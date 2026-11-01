@@ -742,7 +742,7 @@ impl Import {
 	/// amount of waiting changes either.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut delay = STEP_RETRY_MIN;
-		let mut deadline = moq_clock::now() + STEP_RETRY_BUDGET;
+		let mut deadline = kio::clock::now() + STEP_RETRY_BUDGET;
 
 		loop {
 			// A step where *nothing* ingested while a rendition was failing is a failed pass wearing
@@ -766,7 +766,7 @@ impl Import {
 				Ok(outcome) => {
 					// The source is alive, so the earlier failures no longer describe it.
 					delay = STEP_RETRY_MIN;
-					deadline = moq_clock::now() + STEP_RETRY_BUDGET;
+					deadline = kio::clock::now() + STEP_RETRY_BUDGET;
 					outcome
 				}
 				Err(err @ Error::ResourceRefused) => return Err(err),
@@ -778,7 +778,7 @@ impl Import {
 				// The source rewound its timestamps, which no later pass can import.
 				Err(err @ Error::Rewind { .. }) => return Err(err),
 				Err(err) => {
-					let now = moq_clock::now();
+					let now = kio::clock::now();
 					if now >= deadline {
 						return Err(err);
 					}
@@ -790,7 +790,7 @@ impl Import {
 						.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)
 						.min(deadline - now);
 					delay = (delay * 2).min(STEP_RETRY_MAX);
-					moq_clock::sleep(wait).await;
+					kio::clock::sleep(wait).await;
 					continue;
 				}
 			};
@@ -807,7 +807,7 @@ impl Import {
 				"HLS import step complete"
 			);
 
-			moq_clock::sleep(delay).await;
+			kio::clock::sleep(delay).await;
 		}
 	}
 
@@ -1972,7 +1972,7 @@ mod tests {
 		assert!(import.video[0].importer.is_none(), "nothing was imported");
 		assert!(catalog.snapshot().video.renditions.is_empty());
 
-		let run = moq_clock::timeout(Duration::from_secs(5), import.run())
+		let run = kio::clock::timeout(Duration::from_secs(5), import.run())
 			.await
 			.expect("a settled refusal skips the retry budget");
 		assert!(matches!(run, Err(Error::PlaylistEnded)));
@@ -1999,7 +1999,7 @@ mod tests {
 		let cfg = Config::new(Url::from_file_path(dir.join("master.m3u8")).unwrap());
 		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
 
-		let run = moq_clock::timeout(Duration::from_secs(5), import.run())
+		let run = kio::clock::timeout(Duration::from_secs(5), import.run())
 			.await
 			.expect("the ended rendition ends the import");
 		assert!(matches!(run, Err(Error::PlaylistEnded)), "{run:?}");
@@ -2032,7 +2032,7 @@ mod tests {
 
 		let (_, ended) = recording(4, true);
 		std::fs::write(dir.join("media.m3u8"), ended).unwrap();
-		moq_clock::timeout(Duration::from_secs(10), import.run())
+		kio::clock::timeout(Duration::from_secs(10), import.run())
 			.await
 			.expect("an ended playlist ends the import")
 			.unwrap();
@@ -2426,7 +2426,7 @@ mod tests {
 			"audio",
 			"#EXTINF:1,\naudio0.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\naudio1.m4s\n",
 		);
-		let run = moq_clock::timeout(Duration::from_secs(5), import.run())
+		let run = kio::clock::timeout(Duration::from_secs(5), import.run())
 			.await
 			.expect("a rewind is not retried");
 		assert!(
@@ -2462,8 +2462,8 @@ mod tests {
 		let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
 		let wait = std::time::Duration::from_millis(100);
 		let mut out = Vec::new();
-		while let Ok(Ok(Some(mut group))) = moq_clock::timeout(wait, track.recv_group()).await {
-			while let Ok(Ok(Some(frame))) = moq_clock::timeout(wait, group.read_frame()).await {
+		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(wait, track.recv_group()).await {
+			while let Ok(Ok(Some(frame))) = kio::clock::timeout(wait, group.read_frame()).await {
 				out.push(frame.timestamp.unwrap().as_micros());
 			}
 		}
@@ -2513,7 +2513,7 @@ mod tests {
 		let before = published(&consumer, &catalog).await;
 
 		// Let the clock run on, so a fresh offset could not land back on the source's timestamps.
-		moq_clock::sleep(std::time::Duration::from_millis(50)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(50)).await;
 		let mut second = sink.importer(&select_muxed());
 		second.decode(&init).unwrap();
 		drop(first);

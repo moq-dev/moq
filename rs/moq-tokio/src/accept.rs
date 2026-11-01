@@ -32,7 +32,7 @@ use std::{
 	time::Duration,
 };
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 /// Delay after an accept failure that is not one connection's fault, escalating
 /// while they continue and reset by the next successful accept.
@@ -470,11 +470,11 @@ mod tests {
 	}
 
 	#[cfg(unix)]
-	#[moq_clock::test]
+	#[kio::test]
 	async fn exhaustion_stall_uses_the_retry_clock() {
 		let health = Health::new("test");
 		let _ = health.failed(&io(libc::EMFILE));
-		moq_clock::sleep(Duration::from_secs(30)).await;
+		kio::clock::sleep(Duration::from_secs(30)).await;
 		assert_eq!(health.stalled(), Some(Duration::from_secs(30)));
 	}
 }

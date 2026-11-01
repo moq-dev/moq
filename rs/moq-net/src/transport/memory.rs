@@ -435,6 +435,14 @@ enum End {
 }
 
 impl Channel {
+	/// Whether a read would return now: a queued message or the end.
+	fn readable(&self) -> Poll<()> {
+		match !self.messages.is_empty() || self.end.is_some() {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}
+	}
+
 	/// Close with a reset or stop code and drop what is queued. An earlier end stands,
 	/// unless it was a finish the reader has not fully read.
 	fn abort(&mut self, end: End) {
@@ -485,17 +493,20 @@ impl poll::SendStream for SendStream {
 			return Poll::Ready(Ok(0));
 		}
 
-		if let Poll::Ready(err) = poll_close(&self.close, waiter) {
+		// Peek at the close rather than register on it: only a write that parks waits for it.
+		if let Some(err) = closed(&self.close) {
 			return Poll::Ready(Err(err));
 		}
 
 		let buffer = self.buffer;
-		let mut channel = ready!(self.channel.poll(waiter, |channel| {
+		let Poll::Ready(mut channel) = self.channel.poll(waiter, |channel| {
 			match channel.end.is_some() || channel.messages.is_empty() || channel.queued < buffer {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
 			}
-		}));
+		}) else {
+			return poll_close(&self.close, waiter).map(Err);
+		};
 		if let Some(End::Stop(code)) = channel.end {
 			return Poll::Ready(Err(Error::Stopped(code)));
 		}
@@ -599,16 +610,17 @@ impl poll::Chunks for Chunks {
 			return Poll::Ready(Ok(Some(Bytes::new())));
 		}
 
-		// Check the close first, so a message queued before it is still read below.
-		let closed = poll_close(&self.close, waiter);
-		let Poll::Ready(mut channel) = self.channel.poll(waiter, |channel| {
-			match !channel.messages.is_empty() || channel.end.is_some() {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
+		// Only a read that parks registers on the close, so a ready read costs one lock.
+		let mut channel = match self.channel.poll(waiter, |channel| channel.readable()) {
+			Poll::Ready(channel) => channel,
+			Poll::Pending => {
+				let err = ready!(poll_close(&self.close, waiter));
+				// Queued messages drain first, so look again: one may have landed before the close.
+				match self.channel.poll(waiter, |channel| channel.readable()) {
+					Poll::Ready(channel) => channel,
+					Poll::Pending => return Poll::Ready(Err(err)),
+				}
 			}
-		}) else {
-			// Queued messages drain first; only an idle stream fails with the close.
-			return closed.map(Err);
 		};
 
 		let Some(front) = channel.messages.front_mut() else {
@@ -991,6 +1003,49 @@ mod tests {
 		drop(late);
 		ready(b.poll_accept_uni(&noop())).unwrap();
 		assert!(closed(ready(b.poll_accept_uni(&noop())).err().unwrap()));
+	}
+
+	/// Only a parked read or write waits on the close: one that returns at once leaves no
+	/// registration behind, as every frame of a session pays for one.
+	#[test]
+	fn only_parked_streams_wait_on_the_close() {
+		let (a, b) = pair(buffer(0));
+		let (mut send, mut recv) = uni(&a, &b);
+		let counted = || {
+			let count = Arc::new(Count::default());
+			(kio::Waiter::new(Waker::from(count.clone())), count)
+		};
+
+		let (ready_write, ready_write_count) = counted();
+		assert_eq!(
+			ready(send.poll_write_buf(&ready_write, &mut Bytes::from_static(b"one"))).unwrap(),
+			3
+		);
+		let (ready_read, ready_read_count) = counted();
+		let chunk = ready(poll::Chunks::poll_read_chunk(recv.get_mut(), &ready_read, usize::MAX));
+		assert_eq!(chunk.unwrap().unwrap(), "one");
+
+		// The channel is empty, so the read parks; refill it so the write parks too.
+		let (parked_read, parked_read_count) = counted();
+		assert!(poll::Chunks::poll_read_chunk(recv.get_mut(), &parked_read, usize::MAX).is_pending());
+		let (mut other, _other_recv) = uni(&a, &b);
+		ready(write(&mut other, &Bytes::from_static(b"two"))).unwrap();
+		let (parked_write, parked_write_count) = counted();
+		assert!(
+			other
+				.poll_write_buf(&parked_write, &mut Bytes::from_static(b"x"))
+				.is_pending()
+		);
+
+		a.close(4, "bye");
+		assert_eq!(ready_write_count.0.load(Ordering::Relaxed), 0);
+		assert_eq!(ready_read_count.0.load(Ordering::Relaxed), 0);
+		assert!(parked_read_count.0.load(Ordering::Relaxed) > 0);
+		assert!(parked_write_count.0.load(Ordering::Relaxed) > 0);
+
+		let closed = |err: Error| matches!(err, Error::Session { code: 4, .. });
+		assert!(closed(ready(read(&mut recv, usize::MAX)).unwrap_err()));
+		assert!(closed(ready(write(&mut other, &Bytes::from_static(b"x"))).unwrap_err()));
 	}
 
 	#[test]

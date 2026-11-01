@@ -361,8 +361,8 @@ impl MockChunks {
 			if self.landing != Some(arrival) {
 				self.landing = Some(arrival);
 				let waker = waiter.waker().clone();
-				drop(moq_clock::sim::spawn(async move {
-					moq_clock::sleep_until(arrival).await;
+				drop(kio::clock::sim::spawn(async move {
+					kio::clock::sleep_until(arrival).await;
 					waker.wake();
 				}));
 			}
@@ -386,8 +386,8 @@ impl MockChunks {
 			poll::RecvStream::stop(&mut inner, code);
 			return;
 		}
-		drop(moq_clock::sim::spawn(async move {
-			moq_clock::sleep(latency).await;
+		drop(kio::clock::sim::spawn(async move {
+			kio::clock::sleep(latency).await;
 			poll::RecvStream::stop(&mut inner, code);
 		}));
 	}

@@ -81,7 +81,7 @@ impl Connecting {
 		let driver = ConnectionDriver::new(conn.clone());
 		runtime.spawn(
 			async {
-				if let Err(e) = driver.await {
+				if let Some(Err(e)) = crate::panic::isolate(driver).await {
 					tracing::error!("I/O error: {e}");
 				}
 			}
@@ -130,6 +130,17 @@ impl Connecting {
 	pub fn remote_address(&self) -> SocketAddr {
 		let conn_ref: &ConnectionRef = self.conn.as_ref().expect("used after yielding Ready");
 		conn_ref.state.lock().inner.remote_address()
+	}
+
+	/// Panic while holding the state, as a driver bug would, then wake the driver into it.
+	#[cfg(test)]
+	pub(super) fn poison(&self) {
+		let conn = self.conn.as_ref().expect("used after yielding Ready");
+		let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+			let _guard = conn.state.lock();
+			panic!("injected");
+		}));
+		conn.state.poisoned().expect("the panic poisoned the state").wake();
 	}
 }
 
@@ -233,6 +244,20 @@ impl Future for ConnectionDriver {
 			unreachable!("drained connections always have an error");
 		}
 		Poll::Ready(Ok(()))
+	}
+}
+
+impl Drop for ConnectionDriver {
+	fn drop(&mut self) {
+		// A panic poisoned the state, and without a driver nothing will time the connection out:
+		// fail every waiter now, so it reaches the poisoned lock instead of hanging.
+		if let Some(mut conn) = self.conn.state.poisoned() {
+			let reason = TransportError::new(
+				TransportErrorCode::INTERNAL_ERROR,
+				"connection driver panicked".to_string(),
+			);
+			conn.terminate(Error::TransportError(reason), &self.conn.shared);
+		}
 	}
 }
 
@@ -786,7 +811,9 @@ impl Drop for ConnectionRef {
 			return;
 		}
 
-		let conn = &mut *self.state.lock();
+		let Some(mut conn) = self.state.lock_for_drop() else {
+			return;
+		};
 
 		if !conn.inner.is_closed() {
 			// If the driver is alive, it's just it and us, so we'd better shut it down. If it's
@@ -839,7 +866,7 @@ pub(crate) struct State {
 	handle: ConnectionHandle,
 	on_handshake_data: Option<oneshot::Sender<()>>,
 	connected: bool,
-	timer: Option<moq_clock::Sleep>,
+	timer: Option<kio::clock::Sleep>,
 	timer_deadline: Option<Instant>,
 	conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
 	endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
@@ -1034,7 +1061,7 @@ impl State {
 				delay.reset(deadline);
 			}
 			None => {
-				self.timer = Some(moq_clock::sleep_until(deadline));
+				self.timer = Some(kio::clock::sleep_until(deadline));
 			}
 			_ => {}
 		}

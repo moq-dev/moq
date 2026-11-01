@@ -19,6 +19,7 @@ use crate::{
 
 use super::{Message, Version, cluster, error::request, group::ObjectExtensionsLength, peer, request_update};
 use crate::tail::{Reading, Settle, Tail};
+use crate::util::Later;
 
 use kio::Lock;
 
@@ -756,7 +757,9 @@ struct Idle {
 	/// Serves its cache misses with a group FETCH, subscribed or not.
 	dynamic: track::Requests,
 	demand: track::Demand,
-	timescale: Option<Timescale>,
+	/// The Track Properties the publisher declared for the copy. A resumed SUBSCRIBE that
+	/// opts out of them is answered without them, so the copy keeps these.
+	properties: ietf::Properties,
 	/// The publisher ended the track, so a returning subscriber reads the copy as it is.
 	finished: bool,
 }
@@ -773,12 +776,11 @@ struct TrackState {
 	// stream and the subgroup stream carrying the rest of the group.
 	fill: kio::Producer<Fill>,
 
-	// The broadcast this track was subscribed from. With the track name and the instance
-	// it names, it forms the full track name, which is what decides whether a repeated
+	// The broadcast this track was subscribed from. With the track name, it forms the
+	// full track name, which is what decides whether a repeated
 	// alias is the fatal collision (one alias, two tracks) or the legal sharing of an alias
 	// across subscriptions.
 	broadcast: Path,
-	epoch: Option<crate::Epoch>,
 
 	// Units for this track's object Timestamps, from the TIMESCALE Track Property in
 	// SUBSCRIBE_OK. `None` until it arrives, and for a track that declares none: its
@@ -832,7 +834,6 @@ impl TrackState {
 			name,
 			alias: None,
 			broadcast,
-			epoch: None,
 			timescale: None,
 			fill_largest: None,
 			fill_start: None,
@@ -913,14 +914,6 @@ struct Advertised {
 	route: crate::origin::Route,
 }
 
-impl Advertised {
-	/// The publisher instance the advertisement named (MoQ Epoch), taken as given.
-	fn with_epoch(mut self, epoch: Option<crate::Epoch>) -> Self {
-		self.route.epoch = epoch;
-		self
-	}
-}
-
 /// One NAMESPACE a SUBSCRIBE_NAMESPACE stream holds, live on the wire until its
 /// NAMESPACE_DONE whether or not its route is attached.
 struct Advertisement {
@@ -928,8 +921,6 @@ struct Advertisement {
 	/// [`Subscriber::update_announce`]; `None` while it loops back through us or falls
 	/// outside the scope.
 	id: Option<u64>,
-	/// The publisher instance it names: a repeat may name another, but not gain or lose one.
-	epoch: Option<crate::Epoch>,
 	/// Counts it against the session's announce cap until its NAMESPACE_DONE, attached or
 	/// not; the namespace's route shares it rather than taking a second.
 	slot: crate::auth::Hold,
@@ -939,9 +930,6 @@ struct Advertisement {
 struct Held {
 	/// The MoQ Cluster parameters, which a REQUEST_UPDATE carries only when they change.
 	cluster: Option<cluster::Advert>,
-	/// The MoQ Epoch instance, fixed for the advertisement's life: REQUEST_UPDATE cannot
-	/// carry one.
-	epoch: Option<crate::Epoch>,
 }
 
 /// A joining request may be abandoned before it takes an ID. Once committed, the session
@@ -992,10 +980,6 @@ impl Drop for JoiningTask {
 pub(super) struct Subscriber {
 	// Scoped to a minted source on the clone that serves its requests.
 	validity: crate::model::broadcast::RequestValidity,
-	// The publisher instance the minted source was resolved under (MoQ Epoch), named on
-	// every request for it, so the peer refuses rather than answer from another. Scoped
-	// like `validity`, and only ever set on a session that negotiated the extension.
-	epoch: Option<crate::Epoch>,
 	// Arms the track-alias and request-id timeouts.
 	runtime: crate::time::Deadlines,
 	session: Transport,
@@ -1133,7 +1117,6 @@ impl Subscriber {
 			announces: Default::default(),
 			listings: Default::default(),
 			validity: Default::default(),
-			epoch: None,
 		}
 	}
 
@@ -1346,8 +1329,7 @@ impl Subscriber {
 		let (Some(held), Some(new)) = (state.subscribes.get(&holder), state.subscribes.get(&request_id)) else {
 			return false;
 		};
-
-		held.broadcast == new.broadcast && held.epoch == new.epoch && held.name == new.name
+		held.broadcast == new.broadcast && held.name == new.name
 	}
 
 	/// Take the origin request back out of a subscription that is still setting up.
@@ -1488,7 +1470,6 @@ impl Subscriber {
 		let peer = self.peer().await;
 		let negotiated = ietf::Negotiated {
 			cluster: peer.negotiated(),
-			epoch: declared.epoch,
 		};
 
 		self.run_namespace_entries(request, &peer, negotiated, Initial { initial, snapshot }, live)
@@ -1612,22 +1593,14 @@ impl Subscriber {
 					let path = prefix.join(&msg.suffix)?;
 					let params = msg.params.unwrap_or_default();
 					let held = match live.entry(path.clone()) {
-						// A repeat under another epoch replaces the instance in place, but one that
-						// gains or loses an epoch skipped the NAMESPACE_DONE it needs.
-						Entry::Occupied(entry) if entry.get().epoch.is_some() != params.epoch.is_some() => {
-							tracing::warn!(%path, "namespace repeated gaining or losing an epoch");
-							return Err(Error::ProtocolViolation);
-						}
 						Entry::Occupied(entry) => entry.into_mut(),
 						// The peer holds the namespace until its NAMESPACE_DONE whatever we make
 						// of it, so it takes its announce slot before the decision.
 						Entry::Vacant(entry) => entry.insert(Advertisement {
 							id: None,
-							epoch: None,
 							slot: std::sync::Arc::new(self.acquire_announce()?),
 						}),
 					};
-					held.epoch = params.epoch.clone();
 					let Some(advert) = self.route(params.cluster.as_ref(), peer) else {
 						// Looped back through us: forwarding it would extend the loop and
 						// subscribing through it would route us back to ourselves.
@@ -1636,20 +1609,18 @@ impl Subscriber {
 						// replacement retracts the route we were holding. Keeping it would
 						// leave subscriptions on a path the peer no longer offers.
 						//
-						// The advertisement itself stays live on the wire, epoch and all.
+						// The advertisement itself stays live on the wire.
 						tracing::debug!(%path, "dropping reflected namespace");
 						if let Some(id) = held.id.take() {
 							let _ = self.stop_announce(path, id, false);
 						}
 						continue;
 					};
-					let advert = advert.with_epoch(params.epoch.clone());
 
-					tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, epoch = ?params.epoch, "namespace");
+					tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, "namespace");
 					match held.id {
 						// A repeat replaces the advertisement atomically; nothing is torn
-						// down merely because an update arrived, and another epoch restarts
-						// the route without it ever going absent.
+						// down merely because an update arrived.
 						Some(id) => self.update_announce(path, id, advert)?,
 						None => {
 							match self.start_announce(path.clone(), advert, Admit::Session(Some(held.slot.clone()))) {
@@ -1695,7 +1666,6 @@ impl Subscriber {
 		body: ietf::Body,
 		stream: Stream<Transport, Version>,
 		peer: cluster::Peer,
-		epoch: bool,
 		declared: Option<bool>,
 	) -> Result<BoxFuture<'static, ()>, Error> {
 		let mut this = self.clone();
@@ -1730,7 +1700,6 @@ impl Subscriber {
 				// the dispatcher turns into the protocol violation the draft requires.
 				let negotiated = ietf::Negotiated {
 					cluster: peer.negotiated(),
-					epoch,
 				};
 				let msg = match ietf::PublishNamespace::decode_body(&mut data, this.version, negotiated) {
 					Err(err) if super::token::refuses_request(&err) => {
@@ -1872,7 +1841,6 @@ impl Subscriber {
 
 		// A path that already contains our own Hop ID looped back. Reject it rather
 		// than attaching a source we would then have to route around.
-		let epoch = msg.params.epoch.clone();
 		let Some(advert) = self.route(msg.params.cluster.as_ref(), &peer) else {
 			tracing::debug!(%path, "dropping reflected publish_namespace");
 			self.write_error(&mut stream, &Error::Unroutable, "route loops through this relay")
@@ -1880,7 +1848,6 @@ impl Subscriber {
 			let _ = stream.writer.close().await;
 			return Ok(());
 		};
-		let advert = advert.with_epoch(epoch.clone());
 
 		// Our authorization of the peer (the limit) admits an announce without a token, and
 		// holds back one it does not cover until it does. An AUTHORIZATION TOKEN on the
@@ -1958,7 +1925,6 @@ impl Subscriber {
 				&path,
 				Held {
 					cluster: msg.params.cluster,
-					epoch,
 				},
 				peer,
 				&mut attached,
@@ -2019,10 +1985,7 @@ impl Subscriber {
 		attached: &mut Option<u64>,
 		token_grant: Option<crate::auth::RequestGrant>,
 	) -> Result<Withdraw, Error> {
-		let Held {
-			cluster: mut held,
-			epoch,
-		} = held;
+		let Held { cluster: mut held } = held;
 		// A REQUEST_UPDATE carrying a fresh token refreshes the announce's request grant (MoQ
 		// request-token); its verify is raced against the stream in the loop's single wait
 		// (never a bare await), so a peer ending the announce ends it whatever the acceptor
@@ -2237,8 +2200,6 @@ impl Subscriber {
 						Ok(())
 					}
 					Some(advert) => {
-						// The epoch is the advertisement's for as long as it stands.
-						let advert = advert.with_epoch(epoch.clone());
 						tracing::debug!(%path, hops = advert.route.hops.len(), cost = ?advert.route.cost, "publish_namespace update");
 						match *attached {
 							Some(id) => self.update_announce(path.clone(), id, advert),
@@ -2306,11 +2267,7 @@ impl Subscriber {
 	/// End an advertisement we accepted, leaving the session up: a closed stream.
 	async fn cancel_announce(&self, stream: &mut Stream<Transport, Version>) -> Result<(), Error> {
 		// An OK cut short by the grant ending is still buffered, and goes out ahead of the FIN.
-		kio::wait(|waiter| stream.writer.poll_flush(waiter)).await?;
-		if stream.writer.finish().is_ok() {
-			let _ = stream.writer.closed().await;
-		}
-		Ok(())
+		super::request_stream::deliver(&mut stream.writer).await
 	}
 
 	/// Reject an incoming PUBLISH.
@@ -2341,13 +2298,11 @@ impl Subscriber {
 		// it, and a rejected request has no lifetime of ours to hang the cleanup on, so the
 		// entry would have to be swept asynchronously. Any data streams the publisher opened
 		// before reading this are dropped by the unknown-alias path instead.
-		self.write_publish_error(&mut stream, &Error::Unsupported, "PUBLISH is not supported")
-			.await?;
+		let (kind, err) = (request::Kind::Publish, &Error::Unsupported);
+		super::request_stream::buffer_error(&mut stream.writer, kind, err, "PUBLISH is not supported", self.version)?;
 		// The rejection is the whole exchange, but it still has to arrive: a finish alone
 		// leaves the drop-time reset free to discard it before the peer acknowledges it.
-		let _ = stream.writer.close().await;
-
-		Ok(())
+		super::request_stream::deliver(&mut stream.writer).await
 	}
 
 	/// Send OK on the bidi stream.
@@ -2392,16 +2347,6 @@ impl Subscriber {
 			self.version,
 		)
 		.await
-	}
-
-	/// Refuse a PUBLISH on the bidi stream that carries it.
-	async fn write_publish_error(
-		&self,
-		stream: &mut Stream<Transport, Version>,
-		err: &Error,
-		reason: &str,
-	) -> Result<(), Error> {
-		super::request_stream::write_error(&mut stream.writer, request::Kind::Publish, err, reason, self.version).await
 	}
 
 	/// Attach the route for one newly advertised namespace, returning the id that names
@@ -2496,18 +2441,12 @@ impl Subscriber {
 			Entry::Occupied(entry) => {
 				let entry = entry.into_mut();
 				match entry.adverts.iter().position(|(advert, _)| *advert == id) {
-					// A repeat under another epoch is a newer advertisement, so it becomes the
-					// newest; one of the same instance stays where it is.
-					Some(index) if entry.adverts[index].1.epoch != route.epoch => {
-						entry.adverts.remove(index);
-						entry.adverts.push((id, route));
-					}
 					Some(index) => entry.adverts[index].1 = route,
 					None => entry.adverts.push((id, route)),
 				}
 				// The newest advertisement stands, and an update to an older one changes
 				// nothing. A repeat of the same instance re-prices in place and in-flight
-				// tracks keep flowing; another epoch restarts it.
+				// tracks keep flowing.
 				let (newest, route) = entry.adverts.last().expect("just recorded");
 				if *newest == id {
 					entry.route = route.clone();
@@ -2698,22 +2637,19 @@ impl Subscriber {
 				Some(requested) => requested.clone(),
 				None => continue,
 			};
-			// The source serves the instance the route names now: every request for it names
-			// that epoch when the peer can read one, and the source takes new tracks only
-			// while the peer still selects that instance.
-			let (validity, epoch) = {
+			// The source takes new tracks only while the peer still selects that instance.
+			let validity = {
 				let state = self.state.lock();
 				let entry = state
 					.broadcasts
 					.get(&path)
 					.filter(|entry| entry.generation == generation);
-				let validity = entry
+				entry
 					.and_then(|entry| entry.dynamic.as_ref())
 					.map(|route| crate::model::broadcast::RequestValidity::for_source(route, request.path()))
 					.unwrap_or_else(|| {
 						crate::model::broadcast::RequestValidity::token(Some(kio::Producer::new(()).consume()))
-					});
-				(validity, entry.and_then(|entry| entry.route.epoch.clone()))
+					})
 			};
 			let source =
 				crate::model::broadcast::SourceGuard::new(self.origin.create_source(requested.clone(), validity));
@@ -2738,7 +2674,6 @@ impl Subscriber {
 
 			let mut this = self.clone();
 			this.validity = dynamic.validity().clone();
-			this.epoch = epoch;
 			broadcasts.push(async move {
 				if let Err(err) = this.run_broadcast(requested, source, dynamic, route).await {
 					tracing::debug!(%err, "error running broadcast");
@@ -2932,7 +2867,7 @@ impl Subscriber {
 					.is_none_or(|subscription| subscription.ranges.is_empty()) =>
 			{
 				let Some(idle) = self
-					.track_status(&broadcast_path, &track_name, request, &mut gate)
+					.track_status(&broadcast_path, &track_name, request, &mut group_fetches, &mut gate)
 					.await
 				else {
 					return;
@@ -3140,7 +3075,6 @@ impl Subscriber {
 				TrackState {
 					// A resumed copy is the session's to abort from here on.
 					producer: target.producer().cloned(),
-					epoch: self.epoch.clone(),
 					alias,
 					tail,
 					..TrackState::pending(track_name.to_owned(), broadcast_path.clone(), fill.clone())
@@ -3159,6 +3093,11 @@ impl Subscriber {
 		let order = aggregate.map(|s| s.order).unwrap_or_default();
 		// Without an Established subscription, a relay includes the request it holds.
 		let new_group = target.new_group();
+		// A timed copy asks for the units that opt its objects into timestamps.
+		let properties_wanted = match &target {
+			Target::Request(_) => true,
+			Target::Resume(idle) => idle.properties.timescale.is_some(),
+		};
 		// Buffered only: the wait for the answer flushes it, so the local terminals still end a
 		// request the peer's send window holds back.
 		let written = match &held {
@@ -3189,18 +3128,11 @@ impl Subscriber {
 					group_order: order.into(),
 					filter: join.filter,
 					fill: join.fill,
-					// A resumed copy already knows the track, from the answer that accepted
-					// it, but only a TIMESCALE in this answer opts its objects into the
-					// timestamps a timed copy reads.
-					properties_wanted: match &target {
-						Target::Request(_) => true,
-						Target::Resume(idle) => idle.timescale.is_some(),
-					},
+					properties_wanted,
 					forward: true,
 					rendezvous: false,
 					range_filters: false,
 					authorization_token: None,
-					epoch: self.epoch.clone(),
 				},
 			),
 		};
@@ -3421,8 +3353,15 @@ impl Subscriber {
 			properties,
 			largest,
 		} = accepted;
-		// The objects are stamped in the units the answer declares. A timed copy asked for
-		// them; an untimed one that opted out has none to keep.
+		// A resumed SUBSCRIBE opts out of the properties from draft-22, so its answer carries
+		// none and the copy keeps the ones it learned. Before that the answer declares them
+		// again. A pause holds these too, so a later resume still knows DYNAMIC_GROUPS.
+		let properties = match &resumed {
+			Some(idle) if held.is_none() && !properties_wanted && ietf::Filter::is_draft20(self.version) => {
+				idle.properties.clone()
+			}
+			_ => properties,
+		};
 		let timescale = properties.timescale;
 		let info = accepted_info(&properties, self.version);
 		// The copy already holds the track: it is current again up to the answer's Largest
@@ -3863,7 +3802,7 @@ impl Subscriber {
 							broadcast_path.clone(),
 							track_name.to_owned(),
 							requested,
-							timescale,
+							Later::Known(timescale),
 						);
 						group_fetches.push(fetch);
 					}
@@ -3956,8 +3895,7 @@ impl Subscriber {
 				messages,
 				request_id,
 				alias,
-				// What a pause holds again: the properties the track was listed with.
-				properties,
+				properties: properties.clone(),
 				owed: unanswered.load(Ordering::Relaxed),
 				copy: Some(track.clone()),
 			};
@@ -3966,7 +3904,7 @@ impl Subscriber {
 				demand: track.demand(),
 				track,
 				dynamic,
-				timescale,
+				properties,
 				finished: false,
 			});
 		}
@@ -3989,7 +3927,7 @@ impl Subscriber {
 				demand: track.demand(),
 				track,
 				dynamic,
-				timescale,
+				properties,
 				finished: true,
 			});
 		}
@@ -4017,7 +3955,7 @@ impl Subscriber {
 			demand: track.demand(),
 			track,
 			dynamic,
-			timescale,
+			properties,
 			finished: false,
 		})
 	}
@@ -4096,7 +4034,7 @@ impl Subscriber {
 						broadcast_path.clone(),
 						track_name.to_owned(),
 						fill,
-						idle.timescale,
+						Later::Known(idle.properties.timescale),
 					);
 					group_fetches.push(fetch);
 				}
@@ -4258,7 +4196,6 @@ impl Subscriber {
 						fill_timeout: false,
 						properties_wanted: true,
 						// Served by the subscription it joins, which named the instance.
-						epoch: None,
 					},
 				)?;
 				this.finish_joining_fetch(stream, progress).await
@@ -4386,13 +4323,49 @@ impl Subscriber {
 	/// Learn a track nobody subscribes to from TRACK_STATUS, accepting an idle copy that
 	/// [`Self::linger`] serves fetches from and subscribes once someone does. `None` once
 	/// refused or abandoned: a refused status fails the query-only or fetch-only request.
+	///
+	/// Fetches go out meanwhile into `group_fetches`, reading their objects only once the
+	/// status says the timescale, and failing with it.
 	async fn track_status(
 		&mut self,
 		broadcast_path: &Path,
 		track_name: &str,
 		request: track::Request,
+		group_fetches: &mut TaskSet,
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
+		let timescale = crate::util::Learning::new();
+		let learned = self
+			.learn_track_status(broadcast_path, track_name, request, group_fetches, &timescale, gate)
+			.await;
+		match learned {
+			Ok(idle) => {
+				timescale.resolve(Ok(idle.properties.timescale));
+				Some(idle)
+			}
+			Err(err) => {
+				// The fetches sent alongside fail with the status: let them answer first.
+				timescale.resolve(Err(err));
+				self.drain(group_fetches).await;
+				None
+			}
+		}
+	}
+
+	/// [`Self::track_status`]'s exchange, failing with why the request was refused or
+	/// abandoned.
+	async fn learn_track_status(
+		&mut self,
+		broadcast_path: &Path,
+		track_name: &str,
+		request: track::Request,
+		group_fetches: &mut TaskSet,
+		timescale: &crate::util::Learning<Option<Timescale>>,
+		gate: &mut crate::auth::Gate,
+	) -> Result<Idle, Error> {
+		// Registered before accepting: `accept` releases the request's own fetch gate, and a
+		// cache-miss fetch queued in the gap would be drained as NotFound.
+		let dynamic = request.requests();
 		let validity = self.validity.start();
 		let opening = self.session.clone();
 		let mut stream = match kio::wait(|waiter| {
@@ -4406,8 +4379,8 @@ impl Subscriber {
 		{
 			Ok(stream) => stream,
 			Err(err) => {
-				request.reject(err);
-				return None;
+				request.reject(err.clone());
+				return Err(err);
 			}
 		};
 		stream = stream.with_stats(self.origin.stats());
@@ -4422,18 +4395,18 @@ impl Subscriber {
 				track_namespace: broadcast_path.clone(),
 				track_name: track_name.into(),
 				properties_wanted: true,
-				epoch: self.epoch.clone(),
 			},
 		);
 		if let Err(err) = written {
-			request.reject(err);
-			return None;
+			request.reject(err.clone());
+			return Err(err);
 		}
 
 		// Nobody wanting the track any more ends the wait on a peer that may never answer,
 		// and the session ending fails it with the session's reason.
 		let mut demand = request.demand();
 		let closed = self.session.clone();
+		let this = self.clone();
 		let response = {
 			let mut response = std::pin::pin!(async {
 				kio::wait(|waiter| stream.writer.poll_flush(waiter)).await?;
@@ -4457,6 +4430,18 @@ impl Subscriber {
 					if let Poll::Ready(err) = closed.poll_closed(waiter) {
 						return Poll::Ready(Some(SetupResponse::Cancelled(Error::from_transport(err))));
 					}
+					// A fetch needs nothing from the status to go out, only to read its objects.
+					while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(waiter) {
+						let fetch = this.clone().serve_fill(
+							this.session.work().start(),
+							broadcast_path.clone(),
+							track_name.to_owned(),
+							fill,
+							timescale.later(),
+						);
+						group_fetches.push(fetch);
+					}
+					let _ = group_fetches.poll(waiter);
 					crate::util::poll_unwanted(&mut demand, waiter).map(|_| None)
 				})
 				.await;
@@ -4470,15 +4455,15 @@ impl Subscriber {
 		let response = match response {
 			Some(SetupResponse::Response(response)) => response,
 			Some(SetupResponse::Cancelled(err)) => {
-				request.reject(err);
+				request.reject(err.clone());
 				stream.reader.abort(&Error::Cancel);
 				let _ = stream.writer.close().await;
-				return None;
+				return Err(err);
 			}
 			None => {
 				stream.reader.abort(&Error::Cancel);
 				stream.writer.abort(&Error::Cancel);
-				return None;
+				return Err(Error::Cancel);
 			}
 		};
 		let _ = stream.writer.finish();
@@ -4494,13 +4479,12 @@ impl Subscriber {
 			Ok(ok) => ok,
 			Err(err) => {
 				tracing::debug!(%err, broadcast = %crate::path::Rooted(self.origin.root(), broadcast_path), track = %track_name, "track status refused");
-				request.reject(err);
-				return None;
+				request.reject(err.clone());
+				return Err(err);
 			}
 		};
 
 		tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), broadcast_path), track = %track_name, "track status known");
-		let dynamic = request.requests();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge. Idle
 		// from the accept, so no reader takes it as live in between.
 		let track = request.idle().stage(accepted_info(&ok.properties, self.version));
@@ -4511,11 +4495,11 @@ impl Subscriber {
 			track.report_object(largest.group, largest.object);
 		}
 		let track = track.commit();
-		Some(Idle {
+		Ok(Idle {
 			demand: track.demand(),
 			track,
 			dynamic,
-			timescale: ok.properties.timescale,
+			properties: ok.properties,
 			finished: false,
 		})
 	}
@@ -5416,31 +5400,8 @@ impl Subscriber {
 		producer: &mut crate::recv::Group,
 		payload: FetchPayload,
 	) -> Result<(), Error> {
-		let FetchPayload { decoded, timescale, id } = payload;
-		producer.mark_gap(id, decoded.gap)?;
-		let size = stream.varint().await?;
-		super::object::check_frame(&decoded.properties, timescale)?;
-		let timestamp = object_time(timescale, decoded.timestamp)?;
-		let plain = id == producer.frame_count() as u64 && decoded.properties.is_empty();
-		let fields = (!plain).then(|| {
-			std::sync::Arc::new(crate::model::object::Fields {
-				id,
-				properties: decoded.properties,
-			})
-		});
-		let header = frame::Header {
-			info: frame::Info { size, timestamp },
-			fields,
-			inflated: super::object::inflated(decoded.inflated, producer.compressed())?,
-		};
-		kio::wait(|waiter| stream.poll_admit(waiter, producer, &header)).await?;
-		let mut frame = producer.create_object(header)?;
-		if let Err(err) = kio::wait(|waiter| stream.poll_read_frame(waiter, &mut frame)).await {
-			let _ = frame.abort(err.clone());
-			return Err(err);
-		}
-		producer.restore(frame.finish()?);
-		Ok(())
+		let mut recv = FetchPayloadRecv::new(payload);
+		kio::wait(|waiter| recv.poll(waiter, stream, producer)).await
 	}
 
 	/// Serve a fill a run at a time, newest run first for a descending reader, until it is
@@ -5456,7 +5417,7 @@ impl Subscriber {
 		broadcast: Path,
 		name: String,
 		fill: track::Fill,
-		timescale: Option<Timescale>,
+		timescale: Later<Option<Timescale>>,
 	) {
 		let fill = std::sync::Arc::new(fill);
 		let mut last = None;
@@ -5482,7 +5443,7 @@ impl Subscriber {
 			}
 			last = Some(run.clone());
 			self.clone()
-				.run_range_fetch(broadcast.clone(), name.clone(), fill.clone(), run, timescale)
+				.run_range_fetch(broadcast.clone(), name.clone(), fill.clone(), run, timescale.clone())
 				.await;
 		}
 	}
@@ -5491,7 +5452,7 @@ impl Subscriber {
 	#[cfg(test)]
 	async fn run_group_fetch(self, broadcast: Path, name: String, fill: track::Fill, timescale: Option<Timescale>) {
 		let run = fill.start().group..fill.end();
-		self.run_range_fetch(broadcast, name, std::sync::Arc::new(fill), run, timescale)
+		self.run_range_fetch(broadcast, name, std::sync::Arc::new(fill), run, Later::Known(timescale))
 			.await;
 	}
 
@@ -5509,7 +5470,7 @@ impl Subscriber {
 		name: String,
 		fill: std::sync::Arc<track::Fill>,
 		run: std::ops::Range<u64>,
-		timescale: Option<Timescale>,
+		timescale: Later<Option<Timescale>>,
 	) {
 		let validity = self.validity.start();
 		let last = run.end - 1;
@@ -5528,6 +5489,10 @@ impl Subscriber {
 			}
 			if fill.poll_unwanted_groups(run.clone(), waiter).is_ready() {
 				return Poll::Ready(Err(Error::Cancel));
+			}
+			// A TRACK_STATUS sent alongside that failed fails the fetch.
+			if let Poll::Ready(Err(err)) = timescale.poll(waiter) {
+				return Poll::Ready(Err(err));
 			}
 			Stream::poll_open(&opening, self.version, waiter)
 		})
@@ -5581,11 +5546,14 @@ impl Subscriber {
 				fetch_type,
 				range_filters: false,
 				fill_timeout: false,
-				// The copy learned the track before any fetch, from SUBSCRIBE_OK or
-				// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste, except that only its
-				// TIMESCALE opts the answer into the timestamps a timed copy needs.
-				properties_wanted: timescale.is_some(),
-				epoch: self.epoch.clone(),
+				// The copy learns the track from SUBSCRIBE_OK or TRACK_STATUS_OK, so a FETCH_OK
+				// repeating it is waste, except that only its TIMESCALE opts the answer into the
+				// timestamps a timed copy needs. A FETCH sent alongside TRACK_STATUS cannot know
+				// yet, so it asks.
+				properties_wanted: match timescale.peek() {
+					Some(Ok(timescale)) => timescale.is_some(),
+					_ => true,
+				},
 			},
 		);
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
@@ -5605,6 +5573,9 @@ impl Subscriber {
 						return Poll::Ready(SetupResponse::Cancelled(err));
 					}
 					if let Poll::Ready(err) = fill.poll_aborted(waiter) {
+						return Poll::Ready(SetupResponse::Cancelled(err));
+					}
+					if let Poll::Ready(Err(err)) = timescale.poll(waiter) {
 						return Poll::Ready(SetupResponse::Cancelled(err));
 					}
 					if let Poll::Ready(res) = response {
@@ -5629,6 +5600,33 @@ impl Subscriber {
 				tracing::debug!(%err, groups = ?run, "group fetch refused");
 				fill.reject_groups(run, err);
 				let _ = stream.writer.close().await;
+				return;
+			}
+		};
+
+		// The objects are stamped in the track's timescale, which the TRACK_STATUS sent
+		// alongside may still owe: they wait unread in their stream until it lands, and its
+		// failure fails the fetch.
+		let timescale = match kio::wait(|waiter| {
+			if let Err(err) = validity.check(waiter) {
+				return Poll::Ready(Err(err));
+			}
+			if let Poll::Ready(err) = fill.poll_aborted(waiter) {
+				return Poll::Ready(Err(err));
+			}
+			if let Poll::Ready(res) = timescale.poll(waiter) {
+				return Poll::Ready(res);
+			}
+			fill.poll_unwanted_groups(run.clone(), waiter)
+				.map(|_| Err(Error::Cancel))
+		})
+		.await
+		{
+			Ok(timescale) => timescale,
+			Err(err) => {
+				fill.reject_groups(run, err);
+				drop(registered);
+				self.cancel_group_fetch(stream).await;
 				return;
 			}
 		};
@@ -5970,6 +5968,57 @@ struct FetchPayload {
 	id: u64,
 }
 
+/// Read one fetch object's length and payload into a group, after its header.
+struct FetchPayloadRecv {
+	payload: Option<FetchPayload>,
+	state: FetchPayloadState,
+}
+
+#[kio::machine(self.state: FetchPayloadState)]
+impl FetchPayloadRecv {
+	fn new(payload: FetchPayload) -> Self {
+		Self {
+			payload: Some(payload),
+			state: FetchPayloadState::Start,
+		}
+	}
+
+	fn poll(
+		&mut self,
+		waiter: &kio::Waiter,
+		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
+		producer: &mut crate::recv::Group,
+	) -> Poll<Result<(), Error>> {
+		let payload: FetchPayload = self.payload.take().expect("a machine starts once");
+		producer.mark_gap(payload.id, payload.decoded.gap)?;
+		let size = wait!(Size => stream.poll_varint(waiter))?;
+		let FetchPayload { decoded, timescale, id } = payload;
+		super::object::check_frame(&decoded.properties, timescale)?;
+		let timestamp = object_time(timescale, decoded.timestamp)?;
+		let plain = id == producer.frame_count() as u64 && decoded.properties.is_empty();
+		let fields = (!plain).then(|| {
+			std::sync::Arc::new(crate::model::object::Fields {
+				id,
+				properties: decoded.properties,
+			})
+		});
+		let header: frame::Header = frame::Header {
+			info: frame::Info { size, timestamp },
+			fields,
+			inflated: super::object::inflated(decoded.inflated, producer.compressed())?,
+		};
+		wait!(Admit => stream.poll_admit(waiter, producer, header))?;
+		let mut frame: crate::frame::Producer = producer.create_object(header)?;
+		let read: Result<(), Error> = wait!(Read => stream.poll_read_frame(waiter, frame));
+		if let Err(err) = read {
+			let _ = frame.abort(err.clone());
+			return Poll::Ready(Err(err));
+		}
+		producer.restore(frame.finish()?);
+		Poll::Ready(Ok(()))
+	}
+}
+
 /// One Object header on a fetch stream, after version-specific decoding.
 struct FetchedObject {
 	group: Option<u64>,
@@ -6254,7 +6303,7 @@ mod tests {
 		(live, consumer)
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn internal_alias_resolution_ends_with_its_session() {
 		let aliases = TrackAliases::default();
 		let consumer = aliases.consume();
@@ -6307,14 +6356,14 @@ mod tests {
 		responses
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn bare_fin_requires_publish_done() {
 		for clean in [false, true] {
 			check_publish_fin(fin_responses(clean), clean).await;
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	#[ignore = "requires Bun; run by just test bare-fin in interop CI"]
 	async fn bare_fin_interop() {
 		for clean in [false, true] {
@@ -6323,7 +6372,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn track_alias_waits_for_control_message() {
 		let runtime = crate::time::sim();
 		let aliases = TrackAliases::default();
@@ -6339,7 +6388,7 @@ mod tests {
 
 	/// SUBSCRIBE_OK has not accepted the track, so the map holds no producer.
 	/// Abort still has to reject the parked origin request with the session error.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn session_death_rejects_a_subscribe_still_setting_up() {
 		let broadcast = crate::broadcast::Info::new().produce();
 		let mut dynamic = broadcast.requests();
@@ -6375,7 +6424,7 @@ mod tests {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn unknown_track_alias_times_out() {
 		let aliases = TrackAliases::default();
 		assert!(matches!(
@@ -6385,7 +6434,7 @@ mod tests {
 	}
 
 	async fn settle() {
-		moq_clock::sleep(Duration::from_millis(1)).await;
+		kio::clock::sleep(Duration::from_millis(1)).await;
 	}
 
 	fn occurrences(log: &crate::lite::test_transport::Log, needle: &[u8]) -> usize {
@@ -6429,7 +6478,7 @@ mod tests {
 
 	/// A side that declined MoQ Solicit invited unsolicited advertisements, so one is
 	/// expected even from a peer that implements the extension.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_announce_to_a_side_that_declined_solicit_is_fine() {
 		for solicit in [Some(true), Some(false), None] {
 			assert!(
@@ -6445,7 +6494,7 @@ mod tests {
 	///
 	/// Writing the option is the proof of support, whichever value it carries: an explicit
 	/// 0 says "no requirement of my own" and still says "I read yours".
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_announce_from_a_peer_that_implements_solicit_is_fatal() {
 		assert!(
 			unsolicited_is_a_violation(Some(true), Version::Draft18),
@@ -6460,7 +6509,7 @@ mod tests {
 	/// A peer that declared nothing has never heard of the extension, so it cannot have
 	/// honored ours. Announcing at us is what it is supposed to do, and #2730 is what
 	/// happens when nobody does.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_announce_from_a_peer_that_declared_nothing_is_fine() {
 		assert!(!unsolicited_is_a_violation(None, Version::Draft18));
 	}
@@ -6468,7 +6517,7 @@ mod tests {
 	/// A rooted subscriber asks the peer for its permitted SCOPE. The root names where
 	/// replies mount on our side, which is meaningless to a peer outside our namespace,
 	/// so sending it asks for a prefix that matches nothing there.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_rooted_subscriber_asks_for_its_scope_not_its_root() {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let scope = crate::Patterns::from(crate::Pattern::subtree("cam").unwrap());
@@ -6520,7 +6569,7 @@ mod tests {
 	/// A SUBSCRIBE_NAMESPACE the peer's send window holds back part-way still ends as soon as
 	/// `live` closes, resetting the stream: a FIN would hand the peer a truncated request,
 	/// and there is no answer to wait for.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_namespace_request_stalled_on_credit_ends_when_cancelled() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let session = crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_send_window(1);
@@ -6606,7 +6655,7 @@ mod tests {
 	/// Driven through the real response stream rather than by recomputing the join
 	/// here: a test that did its own `prefix.join(suffix)` would still pass if the
 	/// NAMESPACE arm went back to joining the root.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_rooted_subscriber_mounts_a_reply_under_its_root_once() {
 		const VERSION: Version = Version::Draft18;
 
@@ -6666,105 +6715,10 @@ mod tests {
 		);
 	}
 
-	/// A NAMESPACE that loops back through us detaches its route, but the advertisement
-	/// stays live on the wire until its NAMESPACE_DONE: a repeat that restores a clean path
-	/// while gaining or losing an epoch is still the violation it would be without the loop.
-	#[moq_clock::test]
-	async fn a_reflected_namespace_keeps_its_epoch_live() {
-		const VERSION: Version = Version::Draft18;
-		let us = crate::Hop::new(5).unwrap();
-		let epoch = crate::Epoch::mint();
-
-		for (reflected, drops) in [(false, true), (true, true), (true, false)] {
-			let log = crate::lite::test_transport::Log::default();
-			let mut writer = crate::coding::Writer::new(
-				crate::transport::boxed::SendStream::new(crate::lite::test_transport::SinkSend::new(log.clone())),
-				VERSION,
-			);
-			writer.varint(ietf::RequestOk::ID).await.unwrap();
-			writer
-				.encode(&ietf::RequestOk {
-					largest: None,
-					active: None,
-				})
-				.await
-				.unwrap();
-			let mut adverts = vec![(hop_path(&[7, 9]), Some(epoch.clone()))];
-			if reflected {
-				adverts.push((hop_path(&[7, 5, 9]), Some(epoch.clone())));
-			}
-			adverts.push((hop_path(&[7, 9]), (!drops).then(|| epoch.clone())));
-			for (hops, epoch) in adverts {
-				writer.varint(ietf::Namespace::ID).await.unwrap();
-				writer
-					.encode(&ietf::Namespace {
-						suffix: crate::Path::from_static("room"),
-						params: Some(ietf::AdvertParams {
-							cluster: Some(cluster::Advert { hops, cost: 0 }),
-							epoch,
-						}),
-					})
-					.await
-					.unwrap();
-			}
-			let script = log.writes.lock().unwrap().clone();
-
-			let origin = crate::origin::Config::new(us).produce();
-			let session = crate::lite::test_transport::ScriptedSession::new(script);
-			let (tasks, _task_set) = crate::util::TaskSet::new();
-			let peer_setup = peer::PeerSetup::default();
-			peer_setup.set(peer::Peer {
-				cluster: cluster::Peer {
-					hop: Some(crate::Hop::new(9).unwrap()),
-					cost: None,
-				},
-				epoch: true,
-				..Default::default()
-			});
-			let mut subscriber = Subscriber::new(
-				crate::time::sim(),
-				crate::driver::Transport::new(session.clone()),
-				origin,
-				Control::new(false),
-				None,
-				peer_setup,
-				us,
-				None,
-				VERSION,
-				tasks,
-				Default::default(),
-			);
-
-			let prefix = crate::model::interest_prefixes(&subscriber.origin.allowed())
-				.pop()
-				.expect("one prefix");
-			let (_live, live) = live();
-			let stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), VERSION)
-				.await
-				.unwrap();
-			let mut run = std::pin::pin!(subscriber.run_subscribe_namespace(
-				stream,
-				prefix,
-				crate::model::Snapshot::landed(),
-				live
-			));
-			let mut result = None;
-			for _ in 0..100 {
-				if let std::task::Poll::Ready(done) = futures::poll!(run.as_mut()) {
-					result = Some(done);
-					break;
-				}
-				settle().await;
-			}
-			let violated = matches!(result, Some(Err(ref err)) if is_protocol_violation(err));
-			assert_eq!(violated, drops, "reflected: {reflected}, drops: {drops}: {result:?}");
-		}
-	}
-
 	/// A namespace the peer holds on a SUBSCRIBE_NAMESPACE stream takes an announce slot
 	/// whatever we make of it, so reflected ones the origin never sees still exhaust the
 	/// session's budget, and a NAMESPACE_DONE gives the slot back.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_reflected_namespace_holds_an_announce_slot() {
 		const VERSION: Version = Version::Draft18;
 		let us = crate::Hop::new(5).unwrap();
@@ -6786,7 +6740,6 @@ mod tests {
 					hops: hop_path(&[7, 5, 9]),
 					cost: 0,
 				}),
-				epoch: None,
 			}),
 		};
 		writer.varint(ietf::Namespace::ID).await.unwrap();
@@ -6856,7 +6809,7 @@ mod tests {
 	/// MoQ Active Count is negotiated, so a REQUEST_OK that breaks the negotiation
 	/// either way is the peer's fault: a count we cannot rely on, or one missing where we
 	/// would otherwise wait on it forever.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_count_the_negotiation_did_not_promise_is_a_violation() {
 		const VERSION: Version = Version::Draft18;
 
@@ -6987,7 +6940,7 @@ mod tests {
 	}
 
 	/// With MoQ Active Count, the origin syncs once the counted NAMESPACEs are in.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn counted_namespaces_catch_up() {
 		const VERSION: Version = Version::Draft18;
 		for (entries, synced) in [(&["a"][..], false), (&["a", "b"][..], true)] {
@@ -7017,7 +6970,7 @@ mod tests {
 	}
 
 	/// Without MoQ Active Count, REQUEST_OK is the best boundary there is.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_uncounted_answer_catches_up_on_the_ok() {
 		const VERSION: Version = Version::Draft18;
 		let session = crate::lite::test_transport::ScriptedSession::new(counted_response(VERSION, None, &[]).await);
@@ -7038,7 +6991,7 @@ mod tests {
 	}
 
 	/// A counted set cut short, by a NAMESPACE_DONE or the stream ending, is the peer's fault.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_counted_set_cut_short_is_a_violation() {
 		const VERSION: Version = Version::Draft18;
 		for (entries, fin) in [(&["a", "-a"][..], false), (&["a"][..], true)] {
@@ -7071,7 +7024,7 @@ mod tests {
 	/// A cancelled subscription leaves its alias behind, so the groups the publisher is
 	/// still sending are discarded at once instead of stalling out the timeout and being
 	/// reported as unknown.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn retired_alias_drops_late_groups_immediately() {
 		let aliases = TrackAliases::default();
 		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
@@ -7095,7 +7048,7 @@ mod tests {
 	/// Covers the error this path produces and the code it maps to, not the dispatch loop
 	/// that sends it. `session::a_group_for_a_retired_alias_is_stopped_with_cancelled`
 	/// drives that loop over a real receive stream.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_retired_alias_maps_to_the_cancelled_code() {
 		let aliases = TrackAliases::default();
 		insert_track_alias(&aliases, 7, RequestId(11)).unwrap();
@@ -7189,7 +7142,7 @@ mod tests {
 	/// same alias. Our filters are all LargestObject, so we cannot re-apply them to tell the
 	/// groups apart, but that is one subscription's problem. Killing the session over a
 	/// legal choice would take every other broadcast down with it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_shared_alias_for_one_track_costs_only_that_subscription() {
 		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "video"), (RequestId(13), "cam", "video")]);
 
@@ -7203,7 +7156,7 @@ mod tests {
 
 	/// Relays keep datagram Object IDs, while plain readers see only normal object 0.
 	/// An unbound alias is dropped, and a malformed datagram is the peer's violation.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_object_datagram_is_a_datagram_group() {
 		use crate::coding::Encode as _;
 		use futures::FutureExt as _;
@@ -7276,7 +7229,7 @@ mod tests {
 	/// A datagram that lands before SUBSCRIBE_OK binds its alias is dropped, not held for the
 	/// subscription to replay once it is bound. The reader was already subscribed, so only the
 	/// missing alias can have dropped it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_datagram_before_its_alias_is_dropped() {
 		use crate::coding::Encode as _;
 		use futures::FutureExt as _;
@@ -7322,7 +7275,7 @@ mod tests {
 	}
 
 	/// One alias naming two different tracks is the collision section 11.1 makes fatal.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_alias_reused_for_another_track_is_fatal() {
 		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "video"), (RequestId(13), "cam", "audio")]);
 
@@ -7336,7 +7289,7 @@ mod tests {
 
 	/// Same track name under a different broadcast is a different full track name, so it is
 	/// a collision too.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_alias_reused_across_broadcasts_is_fatal() {
 		let subscriber = subscriber_with_tracks(&[(RequestId(11), "cam", "video"), (RequestId(13), "screen", "video")]);
 
@@ -7353,7 +7306,7 @@ mod tests {
 	/// until STOP_SENDING arrives on the direction it writes (section 6.4.2.3),
 	/// so a subscriber that only finishes leaves it feeding an alias forever. That is what
 	/// turns a routine unsubscribe into an endless "unknown track alias" stream.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn cancelling_a_subscription_stops_the_publisher() {
 		for version in [Version::Draft22] {
 			let log = cancel_a_subscription(version).await;
@@ -7376,7 +7329,7 @@ mod tests {
 	/// polled. The publisher destroyed the request when it sent the error, so treating that
 	/// as abandonment would cancel a request that no longer exists and name a dead id back at
 	/// a peer entitled to object. The answer wins.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_ready_rejection_beats_local_abandonment() {
 		const VERSION: Version = Version::Draft18;
 
@@ -7433,13 +7386,13 @@ mod tests {
 		drop(track);
 		drop(consumer);
 
-		let serving = moq_clock::sim::spawn(async move {
+		let serving = kio::clock::sim::spawn(async move {
 			subscriber
 				.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
 				.await;
 		});
 
-		moq_clock::timeout(std::time::Duration::from_secs(1), serving)
+		kio::clock::timeout(std::time::Duration::from_secs(1), serving)
 			.await
 			.expect("run_subscribe did not finish")
 			.unwrap();
@@ -7487,7 +7440,7 @@ mod tests {
 
 	/// A subscribe whose readers leave while it waits on a token ends, rather than holding
 	/// its task and track until a token that may never be answered.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_abandoned_subscribe_stops_waiting_for_auth() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, log, _auth, _tokens, _task_set) = waiting_on_auth(VERSION);
@@ -7499,13 +7452,13 @@ mod tests {
 		let subscription = track.subscribe(None);
 		let request = dynamic.requested_track().await.expect("no track requested");
 
-		let mut serving = moq_clock::sim::spawn(async move {
+		let mut serving = kio::clock::sim::spawn(async move {
 			subscriber
 				.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
 				.await;
 		});
 		assert!(
-			moq_clock::timeout(std::time::Duration::from_secs(1), &mut serving)
+			kio::clock::timeout(std::time::Duration::from_secs(1), &mut serving)
 				.await
 				.is_err(),
 			"finished while the track was wanted"
@@ -7514,7 +7467,7 @@ mod tests {
 		drop(subscription);
 		drop(track);
 		drop(consumer);
-		moq_clock::timeout(std::time::Duration::from_secs(1), serving)
+		kio::clock::timeout(std::time::Duration::from_secs(1), serving)
 			.await
 			.expect("an abandoned subscribe kept waiting on its token")
 			.unwrap();
@@ -7526,7 +7479,7 @@ mod tests {
 
 	/// A subscribe under an announced route that is withdrawn while it waits on a token
 	/// ends, judged against the union as it stands, so routing can recover.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_withdrawn_route_ends_a_subscribe_waiting_for_auth() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, log, _auth, _tokens, _task_set) = waiting_on_auth(VERSION);
@@ -7540,20 +7493,20 @@ mod tests {
 
 		let route = kio::Producer::<()>::default();
 		let live = route.consume();
-		let mut serving = moq_clock::sim::spawn(async move {
+		let mut serving = kio::clock::sim::spawn(async move {
 			subscriber
 				.run_subscribe(Path::from_static("broadcast"), dynamic, Some(live), request)
 				.await;
 		});
 		assert!(
-			moq_clock::timeout(std::time::Duration::from_secs(1), &mut serving)
+			kio::clock::timeout(std::time::Duration::from_secs(1), &mut serving)
 				.await
 				.is_err(),
 			"finished while the route stood"
 		);
 
 		drop(route);
-		moq_clock::timeout(std::time::Duration::from_secs(1), serving)
+		kio::clock::timeout(std::time::Duration::from_secs(1), serving)
 			.await
 			.expect("a withdrawn route kept the subscribe waiting on its token")
 			.unwrap();
@@ -7568,7 +7521,7 @@ mod tests {
 	/// independent of the request stream. If the last consumer leaves in that window, the
 	/// subscriber still owes it a cancellation: walking away silently is what leaves it
 	/// serving a track nobody reads.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn abandoning_before_subscribe_ok_still_cancels() {
 		const VERSION: Version = Version::Draft18;
 
@@ -7599,7 +7552,7 @@ mod tests {
 
 		let request = dynamic.requested_track().await.expect("no track requested");
 
-		let serving = moq_clock::sim::spawn(async move {
+		let serving = kio::clock::sim::spawn(async move {
 			subscriber
 				.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
 				.await;
@@ -7613,7 +7566,7 @@ mod tests {
 		drop(track);
 		drop(consumer);
 
-		moq_clock::timeout(std::time::Duration::from_secs(1), serving)
+		kio::clock::timeout(std::time::Duration::from_secs(1), serving)
 			.await
 			.expect("run_subscribe parked waiting for a response that never came")
 			.unwrap();
@@ -7636,7 +7589,7 @@ mod tests {
 
 	/// A grant revoked while the SUBSCRIBE waits for its answer refuses the request and
 	/// cancels the subscribe at once, not once the peer answers or acknowledges the cancel.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_revocation_never_waits_behind_subscribe_ok() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			// A peer that accepts the stream and then says nothing at all, not even
@@ -7667,7 +7620,7 @@ mod tests {
 			let subscription = track.subscribe(None);
 			let request = dynamic.requested_track().await.expect("no track requested");
 
-			let serving = moq_clock::sim::spawn(async move {
+			let serving = kio::clock::sim::spawn(async move {
 				subscriber
 					.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
 					.await;
@@ -7677,7 +7630,7 @@ mod tests {
 			assert!(occurrences(&log, &[ietf::Subscribe::ID as u8]) > 0, "{version}");
 
 			auth.ended(0, Error::Session(SessionError::Unauthorized));
-			let result = moq_clock::timeout(Duration::from_secs(1), subscription)
+			let result = kio::clock::timeout(Duration::from_secs(1), subscription)
 				.await
 				.unwrap_or_else(|_| panic!("{version}: the revocation waited behind SUBSCRIBE_OK"));
 			assert!(
@@ -7697,7 +7650,7 @@ mod tests {
 
 	/// An unanswered epochless request cannot prove which instance the peer resolved.
 	/// Retiring its source cancels it even while the caller keeps its demand.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_retirement_before_subscribe_ok_refuses_the_subscription() {
 		const VERSION: Version = Version::Draft18;
 
@@ -7731,7 +7684,7 @@ mod tests {
 
 		let request = dynamic.requested_track().await.expect("no track requested");
 
-		let serving = moq_clock::sim::spawn(async move {
+		let serving = kio::clock::sim::spawn(async move {
 			subscriber
 				.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
 				.await;
@@ -7840,7 +7793,13 @@ mod tests {
 			SetupWait::StatusOpen | SetupWait::StatusWrite | SetupWait::StatusResponse => Box::pin(async {
 				assert!(
 					subscriber
-						.track_status(&Path::from_static("broadcast"), "video", request, &mut gate)
+						.track_status(
+							&Path::from_static("broadcast"),
+							"video",
+							request,
+							&mut TaskSet::owned(),
+							&mut gate
+						)
 						.await
 						.is_none()
 				);
@@ -7950,7 +7909,7 @@ mod tests {
 
 	macro_rules! setup_wait_test {
 		($name:ident, $stage:ident, [$($version:ident),+]) => {
-			#[moq_clock::test]
+			#[kio::test]
 			async fn $name() {
 				for version in [$(Version::$version),+] {
 					for cause in [Invalidated::Retired, Invalidated::Revoked, Invalidated::Narrowed, Invalidated::Expired] {
@@ -8005,7 +7964,7 @@ mod tests {
 	/// finished is still retransmitting, so the writer's Drop reset would discard the message
 	/// before the peer read it. Closing consumes the writer, which is what removes that
 	/// fallback, so a reset here means the cancellation never landed.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn cancelling_does_not_reset_away_the_unsubscribe() {
 		for version in [Version::Draft22] {
 			let log = cancel_a_subscription(version).await;
@@ -8022,7 +7981,7 @@ mod tests {
 		window: Option<usize>,
 	) -> (
 		crate::lite::test_transport::ScriptedSession,
-		moq_clock::sim::JoinHandle<()>,
+		kio::clock::sim::JoinHandle<()>,
 		crate::track::Consumer,
 		kio::Pending<track::Subscribing>,
 	) {
@@ -8060,7 +8019,7 @@ mod tests {
 		let track = producer.consume().track("video").unwrap();
 		let first = track.subscribe(None);
 		let request = dynamic.requested_track().await.expect("no track requested");
-		let serving = moq_clock::sim::spawn(async move {
+		let serving = kio::clock::sim::spawn(async move {
 			let _producer = producer;
 			subscriber
 				.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
@@ -8073,7 +8032,7 @@ mod tests {
 	/// A REQUEST_UPDATE the peer's send window holds back part-way is still buffered when
 	/// PUBLISH_DONE ends the subscription, so the stream resets rather than FIN a truncated
 	/// update.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_stalled_update_resets_when_the_publisher_ends() {
 		// The SUBSCRIBE alone, measured over an open window.
 		let subscribe = {
@@ -8115,7 +8074,7 @@ mod tests {
 			.await
 			.unwrap();
 		// Past the grace PUBLISH_DONE waits out for its data streams; the copy then lingers.
-		moq_clock::sleep(crate::ledger::GRACE * 2).await;
+		kio::clock::sleep(crate::ledger::GRACE * 2).await;
 		assert_eq!(session.log.resets(), vec![crate::ietf::error::CANCELLED]);
 		assert!(
 			!session
@@ -8203,7 +8162,7 @@ mod tests {
 		// subscription reached Established rather than assume it.
 		let probe = subscriber.clone();
 
-		let serving = moq_clock::sim::spawn(async move {
+		let serving = kio::clock::sim::spawn(async move {
 			subscriber
 				.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
 				.await;
@@ -8226,7 +8185,7 @@ mod tests {
 		drop(track);
 		drop(consumer);
 
-		moq_clock::timeout(crate::track::IDLE_LINGER * 2, serving)
+		kio::clock::timeout(crate::track::IDLE_LINGER * 2, serving)
 			.await
 			.expect("run_subscribe did not finish")
 			.unwrap();
@@ -8285,7 +8244,7 @@ mod tests {
 		let request = dynamic.requested_track().await.expect("no track requested");
 
 		let probe = subscriber.clone();
-		let serving = moq_clock::sim::spawn(async move {
+		let serving = kio::clock::sim::spawn(async move {
 			subscriber
 				.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
 				.await;
@@ -8337,7 +8296,7 @@ mod tests {
 
 	/// Serve the front's request on its wake, before the requesting call can return.
 	/// A peer that refuses TRACK_STATUS must still receive SUBSCRIBE for a catalog reader.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_catalog_subscription_never_requests_track_status() {
 		use std::sync::{Arc, Mutex};
 		use std::task::{Context, Wake, Waker};
@@ -8413,7 +8372,7 @@ mod tests {
 				// Run the request classification before the front can add demand after
 				// its query. The simulator takes over only once the wire work parks.
 				if std::future::Future::poll(serving.as_mut(), &mut Context::from_waker(Waker::noop())).is_pending() {
-					drop(moq_clock::sim::spawn(serving));
+					drop(kio::clock::sim::spawn(serving));
 				}
 			}
 		}
@@ -8442,7 +8401,7 @@ mod tests {
 
 	/// Query-only and fetch-only demand fail with the peer's TRACK_STATUS refusal,
 	/// including NOT_SUPPORTED and undefined codes, without opening a subscription.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_refused_track_status_never_subscribes() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for code in [3, u64::from(u32::MAX)] {
@@ -8510,7 +8469,7 @@ mod tests {
 	/// A copy that already knows its track, here from TRACK_STATUS_OK, opts out of the
 	/// properties when a subscriber returns only if the track is untimed: a publisher stamps
 	/// objects only for a subscriber that took the TIMESCALE.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_resumed_subscribe_opts_out_only_when_untimed() {
 		let declared = Timescale::new(90_000).unwrap();
 		for (version, timed) in [Version::Draft18, Version::Draft20, Version::Draft22]
@@ -8570,7 +8529,7 @@ mod tests {
 			let request = dynamic.requested_track().await.expect("no track requested");
 
 			let probe = subscriber.clone();
-			let serving = moq_clock::sim::spawn(async move {
+			let serving = kio::clock::sim::spawn(async move {
 				subscriber
 					.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
 					.await;
@@ -8625,7 +8584,7 @@ mod tests {
 	/// The publisher opens no fetch stream for an empty range, so a fill against a track
 	/// with no content is owed nothing. Leaving it outstanding would withhold every later
 	/// group behind a head that is never coming.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_empty_track_settles_the_fill() {
 		assert!(
 			!fill_after_subscribe_ok(None, Some(37)).await,
@@ -8635,7 +8594,7 @@ mod tests {
 
 	/// A track with content does owe one, so the fill stays outstanding until its fetch
 	/// stream arrives.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_track_with_content_still_awaits_its_fill() {
 		assert!(
 			fill_after_subscribe_ok(Some(ietf::Location { group: 3, object: 4 }), Some(37)).await,
@@ -8643,7 +8602,7 @@ mod tests {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_older_peer_without_priority_property_uses_wire_default() {
 		assert!(!fill_after_subscribe_ok(None, None).await);
 	}
@@ -8667,7 +8626,7 @@ mod tests {
 
 	/// A namespace past the session's cap closes the session with TOO_MANY_REQUESTS, a
 	/// repeat of a held namespace costs nothing, and a retraction frees its slot.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn namespaces_past_the_cap_close_the_session() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let log = session.log.clone();
@@ -8723,7 +8682,7 @@ mod tests {
 	/// moq-transport carries no hop ids, so a peer's broadcasts are marked
 	/// anonymous (hop 0). An identity assigned via `Client::with_peer_hop` is
 	/// stored as `via` for split-horizon and never written into the chain.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn assigned_peer_hop_attributes_announces() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let assigned = crate::Hop::new(777).unwrap();
@@ -8766,7 +8725,7 @@ mod tests {
 	/// claiming the path: taking it over would leave only a route we refuse to
 	/// advertise back to the peer, and the publish direction would withdraw the
 	/// announce it just made.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn reflected_announce_does_not_evict_the_source_we_publish() {
 		let session = crate::lite::test_transport::SinkSession::new(Default::default());
 		let peer = crate::Hop::new(777).unwrap();
@@ -8820,7 +8779,7 @@ mod tests {
 	/// Two sessions assigned the same identity announce the same anonymous chain.
 	/// Without an epoch the fresh session is another source, so consumers restart
 	/// once, and retracting the stale session leaves the fresh route standing quietly.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn reconnecting_peer_restarts_the_route() {
 		let peer = crate::Hop::new(777).unwrap();
 		let self_origin = crate::Hop::new(1).unwrap();
@@ -8853,13 +8812,13 @@ mod tests {
 		};
 
 		let first = connect();
-		moq_clock::sim::yield_now().await;
+		kio::clock::sim::yield_now().await;
 		announced.expect_next_active("room/host").await;
 
 		// The peer reconnects before the old session is retired: an identical route
 		// from the fresh session wins at once, as another source.
 		let _second = connect();
-		moq_clock::sim::yield_now().await;
+		kio::clock::sim::yield_now().await;
 		announced.expect_next_restarted("room/host").await;
 		announced.assert_next_wait();
 
@@ -8868,7 +8827,7 @@ mod tests {
 
 		// The stale session finally retracting leaves the fresh route standing.
 		drop(first);
-		moq_clock::sim::yield_now().await;
+		kio::clock::sim::yield_now().await;
 		announced.assert_next_wait();
 		assert!(routed_now(&consumer, "room/host").is_some());
 	}
@@ -8917,7 +8876,7 @@ mod tests {
 	/// A negotiated advertisement carries the whole path and its accumulated cost, and
 	/// the receiving relay charges its own link on top (saturating, so an absurd
 	/// upstream value ranks last rather than wrapping to best).
-	#[moq_clock::test]
+	#[kio::test]
 	async fn cluster_advert_becomes_a_route_with_the_link_charged() {
 		let (subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
@@ -8953,7 +8912,7 @@ mod tests {
 	/// An advertisement whose path already contains our own Hop ID looped back:
 	/// forwarding it would extend the loop and subscribing through it would route us
 	/// back to ourselves. Hop ID 0 identifies nothing, so it is never a loop.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn cluster_advert_loop_is_discarded() {
 		let (subscriber, _origin) = cluster_subscriber(crate::Hop::new(5).unwrap());
 		let peer = cluster::Peer {
@@ -8976,7 +8935,7 @@ mod tests {
 
 	/// An unpriced link costs 1, so an unpriced mesh accumulates a cost equal to the
 	/// hop count and degenerates to shortest-path routing.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn unpriced_link_costs_one() {
 		let (subscriber, _origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let peer = cluster::Peer {
@@ -9005,7 +8964,7 @@ mod tests {
 	///
 	/// Driven through the real exit path rather than by calling `stop_announce`: a test
 	/// that picked the detach itself would still pass if the stream stopped using it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_lost_namespace_stream_closes_the_broadcast() {
 		const VERSION: Version = Version::Draft18;
 
@@ -9059,7 +9018,7 @@ mod tests {
 	/// NAMESPACE has no REQUEST_UPDATE, so a peer reprices one by re-sending it on the
 	/// SUBSCRIBE_NAMESPACE stream. The repeat is neither a duplicate nor a violation: it
 	/// replaces the advertisement in place, and the route is never retracted for it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_re_sent_namespace_reprices_in_place() {
 		const VERSION: Version = Version::Draft18;
 
@@ -9090,7 +9049,6 @@ mod tests {
 								hops: hop_path(&[7, 9]),
 								cost,
 							}),
-							epoch: None,
 						}),
 					})
 					.await
@@ -9152,7 +9110,7 @@ mod tests {
 
 	/// The peer explicitly retracting a namespace ends the broadcast immediately: it
 	/// said the namespace is gone, so a later create at the path is new content.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_explicit_namespace_done_closes_the_broadcast() {
 		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
@@ -9171,7 +9129,7 @@ mod tests {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn publish_namespace_requester_fin_keeps_the_route() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for reset in [false, true] {
@@ -9229,7 +9187,7 @@ mod tests {
 	///
 	/// Driven through the real exit path rather than by calling `stop_announce`: a test
 	/// that picked the detach itself would still pass if the stream stopped using it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_broken_publish_namespace_stream_closes_the_broadcast() {
 		const VERSION: Version = Version::Draft18;
 
@@ -9294,7 +9252,7 @@ mod tests {
 	/// which is what these advertisements would be had they arrived on two sessions. The
 	/// refcount is a detail of sharing one `SourceGuard` per session; it must not change
 	/// what the origin sees.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn the_last_owner_out_decides_the_detach() {
 		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
@@ -9332,7 +9290,7 @@ mod tests {
 	/// A source minted under a namespace goes once nothing holds it, so the session keeps
 	/// nothing for a path its fronts let go of, and goes at once as the namespace is
 	/// retracted, held or not.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_minted_source_closes_unheld_or_retracted() {
 		let (subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let run = |route: &kio::Producer<()>| {
@@ -9341,7 +9299,7 @@ mod tests {
 			);
 			let (holder, dynamic) = (source.consume(), source.requests());
 			let (this, route) = (subscriber.clone(), route.consume());
-			let task = moq_clock::sim::spawn(async move {
+			let task = kio::clock::sim::spawn(async move {
 				this.run_broadcast(crate::Path::from_static("pool/p"), source, dynamic, Some(route))
 					.await
 			});
@@ -9367,7 +9325,7 @@ mod tests {
 	/// An advertisement with no path of its own (a peer that did not negotiate the
 	/// extension) still pays for the link it arrived over. Forwarding it as free would
 	/// advertise a paid upstream as the cheapest route in the mesh.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_pathless_advert_still_pays_for_its_link() {
 		let (unpriced, _origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let peer = cluster::Peer::default();
@@ -9393,7 +9351,7 @@ mod tests {
 
 	/// An update replaces the advertisement in place: the route moves, the refcount does
 	/// not, and the source is not torn down.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn cluster_update_replaces_in_place() {
 		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
@@ -9434,7 +9392,7 @@ mod tests {
 	/// relay signals that it started carrying the namespace), so the source and every
 	/// live subscription on it must survive. Reading the repeat as a new publisher
 	/// detached the source milliseconds after SUBSCRIBE went out.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn anonymous_publisher_survives_a_repricing_update() {
 		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
@@ -9480,101 +9438,9 @@ mod tests {
 		assert!(routed_now(&consumer, "room/host").is_none());
 	}
 
-	/// MoQ Epoch: a publisher replacing its instance withdraws one advertisement and makes
-	/// another, on separate streams that arrive in either order. The newest advertisement
-	/// stands, so neither the old one's late update nor its withdrawal reverts the route
-	/// to the instance it named.
-	#[moq_clock::test]
-	async fn a_reordered_replacement_keeps_the_new_instance() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
-		let consumer = origin.consume();
-		let path = crate::Path::from_static("room/host");
-		let peer = cluster::Peer::default();
-		let (old, new) = (crate::Epoch::mint(), crate::Epoch::mint());
-		let advert = |subscriber: &Subscriber, epoch: &crate::Epoch| {
-			subscriber
-				.route(None, &peer)
-				.expect("route")
-				.with_epoch(Some(epoch.clone()))
-		};
-		let epoch_now = || routed_now(&consumer, "room/host").and_then(|route| route.epoch);
-
-		let first = advert(&subscriber, &old);
-		let first = subscriber
-			.start_announce(path.clone(), first, Admit::Session(None))
-			.unwrap();
-		assert_eq!(epoch_now(), Some(old.clone()));
-
-		// The replacement's PUBLISH_NAMESPACE beats the old one's PUBLISH_NAMESPACE_DONE.
-		let second = advert(&subscriber, &new);
-		let second = subscriber
-			.start_announce(path.clone(), second, Admit::Session(None))
-			.unwrap();
-		assert_eq!(epoch_now(), Some(new.clone()));
-
-		// A late update to the old advertisement changes nothing.
-		let stale = advert(&subscriber, &old);
-		subscriber.update_announce(path.clone(), first, stale).unwrap();
-		assert_eq!(epoch_now(), Some(new.clone()), "a stale update reverted the instance");
-
-		// Its withdrawal, arriving last, leaves the new instance standing.
-		subscriber.stop_announce(path.clone(), first, false).unwrap();
-		assert_eq!(
-			epoch_now(),
-			Some(new.clone()),
-			"the old withdrawal retracted the new instance"
-		);
-
-		subscriber.stop_announce(path, second, false).unwrap();
-		assert_eq!(routed_now(&consumer, "room/host"), None);
-	}
-
-	/// MoQ Epoch: a namespace advertised both inline and by a later PUBLISH_NAMESPACE takes
-	/// another epoch from either. An inline repeat under the new epoch is the newest
-	/// advertisement, not an update to the older of the two.
-	#[moq_clock::test]
-	async fn a_repeat_under_another_epoch_becomes_the_newest() {
-		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
-		let consumer = origin.consume();
-		let path = crate::Path::from_static("room/host");
-		let peer = cluster::Peer::default();
-		let (old, new) = (crate::Epoch::mint(), crate::Epoch::mint());
-		let advert = |subscriber: &Subscriber, epoch: &crate::Epoch| {
-			subscriber
-				.route(None, &peer)
-				.expect("route")
-				.with_epoch(Some(epoch.clone()))
-		};
-		let epoch_now = || routed_now(&consumer, "room/host").and_then(|route| route.epoch);
-
-		let inline = advert(&subscriber, &old);
-		let inline = subscriber
-			.start_announce(path.clone(), inline, Admit::Session(None))
-			.unwrap();
-		let request = advert(&subscriber, &old);
-		let request = subscriber
-			.start_announce(path.clone(), request, Admit::Session(None))
-			.unwrap();
-		assert_eq!(epoch_now(), Some(old.clone()));
-
-		let repeat = advert(&subscriber, &new);
-		subscriber.update_announce(path.clone(), inline, repeat).unwrap();
-		assert_eq!(
-			epoch_now(),
-			Some(new.clone()),
-			"the older request kept the old instance"
-		);
-
-		// The old instance's withdrawal leaves the new one standing.
-		subscriber.stop_announce(path.clone(), request, false).unwrap();
-		assert_eq!(epoch_now(), Some(new));
-		subscriber.stop_announce(path, inline, false).unwrap();
-		assert_eq!(routed_now(&consumer, "room/host"), None);
-	}
-
 	/// Two *separate* advertisements for one namespace refcount a single route:
 	/// it takes both retractions to retract it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn separate_adverts_refcount_the_route() {
 		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
@@ -9612,7 +9478,7 @@ mod tests {
 	/// one namespace are then two messages about a single source, and treating the
 	/// second as a different publisher would tear down what the first attached, right
 	/// as a subscriber is resolving a track through it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn pathless_adverts_never_replace_the_source() {
 		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
@@ -9643,7 +9509,7 @@ mod tests {
 	/// An update replaces the advertisement it repeats. When the replacement loops back
 	/// through us it is a retraction, so the route we were holding must go: keeping it
 	/// would leave subscriptions on a path the peer no longer offers.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn reflected_replacement_retracts_the_route() {
 		let self_origin = crate::Hop::new(5).unwrap();
 		let (mut subscriber, origin) = cluster_subscriber(self_origin);
@@ -9824,7 +9690,7 @@ mod tests {
 	/// namespace even when the peer's path goes clean again. It is also not ours to
 	/// close: a peer MAY legitimately send a path carrying our Hop ID when a redundant
 	/// sibling shares it, which the draft answers with "discard", not PROTOCOL_VIOLATION.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_reflected_update_detaches_but_keeps_the_stream() {
 		let self_origin = crate::Hop::new(5).unwrap();
 		let peer = peer_9();
@@ -9841,7 +9707,6 @@ mod tests {
 				&path,
 				Held {
 					cluster: Some(clean.clone()),
-					epoch: None
 				},
 				peer,
 				&mut attached,
@@ -9874,7 +9739,7 @@ mod tests {
 
 	/// Having kept the stream, a later usable path re-attaches on it. This is the whole
 	/// reason the stream stays open.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_clean_update_after_a_reflection_reattaches() {
 		let self_origin = crate::Hop::new(5).unwrap();
 		let peer = peer_9();
@@ -9891,7 +9756,6 @@ mod tests {
 				&path,
 				Held {
 					cluster: Some(clean.clone()),
-					epoch: None
 				},
 				peer,
 				&mut attached,
@@ -9917,7 +9781,7 @@ mod tests {
 
 	/// A token-authorized announce re-attaching after a reflection reuses the slot its grant
 	/// still holds: with a cap of one, taking a second would close the session.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_token_announce_reattaches_on_its_own_slot() {
 		let self_origin = crate::Hop::new(5).unwrap();
 		let peer = peer_9();
@@ -9981,7 +9845,6 @@ mod tests {
 				&path,
 				Held {
 					cluster: Some(clean.clone()),
-					epoch: None
 				},
 				peer,
 				&mut attached,
@@ -10007,7 +9870,7 @@ mod tests {
 	/// The expected update: a relay that started carrying the namespace reprices it to
 	/// 0. REQUEST_UPDATE keeps an omitted parameter, so the 0 arrives explicit and alone,
 	/// lands on the path already held, and is answered REQUEST_OK.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_explicit_zero_reprices_the_held_path() {
 		const VERSION: Version = Version::Draft18;
 		let self_origin = crate::Hop::new(5).unwrap();
@@ -10054,7 +9917,6 @@ mod tests {
 				&path,
 				Held {
 					cluster: Some(held.clone()),
-					epoch: None
 				},
 				peer,
 				&mut attached,
@@ -10079,7 +9941,7 @@ mod tests {
 	/// closed, which withdraws the advertisement (moq-transport Section 9.5.1). The
 	/// caller releases the route, so the loop must return cleanly rather than fault the
 	/// session.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_failed_update_withdraws_the_advertisement() {
 		let self_origin = crate::Hop::new(5).unwrap();
 		let peer = peer_9();
@@ -10106,7 +9968,6 @@ mod tests {
 				&path,
 				Held {
 					cluster: Some(clean.clone()),
-					epoch: None
 				},
 				peer,
 				&mut attached,
@@ -10137,7 +9998,7 @@ mod tests {
 	/// An update whose first Hop ID differs names a different publisher. It still
 	/// replaces the advertisement in place and the stream stays open: the origin, not the
 	/// session, keeps the two publishers' content apart.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_update_that_changes_the_publisher_applies_in_place() {
 		let self_origin = crate::Hop::new(5).unwrap();
 		let peer = peer_9();
@@ -10160,7 +10021,6 @@ mod tests {
 				&path,
 				Held {
 					cluster: Some(clean.clone()),
-					epoch: None
 				},
 				peer,
 				&mut attached,
@@ -10185,7 +10045,7 @@ mod tests {
 
 	/// A second PUBLISH_NAMESPACE on the stream that already carries one is not an
 	/// update any more: it is the base draft's duplicate request, a protocol violation.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_repeated_publish_namespace_is_a_duplicate() {
 		const VERSION: Version = Version::Draft18;
 		let self_origin = crate::Hop::new(5).unwrap();
@@ -10208,7 +10068,6 @@ mod tests {
 							cost: 0,
 							..clean.clone()
 						}),
-						epoch: None,
 					},
 					authorization_token: None,
 				})
@@ -10229,7 +10088,6 @@ mod tests {
 			&path,
 			Held {
 				cluster: Some(clean.clone()),
-				epoch: None
 			},
 			peer,
 			&mut attached,
@@ -10252,7 +10110,7 @@ mod tests {
 	/// without a NAMESPACE_DONE for each, those refcounts must still be released, or the
 	/// source stays attached for the rest of the session (the stream can die while the
 	/// session keeps running).
-	#[moq_clock::test]
+	#[kio::test]
 	async fn namespace_stream_close_releases_live_paths() {
 		let (mut subscriber, origin) = cluster_subscriber(crate::Hop::new(1).unwrap());
 		let consumer = origin.consume();
@@ -10282,7 +10140,7 @@ mod tests {
 	/// PUBLISH offers one track, but a source attaches per namespace and serves every
 	/// track under it. Rather than invent a namespace-level source from a track-level
 	/// offer, decline the request with NOT_SUPPORTED and leave the session running.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn publish_is_rejected_without_announcing() {
 		for version in [Version::Draft18] {
 			// An open gate, so the rejection actually reaches the wire.
@@ -10325,7 +10183,7 @@ mod tests {
 
 			// Errors are surfaced to the peer on the stream, not raised as a session error.
 			subscriber.run_publish_stream(stream, msg).await.unwrap();
-			moq_clock::sleep(Duration::from_millis(1)).await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 
 			assert!(
 				routed_now(&consumer, "room/host").is_none(),
@@ -10511,7 +10369,7 @@ mod tests {
 
 	/// A request token on a PUBLISH_NAMESPACE the session grant does not cover authorizes
 	/// the announce: the subscriber verifies it through the acceptor and attaches the route.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_publish_namespace_token_authorizes_an_uncovered_announce() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness(VERSION, Vec::new());
@@ -10550,7 +10408,7 @@ mod tests {
 	/// An announce's grant ending while its first answer waits on a peer that stopped
 	/// reading retracts the route at once, not once the answer drains: the peer is told
 	/// only afterwards.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_revoked_token_retracts_an_announce_whose_ok_is_blocked() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let gate = kio::Producer::new(false);
@@ -10601,7 +10459,7 @@ mod tests {
 			};
 			*open = true;
 			drop(open);
-			let _ = moq_clock::timeout(std::time::Duration::from_secs(1), run.as_mut())
+			let _ = kio::clock::timeout(std::time::Duration::from_secs(1), run.as_mut())
 				.await
 				.unwrap_or_else(|_| panic!("{version}: outlived its grant"));
 
@@ -10630,7 +10488,7 @@ mod tests {
 
 	/// A refused request token is answered UNAUTHORIZED and the announce is not attached; the
 	/// session is untouched.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_refused_publish_namespace_token_is_not_announced() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, mut requests, _cred, consumer, session) = auth_announce_harness(VERSION, Vec::new());
@@ -10670,7 +10528,7 @@ mod tests {
 	/// What the peer's AUTH_OK grants us never authorizes what the peer asks of us: with a
 	/// covering peer grant and no limit, the application still verifies the announce's token,
 	/// and its refusal refuses the announce.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_covering_peer_grant_never_skips_the_verifier() {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Link::new(true);
@@ -10720,7 +10578,7 @@ mod tests {
 	/// one stands outside the limit: narrowing the limit away from it leaves it attached, as the
 	/// publisher, which counts it token-backed, expects. Admitted on the limit instead, the
 	/// narrowing would withhold a route the publisher still believes its token backs.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_covering_limit_still_verifies_the_token() {
 		const VERSION: Version = Version::Draft18;
 		let limit = |subtree: &str| crate::auth::Grant {
@@ -10782,7 +10640,7 @@ mod tests {
 
 	/// A token-authorized announce stands outside the limit while it lasts: a narrower limit
 	/// leaves it attached, and only its own end retracts it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_token_authorized_announce_is_exempt_from_the_limit() {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Link::new(false);
@@ -10833,7 +10691,7 @@ mod tests {
 
 	/// A token-authorized announce authorizes the tracks subscribed under it, outside the
 	/// limit, and only while its token lasts.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_token_authorized_announce_admits_its_subscriptions() {
 		const VERSION: Version = Version::Draft18;
 		let auth = crate::auth::Link::new(false);
@@ -10932,7 +10790,7 @@ mod tests {
 	/// A REQUEST_UPDATE the acceptor renews keeps a token-authorized announce alive past the
 	/// old grant's expiry: the subscriber re-verifies the token off the announce stream and
 	/// re-arms the deadline.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_publish_namespace_renewal_extends_past_the_old_expiry() {
 		for version in [Version::Draft18] {
 			let (mut subscriber, mut requests, _cred, consumer, session) =
@@ -10990,7 +10848,7 @@ mod tests {
 
 			// Past the original 60s expiry: the renewal re-armed the deadline, so the announce
 			// stays attached.
-			moq_clock::sim::advance(std::time::Duration::from_secs(120)).await;
+			kio::clock::sim::advance(std::time::Duration::from_secs(120)).await;
 			for _ in 0..50 {
 				let _ = futures::poll!(acceptor.as_mut());
 				assert!(
@@ -11008,7 +10866,7 @@ mod tests {
 
 	/// A lapsed grant retracts its announce at once, even while the withdrawal waits on a peer
 	/// that never acknowledges the closed stream.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_lapsed_announce_grant_retracts_before_the_peer_reads() {
 		const VERSION: Version = Version::Draft18;
 		let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![Vec::new()]).with_unacked_fin();
@@ -11044,7 +10902,7 @@ mod tests {
 		}
 		assert!(routed, "the token must authorize the announce");
 
-		moq_clock::sim::advance(std::time::Duration::from_secs(120)).await;
+		kio::clock::sim::advance(std::time::Duration::from_secs(120)).await;
 		let mut retracted = false;
 		for _ in 0..50 {
 			let _ = futures::poll!(acceptor.as_mut());
@@ -11066,7 +10924,7 @@ mod tests {
 
 	/// An update repeating its token withdraws a token-authorized announce, retracting the route
 	/// at once even while the withdrawal waits on a peer that never acknowledges it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_repeated_token_update_retracts_before_the_peer_reads() {
 		const VERSION: Version = Version::Draft18;
 		const TOKEN: &[u8] = &[0x03, 0x00, 0xAA];
@@ -11118,7 +10976,7 @@ mod tests {
 	/// Per draft-18 section 10.9.1, a refused PUBLISH_NAMESPACE
 	/// renewal ends only that announce at once, by closing its stream, not by waiting for
 	/// the old 60s grant to lapse. The session stays up.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_refused_publish_namespace_renewal_ends_the_announce() {
 		for version in [Version::Draft18] {
 			let (mut subscriber, mut requests, _cred, _consumer, session) =
@@ -11180,7 +11038,7 @@ mod tests {
 
 	/// Where tokens decide, a token arriving on an update for an announce the limit admitted
 	/// without one is refused rather than taken unread: it ends only that announce, unverified.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_token_on_an_announce_admitted_without_one_is_refused() {
 		for version in [Version::Draft18] {
 			let (mut subscriber, mut requests, _cred, consumer, session) =
@@ -11226,7 +11084,7 @@ mod tests {
 	/// renewal re-arms the grant and the HOP_PATH/ROUTE_COST re-route the advertisement,
 	/// answered with the renewal's single response. Before the fix the token branch
 	/// short-circuited the loop and the cluster parameters on the same update were dropped.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_update_applies_both_a_renewal_and_cluster_params() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, mut requests, _cred, consumer, session) =
@@ -11307,7 +11165,7 @@ mod tests {
 	/// (0x05) changes only ROUTE_COST (4 to 1) and the last (0x07) only HOP_PATH, so the final
 	/// cost shows the middle delta survived; the single slot this replaced dropped 0x05,
 	/// leaving the cost at the initial 4 and never verifying its token.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn two_announce_renewals_buffered_behind_a_pending_verdict_each_apply_and_answer() {
 		const VERSION: Version = Version::Draft18;
 
@@ -11387,7 +11245,7 @@ mod tests {
 	/// an announce stream broke the negotiated limit: draft-22 section 9.1.7 closes the session
 	/// with TOO_MANY_REQUEST_UPDATES. run_publish_namespace_updates must close explicitly (the
 	/// dispatcher does not close on an Error::Session), and surface that error too.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn announce_renewals_past_the_advertised_limit_close_the_session() {
 		const VERSION: Version = Version::Draft22;
 
@@ -11448,7 +11306,7 @@ mod tests {
 	/// Exactly MAX_REQUEST_UPDATES outstanding (the one being verified plus the queue) is within
 	/// the advertised limit, so a draft-22 peer holding that many is not faulted: the announce
 	/// keeps running and the session stays up.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn announce_renewals_at_the_advertised_limit_keep_the_announce() {
 		const VERSION: Version = Version::Draft18;
 
@@ -11494,7 +11352,7 @@ mod tests {
 	/// Drafts below 19 carry no MAX_REQUEST_UPDATES option, so a peer there agreed to no ceiling:
 	/// the same flood that closes a draft-22 session must neither end the announce nor close the
 	/// session on draft-18, because a conforming peer must not be stranded for a limit it never saw.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn older_drafts_do_not_strand_an_announce_flood() {
 		const VERSION: Version = Version::Draft18;
 
@@ -11537,7 +11395,7 @@ mod tests {
 
 	/// On drafts without the option the guard is a memory backstop, not a protocol limit: a flood
 	/// past it ends the one announce by finishing the stream, never the session.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_older_draft_announce_flood_past_the_guard_ends_the_announce() {
 		const VERSION: Version = Version::Draft18;
 
@@ -11586,7 +11444,7 @@ mod tests {
 
 	/// A flood past the guard retracts the announce at once, even while the withdrawal waits on
 	/// a peer that never acknowledges the finished stream.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_flood_past_the_guard_retracts_before_the_peer_reads() {
 		const VERSION: Version = Version::Draft18;
 
@@ -11708,7 +11566,7 @@ mod tests {
 	/// On a session without the AUTH extension, a token-bearing PUBLISH_NAMESPACE the limit
 	/// does not cover is verified by the application. Admitted on a covering grant; refused
 	/// UNAUTHORIZED (not admitted) on refusal. This is the standard moq-transport peer shape.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_request_token_on_a_no_auth_session_is_verified() {
 		const VERSION: Version = Version::Draft18;
 
@@ -11801,7 +11659,7 @@ mod tests {
 	/// A peer that ends the announce while a renewal is still being verified ends it here too:
 	/// with a grant that never expires and an acceptor that never answers the renewal, only
 	/// the stream closing can end the request, and it must.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_closed_announce_ends_while_a_renewal_is_pending() {
 		const VERSION: Version = Version::Draft18;
 		let session = crate::lite::test_transport::ScriptedSession::per_stream_eof(vec![
@@ -11856,7 +11714,7 @@ mod tests {
 
 	/// An update queued behind a pending renewal spends its request ID on arrival, so the
 	/// announce ending before the queue drains leaves no ID the peer could reuse.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_queued_update_spends_its_request_id_when_the_announce_ends() {
 		const VERSION: Version = Version::Draft18;
 		let queued = {
@@ -11918,7 +11776,7 @@ mod tests {
 
 	/// An update queued behind a pending renewal is decoded on arrival, so a session-fatal one
 	/// still closes the session when the peer withdraws before the queue drains.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_queued_malformed_update_is_fatal_despite_a_withdrawal() {
 		const VERSION: Version = Version::Draft18;
 		let queued = {
@@ -11998,7 +11856,7 @@ mod tests {
 
 	/// An announcing peer's token grant is checked on its `publish` patterns: a read-only grant
 	/// does not admit a PUBLISH_NAMESPACE, a write-only one does.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_announce_token_needs_a_publish_grant() {
 		const VERSION: Version = Version::Draft18;
 		let read_only = crate::auth::Grant {
@@ -12052,7 +11910,7 @@ mod tests {
 
 	/// The additive constraint: a token-LESS PUBLISH_NAMESPACE on a no-auth session (None union)
 	/// is admitted by the origin model exactly as before; the token path is never entered.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_token_less_request_on_a_no_auth_session_is_unchanged() {
 		const VERSION: Version = Version::Draft18;
 		let (mut subscriber, _requests, consumer, session) = auth_announce_harness_no_ext(VERSION, None);
@@ -12738,7 +12596,7 @@ mod stitch_tests {
 	/// The tail is read first, so it has to wait for the head rather than start a group of
 	/// its own: with newest-first group order the publisher can prioritize the tail's stream
 	/// ahead of the fill's.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_fill_and_its_tail_stitch_into_one_group() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -12773,7 +12631,7 @@ mod stitch_tests {
 
 	/// History groups finish at the next group's header; only the newest head waits
 	/// for the live tail. A gap in group numbering is not a missing object.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_multi_group_fill_finishes_history_before_stitching_the_tail() {
 		let history: &[&[u8]] = &[b"history"];
 		let head: &[&[u8]] = &[b"head"];
@@ -12816,7 +12674,7 @@ mod stitch_tests {
 
 	/// Cancelling an update fill in a partial payload releases its tail without
 	/// cancelling the live subscription: its next whole group still arrives.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn cancelling_an_update_fill_does_not_park_the_live_tail() {
 		const UPDATE: RequestId = RequestId(99);
 		let h = Harness::new(
@@ -12841,7 +12699,7 @@ mod stitch_tests {
 			assert!(futures::poll!(filling.as_mut()).is_pending());
 		}
 		let mut tail = h.stream().await;
-		let result = moq_clock::timeout(Duration::from_secs(1), h.subscriber.clone().recv_group(&mut tail))
+		let result = kio::clock::timeout(Duration::from_secs(1), h.subscriber.clone().recv_group(&mut tail))
 			.await
 			.expect("cancelled fill left its tail parked");
 		result.expect("the live tail still supports passthrough delivery");
@@ -12857,7 +12715,7 @@ mod stitch_tests {
 	/// A tail parked on its head stops holding the end open, so the finished fill does until
 	/// the head is claimed: otherwise the subscription looks settled between the fill
 	/// finishing and the tail waking, and ends before the tail is read.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unclaimed_fill_holds_the_end_open() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -13035,7 +12893,6 @@ mod stitch_tests {
 				range_filters: false,
 				fill_timeout: false,
 				properties_wanted: true,
-				epoch: None,
 			}
 			.encode_msg(&mut Encoder::new(&mut body, egress.into()), egress)
 			.unwrap();
@@ -13056,7 +12913,6 @@ mod stitch_tests {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
-				epoch: None,
 			}
 			.encode_msg(&mut Encoder::new(&mut body, egress.into()), egress)
 			.unwrap();
@@ -13066,7 +12922,7 @@ mod stitch_tests {
 			.await
 			.unwrap();
 		publisher
-			.handle_stream(id, ietf::Body(body.into()), stream, false)
+			.handle_stream(id, ietf::Body(body.into()), stream)
 			.unwrap()
 			.await;
 		let mut streams = std::collections::BTreeMap::<usize, Vec<u8>>::new();
@@ -13097,7 +12953,7 @@ mod stitch_tests {
 		relay_passthrough(script, ingress, egress, None).await
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_preserves_object_properties_through_dispatch() {
 		for version in [Version::Draft22] {
 			let mut script = Vec::new();
@@ -13133,7 +12989,7 @@ mod stitch_tests {
 	/// A relayed Timestamp leaves in the units the publisher declared: the cache holds the
 	/// track on the publisher's grid, so a copy of the same instance over another route
 	/// matches it, including across a moq-lite hop that negotiated the `ietf` extension.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_keeps_the_publishers_timestamp_units() {
 		let version = Version::Draft22;
 		// Timestamp 42 (ms), then an unknown property that must survive beside it.
@@ -13191,7 +13047,7 @@ mod stitch_tests {
 		bytes
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_fetch_requires_marked_gaps_and_preserves_fields() {
 		for version in [Version::Draft22] {
 			for marked in [false, true] {
@@ -13249,7 +13105,7 @@ mod stitch_tests {
 
 	/// A relayed FETCH ends its answer at the last frame rather than carrying the
 	/// END_OF_GROUP object, and the next relay fills its cache from that answer.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_fetch_ends_at_the_last_frame() {
 		for version in [Version::Draft22] {
 			let objects = [
@@ -13289,7 +13145,7 @@ mod stitch_tests {
 
 	/// Only a Normal object may carry properties: a status object with them is refused on
 	/// ingest.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_keeps_properties_off_status_objects() {
 		for version in [Version::Draft22] {
 			for status in [END_OF_GROUP, END_OF_TRACK] {
@@ -13306,7 +13162,7 @@ mod stitch_tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_refuses_contradictory_gap_properties() {
 		for properties in [vec![0x3e, 2], vec![0x3e, 3], vec![0x3e, 1, 0, 1]] {
 			let script = object_stream(VERSION, true, &[(0, &[], None), (2, &properties, None)]);
@@ -13319,7 +13175,7 @@ mod stitch_tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_fetch_ingest_keeps_marked_gaps_and_stitches_its_tail() {
 		for version in [Version::Draft22] {
 			let mut objects = Vec::new();
@@ -13385,7 +13241,7 @@ mod stitch_tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_preserves_ids_first_object_and_end_status() {
 		for version in [Version::Draft22] {
 			for first in [false, true] {
@@ -13415,7 +13271,7 @@ mod stitch_tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_preserves_immutable_bytes() {
 		for ingress in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut inner = Vec::new();
@@ -13444,7 +13300,7 @@ mod stitch_tests {
 	/// dropped on its way to draft 22 when mutable, and refused when sealed, through a
 	/// moq-lite hop too: drafts 18 and 22 serialize a block alike, so only the track's
 	/// carried ingress draft tells them apart.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_keeps_0x06_from_crossing_to_draft_22() {
 		let (ingress, egress) = (Version::Draft18, Version::Draft22);
 		// 0x06 = 42 and 0x20 = 7, mutable.
@@ -13475,7 +13331,7 @@ mod stitch_tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_preserves_datagram_objects_through_dispatch() {
 		// Also through a second relay behind a moq-lite hop with the `ietf` extension.
 		for (version, ranged, hop) in [Version::Draft22]
@@ -13563,7 +13419,6 @@ mod stitch_tests {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
-				epoch: None,
 			};
 			let mut body = Vec::new();
 			subscribe
@@ -13573,7 +13428,7 @@ mod stitch_tests {
 				.await
 				.unwrap();
 			publisher
-				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream, false)
+				.handle_stream(ietf::Subscribe::ID, ietf::Body(body.into()), stream)
 				.unwrap()
 				.await;
 			let sent = downstream.log.datagrams.lock().unwrap();
@@ -13589,7 +13444,7 @@ mod stitch_tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_translates_mutable_property_encodings() {
 		for ingress in [Version::Draft22] {
 			let mut properties = Vec::new();
@@ -13615,7 +13470,7 @@ mod stitch_tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_accepts_nonzero_first_objects_and_gaps() {
 		for version in [Version::Draft22] {
 			let mut script = Vec::new();
@@ -13644,7 +13499,7 @@ mod stitch_tests {
 	}
 
 	/// Relays retain a datagram's Object ID; a plain reader skips it until object 0 arrives.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn passthrough_accepts_datagrams_past_object_zero() {
 		let version = Version::Draft22;
 		let mut h = Harness::with_timescale(Fill::Done, vec![], None);
@@ -13682,7 +13537,7 @@ mod stitch_tests {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_overflowing_object_id_reaches_session_teardown() {
 		let mut bytes = tail_stream(SEQUENCE, 0, &[b"head"]);
 		crate::coding::Encoder::new(&mut bytes, VERSION.into())
@@ -13698,7 +13553,7 @@ mod stitch_tests {
 	}
 
 	/// A subgroup 1 stream costs only itself: the track's subgroup 0 stream still arrives.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_non_zero_subgroup_leaves_the_track_flowing() {
 		let mut refused = Vec::new();
 		ietf::GroupHeader {
@@ -13735,7 +13590,7 @@ mod stitch_tests {
 	/// 2 is subgroup 2: refused like an explicit one, never taken as subgroup 0, even when the
 	/// rest of that object is cut off. A compact stream with no objects names no subgroup and
 	/// is subgroup 0.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_compact_non_zero_subgroup_is_refused() {
 		for version in [Version::Draft22] {
 			let compact = |sequence: u64, first: Option<u64>| {
@@ -13826,7 +13681,7 @@ mod stitch_tests {
 	}
 
 	/// A truncated property inside a later object's extension block is a malformed group.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_malformed_extension_block_is_refused() {
 		// Delta 0, then a 1-byte extension block holding half of a 2-byte varint.
 		let mut stream = tail_stream(SEQUENCE, 0, &[b"ok"]);
@@ -13836,14 +13691,14 @@ mod stitch_tests {
 	}
 
 	/// A FIN before the declared payload ends.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_payload_cut_short_is_refused() {
 		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &[0, 4], &[1, 2])], None);
 		h.dispatch_refused().await;
 	}
 
 	/// A declared object size past what a group may hold.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_oversized_frame_is_refused() {
 		let size = crate::group::MAX_CACHE_BYTES + 1;
 		let h = Harness::with_timescale(Fill::Done, vec![raw_stream(SEQUENCE, &[0, size], &[])], None);
@@ -13851,7 +13706,7 @@ mod stitch_tests {
 	}
 
 	/// A second stream for a group the track already holds.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_second_stream_for_a_group_is_refused() {
 		let whole = raw_stream(SEQUENCE, &[0, 1], &[42]);
 		let h = Harness::with_timescale(Fill::Done, vec![whole.clone(), whole], None);
@@ -13860,7 +13715,7 @@ mod stitch_tests {
 		h.dispatch_refused().await;
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn object_extension_limit() {
 		for size in [65536usize, 65537] {
 			for first in [true, false] {
@@ -13934,7 +13789,7 @@ mod stitch_tests {
 
 	/// A fill object without a Timestamp on a timed track ends the track, as a subgroup
 	/// object does: the fill is the head of a group the subscription carries.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unstamped_fill_object_ends_the_track() {
 		use futures::FutureExt;
 
@@ -13971,7 +13826,7 @@ mod stitch_tests {
 
 	/// A subgroup object without a Timestamp on a timed track makes the whole track
 	/// malformed, so the track ends rather than only its group.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unstamped_subgroup_object_ends_the_track() {
 		use futures::FutureExt;
 
@@ -14002,7 +13857,7 @@ mod stitch_tests {
 	}
 
 	/// END_OF_TRACK after a group's last object ends the track right after that group.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_end_of_track_after_a_group_ends_the_track_after_it() {
 		let h = Harness::new(
 			Fill::Done,
@@ -14026,7 +13881,7 @@ mod stitch_tests {
 		assert!(consumer.recv_group().await.unwrap().is_none(), "then the track ends");
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_standalone_end_of_track_preserves_a_nonzero_object() {
 		let mut marker = tail_stream(5, 5, &[]);
 		for value in [5u64, 0, 0, END_OF_TRACK] {
@@ -14045,7 +13900,7 @@ mod stitch_tests {
 
 	/// A group at or past the end an END_OF_TRACK declared contradicts that end, which no
 	/// later stream can repair, so the whole track fails rather than ending clean without it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_group_past_the_declared_end_aborts_the_track() {
 		use futures::FutureExt;
 
@@ -14063,7 +13918,7 @@ mod stitch_tests {
 
 	/// END_OF_TRACK at object 0 says the group does not exist, so the track ends before it
 	/// and no group is created for it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_end_of_track_at_object_zero_creates_no_group() {
 		let h = Harness::new(
 			Fill::Done,
@@ -14078,7 +13933,7 @@ mod stitch_tests {
 
 	/// The group ended exactly where we joined it, so the subscription's stream carries no
 	/// objects at all. That still ends the group, which is what publishes the head.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_empty_tail_finishes_the_filled_group() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14103,7 +13958,7 @@ mod stitch_tests {
 	/// A fill that ends without the head it owed settles before the mid-group tail arrives.
 	/// The tail then has a hole at the front, so it is dropped as it would be had it waited
 	/// on the fill, rather than cached as a whole group starting at its first object.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_headless_tail_after_the_fill_settles_is_dropped() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14131,7 +13986,7 @@ mod stitch_tests {
 
 	/// The same headless tail arriving first waits on the fill, and is dropped once the fill
 	/// ends without the head.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_headless_tail_before_the_fill_settles_is_dropped() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14161,7 +14016,7 @@ mod stitch_tests {
 
 	/// A subscription that requested no head was owed none, so a stream starting mid-group
 	/// still stands alone.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_mid_group_stream_without_a_fill_stands_alone() {
 		let h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 2, &[b"tail-2"])]);
 		let mut consumer = h.track.subscribe(None);
@@ -14177,7 +14032,7 @@ mod stitch_tests {
 	/// cannot reach a producer the fetch stream still owns. The handoff has to settle it, or
 	/// the head outlives the subscription unfinished and a consumer blocks on it. It is
 	/// cancelled rather than finished, since nothing says the group ended there.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_head_finishing_after_teardown_is_cancelled_not_installed() {
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
@@ -14203,7 +14058,7 @@ mod stitch_tests {
 	/// A joining FETCH whose request fails while its stream is still writing has already
 	/// dropped the headless tail, so a head landing afterwards is cancelled, not installed
 	/// for a tail that is gone.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_head_finishing_after_its_fill_failed_is_cancelled() {
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
@@ -14231,7 +14086,7 @@ mod stitch_tests {
 	/// A joining FETCH is not in PUBLISH_DONE's Stream Count, so the subscription can end
 	/// cleanly after its request failed and its headless tail was dropped, with the head
 	/// still writing. That head is cancelled when it lands, not published as the whole group.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_clean_end_keeps_a_failed_fill_terminal() {
 		let track = track::Producer::new(
 			std::sync::Arc::new(crate::broadcast::Info::default()),
@@ -14260,7 +14115,7 @@ mod stitch_tests {
 	/// Widening updates replaced fills that failed to head this group and the next, and the
 	/// current fill has settled. A mid-group tail at or below the last failed group is still
 	/// headless, so it is dropped, while a whole group there stands alone.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_headless_tail_after_its_fill_was_replaced_is_dropped() {
 		let h = Harness::new(
 			Fill::Done,
@@ -14290,7 +14145,7 @@ mod stitch_tests {
 	/// Leaving a track while its head waits for the tail cancels that group rather than
 	/// finishing it: the group may still be open upstream, and a finished copy would cut it
 	/// short for a rejoin.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unclaimed_head_is_cancelled_when_the_subscription_goes() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14308,7 +14163,7 @@ mod stitch_tests {
 	}
 
 	/// Closing locally cancels a filled head whose live tail never arrived.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unclaimed_head_is_cancelled_when_the_session_closes() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14333,7 +14188,7 @@ mod stitch_tests {
 	/// A publisher that serves a head and then opens a whole group for the same sequence
 	/// has contradicted its own fill. The model holds one producer per group, so the
 	/// duplicate stream and unfinished head are refused without caching a cut group.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_whole_group_for_a_headed_sequence_is_refused() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14360,7 +14215,7 @@ mod stitch_tests {
 	/// A fill head parked waiting for its tail is still a live group producer. Dropping the
 	/// session has to end it, or the consumer waits on a group nobody will ever write again.
 	/// The guard is `State`'s own `Drop`, so it runs however the driver was torn down.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_cancelled_session_aborts_a_waiting_fill_head() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14386,7 +14241,7 @@ mod stitch_tests {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn session_death_keeps_a_waiting_fill_heads_resume_position() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14418,7 +14273,7 @@ mod stitch_tests {
 	/// group lands before the fill has written its head. The model holds one producer per
 	/// live sequence, so the fill loses the race to create it and gives up, rather than a
 	/// second producer appearing and the objects being delivered twice.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_whole_group_that_precedes_the_head_wins_the_sequence() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14449,7 +14304,7 @@ mod stitch_tests {
 	}
 
 	/// A standalone subgroup tail keeps its identity while plain readers see its payload.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_tail_without_a_fill_is_preserved() {
 		let h = Harness::new(Fill::Done, vec![tail_stream(SEQUENCE, 2, &[b"tail-2"])]);
 		let mut consumer = h.track.subscribe(None);
@@ -14461,7 +14316,7 @@ mod stitch_tests {
 	/// Object IDs are absolute whatever FIRST_OBJECT says, and they start at 0, so a
 	/// draft-18 stream that leaves the bit clear and starts at object 0 is the whole
 	/// group. The publisher is out of spec on the bit, not missing a head.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_clear_first_object_at_zero_delivers_the_group() {
 		let bytes = draft18_subgroup(SEQUENCE, false, 0, &[b"whole", b"next"]);
 		assert_eq!(
@@ -14486,7 +14341,7 @@ mod stitch_tests {
 
 	/// The END_OF_GROUP header bit only lets a FIN imply the group's end, so an explicit
 	/// END_OF_GROUP status on the same stream ends the group there rather than failing it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_end_of_group_status_on_a_marked_stream_finishes_the_group() {
 		use futures::FutureExt;
 
@@ -14514,7 +14369,7 @@ mod stitch_tests {
 	}
 
 	/// FIRST_OBJECT and the starting ID are independent relay metadata.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_clear_first_object_past_zero_is_preserved() {
 		let partial = draft18_subgroup(SEQUENCE, false, 3, &[b"tail-3"]);
 		let whole = draft18_subgroup(SEQUENCE + 1, true, 0, &[b"next"]);
@@ -14545,7 +14400,7 @@ mod stitch_tests {
 
 	/// A received group whose first object rewinds past the group before it is accepted: a
 	/// moq-transport peer may stamp arrival times, so its timed tracks are unchecked.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_received_rewind_is_accepted() {
 		use futures::FutureExt;
 
@@ -14576,7 +14431,7 @@ mod stitch_tests {
 
 	/// A head that stops short of where the tail starts would leave a hole in the middle of
 	/// the group. Refusing it aborts the incomplete group instead of caching a cut prefix.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_head_that_misses_the_tail_is_refused() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14600,7 +14455,7 @@ mod stitch_tests {
 		assert!(matches!(head.read_frame().await, Err(Error::Unsupported)));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn receive_drain_keeps_bound_aliases_and_ends_unknown_alias_waits() {
 		let h = Harness::new(Fill::Done, vec![]);
 		let aliases = h.subscriber.state.lock().aliases.consume();
@@ -14614,7 +14469,7 @@ mod stitch_tests {
 		assert!(matches!(resolve_track_alias(&h.subscriber.runtime, aliases, ALIAS).await, Ok(id) if id == REQUEST));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn receive_drain_ends_a_fill_waiting_for_subscribe_ok() {
 		let h = Harness::new(Fill::Requested, vec![fill_stream(SEQUENCE, &[b"head"])]);
 		let mut stream = h.stream().await;
@@ -14628,7 +14483,7 @@ mod stitch_tests {
 		));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn receive_drain_ends_a_tail_waiting_for_a_missing_fill() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14642,7 +14497,7 @@ mod stitch_tests {
 		assert!(futures::FutureExt::now_or_never(receiving).is_some());
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn receive_drain_preserves_a_buffered_fill_and_tail() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14669,7 +14524,7 @@ mod stitch_tests {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn receive_drain_ends_a_group_fetch_waiting_for_fetch_ok() {
 		let h = Harness::new(Fill::Done, vec![fill_stream(SEQUENCE, &[b"head"])]);
 		h.subscriber
@@ -14690,7 +14545,7 @@ mod stitch_tests {
 
 	/// A fetch stream can arrive before SUBSCRIBE_OK commits the pending track. It waits
 	/// for that response instead of looking up a producer that does not exist yet.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_early_fill_waits_for_subscribe_ok() {
 		let h = Harness::new(Fill::Requested, vec![fill_stream(SEQUENCE, &[b"head-0"])]);
 		{
@@ -14712,7 +14567,7 @@ mod stitch_tests {
 
 	/// A fetch stream answering a subscription that asked for no fill duplicates a group the
 	/// subscription itself is delivering, so it is refused rather than written.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unsolicited_fill_is_refused() {
 		let h = Harness::new(Fill::Done, vec![fill_stream(SEQUENCE, &[b"head-0"])]);
 		let mut fill = h.stream().await;
@@ -14727,7 +14582,7 @@ mod stitch_tests {
 
 	/// A mid-group subscribe stream waits for the joining FETCH's head and stitches onto it,
 	/// the same rendezvous a draft-22 fill uses. The FETCH is named by its own request id.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_joining_fetch_stitches_a_mid_group_tail() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14758,7 +14613,7 @@ mod stitch_tests {
 
 	/// A subscribe stream that starts at object 0 stands alone; the joining FETCH's answer
 	/// is discarded rather than delivered twice.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_whole_group_stream_discards_the_joining_fetch() {
 		let h = Harness::new(
 			Fill::Serving(Some(Timescale::MICRO)),
@@ -14798,7 +14653,7 @@ mod stitch_tests {
 
 	/// A joining FETCH carries the one group its subscription joins, so a second group on
 	/// it is refused rather than published as a head no tail continues.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_joining_fetch_spanning_several_groups_is_refused() {
 		let groups: &[(u64, &[&[u8]])] = &[(9, &[b"g9-0"]), (10, &[b"g10-0"])];
 		let h = Harness::new(
@@ -14815,7 +14670,7 @@ mod stitch_tests {
 
 	/// The first object on a fetch stream has no prior object, so leaving any field to
 	/// the prior one is a violation, not "the requested group, from its start".
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_group_fetch_refuses_a_first_object_that_inherits() {
 		use ietf::FetchSubgroup::{Prior, Zero};
 		let header = |group, object, subgroup, priority| ietf::FetchObject::Object {
@@ -14856,7 +14711,7 @@ mod stitch_tests {
 
 	/// On a timed track every Normal object carries a Timestamp, so one without is
 	/// malformed rather than stamped with its arrival time.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unstamped_object_on_a_timed_track_is_malformed() {
 		let mut run = GroupFetchRun::new(VERSION, group_fetch_objects(SEQUENCE, 0, &[b"a"])).await;
 		let track = track::Producer::new(
@@ -14878,7 +14733,7 @@ mod stitch_tests {
 	/// fails the group instead of caching it. Before draft-22 the End Location also promises
 	/// every object before it, so a stream that FINs short fails too. From draft-22 it is the
 	/// range covered, and the objects missing before it do not exist (section 9.11).
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_group_fetch_stays_within_its_end_location() {
 		const END: u64 = 3;
 		for version in [Version::Draft18, VERSION] {
@@ -14914,7 +14769,7 @@ mod stitch_tests {
 	/// A stream that FINs before the group its End Location bounds, with no objects or after
 	/// an earlier group, is short before draft-22. From draft-22 the bounded group is refused
 	/// for now, since objects past the bound may still be written.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_range_fetch_must_reach_its_bounded_group() {
 		let last = SEQUENCE + 2;
 		for version in [Version::Draft18, VERSION] {
@@ -14953,7 +14808,7 @@ mod stitch_tests {
 					),
 					true => {
 						assert!(res.is_ok(), "{version} empty={empty}: {res:?}");
-						let bounded = moq_clock::timeout(Duration::from_secs(1), bounded)
+						let bounded = kio::clock::timeout(Duration::from_secs(1), bounded)
 							.await
 							.expect("refused");
 						assert!(
@@ -14989,7 +14844,7 @@ mod stitch_tests {
 
 	/// A datagram group is never fetchable, so a group fetch answered with one names it
 	/// dropped as not fetchable, caching nothing, and reads on past its payload.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_group_fetch_drops_a_datagram_group() {
 		let mut run = GroupFetchRun::new(VERSION, datagram_object(SEQUENCE)).await;
 		let (slot, fetch) = run.slot(None, None).await;
@@ -15002,7 +14857,7 @@ mod stitch_tests {
 
 	/// A third-party publisher may answer a range even though ours refuses it. The subscriber
 	/// caches the supplied groups and reports the gaps between them as misses.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_range_fetch_caches_the_groups_with_the_groups_between_dropped() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut objects = group_fetch_objects(4, 0, &[b"4-0", b"4-1"]);
@@ -15039,7 +14894,7 @@ mod stitch_tests {
 				start: 0,
 				end: None,
 			}));
-			let res = moq_clock::timeout(
+			let res = kio::clock::timeout(
 				Duration::from_secs(1),
 				run.subscriber.recv_group_fetch(&mut run.stream, slot),
 			)
@@ -15060,7 +14915,7 @@ mod stitch_tests {
 				assert!(group.read_frame().await.unwrap().is_none(), "{version}");
 			}
 			for fetched in missing {
-				let fetched = moq_clock::timeout(Duration::from_secs(1), fetched)
+				let fetched = kio::clock::timeout(Duration::from_secs(1), fetched)
 					.await
 					.expect("dropped");
 				assert!(
@@ -15074,7 +14929,7 @@ mod stitch_tests {
 
 	/// A fill answered with a datagram Object is refused the same way. Only the fill goes:
 	/// the subscription keeps delivering the groups after it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_datagram_fill_fails_only_the_fill() {
 		let mut fill = Vec::new();
 		crate::coding::Encoder::new(&mut fill, VERSION.into())
@@ -15134,7 +14989,7 @@ mod stitch_tests {
 
 	/// A group aborted under a stalled fetch stream, as by eviction, ends the run with its
 	/// error instead of leaving the run's readers waiting on the stream.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_group_aborted_under_a_stalled_fetch_ends_the_run() {
 		let mut run = GroupFetchRun::stalled(VERSION, group_fetch_objects(SEQUENCE, 0, &[b"0"])).await;
 		let (slot, _fetch) = run.slot(None, None).await;
@@ -15149,7 +15004,7 @@ mod stitch_tests {
 		assert!(matches!(receive.await, Err(Error::Evicted)));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn internal_group_fetch_setup_cancellation_is_cancel() {
 		let mut run = GroupFetchRun::new(VERSION, Vec::new()).await;
 		let slot = kio::Producer::new(GroupFetch::Pending);
@@ -15270,7 +15125,7 @@ mod joining_fetch_tests {
 	const JOINING_DRAFTS: [Version; 1] = [Version::Draft18];
 
 	async fn settle() {
-		moq_clock::sleep(Duration::from_millis(1)).await;
+		kio::clock::sleep(Duration::from_millis(1)).await;
 	}
 
 	fn message_bytes<'m, M: Message<'m>>(id: u64, msg: &M, version: Version) -> Vec<u8> {
@@ -15346,7 +15201,7 @@ mod joining_fetch_tests {
 			kio::Pending<track::Subscribing>,
 		),
 		_tasks: (Tasks, TaskSet),
-		serving: moq_clock::sim::JoinHandle<()>,
+		serving: kio::clock::sim::JoinHandle<()>,
 	}
 
 	impl JoinRun {
@@ -15387,7 +15242,7 @@ mod joining_fetch_tests {
 			let request = dynamic.requested_track().await.expect("no track requested");
 
 			let mut serving_subscriber = subscriber.clone();
-			let serving = moq_clock::sim::spawn(async move {
+			let serving = kio::clock::sim::spawn(async move {
 				serving_subscriber
 					.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
 					.await;
@@ -15523,12 +15378,12 @@ mod joining_fetch_tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn revocation_cancels_a_group_fetch_before_the_subscribe_fin_is_acked() {
 		revoked_child_fetch(false).await;
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn revocation_cancels_an_answered_fetch_before_the_subscribe_fin_is_acked() {
 		revoked_child_fetch(true).await;
 	}
@@ -15536,7 +15391,7 @@ mod joining_fetch_tests {
 	/// From draft 18 the joining FETCH's request stays open after FETCH_OK. Its failure while
 	/// the head is still being written settles the fill, so a mid-group tail is not parked
 	/// on a head that may never finish.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_request_failing_mid_head_settles_the_fill() {
 		let version = Version::Draft18;
 		let session = ScriptedSession::per_stream_reset(vec![fetch_ok(version)]);
@@ -15554,7 +15409,7 @@ mod joining_fetch_tests {
 		assert!(matches!(*fill.read(), Fill::Done), "{version}: the head is released");
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn invalid_joining_open_is_refused() {
 		for version in JOINING_DRAFTS {
 			for retired in [false, true] {
@@ -15582,7 +15437,7 @@ mod joining_fetch_tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_joining_fetch_waits_for_stream_credit() {
 		for version in JOINING_DRAFTS {
 			let session = ScriptedSession::new(Vec::new()).without_credit();
@@ -15601,7 +15456,7 @@ mod joining_fetch_tests {
 
 	/// A committed joining FETCH the peer's send window holds back part-way is reset once
 	/// its subscription lets go, rather than waiting for credit to finish the header.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_joining_fetch_stalled_on_credit_resets_when_cancelled() {
 		for version in JOINING_DRAFTS {
 			let session = ScriptedSession::new(Vec::new()).with_send_window(1);
@@ -15625,7 +15480,7 @@ mod joining_fetch_tests {
 	}
 
 	/// Abandoning a blocked open leaves the next sequential ID available to unrelated work.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn cancelling_a_joining_fetch_open_spends_no_id() {
 		for version in JOINING_DRAFTS {
 			let gate = kio::Producer::new(false);
@@ -15644,7 +15499,7 @@ mod joining_fetch_tests {
 
 	/// Every draft-18 live join is Largest Object on the SUBSCRIBE and a relative
 	/// joining FETCH at offset 0 that names the subscribe's request id.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_live_join_is_spelled_as_largest_object_plus_relative_fetch() {
 		let largest = Some(ietf::Location { group: 4, object: 1 });
 		for version in JOINING_DRAFTS {
@@ -15676,7 +15531,7 @@ mod joining_fetch_tests {
 
 	/// A start below, at, or past the Largest group joins that group alone: a group below it
 	/// is left to the copy's fills.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_join_from_any_start_fetches_only_the_largest_group() {
 		let largest = Some(ietf::Location { group: 9, object: 0 });
 		for version in JOINING_DRAFTS {
@@ -15703,7 +15558,7 @@ mod joining_fetch_tests {
 	/// the Largest group and nothing more, as a failed draft-22 fill does: the fill settles,
 	/// so a stream starting mid-group no longer waits on it, and the subscription keeps
 	/// delivering whole groups.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_refused_fetch_joins_at_the_next_whole_group() {
 		let largest = Some(ietf::Location { group: 4, object: 1 });
 		for version in JOINING_DRAFTS {
@@ -15724,7 +15579,7 @@ mod joining_fetch_tests {
 
 	/// A malformed answer to the joining FETCH is not a refusal: the peer broke the
 	/// protocol, so the session closes.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_malformed_fetch_answer_closes_the_session() {
 		let largest = Some(ietf::Location { group: 4, object: 1 });
 		for version in JOINING_DRAFTS {
@@ -15746,7 +15601,7 @@ mod joining_fetch_tests {
 	/// A joining FETCH is not one of the subscription's counted streams, so a clean
 	/// PUBLISH_DONE can settle while its head is still being written. The head is then the
 	/// whole group, as it is when it lands first, rather than cut short as on a leave.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_head_landing_after_a_clean_end_finishes_its_group() {
 		let largest = Some(ietf::Location { group: 4, object: 0 });
 		for version in JOINING_DRAFTS {
@@ -15800,7 +15655,7 @@ mod joining_fetch_tests {
 			// The grace runs out with the head still being written, ending the subscription.
 			// The finished copy lingers for fills while the reader holds it.
 			while !run.subscriber.state.lock().subscribes.is_empty() {
-				moq_clock::sleep(Duration::from_millis(1)).await;
+				kio::clock::sleep(Duration::from_millis(1)).await;
 			}
 			assert!(!run.serving.is_finished(), "{version}: the finished copy lingers");
 
@@ -15818,7 +15673,7 @@ mod joining_fetch_tests {
 	/// for a later reader to subscribe afresh rather than lingering as if the track ended. Its
 	/// reader sees an error, not a clean end: the fresh copy's groups continue past this one's,
 	/// so an end here would be one the track runs past.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_subscription_ended_copy_does_not_linger() {
 		for version in JOINING_DRAFTS {
 			let mut ok = subscribe_ok(version, None);
@@ -16042,35 +15897,35 @@ mod joining_fetch_tests {
 		assert!(subscriber.state.lock().group_fetches.is_empty(), "request retired");
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_retired_group_fetch_before_fetch_ok_is_cancelled() {
 		for version in JOINING_DRAFTS {
 			abandon_group_fetch(version, FetchStage::Retired).await;
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_abandoned_group_fetch_before_fetch_ok_is_cancelled() {
 		for version in JOINING_DRAFTS {
 			abandon_group_fetch(version, FetchStage::Unanswered).await;
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_abandoned_group_fetch_after_fetch_ok_is_cancelled() {
 		for version in JOINING_DRAFTS {
 			abandon_group_fetch(version, FetchStage::Accepted).await;
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_abandoned_partial_group_fetch_is_cancelled() {
 		for version in JOINING_DRAFTS {
 			abandon_group_fetch(version, FetchStage::Receiving).await;
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_complete_group_fetch_is_cached_when_the_reader_leaves() {
 		for version in JOINING_DRAFTS {
 			abandon_group_fetch(version, FetchStage::Complete).await;
@@ -16078,14 +15933,14 @@ mod joining_fetch_tests {
 	}
 
 	/// A request reset after the group is written must not abort the cached group.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_complete_group_fetch_survives_a_request_reset() {
 		for version in JOINING_DRAFTS {
 			abandon_group_fetch(version, FetchStage::CompleteReset).await;
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_claimed_fetch_waits_only_while_wanted() {
 		for version in JOINING_DRAFTS {
 			for stage in [FetchStage::Credit, FetchStage::CreditRetired, FetchStage::CreditGranted] {
@@ -16097,7 +15952,7 @@ mod joining_fetch_tests {
 	/// A publisher that resets the request after FETCH_OK owes no fetch stream, so the
 	/// group it accepted is aborted instead of left open for every reader to wait on.
 	/// Without that, `run_group_fetch` never returns.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_group_fetch_reset_after_fetch_ok_aborts_the_group() {
 		const VERSION: Version = Version::Draft18;
 		const GROUP: u64 = 4;
@@ -16152,7 +16007,7 @@ mod joining_fetch_tests {
 
 	/// From draft-22 an End Location outside the FETCH's range is malformed:
 	/// the session closes with PROTOCOL_VIOLATION rather than reading it as an empty answer.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_draft22_end_location_outside_the_range_closes_the_session() {
 		const GROUP: u64 = 4;
 		const START: u64 = 3;
@@ -16235,7 +16090,7 @@ mod joining_fetch_tests {
 
 	/// A cache miss for a group's tail asks upstream from the frame the reader wants and
 	/// numbers what arrives from there, so a publisher that evicted the prefix can answer.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_group_fetch_asks_from_the_wanted_frame() {
 		for version in JOINING_DRAFTS.into_iter().chain([Version::Draft22]) {
 			for ended in [false, true] {
@@ -16245,7 +16100,7 @@ mod joining_fetch_tests {
 	}
 
 	/// Legacy moxygen/cache answers one group past the requested group remain readable.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_legacy_group_fetch_answer_still_covers_the_requested_group() {
 		for version in JOINING_DRAFTS {
 			for ended in [false, true] {
@@ -16342,7 +16197,7 @@ mod joining_fetch_tests {
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
 		let request = dynamic.requested_fill().await.expect("no group requested");
 
-		let serving = moq_clock::sim::spawn(subscriber.clone().run_group_fetch(
+		let serving = kio::clock::sim::spawn(subscriber.clone().run_group_fetch(
 			Path::from_static("broadcast"),
 			"video".into(),
 			request,
@@ -16415,7 +16270,7 @@ mod new_group_tests {
 	use crate::{model::ProduceTest, transport::memory};
 
 	async fn settle() {
-		moq_clock::sleep(Duration::from_millis(1)).await;
+		kio::clock::sleep(Duration::from_millis(1)).await;
 	}
 
 	const VERSION: Version = Version::Draft22;
@@ -16426,7 +16281,7 @@ mod new_group_tests {
 		track: track::Consumer,
 		probe: Subscriber,
 		peer: memory::Session,
-		serving: moq_clock::sim::JoinHandle<()>,
+		serving: kio::clock::sim::JoinHandle<()>,
 		/// Landed groups stay open, as a live publisher's would.
 		landed: Vec<group::Producer>,
 		_broadcast: crate::broadcast::Producer,
@@ -16456,7 +16311,7 @@ mod new_group_tests {
 		let first = track.subscribe(None);
 		let request = dynamic.requested_track().await.expect("no track requested");
 		let probe = subscriber.clone();
-		let serving = moq_clock::sim::spawn(async move {
+		let serving = kio::clock::sim::spawn(async move {
 			subscriber
 				.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
 				.await;
@@ -16478,7 +16333,7 @@ mod new_group_tests {
 			let id = stream.reader.varint().await.unwrap();
 			(id, stream.reader.decode::<ietf::Body>().await.unwrap())
 		};
-		moq_clock::timeout(Duration::from_secs(1), read)
+		kio::clock::timeout(Duration::from_secs(1), read)
 			.await
 			.expect("the relay sent nothing")
 	}
@@ -16570,7 +16425,7 @@ mod new_group_tests {
 
 	/// A copy with nothing cached has no group to judge a join by, so its SUBSCRIBE asks for
 	/// none.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_first_subscribe_asks_for_no_group() {
 		let (mut relay, _first) = relay().await;
 		let (_stream, sent) = relay.accept().await;
@@ -16580,7 +16435,7 @@ mod new_group_tests {
 
 	/// A join over the ratio goes upstream in a REQUEST_UPDATE for the group past the
 	/// newest. Joins until that group lands ask for the same one and go no further.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_join_over_the_ratio_requests_a_group() {
 		let (mut relay, _first) = relay().await;
 		let (mut stream, _) = relay.accept().await;
@@ -16602,7 +16457,7 @@ mod new_group_tests {
 	}
 
 	/// A join under the ratio reads the current group and asks for nothing.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_join_under_the_ratio_asks_nothing() {
 		let (mut relay, _first) = relay().await;
 		let (mut stream, _) = relay.accept().await;
@@ -16615,7 +16470,7 @@ mod new_group_tests {
 	}
 
 	/// One REQUEST_UPDATE is in flight at a time; a join meanwhile goes up once it is answered.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_join_behind_an_unanswered_update_waits() {
 		let (mut relay, _first) = relay().await;
 		let (mut stream, _) = relay.accept().await;
@@ -16637,7 +16492,7 @@ mod new_group_tests {
 
 	/// A refused update ends the subscription, so nothing more goes up while PUBLISH_DONE
 	/// is on its way, even for a join that waited behind it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_refused_update_sends_no_more() {
 		let (mut relay, _first) = relay().await;
 		let (mut stream, _) = relay.accept().await;
@@ -16664,7 +16519,7 @@ mod new_group_tests {
 
 	/// A group the publisher already has is on its way, so a join asking for it goes no
 	/// further.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_group_upstream_has_is_not_requested() {
 		let (mut relay, _first) = relay().await;
 		let (mut stream, _) = relay.accept().await;
@@ -16678,7 +16533,7 @@ mod new_group_tests {
 
 	/// A publisher that did not advertise DYNAMIC_GROUPS refreshes on no join, so it never
 	/// hears a REQUEST_UPDATE carrying one.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_publisher_without_dynamic_groups_hears_no_updates() {
 		let (mut relay, _first) = relay().await;
 		let (mut stream, _) = relay.accept().await;
@@ -16692,7 +16547,7 @@ mod new_group_tests {
 
 	/// A group still wanted when the copy goes idle rides the SUBSCRIBE that resumes it, and
 	/// is outstanding from there.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_resumed_copy_carries_its_request() {
 		let (mut relay, first) = relay().await;
 		let (mut stream, _) = relay.accept().await;
@@ -16716,7 +16571,7 @@ mod new_group_tests {
 
 	/// An identified fill keeps ownership until its head is handed off. A fill with no
 	/// header can instead be superseded, since a reset may have discarded that header.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn only_an_identified_fill_holds_back_a_widening() {
 		let (mut relay, mut first) = relay().await;
 		let (mut stream, _) = relay.accept().await;
@@ -16757,7 +16612,7 @@ mod new_group_tests {
 
 	/// Delayed headers, including one already waiting for REQUEST_OK, belong to the
 	/// request they answer and cannot consume a later widening's fill.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn superseded_fill_headers_cannot_claim_the_new_request() {
 		use crate::{coding::Encode, lite::test_transport::ScriptedSession};
 
@@ -16841,7 +16696,7 @@ mod new_group_tests {
 	/// A widening update replaces a fill that failed to head its group, while that group's
 	/// mid-group tail can still be in flight. The tail stays headless both to a stream
 	/// already opening on the old fill and to one opening after either replacement.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_replaced_failed_fill_keeps_its_group_headless() {
 		use crate::{coding::Encode, lite::test_transport::ScriptedSession};
 
@@ -16956,7 +16811,7 @@ mod track_property_tests {
 		let subscribing = track.subscribe(None);
 		let request = dynamic.requested_track().await.expect("no track requested");
 		let probe = subscriber.clone();
-		let serving = moq_clock::sim::spawn(async move {
+		let serving = kio::clock::sim::spawn(async move {
 			subscriber
 				.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
 				.await;
@@ -16986,10 +16841,10 @@ mod track_property_tests {
 		frame.extend(body);
 		stream.writer.write_all(&mut bytes::Bytes::from(frame)).await.unwrap();
 
-		let subscribed = moq_clock::timeout(Duration::from_secs(1), subscribing)
+		let subscribed = kio::clock::timeout(Duration::from_secs(1), subscribing)
 			.await
 			.expect("the subscription was never answered");
-		moq_clock::sleep(Duration::from_millis(1)).await;
+		kio::clock::sleep(Duration::from_millis(1)).await;
 		serving.abort();
 		(subscribed, probe)
 	}
@@ -17013,7 +16868,7 @@ mod track_property_tests {
 	/// An even property the draft defines but moq-net does not implement
 	/// (OBJECT_DELIVERY_TIMEOUT) and an odd one from the application range reach the track
 	/// unchanged, for the relay's own answers downstream to forward.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn unknown_properties_reach_the_track() {
 		for version in VERSIONS {
 			let unknown = vec![
@@ -17040,7 +16895,7 @@ mod track_property_tests {
 
 	/// A Mandatory Track Property we do not understand, mutable or sealed, refuses the
 	/// track with UNSUPPORTED_EXTENSION instead of forwarding it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_mandatory_property_refuses_the_track() {
 		for version in VERSIONS {
 			let mandatory = Property {
@@ -17068,7 +16923,7 @@ mod track_property_tests {
 
 	/// A sealed DEFAULT_PUBLISHER_GROUP_ORDER is advisory: the relay accepts the track, serves
 	/// its own order, and keeps the sealed block to forward unchanged.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_sealed_group_order_the_relay_does_not_serve_is_accepted() {
 		for version in VERSIONS {
 			for order in [2, 1] {
@@ -17099,7 +16954,7 @@ mod track_property_tests {
 
 	/// A TIMESCALE keeps the publisher's units, mutable or sealed: a sealed one travels
 	/// downstream unchanged, and a mutable one matches a copy that arrived over another route.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_timescale_keeps_its_units() {
 		for version in VERSIONS {
 			let timescale = Property {
@@ -17126,7 +16981,7 @@ mod full_track_name_tests {
 
 	/// A Full Track Name too long for the wire fails only its own subscription, and the
 	/// session carries the next one.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unencodable_track_name_fails_only_its_subscription() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let (session, peer) = memory::pair(memory::Config::default());
@@ -17153,7 +17008,7 @@ mod full_track_name_tests {
 				let mut subscribing = std::pin::pin!(track.subscribe(None));
 				let request = dynamic.requested_track().await.expect("no track requested");
 				let mut subscriber = subscriber.clone();
-				let serving = moq_clock::sim::spawn(async move {
+				let serving = kio::clock::sim::spawn(async move {
 					subscriber
 						.run_subscribe(Path::from_static("broadcast"), dynamic, None, request)
 						.await;
@@ -17170,7 +17025,7 @@ mod full_track_name_tests {
 					};
 					assert_eq!(id, ietf::Subscribe::ID, "{version}");
 				} else {
-					let refused = moq_clock::timeout(Duration::from_secs(1), &mut subscribing)
+					let refused = kio::clock::timeout(Duration::from_secs(1), &mut subscribing)
 						.await
 						.expect("the subscription was never refused");
 					assert!(
