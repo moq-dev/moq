@@ -6068,8 +6068,8 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	);
 }
 
-/// Zero is a real setting for these two, not "unset": retry forever, and no
-/// keep-alive pings. The flag is what carries that distinction.
+/// Presence flags preserve explicit zero durations; backoff zero retries forever,
+/// while keep-alive zero resolves to the derived interval.
 #[test]
 fn zero_with_a_flag_set_is_a_real_value() {
 	let mut config = client_config();
