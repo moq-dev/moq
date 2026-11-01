@@ -10028,7 +10028,7 @@ mod serve_tests {
 
 	/// A cold copy's frame zero retains the upstream Object ID, so a Next Object floor
 	/// compares wire IDs rather than discarding that many locally received frames.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_cold_reported_copy_serves_its_first_wire_object() {
 		for version in [Version::Draft18, Version::Draft22] {
 			for streamed in [false, true] {
