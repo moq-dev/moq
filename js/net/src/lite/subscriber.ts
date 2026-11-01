@@ -1361,8 +1361,9 @@ export class Subscriber {
 		}
 	}
 
-	// Resolve the track's timescale, then open the FETCH stream and wait for it to be accepted.
-	// Closing the group during that wait resets the stream.
+	// Open the FETCH stream alongside the TRACK stream that says the track's timescale, and wait
+	// for both: the response waits unread in its stream until the timescale lands. Closing the
+	// group during that wait resets the stream, and a failed TRACK_INFO fails the fetch.
 	async #fetchSetup(
 		broadcast: Path.Valid,
 		consumed: Consumed,
@@ -1381,29 +1382,41 @@ export class Subscriber {
 		// Only the properties are needed, so the TRACK stream closes however the wait ends.
 		answered.then(
 			({ stream }) => stream.close(),
-			() => {},
+			(err: unknown) => cancel.abort(error(err)),
 		);
-		const { info } = await untilClosed(group, answered);
-		return this.#exchange(
-			{ sendOrder: sendOrder({ priority }), version: this.version },
-			async (stream) => {
-				await stream.writer.u53(StreamId.Fetch);
-				await new FetchMessage({
-					broadcast,
-					epoch,
-					track,
-					priority,
-					maxDelay: hasFetchMaxDelay(this.version) ? maxDelay : undefined,
-					group: sequence,
-				}).encode(stream.writer, this.version);
-				// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
-				// done() buffers that byte so the response pump can decode it normally.
-				await untilClosed(group, stream.reader.done());
-				return { stream, info };
-			},
-			signal,
-			deadline,
-		);
+		let stream: Stream;
+		try {
+			stream = await this.#exchange(
+				{ sendOrder: sendOrder({ priority }), version: this.version },
+				async (stream) => {
+					await stream.writer.u53(StreamId.Fetch);
+					await new FetchMessage({
+						broadcast,
+						epoch,
+						track,
+						priority,
+						maxDelay: hasFetchMaxDelay(this.version) ? maxDelay : undefined,
+						group: sequence,
+					}).encode(stream.writer, this.version);
+					// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
+					// done() buffers that byte so the response pump can decode it normally.
+					await untilClosed(group, stream.reader.done());
+					return stream;
+				},
+				signal,
+				deadline,
+			);
+		} catch (err: unknown) {
+			cancel.abort(error(err));
+			throw err;
+		}
+		try {
+			const { info } = await untilClosed(group, answered);
+			return { stream, info };
+		} catch (err: unknown) {
+			stream.abort(error(err));
+			throw err;
+		}
 	}
 
 	// Read the FETCH response (bare frames, zigzag-delta-timestamped unless `timescale` is 0)

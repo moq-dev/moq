@@ -63,6 +63,14 @@ pub enum Error {
 	#[error("rtc error: {0}")]
 	Rtc(String),
 
+	/// A capped WHIP publisher sent media past its cap plus burst, ignoring the steering
+	/// toward it. `cap` is the sustained rate it exceeded.
+	#[error("media exceeded the {} bps cap plus burst", cap.as_bps())]
+	RateLimited {
+		/// The cap's sustained rate.
+		cap: moq_net::bandwidth::Rate,
+	},
+
 	/// An internal video bridge could not be initialized.
 	#[error("video bridge initialization failed")]
 	BridgeFailed,
