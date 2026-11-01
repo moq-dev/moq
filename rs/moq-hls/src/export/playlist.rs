@@ -6,7 +6,7 @@
 //! (`/<broadcast>/<kind>/<rendition>/media.m3u8`), so they resolve against the rendition
 //! directory.
 
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::fmt::Write;
 use std::sync::Arc;
 use std::time::Duration;

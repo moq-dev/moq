@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_mux::container::Read as Encoded;
 use std::time::Duration;
 
@@ -12,6 +12,7 @@ use super::decoder::{Config, Decoder};
 use crate::jitter::{self, Target};
 use crate::resample::{Remix, Resampler};
 use crate::{Activity, Error, Format, Frame, Layout};
+pub use moq_mux::container::Delay;
 
 /// One item of a [`Consumer`] read, in delivery order: decoded PCM, or a break in it.
 ///
@@ -69,24 +70,38 @@ pub struct Output {
 }
 
 /// Subscription, decoder, and output policy for [`Consumer`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Options {
 	/// Low-level decoder configuration.
 	pub decoder: Config,
 	/// PCM output conversion.
 	pub output: Output,
-	/// How far a group may fall behind the live edge before the subscription skips it.
-	pub max_delay: std::time::Duration,
+	/// How far behind the live edge playback runs.
+	///
+	/// [`Delay::min`] is the playout delay: the jitter buffer a player holds ahead of the
+	/// playhead, reported by [`Consumer::delay`], and where a cold join starts. With
+	/// [`estimate`](Self::estimate) it is a floor under the measured delay instead. A `min`
+	/// beyond the track's retention is refused. [`Delay::max`] is how far a group may fall
+	/// behind the live edge before the subscription skips it; it adds no buffering.
+	pub delay: Delay,
+	/// Measure the playout delay from arrival timing, never below [`Delay::min`] (default:
+	/// `true`). `false` holds exactly `delay.min`.
+	pub estimate: bool,
 	/// Initial cached-group policy.
 	pub start: Start,
-	/// A fixed playout delay, or `None` to estimate it from arrival timing.
-	///
-	/// The jitter buffer a player holds ahead of the playhead, reported by
-	/// [`Consumer::delay`]. Distinct from [`max_delay`](Self::max_delay), which is
-	/// the live-edge skip budget and adds no buffering. A fixed delay beyond the
-	/// track's retention is refused.
-	pub delay: Option<Duration>,
+}
+
+impl Default for Options {
+	fn default() -> Self {
+		Self {
+			decoder: Config::default(),
+			output: Output::default(),
+			delay: Delay::default(),
+			estimate: true,
+			start: Start::default(),
+		}
+	}
 }
 
 impl Options {
@@ -181,7 +196,7 @@ impl Consumer {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.audio)
-					.with_max_delay(options.max_delay.saturating_add(warmup)),
+					.with_max_delay(options.delay.max.map(|max| max.saturating_add(warmup))),
 			)
 			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
@@ -197,10 +212,15 @@ impl Consumer {
 		}
 		let track = subscriber;
 		let retention = track.info().max_age;
-		let max_delay = options.max_delay.min(retention.unwrap_or(Duration::MAX));
+		let max_delay = options
+			.delay
+			.max
+			.unwrap_or(Duration::MAX)
+			.min(retention.unwrap_or(Duration::MAX));
 		// Holding more than the publisher keeps would wait on media it has already
 		// discarded, so the caller asked for something impossible.
-		if let (Some(delay), Some(retention)) = (options.delay, retention)
+		let delay = options.delay.min;
+		if let Some(retention) = retention
 			&& delay > retention
 		{
 			return Err(Error::Unsupported(format!(
@@ -211,10 +231,14 @@ impl Consumer {
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
 		let container = moq_mux::catalog::hang::Container::try_from(catalog)?;
-		let track = moq_mux::container::Consumer::new(track, container);
+		// The subscription's budget includes the warmup, so the start reaches the playout delay
+		// plus the warmup back, while the container skips at the max delay alone.
+		let track = moq_mux::container::Consumer::new(track, container)
+			.with_warmup(warmup)
+			.with_delay(options.delay);
 
 		Ok(Self {
-			target: Target::new(options.delay, catalog.jitter),
+			target: Target::new(options.delay.min, options.estimate, catalog.jitter),
 			decoder,
 			track,
 			resampler: None,
@@ -256,7 +280,7 @@ impl Consumer {
 	}
 
 	/// The playout delay to hold ahead of the playhead right now: the fixed
-	/// [`Options::delay`], or the estimate from every frame read so far.
+	/// [`Delay::min`], or with [`Options::estimate`] the estimate from every frame read so far.
 	///
 	/// The estimate measures when [`read`](Self::read) hands each packet over, so
 	/// it is only as honest as the caller is prompt: read as soon as the previous
@@ -818,7 +842,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: Duration::from_secs(10),
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -935,7 +962,10 @@ mod tests {
 			"audio",
 			Options {
 				start: Start::Latest,
-				max_delay: Duration::from_secs(10),
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -988,7 +1018,10 @@ mod tests {
 			"audio",
 			Options {
 				start: Start::Latest,
-				max_delay: Duration::from_secs(1),
+				delay: Delay {
+					max: Some(Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1069,7 +1102,10 @@ mod tests {
 			"audio",
 			Options {
 				start: Start::Latest,
-				max_delay: Duration::from_secs(10),
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1113,7 +1149,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: Duration::from_secs(1),
+				delay: Delay {
+					max: Some(Duration::from_secs(1)),
+					..Delay::default()
+				},
 				output: Output {
 					sample_rate: Some(44_100),
 					..Output::default()
@@ -1166,7 +1205,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: Duration::from_secs(10),
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1199,7 +1241,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: Duration::from_secs(10),
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
 				output: Output {
 					sample_rate: Some(48_000),
 					..Output::default()
@@ -1341,7 +1386,10 @@ mod tests {
 		);
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 		let options = Options {
-			max_delay: Duration::from_secs(1),
+			delay: Delay {
+				max: Some(Duration::from_secs(1)),
+				..Delay::default()
+			},
 			..Options::new()
 		};
 		let mut consumer = Consumer::new(&broadcast.consume(), &catalog, "audio", options)
@@ -1393,7 +1441,10 @@ mod tests {
 					sample_rate: Some(48_000),
 					..Output::default()
 				},
-				max_delay: Duration::from_secs(1),
+				delay: Delay {
+					max: Some(Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1467,7 +1518,10 @@ mod tests {
 					sample_rate: Some(48_000),
 					..Output::default()
 				},
-				max_delay: std::time::Duration::from_secs(1),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1601,7 +1655,10 @@ mod tests {
 					sample_rate: Some(44_100),
 					..Output::default()
 				},
-				max_delay: std::time::Duration::from_secs(1),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1684,7 +1741,10 @@ mod tests {
 					sample_rate: Some(out_rate),
 					..Output::default()
 				},
-				max_delay: std::time::Duration::from_secs(1),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1931,7 +1991,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: std::time::Duration::from_secs(1),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -2019,7 +2082,11 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				delay: case.delay.map(duration),
+				delay: Delay {
+					min: case.delay.map_or(Duration::ZERO, duration),
+					..Delay::default()
+				},
+				estimate: case.delay.is_none(),
 				..Options::new()
 			},
 		)
@@ -2133,7 +2200,11 @@ mod tests {
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 
 		let options = |delay| Options {
-			delay: Some(std::time::Duration::from_millis(delay)),
+			delay: Delay {
+				min: std::time::Duration::from_millis(delay),
+				..Delay::default()
+			},
+			estimate: false,
 			..Options::new()
 		};
 		let err = Consumer::new(&subscriber, &catalog, "audio", options(101))
@@ -2162,7 +2233,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: std::time::Duration::from_millis(500),
+				delay: Delay {
+					max: Some(std::time::Duration::from_millis(500)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -2201,7 +2275,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: std::time::Duration::from_secs(1),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -2255,7 +2332,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: std::time::Duration::from_secs(1),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -2314,7 +2394,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay,
+				delay: Delay {
+					max: Some(max_delay),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)

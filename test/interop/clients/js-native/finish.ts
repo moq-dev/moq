@@ -38,7 +38,7 @@ export async function readFinish(
 			const subscription = broadcast
 				.track(Catalog.track(name, config))
 				.subscribe({ maxDelay, ranges: [{ start: { absolute: 0 } }] });
-			const media = new Container.Consumer(subscription, { format, maxDelay });
+			const media = new Container.Consumer(subscription, { format, delay: { max: maxDelay } });
 			let count = 0;
 			try {
 				for (;;) {
@@ -69,11 +69,8 @@ export async function readFinish(
 				if (!group) throw new Error("no health group");
 				try {
 					const frame = await group.readFrame();
-					if (
-						!frame ||
-						new TextDecoder().decode(frame.payload) !== "session-alive" ||
-						frame.timestamp !== undefined
-					)
+					// Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+					if (!frame || new TextDecoder().decode(frame.payload) !== "session-alive")
 						throw new Error("health frame");
 					if ((await group.readFrame()) !== undefined || (await track.recvGroup()) !== undefined)
 						throw new Error("health EOF");

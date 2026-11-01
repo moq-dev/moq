@@ -169,7 +169,7 @@ where
 	crate::runtime::scope(async move {
 		let timeout = options.timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT);
 		let deadline = (!timeout.is_zero())
-			.then(|| moq_clock::now().checked_add(timeout))
+			.then(|| kio::clock::now().checked_add(timeout))
 			.flatten();
 		// A vanished peer sends no FIN. Ping and timeout bound the same stale-session
 		// lifetime that QUIC's idle timeout bounds on the native path.
@@ -413,7 +413,7 @@ pub(crate) async fn connect(
 	// TODO if let chain
 	match resolved.delay {
 		delay if !delay.is_zero() && !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
-			moq_clock::sleep(delay).await;
+			kio::clock::sleep(delay).await;
 			tracing::debug!(peer = %crate::connect::Endpoint(&url), delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
 		}
 		_ => {}
@@ -757,7 +757,7 @@ impl Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						moq_clock::sleep(delay).await;
+						kio::clock::sleep(delay).await;
 					}
 				}
 			}

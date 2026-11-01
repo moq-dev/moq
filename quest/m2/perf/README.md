@@ -57,7 +57,7 @@ profile shows no pool contention.
 
 #3122's per-turn clock read landed in
 [#5926](https://github.com/moq-dev/moq/pull/5926): the io_uring worker is a
-`moq-clock` backend that samples the clock once per turn, cutting
+`kio::clock` backend that samples the clock once per turn, cutting
 `clock_gettime` from 44.7 to 1.05 calls per turn. `perf` was unavailable
 there, so [Profile the io_uring clock read](/quest/m2/perf/uring-clock-profile.md)
 owns the `[vdso]` share and relay CPU measurement.
@@ -92,6 +92,7 @@ revisions on the same host and worker count, and profiles with
 - [io_uring buffer pool memory](/quest/m2/perf/uring-pool-memory.md) - measure reserved versus resident pool memory before any shrink policy
 - [An idle export poll is cheap](/quest/m2/perf/export-idle-poll.md) - an export poll nothing woke skips the track fill and catalog work it repeats today
 - [Mesh session cost](/quest/m2/perf/mesh-session-cost.md) - moq-net's per-session announce, route sync, and scope work drops, swept over sessions and announces
+- [Adapter reads reuse their waker](/quest/m2/perf/adapter-waker-alloc.md) - a measured verdict on the per-read waker allocation moq-tokio and moq-uring reads pay since #7042, fixed if real
 - [Lite request allocations](/quest/m2/perf/lite-request-allocs.md) - `Path::concat` allocates once and the lite request handler keeps one track-name copy
 - [Coverage before START](/quest/m2/perf/covered-before-start.md) - the lite-07 publisher's coverage check costs O(1) per wake before SUBSCRIBE_START
 - [io_uring demux churn](/quest/m2/perf/uring-demux-churn.md) - the demux snapshots stats and builds its fed list once per completion, not per datagram

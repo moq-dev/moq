@@ -681,7 +681,11 @@ void main() {
 
     final fixedOutput = moq_audio.DecoderOutput(
       format: moq_audio.SampleFormat.f32,
-      delay: const Duration(milliseconds: 80),
+      delay: moq_media.Delay(
+        min: Duration(milliseconds: 80),
+        max: Duration.zero,
+      ),
+      estimate: false,
     );
     final fixed = await moq_audio.Consumer.subscribe(
       broadcast: consumer,
