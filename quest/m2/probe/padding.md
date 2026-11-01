@@ -71,3 +71,7 @@ Tests, on `@moq/clock`'s `Manual`:
   Assert that repeated clusters on a path with no room stay within the
   overhead budget.
   Wire it into CI at least nightly, sharing the epic's shaped-uplink setup.
+
+## Required
+
+- [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari have no estimate for a probe cluster to pace against or raise until the PROBE estimate feeds the allocator
