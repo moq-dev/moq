@@ -4,11 +4,11 @@ Running interop tests...
   Relay:  ghcr.io/englishm/moq-interop-runner-xquic-moq-relay-draft-18:latest
   Client: ghcr.io/englishm/moq-interop-runner-moq-dev-rs-client:latest
   URL:    moqt://relay:4443
-time="2026-11-01T16:08:02Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-01T16:08:02Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-01T16:08:02Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
-time="2026-11-01T16:08:02Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
-time="2026-11-01T16:08:02Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-01T16:39:43Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-01T16:39:43Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-01T16:39:43Z" level=warning msg="The \"PORT\" variable is not set. Defaulting to a blank string."
+time="2026-11-01T16:39:43Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
+time="2026-11-01T16:39:43Z" level=warning msg="The \"HEX\" variable is not set. Defaulting to a blank string."
  Container runner-upstream-relay-1  Recreate
  Container runner-upstream-relay-1  Recreated
  Container runner-upstream-test-client-1  Recreate
@@ -23,25 +23,26 @@ test-client-1  | # moq-dev-rs-client v0.1.0 (moq-tokio 0.19.28)
 test-client-1  | # Relay: moqt://relay:4443
 test-client-1  | 1..8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x558948629200, user_conn: 0x558948629208
+relay-1        | -- server_accept user_session :0x55a743c74200, user_conn: 0x55a743c74208
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1645 (xqc_server_conn_create_notify)
-relay-1        | -- user_data: 0x558948629200 user_conn: 0x558948629208
+relay-1        | -- user_data: 0x55a743c74200 user_conn: 0x55a743c74208
 test-client-1  | ok 1 - setup-only
 test-client-1  |   ---
-test-client-1  |   duration_ms: 41
+test-client-1  |   duration_ms: 35
 test-client-1  |   negotiated: moq-transport-18
 test-client-1  |   ...
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1674 (xqc_server_conn_handshake_finished)
+relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:858 (on_session_setup)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x558948632220, user_conn: 0x558948632228
+relay-1        | -- server_accept user_session :0x55a743c99180, user_conn: 0x55a743c99188
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1645 (xqc_server_conn_create_notify)
-relay-1        | -- user_data: 0x558948632220 user_conn: 0x558948632228
+relay-1        | -- user_data: 0x55a743c99180 user_conn: 0x55a743c99188
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1674 (xqc_server_conn_handshake_finished)
-relay-1        | draft18_relay_namespace publisher:0x558948632220 namespace:moq-test/interop
+relay-1        | draft18_relay_namespace publisher:0x55a743c99180 namespace:moq-test/interop
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:858 (on_session_setup)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1657 (xqc_server_conn_close_notify)
-relay-1        | send_count:12, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:6, srtt:488 early_data_flag:0, conn_err:12, ack_info:#0-0#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
+relay-1        | send_count:12, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:6, srtt:255 early_data_flag:0, conn_err:12, ack_info:#1-0#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
 test-client-1  | ok 2 - announce-only
 test-client-1  |   ---
 test-client-1  |   duration_ms: 503
@@ -50,62 +51,62 @@ test-client-1  |   outcome: "namespace remained accepted"
 test-client-1  |   ...
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x558948644560, user_conn: 0x558948644568
+relay-1        | -- server_accept user_session :0x55a743c8e840, user_conn: 0x55a743c8e848
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1645 (xqc_server_conn_create_notify)
-relay-1        | -- user_data: 0x558948644560 user_conn: 0x558948644568
+relay-1        | -- user_data: 0x55a743c8e840 user_conn: 0x55a743c8e848
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1674 (xqc_server_conn_handshake_finished)
-relay-1        | draft18_relay_namespace publisher:0x558948644560 namespace:moq-test/interop
+relay-1        | draft18_relay_namespace publisher:0x55a743c8e840 namespace:moq-test/interop
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:858 (on_session_setup)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1657 (xqc_server_conn_close_notify)
-relay-1        | send_count:13, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:11, srtt:649 early_data_flag:0, conn_err:0, ack_info:#5-0#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
+relay-1        | send_count:13, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:10, srtt:455 early_data_flag:0, conn_err:0, ack_info:#5-0#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
 relay-1        | draft18_relay_namespace_cleanup source:session_close request_id:0 namespace:moq-test/interop
 relay-1        | draft18_relay_namespace_done request_id:0 error_code:1 namespace:moq-test/interop
 test-client-1  | ok 3 - publish-namespace-done
 test-client-1  |   ---
-test-client-1  |   duration_ms: 706
+test-client-1  |   duration_ms: 705
 test-client-1  |   negotiated: moq-transport-18
 test-client-1  |   outcome: "namespace withdrawn cleanly"
 test-client-1  |   ...
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x558948637e90, user_conn: 0x558948637e98
+relay-1        | -- server_accept user_session :0x55a743c6c070, user_conn: 0x55a743c6c078
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1645 (xqc_server_conn_create_notify)
-relay-1        | -- user_data: 0x558948637e90 user_conn: 0x558948637e98
+relay-1        | -- user_data: 0x55a743c6c070 user_conn: 0x55a743c6c078
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1674 (xqc_server_conn_handshake_finished)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:858 (on_session_setup)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x55894864b670, user_conn: 0x55894864b678
+relay-1        | -- server_accept user_session :0x55a743cc2b10, user_conn: 0x55a743cc2b18
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1645 (xqc_server_conn_create_notify)
-relay-1        | -- user_data: 0x55894864b670 user_conn: 0x55894864b678
+relay-1        | -- user_data: 0x55a743cc2b10 user_conn: 0x55a743cc2b18
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1674 (xqc_server_conn_handshake_finished)
+relay-1        | draft18_relay_namespace publisher:0x55a743cc2b10 namespace:moq-test/interop/subscribe-namespace-lifecycle/7-1793551190371202891
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:858 (on_session_setup)
-relay-1        | draft18_relay_namespace publisher:0x55894864b670 namespace:moq-test/interop/subscribe-namespace-lifecycle/7-1793549289971277089
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1657 (xqc_server_conn_close_notify)
-relay-1        | send_count:11, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:12, srtt:3145 early_data_flag:0, conn_err:0, ack_info:#8-6#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
+relay-1        | send_count:11, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:12, srtt:3094 early_data_flag:0, conn_err:0, ack_info:#8-6#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
 test-client-1  | not ok 4 - subscribe-namespace-lifecycle
 test-client-1  |   ---
-test-client-1  |   duration_ms: 3007
+test-client-1  |   duration_ms: 3005
 test-client-1  |   message: "timeout waiting for namespace event: deadline has elapsed"
 test-client-1  |   ...
 test-client-1  | ok 5 - subscribe-error # SKIP moq-net API requires namespace discovery before SUBSCRIBE
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x558948637c00, user_conn: 0x558948637c08
+relay-1        | -- server_accept user_session :0x55a743c6c310, user_conn: 0x55a743c6c318
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1645 (xqc_server_conn_create_notify)
-relay-1        | -- user_data: 0x558948637c00 user_conn: 0x558948637c08
+relay-1        | -- user_data: 0x55a743c6c310 user_conn: 0x55a743c6c318
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1674 (xqc_server_conn_handshake_finished)
+relay-1        | draft18_relay_namespace publisher:0x55a743c6c310 namespace:moq-test/interop
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:858 (on_session_setup)
-relay-1        | draft18_relay_namespace publisher:0x558948637c00 namespace:moq-test/interop
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1657 (xqc_server_conn_close_notify)
-relay-1        | send_count:10, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:10, srtt:775 early_data_flag:0, conn_err:0, ack_info:#6-3#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
-relay-1        | draft18_relay_namespace_cleanup source:session_close request_id:0 namespace:moq-test/interop/subscribe-namespace-lifecycle/7-1793549289971277089
+relay-1        | send_count:10, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:9, srtt:3480 early_data_flag:0, conn_err:0, ack_info:#5-4#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
+relay-1        | draft18_relay_namespace_cleanup source:session_close request_id:0 namespace:moq-test/interop/subscribe-namespace-lifecycle/7-1793551190371202891
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1657 (xqc_server_conn_close_notify)
-relay-1        | send_count:9, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:9, srtt:597 early_data_flag:0, conn_err:0, ack_info:#5-0#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
+relay-1        | send_count:9, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:7, srtt:3556 early_data_flag:0, conn_err:0, ack_info:#3-2#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x558948621460, user_conn: 0x558948621468
+relay-1        | -- server_accept user_session :0x55a743ca35e0, user_conn: 0x55a743ca35e8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1645 (xqc_server_conn_create_notify)
-relay-1        | -- user_data: 0x558948621460 user_conn: 0x558948621468
+relay-1        | -- user_data: 0x55a743ca35e0 user_conn: 0x55a743ca35e8
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1674 (xqc_server_conn_handshake_finished)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:858 (on_session_setup)
 test-client-1  | not ok 6 - announce-subscribe
@@ -117,26 +118,26 @@ test-client-1  | ok 7 - subscribe-before-announce # SKIP moq-net API requires na
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1635 (xqc_server_conn_closing_notify)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x558948654b70, user_conn: 0x558948654b78
+relay-1        | -- server_accept user_session :0x55a743ca3790, user_conn: 0x55a743ca3798
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1645 (xqc_server_conn_create_notify)
-relay-1        | -- user_data: 0x558948654b70 user_conn: 0x558948654b78
+relay-1        | -- user_data: 0x55a743ca3790 user_conn: 0x55a743ca3798
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1674 (xqc_server_conn_handshake_finished)
+relay-1        | draft18_relay_namespace publisher:0x55a743ca3790 namespace:moq-test/data-subgroup-basic/044c72abdff2bb3efa53d7b0a96c9579
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:858 (on_session_setup)
-relay-1        | draft18_relay_namespace publisher:0x558948654b70 namespace:moq-test/data-subgroup-basic/51c824dcccfd360f71cb6cf4fd71d7c7
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1517 (xqc_server_accept)
-relay-1        | -- server_accept user_session :0x55894869d3e0, user_conn: 0x55894869d3e8
+relay-1        | -- server_accept user_session :0x55a743ca1960, user_conn: 0x55a743ca1968
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1645 (xqc_server_conn_create_notify)
-relay-1        | -- user_data: 0x55894869d3e0 user_conn: 0x55894869d3e8
+relay-1        | -- user_data: 0x55a743ca1960 user_conn: 0x55a743ca1968
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1674 (xqc_server_conn_handshake_finished)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:858 (on_session_setup)
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1657 (xqc_server_conn_close_notify)
-relay-1        | send_count:9, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:10, srtt:601 early_data_flag:0, conn_err:0, ack_info:#6-3#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
+relay-1        | send_count:9, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:8, srtt:301 early_data_flag:0, conn_err:0, ack_info:#4-0#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
 relay-1        | /build/xquic/moq/demo/xqc_moq_demo_server.c:1657 (xqc_server_conn_close_notify)
-relay-1        | send_count:10, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:10, srtt:621 early_data_flag:0, conn_err:0, ack_info:#6-3#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
+relay-1        | send_count:10, lost_count:0, lost_dgram_count:0, tlp_count:0, recv_count:9, srtt:3476 early_data_flag:0, conn_err:0, ack_info:#5-4#0-0#0-0#v0429, alpn:moqt-18, fec_recovered:0
 relay-1        | draft18_relay_namespace_cleanup source:session_close request_id:0 namespace:moq-test/interop
 test-client-1  | not ok 8 - data-subgroup-basic
 test-client-1  |   ---
-test-client-1  |   duration_ms: 5007
+test-client-1  |   duration_ms: 5006
 test-client-1  |   test_spec_revision: 2
 test-client-1  |   message: "timeout waiting for the routing prefix: deadline has elapsed"
 test-client-1  |   ...
