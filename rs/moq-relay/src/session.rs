@@ -476,7 +476,6 @@ pub struct Nudged {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::time::Duration;
@@ -583,11 +582,11 @@ mod tests {
 		let reg = registry.register(request);
 		let ids = registry.revalidate(&Filter::from_query(Some("id=abc")).unwrap());
 		assert_eq!(ids, ["abc"]);
-		tokio::time::timeout(Duration::from_secs(1), reg.nudged())
+		moq_clock::timeout(Duration::from_secs(1), reg.nudged())
 			.await
 			.expect("the registration woke");
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(20), reg.nudged())
+			moq_clock::timeout(std::time::Duration::from_millis(20), reg.nudged())
 				.await
 				.is_err(),
 			"a single push wakes once"
