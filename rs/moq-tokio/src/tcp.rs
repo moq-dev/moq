@@ -4,7 +4,8 @@
 //! Plaintext `tcp://` has no transport encryption and no authentication, so only
 //! use it on a trusted network (loopback, a private VPC interface, etc.).
 //! `tls://` encrypts and verifies the server with the same TLS settings as the
-//! other transports, for links that need neither QUIC nor a WebSocket.
+//! other transports, for links that need neither QUIC nor a WebSocket, and its
+//! listener verifies client certificates as the QUIC listener does.
 //!
 //! Plaintext TCP has no TLS handshake, so the application protocol (the moq
 //! ALPN) is negotiated in-band; TLS negotiates it in its handshake. Either way
@@ -41,8 +42,9 @@ pub struct Config {
 	pub bind: Option<net::SocketAddr>,
 
 	/// Serve TLS on the TCP listener with the listen certificate, for `tls://`
-	/// dials. It asks for no client certificate, so a peer on it authenticates
-	/// with a token rather than mTLS.
+	/// dials. It asks for a client certificate as the QUIC listener does: optionally
+	/// under CA roots, required under pinned peers, so a peer on it authenticates
+	/// with mTLS or a token.
 	#[usage(
 		long = "listen-tcp-tls",
 		name = "listen-tcp-tls",
@@ -366,37 +368,135 @@ mod tests {
 	}
 
 	/// A `tls://` dial carries qmux and the request target over TLS, and a client
-	/// that does not trust the certificate is refused. Client-certificate policy
-	/// meant for QUIC (CA roots or pinned peers) never makes the TCP listener ask
-	/// for one, so a token-only client still gets through.
+	/// that does not trust the certificate is refused.
 	#[cfg(feature = "aws-lc-rs")]
 	#[tokio::test]
 	async fn tls_carries_qmux_and_refuses_an_untrusted_certificate() {
 		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+		let mut listen = crate::listen::Config::default();
+		listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		listen.tcp.tls = Some(true);
+		listen.tls.generate = vec!["localhost".into()];
+		tls_round_trip(listen).await;
+	}
+
+	/// A `tls://` listener with no QUIC beside it verifies client certificates
+	/// as QUIC does: CA roots accept a chained certificate or a token-only client,
+	/// pinned peers require a pinned certificate. The request reports the chain
+	/// and the SNI.
+	#[cfg(feature = "aws-lc-rs")]
+	#[tokio::test]
+	async fn tls_verifies_a_client_certificate() {
+		use rcgen::{BasicConstraints, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair};
+
+		let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 		let dir = tempfile::tempdir().unwrap();
-		for pinned in [false, true] {
+		let write = |name: &str, contents: String| {
+			let path = dir.path().join(name);
+			std::fs::write(&path, contents).unwrap();
+			path
+		};
+
+		let ca_key = KeyPair::generate().unwrap();
+		let mut ca_params = CertificateParams::new(Vec::new()).unwrap();
+		ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+		let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+		let issuer = Issuer::from_params(&ca_params, &ca_key);
+		let client_key = KeyPair::generate().unwrap();
+		let mut client_params = CertificateParams::new(vec!["client.example".to_string()]).unwrap();
+		client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+		let client_cert = client_params.signed_by(&client_key, &issuer).unwrap();
+		let fingerprint = crate::tls::PeerIdentity::from_chain(vec![client_cert.der().clone()])
+			.fingerprint()
+			.unwrap();
+		let ca = write("ca.pem", ca_cert.pem());
+		let cert = (
+			write("client.pem", client_cert.pem()),
+			write("client.key", client_key.serialize_pem()),
+		);
+
+		let listen = |set: &dyn Fn(&mut crate::listen::Config)| {
 			let mut listen = crate::listen::Config::default();
 			listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
 			listen.tcp.tls = Some(true);
 			listen.tls.generate = vec!["localhost".into()];
-			// Client-certificate policy is refused without a QUIC listener to read it.
-			if !cfg!(feature = "quic") {
-				continue;
-			}
-			listen.bind = Some("127.0.0.1:0".parse().unwrap());
-			match pinned {
-				true => listen.tls.peers = Some(crate::tls::Peers::new()),
-				false => {
-					let ca = dir.path().join("client-ca.pem");
-					let cert = rcgen::generate_simple_self_signed(["client-ca".to_string()])
-						.unwrap()
-						.cert;
-					std::fs::write(&ca, cert.pem()).unwrap();
-					listen.tls.root = vec![ca];
-				}
-			}
-			tls_round_trip(listen).await;
+			set(&mut listen);
+			listen
+		};
+
+		// CA roots: a certificate is optional, so the token path still works.
+		let server = listen(&|l| l.tls.root = vec![ca.clone()]);
+		let server = server.init(Default::default()).unwrap().listen().await.unwrap();
+		let (server, identity, sni) = mtls_dial(server, Some(&cert))
+			.await
+			.expect("CA-rooted certificate refused");
+		let identity = identity.expect("the chain is reported");
+		assert_eq!(identity.name().as_deref(), Some("client.example"));
+		assert_eq!(sni.as_deref(), Some("localhost"));
+		let (_server, identity, _) = mtls_dial(server, None).await.expect("token-only client refused");
+		assert!(identity.is_none());
+
+		// Pinned peers: a certificate is required, and must be pinned.
+		let peers = crate::tls::Peers::new();
+		peers.insert(&fingerprint).unwrap();
+		let server = listen(&|l| l.tls.peers = Some(peers.clone()));
+		let server = server.init(Default::default()).unwrap().listen().await.unwrap();
+		let (server, identity, _) = mtls_dial(server, Some(&cert))
+			.await
+			.expect("pinned certificate refused");
+		assert_eq!(identity.unwrap().fingerprint(), Some(fingerprint.clone()));
+		// A refused dial consumes its listener, so the token-only check gets its own.
+		let token_only = listen(&|l| l.tls.peers = Some(peers.clone()));
+		let token_only = token_only.init(Default::default()).unwrap().listen().await.unwrap();
+		assert!(
+			mtls_dial(token_only, None).await.is_none(),
+			"a token-only client must be refused under pinned peers"
+		);
+		peers.remove(&fingerprint).unwrap();
+		assert!(
+			mtls_dial(server, Some(&cert)).await.is_none(),
+			"an unpinned certificate must be refused"
+		);
+	}
+
+	/// Dial `server` over `tls://localhost`, presenting `cert` (a PEM cert and key)
+	/// if given. Returns the server with the accepted request's identity and SNI,
+	/// or `None` when the dial is refused.
+	#[cfg(feature = "aws-lc-rs")]
+	async fn mtls_dial(
+		mut server: crate::Listener,
+		cert: Option<&(std::path::PathBuf, std::path::PathBuf)>,
+	) -> Option<(crate::Listener, Option<crate::tls::PeerIdentity>, Option<String>)> {
+		let port = server.tcp_local_addr().unwrap().port();
+		let url: Url = format!("tls://localhost:{port}/room?jwt=credential").parse().unwrap();
+		let mut config = crate::connect::Config::default();
+		config.tls.insecure = Some(true);
+		if let Some((cert, key)) = cert {
+			config.tls.cert = Some(cert.clone());
+			config.tls.key = Some(key.clone());
 		}
+		let client = config.init(Default::default()).unwrap().with_reconnect(false);
+
+		let accept = tokio::spawn(async move {
+			let request = server.accept().await.unwrap();
+			let identity = request.peer_identity();
+			let sni = request.server_name().map(str::to_owned);
+			assert_eq!(request.authority(), sni.as_deref());
+			let session = request.ok().await.unwrap();
+			(server, identity, sni, session)
+		});
+		let dialed = tokio::time::timeout(Duration::from_secs(5), client.connect(url).established())
+			.await
+			.expect("dial timed out");
+		if dialed.is_err() {
+			accept.abort();
+			return None;
+		}
+		let (server, identity, sni, _session) = tokio::time::timeout(Duration::from_secs(5), accept)
+			.await
+			.expect("accept timed out")
+			.expect("accept task panicked");
+		Some((server, identity, sni))
 	}
 
 	#[cfg(feature = "aws-lc-rs")]

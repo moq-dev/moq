@@ -607,6 +607,12 @@
 
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
+          # The nightly `just rs send-depth` proves native Send futures on.
+          # Pinned so a toolchain release alone never fails the merge gate;
+          # bump it on purpose, like the stable toolchain above. Kept out of
+          # the dev shell, which every CI job downloads.
+          rust-nightly = pkgs.rust-bin.nightly."2026-10-18".minimal;
+
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
           # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out
           # of the default shell because it pulls in ~3 GB (CEF, mostly) that

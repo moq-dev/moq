@@ -366,7 +366,8 @@ jobs:
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
         # `gate -rs_shapes` runs the queue's Check over every package, catching
-        # what a diff-scoped queue run let into main. Features runs the rest,
+        # what a diff-scoped queue run let into main. That includes
+        # `rs send-depth` on the flake's pinned nightly. Features runs the rest,
         # the isolated feature shapes, which outgrow one hosted job beside it.
         # `rs audio-devices` plays moq-audio's device tests into a private null sink.
         # `rs multicast` runs the mDNS tests, which loop multicast back on the runner.
@@ -375,9 +376,6 @@ jobs:
         # `rs v4l2` streams moq-video's V4L2 capture from the kernel's vivid
         # virtual camera, a module load no pull request job should make.
         recipe: ["gate -rs_shapes", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2"]
-        include:
-          - recipe: rs send-depth
-            nightly: true
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -389,11 +387,6 @@ jobs:
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
-      - name: Install nightly Rust
-        if: matrix.nightly
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: nightly
       - name: Add a second IPv6 loopback address
         if: matrix.recipe == 'rs uring'
         # moq-uring's local address test reaches a wildcard socket on it.

@@ -85,6 +85,14 @@ class SelectTest(unittest.TestCase):
         calls = self.selected("rs/moq-stats/benches/producer_tick.rs")
         self.assertFalse(any(call.endswith("-features") for call in calls), calls)
 
+    def test_send_depth_follows_moq_net(self):
+        for action in ("check", "check-test", "lint"):
+            for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "sh/rs/send-depth.sh"):
+                with self.subTest(action=action, path=path):
+                    self.assertIn("rs send-depth", self.selected(path, action=action))
+            with self.subTest(action=action, path="rs/moq-tokio/src/lib.rs"):
+                self.assertNotIn("rs send-depth", self.selected("rs/moq-tokio/src/lib.rs", action=action))
+
     def test_local_feature_contracts_skip_dependents(self):
         # `just check` lints feature shapes for the changed crates alone; their
         # dependents keep the default-feature lint and the landing worker's shapes.
