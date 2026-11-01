@@ -21,7 +21,7 @@ impl MoqAllocator {
 		Self { allocator }
 	}
 
-	#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+	#[cfg(feature = "audio")]
 	pub(crate) fn inner(&self) -> &moq_net::bandwidth::Allocator {
 		&self.allocator
 	}
@@ -63,7 +63,7 @@ impl MoqReservation {
 		Self { inner }
 	}
 
-	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+	#[cfg(feature = "video")]
 	pub(crate) fn consume(&self) -> moq_net::bandwidth::Consumer {
 		self.inner.consume()
 	}
@@ -314,7 +314,7 @@ mod tests {
 		assert_eq!(control.target(), MoqRateTarget::Enabled { bitrate_bps: 3_000_000 });
 	}
 
-	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+	#[cfg(feature = "video")]
 	#[test]
 	fn a_share_wakes_a_parked_thread() {
 		use std::sync::atomic::Ordering;
@@ -343,6 +343,10 @@ mod tests {
 			std::thread::yield_now();
 		}
 		// The inner changed() may not have parked yet; give it a turn.
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the test thread has no runtime; it gives the follower's runtime thread a real turn"
+		)]
 		std::thread::sleep(std::time::Duration::from_millis(50));
 		let _sub = track.consume(None).unwrap();
 		estimate

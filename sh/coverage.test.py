@@ -113,7 +113,7 @@ for arg in sys.argv:
         self.assertEqual(calls[0][2:], ["llvm-cov", "clean", "--workspace"])
         build = calls[1][2:]
         self.assertIn("--workspace", build)
-        for excluded in ("moq-net-fuzz", "moq-quic-fuzz", "moq-wasm"):
+        for excluded in ("moq-net-fuzz", "moq-quic-fuzz"):
             self.assertIn(excluded, build)
         self.assertIn("--tests", build)
         self.assertIn("--test-threads", build)
