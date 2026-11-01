@@ -112,12 +112,12 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 			// connection's flow-control window when it disconnects.
 			if let Some(tx) = drained.take() {
 				let _ = tx.send(());
-				moq_clock::sleep(STALL).await;
+				kio::clock::sleep(STALL).await;
 			}
 		}
 	});
 
-	let request = moq_clock::timeout(TIMEOUT, server.accept())
+	let request = kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("accept timeout")
 		.expect("no incoming connection");
@@ -127,13 +127,13 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 		.await
 		.expect("publisher session");
 
-	moq_clock::timeout(TIMEOUT, crate::wanted(track.demand()))
+	kio::clock::timeout(TIMEOUT, crate::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.expect("track closed");
 
 	write_group(&track);
-	moq_clock::timeout(TIMEOUT, drained_rx)
+	kio::clock::timeout(TIMEOUT, drained_rx)
 		.await
 		.expect("the head group never arrived")
 		.expect("reader gone");
@@ -152,7 +152,7 @@ async fn round(drop_session: bool) -> (usize, Option<moq_net::Error>) {
 		Some(session)
 	};
 
-	let result = moq_clock::timeout(TIMEOUT, reader)
+	let result = kio::clock::timeout(TIMEOUT, reader)
 		.await
 		.expect("the subscription never ended")
 		.expect("reader panicked");

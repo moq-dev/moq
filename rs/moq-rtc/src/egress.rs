@@ -14,7 +14,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use bytes::Bytes;
 use hang::catalog::{AudioCodec, VideoCodecKind};
@@ -822,7 +822,7 @@ mod tests {
 
 	/// The payload of the next write, required without another frame arriving.
 	async fn written(writes: &mut mpsc::Receiver<WriteRequest>) -> Bytes {
-		moq_clock::timeout(Duration::from_millis(10), writes.recv())
+		kio::clock::timeout(Duration::from_millis(10), writes.recv())
 			.await
 			.expect("a frame is written")
 			.expect("the pump is alive")
@@ -831,7 +831,7 @@ mod tests {
 
 	/// Nothing is written without another frame arriving.
 	async fn idle(writes: &mut mpsc::Receiver<WriteRequest>) {
-		let next = moq_clock::timeout(Duration::from_millis(10), writes.recv()).await;
+		let next = kio::clock::timeout(Duration::from_millis(10), writes.recv()).await;
 		assert!(
 			next.is_err(),
 			"unexpected write: {:?}",
@@ -987,7 +987,7 @@ mod tests {
 			.unwrap();
 
 		let next = async |writes: &mut mpsc::Receiver<WriteRequest>| {
-			let write = moq_clock::timeout(Duration::from_millis(10), writes.recv())
+			let write = kio::clock::timeout(Duration::from_millis(10), writes.recv())
 				.await
 				.expect("a frame is written")
 				.expect("the pump is alive");
@@ -1294,7 +1294,7 @@ mod tests {
 			while demand.wanted_changed().await?.is_some() {}
 			moq_net::Result::Ok(())
 		};
-		moq_clock::timeout(Duration::from_secs(1), unwanted)
+		kio::clock::timeout(Duration::from_secs(1), unwanted)
 			.await
 			.expect("the line unsubscribes")
 			.unwrap();
