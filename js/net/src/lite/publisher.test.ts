@@ -696,6 +696,8 @@ async function servedSubscription(
 		// Answer the subscription with a front's broadcast, as an application forwarding a
 		// routed one does, so the track reads through the front's serving route.
 		routed?: boolean;
+		// Groups the track holds before the SUBSCRIBE arrives, stamped by sequence.
+		prefill?: number[];
 	} = {},
 ) {
 	const version = options.version ?? Version.DRAFT_05;
@@ -721,6 +723,11 @@ async function servedSubscription(
 		broadcast = publish(origin, Path.from("test"));
 	}
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: options.maxAge });
+	for (const sequence of options.prefill ?? []) {
+		const group = track.createGroup(sequence);
+		for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(sequence)));
+		group.finish();
+	}
 
 	const client = await Stream.open(pair.client, { version: version });
 
@@ -834,27 +841,33 @@ async function servedSubscription(
 	};
 }
 
-// Refuse unsupported anchors on either control message before promising a delivery start.
-for (const kind of [2, 3]) {
-	for (const end of [false, true]) {
-		for (const update of [false, true]) {
-			test(`lite-07 refuses anchor ${kind} at ${end ? "end" : "start"} in ${update ? "UPDATE" : "SUBSCRIBE"}`, async () => {
-				const version = Version.DRAFT_07;
-				const anchor = end ? [0, kind, 0] : [kind, 0, 0];
-				const bytes = new Uint8Array([8, 128, 0, 0, 1, ...anchor, 0]);
-				const decoded = await SubscribeUpdate.decode(new Reader(undefined, bytes, version), version);
-				const sub = await servedSubscription({ version, ranges: update ? undefined : decoded.ranges });
-				try {
-					if (update) await sub.client.writer.write(bytes);
-					await sub.serving;
-					await expect(decodeSubscribeResponse(sub.client.reader, version)).rejects.toThrow();
-				} finally {
-					await sub.close();
-				}
-			});
-		}
+// SUBSCRIBE_START tells the subscriber where each range's start landed, which a relative or time
+// start leaves it no way to work out from the groups it receives. Mirrors the Rust
+// `lite07_start_names_each_resolved_range_start`.
+test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		prefill: [0, 1, 2, 3, 4],
+		maxAge: Milli(3_600_000),
+		ranges: [
+			{ start: { relative: 1 } },
+			// Group 1 starts at 1 ms.
+			{ start: { time: 1 }, end: { absolute: 2 } },
+			// Empty, so it starts nowhere.
+			{ start: { absolute: 3 }, end: { absolute: 3 } },
+			// Empty only once its start resolves to group 4.
+			{ start: { relative: 0 }, end: { absolute: 2 } },
+		],
+	});
+	try {
+		const resp = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
+		expect(resp.start.starts).toEqual([3, 1, undefined, undefined]);
+	} finally {
+		await sub.close();
 	}
-}
+});
 
 // A relay can ingest back-to-back groups micro-reordered (the upstream leg sends
 // newest-first). The older group is cached and in demand, so serving must still
@@ -1022,8 +1035,8 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group 
 	// The publisher applies an update's datagram bounds before forwarding its group range, and
 	// each update here moves the range's end.
 	const applied = async (end: number) => {
-		let groups = sub.track.subscription.peek()?.groups;
-		while (groups?.end?.excluded !== end) groups = (await sub.track.subscription.changed())?.groups;
+		let ranges = sub.track.subscription.peek()?.ranges;
+		while (ranges?.[0]?.end?.absolute !== end) ranges = (await sub.track.subscription.changed())?.ranges;
 	};
 	try {
 		send([0, 2, 1]);
@@ -1378,7 +1391,7 @@ test("lite draft-05: a group popped before a cap update is still served", async 
 		expect(await sub.servedSequence()).toBe(1);
 		while (ranges.mock.calls.length === 0) await flush();
 		// Dropping the named floor re-pins to the latest group, as an unfloored SUBSCRIBE does.
-		expect(lastGroups(ranges)).toEqual({ start: { included: 1 }, end: { included: 0 } });
+		expect(lastGroups(ranges)).toEqual({ start: { included: 1 } });
 	} finally {
 		ranges.mockRestore();
 		sub.release();
@@ -1556,7 +1569,7 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 			expect(await sub.servedGroup()).toEqual({ sequence: 1, frameStart: 0, payloads: ["a"] });
 			expect(ranges).toHaveBeenCalledTimes(1);
 			// Draft-06 encodes a floor of group 0 as no floor, which assigns 0.
-			expect(lastGroups(ranges)).toEqual({ start: { included: 0 }, end: { included: 1 } });
+			expect(lastGroups(ranges)).toEqual({ start: { included: 0 } });
 		} finally {
 			ranges.mockRestore();
 		}
@@ -1629,14 +1642,14 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 			priority: 9,
 			maxDelay: TEST_MAX_DELAY_MS,
 			order: "descending",
-			groups: { start: undefined, end: { excluded: 6 } },
+			ranges: [{ end: { absolute: 6 } }],
 		});
 		expect(ranges).not.toHaveBeenCalled();
 
 		sub.release();
 		expect(await sub.servedSequence()).toBe(0);
 		while (ranges.mock.calls.length === 0) await flush();
-		expect(lastGroups(ranges)).toEqual({ start: { included: 0 }, end: { included: 5 } });
+		expect(lastGroups(ranges)).toEqual({ start: { included: 0 } });
 	} finally {
 		ranges.mockRestore();
 		sub.release();

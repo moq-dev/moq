@@ -1,8 +1,16 @@
 import { expect, test } from "bun:test";
 import { Instant, Milli, Nano } from "@moq/clock";
-import { Ledger } from "./ledger.ts";
+import { CACHE_EXPIRY, GRACE, grace, Ledger } from "./ledger.ts";
 
 const at = (ms: number) => Instant(Nano.fromMilli(Milli(ms)));
+
+test("grace waits out the budget, capped at the cache expiry", () => {
+	expect(grace(0)).toBe(GRACE);
+	expect(grace(500)).toBe(Milli(500));
+	// The largest delay a wire carries is no limit, as an unbounded one is.
+	expect(grace(Number.MAX_SAFE_INTEGER)).toBe(CACHE_EXPIRY);
+	expect(grace(Number.POSITIVE_INFINITY)).toBe(CACHE_EXPIRY);
+});
 
 test("overlapping and adjacent ranges merge without changing surviving gap ages", () => {
 	const ledger = new Ledger();

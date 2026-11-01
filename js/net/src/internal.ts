@@ -5,7 +5,7 @@
  *
  * @module
  */
-import { type Instant, Milli } from "@moq/clock";
+import type { Instant, Milli } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Datagram } from "./datagram.ts";
@@ -18,16 +18,23 @@ import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
-import * as Varint from "./varint.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
-/** What a null maxDelay goes out as: the largest value every peer can read, as Rust sends for `None`. */
-export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
+/**
+ * A subscription's `maxDelay` as a budget in milliseconds, `0` without one: `null` waits as
+ * long as anything could, which the publisher's max age clamps.
+ */
+export function delayBudget(subscription: Pick<Subscription, "maxDelay"> | undefined): number {
+	const maxDelay = subscription?.maxDelay;
+	return maxDelay === null ? Number.POSITIVE_INFINITY : (maxDelay ?? 0);
+}
 
-/** A subscription's budget as the wire carries it: null for no limit, omitted for zero. */
-export function maxDelayOf(subscription: Pick<Subscription, "maxDelay">): Milli {
-	if (subscription.maxDelay === null) return NO_MAX_DELAY;
-	return subscription.maxDelay ?? Milli.zero;
+/**
+ * The `Subscriber Max Age` a wire carries for `maxDelay`: `null` is the publisher's max age
+ * alone, which the largest value every peer can read leaves to its clamp.
+ */
+export function wireDelay(subscription: Pick<Subscription, "maxDelay"> | undefined): number {
+	return Math.min(delayBudget(subscription), Number.MAX_SAFE_INTEGER);
 }
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
@@ -325,6 +332,15 @@ export interface ResumeSource {
 	start(): number | "pending" | undefined;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Position | undefined;
+	/** Where each range starts on the serving copy once delivery starts at `from`, undefined without one. */
+	starts(from: number): (number | undefined)[] | undefined;
+	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
+	runs(start: number, end: number): Run[] | undefined;
+	/**
+	 * The exclusive end past every group the serving copy reads: undefined while one of its
+	 * ranges stays open or without a serving copy.
+	 */
+	servingEnd(): number | undefined;
 	/** The error the logical track's end carries, if it does not end cleanly. */
 	endError(): Error | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
@@ -435,6 +451,12 @@ export const hooks: {
 	 * waits on its START, as the Rust `request_start`.
 	 */
 	startTrack: (producer: Producer, served: { start?: number | null; requested?: number }) => void;
+	/**
+	 * Mark a track as a copy received over a wire without ranges, which cannot carry a relative
+	 * anchor other than the live start, so its readers refuse one rather than guess from a
+	 * partial copy. Mirrors the Rust `Holdings::drops_anchors`; assigned by `track.ts`.
+	 */
+	dropAnchors: (producer: Producer) => void;
 	/** Mint a track {@link Request}; assigned by `track.ts`. */
 	makeRequest: (options: TrackRequestOptions) => Request;
 	/**
@@ -480,6 +502,21 @@ export const hooks: {
 	 * kept for it, so a resumed reader takes groups the plain way and drops from here.
 	 */
 	tryDrop: (subscriber: Subscriber) => (Recv & { kind: "drop" }) | undefined;
+	/**
+	 * The runs of `[start, end)` a subscriber reads: inside its ranges and its local bounds.
+	 * Assigned by `track.ts`.
+	 */
+	servingRuns: (subscriber: Subscriber, start: number, end: number) => Run[];
+	/**
+	 * The exclusive end past every group a subscriber reads, or undefined while one of its ranges
+	 * stays open. Assigned by `track.ts`.
+	 */
+	servingEnd: (subscriber: Subscriber) => number | undefined;
+	/**
+	 * Where each of a subscriber's ranges starts once delivery starts at `from`, undefined for one
+	 * with no group there: what lite-07 SUBSCRIBE_START answers. Assigned by `track.ts`.
+	 */
+	servingStarts: (subscriber: Subscriber, from: number) => (number | undefined)[];
 	/** The sequence {@link tryNextGroup} (`ordered`) or {@link tryRecvGroup} would take next, without taking it. */
 	peekGroup: (subscriber: Subscriber, ordered: boolean) => number | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
@@ -651,6 +688,18 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	startTrack: () => {
+		throw new Error("track.ts not loaded");
+	},
+	dropAnchors: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingRuns: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingEnd: () => {
+		throw new Error("track.ts not loaded");
+	},
+	servingStarts: () => {
 		throw new Error("track.ts not loaded");
 	},
 	makeRequest: () => {

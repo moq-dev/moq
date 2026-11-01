@@ -15,9 +15,20 @@ const BTree = (btree.default as unknown as { default?: typeof btree.default }).d
  */
 export const GRACE = Milli(1000);
 
-/** The grace for a subscription with `maxDelay`: how long it was willing to wait for a late group anyway, or {@link GRACE} without one. */
-export function grace(maxDelay: Milli): Milli {
-	return maxDelay > 0 ? maxDelay : GRACE;
+/**
+ * How long idle cached content is kept, matching Rust `cache::DEFAULT_EXPIRY`: a group older
+ * than this is evicted, so nothing waits for one longer.
+ */
+export const CACHE_EXPIRY = Milli(30_000);
+
+/**
+ * The grace for a subscription with a `maxDelay` budget in milliseconds: how long it was willing
+ * to wait for a late group anyway, {@link GRACE} without one, and at most {@link CACHE_EXPIRY},
+ * which an unbounded one or the largest delay a wire carries reaches.
+ */
+export function grace(budget: number): Milli {
+	if (budget <= 0) return GRACE;
+	return budget < CACHE_EXPIRY ? Milli(budget) : CACHE_EXPIRY;
 }
 
 // A run of accounted sequences `[start, end)`, and when the gap below it opened, which is
@@ -111,6 +122,12 @@ export class Ledger {
 	/** The lowest sequence accounted for. */
 	first(): number | undefined {
 		return this.#runs.minKey();
+	}
+
+	/** The exclusive end of the run accounting for `sequence`, undefined when none does. */
+	runEnd(sequence: number): number | undefined {
+		const run = this.#runs.getPairOrNextLower(sequence)?.[1];
+		return run !== undefined && sequence < run.end ? run.end : undefined;
 	}
 
 	/** Whether every sequence in `[start, end)` is accounted for. */
