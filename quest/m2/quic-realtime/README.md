@@ -91,7 +91,7 @@ Remaining work once the candidates finish (this README's own job):
 - Delete the losing candidates' code.
 - Decide who asks for receive timestamps. The spike added
   `transport::Config::receive_timestamps`, off by default, and the maintainer
-  kept it on 2026-10-30. The winner decides whether its `ControllerFactory`
+  kept it on 2026-10-30. The winner decides whether its `Factory`
   turns them on instead, so only `Realtime` sessions pay the ACK bytes.
 - Wire the winner's moq-shaper run into the nightly so a regression in
   queuing delay shows up.

@@ -73,12 +73,12 @@ mod tests;
 #[cfg(test)]
 mod bench;
 
-use std::{any::Any, collections::VecDeque, num::NonZeroU16, sync::Arc, time::Duration};
+use std::{collections::VecDeque, num::NonZeroU16, sync::Arc, time::Duration};
 
 use kio::clock::Instant;
 
 use crate::{
-    Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent,
+    Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent,
     pacer::{self, Pacer, Rate},
 };
 use api::{
@@ -125,7 +125,7 @@ pub struct Config {
     _private: (),
 }
 
-impl ControllerFactory for Config {
+impl Factory for Config {
     fn build(self: Arc<Self>, init: Init) -> Box<dyn Controller> {
         Box::new(Gcc::new(init))
     }
@@ -144,7 +144,7 @@ struct Cluster {
 /// The window is GoogCC's congestion window (its target rate times the round trip plus 350ms),
 /// the pacing rate its pacer's, and the bandwidth estimate its target rate. Each probe cluster
 /// GoogCC requests paces at its rate while it runs and reports what it still needs as
-/// [`ControllerMetrics::probe_inflight`], so an application-limited sender can fill it.
+/// [`Metrics::probe_inflight`], so an application-limited sender can fill it.
 #[derive(Clone)]
 pub struct Gcc {
     cc: GoogCcNetworkController,
@@ -487,8 +487,8 @@ impl Controller for Gcc {
         Some(pacer::rate_capacity(self.pacing_rate, self.mtu).max(mtu))
     }
 
-    fn metrics(&self) -> ControllerMetrics {
-        ControllerMetrics {
+    fn metrics(&self) -> Metrics {
+        Metrics {
             congestion_window: self.congestion_window(),
             ssthresh: None,
             pacing_rate: Some(self.pacing_rate),
@@ -513,10 +513,6 @@ impl Controller for Gcc {
 
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(self.clone())
-    }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self
     }
 }
 
