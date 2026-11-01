@@ -291,20 +291,30 @@ impl Feed {
 	}
 }
 
+/// How far a track got toward a live [`Producer`]; each step replaces the last.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Publication {
+	/// Nobody answered the request yet.
+	#[default]
+	Pending,
+	/// A dynamic handler took the request. Its answer is the handler's call, so ending
+	/// the broadcast leaves it pending rather than rejecting it.
+	Claimed,
+	/// Minted by `Request::stage` and not committed yet: the producer writes, but waiting
+	/// subscribers resolve only at `Staged::commit`, with everything written by then.
+	Staged,
+	/// A live Producer was minted and committed.
+	Published,
+}
+
 #[derive(Default)]
 pub(crate) struct TrackState {
 	// The publisher's properties, once known; always Some for Subscriber/Producer.
 	// Copied by value into each group it creates.
 	info: Option<Info>,
-	// Whether a live Producer was minted. A reverse fetch may install `info`
-	// before acceptance, so the two states are deliberately separate.
-	published: bool,
-	// Minted by `Request::stage` and not committed yet: the producer writes, but waiting
-	// subscribers resolve only at `Staged::commit`, with everything written by then.
-	staged: bool,
-	// Whether a dynamic handler took the request. Its answer is the handler's call,
-	// so ending the broadcast leaves it pending rather than rejecting it.
-	claimed: bool,
+	// How far the track got toward a live Producer. A reverse fetch may install `info`
+	// before acceptance, so the two are deliberately separate.
+	publication: Publication,
 
 	// The broadcast this track belongs to. Supplies the cache pool its groups charge
 	// into and the local `cache_duration` ceiling.
@@ -1033,13 +1043,36 @@ impl TrackState {
 		self.drops.get(&sequence).cloned().map(Error::Stream)
 	}
 
-	fn accept(&mut self, info: Info) {
-		self.published = true;
+	/// Whether a Producer was minted, committed or not.
+	fn minted(&self) -> bool {
+		matches!(self.publication, Publication::Staged | Publication::Published)
+	}
+
+	/// A dynamic handler took the request.
+	fn claim(&mut self) {
+		self.publication = Publication::Claimed;
+	}
+
+	/// Mint the Producer, holding waiting subscribers until [`Self::commit`].
+	fn stage(&mut self, info: Info) {
+		self.publication = Publication::Staged;
+		self.install(info);
+	}
+
+	/// Resolve waiting subscribers with what the minted Producer wrote.
+	fn commit(&mut self) {
+		debug_assert_eq!(self.publication, Publication::Staged, "only a staged track commits");
+		self.publication = Publication::Published;
+	}
+
+	/// Mint the Producer and resolve waiting subscribers at once.
+	fn publish(&mut self, info: Info) {
+		self.publication = Publication::Published;
 		self.install(info);
 	}
 
 	fn poll_info(&self) -> Poll<Result<Info>> {
-		if let Some(info) = self.info.as_ref().filter(|_| !self.staged) {
+		if let Some(info) = self.info.as_ref().filter(|_| self.publication != Publication::Staged) {
 			Poll::Ready(Ok(info.clone()))
 		} else if let Some(err) = &self.abort {
 			// Aborted before anyone served it, so the info can never arrive: fail the
@@ -3053,7 +3086,7 @@ impl Producer {
 		let name = name.into();
 		let info = info.into().unwrap_or_default();
 		let state = TrackState::spawn(broadcast.clone());
-		state.write().ok().expect("a new track is open").accept(info.clone());
+		state.write().ok().expect("a new track is open").publish(info.clone());
 		let alive = Alive::new(name.clone(), state.clone());
 		alive.publish(None);
 		Self {
@@ -4169,7 +4202,7 @@ impl TrackWeak {
 		let Ok(mut state) = producer.write() else {
 			return false;
 		};
-		if state.published || state.claimed || state.abort.is_some() {
+		if state.publication != Publication::Pending || state.abort.is_some() {
 			return false;
 		}
 		state.abort = Some(err);
@@ -4951,7 +4984,7 @@ impl Consumer {
 		self.with_state(|state| {
 			state.is_some_and(|state| {
 				let state = state.read();
-				state.routes.is_none() && state.published && !state.closed && state.feed.is_live()
+				state.routes.is_none() && state.minted() && !state.closed && state.feed.is_live()
 			})
 		})
 	}
@@ -8174,7 +8207,7 @@ impl Staged {
 	pub(crate) fn commit(mut self) -> Producer {
 		let producer = self.producer.take().expect("taken only by commit");
 		if let Ok(mut state) = producer.state.write() {
-			state.staged = false;
+			state.commit();
 		}
 		producer
 	}
@@ -8357,7 +8390,7 @@ impl Request {
 	/// Mark this request as taken by a dynamic handler, which alone decides its answer.
 	pub(super) fn claim(self) -> Self {
 		if let Ok(mut state) = self.state.write() {
-			state.claimed = true;
+			state.claim();
 		}
 		self
 	}
@@ -8399,8 +8432,7 @@ impl Request {
 		// tolerate it: the Producer we hand back simply can't write.
 		let open = match self.state.write() {
 			Ok(mut state) => {
-				state.accept(info.clone());
-				state.staged = true;
+				state.stage(info.clone());
 				if let RequestedStart::Pending(floor) = self.requested_start {
 					state.set_start(floor, true);
 				}
