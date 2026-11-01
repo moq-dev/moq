@@ -277,6 +277,7 @@ async function guardedPlayback(
 	if (live) next.mockRestore();
 	class Codec {
 		state = "unconfigured";
+		decodeQueueSize = 0;
 		// Like WebCodecs, a configure requires a key chunk before any delta.
 		#keyRequired = true;
 		readonly callbacks: VideoDecoderInit;
