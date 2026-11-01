@@ -17,6 +17,12 @@ pub(crate) struct Pacer {
     /// Inputs [`Self::capacity`] was derived from, or `None` if it was derived from a pacing rate
     last_window_inputs: Option<WindowInputs>,
     tokens: u64,
+    /// Bytes sent past the tokens on hand, repaid before any new credit counts
+    ///
+    /// A transport checks the pace of a datagram while the packet before it is still being
+    /// built, so a burst can release two packets on one packet's credit. Without a debt the
+    /// second would go free, doubling the rate whenever the burst budget is a single packet.
+    debt: u64,
     max_bytes_per_second: Option<u64>,
     prev: Instant,
 }
@@ -45,6 +51,7 @@ impl Pacer {
             capacity,
             last_window_inputs: Some(WindowInputs { window, mtu }),
             tokens: capacity,
+            debt: 0,
             max_bytes_per_second,
             prev: now,
         }
@@ -52,7 +59,26 @@ impl Pacer {
 
     /// Record that a packet has been transmitted.
     pub(crate) fn on_transmit(&mut self, packet_length: u16) {
-        self.tokens = self.tokens.saturating_sub(packet_length.into())
+        let bytes = u64::from(packet_length);
+        match self.tokens.checked_sub(bytes) {
+            Some(tokens) => self.tokens = tokens,
+            None => {
+                // Bounded, so packets sent unpaced, as loss probes are, cost one burst at most
+                let debt = self.debt + bytes - self.tokens;
+                self.debt = debt.min(self.capacity.max(bytes));
+                self.tokens = 0;
+            }
+        }
+    }
+
+    /// Adds `earned` bytes of credit, repaying any debt first
+    fn refill(&mut self, earned: u64) {
+        let repaid = earned.min(self.debt);
+        self.debt -= repaid;
+        self.tokens = self
+            .tokens
+            .saturating_add(earned - repaid)
+            .min(self.capacity);
     }
 
     /// Return how long we need to wait before sending `bytes_to_send`
@@ -94,7 +120,7 @@ impl Pacer {
         }
 
         // if we can already send a packet, there is no need for delay
-        if self.tokens >= bytes_to_send {
+        if self.debt == 0 && self.tokens >= bytes_to_send {
             return None;
         }
 
@@ -113,7 +139,7 @@ impl Pacer {
 
         let elapsed_rtts = time_elapsed.as_secs_f64() / smoothed_rtt.as_secs_f64();
         let new_tokens = (window as f64 * 1.25 * elapsed_rtts).round() as u64;
-        self.tokens = self.tokens.saturating_add(new_tokens).min(self.capacity);
+        self.refill(new_tokens);
 
         // In the unlikely event that we're getting polled faster than tokens are generated, ensure
         // that `elapsed_rtts` can grow until we make progress.
@@ -122,12 +148,12 @@ impl Pacer {
         }
 
         // if we can already send a packet, there is no need for delay
-        if self.tokens >= bytes_to_send {
+        if self.debt == 0 && self.tokens >= bytes_to_send {
             return None;
         }
 
         let unscaled_delay = smoothed_rtt
-            .checked_mul((bytes_to_send.max(self.capacity) - self.tokens) as _)
+            .checked_mul((bytes_to_send.max(self.capacity) - self.tokens + self.debt) as _)
             .unwrap_or(Duration::MAX)
             / window;
 
@@ -175,14 +201,14 @@ impl Pacer {
         // pay for a single byte is carried over rather than discarded. Without this, a slow
         // rate polled frequently would never accumulate anything.
         if new_tokens > 0 {
-            self.tokens = self.tokens.saturating_add(new_tokens).min(self.capacity);
+            self.refill(new_tokens);
             self.prev = now;
         }
 
         // Capped at the burst budget so that a `bytes_to_send` exceeding the whole bucket is
         // still released eventually, rather than waiting for a level the bucket never reaches.
         let target = Ord::min(bytes_to_send, self.capacity);
-        if self.tokens >= target {
+        if self.debt == 0 && self.tokens >= target {
             return None;
         }
 
@@ -190,7 +216,7 @@ impl Pacer {
         // the same interval on every poll and never retire, stalling the connection.
         // Round up, so the wait always earns the whole shortfall. At a high rate it can be under
         // a nanosecond, and truncating that to zero would re-arm the timer at `now` forever.
-        let deficit = target - self.tokens;
+        let deficit = target.saturating_sub(self.tokens) + self.debt;
         let nanos = (u128::from(deficit) * 1_000_000_000).div_ceil(u128::from(rate));
         Some(now + Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX)))
     }
@@ -701,6 +727,41 @@ mod tests {
         assert_eq!(
             resume - now,
             Duration::from_secs_f64(deficit as f64 / RATE as f64)
+        );
+    }
+
+    /// A transport checks a datagram's pace while the packet before it is unfinished, asking for
+    /// both. Under 2 Mbit/s the burst budget is one packet, so both leave on its credit, and the
+    /// second is repaid before the next leaves rather than going free at twice the rate.
+    #[test]
+    fn repays_a_packet_sent_past_the_burst_budget() {
+        // 100 KB/s, whose 10ms burst budget is under one packet
+        const RATE: u64 = 100_000;
+        let mtu = 1200;
+        let rtt = Duration::from_millis(50);
+        let now = Instant::now();
+        let metrics = paced_metrics(1_000_000, RATE);
+        let mut pacer = Pacer::new(rtt, 1_000_000, mtu, None, now);
+        assert_eq!(pacer.delay(rtt, u64::from(mtu), mtu, now, metrics), None);
+        assert_eq!(pacer.capacity, u64::from(mtu));
+
+        let mut now = now;
+        let mut sent = 0u64;
+        let start = now;
+        while now - start < Duration::from_secs(1) {
+            match pacer.delay(rtt, 2 * u64::from(mtu), mtu, now, metrics) {
+                Some(resume) => now = resume,
+                None => {
+                    pacer.on_transmit(mtu);
+                    pacer.on_transmit(mtu);
+                    sent += 2 * u64::from(mtu);
+                }
+            }
+        }
+        // One packet of credit on hand at the start, then the rate
+        assert!(
+            sent <= RATE + 2 * u64::from(mtu),
+            "sent {sent} bytes in a second at {RATE} B/s"
         );
     }
 
