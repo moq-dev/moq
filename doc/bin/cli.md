@@ -11,6 +11,11 @@ it locally. On macOS or Linux, install it with
 `curl -fsSL https://moq.sh | sh`, or use cargo, brew, apt, dnf, winget, or
 Docker; see [Install](/setup/install).
 
+Its cryptography comes from [rind](https://github.com/moq-dev/rind), which
+runs on any x86\_64 CPU and on any aarch64 CPU with NEON, including a Raspberry
+Pi 4, CM4, or Zero 2 W on a 64-bit OS. On a CPU missing a feature rind needs,
+`moq` exits at startup naming it.
+
 ## What it does
 
 | Verb | Endpoint | |
@@ -22,6 +27,7 @@ Docker; see [Install](/setup/install).
 | `import` | `rtsp --connect <url>` | Pull an IP camera's stream. |
 | `import` | `archive <url>` | Replay a recording from an object store. |
 | `export` | `fmp4`, `mkv`, `ts`, `flv`, `h264`, `h265` | Write a container to stdout. |
+| `export` | `mp4 --output <file>` | Record a regular MP4 that stays playable if the recording is cut short. |
 | `export` | `hls --listen`, `hls --output <dir>` | Serve the broadcast as HLS over HTTP, record it to a directory, or both. |
 | `export` | `rtmp`, `srt`, `rtc` | Serve plays (`--listen`) or push to a remote (`--connect`). |
 | `export` | `archive <url>` | Record every broadcast under the prefix into an object store. |
@@ -170,7 +176,7 @@ moq --connect https://relay.example.com/anon --broadcast camera.hang \
 
 ## Export
 
-The `fmp4`, `mkv`, `flv`, `h264`, and `h265` exports pick renditions with
+The `fmp4`, `mp4`, `mkv`, `flv`, `h264`, and `h265` exports pick renditions with
 `--video-name`, `--audio-name`, `--video-codec`, `--audio-codec`, `--video <on|off>`,
 and `--audio <on|off>` (both default to `on`). `ts`, `archive`, and the gateways
 export everything and refuse these flags.
@@ -195,6 +201,17 @@ entry are described at once as `avc3` or `hev1`, with SPS, PPS, and VPS kept in
 the samples, so an encoder restarting with a new SPS does not end the export.
 Each keyframe carries them, so a keyframe whose sets never appeared ends it.
 Other video waits for its first keyframe.
+
+`mp4 --output <file>` records to a new file the way OBS's hybrid MP4 does: it is
+fragmented MP4 while recording, so a crash leaves a playable file, and the
+broadcast's end or the first Ctrl-C (or SIGTERM) finishes it as a regular MP4 with
+its index at the end, without copying the media. A second signal exits at once
+and leaves it fragmented. Unlike `fmp4`, a rendition that joins mid-recording is
+kept, though only the finished file indexes it.
+
+```bash
+moq ... export mp4 --output recording.mp4
+```
 
 MPEG-TS export pads to the source's constant mux rate when the catalog
 recorded one, or to `--mux-rate`, on a constant-rate schedule an IRD or groomer
@@ -458,8 +475,8 @@ See [Authentication](/bin/relay/auth).
 ## Retention and latency
 
 `import --max-age` (default 30 s) tells relays how long to keep old groups
-fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export h264`,
-and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
+fetchable, which the [HLS gateway](/bin/hls) depends on. `export fmp4`, `export mp4`,
+`export h264`, and `export h265` take `--max-delay` (default 500 ms): how far a stalled group
 may fall behind the live edge before *this* consumer skips it. Raising
 `--max-age` never delays playback.
 At stdin EOF, `import` keeps the finished broadcast announced for

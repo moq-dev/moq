@@ -259,9 +259,9 @@ extension Json {
             guard let timed = try await ffi.next() else { return nil }
             let event: WindowEvent<Value>
             switch timed.event {
-            case let .push(index, value): event = .push(index: index, value: try decodeJson(value))
-            case let .pop(start, end): event = .pop(start..<end)
-            case let .skip(start, end): event = .skip(start..<end)
+            case .push(let index, let value): event = .push(index: index, value: try decodeJson(value))
+            case .pop(let start, let end): event = .pop(start..<end)
+            case .skip(let start, let end): event = .skip(start..<end)
             }
             return Timed(value: event, timestampUs: timed.timestampUs)
         }
