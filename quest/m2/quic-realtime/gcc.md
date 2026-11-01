@@ -28,10 +28,13 @@ path opens, against BBR3's 5s budget, and the baseline without a target
 reaches 4.9 Mbit/s at the same moment. GoogCC probes in the
 application-limited region only five seconds after it last probed or
 entered that region, and caps every probe at its default 5 Mbit/s maximum,
-so with an 8 Mbit/s target the estimate stops at 5.0 Mbit/s. Whether to hand
-GoogCC the session's probe target (its `OnMaxTotalAllocatedBitrate` probes
-when the allocation rises and caps probes at twice it), raise its maximum,
-or accept GoogCC's cadence is undecided. Once that lands,
+so with an 8 Mbit/s target the estimate stops at 5.0 Mbit/s. Feeding GoogCC
+the session's probe target through `OnMaxTotalAllocatedBitrate` alone does
+not lift that cap, since it caps probes at the lesser of the maximum and
+twice the target, and a 1 Gbit/s maximum broke GoogCC's initial probing.
+Whether to configure the maximum (tuning the initial probes), hand GoogCC
+the target as well, or accept the cap is undecided, and so is whether BBR3's
+5s rise budget applies to GoogCC's 5s probe cadence. Once that lands,
 `rises_toward_target_under_gcc` asserts the rise as `rises_to_target` does
 for BBR3, if the rise budget applies to GCC.
 
