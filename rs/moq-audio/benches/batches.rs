@@ -10,6 +10,11 @@
 //! instructions per input sample (Linux `perf_event_open`, `-` where unavailable),
 //! allocations, allocated bytes and the slowest write of one counted pass. Criterion
 //! then times each case.
+#![expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "host time measures benchmark throughput"
+)]
 
 use std::alloc::{GlobalAlloc, Layout as AllocLayout, System};
 use std::hint::black_box;
