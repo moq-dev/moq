@@ -7710,7 +7710,7 @@ mod tests {
 
 	/// A peer opening control streams at once gets a budget of them accepted per poll,
 	/// leaving the rest for later so the session's other tasks run in between.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_flood_of_control_streams_yields() {
 		use crate::transport::poll::Session as _;
 

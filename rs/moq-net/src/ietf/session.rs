@@ -2742,7 +2742,7 @@ mod tests {
 
 	/// A peer opening uni streams at once gets a budget of them accepted per poll, leaving
 	/// the rest for later so the session's other tasks run in between.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_flood_of_uni_streams_yields() {
 		const VERSION: Version = Version::Draft18;
 		let (local, peer) = crate::transport::memory::pair(Default::default());
@@ -2789,7 +2789,7 @@ mod tests {
 
 	/// A peer opening request streams at once gets a budget of them accepted per poll,
 	/// leaving the rest for later so the session's other tasks run in between.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_flood_of_request_streams_yields() {
 		const VERSION: Version = Version::Draft18;
 		let (local, peer) = crate::transport::memory::pair(Default::default());
