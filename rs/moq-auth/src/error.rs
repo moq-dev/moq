@@ -93,11 +93,11 @@ pub enum Error {
 	InvalidRoot(String),
 
 	/// The path does not overlap the token's root.
-	#[error("path `{0}` does not overlap the token root")]
+	#[error("path {0:?} does not overlap the token root")]
 	RootMismatch(String),
 
 	/// The token grants no access to this path.
-	#[error("token grants no access to path `{0}`")]
+	#[error("token grants no access to path {0:?}")]
 	NoAccess(String),
 
 	/// The key scope allows neither publish nor subscribe.
