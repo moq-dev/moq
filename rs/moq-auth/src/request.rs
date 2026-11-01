@@ -1,4 +1,4 @@
-use moq_clock::Wall;
+use kio::clock::Wall;
 use serde::{Deserialize, Serialize};
 use serde_with::base64::{Base64, UrlSafe};
 use serde_with::formats::Unpadded;
@@ -241,7 +241,7 @@ pub struct Peer {
 	/// SHA-256 of the leaf certificate, hex.
 	pub fingerprint: String,
 	/// The certificate's notAfter.
-	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
+	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
 	pub expires: Option<Wall>,
 	/// The issuer's distinguished name.
 	pub issuer: String,

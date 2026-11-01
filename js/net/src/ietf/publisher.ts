@@ -47,9 +47,9 @@ import * as Message from "./message.ts";
 import * as Namespace from "./namespace.ts";
 import { FetchFrame, Frame, Group as GroupMessage } from "./object.ts";
 import { Parameters } from "./parameters.ts";
-import { DEFAULT_WIRE, fromWire, toWire } from "./priority.ts";
+import { fromWire, toWire } from "./priority.ts";
 import * as Properties from "./properties.ts";
-import { Publish, PublishDone, PublishDoneStatus } from "./publish.ts";
+import { PublishDone, PublishDoneStatus } from "./publish.ts";
 import { type AdvertParams, PublishNamespace, PublishNamespaceUpdate } from "./publish_namespace.ts";
 import { RequestError, RequestOk } from "./request.ts";
 import {
@@ -62,16 +62,16 @@ import {
 	refuseUpdate,
 } from "./request_stream.ts";
 import type { Session } from "./session.ts";
-import { GroupOrder, Subscribe, SubscribeOk } from "./subscribe.ts";
+import { GroupOrder, type Subscribe, SubscribeOk } from "./subscribe.ts";
 import {
 	type SubscribeNamespace,
 	SubscribeNamespaceEntry,
 	SubscribeNamespaceEntryDone,
 } from "./subscribe_namespace.ts";
-import { PublishSkipped, type SubscribeTracks } from "./subscribe_tracks.ts";
+import type { SubscribeTracks } from "./subscribe_tracks.ts";
 import { MalformedAuthToken } from "./token.ts";
 import { TrackStatusOk, type TrackStatusRequest } from "./track.ts";
-import { type IetfVersion, Version } from "./version.ts";
+import type { IetfVersion } from "./version.ts";
 
 /** First wait before re-offering a namespace the peer refused or we couldn't open for. */
 const RETRY_BASE = 100;
@@ -260,31 +260,6 @@ interface RunGroup {
 /** How many data streams a subscription opened, fill streams included. */
 type StreamCount = { opened: number; terminalSent?: boolean };
 
-/** A PUBLISH's state across every pause and resume. */
-interface Published {
-	streams: StreamCount;
-	unlisted: Once<Unlisted>;
-	answer?: { requestId: bigint };
-}
-
-/** How a listed track left the listing: it finished, or it left unfinished. */
-type Unlisted = "finished" | "removed";
-
-/** The next listed track to PUBLISH, ready but for its stream. */
-interface Staged {
-	name: string;
-	info: Info;
-	/** On draft-18, claims the track's one subscription from now on. */
-	claim?: string;
-}
-
-/** What a broadcast's listing woke for. */
-type Woken =
-	| { kind: "track"; event: broadcast.TracksEvent | undefined }
-	| { kind: "opened"; stream: Stream }
-	| { kind: "failed"; err: unknown }
-	| { kind: "changed" };
-
 /** Stop forwarding without ending the subscription. */
 class Paused extends Error {
 	/** Whether an update asked for the pause, which is answered once forwarding stopped. */
@@ -346,8 +321,6 @@ export class Publisher {
 	#quic: WebTransport;
 	#session: Session;
 	#requiresSolicitation: boolean;
-	#listings = new Set<Path.Valid>();
-	#trackClaims = new Map<string, "publish" | number>();
 	// What a joining FETCH needs from each draft-18 SUBSCRIBE, by its request ID, while it lasts:
 	// pending from its arrival until it resolves. Request streams race, so a joining FETCH can
 	// arrive before the subscription it names has.
@@ -482,36 +455,15 @@ export class Publisher {
 		// Draft-22 replaced joining FETCH with fills.
 		const joinable = !Filter.isDraft20(this.#session.version);
 		if (joinable) this.#setJoin(msg.requestId, "pending");
-		const key = JSON.stringify([msg.trackNamespace, msg.trackName]);
-		const claimed = this.#session.version === Version.DRAFT_18;
-		let held = false;
 		try {
 			if (Namespace.reserved(msg.trackNamespace, this.#session.version)) {
 				await refuseReserved(request);
 				return;
 			}
-			if (claimed && this.#trackClaims.get(key) === "publish") {
-				await Message.write(
-					request.writer,
-					RequestError.id,
-					new RequestError({ errorCode: 0x19, reasonPhrase: "track already PUBLISHed" }),
-					this.#session.version,
-				);
-				return;
-			}
-			if (claimed) {
-				this.#trackClaims.set(key, ((this.#trackClaims.get(key) as number | undefined) ?? 0) + 1);
-				held = true;
-			}
 			await this.#serveSubscribe(msg, request);
 		} finally {
 			// A joining FETCH arriving after the subscription ended has no edge to end at.
 			if (joinable) this.#setJoin(msg.requestId, undefined);
-			if (held) {
-				const count = (this.#trackClaims.get(key) as number) - 1;
-				if (count) this.#trackClaims.set(key, count);
-				else this.#trackClaims.delete(key);
-			}
 		}
 	}
 
@@ -722,15 +674,13 @@ export class Publisher {
 		request,
 		track,
 		info,
-		published,
-		streams = published?.streams ?? { opened: 0 },
+		streams = { opened: 0 },
 		answer,
 	}: {
 		msg: Subscribe;
 		request: RequestStream;
 		track: TrackSubscriber;
 		info: Awaited<ReturnType<TrackSubscriber["info"]>>;
-		published?: Published;
 		/** The data streams opened over every time the subscription forwarded. */
 		streams?: StreamCount;
 		/** The update a resumed SUBSCRIBE answers with REQUEST_OK instead of SUBSCRIBE_OK. */
@@ -798,7 +748,7 @@ export class Publisher {
 			// Draft-22 replaced joining FETCH with fills. Older drafts save the Largest Object the
 			// subscription starts after, again on every resume, so a joining FETCH ends exactly
 			// where the subscription begins. Saved before the answer names it.
-			if (!published && !Filter.isDraft20(version)) {
+			if (!Filter.isDraft20(version)) {
 				this.#setJoin(
 					msg.requestId,
 					msg.filter.kind === "nextObject"
@@ -815,14 +765,7 @@ export class Publisher {
 				);
 			}
 
-			if (published) {
-				if (published.answer) {
-					const parameters = new Parameters();
-					if (edge.largest)
-						parameters.largest = { groupId: edge.largest.group, objectId: edge.largest.object };
-					await Message.write(request.writer, RequestOk.id, new RequestOk({ parameters }), version);
-				}
-			} else if (answer) {
+			if (answer) {
 				// The resuming update learns where the subscription now joins.
 				const parameters = new Parameters();
 				if (edge.largest) parameters.largest = { groupId: edge.largest.group, objectId: edge.largest.object };
@@ -874,8 +817,7 @@ export class Publisher {
 					streams,
 				});
 			};
-			if (fill && cache)
-				startFill(answer?.requestId ?? published?.answer?.requestId ?? msg.requestId, fill, cache);
+			if (fill && cache) startFill(answer?.requestId ?? msg.requestId, fill, cache);
 
 			// Every group started, until its stream finishes or resets, and the data streams
 			// opened for PUBLISH_DONE to report.
@@ -1035,20 +977,17 @@ export class Publisher {
 					}),
 					requestEnded,
 					revoked,
-					...(published ? [published.unlisted] : []),
 				]);
-				if (end === "removed") throw new NotFound("track no longer listed");
 				if (end === "revoked") {
 					console.info(`subscription no longer authorized: broadcast=${name} track=${track.name}`);
 					unauthorized = true;
 					unsubscribe();
 				}
-				// A track that finished leaves the listing with TRACK_ENDED, like one served to its end.
-				ended = end === served || end === "finished";
+				ended = end === served;
 			} catch (err: unknown) {
 				publishError = error(err);
 				// Stop forwarding at once: a pause answers only after every data stream closed.
-				if (published || publishError instanceof Paused) {
+				if (publishError instanceof Paused) {
 					unsubscribe();
 					track.close();
 				}
@@ -2245,581 +2184,17 @@ export class Publisher {
 		}
 	}
 
-	/** Answer a request to discover tracks under a namespace prefix. @internal */
+	/** Refuse a request to discover tracks under a namespace prefix: we list none by PUBLISH. @internal */
 	runSubscribeTracks(msg: SubscribeTracks, stream: Stream): Promise<void> {
 		const request = new RequestStream(stream, this.#session, this.#quic);
-		return request.serve(this.#runSubscribeTracks(msg, request));
-	}
-
-	async #runSubscribeTracks(msg: SubscribeTracks, request: RequestStream) {
-		const version = this.#session.version;
-		if (Namespace.reserved(msg.prefix, version)) return refuseReserved(request);
-		const params = msg.parameters;
-		if (
-			params.rangeFilters ||
-			params.trackPropertyFilter ||
-			(version === Version.DRAFT_18 && params.forward !== false)
-		) {
-			return request.refuse("subscribe_namespace", {
-				condition: params.rangeFilters ? "invalid_filter" : "not_supported",
-				reasonPhrase: params.rangeFilters
-					? "Range Filters exceed MAX_FILTER_RANGES=0"
-					: "SUBSCRIBE_TRACKS parameters not supported",
-			});
-		}
-		if (
-			[...this.#listings].some(
-				(prefix) => Path.hasPrefix(prefix, msg.prefix) || Path.hasPrefix(msg.prefix, prefix),
-			)
-		) {
-			await Message.write(
-				request.writer,
-				RequestError.id,
-				new RequestError({ errorCode: 0x30, reasonPhrase: "overlapping SUBSCRIBE_TRACKS prefix" }),
-				version,
-			);
-			return;
-		}
-		this.#listings.add(msg.prefix);
-		const adding = new Signal(true);
-		const skips = new Map<symbol, PublishSkipped>();
-		const changed = new Signal(0);
-		const tasks = new Set<Promise<void>>();
-		const routes = new Map<Path.Valid, { snapshot: Advertised; hold: AbortController }>();
-		const stop = () => {
-			if (!adding.peek()) return;
-			adding.set(false);
-			this.#listings.delete(msg.prefix);
-			skips.clear();
-			changed.update((n) => n + 1);
-		};
-		void request.ended.then(stop);
-		let refusal: Refusal | undefined;
-		const closed = this.#quic.closed.then(
-			() => "closed" as const,
-			() => "closed" as const,
+		return request.serve(
+			Namespace.reserved(msg.prefix, this.#session.version)
+				? refuseReserved(request)
+				: request.refuse("subscribe_namespace", {
+						condition: "not_supported",
+						reasonPhrase: "SUBSCRIBE_TRACKS is not supported",
+					}),
 		);
-		let updates: Promise<void> | undefined;
-		let writing: Promise<void> | undefined;
-		try {
-			await Message.write(request.writer, RequestOk.id, new RequestOk({}), version);
-			updates = (async () => {
-				const framed = await request.next();
-				if (!framed) return request.ended;
-				if (framed.type !== 0x02) throw new ProtocolViolation("expected SUBSCRIBE_TRACKS update");
-				await Message.decode(framed.reader, async (body) => {
-					this.#session.checkRequestId(await body.u62());
-					await Parameters.decode(body, version, "tracks-update");
-				});
-				refusal = { condition: "not_supported", reasonPhrase: "SUBSCRIBE_TRACKS updates are not supported" };
-				stop();
-			})().catch((err) => {
-				if (err instanceof MalformedAuthToken) {
-					refusal = { condition: "malformed_auth_token", reasonPhrase: err.message };
-					stop();
-				} else request.abort(malformed(err, "SUBSCRIBE_TRACKS update"));
-			});
-			writing = (async () => {
-				while (adding.peek()) {
-					const first = skips.entries().next().value;
-					if (!first) {
-						await Signal.race(changed, adding);
-						continue;
-					}
-					skips.delete(first[0]);
-					// A FORWARD=1 listing waits for this to read its next track.
-					changed.update((n) => n + 1);
-					await Message.write(request.writer, PublishSkipped.id, first[1], version);
-				}
-				if (refusal) await request.refuse("subscribe_namespace", refusal);
-				else request.close();
-			})().catch((err) => {
-				request.abort(err);
-			});
-			await race([this.#ready, request.ended]);
-			for (;;) {
-				const table = this.#advertised.peek();
-				const visible =
-					table &&
-					presented(
-						msg.prefix,
-						table,
-						(path) => this.#gate.allows(path) && (!this.#hidden || !hiddenBelow(msg.prefix, path)),
-					);
-				for (const [suffix, route] of routes) {
-					const next = visible?.get(suffix);
-					if (!next || !sameInstance(route.snapshot, next)) {
-						route.hold.abort();
-						routes.delete(suffix);
-					}
-				}
-				if (adding.peek() && visible)
-					for (const [suffix, snapshot] of visible) {
-						if (routes.has(suffix)) continue;
-						const hold = new AbortController();
-						const task = this.#listBroadcast({
-							msg,
-							suffix,
-							epoch: snapshot.route.epoch,
-							hold,
-							adding,
-							skips,
-							changed,
-						})
-							.catch((err) => {
-								if (err instanceof ProtocolViolation) request.abort(err);
-							})
-							.finally(() => {
-								tasks.delete(task);
-								changed.update((n) => n + 1);
-							});
-						tasks.add(task);
-						routes.set(suffix, { snapshot, hold });
-					}
-				if (!adding.peek()) {
-					// Sent PUBLISHes own their subscriptions, but still follow route withdrawal.
-					if (!tasks.size) break;
-					if ((await race([Signal.race(this.#advertised, this.#grant, changed), closed])) === "closed") break;
-				} else {
-					if ((await race([Signal.race(this.#advertised, this.#grant, adding), closed])) === "closed") break;
-				}
-				if (!table) break;
-			}
-		} finally {
-			stop();
-			for (const route of routes.values()) route.hold.abort();
-			await writing;
-			request.close();
-			await Promise.all(tasks);
-			await updates;
-		}
-	}
-
-	/**
-	 * List one broadcast under a SUBSCRIBE_TRACKS: PUBLISH or skip each of its tracks until its
-	 * route goes or the broadcast ends, then let its PUBLISHes run to their end.
-	 *
-	 * A PUBLISH starts only once the peer's stream credit opens its stream, one staged at a time,
-	 * so the PUBLISHes a peer holds are bounded by the credit it grants. The listing is still read
-	 * meanwhile, since an unlisted track's PUBLISH_DONE is what returns that credit; the tracks
-	 * read but not yet PUBLISHed wait in `pending`. A FORWARD=1 listing has nothing to unlist, so
-	 * it reads its next track only once the request stream has taken the last skip.
-	 */
-	async #listBroadcast({
-		msg,
-		suffix,
-		epoch,
-		hold,
-		adding,
-		skips,
-		changed,
-	}: {
-		msg: SubscribeTracks;
-		suffix: Path.Valid;
-		epoch?: Epoch.Valid;
-		hold: AbortController;
-		adding: Signal<boolean>;
-		skips: Map<symbol, PublishSkipped>;
-		changed: Signal<number>;
-	}) {
-		const forward = msg.parameters.forward !== false;
-		const namespace = Path.join(msg.prefix, suffix);
-		// The tracks waiting their turn for a PUBLISH, in listing order.
-		const pending = new Map<string, Info>();
-		// The next track to PUBLISH, waiting on the peer's stream credit.
-		let staged: Staged | undefined;
-		// The stream the next PUBLISH goes out on, once the peer's credit admits it.
-		let opening: Promise<Woken> | undefined;
-		// The listing's next event, read while anything else is awaited.
-		let reading: Promise<Woken> | undefined;
-		// Each sent PUBLISH's entry: setting it says the track is no longer listed.
-		const listed = new Map<string, Once<Unlisted>>();
-		// The tracks with a skip queued, so the broadcast's end cancels only its own.
-		const skipped = new Map<string, symbol>();
-		const tasks = new Set<Promise<void>>();
-		const skip = (name: string) => {
-			const key = Symbol();
-			skipped.set(name, key);
-			skips.set(key, new PublishSkipped(suffix, name));
-			changed.update((n) => n + 1);
-		};
-		const unstage = () => {
-			if (staged?.claim) this.#trackClaims.delete(staged.claim);
-			staged = undefined;
-		};
-		// The PUBLISHes already sent still end when their track is unlisted, so the listing is
-		// still read once cancelled, adding nothing.
-		const cancel = adding.subscribe((active) => {
-			if (active) return;
-			pending.clear();
-			unstage();
-			if (!tasks.size) hold.abort();
-		});
-		let listing: broadcast.Tracks | undefined;
-		try {
-			if (!adding.peek()) return;
-			const source = await this.#resolve(namespace, hold.signal, epoch);
-			listing = source.tracks();
-			for (;;) {
-				// Stage the next pending track that will be PUBLISHed, skipping those that will
-				// not, so a stream is opened only for a PUBLISH that goes out.
-				for (const [name, info] of pending) {
-					if (staged || !adding.peek()) break;
-					pending.delete(name);
-					// Draft-18 allows one subscription per track (section 5.1), so a track the peer
-					// is subscribed to, by its SUBSCRIBE or a PUBLISH still alive, is skipped.
-					// Claimed from now, so a SUBSCRIBE cannot slip in before the PUBLISH goes out.
-					const claim =
-						this.#session.version === Version.DRAFT_18 ? JSON.stringify([namespace, name]) : undefined;
-					if (claim !== undefined) {
-						if (this.#trackClaims.has(claim)) {
-							skip(name);
-							continue;
-						}
-						this.#trackClaims.set(claim, "publish");
-					}
-					staged = { name, info, claim };
-				}
-				if (staged && !opening)
-					opening = Promise.resolve(this.#session.openBi({ timeout: null })).then(
-						(stream): Woken => ({ kind: "opened", stream }),
-						(err: unknown): Woken => ({ kind: "failed", err }),
-					);
-				const waits: PromiseLike<Woken>[] = [];
-				if (opening) waits.push(opening);
-				// A FORWARD=1 listing has nothing to unlist, so it reads its next track only once
-				// the request stream has taken the last skip.
-				if (forward && skips.size) waits.push(Signal.race(changed).then((): Woken => ({ kind: "changed" })));
-				else {
-					reading ??= listing.next().then((event): Woken => ({ kind: "track", event }));
-					waits.push(reading);
-				}
-				let woken: Woken;
-				try {
-					woken = await untilAborted(race(waits), hold.signal);
-				} catch (err) {
-					// A closed broadcast's listing has already ended, after the tracks that left
-					// before it, so it is read to that end whatever withdrew the broadcast: a
-					// PUBLISH whose track finished ends with TRACK_ENDED. Nothing more goes out.
-					if (source.closed.peek() === undefined) throw err;
-					pending.clear();
-					unstage();
-					reading ??= listing.next().then((event): Woken => ({ kind: "track", event }));
-					woken = await reading;
-				}
-				if (woken.kind === "changed") continue;
-				if (woken.kind === "failed") {
-					console.debug(`listed broadcast=${namespace}: PUBLISH stream did not open`, woken.err);
-					break;
-				}
-				if (woken.kind === "opened") {
-					opening = undefined;
-					const next = staged;
-					if (!next || !adding.peek()) {
-						woken.stream.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
-						continue;
-					}
-					staged = undefined;
-					const unlisted = new Once<Unlisted>();
-					listed.set(next.name, unlisted);
-					const task = this.#runPublish({
-						msg,
-						namespace,
-						source,
-						stream: woken.stream,
-						name: next.name,
-						info: next.info,
-						unlisted,
-						adding,
-					})
-						.catch((err) => {
-							if (err instanceof ProtocolViolation) throw err;
-						})
-						.finally(() => {
-							if (next.claim) this.#trackClaims.delete(next.claim);
-							tasks.delete(task);
-							if (!adding.peek() && !tasks.size) hold.abort();
-						});
-					tasks.add(task);
-					void task.catch(() => hold.abort());
-					continue;
-				}
-				reading = undefined;
-				const event = woken.event;
-				if (!event) break;
-				if (event.kind === "synced") continue;
-				if (event.kind === "removed" || event.kind === "finished") {
-					if (staged?.name === event.name) unstage();
-					pending.delete(event.name);
-					listed.get(event.name)?.set(event.kind);
-					listed.delete(event.name);
-					const key = skipped.get(event.name);
-					if (key) skips.delete(key);
-					skipped.delete(event.name);
-					continue;
-				}
-				if (!adding.peek()) continue;
-				if (forward) skip(event.name);
-				else pending.set(event.name, event.info);
-			}
-		} finally {
-			cancel();
-			listing?.close();
-			pending.clear();
-			unstage();
-			// A stream that opens from now on carries nothing.
-			void opening?.then((woken) => {
-				if (woken.kind === "opened")
-					woken.stream.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
-			});
-			for (const entry of listed.values()) entry.set("removed");
-			for (const key of skipped.values()) skips.delete(key);
-			await Promise.all(tasks);
-		}
-	}
-
-	async #runPublish({
-		msg,
-		namespace,
-		source,
-		stream,
-		name,
-		info,
-		unlisted,
-		adding,
-	}: {
-		msg: SubscribeTracks;
-		namespace: Path.Valid;
-		source: broadcast.Consumer;
-		/** The PUBLISH's stream, opened once the peer's credit admitted it. */
-		stream: Stream;
-		name: string;
-		info: Info;
-		unlisted: Once<Unlisted>;
-		adding: Signal<boolean>;
-	}) {
-		const version = this.#session.version;
-		const hold = new AbortController();
-		const stop = adding.subscribe((active) => {
-			if (!active) hold.abort();
-		});
-		// The peer lists the track once its PUBLISH arrives, which may be before the write
-		// returns, so a track that finishes from then on sees the PUBLISH through to its answer
-		// and ends with TRACK_ENDED; a reset would fail the peer's listing.
-		let publishing = false;
-		const removed = unlisted.subscribe((how) => {
-			if (how === "removed" || (how === "finished" && !publishing)) hold.abort();
-		});
-		const request = new RequestStream(stream, this.#session, this.#quic);
-		const cancelled = () => request.abort(new StreamError(StreamCode.Cancel, { message: "listing ended" }));
-		hold.signal.addEventListener("abort", cancelled);
-		try {
-			let peerEnded = false;
-			const ended = request.ended.then(() => {
-				peerEnded = true;
-				hold.abort();
-				return undefined;
-			});
-			const id = await this.#session.nextRequestId(hold.signal);
-			if (id === undefined) return;
-			const defaults = msg.parameters;
-			const subscription = new Subscribe({
-				requestId: id,
-				trackNamespace: namespace,
-				trackName: name,
-				subscriberPriority: defaults.subscriberPriority ?? DEFAULT_WIRE,
-				groupOrder: defaults.groupOrder === GroupOrder.Ascending ? "ascending" : "descending",
-				filter: defaults.subscriptionFilter,
-				propertiesWanted: defaults.includeProperties ?? true,
-			});
-			const parameters = new Parameters();
-			if (Filter.isDraft20(version)) {
-				parameters.subscriberPriority = subscription.subscriberPriority;
-				parameters.groupOrder =
-					subscription.groupOrder === "ascending" ? GroupOrder.Ascending : GroupOrder.Descending;
-				parameters.subscriptionFilter = subscription.filter;
-			}
-			const largest = wireOf(source).largest(name);
-			publishing = true;
-			await Message.write(
-				request.writer,
-				Publish.id,
-				new Publish({
-					requestId: id,
-					trackNamespace: namespace,
-					trackName: name,
-					trackAlias: id,
-					groupOrder: GroupOrder.Descending,
-					contentExists: !!largest,
-					largest: largest && { groupId: BigInt(largest.group), objectId: BigInt(largest.frame) },
-					forward: false,
-					parameters,
-					properties: subscription.propertiesWanted
-						? {
-								priority: toWire(info.priority),
-								groupOrder: Properties.DESCENDING,
-								timescale: info.timescale ?? undefined,
-								maxCacheDuration: info.maxAge === undefined ? undefined : BigInt(info.maxAge),
-							}
-						: {},
-				}),
-				version,
-			);
-			hold.signal.removeEventListener("abort", cancelled);
-			stop();
-			// Once sent, the PUBLISH survives cancellation of its listing.
-			const state: Published = { streams: { opened: 0 }, unlisted };
-			const answer = await untilAborted(request.next(), hold.signal);
-			publishing = false;
-			if (!answer) throw new ProtocolViolation("PUBLISH ended without an answer");
-			if (answer.type === RequestError.id) {
-				await RequestError.decode(answer.reader, version).catch((err) => {
-					throw malformed(err, "REQUEST_ERROR");
-				});
-				return;
-			}
-			if (answer.type !== RequestOk.id && !(version === Version.DRAFT_18 && answer.type === 0x1e))
-				throw new ProtocolViolation("expected PUBLISH_OK");
-			const params = await Message.decode(answer.reader, (body) =>
-				Parameters.decode(body, version, "publish-ok"),
-			).catch((err) => {
-				throw malformed(err, "PUBLISH_OK");
-			});
-			if (params.vars.has(0x32n)) {
-				await this.#publishFailed(request, state.streams);
-				return;
-			}
-			this.#applyPublished(subscription, params);
-			let forward = !Filter.isDraft20(version) && params.forward !== false;
-			for (;;) {
-				if (!this.#gate.allows(namespace) || unlisted.peek() !== undefined) {
-					await Message.write(
-						request.writer,
-						PublishDone.id,
-						new PublishDone({
-							statusCode: !this.#gate.allows(namespace)
-								? PublishDoneStatus.UNAUTHORIZED
-								: unlisted.peek() === "finished"
-									? PublishDoneStatus.TRACK_ENDED
-									: PublishDoneStatus.INTERNAL_ERROR,
-							streamCount: BigInt(state.streams.opened),
-							reasonPhrase: "track no longer listed or granted",
-						}),
-						version,
-					);
-					return;
-				}
-				if (forward) {
-					const fixed = subscribeRange(subscription, {}, version);
-					const track = wireOf(source).subscribe(name, {
-						priority: fromWire(subscription.subscriberPriority),
-						order: subscription.groupOrder,
-						maxDelay: Milli(subscription.maxAge ?? Varint.MAX_U53),
-						groups: fixed.start ? rangeGroups(fixed) : undefined,
-					});
-					let ready: Info;
-					try {
-						ready = await untilAborted(track.info(), hold.signal);
-					} catch (err) {
-						track.close();
-						if (peerEnded) return;
-						if (state.answer) {
-							await refuseUpdate(request.writer, version, "subscribe", this.#failed(err));
-							await this.#publishFailed(request, state.streams);
-						} else {
-							await Message.write(
-								request.writer,
-								PublishDone.id,
-								new PublishDone({
-									statusCode: PublishDoneStatus.INTERNAL_ERROR,
-									streamCount: BigInt(state.streams.opened),
-									reasonPhrase: "resume failed",
-								}),
-								version,
-							);
-						}
-						return;
-					}
-					const paused = await this.#forward({
-						msg: subscription,
-						request,
-						track,
-						info: ready,
-						published: state,
-					});
-					if (!paused) return;
-					await Message.write(request.writer, RequestOk.id, new RequestOk({}), version);
-					forward = false;
-				}
-				const revoked = new Once<true>();
-				const gate = this.#gate.watch(namespace, () => revoked.set(true));
-				let next: Framed | undefined | true | Unlisted;
-				try {
-					next = await race([request.next(), unlisted, revoked, ended]);
-				} finally {
-					gate.dispose();
-				}
-				if (next === true || next === "finished" || next === "removed") {
-					await Message.write(
-						request.writer,
-						PublishDone.id,
-						new PublishDone({
-							statusCode: revoked.peek()
-								? PublishDoneStatus.UNAUTHORIZED
-								: next === "finished"
-									? PublishDoneStatus.TRACK_ENDED
-									: PublishDoneStatus.INTERNAL_ERROR,
-							streamCount: BigInt(state.streams.opened),
-							reasonPhrase: "track no longer listed or granted",
-						}),
-						version,
-					);
-					return;
-				}
-				if (!next) return request.ended;
-				if (next.type !== 0x02) throw new ProtocolViolation("expected PUBLISH REQUEST_UPDATE");
-				let update: Parameters;
-				let updateId: bigint;
-				try {
-					({ params: update, requestId: updateId } = await this.#subscriptionUpdate(next));
-				} catch (err) {
-					if (!(err instanceof MalformedAuthToken)) throw malformed(err, "REQUEST_UPDATE");
-					await refuseUpdate(request.writer, version, "subscribe", {
-						condition: "malformed_auth_token",
-						reasonPhrase: err.message,
-					});
-					await this.#publishFailed(request, state.streams);
-					return;
-				}
-				if (
-					update.rangeFilters ||
-					update.vars.has(0x32n) ||
-					(update.fillParameters && update.forward !== true)
-				) {
-					await refuseUpdate(request.writer, version, "subscribe", {
-						condition: update.rangeFilters ? "invalid_filter" : "not_supported",
-						reasonPhrase: "PUBLISH update parameters not supported",
-					});
-					await this.#publishFailed(request, state.streams);
-					return;
-				}
-				this.#applyPublished(subscription, update);
-				forward = update.forward === true;
-				state.answer = forward ? { requestId: updateId } : undefined;
-				if (!forward) {
-					await Message.write(request.writer, RequestOk.id, new RequestOk({}), version);
-				}
-			}
-		} catch (err) {
-			request.abort(err);
-			throw err;
-		} finally {
-			stop();
-			removed();
-			hold.signal.removeEventListener("abort", cancelled);
-			hold.abort();
-			request.close();
-		}
 	}
 
 	async #subscriptionUpdate(framed: Framed): Promise<{ params: Parameters; requestId: bigint }> {

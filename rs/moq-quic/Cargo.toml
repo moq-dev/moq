@@ -14,10 +14,6 @@ categories = ["network-programming", "asynchronous"]
 [package.metadata.docs.rs]
 features = ["rustls-aws-lc-rs", "ring"]
 
-[package.metadata.cargo-shear]
-# Enables the `web` feature on wasm32-unknown-unknown; never named in code.
-ignored = ["rustls-pki-types"]
-
 [features]
 default = ["ring"]
 aws-lc-rs = ["dep:aws-lc-rs", "aws-lc-rs?/aws-lc-sys", "aws-lc-rs?/prebuilt-nasm", "dep:rustls", "rustls/aws-lc-rs"]
@@ -45,9 +41,10 @@ aws-lc-rs = { version = "1.9", default-features = false, optional = true }
 bytes = { workspace = true }
 fastbloom = { version = "0.17", default-features = false }
 indexmap = { workspace = true }
+# The waiter every `poll_*` wait registers, owned by the caller, and the clock
+# without the runtime, which is meant for dev-dependencies; a driver brings its own.
+kio = { workspace = true }
 lru-slab = "0.1.2"
-# Without the runtime, which is meant for dev-dependencies; a driver brings its own.
-moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 moq-congestion = { workspace = true }
 qlog = { version = "0.18", optional = true }
 rand = { workspace = true }
@@ -59,21 +56,14 @@ thiserror = { workspace = true }
 tinyvec = { version = "1.1", features = ["alloc"] }
 tracing = { version = "0.1.10", default-features = false, features = ["std"] }
 
-# Feature flags & dependencies for wasm
-# wasm-bindgen is assumed for a wasm*-*-unknown target
-[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
-getrandom = { version = "0.4", default-features = false, features = ["wasm_js"] }
-ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"], optional = true }
-# only added as dependency to enforce the `web` feature for this target
-rustls-pki-types = { version = "1.7", features = ["web"] }
-
 [dev-dependencies]
 arbitrary = { version = "1.5", features = ["derive"] }
 assert_matches = "1.1"
+cpu-time = "1.0.0"
 criterion = { package = "bench-harness", path = "../bench-harness" }
 hex-literal = "1"
 # The tests and benches read time through the runtime, as the drivers do.
-moq-clock = { path = "../moq-clock", features = ["sim"] }
+kio = { path = "../kio", features = ["runtime", "sim"] }
 # The tests seed BBR3's probe phases.
 moq-congestion = { workspace = true, features = ["testing"] }
 # The mux module's tests run in the default merge gate.
@@ -82,10 +72,6 @@ proptest = { workspace = true }
 rand_pcg = { workspace = true }
 rcgen = { workspace = true, features = ["pem", "ring"] }
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["env-filter", "fmt", "ansi", "time", "local-time"] }
-wasm-bindgen-test = "0.3.45"
-
-[target.'cfg(not(target_family = "wasm"))'.dev-dependencies]
-cpu-time = "1.0.0"
 
 # Writes the generated fuzzer corpus to disk. Needs the `fuzz` feature, so a default
 # `--all-targets` build skips it rather than failing to find the module.

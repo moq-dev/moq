@@ -26,13 +26,13 @@ async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<u64>, Option<Err
 	let subscription = Subscription::default()
 		.with_range(0..)
 		.with_max_delay(Duration::from_secs(30));
-	let mut sub = moq_clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(subscription))
+	let mut sub = kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")
 		.expect("subscribe");
 	let mut got = Vec::new();
 	loop {
-		match moq_clock::timeout(TIMEOUT, sub.recv_group())
+		match kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("read timeout")
 		{
@@ -43,7 +43,7 @@ async fn read(broadcast: &moq_net::broadcast::Consumer) -> (Vec<u64>, Option<Err
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn an_errored_end_keeps_its_history_across_a_hop() {
 	for name in ["moq-lite-06", "moq-lite-07-wip"] {
 		let version: Version = name.parse().unwrap();
@@ -64,7 +64,7 @@ async fn an_errored_end_keeps_its_history_across_a_hop() {
 		options.server_publish = Some(publisher.consume());
 		options.client_subscribe = Some(subscriber.clone());
 		let session = connect_mock(options).await;
-		let remote = moq_clock::timeout(TIMEOUT, subscriber.consume().follow("bcast", None).unwrap().available())
+		let remote = kio::clock::timeout(TIMEOUT, subscriber.consume().follow("bcast", None).unwrap().available())
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves");
