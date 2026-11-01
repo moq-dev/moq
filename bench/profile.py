@@ -175,9 +175,9 @@ def lock(pid, delay, duration, directory):
     # never sees a worker's switch-in; --switch-events records it. glibc's syscall wrapper
     # keeps no frame pointer, so frame-pointer unwinding drops its caller, lock_contended;
     # DWARF unwinding keeps it. Switch timestamps bound CPU and open waits alike.
-    # The default 512 KiB buffer drops samples at 16 workers; 2 MiB does not.
+    # The default 512 KiB buffer drops samples at 16 workers. SPIKE: 2 MiB still lost one on chat at 16 base workers, 8 MiB too, so 32 MiB.
     subprocess.run(['perf', 'record', '--quiet', '--no-buildid-cache', '-e', EVENT, '-c', '1', '--call-graph', 'dwarf', '--switch-events',
-                    '-k', 'monotonic', '-m', '2M', '-p', str(pid), '-o', str(data), '--', 'sleep', str(duration)], check=True)
+                    '-k', 'monotonic', '-m', '32M', '-p', str(pid), '-o', str(data), '--', 'sleep', str(duration)], check=True)
     after = schedstat(pid, names)
     result, folded = reduce(names, parse(perf_script(data, '--show-switch-events')), before, after)
     (directory / 'lock.json').write_text(json.dumps(result, indent=2) + '\n')
