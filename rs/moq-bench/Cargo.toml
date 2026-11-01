@@ -63,6 +63,7 @@ moq-uring = { workspace = true, optional = true }
 procfs = "0.18"
 
 [dev-dependencies]
+tempfile = { workspace = true }
 # Runs the tests that need a variable set or unset in a child process given it.
 test-env = { path = "../test-env" }
 # test-util enables tokio::time::pause/advance for the deterministic produce tests.

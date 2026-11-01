@@ -1931,8 +1931,8 @@ mod tests {
 	#[test]
 	fn test_file_io_base64url() {
 		let key = create_test_key();
-		let temp_dir = std::env::temp_dir();
-		let temp_path = temp_dir.join("test_jwk.key");
+		let temp_dir = tempfile::tempdir().unwrap();
+		let temp_path = temp_dir.path().join("test_jwk.key");
 
 		// Write key to file as base64url
 		key.to_file(&temp_path).unwrap();
@@ -1969,16 +1969,13 @@ mod tests {
 		} else {
 			panic!("Expected both keys to be OCT variant");
 		}
-
-		// Clean up
-		std::fs::remove_file(temp_path).ok();
 	}
 
 	#[test]
 	fn test_file_io_raw_json() {
 		let key = create_test_key();
-		let temp_dir = std::env::temp_dir();
-		let temp_path = temp_dir.join("test_jwk_raw_json.key");
+		let temp_dir = tempfile::tempdir().unwrap();
+		let temp_path = temp_dir.path().join("test_jwk_raw_json.key");
 
 		// Write key as raw JSON (backwards compat format)
 		let json = serde_json::to_string(&key).unwrap();
@@ -2004,9 +2001,6 @@ mod tests {
 		} else {
 			panic!("Expected both keys to be OCT variant");
 		}
-
-		// Clean up
-		std::fs::remove_file(temp_path).ok();
 	}
 
 	#[cfg(unix)]

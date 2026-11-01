@@ -3065,8 +3065,9 @@ mod tests {
 	#[cfg(all(feature = "uds", unix))]
 	#[tokio::test]
 	async fn certificates_are_empty_without_a_tls_backend() {
+		let dir = tempfile::tempdir().unwrap();
 		let mut config = crate::listen::Config::default();
-		config.unix.bind = Some(PathBuf::from("/tmp/moq-tokio-certificates-test.sock"));
+		config.unix.bind = Some(dir.path().join("certificates.sock"));
 
 		let server = config.init(Default::default()).expect("server init");
 		assert!(server.certificates().fingerprints().is_empty());

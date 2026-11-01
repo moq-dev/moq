@@ -573,9 +573,8 @@ mod tests {
 	async fn report_fails_on_output_error() {
 		tokio::time::pause();
 
-		let dir = std::env::temp_dir().join("moq-bench-stats-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("out.jsonl");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("out.jsonl");
 		std::fs::write(&path, b"").unwrap();
 		// A read-only handle: the first write fails.
 		let file = std::fs::File::open(&path).unwrap();

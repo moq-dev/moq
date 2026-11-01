@@ -3166,9 +3166,8 @@ mod tests {
 	#[test]
 	fn cluster_connect_object_form_round_trip() {
 		let toml = "[cluster]\nconnect = [\"https://a.example/?cost=1\", { url = \"https://b.example/\", cost = 2, egress = 2, token = \"secret\", upstream = true }]\n";
-		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-connect-object-toml.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("cluster-connect-object-toml.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
@@ -3268,9 +3267,8 @@ mod tests {
 		}
 
 		let toml = "[cluster]\nnode = \"https://relay.example.com\"\n\n[cluster.lan]\nenabled = true\nsecret = \"cluster.key\"\napp = \"custom\"\n";
-		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-lan-toml.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("cluster-lan-toml.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
@@ -3297,9 +3295,8 @@ mod tests {
 		}
 
 		let toml = "[cluster.lan]\nenabled = true\nsecret = \"from-toml.key\"\napp = \"from-toml\"\n";
-		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-lan-override.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("cluster-lan-override.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![
@@ -3486,9 +3483,8 @@ mod tests {
 	#[test]
 	fn cluster_connect_api_survives_toml_merge() {
 		let toml = "[cluster.api]\nurl = \"https://api.example.com/cluster/connect\"\ntls.root = [\"api.pem\"]\n";
-		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-connect-api-toml.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("cluster-connect-api-toml.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
