@@ -6173,7 +6173,7 @@ impl Heading {
 		match *held.fill.read() {
 			Fill::Requested => Some(Head::Unnamed),
 			Fill::Serving(_) | Fill::Active => held.fill_largest.map(Head::Group),
-			Fill::Ready { .. } | Fill::Done | Fill::Ended => None,
+			Fill::Ready { .. } | Fill::Done | Fill::Failed { .. } | Fill::Ended => None,
 		}
 	}
 }
