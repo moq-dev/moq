@@ -6,7 +6,7 @@ moq-uring's QUIC transport config (`rs/moq-uring/src/quic/transport.rs`) takes a
 
 ## Plan
 
-Follows [moq-dev/moq#7467](https://github.com/moq-dev/moq/pull/7467) (open), which adds `quic::Config::controller` to moq-tokio, a factory the QUIC backend builds one controller from per connection, and has the iroh backend and the relay's io_uring runtime refuse a config that carries one. This waits on #7467 landing.
+Follows [moq-dev/moq#7467](https://github.com/moq-dev/moq/pull/7467) (open), which adds `quic::Config::controller` to moq-tokio, a factory the QUIC backend builds one controller from per connection, and has the relay's io_uring runtime refuse a config that carries one. This waits on #7467 landing.
 
 Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): m2, in this epic, because shipping `Realtime` "in moq-tokio and moq-uring" (the README's own work) is simpler once moq-uring takes a factory like moq-quic's `transport::Config::congestion` does: the winner becomes one factory both runtimes install, not a new enum variant per crate.
 
