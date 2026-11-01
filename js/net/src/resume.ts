@@ -136,8 +136,15 @@ function ask(source: Source, name: string, retired: AbortSignal, hold?: AbortSig
 	});
 }
 
+let sources = 0;
+
 /** One route's broadcast, held while the front serves it or a reader still reads a copy of it. */
 class Source {
+	/**
+	 * Names this source where it outlives its route, as a front's record of who said what a
+	 * track is: a reference there would keep a retired route's session reachable.
+	 */
+	readonly id = sources++;
 	readonly wire: BroadcastWire;
 	/** The table's handle this was served from, so serving it again is a no-op. */
 	readonly from: broadcast.Consumer;
@@ -1514,8 +1521,11 @@ export class Front {
 	readonly consumer: broadcast.Consumer;
 	#source?: Source;
 	#routes = new Map<string, Route>();
-	/** Each track's properties as first committed, and the source that said so: every later copy must match. */
-	#info = new Map<string, { info: track.Info; source: Source }>();
+	/**
+	 * Each track's properties as first committed, and the {@link Source.id} of the source that said
+	 * so: every later copy must match. Kept for the front's lifetime, so it holds no route.
+	 */
+	#info = new Map<string, { info: track.Info; source: number }>();
 	/** Bumped whenever the source changes, so an answer from a replaced one is dropped. */
 	#changed = new Signal(0);
 	/** Aborted once the current source is replaced, retiring what was asked of it. */
@@ -1719,7 +1729,7 @@ export class Front {
 		const previous = route.served;
 		// The first copy of a track has nothing to match, and the source that said what it is
 		// matches itself.
-		if ((!recorded && !previous) || recorded?.source === source) {
+		if ((!recorded && !previous) || recorded?.source === source.id) {
 			route.serve(source);
 			return;
 		}
@@ -1785,7 +1795,7 @@ export class Front {
 	// never reads a copy a subscription would refuse.
 	async #verify(name: string, source: Source): Promise<void> {
 		const recorded = this.#info.get(name);
-		if (recorded?.source === source) return;
+		if (recorded?.source === source.id) return;
 		let verified = this.#verified.get(source);
 		if (verified?.has(name)) return;
 		const retired = this.#retire.signal;
@@ -1816,7 +1826,7 @@ export class Front {
 	}
 
 	#record(name: string, info: track.Info, source: Source): void {
-		if (!this.#info.has(name)) this.#info.set(name, { info, source });
+		if (!this.#info.has(name)) this.#info.set(name, { info, source: source.id });
 	}
 
 	subscribe(name: string, options?: track.Subscription): track.Subscriber {

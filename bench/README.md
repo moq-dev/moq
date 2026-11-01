@@ -409,12 +409,13 @@ Crashes, wrong bytes, missing frames, a window that presents nothing, or an
 unavailable CPU clock fail the run; timing never does. The nightly runs
 `--smoke` and keeps its run directory as the `bench-browser` artifact.
 
-The in-memory frame, retained-history, and gap ledger paths also run directly in Chromium:
+The in-memory frame, retained-history, gap ledger, and resume-history paths also run directly in Chromium:
 
 ```bash
 nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench drift --out .tmp/drift.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench ledger --out .tmp/ledger.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench resume-history --out .tmp/resume-history.json before=/path/to/main current=. aa=.
 ```
 
 Each variant uses its own workspace source and a persistent page, with one full
@@ -432,7 +433,22 @@ Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
 for mixed millisecond/microsecond timestamps, which exercise exact cross-scale
 comparison.
 
-The browser smoke lane preserves one measured round of all three fixtures, and drift
+`resume-history` moves long-lived logical fronts across lite sessions over the
+in-memory transport, make-before-break as a session draining after GOAWAY does.
+It sweeps fronts, names read per route, and route count, with `stable` names
+(the same ones on every route) against `churn` (new names first answered by each
+route), each read by info lookup, fetch, or subscription and then closed. Once a
+manual clock ages out every cache, full collections from Chromium's exposed `gc`
+let weak references count the retired routes' sessions, transports, broadcast
+handles, and delivered payload buffers still reachable. These counts are exact,
+so any nonzero one fails the run once every sample is written, leaving a retaining
+`before` revision's counts in the JSON. A concluded control must release everything,
+or the fixture fails. `size_bytes` is the JS heap the fronts and their serving
+route hold, from Chromium's precise memory info; `serve_us` (clamped to the
+page's coarse timer) and `read_us` include no setup. Bun's collector scans its
+stack conservatively, so the fixture refuses to run there.
+
+The browser smoke lane preserves one measured round of all four fixtures, and drift
 and ledger also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
