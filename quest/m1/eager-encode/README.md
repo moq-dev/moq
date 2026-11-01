@@ -1,4 +1,4 @@
-# Always-on encoding
+# [S] Always-on encoding
 
 ## Goal
 
@@ -50,9 +50,6 @@ The epic's own work, once the children land:
   [video hardware](/quest/m3/video-hardware.md), and
   [time-addressed consumers](/quest/m1/time-addressing/consumers.md)'s
   HLS-only-viewer clause.
-
-## Required
-
 
 ## Related
 

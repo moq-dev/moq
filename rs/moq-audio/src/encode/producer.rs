@@ -855,7 +855,9 @@ mod tests {
 		// Capture runs on with nobody subscribed, past the default 30-second retention.
 		let at = |index: u64| Timestamp::from_micros(1_000_000 + index * 20_000).unwrap();
 		for index in 1..=1600 {
-			producer.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros() as u64)).unwrap();
+			producer
+				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros() as u64))
+				.unwrap();
 			producer.set_active(false, at(index + 1)).unwrap();
 		}
 		loop {
@@ -877,7 +879,10 @@ mod tests {
 		}
 		assert!(!listed[0].is_stop() && listed[1].is_stop(), "{listed:?}");
 		assert_eq!(listed[0].pts.as_micros(), 1_000_000);
-		assert!(listed[1].pts.as_micros() <= 1_020_000, "the idle gap joined a segment: {listed:?}");
+		assert!(
+			listed[1].pts.as_micros() <= 1_020_000,
+			"the idle gap joined a segment: {listed:?}"
+		);
 		// The replay resumes at the oldest retained frame, 30 seconds before demand returned.
 		assert!(!listed[2].is_stop(), "{listed:?}");
 		assert!(listed[2].pts.as_micros() >= 2_000_000, "{listed:?}");
