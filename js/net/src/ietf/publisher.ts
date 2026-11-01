@@ -26,6 +26,7 @@ import type { Hop, Route } from "../hop.ts";
 import { hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
@@ -1197,7 +1198,7 @@ export class Publisher {
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
 					const read = await race([
-						group.readFrameSequence({ from: slice.skip }),
+						hooks.readGroupFrame(group, false, slice.skip),
 						stream.closed,
 						cancelled,
 						excluded.promise,
@@ -1208,10 +1209,18 @@ export class Publisher {
 					next = read.sequence + 1;
 					if (slice.until !== undefined && read.sequence >= slice.until) break;
 
-					const obj = new Frame({ payload: read.payload, timestamp: read.timestamp });
+					// A frame written in pieces streams its payload after the header.
+					const chunks = read.chunks?.size ? read.chunks : undefined;
+					const obj = chunks
+						? new Frame({ streamed: chunks.size, timestamp: chunks.timestamp })
+						: new Frame({
+								payload: read.chunks ? new Uint8Array(0) : read.frame.payload,
+								timestamp: read.frame.timestamp,
+							});
 					const delta = first ? read.sequence : 0;
 					first = false;
 					await send(() => obj.encode(stream, header.flags, timescale, this.#session.version, delta));
+					if (chunks) await send(() => sendPayload(chunks, (chunk) => stream.write(chunk), stream.closed));
 				}
 
 				// The track ends right after this group's last object, so the marker rides this
