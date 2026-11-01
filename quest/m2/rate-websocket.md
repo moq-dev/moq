@@ -2,8 +2,8 @@
 
 ## Goal
 
-A relay session over the WebSocket fallback is held to its `publish.rate`
-and `subscribe.rate` like a QUIC session, and is admitted instead of refused.
+A relay session over the WebSocket fallback is held to its `publish_rate`
+and `subscribe_rate` like a QUIC session, and is admitted instead of refused.
 When caps are reintroduced, HTTP `/fetch` and `/announced` must refuse them:
 a request has no connection to meter.
 

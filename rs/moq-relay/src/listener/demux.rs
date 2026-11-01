@@ -29,7 +29,7 @@ pub(crate) enum Classified {
 	Http(Stream),
 	Rtmp(Stream),
 	/// `tls://`: its ClientHello offered a moq ALPN, and the handshake negotiated one.
-	Qmux(Stream),
+	Qmux(Box<TlsStream<Accepted>>),
 }
 
 /// The TLS a listener terminates: HTTP's config, and `tls://`'s when it is served.
@@ -76,18 +76,17 @@ pub(crate) async fn classify(accepted: Accepted, tls: Option<&Tls>) -> io::Resul
 		};
 		Ok::<_, io::Error>((start.into_stream(config).await?, qmux.is_some()))
 	};
-	let (mut tls, qmux) = moq_clock::timeout(TLS_HANDSHAKE, handshake)
+	let (mut tls, qmux) = kio::clock::timeout(TLS_HANDSHAKE, handshake)
 		.await
 		.map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
+	if qmux {
+		return Ok(Classified::Qmux(Box::new(tls)));
+	}
 	if tls.get_ref().1.alpn_protocol().is_some() {
-		let stream = Stream {
+		return Ok(Classified::Http(Stream {
 			transport: Transport::Tls(Box::new(tls)),
 			peeked: None,
-		};
-		return Ok(match qmux {
-			true => Classified::Qmux(stream),
-			false => Classified::Http(stream),
-		});
+		}));
 	}
 	let first = tls.read_u8().await?;
 	let stream = Stream {
@@ -171,12 +170,6 @@ impl AsyncWrite for Stream {
 			Transport::Plain(accepted) => Pin::new(accepted).poll_shutdown(cx),
 			Transport::Tls(tls) => Pin::new(tls.as_mut()).poll_shutdown(cx),
 		}
-	}
-}
-
-impl AsRef<TcpStream> for Stream {
-	fn as_ref(&self) -> &TcpStream {
-		self.tcp()
 	}
 }
 

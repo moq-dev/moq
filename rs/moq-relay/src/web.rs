@@ -383,7 +383,7 @@ impl Web {
 		let state = Arc::get_mut(&mut self.state).expect("with_timeout called after routes were built");
 		// hyper adds the header timeout to the clock unchecked, so an unreachable
 		// one would panic on every connection.
-		state.timeout = timeout.filter(|timeout| moq_clock::now().checked_add(*timeout).is_some());
+		state.timeout = timeout.filter(|timeout| kio::clock::now().checked_add(*timeout).is_some());
 		self
 	}
 
@@ -411,12 +411,28 @@ impl Web {
 	/// once across the merged router). GET CORS is applied to the complete router by [`Self::serve`],
 	/// including any routes the embedder merges in without their own policy.
 	pub fn routes(&self) -> Router {
+		// These responses depend on the caller's grant, including when auth or
+		// extraction fails. Publisher bytes must never become active content.
+		let granted = Router::new()
+			.route("/announced", get(serve_announced))
+			.route("/announced/{*prefix}", get(serve_announced))
+			.route("/fetch/{*path}", get(serve_fetch))
+			.layer(axum::middleware::map_response(async |mut response: Response| {
+				let headers = response.headers_mut();
+				headers.insert(
+					http::header::CACHE_CONTROL,
+					http::HeaderValue::from_static("private, no-store"),
+				);
+				headers.insert(
+					http::header::X_CONTENT_TYPE_OPTIONS,
+					http::HeaderValue::from_static("nosniff"),
+				);
+				response
+			}));
 		let app = Router::new()
 			.route("/health", get(serve_health))
 			.route("/certificate.sha256", get(serve_fingerprint))
-			.route("/announced", get(serve_announced))
-			.route("/announced/{*prefix}", get(serve_announced))
-			.route("/fetch/{*path}", get(serve_fetch));
+			.merge(granted);
 
 		// If WebSocket is enabled, add the WebSocket route. Both `/` and
 		// `/{*path}` map to the same handler so a client that dials a bare
@@ -744,32 +760,24 @@ impl WebAcceptor {
 
 	/// Run a `tls://` connection as a MoQ session on its own task, past the idle
 	/// deadline that bounds this acceptor.
-	fn serve_qmux(&self, stream: crate::listener::Stream) {
+	fn serve_qmux(&self, stream: Box<tokio_rustls::server::TlsStream<crate::listener::Accepted>>) {
 		let Some(acceptor) = self.tls.as_ref().and_then(|tls| tls.qmux.clone()) else {
 			return;
 		};
 		let state = self.state.clone();
 		// The admission carries into the session, as a WebSocket upgrade's does.
 		let Some(active) = stream
-			.admission()
+			.get_ref()
+			.0
+			.admission
+			.clone()
 			.and_then(|admission| admission.take())
 			.or_else(|| state.shutdown.activity.enter())
 		else {
 			return;
 		};
-		let tls = stream.tls().expect("tls:// is only classified under TLS");
-		let mut link = moq_tokio::server::Link::default();
-		link.server_name = tls.server_name().map(str::to_owned);
-		link.alpn = tls
-			.alpn_protocol()
-			.and_then(|alpn| std::str::from_utf8(alpn).ok())
-			.map(str::to_owned);
 		tokio::spawn(async move {
-			let Some(request) = state
-				.shutdown
-				.until_deadline(acceptor.accept(stream, link, active))
-				.await
-			else {
+			let Some(request) = state.shutdown.until_deadline(acceptor.accept(*stream, active)).await else {
 				return;
 			};
 			let request = match request {
@@ -1025,7 +1033,7 @@ async fn admit_http(
 	// HTTP read has no handshake deadline to inherit, so the bound starts here.
 	let admit = state.auth.admit(request);
 	let lease = match state.timeout {
-		Some(timeout) => moq_clock::timeout(timeout, admit)
+		Some(timeout) => kio::clock::timeout(timeout, admit)
 			.await
 			.unwrap_or_else(|_| Err(auth::Error::Unavailable("the admission timed out".into()))),
 		None => admit.await,
@@ -1065,7 +1073,8 @@ async fn serve_announced(
 	while let Some(event) = announced.try_next() {
 		if let moq_net::announce::Event::Start(update)
 		| moq_net::announce::Event::Update(update)
-		| moq_net::announce::Event::Restart(update) = event
+		| moq_net::announce::Event::Restart(update)
+		| moq_net::announce::Event::Takeover { announce: update, .. } = event
 		{
 			broadcasts.push(update.prefix);
 		}
@@ -1106,11 +1115,11 @@ async fn serve_fetch(
 
 	tracing::info!(%broadcast, %track, "fetching track");
 
-	let deadline = moq_clock::now() + tokio::time::Duration::from_secs(30);
+	let deadline = kio::clock::now() + tokio::time::Duration::from_secs(30);
 
 	// The lease outlives this handler: the body streams after it returns, so the
 	// response holds the lease and ends it when the last frame is served.
-	let result = moq_clock::timeout_at(deadline, async {
+	let result = kio::clock::timeout_at(deadline, async {
 		// NOTE: The auth token is already scoped to the broadcast.
 		// Block until a route covers the broadcast (within the fetch deadline) so
 		// freshly-connected subscribers don't get a spurious 404 before the announce arrives.
@@ -1166,7 +1175,7 @@ async fn serve_fetch(
 /// `end` event carries the outcome.
 struct ServeGroup {
 	group: moq_net::group::Consumer,
-	deadline: moq_clock::Instant,
+	deadline: kio::clock::Instant,
 	/// Taken when the body ends, so the reason is reported once.
 	lease: Option<auth::Lease>,
 }
@@ -1177,7 +1186,7 @@ impl ServeGroup {
 			return Ok(None);
 		};
 		tokio::select! {
-			res = moq_clock::timeout_at(self.deadline, self.group.read_frame()) => match res {
+			res = kio::clock::timeout_at(self.deadline, self.group.read_frame()) => match res {
 				Ok(res) => Ok(res?.map(|frame| frame.payload)),
 				Err(_) => Err(moq_net::Error::Timeout),
 			},
@@ -1214,16 +1223,15 @@ impl IntoResponse for ServeGroup {
 				}
 			}
 		});
-		Response::new(Body::from_stream(frames))
+		(
+			[(http::header::CONTENT_TYPE, "application/octet-stream")],
+			Body::from_stream(frames),
+		)
+			.into_response()
 	}
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 
@@ -1245,6 +1253,92 @@ mod tests {
 	use std::io::Write;
 	use tempfile::TempDir;
 	use tokio::io::{AsyncRead, AsyncWrite};
+
+	#[tokio::test(start_paused = true)]
+	async fn authenticated_http_responses_are_private_and_cannot_be_sniffed() {
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
+		let auth = crate::auth::Config {
+			public_subscribe: vec![moq_auth::Pattern::all()],
+			..Default::default()
+		}
+		.init("test", &moq_tokio::tls::Connect::default(), false)
+		.unwrap();
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let broadcast = cluster.origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast
+			.create_track(
+				"video",
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)
+			.unwrap();
+		let mut group = track.append_group().unwrap();
+		const PAYLOAD: &[u8] = b"<!doctype html><script>alert(1)</script>";
+		group.write_frame(moq_net::Timestamp::ZERO, PAYLOAD).unwrap();
+		group.finish().unwrap();
+		let mut refused = Web::new(
+			auth::Auth::refuse("test"),
+			cluster.clone(),
+			certificates.clone(),
+			Config::default(),
+		)
+		.routes();
+		for path in ["/fetch/room/video", "/announced/room"] {
+			let mut request = http::Request::builder().uri(path).body(Body::empty()).unwrap();
+			request
+				.extensions_mut()
+				.insert(ConnectInfo("127.0.0.1:1234".parse::<net::SocketAddr>().unwrap()));
+			let response = refused.call(request).await.unwrap();
+			assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+			assert_eq!(response.headers()[http::header::CACHE_CONTROL], "private, no-store");
+			assert_eq!(response.headers()[http::header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+		}
+		let web = Web::new(auth, cluster, certificates, Config::default());
+		let mut routes = web.routes();
+		for (path, expected, content_type) in [
+			(
+				"/fetch/room/video?group=0",
+				StatusCode::OK,
+				Some("application/octet-stream"),
+			),
+			("/fetch/room/video?group=1", StatusCode::NOT_FOUND, None),
+			("/fetch/room/video?group=invalid", StatusCode::BAD_REQUEST, None),
+			("/announced/room", StatusCode::OK, Some("text/plain; charset=utf-8")),
+			("/announced", StatusCode::OK, Some("text/plain; charset=utf-8")),
+		] {
+			let mut request = http::Request::builder().uri(path).body(Body::empty()).unwrap();
+			request
+				.extensions_mut()
+				.insert(ConnectInfo("127.0.0.1:1234".parse::<net::SocketAddr>().unwrap()));
+			let response = routes.call(request).await.unwrap();
+			assert_eq!(response.status(), expected, "{path}");
+			assert_eq!(
+				response.headers().get(http::header::CACHE_CONTROL).unwrap(),
+				"private, no-store",
+				"{path}"
+			);
+			assert_eq!(
+				response.headers().get(http::header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+				"nosniff",
+				"{path}"
+			);
+			if let Some(content_type) = content_type {
+				assert_eq!(
+					response.headers().get(http::header::CONTENT_TYPE).unwrap(),
+					content_type,
+					"{path}"
+				);
+			}
+			if path == "/fetch/room/video?group=0" {
+				assert_eq!(
+					axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+					PAYLOAD
+				);
+			}
+		}
+	}
 
 	#[tokio::test(start_paused = true)]
 	async fn http_refusals_count_at_both_endpoints() {
@@ -2093,6 +2187,70 @@ mod tests {
 		running.await.unwrap().unwrap();
 	}
 
+	/// `tls://` on the HTTPS port applies the listen client-certificate policy, as the
+	/// `listen.tcp` `tls://` listener does: under pinned peers a dial without a pinned
+	/// certificate is refused. HTTPS on the same port is never asked for one.
+	#[cfg(feature = "quic")]
+	#[tokio::test]
+	async fn https_listener_verifies_tls_qmux_client_certificates() {
+		use rustls::pki_types::{CertificateDer, pem::PemObject};
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let dir = TempDir::new().unwrap();
+		let (ca, cert, key) = make_certs(&dir);
+		let mut config = crate::Config::default();
+		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.listen.tls.generate = vec!["localhost".into()];
+		config.listen.tls.peers = Some(moq_tokio::tls::Peers::new());
+		config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
+		config.web.https.cert = vec![cert];
+		config.web.https.key = vec![key];
+		config.auth.public = vec![moq_auth::Pattern::all()];
+		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let https = relay.web_addrs().https.unwrap();
+		let ready = relay.ready();
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+		ready.wait().await.unwrap();
+
+		let url: url::Url = format!("tls://localhost:{}/room", https.port()).parse().unwrap();
+		let mut config = moq_tokio::connect::Config::default();
+		config.tls.insecure = Some(true);
+		let connection = config
+			.init(Default::default())
+			.unwrap()
+			.with_reconnect(false)
+			.connect(url);
+		let refused = tokio::time::timeout(std::time::Duration::from_secs(10), connection.established())
+			.await
+			.expect("the tls:// dial timed out");
+		assert!(refused.is_err(), "tls:// accepted a dial without a pinned certificate");
+
+		let mut roots = rustls::RootCertStore::empty();
+		for cert in CertificateDer::pem_slice_iter(&std::fs::read(&ca).unwrap()) {
+			roots.add(cert.unwrap()).unwrap();
+		}
+		let mut client = rustls::ClientConfig::builder()
+			.with_root_certificates(roots)
+			.with_no_client_auth();
+		client.alpn_protocols = vec![b"http/1.1".to_vec()];
+		let tcp = tokio::net::TcpStream::connect(https).await.unwrap();
+		let mut client = tokio_rustls::TlsConnector::from(Arc::new(client))
+			.connect("localhost".try_into().unwrap(), tcp)
+			.await
+			.expect("HTTPS asked for a client certificate");
+		client
+			.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+			.await
+			.unwrap();
+		let mut response = String::new();
+		let _ = client.read_to_string(&mut response).await;
+		assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+		trigger.start();
+		running.await.unwrap().unwrap();
+	}
+
 	/// Each web listener splits its connections by their first bytes: HTTP reaches the
 	/// router, while plaintext RTMP and RTMPS (TLS with no ALPN) reach the RTMP
 	/// consumer with the classifying byte intact, until serving stops. Untaken, RTMP
@@ -2330,11 +2488,11 @@ mod tests {
 		let serving = tokio::spawn(web.serve(Router::new()));
 
 		let mut tcp = tokio::net::TcpStream::connect(http).await.unwrap();
-		let start = std::time::Instant::now();
+		let start = kio::clock::now();
 		tcp.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n").await.unwrap();
 
 		let mut rest = Vec::new();
-		tokio::time::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
+		kio::clock::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
 			.await
 			.expect("slow headers held the connection open")
 			.ok();
@@ -2368,13 +2526,13 @@ mod tests {
 		let serving = tokio::spawn(web.serve(routes));
 
 		let mut tcp = tokio::net::TcpStream::connect(http).await.unwrap();
-		let start = std::time::Instant::now();
+		let start = kio::clock::now();
 		tcp.write_all(b"GET /announced HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
 			.await
 			.unwrap();
 
 		let mut response = Vec::new();
-		tokio::time::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut response))
+		kio::clock::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut response))
 			.await
 			.expect("the unanswered admission held the request open")
 			.ok();
@@ -2486,7 +2644,7 @@ mod tests {
 		tcp.write_all(&frame).await.unwrap();
 
 		let mut rest = Vec::new();
-		tokio::time::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
+		kio::clock::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
 			.await
 			.expect("the socket waited to buffer a frame larger than a record")
 			.ok();

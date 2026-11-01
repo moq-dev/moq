@@ -37,6 +37,12 @@ pub(crate) struct Accepted {
 	pub(crate) admission: Option<Admission>,
 }
 
+impl Accepted {
+	pub(crate) fn local_addr(&self) -> io::Result<SocketAddr> {
+		self.stream.local_addr()
+	}
+}
+
 #[cfg(all(test, unix, feature = "websocket"))]
 impl Accepted {
 	/// A socket accepted outside [`Listener`], holding no admission.
@@ -62,6 +68,11 @@ impl AsyncWrite for Accepted {
 	}
 	fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
 		Pin::new(&mut self.stream).poll_shutdown(cx)
+	}
+}
+impl AsRef<TcpStream> for Accepted {
+	fn as_ref(&self) -> &TcpStream {
+		&self.stream
 	}
 }
 #[cfg(unix)]
@@ -202,7 +213,7 @@ impl AddrListener<Accepted, Peer> for Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						moq_clock::sleep(delay).await;
+						kio::clock::sleep(delay).await;
 					}
 				}
 			}

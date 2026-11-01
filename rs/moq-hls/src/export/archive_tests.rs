@@ -164,7 +164,7 @@ impl Recording {
 		// Subscribed before anything is published, so every group is recorded live.
 		for source in sources.values() {
 			while source.media.subscription().is_none() || source.track.subscription().is_none() {
-				tokio::time::sleep(Duration::from_millis(1)).await;
+				kio::clock::sleep(Duration::from_millis(1)).await;
 			}
 		}
 		Self {
@@ -207,7 +207,7 @@ impl Recording {
 
 	/// Wait until the recorder subscribed to every track and stored what was published.
 	async fn stored(&self) {
-		tokio::time::sleep(Duration::from_secs(5)).await;
+		kio::clock::sleep(Duration::from_secs(5)).await;
 	}
 
 	/// End the source cleanly, then wait for the recorder to mark the archive complete.
@@ -265,7 +265,7 @@ fn catalog() -> hang::Catalog {
 
 /// An archive served back through an origin by a consumer, and a broadcaster exporting it.
 struct Replay {
-	broadcaster: Arc<Broadcaster>,
+	broadcaster: Broadcaster,
 	/// Keeps the served broadcast's origin open.
 	_origin: moq_net::origin::Producer,
 	consumer: tokio::task::JoinHandle<moq_archive::Result<()>>,
@@ -284,8 +284,8 @@ impl Replay {
 		let consumer = tokio::spawn(consumer.run());
 		broadcast.announce(Default::default()).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "rec").await, Config::default());
-		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "rec").await, Config::default());
+		kio::clock::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
 			.expect("a rendition becomes playable or fails");
 
@@ -305,7 +305,7 @@ impl Replay {
 
 	async fn playlist(&self, kind: Kind, name: &str) -> String {
 		let rendition = self.rendition(kind, name);
-		tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None))
+		kio::clock::timeout(Duration::from_secs(5), rendition.playlist(None))
 			.await
 			.expect("playlist renders")
 			.unwrap()
@@ -319,7 +319,7 @@ impl Replay {
 			if ready(&playlist) {
 				return playlist;
 			}
-			tokio::time::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 		}
 		panic!("{name} playlist never became ready");
 	}
