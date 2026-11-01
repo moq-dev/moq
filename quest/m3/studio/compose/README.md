@@ -34,8 +34,8 @@ Decided 2026-10-26 (maintainer), the studio's flagship and first in its epic:
 - **Layout:** the live scene state (items, transforms, transitions, and each
   element's priority and toggleable flag) as a hang JSON track on the media
   clock, so any host composites the same frame the studio shows.
-- **Browser build:** whichever line [Rust-backed @moq/net](/quest/m2/rs2ts/README.md)
-  lands (WASM first, then JS built from Rust). Not fixed to WASM.
+- **Browser build:** whichever line [JS-only @moq/net from Rust](/quest/m2/rs2ts-js.md)
+  lands. moq's WASM support was removed on 2026-10-31.
 - **Cost:** every source and the program follow MoQ's pull model and are
   encoded only while something subscribes, so a fallback nobody uses costs
   nothing.

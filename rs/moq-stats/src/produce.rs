@@ -10,7 +10,7 @@ use moq_clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Tier, Traffic, TrafficEntry};
 use moq_net::{Epoch, Path, broadcast, kio, origin, track};
 use serde::Serialize;
-use web_async::spawn;
+use tracing::Instrument as _;
 
 use crate::{
 	Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track, presence_track, totals_track,
@@ -196,7 +196,7 @@ impl Producer {
 			linger,
 			interval,
 		};
-		spawn(task.run(Arc::downgrade(&keepalive)));
+		tokio::spawn(task.run(Arc::downgrade(&keepalive)).in_current_span());
 
 		Self {
 			registry,

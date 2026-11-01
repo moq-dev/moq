@@ -1,8 +1,4 @@
 #![warn(missing_docs)]
-#![cfg_attr(
-	test,
-	expect(clippy::disallowed_methods, reason = "tests read the host clock directly")
-)]
 
 //! Media muxers and demuxers for MoQ.
 //!
