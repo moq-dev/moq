@@ -135,8 +135,8 @@ removed).
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's identity, replacing the ANNOUNCE_TAKEOVER predecessor design
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
-- [A tightened SUBSCRIBE keeps the start's budget honest](/quest/m1/start-budget-update.md) - a relay copy records the delay its start was resolved under, so a SUBSCRIBE_UPDATE tightening cannot make later readers skip fillable history
 - [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for a per-rendition `hls` field
+- [Subscriptions take a Delay { min, max }](/quest/m1/subscription-delay.md) - one Delay type across every subscription API, and omitted max means 0 in every binding
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Smoke token subject](/quest/m1/smoke-token-subject.md) - condition: grant subject ships; then the release smoke test signs with `--subject`
 - [Moxygen pin bump](/quest/m1/moxygen-pin-bump.md) - waiting on moxygen#264, then the TRACK_STATUS patch is dropped
@@ -160,7 +160,6 @@ removed).
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - remove the actionlint queue ignore once a release after 1.7.12 reaches the dev shell
 - [crates.io trusts the workflow](/quest/m1/crates-trusted-publisher.md) - maintainer action: every published crate gets a trusted publisher for `release-rs.yml`
 - [Rust releases publish through OIDC](/quest/m1/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
-- [kio's clock tests pass under cargo test](/quest/m1/clock-test-process.md) - `paused_runtimes_own_their_anchors` stops depending on being first in its process
 - [The JS stalled-consumer eviction test ages its groups](/quest/m1/js-cache-age-test.md) - the test drives the clock the cache reads, so it can fail
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
@@ -168,11 +167,11 @@ removed).
 - [Probe scenario seeds randomize the media's start](/quest/m1/sim-media-offset.md) - each seed draws its own media start offset against the handshake and competitor, so probe budgets are not judged against one shared timing alignment
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
-- [Next Object on a cold Rust copy](/quest/m1/next-object-cold-copy.md) - a join after an upstream group report starts at the first frame received, never skipping
 - [Legacy lite close drain](/quest/m1/lite-legacy-close-drain.md) - a lite-01..06 graceful close never cuts a final group the subscriber has not read
-- [moqsrc max-delay](/quest/m1/gst-max-delay.md) - GStreamer's `moqsrc` takes a `max-delay` property instead of a hard-coded 1 s budget
 - [JS join tests cover draft 20](/quest/m1/join-tests-draft20.md) - join.test.ts runs on every supported draft, not just 18 and 22
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
+- [Audit retention defaults](/quest/m1/max-age-defaults.md) - every max-age default listed, with a proposed finite default for the maintainer
+- [JS ordered reads wait only on owed groups](/quest/m1/js-ordered-owed.md) - @moq/net matches Rust's owed-group wait
 - [Binding announcements always carry captures](/quest/m1/ffi-required-captures.md) - moq-ffi and its generated bindings make `captures` a required list, as #7266 always sets it
 - [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - a decoder-identity change under the same codec string starts a new init and segment tag
 - [A JS reader finishes after a clean close](/quest/m1/js-close-range-finish.md) - a range ending below the cache delivers what's held and then ends
