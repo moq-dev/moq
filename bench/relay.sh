@@ -152,12 +152,7 @@ start_relay() {
         log=$directory/relay-$attempt.log
         relay_config "$config" "$port" "$runtime" "$workers"
 
-        # SPIKE: BENCH_RELAY_CPUS pins the relay (taskset execs, so the PID stays the relay's).
-        if [[ -n ${BENCH_RELAY_CPUS:-} ]]; then
-            env "${environment[@]}" taskset -c "$BENCH_RELAY_CPUS" "$relay" "$config" >"$log" 2>&1 &
-        else
-            env "${environment[@]}" "$relay" "$config" >"$log" 2>&1 &
-        fi
+        env "${environment[@]}" "$relay" "$config" >"$log" 2>&1 &
         RELAY_PID=$!
 
         for _ in {1..100}; do
@@ -288,12 +283,7 @@ run_workload() {
     local relay_pid=$RELAY_PID generator_pid='' finished url
     local profile=$directory/$PROFILE
     url=$(relay_url "$RELAY_PORT")
-    local -a load=()
-    # SPIKE: BENCH_LOAD_CPUS pins the load generator away from the relay's cores.
-    if [[ -n ${BENCH_LOAD_CPUS:-} ]]; then
-        load=(taskset -c "$BENCH_LOAD_CPUS")
-    fi
-    load+=("$LOAD_BIN" --file "$config"
+    local -a load=("$LOAD_BIN" --file "$config"
         --connect "$url" --name "bench-$label-$workload" --startup 2s --report 500ms
         --output "$stats" "${overrides[@]}")
     case $TRANSPORT in
@@ -315,15 +305,6 @@ run_workload() {
         HOST_PID=$!
         # The second half of the host window, matching the summary's throughput window.
         # Its own process group, so cleanup also stops perf and its workload.
-        # SPIKE: BENCH_STAT counts the relay's instructions over the unprofiled run's
-        # steady window (the same 5 s as the summary's throughput and the profiles).
-        local stat_pid=''
-        if [[ -n ${BENCH_STAT:-} && -z $PROFILE ]]; then
-            (sleep 5 && exec perf stat -x, -o "$directory/stat.csv" \
-                -e cpu_core/instructions/u,cpu_atom/instructions/u,cpu_core/instructions/k,cpu_atom/instructions/k,task-clock \
-                -p "$relay_pid" -- sleep 5) >"$directory/stat.log" 2>&1 &
-            stat_pid=$!
-        fi
         case $PROFILE in
             lock | cpu)
                 setsid python3 "$ROOT/bench/profile.py" "$PROFILE" "$relay_pid" "$profile" --delay 5 --duration 5 \
@@ -345,10 +326,6 @@ run_workload() {
             return 1
         fi
         HOST_PID=
-        if [[ -n $stat_pid ]] && ! wait "$stat_pid"; then
-            cat "$directory/stat.log" >&2
-            return 1
-        fi
         if [[ -n $PROFILE ]]; then
             if ! wait "$PROFILE_PID"; then
                 cat "$directory/profile.log" >&2
