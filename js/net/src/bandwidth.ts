@@ -26,8 +26,17 @@ export interface Want {
 	max: number;
 }
 
+/** A want in the order it is served, with what was left of the estimate before it. */
+interface Served {
+	id: number;
+	priority: number;
+	max: number;
+	budget: number;
+}
+
 /**
- * Divide `estimate` among `wants`, returning the slice for `id`.
+ * One division of `estimate` among the demanded `wants`, computed once and read by every
+ * reservation instead of each re-dividing the whole table.
  *
  * Strict priority: a tier is filled to its reservations before the next one
  * sees a bit. Within a tier the split is max-min fair, so a share asking for
@@ -37,43 +46,91 @@ export interface Want {
  * A reservation is what a sender can use, so handing it more is not a reason to
  * send more than it was configured for.
  *
- * `undefined` when `id` isn't among the wants, which is how a released or closed
- * reservation reports "hold your rate" instead of a grant of zero.
- *
  * Rates are bits per second.
  */
-export function allocate(estimate: number, wants: readonly Want[], id: number): number | undefined {
-	// Integer bits per second: the same truncation the Rust allocator uses.
-	let budget = estimate;
-	let tier: number | undefined;
-	for (const want of wants) {
-		if (tier === undefined || want.priority > tier) tier = want.priority;
+export class Plan {
+	/**
+	 * The wants in the order they are served: higher priority first, then ascending by
+	 * reservation, then by registration.
+	 */
+	readonly #order: Served[];
+	readonly #grants = new Map<number, number>();
+	/** What is left once every want is served. */
+	readonly #leftover: number;
+
+	constructor(estimate: number, wants: readonly Want[]) {
+		// Read each want once. Registration order breaks ties, as in the Rust allocator.
+		const order = wants.map((want) => ({ id: want.id, priority: want.priority, max: want.max, budget: 0 }));
+		order.sort((a, b) => b.priority - a.priority || a.max - b.max || a.id - b.id);
+
+		// Integer bits per second: the same truncation the Rust allocator uses.
+		let budget = estimate;
+		for (let start = 0; start < order.length; ) {
+			let end = start;
+			while (end < order.length && order[end].priority === order[start].priority) end++;
+			// Ascending by reservation: each share takes an even cut of what's left, or
+			// all it asked for if that's less, which frees the difference for the rest.
+			for (let at = start; at < end; at++) {
+				const served = order[at];
+				served.budget = budget;
+				const grant = Math.min(served.max, Math.floor(budget / (end - at)));
+				this.#grants.set(served.id, grant);
+				budget -= grant;
+			}
+			start = end;
+		}
+		this.#order = order;
+		this.#leftover = budget;
 	}
 
-	while (tier !== undefined) {
-		// Ascending by reservation: each share takes an even cut of what's left, or
-		// all it asked for if that's less, which frees the difference for the rest.
-		const members = wants.filter((want) => want.priority === tier).sort((a, b) => a.max - b.max);
+	/**
+	 * The slice for `id`, or `undefined` when `id` isn't among the wants, which is how a
+	 * released or closed reservation reports "hold your rate" instead of a grant of zero.
+	 */
+	grant(id: number): number | undefined {
+		return this.#grants.get(id);
+	}
 
-		let remaining = members.length;
-		for (const want of members) {
-			const even = Math.floor(budget / remaining);
-			const grant = Math.min(want.max, even);
-			if (want.id === id) return grant;
-			budget -= grant;
+	/**
+	 * What a want missing from this division would get were it demanded again.
+	 *
+	 * Tiers above its own are served first either way, so only its own tier is walked
+	 * again, with one more want sharing it, as far as where it would be served: after
+	 * every want of its tier reserving less than it, or as much but registered earlier.
+	 */
+	rejoin(want: Want): number {
+		const { id, priority, max } = want;
+		const order = this.#order;
+		let start = 0;
+		while (start < order.length && order[start].priority > priority) start++;
+		let at = start;
+		while (
+			at < order.length &&
+			order[at].priority === priority &&
+			(order[at].max < max || (order[at].max === max && order[at].id < id))
+		)
+			at++;
+		let end = at;
+		while (end < order.length && order[end].priority === priority) end++;
+
+		let budget = start < order.length ? order[start].budget : this.#leftover;
+		let remaining = end - start + 1;
+		for (let index = start; index < at; index++) {
+			budget -= Math.min(order[index].max, Math.floor(budget / remaining));
 			remaining -= 1;
 		}
-
-		let next: number | undefined;
-		for (const want of wants) {
-			if (want.priority < tier && (next === undefined || want.priority > next)) {
-				next = want.priority;
-			}
-		}
-		tier = next;
+		return Math.min(max, Math.floor(budget / remaining));
 	}
+}
 
-	return undefined;
+/**
+ * Divide `estimate` among `wants`, returning the slice for `id`.
+ *
+ * `undefined` when `id` isn't among the wants. See {@link Plan}, which computes every
+ * slice at once.
+ */
+export function allocate(estimate: number, wants: readonly Want[], id: number): number | undefined {
+	return new Plan(estimate, wants).grant(id);
 }
 
 interface Entry {
@@ -90,29 +147,32 @@ interface Registry {
 	release(id: number): void;
 }
 
-function wantsOf(entries: readonly Entry[]): Want[] {
-	const wants: Want[] = [];
-	for (const entry of entries) {
-		if (hooks.demandReleased(entry.demand).peek() !== undefined) continue;
-		if (entry.demand.wanted.peek() === undefined) continue;
-		wants.push({ id: entry.id, priority: entry.priority, max: entry.max });
-	}
-	return wants;
+/** Whether `entry` claims its share from the others: its track is demanded and not released. */
+function demanded(entry: Entry): boolean {
+	return hooks.demandReleased(entry.demand).peek() === undefined && entry.demand.wanted.peek() !== undefined;
+}
+
+/** A division and what it divided, so a read that finds them unchanged reuses it. */
+interface Division {
+	plan: Plan;
+	estimate: number;
+	/** The allocator's entry version it was divided at. */
+	version: number;
+	/** Which entries were {@link demanded}, in order. */
+	demanded: boolean[];
 }
 
 /**
- * `entry`'s slice of `estimate` among the demanded `wants`.
+ * `entry`'s slice of `plan`, the division among the demanded entries.
  *
  * An idle entry claims nothing from the others but still reads the slice it would
  * get back: a rendition stopped for lack of bandwidth, whose viewers then left,
  * needs that to know when to resume.
  */
-function shareOf(estimate: number, wants: readonly Want[], entry: Entry): number | undefined {
+function shareOf(plan: Plan, entry: Entry): number | undefined {
 	if (entry.demand.closed.peek() !== undefined) return undefined;
-	if (entry.demand.wanted.peek() === undefined) {
-		wants = [...wants, { id: entry.id, priority: entry.priority, max: entry.max }];
-	}
-	return allocate(estimate, wants, entry.id);
+	if (entry.demand.wanted.peek() === undefined) return plan.rejoin(entry);
+	return plan.grant(entry.id);
 }
 
 function ceiling(max: number): number {
@@ -157,6 +217,9 @@ export class Allocator implements Handle {
 	#nextId = 0;
 	#signals = new Effect();
 	#registry: Registry;
+	/** Bumped whenever an entry is added, moved or removed. */
+	#version = 0;
+	#division: Division | undefined;
 
 	/**
 	 * Divide `estimate`, normally a connection's sampled send rate.
@@ -224,7 +287,7 @@ export class Allocator implements Handle {
 
 		const id = this.#nextId++;
 		const rate = new Signal<number | undefined>(undefined);
-		this.#entries.mutate((entries) => {
+		this.#mutate((entries) => {
 			entries.push({
 				id,
 				demand: track,
@@ -250,22 +313,51 @@ export class Allocator implements Handle {
 			entry.rate.set(undefined);
 		}
 		this.#entries.set([]);
+		this.#division = undefined;
 		this.#signals.close();
 	}
 
 	#prune(): void {
 		const entries = this.#entries.peek();
 		const live = entries.filter((entry) => hooks.demandReleased(entry.demand).peek() === undefined);
-		if (live.length !== entries.length) this.#entries.set(live);
+		if (live.length !== entries.length) {
+			this.#version++;
+			this.#entries.set(live);
+		}
+	}
+
+	#mutate(fn: (entries: Entry[]) => void): void {
+		this.#version++;
+		this.#entries.mutate(fn);
+	}
+
+	/** The division of `estimate` among `entries`, divided again only when either moved. */
+	#plan(estimate: number, entries: readonly Entry[]): Plan {
+		const last = this.#division;
+		if (
+			last?.estimate === estimate &&
+			last.version === this.#version &&
+			entries.every((entry, index) => demanded(entry) === last.demanded[index])
+		) {
+			return last.plan;
+		}
+		const flags = entries.map(demanded);
+		const plan = new Plan(
+			estimate,
+			entries.filter((_, index) => flags[index]),
+		);
+		this.#division = { plan, estimate, version: this.#version, demanded: flags };
+		return plan;
 	}
 
 	#publish(): void {
 		if (!this.#alive.peek()) return;
 		const estimate = this.#estimate?.peek();
 		const entries = this.#entries.peek();
-		const wants = wantsOf(entries);
+		// Divided once for every reservation rather than once per reservation.
+		const plan = estimate == null ? undefined : this.#plan(estimate, entries);
 		for (const entry of entries) {
-			entry.rate.set(estimate == null ? undefined : shareOf(estimate, wants, entry));
+			entry.rate.set(plan && shareOf(plan, entry));
 		}
 	}
 
@@ -276,13 +368,13 @@ export class Allocator implements Handle {
 		const entries = this.#entries.peek();
 		const entry = entries.find((candidate) => candidate.id === id);
 		if (!entry) return undefined;
-		return shareOf(estimate, wantsOf(entries), entry);
+		return shareOf(this.#plan(estimate, entries), entry);
 	}
 
 	#update(id: number, max: number): void {
 		if (!this.#alive.peek()) return;
 		max = ceiling(max);
-		this.#entries.mutate((entries) => {
+		this.#mutate((entries) => {
 			const entry = entries.find((candidate) => candidate.id === id);
 			if (entry) entry.max = max;
 		});
@@ -291,7 +383,7 @@ export class Allocator implements Handle {
 
 	#release(id: number): void {
 		if (!this.#alive.peek()) return;
-		this.#entries.mutate((entries) => {
+		this.#mutate((entries) => {
 			const index = entries.findIndex((entry) => entry.id === id);
 			if (index >= 0) entries.splice(index, 1);
 		});

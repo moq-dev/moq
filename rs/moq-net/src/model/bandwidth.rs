@@ -12,7 +12,14 @@
 //! which the session hands to its transport's [`Probe`](crate::transport::Probe) so
 //! the estimate can rise to fund them.
 
-use std::{collections::BTreeMap, task::Poll};
+use std::{
+	collections::BTreeMap,
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
+	task::{Poll, Wake, Waker},
+};
 
 use crate::{Error, Result, track};
 
@@ -347,7 +354,7 @@ impl Allocator {
 		let priority = track.priority();
 		let demand = track.clone();
 
-		let id = {
+		let (id, grants) = {
 			// Nothing ever closes this channel: the allocator holds the only producer
 			// and never aborts it, so it's open for as long as `self` is.
 			let Ok(mut registry) = self.registry.write() else {
@@ -367,15 +374,17 @@ impl Allocator {
 
 			let id = registry.next_id;
 			registry.next_id += 1;
+			registry.generation += 1;
 			registry.reserved += u128::from(max.as_bps());
 			registry.entries.insert(id, Entry { demand, priority, max });
-			id
+			(id, registry.grants.clone())
 		};
 
 		Reservation {
 			share: Share {
 				estimate: self.estimate.clone(),
 				registry: self.registry.consume(),
+				grants,
 				id,
 			},
 			registry: self.registry.downgrade(),
@@ -438,6 +447,7 @@ impl Reservation {
 		let registry = &mut *registry;
 		if let Some(entry) = registry.entries.get_mut(&self.share.id) {
 			registry.reserved = registry.reserved - u128::from(entry.max.as_bps()) + u128::from(max.as_bps());
+			registry.generation += 1;
 			entry.max = max;
 		}
 	}
@@ -476,7 +486,7 @@ impl std::fmt::Debug for Allocator {
 /// Every track registered with one [`Allocator`].
 #[derive(Default)]
 struct Registry {
-	/// Keyed by registration order, which [`allocate`] keeps as its tie-break.
+	/// Keyed by registration order, which a [`Plan`] keeps as its tie-break.
 	entries: BTreeMap<u64, Entry>,
 	next_id: u64,
 	/// The entries' ceilings summed, kept as they change so following the target
@@ -486,12 +496,18 @@ struct Registry {
 	target: Option<Rate>,
 	/// How many sessions probe for these reservations, each through its [`Target`].
 	probes: usize,
+	/// Bumped whenever an entry is added, moved or removed, so a [`Plan`] knows the
+	/// entries it divided are still the registry's.
+	generation: u64,
+	/// The division every share of this registry reads.
+	grants: Arc<Grants>,
 }
 
 impl Registry {
 	fn remove(&mut self, id: u64) {
 		if let Some(entry) = self.entries.remove(&id) {
 			self.reserved -= u128::from(entry.max.as_bps());
+			self.generation += 1;
 		}
 	}
 
@@ -572,35 +588,16 @@ struct Share {
 	/// What's being divided, which may itself be a share.
 	estimate: Consumer,
 	registry: kio::Consumer<Registry>,
+	/// The registry's division, shared with every other share of it.
+	grants: Arc<Grants>,
 	id: u64,
-}
-
-/// One demanded track's claim, snapshotted out of the [`Registry`] so no lock is
-/// held while the tracks themselves are read.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-struct Want {
-	id: u64,
-	priority: i8,
-	max: Rate,
 }
 
 impl Share {
 	/// This share's slice right now.
 	fn grant(&self) -> Option<Rate> {
 		let estimate = self.estimate.peek()?;
-		let wants: Vec<Want> = self
-			.claims()
-			.into_iter()
-			// Its own track counts while idle too, so an unwatched sender reads the slice
-			// it would get back: a rendition stopped for lack of bandwidth, whose viewers
-			// then left, needs that to know when to resume.
-			.filter(|(want, demand)| match want.id == self.id {
-				true => !demand.is_closed(),
-				false => demand.is_wanted(),
-			})
-			.map(|(want, _)| want)
-			.collect();
-		allocate(estimate, &wants, self.id)
+		self.grants.grant(&self.registry, estimate, self.id)
 	}
 
 	/// Whether a session probes for this share's registry, toward a target above zero,
@@ -636,91 +633,273 @@ impl Share {
 			return Poll::Ready(Err(Error::Dropped));
 		}
 
-		let wants: Vec<Want> = self
-			.claims()
-			.into_iter()
-			.filter(|(want, demand)| match demand.poll_state(waiter) {
-				track::DemandState::Active => true,
-				// An idle track claims nothing from its siblings, so an unwatched encoder's
-				// reservation goes to whoever is actually sending. Its own reader still
-				// sees the slice it would get back; see `grant`.
-				track::DemandState::Idle => want.id == self.id,
-				// Gone for good, and pruned by the next `register`.
-				track::DemandState::Closed => false,
-			})
-			.map(|(want, _)| want)
-			.collect();
+		// Wake on any track's demand moving. The division watches the tracks once on
+		// behalf of every share, so this is one registration rather than one per track.
+		// It comes before the read below, so a move after it either shows in the read
+		// or wakes this waiter.
+		self.grants.watch.park(waiter);
 
 		let grant = self
 			.estimate
 			.peek()
-			.and_then(|estimate| allocate(estimate, &wants, self.id));
+			.and_then(|estimate| self.grants.grant(&self.registry, estimate, self.id));
 		Poll::Ready(Ok((grant, self.probed())))
-	}
-
-	/// Snapshot the registry so the tracks can be read without holding its lock.
-	fn claims(&self) -> Vec<(Want, track::Demand)> {
-		self.registry
-			.read()
-			.entries
-			.iter()
-			.map(|(id, entry)| {
-				(
-					Want {
-						id: *id,
-						priority: entry.priority,
-						max: entry.max,
-					},
-					entry.demand.clone(),
-				)
-			})
-			.collect()
 	}
 }
 
-/// Divide `estimate` among `wants`, returning the slice for `id`.
-///
-/// Strict priority: a tier is filled to its reservations before the next tier
-/// sees a bit. Within a tier the split is max-min fair, so a share asking for
-/// less than an even split takes all of it and leaves the rest to the others.
-///
-/// Surplus above the total reserved is left unclaimed rather than spread around.
-/// A reservation is what a sender can use, so handing it more is not a reason to
-/// send more than it was configured for.
-///
-/// `None` when `id` isn't among the wants, which is how a released or closed
-/// reservation reports "hold your rate" instead of a grant of zero.
-fn allocate(estimate: Rate, wants: &[Want], id: u64) -> Option<Rate> {
-	// Plain bits per second inside: this is where the division actually happens, and
-	// wrapping every intermediate would need arithmetic on `Rate` that no caller wants.
-	let mut budget = estimate.as_bps();
-	let mut tier = wants.iter().map(|want| want.priority).max();
+/// One demanded track's claim, snapshotted out of the [`Registry`] so no lock is
+/// held while the tracks themselves are read.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct Want {
+	id: u64,
+	priority: i8,
+	max: Rate,
+}
 
-	while let Some(priority) = tier {
-		// Ascending by reservation: each share takes an even cut of what's left, or
-		// all it asked for if that's less, which frees the difference for the rest.
-		let mut members: Vec<&Want> = wants.iter().filter(|want| want.priority == priority).collect();
-		members.sort_by_key(|want| want.max);
+impl Want {
+	/// Where this claim is served: higher priority first, then ascending by reservation,
+	/// so each share takes an even cut of what's left, or all it asked for if that's
+	/// less, which frees the difference for the rest. Registration order breaks ties.
+	fn order(&self) -> (std::cmp::Reverse<i8>, Rate, u64) {
+		(std::cmp::Reverse(self.priority), self.max, self.id)
+	}
+}
 
-		let mut remaining = members.len() as u64;
-		for want in members {
-			let even = budget / remaining;
-			let grant = want.max.as_bps().min(even);
-			if want.id == id {
-				return Some(Rate::from_bps(grant));
+/// A registry's division of its estimate, computed once per change to the estimate, the
+/// entries or a track's demand, and read by every share instead of each re-dividing
+/// the whole table.
+///
+/// One plan is cached, for the last estimate read. That assumes every share of a
+/// registry divides the same value, as they do in practice: a reconnecting connection's
+/// persistent estimate is forwarded from its current session's. Shares reading
+/// different values still get the right slices, but each alternation divides the
+/// cached entries again (without reading the tracks).
+#[derive(Default)]
+struct Grants {
+	/// The latest division, or `None` before the first read.
+	plan: kio::Lock<Option<Plan>>,
+	/// Watches every track's demand on the plan's behalf.
+	watch: Arc<Watch>,
+}
+
+impl Grants {
+	/// `id`'s slice of `estimate`, dividing it again only when something it depends on moved.
+	fn grant(&self, registry: &kio::Consumer<Registry>, estimate: Rate, id: u64) -> Option<Rate> {
+		let mut plan = self.plan.lock();
+		// Read before the tracks are, so a move while they are read invalidates this plan.
+		let epoch = self.watch.epoch.load(Ordering::SeqCst);
+		let generation = registry.read().generation;
+		match plan.as_mut() {
+			Some(current) if current.generation == generation && current.epoch == epoch => {
+				if current.estimate != estimate {
+					current.divide(estimate);
+				}
 			}
-			budget -= grant;
-			remaining -= 1;
+			_ => *plan = Some(Plan::new(registry, &self.watch, estimate, epoch)),
 		}
+		plan.as_ref().and_then(|plan| plan.grant(id))
+	}
+}
 
-		tier = wants
-			.iter()
-			.map(|want| want.priority)
-			.filter(|other| *other < priority)
-			.max();
+/// Turns any watched track's demand moving into one wake for every share parked on it.
+#[derive(Default)]
+struct Watch {
+	/// Bumped on every wake, so a plan made before it knows it is stale.
+	epoch: AtomicU64,
+	/// Shares parked on a demand moving.
+	parked: kio::Lock<kio::WaiterList>,
+}
+
+impl Watch {
+	/// Wake `waiter` on the next demand move.
+	fn park(&self, waiter: &kio::Waiter) {
+		waiter.register(&mut self.parked.lock());
+	}
+}
+
+impl Wake for Watch {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
 	}
 
-	None
+	fn wake_by_ref(self: &Arc<Self>) {
+		self.epoch.fetch_add(1, Ordering::SeqCst);
+		let mut parked = self.parked.lock().take();
+		parked.wake();
+	}
+}
+
+/// One entry as a [`Plan`] found it.
+#[derive(Copy, Clone)]
+struct Planned {
+	want: Want,
+	state: track::DemandState,
+	/// Its slice, for an active entry; the others are worked out when read.
+	grant: u64,
+}
+
+/// One demanded entry in the order it is served.
+#[derive(Copy, Clone)]
+struct Served {
+	want: Want,
+	/// What was left of the estimate before this entry was served.
+	budget: u64,
+}
+
+/// One division of an estimate among a registry's entries.
+///
+/// Strict priority: a tier is filled to its reservations before the next tier sees a
+/// bit. Within a tier the split is max-min fair, so a share asking for less than an
+/// even split takes all of it and leaves the rest to the others.
+///
+/// Surplus above the total reserved is left unclaimed rather than spread around. A
+/// reservation is what a sender can use, so handing it more is not a reason to send
+/// more than it was configured for.
+struct Plan {
+	estimate: Rate,
+	/// The [`Registry::generation`] the entries were read at.
+	generation: u64,
+	/// The [`Watch::epoch`] before the tracks were read.
+	epoch: u64,
+	/// Every entry, by registration.
+	entries: Vec<Planned>,
+	/// The active entries, in the order they are served.
+	order: Vec<Served>,
+	/// What is left once every active entry is served.
+	leftover: u64,
+	/// Holds the registration on every track's demand, which ends when it is replaced.
+	_waiter: kio::Waiter,
+}
+
+impl Plan {
+	/// Read every entry and its track's demand, watching each for the next move, and
+	/// divide `estimate` among them.
+	fn new(registry: &kio::Consumer<Registry>, watch: &Arc<Watch>, estimate: Rate, epoch: u64) -> Self {
+		// Snapshot the registry so the tracks can be read without holding its lock.
+		let (generation, claims): (u64, Vec<(Want, track::Demand)>) = {
+			let registry = registry.read();
+			let claims = registry
+				.entries
+				.iter()
+				.map(|(id, entry)| {
+					let want = Want {
+						id: *id,
+						priority: entry.priority,
+						max: entry.max,
+					};
+					(want, entry.demand.clone())
+				})
+				.collect();
+			(registry.generation, claims)
+		};
+
+		let waiter = kio::Waiter::new(Waker::from(watch.clone()));
+		let entries = claims
+			.into_iter()
+			.map(|(want, demand)| Planned {
+				want,
+				state: demand.poll_state(&waiter),
+				grant: 0,
+			})
+			.collect();
+
+		Self::divided(estimate, generation, epoch, entries, waiter)
+	}
+
+	/// Divide `estimate` among `entries`, which are in registration order.
+	fn divided(estimate: Rate, generation: u64, epoch: u64, entries: Vec<Planned>, waiter: kio::Waiter) -> Self {
+		let mut plan = Self {
+			estimate,
+			generation,
+			epoch,
+			entries,
+			order: Vec::new(),
+			leftover: 0,
+			_waiter: waiter,
+		};
+		plan.divide(estimate);
+		plan
+	}
+
+	/// Divide `estimate` among the entries already read.
+	fn divide(&mut self, estimate: Rate) {
+		self.estimate = estimate;
+		self.order.clear();
+		self.order.extend(
+			self.entries
+				.iter()
+				.filter(|entry| entry.state == track::DemandState::Active)
+				.map(|entry| Served {
+					want: entry.want,
+					budget: 0,
+				}),
+		);
+		// The order is total, since ids are unique.
+		self.order.sort_unstable_by_key(|served| served.want.order());
+
+		// Plain bits per second inside: this is where the division actually happens, and
+		// wrapping every intermediate would need arithmetic on `Rate` that no caller wants.
+		let mut budget = estimate.as_bps();
+		let mut start = 0;
+		while start < self.order.len() {
+			let priority = self.order[start].want.priority;
+			let end = start + self.order[start..].partition_point(|served| served.want.priority == priority);
+			for index in start..end {
+				let served = &mut self.order[index];
+				served.budget = budget;
+				let grant = served.want.max.as_bps().min(budget / (end - index) as u64);
+				budget -= grant;
+
+				// Ids are registration order, which is the entries' order.
+				let at = self
+					.entries
+					.binary_search_by_key(&served.want.id, |entry| entry.want.id)
+					.expect("every served entry was read");
+				self.entries[at].grant = grant;
+			}
+			start = end;
+		}
+		self.leftover = budget;
+	}
+
+	/// The slice for `id`.
+	///
+	/// An idle entry claims nothing from the others but still reads the slice it would
+	/// get back: a rendition stopped for lack of bandwidth, whose viewers then left,
+	/// needs that to know when to resume.
+	///
+	/// `None` when `id` isn't registered or its track closed, which is how a released
+	/// or closed reservation reports "hold your rate" instead of a grant of zero.
+	fn grant(&self, id: u64) -> Option<Rate> {
+		let at = self.entries.binary_search_by_key(&id, |entry| entry.want.id).ok()?;
+		let entry = &self.entries[at];
+		match entry.state {
+			track::DemandState::Active => Some(Rate::from_bps(entry.grant)),
+			track::DemandState::Idle => Some(Rate::from_bps(self.rejoin(entry.want))),
+			track::DemandState::Closed => None,
+		}
+	}
+
+	/// What an idle `want` would get were it demanded again.
+	///
+	/// Tiers above its own are served first either way, so only its own tier is walked
+	/// again, with one more entry sharing it, as far as where it would be served.
+	fn rejoin(&self, want: Want) -> u64 {
+		let start = self
+			.order
+			.partition_point(|served| served.want.priority > want.priority);
+		let end = self
+			.order
+			.partition_point(|served| served.want.priority >= want.priority);
+		let at = self.order.partition_point(|served| served.want.order() < want.order());
+		let mut budget = self.order.get(start).map_or(self.leftover, |served| served.budget);
+		let mut remaining = (end - start + 1) as u64;
+		for served in &self.order[start..at] {
+			budget -= served.want.max.as_bps().min(budget / remaining);
+			remaining -= 1;
+		}
+		want.max.as_bps().min(budget / remaining)
+	}
 }
 
 /// Consumes bandwidth estimates, allowing reads and async change notifications.
@@ -841,6 +1020,22 @@ mod tests {
 	const AUDIO: i8 = 80;
 	const VIDEO: i8 = 60;
 
+	/// Divide `estimate` among `wants`, returning the slice for `id`, or `None` when `id`
+	/// isn't among them.
+	fn allocate(estimate: Rate, wants: &[Want], id: u64) -> Option<Rate> {
+		let entries = wants.iter().map(|want| (*want, track::DemandState::Active));
+		plan(estimate, entries).grant(id)
+	}
+
+	/// A division of `estimate` among `entries`, in registration order, with no tracks to watch.
+	fn plan(estimate: Rate, entries: impl IntoIterator<Item = (Want, track::DemandState)>) -> Plan {
+		let entries = entries
+			.into_iter()
+			.map(|(want, state)| Planned { want, state, grant: 0 })
+			.collect();
+		Plan::divided(estimate, 0, 0, entries, kio::Waiter::noop())
+	}
+
 	/// Bits per second, so the tables below stay readable.
 	fn bps(bps: u64) -> Rate {
 		Rate::from_bps(bps)
@@ -932,6 +1127,87 @@ mod tests {
 	fn an_unregistered_share_has_no_grant() {
 		assert_eq!(allocate(bps(1_000_000), &[], 0), None);
 		assert_eq!(allocate(bps(1_000_000), &[want(0, VIDEO, 1_000)], 7), None);
+	}
+
+	/// One share's slice, dividing every tier again for it alone: the reference a shared
+	/// division is checked against.
+	fn sequential(estimate: Rate, wants: &[Want], id: u64) -> Option<Rate> {
+		let mut budget = estimate.as_bps();
+		let mut tier = wants.iter().map(|want| want.priority).max();
+		while let Some(priority) = tier {
+			let mut members: Vec<&Want> = wants.iter().filter(|want| want.priority == priority).collect();
+			members.sort_by_key(|want| want.max);
+			let mut remaining = members.len() as u64;
+			for want in members {
+				let grant = want.max.as_bps().min(budget / remaining);
+				if want.id == id {
+					return Some(Rate::from_bps(grant));
+				}
+				budget -= grant;
+				remaining -= 1;
+			}
+			tier = wants
+				.iter()
+				.map(|want| want.priority)
+				.filter(|other| *other < priority)
+				.max();
+		}
+		None
+	}
+
+	/// Every slice of one shared division, active or idle, matches dividing the table
+	/// again for that share alone, across tiers, tied ceilings and rounding.
+	#[test]
+	fn one_division_matches_each_share_dividing_alone() {
+		let mut seed = 42u64;
+		let mut next = |bound: u64| {
+			seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+			(seed >> 33) % bound
+		};
+		for _ in 0..2_000 {
+			let count = next(12) + 1;
+			let tiers = next(4) + 1;
+			let entries: Vec<(Want, bool)> = (0..count)
+				.map(|id| {
+					let want = want(id, next(tiers) as i8 - 1, next(5) * 300 + next(3));
+					(want, next(3) > 0)
+				})
+				.collect();
+			let estimate = bps(next(count * 1_600));
+			let active: Vec<Want> = entries
+				.iter()
+				.filter(|(_, active)| *active)
+				.map(|(want, _)| *want)
+				.collect();
+
+			let plan = plan(
+				estimate,
+				entries.iter().map(|(want, active)| {
+					let state = match active {
+						true => track::DemandState::Active,
+						false => track::DemandState::Idle,
+					};
+					(*want, state)
+				}),
+			);
+
+			for (want, is_active) in &entries {
+				let expected = match is_active {
+					true => sequential(estimate, &active, want.id),
+					false => {
+						let mut rejoined = active.clone();
+						rejoined.push(*want);
+						rejoined.sort_by_key(|want| want.id);
+						sequential(estimate, &rejoined, want.id)
+					}
+				};
+				assert_eq!(
+					plan.grant(want.id),
+					expected,
+					"{want:?} among {entries:?} sharing {estimate:?}"
+				);
+			}
+		}
 	}
 
 	/// The headline case: two encoders on one connection must not each target the

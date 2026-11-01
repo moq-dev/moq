@@ -14,8 +14,9 @@ const { values, positionals } = parseArgs({
 	},
 });
 const benchmark = values.bench;
-if (benchmark !== "frames" && benchmark !== "drift" && benchmark !== "ledger")
-	throw new Error("--bench must be frames, drift, or ledger");
+/** Rows each benchmark prints per measurement. */
+const ROWS: Record<string, number> = { frames: 26, drift: 36, ledger: 12, bandwidth: 44 };
+if (!(benchmark in ROWS)) throw new Error("--bench must be frames, drift, ledger, or bandwidth");
 const rounds = Number(values.rounds);
 if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("--rounds must be a positive integer");
 const roots = new Map<string, string>();
@@ -39,11 +40,12 @@ for (const [name, root] of roots) {
 			{
 				name: "repeat-microbenchmark",
 				setup(build) {
-					// The ledger is internal, so select it explicitly instead of a package export.
-					build.onResolve({ filter: /^\.\.\/src\/ledger\.ts$/ }, () => ({
-						path: resolve(root, "js/net/src/ledger.ts"),
+					// The ledger and allocator are internal, so select them explicitly instead of a
+					// package export, from each variant's own checkout.
+					build.onResolve({ filter: /^\.\.\/src\/(ledger|bandwidth|track)\.ts$/ }, ({ path }) => ({
+						path: resolve(root, "js/net/src", path.slice("../src/".length)),
 					}));
-					build.onLoad({ filter: /\/bench\/(frames|drift|ledger)\.ts$/ }, async ({ path }) => {
+					build.onLoad({ filter: /\/bench\/(frames|drift|ledger|bandwidth)\.ts$/ }, async ({ path }) => {
 						const source = await Bun.file(path).text();
 						if (benchmark !== "frames")
 							return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
@@ -109,8 +111,7 @@ try {
 			rows.set(variant, []);
 			await pages.get(variant)?.evaluate("globalThis.measure()");
 			const measured = rows.get(variant);
-			if (measured?.length !== (benchmark === "frames" ? 26 : benchmark === "drift" ? 36 : 12))
-				throw new Error(`incomplete rows: ${variant}`);
+			if (measured?.length !== ROWS[benchmark]) throw new Error(`incomplete rows: ${variant}`);
 			samples.push({ round, variant, rows: measured });
 			await Bun.write(
 				values.out,
