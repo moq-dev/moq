@@ -30,7 +30,7 @@ pub(crate) mod priority;
 mod probe;
 #[cfg(feature = "async")]
 mod publisher;
-#[cfg(any(test, feature = "fuzz"))]
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
 pub use publisher::CoverageBench;
 #[cfg(feature = "async")]
 mod replay;
