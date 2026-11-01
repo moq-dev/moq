@@ -164,7 +164,10 @@ fn generate(root: &Path) {
 		}
 		.to_file(dir.join(format!("{size}.jwks")))
 		.unwrap();
-		write(&dir.join(format!("{size}-last")), &keys[size - 1].sign(&valid()).unwrap());
+		write(
+			&dir.join(format!("{size}-last")),
+			&keys[size - 1].sign(&valid()).unwrap(),
+		);
 	}
 	write(&root.join("set").join("first"), &keys[0].sign(&valid()).unwrap());
 	// A directory of the first keys, each with a token, so concurrent clients spread over kids.
@@ -172,14 +175,22 @@ fn generate(root: &Path) {
 	std::fs::create_dir_all(&spread).unwrap();
 	for (index, key) in keys[..SPREAD].iter().enumerate() {
 		verifier(key).to_file(spread.join(format!("k{index}.jwk"))).unwrap();
-		write(&root.join("tokens").join(format!("k{index}")), &key.sign(&valid()).unwrap());
+		write(
+			&root.join("tokens").join(format!("k{index}")),
+			&key.sign(&valid()).unwrap(),
+		);
 	}
 	// Two versions of one kid, swapped in and out while clients present tokens from both.
 	std::fs::create_dir_all(root.join("rotate")).unwrap();
 	for version in ["a", "b"] {
 		let key = Key::generate(Algorithm::ES256, kid("rotate")).unwrap();
-		verifier(&key).to_file(root.join("rotate").join(format!("{version}.jwk"))).unwrap();
-		write(&root.join("rotate").join(format!("{version}.jwt")), &key.sign(&valid()).unwrap());
+		verifier(&key)
+			.to_file(root.join("rotate").join(format!("{version}.jwk")))
+			.unwrap();
+		write(
+			&root.join("rotate").join(format!("{version}.jwt")),
+			&key.sign(&valid()).unwrap(),
+		);
 	}
 	let stranger = Key::generate(Algorithm::ES256, kid("missing")).unwrap();
 	write(&root.join("set").join("missing"), &stranger.sign(&valid()).unwrap());
@@ -438,7 +449,11 @@ impl Bench {
 		for size in SET_SIZES {
 			let path = self.root.join("set").join(format!("{size}.jwks"));
 			let last = self.read(format!("set/{size}-last"));
-			for (kid, token, admit) in [("first", &first, true), ("last", &last, true), ("missing", &missing, false)] {
+			for (kid, token, admit) in [
+				("first", &first, true),
+				("last", &last, true),
+				("missing", &missing, false),
+			] {
 				self.decide(
 					format!("verify/set/{size}/{kid}"),
 					Keys::Set(path.clone()),
@@ -469,7 +484,13 @@ impl Bench {
 		let spread: Vec<String> = (0..SPREAD).map(|index| self.read(format!("tokens/k{index}"))).collect();
 		for clients in CLIENTS {
 			let file = Keys::File(self.root.join("ES256").join("key.jwk"));
-			self.clients(format!("verify/clients/{clients}/file"), file, &es256, None, Result::is_ok);
+			self.clients(
+				format!("verify/clients/{clients}/file"),
+				file,
+				&es256,
+				None,
+				Result::is_ok,
+			);
 			let spread_dir = Keys::Dir(self.root.join("spread"));
 			let name = format!("verify/clients/{clients}/dir{SPREAD}");
 			self.clients(name, spread_dir, &spread, None, Result::is_ok);
@@ -551,7 +572,10 @@ fn main() {
 	generate(&root);
 	let root = root.canonicalize().unwrap();
 
-	let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
 	let _clock = moq_clock::Manual::new().install(runtime.handle());
 	let pool = tokio::runtime::Builder::new_multi_thread()
 		.worker_threads(4)
