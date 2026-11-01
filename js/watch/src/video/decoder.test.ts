@@ -1603,6 +1603,28 @@ describe("Decoder with a warmup rendition", () => {
 		}
 	});
 
+	it("promotes a pending rendition once the outgoing one restarts its timeline", async () => {
+		const run = await refresh({}, [0]);
+		try {
+			await run.push(MIN, at(10, 1000, true));
+			expect(run.current()).toEqual([1000, MIN]);
+
+			// The outgoing rendition reads a restart whose first picture is still in the codec. It has
+			// presented nothing on the new timeline, so the replacement need not catch up to 1000.
+			await run.push(MIN, marker(10, 1_066_000), at(11, 0, true));
+			expect(run.current()).toEqual([1000, MIN]);
+			run.playback.switchRendition();
+			await microtasks();
+			expect(run.playback.codecs).toBe(2);
+			// Emitted straight from the replacement codec, since decoding there would flush the held picture.
+			run.playback.emit(0, 1);
+			await microtasks();
+			expect(run.current()).toEqual([0, 1]);
+		} finally {
+			await run.close();
+		}
+	});
+
 	it("takes the max-delay picture when that decoder opens after a restart", async () => {
 		const run = await refresh({});
 		try {

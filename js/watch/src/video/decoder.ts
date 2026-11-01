@@ -463,11 +463,11 @@ class DecoderTrack {
 	// Counts the timeline restarts this decoder read. A picture decoded before one is from the old
 	// timeline and never presents after it, even when its clock wait already resolved.
 	#generation = 0;
-	// The group each frame in the codec was read from, by timestamp. Each output retires its entry and
-	// every one before it. A publisher that never outputs a picture grows this by one entry per chunk;
-	// the maintainer accepted that as an exception to the bounded-state rule (moq-dev/moq#7555,
-	// 2026-11-01), since WebCodecs bounds no codec's pending output, so any cap is a guess that can
-	// evict a picture the codec still owes.
+	// The group each frame in the codec was read from, by timestamp. Each output found here retires its
+	// entry and every one before it. A publisher that never outputs a picture grows this by one entry
+	// per chunk; the maintainer accepted that as an exception to the bounded-state rule
+	// (moq-dev/moq#7555, 2026-11-01), since WebCodecs bounds no codec's pending output, so any cap is
+	// a guess that can evict a picture the codec still owes.
 	#groups = new Map<number, number>();
 
 	// How far past the shared clock's budgets this decoder reaches.
@@ -564,9 +564,13 @@ class DecoderTrack {
 					const generation = this.#generation;
 					const group = this.#groups.get(frame.timestamp);
 					// Pictures come out in presentation order, so a chunk at or before this one that
-					// produced none, such as a hidden VP9 frame, never will.
-					for (const timestamp of this.#groups.keys()) {
-						if (timestamp <= frame.timestamp) this.#groups.delete(timestamp);
+					// produced none, such as a hidden VP9 frame, never will. Only a picture with an entry
+					// proves that: one without was decoded before the last reset cleared the map, so its
+					// timestamp says nothing about the chunks fed since.
+					if (group !== undefined) {
+						for (const timestamp of this.#groups.keys()) {
+							if (timestamp <= frame.timestamp) this.#groups.delete(timestamp);
+						}
 					}
 					const timestamp = Milli.fromMicro(frame.timestamp as Micro);
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
@@ -1049,10 +1053,13 @@ class Rendition {
 	// candidates: one held from before a restart neither shows nor sets the floor. Not `caughtUp`: its
 	// slack, applied per picture, would alternate backwards and forwards.
 	#select(min: Lane, max: Lane | undefined, start: number | undefined): void {
-		// A restarted timeline begins below the previous one's pictures.
+		// A restarted timeline begins below the previous one's pictures. Like a decoder's own timestamp
+		// on a break, the selection's clears until the new timeline presents, so a pending rendition is
+		// not held to the old timeline's playhead.
 		if (start !== this.#start) {
 			this.#start = start;
 			this.#last = undefined;
+			this.timestamp.set(undefined);
 		}
 		const current = (lane: Lane | undefined): lane is Lane & { frame: VideoFrame } =>
 			lane?.frame !== undefined && (start === undefined || (lane.lane.group ?? -1) >= start);
