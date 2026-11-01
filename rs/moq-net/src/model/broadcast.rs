@@ -29,9 +29,7 @@ mod listing;
 #[cfg(feature = "async")]
 pub(crate) use listing::Owner;
 pub(super) use listing::{ListOnAccept, Unlist};
-// Only sessions answer a peer's listings.
-pub(crate) use listing::Lister;
-pub use listing::{Tracks, TracksEvent};
+pub use listing::{Lister, Tracks, TracksEvent};
 
 /// A collection of media tracks that can be published and subscribed to.
 ///
@@ -847,7 +845,7 @@ impl Requests {
 	///
 	/// A handler that serves any name on request takes none, so it lists nothing. One
 	/// answer per broadcast: fails with [`Error::Duplicate`] while another lister exists.
-	pub(crate) fn lister(&self) -> Result<Lister, Error> {
+	pub fn lister(&self) -> Result<Lister, Error> {
 		Lister::new(self.state.clone())
 	}
 
