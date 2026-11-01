@@ -663,20 +663,12 @@ impl Misses {
 			self.judged.insert(run.clone());
 		}
 		let start = state.start_sequence.unwrap_or(0);
-		let (stale_below, unasked) = match state.start_budget {
-			// Its publisher skipped every older group as stale under a budget no tighter
-			// than this reader's, so they are stale for it too.
-			Some(budget) if drift.budget <= budget => (start, false),
-			// Such a copy cannot tell a group a looser reader's budget reaches, so it leaves
-			// them to the feed's re-offer.
-			Some(_) => (0, state.fills_from_start),
-			// The feed began at the live edge or the floor the copy asked for, so older
-			// groups are history only a reader naming them asked for.
-			None => (
-				0,
-				state.fills_from_start || state.received && named.is_none_or(|named| named >= start),
-			),
-		};
+		// Below a start its publisher resolved from a budget, which an update may have changed
+		// in flight, every older group is history a fill may still find. A feed that began at
+		// the live edge or the floor the copy asked for leaves older groups as history only a
+		// reader naming them asked for.
+		let unasked = state.fills_from_start
+			|| !state.start_resolved && state.received && named.is_none_or(|named| named >= start);
 		if unasked && start > 0 {
 			candidates.remove(0..start);
 		}
@@ -740,10 +732,8 @@ impl Misses {
 		// budget is stale throughout.
 		let stale: Vec<ops::Range<u64>> = asks
 			.iter()
-			.filter_map(|run| match state.drifted(run.end - 1, &drift.edge, drift.budget) {
-				true => Some(run.clone()),
-				false => Some(run.start..run.end.min(stale_below)).filter(|run| !run.is_empty()),
-			})
+			.filter(|run| state.drifted(run.end - 1, &drift.edge, drift.budget))
+			.cloned()
 			.collect();
 		for run in stale {
 			asks.remove(run.clone());
