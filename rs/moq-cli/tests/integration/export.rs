@@ -1110,6 +1110,70 @@ async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	feeding.abort();
 }
 
+/// `repair mp4` finishes a recording whose `export mp4` was killed as a regular MP4, and leaves
+/// it alone once finished.
+#[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
+async fn a_killed_mp4_recording_is_repaired() {
+	let relay = relay().await;
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("recording.mp4");
+	let mut recording = moq(&relay, &[])
+		.args(["export", "mp4", "--output"])
+		.arg(&path)
+		.spawn()
+		.expect("spawn export");
+	let (mut publisher, feeding) = import(&relay);
+
+	kio::clock::timeout(TIMEOUT, async {
+		while std::fs::metadata(&path).map_or(0, |file| file.len()) < 10_000 {
+			kio::clock::sleep(Duration::from_millis(50)).await;
+		}
+	})
+	.await
+	.expect("the recording never grew");
+	recording.kill().await.unwrap();
+	let killed = std::fs::read(&path).unwrap();
+	assert_eq!(
+		boxes(&killed)[1].kind().to_string(),
+		"free",
+		"the killed recording is unfinished"
+	);
+
+	let repair = || async {
+		let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"))
+			.args(["repair", "mp4"])
+			.arg(&path)
+			.output();
+		let output = kio::clock::timeout(TIMEOUT, output)
+			.await
+			.expect("repair never exited")
+			.unwrap();
+		assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+		std::fs::read(&path).unwrap()
+	};
+	let repaired = repair().await;
+	let boxes = boxes(&repaired);
+	let kinds: Vec<String> = boxes.iter().map(|atom| atom.kind().to_string()).collect();
+	assert_eq!(kinds, ["ftyp", "mdat", "moov"]);
+	let Some(mp4_atom::Any::Moov(moov)) = boxes.last() else {
+		unreachable!();
+	};
+	assert_eq!(moov.trak.len(), 2, "video and audio");
+	// Only the reserved box changed before the moov, which replaces any partial fragment.
+	let reserved = u32::from_be_bytes(killed[..4].try_into().unwrap()) as usize;
+	let media = reserved + u64::from_be_bytes(repaired[reserved + 8..reserved + 16].try_into().unwrap()) as usize;
+	assert!(media <= killed.len());
+	assert_eq!(repaired[..reserved], killed[..reserved]);
+	assert_eq!(repaired[reserved + 16..media], killed[reserved + 16..media]);
+
+	assert_eq!(repair().await, repaired, "a finished recording is left alone");
+
+	let stdin = feeding.await.unwrap();
+	drop(stdin);
+	assert!(wait(&mut publisher).await.success());
+}
+
 /// The top-level boxes of an MP4 file, by kind.
 fn boxes(file: &[u8]) -> Vec<mp4_atom::Any> {
 	use mp4_atom::DecodeMaybe;

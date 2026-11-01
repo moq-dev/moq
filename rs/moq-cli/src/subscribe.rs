@@ -403,12 +403,7 @@ impl Subscribe {
 
 		match mp4.finish()? {
 			Some(trailer) => {
-				file.write_all(&trailer.moov).await?;
-				// The header points readers past the media at the moov, so the moov must be on disk first.
-				file.sync_data().await?;
-				file.seek(std::io::SeekFrom::Start(trailer.mdat_offset)).await?;
-				file.write_all(&trailer.mdat).await?;
-				file.sync_all().await?;
+				write_finish(&mut file, &trailer).await?;
 				tracing::info!(path = %path.display(), "recording finished");
 			}
 			// Nothing reached the file, so there is no recording to keep.
@@ -596,4 +591,17 @@ impl Subscribe {
 
 		Ok(())
 	}
+}
+
+/// Make the writes that turn a recording into a regular MP4: the moov where the media ends,
+/// then the mdat header over the reserved box.
+pub async fn write_finish(file: &mut tokio::fs::File, finish: &moq_mux::container::mp4::Finish) -> std::io::Result<()> {
+	file.set_len(finish.moov_offset).await?;
+	file.seek(std::io::SeekFrom::Start(finish.moov_offset)).await?;
+	file.write_all(&finish.moov).await?;
+	// The header points readers past the media at the moov, so the moov must be on disk first.
+	file.sync_data().await?;
+	file.seek(std::io::SeekFrom::Start(finish.mdat_offset)).await?;
+	file.write_all(&finish.mdat).await?;
+	file.sync_all().await
 }

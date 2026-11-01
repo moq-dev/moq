@@ -2,7 +2,8 @@
 //!
 //! [`Export`] writes a file that is a valid fragmented MP4 while it grows, so a crash still
 //! leaves a playable file, and [`Export::finish`] turns it into a regular MP4 with its `moov`
-//! at the end without moving any media, the way OBS's hybrid MP4 does.
+//! at the end without moving any media, the way OBS's hybrid MP4 does. [`repair`] finishes a
+//! file the same way after a crash.
 //!
 //! The file starts with `ftyp`, a reserved 16-byte `free` box and the fragmented `moov`, then
 //! the moof+mdat fragments. Finishing appends a `moov` that indexes every sample where it
@@ -11,9 +12,12 @@
 //! header there would swallow the fragmented `moov` and leave a crashed file unreadable.
 //!
 //! A rendition that joins after the fragmented `moov` is written into `free` boxes, which a
-//! reader of the unfinished file skips, and only the final `moov` indexes it.
+//! reader of the unfinished file skips. Before a track's first fragment, and again whenever
+//! its description changes, a `free` box holds a `moov` declaring it, so the final `moov`
+//! can be rebuilt from the file alone.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::{Read, Seek, SeekFrom};
 use std::task::Poll;
 use std::time::Duration;
 
@@ -33,10 +37,10 @@ const NON_SYNC: u32 = 0x0001_0000;
 /// Subscribe to a moq broadcast and record it as a crash-safe regular MP4.
 ///
 /// [`next`](Self::next) returns the bytes to append to the file, the same fMP4 an
-/// [`fmp4::Export`] writes plus the reserved box, so the file plays if the recording never
-/// finishes. [`finish`](Self::finish) then returns the trailing `moov` and the `mdat` header
-/// that make it a regular MP4. Writing those needs a file that can be overwritten in place,
-/// not a stream.
+/// [`fmp4::Export`] writes plus the reserved box and track descriptions, so the file plays if
+/// the recording never finishes. [`finish`](Self::finish) then returns the trailing `moov` and
+/// the `mdat` header that make it a regular MP4. Writing those needs a file that can be
+/// overwritten in place, not a stream.
 ///
 /// Unlike [`fmp4::Export`], a rendition that joins after the fragmented `moov` is recorded.
 pub struct Export<S: Stream> {
@@ -45,51 +49,22 @@ pub struct Export<S: Stream> {
 	/// Bytes returned so far, which is where the next chunk starts in the file.
 	written: u64,
 
-	/// The fragmented `moov`, once written.
-	header: Option<Header>,
+	/// What the file holds, once the fragmented `moov` is written.
+	index: Option<Index>,
 
-	/// What each track wrote, by track id.
-	tracks: BTreeMap<u32, Track>,
-}
-
-/// What the fragmented `moov` fixed.
-struct Header {
-	/// Where the reserved box starts.
-	reserved: u64,
-	/// The movie timescale.
-	timescale: u32,
-	/// The tracks it declares. Any other track joined later.
-	declared: HashSet<u32>,
-}
-
-/// What one track wrote, in decode order.
-#[derive(Default)]
-struct Track {
-	/// One chunk per `trun`, its samples contiguous in the file.
-	chunks: Vec<Run>,
-	samples: Vec<Sample>,
-}
-
-struct Run {
-	/// Where the first sample starts in the file.
-	offset: u64,
-	/// The first sample's decode time, in media ticks.
-	decode_time: u64,
-	/// How many samples the run holds.
-	count: u32,
-}
-
-struct Sample {
-	size: u32,
-	duration: u32,
-	cts: i64,
-	sync: bool,
+	/// The declaration the file last described each track with, by track id.
+	described: HashMap<u32, Description>,
 }
 
 /// The writes that finish a recording, in order.
 #[derive(Clone, Debug)]
 pub struct Finish {
-	/// The regular `moov`, appended after everything [`Export::next`] returned.
+	/// Where [`moov`](Self::moov) is written, from the start of the file, which is cut there
+	/// first: the end of everything [`Export::next`] returned, or of a repaired file's last
+	/// complete fragment.
+	pub moov_offset: u64,
+
+	/// The regular `moov`, written first.
 	pub moov: Bytes,
 
 	/// Where [`mdat`](Self::mdat) overwrites the reserved box, from the start of the file.
@@ -105,8 +80,8 @@ impl<S: Stream> Export<S> {
 		Self {
 			fmp4: fmp4::Export::new(source, catalog).with_late_tracks(),
 			written: 0,
-			header: None,
-			tracks: BTreeMap::new(),
+			index: None,
+			described: HashMap::new(),
 		}
 	}
 
@@ -146,72 +121,7 @@ impl<S: Stream> Export<S> {
 	///
 	/// Media still buffered for a fragment that has not closed is left out.
 	pub fn finish(self) -> Result<Option<Finish>> {
-		let Some(header) = &self.header else {
-			return Ok(None);
-		};
-
-		let declarations: HashMap<u32, &mp4_atom::Trak> =
-			self.fmp4.declarations().map(|(id, trak, _)| (id, trak)).collect();
-		let mut timelines = Vec::new();
-		for (&id, track) in self.tracks.iter().filter(|(_, track)| !track.samples.is_empty()) {
-			let Some(&trak) = declarations.get(&id) else {
-				return Err(unindexable(id, "the track has no declaration").into());
-			};
-			timelines.push((trak, track, Timeline::new(id, trak, track)?));
-		}
-
-		let movie = u128::from(header.timescale);
-		let to_movie = |ticks: u64, timescale: u32| {
-			u64::try_from(u128::from(ticks) * movie / u128::from(timescale)).map_err(|_| Error::PtsOverflow)
-		};
-		// The earliest track starts the movie; the rest start that much later.
-		let mut origin = u64::MAX;
-		for (trak, _, timeline) in &timelines {
-			origin = origin.min(to_movie(timeline.start, trak.mdia.mdhd.timescale)?);
-		}
-
-		let mut traks = Vec::new();
-		for (trak, track, timeline) in timelines {
-			let timescale = trak.mdia.mdhd.timescale;
-			let delay = to_movie(timeline.start, timescale)? - origin;
-			let presented = to_movie(timeline.duration, timescale)?;
-			let mut trak = trak.clone();
-			trak.mdia.mdhd.duration = timeline.deltas.iter().map(|&delta| u64::from(delta)).sum();
-			trak.tkhd.duration = delay + presented;
-			trak.edts = edits(delay, timeline.media_time, presented);
-			trak.mdia.minf.stbl = sample_table(&trak.mdia.minf.stbl.stsd, track, &timeline);
-			traks.push(trak);
-		}
-		traks.sort_by_key(|trak| (trak.mdia.hdlr.handler != b"vide".into(), trak.tkhd.track_id));
-
-		let moov = mp4_atom::Moov {
-			mvhd: mp4_atom::Mvhd {
-				timescale: header.timescale,
-				duration: traks.iter().map(|trak| trak.tkhd.duration).max().unwrap_or(0),
-				// Normal playback rate and full volume; both default to 0.
-				rate: mp4_atom::FixedPoint::from(1),
-				volume: mp4_atom::FixedPoint::from(1),
-				next_track_id: traks.iter().map(|trak| trak.tkhd.track_id).max().unwrap_or(0) + 1,
-				..Default::default()
-			},
-			trak: traks,
-			..Default::default()
-		};
-		let mut buf = Vec::new();
-		moov.encode(&mut buf)?;
-
-		// Everything from the reserved box to the moov, the fragmented moov and every moof
-		// included, becomes one mdat that a reader skips through to the moov.
-		let mut mdat = BytesMut::with_capacity(RESERVED as usize);
-		mdat.put_u32(1);
-		mdat.put_slice(b"mdat");
-		mdat.put_u64(self.written - header.reserved);
-
-		Ok(Some(Finish {
-			moov: Bytes::from(buf),
-			mdat_offset: header.reserved,
-			mdat: mdat.freeze(),
-		}))
+		self.index.map(|index| index.finish(self.written)).transpose()
 	}
 
 	/// The file header: the init segment's `ftyp`, the reserved box, then its `moov`.
@@ -228,24 +138,42 @@ impl<S: Stream> Export<S> {
 		data.put_u64(0);
 		data.put_slice(&init[split..]);
 
-		self.header = Some(Header {
-			reserved: self.written + split as u64,
-			timescale: moov.mvhd.timescale,
-			declared: moov.trak.iter().map(|trak| trak.tkhd.track_id).collect(),
-		});
+		self.index = Some(Index::new(self.written + split as u64, &moov)?);
+		self.described = self
+			.fmp4
+			.declarations()
+			.map(|(id, trak, trex)| (id, Description::new(trak, trex)))
+			.collect();
 		Ok(data.freeze())
 	}
 
-	/// Index a moof+mdat fragment where it will land, wrapping a late track's in a `free` box.
+	/// Index a moof+mdat fragment where it will land, after a description of each track the
+	/// file has yet to describe as it is now, and wrapping a late track's in a `free` box.
 	fn fragment(&mut self, fragment: Bytes) -> Result<Bytes> {
-		let header = self.header.as_ref().expect("the init segment comes first");
+		let index = self.index.as_mut().expect("the init segment comes first");
 		let moof = mp4_atom::Moof::decode(&mut std::io::Cursor::new(fragment.as_ref()))?;
 
 		let mut data = BytesMut::new();
+		for traf in &moof.traf {
+			let id = traf.tfhd.track_id;
+			let Some((trak, trex)) = self.fmp4.declaration(id) else {
+				return Err(unindexable(id, "the track has no declaration").into());
+			};
+			if self
+				.described
+				.get(&id)
+				.is_none_or(|known| known.trak != *trak || known.trex != *trex)
+			{
+				let description = Description::new(trak, trex);
+				// Indexed as a repair reads it back, which keeps the two finishes identical.
+				index.describe(&description.encode(index.timescale, &mut data)?)?;
+				self.described.insert(id, description);
+			}
+		}
 		if moof
 			.traf
 			.iter()
-			.any(|traf| !header.declared.contains(&traf.tfhd.track_id))
+			.any(|traf| !index.declared.contains(&traf.tfhd.track_id))
 		{
 			mp4_atom::Header {
 				kind: b"free".into(),
@@ -253,18 +181,264 @@ impl<S: Stream> Export<S> {
 			}
 			.encode(&mut data)?;
 		}
-		let start = self.written + data.len() as u64;
-		for traf in &moof.traf {
-			self.index(start, traf)?;
-		}
+		index.fragment(self.written + data.len() as u64, &moof)?;
 		data.put_slice(&fragment);
 		Ok(data.freeze())
 	}
+}
+
+/// Rebuild the writes that finish a recording [`Export`] left unfinished, such as after a
+/// crash or a cut-short finish, or `None` when the file is already a regular MP4.
+///
+/// The final `moov` indexes every complete fragment, the same as finishing the recording
+/// right after writing the last one. Whatever follows it, such as a partial fragment or
+/// `moov`, is cut, so a repair cut short can itself be repaired.
+pub fn repair<F: Read + Seek>(file: &mut F) -> Result<Option<Finish>> {
+	let eof = file.seek(SeekFrom::End(0))?;
+	let Some(ftyp) = Atom::read(file, 0, eof)?.filter(|atom| atom.kind == *b"ftyp") else {
+		return Err(Error::Unrepairable("it does not start with an ftyp box").into());
+	};
+	let Some(reserved) = Atom::read(file, ftyp.end, eof)? else {
+		return Err(Error::Unrepairable("it ends before its header").into());
+	};
+	if reserved.kind == *b"mdat" {
+		return Ok(None);
+	}
+	if reserved.kind != *b"free" || reserved.end - reserved.start != RESERVED {
+		return Err(Error::Unrepairable("it has no reserved box").into());
+	}
+	let Some(header) = Atom::read(file, reserved.end, eof)?.filter(|atom| atom.kind == *b"moov") else {
+		return Err(Error::Unrepairable("it has no complete moov after its reserved box").into());
+	};
+	let moov: mp4_atom::Moov = header.decode(file)?;
+	if moov.mvex.is_none() {
+		return Err(Error::Unrepairable("its moov is not fragmented").into());
+	}
+	let mut index = Index::new(reserved.start, &moov)?;
+
+	// Where the last complete fragment ends, and the descriptions written since, which only
+	// count once the fragment written with them is complete.
+	let mut end = header.end;
+	let mut described = Vec::new();
+	let mut position = header.end;
+	while let Some(atom) = Atom::read(file, position, eof)? {
+		let moof = match &atom.kind {
+			b"moof" => {
+				let Some(mdat) = Atom::read(file, atom.end, eof)? else {
+					break;
+				};
+				if mdat.kind != *b"mdat" {
+					return Err(Error::Unrepairable("a moof is not followed by its mdat").into());
+				}
+				position = mdat.end;
+				atom
+			}
+			b"free" => {
+				position = atom.end;
+				match Atom::read(file, atom.body, atom.end)? {
+					Some(inner) if inner.kind == *b"moof" => {
+						let mdat = Atom::read(file, inner.end, atom.end)?;
+						if mdat.is_none_or(|mdat| mdat.kind != *b"mdat" || mdat.end != atom.end) {
+							return Err(Error::Unrepairable("a free box holds a moof without its mdat").into());
+						}
+						inner
+					}
+					Some(inner) if inner.kind == *b"moov" => {
+						described.push(inner.decode::<_, mp4_atom::Moov>(file)?);
+						continue;
+					}
+					_ => return Err(Error::Unrepairable("a free box holds neither a fragment nor a moov").into()),
+				}
+			}
+			// A finish cut short appended part or all of a moov, which ends the recording.
+			b"moov" => break,
+			_ => return Err(Error::Unrepairable("it holds a box a recording never writes").into()),
+		};
+		for moov in described.drain(..) {
+			index.describe(&moov)?;
+		}
+		index.fragment(moof.start, &moof.decode(file)?)?;
+		end = position;
+	}
+	if end < eof {
+		tracing::warn!(
+			offset = end,
+			bytes = eof - end,
+			"cutting what follows the last complete fragment"
+		);
+	}
+	Ok(Some(index.finish(end)?))
+}
+
+/// One box in a file.
+struct Atom {
+	kind: [u8; 4],
+	/// Where the box starts.
+	start: u64,
+	/// Where its body starts, past the header.
+	body: u64,
+	/// Where the box ends.
+	end: u64,
+}
+
+impl Atom {
+	/// The box at `start`, or `None` when it does not end by `limit`: cut short, or not a box.
+	fn read<F: Read + Seek>(file: &mut F, start: u64, limit: u64) -> Result<Option<Self>> {
+		let mut header = [0u8; 16];
+		let available = limit.saturating_sub(start).min(16) as usize;
+		if available < 8 {
+			return Ok(None);
+		}
+		file.seek(SeekFrom::Start(start))?;
+		file.read_exact(&mut header[..available])?;
+		let kind = header[4..8].try_into().unwrap();
+		let (length, size) = match u32::from_be_bytes(header[..4].try_into().unwrap()) {
+			1 if available == 16 => (16, u64::from_be_bytes(header[8..].try_into().unwrap())),
+			// A crash can leave zeroes, and a recording never writes a box that runs to the end.
+			0 | 1 => return Ok(None),
+			size => (8, u64::from(size)),
+		};
+		let end = start.checked_add(size).filter(|&end| size >= length && end <= limit);
+		Ok(end.map(|end| Self {
+			kind,
+			start,
+			body: start + length,
+			end,
+		}))
+	}
+
+	/// Read and decode the whole box.
+	fn decode<F: Read + Seek, T: Decode>(&self, file: &mut F) -> Result<T> {
+		let mut data = vec![0u8; (self.end - self.start) as usize];
+		file.seek(SeekFrom::Start(self.start))?;
+		file.read_exact(&mut data)?;
+		Ok(T::decode(&mut std::io::Cursor::new(data.as_slice()))?)
+	}
+}
+
+/// What a recording's file holds: its header, each track's latest description, and the
+/// samples of every fragment.
+#[derive(Clone)]
+struct Index {
+	/// Where the reserved box starts.
+	reserved: u64,
+	/// The movie timescale.
+	timescale: u32,
+	/// The tracks the fragmented `moov` declares. Any other track joined later.
+	declared: HashSet<u32>,
+	/// The latest description of each track, by track id.
+	descriptions: HashMap<u32, Description>,
+	/// What each track wrote, by track id.
+	tracks: BTreeMap<u32, Track>,
+}
+
+/// How a track is declared.
+#[derive(Clone)]
+struct Description {
+	trak: mp4_atom::Trak,
+	trex: mp4_atom::Trex,
+}
+
+impl Description {
+	fn new(trak: &mp4_atom::Trak, trex: &mp4_atom::Trex) -> Self {
+		Self {
+			trak: trak.clone(),
+			trex: trex.clone(),
+		}
+	}
+
+	/// Write a `free` box holding a `moov` that declares the track, returning that `moov` as
+	/// read back from the file.
+	fn encode(&self, timescale: u32, data: &mut BytesMut) -> Result<mp4_atom::Moov> {
+		let moov = mp4_atom::Moov {
+			mvhd: mp4_atom::Mvhd {
+				timescale,
+				..Default::default()
+			},
+			trak: vec![self.trak.clone()],
+			mvex: Some(mp4_atom::Mvex {
+				trex: vec![self.trex.clone()],
+				..Default::default()
+			}),
+			..Default::default()
+		};
+		let mut buf = Vec::new();
+		moov.encode(&mut buf)?;
+		mp4_atom::Header {
+			kind: b"free".into(),
+			size: Some(buf.len()),
+		}
+		.encode(data)?;
+		data.put_slice(&buf);
+		Ok(mp4_atom::Moov::decode(&mut std::io::Cursor::new(buf.as_slice()))?)
+	}
+}
+
+/// What one track wrote, in decode order.
+#[derive(Clone, Default)]
+struct Track {
+	/// One chunk per `trun`, its samples contiguous in the file.
+	chunks: Vec<Run>,
+	samples: Vec<Sample>,
+}
+
+#[derive(Clone)]
+struct Run {
+	/// Where the first sample starts in the file.
+	offset: u64,
+	/// The first sample's decode time, in media ticks.
+	decode_time: u64,
+	/// How many samples the run holds.
+	count: u32,
+}
+
+#[derive(Clone)]
+struct Sample {
+	size: u32,
+	duration: u32,
+	cts: i64,
+	sync: bool,
+}
+
+impl Index {
+	/// Index a file whose reserved box starts at `reserved`, followed by the fragmented `moov`.
+	fn new(reserved: u64, moov: &mp4_atom::Moov) -> Result<Self> {
+		let mut index = Self {
+			reserved,
+			timescale: moov.mvhd.timescale,
+			declared: moov.trak.iter().map(|trak| trak.tkhd.track_id).collect(),
+			descriptions: HashMap::new(),
+			tracks: BTreeMap::new(),
+		};
+		index.describe(moov)?;
+		Ok(index)
+	}
+
+	/// Take each track `moov` declares as its description from here on.
+	fn describe(&mut self, moov: &mp4_atom::Moov) -> Result<()> {
+		let trexs = moov.mvex.as_ref().map_or(&[][..], |mvex| mvex.trex.as_slice());
+		for trak in &moov.trak {
+			let id = trak.tkhd.track_id;
+			let Some(trex) = trexs.iter().find(|trex| trex.track_id == id) else {
+				return Err(unindexable(id, "the track has no trex").into());
+			};
+			self.descriptions.insert(id, Description::new(trak, trex));
+		}
+		Ok(())
+	}
+
+	/// Record the samples of `moof`, which starts at `offset` in the file.
+	fn fragment(&mut self, offset: u64, moof: &mp4_atom::Moof) -> Result<()> {
+		for traf in &moof.traf {
+			self.traf(offset, traf)?;
+		}
+		Ok(())
+	}
 
 	/// Record the samples of `traf`, whose moof starts at `moof` in the file.
-	fn index(&mut self, moof: u64, traf: &mp4_atom::Traf) -> Result<()> {
+	fn traf(&mut self, moof: u64, traf: &mp4_atom::Traf) -> Result<()> {
 		let id = traf.tfhd.track_id;
-		let Some((_, trex)) = self.fmp4.declaration(id) else {
+		let Some(Description { trex, .. }) = self.descriptions.get(&id) else {
 			return Err(unindexable(id, "the track has no declaration").into());
 		};
 		let Some(tfdt) = &traf.tfdt else {
@@ -306,6 +480,71 @@ impl<S: Stream> Export<S> {
 			}
 		}
 		Ok(())
+	}
+
+	/// The writes that make the file a regular MP4 with its `moov` at `end`.
+	fn finish(&self, end: u64) -> Result<Finish> {
+		let mut timelines = Vec::new();
+		for (&id, track) in self.tracks.iter().filter(|(_, track)| !track.samples.is_empty()) {
+			let Some(Description { trak, .. }) = self.descriptions.get(&id) else {
+				return Err(unindexable(id, "the track has no declaration").into());
+			};
+			timelines.push((trak, track, Timeline::new(id, trak, track)?));
+		}
+
+		let movie = u128::from(self.timescale);
+		let to_movie = |ticks: u64, timescale: u32| {
+			u64::try_from(u128::from(ticks) * movie / u128::from(timescale)).map_err(|_| Error::PtsOverflow)
+		};
+		// The earliest track starts the movie; the rest start that much later.
+		let mut origin = u64::MAX;
+		for (trak, _, timeline) in &timelines {
+			origin = origin.min(to_movie(timeline.start, trak.mdia.mdhd.timescale)?);
+		}
+
+		let mut traks = Vec::new();
+		for (trak, track, timeline) in timelines {
+			let timescale = trak.mdia.mdhd.timescale;
+			let delay = to_movie(timeline.start, timescale)? - origin;
+			let presented = to_movie(timeline.duration, timescale)?;
+			let mut trak = trak.clone();
+			trak.mdia.mdhd.duration = timeline.deltas.iter().map(|&delta| u64::from(delta)).sum();
+			trak.tkhd.duration = delay + presented;
+			trak.edts = edits(delay, timeline.media_time, presented);
+			trak.mdia.minf.stbl = sample_table(&trak.mdia.minf.stbl.stsd, track, &timeline);
+			traks.push(trak);
+		}
+		traks.sort_by_key(|trak| (trak.mdia.hdlr.handler != b"vide".into(), trak.tkhd.track_id));
+
+		let moov = mp4_atom::Moov {
+			mvhd: mp4_atom::Mvhd {
+				timescale: self.timescale,
+				duration: traks.iter().map(|trak| trak.tkhd.duration).max().unwrap_or(0),
+				// Normal playback rate and full volume; both default to 0.
+				rate: mp4_atom::FixedPoint::from(1),
+				volume: mp4_atom::FixedPoint::from(1),
+				next_track_id: traks.iter().map(|trak| trak.tkhd.track_id).max().unwrap_or(0) + 1,
+				..Default::default()
+			},
+			trak: traks,
+			..Default::default()
+		};
+		let mut buf = Vec::new();
+		moov.encode(&mut buf)?;
+
+		// Everything from the reserved box to the moov, the fragmented moov and every moof
+		// included, becomes one mdat that a reader skips through to the moov.
+		let mut mdat = BytesMut::with_capacity(RESERVED as usize);
+		mdat.put_u32(1);
+		mdat.put_slice(b"mdat");
+		mdat.put_u64(end - self.reserved);
+
+		Ok(Finish {
+			moov_offset: end,
+			moov: Bytes::from(buf),
+			mdat_offset: self.reserved,
+			mdat: mdat.freeze(),
+		})
 	}
 }
 
@@ -539,12 +778,44 @@ mod tests {
 		}
 	}
 
+	/// Append everything the export writes like [`record`], keeping the file's length and what
+	/// the export indexed after each write.
+	async fn record_indexed(
+		export: &mut super::Export<crate::catalog::Consumer>,
+		file: &mut Vec<u8>,
+		indexes: &mut Vec<(usize, super::Index)>,
+	) {
+		while let Ok(next) = kio::clock::timeout(Duration::from_millis(1), export.next()).await {
+			match next.expect("export failed") {
+				Some(data) => file.extend_from_slice(&data),
+				None => break,
+			}
+			indexes.push((file.len(), export.index.clone().expect("the header comes first")));
+		}
+	}
+
 	/// Finish the recording in `file` the way a writer does.
 	fn finish(export: super::Export<crate::catalog::Consumer>, file: &mut Vec<u8>) {
-		let finish = export.finish().expect("finish").expect("something was written");
+		apply(export.finish().expect("finish").expect("something was written"), file);
+	}
+
+	/// Make the writes of `finish` to `file`.
+	fn apply(finish: super::Finish, file: &mut Vec<u8>) {
+		file.truncate(finish.moov_offset as usize);
 		file.extend_from_slice(&finish.moov);
 		let offset = finish.mdat_offset as usize;
 		file[offset..offset + finish.mdat.len()].copy_from_slice(&finish.mdat);
+	}
+
+	fn repair(file: &[u8]) -> crate::Result<Option<super::Finish>> {
+		super::repair(&mut std::io::Cursor::new(file))
+	}
+
+	fn assert_same(finish: &super::Finish, expected: &super::Finish, cut: usize) {
+		assert_eq!(finish.moov_offset, expected.moov_offset, "cut at {cut}");
+		assert_eq!(finish.moov, expected.moov, "cut at {cut}");
+		assert_eq!(finish.mdat_offset, expected.mdat_offset, "cut at {cut}");
+		assert_eq!(finish.mdat, expected.mdat, "cut at {cut}");
 	}
 
 	fn atoms(file: &[u8]) -> Vec<mp4_atom::Any> {
@@ -627,7 +898,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_finished_recording_is_a_regular_mp4() {
 		let mut live = Live::avc3();
-		let mut audio = add_opus(&mut live, 0);
+		let mut audio = add_opus(&mut live, 312);
 		let video: Vec<_> = (0..9u64).map(|i| video_frame(i * 33_000, i % 3 == 0)).collect();
 		for frame in &video {
 			live.track.write(frame.clone()).unwrap();
@@ -642,13 +913,15 @@ mod tests {
 		let mut file = Vec::new();
 		record(&mut export, &mut file).await;
 
-		// Unfinished, it is the fMP4 a crash would leave.
+		// Unfinished, it is the fMP4 a crash would leave. The fragmented moov already describes
+		// every track as written, Opus pre-skip edit included.
 		let unfinished = atoms(&file);
 		assert_eq!(kinds(&unfinished[..3]), ["ftyp", "free", "moov"]);
 		assert!(
 			kinds(&unfinished[3..])
 				.iter()
-				.all(|kind| kind == "moof" || kind == "mdat")
+				.all(|kind| kind == "moof" || kind == "mdat"),
+			"no description beyond the fragmented moov"
 		);
 		assert!(moov(unfinished).mvex.is_some());
 
@@ -707,7 +980,10 @@ mod tests {
 			.iter()
 			.filter(|atom| matches!(atom, mp4_atom::Any::Free(_)))
 			.count();
-		assert_eq!(frees, 3, "the reserved box and both audio fragments");
+		assert_eq!(
+			frees, 4,
+			"the reserved box, the audio description and both audio fragments"
+		);
 
 		finish(export, &mut file);
 		let moov = moov(atoms(&file));
@@ -855,5 +1131,90 @@ mod tests {
 		let live = Live::avc3();
 		let export = export(&live).await;
 		assert!(export.finish().unwrap().is_none());
+	}
+
+	/// A recording cut anywhere, mid-fragment or right after a late rendition joins, repairs
+	/// to exactly what finishing it after its last complete write would have produced.
+	#[tokio::test(start_paused = true)]
+	async fn a_cut_recording_repairs_like_a_finish_there() {
+		let mut live = Live::avc3();
+		for i in 0..4u64 {
+			live.track.write(video_frame(i * 33_000, i % 3 == 0)).unwrap();
+		}
+		let mut export = export(&live).await;
+		let mut file = Vec::new();
+		let mut indexes = Vec::new();
+		record_indexed(&mut export, &mut file, &mut indexes).await;
+
+		let mut audio = add_opus(&mut live, 312);
+		for i in 0..10u64 {
+			audio.write(raw_frame(100_000 + i * 20_000, OPUS, i % 5 == 0)).unwrap();
+		}
+		audio.finish().unwrap();
+		for i in 4..9u64 {
+			live.track.write(video_frame(i * 33_000, i % 3 == 0)).unwrap();
+		}
+		live.track.finish().unwrap();
+		record_indexed(&mut export, &mut file, &mut indexes).await;
+		assert!(indexes.len() > 4, "several writes to cut between");
+
+		for cut in 0..=file.len() {
+			let repaired = repair(&file[..cut]);
+			let Some((end, index)) = indexes.iter().rev().find(|(end, _)| *end <= cut) else {
+				assert!(repaired.is_err(), "a header cut at {cut} is no recording");
+				continue;
+			};
+			let repaired = repaired.unwrap().expect("unfinished");
+			assert_same(&repaired, &index.finish(*end as u64).unwrap(), cut);
+
+			// A repair cut short after its moov leaves a file that repairs the same.
+			let mut half = file[..cut].to_vec();
+			half.truncate(repaired.moov_offset as usize);
+			half.extend_from_slice(&repaired.moov);
+			assert_same(&repair(&half).unwrap().expect("unfinished"), &repaired, cut);
+		}
+
+		// Uncut, the repair is the finish byte for byte, and indexes the late rendition.
+		let mut repaired = file.clone();
+		apply(repair(&file).unwrap().expect("unfinished"), &mut repaired);
+		finish(export, &mut file);
+		assert_eq!(repaired, file);
+		let moov = moov(atoms(&file));
+		assert_eq!(samples(&file, trak(&moov, b"soun")), vec![OPUS; 10]);
+		assert_eq!(samples(&file, trak(&moov, b"vide")).len(), 9);
+	}
+
+	/// A finish cut short before its mdat header leaves part or all of the moov at the end,
+	/// which the repair cuts and writes again.
+	#[tokio::test(start_paused = true)]
+	async fn an_interrupted_finish_repairs() {
+		let mut live = Live::avc3();
+		let mut audio = add_opus(&mut live, 0);
+		for i in 0..6u64 {
+			live.track.write(video_frame(i * 33_000, i % 3 == 0)).unwrap();
+			audio.write(raw_frame(i * 20_000, OPUS, i == 0)).unwrap();
+		}
+		live.track.finish().unwrap();
+		audio.finish().unwrap();
+		let mut export = export(&live).await;
+		let mut file = Vec::new();
+		record(&mut export, &mut file).await;
+		let finished = export.finish().unwrap().expect("something was written");
+
+		for appended in [1, 8, finished.moov.len() / 2, finished.moov.len()] {
+			let mut cut = file.clone();
+			cut.extend_from_slice(&finished.moov[..appended]);
+			assert_same(&repair(&cut).unwrap().expect("unfinished"), &finished, appended);
+		}
+
+		let mut done = file.clone();
+		apply(finished, &mut done);
+		assert_eq!(kinds(&atoms(&done)), ["ftyp", "mdat", "moov"]);
+		assert!(repair(&done).unwrap().is_none(), "already a regular MP4");
+
+		// A plain fMP4 has no reserved box for the mdat header.
+		let ftyp = u32::from_be_bytes(file[..4].try_into().unwrap()) as usize;
+		let fmp4 = [&file[..ftyp], &file[ftyp + 16..]].concat();
+		assert!(repair(&fmp4).is_err());
 	}
 }
