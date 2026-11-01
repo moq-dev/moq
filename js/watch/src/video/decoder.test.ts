@@ -9,7 +9,7 @@ import { ringSamples } from "../audio/latency";
 import { AudioRingBuffer } from "../audio/ring-buffer";
 import type { Broadcast } from "../broadcast";
 import { type Delay, Sync } from "../sync";
-import { Decoder } from "./decoder";
+import { Decoder, insertRecoveryPoint } from "./decoder";
 import { Source } from "./source";
 
 const flush = () => yieldNow();
@@ -191,14 +191,14 @@ function manualAt(ms: number) {
 	clock.jump(Nano.fromMilli(Milli(ms)));
 	return { advance: (by: number) => clock.advance(Nano.fromMilli(Milli(by))), installed: clock.install() };
 }
-function sample(group: number, timestamp: number, keyframe = true): Read {
+function sample(group: number, timestamp: number, keyframe = true, payload: Uint8Array = new Uint8Array([1])): Read {
 	return {
 		kind: "frame",
 		group,
 		frame: {
 			arrival: Nano.toMilli(Nano(now())),
 			timestamp: Micro(timestamp),
-			payload: new Uint8Array([1]),
+			payload,
 			keyframe,
 		},
 	};
@@ -254,8 +254,9 @@ async function guardedPlayback(
 	const originalDecoder = Object.getOwnPropertyDescriptor(globalThis, "VideoDecoder");
 	const originalChunk = Object.getOwnPropertyDescriptor(globalThis, "EncodedVideoChunk");
 	const submitted: number[] = [];
-	// What each codec, in creation order, was given.
+	// What each codec, in creation order, was given, and the bytes of each chunk.
 	const decoded: number[][] = [];
+	const payloads: Uint8Array[][] = [];
 	const outputs: number[] = [];
 	const pictures: Picture[] = [];
 	const owed = new Set(hold);
@@ -283,6 +284,7 @@ async function guardedPlayback(
 		constructor(callbacks: VideoDecoderInit) {
 			this.callbacks = callbacks;
 			decoded.push([]);
+			payloads.push([]);
 			errors.push(callbacks.error);
 			frames.push(callbacks.output);
 		}
@@ -300,6 +302,7 @@ async function guardedPlayback(
 			this.#keyRequired = false;
 			submitted.push(chunk.timestamp);
 			decoded[this.index].push(chunk.timestamp);
+			payloads[this.index].push((chunk as unknown as { data: Uint8Array }).data);
 			const emit = () => {
 				outputs.push(chunk.timestamp);
 				const picture = new Picture(chunk.timestamp, pictures, this.index);
@@ -328,9 +331,11 @@ async function guardedPlayback(
 		value: class {
 			timestamp: number;
 			type: EncodedVideoChunkType;
+			data: Uint8Array;
 			constructor(init: EncodedVideoChunkInit) {
 				this.timestamp = init.timestamp;
 				this.type = init.type;
+				this.data = new Uint8Array(init.data as Uint8Array);
 			}
 		},
 	});
@@ -396,6 +401,7 @@ async function guardedPlayback(
 		track,
 		submitted,
 		decoded,
+		payloads,
 		outputs,
 		pictures,
 		sync,
@@ -1796,3 +1802,137 @@ describe("Decoder with a warmup rendition", () => {
 		}
 	});
 });
+
+// H.264 NAL units, without their start code or length prefix.
+const NAL = {
+	aud: [0x09, 0xf0],
+	sps: [0x67, 0x64, 0x00, 0x28],
+	pps: [0x68, 0xee],
+	// An SEI recovery point counting one 30-frame sweep, as an intra-refresh encoder writes it.
+	sweep: [0x06, 0x06, 0x02, 0x0f, 0x84, 0x80],
+	// The one the decoder inserts: recovery_frame_cnt = 0.
+	recovered: [0x06, 0x06, 0x01, 0x84, 0x80],
+	slice: [0x41, 0x9a, 0x02],
+	idr: [0x65, 0x88, 0x84],
+};
+
+// Length-prefixed with `size` bytes, as an avcC `description` declares.
+function avcc(nals: number[][], size = 4): Uint8Array {
+	const out: number[] = [];
+	for (const nal of nals) {
+		for (let i = size - 1; i >= 0; i--) out.push((nal.length >> (8 * i)) & 0xff);
+		out.push(...nal);
+	}
+	return new Uint8Array(out);
+}
+
+function annexB(nals: number[][], code = [0, 0, 0, 1]): Uint8Array {
+	return new Uint8Array(nals.flatMap((nal) => [...code, ...nal]));
+}
+
+// avcC records whose lengthSizeMinusOne is 3 and 1.
+const AVCC4 = new Uint8Array([0x01, 0x64, 0x00, 0x28, 0xff]);
+const AVCC2 = new Uint8Array([0x01, 0x64, 0x00, 0x28, 0xfd]);
+
+describe("insertRecoveryPoint", () => {
+	it("inserts a zero-count recovery point before the first slice of a length-prefixed recovery point", () => {
+		const payload = avcc([NAL.sweep, NAL.slice, NAL.slice]);
+		expect(insertRecoveryPoint(payload, AVCC4)).toEqual(avcc([NAL.sweep, NAL.recovered, NAL.slice, NAL.slice]));
+		expect(insertRecoveryPoint(avcc([NAL.slice], 2), AVCC2)).toEqual(avcc([NAL.recovered, NAL.slice], 2));
+	});
+
+	it("inserts it before the first slice of an Annex B recovery point", () => {
+		// The slice's 4-byte start code keeps its leading zero byte, which now leads the inserted unit.
+		expect(insertRecoveryPoint(annexB([NAL.aud, NAL.sweep, NAL.slice]))).toEqual(
+			new Uint8Array([...annexB([NAL.aud, NAL.sweep]), 0, ...annexB([NAL.recovered, NAL.slice], [0, 0, 1])]),
+		);
+		const short = [0, 0, 1];
+		expect(insertRecoveryPoint(annexB([NAL.sps, NAL.pps, NAL.slice], short))).toEqual(
+			annexB([NAL.sps, NAL.pps, NAL.recovered, NAL.slice], short),
+		);
+	});
+
+	it("leaves an IDR, a payload without a slice, and a malformed payload unchanged", () => {
+		for (const [payload, description] of [
+			[avcc([NAL.sps, NAL.pps, NAL.idr]), AVCC4],
+			[annexB([NAL.sps, NAL.pps, NAL.idr]), undefined],
+			[avcc([NAL.sps, NAL.pps]), AVCC4],
+			[annexB([NAL.sweep]), undefined],
+			// A length running past the payload, and a truncated description.
+			[avcc([NAL.slice]).subarray(0, 6), AVCC4],
+			[avcc([NAL.slice]), new Uint8Array([0x01])],
+		] as const) {
+			expect(insertRecoveryPoint(payload, description)).toBe(payload);
+		}
+	});
+});
+
+for (const kind of ["legacy", "cmaf"] as const) {
+	describe(`Decoder opening a ${kind} warmup rendition`, () => {
+		const MIN = 0;
+		const MAX = 1;
+		const recovery = avcc([NAL.sweep, NAL.slice]);
+		const patched = avcc([NAL.sweep, NAL.recovered, NAL.slice]);
+		const delta = avcc([NAL.slice]);
+		const idr = avcc([NAL.sps, NAL.pps, NAL.idr]);
+		const at = (group: number, ms: number, key: boolean, payload: Uint8Array) =>
+			sample(group, ms * 1000, key, payload);
+
+		async function open(fields: Partial<Catalog.VideoConfig>) {
+			const feeds = new Feeds();
+			const playback = await guardedPlayback(kind, [], [], false, 0, { fields, feeds });
+			return {
+				playback,
+				push: async (lane: number, ...reads: Read[]) => {
+					feeds.push(lane, ...reads);
+					await microtasks();
+				},
+			};
+		}
+
+		it("rewrites only the recovery point that opens each codec", async () => {
+			const { playback, push } = await open({ warmup: Catalog.u53(300) });
+			try {
+				expect(playback.codecs).toBe(2);
+				for (const lane of [MIN, MAX]) {
+					await push(lane, at(10, 1000, true, recovery), at(10, 1033, false, delta));
+					// The next group continues the open codec, so Chromium does not check it.
+					await push(lane, at(11, 1300, true, recovery));
+				}
+				for (const lane of [MIN, MAX]) expect(playback.payloads[lane]).toEqual([patched, delta, recovery]);
+
+				// A skip resets the min-delay codec, so the group it reopens on is rewritten again.
+				await push(MIN, gap, at(13, 1900, true, recovery));
+				expect(playback.resets).toBe(1);
+				expect(playback.payloads[MIN].at(-1)).toEqual(patched);
+			} finally {
+				playback.close();
+				await microtasks();
+			}
+		});
+
+		it("leaves an opening IDR unchanged", async () => {
+			const { playback, push } = await open({ warmup: Catalog.u53(300) });
+			try {
+				for (const lane of [MIN, MAX]) await push(lane, at(10, 1000, true, idr));
+				for (const lane of [MIN, MAX]) expect(playback.payloads[lane]).toEqual([idr]);
+			} finally {
+				playback.close();
+				await microtasks();
+			}
+		});
+
+		it("leaves a rendition without a warmup unchanged", async () => {
+			const { playback, push } = await open({});
+			try {
+				expect(playback.codecs).toBe(1);
+				await push(MIN, at(10, 1000, true, recovery), gap, at(13, 1900, true, recovery));
+				expect(playback.resets).toBe(1);
+				expect(playback.payloads[MIN]).toEqual([recovery, recovery]);
+			} finally {
+				playback.close();
+				await microtasks();
+			}
+		});
+	});
+}

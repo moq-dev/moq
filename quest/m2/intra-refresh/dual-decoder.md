@@ -10,22 +10,25 @@ decodes on from there, showing stripes until the sweep completes.
 
 ## Plan
 
-The two decoders, their selector, and their tests landed with this quest's
-first PR ([moq-dev/moq#7555](https://github.com/moq-dev/moq/pull/7555)).
-What remains is getting the opening chunk past each engine's key check.
+The two decoders, their selector, and the Chromium join landed with this
+quest's first PR ([moq-dev/moq#7555](https://github.com/moq-dev/moq/pull/7555)).
+What remains is checking the other engines.
 
-- Chromium (verified on 156): WebCodecs accepts an H.264 chunk sent as `key`
-  only when it is an IDR or carries an SEI recovery point with
+- Chromium (done, verified on 156): WebCodecs accepts an H.264 chunk that opens
+  a codec only when it is an IDR or carries an SEI recovery point with
   `recovery_frame_cnt == 0` (`media/formats/mp4/avc.cc`, `AnalyzeAnnexB`). An
-  intra-refresh recovery point counts a whole sweep, so `decode()` throws
-  "A key frame is required" and the rendition fails through `error`. Adding a
-  second SEI recovery point with a zero count ahead of the first slice of that
-  one chunk makes Chromium accept it, and it outputs from that frame on.
-  Open question for the maintainer: how js/watch handles this (see the PR's
-  `## Decisions needed`).
+  intra-refresh recovery point counts a whole sweep.
+  ✅ Decided 2026-11-01 (option A): on the chunk that opens a codec (after
+  `configure` or `reset`), when the rendition has `warmup` and the chunk is
+  H.264 with no IDR, `insertRecoveryPoint` in `decoder.ts` inserts an SEI
+  recovery point with a zero count before the first slice. Rejected: treating
+  H.264 `warmup` renditions as unsupported in Chromium (B), and asking Chromium
+  to accept a nonzero count (C), an outside party.
 - Firefox and Safari: unverified. Playwright's Firefox build reports H.264
   unsupported and its WebKit build would not launch on the Linux host. Check
-  both with a real browser, joining at a non-IDR recovery point sent as `key`.
+  both with a real browser, joining at a non-IDR recovery point sent as `key`,
+  with and without the inserted recovery point. If one rejects the join, find
+  what its key check accepts.
 - HEVC: Chromium rejects a non-IRAP H.265 frame sent as `key`, so an HEVC
   refresh rendition fails through the decoder's existing `error` signal.
 

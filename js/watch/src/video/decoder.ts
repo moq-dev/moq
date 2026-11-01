@@ -421,6 +421,9 @@ interface DecoderTrackProps {
 	// Set for the max-delay decoder of a rendition with a catalog `warmup`: its start and its
 	// lateness budget reach this much further, and it leaves the shared clock and stats alone.
 	warmup?: Getter<Milli>;
+	// Whether the rendition has a catalog `warmup`, so its groups may open on a recovery point that
+	// is not an IDR. Set for both decoders.
+	refresh?: Getter<boolean>;
 	broadcast: Moq.Broadcast.Consumer;
 	// The rendition ID; `name` is its track's name in `broadcast`.
 	track: string;
@@ -468,6 +471,7 @@ class DecoderTrack {
 	// Whether this decoder drives the shared clock: only the min-delay one reports arrivals and
 	// restarts the timeline.
 	#drives: boolean;
+	#refresh: Getter<boolean>;
 
 	// Network jitter + decode buffer.
 	buffered = new Signal<Container.BufferedRanges>([]);
@@ -482,6 +486,8 @@ class DecoderTrack {
 
 	// Codec description from the last configure, reused after a playhead reset.
 	#description?: Uint8Array;
+	// Whether the next chunk opens the codec, after a configure or a reset.
+	#opening = false;
 
 	// A hole or timeline restart makes the next decoded frame decide whether the codec resets.
 	#resetPending = false;
@@ -506,6 +512,7 @@ class DecoderTrack {
 		this.stats = props.stats;
 		this.#warmup = props.warmup ?? getter(Milli.zero);
 		this.#drives = props.warmup === undefined;
+		this.#refresh = props.refresh ?? getter(false);
 		this.#predecessor = props.predecessor;
 
 		this.#signals.run(this.#run.bind(this));
@@ -679,12 +686,6 @@ class DecoderTrack {
 				// min-delay decoder moves the clock: the other reads frames already behind it.
 				if (this.#drives) this.sync.received(Milli.fromMicro(frame.timestamp as Micro), frame.arrival);
 
-				const chunk = new EncodedVideoChunk({
-					type: frame.keyframe ? "key" : "delta",
-					data: frame.payload,
-					timestamp: frame.timestamp,
-				});
-
 				// Track decode buffer: frames sent to decoder but not yet rendered. Only bridge from
 				// the previous frame when no gap or end came between them. Group ids can't answer that:
 				// they aren't required to be sequential (some encoders derive them from DTS), so
@@ -698,8 +699,8 @@ class DecoderTrack {
 
 				latest = next.group;
 				this.#resetAtKeyframe(decoder, frame.keyframe);
-				this.#groups.set(chunk.timestamp, next.group);
-				decoder.decode(chunk);
+				this.#groups.set(frame.timestamp, next.group);
+				decoder.decode(this.#chunk(frame));
 				if (!this.sync.playing.peek())
 					await this.#waitStartup(effect, Milli.fromMicro(frame.timestamp as Micro));
 			}
@@ -778,13 +779,7 @@ class DecoderTrack {
 				latest = next.group;
 				this.#resetAtKeyframe(decoder, frame.keyframe);
 				this.#groups.set(frame.timestamp, next.group);
-				decoder.decode(
-					new EncodedVideoChunk({
-						type: frame.keyframe ? "key" : "delta",
-						data: frame.payload,
-						timestamp: frame.timestamp,
-					}),
-				);
+				decoder.decode(this.#chunk(frame));
 				if (!this.sync.playing.peek()) await this.#waitStartup(effect, Milli.fromMicro(frame.timestamp));
 			}
 		});
@@ -862,7 +857,20 @@ class DecoderTrack {
 		this.#configure(decoder);
 	}
 
+	// The chunk for `frame`, run through the opening rewrite when it opens the codec.
+	#chunk(frame: Container.ReceivedFrame): EncodedVideoChunk {
+		let data = frame.payload;
+		if (this.#opening) {
+			this.#opening = false;
+			if (frame.keyframe && this.#refresh.peek() && isH264(this.config.codec)) {
+				data = insertRecoveryPoint(data, this.#description);
+			}
+		}
+		return new EncodedVideoChunk({ type: frame.keyframe ? "key" : "delta", data, timestamp: frame.timestamp });
+	}
+
 	#configure(decoder: VideoDecoder): void {
+		this.#opening = true;
 		decoder.configure({
 			codec: this.config.codec,
 			description: this.#description,
@@ -918,7 +926,7 @@ class DecoderTrack {
 }
 
 /** Constructor properties for {@link Rendition}. */
-interface RenditionProps extends Omit<DecoderTrackProps, "warmup" | "predecessor" | "stats"> {
+interface RenditionProps extends Omit<DecoderTrackProps, "warmup" | "refresh" | "predecessor" | "stats"> {
 	stats: Signal<Stats | undefined>;
 	// The rendition on screen when this one was selected from the same path, whose decoders' arrival
 	// estimates these continue.
@@ -967,13 +975,14 @@ class Rendition {
 		this.identity = props.identity;
 		this.catalog = props.catalog;
 
-		const predecessor = props.predecessor;
-		this.min = new DecoderTrack({ ...props, predecessor: predecessor?.consumer });
-
 		// A missing or zero `warmup` keeps one decoder. The budgets follow a changed value without
 		// reopening the max-delay decoder.
 		const warmup = new Signal(Milli.zero);
 		const dual = new Signal(false);
+
+		const predecessor = props.predecessor;
+		this.min = new DecoderTrack({ ...props, refresh: dual, predecessor: predecessor?.consumer });
+
 		this.#signals.run((effect) => {
 			const config = effect.get(props.catalog)?.video?.renditions?.[props.track];
 			warmup.set(Milli(config?.warmup ?? 0));
@@ -985,6 +994,7 @@ class Rendition {
 				...props,
 				stats: undefined,
 				warmup,
+				refresh: dual,
 				predecessor: predecessor?.max.peek()?.consumer ?? predecessor?.consumer,
 			});
 			effect.cleanup(() => max.close());
@@ -1071,6 +1081,80 @@ class Rendition {
 interface Lane {
 	frame: VideoFrame | undefined;
 	lane: DecoderTrack;
+}
+
+function isH264(codec: string): boolean {
+	return codec.startsWith("avc1.") || codec.startsWith("avc3.");
+}
+
+// An SEI NAL unit (type 6) holding one recovery point message (payload type 6, one byte):
+// recovery_frame_cnt = 0, exact_match_flag = 0, broken_link_flag = 0, changing_slice_group_idc = 0,
+// then payload alignment and the RBSP trailing bits. It needs no emulation prevention.
+const RECOVERY_SEI = new Uint8Array([0x06, 0x06, 0x01, 0x84, 0x80]);
+
+/**
+ * Insert an SEI recovery point with `recovery_frame_cnt = 0` before the first slice of an H.264
+ * access unit that has no IDR, so a codec can open on it. `description` is the avcC record when the
+ * payload is length-prefixed, and absent for Annex B. An IDR, a payload without a slice, or one that
+ * does not parse comes back unchanged.
+ *
+ * Chromium's WebCodecs checks the chunk that opens a codec, after `configure()` or `reset()`: an
+ * H.264 chunk sent as `key` must hold an IDR, or an SEI recovery point with `recovery_frame_cnt ==
+ * 0` (`AnalyzeAnnexB` in `media/formats/mp4/avc.cc`). Otherwise `decode()` throws "A key frame is
+ * required". An intra-refresh group opens on a recovery point that counts a whole sweep, so every
+ * join and skip of a `warmup` rendition would fail. The extra message declares that one picture
+ * recovered, which is what a `warmup` rendition already accepts: the min-delay decoder shows the
+ * refresh stripes until the sweep completes, and the max-delay decoder covers them. The slices
+ * are unchanged; the message goes right before the first one, after any SEI the stream carries.
+ * @internal
+ */
+export function insertRecoveryPoint(payload: Uint8Array, description?: Uint8Array): Uint8Array {
+	if (description) {
+		// lengthSizeMinusOne, in the low two bits of the avcC record's fifth byte.
+		if (description.byteLength < 5) return payload;
+		const size = (description[4] & 0x03) + 1;
+		for (let offset = 0; offset + size <= payload.byteLength; ) {
+			let length = 0;
+			for (let i = 0; i < size; i++) length = length * 256 + payload[offset + i];
+			const start = offset + size;
+			if (length === 0 || start + length > payload.byteLength) return payload;
+			const type = payload[start] & 0x1f;
+			if (type === 5) return payload;
+			if (type >= 1 && type <= 4) {
+				const prefix = new Uint8Array(size);
+				for (let i = 0, n = RECOVERY_SEI.byteLength; i < size; i++, n = Math.floor(n / 256)) {
+					prefix[size - 1 - i] = n % 256;
+				}
+				return splice(payload, offset, prefix, RECOVERY_SEI);
+			}
+			offset = start + length;
+		}
+		return payload;
+	}
+
+	// Annex B: each NAL unit follows a 00 00 01 start code, with an optional leading zero byte.
+	for (let i = 0; i + 3 < payload.byteLength; i++) {
+		if (payload[i] !== 0 || payload[i + 1] !== 0 || payload[i + 2] !== 1) continue;
+		const type = payload[i + 3] & 0x1f;
+		if (type === 5) return payload;
+		if (type >= 1 && type <= 4) return splice(payload, i, new Uint8Array([0, 0, 1]), RECOVERY_SEI);
+		i += 2;
+	}
+	return payload;
+}
+
+// `payload` with `parts` inserted at `at`.
+function splice(payload: Uint8Array, at: number, ...parts: Uint8Array[]): Uint8Array {
+	const length = parts.reduce((sum, part) => sum + part.byteLength, payload.byteLength);
+	const out = new Uint8Array(length);
+	out.set(payload.subarray(0, at), 0);
+	let offset = at;
+	for (const part of parts) {
+		out.set(part, offset);
+		offset += part.byteLength;
+	}
+	out.set(payload.subarray(at), offset);
+	return out;
 }
 
 // Chrome configures a hardware H.264 decoder that then fails the first interlaced picture: field

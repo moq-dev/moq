@@ -62,6 +62,13 @@ picture shows whenever it has caught up. Each decoder costs its own CPU and
 decoder memory, and both share one subscription. A rendition without `warmup`
 uses one decoder.
 
+An H.264 group of such a rendition opens on a recovery point that is not an
+IDR. Chromium's WebCodecs refuses to open a decoder on that picture: it wants
+an IDR or a recovery point that counts zero frames. So when a decoder opens on
+one, the player inserts a second recovery point with a zero count before its
+first slice. The slices are untouched; the stripes clear as the sweep
+completes.
+
 `el.broadcast.out.status` is `offline`, `loading`, `live`, `error`, or `unsupported`.
 On `unsupported`, update the player to read the broadcast's newer catalog; the overlay shows this notice.
 On `error` the origin refused the broadcast, `el.broadcast.out.error` says why,
