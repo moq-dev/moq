@@ -702,7 +702,7 @@ mod tests {
 						producer.set_active(active, Timestamp::ZERO).unwrap();
 					}
 					let pcm: Vec<_> = (0..1920).map(|index| (index as f32 * 0.1).sin() * 0.1).collect();
-					let start = moq_clock::now();
+					let start = kio::clock::now();
 					for index in 0..3000 {
 						let frame = pcm_frame(&pcm, index * 20_000);
 						for producer in &mut producers {
@@ -710,7 +710,7 @@ mod tests {
 						}
 					}
 					let idle = start.elapsed();
-					let start = moq_clock::now();
+					let start = kio::clock::now();
 					for producer in &mut producers {
 						loop {
 							producer
@@ -1014,7 +1014,7 @@ mod tests {
 			while demand.wanted_changed().await?.is_none() {}
 			moq_net::Result::Ok(())
 		};
-		moq_clock::timeout(Duration::from_secs(1), wanted)
+		kio::clock::timeout(Duration::from_secs(1), wanted)
 			.await
 			.expect("subscription demand")
 			.unwrap();
@@ -1026,7 +1026,7 @@ mod tests {
 			while demand.wanted_changed().await?.is_some() {}
 			moq_net::Result::Ok(())
 		};
-		moq_clock::timeout(Duration::from_secs(1), unwanted)
+		kio::clock::timeout(Duration::from_secs(1), unwanted)
 			.await
 			.expect("subscription released")
 			.unwrap();
@@ -1034,7 +1034,7 @@ mod tests {
 
 		producer.finish().unwrap();
 		drop(producer);
-		let closed = moq_clock::timeout(Duration::from_secs(1), demand.closed())
+		let closed = kio::clock::timeout(Duration::from_secs(1), demand.closed())
 			.await
 			.expect("producer closed");
 		assert!(closed.is_ok(), "{closed:?}");
@@ -1131,7 +1131,10 @@ mod tests {
 				&decoder_config,
 				"audio",
 				DecodeOptions {
-					max_delay: Duration::from_secs(1),
+					delay: crate::decode::Delay {
+						max: Some(Duration::from_secs(1)),
+						..Default::default()
+					},
 					..DecodeOptions::new()
 				},
 			)
@@ -1311,7 +1314,10 @@ mod tests {
 			&decoder_config,
 			"audio",
 			DecodeOptions {
-				max_delay: Duration::from_millis(500),
+				delay: crate::decode::Delay {
+					max: Some(Duration::from_millis(500)),
+					..Default::default()
+				},
 				..DecodeOptions::new()
 			},
 		)

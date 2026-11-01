@@ -774,7 +774,7 @@ struct Reader<R> {
 	// diagnosed by the rate at which these climb, and stdin may never end, so
 	// they have to surface as they accumulate rather than at exit.
 	log: ts::stats::Log,
-	sampled: moq_clock::Instant,
+	sampled: kio::clock::Instant,
 }
 
 /// Decode `input` into the broadcast until EOF.
@@ -817,7 +817,7 @@ async fn decode(
 		// whatever is available without waiting to fill it.
 		buffer: bytes::BytesMut::with_capacity(64 * 1024),
 		log: ts::stats::Log::default(),
-		sampled: moq_clock::now(),
+		sampled: kio::clock::now(),
 	};
 
 	let result = loop {
@@ -864,7 +864,7 @@ impl Instance {
 				}
 
 				if reader.sampled.elapsed() >= ts::stats::Log::INTERVAL {
-					reader.sampled = moq_clock::now();
+					reader.sampled = kio::clock::now();
 					if let Some(stats) = decoder.stats() {
 						if let Some(sections) = &sections {
 							sections.set(|report| report.mpegts = Some(stats.clone()));
@@ -1297,7 +1297,7 @@ pub(crate) mod tests {
 		// Past the export's release delay and the send-ahead window behind it, so the first
 		// frame goes out before it ends.
 		let wait = RECORDING_MAX_AGE * 3 + Duration::from_secs(1);
-		while let Ok(res) = moq_clock::timeout(wait, exporter.next()).await {
+		while let Ok(res) = kio::clock::timeout(wait, exporter.next()).await {
 			match res.expect("exporter error") {
 				Some(frame) => out.extend_from_slice(&frame.payload),
 				None => break,
@@ -1675,12 +1675,12 @@ pub(crate) mod tests {
 			// the lead holds; the jump is in the copy after it.
 			const WAIT: Duration = Duration::from_secs(10);
 			decoder.decode_chunk(&lead).unwrap();
-			let consumer = moq_clock::timeout(WAIT, remote.consume().follow("pt.hang", None).unwrap().available())
+			let consumer = kio::clock::timeout(WAIT, remote.consume().follow("pt.hang", None).unwrap().available())
 				.await
 				.unwrap()
 				.unwrap();
 			let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
-			let catalog = moq_clock::timeout(WAIT, catalogs.next())
+			let catalog = kio::clock::timeout(WAIT, catalogs.next())
 				.await
 				.unwrap()
 				.unwrap()
@@ -1692,13 +1692,13 @@ pub(crate) mod tests {
 			// SUBSCRIBE arrives, not when it is sent.
 			let start = async |subscription: moq_net::track::Subscription| {
 				let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
-				let first = moq_clock::timeout(WAIT, track.recv_group()).await.unwrap().unwrap();
+				let first = kio::clock::timeout(WAIT, track.recv_group()).await.unwrap().unwrap();
 				(track, first)
 			};
 			// Each group's sequence and frames, read until the track ends. A read cut off as
 			// stale leaves `None` for that group's frames, and a marker leaves none.
 			let read = |(mut track, first): (moq_net::track::Subscriber, Option<moq_net::group::Consumer>)| {
-				tokio::spawn(moq_clock::timeout(WAIT, async move {
+				tokio::spawn(kio::clock::timeout(WAIT, async move {
 					let mut groups = Vec::new();
 					let mut next = first;
 					while let Some(mut group) = next {
@@ -1771,9 +1771,8 @@ pub(crate) mod tests {
 			// Joining once every group is out, with a budget half the jump, reads every group
 			// after it past the marker, and none of the groups the jump left more than
 			// the budget behind. An IETF subscription starts at the newest group, so only lite
-			// has the groups behind it to read, and a lite-06 subscriber drops the timestamps
-			// that carry the jump.
-			if version == "moq-lite-07-wip" {
+			// has the groups behind it to read.
+			if version.starts_with("moq-lite") {
 				let late =
 					read(start(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10))).await)
 						.await
@@ -1813,9 +1812,9 @@ pub(crate) mod tests {
 		let Source::Stream { decoder, .. } = &mut publish.source else {
 			panic!("expected a stream source");
 		};
-		let before = moq_clock::wall();
+		let before = kio::clock::wall();
 		decoder.decode_chunk(BBB).unwrap();
-		let after = moq_clock::wall();
+		let after = kio::clock::wall();
 		decoder.finish().unwrap();
 
 		let catalog = hang::catalog::Catalog::<()>::subscribe(&consumer)
@@ -1965,7 +1964,7 @@ pub(crate) mod tests {
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
-			let start = moq_clock::now();
+			let start = kio::clock::now();
 			decode(decoder, catalog, input, Publication::default()).await.unwrap();
 			let elapsed = start.elapsed();
 			let bytes = INPUT.len() * copies;
@@ -2000,7 +1999,7 @@ pub(crate) mod tests {
 
 		let mut last = None;
 		loop {
-			let next = moq_clock::timeout(Duration::from_secs(1), catalogs.next())
+			let next = kio::clock::timeout(Duration::from_secs(1), catalogs.next())
 				.await
 				.expect("the catalog track ends");
 			match next.expect("the catalog ends cleanly") {
@@ -2033,7 +2032,7 @@ pub(crate) mod tests {
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
-		let started = moq_clock::Instant::now();
+		let started = kio::clock::Instant::now();
 		let publication = Publication {
 			broadcast: publish.broadcast.clone(),
 			linger: LINGER,
@@ -2108,7 +2107,7 @@ pub(crate) mod tests {
 
 			tokio::select! {
 				res = &mut import => panic!("the import returned before its input ended: {res:?}"),
-				event = moq_clock::timeout(Duration::from_secs(5), announced.next()) => {
+				event = kio::clock::timeout(Duration::from_secs(5), announced.next()) => {
 					assert!(event.is_err(), "announced before any input: {event:?}");
 				}
 			}
@@ -2116,7 +2115,7 @@ pub(crate) mod tests {
 			tokio::io::AsyncWriteExt::write_all(&mut stdin, input).await.unwrap();
 			let resolved = tokio::select! {
 				res = &mut import => panic!("the import returned before its input ended: {res:?}"),
-				_ = moq_clock::sleep(Duration::from_secs(30)) => panic!("never announced"),
+				_ = kio::clock::sleep(Duration::from_secs(30)) => panic!("never announced"),
 				resolved = async {
 					let event = announced.next().await.expect("origin closed");
 					assert!(matches!(event, moq_net::announce::Event::Start(_)), "{event:?}");
@@ -2236,7 +2235,7 @@ pub(crate) mod tests {
 		let mut next = async |import: &mut std::pin::Pin<&mut _>| {
 			tokio::select! {
 				res = import => panic!("the import returned before its input ended: {res:?}"),
-				_ = moq_clock::sleep(Duration::from_secs(30)) => panic!("never announced"),
+				_ = kio::clock::sleep(Duration::from_secs(30)) => panic!("never announced"),
 				epoch = async {
 					loop {
 						use moq_net::announce::Event;
@@ -2317,7 +2316,7 @@ pub(crate) mod tests {
 			};
 			let err = decode(decoder, catalog, &input[..], publication).await.unwrap_err();
 			assert!(err.to_string().contains("declared"), "{err:#}");
-			let event = moq_clock::timeout(Duration::from_secs(1), announced.next()).await;
+			let event = kio::clock::timeout(Duration::from_secs(1), announced.next()).await;
 			assert!(event.is_err(), "announced an empty broadcast: {event:?}");
 		}
 	}
@@ -2439,7 +2438,7 @@ pub(crate) mod tests {
 	async fn read_frame(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<u8> {
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
-		let frame = moq_clock::timeout(Duration::from_secs(1), next_frame(&mut reader))
+		let frame = kio::clock::timeout(Duration::from_secs(1), next_frame(&mut reader))
 			.await
 			.expect("verbatim read timed out");
 		frame.payload.to_vec()

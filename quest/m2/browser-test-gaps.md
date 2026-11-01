@@ -20,7 +20,3 @@ From the 2026-10-27 coverage audit.
   subscription.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [Every opt-in test target has a CI caller](/quest/m2/test-inventory.md) - would flag the worklet matrix

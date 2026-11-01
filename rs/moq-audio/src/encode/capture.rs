@@ -898,7 +898,7 @@ impl Output for EncoderOutput<'_> {
 		tokio::select! {
 			changed = self.demand.wanted_changed() => { changed?; }
 			_ = async {
-				match delay { Some(delay) => moq_clock::sleep(delay).await, None => std::future::pending().await }
+				match delay { Some(delay) => kio::clock::sleep(delay).await, None => std::future::pending().await }
 			} => {}
 		}
 		self.refresh()
@@ -1077,7 +1077,7 @@ impl Supervisor {
 			};
 
 			tracing::warn!(error = %failure, "audio capture format unavailable");
-			moq_clock::sleep(self.advance()).await;
+			kio::clock::sleep(self.advance()).await;
 		}
 	}
 
@@ -1154,7 +1154,7 @@ impl Supervisor {
 			tokio::select! {
 				biased;
 				_ = lifetime.closed() => return Err(last_error.expect("a failed capture has an error")),
-				result = output_while(output, moq_clock::sleep(self.advance())) => { result?; }
+				result = output_while(output, kio::clock::sleep(self.advance())) => { result?; }
 			}
 		}
 	}
@@ -1463,7 +1463,7 @@ mod tests {
 	}
 
 	async fn wait_for(control: &mut Control, status: Status) -> State {
-		moq_clock::timeout(Duration::from_secs(1), async {
+		kio::clock::timeout(Duration::from_secs(1), async {
 			loop {
 				let state = control.state();
 				if state.status() == status {
@@ -1540,7 +1540,7 @@ mod tests {
 		events
 			.try_push(Ok(capture::Samples::plain(vec![0.25, -0.5, 1.0, -1.0], false)))
 			.unwrap();
-		let level = moq_clock::timeout(Duration::from_secs(1), async {
+		let level = kio::clock::timeout(Duration::from_secs(1), async {
 			loop {
 				let level = control.level();
 				if level != Level::default() {
@@ -1571,7 +1571,7 @@ mod tests {
 				.try_push(Ok(capture::Samples::plain(vec![0.25, -0.5, 1.0, -1.0], false)))
 				.unwrap();
 		}
-		moq_clock::timeout(Duration::from_millis(100), control.changed())
+		kio::clock::timeout(Duration::from_millis(100), control.changed())
 			.await
 			.expect_err("a level change woke a state waiter");
 
@@ -1590,7 +1590,7 @@ mod tests {
 			..driver
 		};
 
-		let err = moq_clock::timeout(Duration::from_secs(1), driver.run_with(source))
+		let err = kio::clock::timeout(Duration::from_secs(1), driver.run_with(source))
 			.await
 			.expect("a terminal failure parked instead of returning")
 			.expect_err("the terminal failure was swallowed");
@@ -1626,7 +1626,7 @@ mod tests {
 		events
 			.try_push(Ok(capture::Samples::plain(vec![0.5, -0.5], false)))
 			.unwrap();
-		moq_clock::timeout(Duration::from_secs(1), async {
+		kio::clock::timeout(Duration::from_secs(1), async {
 			while control.level() == Level::default() {
 				tokio::task::yield_now().await;
 			}
@@ -1676,7 +1676,7 @@ mod tests {
 		let task = tokio::spawn(driver.run_with(source));
 
 		assert_eq!(control.track_name(), "audio");
-		moq_clock::timeout(Duration::from_secs(1), async {
+		kio::clock::timeout(Duration::from_secs(1), async {
 			while attempts.load(Ordering::SeqCst) == 0 {
 				tokio::task::yield_now().await;
 			}
@@ -2028,7 +2028,7 @@ mod tests {
 		poll_pending(run.as_mut()).await;
 		assert_eq!(attempts.load(Ordering::SeqCst), 1);
 		drop(control);
-		moq_clock::timeout(Duration::from_secs(1), run)
+		kio::clock::timeout(Duration::from_secs(1), run)
 			.await
 			.expect("dropping the controls ends the driver")
 			.unwrap();
@@ -2046,7 +2046,7 @@ mod tests {
 			poll_pending(run.as_mut()).await;
 		}
 		drop(control);
-		moq_clock::timeout(Duration::from_secs(1), run)
+		kio::clock::timeout(Duration::from_secs(1), run)
 			.await
 			.expect("dropping the controls ends the driver")
 			.unwrap();
@@ -2059,7 +2059,7 @@ mod tests {
 	/// the broadcast clock's own correlation, so the published timestamp is exactly that
 	/// instant however late the read happens.
 	mod clock {
-		use moq_clock::Wall;
+		use kio::clock::Wall;
 		use std::time::Duration;
 
 		use super::*;
@@ -2193,7 +2193,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_late_first_buffer_publishes_its_capture() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(5), moq_clock::wall(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(5), kio::clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let published = fixture.deliver(&samples, &mut track, &[]).await;
@@ -2206,7 +2206,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_queued_buffer_publishes_its_capture_instant() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(5), moq_clock::wall(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(5), kio::clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let captured = Instant::now() - Duration::from_millis(40);
@@ -2224,7 +2224,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_buffer_before_the_clock_began_clamps_to_zero() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::ZERO, moq_clock::wall(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::ZERO, kio::clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			samples
@@ -2247,7 +2247,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_buffer_captured_after_now_clamps_to_the_read() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let pushed = fixture.at(Instant::now());
@@ -2272,7 +2272,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_buffer_without_a_capture_instant_publishes_its_read() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let pushed = fixture.at(Instant::now());
@@ -2293,7 +2293,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_gap_reanchors_to_the_next_capture_instant() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
+			let mut fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 
 			let second_at = Instant::now() - Duration::from_millis(20);
@@ -2319,7 +2319,7 @@ mod tests {
 			let (second, reopened) = stream(None);
 			let mut fixture = Fixture::start(
 				Duration::from_secs(1),
-				moq_clock::wall(),
+				kio::clock::wall(),
 				[Open::Stream(failing), Open::Stream(reopened)],
 			);
 			let mut track = fixture.subscribe().await;
@@ -2346,7 +2346,7 @@ mod tests {
 		#[tokio::test]
 		async fn captures_without_a_subscriber() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::always_on(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
+			let mut fixture = Fixture::always_on(Duration::from_secs(1), kio::clock::wall(), [Open::Stream(input)]);
 			wait_for(&mut fixture.publication, Status::Live).await;
 
 			let captured = Instant::now();
@@ -2355,7 +2355,7 @@ mod tests {
 				.unwrap();
 			// Published before anyone subscribes: the largest location is read without asking for it.
 			let mut probe = fixture.consumer.track("audio").unwrap();
-			moq_clock::timeout(Duration::from_secs(1), probe.largest())
+			kio::clock::timeout(Duration::from_secs(1), probe.largest())
 				.await
 				.expect("a group published with nobody listening")
 				.expect("the track is still open");
@@ -2370,7 +2370,7 @@ mod tests {
 		#[tokio::test(start_paused = true)]
 		async fn on_demand_buffers_until_a_subscriber() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::on_demand(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
+			let mut fixture = Fixture::on_demand(Duration::from_secs(1), kio::clock::wall(), [Open::Stream(input)]);
 			wait_for(&mut fixture.publication, Status::Waiting).await;
 			assert_eq!(fixture.opens.load(Ordering::SeqCst), 1);
 			let captured = Instant::now();
@@ -2390,7 +2390,7 @@ mod tests {
 		#[tokio::test(start_paused = true)]
 		async fn a_demand_gap_keeps_capture_and_history() {
 			let (samples, input) = stream(None);
-			let mut fixture = Fixture::on_demand(Duration::from_secs(1), moq_clock::wall(), [Open::Stream(input)]);
+			let mut fixture = Fixture::on_demand(Duration::from_secs(1), kio::clock::wall(), [Open::Stream(input)]);
 			let mut track = fixture.subscribe().await;
 			let before = fixture.deliver(&samples, &mut track, &[]).await;
 			drop(track);
@@ -2413,7 +2413,7 @@ mod tests {
 		#[tokio::test]
 		async fn a_system_wall_adjustment_retimes_nothing() {
 			// Whole seconds, so the advertised mapping holds it exactly.
-			let now = moq_clock::wall().checked_duration_since(Wall::UNIX_EPOCH).unwrap();
+			let now = kio::clock::wall().checked_duration_since(Wall::UNIX_EPOCH).unwrap();
 			let wall = Wall::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
 			let (samples, input) = stream(None);
 			let mut fixture = Fixture::start(Duration::from_secs(1), wall, [Open::Stream(input)]);
