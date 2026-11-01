@@ -246,7 +246,8 @@ public enum Media {
         ) throws -> TrackProducer {
             var initData = initData
             if let lower { initData.lower = lower.ffi }
-            return TrackProducer(try MoqMediaTrackProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
+            return TrackProducer(
+                try MoqMediaTrackProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
         }
         init(_ ffi: MoqMediaTrackProducer) {
             self.ffi = ffi
