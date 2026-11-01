@@ -9,26 +9,52 @@ version = "0.6.2"
 edition = "2024"
 rust-version.workspace = true
 
-keywords = ["async", "producer", "consumer", "state", "sync"]
-categories = ["asynchronous", "concurrency"]
+keywords = ["async", "producer", "consumer", "clock", "simulation"]
+categories = ["asynchronous", "concurrency", "date-and-time", "development-tools::testing"]
+
+[package.metadata.docs.rs]
+features = ["runtime", "manual", "sim", "serde", "macros"]
+
+# The self dev-dependency below only enables features; no code names it.
+[package.metadata.cargo-shear]
+ignored = ["kio"]
 
 [features]
+# Lean by default: without `runtime`, the clock compiles no host timer backend.
+default = []
+# Host timers on tokio's clock.
+runtime = ["dep:tokio"]
+# The deterministic single-threaded executor, `#[kio::test]`, and per-task Ready
+# poll accounting. Meant for dev-dependencies, so production builds never compile it.
+sim = ["dep:futures", "dep:kio-macros"]
+# `clock::Manual::install`: a clock that only a test moves, as one tokio runtime's
+# ambient clock. Meant for test builds, so production builds never compile it.
+manual = ["runtime"]
+# Numeric Unix-second JSON adapters for public wall times.
+serde = ["dep:serde", "dep:serde_with"]
 # `#[kio::machine]`, which writes a `poll_*` state machine from straight-line code.
 macros = ["dep:kio-macros"]
-# Per-task Ready poll accounting for deterministic simulators, never production.
-_sim = []
 
 [dependencies]
 # Frees a log's evicted segments once no read that could reach them is running.
 crossbeam-epoch = "0.9.21"
+futures = { workspace = true, optional = true }
 kio-macros = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+serde_with = { workspace = true, optional = true }
 smallvec = { version = "1.15", features = ["union"] }
+# The host timers, and the runtime handle that keeps a paused runtime's clock on its own origin.
+tokio = { workspace = true, features = ["rt", "time"], optional = true }
 
 [dev-dependencies]
 # Bench-only: the FuturesUnordered comparison in benches/tasks.rs.
 criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = "0.3"
-tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
+# Enable the simulator and the installed manual clock so the clock's tests run in
+# the merge gate.
+kio = { path = ".", features = ["manual", "sim", "serde"] }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util", "time"] }
 
 [[bench]]
 name = "tasks"

@@ -201,7 +201,7 @@ start rather than being ignored. If io\_uring workers fail to start naming
 listen = "[::]:4443"                 # HTTP: fingerprint, announced, fetch, health.
 
 [web.https]
-listen = "[::]:443"                  # HTTPS plus the WebSocket fallback.
+listen = "[::]:443"                  # HTTPS, the WebSocket fallback, and tls:// with the listen certificate.
 cert = "cert.pem"                    # cert, key, and root need listen. Omit cert and key with [acme].
 key = "key.pem"
 
@@ -334,7 +334,8 @@ A draining upstream may name a replacement URI. `same-host` follows it only
 onto the host already dialed, so a peer can move us between ports and schemes;
 `follow` also lets it choose the host, which trusts it not to point us into
 the local network; `ignore` keeps the current address. `handover` caps how long
-the old connection keeps serving after a GOAWAY.
+the old connection keeps serving after a GOAWAY; it closes sooner, once the
+replacement is up and it carries no subscription or fetch.
 
 ## \[cache]
 

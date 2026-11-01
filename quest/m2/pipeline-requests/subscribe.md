@@ -89,5 +89,4 @@ blocks the Related quests below; whichever lands second rebases.
 
 ## Related
 
-- [Pipelined first FETCH](/quest/m2/pipeline-requests/fetch.md) - the same change for fetch-only readers
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - replaces the SUBSCRIBE floor with ranges

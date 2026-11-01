@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use super::stats;
 
@@ -28,7 +28,7 @@ impl Burst {
 
 impl Log {
 	pub fn record(&mut self, pid: u16, error: &anyhow::Error) {
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		self.flush(now);
 		let first = match self.bursts.entry(pid) {
 			std::collections::btree_map::Entry::Occupied(mut entry) => {
@@ -122,7 +122,7 @@ mod tests {
 		tokio::time::advance(stats::Log::INTERVAL / 2).await;
 		log.record(97, &error);
 		tokio::time::advance(stats::Log::INTERVAL / 2).await;
-		log.flush(moq_clock::now());
+		log.flush(kio::clock::now());
 		// This PID is quiet for a full interval before the next global summary tick.
 		tokio::time::advance(stats::Log::INTERVAL / 2).await;
 		log.record(97, &error);

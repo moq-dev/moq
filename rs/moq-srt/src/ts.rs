@@ -326,7 +326,7 @@ impl Subscriber {
 
 #[cfg(test)]
 mod tests {
-	use moq_clock::timeout;
+	use kio::clock::timeout;
 	use moq_mux::catalog::hang::Container;
 	use moq_mux::catalog::{CatalogFormat, Stream};
 
@@ -676,7 +676,7 @@ mod tests {
 			.unwrap();
 
 		let _fresh = Publisher::new(&origin, "ingest", Default::default(), None).unwrap();
-		let stale_viewer = moq_clock::timeout(Duration::from_secs(1), async {
+		let stale_viewer = kio::clock::timeout(Duration::from_secs(1), async {
 			loop {
 				match catalog.recv_group().await {
 					Ok(Some(_)) => continue,
@@ -728,9 +728,9 @@ mod tests {
 
 		let consumer = origin.consume();
 		let broadcast = consumer.follow("live/cam0", None).unwrap().available().await.unwrap();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let wait = tokio::spawn(publisher.finish(linger).unwrap().wait());
-		moq_clock::sleep(linger / 2).await;
+		kio::clock::sleep(linger / 2).await;
 		let mut catalog = broadcast.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 		assert!(
 			catalog.recv_group().await.unwrap().is_some(),
