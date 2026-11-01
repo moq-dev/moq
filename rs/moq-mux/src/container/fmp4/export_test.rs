@@ -2626,7 +2626,7 @@ async fn export_reordered_clip(cap: Option<std::time::Duration>) -> (Bytes, Vec<
 	let mut init = None;
 	let mut fragments = Vec::new();
 	// The tracks finished, but the broadcast stays up: the export is done once it goes quiet.
-	while let Ok(next) = moq_clock::timeout(RECORDING_MAX_DELAY * 4, exporter.next_chunk()).await {
+	while let Ok(next) = kio::clock::timeout(RECORDING_MAX_DELAY * 4, exporter.next_chunk()).await {
 		let Some(chunk) = next.expect("exporter failed") else {
 			break;
 		};
