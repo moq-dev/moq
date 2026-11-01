@@ -125,6 +125,8 @@ test("encoding tracks encoder config in its child effect", async () => {
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -166,6 +168,8 @@ test("an on-demand gap marks a discontinuity and leaves the broadcast-owned trac
 	const rendition = {
 		config: new Signal(undefined),
 		track: live,
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -220,6 +224,8 @@ test("a bandwidth estimate updates the bitrate without blanking the config or re
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -305,6 +311,8 @@ test("every published config fits a probe for its own codec", async () => {
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -657,6 +665,8 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -824,6 +834,8 @@ test("the probe encodes with the frame rate and bitrate ceiling", async () => {
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1031,6 +1043,8 @@ async function recordKeyframes(
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1187,6 +1201,46 @@ test.each([false, true])(
 		}
 	},
 );
+
+// An HLS export subscribes only to the records the catalog advertises, so an on-demand rendition has
+// to advertise them before anything is encoded, even with every frame a keyframe.
+test("an on-demand all-keyframe rendition advertises its records, whose subscriber starts it", async () => {
+	using recording = await installRecording();
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("keyframes.hang"),
+		onDemand: true,
+	});
+	const encoder = new Encoder("video", {
+		enabled: true,
+		broadcast,
+		capture: recording.capture as never,
+		config: { keyframeInterval: Milli(0) },
+	});
+	const subscribers: Moq.Track.Subscriber[] = [];
+	try {
+		await settle();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		expect(encoder.out.active.peek()).toBe(false);
+
+		const catalogSubscriber = net.track(Broadcast.CATALOG_TRACK).subscribe();
+		subscribers.push(catalogSubscriber);
+		const catalog = await new Json.Snapshot.Consumer<Catalog.Root>({ track: catalogSubscriber }).latest();
+		expect(catalog?.value.video?.renditions.video?.hls).toEqual({
+			track: "video.hls",
+			duration: Catalog.u53(4000),
+		});
+
+		subscribers.push(net.track("video.hls").subscribe());
+		await settle();
+		expect(encoder.out.active.peek()).toBe(true);
+	} finally {
+		for (const subscriber of subscribers) subscriber.close();
+		encoder.close();
+		broadcast.close();
+	}
+});
 
 test("an unwatched rendition reserves nothing and encodes at its configured bitrate", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
@@ -1406,6 +1460,8 @@ test("a shrinking capture resizes in band below the advertised ceiling", async (
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1478,6 +1534,8 @@ test("the catalog bitrate and frame rate only rise", async () => {
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1534,6 +1592,8 @@ test("each broadcast keeps its own ceiling and maxima", async () => {
 	const rendition = () => ({
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(undefined),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {},
 	});
 	const first = { video: rendition, order: new Order() };

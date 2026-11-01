@@ -293,6 +293,8 @@ async function setup(order = new Order(), codec?: Codec, groupDuration?: Milli) 
 	const rendition = {
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {
 			track.finish();
 			track.close();
@@ -1023,6 +1025,37 @@ test.each([undefined, false, true])(
 		}
 	},
 );
+
+// An HLS export subscribes only to the records the catalog advertises, so their reader must start the
+// on-demand audio encode just as a media subscriber does.
+test("a record subscriber starts on-demand audio", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("records.hang") });
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	let records: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		expect(encoder.out.active.peek()).toBe(false);
+
+		records = net.track("audio.hls").subscribe();
+		await settle();
+		expect(encoder.out.active.peek()).toBe(true);
+
+		records.close();
+		records = undefined;
+		await settle();
+		expect(encoder.out.active.peek()).toBe(false);
+	} finally {
+		records?.close();
+		encoder.close();
+		broadcast.close();
+	}
+});
 
 test("a backlog encode refusal aborts its rendition when demand arrives", async () => {
 	using _webcodecs = installFakeWebCodecs();

@@ -189,8 +189,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [DVR rewind](/quest/m2/archive-dvr.md) - follow-on capability after the release contract is stable
 - [Archive lookups cancel when abandoned](/quest/m2/archive-lookup-withdrawal.md) - a public withdrawal signal on `Fill` stops a time lookup's store read once its readers leave
 
-- [JS HLS field](/quest/m2/js-hls.md) - follow-on capability after the release contract is stable
-
 - [Demo dashboard shows viewer lag](/quest/m2/qos-lag-dashboard.md) - follow-on capability after the release contract is stable
 
 - [Publisher timeliness at relay ingest](/quest/m2/qos-publisher-timeliness.md) - follow-on capability after the release contract is stable

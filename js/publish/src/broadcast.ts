@@ -1,12 +1,13 @@
 import { Milli } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
+import * as Hls from "@moq/hang/hls";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
-import { errors } from "./internal";
+import { errors, wanted } from "./internal";
 import { Order } from "./order";
 import type { Kind, Rendition } from "./rendition";
 import { makeRendition } from "./rendition-internal";
@@ -66,6 +67,14 @@ export type BroadcastInput = {
 	 * its past. Unless false, audio keeps raw history up to `maxAge`. Capture stays open.
 	 */
 	onDemand: Getter<boolean | undefined>;
+
+	/**
+	 * Whether each video and audio track publishes HLS segment records, advertised in its catalog
+	 * entry's `hls` field, so an edge can export the broadcast as HLS. Defaults to true. A record
+	 * track's subscribers count as demand for its media under {@link onDemand}, since an export reads
+	 * the records rather than the media. Changing this publishes a new network broadcast.
+	 */
+	hls: Getter<boolean>;
 };
 
 /**
@@ -125,6 +134,10 @@ export class Broadcast {
 	// catalog ID under a fresh track name, so a name always means the same content.
 	readonly #names = new Signal<Record<string, string>>({});
 
+	// Each track name's HLS recorder in the current network broadcast, whose `hls` field the catalog
+	// advertises once its duration is known.
+	readonly #records = new Signal<Record<string, Hls.Recorder>>({});
+
 	// Every replacement track name minted in the current network broadcast, even one never served.
 	#replacements = new Set<string>();
 
@@ -151,6 +164,7 @@ export class Broadcast {
 			rotation: getter(props?.rotation ?? 0),
 			maxAge: getter(props?.maxAge),
 			onDemand: getter(props?.onDemand),
+			hls: getter(props?.hls ?? true),
 		};
 
 		this.#signals.run(this.#runCatalog.bind(this));
@@ -198,11 +212,25 @@ export class Broadcast {
 		if (this.#replacements.has(name)) {
 			throw new Error(`rendition ${name} names another rendition's replacement track`);
 		}
+		// A video or audio rendition's HLS records hold or will hold the name.
+		if (this.in.hls.peek() && name.endsWith(Hls.SUFFIX)) {
+			const media = name.slice(0, -Hls.SUFFIX.length);
+			const owner = this.#renditions.peek()[media];
+			if (this.#records.peek()[media] || (owner && owner.kind !== "text")) {
+				throw new Error(`rendition ${name} names another rendition's HLS record track`);
+			}
+		}
 
 		const track = new Signal<Moq.Track.Producer | undefined>(undefined);
 		this.#tracks.set(name, track);
 
-		const rendition = makeRendition<C>(name, kind, track, () => this.#unregister(name));
+		const rendition = makeRendition<C>(
+			name,
+			kind,
+			track,
+			(served) => this.#records.peek()[served.name],
+			() => this.#unregister(name),
+		);
 		this.#renditions.update((renditions) => ({ ...renditions, [name]: rendition as Rendition<unknown> }));
 
 		return rendition;
@@ -230,6 +258,7 @@ export class Broadcast {
 		const enabled = effect.get(this.in.enabled);
 		const renditions = effect.get(this.#renditions);
 		const names = effect.get(this.#names);
+		const records = effect.get(this.#records);
 
 		const video: Record<string, Catalog.VideoConfig> = {};
 		const audio: Record<string, Catalog.AudioConfig> = {};
@@ -255,7 +284,11 @@ export class Broadcast {
 			}
 			this.#served?.set(track, media);
 			listed.set(track, media);
-			const config = track !== rendition.name ? { ...(source as object), track } : source;
+			let config = track !== rendition.name ? { ...(source as object), track } : source;
+			// Filled in here rather than by the producer, so one rewriting its config can't drop it.
+			const recorder = records[track];
+			const hls = recorder && effect.get(recorder.hls);
+			if (hls) config = { ...(config as object), hls };
 
 			if (rendition.kind === "video") {
 				video[rendition.name] = config as Catalog.VideoConfig;
@@ -345,6 +378,7 @@ export class Broadcast {
 
 		const name = effect.get(this.in.name);
 		const maxAge = effect.get(this.in.maxAge);
+		const hls = effect.get(this.in.hls);
 		if (Catalog.detectFormat(name) === undefined) {
 			console.warn(
 				`You should append .hang to broadcast name ${JSON.stringify(name)} to make the catalog format explicit.`,
@@ -370,15 +404,22 @@ export class Broadcast {
 		// so a re-announce or a rendition change keeps writing to it instead of restarting its
 		// group sequence under the same epoch. Rendition tracks by name, so registering a name
 		// again finds its track; the catalog's stay out of reach of a colliding rendition.
-		const tracks = new Map<string, { track: Moq.Track.Producer; owner: Rendition<unknown> }>();
+		const tracks = new Map<
+			string,
+			{ track: Moq.Track.Producer; owner: Rendition<unknown>; recorder?: Hls.Recorder }
+		>();
 		this.#names.set({});
+		this.#records.set({});
 		this.#replacements = new Set();
 		// From here a name keeps the identity it is first listed with.
 		this.#served = new Map(this.#listed);
 		const kinds = new Map<string, Kind>();
 		this.#kinds = kinds;
 		effect.cleanup(() => {
-			for (const { track } of tracks.values()) track.finish();
+			for (const { track, recorder } of tracks.values()) {
+				track.finish();
+				recorder?.finish();
+			}
 			for (const { track } of tracks.values()) track.close();
 			if (this.#kinds === kinds) this.#kinds = new Map();
 		});
@@ -428,13 +469,17 @@ export class Broadcast {
 
 				let entry = tracks.get(rendition.name);
 				const cause = entry && errors.get(entry.owner)?.peek();
-				if (entry && cause) entry.track.abort(cause);
+				if (entry && cause) {
+					entry.track.abort(cause);
+					entry.recorder?.abort(cause);
+				}
 				const name = names[rendition.name] ?? rendition.name;
 				if (entry && entry.track.name !== name) {
 					// The catalog moved this rendition to a new name for new media. End the old track
 					// cleanly on its last identity, so its subscribers follow the catalog.
 					entry.track.finish();
 					entry.track.close();
+					entry.recorder?.finish();
 					entry = undefined;
 				} else if (entry && entry.owner !== rendition && entry.track.closed.peek() !== undefined) {
 					// An error leaves this rendition down. Only a replacement registration may recover,
@@ -449,13 +494,18 @@ export class Broadcast {
 						name,
 						rendition.kind === "video" ? { ...info, refresh: VIDEO_REFRESH } : info,
 					);
-					entry = { track, owner: rendition };
+					entry = {
+						track,
+						owner: rendition,
+						recorder: hls ? this.#record(broadcast, rendition, name) : undefined,
+					};
 					tracks.set(rendition.name, entry);
 					kinds.set(rendition.name, rendition.kind);
 				} else {
 					entry.owner = rendition;
 				}
 				const served = entry.track;
+				const recorder = entry.recorder;
 				const error = errors.get(rendition);
 				if (error) {
 					inner.run((failure) => {
@@ -463,18 +513,46 @@ export class Broadcast {
 						if (cause) served.abort(cause);
 					});
 				}
+				if (recorder) {
+					// The records end with their media, however it closes, so a reader of only the
+					// records sees the same finish or failure.
+					inner.run((ended) => {
+						const closed = ended.get(served.closed);
+						if (closed instanceof Error) recorder.abort(closed);
+						else if (closed === null) recorder.finish();
+					});
+				}
 				inner.run((gate) => {
 					if (gate.get(served.closed) !== undefined) return;
-					if (
-						rendition.kind !== "audio" &&
-						gate.get(this.in.onDemand) &&
-						gate.get(served.demand().wanted) === undefined
-					)
+					// Audio gates its own encode on demand, retaining raw PCM meanwhile.
+					if (rendition.kind !== "audio" && gate.get(this.in.onDemand) && !wanted(gate, served, recorder))
 						return;
 					gate.set(signal, served);
 				});
 			}
 		});
+	}
+
+	// Start the HLS records of `rendition`'s video or audio track `name`. A record track name already
+	// taken, by a rendition registered while hls was off or an application's own track, leaves the
+	// rendition without records rather than down.
+	#record(broadcast: Moq.Broadcast.Producer, rendition: Rendition<unknown>, name: string): Hls.Recorder | undefined {
+		if (rendition.kind === "text") return undefined;
+		const records = Hls.defaultName(name);
+		if (records in this.#renditions.peek() || this.#kinds.has(records)) {
+			console.warn(`rendition ${name} publishes no HLS records: ${records} is a rendition`);
+			return undefined;
+		}
+		let track: Moq.Track.Producer;
+		try {
+			track = broadcast.createTrack(records, Hls.Recorder.INFO);
+		} catch (err) {
+			console.warn(`rendition ${name} publishes no HLS records`, err);
+			return undefined;
+		}
+		const recorder = new Hls.Recorder(track, { durationHint: rendition.hlsHint.peek() });
+		this.#records.update((records) => ({ ...records, [name]: recorder }));
+		return recorder;
 	}
 
 	/** Stop and release everything this holds. */
