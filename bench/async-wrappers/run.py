@@ -144,6 +144,10 @@ def verify(tree):
     path.write_text(bad)
     try:
         check(tree, "kio", "bad-receiver", success=False)
+        diagnostic = (OUT / f"{tree.name}-kio-bad-receiver.log").read_text()
+        expected = {"handwritten": "cannot move out", "rules": "no rules expected", "attribute": "wrapper requires a borrowed receiver"}[tree.name]
+        if expected not in diagnostic:
+            raise RuntimeError(f"missing expected diagnostic: {expected}")
     finally:
         path.write_text(original)
     print(f"verified {tree.name}: feature on/off, rustdoc, rejected owned receiver", flush=True)
@@ -171,14 +175,15 @@ def main():
         "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
         "jobs": 2, "incremental": True, "rounds": args.rounds,
-        "system": os.uname()._asdict(),
+        "system": {key: getattr(os.uname(), key) for key in ("sysname", "release", "machine")},
     }
     if not args.verify_only:
         for round_number in range(args.rounds):
             order = VARIANTS[round_number % 3:] + VARIANTS[:round_number % 3]
             for variant in order:
                 tree = trees[variant]
-                shutil.rmtree(tree / "target", ignore_errors=True)
+                if (tree / "target").exists():
+                    shutil.rmtree(tree / "target")
                 # kio separately exposes the dependency cost hidden by moq-net's
                 # existing proc-macro graph. Then discard it for the net clean run.
                 results[variant]["kio_clean"].append(check(tree, "kio", f"clean-{round_number}"))
