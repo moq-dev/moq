@@ -1,4 +1,4 @@
-# Main is no slower than release
+# [S] Main is no slower than release
 
 ## Goal
 
@@ -7,9 +7,10 @@ Before the next release cut, every benchmark where `main` is slower than
 is fixed. Cost that pays for a feature `main` deliberately added is accepted,
 and the reason is written here.
 
-This epic's own work: once its child has landed, re-pair the relay `fanout`
-workload against `release` and confirm main's relay CPU is no higher in every
-round. The sparse rows are accepted (2026-10-30). The browser frame path
+This epic's own work: once
+[moq-dev/moq#7493](https://github.com/moq-dev/moq/pull/7493) has landed,
+re-pair the relay `fanout` workload against `release` and confirm main's relay
+CPU is no higher in every round. The sparse rows are accepted (2026-10-30). The browser frame path
 needs no repeat; the [performance audit](/quest/m2/audit-perf.md) now pairs
 every later cut with `release`.
 
@@ -266,11 +267,17 @@ Decided 2026-10-30 (maintainer), in
 
 - The sparse rows are accepted as that per-group model cost.
 - The fanout mode is accidental and is fixed before the cut, in
-  [Fanout lock contention](/quest/m1/release-perf/fanout-lock.md).
+  [moq-dev/moq#7493](https://github.com/moq-dev/moq/pull/7493).
 
-## Required
-
-- [Fanout lock contention](/quest/m1/release-perf/fanout-lock.md) - relay fanout subscribers stop contending one track lock, so main's relay CPU matches release's in every round
+That fix cut the shared track lock from about 155 acquisitions per delivered
+group to 34 (release takes 31), counted on one worker. Most were the
+logical-track reader re-reading every copy's end, the retention edge, and a
+probe's fills on each of several reads per wake, plus a whole track walk on
+every group machine's wake. Its own pairing, 14 alternating rounds at load 7
+to 28, found no high-mode round on either side: relay CPU 0.066 to 0.090 cores
+against release's 0.062 to 0.104, with mixed-sign paired deltas inside
+release's own spread, and 5 to 36% fewer user-space instructions than release
+in every round. The re-pair above, on a quieter host, is what remains.
 
 ## Related
 
