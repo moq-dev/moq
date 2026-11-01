@@ -1441,10 +1441,9 @@ impl TrackState {
 				// What is left to search, shrinking from the end the search starts at.
 				let (mut lo, mut hi) = (from, u64::MAX);
 				while lo <= hi {
-					let mut left = runs.overlapping(lo..=hi);
 					let run = match rev {
-						true => left.next_back(),
-						false => left.next(),
+						true => runs.last(lo, hi),
+						false => runs.first(lo, hi),
 					}?;
 					let (start, end) = ((*run.start()).max(lo), (*run.end()).min(hi));
 					// The cache from the run on, toward the far end: one lookup either finds
@@ -6029,7 +6028,33 @@ enum Servable {
 	/// handed out before the run moved above it, which is judged against the run.
 	Run { start: u64, end: Option<u64> },
 	/// Disjoint runs, lowest first.
-	Runs(Arc<RangeInclusiveSet<u64>>),
+	Runs(Arc<Runs>),
+}
+
+/// Disjoint runs of groups, lowest first, each found from either end by one search.
+///
+/// Not a [`RangeInclusiveSet`]: its overlapping iterator walks back from the last run, so
+/// finding the highest run below a point costs every run above it.
+#[derive(PartialEq)]
+struct Runs(Vec<ops::RangeInclusive<u64>>);
+
+impl Runs {
+	fn contains(&self, sequence: u64) -> bool {
+		let index = self.0.partition_point(|run| *run.end() < sequence);
+		self.0.get(index).is_some_and(|run| *run.start() <= sequence)
+	}
+
+	/// The lowest run reaching into `lo..=hi`.
+	fn first(&self, lo: u64, hi: u64) -> Option<&ops::RangeInclusive<u64>> {
+		let index = self.0.partition_point(|run| *run.end() < lo);
+		self.0.get(index).filter(|run| *run.start() <= hi)
+	}
+
+	/// The highest run reaching into `lo..=hi`.
+	fn last(&self, lo: u64, hi: u64) -> Option<&ops::RangeInclusive<u64>> {
+		let index = self.0.partition_point(|run| *run.start() <= hi);
+		self.0.get(index.checked_sub(1)?).filter(|run| *run.end() >= lo)
+	}
 }
 
 impl Servable {
@@ -6043,7 +6068,7 @@ impl Servable {
 	fn contains(&self, sequence: u64) -> bool {
 		match self {
 			Self::Run { start, end } => sequence >= *start && end.is_none_or(|end| sequence < end),
-			Self::Runs(runs) => runs.contains(&sequence),
+			Self::Runs(runs) => runs.contains(sequence),
 		}
 	}
 
@@ -6063,7 +6088,7 @@ impl Servable {
 		let mut set = RangeInclusiveSet::new();
 		set.insert(first);
 		set.extend(runs);
-		Self::Runs(Arc::new(set))
+		Self::Runs(Arc::new(Runs(set.into_iter().collect())))
 	}
 
 	/// These groups below the exclusive `cap`.
@@ -6087,7 +6112,8 @@ impl Servable {
 					return Self::NONE;
 				};
 				Self::new(
-					runs.iter()
+					runs.0
+						.iter()
 						.take_while(|run| *run.start() <= last)
 						.map(|run| *run.start()..=(*run.end()).min(last)),
 				)
@@ -13006,6 +13032,28 @@ mod test {
 			assert!(published(&subscriber) == expected, "{order}");
 			let _ = subscriber.poll_recv_group(&kio::Waiter::noop());
 			assert!(published(&subscriber) == expected, "{order}, once the cursor syncs");
+		}
+	}
+
+	/// A search over several runs finds the lowest and the highest run reaching into a span
+	/// from either end, as a walk over every run would.
+	#[test]
+	fn servable_runs_are_found_from_either_end() {
+		let bounds = [(2u64, 3u64), (6, 8), (12, 12), (20, u64::MAX)];
+		let runs = Runs(bounds.iter().map(|&(first, last)| first..=last).collect());
+		let points = [0, 1, 2, 3, 4, 5, 6, 8, 9, 11, 12, 13, 19, 20, 21, u64::MAX];
+		for lo in points {
+			assert_eq!(
+				runs.contains(lo),
+				bounds.iter().any(|&(first, last)| (first..=last).contains(&lo)),
+				"{lo}"
+			);
+			for hi in points.into_iter().filter(|hi| *hi >= lo) {
+				let reaching = || bounds.iter().filter(|&&(first, last)| first <= hi && last >= lo);
+				let expect = |run: Option<&(u64, u64)>| run.map(|&(first, last)| first..=last);
+				assert_eq!(runs.first(lo, hi).cloned(), expect(reaching().next()), "{lo}..={hi}");
+				assert_eq!(runs.last(lo, hi).cloned(), expect(reaching().last()), "{lo}..={hi}");
+			}
 		}
 	}
 

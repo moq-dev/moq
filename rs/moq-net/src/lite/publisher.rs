@@ -3649,6 +3649,30 @@ impl Frames {
 	}
 }
 
+/// The frame bounds of `ranges` ranges, each starting and ending partway through its own
+/// group, for the range-count bench.
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub(crate) struct FramesBench(Frames);
+
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+impl FramesBench {
+	pub(crate) fn new(ranges: u64) -> Self {
+		let at = |group, frame| Some(lite::Anchor::Absolute(track::Position { group, frame }));
+		let ranges: Vec<_> = (0..ranges)
+			.map(|i| lite::Range {
+				start: at(i * 2, 1),
+				end: at(i * 2, 3),
+			})
+			.collect();
+		Self(Bounds::new(&ranges, None).expect("group anchors").frames)
+	}
+
+	/// The frames served of `group`, as a served group or datagram looks them up.
+	pub(crate) fn serve(&self, group: u64) -> (u64, Option<u64>) {
+		(self.0.start(group), self.0.end(group))
+	}
+}
+
 /// A subscription's requested ranges, in the model's whole groups, with the frame bounds
 /// the model leaves to [`position_group`].
 #[derive(Debug)]

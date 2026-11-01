@@ -91,6 +91,22 @@ impl CanonicalStorage {
 	}
 }
 
+/// A lite-07 subscription's frame bounds over many ranges, for the range-count bench.
+pub struct FrameBounds(crate::lite::FramesBench);
+
+impl FrameBounds {
+	/// `ranges` ranges, each starting and ending partway through its own group.
+	pub fn new(ranges: u64) -> Self {
+		Self(crate::lite::FramesBench::new(ranges))
+	}
+
+	/// The first and last frame served of `group`, as a served group or datagram looks
+	/// them up.
+	pub fn serve(&self, group: u64) -> (u64, Option<u64>) {
+		self.0.serve(group)
+	}
+}
+
 /// Every target, keyed by the name of its `fuzz_targets/<name>.rs` shim.
 pub const TARGETS: &[(&str, Target)] = &[
 	("lite", lite_wire),
