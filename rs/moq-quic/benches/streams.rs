@@ -204,7 +204,7 @@ fn bench_group_churn(c: &mut Criterion<ThreadCpu>) {
 	const BYTES: usize = 256;
 	let data = payload(BYTES);
 	let mut group = c.benchmark_group("group_churn");
-	for (subs, churn) in [(16, 4), (256, 16), (4096, 16), (4096, 256)] {
+	for (subs, churn) in [(16_usize, 4), (256, 16), (4096, 16), (4096, 256)] {
 		// The moved and cancelled groups stay distinct, below.
 		assert!(2 * churn <= subs && subs.is_power_of_two());
 		let mut pair = Pair::new(Setup::default());
