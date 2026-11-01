@@ -33,7 +33,7 @@ import type { Groups, Info, Position as TrackPosition, Subscriber as TrackSubscr
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
 import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
-import { untilGivenUp } from "../util/given_up.ts";
+import { GivenUp } from "../util/given_up.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
@@ -1105,6 +1105,9 @@ export class Publisher {
 		};
 		const changed = bounds.subscribe(narrowed);
 		narrowed();
+		// The subscription's budget, or an eviction of what is left to read, may give up on the
+		// group mid-write, which abandons the stream. A group already given up never starts the write.
+		const givenUp = new GivenUp(group);
 		try {
 			// One stream per group is faster than a peer at its limit can retire them, so this
 			// is the one path that doesn't wait for a slot: the transport would serve the opens
@@ -1114,9 +1117,11 @@ export class Publisher {
 			// once the open settles. tryOpen owns resetting a slot that arrives too late.
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
-			const abandoned = untilGivenUp(group, () => opened.promise).then((stop) => {
-				failure = stop;
-			});
+			const abandoned = givenUp
+				.write(() => opened.promise)
+				.then((stop) => {
+					failure = stop;
+				});
 			let stream: Writer | undefined;
 			try {
 				stream = await Writer.tryOpen(this.#quic, {
@@ -1163,17 +1168,18 @@ export class Publisher {
 			let left: StreamError | undefined;
 			const cancelled = unsubscribed.then(() => {
 				left = new StreamError(StreamCode.Cancel, { message: "unsubscribed while serving the group" });
-				return undefined;
 			});
-			// The subscription's budget, or an eviction of what is left to read, may give up on the
-			// group mid-write, which abandons the stream. A group already given up never starts the write.
+			// Either ends serving the group: made once, so each read and write races one promise for both.
+			const stopped = race([cancelled, excluded.promise]).then(() => false as const);
 			const write = async (op: () => Promise<unknown>) => {
-				const stop = await untilGivenUp(group, op);
+				const stop = await givenUp.write(op);
 				if (stop) throw stop;
 			};
 			// Writing the group stops for the pause too; the drain below answers it without a reset.
+			// One race covers the budget and both, rather than racing the budget's race again.
 			const send = async (op: () => Promise<unknown>) => {
-				await race([write(op), cancelled, excluded.promise]);
+				const stop = await givenUp.write(op, stopped);
+				if (stop) throw stop;
 				if (left) throw left;
 				if (rangeError) throw rangeError;
 			};
@@ -1196,12 +1202,7 @@ export class Publisher {
 
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
-					const read = await race([
-						group.readFrameSequence({ from: slice.skip }),
-						stream.closed,
-						cancelled,
-						excluded.promise,
-					]);
+					const read = await race([group.readFrameSequence({ from: slice.skip }), stream.closed, stopped]);
 					if (left) throw left;
 					if (rangeError) throw rangeError;
 					if (!read) break;
@@ -1257,6 +1258,7 @@ export class Publisher {
 			hooks.releaseGroupReader(group, error(err));
 		} finally {
 			changed();
+			givenUp.close();
 			group.close();
 		}
 	}
