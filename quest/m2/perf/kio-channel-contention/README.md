@@ -296,13 +296,34 @@ a full mesh re-announces every route to every peer (not checked route by
 route). At 16 workers a relay with 10,000 broadcasts would hold about 9 GB of
 announce state that a shared origin holds in 49 MB.
 
-Verdict: the data-plane half is a win wherever a track fans out to many
+Findings: the data-plane half is a win wherever a track fans out to many
 subscribers per worker (chat), and a wash or a loss where it does not
-(fanout). Sharing nothing then costs W-squared announce state and
-propagation, which grows past any data-plane saving at relay broadcast
-counts. Relay-per-thread is not a win as a design; it bounds what the
-[replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md),
-which keeps one shared announce table, can save on the data plane.
+(fanout). Sharing nothing through today's full mesh then costs W-squared
+announce state and propagation, which grows past any data-plane saving at
+relay broadcast counts.
+
+Decided (maintainer, 2026-11-01, cluster spike):
+
+- ✅ A conditional win. Relay-per-thread is planned through `/quest-plan`,
+  on the condition that the worker mesh never re-announces peer routes to
+  peers. Each worker then learns a broadcast once, from the worker that
+  ingested it, which cuts announce state to about one route per worker
+  instead of one per peer.
+- That changes cluster routing semantics: today a relay re-announces every
+  route it learned to every other peer, and hop chains prevent loops. How
+  routes from outside the relay (other relays' peer links) reach every
+  worker without re-announce is for the planning to settle.
+- The cost is unmeasured. The spike measured only the full mesh; nobody has
+  measured announce state, propagation, or the data plane with
+  no-re-announce.
+- The [replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md)
+  (claimed in [moq-dev/moq#7533](https://github.com/moq-dev/moq/pull/7533),
+  queued) still runs. It keeps one shared announce table and replicates
+  only the data plane, so it chases the same data-plane win, which these
+  numbers bound, at a different control-plane cost. Whether
+  relay-per-thread waits on its result is for the planning to settle.
+- Rejected: calling relay-per-thread a no-win and leaving sharding to the
+  replica spike alone, and restoring the no-sharding rule now.
 
 ## Required
 
