@@ -1970,8 +1970,9 @@ impl Clone for Scope {
 }
 
 impl Scope {
-	/// Whether a [`Meter`] from this scope can count anything, without resolving it: the
-	/// no-op context never does.
+	/// Whether this scope was tagged, a cheap pre-check that never resolves: an untagged
+	/// scope's [`Meter`] counts nothing, but a tagged one's may count nothing either, when
+	/// the registry is disabled or excludes its path, so [`Meter::is_tracked`] decides.
 	pub(crate) fn is_tagged(&self) -> bool {
 		self.session.inner.is_some() && self.resolved.is_some()
 	}

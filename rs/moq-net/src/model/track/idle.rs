@@ -26,6 +26,16 @@ pub(super) enum Walk {
 	Sequence,
 }
 
+impl Walk {
+	/// The walk a read in sequence order for `ordered`, or arrival order otherwise, takes.
+	pub(super) fn new(ordered: bool) -> Self {
+		match ordered {
+			true => Self::Sequence,
+			false => Self::Arrival,
+		}
+	}
+}
+
 /// A cursor's parked read, and the waiter it parked on.
 pub(super) struct Idle {
 	/// The read that parked, or `None` while nothing is parked.

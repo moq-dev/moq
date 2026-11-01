@@ -3,7 +3,7 @@
 use std::task::Poll;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use crate::catalog::{CatalogFormat, Stream};
 use crate::container::consumer::Event;
@@ -53,7 +53,7 @@ impl Release {
 			source,
 			catalog: Some(catalog),
 			track: None,
-			subscribed: moq_clock::now(),
+			subscribed: kio::clock::now(),
 			finished: false,
 			released: false,
 			delay: Duration::ZERO,
@@ -159,7 +159,7 @@ impl Release {
 				// does not make them late, and a stall of the whole path does not hide that they are.
 				let arrival = Arrival {
 					arrived: arrived.max(self.subscribed),
-					read: moq_clock::now(),
+					read: kio::clock::now(),
 					decode: frame.timestamp.into(),
 					restart: track.markers(),
 					// The output opens on a group, at a random access point; from then on every
@@ -208,7 +208,7 @@ impl Release {
 					false => source.live(),
 				};
 				self.track = Some((m2ts.track.clone(), source));
-				self.subscribed = moq_clock::now();
+				self.subscribed = kio::clock::now();
 			}
 			Some((name, _)) if *name != m2ts.track => {
 				return Err(anyhow::anyhow!("the `m2ts` track moved from `{name}` to `{}`", m2ts.track).into());

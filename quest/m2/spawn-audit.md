@@ -12,7 +12,8 @@ Blocking OS threads are out of scope.
 Planned 2026-10-25 with the maintainer as the follow-up to no-spawn. As of
 `main` today the spawning library crates include moq-tokio (connection,
 server, client), moq-relay (web, shutdown, uring), moq-mux's container
-consumer, moq-hls export, moq-rtmp, moq-rtsp, moq-srt, moq-rtc, moq-transcode,
+consumer, moq-hls's server (its path follower and each
+broadcaster's driver), moq-rtmp, moq-rtsp, moq-srt, moq-rtc, moq-transcode,
 moq-video's encode producer, moq-cli's play path, moq-bench, and qmux's
 transport. Recount with `rg 'tokio::spawn|spawn_local|task::spawn'` outside
 tests, benches, and binaries before starting.
