@@ -98,6 +98,15 @@ performance suite, GPU/platform codecs, or every generated wrapper. Those
 remain with their existing owners. The recurring audit is not completed by
 this source survey.
 
+UDP socket queues closed as a measured no-win: the 8 MiB request stays,
+with no new setting. `benchmark_socket_queues` (moq-uring, nightly) showed
+loss follows the kernel queue against worker stalls, while pool depth, flows
+and the receive path did not change it. A bigger queue costs delay only
+while a worker is overloaded and the queue sits full. Relay shard sweeps at
+up to 256 connections saw no socket drops, with the sampled peak queue under
+1% of the granted 16 MiB. The relay sampler now records per-socket drops,
+granted buffers and queued bytes (`udp_*`).
+
 An operation-count probe imported the actual JS `bandwidth.allocate`, counted
 `Want.priority` getter reads, and called it for every reservation, as
 `Allocator.#publish` does. With one tier, 16/64/256 reservations caused
@@ -187,7 +196,6 @@ No duplicate quest or workflow edit belongs here.
 - [Idle browser stats](/quest/m2/performance-survey/browser-idle-stats.md) - local transport polling without active publishing demand
 - [Transport preference history](/quest/m2/performance-survey/transport-history.md) - full URL retention across retired sessions
 - [Resume identity history](/quest/m2/performance-survey/resume-history.md) - historical source graphs held by first-seen track metadata
-- [UDP socket queues](/quest/m2/performance-survey/socket-queues.md) - drop attribution and queue-size tradeoffs across workers and load
 - [Session datagrams](/quest/m2/performance-survey/datagram-delivery.md) - complete per-object delivery across publishers and viewers
 - [JWT verification](/quest/m2/performance-survey/jwt-verification.md) - key loading, lookup, parsing and crypto attribution
 - [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md) - HTTP polling cost versus result size and unrelated routes

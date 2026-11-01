@@ -152,7 +152,12 @@ Zero shards is the shared runtime with one Tokio thread per usable CPU; any
 other count is that many unpinned Tokio workers. The table reports CPU per
 connection, so a steering, dispatch, or per-shard cost that grows with either
 axis reads as a slope. Linux only, since nothing else steers a reuseport
-group. It runs nightly.
+group. It runs nightly. `sock-drops` and `gen-drops` are the datagrams the
+kernel dropped over the measured window at the relay's and the generator's
+own UDP sockets because a receive queue was full, from the sampler's
+`udp_drops` (see `rs/moq-bench/README.md`). Every relay summary carries them
+with the granted receive buffer and the peak queued bytes. A nonzero
+`sock-drops` is local starvation; loss with zero drops happened elsewhere.
 
 Profile the relay under a workload, in one or more capture modes: `lock`
 (worker std mutex waits by stack), `cpu` (CPU stacks of every relay thread),

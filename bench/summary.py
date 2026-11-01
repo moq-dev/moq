@@ -8,6 +8,9 @@ import math
 from pathlib import Path
 
 COUNTERS = ("cpu_user", "cpu_system", "ctx_voluntary", "ctx_involuntary")
+# Integer counters from the sampler's UDP accounting. The namespace-wide ones
+# include every socket in the network namespace, not only the process's.
+UDP_COUNTERS = ("udp_drops", "udp_rcvbuf_errors", "udp_sndbuf_errors", "udp_in_errors")
 
 
 def records(path):
@@ -89,7 +92,36 @@ def cpu(rows, start, end):
         threads=max(row["threads"] for row in window),
         thread_cpu=workers,
         thread_scope="threads present at both interpolated window boundaries",
+        **udp(rows, start, end),
     )
+
+
+def udp(rows, start, end):
+    """Kernel UDP accounting over the window, when the sampler recorded it.
+
+    Drops are whole events, so the counters diff the samples that bracket the
+    window instead of interpolating: a drop near a boundary counts rather than
+    splitting. The granted buffer and queue peak come from samples inside it.
+    """
+    if not all("udp_drops" in row for row in rows):
+        return {}
+    first = [row for row in rows if row["timestamp_ms"] <= start][-1]
+    last = next(row for row in rows if row["timestamp_ms"] >= end)
+    result = {}
+    for key in UDP_COUNTERS:
+        value = last[key] - first[key]
+        if value < 0:
+            raise ValueError(f"host counter moved backwards: {key}")
+        result[key] = value
+    window = [row for row in rows if first["timestamp_ms"] <= row["timestamp_ms"] <= last["timestamp_ms"]]
+    granted = [row["udp_rcvbuf_min"] for row in window if row["udp_sockets"]]
+    result.update(
+        udp_sockets=max(row["udp_sockets"] for row in window),
+        udp_rcvbuf_min=min(granted) if granted else None,
+        udp_rx_queue_peak_bytes=max(row["udp_rx_queue_bytes"] for row in window),
+        udp_scope="samples bracketing the load window; rcvbuf/sndbuf/in errors are namespace-wide",
+    )
+    return result
 
 
 def main():

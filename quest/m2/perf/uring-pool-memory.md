@@ -26,6 +26,13 @@ RSS is process-wide, so attribute it with a control run whose pools are
 pinned at their starting size. A
 no-cost result is recorded and closes the quest.
 
+The socket-queue benchmark (`benchmark_socket_queues` in moq-uring's
+integration tests) already sweeps `rx_buffers_max` against the kernel
+queue: at 16, 256 and 4096 buffers the drops were the same, and a 16-buffer
+pool starved hundreds of times without losing a datagram, since starvation
+leaves them queued in the socket. A smaller ceiling is therefore not a loss
+risk at those loads; reuse that fixture for the memory side.
+
 Decided 2026-10-22 from the io_uring audit.
 
 Public API: additive, gauge fields on the `#[non_exhaustive]`
