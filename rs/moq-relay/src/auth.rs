@@ -806,7 +806,7 @@ impl Decider {
 					// Nothing here can verify a token, so one is refused rather than ignored:
 					// its holder expects it to count, and the public grant is not what it says.
 					Self::Public(_) if presents_token(&admission.request) => {
-						tracing::debug!(path = %admission.request.path, "a token was presented to public rules");
+						tracing::debug!(path = ?admission.request.path, "a token was presented to public rules");
 						admission.refuse(Error::Refused(Default::default()));
 					}
 					Self::Public(rules) => match rules.authorize(&admission.request.path) {
@@ -817,7 +817,7 @@ impl Decider {
 						// A path the rules don't reach is a refusal, never an outage a
 						// client would retry.
 						Err(err) => {
-							tracing::debug!(path = %admission.request.path, %err, "public rules refused");
+							tracing::debug!(path = ?admission.request.path, ?err, "public rules refused");
 							admission.refuse(Error::Refused(Default::default()));
 						}
 					},
@@ -1119,7 +1119,6 @@ pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1399,7 +1398,7 @@ mod tests {
 		let clone = auth.clone();
 		drop(auth);
 		assert!(
-			tokio::time::timeout(std::time::Duration::ZERO, admissions.next())
+			moq_clock::timeout(std::time::Duration::ZERO, admissions.next())
 				.await
 				.is_err()
 		);
@@ -1550,5 +1549,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod admission_tests;
