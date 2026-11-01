@@ -2,17 +2,16 @@
 """Exercise pre-setup selection with real diffs and no development toolchain."""
 
 import os
-from pathlib import Path
 import shutil
-import subprocess
 import statistics
+import subprocess
 import sys
-import time
 import tempfile
+import time
 import unittest
+from pathlib import Path
 
 from test_env import dispatch_env
-
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -30,8 +29,13 @@ class QueryTests(unittest.TestCase):
         self.bin.mkdir()
         for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
             (self.bin / command).symlink_to(shutil.which(command))
-        self.env = dispatch_env(LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
-                                GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
+        self.env = dispatch_env(
+            LOCAL_SUPERVISED="1",
+            PATH=str(self.bin),
+            GIT_CONFIG_NOSYSTEM="1",
+            GIT_CONFIG_GLOBAL=os.devnull,
+            CI_STRICT="1",
+        )
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "test")
         self.git("config", "user.email", "test@example.com")
@@ -42,8 +46,9 @@ class QueryTests(unittest.TestCase):
         self.git("update-ref", "refs/remotes/origin/release", "HEAD")
 
     def git(self, *args):
-        return subprocess.run(["git", *args], cwd=self.repo, env=self.env,
-                              text=True, capture_output=True, check=True).stdout.strip()
+        return subprocess.run(
+            ["git", *args], cwd=self.repo, env=self.env, text=True, capture_output=True, check=True
+        ).stdout.strip()
 
     def change(self, path):
         file = self.repo / path
@@ -51,8 +56,13 @@ class QueryTests(unittest.TestCase):
         file.write_text(file.read_text() + "\n" if file.exists() else "changed\n")
 
     def run_query(self, job="ci", base="origin/main"):
-        return subprocess.run(["bash", "sh/dispatch.sh", job if job == "ci" else f"ci-{job}", base, "--query"],
-                              cwd=self.repo, env=self.env, text=True, capture_output=True)
+        return subprocess.run(
+            ["bash", "sh/dispatch.sh", job if job == "ci" else f"ci-{job}", base, "--query"],
+            cwd=self.repo,
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
 
     def expect(self, needed, job="ci", base="origin/main", rust=None):
         result = self.run_query(job, base)
@@ -79,9 +89,14 @@ class QueryTests(unittest.TestCase):
                 (self.repo / path).unlink()
 
     def test_rust_cache_follows_modules_that_compile_rust(self):
-        for path, rust in (("rs/moq-net/src/lib.rs", True), ("py/moq-rs/example.py", True),
-                           ("js/net/src/index.ts", False), ("kt/example.kt", True),
-                           ("infra/moq-sh/install.sh", False), (".github/workflows/check.yml", False)):
+        for path, rust in (
+            ("rs/moq-net/src/lib.rs", True),
+            ("py/moq-rs/example.py", True),
+            ("js/net/src/index.ts", False),
+            ("kt/example.kt", True),
+            ("infra/moq-sh/install.sh", False),
+            (".github/workflows/check.yml", False),
+        ):
             with self.subTest(path=path):
                 self.change(path)
                 self.expect(True, rust=rust)
@@ -106,8 +121,13 @@ class QueryTests(unittest.TestCase):
         self.expect(True)
 
     def test_selected_tests_do_not_depend_on_installed_tools(self):
-        for path in ("js/net/src/index.ts", "rs/moq-net/src/lib.rs", "py/moq-rs/example.py",
-                     "doc/concept/example.md", "test/example.ts"):
+        for path in (
+            "js/net/src/index.ts",
+            "rs/moq-net/src/lib.rs",
+            "py/moq-rs/example.py",
+            "doc/concept/example.md",
+            "test/example.ts",
+        ):
             with self.subTest(path=path):
                 self.change(path)
                 self.expect(True)
@@ -145,8 +165,9 @@ class QueryTests(unittest.TestCase):
         self.assertIn("cannot resolve merge-base", result.stderr)
 
     def test_execution_still_requires_dev_shell(self):
-        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"],
-                                cwd=self.repo, env=self.env, text=True, capture_output=True)
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo, env=self.env, text=True, capture_output=True
+        )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("run inside the Nix dev shell", result.stderr)
 
@@ -187,18 +208,53 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(set(self.platform("--all").values()), {"true"})
 
     def test_platform_is_only_a_query(self):
-        result = subprocess.run(["bash", "sh/dispatch.sh", "ci-platform", "origin/main"],
-                                cwd=self.repo, env=self.env, text=True, capture_output=True)
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "ci-platform", "origin/main"],
+            cwd=self.repo,
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
 
     def stub_ci(self, just=""):
-        for tool in ("bun", "python3", "cargo", "jq", "shellcheck",
-                     "shfmt", "taplo", "nixfmt", "actionlint", "zizmor", "quest", "nix",
-                     "c++", "clang-format", "cmake", "dart", "dash", "gersemi", "go",
-                     "gradle", "java", "kramdown-rfc", "pkg-config", "uniffi-bindgen-cpp",
-                     "clippy-driver", "dpkg-deb", "nfpm", "rpm",
-                     "uniffi-bindgen-go", "uniffi_bindgen_dart", "uv", "xml2rfc"):
+        for tool in (
+            "bun",
+            "python3",
+            "cargo",
+            "jq",
+            "shellcheck",
+            "shfmt",
+            "taplo",
+            "nixfmt",
+            "actionlint",
+            "zizmor",
+            "quest",
+            "nix",
+            "c++",
+            "clang-format",
+            "cmake",
+            "dart",
+            "dash",
+            "gersemi",
+            "go",
+            "gradle",
+            "java",
+            "kramdown-rfc",
+            "ktfmt",
+            "pkg-config",
+            "uniffi-bindgen-cpp",
+            "clippy-driver",
+            "dpkg-deb",
+            "nfpm",
+            "rpm",
+            "ruff",
+            "uniffi-bindgen-go",
+            "uniffi_bindgen_dart",
+            "uv",
+            "xml2rfc",
+        ):
             path = self.bin / tool
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
@@ -218,8 +274,9 @@ class QueryTests(unittest.TestCase):
 
     def run_ci(self, base="origin/main"):
         self.stub_ci()
-        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", base],
-                                cwd=self.repo, env=self.env, text=True, capture_output=True)
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "ci", base], cwd=self.repo, env=self.env, text=True, capture_output=True
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
 
@@ -233,16 +290,22 @@ class QueryTests(unittest.TestCase):
             os.mkfifo(started)
             os.mkfifo(released)
             blocked[name] = (call, started, released)
-        stub = "".join(f'    {call}) echo >"{started}"; read -r <"{released}" ;;\n'
-                       for call, started, released in blocked.values())
+        stub = "".join(
+            f'    {call}) echo >"{started}"; read -r <"{released}" ;;\n' for call, started, released in blocked.values()
+        )
         reads = "; ".join(f'read -r <"{started}"' for _, started, _ in blocked.values())
         releases = "; ".join(f'echo >"{released}"' for _, _, released in blocked.values())
-        self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\n'
-                     f'    "go check") {releases} ;;\nesac\n')
+        self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\n    "go check") {releases} ;;\nesac\n')
         self.change("rs/moq-ffi/src/lib.rs")
         self.change("js/net/src/index.ts")
-        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
-                                env=self.env, text=True, capture_output=True, timeout=60)
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "ci", "origin/main"],
+            cwd=self.repo,
+            env=self.env,
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
         self.assertEqual(result.returncode, 3, result.stderr)
         self.assertIn("ci: test gh failed", result.stderr)
         self.assertRegex(result.stderr, r"\d+  test gh \(failed\)")
@@ -262,15 +325,21 @@ class QueryTests(unittest.TestCase):
             os.mkfifo(started)
             os.mkfifo(released)
             blocked[name] = (call, started, released)
-        stub = "".join(f'    {call}) echo >"{started}"; read -r <"{released}" ;;\n'
-                       for call, started, released in blocked.values())
+        stub = "".join(
+            f'    {call}) echo >"{started}"; read -r <"{released}" ;;\n' for call, started, released in blocked.values()
+        )
         reads = "; ".join(f'read -r <"{started}"' for _, started, _ in blocked.values())
         self.stub_ci(f'case "$*" in\n{stub}    "gh test") {reads}; exit 3 ;;\nesac\n')
         self.change("rs/moq-ffi/src/lib.rs")
         self.change("js/net/src/index.ts")
-        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
-                                env=dict(self.env, CHECK_FAIL_FAST="1"), text=True, capture_output=True,
-                                timeout=60)
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "ci", "origin/main"],
+            cwd=self.repo,
+            env=dict(self.env, CHECK_FAIL_FAST="1"),
+            text=True,
+            capture_output=True,
+            timeout=60,
+        )
         self.assertEqual(result.returncode, 3, result.stderr)
         self.assertIn("ci: test gh failed", result.stderr)
         self.assertRegex(result.stderr, r"\d+  test rs \(cancelled\)")
@@ -284,9 +353,13 @@ class QueryTests(unittest.TestCase):
         self.stub_ci('case "$*" in "js check-changed "*) exit 3 ;; "gh check") exit 4 ;; esac\n')
         self.change("js/net/src/index.ts")
         self.change("dart/example.dart")
-        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
-                                env=dict(self.env, CHECK_JOBS="1", CHECK_FAIL_FAST="1"), text=True,
-                                capture_output=True)
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "ci", "origin/main"],
+            cwd=self.repo,
+            env=dict(self.env, CHECK_JOBS="1", CHECK_FAIL_FAST="1"),
+            text=True,
+            capture_output=True,
+        )
         self.assertNotEqual(result.returncode, 0, result.stderr)
         failures = [line for line in result.stderr.splitlines() if line.startswith("ci: ") and line.endswith(" failed")]
         self.assertEqual(len(failures), 1, result.stderr)
@@ -297,8 +370,13 @@ class QueryTests(unittest.TestCase):
                 self.stub_ci('case "$*" in "js check-changed "*) exit 3 ;; "gh check") exit 4 ;; esac\n')
                 self.change("js/net/src/index.ts")
                 self.change("dart/example.dart")
-                result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
-                                        env=dict(self.env, CHECK_JOBS=jobs), text=True, capture_output=True)
+                result = subprocess.run(
+                    ["bash", "sh/dispatch.sh", "ci", "origin/main"],
+                    cwd=self.repo,
+                    env=dict(self.env, CHECK_JOBS=jobs),
+                    text=True,
+                    capture_output=True,
+                )
                 self.assertEqual(result.returncode, 3, result.stderr)
                 self.assertIn("ci: check js failed", result.stderr)
                 self.assertIn("ci: check gh failed", result.stderr)
@@ -318,15 +396,20 @@ class QueryTests(unittest.TestCase):
         nonces = []
         for _ in range(2):
             (self.root / "calls").unlink(missing_ok=True)
-            result = subprocess.run(["bash", "sh/dispatch.sh", "check", "origin/main"], cwd=self.repo,
-                                    env=self.env, text=True, capture_output=True)
+            result = subprocess.run(
+                ["bash", "sh/dispatch.sh", "check", "origin/main"],
+                cwd=self.repo,
+                env=self.env,
+                text=True,
+                capture_output=True,
+            )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("local Nix builder cannot create user namespaces", result.stdout + result.stderr)
             self.assertRegex(result.stderr, r"\d+  check flake \(skipped\)")
             calls = (self.root / "calls").read_text().splitlines()
             self.assertNotIn("nix flake check --print-build-logs", calls)
             self.assertIn("gh test", calls)
-            probe, = [call for call in calls if call.startswith("nix build ")]
+            (probe,) = [call for call in calls if call.startswith("nix build ")]
             self.assertIn("--builders  --max-jobs 1", probe)
             self.assertIn("--no-link", probe)
             nonces.append(probe.split("--argstr nonce ")[1].split()[0])
@@ -337,8 +420,13 @@ class QueryTests(unittest.TestCase):
         self.stub_ci()
         self.change("flake.nix")
         self.env.pop("CI_STRICT")
-        result = subprocess.run(["bash", "sh/dispatch.sh", "check", "origin/main"], cwd=self.repo,
-                                env=self.env, text=True, capture_output=True)
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "check", "origin/main"],
+            cwd=self.repo,
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn("(skipped)", result.stderr)
         calls = (self.root / "calls").read_text().splitlines()
@@ -352,8 +440,13 @@ class QueryTests(unittest.TestCase):
         nix = self.bin / "nix"
         nix.write_text(nix.read_text() + 'case "$*" in "flake check --print-build-logs") exit 77 ;; esac\n')
         self.env.pop("CI_STRICT")
-        result = subprocess.run(["bash", "sh/dispatch.sh", "check", "origin/main"], cwd=self.repo,
-                                env=self.env, text=True, capture_output=True)
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "check", "origin/main"],
+            cwd=self.repo,
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertNotIn("(skipped)", result.stderr)
         self.assertIn("check: check flake failed", result.stderr)
@@ -365,8 +458,13 @@ class QueryTests(unittest.TestCase):
         nix = self.bin / "nix"
         nix.write_text(nix.read_text() + 'case "$*" in "build "*) echo "evaluation failed" >&2; exit 1 ;; esac\n')
         self.env.pop("CI_STRICT")
-        result = subprocess.run(["bash", "sh/dispatch.sh", "check", "origin/main"], cwd=self.repo,
-                                env=self.env, text=True, capture_output=True)
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "check", "origin/main"],
+            cwd=self.repo,
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("check: check flake failed", result.stderr)
         self.assertNotIn("(skipped)", result.stderr)
@@ -380,9 +478,10 @@ class QueryTests(unittest.TestCase):
         self.assertIn("nix flake check --print-build-logs", calls)
         self.assertFalse(any(call.startswith("nix build ") for call in calls))
         nix = self.bin / "nix"
-        nix.write_text(nix.read_text() + 'exit 77\n')
-        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo,
-                                env=self.env, text=True, capture_output=True)
+        nix.write_text(nix.read_text() + "exit 77\n")
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "ci", "origin/main"], cwd=self.repo, env=self.env, text=True, capture_output=True
+        )
         self.assertEqual(result.returncode, 77, result.stderr)
         self.assertNotIn("(skipped)", result.stderr)
         self.assertIn("ci: check flake failed", result.stderr)
@@ -398,9 +497,13 @@ esac
         self.change("rs/kio/src/clock/mod.rs")
         for jobs in ("1", "3"):
             with self.subTest(jobs=jobs):
-                run = subprocess.Popen(["bash", "sh/dispatch.sh", "ci", "origin/main"],
-                                       cwd=self.repo, env=dict(self.env, CHECK_JOBS=jobs),
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+                run = subprocess.Popen(
+                    ["bash", "sh/dispatch.sh", "ci", "origin/main"],
+                    cwd=self.repo,
+                    env=dict(self.env, CHECK_JOBS=jobs),
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                )
                 started.read_text()
                 # A job timeout can kill the run without a signal it traps, so
                 # a buffered lane names its running phase before the phase ends.
@@ -423,8 +526,10 @@ esac
         self.assertFalse(any(call.startswith("rs check-changed ") for call in calls), calls)
         self.assertEqual(sum(call.startswith("rs lint-changed ") for call in calls), 1)
         self.assertEqual(sum(call.startswith("rs test-changed ") for call in calls), 1)
-        self.assertLess(next(i for i, call in enumerate(calls) if call.startswith("rs lint-changed ")),
-                        next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")))
+        self.assertLess(
+            next(i for i, call in enumerate(calls) if call.startswith("rs lint-changed ")),
+            next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")),
+        )
 
     def test_rust_lane_runs_only_the_lint_and_the_test_build(self):
         self.change("rs/kio/src/clock/mod.rs")
@@ -441,24 +546,29 @@ esac
                 # Every other module runs in the job that does not name one.
                 self.assertEqual("gh check" in calls, filter.startswith("-"))
         self.env["CHECK_MODULES"] = "rs_shapes"
-        result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "--all"], cwd=self.repo,
-                                env=self.env, text=True, capture_output=True)
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "ci", "--all"], cwd=self.repo, env=self.env, text=True, capture_output=True
+        )
         self.assertEqual(result.returncode, 2, result.stderr)
         self.assertIn("CHECK_MODULES names 'rs_shapes'", result.stderr)
 
     def test_flake_checks_follow_nix_inputs_instead_of_rust_source(self):
-        for path, expected in ((".cargo/config.toml", True),
-                               ("rs/moq-net/src/lib.rs", False),
-                               ("rs/moq-net/Cargo.toml", True),
-                               ("rs/moq-c/native-libs/linux.txt", True),
-                               ("rs/moq-video/src/frame/nv12_resize.ptx", True),
-                               ("Cargo.toml", True), ("Cargo.lock", True),
-                               ("rust-toolchain.toml", True),
-                               ("flake.nix", True), ("flake.lock", True),
-                               ("nix/runner/hog.py", True),
-                               ("nix/runner/migrate.sh", True),
-                               ("infra/example.nix", True),
-                               ("quest/m1/example.md", False)):
+        for path, expected in (
+            (".cargo/config.toml", True),
+            ("rs/moq-net/src/lib.rs", False),
+            ("rs/moq-net/Cargo.toml", True),
+            ("rs/moq-c/native-libs/linux.txt", True),
+            ("rs/moq-video/src/frame/nv12_resize.ptx", True),
+            ("Cargo.toml", True),
+            ("Cargo.lock", True),
+            ("rust-toolchain.toml", True),
+            ("flake.nix", True),
+            ("flake.lock", True),
+            ("nix/runner/hog.py", True),
+            ("nix/runner/migrate.sh", True),
+            ("infra/example.nix", True),
+            ("quest/m1/example.md", False),
+        ):
             with self.subTest(path=path):
                 self.change(path)
                 calls = self.run_ci()
