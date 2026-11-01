@@ -177,17 +177,22 @@ impl Forward {
 	/// Forward `packet` if its connection ID names another server, returning whether it was taken.
 	///
 	/// A packet naming a server missing from the peers is taken and dropped: answering it here
-	/// would reset a connection another server owns.
+	/// would reset a connection another server owns. One that `is_local_reset` recognizes stays,
+	/// since a stateless reset's connection ID is random and may seem to name another server.
 	pub(crate) fn route(
 		&mut self,
 		packet: &[u8],
 		remote: SocketAddr,
 		local_ip: Option<IpAddr>,
 		ecn: Option<EcnCodepoint>,
+		is_local_reset: impl FnOnce() -> bool,
 	) -> bool {
 		let Some(id) = self.foreign(packet) else {
 			return false;
 		};
+		if is_local_reset() {
+			return false;
+		}
 		let Some(peer) = self.peers.get(id) else {
 			tracing::trace!(id = %hex::encode(id), "dropping a packet for an unknown server");
 			return true;
@@ -353,7 +358,7 @@ mod tests {
 		let client: SocketAddr = "192.0.2.7:5000".parse().unwrap();
 		let arrival: IpAddr = "198.51.100.1".parse().unwrap();
 
-		assert!(a.route(&short(2), client, Some(arrival), Some(EcnCodepoint::Ce)));
+		assert!(a.route(&short(2), client, Some(arrival), Some(EcnCodepoint::Ce), || false));
 		assert_eq!(
 			recv(&mut b).await,
 			Some((client, Some(arrival), Some(EcnCodepoint::Ce), short(2)))
@@ -361,22 +366,25 @@ mod tests {
 
 		// An IPv6 client, through a server that never learned the arrival address.
 		let client: SocketAddr = "[2001:db8::7]:5000".parse().unwrap();
-		assert!(a.route(&short(2), client, None, None));
+		assert!(a.route(&short(2), client, None, None, || false));
 		assert_eq!(recv(&mut b).await, Some((client, None, None, short(2))));
 	}
 
-	/// What stays: this server's own connection IDs, long headers, and anything too short to
-	/// carry a server ID. A short header for a server nobody listed is taken and dropped.
+	/// What stays: this server's own connection IDs, long headers, anything too short to carry a
+	/// server ID, and a stateless reset for one of this server's connections, whose random
+	/// connection ID may seem to name another. A short header for a server nobody listed is taken
+	/// and dropped.
 	#[tokio::test]
 	async fn only_another_servers_short_headers_leave() {
 		let (mut a, _b, _) = pair();
 		let client: SocketAddr = "192.0.2.7:5000".parse().unwrap();
-		assert!(!a.route(&short(1), client, None, None));
+		assert!(!a.route(&short(1), client, None, None, || false));
 		let mut long = short(2);
 		long[0] = 0xc0;
-		assert!(!a.route(&long, client, None, None));
-		assert!(!a.route(&[0x40, 5], client, None, None));
-		assert!(a.route(&short(3), client, None, None));
+		assert!(!a.route(&long, client, None, None, || false));
+		assert!(!a.route(&[0x40, 5], client, None, None, || false));
+		assert!(a.route(&short(3), client, None, None, || false));
+		assert!(!a.route(&short(2), client, None, None, || true));
 	}
 
 	/// A forward opens only from a listed peer, under the shared key, and only for this server: a
@@ -389,7 +397,7 @@ mod tests {
 
 		// Not listed, with the right key.
 		let mut stranger = server(1, socket(), &peers, &KEY);
-		assert!(stranger.route(&short(2), client, None, None));
+		assert!(stranger.route(&short(2), client, None, None, || false));
 		assert_eq!(recv(&mut b).await, None);
 
 		// Listed, with the wrong key.
@@ -399,7 +407,7 @@ mod tests {
 		map.insert(&[2], b_addr);
 		map.insert(&[3], forged.socket.local_addr().unwrap());
 		peers.set(map);
-		assert!(forged.route(&short(2), client, None, None));
+		assert!(forged.route(&short(2), client, None, None, || false));
 		assert_eq!(recv(&mut b).await, None);
 
 		// Server 1 sending server 2 a packet of its own, as a stale map would.
@@ -408,7 +416,7 @@ mod tests {
 		assert_eq!(recv(&mut b).await, None);
 
 		// Still open to a real forward.
-		assert!(a.route(&short(2), client, None, None));
+		assert!(a.route(&short(2), client, None, None, || false));
 		assert!(recv(&mut b).await.is_some());
 	}
 }

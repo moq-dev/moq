@@ -945,8 +945,9 @@ impl RecvState {
 						while !data.is_empty() {
 							let buf = data.split_to(meta.stride.min(data.len()));
 							if let Some(forward) = forward.as_deref_mut()
-								&& forward.route(&buf, meta.addr, meta.dst_ip, meta.ecn)
-							{
+								&& forward.route(&buf, meta.addr, meta.dst_ip, meta.ecn, || {
+									endpoint.is_stateless_reset(meta.addr, &buf)
+								}) {
 								continue;
 							}
 							let received = Received {

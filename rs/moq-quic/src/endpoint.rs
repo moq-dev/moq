@@ -1027,6 +1027,20 @@ impl Endpoint {
 		self.connections.len()
 	}
 
+	/// Whether `datagram` from `remote` ends in the stateless reset token a connection's peer
+	/// issued, so [`handle`](Self::handle) would route it to that connection
+	///
+	/// A stateless reset carries a random connection ID, so a caller that routes datagrams by
+	/// connection ID before handing them over checks this first.
+	pub fn is_stateless_reset(&self, remote: SocketAddr, datagram: &[u8]) -> bool {
+		datagram.len().checked_sub(RESET_TOKEN_SIZE).is_some_and(|start| {
+			self.index
+				.connection_reset_tokens
+				.get(remote, &datagram[start..])
+				.is_some()
+		})
+	}
+
 	/// Counter for the number of bytes currently used
 	/// in the buffers for Initial messages for pending incoming connections
 	/// and accepts that are still being finalized
