@@ -503,16 +503,18 @@ test("a stalled consumer does not pin evicted groups", async () => {
 		clock.jump(Nano.fromMilli(Milli(10_000)));
 
 		const broadcast = new BroadcastProducer();
-		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Milli(1000) });
+		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-		// A subscriber that never reads. Its sink must not grow without bound.
-		const stalled = broadcast.track("video").subscribe();
+		// A subscriber that never reads. Its sink must not grow without bound. No max delay,
+		// so only eviction (not a skip of a superseded group) can drop the old group.
+		const stalled = broadcast.track("video").subscribe({ maxDelay: null });
 
 		producer.writeFrame(textFrame("old"));
 
-		// Advance past the cache window and write again to trigger a prune. The old
-		// (closed, aged-out) group is dropped from the stalled sink, not retained.
-		clock.jump(Nano.fromMilli(Milli(2_000)));
+		// Advance past the cache window, plus the scan slice a prune may lag by, and write
+		// again to trigger a prune. The old (closed, aged-out) group is dropped from the
+		// stalled sink, not retained.
+		clock.jump(Nano.fromMilli(Milli(30_000 + 30_000 / 8)));
 		producer.writeFrame(textFrame("fresh"));
 
 		// The next group in arrival order is the fresh one (seq 1): the old (seq 0) group
