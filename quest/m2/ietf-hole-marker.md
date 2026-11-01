@@ -81,4 +81,4 @@ Our publishers answer multi-group FETCH and fills over known caches.
 
 ## Related
 
-- [Ordered reads wait only on owed groups](/quest/m2/ordered-owed-wait.md) - the ordered-reader wait a signalled hole ends
+- [Ordered reads wait only on owed groups](https://github.com/moq-dev/moq/pull/7403) - the ordered-reader wait a signalled hole ends
