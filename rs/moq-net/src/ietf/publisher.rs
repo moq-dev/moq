@@ -4230,9 +4230,24 @@ impl Publisher {
 	/// for a subset).
 	async fn run_namespaces(
 		&self,
+		announced: crate::announce::Consumer,
+		prefix: crate::Path,
+		mut ns: Namespaces,
+		initial: Vec<crate::announce::Announce>,
+	) -> Result<(), Error> {
+		let res = self.forward_namespaces(announced, prefix, &mut ns, initial).await;
+		// Every exit, a failed write's included, keeps the request's stream, and so its
+		// credit, until the acceptor lets go of a token it is still verifying.
+		self.abandon_verification(&mut ns).await;
+		res
+	}
+
+	/// [`Self::run_namespaces`]'s loop, leaving a token still being verified in `ns`.
+	async fn forward_namespaces(
+		&self,
 		mut announced: crate::announce::Consumer,
 		mut prefix: crate::Path,
-		mut ns: Namespaces,
+		ns: &mut Namespaces,
 		initial: Vec<crate::announce::Announce>,
 	) -> Result<(), Error> {
 		let mut finished = false;
@@ -4249,7 +4264,7 @@ impl Publisher {
 		}
 		(ns.permit, ns.epoch) = self.permit_now(ns.gate.as_ref());
 		for update in initial {
-			self.apply_update(&mut ns, &prefix, update, true).await?;
+			self.apply_update(ns, &prefix, update, true).await?;
 		}
 
 		// When to re-offer whatever the peer should hold and doesn't, and how long to wait
@@ -4278,7 +4293,7 @@ impl Publisher {
 				}
 			}
 			retry.set(retry_at);
-			self.prune_updates(&mut ns, &prefix);
+			self.prune_updates(ns, &prefix);
 
 			let event = {
 				let Namespaces {
@@ -4291,7 +4306,7 @@ impl Publisher {
 					gate,
 					verifying,
 					..
-				} = &mut ns;
+				} = &mut *ns;
 				kio::wait(|waiter| {
 					if self.withdrawal.poll(waiter).is_ready() {
 						return Poll::Ready(NamespaceEvent::Update(None));
@@ -4418,10 +4433,7 @@ impl Publisher {
 							});
 						}
 						None => {
-							if self
-								.rescope(&mut ns, &mut prefix, &mut announced, update.prefix)
-								.await?
-							{
+							if self.rescope(ns, &mut prefix, &mut announced, update.prefix).await? {
 								retry_at = None;
 								retry_delay = RETRY_BASE;
 							}
@@ -4454,7 +4466,7 @@ impl Publisher {
 					{
 						*token.lock() = gate.token_guard();
 					}
-					if self.rescope(&mut ns, &mut prefix, &mut announced, next).await? {
+					if self.rescope(ns, &mut prefix, &mut announced, next).await? {
 						retry_at = None;
 						retry_delay = RETRY_BASE;
 					}
@@ -4475,7 +4487,7 @@ impl Publisher {
 
 					for suffix in deferred {
 						let path = prefix.rejoin(&suffix);
-						self.sync_namespace(&mut ns, &suffix, &path).await?;
+						self.sync_namespace(ns, &suffix, &path).await?;
 					}
 				}
 				NamespaceEvent::Regrant(permit) => {
@@ -4483,16 +4495,16 @@ impl Publisher {
 					let suffixes: Vec<crate::Path> = ns.watched.keys().cloned().collect();
 					for suffix in suffixes {
 						let path = prefix.rejoin(&suffix);
-						self.sync_namespace(&mut ns, &suffix, &path).await?;
+						self.sync_namespace(ns, &suffix, &path).await?;
 					}
 				}
-				NamespaceEvent::Renew(request_id) => self.send_update(&mut ns, &prefix, request_id).await?,
-				NamespaceEvent::Answered(suffix, answer) => self.answered(&mut ns, &prefix, suffix, answer).await?,
+				NamespaceEvent::Renew(request_id) => self.send_update(ns, &prefix, request_id).await?,
+				NamespaceEvent::Answered(suffix, answer) => self.answered(ns, &prefix, suffix, answer).await?,
 				NamespaceEvent::Update(None) => {
 					// The origin is gone: withdraw everything, then finish the
 					// stream and wait for delivery.
 					self.withdraw_requests(&mut ns.target, &mut ns.requests).await;
-					self.abandon_verification(&mut ns).await;
+					self.abandon_verification(ns).await;
 					let Some(stream) = ns.target.stream() else {
 						return Ok(());
 					};
@@ -4504,17 +4516,16 @@ impl Publisher {
 					// again, and resubscribes. One that tells instances apart (MoQ Epoch) takes
 					// another epoch in place instead, which `sync_namespace` makes before it
 					// breaks the old.
-					if restart && !Self::replaces(&ns, &update) {
-						self.apply_update(&mut ns, &prefix, update.clone(), false).await?;
+					if restart && !Self::replaces(ns, &update) {
+						self.apply_update(ns, &prefix, update.clone(), false).await?;
 					}
-					self.apply_update(&mut ns, &prefix, update, active).await?;
+					self.apply_update(ns, &prefix, update, active).await?;
 				}
 			}
 		};
 
 		// This loop's advertisements die with it.
 		self.withdraw_requests(&mut ns.target, &mut ns.requests).await;
-		self.abandon_verification(&mut ns).await;
 
 		res
 	}
@@ -9034,6 +9045,32 @@ mod serve_tests {
 		assert!(
 			futures::poll!(running.as_mut()).is_ready(),
 			"answered, the request ends"
+		);
+	}
+
+	/// A write that fails while an update's token is being verified ends the request, but
+	/// it keeps the request's stream, and so its credit, until the application answers.
+	#[kio::test]
+	async fn a_failed_write_keeps_a_verifying_update_stream_until_the_application_answers() {
+		let version = Version::Draft22;
+		let (h, mut requests, session, mut running) = token_namespaces(version).await;
+		session.push(&update_with_tokens(&[TOKEN]));
+		let request = taken_token(&mut running, &mut requests).await;
+
+		session.log.fail_writes();
+		let _other = h._origin.announce("other", crate::origin::Route::default()).unwrap();
+		for _ in 0..10 {
+			assert!(
+				futures::poll!(running.as_mut()).is_pending(),
+				"the failed request let go of its stream before the application answered"
+			);
+			settle().await;
+		}
+		drop(request.accept(crate::auth::Grant::all()));
+		let res = futures::poll!(running.as_mut());
+		assert!(
+			matches!(res, Poll::Ready(Err(_))),
+			"answered, the failed write ends the request: {res:?}"
 		);
 	}
 
