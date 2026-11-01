@@ -14,9 +14,8 @@ import {
 import * as Epoch from "./epoch.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
-import { Parameters } from "./ietf/parameters.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
-import { RequestOk } from "./ietf/request.ts";
+import { RequestError } from "./ietf/request.ts";
 import { refuse as refuseRequest } from "./ietf/request_stream.ts";
 import { SubscribeTracks } from "./ietf/subscribe_tracks.ts";
 import { hooks } from "./internal.ts";
@@ -1306,9 +1305,12 @@ test("integration: ietf fetch group is unsupported", async () => {
 	server.abort();
 });
 
-test("integration: cancelling an ietf track listing preserves an existing subscription", async () => {
+// We list no tracks by PUBLISH, so a SUBSCRIBE_TRACKS is refused NOT_SUPPORTED on its own stream, and
+// the subscription already on the session keeps going.
+test("integration: ietf SUBSCRIBE_TRACKS is refused per request", async () => {
 	for (const [protocol, version] of [
 		[Ietf.ALPN.DRAFT_18, Ietf.Version.DRAFT_18],
+		[Ietf.ALPN.DRAFT_20, Ietf.Version.DRAFT_20],
 		[Ietf.ALPN.DRAFT_22, Ietf.Version.DRAFT_22],
 	] as const) {
 		const pair = createMockTransportPair(protocol);
@@ -1337,13 +1339,10 @@ test("integration: cancelling an ietf track listing preserves an existing subscr
 
 		const bidi = await pair.client.createBidirectionalStream();
 		const listing = new Stream({ ...bidi, version });
-		const params = new Parameters();
-		params.forward = false;
 		await listing.writer.u53(SubscribeTracks.id);
-		await new SubscribeTracks(62n, Path.from("room"), params).encode(listing.writer, version);
-		expect(await listing.reader.u53()).toBe(RequestOk.id);
-		await RequestOk.decode(listing.reader, version);
-		listing.abort(new StreamError(StreamCode.Cancel));
+		await new SubscribeTracks(62n, Path.from("room")).encode(listing.writer, version);
+		expect(await listing.reader.u53()).toBe(RequestError.id);
+		expect((await RequestError.decode(listing.reader, version)).errorCode).toBe(0x3);
 
 		for (const producer of served) producer.writeFrame(textFrame("after"));
 		expect(await track.readString()).toBe("after");
