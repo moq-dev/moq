@@ -320,6 +320,13 @@ impl Scream {
 
     /// equivalent to scl_t: 1 away from the window congestion last began at, falling to 0.1 near
     /// it
+    ///
+    /// Taken after the update's reduction, as the draft's comment has it ("ref_wnd_i is updated
+    /// before this code"), though its pseudocode and the reference implementation take it
+    /// before. A reaction makes the window it began at the inflection, so the increase right
+    /// after a small backoff is held near it, as the draft intends, rather than measured against
+    /// an older inflection the window grew past. Taken before, the queue's p95 after
+    /// `follows_a_capacity_drop`'s drop rose from 58ms to 62ms, past the 60ms target.
     fn scl(&self) -> f64 {
         let scl = (self.ref_wnd - self.ref_wnd_i) / self.ref_wnd_i * 8.0;
         (scl * scl).clamp(0.1, 1.0)
@@ -466,6 +473,10 @@ impl Controller for Scream {
         }
     }
 
+    // The draft's increase leaves out CE-marked bytes. [`Ce`] carries no count of them, so they
+    // count here: classic ECN grows the window additively after its reaction, at most an MSS a
+    // round trip, so they cost a fraction of an MSS against the 20% backoff. The L4S path, which
+    // grows through marks every round trip, would need the count.
     fn on_ce(&mut self, ce: Ce) {
         if self.last_reaction.is_none_or(|last| ce.sent > last) {
             self.ce_detected = true;
@@ -882,5 +893,32 @@ mod tests {
 
         lose(&mut scream, now + ms(300), now + ms(100));
         assert_eq!(scream.ref_wnd, 100_000.0 * BETA_LOSS * BETA_LOSS);
+    }
+
+    /// A small delay backoff holds the increase that follows near its new inflection, even when
+    /// the window had grown far past the old one
+    #[test]
+    fn backoff_holds_growth_at_the_new_inflection() {
+        let now = Instant::now();
+        let mut scream = scream(now, ScreamConfig::default());
+        scream.ref_wnd = 100_000.0;
+        scream.ref_wnd_i = 50_000.0;
+        scream.max_bytes_in_flight = 100_000;
+        scream.bytes_newly_acked = 100_000;
+        // Just past half the target: alpha 0.1
+        scream.qdelay_avg = Duration::from_millis(33);
+        scream.update(now + Duration::from_millis(50));
+
+        // At a 333ms RTT, a reaction every 25ms takes 1/13.3 of alpha / 2
+        let reduced = 100_000.0 * (1.0 - 0.1 / 2.0 / (333.0 / 25.0));
+        assert!((scream.ref_wnd_i - 100_000.0).abs() < 1e-6);
+        // 100 kB acked is about one MSS, scaled by max(0.25, scl) with scl at its floor; the
+        // multiplicative part is zero right after congestion
+        let expected = reduced + 100_000.0 * f64::from(MTU) / reduced * 0.25;
+        assert!(
+            (scream.ref_wnd - expected).abs() < 1e-3,
+            "ref_wnd {} != {expected}",
+            scream.ref_wnd
+        );
     }
 }
