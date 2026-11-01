@@ -27,6 +27,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Byte streams](/quest/m2/stream/README.md) - TCP connections ride MoQ losslessly through relays, proxied per hop rather than as IP packets
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
 - [Untrusted media parsers have fuzz targets](/quest/m2/media-fuzz.md) - fMP4, MKV, FLV, TS, Annex-B, catalog, and AMF0 parsing fuzzed with a bounded-work invariant
+- [One policy for oversized container metadata](/quest/m2/import-metadata-policy.md) - fMP4 and MKV refuse or stream huge metadata by one documented rule
 - [Wire fuzz coverage](/quest/m2/wire-fuzz-coverage.md) - the cmsg walks in moq-sock and moq-uring have invariant fuzz targets, and the unsafe peer input reaches runs under Miri
 - [In-memory unsafe runs under Miri](/quest/m2/miri-memory.md) - kio's and moq-net's memory-only unsafe runs under a nightly Miri job
 - [VA-API renderer tests](/quest/m2/vaapi-render-tests.md) - the VA-API renderer, decode, and transcode tests run in `just rs gpu` on AMD and Intel and fail instead of skipping, and hosted CI reports them ignored
@@ -50,6 +51,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Broadcast fairness](/quest/m2/broadcast-fairness.md) - broadcasts share a cluster link fairly, so one tenant's priority never starves another's
 - [Cache fair share](/quest/m2/cache-fairness.md) - one tenant cannot crowd another out of the relay's shared group cache
 - [Peer grant bound](/quest/m2/peer-grant-bound.md) - a peer's AUTH_OK costs near-linear time in its bytes on every input shape, in Rust and in a browser
+- [A regrant re-checks only the routes it can change](/quest/m2/regrant-route-recheck.md) - an `AUTH_OK` no longer costs routes times grant members on every lite announce stream
 - [Plan: watch worker](/quest/m2/plan-watch-worker.md) - prototype an invisible page worker against app-spawned workers, and land the jank harness that decides
 - [Watch worker](/quest/m2/watch-worker.md) - watch playback runs in a worker onto an OffscreenCanvas, so main-thread jank never stalls video or audio
 - [Vulkan Video encode on AMD](/quest/m2/vulkan-encode.md) - H.264 and H.265 from an external Vulkan image on RADV, hand-rolled on ash, proven on an RX 9070
@@ -106,6 +108,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Bindings in the interop matrix](/quest/m2/interop-bindings.md) - Kotlin, Swift, and Dart publish and subscribe against every other interop client
 - [WebGPU HDR](/quest/m2/webgpu-hdr.md) - HDR renditions play as HDR where the browser and display can show it, and tone-map to SDR elsewhere
 - [Resume as producer replacement](/quest/m2/resume-redesign.md) - route changes replace the writer of one track state, deleting the per-reader resume path in Rust and JS
+- [Migrated sessions close once their replacement synced](/quest/m2/goaway-migration-followups.md) - moq-tokio holds the early close for the replacement's announce sync, and the JS `Connection` closes early too
 - [moq-transport requests end through one lease](/quest/m2/ietf-request-lease.md) - every IETF request ends through one polled lease, and the two 18k-line files split by mechanism
 - [A moq-transport group head fills its hole in place](/quest/m2/ietf-fill-refill.md) - fills and joining FETCHes write into the tail's group, deleting the `Fill` handoff
 - [moq-transport hole markers](/quest/m2/ietf-hole-marker.md) - a negotiated extension names a SUBSCRIBE's holes, so our publishers answer multi-group FETCH from caches that know every group; built when an IETF client wants it
@@ -133,8 +136,9 @@ lite-07; bitrate enforcement is not part of this release.
 - [Windows GPU input](/quest/m2/obs-windows.md) - import or blit OBS D3D11 textures with explicit synchronization
 - [WASM-to-JS evaluation](/quest/m2/rs2ts-wasm2js.md) - try the Rust implementation as JS-only browser output and compare source-translator alternatives if needed
 - [JS-only @moq/net](/quest/m2/rs2ts-js.md) - adopt the selected Rust-to-JS route after browser parity and measured tradeoffs are accepted
-- [Per-stream deadlines](/quest/m2/quic-deadline.md) - hopeless retransmits
-  become resets, and a tail loss probe fires early while there is still time
+- [Per-stream and per-datagram deadlines](/quest/m2/quic-deadline.md) - hopeless retransmits
+  become resets, a tail loss probe fires early while there is still time, and
+  datagrams past their subscription's max delay are dropped instead of sent late
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - a written
   verdict on marking versus dropping, and whether Linode and OVH keep marks
 - [poll_acked on moq-net's send stream](/quest/m2/quic-ack-hook.md) - the
@@ -149,6 +153,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Ring drain GOAWAY](/quest/m2/uring-ring-drain.md) - the ring sends moq-transport 17+ sessions their drain GOAWAY
 - [Relay io_uring packages](/quest/m2/relay-io-uring-package.md) - Linux relay packages ship io_uring once the ring is on par with tokio
 - [io_uring thread check](/quest/m2/uring-transport-machines.md) - the relay fanout bench measures `moq_uring::transport::Local`'s per-call thread check after the transport is boxed, removing it only if it shows
+- [io_uring quiescence on a quiet host](/quest/m2/uring-bench-followups.md) - quiet-host acceptance numbers and a nightly `worker_turns` QUIC request-reply series
 - [Opus implementation](/quest/m2/audio-opus-backend.md) - compare Opus codec quality, CPU, build cost, and the loss recovery each backend offers
 - [Latency ledger](/quest/m2/latency-ledger.md) - a viewer reports its share of playback delay stage by stage: jitter buffer and device
 - [Media Foundation decode](/quest/m2/audio-decode-mediafoundation.md) - Windows decodes HE-AAC, multichannel AAC, and what else the MFTs offer
@@ -179,9 +184,11 @@ lite-07; bitrate enforcement is not part of this release.
 - [A release carries multi-vendor GPU input](/quest/m2/gpu-release.md) - `release` carries the GPU surface validated on AMD and Intel; health follows separately
 - [The remaining library spawns](/quest/m2/spawn-audit.md) - every async spawn left in a library crate becomes a polled `kio::Tasks` child or is listed with why it stays
 - [The relay over QUIC on the sim](/quest/m2/quic-sim.md) - the relay and moq-tokio's `Client` and `Server` run over `moq-quic` on the seeded sim
+- [moq-shaper's own socket never passes for path loss](/quest/m2/shaper-socket.md) - relay-sized buffers and its own socket drops reported beside path drops
 
 - [Archive time ranges](/quest/m2/archive-time-ranges.md) - a `Time(pts)` range on an archive consumer broadcast resolves from the archive's keys, however old
 - [DVR rewind](/quest/m2/archive-dvr.md) - follow-on capability after the release contract is stable
+- [Archive lookups cancel when abandoned](/quest/m2/archive-lookup-withdrawal.md) - a public withdrawal signal on `Fill` stops a time lookup's store read once its readers leave
 
 - [JS HLS field](/quest/m2/js-hls.md) - follow-on capability after the release contract is stable
 
@@ -189,6 +196,7 @@ lite-07; bitrate enforcement is not part of this release.
 
 - [Publisher timeliness at relay ingest](/quest/m2/qos-publisher-timeliness.md) - follow-on capability after the release contract is stable
 
+- [Auth session caps cost O(1)](/quest/m2/auth-session-index.md) - per-token and per-remote counts and a time-ordered expiry queue replace the scans, after #7211
 - [H.264 parsing with maintained crates](/quest/m2/h264-reader.md) - moq-mux parses SPS VUI with h264-reader and shares one bit reader across codec config parsers
 - [Relay metrics through prometheus-client](/quest/m2/relay-prometheus-client.md) - `/metrics` renders through the maintained client with the same series
 - [moq-transport finish interop](/quest/m2/ietf-finish.md) - the interop `finish` case runs on every even moq-transport draft instead of being skipped
@@ -226,18 +234,23 @@ lite-07; bitrate enforcement is not part of this release.
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
 - [moq-gst playback shares one session context](/quest/m2/gst-session-context.md) - the playback helpers take one context instead of six arguments
 - [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
+- [The memory bench finishes at 1 MiB frames](/quest/m2/memory-bench-hang.md) - the allocation mode's park at `size=1048576` is root-caused and fixed
 - [Audio's Latest start reaches back](/quest/m2/audio-latest-reach-back.md) - moq_audio's start covers min plus warmup like other consumers
 - [moq-lite tails count drops](/quest/m2/lite-tail-drop-count.md) - SUBSCRIBE_DROP accounting replaces the session-tail grace from lite-05
 - [Re-run the SPS fuzzer on h264-reader](/quest/m2/sps-fuzz-h264-reader.md) - the H.264 SPS overflow is rechecked on the new parser
 - [Bindings see a broadcast end](/quest/m2/binding-broadcast-end.md) - `MoqBroadcastConsumer` exposes the close, and a moq-transport run end is a protocol error
 - [Audio track changes are gapless](/quest/m2/gapless-audio-switch.md) - no silence beyond a frame on audio format or rendition changes, enforced by media QA
+- [PCM encodes in one pass](/quest/m2/pcm-bulk-encode.md) - the PCM encoder converts a frame in bulk instead of one sample at a time
 - [We own our WebRTC stack](/quest/m2/webrtc/README.md) - moq-rtc becomes moq-webrtc with moq-ice, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
 - [Certificate reload and qmux's tasks are supervised](/quest/m2/tls-reload-supervision.md) - a panic in either fails loudly instead of silently stopping
 - [PUBLISH_DONE says why](/quest/m2/publish-done-codes.md) - GOING_AWAY, TOO_FAR_BEHIND, and EXPIRED round-trip as stream codes
 - [Repair a crashed mp4 recording](/quest/m2/mp4-repair.md) - a crashed recording's fragmented file becomes a regular MP4
+- [moq repair refuses a live recording](/quest/m2/mp4-repair-lock.md) - the recorder's advisory lock keeps `moq repair` off a file still being written
 - [Windows receives notice truncated control data](/quest/m2/cmsg-windows-truncation.md) - Windows handles `MSG_CTRUNC` like the Unix paths
+- [The error-queue reader decodes truncated control data](/quest/m2/errqueue-truncation.md) - `MSG_ERRQUEUE` keeps what fit on `MSG_CTRUNC`, like the receive paths
 - [moq-quic's internal dev-dependencies are path-only](/quest/m2/quic-dev-dep-path.md) - moq-congestion is a path dev-dependency
 - [moq-mux's AAC config reports SBR](/quest/m2/aac-sbr-config.md) - moq-audio reads backward-compatible SBR from the config
+- [fMP4 decode times from the declared reorder depth](/quest/m2/fmp4-declared-clock.md) - `DeclaredClock` replaces the sub-GOP cadence cap, as in TS, FLV, and MKV
 - [An ended HLS playlist has no trailing gap](/quest/m2/hls-trailing-gap.md) - no zero-duration `EXT-X-GAP` before `EXT-X-ENDLIST`
 - [moq-video's Apple Sink encodes on its own thread](/quest/m2/apple-sink-thread.md) - macOS and iOS ladders never encode on a tokio worker
 - [The test inventory sees JS bench scripts](/quest/m2/js-bench-inventory.md) - JS bench entry points are resolved by the inventory gate
