@@ -973,6 +973,8 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
+		// Joined mid-stream: the track's first packet needs no warmup.
+		producer.seek(1).unwrap();
 		// One 20 ms packet per group.
 		let mut write = |packet: u64| {
 			producer
