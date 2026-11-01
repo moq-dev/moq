@@ -152,6 +152,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
+- [Check on ready PRs](/quest/m0/ci/pr-check.md) - Check runs again on non-draft main PRs as a signal for `/quest-merge` and the land fixer, never as a gate
 - [Land main through quest land](/quest/m0/ci/land.md) - a host daemon tests small batches of queued PRs once and lands each as its tested squash commit
 - [A cache error is a miss](/quest/m0/ci/nix-cache-5xx.md) - a transient `nix.moq.dev` 5xx no longer fails `just ci`
 - [Cheap checks skip the queue](/quest/m0/ci/gate-quick.md) - condition: quest ships `quest gate --quick`; then cheap modules wait at most a minute
