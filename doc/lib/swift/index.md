@@ -58,8 +58,8 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
     case .start(let started), .restart(let started), .takeover(let started, _): announcement = started
     default: continue // .update or .end
     }
-    // Prefixes stay origin-relative; captures reports what each wildcard matched.
-    print(announcement.captures ?? [])
+    // Prefixes stay origin-relative; captures is a list of wildcard matches, empty without wildcards.
+    print(announcement.captures)
     let broadcast = try await session.consume.request(path: announcement.prefix)
     for try await catalog in try await Media.CatalogConsumer.subscribe(broadcast: broadcast) {
         print(catalog)

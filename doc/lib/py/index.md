@@ -51,7 +51,7 @@ async def main():
             if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart, moq.AnnounceEventTakeover)):
                 continue  # AnnounceEventUpdate or AnnounceEventEnd
             announcement = event.announce
-            print(announcement.captures)  # what * matched
+            print(announcement.captures)  # list of wildcard matches, empty without wildcards
             broadcast = await client.request(announcement.prefix)
             catalog = await moq.media.catalog(broadcast)
             id, audio = next(iter(catalog.audio.items()))

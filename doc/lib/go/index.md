@@ -75,7 +75,7 @@ for event, err := range announced.All(ctx) {
     default:
         continue // AnnounceEventUpdate or AnnounceEventEnd
     }
-    // Prefix stays origin-relative; Captures reports what each wildcard matched.
+    // Prefix stays origin-relative; Captures is a list, empty without wildcards.
     fmt.Printf("captures: %v\n", ann.Captures)
     broadcast, err := client.Request(ctx, ann.Prefix, nil)
     if err != nil {

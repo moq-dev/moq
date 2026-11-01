@@ -1008,13 +1008,10 @@ pub struct moq_announce_event {
 	pub prefix_len: usize,
 
 	/// What each requested filter wildcard matched. Each string is NOT NULL terminated.
-	/// Meaningful only when `has_captures` is true; false means the route overlaps
-	/// the filter without pinning every wildcard.
+	/// Empty when the filter has no wildcards; only full matches are listed.
 	pub captures: *const moq_string,
 	/// The number of entries in `captures`.
 	pub captures_len: usize,
-	/// Whether `captures` is present.
-	pub has_captures: bool,
 
 	/// Which event this is.
 	pub kind: moq_announce_kind,
