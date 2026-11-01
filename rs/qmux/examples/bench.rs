@@ -258,9 +258,9 @@ async fn measure(
 	}
 
 	// Let every stream open and the allocator settle before the window starts.
-	moq_clock::sleep(duration / 4).await;
-	let (start, cpu, count) = (moq_clock::now(), process_cpu()?, done.load(Ordering::Relaxed));
-	moq_clock::sleep(duration).await;
+	kio::clock::sleep(duration / 4).await;
+	let (start, cpu, count) = (kio::clock::now(), process_cpu()?, done.load(Ordering::Relaxed));
+	kio::clock::sleep(duration).await;
 	let sample = Sample {
 		round_trips: done.load(Ordering::Relaxed) - count,
 		cpu: process_cpu()? - cpu,
