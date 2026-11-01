@@ -127,6 +127,8 @@ export const PublishDoneStatus = {
 	/** Unassigned in draft-22. */
 	SUBSCRIPTION_ENDED: 0x3,
 	UPDATE_FAILED: 0x8,
+	/** A relay found the track malformed, so it ended every subscription to it. */
+	MALFORMED_TRACK: 0x12,
 } as const;
 
 /**
