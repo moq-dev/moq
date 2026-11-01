@@ -6,7 +6,7 @@ use bytes::Buf;
 use thiserror::Error;
 use tracing::trace;
 
-use super::{StreamEvent, StreamsState, schedule::Slot};
+use super::{StreamsState, schedule::Slot};
 use crate::connection::{ConnectionTag, State as ConnState, send_buffer::SendBuffer, spaces::Retransmits, waits::Wait};
 use crate::{StreamId, VarInt, frame};
 
@@ -262,21 +262,20 @@ impl Send {
 		Ok(false)
 	}
 
-	/// The acknowledged prefix to report once it reaches the offset a waiter is waiting for
-	pub(super) fn take_acked(&mut self) -> Option<u64> {
-		let acked = self.pending.acked();
-		if self.notify.is_none_or(|notify| acked < notify) {
-			return None;
+	/// Whether the acknowledged prefix reached the lowest offset a waiter is waiting for, which
+	/// then wakes every waiter on the stream
+	pub(super) fn take_acked(&mut self) -> bool {
+		if self.notify.is_none_or(|notify| self.pending.acked() < notify) {
+			return false;
 		}
 		self.notify = None;
-		Some(acked)
+		true
 	}
 
-	/// The acknowledged prefix to report to every waiter after a reset or STOP_SENDING, which may
-	/// fail any of them
-	pub(super) fn take_waiting(&mut self) -> Option<u64> {
-		self.notify.take()?;
-		Some(self.pending.acked())
+	/// Whether a waiter is waiting on the acknowledged prefix, which a reset or STOP_SENDING may
+	/// fail, so every waiter on the stream wakes
+	pub(super) fn take_waiting(&mut self) -> bool {
+		self.notify.take().is_some()
 	}
 
 	/// Handle increase to stream-level flow control limit
@@ -355,8 +354,8 @@ impl<'a> Stream<'a> {
 	/// Queue as much of `data` as the stream and connection accept now, returning how many bytes
 	///
 	/// Each chunk is taken with [`Buf::copy_to_bytes`], which a [`Bytes`](bytes::Bytes) source
-	/// splits off without copying. Fails with [`Error::Blocked`] when nothing fits; a
-	/// [`StreamEvent::Writable`] says when to retry.
+	/// splits off without copying. Fails with [`Error::Blocked`] when nothing fits;
+	/// [`Self::poll_write`] waits for room instead.
 	pub fn write(&mut self, data: &mut impl Buf) -> Result<usize, Error> {
 		if self.conn_state.is_closed() {
 			trace!(%self.id, "write blocked; connection draining");
@@ -425,7 +424,7 @@ impl<'a> Stream<'a> {
 			Some(Some(stream)) if stream.released => Err(Error::Closed),
 			Some(Some(stream)) => Ok(stream.end()),
 			Some(None) => Ok(None),
-			None => self.state.ends.get(&self.id).map(|&end| Some(end)).ok_or(Error::Closed),
+			None => self.state.ends.get(&self.id).map(|&(end, _)| Some(end)).ok_or(Error::Closed),
 		}
 	}
 
@@ -508,9 +507,8 @@ impl<'a> Stream<'a> {
 
 	/// Whether the peer acknowledged every byte before `offset`
 	///
-	/// A `false` notes to report a [`StreamEvent::Acked`] once the answer changes, so poll again
-	/// then. The stream holds only its lowest waiting offset, so every waiter on it polls again
-	/// on that event. Like [`End::Finished`], an acknowledgment only means the peer's QUIC stack
+	/// A `false` notes to wake the stream's [`Self::poll_acked`] waiters once the answer changes.
+	/// The stream holds only its lowest waiting offset, so every waiter on it polls again then. Like [`End::Finished`], an acknowledgment only means the peer's QUIC stack
 	/// holds the data, not that its application read it.
 	///
 	/// Fails with [`Error::Closed`] once the peer will never acknowledge it, or no longer reads
@@ -529,8 +527,10 @@ impl<'a> Stream<'a> {
 			// Nothing was written, so an offset of it is 0.
 			Some(None) => Ok(true),
 			Some(Some(_)) => Err(Error::Closed),
+			// A reset keeps answering for the prefix the peer acknowledged before it freed the stream.
 			None => match self.state.ends.get(&self.id) {
-				Some(End::Finished) => Ok(true),
+				Some((End::Finished, _)) => Ok(true),
+				Some((End::Reset(_), acked)) if offset <= *acked => Ok(true),
 				_ => Err(Error::Closed),
 			},
 		}
@@ -614,8 +614,8 @@ impl<'a> Stream<'a> {
 		if let Some(reliable_size) = send {
 			self.pending.reset_stream.push((self.id, reliable_size));
 		}
-		if let Some(offset) = waiting {
-			self.state.notify(StreamEvent::Acked { id: self.id, offset });
+		if waiting {
+			self.state.waits.wake(self.id, Wait::Acked);
 		}
 		// The stream ended, and a writer waiting on it learns it is closed.
 		self.state.waits.wake(self.id, Wait::End);

@@ -1,5 +1,5 @@
 use std::{
-	collections::{BTreeSet, VecDeque, hash_map},
+	collections::{BTreeSet, hash_map},
 	convert::TryFrom,
 	mem,
 	ops::Range,
@@ -11,7 +11,7 @@ use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use tracing::{debug, trace};
 
 use super::{
-	Next, Recv, Retransmits, Schedule, Send, SendState, ShouldTransmit, StreamEvent, StreamHalf, ThinRetransmits,
+	Next, Recv, Retransmits, Schedule, Send, SendState, ShouldTransmit, StreamHalf, ThinRetransmits,
 	lease::Rank,
 	send::{End, Error},
 };
@@ -90,8 +90,9 @@ pub(crate) struct StreamsState {
 	pub(super) side: Side,
 	// Set of streams that are currently open, or could be immediately opened by the peer
 	pub(super) send: FxHashMap<StreamId, Option<Box<Send>>>,
-	/// How each send stream whose state is gone ended, until the application releases its ID
-	pub(super) ends: FxHashMap<StreamId, End>,
+	/// How each send stream whose state is gone ended, and the end of its acknowledged prefix,
+	/// until the application releases its ID
+	pub(super) ends: FxHashMap<StreamId, (End, u64)>,
 	pub(super) recv: FxHashMap<StreamId, Option<StreamRecv>>,
 	pub(super) free_recv: Vec<StreamRecv>,
 	pub(super) next: [u64; 2],
@@ -110,9 +111,6 @@ pub(crate) struct StreamsState {
 	max_concurrent_remote_count: [u64; 2],
 	/// Lowest remotely-initiated stream index that haven't actually been opened by the peer
 	pub(super) next_remote: [u64; 2],
-	/// Whether the remote endpoint has opened any streams the application doesn't know about yet,
-	/// per directionality
-	opened: [bool; 2],
 	// Next to report to the application, once opened
 	pub(super) next_reported_remote: [u64; 2],
 	/// Number of outbound streams
@@ -123,8 +121,7 @@ pub(crate) struct StreamsState {
 	/// Streams with outgoing data queued and outgoing datagrams, in the order to send them
 	pub(super) pending: Schedule<StreamId, frame::OutgoingDatagram>,
 
-	pub(super) events: VecDeque<StreamEvent>,
-	/// The waiters on the streams and the connection, woken alongside the events
+	/// The waiters on the streams and the connection, woken as their state changes
 	pub(crate) waits: Waits,
 	/// Streams blocked on connection-level flow control or stream window space
 	///
@@ -226,11 +223,9 @@ impl StreamsState {
 			allocated_remote_count: [max_remote_bi.into(), max_remote_uni.into()],
 			max_concurrent_remote_count: [max_remote_bi.into(), max_remote_uni.into()],
 			next_remote: [0, 0],
-			opened: [false, false],
 			next_reported_remote: [0, 0],
 			send_streams: 0,
 			pending: Schedule::new(),
-			events: VecDeque::new(),
 			waits: Waits::default(),
 			connection_blocked: IndexSet::default(),
 			max_data: 0,
@@ -278,7 +273,7 @@ impl StreamsState {
 			let count = count.into();
 			// A caller can attempt an open before the peer's limit is known.
 			if count > self.max[dir as usize] && mem::take(&mut self.open_refused[dir as usize]) {
-				self.notify(StreamEvent::Available { dir });
+				self.waits.wake_open(dir);
 			}
 			self.max[dir as usize] = count;
 		}
@@ -329,7 +324,7 @@ impl StreamsState {
 		self.spend(new_bytes);
 
 		let transmit = if !stopped {
-			self.notify(StreamEvent::Readable { id });
+			self.waits.wake(id, Wait::Read);
 			self.ranks.extend(rank);
 			self.unlooked.insert(id);
 			// Credit released while the peer still had room may not have been worth a frame
@@ -432,7 +427,7 @@ impl StreamsState {
 			}
 			new_bytes
 		} else {
-			self.notify(StreamEvent::Readable { id });
+			self.waits.wake(id, Wait::Read);
 			self.ranks.extend(rank);
 			self.unlooked.insert(id);
 			freed
@@ -480,10 +475,11 @@ impl StreamsState {
 			self.pending.remove(&mut stream.slot);
 		}
 		if stopped {
-			self.notify(StreamEvent::Stopped { id, error_code });
+			self.waits.wake(id, Wait::Write);
+			self.waits.wake(id, Wait::End);
 		}
-		if let Some(offset) = waiting {
-			self.notify(StreamEvent::Acked { id, offset });
+		if waiting {
+			self.waits.wake(id, Wait::Acked);
 		}
 		self.unblock();
 		Ok(reset)
@@ -891,8 +887,8 @@ impl StreamsState {
 			None => entry.remove(),
 			Some(_) => None,
 		};
-		if let Some(offset) = acked {
-			self.notify(StreamEvent::Acked { id, offset });
+		if acked {
+			self.waits.wake(id, Wait::Acked);
 		}
 		self.unblock();
 		if let Some(held) = held {
@@ -904,7 +900,7 @@ impl StreamsState {
 		}
 		self.stream_freed(id, StreamHalf::Send);
 		if !reset {
-			self.notify(StreamEvent::Finished { id });
+			self.waits.wake(id, Wait::End);
 		}
 		None
 	}
@@ -933,7 +929,7 @@ impl StreamsState {
 			*current = count;
 			self.streams_blocked[dir as usize] = false;
 			self.open_refused[dir as usize] = false;
-			self.notify(StreamEvent::Available { dir });
+			self.waits.wake_open(dir);
 		}
 
 		Ok(())
@@ -970,7 +966,7 @@ impl StreamsState {
 			return;
 		}
 		if self.write_limit() > 0 {
-			self.notify(StreamEvent::Writable { id });
+			self.waits.wake(id, Wait::Write);
 			return;
 		}
 		// Still blocked on the connection window, so wait in the list that wakes when it relaxes
@@ -989,32 +985,6 @@ impl StreamsState {
 			.min(self.send_window.saturating_sub(self.buffered_data))
 	}
 
-	/// Yield stream events
-	pub(crate) fn poll(&mut self) -> Option<StreamEvent> {
-		if let Some(dir) = Dir::iter().find(|&i| mem::replace(&mut self.opened[i as usize], false)) {
-			return Some(StreamEvent::Opened { dir });
-		}
-
-		self.events.pop_front()
-	}
-
-	/// Report `event`, and wake the waiters it concerns
-	pub(super) fn notify(&mut self, event: StreamEvent) {
-		match event {
-			StreamEvent::Opened { dir } => self.waits.wake_accept(dir),
-			StreamEvent::Readable { id } => self.waits.wake(id, Wait::Read),
-			StreamEvent::Writable { id } => self.waits.wake(id, Wait::Write),
-			StreamEvent::Finished { id } => self.waits.wake(id, Wait::End),
-			StreamEvent::Acked { id, .. } => self.waits.wake(id, Wait::Acked),
-			StreamEvent::Stopped { id, .. } => {
-				self.waits.wake(id, Wait::Write);
-				self.waits.wake(id, Wait::End);
-			}
-			StreamEvent::Available { dir } => self.waits.wake_open(dir),
-		}
-		self.events.push_back(event);
-	}
-
 	/// Wake the writers blocked on the connection window, once it has room
 	///
 	/// Called wherever the room grows: the peer raising `MAX_DATA`, or buffered data leaving the
@@ -1031,7 +1001,7 @@ impl StreamsState {
 			// If it's no longer sensible to write to a stream (even to detect an error) then don't
 			// report it.
 			if stream.is_writable() && stream.stop_reason.is_none() && stream.max_data > stream.offset() {
-				self.notify(StreamEvent::Writable { id });
+				self.waits.wake(id, Wait::Write);
 			}
 		}
 	}
@@ -1173,7 +1143,6 @@ impl StreamsState {
 			}
 		}
 		self.next_remote[dir_idx] = id.index() + 1;
-		self.opened[dir_idx] = true;
 		self.waits.wake_accept(id.dir());
 	}
 
@@ -1321,7 +1290,7 @@ impl StreamsState {
 		if !stream.released
 			&& let Some(end) = stream.end()
 		{
-			self.ends.insert(id, end);
+			self.ends.insert(id, (end, stream.pending.acked()));
 		}
 	}
 

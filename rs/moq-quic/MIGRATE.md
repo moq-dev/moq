@@ -4,9 +4,31 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Waits replace stream and connection events
+
+Every wait is a `poll_*` taking the caller's `&kio::Waiter`, which moq-quic registers and wakes itself, so a driver keeps no waiter tables.
+`StreamEvent` is gone, and so are the `Event` variants a handle waited on; `Event` keeps only `PathUpdated`, and `mux::Event` and `mux::Connection::poll` are gone.
+
+| Before | After |
+| --- | --- |
+| `Event::HandshakeDataReady` | `Connection::poll_handshake_data` |
+| `Event::Connected` | `Connection::poll_connected` |
+| `Event::HandshakeConfirmed` | `Connection::poll_handshake_confirmed` |
+| `Event::ConnectionLost { reason }` | `Connection::poll_closed`, or `Connection::error` |
+| `Event::DatagramReceived` | `Datagrams::poll_recv` |
+| `StreamEvent::Opened { dir }` | `Streams::poll_accept` |
+| `StreamEvent::Available { dir }` | `Streams::poll_open` |
+| `StreamEvent::Readable { id }` | `recv::Chunks::poll_next`, `recv::Stream::poll_lease`, or `recv::Stream::poll_received_reset` |
+| `StreamEvent::Writable { id }` | `send::Stream::poll_write` |
+| `StreamEvent::Finished { id }`, `StreamEvent::Stopped { id, .. }` | `send::Stream::poll_end` |
+| `StreamEvent::Acked { id, .. }` | `send::Stream::poll_acked` |
+
+A wake only schedules: moq-quic wakes under whatever lock guards the connection, so the woken task polls again under it.
+Stream waits fail with `send::Error::ConnectionLost` or `recv::Error::ConnectionLost` once the connection is lost, after accepted streams, readable bytes, and received datagrams drain.
+
 ### Early data is removed
 
-Wait for `Event::Connected` before opening streams or sending application data.
+Wait for `Connection::poll_connected` before opening streams or sending application data.
 `Connection::has_0rtt`, `accepted_0rtt`, and the `crypto::Session::early_crypto` and `early_data_accepted` hooks are gone.
 Custom crypto sessions no longer implement those hooks.
 Rustls configs disable early data, including caller-supplied configs, while session tickets still resume 1-RTT handshakes.

@@ -8,7 +8,7 @@ use std::task::Poll;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
 use super::recv::{Error, Stream};
-use super::{ShouldTransmit, StreamEvent, StreamId};
+use super::{ShouldTransmit, StreamId};
 use super::{StreamsState, state::get_or_insert_recv};
 use crate::VarInt;
 use crate::connection::assembler::Assembler;
@@ -265,7 +265,7 @@ impl Stream<'_> {
 	/// back before leasing again. If the returned [`ShouldTransmit::should_transmit()`] is
 	/// `true`, transmit soon, whatever the result.
 	///
-	/// [`Error::Blocked`] records the `want`, so the next [`StreamEvent::Readable`] for this
+	/// [`Error::Blocked`] records the `want`, so the next wake of a [`Self::poll_lease()`] on this
 	/// stream means it may be met, and so that a connection window every reader is waiting on
 	/// can be recovered by evicting the stream ranked lowest by [`Self::set_priority()`].
 	///
@@ -569,7 +569,7 @@ impl StreamsState {
 	/// arrival pays for one look at most.
 	///
 	/// Returns `None` if nothing was evicted, or whether to transmit the `MAX_DATA` the evictions
-	/// freed; each evicted stream's reader is woken by a [`StreamEvent::Readable`].
+	/// freed; each evicted stream's reader wakes.
 	pub(super) fn evict_if_stuck(&mut self) -> Option<ShouldTransmit> {
 		self.stuck_waiting = false;
 		// The window, not the credit a rate cap paces, says whether memory is stuck: a capped
@@ -661,7 +661,7 @@ impl StreamsState {
 		self.held -= leased;
 		self.unlooked.remove(&id);
 		self.evicted += 1;
-		self.notify(StreamEvent::Readable { id });
+		self.waits.wake(id, Wait::Read);
 		self.add_read_credits(leased + unread)
 	}
 

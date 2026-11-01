@@ -244,7 +244,6 @@ fn reset_fails_past_reliable_size() {
 /// The waiter a reset's acknowledged prefix wakes learns it was acknowledged, even though the
 /// same ACK freed the stream.
 #[test]
-#[ignore = "a stream its reset freed answers Closed for every offset, losing the acknowledged prefix the Acked event carried (quest/m1/quic-api/waits.md)"]
 fn reset_keeps_its_acked_prefix() {
 	let _guard = subscribe();
 	let mut pair = pair(true);
