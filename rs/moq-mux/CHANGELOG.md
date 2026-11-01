@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - MP4 and Matroska import fill a video rendition's `projection` and `stereo` from Spherical Video V2's `sv3d`/`st3d` boxes and Matroska's `Projection`/`StereoMode`, and Opus channel mapping family 2 (raw Opus, Matroska, and other OpusHead sources) imports with `layout: "ambisonic"`. What the catalog cannot describe is refused with `fmp4::Error::UnsupportedSpatial`, `mkv::Error::UnsupportedSpatial`, or `opus::Error::UnsupportedChannelCount`: a cubemap or mesh projection, a nonzero pose, uncentred or vertically cropped equirectangular bounds, a stereo packing other than mono, left-right, or top-bottom with the left eye first, and family 2 at zeroth order or with RFC 8486's non-diegetic stereo pair.
 - fMP4 carries surround Opus: a `dOps` channel mapping table (family 1, 2, or 255) imports into the OpusHead description, and an exported `dOps` writes the description's table back instead of refusing it with `opus::Error::UnsupportedMappingFamily`. Family 3, whose OpusHead carries a demixing matrix rather than a table, is still refused both ways.
+- `container::mp4::Export::stop` ends a recording before the broadcast does: `next` still returns the fragment each track was buffering, then `None`, so `finish` indexes it.
 
 ### Changed
 

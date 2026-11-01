@@ -90,6 +90,9 @@ pub struct Export<S: Stream> {
 	/// that declares it elsewhere. Its fragments carry a track id the init never declared.
 	late: bool,
 
+	/// Set by [`stop`](Self::stop), after which nothing more is read.
+	stopped: bool,
+
 	/// The `tkhd.track_id` the next new rendition gets.
 	next_track_id: u32,
 
@@ -498,6 +501,7 @@ impl<S: Stream> Export<S> {
 			queued: VecDeque::new(),
 			init_emitted: false,
 			late: false,
+			stopped: false,
 			next_track_id: 1,
 			sequence_number: 1,
 		}
@@ -536,6 +540,19 @@ impl<S: Stream> Export<S> {
 	pub(crate) fn with_late_tracks(mut self) -> Self {
 		self.late = true;
 		self
+	}
+
+	/// Stop reading the broadcast. The export still writes out the media it read, the
+	/// fragment each track was buffering included, then ends.
+	///
+	/// Stopping before the init segment could be written ends the export without writing.
+	pub(crate) fn stop(&mut self) {
+		self.catalog = None;
+		for track in self.tracks.values_mut() {
+			track.source = None;
+			track.finished = true;
+		}
+		self.stopped = true;
 	}
 
 	/// The `trak` and `trex` declaring `track_id`, once the track could be described.
@@ -668,7 +685,7 @@ impl<S: Stream> Export<S> {
 				}
 				if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
 					// Media was read but can't be written without every track's description.
-					if !self.queued.is_empty() {
+					if !self.queued.is_empty() && !self.stopped {
 						return Poll::Ready(Err(Error::TrackUndescribed(self.undescribed()).into()));
 					}
 					return Poll::Ready(Ok(None));
@@ -823,7 +840,8 @@ impl<S: Stream> Export<S> {
 			.iter()
 			.filter(|(_, track)| {
 				!track.buffer.is_empty()
-					&& (track.finished
+					// A stopped track's pending frame joins its buffer first.
+					&& ((track.finished && track.pending.is_none())
 						|| track.group_finished
 						|| (self.fragment_duration == Some(Duration::ZERO)
 							&& track.buffer.last().is_some_and(|frame| frame.duration.is_some())))
