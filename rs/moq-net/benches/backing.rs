@@ -28,7 +28,9 @@
 //! allocations and bytes allocated per frame received, instead of timing. The live heap
 //! counts each allocation once, however many frames slice it. An argument filters the cases
 //! by name. Timing covers only the cases that keep every group, since eviction adds a few
-//! aborts, and prints the same line for each before timing it.
+//! aborts. The first time a timed case runs, it prints the same line for itself and for the
+//! two cases that evict its video groups, so a timed run such as the nightly one logs every
+//! case's memory. The ratio is reported, not asserted: the reader's unit test pins the copy.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench backing`.
 
@@ -337,13 +339,17 @@ fn cases() -> impl Iterator<Item = (String, usize, u64, Backing, (&'static str, 
 	TRACKS.into_iter().flat_map(|tracks| {
 		VIDEO_KBPS.into_iter().flat_map(move |kbps| {
 			KEEP.into_iter().flat_map(move |keep| {
-				Backing::ALL.into_iter().map(move |backing| {
-					let name = format!("tracks={tracks}/video={kbps}k/keep={}/{}", keep.0, backing.name());
-					(name, tracks, kbps, backing, keep)
-				})
+				Backing::ALL
+					.into_iter()
+					.map(move |backing| (name(tracks, kbps, keep, backing), tracks, kbps, backing, keep))
 			})
 		})
 	})
+}
+
+/// A case's name within the `backing` group.
+fn name(tracks: usize, kbps: u64, keep: (&str, u64, u64), backing: Backing) -> String {
+	format!("tracks={tracks}/video={kbps}k/keep={}/{}", keep.0, backing.name())
 }
 
 /// The live heap, once the cache's deferred frees have run.
@@ -398,14 +404,21 @@ fn bench(c: &mut Criterion) {
 		return;
 	}
 
-	// Eviction is a handful of aborts, so only the cases keeping every group are timed, each
-	// with its memory printed beside it.
+	// Eviction is a handful of aborts, so only the cases keeping every group are timed. The
+	// first run of one, which Criterion's filter allows only for a selected case, prints the
+	// memory of every case sharing its media and backing, untimed.
 	let mut group = c.benchmark_group("backing");
-	for (name, tracks, kbps, backing, keep) in cases().filter(|(.., keep)| keep.0 == "all") {
+	for (id, tracks, kbps, backing, keep) in cases().filter(|(.., keep)| keep.0 == "all") {
 		let media = Media::new(tracks, kbps);
-		eprintln!("backing/{name}: {}", measure(&media, backing, keep));
+		let mut measured = false;
 		group.throughput(Throughput::Bytes(media.payload as u64));
-		group.bench_function(BenchmarkId::from_parameter(name), |b| {
+		group.bench_function(BenchmarkId::from_parameter(id), |b| {
+			if !std::mem::replace(&mut measured, true) {
+				for other in KEEP {
+					let case = name(tracks, kbps, other, backing);
+					eprintln!("backing/{case}: {}", measure(&media, backing, other));
+				}
+			}
 			b.iter_batched(
 				|| Cache::new(&media),
 				|mut cache| {
