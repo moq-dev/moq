@@ -84,7 +84,7 @@ impl Credential {
 	///
 	/// # Errors
 	///
-	/// [`Error::Identity`](crate::Error::Identity) if `semantic` exceeds 65535 bytes.
+	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes.
 	pub fn path(&self, semantic: &str) -> Result<moq_net::Path> {
 		let material: [u8; PATH_LEN] = self.expand(&self.path_info(semantic)?);
 		// A fixed-length encoding, far under the path limit.
