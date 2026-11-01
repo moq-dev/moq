@@ -8,6 +8,12 @@ subscription's `maxDelay` to serve. On-demand encoding stays available as an
 explicit opt-in. Video stays always-on. Audio encodes on demand, from raw
 frames kept up to `maxAge` while nobody listens.
 
+What remains: `moq-studio`'s program video still copies and encodes only while
+someone watches (`watch` and `run_program` in `rs/moq-studio/src/engine.rs`,
+the Output panel's "none; not encoding", and `doc/bin/studio.md`'s "Video is
+only encoded while someone watches it"). No child covered it, and the
+library, CLI, browser, wrapper, and room publishers are done.
+
 ## Plan
 
 Decided 2026-10-28 (maintainer), from [#7101](https://github.com/moq-dev/moq/issues/7101):
@@ -31,25 +37,11 @@ Decided 2026-10-28 (maintainer), from [#7101](https://github.com/moq-dev/moq/iss
   anyway, and the backlog is served from cache rather than paced live.
   Rejected: the last granted target, and the lowest rung.
 
-Already opt-in, with no built-in gate: moq-c (`moq_encode_*_demand`), moq-ffi,
-the wrappers, OBS and moq-gst. Only their docs change.
-
-The epic's own work, once the children land:
-
-- Docs: `doc/lib/rs/moq-net.md:25` ("publish only while someone is
-  watching"), `doc/concept/use-case/contribution.md` (on-demand becomes an
-  option), the moq-c doc comment at `rs/moq-c/src/audio.rs:433`, and the
-  Swift/Python/Go/Dart wrapper docs.
-- `@moq/room`'s docs: a joined room publishes through `Publish.Broadcast`, so
-  it now encodes the camera and microphone while `Local`'s `cameraEnabled` and
-  `microphoneEnabled` are on, even when nobody watches (found 2026-10-28 by
-  [moq-dev/moq#7143](https://github.com/moq-dev/moq/pull/7143)).
-- Rewrite the quests that assume demand-gated capture:
-  [studio replay](/quest/m3/studio/replay.md) and its compose sources ("arm
-  replay = local subscriber"), [iOS capture](/quest/m2/mobile-capture-ios.md),
-  [video hardware](/quest/m3/video-hardware.md), and
-  [time-addressed consumers](/quest/m1/time-addressing/consumers.md)'s
-  HLS-only-viewer clause.
+The studio quests already assume the program and its sources encode whatever
+the demand ([replay](/quest/m3/studio/replay.md),
+[source tracks](/quest/m3/studio/compose/sources.md)). Whether the program
+drops its gate here, with which opt-in, or the studio is exempted like
+moq-transcode is open on this quest's PR.
 
 ## Related
 
