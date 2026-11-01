@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Select shared native libraries and check an independent FFI publisher."""
 
-from datetime import datetime
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import sys
+from datetime import datetime
+from pathlib import Path
 
 LANGUAGES = {
     "go": ("Release Go FFI", "Publish to Go module mirror"),
@@ -107,7 +107,9 @@ def completed(language):
     # A single query after workflow_run completion, never a publication poll.
     result = subprocess.run(
         ["gh", "api", f"repos/{repo}/actions/runs/{run}/jobs?filter=all", "--paginate", "--slurp"],
-        check=True, stdout=subprocess.PIPE, text=True,
+        check=True,
+        stdout=subprocess.PIPE,
+        text=True,
     )
     pages = json.loads(result.stdout)
     jobs = [job for page in pages for job in page["jobs"]]

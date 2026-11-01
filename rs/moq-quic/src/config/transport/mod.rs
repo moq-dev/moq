@@ -70,13 +70,14 @@ pub struct Config {
 	pub handshake_timeout: Duration,
 
 	/// Period of inactivity before sending a keep-alive packet, `None` (the default) to derive it
-	/// from the negotiated idle timeout, or zero to send none
+	/// from the negotiated idle timeout; zero also uses the default
 	///
 	/// Keep-alive packets prevent an inactive but otherwise healthy connection from timing out.
 	/// Only one side of any given connection needs keep-alive enabled for the connection to be
 	/// preserved. The derived interval is under a third of the idle timeout both peers settled
 	/// on, so a lost keep-alive and its probe land before either times out, and it follows a peer
-	/// that advertises a shorter timeout than ours. With no idle timeout at all it sends none.
+	/// that advertises a shorter timeout than ours. Without an idle timeout it uses the
+	/// default idle timeout instead.
 	///
 	/// An explicit interval wins, for a NAT binding that lives shorter than the idle timeout,
 	/// except one no shorter than the negotiated idle timeout, which could never keep the
@@ -269,20 +270,20 @@ impl Config {
 	}
 }
 
-/// The keep-alive interval a connection runs with, or `None` to send no keep-alives
+/// The keep-alive interval a connection runs with
 ///
 /// `keep_alive` is the configured [`Config::keep_alive`] and `idle_timeout` the negotiated idle
 /// timeout (RFC 9000 section 10.1), the smaller of both peers' `max_idle_timeout`.
-pub fn keep_alive_interval(keep_alive: Option<Duration>, idle_timeout: Option<Duration>) -> Option<Duration> {
+pub fn keep_alive_interval(keep_alive: Option<Duration>, idle_timeout: Option<Duration>) -> Duration {
 	// 3/10 leaves a lost keep-alive room for another and its probe retransmits.
-	let derived = idle_timeout.map(|timeout| timeout * 3 / 10);
-	match (keep_alive, idle_timeout) {
-		(Some(interval), _) if interval.is_zero() => None,
-		(Some(interval), Some(timeout)) if interval >= timeout => derived,
-		(Some(interval), _) => Some(interval),
-		(None, _) => derived,
+	let derived = (idle_timeout.unwrap_or(DEFAULT_IDLE_TIMEOUT) * 3 / 10).max(Duration::from_nanos(1));
+	match keep_alive.filter(|interval| !interval.is_zero()) {
+		Some(interval) if idle_timeout.is_none_or(|timeout| interval < timeout) => interval,
+		_ => derived,
 	}
 }
+
+const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// A limit on the wire, or its default when unset
 fn varint(limit: Option<NonZeroU64>, default: u64) -> VarInt {
@@ -293,7 +294,7 @@ impl Default for Config {
 	fn default() -> Self {
 		Self {
 			limits: Limits::default(),
-			idle_timeout: Some(Duration::from_secs(30)),
+			idle_timeout: Some(DEFAULT_IDLE_TIMEOUT),
 			handshake_timeout: Duration::from_secs(10),
 			keep_alive: None,
 			send_fairness: true,
