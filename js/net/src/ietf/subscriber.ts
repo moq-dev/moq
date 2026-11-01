@@ -33,6 +33,7 @@ import {
 } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
+import { receiveFrame, skipPayload } from "../payload.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import type { Timescale, Timestamp } from "../time.ts";
@@ -1602,10 +1603,10 @@ export class Subscriber {
 					// The first object's ID is absolute: where in the group this stream starts. An End
 					// of Group there names where the group ends, past the head's last object.
 					const start =
-						object?.payload !== undefined || object?.endOfTrack || (object?.idDelta ?? 0) > 0
+						object?.isObject || object?.endOfTrack || (object?.idDelta ?? 0) > 0
 							? object?.idDelta
 							: undefined;
-					if (start === 0 && object?.payload !== undefined) {
+					if (start === 0 && object?.isObject) {
 						// The whole group: it stands alone unless the head already took the sequence.
 						if (!join.whole()) {
 							stream.stop(new Error("the group's head was served twice"));
@@ -1656,7 +1657,7 @@ export class Subscriber {
 					subscription.end ??= finalSequence(end);
 					return;
 				}
-				if (frame.payload === undefined) break;
+				if (!frame.isObject) break;
 
 				// A track that declared TIMESCALE stamps every object, so one without a Timestamp is
 				// malformed rather than something to invent a time for.
@@ -1665,7 +1666,11 @@ export class Subscriber {
 						message: `object without a Timestamp on a track with TIMESCALE: group=${group.groupId}`,
 					});
 				}
-				open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp });
+				if (frame.payload) open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp });
+				else if (
+					!(await receiveFrame(stream, open(), { size: frame.streamed ?? 0, timestamp: frame.timestamp }))
+				)
+					break;
 				nextObject += 1;
 			}
 
@@ -1756,7 +1761,10 @@ export class Subscriber {
 					return;
 				}
 				if (object === undefined) break;
-				if (discarding) continue;
+				if (discarding) {
+					if (object.kind === "object" && !object.payload) await skipPayload(stream, object.size);
+					continue;
+				}
 
 				if (object.kind === "endOfRange") {
 					throw new JoinUnsupported("a head with an End of Range cannot be stitched");
@@ -1797,10 +1805,12 @@ export class Subscriber {
 					producer = join.open(() => track.createGroup(join.sequence));
 					if (!producer) {
 						discarding = true;
+						if (!object.payload) await skipPayload(stream, object.size);
 						continue;
 					}
 				}
-				producer?.writeFrame({ payload: object.payload, timestamp: object.timestamp });
+				if (object.payload) producer?.writeFrame({ payload: object.payload, timestamp: object.timestamp });
+				else if (producer && !(await receiveFrame(stream, producer, object))) break;
 				join.wrote();
 				next += 1;
 			}
