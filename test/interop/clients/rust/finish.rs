@@ -115,7 +115,7 @@ async fn main() -> anyhow::Result<()> {
 		let mut command = String::new();
 		stdin.read_line(&mut command).await?;
 		ensure!(command == "read\n", "finish read phase was not released");
-		moq_clock::timeout(args.timeout, async {
+		kio::clock::timeout(args.timeout, async {
 			let mut routes = consumer.announced();
 			let broadcast = consumer.follow(&args.broadcast, None)?.available().await?;
 			let mut catalogs =

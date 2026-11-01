@@ -71,13 +71,13 @@ async fn relay(
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
 	let subscription = Subscription::default().with_max_delay(BUDGET).with_range(0..);
-	let reader = moq_clock::sim::spawn(async move {
+	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("data")
 			.unwrap()
@@ -87,13 +87,13 @@ async fn relay(
 		let timescale = sub.info().timescale;
 		let mut got = Vec::new();
 		loop {
-			let next = moq_clock::timeout(TIMEOUT, sub.recv_group())
+			let next = kio::clock::timeout(TIMEOUT, sub.recv_group())
 				.await
 				.expect("recv_group timed out");
 			let Some(mut group) = next.expect("recv_group") else {
 				break;
 			};
-			let read = moq_clock::timeout(TIMEOUT, group.read_frame())
+			let read = kio::clock::timeout(TIMEOUT, group.read_frame())
 				.await
 				.expect("read_frame timed out")
 				.map(|frame| frame.expect("a frame").timestamp);
@@ -102,18 +102,18 @@ async fn relay(
 		(timescale, got)
 	});
 
-	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
+	kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 1);
 	// Sent later, so group 0's send time lands after group 1's.
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 	write_group(&track, 0);
 	track.finish().unwrap();
 
-	let got = moq_clock::timeout(TIMEOUT * 3, reader)
+	let got = kio::clock::timeout(TIMEOUT * 3, reader)
 		.await
 		.expect("reader hung")
 		.expect("reader panicked");
@@ -124,7 +124,7 @@ async fn relay(
 /// A relay passes on lite-06 send times unchecked, so a lite-06 or moq-transport reader
 /// reads both groups timed and the track stays open. A lite-07 reader checks them and
 /// refuses the group that rewinds, the cost of an untimed origin on lite-06.
-#[moq_clock::test]
+#[kio::test]
 async fn a_relay_forwards_descending_send_times_without_closing_the_track() {
 	let mut failures = Vec::new();
 	for downstream in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
@@ -148,7 +148,7 @@ async fn a_relay_forwards_descending_send_times_without_closing_the_track() {
 
 /// A timed track's timestamps cross a lite-06 or moq-transport hop between two origins with
 /// their values, and the relay serves them on over every version.
-#[moq_clock::test]
+#[kio::test]
 async fn a_timed_track_keeps_its_timestamps_through_a_relay() {
 	let mut failures = Vec::new();
 	for upstream in ["moq-lite-06", "moq-transport-22"] {
@@ -187,7 +187,7 @@ async fn fetch_only(version: &str) -> Vec<Result<Option<moq_net::Timestamp>, moq
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -200,15 +200,15 @@ async fn fetch_only(version: &str) -> Vec<Result<Option<moq_net::Timestamp>, moq
 			while group.read_frame().await?.is_some() {}
 			Ok(timestamp)
 		};
-		got.push(moq_clock::timeout(TIMEOUT, read).await.expect("fetch timed out"));
+		got.push(kio::clock::timeout(TIMEOUT, read).await.expect("fetch timed out"));
 		// Answered later, so group 0's send time lands after group 1's.
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 	}
 	drop((pair, remote, broadcast, publisher, subscriber));
 	got
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn fetches_alone_accept_descending_send_times() {
 	let mut failures = Vec::new();
 	for version in ["moq-lite-05", "moq-lite-06"] {

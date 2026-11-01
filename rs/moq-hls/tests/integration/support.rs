@@ -47,7 +47,7 @@ impl Pair {
 		let (client, server) = tokio::join!(
 			async {
 				let (session, driver) = client
-					.connect(moq_clock::now(), client_transport)
+					.connect(kio::clock::now(), client_transport)
 					.await
 					.expect("client session");
 				tokio::spawn(moq_net::time::run(driver));
@@ -55,7 +55,7 @@ impl Pair {
 			},
 			async {
 				let (session, driver) = server
-					.accept(moq_clock::now(), server_transport)
+					.accept(kio::clock::now(), server_transport)
 					.await
 					.expect("server session");
 				tokio::spawn(moq_net::time::run(driver));
@@ -179,13 +179,13 @@ pub fn frame(second: u64, payload: u8) -> moq_mux::container::Frame {
 
 /// The rendition `server` exports for `path` once its catalog lists it.
 pub async fn rendition(server: &Server, path: &str) -> std::sync::Arc<Rendition> {
-	let broadcaster = moq_clock::timeout(TIMEOUT, server.broadcaster(path))
+	let broadcaster = kio::clock::timeout(TIMEOUT, server.broadcaster(path))
 		.await
 		.expect("resolve timed out")
 		.expect("announced");
 	let mut renditions = broadcaster.renditions();
 	loop {
-		match moq_clock::timeout(TIMEOUT, renditions.next()).await {
+		match kio::clock::timeout(TIMEOUT, renditions.next()).await {
 			Ok(Ok(Some(moq_hls::export::renditions::Event::Added(rendition)))) if rendition.name == TRACK => {
 				return rendition;
 			}
@@ -199,7 +199,7 @@ pub async fn rendition(server: &Server, path: &str) -> std::sync::Arc<Rendition>
 pub async fn drain(cursor: &mut segments::Consumer) -> (Vec<u64>, moq_hls::Result<()>) {
 	let mut read = Vec::new();
 	loop {
-		match moq_clock::timeout(TIMEOUT, cursor.next())
+		match kio::clock::timeout(TIMEOUT, cursor.next())
 			.await
 			.expect("the cursor stalled")
 		{
@@ -224,7 +224,7 @@ pub async fn get(app: &axum::Router, uri: &str) -> Response<Bytes> {
 
 /// Poll `uri` until it answers 200 with a body containing `needle`, returning the body.
 pub async fn listed(app: &axum::Router, uri: &str, needle: &str) -> String {
-	let deadline = moq_clock::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	loop {
 		let response = get(app, uri).await;
 		let body = String::from_utf8_lossy(response.body()).into_owned();
@@ -232,11 +232,11 @@ pub async fn listed(app: &axum::Router, uri: &str, needle: &str) -> String {
 			return body;
 		}
 		assert!(
-			moq_clock::now() < deadline,
+			kio::clock::now() < deadline,
 			"{uri} never listed {needle}: {} {body}",
 			response.status()
 		);
-		moq_clock::sleep(Duration::from_millis(50)).await;
+		kio::clock::sleep(Duration::from_millis(50)).await;
 	}
 }
 

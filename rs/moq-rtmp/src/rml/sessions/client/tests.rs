@@ -190,8 +190,9 @@ fn event_raised_when_connect_request_rejected() {
 
 	assert_eq!(events.len(), 1, "Expected one event returned");
 	match events.remove(0) {
-		ClientSessionEvent::ConnectionRequestRejected { description } => {
-			assert!(description.len() > 0, "Expected a non-empty description");
+		ClientSessionEvent::ConnectionRequestRejected { code, description } => {
+			assert_eq!(code, "NetConnection.Connect.Failed");
+			assert_eq!(description, "hi");
 		}
 
 		x => panic!("Expected connection accepted event, instead received: {:?}", x),

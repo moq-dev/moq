@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Elapsed, Manual, Milli, Nano, timeout, yieldNow } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
@@ -16,6 +16,7 @@ import {
 	StreamError,
 	TimestampMismatch,
 } from "../error.ts";
+import type { Consumer as GroupConsumer } from "../group.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
@@ -120,27 +121,21 @@ function announceHarness(version: Version, origin = 1n) {
 	// A peer that is not told about its own violation should fail the test visibly rather
 	// than hang it out to the suite timeout.
 	const abortReason = async () => {
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const timeout = new Promise<never>((_, reject) => {
-			timer = setTimeout(() => reject(new Error("stream was never aborted")), 250);
-		});
 		try {
-			return reason(error(await Promise.race([aborted, timeout])));
-		} finally {
-			clearTimeout(timer);
+			return reason(error(await timeout(Nano.fromMilli(Milli(250)), aborted)));
+		} catch (error) {
+			if (error instanceof Elapsed) throw new Error("stream was never aborted");
+			throw error;
 		}
 	};
 
 	// Rejects promptly if the session outlives the violation, rather than hanging the test.
 	const sessionEnded = async () => {
-		let timer: ReturnType<typeof setTimeout> | undefined;
-		const timeout = new Promise<never>((_, reject) => {
-			timer = setTimeout(() => reject(new Error("session was never closed")), 250);
-		});
 		try {
-			return await Promise.race([sessionClosed, timeout]);
-		} finally {
-			clearTimeout(timer);
+			return await timeout(Nano.fromMilli(Milli(250)), sessionClosed);
+		} catch (error) {
+			if (error instanceof Elapsed) throw new Error("session was never closed");
+			throw error;
 		}
 	};
 
@@ -151,7 +146,7 @@ function announceHarness(version: Version, origin = 1n) {
 		finish: () => inbound.close(),
 		abortReason,
 		sessionEnded,
-		settle: () => new Promise((resolve) => setTimeout(resolve, 0)),
+		settle: () => yieldNow(),
 	};
 }
 
@@ -184,7 +179,7 @@ test("an announce consumer closed while its stream opens sends nothing on it", a
 	announced.close();
 	// The slot frees up only after the consumer left.
 	opening.resolve();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	expect(written).toBe(0);
 	expect(closed).toBe(true);
 });
@@ -1097,8 +1092,13 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 			await request.reading;
 			await respond(request, version, [{ start: new SubscribeStart([0]) }]);
 			const received = track.recvDatagram();
-			await writer.write(new DatagramMessage(0n, 0, 0, new Uint8Array(1198)).encode(version));
-			await writer.write(new DatagramMessage(0n, 1, 1, new Uint8Array(1197)).encode(version));
+			if (version === Version.DRAFT_07) {
+				await writer.write(new Uint8Array([1]));
+				await writer.write(new Uint8Array([1, ...new Uint8Array(1199).fill(0xff)]));
+			}
+			const size = version === Version.DRAFT_07 ? 1196 : 1197;
+			await writer.write(new DatagramMessage(0n, 0, 0, new Uint8Array(size + 1)).encode(version));
+			await writer.write(new DatagramMessage(0n, 1, 1, new Uint8Array(size)).encode(version));
 			expect((await received)?.sequence).toBe(1);
 		} finally {
 			await writer.close();
@@ -1316,6 +1316,48 @@ test("an already-aborted fetch rejects without opening a stream", async () => {
 	expect(streams.length).toBe(0);
 });
 
+// A fetch-only reader's FETCH goes out alongside the TRACK stream, not a round trip after it,
+// and its response is read only once TRACK_INFO says the timescale.
+test("the first FETCH goes out before TRACK_INFO answers", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+
+	let fetched: GroupConsumer | undefined;
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).then((group) => {
+		fetched = group;
+		return group;
+	});
+	await opened(0);
+	await opened(1);
+	await streams[1].reading;
+
+	// An empty-group FIN accepts the fetch, but nothing is handed out before the info.
+	streams[1].inbound.close();
+	for (let i = 0; i < 64; i++) await Promise.resolve();
+	expect(fetched).toBeUndefined();
+
+	await answerTrackInfo(streams[0]);
+	expect(await (await fetch).readFrame()).toBeUndefined();
+
+	subscriber.close();
+});
+
+test("a failed TRACK_INFO fails the FETCH sent alongside it", async () => {
+	const { quic, streams, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
+
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => err);
+	await opened(0);
+	await opened(1);
+	await streams[1].reading;
+
+	streams[0].inbound.error(new StreamError(StreamCode.NotFound, { message: "no such track" }));
+	expect(await fetch).toBeInstanceOf(Error);
+	await streams[1].aborted;
+
+	subscriber.close();
+});
+
 // Coalesced fetches share one FETCH stream. An abort releases only that caller's share; the
 // stream is cancelled once the last sharer leaves, before its FETCH is sent if it can be.
 test("one of two fetch sharers aborting leaves the other's fetch", async () => {
@@ -1374,10 +1416,12 @@ test.each([
 	expect(((await b.catch((err: unknown) => err)) as Error).message).toBe("second");
 
 	if (stage === "track") {
-		// The abandoned TRACK exchange is reset promptly; no FETCH is sent.
-		const err = fromTransport(await streams[0].aborted) as StreamError;
-		expect(err.code).toBe(StreamCode.Cancel);
-		expect(streams.length).toBe(1);
+		// The abandoned TRACK exchange is reset promptly, with the FETCH sent alongside it.
+		for (const stream of streams) {
+			const err = fromTransport(await stream.aborted) as StreamError;
+			expect(err.code).toBe(StreamCode.Cancel);
+		}
+		expect(streams.length).toBe(2);
 	} else {
 		const err = fromTransport(await streams[1].aborted) as StreamError;
 		expect(err.code).toBe(StreamCode.Cancel);
@@ -1817,7 +1861,7 @@ test("a listing whose readers leave as its token settles never reaches the wire"
 	await asked;
 	release();
 	tracks.close();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	expect(streams.length).toBe(0);
 	held.close();
 	subscriber.close();

@@ -763,6 +763,12 @@ The subscriber MAY cache the error and potentially retry later.
 ## Datagrams
 QUIC datagrams provide unreliable, unordered delivery for latency-sensitive content that does not need retransmission.
 
+Every datagram begins with a Type (i): 0x0 for a Group Datagram, or 0x1 for a Padding Datagram.
+A receiver MUST discard a datagram with an unknown type.
+The total datagram body, including Type, MUST NOT exceed 1200 bytes; a sender MUST NOT send a larger one and a receiver MUST silently drop it.
+
+### Group Datagram
+
 A publisher MAY transmit a Group consisting of exactly one Frame as a single QUIC datagram, in addition to (or instead of) opening a Group Stream, based on application hints, group size, and network conditions; a multi-frame Group is delivered via a Group Stream only.
 A publisher sends a datagram to a subscription only when its Group Sequence is inside one of the subscription's Ranges, where a start Position past frame 0 excludes its group (see [Positions](#positions)).
 A datagram is never cached or retransmitted, and FETCH never returns one.
@@ -775,6 +781,7 @@ Each datagram body has the following encoding (note: there is no message length 
 
 ~~~
 DATAGRAM Body {
+  Type (i) = 0x0
   Subscribe ID (i)
   Group Sequence (i)
   [Timestamp (i)]
@@ -800,10 +807,12 @@ Present only when the Track's Compression is not none; the datagram payload is t
 
 **Payload**:
 The frame payload, extending to the end of the datagram.
-The total datagram body MUST NOT exceed 1200 bytes, ensuring it fits within the minimum QUIC path MTU without IP-layer fragmentation; a publisher MUST NOT send a larger one and a receiver MUST silently drop it.
 A group whose frame does not fit is simply not eligible for datagram delivery.
 
+### Padding Datagram
 
+Either endpoint MAY send a Padding Datagram (0x1), followed by arbitrary bytes to the datagram boundary.
+A receiver MUST discard it without changing session or subscription state.
 
 # Encoding
 This section covers the encoding of each message.
@@ -1793,6 +1802,8 @@ The `Message Length` describes the payload size on the wire.
 # Appendix A: Changelog
 
 ## moq-lite-07
+
+- Added a leading Type to datagrams: Group (0x0) or Padding (0x1), which either endpoint discards without changing session or subscription state.
 
 - Refuse a SUBSCRIBE_DROP whose Group Start is greater than Group End plus one on every version that carries it. SETUP parameter counts are bounded by Message Length, without a separate count cap.
 
