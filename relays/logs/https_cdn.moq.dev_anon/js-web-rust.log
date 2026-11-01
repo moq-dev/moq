@@ -1,15 +1,15 @@
-[2m2026-11-01T15:49:21.168050Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m476710694088573 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-01T15:49:21.174921Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-11-01T15:49:21.174952Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-01T15:49:21.183160Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-01T15:49:21.183286Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://cdn.moq.dev
-[2m2026-11-01T15:49:21.253650Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-lite-06
-[2m2026-11-01T15:49:21.253685Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mhttps://cdn.moq.dev
-[2m2026-11-01T15:49:22.285995Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe started [3mid[0m[2m=[0m0 [3mbroadcast[0m[2m=[0msmoke-js-web-4981-29009.hang [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-01T15:49:22.340820Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe started [3mid[0m[2m=[0m1 [3mbroadcast[0m[2m=[0msmoke-js-web-4981-29009.hang [3mtrack[0m[2m=[0mvideo
-[2m2026-11-01T15:49:22.421417Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe canceled (idle) [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-01T15:49:22.421454Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe canceled (idle) [3mtrack[0m[2m=[0mvideo
-[2m2026-11-01T15:49:22.430144Z[0m [33m WARN[0m [2mweb_transport_moq::session[0m[2m:[0m failed to read capsule [3me[0m[2m=[0mUnexpectedEnd
-[2m2026-11-01T15:49:22.430231Z[0m [33m WARN[0m [2mmoq_net::lite::publisher[0m[2m:[0m probe stream error [3merr[0m[2m=[0mtransport: session error: connection error: closed
-[2m2026-11-01T15:49:22.430252Z[0m [32m INFO[0m [2mmoq_net::lite::session[0m[2m:[0m session terminated
+[2m2026-11-01T16:21:43.953956Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m3888441382995564 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-01T16:21:43.958248Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-01T16:21:43.958275Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-01T16:21:43.962586Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://cdn.moq.dev
+[2m2026-11-01T16:21:43.963320Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-01T16:21:44.027440Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-lite-06
+[2m2026-11-01T16:21:44.027483Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mhttps://cdn.moq.dev
+[2m2026-11-01T16:21:45.182658Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe started [3mid[0m[2m=[0m0 [3mbroadcast[0m[2m=[0msmoke-js-web-4729-5394.hang [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-01T16:21:45.204377Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe started [3mid[0m[2m=[0m1 [3mbroadcast[0m[2m=[0msmoke-js-web-4729-5394.hang [3mtrack[0m[2m=[0mvideo
+[2m2026-11-01T16:21:47.250784Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe canceled (idle) [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-01T16:21:47.250834Z[0m [32m INFO[0m [2mmoq_net::lite::subscriber[0m[2m:[0m subscribe canceled (idle) [3mtrack[0m[2m=[0mvideo
+[2m2026-11-01T16:21:47.257083Z[0m [33m WARN[0m [2mweb_transport_moq::session[0m[2m:[0m failed to read capsule [3me[0m[2m=[0mUnexpectedEnd
+[2m2026-11-01T16:21:47.257108Z[0m [33m WARN[0m [2mmoq_net::lite::publisher[0m[2m:[0m probe stream error [3merr[0m[2m=[0mtransport: session error: connection error: closed
+[2m2026-11-01T16:21:47.257127Z[0m [32m INFO[0m [2mmoq_net::lite::session[0m[2m:[0m session terminated
 Error: Broken pipe (os error 32)

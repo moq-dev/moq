@@ -2,11 +2,11 @@
 [page] announced: prefix=
 [page] announce: prefix=
 [page] announced: broadcast=izumoe-clock-8633460322fd41adb789ed0bd4fc54d4.hang active=true
-[page] announced: broadcast=smoke-js-web-4981-29009.hang active=true
-[page] subscribe start: id=0 broadcast=smoke-js-web-4981-29009.hang track=catalog.json
-[page] subscribe ok: id=0 broadcast=smoke-js-web-4981-29009.hang track=catalog.json
-[page] received catalog hang smoke-js-web-4981-29009.hang {video: Object, clock: Object}
-[page] subscribe start: id=1 broadcast=smoke-js-web-4981-29009.hang track=video
-[page] subscribe ok: id=1 broadcast=smoke-js-web-4981-29009.hang track=video
-[page] subscribe update: id=1 broadcast=smoke-js-web-4981-29009.hang track=video
-decoded 5 frames from smoke-js-web-4981-29009.hang (vite)
+[page] announced: broadcast=smoke-js-web-4729-5394.hang active=true
+[page] subscribe start: id=0 broadcast=smoke-js-web-4729-5394.hang track=catalog.json
+[page] subscribe ok: id=0 broadcast=smoke-js-web-4729-5394.hang track=catalog.json
+[page] received catalog hang smoke-js-web-4729-5394.hang {video: Object, clock: Object}
+[page] subscribe start: id=1 broadcast=smoke-js-web-4729-5394.hang track=video
+[page] subscribe ok: id=1 broadcast=smoke-js-web-4729-5394.hang track=video
+[page] subscribe update: id=1 broadcast=smoke-js-web-4729-5394.hang track=video
+decoded 3 frames from smoke-js-web-4729-5394.hang (vite)

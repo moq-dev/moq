@@ -2,11 +2,11 @@
 [page] announced: prefix=
 [page] announce: prefix=
 [page] announced: broadcast=izumoe-clock-8633460322fd41adb789ed0bd4fc54d4.hang active=true
-[page] announced: broadcast=smoke-rust-4981-17174.hang active=true
-[page] subscribe start: id=0 broadcast=smoke-rust-4981-17174.hang track=catalog.json
-[page] subscribe ok: id=0 broadcast=smoke-rust-4981-17174.hang track=catalog.json
-[page] received catalog hang smoke-rust-4981-17174.hang {video: Object, audio: Object, archive: Object, clock: Object}
-[page] subscribe start: id=1 broadcast=smoke-rust-4981-17174.hang track=0.avc3
-[page] subscribe ok: id=1 broadcast=smoke-rust-4981-17174.hang track=0.avc3
+[page] announced: broadcast=smoke-rust-4729-2369.hang active=true
+[page] subscribe start: id=0 broadcast=smoke-rust-4729-2369.hang track=catalog.json
+[page] subscribe ok: id=0 broadcast=smoke-rust-4729-2369.hang track=catalog.json
+[page] received catalog hang smoke-rust-4729-2369.hang {video: Object, audio: Object, archive: Object, clock: Object}
+[page] subscribe start: id=1 broadcast=smoke-rust-4729-2369.hang track=0.avc3
+[page] subscribe ok: id=1 broadcast=smoke-rust-4729-2369.hang track=0.avc3
 [page] skipping slow groups: track=0.avc3 0 -> 1 count=1
-decoded 31 frames from smoke-rust-4981-17174.hang (vite)
+decoded 35 frames from smoke-rust-4729-2369.hang (vite)

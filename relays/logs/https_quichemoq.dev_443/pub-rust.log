@@ -1,18 +1,18 @@
-[2m2026-11-01T15:54:41.734872Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m4857212666049321 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-01T15:54:41.738011Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-11-01T15:54:41.738026Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-01T15:54:41.740871Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-01T15:54:41.743319Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://quichemoq.dev
-[2m2026-11-01T15:54:51.746398Z[0m [31mERROR[0m [2mmoq_tokio::connection[0m[2m:[0m connection loop exited [3merr[0m[2m=[0mreconnect timed out after 10s: timed out connecting to https://quichemoq.dev
-[2m2026-11-01T15:54:51.747317Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0m0.avc3
-[2m2026-11-01T15:54:51.747340Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m10
-[2m2026-11-01T15:54:51.747572Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json
-[2m2026-11-01T15:54:51.747576Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json.z
-[2m2026-11-01T15:54:51.747579Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog
-[2m2026-11-01T15:54:51.747589Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mtimeline.z
-[2m2026-11-01T15:54:51.747593Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m0
+[2m2026-11-01T16:27:02.858891Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m993402288326007 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-01T16:27:02.864726Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-01T16:27:02.864755Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-01T16:27:02.869340Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-01T16:27:02.869356Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://quichemoq.dev
+[2m2026-11-01T16:27:12.872690Z[0m [31mERROR[0m [2mmoq_tokio::connection[0m[2m:[0m connection loop exited [3merr[0m[2m=[0mreconnect timed out after 10s: timed out connecting to https://quichemoq.dev
+[2m2026-11-01T16:27:12.872800Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0m0.avc3
+[2m2026-11-01T16:27:12.872815Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m10
+[2m2026-11-01T16:27:12.873086Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json
+[2m2026-11-01T16:27:12.873092Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog.json.z
+[2m2026-11-01T16:27:12.873097Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mcatalog
+[2m2026-11-01T16:27:12.873109Z[0m [33m WARN[0m [2mmoq_net::model::track[0m[2m:[0m track::Producer dropped without finish() or abort() [3mtrack[0m[2m=[0mtimeline.z
+[2m2026-11-01T16:27:12.873113Z[0m [33m WARN[0m [2mmoq_net::model::group[0m[2m:[0m group::Producer dropped without finish() or abort() [3msequence[0m[2m=[0m0
 Error: reconnect timed out after 10s: timed out connecting to https://quichemoq.dev
-[vost#0:0/libx264 @ 0x55de63802180] Error submitting a packet to the muxer: Broken pipe
-[out#0/h264 @ 0x55de63800e80] Error muxing a packet
-[out#0/h264 @ 0x55de63800e80] Error writing trailer: Broken pipe
-[out#0/h264 @ 0x55de63800e80] Error closing file: Broken pipe
+[vost#0:0/libx264 @ 0x55b068e21180] Error submitting a packet to the muxer: Broken pipe
+[out#0/h264 @ 0x55b068e1fe80] Error muxing a packet
+[out#0/h264 @ 0x55b068e1fe80] Error writing trailer: Broken pipe
+[out#0/h264 @ 0x55b068e1fe80] Error closing file: Broken pipe
