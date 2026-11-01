@@ -2954,9 +2954,6 @@ impl Connection {
 				}
 				Ok(())
 			}
-			Header::Long {
-				ty: LongType::ZeroRtt, ..
-			} => Ok(()),
 			Header::VersionNegotiate { .. } => {
 				// RFC 9000 6.2: discard once any other packet was processed
 				if processed_server_packet {
