@@ -1994,7 +1994,7 @@ impl Cluster {
 				Err(err) => tracing::warn!(%err, "cluster peer error; will retry"),
 			}
 
-			let wait = redial.next(&mut rand::rng());
+			let wait = redial.next(&mut kio::clock::rng());
 			kio::clock::sleep(wait).await;
 		}
 	}

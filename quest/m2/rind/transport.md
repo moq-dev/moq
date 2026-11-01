@@ -43,4 +43,3 @@ Unsupported CPUs now fail at startup. Wire: none.
 
 ## Required
 
-- [rind runs on CPUs without the crypto extensions](/quest/m2/rind/older-cpus.md) - the rind release this switches to

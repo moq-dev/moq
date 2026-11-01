@@ -2666,7 +2666,11 @@ pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
 	})
 }
 
-/// Watch whether a media track has subscribers, so an encoder runs only while someone watches.
+/// Watch whether a media track has subscribers.
+///
+/// A track publishes whatever you write, subscribed or not, so a late subscriber can fetch
+/// the recent past. Running an encoder only while someone watches is an opt-in: it saves
+/// the encode, but leaves nothing from before the first subscriber.
 ///
 /// `on_demand` fires right away with the current [moq_demand] state, again on every
 /// change, including a move of the wanted group that [moq_publish_demand_wanted] reads,
