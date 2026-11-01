@@ -12058,7 +12058,6 @@ mod tests {
 
 	/// An inline native executor can re-enter both tables from the rejection's wake.
 	#[test]
-	#[cfg(not(target_family = "wasm"))]
 	fn refusing_route_requests_wakes_after_unlocking() {
 		struct Reenter {
 			table: SendCell<kio::Shared<OriginState>>,

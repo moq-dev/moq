@@ -49,7 +49,6 @@ default-members = [
     "rs/moq-uring",
     "rs/moq-v4l",
     "rs/moq-video",
-    # "rs/moq-wasm",  # wasm32-unknown-unknown target only
     "rs/qmux",
     "rs/test-env",
     # Maturin runs the workspace's `uniffi-bindgen` binary from the root to
@@ -58,10 +57,6 @@ default-members = [
     "rs/uniffi-bindgen",
 ]
 resolver = "2"
-
-[workspace.metadata.cargo-shear]
-# Feature-only dependency selecting the wasm_js backend for browser consumers.
-ignored = ["getrandom"]
 
 [workspace.package]
 # Floor for the library surface: iroh 1.0 (via moq-tokio) needs 1.91. This is
@@ -108,7 +103,6 @@ dispatch2 = "0.3.1"
 ebml-iterable = "0.7.1"
 flate2 = { version = "1.1", default-features = false }
 futures = "0.3"
-getrandom = { version = "0.4", features = ["wasm_js"] }
 h2 = "0.4"
 hang = { version = "0.21.11", path = "rs/hang" }
 hashbrown = { version = "0.17.1", default-features = false }
@@ -212,6 +206,7 @@ rcgen = { version = "0.14", default-features = false }
 # default-features off so each consumer picks its own TLS backend and body
 # features; nothing here wants the default native-tls stack.
 reqwest = { version = "0.13", default-features = false }
+rind = "0.1"
 rustc-hash = "2.1.3"
 sd-notify = "0.5"
 send_wrapper = "0.6"
@@ -243,11 +238,9 @@ uniffi = "0.32"
 url = "2"
 usage-rs = "7.1.0"
 uuid = { version = "1.26", features = ["v7"] }
-web-async = { version = "0.1.5", features = ["tracing"] }
 web-transport-iroh = "0.8.3"
 web-transport-proto = "0.6"
 web-transport-trait = "0.5"
-web-transport-wasm = "0.8"
 x11rb = { version = "0.14.0", features = ["randr", "xfixes"] }
 x509-parser = "0.18"
 zeroize = { version = "1", features = ["derive"] }
@@ -342,10 +335,3 @@ strip = "none"
 
 [profile.release-with-debug.package.moq-ffi]
 strip = "none"
-
-# Size-optimized build for the browser/WASM bindings (rs/moq-wasm). Shipping over
-# the wire, so optimize for size, not speed (~579KB -> ~471KB gzipped vs the
-# default release profile). `just js wasm` builds with `--profile wasm-release`.
-[profile.wasm-release]
-inherits = "release"
-opt-level = "z"

@@ -23,7 +23,7 @@ follow-up through `/quest-plan`.
 
 Nightly keeps both reports as artifacts: `just rs coverage` (cargo-llvm-cov
 over nextest, the native workspace at default features, both fuzz packages
-and the native moq-wasm stub excluded) and `just js coverage` (Bun's own
+excluded) and `just js coverage` (Bun's own
 coverage, one process per package, line hits unioned across processes).
 Start from those artifacts (`gh run download <nightly run> -n rust-coverage`
 and `-n js-coverage`) rather than re-running the instrumented workspace,
@@ -85,7 +85,7 @@ Lines covered / measured:
 | pattern | 435 / 523 | 0 | publish | 2773 / 3308 | 22 |
 | auth | 725 / 788 | 2 | room | 493 / 530 | 1 |
 | e2ee | 568 / 569 | 2 | signals | 580 / 763 | 2 |
-| flate | 233 / 333 | 0 | wasm | 0 / 0 | 0 |
+| flate | 233 / 333 | 0 | | | |
 | json | 804 / 1093 | 0 | moq-boy | 155 / 194 | 8 |
 | hang | 2076 / 2899 | 1 | | | |
 

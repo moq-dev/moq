@@ -139,7 +139,6 @@ build:
     just js build
     just rs build
     just py build
-    just js wasm
 
 # Delete this checkout's build artifacts and caches; `all` includes agent worktrees.
 clean SCOPE="here":

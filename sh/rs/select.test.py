@@ -44,7 +44,7 @@ class SelectTest(unittest.TestCase):
                                                 github_actions=github_actions))
         selected = self.selected("sh/rs/nextest.sh")
         # The gate's lint runs no extra target or feature builds.
-        for recipe in ("wasm", "uring-check", "capture"):
+        for recipe in ("uring-check", "capture"):
             self.assertNotIn(f"rs {recipe}", selected)
 
     def test_cargo_configuration_selects_workspace(self):
@@ -66,13 +66,15 @@ class SelectTest(unittest.TestCase):
         for owner in ("tokio", "media", "net"):
             self.assertEqual(self.selected(f"sh/rs/{owner}-features.sh"), [])
 
-    def test_send_depth_follows_moq_net(self):
-        for action in ("check", "check-test", "lint"):
-            for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "sh/rs/send-depth.sh"):
-                with self.subTest(action=action, path=path):
-                    self.assertIn("rs send-depth", self.selected(path, action=action))
-            with self.subTest(action=action, path="rs/moq-tokio/src/lib.rs"):
-                self.assertNotIn("rs send-depth", self.selected("rs/moq-tokio/src/lib.rs", action=action))
+    def test_gate_leaves_send_depth_to_nightly(self):
+        # Nightly runs `rs send-depth` on the pinned toolchain; the gate's lint
+        # is the one cargo pass.
+        for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
+            with self.subTest(path=path):
+                calls = self.selected(path)
+                self.assertEqual(len(calls), 1, calls)
+                self.assertTrue(calls[0].startswith("rs lint "), calls)
+        self.assertEqual(self.selected("sh/rs/send-depth.sh"), [])
 
     def test_device_features_join_the_one_test_build(self):
         for path, features in (("rs/moq-audio/src/lib.rs", DEVICE_FEATURES),
@@ -204,13 +206,12 @@ class FeatureTest(unittest.TestCase):
             self.assertEqual(result.returncode, expected_returncode, result.stdout + result.stderr)
             return calls.read_text().splitlines()
 
-    def test_net_keeps_model_and_browser_contracts(self):
+    def test_net_keeps_model_contracts(self):
         boundary = self.trace("net")
         exhaustive = self.trace("net", "--all")
         for calls in (boundary, exhaustive):
             self.assertTrue(any(" --lib " in call for call in calls if call.startswith("clippy ")))
             self.assertFalse(any(" --all-targets " in call for call in calls))
-            self.assertTrue(any(" --target wasm32-unknown-unknown " in call for call in calls))
             self.assertTrue(any(call.startswith("nextest run ") for call in calls))
             self.assertTrue(any(call.startswith("doc ") for call in calls))
 

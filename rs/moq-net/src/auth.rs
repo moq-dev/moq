@@ -2127,10 +2127,10 @@ impl RequestGrant {
 
 	/// Run `body`, everything a request does once admitted, until it finishes or `grant`
 	/// (when its token admitted it) ends. See [`until`].
-	pub(crate) fn guard<F: std::future::Future + kio::MaybeSend>(
+	pub(crate) fn guard<F: std::future::Future + Send>(
 		grant: Option<&Self>,
 		body: F,
-	) -> impl std::future::Future<Output = std::result::Result<F::Output, Refusal>> + kio::MaybeSend {
+	) -> impl std::future::Future<Output = std::result::Result<F::Output, Refusal>> + Send {
 		crate::util::sendable(until(body, move |waiter| match grant {
 			Some(grant) => grant.poll_ended(waiter),
 			None => Poll::Pending,

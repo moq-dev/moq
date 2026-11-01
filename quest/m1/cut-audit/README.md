@@ -50,7 +50,7 @@ redesign evidence went into the quests that already own the mechanism:
 [per-origin routes](/quest/m1/cluster-routing/routes.md),
 drafts 14-17 removal (since landed), and
 [buffered playback](/quest/m1/buffered-ascending.md). The audit recommends
-leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts/README.md).
+leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts-js.md).
 
 ## Required
 

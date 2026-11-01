@@ -22,7 +22,7 @@ jobs:
         # The queue checks default features only. Nightly and release PRs
         # keep the feature matrix and optimized artifacts; release binding
         # workflows cover their optimized libraries separately.
-        recipe: ["rs features", "js wasm"]
+        recipe: ["rs features"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

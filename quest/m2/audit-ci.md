@@ -56,16 +56,11 @@ verdicts:
   - Windows only: `reconnect::a_protocol_violation_ends_reconnect`, added by
     [moq-dev/moq#6162](https://github.com/moq-dev/moq/pull/6162), redials
     after a protocol violation over TCP.
-  - WASM and the browser backend baseline: on the 2026-10-22 night, an
-    uncaught `createUnidirectionalStream` rejection on a closed WebTransport
-    session failed the harness although every case passed. Two local runs on
-    main `f42b336f0e` did not reproduce it.
-- `just test wasm` on main `f42b336f0e` fails `ietf: reads a published
-  broadcast` (`remote error: code=0`). Bisected to
+- The WASM browser harness (since removed) on main `f42b336f0e` failed `ietf:
+  reads a published broadcast` (`remote error: code=0`). Bisected to
   [moq-dev/moq#6348](https://github.com/moq-dev/moq/pull/6348): the harness
   finishes its track before the pre-draft-22 joining FETCH arrives, which
-  [join after a quick finish](/quest/m2/ietf-join-after-finish.md) owns. The
-  merge queue does not run the browser harness, so only Nightly sees it.
+  [join after a quick finish](/quest/m2/ietf-join-after-finish.md) owns.
   - Audio quality: two Chromium Opus `wide` rows exceed their `target_ms_p95`
     budget. The [audio jitter target](/quest/m1/audio-jitter-target/README.md)
     owns the budgets.
@@ -200,7 +195,6 @@ coverage evidence, not a regression caught.
 | [ts](/.github/workflows/ts.yml) | TS container compliance and round-trip media integrity | Scheduled failure alert and release gate | 1493 | Linux 34.9 | [2026-10-22](https://github.com/moq-dev/moq/actions/runs/39786183107) |
 | [uring](/.github/workflows/uring.yml) | io_uring compile and runtime/kernel contract | Caller gate and Nightly alert | 1711 | ARM 7.7 | [2026-10-19](https://github.com/moq-dev/moq/actions/runs/39344299025) |
 | [video](/.github/workflows/video.yml) | Browser video renderer behavior | Scheduled failure alert and release gate | 413 | Linux 1.9 | No retained standalone failure |
-| [wasm](/.github/workflows/wasm.yml) | Native/wasm cross-language bindings and browser behavior | Nightly and release-gate alert | at least 2,500 | ARM 23.8 | [2026-10-22](https://github.com/moq-dev/moq/actions/runs/39779729461) |
 | [x11](/.github/workflows/x11.yml) | SHM and GetImage native capture paths | Caller gate and Nightly alert | 680 | ARM 5.2 | [2026-10-17](https://github.com/moq-dev/moq/actions/runs/39002028489) |
 
 ## Required
