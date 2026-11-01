@@ -410,8 +410,9 @@ int subscribe(
         auto group = until(track->next_group(), read_deadline, "health group");
         if (!group) fail("missing health group");
         auto frame = until(group->read_frame(), read_deadline, "health frame");
-        if (!frame || std::string(frame->payload.begin(), frame->payload.end()) != "session-alive" || frame->timestamp_us) {
-            fail("health payload or timestamp");
+        // Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+        if (!frame || std::string(frame->payload.begin(), frame->payload.end()) != "session-alive") {
+            fail("health payload");
         }
         if (until(group->read_frame(), read_deadline, "health group EOF") ||
             until(track->next_group(), read_deadline, "health track EOF") || session->state().connects != 1) {

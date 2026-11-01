@@ -53,9 +53,4 @@ pub(crate) use session::*;
 pub(crate) use state::*;
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod test;

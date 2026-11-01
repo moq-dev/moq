@@ -2,8 +2,8 @@
 //!
 //! Drivers take the current [`Instant`] on every poll and never read a clock.
 
-pub use moq_clock::Instant;
-pub(crate) use moq_clock::{Deadline, Deadlines};
+pub use kio::clock::Instant;
+pub(crate) use kio::clock::{Deadline, Deadlines};
 
 use crate::Error;
 
@@ -23,13 +23,13 @@ pub trait Driver {
 #[cfg(feature = "async")]
 pub async fn run<D: Driver>(driver: D) -> Error {
 	let mut driver = Box::new(driver);
-	moq_clock::drive(move |now, waiter| driver.poll(now, waiter)).await
+	kio::clock::drive(move |now, waiter| driver.poll(now, waiter)).await
 }
 
 /// A deadline queue attached to the deterministic test clock.
 #[cfg(all(test, feature = "async"))]
 pub(crate) fn sim() -> Deadlines {
-	let deadlines = Deadlines::new(moq_clock::now());
-	moq_clock::sim::attach(&deadlines);
+	let deadlines = Deadlines::new(kio::clock::now());
+	kio::clock::sim::attach(&deadlines);
 	deadlines
 }

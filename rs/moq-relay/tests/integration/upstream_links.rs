@@ -26,7 +26,7 @@ const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Bound `fut` by [`TIMEOUT`], naming the step that hung.
 async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
-	tokio::time::timeout(TIMEOUT, fut)
+	kio::clock::timeout(TIMEOUT, fut)
 		.await
 		.unwrap_or_else(|_| panic!("timed out: {step}"))
 }
@@ -159,7 +159,7 @@ fn publish(origin: &origin::Producer, path: &str) -> Publisher {
 			if group.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref()).is_err() || group.finish().is_err() {
 				break;
 			}
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 	})
 	.abort_handle();

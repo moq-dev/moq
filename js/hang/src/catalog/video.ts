@@ -5,11 +5,39 @@ import { hexSchema } from "./hex";
 import { HlsFieldSchema } from "./hls";
 import { u8Schema, u53Schema } from "./integers";
 import { EpochSchema, RelativeBroadcastSchema } from "./path";
+import { codecNumber, countSchema, renditions } from "./section";
 
-// Backwards compatibility: old track schema
-const TrackSchema = z.object({
-	name: z.string(),
-});
+// av01.<profile>.<level><tier>.<bitDepth>, optionally followed by every one of .<monochrome>
+// .<chromaSubsampling><chromaSamplePosition>.<colorPrimaries>.<transfer>.<matrix>.<fullRange>.
+const AV1 = /^av01\.[0-2]\.[0-9]{2}[MH]\.[0-9]{2}(\.[01]\.[01]{2}[0-3]\.[0-9]{2}\.[0-9]{2}\.[0-9]{2}\.[01])?$/;
+
+// vp09.<profile>.<level>.<bitDepth>, optionally followed by all five color fields, each two digits.
+const VP9 = /^vp09(\.[0-9]{2}){3}((\.[0-9]{2}){5})?$/;
+
+// hvc1/hev1.<space?><profile>.<compatibility>.<tier><level>[.<constraint>]{0,6}
+function hevcValid(codec: string): boolean {
+	const [, profile, compatibility, level, ...constraints] = codec.split(".");
+	if (profile === undefined || level === undefined) return false;
+	// general_profile_space is two bits, and 0 has no letter.
+	const idc = /^[A-C]/.test(profile) ? profile.slice(1) : profile;
+	if (!codecNumber(idc, 10, 0xff) || !codecNumber(compatibility, 16, 0xffff_ffff)) return false;
+	if (!/^[HL]/.test(level) || !codecNumber(level.slice(1), 10, 0xff)) return false;
+	// Tolerate one empty trailing field (a dangling '.') emitted by older encoders and muxers.
+	if (constraints.at(-1) === "") constraints.pop();
+	return constraints.length <= 6 && constraints.every((constraint) => codecNumber(constraint, 16, 0xff));
+}
+
+/**
+ * Whether `codec` parses: a known codec's string must carry its parameters, while any other string
+ * is carried as a codec this build may not decode. Mirrors the Rust `VideoCodec` parser.
+ */
+function codecValid(codec: string): boolean {
+	if (codec.startsWith("avc1.") || codec.startsWith("avc3.")) return /^avc[13]\.[0-9a-fA-F]{6}$/.test(codec);
+	if (codec.startsWith("hvc1.") || codec.startsWith("hev1.")) return hevcValid(codec);
+	if (codec.startsWith("vp09.")) return VP9.test(codec);
+	if (codec.startsWith("av01.")) return AV1.test(codec);
+	return true;
+}
 
 // A CIE 1931 xy chromaticity coordinate.
 const ChromaticitySchema = z.object({ x: z.number(), y: z.number() });
@@ -103,7 +131,7 @@ export const VideoConfigSchema = z.object({
 	label: z.optional(z.string()),
 
 	// See: https://w3c.github.io/webcodecs/codec_registry.html
-	codec: z.string(),
+	codec: z.string().check(z.refine(codecValid, "malformed codec string")),
 
 	// The container format, used to decode the timestamp and more.
 	container: ContainerSchema,
@@ -115,13 +143,13 @@ export const VideoConfigSchema = z.object({
 
 	// The largest width and height the track carries in pixels, fixed for its name. The picture
 	// resizes in band at a keyframe below these ceilings, unless the description pins it.
-	codedWidth: z.optional(u53Schema),
-	codedHeight: z.optional(u53Schema),
+	codedWidth: z.optional(countSchema),
+	codedHeight: z.optional(countSchema),
 
 	// The aspect ratio the whole picture is displayed at, as WebCodecs' VideoDecoderConfig
 	// displayAspectWidth/displayAspectHeight. Absent means the decoded picture's own shape.
-	displayAspectWidth: z.optional(u53Schema),
-	displayAspectHeight: z.optional(u53Schema),
+	displayAspectWidth: z.optional(countSchema),
+	displayAspectHeight: z.optional(countSchema),
 
 	// The colour the decoded pixels carry, so a renderer need not guess or reparse the bitstream.
 	color: z.optional(ColorSchema),
@@ -206,51 +234,28 @@ export const VideoConfigSchema = z.object({
  * Schema for the catalog video section: renditions plus display size, rotation, and flip.
  * Renditions mirror WebCodecs VideoDecoderConfig (https://w3c.github.io/webcodecs/#video-decoder-config).
  */
-export const VideoSchema = z.union([
-	z.object({
-		// A map of track name to rendition configuration.
-		// This is not an array in order for it to work with JSON Merge Patch.
-		renditions: z.record(z.string(), VideoConfigSchema),
+export const VideoSchema = z.object({
+	// A map of track name to rendition configuration; a malformed rendition refuses the catalog.
+	// This is not an array in order for it to work with JSON Merge Patch.
+	renditions: renditions(VideoConfigSchema),
 
-		// Render the video at this size in pixels.
-		// This is separate from the display aspect ratio because it does not require reinitialization.
-		display: z.optional(
-			z.object({
-				width: u53Schema,
-				height: u53Schema,
-			}),
-		),
-
-		// The rotation of the video in degrees.
-		// Default: 0
-		rotation: z.optional(z.number()),
-
-		// If true, the decoder will flip the video horizontally
-		// Default: false
-		flip: z.optional(z.boolean()),
-	}),
-	// Backwards compatibility: transform old array of {track, config} to new object format
-	z.pipe(
-		z.array(
-			z.object({
-				track: TrackSchema,
-				config: VideoConfigSchema,
-			}),
-		),
-		z.transform((arr) => {
-			const config = arr[0]?.config;
-			return {
-				renditions: Object.fromEntries(arr.map((item) => [item.track.name, item.config])),
-				display:
-					config?.displayAspectWidth !== undefined && config?.displayAspectHeight !== undefined
-						? { width: config.displayAspectWidth, height: config.displayAspectHeight }
-						: undefined,
-				rotation: undefined,
-				flip: undefined,
-			};
+	// Render the video at this size in pixels.
+	// This is separate from the display aspect ratio because it does not require reinitialization.
+	display: z.optional(
+		z.object({
+			width: u53Schema.check(z.lte(0xffff_ffff)),
+			height: u53Schema.check(z.lte(0xffff_ffff)),
 		}),
 	),
-]);
+
+	// The rotation of the video in degrees.
+	// Default: 0
+	rotation: z.optional(z.number()),
+
+	// If true, the decoder will flip the video horizontally
+	// Default: false
+	flip: z.optional(z.boolean()),
+});
 
 /** The catalog video section: renditions keyed by track name plus display options. */
 export type Video = z.infer<typeof VideoSchema>;

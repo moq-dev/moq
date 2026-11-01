@@ -14,9 +14,8 @@ keywords = ["quic", "webtransport", "conferencing", "live"]
 categories = ["multimedia", "network-programming"]
 
 [dependencies]
-kio = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-auth = { workspace = true }
-moq-clock = { workspace = true }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
 thiserror = { workspace = true }
