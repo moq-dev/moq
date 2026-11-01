@@ -13,6 +13,7 @@ use super::select::{Lane, Next, Selector};
 use super::sink::Sink;
 use crate::Error;
 use crate::Frame;
+pub use moq_mux::container::Delay;
 
 /// One item of a [`Consumer`] read, in delivery order: a decoded picture, or a break
 /// between them.
@@ -88,13 +89,15 @@ pub struct Options {
 	pub decoder: Config,
 	/// Where to start on a track that already holds groups.
 	pub start: Start,
-	/// How far playback may drift from the live edge before a stalled group is
-	/// skipped. Defaults to [`std::time::Duration::ZERO`](std::time::Duration::ZERO)
-	/// (skip aggressively); set it to your playout buffer for a softer skip.
-	/// Applied to the transport subscription and inherited by
+	/// How far behind the live edge playback runs. [`Delay::min`] is the
+	/// player's playout delay, where a cold join starts; [`Delay::max`] is how
+	/// far playback may drift before a stalled group is skipped. Both default to
+	/// zero: start at the newest group and skip aggressively. Set `min` to your
+	/// playout delay and `max` at or past it for a softer skip. The max is
+	/// applied to the transport subscription, and both reach
 	/// [`moq_mux::container::Consumer`]. A rendition with a catalog `warmup`
-	/// runs a second decoder at this plus the warmup (see [`Consumer`]).
-	pub max_delay: std::time::Duration,
+	/// runs a second decoder at both plus the warmup (see [`Consumer`]).
+	pub delay: Delay,
 }
 
 impl Options {
@@ -112,9 +115,9 @@ impl Options {
 /// `moq_audio::decode::Consumer`.
 ///
 /// A rendition with a catalog `warmup` (intra refresh, so no keyframes) runs
-/// two decoders. One skips at [`Options::max_delay`] and may show refresh
-/// stripes after a join or a skip. The other tolerates `warmup` more and joins
-/// a group earlier, so its pictures stay clean, and they replace the first
+/// two decoders. One skips at [`Options::delay`]'s max and may show refresh
+/// stripes after a join or a skip. The other starts and tolerates `warmup` more
+/// and joins a group earlier, so its pictures stay clean, and they replace the first
 /// decoder's once it catches up. Both subscriptions share one upstream request.
 pub struct Consumer {
 	/// The min-delay and max-delay decoders, indexed by [`Lane`].
@@ -168,16 +171,20 @@ impl Consumer {
 		options: Options,
 	) -> Result<Self, Error> {
 		let name = name.into();
-		let min = Reader::open(broadcast, catalog, &name, &options, options.max_delay, 0).await?;
+		let min = Reader::open(broadcast, catalog, &name, &options, options.delay, 0).await?;
 
 		let warmup = catalog.warmup.unwrap_or_default();
 		let max = if warmup.is_zero() {
 			None
 		} else {
-			// One more sweep of budget, joining a group earlier, so this decoder
-			// starts at a recovery point a whole sweep before the live edge.
-			let budget = options.max_delay.saturating_add(warmup);
-			Some(Reader::open(broadcast, catalog, &name, &options, budget, 1).await?)
+			// One more sweep both to start and to fall behind, joining a group earlier,
+			// so this decoder starts at a recovery point a whole sweep before the
+			// min-delay one.
+			let delay = Delay {
+				min: options.delay.min.saturating_add(warmup),
+				max: options.delay.max.map(|max| max.saturating_add(warmup)),
+			};
+			Some(Reader::open(broadcast, catalog, &name, &options, delay, 1).await?)
 		};
 
 		// The catalog's rate when it has one, else whatever the pictures show.
@@ -295,14 +302,14 @@ impl Consumer {
 }
 
 impl Reader {
-	/// Subscribe with `max_delay`, starting `lookback` groups before the live
+	/// Subscribe with `delay`'s max, starting `lookback` groups before the live
 	/// edge when the caller asked for [`Start::Latest`].
 	async fn open(
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &VideoConfig,
 		name: &str,
 		options: &Options,
-		max_delay: std::time::Duration,
+		delay: Delay,
 		lookback: u64,
 	) -> Result<Self, Error> {
 		let decoder = Sink::open(catalog, &options.decoder).await?;
@@ -312,7 +319,7 @@ impl Reader {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.video)
-					.with_max_delay(max_delay),
+					.with_max_delay(delay.max),
 			)
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement
@@ -343,7 +350,11 @@ impl Reader {
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
 		let container = moq_mux::catalog::hang::Container::try_from(catalog)?;
-		let track = moq_mux::container::Consumer::new(track, container);
+		// On a cold network join the live edge's stream often lands first. The container starts
+		// at the group covering the live edge less the min delay, waiting for it, so the
+		// max-delay decoder, whose min delay includes the warmup, still gets the group its warmup
+		// needs. That decoder tolerates the warmup as lateness too, so it passes no further warmup.
+		let track = moq_mux::container::Consumer::new(track, container).with_delay(delay);
 
 		Ok(Self {
 			decoder,
@@ -574,7 +585,10 @@ mod tests {
 				// Wide enough to keep every group fresh: the age budget on its own
 				// delivers only the live edge, which would pass this test without
 				// `Start::Latest` doing anything.
-				max_delay: std::time::Duration::from_secs(10),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -655,7 +669,10 @@ mod tests {
 				},
 				// A budget that keeps every group fresh, so the start policy is the
 				// only thing deciding what is read.
-				max_delay: std::time::Duration::from_secs(10),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -724,7 +741,10 @@ mod tests {
 			"video",
 			Options {
 				decoder: decoder.clone(),
-				max_delay,
+				delay: Delay {
+					max: Some(max_delay),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		))
@@ -772,7 +792,10 @@ mod tests {
 					kind: Kind::Named(probe::BUFFERED_NAME.into()),
 					..Config::new()
 				},
-				max_delay: std::time::Duration::from_secs(10),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -805,10 +828,7 @@ mod tests {
 			[1000, 1100, 2000, 1800, 1900],
 			"join trims, continuous delivery keeps every leading picture"
 		);
-		consumer
-			.reader(Lane::Min)
-			.track
-			.set_max_delay(std::time::Duration::ZERO);
+		consumer.reader(Lane::Min).track.set_delay(Delay::default());
 		write(12, &[3000]);
 		write(13, &[4000, 3800, 3900, 4100]);
 		track.finish().unwrap();
@@ -919,7 +939,10 @@ mod tests {
 					kind: Kind::Named(probe::BUFFERED_NAME.into()),
 					..Config::new()
 				},
-				max_delay: std::time::Duration::from_secs(10),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1143,7 +1166,10 @@ mod tests {
 					..Config::new()
 				},
 				start,
-				max_delay,
+				delay: Delay {
+					max: Some(max_delay),
+					..Delay::default()
+				},
 			},
 		)
 		.await
@@ -1209,6 +1235,50 @@ mod tests {
 			write(&mut live, &[second]);
 			assert_eq!(read(&mut consumer).await, (second, Lane::Max));
 		}
+	}
+
+	/// On a cold network join the live edge's stream often lands first. The
+	/// max-delay decoder still starts at the group before it, and takes over.
+	#[tokio::test]
+	async fn a_cold_join_whose_live_edge_arrives_first_starts_a_group_earlier() {
+		let (broadcast, mut track) = live_track();
+		let mut live = group(&mut track, 1, &[4, 5]);
+
+		let mut consumer = dual(
+			&broadcast,
+			Start::Latest,
+			std::time::Duration::ZERO,
+			probe::IMMEDIATE_NAME,
+		)
+		.await;
+
+		// Only the live edge has landed: the max-delay decoder waits for the group below it.
+		// Mocked time, so the timeout and the warmup's deadline never race; no decode runs
+		// while it waits, and the probe's thread would let mocked time skip ahead if one did.
+		let max = consumer.reader(Lane::Max);
+		tokio::time::pause();
+		assert!(
+			kio::clock::timeout(std::time::Duration::from_millis(50), max.read())
+				.await
+				.is_err(),
+			"the max-delay decoder started at the live edge"
+		);
+		tokio::time::resume();
+		group(&mut track, 0, &[0, 1, 2, 3]).finish().unwrap();
+		let Ok(Some(Read::Frame(first))) = max.read().await else {
+			panic!("the max-delay decoder produced no picture");
+		};
+		assert_eq!(
+			first.timestamp,
+			Timestamp::from_micros(0).unwrap(),
+			"it starts a group earlier"
+		);
+
+		assert_eq!(read(&mut consumer).await, (4, Lane::Min), "the live edge shows first");
+		assert_eq!(read(&mut consumer).await.0, 5);
+		catch_up(&mut consumer).await;
+		write(&mut live, &[6]);
+		assert_eq!(read(&mut consumer).await, (6, Lane::Max));
 	}
 
 	/// A stall shorter than a sweep makes the min-delay decoder skip, while the
@@ -1346,7 +1416,10 @@ mod tests {
 						kind: Kind::Named(probe::IMMEDIATE_NAME.into()),
 						..Config::new()
 					},
-					max_delay,
+					delay: Delay {
+						max: Some(max_delay),
+						..Delay::default()
+					},
 					..Options::new()
 				},
 			)

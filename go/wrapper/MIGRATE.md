@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Decoder outputs take a `media.Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`audio.DecoderOutput` replaces `MaxDelay` and the playout `Delay *time.Duration` with `Delay *media.Delay` and `Estimate *bool` (nil estimates).
+`video.DecoderOutput.MaxDelay` is `Delay *media.Delay`.
+`media.Delay{Min, Max}`: `Max` (nil for no limit) is the old `MaxDelay`, and `Min` is the playout delay, where a cold join starts.
+A fixed audio playout delay `d` is `Delay: &media.Delay{Min: d, Max: &max}` with `Estimate` set to false.
+
 ### `media.VideoInit` is a struct
 
 `media.VideoInit` is its own struct rather than an alias of the generated record, so its new `Lower` field takes a `*media.TrackProducer`. A composite literal with `Format`, `Data`, `Label`, and `Hint` compiles unchanged; build one that way where you converted a generated `MoqVideoInit`.

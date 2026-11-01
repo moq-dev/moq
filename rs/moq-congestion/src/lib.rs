@@ -48,6 +48,18 @@ pub trait Controller: Send + Sync {
     )]
     fn on_app_limited(&mut self, in_flight: u64) {}
 
+    /// A transmit poll drained the source, then filled the rest with bandwidth-probe duplicates
+    /// or was held back by [`ControllerMetrics::probe_inflight`] or the probe's own pace.
+    ///
+    /// Reports the poll [`Controller::on_app_limited`] would have reported without the probe,
+    /// with `in_flight` bytes outstanding. A controller that probes decides which of its
+    /// decisions the duplicates may inform.
+    #[allow(
+        unused_variables,
+        reason = "a no-op default that keeps the parameter names for implementors"
+    )]
+    fn on_probe_filled(&mut self, in_flight: u64) {}
+
     /// An ACK newly acknowledged packets.
     fn on_ack(&mut self, ack: Ack<'_>);
 
@@ -158,6 +170,11 @@ pub struct Acked {
     pub bytes: u16,
     /// The state [`Controller::on_sent`] returned for it.
     pub packet: Packet,
+    /// When the peer received it, if the peer reports receive timestamps.
+    ///
+    /// Counted from a basis the peer picked and never shares, on the peer's clock, so only the
+    /// difference between two packets' times means anything, and the two clocks may drift.
+    pub received: Option<Duration>,
 }
 
 /// Packets loss detection declared lost together.
