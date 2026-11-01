@@ -20,7 +20,3 @@ against it.
   see the [epic](/quest/m2/quic-realtime/README.md)). Measure that a stopped
   rung recovers under it.
 - Unit tests drive the controller with mocked time, not wall clock.
-
-## Required
-
-- [Receive-ts spike](/quest/m2/quic-realtime/receive-ts.md) - the per-packet receive instants and the shared presets

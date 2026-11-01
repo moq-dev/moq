@@ -26,7 +26,7 @@
 		"@libav.js/types": "^6.10.9"
 	},
 	"devDependencies": {
-		"@types/bun": "^1.4.3",
+		"@types/bun": "^1.4.4",
 		"typescript": "7.0.2"
 	}
 }
