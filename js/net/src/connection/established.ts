@@ -82,6 +82,9 @@ export interface Established {
 	 * Settles with the peer's GOAWAY, its request that this session move elsewhere. The session
 	 * keeps serving until it closes, and a one-shot session never moves on its own, so answer it
 	 * by connecting again and closing this one. Stays pending if the session closes without one.
+	 *
+	 * The URI is peer-controlled: apply a redirect policy you trust before dialing it or presenting
+	 * tokens to it, as the reconnecting `Connection` does with `goaway.redirect`.
 	 */
 	readonly draining: GetPromise<Drain>;
 
