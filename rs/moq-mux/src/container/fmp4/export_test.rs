@@ -640,6 +640,27 @@ async fn zero_fragment_duration_uses_the_successor_then_the_cut() {
 	assert!(drain_now(&mut exporter).await.is_empty());
 }
 
+/// One sample per fragment hides the B-frames a reference frame's successor gap spans, so H.264
+/// whose catalog declares no `reorder` takes no more than the 30 fps cadence. Declaring
+/// `reorder: 0` says it presents in decode order, so the 50 ms gap is a real duration.
+#[tokio::test(start_paused = true)]
+async fn zero_fragment_duration_trusts_a_long_gap_only_without_reordering() {
+	let cadence = moq_net::Timestamp::from_scale(1_000, 30_000).unwrap().into();
+	for (reorder, expected) in [(None, cadence), (Some(0), std::time::Duration::from_millis(50))] {
+		let mut live = Live::avc3();
+		for config in live.catalog.modify().unwrap().video.renditions.values_mut() {
+			config.reorder = reorder;
+		}
+		live.track.write(video_frame(0, true)).unwrap();
+		live.track.write(video_frame(50_000, false)).unwrap();
+		let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await)
+			.with_fragment_duration(std::time::Duration::ZERO);
+		chunk_now(&mut exporter).await.init().expect("init");
+		let first = chunk_now(&mut exporter).await.fragment().expect("first sample");
+		assert_eq!(first.duration, expected, "reorder {reorder:?}");
+	}
+}
+
 #[tokio::test(start_paused = true)]
 async fn ntsc_tail_uses_a_representable_catalog_cadence() {
 	use hang::catalog::{Container, H264, VideoConfig};
@@ -2583,4 +2604,159 @@ async fn a_rendition_moved_to_another_sample_entry_fails() {
 		matches!(&err, crate::Error::Cmaf(crate::container::fmp4::Error::TrackChanged(name)) if name == Moving::RENDITION),
 		"{err:?}"
 	);
+}
+
+/// Export `bbb5s_cbr.ts` (HEVC with B-pyramids, and Opus) cut at `cap`, returning the init
+/// segment and every fragment it writes.
+async fn export_reordered_clip(cap: Option<std::time::Duration>) -> (Bytes, Vec<crate::container::fmp4::Fragment>) {
+	let data = include_bytes!("../ts/test_data/bbb5s_cbr.ts");
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let consumer = broadcast.consume();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	let mut import = crate::container::ts::Import::new(broadcast, catalog.reserve());
+	import.decode(&BytesMut::from(&data[..])).unwrap();
+	import.finish().unwrap();
+
+	let catalog_stream = crate::catalog::Consumer::<()>::new(&consumer, crate::catalog::CatalogFormat::Hang)
+		.await
+		.expect("catalog consumer");
+	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer).await, catalog_stream)
+		.with_max_delay(RECORDING_MAX_DELAY)
+		.with_fragment_duration(cap);
+	let mut init = None;
+	let mut fragments = Vec::new();
+	// The tracks finished, but the broadcast stays up: the export is done once it goes quiet.
+	while let Ok(next) = moq_clock::timeout(RECORDING_MAX_DELAY * 4, exporter.next_chunk()).await {
+		let Some(chunk) = next.expect("exporter failed") else {
+			break;
+		};
+		match chunk {
+			crate::container::fmp4::Chunk::Init(bytes) => init = Some(bytes),
+			crate::container::fmp4::Chunk::Fragment(fragment) => fragments.push(fragment),
+		}
+	}
+	(init.expect("an init segment"), fragments)
+}
+
+/// Every track's media timescale, by track id, from an init segment.
+fn track_scales(init: &Bytes) -> std::collections::BTreeMap<u32, moq_net::Timescale> {
+	let mut cursor = Cursor::new(init.as_ref());
+	let mut scales = std::collections::BTreeMap::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode init") {
+		if let mp4_atom::Any::Moov(moov) = atom {
+			for trak in &moov.trak {
+				let scale = moq_net::Timescale::new(trak.mdia.mdhd.timescale.into()).unwrap();
+				scales.insert(trak.tkhd.track_id, scale);
+			}
+		}
+	}
+	scales
+}
+
+/// Every sample's presentation time in microseconds, by track id, in decode order.
+fn presentation_times(
+	init: &Bytes,
+	fragments: &[crate::container::fmp4::Fragment],
+) -> std::collections::BTreeMap<u32, Vec<u128>> {
+	let scales = track_scales(init);
+	let mut times: std::collections::BTreeMap<u32, Vec<u128>> = Default::default();
+	for fragment in fragments {
+		let id = super::first_traf(&fragment.data).tfhd.track_id;
+		let kind = if id == 1 {
+			super::Kind::Video
+		} else {
+			super::Kind::Audio
+		};
+		let track = super::Track::new(scales[&id], kind);
+		let samples = super::decode(fragment.data.clone(), None, track).expect("decode fragment");
+		times
+			.entry(id)
+			.or_default()
+			.extend(samples.iter().map(|sample| sample.timestamp.as_micros()));
+	}
+	times
+}
+
+/// The warnings ffprobe prints reading every packet of an fMP4 file.
+fn ffprobe_warnings(file: Vec<u8>) -> String {
+	use std::io::Write;
+
+	let mut child = std::process::Command::new("ffprobe")
+		.args([
+			"-v",
+			"warning",
+			"-show_entries",
+			"packet=pts,dts",
+			"-of",
+			"csv",
+			"-i",
+			"pipe:0",
+		])
+		.stdin(std::process::Stdio::piped())
+		.stdout(std::process::Stdio::null())
+		.stderr(std::process::Stdio::piped())
+		.spawn()
+		.expect("ffprobe is in the dev shell");
+	let mut stdin = child.stdin.take().unwrap();
+	let writer = std::thread::spawn(move || stdin.write_all(&file));
+	let output = child.wait_with_output().unwrap();
+	writer.join().unwrap().expect("feed ffprobe");
+	assert!(output.status.success(), "ffprobe failed");
+	String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// Fragments shorter than a GOP of B-frame video continue the decode timeline instead of
+/// anchoring at a reference frame that presents after the B-frames decoded next, and time each
+/// sample by the cadence rather than the gap to that reference. Each track's `tfdt` then starts
+/// at or after where its previous fragment ended, every sample presents when it does in the
+/// whole-GOP export, and ffprobe reads the file without complaint.
+#[tokio::test(start_paused = true)]
+async fn reordered_video_cut_inside_a_gop_keeps_decode_times_increasing() {
+	let video = |fragments: &[crate::container::fmp4::Fragment]| {
+		fragments
+			.iter()
+			.filter(|fragment| super::first_traf(&fragment.data).tfhd.track_id == 1)
+			.count()
+	};
+	let (init, whole) = export_reordered_clip(None).await;
+	let reference = presentation_times(&init, &whole);
+	assert!(
+		reference[&1].windows(2).any(|pair| pair[1] < pair[0]),
+		"the clip's video must reorder"
+	);
+
+	for cap in [std::time::Duration::ZERO, std::time::Duration::from_millis(100)] {
+		let (init, fragments) = export_reordered_clip(Some(cap)).await;
+		assert!(video(&fragments) > video(&whole), "{cap:?} must cut inside a GOP");
+
+		let mut ends = std::collections::BTreeMap::new();
+		for fragment in &fragments {
+			let traf = super::first_traf(&fragment.data);
+			let start = traf.tfdt.expect("a tfdt").base_media_decode_time;
+			let span: u64 = traf.trun[0]
+				.samples
+				.iter()
+				.map(|sample| u64::from(sample.duration.expect("a sample duration")))
+				.sum();
+			if let Some(end) = ends.insert(traf.tfhd.track_id, start + span) {
+				assert!(
+					start >= end,
+					"{cap:?}: track {} decodes from {start} before its previous fragment ended at {end}",
+					traf.tfhd.track_id,
+				);
+			}
+		}
+
+		assert_eq!(
+			presentation_times(&init, &fragments),
+			reference,
+			"{cap:?}: every sample presents as in the whole-GOP export"
+		);
+
+		let mut file = init.to_vec();
+		for fragment in &fragments {
+			file.extend_from_slice(&fragment.data);
+		}
+		assert_eq!(ffprobe_warnings(file), "", "{cap:?}");
+	}
 }
