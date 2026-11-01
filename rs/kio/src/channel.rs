@@ -161,8 +161,17 @@ impl<T> Channel<T> {
 		if self.version() != judged {
 			return false;
 		}
-		self.park_value(waiter, judged);
+		if !waiter.holds(self.value_tag.load(Ordering::Acquire)) {
+			self.park_value_cold(waiter, judged);
+		}
 		true
+	}
+
+	/// [`park_value`](Self::park_value) kept out of line, so a [`repoll`](Self::repoll)
+	/// that skips the lock stays small.
+	#[inline(never)]
+	fn park_value_cold(&self, waiter: &Waiter, seen: u64) {
+		self.park_value(waiter, seen);
 	}
 
 	/// Register `waiter` for the next publish after `seen`, the version a pending predicate
@@ -171,6 +180,10 @@ impl<T> Channel<T> {
 	/// A publish that landed in between already drained the list without this waiter in it,
 	/// so wake it now: its task polls again and judges the new value. `f` was `FnOnce`, so
 	/// re-running it here is not an option.
+	///
+	/// Always inlined: once [`park_value_cold`](Self::park_value_cold) calls it too, the
+	/// compiler would otherwise keep it out of line, a call on every pending poll.
+	#[inline(always)]
 	pub fn park_value(&self, waiter: &Waiter, seen: u64) {
 		// Still on the list, and nothing published since `f` judged the value.
 		if waiter.holds(self.value_tag.load(Ordering::Acquire)) && self.version() == seen {
