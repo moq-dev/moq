@@ -41,6 +41,9 @@ pub struct Waiter {
 	// A registration found no free slot in `parked`, so a list may hold this waiter
 	// unrecorded and a later registration there would stack a duplicate.
 	lost: AtomicBool,
+
+	// Made by [`Self::noop`]: nothing it registers could ever be woken, so it registers nothing.
+	noop: bool,
 }
 
 /// Lists a waiter remembers being parked on. A relay's busiest tasks park on up to 8.
@@ -54,12 +57,16 @@ impl Waiter {
 			shared: OnceLock::new(),
 			parked: Default::default(),
 			lost: AtomicBool::new(false),
+			noop: false,
 		}
 	}
 
 	/// Create a no-op waiter that discards registrations.
 	pub fn noop() -> Self {
-		Self::new(Waker::noop().clone())
+		Self {
+			noop: true,
+			..Self::new(Waker::noop().clone())
+		}
 	}
 
 	/// Register this waiter with a [`WaiterList`] for future notification.
@@ -175,6 +182,7 @@ impl Clone for Waiter {
 			shared: OnceLock::from(shared),
 			parked: std::array::from_fn(|i| AtomicU64::new(self.parked[i].load(Ordering::Relaxed))),
 			lost: AtomicBool::new(self.lost.load(Ordering::Relaxed)),
+			noop: self.noop,
 		}
 	}
 }
@@ -232,7 +240,8 @@ impl WaiterList {
 		}
 	}
 
-	/// Register a waiter, a no-op while this list still holds it.
+	/// Register a waiter, a no-op while this list still holds it, or for a
+	/// [`Waiter::noop`].
 	///
 	/// The list's tag changes on every drain and the waiter records the tag it
 	/// joined under, so a matching record proves the entry is still here and a
@@ -243,6 +252,10 @@ impl WaiterList {
 	/// window covers the list over time. A list about to grow sweeps every
 	/// dead slot first.
 	pub fn register(&mut self, waiter: &Waiter) {
+		// Registering would only allocate a handle nothing can wake, leaving a dead slot once it drops.
+		if waiter.noop {
+			return;
+		}
 		if self.tag == 0 {
 			self.tag = serial();
 		}
@@ -546,7 +559,7 @@ mod tests {
 	fn abandoned_waiters_do_not_grow_the_list() {
 		let mut list = WaiterList::new();
 		for _ in 0..1_000 {
-			Waiter::noop().register(&mut list);
+			Waiter::new(Waker::noop().clone()).register(&mut list);
 		}
 		assert!(list.entries.len() <= 2);
 	}
@@ -555,11 +568,22 @@ mod tests {
 	fn a_list_is_empty_once_its_waiters_drop() {
 		let mut list = WaiterList::new();
 		assert!(list.is_empty());
-		let waiter = Waiter::noop();
+		let waiter = Waiter::new(Waker::noop().clone());
 		waiter.register(&mut list);
 		assert!(!list.is_empty());
 		drop(waiter);
 		assert!(list.is_empty());
+	}
+
+	/// A peek through a no-op waiter allocates no handle and takes no slot, clone or not.
+	#[test]
+	fn a_noop_waiter_registers_nothing() {
+		let mut list = WaiterList::new();
+		let waiter = Waiter::noop();
+		waiter.register(&mut list);
+		assert!(waiter.shared.get().is_none(), "a no-op registration allocated a handle");
+		waiter.clone().register(&mut list);
+		assert!(list.entries.is_empty());
 	}
 
 	/// Tasks parked on one list are retired and re-register in whatever order they
@@ -569,7 +593,7 @@ mod tests {
 	fn retired_live_waiters_do_not_grow_the_list() {
 		const LIVE: usize = 64;
 		let mut list = WaiterList::new();
-		let mut waiters: Vec<Waiter> = (0..LIVE).map(|_| Waiter::noop()).collect();
+		let mut waiters: Vec<Waiter> = (0..LIVE).map(|_| Waiter::new(Waker::noop().clone())).collect();
 		for waiter in &waiters {
 			waiter.register(&mut list);
 		}
@@ -578,7 +602,7 @@ mod tests {
 		for _ in 0..100_000 {
 			seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
 			let i = (seed >> 33) as usize % LIVE;
-			waiters[i] = Waiter::noop();
+			waiters[i] = Waiter::new(Waker::noop().clone());
 			waiters[i].register(&mut list);
 		}
 
@@ -603,7 +627,7 @@ mod tests {
 	/// after one of them drains, while an unrecorded list appends on every call.
 	#[test]
 	fn overflow_keeps_recorded_lists_idempotent() {
-		let waiter = Waiter::noop();
+		let waiter = Waiter::new(Waker::noop().clone());
 		let mut lists: Vec<_> = (0..=PARKED).map(|_| WaiterList::new()).collect();
 		for _ in 0..3 {
 			for list in &mut lists {
