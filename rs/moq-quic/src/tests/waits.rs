@@ -614,7 +614,10 @@ fn transmit_hears_resets_stops_and_refused_opens() {
 	pair.client_send(client_ch, s).reset(VarInt(7)).unwrap();
 	assert_eq!(driver.wakes(), 2, "RESET_STREAM");
 
-	let t = pair.server_streams(server_ch).open(Dir::Bi, Default::default()).unwrap();
+	let t = pair
+		.server_streams(server_ch)
+		.open(Dir::Bi, Default::default())
+		.unwrap();
 	pair.server_send(server_ch, t).write(&mut &b"x"[..]).unwrap();
 	pair.drive();
 	assert_eq!(pair.client_streams(client_ch).accept(Dir::Bi), Some(t));

@@ -30,7 +30,7 @@ Compare:
   handle appends; the driver packetizes and retransmits by offset; acks
   evict), credit is an atomic the driver publishes, received data arrives
   through a per-stream queue, and the waits from
-  [waits](/quest/m1/quic-api/waits.md) live in that per-stream cell. Keeps
+  moq-quic's `poll_*` waits live in that per-stream cell. Keeps
   the `&self` API and fits both runtimes; msquic's one owner per connection is
   prior art. Costs: an `Arc` per stream and credit mirrored on both sides.
   `kio::log` evicts only from its writer, so acked eviction needs a path
@@ -52,4 +52,3 @@ Public API: none; prototypes stay on a branch. The adoption is its own quest.
 ## Related
 
 - [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md) - measures the lock this would remove; its staging queue is a partial form of the channel approach
-- [moq-quic owns its waits](/quest/m1/quic-api/waits.md) - the wait shape every prototype keeps

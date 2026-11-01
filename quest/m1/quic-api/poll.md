@@ -24,7 +24,7 @@ primary surface. [Native WebTransport](/quest/m1/quic-api/native-web.md) and
 
 Decided 2026-10-25 (maintainer), replacing the 2026-10-23 shape:
 
-- **moq-quic owns the waits** ([waits](/quest/m1/quic-api/waits.md)). Each
+- **moq-quic owns the waits** (landed: `connection/waits.rs`). Each
   connection and stream form here takes the lock and forwards to moq-quic's
   `poll_*` in one line; the driver keeps no waiter table of its own. Only
   `Endpoint::poll_accept` waits on driver state, the queue of handshaken
@@ -56,10 +56,6 @@ that now). The `Connecting` handshake, `Endpoint::wait_idle`, and
 until a caller needs one. Report the public API:
 new poll methods on `Connection`, `send::Stream` and `Endpoint`, with the
 async forms unchanged.
-
-## Required
-
-- [Waits](/quest/m1/quic-api/waits.md) - moq-quic's `poll_*` forms these forward to
 
 ## Related
 

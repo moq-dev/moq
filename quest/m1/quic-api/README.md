@@ -37,7 +37,7 @@ Decided with the maintainer:
   WebTransport into m1 from m2, and deleted 0-RTT entirely: MoQ cannot use
   it, since CONNECT and authorization need the finished handshake.
 - 2026-10-25: moq-quic owns every wait as a `poll_*` on `&kio::Waiter`
-  ([waits](/quest/m1/quic-api/waits.md)), and moq-net's `transport::poll`
+  (landed as the waits quest), and moq-net's `transport::poll`
   traits join the epic so all
   three layers share the `&self, &kio::Waiter` shape.
 
@@ -48,7 +48,6 @@ side by side and fix any name or signature that still differs, and check
 ## Required
 
 - [Crypto](/quest/m1/quic-api/crypto.md) - crypto traits sealed to rustls, concrete peer identity and handshake data
-- [Waits](/quest/m1/quic-api/waits.md) - moq-quic owns every wait as a `poll_*` on `&kio::Waiter`, deleting `StreamEvent` and the drivers' and qmux's waiter tables
 - [Poll forms](/quest/m1/quic-api/poll.md) - both drivers' waits poll as `&self, &kio::Waiter` forwards to moq-quic, the async forms wrap them, and `send::Finished` is a future
 - [Native WebTransport](/quest/m1/quic-api/native-web.md) - `quic::web` in both crates implements moq-net's poll traits, deleting the generic `web_transport_trait` adapters and the dependency on it
 

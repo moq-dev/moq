@@ -427,7 +427,12 @@ impl<'a> Stream<'a> {
 			Some(Some(stream)) if stream.released => Err(Error::Closed),
 			Some(Some(stream)) => Ok(stream.end()),
 			Some(None) => Ok(None),
-			None => self.state.ends.get(&self.id).map(|&(end, _)| Some(end)).ok_or(Error::Closed),
+			None => self
+				.state
+				.ends
+				.get(&self.id)
+				.map(|&(end, _)| Some(end))
+				.ok_or(Error::Closed),
 		}
 	}
 

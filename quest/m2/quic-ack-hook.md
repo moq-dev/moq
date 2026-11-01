@@ -53,9 +53,8 @@ The same pair goes on `send::Finished`, the handle `finish(self)` returns
 ([moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)), and the methods take its opaque `send::Offset`, which only
 `offset()` mints, instead of a `u64`. The `send::Error` says why the bytes will
 never be acknowledged: a reset, the peer's STOP_SENDING, or the connection's
-loss. Both drivers forward to `moq-quic`'s own `poll_acked` wait, which
-[waits](/quest/m1/quic-api/waits.md) makes of today's `acked(offset)` and
-`StreamEvent::Acked`. Four traps, each settled in moq-quic where the wait
+loss. Both drivers forward to `moq-quic`'s own `send::Stream::poll_acked`
+wait, which replaced `StreamEvent::Acked`. Four traps, each settled in moq-quic where the wait
 lives:
 
 - A finished stream whose every byte was acknowledged must not look like a

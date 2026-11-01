@@ -691,7 +691,10 @@ impl State {
 				None => {
 					self.send_buffer.clear();
 					self.send_buffer.reserve(self.inner.current_mtu() as usize);
-					match self.inner.poll_transmit(waiter, now, max_datagrams, &mut self.send_buffer) {
+					match self
+						.inner
+						.poll_transmit(waiter, now, max_datagrams, &mut self.send_buffer)
+					{
 						Poll::Ready(t) => {
 							transmits += match t.segment_size {
 								None => 1,
