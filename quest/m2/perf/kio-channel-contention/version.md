@@ -30,6 +30,5 @@ longer contends with readers of the value. Lands with the contended bench (`rs/k
   `Consumer`, the `Waiter`, or a caller-held cursor). The `Consumer` is shared
   by `&self` across waiters, which argues for a caller-held cursor. Settle it
   first, with options and a recommendation.
-- Every new atomic protocol gets a loom model in `rs/kio/src/loom.rs`.
 - Generic across every `T`, with no moq-net restructure.
 

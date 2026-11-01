@@ -250,12 +250,13 @@ fn transport_config(config: &transport::Config) -> Result<moq_quic::transport::C
 	let mut transport = moq_quic::transport::Config::default();
 	transport.idle_timeout = Some(config.idle_timeout);
 	transport.keep_alive = config.keep_alive;
-	// Our defaults where the caller set none, rather than moq-quic's.
-	let limits = config.limits;
-	transport.limits.max_streams = limits.max_streams.or(NonZeroU64::new(MAX_STREAMS));
-	transport.limits.receive_window = limits.receive_window.or(NonZeroU64::new(CONNECTION_WINDOW.into()));
-	transport.limits.stream_receive_window = limits.stream_receive_window.or(NonZeroU64::new(STREAM_WINDOW.into()));
-	transport.limits.send_window = limits.send_window.or(NonZeroU64::new(SEND_WINDOW.into()));
+	// Our defaults where the caller set none, rather than moq-quic's; the rate caps pass through.
+	transport.limits = config.limits;
+	let limits = &mut transport.limits;
+	limits.max_streams = limits.max_streams.or(NonZeroU64::new(MAX_STREAMS));
+	limits.receive_window = limits.receive_window.or(NonZeroU64::new(CONNECTION_WINDOW.into()));
+	limits.stream_receive_window = limits.stream_receive_window.or(NonZeroU64::new(STREAM_WINDOW.into()));
+	limits.send_window = limits.send_window.or(NonZeroU64::new(SEND_WINDOW.into()));
 	transport.datagram.receive_buffer = Some(DATAGRAM_WINDOW);
 	transport.datagram.send_buffer = DATAGRAM_WINDOW;
 	// moq-quic probes by default; the 1200-byte floor reaches every path.
@@ -366,6 +367,7 @@ mod tests {
 	use std::num::NonZeroU64;
 
 	use super::{CONNECTION_WINDOW, MAX_STREAMS, SEND_WINDOW, STREAM_WINDOW, transport, transport_config};
+	use crate::quic::Rate;
 
 	#[test]
 	fn limits_default_to_the_fixed_credits() {
@@ -384,11 +386,15 @@ mod tests {
 		config.limits.receive_window = NonZeroU64::new(256 << 20);
 		config.limits.stream_receive_window = NonZeroU64::new(8 << 20);
 		config.limits.send_window = NonZeroU64::new(32 << 20);
+		config.limits.receive_rate = Some(Rate::BytesPerSecond(NonZeroU64::new(125_000).unwrap()));
+		config.limits.send_rate = Some(Rate::Unlimited);
 
 		let limits = transport_config(&config).expect("windows").limits;
 		assert_eq!(limits.receive_window, NonZeroU64::new(256 << 20));
 		assert_eq!(limits.stream_receive_window, NonZeroU64::new(8 << 20));
 		assert_eq!(limits.send_window, NonZeroU64::new(32 << 20));
+		assert_eq!(limits.receive_rate, config.limits.receive_rate);
+		assert_eq!(limits.send_rate, config.limits.send_rate);
 	}
 
 	#[test]

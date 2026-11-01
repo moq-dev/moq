@@ -2,7 +2,7 @@
 
 BBR3, Cubic, and Unlimited congestion controllers, consumed by moq-quic and the native transport drivers.
 
-The controllers take explicit `moq_clock::Instant` values and never drive a runtime. The `Controller` trait names no transport types: `on_sent` returns an opaque per-packet state that the transport stores and hands back with each acknowledgement or loss, and the controller paces its own sends.
+The controllers take explicit `kio::clock::Instant` values and never drive a runtime. The `Controller` trait names no transport types: `on_sent` returns an opaque per-packet state that the transport stores and hands back with each acknowledgement or loss, and the controller paces its own sends.
 
 Construct controllers with `Factory::build` on an `Arc<bbr3::Config>`, `Arc<cubic::Config>`, or `Arc<Unlimited>`. `Bbr3`, `Cubic`, `Unlimited`, and `Metrics` live at the crate root.
 

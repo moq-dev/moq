@@ -1,6 +1,6 @@
 //! One rendition: playlists from its own HLS records, and segments fetched on demand.
 
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::task::Poll;
@@ -11,6 +11,7 @@ use hang::catalog::{AudioConfig, Clock, Hls, Reference, VideoConfig};
 use moq_mux::container::fmp4::Muxer;
 use sha2::{Digest, Sha256};
 
+use super::driver::Owner;
 use super::playlist::{Segment, Snapshot};
 use super::{mpd, renditions, segments};
 use crate::Result;
@@ -341,8 +342,8 @@ pub struct Rendition {
 	fanout: renditions::Fanout,
 	/// The broadcast carrying the catalog and every record track.
 	catalog: moq_net::broadcast::Consumer,
-	/// Follows the records into [`live`](Self::live); aborted when the rendition drops.
-	watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
+	/// Follows the records into [`live`](Self::live); ends when the rendition drops.
+	watcher: Mutex<Option<Owner>>,
 	/// Set once the catalog drops or replaces the rendition (see [`retire`](Self::retire)).
 	retiring: tokio::sync::watch::Sender<bool>,
 	/// Which records this instance lists.
@@ -359,11 +360,8 @@ pub struct Rendition {
 	/// Serializes init builds, so concurrent first requests fetch the keyframe group once. Shared
 	/// so a background build (see [`start_init`](Self::start_init)) holds it for its whole run.
 	building: Arc<tokio::sync::Mutex<()>>,
-	/// The background init build; aborted when the rendition drops.
-	build: Mutex<Option<tokio::task::JoinHandle<()>>>,
-	/// The runtime the rendition was built on, which runs the background init build even when a
-	/// synchronous render calls from another thread.
-	runtime: tokio::runtime::Handle,
+	/// The background init build; ends when the rendition drops.
+	build: Mutex<Option<Owner>>,
 }
 
 impl Rendition {
@@ -465,7 +463,6 @@ impl Rendition {
 			run: kio::Producer::default(),
 			building: Arc::new(tokio::sync::Mutex::new(())),
 			build: Mutex::new(None),
-			runtime: tokio::runtime::Handle::current(),
 		})
 	}
 
@@ -505,13 +502,12 @@ impl Rendition {
 			run: kio::Producer::default(),
 			building: Arc::new(tokio::sync::Mutex::new(())),
 			build: Mutex::new(None),
-			runtime: tokio::runtime::Handle::current(),
 		})
 	}
 
 	/// Start following this rendition's own HLS records.
 	pub(crate) fn watch(self: &Arc<Self>) {
-		let watcher = tokio::spawn(watch_records(
+		let watcher = self.fanout.spawn(watch_records(
 			self.catalog.clone(),
 			self.hls.clone(),
 			Arc::downgrade(self),
@@ -570,7 +566,7 @@ impl Rendition {
 	}
 
 	/// The `EXT-X-TARGETDURATION` of this rendition's media playlist, in whole seconds.
-	pub(crate) fn target_duration(&self) -> u64 {
+	pub fn target_duration(&self) -> u64 {
 		self.target_duration
 	}
 
@@ -627,9 +623,7 @@ impl Rendition {
 	pub(crate) fn restart(&self, generation: Option<Arc<str>>) {
 		// A build parked on the old run's open group would hold `building`, so the new run could
 		// never start its own.
-		if let Some(build) = self.build.lock().expect("build lock poisoned").take() {
-			build.abort();
-		}
+		self.build.lock().expect("build lock poisoned").take();
 		self.live.clear();
 		let mut run = self.run_mut();
 		*run = Run {
@@ -1023,7 +1017,7 @@ impl Rendition {
 	/// later [`representation`](Self::representation) lists this rendition without any render
 	/// waiting on its media.
 	///
-	/// The build never holds the rendition itself, and is aborted when the rendition drops, so
+	/// The build never holds the rendition itself, and ends when the rendition drops, so
 	/// one stuck on an open group cannot keep a torn-down export's state alive.
 	pub(crate) fn start_init(self: &Arc<Self>) {
 		let Ok(binding) = self.authorize() else {
@@ -1048,7 +1042,7 @@ impl Rendition {
 		let media = self.media.clone();
 		let rendition = Arc::downgrade(self);
 		let name = self.name.clone();
-		let build = self.runtime.spawn(async move {
+		let build = self.fanout.spawn(async move {
 			let _building = building;
 			match read.read(&media, &binding).await {
 				Ok(Some(bytes)) => {
@@ -1413,17 +1407,6 @@ impl InitRead {
 	}
 }
 
-impl Drop for Rendition {
-	fn drop(&mut self) {
-		if let Some(watcher) = self.watcher.lock().expect("watcher lock poisoned").take() {
-			watcher.abort();
-		}
-		if let Some(build) = self.build.lock().expect("build lock poisoned").take() {
-			build.abort();
-		}
-	}
-}
-
 /// Fetch one group, mapping "no longer (or not yet) servable" to the error that says so
 /// rather than a bare `None`: a caller abandoning a segment can only explain itself with it.
 async fn fetch(
@@ -1542,7 +1525,7 @@ mod tests {
 		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let mut config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
 		config.broadcast = Some(moq_net::path::Relative::new("./secret").unwrap());
-		let renditions = renditions::Producer::new(Duration::from_secs(30));
+		let renditions = renditions::Producer::spawned(Duration::from_secs(30));
 		let rendition =
 			Arc::new(Rendition::video("video".into(), &config, &source, hls(), None, renditions.fanout()).unwrap());
 		let request = dynamic.requested_broadcast().await.unwrap();
@@ -1714,7 +1697,7 @@ mod tests {
 		let broadcast = origin.create_broadcast("live").unwrap();
 		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let config = VideoConfig::new(hang::catalog::VideoCodec::VP8);
-		let renditions = renditions::Producer::new(Duration::from_secs(30));
+		let renditions = renditions::Producer::spawned(Duration::from_secs(30));
 		let rendition =
 			Arc::new(Rendition::video("video".into(), &config, &source, hls(), None, renditions.fanout()).unwrap());
 		// On its own task, so only a registered wake polls it again.
@@ -1722,10 +1705,10 @@ mod tests {
 			let rendition = rendition.clone();
 			async move { kio::wait(|waiter| rendition.poll_refused(waiter)).await }
 		});
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		assert!(!refused.is_finished(), "the records have not failed yet");
 		rendition.fail(crate::Error::Moq(moq_net::Error::Transport("connection lost".into())));
-		moq_clock::timeout(Duration::from_secs(1), refused)
+		kio::clock::timeout(Duration::from_secs(1), refused)
 			.await
 			.expect("the failure wakes the wait")
 			.unwrap();

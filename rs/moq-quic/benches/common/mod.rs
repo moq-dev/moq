@@ -21,7 +21,7 @@ use criterion::{
 	Criterion,
 	measurement::{Measurement, ValueFormatter, WallTime},
 };
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_congestion::{Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent};
 use moq_quic::{
 	ConnectionId, ConnectionIdGenerator, Event, RandomConnectionIdGenerator, StreamEvent, VarInt, client,

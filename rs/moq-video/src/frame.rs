@@ -180,11 +180,11 @@ pub(crate) fn wait_dma_buf_readable(fd: BorrowedFd<'_>) -> std::io::Result<()> {
 		events: libc::POLLIN,
 		revents: 0,
 	};
-	let deadline = moq_clock::now() + DMA_BUF_FENCE_TIMEOUT;
+	let deadline = kio::clock::now() + DMA_BUF_FENCE_TIMEOUT;
 	loop {
 		// A signal restarts the wait against the same deadline rather than
 		// granting a fresh budget, so the total stall stays bounded.
-		let remaining = deadline.saturating_duration_since(moq_clock::now());
+		let remaining = deadline.saturating_duration_since(kio::clock::now());
 		if remaining.is_zero() {
 			return Err(std::io::Error::from(std::io::ErrorKind::TimedOut));
 		}
@@ -2944,6 +2944,33 @@ mod tests {
 		let yuyv = vec![0u8; width as usize * height as usize * 2];
 		let frame = super::I420::from_yuyv(&yuyv, width * 2, Size::new(width, height)).expect("yuyv to i420");
 		assert_eq!(frame.color(), None, "a chroma resample names no color space");
+	}
+
+	/// The MJPEG half of camera capture, which the nightly `vivid` lane cannot
+	/// reach: the driver offers raw formats only. The fixture is one solid red
+	/// 32x16 baseline JPEG, as a UVC camera would send it.
+	#[cfg(all(target_os = "linux", feature = "capture"))]
+	#[test]
+	fn mjpeg_capture_decodes_at_the_negotiated_size() {
+		const RED: &[u8] = include_bytes!("frame/test_data/red_32x16.jpg");
+		let size = Size::new(32, 16);
+		let frame = super::I420::from_mjpeg(RED, size).expect("mjpeg to i420");
+		assert_eq!(frame.size(), size);
+		let luma = size.pixels() as usize;
+		let (u, v) = frame.data()[luma..].split_at(luma / 4);
+		assert!(
+			u.iter().all(|&u| u < 128) && v.iter().all(|&v| v > 192),
+			"red decodes to low U and high V"
+		);
+
+		assert!(
+			super::I420::from_mjpeg(RED, Size::new(16, 16)).is_err(),
+			"size mismatch"
+		);
+		assert!(
+			super::I420::from_mjpeg(&RED[..RED.len() / 2], size).is_err(),
+			"truncated"
+		);
 	}
 
 	/// A short buffer is rejected at construction rather than panicking later: the
