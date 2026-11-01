@@ -61,3 +61,26 @@ Examples:
 Runs in the browser and, over WebSocket, in Node, Bun, and Deno; see
 [server-side](/lib/js/#server-side). Path patterns are on the
 [concept page](/concept/moq-lite#path-patterns).
+
+Groups retain a 32 MiB live tail without limiting their lifetime or frame count.
+Readers that fall behind the shed front receive `Evicted`; tracks with a
+`refresh` ratio also request a fresh group. A join never starts at an arbitrary
+frame in the retained tail.
+
+Frames have no size cap either. `group.createFrame({ size })` writes one in
+pieces, and `group.nextFrame()` reads it as it arrives with `readChunk()`, so a
+file-sized frame passes through holding only the tail. The tail sheds a large
+frame's oldest 1 MiB segments while it is written, so a chunk reader more than
+the tail behind gets `Evicted`. `readFrame()` still works for any size, but it
+collects the frame into one buffer. A compressed track keeps a 32 MiB frame
+limit, because its header declares each compressed slice's size before the
+bytes:
+
+```ts
+const frame = group.createFrame({ size: file.size });
+for await (const chunk of file.stream()) frame.write(chunk);
+frame.finish();
+
+const reader = await consumer.nextFrame();
+for (let chunk = await reader?.readChunk(); chunk; chunk = await reader?.readChunk()) save(chunk);
+```

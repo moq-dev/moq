@@ -461,7 +461,7 @@ Applying one rule to both advertisement and dispatch keeps advertised paths trut
 
 When resolving a path covered by several routes (across any number of streams), the subscriber SHOULD prefer the most specific covering route (see [Resolution](#resolution)).
 Among those, a route is ineligible while another route of the same prefix carries its Identity at a higher Epoch, however cheap it is.
-Among the eligible routes, the subscriber SHOULD prefer the higher preference it locally assigns to the arriving link, neutral unless assigned and either promoted above or demoted below that, then a path that contains no 0 Hop ID over one that does, then the lowest Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), then a broadcast the receiver publishes itself, breaking ties toward the shortest path, then toward the lowest Identity Hash, then, among routes of one Identity, toward the lowest Chain Hash, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
+Among the eligible routes, the subscriber SHOULD prefer a path that contains no 0 Hop ID over one that does, then the lowest Route Cost after adding each arriving link's cost (see [Cost Parameter](#cost-parameter)), then a broadcast the receiver publishes itself, breaking ties toward the shortest path, then toward the lowest Identity Hash, then, among routes of one Identity, toward the lowest Chain Hash, and then toward the most recently received, so a reconnecting publisher is not outranked by the stale session it replaced.
 
 Both hashes are the 64-bit FNV-1a hash, with offset basis `0x420C0DECB00B` and the standard FNV-64 prime, of the requested path's UTF-8 bytes followed by more bytes: for the Identity Hash, the route's Identity; for the Chain Hash, each Hop ID of the route's path, oldest first, as 8 little-endian bytes.
 They are keyed on the requested path rather than the route's prefix, so equal-cost advertisers of one prefix, each under its own Identity, share its paths instead of the first one taking them all.
@@ -1816,95 +1816,94 @@ The `Message Length` describes the payload size on the wire.
 
 ## moq-lite-07
 
-- Added a leading Type to datagrams: Group (0x0) or Padding (0x1), which either endpoint discards without changing session or subscription state.
+- Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
+- Removed rules for mapping onto earlier versions and moq-transport, and guidance on relay internals that no peer observes, such as announce and listing queues, TRACK_INFO caching, upstream requests, and GOAWAY route costs. Coalescing announce and listing changes is now a MAY, bounded only by when SYNCED arrives, and a publisher MAY, rather than MUST, reset an older Tracks Stream for the same Broadcast.
 
-- Refuse a SUBSCRIBE_DROP whose Group Start is greater than Group End plus one on every version that carries it. SETUP parameter counts are bounded by Message Length, without a separate count cap.
+### Session and Encoding {#changelog-07-session}
 
-- Limited a broadcast path to 32 segments and 4,096 bytes.
-
+- Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.
+- Capped the Message Length of every message except FRAME at 65,535 bytes. SETUP parameter counts are bounded by Message Length, without a separate count cap.
+- Any Setup Stream or bidirectional stream message that fails to decode closes the session with PROTOCOL_VIOLATION; previously only an unexpected Message Length did, as a SHOULD. This includes a frame bound without its group bound, and a Hop Count that disagrees with its Hop ID entries, each of which previously reset only the stream. A stream ending mid-message outside the Setup and Auth Streams, a malformed GROUP or FRAME on a Group or Fetch Stream, and an unknown stream type still affect only that stream.
 - A session without a negotiated subprotocol negotiates the version in a draft-14 CLIENT_SETUP and SERVER_SETUP exchange.
-
-- A path never has an empty segment, so a leading, trailing, or doubled `/` is a PROTOCOL_VIOLATION rather than a second spelling of the same path.
-
-- A `\` in a path escapes only `\` or `/`; any other `\` is a PROTOCOL_VIOLATION rather than a second spelling of the same namespace field.
-
-- Added the SETUP `Implementation` parameter (0x6): the sender's software as `name/version` product tokens.
-
-- Hop IDs span 64 bits.
-
-- Allow a negotiated extension to preserve timestamps with explicitly unchecked provenance.
-
-- Added Padding Stream (0x2), read and discarded incrementally by either endpoint.
-
-- Named 128 the midpoint priority for an unset Subscriber or Publisher Priority.
-- Added the Tracks Stream (0x8) with TRACKS, TRACKS_ADD, TRACKS_REMOVE, TRACKS_FINISH, and SYNCED: a subscriber lists one Broadcast's Tracks, each with its TRACK_INFO, then SUBSCRIBEs to those it wants, and learns whether each removed Track finished. A relay answers at once with what it holds.
-- Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
-
-- Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME and datagrams carry an `Inflated Size` when it is not none.
-- SUBSCRIBE may start at any frame, including when the subscriber no longer holds the prefix.
-
-- Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
-
-- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.
-
-- Bounded every timestamp below 2^61. A larger one is a malformed Track.
-
 - Added the reliable ordered RTCDataChannel binding, with one Qmux Record per binary message and no datagrams.
+- Added the SETUP `Implementation` parameter (0x6): the sender's software as `name/version` product tokens.
+- Added the client-only Token Setup Parameter (0x7), carrying the connection credential in SETUP instead of only the request URI.
+- Added Padding Stream (0x2), read and discarded incrementally by either endpoint.
+- A Report-level publisher reads and ignores PROBE targets instead of resetting the Probe Stream.
+- A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session; previously it MUST NOT open new streams. The sender SHOULD keep answering them and MAY reset one with GOING_AWAY, which the recipient SHOULD retry on another route.
 
-- Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
+### Error Codes {#changelog-07-errors}
+
+- Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
+- Added the MALFORMED_AUTH_TOKEN (0x16) session code, with moq-transport's meaning.
 - Listed the shared EXPIRED_AUTH_TOKEN (0x18) session code. A request that expires on its own resets with the UNAUTHORIZED stream code.
-
-- Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
-- Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges. Each end is an Anchor: none, an absolute Position (exclusive as an end), a count of Groups back from the latest, or a presentation time.
-- A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
-- A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
-- A publisher SHOULD order a datagram among the subscription's streams as if it were its Group's stream, ahead of that stream when both exist. It SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
-- Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
-- The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
-- A subscriber MAY cancel by FIN on its Subscribe Stream, and the publisher then FINs without SUBSCRIBE_END.
-- A publisher MAY FIN a subscription whose every Range has an End, once each Group in them is sent or dropped, without SUBSCRIBE_END. The FIN ends the subscription, not the Track.
+- Added NOT_SUPPORTED (0x30) to session errors; unsupported Auth Stream tokens and grants use AUTH_ERROR before or after a grant.
+- Removed KEY_VALUE_FORMATTING_ERROR (0x6) from the session codes; a repeated SETUP parameter is a PROTOCOL_VIOLATION.
 - Removed the NO_CAPACITY stream error and its one re-resolution. Every refusal is terminal, including at another route of the same prefix.
 - A relay resets with UNROUTABLE, rather than INTERNAL_ERROR, a stream served through an upstream session that ended.
-- A GOAWAY recipient MAY keep opening requests on the current session until it has moved to a replacement session; previously it MUST NOT open new streams. The sender SHOULD keep answering them and MAY reset one with GOING_AWAY, which the recipient SHOULD retry on another route.
-- Replaced Warm and Cold Route Cost with one static Route Cost.
-- Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
-- Added an optional `Subscriber Max Age` to FETCH, encoded as milliseconds plus one with zero meaning absent. It can tighten, but never relax, `Publisher Max Age`.
-- Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it.
+
+### Authorization {#changelog-07-auth}
+
+- Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
+- Scope widens before AUTH_OK. A presenter waits for unanswered non-empty tokens before sending an uncovered request or rejecting a publication, and renewal waits for AUTH_OK before withdrawing the old token.
+- An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION, as do invalid UTF-8 or an oversized AUTH_ERROR reason.
+- Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
+
+### Paths and Routing {#changelog-07-routing}
+
+- Limited a broadcast path to 32 segments and 4,096 bytes.
+- A path never has an empty segment, so a leading, trailing, or doubled `/` is a PROTOCOL_VIOLATION rather than a second spelling of the same path.
+- A `\` in a path escapes only `\` or `/`; any other `\` is a PROTOCOL_VIOLATION rather than a second spelling of the same namespace field.
+- Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
+- Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 - Added `Identity` and `Epoch` to ANNOUNCE_START and ANNOUNCE_RESTART, and `Identity` to TRACK, TRACKS, SUBSCRIBE, and FETCH. The Identity is non-empty UTF-8 text naming one continuous stream, and a path and an Identity name one Broadcast; the Epoch is a counter within one Identity. A relay MAY move a subscription between routes with the same Identity, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Identities. Within one Identity only its highest Epoch is eligible. A request's Identity is empty when it pins none. Replaces the first-hop identity.
 - Added ANNOUNCE_RESTART (0x3): a live advertisement now serves another Identity, or a higher Epoch of the same one.
 - Added ANNOUNCE_TAKEOVER (0x5): a route that continues what a live advertisement served beneath it, such as a job answering a request through a worker's prefix at its exact path, so subscriptions resolved through the prefix are not reset.
 - A receiver mints an Identity, starting with `~`, for each announcement a session of an earlier version delivers.
-- An untimed Track declares a `Timescale` of 0 in TRACK_INFO, and its FRAME messages and datagrams omit the timestamp.
-- Expiration also measures a group's arrival age, the time since its successor arrived at this hop, so a group of an untimed Track expires by arrival age alone.
-- A publisher resets the Group Stream of an expired, unfinished group with OLD rather than finishing it, even after sending every frame it holds.
-- An open Track Stream is interest in the Track until the subscriber closes it, which a subscriber does once its Subscribe Stream has a response.
+- Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
+- Hop IDs span 64 bits.
+- Replaced Warm and Cold Route Cost with one static Route Cost.
+- Added the Identity Hash and Chain Hash tie-breaks after the shortest path: hashes of the requested path with the route's Identity, then with its Hop IDs, so equal-cost advertisers of one prefix share its paths. Both are skipped for a route a publisher announced directly at the requested path.
+- Removed the standby-ordering deployment requirements on Route Cost seeds and bounds.
 
-- Assigned `moq-lite-07-wip` as this draft's protocol identifier until it is finalized as `moq-lite-07`.
-- Added the client-only Token Setup Parameter (0x7), carrying the connection credential in SETUP instead of only the request URI.
-- Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.
-- Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
+### Tracks {#changelog-07-tracks}
+
+- Added the Tracks Stream (0x8) with TRACKS, TRACKS_ADD, TRACKS_REMOVE, TRACKS_FINISH, and SYNCED: a subscriber lists one Broadcast's Tracks, each with its TRACK_INFO, then SUBSCRIBEs to those it wants, and learns whether each removed Track finished. A relay answers at once with what it holds.
+- An open Track Stream is interest in the Track until the subscriber closes it, which a subscriber does once its Subscribe Stream has a response.
+- Named 128 the midpoint priority for an unset Subscriber or Publisher Priority.
+- Made TRACK_INFO Publisher Max Age optional, encoded as milliseconds plus one with zero meaning no limit.
+- Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
+- Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME and datagrams carry an `Inflated Size` when it is not none.
+- An untimed Track declares a `Timescale` of 0 in TRACK_INFO, and its FRAME messages and datagrams omit the timestamp.
+- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.
+- Bounded every timestamp below 2^61. A larger one is a malformed Track.
+
+### Subscriptions {#changelog-07-subscribe}
+
+- Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges. Each end is an Anchor: none, an absolute Position (exclusive as an end), a count of Groups back from the latest, or a presentation time.
+- Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
+- SUBSCRIBE may start at any frame, including when the subscriber no longer holds the prefix.
+- A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
+- Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
+- Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it.
 - Added `Error Code` to SUBSCRIBE_END: a track can end with an error while keeping the groups below its end.
 - Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_END. Every sequence is accounted for by a Group Stream, a datagram, or a drop; a publisher SHOULD send a drop as soon as it gives a sequence up.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving.
+- Refuse a SUBSCRIBE_DROP whose Group Start is greater than Group End plus one on every version that carries it.
 - SUBSCRIBE_END declares the final boundary while lower groups can still be in flight; the Subscribe Stream FIN follows once every Group Stream has finished or been reset.
-- Added the Identity Hash and Chain Hash tie-breaks after the shortest path: hashes of the requested path with the route's Identity, then with its Hop IDs, so equal-cost advertisers of one prefix share its paths.
-- Skipped both hashes for a route a publisher announced directly at the requested path.
-- Added a local link preference to route selection, first among eligible routes and before the 0 Hop ID check: the higher preference a subscriber assigns to the arriving link wins, and an unassigned link is neutral. Not carried on the wire.
-- Added announce compression: ANNOUNCE_START gains `Path Base` and `Path Keep` to copy the head of a live advertisement's suffix, and ANNOUNCE_START and ANNOUNCE_UPDATE gain `Hop Base` and `Hop Keep` to copy the tail of a live advertisement's Hop ID list.
-- Capped the Message Length of every message except FRAME at 65,535 bytes.
-- Added the TOO_MANY_REQUESTS (0x7) session code, closing a session whose peer goes past the endpoint's bound on subscriptions or announcements.
-- Added the MALFORMED_AUTH_TOKEN (0x16) session code, with moq-transport's meaning.
-- Removed KEY_VALUE_FORMATTING_ERROR (0x6) from the session codes; a repeated SETUP parameter is a PROTOCOL_VIOLATION.
-- Removed the standby-ordering deployment requirements on Route Cost seeds and bounds.
-- Removed rules for mapping onto earlier versions and moq-transport, and guidance on relay internals that no peer observes, such as announce and listing queues, TRACK_INFO caching, upstream requests, and GOAWAY route costs. Coalescing announce and listing changes is now a MAY, bounded only by when SYNCED arrives, and a publisher MAY, rather than MUST, reset an older Tracks Stream for the same Broadcast.
-- Limited AUTH_OK Expires to 2^53 - 1 milliseconds, with an out-of-range value closing the session with PROTOCOL_VIOLATION.
-- Invalid UTF-8 or an oversized AUTH_ERROR reason closes the session with PROTOCOL_VIOLATION.
-- An Auth Stream message that fails to decode, has trailing body bytes, or has an unexpected type, or a second AUTH from the opener, closes the session with PROTOCOL_VIOLATION.
-- Any Setup Stream or bidirectional stream message that fails to decode closes the session with PROTOCOL_VIOLATION; previously only an unexpected Message Length did, as a SHOULD. This includes a frame bound without its group bound, and a Hop Count that disagrees with its Hop ID entries, each of which previously reset only the stream. A stream ending mid-message outside the Setup and Auth Streams, a malformed GROUP or FRAME on a Group or Fetch Stream, and an unknown stream type still affect only that stream.
-- A Report-level publisher reads and ignores PROBE targets instead of resetting the Probe Stream.
-- Added NOT_SUPPORTED (0x30) to session errors; unsupported Auth Stream tokens and grants use AUTH_ERROR before or after a grant.
-- Added the Auth Stream (0x7) with AUTH, AUTH_OK, and AUTH_ERROR: either endpoint presents a token on its own stream and learns the [path patterns](#path-pattern) it may publish and subscribe to. The union of a session's open grants is its scope. A shrink withdraws what it no longer covers, and an announcement outside the scope closes the session with UNAUTHORIZED. A peer without the stream resets it.
-- Required scope widening before AUTH_OK and presenter-side waiting for unanswered non-empty tokens before sending an uncovered request or rejecting a publication; renewal waits for AUTH_OK before withdrawing the old token.
+- A publisher MAY FIN a subscription whose every Range has an End, once each Group in them is sent or dropped, without SUBSCRIBE_END. The FIN ends the subscription, not the Track.
+- The subscriber FINs its Subscribe Stream after settling its tail; graceful session close waits for that FIN or reset.
+- A subscriber MAY cancel by FIN on its Subscribe Stream, and the publisher then FINs without SUBSCRIBE_END.
+
+### Delivery {#changelog-07-delivery}
+
+- Added a leading Type to datagrams: Group (0x0) or Padding (0x1), which either endpoint discards without changing session or subscription state.
+- Expiration also measures a group's arrival age, the time since its successor arrived at this hop, so a group of an untimed Track expires by arrival age alone.
+- A publisher resets the Group Stream of an expired, unfinished group with OLD rather than finishing it, even after sending every frame it holds.
+- A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
+- A publisher SHOULD order a datagram among the subscription's streams as if it were its Group's stream, ahead of that stream when both exist. It SHOULD drop a datagram rather than block when the transport has no room for it, where it previously sent one only if the congestion controller could transmit it immediately.
+- Assigned 0x3A NOT_FETCHABLE in the stream error table: a FETCH for a group delivered only as a datagram.
+- Added an optional `Subscriber Max Age` to FETCH, encoded as milliseconds plus one with zero meaning absent. It can tighten, but never relax, `Publisher Max Age`.
 
 ## moq-lite-06
 

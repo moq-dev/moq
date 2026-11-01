@@ -757,7 +757,9 @@ struct Idle {
 	/// Serves its cache misses with a group FETCH, subscribed or not.
 	dynamic: track::Requests,
 	demand: track::Demand,
-	timescale: Option<Timescale>,
+	/// The Track Properties the publisher declared for the copy. A resumed SUBSCRIBE that
+	/// opts out of them is answered without them, so the copy keeps these.
+	properties: ietf::Properties,
 	/// The publisher ended the track, so a returning subscriber reads the copy as it is.
 	finished: bool,
 }
@@ -3096,6 +3098,11 @@ impl Subscriber {
 		let order = aggregate.map(|s| s.order).unwrap_or_default();
 		// Without an Established subscription, a relay includes the request it holds.
 		let new_group = target.new_group();
+		// A timed copy asks for the units that opt its objects into timestamps.
+		let properties_wanted = match &target {
+			Target::Request(_) => true,
+			Target::Resume(idle) => idle.properties.timescale.is_some(),
+		};
 		// Buffered only: the wait for the answer flushes it, so the local terminals still end a
 		// request the peer's send window holds back.
 		let written = match &held {
@@ -3126,13 +3133,7 @@ impl Subscriber {
 					group_order: order.into(),
 					filter: join.filter,
 					fill: join.fill,
-					// A resumed copy already knows the track, from the answer that accepted
-					// it, but only a TIMESCALE in this answer opts its objects into the
-					// timestamps a timed copy reads.
-					properties_wanted: match &target {
-						Target::Request(_) => true,
-						Target::Resume(idle) => idle.timescale.is_some(),
-					},
+					properties_wanted,
 					forward: true,
 					rendezvous: false,
 					range_filters: false,
@@ -3357,8 +3358,15 @@ impl Subscriber {
 			properties,
 			largest,
 		} = accepted;
-		// The objects are stamped in the units the answer declares. A timed copy asked for
-		// them; an untimed one that opted out has none to keep.
+		// A resumed SUBSCRIBE opts out of the properties from draft-22, so its answer carries
+		// none and the copy keeps the ones it learned. Before that the answer declares them
+		// again. A pause holds these too, so a later resume still knows DYNAMIC_GROUPS.
+		let properties = match &resumed {
+			Some(idle) if held.is_none() && !properties_wanted && ietf::Filter::is_draft20(self.version) => {
+				idle.properties.clone()
+			}
+			_ => properties,
+		};
 		let timescale = properties.timescale;
 		let info = accepted_info(&properties, self.version);
 		// The copy already holds the track: it is current again up to the answer's Largest
@@ -3892,8 +3900,7 @@ impl Subscriber {
 				messages,
 				request_id,
 				alias,
-				// What a pause holds again: the properties the track was listed with.
-				properties,
+				properties: properties.clone(),
 				owed: unanswered.load(Ordering::Relaxed),
 				copy: Some(track.clone()),
 			};
@@ -3902,7 +3909,7 @@ impl Subscriber {
 				demand: track.demand(),
 				track,
 				dynamic,
-				timescale,
+				properties,
 				finished: false,
 			});
 		}
@@ -3925,7 +3932,7 @@ impl Subscriber {
 				demand: track.demand(),
 				track,
 				dynamic,
-				timescale,
+				properties,
 				finished: true,
 			});
 		}
@@ -3953,7 +3960,7 @@ impl Subscriber {
 			demand: track.demand(),
 			track,
 			dynamic,
-			timescale,
+			properties,
 			finished: false,
 		})
 	}
@@ -4032,7 +4039,7 @@ impl Subscriber {
 						broadcast_path.clone(),
 						track_name.to_owned(),
 						fill,
-						Later::Known(idle.timescale),
+						Later::Known(idle.properties.timescale),
 					);
 					group_fetches.push(fetch);
 				}
@@ -4338,7 +4345,7 @@ impl Subscriber {
 			.await;
 		match learned {
 			Ok(idle) => {
-				timescale.resolve(Ok(idle.timescale));
+				timescale.resolve(Ok(idle.properties.timescale));
 				Some(idle)
 			}
 			Err(err) => {
@@ -4497,7 +4504,7 @@ impl Subscriber {
 			demand: track.demand(),
 			track,
 			dynamic,
-			timescale: ok.properties.timescale,
+			properties: ok.properties,
 			finished: false,
 		})
 	}
@@ -13356,12 +13363,23 @@ mod stitch_tests {
 				original.push(datagram);
 			}
 			track.finish().unwrap();
-			let (served, _sessions) = match hop {
+			let (served, _sessions, _copy) = match hop {
 				true => {
 					let (served, sessions) = crate::lite::ietf::test_hop(&origin, "room", [true, true]).await;
-					(served, Some(sessions))
+					// The hop learns the track's info first, and holds the copy for the SUBSCRIBE
+					// below: a SUBSCRIBE sent alongside the TRACK has the cache replayed as
+					// datagrams before the TRACK_INFO they are read with, and they are dropped.
+					let copy = served
+						.consume()
+						.request("room", None)
+						.await
+						.unwrap()
+						.track("video")
+						.unwrap();
+					copy.info().await.unwrap();
+					(served, Some(sessions), Some(copy))
 				}
-				false => (origin, None),
+				false => (origin, None, None),
 			};
 			let downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
 			let peer = peer::PeerSetup::default();

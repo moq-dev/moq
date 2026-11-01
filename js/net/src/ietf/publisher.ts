@@ -22,17 +22,17 @@ import {
 } from "../error.ts";
 import type * as group from "../group.ts";
 import type { Hop, Route } from "../hop.ts";
-import type * as Identity from "../identity.ts";
 import { firstEligible, hiddenBelow, hooks, presented } from "../internal.ts";
 import type { Consumer as OriginConsumer } from "../origin.ts";
 import * as Path from "../path.ts";
+import { sendPayload } from "../payload.ts";
 import { Priority, sendOrder } from "../priority.ts";
 import { type Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import type { Groups, Info, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
-import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
+import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import { untilGivenUp } from "../util/given_up.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
@@ -1024,23 +1024,29 @@ export class Publisher {
 			// PUBLISH_DONE is required for every supported draft. The peer may have already
 			// closed its side to unsubscribe, in which case there is nowhere to send it.
 			const updateFailed = publishError instanceof UpdateFailed;
+			// A malformed upstream, such as a moq-lite MALFORMED_TRACK reset, is passed on as one.
+			const malformed = publishError instanceof StreamError && publishError.code === StreamCode.MalformedTrack;
 			try {
 				const done = new PublishDone({
 					statusCode: unauthorized
 						? PublishDoneStatus.UNAUTHORIZED
 						: updateFailed
 							? PublishDoneStatus.UPDATE_FAILED
-							: publishError
-								? PublishDoneStatus.INTERNAL_ERROR
-								: PublishDoneStatus.TRACK_ENDED,
+							: malformed
+								? PublishDoneStatus.MALFORMED_TRACK
+								: publishError
+									? PublishDoneStatus.INTERNAL_ERROR
+									: PublishDoneStatus.TRACK_ENDED,
 					streamCount: BigInt(streams.opened),
 					reasonPhrase: unauthorized
 						? "not granted"
 						: updateFailed
 							? "update failed"
-							: publishError
-								? "internal error"
-								: "track ended",
+							: malformed
+								? "malformed track"
+								: publishError
+									? "internal error"
+									: "track ended",
 				});
 				await Message.write(request.writer, PublishDone.id, done, version);
 			} catch {
@@ -1179,7 +1185,7 @@ export class Publisher {
 					// Reading from the filter's start drops the objects below it: they are outside
 					// the requested range, so skipping them is not a gap.
 					const read = await race([
-						group.readFrameSequence({ from: slice.skip }),
+						hooks.readGroupFrame(group, false, slice.skip),
 						stream.closed,
 						cancelled,
 						excluded.promise,
@@ -1190,10 +1196,18 @@ export class Publisher {
 					next = read.sequence + 1;
 					if (slice.until !== undefined && read.sequence >= slice.until) break;
 
-					const obj = new Frame({ payload: read.payload, timestamp: read.timestamp });
+					// A frame written in pieces streams its payload after the header.
+					const chunks = read.chunks?.size ? read.chunks : undefined;
+					const obj = chunks
+						? new Frame({ streamed: chunks.size, timestamp: chunks.timestamp })
+						: new Frame({
+								payload: read.chunks ? new Uint8Array(0) : read.frame.payload,
+								timestamp: read.frame.timestamp,
+							});
 					const delta = first ? read.sequence : 0;
 					first = false;
 					await send(() => obj.encode(stream, header.flags, timescale, this.#session.version, delta));
+					if (chunks) await send(() => sendPayload(chunks, (chunk) => stream.write(chunk), stream.closed));
 				}
 
 				// The track ends right after this group's last object, so the marker rides this
@@ -1869,13 +1883,12 @@ export class Publisher {
 			const deadline = new Deadline();
 			const answer = await deadline.wait(
 				(async (): Promise<Answer> => {
-					const stream = await deadline.open(this.#session.openBi(requestOptions));
-					const opened = new RequestStream(stream, this.#session, this.#quic);
+					const opened = await RequestStream.open(this.#session, deadline, this.#quic);
 					request = opened;
 					const version = this.#session.version;
 					const token = this.#auth?.carried(auth);
 					const msg = new PublishNamespace({ requestId, trackNamespace: path, params, token });
-					await deadline.send(stream, async () => {
+					await deadline.send(opened, async () => {
 						await Message.write(opened.writer, PublishNamespace.id, msg, version);
 					});
 
@@ -2576,11 +2589,10 @@ export class Publisher {
 	 * Resolve the broadcast a request names for serving: a local publish, or else the
 	 * origin's routes and dynamic handlers. Rejects with the abort once `signal` aborts.
 	 */
-	async #resolve(name: Path.Valid, signal: AbortSignal, identity?: Identity.Valid): Promise<broadcast.Consumer> {
+	async #resolve(name: Path.Valid, signal: AbortSignal): Promise<broadcast.Consumer> {
 		const broadcast =
 			this.#publish &&
-			(wireOf(this.#publish).local(name, identity) ??
-				(await wireOf(this.#publish).demand(name, identity, signal)));
+			(wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name, undefined, signal)));
 		if (!broadcast) throw new NotFound(`broadcast ${name}`);
 		return broadcast;
 	}

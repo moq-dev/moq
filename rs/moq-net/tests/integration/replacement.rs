@@ -77,12 +77,13 @@ const WITHIN_HOLD: Duration = Duration::from_millis(10);
 const PAST_HOLD: Duration = Duration::from_millis(500);
 
 async fn replace(version: &str, identity: Option<Identity>) {
+	let carries = version == "moq-lite-07-wip";
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(3);
 
 	let mut route = origin::Route::default();
-	route.identity = identity;
+	route.identity = identity.clone();
 	let cam = publisher.publish("cam", route).unwrap();
 	let video = cam.create_track("video", timed()).unwrap();
 	let audio = cam.create_track("audio", timed()).unwrap();
@@ -91,7 +92,14 @@ async fn replace(version: &str, identity: Option<Identity>) {
 	let _first = link(version, &publisher, &viewer).await;
 	let mut announced = viewer.consume().announced();
 	match next_event(&mut announced).await {
-		announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "cam"),
+		announce::Event::Start(announce) => {
+			assert_eq!(announce.prefix.as_str(), "cam");
+			let carried = announce.route.identity.as_ref().expect("every route has an identity");
+			assert_eq!(carried.is_minted(), !carries, "{version}: minted {carried}");
+			if carries && let Some(identity) = &identity {
+				assert_eq!(carried, identity, "{version}: carried identity");
+			}
+		}
 		other => panic!("{version}: expected the broadcast, got {other:?}"),
 	}
 
@@ -105,7 +113,7 @@ async fn replace(version: &str, identity: Option<Identity>) {
 	let _second = link(version, &publisher, &viewer).await;
 	kio::clock::sleep(WITHIN_HOLD).await;
 
-	if version.to_string() == "moq-lite-07-wip" {
+	if carries {
 		// The identity continues across the replacement: nothing to restart, and the old
 		// handle keeps serving.
 		if let Ok(event) = kio::clock::timeout(PAST_HOLD, announced.next()).await {

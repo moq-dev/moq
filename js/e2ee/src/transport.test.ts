@@ -75,8 +75,8 @@ for (const [name, protocol, routed, timed] of transports) {
 
 		const remote = await active(subscriber, path);
 		// The epoch rides the route where the wire carries it; elsewhere the application supplies it.
-		if (routed) expect(Epoch.of(remote)).toBe(generation.epoch);
-		const epoch = (routed && Epoch.of(remote)) || generation.epoch;
+		expect(Epoch.of(remote)).toBe(routed ? generation.epoch : undefined);
+		const epoch = Epoch.of(remote) ?? generation.epoch;
 		const consumer = await new Protected.Consumer(remote, cred.consume(epoch)).subscribe("video", {
 			maxDelay: Milli(60_000),
 		});

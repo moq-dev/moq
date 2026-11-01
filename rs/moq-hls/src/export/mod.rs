@@ -42,7 +42,7 @@ mod route;
 pub mod renditions;
 pub mod segments;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use moq_mux::catalog::{self, CatalogFormat, Stream};
@@ -118,8 +118,8 @@ pub struct Broadcaster {
 /// What the last [`Broadcaster`] clone releases.
 struct Guard {
 	renditions: renditions::Producer,
-	/// Ends the catalog watcher when dropped.
-	_watcher: driver::Owner,
+	/// Ends the catalog watcher when dropped, or when [`replaced`](Broadcaster::replaced) takes it.
+	watcher: Mutex<Option<driver::Owner>>,
 }
 
 impl Drop for Guard {
@@ -135,7 +135,16 @@ impl Drop for Guard {
 impl Broadcaster {
 	/// Start tracking the renditions of `source`'s catalog broadcast, once the returned
 	/// [`Driver`] runs.
-	pub fn new(source: moq_mux::Source, config: Config) -> (Self, Driver) {
+	///
+	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU its
+	/// cryptography cannot run on.
+	pub fn new(source: moq_mux::Source, config: Config) -> crate::Result<(Self, Driver)> {
+		rind::cpu::check().map_err(crate::Error::unsupported_cpu)?;
+		Ok(Self::start(source, config))
+	}
+
+	/// [`new`](Self::new) for a caller that already checked the CPU.
+	pub(crate) fn start(source: moq_mux::Source, config: Config) -> (Self, Driver) {
 		let broadcast = source.broadcast();
 		// An identity names the stream on every edge, so each serves it under the same URLs.
 		let instance = broadcast
@@ -153,7 +162,7 @@ impl Broadcaster {
 			instance: Arc::from(instance.as_str()),
 			_guard: Arc::new(Guard {
 				renditions: renditions.clone(),
-				_watcher: watcher,
+				watcher: Mutex::new(Some(watcher)),
 			}),
 			renditions,
 		};
@@ -163,7 +172,7 @@ impl Broadcaster {
 	/// [`new`](Self::new), with its driver spawned on the ambient runtime.
 	#[cfg(test)]
 	pub(crate) fn spawned(source: moq_mux::Source, config: Config) -> Self {
-		let (broadcaster, driver) = Self::new(source, config);
+		let (broadcaster, driver) = Self::new(source, config).unwrap();
 		tokio::spawn(driver.run());
 		broadcaster
 	}
@@ -427,6 +436,19 @@ impl Broadcaster {
 		}
 	}
 
+	/// End every playlist and recording cursor at the segments listed now, because another
+	/// publisher run took the broadcast over, and stop following this one's catalog and records.
+	/// The replaced publisher may keep sending, so nothing else would end them.
+	#[cfg_attr(
+		not(feature = "server"),
+		allow(dead_code, reason = "only the `server` feature follows takeovers")
+	)]
+	pub(crate) fn replaced(&self) {
+		let watcher = self._guard.watcher.lock().unwrap().take();
+		drop(watcher);
+		self.renditions.cut();
+	}
+
 	/// Whether the current catalog contains no servable renditions (serve path).
 	#[cfg_attr(
 		not(feature = "server"),
@@ -447,7 +469,7 @@ async fn watch_catalog(source: moq_mux::Source, renditions: renditions::Producer
 			Ok(consumer) => break consumer,
 			Err(err) => {
 				tracing::warn!(%err, "failed to subscribe to broadcast catalog, retrying");
-				let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+				let wait = delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
 				delay = (delay * 2).min(CATALOG_RETRY_MAX);
 				tokio::select! {
 					_ = kio::clock::sleep(wait) => {}
@@ -1697,7 +1719,8 @@ mod tests {
 		settle().await;
 		let (_catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
-		let (broadcaster, driver) = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let (broadcaster, driver) =
+			Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let driving = tokio::spawn(driver.run());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let old = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
@@ -1785,6 +1808,30 @@ mod tests {
 			rendition.media_playlist(None).unwrap().is_none(),
 			"clearing the generation is a change too"
 		);
+	}
+
+	// A replaced instance's ended playlists keep their URLs: a generation set after the cut would
+	// otherwise relabel its frozen rows under a run they never belonged to.
+	#[tokio::test]
+	async fn a_replaced_instance_keeps_its_generation() {
+		let origin = produce_origin();
+		let broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let (_catalog, _media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
+
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
+		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+		let tag = rendition.tag().to_string();
+		broadcaster.set_generation(Some("run-1")).unwrap();
+		broadcaster.replaced();
+		let ended = rendition.media_playlist(None).unwrap().expect("the cut keeps the rows");
+		assert!(ended.contains("#EXT-X-ENDLIST"), "{ended}");
+
+		broadcaster.set_generation(Some("run-2")).unwrap();
+		assert_eq!(rendition.media_playlist(None).unwrap().as_deref(), Some(ended.as_str()));
+		assert!(ended.contains(&format!("\nseg/run-1.{tag}.0.m4s\n")), "{ended}");
 	}
 
 	// A restarted inline-codec publisher can carry new parameter sets under the same catalog, so
@@ -2499,7 +2546,8 @@ mod tests {
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(3_000_000, false)).unwrap();
 
-		let (broadcaster, driver) = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let (broadcaster, driver) =
+			Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let driving = tokio::spawn(driver.run());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster

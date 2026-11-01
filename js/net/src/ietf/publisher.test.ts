@@ -3,8 +3,15 @@ import { Elapsed, Manual, Milli, Nano, sleep, timeout, yieldNow } from "@moq/clo
 import { Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import { error, ProtocolViolation, SessionCode, SessionError, StreamCode, unauthorized } from "../error.ts";
-import { MAX_GROUP_FRAMES } from "../group.ts";
+import {
+	error,
+	ProtocolViolation,
+	SessionCode,
+	SessionError,
+	StreamCode,
+	Stream as StreamError,
+	unauthorized,
+} from "../error.ts";
 import { type Hop, HopSchema } from "../hop.ts";
 import * as Identity from "../identity.ts";
 import { hooks } from "../internal.ts";
@@ -2068,6 +2075,8 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 			[new Error("failed"), 0x0],
 			[unauthorized("test"), 0x1],
 			[new SessionError(SessionCode.Expired), 0x1],
+			// So does a malformed upstream: MALFORMED_TRACK, so the subscriber can tell it from a bug here.
+			[new StreamError(StreamCode.MalformedTrack), 0x12],
 		] as const) {
 			const pair = createMockTransportPair(ALPN.DRAFT_18);
 			const session = new NativeSession(pair.server, version, true);
@@ -2543,20 +2552,17 @@ test("draft-22: a fill never rewinds an absolute live join", async () => {
 });
 
 /**
- * A group that outgrows its cache is aborted. A Next Object subscriber joining that group
- * sees the abort rather than a live tail served off a trimmed head.
+ * A group that outgrows its cache sheds its front. A Next Object subscriber joining that group
+ * receives Evicted rather than an arbitrary tail.
  */
-test("draft-22: an open group that outgrew its cache aborts instead of serving a tail", async () => {
+test("draft-22: an open group with a shed front refuses a tail join", async () => {
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
 	const group = track.appendGroup();
-	for (let i = 0; i < MAX_GROUP_FRAMES; i++) {
-		group.writeFrame({ payload: new TextEncoder().encode(`0.${i}`), timestamp: Timestamp.now() });
+	for (let i = 0; i < 40; i++) {
+		group.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.now() });
 	}
-	expect(() =>
-		group.writeFrame({ payload: new TextEncoder().encode("overflow"), timestamp: Timestamp.now() }),
-	).toThrow();
 
 	const { client, ok } = await runSubscribe(
 		fx,
@@ -2570,10 +2576,10 @@ test("draft-22: an open group that outgrew its cache aborts instead of serving a
 	);
 
 	try {
-		expect(ok.largest).toEqual({ groupId: 0n, objectId: BigInt(MAX_GROUP_FRAMES - 1) });
+		expect(ok.largest).toEqual({ groupId: 0n, objectId: 39n });
 
 		const live = await nextUni(fx.uni);
-		if (!live) throw new Error("the subscription never opened a stream for the aborted group");
+		if (!live) throw new Error("the subscription never opened a stream for the evicted group");
 		await expect(readGroup(live)).rejects.toBeDefined();
 	} finally {
 		fx.close();

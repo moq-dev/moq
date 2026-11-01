@@ -33,6 +33,7 @@ import {
 } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
+import { receiveFrame, skipPayload } from "../payload.ts";
 import { type Cursor, Reader, type Stream } from "../stream.ts";
 import { Tail } from "../tail.ts";
 import type { Timescale, Timestamp } from "../time.ts";
@@ -117,15 +118,8 @@ type SubscribeSetupState = {
 	 */
 	cancelled?: boolean;
 	/**
-	 * Whether the SUBSCRIBE reached the wire. From that moment the publisher may be serving,
-	 * even before it answers, so abandoning owes it a cancellation regardless of whether we
-	 * ever saw the SUBSCRIBE_OK.
-	 */
-	sent?: boolean;
-	/**
 	 * Whether the publisher answered with an error. It has torn the request down already, so
-	 * there is nothing left to cancel and naming the dead request id at it risks being read
-	 * as a protocol violation.
+	 * there is nothing left to cancel and ours ends cleanly.
 	 */
 	rejected?: boolean;
 	/** Hands a draft-22 fill stream that overtook SUBSCRIBE_OK the subscription it heads, or nothing. */
@@ -535,11 +529,7 @@ export class Subscriber {
 
 		try {
 			const deadline = new Deadline();
-			const request = new RequestStream(
-				await deadline.wait(deadline.open(this.#session.openBi(requestOptions))),
-				this.#session,
-				this.#quic,
-			);
+			const request = await deadline.wait(RequestStream.open(this.#session, deadline, this.#quic));
 
 			const run = async () => {
 				const msg = new SubscribeNamespace({ namespace: prefix, requestId, hidden });
@@ -837,9 +827,9 @@ export class Subscriber {
 			);
 			// Runs now for whatever is already open, and again if `setup` settles late.
 			// Retirement is repeated because a late SUBSCRIBE_OK can register an alias after
-			// the first pass; the stream is torn down once.
-			let torn = false;
-			const cleanup = async (afterSetup: boolean) => {
+			// the first pass. The request ends once: a deadline failure already reset it through
+			// the same stream, so a second end here does nothing.
+			const cleanup = () => {
 				state.cancelled = true;
 
 				// A fill stream waiting on SUBSCRIBE_OK gets nothing, and a head already started goes.
@@ -855,31 +845,18 @@ export class Subscriber {
 					this.#timescales.delete(state.registeredAlias);
 				}
 
-				if (!state.stream || torn) return;
-
-				// A SUBSCRIBE still being written must not be torn down from here. Aborting a
-				// Web Stream waits for the in-flight write, so the request can still reach the
-				// peer while the abort destroys the stream we would have cancelled on. Setup
-				// unwinds on the cancelled flag once that write lands, and its pass below has
-				// the finished picture.
-				if (!state.sent && !afterSetup) return;
-				torn = true;
-
 				// A refusal already ended the request, so end ours cleanly: a reset would tell the
 				// publisher we failed.
-				if (state.rejected) state.stream.close();
-				else state.stream.abort(e);
+				if (state.rejected) state.stream?.close();
+				else state.stream?.abort(e);
 			};
 
 			// Tear down what is already open rather than waiting on `setup`. A peer that
 			// opened the stream and then went quiet never settles it, and deferring would
 			// leave the request outstanding for the life of the session -- which is the
 			// timeout case, not a rare one.
-			void cleanup(false);
-			setup.then(
-				() => cleanup(true),
-				() => cleanup(true),
-			);
+			cleanup();
+			setup.then(cleanup, cleanup);
 			return;
 		}
 
@@ -1014,6 +991,13 @@ export class Subscriber {
 		const done = await PublishDone.decode(framed.reader, version);
 		// A revocation reads the same as one from a moq-lite peer.
 		if (done.statusCode === PublishDoneStatus.UNAUTHORIZED) throw unauthorized(broadcast);
+		// The peer's code, as a moq-lite MALFORMED_TRACK reset reads, so a consumer can tell a
+		// malformed upstream apart from a relay bug.
+		if (done.statusCode === PublishDoneStatus.MALFORMED_TRACK) {
+			throw new StreamError(StreamCode.MalformedTrack, {
+				message: `publish done: malformed track reason=${done.reasonPhrase}`,
+			});
+		}
 		if (!publishDoneClean(done.statusCode, version)) {
 			throw new Error(`publish done: status=0x${done.statusCode.toString(16)} reason=${done.reasonPhrase}`);
 		}
@@ -1213,11 +1197,7 @@ export class Subscriber {
 	}> {
 		const version = this.#session.version;
 
-		state.stream = new RequestStream(
-			await deadline.open(this.#session.openBi(requestOptions)),
-			this.#session,
-			this.#quic,
-		);
+		state.stream = await RequestStream.open(this.#session, deadline, this.#quic);
 
 		// The timeout can fire while the open is still in flight, in which case cleanup ran
 		// with nothing to release. Bail now that the stream is recorded, so settling this
@@ -1245,11 +1225,9 @@ export class Subscriber {
 			state.fill = accepted.resolve;
 		}
 		await Message.write(state.stream.writer, Subscribe.id, msg, version);
-		state.sent = true;
 
-		// The caller may have given up while that write was in flight. It deliberately left
-		// the stream alone, so unwind here and let its cleanup send the cancellation now that
-		// the SUBSCRIBE has actually reached the peer.
+		// The caller may have given up while that write was in flight, resetting the request
+		// under it.
 		if (state.cancelled) throw new Error("subscribe cancelled while it was being sent");
 		console.debug(`subscribe written: id=${requestId} broadcast=${broadcast} track=${request.name}`);
 
@@ -1572,10 +1550,10 @@ export class Subscriber {
 					// The first object's ID is absolute: where in the group this stream starts. An End
 					// of Group there names where the group ends, past the head's last object.
 					const start =
-						object?.payload !== undefined || object?.endOfTrack || (object?.idDelta ?? 0) > 0
+						object?.isObject || object?.endOfTrack || (object?.idDelta ?? 0) > 0
 							? object?.idDelta
 							: undefined;
-					if (start === 0 && object?.payload !== undefined) {
+					if (start === 0 && object?.isObject) {
 						// The whole group: it stands alone unless the head already took the sequence.
 						if (!join.whole()) {
 							stream.stop(new Error("the group's head was served twice"));
@@ -1626,7 +1604,7 @@ export class Subscriber {
 					subscription.end ??= finalSequence(end);
 					return;
 				}
-				if (frame.payload === undefined) break;
+				if (!frame.isObject) break;
 
 				// A track that declared TIMESCALE stamps every object, so one without a Timestamp is
 				// malformed rather than something to invent a time for.
@@ -1635,7 +1613,11 @@ export class Subscriber {
 						message: `object without a Timestamp on a track with TIMESCALE: group=${group.groupId}`,
 					});
 				}
-				open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp });
+				if (frame.payload) open().writeFrame({ payload: frame.payload, timestamp: frame.timestamp });
+				else if (
+					!(await receiveFrame(stream, open(), { size: frame.streamed ?? 0, timestamp: frame.timestamp }))
+				)
+					break;
 				nextObject += 1;
 			}
 
@@ -1726,7 +1708,10 @@ export class Subscriber {
 					return;
 				}
 				if (object === undefined) break;
-				if (discarding) continue;
+				if (discarding) {
+					if (object.kind === "object" && !object.payload) await skipPayload(stream, object.size);
+					continue;
+				}
 
 				if (object.kind === "endOfRange") {
 					throw new JoinUnsupported("a head with an End of Range cannot be stitched");
@@ -1767,10 +1752,12 @@ export class Subscriber {
 					producer = join.open(() => track.createGroup(join.sequence));
 					if (!producer) {
 						discarding = true;
+						if (!object.payload) await skipPayload(stream, object.size);
 						continue;
 					}
 				}
-				producer?.writeFrame({ payload: object.payload, timestamp: object.timestamp });
+				if (object.payload) producer?.writeFrame({ payload: object.payload, timestamp: object.timestamp });
+				else if (producer && !(await receiveFrame(stream, producer, object))) break;
 				join.wrote();
 				next += 1;
 			}

@@ -164,21 +164,20 @@ pub struct MoqAudioDecoderOutput {
 	/// the decoder remixes to it.
 	#[uniffi(default = None)]
 	pub channels: Option<u32>,
-	/// Upper bound on buffering before skipping a stalled group. Same
-	/// congestion-control knob as
-	/// [`MoqSubscription::max_delay`](crate::consumer::MoqSubscription::max_delay):
-	/// when a group stalls and a newer group is more than this far ahead,
-	/// the consumer skips. `None` keeps the moq-mux default of zero (skip
-	/// aggressively). Distinct from [`delay`](Self::delay): this one
-	/// bounds how stale a group may be and adds no buffering.
+	/// How far behind the live edge to play. `min` is the playout delay: the
+	/// jitter buffer to hold ahead of the playhead, reported by
+	/// [`MoqAudioConsumer::delay`], and where a cold join starts; with
+	/// [`estimate`](Self::estimate) it floors the measured delay instead. A `min`
+	/// beyond the track's retention is refused. `max` is the congestion-control
+	/// knob [`MoqSubscription::max_delay`](crate::consumer::MoqSubscription::max_delay)
+	/// carries: a stalled group more than this far behind a newer one is skipped,
+	/// with no buffering added. `None` keeps the moq-mux default of zero for both.
 	#[uniffi(default = None)]
-	pub max_delay: Option<Duration>,
-	/// A fixed playout delay, or `None` to estimate it from arrival timing. This
-	/// is the jitter buffer to hold ahead of the playhead, reported by
-	/// [`MoqAudioConsumer::delay`]. A fixed delay beyond the track's retention
-	/// is refused.
-	#[uniffi(default = None)]
-	pub delay: Option<Duration>,
+	pub delay: Option<crate::media::MoqDelay>,
+	/// Measure the playout delay from arrival timing, never below `delay.min`.
+	/// `false` holds exactly `delay.min`.
+	#[uniffi(default = true)]
+	pub estimate: bool,
 	/// Where to start on a track that already holds groups, or `None` for the oldest. A live
 	/// player picks [`Latest`](crate::media::MoqDecodeStart::Latest) so a reopened decoder
 	/// skips the backlog.
@@ -597,7 +596,8 @@ impl MoqAudioConsumer {
 	}
 
 	/// The playout delay to hold ahead of the playhead: the fixed
-	/// [`MoqAudioDecoderOutput::delay`], or the estimate from every frame read
+	/// [`MoqAudioDecoderOutput::delay`]'s min, or with
+	/// [`MoqAudioDecoderOutput::estimate`] the estimate from every frame read
 	/// so far.
 	///
 	/// The estimate measures when [`Self::next`] returns each frame, so call it
@@ -672,8 +672,8 @@ impl MoqAudioConsumer {
 		config.output.format = output.format.into();
 		config.output.sample_rate = output.sample_rate;
 		config.output.layout = output.channels.map(moq_audio::Layout::from_channels).transpose()?;
-		config.max_delay = output.max_delay.unwrap_or_default();
-		config.delay = output.delay;
+		config.delay = output.delay.map(Into::into).unwrap_or_default();
+		config.estimate = output.estimate;
 		config.start = match output.start.unwrap_or_default() {
 			crate::media::MoqDecodeStart::Oldest => moq_audio::decode::Start::Oldest,
 			crate::media::MoqDecodeStart::Latest => moq_audio::decode::Start::Latest,

@@ -87,6 +87,7 @@ impl<T> Shared<T> {
 	///
 	/// The returned [`Mut`] holds the lock, so do your mutation and drop it rather than
 	/// carrying it across another `.await`, which would block every other handle.
+	#[cfg(feature = "async")]
 	pub async fn wait<F>(&self, mut f: F) -> Mut<'_, T>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<()> + Unpin,

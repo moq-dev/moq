@@ -40,7 +40,7 @@ pub mod consume;
 pub mod produce;
 
 pub use consume::Consumer;
-pub use produce::Producer;
+pub use produce::{Producer, Publisher};
 
 use std::collections::BTreeMap;
 

@@ -503,6 +503,8 @@ macro_rules! pinned_tests {
 }
 
 pinned_tests! {
+	ietf_18: "moq-transport-18",
+	ietf_22: "moq-transport-22",
 	lite_06: "moq-lite-06",
 	lite_05: "moq-lite-05",
 	lite_04: "moq-lite-04",

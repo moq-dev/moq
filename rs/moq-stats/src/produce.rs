@@ -22,13 +22,13 @@ use crate::{
 /// to [`Producer::new`].
 ///
 /// With no origin set the resulting producer is a no-op: its registry is
-/// disabled (bumps are dropped) and no task spawns. Call
+/// disabled (bumps are dropped) and its [`Publisher`] returns at once. Call
 /// [`Config::with_origin`] to publish.
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct Config {
 	/// Origin the stats broadcast is created on.
-	/// When `None`, [`Producer::new`] spawns no task and publishes nothing.
+	/// When `None`, [`Producer::new`] publishes nothing.
 	pub origin: Option<origin::Producer>,
 	/// Top-level path stats are published under (default `.stats`). The full
 	/// advertised path is `<prefix>/node/<node>` (or `<prefix>/node` when
@@ -142,27 +142,26 @@ struct Keepalive;
 /// Publishes a [`Registry`]'s counters as a stats broadcast. Cheap to clone.
 ///
 /// [`Producer::new`] builds the registry itself (wiring the config's prefix as
-/// its exclude prefix) and spawns the publish task; hand sessions tier-scoped
-/// handles via [`Registry::tier`] on [`Producer::registry`]. The task drains
-/// the registry every interval and writes a frame per changed track, running
-/// until the last [`Producer`] clone is dropped.
+/// its exclude prefix) and returns the [`Publisher`] to run; hand sessions
+/// tier-scoped handles via [`Registry::tier`] on [`Producer::registry`]. The
+/// publisher drains the registry every interval and writes a frame per changed
+/// track, running until the last [`Producer`] clone is dropped.
 #[derive(Clone)]
 pub struct Producer {
 	registry: Registry,
-	/// `None` for a no-op producer (config had no origin): no task was spawned
+	/// `None` for a no-op producer (config had no origin): nothing publishes
 	/// and the registry is disabled.
 	_keepalive: Option<Arc<Keepalive>>,
 }
 
 impl Producer {
-	/// Build a producer from `config`.
+	/// Build a producer from `config`, with the [`Publisher`] its caller runs.
 	///
-	/// When `config` has an origin, this spawns the publish task immediately
-	/// and announces the stats broadcast; the task runs until the last
-	/// [`Producer`] clone is dropped. With no origin the producer is a no-op
-	/// (its registry is disabled, nothing is published) and no task spawns, so
-	/// it's safe to build outside an async runtime.
-	pub fn new(config: Config) -> Self {
+	/// The publisher announces the stats broadcast once it runs, and publishes
+	/// until the last [`Producer`] clone is dropped. Spawning it is the caller's,
+	/// so the caller decides what a panic in it ends. With no origin the producer
+	/// is a no-op: its registry is disabled and the publisher returns at once.
+	pub fn new(config: Config) -> (Self, Publisher) {
 		let Config {
 			origin,
 			prefix,
@@ -177,10 +176,11 @@ impl Producer {
 		let node = node.filter(|p| !p.is_empty());
 
 		let Some(origin) = origin else {
-			return Self {
+			let producer = Self {
 				registry: Registry::disabled(),
 				_keepalive: None,
 			};
+			return (producer, Publisher(None));
 		};
 
 		// The prefix is a literal path, so its subtree claim cannot fail.
@@ -196,12 +196,12 @@ impl Producer {
 			linger,
 			interval,
 		};
-		tokio::spawn(task.run(Arc::downgrade(&keepalive)).in_current_span());
-
-		Self {
+		let publisher = Publisher(Some((task, Arc::downgrade(&keepalive), tracing::Span::current())));
+		let producer = Self {
 			registry,
 			_keepalive: Some(keepalive),
-		}
+		};
+		(producer, publisher)
 	}
 
 	/// The registry this producer drains. Hand sessions tier-scoped handles via
@@ -209,6 +209,19 @@ impl Producer {
 	/// Disabled (all bumps no-op) for a no-op producer.
 	pub fn registry(&self) -> &Registry {
 		&self.registry
+	}
+}
+
+/// The publish task of one [`Producer`], returned by [`Producer::new`].
+#[must_use = "nothing is published until the publisher runs"]
+pub struct Publisher(Option<(Task, Weak<Keepalive>, tracing::Span)>);
+
+impl Publisher {
+	/// Publish until the last [`Producer`] clone drops; at once for a no-op producer.
+	pub async fn run(self) {
+		if let Some((task, weak, span)) = self.0 {
+			task.run(weak).instrument(span).await;
+		}
 	}
 }
 
@@ -227,6 +240,11 @@ impl Task {
 	/// Publishes the stats broadcast and writes a frame per drain. Runs until
 	/// every [`Producer`] clone is dropped (`weak.upgrade()` returns `None`).
 	async fn run(self, weak: Weak<Keepalive>) {
+		// A publisher first run after its last producer dropped announces nothing,
+		// so it cannot replace a newer producer's broadcast on the same path.
+		if weak.strong_count() == 0 {
+			return;
+		}
 		let interval = self.interval;
 		let Some(mut drain) = Drain::new(self) else {
 			return;
@@ -240,8 +258,8 @@ impl Task {
 			// so each drain gets an interval of its own to open its groups in.
 			let scheduled = ticker.tick().await;
 
+			// Dropping the drain ends the broadcast, as cancelling this future does.
 			if weak.upgrade().is_none() {
-				drain.finish();
 				return;
 			}
 
@@ -317,10 +335,6 @@ impl Drain {
 		// A label's presence track and a prefix's track exist only while
 		// requested. See `serve_requests`.
 		self.node.serve_requests(&self.report, self.tick, stamp);
-	}
-
-	fn finish(self) {
-		self.node.finish();
 	}
 
 	/// The largest group snapshot still held, and the largest group frame this
@@ -1237,9 +1251,13 @@ impl NodePublisher {
 		track.publish(tick, stamp);
 		self.prefixes.insert(path.as_str().to_string(), track);
 	}
+}
 
-	/// Deliberately end the broadcast: finish every track, then close the broadcast.
-	fn finish(mut self) {
+/// The publish task ending, when the last producer drops or when its future is
+/// cancelled, is a deliberate end of the broadcast, never a dropped track.
+impl Drop for NodePublisher {
+	/// Finish every track, then close the broadcast.
+	fn drop(&mut self) {
 		self.totals.output.finish();
 		for track in self.presence.values_mut() {
 			track.output.finish();
@@ -1304,6 +1322,13 @@ fn advertised_path(prefix: &Path, node: Option<&Path>) -> Result<Path, moq_net::
 		Some(node) => path.join(node),
 		None => Ok(path),
 	}
+}
+
+/// Run a test producer's publisher on the ambient runtime.
+#[cfg(test)]
+pub(crate) fn spawned((producer, publisher): (Producer, Publisher)) -> Producer {
+	tokio::spawn(publisher.run());
+	producer
 }
 
 #[cfg(test)]
@@ -1620,11 +1645,11 @@ mod tests {
 
 	fn test_producer(node: Option<&str>) -> (Producer, origin::Producer) {
 		let origin = produce_origin();
-		let producer = Producer::new(
+		let producer = crate::produce::spawned(Producer::new(
 			Config::new()
 				.with_origin(origin.clone())
 				.with_node(node.map(|s| Path::try_from(s.to_string()).unwrap())),
-		);
+		));
 		(producer, origin)
 	}
 
@@ -1909,11 +1934,11 @@ mod tests {
 
 	/// A producer on `origin` publishing as node `sjc` at depth 0.
 	fn node_producer(origin: &origin::Producer) -> Producer {
-		Producer::new(
+		crate::produce::spawned(Producer::new(
 			Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::from_static("sjc")),
-		)
+		))
 	}
 
 	/// A producer restarted on the same origin ends its old epoch and announces
@@ -1974,6 +1999,54 @@ mod tests {
 
 		let stats = origin.consume().request(path.as_str(), None).await.expect("resolve");
 		assert_eq!(read_egress(&stats).await["foo/bar"].bytes, 30);
+	}
+
+	/// A publisher first run after every producer clone dropped announces
+	/// nothing, so it cannot take the path from a newer producer.
+	#[tokio::test(start_paused = true)]
+	async fn a_publisher_run_after_its_producer_dropped_announces_nothing() {
+		let origin = produce_origin();
+		let mut events = origin.consume().with_hidden(true).announced();
+
+		let (stale, publisher) = Producer::new(
+			Config::new()
+				.with_origin(origin.clone())
+				.with_node(Path::from_static("sjc")),
+		);
+		drop(stale);
+
+		let _newer = node_producer(&origin);
+		drive_tick().await;
+		let [(_, true, _)] = &take_epochs(&mut events)[..] else {
+			panic!("expected the newer producer's announce");
+		};
+
+		publisher.run().await;
+		drive_tick().await;
+		assert_eq!(take_epochs(&mut events), []);
+	}
+
+	/// Cancelling a running publisher ends its tracks deliberately, so a reader
+	/// sees the track finish rather than drop.
+	#[tokio::test(start_paused = true)]
+	async fn a_cancelled_publisher_finishes_its_tracks() {
+		let origin = produce_origin();
+		let (_producer, publisher) = Producer::new(
+			Config::new()
+				.with_origin(origin.clone())
+				.with_node(Path::from_static("sjc")),
+		);
+		let task = tokio::spawn(publisher.run());
+		drive_tick().await;
+		let (_, broadcast) = announced(&origin).await;
+		let mut totals = subscribe(&broadcast, crate::TOTALS).await;
+		while try_next_frame(&mut totals).is_some() {}
+
+		task.abort();
+		assert!(task.await.unwrap_err().is_cancelled());
+		while let Some(group) = totals.next_group().await.expect("a finished track, not a dropped one") {
+			drop(group);
+		}
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -2144,13 +2217,13 @@ mod tests {
 	/// `.stats/node/sjc`.
 	fn grouped_producer(linger: Duration) -> (Producer, origin::Producer) {
 		let origin = produce_origin();
-		let producer = Producer::new(
+		let producer = crate::produce::spawned(Producer::new(
 			Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::from_static("sjc"))
 				.with_depth(1)
 				.with_linger(linger),
-		);
+		));
 		(producer, origin)
 	}
 
