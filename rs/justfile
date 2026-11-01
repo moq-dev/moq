@@ -227,6 +227,8 @@ features:
     just rs test -p moq-cli --no-default-features --features capture,pipewire,websocket -E 'test(capture_window)'
     bash sh/local.sh cargo check --locked -p moq-bench --no-default-features
     bash sh/local.sh cargo check --locked -p moq-boy --no-default-features
+    # Alone, since the workspace's `kio/sim` dev-dependencies would unify `kio/async` back in.
+    bash sh/local.sh cargo check --locked --manifest-path rs/moq-auth/Cargo.toml --lib --all-features
     bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
     bash sh/local.sh cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
