@@ -329,6 +329,10 @@ pub enum Error {
 		/// What the sample tables can't express.
 		reason: &'static str,
 	},
+
+	/// A file to repair is not a recording that an MP4 export left unfinished.
+	#[error("not an unfinished mp4 recording: {0}")]
+	Unrepairable(&'static str),
 }
 
 impl From<mp4_atom::Error> for Error {

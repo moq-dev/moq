@@ -31,6 +31,7 @@ Docker; see [Install](/setup/install).
 | `announced` | `[prefix]` | Follow the broadcasts announced on a relay. |
 | `fetch` | `<track>` | Write one group of a track to stdout. |
 | `auth` | | Generate, sign, and verify relay JWTs. |
+| `repair` | `<file>` | Finish an `export mp4` recording that was cut short. |
 | `devices` | | List capture sources and their ids. |
 
 ## Grammar
@@ -202,10 +203,13 @@ fragmented MP4 while recording, so a crash leaves a playable file, and the
 broadcast's end or the first Ctrl-C (or SIGTERM) finishes it as a regular MP4 with
 its index at the end, without copying the media. A second signal exits at once
 and leaves it fragmented. Unlike `fmp4`, a rendition that joins mid-recording is
-kept, though only the finished file indexes it.
+kept, though only the finished file indexes it. `moq repair <file>` finishes a
+recording that a crash or second signal left fragmented, in place and the same
+way, indexing every fragment written in full, late renditions included.
 
 ```bash
 moq ... export mp4 --output recording.mp4
+moq repair recording.mp4
 ```
 
 MPEG-TS export pads to the source's constant mux rate when the catalog

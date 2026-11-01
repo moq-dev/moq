@@ -445,7 +445,7 @@ impl Invocation {
 
 		// Only `import` and `export` share an Origin. The rest own the process: `play`
 		// drives a window on the main thread, `transcode` builds its own Origin, `fetch`
-		// and `announced` open their own session, and `auth` / `devices` never touch the network at all.
+		// and `announced` open their own session, and `auth` / `repair` / `devices` never touch the network at all.
 		if let Some(command) = self.stages.iter().find(|command| !command.is_stageable()) {
 			anyhow::bail!(
 				"`{}` must be the only verb; it can't share a process with another `--` stage",
@@ -685,6 +685,8 @@ pub enum Command {
 	Announced(crate::announced::Args),
 	/// Write one group of a track to stdout.
 	Fetch(crate::fetch::Args),
+	/// Finish an `export mp4` recording that a crash or second signal left fragmented.
+	Repair(crate::repair::Args),
 	/// Play a broadcast in a native window and speaker.
 	#[cfg(feature = "play")]
 	Play(crate::play::Args),
@@ -744,6 +746,7 @@ impl Command {
 			Self::Export(_) | Self::Subscribe(_) => "export",
 			Self::Announced(_) => "announced",
 			Self::Fetch(_) => "fetch",
+			Self::Repair(_) => "repair",
 			#[cfg(feature = "play")]
 			Self::Play(_) => "play",
 			#[cfg(feature = "transcode")]
@@ -1390,7 +1393,7 @@ pub struct Recorded {
 
 	/// The file to record to, which must not exist yet. It plays as fragmented MP4 while
 	/// recording; the broadcast's end or the first SIGINT/SIGTERM finishes it as a regular
-	/// MP4, and a second signal exits at once, leaving it fragmented.
+	/// MP4, and a second signal exits at once, leaving it fragmented for `moq repair`.
 	#[usage(long, value_name = "FILE", value_hint = usage_rs::ValueHint::FilePath)]
 	pub output: PathBuf,
 }
@@ -2775,7 +2778,11 @@ mod tests {
 			Invocation::try_parse_from(argv).unwrap_or_else(|err| panic!("{flag:?}: {err}"))
 		};
 
-		for verb in [&["auth", "generate"][..], &["completion", "bash"]] {
+		for verb in [
+			&["auth", "generate"][..],
+			&["completion", "bash"],
+			&["repair", "recording.mp4"],
+		] {
 			for flag in accept.iter().chain(dial) {
 				let err = parse(flag, verb).reject(verb[0]).unwrap_err().to_string();
 				assert!(err.contains(flag[0]), "{verb:?} {flag:?}: {err}");
