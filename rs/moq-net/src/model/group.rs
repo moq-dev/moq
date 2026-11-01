@@ -3680,18 +3680,25 @@ impl Consumer {
 	/// Returns None if the group is finished and the index is out of range, or the cursor
 	/// passed the [`Self::with_range`] cap.
 	pub fn poll_next_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<frame::Consumer>>> {
-		if self.recover.is_none() {
-			let res = self.poll_next_frame_once(waiter);
-			return self.ended_on(res);
+		let res = match self.recover.is_none() {
+			true => {
+				let res = self.poll_next_frame_once(waiter);
+				self.ended_on(res)
+			}
+			false => match (self.poll_resumed(waiter, Self::poll_next_frame_once), &self.recover) {
+				// A frame read from a copy that may fail too carries on the same way.
+				(Poll::Ready(Ok(Some(frame))), Some(recover)) => Poll::Ready(Ok(Some(
+					frame.with_recover((**recover).clone(), self.cursor.index as u64 - 1),
+				))),
+				(res, _) => self.ended_on(res),
+			},
+		};
+		// The cursor moved past a frame that may still be arriving, which a whole-frame read
+		// parked on it waits out: that read never hears of the move.
+		if let Poll::Ready(Ok(Some(_))) = &res {
+			Idle::disarm(&mut self.idle);
 		}
-		let res = self.poll_resumed(waiter, Self::poll_next_frame_once);
-		match (res, &self.recover) {
-			// A frame read from a copy that may fail too carries on the same way.
-			(Poll::Ready(Ok(Some(frame))), Some(recover)) => Poll::Ready(Ok(Some(
-				frame.with_recover((**recover).clone(), self.cursor.index as u64 - 1),
-			))),
-			(res, _) => self.ended_on(res),
-		}
+		res
 	}
 
 	/// Pass a read through, releasing the track demand once it reached the group's end,
@@ -6596,6 +6603,33 @@ mod test {
 			.unwrap();
 		assert!(other.take(), "the next frame wakes the task that polled last");
 		assert!(matches!(group.poll_read_frame(&moved), Poll::Ready(Ok(Some(_)))));
+	}
+
+	/// A chunked read that takes the frame a whole-frame read parked on moves the cursor, so
+	/// that read looks again rather than waiting out a frame it no longer reads.
+	#[test]
+	fn a_chunked_read_moves_a_parked_frame_read_on() {
+		let producer = Info { sequence: 0 }.produce();
+		let mut group = producer.consume().with_range(0..1);
+		let mut frame = producer
+			.create_frame(frame::Info {
+				size: 6,
+				timestamp: Some(Timestamp::ZERO),
+			})
+			.unwrap();
+		frame.write(Bytes::from_static(b"foo")).unwrap();
+		let waiter = kio::Waiter::noop();
+		for _ in 0..3 {
+			assert!(
+				group.poll_read_frame(&waiter).is_pending(),
+				"the frame is still arriving"
+			);
+		}
+		assert!(matches!(group.poll_next_frame(&waiter), Poll::Ready(Ok(Some(_)))));
+		assert!(
+			matches!(group.poll_read_frame(&waiter), Poll::Ready(Ok(None))),
+			"past the cap"
+		);
 	}
 
 	/// A reader capped by its range finishes there cleanly whatever becomes of the frames past
