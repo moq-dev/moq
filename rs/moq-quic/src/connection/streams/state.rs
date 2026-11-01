@@ -20,6 +20,7 @@ use crate::{
 	coding::BufMutExt,
 	connection::ConnectionTag,
 	connection::stats::{CreditStats, FrameStats},
+	connection::waits::{Wait, Waits},
 	frame::{self, FrameStruct, StreamMetaVec},
 	transport_parameters::TransportParameters,
 };
@@ -122,6 +123,8 @@ pub(crate) struct StreamsState {
 	pub(super) pending: Schedule<StreamId, frame::OutgoingDatagram>,
 
 	pub(super) events: VecDeque<StreamEvent>,
+	/// The waiters on the streams and the connection, woken alongside the events
+	pub(crate) waits: Waits,
 	/// Streams blocked on connection-level flow control or stream window space
 	///
 	/// Deduplicated waiters with constant-time removal. Cancellation may change wake order.
@@ -221,6 +224,7 @@ impl StreamsState {
 			send_streams: 0,
 			pending: Schedule::new(),
 			events: VecDeque::new(),
+			waits: Waits::default(),
 			connection_blocked: IndexSet::default(),
 			max_data: 0,
 			receive_window: receive_window.into(),
@@ -265,7 +269,7 @@ impl StreamsState {
 			let count = count.into();
 			// A caller can attempt an open before the peer's limit is known.
 			if count > self.max[dir as usize] && mem::take(&mut self.open_refused[dir as usize]) {
-				self.events.push_back(StreamEvent::Available { dir });
+				self.notify(StreamEvent::Available { dir });
 			}
 			self.max[dir as usize] = count;
 		}
@@ -316,7 +320,7 @@ impl StreamsState {
 		self.spend(new_bytes);
 
 		let transmit = if !stopped {
-			self.events.push_back(StreamEvent::Readable { id });
+			self.notify(StreamEvent::Readable { id });
 			self.ranks.extend(rank);
 			self.unlooked.insert(id);
 			// Credit released while the peer still had room may not have been worth a frame
@@ -416,7 +420,7 @@ impl StreamsState {
 			}
 			new_bytes
 		} else {
-			self.events.push_back(StreamEvent::Readable { id });
+			self.notify(StreamEvent::Readable { id });
 			self.ranks.extend(rank);
 			self.unlooked.insert(id);
 			freed
@@ -455,18 +459,21 @@ impl StreamsState {
 		let stream = stream_opt.get_or_insert_with(|| Send::new(max_send_data));
 
 		self.connection_blocked.swap_remove(&id);
-		if stream.try_stop(error_code) {
-			self.events.push_back(StreamEvent::Stopped { id, error_code });
-		}
+		let stopped = stream.try_stop(error_code);
 		let buffered = stream.pending.buffered();
 		let reset = stream.abandon_reliable();
 		self.buffered_data -= buffered - stream.pending.buffered();
-		if let Some(offset) = stream.take_waiting() {
-			self.events.push_back(StreamEvent::Acked { id, offset });
-		}
+		let waiting = stream.take_waiting();
 		if !stream.is_pending() {
 			self.pending.remove(&mut stream.slot);
 		}
+		if stopped {
+			self.notify(StreamEvent::Stopped { id, error_code });
+		}
+		if let Some(offset) = waiting {
+			self.notify(StreamEvent::Acked { id, offset });
+		}
+		self.unblock();
 		Ok(reset)
 	}
 
@@ -863,22 +870,29 @@ impl StreamsState {
 			// A duplicate delivered the last of the data queued for retransmission
 			self.pending.remove(&mut stream.slot);
 		}
-		if let Some(offset) = stream.take_acked() {
-			self.events.push_back(StreamEvent::Acked { id, offset });
-		}
-		if !finished {
-			// The stream is unfinished or may still need retransmits
-			return stream.take_held_reset();
-		}
-
+		let acked = stream.take_acked();
+		// The stream is unfinished or may still need retransmits
+		let held = (!finished).then(|| stream.take_held_reset());
 		// A reset is not reported as finished, like one without a Reliable Size
 		let reset = stream.is_reset();
-		if let (_, Some(stream)) = entry.remove_entry() {
+		let freed = match held {
+			None => entry.remove(),
+			Some(_) => None,
+		};
+		if let Some(offset) = acked {
+			self.notify(StreamEvent::Acked { id, offset });
+		}
+		self.unblock();
+		if let Some(held) = held {
+			return held;
+		}
+
+		if let Some(stream) = freed {
 			self.send_freed(id, stream);
 		}
 		self.stream_freed(id, StreamHalf::Send);
 		if !reset {
-			self.events.push_back(StreamEvent::Finished { id });
+			self.notify(StreamEvent::Finished { id });
 		}
 		None
 	}
@@ -907,7 +921,7 @@ impl StreamsState {
 			*current = count;
 			self.streams_blocked[dir as usize] = false;
 			self.open_refused[dir as usize] = false;
-			self.events.push_back(StreamEvent::Available { dir });
+			self.notify(StreamEvent::Available { dir });
 		}
 
 		Ok(())
@@ -916,6 +930,7 @@ impl StreamsState {
 	/// Handle increase to connection-level flow control limit
 	pub(crate) fn received_max_data(&mut self, n: VarInt) {
 		self.max_data = self.max_data.max(n.into());
+		self.unblock();
 	}
 
 	pub(crate) fn received_max_stream_data(&mut self, id: StreamId, offset: u64) -> Result<(), TransportError> {
@@ -943,7 +958,7 @@ impl StreamsState {
 			return;
 		}
 		if self.write_limit() > 0 {
-			self.events.push_back(StreamEvent::Writable { id });
+			self.notify(StreamEvent::Writable { id });
 			return;
 		}
 		// Still blocked on the connection window, so wait in the list that wakes when it relaxes
@@ -968,21 +983,45 @@ impl StreamsState {
 			return Some(StreamEvent::Opened { dir });
 		}
 
-		if self.write_limit() > 0 {
-			while let Some(id) = self.connection_blocked.pop() {
-				let Some(stream) = self.send.get_mut(&id).and_then(|s| s.as_mut()) else {
-					continue;
-				};
+		self.events.pop_front()
+	}
 
-				// If it's no longer sensible to write to a stream (even to detect an error) then don't
-				// report it.
-				if stream.is_writable() && stream.stop_reason.is_none() && stream.max_data > stream.offset() {
-					return Some(StreamEvent::Writable { id });
-				}
+	/// Report `event`, and wake the waiters it concerns
+	pub(super) fn notify(&mut self, event: StreamEvent) {
+		match event {
+			StreamEvent::Opened { dir } => self.waits.wake_accept(dir),
+			StreamEvent::Readable { id } => self.waits.wake(id, Wait::Read),
+			StreamEvent::Writable { id } => self.waits.wake(id, Wait::Write),
+			StreamEvent::Finished { id } => self.waits.wake(id, Wait::End),
+			StreamEvent::Acked { id, .. } => self.waits.wake(id, Wait::Acked),
+			StreamEvent::Stopped { id, .. } => {
+				self.waits.wake(id, Wait::Write);
+				self.waits.wake(id, Wait::End);
+			}
+			StreamEvent::Available { dir } => self.waits.wake_open(dir),
+		}
+		self.events.push_back(event);
+	}
+
+	/// Wake the writers blocked on the connection window, once it has room
+	///
+	/// Called wherever the room grows: the peer raising `MAX_DATA`, or buffered data leaving the
+	/// send window.
+	pub(super) fn unblock(&mut self) {
+		if self.write_limit() == 0 {
+			return;
+		}
+		while let Some(id) = self.connection_blocked.pop() {
+			let Some(stream) = self.send.get(&id).and_then(|s| s.as_ref()) else {
+				continue;
+			};
+
+			// If it's no longer sensible to write to a stream (even to detect an error) then don't
+			// report it.
+			if stream.is_writable() && stream.stop_reason.is_none() && stream.max_data > stream.offset() {
+				self.notify(StreamEvent::Writable { id });
 			}
 		}
-
-		self.events.pop_front()
 	}
 
 	/// Queues MAX_STREAM_ID frames in `pending` if needed
@@ -1061,6 +1100,7 @@ impl StreamsState {
 
 	pub(crate) fn set_send_window(&mut self, send_window: u64) {
 		self.send_window = send_window;
+		self.unblock();
 	}
 
 	/// Set the receive window of each stream, which applies as each stream's credit is next
@@ -1122,6 +1162,7 @@ impl StreamsState {
 		}
 		self.next_remote[dir_idx] = id.index() + 1;
 		self.opened[dir_idx] = true;
+		self.waits.wake_accept(id.dir());
 	}
 
 	/// Adds credits to the connection flow control window
@@ -1214,6 +1255,7 @@ impl StreamsState {
 			self.connection_blocked.swap_remove(&id);
 			self.send_streams -= 1;
 		}
+		self.waits.freed(id);
 	}
 
 	/// Recycle a receive stream's state, returning any credit its lease still holds, as when a
@@ -4039,6 +4081,36 @@ mod tests {
 		// Late data on the evicted stream is credited on arrival.
 		data(&mut client, low, WINDOW, 10, true);
 		assert_eq!(client.local_max_data, 3 * WINDOW + 10);
+	}
+
+	/// A reader whose own wait evicts its stream hears of it at once, rather than parking after
+	/// the eviction's wake went by.
+	#[test]
+	fn self_eviction_does_not_park() {
+		use std::task::Poll;
+
+		use crate::connection::waits::Counter;
+
+		const WINDOW: u64 = 1000;
+		let (mut client, [low, high]) = stuck(WINDOW);
+		data(&mut client, high, 0, WINDOW as usize, false);
+		data(&mut client, low, 0, WINDOW as usize - 1, false);
+		let mut pending = Retransmits::default();
+		recv(&mut client, &mut pending, low).set_priority(-1);
+		recv(&mut client, &mut pending, high).set_priority(1);
+		assert_eq!(lease(&mut client, high), WINDOW as usize);
+		assert_eq!(lease(&mut client, low), WINDOW as usize - 1);
+		assert!(matches!(wait(&mut client, high, 2000), Err(recv::Error::Blocked)));
+		assert!(matches!(wait(&mut client, low, 2000), Err(recv::Error::Blocked)));
+		data(&mut client, low, WINDOW - 1, 1, false);
+		assert!(!client.leased(low).unwrap().evicted);
+
+		// This wait spends the last byte of credit and evicts its own stream.
+		let waiter = Counter::new();
+		let (poll, transmit) = recv(&mut client, &mut pending, low).poll_lease(&waiter, 2000);
+		assert!(matches!(poll, Poll::Ready(Err(recv::Error::Evicted))));
+		assert!(transmit.should_transmit());
+		assert_eq!(client.credit_stats().evicted, 1);
 	}
 
 	/// A frame past the window: once its taken bytes fill the window, waiting for one more

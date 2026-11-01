@@ -21,7 +21,7 @@ impl MoqAllocator {
 		Self { allocator }
 	}
 
-	#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+	#[cfg(feature = "audio")]
 	pub(crate) fn inner(&self) -> &moq_net::bandwidth::Allocator {
 		&self.allocator
 	}
@@ -63,7 +63,7 @@ impl MoqReservation {
 		Self { inner }
 	}
 
-	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+	#[cfg(feature = "video")]
 	pub(crate) fn consume(&self) -> moq_net::bandwidth::Consumer {
 		self.inner.consume()
 	}
@@ -203,7 +203,7 @@ mod tests {
 		assert_eq!(reserved.rate(), Some(1_000_000));
 	}
 
-	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+	#[cfg(feature = "video")]
 	#[test]
 	fn a_share_wakes_a_parked_thread() {
 		use std::sync::atomic::Ordering;

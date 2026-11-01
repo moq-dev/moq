@@ -15,7 +15,7 @@ before the cut, not only breaking work, so ready non-breaking quests stay
 here instead of moving out; the cut is what ships them.
 
 - Preserve epoch correctness, routing recovery, outbound federation, and
-  announcement takeover on both lite and IETF. Catalogs, long-lived readers,
+  claim continuity on lite-07. Catalogs, long-lived readers,
   and late joiners obey the same identity contract.
 - Keep IETF passthrough, the API audit, the broad clock conversion,
   archive replay/DVR correctness, and the TS fidelity
@@ -123,7 +123,6 @@ removed).
 ## Required
 
 - [Address groups by timestamp](/quest/m1/time-addressing/README.md) - group start timestamps replace sequence numbers in the moq-net API and lite-07 wire, while old subscribers, old publishers, and published JS clients keep working
-- [Release audit findings](/quest/m1/release-audit/README.md) - resolve newly identified resource, parser, playback, and interoperability risks before the cut
 - [Pre-cut audit findings](/quest/m1/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
 - [Vendored code has every upstream fix it needs](/quest/m1/vendor-sync/README.md) - quinn, libv4l-rs, nvidia-video-codec-sdk, rust-media-libs, cros-codecs, and UniFFI generator fixes are ported or planned, once per release cycle
 - [Security audit findings](/quest/m1/security-audit/README.md) - fix the verified relay, importer, moq-c, browser, and CI findings of the 2026-10-27 external security audit
@@ -135,7 +134,7 @@ removed).
 - [Exact timestamps in every binding](/quest/m1/binding-timestamps.md) - bindings carry `{value, scale}` timestamps instead of lossy microseconds
 - [Bindings see a moq-transport run end as an end](/quest/m1/ffi-ietf-run-end.md) - an IETF publisher ending its run reaches moq-ffi consumers as an end, not `Internal`
 - [A broadcast stamps everything from one clock](/quest/m1/broadcast-clock.md) - catalog, MSF, and HLS record groups are stamped from the broadcast's clock, never the ambient one
-- [Announcement takeover](/quest/m1/announce-takeover.md) - a new independent route explicitly continues instances served through its predecessor, with shared Rust/JS semantics and lite-07 wire
+- [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's identity, replacing the ANNOUNCE_TAKEOVER predecessor design
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [A tightened SUBSCRIBE keeps the start's budget honest](/quest/m1/start-budget-update.md) - a relay copy records the delay its start was resolved under, so a SUBSCRIBE_UPDATE tightening cannot make later readers skip fillable history
@@ -161,7 +160,6 @@ removed).
 - [Decoding from a track's first packet keeps its start](/quest/m1/opus-preskip.md) - moq-audio drops only OpusHead's pre-skip from a track's first packet, keeping the 80 ms warmup for mid-stream joins
 - [Container reads drop backfill](/quest/m1/read-backfill.md) - the JS container consumer drops groups below its read cursor like Rust
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
-- [The publish controls stay visible without a preview](/quest/m1/publish-controls.md) - `<moq-publish>`'s controls no longer collapse with a live camera and no preview
 - [Push-to-talk loses no speech](/quest/m1/push-to-talk/README.md) - consumers hold a disabled rendition, and an unmute encodes at once with the mic still open
 - [Always-on encoding](/quest/m1/eager-encode/README.md) - publishers encode while enabled whatever the demand, so the past exists to fetch; on-demand is opt-in, and audio returns to it through a raw backbuffer
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
@@ -174,7 +172,6 @@ removed).
 - [moq-transport-22 FETCH cost](/quest/m1/ietf22-fetch-poll-cost.md) - #7042's +12.8% instructions on draft-22 FETCH is fixed or attributed
 - [An idle track poll exits cheaply](/quest/m1/idle-poll-exit.md) - a reader's poll on a track with nothing new costs a small constant, not ~3,800 instructions
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
-- [The browser baseline keeps its page logs](/quest/m1/baseline-page-logs.md) - a failing wasm-baseline cell is diagnosable from its artifact
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served

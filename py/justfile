@@ -48,6 +48,13 @@ check:
     just samples
     just docs
 
+# Check the locked dependencies against PyPI's advisories. Nightly: advisories land without a diff.
+# `--isolated` keeps the audit group out of the workspace venv.
+audit:
+    mkdir -p ../.tmp/py
+    uv export --locked --all-groups --no-emit-workspace --no-emit-project --format requirements-txt --quiet -o ../.tmp/py/audit.txt
+    uv run --isolated --locked --only-group audit pip-audit --disable-pip --require-hashes -r ../.tmp/py/audit.txt
+
 # Type-check every Python sample in the docs against the installed wrapper.
 samples:
     ../sh/py/samples.sh
