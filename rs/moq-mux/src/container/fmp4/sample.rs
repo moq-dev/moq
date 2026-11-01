@@ -84,7 +84,7 @@ pub(crate) struct Resolver {
 /// A sample whose byte range and duration have been validated.
 pub(crate) struct Resolved {
 	pub sample: Sample,
-	pub cts: i32,
+	pub cts: i64,
 	pub range: std::ops::Range<usize>,
 }
 
@@ -106,12 +106,12 @@ impl Resolver {
 		if traf.tfhd.base_data_offset.is_some() {
 			return Err(super::Error::UnsupportedBaseDataOffset);
 		}
-		let mut remaining: usize = traf.trun.iter().map(|run| run.entries.len()).sum();
+		let mut remaining: u64 = traf.trun.iter().map(|run| run.samples.len() as u64).sum();
 		if remaining == 0 {
 			return Err(super::Error::MissingTrun);
 		}
 		let mut runs = traf.trun.iter();
-		let mut entries = [].iter();
+		let mut entries = mp4_atom::TrunSamplesIter::default();
 		let mut offset = 0usize;
 		Ok(std::iter::from_fn(move || {
 			if remaining == 0 {
@@ -129,9 +129,9 @@ impl Resolver {
 							.and_then(|start| start.checked_sub(self.data_start))
 							.ok_or(super::Error::InvalidDataOffset)?;
 					}
-					entries = run.entries.iter();
+					entries = run.samples.iter();
 				};
-				let sample = defaults.resolve(&traf.tfhd, entry);
+				let sample = defaults.resolve(&traf.tfhd, &entry);
 				if sample.size == 0 {
 					return Err(super::Error::EmptySample);
 				}
@@ -282,7 +282,10 @@ mod tests {
 				.iter()
 				.map(|&data_offset| mp4_atom::Trun {
 					data_offset,
-					entries: vec![Default::default()],
+					samples: mp4_atom::TrunSamples::Inherited {
+						count: 1,
+						first_flags: None,
+					},
 				})
 				.collect(),
 			..Default::default()
@@ -336,11 +339,49 @@ mod tests {
 		}
 	}
 
+	/// A moof of many field-less runs decodes as counts rather than one entry per sample, and
+	/// resolving it stops at the end of the mdat.
+	#[test]
+	fn fieldless_runs_do_not_amplify() {
+		use mp4_atom::{Decode, Encode};
+
+		let samples = mp4_atom::TrunSamples::Inherited {
+			count: u32::MAX,
+			first_flags: None,
+		};
+		let mut traf = traf(&[None; 1000]);
+		for run in &mut traf.trun {
+			run.samples = samples.clone();
+		}
+		let moof = mp4_atom::Moof {
+			mfhd: mp4_atom::Mfhd { sequence_number: 1 },
+			traf: vec![traf],
+		};
+		let mut buf = Vec::new();
+		moof.encode(&mut buf).unwrap();
+		assert!(buf.len() < 16 * 1024);
+
+		let decoded = mp4_atom::Moof::decode(&mut buf.as_slice()).unwrap();
+		assert!(decoded.traf[0].trun.iter().all(|run| run.samples == samples));
+
+		let mut resolver = Resolver::new(100, 6);
+		let resolved: Vec<_> = resolver
+			.resolve(&decoded.traf[0], Defaults::default())
+			.unwrap()
+			.collect();
+		assert_eq!(resolved.len(), 4);
+		assert!(resolved[..3].iter().all(Result::is_ok));
+		assert!(matches!(
+			resolved[3],
+			Err(super::super::Error::SampleRangeOutOfBounds { .. })
+		));
+	}
+
 	#[test]
 	fn only_the_final_sample_may_lack_a_duration() {
 		use super::super::Error;
 		let mut traf = traf(&[None, None]);
-		traf.trun[1].entries[0].duration = Some(0);
+		traf.trun[1].samples = vec![entry(None, Some(0), None)].into();
 		// Empty trailing runs don't make the last sample non-final.
 		traf.trun.push(Default::default());
 		let mut resolver = Resolver::new(100, 4);
@@ -350,7 +391,7 @@ mod tests {
 			.map(|sample| sample.unwrap().sample.duration)
 			.collect();
 		assert_eq!(durations, [Some(1), None]);
-		traf.trun[0].entries[0].duration = Some(0);
+		traf.trun[0].samples = vec![entry(None, Some(0), None)].into();
 		let mut resolver = Resolver::new(100, 4);
 		assert!(matches!(
 			resolver.resolve(&traf, Defaults::default()).unwrap().next().unwrap(),
