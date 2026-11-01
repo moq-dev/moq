@@ -16,7 +16,7 @@ import { type IetfVersion, Version } from "./version.ts";
 const VERSION = Version.DRAFT_18;
 
 /** A session that negotiated MoQ Cluster alone. */
-const CLUSTER = { cluster: true, epoch: false };
+const CLUSTER = { cluster: true };
 
 function origin(id: bigint): Hop {
 	return HopSchema.parse(id);

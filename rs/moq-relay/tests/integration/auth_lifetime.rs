@@ -191,7 +191,7 @@ async fn spawn_relay_with(
 
 	let handle = tokio::spawn(async move {
 		let mut id = 0;
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			let conn = Connection::new(request, cluster.clone(), auth.clone()).with_id(id);
 			id += 1;
 			tokio::spawn(async move {
@@ -382,7 +382,7 @@ async fn spawn_quic_relay_with(
 	let addr = server.local_addr().expect("quic addr");
 	let mut server = server.listen().await.expect("listen");
 	let handle = tokio::spawn(async move {
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			let conn = Connection::new(request, cluster.clone(), auth.clone());
 			tokio::spawn(async move {
 				conn.run().await;
@@ -883,12 +883,17 @@ async fn a_rechecked_grant_resizes_live_sessions() {
 			.await
 			.expect("subscribe");
 		send(0, 1);
-		let group = kio::clock::timeout(TIMEOUT, audio.recv_group())
-			.await
-			.expect("recv_group timeout")
-			.expect("recv_group failed")
-			.expect("the undeafened track closed");
-		assert!(group.sequence >= 1, "{scheme}");
+		// The SUBSCRIBE went out with the TRACK, so the latest group when it arrived may come first.
+		loop {
+			let group = kio::clock::timeout(TIMEOUT, audio.recv_group())
+				.await
+				.expect("recv_group timeout")
+				.expect("recv_group failed")
+				.expect("the undeafened track closed");
+			if group.sequence >= 1 {
+				break;
+			}
+		}
 
 		for (session, what) in [(pub_session, "publisher"), (sub_session, "subscriber")] {
 			assert!(
