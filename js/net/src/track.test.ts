@@ -3408,22 +3408,27 @@ test("an endless track with gaps remembers only those within the budget", () => 
 	}
 });
 
-test("IETF provenance survives normalization on timed and untimed tracks", () => {
-	for (const timescale of [undefined, Timescale.MILLI]) {
-		const info = infoDefaults({ ietf: IetfVersion.DRAFT_22, timescale });
-		expect(info.ietf).toBe(IetfVersion.DRAFT_22);
-		expect(info.timescale).toBe(timescale);
-	}
-	const producer = new TrackProducer("ietf").accept({ timescale: Timescale.MILLI, ietf: IetfVersion.DRAFT_22 });
-	try {
-		stampGroup(producer, 0, 1000);
-		stampGroup(producer, 1, 500);
-		producer.writeFrame({ payload: enc.encode("arrival"), timestamp: Timestamp.fromMillis(250) });
-	} finally {
-		producer.finish();
-		producer.close();
-	}
-});
+for (const [name, extra] of [
+	["unchecked", { unchecked: true }],
+	["IETF provenance", { ietf: IetfVersion.DRAFT_22 }],
+] as const) {
+	test(`${name} survives normalization and skips the rewind check`, () => {
+		for (const timescale of [undefined, Timescale.MILLI]) {
+			const info = infoDefaults({ ...extra, timescale });
+			expect(info).toMatchObject(extra);
+			expect(info.timescale).toBe(timescale);
+		}
+		const producer = new TrackProducer("rewind").accept({ timescale: Timescale.MILLI, ...extra });
+		try {
+			stampGroup(producer, 0, 1000);
+			stampGroup(producer, 1, 500);
+			producer.writeFrame({ payload: enc.encode("arrival"), timestamp: Timestamp.fromMillis(250) });
+		} finally {
+			producer.finish();
+			producer.close();
+		}
+	});
+}
 
 test("an appended rewind is refused and an equal start is not", () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });

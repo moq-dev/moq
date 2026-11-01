@@ -156,8 +156,8 @@ async fn setup_through(
 fn rand_seed() -> u64 {
 	let seed = match std::env::var("MOQ_SHAPER_SEED") {
 		Ok(seed) => seed.parse().expect("MOQ_SHAPER_SEED is not a u64"),
-		Err(_) => moq_clock::wall()
-			.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH)
+		Err(_) => kio::clock::wall()
+			.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH)
 			.as_nanos() as u64,
 	};
 	println!("MOQ_SHAPER_SEED={seed}");
@@ -167,7 +167,7 @@ fn rand_seed() -> u64 {
 /// Broadcast `room`, once the peer announces it into `origin`.
 async fn room(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
 	let consumer = origin.consume();
-	moq_clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
+	kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves")
@@ -175,7 +175,7 @@ async fn room(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consume
 
 /// Subscribe to track `name` of `remote` at `priority`.
 async fn subscribe(remote: &moq_net::broadcast::Consumer, name: &str, priority: i8) -> moq_net::track::Subscriber {
-	moq_clock::timeout(
+	kio::clock::timeout(
 		TIMEOUT,
 		remote
 			.track(name)
@@ -203,7 +203,7 @@ impl Setup {
 
 /// The next group, which must arrive in time.
 async fn next_group(sub: &mut moq_net::track::Subscriber) -> moq_net::group::Consumer {
-	moq_clock::timeout(TIMEOUT, sub.recv_group())
+	kio::clock::timeout(TIMEOUT, sub.recv_group())
 		.await
 		.expect("group timed out")
 		.expect("group")
@@ -213,7 +213,7 @@ async fn next_group(sub: &mut moq_net::track::Subscriber) -> moq_net::group::Con
 /// The next frame's payload, which must arrive in time.
 async fn next_frame(sub: &mut moq_net::track::Subscriber) -> Bytes {
 	let mut group = next_group(sub).await;
-	moq_clock::timeout(TIMEOUT, group.read_frame())
+	kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("frame timed out")
 		.expect("frame")
@@ -224,7 +224,7 @@ async fn next_frame(sub: &mut moq_net::track::Subscriber) -> Bytes {
 /// The next group's first frame, still arriving.
 async fn partial_frame(sub: &mut moq_net::track::Subscriber) -> moq_net::frame::Consumer {
 	let mut group = next_group(sub).await;
-	moq_clock::timeout(TIMEOUT, group.next_frame())
+	kio::clock::timeout(TIMEOUT, group.next_frame())
 		.await
 		.expect("frame header timed out")
 		.expect("frame")
@@ -235,7 +235,7 @@ async fn partial_frame(sub: &mut moq_net::track::Subscriber) -> moq_net::frame::
 async fn read_partial(frame: &mut moq_net::frame::Consumer, bytes: usize) {
 	let mut seen = 0;
 	while seen < bytes {
-		let chunk = moq_clock::timeout(TIMEOUT, frame.read_chunk())
+		let chunk = kio::clock::timeout(TIMEOUT, frame.read_chunk())
 			.await
 			.expect("partial payload timed out")
 			.expect("chunk")
@@ -374,7 +374,7 @@ async fn lite_frame_past_the_window_gives_way() {
 
 	let mut partial = partial_frame(&mut low_sub).await;
 	loop {
-		match moq_clock::timeout(TIMEOUT, partial.read_chunk())
+		match kio::clock::timeout(TIMEOUT, partial.read_chunk())
 			.await
 			.expect("the partial frame neither failed nor grew")
 		{
@@ -528,7 +528,7 @@ impl Reversed {
 			});
 		}
 		for _ in 0..stopped {
-			moq_clock::timeout(TIMEOUT, rx.recv())
+			kio::clock::timeout(TIMEOUT, rx.recv())
 				.await
 				.expect("stop timed out")
 				.expect("a writer");
@@ -668,7 +668,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 		.expect("spawn bun");
 	let mut commands = child.stdin.take().unwrap();
 
-	let request = moq_clock::timeout(TIMEOUT, server.accept())
+	let request = kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("connect timeout")
 		.expect("request");
@@ -700,7 +700,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	commands.write_all(&b"high\n"[..]).await.unwrap();
 	assert_eq!(next_frame(&mut high).await, vec![2u8; WINDOW / 2], "{version}");
 	loop {
-		let chunk = moq_clock::timeout(TIMEOUT, partial.read_chunk())
+		let chunk = kio::clock::timeout(TIMEOUT, partial.read_chunk())
 			.await
 			.expect("stop timed out");
 		match chunk {
@@ -715,7 +715,7 @@ async fn javascript_partial_frame_gives_way(version: &str) {
 	assert_eq!(next_frame(&mut low).await, &b"after"[..], "{version}");
 
 	drop(commands);
-	let status = moq_clock::timeout(TIMEOUT, child.wait())
+	let status = kio::clock::timeout(TIMEOUT, child.wait())
 		.await
 		.expect("sender exit timed out")
 		.expect("sender");
@@ -785,7 +785,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 		let track = setup.broadcast.create_track(name.as_str(), timed()).unwrap();
 		// Groups in flight fall behind the live edge, so a zero budget would skip them.
 		let subscription = Subscription::default().with_max_delay(TIMEOUT);
-		let sub = moq_clock::timeout(TIMEOUT, setup.remote.track(&name).unwrap().subscribe(subscription))
+		let sub = kio::clock::timeout(TIMEOUT, setup.remote.track(&name).unwrap().subscribe(subscription))
 			.await
 			.expect("subscribe timeout")
 			.expect("subscribe");
@@ -794,7 +794,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 
 	let rounds = (bytes / cell.frame / cell.streams).max(1);
 	let payload = Bytes::from(vec![7u8; cell.frame]);
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	let tasks: Vec<_> = tracks
 		.into_iter()
 		.map(|(track, mut sub)| {
@@ -808,7 +808,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 						for _ in 0..rounds {
 							inflight.acquire().await.unwrap().forget();
 							let mut group = track.append_group().unwrap();
-							sent.lock().unwrap().insert(group.sequence, moq_clock::now());
+							sent.lock().unwrap().insert(group.sequence, kio::clock::now());
 							group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 							group.finish().unwrap();
 						}
@@ -818,7 +818,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 				let mut latency = Vec::with_capacity(rounds);
 				for _ in 0..rounds {
 					let mut group = next_group(&mut sub).await;
-					let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+					let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 						.await
 						.expect("frame timed out")
 						.expect("frame")
