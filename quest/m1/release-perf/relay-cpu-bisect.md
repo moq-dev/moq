@@ -15,12 +15,12 @@ Found by [moq-dev/moq#7505](https://github.com/moq-dev/moq/pull/7505), which pro
 | chat | tokio workers | 104.0 [101.4-105.0] at `1dd9b83d1` | 143.1 [127.5-205.3] |
 | video | tokio workers | 141.6 [139.3-148.3] at `1dd9b83d1` | 167.1 [164.9-173.6] |
 
-Medians of 5 interleaved reps, min-max in brackets. The tokio rows start at [`1dd9b83d1`](https://github.com/moq-dev/moq/commit/1dd9b83d19), #5926's base, since #7505 measured the tokio workers only there and at `main`. Both runtimes moved, so the cause is shared code (moq-net's model, kio, or the session layer), not the io_uring clock.
+Medians of 5 interleaved reps, min-max in brackets. The tokio rows start at [`1dd9b83d1`](https://github.com/moq-dev/moq/commit/1dd9b83d19), #5926's base, since #7505 measured the tokio workers only there and at `main`. Both runtimes moved, so at least one cause is shared code (moq-net's model, kio, or the session layer). That does not rule out a further io_uring-only cost, such as the clock read #7505 profiled. The tokio range also spans #5926 itself, so the two rises can't be subtracted to find one.
 
 Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): m1, in this epic, since `main` must not reach the cut carrying accidental per-frame cost.
 
 - Measure as #7505 did: `--profile profiling` builds with frame pointers and `moq-relay/io-uring,moq-bench/uring`, one target directory per revision, `perf stat` `cpu_core` instructions (user and kernel) over the steady window, divided by the frames the generator's 500 ms reports count over the same window. 4 io_uring workers, not 1, so chat does not saturate a worker. Pin the relay and generator cores so a loaded host still reads instruction deltas.
-- Bisect `cdff3c8f95..main` on chat over io_uring first (the largest rise and the tightest ranges), with a step size that keeps each build's cost bounded, then confirm the culprits on video and on the tokio workers.
+- Bisect `cdff3c8f95..main` on chat over io_uring first (the largest rise and the tightest ranges), with a step size that keeps each build's cost bounded, then confirm the culprits on video and on the tokio workers. A rise that shows on io_uring but not on the tokio workers is attributed on its own, not folded into a shared culprit.
 - Attribute each step with `perf record` at a fixed period, as #7505 did, before deciding fix or accept. Record accepted costs in the epic's Plan with the feature they pay for.
 - Commit the driver this needs as a deterministic mode of `just bench-profile` or `just bench-runtime` (pinned cores, instructions per delivered frame, fixed-period samples) instead of another throwaway script; #7505's driver on `bench/relay.sh` was not committed.
 - [Fanout lock contention](/quest/m1/release-perf/fanout-lock.md) covers the bimodal futex cost on the fanout workload; don't fix it twice. A bisect step that lands on the same lock goes there.
