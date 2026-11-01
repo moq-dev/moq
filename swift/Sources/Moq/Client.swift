@@ -174,4 +174,14 @@ public final class Session: Sendable {
     public func allocator() -> Allocator {
         Allocator(ffi.allocator())
     }
+
+    /// The session's viewers, dividing the receive estimate among watched broadcasts.
+    ///
+    /// Every call returns a handle to the same registry, and the session sends what
+    /// its viewers' ceilings add up to as its PROBE target. A client handle survives
+    /// reconnects: a viewer reads `nil` while disconnected and resumes on the next
+    /// connection.
+    public func viewers() -> Viewers {
+        Viewers(ffi.viewers())
+    }
 }

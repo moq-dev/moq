@@ -1,7 +1,5 @@
 use crate::driver::Transport;
 use crate::transport::poll::Session as _;
-#[cfg(test)]
-use std::sync::atomic::AtomicU64;
 
 use crate::{SessionError, announce, frame, group, origin, track};
 use rangemap::{RangeMap, RangeSet};
@@ -10,7 +8,7 @@ use std::{
 	ops::{Bound, ControlFlow, Range},
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicUsize, Ordering},
+		atomic::{AtomicU64, AtomicUsize, Ordering},
 	},
 	task::{Poll, ready},
 	time::Duration,
@@ -90,6 +88,23 @@ struct Shared {
 	// untimed (see `wire_timestamp`).
 	runtime: crate::time::Deadlines,
 	estimate: kio::ProducerWeak<crate::session::Estimate>,
+	/// The peer's latest PROBE target, which the session's sender probes up to.
+	peer_target: kio::Producer<crate::bandwidth::Rate>,
+	/// Each open PROBE stream's latest target, which `peer_target` follows.
+	peer_targets: Mutex<PeerTargets>,
+	/// Numbers each PROBE stream for `peer_targets`.
+	probe_streams: AtomicU64,
+}
+
+/// The latest target each open PROBE stream sent, so the peer's target is the newest
+/// one written by a stream still open. A superseded stream's late targets and end then
+/// settle on its replacement's target whatever order they arrive in, with no need to
+/// know which stream the peer opened first.
+#[derive(Default)]
+struct PeerTargets {
+	/// By stream: when its target was written, counted by `writes`, and the target.
+	streams: HashMap<u64, (u64, crate::bandwidth::Rate)>,
+	writes: u64,
 }
 
 /// Largest millisecond duration every implementation can carry losslessly.
@@ -130,6 +145,40 @@ fn cursor_floor(version: Version, start_group: Option<u64>, latest: Option<u64>)
 }
 
 impl Shared {
+	/// Record the PROBE target stream `stream` sent, which only a session with a sender
+	/// acts on. The latest write wins while several streams are open.
+	fn set_peer_target(&self, stream: u64, target: crate::bandwidth::Rate) {
+		let mut targets = self.peer_targets.lock().unwrap();
+		targets.writes += 1;
+		let order = targets.writes;
+		targets.streams.insert(stream, (order, target));
+		self.write_peer_target(target);
+	}
+
+	/// Lapse the target stream `stream` sent as it ends, falling back to the newest one
+	/// another open stream sent, or zero.
+	fn clear_peer_target(&self, stream: u64) {
+		let mut targets = self.peer_targets.lock().unwrap();
+		if targets.streams.remove(&stream).is_none() {
+			return;
+		}
+		let newest = targets
+			.streams
+			.values()
+			.max_by_key(|(order, _)| *order)
+			.map_or(crate::bandwidth::Rate::ZERO, |(_, target)| *target);
+		self.write_peer_target(newest);
+	}
+
+	fn write_peer_target(&self, target: crate::bandwidth::Rate) {
+		// An error means nothing follows the target, which is then moot.
+		if let Ok(mut current) = self.peer_target.write()
+			&& *current != target
+		{
+			*current = target;
+		}
+	}
+
 	/// Watches whether the session still lets us serve `broadcast` to the peer: our
 	/// grant, and the ceiling on what the peer may subscribe to.
 	fn gate(&self, broadcast: &crate::Path) -> crate::auth::Gate {
@@ -207,6 +256,9 @@ impl Publisher {
 				lister: crate::broadcast::Owner::new(),
 				runtime: config.runtime.clone(),
 				estimate: config.estimate,
+				peer_target: kio::Producer::new(crate::bandwidth::Rate::ZERO),
+				peer_targets: Default::default(),
+				probe_streams: AtomicU64::new(0),
 			}),
 			runtime: config.runtime,
 			accept,
@@ -216,6 +268,11 @@ impl Publisher {
 }
 
 impl Publisher {
+	/// The peer's latest PROBE target, or zero while it asks for none.
+	pub fn peer_target(&self) -> kio::Consumer<crate::bandwidth::Rate> {
+		self.shared.peer_target.consume()
+	}
+
 	pub fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		if let Some(enforce) = &mut self.enforce
 			&& let Poll::Ready(res) = enforce.poll(&self.shared, waiter)
@@ -654,6 +711,8 @@ struct ProbeServe {
 	due: crate::time::Deadline,
 	/// A peer streaming targets still lets the session's other tasks run.
 	budget: kio::coop::Budget,
+	/// This stream's key in the session's `peer_targets`.
+	id: u64,
 }
 
 impl ProbeServe {
@@ -705,6 +764,7 @@ impl ProbeServe {
 
 	fn new(shared: Arc<Shared>, runtime: crate::time::Deadlines, stream: Stream<Transport, Version>) -> Self {
 		Self {
+			id: shared.probe_streams.fetch_add(1, Ordering::Relaxed) + 1,
 			estimate: shared.estimate.consume(),
 			seen: None,
 			shared,
@@ -717,7 +777,11 @@ impl ProbeServe {
 	}
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		match ready!(self.poll_probe(waiter)) {
+		let res = ready!(self.poll_probe(waiter));
+		// The stream carried the target, so it lapses with it, back to another open
+		// stream's target if a replacement already sent one.
+		self.shared.clear_peer_target(self.id);
+		match res {
 			Ok(()) => tracing::debug!("probe stream closed"),
 			Err(err) => {
 				self.stream.take().expect("stream present").writer.abort(&err);
@@ -743,11 +807,18 @@ impl ProbeServe {
 			// Deliver the previous estimate before weighing the next one.
 			ready!(stream.writer.poll_flush(waiter))?;
 
-			// Report ignores target values, but consumes them so buffered bytes
-			// cannot hide the peer's FIN or a malformed complete message.
+			// The peer's target, recorded for the session's sender. Without one the
+			// session ignores it, as a Report-level publisher must, but it is still
+			// consumed so buffered bytes cannot hide the peer's FIN or a malformed
+			// complete message.
 			loop {
 				match stream.reader.poll_decode_maybe::<lite::Probe>(waiter) {
-					Poll::Ready(Ok(Some(_))) => ready!(self.budget.poll_yield(waiter)),
+					Poll::Ready(Ok(Some(probe))) => {
+						let target = probe.bitrate.map(crate::bandwidth::Rate::from_bps);
+						self.shared
+							.set_peer_target(self.id, target.unwrap_or(crate::bandwidth::Rate::ZERO));
+						ready!(self.budget.poll_yield(waiter))
+					}
 					Poll::Ready(Ok(None)) => return Poll::Ready(Ok(())),
 					Poll::Ready(Err(err)) => return Poll::Ready(Err(err)),
 					Poll::Pending => break,
@@ -7776,6 +7847,38 @@ mod tests {
 			estimate: estimate.weak(),
 		});
 		ProbeServe::new(publisher.shared.clone(), publisher.runtime.clone(), stream)
+	}
+
+	/// A subscriber that drops its PROBE stream and opens another can see the new
+	/// stream's target land before the old stream's buffered targets and end, in any
+	/// order: once the old stream ends, the new stream's target stands.
+	#[kio::test]
+	async fn a_superseded_probe_stream_keeps_its_successors_target() {
+		use crate::bandwidth::Rate;
+		let version = Version::Lite06;
+		let session = ScriptedSession::new(Vec::new());
+		let mut transport = crate::driver::Transport::new(session.clone());
+		let stream = Stream::open(&mut transport, version).await.unwrap();
+		let estimate = kio::Producer::default();
+		let old = probe_server(crate::driver::Transport::new(session), stream, version, &estimate);
+		let stream = Stream::open(&mut transport, version).await.unwrap();
+		let new = ProbeServe::new(old.shared.clone(), crate::time::sim(), stream);
+		let shared = old.shared.clone();
+		let target = shared.peer_target.consume();
+
+		shared.set_peer_target(old.id, Rate::from_bps(1_000_000));
+		shared.set_peer_target(new.id, Rate::from_bps(2_000_000));
+		// The old stream's buffered target lands late, winning while it is open.
+		shared.set_peer_target(old.id, Rate::from_bps(3_000_000));
+		assert_eq!(*target.read(), Rate::from_bps(3_000_000));
+		shared.clear_peer_target(old.id);
+		assert_eq!(*target.read(), Rate::from_bps(2_000_000));
+		// A stream that never sent a target ends without touching the others'.
+		shared.clear_peer_target(old.id + new.id + 1);
+		assert_eq!(*target.read(), Rate::from_bps(2_000_000));
+
+		shared.clear_peer_target(new.id);
+		assert_eq!(*target.read(), Rate::ZERO);
 	}
 
 	#[kio::test]

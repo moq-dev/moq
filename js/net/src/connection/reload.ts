@@ -1,9 +1,9 @@
 import { Instant, Milli, Nano, now, sleep } from "@moq/clock";
-import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
+import { Derived, Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { Handle as AuthHandle } from "../auth.ts";
 import { ended } from "../auth_session.ts";
-import { Allocator } from "../bandwidth.ts";
+import { Allocator, Viewers } from "../bandwidth.ts";
 import { error, reason, SessionCode, SessionError } from "../error.ts";
 import type { Consumer as OriginConsumer, Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -83,7 +83,7 @@ export type ReloadDelay = {
  */
 export type ReloadProps = Omit<
 	ConnectProps,
-	"url" | "signal" | "transport" | "implementation" | "extensions" | "tokens"
+	"url" | "signal" | "transport" | "implementation" | "extensions" | "tokens" | "viewers"
 > & {
 	/** See {@link ConnectProps.tokens}; pass a `Signal` to replace them before they expire. */
 	tokens?: readonly string[] | Signal<readonly string[]>;
@@ -93,6 +93,9 @@ export type ReloadProps = Omit<
 
 	/** A one-shot transport cannot be reused by the reconnect loop. */
 	transport?: never;
+
+	/** A reload owns its {@link Reload.viewers}, fed by its own sessions' estimates. */
+	viewers?: never;
 
 	/** Whether to reload the connection when it disconnects (default: true). */
 	enabled?: boolean | Signal<boolean>;
@@ -222,6 +225,15 @@ export class Reload {
 	 * its rate rather than encode at zero.
 	 */
 	readonly allocator: Allocator;
+
+	/**
+	 * Divides this connection's receive estimate among the broadcasts watched over it.
+	 *
+	 * The same instance across reconnects, so viewers survive a drop, and every session
+	 * the loop dials sends their ceilings summed as its PROBE target. A live viewer
+	 * requests PROBE; viewers report `undefined` while disconnected.
+	 */
+	readonly viewers: Viewers;
 
 	/**
 	 * The auth handle every session of the loop is built on, spanning reconnects.
@@ -408,6 +420,11 @@ export class Reload {
 		this.allocator = new Allocator(this.#estimate);
 		this.#signals.cleanup(() => this.allocator.close());
 
+		// Lazy: the registry observes the estimate only while a viewer is live, and only
+		// that observation requests PROBE from the current session.
+		this.viewers = new Viewers(new Derived([this.probe], (probe) => probe?.estimatedRecvRate));
+		this.#signals.cleanup(() => this.viewers.close());
+
 		// The transport has no event for the send-rate estimate, so sample on our
 		// own schedule and skip a tick while the previous snapshot is outstanding.
 		this.#signals.run((effect) => {
@@ -542,6 +559,7 @@ export class Reload {
 							publish: this.publish,
 							consume: this.consume,
 							auth: this.auth,
+							viewers: this.viewers,
 							signal,
 						});
 					} finally {

@@ -454,6 +454,10 @@ struct Side {
 	panic_on_stats: AtomicBool,
 	/// The wire counters [`poll::Session::wire`] exposes, which a test updates as a transport would.
 	wire: moq_net::transport::Wire,
+	/// Whether [`poll::Session::probe`] reports a sender; see [`MockSession::set_probe`].
+	probing: AtomicBool,
+	/// The sender's target, which the session sets.
+	probe: moq_net::transport::Probe,
 }
 
 /// The connection statistics a [`MockSession`] reports. Unavailable by default.
@@ -643,6 +647,13 @@ impl poll::Session for MockSession {
 	fn wire(&self) -> Option<moq_net::transport::Wire> {
 		Some(self.side.wire.clone())
 	}
+
+	fn probe(&self) -> Option<moq_net::transport::Probe> {
+		self.side
+			.probing
+			.load(Ordering::Relaxed)
+			.then(|| self.side.probe.clone())
+	}
 }
 
 #[allow(dead_code, reason = "only some test binaries steer delivery")]
@@ -674,6 +685,16 @@ impl MockSession {
 	/// Report `stats` from now on.
 	pub fn set_stats(&self, stats: MockStats) {
 		*self.side.stats.lock().unwrap() = stats;
+	}
+
+	/// Report a sender from now on, which a session reads once as it starts.
+	pub fn set_probe(&self, probing: bool) {
+		self.side.probing.store(probing, Ordering::Relaxed);
+	}
+
+	/// The target the session hands this side's sender, or zero without one.
+	pub fn probe_target(&self) -> moq_net::bandwidth::Rate {
+		self.side.probe.target()
 	}
 
 	/// How many times the stats were read.
@@ -914,6 +935,8 @@ pub fn create_mock_session_pair(config: memory::Config) -> (MockSession, MockSes
 			stats_reads: Default::default(),
 			panic_on_stats: Default::default(),
 			wire: Default::default(),
+			probing: Default::default(),
+			probe: Default::default(),
 		}),
 	};
 

@@ -48,8 +48,11 @@ ignores unknown parameters: [cluster](/draft/moq-cluster) routing hop lists,
 [active-count](/draft/moq-active-count) to count the `NAMESPACE` messages
 before a `SUBSCRIBE_NAMESPACE` is synced, and
 [probe](/draft/moq-probe) for bandwidth estimation. Rust sessions request PROBE
-only while an owned `recv_bandwidth()` consumer is held. Read estimates through
-its `peek()` or `changed()` methods; session statistics do not request PROBE.
+only while an owned `recv_bandwidth()` consumer or a `viewers()` viewer is held.
+The consumer reads the estimate, and a viewer reads its share of it; session
+statistics do not request PROBE. The viewers' ceilings, summed, are the PROBE target, sent only
+to a peer advertising `Increase`, which a native session over moq-quic with BBR3
+does and a browser session does not yet.
 Both libraries offer solicit and auth unless a side's
 `extensions` setting declines one, which connects it as a peer that does not
 speak that extension. The pooled JavaScript `Connection` has no such setting yet.

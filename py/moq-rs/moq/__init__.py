@@ -42,7 +42,16 @@ from .publish import (
     TrackRequests,
 )
 from .server import Request, Server, Transport
-from .session import Allocator, BandwidthConsumer, GrantConsumer, Reservation, Session, Tokens
+from .session import (
+    Allocator,
+    BandwidthConsumer,
+    GrantConsumer,
+    Reservation,
+    Session,
+    Tokens,
+    Viewer,
+    Viewers,
+)
 from .subscribe import (
     BroadcastConsumer,
     GroupConsumer,
@@ -151,6 +160,8 @@ __all__ = [
     "VideoEncoderOutput",
     "VideoDecodedFrame",
     "VideoPixelFormat",
+    "Viewer",
+    "Viewers",
     "WebSocketConfig",
     "connect",
     "is_auth",

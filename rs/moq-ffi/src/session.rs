@@ -1053,6 +1053,19 @@ impl MoqSession {
 		self.allocator.clone()
 	}
 
+	/// The session's viewers, used to divide the connection's receive estimate among
+	/// the broadcasts watched over it.
+	///
+	/// Every call returns a handle to the same registry, and the session sends what its
+	/// viewers add up to as its PROBE target. A client handle survives reconnects: a
+	/// viewer reads `None` while disconnected and resumes on the next connection.
+	pub fn viewers(&self) -> Arc<crate::bandwidth::MoqViewers> {
+		Arc::new(crate::bandwidth::MoqViewers::new(match &self.inner {
+			Inner::Connection(connection) => connection.viewers(),
+			Inner::Session(session) => session.viewers(),
+		}))
+	}
+
 	/// Follow the grant the peer gave this session.
 	///
 	/// Every call returns an independent consumer. A client session's grant follows each

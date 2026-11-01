@@ -3,6 +3,7 @@ import { Elapsed, Manual, Milli, Nano, timeout, yieldNow } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
+import { Viewers } from "../bandwidth.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
 import * as Epoch from "../epoch.ts";
 import {
@@ -28,6 +29,7 @@ import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadca
 import { Datagram as DatagramMessage } from "./datagram.ts";
 import { Group } from "./group.ts";
 import { Probe } from "./probe.ts";
+import { ProbeLevel, Setup } from "./setup.ts";
 import { StreamId } from "./stream.ts";
 import {
 	encodeSubscribeResponse,
@@ -2948,4 +2950,140 @@ test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while 
 		subscriber.close();
 		installed.close();
 	}
+});
+
+/**
+ * A PROBE stream to a peer whose SETUP advertised `level`: `sent` reads back what the
+ * subscriber wrote, and `finish` plays the peer's FIN.
+ */
+function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean; stallTarget?: boolean }) {
+	const version = Version.DRAFT_06;
+	let written!: ReadableStreamDefaultController<Uint8Array>;
+	const sent = new Reader(
+		new ReadableStream<Uint8Array>({ start: (controller) => (written = controller) }),
+		undefined,
+		version,
+	);
+	let inbound!: ReadableStreamDefaultController<Uint8Array>;
+	let writes = 0;
+	let stall!: () => void;
+	const stalled = new Promise<void>((resolve) => (stall = resolve));
+	let reset!: (reason: unknown) => void;
+	const aborted = new Promise<unknown>((resolve) => (reset = resolve));
+	const quic = {
+		createBidirectionalStream: async () => ({
+			readable: new ReadableStream<Uint8Array>({ start: (controller) => (inbound = controller) }),
+			writable: new WritableStream<Uint8Array>({
+				write: async (chunk, controller) => {
+					// Only the stream type precedes the first target.
+					if (writes++ > 0) {
+						if (options?.failTarget) throw new Error("write failed");
+						// A peer that never drains the stream: only a reset ends the write.
+						if (options?.stallTarget) {
+							stall();
+							await new Promise<void>((_, reject) => {
+								controller.signal.addEventListener("abort", () => {
+									reset(controller.signal.reason);
+									reject(controller.signal.reason);
+								});
+							});
+						}
+					}
+					written.enqueue(new Uint8Array(chunk));
+				},
+				close: () => written.close(),
+			}),
+		}),
+	} as unknown as WebTransport;
+	const peerSetup = new Signal<Setup | undefined>(new Setup({ probe: level }));
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n), new Signal<ProbeStats>({}), peerSetup);
+	return {
+		subscriber,
+		sent,
+		version,
+		stalled,
+		aborted,
+		finish: () => inbound.close(),
+	};
+}
+
+// The viewers' sum reaches the peer as its PROBE target: only once nonzero, on every change,
+// and retracted with a zero, while an opt-out sends nothing at all.
+test("the PROBE stream sends the viewers' target to an Increase peer", async () => {
+	const { subscriber, sent, version, finish } = probeTargetHarness(ProbeLevel.Increase);
+	const viewers = new Viewers();
+	viewers.setTarget(0);
+	const running = subscriber.runProbe(undefined, viewers.target);
+	expect(await sent.u53()).toBe(StreamId.Probe);
+
+	// Opted out: a viewer moves nothing onto the wire until the override clears.
+	const first = viewers.watch(1_000_000);
+	viewers.setTarget(undefined);
+	expect((await Probe.decode(sent, version)).bitrate).toBe(1_000_000);
+
+	const second = viewers.watch(2_000_000);
+	expect((await Probe.decode(sent, version)).bitrate).toBe(3_000_000);
+
+	first.close();
+	expect((await Probe.decode(sent, version)).bitrate).toBe(2_000_000);
+
+	// Dropping to zero retracts the target as unknown on the wire.
+	second.close();
+	expect((await Probe.decode(sent, version)).bitrate).toBeUndefined();
+
+	finish();
+	await running;
+	expect(await sent.done()).toBe(true);
+	subscriber.close();
+	viewers.close();
+});
+
+// The writer and reader are independent: a failed target write ends the probe even while
+// the peer keeps its side open.
+test("a failed PROBE target write ends the probe", async () => {
+	const { subscriber, sent } = probeTargetHarness(ProbeLevel.Increase, { failTarget: true });
+	const viewers = new Viewers();
+	const viewer = viewers.watch(1_000_000);
+	const running = subscriber.runProbe(undefined, viewers.target);
+	expect(await sent.u53()).toBe(StreamId.Probe);
+
+	await running;
+	viewer.close();
+	subscriber.close();
+	viewers.close();
+});
+
+// Ending the probe resets a stream whose target write the peer never drained, rather than
+// queueing a close behind that write and holding the stream open.
+test("ending the probe resets a stalled PROBE target write", async () => {
+	const { subscriber, sent, stalled, aborted } = probeTargetHarness(ProbeLevel.Increase, { stallTarget: true });
+	const viewers = new Viewers();
+	const viewer = viewers.watch(1_000_000);
+	const stop = new AbortController();
+	const running = subscriber.runProbe(stop.signal, viewers.target);
+	expect(await sent.u53()).toBe(StreamId.Probe);
+	await stalled;
+
+	stop.abort();
+	await running;
+	expect(await aborted).toBeDefined();
+	viewer.close();
+	subscriber.close();
+	viewers.close();
+});
+
+// A Report-level peer only measures, so it is never sent a target to ignore.
+test("the PROBE stream sends no target to a Report peer", async () => {
+	const { subscriber, sent, finish } = probeTargetHarness(ProbeLevel.Report);
+	const viewers = new Viewers();
+	const viewer = viewers.watch(1_000_000);
+	const running = subscriber.runProbe(undefined, viewers.target);
+	expect(await sent.u53()).toBe(StreamId.Probe);
+
+	finish();
+	await running;
+	expect(await sent.done()).toBe(true);
+	viewer.close();
+	subscriber.close();
+	viewers.close();
 });

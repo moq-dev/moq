@@ -15,6 +15,8 @@ use super::{
 
 pub(crate) struct SessionStart {
 	pub recv_bandwidth: Option<bandwidth::Weak>,
+	/// The peer's PROBE target, which the session's sender probes up to.
+	pub peer_target: kio::Consumer<bandwidth::Rate>,
 	/// The estimate PROBE reports, published by the session's supervisor.
 	pub estimate: kio::Producer<crate::session::Estimate>,
 	/// The session's protocol machine over the boxed transport.
@@ -202,6 +204,8 @@ pub struct Config {
 	pub auth: crate::auth::Link,
 	/// What the peer may make this session hold.
 	pub limits: crate::session::Limits,
+	/// The viewers whose sum the session sends as its PROBE target.
+	pub viewers: bandwidth::Viewers,
 }
 
 /// Start a lite session.
@@ -222,6 +226,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		peer_setup,
 		auth,
 		limits,
+		viewers,
 	} = config;
 
 	let recv_bw = bandwidth::Producer::new();
@@ -334,6 +339,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		client,
 		subscriptions,
 	});
+	let peer_target = publisher.peer_target();
 	let mut subscriber = Subscriber::new(SubscriberConfig {
 		runtime: runtime.clone(),
 		session: session.clone(),
@@ -350,6 +356,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		auth: auth.clone(),
 	});
 	subscriber.announces = announces;
+	subscriber.viewers = viewers;
 
 	// SendSetup only logs a failure, so refuse a SETUP that cannot encode (one past the
 	// size bound, such as a long implementation or path) here rather than leave the peer waiting.
@@ -386,6 +393,7 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 
 	Ok(SessionStart {
 		recv_bandwidth: recv_bw_consumer,
+		peer_target,
 		estimate,
 		driver,
 		goaway: goaway_handle,
@@ -944,6 +952,7 @@ mod tests {
 			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
+			viewers: Default::default(),
 			session: crate::driver::Transport::new(transport.clone()),
 			setup_stream: None,
 			publish: None,
@@ -989,6 +998,7 @@ mod tests {
 			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
+			viewers: Default::default(),
 			session: crate::driver::Transport::new(transport),
 			setup_stream: None,
 			publish: None,
@@ -1069,6 +1079,7 @@ mod tests {
 				stats: Default::default(),
 				client: false,
 				limits: Default::default(),
+				viewers: Default::default(),
 				session: crate::driver::Transport::new(transport.clone()),
 				setup_stream: None,
 				publish: None,
@@ -1156,6 +1167,7 @@ mod tests {
 			stats: Default::default(),
 			client: true,
 			limits: Default::default(),
+			viewers: Default::default(),
 			session: crate::driver::Transport::new(transport.clone()),
 			setup_stream: None,
 			publish: None,
@@ -1237,6 +1249,7 @@ mod tests {
 					client: false,
 					auth: crate::auth::Link::new(version.has_auth()),
 					limits: Default::default(),
+					viewers: Default::default(),
 				})
 				.unwrap();
 				let _ = started.driver.poll(&kio::Waiter::noop());
@@ -1292,6 +1305,7 @@ mod tests {
 					client: false,
 					auth: crate::auth::Link::new(version.has_auth()),
 					limits: Default::default(),
+					viewers: Default::default(),
 				})
 				.unwrap();
 				let _ = started.driver.poll(&kio::Waiter::noop());
@@ -1325,6 +1339,7 @@ mod tests {
 			peer_setup,
 			auth: crate::auth::Link::new(version.has_auth()),
 			limits: Default::default(),
+			viewers: Default::default(),
 		})
 		.unwrap()
 	}

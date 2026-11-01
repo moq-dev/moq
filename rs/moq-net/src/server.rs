@@ -184,11 +184,14 @@ impl Server {
 			lite::Setup::default()
 		};
 
+		// One registry, which the subscriber sends and the session hands out.
+		let viewers = crate::bandwidth::Viewers::default();
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
 			stats: self.stats.clone(),
 			client: false,
 			limits: self.limits,
+			viewers: viewers.clone(),
 			session: session.clone(),
 			setup_stream: None,
 			publish,
@@ -212,7 +215,9 @@ impl Server {
 				auth: start.auth,
 				credential: start.credential,
 				estimate: Some(start.estimate),
+				peer_target: Some(start.peer_target),
 				bandwidth: crate::bandwidth::Allocator::default(),
+				viewers,
 				peer_implementation: start.peer_implementation,
 			},
 		))
@@ -552,7 +557,9 @@ impl PausedIetf {
 				auth,
 				credential,
 				estimate: None,
+				peer_target: None,
 				bandwidth: crate::bandwidth::Allocator::default(),
+				viewers: Default::default(),
 				peer_implementation,
 			},
 		))
@@ -596,11 +603,14 @@ impl PausedNegotiated {
 
 		let stream = stream.with_version(version);
 		// Pre-lite-05: no Setup Stream, so nothing to advertise or seed.
+		// One registry, which the subscriber sends and the session hands out.
+		let viewers = crate::bandwidth::Viewers::default();
 		let start = lite::start(lite::Config {
 			runtime: runtime.clone(),
 			stats: server.stats.clone(),
 			client: false,
 			limits: server.limits,
+			viewers: viewers.clone(),
 			session: session.clone(),
 			setup_stream: Some(stream),
 			publish,
@@ -624,7 +634,9 @@ impl PausedNegotiated {
 				auth: start.auth,
 				credential: start.credential,
 				estimate: Some(start.estimate),
+				peer_target: Some(start.peer_target),
 				bandwidth: crate::bandwidth::Allocator::default(),
+				viewers,
 				peer_implementation: start.peer_implementation,
 			},
 		))

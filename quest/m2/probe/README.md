@@ -30,7 +30,7 @@ publisher-local padding handle:
   target and the peer's PROBE target. PROBE `Increase` is the wire signal;
   retransmission or padding is the mechanism. The
   send target (`bandwidth::Allocator`'s reservations) owns the local half and
-  [viewer targets](/quest/m2/probe/viewer-target.md) the peer's.
+  viewer targets (`bandwidth::Viewers`, [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090)) the peer's.
 - **Viewers are in scope.** The viewer up-switch joined the epic, since a
   viewer's target is the same session target sent the other way.
 - **moq-net stays catalog-agnostic, and each hop is independent.** A relay
@@ -64,8 +64,8 @@ Decided with the maintainer on 2026-10-20:
   probes with padding.
 - The target then split: m1 keeps the send target
   native rung recovery needs, and viewer handles, viewer grants, the peer's
-  PROBE target, and `Increase` came back here as
-  [viewer targets](/quest/m2/probe/viewer-target.md), beside their consumers.
+  PROBE target, and `Increase` came back here as viewer targets, beside their
+  consumers, and landed in [moq-dev/moq#7090](https://github.com/moq-dev/moq/pull/7090).
   The `js/net` send target moved to [padding](/quest/m2/probe/padding.md), its
   only sender.
 
@@ -87,7 +87,6 @@ This README's own work, once the children land:
 - [Browser send estimate](/quest/m2/probe/browser-send-estimate.md) - shipping Chrome and Safari publishers adapt to the relay's PROBE estimate, since they have no `getStats()`
 - [Padding probes](/quest/m2/probe/padding.md) - a browser probes with a lowest-priority padding stream on an ALR schedule
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - `@moq/publish` applies the native rung rule, recovering through padding
-- [Viewer targets](/quest/m2/probe/viewer-target.md) - a session sends its viewer handles as its PROBE target, probes to the peer's, splits the receive estimate into viewer grants, and advertises `Increase` where a sender exists
 - [Players set viewer targets](/quest/m2/probe/players.md) - players hold a viewer handle per watched broadcast at its highest enabled rendition's bitrate
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - a viewer capped by its small rendition finds headroom through PROBE and moves up
 

@@ -169,6 +169,8 @@ pub struct Session {
 	/// unused: [`bandwidth`](Self::bandwidth) mints one per call, so holding the
 	/// session doesn't keep the sampler running.
 	bandwidth: bandwidth::Allocator,
+	/// The registry whose viewers this session sends its peer as the PROBE target.
+	viewers: bandwidth::Viewers,
 	goaway: Arc<goaway::Handle>,
 	auth: auth::Handle,
 	credential: Option<auth::Credential>,
@@ -236,6 +238,18 @@ impl Session {
 	/// Returns `None` if the MoQ version doesn't support PROBE (requires moq-lite-03+).
 	pub fn recv_bandwidth(&self) -> Option<bandwidth::Consumer> {
 		self.recv_bandwidth.as_ref().map(bandwidth::Weak::consume)
+	}
+
+	/// Divides [`recv_bandwidth`](Self::recv_bandwidth) among the broadcasts watched over this session.
+	///
+	/// The session sends what the viewers add up to as its PROBE target, so a peer that
+	/// advertised `Increase` probes the connection up to it. Holding a viewer requests
+	/// PROBE. Clones share one registry: a
+	/// [`Client::with_viewers`](crate::Client::with_viewers) registry's when the session
+	/// was dialed with one, so viewers outlive a reconnect. Viewers report `None` when
+	/// the version has no PROBE.
+	pub fn viewers(&self) -> bandwidth::Viewers {
+		self.viewers.with_estimate(self.recv_bandwidth.clone())
 	}
 
 	/// Returns a snapshot of the current connection statistics.
@@ -410,6 +424,10 @@ pub(super) struct Handles {
 	pub estimate: Option<kio::Producer<Estimate>>,
 	/// The reservations the session probes for.
 	pub bandwidth: bandwidth::Allocator,
+	/// The viewers whose sum the session sends as its PROBE target.
+	pub viewers: bandwidth::Viewers,
+	/// The peer's PROBE target, for a protocol that carries one (moq-lite PROBE).
+	pub peer_target: Option<kio::Consumer<bandwidth::Rate>>,
 	/// What the peer's SETUP advertised as its implementation.
 	pub peer_implementation: crate::setup::PeerImplementation,
 }
@@ -430,6 +448,8 @@ impl Session {
 			estimate,
 			stats: context,
 			bandwidth,
+			viewers,
+			peer_target,
 			peer_implementation,
 		} = handles;
 		let goaway = Arc::new(goaway);
@@ -454,7 +474,12 @@ impl Session {
 		};
 
 		// Without a sender there is nothing to hand the target to, so don't follow it.
-		let probe = session.probe().map(|probe| (probe, bandwidth.target()));
+		let probe = session.probe().map(|sender| Probing {
+			sender,
+			local: bandwidth.target(),
+			peer: peer_target,
+			targets: (bandwidth::Rate::ZERO, bandwidth::Rate::ZERO),
+		});
 
 		let close = kio::Producer::new(None);
 		let closed = kio::Producer::new(None);
@@ -494,6 +519,7 @@ impl Session {
 			send_bandwidth,
 			recv_bandwidth,
 			bandwidth,
+			viewers,
 			goaway,
 			auth: auth.handle().clone(),
 			credential,
@@ -540,8 +566,8 @@ pub(crate) struct Supervisor {
 	send_bandwidth: Option<bandwidth::Producer>,
 	/// Published on change while a consumer exists; see [`Self::poll_sampler`].
 	estimate: Option<kio::Producer<Estimate>>,
-	/// The transport's sender and the target it is handed, when it has one.
-	probe: Option<(crate::transport::Probe, bandwidth::Target)>,
+	/// The transport's sender and the targets it probes up to, when it has one.
+	probe: Option<Probing>,
 	/// When the last sample was taken.
 	sampled: Option<crate::time::Instant>,
 	mode: SamplerMode,
@@ -551,6 +577,52 @@ pub(crate) struct Supervisor {
 	/// This session's side of its auth handle, closed before the end is published so a
 	/// replacement session built on the same handle never finds this one still active.
 	auth: auth::Link,
+}
+
+/// A transport's sender and the two targets it probes up to, whichever is larger.
+///
+/// The directions never mix: these are both rates this side sends at, its own
+/// reservations' and what the peer asks to receive. What this side wants to receive
+/// goes to the peer instead, as its PROBE target.
+struct Probing {
+	sender: crate::transport::Probe,
+	/// This side's reservations.
+	local: bandwidth::Target,
+	/// The peer's PROBE target, when the protocol carries one. `None` once it is gone.
+	peer: Option<kio::Consumer<bandwidth::Rate>>,
+	/// The last local and peer targets read.
+	targets: (bandwidth::Rate, bandwidth::Rate),
+}
+
+impl Probing {
+	fn poll(&mut self, waiter: &kio::Waiter) {
+		while let Poll::Ready(local) = self.local.poll_changed(waiter) {
+			self.targets.0 = local;
+		}
+		// Loop until pending, so the waiter stays armed for the next change.
+		while let Some(peer) = &self.peer {
+			let last = self.targets.1;
+			let polled = peer.poll(waiter, |rate| match **rate != last {
+				true => Poll::Ready(**rate),
+				false => Poll::Pending,
+			});
+			match polled.map(|res| res.ok()) {
+				Poll::Ready(Some(rate)) => self.targets.1 = rate,
+				// The protocol stopped reading the peer; nothing it asked for still holds.
+				Poll::Ready(None) => {
+					self.targets.1 = bandwidth::Rate::ZERO;
+					self.peer = None;
+				}
+				Poll::Pending => break,
+			}
+		}
+		// The peer's target is untrusted, but only sets how high to probe: each probe
+		// scales the current estimate and stays under congestion control.
+		let target = self.targets.0.max(self.targets.1);
+		if self.sender.target() != target {
+			self.sender.set_target(target);
+		}
+	}
 }
 
 /// A [`Session::close`] waiting for the protocol to deliver what it queued.
@@ -679,10 +751,8 @@ impl Supervisor {
 
 		self.poll_sampler(waiter);
 
-		if let Some((probe, target)) = &mut self.probe {
-			while let Poll::Ready(target) = target.poll_changed(waiter) {
-				probe.set_target(target);
-			}
+		if let Some(probe) = &mut self.probe {
+			probe.poll(waiter);
 		}
 
 		Poll::Pending
