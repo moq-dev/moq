@@ -1434,7 +1434,7 @@ async fn forwarded_packets_reach_their_owner() {
 		let (mut send, mut recv) = conn.open_bi(Default::default()).await.unwrap();
 		send.write_all(message.as_bytes()).await.unwrap();
 		let _ = send.finish();
-		let echoed = tokio::time::timeout(Duration::from_secs(10), recv.read_to_end(1024))
+		let echoed = timeout(Duration::from_secs(10), recv.read_to_end(1024))
 			.await
 			.expect("the owner answered")
 			.unwrap();

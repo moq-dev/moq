@@ -330,7 +330,7 @@ mod tests {
 				.poll_recv(cx)
 				.map_ok(|opened| opened.map(|o| (o.remote, o.local_ip, o.ecn, o.packet.to_vec())))
 		});
-		tokio::time::timeout(std::time::Duration::from_secs(5), next)
+		kio::clock::timeout(std::time::Duration::from_secs(5), next)
 			.await
 			.expect("a datagram")
 			.unwrap()
