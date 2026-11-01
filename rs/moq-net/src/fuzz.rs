@@ -1670,6 +1670,87 @@ impl crate::transport::Error for NoError {
 	}
 }
 
+/// One group's stream on a receiving session, as the backing bench feeds it: each frame's
+/// payload arrives as the chunks given, exactly as a transport hands them over, and passes
+/// through the session's frame reader into the cache.
+///
+/// A chunk keeps whatever allocation it was sliced from, so the bench can see which
+/// receive buffers the cached frames keep alive.
+pub struct GroupRecv {
+	reader: coding::Reader<crate::transport::poll::Buffered<Queue>, lite::Version>,
+	queue: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Bytes>>>,
+	group: Option<group::Producer>,
+}
+
+impl GroupRecv {
+	/// Receive frames into `group`.
+	pub fn new(group: group::Producer) -> Self {
+		let queue = std::rc::Rc::default();
+		let stream = Queue(std::rc::Rc::clone(&queue));
+		Self {
+			reader: coding::Reader::new(crate::transport::poll::Buffered::new(stream), lite::Version::Lite05),
+			queue,
+			group: Some(group),
+		}
+	}
+
+	/// Receive one frame whose payload is `chunks`, in order, and commit it.
+	pub fn frame(
+		&mut self,
+		timestamp: Option<crate::Timestamp>,
+		chunks: impl IntoIterator<Item = Bytes>,
+	) -> crate::Result<()> {
+		let mut size = 0;
+		self.queue
+			.borrow_mut()
+			.extend(chunks.into_iter().inspect(|chunk| size += chunk.len()));
+		let group = self.group.take().ok_or(crate::Error::Closed)?;
+		let mut frame = group.create_frame(frame::Info {
+			size: size as u64,
+			timestamp,
+		})?;
+		match self.reader.poll_read_frame(&kio::Waiter::noop(), &mut frame) {
+			std::task::Poll::Ready(Ok(())) => {}
+			std::task::Poll::Ready(Err(err)) => return Err(err),
+			std::task::Poll::Pending => unreachable!("every chunk of the frame is queued"),
+		}
+		self.group = Some(frame.finish()?);
+		Ok(())
+	}
+
+	/// Finish the group, returning its producer, which keeps it cached until dropped or aborted.
+	pub fn finish(mut self) -> crate::Result<group::Producer> {
+		let mut group = self.group.take().ok_or(crate::Error::Closed)?;
+		group.finish()?;
+		Ok(group)
+	}
+}
+
+/// The chunks queued by [`GroupRecv::frame`], handed over one at a time without copying.
+struct Queue(std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Bytes>>>);
+
+impl crate::transport::poll::Chunks for Queue {
+	type Error = NoError;
+
+	fn poll_read_chunk(
+		&mut self,
+		_waiter: &kio::Waiter,
+		max: usize,
+	) -> std::task::Poll<Result<Option<bytes::Bytes>, NoError>> {
+		let mut queue = self.0.borrow_mut();
+		let Some(front) = queue.front_mut() else {
+			return std::task::Poll::Pending;
+		};
+		let chunk = match front.len() > max {
+			true => front.split_to(max),
+			false => queue.pop_front().expect("front exists"),
+		};
+		std::task::Poll::Ready(Ok(Some(chunk)))
+	}
+
+	fn stop(&mut self, _code: u32) {}
+}
+
 /// A source-selection watch for the private request-lifetime benchmark.
 pub struct RequestValidity {
 	watch: crate::model::broadcast::RequestValidity,

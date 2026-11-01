@@ -45,6 +45,8 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
+# Runs the group log's deferred frees before the backing bench reads the live heap.
+crossbeam-epoch = "0.9.21"
 futures = { workspace = true }
 # The tests' executor, with simulated time.
 kio = { path = "../kio", features = ["runtime", "sim"] }
@@ -117,6 +119,12 @@ required-features = ["fuzz"]
 # Reaches the private frame ingest through the hidden `fuzz` module.
 [[bench]]
 name = "frame"
+harness = false
+required-features = ["fuzz"]
+
+# Receives frames through the private session reader via the hidden `fuzz` module.
+[[bench]]
+name = "backing"
 harness = false
 required-features = ["fuzz"]
 

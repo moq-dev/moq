@@ -5781,6 +5781,7 @@ dependencies = [
  "arrayvec",
  "bench-harness",
  "bytes",
+ "crossbeam-epoch",
  "flate2",
  "futures",
  "hashbrown 0.17.1",
