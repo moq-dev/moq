@@ -336,7 +336,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn raw_payload_stop_uses_the_negotiated_registry() {
 		for (version, expected) in [
 			(
@@ -375,12 +375,12 @@ mod tests {
 			writer.set_priority(send_order.into());
 		}
 
-		assert_eq!(log.priorities(), (0u8..=255).collect::<Vec<_>>());
+		assert_eq!(log.priorities(), (0i64..=255).collect::<Vec<_>>());
 	}
 
 	/// A message the stream has not taken whole cannot be finished, so closing resets rather
 	/// than hand the peer a truncated message.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn closing_an_unflushed_message_resets() {
 		let log = Log::default();
 		let budget = kio::Producer::new(0);

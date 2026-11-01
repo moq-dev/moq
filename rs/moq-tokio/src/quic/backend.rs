@@ -70,10 +70,10 @@ fn apply_qlog(transport: &mut driver::transport::Config, quic: &Resolved, role: 
 }
 
 /// The controller factory for a congestion control family. moq-quic's BBR is v3.
-fn congestion_factory(family: CongestionControl) -> Arc<dyn moq_congestion::ControllerFactory + Send + Sync> {
+fn congestion_factory(family: CongestionControl) -> Arc<dyn moq_congestion::Factory + Send + Sync> {
 	match family {
-		CongestionControl::Loss => Arc::new(moq_congestion::CubicConfig::default()),
-		CongestionControl::Delay => Arc::new(moq_congestion::Bbr3Config::default()),
+		CongestionControl::Loss => Arc::new(moq_congestion::cubic::Config::default()),
+		CongestionControl::Delay => Arc::new(moq_congestion::bbr3::Config::default()),
 		CongestionControl::None => Arc::new(moq_congestion::Unlimited),
 	}
 }
@@ -890,7 +890,7 @@ mod tests {
 		let client = Client::new(&config, &crate::quic::Config::default()).expect("client init");
 		let url: Url = format!("http://127.0.0.1:{port}/").parse().unwrap();
 		let versions = moq_net::Versions::default();
-		let result = moq_clock::timeout(Duration::from_secs(5), client.connect(&tls, url.into(), &versions))
+		let result = kio::clock::timeout(Duration::from_secs(5), client.connect(&tls, url.into(), &versions))
 			.await
 			.expect("dial timed out");
 		assert!(
@@ -936,7 +936,7 @@ mod tests {
 			let incoming = server.accept().await.expect("incoming connection");
 			super::accept(incoming, versions.alpns()).await
 		};
-		let result = moq_clock::timeout(Duration::from_secs(5), async { tokio::try_join!(dial, accept) })
+		let result = kio::clock::timeout(Duration::from_secs(5), async { tokio::try_join!(dial, accept) })
 			.await
 			.expect("handshake timed out");
 		let (_client, _server) = result.expect("pinned connection failed");
@@ -971,25 +971,27 @@ mod tests {
 		assert_eq!(limits.send_window.unwrap().get(), crate::quic::DEFAULT_SEND_WINDOW);
 	}
 
-	/// Build a controller from each family's factory and downcast it to the
-	/// concrete moq-quic implementation it must map to.
+	/// Each family supplies its advertised congestion behavior.
 	#[test]
 	fn congestion_factory_maps_each_family() {
 		let init = moq_congestion::Init {
-			now: moq_clock::Instant::now(),
+			now: kio::clock::Instant::now(),
 			mtu: 1200,
 			rtt: std::time::Duration::from_millis(333),
 			max_pacing_rate: None,
 		};
 
 		let loss = congestion_factory(CongestionControl::Loss).build(init);
-		assert!(loss.into_any().downcast::<moq_congestion::Cubic>().is_ok());
+		assert!(loss.metrics().ssthresh.is_some());
+		assert!(!loss.probes());
 
 		let delay = congestion_factory(CongestionControl::Delay).build(init);
-		assert!(delay.into_any().downcast::<moq_congestion::Bbr3>().is_ok());
+		assert!(delay.probes());
+		assert!(delay.metrics().pacing_rate.is_some());
 
 		let none = congestion_factory(CongestionControl::None).build(init);
-		assert!(none.into_any().downcast::<moq_congestion::Unlimited>().is_ok());
+		assert_eq!(none.window(), u64::MAX);
+		assert!(!none.probes());
 	}
 
 	/// Loopback regression test: with the knob unset, live QUIC connections must run
@@ -1021,7 +1023,7 @@ mod tests {
 		let accepted = tokio::spawn(async move {
 			let incoming = server.accept().await.expect("no incoming connection");
 			let conn = incoming.accept().expect("accept").await.expect("handshake");
-			is_bbr3(&conn)
+			conn.congestion_state().probes()
 		});
 
 		// tls::Connect has a private field, so it can't be built with a struct literal.
@@ -1041,31 +1043,23 @@ mod tests {
 
 		// Bound the whole connect + accept + assert flow so a handshake
 		// regression fails fast instead of stalling CI.
-		moq_clock::timeout(Duration::from_secs(5), async move {
+		kio::clock::timeout(Duration::from_secs(5), async move {
 			let session = client
 				.connect(&tls, url.into(), &moq_net::Versions::default())
 				.await
 				.expect("connect failed");
 
 			// web::Session derefs to the driver connection.
-			assert!(is_bbr3(&session), "client connection is not running BBRv3");
+			assert!(session.congestion_state().probes(), "client controller cannot probe");
 			// BBRv3 can probe, so moq-net gets a target to write.
 			#[cfg(feature = "net")]
 			assert!(session.probe().is_some(), "BBRv3 connection has no probe target");
 			assert!(
 				accepted.await.expect("server task panicked"),
-				"server connection is not running BBRv3"
+				"server controller cannot probe"
 			);
 		})
 		.await
 		.expect("test timed out");
-	}
-
-	/// Whether a live connection is running BBRv3.
-	fn is_bbr3(conn: &driver::connection::Connection) -> bool {
-		conn.congestion_state()
-			.into_any()
-			.downcast::<moq_congestion::Bbr3>()
-			.is_ok()
 	}
 }

@@ -21,8 +21,15 @@
 //! [`coop`] bounds the passes a loop makes per poll, so one that always finds
 //! work ready still yields.
 //!
+//! [`clock`] is the time those waits run on: logical instants, wall time,
+//! deadlines, timers, and a deterministic simulator for tests.
+//!
+//! Every wait is a `poll_*` method first. The `async` feature adds the `async fn` that
+//! awaits each one, so a build without it compiles no coroutines (`async` bodies).
+//!
 //! With the `macros` feature, `#[kio::machine]` writes a `poll_*` state machine from
-//! straight-line code with explicit waits.
+//! straight-line code with explicit waits, and `#[kio::wrapper]` generates the `async
+//! fn` that awaits a `poll_*` method.
 
 #![warn(missing_docs)]
 
@@ -35,6 +42,7 @@ use std::{
 mod lock;
 mod waiter;
 
+pub mod clock;
 pub mod coop;
 pub mod log;
 
@@ -51,7 +59,7 @@ mod weak;
 mod tests;
 
 #[cfg(feature = "macros")]
-pub use kio_macros::machine;
+pub use kio_macros::{machine, wrapper};
 
 pub use bridge::Bridge;
 pub use consumer::Consumer;
@@ -63,6 +71,15 @@ pub use shared::Shared;
 pub use task::{Task, TaskKey, Tasks};
 pub use waiter::{Park, Waiter, WaiterList, wait};
 pub use weak::{ConsumerWeak, ProducerWeak, Weak};
+
+/// Run an `async fn` test to completion on [`clock::sim::run`].
+#[cfg(feature = "sim")]
+pub use kio_macros::test;
+
+// So `#[kio::test]` resolves inside this crate's own tests, and the wrappers
+// `#[kio::wrapper]` generates here reach `::kio::wait`.
+#[cfg(any(test, feature = "async"))]
+extern crate self as kio;
 
 /// Bytes an `Arc<T>` allocation occupies: `T` behind two reference counts, padded to
 /// `T`'s alignment and rounded up to the whole layout's.
@@ -84,7 +101,8 @@ const fn arc_heap<T>() -> usize {
 mod heap {
 	use std::alloc::Layout;
 
-	use super::*;
+	// Not a glob: it would import `test`, kio's attribute, over the built-in one.
+	use super::{State, arc_heap};
 
 	/// [`arc_heap`] hand-rolls what `Layout` does, because `Layout` isn't `const`. Hold
 	/// it to the real thing, including a `T` aligned past the reference counts.

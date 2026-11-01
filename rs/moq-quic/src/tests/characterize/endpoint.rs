@@ -70,6 +70,7 @@ fn answer(endpoint: &mut Endpoint, now: Instant, packet: &[u8]) -> Answer {
 			local_ip: None,
 			ecn: None,
 			data: packet.into(),
+			arrival: None,
 		},
 		&mut buf,
 	) {
@@ -218,6 +219,7 @@ fn undecryptable_initial() {
 					local_ip: None,
 					ecn: None,
 					data: packet[..].into(),
+					arrival: None,
 				},
 				&mut buf,
 			) {

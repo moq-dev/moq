@@ -13,9 +13,10 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use hang::moq_net;
+use moq_mux::container::fmp4::mp4_atom;
 use moq_mux::container::ts;
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -48,9 +49,9 @@ struct Export {
 impl Export {
 	/// Wait for output, retaining the child verdict and stderr on every timeout.
 	async fn output_past(&mut self, len: usize) {
-		let arrived = moq_clock::timeout(TIMEOUT, async {
+		let arrived = kio::clock::timeout(TIMEOUT, async {
 			while self.output.lock().unwrap().len() <= len {
-				moq_clock::sleep(Duration::from_millis(50)).await;
+				kio::clock::sleep(Duration::from_millis(50)).await;
 			}
 		})
 		.await;
@@ -64,7 +65,7 @@ impl Export {
 
 	/// Wait for the verdict and drain both pipes before inspecting their contents.
 	async fn wait(mut self) -> (std::process::ExitStatus, String) {
-		let status = match moq_clock::timeout(TIMEOUT, self.child.wait()).await {
+		let status = match kio::clock::timeout(TIMEOUT, self.child.wait()).await {
 			Ok(status) => status.expect("wait for export"),
 			Err(err) => {
 				let _ = self.child.kill().await;
@@ -272,7 +273,7 @@ fn feed(mut stdin: ChildStdin, format: Format) -> JoinHandle<ChildStdin> {
 	tokio::spawn(async move {
 		for chunk in format.clip.chunks(format.chunk) {
 			stdin.write_all(chunk).await.expect("write stdin");
-			moq_clock::sleep(Duration::from_millis(150)).await;
+			kio::clock::sleep(Duration::from_millis(150)).await;
 		}
 		stdin
 	})
@@ -293,7 +294,7 @@ async fn interrupt(mut child: Child, stdin: ChildStdin) {
 }
 
 async fn wait(child: &mut Child) -> std::process::ExitStatus {
-	moq_clock::timeout(TIMEOUT, child.wait())
+	kio::clock::timeout(TIMEOUT, child.wait())
 		.await
 		.expect("moq never exited")
 		.expect("wait for moq")
@@ -425,13 +426,13 @@ async fn interrupted(export: &mut Export, publisher: (Child, JoinHandle<ChildStd
 	let stdin = feeding.await.unwrap();
 	export.output_past(0).await;
 	interrupt(publisher, stdin).await;
-	moq_clock::timeout(TIMEOUT, export.settled.take().expect("one interruption per export"))
+	kio::clock::timeout(TIMEOUT, export.settled.take().expect("one interruption per export"))
 		.await
 		.expect("export never drained into its follow")
 		.expect("export stopped before following");
 	let (fence, drained) = tokio::sync::oneshot::channel();
 	export.fence.send(fence).expect("stdout reader is still running");
-	let len = moq_clock::timeout(TIMEOUT, drained)
+	let len = kio::clock::timeout(TIMEOUT, drained)
 		.await
 		.expect("stdout reader never drained its queued tail")
 		.expect("stdout reader ended before its tail fence");
@@ -550,7 +551,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	// the publisher reconnects would make the rest late by the pause, and dropped. The
 	// interval bursts whatever a stall held back. The export joins after the catalog's
 	// PCR-rate window and writes a delay after that, so publish until it has written.
-	let mut pace = moq_clock::interval(Duration::from_millis(150));
+	let mut pace = kio::clock::interval(Duration::from_millis(150));
 	let mut chunks = LONG.chunks(188 * 40);
 	let mut split = 0;
 	while output.lock().unwrap().is_empty()
@@ -567,12 +568,12 @@ async fn the_same_instance_within_the_follow_continues() {
 	let clock = catalog.snapshot().clock;
 	connection.abort(moq_net::Error::Cancel);
 	connection.closed().await.unwrap();
-	moq_clock::timeout(TIMEOUT, old.closed())
+	kio::clock::timeout(TIMEOUT, old.closed())
 		.await
 		.expect("the relay observes the lost publication");
 	let mark = output.lock().unwrap().len().next_multiple_of(188);
 	let connection = client.connect(url).established().await.unwrap();
-	let back = moq_clock::timeout(TIMEOUT, relay.origin.follow("demo", None).unwrap().available())
+	let back = kio::clock::timeout(TIMEOUT, relay.origin.follow("demo", None).unwrap().available())
 		.await
 		.expect("the relay observes the returning publication")
 		.unwrap();
@@ -644,7 +645,7 @@ async fn a_standby_before_its_tracks(global: &[&str], format: Format) {
 		.spawn()
 		.expect("spawn the standby");
 	let standby_stdin = standby.stdin.take().expect("stdin");
-	moq_clock::sleep(Duration::from_secs(2)).await;
+	kio::clock::sleep(Duration::from_secs(2)).await;
 	assert!(
 		first.child.try_wait().unwrap().is_none(),
 		"the first export survives the standby"
@@ -713,7 +714,7 @@ async fn an_old_publisher_that_stays_up_keeps_the_export() {
 	let (mut new, replacing) = import_with(&relay, &lite07);
 	let old_stdin = feeding.await.unwrap();
 	let new_stdin = replacing.await.unwrap();
-	moq_clock::sleep(Duration::from_secs(1)).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
 	assert!(
 		export.child.try_wait().unwrap().is_none(),
 		"the export stays on the old publisher while it is up"
@@ -768,7 +769,7 @@ async fn import_announced(relay: &Relay, format: Format) -> (Child, JoinHandle<C
 		}
 		panic!("the import exited before announcing");
 	};
-	moq_clock::timeout(TIMEOUT, announced)
+	kio::clock::timeout(TIMEOUT, announced)
 		.await
 		.expect("the import never announced");
 	// Keep draining, so a full pipe never blocks the import.
@@ -841,7 +842,7 @@ fn redundant_feed() -> (tokio::sync::mpsc::UnboundedSender<ChildStdin>, JoinHand
 	let task = tokio::spawn(async move {
 		let source = redundant_source();
 		let mut inputs: Vec<ChildStdin> = Vec::new();
-		let mut pace = moq_clock::interval(Duration::from_micros(30_080));
+		let mut pace = kio::clock::interval(Duration::from_micros(30_080));
 		for chunk in source.chunks(8 * 188) {
 			pace.tick().await;
 			while let Ok(input) = added.try_recv() {
@@ -947,7 +948,7 @@ async fn redundant_failover(bufferbloat: bool) {
 	let mut second = redundant_import(&relay, &feed, &[]);
 	for version in 1..=3 {
 		for export in &mut exports {
-			moq_clock::timeout(TIMEOUT, async {
+			kio::clock::timeout(TIMEOUT, async {
 				loop {
 					if export.child.try_wait().unwrap().is_some() {
 						let errors = (&mut export.stderr).await.expect("collect exporter stderr");
@@ -959,7 +960,7 @@ async fn redundant_failover(bufferbloat: bool) {
 					{
 						break;
 					}
-					moq_clock::sleep(Duration::from_millis(20)).await;
+					kio::clock::sleep(Duration::from_millis(20)).await;
 				}
 			})
 			.await
@@ -1056,7 +1057,7 @@ async fn redundant_failover(bufferbloat: bool) {
 
 /// The epoch of the next route announced for the path.
 async fn next_epoch(announced: &mut moq_net::announce::Consumer) -> moq_net::Epoch {
-	moq_clock::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			match announced.next().await.expect("the relay stays up") {
 				moq_net::announce::Event::Start(announce)
@@ -1107,4 +1108,69 @@ async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	);
 	second.kill().await.unwrap();
 	feeding.abort();
+}
+
+/// The top-level boxes of an MP4 file, by kind.
+fn boxes(file: &[u8]) -> Vec<mp4_atom::Any> {
+	use mp4_atom::DecodeMaybe;
+	let mut cursor = Cursor::new(file);
+	let mut boxes = Vec::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode the recording") {
+		boxes.push(atom);
+	}
+	boxes
+}
+
+/// SIGINT during `export mp4` finishes the recording as a regular MP4 with its moov at the end.
+#[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
+async fn an_interrupted_mp4_recording_is_finished() {
+	let relay = relay().await;
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("recording.mp4");
+	let mut recording = moq(&relay, &[])
+		.args(["export", "mp4", "--output"])
+		.arg(&path)
+		.stderr(Stdio::piped())
+		.spawn()
+		.expect("spawn export");
+	let (mut publisher, feeding) = import(&relay);
+
+	kio::clock::timeout(TIMEOUT, async {
+		while std::fs::metadata(&path).map_or(0, |file| file.len()) < 10_000 {
+			kio::clock::sleep(Duration::from_millis(50)).await;
+		}
+	})
+	.await
+	.expect("the recording never grew");
+	let pid = recording.id().expect("running").to_string();
+	let status = std::process::Command::new("kill")
+		.args(["-INT", &pid])
+		.status()
+		.expect("kill");
+	assert!(status.success());
+	let status = wait(&mut recording).await;
+	let mut errors = String::new();
+	recording
+		.stderr
+		.take()
+		.unwrap()
+		.read_to_string(&mut errors)
+		.await
+		.unwrap();
+	assert!(status.success(), "{errors}");
+
+	let file = std::fs::read(&path).unwrap();
+	let boxes = boxes(&file);
+	let kinds: Vec<String> = boxes.iter().map(|atom| atom.kind().to_string()).collect();
+	assert_eq!(kinds, ["ftyp", "mdat", "moov"], "{errors}");
+	let Some(mp4_atom::Any::Moov(moov)) = boxes.last() else {
+		unreachable!();
+	};
+	assert!(moov.mvex.is_none());
+	assert_eq!(moov.trak.len(), 2, "video and audio");
+
+	let stdin = feeding.await.unwrap();
+	drop(stdin);
+	assert!(wait(&mut publisher).await.success());
 }

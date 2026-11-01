@@ -61,7 +61,7 @@ impl<T> Shared<T> {
 	/// [`Ref`], so it can't flag the state modified and spuriously wake this poll's own
 	/// waiter. Registers `waiter` while pending; any mutation through a [`lock`](Self::lock)
 	/// guard re-polls it.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll<F>(&self, waiter: &Waiter, f: F) -> Poll<Mut<'_, T>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<()>,
@@ -87,6 +87,7 @@ impl<T> Shared<T> {
 	///
 	/// The returned [`Mut`] holds the lock, so do your mutation and drop it rather than
 	/// carrying it across another `.await`, which would block every other handle.
+	#[cfg(feature = "async")]
 	pub async fn wait<F>(&self, mut f: F) -> Mut<'_, T>
 	where
 		F: FnMut(&Ref<'_, T>) -> Poll<()> + Unpin,
