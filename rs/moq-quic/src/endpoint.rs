@@ -151,6 +151,7 @@ impl Endpoint {
 			local_ip,
 			ecn,
 			data,
+			arrival,
 		} = received;
 		// Partially decode packet or short-circuit if unable
 		let datagram_len = data.len();
@@ -161,6 +162,7 @@ impl Endpoint {
 		) {
 			Ok((first_decode, remaining)) => DatagramConnectionEvent {
 				now,
+				arrival,
 				remote,
 				ecn,
 				first_decode,
@@ -817,7 +819,7 @@ impl Endpoint {
 		let payload = TokenPayload::Retry {
 			address: incoming.addresses.remote,
 			orig_dst_cid: incoming.packet.header.dst_cid,
-			issued: moq_clock::wall(),
+			issued: kio::clock::wall(),
 		};
 		let token = Token::new(payload, &mut self.rng).encode(&*server_config.token_key);
 
@@ -1241,6 +1243,9 @@ pub struct Received {
 	pub ecn: Option<EcnCodepoint>,
 	/// The datagram's payload, which may hold several coalesced QUIC packets
 	pub data: BytesMut,
+	/// When the datagram arrived, as precisely as the socket knows, or `None` to report no
+	/// receive timestamp for it to a peer that asks for them
+	pub arrival: Option<Instant>,
 }
 
 /// An outgoing connection for [`Endpoint::connect`]

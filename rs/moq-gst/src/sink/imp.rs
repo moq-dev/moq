@@ -696,7 +696,7 @@ impl MoqSink {
 		});
 		let sample = super::wall::Sample {
 			running: reference_running_time,
-			wall: moq_clock::wall(),
+			wall: kio::clock::wall(),
 		};
 		let map = buffer.map_readable().map_err(|_| {
 			gst::error!(CAT, "failed to map buffer on pad {}", pad.name());
@@ -1307,7 +1307,7 @@ mod tests {
 					Duration::ZERO,
 					super::super::wall::Sample {
 						running: Some(gst::ClockTime::ZERO),
-						wall: moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
+						wall: kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1_735_689_600),
 					},
 				)
 				.unwrap();
@@ -2281,11 +2281,11 @@ mod tests {
 		while bus.pop().is_some() {}
 
 		let linger = Duration::from_secs(30);
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let finished = moq_mux::Linger::new([broadcast], track, linger);
 		let lingering = tokio::spawn(linger_task(finished, sink.downgrade(), session));
 
-		moq_clock::sleep(linger - Duration::from_secs(1)).await;
+		kio::clock::sleep(linger - Duration::from_secs(1)).await;
 		let mut late = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 		assert!(
 			late.recv_group().await.unwrap().is_some(),
@@ -2294,7 +2294,7 @@ mod tests {
 		assert!(bus.pop_filtered(&[gst::MessageType::Eos]).is_none(), "the EOS waits");
 
 		lingering.await.unwrap();
-		assert_eq!(moq_clock::now() - start, linger);
+		assert_eq!(kio::clock::now() - start, linger);
 		assert!(consumer.is_closed());
 		assert!(
 			bus.pop_filtered(&[gst::MessageType::Eos]).is_some(),

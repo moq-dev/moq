@@ -89,10 +89,10 @@ impl Client {
 		let remaining = || {
 			current
 				.expires
-				.checked_duration_since(moq_clock::wall())
+				.checked_duration_since(kio::clock::wall())
 				.unwrap_or_default()
 		};
-		moq_clock::sleep(remaining() * 2 / 3).await;
+		kio::clock::sleep(remaining() * 2 / 3).await;
 
 		let mut backoff = Duration::from_secs(1);
 		loop {
@@ -109,7 +109,7 @@ impl Client {
 				Err(err) if remaining().is_zero() => return Err(err),
 				Err(err) => {
 					tracing::warn!(%err, "mesh refresh failed; retrying");
-					moq_clock::sleep(backoff.min(remaining())).await;
+					kio::clock::sleep(backoff.min(remaining())).await;
 					backoff = (backoff * 2).min(MAX_BACKOFF);
 				}
 			}
