@@ -62,8 +62,8 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			assert_eq!(got.sequence, sequence, "{alpn}");
 			let frame = got.read_frame().await.unwrap().unwrap();
 			assert_eq!(frame.payload, b"ladder".as_ref());
-			// Lite-02 carries no timestamps, and a lite-06 subscriber drops them.
-			let timed = alpn == "moq-transport-22";
+			// Lite-02 carries no timestamps.
+			let timed = alpn != "moq-lite-02";
 			assert_eq!(frame.timestamp, timed.then_some(timestamp), "{alpn}");
 		}
 	}
