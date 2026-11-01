@@ -50,6 +50,7 @@ enum HalfState {
 
 impl Stream {
 	pub(crate) fn new(shared: Shared, id: stream::Id) -> Self {
+		shared.hold();
 		Self(Half {
 			shared,
 			id,
@@ -327,6 +328,7 @@ impl Drop for Half {
 		if reset.is_some_and(|reset| reset.is_ok()) {
 			self.shared.kick();
 		}
+		self.shared.release();
 	}
 }
 

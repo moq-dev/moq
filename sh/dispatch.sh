@@ -108,20 +108,21 @@ module() {
 # another reads it. py builds its test features into a target directory of its
 # own, and carla runs its tools outside py's venv.
 module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)' \
-    tools='uv' compiles=check fix
+    tools='uv' compiles=check
 # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
 # moq-cli builds the Rust interop clients as examples from outside its
 # crate; sh/rs/select.test.py fails when a target's directory is missing.
 # moq-relay's tests read its NixOS module.
 module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
     tools='cargo jq' compiles='check fix' fix
-# The C package links moq-c's native-libs lists, and the C++ package's FFI pin.
-module c '^(\.cargo/config\.toml$|c/|sh/c/|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)' \
-    tools='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp' compiles=check
+# The C package links moq-c's native-libs lists, and the C++ package's FFI
+# pin. Both packages format with sh/clang-format.sh and OBS's style file.
+module c '^(\.cargo/config\.toml$|c/|sh/c/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)' \
+    tools='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp clang-format' compiles=check fix
 # The package links moq-c's native-libs lists, and compiles its doc samples.
 # It shares a lane with obs_compile because both build cpp/moq/build.
-module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)' \
-    tools='cargo cmake c++ uniffi-bindgen-cpp' compiles=check lane=cpp
+module cpp '^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)' \
+    tools='cargo cmake c++ uniffi-bindgen-cpp clang-format' compiles=check lane=cpp fix
 # The plugin and its tests call through the bindings generated from cpp/moq
 # and moq-ffi and link through moq-c's native-libs lists, and flake.nix owns
 # the libobs headers it compiles against.
@@ -137,7 +138,7 @@ module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi
 module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
     tools='bun python3' lane=bun fix
 module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|doc/lib/kt/|doc/lib/samples\.sh$)' \
-    tools='cargo gradle java' compiles=check
+    tools='cargo gradle java ktfmt' compiles=check fix
 # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
 # and its own modules and test helpers; those still gate the full flake.
 module flake '(^\.cargo/|^rs/.*\.(toml|txt|ptx|in)$|^Cargo\.(toml|lock)$|^rust-toolchain\.toml$|^flake\.lock$|^nix/|\.nix$)' \
@@ -147,12 +148,14 @@ module bench '^bench/' \
 # The CARLA demo's simulator worker and launchers. Its player is a JS
 # package and its GPU bridge a Rust crate, so those modules cover them.
 module carla '^demo/carla/(sim/|justfile$)' \
-    tools='uv' fix
+    tools='uv'
 # swift needs no tools: it skips off macOS by design, and platform.yml is its
-# real gate.
-module swift '^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
+# real gate. Its formatter is absent where nixpkgs cannot build it (see
+# flake.nix).
+module swift '^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)' \
+    fix
 module go '^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)' \
-    tools='cargo go uniffi-bindgen-go' compiles=check
+    tools='cargo go uniffi-bindgen-go' compiles=check fix
 module drafts '^(drafts/|sh/drafts/|doc/\.vitepress/drafts\.ts$)' \
     tools='bun kramdown-rfc xml2rfc' lane=bun
 module markdown '' \
@@ -179,6 +182,9 @@ module obs '^(cpp/obs/|sh/obs/|flake\.(nix|lock)$)' \
 # moves only with a manifest, the lockfile, or the harness's packages.
 module ts_paths '^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)' \
     tools='cargo python3'
+# Ruff lints and formats every Python file under the nearest pyproject.toml.
+module python '(\.pyi?|(^|/)pyproject\.toml)$' \
+    tools='ruff' fix
 module shell '' \
     tools='shellcheck shfmt' fix
 module large_files ''
@@ -303,9 +309,13 @@ if [[ -z "$all" ]]; then
     js_list=$js_changed
 fi
 
-# Tracked and new files, skipping whatever .gitignore does (node_modules, target).
+# Tracked and new files, skipping whatever .gitignore does (node_modules, target)
+# and tracked files deleted from the working tree, which no formatter can read.
 files() {
-    git ls-files -z --cached --others --exclude-standard -- "$@"
+    git ls-files -z --cached --others --exclude-standard -- "$@" |
+        while IFS= read -r -d '' file; do
+            [[ ! -e "$file" ]] || printf '%s\0' "$file"
+        done
 }
 
 # One phase of one module. The bindings run their tests in their check; rs,
@@ -360,6 +370,10 @@ step() {
             sh/markdown.sh check
             ;;
         check:large_files) sh/large-files.sh "$large_base" ;;
+        check:python)
+            files '*.py' '*.pyi' | xargs -0 ruff check --force-exclude
+            files '*.py' '*.pyi' | xargs -0 ruff format --check --force-exclude
+            ;;
         check:toml) RUST_LOG=error taplo format --check ;;
         check:nix) files '*.nix' | xargs -0 nixfmt --check ;;
         check:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --check --justfile ;;
@@ -372,6 +386,10 @@ step() {
         fix:markdown)
             bun install
             sh/markdown.sh fix
+            ;;
+        fix:python)
+            files '*.py' '*.pyi' | xargs -0 ruff check --fix --force-exclude
+            files '*.py' '*.pyi' | xargs -0 ruff format --force-exclude
             ;;
         fix:toml) RUST_LOG=error taplo format ;;
         fix:nix) files '*.nix' | xargs -0 nixfmt ;;

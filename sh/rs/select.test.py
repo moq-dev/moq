@@ -2,12 +2,11 @@
 
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import tempfile
 import unittest
-
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
@@ -25,11 +24,22 @@ class SelectTest(unittest.TestCase):
             just.chmod(0o755)
             changed = scratch / "changed"
             changed.write_text("\n".join(paths) + "\n")
-            env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
-                       SELECT_CALLS=str(calls), BASH_ENV=os.devnull,
-                       GITHUB_ACTIONS=str(github_actions).lower())
-            subprocess.run(["bash", "sh/rs/select.sh", action, str(changed)],
-                           cwd=ROOT, env=env, check=True, capture_output=True, text=True)
+            env = dict(
+                os.environ,
+                LOCAL_SUPERVISED="1",
+                PATH=f"{scratch}:{os.environ['PATH']}",
+                SELECT_CALLS=str(calls),
+                BASH_ENV=os.devnull,
+                GITHUB_ACTIONS=str(github_actions).lower(),
+            )
+            subprocess.run(
+                ["bash", "sh/rs/select.sh", action, str(changed)],
+                cwd=ROOT,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
             return calls.read_text().splitlines() if calls.exists() else []
 
     def test_nextest_launcher_selects_workspace(self):
@@ -39,9 +49,10 @@ class SelectTest(unittest.TestCase):
                     suffix = f" --features {DEVICE_FEATURES} moq-tokio/webrtc" if action == "test" else ""
                     suffix += " moq-relay/io-uring" if LINUX and action == "test" else ""
                     suffix += " --timings" if github_actions and action == "test" else ""
-                    self.assertIn(f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz{suffix}",
-                                  self.selected("sh/rs/nextest.sh", action=action,
-                                                github_actions=github_actions))
+                    self.assertIn(
+                        f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz{suffix}",
+                        self.selected("sh/rs/nextest.sh", action=action, github_actions=github_actions),
+                    )
         selected = self.selected("sh/rs/nextest.sh")
         # The gate's lint runs no extra target or feature builds.
         for recipe in ("uring-check", "capture"):
@@ -60,18 +71,24 @@ class SelectTest(unittest.TestCase):
             with self.subTest(paths=paths):
                 calls = self.selected(*paths)
                 self.assertTrue(any(call.startswith("rs lint --workspace ") for call in calls), calls)
-        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        scope = re.search(r"^module rs '([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
         self.assertRegex("clippy.toml", scope)
 
     def test_gate_runs_no_feature_matrix(self):
         # `just rs features` owns the isolated feature builds, outside the gate.
-        for path in ("rs/kio/src/lib.rs", "rs/moq-tokio/src/lib.rs", "rs/moq-quic/src/lib.rs",
-                     "rs/moq-video/src/lib.rs", "Cargo.lock"):
+        for path in (
+            "rs/kio/src/lib.rs",
+            "rs/moq-tokio/src/lib.rs",
+            "rs/moq-quic/src/lib.rs",
+            "rs/moq-video/src/lib.rs",
+            "Cargo.lock",
+        ):
             for action in ("check", "check-test", "lint"):
                 with self.subTest(path=path, action=action):
                     calls = self.selected(path, action=action)
-                    self.assertFalse(any(call.endswith("-features") or "feature-shapes" in call
-                                         for call in calls), calls)
+                    self.assertFalse(
+                        any(call.endswith("-features") or "feature-shapes" in call for call in calls), calls
+                    )
         for owner in ("tokio", "media", "net"):
             self.assertEqual(self.selected(f"sh/rs/{owner}-features.sh"), [])
 
@@ -86,8 +103,10 @@ class SelectTest(unittest.TestCase):
         self.assertEqual(self.selected("sh/rs/send-depth.sh"), [])
 
     def test_device_features_join_the_one_test_build(self):
-        for path, features in (("rs/moq-audio/src/lib.rs", DEVICE_FEATURES),
-                               ("rs/moq-cli/src/main.rs", "moq-cli/play moq-cli/openh264")):
+        for path, features in (
+            ("rs/moq-audio/src/lib.rs", DEVICE_FEATURES),
+            ("rs/moq-cli/src/main.rs", "moq-cli/play moq-cli/openh264"),
+        ):
             with self.subTest(path=path):
                 calls = self.selected(path, action="test")
                 self.assertEqual(len(calls), 1, calls)
@@ -111,8 +130,7 @@ class SelectTest(unittest.TestCase):
         self.assertNotIn("moq-relay/io-uring", self.selected("rs/moq-cli/src/main.rs", action="test")[0])
 
     def test_net_session_tests_follow_the_library(self):
-        for path in ("rs/moq-net/src/lib.rs", "rs/moq-json/src/lib.rs",
-                     "rs/moq-net-tests/tests/integration/main.rs"):
+        for path in ("rs/moq-net/src/lib.rs", "rs/moq-json/src/lib.rs", "rs/moq-net-tests/tests/integration/main.rs"):
             with self.subTest(path=path):
                 calls = self.selected(path, action="test")
                 self.assertTrue(any("/rs/moq-net-tests#" in call for call in calls), calls)
@@ -130,21 +148,23 @@ class SelectTest(unittest.TestCase):
             for action in ("lint", "fix"):
                 with self.subTest(path=path, action=action):
                     calls = self.selected(path, action=action)
-                    self.assertTrue(any(call.startswith(f"rs {action} ") and "/rs/moq-cli#" in call
-                                        for call in calls), calls)
+                    self.assertTrue(
+                        any(call.startswith(f"rs {action} ") and "/rs/moq-cli#" in call for call in calls), calls
+                    )
         self.assertEqual(self.selected("test/interop/compat/container.rs"), [])
 
     def test_relay_nixos_module_selects_the_relay(self):
         # moq-relay's tests read the module.
         calls = self.selected("nix/modules/moq-relay.nix", action="test")
         self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
-        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        scope = re.search(r"^module rs '([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
         self.assertRegex("nix/modules/moq-relay.nix", scope)
 
     def test_dispatch_scope_covers_out_of_crate_targets(self):
         scope = re.search(r"^module rs '([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
-        metadata = json.loads(subprocess.check_output(
-            ["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT, text=True))
+        metadata = json.loads(
+            subprocess.check_output(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT, text=True)
+        )
         root = Path(metadata["workspace_root"])
         directories = set()
         for package in metadata["packages"]:
@@ -169,7 +189,6 @@ class SelectTest(unittest.TestCase):
         self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
 
 
-
 class RecipeTest(unittest.TestCase):
     def test_unexecuted_bench_is_not_compiled(self):
         for source in ("lib.rs", "main.rs"):
@@ -185,17 +204,20 @@ class RecipeTest(unittest.TestCase):
                     'version = 4\n[[package]]\nname = "nextest-target-probe"\nversion = "0.0.0"\n'
                 )
                 (scratch / "src" / source).write_text(
-                    '#[test] fn runs() { assert_eq!(1 + 1, 2); }\n' +
-                    ('fn main() {}\n' if source == "main.rs" else '')
+                    "#[test] fn runs() { assert_eq!(1 + 1, 2); }\n" + ("fn main() {}\n" if source == "main.rs" else "")
                 )
                 (scratch / "benches/unexecuted.rs").write_text(
                     'compile_error!("nextest must not compile a benchmark it never runs");\nfn main() {}\n'
                 )
-                env = dict(os.environ, LOCAL_SUPERVISED="1", BASH_ENV=os.devnull, TMPDIR="/tmp",
-                           NEXTEST_PROFILE="default")
+                env = dict(
+                    os.environ, LOCAL_SUPERVISED="1", BASH_ENV=os.devnull, TMPDIR="/tmp", NEXTEST_PROFILE="default"
+                )
                 result = subprocess.run(
                     ["just", "rs", "test", "--manifest-path", str(scratch / "Cargo.toml")],
-                    cwd=ROOT, env=env, capture_output=True, text=True,
+                    cwd=ROOT,
+                    env=env,
+                    capture_output=True,
+                    text=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -208,10 +230,17 @@ class FeatureTest(unittest.TestCase):
             cargo = scratch / "cargo"
             cargo.write_text(CARGO_STUB)
             cargo.chmod(0o755)
-            env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=f"{scratch}:{os.environ['PATH']}",
-                       FEATURE_CALLS=str(calls), FEATURE_NET_FEATURES=net_features, BASH_ENV=os.devnull)
-            result = subprocess.run(["bash", f"sh/rs/{owner}-features.sh", *args],
-                                    cwd=ROOT, env=env, capture_output=True, text=True)
+            env = dict(
+                os.environ,
+                LOCAL_SUPERVISED="1",
+                PATH=f"{scratch}:{os.environ['PATH']}",
+                FEATURE_CALLS=str(calls),
+                FEATURE_NET_FEATURES=net_features,
+                BASH_ENV=os.devnull,
+            )
+            result = subprocess.run(
+                ["bash", f"sh/rs/{owner}-features.sh", *args], cwd=ROOT, env=env, capture_output=True, text=True
+            )
             self.assertEqual(result.returncode, expected_returncode, result.stdout + result.stderr)
             return calls.read_text().splitlines()
 
@@ -227,8 +256,7 @@ class FeatureTest(unittest.TestCase):
     def test_net_rejects_async_from_test_dependencies(self):
         for feature in ("async", "default", "fuzz"):
             with self.subTest(feature=feature):
-                calls = self.trace("net", net_features=f'moq-net feature "{feature}"',
-                                   expected_returncode=1)
+                calls = self.trace("net", net_features=f'moq-net feature "{feature}"', expected_returncode=1)
                 self.assertTrue(all(call.startswith("tree ") for call in calls), calls)
 
     def test_tokio_keeps_extremes_and_crypto_contracts(self):
@@ -239,8 +267,10 @@ class FeatureTest(unittest.TestCase):
         self.assertTrue(any(" --tests " in call for call in boundary))
         self.assertFalse(any(" --all-targets " in call for call in boundary))
         self.assertTrue(any(" --all-targets " in call for call in exhaustive))
-        self.assertEqual([call for call in boundary if not call.startswith("clippy ")],
-                         [call for call in exhaustive if not call.startswith("clippy ")])
+        self.assertEqual(
+            [call for call in boundary if not call.startswith("clippy ")],
+            [call for call in exhaustive if not call.startswith("clippy ")],
+        )
 
     def test_media_keeps_dependency_contracts_and_vpx_tests(self):
         boundary = self.trace("media")
@@ -249,8 +279,10 @@ class FeatureTest(unittest.TestCase):
         self.assertEqual(sum(call.startswith("check ") for call in exhaustive), 10)
         self.assertFalse(any(" --all-targets " in call for call in boundary))
         self.assertTrue(any(" --all-targets " in call for call in exhaustive))
-        self.assertEqual([call for call in boundary if not call.startswith("check ")],
-                         [call for call in exhaustive if not call.startswith("check ")])
+        self.assertEqual(
+            [call for call in boundary if not call.startswith("check ")],
+            [call for call in exhaustive if not call.startswith("check ")],
+        )
 
 
 CARGO_STUB = r"""#!/usr/bin/env bash
