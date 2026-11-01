@@ -4,7 +4,10 @@ use std::{
 	net::{IpAddr, Ipv4Addr},
 	os::windows::io::AsRawSocket,
 	ptr,
-	sync::atomic::{AtomicUsize, Ordering},
+	sync::{
+		Once,
+		atomic::{AtomicUsize, Ordering},
+	},
 };
 
 use libc::{c_int, c_uint};
@@ -13,7 +16,7 @@ use windows_sys::Win32::Networking::WinSock;
 use crate::udp::{
 	EcnCodepoint, RecvMeta, Transmit, UdpSockRef,
 	cmsg::{self, CMsgHdr},
-	log::debug,
+	log::{debug, warn},
 };
 
 /// QUIC-friendly UDP socket for Windows
@@ -202,6 +205,15 @@ impl UdpSocketState {
 			})?;
 			addr.as_socket()
 		};
+
+		// `MSG_CTRUNC` keeps the datagram with the metadata that fit: losing metadata beats losing
+		// the packet. The iterator below stays within the `Control.len` Winsock returned.
+		if wsa_msg.dwFlags & WinSock::MSG_CTRUNC != 0 {
+			static CTRUNC: Once = Once::new();
+			CTRUNC.call_once(|| {
+				warn!("control messages truncated to {CMSG_LEN} bytes; some receive metadata is lost");
+			});
+		}
 
 		// Decode control messages (PKTINFO and ECN)
 		let mut ecn_bits = 0;

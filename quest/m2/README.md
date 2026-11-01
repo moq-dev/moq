@@ -240,7 +240,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [PUBLISH_DONE says why](/quest/m2/publish-done-codes.md) - GOING_AWAY, TOO_FAR_BEHIND, and EXPIRED round-trip as stream codes
 - [An interrupted mp4 recording keeps its last fragment](/quest/m2/mp4-sigint-flush.md) - SIGINT flushes the buffering fragment before finishing
 - [Repair a crashed mp4 recording](/quest/m2/mp4-repair.md) - a crashed recording's fragmented file becomes a regular MP4
-- [Windows receives notice truncated control data](/quest/m2/cmsg-windows-truncation.md) - Windows handles `MSG_CTRUNC` like the Unix paths
 - [moq-quic's internal dev-dependencies are path-only](/quest/m2/quic-dev-dep-path.md) - moq-congestion is a path dev-dependency
 - [moq-mux's AAC config reports SBR](/quest/m2/aac-sbr-config.md) - moq-audio reads backward-compatible SBR from the config
 - [An ended HLS playlist has no trailing gap](/quest/m2/hls-trailing-gap.md) - no zero-duration `EXT-X-GAP` before `EXT-X-ENDLIST`
