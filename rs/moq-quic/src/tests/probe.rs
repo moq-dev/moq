@@ -12,8 +12,10 @@
 
 use std::collections::HashMap;
 
+use rand::RngExt;
+
 use super::*;
-use crate::congestion::cubic;
+use crate::congestion::{bbr3, cubic};
 
 /// The media's bitrate, 2 Mbit/s, which the probe has to see past
 const MEDIA: u64 = 250_000;
@@ -87,6 +89,8 @@ struct Scenario {
 	ack_threshold: Option<u32>,
 	/// Bytes of bulk upload before the media starts, to learn the path's rate first
 	warmup: usize,
+	/// Whether the media's BBR3 runs the delay bound, reading the receive timestamps it asks for
+	delay_bound: bool,
 }
 
 impl Default for Scenario {
@@ -104,6 +108,7 @@ impl Default for Scenario {
 			receive_window: None,
 			ack_threshold: None,
 			warmup: 0,
+			delay_bound: false,
 		}
 	}
 }
@@ -260,6 +265,12 @@ fn run(scenario: &Scenario) -> Outcome {
 			..transport::ack_frequency::Config::default()
 		};
 		transport.ack_frequency = Some(ack);
+	}
+	if scenario.delay_bound {
+		let mut bbr = bbr3::Config::default();
+		bbr.delay_bound(true).probe_rng_seed(entropy::rng().random());
+		transport.congestion = Arc::new(bbr);
+		transport.receive_timestamps = NonZeroU32::new(32);
 	}
 	let mut config = client_config();
 	config.transport = transport;
@@ -665,15 +676,32 @@ fn steps() -> Scenario {
 #[test]
 fn rises_to_target() {
 	let _guard = subscribe();
+	rises(&compare("rises", opening(), GATE), Duration::from_secs(5));
+}
+
+/// The same under the delay bound: its brake on queue growth leaves BBR3's probing to raise the
+/// estimate, so a rung stopped for want of it comes back
+#[test]
+fn rises_to_target_under_delay_bound() {
+	let _guard = subscribe();
 	let scenario = Scenario {
+		delay_bound: true,
+		..opening()
+	};
+	rises(&compare("rises delay bound", scenario, GATE), Duration::from_secs(5));
+}
+
+/// A constant bitrate over a 3 Mbit/s path with a 100ms round trip that opens up to 12 Mbit/s
+/// at 5s
+fn opening() -> Scenario {
+	Scenario {
 		latency: Duration::from_millis(50),
 		buffer: 170_000,
 		keyframe: 0,
 		rates: vec![(Duration::ZERO, 375_000), (Duration::from_secs(5), 1_500_000)],
 		duration: Duration::from_secs(15),
 		..Scenario::default()
-	};
-	rises(&compare("rises", scenario, GATE), Duration::from_secs(5));
+	}
 }
 
 /// A path short of the target, behind a queue a second deep: each attempt that misses sits out
@@ -842,6 +870,20 @@ fn probe_inflight_limits_only_an_attempt() {
 fn steps_keyframes() {
 	let _guard = subscribe();
 	let trials = compare("steps keyframes", steps(), SEEDS);
+	rises(&trials, Duration::from_secs(20));
+	falls(&trials, Duration::from_secs(40), 375_000);
+}
+
+/// Under the delay bound, as the keyframed steps without it
+#[test]
+#[ignore = "nightly: just rs quic-sim"]
+fn steps_delay_bound() {
+	let _guard = subscribe();
+	let scenario = Scenario {
+		delay_bound: true,
+		..steps()
+	};
+	let trials = compare("steps delay bound", scenario, SEEDS);
 	rises(&trials, Duration::from_secs(20));
 	falls(&trials, Duration::from_secs(40), 375_000);
 }

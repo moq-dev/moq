@@ -45,6 +45,7 @@ mod acked;
 mod characterize;
 mod probe;
 mod rate;
+mod realtime;
 mod receive_ts;
 mod reset_stream_at;
 mod sim;

@@ -39,7 +39,18 @@ spike assumed no consumer; teleoperation uplinks are one):
   in `moq-congestion`. The moq-shaper presets `cellular-step`,
   `cellular-bursty` and `cellular-deep` decide it. The report states the
   shaper's timing jitter, measured over `near-zero`, as the noise floor of the
-  delay signal.
+  delay signal. The BBR3 delay bound (`bbr3::Config::delay_bound`) landed
+  first, with the harness the others join: moq-quic's `tests::realtime`
+  replays the three presets on the sim, and each candidate adds a
+  `Candidate` there (`just rs quic-sim` prints the table).
+- BBR3 delay bound decisions, ✅ 2026-11-01 (maintainer, on
+  [moq-dev/moq#7544](https://github.com/moq-dev/moq/pull/7544)): the brake
+  is a separate `bw_delay` bound beside `max_bw` and `bw_shortterm`, which
+  REFILL doesn't reset and which Startup and ProbeBW_UP raise. Its GoogCC-style
+  trend detector stays inside `moq-congestion`'s `bbr3/`, so dropping the
+  candidate deletes it, rather than sharing the GCC candidate's trendline.
+  The candidate reported on the sim replicas only; real sockets are the
+  shared comparison's job.
 - Native probing is required (decided 2026-10-25, maintainer). Every
   candidate implements `moq_congestion::Controller::probes` and reports
   `probe_inflight`, so moq-quic's native probing
@@ -62,6 +73,10 @@ Remaining work once the candidates finish (this README's own job):
 - Run the shared comparison on the uplink presets: queuing delay p50/p95/p99,
   throughput, reaction time to a capacity step down, and share against one
   competing CUBIC flow. Pick the winner on queuing delay.
+  It runs every candidate once over real moq-shaper sockets, measuring the
+  `near-zero` noise floor too, so a candidate's own report may stay on the
+  sim replicas (✅ 2026-11-01, maintainer, on
+  [moq-dev/moq#7544](https://github.com/moq-dev/moq/pull/7544)).
 - Run every candidate under both sender models in one harness: a bulk
   upload, and an encoder that follows `bandwidth_estimate` (the model moq-cli
   and moq-ffi use, and the one GoogCC is built for). Decided 2026-11-01
@@ -106,7 +121,6 @@ owns that feedback.
 ## Required
 
 - [GCC candidate](/quest/m2/quic-realtime/gcc.md) - libwebrtc's GoogCC vendored into `moq-congestion` and refreshed to current WebRTC
-- [BBR3 delay bound](/quest/m2/quic-realtime/bbr-delay-bound.md) - BBR3 with inflight capped when the forward delay gradient shows queue growth
 - [SCReAMv2 candidate](/quest/m2/quic-realtime/scream.md) - the RFC 8298bis delay path ported to `moq-congestion`
 - [io_uring runs an application's controller](/quest/m2/quic-realtime/uring-controller.md) - moq-uring takes a controller factory, so the winner installs the same way on both runtimes
 - [moqsink encoder feedback](/quest/m2/quic-realtime/moqsink-feedback.md) - GStreamer publishers retune their encoder to the target rate

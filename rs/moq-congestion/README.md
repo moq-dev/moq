@@ -2,6 +2,8 @@
 
 BBR3, Cubic, and Unlimited congestion controllers, consumed by moq-quic and the native transport drivers.
 
+BBR3's optional delay bound (`bbr3::Config::delay_bound`) reads the peer's receive timestamps and brakes when the forward delay's trend shows the bottleneck queue growing.
+
 The controllers take explicit `kio::clock::Instant` values and never drive a runtime. The `Controller` trait names no transport types: `on_sent` returns an opaque per-packet state that the transport stores and hands back with each acknowledgement or loss, and the controller paces its own sends.
 
 Construct controllers with `Factory::build` on an `Arc<bbr3::Config>`, `Arc<cubic::Config>`, or `Arc<Unlimited>`. `Bbr3`, `Cubic`, `Unlimited`, and `Metrics` live at the crate root.
