@@ -247,6 +247,9 @@ pub struct Server {
 	accept: FuturesUnordered<BoxFuture<'static, crate::Result<Request>>>,
 	#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 	streams: StreamListeners,
+	/// The `tls://` config another listener can serve, when a listen identity is loaded.
+	#[cfg(all(feature = "tcp", feature = "_certs"))]
+	tls_stream: Option<std::sync::Arc<rustls::ServerConfig>>,
 	#[cfg(feature = "iroh")]
 	iroh: Option<iroh::Endpoint>,
 	#[cfg(feature = "quic")]
@@ -414,6 +417,12 @@ impl Server {
 			unix_allow,
 		);
 
+		#[cfg(all(feature = "tcp", feature = "_certs"))]
+		let tls_stream = tls
+			.map(|tls| TcpTls::new(&config, &versions, tls))
+			.transpose()?
+			.map(|tls| tls.config);
+
 		// The endpoint was bound before this server's versions were known, so it
 		// accepts nothing until they name its ALPNs.
 		#[cfg(feature = "iroh")]
@@ -450,6 +459,8 @@ impl Server {
 			timeout,
 			#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
 			streams,
+			#[cfg(all(feature = "tcp", feature = "_certs"))]
+			tls_stream,
 			#[cfg(feature = "iroh")]
 			iroh,
 			#[cfg(feature = "quic")]
@@ -514,6 +525,18 @@ impl Server {
 			}));
 		}
 		Ok(())
+	}
+
+	/// Serve `tls://` on connections another listener accepts, such as an HTTPS
+	/// server that shares its port with it (see [`crate::tcp::TlsAcceptor`]).
+	///
+	/// `None` when this server loaded no listen TLS identity, as a stream-only
+	/// server without `--listen-tcp-tls` does not.
+	#[cfg(all(feature = "tcp", feature = "_certs"))]
+	pub fn tls_acceptor(&self) -> Option<crate::tcp::TlsAcceptor> {
+		let config = self.tls_stream.clone()?;
+		let server = self.moq.clone().with_versions(self.streams.versions.clone());
+		Some(crate::tcp::TlsAcceptor::new(config, server, self.timeout))
 	}
 
 	/// A live handle to the certificates this server is serving.
@@ -1179,7 +1202,7 @@ impl Deadline {
 	all(feature = "uds", unix),
 	feature = "webrtc"
 ))]
-async fn within<T, E>(
+pub(crate) async fn within<T, E>(
 	deadline: Option<kio::clock::Instant>,
 	handshake: impl Future<Output = Result<T, E>>,
 ) -> crate::Result<T>
@@ -1490,33 +1513,8 @@ fn spawn_tcp_loop(
 			handshakes.spawn(crate::panic::isolate(async move {
 				match within(deadline, pending).await {
 					Ok((session, remote)) => {
-						// Set only on `tls://`: the SNI, and the client certificate its
-						// verifier already accepted.
-						let server_name = session.server_name().map(str::to_owned);
-						let identity = session
-							.peer_certificates()
-							.map(|chain| crate::tls::PeerIdentity::from_chain(chain.to_vec()));
-						let link = Link {
-							remote: Some(remote),
-							local,
-							server_name: server_name.clone(),
-							..Default::default()
-						};
-						stream_request(
-							session,
-							&setup,
-							tx,
-							Incoming {
-								transport: Transport::Tcp,
-								link,
-								// Like raw QUIC, the SNI is the only authority a `tls://` client offers.
-								authority: server_name,
-								identity,
-								deadline,
-								active,
-							},
-						)
-						.await
+						let incoming = Incoming::tcp(&session, Some(remote), local, deadline, active);
+						stream_request(session, &setup, tx, incoming).await;
 					}
 					// Per-connection: a failed `accept(2)` is the listener's own to
 					// classify and pace, and never surfaces here.
@@ -1576,13 +1574,52 @@ fn spawn_unix_loop(
 }
 
 #[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
-struct Incoming {
+pub(crate) struct Incoming {
 	transport: Transport,
 	link: Link,
 	authority: Option<String>,
 	identity: Option<crate::tls::PeerIdentity>,
 	deadline: Option<kio::clock::Instant>,
 	active: moq_net::server::Active,
+}
+
+#[cfg(feature = "tcp")]
+impl Incoming {
+	/// A TCP session's facts. On `tls://` these are the SNI, and the client
+	/// certificate its verifier already accepted.
+	pub(crate) fn tcp(
+		session: &qmux::Session,
+		remote: Option<std::net::SocketAddr>,
+		local: Option<std::net::SocketAddr>,
+		deadline: Option<kio::clock::Instant>,
+		active: moq_net::server::Active,
+	) -> Self {
+		let server_name = session.server_name().map(str::to_owned);
+		let identity = session
+			.peer_certificates()
+			.map(|chain| crate::tls::PeerIdentity::from_chain(chain.to_vec()));
+		Self {
+			transport: Transport::Tcp,
+			link: Link {
+				remote,
+				local,
+				server_name: server_name.clone(),
+				..Default::default()
+			},
+			// Like raw QUIC, the SNI is the only authority a `tls://` client offers.
+			authority: server_name,
+			identity,
+			deadline,
+			active,
+		}
+	}
+
+	/// Report the ALPN the connection's TLS handshake negotiated.
+	#[cfg(feature = "_certs")]
+	pub(crate) fn with_alpn(mut self, alpn: Option<String>) -> Self {
+		self.link.alpn = alpn;
+		self
+	}
 }
 
 /// Read SETUP in the connection task and forward the resulting request.
@@ -1593,6 +1630,21 @@ async fn stream_request(
 	tx: tokio::sync::mpsc::Sender<Request>,
 	incoming: Incoming,
 ) {
+	match accept_stream(&setup.server, session, incoming).await {
+		Ok(request) => {
+			let _ = tx.send(request).await;
+		}
+		Err(err) => tracing::debug!(%err, "stream SETUP handshake failed"),
+	}
+}
+
+/// Read SETUP on a stream session, which carries its path in SETUP rather than a URL.
+#[cfg(any(feature = "tcp", all(feature = "uds", unix)))]
+pub(crate) async fn accept_stream(
+	server: &moq_net::Server,
+	session: qmux::Session,
+	incoming: Incoming,
+) -> crate::Result<Request> {
 	let Incoming {
 		transport,
 		link,
@@ -1601,28 +1653,23 @@ async fn stream_request(
 		deadline,
 		active,
 	} = incoming;
-	match accept_request(&setup.server, session, deadline).await {
-		Ok((request, deadline)) => {
-			let request = Request {
-				transport,
-				url: None,
-				authority,
-				identity,
-				link,
-				handshake: Box::new(request),
-				#[cfg(feature = "quic")]
-				quic: None,
-				#[cfg(feature = "quic")]
-				window: None,
-				#[cfg(feature = "quic")]
-				quic_limits: Default::default(),
-				deadline,
-				active,
-			};
-			let _ = tx.send(request).await;
-		}
-		Err(err) => tracing::debug!(%err, "stream SETUP handshake failed"),
-	}
+	let (request, deadline) = accept_request(server, session, deadline).await?;
+	Ok(Request {
+		transport,
+		url: None,
+		authority,
+		identity,
+		link,
+		handshake: Box::new(request),
+		#[cfg(feature = "quic")]
+		quic: None,
+		#[cfg(feature = "quic")]
+		window: None,
+		#[cfg(feature = "quic")]
+		quic_limits: Default::default(),
+		deadline,
+		active,
+	})
 }
 
 /// The transport-level facts a backend captures while accepting a connection, before the

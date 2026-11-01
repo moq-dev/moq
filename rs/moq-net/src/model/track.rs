@@ -4758,6 +4758,9 @@ impl Consumer {
 	}
 
 	/// Refuse a new range before it changes the demand shared by this route's readers.
+	///
+	/// Only an unresolved time anchor is refused, so callers skip ranges without one
+	/// before building a consumer or locking the track's state.
 	fn refuse_subscription(&self, subscription: &Subscription) -> Result<()> {
 		if let Some(serving) = self.serving() {
 			return serving.refuse_subscription(subscription);
@@ -5326,7 +5329,9 @@ impl Subscribing {
 		let info = ready!(self.state.poll(waiter, |state| state.poll_info()))
 			.map_err(|e| e.abort.clone().unwrap_or(Error::Dropped))??;
 		refuse_untimed(&info, &self.subscription.read())?;
-		Consumer::new(self.name.clone(), self.state.weak()).refuse_subscription(&self.subscription.read())?;
+		if self.subscription.read().has_time() {
+			Consumer::new(self.name.clone(), self.state.weak()).refuse_subscription(&self.subscription.read())?;
+		}
 
 		let resume = self.state.read().routes.clone();
 		let inner = match resume {
@@ -5353,7 +5358,7 @@ impl Subscribing {
 	/// Returns [`Error::Closed`] if the track already ended; the update is
 	/// meaningless at that point and can usually be ignored.
 	pub fn update(&mut self, subscription: Subscription) -> Result<()> {
-		if subscription.ranges != self.subscription.read().ranges {
+		if subscription.has_time() && subscription.ranges != self.subscription.read().ranges {
 			Consumer::new(self.name.clone(), self.state.weak()).refuse_subscription(&subscription)?;
 		}
 		self.subscription.update(subscription)
@@ -7235,7 +7240,7 @@ impl Control {
 		if !self.timed && subscription.has_time() {
 			return Err(Error::TimestampMismatch);
 		}
-		if subscription.ranges != self.subscription.read().ranges {
+		if subscription.has_time() && subscription.ranges != self.subscription.read().ranges {
 			self.track.refuse_subscription(&subscription)?;
 		}
 		self.subscription.update(subscription)?;
@@ -7925,7 +7930,7 @@ impl Subscriber {
 			Inner::Plain(cursor) => &cursor.subscription,
 			Inner::Resume(resume, _) => resume.subscription(),
 		};
-		if subscription.ranges != channel.read().ranges {
+		if subscription.has_time() && subscription.ranges != channel.read().ranges {
 			self.consume().refuse_subscription(&subscription)?;
 		}
 		channel.update(subscription)?;

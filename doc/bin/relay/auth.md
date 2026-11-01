@@ -496,3 +496,7 @@ parent directory or an allowlist.
 dials such as [cluster links](/bin/relay/cluster#tls-links). It asks for a
 client certificate as the QUIC listener does, under the same `listen.tls.root`,
 so a peer on it presents a certificate or a token.
+The HTTPS listener (`web.https`) accepts `tls://` too, with no setting: a
+ClientHello that offers a moq ALPN is served the listen certificate and the
+same client-certificate request, while every other connection keeps
+`web.https.cert`.

@@ -201,7 +201,7 @@ start rather than being ignored. If io\_uring workers fail to start naming
 listen = "[::]:4443"                 # HTTP: fingerprint, announced, fetch, health.
 
 [web.https]
-listen = "[::]:443"                  # HTTPS plus the WebSocket fallback.
+listen = "[::]:443"                  # HTTPS, the WebSocket fallback, and tls:// with the listen certificate.
 cert = "cert.pem"                    # cert, key, and root need listen. Omit cert and key with [acme].
 key = "key.pem"
 
