@@ -170,7 +170,12 @@ export class Broadcast {
 	// Requests are shared by callers; each owns its restart watch in the origin.
 	readonly #references = new Map<
 		Moq.Path.Valid,
-		{ origin: Moq.Origin.Table; follow: boolean; request: Moq.Origin.Requesting; users: number }
+		{
+			origin: Moq.Origin.Table;
+			follow: boolean;
+			request: Moq.Origin.Requesting | Moq.Origin.Following;
+			users: number;
+		}
 	>();
 
 	// The catalog as published, before renditions this consumer cannot use are dropped. Kept
@@ -301,7 +306,7 @@ export class Broadcast {
 		const name = effect.get(this.in.name);
 		const follow = effect.get(this.in.follow);
 
-		let request: Moq.Origin.Requesting;
+		let request: Moq.Origin.Requesting | Moq.Origin.Following;
 		try {
 			request = follow ? origin.follow(name) : origin.request(name);
 		} catch (err) {

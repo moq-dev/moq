@@ -11,7 +11,7 @@ regenerated.
 ## Plan
 
 Planned 2026-10-31 (`/quest-plan`, maintainer), a follow-up from
-[JS follow returns a Following](/quest/m1/api-audit/resolve/js-following.md),
+[JS follow returns a Following](https://github.com/moq-dev/moq/pull/7476),
 which split the return types but kept one `RequestOptions` for both
 methods. Keep the shared fields' names. Drop a field from `FollowOptions`
 only if `follow` ignores it today, and say which in the PR. If the two
@@ -20,7 +20,3 @@ point is that each method's docs describe one behavior.
 
 Public API: breaking for TypeScript type annotations that name
 `RequestOptions` for a `follow` call. Wire: none.
-
-## Required
-
-- [JS follow returns a Following](/quest/m1/api-audit/resolve/js-following.md) - the `Following` return type this finishes

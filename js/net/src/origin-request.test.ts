@@ -4,7 +4,7 @@ import * as Epoch from "./epoch";
 import { StreamCode, StreamError } from "./error";
 import { Route } from "./hop";
 import { hooks } from "./internal.ts";
-import { Producer, type Publication, type Request } from "./origin";
+import { type Following, Producer, type Publication, type Request, type Requesting } from "./origin";
 import * as Path from "./path";
 import { wireOf } from "./wire";
 
@@ -16,7 +16,7 @@ test("a follower moves through restart, end and a later start", async () => {
 	const firstPublication = origin.createBroadcast(path);
 	const first = firstPublication.broadcast;
 	firstPublication.announce();
-	const request = origin.follow(path);
+	const request: Following = origin.follow(path);
 	expect(request.active.peek()?.closed).toBe(first.closed);
 	const secondPublication = origin.createBroadcast(path);
 	const second = secondPublication.broadcast;
@@ -142,7 +142,7 @@ test("only a request can use a session without discovery", async () => {
 	const slot = wire.requests.peek()?.get(path);
 	if (!slot) throw new Error("request did not register");
 	expect(wire.blind(slot)).toBe(false);
-	const requested = origin.request(path);
+	const requested: Requesting = origin.request(path);
 	expect(wire.blind(slot)).toBe(true);
 	// The blind answer lands in the shared slot, but only the plain handle takes it.
 	const source = new BroadcastProducer();

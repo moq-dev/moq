@@ -1243,7 +1243,7 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 	let siblingSubscriber: Moq.Track.Subscriber | undefined;
 	let catalogSubscriber: Moq.Track.Subscriber | undefined;
 	let recovered: Moq.Track.Subscriber | undefined;
-	let announced: Moq.Origin.Requesting | undefined;
+	let announced: Moq.Origin.Following | undefined;
 	try {
 		await encoder.out.catalog.changed();
 		const net = broadcast.net.peek();

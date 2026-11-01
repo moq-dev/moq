@@ -800,7 +800,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		}
 		await feed.drain();
 	};
-	let announced: Moq.Origin.Requesting | undefined;
+	let announced: Moq.Origin.Following | undefined;
 	try {
 		await configuring;
 		await settle();

@@ -382,10 +382,16 @@ export namespace Origin {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		get closed(): Signals.GetPromise<Error | null>;
 		get discovery(): Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 	}
 	export type Cost = bigint;
+	export class Following {
+		readonly active: Signals.Getter<Broadcast.Consumer | undefined>;
+		close(): void;
+		readonly closed: Signals.GetPromise<Error | null>;
+		readonly path: Path.Valid;
+	}
 	export type Hop = infer<typeof Origin.HopSchema>;
 	export const HopSchema: $ZodBranded<ZodMiniBigInt<bigint>, "Hop", "out">;
 	export class Prepared {
@@ -402,7 +408,7 @@ export namespace Origin {
 		consume(): Origin.Consumer;
 		createBroadcast(path: Path.Valid): Origin.Publication;
 		get discovery(): Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		requests(prefix: Path.Valid): Origin.Requests;
 		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
@@ -449,7 +455,7 @@ export namespace Origin {
 		readonly closed: Signals.GetPromise<Error | null>;
 		createBroadcast(path: Path.Valid): Origin.Publication;
 		readonly discovery: Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		requests(prefix: Path.Valid): Origin.Requests;
 	}

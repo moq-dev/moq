@@ -1123,7 +1123,7 @@ export interface Table {
 	request(path: Path.Valid, options?: RequestOptions): Requesting;
 
 	/** Follow `path` across publisher instances; see {@link Consumer.follow}. */
-	follow(path: Path.Valid, options?: RequestOptions): Requesting;
+	follow(path: Path.Valid, options?: RequestOptions): Following;
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
 	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
@@ -1526,7 +1526,7 @@ export class Producer implements Table {
 	}
 
 	/** Follow `path` across publisher instances; see {@link Consumer.follow}. */
-	follow(path: Path.Valid, options?: RequestOptions): Requesting {
+	follow(path: Path.Valid, options?: RequestOptions): Following {
 		return this.#reader.follow(path, options);
 	}
 
@@ -1591,7 +1591,7 @@ export class Producer implements Table {
 // that would leak the unexported OriginState. Assigned in the class's static block.
 let makeConsumer: (state: OriginState, scope: Scope) => Consumer;
 
-// Same for Requesting: a public constructor would let a caller forge a handle that no origin
+// Same for Requesting and Following: a public constructor would let a caller forge a handle that no origin
 // ever registered, whose lifecycle guarantees are then false. `@internal` alone would not
 // stop it, since the declaration emit keeps the constructor.
 let makeRequesting: (
@@ -1600,6 +1600,13 @@ let makeRequesting: (
 	closed: Once<Error | null>,
 	dispose: Dispose,
 ) => Requesting;
+
+let makeFollowing: (
+	path: Path.Valid,
+	active: Getter<broadcast.Consumer | undefined>,
+	closed: Once<Error | null>,
+	dispose: Dispose,
+) => Following;
 
 let makeDynamic: (
 	prefix: Path.Valid,
@@ -1617,7 +1624,7 @@ let publishPrepared: (request: Request, publication: Publication, epoch: Epoch.V
 let rejectPrepared: (request: Request, err: Error) => void;
 
 /**
- * An owned request for a broadcast path; see {@link Consumer.request} and {@link Consumer.follow}.
+ * An owned request for one publisher instance at a broadcast path; see {@link Consumer.request}.
  *
  * @public
  */
@@ -1626,19 +1633,16 @@ export class Requesting {
 	readonly path: Path.Valid;
 
 	/**
-	 * The current broadcast, or undefined while nothing provides the path.
-	 * A followed path moves to each publisher instance, pinned to one when requested.
-	 * A request retains its accepted instance. Another route of the same epoch taking over keeps
+	 * The accepted broadcast, or undefined while the request is pending.
+	 * Another route of the same epoch taking over keeps
 	 * this handle: its tracks resume on that route from the first group each reader lacks.
 	 * Closing this handle affects only this request.
 	 */
 	readonly active: Getter<broadcast.Consumer | undefined>;
 
 	/**
-	 * Settles on refusal, origin shutdown, or explicit close.
-	 * A request also ends when its accepted instance stops serving, and fails
-	 * `Unroutable` while pending once discovery syncs without a route for it;
-	 * a followed path waits for a later start, even when pinned.
+	 * Settles on refusal, origin shutdown, explicit close, or the accepted instance ending.
+	 * Fails `Unroutable` while pending once discovery syncs without a route for it.
 	 */
 	readonly closed: GetPromise<Error | null>;
 
@@ -1662,6 +1666,56 @@ export class Requesting {
 	}
 
 	/** Withdraw the request. The path stays routed for any other open request. Idempotent. */
+	close(): void {
+		if (this.#disposed) return;
+		this.#disposed = true;
+		this.#dispose();
+	}
+}
+
+/**
+ * An owned follower of the publisher instances announced at a broadcast path; see {@link Consumer.follow}.
+ *
+ * @public
+ */
+export class Following {
+	/** The followed path. */
+	readonly path: Path.Valid;
+
+	/**
+	 * The current announced broadcast, or undefined between publisher instances.
+	 * Moves to each new instance, or waits for the pinned epoch when one was requested.
+	 * Another route of the same epoch keeps this handle and resumes its tracks.
+	 * Closing this handle affects only this follower.
+	 */
+	readonly active: Getter<broadcast.Consumer | undefined>;
+
+	/**
+	 * Settles on refusal, origin shutdown, or explicit close.
+	 * Waits through gaps in announcements for a later start, even when pinned to an epoch.
+	 */
+	readonly closed: GetPromise<Error | null>;
+
+	#dispose: Dispose;
+	#disposed = false;
+
+	private constructor(
+		path: Path.Valid,
+		active: Getter<broadcast.Consumer | undefined>,
+		closed: GetPromise<Error | null>,
+		dispose: Dispose,
+	) {
+		this.path = path;
+		this.active = active;
+		this.closed = closed;
+		this.#dispose = dispose;
+	}
+
+	static {
+		makeFollowing = (path, active, closed, dispose) => new Following(path, active, closed, dispose);
+	}
+
+	/** Withdraw the follower. The path stays routed for any other open request. Idempotent. */
 	close(): void {
 		if (this.#disposed) return;
 		this.#disposed = true;
@@ -1764,7 +1818,7 @@ export class Consumer {
 	 * its path until closed. Requires discovery: a session without it never serves a follower.
 	 * A selected handler's refusal or the origin closing ends it.
 	 */
-	follow(path: Path.Valid, options: RequestOptions = {}): Requesting {
+	follow(path: Path.Valid, options: RequestOptions = {}): Following {
 		const epoch = options.epoch;
 		const absolute = this.#scope.path(path);
 		Path.Pattern.literal(path);
@@ -1868,7 +1922,7 @@ export class Consumer {
 			changed();
 		}
 
-		return makeRequesting(path, active, closed, () => finish(null));
+		return makeFollowing(path, active, closed, () => finish(null));
 	}
 
 	// One resolution of `path`. A follower's (`announced`) takes only an announced front and
