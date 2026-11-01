@@ -3977,6 +3977,9 @@ struct TrackRun {
 	steer_tx: kio::Producer<Steer>,
 	// The frame bounds of the requested ranges, which the model leaves to `position_group`.
 	frames: Frames,
+	// The lowest group the requested ranges name, `None` unless each names its start: kept
+	// with the ranges, so a wake reads it without copying every range.
+	named: Option<u64>,
 	// A SUBSCRIBE_UPDATE this track cannot serve, such as a time anchor on a track the
 	// peer was told is untimed, which ends the subscription.
 	refused: Option<Error>,
@@ -4024,7 +4027,8 @@ impl TrackRun {
 	) -> Self {
 		// Apply the initial cap from the original Subscribe. Subsequent updates
 		// flow through the SUBSCRIBE_UPDATE arm below.
-		let cap = bounds.groups().end().map_or(Bound::Unbounded, Bound::Excluded);
+		let groups = bounds.groups();
+		let cap = groups.end().map_or(Bound::Unbounded, Bound::Excluded);
 		let track = track.with_range((Bound::Included(floor), cap));
 
 		let emit_range = ctx.version.has_track_stream();
@@ -4036,6 +4040,7 @@ impl TrackRun {
 		Self {
 			bounded,
 			frames: bounds.frames,
+			named: groups.start(),
 			refused: None,
 			ctx,
 			track,
@@ -4093,7 +4098,7 @@ impl TrackRun {
 		// Feed the full update into the model subscriber so the producer's
 		// aggregate reflects it (and a relay re-forwards it upstream).
 		// Read first: `update` replaces these preferences.
-		let requested = self.track.subscription().start();
+		let requested = self.named;
 		let floored = requested.is_some_and(|group| group > 0);
 		let bounds = match Bounds::new(&upd.ranges, self.ctx.stamp.map(|stamp| stamp.timescale)) {
 			Ok(bounds) => bounds,
@@ -4104,12 +4109,18 @@ impl TrackRun {
 		};
 		let groups = bounds.groups();
 		let (start, end) = (groups.start(), groups.end());
-		let _ = self.track.update(crate::track::Subscription {
-			priority: upd.priority,
-			max_delay: serving_max_delay(self.ctx.version, upd.max_delay),
-			order: upd.order,
-			..groups
-		});
+		if self
+			.track
+			.update(crate::track::Subscription {
+				priority: upd.priority,
+				max_delay: serving_max_delay(self.ctx.version, upd.max_delay),
+				order: upd.order,
+				..groups
+			})
+			.is_ok()
+		{
+			self.named = start;
+		}
 		// An explicit start moves the read cursor. Lite-06+ encodes an absent
 		// start as no floor, so a subscription that had one above group 0 has to
 		// drop back to 0: the cursor only rises on its own, and a finished group
@@ -4247,7 +4258,7 @@ impl TrackRun {
 		if self.emit_range
 			&& self.start.is_none()
 			&& self.ctx.version.has_largest()
-			&& let Some(start) = self.track.subscription().start()
+			&& let Some(start) = self.named
 			&& let Poll::Ready(Some(largest)) = self.track.poll_live(waiter)
 			&& (track::Position {
 				group: start,
@@ -4546,7 +4557,7 @@ impl TrackRun {
 		// floor. Lite-06 encodes a floor of group 0 as 0, which decodes as no named floor;
 		// that 0 is group 0, so it is not pinned. Raised, not assigned: an update that
 		// landed while the group was held may already have raised it past.
-		if self.track.subscription().start().is_none() && !self.ctx.version.resolves_start() {
+		if self.named.is_none() && !self.ctx.version.resolves_start() {
 			self.raise_floor(start);
 		}
 		self.serve(group);
