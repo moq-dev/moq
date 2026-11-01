@@ -802,43 +802,49 @@ impl<F: Container> Consumer<F> {
 
 	// Before the first item, move the cursor past its group when that group's first frame trails the
 	// newest content by more than the budget and the next group still starts at or before the live
-	// edge less the reach, so it is not what the start covers. Returns whether it moved.
+	// edge less the reach, so it is not what the start covers, and repeat for the group it lands on.
+	// Returns whether it moved.
 	fn start_skip(&mut self, waiter: &kio::Waiter) -> Result<bool, F::Error> {
-		let Some(group) = self.pending.front_mut() else {
-			return Ok(false);
-		};
-		if group.sequence > self.current {
-			return Ok(false);
+		// The newest content lies in the highest group with a timestamp, which a skip never drops, so
+		// one read serves every skip and a long backlog is walked once.
+		let mut newest = None;
+		let mut moved = false;
+		while let Some(group) = self.pending.front_mut() {
+			if group.sequence > self.current {
+				break;
+			}
+			let _ = group.poll_min_timestamp(waiter, &self.format, true);
+			let Some((frame, ..)) = group.buffered.front() else {
+				break;
+			};
+			let first = std::time::Duration::from(frame.timestamp);
+			let current_end = group.max_end;
+			// The next group that arrived, even one whose first frame is still in flight: that frame
+			// may land within the budget, so skipping on to a later group could drop the one the start
+			// belongs on. Until it lands, nothing is skipped, as `@moq/hang`'s consumer waits on its
+			// successor's start.
+			let Some(idx) = self.pending.iter().position(|group| group.sequence > self.current) else {
+				break;
+			};
+			let Poll::Ready(Some(next_start)) = self.pending[idx].poll_min_timestamp(waiter, &self.format, false)
+			else {
+				break;
+			};
+			let next_start = std::time::Duration::from(next_start);
+			let newest = *newest.get_or_insert_with(|| self.poll_newest(waiter));
+			// Nothing has been read, so the reader still warms.
+			if newest.saturating_sub(first) <= self.max_delay.saturating_add(self.warmup) {
+				break;
+			}
+			// The group the start reaches back to is kept: the next one begins past that point.
+			let reach = self.min_delay.min(self.max_delay).saturating_add(self.warmup);
+			if !reach.is_zero() && next_start > newest.saturating_sub(reach) {
+				break;
+			}
+			self.skip_to(idx, Some(next_start), current_end)?;
+			moved = true;
 		}
-		let _ = group.poll_min_timestamp(waiter, &self.format, true);
-		let Some((frame, ..)) = group.buffered.front() else {
-			return Ok(false);
-		};
-		let first = std::time::Duration::from(frame.timestamp);
-		let current_end = group.max_end;
-		// The next group that arrived, even one whose first frame is still in flight: that frame may
-		// land within the budget, so skipping on to a later group could drop the one the start
-		// belongs on. Until it lands, nothing is skipped, as `@moq/hang`'s consumer waits on its
-		// successor's start.
-		let Some(idx) = self.pending.iter().position(|group| group.sequence > self.current) else {
-			return Ok(false);
-		};
-		let Poll::Ready(Some(next_start)) = self.pending[idx].poll_min_timestamp(waiter, &self.format, false) else {
-			return Ok(false);
-		};
-		let next_start = std::time::Duration::from(next_start);
-		let newest = self.poll_newest(waiter);
-		// Nothing has been read, so the reader still warms.
-		if newest.saturating_sub(first) <= self.max_delay.saturating_add(self.warmup) {
-			return Ok(false);
-		}
-		// The group the start reaches back to is kept: the next one begins past that point.
-		let reach = self.min_delay.min(self.max_delay).saturating_add(self.warmup);
-		if !reach.is_zero() && next_start > newest.saturating_sub(reach) {
-			return Ok(false);
-		}
-		self.skip_to(idx, Some(next_start), current_end)?;
-		Ok(true)
+		Ok(moved)
 	}
 
 	// The first group past the cursor with a timestamp, the skip target, and where it starts.
