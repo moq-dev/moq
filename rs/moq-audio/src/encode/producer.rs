@@ -404,49 +404,72 @@ impl Producer {
 
 	/// Encode and publish every full frame in `pending`, keeping any partial
 	/// trailing frame for the next call.
+	///
+	/// Frames are read in place and the remainder moves to the front once, so a
+	/// large batch costs linear rather than quadratic copying.
 	fn publish_full_frames(&mut self, anchor_us: u64) -> Result<(), Error> {
 		let frame_samples = self.encoder()?.frame_size() * self.encoder()?.codec_channels() as usize;
-		while self.pending.len() >= frame_samples {
-			let chunk: Vec<f32> = self.pending.drain(..frame_samples).collect();
-			let timestamp = Self::timestamp(
-				anchor_us,
-				self.frames_produced,
-				self.encoder()?.folded_delay(),
-				self.encoder()?.codec_rate(),
-			)?;
-			self.frames_produced += self.encoder()?.frame_size() as u64;
-			let end = Self::timestamp(anchor_us, self.frames_produced, 0, self.encoder()?.codec_rate())?;
-			let raw = Raw {
-				samples: chunk,
-				timestamp,
-				end,
-				reset: std::mem::take(&mut self.reset_pending),
-				discontinuity: std::mem::take(&mut self.pending_discontinuity),
-			};
-			if self.active && self.backlog.is_empty() {
-				self.encode_raw(raw)?;
-			} else {
-				self.backlog.push(raw);
-			}
+		// Taken so each frame can be borrowed while `self` encodes it; restored below on every path.
+		let mut pending = std::mem::take(&mut self.pending);
+		let mut consumed = 0;
+		let mut result = Ok(());
+		while result.is_ok() && pending.len() - consumed >= frame_samples {
+			let frame = &pending[consumed..consumed + frame_samples];
+			// A frame that fails is consumed too, so it is never encoded twice.
+			consumed += frame_samples;
+			result = self.publish_frame(anchor_us, frame);
 		}
+		pending.drain(..consumed);
+		self.pending = pending;
+		result
+	}
 
+	/// Stamp one codec frame, then encode it now or keep it in the backlog.
+	fn publish_frame(&mut self, anchor_us: u64, samples: &[f32]) -> Result<(), Error> {
+		let timestamp = Self::timestamp(
+			anchor_us,
+			self.frames_produced,
+			self.encoder()?.folded_delay(),
+			self.encoder()?.codec_rate(),
+		)?;
+		self.frames_produced += self.encoder()?.frame_size() as u64;
+		let end = Self::timestamp(anchor_us, self.frames_produced, 0, self.encoder()?.codec_rate())?;
+		let reset = std::mem::take(&mut self.reset_pending);
+		let discontinuity = std::mem::take(&mut self.pending_discontinuity);
+		if self.active && self.backlog.is_empty() {
+			return self.encode_frame(samples, timestamp, reset, discontinuity);
+		}
+		// Only a frame that waits needs its own copy.
+		self.backlog.push(Raw {
+			samples: samples.to_vec(),
+			timestamp,
+			end,
+			reset,
+			discontinuity,
+		});
 		Ok(())
 	}
 
-	fn encode_raw(&mut self, raw: Raw) -> Result<(), Error> {
+	fn encode_frame(
+		&mut self,
+		samples: &[f32],
+		timestamp: Timestamp,
+		reset: bool,
+		discontinuity: bool,
+	) -> Result<(), Error> {
 		// A break before anything was published, such as history expiring before the first
 		// subscriber, has nothing to separate.
-		if raw.discontinuity && !self.decoder_boundary {
+		if discontinuity && !self.decoder_boundary {
 			self.track.discontinuity()?;
 			self.decoder_boundary = true;
 		}
 		let encoder = self.encoder.as_mut().ok_or(moq_net::Error::Closed)?;
-		if raw.reset {
+		if reset {
 			encoder.reset();
 		}
-		let packet = encoder.encode(&raw.samples)?;
+		let packet = encoder.encode(samples)?;
 		self.activity = packet.activity;
-		self.publish(packet, raw.timestamp)?;
+		self.publish(packet, timestamp)?;
 		self.decoder_boundary = false;
 		Ok(())
 	}
@@ -463,7 +486,7 @@ impl Producer {
 		// One codec frame per turn lets capture keep draining while catching up.
 		if active && let Some(raw) = self.backlog.pop() {
 			self.track.history(raw.timestamp);
-			self.encode_raw(raw)?;
+			self.encode_frame(&raw.samples, raw.timestamp, raw.reset, raw.discontinuity)?;
 		}
 		Ok(())
 	}
@@ -573,7 +596,7 @@ impl Producer {
 		self.active = true;
 		while let Some(raw) = self.backlog.pop() {
 			self.track.history(raw.timestamp);
-			self.encode_raw(raw)?;
+			self.encode_frame(&raw.samples, raw.timestamp, raw.reset, raw.discontinuity)?;
 		}
 		if self.reset_pending
 			&& let Some(encoder) = self.encoder.as_mut()
@@ -1156,6 +1179,79 @@ mod tests {
 			assert_eq!(decoded.len(), frames, "terminal padding extended the source");
 			let peak = decoded.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
 			assert!(peak > 0.1, "the {frames}-frame Opus tail lost the impulse: peak {peak}");
+		}
+	}
+
+	/// Batching cannot change what is published: every packet, timestamp, group boundary
+	/// and the flushed tail match whether PCM arrives a frame at a time or in one burst,
+	/// with or without resampling.
+	#[tokio::test]
+	async fn batch_size_does_not_change_the_published_track() {
+		for input_rate in [48_000u32, 44_100] {
+			let input = Input::new(input_rate, Layout::Stereo);
+			// Not a whole number of codec frames, so finish flushes a partial tail.
+			let frames = input_rate as usize + 123;
+			let samples: Vec<f32> = (0..frames * 2)
+				.map(|index| (index as f32 * 0.01).sin() * 0.25)
+				.collect();
+			let mut reference = None;
+			for batch in [1, 7, 959, 961, 1921, 4410, frames] {
+				let mut broadcast = moq_net::broadcast::Info::new().produce();
+				let catalog =
+					moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+				let consumer = broadcast.consume();
+				let mut options = Options {
+					track: Some("audio".to_string()),
+					config: Config::from_input(super::super::Codec::Pcm, &input),
+					..Options::default()
+				};
+				options.config.sample_rate = 48_000;
+				let mut producer = Producer::new(&mut broadcast, catalog, input.clone(), &options).unwrap();
+				let track = consumer
+					.track("audio")
+					.unwrap()
+					.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60)))
+					.await
+					.unwrap();
+				let mut reader = moq_mux::container::Consumer::new(
+					track,
+					moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
+				);
+
+				for (index, chunk) in samples.chunks(batch * 2).enumerate() {
+					let at = (index * batch) as u64 * 1_000_000 / input_rate as u64;
+					producer.write(&pcm_frame(chunk, 1_000_000 + at)).unwrap();
+				}
+				producer.finish().unwrap();
+
+				let mut published = Vec::new();
+				while let Some(read) = reader.read().await.unwrap() {
+					published.push(match read {
+						moq_mux::container::Read::Frame { group, frame } => (
+							format!("{group} {:?} {}", frame.timestamp, frame.keyframe),
+							frame.payload,
+						),
+						other => (format!("{other:?}"), Bytes::new()),
+					});
+				}
+				if input_rate == 48_000 {
+					// PCM at the codec rate publishes exactly the input, its final frame zero-padded.
+					let payload: Vec<u8> = published.iter().flat_map(|(_, payload)| payload.to_vec()).collect();
+					let expected: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();
+					assert_eq!(
+						payload.len(),
+						expected.len().next_multiple_of(1920 * 4),
+						"batch={batch}"
+					);
+					assert_eq!(payload[..expected.len()], expected[..], "batch={batch}");
+					assert!(payload[expected.len()..].iter().all(|&byte| byte == 0), "batch={batch}");
+				}
+				assert_eq!(
+					&published,
+					reference.get_or_insert_with(|| published.clone()),
+					"{input_rate} Hz, batch={batch}"
+				);
+			}
 		}
 	}
 
