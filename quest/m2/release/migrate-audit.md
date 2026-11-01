@@ -61,6 +61,12 @@ m1 quest on 2026-10-22.
   listed as breaks matching no name in `MIGRATE.md` (about 15 Rust crates,
   `@moq/hang`, `@moq/net`, `@moq/watch`, and moq-ffi): confirm each, and add
   its migration note or record why none is needed.
+- Known break, a Nix option rather than a Rust API (added 2026-10-31, from
+  [moq-dev/moq#7343](https://github.com/moq-dev/moq/pull/7343)): the NixOS
+  module option `services.moq-relay.cluster.rootUrl` takes a non-empty
+  list instead of a string. Migrate `rootUrl = "https://root:4443";` to
+  `rootUrl = [ "https://root:4443" ];`; an empty list fails evaluation.
+  Write it into `rs/moq-relay/MIGRATE.md`'s transition section.
 
 ## Required
 

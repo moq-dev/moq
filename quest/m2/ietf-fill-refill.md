@@ -22,8 +22,13 @@ Group stitching across two streams drew repeated fixes:
 [#6407](https://github.com/moq-dev/moq/pull/6407), plus
 [#7322](https://github.com/moq-dev/moq/pull/7322) (headless groups) and
 [join after finish](/quest/m2/ietf-join-after-finish.md). The `Fill` enum
-and its handoff (`rs/moq-net/src/ietf/subscriber.rs` about lines 273-396
-and 4712-4862) exist only because the model has one producer per group.
+and its handoff exist only because the model has one producer per group. In
+`rs/moq-net/src/ietf/subscriber.rs` on 38566f5a84 (refreshed 2026-10-31;
+[moq-dev/moq#7322](https://github.com/moq-dev/moq/pull/7322) found the old
+ones stale):
+`Fill`, `FillRequest`, and `Filling` at lines 249-414, `claim_fill` at
+4961-5001, and `recv_fill`, `run_fill`, and `run_fill_objects` from 5065.
+Search by those names if the lines have moved again.
 
 Decided 2026-10-28 (maintainer): nothing is written into a group copy below
 its live log, so the head no longer fills the tail's group in place. Once

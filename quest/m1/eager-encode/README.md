@@ -51,6 +51,10 @@ The epic's own work, once the children land:
   [time-addressed consumers](/quest/m1/time-addressing/consumers.md)'s
   HLS-only-viewer clause.
 
+## Required
+
+- [Buffered audio survives a capture stop and a disable](/quest/m1/eager-encode/audio-across-stop.md) - audio retained by buffered capture is still served, or expires on its own `max_age`, after capture stops or the input is disabled
+
 ## Related
 
 - [Push-to-talk loses no speech](/quest/m1/push-to-talk/README.md) - the late-subscriber half of an unmute this fixes

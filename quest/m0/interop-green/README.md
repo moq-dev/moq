@@ -32,3 +32,4 @@ Public API: none. Wire: none.
 ## Required
 
 - [Browser tests expect current behavior](/quest/m0/interop-green/stale-browser-tests.md) - the renderer and element version tests match the shipped validation and version list
+- [The browser js -> js moq-transport cell passes](/quest/m0/interop-green/js-pause-resume.md) - interop's browser `js -> js` cell passes on moq-transport drafts 20 and 22 in the scheduled run on `main`

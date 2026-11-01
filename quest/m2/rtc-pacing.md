@@ -38,6 +38,18 @@ WHEP enforcement needs it and nobody owned it.
   pacer; the vendored str0m's leaky pacer is deleted.
 - A per-session rate handle sets the cap and accepts live updates. The pacer
   counts media; the docs advise headroom for RTP overhead.
+- WHIP ingest follow-ups (2026-10-31, from
+  [moq-dev/moq#7373](https://github.com/moq-dev/moq/pull/7373), which
+  meters a capped WHIP publisher's frame payload): it does not meter
+  inbound RTP that never forms a frame, so a hostile publisher can send junk
+  RTP past its cap. Meter it with the same bucket here if that proves to
+  matter, without counting BWE padding probes (metering raw SRTP bytes would
+  trip an honest Chrome while probing). [moq-dev/moq#7373](https://github.com/moq-dev/moq/pull/7373) was tested against str0m on
+  both ends only; check once with a real Chrome or Firefox publisher that
+  it honors `b=TIAS` and REMB beside transport-cc, stays under the meter
+  through keyframes and BWE probing at 90% of the cap, and lifts its
+  ceiling on a `Bitrate::MAX` REMB. Do the same real-browser check for the
+  WHEP cap this quest adds.
 - Tests: a capped viewer never receives more than cap plus burst, including
   a single frame larger than the burst, which still arrives; a viewer
   over the cap resumes cleanly on the next group; two viewers with different

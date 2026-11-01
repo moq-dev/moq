@@ -80,3 +80,6 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Keep moq-net's model in rust2-ts's subset](/quest/m3/rs2ts-model-subset.md) - safe twins for the model's internal `unsafe`, `dyn Expiry` as an enum, once rust2-ts reaches the model
 - [Wait for a stable bun lint](/quest/m3/bun-lint-release.md) - condition: `bun lint` ships in a stable Bun that nixpkgs carries
 - [Evaluate bun fmt and bun lint](/quest/m3/bun-lint.md) - a measured decision on replacing Biome
+- [Rust and JS end a lite-05 track the same way after an inclusive SUBSCRIBE_END](/quest/m3/lite05-subscribe-end.md) - after a legacy inclusive SUBSCRIBE_END, Rust and JS both end the track instead of Rust sending a FIN and JS only releasing
+- [Byte-at-a-time MKV input imports as fast as chunked input](/quest/m3/mkv-input-coalesce.md) - the MKV importer fed one byte at a time is no slower than before moq-dev/moq#7234
+- [A transcode ladder probes an unseen source shape without stalling its other rungs](/quest/m3/transcode-parallel-open.md) - a source changing to an unseen size opens the new encoders without stalling the ladder's other rungs

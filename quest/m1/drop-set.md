@@ -304,6 +304,15 @@ a cancelled fetch below a track's end still holds the end open until the cache
 expiry scan removes it, so how fast a subscription ends depends on expiry
 timing. Settle it here, where cancelled and expired runs get a reason.
 
+### Untimed fills below a resolved start
+
+Noted 2026-10-31 from [moq-dev/moq#7235](https://github.com/moq-dev/moq/pull/7235),
+which made everything below a resolved SUBSCRIBE_START fillable from upstream:
+a lite-07 copy with no media time asks a fill below the start even for a reader
+whose budget the publisher already exceeded, and that fill ends empty. If the
+extra FETCH shows up in relay traffic, bound it here, where a run below the
+start can carry the budget it was resolved under.
+
 ## Required
 
 - [Range count cost](/quest/m1/subscribe-ranges/fill-linear.md) - the remaining range-count walks stop growing per poll; both edit `miss.rs`

@@ -45,6 +45,20 @@ tungstenite stays in this quest, driven from the one task (it runs over any
 [codec](/quest/m2/perf/stream/codec.md) quest, so the bench attributes each
 change on its own.
 
+Stopgap first (2026-10-31, from
+[moq-dev/moq#7086](https://github.com/moq-dev/moq/pull/7086)'s benchmark):
+tungstenite's default read buffer dominates its share of the profile. Shrink
+`WebSocketConfig::read_buffer_size` to near qmux's maximum record size
+(about 16 KiB) in `qmux::ws` (`capped` in `rs/qmux/src/ws.rs`) and on the
+relay's axum `WebSocketUpgrade` (`rs/moq-relay/src/websocket.rs`) until this
+driver replaces it. That setting is the buffer tungstenite allocates up
+front, not a memory cap: a larger frame still grows past it, so the existing
+message and frame size limits stay the bound. The stopgap lowers the
+baseline allocation per connection. Land it as its own commit with a bench
+run that also reports retained memory, then rerun the
+[codec](/quest/m2/perf/stream/codec.md) quest's gate before deciding whether
+replacing tungstenite still pays.
+
 Public API: the constructor shape changes in `qmux`, `moq-tokio`, and any
 binding that starts a qmux session. The Impact bullet says how to migrate.
 

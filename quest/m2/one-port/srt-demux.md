@@ -40,6 +40,11 @@ that sees every inbound packet can tell. Test both with a mocked clock,
 which the driver allows by taking `now` as input; srt-tokio reads std's
 clock, so `tokio::time::pause` cannot drive its idle timeout.
 
+Noted 2026-10-31 from [moq-dev/moq#7095](https://github.com/moq-dev/moq/pull/7095):
+a pinned lookup in the demux's flow table hashes with SipHash, about 20 ns.
+Once SRT pins send every SRT datagram through that path, measure a faster
+keyed hasher with the `demux_route` bench and switch if it pays.
+
 Tests: `moq-srt`'s existing integration test runs against the shared socket
 with a QUIC client active on the same port; a QUIC short header from a new
 4-tuple during an SRT session still reaches QUIC.

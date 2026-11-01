@@ -181,6 +181,18 @@ removed).
 - [A JS reader finishes after a clean close](/quest/m1/js-close-range-finish.md) - a range ending below the cache delivers what's held and then ends
 - [fMP4 decode times keep increasing](/quest/m1/fmp4-bframe-decode-time.md) - fragments shorter than a GOP of B-frame video never step `tfdt` backwards
 - [moq-quic deletes its remaining 0-RTT code](/quest/m1/quic-zero-rtt-leftovers.md) - only the code that drops a 0-RTT packet remains, with a test
+- [A cancelled MoqTrackDemand wait never loses the next change](/quest/m1/demand-cancel-race.md) - cancelling a `MoqTrackDemand::wanted_changed` call, from any binding, never consumes a demand change
+- [moq-ffi reports an unsupported media configuration as a typed error](/quest/m1/ffi-unsupported-config.md) - `MoqAudioConsumer::subscribe` and the matching video subscribe fail with a typed "unsupported configuration" error
+- [A live keyframe interval change never outruns the declared HLS duration](/quest/m1/js-hls-keyframe-duration.md) - raising a live keyframe interval, even to infinite, never pushes a segment past the declared HLS target duration, and the browser interop cell asserts the catalog `hls` field
+- [A request stream that opens after its deadline is aborted once and never sends](/quest/m1/js-request-deadline.md) - A `@moq/net` IETF request whose stream finishes opening only after its deadline fired is aborted exactly once, through its `RequestStream`, and never writes its request
+- [A lite close drain keeps the streams queued when the session closed](/quest/m1/lite-close-drain-queued.md) - when a `@moq/net` lite session drains after the peer's close, a group stream the peer opened before closing is delivered even if it was still queued, not yet accepted
+- [One Ed25519 public key type with one z-base-32 codec](/quest/m1/mesh-key-codec.md) - `moq_auth::mesh::EndpointId` is merged into `moq_sign::PublicKey`
+- [moqsink reports track demand only once the track is in the catalog](/quest/m1/moqsink-demand-catalog.md) - A `moqsink` request pad's `track-demand` stays null until its track is listed in the published catalog, and only then reports `wanted`
+- [A discontinuity before the first frame keeps the init's parameter sets](/quest/m1/mux-discontinuity-headers.md) - an avc3, hev1, or av01 track that marks a discontinuity before its first frame still publishes that first keyframe with its init's parameter sets
+- [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
+- [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
+- [The Python wrapper publish can be retried by hand](/quest/m1/release-py-dispatch.md) - `.github/workflows/release-py.yml` has a `workflow_dispatch` trigger, so a maintainer can retry a failed `moq-rs` publish from `release` without a new `moq-ffi-v*` tag or a path-matching push
+- [A returning route serves past the cap its old copy was given](/quest/m1/returning-route-cap.md) - when a resumed reader's route returns, the reused serving copy asks with the reader's current resolution, not the capped resolution it was left with when it was replaced
 - [Gate the no-em-dash rule](/quest/m1/em-dash-gate.md) - `just check` fails on an em dash in any tracked text file
 
 ## Related
