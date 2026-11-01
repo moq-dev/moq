@@ -17,7 +17,8 @@ categories = ["multimedia", "multimedia::audio", "multimedia::encoding"]
 # and `bus` (pure Rust). Off by default: the device features, because on Linux cpal links
 # libasound at build time, the one system build dependency in this crate. macOS
 # and Windows would pay nothing, but a default is one setting for every host.
-# The features exist so a consumer can pick what it wants, not to hide code from
+# The always-available echo processor does not link libasound. The
+# features exist so a consumer can pick what it wants, not to hide code from
 # the default compile: `just check` lints default features only, so the device
 # code is compiled by nightly's `just rs features` and platform.yml's
 # `just rs macos`. Workspace consumers opt in at the root manifest
@@ -62,10 +63,9 @@ playback = ["dep:cpal", "dep:ringbuf", "dep:tokio", "dep:tracing"]
 # `capture` or `playback` activates it, so a host flag alone pulls no audio I/O.
 pipewire = ["cpal?/pipewire"]
 pulseaudio = ["cpal?/pulseaudio"]
-# Acoustic echo cancellation: subtract what `playback` is playing from what
-# `capture` hears, so a speakerphone doesn't send its own output back. Needs
-# both halves, since the canceller taps the output mix as its reference.
-aec = ["capture", "dep:sonora", "playback"]
+# Acoustic echo cancellation wired directly between `playback` and `capture`,
+# so a speakerphone doesn't send its own output back.
+aec = ["capture", "playback"]
 
 [dependencies]
 bitstream-io = { workspace = true }
@@ -90,13 +90,13 @@ rubato = { version = "5.0", default-features = false }
 # Pure-Rust port of WebRTC's audio processing module (AEC3, noise suppression,
 # AGC2). The reason the `aec` feature can exist at all: every other option is a
 # C++ build (webrtc-audio-processing wants CMake and abseil), which is the same
-# trade we refused for Opus. Optional, and BSD-3-Clause like the upstream it was
+# trade we refused for Opus. BSD-3-Clause like the upstream it was
 # ported from.
 #
 # 0.2.0 or newer: 0.1.0 panics when the adaptive filter shrinks, which a call
 # whose echo path changes length does reach (dignifiedquire/sonora#14). The
 # `survives_a_moving_echo_delay` test covers that path.
-sonora = { version = "0.2", optional = true }
+sonora = "0.2"
 # Pure-Rust AAC-LC decoder, ported from NihAV. Decode only: no Rust AAC encoder
 # exists, and the alternatives (libfdk-aac, ffmpeg) are C libraries we would have
 # to link. Limited to AAC-LC mono/stereo, which is what every ingest gateway
