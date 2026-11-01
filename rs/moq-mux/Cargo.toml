@@ -28,7 +28,7 @@ moq-json = { workspace = true }
 moq-loc = { workspace = true }
 moq-msf = { workspace = true }
 moq-net = { workspace = true }
-mp4-atom = { version = "0.16.2", features = ["tokio", "bytes", "serde"] }
+mp4-atom = { version = "0.17.0", features = ["tokio", "bytes", "serde"] }
 mpeg2ts = "0.6.0"
 num_enum = { workspace = true }
 roxmltree = "0.21.1"

@@ -17,7 +17,7 @@ use super::args::Args;
 use super::output::{Output, Sink, Speaker};
 use super::playback::{Kind, Playback, Track, joined};
 use super::timeline::{AudioTimeline, Presentation, Role, Transition, fit, timestamp};
-use super::video::Video;
+use super::video::{Refresh, Video};
 use super::window::Event;
 
 /// What a frame that starts a new decoded timeline crossed.
@@ -266,7 +266,8 @@ impl<O: Output> Media<O> {
 					// Nothing older than the playhead is worth presenting, so the delay
 					// doubles as the staleness budget on the wire.
 					let max_delay = self.args.video_max_delay(&snapshot.audio);
-					let opened = async {
+					// A decoder and its subscription, starting `lookback` groups before the live edge.
+					let open = async |max_delay: Duration, lookback: u64| {
 						// The window's renderer refuses a GPU surface it cannot import, so
 						// the decoder downloads those instead, all of them on a device
 						// that imports none.
@@ -286,15 +287,42 @@ impl<O: Output> Media<O> {
 						// once the feed is live, so wait for it rather than read the backlog of
 						// a warm copy still waiting on its source; the wait ends with the track.
 						if let Some(largest) = subscriber.largest().await {
-							subscriber = subscriber.with_range(largest.group..);
+							subscriber = subscriber.with_range(largest.group.saturating_sub(lookback)..);
 						}
 						let format = catalog::hang::Container::try_from(config)?;
 						Ok::<_, anyhow::Error>((moq_mux::container::Consumer::new(subscriber, format), decoder))
+					};
+					let opened = async {
+						let (track, decoder) = open(max_delay, 0).await?;
+						// An intra-refresh rendition also runs a decoder with one more sweep
+						// of budget, joining a group earlier so its pictures stay clean, as
+						// `moq_video::decode::Consumer` does. Both share one upstream request.
+						let warmup = config.warmup.unwrap_or_default();
+						let refresh = if warmup.is_zero() {
+							None
+						} else {
+							let (track, decoder) = open(max_delay.saturating_add(warmup), 1).await?;
+							let interval = config
+								.framerate
+								.filter(|rate| rate.is_finite() && *rate > 0.0)
+								.and_then(|rate| Duration::try_from_secs_f64(rate.recip()).ok());
+							Some(Refresh {
+								track,
+								decoder,
+								interval,
+							})
+						};
+						Ok::<_, anyhow::Error>((track, decoder, refresh))
 					}
 					.await;
 					match opened {
-						Ok((track, decoder)) => {
-							tracing::info!(track = name, decoder = decoder.name(), "playing video rendition");
+						Ok((track, decoder, refresh)) => {
+							tracing::info!(
+								track = name,
+								decoder = decoder.name(),
+								refresh = refresh.is_some(),
+								"playing video rendition"
+							);
 							let video = Video {
 								presentation: self.presentation.clone(),
 								frames: self.video.clone(),
@@ -319,7 +347,7 @@ impl<O: Output> Media<O> {
 										Ok(()) = retired => {}
 									}
 								};
-								let result = until_stopped(video.run(track, decoder), stopped).await;
+								let result = until_stopped(video.run(track, decoder, refresh), stopped).await;
 								(Kind::Video, result.map(|(finished, _)| (finished, None)))
 							});
 							playback.started(Kind::Video, reference);
@@ -1001,6 +1029,7 @@ mod tests {
 		let video_task = tokio::spawn(video_play.run(
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
 			Buffered(Vec::new()),
+			None,
 		));
 		let picture = |index: u64, keyframe: bool| moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_millis(index * 20).unwrap(),
@@ -1349,6 +1378,7 @@ mod tests {
 		let video_task = tokio::spawn(video_play.run(
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
 			Passthrough,
+			None,
 		));
 		let picture = |millis: u64, keyframe: bool| moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_millis(millis).unwrap(),
@@ -2126,7 +2156,7 @@ mod tests {
 				output: recorder.clone(),
 				max_delay: delay,
 			}
-			.run(track, decoder),
+			.run(track, decoder, None),
 		);
 		loop {
 			tokio::task::yield_now().await;

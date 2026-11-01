@@ -72,7 +72,7 @@ impl Track {
 		for resolved in input.resolver.resolve(traf, self.defaults)? {
 			let sample::Resolved { sample, cts, range } = resolved?;
 			let duration = sample.duration.ok_or(Error::MissingSampleDuration)?;
-			let pts = dts.checked_add_signed(cts as i64).ok_or(Error::PtsOverflow)?;
+			let pts = dts.checked_add_signed(cts).ok_or(Error::PtsOverflow)?;
 			let duration = Timestamp::new(duration as u64, self.timescale)?;
 			let data = &input.data[range];
 			dts = dts.checked_add(duration.value()).ok_or(Error::PtsOverflow)?;

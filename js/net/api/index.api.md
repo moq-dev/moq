@@ -622,7 +622,7 @@ export namespace Track {
 		createGroup(sequence: number): Group.Producer;
 		demand(): Track.Demand;
 		finish(): void;
-		finishAt(end: Track.Position): void;
+		finishAt(end: Track.Position, error?: Error): void;
 		info(): Promise<Track.Info>;
 		insertDatagram(sequence: number, timestamp: Time.Timestamp | undefined, payload: Uint8Array): void;
 		largest(): Track.Position | undefined;
@@ -660,7 +660,7 @@ export namespace Track {
 	};
 	export interface Subscription {
 		groups?: Track.Groups;
-		maxDelay?: Milli;
+		maxDelay?: Milli | null;
 		order?: Track.Order;
 		priority?: number;
 	}

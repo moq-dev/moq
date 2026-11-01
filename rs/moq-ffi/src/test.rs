@@ -317,6 +317,7 @@ fn audio_output() -> crate::audio::MoqAudioDecoderOutput {
 		channels: None,
 		max_delay: None,
 		delay: None,
+		start: None,
 	}
 }
 
@@ -2572,7 +2573,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 		(5, 0, 6)
 	);
 	assert_eq!(request.priority(), 11);
-	assert_eq!(request.next(), Some(5));
+	assert_eq!(request.wanted(), Some(5));
 
 	let group = request.accept(5).unwrap();
 	group
@@ -2595,7 +2596,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 }
 
 #[tokio::test]
-async fn fill_goes_unused_when_the_fetcher_leaves() {
+async fn fill_goes_unwanted_when_the_fetcher_leaves() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("events".into(), None).unwrap();
 	let dynamic = track.requests().unwrap();
@@ -2606,21 +2607,57 @@ async fn fill_goes_unused_when_the_fetcher_leaves() {
 		.await
 		.expect("timed out waiting for fill")
 		.unwrap();
-	assert!(fill.is_used());
+	assert_eq!(fill.wanted_changed().await.unwrap(), Some(5));
 	assert!(fill.is_wanted(5));
 	assert!(!fill.is_wanted(6), "outside the fill");
 
 	fetch.abort();
-	tokio::time::timeout(TIMEOUT, fill.unused())
+	let wanted = tokio::time::timeout(TIMEOUT, fill.wanted_changed())
 		.await
-		.expect("timed out waiting for the abandoned fetch to become unused")
+		.expect("timed out waiting for the abandoned fetch to become unwanted")
 		.unwrap();
-	assert!(!fill.is_used());
+	assert_eq!(wanted, None);
+	assert_eq!(fill.wanted(), None);
 	tokio::time::timeout(TIMEOUT, fill.unwanted(5))
 		.await
-		.expect("an unused fill wants none of its groups")
+		.expect("an unwanted fill wants none of its groups")
 		.unwrap();
 	assert!(!fill.is_wanted(5));
+}
+
+/// A foreign cancel only stops polling `wanted_changed`; uniffi drops it later, at
+/// `rust_future_free`. Until then the cancelled call must not consume the change the next
+/// call is waiting for.
+#[tokio::test]
+async fn fill_wanted_changed_cancelled_before_free_leaves_the_change() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let dynamic = track.requests().unwrap();
+	let consumer = broadcast.consume().unwrap();
+
+	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
+	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
+		.await
+		.expect("timed out waiting for fill")
+		.unwrap();
+	assert_eq!(fill.wanted_changed().await.unwrap(), Some(5));
+
+	// Poll once, then stop without dropping, which is all `rust_future_cancel` does.
+	let mut cancelled = Box::pin(fill.wanted_changed());
+	let first = std::future::poll_fn(|cx| std::task::Poll::Ready(cancelled.as_mut().poll(cx))).await;
+	assert!(first.is_pending());
+
+	fetch.abort();
+	// Give anything still driving the cancelled call the chance to take the change.
+	ffi_caught_up().await;
+
+	let next = fill.wanted_changed();
+	drop(cancelled);
+	let wanted = tokio::time::timeout(TIMEOUT, next)
+		.await
+		.expect("the cancelled call took the change")
+		.unwrap();
+	assert_eq!(wanted, None);
 }
 
 #[tokio::test]
@@ -2636,7 +2673,7 @@ async fn dynamic_track_rejects_fetch_miss() {
 		.expect("timed out waiting for fill")
 		.unwrap();
 	fill.drop_groups(5, 6);
-	assert_eq!(fill.next(), None, "the dropped group is answered");
+	assert_eq!(fill.wanted(), None, "the dropped group is answered");
 
 	let result = tokio::time::timeout(TIMEOUT, fetch)
 		.await
@@ -3994,6 +4031,119 @@ async fn video_decode_frame_ownership() {
 
 	// Converting again reads the same retained surface.
 	assert_eq!(frame.pixels(MoqVideoPixelFormat::I420).unwrap(), i420);
+}
+
+/// The default start decodes a cached track from its oldest group, while
+/// `Latest` skips that backlog and joins at the newest group.
+#[cfg(feature = "video")]
+#[tokio::test]
+async fn video_decode_start() {
+	use crate::media::MoqDecodeStart;
+	use crate::video::*;
+
+	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
+	let broadcast = create_announced(&origin, "video-decode-start");
+	let video = crate::video::MoqVideoProducer::new(
+		&crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap(),
+		crate::video::MoqVideoProducerOptions {
+			input: MoqVideoEncoderInput {
+				format: MoqVideoPixelFormat::Rgba,
+				width: 320,
+				height: 240,
+				framerate: crate::video::MoqVideoFrameRate {
+					numerator: 30,
+					denominator: 1,
+				},
+			},
+			output: MoqVideoEncoderOutput {
+				codec: MoqVideoCodec::H264,
+				bitrate: None,
+				gop: None,
+				kind: MoqVideoEncoderKind::Software,
+			},
+			track: Some("camera".into()),
+			bandwidth: None,
+			lower: None,
+		},
+	)
+	.unwrap();
+
+	// Two groups, the second starting at frame 10.
+	const NEWEST_US: u64 = 10 * 33_333;
+	let rgba = vec![0x80u8; 320 * 240 * 4];
+	for i in 0..20u64 {
+		if i % 10 == 0 {
+			video.cut().unwrap();
+		}
+		video
+			.write(MoqVideoFrame {
+				timestamp_us: i * 33_333,
+				data: rgba.clone(),
+			})
+			.unwrap();
+	}
+
+	let consumer = origin.consume();
+	let broadcast_consumer = await_announced(&consumer, "video-decode-start").await;
+	// The newest group must be cached before `Latest` subscribes, or it would join the first.
+	let raw = broadcast_consumer.subscribe_track("camera".into(), None).await.unwrap();
+	while tokio::time::timeout(TIMEOUT, raw.recv_group())
+		.await
+		.expect("timed out")
+		.unwrap()
+		.expect("the track ended early")
+		.sequence()
+		== 0
+	{}
+	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
+	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("timed out")
+		.unwrap()
+		.expect("expected catalog");
+	let rendition = catalog.video["camera"].clone();
+
+	let subscribe = async |start| {
+		crate::video::MoqVideoConsumer::subscribe(
+			&broadcast_consumer,
+			"camera".into(),
+			rendition.clone(),
+			MoqVideoDecoderOutput {
+				start,
+				// The track's whole retention, so a slow host does not skip the first group.
+				max_delay: Some(Duration::from_secs(30)),
+				..Default::default()
+			},
+		)
+		.await
+		.unwrap()
+	};
+	let oldest = subscribe(None).await;
+	let latest = subscribe(Some(MoqDecodeStart::Latest)).await;
+	video.finish().unwrap();
+
+	let timestamps = async |decoder: Arc<MoqVideoConsumer>| {
+		let mut timestamps = Vec::new();
+		while let Some(read) = tokio::time::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
+			match read {
+				MoqVideoRead::Frame { frame } => timestamps.push(frame.timestamp_us()),
+				MoqVideoRead::End { .. } => break,
+				MoqVideoRead::Gap { .. } => panic!("nothing was lost"),
+			}
+		}
+		timestamps
+	};
+	assert_eq!(
+		timestamps(oldest).await.first(),
+		Some(&0),
+		"the default starts at the oldest group"
+	);
+	assert_eq!(
+		timestamps(latest).await.first(),
+		Some(&NEWEST_US),
+		"latest joins at the newest group"
+	);
+	broadcast.close().unwrap();
 }
 
 /// Regression: a `MoqVideoProducer` is shared, so its calls land on whichever
