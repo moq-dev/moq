@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod bench;
+mod delay;
 mod max_filter;
 
 use std::any::Any;
@@ -89,6 +90,11 @@ const LOSS_THRESH: f64 = 0.02;
 /// equivalent to BBR.Beta: A constant specifying the default multiplicative decrease to make upon
 /// each round trip during which the connection detects packet loss (the value is 0.7).
 const BETA: f64 = 0.7;
+
+/// The delay bound's pacing, as a share of the delivery rate while the bottleneck queue grows:
+/// GoogCC's backoff from its acknowledged rate on overuse. Below the bottleneck's rate, it drains
+/// the queue at 15% of that rate.
+const DELAY_BETA: f64 = 0.85;
 
 /// equivalent to BBR.Headroom: A constant specifying the multiplicative factor to apply to
 /// BBR.inflight_longterm when calculating a volume of free headroom to try to leave unused in the
@@ -523,6 +529,14 @@ pub struct Bbr3 {
     /// Used when computing `offload_budget` per
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.8.2>.
     max_ack_delay: Duration,
+    /// Reads bottleneck queue growth from the peer's receive timestamps, when
+    /// [`Bbr3Config::delay_bound`] is set.
+    delay: Option<delay::Detector>,
+    /// The delay bound's ceiling on BBR.bw: the most the path delivered without its queue
+    /// growing. Infinite until the queue first grows, and always without the delay bound.
+    bw_delay: f64,
+    /// C.delivered when the delay bound last acted, which it does once per round trip.
+    delay_round_delivered: u64,
 }
 
 impl Bbr3 {
@@ -680,6 +694,9 @@ impl Bbr3 {
             // when the connection supplies peer ACK-frequency parameters.
             ack_eliciting_threshold: 1,
             max_ack_delay: Duration::from_millis(25),
+            delay: config.delay_bound.then(delay::Detector::default),
+            bw_delay: f64::INFINITY,
+            delay_round_delivered: 0,
         }
     }
 
@@ -823,6 +840,10 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRUpdateACKAggregation <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.9>
+    ///
+    /// The delay bound expects delivery at BBR.bw without its own `bw_delay`: pacing below the
+    /// delivery rate to drain a queue delivers faster than that bound while the queue lasts,
+    /// which is not ACK aggregation, and taking it as such inflates the window.
     fn update_ack_aggregation(&mut self, newly_acked: u64, now: Instant) {
         let interval;
         if let Some(extra_acked_interval_start) = self.extra_acked_interval_start {
@@ -830,7 +851,11 @@ impl Bbr3 {
         } else {
             interval = Duration::from_secs(0);
         }
-        let mut expected_delivered = (self.bw * interval.as_secs_f64()) as u64;
+        let bw = match self.bw_delay.is_finite() {
+            true => self.max_bw.min(self.bw_shortterm),
+            false => self.bw,
+        };
+        let mut expected_delivered = (bw * interval.as_secs_f64()) as u64;
         if self.extra_acked_delivered <= expected_delivered {
             self.extra_acked_delivered = 0;
             self.extra_acked_interval_start = Some(now);
@@ -1316,9 +1341,11 @@ impl Bbr3 {
     }
 
     /// equivalent to BBRBoundBWForModel <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.5.10.3>
+    ///
+    /// The delay bound's `bw_delay` bounds it too, infinite unless that is on.
     fn bound_bw_for_model(&mut self) {
-        // gives min of both f64
-        self.bw = [self.max_bw, self.bw_shortterm]
+        // gives min of all three f64
+        self.bw = [self.max_bw, self.bw_shortterm, self.bw_delay]
             .iter()
             .copied()
             .fold(f64::NAN, f64::min);
@@ -1785,6 +1812,56 @@ impl Bbr3 {
         let inflight = Ord::max(inflight, self.offload_budget);
         Some(Ord::max(inflight, self.min_pipe_cwnd))
     }
+
+    /// The delay bound's response to the forward delay's trend showing the bottleneck queue
+    /// growing, at most once per round trip, so the response to one queue lands before it is
+    /// judged again.
+    ///
+    /// While the queue grows, the bottleneck's rate bounds the delivery rate, so the round's
+    /// delivery rate measures it. ProbeBW_UP has found it: `bw_delay` falls to it, and the probe
+    /// stops, as loss stops it, so ProbeBW_DOWN drains the probe's queue. Growth in any other
+    /// ProbeBW phase means the path slowed under the estimate: `bw_delay` falls to
+    /// [`DELAY_BETA`] of the delivery rate, so pacing drains the queue that slowing built.
+    ///
+    /// Startup, Drain, and ProbeRTT are BBR3's own: Startup ends on its plateau or on loss, and
+    /// Drain and ProbeRTT already send below the estimate.
+    fn bound_queue_growth(&mut self, now: Instant) {
+        let Some(rs) = self.rs else {
+            return;
+        };
+        if rs.prior_delivered < self.delay_round_delivered {
+            return;
+        }
+        let delivery_rate = self.bw_latest.max(rs.delivery_rate);
+        match self.state {
+            BbrState::ProbeBw(ProbeBwSubstate::Up) => {
+                self.bw_delay = self.bw_delay.min(delivery_rate);
+                self.start_probe_bw_down(now);
+            }
+            BbrState::ProbeBw(_) => {
+                self.bw_delay = self.bw_delay.min(DELAY_BETA * delivery_rate);
+            }
+            BbrState::Startup | BbrState::Drain | BbrState::ProbeRtt => return,
+        }
+        self.bound_bw_for_model();
+        self.delay_round_delivered = self.rate.delivered();
+    }
+
+    /// Raises `bw_delay` to what Startup and ProbeBW_UP deliver without the queue growing: a
+    /// probe the path carries lifts it a probe gain per round, as it lifts BBR.max_bw.
+    fn raise_bw_delay(&mut self) {
+        let Some(rs) = self.rs else {
+            return;
+        };
+        let probing = matches!(
+            self.state,
+            BbrState::Startup | BbrState::ProbeBw(ProbeBwSubstate::Up)
+        );
+        if probing && !rs.is_app_limited && rs.delivery_rate > self.bw_delay {
+            self.bw_delay = rs.delivery_rate;
+            self.bound_bw_for_model();
+        }
+    }
 }
 
 impl Controller for Bbr3 {
@@ -1843,6 +1920,11 @@ impl Controller for Bbr3 {
         for acked in ack.packets {
             self.check_recovery_done(acked.sent);
             newly_acked += u64::from(acked.bytes);
+            if let Some(delay) = &mut self.delay
+                && let Some(received) = acked.received
+            {
+                delay.on_packet(acked.sent, received, ack.now);
+            }
         }
         self.inflight = ack.in_flight;
         // An ACK that delivered no packet has no sample, and a finished one is never folded
@@ -1857,6 +1939,12 @@ impl Controller for Bbr3 {
         };
         self.rs = Some(rs);
         self.update_model_and_state(rs.prior_delivered, newly_acked, ack.app_limited, ack.now);
+        if let Some(grew) = self.delay.as_mut().map(delay::Detector::take_signal) {
+            self.raise_bw_delay();
+            if grew {
+                self.bound_queue_growth(ack.now);
+            }
+        }
         self.update_control_parameters(newly_acked);
     }
 
@@ -2008,9 +2096,27 @@ pub struct Bbr3Config {
     drain_pacing_gain: Option<f64>,
     pacing_margin_percent: Option<f64>,
     default_cwnd_gain: Option<f64>,
+    delay_bound: bool,
 }
 
 impl Bbr3Config {
+    /// Brake when the peer's receive timestamps show the bottleneck queue growing.
+    ///
+    /// A trend line over the forward delay, as GoogCC fits one, detects the queue growing. BBR3
+    /// then bounds its bandwidth estimate, and with it the pacing rate and the window, at the
+    /// delivery rate the queue's growth measured: a bandwidth probe stops there, as it stops on
+    /// loss, and growth outside a probe sets the bound below that rate, so the queue drains.
+    /// Startup and ProbeBW_UP raise the bound to whatever they deliver, so the probes, native
+    /// probing included, still find capacity that comes back. Startup and the model are BBR3's
+    /// own.
+    ///
+    /// Without receive timestamps, which the transport requests separately, it does nothing.
+    /// Off by default.
+    pub fn delay_bound(&mut self, value: bool) -> &mut Self {
+        self.delay_bound = value;
+        self
+    }
+
     /// Default limit on the amount of outstanding data in bytes.
     ///
     /// Recommended value: `min(10 * max_datagram_size, max(2 * max_datagram_size, 14720))`
@@ -2043,6 +2149,7 @@ impl Default for Bbr3Config {
             drain_pacing_gain: None,
             pacing_margin_percent: None,
             default_cwnd_gain: None,
+            delay_bound: false,
         }
     }
 }
@@ -2108,13 +2215,25 @@ mod test {
 
         /// Add packet `pn` to the ACK being built; a number not in flight is ignored.
         fn ack(&mut self, now: Instant, sent: Instant, bytes: u64, pn: u64) {
+            self.ack_received(now, sent, bytes, pn, None);
+        }
+
+        /// [`Self::ack`], reporting when the peer received the packet.
+        fn ack_received(
+            &mut self,
+            now: Instant,
+            sent: Instant,
+            bytes: u64,
+            pn: u64,
+            received: Option<Duration>,
+        ) {
             let _ = now;
             if let Some(acked) = self.sent.remove(&pn) {
                 self.acked.push(Acked {
                     sent,
                     bytes: bytes as u16,
                     packet: acked.packet,
-                    received: None,
+                    received,
                 });
             }
         }
@@ -2177,6 +2296,8 @@ mod test {
         pn: u64,
         send_ns: u64,
         ack_ns: u64,
+        /// when the peer received it
+        recv_ns: u64,
         /// whether the bottleneck marked the packet CE
         ce: bool,
     }
@@ -2210,6 +2331,10 @@ mod test {
         ce_above_ns: Option<u64>,
         /// the longest queueing delay a packet has met at the bottleneck
         max_queue_ns: u64,
+        /// whether each ACK reports when the peer received the packet, as receive timestamps do
+        timestamps: bool,
+        /// each packet's queueing delay at the bottleneck, by when it reached it
+        queues: Vec<(u64, u64)>,
     }
 
     impl Sim {
@@ -2229,6 +2354,8 @@ mod test {
                 btl_service_ns: (mss as f64 / bw * 1e9).round() as u64,
                 ce_above_ns: None,
                 max_queue_ns: 0,
+                timestamps: false,
+                queues: Vec::new(),
             }
         }
 
@@ -2248,6 +2375,7 @@ mod test {
                     pn: self.pn,
                     send_ns: now_ns,
                     ack_ns: now_ns,
+                    recv_ns: now_ns,
                     ce: false,
                 });
                 self.pn += 1;
@@ -2354,6 +2482,7 @@ mod test {
                     let ack_ns = finish + self.ret_ns;
                     let queue_ns = service_start - arrival;
                     self.max_queue_ns = self.max_queue_ns.max(queue_ns);
+                    self.queues.push((arrival, queue_ns));
                     let ce = self.ce_above_ns.is_some_and(|limit| queue_ns > limit);
 
                     self.bbr.send(
@@ -2366,6 +2495,7 @@ mod test {
                         pn: self.pn,
                         send_ns,
                         ack_ns,
+                        recv_ns: finish,
                         ce,
                     });
 
@@ -2382,7 +2512,9 @@ mod test {
                     self.inflight -= self.mss;
                     let now_at = self.base + Duration::from_nanos(self.now_ns);
                     let send_at = self.base + Duration::from_nanos(p.send_ns);
-                    self.bbr.ack(now_at, send_at, self.mss, p.pn);
+                    let received = self.timestamps.then(|| Duration::from_nanos(p.recv_ns));
+                    self.bbr
+                        .ack_received(now_at, send_at, self.mss, p.pn, received);
                     self.bbr.end_acks(now_at, self.inflight, false);
                     // Each ACK covers one packet, so a marked one raises the CE count.
                     if p.ce {
@@ -2431,6 +2563,7 @@ mod test {
             drain_pacing_gain: None,
             pacing_margin_percent: None,
             default_cwnd_gain: None,
+            delay_bound: false,
         };
         let mut bbr3 = Driver::new(Arc::new(config), 2500);
         bbr3.pick_probe_wait();
@@ -8150,5 +8283,80 @@ mod test {
         run_until(&mut marked, 21 * SEC);
         assert!(marked.bbr.max_bw > 0.9 * control.bbr.max_bw);
         assert_eq!(marked.bbr.inflight_shortterm, u64::MAX);
+    }
+
+    /// A [`Sim`] whose peer reports receive timestamps, with the delay bound on or off
+    fn timestamped(delay_bound: bool) -> Sim {
+        let mut config = Bbr3Config {
+            probe_rng_seed: Some([7; 16]),
+            ..Bbr3Config::default()
+        };
+        config.delay_bound(delay_bound);
+        let mut sim = Sim::new(config, 1200, LINK_BW, LINK_RTT);
+        sim.timestamps = true;
+        sim
+    }
+
+    /// The `p`th percentile of the queueing delay packets met reaching the bottleneck in
+    /// `from..until`, in nanoseconds
+    fn queue_percentile(sim: &Sim, from: u64, until: u64, p: f64) -> u64 {
+        let mut queues: Vec<u64> = sim
+            .queues
+            .iter()
+            .filter(|(at, _)| (from..until).contains(at))
+            .map(|&(_, queue)| queue)
+            .collect();
+        queues.sort_unstable();
+        queues[((queues.len() - 1) as f64 * p) as usize]
+    }
+
+    /// The capacity drops to a quarter for 5s, then comes back. BBR3 keeps sending into the
+    /// queue its stale estimate builds until its window binds, while the delay bound reads the
+    /// queue growing and paces below the delivery rate until it drains. Its ProbeBW_UP then
+    /// finds the capacity again, at nearly BBR3's goodput throughout.
+    #[test]
+    fn delay_bound_drains_queue_after_capacity_drop() {
+        const SEC: u64 = 1_000_000_000;
+        let mut control = timestamped(false);
+        let mut bound = timestamped(true);
+        let mut delivered = [[0; 3]; 2];
+        for (sim, delivered) in [&mut control, &mut bound].into_iter().zip(&mut delivered) {
+            delivered[0] = run_until(sim, 5 * SEC);
+            sim.btl_service_ns *= 4;
+            delivered[1] = run_until(sim, 10 * SEC);
+            sim.btl_service_ns /= 4;
+            delivered[2] = run_until(sim, 15 * SEC);
+        }
+        let median = |sim: &Sim| queue_percentile(sim, 5 * SEC, 10 * SEC, 0.5);
+        let (control_queue, bound_queue) = (median(&control), median(&bound));
+        assert!(
+            bound_queue * 4 < control_queue,
+            "median queue {}ms with the bound, {}ms without",
+            bound_queue / MS,
+            control_queue / MS
+        );
+        let [control_bytes, bound_bytes] = delivered;
+        for phase in 0..3 {
+            assert!(
+                bound_bytes[phase] as f64 > 0.9 * control_bytes[phase] as f64,
+                "phase {phase}: {bound_bytes:?} bytes delivered with the bound, {control_bytes:?} without"
+            );
+        }
+    }
+
+    /// The delay bound reads only receive timestamps: without them it changes nothing
+    #[test]
+    fn delay_bound_without_timestamps_is_bbr3() {
+        const SEC: u64 = 1_000_000_000;
+        let mut control = timestamped(false);
+        let mut bound = timestamped(true);
+        bound.timestamps = false;
+        for sim in [&mut control, &mut bound] {
+            run_until(sim, 3 * SEC);
+            sim.btl_service_ns *= 4;
+            run_until(sim, 6 * SEC);
+        }
+        assert_eq!(control.queues, bound.queues);
+        assert_eq!(control.bbr.window(), bound.bbr.window());
     }
 }

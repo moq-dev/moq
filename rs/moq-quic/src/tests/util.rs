@@ -315,9 +315,14 @@ pub(super) struct Bottleneck {
 	max_queue: Duration,
 	/// Whether packets are marked CE once the queue is half full, as a classic AQM does
 	marks_ce: bool,
+	/// Whether the queue is bounded in time rather than bytes, as moq-shaper's is, so a rate
+	/// change keeps `max_queue`
+	timed: bool,
 	/// When the link finishes serving everything queued so far
 	busy_until: Option<Instant>,
 	pub(super) stats: QueueStats,
+	/// Each queued packet's arrival and queueing delay, once set to `Some`
+	pub(super) trace: Option<Vec<(Instant, Duration)>>,
 }
 
 impl Bottleneck {
@@ -329,18 +334,32 @@ impl Bottleneck {
 			buffer_size,
 			max_queue: buffer_size * time_per_byte,
 			marks_ce,
+			timed: false,
 			busy_until: None,
 			stats: QueueStats::default(),
+			trace: None,
 		}
 	}
 
-	/// Serve at `bytes_per_second` from now on, keeping the queue's size in bytes
+	/// A link serving `bytes_per_second`, dropping what would wait in its queue past `max_queue`
+	/// at whatever rate it serves, as a moq-shaper rate limit does
+	pub(super) fn timed(bytes_per_second: u64, max_queue: Duration) -> Self {
+		let mut bottleneck = Self::new(bytes_per_second, 0, false);
+		bottleneck.max_queue = max_queue;
+		bottleneck.timed = true;
+		bottleneck
+	}
+
+	/// Serve at `bytes_per_second` from now on, keeping the queue's size in bytes, or in time
+	/// for a [`Self::timed`] queue
 	///
 	/// Packets already queued still leave when they were due, as if the link stepped once they
 	/// had been served.
 	pub(super) fn set_rate(&mut self, bytes_per_second: u64) {
 		self.time_per_byte = Duration::from_nanos(1_000_000_000 / bytes_per_second);
-		self.max_queue = self.buffer_size * self.time_per_byte;
+		if !self.timed {
+			self.max_queue = self.buffer_size * self.time_per_byte;
+		}
 	}
 
 	/// Queues `bytes` arriving at `now`, returning when they leave the link and whether they
@@ -353,6 +372,9 @@ impl Bottleneck {
 			return None;
 		}
 		let service = bytes as u32 * self.time_per_byte;
+		if let Some(trace) = &mut self.trace {
+			trace.push((now, delay));
+		}
 		self.stats.queued += 1;
 		self.stats.total_delay += delay;
 		self.stats.max_delay = self.stats.max_delay.max(delay);
@@ -385,8 +407,13 @@ pub(super) struct Link {
 	pub(super) reorder: f64,
 	/// The most a reordered arrival is held back
 	pub(super) reorder_delay: Duration,
+	/// Releases in-order arrivals only at the end of each interval this long, as a cellular
+	/// uplink's scheduler grants them, bunching what arrived within it
+	pub(super) grant: Option<Duration>,
 	/// The latest in-order arrival, which jitter never moves another before
 	last_arrival: Option<Instant>,
+	/// When the first grant interval began
+	grant_epoch: Option<Instant>,
 }
 
 impl Link {
@@ -412,11 +439,22 @@ impl Link {
 					return arrival + rng.random_range(Duration::ZERO..=self.reorder_delay);
 				}
 				let arrival = self.last_arrival.map_or(arrival, |last| last.max(arrival));
+				let arrival = self.granted(arrival);
 				self.last_arrival = Some(arrival);
 				arrival
 			})
 			.collect();
 		(marked, arrivals)
+	}
+
+	/// When the grant covering `arrival` releases it: the end of its interval
+	fn granted(&mut self, arrival: Instant) -> Instant {
+		let Some(grant) = self.grant else {
+			return arrival;
+		};
+		let epoch = *self.grant_epoch.get_or_insert(arrival);
+		let intervals = (arrival - epoch).as_nanos().div_ceil(grant.as_nanos());
+		epoch + Duration::from_nanos((intervals * grant.as_nanos()) as u64)
 	}
 }
 

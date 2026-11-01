@@ -292,7 +292,7 @@ play *args:
 doctest *args:
     bash sh/local.sh cargo test --locked --doc "$@"
 
-# Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite and the receive-timestamps comparison.
+# Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite, the receive-timestamps comparison, and the realtime controllers' comparison.
 quic-sim:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -307,6 +307,8 @@ quic-sim:
     # Forward delay against RTT as a queue-growth signal: deterministic in the simulation, then over real sockets through each cellular moq-shaper preset, one at a time so they do not add to each other's noise.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::receive_ts::/)'
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-tokio --test integration --run-ignored only --no-capture --test-threads 1 -E 'test(/^receive_ts::/)'
+    # Each realtime congestion controller against BBR3 over sim replicas of the cellular presets: queueing delay, throughput, reaction to the drop, and share beside CUBIC.
+    bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only --no-capture -E 'test(/^tests::realtime::/)'
 
 # Prove downstream futures are Send at the default recursion limit on the
 # flake's pinned nightly. Nightly runs it; the land gate does not.

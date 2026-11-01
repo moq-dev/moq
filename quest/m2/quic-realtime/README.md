@@ -39,7 +39,10 @@ spike assumed no consumer; teleoperation uplinks are one):
   in `moq-congestion`. The moq-shaper presets `cellular-step`,
   `cellular-bursty` and `cellular-deep` decide it. The report states the
   shaper's timing jitter, measured over `near-zero`, as the noise floor of the
-  delay signal.
+  delay signal. The BBR3 delay bound (`Bbr3Config::delay_bound`) landed
+  first, with the harness the others join: moq-quic's `tests::realtime`
+  replays the three presets on the sim, and each candidate adds a
+  `Candidate` there (`just rs quic-sim` prints the table).
 - Native probing is required (decided 2026-10-25, maintainer). Every
   candidate implements `moq_congestion::Controller::probes` and reports
   `probe_inflight`, so moq-quic's native probing
@@ -85,7 +88,6 @@ owns that feedback.
 ## Required
 
 - [GCC candidate](/quest/m2/quic-realtime/gcc.md) - libwebrtc's GoogCC vendored into `moq-congestion` and refreshed to current WebRTC
-- [BBR3 delay bound](/quest/m2/quic-realtime/bbr-delay-bound.md) - BBR3 with inflight capped when the forward delay gradient shows queue growth
 - [SCReAMv2 candidate](/quest/m2/quic-realtime/scream.md) - the RFC 8298bis delay path ported to `moq-congestion`
 - [moqsink encoder feedback](/quest/m2/quic-realtime/moqsink-feedback.md) - GStreamer publishers retune their encoder to the target rate
 
