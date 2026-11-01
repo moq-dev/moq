@@ -240,6 +240,11 @@ impl Task {
 	/// Publishes the stats broadcast and writes a frame per drain. Runs until
 	/// every [`Producer`] clone is dropped (`weak.upgrade()` returns `None`).
 	async fn run(self, weak: Weak<Keepalive>) {
+		// A publisher first run after its last producer dropped announces nothing,
+		// so it cannot replace a newer producer's broadcast on the same path.
+		if weak.strong_count() == 0 {
+			return;
+		}
 		let interval = self.interval;
 		let Some(mut drain) = Drain::new(self) else {
 			return;
@@ -253,8 +258,8 @@ impl Task {
 			// so each drain gets an interval of its own to open its groups in.
 			let scheduled = ticker.tick().await;
 
+			// Dropping the drain ends the broadcast, as cancelling this future does.
 			if weak.upgrade().is_none() {
-				drain.finish();
 				return;
 			}
 
@@ -330,10 +335,6 @@ impl Drain {
 		// A label's presence track and a prefix's track exist only while
 		// requested. See `serve_requests`.
 		self.node.serve_requests(&self.report, self.tick, stamp);
-	}
-
-	fn finish(self) {
-		self.node.finish();
 	}
 
 	/// The largest group snapshot still held, and the largest group frame this
@@ -1250,9 +1251,13 @@ impl NodePublisher {
 		track.publish(tick, stamp);
 		self.prefixes.insert(path.as_str().to_string(), track);
 	}
+}
 
-	/// Deliberately end the broadcast: finish every track, then close the broadcast.
-	fn finish(mut self) {
+/// The publish task ending, when the last producer drops or when its future is
+/// cancelled, is a deliberate end of the broadcast, never a dropped track.
+impl Drop for NodePublisher {
+	/// Finish every track, then close the broadcast.
+	fn drop(&mut self) {
 		self.totals.output.finish();
 		for track in self.presence.values_mut() {
 			track.output.finish();
@@ -1994,6 +1999,54 @@ mod tests {
 
 		let stats = origin.consume().request(path.as_str(), None).await.expect("resolve");
 		assert_eq!(read_egress(&stats).await["foo/bar"].bytes, 30);
+	}
+
+	/// A publisher first run after every producer clone dropped announces
+	/// nothing, so it cannot take the path from a newer producer.
+	#[tokio::test(start_paused = true)]
+	async fn a_publisher_run_after_its_producer_dropped_announces_nothing() {
+		let origin = produce_origin();
+		let mut events = origin.consume().with_hidden(true).announced();
+
+		let (stale, publisher) = Producer::new(
+			Config::new()
+				.with_origin(origin.clone())
+				.with_node(Path::from_static("sjc")),
+		);
+		drop(stale);
+
+		let _newer = node_producer(&origin);
+		drive_tick().await;
+		let [(_, true, _)] = &take_epochs(&mut events)[..] else {
+			panic!("expected the newer producer's announce");
+		};
+
+		publisher.run().await;
+		drive_tick().await;
+		assert_eq!(take_epochs(&mut events), []);
+	}
+
+	/// Cancelling a running publisher ends its tracks deliberately, so a reader
+	/// sees the track finish rather than drop.
+	#[tokio::test(start_paused = true)]
+	async fn a_cancelled_publisher_finishes_its_tracks() {
+		let origin = produce_origin();
+		let (_producer, publisher) = Producer::new(
+			Config::new()
+				.with_origin(origin.clone())
+				.with_node(Path::from_static("sjc")),
+		);
+		let task = tokio::spawn(publisher.run());
+		drive_tick().await;
+		let (_, broadcast) = announced(&origin).await;
+		let mut totals = subscribe(&broadcast, crate::TOTALS).await;
+		while try_next_frame(&mut totals).is_some() {}
+
+		task.abort();
+		assert!(task.await.unwrap_err().is_cancelled());
+		while let Some(group) = totals.next_group().await.expect("a finished track, not a dropped one") {
+			drop(group);
+		}
 	}
 
 	#[tokio::test(start_paused = true)]
