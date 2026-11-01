@@ -440,6 +440,10 @@ mod tests {
 		}
 
 		/// Spin until `done` holds, failing once a wake was evidently lost.
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "real threads hang on real time, which no kio clock moves"
+		)]
 		fn until(done: impl Fn() -> bool, what: &str) {
 			let deadline = std::time::Instant::now() + Duration::from_secs(20);
 			while !done() {
