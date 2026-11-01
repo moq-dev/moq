@@ -8,10 +8,15 @@
 //! The connections then go quiet, resume with one packet per stream, and repeat the burst.
 //!
 //! The table, printed first, reads a counting allocator, so its heap columns are what the
-//! process owns at each phase rather than the allocator's resident pages, which `rss_kib` shows.
-//! `kept_b` is what the quiet phase holds over the cold one, per stream of the burst. The
-//! allocation and CPU columns cover the server alone. Criterion then times the server's side of
-//! a burst on a connection that already recycled the previous one.
+//! application owns rather than the pages the allocator keeps resident, which the process-wide
+//! `rss_kib` shows. `peak_kib` is the whole process at the burst's peak. The `server_` columns
+//! are what dropping the server's connections frees: when new, when quiet after one burst, and
+//! when quiet after the resume and a repeat burst. `kept_b` is what quiet holds over new, per
+//! stream of the burst. The CPU columns time the server; the allocation counts include the
+//! clients', which a receive change leaves alone. `teardown_b` is what the case leaks.
+//!
+//! Criterion then times the server's side of a burst on a connection that already recycled the
+//! previous one, so both reuse and regrowth show.
 //!
 //! Run with `cargo bench -p moq-quic --features fuzz --bench receive_reuse`.
 

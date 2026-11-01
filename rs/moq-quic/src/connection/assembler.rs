@@ -25,12 +25,17 @@ impl Assembler {
 		Self::default()
 	}
 
-	/// Reset to the initial state
+	/// Reset to the initial state, for the next stream to reuse
 	pub(super) fn reinit(&mut self) {
-		let old_data = mem::take(&mut self.data);
-		*self = Self::default();
-		self.data = old_data;
-		self.data.clear();
+		let mut data = mem::take(&mut self.data);
+		data.clear();
+		// Recycled state lives as long as the connection, so a past backlog's chunk list would
+		// too. Regrowing it costs little next to the chunks that would need it again. It is freed
+		// whole: shrinking in place left glibc a tail it trimmed and faulted back in each burst.
+		if data.capacity() > RETAINED_CHUNKS {
+			data = VecDeque::new();
+		}
+		*self = Self { data, ..Self::default() };
 	}
 
 	/// Get the the next chunk
@@ -349,6 +354,9 @@ const MAX_CHUNKS: usize = 1024;
 /// being cheap to copy while reducing the overhead of many small buffer nodes.
 const MIN_RETAINED_CHUNK_SIZE: usize = 128;
 
+/// Chunk capacity a recycled assembler keeps: a stream read as it arrives rarely buffers more.
+const RETAINED_CHUNKS: usize = 4;
+
 /// Chunk count past which `insert` compacts before deciding whether to reject
 ///
 /// Above `MAX_CHUNKS` so a flood of mergeable frames cannot force a defragmentation
@@ -561,6 +569,19 @@ mod test {
 		assert_eq!(x.data.len(), 0);
 		x.insert(2, Bytes::from_static(b"cd"), 2).unwrap();
 		assert_eq!(x.data.front(), Some(&Buffer::new(3, Bytes::from_static(b"d"), 2)));
+	}
+
+	#[test]
+	fn reinit_releases_backlog_capacity() {
+		let mut x = Assembler::new();
+		// Withhold offset 0 so every chunk stays buffered.
+		for i in 0..MAX_CHUNKS as u64 {
+			x.insert(1 + i * 4, Bytes::from_static(b"abc"), 3).unwrap();
+		}
+		x.reinit();
+		assert!(x.data.capacity() <= RETAINED_CHUNKS, "kept {}", x.data.capacity());
+		x.insert(0, Bytes::from_static(b"abc"), 3).unwrap();
+		assert_matches!(next(&mut x, 32), Some(y) if &y[..] == b"abc");
 	}
 
 	#[test]
