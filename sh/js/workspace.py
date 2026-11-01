@@ -155,6 +155,7 @@ def run(action, plan):
             "bun",
             "test",
             "js/common/api.test.ts",
+            "js/common/constructors.test.ts",
             "js/common/deps.test.ts",
             "js/common/worklet.test.ts",
             "js/common/release.test.ts",
