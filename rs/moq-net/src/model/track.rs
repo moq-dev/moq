@@ -6538,6 +6538,12 @@ impl Cursor {
 		})
 	}
 
+	/// Whether a group read in `walk` order would park again at once, with nothing peeked
+	/// or skipped for its owner to take; see [`idle`].
+	fn parked(&self, walk: idle::Walk, waiter: &kio::Waiter) -> bool {
+		self.peeked.is_none() && self.stale == stats::Content::default() && idle::Idle::parked(&self.idle, walk, waiter)
+	}
+
 	/// Take the groups skipped since the last call, for the owner to meter.
 	fn take_stale(&mut self) -> stats::Content {
 		std::mem::take(&mut self.stale)
@@ -7333,6 +7339,16 @@ impl Subscriber {
 	/// The next group in arrival order, or in sequence order for `ordered`, skipping any
 	/// already handed out.
 	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		let walk = match ordered {
+			true => idle::Walk::Sequence,
+			false => idle::Walk::Arrival,
+		};
+		// Ahead of the meter: a read that parks again has nothing to count.
+		if let Inner::Plain(cursor) = &self.inner
+			&& cursor.parked(walk, waiter)
+		{
+			return Poll::Pending;
+		}
 		let meter = self.stats.meter();
 		let res = match &mut self.inner {
 			Inner::Plain(cursor) => loop {
