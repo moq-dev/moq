@@ -57,11 +57,11 @@ async fn wire_sources(io_uring: bool) {
 		client.bind = Some("127.0.0.1:0".parse().unwrap());
 		let client = client.init(Default::default()).unwrap();
 		let url: url::Url = format!("{scheme}://{addr}/wire").parse().unwrap();
-		let connection = moq_clock::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
+		let connection = kio::clock::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
 			.await
 			.unwrap()
 			.unwrap();
-		let before = moq_clock::timeout(TIMEOUT, async {
+		let before = kio::clock::timeout(TIMEOUT, async {
 			loop {
 				let row = presence(&registry);
 				if row.active() == 1
@@ -106,7 +106,7 @@ async fn wire_sources(io_uring: bool) {
 			assert!(total > 0, "{scheme}: {body}");
 		}
 		drop(connection);
-		let after = moq_clock::timeout(TIMEOUT, async {
+		let after = kio::clock::timeout(TIMEOUT, async {
 			loop {
 				let row = presence(&registry);
 				if row.active() == 0 {
@@ -121,7 +121,7 @@ async fn wire_sources(io_uring: bool) {
 		assert_eq!(presence(&registry), after, "a closed source is unregistered");
 	}
 	trigger.start();
-	moq_clock::timeout(TIMEOUT, running).await.unwrap().unwrap().unwrap();
+	kio::clock::timeout(TIMEOUT, running).await.unwrap().unwrap().unwrap();
 }
 
 #[tokio::test]

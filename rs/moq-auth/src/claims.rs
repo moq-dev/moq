@@ -126,14 +126,14 @@ pub struct Claims {
 	pub subscribe: Patterns,
 
 	/// The expiration time of the token as a unix timestamp (`exp`).
-	pub expires: Option<moq_clock::Wall>,
+	pub expires: Option<kio::clock::Wall>,
 
 	/// The issued time of the token as a unix timestamp (`iat`).
-	pub issued: Option<moq_clock::Wall>,
+	pub issued: Option<kio::clock::Wall>,
 
 	/// The time before which the token is refused, as a unix timestamp (`nbf`).
 	/// Enforced by [`Key::verify`](crate::Key::verify).
-	pub not_before: Option<moq_clock::Wall>,
+	pub not_before: Option<kio::clock::Wall>,
 }
 
 impl Claims {
@@ -158,7 +158,7 @@ impl Claims {
 	/// Expire the token at this time. Enforced by [`Key::verify`](crate::Key::verify).
 	///
 	/// Accepts an `Option` so a caller can pass one through without unwrapping it.
-	pub fn with_expires(mut self, at: impl Into<Option<moq_clock::Wall>>) -> Self {
+	pub fn with_expires(mut self, at: impl Into<Option<kio::clock::Wall>>) -> Self {
 		self.expires = at.into();
 		self
 	}
@@ -166,7 +166,7 @@ impl Claims {
 	/// Record when the token was issued. Purely informational; nothing enforces it.
 	///
 	/// Accepts an `Option` so a caller can pass one through without unwrapping it.
-	pub fn with_issued(mut self, at: impl Into<Option<moq_clock::Wall>>) -> Self {
+	pub fn with_issued(mut self, at: impl Into<Option<kio::clock::Wall>>) -> Self {
 		self.issued = at.into();
 		self
 	}
@@ -251,8 +251,8 @@ mod tests {
 			root: "test-path".to_string(),
 			publish: patterns(&["test-pub/**"]),
 			subscribe: patterns(&["test-sub/**"]),
-			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
-			issued: Some(moq_clock::wall()),
+			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
+			issued: Some(kio::clock::wall()),
 			not_before: None,
 		}
 	}

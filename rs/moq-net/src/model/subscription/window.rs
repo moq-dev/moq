@@ -173,11 +173,6 @@ impl Span {
 			End::Time(time) => time.limit,
 		}
 	}
-
-	/// Whether group `sequence` is read now.
-	fn covers(&self, sequence: u64) -> bool {
-		sequence >= self.start && self.limit().is_none_or(|end| sequence < end)
-	}
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -429,15 +424,17 @@ impl Window {
 	/// range's absolute groups and the relative ones resolved so far.
 	pub fn admits_datagram(&self, sequence: u64, timestamp: Option<Timestamp>) -> bool {
 		let Some(timestamp) = timestamp else {
-			return self.pending || self.spans.iter().any(|span| span.covers(sequence));
+			return self.contains(sequence);
 		};
+		// Spans are in the order of the ranges they resolve, so one pass pairs them.
+		let mut spans = self.spans.iter().peekable();
 		self.ranges
 			.iter()
 			.enumerate()
 			.filter(|(_, range)| !range.is_empty())
 			.any(|(index, range)| {
 				// A relative anchor still waiting on a latest group bounds nothing yet.
-				let span = self.spans.iter().find(|span| span.index == index);
+				let span = spans.next_if(|span| span.index == index);
 				let started = match range.start {
 					Anchor::Time(pts) => !later(pts, timestamp),
 					Anchor::Absolute(start) => sequence >= start,
@@ -520,7 +517,7 @@ impl Window {
 	/// The exclusive end past every group in range, `None` when one stays open. An
 	/// unsettled time end counts as open: its cap only holds reads back meanwhile.
 	pub fn end(&self) -> Option<u64> {
-		if self.pending || self.spans.iter().any(|span| matches!(span.end, End::Time(_))) {
+		if !self.settled {
 			return None;
 		}
 		match self.groups.iter().next_back() {

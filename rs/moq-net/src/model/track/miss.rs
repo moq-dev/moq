@@ -24,7 +24,7 @@ use std::{
 	time::Duration,
 };
 
-use rangemap::{RangeInclusiveSet, RangeSet};
+use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 use super::super::delivered::Delivered;
 pub(super) use super::fill::Asking;
@@ -53,8 +53,13 @@ pub(super) struct Misses {
 	/// Asked under the feed's start and refused, never asked again: given up once the feed
 	/// gives up on them, unless they arrive first.
 	refused: RangeSet<u64>,
-	/// The fills this reader waits on.
-	joins: Vec<Join>,
+	/// The fills this reader waits on, under the keys `holders` names them by.
+	joins: BTreeMap<u64, Join>,
+	/// The join holding each sequence: a reader's joins hold disjoint groups, so a change
+	/// touches only the joins holding what it changes, never every fill the reader asked.
+	holders: RangeMap<u64, u64>,
+	/// The key the next join takes.
+	next_join: u64,
 	/// What the reader asked its fills with last.
 	asking: Option<Asking>,
 	/// The sequences of `joins` still unanswered.
@@ -63,6 +68,8 @@ pub(super) struct Misses {
 	filled: BTreeSet<u64>,
 	/// Never asked again: named dropped to the reader.
 	given_up: RangeSet<u64>,
+	/// The window revision and cap what this holds was last clipped to.
+	clipped: Option<(u64, Option<u64>)>,
 	/// Where the track leaves what it evicts that this reader judged cached, once it judged.
 	inbox: Option<Inbox>,
 	/// The track's eviction count this reader last emptied its inbox at.
@@ -223,7 +230,9 @@ impl Misses {
 				return Some(slot.serving().clone());
 			}
 			self.filled.remove(&sequence);
-			self.release(sequence);
+			let mut lost = RangeSet::new();
+			lost.insert(sequence..sequence + 1);
+			self.release(&lost);
 			self.give_up(sequence..sequence + 1, given_up);
 		}
 	}
@@ -236,19 +245,42 @@ impl Misses {
 			self.refilled.remove(sequence..end);
 		}
 		if self.filled.remove(&sequence) {
-			self.release(sequence);
+			let mut lost = RangeSet::new();
+			lost.insert(sequence..sequence + 1);
+			self.release(&lost);
 		}
 	}
 
-	/// Stop holding a filled `sequence` in its fill: handed out, the group's own reader
-	/// keeps it wanted, or nothing does.
-	fn release(&mut self, sequence: u64) {
-		let mut lost = RangeSet::new();
-		lost.insert(sequence..sequence + 1);
-		self.joins.retain_mut(|join| {
-			join.release(&lost);
-			!join.is_empty()
-		});
+	/// Hold `joins` until each fill answers and the reader takes what it filled.
+	fn hold(&mut self, joins: Vec<Join>) {
+		for join in joins {
+			debug_assert!(
+				self.holders.overlapping(&join.groups).next().is_none(),
+				"a reader asks only for what no join holds"
+			);
+			let key = self.next_join;
+			self.next_join += 1;
+			self.holders.insert(join.groups.clone(), key);
+			self.joins.insert(key, join);
+		}
+	}
+
+	/// Stop holding `lost` in the joins holding any of it, so their fills no longer owe it
+	/// this reader, and drop each join left holding nothing.
+	fn release(&mut self, lost: &RangeSet<u64>) {
+		for run in lost.iter() {
+			while let Some((held, &key)) = self.holders.overlapping(run).next() {
+				// Only this piece: a join split by an earlier release has other pieces in
+				// `lost`, and each must still find the join when its turn comes.
+				let piece = held.start.max(run.start)..held.end.min(run.end);
+				self.holders.remove(piece.clone());
+				let join = self.joins.get_mut(&key).expect("a holder names a join");
+				join.release(&RangeSet::from_iter([piece]));
+				if join.is_empty() {
+					self.joins.remove(&key);
+				}
+			}
+		}
 	}
 
 	/// Ask every fill this reader waits on with `asking` from now on, queued or taken.
@@ -257,18 +289,38 @@ impl Misses {
 			return;
 		}
 		self.asking = Some(*asking);
-		for join in &mut self.joins {
+		for join in self.joins.values_mut() {
 			join.update(asking);
 		}
 	}
 
-	/// Forget what the reader no longer reads: below `from`, or outside `admitted`. Its fills
-	/// no longer owe it those groups, and one nobody waits on is withdrawn once its last join
-	/// goes.
-	pub fn retain(&mut self, from: u64, admitted: &RangeInclusiveSet<u64>) {
-		if self.wanted.is_empty() && self.filled.is_empty() && self.joins.is_empty() {
+	/// Forget what the reader no longer reads: below `from`, or outside `admitted`, its window
+	/// at `revision` below the exclusive `cap`. Its fills no longer owe it those groups, and one
+	/// nobody waits on is withdrawn once its last join goes.
+	///
+	/// Clips to the window only once it moves, since everything taken in since lies inside it,
+	/// so a poll under the same window costs only what falls below a raised floor.
+	pub fn retain(
+		&mut self,
+		(from, revision, cap): (u64, u64, Option<u64>),
+		admitted: impl FnOnce() -> RangeInclusiveSet<u64>,
+	) {
+		let clipped = self.clipped.replace((revision, cap));
+		// A join holds only what is still wanted or filled.
+		let Some(lowest) = self.lowest() else {
+			return;
+		};
+		if clipped == Some((revision, cap)) {
+			if lowest < from {
+				self.filled = self.filled.split_off(&from);
+				self.wanted.remove(0..from);
+				let mut below = RangeSet::new();
+				below.insert(0..from);
+				self.release(&below);
+			}
 			return;
 		}
+		let admitted = &admitted();
 		let outside = |sequence: u64| sequence < from || !admitted.contains(&sequence);
 		self.filled.retain(|sequence| !outside(*sequence));
 		let mut kept = RangeSet::new();
@@ -278,13 +330,14 @@ impl Misses {
 			}
 		}
 		self.wanted = kept;
-		self.joins.retain_mut(|join| {
-			// By the join's whole span, not just what is unanswered: a filled group not
-			// taken yet is held too.
-			let inside: RangeSet<u64> = clip(join.groups.clone(), from, admitted).into_iter().collect();
-			join.release(&inside.gaps(&join.groups).collect());
-			!join.is_empty()
-		});
+		// By everything held, not just what is unanswered: a filled group not taken yet is
+		// held too.
+		let mut lost = RangeSet::new();
+		for (held, _) in self.holders.iter() {
+			let inside: RangeSet<u64> = clip(held.clone(), from, admitted).into_iter().collect();
+			lost.extend(inside.gaps(held));
+		}
+		self.release(&lost);
 	}
 
 	/// Take in what the joined fills answered, parking `waiter` on the rest. Returns the
@@ -297,20 +350,30 @@ impl Misses {
 		waiter: &kio::Waiter,
 	) -> RangeSet<u64> {
 		let mut retry = RangeSet::new();
-		let mut i = 0;
-		while i < self.joins.len() {
-			let join = &self.joins[i];
-			let wanted: RangeSet<u64> = self
-				.wanted
-				.overlapping(&join.groups)
-				.map(|run| run.start.max(join.groups.start)..run.end.min(join.groups.end))
+		// Only the joins holding something unanswered: one holding only filled groups until
+		// they are taken has nothing to answer.
+		let keys: BTreeSet<u64> = self
+			.wanted
+			.iter()
+			.flat_map(|run| self.holders.overlapping(run).map(|(_, key)| *key))
+			.collect();
+		let mut keys = keys.into_iter().peekable();
+		while let Some(&key) = keys.peek() {
+			let Some(join) = self.joins.get(&key) else {
+				keys.next();
+				continue;
+			};
+			let wanted: RangeSet<u64> = join
+				.held()
+				.iter()
+				.flat_map(|held| {
+					self.wanted
+						.overlapping(held)
+						.map(move |run| run.start.max(held.start)..run.end.min(held.end))
+				})
 				.collect();
 			if wanted.is_empty() {
-				// Holding only filled groups until they are taken, it has nothing to answer.
-				match join.is_empty() {
-					true => drop(self.joins.swap_remove(i)),
-					false => i += 1,
-				}
+				keys.next();
 				continue;
 			}
 			let answers = match join.outcome().poll(waiter, |outcome| {
@@ -333,7 +396,7 @@ impl Misses {
 					answers
 				}
 				Poll::Pending => {
-					i += 1;
+					keys.next();
 					continue;
 				}
 			};
@@ -367,7 +430,7 @@ impl Misses {
 				}
 			}
 			drop(state);
-			self.joins[i].release(&taken);
+			self.release(&taken);
 			// Judged again: the same join may have more to answer, or park the waiter now.
 		}
 		retry
@@ -579,7 +642,7 @@ impl Misses {
 			let filled: Vec<u64> = self.filled.range(run.clone()).copied().collect();
 			for sequence in filled {
 				self.filled.remove(&sequence);
-				self.release(sequence);
+				self.release(&RangeSet::from_iter(std::iter::once(sequence..sequence + 1)));
 			}
 			match refill {
 				true => {
@@ -600,20 +663,12 @@ impl Misses {
 			self.judged.insert(run.clone());
 		}
 		let start = state.start_sequence.unwrap_or(0);
-		let (stale_below, unasked) = match state.start_budget {
-			// Its publisher skipped every older group as stale under a budget no tighter
-			// than this reader's, so they are stale for it too.
-			Some(budget) if drift.budget <= budget => (start, false),
-			// Such a copy cannot tell a group a looser reader's budget reaches, so it leaves
-			// them to the feed's re-offer.
-			Some(_) => (0, state.fills_from_start),
-			// The feed began at the live edge or the floor the copy asked for, so older
-			// groups are history only a reader naming them asked for.
-			None => (
-				0,
-				state.fills_from_start || state.received && named.is_none_or(|named| named >= start),
-			),
-		};
+		// Below a start its publisher resolved from a budget, which an update may have changed
+		// in flight, every older group is history a fill may still find. A feed that began at
+		// the live edge or the floor the copy asked for leaves older groups as history only a
+		// reader naming them asked for.
+		let unasked = state.fills_from_start
+			|| !state.start_resolved && state.received && named.is_none_or(|named| named >= start);
 		if unasked && start > 0 {
 			candidates.remove(0..start);
 		}
@@ -677,10 +732,8 @@ impl Misses {
 		// budget is stale throughout.
 		let stale: Vec<ops::Range<u64>> = asks
 			.iter()
-			.filter_map(|run| match state.drifted(run.end - 1, &drift.edge, drift.budget) {
-				true => Some(run.clone()),
-				false => Some(run.start..run.end.min(stale_below)).filter(|run| !run.is_empty()),
-			})
+			.filter(|run| state.drifted(run.end - 1, &drift.edge, drift.budget))
+			.cloned()
 			.collect();
 		for run in stale {
 			asks.remove(run.clone());
@@ -728,10 +781,7 @@ impl Misses {
 		for run in arrived.iter() {
 			released.insert(run.clone());
 		}
-		self.joins.retain_mut(|join| {
-			join.release(&released);
-			!join.is_empty()
-		});
+		self.release(&released);
 		for run in stale.iter() {
 			self.give_up(run.clone(), given_up);
 		}
@@ -765,7 +815,7 @@ impl Misses {
 				self.wanted.remove(groups.clone());
 				self.settle(&state.read(), groups, given_up);
 			}
-			self.joins.extend(joins);
+			self.hold(joins);
 		}
 	}
 
@@ -1009,7 +1059,7 @@ mod tests {
 	use super::super::{Servable, Subscription};
 	use super::*;
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_recreated_accounted_group_clears_its_earlier_fill_refusal() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let mut track = broadcast
@@ -1116,7 +1166,36 @@ mod tests {
 		assert!(given_up.is_empty(), "a live recreation is never given up");
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
+	async fn releasing_both_pieces_of_a_split_join_drops_it_once() {
+		let broadcast = crate::broadcast::Info::default().produce();
+		let track = broadcast.create_track("split", crate::track::Info::default()).unwrap();
+		let fills = track.state.read().fills.clone();
+		fills.lock().add_handler();
+		let mut misses = Misses::default();
+		let mut given_up = Vec::new();
+		misses.ask(
+			&track.state.consume(),
+			&fills,
+			&RangeSet::from_iter(std::iter::once(0..3)),
+			&Asking {
+				priority: 0,
+				max_delay: None,
+				order: Order::Ascending,
+			},
+			&mut given_up,
+		);
+		assert_eq!(misses.joins.len(), 1, "one fill covers the whole run");
+
+		// Refusing the middle group splits the join's holder in two.
+		misses.release(&RangeSet::from_iter(std::iter::once(1..2)));
+		assert_eq!(misses.joins.len(), 1);
+		misses.release(&RangeSet::from_iter([0..1, 2..3]));
+		assert!(misses.joins.is_empty(), "the join goes with its last piece");
+		assert!(misses.holders.is_empty());
+	}
+
+	#[kio::test]
 	async fn an_aborted_live_group_keeps_its_earlier_fill_refusal() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let mut track = broadcast
@@ -1188,7 +1267,7 @@ mod tests {
 		assert!(!asks.contains(&2), "a refused hole is not asked again");
 		assert_eq!(given_up, vec![2..3]);
 	}
-	#[moq_clock::test]
+	#[kio::test]
 	async fn unchanged_probes_and_late_arrivals_keep_other_gap_deadlines() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let track = broadcast.create_track("sparse", crate::track::Info::default()).unwrap();
@@ -1283,7 +1362,7 @@ mod tests {
 
 	/// A grace change with nothing deferred has no deadline to move, so an unchanged probe
 	/// skips it; the next gap is still timed by the new grace.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_grace_change_with_nothing_deferred_times_the_next_gap() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let track = broadcast.create_track("grace", crate::track::Info::default()).unwrap();
