@@ -106,5 +106,11 @@ name = "sent_packets"
 harness = false
 required-features = ["fuzz"]
 
+# Prototypes for quest/m2/perf/quic-borrow-free.md: how handles share the connection.
+[[bench]]
+name = "share"
+harness = false
+required-features = ["fuzz"]
+
 [lints]
 workspace = true

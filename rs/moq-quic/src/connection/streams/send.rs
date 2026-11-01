@@ -400,6 +400,21 @@ impl<'a> Stream<'a> {
 		Ok(written)
 	}
 
+	/// Bytes [`Self::write`] would accept now: the stream's credit, capped by the connection's
+	///
+	/// Prototype for `quest/m2/perf/quic-borrow-free.md`: a driver that owns the connection
+	/// publishes it as the credit the stream's handle appends against.
+	pub fn writable(&self) -> u64 {
+		let stream = match self.state.send.get(&self.id) {
+			Some(Some(stream)) if stream.is_writable() && stream.stop_reason.is_none() => {
+				stream.max_data - stream.pending.offset()
+			}
+			Some(Some(_)) => return 0,
+			_ => self.state.max_send_data(self.id).into_inner(),
+		};
+		stream.min(self.state.write_limit())
+	}
+
 	/// [`Self::write`], or wait for room when nothing fits
 	///
 	/// Pending registers `waiter` until flow control or the send buffer has room, the peer stops

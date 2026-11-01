@@ -124,6 +124,22 @@ impl<'a> Streams<'a> {
 		Poll::Pending
 	}
 
+	/// Bytes the connection's flow control and send window accept across every stream now
+	///
+	/// Prototype for `quest/m2/perf/quic-borrow-free.md`: a driver that owns the connection
+	/// publishes it as credit its stream handles append against.
+	pub fn write_limit(&self) -> u64 {
+		self.state.write_limit()
+	}
+
+	/// The stream credit the peer grants each new locally opened stream of `dir`
+	///
+	/// Prototype for `quest/m2/perf/quic-borrow-free.md`: a handle appends up to this much before
+	/// its driver has opened the stream.
+	pub fn initial_send_credit(&self, dir: Dir) -> u64 {
+		self.state.initial_send_credit(dir)
+	}
+
 	/// The number of streams that may have unacknowledged data.
 	pub fn send_streams(&self) -> usize {
 		self.state.send_streams

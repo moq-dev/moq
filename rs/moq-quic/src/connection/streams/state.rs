@@ -982,6 +982,11 @@ impl StreamsState {
 		self.buffered_data >= self.send_window
 	}
 
+	/// The stream credit a new locally opened stream of `dir` starts with.
+	pub(crate) fn initial_send_credit(&self, dir: Dir) -> u64 {
+		self.max_send_data(StreamId::new(self.side, dir, 0)).into_inner()
+	}
+
 	/// Returns the maximum amount of data this is allowed to be written on the connection
 	pub(crate) fn write_limit(&self) -> u64 {
 		(self.max_data - self.data_sent)
