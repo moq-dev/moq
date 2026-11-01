@@ -35,5 +35,5 @@ Public API: none. Wire: none.
 
 ## Required
 
+- [The paired bench baseline builds](/quest/m0/nightly/bench-baseline-build.md) - the next scheduled Nightly's paired bench jobs build their baseline and compare, or the baseline moves outside the checkout
 - [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - the WASM and UniFFI backend baseline completes every supported transport case without an internal error
-- [Firefox's player closes every VideoFrame](/quest/m0/nightly/firefox-videoframe.md) - the Media job's Firefox player stops leaking an unclosed VideoFrame

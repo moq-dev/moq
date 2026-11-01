@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Container.Consumer` takes a `delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`ConsumerProps.maxDelay` is `delay: GetterInit<Container.Delay>`, where `Delay` is `{ min?: Milli; max?: Milli | null }` and an omitted field is zero.
+Replace `maxDelay: d` with `delay: { max: d }`, or derive it from a signal. `max: null` is no limit.
+`min` is the playout delay: the consumer starts at the group covering the live edge less `min` plus any `warmup`, waiting for it when the newest group arrives first. `max` never moves the start.
+
 ### The catalog rendition cap is removed
 
 `Catalog.MAX_RENDITIONS` and `Catalog.TooManyRenditions` are gone: `checkRenditions`, `encode`, and `watch` accept any number of renditions.

@@ -80,7 +80,7 @@ async function measure(t: Arrival[], budget: (target: Milli) => Milli): Promise<
 	const subscriber = track.subscribe({ maxDelay: budget(Milli.zero) });
 	const consumer = new Container.Consumer(subscriber, {
 		format: new Container.Legacy.Format("audio"),
-		maxDelay: AUTO_MAX_DELAY,
+		delay: { max: AUTO_MAX_DELAY },
 	});
 
 	const result: Measured = { targets: [], delivered: 0 };
