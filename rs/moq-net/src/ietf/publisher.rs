@@ -4175,15 +4175,12 @@ impl Publisher {
 
 		let target = Target::Inline(stream);
 
-		let token = kio::Shared::new(gate.token_guard());
 		let mut ns = Namespaces::new(peer, target);
+		ns.token = Some(kio::Shared::new(gate.token_guard()));
 		ns.gate = Some(gate);
-		ns.token = Some(token.clone());
 		ns.hidden = !declared.hidden || msg.hidden || self.origin.includes_hidden();
 		ns.epochs = declared.epoch;
-		crate::auth::RequestGrant::guard_named(token, self.run_namespaces(announced, prefix, ns, initial))
-			.await
-			.map_err(|refusal| refusal.error)?
+		self.run_namespaces(announced, prefix, ns, initial).await
 	}
 
 	/// Our publish permit as it stands now, with the auth epoch it was read at.
@@ -4227,7 +4224,7 @@ impl Publisher {
 	///
 	/// Shared by both announce paths: they differ in where the advertisements go
 	/// ([`Target`]) and where the origin is rooted (`prefix`, empty when nothing asked
-	/// for a subset).
+	/// for a subset). A request's token, in [`Namespaces::token`], guards the loop.
 	async fn run_namespaces(
 		&self,
 		announced: crate::announce::Consumer,
@@ -4235,9 +4232,17 @@ impl Publisher {
 		mut ns: Namespaces,
 		initial: Vec<crate::announce::Announce>,
 	) -> Result<(), Error> {
-		let res = self.forward_namespaces(announced, prefix, &mut ns, initial).await;
-		// Every exit, a failed write's included, keeps the request's stream, and so its
-		// credit, until the acceptor lets go of a token it is still verifying.
+		let named = ns.token.clone();
+		let forward = self.forward_namespaces(announced, prefix, &mut ns, initial);
+		let res = match named {
+			Some(named) => crate::auth::RequestGrant::guard_named(named, forward)
+				.await
+				.unwrap_or_else(|refusal| Err(refusal.error)),
+			None => forward.await,
+		};
+		// Every exit, a failed write's or an ended token's included, keeps the request's
+		// stream, and so its credit, until the acceptor lets go of a token it is still
+		// verifying.
 		self.abandon_verification(&mut ns).await;
 		res
 	}
@@ -9071,6 +9076,42 @@ mod serve_tests {
 		assert!(
 			matches!(res, Poll::Ready(Err(_))),
 			"answered, the failed write ends the request: {res:?}"
+		);
+	}
+
+	/// The request's token ending while a renewal is being verified ends the request, but it
+	/// keeps the request's stream, and so its credit, until the application answers.
+	#[kio::test]
+	async fn an_ended_token_keeps_a_verifying_update_stream_until_the_application_answers() {
+		let version = Version::Draft22;
+		let (h, mut requests, session, mut running) = token_namespaces(version).await;
+		session.push(&update_with_tokens(&[TOKEN]));
+		let first = taken_token(&mut running, &mut requests).await;
+		let _issued = first.accept(crate::auth::Grant {
+			expires: Some(h.publisher.runtime.now() + Duration::from_secs(1)),
+			..crate::auth::Grant::all()
+		});
+		assert!(futures::poll!(running.as_mut()).is_pending());
+
+		// A renewal naming another token, on the next request ID the requester may use.
+		let mut renewal = update_with_tokens(&[&[0x03, 0x00, 0xBB]]);
+		renewal[3] = 4;
+		session.push(&renewal);
+		let request = taken_token(&mut running, &mut requests).await;
+
+		kio::clock::sim::advance(Duration::from_secs(2)).await;
+		for _ in 0..10 {
+			assert!(
+				futures::poll!(running.as_mut()).is_pending(),
+				"the ended request let go of its stream before the application answered"
+			);
+			settle().await;
+		}
+		drop(request);
+		let res = futures::poll!(running.as_mut());
+		assert!(
+			matches!(res, Poll::Ready(Err(_))),
+			"answered, the ended token ends the request: {res:?}"
 		);
 	}
 
