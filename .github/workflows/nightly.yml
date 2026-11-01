@@ -367,7 +367,8 @@ jobs:
         # `test qmux` runs js/qmux against the in-tree Rust qmux, per draft.
         # `rs v4l2` streams moq-video's V4L2 capture from the kernel's vivid
         # virtual camera, a module load no pull request job should make.
-        recipe: ["gate", "rs doctest --workspace", "rs send-depth", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2"]
+        # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
+        recipe: ["gate", "rs doctest --workspace", "rs send-depth", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
         include:
           # Miri interprets kio's and moq-net's in-memory unsafe; too slow for the merge gate.
           - recipe: rs miri
@@ -486,6 +487,9 @@ jobs:
 
       - name: Browser publisher fairness benchmark
         run: nix develop --command just js serve-bench
+        shell: bash -leo pipefail {0}
+      - name: Raw audio encoding benchmark
+        run: nix develop --command just js raw-audio-bench
         shell: bash -leo pipefail {0}
       - name: Audio ring benchmark
         run: nix develop --command just js ring-bench

@@ -40,7 +40,7 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, 
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
 async fn settle() {
-	moq_clock::sleep(Duration::from_millis(500)).await;
+	kio::clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// A worker claiming `pool`, answering each request with an output whose `video`
@@ -58,7 +58,7 @@ impl Worker {
 		let claim = Rc::new(origin.requests("pool").unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
-		drop(moq_clock::sim::spawn(async move {
+		drop(kio::clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let prepared = request.prepare(Epoch::mint()).unwrap();
 				let track = prepared.broadcast().create_track("video", timed()).unwrap();
@@ -114,7 +114,7 @@ async fn drained_claim(version: &str) {
 	a_link.server.drain().send(Goaway::new()).unwrap();
 	// Past the linger, which is as long as the cache window, nothing reads the relay's
 	// front for the path.
-	moq_clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2).await;
+	kio::clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2).await;
 
 	assert_eq!(
 		watch(version, &relay).await,
@@ -125,16 +125,16 @@ async fn drained_claim(version: &str) {
 	assert_eq!(b.served(), 1, "{version}");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_drained_claims_front_ends_once_unread_lite06() {
-	moq_clock::timeout(TEST_TIMEOUT, drained_claim("moq-lite-06"))
+	kio::clock::timeout(TEST_TIMEOUT, drained_claim("moq-lite-06"))
 		.await
 		.expect("timed out");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_drained_claims_front_ends_once_unread_lite07() {
-	moq_clock::timeout(TEST_TIMEOUT, drained_claim("moq-lite-07-wip"))
+	kio::clock::timeout(TEST_TIMEOUT, drained_claim("moq-lite-07-wip"))
 		.await
 		.expect("timed out");
 }

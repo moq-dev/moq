@@ -1,36 +1,11 @@
 import { Milli, Nano, now } from "@moq/clock";
 import type { Effect, Getter } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
-import { graph } from "@moq/ui";
+import { formatBitrate, formatFps, formatHz, formatMillis, graph, statCard, statLine } from "@moq/ui";
 import type MoqWatch from "../element";
-import { formatBitrate, formatFps, formatHz, formatMillis } from "./format";
-import { audio as audioIcon, icon, network as networkIcon, video as videoIcon } from "./icons";
+import { audio as audioIcon, network as networkIcon, video as videoIcon } from "./icons";
 
 const POLL = Nano.fromMilli(Milli(250));
-
-type Kind = "network" | "video" | "audio";
-
-function card(kind: Kind, label: string, svg: string): { el: HTMLElement; grid: HTMLElement; status: HTMLElement } {
-	const el = DOM.create("div", { className: `stat-card stat-card--${kind}` });
-
-	const head = DOM.create("div", { className: "stat-head" });
-	const iconWrap = DOM.create("div", { className: "stat-icon" });
-	iconWrap.appendChild(icon(svg));
-	const status = DOM.create("span", { className: "stat-status", style: { display: "none" } });
-	head.append(iconWrap, DOM.create("span", { className: "stat-title" }, label), status);
-
-	const grid = DOM.create("div", { className: "stat-grid" });
-	el.append(head, grid);
-	return { el, grid, status };
-}
-
-function line(grid: HTMLElement, label: string): HTMLSpanElement {
-	const row = DOM.create("div", { className: "stat-line" });
-	const value = DOM.create("span", { className: "stat-value" }, "—");
-	row.append(DOM.create("span", { className: "stat-key" }, label), value);
-	grid.appendChild(row);
-	return value;
-}
 
 /** Bitrate from a byte counter, sampled across an interval. */
 function rate(prev: { bytes: number; when: number }, bytes: number, now: number): number | undefined {
@@ -70,9 +45,9 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	parent.cleanup(watch.connection.probe.subscribe(() => {}));
 
 	// Video card: static detail as rows, live bitrate/fps as graphs (no duplicate rows).
-	const videoCard = card("video", "Video", videoIcon);
-	const vRes = line(videoCard.grid, "Resolution");
-	const vCodec = line(videoCard.grid, "Codec");
+	const videoCard = statCard("video", "Video", videoIcon);
+	const vRes = statLine(videoCard.grid, "Resolution");
+	const vCodec = statLine(videoCard.grid, "Codec");
 	const vBitrateGraph = graph(parent, "Bitrate", { color: "#a855f7", format: formatBitrate });
 	const vFpsGraph = graph(parent, "Frame rate", { color: "#facc15", format: formatFps });
 	videoCard.el.append(vBitrateGraph.el, vFpsGraph.el);
@@ -83,12 +58,12 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	});
 
 	// Audio card.
-	const audioCard = card("audio", "Audio", audioIcon);
-	const aCodec = line(audioCard.grid, "Codec");
-	const aRate2 = line(audioCard.grid, "Sample rate");
-	const aChannels = line(audioCard.grid, "Channels");
-	const aBitrate = line(audioCard.grid, "Bitrate");
-	const aUnderruns = line(audioCard.grid, "Underruns");
+	const audioCard = statCard("audio", "Audio", audioIcon);
+	const aCodec = statLine(audioCard.grid, "Codec");
+	const aRate2 = statLine(audioCard.grid, "Sample rate");
+	const aChannels = statLine(audioCard.grid, "Channels");
+	const aBitrate = statLine(audioCard.grid, "Bitrate");
+	const aUnderruns = statLine(audioCard.grid, "Underruns");
 	track(parent, audioCard, {
 		catalog: watch.audio.source.out.catalog,
 		flag: watch.controls.audio.muted,
@@ -96,9 +71,9 @@ export function statsTab(parent: Effect, watch: MoqWatch): HTMLElement {
 	});
 
 	// Network card: congestion-control estimate vs. the bitrate we actually pull.
-	const netCard = card("network", "Network", networkIcon);
-	const nMax = line(netCard.grid, "Estimated max");
-	const nActual = line(netCard.grid, "Actual");
+	const netCard = statCard("network", "Network", networkIcon);
+	const nMax = statLine(netCard.grid, "Estimated max");
+	const nActual = statLine(netCard.grid, "Actual");
 	const nRttGraph = graph(parent, "Round trip", { color: "#00dfff", format: (v) => formatMillis(v) });
 	netCard.el.append(nRttGraph.el);
 
