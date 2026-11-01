@@ -13,13 +13,14 @@ use std::sync::Arc;
 
 mod bbr3;
 mod cubic;
+mod gcc;
 mod pacer;
 mod rate;
 mod unlimited;
-mod gcc;
 
 pub use bbr3::{Bbr3, Bbr3Config};
 pub use cubic::{Cubic, CubicConfig};
+pub use gcc::{Gcc, GccConfig};
 pub use rate::Packet;
 pub use unlimited::Unlimited;
 

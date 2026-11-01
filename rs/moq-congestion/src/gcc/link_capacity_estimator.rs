@@ -10,6 +10,7 @@
 
 use crate::gcc::api::units::DataRate;
 
+#[derive(Clone)]
 pub struct LinkCapacityEstimator {
     estimate_kbps: Option<f64>,
     deviation_kbps: f64,

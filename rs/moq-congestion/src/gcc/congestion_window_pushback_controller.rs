@@ -18,6 +18,7 @@ use crate::gcc::{
 // will be reduced accordingly to accommodate the network changes. To avoid
 // pausing video too frequently, a minimum encoder target bitrate threshold is
 // used to prevent video pause due to a full congestion window.
+#[derive(Clone)]
 pub struct CongestionWindowPushbackController {
     add_pacing: bool,
     min_pushback_target_bitrate_bps: u32,

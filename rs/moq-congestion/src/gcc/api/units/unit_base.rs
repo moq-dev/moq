@@ -495,9 +495,6 @@ pub(crate) use unit_base;
 mod test {
     use std::fmt;
 
-
-    use super::*;
-
     relative_unit!(TestUnit);
 
     impl TestUnit {

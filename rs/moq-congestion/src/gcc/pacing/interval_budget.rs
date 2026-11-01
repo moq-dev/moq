@@ -1,3 +1,4 @@
+#[derive(Clone)]
 pub struct IntervalBudget {
     target_rate_kbps: i64,
     max_bytes_in_budget: i64,

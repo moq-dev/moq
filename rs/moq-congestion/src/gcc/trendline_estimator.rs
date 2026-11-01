@@ -10,7 +10,7 @@
 
 use std::collections::VecDeque;
 
-use crate::gcc::{api::transport::BandwidthUsage, DelayIncreaseDetectorInterface};
+use crate::gcc::{DelayIncreaseDetectorInterface, api::transport::BandwidthUsage};
 
 // WebRTC-Bwe-TrendlineEstimatorSettings
 #[derive(Debug, Clone)]
@@ -81,6 +81,7 @@ impl Default for TrendlineEstimatorSettings {
     }
 }
 
+#[derive(Clone)]
 pub struct TrendlineEstimator {
     // Parameters.
     settings: TrendlineEstimatorSettings,
@@ -108,6 +109,7 @@ pub struct TrendlineEstimator {
     hypothesis: BandwidthUsage,
 }
 
+#[derive(Clone)]
 struct PacketTiming {
     pub arrival_time_ms: f64,
     pub smoothed_delay_ms: f64,
@@ -211,7 +213,10 @@ impl TrendlineEstimator {
     pub fn new(mut settings: TrendlineEstimatorSettings) -> Self {
         settings.validate();
 
-        tracing::debug!("Using Trendline filter for delay change estimation with settings {:?} and no network state predictor", settings);
+        tracing::debug!(
+            "Using Trendline filter for delay change estimation with settings {:?} and no network state predictor",
+            settings
+        );
         Self {
             settings,
             smoothing_coef: Self::DEFAULT_TRENDLINE_SMOOTHING_COEFF,

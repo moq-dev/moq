@@ -8,23 +8,21 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+//! Upstream also keeps the older `AcknowledgedBitrateEstimator`, selected when this estimator's
+//! field trial is disabled; it is enabled by default, so the older one is gone. QUIC tracks every
+//! packet it sends, so no data goes unacknowledged outside the feedback, and `unacked_weight` with
+//! it.
+
 use std::collections::VecDeque;
 
-use crate::gcc::{
-    api::{
-        transport::PacketResult,
-        units::{DataRate, DataSize, TimeDelta, Timestamp},
-    },
-    AcknowledgedBitrateEstimatorInterface,
+use crate::gcc::api::{
+    transport::PacketResult,
+    units::{DataRate, DataSize, TimeDelta, Timestamp},
 };
 
 // WebRTC-Bwe-RobustThroughputEstimatorSettings
 #[derive(Debug, Clone)]
 pub struct RobustThroughputEstimatorSettings {
-    // Set `enabled` to true to use the RobustThroughputEstimator, false to use
-    // the AcknowledgedBitrateEstimator.
-    pub enabled: bool,
-
     // The estimator keeps the smallest window containing at least
     // `window_packets` and at least the packets received during the last
     // `min_window_duration` milliseconds.
@@ -41,37 +39,22 @@ pub struct RobustThroughputEstimatorSettings {
     // The estimator window requires at least `required_packets` packets
     // to produce an estimate.
     pub required_packets: usize,
-
-    // If audio packets aren't included in allocation (i.e. the
-    // estimated available bandwidth is divided only among the video
-    // streams), then `unacked_weight` should be set to 0.
-    // If audio packets are included in allocation, but not in bandwidth
-    // estimation (i.e. they don't have transport-wide sequence numbers,
-    // but we nevertheless divide the estimated available bandwidth among
-    // both audio and video streams), then `unacked_weight` should be set to 1.
-    // If all packets have transport-wide sequence numbers, then the value
-    // of `unacked_weight` doesn't matter.
-    pub unacked_weight: f64,
 }
 
 impl Default for RobustThroughputEstimatorSettings {
     fn default() -> Self {
         Self {
-            enabled: true,
             window_packets: 20,
             max_window_packets: 500,
             window_duration: TimeDelta::from_seconds(1),
             max_window_duration: TimeDelta::from_seconds(5),
             required_packets: 10,
-            unacked_weight: 1.0,
         }
     }
 }
 
 impl RobustThroughputEstimatorSettings {
     pub fn validate(&mut self) {
-        assert!(self.enabled);
-
         if self.window_packets < 10 || 1000 < self.window_packets {
             tracing::warn!("Window size must be between 10 and 1000 packets");
             self.window_packets = 20;
@@ -103,14 +86,10 @@ impl RobustThroughputEstimatorSettings {
             self.max_window_duration = TimeDelta::from_seconds(5);
         }
         self.window_duration = self.window_duration.min(self.max_window_duration);
-
-        if self.unacked_weight < 0.0 || 1.0 < self.unacked_weight {
-            tracing::warn!("Weight for prior unacked size must be between 0 and 1.");
-            self.unacked_weight = 1.0;
-        }
     }
 }
 
+#[derive(Clone)]
 pub struct RobustThroughputEstimator {
     settings: RobustThroughputEstimatorSettings,
     window: VecDeque<PacketResult>,
@@ -153,10 +132,8 @@ impl RobustThroughputEstimator {
         }
         false
     }
-}
 
-impl AcknowledgedBitrateEstimatorInterface for RobustThroughputEstimator {
-    fn incoming_packet_feedback(&mut self, packet_feedback: &[PacketResult]) {
+    pub fn incoming_packet_feedback(&mut self, packet_feedback: &[PacketResult]) {
         //assert!(packet_feedback.is_sorted_by_key(|x| x.receive_time));
         for packet in packet_feedback {
             // Ignore packets without valid send or receive times.
@@ -170,18 +147,13 @@ impl AcknowledgedBitrateEstimatorInterface for RobustThroughputEstimator {
 
             // Insert the new packet.
             self.window.push_back(*packet);
-            self.window
-                .back_mut()
-                .unwrap()
-                .sent_packet
-                .prior_unacked_data *= self.settings.unacked_weight;
             // In most cases, receive timestamps should already be in order, but in the
             // rare case where feedback packets have been reordered, we do some swaps to
             // ensure that the window is sorted.
-            for i in (1..self.window.len()).rev() {
-                if self.window[i].receive_time < self.window[i - 1].receive_time {
-                    self.window.swap(i, i - 1);
-                }
+            let mut i = self.window.len() - 1;
+            while i > 0 && self.window[i].receive_time < self.window[i - 1].receive_time {
+                self.window.swap(i, i - 1);
+                i -= 1;
             }
 
             const MAX_REORDERING_TIME: TimeDelta = TimeDelta::from_seconds(1);
@@ -207,7 +179,7 @@ impl AcknowledgedBitrateEstimatorInterface for RobustThroughputEstimator {
         }
     }
 
-    fn bitrate(&self) -> Option<DataRate> {
+    pub fn bitrate(&self) -> Option<DataRate> {
         if self.window.is_empty() || self.window.len() < self.settings.required_packets {
             return None;
         }
@@ -237,11 +209,10 @@ impl AcknowledgedBitrateEstimatorInterface for RobustThroughputEstimator {
         for packet in &self.window {
             if packet.receive_time < first_recv_time {
                 first_recv_time = packet.receive_time;
-                first_recv_size = packet.sent_packet.size + packet.sent_packet.prior_unacked_data;
+                first_recv_size = packet.sent_packet.size;
             }
             last_recv_time = std::cmp::max(last_recv_time, packet.receive_time);
             recv_size += packet.sent_packet.size;
-            recv_size += packet.sent_packet.prior_unacked_data;
 
             if packet.sent_packet.send_time < self.latest_discarded_send_time {
                 // If we have dropped packets from the window that were sent after
@@ -254,12 +225,11 @@ impl AcknowledgedBitrateEstimatorInterface for RobustThroughputEstimator {
             }
             if packet.sent_packet.send_time > last_send_time {
                 last_send_time = packet.sent_packet.send_time;
-                last_send_size = packet.sent_packet.size + packet.sent_packet.prior_unacked_data;
+                last_send_size = packet.sent_packet.size;
             }
             first_send_time = std::cmp::min(first_send_time, packet.sent_packet.send_time);
 
             send_size += packet.sent_packet.size;
-            send_size += packet.sent_packet.prior_unacked_data;
             num_sent_packets_in_window += 1;
         }
 
@@ -308,18 +278,6 @@ impl AcknowledgedBitrateEstimatorInterface for RobustThroughputEstimator {
             recv_size / recv_duration,
         ))
     }
-
-    fn peek_rate(&self) -> Option<DataRate> {
-        self.bitrate()
-    }
-
-    fn set_alr(&mut self, _in_alr: bool) {
-        // noop
-    }
-
-    fn set_alr_ended_time(&mut self, _alr_ended_time: crate::gcc::api::units::Timestamp) {
-        // noop
-    }
 }
 
 #[cfg(test)]
@@ -331,7 +289,6 @@ mod test {
     struct FeedbackGenerator {
         send_clock: Timestamp,
         recv_clock: Timestamp,
-        sequence_number: i64,
     }
 
     impl Default for FeedbackGenerator {
@@ -339,7 +296,6 @@ mod test {
             Self {
                 send_clock: Timestamp::from_millis(100000),
                 recv_clock: Timestamp::from_millis(10000),
-                sequence_number: 100,
             }
         }
     }
@@ -359,7 +315,6 @@ mod test {
                 packet_feedback.push(PacketResult {
                     sent_packet: SentPacket {
                         send_time: self.send_clock,
-                        sequence_number: self.sequence_number,
                         size: packet_size,
                         ..Default::default()
                     },
@@ -367,7 +322,6 @@ mod test {
                     ..Default::default()
                 });
                 self.send_clock += packet_size / send_rate;
-                self.sequence_number += 1;
             }
 
             packet_feedback
@@ -554,7 +508,6 @@ mod test {
         // This test uses a 500ms window to amplify the effect
         // of a delay spike.
         let settings = RobustThroughputEstimatorSettings {
-            enabled: true,
             window_duration: TimeDelta::from_millis(500),
             ..Default::default()
         };
@@ -711,7 +664,6 @@ mod test {
         // This test uses a 500ms window to amplify the
         // effect of reordering.
         let settings = RobustThroughputEstimatorSettings {
-            enabled: true,
             window_duration: TimeDelta::from_millis(500),
             ..Default::default()
         };

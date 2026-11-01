@@ -14,8 +14,12 @@
 //! difference of two Timestamps results in a TimeDelta.
 super::unit_base!(Timestamp);
 
-use std::{fmt, sync::LazyLock, time::{Duration, Instant}};
 use std::ops::*;
+use std::{
+    fmt,
+    sync::LazyLock,
+    time::{Duration, Instant},
+};
 
 use super::TimeDelta;
 
@@ -182,17 +186,16 @@ impl From<Timestamp> for Instant {
         let duration = Duration::from_micros(timestamp.us().unsigned_abs());
 
         if timestamp.0 > 0 {
-            r.checked_add(duration).expect("Timestamp is too far in the future")
+            r.checked_add(duration)
+                .expect("Timestamp is too far in the future")
         } else {
-            r.checked_sub(duration).expect("Timestamp is from before the program started")
+            r.checked_sub(duration)
+                .expect("Timestamp is from before the program started")
         }
     }
 }
 
-static REF: LazyLock<std::time::Instant> = LazyLock::new(|| {
-    std::time::Instant::now()
-});
-
+static REF: LazyLock<std::time::Instant> = LazyLock::new(|| std::time::Instant::now());
 
 #[cfg(test)]
 mod test {

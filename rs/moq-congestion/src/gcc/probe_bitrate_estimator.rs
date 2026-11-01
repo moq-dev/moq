@@ -15,6 +15,7 @@ use crate::gcc::api::{
     units::{DataRate, DataSize, TimeDelta, Timestamp},
 };
 
+#[derive(Clone)]
 struct AggregatedCluster {
     pub num_probes: i64,
     pub first_send: Timestamp,
@@ -41,7 +42,7 @@ impl Default for AggregatedCluster {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ProbeBitrateEstimator {
     clusters: HashMap<i32, AggregatedCluster>,
     estimated_data_rate: Option<DataRate>,
@@ -146,8 +147,12 @@ impl ProbeBitrateEstimator {
             || receive_interval <= TimeDelta::zero()
             || receive_interval > Self::MAX_PROBE_INTERVAL
         {
-            tracing::debug!("Probing unsuccessful, invalid send/receive interval [cluster id: {}] [send interval: {:?}] [receive interval: {:?}]",
-                      cluster_id, send_interval, receive_interval);
+            tracing::debug!(
+                "Probing unsuccessful, invalid send/receive interval [cluster id: {}] [send interval: {:?}] [receive interval: {:?}]",
+                cluster_id,
+                send_interval,
+                receive_interval
+            );
             return None;
         }
         // Since the `send_interval` does not include the time it takes to actually
@@ -166,13 +171,31 @@ impl ProbeBitrateEstimator {
 
         let ratio: f64 = receive_rate / send_rate;
         if ratio > Self::MAX_VALID_RATIO {
-            tracing::debug!("Probing unsuccessful, receive/send ratio too high [cluster id: {}] [send: {:?}/{:?} = {:?}] [receive: {:?}/{:?} = {:?}] [ratio: {:?} > {:?}]",
-                      cluster_id, send_size, send_interval, send_rate, receive_size, receive_interval, receive_rate, ratio, Self::MAX_VALID_RATIO);
+            tracing::debug!(
+                "Probing unsuccessful, receive/send ratio too high [cluster id: {}] [send: {:?}/{:?} = {:?}] [receive: {:?}/{:?} = {:?}] [ratio: {:?} > {:?}]",
+                cluster_id,
+                send_size,
+                send_interval,
+                send_rate,
+                receive_size,
+                receive_interval,
+                receive_rate,
+                ratio,
+                Self::MAX_VALID_RATIO
+            );
             return None;
         }
 
-        tracing::debug!("Probing successful [cluster id: {}] [send: {:?}/{:?} = {:?}] [receive: {:?}/{:?} = {:?}]",
-                    cluster_id, send_size, send_interval, send_rate, receive_size, receive_interval, receive_rate);
+        tracing::debug!(
+            "Probing successful [cluster id: {}] [send: {:?}/{:?} = {:?}] [receive: {:?}/{:?} = {:?}]",
+            cluster_id,
+            send_size,
+            send_interval,
+            send_rate,
+            receive_size,
+            receive_interval,
+            receive_rate
+        );
 
         let mut res: DataRate = std::cmp::min(send_rate, receive_rate);
         // If we're receiving at significantly lower bitrate than we were sending at,
@@ -467,10 +490,11 @@ mod test {
     #[test]
     fn no_last_estimated_bitrate_bps() {
         let mut test = TestProbeBitrateEstimator::default();
-        assert!(test
-            .probe_bitrate_estimator
-            .fetch_and_reset_last_estimated_bitrate()
-            .is_none());
+        assert!(
+            test.probe_bitrate_estimator
+                .fetch_and_reset_last_estimated_bitrate()
+                .is_none()
+        );
     }
 
     #[test]
@@ -490,9 +514,10 @@ mod test {
             800000.0,
             epsilon = 10.0
         );
-        assert!(test
-            .probe_bitrate_estimator
-            .fetch_and_reset_last_estimated_bitrate()
-            .is_none());
+        assert!(
+            test.probe_bitrate_estimator
+                .fetch_and_reset_last_estimated_bitrate()
+                .is_none()
+        );
     }
 } // namespace webrtc

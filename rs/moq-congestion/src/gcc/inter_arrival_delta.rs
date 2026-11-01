@@ -41,6 +41,7 @@ impl SendTimeGroup {
 // Helper class to compute the inter-arrival time delta and the size delta
 // between two send bursts. This code is branched from
 // modules/remote_bitrate_estimator/inter_arrival.
+#[derive(Clone)]
 pub struct InterArrivalDelta {
     send_time_group_length: TimeDelta,
     current_timestamp_group: SendTimeGroup,
@@ -116,7 +117,11 @@ impl InterArrivalDelta {
                     // arrival timestamp.
                     self.num_consecutive_reordered_packets += 1;
                     if self.num_consecutive_reordered_packets >= Self::REORDERED_RESET_THRESHOLD {
-                        tracing::warn!("Packets between send burst arrived out of order, resetting: arrival_time_delta_ms={}, send_time_delta_ms={}", arrival_time_delta.ms(), send_time_delta.ms());
+                        tracing::warn!(
+                            "Packets between send burst arrived out of order, resetting: arrival_time_delta_ms={}, send_time_delta_ms={}",
+                            arrival_time_delta.ms(),
+                            send_time_delta.ms()
+                        );
                         self.reset();
                     }
                     return false;

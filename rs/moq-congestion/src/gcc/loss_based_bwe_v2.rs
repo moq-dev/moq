@@ -8,8 +8,6 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-use std::collections::HashMap;
-
 use crate::gcc::{
     api::{
         transport::PacketResult,
@@ -103,7 +101,6 @@ pub struct LossBasedBweV2Config {
     pub use_byte_loss_rate: bool,
     pub padding_duration: TimeDelta,
     pub bound_best_candidate: bool,
-    pub pace_at_loss_based_estimate: bool,
     pub median_sending_rate_factor: f64,
 }
 
@@ -162,7 +159,9 @@ impl LossBasedBweV2Config {
             && !self.delay_based_candidate
             && !self.candidate_factors.iter().any(|cf| *cf != 1.0)
         {
-            tracing::warn!("The configuration does not allow generating candidates. Specify a candidate factor other than 1.0, allow the acknowledged rate to be a candidate, and/or allow the delay based estimate to be a candidate.");
+            tracing::warn!(
+                "The configuration does not allow generating candidates. Specify a candidate factor other than 1.0, allow the acknowledged rate to be a candidate, and/or allow the delay based estimate to be a candidate."
+            );
             valid = false;
         }
 
@@ -208,7 +207,11 @@ impl LossBasedBweV2Config {
         if self.inherent_loss_upper_bound_offset < self.inherent_loss_lower_bound
             || self.inherent_loss_upper_bound_offset >= 1.0
         {
-            tracing::warn!("The inherent loss upper bound must be greater than or equal to the inherent loss lower bound, which is {}, and less than 1: {}", self.inherent_loss_lower_bound, self.inherent_loss_upper_bound_offset);
+            tracing::warn!(
+                "The inherent loss upper bound must be greater than or equal to the inherent loss lower bound, which is {}, and less than 1: {}",
+                self.inherent_loss_lower_bound,
+                self.inherent_loss_upper_bound_offset
+            );
             valid = false;
         }
         if self.initial_inherent_loss_estimate < 0.0 || self.initial_inherent_loss_estimate >= 1.0 {
@@ -326,19 +329,19 @@ impl LossBasedBweV2Config {
 impl Default for LossBasedBweV2Config {
     fn default() -> Self {
         Self {
-            enabled: true,                                                             // Enabled
-            bw_rampup_upper_bound_factor: 1000000.0, // BwRampupUpperBoundFactor
-            bw_rampup_upper_bound_in_hold_factor: 1000000.0, // BwRampupUpperBoundInHoldFactor
+            enabled: true,                                                              // Enabled
+            bw_rampup_upper_bound_factor: 1.5, // BwRampupUpperBoundFactor
+            bw_rampup_upper_bound_in_hold_factor: 1.2, // BwRampupUpperBoundInHoldFactor
             bw_rampup_upper_bound_hold_threshold: 1.3, // BwRampupUpperBoundHoldThreshold
-            bw_rampup_accel_max_factor: 0.0,         // BwRampupAccelMaxFactor
+            bw_rampup_accel_max_factor: 0.0,   // BwRampupAccelMaxFactor
             bw_rampup_accel_maxout_time: TimeDelta::from_seconds(60), // BwRampupAccelMaxoutTime
             candidate_factors: vec![1.02, 1.0, 0.95], // CandidateFactors
-            higher_bw_bias_factor: 0.0002,           // HigherBwBiasFactor
-            higher_log_bw_bias_factor: 0.02,         // HigherLogBwBiasFactor
-            inherent_loss_lower_bound: 1.0e-3,       // InherentLossLowerBound
-            loss_threshold_of_high_bandwidth_preference: 0.15, // LossThresholdOfHighBandwidthPreference
-            bandwidth_preference_smoothing_factor: 0.002,      // BandwidthPreferenceSmoothingFactor
-            inherent_loss_upper_bound_bw_balance: DataRate::from_kilobits_per_sec(75), // InherentLossUpperBoundBwBalance
+            higher_bw_bias_factor: 0.0002,     // HigherBwBiasFactor
+            higher_log_bw_bias_factor: 0.02,   // HigherLogBwBiasFactor
+            inherent_loss_lower_bound: 1.0e-3, // InherentLossLowerBound
+            loss_threshold_of_high_bandwidth_preference: 0.2, // LossThresholdOfHighBandwidthPreference
+            bandwidth_preference_smoothing_factor: 0.002,     // BandwidthPreferenceSmoothingFactor
+            inherent_loss_upper_bound_bw_balance: DataRate::from_kilobits_per_sec(100), // InherentLossUpperBoundBwBalance
             inherent_loss_upper_bound_offset: 0.05, // InherentLossUpperBoundOffset
             initial_inherent_loss_estimate: 0.01,   // InitialInherentLossEstimate
             newton_iterations: 1,                   // NewtonIterations
@@ -347,10 +350,10 @@ impl Default for LossBasedBweV2Config {
             delay_based_candidate: true,            // DelayBasedCandidate
             upper_bound_candidate_in_alr: false,    // UpperBoundCandidateInAlr
             observation_duration_lower_bound: TimeDelta::from_millis(250), // ObservationDurationLowerBound
-            observation_window_size: 20,                                   // ObservationWindowSize
+            observation_window_size: 15,                                   // ObservationWindowSize
             sending_rate_smoothing_factor: 0.0, // SendingRateSmoothingFactor
             instant_upper_bound_temporal_weight_factor: 0.9, // InstantUpperBoundTemporalWeightFactor
-            instant_upper_bound_bw_balance: DataRate::from_kilobits_per_sec(75), // InstantUpperBoundBwBalance
+            instant_upper_bound_bw_balance: DataRate::from_kilobits_per_sec(100), // InstantUpperBoundBwBalance
             instant_upper_bound_loss_offset: 0.05, // InstantUpperBoundLossOffset
             temporal_weight_factor: 0.9,           // TemporalWeightFactor
             bw_backoff_lower_bound_factor: 1.0,    // BwBackoffLowerBoundFactor
@@ -358,14 +361,13 @@ impl Default for LossBasedBweV2Config {
             delayed_increase_window: TimeDelta::from_millis(300), // DelayedIncreaseWindow
             not_increase_if_inherent_loss_less_than_average_loss: true, // NotIncreaseIfInherentLossLessThanAverageLoss
             not_use_acked_rate_in_alr: true,                            // NotUseAckedRateInAlr
-            use_in_start_phase: false,                                  // UseInStartPhase
+            use_in_start_phase: true,                                   // UseInStartPhase
             min_num_observations: 3,                                    // MinNumObservations
-            lower_bound_by_acked_rate_factor: 0.0, // LowerBoundByAckedRateFactor
-            hold_duration_factor: 0.0,             // HoldDurationFactor
-            use_byte_loss_rate: false,             // UseByteLossRate
-            padding_duration: TimeDelta::zero(),   // PaddingDuration
-            bound_best_candidate: false,           // BoundBest
-            pace_at_loss_based_estimate: false,    // PaceAtLossBasedEstimate
+            lower_bound_by_acked_rate_factor: 1.0, // LowerBoundByAckedRateFactor
+            hold_duration_factor: 2.0,             // HoldDurationFactor
+            use_byte_loss_rate: true,              // UseByteLossRate
+            padding_duration: TimeDelta::from_seconds(2), // PaddingDuration
+            bound_best_candidate: true,            // BoundBest
             median_sending_rate_factor: 2.0,       // MedianSendingRateFactor
         }
     }
@@ -408,9 +410,13 @@ impl Observation {
     }
 }
 
+// Upstream keys lost packets by sequence number, so a packet one feedback reports lost and a
+// later one received counts once. QUIC reports each packet once, acknowledged or lost.
+#[derive(Clone)]
 struct PartialObservation {
     pub num_packets: usize,
-    pub lost_packets: HashMap<i64, DataSize>,
+    pub num_lost_packets: usize,
+    pub lost_size: DataSize,
     pub size: DataSize,
 }
 
@@ -418,12 +424,14 @@ impl Default for PartialObservation {
     fn default() -> Self {
         Self {
             num_packets: 0,
-            lost_packets: HashMap::new(),
+            num_lost_packets: 0,
+            lost_size: DataSize::zero(),
             size: DataSize::zero(),
         }
     }
 }
 
+#[derive(Clone)]
 struct PaddingInfo {
     pub padding_rate: DataRate,
     pub padding_timestamp: Timestamp,
@@ -438,6 +446,7 @@ impl Default for PaddingInfo {
     }
 }
 
+#[derive(Clone)]
 struct HoldInfo {
     timestamp: Timestamp,
     duration: TimeDelta,
@@ -454,6 +463,7 @@ impl Default for HoldInfo {
     }
 }
 
+#[derive(Clone)]
 pub struct LossBasedBweV2 {
     acknowledged_bitrate: Option<DataRate>,
     config: LossBasedBweV2Config,
@@ -508,7 +518,9 @@ impl LossBasedBweV2 {
         };
 
         if !this.config.enabled {
-            tracing::debug!("The configuration does not specify that the estimator should be enabled, disabling it.");
+            tracing::debug!(
+                "The configuration does not specify that the estimator should be enabled, disabling it."
+            );
             return this;
         }
 
@@ -555,11 +567,6 @@ impl LossBasedBweV2 {
     // Returns true if loss based BWE is ready to be used in the start phase.
     pub fn ready_to_use_in_start_phase(&self) -> bool {
         self.is_ready() && self.config.use_in_start_phase
-    }
-
-    // Returns true if loss based BWE can be used in the start phase.
-    pub fn use_in_start_phase(&self) -> bool {
-        self.config.use_in_start_phase
     }
 
     // Returns `DataRate::plus_infinity` if no BWE can be calculated.
@@ -664,7 +671,12 @@ impl LossBasedBweV2 {
             self.newtons_method_update(&mut candidate);
 
             let candidate_objective: f64 = self.get_objective(&candidate);
-            if candidate_objective > objective_max {
+            // Select the candidate with the highest objective or the one with the
+            // same objective but higher bandwidth if they are tied.
+            if candidate_objective > objective_max
+                || (candidate_objective == objective_max
+                    && candidate.loss_limited_bandwidth > best_candidate.loss_limited_bandwidth)
+            {
                 objective_max = candidate_objective;
                 best_candidate = candidate;
             }
@@ -761,11 +773,9 @@ impl LossBasedBweV2 {
         if self.config.bound_best_candidate
             && bounded_bandwidth_estimate < best_candidate.loss_limited_bandwidth
         {
-            tracing::debug!(
-                "Resetting loss based BWE to {:?} due to loss. Avg loss rate: {:?}",
-                bounded_bandwidth_estimate,
-                self.average_reported_loss_ratio
-            );
+            // If network is lossy, cap the best estimate by the instant upper bound,
+            // e.g. 450kbps if loss rate is 50%.
+            // Otherwise, cap the estimate by the delay-based estimate or max_bitrate.
             self.current_best_estimate.loss_limited_bandwidth = bounded_bandwidth_estimate;
             self.current_best_estimate.inherent_loss = 0.0;
         } else {
@@ -863,11 +873,6 @@ impl LossBasedBweV2 {
             self.recovering_after_loss_timestamp = self.last_send_time_most_recent_observation;
         }
     }
-    pub fn pace_at_loss_based_estimate(&self) -> bool {
-        self.config.pace_at_loss_based_estimate
-            && self.loss_based_result.state != LossBasedState::DelayBasedEstimate
-    }
-
     // For unit testing only.
     #[cfg(test)]
     pub fn set_bandwidth_estimate(&mut self, bandwidth_estimate: DataRate) {
@@ -970,6 +975,12 @@ impl LossBasedBweV2 {
             // the loss rate might not be due to a spike.
             return lost_bytes / total_bytes;
         }
+
+        if total_bytes == max_bytes_received + min_bytes_received {
+            // It could happen if the observation window was 2.
+            return lost_bytes / total_bytes;
+        }
+
         (lost_bytes - min_lost_bytes - max_lost_bytes)
             / (total_bytes - max_bytes_received - min_bytes_received)
     }
@@ -1245,14 +1256,9 @@ impl LossBasedBweV2 {
         let mut last_send_time: Timestamp = Timestamp::minus_infinity();
         let mut first_send_time: Timestamp = Timestamp::plus_infinity();
         for packet in packet_results {
-            if packet.is_received() {
-                self.partial_observation
-                    .lost_packets
-                    .remove(&packet.sent_packet.sequence_number);
-            } else {
-                self.partial_observation
-                    .lost_packets
-                    .insert(packet.sent_packet.sequence_number, packet.sent_packet.size);
+            if !packet.is_received() {
+                self.partial_observation.num_lost_packets += 1;
+                self.partial_observation.lost_size += packet.sent_packet.size;
             }
             self.partial_observation.size += packet.sent_packet.size;
             last_send_time = std::cmp::max(last_send_time, packet.sent_packet.send_time);
@@ -1279,13 +1285,11 @@ impl LossBasedBweV2 {
 
         let mut observation = Observation::default();
         observation.num_packets = self.partial_observation.num_packets;
-        observation.num_lost_packets = self.partial_observation.lost_packets.len();
+        observation.num_lost_packets = self.partial_observation.num_lost_packets;
         observation.num_received_packets = observation.num_packets - observation.num_lost_packets;
         observation.sending_rate =
             self.get_sending_rate(self.partial_observation.size / observation_duration);
-        for packet_size in self.partial_observation.lost_packets.values() {
-            observation.lost_size += *packet_size;
-        }
+        observation.lost_size = self.partial_observation.lost_size;
         observation.size = self.partial_observation.size;
         observation.id = self.num_observations as _;
         self.observations[self.num_observations % self.config.observation_window_size] =
@@ -1434,9 +1438,7 @@ mod test {
     }
 
     #[derive(Default)]
-    struct LossBasedBweV2Test {
-        transport_sequence_number: i64,
-    }
+    struct LossBasedBweV2Test {}
 
     impl LossBasedBweV2Test {
         fn create_packet_results_with_received_packets(
@@ -1444,10 +1446,6 @@ mod test {
             first_packet_timestamp: Timestamp,
         ) -> Vec<PacketResult> {
             let mut enough_feedback = vec![PacketResult::default(); 2];
-            self.transport_sequence_number += 1;
-            enough_feedback[0].sent_packet.sequence_number = self.transport_sequence_number;
-            self.transport_sequence_number += 1;
-            enough_feedback[1].sent_packet.sequence_number = self.transport_sequence_number;
             enough_feedback[0].sent_packet.size = DataSize::from_bytes(PACKET_SIZE);
             enough_feedback[1].sent_packet.size = DataSize::from_bytes(PACKET_SIZE);
             enough_feedback[0].sent_packet.send_time = first_packet_timestamp;
@@ -1467,8 +1465,6 @@ mod test {
         ) -> Vec<PacketResult> {
             let mut enough_feedback = vec![PacketResult::default(); 10];
             for (i, packet) in enough_feedback.iter_mut().enumerate() {
-                self.transport_sequence_number += 1;
-                packet.sent_packet.sequence_number = self.transport_sequence_number;
                 packet.sent_packet.size = DataSize::from_bytes(PACKET_SIZE);
                 packet.sent_packet.send_time =
                     first_packet_timestamp + (i) as i64 * OBSERVATION_DURATION_LOWER_BOUND;
@@ -1485,10 +1481,6 @@ mod test {
             first_packet_timestamp: Timestamp,
         ) -> Vec<PacketResult> {
             let mut enough_feedback = vec![PacketResult::default(); 2];
-            self.transport_sequence_number += 1;
-            enough_feedback[0].sent_packet.sequence_number = self.transport_sequence_number;
-            self.transport_sequence_number += 1;
-            enough_feedback[1].sent_packet.sequence_number = self.transport_sequence_number;
             enough_feedback[0].sent_packet.size = DataSize::from_bytes(PACKET_SIZE);
             enough_feedback[1].sent_packet.size = DataSize::from_bytes(PACKET_SIZE);
             enough_feedback[0].sent_packet.send_time = first_packet_timestamp;
@@ -1508,11 +1500,8 @@ mod test {
             let mut enough_feedback = Vec::with_capacity(num_packets);
 
             for i in 0..(num_packets - 1) {
-                self.transport_sequence_number += 1;
-
                 enough_feedback.push(PacketResult {
                     sent_packet: SentPacket {
-                        sequence_number: self.transport_sequence_number,
                         size: DataSize::from_bytes(PACKET_SIZE),
                         send_time: first_packet_timestamp + TimeDelta::from_millis(i as i64 * 10),
                         ..Default::default()
@@ -1521,11 +1510,9 @@ mod test {
                     ..Default::default()
                 });
             }
-            self.transport_sequence_number += 1;
 
             enough_feedback.push(PacketResult {
                 sent_packet: SentPacket {
-                    sequence_number: self.transport_sequence_number,
                     size: DataSize::from_bytes(PACKET_SIZE),
                     send_time: first_packet_timestamp + OBSERVATION_DURATION_LOWER_BOUND,
                     ..Default::default()
@@ -1643,10 +1630,12 @@ mod test {
         );
 
         assert!(loss_based_bandwidth_estimator.is_ready());
-        assert!(loss_based_bandwidth_estimator
-            .get_loss_based_result()
-            .bandwidth_estimate
-            .is_finite());
+        assert!(
+            loss_based_bandwidth_estimator
+                .get_loss_based_result()
+                .bandwidth_estimate
+                .is_finite()
+        );
     }
 
     #[test]
@@ -1665,10 +1654,12 @@ mod test {
         );
 
         assert!(!loss_based_bandwidth_estimator.is_ready());
-        assert!(loss_based_bandwidth_estimator
-            .get_loss_based_result()
-            .bandwidth_estimate
-            .is_plus_infinity());
+        assert!(
+            loss_based_bandwidth_estimator
+                .get_loss_based_result()
+                .bandwidth_estimate
+                .is_plus_infinity()
+        );
     }
 
     #[test]
@@ -1691,10 +1682,12 @@ mod test {
         loss_based_bandwidth_estimator.set_bandwidth_estimate(DataRate::from_kilobits_per_sec(600));
 
         assert!(!loss_based_bandwidth_estimator.is_ready());
-        assert!(loss_based_bandwidth_estimator
-            .get_loss_based_result()
-            .bandwidth_estimate
-            .is_plus_infinity());
+        assert!(
+            loss_based_bandwidth_estimator
+                .get_loss_based_result()
+                .bandwidth_estimate
+                .is_plus_infinity()
+        );
 
         loss_based_bandwidth_estimator.update_bandwidth_estimate(
             &not_enough_feedback,
@@ -1703,10 +1696,12 @@ mod test {
         );
 
         assert!(!loss_based_bandwidth_estimator.is_ready());
-        assert!(loss_based_bandwidth_estimator
-            .get_loss_based_result()
-            .bandwidth_estimate
-            .is_plus_infinity());
+        assert!(
+            loss_based_bandwidth_estimator
+                .get_loss_based_result()
+                .bandwidth_estimate
+                .is_plus_infinity()
+        );
     }
 
     #[test]
@@ -2106,19 +2101,13 @@ mod test {
     }
 
     #[test]
-    fn increase_by_max_increase_factor_after_loss_based_bwe_backs_off() {
+    fn increase_by_hold_factor_after_loss_based_bwe_backs_off() {
         let mut test = LossBasedBweV2Test::default();
-        let config = LossBasedBweV2Config {
-            candidate_factors: vec![1.2, 1.0, 0.5],
-            instant_upper_bound_bw_balance: DataRate::from_kilobits_per_sec(10000),
-            max_increase_factor: 1.5,
-            not_increase_if_inherent_loss_less_than_average_loss: false,
-            ..short_observation_config()
-        };
+        let config = short_observation_config();
 
         let mut loss_based_bandwidth_estimator = LossBasedBweV2::new(config);
         let delay_based_estimate: DataRate = DataRate::from_kilobits_per_sec(5000);
-        let acked_rate: DataRate = DataRate::from_kilobits_per_sec(300);
+        let acked_rate: DataRate = DataRate::from_kilobits_per_sec(100);
         loss_based_bandwidth_estimator.set_bandwidth_estimate(DataRate::from_kilobits_per_sec(600));
         loss_based_bandwidth_estimator.set_acknowledged_bitrate(acked_rate);
 
@@ -2136,24 +2125,28 @@ mod test {
             loss_based_bandwidth_estimator.get_loss_based_result();
 
         // Network recovers after loss.
-        let enough_feedback_2: Vec<PacketResult> = test
-            .create_packet_results_with_received_packets(
-                /*first_packet_timestamp=*/
-                Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND,
+        let mut feedback_count: i64 = 2;
+        while loss_based_bandwidth_estimator.get_loss_based_result().state
+            != LossBasedState::IncreaseUsingPadding
+        {
+            assert!(feedback_count < 100, "never reached IncreaseUsingPadding");
+            loss_based_bandwidth_estimator.update_bandwidth_estimate(
+                &test.create_packet_results_with_received_packets(
+                    /*first_packet_timestamp=*/
+                    Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND * feedback_count,
+                ),
+                delay_based_estimate,
+                /*in_alr=*/ false,
             );
-        loss_based_bandwidth_estimator
-            .set_acknowledged_bitrate(DataRate::from_kilobits_per_sec(600));
-        loss_based_bandwidth_estimator.update_bandwidth_estimate(
-            &enough_feedback_2,
-            delay_based_estimate,
-            /*in_alr=*/ false,
-        );
+            feedback_count += 1;
+        }
 
         let result_after_recovery: LossBasedBweV2Result =
             loss_based_bandwidth_estimator.get_loss_based_result();
+        // BwRampupUpperBoundInHoldFactor is 1.2.
         assert_eq!(
             result_after_recovery.bandwidth_estimate,
-            result_at_loss.bandwidth_estimate * 1.5
+            result_at_loss.bandwidth_estimate * 1.2
         );
     }
 
@@ -2161,7 +2154,7 @@ mod test {
     fn loss_based_state_is_delay_based_estimate_after_network_recovering() {
         let mut test = LossBasedBweV2Test::default();
         let config = LossBasedBweV2Config {
-            candidate_factors: vec![1.2, 1.0, 0.5],
+            candidate_factors: vec![100.0, 1.0, 0.5],
             instant_upper_bound_bw_balance: DataRate::from_kilobits_per_sec(10000),
             max_increase_factor: 100.0,
             not_increase_if_inherent_loss_less_than_average_loss: false,
@@ -2309,7 +2302,8 @@ mod test {
         loss_based_bandwidth_estimator.set_acknowledged_bitrate(estimate_1 * 0.9);
 
         let mut feedback_count: i64 = 1;
-        while feedback_count < 5 && result.state != LossBasedState::Increasing {
+        while result.state != LossBasedState::IncreaseUsingPadding {
+            assert!(feedback_count < 100, "never reached IncreaseUsingPadding");
             loss_based_bandwidth_estimator.update_bandwidth_estimate(
                 &test.create_packet_results_with_received_packets(
                     /*first_packet_timestamp=*/
@@ -2321,7 +2315,7 @@ mod test {
             feedback_count += 1;
             result = loss_based_bandwidth_estimator.get_loss_based_result();
         }
-        assert_eq!(result.state, LossBasedState::Increasing);
+        assert_eq!(result.state, LossBasedState::IncreaseUsingPadding);
 
         // The estimate is capped by acked_bitrate * BwRampupUpperBoundFactor.
         assert_eq!(result.bandwidth_estimate, estimate_1 * 0.9 * 1.2);
@@ -2385,7 +2379,8 @@ mod test {
         loss_based_bandwidth_estimator.set_acknowledged_bitrate(estimate_1 / 2);
 
         let mut feedback_count: i64 = 1;
-        while feedback_count < 5 && result.state != LossBasedState::Increasing {
+        while result.state != LossBasedState::IncreaseUsingPadding {
+            assert!(feedback_count < 100, "never reached IncreaseUsingPadding");
             loss_based_bandwidth_estimator.update_bandwidth_estimate(
                 &test.create_packet_results_with_received_packets(
                     /*first_packet_timestamp=*/
@@ -2398,7 +2393,7 @@ mod test {
             result = loss_based_bandwidth_estimator.get_loss_based_result();
         }
 
-        assert_eq!(result.state, LossBasedState::Increasing);
+        assert_eq!(result.state, LossBasedState::IncreaseUsingPadding);
         // The estimate increases by 1kbps.
         assert_eq!(
             result.bandwidth_estimate,
@@ -2889,7 +2884,7 @@ mod test {
         );
         loss_based_bandwidth_estimator.set_bandwidth_estimate(DataRate::from_kilobits_per_sec(500));
         loss_based_bandwidth_estimator
-            .set_acknowledged_bitrate(DataRate::from_kilobits_per_sec(500));
+            .set_acknowledged_bitrate(DataRate::from_kilobits_per_sec(100));
 
         let enough_feedback_10p_loss_1: Vec<PacketResult> = test
             .create_packet_results_with_10p_packet_loss_rate(
@@ -2954,7 +2949,7 @@ mod test {
         let enough_feedback_50p_loss_2: Vec<PacketResult> = test
             .create_packet_results_with_50p_packet_loss_rate(
                 /*first_packet_timestamp=*/
-                Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND,
+                Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND * 2,
             );
         loss_based_bandwidth_estimator.update_bandwidth_estimate(
             &enough_feedback_50p_loss_2,
@@ -2963,7 +2958,7 @@ mod test {
         );
 
         // Verify that the instant lower bound increases the estimate, and state is
-        // updated to Increasing.
+        // updated to IncreaseUsingPadding.
         assert_eq!(
             loss_based_bandwidth_estimator
                 .get_loss_based_result()
@@ -2972,7 +2967,7 @@ mod test {
         );
         assert_eq!(
             loss_based_bandwidth_estimator.get_loss_based_result().state,
-            LossBasedState::Increasing
+            LossBasedState::IncreaseUsingPadding
         );
     }
 
@@ -3063,7 +3058,8 @@ mod test {
 
         // Eventually  the estimator recovers to delay based state.
         let mut feedback_count: i64 = 2;
-        while feedback_count < 5 && result.state != LossBasedState::DelayBasedEstimate {
+        while result.state != LossBasedState::DelayBasedEstimate {
+            assert!(feedback_count < 100, "never reached DelayBasedEstimate");
             loss_based_bandwidth_estimator.update_bandwidth_estimate(
                 /*feedback = */
                 &test.create_packet_results_with_received_packets(
@@ -3107,14 +3103,21 @@ mod test {
             LossBasedState::Decreasing
         );
 
-        loss_based_bandwidth_estimator.update_bandwidth_estimate(
-            &test.create_packet_results_with_received_packets(
-                /*first_packet_timestamp=*/
-                Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND,
-            ),
-            /*delay_based_estimate=*/ DataRate::plus_infinity(),
-            /*in_alr=*/ false,
-        );
+        let mut feedback_count: i64 = 1;
+        while loss_based_bandwidth_estimator.get_loss_based_result().state
+            != LossBasedState::IncreaseUsingPadding
+        {
+            assert!(feedback_count < 100, "never reached IncreaseUsingPadding");
+            loss_based_bandwidth_estimator.update_bandwidth_estimate(
+                &test.create_packet_results_with_received_packets(
+                    /*first_packet_timestamp=*/
+                    Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND * feedback_count,
+                ),
+                /*delay_based_estimate=*/ DataRate::plus_infinity(),
+                /*in_alr=*/ false,
+            );
+            feedback_count += 1;
+        }
         assert_eq!(
             loss_based_bandwidth_estimator.get_loss_based_result().state,
             LossBasedState::IncreaseUsingPadding
@@ -3326,195 +3329,6 @@ mod test {
     }
 
     #[test]
-    fn increase_estimate_if_not_hold() {
-        let mut test = LossBasedBweV2Test::default();
-        let config = LossBasedBweV2Config {
-            hold_duration_factor: 0.0,
-            ..short_observation_config()
-        };
-        let mut loss_based_bandwidth_estimator = LossBasedBweV2::new(config);
-        loss_based_bandwidth_estimator
-            .set_bandwidth_estimate(DataRate::from_kilobits_per_sec(2500));
-        loss_based_bandwidth_estimator.update_bandwidth_estimate(
-            &test.create_packet_results_with_50p_packet_loss_rate(
-                /*first_packet_timestamp=*/ Timestamp::zero(),
-            ),
-            /*delay_based_estimate=*/ DataRate::plus_infinity(),
-            /*in_alr=*/ false,
-        );
-        assert_eq!(
-            loss_based_bandwidth_estimator.get_loss_based_result().state,
-            LossBasedState::Decreasing
-        );
-        let estimate: DataRate = loss_based_bandwidth_estimator
-            .get_loss_based_result()
-            .bandwidth_estimate;
-
-        loss_based_bandwidth_estimator.update_bandwidth_estimate(
-            &test.create_packet_results_with_received_packets(
-                /*first_packet_timestamp=*/
-                Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND,
-            ),
-            /*delay_based_estimate=*/ DataRate::plus_infinity(),
-            /*in_alr=*/ false,
-        );
-        assert_eq!(
-            loss_based_bandwidth_estimator.get_loss_based_result().state,
-            LossBasedState::Increasing
-        );
-        assert!(
-            loss_based_bandwidth_estimator
-                .get_loss_based_result()
-                .bandwidth_estimate
-                > estimate
-        );
-    }
-
-    #[test]
-    fn increase_estimate_after_hold_duration() {
-        let mut test = LossBasedBweV2Test::default();
-        let config = LossBasedBweV2Config {
-            hold_duration_factor: 10.0,
-            ..short_observation_config()
-        };
-        let mut loss_based_bandwidth_estimator = LossBasedBweV2::new(config);
-        loss_based_bandwidth_estimator
-            .set_bandwidth_estimate(DataRate::from_kilobits_per_sec(2500));
-        loss_based_bandwidth_estimator.update_bandwidth_estimate(
-            &test.create_packet_results_with_50p_packet_loss_rate(
-                /*first_packet_timestamp=*/ Timestamp::zero(),
-            ),
-            /*delay_based_estimate=*/ DataRate::plus_infinity(),
-            /*in_alr=*/ false,
-        );
-        assert_eq!(
-            loss_based_bandwidth_estimator.get_loss_based_result().state,
-            LossBasedState::Decreasing
-        );
-        let estimate: DataRate = loss_based_bandwidth_estimator
-            .get_loss_based_result()
-            .bandwidth_estimate;
-
-        // During the hold duration, e.g. first 300ms, the estimate cannot increase.
-        loss_based_bandwidth_estimator.update_bandwidth_estimate(
-            &test.create_packet_results_with_received_packets(
-                /*first_packet_timestamp=*/
-                Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND,
-            ),
-            /*delay_based_estimate=*/ DataRate::plus_infinity(),
-            /*in_alr=*/ false,
-        );
-        assert_eq!(
-            loss_based_bandwidth_estimator.get_loss_based_result().state,
-            LossBasedState::Decreasing
-        );
-        assert_eq!(
-            loss_based_bandwidth_estimator
-                .get_loss_based_result()
-                .bandwidth_estimate,
-            estimate
-        );
-
-        // After the hold duration, the estimate can increase.
-        loss_based_bandwidth_estimator.update_bandwidth_estimate(
-            &test.create_packet_results_with_received_packets(
-                /*first_packet_timestamp=*/
-                Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND * 2,
-            ),
-            /*delay_based_estimate=*/ DataRate::plus_infinity(),
-            /*in_alr=*/ false,
-        );
-        assert_eq!(
-            loss_based_bandwidth_estimator.get_loss_based_result().state,
-            LossBasedState::Increasing
-        );
-        assert!(
-            loss_based_bandwidth_estimator
-                .get_loss_based_result()
-                .bandwidth_estimate
-                >= estimate
-        );
-
-        // Get another 50p packet loss.
-        loss_based_bandwidth_estimator.update_bandwidth_estimate(
-            &test.create_packet_results_with_50p_packet_loss_rate(
-                /*first_packet_timestamp=*/
-                Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND * 3,
-            ),
-            /*delay_based_estimate=*/ DataRate::plus_infinity(),
-            /*in_alr=*/ false,
-        );
-        assert_eq!(
-            loss_based_bandwidth_estimator.get_loss_based_result().state,
-            LossBasedState::Decreasing
-        );
-        let estimate_at_hold: DataRate = loss_based_bandwidth_estimator
-            .get_loss_based_result()
-            .bandwidth_estimate;
-
-        // In the hold duration, e.g. next 3s, the estimate cannot increase above the
-        // hold rate. Get some lost packets to get lower estimate than the HOLD rate.
-        for i in 4..=6 {
-            loss_based_bandwidth_estimator.update_bandwidth_estimate(
-                &test.create_packet_results_with_100p_loss_rate(
-                    /*first_packet_timestamp=*/
-                    Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND * i,
-                    2,
-                ),
-                /*delay_based_estimate=*/ DataRate::plus_infinity(),
-                /*in_alr=*/ false,
-            );
-            assert_eq!(
-                loss_based_bandwidth_estimator.get_loss_based_result().state,
-                LossBasedState::Decreasing
-            );
-            assert!(
-                loss_based_bandwidth_estimator
-                    .get_loss_based_result()
-                    .bandwidth_estimate
-                    < estimate_at_hold
-            );
-        }
-
-        let mut feedback_id: i64 = 7;
-        while loss_based_bandwidth_estimator.get_loss_based_result().state
-            != LossBasedState::Increasing
-        {
-            loss_based_bandwidth_estimator.update_bandwidth_estimate(
-                &test.create_packet_results_with_received_packets(
-                    /*first_packet_timestamp=*/
-                    Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND * feedback_id,
-                ),
-                /*delay_based_estimate=*/ DataRate::plus_infinity(),
-                /*in_alr=*/ false,
-            );
-            if loss_based_bandwidth_estimator.get_loss_based_result().state
-                == LossBasedState::Decreasing
-            {
-                // In the hold duration, the estimate can not go higher than estimate at
-                // hold.
-                assert!(
-                    loss_based_bandwidth_estimator
-                        .get_loss_based_result()
-                        .bandwidth_estimate
-                        <= estimate_at_hold
-                );
-            } else if loss_based_bandwidth_estimator.get_loss_based_result().state
-                == LossBasedState::Increasing
-            {
-                // After the hold duration, the estimate can increase again.
-                assert!(
-                    loss_based_bandwidth_estimator
-                        .get_loss_based_result()
-                        .bandwidth_estimate
-                        > estimate_at_hold
-                );
-            }
-            feedback_id += 1;
-        }
-    }
-
-    #[test]
     fn hold_rate_not_lower_than_acked_rate() {
         let mut test = LossBasedBweV2Test::default();
         let config = LossBasedBweV2Config {
@@ -3632,10 +3446,7 @@ mod test {
     #[test]
     fn end_hold_duration_if_delay_based_estimate_works() {
         let mut test = LossBasedBweV2Test::default();
-        let config = LossBasedBweV2Config {
-            hold_duration_factor: 3.0,
-            ..short_observation_config()
-        };
+        let config = short_observation_config();
         let mut loss_based_bandwidth_estimator = LossBasedBweV2::new(config);
         loss_based_bandwidth_estimator
             .set_bandwidth_estimate(DataRate::from_kilobits_per_sec(2500));
@@ -3658,6 +3469,14 @@ mod test {
             &test.create_packet_results_with_received_packets(
                 /*first_packet_timestamp=*/
                 Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND,
+            ),
+            /*delay_based_estimate=*/ estimate + DataRate::from_kilobits_per_sec(10),
+            /*in_alr=*/ false,
+        );
+        loss_based_bandwidth_estimator.update_bandwidth_estimate(
+            &test.create_packet_results_with_received_packets(
+                /*first_packet_timestamp=*/
+                Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND * 2,
             ),
             /*delay_based_estimate=*/ estimate + DataRate::from_kilobits_per_sec(10),
             /*in_alr=*/ false,
@@ -3701,7 +3520,7 @@ mod test {
             loss_based_bandwidth_estimator
                 .get_loss_based_result()
                 .bandwidth_estimate
-                < DataRate::from_kilobits_per_sec(150)
+                < DataRate::from_kilobits_per_sec(160)
         );
     }
 
@@ -3711,7 +3530,7 @@ mod test {
         let config = LossBasedBweV2Config {
             use_byte_loss_rate: true,
             observation_window_size: 5,
-            ..short_observation_config()
+            ..Default::default()
         };
         let mut loss_based_bandwidth_estimator = LossBasedBweV2::new(config);
         const DELAY_BASED_ESTIMATE: DataRate = DataRate::from_kilobits_per_sec(500);
@@ -3784,7 +3603,7 @@ mod test {
         let config = LossBasedBweV2Config {
             use_byte_loss_rate: true,
             observation_window_size: 5,
-            ..short_observation_config()
+            ..Default::default()
         };
         let mut loss_based_bandwidth_estimator = LossBasedBweV2::new(config);
         const DELAY_BASED_ESTIMATE: DataRate = DataRate::from_kilobits_per_sec(500);
@@ -3826,116 +3645,39 @@ mod test {
     }
 
     #[test]
-    fn pace_at_loss_based_estimate() {
+    fn select_higher_candidate_if_having_same_objective() {
         let mut test = LossBasedBweV2Test::default();
-        let config = LossBasedBweV2Config {
-            pace_at_loss_based_estimate: true,
-            padding_duration: TimeDelta::from_millis(1000),
-            ..short_observation_config()
-        };
-        let mut loss_based_bandwidth_estimator = LossBasedBweV2::new(config);
-        loss_based_bandwidth_estimator
-            .set_bandwidth_estimate(DataRate::from_kilobits_per_sec(1000));
-        loss_based_bandwidth_estimator.update_bandwidth_estimate(
-            &test.create_packet_results_with_received_packets(
-                /*first_packet_timestamp=*/ Timestamp::zero(),
-            ),
-            /*delay_based_estimate=*/ DataRate::from_kilobits_per_sec(1000),
-            /*in_alr=*/ false,
-        );
-        assert_eq!(
-            loss_based_bandwidth_estimator.get_loss_based_result().state,
-            LossBasedState::DelayBasedEstimate
-        );
-        assert!(!loss_based_bandwidth_estimator.pace_at_loss_based_estimate());
-
-        loss_based_bandwidth_estimator.update_bandwidth_estimate(
-            &test.create_packet_results_with_100p_loss_rate(
-                /*first_packet_timestamp=*/
-                Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND,
-                2,
-            ),
-            /*delay_based_estimate=*/ DataRate::from_kilobits_per_sec(1000),
-            /*in_alr=*/ false,
-        );
-        assert_eq!(
-            loss_based_bandwidth_estimator.get_loss_based_result().state,
-            LossBasedState::Decreasing
-        );
-        assert!(loss_based_bandwidth_estimator.pace_at_loss_based_estimate());
-
-        loss_based_bandwidth_estimator.update_bandwidth_estimate(
-            &test.create_packet_results_with_received_packets(
-                /*first_packet_timestamp=*/
-                Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND * 2,
-            ),
-            /*delay_based_estimate=*/ DataRate::from_kilobits_per_sec(1000),
-            /*in_alr=*/ false,
-        );
-        assert_eq!(
-            loss_based_bandwidth_estimator.get_loss_based_result().state,
-            LossBasedState::IncreaseUsingPadding
-        );
-        assert!(loss_based_bandwidth_estimator.pace_at_loss_based_estimate());
-    }
-
-    #[test]
-    fn estimate_does_not_back_off_due_to_packet_reordering_between_feedback() {
         let config = short_observation_config();
         let mut loss_based_bandwidth_estimator = LossBasedBweV2::new(config);
-        const START_BITRATE: DataRate = DataRate::from_kilobits_per_sec(2500);
+        const START_BITRATE: DataRate = DataRate::from_kilobits_per_sec(1000);
         loss_based_bandwidth_estimator.set_bandwidth_estimate(START_BITRATE);
-
-        let mut feedback_1 = vec![PacketResult::default(); 3];
-        feedback_1[0].sent_packet.sequence_number = 1;
-        feedback_1[0].sent_packet.size = DataSize::from_bytes(PACKET_SIZE);
-        feedback_1[0].sent_packet.send_time = Timestamp::zero();
-        feedback_1[0].receive_time =
-            feedback_1[0].sent_packet.send_time + TimeDelta::from_millis(10);
-        feedback_1[1].sent_packet.sequence_number = 2;
-        feedback_1[1].sent_packet.size = DataSize::from_bytes(PACKET_SIZE);
-        feedback_1[1].sent_packet.send_time = Timestamp::zero();
-        // Lost or reordered
-        feedback_1[1].receive_time = Timestamp::plus_infinity();
-
-        feedback_1[2].sent_packet.sequence_number = 3;
-        feedback_1[2].sent_packet.size = DataSize::from_bytes(PACKET_SIZE);
-        feedback_1[2].sent_packet.send_time = Timestamp::zero();
-        feedback_1[2].receive_time =
-            feedback_1[2].sent_packet.send_time + TimeDelta::from_millis(10);
-
-        let mut feedback_2 = vec![PacketResult::default(); 3];
-        feedback_2[0].sent_packet.sequence_number = 2;
-        feedback_2[0].sent_packet.size = DataSize::from_bytes(PACKET_SIZE);
-        feedback_2[0].sent_packet.send_time = Timestamp::zero();
-        feedback_2[0].receive_time =
-            feedback_1[0].sent_packet.send_time + TimeDelta::from_millis(10);
-        feedback_2[1].sent_packet.sequence_number = 4;
-        feedback_2[1].sent_packet.size = DataSize::from_bytes(PACKET_SIZE);
-        feedback_2[1].sent_packet.send_time = Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND;
-        feedback_2[1].receive_time =
-            feedback_2[1].sent_packet.send_time + TimeDelta::from_millis(10);
-        feedback_2[2].sent_packet.sequence_number = 5;
-        feedback_2[2].sent_packet.size = DataSize::from_bytes(PACKET_SIZE);
-        feedback_2[2].sent_packet.send_time = Timestamp::zero();
-        feedback_2[2].receive_time =
-            feedback_2[2].sent_packet.send_time + TimeDelta::from_millis(10);
-
+        let enough_feedback_01: Vec<PacketResult> = test
+            .create_packet_results_with_received_packets(
+                /*first_packet_timestamp=*/ Timestamp::zero(),
+            );
+        let enough_feedback_02: Vec<PacketResult> = test
+            .create_packet_results_with_received_packets(
+                /*first_packet_timestamp=*/
+                Timestamp::zero() + OBSERVATION_DURATION_LOWER_BOUND,
+            );
         loss_based_bandwidth_estimator.update_bandwidth_estimate(
-            &feedback_1,
-            /*delay_based_estimate=*/ START_BITRATE,
+            &enough_feedback_01,
+            START_BITRATE,
             /*in_alr=*/ false,
         );
+        let delay_based_estimate =
+            DataRate::from_bytes_per_sec_float(START_BITRATE.bytes_per_sec() as f64 * 1.02 + 1.0);
         loss_based_bandwidth_estimator.update_bandwidth_estimate(
-            &feedback_2,
-            /*delay_based_estimate=*/ START_BITRATE,
+            &enough_feedback_02,
+            delay_based_estimate,
             /*in_alr=*/ false,
         );
+
         assert_eq!(
             loss_based_bandwidth_estimator
                 .get_loss_based_result()
                 .bandwidth_estimate,
-            START_BITRATE
+            delay_based_estimate
         );
     }
 } // namespace

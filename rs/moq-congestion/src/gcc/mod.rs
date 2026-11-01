@@ -16,25 +16,17 @@ macro_rules! assert_relative_eq {
 }
 
 mod api;
-
-/// [FieldTrials](experiments::FieldTrials) and dynamic configuration.
-pub mod experiments;
-
-// We inline goog_cc modules to avoid goog_cc::goog_cc logging prefix.
+mod experiments;
 mod pacing;
-
 mod remote_bitrate_estimator;
-mod acknowledged_bitrate_estimator;
-mod acknowledged_bitrate_estimator_interface;
+
 mod alr_detector;
-mod bitrate_estimator;
 mod congestion_window_pushback_controller;
 mod delay_based_bwe;
 mod delay_increase_detector_interface;
 mod goog_cc_network_control;
 mod inter_arrival_delta;
 mod link_capacity_estimator;
-mod loss_based_bandwidth_estimation;
 mod loss_based_bwe_v2;
 mod probe_bitrate_estimator;
 mod probe_controller;
@@ -42,16 +34,12 @@ mod robust_throughput_estimator;
 mod send_side_bandwidth_estimation;
 mod trendline_estimator;
 
-use acknowledged_bitrate_estimator::*;
-use acknowledged_bitrate_estimator_interface::*;
 use alr_detector::*;
-use bitrate_estimator::*;
 use congestion_window_pushback_controller::*;
 use delay_based_bwe::*;
 use delay_increase_detector_interface::*;
 use inter_arrival_delta::*;
 use link_capacity_estimator::*;
-use loss_based_bandwidth_estimation::*;
 use loss_based_bwe_v2::*;
 use probe_bitrate_estimator::*;
 use probe_controller::*;
@@ -59,16 +47,399 @@ use robust_throughput_estimator::*;
 use send_side_bandwidth_estimation::*;
 use trendline_estimator::*;
 
-// Selectively export the public API.
-pub use api::{network_control, transport, units};
-pub use goog_cc_network_control::{GoogCcConfig, GoogCcNetworkController};
-pub use {
-    alr_detector::AlrDetectorConfig, bitrate_estimator::BitrateEstimatorConfig,
-    send_side_bandwidth_estimation::BweLossExperiment,
-    delay_based_bwe::BweSeparateAudioPacketsSettings,
-    loss_based_bwe_v2::LossBasedBweV2Config,
-    loss_based_bandwidth_estimation::LossBasedControlConfig,
-    probe_controller::ProbeControllerConfig,
-    robust_throughput_estimator::RobustThroughputEstimatorSettings,
-    send_side_bandwidth_estimation::RttBasedBackoffConfig, goog_cc_network_control::SafeResetOnRouteChange, trendline_estimator::TrendlineEstimatorSettings,
+use goog_cc_network_control::{GoogCcNetworkController, NetworkControllerConfig};
+
+use std::{any::Any, collections::VecDeque, num::NonZeroU16, sync::Arc, time::Duration};
+
+use kio::clock::Instant;
+
+use crate::{
+    Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent,
+    pacer::{Pacer, Rate},
 };
+use api::{
+    transport::{
+        NetworkAvailability, NetworkControlUpdate, PacedPacketInfo, PacerConfig, PacketResult,
+        ProcessInterval, RoundTripTimeUpdate, SentPacket, StreamsConfig, TargetRateConstraints,
+        TransportPacketsFeedback,
+    },
+    units::{DataRate, DataSize, TimeDelta, Timestamp},
+};
+use pacing::BitrateProber;
+
+/// How often GoogCC expects its process timer, as `GetProcessInterval`
+const PROCESS_INTERVAL: Duration = Duration::from_millis(25);
+/// How far a mapped peer receive time may sit from the local clock: a peer's clock drifts far
+/// less over a connection, and the bound keeps a hostile time from overflowing GoogCC's units.
+const RECEIVE_SKEW: TimeDelta = TimeDelta::from_seconds(3600);
+/// The smallest window GoogCC's congestion window settles on, `kMinCwnd`
+const MIN_WINDOW: u64 = 2 * 1500;
+/// How long a probe cluster's settings are kept for its packets' feedback, past the
+/// `ProbeBitrateEstimator`'s own one second of history
+const CLUSTER_HISTORY: TimeDelta = TimeDelta::from_seconds(2);
+
+/// Configuration for the [`Gcc`] congestion controller.
+#[derive(Debug, Clone)]
+pub struct GccConfig {
+    initial_rate: u64,
+}
+
+impl GccConfig {
+    /// The rate GoogCC starts at and first probes from, in bytes per second.
+    ///
+    /// Defaults to WebRTC's 300 kbit/s.
+    pub fn initial_rate(&mut self, bytes_per_second: u64) -> &mut Self {
+        self.initial_rate = bytes_per_second;
+        self
+    }
+}
+
+impl Default for GccConfig {
+    fn default() -> Self {
+        Self {
+            initial_rate: 300_000 / 8,
+        }
+    }
+}
+
+impl ControllerFactory for GccConfig {
+    fn build(self: Arc<Self>, init: Init) -> Box<dyn Controller> {
+        Box::new(Gcc::new(&self, init))
+    }
+}
+
+/// A probe cluster's settings, kept for its packets' feedback
+#[derive(Debug, Clone, Copy)]
+struct Cluster {
+    info: PacedPacketInfo,
+    /// When its last packet was sent
+    sent: Timestamp,
+}
+
+/// libwebrtc's Google Congestion Control, fed by receive timestamps.
+///
+/// The window is GoogCC's congestion window (its target rate times the round trip plus 350ms),
+/// the pacing rate its pacer's, and the bandwidth estimate its target rate. Each probe cluster
+/// GoogCC requests paces at its rate while it runs and reports what it still needs as
+/// [`ControllerMetrics::probe_inflight`], so an application-limited sender can fill it.
+#[derive(Clone)]
+pub struct Gcc {
+    cc: GoogCcNetworkController,
+    prober: BitrateProber,
+    pacer: Pacer,
+    mtu: u16,
+    /// The pacing rate GoogCC last configured, in bytes per second
+    pacing_rate: u64,
+    /// The target rate GoogCC last reported, in bytes per second
+    target_rate: u64,
+    /// The window until GoogCC computes one from feedback
+    initial_window: u64,
+    in_flight: u64,
+    next_process: Instant,
+    /// The local time, in microseconds, a peer receive time of zero maps to, fixed by the first
+    /// receive time the peer reports
+    receive_basis: Option<i64>,
+    /// Recently sent probe clusters, oldest first
+    clusters: VecDeque<Cluster>,
+    /// Reused for each ACK's and loss's feedback
+    feedback: TransportPacketsFeedback,
+}
+
+impl Gcc {
+    fn new(config: &GccConfig, init: Init) -> Self {
+        let now = timestamp(init.now);
+        let starting_rate = DataRate::from_bytes_per_sec(config.initial_rate.max(1) as i64);
+        let cc = GoogCcNetworkController::new(NetworkControllerConfig {
+            constraints: TargetRateConstraints {
+                at_time: now,
+                min_data_rate: None,
+                max_data_rate: init
+                    .max_pacing_rate
+                    .map(|rate| DataRate::from_bytes_per_sec(rate.min(i64::MAX as u64) as i64)),
+                starting_rate: Some(starting_rate),
+            },
+            stream_based_config: StreamsConfig {
+                // Periodic probing while application-limited, so a sender held below its target
+                // finds the capacity to resume a stopped rendition
+                requests_alr_probing: Some(true),
+                ..Default::default()
+            },
+            default_pacing_time_window: PacerConfig::DEFAULT_TIME_INTERVAL,
+            ..Default::default()
+        });
+        let window_time = TimeDelta::from_micros(init.rtt.as_micros().min(i64::MAX as u128) as i64)
+            + TimeDelta::from_millis(experiments::CongestionWindowConfig::default().queue_size_ms);
+        let initial_window = ((starting_rate * window_time).bytes().max(0) as u64).max(MIN_WINDOW);
+        let mut gcc = Self {
+            cc,
+            prober: BitrateProber::default(),
+            pacer: Pacer::new(
+                init.rtt,
+                initial_window,
+                init.mtu,
+                init.max_pacing_rate,
+                init.now,
+            ),
+            mtu: init.mtu,
+            pacing_rate: config.initial_rate.max(1),
+            target_rate: config.initial_rate,
+            initial_window,
+            in_flight: 0,
+            next_process: init.now,
+            receive_basis: None,
+            clusters: VecDeque::new(),
+            feedback: TransportPacketsFeedback::default(),
+        };
+        let update = gcc.cc.on_network_availability(NetworkAvailability {
+            at_time: now,
+            network_available: true,
+        });
+        gcc.apply(update);
+        gcc.process(init.now);
+        gcc
+    }
+
+    /// Runs GoogCC's process timer if it is due.
+    fn process(&mut self, now: Instant) {
+        if now < self.next_process {
+            return;
+        }
+        self.next_process = now + PROCESS_INTERVAL;
+        let update = self.cc.on_process_interval(ProcessInterval {
+            at_time: timestamp(now),
+            pacer_queue: None,
+        });
+        self.apply(update);
+    }
+
+    fn apply(&mut self, update: NetworkControlUpdate) {
+        if let Some(target) = update.target_rate {
+            self.target_rate = target.target_rate.bytes_per_sec().max(0) as u64;
+        }
+        if let Some(pacer) = update.pacer_config {
+            self.pacing_rate = (pacer.data_rate().bytes_per_sec().max(1)) as u64;
+        }
+        for cluster in &update.probe_cluster_configs {
+            self.prober.create_probe_cluster(cluster);
+        }
+    }
+
+    /// Maps a peer receive time onto the local clock.
+    ///
+    /// The first one the peer reports lands at the local time its ACK arrived, so the mapped
+    /// times carry the forward delay of that packet as a constant offset, which GoogCC's
+    /// gradients ignore.
+    fn receive_time(&mut self, received: Duration, now: Instant) -> Timestamp {
+        let now = timestamp(now);
+        let received = i64::try_from(received.as_micros()).unwrap_or(i64::MAX);
+        let basis = *self
+            .receive_basis
+            .get_or_insert_with(|| now.us().saturating_sub(received));
+        let mapped = Timestamp::from_micros(received.saturating_add(basis));
+        mapped.clamp(now - RECEIVE_SKEW, now + RECEIVE_SKEW)
+    }
+
+    /// The pacing info of the probe cluster `id` was sent in.
+    fn cluster(&self, id: Option<NonZeroU16>) -> PacedPacketInfo {
+        id.and_then(|id| {
+            self.clusters
+                .iter()
+                .rev()
+                .find(|cluster| short_id(cluster.info.probe_cluster_id) == Some(id))
+        })
+        .map_or_else(PacedPacketInfo::default, |cluster| cluster.info)
+    }
+
+    fn feed(&mut self, now: Instant, in_flight: u64) {
+        if self.feedback.packet_feedbacks.is_empty() {
+            return;
+        }
+        self.feedback.feedback_time = timestamp(now);
+        self.feedback.data_in_flight = size(in_flight);
+        let update = self.cc.on_transport_packets_feedback(&self.feedback);
+        self.feedback.packet_feedbacks.clear();
+        self.apply(update);
+    }
+
+    /// The window GoogCC allows in flight.
+    fn congestion_window(&self) -> u64 {
+        let window = self
+            .cc
+            .congestion_window()
+            .map_or(self.initial_window, |window| window.bytes().max(0) as u64);
+        window.max(MIN_WINDOW)
+    }
+
+    /// The bytes in flight up to which the current probe cluster may be filled.
+    fn probe_inflight(&self) -> Option<u64> {
+        let (bytes, packets, _) = self.prober.remaining()?;
+        let packets = u64::try_from(packets).unwrap_or(0) * u64::from(self.mtu);
+        let bytes = u64::try_from(bytes.bytes()).unwrap_or(0);
+        Some(self.in_flight + bytes.max(packets))
+    }
+}
+
+impl Controller for Gcc {
+    fn on_sent(&mut self, sent: Sent) -> Packet {
+        self.process(sent.now);
+        let now = timestamp(sent.now);
+        self.in_flight = sent.in_flight;
+        self.pacer.on_transmit(sent.bytes);
+        let bytes = DataSize::from_bytes(sent.bytes.into());
+
+        let info = self.prober.current_cluster(now);
+        if info.is_some() {
+            self.prober.probe_sent(now, bytes);
+        }
+        let info = info.unwrap_or_default();
+        let probe_cluster = short_id(info.probe_cluster_id);
+        if probe_cluster.is_some() {
+            match self.clusters.back_mut() {
+                Some(last) if last.info.probe_cluster_id == info.probe_cluster_id => {
+                    last.sent = now;
+                }
+                _ => self.clusters.push_back(Cluster { info, sent: now }),
+            }
+        }
+        while self
+            .clusters
+            .front()
+            .is_some_and(|cluster| now - cluster.sent > CLUSTER_HISTORY)
+        {
+            self.clusters.pop_front();
+        }
+
+        let update = self.cc.on_sent_packet(SentPacket {
+            send_time: now,
+            size: bytes,
+            pacing_info: info,
+            data_in_flight: size(sent.in_flight),
+        });
+        self.apply(update);
+        Packet {
+            probe_cluster,
+            ..Default::default()
+        }
+    }
+
+    fn on_ack(&mut self, ack: Ack<'_>) {
+        self.process(ack.now);
+        self.in_flight = ack.in_flight;
+        if !ack.rtt.is_zero() {
+            self.cc.on_round_trip_time_update(RoundTripTimeUpdate {
+                round_trip_time: TimeDelta::from_micros(
+                    ack.rtt.as_micros().min(i64::MAX as u128) as i64
+                ),
+            });
+        }
+        for packet in ack.packets {
+            // Until the peer reports a receive time, the ACK's arrival stands in for each
+            // packet's, so GoogCC runs on the round-trip delay. Once it reports one, a packet
+            // without one is left out rather than mix the two clocks.
+            let receive_time = match packet.received {
+                Some(received) => self.receive_time(received, ack.now),
+                None if self.receive_basis.is_none() => timestamp(ack.now),
+                None => continue,
+            };
+            let result = PacketResult {
+                sent_packet: SentPacket {
+                    send_time: timestamp(packet.sent),
+                    size: DataSize::from_bytes(packet.bytes.into()),
+                    pacing_info: self.cluster(packet.packet.probe_cluster),
+                    data_in_flight: DataSize::zero(),
+                },
+                receive_time,
+            };
+            self.feedback.packet_feedbacks.push(result);
+        }
+        self.feed(ack.now, ack.in_flight);
+    }
+
+    fn on_loss(&mut self, loss: Loss<'_>) {
+        self.process(loss.now);
+        self.in_flight = loss.in_flight;
+        for packet in loss.packets {
+            let result = PacketResult {
+                sent_packet: SentPacket {
+                    send_time: timestamp(packet.sent),
+                    size: DataSize::from_bytes(packet.bytes.into()),
+                    pacing_info: self.cluster(packet.packet.probe_cluster),
+                    data_in_flight: DataSize::zero(),
+                },
+                receive_time: Timestamp::plus_infinity(),
+            };
+            self.feedback.packet_feedbacks.push(result);
+        }
+        self.feed(loss.now, loss.in_flight);
+    }
+
+    // GoogCC reacts to delay and loss; ECN is SCReAM's signal.
+    fn on_ce(&mut self, _ce: Ce) {}
+
+    fn on_mtu_update(&mut self, new_mtu: u16) {
+        self.mtu = new_mtu;
+    }
+
+    fn window(&self) -> u64 {
+        self.congestion_window()
+    }
+
+    fn pace(&mut self, now: Instant, bytes: u64) -> Option<Instant> {
+        self.process(now);
+        let at = timestamp(now);
+        // A packet is ready, which starts a pending probe cluster
+        self.prober
+            .on_incoming_packet(DataSize::from_bytes(bytes.min(i64::MAX as u64) as i64));
+        if self.prober.current_cluster(at).is_some() {
+            let next = self.prober.next_probe_time();
+            if next <= at {
+                return None;
+            }
+            return Some(now + Duration::from_micros((next - at).us().max(0) as u64));
+        }
+        let rate = Rate {
+            window: self.congestion_window(),
+            pacing_rate: Some(self.pacing_rate),
+        };
+        // A pacing rate makes the RTT irrelevant; the MTU only sizes the bursts.
+        self.pacer.delay(Duration::ZERO, bytes, self.mtu, now, rate)
+    }
+
+    fn metrics(&self) -> ControllerMetrics {
+        ControllerMetrics {
+            congestion_window: self.congestion_window(),
+            ssthresh: None,
+            pacing_rate: Some(self.pacing_rate),
+            bandwidth_estimate: Some(self.target_rate),
+            probe_inflight: self.probe_inflight(),
+        }
+    }
+
+    fn probes(&self) -> bool {
+        true
+    }
+
+    fn clone_box(&self) -> Box<dyn Controller> {
+        Box::new(self.clone())
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+fn timestamp(instant: Instant) -> Timestamp {
+    let micros = instant.duration_since(Instant::ZERO).as_micros();
+    Timestamp::from_micros(micros.min(i64::MAX as u128 / 2) as i64)
+}
+
+fn size(bytes: u64) -> DataSize {
+    DataSize::from_bytes(bytes.min(i64::MAX as u64 / 2) as i64)
+}
+
+/// The probe cluster id a [`Packet`] stores: GoogCC's, which counts up from one, wrapped to
+/// sixteen bits without zero.
+fn short_id(id: i32) -> Option<NonZeroU16> {
+    let id = u32::try_from(id).ok().filter(|&id| id > 0)?;
+    NonZeroU16::new(((id - 1) % u32::from(u16::MAX) + 1) as u16)
+}
