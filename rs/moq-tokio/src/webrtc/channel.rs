@@ -89,8 +89,11 @@ impl Writer {
 	pub fn poll_ready(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), qmux::Error>> {
 		if self.pending.is_some() {
 			let pending = &mut self.pending;
-			ready!(self.queue.poll_push_with(waiter, || pending.take().expect("checked above")))
-				.map_err(|_| qmux::Error::Closed)?;
+			ready!(
+				self.queue
+					.poll_push_with(waiter, || pending.take().expect("checked above"))
+			)
+			.map_err(|_| qmux::Error::Closed)?;
 		}
 		Poll::Ready(Ok(()))
 	}

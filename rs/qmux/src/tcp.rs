@@ -6,10 +6,7 @@ use crate::{Config, Driver, Error, Session};
 /// Connect a QMux client over plain TCP with one session configuration.
 ///
 /// TCP has no ALPN; set `Config::protocol` to negotiate an application protocol.
-pub async fn connect(
-	addr: impl ToSocketAddrs,
-	config: Config,
-) -> Result<(Session, Driver<Stream<TcpStream>>), Error> {
+pub async fn connect(addr: impl ToSocketAddrs, config: Config) -> Result<(Session, Driver<Stream<TcpStream>>), Error> {
 	let stream = TcpStream::connect(addr).await?;
 	finish(stream, config, false).await
 }

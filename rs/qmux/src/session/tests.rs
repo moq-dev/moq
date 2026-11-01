@@ -36,7 +36,10 @@ async fn establish(
 	let client = Session::connect(Stream::new(client), client_config);
 	let server = Session::accept(Stream::new(server), server_config);
 	let (client, server) = tokio::join!(client, server);
-	(spawn(client.expect("client handshake")), spawn(server.expect("server handshake")))
+	(
+		spawn(client.expect("client handshake")),
+		spawn(server.expect("server handshake")),
+	)
 }
 
 async fn pair(client_config: Config, server_config: Config) -> (Session, Session) {

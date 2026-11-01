@@ -12,13 +12,10 @@ use super::Transport;
 use crate::protocol::validate_protocol;
 use crate::{Config, Driver, Error, MAX_FRAME_SIZE, Protocol, Session};
 
-/// The longest QUIC variable-length integer.
-const MAX_VARINT: usize = 8;
-
-/// The size of each read buffer. Records are sliced out of it rather than copied, and the
-/// session counts every slice as pinning a whole buffer of this size, so it is held to the
-/// largest frame a peer sends by default.
-const READ_BUFFER: usize = MAX_FRAME_SIZE + MAX_VARINT;
+/// The size of each read buffer: one default record with its size field, or one draft-00
+/// frame. Records are sliced out of it rather than copied, and the session counts every slice
+/// as pinning a whole buffer of this size. A larger record gets a buffer of its own size.
+const READ_BUFFER: usize = MAX_FRAME_SIZE;
 
 /// The least room a read is worth a syscall for; a fuller buffer moves its partial record to
 /// a fresh one first.
@@ -137,16 +134,22 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Stream<T> {
 
 	/// Read more of the peer's bytes into the read buffer, setting `eof` once it finished.
 	fn poll_fill(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
-		let want = self.need.saturating_sub(self.read.len()).max(MIN_READ);
+		// What the record at the front still needs, which this buffer must have room for.
+		let need = self.need.saturating_sub(self.read.len()).max(1);
+		let want = need.max(MIN_READ);
 		// Reuse the buffer in place once no record still points into it; otherwise move the
-		// partial record to a fresh one.
+		// partial record to a fresh one, sized to the record when it is larger than usual.
 		if self.read.capacity() - self.read.len() < want && !self.read.try_reclaim(want) {
-			let mut fresh = BytesMut::with_capacity(READ_BUFFER.max(self.read.len() + want));
+			let mut fresh = BytesMut::with_capacity(READ_BUFFER.max(self.read.len() + need));
 			fresh.extend_from_slice(&self.read);
 			self.read = fresh;
 		}
 		let mut cx = waiter.context();
-		match ready!(tokio_util::io::poll_read_buf(Pin::new(&mut self.io), &mut cx, &mut self.read)) {
+		match ready!(tokio_util::io::poll_read_buf(
+			Pin::new(&mut self.io),
+			&mut cx,
+			&mut self.read
+		)) {
 			Ok(0) => self.eof = true,
 			Ok(_) => {}
 			Err(err) => {

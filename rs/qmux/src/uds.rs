@@ -7,10 +7,7 @@ use crate::{Config, Driver, Error, Session};
 /// Connect a QMux client over a Unix socket with one session configuration.
 ///
 /// A Unix socket negotiates its application protocol in-band through `Config::protocol`.
-pub async fn connect(
-	path: impl AsRef<Path>,
-	config: Config,
-) -> Result<(Session, Driver<Stream<UnixStream>>), Error> {
+pub async fn connect(path: impl AsRef<Path>, config: Config) -> Result<(Session, Driver<Stream<UnixStream>>), Error> {
 	let stream = UnixStream::connect(path).await?;
 	finish(stream, config, false).await
 }

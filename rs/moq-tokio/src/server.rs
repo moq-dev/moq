@@ -2065,7 +2065,11 @@ mod tests {
 			if allowed {
 				let mut config = qmux::Config::new(qmux::Version::QMux01);
 				config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]);
-				let session = crate::spawn_qmux(qmux::uds::connect(&path, config).await.expect("allowed peer negotiates"));
+				let session = crate::spawn_qmux(
+					qmux::uds::connect(&path, config)
+						.await
+						.expect("allowed peer negotiates"),
+				);
 				assert_eq!(session.protocol(), Some("moq-lite-06"));
 			} else {
 				let mut peer = tokio::net::UnixStream::connect(&path).await.unwrap();

@@ -48,7 +48,10 @@ async fn a_record_split_across_reads_arrives_whole() {
 		for byte in &wire[..wire.len() - 1] {
 			peer.write_all(&[*byte]).await.unwrap();
 			tokio::task::yield_now().await;
-			assert!(try_recv(&mut stream).is_pending(), "{version:?}: a partial record arrived");
+			assert!(
+				try_recv(&mut stream).is_pending(),
+				"{version:?}: a partial record arrived"
+			);
 		}
 		peer.write_all(&wire[wire.len() - 1..]).await.unwrap();
 		assert_eq!(recv(&mut stream).await.unwrap(), payload, "{version:?}");

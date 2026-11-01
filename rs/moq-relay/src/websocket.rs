@@ -109,7 +109,9 @@ fn upgrade_key(request: &Request) -> Option<HeaderValue> {
 			.is_some_and(|version| version == "13")
 		// hyper hands this out only for a connection that can switch protocols.
 		&& request.extensions().get::<hyper::upgrade::OnUpgrade>().is_some();
-	upgrade.then(|| headers.get(header::SEC_WEBSOCKET_KEY).cloned()).flatten()
+	upgrade
+		.then(|| headers.get(header::SEC_WEBSOCKET_KEY).cloned())
+		.flatten()
 }
 
 /// The 101 response accepting the upgrade keyed `key` with `protocol`.
@@ -141,7 +143,11 @@ fn socket_config() -> tungstenite::protocol::WebSocketConfig {
 /// The relay's own listeners hand hyper a plain or TLS stream, which comes back whole with
 /// whatever hyper read past the request, so qmux polls the socket directly rather than through
 /// hyper's boxed IO. A router served by another HTTP server keeps that IO.
-async fn serve_upgraded(upgraded: hyper::upgrade::Upgraded, options: moq_tokio::websocket::Options, state: Arc<WebState>) {
+async fn serve_upgraded(
+	upgraded: hyper::upgrade::Upgraded,
+	options: moq_tokio::websocket::Options,
+	state: Arc<WebState>,
+) {
 	let upgraded = match upgraded.downcast::<TokioIo<Io<Accepted>>>() {
 		Ok(parts) => return serve_socket(parts.io.into_inner().into_inner(), parts.read_buf, options, state).await,
 		Err(upgraded) => upgraded,
@@ -382,10 +388,7 @@ mod tests {
 
 		// Our preference wins over the client's order.
 		let fallback = supported.last().expect("no supported subprotocols");
-		assert_eq!(
-			select(&[fallback.as_bytes(), known.as_bytes()]),
-			Some(known.clone())
-		);
+		assert_eq!(select(&[fallback.as_bytes(), known.as_bytes()]), Some(known.clone()));
 	}
 
 	/// Send a raw WebSocket handshake and return its HTTP status line.

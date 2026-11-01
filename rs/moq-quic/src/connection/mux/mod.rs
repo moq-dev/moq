@@ -512,9 +512,7 @@ impl Connection {
 
 		// Stream data and datagrams last, so a STREAM frame without a Length field runs to the
 		// end of the record
-		let written = self
-			.streams
-			.write_frames(buf, 0..budget, self.config.send_fairness);
+		let written = self.streams.write_frames(buf, 0..budget, self.config.send_fairness);
 		for meta in written.streams {
 			let id = meta.id;
 			// A reset held until the peer has the data below its Reliable Size goes out now

@@ -188,7 +188,10 @@ impl<I> Io<I> {
 	/// The stream underneath, once HTTP has handed it to another protocol and no longer
 	/// needs the idle deadline.
 	#[cfg(feature = "websocket")]
-	#[allow(dead_code, reason = "the http_idle benchmark includes this module without the WebSocket route")]
+	#[allow(
+		dead_code,
+		reason = "the http_idle benchmark includes this module without the WebSocket route"
+	)]
 	pub(crate) fn into_inner(self) -> I {
 		self.inner
 	}
