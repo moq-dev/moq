@@ -442,8 +442,10 @@ gst-smoke *args:
 # Build the Criterion benches CodSpeed simulates; CI runs them with `cargo codspeed run`.
 # Only single-threaded benches without I/O, whose instruction counts repeat. CodSpeed skips
 # `iter_custom`, so targets made only of it are left out too. Nightly still measures them all.
+# Valgrind runs ADX but hides it from CPUID (https://bugs.kde.org/show_bug.cgi?id=494162), so
+# rind is built to skip that one startup check, or it refuses the simulated CPU.
 codspeed:
-    cargo codspeed build --locked -m simulation \
+    VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation \
         -p kio -p moq-audio -p moq-e2ee -p moq-json -p moq-mux -p moq-net -p moq-pattern -p moq-quic -p moq-rtmp \
         --features moq-audio/bus,moq-net/fuzz,moq-quic/fuzz \
         --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
