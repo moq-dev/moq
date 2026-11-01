@@ -717,7 +717,7 @@ pub struct MoqMediaCatalogProducer {
 }
 
 impl MoqMediaCatalogProducer {
-	#[cfg(all(any(feature = "audio", feature = "video"), not(target_arch = "wasm32")))]
+	#[cfg(any(feature = "audio", feature = "video"))]
 	pub(crate) fn broadcast(&self) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		self.broadcast.upgrade().ok_or(MoqError::Closed)
 	}
@@ -1780,7 +1780,7 @@ mod catalog_tests {
 	}
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod timebase_tests {
 	use super::*;
 	use std::time::Duration;
@@ -2038,7 +2038,7 @@ mod timebase_tests {
 				reserve();
 			}
 			for touched in [1, 16, 256] {
-				let start = moq_clock::Instant::now();
+				let start = kio::clock::Instant::now();
 				for _ in 0..1000 {
 					for _ in 0..touched {
 						reserve();

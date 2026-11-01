@@ -1,5 +1,5 @@
-import { expect, setSystemTime, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { expect, test } from "bun:test";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { GroupTooLarge, NotFound, StreamCode } from "./error.ts";
 import { MAX_GROUP_FRAMES } from "./group.ts";
@@ -205,7 +205,7 @@ test("an info lookup joining a subscription's request is answered after the subs
 
 	// Flush every pending notification, so only the lookup is left holding demand.
 	subscriber.close();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	expect(request.demand().wanted.peek()).toBeUndefined();
 
 	request.accept({ timescale: Timescale.MILLI, priority: 2 });
@@ -500,8 +500,10 @@ test("a read throws GroupTooLarge on an overflow, then resyncs to the next group
 });
 
 test("a stalled consumer does not pin evicted groups", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
 	try {
-		setSystemTime(new Date(10_000));
+		clock.jump(Nano.fromMilli(Milli(10_000)));
 
 		const broadcast = new BroadcastProducer();
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Milli(1000) });
@@ -513,7 +515,7 @@ test("a stalled consumer does not pin evicted groups", async () => {
 
 		// Advance past the cache window and write again to trigger a prune. The old
 		// (closed, aged-out) group is dropped from the stalled sink, not retained.
-		setSystemTime(new Date(12_000));
+		clock.jump(Nano.fromMilli(Milli(2_000)));
 		producer.writeFrame(textFrame("fresh"));
 
 		// The next group in arrival order is the fresh one (seq 1): the old (seq 0) group
@@ -526,7 +528,7 @@ test("a stalled consumer does not pin evicted groups", async () => {
 		const next = await Promise.race([stalled.recvGroup(), Promise.resolve(pending)]);
 		expect(next).toBe(pending);
 	} finally {
-		setSystemTime();
+		installed.close();
 	}
 });
 

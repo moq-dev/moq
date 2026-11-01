@@ -417,11 +417,42 @@ media_runs() {
     "$action" "$who: control: offset audio" "${roles[@]}" --fault audio-offset --cases none --expect-fail "audio/video sync"
     "$action" "$who: control: leaked session" "${roles[@]}" --leak --cases detach --expect-fail "resource baseline"
     "$action" "$who: control: lagging latecomer" "${roles[@]}" --lag --cases late-join --expect-fail "late join reaches live"
+    # Skipped where the publisher has no AAC encoder, which for Chromium is every Linux build.
+    "$action" "$who: AAC publish and codec change" "${roles[@]}" --cases aac,audio-codec --focused
+    # The native runs have no browser publisher, so only the default Chromium-publisher pass runs them.
+    [[ "$MEDIA_PUBLISHER" == chromium ]] || return 0
+    # The Rust CLI publishing the same pattern from ffmpeg (src/native.ts), so the player grades a
+    # native importer's timestamps: one rendition per codec, switched between, then AAC alone.
+    "$action" "$engine: native publisher: opus + AAC" --native opus,mp4a --player-engine "$engine" --cases audio-switch
+    "$action" "$engine: native publisher: AAC" --native mp4a --player-engine "$engine" --cases none
+    # The fixture's audio-offset fault as ffmpeg's -itsoffset: OFFSET_STEPS (4) steps of 200 ms.
+    "$action" "$engine: control: native offset audio" --native opus --native-offset 0.8 --player-engine "$engine" --cases none --expect-fail "audio/video sync"
+}
+
+# The native media publisher: ffmpeg's rendering of the media QA pattern, in each of <codecs>, with
+# the audio delayed <offset> seconds, imported by the Rust CLI as <broadcast>.
+# shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
+run_native_media() {
+    local codecs="$1" offset="$2" broadcast="$3" video audio connect
+    video=$(cd "$CLIENTS/js" && bun src/native.ts video) || return 1
+    audio=$(cd "$CLIENTS/js" && bun src/native.ts audio) || return 1
+    rust_connect "$MEDIA_URL"
+    ffmpeg_fmp4 "$audio" "$codecs" "$video" "$offset" |
+        RUST_LOG="$CLI_LOG" "$MOQ" "${connect[@]}" --broadcast "$broadcast" import --max-age 5s fmp4
 }
 
 # shellcheck disable=SC2329  # invoked indirectly via media_runs
 plan_media() {
-    record "not run" case="$1" publisher=js subscriber=js
+    record "not run" case="$1" publisher="$(media_publisher "${@:2}")" subscriber=js
+}
+
+# The publisher a media run's <args> name: the Rust CLI for a native run, else the browser fixture.
+# shellcheck disable=SC2329  # invoked indirectly via media_runs
+media_publisher() {
+    case " $* " in
+        *" --native "* | *" --publisher native "*) echo rust ;;
+        *) echo js ;;
+    esac
 }
 
 # Record every case this run will reach as `not run`, before any build, so one the run
@@ -991,12 +1022,14 @@ tone_source() {
     printf 'aevalsrc=%s:s=48000:c=%s' "${exprs[*]}" "$layout"
 }
 
-# ffmpeg_fmp4 <tone> <codecs>: the Rust CLI's input, the same picture plus <tone> in each of
-# <codecs> (see publisher_codecs), all in fragmented MP4, so its cells also cover moq-mux's fMP4
-# Opus and AAC import, and every subscriber's AAC decode.
+# ffmpeg_fmp4 <audio> <codecs> [video] [offset]: the Rust CLI's input, the same picture (or the
+# lavfi <video>) plus the lavfi <audio> in each of <codecs> (see publisher_codecs), all in
+# fragmented MP4, so its cells also cover moq-mux's fMP4 Opus and AAC import, and every
+# subscriber's AAC decode. <offset> delays the audio by that many seconds.
 # shellcheck disable=SC2329  # reached from a function 'harness_spawn' invokes
 ffmpeg_fmp4() {
-    local codec i=0 audio=()
+    local codec i=0 audio=() video="${3:-testsrc=size=${SIZE}:rate=${FPS}}" delay=()
+    [[ -z "${4:-}" ]] || delay=(-itsoffset "$4")
     for codec in ${2//,/ }; do
         case "$codec" in
             opus) audio+=(-map 1:a "-c:a:$i" libopus "-b:a:$i" 128k) ;;
@@ -1008,8 +1041,8 @@ ffmpeg_fmp4() {
         esac
         i=$((i + 1))
     done
-    ffmpeg -hide_banner -loglevel error -re -f lavfi -i "testsrc=size=${SIZE}:rate=${FPS}" \
-        -re -f lavfi -i "$(tone_source "$1")" -map 0:v "${audio[@]}" \
+    ffmpeg -hide_banner -loglevel error -re -f lavfi -i "$video" \
+        ${delay[@]+"${delay[@]}"} -re -f lavfi -i "$1" -map 0:v "${audio[@]}" \
         -c:v libx264 -profile:v baseline -preset ultrafast -pix_fmt yuv420p \
         -x264-params "keyint=${FPS}:min-keyint=${FPS}:scenecut=0" \
         -f mp4 -movflags cmaf+separate_moof+delay_moov+skip_trailer -frag_duration 1000 -
@@ -1050,7 +1083,7 @@ run_publisher() {
                 # readers' 5 s. Each 1 s fragment lands as one burst, so with a 1 s
                 # max-age the oldest group a joining reader is served goes stale as soon as the
                 # next group lands, cutting it mid-read and failing the gap check.
-                ffmpeg_fmp4 "$tone" "$(publisher_codecs rust)" | RUST_LOG="$CLI_LOG" "$MOQ" "${connect[@]}" --connect-version "$(cell_version rust)" \
+                ffmpeg_fmp4 "$(tone_source "$tone")" "$(publisher_codecs rust)" | RUST_LOG="$CLI_LOG" "$MOQ" "${connect[@]}" --connect-version "$(cell_version rust)" \
                     --broadcast "$broadcast" import --max-age 5s fmp4
             else
                 ffmpeg_h264 | RUST_LOG="$CLI_LOG" "$MOQ" "${connect[@]}" --connect-version "$(cell_version rust)" \
@@ -2057,11 +2090,25 @@ PYCODE
 MEDIA_RUNS=0
 # shellcheck disable=SC2329  # invoked indirectly via media_runs
 run_media() {
-    local name="$1" log started status=0 sink=()
+    local name="$1" log started status=0 sink=() codecs="" offset="" broadcast pub=""
     shift
     log="$HARNESS_RUN/media-${name//[^[:alnum:]._-]/-}.log"
     started=$SECONDS
     MEDIA_RUNS=$((MEDIA_RUNS + 1))
+    # A native run starts its publisher here and hands media.ts the broadcast to watch.
+    while [[ "${1:-}" == --native* ]]; do
+        case "$1" in
+            --native) codecs="$2" ;;
+            --native-offset) offset="$2" ;;
+        esac
+        shift 2
+    done
+    if [[ -n "$codecs" ]]; then
+        broadcast="media-native-$$-$MEDIA_RUNS.hang"
+        harness_spawn "native-$MEDIA_RUNS" "$HARNESS_RUN/native-$MEDIA_RUNS.log" run_native_media "$codecs" "$offset" "$broadcast"
+        pub="$HARNESS_PID"
+        set -- --publisher native --broadcast "$broadcast" "$@"
+    fi
     # Firefox only resumes an AudioContext on an output device, and a Linux CI runner has none. A
     # private null sink gives it one, and keeps a local run off the desktop's speakers. macOS always
     # has CoreAudio's output, and the dev shell has no PulseAudio there.
@@ -2069,8 +2116,13 @@ run_media() {
         sink=(python3 "$WORKSPACE/test/lib/pulse.py" --dir "$HARNESS_RUN/pulse-$MEDIA_RUNS" --)
     (cd "$CLIENTS/js" && "${sink[@]}" bun media.ts --url "$MEDIA_URL" --timeout "$TIMEOUT" "$@") >"$log" 2>&1 ||
         status=$?
-    local cell=(case="$name" publisher=js subscriber=js seconds=$((SECONDS - started)) log="$log")
-    if [[ "$status" -eq 0 ]]; then
+    [[ -z "$pub" ]] || stop_publisher "$pub" rust
+    local cell=(case="$name" publisher="$(media_publisher "$@")" subscriber=js seconds=$((SECONDS - started)) log="$log")
+    if [[ "$status" -eq 77 ]]; then
+        # media.ts names what this host lacks; the case is not a pass.
+        echo "  SKIP  $name: $(grep -m1 '^SKIP ' "$log" | cut -c6-)"
+        record skip "${cell[@]}" detail="$(grep -m1 '^SKIP ' "$log" | cut -c6-)"
+    elif [[ "$status" -eq 0 ]]; then
         echo "  PASS  $name ($((SECONDS - started))s)"
         record pass "${cell[@]}"
         # The measurements are the point even when nothing fails: a skew or frame rate creeping
@@ -2086,7 +2138,7 @@ run_media() {
 
 # shellcheck disable=SC2329  # invoked indirectly via media_runs
 fail_media() {
-    record fail case="$1" publisher=js subscriber=js detail="browser client unavailable"
+    record fail case="$1" publisher="$(media_publisher "${@:2}")" subscriber=js detail="browser client unavailable"
 }
 
 # Check that a publisher refused for <broadcast> failed loud: Unauthorized, naming the path.

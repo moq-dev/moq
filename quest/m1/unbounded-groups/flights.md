@@ -75,7 +75,3 @@ Public API: none. Wire: none, beyond the existing frame-offset fills.
 ## Required
 
 - [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - flights pace on their fastest rider the same way the live edge does
-
-## Related
-
-- [Refill evicted groups](/quest/m2/evicted-refill.md) - refills whole groups evicted before a reader took them

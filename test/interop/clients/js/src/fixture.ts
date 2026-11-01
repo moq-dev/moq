@@ -16,8 +16,15 @@ import { Milli, Nano } from "@moq/clock";
 import * as Moq from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
-import type { Fault, FixtureState } from "./contract";
-import { FIXTURE_EVENT, KEYFRAME_INTERVAL_MS, OFFSET_STEPS, SAMPLE_RATE } from "./contract";
+import type { AudioCodec, Fault, FixtureState } from "./contract";
+import {
+	ALT_AUDIO,
+	CHANGED_SAMPLE_RATE,
+	FIXTURE_EVENT,
+	KEYFRAME_INTERVAL_MS,
+	OFFSET_STEPS,
+	SAMPLE_RATE,
+} from "./contract";
 import * as Pattern from "./pattern";
 
 /** Cap the encoder rather than letting it track a bandwidth estimate, so runs are comparable. */
@@ -49,6 +56,10 @@ export class Fixture {
 	#timer: number | undefined;
 	readonly #canvas: HTMLCanvasElement;
 	readonly #video: Publish.Video.Encoder;
+	readonly #broadcast: Publish.Broadcast;
+	readonly #audioCapture: Publish.Audio.Capture;
+	readonly #audioEncoder: Publish.Audio.Encoder;
+	readonly #alt = new Signal<Publish.Audio.Encoder | undefined>(undefined);
 	#generation = 0;
 
 	constructor(
@@ -59,12 +70,14 @@ export class Fixture {
 			fault,
 			versions,
 			generation = 0,
+			audioCodec = "opus",
 		}: {
 			url: string;
 			name: string;
 			fault: Fault;
 			versions?: string[];
 			generation?: number;
+			audioCodec?: AudioCodec;
 		},
 	) {
 		this.#generation = generation;
@@ -117,6 +130,7 @@ export class Fixture {
 			name: Moq.Path.from(name),
 			display: capture.out.display,
 		});
+		this.#broadcast = broadcast;
 		this.#signals.cleanup(() => broadcast.close());
 
 		const video = new Publish.Video.Encoder("video", {
@@ -152,14 +166,18 @@ export class Fixture {
 			source: { track: audioTrack, kind: "music" },
 			channelCount: 1,
 		});
+		this.#audioCapture = audioCapture;
 		this.#signals.cleanup(() => audioCapture.close());
 
 		const audio = new Publish.Audio.Encoder("audio", {
 			broadcast,
 			capture: audioCapture,
 			enabled: true,
+			codec: audioCodec,
 		});
+		this.#audioEncoder = audio;
 		this.#signals.cleanup(() => audio.close());
+		this.#signals.cleanup(() => this.#alt.peek()?.close());
 
 		// The tone and the picture share this clock, so neither can start until the audio graph runs.
 		// Without the permissive launch flags that takes a real gesture, and `resume()` on a
@@ -202,6 +220,23 @@ export class Fixture {
 				audioActive: effect.get(audio.out.active),
 				encodedFrames: effect.get(video.out.stats).frames,
 				videoEnabled: effect.get(video.out.catalog)?.enabled !== false,
+				audio: Object.fromEntries(
+					[audio, effect.get(this.#alt)].flatMap((encoder) => {
+						const config = encoder && effect.get(encoder.out.catalog);
+						return config
+							? [
+									[
+										encoder.name,
+										{
+											codec: config.codec,
+											sampleRate: config.sampleRate,
+											numberOfChannels: config.numberOfChannels,
+										},
+									],
+								]
+							: [];
+					}),
+				),
 			};
 			console.debug(FIXTURE_EVENT + JSON.stringify(state));
 		});
@@ -267,6 +302,43 @@ export class Fixture {
 		this.#generation = 2;
 		this.#canvas.width = Pattern.WIDTH * 2;
 		this.#canvas.height = Pattern.HEIGHT * 2;
+	}
+
+	/** Switch the audio rendition from Opus to AAC, which re-mints its track. */
+	changeAudioCodec(): void {
+		this.#audioEncoder.codec.set("aac");
+	}
+
+	/** Rebuild the capture graph at a rate Opus carries natively, which re-mints the audio track. */
+	changeAudioRate(): void {
+		this.#audioCapture.sampleRate.set(CHANGED_SAMPLE_RATE);
+	}
+
+	/** Capture the tone in stereo, which re-mints the audio track. The tone is the same in both channels. */
+	changeAudioChannels(): void {
+		this.#audioCapture.channelCount.set(2);
+	}
+
+	/**
+	 * Publish {@link ALT_AUDIO} beside the main rendition, encoding the same capture at twice the
+	 * bitrate, so a player has a second rendition of the same tone to switch to.
+	 */
+	addAudioRendition(): void {
+		if (this.#alt.peek()) return;
+		this.#alt.set(
+			new Publish.Audio.Encoder(ALT_AUDIO, {
+				broadcast: this.#broadcast,
+				capture: this.#audioCapture,
+				enabled: true,
+				codec: { mime: "opus", bitrate: 64_000 },
+			}),
+		);
+	}
+
+	/** Stop publishing {@link ALT_AUDIO}, dropping it from the catalog. */
+	removeAudioRendition(): void {
+		this.#alt.peek()?.close();
+		this.#alt.set(undefined);
 	}
 
 	/** Stop publishing and release the capture, audio graph, and session. */

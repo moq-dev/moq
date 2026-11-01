@@ -2,9 +2,9 @@
 
 use std::time::Duration;
 
+use serde::Serializer;
 use serde::de::Deserializer;
 use serde::ser::Error as _;
-use serde::{Deserialize, Serialize, Serializer};
 use serde_with::{DeserializeAs, SerializeAs};
 
 /// A [`serde_with`] adapter encoding a [`Duration`] as whole milliseconds, rounded up.
@@ -21,15 +21,15 @@ pub(crate) struct MillisCeil;
 impl SerializeAs<Duration> for MillisCeil {
 	fn serialize_as<S: Serializer>(source: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
 		let millis = source.as_nanos().div_ceil(1_000_000);
-		u64::try_from(millis)
-			.map_err(|_| S::Error::custom("a duration too long to express in milliseconds"))?
-			.serialize(serializer)
+		let millis =
+			u64::try_from(millis).map_err(|_| S::Error::custom("a duration too long to express in milliseconds"))?;
+		crate::snapshot::Number::serialize_as(&millis, serializer)
 	}
 }
 
 impl<'de> DeserializeAs<'de, Duration> for MillisCeil {
 	fn deserialize_as<D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
-		u64::deserialize(deserializer).map(Duration::from_millis)
+		crate::snapshot::Number::deserialize_as(deserializer).map(Duration::from_millis)
 	}
 }
 
@@ -51,9 +51,8 @@ impl SerializeAs<Option<Duration>> for MillisCeil {
 
 impl<'de> DeserializeAs<'de, Option<Duration>> for MillisCeil {
 	fn deserialize_as<D: Deserializer<'de>>(deserializer: D) -> Result<Option<Duration>, D::Error> {
-		Ok(Option::<u64>::deserialize(deserializer)?
-			.filter(|millis| *millis != 0)
-			.map(Duration::from_millis))
+		let millis: Option<u64> = Option::<crate::snapshot::Number>::deserialize_as(deserializer)?;
+		Ok(millis.filter(|millis| *millis != 0).map(Duration::from_millis))
 	}
 }
 
