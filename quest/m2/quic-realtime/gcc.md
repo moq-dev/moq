@@ -1,31 +1,31 @@
-# [L] GCC candidate
+# [S] GCC candidate
 
 ## Goal
 
-libwebrtc's Google Congestion Control runs as a controller in
-`moq-congestion`, fed by receive timestamps, and reports its queuing delay,
-throughput, and reaction time on the shared moq-shaper uplink presets.
+Under `moq_congestion::Gcc`, moq-quic's native probing raises the estimate to
+the session's probe target once the path allows it, so a rung stopped for want
+of an estimate comes back, as it does under BBR3.
 
 ## Plan
 
-Decided 2026-10-17: vendor [goog_cc](https://github.com/kixelated/goog_cc)
-into `rs/moq-congestion/src/gcc/` and refresh it to current WebRTC rather
-than depend on the crates.io 0.1.4 release. The port predates AI-assisted
-review and tracks a 2024-12-09 WebRTC snapshot, so owning it in-tree lets us
-trim it to what QUIC needs and review it the way we review the rest of the
-fork.
+GoogCC is vendored in `rs/moq-congestion/src/gcc/`, refreshed to WebRTC
+556f7eec27, trimmed to what QUIC has, and driven as a `Controller` from
+receive timestamps. Its probe clusters report `probe_inflight`, and its
+queuing delay, throughput, and reaction time on the sim replicas of the
+cellular presets are in the PR that landed it.
 
-- Refresh against current `modules/congestion_controller/goog_cc` and record
-  the WebRTC revision in the module docs.
-- Trim what QUIC makes redundant: RTP packet feedback types become the
-  Controller's per-packet send and receive instants; drop the parts that only
-  serve RTCP or probe clusters unless the comparison needs them.
-- GCC outputs a target rate and pacing rate; map them to the Controller's
-  window and `ControllerMetrics::{pacing_rate, bandwidth_estimate}`, keeping
-  its congestion-window pushback as the inflight bound.
-- Keep the BSD license and PATENTS file with the vendored code.
-- Implement `Controller::probes` and report `probe_inflight` so moq-quic's
-  native probing still raises the estimate (decided 2026-10-25, maintainer;
-  see the [epic](/quest/m2/quic-realtime/README.md)). Measure that a stopped
-  rung recovers under it.
-- Unit tests drive the controller with mocked time, not wall clock.
+What remains: `tests::probe::rises_toward_target_under_gcc` ends at
+3.2 Mbit/s against a 4 Mbit/s target on every seed, while GCC without the
+target reaches 4.9 Mbit/s. GoogCC probes at twice its estimate and reads a
+probe at the slower of its send and receive rates, while the transport sends
+the duplicates filling a probe at no more than the target in all, so past a
+frame's media they trail the cluster and the reading falls short. Which side
+changes is undecided: the controller learning the target (GoogCC's
+`OnMaxTotalAllocatedBitrate` takes it, and caps its probes at twice it), or
+the transport letting a probe's duplicates keep the controller's probe rate.
+Once one lands, `rises_toward_target_under_gcc` asserts the rise as
+`rises_to_target` does for BBR3.
+
+## Related
+
+- [Realtime uplink congestion control](/quest/m2/quic-realtime/README.md) - the bake-off GCC is a candidate in

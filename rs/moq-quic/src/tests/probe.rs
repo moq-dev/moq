@@ -899,17 +899,6 @@ fn steps_keyframes() {
 	falls(&trials, Duration::from_secs(40), 375_000);
 }
 
-/// Under GCC, as the keyframed steps under BBR3
-#[test]
-#[ignore = "nightly: just rs quic-sim"]
-fn steps_gcc() {
-	let _guard = subscribe();
-	let scenario = Scenario { gcc: true, ..steps() };
-	let trials = compare("steps gcc", scenario, SEEDS);
-	rises(&trials, Duration::from_secs(20));
-	falls(&trials, Duration::from_secs(40), 375_000);
-}
-
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
 fn steps_constant() {

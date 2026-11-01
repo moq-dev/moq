@@ -70,13 +70,16 @@ use goog_cc_network_control::{GoogCcNetworkController, NetworkControllerConfig};
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod bench;
+
 use std::{any::Any, collections::VecDeque, num::NonZeroU16, sync::Arc, time::Duration};
 
 use kio::clock::Instant;
 
 use crate::{
     Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent,
-    pacer::{Pacer, Rate},
+    pacer::{self, Pacer, Rate},
 };
 use api::{
     transport::{
@@ -425,6 +428,19 @@ impl Controller for Gcc {
         };
         // A pacing rate makes the RTT irrelevant; the MTU only sizes the bursts.
         self.pacer.delay(Duration::ZERO, bytes, self.mtu, now, rate)
+    }
+
+    /// The pacer's own burst budget, or a single packet while a probe cluster runs.
+    ///
+    /// A transport checks each datagram's pace while the one before it is still being built, so
+    /// a batch longer than the budget releases a packet the budget never pays for. Under
+    /// 2 Mbit/s the budget is one packet, and batching two would pace at twice the rate.
+    fn burst(&self) -> Option<u64> {
+        let mtu = u64::from(self.mtu);
+        if self.prober.remaining().is_some() {
+            return Some(mtu);
+        }
+        Some(pacer::rate_capacity(self.pacing_rate, self.mtu).max(mtu))
     }
 
     fn metrics(&self) -> ControllerMetrics {

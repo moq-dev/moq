@@ -2,7 +2,7 @@
 
 MoQ's sans-IO QUIC state machine, a hard fork of [quinn-proto](https://github.com/quinn-rs/quinn).
 
-BBR3, Cubic, and Unlimited live in [moq-congestion](../moq-congestion); this crate stores each packet's controller state and hands it back on acknowledgement or loss, and the controller paces the sends.
+BBR3, Cubic, GCC, and Unlimited live in [moq-congestion](../moq-congestion); this crate stores each packet's controller state and hands it back on acknowledgement or loss, and the controller paces the sends.
 
 All credit for the code goes to the quinn developers; it stays under quinn's MIT or Apache-2.0 license.
 
