@@ -15,6 +15,15 @@ this quest landed in [moq-dev/moq#7513](https://github.com/moq-dev/moq/pull/7513
 A three-level wake index means an owner poll visits only woken words, so poll
 cost no longer depends on the historical peak. The memory half remains.
 
+Decided 2026-11-01 by the maintainer on
+[moq-dev/moq#7513](https://github.com/moq-dev/moq/pull/7513):
+
+- ✅ (a) Land the CPU half as is, and keep this quest for the memory half:
+  reclaimable slot chunks, measured against repeat-burst cost and the real
+  consumers' task sizes.
+- (b) Treat retained capacity as justified and delete this quest.
+- (c) Implement chunk reclaim in the same PR.
+
 The [`task_capacity` bench](/rs/kio/benches/task_capacity.rs) reports
 retained bytes after a burst. With an 8-byte task, the set keeps about
 184 B per peak slot whatever is still live: 188,912 B after a 1,024-task

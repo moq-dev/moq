@@ -256,6 +256,7 @@ const PEAKS: [usize; 4] = [1, 1024, 16_384, 65_536];
 
 /// A set that grew to `peak` tasks, every one parked, then removed all but the
 /// slots `live` keeps. Returns the set and the live tasks' gates.
+#[expect(clippy::type_complexity, reason = "an opaque task type cannot be aliased on stable")]
 fn after_burst(
 	peak: usize,
 	live: impl Fn(usize) -> bool,
