@@ -1531,7 +1531,10 @@ impl RecvBandwidth {
 						}
 					}
 					// The stream ended (peer FIN'd or errored). Don't hammer an
-					// uncooperative peer; give up for the rest of the session.
+					// uncooperative peer; give up for the rest of the session, and
+					// clear the estimate so consumers don't keep reading its last rate.
+					let bandwidth = self.subscriber.recv_bandwidth.as_ref().expect("gated above");
+					let _ = bandwidth.set(None);
 					return Poll::Ready(Ok(()));
 				}
 			}
@@ -4788,6 +4791,60 @@ mod tests {
 					"{end:?}"
 				),
 			}
+		}
+	}
+
+	/// A PROBE stream the peer ends, by FIN or reset, leaves no estimate behind: the
+	/// session gives up probing, so a held consumer must not keep its last rate.
+	#[moq_clock::test]
+	async fn an_ended_probe_clears_the_estimate() {
+		use crate::transport::poll::{SendStream as _, Session as _};
+		for reset in [false, true] {
+			let version = Version::Lite04;
+			let (session, peer) = crate::transport::memory::pair(Default::default());
+			let producer = bandwidth::Producer::new();
+			let mut estimate = producer.consume();
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(session.clone()),
+				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				recv_bandwidth: Some(producer),
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+			let mut probe = RecvBandwidth::new(subscriber);
+			assert!(probe.poll(&kio::Waiter::noop()).is_pending());
+
+			// The peer reports once.
+			let (mut send, _recv) = kio::wait(|waiter| peer.poll_accept_bi(waiter)).await.unwrap();
+			let mut report = Vec::new();
+			lite::Probe {
+				bitrate: Some(1_000_000),
+				rtt: None,
+			}
+			.encode(&mut crate::coding::Encoder::new(&mut report, version.into()), version)
+			.unwrap();
+			kio::wait(|waiter| send.poll_write(waiter, &report)).await.unwrap();
+			let rate = kio::wait(|waiter| {
+				let _ = probe.poll(waiter);
+				estimate.poll_changed(waiter)
+			})
+			.await
+			.unwrap();
+			assert_eq!(rate, Some(bandwidth::Rate::from_bps(1_000_000)));
+
+			// Then ends the stream.
+			if reset {
+				send.reset(crate::StreamError::Cancel.to_code());
+			} else {
+				send.finish().unwrap();
+			}
+			kio::wait(|waiter| probe.poll(waiter)).await.unwrap();
+			assert_eq!(estimate.peek(), None, "reset: {reset}");
 		}
 	}
 
