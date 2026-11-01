@@ -10,8 +10,7 @@ path, track name, and group sequence, and a subscriber that loses its route
 resumes by asking for the first frame it lacks. Both are only safe while every
 source of a name serves the same bytes. This page is the contract publishers,
 players, and relays share to keep that true across restarts, failover, and work
-started on demand. Wire details live in the [moq-lite](/draft/moq-lite) and
-[epoch](/draft/moq-epoch) drafts.
+started on demand. Wire details live in the [moq-lite](/draft/moq-lite) draft.
 
 ## Identity is a path and an epoch
 
@@ -52,11 +51,10 @@ the ingest gateways do it for you; see [publisher runs](/bin/cli#publisher-runs)
 ## Routes with and without an epoch
 
 An epoch reaches readers only over hops that carry it: moq-lite 07
-(`moq-lite-07-wip`, opt-in) and moq-transport with the
-[epoch extension](/draft/moq-epoch), which is on by default. Older moq-lite
-versions and moq-transport without the extension drop it. The
-[moq-lite](/draft/moq-lite) and [epoch](/draft/moq-epoch) drafts say how each
-version signals another instance taking the path.
+(`moq-lite-07-wip`, opt-in). Older moq-lite versions and moq-transport drop
+it, so use moq-lite 07 on every hop where continuity matters. The
+[moq-lite draft](/draft/moq-lite) says how each version signals another
+instance taking the path.
 
 A relay forwards an epoch unchanged and never invents one. Without one, no
 route can prove it serves the same bytes as another, so any other route
@@ -145,11 +143,17 @@ A lazy job's lifecycle, as a viewer of `transcode/alice` sees it through a relay
 1. **Request.** The relay resolves the path through the claim and forwards the
    request. The worker starts job A and publishes `transcode/alice` under
    epoch A.
-2. **Cold start.** The exact route outranks the claim, and nothing proves the
-   claim's answer was job A, so the first subscription resolved through the
-   claim is reset. A follower sees a restart and requests again; a holder's
-   track ends with an error, and it requests again. Either way the second
-   request reaches job A. Every wire version behaves this way today.
+2. **Takeover.** Publishing the answer through the claim proves it was job A,
+   so job A's route takes over the claim: what the viewer already resolved
+   through the claim beneath `transcode/alice` keeps playing, now as epoch A.
+   A Rust follower sees a takeover rather than a restart (JavaScript still
+   reports a start or restart). A different worker, or a
+   job restarted under the same claim, never inherits it. Only moq-lite 07
+   carries the takeover across relays. Older wires, and paths where a relay
+   cannot vouch for it, send an ordinary announcement instead, so the first
+   subscription through the claim is reset there: a follower sees a restart
+   and requests again, and a holder's track ends with an error, and it
+   requests again. Either way the second request reaches job A.
 3. **Steady state.** Requests resolve epoch A by its exact route. Routes
    carrying epoch A through other relays fail over without a seam.
 4. **Job restart.** The worker closes job A's publication. The path falls back

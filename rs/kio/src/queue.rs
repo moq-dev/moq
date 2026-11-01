@@ -130,7 +130,7 @@ impl<T> Queue<T> {
 	/// (or anything that does).
 	///
 	/// Registers `waiter` while full; a pop or close re-polls it.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_push_with<F: FnOnce() -> T>(&self, waiter: &Waiter, make: F) -> Poll<Result<(), Closed>> {
 		let mut waiters = {
 			let mut state = self.state.lock();
@@ -181,7 +181,7 @@ impl<T> Queue<T> {
 	///
 	/// Queued items drain before closure is reported, so [`Closed`] means empty
 	/// *and* closed. Registers `waiter` while empty; a push or close re-polls it.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_pop(&self, waiter: &Waiter) -> Poll<Result<T, Closed>> {
 		let (item, mut waiters) = {
 			let mut state = self.state.lock();
@@ -262,7 +262,7 @@ impl<T> Clone for Queue<T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use std::{
 		sync::{

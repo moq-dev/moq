@@ -25,7 +25,7 @@ fn lite07() -> Version {
 
 /// The next event as `+name`, `-name`, `synced`, `end`, or `error: ..`.
 async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
-	match moq_clock::timeout(TIMEOUT, tracks.next())
+	match kio::clock::timeout(TIMEOUT, tracks.next())
 		.await
 		.expect("listing stalled")
 	{
@@ -53,7 +53,7 @@ async fn connect(
 }
 
 async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Consumer {
-	moq_clock::timeout(TIMEOUT, origin.consume().follow("bcast", None).unwrap().available())
+	kio::clock::timeout(TIMEOUT, origin.consume().follow("bcast", None).unwrap().available())
 		.await
 		.expect("announce timeout")
 		.expect("routed")
@@ -61,7 +61,7 @@ async fn resolve(origin: &moq_net::origin::Producer) -> moq_net::broadcast::Cons
 
 /// A session syncs at once, then lists the peer's tracks and their changes until the
 /// broadcast ends.
-#[moq_clock::test]
+#[kio::test]
 async fn a_session_lists_its_peers_tracks() {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -91,7 +91,7 @@ async fn a_session_lists_its_peers_tracks() {
 }
 
 /// TRACKS_ADD carries the track's whole TRACK_INFO, Refresh included.
-#[moq_clock::test]
+#[kio::test]
 async fn a_listing_carries_track_info() {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -107,7 +107,7 @@ async fn a_listing_carries_track_info() {
 	let (subscriber, _pair) = connect(&publisher, 2, lite07()).await;
 	let mut tracks = resolve(&subscriber).await.tracks().unwrap();
 	assert_eq!(next(&mut tracks).await, "synced");
-	let event = moq_clock::timeout(TIMEOUT, tracks.next())
+	let event = kio::clock::timeout(TIMEOUT, tracks.next())
 		.await
 		.expect("listing stalled")
 		.unwrap();
@@ -124,7 +124,7 @@ async fn a_listing_carries_track_info() {
 
 /// A listed track is a track like any other: a SUBSCRIBE from the listing reads the
 /// group it already holds from the cache.
-#[moq_clock::test]
+#[kio::test]
 async fn a_listed_track_serves_its_cached_group() {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -141,11 +141,11 @@ async fn a_listed_track_serves_its_cached_group() {
 	group.finish().unwrap();
 	assert_eq!(next(&mut tracks).await, "+late");
 
-	let mut sub = moq_clock::timeout(TIMEOUT, remote.track("late").unwrap().subscribe(None))
+	let mut sub = kio::clock::timeout(TIMEOUT, remote.track("late").unwrap().subscribe(None))
 		.await
 		.expect("subscribe timeout")
 		.expect("subscribe");
-	let mut group = moq_clock::timeout(TIMEOUT, sub.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 		.await
 		.expect("group timeout")
 		.unwrap()
@@ -157,7 +157,7 @@ async fn a_listed_track_serves_its_cached_group() {
 /// Through a relay: the relay answers each downstream listing at once from the one
 /// upstream listing it keeps, a cold relay's upstream tracks follow as live adds, and a
 /// removal reaches each downstream as its upstream reported it.
-#[moq_clock::test]
+#[kio::test]
 async fn a_relay_shares_its_upstream_listing() {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -191,7 +191,7 @@ async fn a_relay_shares_its_upstream_listing() {
 }
 
 /// A version without the Tracks Stream refuses the listing rather than answer it empty.
-#[moq_clock::test]
+#[kio::test]
 async fn lite06_cannot_list() {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -208,7 +208,7 @@ async fn lite06_cannot_list() {
 
 /// Each listed track counts against the session's `announces` cap: past it, the listing
 /// is reset rather than held, and the session stays.
-#[moq_clock::test]
+#[kio::test]
 async fn a_listing_past_the_announces_cap_is_reset() {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
@@ -242,7 +242,7 @@ async fn a_listing_past_the_announces_cap_is_reset() {
 	assert_eq!(end, format!("error: {}", moq_net::Error::TooManyRequests));
 
 	assert!(
-		moq_clock::timeout(Duration::from_millis(100), pair.server.closed())
+		kio::clock::timeout(Duration::from_millis(100), pair.server.closed())
 			.await
 			.is_err(),
 		"the session closed"

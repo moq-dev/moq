@@ -21,6 +21,7 @@ from ._records import _subscription, _track_info
 from ._stream import _Stream
 from .types import (
     Frame,
+    Position,
     Subscription,
     TrackInfo,
 )
@@ -128,6 +129,18 @@ class TrackProducer:
         """
         return self._inner.append_datagram(Frame(payload, timestamp)._ffi())
 
+    def insert_datagram(self, sequence: int, payload: bytes, timestamp: timedelta | None = None) -> None:
+        """Send a best-effort datagram at an explicit sequence number.
+
+        For a caller that allocates its own sequences; :meth:`append_datagram`
+        continues after the largest one.
+        """
+        self._inner.insert_datagram(sequence, Frame(payload, timestamp)._ffi())
+
+    def largest(self) -> Position | None:
+        """The newest group or datagram written, at its newest frame; ``None`` before any."""
+        return self._inner.largest()
+
     def consume(self, subscription: Subscription | None = None) -> TrackConsumer:
         """Create a consumer that reads directly from this producer's track.
 
@@ -193,10 +206,10 @@ class Fill:
     """A run of groups readers miss, for a :class:`TrackRequests` to serve.
 
     Call :meth:`accept` for each group you have and :meth:`drop_groups` for the rest;
-    :meth:`next` names what is still owed, in the fill's order. Dropping the fill names
+    :meth:`wanted` names what is still owed, in the fill's order. Dropping the fill names
     whatever is left as dropped while a reader still wants it; once nobody does, it is
-    withdrawn, so stop serving it when :meth:`unused` returns. Stop serving a single group
-    when :meth:`unwanted` returns for it, and move on to :meth:`next`.
+    withdrawn, so stop serving it once :meth:`wanted` is ``None``. Stop serving a single group
+    when :meth:`unwanted` returns for it, and move on to :meth:`wanted`.
     """
 
     def __init__(self, inner: MoqFill) -> None:
@@ -232,9 +245,16 @@ class Fill:
         """Which end to fill first."""
         return self._inner.order()
 
-    def next(self) -> int | None:
-        """The next group still owed in the fill's order, ``None`` once every group is answered."""
-        return self._inner.next()
+    def wanted(self) -> int | None:
+        """The next group still owed in the fill's order.
+
+        ``None`` once every group is answered or no reader waits on the fill.
+        """
+        return self._inner.wanted()
+
+    async def wanted_changed(self) -> int | None:
+        """Wait for ``wanted`` to change and return it. The first call returns at once."""
+        return await self._inner.wanted_changed()
 
     def accept(self, sequence: int) -> GroupProducer:
         """Insert group ``sequence`` and return a producer for it.
@@ -246,14 +266,6 @@ class Fill:
     def drop_groups(self, start: int, end: int) -> None:
         """Name groups ``start`` up to the exclusive ``end`` as never to be delivered."""
         self._inner.drop_groups(start, end)
-
-    def is_used(self) -> bool:
-        """Whether a reader still waits on this fill."""
-        return self._inner.is_used()
-
-    async def unused(self) -> None:
-        """Wait until no reader waits on this fill."""
-        await self._inner.unused()
 
     def is_wanted(self, sequence: int) -> bool:
         """Whether a reader still waits for group ``sequence`` from this fill.

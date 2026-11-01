@@ -23,7 +23,8 @@ export interface Abortable {
 
 /** One fatal deadline for a request, including every stream its setup creates. @internal */
 export class Deadline {
-	#opening = false;
+	/** Creates still waiting on credit: a fetch opens its TRACK stream alongside. */
+	#opening = 0;
 	#owners: Abortable[] = [];
 	#failure?: Error;
 
@@ -37,7 +38,7 @@ export class Deadline {
 		opening: Stream | Promise<Stream>,
 		own: (stream: Stream) => Abortable = (stream) => stream,
 	): Promise<Abortable> {
-		this.#opening = true;
+		this.#opening++;
 		let stream: Stream;
 		try {
 			stream = await opening;
@@ -45,7 +46,7 @@ export class Deadline {
 			if (sessionFailure(cause)) throw cause;
 			throw new NoStreamCredit({ cause });
 		} finally {
-			this.#opening = false;
+			this.#opening--;
 		}
 		const owner = own(stream);
 		if (this.#failure) {
@@ -74,7 +75,7 @@ export class Deadline {
 		} catch (cause) {
 			const failure =
 				cause instanceof TimeoutError
-					? this.#opening
+					? this.#opening > 0
 						? new NoStreamCredit({ cause })
 						: controlTimeout(cause)
 					: error(cause);

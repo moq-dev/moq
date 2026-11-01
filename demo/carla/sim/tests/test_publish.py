@@ -211,14 +211,14 @@ class Drivers:
 
     def __init__(self) -> None:
         self.announcements = Announcements()
-        self.requested: list[str] = []
+        self.requested: list[tuple[str, str | None]] = []
 
     def announced(self, prefix: str, *, filter: str):
         assert (prefix, filter) == ("viewer/carla/truck1", "*")
         return self.announcements
 
-    async def request(self, path: str):
-        self.requested.append(path)
+    async def request(self, path: str, *, epoch: str | None = None):
+        self.requested.append((path, epoch))
         sequence = len(self.requested)
 
         async def control():
@@ -263,7 +263,7 @@ def test_a_driver_run_keeps_the_lease_across_route_updates() -> None:
         await relay.announcements.send(moq.AnnounceEventUpdate, "viewer/carla/truck1/abc", "e1")
         assert commands.empty()
         assert gate.driver == "abc"
-        assert relay.requested == ["viewer/carla/truck1/abc"]
+        assert relay.requested == [("viewer/carla/truck1/abc", "e1")]
 
     asyncio.run(watching(scenario))
 
@@ -297,7 +297,7 @@ def test_a_driver_that_restarts_under_a_new_epoch_is_a_new_driver(kind: str) -> 
         await relay.announcements.send(event, "viewer/carla/truck1/abc", "e2")
         received = [await next_command(commands, gate) for _ in range(2)]
         assert {(command.kind, command.epoch) for command in received} == {("driver_left", "e1"), ("drive", "e2")}
-        assert relay.requested == ["viewer/carla/truck1/abc"] * 2
+        assert relay.requested == [("viewer/carla/truck1/abc", "e1"), ("viewer/carla/truck1/abc", "e2")]
 
         # Whichever order those two arrived in, the new run holds the lease
         # by its next command, and the old run can no longer release it.
