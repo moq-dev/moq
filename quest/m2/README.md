@@ -160,7 +160,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [#3199](/quest/m2/3199-moq-uring-remove-sq-indirection-and-per-enter-ring-fd.md) - moq-uring: remove SQ indirection and per-enter ring fd lookup, if a profile shows the win
 - [#3200](/quest/m2/3200-moq-uring-batch-completion-wakeups-with-min-timeout.md) - moq-uring: batch completion wakeups with MIN_TIMEOUT
 - [Browser media report](/quest/m2/rs2ts-browser-report.md) - compare Rust-backed and handwritten @moq/net through full media workloads, supplementing the pre-adoption comparisons
-- [mTLS on tls://](/quest/m2/tls-listener-mtls.md) - a `tls://` listener can identify a cluster peer by its client certificate
 - [Link quality](/quest/m2/link-quality.md) - a radio link's cost follows its measured quality without flapping routes
 - [io_uring handle lifecycle](/quest/m2/uring-lifecycle.md) - handles fail once their worker is gone, close on last drop like tokio, and surface a close behind unread data
 - [io_uring socket teardown](/quest/m2/uring-socket-teardown.md) - socket churn never exhausts buffer-group ids, and a failed receive cancel surfaces
