@@ -2150,6 +2150,7 @@ mod tests {
 			unanswered: None,
 			bounded: false,
 			updated: false,
+			_working: crate::session::Work::default().start(),
 		})
 	}
 
@@ -2325,6 +2326,7 @@ mod tests {
 				unanswered: None,
 				bounded: false,
 				updated: false,
+				_working: crate::session::Work::default().start(),
 			});
 			if update {
 				h.serve
@@ -2781,6 +2783,7 @@ mod tests {
 			unanswered: None,
 			bounded: false,
 			updated: false,
+			_working: crate::session::Work::default().start(),
 		};
 		assert_eq!(
 			sub.owed(None),
@@ -6586,6 +6589,8 @@ struct SubStream {
 	/// Whether an update changed the ranges since the SUBSCRIBE, which a publisher may
 	/// FIN before reading.
 	updated: bool,
+	/// Holds the session busy for as long as the subscription is open.
+	_working: crate::session::Working,
 }
 
 impl SubStream {
@@ -7154,6 +7159,7 @@ impl TrackServe {
 		Establish {
 			validity: self.validity.start(),
 			serve: self.clone(),
+			_working: session.work().start(),
 			closed: session.clone(),
 			session,
 			id,
@@ -7268,6 +7274,8 @@ struct Establish {
 	/// The ranges the SUBSCRIBE carries for `subscription`.
 	ranges: Vec<lite::Range>,
 	tail: kio::Producer<Tail>,
+	/// Holds the session busy while the SUBSCRIBE opens.
+	_working: crate::session::Working,
 	state: EstablishState,
 }
 
@@ -7345,6 +7353,7 @@ impl Establish {
 			wanted: None,
 			bounded: bounded(&self.ranges),
 			updated: false,
+			_working: self.session.work().start(),
 		}
 	}
 }
@@ -7369,10 +7378,16 @@ enum TrackRunState {
 	Info {
 		request: Option<track::Request>,
 		info: TrackInfoFetch,
+		/// Holds the session busy while the request waits on its TRACK_INFO.
+		_working: crate::session::Working,
 	},
 	Serve(ServeLoop),
 	/// Preserve the lite07 completion FIN until the publisher acknowledges it.
-	Finish(crate::coding::Writer<crate::transport::boxed::SendStream, Version>),
+	Finish {
+		writer: crate::coding::Writer<crate::transport::boxed::SendStream, Version>,
+		/// The subscription keeps the session busy until then.
+		_working: crate::session::Working,
+	},
 	Done,
 }
 
@@ -7382,6 +7397,7 @@ impl TrackServeRun {
 			TrackRunState::Info {
 				request: Some(request),
 				info: TrackInfoFetch::new(&serve),
+				_working: serve.subscriber.session.work().start(),
 			}
 		} else {
 			// Older wires declare no publisher retention limit, and no timeline: their
@@ -7416,7 +7432,7 @@ impl TrackServeRun {
 				}
 				// Each fetch in flight resets itself as it drops, seeing the same denial.
 			}
-			TrackRunState::Finish(_) | TrackRunState::Done => {}
+			TrackRunState::Finish { .. } | TrackRunState::Done => {}
 		}
 	}
 }
@@ -7455,7 +7471,7 @@ impl kio::Task for TrackServeRun {
 		// A finished track only waits for its FIN to be acknowledged: nothing is left to revoke.
 		// Nor on a closed session, whose grants end with it: the session's end decides how
 		// its tracks end.
-		if !matches!(self.state, TrackRunState::Finish(_))
+		if !matches!(self.state, TrackRunState::Finish { .. })
 			&& self.gate.poll_denied(waiter).is_ready()
 			&& self.serve.subscriber.session.clone().poll_closed(waiter).is_pending()
 		{
@@ -7464,7 +7480,7 @@ impl kio::Task for TrackServeRun {
 		}
 		loop {
 			match &mut self.state {
-				TrackRunState::Info { request, info } => {
+				TrackRunState::Info { request, info, .. } => {
 					// Abandonment was checked at the top of this poll, arming its wait.
 					let res = ready!(info.poll_fetch(&self.serve, waiter));
 					let request = request.take().expect("request pending");
@@ -7531,14 +7547,17 @@ impl kio::Task for TrackServeRun {
 						if active.stream.writer.finish().is_ok()
 							&& finished && self.serve.subscriber.version.waits_for_subscriber_fin()
 						{
-							self.state = TrackRunState::Finish(active.stream.writer);
+							self.state = TrackRunState::Finish {
+								writer: active.stream.writer,
+								_working: active._working,
+							};
 							continue;
 						}
 					}
 
 					return Poll::Ready(());
 				}
-				TrackRunState::Finish(writer) => {
+				TrackRunState::Finish { writer, .. } => {
 					let _ = ready!(writer.poll_close(waiter));
 					self.state = TrackRunState::Done;
 				}
@@ -7695,8 +7714,12 @@ struct ServeLoop {
 	/// demand still asks for just them: subscribing again would only resend them.
 	covered: Option<Vec<lite::Range>>,
 	/// Our side of the covered subscription, finished and held until the publisher reads
-	/// the FIN, since dropping it would reset it.
-	closing: Option<crate::coding::Writer<crate::transport::boxed::SendStream, Version>>,
+	/// the FIN, since dropping it would reset it. The subscription keeps the session busy
+	/// until then.
+	closing: Option<(
+		crate::coding::Writer<crate::transport::boxed::SendStream, Version>,
+		crate::session::Working,
+	)>,
 }
 
 #[expect(
@@ -8036,7 +8059,7 @@ impl ServeLoop {
 							serve.subscriber.remove_subscribe(active.id);
 							let mut writer = active.stream.writer;
 							if writer.finish().is_ok() {
-								self.closing = Some(writer);
+								self.closing = Some((writer, active._working));
 							}
 							// Unchanged ranges are what the publisher covered, even if a datagram
 							// went missing. Changed ones settled by the grace instead may have
@@ -8064,7 +8087,7 @@ impl ServeLoop {
 					return Poll::Pending;
 				}
 				ServeMode::Select => {
-					if let Some(writer) = &mut self.closing
+					if let Some((writer, _)) = &mut self.closing
 						&& writer.poll_close(waiter).is_ready()
 					{
 						self.closing = None;
@@ -8436,6 +8459,8 @@ struct FetchServeRun {
 	info: track::Info,
 	group: u64,
 	state: FetchRunState,
+	/// Holds the session busy until the fetch ends.
+	_working: crate::session::Working,
 }
 
 enum FetchRunState {
@@ -8484,6 +8509,7 @@ impl FetchServeRun {
 			validity: serve.validity.start(),
 			gate: serve.gate(),
 			serve,
+			_working: session.work().start(),
 			session,
 			info,
 			group,
