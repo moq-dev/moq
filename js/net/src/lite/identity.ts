@@ -3,7 +3,8 @@ import type { Reader, Writer } from "../stream.ts";
 import { hasIdentity, type Version } from "./version.ts";
 
 const encoder = new TextEncoder();
-const decoder = new TextDecoder("utf-8", { fatal: true });
+// `ignoreBOM` keeps a leading U+FEFF, which is identity text like any other, as Rust does.
+const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
 /** Encode the identity a request pins as its UTF-8 bytes, or empty for none. Older versions
  * carry nothing, so the peer resolves whichever identity wins the path. Mirrors rs/moq-net. */
