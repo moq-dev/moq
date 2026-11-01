@@ -19,7 +19,7 @@ import {
 import type { Established } from "./established.ts";
 import { DISCOVERY_REMOVED } from "./forward.ts";
 import { DEFAULT_HANDOVER, type Drain, dialed, type GoawayProps, handover, pinnedTransport, target } from "./goaway.ts";
-import type { Probe } from "./stats.ts";
+import { estimates, type Probe } from "./stats.ts";
 import { heldOf } from "./tokens.ts";
 
 function sameTokens(a: readonly string[], b: readonly string[]): boolean {
@@ -221,7 +221,9 @@ export class Reload {
 	 * estimate is `undefined` while disconnected, which tells a sender to hold
 	 * its rate rather than encode at zero. It is sampled from the transport only
 	 * while a reservation reads it, so the first reservation after none waits one
-	 * snapshot for its slice.
+	 * snapshot for its slice. It stays `undefined` on a transport that cannot
+	 * report one: the WebSocket fallback, WebRTC, or WebTransport without
+	 * `getStats()`.
 	 */
 	readonly allocator: Allocator;
 
@@ -415,12 +417,12 @@ export class Reload {
 		// Only while a reservation reads it: a receive-only or lingering connection
 		// would otherwise snapshot the transport ten times a second for nobody. The
 		// estimate clears with the last reservation, so the next one never reads a
-		// stale figure.
+		// stale figure. A transport that can never report one is not sampled at all.
 		this.#signals.run((effect) => {
 			effect.set(this.#estimate, undefined);
 			if (!effect.get(reserved(this.allocator))) return;
 			const connection = effect.get(this.established);
-			if (!connection) return;
+			if (!connection || !estimates(connection)) return;
 
 			let pending = false;
 			const sample = async () => {

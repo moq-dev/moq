@@ -5,7 +5,7 @@ import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
 import type { Established } from "../connection/established.ts";
 import type { Drain } from "../connection/goaway.ts";
-import { type Probe, type Stats, transportStats } from "../connection/stats.ts";
+import { detect, type Probe, type Stats, transportStats } from "../connection/stats.ts";
 import { type Transport, transportOf } from "../connection/transport.ts";
 import { closeError, error, fromClose, ProtocolViolation, StreamCode, sessionCause } from "../error.ts";
 import { type Hop, randomHop } from "../hop.ts";
@@ -186,6 +186,7 @@ export class Connection implements Established {
 		this.version = versionName(version);
 		this.#version = version;
 		this.transport = transportOf(quic);
+		detect(this, quic);
 
 		this.probe = this.#probe;
 
