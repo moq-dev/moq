@@ -15,7 +15,9 @@ private func micros(_ value: UInt64) -> Timestamp {
 }
 
 /// Assert `body` throws `MoqError.TimeOverflow`.
-private func assertTimeOverflow<T>(_ body: @autoclosure () throws -> T, file: StaticString = #filePath, line: UInt = #line) {
+private func assertTimeOverflow<T>(
+    _ body: @autoclosure () throws -> T, file: StaticString = #filePath, line: UInt = #line
+) {
     XCTAssertThrowsError(try body(), file: file, line: line) { error in
         guard case MoqError.TimeOverflow = error else {
             return XCTFail("expected TimeOverflow, got \(error)", file: file, line: line)
@@ -466,7 +468,8 @@ final class SmokeTests: XCTestCase {
         for n in 0..<3 {
             let event = try await consumer.next()
             XCTAssertEqual(
-                event, Json.Timed(value: .push(index: UInt64(n), value: Event(n: n)), timestamp: micros(UInt64(n) * 1000)))
+                event,
+                Json.Timed(value: .push(index: UInt64(n), value: Event(n: n)), timestamp: micros(UInt64(n) * 1000)))
         }
         let pop = try await consumer.next()
         XCTAssertEqual(pop, Json.Timed(value: .pop(0..<2), timestamp: micros(3000)))
