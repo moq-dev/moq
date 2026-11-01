@@ -16,6 +16,12 @@
 
 use std::{
 	hint::black_box,
+	sync::{
+		Arc, Mutex,
+		atomic::{AtomicU64, AtomicUsize, Ordering},
+	},
+	task::Poll,
+	thread,
 	time::{Duration, Instant},
 };
 
@@ -36,8 +42,8 @@ const PAYLOAD: usize = 64;
 
 /// Frame counts to sweep. 8192 is the largest legal group (`MAX_GROUP_FRAMES`);
 /// the 8193rd write returns `GroupTooLarge`. The top end is that full group of
-/// tiny frames.
-const COUNTS: [usize; 5] = [4, 5, 512, 2_048, 8_192];
+/// tiny frames. Counts 32 and 33 straddle a full write batch and its next flush.
+const COUNTS: [usize; 7] = [4, 5, 32, 33, 512, 2_048, 8_192];
 
 /// Cached group counts to sweep for the track-level delivery benchmarks. A track
 /// publishing one group per frame at the default 5s retention sits in the hundreds,
@@ -378,12 +384,225 @@ fn bench_stamp(c: &mut Criterion) {
 	g.finish();
 }
 
+/// Worker threads the contended readers are spread over.
+const THREADS: [usize; 3] = [1, 4, 16];
+
+/// Readers of the one contended group.
+const READERS: [usize; 3] = [16, 256, 1_024];
+
+/// Frames appended per contended round: one at the edge, or a burst that readers drain
+/// several at a time.
+const BURSTS: [usize; 2] = [1, 8];
+
+/// Frames a contended group takes before the driver rolls to the next one.
+const ROLL: usize = 4_096;
+
+/// One pass of a worker over its readers.
+type Work = Box<dyn FnMut() + Send>;
+
+/// Worker threads that each run one pass when the driver releases a round.
+struct Crew {
+	control: Arc<Control>,
+	threads: Vec<thread::JoinHandle<()>>,
+}
+
+#[derive(Default)]
+struct Control {
+	/// Rounds released so far, or [`STOP`].
+	round: AtomicU64,
+	/// Workers done with the current round.
+	done: AtomicUsize,
+}
+
+const STOP: u64 = u64::MAX;
+
+impl Crew {
+	fn new(work: Vec<Work>) -> Self {
+		let control = Arc::new(Control::default());
+		let threads = work
+			.into_iter()
+			.map(|mut work| {
+				let control = control.clone();
+				thread::spawn(move || {
+					let mut seen = 0;
+					loop {
+						seen = spin(|| {
+							let round = control.round.load(Ordering::Acquire);
+							(round != seen).then_some(round)
+						});
+						if seen == STOP {
+							return;
+						}
+						work();
+						control.done.fetch_add(1, Ordering::AcqRel);
+					}
+				})
+			})
+			.collect();
+		Self { control, threads }
+	}
+
+	/// Run one pass on every worker and wait for all of them.
+	fn run(&self) {
+		self.control.done.store(0, Ordering::Relaxed);
+		self.control.round.fetch_add(1, Ordering::Release);
+		let threads = self.threads.len();
+		spin(|| {
+			// A panicked worker never reports done, so fail instead of spinning forever.
+			assert!(!self.threads.iter().any(|t| t.is_finished()), "worker panicked");
+			(self.control.done.load(Ordering::Acquire) == threads).then_some(())
+		});
+	}
+}
+
+impl Drop for Crew {
+	fn drop(&mut self) {
+		self.control.round.store(STOP, Ordering::Release);
+		for thread in self.threads.drain(..) {
+			let result = thread.join();
+			// Already unwinding from `run`'s check: a second panic would abort.
+			if !thread::panicking() {
+				result.expect("worker panicked");
+			}
+		}
+	}
+}
+
+/// Busy-wait for `f`, yielding once spinning has gone on long enough that the machine
+/// may be oversubscribed.
+fn spin<R>(mut f: impl FnMut() -> Option<R>) -> R {
+	let mut spins = 0u32;
+	loop {
+		if let Some(r) = f() {
+			return r;
+		}
+		if spins < 1_000 {
+			spins += 1;
+			std::hint::spin_loop();
+		} else {
+			thread::yield_now();
+		}
+	}
+}
+
+/// Read one live group from readers on several threads.
+///
+/// Each round the driver appends a burst of frames; every reader drains them with
+/// [`group::Consumer::poll_read_frame`] and parks at the edge again. Every [`ROLL`]
+/// frames the driver publishes the next group and finishes the current one, and each
+/// reader moves on once it reads the end, so the group stays under its frame cap.
+///
+/// A `subscribed` reader receives each group from its own [`track::Subscriber`], so the
+/// group carries the subscription's expiry and every park judges it.
+fn bench_contended(c: &mut Criterion) {
+	let payload = Bytes::from(vec![0u8; PAYLOAD]);
+	let mut g = c.benchmark_group("group_contended");
+	g.warm_up_time(Duration::from_secs(1));
+	g.measurement_time(Duration::from_secs(3));
+	for subscribed in [false, true] {
+		for burst in BURSTS {
+			for threads in THREADS {
+				for readers in READERS {
+					g.throughput(Throughput::Elements((readers * burst) as u64));
+					let source = if subscribed { "subscribed/" } else { "" };
+					let id = BenchmarkId::new(format!("{source}burst_{burst}/threads_{threads}"), readers);
+					g.bench_function(id, |b| contended(b, &payload, subscribed, burst, threads, readers));
+				}
+			}
+		}
+	}
+	g.finish();
+}
+
+/// One [`bench_contended`] case.
+fn contended(
+	b: &mut criterion::Bencher,
+	payload: &Bytes,
+	subscribed: bool,
+	burst: usize,
+	threads: usize,
+	readers: usize,
+) {
+	let broadcast = broadcast::Producer::new(broadcast::Info::default());
+	let track = broadcast.create_track("bench", track::Info::default()).unwrap();
+	let mut group = track.append_group().unwrap();
+	// The group readers move to once theirs ends.
+	let next = Arc::new(Mutex::new(group.consume()));
+	let mut sets: Vec<Vec<(Option<track::Subscriber>, group::Consumer)>> = (0..threads).map(|_| Vec::new()).collect();
+	for i in 0..readers {
+		let reader = match subscribed {
+			true => {
+				let mut subscriber = track.subscribe(None);
+				let group = subscriber.recv_group().now_or_never().unwrap().unwrap().unwrap();
+				assert_eq!(group.sequence, 0, "the subscriber starts at the live group");
+				(Some(subscriber), group)
+			}
+			false => (None, group.consume()),
+		};
+		sets[i % threads].push(reader);
+	}
+	let work = sets
+		.into_iter()
+		.map(|mut set| -> Work {
+			let next = next.clone();
+			let waiter = kio::Waiter::noop();
+			Box::new(move || {
+				for (subscriber, reader) in &mut set {
+					let mut read = 0;
+					loop {
+						match reader.poll_read_frame(&waiter) {
+							Poll::Ready(Ok(Some(frame))) => {
+								black_box(frame);
+								read += 1;
+							}
+							Poll::Ready(Ok(None)) => {
+								*reader = match subscriber {
+									Some(subscriber) => {
+										let next = subscriber.recv_group().now_or_never();
+										next.unwrap().unwrap().expect("the next group is live")
+									}
+									None => next.lock().unwrap().clone(),
+								}
+							}
+							Poll::Ready(Err(err)) => panic!("read failed: {err}"),
+							Poll::Pending => break,
+						}
+					}
+					assert_eq!(read, burst, "every appended frame is ready");
+				}
+			})
+		})
+		.collect();
+	let crew = Crew::new(work);
+
+	let mut written = 0;
+	b.iter_custom(|iters| {
+		let start = Instant::now();
+		for _ in 0..iters {
+			if written + burst > ROLL {
+				let rolled = track.append_group().unwrap();
+				*next.lock().unwrap() = rolled.consume();
+				let done = std::mem::replace(&mut group, rolled);
+				done.finish().unwrap();
+				written = 0;
+			}
+			for _ in 0..burst {
+				group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+			}
+			written += burst;
+			crew.run();
+		}
+		start.elapsed()
+	});
+}
+
 criterion_group!(
 	benches,
 	bench_write,
 	bench_read,
 	bench_roundtrip,
 	bench_track_recv,
-	bench_stamp
+	bench_stamp,
+	bench_contended
 );
 criterion_main!(benches);

@@ -56,7 +56,7 @@ use moq_net::time::Instant;
 
 use bytes::Bytes;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_net::{Error, Timestamp, broadcast, cache, track};
+use moq_net::{Error, Timestamp, broadcast, cache, group, track};
 
 /// A millisecond track: the frames written here carry timestamps.
 ///
@@ -272,6 +272,15 @@ fn bench_gc(c: &mut Criterion) {
 		group.bench_with_input(BenchmarkId::new("idle", tracks), &tracks, |b, &tracks| {
 			let swept = Swept::new(tracks);
 			b.iter(|| black_box(swept.pool.gc(swept.now)));
+		});
+		// Also advance supplied time, so reusing an identical instant cannot hide clock work.
+		group.bench_with_input(BenchmarkId::new("advancing", tracks), &tracks, |b, &tracks| {
+			let swept = Swept::new(tracks);
+			let mut now = swept.now;
+			b.iter(|| {
+				now += Duration::from_nanos(1);
+				black_box(swept.pool.gc(now))
+			});
 		});
 		// A due pass, stepping one sweep interval per call.
 		group.throughput(Throughput::Elements(tracks as u64));
@@ -820,7 +829,7 @@ impl GapFlush {
 fn bench_gap_flush(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_gap_flush");
 	group.sample_size(10);
-	for gaps in [64u64, 512, 4096] {
+	for gaps in [16u64, 64, 256, 512, 4096] {
 		group.throughput(Throughput::Elements(gaps));
 		group.bench_function(BenchmarkId::from_parameter(gaps), |b| {
 			b.iter_batched_ref(|| GapFlush::new(gaps), GapFlush::flush, BatchSize::PerIteration);
@@ -925,6 +934,239 @@ fn bench_empty_run(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Groups written between reads in `track_evict_fanout`, each evicting one.
+const EVICTED: [usize; 3] = [1, 8, 64];
+
+fn bench_evict_fanout(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_evict_fanout");
+	for subscribers in FANOUT {
+		for evicted in EVICTED {
+			group.throughput(Throughput::Elements(evicted as u64));
+			group.bench_function(BenchmarkId::new(format!("{subscribers}r"), evicted), |b| {
+				let mut fanout = Fanout::new(subscribers);
+				// Twice what the pool holds, so every write evicts.
+				for _ in 0..2 * CACHE_CAPACITY / PAYLOAD as u64 {
+					fanout.cycle();
+				}
+				// Only the writes and the evictions they cause are timed, not the reads that
+				// judge each written group cached again.
+				b.iter_custom(|iterations| {
+					let mut elapsed = Duration::ZERO;
+					for _ in 0..iterations {
+						let start = WallInstant::now();
+						for _ in 0..evicted {
+							let mut group = fanout.track.append_group().unwrap();
+							group.write_frame(Timestamp::ZERO, fanout.payload.clone()).unwrap();
+							group.finish().unwrap();
+						}
+						elapsed += start.elapsed();
+						for (subscriber, waiter) in fanout.subscribers.iter_mut().zip(&fanout.waiters) {
+							while let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(waiter) {
+								black_box(group);
+							}
+						}
+					}
+					elapsed
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+/// Tracks sharing one bounded pool, each holding `queued` datagrams for a reader that never
+/// reads, while one datagram is appended to the next track and read by its fast reader.
+///
+/// Only `main`'s `plain` payload: `release` has no track compression, so its `zeros` rows
+/// are left out.
+fn bench_datagram_pressure(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_datagram_pressure");
+	group.throughput(Throughput::Elements(1));
+	let name = "plain";
+	let payload = Bytes::from(vec![0u8; PAYLOAD]);
+	for tracks in [1, 16, 64] {
+		for queued in [1, 8, 64] {
+			let mut info = broadcast::Info::default();
+			info.pool = cache::Pool::new(cache::Config::default().with_capacity(CACHE_CAPACITY));
+			let pool = info.pool.clone();
+			let broadcast = broadcast::Producer::new(info);
+			let mut held: Vec<_> = (0..tracks)
+				.map(|index| {
+					let mut track = broadcast
+						.create_track(format!("bench{index}").as_str(), timed())
+						.unwrap();
+					let slow = track.subscribe(None);
+					let fast = track.subscribe(None);
+					for _ in 0..queued {
+						track.append_datagram(Timestamp::ZERO, payload.clone()).unwrap();
+					}
+					(track, slow, fast)
+				})
+				.collect();
+			let waiter = kio::Waiter::noop();
+			for (_, _, fast) in &mut held {
+				while let Poll::Ready(Ok(Some(_))) = fast.poll_recv_datagram(&waiter) {}
+			}
+			eprintln!(
+				"track_datagram_pressure/{name}/{tracks}t/{queued}q: {} bytes retained",
+				pool.used()
+			);
+
+			let mut next = 0;
+			group.bench_function(BenchmarkId::new(format!("{name}/{tracks}t"), queued), |b| {
+				b.iter(|| {
+					let (track, _, fast) = &mut held[next % tracks];
+					next += 1;
+					track.append_datagram(Timestamp::ZERO, payload.clone()).unwrap();
+					let Poll::Ready(Ok(Some(datagram))) = fast.poll_recv_datagram(&waiter) else {
+						panic!("the fast reader takes each datagram");
+					};
+					black_box(datagram);
+				});
+			});
+			drop((held, broadcast));
+		}
+	}
+	group.finish();
+}
+
+/// A timed sparse feed holding `gaps` remembered gaps, as in `track_sparse_read`.
+struct Sparse {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	sub: track::Subscriber,
+	next: u64,
+	missing: u64,
+}
+
+impl Sparse {
+	fn new(gaps: u64) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		let sub = track.subscribe(track::Subscription::default().with_max_age(Duration::from_secs(3600)));
+		let mut sparse = Self {
+			_broadcast: broadcast,
+			track,
+			sub,
+			next: gaps * 2,
+			missing: 1,
+		};
+		for gap in 0..gaps {
+			sparse.hand_out(gap * 2);
+		}
+		// Fill beyond the cache queue's initial power-of-two capacity outside timing.
+		if gaps != 0 {
+			sparse.hand_out(sparse.next);
+			sparse.hand_out(sparse.missing);
+			sparse.next += 2;
+			sparse.missing += 2;
+		}
+		sparse
+	}
+
+	fn hand_out(&mut self, sequence: u64) {
+		let mut group = self.track.create_group(moq_net::group::Info { sequence }).unwrap();
+		group
+			.write_frame(Timestamp::from_micros(sequence).unwrap(), Bytes::from_static(b"x"))
+			.unwrap();
+		group.finish().unwrap();
+		let Poll::Ready(Ok(Some(read))) = self.sub.poll_recv_group(&kio::Waiter::noop()) else {
+			panic!("the group is cached");
+		};
+		black_box(read);
+	}
+}
+
+/// A read with nothing new on a sparse feed, swept over its remembered gaps. Only `main`'s
+/// `timed` rows: `release` reads no untimed sparse feed.
+fn bench_sparse_poll(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_sparse_poll");
+	for gaps in [16u64, 256, 4096] {
+		group.bench_function(BenchmarkId::new("timed", gaps), |b| {
+			b.iter_custom(|iterations| {
+				let mut sparse = Sparse::new(gaps);
+				let waiter = kio::Waiter::noop();
+				let start = WallInstant::now();
+				for _ in 0..iterations {
+					assert!(black_box(sparse.sub.poll_recv_group(&waiter)).is_pending());
+				}
+				start.elapsed()
+			});
+		});
+	}
+	group.finish();
+}
+
+/// The budget `track_idle_poll`'s readers hold, long enough that nothing ages out.
+const AGED_BUDGET: Duration = Duration::from_secs(3600);
+
+/// Readers parked on one track with nothing new, each having taken the one cached group.
+struct Idle {
+	_broadcast: broadcast::Producer,
+	_track: track::Producer,
+	_open: group::Producer,
+	recv: Vec<track::Subscriber>,
+	next: Vec<track::Ordered>,
+	waiter: kio::Waiter,
+}
+
+impl Idle {
+	fn new(readers: usize, ordered: bool) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		let mut open = track.append_group().unwrap();
+		open.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")).unwrap();
+		let waiter = kio::Waiter::noop();
+		let (mut recv, mut next) = (Vec::new(), Vec::new());
+		for _ in 0..readers {
+			let reader = track.subscribe(track::Subscription::default().with_max_age(AGED_BUDGET));
+			if ordered {
+				let mut reader = reader.ordered();
+				assert!(matches!(reader.poll_next_group(&waiter), Poll::Ready(Ok(Some(_)))));
+				next.push(reader);
+			} else {
+				let mut reader = reader;
+				assert!(matches!(reader.poll_recv_group(&waiter), Poll::Ready(Ok(Some(_)))));
+				recv.push(reader);
+			}
+		}
+		let mut idle = Self {
+			_broadcast: broadcast,
+			_track: track,
+			_open: open,
+			recv,
+			next,
+			waiter,
+		};
+		// The first park walks the read path; only the repeats are measured.
+		idle.poll();
+		idle
+	}
+
+	fn poll(&mut self) {
+		for reader in &mut self.recv {
+			assert!(black_box(reader.poll_recv_group(&self.waiter)).is_pending());
+		}
+		for reader in &mut self.next {
+			assert!(black_box(reader.poll_next_group(&self.waiter)).is_pending());
+		}
+	}
+}
+
+fn bench_idle_poll(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_idle_poll");
+	for (name, ordered) in [("recv", false), ("next", true)] {
+		for readers in FANOUT {
+			group.throughput(Throughput::Elements(readers as u64));
+			group.bench_function(BenchmarkId::new(name, readers), |b| {
+				let mut idle = Idle::new(readers, ordered);
+				b.iter(|| idle.poll());
+			});
+		}
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_fanout,
@@ -941,6 +1183,10 @@ criterion_group!(
 	bench_parked_read,
 	bench_sparse_read,
 	bench_gap_flush,
-	bench_empty_run
+	bench_empty_run,
+	bench_evict_fanout,
+	bench_datagram_pressure,
+	bench_sparse_poll,
+	bench_idle_poll
 );
 criterion_main!(benches);
