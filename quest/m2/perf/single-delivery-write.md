@@ -25,15 +25,15 @@ Measured with user-space instruction counts on a pinned P-core, against
   (about 40k), the commit path (`frame::Producer::finish`, `GroupState::commit`,
   about 30k), and reader and copy costs. Locking and overlap checks are gone.
 - **Batched writes.** `group_write_frames/batch32/512` is 422 instructions per
-  frame on base and 474 on main, unchanged by #7508: the batch path takes no
-  frame lock. Padding base's `Entry` to main's size costs 13 per frame there, but
-  shrinking main's owner slot to one pointer saves only 2.6, and inlining
-  `GroupState::commit` or `canonicalize` into `write_frames` costs 3% more, so the
-  rest is code layout around `write_frames` rather than a removable step.
+  frame on base and 475 on main, unchanged by #7508: the batch path takes no
+  frame lock. The owner slot `Entry` gained is not it either: padding base's
+  `Entry` to main's size costs 3.4 per frame, and shrinking main's to one pointer
+  saves 2.6. Forcing `GroupState::commit` inline into `write_frames` costs 3%
+  more, so the rest is in how `write_frames` compiles rather than a removable step.
 
 The candidates left are a smaller `FrameContent` for the single-delivery case
 (moving the canonical-only fields behind a lazily allocated part, at one more
-allocation per canonical frame) and a `write_frames` layout that keeps base's
-inlined per-frame body.
+allocation per canonical frame), and finding which part of `write_frames`'
+compiled loop holds the batch path's other 50 instructions per frame.
 
 Public API: none. Wire: none.
