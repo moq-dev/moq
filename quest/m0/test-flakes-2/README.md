@@ -21,8 +21,8 @@ Rules every child keeps:
   slow, fix that.
 - A paused clock auto-advances while the runtime idles, so it can fire a
   timer before a real socket delivers. Where real sockets fight the paused
-  clock, drive the timers with a `moq_clock::Manual` clock or the sim (every
-  crate's timers run on `moq-clock`), or move the test off real sockets.
+  clock, drive the timers with a `kio::clock::Manual` clock or the sim (every
+  crate's timers run on `kio::clock`), or move the test off real sockets.
 - A mocked clock still flakes when the code jitters its timers with `rand`
   (one cancel race was a retry sweep jittered past a fixed settle
   budget). Wait out the jitter's whole window, not a count of small steps.

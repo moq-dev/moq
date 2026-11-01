@@ -271,11 +271,6 @@ interface Reader {
 	floor?: number;
 	/** Its instance lost its last route while it read. */
 	doomed: boolean;
-	/**
-	 * The newest group handed out when its routes last changed. A route change resumes from
-	 * there, so a group below it that lands only afterwards may be lost.
-	 */
-	resumed?: number;
 	/** `null` once the track ended cleanly, the error once it failed. */
 	end?: Error | null;
 	/**
@@ -345,19 +340,6 @@ class Model {
 	}
 
 	async apply(op: Op): Promise<void> {
-		// Only adding or removing a route can move a reader to another one. Unlike Rust, which
-		// moves only when the cheapest route changes, a JS reader may keep reading from a route
-		// that is no longer the cheapest, so any change counts.
-		const rerouted =
-			(op.kind === "up" && !this.instances[op.epoch].routes[op.slot]) ||
-			(op.kind === "down" && this.instances[op.epoch].routes[op.slot] !== undefined);
-		if (rerouted) {
-			for (const reader of this.readers) {
-				if (reader?.instance !== op.epoch) continue;
-				const newest = max(reader.handed);
-				if (newest !== undefined) reader.resumed = Math.max(reader.resumed ?? newest, newest);
-			}
-		}
 		switch (op.kind) {
 			case "up":
 				this.up(op.epoch, op.slot);
@@ -786,7 +768,6 @@ class Model {
 		let owed: number[] = [];
 		for (let group = 0; group < GROUPS; group++) {
 			if (reader.floor !== undefined && group <= reader.floor) continue;
-			if (reader.resumed !== undefined && group <= reader.resumed) continue;
 			if (covers(reader, group) && carried(group)) owed.push(group);
 		}
 		if (reader.spec.ordered && before !== undefined) owed = owed.filter((group) => group > before);
@@ -873,7 +854,7 @@ test(
 	{ timeout: 3_600_000 },
 );
 
-/** An Up or Down that changes no route resumes nothing, so lower groups stay owed. */
+/** An Up or Down that leaves the serving route still delivers a group only a standby route has. */
 test("unchanged routes keep groups owed", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
@@ -892,7 +873,6 @@ test("unchanged routes keep groups owed", async () => {
 		}
 		const reader = model.readers[0];
 		expect(reader?.handed).toContain(8);
-		expect(reader?.resumed).toBeUndefined();
 	} finally {
 		await model.close();
 		installed.close();
@@ -980,6 +960,18 @@ test("regressions", async () => {
 				{ kind: "write", epoch: 0, slot: 0, group: 8, frames: 1 },
 				{ kind: "giveUp", epoch: 0, slot: 0, group: 8 },
 				{ kind: "write", epoch: 0, slot: 1, group: 0, frames: 1 },
+			],
+			finish: false,
+		},
+		// A widened cursor owes a group below where a route change resumed, landing late.
+		{
+			ops: [
+				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 2], false) },
+				{ kind: "up", epoch: 1, slot: 0 },
+				{ kind: "up", epoch: 0, slot: 1 },
+				{ kind: "bounds", reader: 0, range: undefined },
+				{ kind: "write", epoch: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "down", epoch: 0, slot: 0 },
 			],
 			finish: false,
 		},

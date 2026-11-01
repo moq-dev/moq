@@ -13,7 +13,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use str0m::{Candidate, Event, Rtc};
 use tokio::net::UdpSocket;
@@ -552,10 +552,10 @@ struct SenderAnchor {
 }
 
 impl SenderAnchor {
-	fn new(sender: str0m::rtp::rtcp::SenderInfo) -> std::result::Result<Self, moq_clock::OutOfRange> {
-		let wall = moq_clock::Wall::try_from(sender.ntp_time)?;
+	fn new(sender: str0m::rtp::rtcp::SenderInfo) -> std::result::Result<Self, kio::clock::OutOfRange> {
+		let wall = kio::clock::Wall::try_from(sender.ntp_time)?;
 		Ok(Self {
-			ntp_us: wall.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH).as_micros() as i128,
+			ntp_us: wall.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH).as_micros() as i128,
 			rtp_us: media_time_to_micros(&sender.rtp_time) as i128,
 		})
 	}
@@ -677,7 +677,7 @@ pub fn rtc_config_with_codecs(codecs: &[str0m::format::Codec]) -> str0m::RtcConf
 /// [`rtc_config_with_codecs`] directly so it can inject the mux's known
 /// credentials before building.
 pub fn rtc_with_codecs(codecs: &[str0m::format::Codec]) -> Rtc {
-	rtc_config_with_codecs(codecs).build(moq_clock::now().into_std())
+	rtc_config_with_codecs(codecs).build(kio::clock::now().into_std())
 }
 
 /// Bind an ephemeral UDP socket for a single client session, read by its own

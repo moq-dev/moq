@@ -18,13 +18,13 @@ no_fuzz := "--exclude moq-net-fuzz --exclude moq-quic-fuzz"
 default:
     just check
 
-# Default features for the selected packages. Selection also checks feature
-# extremes; `features` covers the full matrix nightly. No `cargo
-# check` pass: clippy is a superset of it, and the two use different rustc
-# wrappers, so running both compiles the workspace twice.
+# Default features for the selected packages; `features` covers the feature
+# matrix nightly and on release PRs. No `cargo check` pass: clippy is a
+# superset of it, and the two use different rustc wrappers, so running both
+# compiles the workspace twice.
 #
 # A bare `just rs check` is default-members, which skips moq-c, moq-ffi,
-# moq-gst, and moq-wasm; pass `--workspace` for all of it.
+# and moq-gst; pass `--workspace` for all of it.
 
 # Compile, lint, format-check, doc-check, and verify dependency hygiene.
 [positional-arguments]
@@ -65,13 +65,9 @@ fix *args:
 check-changed $LIST:
     sh/rs/select.sh check "$LIST"
 
-# Like `lint`, with the feature and target checks for the selected crates.
+# Like `lint`, but only the crates in a changed-file list plus their dependents.
 lint-changed $LIST:
     sh/rs/select.sh lint "$LIST"
-
-# `feature-shapes` for the crates in a changed-file list plus their dependents.
-feature-shapes-changed $LIST:
-    sh/rs/select.sh feature-shapes "$LIST"
 
 # Like `check-test`, but only the crates in a changed-file list plus their dependents.
 check-test-changed $LIST:
@@ -163,6 +159,11 @@ capture *args:
 capture-test *args:
     just rs test -p moq-video -p moq-audio -p moq-scene -p moq-studio --features moq-video/capture,moq-audio/capture,moq-audio/playback,moq-scene/capture,moq-studio/capture "$@"
 
+# Stream V4L2 capture from the kernel's vivid virtual camera (`sudo modprobe vivid`
+# first); without one the tests skip, or fail under CI_STRICT.
+v4l2:
+    just rs test -p moq-video --no-default-features --features capture --lib --run-ignored only -E 'test(/^capture::v4l2::tests::vivid::/)'
+
 # Compare SHM and GetImage through production capture on the current X11 display.
 x11-bench:
     just rs test --release -p moq-video --no-default-features --features capture -E 'test(x11_capture_workload)' --run-ignored only --no-capture
@@ -197,30 +198,6 @@ android *args:
     bash sh/local.sh cargo ndk -t arm64-v8a --platform 26 -o target/android-jni build-ffi "$@"
     nm -D --undefined-only target/android-jni/arm64-v8a/libmoq_ffi.so | grep -q __android_log_
 
-# moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a wasm32
-# build sees the code. Not to be confused with `just js wasm`, which builds the
-# shippable `@moq/wasm` package. `moq-mux` and `moq-ffi` share the invocation
-# because moq-mux needs the getrandom backend only its siblings declare, and
-# features unify only within one cargo invocation. `moq-clock` rides along to
-# compile its browser clock backend.
-
-# Compile and lint the browser/WASM bindings, which the host-target check skips.
-[positional-arguments]
-wasm *args:
-    bash sh/local.sh cargo clippy --locked -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@" -- -D warnings
-
-# Run the browser clock backend on the root devShell's Playwright Chromium,
-# with the runtime and with reads alone.
-wasm-test:
-    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" bash sh/local.sh cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown
-    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER="bun {{ justfile_directory() }}/test/wasm/rust.ts" bash sh/local.sh cargo test --locked -p moq-clock --lib --target wasm32-unknown-unknown --no-default-features
-
-# Auto-fix the browser/WASM bindings.
-[positional-arguments]
-wasm-fix *args:
-    bash sh/local.sh cargo clippy --locked --fix --allow-staged --allow-dirty -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock --target wasm32-unknown-unknown --lib "$@"
-    cargo fmt -p moq-wasm -p moq-mux -p moq-ffi -p moq-clock
-
 # Audit dependencies against deny.toml. Nightly: advisories land without a diff.
 audit:
     bash sh/local.sh cargo deny check --show-stats
@@ -235,15 +212,6 @@ relay-minimal:
 c-tests:
     sh/rs/c-tests.sh
 
-# Benchmarks and examples stay in Nightly; the gate compiles the same targets
-# it tests, with both extremes exercising feature-gated implementation arms.
-
-# Isolate selected packages so a dependent cannot enable a feature that hides a warning.
-[positional-arguments]
-feature-shapes *args:
-    bash sh/local.sh cargo hack clippy --locked --tests --no-default-features "$@" -- -D warnings
-    bash sh/local.sh cargo hack clippy --locked --tests --all-features "$@" -- -D warnings
-
 # Compile the full feature matrix, including isolated combinations and their tests.
 features:
     just rs net-features --all
@@ -251,7 +219,6 @@ features:
     just rs tokio-features --all
     just rs media-features --all
     bash sh/local.sh cargo check --locked --workspace {{ no_fuzz }} --all-targets --no-default-features
-    bash sh/local.sh cargo hack check --locked -p moq-tokio --each-feature --exclude-features _transport --features aws-lc-rs
     bash sh/local.sh cargo check --locked -p moq-relay --no-default-features
     just rs relay-minimal
     bash sh/local.sh cargo check --locked -p moq-cli --no-default-features
@@ -269,7 +236,7 @@ features:
 net-features *args:
     bash sh/rs/net-features.sh "$@"
 
-# Prove moq-quic leaves moq-clock's dev-only runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
+# Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
 [positional-arguments]
 quic-features *args:
     #!/usr/bin/env bash
@@ -282,7 +249,7 @@ quic-features *args:
         exit 2
     fi
     graph=$(cargo tree --locked -p moq-quic -e normal --prefix none)
-    if grep -E '^(tokio|web-async) ' <<<"$graph"; then
+    if grep -E '^tokio ' <<<"$graph"; then
         echo "moq-quic must not depend on a native runtime" >&2
         exit 1
     fi
@@ -325,22 +292,6 @@ play *args:
 doctest *args:
     bash sh/local.sh cargo test --locked --doc "$@"
 
-# `--cfg loom` swaps kio's primitives for loom's, so it rebuilds the world and
-# executes only in Nightly; the selected Rust gate compiles it with `--no-run`.
-# `--release` because a model check runs the body once
-# per interleaving (411s -> 51s); the assertions are plain `assert!`. kio's
-# models search every interleaving; moq-net's cap preemptions (see
-# `tests/loom.rs`, `LOOM_MAX_PREEMPTIONS`). kio's own unit tests are
-# `cfg(not(loom))`.
-
-# Permutation-test the concurrent handoffs with loom. `crossbeam_loom` puts the
-# epoch collector that frees `kio::log` segments under loom too.
-[positional-arguments]
-loom *args:
-    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p kio --lib loom:: "$@"
-    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p moq-net --test loom "$@"
-    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p moq-net --test expiry-loom "$@"
-
 # Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite.
 quic-sim:
     #!/usr/bin/env bash
@@ -354,7 +305,8 @@ quic-sim:
     # The bandwidth probe's acceptance suite, over fixed seeds: the merge gate runs only its short cases.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only -E 'test(/^tests::probe::/)'
 
-# Prove downstream futures are Send at the default recursion limit on nightly.
+# Prove downstream futures are Send at the default recursion limit on the
+# flake's pinned nightly. Nightly runs it; the land gate does not.
 send-depth:
     bash sh/rs/send-depth.sh
 

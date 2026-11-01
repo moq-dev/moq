@@ -2,7 +2,7 @@
 
 ## Goal
 
-moq-net's model, and the kio, moq-clock, and moq-pattern code it calls, stay inside the
+moq-net's model, and the kio (clock included) and moq-pattern code it calls, stay inside the
 subset [rust2-ts](https://github.com/moq-dev/rust2/blob/main/ts/README.md) translates,
 so the [source-translator route](/quest/m2/rs2ts-wasm2js.md) can be measured on the model
 with no hand-written stand-ins for moq's own logic.
@@ -16,7 +16,7 @@ and trait objects, so the moq-specific changes are made here. Waits until rust2'
 reaches the model; none of these changes behavior.
 
 - Safe twins, under `cfg(rust2_ts)`, which rust2-ts's driver passes, for the internal
-  `unsafe` (not `target_arch = "wasm32"`, since moq's WASM build keeps the native ones):
+  `unsafe`:
   `model/group.rs`'s `MaybeUninit` frame ring, `NonNull` in `track.rs` and
   `track/demand/ranges.rs`, `cache.rs`'s pointer identity, `frame.rs`'s `Segment`, and
   kio's lock-free `log`. Differential tests cover the twins, and native builds keep the
