@@ -407,7 +407,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_whip_publisher_past_its_cap_plus_burst_is_closed() {
 		let origin = moq_tokio::origin::spawn();
-		let (mut opus, _catalog) = publish_opus(&origin, moq_net::Epoch::mint());
+		let (mut opus, _catalog) = publish_opus(&origin, moq_net::Identity::random());
 		// 8 kbps with a tenth of a second of burst allows 100 bytes up front.
 		let cap = crate::rate::Cap::new(moq_net::bandwidth::Rate::from_kbps(8)).with_burst(Duration::from_millis(100));
 		let (address, http, mut sessions) = serve_capped_whip(crate::rate::Limit::new(cap)).await;

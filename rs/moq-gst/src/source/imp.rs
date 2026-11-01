@@ -4779,12 +4779,12 @@ mod session_tests {
 		let recorder = Recorder::attach(&element);
 		let origin = origin();
 
-		let mut current = Publisher::new(&origin, epoch(), video_rendition());
+		let mut current = Publisher::new(&origin, Default::default(), video_rendition());
 		let session = follow(&element, &origin);
 		let pad = recorder.written(&mut current, 1);
 		for round in 0..4u8 {
 			let tag = 2 + round * 3;
-			let route = epoch();
+			let route = moq_net::origin::Route::default();
 			let mut next = Publisher::new(&origin, route.clone(), video_rendition());
 			assert_eq!(
 				recorder.written(&mut next, tag),
