@@ -31,6 +31,12 @@ fi
 
 cd "$(dirname "${BASH_SOURCE[0]}")/../../cpp"
 
+# A source build checks formatting first; the release jobs that pass an input
+# check a build of sources already gated.
+if [[ -z "$archive" && -z "$ffi_dir" ]]; then
+    bash ../sh/clang-format.sh --check cpp/moq
+fi
+
 # Single-config generators build the package Debug, for cargo's dev profile. The consumers
 # clear the build type, since debug info only slows the bindings' compile and link. Visual
 # Studio ignores CMAKE_BUILD_TYPE and gets --config Release, since the Rust staticlib links

@@ -27,6 +27,7 @@ mod fetch_cancel;
 mod fetch_fanout;
 mod fetch_from_feed;
 mod fetch_only;
+mod fetch_pipeline;
 mod finished_broadcast_mock;
 mod finite_relay;
 mod goaway;
@@ -62,6 +63,7 @@ mod stream_credit;
 mod subscribe_priority;
 mod subscribe_ranges;
 mod subscribe_tracks;
+mod subscribe_with_track;
 mod subscriber_max_age;
 mod subscription_end_integrity;
 #[cfg(feature = "async")]

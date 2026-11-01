@@ -67,16 +67,16 @@ async fn covering(version: Option<&str>) -> Vec<String> {
 
 	let served = publisher.create_broadcast(SERVED).unwrap();
 	served.announce(Default::default()).unwrap();
-	moq_clock::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 	log.push(format!("served: {:?}", drain(&mut announced)));
 
 	let below = publisher.create_broadcast(format!("{REQUESTED}/cam")).unwrap();
 	below.announce(Default::default()).unwrap();
-	moq_clock::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 	log.push(format!("below: {:?}", drain(&mut announced)));
 
 	if let Some(pair) = pair {
-		let closed = moq_clock::timeout(SETTLE, pair.client.closed()).await;
+		let closed = kio::clock::timeout(SETTLE, pair.client.closed()).await;
 		log.push(format!("session open: {}", closed.is_err()));
 	}
 
@@ -85,12 +85,12 @@ async fn covering(version: Option<&str>) -> Vec<String> {
 
 const EXPECTED: &[&str] = &["served: [\"Start \"]", "below: [\"Start cam\"]"];
 
-#[moq_clock::test]
+#[kio::test]
 async fn local_cursor_sees_the_covering_route_at_its_root() {
 	assert_eq!(covering(None).await, EXPECTED);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn remote_lite_peer_hears_the_covering_route() {
 	let mut expected = EXPECTED.to_vec();
 	expected.push("session open: true");
@@ -105,7 +105,7 @@ async fn remote_lite_peer_hears_the_covering_route() {
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn remote_ietf_peer_hears_the_covering_route() {
 	let mut expected = EXPECTED.to_vec();
 	expected.push("session open: true");
@@ -117,7 +117,7 @@ async fn remote_ietf_peer_hears_the_covering_route() {
 /// A relay forwards a claim at `room` through a `**/*.chat` scope, since a path beneath it
 /// could match, so a request for `room/lobby.chat` is served across both hops. Listing that
 /// scope at the far end shows only literal matches, so the claim stays out of it.
-#[moq_clock::test]
+#[kio::test]
 async fn relays_route_a_covering_claim_that_listings_omit() {
 	let chat = Patterns::from("**/*.chat".parse::<Pattern>().unwrap());
 	for version in [
@@ -148,20 +148,20 @@ async fn relays_route_a_covering_claim_that_listings_omit() {
 		let scoped = client.consume().scope("", &chat).unwrap();
 		let mut listed = scoped.announced();
 		let mut covering = scoped.clone().covering().announced();
-		moq_clock::sleep(SETTLE).await;
+		kio::clock::sleep(SETTLE).await;
 		assert_eq!(drain(&mut listed), ["Start lobby.chat"], "{version}");
 		let mut routes = drain(&mut covering);
 		routes.sort();
 		assert_eq!(routes, ["Start lobby.chat", "Start room"], "{version}");
 
 		// The claim is asked once something subscribes beneath it.
-		let broadcast = moq_clock::timeout(SETTLE, scoped.request("room/lobby.chat", None))
+		let broadcast = kio::clock::timeout(SETTLE, scoped.request("room/lobby.chat", None))
 			.await
 			.expect("the request resolved")
 			.unwrap();
 		let track = broadcast.track("video").unwrap();
-		let _subscribing = moq_clock::sim::spawn(async move { track.subscribe(None).await.map(drop) });
-		let request = moq_clock::timeout(SETTLE, claim.requested_broadcast())
+		let _subscribing = kio::clock::sim::spawn(async move { track.subscribe(None).await.map(drop) });
+		let request = kio::clock::timeout(SETTLE, claim.requested_broadcast())
 			.await
 			.expect("the request crossed both hops")
 			.unwrap();
