@@ -1,6 +1,6 @@
 //! Pacing of packet transmissions.
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::time::Duration;
 
 /// A simple token-bucket pacer

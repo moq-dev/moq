@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { replenishWindow } from "./credit.ts";
 import { RecvStream } from "./recv.ts";
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const tick = () => yieldNow();
 
 describe("RecvStream", () => {
 	test("delivers buffered chunks in order, crediting each on delivery", async () => {
