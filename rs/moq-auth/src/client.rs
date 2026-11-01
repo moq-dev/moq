@@ -489,11 +489,6 @@ impl<S: Post> Driver<S> {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 	use moq_pattern::Patterns;
@@ -802,7 +797,7 @@ mod tests {
 		struct Slow(Script);
 		impl Post for Slow {
 			async fn post(&self, request: &Request) -> crate::Result<Grant> {
-				tokio::time::sleep(TIMEOUT + Duration::from_secs(1)).await;
+				moq_clock::sleep(TIMEOUT + Duration::from_secs(1)).await;
 				self.0.post(request).await
 			}
 			async fn post_end(&self, request: &Request) -> crate::Result<()> {
@@ -812,7 +807,7 @@ mod tests {
 		let script = Script::new(Log::default(), |_| Some(Ok(grant(None, None))));
 		let server = Slow(script.clone());
 
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let owner = match admit(
 			server.clone(),
 			request(),
@@ -828,7 +823,7 @@ mod tests {
 		let mut attached = request();
 		attached.query = Some("jwt=replacement".into());
 		let context = owner.context().unwrap().attach(&attached, &script.identity).unwrap();
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let Err(err) = admit(server, attached, context).await else {
 			panic!("an attached credential waited past its bound");
 		};
@@ -1199,7 +1194,7 @@ mod tests {
 		});
 
 		let mut consumer = script.connect().await.unwrap();
-		let fresh = tokio::time::timeout(Duration::from_secs(3), consumer.changed())
+		let fresh = moq_clock::timeout(Duration::from_secs(3), consumer.changed())
 			.await
 			.expect("a re-check within the cadence")
 			.unwrap();
@@ -1222,7 +1217,7 @@ mod tests {
 			});
 
 			let consumer = script.connect().await.unwrap();
-			let reason = tokio::time::timeout(Duration::from_secs(3), consumer.closed())
+			let reason = moq_clock::timeout(Duration::from_secs(3), consumer.closed())
 				.await
 				.expect("revoked within the cadence");
 			assert_eq!(reason, Reason::Refused);
@@ -1239,7 +1234,7 @@ mod tests {
 		});
 
 		let consumer = script.connect().await.unwrap();
-		let reason = tokio::time::timeout(Duration::from_secs(3), consumer.closed())
+		let reason = moq_clock::timeout(Duration::from_secs(3), consumer.closed())
 			.await
 			.expect("revoked within the cadence");
 		assert_eq!(reason, Reason::Invalid);
@@ -1270,7 +1265,7 @@ mod tests {
 		let consumer = script.connect().await.unwrap();
 		// A nudge's reply schedules the next re-check the same way.
 		consumer.revalidate();
-		let reason = tokio::time::timeout(Duration::from_secs(4), consumer.closed())
+		let reason = moq_clock::timeout(Duration::from_secs(4), consumer.closed())
 			.await
 			.expect("closed at expires");
 		assert_eq!(reason, Reason::Expired);
@@ -1297,15 +1292,15 @@ mod tests {
 
 		// `expires` is wall-clock time, which the client maps onto Tokio's clock
 		// somewhere inside `connect`, so bracket it: the bounds hold however long it takes.
-		let (wall, tick) = (moq_clock::wall(), tokio::time::Instant::now());
+		let (wall, tick) = (moq_clock::wall(), moq_clock::now());
 		let consumer = script.connect().await.unwrap();
 		let earliest = tick + expires.checked_duration_since(moq_clock::wall()).unwrap();
-		let latest = tokio::time::Instant::now() + expires.checked_duration_since(wall).unwrap();
+		let latest = moq_clock::now() + expires.checked_duration_since(wall).unwrap();
 
 		// A millisecond either side for Tokio's timer resolution.
 		let tolerance = Duration::from_millis(1);
 		assert!(
-			tokio::time::timeout_at(earliest - tolerance, consumer.closed())
+			moq_clock::timeout_at(earliest - tolerance, consumer.closed())
 				.await
 				.is_err(),
 			"an outage must not close before expires"
@@ -1316,7 +1311,7 @@ mod tests {
 			patterns(&["**"]),
 			"the grant stands through the outage"
 		);
-		let reason = tokio::time::timeout_at(latest + tolerance, consumer.closed())
+		let reason = moq_clock::timeout_at(latest + tolerance, consumer.closed())
 			.await
 			.expect("closed at expires, not later");
 		assert_eq!(reason, Reason::Expired);
@@ -1339,7 +1334,7 @@ mod tests {
 		});
 		let consumer = script.connect().await.unwrap();
 
-		let reason = tokio::time::timeout(Duration::from_secs(5), consumer.closed())
+		let reason = moq_clock::timeout(Duration::from_secs(5), consumer.closed())
 			.await
 			.expect("expired while the re-check was in flight");
 		assert_eq!(reason, Reason::Expired);
@@ -1410,7 +1405,7 @@ mod tests {
 		let consumer = client(&server).connect(request()).await.unwrap();
 		assert_eq!(log.events(), [Event::Connect]);
 		consumer.revalidate();
-		tokio::time::timeout(
+		moq_clock::timeout(
 			Duration::from_secs(2),
 			log.until(|log| log.iter().any(|r| r.event == Event::Revalidate)),
 		)
@@ -1433,7 +1428,7 @@ mod tests {
 
 		let consumer = client(&server).connect(request()).await.unwrap();
 		consumer.revalidate();
-		tokio::time::timeout(
+		moq_clock::timeout(
 			Duration::from_secs(2),
 			log.until(|log| log.iter().any(|r| r.event == Event::Revalidate)),
 		)
@@ -1444,7 +1439,7 @@ mod tests {
 		consumer.revalidate();
 		// `changed` jumps to the latest grant epoch, so two replies can arrive as one
 		// observation. The request log does not coalesce.
-		tokio::time::timeout(
+		moq_clock::timeout(
 			Duration::from_secs(3),
 			log.until(|log| log.iter().filter(|r| r.event == Event::Revalidate).count() >= 2),
 		)

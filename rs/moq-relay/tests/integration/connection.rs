@@ -54,7 +54,7 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 			group.write_frame(timestamp, b"ladder".as_ref()).unwrap();
 			group.finish().unwrap();
-			let mut got = tokio::time::timeout(TIMEOUT, sub.recv_group())
+			let mut got = moq_clock::timeout(TIMEOUT, sub.recv_group())
 				.await
 				.unwrap_or_else(|_| panic!("{alpn} sequence={sequence} hung"))
 				.unwrap()
@@ -93,7 +93,7 @@ fn publish(
 /// The next active route's prefix.
 async fn next_active(announced: &mut moq_net::announce::Consumer) -> String {
 	loop {
-		match tokio::time::timeout(TIMEOUT, announced.next())
+		match moq_clock::timeout(TIMEOUT, announced.next())
 			.await
 			.expect("announcement timeout")
 			.expect("origin closed")
@@ -111,7 +111,7 @@ async fn next_active(announced: &mut moq_net::announce::Consumer) -> String {
 /// was answered first.
 async fn assert_refused(result: Result<moq_net::Session, moq_net::Error>) {
 	let err = match result {
-		Ok(session) => tokio::time::timeout(TIMEOUT, session.closed())
+		Ok(session) => moq_clock::timeout(TIMEOUT, session.closed())
 			.await
 			.expect("the relay must close a refused session, not leave it open"),
 		Err(err) => err,
@@ -139,7 +139,7 @@ async fn subscribe_only_public_accepts_subscriber_role() {
 		.await
 		.expect("subscriber connects");
 	assert!(
-		tokio::time::timeout(TIMEOUT, session.closed()).await.is_err(),
+		moq_clock::timeout(TIMEOUT, session.closed()).await.is_err(),
 		"subscribe-only relay should keep a subscriber session open"
 	);
 }
@@ -245,7 +245,7 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 		.subscribe(None)
 		.await
 		.expect("subscribe");
-	let mut group = tokio::time::timeout(TIMEOUT, track.recv_group())
+	let mut group = moq_clock::timeout(TIMEOUT, track.recv_group())
 		.await
 		.expect("group timeout")
 		.expect("recv group")
@@ -287,7 +287,7 @@ async fn stats_count_admitted_and_refused_sessions() {
 	let session = connect(client, newest(), &cluster, &auth)
 		.await
 		.expect("subscriber connects");
-	tokio::time::timeout(TIMEOUT, async {
+	moq_clock::timeout(TIMEOUT, async {
 		while presence().active() != 1 {
 			tokio::task::yield_now().await;
 		}
@@ -301,7 +301,7 @@ async fn stats_count_admitted_and_refused_sessions() {
 	assert_eq!(presence().sessions_refused.forbidden, 1);
 
 	drop(session);
-	tokio::time::timeout(TIMEOUT, async {
+	moq_clock::timeout(TIMEOUT, async {
 		while presence().active() != 0 {
 			tokio::task::yield_now().await;
 		}

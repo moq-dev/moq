@@ -86,11 +86,11 @@ where
 			std::task::Poll::Pending => fut.await,
 		}
 	});
-	tokio::time::timeout(TIMEOUT, started_rx)
+	moq_clock::timeout(TIMEOUT, started_rx)
 		.await
 		.expect("timed out waiting for the read to start")
 		.expect("the read task dropped before polling");
-	tokio::time::timeout(TIMEOUT, ffi_caught_up())
+	moq_clock::timeout(TIMEOUT, ffi_caught_up())
 		.await
 		.expect("timed out waiting for the FFI runtime to poll the read");
 	handle
@@ -126,7 +126,7 @@ async fn wait_for_config_error(
 	mut op: impl FnMut() -> Result<(), MoqError>,
 	want: impl Fn(&MoqError) -> bool,
 ) -> MoqError {
-	tokio::time::timeout(TIMEOUT, async {
+	moq_clock::timeout(TIMEOUT, async {
 		loop {
 			match op() {
 				Err(err) if want(&err) => return err,
@@ -141,7 +141,7 @@ async fn wait_for_config_error(
 
 /// Wait until `read_frame` has taken `group` off the ordered cursor.
 async fn wait_group_acquired(group: &MoqGroupProducer) {
-	tokio::time::timeout(TIMEOUT, group.wanted())
+	moq_clock::timeout(TIMEOUT, group.wanted())
 		.await
 		.expect("timed out waiting for the group to be acquired")
 		.unwrap();
@@ -200,13 +200,13 @@ async fn detached_cancels_inner_on_drop() {
 		std::future::pending::<Result<(), MoqError>>().await
 	}));
 
-	tokio::time::timeout(TIMEOUT, started_rx)
+	moq_clock::timeout(TIMEOUT, started_rx)
 		.await
 		.expect("timed out waiting for detached task to start")
 		.unwrap();
 	outer.abort();
 	assert!(outer.await.unwrap_err().is_cancelled());
-	tokio::time::timeout(TIMEOUT, dropped_rx)
+	moq_clock::timeout(TIMEOUT, dropped_rx)
 		.await
 		.expect("timed out waiting for detached task to be dropped")
 		.unwrap();
@@ -236,7 +236,7 @@ fn video_init(format: MoqVideoFormat, data: Vec<u8>) -> MoqVideoInit {
 /// These tests wait for that future announcement before resolving the reference.
 async fn await_announced(consumer: &MoqOriginConsumer, path: &str) -> Arc<MoqBroadcastConsumer> {
 	let announced = consumer.follow(path.into(), None).unwrap();
-	tokio::time::timeout(TIMEOUT, announced.available())
+	moq_clock::timeout(TIMEOUT, announced.available())
 		.await
 		.unwrap_or_else(|_| panic!("timed out waiting for {path} to be announced"))
 		.unwrap()
@@ -252,7 +252,7 @@ fn create_announced(origin: &MoqOriginProducer, path: &str) -> Arc<MoqBroadcastP
 
 /// The next announce event, failing the test on a timeout or a closed origin.
 async fn next_event(announced: &MoqAnnounceConsumer) -> MoqAnnounceEvent {
-	tokio::time::timeout(TIMEOUT, announced.next())
+	moq_clock::timeout(TIMEOUT, announced.next())
 		.await
 		.expect("timed out waiting for an announce event")
 		.unwrap()
@@ -532,13 +532,13 @@ async fn raw_track_activity() {
 	assert_eq!(demand.name(), "status");
 
 	let consumer = track.consume(None).unwrap();
-	tokio::time::timeout(TIMEOUT, demand.until_wanted())
+	moq_clock::timeout(TIMEOUT, demand.until_wanted())
 		.await
 		.expect("timed out waiting for raw track to become used")
 		.unwrap();
 
 	drop(consumer);
-	tokio::time::timeout(TIMEOUT, demand.until_unwanted())
+	moq_clock::timeout(TIMEOUT, demand.until_unwanted())
 		.await
 		.expect("timed out waiting for raw track to become unused")
 		.unwrap();
@@ -581,7 +581,7 @@ async fn raw_audio_activity() {
 	.unwrap();
 	assert_eq!(audio.demand().unwrap().name(), "microphone");
 
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for raw audio catalog")
 		.unwrap()
@@ -599,7 +599,7 @@ async fn raw_audio_activity() {
 	)
 	.await
 	.unwrap();
-	tokio::time::timeout(TIMEOUT, audio.demand().unwrap().until_wanted())
+	moq_clock::timeout(TIMEOUT, audio.demand().unwrap().until_wanted())
 		.await
 		.expect("timed out waiting for raw audio to become used")
 		.unwrap();
@@ -609,7 +609,7 @@ async fn raw_audio_activity() {
 			data: vec![0; FRAME_SAMPLES * std::mem::size_of::<f32>()],
 		})
 		.unwrap();
-	let first = tokio::time::timeout(TIMEOUT, next_encoded_frame(&subscription))
+	let first = moq_clock::timeout(TIMEOUT, next_encoded_frame(&subscription))
 		.await
 		.expect("timed out waiting for raw audio frame")
 		.unwrap()
@@ -617,7 +617,7 @@ async fn raw_audio_activity() {
 	assert_eq!(micros(first.timestamp), FIRST_TIMESTAMP_US);
 
 	drop(subscription);
-	tokio::time::timeout(TIMEOUT, audio.demand().unwrap().until_unwanted())
+	moq_clock::timeout(TIMEOUT, audio.demand().unwrap().until_unwanted())
 		.await
 		.expect("timed out waiting for raw audio to become unused")
 		.unwrap();
@@ -631,7 +631,7 @@ async fn raw_audio_activity() {
 	)
 	.await
 	.unwrap();
-	tokio::time::timeout(TIMEOUT, audio.demand().unwrap().until_wanted())
+	moq_clock::timeout(TIMEOUT, audio.demand().unwrap().until_wanted())
 		.await
 		.expect("timed out waiting for raw audio to become used again")
 		.unwrap();
@@ -642,13 +642,13 @@ async fn raw_audio_activity() {
 			data: vec![0; FRAME_SAMPLES * std::mem::size_of::<f32>()],
 		})
 		.unwrap();
-	let mut resumed = tokio::time::timeout(TIMEOUT, next_encoded_frame(&subscription))
+	let mut resumed = moq_clock::timeout(TIMEOUT, next_encoded_frame(&subscription))
 		.await
 		.expect("timed out waiting for resumed raw audio frame")
 		.unwrap()
 		.expect("expected a resumed raw audio frame");
 	if resumed.timestamp == first.timestamp {
-		resumed = tokio::time::timeout(TIMEOUT, next_encoded_frame(&subscription))
+		resumed = moq_clock::timeout(TIMEOUT, next_encoded_frame(&subscription))
 			.await
 			.expect("timed out waiting for re-anchored raw audio frame")
 			.unwrap()
@@ -740,7 +740,7 @@ async fn audio_subscribes_a_held_disabled_rendition() {
 	}
 	audio.finish().unwrap();
 	let mut frames = 0;
-	while let Some(read) = tokio::time::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
+	while let Some(read) = moq_clock::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
 		if matches!(read, MoqAudioRead::Frame { .. }) {
 			frames += 1;
 		}
@@ -808,7 +808,7 @@ async fn audio_raw_publish_from_many_threads() {
 	let closer = audio.clone();
 	std::thread::spawn(move || closer.finish()).join().unwrap().unwrap();
 	let mut pcm = Vec::new();
-	while let Some(read) = tokio::time::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
+	while let Some(read) = moq_clock::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
 		let frame = match read {
 			MoqAudioRead::Frame { frame } => frame,
 			MoqAudioRead::End { end } => {
@@ -921,7 +921,7 @@ async fn raw_audio_decode_delay() {
 		},
 	)
 	.unwrap();
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for raw audio catalog")
 		.unwrap()
@@ -959,7 +959,7 @@ async fn raw_audio_decode_delay() {
 			.unwrap();
 	}
 	for read in [fixed_read, estimated_read] {
-		let read = tokio::time::timeout(TIMEOUT, read)
+		let read = moq_clock::timeout(TIMEOUT, read)
 			.await
 			.expect("timed out waiting for decoded audio")
 			.unwrap()
@@ -1051,7 +1051,7 @@ async fn raw_audio_decode_reports_encoder_ends() {
 
 	let mut ends = Vec::new();
 	let mut frames = Vec::new();
-	while let Some(read) = tokio::time::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
+	while let Some(read) = moq_clock::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
 		match read {
 			MoqAudioRead::Frame { frame } => frames.push((ends.len(), micros(frame.timestamp))),
 			MoqAudioRead::Gap { .. } => panic!("nothing was lost"),
@@ -1232,7 +1232,7 @@ async fn raw_track_datagram_roundtrip() {
 			timestamp: Some(us(123_456)),
 		})
 		.unwrap();
-	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+	let datagram = moq_clock::timeout(TIMEOUT, consumer.recv_datagram())
 		.await
 		.expect("timed out waiting for datagram")
 		.unwrap()
@@ -1295,7 +1295,7 @@ async fn raw_track_update_does_not_wait_for_pending_read() {
 		})
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, read)
+	let frame = moq_clock::timeout(TIMEOUT, read)
 		.await
 		.expect("timed out waiting for raw frame")
 		.expect("read task panicked")
@@ -1454,7 +1454,7 @@ async fn json_snapshot_roundtrip() {
 		producer.update(format!(r#"{{"a":{n}}}"#), Some(us(n * 1000))).unwrap();
 	}
 
-	let value = tokio::time::timeout(TIMEOUT, consumer.next())
+	let value = moq_clock::timeout(TIMEOUT, consumer.next())
 		.await
 		.expect("timed out waiting for json snapshot")
 		.unwrap()
@@ -1465,7 +1465,7 @@ async fn json_snapshot_roundtrip() {
 	);
 	assert_eq!(value.timestamp.map(micros), Some(1000));
 
-	let value = tokio::time::timeout(TIMEOUT, consumer.next())
+	let value = moq_clock::timeout(TIMEOUT, consumer.next())
 		.await
 		.expect("timed out waiting for json snapshot delta")
 		.unwrap()
@@ -1477,7 +1477,7 @@ async fn json_snapshot_roundtrip() {
 	assert_eq!(value.timestamp.map(micros), Some(2000));
 
 	// `latest` skips the buffered third state.
-	let value = tokio::time::timeout(TIMEOUT, consumer.latest())
+	let value = moq_clock::timeout(TIMEOUT, consumer.latest())
 		.await
 		.expect("timed out waiting for the latest json snapshot")
 		.unwrap()
@@ -1493,7 +1493,7 @@ async fn json_snapshot_roundtrip() {
 		producer.update(r#"{"a":5}"#.into(), Some(us(5000))),
 		Err(MoqError::Closed)
 	));
-	let end = tokio::time::timeout(TIMEOUT, consumer.next())
+	let end = moq_clock::timeout(TIMEOUT, consumer.next())
 		.await
 		.expect("timed out waiting for the end of the json snapshot")
 		.unwrap();
@@ -1526,7 +1526,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 	// The join crosses the ratio, so the producer restates the value without another update. The
 	// joiner may read the open group first or skip straight to the restatement.
 	let joiner = subscribe(&broadcast, "meta").await;
-	let refreshed = tokio::time::timeout(TIMEOUT, async {
+	let refreshed = moq_clock::timeout(TIMEOUT, async {
 		loop {
 			let group = joiner.recv_group().await.unwrap().expect("expected a group");
 			if group.sequence() > 0 {
@@ -1538,7 +1538,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 	.expect("timed out waiting for the refresh");
 	assert_eq!(refreshed.sequence(), 1);
 	let consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "meta").await).unwrap();
-	let value = tokio::time::timeout(TIMEOUT, consumer.next())
+	let value = moq_clock::timeout(TIMEOUT, consumer.next())
 		.await
 		.expect("timed out waiting for the restated value")
 		.unwrap()
@@ -1569,11 +1569,11 @@ async fn json_demand() {
 	let snapshot_consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "status").await).unwrap();
 	let stream_consumer = MoqJsonStreamConsumer::new(&*subscribe(&broadcast, "events").await).unwrap();
 
-	tokio::time::timeout(TIMEOUT, snapshot_demand.until_wanted())
+	moq_clock::timeout(TIMEOUT, snapshot_demand.until_wanted())
 		.await
 		.expect("timed out waiting for the json snapshot to become used")
 		.unwrap();
-	tokio::time::timeout(TIMEOUT, stream_demand.until_wanted())
+	moq_clock::timeout(TIMEOUT, stream_demand.until_wanted())
 		.await
 		.expect("timed out waiting for the json stream to become used")
 		.unwrap();
@@ -1581,11 +1581,11 @@ async fn json_demand() {
 
 	drop(snapshot_consumer);
 	drop(stream_consumer);
-	tokio::time::timeout(TIMEOUT, snapshot_demand.until_unwanted())
+	moq_clock::timeout(TIMEOUT, snapshot_demand.until_unwanted())
 		.await
 		.expect("timed out waiting for the json snapshot to become unused")
 		.unwrap();
-	tokio::time::timeout(TIMEOUT, stream_demand.until_unwanted())
+	moq_clock::timeout(TIMEOUT, stream_demand.until_unwanted())
 		.await
 		.expect("timed out waiting for the json stream to become unused")
 		.unwrap();
@@ -1600,7 +1600,7 @@ async fn json_demand() {
 
 /// Read the next window event, failing the test if none arrives.
 async fn next_window(consumer: &MoqJsonWindowConsumer) -> Option<MoqJsonWindowTimed> {
-	tokio::time::timeout(TIMEOUT, consumer.next())
+	moq_clock::timeout(TIMEOUT, consumer.next())
 		.await
 		.expect("timed out waiting for a json window event")
 		.unwrap()
@@ -1694,7 +1694,7 @@ async fn json_window_cut_restates_the_window() {
 	producer.cut().unwrap();
 	producer.push(r#"{"n":3}"#.into(), None).unwrap();
 
-	let group = tokio::time::timeout(TIMEOUT, async {
+	let group = moq_clock::timeout(TIMEOUT, async {
 		loop {
 			let group = raw.recv_group().await.unwrap().expect("expected a group");
 			if group.sequence() > 0 {
@@ -1751,7 +1751,7 @@ async fn json_window_refreshes_a_bounded_checkpoint_for_a_joiner() {
 
 	// The join crosses the ratio, so the producer restates the window without another edit.
 	let joiner = subscribe(&broadcast, "log").await;
-	tokio::time::timeout(TIMEOUT, async {
+	moq_clock::timeout(TIMEOUT, async {
 		while joiner.recv_group().await.unwrap().expect("expected a group").sequence() == 0 {}
 	})
 	.await
@@ -1801,12 +1801,12 @@ async fn json_window_demand() {
 	assert!(demand.wanted().is_none());
 
 	let consumer = MoqJsonWindowConsumer::new(&*subscribe(&broadcast, "log").await).unwrap();
-	tokio::time::timeout(TIMEOUT, demand.until_wanted())
+	moq_clock::timeout(TIMEOUT, demand.until_wanted())
 		.await
 		.expect("timed out waiting for the json window to become used")
 		.unwrap();
 	drop(consumer);
-	tokio::time::timeout(TIMEOUT, demand.until_unwanted())
+	moq_clock::timeout(TIMEOUT, demand.until_unwanted())
 		.await
 		.expect("timed out waiting for the json window to become unused")
 		.unwrap();
@@ -1836,7 +1836,7 @@ async fn demand_handle_outlives_finish() {
 	assert_eq!(media_demand.name(), media.demand().unwrap().name());
 
 	let consumer = track.consume(None).unwrap();
-	tokio::time::timeout(TIMEOUT, track_demand.until_wanted())
+	moq_clock::timeout(TIMEOUT, track_demand.until_wanted())
 		.await
 		.expect("timed out waiting for the raw track to become used")
 		.unwrap();
@@ -1846,10 +1846,10 @@ async fn demand_handle_outlives_finish() {
 	drop(track);
 	media.finish().unwrap();
 	broadcast.close().unwrap();
-	let track_err = tokio::time::timeout(TIMEOUT, track_demand.until_wanted())
+	let track_err = moq_clock::timeout(TIMEOUT, track_demand.until_wanted())
 		.await
 		.expect("timed out waiting for the finished raw track");
-	let media_err = tokio::time::timeout(TIMEOUT, media_demand.until_wanted())
+	let media_err = moq_clock::timeout(TIMEOUT, media_demand.until_wanted())
 		.await
 		.expect("timed out waiting for the finished media track");
 	assert!(matches!(track_err, Err(MoqError::Closed)), "{track_err:?}");
@@ -1865,7 +1865,7 @@ async fn json_stream_roundtrip() {
 
 	for n in 0..3 {
 		producer.append(format!(r#"{{"n":{n}}}"#), None).unwrap();
-		let value = tokio::time::timeout(TIMEOUT, consumer.next())
+		let value = moq_clock::timeout(TIMEOUT, consumer.next())
 			.await
 			.expect("timed out waiting for json stream record")
 			.unwrap()
@@ -1890,12 +1890,12 @@ async fn json_on_requested_track() {
 		let consumer = broadcast.consume().unwrap();
 		tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await })
 	};
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+	let request = moq_clock::timeout(TIMEOUT, dynamic.requested_track())
 		.await
 		.expect("timed out waiting for requested track")
 		.unwrap();
 	let producer = MoqJsonStreamProducer::new(&broadcast, &request.accept(None).unwrap()).unwrap();
-	let track = tokio::time::timeout(TIMEOUT, subscribe)
+	let track = moq_clock::timeout(TIMEOUT, subscribe)
 		.await
 		.expect("timed out waiting for the subscribe")
 		.unwrap()
@@ -1903,7 +1903,7 @@ async fn json_on_requested_track() {
 	let consumer = MoqJsonStreamConsumer::new(&track).unwrap();
 
 	producer.append(r#"{"n":1}"#.into(), None).unwrap();
-	let value = tokio::time::timeout(TIMEOUT, consumer.next())
+	let value = moq_clock::timeout(TIMEOUT, consumer.next())
 		.await
 		.expect("timed out waiting for json stream record")
 		.unwrap()
@@ -1924,7 +1924,7 @@ async fn json_consumer_takes_an_unread_track() {
 		.await
 		.unwrap();
 	track.append_group().unwrap().finish().unwrap();
-	tokio::time::timeout(TIMEOUT, read.recv_group())
+	moq_clock::timeout(TIMEOUT, read.recv_group())
 		.await
 		.expect("timed out waiting for a group")
 		.unwrap()
@@ -2000,7 +2000,7 @@ async fn dynamic_track_request() {
 		tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await })
 	};
 
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+	let request = moq_clock::timeout(TIMEOUT, dynamic.requested_track())
 		.await
 		.expect("timed out waiting for requested track")
 		.unwrap();
@@ -2016,13 +2016,13 @@ async fn dynamic_track_request() {
 		})
 		.unwrap();
 
-	let track_consumer = tokio::time::timeout(TIMEOUT, subscribe)
+	let track_consumer = moq_clock::timeout(TIMEOUT, subscribe)
 		.await
 		.expect("timed out waiting for subscribe")
 		.expect("subscribe task panicked")
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, track_consumer.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, track_consumer.read_frame())
 		.await
 		.expect("timed out waiting for dynamic track frame")
 		.unwrap()
@@ -2112,7 +2112,7 @@ async fn raw_frame_timestamps() {
 		})
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, consumer.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, consumer.read_frame())
 		.await
 		.expect("timed out waiting for raw track frame")
 		.unwrap()
@@ -2131,7 +2131,7 @@ async fn raw_frame_timestamps() {
 		.unwrap();
 	group.finish().unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, group_consumer.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, group_consumer.read_frame())
 		.await
 		.expect("timed out waiting for raw group frame")
 		.unwrap()
@@ -2276,7 +2276,7 @@ async fn dynamic_track_request_can_abort() {
 		tokio::spawn(async move { consumer.subscribe_track("unknown".into(), None).await })
 	};
 
-	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+	let track = moq_clock::timeout(TIMEOUT, dynamic.requested_track())
 		.await
 		.expect("timed out waiting for requested track")
 		.unwrap();
@@ -2284,7 +2284,7 @@ async fn dynamic_track_request_can_abort() {
 	track.abort(404).unwrap();
 	assert!(matches!(track.name(), Err(MoqError::Closed)));
 
-	let result = tokio::time::timeout(TIMEOUT, subscribe)
+	let result = moq_clock::timeout(TIMEOUT, subscribe)
 		.await
 		.expect("timed out waiting for subscribe")
 		.expect("subscribe task panicked");
@@ -2439,7 +2439,7 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 	}
 	media.finish().unwrap();
 
-	let fetched = tokio::time::timeout(
+	let fetched = moq_clock::timeout(
 		TIMEOUT,
 		MoqMediaGroupConsumer::fetch(
 			&consumer,
@@ -2454,7 +2454,7 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 	.expect("timed out fetching CMAF group")
 	.unwrap();
 
-	let first = tokio::time::timeout(TIMEOUT, fetched.next())
+	let first = moq_clock::timeout(TIMEOUT, fetched.next())
 		.await
 		.expect("timed out reading first CMAF sample")
 		.unwrap()
@@ -2462,7 +2462,7 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 	assert_eq!(first.payload, b"keyframe");
 	assert_eq!(micros(first.timestamp), 2_000_000);
 	assert!(first.keyframe);
-	let second = tokio::time::timeout(TIMEOUT, fetched.next())
+	let second = moq_clock::timeout(TIMEOUT, fetched.next())
 		.await
 		.expect("timed out reading second CMAF sample")
 		.unwrap()
@@ -2471,7 +2471,7 @@ async fn fetch_media_group_decodes_multiple_cmaf_samples() {
 	assert_eq!(micros(second.timestamp), 2_020_000);
 	assert!(!second.keyframe);
 	assert!(
-		tokio::time::timeout(TIMEOUT, fetched.next())
+		moq_clock::timeout(TIMEOUT, fetched.next())
 			.await
 			.expect("timed out finishing CMAF group")
 			.unwrap()
@@ -2514,7 +2514,7 @@ async fn legacy_track() -> (
 }
 
 async fn recv_raw_group(track: &MoqTrackConsumer) -> Arc<MoqGroupConsumer> {
-	tokio::time::timeout(TIMEOUT, track.recv_group())
+	moq_clock::timeout(TIMEOUT, track.recv_group())
 		.await
 		.expect("timed out waiting for a group")
 		.unwrap()
@@ -2527,7 +2527,7 @@ async fn recv_media_group(track: &MoqTrackConsumer) -> Arc<MoqMediaGroupConsumer
 }
 
 async fn next_media(group: &MoqMediaGroupConsumer) -> Result<Option<MoqMediaFrame>, MoqError> {
-	tokio::time::timeout(TIMEOUT, group.next())
+	moq_clock::timeout(TIMEOUT, group.next())
 		.await
 		.expect("timed out reading a media frame")
 }
@@ -2643,7 +2643,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 			.await
 	});
 
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
+	let request = moq_clock::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
 		.expect("timed out waiting for fill")
 		.unwrap();
@@ -2663,7 +2663,7 @@ async fn dynamic_track_serves_fetch_miss_and_priority() {
 		.unwrap();
 	group.finish().unwrap();
 
-	let fetched = tokio::time::timeout(TIMEOUT, fetch)
+	let fetched = moq_clock::timeout(TIMEOUT, fetch)
 		.await
 		.expect("timed out waiting for fetch")
 		.expect("fetch task panicked")
@@ -2682,7 +2682,7 @@ async fn fill_goes_unwanted_when_the_fetcher_leaves() {
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
-	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
+	let fill = moq_clock::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
 		.expect("timed out waiting for fill")
 		.unwrap();
@@ -2691,13 +2691,13 @@ async fn fill_goes_unwanted_when_the_fetcher_leaves() {
 	assert!(!fill.is_wanted(6), "outside the fill");
 
 	fetch.abort();
-	let wanted = tokio::time::timeout(TIMEOUT, fill.wanted_changed())
+	let wanted = moq_clock::timeout(TIMEOUT, fill.wanted_changed())
 		.await
 		.expect("timed out waiting for the abandoned fetch to become unwanted")
 		.unwrap();
 	assert_eq!(wanted, None);
 	assert_eq!(fill.wanted(), None);
-	tokio::time::timeout(TIMEOUT, fill.unwanted(5))
+	moq_clock::timeout(TIMEOUT, fill.unwanted(5))
 		.await
 		.expect("an unwanted fill wants none of its groups")
 		.unwrap();
@@ -2715,7 +2715,7 @@ async fn fill_wanted_changed_cancelled_before_free_leaves_the_change() {
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
-	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
+	let fill = moq_clock::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
 		.expect("timed out waiting for fill")
 		.unwrap();
@@ -2732,7 +2732,7 @@ async fn fill_wanted_changed_cancelled_before_free_leaves_the_change() {
 
 	let next = fill.wanted_changed();
 	drop(cancelled);
-	let wanted = tokio::time::timeout(TIMEOUT, next)
+	let wanted = moq_clock::timeout(TIMEOUT, next)
 		.await
 		.expect("the cancelled call took the change")
 		.unwrap();
@@ -2747,14 +2747,14 @@ async fn dynamic_track_rejects_fetch_miss() {
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("events".into(), 5, None).await });
-	let fill = tokio::time::timeout(TIMEOUT, dynamic.requested_fill())
+	let fill = moq_clock::timeout(TIMEOUT, dynamic.requested_fill())
 		.await
 		.expect("timed out waiting for fill")
 		.unwrap();
 	fill.drop_groups(5, 6);
 	assert_eq!(fill.wanted(), None, "the dropped group is answered");
 
-	let result = tokio::time::timeout(TIMEOUT, fetch)
+	let result = moq_clock::timeout(TIMEOUT, fetch)
 		.await
 		.expect("timed out waiting for rejected fetch")
 		.expect("fetch task panicked");
@@ -2788,14 +2788,14 @@ async fn requested_track_dynamic_survives_accept() {
 	let consumer = broadcast.consume().unwrap();
 
 	let fetch = tokio::spawn(async move { consumer.fetch_group("archive".into(), 9, None).await });
-	let request = tokio::time::timeout(TIMEOUT, broadcast_dynamic.requested_track())
+	let request = moq_clock::timeout(TIMEOUT, broadcast_dynamic.requested_track())
 		.await
 		.expect("timed out waiting for track request")
 		.unwrap();
 	let track_dynamic = request.requests().unwrap();
 	let _track = request.accept(Some(timed_info())).unwrap();
 
-	let fill = tokio::time::timeout(TIMEOUT, track_dynamic.requested_fill())
+	let fill = moq_clock::timeout(TIMEOUT, track_dynamic.requested_fill())
 		.await
 		.expect("timed out waiting for fill")
 		.unwrap();
@@ -2809,7 +2809,7 @@ async fn requested_track_dynamic_survives_accept() {
 		.unwrap();
 	group.finish().unwrap();
 
-	let fetched = tokio::time::timeout(TIMEOUT, fetch)
+	let fetched = moq_clock::timeout(TIMEOUT, fetch)
 		.await
 		.expect("timed out waiting for fetch")
 		.expect("fetch task panicked")
@@ -2860,7 +2860,7 @@ async fn video_publish_named_track() {
 		Err(MoqError::Codec { .. })
 	));
 
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
 		.unwrap()
@@ -2928,7 +2928,7 @@ async fn track_stream_producer_publishes_its_last_access_unit() {
 	}
 	stream.finish().unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, track.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, track.read_frame())
 		.await
 		.expect("timed out waiting for the access unit")
 		.unwrap()
@@ -2952,7 +2952,7 @@ async fn requested_track_keeps_its_name() {
 		.await
 	});
 
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+	let request = moq_clock::timeout(TIMEOUT, dynamic.requested_track())
 		.await
 		.expect("timed out waiting for requested track")
 		.unwrap();
@@ -2992,7 +2992,7 @@ async fn dynamic_track_request_can_publish_media() {
 		})
 	};
 
-	let track = tokio::time::timeout(TIMEOUT, dynamic.requested_track())
+	let track = moq_clock::timeout(TIMEOUT, dynamic.requested_track())
 		.await
 		.expect("timed out waiting for requested track")
 		.unwrap();
@@ -3007,13 +3007,13 @@ async fn dynamic_track_request_can_publish_media() {
 	assert_eq!(media.demand().unwrap().name(), "requested-audio");
 	assert!(matches!(track.name(), Err(MoqError::Closed)));
 
-	let media_consumer = tokio::time::timeout(TIMEOUT, subscribe)
+	let media_consumer = moq_clock::timeout(TIMEOUT, subscribe)
 		.await
 		.expect("timed out waiting for subscribe")
 		.expect("subscribe task panicked")
 		.unwrap();
 
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
 		.unwrap()
@@ -3034,7 +3034,7 @@ async fn dynamic_track_request_can_publish_media() {
 		})
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
+	let frame = moq_clock::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
 		.await
 		.expect("timed out waiting for media frame")
 		.unwrap()
@@ -3062,7 +3062,7 @@ async fn media_track_activity_and_name() {
 
 	let broadcast_consumer = broadcast.consume().unwrap();
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
 		.unwrap()
@@ -3070,13 +3070,13 @@ async fn media_track_activity_and_name() {
 	assert!(catalog.audio.contains_key(&track_name));
 
 	let track_consumer = broadcast_consumer.subscribe_track(track_name, None).await.unwrap();
-	tokio::time::timeout(TIMEOUT, media.demand().unwrap().until_wanted())
+	moq_clock::timeout(TIMEOUT, media.demand().unwrap().until_wanted())
 		.await
 		.expect("timed out waiting for media track to become used")
 		.unwrap();
 
 	drop(track_consumer);
-	tokio::time::timeout(TIMEOUT, media.demand().unwrap().until_unwanted())
+	moq_clock::timeout(TIMEOUT, media.demand().unwrap().until_unwanted())
 		.await
 		.expect("timed out waiting for media track to become unused")
 		.unwrap();
@@ -3100,7 +3100,7 @@ async fn publish_media_aac_populates_description() {
 
 	let consumer = broadcast.consume().unwrap();
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&consumer).await.unwrap();
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
 		.unwrap()
@@ -3142,7 +3142,7 @@ async fn create_broadcast_is_invisible_until_announced() {
 	let consumer = origin.consume();
 	let publication = origin.create_broadcast("live".into()).unwrap();
 
-	let unroutable = tokio::time::timeout(TIMEOUT, consumer.request("live".into(), None))
+	let unroutable = moq_clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("an unroutable request answers at once");
 	assert!(unroutable.is_err(), "an unannounced broadcast is unroutable");
@@ -3151,17 +3151,17 @@ async fn create_broadcast_is_invisible_until_announced() {
 	let pending = tokio::spawn(async move { announced.next().await });
 	let waiting = consumer.follow("live".into(), None).unwrap();
 	let waited = tokio::spawn(async move { waiting.available().await });
-	tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+	moq_clock::sleep(std::time::Duration::from_millis(50)).await;
 	assert!(!pending.is_finished(), "create_broadcast must not advertise the path");
 	assert!(!waited.is_finished(), "an unannounced broadcast must not resolve");
 
 	publication.announce(MoqAnnounceRoute::default()).unwrap();
-	tokio::time::timeout(TIMEOUT, waited)
+	moq_clock::timeout(TIMEOUT, waited)
 		.await
 		.expect("timed out waiting for the announced broadcast")
 		.expect("task")
 		.expect("the announced broadcast resolves");
-	let update = tokio::time::timeout(TIMEOUT, pending)
+	let update = moq_clock::timeout(TIMEOUT, pending)
 		.await
 		.expect("timed out waiting for announce")
 		.expect("task")
@@ -3185,14 +3185,14 @@ async fn follow_keeps_the_requested_path() {
 	let broadcast = create_announced(&origin, "a/pub");
 
 	let announced = consumer.follow("a/pub".into(), None).unwrap();
-	let waited = tokio::time::timeout(TIMEOUT, announced.available())
+	let waited = moq_clock::timeout(TIMEOUT, announced.available())
 		.await
 		.expect("timed out waiting for the announcement")
 		.unwrap();
 	assert_eq!(waited.inner().info().path.as_str(), "a/pub");
 
 	// The same broadcast reached by request names itself identically.
-	let requested = tokio::time::timeout(TIMEOUT, consumer.request("a/pub".into(), None))
+	let requested = moq_clock::timeout(TIMEOUT, consumer.request("a/pub".into(), None))
 		.await
 		.expect("timed out requesting the broadcast")
 		.unwrap();
@@ -3219,7 +3219,7 @@ async fn audio_consumer_follows_a_sibling_broadcast_reference() {
 	let broadcast = await_announced(&consumer, "a/pub").await;
 	await_announced(&consumer, "a/source").await;
 
-	let decoded = tokio::time::timeout(
+	let decoded = moq_clock::timeout(
 		TIMEOUT,
 		crate::audio::MoqAudioConsumer::subscribe(
 			&broadcast,
@@ -3233,7 +3233,7 @@ async fn audio_consumer_follows_a_sibling_broadcast_reference() {
 	decoded.expect("the rendition's broadcast reference should resolve to the sibling");
 
 	// Without the reference the same call has nowhere to find the track.
-	let missing = tokio::time::timeout(
+	let missing = moq_clock::timeout(
 		TIMEOUT,
 		crate::audio::MoqAudioConsumer::subscribe(&broadcast, "audio".into(), sibling_audio(""), audio_output()),
 	)
@@ -3296,7 +3296,7 @@ async fn media_consumers_follow_a_rendition_track_in_a_sibling_broadcast() {
 		config,
 	};
 
-	let live = tokio::time::timeout(
+	let live = moq_clock::timeout(
 		TIMEOUT,
 		MoqMediaTrackConsumer::subscribe(
 			&broadcast,
@@ -3309,14 +3309,14 @@ async fn media_consumers_follow_a_rendition_track_in_a_sibling_broadcast() {
 	.await
 	.expect("timed out subscribing to the rendition")
 	.unwrap();
-	let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&live))
+	let frame = moq_clock::timeout(TIMEOUT, next_encoded_frame(&live))
 		.await
 		.expect("timed out reading the rendition")
 		.unwrap()
 		.expect("expected a frame");
 	assert_eq!(frame.payload, b"right");
 
-	let fetched = tokio::time::timeout(
+	let fetched = moq_clock::timeout(
 		TIMEOUT,
 		MoqMediaGroupConsumer::fetch(
 			&broadcast,
@@ -3330,7 +3330,7 @@ async fn media_consumers_follow_a_rendition_track_in_a_sibling_broadcast() {
 	.await
 	.expect("timed out fetching the rendition")
 	.unwrap();
-	let frame = tokio::time::timeout(TIMEOUT, fetched.next())
+	let frame = moq_clock::timeout(TIMEOUT, fetched.next())
 		.await
 		.expect("timed out reading the fetched group")
 		.unwrap()
@@ -3379,11 +3379,11 @@ async fn followed_broadcasts_resolve_siblings_under_the_prefix() {
 
 	await_announced(&consumer, "a/source").await;
 
-	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(referencing(Some("./source"), None)))
+	let sibling = moq_clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some("./source"), None)))
 		.await
 		.expect("timed out resolving the reference")
 		.unwrap();
-	tokio::time::timeout(TIMEOUT, sibling.subscribe_track("video".into(), None))
+	moq_clock::timeout(TIMEOUT, sibling.subscribe_track("video".into(), None))
 		.await
 		.expect("timed out subscribing on the resolved broadcast")
 		.unwrap();
@@ -3479,20 +3479,20 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 	let broadcast = await_announced(&consumer, "a/pub").await;
 	await_announced(&consumer, "a/source").await;
 
-	let sibling = tokio::time::timeout(TIMEOUT, broadcast.resolve(referencing(Some("./source"), None)))
+	let sibling = moq_clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some("./source"), None)))
 		.await
 		.expect("timed out resolving the reference")
 		.unwrap();
 	assert_eq!(sibling.inner().info().path.as_str(), "a/source");
 
 	// The sibling is a full consumer: the referenced track subscribes on it directly.
-	tokio::time::timeout(TIMEOUT, sibling.subscribe_track("video".into(), None))
+	moq_clock::timeout(TIMEOUT, sibling.subscribe_track("video".into(), None))
 		.await
 		.expect("timed out subscribing on the resolved broadcast")
 		.unwrap();
 
 	// And it can follow a reference of its own, back to where we started.
-	let back = tokio::time::timeout(TIMEOUT, sibling.resolve(referencing(Some("./pub"), None)))
+	let back = moq_clock::timeout(TIMEOUT, sibling.resolve(referencing(Some("./pub"), None)))
 		.await
 		.expect("timed out resolving back")
 		.unwrap();
@@ -3512,7 +3512,7 @@ async fn resolve_honors_the_reference_epoch() {
 		reference: &str,
 		epoch: Option<&str>,
 	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		tokio::time::timeout(TIMEOUT, broadcast.resolve(referencing(Some(reference), epoch)))
+		moq_clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some(reference), epoch)))
 			.await
 			.expect("timed out resolving the reference")
 	}
@@ -3564,7 +3564,7 @@ async fn resolve_honors_the_reference_epoch() {
 		rendition: referencing(Some("./source"), Some(&other)),
 		subscription: None,
 	};
-	let subscribed = tokio::time::timeout(TIMEOUT, MoqMediaTrackConsumer::subscribe(&broadcast, config))
+	let subscribed = moq_clock::timeout(TIMEOUT, MoqMediaTrackConsumer::subscribe(&broadcast, config))
 		.await
 		.expect("timed out subscribing to the rendition");
 	assert!(matches!(subscribed, Err(MoqError::Mux { reason }) if reason.contains("serves epoch")));
@@ -3599,7 +3599,7 @@ async fn announce_and_unannounce_toggles_discovery() {
 	wait_live(&announced, false).await;
 
 	// Unannounced for local consumers exactly as for peers.
-	let unroutable = tokio::time::timeout(TIMEOUT, consumer.request("live".into(), None))
+	let unroutable = moq_clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("an unroutable request answers at once");
 	assert!(unroutable.is_err(), "an unannounced broadcast is unroutable");
@@ -3607,7 +3607,7 @@ async fn announce_and_unannounce_toggles_discovery() {
 	// Announcing again brings it back.
 	publication.announce(MoqAnnounceRoute::default()).unwrap();
 	wait_live(&announced, true).await;
-	tokio::time::timeout(TIMEOUT, consumer.request("live".into(), None))
+	moq_clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("timed out requesting the reannounced broadcast")
 		.expect("a reannounced broadcast resolves");
@@ -3636,7 +3636,7 @@ async fn dropping_a_publication_keeps_its_route() {
 	broadcast.close().unwrap();
 	publication.broadcast().close().unwrap();
 	for path in ["live", "held"] {
-		let unroutable = tokio::time::timeout(TIMEOUT, consumer.request(path.into(), None))
+		let unroutable = moq_clock::timeout(TIMEOUT, consumer.request(path.into(), None))
 			.await
 			.expect("an unroutable request answers at once");
 		assert!(unroutable.is_err(), "a closed broadcast is unroutable");
@@ -3660,7 +3660,7 @@ async fn a_stale_publication_leaves_its_replacement_alone() {
 		Err(MoqError::Closed)
 	));
 	assert!(matches!(stale.unannounce(), Err(MoqError::Closed)));
-	tokio::time::timeout(TIMEOUT, consumer.request("live".into(), None))
+	moq_clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("timed out requesting the replacement")
 		.expect("the replacement still resolves");
@@ -3675,7 +3675,7 @@ async fn finish_unpublishes() {
 	let broadcast = create_announced(&origin, "live");
 
 	let announced = consumer.follow("live".into(), None).unwrap();
-	tokio::time::timeout(TIMEOUT, announced.available())
+	moq_clock::timeout(TIMEOUT, announced.available())
 		.await
 		.expect("timed out waiting for the announcement")
 		.unwrap();
@@ -3683,12 +3683,12 @@ async fn finish_unpublishes() {
 	// A graceful finish detaches immediately; the path stops resolving. Removal is
 	// asynchronous, so poll until it takes effect.
 	broadcast.close().unwrap();
-	let removed = tokio::time::timeout(TIMEOUT, async {
+	let removed = moq_clock::timeout(TIMEOUT, async {
 		loop {
 			if consumer.request("live".into(), None).await.is_err() {
 				return;
 			}
-			tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(10)).await;
 		}
 	})
 	.await;
@@ -3717,7 +3717,7 @@ async fn local_publish_consume_audio() {
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
 
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
 		.unwrap()
@@ -3751,7 +3751,7 @@ async fn local_publish_consume_audio() {
 		})
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
+	let frame = moq_clock::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
 		.await
 		.expect("timed out waiting for frame")
 		.unwrap()
@@ -3783,7 +3783,7 @@ async fn video_publish_consume() {
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
 
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
 		.unwrap()
@@ -3822,7 +3822,7 @@ async fn video_publish_consume() {
 		})
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
+	let frame = moq_clock::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
 		.await
 		.expect("timed out")
 		.unwrap()
@@ -3874,12 +3874,12 @@ async fn video_raw_publish_consume() {
 	assert_eq!(video.demand().unwrap().name(), "camera");
 	let local_consumer = broadcast.consume().unwrap();
 	let demand_consumer = local_consumer.subscribe_track("camera".into(), None).await.unwrap();
-	tokio::time::timeout(TIMEOUT, video.demand().unwrap().until_wanted())
+	moq_clock::timeout(TIMEOUT, video.demand().unwrap().until_wanted())
 		.await
 		.expect("timed out waiting for video demand")
 		.unwrap();
 	drop(demand_consumer);
-	tokio::time::timeout(TIMEOUT, video.demand().unwrap().until_unwanted())
+	moq_clock::timeout(TIMEOUT, video.demand().unwrap().until_unwanted())
 		.await
 		.expect("timed out waiting for video demand to clear")
 		.unwrap();
@@ -3903,7 +3903,7 @@ async fn video_raw_publish_consume() {
 
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
 		.unwrap()
@@ -3947,7 +3947,7 @@ async fn video_raw_publish_consume() {
 			.unwrap();
 	}
 
-	let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
+	let frame = moq_clock::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
 		.await
 		.expect("timed out")
 		.unwrap()
@@ -4012,7 +4012,7 @@ async fn video_decode_frame_ownership() {
 	let consumer = origin.consume();
 	let broadcast_consumer = await_announced(&consumer, "video-decode-frame").await;
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
 		.unwrap()
@@ -4058,7 +4058,7 @@ async fn video_decode_frame_ownership() {
 	}
 
 	let next = async |decoder: &MoqVideoConsumer| {
-		let read = tokio::time::timeout(TIMEOUT, decoder.next())
+		let read = moq_clock::timeout(TIMEOUT, decoder.next())
 			.await
 			.expect("timed out")
 			.unwrap();
@@ -4166,7 +4166,7 @@ async fn video_decode_start() {
 	let broadcast_consumer = await_announced(&consumer, "video-decode-start").await;
 	// The newest group must be cached before `Latest` subscribes, or it would join the first.
 	let raw = broadcast_consumer.subscribe_track("camera".into(), None).await.unwrap();
-	while tokio::time::timeout(TIMEOUT, raw.recv_group())
+	while moq_clock::timeout(TIMEOUT, raw.recv_group())
 		.await
 		.expect("timed out")
 		.unwrap()
@@ -4175,7 +4175,7 @@ async fn video_decode_start() {
 		== 0
 	{}
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
 		.unwrap()
@@ -4203,7 +4203,7 @@ async fn video_decode_start() {
 
 	let timestamps = async |decoder: Arc<MoqVideoConsumer>| {
 		let mut timestamps = Vec::new();
-		while let Some(read) = tokio::time::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
+		while let Some(read) = moq_clock::timeout(TIMEOUT, decoder.next()).await.unwrap().unwrap() {
 			match read {
 				MoqVideoRead::Frame { frame } => timestamps.push(micros(frame.timestamp())),
 				MoqVideoRead::End { .. } => break,
@@ -4298,7 +4298,7 @@ async fn video_raw_publish_from_many_threads() {
 		MoqMediaCatalogConsumer::subscribe(await_announced(&consumer, &announcement.prefix).await.as_ref())
 			.await
 			.unwrap();
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out")
 		.unwrap()
@@ -4413,7 +4413,7 @@ async fn multiple_frames_ordering() {
 
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.unwrap()
 		.unwrap()
@@ -4445,7 +4445,7 @@ async fn multiple_frames_ordering() {
 	}
 
 	for (i, &expected_ts) in timestamps.iter().enumerate() {
-		let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
+		let frame = moq_clock::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
 			.await
 			.unwrap_or_else(|_| panic!("timed out waiting for frame {i}"))
 			.unwrap()
@@ -4475,7 +4475,7 @@ async fn catalog_update_on_new_track() {
 	let broadcast_consumer = await_announced(&consumer, &announcement.prefix).await;
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&broadcast_consumer).await.unwrap();
 
-	let catalog1 = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog1 = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.unwrap()
 		.unwrap()
@@ -4490,7 +4490,7 @@ async fn catalog_update_on_new_track() {
 	)
 	.unwrap();
 
-	let catalog2 = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog2 = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.unwrap()
 		.unwrap()
@@ -4561,7 +4561,7 @@ async fn finish_serves_finished_tracks_until_close() {
 
 	let late = await_announced(&consumer, "finish").await;
 	let track = late.subscribe_track("audio".into(), None).await.unwrap();
-	let frame = tokio::time::timeout(TIMEOUT, track.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, track.read_frame())
 		.await
 		.expect("timed out reading the finished track")
 		.unwrap()
@@ -4601,7 +4601,7 @@ async fn children(
 /// Each reader ends with `Unroutable`, the cause of a publisher leaving.
 async fn assert_left<const N: usize>(readers: [Arc<MoqTrackConsumer>; N]) {
 	for reader in readers {
-		let read = tokio::time::timeout(TIMEOUT, reader.read_frame()).await;
+		let read = moq_clock::timeout(TIMEOUT, reader.read_frame()).await;
 		let Err(err) = read.expect("the track carried on") else {
 			panic!("the track ended without a cause");
 		};
@@ -4653,7 +4653,7 @@ async fn finishing_before_close_ends_tracks_cleanly() {
 	drop(raw);
 	broadcast.close().unwrap();
 	for reader in readers {
-		let read = tokio::time::timeout(TIMEOUT, reader.read_frame()).await;
+		let read = moq_clock::timeout(TIMEOUT, reader.read_frame()).await;
 		assert!(read.expect("the track carried on").unwrap().is_none());
 	}
 }
@@ -4765,7 +4765,7 @@ async fn a_failed_finish_ends_the_track_with_its_cause() {
 	stream.write(vec![0, 0, 0, 1, 0x61, 0xe0, 0x12, 0x34]).unwrap();
 	assert!(matches!(stream.finish(), Err(MoqError::Codec { .. })));
 
-	let read = tokio::time::timeout(TIMEOUT, reader.read_frame()).await;
+	let read = moq_clock::timeout(TIMEOUT, reader.read_frame()).await;
 	let Err(err) = read.expect("the track carried on") else {
 		panic!("the track ended without a cause");
 	};
@@ -4826,7 +4826,7 @@ async fn dynamic_broadcast_request() {
 		tokio::spawn(async move { consumer.request("dynamic/broadcast".into(), None).await })
 	};
 
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let request = moq_clock::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("timed out waiting for requested broadcast")
 		.unwrap();
@@ -4848,7 +4848,7 @@ async fn dynamic_broadcast_request() {
 		.unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
-	let broadcast = tokio::time::timeout(TIMEOUT, requesting)
+	let broadcast = moq_clock::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for requested broadcast result")
 		.expect("request task panicked")
@@ -4863,7 +4863,7 @@ async fn dynamic_broadcast_request() {
 		})
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, track_consumer.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, track_consumer.read_frame())
 		.await
 		.expect("timed out waiting for dynamic broadcast frame")
 		.unwrap()
@@ -4887,7 +4887,7 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 		let consumer = consumer.clone();
 		tokio::spawn(async move { consumer.request("live/cam".into(), None).await })
 	};
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let request = moq_clock::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("timed out waiting for the prefix request")
 		.unwrap();
@@ -4895,14 +4895,14 @@ async fn dynamic_serves_a_request_under_a_prefix() {
 	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
 	let served = prepared.broadcast();
 	prepared.publish().unwrap();
-	tokio::time::timeout(TIMEOUT, requesting)
+	moq_clock::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for the request to resolve")
 		.expect("request task panicked")
 		.expect("the handler served the path");
 
 	dynamic.cancel();
-	let err = tokio::time::timeout(TIMEOUT, consumer.request("live/other".into(), None))
+	let err = moq_clock::timeout(TIMEOUT, consumer.request("live/other".into(), None))
 		.await
 		.expect("timed out waiting for the retraction to reject the request")
 		.err()
@@ -4930,14 +4930,14 @@ async fn dynamic_keeps_the_origin_alive() {
 		let consumer = consumer.clone();
 		tokio::spawn(async move { consumer.request("live".into(), None).await })
 	};
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let request = moq_clock::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the handler must still receive requests")
 		.unwrap();
 	let prepared = request.prepare(moq_net::Epoch::mint().to_string()).unwrap();
 	let served = prepared.broadcast();
 	prepared.publish().unwrap();
-	tokio::time::timeout(TIMEOUT, requesting)
+	moq_clock::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for the request to resolve")
 		.expect("request task panicked")
@@ -4992,12 +4992,12 @@ async fn raw_track_next_group_is_repeatable() {
 			})
 			.unwrap();
 
-		let group = tokio::time::timeout(TIMEOUT, consumer.next_group())
+		let group = moq_clock::timeout(TIMEOUT, consumer.next_group())
 			.await
 			.expect("timed out waiting for a group")
 			.unwrap()
 			.expect("expected a group");
-		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.expect("timed out waiting for a frame")
 			.unwrap()
@@ -5031,7 +5031,7 @@ async fn raw_track_group_order_commits_on_first_read() {
 		.unwrap();
 
 	// An arrival read commits the track to arrival order.
-	let group = tokio::time::timeout(TIMEOUT, consumer.recv_group())
+	let group = moq_clock::timeout(TIMEOUT, consumer.recv_group())
 		.await
 		.expect("timed out waiting for a group")
 		.unwrap()
@@ -5047,7 +5047,7 @@ async fn raw_track_group_order_commits_on_first_read() {
 			timestamp: Some(us(0)),
 		})
 		.unwrap();
-	let group = tokio::time::timeout(TIMEOUT, consumer.recv_group())
+	let group = moq_clock::timeout(TIMEOUT, consumer.recv_group())
 		.await
 		.expect("timed out waiting for a group")
 		.unwrap()
@@ -5061,7 +5061,7 @@ async fn raw_track_group_order_commits_on_first_read() {
 			timestamp: Some(us(0)),
 		})
 		.unwrap();
-	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+	let datagram = moq_clock::timeout(TIMEOUT, consumer.recv_datagram())
 		.await
 		.expect("timed out waiting for a datagram")
 		.unwrap()
@@ -5111,7 +5111,7 @@ where
 	assert!(!group_read.is_finished(), "group read should still be pending");
 
 	let sequence = track.append_datagram(datagram_frame(b"beep")).unwrap();
-	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+	let datagram = moq_clock::timeout(TIMEOUT, consumer.recv_datagram())
 		.await
 		.expect("timed out waiting for datagram behind a pending group read")
 		.unwrap()
@@ -5121,7 +5121,7 @@ where
 	assert!(!group_read.is_finished(), "group read should stay pending");
 
 	track.write_frame(group_frame(b"group")).unwrap();
-	tokio::time::timeout(TIMEOUT, group_read)
+	moq_clock::timeout(TIMEOUT, group_read)
 		.await
 		.expect("timed out waiting for the parked group")
 		.expect("group read panicked")
@@ -5144,14 +5144,14 @@ where
 	assert!(!datagram_read.is_finished(), "datagram read should still be pending");
 
 	track.write_frame(group_frame(b"group")).unwrap();
-	tokio::time::timeout(TIMEOUT, start_group(consumer.clone()))
+	moq_clock::timeout(TIMEOUT, start_group(consumer.clone()))
 		.await
 		.expect("timed out waiting for a group behind a pending datagram read")
 		.unwrap();
 	assert!(!datagram_read.is_finished(), "datagram read should stay pending");
 
 	let sequence = track.append_datagram(datagram_frame(b"beep")).unwrap();
-	let datagram = tokio::time::timeout(TIMEOUT, datagram_read)
+	let datagram = moq_clock::timeout(TIMEOUT, datagram_read)
 		.await
 		.expect("timed out waiting for the parked datagram")
 		.expect("datagram read panicked")
@@ -5167,7 +5167,7 @@ async fn raw_track_insert_datagram_keeps_its_sequence() {
 	let (_broadcast, track, consumer) = raw_track();
 
 	track.insert_datagram(7, datagram_frame(b"seven")).unwrap();
-	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+	let datagram = moq_clock::timeout(TIMEOUT, consumer.recv_datagram())
 		.await
 		.expect("timed out waiting for the inserted datagram")
 		.unwrap()
@@ -5209,7 +5209,7 @@ async fn broadcast_consumer_closed_resolves_on_close() {
 	assert!(!closed.is_finished(), "closed resolved while the broadcast is live");
 
 	broadcast.close().unwrap();
-	tokio::time::timeout(TIMEOUT, closed)
+	moq_clock::timeout(TIMEOUT, closed)
 		.await
 		.expect("timed out waiting for closed")
 		.expect("closed panicked")
@@ -5285,7 +5285,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 		.unwrap();
 
 	let sequence = track.append_datagram(datagram_frame(b"after-update")).unwrap();
-	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+	let datagram = moq_clock::timeout(TIMEOUT, consumer.recv_datagram())
 		.await
 		.expect("timed out waiting for datagram after update")
 		.unwrap()
@@ -5294,7 +5294,7 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 	assert_eq!(datagram.payload, b"after-update".to_vec());
 
 	track.write_frame(group_frame(b"group")).unwrap();
-	tokio::time::timeout(TIMEOUT, group_read)
+	moq_clock::timeout(TIMEOUT, group_read)
 		.await
 		.expect("timed out waiting for the parked group")
 		.expect("group read panicked")
@@ -5318,7 +5318,7 @@ async fn raw_track_dropping_a_pending_group_read_does_not_cancel_datagrams() {
 	}
 
 	let sequence = track.append_datagram(datagram_frame(b"still-open")).unwrap();
-	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+	let datagram = moq_clock::timeout(TIMEOUT, consumer.recv_datagram())
 		.await
 		.expect("timed out waiting for datagram after a cancelled group read")
 		.unwrap()
@@ -5326,12 +5326,12 @@ async fn raw_track_dropping_a_pending_group_read_does_not_cancel_datagrams() {
 	assert_eq!(datagram.sequence, sequence);
 
 	track.write_frame(group_frame(b"group")).unwrap();
-	let group = tokio::time::timeout(TIMEOUT, consumer.next_group())
+	let group = moq_clock::timeout(TIMEOUT, consumer.next_group())
 		.await
 		.expect("timed out waiting for a group after the cancelled read")
 		.unwrap()
 		.expect("expected a group");
-	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("timed out waiting for the group's frame")
 		.unwrap()
@@ -5355,7 +5355,7 @@ async fn raw_track_dropping_a_pending_datagram_read_does_not_cancel_groups() {
 	}
 
 	track.write_frame(group_frame(b"group")).unwrap();
-	let group = tokio::time::timeout(TIMEOUT, consumer.next_group())
+	let group = moq_clock::timeout(TIMEOUT, consumer.next_group())
 		.await
 		.expect("timed out waiting for a group after a cancelled datagram read")
 		.unwrap()
@@ -5363,7 +5363,7 @@ async fn raw_track_dropping_a_pending_datagram_read_does_not_cancel_groups() {
 	assert_eq!(group.sequence(), 0);
 
 	let sequence = track.append_datagram(datagram_frame(b"later")).unwrap();
-	let datagram = tokio::time::timeout(TIMEOUT, consumer.recv_datagram())
+	let datagram = moq_clock::timeout(TIMEOUT, consumer.recv_datagram())
 		.await
 		.expect("timed out waiting for a datagram after the cancelled read")
 		.unwrap()
@@ -5386,7 +5386,7 @@ async fn raw_track_handle_cancel_aborts_both_pending_lanes() {
 
 	consumer.cancel();
 
-	match tokio::time::timeout(TIMEOUT, group_read)
+	match moq_clock::timeout(TIMEOUT, group_read)
 		.await
 		.expect("timed out waiting for cancelled group read")
 		.expect("group read panicked")
@@ -5396,7 +5396,7 @@ async fn raw_track_handle_cancel_aborts_both_pending_lanes() {
 		Ok(_) => panic!("handle cancel should fail the group read"),
 	}
 
-	match tokio::time::timeout(TIMEOUT, datagram_read)
+	match moq_clock::timeout(TIMEOUT, datagram_read)
 		.await
 		.expect("timed out waiting for cancelled datagram read")
 		.expect("datagram read panicked")
@@ -5439,7 +5439,7 @@ async fn raw_read_frame_skips_empty_group_on_open_track() {
 		})
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, read)
+	let frame = moq_clock::timeout(TIMEOUT, read)
 		.await
 		.expect("timed out waiting for the frame after an empty group")
 		.expect("read task panicked")
@@ -5468,7 +5468,7 @@ async fn raw_read_frame_skips_empty_then_populated_groups() {
 		})
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, consumer.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, consumer.read_frame())
 		.await
 		.expect("timed out skipping empty groups")
 		.unwrap()
@@ -5501,7 +5501,7 @@ async fn raw_read_frame_skips_a_group_reset_as_old() {
 		.write_frame(moq_net::Timestamp::from_millis(1).unwrap(), b"later".as_slice())
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, read)
+	let frame = moq_clock::timeout(TIMEOUT, read)
 		.await
 		.expect("timed out skipping the expired group")
 		.expect("read task panicked")
@@ -5527,7 +5527,7 @@ async fn raw_read_frame_cancelled_before_free_leaves_the_frame() {
 
 	let next = consumer.read_frame();
 	drop(cancelled);
-	let frame = tokio::time::timeout(TIMEOUT, next)
+	let frame = moq_clock::timeout(TIMEOUT, next)
 		.await
 		.expect("the cancelled read took the frame")
 		.unwrap()
@@ -5556,7 +5556,7 @@ async fn raw_read_frame_keeps_group_across_cancelled_call() {
 	group.finish().unwrap();
 	track.finish().unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, consumer.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, consumer.read_frame())
 		.await
 		.expect("timed out reading the preserved group")
 		.unwrap()
@@ -5565,7 +5565,7 @@ async fn raw_read_frame_keeps_group_across_cancelled_call() {
 	assert_eq!(frame.timestamp.map(micros), Some(3_000));
 
 	assert!(
-		tokio::time::timeout(TIMEOUT, consumer.read_frame())
+		moq_clock::timeout(TIMEOUT, consumer.read_frame())
 			.await
 			.expect("timed out waiting for track EOF")
 			.unwrap()
@@ -5589,7 +5589,7 @@ async fn raw_read_frame_drops_aborted_pending_group() {
 	wait_group_acquired(&first).await;
 	first.abort(409).unwrap();
 
-	let err = tokio::time::timeout(TIMEOUT, read)
+	let err = moq_clock::timeout(TIMEOUT, read)
 		.await
 		.expect("timed out waiting for the aborted group")
 		.expect("read task panicked");
@@ -5611,7 +5611,7 @@ async fn raw_read_frame_drops_aborted_pending_group() {
 			timestamp: Some(us(4_000)),
 		})
 		.unwrap();
-	let frame = tokio::time::timeout(TIMEOUT, consumer.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, consumer.read_frame())
 		.await
 		.expect("timed out reading the group after an aborted pending group")
 		.unwrap()
@@ -5639,12 +5639,12 @@ async fn raw_read_frame_and_next_group_share_the_cursor() {
 		.unwrap();
 	first.finish().unwrap();
 
-	let group = tokio::time::timeout(TIMEOUT, consumer.next_group())
+	let group = moq_clock::timeout(TIMEOUT, consumer.next_group())
 		.await
 		.expect("timed out taking the pending group")
 		.unwrap()
 		.expect("next_group should return the group read_frame acquired");
-	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("timed out reading the handed-off group")
 		.unwrap()
@@ -5657,7 +5657,7 @@ async fn raw_read_frame_and_next_group_share_the_cursor() {
 			timestamp: Some(us(0)),
 		})
 		.unwrap();
-	let frame = tokio::time::timeout(TIMEOUT, consumer.read_frame())
+	let frame = moq_clock::timeout(TIMEOUT, consumer.read_frame())
 		.await
 		.expect("timed out reading the next group")
 		.unwrap()
@@ -5673,7 +5673,7 @@ async fn raw_read_frame_terminal_cancel_releases_demand() {
 	let consumer = track.consume(None).unwrap();
 	let demand = track.demand().unwrap();
 
-	tokio::time::timeout(TIMEOUT, demand.until_wanted())
+	moq_clock::timeout(TIMEOUT, demand.until_wanted())
 		.await
 		.expect("timed out waiting for the subscriber")
 		.unwrap();
@@ -5686,7 +5686,7 @@ async fn raw_read_frame_terminal_cancel_releases_demand() {
 	wait_group_acquired(&open).await;
 
 	consumer.cancel();
-	let err = tokio::time::timeout(TIMEOUT, read)
+	let err = moq_clock::timeout(TIMEOUT, read)
 		.await
 		.expect("timed out waiting for the cancelled read")
 		.expect("read task panicked");
@@ -5697,7 +5697,7 @@ async fn raw_read_frame_terminal_cancel_releases_demand() {
 		Ok(None) => panic!("cancelled read returned EOF"),
 	}
 
-	tokio::time::timeout(TIMEOUT, demand.until_unwanted())
+	moq_clock::timeout(TIMEOUT, demand.until_unwanted())
 		.await
 		.expect("timed out waiting for demand to drop")
 		.unwrap();
@@ -5716,7 +5716,7 @@ async fn dynamic_broadcast_request_can_reject() {
 		tokio::spawn(async move { consumer.request("missing".into(), None).await })
 	};
 
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let request = moq_clock::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("timed out waiting for requested broadcast")
 		.unwrap();
@@ -5725,7 +5725,7 @@ async fn dynamic_broadcast_request_can_reject() {
 	request.reject(404).unwrap();
 	assert!(matches!(request.path(), Err(MoqError::Closed)));
 
-	let result = tokio::time::timeout(TIMEOUT, requesting)
+	let result = moq_clock::timeout(TIMEOUT, requesting)
 		.await
 		.expect("timed out waiting for rejected broadcast")
 		.expect("request task panicked");
@@ -5741,7 +5741,7 @@ async fn cancelling_dynamic_broadcasts_unregisters_the_handler() {
 	dynamic.cancel();
 	assert!(matches!(dynamic.requested_broadcast().await, Err(MoqError::Closed)));
 
-	let result = tokio::time::timeout(TIMEOUT, consumer.request("missing".into(), None))
+	let result = moq_clock::timeout(TIMEOUT, consumer.request("missing".into(), None))
 		.await
 		.expect("request stayed pending after the dynamic handler was cancelled");
 	let err = match result {
@@ -5817,7 +5817,7 @@ async fn server_client_roundtrip() {
 	})
 	.unwrap();
 
-	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+	let addr = moq_clock::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
@@ -5848,12 +5848,12 @@ async fn server_client_roundtrip() {
 		..Default::default()
 	})
 	.unwrap();
-	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let cs = moq_clock::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
 
-	let server_session = tokio::time::timeout(TIMEOUT, accept)
+	let server_session = moq_clock::timeout(TIMEOUT, accept)
 		.await
 		.expect("server accept timed out")
 		.expect("server accept task panicked");
@@ -5877,7 +5877,7 @@ async fn server_client_roundtrip() {
 	// Subscribe to the audio track and verify a frame round-trips.
 	let bc = await_announced(&consumer, "hello").await;
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&bc).await.unwrap();
-	let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("timed out waiting for catalog")
 		.unwrap()
@@ -5904,7 +5904,7 @@ async fn server_client_roundtrip() {
 		})
 		.unwrap();
 
-	let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
+	let frame = moq_clock::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
 		.await
 		.expect("timed out waiting for frame")
 		.unwrap()
@@ -5925,7 +5925,7 @@ async fn server_client_roundtrip() {
 /// Subscribe to the first audio rendition in `broadcast`'s catalog.
 async fn subscribe_audio(broadcast: &MoqBroadcastConsumer) -> Arc<MoqMediaTrackConsumer> {
 	let catalogs = MoqMediaCatalogConsumer::subscribe(broadcast).await.unwrap();
-	let catalog = tokio::time::timeout(TIMEOUT, catalogs.next())
+	let catalog = moq_clock::timeout(TIMEOUT, catalogs.next())
 		.await
 		.expect("timed out waiting for the catalog")
 		.unwrap()
@@ -5955,7 +5955,7 @@ async fn roundtrip(media: &MoqMediaTrackProducer, track: &MoqMediaTrackConsumer,
 		})
 		.unwrap();
 	loop {
-		let frame = tokio::time::timeout(TIMEOUT, next_encoded_frame(track))
+		let frame = moq_clock::timeout(TIMEOUT, next_encoded_frame(track))
 			.await
 			.expect("timed out waiting for a frame")
 			.unwrap()
@@ -5979,7 +5979,7 @@ async fn follow_follows_an_epochless_replacement() {
 		..Default::default()
 	})
 	.unwrap();
-	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+	let addr = moq_clock::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
@@ -6010,7 +6010,7 @@ async fn follow_follows_an_epochless_replacement() {
 			..Default::default()
 		})
 		.unwrap();
-		tokio::time::timeout(TIMEOUT, client.connect(url.clone()))
+		moq_clock::timeout(TIMEOUT, client.connect(url.clone()))
 			.await
 			.expect("connect timed out")
 			.expect("connect failed")
@@ -6018,7 +6018,7 @@ async fn follow_follows_an_epochless_replacement() {
 
 	let first = connect().await;
 	let followed = viewer.consume().follow("cam".into(), None).unwrap();
-	let old = tokio::time::timeout(TIMEOUT, followed.available())
+	let old = moq_clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out waiting for the broadcast")
 		.unwrap();
@@ -6026,7 +6026,7 @@ async fn follow_follows_an_epochless_replacement() {
 	roundtrip(&media, &old_track, b"before", 1_000_000).await;
 
 	let second = connect().await;
-	let fresh = tokio::time::timeout(TIMEOUT, followed.available())
+	let fresh = moq_clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("the replacement was never handed out")
 		.unwrap();
@@ -6055,7 +6055,7 @@ async fn follow_retries_a_dropped_wait() {
 
 	let waiting = followed.clone();
 	let dropped = tokio::spawn(async move { waiting.available().await });
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let request = moq_clock::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the wait never asked for the broadcast")
 		.unwrap();
@@ -6064,7 +6064,7 @@ async fn follow_retries_a_dropped_wait() {
 
 	let retry = tokio::spawn(async move { followed.available().await });
 	let served = request.prepare(moq_mint_epoch()).unwrap().publish().unwrap();
-	tokio::time::timeout(TIMEOUT, retry)
+	moq_clock::timeout(TIMEOUT, retry)
 		.await
 		.expect("the retry waited for another instance")
 		.unwrap()
@@ -6085,19 +6085,19 @@ async fn follow_hands_out_a_takeover_once(dynamic_at: &str) {
 	let waiting = followed.clone();
 	let first = tokio::spawn(async move { waiting.available().await });
 	// The wait is on the dynamic route's answer when the exact path takes over without an epoch.
-	let _unanswered = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let _unanswered = moq_clock::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the wait never asked for the broadcast")
 		.unwrap();
 	let takeover = create_announced(&origin, "live");
-	let _held = tokio::time::timeout(TIMEOUT, first)
+	let _held = moq_clock::timeout(TIMEOUT, first)
 		.await
 		.expect("the takeover never resolved")
 		.unwrap()
 		.unwrap();
 
 	let next = tokio::spawn(async move { followed.available().await });
-	tokio::time::sleep(moq_net::origin::Config::default().update_hold * 2).await;
+	moq_clock::sleep(moq_net::origin::Config::default().update_hold * 2).await;
 	assert!(!next.is_finished(), "the takeover was handed out twice");
 	next.abort();
 	takeover.close().unwrap();
@@ -6126,7 +6126,7 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 	};
 	let publication = origin.create_broadcast("live".into()).unwrap();
 	publication.announce(route.clone()).unwrap();
-	let first = tokio::time::timeout(TIMEOUT, followed.available())
+	let first = moq_clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out waiting for the broadcast")
 		.unwrap();
@@ -6135,14 +6135,14 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 	let dynamic = origin.inner().inner.requests("").unwrap();
 	publication.unannounce().unwrap();
 	let again = tokio::spawn(async move { followed.available().await });
-	let request = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let request = moq_clock::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the instance never asked the route above the path")
 		.unwrap();
 	let epoch = route.epoch.clone().unwrap().parse().unwrap();
 	let served = request.prepare(epoch).unwrap().publish().unwrap();
 
-	let again = tokio::time::timeout(TIMEOUT, again)
+	let again = moq_clock::timeout(TIMEOUT, again)
 		.await
 		.expect("the instance was never handed out again")
 		.unwrap()
@@ -6171,7 +6171,7 @@ async fn an_epoch_pins_request_and_follow() {
 		})
 		.unwrap();
 
-	let pinned = tokio::time::timeout(TIMEOUT, consumer.request("live".into(), Some(epoch.clone())))
+	let pinned = moq_clock::timeout(TIMEOUT, consumer.request("live".into(), Some(epoch.clone())))
 		.await
 		.expect("timed out requesting the pinned instance")
 		.unwrap();
@@ -6179,7 +6179,7 @@ async fn an_epoch_pins_request_and_follow() {
 		pinned.inner().info().epoch.as_ref().map(ToString::to_string),
 		Some(epoch.clone())
 	);
-	let err = tokio::time::timeout(TIMEOUT, consumer.request("live".into(), Some(moq_mint_epoch())))
+	let err = moq_clock::timeout(TIMEOUT, consumer.request("live".into(), Some(moq_mint_epoch())))
 		.await
 		.expect("timed out requesting another instance")
 		.err()
@@ -6195,7 +6195,7 @@ async fn an_epoch_pins_request_and_follow() {
 	));
 
 	let followed = consumer.follow("live".into(), Some(epoch.clone())).unwrap();
-	tokio::time::timeout(TIMEOUT, followed.available())
+	moq_clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out following the pinned instance")
 		.unwrap();
@@ -6208,7 +6208,7 @@ async fn an_epoch_pins_request_and_follow() {
 		.unwrap();
 	// An unpinned request resolves the takeover and holds it, so a follower resolving it joins
 	// that answer at once: one poll, which applies the takeover first, would hand it out.
-	let takeover = tokio::time::timeout(TIMEOUT, consumer.request("live".into(), None))
+	let takeover = moq_clock::timeout(TIMEOUT, consumer.request("live".into(), None))
 		.await
 		.expect("timed out requesting the takeover")
 		.unwrap();
@@ -6238,21 +6238,21 @@ async fn follow_hands_out_a_gap_while_resolving_once() {
 
 	let waiting = followed.clone();
 	let first = tokio::spawn(async move { waiting.available().await });
-	let _unanswered = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let _unanswered = moq_clock::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the wait never asked for the broadcast")
 		.unwrap();
 	dynamic.cancel();
-	tokio::time::sleep(moq_net::origin::Config::default().update_hold * 2).await;
+	moq_clock::sleep(moq_net::origin::Config::default().update_hold * 2).await;
 	let arrival = create_announced(&origin, "live");
-	let _held = tokio::time::timeout(TIMEOUT, first)
+	let _held = moq_clock::timeout(TIMEOUT, first)
 		.await
 		.expect("the arrival never resolved")
 		.unwrap()
 		.unwrap();
 
 	let next = tokio::spawn(async move { followed.available().await });
-	tokio::time::sleep(moq_net::origin::Config::default().update_hold * 2).await;
+	moq_clock::sleep(moq_net::origin::Config::default().update_hold * 2).await;
 	assert!(!next.is_finished(), "the arrival was handed out twice");
 	next.abort();
 	arrival.close().unwrap();
@@ -6268,20 +6268,20 @@ async fn follow_hands_out_a_dropped_takeover_again() {
 
 	let waiting = followed.clone();
 	let first = tokio::spawn(async move { waiting.available().await });
-	let _unanswered = tokio::time::timeout(TIMEOUT, dynamic.requested_broadcast())
+	let _unanswered = moq_clock::timeout(TIMEOUT, dynamic.requested_broadcast())
 		.await
 		.expect("the wait never asked for the broadcast")
 		.unwrap();
 	let takeover = create_announced(&origin, "live");
 	drop(
-		tokio::time::timeout(TIMEOUT, first)
+		moq_clock::timeout(TIMEOUT, first)
 			.await
 			.expect("the takeover never resolved")
 			.unwrap()
 			.unwrap(),
 	);
 
-	tokio::time::timeout(TIMEOUT, followed.available())
+	moq_clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("the dropped takeover was never handed out again")
 		.unwrap();
@@ -6302,7 +6302,7 @@ async fn server_client_roundtrip_auto_origin() {
 	})
 	.unwrap();
 
-	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+	let addr = moq_clock::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
@@ -6325,7 +6325,7 @@ async fn server_client_roundtrip_auto_origin() {
 		..Default::default()
 	})
 	.unwrap();
-	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let cs = moq_clock::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
@@ -6333,7 +6333,7 @@ async fn server_client_roundtrip_auto_origin() {
 	let publisher = cs.publish();
 	let consumer = cs.consume();
 
-	let server_session = tokio::time::timeout(TIMEOUT, accept)
+	let server_session = moq_clock::timeout(TIMEOUT, accept)
 		.await
 		.expect("server accept timed out")
 		.expect("server accept task panicked");
@@ -6357,7 +6357,7 @@ async fn server_client_roundtrip_auto_origin() {
 	let local_broadcast = create_announced(&publisher, "local-only");
 	// Visibility is asynchronous, so wait for the announcement rather than requesting.
 	let local_announced = consumer.follow("local-only".into(), None).unwrap();
-	tokio::time::timeout(TIMEOUT, local_announced.available())
+	moq_clock::timeout(TIMEOUT, local_announced.available())
 		.await
 		.expect("timed out waiting for the loopback broadcast")
 		.expect("an auto-origin session should discover its own announcement");
@@ -6532,7 +6532,7 @@ async fn client_keylog_writes_session_keys() {
 		..Default::default()
 	})
 	.unwrap();
-	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+	let addr = moq_clock::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
@@ -6547,11 +6547,11 @@ async fn client_keylog_writes_session_keys() {
 	});
 
 	let client = keylog_client(server.cert_fingerprints().unwrap()).unwrap();
-	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
+	let session = moq_clock::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
-	let server_session = tokio::time::timeout(TIMEOUT, accept)
+	let server_session = moq_clock::timeout(TIMEOUT, accept)
 		.await
 		.expect("server accept timed out")
 		.expect("server accept task panicked");
@@ -6578,7 +6578,7 @@ async fn client_connects_with_every_knob_set() {
 		..Default::default()
 	})
 	.unwrap();
-	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+	let addr = moq_clock::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
@@ -6622,11 +6622,11 @@ async fn client_connects_with_every_knob_set() {
 		..Default::default()
 	})
 	.unwrap();
-	let session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let session = moq_clock::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
-	let server_session = tokio::time::timeout(TIMEOUT, accept)
+	let server_session = moq_clock::timeout(TIMEOUT, accept)
 		.await
 		.expect("server accept timed out")
 		.expect("server accept task panicked");
@@ -6652,7 +6652,7 @@ async fn server_cert_fingerprints_available_after_listen() {
 		Err(crate::error::MoqError::Bind { .. })
 	));
 
-	tokio::time::timeout(TIMEOUT, server.listen())
+	moq_clock::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
@@ -6673,7 +6673,7 @@ async fn server_cert_fingerprints_rejected_after_cancel() {
 	})
 	.unwrap();
 
-	tokio::time::timeout(TIMEOUT, server.listen())
+	moq_clock::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
@@ -6726,7 +6726,7 @@ async fn server_cancel_releases_the_bound_port() {
 	.unwrap();
 	rebound.listen().await.expect("the port should rebind immediately");
 
-	let accept = tokio::time::timeout(TIMEOUT, accept)
+	let accept = moq_clock::timeout(TIMEOUT, accept)
 		.await
 		.expect("accept task timed out")
 		.expect("accept task panicked");
@@ -6801,18 +6801,18 @@ async fn server_accept_cancelled_before_free_leaves_the_session() {
 	let connect = tokio::spawn(async move { client.connect(format!("https://{addr}")).await });
 
 	// The wake means the session is ready for the cancelled accept, wherever it now sits.
-	tokio::time::timeout(TIMEOUT, woken.0.notified())
+	moq_clock::timeout(TIMEOUT, woken.0.notified())
 		.await
 		.expect("the session never reached the cancelled accept");
 	drop(cancelled);
 
-	let request = tokio::time::timeout(TIMEOUT, server.accept())
+	let request = moq_clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("the cancelled accept took the session")
 		.expect("accept errored")
 		.expect("accept returned None");
 	let server_session = request.accept(None, None).await.expect("accept the session");
-	let _client_session = tokio::time::timeout(TIMEOUT, connect)
+	let _client_session = moq_clock::timeout(TIMEOUT, connect)
 		.await
 		.expect("connect timed out")
 		.expect("connect task panicked")
@@ -6864,12 +6864,12 @@ async fn request_double_respond_returns_already_responded() {
 		..Default::default()
 	})
 	.unwrap();
-	let _session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let _session = moq_clock::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
 
-	let server_session = tokio::time::timeout(TIMEOUT, accept)
+	let server_session = moq_clock::timeout(TIMEOUT, accept)
 		.await
 		.expect("accept timed out")
 		.expect("accept task panicked");
@@ -6916,12 +6916,12 @@ async fn request_per_session_publish_override() {
 		..Default::default()
 	})
 	.unwrap();
-	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let cs = moq_clock::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
 
-	let server_session = tokio::time::timeout(TIMEOUT, accept)
+	let server_session = moq_clock::timeout(TIMEOUT, accept)
 		.await
 		.expect("accept timed out")
 		.expect("accept task panicked");
@@ -6975,7 +6975,7 @@ async fn session_state_names_a_failing_first_dial() {
 	assert!(state.version.is_none());
 	drop(client);
 	for _ in 0..2 {
-		state = tokio::time::timeout(TIMEOUT, session.state_changed(state.revision))
+		state = moq_clock::timeout(TIMEOUT, session.state_changed(state.revision))
 			.await
 			.unwrap()
 			.unwrap();
@@ -6993,7 +6993,7 @@ async fn session_state_names_a_failing_first_dial() {
 	server.listen().await.unwrap();
 	let request = server.accept().await.unwrap().unwrap();
 	let accepted = request.accept(None, None).await.unwrap();
-	let connected = tokio::time::timeout(TIMEOUT, wait_phase(&session, MoqConnectionPhase::Connected))
+	let connected = moq_clock::timeout(TIMEOUT, wait_phase(&session, MoqConnectionPhase::Connected))
 		.await
 		.unwrap()
 		.unwrap();
@@ -7011,7 +7011,7 @@ async fn session_state_names_a_failing_first_dial() {
 			.is_pending()
 	);
 	accepted.cancel(0);
-	let terminal = tokio::time::timeout(TIMEOUT, ending).await.unwrap().unwrap();
+	let terminal = moq_clock::timeout(TIMEOUT, ending).await.unwrap().unwrap();
 	assert_eq!(terminal.phase, MoqConnectionPhase::Closed);
 	assert!(terminal.version.is_none());
 	assert!(terminal.failure.is_some());
@@ -7039,7 +7039,7 @@ async fn client_reconnects_and_resumes_announcements() {
 	})
 	.unwrap();
 
-	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+	let addr = moq_clock::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
@@ -7083,13 +7083,13 @@ async fn client_reconnects_and_resumes_announcements() {
 	})
 	.unwrap();
 
-	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let cs = moq_clock::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
 
 	// Observe the first successful connect through the same state as its initial dial.
-	let status = tokio::time::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
+	let status = moq_clock::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
 		.await
 		.expect("status timed out")
 		.expect("status errored");
@@ -7101,13 +7101,13 @@ async fn client_reconnects_and_resumes_announcements() {
 
 	// Kill the transport under the client, simulating a relay restart.
 	// Nothing accepts the redial until the gate opens.
-	let first = tokio::time::timeout(TIMEOUT, first_rx)
+	let first = moq_clock::timeout(TIMEOUT, first_rx)
 		.await
 		.expect("first session timed out")
 		.expect("accept task gone");
 	first.cancel(0);
 
-	let status = tokio::time::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Disconnected))
+	let status = moq_clock::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Disconnected))
 		.await
 		.expect("disconnect status timed out")
 		.expect("disconnect status errored");
@@ -7119,7 +7119,7 @@ async fn client_reconnects_and_resumes_announcements() {
 
 	// Open the gate; the redial completes.
 	regate_tx.send(()).expect("accept task gone");
-	let status = tokio::time::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
+	let status = moq_clock::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
 		.await
 		.expect("reconnect status timed out")
 		.expect("reconnect status errored");
@@ -7130,7 +7130,7 @@ async fn client_reconnects_and_resumes_announcements() {
 
 	assert_eq!(status.connects, 2, "phase and count come from one observation");
 
-	let server_session = tokio::time::timeout(TIMEOUT, accept)
+	let server_session = moq_clock::timeout(TIMEOUT, accept)
 		.await
 		.expect("server accept timed out")
 		.expect("server accept task panicked");
@@ -7160,7 +7160,7 @@ async fn one_shot_client_close_surfaces_through_closed() {
 	})
 	.unwrap();
 
-	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+	let addr = moq_clock::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
@@ -7184,18 +7184,18 @@ async fn one_shot_client_close_surfaces_through_closed() {
 	})
 	.unwrap();
 
-	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let cs = moq_clock::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
 
-	let server_session = tokio::time::timeout(TIMEOUT, accept)
+	let server_session = moq_clock::timeout(TIMEOUT, accept)
 		.await
 		.expect("server accept timed out")
 		.expect("server accept task panicked");
 
 	server_session.cancel(7);
-	tokio::time::timeout(TIMEOUT, cs.closed())
+	moq_clock::timeout(TIMEOUT, cs.closed())
 		.await
 		.expect("closed timed out")
 		.expect_err("a severed one-shot session must surface as an error");
@@ -7216,7 +7216,7 @@ async fn rejected_session_surfaces_through_closed() {
 	})
 	.unwrap();
 
-	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+	let addr = moq_clock::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
@@ -7243,11 +7243,11 @@ async fn rejected_session_surfaces_through_closed() {
 	// Either the dial fails outright, or the optimistic connect resolves and the
 	// rejection lands as the session's terminal close. Both must surface within
 	// the timeout.
-	if let Ok(cs) = tokio::time::timeout(TIMEOUT, client.connect(url))
+	if let Ok(cs) = moq_clock::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect neither resolved nor failed")
 	{
-		tokio::time::timeout(TIMEOUT, cs.closed())
+		moq_clock::timeout(TIMEOUT, cs.closed())
 			.await
 			.expect("closed timed out")
 			.expect_err("a rejected session must surface as an error");
@@ -7267,7 +7267,7 @@ async fn cancel_before_connect_fails_fast() {
 	})
 	.unwrap();
 	client.cancel();
-	let result = tokio::time::timeout(
+	let result = moq_clock::timeout(
 		Duration::from_secs(5),
 		client.connect("https://localhost:0/test".into()),
 	)
@@ -7294,7 +7294,7 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 	})
 	.unwrap();
 
-	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+	let addr = moq_clock::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
@@ -7320,17 +7320,17 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 	})
 	.unwrap();
 
-	let cs = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let cs = moq_clock::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
 
-	let server_session = tokio::time::timeout(TIMEOUT, accept)
+	let server_session = moq_clock::timeout(TIMEOUT, accept)
 		.await
 		.expect("server accept timed out")
 		.expect("server accept task panicked");
 
-	let status = tokio::time::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
+	let status = moq_clock::timeout(TIMEOUT, wait_phase(&cs, MoqConnectionPhase::Connected))
 		.await
 		.expect("status timed out")
 		.expect("status errored");
@@ -7340,7 +7340,7 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 	// the abandoned call has to actually reach its await for this to prove
 	// anything, and a spawn that never got there would pass either way.
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), cs.state_changed(status.revision))
+		moq_clock::timeout(Duration::from_millis(200), cs.state_changed(status.revision))
 			.await
 			.is_err(),
 		"no transition was pending, so this must be the caller giving up",
@@ -7349,7 +7349,7 @@ async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 	// The transition the abandoned call would have eaten.
 	server_session.cancel(0);
 
-	let status = tokio::time::timeout(TIMEOUT, cs.state_changed(status.revision))
+	let status = moq_clock::timeout(TIMEOUT, cs.state_changed(status.revision))
 		.await
 		.expect("the cancelled waiter swallowed the disconnect")
 		.expect("status errored");
@@ -7423,7 +7423,7 @@ async fn video_encoder_follows_a_shrinking_grant() {
 			"encoder did not follow the shrinking grant, last applied {}",
 			video.applied_bitrate()
 		);
-		tokio::time::sleep(Duration::from_millis(10)).await;
+		moq_clock::sleep(Duration::from_millis(10)).await;
 	}
 
 	video.finish().unwrap();
@@ -7477,7 +7477,7 @@ async fn dropping_a_video_producer_stops_the_rate_follower() {
 	)
 	.unwrap();
 
-	tokio::time::timeout(TIMEOUT, tokio::task::spawn_blocking(move || drop(video)))
+	moq_clock::timeout(TIMEOUT, tokio::task::spawn_blocking(move || drop(video)))
 		.await
 		.expect("rate follower did not stop")
 		.expect("drop panicked");
@@ -7536,7 +7536,7 @@ async fn one_shot_peers() -> (Arc<MoqSession>, Arc<MoqSession>, Arc<MoqServer>) 
 		..Default::default()
 	})
 	.unwrap();
-	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+	let addr = moq_clock::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
@@ -7559,11 +7559,11 @@ async fn one_shot_peers() -> (Arc<MoqSession>, Arc<MoqSession>, Arc<MoqServer>) 
 		..Default::default()
 	})
 	.unwrap();
-	let client_session = tokio::time::timeout(TIMEOUT, client.connect(url))
+	let client_session = moq_clock::timeout(TIMEOUT, client.connect(url))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
-	let server_session = tokio::time::timeout(TIMEOUT, accept)
+	let server_session = moq_clock::timeout(TIMEOUT, accept)
 		.await
 		.expect("server accept timed out")
 		.expect("server accept task panicked");
@@ -7589,7 +7589,7 @@ async fn session_protocol_codes_cross_the_ffi() {
 	] {
 		let (client, server_session, server) = one_shot_peers().await;
 		server_session.cancel(code);
-		let err = match tokio::time::timeout(TIMEOUT, client.closed())
+		let err = match moq_clock::timeout(TIMEOUT, client.closed())
 			.await
 			.expect("closed timed out")
 		{
@@ -7622,7 +7622,7 @@ async fn cancelling_a_session_aborts_its_first_dial() {
 	let revision = session.state().revision;
 	client.cancel();
 	session.cancel(0);
-	tokio::time::timeout(TIMEOUT, session.closed()).await.unwrap().unwrap();
+	moq_clock::timeout(TIMEOUT, session.closed()).await.unwrap().unwrap();
 	let state = session.state_changed(revision).await.unwrap();
 	assert_eq!(state.phase, MoqConnectionPhase::Closed);
 	assert_eq!(state.connects, 0);
@@ -7657,7 +7657,7 @@ async fn server_cert_fingerprints_busy_during_accept_and_cancelled_after() {
 	server.cancel();
 	assert!(matches!(server.cert_fingerprints(), Err(MoqError::Cancelled)));
 
-	let accept_err = tokio::time::timeout(TIMEOUT, accept)
+	let accept_err = moq_clock::timeout(TIMEOUT, accept)
 		.await
 		.expect("accept task timed out")
 		.expect("accept task panicked");
@@ -7695,7 +7695,7 @@ async fn request_accept_inherits_overrides_and_captures_origins() {
 		.unwrap();
 		let connecting = client.clone();
 		let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
-		let request = tokio::time::timeout(TIMEOUT, server.accept())
+		let request = moq_clock::timeout(TIMEOUT, server.accept())
 			.await
 			.unwrap()
 			.unwrap()
@@ -7711,7 +7711,7 @@ async fn request_accept_inherits_overrides_and_captures_origins() {
 				})
 				.await
 		});
-		tokio::time::timeout(TIMEOUT, held_rx).await.unwrap().unwrap();
+		moq_clock::timeout(TIMEOUT, held_rx).await.unwrap().unwrap();
 		let accepting = request.clone();
 		let accept = spawn_parked(async move { accepting.accept(publish, consume).await }).await;
 		drop(fresh);
@@ -7722,9 +7722,9 @@ async fn request_accept_inherits_overrides_and_captures_origins() {
 			);
 		}
 		release_tx.send(()).unwrap();
-		tokio::time::timeout(TIMEOUT, hold).await.unwrap().unwrap().unwrap();
-		let session = tokio::time::timeout(TIMEOUT, accept).await.unwrap().unwrap().unwrap();
-		let client_session = tokio::time::timeout(TIMEOUT, connect).await.unwrap().unwrap().unwrap();
+		moq_clock::timeout(TIMEOUT, hold).await.unwrap().unwrap().unwrap();
+		let session = moq_clock::timeout(TIMEOUT, accept).await.unwrap().unwrap().unwrap();
+		let client_session = moq_clock::timeout(TIMEOUT, connect).await.unwrap().unwrap().unwrap();
 		assert_eq!(session.publish().inner().hop(), expected_publish);
 
 		// Incoming broadcasts reach the selected consume origin, independently
@@ -7774,7 +7774,7 @@ async fn request_accept_cancelled_after_cancel() {
 	let connecting = client.clone();
 	let connect = tokio::spawn(async move { connecting.connect(format!("https://{addr}")).await });
 
-	let request = tokio::time::timeout(TIMEOUT, server.accept())
+	let request = moq_clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("accept timed out")
 		.expect("accept errored")
@@ -7791,7 +7791,7 @@ async fn request_accept_cancelled_after_cancel() {
 			})
 			.await
 	});
-	tokio::time::timeout(TIMEOUT, held_rx).await.unwrap().unwrap();
+	moq_clock::timeout(TIMEOUT, held_rx).await.unwrap().unwrap();
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let captured = Arc::downgrade(&origin);
 	let accepting = request.clone();
@@ -7802,9 +7802,9 @@ async fn request_accept_cancelled_after_cancel() {
 	assert!(matches!(request.accept(None, None).await, Err(MoqError::Cancelled)));
 	assert!(matches!(request.reject(403).await, Err(MoqError::Cancelled)));
 
-	let result = tokio::time::timeout(TIMEOUT, accept).await.unwrap().unwrap();
+	let result = moq_clock::timeout(TIMEOUT, accept).await.unwrap().unwrap();
 	assert!(matches!(result, Err(MoqError::Cancelled)));
-	let result = tokio::time::timeout(TIMEOUT, hold).await.unwrap().unwrap();
+	let result = moq_clock::timeout(TIMEOUT, hold).await.unwrap().unwrap();
 	assert!(matches!(result, Err(MoqError::Cancelled)));
 	assert!(
 		captured.upgrade().is_none(),
@@ -7812,7 +7812,7 @@ async fn request_accept_cancelled_after_cancel() {
 	);
 
 	client.cancel();
-	let _ = tokio::time::timeout(TIMEOUT, connect).await;
+	let _ = moq_clock::timeout(TIMEOUT, connect).await;
 	server.cancel();
 }
 
@@ -7848,7 +7848,7 @@ async fn shutdown_cancels_and_drops_cleanly() {
 		..Default::default()
 	})
 	.unwrap();
-	let addr = tokio::time::timeout(TIMEOUT, server.listen())
+	let addr = moq_clock::timeout(TIMEOUT, server.listen())
 		.await
 		.expect("listen timed out")
 		.expect("listen failed");
@@ -7866,11 +7866,11 @@ async fn shutdown_cancels_and_drops_cleanly() {
 		..Default::default()
 	})
 	.unwrap();
-	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
+	let session = moq_clock::timeout(TIMEOUT, client.connect(format!("https://{addr}")))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
-	let server_session = tokio::time::timeout(TIMEOUT, accept)
+	let server_session = moq_clock::timeout(TIMEOUT, accept)
 		.await
 		.expect("accept timed out")
 		.expect("accept task panicked");
@@ -7880,7 +7880,7 @@ async fn shutdown_cancels_and_drops_cleanly() {
 	let track = broadcast.publish_track("data".into(), None).unwrap();
 	let consumer = client_origin.consume();
 	let bc = await_announced(&consumer, "hello").await;
-	let subscriber = tokio::time::timeout(TIMEOUT, bc.subscribe_track("data".into(), None))
+	let subscriber = moq_clock::timeout(TIMEOUT, bc.subscribe_track("data".into(), None))
 		.await
 		.expect("subscribe timed out")
 		.expect("subscribe failed");
@@ -7894,7 +7894,7 @@ async fn shutdown_cancels_and_drops_cleanly() {
 	// Idempotent: the thread is already gone.
 	crate::moq_ffi_shutdown();
 
-	let parked = tokio::time::timeout(TIMEOUT, parked)
+	let parked = moq_clock::timeout(TIMEOUT, parked)
 		.await
 		.expect("the parked read never resolved")
 		.expect("the read task panicked");
@@ -7934,7 +7934,7 @@ fn shutdown_waits_for_an_in_place_poll() {
 			entered.send(()).unwrap();
 			// Holds this poll open while shutdown starts on another thread.
 			release_rx.recv().unwrap();
-			tokio::time::sleep(Duration::from_millis(1)).await;
+			moq_clock::sleep(Duration::from_millis(1)).await;
 			// Even if the sleep is already due, only the shutdown may finish this call.
 			std::future::pending::<Result<(), MoqError>>().await
 		});
@@ -8179,7 +8179,7 @@ async fn shutdown_ready(track: &MoqTrackProducer, reader: &MoqTrackConsumer) {
 		})
 		.unwrap();
 	group.finish().unwrap();
-	let ready = tokio::time::timeout(TIMEOUT, reader.read_frame())
+	let ready = moq_clock::timeout(TIMEOUT, reader.read_frame())
 		.await
 		.expect("subscription ready")
 		.expect("priming read")
@@ -8190,7 +8190,7 @@ async fn shutdown_ready(track: &MoqTrackProducer, reader: &MoqTrackConsumer) {
 #[tokio::test]
 async fn shutdown_delivers_the_finished_track() {
 	for client_publishes in [false, true] {
-		let (server, client, accepted) = tokio::time::timeout(TIMEOUT, shutdown_pair()).await.expect("pair");
+		let (server, client, accepted) = moq_clock::timeout(TIMEOUT, shutdown_pair()).await.expect("pair");
 		let (publisher, subscriber) = if client_publishes {
 			(&client, &accepted)
 		} else {
@@ -8199,7 +8199,7 @@ async fn shutdown_delivers_the_finished_track() {
 		let broadcast = create_announced(&publisher.publish(), "tail");
 		let track = broadcast.publish_track("data".into(), Some(timed_info())).unwrap();
 		let remote = await_announced(&subscriber.consume(), "tail").await;
-		let reader = tokio::time::timeout(TIMEOUT, remote.subscribe_track("data".into(), None))
+		let reader = moq_clock::timeout(TIMEOUT, remote.subscribe_track("data".into(), None))
 			.await
 			.expect("subscribe")
 			.unwrap();
@@ -8210,7 +8210,7 @@ async fn shutdown_delivers_the_finished_track() {
 			Ok::<_, MoqError>((frame, end))
 		});
 		let closing = publisher.clone();
-		tokio::time::timeout(
+		moq_clock::timeout(
 			TIMEOUT,
 			crate::ffi::detached(async move {
 				let group = track.append_group()?;
@@ -8228,7 +8228,7 @@ async fn shutdown_delivers_the_finished_track() {
 		.await
 		.expect("shutdown")
 		.unwrap();
-		let (frame, end) = tokio::time::timeout(TIMEOUT, receiving)
+		let (frame, end) = moq_clock::timeout(TIMEOUT, receiving)
 			.await
 			.expect("read")
 			.unwrap()
@@ -8244,7 +8244,7 @@ async fn shutdown_delivers_the_finished_track() {
 #[tokio::test]
 async fn shutdown_times_out_on_an_unfinished_track() {
 	for client_publishes in [false, true] {
-		let (server, client, accepted) = tokio::time::timeout(TIMEOUT, shutdown_pair()).await.expect("pair");
+		let (server, client, accepted) = moq_clock::timeout(TIMEOUT, shutdown_pair()).await.expect("pair");
 		let (publisher, subscriber) = if client_publishes {
 			(&client, &accepted)
 		} else {
@@ -8253,7 +8253,7 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 		let broadcast = create_announced(&publisher.publish(), "live");
 		let track = broadcast.publish_track("data".into(), Some(timed_info())).unwrap();
 		let remote = await_announced(&subscriber.consume(), "live").await;
-		let reader = tokio::time::timeout(TIMEOUT, remote.subscribe_track("data".into(), None))
+		let reader = moq_clock::timeout(TIMEOUT, remote.subscribe_track("data".into(), None))
 			.await
 			.expect("subscribe")
 			.unwrap();
@@ -8268,7 +8268,7 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 				.is_pending()
 		);
 		publisher.shutdown();
-		let err = tokio::time::timeout(TIMEOUT, closed)
+		let err = moq_clock::timeout(TIMEOUT, closed)
 			.await
 			.expect("shutdown")
 			.expect_err("unfinished track must time out");
@@ -8282,7 +8282,7 @@ async fn shutdown_times_out_on_an_unfinished_track() {
 		assert!(
 			matches!(err, MoqError::Protocol { details } if details.kind == crate::error::MoqProtocolKind::DeliveryTimeout)
 		);
-		let _ = tokio::time::timeout(TIMEOUT, receiving).await.unwrap().unwrap();
+		let _ = moq_clock::timeout(TIMEOUT, receiving).await.unwrap().unwrap();
 		client.cancel(0);
 		accepted.cancel(0);
 		server.cancel();
@@ -8328,7 +8328,7 @@ async fn ascending_subscription_reads_a_cached_backlog_oldest_first() {
 	let consumer = track.consume(Some(subscription)).unwrap();
 	let mut sequences = Vec::new();
 	for _ in 0..3 {
-		let group = tokio::time::timeout(TIMEOUT, consumer.recv_group())
+		let group = moq_clock::timeout(TIMEOUT, consumer.recv_group())
 			.await
 			.expect("timed out waiting for a cached group")
 			.unwrap()
@@ -8343,7 +8343,7 @@ async fn await_grant(session: &MoqSession, want: crate::auth::MoqGrant) {
 	// A fresh consumer starts from the grant as it is now, so `changed` follows from there.
 	let grants = session.grants();
 	let mut current = grants.grant();
-	tokio::time::timeout(TIMEOUT, async {
+	moq_clock::timeout(TIMEOUT, async {
 		while current.as_ref() != Some(&want) {
 			current = grants.changed().await.expect("grant watch ended");
 		}
@@ -8364,7 +8364,7 @@ fn grant(publish: &[&str], subscribe: &[&str]) -> crate::auth::MoqGrant {
 /// The peer's answer to the tokens set last.
 async fn answered(session: &MoqSession) -> Result<(), MoqError> {
 	let tokens = session.tokens().expect("a client session has tokens");
-	tokio::time::timeout(TIMEOUT, tokens.answered())
+	moq_clock::timeout(TIMEOUT, tokens.answered())
 		.await
 		.expect("the tokens were never answered")
 }
@@ -8380,9 +8380,7 @@ async fn auth_reads_the_peer_grant() {
 }
 
 async fn auth_reads_the_peer_grant_on(version: &str) {
-	let (server, client, accepted) = tokio::time::timeout(TIMEOUT, session_pair(version))
-		.await
-		.expect("pair");
+	let (server, client, accepted) = moq_clock::timeout(TIMEOUT, session_pair(version)).await.expect("pair");
 
 	// Each side's origins span the root, so its peer grants it everything.
 	await_grant(&client, grant(&["**"], &["**"])).await;
@@ -8411,7 +8409,7 @@ async fn auth_reads_the_peer_grant_on(version: &str) {
 /// answer is that the session cannot carry it.
 #[tokio::test]
 async fn auth_refuses_a_token_nothing_carries() {
-	let (server, client, accepted) = tokio::time::timeout(TIMEOUT, session_pair("moq-lite-06"))
+	let (server, client, accepted) = moq_clock::timeout(TIMEOUT, session_pair("moq-lite-06"))
 		.await
 		.expect("pair");
 	client.tokens().unwrap().set(vec!["extra".into()]).unwrap();
@@ -8463,7 +8461,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 		..Default::default()
 	})
 	.unwrap();
-	let session = tokio::time::timeout(TIMEOUT, client.connect(format!("tcp://{addr}")))
+	let session = moq_clock::timeout(TIMEOUT, client.connect(format!("tcp://{addr}")))
 		.await
 		.expect("connect timed out")
 		.unwrap();
@@ -8478,7 +8476,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 	answered(&session).await.expect("the extra token was refused");
 	// Patterns are kept sorted.
 	await_grant(&session, grant(&["extra/**", "setup/**"], &[])).await;
-	let seen = tokio::time::timeout(TIMEOUT, watcher.changed())
+	let seen = moq_clock::timeout(TIMEOUT, watcher.changed())
 		.await
 		.expect("the second consumer sees the change")
 		.unwrap();
@@ -8495,7 +8493,7 @@ async fn auth_tokens_join_and_leave_the_union() {
 	await_grant(&session, grant(&["setup/**"], &[])).await;
 
 	session.cancel(0);
-	tokio::time::timeout(TIMEOUT, serving)
+	moq_clock::timeout(TIMEOUT, serving)
 		.await
 		.expect("server ended")
 		.unwrap();
@@ -8531,7 +8529,7 @@ async fn time_anchors_start_at_the_containing_group() {
 	let consumer = track.consume(Some(since(1_500))).unwrap();
 	let mut sequences = Vec::new();
 	for _ in 0..2 {
-		let group = tokio::time::timeout(TIMEOUT, consumer.recv_group())
+		let group = moq_clock::timeout(TIMEOUT, consumer.recv_group())
 			.await
 			.expect("timed out waiting for a cached group")
 			.unwrap()

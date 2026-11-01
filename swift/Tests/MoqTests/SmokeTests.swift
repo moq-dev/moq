@@ -25,7 +25,7 @@ private func assertTimeOverflow<T>(_ body: @autoclosure () throws -> T, file: St
 final class SmokeTests: XCTestCase {
     func testDefaultSubscriptionSkipsSupersededGroupsAtOnce() {
         XCTAssertEqual(Subscription.default.maxDelay, 0)
-        XCTAssertNil(Subscription().maxDelay)
+        XCTAssertNil(Subscription(maxDelay: nil).maxDelay)
     }
 
     func testContainerTimebaseBelongsToOneBroadcast() throws {

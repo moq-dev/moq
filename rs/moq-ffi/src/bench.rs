@@ -98,7 +98,7 @@ impl Report {
 		Fut: Future<Output = ()>,
 	{
 		// The test runs many budgets back to back, so a wedged read is caught per round, not by nextest.
-		let mut run = |n| tokio::time::timeout(ROUND_TIMEOUT, round(n));
+		let mut run = |n| moq_clock::timeout(ROUND_TIMEOUT, round(n));
 		for n in 0..WARMUP {
 			run(n).await.expect("round wedged");
 		}

@@ -314,6 +314,8 @@ fn grow_tx(tx: &mut Tx, config: &Config) -> bool {
 
 /// The registered provided-buffer ring: kernel-shared memory we own.
 struct BufRing {
+	/// The buffer group id the ring is registered under.
+	bgid: u16,
 	ptr: NonNull<types::BufRingEntry>,
 	layout: Layout,
 	mask: u16,
@@ -321,13 +323,14 @@ struct BufRing {
 }
 
 impl BufRing {
-	fn new(entries: u16) -> Self {
+	fn new(entries: u16, bgid: u16) -> Self {
 		let layout = Layout::from_size_align(entries as usize * std::mem::size_of::<types::BufRingEntry>(), 4096)
 			.expect("buffer ring layout");
 		// SAFETY: layout is non-zero.
 		let ptr = unsafe { alloc_zeroed(layout) };
 		let ptr = NonNull::new(ptr.cast::<types::BufRingEntry>()).unwrap_or_else(|| handle_alloc_error(layout));
 		Self {
+			bgid,
 			ptr,
 			layout,
 			mask: entries - 1,
@@ -462,7 +465,6 @@ pub(crate) struct SockShared {
 	gso: Cell<bool>,
 	/// When a lost send was last logged, so a flood of them logs once per interval.
 	lost_logged: Cell<Option<moq_clock::Instant>>,
-	bgid: u16,
 	closed: Cell<bool>,
 	rx: RefCell<Rx>,
 	tx: RefCell<Tx>,
@@ -569,12 +571,17 @@ impl SockShared {
 impl Drop for SockShared {
 	fn drop(&mut self) {
 		// Every op referencing our buffers has completed (ops own an `Rc` of
-		// us), so the kernel is done; give the buffer group id back.
-		if self.rx.borrow().ring.is_some()
+		// us), so the kernel is done; give the buffer group id back once it
+		// has let go of the ring.
+		if let Some(ring) = &self.rx.get_mut().ring
 			&& let Some(shared) = self.owner.upgrade()
 		{
-			let ring = shared.ring.borrow_mut();
-			let _ = ring.submitter().unregister_buf_ring(self.bgid);
+			let unregistered = shared.ring.borrow().submitter().unregister_buf_ring(ring.bgid);
+			match unregistered {
+				Ok(()) => shared.bgids.borrow_mut().give(ring.bgid),
+				// Still registered, so the id stays out of circulation.
+				Err(err) => tracing::warn!(%err, bgid = ring.bgid, "failed to unregister a buffer ring"),
+			}
 		}
 	}
 }
@@ -668,24 +675,28 @@ impl Socket {
 			});
 		}
 
-		let bgid = shared.next_bgid.get();
-		shared
-			.next_bgid
-			.set(bgid.checked_add(1).expect("buffer group ids exhausted"));
-
 		let ring = if config.multishot {
-			let mut ring = BufRing::new(rx_cap);
-			{
-				let io_ring = shared.ring.borrow_mut();
-				// SAFETY: the ring allocation lives in `SockShared`, which the
-				// armed receive's `Op` keeps alive until its terminal CQE, and
-				// is unregistered before it drops.
-				unsafe {
-					io_ring
-						.submitter()
-						.register_buf_ring_with_flags(ring.ptr.as_ptr() as u64, rx_cap, bgid, 0)
-						.map_err(Error::ring)?;
-				}
+			let bgid = shared.bgids.borrow_mut().take().ok_or_else(|| {
+				io::Error::new(
+					io::ErrorKind::OutOfMemory,
+					"every buffer group id on this worker names a live socket",
+				)
+			})?;
+			let mut ring = BufRing::new(rx_cap, bgid);
+			// SAFETY: the ring allocation lives in `SockShared`, which the
+			// armed receive's `Op` keeps alive until its terminal CQE, and is
+			// unregistered before it drops.
+			let registered = unsafe {
+				shared
+					.ring
+					.borrow()
+					.submitter()
+					.register_buf_ring_with_flags(ring.ptr.as_ptr() as u64, rx_cap, bgid, 0)
+			};
+			if let Err(err) = registered {
+				// Nothing was registered, so the id is free again.
+				shared.bgids.borrow_mut().give(bgid);
+				return Err(Error::ring(err));
 			}
 			for (bid, buf) in bufs.iter_mut().enumerate() {
 				let addr = buf.data.as_mut_ptr();
@@ -719,7 +730,6 @@ impl Socket {
 			gso: Cell::new(config.gso),
 			lost_logged: Cell::new(None),
 			config,
-			bgid,
 			closed: Cell::new(false),
 			rx: RefCell::new(Rx {
 				bufs,
@@ -865,8 +875,12 @@ impl Drop for Socket {
 		if let (Some(key), Some(shared)) = (rx.armed, self.shared.owner.upgrade()) {
 			drop(rx);
 			// Fire-and-forget: the cancel's own CQE is consumed by the worker,
-			// and the receive's terminal CQE releases the socket state.
-			let _ = shared.cancel(key);
+			// and the receive's terminal CQE releases the socket state. Failing
+			// to stage it means the ring itself is broken, which only the
+			// worker can report.
+			if let Err(err) = shared.cancel(key) {
+				shared.fail(err);
+			}
 		}
 	}
 }
@@ -1322,7 +1336,8 @@ pub(crate) fn arm_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>) {
 			one: None,
 		});
 		rx.armed = Some(key);
-		opcode::RecvMsgMulti::new(types::Fd(sock.io.as_raw_fd()), &*rx.hdr, sock.bgid)
+		let bgid = rx.ring.as_ref().expect("a multishot socket has a buffer ring").bgid;
+		opcode::RecvMsgMulti::new(types::Fd(sock.io.as_raw_fd()), &*rx.hdr, bgid)
 			.build()
 			.user_data(key)
 	} else {
@@ -1972,7 +1987,7 @@ mod tests {
 		Rx {
 			bufs: Vec::new(),
 			// Never registered, so this one is ours alone to publish into.
-			ring: Some(BufRing::new(64)),
+			ring: Some(BufRing::new(64, 0)),
 			// SAFETY: all-zero is valid for `msghdr`, and nothing reads it here.
 			hdr: Box::new(unsafe { std::mem::zeroed() }),
 			queue: VecDeque::new(),
@@ -2240,5 +2255,180 @@ mod tests {
 			.expect("worker");
 		assert_eq!(err.kind(), io::ErrorKind::NetworkUnreachable, "{err}");
 		assert!(sock.shared.rx.borrow().unreachable.is_none(), "nothing queued");
+	}
+
+	/// A worker, or `None` (outside strict CI) on a kernel that cannot run one.
+	fn worker() -> Option<crate::Worker> {
+		match crate::Worker::new(crate::Config::default()) {
+			Ok(worker) => Some(worker),
+			Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
+				eprintln!("skipping io_uring socket test: {reason}");
+				None
+			}
+			Err(err) => panic!("worker setup failed: {err}"),
+		}
+	}
+
+	fn bind() -> UdpSocket {
+		UdpSocket::bind("127.0.0.1:0").expect("bind")
+	}
+
+	fn oneshot() -> Config {
+		Config {
+			multishot: false,
+			..Default::default()
+		}
+	}
+
+	/// The worker's shared core, reached through a socket that takes no
+	/// buffer group id.
+	fn core(handle: &crate::Handle) -> (Socket, Rc<Shared>) {
+		let sock = handle.udp(bind(), oneshot()).expect("oneshot socket");
+		let shared = sock.owner().upgrade().expect("worker");
+		(sock, shared)
+	}
+
+	/// Drive `worker` until every kernel operation has let go of `sock`.
+	fn release(worker: &mut crate::Worker, sock: std::rc::Weak<SockShared>) {
+		worker
+			.block_on(std::future::poll_fn(|cx| {
+				if sock.upgrade().is_none() {
+					return Poll::Ready(());
+				}
+				cx.waker().wake_by_ref();
+				Poll::Pending
+			}))
+			.expect("worker");
+	}
+
+	/// Fill the submission queue, so the next push has to enter the ring.
+	fn fill(shared: &Shared) {
+		while !shared.ring.borrow_mut().submission().is_full() {
+			let key = shared.insert(Op::Cancel);
+			shared
+				.push(&opcode::Nop::new().build().user_data(key))
+				.expect("stage NOP");
+		}
+	}
+
+	/// Only multishot sockets register a buffer ring, so only they take an id.
+	#[test]
+	fn a_oneshot_socket_takes_no_buffer_group_id() {
+		let Some(worker) = worker() else { return };
+		let (_sock, shared) = core(&worker.handle());
+		let _more = worker.handle().udp(bind(), oneshot()).expect("oneshot socket");
+		assert_eq!(shared.bgids.borrow().next, 0);
+	}
+
+	/// Churn past the id space reuses the id the kernel released, and a socket
+	/// beyond every live id fails to open instead of panicking.
+	#[test]
+	fn socket_churn_reuses_buffer_group_ids() {
+		let Some(mut worker) = worker() else { return };
+		let handle = worker.handle();
+		let (_core, shared) = core(&handle);
+		// Every id below the last names a live ring.
+		shared.bgids.borrow_mut().next = u32::from(u16::MAX);
+
+		for _ in 0..3 {
+			let sock = handle.udp(bind(), Config::default()).expect("multishot socket");
+			assert!(
+				shared.bgids.borrow().free.is_empty(),
+				"{:?}",
+				shared.bgids.borrow().free
+			);
+			let err = handle.udp(bind(), Config::default()).expect_err("every id is live");
+			assert!(err.to_string().contains("buffer group id"), "{err}");
+
+			let weak = sock.downgrade();
+			drop(sock);
+			release(&mut worker, weak);
+			assert_eq!(shared.bgids.borrow().free, [u16::MAX]);
+			assert_eq!(shared.bgids.borrow().next, u32::from(u16::MAX) + 1);
+		}
+	}
+
+	/// A registration the kernel refuses hands its id straight back.
+	#[test]
+	fn a_failed_registration_returns_its_buffer_group_id() {
+		let Some(worker) = worker() else { return };
+		let handle = worker.handle();
+		let (_core, shared) = core(&handle);
+
+		// Hold id 0 outside the pool, so the socket's registration collides.
+		let held = BufRing::new(1, 0);
+		// SAFETY: `held` outlives its registration, which ends below.
+		unsafe {
+			shared
+				.ring
+				.borrow()
+				.submitter()
+				.register_buf_ring_with_flags(held.ptr.as_ptr() as u64, 1, 0, 0)
+				.expect("register");
+		}
+		let err = handle.udp(bind(), Config::default()).expect_err("id 0 is taken");
+		assert!(
+			matches!(&err, Error::Io(err) if err.raw_os_error() == Some(libc::EEXIST)),
+			"{err}"
+		);
+		assert_eq!(shared.bgids.borrow().free, [0]);
+
+		shared
+			.ring
+			.borrow()
+			.submitter()
+			.unregister_buf_ring(0)
+			.expect("unregister");
+		drop(held);
+		let _sock = handle.udp(bind(), Config::default()).expect("id 0 is free");
+		assert!(shared.bgids.borrow().free.is_empty());
+		assert_eq!(shared.bgids.borrow().next, 1);
+	}
+
+	/// A dropped socket that cannot stage its cancel fails the worker's next
+	/// turn, rather than leaving the receive armed in silence.
+	#[test]
+	fn a_failed_cancel_fails_the_next_turn() {
+		let Some(mut worker) = worker() else { return };
+		let handle = worker.handle();
+		let (_core, shared) = core(&handle);
+		let sock = handle.udp(bind(), Config::default()).expect("multishot socket");
+		let weak = sock.downgrade();
+
+		fill(&shared);
+		shared.enter_faults.borrow_mut().push_back(libc::EBADF);
+		drop(sock);
+		assert!(weak.upgrade().is_some(), "the receive is still armed");
+
+		// Even a future that is ready on its first poll cannot return past it.
+		let err = worker
+			.block_on(std::future::ready(()))
+			.expect_err("the cancel failure surfaces");
+		assert!(
+			matches!(&err, Error::Io(err) if err.raw_os_error() == Some(libc::EBADF)),
+			"{err}"
+		);
+		// Reported once, like any other ring failure.
+		assert!(shared.failed.take().is_none());
+
+		// Teardown still cancels the receive.
+		drop(worker);
+		assert!(weak.upgrade().is_none(), "teardown leaked the receive");
+	}
+
+	/// An enter interrupted by a signal is retried, not surfaced.
+	#[test]
+	fn an_interrupted_enter_is_retried() {
+		let Some(worker) = worker() else { return };
+		let (_core, shared) = core(&worker.handle());
+		fill(&shared);
+		shared.enter_faults.borrow_mut().push_back(libc::EINTR);
+
+		let key = shared.insert(Op::Cancel);
+		shared
+			.push(&opcode::Nop::new().build().user_data(key))
+			.expect("an interrupted enter retries");
+		assert!(shared.enter_faults.borrow().is_empty());
+		assert_eq!(shared.ring.borrow_mut().submission().len(), 1);
 	}
 }

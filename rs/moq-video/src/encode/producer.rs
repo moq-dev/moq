@@ -927,14 +927,6 @@ mod tests {
 		not(feature = "openh264"),
 		allow(dead_code, unused_imports, reason = "only the `openh264` feature uses it")
 	)]
-	#![cfg_attr(
-		all(feature = "capture", feature = "openh264"),
-		expect(
-			clippy::disallowed_methods,
-			clippy::disallowed_types,
-			reason = "the capture tests read the host clock directly"
-		)
-	)]
 
 	use moq_mux::catalog::Stream as _;
 
@@ -1443,7 +1435,7 @@ mod tests {
 
 					let captured = Instant::now();
 					// Delivered well after acquisition: dequeue time must not leak into the timestamp.
-					tokio::time::sleep(Duration::from_millis(50)).await;
+					moq_clock::sleep(Duration::from_millis(50)).await;
 					camera.push_at(surface(), captured);
 					let published = read(&mut track).await;
 
@@ -1467,7 +1459,7 @@ mod tests {
 					// The device numbers from zero, and real time keeps pace with it.
 					camera.push_native(surface(), us(0));
 					let first = read(&mut track).await;
-					tokio::time::sleep(Duration::from_millis(40)).await;
+					moq_clock::sleep(Duration::from_millis(40)).await;
 					camera.push_native(surface(), us(40_000));
 					let second = read(&mut track).await;
 					assert_eq!(second - first, 40_000, "the device's spacing survives");
@@ -1476,7 +1468,7 @@ mod tests {
 					camera.push_native(surface(), us(0));
 					let restarted = read(&mut track).await;
 					assert!(restarted >= second, "{restarted}us rewound behind {second}us");
-					tokio::time::sleep(Duration::from_millis(40)).await;
+					moq_clock::sleep(Duration::from_millis(40)).await;
 					camera.push_native(surface(), us(40_000));
 					let resumed = read(&mut track).await;
 					assert_eq!(resumed - restarted, 40_000, "the device's spacing resumes");
@@ -1514,7 +1506,7 @@ mod tests {
 					drop(track);
 					drop(camera);
 
-					tokio::time::sleep(idle).await;
+					moq_clock::sleep(idle).await;
 
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
@@ -1640,7 +1632,7 @@ mod tests {
 						live.push(published);
 						drop(track);
 						// Idle past the minimum segment, so each run is listed as its own segment.
-						tokio::time::sleep(moq_mux::hls::DEFAULT_DURATION + Duration::from_millis(100)).await;
+						moq_clock::sleep(moq_mux::hls::DEFAULT_DURATION + Duration::from_millis(100)).await;
 					}
 
 					let (mut catalog, consumer) = fixture.finish().await;
@@ -1754,7 +1746,7 @@ mod tests {
 		async fn capture_groups(steps: Vec<Step>) -> (moq_net::track::Info, Vec<Vec<usize>>) {
 			use moq_mux::container::Container as _;
 
-			let started = tokio::time::Instant::now();
+			let started = moq_clock::Instant::now();
 			let result = local(async {
 				let mut broadcast = moq_net::broadcast::Info::new().produce();
 				let consumer = broadcast.consume();
@@ -2093,7 +2085,7 @@ mod tests {
 			estimate.set(Some(Rate::from_kbps(500))).unwrap();
 			tokio::select! {
 				res = &mut run => panic!("the capture ended: {res:?}"),
-				() = tokio::time::sleep(Duration::from_secs(60)) => {}
+				() = moq_clock::sleep(Duration::from_secs(60)) => {}
 			}
 			assert_eq!(probe::bitrates(), Vec::<u64>::new());
 
@@ -2166,7 +2158,7 @@ mod tests {
 			// Nothing has refused a cut: the probe never finished, or its backend can force one.
 			control.cut().unwrap();
 			drop(control);
-			tokio::time::timeout(Duration::from_secs(1), run)
+			moq_clock::timeout(Duration::from_secs(1), run)
 				.await
 				.expect("dropping the controls ends the driver")
 				.unwrap();

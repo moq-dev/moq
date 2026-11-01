@@ -452,7 +452,6 @@ fn ready_if(condition: bool) -> Poll<()> {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::future::Future;
@@ -596,10 +595,10 @@ mod tests {
 		grant.revalidate = Some(Duration::from_secs(10));
 		grant.expires = Some(moq_clock::wall() + Duration::from_secs(60));
 		let (producer, consumer) = Producer::new(grant.clone());
-		assert!(tokio::time::timeout(Duration::ZERO, producer.due()).await.is_err());
+		assert!(moq_clock::timeout(Duration::ZERO, producer.due()).await.is_err());
 		tokio::time::advance(Duration::from_secs(10)).await;
 		assert_eq!(producer.due().await, Due::Revalidate);
-		assert!(tokio::time::timeout(Duration::ZERO, producer.due()).await.is_err());
+		assert!(moq_clock::timeout(Duration::ZERO, producer.due()).await.is_err());
 
 		let delay = producer.failed();
 		assert!(delay >= Duration::from_millis(750) && delay <= Duration::from_millis(1250));
@@ -610,7 +609,7 @@ mod tests {
 		producer.update(grant);
 		consumer.revalidate();
 		assert_eq!(producer.due().await, Due::Revalidate);
-		assert!(tokio::time::timeout(Duration::ZERO, producer.due()).await.is_err());
+		assert!(moq_clock::timeout(Duration::ZERO, producer.due()).await.is_err());
 	}
 
 	#[cfg(feature = "client")]
@@ -658,7 +657,7 @@ mod tests {
 		grant.revalidate = Some(Duration::MAX);
 		let (producer, _consumer) = Producer::new(grant);
 		tokio::time::advance(Duration::from_secs(3600)).await;
-		assert!(tokio::time::timeout(Duration::ZERO, producer.due()).await.is_err());
+		assert!(moq_clock::timeout(Duration::ZERO, producer.due()).await.is_err());
 	}
 
 	#[cfg(feature = "client")]
