@@ -72,6 +72,11 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
   generator stops panicking on a negative `time.Duration` (the Go wrapper
   guards it today; delete the guard in the PR that pins a generator with the
   fix, with a test passing a negative duration through the Go binding).
+- Cancelled Go results ([moq-dev/moq#7397](https://github.com/moq-dev/moq/pull/7397)):
+  uniffi-bindgen-go `v0.10.0-kixelated.2` destroys a result whose context was
+  cancelled as the call completed, and completes a future cancelled while
+  pending as `context.Canceled`. rust2's Go generator must carry both, with the
+  fork's `destroy` fixture tests.
 - Update the quests that name a `kixelated/uniffi-*` fork
   ([Generated C bindings](/quest/m2/c/README.md)) to point at rust2, then
   archive the three forks.

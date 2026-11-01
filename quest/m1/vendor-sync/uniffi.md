@@ -32,7 +32,7 @@ Last checked (2026-10-30), with each fork's base and pin:
 | Fork | Base | Pin | Upstream head | Behind |
 |---|---|---|---|---|
 | uniffi-rs | `v0.32.2` (`7bc621ee`) | `88d835d6` | `ef9625b6` | 105 on `main`, no newer release |
-| uniffi-bindgen-go | `0b7fb4ce` | `v0.10.0-kixelated.1+v0.32.0` | `0b7fb4ce` | 0 |
+| uniffi-bindgen-go | `0b7fb4ce` | `v0.10.0-kixelated.2+v0.32.0` | `0b7fb4ce` | 0 |
 | uniffi-dart | `72d26c1f` | `v0.3.1-kixelated.6+v0.32.0` | `34f57ea7` | 26 |
 | uniffi-bindgen-cpp | `20bef754` | `v0.11.0-kixelated.7+v0.32.2` | `20bef754` | 0 |
 
