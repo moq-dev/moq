@@ -52,10 +52,13 @@ moq-rtc's session-end test was never load-bound: on the paused clock, dimpl's
 randomly jittered DTLS handshake give-up raced ICE's establishment deadline,
 fixed by [moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379).
 
+moq-relay's auth-trust test was never load-bound either: its fixture left each
+lease's background `end` POST unserved, so a reused port let one steal the next
+trial's accept. Fixed by [moq-dev/moq#7550](https://github.com/moq-dev/moq/pull/7550).
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
-- [moq-relay's auth-trust test survives load](/quest/m0/test-flakes-2/relay-auth-trust.md) - it stops timing out on a busy host
 - [Draft-22 interop with a native publisher](/quest/m0/test-flakes-2/draft22-interop.md) - no "invalid fetch range" or audio gap with a Rust or C++ publisher
