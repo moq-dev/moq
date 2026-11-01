@@ -1196,7 +1196,8 @@ impl FrameIngest {
 		}
 	}
 
-	/// Read a frame header varint. Only a plain group may end in its place.
+	/// Read a frame header varint. EOF may end a plain group only at a frame's
+	/// first field (`boundary`); a truncated header is an error.
 	fn poll_header_varint<R: crate::transport::poll::RecvStream>(
 		&self,
 		reader: &mut Reader<R, Version>,
