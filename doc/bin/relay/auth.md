@@ -221,9 +221,25 @@ everything. Put application data somewhere other than the token.
 Tokens and key scopes from the older `moq-token` format still work: each `put`
 and `get` prefix `p` reads as the subtree `p/**`.
 
-Roles are pattern arrays. Object roles, including bitrate caps such as
-`{"path":["alice/**"],"rate":8000000}`, are refused in full by token and
-auth-server grant parsing. No transport currently enforces bitrate caps.
+### Bitrate caps
+
+A role may cap its bitrate, in bits per second, by naming its patterns as
+`{"path":["alice/**"],"rate":8000000}` in a token or an auth-server grant. A
+`publish` cap bounds what the session sends the relay, and a `subscribe` cap
+what the relay sends it, QUIC overhead and retransmissions included. Each
+averages over a second, with one second of the rate as a burst. Older relays
+refuse a capped role rather than drop the cap.
+
+Only QUIC and WebTransport on the tokio or io\_uring listener enforce caps.
+WebSocket, iroh, and HTTP `/fetch` and `/announced` refuse a capped grant,
+whether it arrives at connect, in band, or at revalidation. When in-band tokens
+add grants to one session, each direction takes the highest cap among them, and
+a grant giving that direction paths without a cap lifts it. A cap changed at
+revalidation applies to the live session.
+
+Every QUIC session starts with only the flow-control credit its SETUP needs, so
+a client cannot bank the full `[quic] receive_window` before its cap applies;
+the relay opens the window once it admits the session.
 
 ### Path matching
 

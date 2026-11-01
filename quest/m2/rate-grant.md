@@ -17,13 +17,12 @@ re-clamps a live encoder.
 Decided in the quest audit: this quest owns net's in-band grants, their lite
 codecs, relay propagation, and publisher clamps.
 
-Token claims and HTTP grants carry path patterns only; object roles, including
-bitrate caps, are refused during parsing. Decided 2026-10-25 (maintainer):
-[QUIC caps](/quest/m2/rate-quic.md) reintroduces optional caps with a type
-moq-auth owns (or a lower shared units crate), converted at the relay boundary
-so moq-auth never depends on moq-net, and this quest Requires it. Its parsers
-and refusal rules must prevent any transport without enforcement from silently
-discarding a cap. This quest reuses only caps that admission actually
+Token claims and HTTP grants carry optional caps as `moq_auth::Rate`
+(`publish_rate`, `subscribe_rate`, bits per second), converted at the relay
+boundary so moq-auth never depends on moq-net. QUIC sessions enforce them and
+every other transport refuses them (`rs/moq-relay/src/auth/caps.rs`). Its
+parsers and refusal rules must prevent any transport without enforcement from
+silently discarding a cap. This quest reuses only caps that admission actually
 enforces.
 
 Update the AUTH grant in `drafts/draft-lcurley-moq-lite.md` and run
@@ -39,7 +38,3 @@ target never exceeds the cap minus overhead; a raised cap lets it climb back.
 Public API: the in-band grant types in `rs/moq-net` and `js/net` gain the two
 rates, and the publishers gain a clamp. Wire: the AUTH grant gains optional
 rates, on the next unpublished lite version after lite-07 only.
-
-## Required
-
-- [QUIC caps](/quest/m2/rate-quic.md) - reintroduces the moq-auth cap type the grant carries

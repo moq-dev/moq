@@ -654,6 +654,9 @@ impl Server {
 			// tokio::select! does not support cfg directives on arms, so we need to create the futures here.
 			// `Some(None)` once a configured endpoint stops, which only losing its
 			// driver does while we accept.
+			// The window a QUIC session opens to once admitted.
+			#[cfg(feature = "quic")]
+			let window = self.quic.as_ref().and_then(|quic| quic.window);
 			#[cfg(feature = "quic")]
 			let quic_accept = async {
 				#[cfg(feature = "quic")]
@@ -751,7 +754,7 @@ impl Server {
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
-							Ok(Request { transport, url, identity, authority, link, handshake: Box::new(request), quic, deadline, active })
+							Ok(Request { transport, url, identity, authority, link, handshake: Box::new(request), quic, window, quic_limits: Default::default(), deadline, active })
 						}.boxed());
 					}
 				}
@@ -778,6 +781,10 @@ impl Server {
 								handshake: Box::new(request),
 								#[cfg(feature = "quic")]
 								quic: None,
+								#[cfg(feature = "quic")]
+								window: None,
+								#[cfg(feature = "quic")]
+								quic_limits: Default::default(),
 								deadline,
 								active,
 							})
@@ -951,6 +958,10 @@ impl Listener {
 				handshake: Box::new(request),
 				#[cfg(feature = "quic")]
 				quic: None,
+				#[cfg(feature = "quic")]
+				window: None,
+				#[cfg(feature = "quic")]
+				quic_limits: Default::default(),
 				deadline,
 				active,
 			})
@@ -1096,6 +1107,10 @@ pub(crate) async fn accept_websocket(
 		handshake: Box::new(request),
 		#[cfg(feature = "quic")]
 		quic: None,
+		#[cfg(feature = "quic")]
+		window: None,
+		#[cfg(feature = "quic")]
+		quic_limits: Default::default(),
 		deadline,
 		active: options.active,
 	})
@@ -1597,6 +1612,10 @@ async fn stream_request(
 				handshake: Box::new(request),
 				#[cfg(feature = "quic")]
 				quic: None,
+				#[cfg(feature = "quic")]
+				window: None,
+				#[cfg(feature = "quic")]
+				quic_limits: Default::default(),
 				deadline,
 				active,
 			};
@@ -1662,6 +1681,12 @@ pub struct Request {
 	/// The connection under a QUIC or WebTransport request, for [`Request::quic`].
 	#[cfg(feature = "quic")]
 	quic: Option<crate::quic::driver::connection::Connection>,
+	/// The receive window [`Request::ok`] opens unless [`Request::with_quic_limits`] names one.
+	#[cfg(feature = "quic")]
+	window: Option<std::num::NonZeroU64>,
+	/// What [`Request::ok`] applies to the QUIC connection before answering SETUP.
+	#[cfg(feature = "quic")]
+	quic_limits: moq_quic::Limits,
 	/// What remains of the handshake deadline, which also bounds [`Request::ok`].
 	deadline: Option<Deadline>,
 }
@@ -1706,11 +1731,24 @@ impl Request {
 		self
 	}
 
-	/// The QUIC connection under this request, to change its limits before answering
-	/// SETUP. `None` on a transport moq-quic does not drive (qmux streams, iroh).
+	/// The QUIC connection under this request, to change its limits once the session runs.
+	/// `None` on a transport moq-quic does not drive (qmux streams, iroh).
 	#[cfg(feature = "quic")]
 	pub fn quic(&self) -> Option<&crate::quic::driver::connection::Connection> {
 		self.quic.as_ref()
+	}
+
+	/// Set the QUIC limits [`Self::ok`] applies before answering SETUP, replacing any set
+	/// before. Ignored on a transport moq-quic does not drive.
+	///
+	/// Until then the connection holds only [`moq_net::transport::SETUP_RECEIVE_WINDOW`];
+	/// `ok` opens `receive_window`, or `[quic] receive_window` when it is unset, after the
+	/// other limits, so a `receive_rate` set here paces the opened window.
+	#[cfg(feature = "quic")]
+	pub fn with_quic_limits(mut self, limits: moq_quic::Limits) -> Result<Self, moq_quic::LimitsError> {
+		limits.validate()?;
+		self.quic_limits = limits;
+		Ok(self)
 	}
 
 	/// Finish `work` before what remains of the handshake deadline, or close the
@@ -1732,6 +1770,14 @@ impl Request {
 	/// on a peer that withholds flow-control credit, which keep-alives would
 	/// otherwise hold open.
 	pub async fn ok(self) -> crate::Result<Session> {
+		// Admitted: open the window the handshake held back, before SETUP OK.
+		#[cfg(feature = "quic")]
+		if let Some(quic) = &self.quic {
+			let mut limits = self.quic_limits;
+			limits.receive_window = limits.receive_window.or(self.window);
+			quic.set_limits(limits)
+				.expect("validated by with_quic_limits and the config");
+		}
 		let Request {
 			handshake,
 			deadline,
@@ -2563,6 +2609,10 @@ mod tests {
 			handshake: Box::new(request),
 			#[cfg(feature = "quic")]
 			quic: None,
+			#[cfg(feature = "quic")]
+			window: None,
+			#[cfg(feature = "quic")]
+			quic_limits: Default::default(),
 			deadline,
 		}
 		.with_stats(

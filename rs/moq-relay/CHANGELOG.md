@@ -7,9 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- QUIC and WebTransport sessions on the tokio and io_uring listeners enforce a grant's bitrate caps: `publish_rate` paces what the relay receives and `subscribe_rate` what it sends. Unions take the highest cap and an uncapped grant lifts it; a re-checked cap reaches the live session. WebSocket, iroh, and HTTP refuse a capped grant at connect, in band, and at revalidation. Every QUIC session starts with only the SETUP's flow-control credit, opened once admitted.
+
 ### Changed
 
-- [**breaking**] Auth token roles hold path patterns directly, matching release. Unsupported object roles, including bitrate caps, are refused by auth parsing before admission.
+- [**breaking**] Auth token roles hold path patterns directly, matching release; a capped role is enforced or refused, never dropped.
 
 - Auth requests distinguish `webtransport` from native `quic`. Upgrade auth servers before relays: older servers reject the new value. Rust and JavaScript auth parsers now map future transport names to `unknown`.
 - `listen.timeout` bounds auth admission as part of the handshake, replacing the fixed ten-second admission timeout, so an auth server answering `connect` late is admitted within the deadline and `"0"` waits through admission too. HTTP reads bound admission by the web listener's timeout. `Auth::admit` and `Cluster::admit` no longer time out on their own; the caller owns the deadline. In-band token verification keeps its ten-second bound.

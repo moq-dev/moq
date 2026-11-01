@@ -16,7 +16,8 @@
 //!   its presenter key, that another client verifies with [`KeySet::to_peer_set`].
 //!
 //! Grants and claims name paths with [`Pattern`]s from `moq-pattern`, re-exported here:
-//! `foo` is one broadcast, `foo/**` is a subtree, `**` is everything.
+//! `foo` is one broadcast, `foo/**` is a subtree, `**` is everything. Each role may also
+//! carry a bitrate cap, a [`Rate`].
 
 #![warn(missing_docs)]
 
@@ -30,6 +31,7 @@ mod key;
 mod key_id;
 mod path;
 mod peer;
+mod rate;
 mod request;
 mod set;
 mod wire;
@@ -55,5 +57,6 @@ pub use key::*;
 pub use key_id::*;
 pub use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment, Specificity};
 pub use peer::*;
+pub use rate::*;
 pub use request::*;
 pub use set::*;

@@ -27,4 +27,3 @@ queue is not evidence about congestion loss.
 ## Related
 
 - [Per-stream deadlines](/quest/m2/quic-deadline.md) - a consumer
-- [QUIC bitrate caps](/quest/m2/rate-quic.md) - wants a simulated clock
