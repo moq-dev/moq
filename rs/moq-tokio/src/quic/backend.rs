@@ -1130,7 +1130,7 @@ mod tests {
 		let client = Client::new(&client_config, &client_quic).expect("client init");
 		let url: Url = format!("moqt://127.0.0.1:{}", addr.port()).parse().unwrap();
 
-		tokio::time::timeout(Duration::from_secs(5), async move {
+		kio::clock::timeout(Duration::from_secs(5), async move {
 			let session = client
 				.connect(&tls, url.into(), &moq_net::Versions::default())
 				.await
