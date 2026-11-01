@@ -1824,7 +1824,7 @@ test("lite draft-06: an errored end is not declared early", async () => {
 				() => "response",
 				() => "reset",
 			),
-			new Promise((resolve) => setTimeout(() => resolve("none"), 20)),
+			sleep(Nano.fromMilli(Milli(20))).then(() => "none"),
 		]);
 		expect(early).toBe("none");
 
