@@ -9,8 +9,8 @@ aws-lc-sys, ring, or `cc` in a crypto crate's graph. rind is MoQ's only crypto,
 replacing aws-lc-rs, ring, and the RustCrypto `hmac`/`sha1`/`sha2`/`p256`/`p384`
 crates in MoQ's own code.
 
-Non-goals: CPUs or targets rind refuses (see Plan), and moq-tokio's `iroh`
-feature, which is deleted instead.
+Non-goals: CPUs or targets rind refuses (see Plan). moq-tokio's iroh backend,
+which hard-wired aws-lc-rs or ring, was deleted instead.
 
 ## Plan
 
@@ -65,7 +65,6 @@ The epic's own work, once every child has merged:
 ## Required
 
 - [rind-instant-acme is on crates.io](/quest/m2/rind/instant-acme.md) - waiting on the adapter relay ACME needs
-- [Drop iroh](/quest/m2/rind/drop-iroh.md) - moq-tokio, moq-relay, and moq-cli lose the `iroh` feature and web-transport-iroh
 - [Transport on rind](/quest/m2/rind/transport.md) - moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take rind, and the `aws-lc-rs`/`ring` features go
 - [moq-auth on rind](/quest/m2/rind/auth.md) - JWT signing, key generation, and JWK loading run on rind
 - [moq-rtc on rind](/quest/m2/rind/rtc.md) - str0m and dimpl run DTLS, SRTP, and STUN on rind

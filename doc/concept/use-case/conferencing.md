@@ -17,7 +17,7 @@ features first.
 - **Latency you choose.** WebRTC decides when to drop. A MoQ subscriber sets its own budget per track, so audio can be near-lossless at 500 ms while video stays at the live edge.
 - **Scale from the same relay.** A relay that serves a two-person call also serves a ten-thousand-viewer webinar. There is no SFU/CDN split.
 - **Full pipeline control in the browser.** WebCodecs frames and `AudioData` samples are yours: render to a texture, run a model, apply effects.
-- **No STUN/TURN.** Clients dial the relay over WebTransport like any HTTPS server. Native peers on a LAN can go [peer-to-peer over iroh](/concept/transport#iroh-peer-to-peer-experimental).
+- **No STUN/TURN.** Clients dial the relay over WebTransport like any HTTPS server.
 
 ## Interop
 

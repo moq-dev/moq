@@ -23,7 +23,7 @@ Decided with the maintainer on 2026-10-17 (see the
   ordinary stream data that any controller counts and paces, and it
   implements the sender hook in `js/net`, mirroring Rust's
   `transport::Probe`. Decided 2026-10-20: browser-only. A native session without
-  native probing (iroh on noq, or moq-quic under CUBIC) has no sender, so
+  native probing (moq-quic under CUBIC) has no sender, so
   [native rung disable](/quest/m1/simulcast-rung-disable.md) never stops a
   rung there.
 - **The browser's send target.** The `js/net` mirror of the Rust send

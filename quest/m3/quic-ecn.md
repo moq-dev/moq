@@ -13,7 +13,7 @@ ECT(0) marking and ACK ECN counts are carried end to end, and BBR3's classic
 CE response, ported to `moq-quic` from
 [moq-dev/noq#12](https://github.com/moq-dev/noq/pull/12) (see
 `rs/moq-quic/README.md`), is the baseline. `main` no longer depends on
-moq-noq; only upstream noq-proto remains, for iroh. This quest adds the
+moq-noq or upstream noq-proto. This quest adds the
 scalable policy separately. `moq-quic` has no ECN knob: `sending_ecn` starts
 on per path and validation failure or an ACK without counts turns it off, so
 both `off` and `ect1` need a `moq-quic` change.

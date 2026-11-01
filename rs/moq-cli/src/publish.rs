@@ -1613,8 +1613,6 @@ pub(crate) mod tests {
 			ready.wait().await.unwrap();
 			let net = crate::Net {
 				quic: Default::default(),
-				#[cfg(feature = "iroh")]
-				iroh: None,
 			};
 			let url = fixture.url.to_string();
 			let client = || {

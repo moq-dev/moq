@@ -1088,7 +1088,6 @@ fn transport(transport: moq_tokio::Transport) -> moq_auth::Transport {
 	match transport {
 		moq_tokio::Transport::Quic => moq_auth::Transport::Quic,
 		moq_tokio::Transport::WebTransport => moq_auth::Transport::WebTransport,
-		moq_tokio::Transport::Iroh => moq_auth::Transport::Iroh,
 		moq_tokio::Transport::WebSocket => moq_auth::Transport::WebSocket,
 		moq_tokio::Transport::Tcp => moq_auth::Transport::Tcp,
 		moq_tokio::Transport::Unix => moq_auth::Transport::Unix,
@@ -1182,15 +1181,7 @@ mod tests {
 	#[test]
 	fn every_transport_has_an_auth_name() {
 		use moq_tokio::Transport as T;
-		for transport in [
-			T::Quic,
-			T::WebTransport,
-			T::Iroh,
-			T::WebSocket,
-			T::Tcp,
-			T::Unix,
-			T::WebRtc,
-		] {
+		for transport in [T::Quic, T::WebTransport, T::WebSocket, T::Tcp, T::Unix, T::WebRtc] {
 			assert_eq!(super::transport(transport).as_str(), transport.as_str());
 		}
 	}

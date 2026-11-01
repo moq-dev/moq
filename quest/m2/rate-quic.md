@@ -82,7 +82,7 @@ discarded by an old relay.
 - The relay's receive cap is the session's `publish_rate`, its send cap the
   `subscribe_rate`, converted from bits to bytes per second.
 - QUIC admission accepts capped roles only on the moq-quic stack (tokio and
-  io_uring); WebSocket, iroh, and HTTP `/fetch` and `/announced` keep refusing
+  io_uring); WebSocket and HTTP `/fetch` and `/announced` keep refusing
   them, including a capped grant arriving in band or at revalidation.
 
 Tests: a union of capped grants takes the highest cap and an uncapped grant

@@ -81,10 +81,6 @@ pub struct Client {
 	tls: rustls::ClientConfig,
 	#[cfg(feature = "quic")]
 	quic: Option<crate::quic::Client>,
-	#[cfg(feature = "iroh")]
-	iroh: Option<crate::iroh::Endpoint>,
-	#[cfg(feature = "iroh")]
-	iroh_addrs: Vec<std::net::SocketAddr>,
 	/// Replaces the transport dial in tests, so the reconnect loop can run over
 	/// in-memory sessions on a paused clock.
 	#[cfg(test)]
@@ -103,7 +99,7 @@ impl Client {
 	#[cfg(not(feature = "_transport"))]
 	pub fn new(_config: Config) -> crate::Result<Self> {
 		Err(Error::NoBackend(
-			"no backend compiled; enable quic, iroh, websocket, tcp, or uds feature",
+			"no backend compiled; enable quic, websocket, tcp, or uds feature",
 		))
 	}
 
@@ -125,8 +121,8 @@ impl Client {
 		quic.validate()?;
 		config.backoff.validate()?;
 
-		// Only the rustls-backed transports use this. Iroh and the plaintext
-		// qmux transports must not require a rustls crypto provider.
+		// Only the rustls-backed transports use this. The plaintext qmux
+		// transports must not require a rustls crypto provider.
 		#[cfg(any(feature = "quic", feature = "websocket"))]
 		let tls = config.tls.build()?;
 
@@ -178,33 +174,9 @@ impl Client {
 			tls,
 			#[cfg(feature = "quic")]
 			quic,
-			#[cfg(feature = "iroh")]
-			iroh: None,
-			#[cfg(feature = "iroh")]
-			iroh_addrs: Vec::new(),
 			#[cfg(test)]
 			dialer: None,
 		})
-	}
-
-	/// Dial `iroh://` URLs through the given Iroh endpoint.
-	///
-	/// Required before [`connect`](Self::connect) can serve an `iroh://` URL;
-	/// without it those dials fail with [`crate::Error::IrohDisabled`].
-	#[cfg(feature = "iroh")]
-	pub fn with_iroh(mut self, iroh: crate::iroh::Endpoint) -> Self {
-		self.iroh = Some(iroh);
-		self
-	}
-
-	/// Set direct IP addresses for connecting to iroh peers.
-	///
-	/// This is useful when the peer's IP addresses are known ahead of time,
-	/// bypassing the need for peer discovery (e.g. in tests or local networks).
-	#[cfg(feature = "iroh")]
-	pub fn with_iroh_addrs(mut self, addrs: Vec<std::net::SocketAddr>) -> Self {
-		self.iroh_addrs = addrs;
-		self
 	}
 
 	/// Publish the given origin to every session this client opens.
@@ -299,8 +271,7 @@ impl Client {
 	/// Call [`Connection::close`] on each connection first to deliver it.
 	///
 	/// Only the QUIC endpoint is closed. WebSocket, TCP, and UDS sessions end when their
-	/// [`Connection`] is dropped (the kernel closes the socket on exit), and an iroh
-	/// endpoint passed to `with_iroh` is closed by its owner.
+	/// [`Connection`] is dropped (the kernel closes the socket on exit).
 	pub async fn close(self) {
 		#[cfg(feature = "quic")]
 		if let Some(quic) = self.quic {
@@ -369,20 +340,14 @@ impl Client {
 	/// Dial the given URL and complete the MoQ handshake.
 	///
 	/// Errors if no transport feature is compiled in.
-	#[cfg(not(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	)))]
+	#[cfg(not(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds")))]
 	pub(crate) async fn dial(
 		&self,
 		_addr: crate::connect::Addr,
 		_presented: &moq_net::auth::Dial,
 	) -> crate::Result<Dialed> {
 		Err(Error::NoBackend(
-			"no backend compiled; enable quic, iroh, websocket, tcp, or uds feature",
+			"no backend compiled; enable quic, websocket, tcp, or uds feature",
 		))
 	}
 
@@ -392,13 +357,7 @@ impl Client {
 	/// WebSocket fallback so a blocked UDP path still connects. The session's
 	/// protocol driver is spawned on the current tokio runtime, else the fallback; the session
 	/// closes once the last returned handle drops.
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	pub(crate) async fn dial(
 		&self,
 		addr: crate::connect::Addr,
@@ -437,13 +396,7 @@ impl Client {
 		Ok(dialed)
 	}
 
-	#[cfg(any(
-		feature = "quic",
-		feature = "iroh",
-		feature = "websocket",
-		feature = "tcp",
-		feature = "uds"
-	))]
+	#[cfg(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds"))]
 	async fn connect_inner(&self, addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		let url = addr.url().clone();
 		// Each session's transport says whether its own request URI carries the target or
@@ -489,18 +442,6 @@ impl Client {
 		#[cfg(feature = "websocket")]
 		if matches!(url.scheme(), "ws" | "wss") {
 			return self.connect_websocket(&moq, addr).await;
-		}
-
-		// iroh offers the moq ALPNs ahead of H3, so two moq endpoints normally land on raw
-		// QUIC, which carries no request URI. The scheme can't tell us which we got, so the
-		// negotiated ALPN decides where the request target travels.
-		#[cfg(feature = "iroh")]
-		if url.scheme() == "iroh" {
-			let endpoint = self.iroh.as_ref().ok_or(Error::IrohDisabled)?;
-			let (session, address) =
-				crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied(), &self.versions).await?;
-			let session = connect_session(&moq, crate::iroh::Session::new(session, address)).await?;
-			return Ok(Dialed::new(session, crate::Transport::Iroh));
 		}
 
 		#[cfg(feature = "quic")]
@@ -604,13 +545,7 @@ pub(crate) struct Dialed {
 
 impl Dialed {
 	#[cfg_attr(
-		not(any(
-			feature = "quic",
-			feature = "iroh",
-			feature = "websocket",
-			feature = "tcp",
-			feature = "uds"
-		)),
+		not(any(feature = "quic", feature = "websocket", feature = "tcp", feature = "uds")),
 		allow(dead_code, reason = "only a transport feature dials")
 	)]
 	fn new(session: moq_net::Session, transport: crate::Transport) -> Self {
@@ -1365,14 +1300,6 @@ mod tests {
 		.expect("race waited for WebSocket after QUIC transport connected")
 		.unwrap();
 		assert!(matches!(value, super::TransportRace::Quic("quic")));
-	}
-
-	/// Iroh carries no rustls state, so constructing its client must not require an
-	/// application-installed crypto provider.
-	#[cfg(all(feature = "iroh", not(any(feature = "quic", feature = "websocket"))))]
-	#[test]
-	fn iroh_only_client_does_not_require_a_tls_provider() {
-		crate::connect::Config::default().init().expect("iroh-only client");
 	}
 
 	/// A peer that completes the TCP handshake and then never speaks: the QUIC arm
