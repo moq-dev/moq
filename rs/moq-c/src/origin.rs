@@ -73,6 +73,7 @@ impl Producer {
 /// One announce event and the C string views borrowed from it.
 struct AnnouncedRecord {
 	prefix: String,
+	/// Owns the strings `capture_views` borrows; never read directly.
 	_captures: Vec<String>,
 	capture_views: Vec<moq_string>,
 	kind: moq_announce_kind,
