@@ -799,11 +799,10 @@ impl Subscriber {
 			) {
 				Ok(grant) => Some(grant),
 				Err(refusal) => {
-					self.write_publish_error(&mut stream, &refusal.error, &refusal.reason)
-						.await?;
+					let (kind, err) = (request::Kind::Publish, &refusal.error);
+					request_stream::buffer_error(&mut stream.writer, kind, err, &refusal.reason, self.version)?;
 					// Dropping an unfinished writer resets it, which could discard the refusal.
-					let _ = stream.writer.close().await;
-					return Ok(());
+					return request_stream::deliver(&mut stream.writer).await;
 				}
 			}
 		} else {
