@@ -1977,7 +1977,7 @@ fn audio_caps(config: &hang::catalog::AudioConfig) -> Result<gst::Caps> {
 			if let Some(description) = &config.description {
 				builder = builder
 					.field("codec_data", gst::Buffer::from_slice(description.clone()))
-					.field("stream-format", "aac");
+					.field("stream-format", "raw");
 			} else {
 				builder = builder.field("stream-format", "adts");
 			}
@@ -2100,6 +2100,22 @@ mod tests {
 				);
 				assert_eq!(structure.has_field("codec_data"), description.is_some());
 			}
+		}
+	}
+
+	#[test]
+	fn aac_caps_follow_the_description_framing() {
+		gst::init().unwrap();
+		for description in [None, Some(bytes::Bytes::from_static(&[0x12, 0x08]))] {
+			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 44_100, 1);
+			config.description = description.clone();
+			let caps = super::audio_caps(&config).unwrap();
+			let structure = caps.structure(0).unwrap();
+			assert_eq!(
+				structure.get::<String>("stream-format").unwrap(),
+				if description.is_some() { "raw" } else { "adts" }
+			);
+			assert_eq!(structure.has_field("codec_data"), description.is_some());
 		}
 	}
 
