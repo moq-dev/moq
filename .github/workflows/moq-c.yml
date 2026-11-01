@@ -59,10 +59,13 @@ jobs:
 
       - name: Build and package
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.parse.outputs.version }}
         run: |
           just rs package-moq-c \
-            --target ${{ matrix.target }} \
-            --version ${{ steps.parse.outputs.version }} \
+            --target "$TARGET" \
+            --version "$VERSION" \
             --output dist
 
       - name: Upload artifact
