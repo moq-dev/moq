@@ -23,16 +23,9 @@ pub(super) fn now() -> crate::time::Instant {
 ///
 /// The ambient runtime's clock where there is one, so a paused test runtime pauses
 /// staleness along with the drivers it supplies time to.
-#[cfg(not(any(test, loom)))]
+#[cfg(not(test))]
 pub(super) fn wall() -> crate::time::Instant {
 	moq_clock::now()
-}
-
-/// Loom permutes handoffs without advancing time, so scheduling cannot age groups.
-#[cfg(all(loom, not(test)))]
-pub(super) fn wall() -> crate::time::Instant {
-	static FROZEN: LazyLock<crate::time::Instant> = LazyLock::new(moq_clock::now);
-	*FROZEN
 }
 
 /// Unit tests freeze the wall clock, so only time a test supplies moves it: the

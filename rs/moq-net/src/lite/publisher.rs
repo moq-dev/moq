@@ -176,13 +176,6 @@ pub(super) struct Publisher {
 }
 
 impl Publisher {
-	#[cfg_attr(
-		target_arch = "wasm32",
-		expect(
-			clippy::arc_with_non_send_sync,
-			reason = "the browser transport is `!Send`, but native shares this state across threads"
-		)
-	)]
 	pub fn new(config: PublisherConfig) -> Self {
 		// Identity stamped onto outbound announce hops. Derived from the
 		// origin we're consuming so it matches the local relay identity
@@ -5011,7 +5004,7 @@ impl GroupServe {
 /// A group that fails mid-stream must reset with its own error code. The subscriber uses
 /// that code to tell a truncated group (Old, Lagged, Evicted) from a routine cancel, so a
 /// blanket [`Error::Cancel`] from the writer's drop fallback loses the reason.
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod serve_group_test {
 	use super::*;
 	use crate::lite::test_transport::*;

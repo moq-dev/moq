@@ -388,9 +388,6 @@ pub(crate) struct Arrival<T> {
 	pub decode: Decode,
 	/// How many times the source had restarted its timeline when the frame was read.
 	pub restart: u64,
-	/// How many times the source's playhead had jumped (a skipped group, or a restart)
-	/// when the frame was read.
-	pub skip: u64,
 	/// Whether the frame decodes without the track's earlier frames.
 	pub sync: bool,
 	/// Whether it presents before the track's last sync frame, so it also references frames
@@ -466,10 +463,8 @@ pub(crate) enum Push {
 /// late are dropped like any other. A source that restarts its timeline (a declared
 /// marker) has moved it, so once frames have gone out the restart opens a new generation,
 /// whose clock is acquired the same way, though never ahead of a deadline already given
-/// out. So does a skip after which a frame would be held more than a delay past everything
-/// queued, beyond how far ahead of the others its track is sent: its timeline jumped ahead,
-/// as when the skipped groups held a marker the publisher shed. So does a step with no marker
-/// at all, as a changeover between two encoders whose clocks disagree, once the delay cannot
+/// out. So does a step with no marker at all, as a changeover between two encoders whose clocks
+/// disagree, or skipped groups that held a marker the publisher shed, once the delay cannot
 /// absorb it: read as drift it would fail [`Buffer::push`], and steering on it would let the
 /// step's span of decode time slew the drift in one go. A smaller one is a move in latency.
 /// How far ahead of its decode time the source sends each track belongs to its mux and
@@ -735,10 +730,8 @@ struct Track<T> {
 	read_timer: Option<Pin<Box<Sleep>>>,
 	/// What its queued frames hold against the byte budget.
 	bytes: usize,
-	/// The source's restart and skip counters at the last frame, when it decodes, and when it
-	/// arrived.
+	/// The source's restart counter at the last frame, when it decodes, and when it arrived.
 	restart: u64,
-	skip: u64,
 	decode: Decode,
 	arrived: Instant,
 	/// The generation of the last frame.
@@ -874,12 +867,15 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 
 	/// Whether a frame moves its track off the clock: a restart, unless the track is crossing
 	/// one another track already opened a generation for and the frame lands on its clock, or
-	/// a frame held past [`Self::bound`] after a skip, or while a generation is acquired, or a
-	/// step in its timeline with no marker that the delay cannot absorb. The second is a track
-	/// reaching the new timeline without a marker of its own, which belongs to that generation,
-	/// not far ahead on the old clock.
+	/// a step in its timeline with no marker that the delay cannot absorb. A track reaching the
+	/// new timeline without a marker of its own makes such a step, and so does one whose skipped
+	/// groups held a marker the publisher shed: either belongs to a new generation, not far
+	/// ahead on the old clock.
 	///
-	/// An unmarked step is told apart from drift and queueing by size. Forward, a frame is held
+	/// An unmarked step is told apart from drift and queueing by size, not by a skip: after a
+	/// stall drains the queue, a frame that is merely less queued than the one the clock
+	/// anchored on is held past [`Self::bound`] too, and a new generation for it would cost the
+	/// output a discontinuity. Forward, a frame is held
 	/// past [`Self::bound`] and reached us more than a delay earlier against its decode time
 	/// than its track's last: no clock within [`MAX_DRIFT`] moves it that far in the time
 	/// between them, and frames reach us in the order they are sent, so neither a backlog
@@ -896,14 +892,13 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 		let restarted = track.restart != arrival.restart
 			&& (track.generation == clock.generation || !self.lands(key, deadline, arrival.arrived));
 		let held = deadline.is_some_and(|deadline| deadline > self.bound(key, arrival.arrived));
-		let leapt = (track.skip != arrival.skip || self.acquire.is_some()) && held;
 		let unmarked = !self.delay.is_zero() && track.generation == clock.generation;
 		let elapsed = arrival.decode.as_nanos() - track.decode.as_nanos();
 		let ahead = elapsed - since(track.arrived, arrival.arrived);
 		let drift = (elapsed.abs() as f64 * MAX_DRIFT) as i128;
 		let forward = held && ahead > self.delay.as_nanos() as i128 + drift;
 		let back = elapsed < 0 && deadline.is_none_or(|deadline| deadline < arrival.arrived);
-		restarted || leapt || (unmarked && (forward || back))
+		restarted || (unmarked && (forward || back))
 	}
 
 	/// Hold a frame for the generation being acquired, starting one if none is, and anchor it
@@ -1007,7 +1002,6 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			read_timer: None,
 			bytes: 0,
 			restart: arrival.restart,
-			skip: arrival.skip,
 			decode: arrival.decode,
 			arrived: arrival.arrived,
 			generation,
@@ -1016,7 +1010,6 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			started: false,
 		});
 		track.restart = arrival.restart;
-		track.skip = arrival.skip;
 		track.decode = arrival.decode;
 		track.arrived = arrival.arrived;
 		track.generation = generation;
@@ -1790,7 +1783,6 @@ mod tests {
 				read: now,
 				decode: ms(u64::from(key) * 100_000 + (now - start).as_millis() as u64).into(),
 				restart: 0,
-				skip: 0,
 				sync: true,
 				leading: false,
 				bytes: 0,
@@ -1924,7 +1916,6 @@ mod tests {
 			read: arrived,
 			decode: ms(decode).into(),
 			restart: 0,
-			skip: 0,
 			sync: true,
 			leading: false,
 			bytes: 0,
@@ -1934,11 +1925,7 @@ mod tests {
 
 	/// The same frame, read after its source restarted its timeline `restart` times.
 	fn after(restart: u64, arrival: Arrival<&'static str>) -> Arrival<&'static str> {
-		Arrival {
-			restart,
-			skip: restart,
-			..arrival
-		}
+		Arrival { restart, ..arrival }
 	}
 
 	/// Every frame due by now, in order, with its generation.
@@ -2373,19 +2360,15 @@ mod tests {
 		// Group 1 is skipped: frames from 100 ms on arrive after a 250 ms stall.
 		let stalled = start + Duration::from_millis(350);
 		tokio::time::advance(stalled - moq_clock::now()).await;
-		let skipped = |decode, item| Arrival {
-			skip: 1,
-			..arrival(stalled, decode, item)
-		};
-		assert_eq!(buffer.push(1, skipped(200, "a200")).unwrap(), Push::Late);
-		assert_eq!(buffer.push(1, skipped(300, "a300")).unwrap(), Push::Queued);
+		assert_eq!(buffer.push(1, arrival(stalled, 200, "a200")).unwrap(), Push::Late);
+		assert_eq!(buffer.push(1, arrival(stalled, 300, "a300")).unwrap(), Push::Queued);
 		tokio::time::advance(Duration::from_millis(100)).await;
 		assert_eq!(released(&mut buffer), [("a300", 0)]);
 	}
 
-	/// A skip after which a frame would be held more than a delay past everything queued
-	/// followed a timeline that leapt ahead, as when the skipped groups held a marker the
-	/// publisher shed, so it opens a generation.
+	/// A skip after which a frame is due more than a delay further ahead of its arrival than
+	/// its track's last followed a timeline that leapt ahead, as when the skipped groups held a
+	/// marker the publisher shed, so it opens a generation.
 	#[tokio::test(start_paused = true)]
 	async fn a_skip_that_leaps_ahead_opens_a_generation() {
 		let start = moq_clock::now();
@@ -2395,13 +2378,30 @@ mod tests {
 		assert_eq!(due(&mut buffer), ["a0"]);
 
 		let now = moq_clock::now();
-		let leapt = Arrival {
-			skip: 1,
-			..arrival(now, 5_000, "a5000")
-		};
-		assert_eq!(buffer.push(1, leapt).unwrap(), Push::Queued);
+		assert_eq!(buffer.push(1, arrival(now, 5_000, "a5000")).unwrap(), Push::Queued);
 		tokio::time::advance(DELAY).await;
 		assert_eq!(released(&mut buffer), [("a5000", 1)]);
+	}
+
+	/// A skip after which a frame arrives a little fresher than the frame the clock anchored on,
+	/// with nothing queued, keeps the clock: the timeline did not move, and a new generation
+	/// would cost the output a discontinuity.
+	#[tokio::test(start_paused = true)]
+	async fn a_fresher_frame_after_a_skip_keeps_the_clock() {
+		let start = moq_clock::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.expect([1]);
+		buffer.push(1, arrival(start, 0, "a0")).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert_eq!(released(&mut buffer), [("a0", 0)]);
+
+		// A second on, past a skipped group, the next frame is 20 ms less queued than the first.
+		let resume = start + Duration::from_secs(1);
+		tokio::time::advance(resume - moq_clock::now()).await;
+		assert_eq!(buffer.push(1, arrival(resume, 1_020, "a1020")).unwrap(), Push::Queued);
+		tokio::time::advance(Duration::from_secs(1)).await;
+		assert_eq!(released(&mut buffer), [("a1020", 0)]);
+		assert_eq!(buffer.dropped(), 0);
 	}
 
 	/// A track sent ahead of the others is held its lead past the delay. Once a skip of its own
@@ -2420,12 +2420,11 @@ mod tests {
 			// Track 2 is sent LEAD ahead, and skips a second of its own.
 			let decode = at + LEAD;
 			if !(8_000..9_000).contains(&decode) {
-				let skip = u64::from(decode >= 9_000);
-				let frame = Arrival {
-					skip,
-					..arrival(now, decode, "a")
-				};
-				assert_eq!(buffer.push(2, frame).unwrap(), Push::Queued, "at {at} ms");
+				assert_eq!(
+					buffer.push(2, arrival(now, decode, "a")).unwrap(),
+					Push::Queued,
+					"at {at} ms"
+				);
 			}
 			out.extend(released(&mut buffer));
 		}
@@ -2523,7 +2522,6 @@ mod tests {
 				read: arrived,
 				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap().into(),
 				restart: 0,
-				skip: 0,
 				sync: true,
 				leading: false,
 				bytes: 0,
@@ -2711,7 +2709,6 @@ mod tests {
 				read: arrived,
 				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap().into(),
 				restart: 0,
-				skip: 0,
 				sync: true,
 				leading: false,
 				bytes: 0,
@@ -2820,7 +2817,7 @@ mod tests {
 
 	/// Feed `secs` of 10 fps frames of `shape`'s tracks through its buffer from a source on our
 	/// clock, each sent as it decodes with a few ms of jitter that changes every steering step,
-	/// whose timeline steps by `step` seconds at `at` s with no restart or skip marker.
+	/// whose timeline steps by `step` seconds at `at` s with no restart marker.
 	async fn unmarked(shape: &Shape, at: f64, step: f64, secs: f64) -> Stepped {
 		// Where the timeline starts, so a step back stays on it.
 		const BASE: f64 = 20_000.0;
@@ -2851,7 +2848,6 @@ mod tests {
 					read: arrived,
 					decode: Timestamp::from_micros((decode * 1e6).round() as u64).unwrap().into(),
 					restart: 0,
-					skip: 0,
 					sync: true,
 					leading: false,
 					bytes: 0,
@@ -3050,17 +3046,16 @@ mod tests {
 			if replay {
 				buffer = buffer.replay();
 			}
-			let video = |decode, sync, skip, item| Arrival {
+			let video = |decode, sync, item| Arrival {
 				sync,
-				skip,
 				..arrival(moq_clock::now(), decode, item)
 			};
-			buffer.push(1, video(0, true, 0, "v0")).unwrap();
+			buffer.push(1, video(0, true, "v0")).unwrap();
 			tokio::time::advance(Duration::from_millis(40)).await;
-			buffer.push(1, video(40, false, 0, "v40")).unwrap();
+			buffer.push(1, video(40, false, "v40")).unwrap();
 			// The rest of the group never arrives: the source cuts it short.
 			tokio::time::advance(Duration::from_millis(80)).await;
-			buffer.push(1, video(120, true, 1, "v120")).unwrap();
+			buffer.push(1, video(120, true, "v120")).unwrap();
 			tokio::time::advance(2 * DELAY).await;
 			assert_eq!(due(&mut buffer), ["v0", "v40", "v120"], "replay {replay}");
 			assert_eq!((buffer.dropped(), buffer.trimmed()), (0, 0), "replay {replay}");

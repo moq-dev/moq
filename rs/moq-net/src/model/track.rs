@@ -13,9 +13,9 @@
 //!
 //! The track is closed with [Error] when all writers or readers are dropped.
 
-use crate::sync::Mutex;
 use crate::{Error, Result, StreamError, Timescale, Timestamp, coding};
 use crate::{broadcast, cache, group, stats};
+use std::sync::Mutex;
 
 use super::Datagram;
 use super::delivered::Delivered;
