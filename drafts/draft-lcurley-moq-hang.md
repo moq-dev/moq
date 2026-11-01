@@ -944,6 +944,7 @@ Audio publishers do not append per-group duration markers because the codec defi
 Data tracks retain empty payloads as data, without endpoint semantics.
 
 For example, h.264 with no `description` field would be annex.b encoded, while h.264 with a `description` field would be AVCC encoded.
+For AAC (`mp4a.40.*`), each nonempty codec payload MUST be one complete ADTS frame when `description` is absent; with an AudioSpecificConfig in `description`, it MUST be one raw AAC access unit without an ADTS header.
 For a text track, the remainder is the cue in the track's declared `format` (for example a `WEBVTT` segment).
 
 ## cmaf
@@ -961,6 +962,7 @@ A consumer MUST feed `init` to the decoder before the first frame.
 
 ## loc
 Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property block, carrying the timestamp among other properties, followed by the codec payload.
+The codec payload uses the same framing as {{legacy}}.
 
 For audio and video, consumers accept empty codec payload metadata with the same video-duration and audio-terminal-trimming meanings as the legacy container.
 Data tracks retain empty payloads as data.
@@ -1162,6 +1164,7 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Defined AAC payloads without a `description` as ADTS, and payloads with an AudioSpecificConfig as raw AAC.
 - A `broadcast` reference and an echo `path` are spelled like a path: one with an empty segment or a lone `\` refuses the catalog instead of collapsing.
 - Removed `catalog.json.z` and the data track `compression` field: compression is a track property the transport carries ({{compression}}), so each compressed track is one name, and the catalog, `stats` and `echo` snapshots, HLS record tracks, and JSON data tracks SHOULD be compressed.
 - Replaced the root `archive` section and its per-track timelines with an optional, per-rendition `hls` field on video and audio ({{hls}}). Each record is a segment's first `group` and `pts` in milliseconds, with an optional `duration` where zero marks a stop; frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone. Each rendition numbers its own segments, and an edge maps a rendition's record `n` to its segment `n`. The record track is named `<track>.hls` and is compressed ({{compression}}).

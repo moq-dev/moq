@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use kio::clock::Instant;
 
@@ -19,6 +20,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 
 use crate::egress::{EgressClock, EgressSource, Format, WriteRequest};
+use crate::rate::{self, Cap, Meter};
 use crate::{Error, Result, codec};
 
 /// str0m's outbound video buffer depth (packets), which also backs NACK resends.
@@ -26,6 +28,10 @@ use crate::{Error, Result, codec};
 /// large keyframe and the rest of the current group via NACK; see
 /// [`rtc_config_with_codecs`].
 const EGRESS_SEND_BUFFER_VIDEO: usize = 3000;
+
+/// How often a capped ingest repeats its REMB, as libwebrtc does, so a lost one costs
+/// at most this long, and an encoder that drifted up is pulled back.
+const REMB_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Receives `MediaData` events from str0m and dispatches to the right codec
 /// [`Bridge`](codec::Bridge). Used as the per-session sink in [`Session::run`]
@@ -103,6 +109,9 @@ pub struct Session {
 	/// Maps the shared MoQ presentation timeline to str0m's sender-report
 	/// wallclock. Unused by ingest sessions.
 	egress_clock: EgressClock,
+	/// The ingest's cap, metered and steered through REMB. `None` until
+	/// [`Session::with_rate`], so always for egress sessions.
+	rate: Option<IngestRate>,
 }
 
 impl Session {
@@ -117,6 +126,7 @@ impl Session {
 			catalog_end: None,
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
+			rate: None,
 		})
 	}
 
@@ -133,7 +143,23 @@ impl Session {
 			catalog_end: Some(catalog_end),
 			ingest_clock: IngestClock::default(),
 			egress_clock: EgressClock::default(),
+			rate: None,
 		})
+	}
+
+	/// Meter an ingest against `limit`'s cap, following its updates, and steer the
+	/// publisher under it with REMB on every video line that negotiated it.
+	pub(crate) fn with_rate(mut self, limit: &rate::Limit) -> Self {
+		let limit = limit.subscribe();
+		let cap = *limit.borrow();
+		self.rate = Some(IngestRate {
+			meter: Meter::new(cap, Instant::now()),
+			limit: Some(limit),
+			remb: Vec::new(),
+			next_remb: Instant::now(),
+			steered: cap.is_some(),
+		});
+		self
 	}
 
 	/// Open a locally offered media line after its answer has been applied.
@@ -168,6 +194,7 @@ impl Session {
 
 	async fn run_loop(&mut self) -> Result<()> {
 		loop {
+			let remb_at = self.rate.as_ref().and_then(IngestRate::remb_at);
 			tokio::select! {
 				// Egress writes get drained promptly; `Agent::next` is cancel safe.
 				biased;
@@ -198,6 +225,33 @@ impl Session {
 					crate::egress::dispatch(&mut self.agent.rtc_mut(), req, wallclock);
 				}
 
+				changed = async {
+					match self.rate.as_mut().and_then(|rate| rate.limit.as_mut()) {
+						Some(limit) => limit.changed().await.map(|()| *limit.borrow_and_update()),
+						None => std::future::pending().await,
+					}
+				} => {
+					let rate = self.rate.as_mut().expect("only a rated session watches its cap");
+					match changed {
+						Ok(cap) => {
+							tracing::debug!(?cap, "ingest cap updated");
+							rate.meter.set(cap, Instant::now());
+							rate.steered |= cap.is_some();
+							// REMB follows an update at once.
+							rate.next_remb = Instant::now();
+						}
+						// Every handle is gone, so the cap can no longer change: keep the last one.
+						Err(_) => rate.limit = None,
+					}
+				}
+
+				_ = async {
+					match remb_at {
+						Some(at) => kio::clock::sleep_until(at).await,
+						None => std::future::pending().await,
+					}
+				} => self.send_remb(),
+
 				event = self.agent.next() => match event {
 					Ok(moq_ice::Event::Rtc(event)) => self.handle_event(event)?,
 					// No STUN servers are configured, so there is nothing to trickle.
@@ -221,10 +275,15 @@ impl Session {
 				// us rebase the (random, per-track) RTP base and feed the sink in one
 				// block; egress sessions never get here so the clock stays untouched.
 				if let MediaRole::Ingest(sink) = &mut self.role {
+					let arrival = Instant::from_std(data.network_time);
+					if let Some(rate) = &mut self.rate
+						&& let Err(cap) = rate.meter.charge(data.data.len(), arrival, Instant::now())
+					{
+						tracing::warn!(cap = cap.rate.as_bps(), "ingest exceeded its cap plus burst; closing");
+						return Err(Error::RateLimited { cap: cap.rate });
+					}
 					let media_us = media_time_to_micros(&data.time);
-					let timestamp_us =
-						self.ingest_clock
-							.normalize(data.mid, Instant::from_std(data.network_time), media_us);
+					let timestamp_us = self.ingest_clock.normalize(data.mid, arrival, media_us);
 					sink.on_frame(
 						data.mid,
 						codec::Frame {
@@ -238,6 +297,11 @@ impl Session {
 				if matches!(&self.role, MediaRole::Ingest(_)) {
 					self.ingest_clock.observe(feedback.mid, feedback.sender_info);
 				}
+			}
+			Event::EgressBitrateEstimate(str0m::bwe::BweKind::Remb { estimate, mid }) => {
+				// The receiver's ceiling for what we send. Egress forwards the catalog's renditions
+				// rather than encoding, so there is no encoder to steer: only log it.
+				tracing::debug!(?mid, bps = estimate.as_u64(), "peer sent REMB");
 			}
 			Event::KeyframeRequest(req) => {
 				// PLI / FIR from the egress peer. For v1 we just log and
@@ -297,6 +361,13 @@ impl Session {
 					None
 				};
 				sink.on_track(mid, kind, codec, audio_params)?;
+				// REMB only where the publisher negotiated it; str0m offers it on video alone.
+				if let Some(rate) = &mut self.rate
+					&& negotiated.iter().any(|params| params.fb_remb())
+				{
+					rate.remb.push(mid);
+					rate.next_remb = Instant::now();
+				}
 			}
 			// Any negotiated codec may be sent, so the catalog picks among all of them.
 			MediaRole::Egress(source) => {
@@ -312,6 +383,56 @@ impl Session {
 			}
 		}
 		Ok(())
+	}
+
+	/// Ask the publisher for at most the steered rate on every video line that negotiated
+	/// REMB, and schedule the next repeat.
+	fn send_remb(&mut self) {
+		let Some(rate) = &mut self.rate else {
+			return;
+		};
+		rate.next_remb = Instant::now() + REMB_INTERVAL;
+		// A REMB ceiling holds until the next one replaces it, so a lifted cap keeps sending
+		// the largest REMB can carry rather than going quiet and leaving the old ceiling.
+		let bitrate = match rate.meter.cap() {
+			Some(cap) => str0m::bwe::Bitrate::bps(cap.steer().as_bps()),
+			None => str0m::bwe::Bitrate::MAX,
+		};
+		let mut rtc = self.agent.rtc_mut();
+		for &mid in &rate.remb {
+			// One REMB per receive stream, simulcast layers included; a stream that has yet to
+			// see its first packet gets the next one.
+			let rids = match rtc.media(mid).map(|media| media.rids_rx()) {
+				Some(str0m::media::Rids::Specific(rids)) => rids.iter().copied().map(Some).collect(),
+				_ => vec![None],
+			};
+			let mut api = rtc.direct_api();
+			for rid in rids {
+				if let Some(stream) = api.stream_rx_by_mid(mid, rid) {
+					stream.request_remb(bitrate);
+				}
+			}
+		}
+	}
+}
+
+/// An ingest's cap: the meter that closes it past the cap plus burst, and the REMB that
+/// steers the publisher under it.
+struct IngestRate {
+	meter: Meter,
+	/// Live cap updates; `None` once every handle is dropped.
+	limit: Option<tokio::sync::watch::Receiver<Option<Cap>>>,
+	/// Video lines that negotiated REMB.
+	remb: Vec<str0m::media::Mid>,
+	next_remb: Instant,
+	/// Whether a cap was ever set, so REMB has a ceiling to keep current.
+	steered: bool,
+}
+
+impl IngestRate {
+	/// When the next REMB is due, once a cap was set and there is a line to send it on.
+	fn remb_at(&self) -> Option<Instant> {
+		(self.steered && !self.remb.is_empty()).then_some(self.next_remb)
 	}
 }
 

@@ -194,6 +194,7 @@ cleanup() {
     fi
     if [[ -n $WORKTREE ]]; then
         git -C "$ROOT" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || true
+        rmdir "$WORKTREE" 2>/dev/null || true
     fi
     # Close both pipe writers before waiting for the owned log copiers.
     if [[ -n $STDOUT_PID ]]; then
@@ -221,6 +222,13 @@ cp -R "$ROOT/bench/workloads" "$RUN/workloads"
 cp -R "$ROOT/bench" "$RUN/harness"
 
 export CRITERION_HOME=$RUN/criterion
+
+checkout_base() {
+    # Cargo merges every ancestor's .cargo/config.toml. A nested worktree would
+    # inherit this checkout's settings instead of measuring the base in isolation.
+    WORKTREE=$(mktemp -d "${TMPDIR:-/tmp}/moq-bench-base.XXXXXX")
+    git worktree add --detach "$WORKTREE" "$1" >/dev/null
+}
 
 # Shorter than Criterion's defaults, but still enough samples for confidence
 # intervals and outlier detection. Comparisons run both revisions on one host.
@@ -386,8 +394,7 @@ measure_criterion() {
     fi
     : >"$base"
     if [[ -n $BASE ]]; then
-        WORKTREE=$RUN/base
-        git worktree add --detach "$WORKTREE" "$BASE" >/dev/null
+        checkout_base "$BASE"
         mkdir -p "$RUN/base-context"
         (cd "$WORKTREE" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE" comparison-base)
         printf 'Criterion paired with base %s\n' "$BASE"
@@ -840,8 +847,7 @@ run_profiles() {
     generate_certificate
 
     if [[ -n $BASE ]]; then
-        WORKTREE=$RUN/base
-        git worktree add --detach "$WORKTREE" "$BASE" >/dev/null
+        checkout_base "$BASE"
         mkdir -p "$RUN/base-context"
         (cd "$WORKTREE" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE" --profile)
     fi
@@ -970,8 +976,7 @@ elif [[ $MODE == --shard ]]; then
     exit 0
 elif [[ -n $BASE ]]; then
     BASE_COMMIT=$(git rev-parse --verify "$BASE^{commit}")
-    WORKTREE=$RUN/base
-    git worktree add --detach "$WORKTREE" "$BASE_COMMIT" >/dev/null
+    checkout_base "$BASE_COMMIT"
     mkdir -p "$RUN/base-context"
     (
         cd "$WORKTREE"

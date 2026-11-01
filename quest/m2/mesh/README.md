@@ -38,7 +38,9 @@ Decided 2026-10-25 with the maintainer (planning interview):
   reaching an ID is subscribing there. There is no separate directory.
 - The token is the binding: enrollment proves the device key, then the
   coordinator issues a grant to publish `mesh/<id>/**` and subscribe
-  `mesh/**`. Relays need no new check. Membership is the coordinator's token
+  `mesh/**`, plus publish on `mesh/*/*/.dial/<id>` so the node can dial
+  another's [socket](/quest/m2/socket/README.md) under its own id (amended
+  2026-11-01). Relays need no new check. Membership is the coordinator's token
   only; a Tailnet-Lock analog was declined.
 - Protection is per broadcast, with levels that nest: identity (the token
   only), authentication (per-frame Ed25519 signatures, the default), and later

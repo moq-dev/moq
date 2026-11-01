@@ -71,7 +71,7 @@ async fn takeover(version: &str, case: Case) {
 	let deadline = kio::clock::now() + TIMEOUT;
 	let current = loop {
 		let current = server.broadcaster("live").await.expect("announced");
-		if !std::sync::Arc::ptr_eq(&current, &replaced) {
+		if !current.is_clone(&replaced) {
 			break current;
 		}
 		assert!(kio::clock::now() < deadline, "the new instance never took over");
