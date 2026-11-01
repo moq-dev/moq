@@ -952,6 +952,10 @@ impl Auth {
 	/// ([`moq_tokio::server::Request::within`]), and dropping the future withdraws
 	/// the admission from the decider.
 	///
+	/// A path naming a `.` or `..` segment is refused before the decider sees it. A
+	/// URL transport resolves those away, but an in-band SETUP Path arrives verbatim,
+	/// and `/tenant-a/../tenant-b` would reach the decider spelled under `tenant-a`.
+	///
 	/// A grant that caps a bitrate is refused: nothing here holds the session to it.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
 		self.admit_paced(request, None).await
@@ -959,6 +963,9 @@ impl Auth {
 
 	/// [Admit](Self::admit) a session whose connection `pacer` holds to a capped grant.
 	pub(crate) async fn admit_paced(&self, request: Request, pacer: Option<Pacer>) -> Result<Lease, Error> {
+		if navigates(&request.path) {
+			return Err(Error::Request(format!("path {:?} has a dot segment", request.path)));
+		}
 		// Build the token from the grant the admission checked: re-reading it could
 		// pick up an update that skipped the check.
 		let (consumer, grant) = self.decide(request.clone()).await?;
@@ -991,6 +998,12 @@ impl Auth {
 	pub(crate) fn admit_fixed(&self, path: &str, grant: Grant) -> Lease {
 		Lease::new(path, lease::Consumer::fixed(grant)).expect("the relay's own grant fits")
 	}
+}
+
+/// Whether `path` has a segment URL resolution reads as `.` or `..`, percent-encoded or not.
+fn navigates(path: &str) -> bool {
+	path.split('/')
+		.any(|segment| matches!(segment.to_ascii_lowercase().replace("%2e", ".").as_str(), "." | ".."))
 }
 
 /// A decider's pending answer to one [`Admission`].
@@ -1587,6 +1600,26 @@ mod tests {
 			token.label.is_empty(),
 			"an absent label is the empty label, not the root"
 		);
+	}
+
+	/// A dot segment never reaches the decider, however it is spelled; a name that
+	/// only contains dots is an ordinary segment.
+	#[tokio::test]
+	async fn admit_refuses_dot_segments() {
+		let auth = config(None, &["**"])
+			.init("relay-1", &moq_tokio::tls::Connect::default(), false)
+			.unwrap();
+		for path in ["/tenant-a/../tenant-b", "/..", "/a/.", "/a/%2e%2E/b", "/a/.%2e", "/%2E"] {
+			let Err(err) = auth.admit(auth.request(moq_auth::Transport::Quic, path)).await else {
+				panic!("{path} was admitted");
+			};
+			assert!(matches!(err, Error::Request(_)), "{path}: {err}");
+		}
+		for path in ["/a/...", "/.hidden", "/a/..b"] {
+			auth.admit(auth.request(moq_auth::Transport::Quic, path))
+				.await
+				.unwrap_or_else(|err| panic!("{path}: {err}"));
+		}
 	}
 
 	#[test]
