@@ -29,6 +29,11 @@
 //! `track_sparse_poll` repeats a parked read without changing the feed, so revisiting
 //! deferred gaps on an otherwise unchanged poll shows up independently of delivery.
 //!
+//! `track_idle_poll` repeats every parked read over readers sharing one track, in arrival
+//! and sequence order, with nothing new: a repeated read parks again without walking the
+//! read path, so each costs a small constant, and a slope over the readers, or a jump in
+//! that constant, means the early exit stopped applying.
+//!
 //! `track_sparse_expire` opens one new gap while one old gap expires, so a full expiry
 //! rescan on each arrival shows up as a slope over the gaps still within budget.
 //!
@@ -1314,6 +1319,73 @@ fn bench_sparse_poll(c: &mut Criterion) {
 	group.finish();
 }
 
+/// Readers parked on one track with nothing new, each having taken the one cached group.
+struct Idle {
+	_broadcast: broadcast::Producer,
+	_track: track::Producer,
+	_open: group::Producer,
+	recv: Vec<track::Subscriber>,
+	next: Vec<track::Ordered>,
+	waiter: kio::Waiter,
+}
+
+impl Idle {
+	fn new(readers: usize, ordered: bool) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		let mut open = track.append_group().unwrap();
+		open.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")).unwrap();
+		let waiter = kio::Waiter::noop();
+		let (mut recv, mut next) = (Vec::new(), Vec::new());
+		for _ in 0..readers {
+			let reader = track.subscribe(track::Subscription::default().with_max_delay(AGED_BUDGET));
+			if ordered {
+				let mut reader = reader.ordered();
+				assert!(matches!(reader.poll_next_group(&waiter), Poll::Ready(Ok(Some(_)))));
+				next.push(reader);
+			} else {
+				let mut reader = reader;
+				assert!(matches!(reader.poll_recv_group(&waiter), Poll::Ready(Ok(Some(_)))));
+				recv.push(reader);
+			}
+		}
+		let mut idle = Self {
+			_broadcast: broadcast,
+			_track: track,
+			_open: open,
+			recv,
+			next,
+			waiter,
+		};
+		// The first park walks the read path; only the repeats are measured.
+		idle.poll();
+		idle
+	}
+
+	fn poll(&mut self) {
+		for reader in &mut self.recv {
+			assert!(black_box(reader.poll_recv_group(&self.waiter)).is_pending());
+		}
+		for reader in &mut self.next {
+			assert!(black_box(reader.poll_next_group(&self.waiter)).is_pending());
+		}
+	}
+}
+
+fn bench_idle_poll(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_idle_poll");
+	for (name, ordered) in [("recv", false), ("next", true)] {
+		for readers in FANOUT {
+			group.throughput(Throughput::Elements(readers as u64));
+			group.bench_function(BenchmarkId::new(name, readers), |b| {
+				let mut idle = Idle::new(readers, ordered);
+				b.iter(|| idle.poll());
+			});
+		}
+	}
+	group.finish();
+}
+
 /// A sparse feed that opens one gap per millisecond, keeping `gaps` within its budget.
 struct Expiring {
 	sparse: Sparse,
@@ -1963,6 +2035,7 @@ criterion_group!(
 	bench_parked_read,
 	bench_sparse_read,
 	bench_sparse_poll,
+	bench_idle_poll,
 	bench_sparse_expire,
 	bench_gap_flush,
 	bench_wall,

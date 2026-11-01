@@ -8907,6 +8907,34 @@ mod test {
 		}
 	}
 
+	/// A read that found nothing parks again at once until something it parked on fires,
+	/// but parks anew for another task, which the next group then wakes instead.
+	#[test]
+	fn an_idle_read_parks_for_the_task_polling_it() {
+		for ordered in [false, true] {
+			let producer = track_producer("test", Info::default());
+			let mut first = framed(&producer, 0, 1);
+			first.finish().unwrap();
+			let mut reader = producer.subscribe(replay());
+			let mut read = |waiter: &kio::Waiter| match ordered {
+				true => reader.poll_group(true, waiter),
+				false => reader.poll_group(false, waiter),
+			};
+			let (flag, waiter) = Flag::waiter();
+			assert!(matches!(read(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(read(&waiter).is_pending());
+			assert!(read(&waiter).is_pending(), "nothing fired, so it parks again");
+			assert!(!flag.take());
+
+			let (other, moved) = Flag::waiter();
+			assert!(read(&moved).is_pending());
+			let mut next = framed(&producer, 1, 1);
+			next.finish().unwrap();
+			assert!(other.take(), "the next group wakes the task that polled last");
+			assert!(matches!(read(&moved), Poll::Ready(Ok(Some(_)))));
+		}
+	}
+
 	/// Write group `sequence` with `frames` frames, left open.
 	fn framed(producer: &Producer, sequence: u64, frames: usize) -> group::Producer {
 		let mut group = producer.create_group(group::Info { sequence }).unwrap();
