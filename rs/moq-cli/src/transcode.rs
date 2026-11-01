@@ -290,7 +290,7 @@ mod tests {
 		let first = next(&mut derivatives).await;
 
 		catalog.finish().unwrap();
-		moq_clock::timeout(std::time::Duration::from_secs(1), first.closed())
+		kio::clock::timeout(std::time::Duration::from_secs(1), first.closed())
 			.await
 			.expect("the ladder outlived its source's end");
 		assert!(!task.is_finished(), "a clean end stopped following");
@@ -313,7 +313,7 @@ mod tests {
 				}
 			}
 		};
-		moq_clock::timeout(std::time::Duration::from_secs(1), start)
+		kio::clock::timeout(std::time::Duration::from_secs(1), start)
 			.await
 			.expect("no derivative instance was announced")
 	}

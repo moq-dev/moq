@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use anyhow::Context;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use serde::{Deserialize, Serialize};
 use stun_types::attribute::XorMappedAddress;
 use stun_types::message::{BINDING, Message, MessageClass, MessageHeader, MessageWriteMutSlice};
@@ -454,7 +454,7 @@ mod tests {
 		let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		client.send_to(&request(), addr).await.unwrap();
 		let mut output = [0; 44];
-		let (len, sender) = moq_clock::timeout(Duration::from_secs(5), client.recv_from(&mut output))
+		let (len, sender) = kio::clock::timeout(Duration::from_secs(5), client.recv_from(&mut output))
 			.await
 			.unwrap()
 			.unwrap();

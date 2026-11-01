@@ -19,7 +19,10 @@ import type { Subscriber as TrackSubscriber } from "../../js/net/src/track.ts";
 
 // Stdout is the response-byte channel back to Rust.
 console.debug = console.error;
-const input: { version: string; started: boolean; clean: boolean; responses: number[] } = JSON.parse(process.argv[2]);
+// `owed` ends the track owing group 0 and kills the session before it arrives.
+const input: { version: string; started?: boolean; clean?: boolean; owed?: boolean; responses: number[] } = JSON.parse(
+	process.argv[2],
+);
 const pair = createMockTransportPair(input.version);
 const path = Path.from("room");
 const lite: Record<string, LiteVersion> = {
@@ -39,8 +42,10 @@ const output = new Writer(
 );
 let reader: TrackSubscriber;
 let peer: Stream | undefined;
+let liteSubscriber: LiteSubscriber | undefined;
 if (version !== undefined) {
 	const subscriber = new LiteSubscriber(pair.client, version, randomHop());
+	liteSubscriber = subscriber;
 	reader = subscriber.consume(path).track("video").subscribe();
 	const info = await Stream.accept(pair.server, version);
 	assert(info);
@@ -52,8 +57,10 @@ if (version !== undefined) {
 	assert(peer);
 	assert.equal(await peer.reader.u53(), StreamId.Subscribe);
 	await Subscribe.decode(peer.reader, version);
-	if (input.started) await encodeSubscribeResponse(output, { start: new SubscribeStart([0]) }, version);
-	if (input.clean) await encodeSubscribeResponse(output, { end: new SubscribeEnd(0) }, version);
+	if (input.started || input.owed) await encodeSubscribeResponse(output, { start: new SubscribeStart([0]) }, version);
+	if (input.clean || input.owed) {
+		await encodeSubscribeResponse(output, { end: new SubscribeEnd(input.owed ? 1 : 0) }, version);
+	}
 } else {
 	assert.equal(input.version, "moqt-18");
 	const version = IetfVersion.DRAFT_18;
@@ -73,13 +80,23 @@ if (version !== undefined) {
 // These bytes came from Rust's encoder; only the omitted end message is malformed.
 if (input.responses.length) await peer.writer.write(Uint8Array.from(input.responses));
 await peer.writer.close();
-const closed = await reader.closed;
-if (input.clean) {
-	assert.equal(closed, null);
-	assert.equal(await reader.recvGroup(), undefined);
+if (input.owed) {
+	assert(liteSubscriber);
+	// Once the responses are read to the FIN, the session dies with group 0 still owed.
+	await liteSubscriber.drain();
+	const died = new Error("session died");
+	liteSubscriber.close(died);
+	assert.equal(await reader.closed, died);
+	await assert.rejects(reader.recvGroup(), died);
 } else {
-	assert(closed instanceof ProtocolViolation);
-	await assert.rejects(reader.recvGroup(), ProtocolViolation);
+	const closed = await reader.closed;
+	if (input.clean) {
+		assert.equal(closed, null);
+		assert.equal(await reader.recvGroup(), undefined);
+	} else {
+		assert(closed instanceof ProtocolViolation);
+		await assert.rejects(reader.recvGroup(), ProtocolViolation);
+	}
 }
 // Rust feeds the JS-encoded bytes into its own subscriber, followed by FIN.
 console.log(JSON.stringify(bytes));
