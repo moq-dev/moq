@@ -57,10 +57,14 @@ profile shows no pool contention.
 
 #3122's per-turn clock read landed in
 [#5926](https://github.com/moq-dev/moq/pull/5926): the io_uring worker is a
-`moq-clock` backend that samples the clock once per turn, cutting
-`clock_gettime` from 44.7 to 1.05 calls per turn. `perf` was unavailable
-there, so [Profile the io_uring clock read](/quest/m2/perf/uring-clock-profile.md)
-owns the `[vdso]` share and relay CPU measurement.
+`kio::clock` backend that samples the clock once per turn, cutting
+`clock_gettime` from 44.7 to 1.05 calls per turn. A later `perf` profile
+([#7505](https://github.com/moq-dev/moq/pull/7505)) put the io_uring relay's
+`[vdso]` cycle share at 0.5% before #5926 and 0.0 to 0.2% after, below the
+tokio workers' 0.2 to 0.4%. #5926 also cut chat's relay instructions per
+delivered frame by about 5%; video's 1.5% drop was within noise. The remaining
+`[vdso]` samples come mostly from the per-turn read and `moq_net`
+`Timestamp::from(Instant)`.
 
 Decided 2026-10-14: kio channel contention ranks first. Its 215% lock wait on
 the default tokio runtime is the largest measured cost, and the lock-wait
@@ -88,10 +92,10 @@ revisions on the same host and worker count, and profiles with
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
 - [Streaming frame read owners](/quest/m2/perf/frame-read-owners.md) - readers of a frame still arriving share one byte owner per publication instead of allocating one each per read
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux
-- [Profile the io_uring clock read](/quest/m2/perf/uring-clock-profile.md) - a `perf` profile shows whether #5926's per-turn clock read cut the io_uring relay's `[vdso]` share and CPU
 - [io_uring buffer pool memory](/quest/m2/perf/uring-pool-memory.md) - measure reserved versus resident pool memory before any shrink policy
 - [An idle export poll is cheap](/quest/m2/perf/export-idle-poll.md) - an export poll nothing woke skips the track fill and catalog work it repeats today
 - [Mesh session cost](/quest/m2/perf/mesh-session-cost.md) - moq-net's per-session announce, route sync, and scope work drops, swept over sessions and announces
+- [Adapter reads reuse their waker](/quest/m2/perf/adapter-waker-alloc.md) - a measured verdict on the per-read waker allocation moq-tokio and moq-uring reads pay since #7042, fixed if real
 - [Lite request allocations](/quest/m2/perf/lite-request-allocs.md) - `Path::concat` allocates once and the lite request handler keeps one track-name copy
 - [Coverage before START](/quest/m2/perf/covered-before-start.md) - the lite-07 publisher's coverage check costs O(1) per wake before SUBSCRIBE_START
 - [io_uring demux churn](/quest/m2/perf/uring-demux-churn.md) - the demux snapshots stats and builds its fed list once per completion, not per datagram

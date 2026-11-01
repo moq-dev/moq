@@ -20,7 +20,7 @@ import { Manual, type Micro, Milli, Nano, type Second } from "@moq/clock";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import { type Group, Time, Track } from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Derived, Effect, Signal } from "@moq/signals";
 import { type Arrival as Diagnostic, gap } from "../arrivals";
 import { type Delay, Sync } from "../sync";
 import { Backpressure } from "./buffer";
@@ -134,7 +134,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 	const track = new Track.Producer("audio");
 	const consumer = new Container.Consumer(track.subscribe({ maxDelay: WIRE_MAX_DELAY }), {
 		format: new Container.Legacy.Format("audio"),
-		maxDelay: sync.out.maxDelay,
+		delay: new Derived([sync.out.delay, sync.out.maxDelay], (min, max) => ({ min, max })),
 	});
 
 	// Match the decoder: a codec constant until a delivered packet states its own duration.

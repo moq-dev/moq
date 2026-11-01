@@ -15,14 +15,13 @@
 //! rendition numbers its own segments, so a number means the same on every edge and reload of
 //! that rendition, but nothing across renditions: players match renditions by timestamp.
 
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::task::{Poll, ready};
 use std::time::Duration;
 
 use bytes::Bytes;
-use sha2::{Digest, Sha256};
 
 use super::Rendition;
 use crate::Result;
@@ -112,13 +111,13 @@ pub(crate) fn evicts(window: Duration, len: usize, rest: Duration) -> bool {
 /// separator. A reconfigured rendition keeps its record track but muxes it differently, so its
 /// segments get new URLs rather than new bytes under the old ones.
 pub(crate) fn tag(track: &str, config: &[u8]) -> String {
-	let hash = Sha256::new()
-		.chain_update(track)
-		.chain_update([0])
-		.chain_update(config)
-		.finalize();
+	let mut hash = rind::digest::Context::new(&rind::digest::SHA256);
+	hash.update(track.as_bytes());
+	hash.update(&[0]);
+	hash.update(config);
+	let hash = hash.finish();
 	// 32 bits: the tag only has to tell apart the configs one rendition name ever carries.
-	hash[..4].iter().map(|b| format!("{b:02x}")).collect()
+	hash.as_ref()[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// One playlist segment: its number, timing, and the groups it holds.
@@ -825,6 +824,8 @@ mod tests {
 		// The separator keeps a name's tail from passing for a config's head.
 		assert_ne!(tag("video.hls", b"x"), tag("video.hlsx", b""));
 		assert_eq!(tag("video.hls", b"").len(), 8);
+		// Edges on other releases derive the same URLs: the first 4 bytes of SHA-256("video.hls\0a").
+		assert_eq!(tag("video.hls", b"a"), "93317179");
 		assert!(tag("a.b/c", b"").chars().all(|c| c.is_ascii_hexdigit()));
 	}
 }

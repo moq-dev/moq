@@ -26,11 +26,11 @@ Pass a received `Packet::dst_ip()` as `src_ip` to answer from the address the pe
 moq-net dropped `connect_lite`, `accept_lite`, and `accept_request_lite`, and every session now needs a `Send` transport.
 Wrap the worker's session as `transport::Local::new(transport::Session::new(conn, address))` and call `connect`, `accept`, or `accept_request`.
 
-### Timers run on moq-clock
+### Timers run on `kio::clock`
 
-The worker is a moq-clock backend, so its deadlines are `moq_clock::Instant`s instead of `std::time::Instant`s.
-`Timer::set` takes an `Option<moq_clock::Instant>`, and `quic::handshake::Info::deadline` is one.
-Read the worker's time with `moq_clock::now()` inside it.
+The worker is a `kio::clock` backend, so its deadlines are `kio::clock::Instant`s instead of `std::time::Instant`s.
+`Timer::set` takes an `Option<kio::clock::Instant>`, and `quic::handshake::Info::deadline` is one.
+Read the worker's time with `kio::clock::now()` inside it.
 
 ### Datagrams take `SendOptions` (#5770, #5872)
 

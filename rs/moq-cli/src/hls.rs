@@ -272,7 +272,7 @@ pub async fn export(origin: moq_net::origin::Consumer, args: ExportArgs, name: S
 
 	// Serving and recording share one server, which follows the publisher instances: a recording
 	// ends at what its instance listed once another takes the broadcast over.
-	let server = moq_hls::Server::new(scoped.clone(), config);
+	let server = moq_hls::Server::new(scoped.clone(), config)?;
 
 	let tls = args.tls.into_config()?;
 	let listen = match (args.listen, &args.output) {
@@ -468,7 +468,7 @@ mod test {
 		};
 		let origin = moq_tokio::origin::spawn();
 		let exporting = export(origin.consume(), args, "live".to_string());
-		let result = moq_clock::timeout(std::time::Duration::from_secs(1), exporting).await;
+		let result = kio::clock::timeout(std::time::Duration::from_secs(1), exporting).await;
 		assert!(result.is_err(), "the recording gave up: {result:?}");
 	}
 

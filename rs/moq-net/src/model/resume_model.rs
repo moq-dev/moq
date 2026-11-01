@@ -197,7 +197,7 @@ fn case() -> impl Strategy<Value = Case> {
 struct Copy {
 	track: track::Producer,
 	/// Answers the front's requests for the route until the route goes.
-	serving: moq_clock::sim::JoinHandle<()>,
+	serving: kio::clock::sim::JoinHandle<()>,
 	_broadcast: broadcast::Producer,
 	/// Fetches of groups the copy lacks, which the route forwards to the publisher.
 	fills: track::Requests,
@@ -338,7 +338,7 @@ impl Model {
 			..Default::default()
 		};
 		let (origin, driver) = Producer::new(origin);
-		moq_clock::sim::spawn(crate::time::run(driver));
+		kio::clock::sim::spawn(crate::time::run(driver));
 		Self {
 			consumer: origin.consume(),
 			origin,
@@ -404,9 +404,9 @@ impl Model {
 				instance.given_up.insert(group);
 			}
 			Op::End { epoch, slot } => self.end(epoch, slot),
-			Op::Advance { ms } => moq_clock::sim::advance(Duration::from_millis(ms)).await,
+			Op::Advance { ms } => kio::clock::sim::advance(Duration::from_millis(ms)).await,
 			Op::Expire => {
-				moq_clock::sim::advance(Duration::from_secs(60)).await;
+				kio::clock::sim::advance(Duration::from_secs(60)).await;
 				for reader in self.readers.iter_mut().flatten() {
 					reader.floor = self.instances[reader.instance].newest();
 				}
@@ -457,7 +457,7 @@ impl Model {
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
 		let upstream = broadcast.consume();
-		let serving = moq_clock::sim::spawn(async move {
+		let serving = kio::clock::sim::spawn(async move {
 			while let Ok(request) = kio::wait(|waiter| requests.poll_requested_broadcast(waiter)).await {
 				request.accept(&upstream);
 			}
@@ -769,7 +769,7 @@ impl Model {
 	async fn settle(&mut self) -> Result<(), TestCaseError> {
 		let mut quiet = 0;
 		for _ in 0..10_000 {
-			moq_clock::sim::yield_now().await;
+			kio::clock::sim::yield_now().await;
 			let mut woken = self.fill();
 			for index in 0..READERS {
 				if self.readers[index]
@@ -905,7 +905,7 @@ impl Model {
 }
 
 fn run(case: &Case) -> Result<(), TestCaseError> {
-	moq_clock::sim::run(async {
+	kio::clock::sim::run(async {
 		let mut model = Model::new();
 		model.up(0, 0);
 		for op in &case.ops {
@@ -935,7 +935,7 @@ fn readers_match_the_logical_track() {
 /// An Up or Down that leaves the winning route serving still delivers a group only a standby route has.
 #[test]
 fn unchanged_routes_keep_groups_owed() {
-	moq_clock::sim::run(async {
+	kio::clock::sim::run(async {
 		let mut model = Model::new();
 		model.up(0, 0);
 		let ops = [
