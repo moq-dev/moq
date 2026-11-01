@@ -5727,10 +5727,30 @@ fn without_runtime() {
 
 #[tokio::test]
 async fn server_client_roundtrip() {
+	server_client_run_end("moq-lite-07-wip").await;
+}
+
+#[tokio::test]
+async fn server_client_run_end_draft18() {
+	server_client_run_end("moq-transport-18").await;
+}
+
+#[tokio::test]
+async fn server_client_run_end_draft20() {
+	server_client_run_end("moq-transport-20").await;
+}
+
+#[tokio::test]
+async fn server_client_run_end_draft22() {
+	server_client_run_end("moq-transport-22").await;
+}
+
+/// Finishing content and withdrawing a run are distinct from aborting an open track.
+async fn server_client_run_end(version: &str) {
 	// Server side: bind, set a publish origin, accept incoming sessions.
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let server = MoqServer::new(MoqServerConfig {
-		versions: vec!["moq-lite-07-wip".into()],
+		versions: vec![version.into()],
 		bind: Some("127.0.0.1:0".into()),
 		tls: localhost_tls(),
 		publish: Some(server_origin.clone()),
@@ -5761,7 +5781,7 @@ async fn server_client_roundtrip() {
 	// Client side: connect, subscribe via a consume origin.
 	let client_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let client = MoqClient::new(MoqClientConfig {
-		versions: vec!["moq-lite-07-wip".into()],
+		versions: vec![version.into()],
 		tls: insecure_tls(),
 		bind: Some("127.0.0.1:0".into()),
 		consume: Some(client_origin.clone()),
@@ -5797,6 +5817,20 @@ async fn server_client_roundtrip() {
 
 	// Subscribe to the audio track and verify a frame round-trips.
 	let bc = await_announced(&consumer, "hello").await;
+	let unfinished = broadcast
+		.publish_track("unfinished".into(), Some(timed_info()))
+		.unwrap();
+	let unfinished_consumer = bc.subscribe_track("unfinished".into(), None).await.unwrap();
+	unfinished.write_frame(group_frame(b"still live")).unwrap();
+	assert_eq!(
+		moq_clock::timeout(TIMEOUT, unfinished_consumer.read_frame())
+			.await
+			.expect("unfinished track read timed out")
+			.unwrap()
+			.unwrap()
+			.payload,
+		b"still live"
+	);
 	let catalog_consumer = MoqMediaCatalogConsumer::subscribe(&bc).await.unwrap();
 	let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
@@ -5833,10 +5867,35 @@ async fn server_client_roundtrip() {
 	assert_eq!(frame.payload, payload);
 	assert_eq!(frame.timestamp_us, 1_000_000);
 
-	// Clean up. Exercise `shutdown()` on the client side and the underlying
-	// `cancel(code)` on the server side, so both shutdown paths run.
 	media.finish().unwrap();
+	assert!(
+		moq_clock::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
+			.await
+			.expect("media end timed out")
+			.unwrap()
+			.is_none(),
+		"{version}: finished media did not end cleanly"
+	);
 	broadcast.close().unwrap();
+	assert!(
+		moq_clock::timeout(TIMEOUT, unfinished_consumer.read_frame())
+			.await
+			.expect("unfinished track end timed out")
+			.is_err(),
+		"{version}: withdrawal falsely declared the unfinished track complete"
+	);
+	while moq_clock::timeout(TIMEOUT, catalog_consumer.next())
+		.await
+		.expect("catalog end timed out")
+		.unwrap()
+		.is_some()
+	{}
+	moq_clock::timeout(TIMEOUT, bc.closed())
+		.await
+		.expect("broadcast end timed out")
+		.unwrap();
+
+	// Exercise both shutdown paths after content ended with the session still open.
 	cs.shutdown();
 	cs.closed().await.unwrap();
 	server_session.cancel(0);
