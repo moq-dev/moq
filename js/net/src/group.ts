@@ -406,8 +406,9 @@ export class Producer {
 		hooks.overRefresh = (group, ratio) => {
 			const state = group.#state;
 			if (state.offset !== 0) return false;
-			if (state.start > 0) return true;
 			const first = state.frames.peek().first;
+			// A shed front, whole frames or the first frame's head, cannot be replayed.
+			if (state.start > 0 || headShed(first)) return true;
 			if (first === undefined) return false;
 			const head = payloadBytes(first);
 			const bytes = state.flate?.stored ?? state.cacheBytes - state.frames.peek().length * FRAME_BYTES;
