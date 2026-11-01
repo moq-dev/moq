@@ -349,7 +349,9 @@ mod tests {
 		let (_catalog, _registration, _track, mut media) =
 			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
 
-		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
+		let app = Server::new(origin.consume(), crate::export::Config::default())
+			.unwrap()
+			.router();
 		assert_eq!(status(&app, "/live/master.m3u8").await, StatusCode::NOT_FOUND);
 
 		write_three_gops(&mut media);
@@ -368,7 +370,9 @@ mod tests {
 			publish_video(&mut broadcast.broadcast().clone(), inline, timed());
 		write_three_gops(&mut media);
 
-		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
+		let app = Server::new(origin.consume(), crate::export::Config::default())
+			.unwrap()
+			.router();
 		let response = oneshot(app, "/live/manifest.mpd").await;
 		assert_eq!(response.status(), StatusCode::OK);
 		let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -418,7 +422,7 @@ mod tests {
 				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
 			)
 			.unwrap();
-		let app = Server::new(restricted, Default::default()).router();
+		let app = Server::new(restricted, Default::default()).unwrap().router();
 		let start = tokio::time::Instant::now();
 		let response = oneshot(app, "/room/live/manifest.mpd").await;
 		assert!(start.elapsed() < READY_TIMEOUT, "waited {:?}", start.elapsed());
@@ -441,7 +445,9 @@ mod tests {
 			publish_video(&mut old.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut old_media);
 
-		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
+		let app = Server::new(origin.consume(), crate::export::Config::default())
+			.unwrap()
+			.router();
 		let old_playlist = format!("/live/@{RUN}/video/video0/media.m3u8");
 		let old_segment = format!("/live/@{RUN}/video/video0/seg/53e0aafd.0.m4s");
 		wait_listed(&app, "/live/master.m3u8", &format!("@{RUN}/video/video0/media.m3u8")).await;
@@ -502,7 +508,9 @@ mod tests {
 			records.push(&record).unwrap();
 		}
 
-		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
+		let app = Server::new(origin.consume(), crate::export::Config::default())
+			.unwrap()
+			.router();
 		wait_listed(&app, &format!("/live/@{RUN}/video/video0/media.m3u8"), ".2.m4s").await;
 		assert_eq!(status(&app, "/live/manifest.mpd").await, StatusCode::OK);
 
@@ -536,7 +544,7 @@ mod tests {
 			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut media);
 
-		let server = Server::new(origin.consume(), crate::export::Config::default());
+		let server = Server::new(origin.consume(), crate::export::Config::default()).unwrap();
 		let app = server.router();
 		wait_listed(
 			&app,
@@ -634,7 +642,7 @@ mod tests {
 			.map(|path| path.parse::<moq_net::Pattern>().unwrap())
 			.collect();
 		let restricted = origin.consume().scope("", &patterns).unwrap();
-		let server = Server::new(restricted, Default::default());
+		let server = Server::new(restricted, Default::default()).unwrap();
 		let broadcaster = server.broadcaster("room/live").await.unwrap();
 		broadcaster.ready().await;
 		let tag = |name| broadcaster.rendition(Kind::Video, name).unwrap().tag().to_string();
@@ -702,7 +710,7 @@ mod tests {
 				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
 			)
 			.unwrap();
-		let all_denied = Server::new(only_catalog, Default::default());
+		let all_denied = Server::new(only_catalog, Default::default()).unwrap();
 		all_denied.broadcaster("room/live").await.unwrap().ready().await;
 		assert_eq!(
 			oneshot(all_denied.router(), denied_uri).await.status(),

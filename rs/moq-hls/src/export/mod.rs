@@ -110,7 +110,16 @@ pub struct Broadcaster {
 
 impl Broadcaster {
 	/// Start tracking the renditions of `source`'s catalog broadcast.
-	pub fn new(source: moq_mux::Source, config: Config) -> Arc<Self> {
+	///
+	/// Fails with [`Error::UnsupportedCpu`](crate::Error::UnsupportedCpu) on a CPU its
+	/// cryptography cannot run on.
+	pub fn new(source: moq_mux::Source, config: Config) -> crate::Result<Arc<Self>> {
+		rind::cpu::check().map_err(crate::Error::unsupported_cpu)?;
+		Ok(Self::start(source, config))
+	}
+
+	/// [`new`](Self::new) for a caller that already checked the CPU.
+	pub(crate) fn start(source: moq_mux::Source, config: Config) -> Arc<Self> {
 		let broadcast = source.broadcast();
 		// An epoch names the instance on every edge, so each serves it under the same URLs.
 		let instance = broadcast.info().epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
@@ -928,7 +937,7 @@ mod tests {
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
 		let mut media = video(&catalog, &broadcast, "video0", video_config());
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let rendition = tokio::time::timeout(Duration::from_secs(5), async {
 			loop {
 				if let Some(rendition) = broadcaster.rendition(Kind::Video, "video0") {
@@ -1011,7 +1020,7 @@ mod tests {
 				records.push(&gop(sequence)).unwrap();
 			}
 		}
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		tokio::time::timeout(Duration::from_secs(5), broadcaster.advertised())
 			.await
 			.expect("video0 is advertised");
@@ -1044,7 +1053,7 @@ mod tests {
 			media.write(vp8_frame(i * 2_000_000, true)).unwrap();
 		}
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		tokio::time::timeout(Duration::from_secs(5), broadcaster.advertised())
 			.await
 			.expect("the rendition is advertised");
@@ -1119,7 +1128,7 @@ mod tests {
 		let (mut catalog, _media) = publish_vp8(&mut broadcast.broadcast().clone(), inline_vp8());
 		broadcast.announce(moq_net::origin::Route::default()).unwrap();
 		settle().await;
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		broadcaster.ready().await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let mut cursor = rendition.segments();
@@ -1152,7 +1161,7 @@ mod tests {
 			records.push(&stop(1, 2_000)).unwrap();
 		}
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		broadcaster.ready().await;
 		let rendition = broadcaster.rendition(Kind::Video, "video1").expect("rendition");
 		until_listed(&rendition, 1).await;
@@ -1296,7 +1305,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		broadcaster.advertised().await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
 		listed_in_manifest(&broadcaster).await;
@@ -1313,7 +1322,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		broadcaster.advertised().await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
 		tokio::time::timeout(Duration::from_millis(1), broadcaster.video_init())
@@ -1368,7 +1377,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		broadcaster.advertised().await;
 		let broken = broadcaster.rendition(Kind::Video, "video0").unwrap();
 		until_listed(&broken, 3).await;
@@ -1401,7 +1410,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		broadcaster.advertised().await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
 		let stuck = broadcaster.rendition(Kind::Video, "video1").unwrap();
@@ -1426,7 +1435,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		broadcaster.advertised().await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
 		let render = broadcaster.clone();
@@ -1448,7 +1457,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		broadcaster.advertised().await;
 		broadcaster.set_generation(Some("run1")).unwrap();
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
@@ -1473,7 +1482,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		broadcaster.advertised().await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").unwrap();
 		until_listed(&rendition, 3).await;
@@ -1514,7 +1523,7 @@ mod tests {
 		let mut open = media.create_group(1u64.into()).unwrap();
 		write_keyframe(&mut open, 1);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 2).await;
 		catalog.finish().unwrap();
@@ -1540,7 +1549,7 @@ mod tests {
 		let (origin, broadcast, _catalog, mut records) = inline_pair("video0").await;
 		let media = broadcast.create_track("video0", timed()).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		while broadcaster.rendition(Kind::Video, "video0").is_none() {
 			moq_clock::sleep(Duration::from_millis(10)).await;
 		}
@@ -1577,7 +1586,7 @@ mod tests {
 			group.finish().unwrap();
 		}
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		broadcaster.advertised().await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
 		for _ in 0..3 {
@@ -1607,7 +1616,7 @@ mod tests {
 		settle().await;
 		let (_catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let old = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let old_playlist = old
@@ -1656,7 +1665,7 @@ mod tests {
 		settle().await;
 		let (_catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let tag = rendition.tag().to_string();
@@ -1718,7 +1727,7 @@ mod tests {
 			media.write(vp8_frame(micros, true)).unwrap();
 		}
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -1753,7 +1762,7 @@ mod tests {
 		// Three GOPs, 2s apart: segments 0 and 1 are complete, segment 2 is the live edge.
 		let (catalog, media) = publish_vp8(&mut broadcast.broadcast().clone(), inline_vp8());
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster
 			.rendition(Kind::Video, "video0")
@@ -1815,7 +1824,7 @@ mod tests {
 		settle().await;
 		let (catalog, media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -1853,7 +1862,7 @@ mod tests {
 		media.write(vp8_frame(2_000_000, true)).unwrap();
 		media.write(vp8_frame(4_000_000, true)).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -1892,7 +1901,7 @@ mod tests {
 		video.write(frame(4_000_000, true)).unwrap(); // live edge
 		audio_write(4_000_000);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let video_rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let audio_rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
@@ -1973,7 +1982,7 @@ mod tests {
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(4_000_000, true)).unwrap(); // live edge
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -2034,7 +2043,7 @@ mod tests {
 			records.push(&gop(sequence)).unwrap();
 		}
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -2079,7 +2088,7 @@ mod tests {
 
 		// Watch before the first fragment, as a live viewer would, so a catalog the moov
 		// published on a provisional clock would stick.
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		assert!(
 			next_event(&mut broadcaster.renditions()).await.is_none(),
 			"the moov alone lists no rendition"
@@ -2205,7 +2214,7 @@ mod tests {
 			.await
 			.unwrap();
 		let source = crate::resolved(consuming, "live").await;
-		let broadcaster = (!late).then(|| Broadcaster::new(source.clone(), Config::default()));
+		let broadcaster = (!late).then(|| Broadcaster::new(source.clone(), Config::default()).unwrap());
 		for i in 0..20u64 {
 			let fragment = video_muxer
 				.fragment(i as u32, &[vp8_frame(i * 1_000_000, i % 2 == 0)], None)
@@ -2225,7 +2234,7 @@ mod tests {
 			import.decode(&fragment).unwrap();
 			settle().await;
 		}
-		let broadcaster = broadcaster.unwrap_or_else(|| Broadcaster::new(source, Config::default()));
+		let broadcaster = broadcaster.unwrap_or_else(|| Broadcaster::new(source, Config::default()).unwrap());
 		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
 			.unwrap();
@@ -2274,7 +2283,7 @@ mod tests {
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.playable()).await;
 
@@ -2322,7 +2331,7 @@ mod tests {
 			audio.cut(None).unwrap();
 		}
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
 		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -2367,7 +2376,7 @@ mod tests {
 		video.write(frame(4_000_000, true)).unwrap(); // segment 2 (live edge)
 		audio_write(4_000_000);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let video_rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let audio_rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
@@ -2416,7 +2425,7 @@ mod tests {
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(3_000_000, false)).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster
 			.rendition(Kind::Video, "video0")
@@ -3121,7 +3130,7 @@ mod tests {
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 
 		let mut renditions = broadcaster.renditions();
 		let added = tokio::time::timeout(Duration::from_secs(5), renditions.next())
@@ -3167,7 +3176,7 @@ mod tests {
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(4_000_000, true)).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 
 		let mut renditions = broadcaster.renditions();
 		let rendition = match tokio::time::timeout(Duration::from_secs(5), renditions.next())
@@ -3520,7 +3529,7 @@ mod tests {
 			video0.push(&gop(sequence)).unwrap();
 			video1.push(&gop(sequence)).unwrap();
 		}
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default()).unwrap();
 		broadcaster.advertised().await;
 		let healthy = broadcaster.rendition(Kind::Video, "video0").unwrap();
 		let broken = broadcaster.rendition(Kind::Video, "video1").unwrap();

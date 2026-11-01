@@ -72,7 +72,7 @@ impl Pair {
 
 	/// An HLS server exporting everything the subscriber receives.
 	pub fn server(&self) -> Server {
-		Server::new(self.subscriber.consume(), Default::default())
+		Server::new(self.subscriber.consume(), Default::default()).unwrap()
 	}
 
 	/// Drop the publisher's session, as a publisher that lost its connection would.

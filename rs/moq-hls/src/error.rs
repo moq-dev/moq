@@ -178,12 +178,17 @@ pub enum Error {
 		segment: u64,
 	},
 
-	/// This CPU lacks a feature rind, the crate's cryptography, requires.
+	/// This CPU lacks a feature the crate's cryptography requires, named in rind's message.
 	#[error("unsupported CPU: {0}")]
-	UnsupportedCpu(#[from] rind::cpu::MissingFeature),
+	UnsupportedCpu(String),
 }
 
 impl Error {
+	/// Carries rind's message rather than its type, so rind stays out of this crate's API.
+	pub(crate) fn unsupported_cpu(err: rind::cpu::MissingFeature) -> Self {
+		Self::UnsupportedCpu(err.to_string())
+	}
+
 	/// The HTTP status the origin answered with, if it answered with one at all.
 	///
 	/// The import loop consults it: a `503` on a playlist fetch is worth another pass, a `404` is

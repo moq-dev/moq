@@ -18,9 +18,8 @@
 //! crate owns the HLS playlist and DASH manifest generation, the
 //! record-driven playlist window, and the HTTP surface.
 //!
-//! Its cryptography is [rind](https://docs.rs/rind), which panics on a CPU missing a feature it
-//! requires. [`import`] refuses such a CPU with [`Error::UnsupportedCpu`]; before serving
-//! [`export`], call `rind::cpu::check()` at startup.
+//! Its cryptography is [rind](https://docs.rs/rind), so every constructor that first needs it
+//! refuses a CPU missing a feature rind requires with [`Error::UnsupportedCpu`].
 
 #![warn(missing_docs)]
 

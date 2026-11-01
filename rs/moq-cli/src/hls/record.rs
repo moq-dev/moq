@@ -639,7 +639,7 @@ mod tests {
 
 		fn broadcaster(&self) -> Arc<Broadcaster> {
 			let source = moq_mux::Source::new(self.origin.consume(), self.broadcast.consume());
-			Broadcaster::new(source, moq_hls::export::Config::default())
+			Broadcaster::new(source, moq_hls::export::Config::default()).unwrap()
 		}
 
 		/// Write GOP `n`, two seconds from `2n`, to every rendition.
