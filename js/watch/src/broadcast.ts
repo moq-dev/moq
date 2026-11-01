@@ -4,6 +4,7 @@ import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
 import { Error as NetError, Path, StreamCode, Track } from "@moq/net";
 import {
+	Derived,
 	Effect,
 	type Getter,
 	type GetterType,
@@ -180,6 +181,10 @@ export class Broadcast {
 	// strands the filtered copy on the previous contents.
 	readonly #raw = new Signal<Catalog.Root | undefined>(undefined);
 
+	// Set only on a contribution: its broadcast resolves through the parent catalog's references,
+	// so the two never resolve one path independently.
+	readonly #resolve = new Signal<((effect: Effect) => Moq.Broadcast.Consumer | undefined) | undefined>(undefined);
+
 	#signals: Effect;
 
 	constructor(props?: Inputs<BroadcastInput>) {
@@ -275,6 +280,20 @@ export class Broadcast {
 	#runBroadcast(effect: Effect): void {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
+
+		const resolve = effect.get(this.#resolve);
+		if (resolve) {
+			// Like the origin request below, a path outside the origin's scope throws.
+			let active: Moq.Broadcast.Consumer | undefined;
+			try {
+				active = resolve(effect);
+			} catch (err) {
+				effect.set(this.#out.error, err instanceof Error ? err : new Error(String(err)), undefined);
+				return;
+			}
+			effect.set(this.#out.active, active, undefined);
+			return;
+		}
 
 		const origin = effect.get(this.in.origin);
 		if (!origin) return;
@@ -489,6 +508,53 @@ export class Broadcast {
 		if (!origin) return undefined;
 
 		return this.#requestBroadcast(effect, origin, target.path);
+	}
+
+	/**
+	 * Select a whole contribution, opening its catalog only while the caller owns this effect.
+	 *
+	 * Listing a contribution in the catalog opens nothing; this is the demand. The child tracks
+	 * the catalog entry and resolves through this broadcast's `relativeBroadcast`, sharing
+	 * its request: while following announcements it follows the contribution's restarts, and
+	 * otherwise it requests the first instance once. With an `epoch` it is offline while its
+	 * broadcast proves another instance. An absent entry leaves the child disabled, and an
+	 * unavailable contribution reads as offline. Its rendition IDs stay local to the child, so
+	 * they never shadow this catalog's IDs.
+	 *
+	 * ```ts
+	 * effects.run((effect) => {
+	 *   const child = broadcast.contribution(effect, "alice");
+	 *   const source = new Video.Source({ broadcast: child, supported: Video.Decoder.supported });
+	 *   effect.cleanup(() => source.close());
+	 *   // Feed source into a decoder as with any broadcast.
+	 * });
+	 * ```
+	 */
+	contribution(effect: Effect, id: string): Broadcast {
+		// Each computed notifies only on a real change, so an update that leaves the child's path
+		// alone (such as a new `epoch`) never restarts its catalog.
+		const entry = effect.computed((run) => {
+			const contributions = run.get(this.out.catalog)?.contributions;
+			return contributions && Object.hasOwn(contributions, id) ? contributions[id] : undefined;
+		});
+		const name = effect.computed((run) => {
+			// An empty reference is present: it names the catalog's own broadcast.
+			const selected = run.get(entry);
+			return selected && Path.tryResolve(run.get(this.in.name), selected.broadcast);
+		});
+		const enabled = effect.computed((run) => run.get(entry) !== undefined);
+		const child = new Broadcast({
+			origin: this.in.origin,
+			name: new Derived([name], (name) => name ?? Path.empty()),
+			enabled: new Derived([enabled], (enabled) => enabled === true),
+			follow: this.in.follow,
+		});
+		child.#resolve.set((run) => {
+			const selected = run.get(entry);
+			return selected && this.relativeBroadcast(run, selected.broadcast, selected.epoch);
+		});
+		effect.cleanup(() => child.close());
+		return child;
 	}
 
 	/** Stop and release everything this holds. */

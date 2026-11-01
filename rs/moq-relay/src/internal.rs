@@ -990,7 +990,6 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1168,7 +1167,8 @@ mod tests {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
@@ -1402,7 +1402,7 @@ mod tests {
 		let internal = Internal::new(Config::default(), moq_net::stats::Registry::disabled());
 		let app = internal.routes();
 
-		let elapsed = tokio::time::timeout(std::time::Duration::from_secs(60), internal.serve(app)).await;
+		let elapsed = kio::clock::timeout(std::time::Duration::from_secs(60), internal.serve(app)).await;
 		assert!(elapsed.is_err(), "serve resolved with no listen address configured");
 	}
 
@@ -1608,8 +1608,8 @@ mod tests {
 		sub_source.announce(Default::default()).unwrap();
 		let sub_track = sub_source.create_track("audio", timed()).unwrap();
 
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 
 		// Leave 46 bytes across two frames behind the live edge, then read 1234
 		// egress bytes out of the default-tier broadcast.

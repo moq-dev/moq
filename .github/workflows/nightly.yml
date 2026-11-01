@@ -28,7 +28,7 @@ name: Nightly
 # release PRs on them.
 #
 # Main PRs run no cloud CI beyond the landing gate's checks, so every
-# path-filtered gate (Android, C, C++, WASM, X11, the audio replays, the OSS
+# path-filtered gate (Android, C, C++, X11, the audio replays, the OSS
 # Scanner image, platform.yml and the release dry-runs) runs here on main too,
 # and release-gate.yml runs them on release PRs.
 #
@@ -77,10 +77,6 @@ jobs:
 
   cpp:
     uses: ./.github/workflows/cpp.yml
-
-  wasm:
-    uses: ./.github/workflows/wasm.yml
-    secrets: inherit
 
   audio-replay:
     uses: ./.github/workflows/audio-quality.yml
@@ -166,10 +162,6 @@ jobs:
           - name: BBB rendition alignment
             recipe: pub check-bbb
             uncached: true
-          - name: Browser backend baseline
-            recipe: test wasm-baseline --uniffi
-            artifact: wasm-backend-baseline
-            artifact-path: target/test
           # Bounded: fails on crashes, missing output, or invalid samples, never on timing.
           - name: Browser benchmark smoke
             recipe: bench-browser --smoke
@@ -180,6 +172,12 @@ jobs:
             uncached: true
           - name: JS audit
             recipe: js audit
+            uncached: true
+          # Builds moq-ffi to stage the modules it checks, so it keeps the Rust cache.
+          - name: Go audit
+            recipe: go audit
+          - name: Python audit
+            recipe: py audit
             uncached: true
           # Uncached: the instrumented build bypasses mbx, so the cache can't serve it.
           - name: Rust coverage
@@ -359,17 +357,17 @@ jobs:
         # It also runs the bandwidth probe's acceptance suite, of which PRs run the short cases.
         # `test drill impaired` runs the relay drills over a freshly seeded shaper; PRs run loopback.
         # `rs cli-export` runs moq-cli's export process tests, which take tens of seconds of real time.
-        # `gate -rs_shapes` runs the queue's Check over every package, catching
-        # what a diff-scoped queue run let into main. Features runs the rest,
-        # the isolated feature shapes, which outgrow one hosted job beside it.
+        # `gate` runs the queue's Check over every package, catching what a
+        # diff-scoped queue run let into main.
+        # `rs send-depth` proves moq-net's futures Send at the default recursion
+        # limit on the flake's pinned nightly, which the land gate leaves out.
         # `rs audio-devices` plays moq-audio's device tests into a private null sink.
         # `rs multicast` runs the mDNS tests, which loop multicast back on the runner.
         # `rs render-sw` renders through wgpu on Mesa's software Vulkan driver.
         # `test qmux` runs js/qmux against the in-tree Rust qmux, per draft.
-        recipe: ["gate -rs_shapes", "rs doctest --workspace", "rs loom", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux"]
-        include:
-          - recipe: rs send-depth
-            nightly: true
+        # `rs v4l2` streams moq-video's V4L2 capture from the kernel's vivid
+        # virtual camera, a module load no pull request job should make.
+        recipe: ["gate", "rs doctest --workspace", "rs send-depth", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2"]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -381,15 +379,23 @@ jobs:
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
-      - name: Install nightly Rust
-        if: matrix.nightly
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        with:
-          toolchain: nightly
       - name: Add a second IPv6 loopback address
         if: matrix.recipe == 'rs uring'
         # moq-uring's local address test reaches a wildcard socket on it.
         run: sudo ip -6 addr add fd6d:6f71::2/128 dev lo nodad
+      - name: Load the vivid virtual camera
+        if: matrix.recipe == 'rs v4l2'
+        # Azure kernels from 7.0 ship vivid in the base modules package and have
+        # no linux-modules-extra; older ones split it out there.
+        run: |
+          if ! modinfo vivid > /dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+          fi
+          sudo modprobe vivid
+          sudo udevadm settle
+          # The runner user is not in the video group.
+          sudo chmod a+rw /dev/video*
       - name: Test
         run: nix develop --command just ${{ matrix.recipe }}
         env:
@@ -446,7 +452,6 @@ jobs:
 
   # Plays the matrix in headless Chromium and the native player through moq-shaper
   # and grades what the listener heard against test/audio-quality/budgets.json.
-  # ARM64 like wasm.yml.
   audio-quality:
     name: Audio quality
     runs-on: ubuntu-24.04-arm
@@ -676,7 +681,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target: [lite, announce, ietf, varint, path, pattern, packet, params, streamid, streams, frame, connection]
+        target: [lite, announce, ietf, varint, path, pattern, ingest, request, packet, params, streamid, streams, frame, connection]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

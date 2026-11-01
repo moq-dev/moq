@@ -1,25 +1,19 @@
 use std::fmt;
 
 use bytes::Bytes;
-use zeroize::Zeroize;
+use rind::aead;
 
 use crate::error::{Error, Result};
-use crate::limits::{KEY_LEN, MAX_INVOCATIONS, MAX_PLAINTEXT_BYTES, TAG_LEN};
+use crate::limits::{MAX_INVOCATIONS, MAX_PLAINTEXT_BYTES, TAG_LEN};
 use crate::protect::{nonce, open, protect};
 
 /// Per-track, per-domain AES-128-GCM key with invocation and byte accounting.
 ///
 /// Not `Clone`: cloning would duplicate the exhaustion counters.
 pub(crate) struct TrackKey {
-	bytes: [u8; KEY_LEN],
+	key: aead::Key,
 	invocations: u64,
 	plaintext_bytes: u64,
-}
-
-impl Drop for TrackKey {
-	fn drop(&mut self) {
-		self.bytes.zeroize();
-	}
 }
 
 impl fmt::Debug for TrackKey {
@@ -33,9 +27,9 @@ impl fmt::Debug for TrackKey {
 }
 
 impl TrackKey {
-	pub(crate) fn new(bytes: [u8; KEY_LEN]) -> Self {
+	pub(crate) fn new(key: aead::Key) -> Self {
 		Self {
-			bytes,
+			key,
 			invocations: 0,
 			plaintext_bytes: 0,
 		}
@@ -66,7 +60,7 @@ impl TrackKey {
 			return Err(Error::Oversize);
 		}
 		self.reserve(plaintext.len())?;
-		let payload = protect(&self.bytes, group, frame, plaintext, payload_limit)?;
+		let payload = protect(&self.key, group, frame, plaintext, payload_limit)?;
 		self.commit(plaintext.len());
 		Ok(payload)
 	}
@@ -79,7 +73,7 @@ impl TrackKey {
 		}
 		let plaintext_len = payload.len() - TAG_LEN;
 		self.reserve(plaintext_len)?;
-		let result = open(&self.bytes, group, frame, payload, payload_limit);
+		let result = open(&self.key, group, frame, payload, payload_limit);
 		// A failed open still ran AES-GCM over every block, so it spends the budget.
 		self.commit(plaintext_len);
 		result
