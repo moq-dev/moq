@@ -17336,7 +17336,7 @@ mod test {
 
 	/// Waiting for enough debt to evict an old group must not shed the live group's
 	/// frames instead: its reader has not had a chance to take them yet.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn carried_debt_keeps_the_live_group() {
 		let unit = 100 * cache::ENTRY_OVERHEAD;
