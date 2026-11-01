@@ -141,6 +141,17 @@ pub trait Controller: Send + Sync {
         false
     }
 
+    /// The session's probe target, the rate in bytes per second the application wants to send,
+    /// or zero for none
+    ///
+    /// The transport reports it to each controller it builds and whenever it changes. A
+    /// controller that sizes its own probes, as GoogCC does, may aim them at it.
+    #[allow(
+        unused_variables,
+        reason = "a no-op default that keeps the parameter names for implementors"
+    )]
+    fn on_probe_target(&mut self, bytes_per_second: u64) {}
+
     /// Duplicate the controller's state
     fn clone_box(&self) -> Box<dyn Controller>;
 

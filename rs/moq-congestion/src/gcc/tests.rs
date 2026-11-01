@@ -321,7 +321,7 @@ fn counts_packets_acknowledged_without_times() {
 }
 
 /// An application-limited sender gets probe clusters to fill: duplicates filling them carry the
-/// estimate far past the media's rate, which GoogCC's increase alone holds within 1.5x of it
+/// estimate far past what the media alone reads from the same clusters
 #[test]
 fn filled_probes_raise_the_estimate() {
     const MEDIA: u64 = 125_000;
@@ -331,15 +331,39 @@ fn filled_probes_raise_the_estimate() {
     filled.fill_probes = true;
     filled.run(Duration::from_secs(10));
     assert!(
-        alone.estimate() <= MEDIA * 2,
-        "estimate {} B/s from {MEDIA} B/s of media alone",
-        alone.estimate()
-    );
-    assert!(
-        filled.estimate() >= 4 * MEDIA,
+        filled.estimate() >= 4 * alone.estimate(),
         "estimate {} B/s filling the probes, {} B/s without",
         filled.estimate(),
         alone.estimate()
+    );
+}
+
+/// A probe target is the allocation GoogCC aims its probes at: no more than twice it, so filled
+/// clusters raise the estimate to the target rather than to the link's rate, and the duplicates
+/// cost no more than the target needs
+#[test]
+fn probes_aim_at_the_target() {
+    const MEDIA: u64 = 125_000;
+    /// 4 Mbit/s, a fifth of the link
+    const TARGET: u64 = 500_000;
+    let run = |target: Option<u64>| {
+        let mut sim = Sim::new(10 * LINK, Source::Media(MEDIA));
+        sim.fill_probes = true;
+        if let Some(target) = target {
+            sim.gcc.on_probe_target(target);
+        }
+        sim.run(Duration::from_secs(10));
+        sim.estimate()
+    };
+    let aimed = run(Some(TARGET));
+    let unaimed = run(None);
+    assert!(
+        (TARGET..=2 * TARGET).contains(&aimed),
+        "estimate {aimed} B/s probing toward {TARGET} B/s"
+    );
+    assert!(
+        unaimed > 2 * TARGET,
+        "estimate {unaimed} B/s without a target"
     );
 }
 

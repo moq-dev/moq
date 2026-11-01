@@ -20,6 +20,7 @@ use crate::gcc::api::units::{DataRate, DataSize, TimeDelta, Timestamp};
 /// for experiments.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StreamsConfig {
+    pub at_time: Timestamp,
     pub requests_alr_probing: Option<bool>,
     /// If `enable_repeated_initial_probing` is set to true, Probes are sent
     /// periodically every 1s during the first 5s after the network becomes

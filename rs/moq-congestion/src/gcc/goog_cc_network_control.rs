@@ -9,10 +9,11 @@
  */
 
 //! Upstream's `NetworkControllerInterface` also takes route changes, REMB, RTCP loss reports,
-//! received packets, runtime stream and constraint changes, and a network state estimate. A QUIC
-//! sender has none of them: a path change rebuilds the controller, and the constraints and stream
-//! settings come once, at construction. What remains is the network becoming available, the
-//! process timer, the RTT, each sent packet, and each ACK's feedback.
+//! received packets, runtime constraint changes, and a network state estimate. A QUIC sender has
+//! none of them: a path change rebuilds the controller, and the constraints come once, at
+//! construction. What remains is the network becoming available, the process timer, the RTT,
+//! each sent packet, each ACK's feedback, and stream settings, which carry the session's probe
+//! target as the allocation GoogCC probes toward.
 
 use std::collections::VecDeque;
 
@@ -164,6 +165,44 @@ impl GoogCcNetworkController {
             probe_cluster_configs: self.probe_controller.on_network_availability(msg),
             ..Default::default()
         }
+    }
+
+    pub fn on_streams_config(&mut self, msg: StreamsConfig) -> NetworkControlUpdate {
+        let mut update = NetworkControlUpdate::default();
+        if let Some(requests_alr_probing) = msg.requests_alr_probing {
+            self.probe_controller
+                .enable_periodic_alr_probing(requests_alr_probing);
+        }
+        if let Some(max_total_allocated_bitrate) = msg.max_total_allocated_bitrate {
+            update.probe_cluster_configs = self
+                .probe_controller
+                .on_max_total_allocated_bitrate(max_total_allocated_bitrate, msg.at_time);
+        }
+
+        let mut pacing_changed = false;
+        if let Some(pacing_factor) = msg.pacing_factor
+            && Some(pacing_factor) != self.pacing_factor
+        {
+            self.pacing_factor = Some(pacing_factor);
+            pacing_changed = true;
+        }
+        if let Some(min_total_allocated_bitrate) = msg.min_total_allocated_bitrate
+            && min_total_allocated_bitrate != self.min_total_allocated_bitrate
+        {
+            self.min_total_allocated_bitrate = min_total_allocated_bitrate;
+            pacing_changed = true;
+
+            if self.use_min_allocatable_as_lower_bound {
+                self.clamp_constraints();
+                self.delay_based_bwe.set_min_bitrate(self.min_data_rate);
+                self.bandwidth_estimation
+                    .set_min_max_bitrate(self.min_data_rate, self.max_data_rate);
+            }
+        }
+        if pacing_changed {
+            update.pacer_config = Some(self.get_pacing_rates());
+        }
+        update
     }
 
     pub fn on_process_interval(&mut self, msg: ProcessInterval) -> NetworkControlUpdate {

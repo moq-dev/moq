@@ -173,9 +173,9 @@ impl Outcome {
 			.map(|sample| sample.at)
 	}
 
-	/// How soon after `from` the estimate reaches the target, if it ever does
-	fn rise(&self, from: Duration) -> Option<Duration> {
-		self.first(from..Duration::MAX, |estimate| estimate >= TARGET)
+	/// How soon after `from` the estimate reaches `target`, if it ever does
+	fn rise(&self, from: Duration, target: u64) -> Option<Duration> {
+		self.first(from..Duration::MAX, |estimate| estimate >= target)
 			.map(|reached| reached - from)
 	}
 
@@ -621,20 +621,28 @@ fn compare(label: &str, scenario: Scenario, seeds: ops::RangeInclusive<u64>) -> 
 
 /// Asserts the probing runs' estimate reaches the target within [`RISE`] of `from` on the mean
 fn rises(trials: &[Trial], from: Duration) {
+	let rise = reaches(trials, from, TARGET);
+	assert!(
+		rise <= RISE.as_secs_f64(),
+		"estimate reached {TARGET} B/s {rise:.1}s after {from:?} on the mean"
+	);
+}
+
+/// Asserts every probing run's estimate reaches `target` after `from`, returning how soon, in
+/// seconds on the mean
+fn reaches(trials: &[Trial], from: Duration, target: u64) -> f64 {
 	let rises = trials.iter().map(|Trial { seed, probing, .. }| {
-		let rise = probing.rise(from).unwrap_or_else(|| {
+		let rise = probing.rise(from, target).unwrap_or_else(|| {
 			panic!(
-				"seed {seed}: estimate {} B/s never reached {TARGET} B/s after {from:?}",
+				"seed {seed}: estimate {} B/s never reached {target} B/s after {from:?}",
 				probing.samples.last().expect("sampled").estimate
 			)
 		});
 		rise.as_secs_f64()
 	});
 	let rise = rises.sum::<f64>() / trials.len() as f64;
-	assert!(
-		rise <= RISE.as_secs_f64(),
-		"estimate reached {TARGET} B/s {rise:.1}s after {from:?} on the mean"
-	);
+	info!(target, rise, "estimate reached the target after {from:?} on the mean");
+	rise
 }
 
 /// Asserts the estimate, probing or not, falls to within the ProbeBW_UP gain of `rate` within
@@ -695,38 +703,45 @@ fn rises_to_target() {
 	rises(&compare("rises", scenario, GATE), Duration::from_secs(5));
 }
 
-/// The same under GCC, which probes five seconds after it last probed or entered the
-/// application-limited region, at twice its estimate but no more than 5 Mbit/s, and reads a probe
-/// at the slower of its send and receive rates, so the duplicates fill each cluster at its pace.
-/// The estimate reaches the target only once GCC next probes, later than [`RISE`] here, and never
-/// past its 5 Mbit/s cap, so this measures the rise, holding the probe's own budgets, rather than
-/// asserting it.
+/// The same under GCC, at the target and at twice it. GCC aims its probes at the target, at
+/// twice its estimate but no more than twice the target, and reads each at the slower of its send
+/// and receive rates, so the duplicates fill each cluster at its pace. Once the target is above
+/// its estimate, GCC probes from the application-limited region five seconds after it last
+/// probed or entered that region, so this holds the rise to reaching the target, not to [`RISE`],
+/// and reports how soon for the bake-off.
 #[test]
 #[ignore = "nightly: just rs quic-sim"]
-fn rises_toward_target_under_gcc() {
+fn rises_to_target_under_gcc() {
 	let _guard = subscribe();
-	let scenario = Scenario {
-		latency: Duration::from_millis(50),
-		buffer: 170_000,
-		keyframe: 0,
-		rates: vec![(Duration::ZERO, 375_000), (Duration::from_secs(5), 1_500_000)],
-		duration: Duration::from_secs(15),
-		gcc: true,
-		..Scenario::default()
-	};
-	for Trial {
-		seed,
-		probing,
-		baseline,
-	} in compare("rises gcc", scenario, SEEDS)
-	{
-		info!(
+	let opens = Duration::from_secs(5);
+	for target in [TARGET, 2 * TARGET] {
+		let scenario = Scenario {
+			latency: Duration::from_millis(50),
+			buffer: 170_000,
+			keyframe: 0,
+			rates: vec![(Duration::ZERO, 375_000), (opens, 1_500_000)],
+			duration: Duration::from_secs(20),
+			target,
+			gcc: true,
+			..Scenario::default()
+		};
+		let trials = compare(&format!("rises gcc {target}"), scenario, SEEDS);
+		for Trial {
 			seed,
-			rise = ?probing.rise(Duration::from_secs(5)),
-			probing = probing.samples.last().expect("sampled").estimate,
-			baseline = baseline.samples.last().expect("sampled").estimate,
-			"estimate after the path opened up, in B/s"
-		);
+			probing,
+			baseline,
+		} in &trials
+		{
+			info!(
+				seed,
+				target,
+				rise = ?probing.rise(opens, target),
+				probing = probing.samples.last().expect("sampled").estimate,
+				baseline = baseline.samples.last().expect("sampled").estimate,
+				"estimate after the path opened up, in B/s"
+			);
+		}
+		reaches(&trials, opens, target);
 	}
 }
 
@@ -757,7 +772,7 @@ fn backs_off_unreachable_target() {
 		// The samples are 100ms apart
 		assert!(gap > Duration::from_millis(2900), "attempts began at {starts:?}");
 	}
-	let rise = outcome.rise(opens).expect("reached the target");
+	let rise = outcome.rise(opens, TARGET).expect("reached the target");
 	assert!(rise <= RISE, "reached the target {rise:?} after the path opened");
 }
 

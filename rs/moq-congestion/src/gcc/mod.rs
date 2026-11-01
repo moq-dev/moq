@@ -102,8 +102,22 @@ const MIN_WINDOW: u64 = 2 * 1500;
 /// `ProbeBitrateEstimator`'s own one second of history
 const CLUSTER_HISTORY: TimeDelta = TimeDelta::from_seconds(2);
 
-/// The rate GoogCC starts at and first probes from, WebRTC's default of 300 kbit/s
-const INITIAL_RATE: DataRate = DataRate::from_kilobits_per_sec(300);
+/// The rate GoogCC starts at, whose initial probes go out at three and six times it: 1 Mbit/s,
+/// rather than WebRTC's 300 kbit/s.
+///
+/// WebRTC's encoder starts at GoogCC's rate, but a transport's sender writes at its own. From
+/// 300 kbit/s the initial probing took several round trips to reach a few Mbit/s while 2 Mbit/s
+/// of media queued behind the pacer. Draining that backlog once a probe found the path queued it
+/// at the bottleneck, and the delay-based estimate cut the rate to 85% of the throughput
+/// acknowledged so far, from a sender still starting up. Held above the estimate, the media kept
+/// GoogCC out of the application-limited region, so no probe followed, and the estimate climbed
+/// back at 8% a second. Only the 5 Mbit/s ceiling `ProbeController` keeps without a maximum rate
+/// hid this: the probe it capped happened to restore the estimate after the cut.
+const INITIAL_RATE: DataRate = DataRate::from_kilobits_per_sec(1000);
+/// The most GoogCC estimates or probes when the transport sets no pacing limit, the 1 Gbit/s
+/// `SendSideBandwidthEstimation` already defaults to. Without one, `ProbeController` caps every
+/// probe at 5 Mbit/s, so a probe target above that could never be reached.
+const MAX_RATE: DataRate = DataRate::from_kilobits_per_sec(1_000_000);
 
 /// Configuration for the [`Gcc`] congestion controller, which has no settings yet.
 #[derive(Debug, Clone, Default)]
@@ -154,6 +168,9 @@ pub struct Gcc {
     receive_basis: Option<i128>,
     /// Recently sent probe clusters, oldest first
     clusters: VecDeque<Cluster>,
+    /// A probe target not yet handed to GoogCC, in bytes per second, which waits for a call that
+    /// knows the time
+    probe_target: Option<u64>,
     /// Reused for each ACK's and loss's feedback
     feedback: TransportPacketsFeedback,
 }
@@ -166,9 +183,9 @@ impl Gcc {
             constraints: TargetRateConstraints {
                 at_time: now,
                 min_data_rate: None,
-                max_data_rate: init
-                    .max_pacing_rate
-                    .map(|rate| DataRate::from_bytes_per_sec(rate.min(i64::MAX as u64) as i64)),
+                max_data_rate: Some(init.max_pacing_rate.map_or(MAX_RATE, |rate| {
+                    DataRate::from_bytes_per_sec(rate.min(i64::MAX as u64) as i64)
+                })),
                 starting_rate: Some(starting_rate),
             },
             stream_based_config: StreamsConfig {
@@ -202,14 +219,27 @@ impl Gcc {
             next_process: init.now,
             receive_basis: None,
             clusters: VecDeque::new(),
+            probe_target: None,
             feedback: TransportPacketsFeedback::default(),
         };
         gcc.process(init.now);
         gcc
     }
 
-    /// Runs GoogCC's process timer if it is due.
+    /// Hands GoogCC a new probe target, then runs its process timer if it is due.
     fn process(&mut self, now: Instant) {
+        if let Some(target) = self.probe_target.take() {
+            // The session's target is the rate its streams would send at, which GoogCC probes
+            // toward as soon as it exceeds the estimate, capping its probes at twice the target
+            let update = self.cc.on_streams_config(StreamsConfig {
+                at_time: timestamp(now),
+                max_total_allocated_bitrate: Some(DataRate::from_bytes_per_sec(
+                    target.min(i64::MAX as u64) as i64,
+                )),
+                ..Default::default()
+            });
+            self.apply(update);
+        }
         if now < self.next_process {
             return;
         }
@@ -475,6 +505,10 @@ impl Controller for Gcc {
     /// its rate reads no higher, and its size bounds what the duplicates filling it cost.
     fn paces_probe(&self) -> bool {
         true
+    }
+
+    fn on_probe_target(&mut self, bytes_per_second: u64) {
+        self.probe_target = Some(bytes_per_second);
     }
 
     fn clone_box(&self) -> Box<dyn Controller> {

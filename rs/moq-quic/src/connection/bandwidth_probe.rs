@@ -6,9 +6,9 @@
 //! the path has room. While the controller probes, this fills the pacing headroom it opens with
 //! duplicates of STREAM data already in flight, up to the session's target, so the probe's
 //! samples measure the path. A controller that paces its own probe cluster, as GoogCC does, gets
-//! it filled at its pace instead, since it reads the cluster at the rate it was sent. A duplicate needs no wire change, and repairs a loss of its
-//! original. It is never retransmitted, and a reset stream's data is never sent again, so a
-//! probe never sends past a group's expiry.
+//! it filled at its pace instead, since it reads the cluster at the rate it was sent. A duplicate
+//! needs no wire change, and repairs a loss of its original. It is never retransmitted, and a
+//! reset stream's data is never sent again, so a probe never sends past a group's expiry.
 //!
 //! An attempt that ends short of the target found the path's ceiling, and another would only
 //! spend the same duplicates finding it again. So each miss in a row doubles how long the probe
@@ -97,6 +97,11 @@ impl BandwidthProbe {
 			cursor: 0,
 			floor: 0,
 		}
+	}
+
+	/// The rate the caller asked to probe up to, in bytes per second; zero when probing is off
+	pub(super) fn target(&self) -> u64 {
+		self.target
 	}
 
 	/// Probe up to `bytes_per_second`, retrying a changed target at once
