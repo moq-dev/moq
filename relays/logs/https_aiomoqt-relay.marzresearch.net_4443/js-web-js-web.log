@@ -1,15 +1,14 @@
 [page] negotiated protocol: moqt-22
 [page] subscribe_namespace written: requestId=0
-[page] announced: broadcast=openmoq/mtt/aiomoqt/bbb_4k30/moq_test_tracks_00/clip/msf/cmaf/h264/1080/30/aac/2 active=true
 [page] announced: broadcast=openmoq/mtt/aiomoqt/artemis_directors/moq_test_tracks_00/clip/msf/loc/h264/1080/30/aac/2 active=true
-[page] announced: broadcast=smoke-js-web-4974-18581.hang active=true
-[page] subscribe start: id=2 broadcast=smoke-js-web-4974-18581.hang track=catalog.json
-[page] subscribe written: id=2 broadcast=smoke-js-web-4974-18581.hang track=catalog.json
-[page] subscribe ok: id=2 broadcast=smoke-js-web-4974-18581.hang track=catalog.json
-[page] received catalog hang smoke-js-web-4974-18581.hang {video: Object, clock: Object}
-[page] subscribe start: id=4 broadcast=smoke-js-web-4974-18581.hang track=video
-[page] subscribe written: id=4 broadcast=smoke-js-web-4974-18581.hang track=video
-[page] subscribe ok: id=4 broadcast=smoke-js-web-4974-18581.hang track=video
-[page] received catalog hang smoke-js-web-4974-18581.hang {video: Object, clock: Object}
-[page] received catalog hang smoke-js-web-4974-18581.hang {video: Object, clock: Object}
-decoded 6 frames from smoke-js-web-4974-18581.hang (vite)
+[page] announced: broadcast=openmoq/mtt/aiomoqt/bbb_4k30/moq_test_tracks_00/clip/msf/cmaf/h264/1080/30/aac/2 active=true
+[page] announced: broadcast=smoke-js-web-4850-5300.hang active=true
+[page] subscribe start: id=2 broadcast=smoke-js-web-4850-5300.hang track=catalog.json
+[page] subscribe written: id=2 broadcast=smoke-js-web-4850-5300.hang track=catalog.json
+[page] subscribe ok: id=2 broadcast=smoke-js-web-4850-5300.hang track=catalog.json
+[page] received catalog hang smoke-js-web-4850-5300.hang {video: Object, clock: Object}
+[page] subscribe start: id=4 broadcast=smoke-js-web-4850-5300.hang track=video
+[page] subscribe written: id=4 broadcast=smoke-js-web-4850-5300.hang track=video
+[page] subscribe ok: id=4 broadcast=smoke-js-web-4850-5300.hang track=video
+[page] received catalog hang smoke-js-web-4850-5300.hang {video: Object, clock: Object}
+decoded 5 frames from smoke-js-web-4850-5300.hang (vite)
