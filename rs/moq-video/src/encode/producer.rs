@@ -1227,10 +1227,10 @@ mod tests {
 	/// published timestamp may land up to `SAMPLING` early, never late.
 	#[cfg(all(feature = "capture", feature = "openh264"))]
 	mod clock {
-		use moq_clock::Wall;
+		use kio::clock::Wall;
 		use std::time::Duration;
 
-		use moq_clock::Instant;
+		use kio::clock::Instant;
 
 		use super::*;
 		use crate::capture::Synthetic;
@@ -1268,7 +1268,7 @@ mod tests {
 		impl Fixture {
 			/// Start the capture loop on a broadcast whose clock began `behind` ago, at `wall`.
 			async fn start(behind: Duration, wall: Wall) -> Self {
-				let epoch = moq_clock::now()
+				let epoch = kio::clock::now()
 					.checked_sub(behind)
 					.expect("a monotonic clock that far back");
 				let clock = moq_mux::Clock::at(epoch, wall).unwrap();
@@ -1429,13 +1429,13 @@ mod tests {
 		async fn a_late_first_frame_publishes_its_acquisition() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(5), moq_clock::wall()).await;
+					let fixture = Fixture::start(Duration::from_secs(5), kio::clock::wall()).await;
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
 
 					let captured = Instant::now();
 					// Delivered well after acquisition: dequeue time must not leak into the timestamp.
-					moq_clock::sleep(Duration::from_millis(50)).await;
+					kio::clock::sleep(Duration::from_millis(50)).await;
 					camera.push_at(surface(), captured);
 					let published = read(&mut track).await;
 
@@ -1452,14 +1452,14 @@ mod tests {
 		async fn a_device_clock_restart_continues_forward() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
 
 					// The device numbers from zero, and real time keeps pace with it.
 					camera.push_native(surface(), us(0));
 					let first = read(&mut track).await;
-					moq_clock::sleep(Duration::from_millis(40)).await;
+					kio::clock::sleep(Duration::from_millis(40)).await;
 					camera.push_native(surface(), us(40_000));
 					let second = read(&mut track).await;
 					assert_eq!(second - first, 40_000, "the device's spacing survives");
@@ -1468,7 +1468,7 @@ mod tests {
 					camera.push_native(surface(), us(0));
 					let restarted = read(&mut track).await;
 					assert!(restarted >= second, "{restarted}us rewound behind {second}us");
-					moq_clock::sleep(Duration::from_millis(40)).await;
+					kio::clock::sleep(Duration::from_millis(40)).await;
 					camera.push_native(surface(), us(40_000));
 					let resumed = read(&mut track).await;
 					assert_eq!(resumed - restarted, 40_000, "the device's spacing resumes");
@@ -1495,7 +1495,7 @@ mod tests {
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					let idle = Duration::from_millis(300);
-					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
 
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
@@ -1506,7 +1506,7 @@ mod tests {
 					drop(track);
 					drop(camera);
 
-					moq_clock::sleep(idle).await;
+					kio::clock::sleep(idle).await;
 
 					let mut track = fixture.subscribe().await;
 					let camera = fixture.camera();
@@ -1531,7 +1531,7 @@ mod tests {
 		async fn a_reopen_onto_a_new_level_follows_the_new_track() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
 					let probed = fixture
 						.catalog
 						.snapshot()
@@ -1586,7 +1586,7 @@ mod tests {
 			tokio::task::LocalSet::new()
 				.run_until(async {
 					// Whole seconds, so the advertised mapping holds it exactly.
-					let now = moq_clock::wall().checked_duration_since(Wall::UNIX_EPOCH).unwrap();
+					let now = kio::clock::wall().checked_duration_since(Wall::UNIX_EPOCH).unwrap();
 					let wall = Wall::UNIX_EPOCH + Duration::from_secs(now.as_secs() - 3600);
 					let fixture = Fixture::start(Duration::from_secs(1), wall).await;
 					let advertised = fixture.catalog.snapshot().clock;
@@ -1614,7 +1614,7 @@ mod tests {
 		async fn hls_records_keep_the_live_timestamps() {
 			tokio::task::LocalSet::new()
 				.run_until(async {
-					let fixture = Fixture::start(Duration::from_secs(1), moq_clock::wall()).await;
+					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
 					// The encoder's GOP hint declares the duration up front.
 					let hls = fixture.catalog.snapshot().video.renditions["video"]
 						.hls
@@ -1632,7 +1632,7 @@ mod tests {
 						live.push(published);
 						drop(track);
 						// Idle past the minimum segment, so each run is listed as its own segment.
-						moq_clock::sleep(moq_mux::hls::DEFAULT_DURATION + Duration::from_millis(100)).await;
+						kio::clock::sleep(moq_mux::hls::DEFAULT_DURATION + Duration::from_millis(100)).await;
 					}
 
 					let (mut catalog, consumer) = fixture.finish().await;
@@ -1746,7 +1746,7 @@ mod tests {
 		async fn capture_groups(steps: Vec<Step>) -> (moq_net::track::Info, Vec<Vec<usize>>) {
 			use moq_mux::container::Container as _;
 
-			let started = moq_clock::Instant::now();
+			let started = kio::clock::Instant::now();
 			let result = local(async {
 				let mut broadcast = moq_net::broadcast::Info::new().produce();
 				let consumer = broadcast.consume();
@@ -2085,7 +2085,7 @@ mod tests {
 			estimate.set(Some(Rate::from_kbps(500))).unwrap();
 			tokio::select! {
 				res = &mut run => panic!("the capture ended: {res:?}"),
-				() = moq_clock::sleep(Duration::from_secs(60)) => {}
+				() = kio::clock::sleep(Duration::from_secs(60)) => {}
 			}
 			assert_eq!(probe::bitrates(), Vec::<u64>::new());
 
@@ -2158,7 +2158,7 @@ mod tests {
 			// Nothing has refused a cut: the probe never finished, or its backend can force one.
 			control.cut().unwrap();
 			drop(control);
-			moq_clock::timeout(Duration::from_secs(1), run)
+			kio::clock::timeout(Duration::from_secs(1), run)
 				.await
 				.expect("dropping the controls ends the driver")
 				.unwrap();
@@ -2314,7 +2314,7 @@ mod tests {
 			probe::refuse_once(ceiling.as_bps());
 
 			// A minute without a wake is far past anything the ramp still needs.
-			while let Ok(next) = moq_clock::timeout(Duration::from_secs(60), next_target(&mut rate)).await {
+			while let Ok(next) = kio::clock::timeout(Duration::from_secs(60), next_target(&mut rate)).await {
 				apply_target(&mut sink, &mut rate, next).await;
 			}
 			let bitrates = probe::bitrates();

@@ -99,7 +99,7 @@ fn client() -> moq_tokio::Client {
 }
 
 async fn connect(client: moq_tokio::Client, url: url::Url) -> moq_tokio::Connection {
-	moq_clock::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
+	kio::clock::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
 		.await
 		.expect("connect timeout")
 		.expect("connect failed")
@@ -156,13 +156,13 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 	}
 
 	for (index, (_connection, consumer, announced)) in subscribers.iter_mut().enumerate() {
-		let (update, active) = moq_clock::timeout(TIMEOUT, next_update(announced))
+		let (update, active) = kio::clock::timeout(TIMEOUT, next_update(announced))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} announcement timeout"))
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "test");
 		assert!(active, "expected announce, got retraction");
-		let broadcast = moq_clock::timeout(TIMEOUT, consumer.request("test", None))
+		let broadcast = kio::clock::timeout(TIMEOUT, consumer.request("test", None))
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} request timeout"))
 			.expect("announced broadcast resolves");
@@ -173,12 +173,12 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 			.subscribe(None)
 			.await
 			.expect("subscribe");
-		let mut group = moq_clock::timeout(TIMEOUT, subscription.recv_group())
+		let mut group = kio::clock::timeout(TIMEOUT, subscription.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} recv_group timeout"))
 			.expect("recv_group failed")
 			.expect("track closed prematurely");
-		let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.unwrap_or_else(|_| panic!("subscriber {index} read_frame timeout"))
 			.expect("read_frame failed")
@@ -260,14 +260,14 @@ async fn uring_workers_serve_every_configured_version() {
 			let connection = connect(client.with_subscriber(origin), url).await;
 			assert_eq!(connection.version(), Some(version), "{scheme} {name}");
 
-			let (update, active) = moq_clock::timeout(TIMEOUT, next_update(&mut announced))
+			let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 				.await
 				.unwrap_or_else(|_| panic!("{scheme} {name}: announcement timeout"))
 				.expect("origin closed");
 			// moq-lite-02 has no in-band path, so a raw QUIC session sits at the root.
 			let path = update.prefix.as_str().to_owned();
 			assert!(active && path.ends_with("test"), "{scheme} {name}: announced {path}");
-			let broadcast = moq_clock::timeout(TIMEOUT, consumer.request(&path, None))
+			let broadcast = kio::clock::timeout(TIMEOUT, consumer.request(&path, None))
 				.await
 				.unwrap_or_else(|_| panic!("{scheme} {name}: request timeout"))
 				.expect("announced broadcast resolves");
@@ -277,12 +277,12 @@ async fn uring_workers_serve_every_configured_version() {
 				.subscribe(None)
 				.await
 				.expect("subscribe");
-			let mut group = moq_clock::timeout(TIMEOUT, subscription.recv_group())
+			let mut group = kio::clock::timeout(TIMEOUT, subscription.recv_group())
 				.await
 				.unwrap_or_else(|_| panic!("{scheme} {name}: recv_group timeout"))
 				.expect("recv_group failed")
 				.expect("track closed prematurely");
-			let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+			let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 				.await
 				.unwrap_or_else(|_| panic!("{scheme} {name}: read_frame timeout"))
 				.expect("read_frame failed")
@@ -330,14 +330,14 @@ async fn uring_workers_report_link_facts() {
 	}
 
 	// A client can see its session established before the relay lists it.
-	let deadline = moq_clock::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	let views = loop {
 		let views = sessions.list(&Default::default());
 		if views.len() == 4 {
 			break views;
 		}
-		assert!(moq_clock::now() < deadline, "expected 4 sessions: {views:?}");
-		moq_clock::sleep(Duration::from_millis(25)).await;
+		assert!(kio::clock::now() < deadline, "expected 4 sessions: {views:?}");
+		kio::clock::sleep(Duration::from_millis(25)).await;
 	};
 	for view in &views {
 		let remote = view.remote.expect("peer address");
@@ -400,12 +400,12 @@ async fn uring_workers_drain_on_the_trigger() {
 	let pending = admissions.next().await.expect("pending admission");
 	trigger.start();
 	let draining = established.draining().expect("connected");
-	let goaway = moq_clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+	let goaway = kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("no GOAWAY after the trigger")
 		.expect("session closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
-	moq_clock::timeout(TIMEOUT, established.closed())
+	kio::clock::timeout(TIMEOUT, established.closed())
 		.await
 		.expect("the drained session never closed")
 		.expect("a one-shot session leaves cleanly on GOAWAY");
@@ -414,7 +414,7 @@ async fn uring_workers_drain_on_the_trigger() {
 	pending.grant(arrival_consumer);
 	let arrival = arriving.await.expect("arrival task");
 	let draining = arrival.draining().expect("connected");
-	let goaway = moq_clock::timeout(
+	let goaway = kio::clock::timeout(
 		Duration::from_secs(1),
 		moq_net::kio::wait(|waiter| draining.poll(waiter)),
 	)
@@ -422,14 +422,14 @@ async fn uring_workers_drain_on_the_trigger() {
 	.expect("an arrival mid-drain was not sent a GOAWAY")
 	.expect("arrival closed without a GOAWAY");
 	assert_eq!(goaway.uri(), "", "expected a reconnect-to-me GOAWAY");
-	moq_clock::timeout(TIMEOUT, arrival.closed())
+	kio::clock::timeout(TIMEOUT, arrival.closed())
 		.await
 		.expect("the arrival never closed")
 		.expect("a one-shot session leaves cleanly on GOAWAY");
 
 	// `run` joins the worker threads before returning, so returning at all is
 	// the clean join; the rebind proves every worker let go of the port.
-	moq_clock::timeout(TIMEOUT, running)
+	kio::clock::timeout(TIMEOUT, running)
 		.await
 		.expect("run did not return after the drain window")
 		.expect("run panicked")
@@ -475,7 +475,7 @@ async fn workers_publish_their_rotated_certificate_fingerprint() {
 		let routes = relay.web().routes();
 		let serving = tokio::spawn(async move { axum::serve(listener, routes).await });
 		let running = tokio::spawn(relay.run());
-		let result = moq_clock::timeout(TIMEOUT, async {
+		let result = kio::clock::timeout(TIMEOUT, async {
 			for rotated in [false, true] {
 				if rotated {
 					let replacement = tempfile::tempdir_in(dir.path()).expect("replacement directory");
@@ -507,7 +507,7 @@ async fn workers_publish_their_rotated_certificate_fingerprint() {
 		})
 		.await;
 		trigger.start();
-		moq_clock::timeout(TIMEOUT, running)
+		kio::clock::timeout(TIMEOUT, running)
 			.await
 			.expect("relay shutdown")
 			.expect("relay task")
@@ -552,7 +552,7 @@ async fn workers_share_a_generated_identity() {
 		let connection = connect(dial.init(Default::default()).unwrap().with_reconnect(false), url).await;
 		drop(connection);
 		trigger.start();
-		moq_clock::timeout(TIMEOUT, running)
+		kio::clock::timeout(TIMEOUT, running)
 			.await
 			.expect("relay shutdown")
 			.expect("relay task")
@@ -619,13 +619,13 @@ async fn an_mtls_client_authenticates_without_a_token() {
 	let mut announced = consumer.announced();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
 
-	let (update, active) = moq_clock::timeout(TIMEOUT, next_update(&mut announced))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let announced = moq_clock::timeout(TIMEOUT, consumer.request("test", None))
+	let announced = kio::clock::timeout(TIMEOUT, consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("announced broadcast resolves");
@@ -635,12 +635,12 @@ async fn an_mtls_client_authenticates_without_a_token() {
 		.subscribe(None)
 		.await
 		.expect("subscribe");
-	let mut group = moq_clock::timeout(TIMEOUT, subscription.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, subscription.recv_group())
 		.await
 		.expect("recv_group timeout")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
-	let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("read_frame timeout")
 		.expect("read_frame failed")
@@ -697,7 +697,7 @@ async fn uring_workers_write_qlog_traces() {
 	let consumer = subscriber_origin.consume();
 	let mut announced = consumer.announced();
 	let subscriber = connect(client().with_subscriber(subscriber_origin), url).await;
-	let (_, active) = moq_clock::timeout(TIMEOUT, next_update(&mut announced))
+	let (_, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 		.await
 		.expect("announcement timeout")
 		.expect("origin closed");
@@ -713,7 +713,7 @@ async fn uring_workers_write_qlog_traces() {
 	running.abort();
 	let _ = running.await;
 
-	let written = moq_clock::timeout(TIMEOUT, async {
+	let written = kio::clock::timeout(TIMEOUT, async {
 		loop {
 			let files: Vec<_> = std::fs::read_dir(&traces)
 				.expect("read qlog dir")
@@ -723,7 +723,7 @@ async fn uring_workers_write_qlog_traces() {
 			if !files.is_empty() {
 				return files;
 			}
-			moq_clock::sleep(Duration::from_millis(50)).await;
+			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 	})
 	.await
@@ -773,14 +773,14 @@ async fn uring_refusals_reach_metrics() {
 		(2, format!("moql://127.0.0.1:{port}/rooms")),
 	] {
 		let url: url::Url = url.parse().expect("parse url");
-		let connected = moq_clock::timeout(
+		let connected = kio::clock::timeout(
 			TIMEOUT,
 			client().with_reconnect(false).connect(url.clone()).established(),
 		)
 		.await
 		.expect("connect timeout");
 		if let Ok(connection) = connected {
-			let _ = moq_clock::timeout(TIMEOUT, connection.closed())
+			let _ = kio::clock::timeout(TIMEOUT, connection.closed())
 				.await
 				.expect("the workers kept a session they should refuse");
 		}
@@ -858,7 +858,7 @@ async fn uring_forwards_the_setup_token() {
 	let expected = token.clone();
 	let deciding = tokio::spawn(async move {
 		for transport in [moq_auth::Transport::Quic, moq_auth::Transport::WebTransport] {
-			let admission = moq_clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+			let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
 			assert_eq!(admission.request.token, Some(expected.clone()));
 			assert_eq!(admission.request.transport, transport);
 			if transport == moq_auth::Transport::WebTransport {
@@ -908,13 +908,13 @@ async fn uring_forwards_the_setup_token() {
 		let setup = [&[0xaf, 0x00][..], &(params.len() as u16).to_be_bytes(), &params].concat();
 		let mut send = session.open_uni(Default::default()).await.unwrap();
 		send.write_all(&setup[..]).await.unwrap();
-		let mut recv = moq_clock::timeout(TIMEOUT, session.accept_uni())
+		let mut recv = kio::clock::timeout(TIMEOUT, session.accept_uni())
 			.await
 			.unwrap()
 			.unwrap();
 		let mut reply = [0u8; 1];
 		assert_eq!(
-			moq_clock::timeout(TIMEOUT, recv.read(&mut &mut reply[..]))
+			kio::clock::timeout(TIMEOUT, recv.read(&mut &mut reply[..]))
 				.await
 				.unwrap()
 				.unwrap(),
@@ -945,7 +945,7 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 	let deciding = tokio::spawn(async move {
 		let mut leases = Vec::new();
 		for expected in ["quic", "webtransport"] {
-			let admission = moq_clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+			let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
 			let actual = admission.request.transport.as_str();
 			assert!(
 				admission
@@ -1005,17 +1005,17 @@ async fn uring_workers_offer_the_configured_extensions() {
 		let client = dial.init(Default::default()).unwrap();
 		let url = format!("moql://127.0.0.1:{port}/extensions").parse().unwrap();
 		let (connection, ()) = tokio::join!(connect(client, url), async {
-			let admission = moq_clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+			let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
 			assert!(!admission.attached(), "offered {offered}: the session arrived attached");
 			admission.grant(grant());
 		});
 
 		let auth = connection.auth();
-		let presented = moq_clock::timeout(TIMEOUT, auth.add("token"));
+		let presented = kio::clock::timeout(TIMEOUT, auth.add("token"));
 		match offered {
 			true => {
 				let (token, ()) = tokio::join!(presented, async {
-					let admission = moq_clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+					let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
 					assert!(admission.attached(), "an AUTH token arrived as a new session");
 					admission.grant(grant());
 				});
@@ -1063,7 +1063,7 @@ fn uring_workers_bound_stalled_handshakes() {
 		.enable_all()
 		.build()
 		.expect("runtime");
-	let clock = moq_clock::Manual::new().install(runtime.handle());
+	let clock = kio::clock::Manual::new().install(runtime.handle());
 	runtime.block_on(async move {
 		let dir = tempfile::tempdir().expect("tempdir");
 		let (cert, key) = certificate(dir.path());
@@ -1203,7 +1203,7 @@ async fn uring_sessions_log_their_close_under_a_connection_span() {
 	for (id, scheme) in ["moql", "https"].into_iter().enumerate() {
 		let url = format!("{scheme}://127.0.0.1:{port}/logs").parse().unwrap();
 		connections.push(connect(client(), url).await);
-		moq_clock::timeout(TIMEOUT, logs.wait_for(&format!("conn{{id={id} ")))
+		kio::clock::timeout(TIMEOUT, logs.wait_for(&format!("conn{{id={id} ")))
 			.await
 			.expect("negotiated log missing");
 	}
@@ -1213,9 +1213,9 @@ async fn uring_sessions_log_their_close_under_a_connection_span() {
 	for connection in connections {
 		let _ = connection.close().await;
 	}
-	moq_clock::timeout(TIMEOUT, running).await.unwrap().unwrap().unwrap();
+	kio::clock::timeout(TIMEOUT, running).await.unwrap().unwrap().unwrap();
 	for id in 0..2 {
-		moq_clock::timeout(TIMEOUT, logs.wait_for(&format!("connection closed id={id}")))
+		kio::clock::timeout(TIMEOUT, logs.wait_for(&format!("connection closed id={id}")))
 			.await
 			.unwrap_or_else(|_| panic!("conn {id} never logged its close: {}", logs.text()));
 	}

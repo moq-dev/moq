@@ -329,7 +329,8 @@ impl Relay {
 			.with_extensions(server_extensions)
 			.with_implementation(implementation)
 			.with_timeout(handshake_timeout)
-			.with_sessions(sessions.clone());
+			.with_sessions(sessions.clone())
+			.with_tls_acceptor(server.tls_acceptor());
 		#[cfg(feature = "acme")]
 		let web = web.with_acme(acme.as_ref().map(crate::acme::Acme::resolver));
 		let web = web.bind()?;
@@ -444,6 +445,12 @@ impl Relay {
 	/// the config named a source, or once taken.
 	pub fn admissions(&mut self) -> Option<Admissions> {
 		self.admissions.take()
+	}
+
+	/// The RTMP and RTMPS connections the public web listeners classify, for the
+	/// embedder to serve; see [`web::Web::rtmp`]. Untaken, they are logged and closed.
+	pub fn rtmp(&mut self) -> web::rtmp::Incoming {
+		self.web.rtmp()
 	}
 
 	/// The shared cluster: the origin every session and peer publishes into.
@@ -888,7 +895,7 @@ mod tests {
 		let request = Message::builder_request(BINDING, MessageWriteVec::new()).finish();
 		client.send_to(&request, addr).await.unwrap();
 		let mut reply = [0; 44];
-		let (len, sender) = moq_clock::timeout(std::time::Duration::from_secs(5), client.recv_from(&mut reply))
+		let (len, sender) = kio::clock::timeout(std::time::Duration::from_secs(5), client.recv_from(&mut reply))
 			.await
 			.unwrap()
 			.unwrap();
@@ -928,7 +935,7 @@ mod tests {
 			trigger.start();
 			let mut signals = crate::shutdown::Signals::new().unwrap();
 			crate::shutdown::raise(libc::SIGTERM).await;
-			let started = moq_clock::now();
+			let started = kio::clock::now();
 			super::drain(trigger, shutdown, Some(&mut signals)).await;
 			assert_eq!(started.elapsed(), std::time::Duration::ZERO, "waited out the drain");
 		}
