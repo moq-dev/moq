@@ -48,7 +48,13 @@
 //! holds others open, swept over sessions and requests held per session, so a slope
 //! here is per-request bookkeeping growing with the sessions or the requests.
 //!
-//! Everything runs on one current-thread runtime, so the only work measured is
+//! `session_fanout_threads` serves one broadcast's one-frame groups through one relay to 64
+//! viewers on multi-threaded runtimes, timed in process CPU. Each group wakes every
+//! subscription's serve task at once, so a read path that makes them take one shared lock
+//! many times pays for it in lock waits and wakes across workers: the `workers=16` rows
+//! climb above the `workers=1` ones.
+//!
+//! Everything else runs on one current-thread runtime, so the only work measured is
 //! protocol and relay work, never scheduling across threads.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench session`.
@@ -283,40 +289,64 @@ fn runtime() -> tokio::runtime::Runtime {
 		.unwrap()
 }
 
-/// One round's clock; the CPU variant excludes scheduling delays from other processes.
+/// A multi-threaded runtime with `workers` threads, for the scenarios timed in process CPU.
+fn threaded(workers: usize) -> tokio::runtime::Runtime {
+	tokio::runtime::Builder::new_multi_thread()
+		.worker_threads(workers)
+		.enable_time()
+		.build()
+		.unwrap()
+}
+
+/// What a round is timed in.
+#[derive(Clone, Copy)]
+enum Clock {
+	Wall,
+	/// This thread's CPU time, excluding scheduling delays from other processes.
+	Thread,
+	/// Every thread's CPU time, for a multi-threaded runtime: lock waits and wakes across
+	/// its workers count too.
+	Process,
+}
+
+/// One round's clock.
 enum MeasurementClock {
 	Wall(Instant),
 	#[cfg(unix)]
-	Cpu(Duration),
+	Cpu(libc::clockid_t, Duration),
 }
 
 impl MeasurementClock {
-	fn start(cpu: bool) -> Self {
-		if cpu {
-			#[cfg(unix)]
-			return Self::Cpu(Self::cpu());
-			#[cfg(not(unix))]
-			panic!("SESSION_CPU requires Unix thread CPU clocks");
+	fn start(clock: Clock) -> Self {
+		#[cfg(unix)]
+		let id = match clock {
+			Clock::Wall => return Self::Wall(Instant::now()),
+			Clock::Thread => libc::CLOCK_THREAD_CPUTIME_ID,
+			Clock::Process => libc::CLOCK_PROCESS_CPUTIME_ID,
+		};
+		#[cfg(unix)]
+		return Self::Cpu(id, Self::cpu(id));
+		#[cfg(not(unix))]
+		match clock {
+			Clock::Wall => Self::Wall(Instant::now()),
+			_ => panic!("CPU-timed rounds require Unix CPU clocks"),
 		}
-		Self::Wall(Instant::now())
 	}
 
 	fn elapsed(self) -> Duration {
 		match self {
 			Self::Wall(start) => start.elapsed(),
 			#[cfg(unix)]
-			Self::Cpu(start) => Self::cpu()
-				.checked_sub(start)
-				.expect("thread CPU clock moved backwards"),
+			Self::Cpu(id, start) => Self::cpu(id).checked_sub(start).expect("CPU clock moved backwards"),
 		}
 	}
 
 	#[cfg(unix)]
-	fn cpu() -> Duration {
+	fn cpu(id: libc::clockid_t) -> Duration {
 		let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
 		// SAFETY: `time` is a valid, initialized output pointer for this supported clock.
-		let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
-		assert_eq!(result, 0, "thread CPU clock: {}", std::io::Error::last_os_error());
+		let result = unsafe { libc::clock_gettime(id, &mut time) };
+		assert_eq!(result, 0, "CPU clock: {}", std::io::Error::last_os_error());
 		Duration::new(
 			u64::try_from(time.tv_sec).unwrap(),
 			u32::try_from(time.tv_nsec).unwrap(),
@@ -600,7 +630,7 @@ struct Room<B: Backend> {
 	/// The group each viewer's subscriber is reading, when paced, flattened in viewer order.
 	reading: Vec<Option<group::Consumer>>,
 	cache_now: moq_net::time::Instant,
-	cpu: bool,
+	clock: Clock,
 }
 
 impl<B: Backend> Room<B> {
@@ -667,7 +697,10 @@ impl<B: Backend> Room<B> {
 			writing: Vec::new(),
 			reading: Vec::new(),
 			cache_now: moq_net::time::Instant::now(),
-			cpu: std::env::var_os("SESSION_CPU").is_some(),
+			clock: match std::env::var_os("SESSION_CPU") {
+				Some(_) => Clock::Thread,
+				None => Clock::Wall,
+			},
 		};
 		room.writing.resize_with(room.watched.len(), || None);
 		room.reading.resize_with(shape.viewers * shape.watch, || None);
@@ -848,7 +881,7 @@ impl<B: Backend> Room<B> {
 		let mut next_report = Duration::from_secs(10);
 		for _ in 0..iters {
 			self.tick();
-			let start = MeasurementClock::start(self.cpu);
+			let start = MeasurementClock::start(self.clock);
 			self.round().await;
 			elapsed += start.elapsed();
 			if report && began.elapsed() >= next_report {
@@ -1413,6 +1446,40 @@ impl IdleRoom {
 		}
 		start.elapsed()
 	}
+}
+
+/// One relay serving one broadcast's one-frame groups to 64 viewers, as the relay load
+/// harness's `fanout` workload does, on multi-threaded runtimes timed in process CPU; see
+/// the module docs.
+pub(crate) fn fanout_threads<B: Backend>(c: &mut Criterion) {
+	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+		return;
+	}
+	let shape = Shape {
+		publishers: 1,
+		viewers: 64,
+		frame: 400,
+		group_frames: 1,
+		..Shape::BASE
+	};
+	let mut group = c.benchmark_group(format!("{}session_fanout_threads", B::PREFIX));
+	// Groups delivered per round: one to each viewer.
+	group.throughput(Throughput::Elements(shape.viewers as u64));
+	for workers in [1, 16] {
+		let rt = threaded(workers);
+		for version in ["moq-lite-06", "moq-lite-07-wip"] {
+			let mut room = None;
+			group.bench_function(format!("{version}/workers={workers}"), |b| {
+				let room = room.get_or_insert_with(|| {
+					let mut room = rt.block_on(Room::<B>::new(version, shape));
+					room.clock = Clock::Process;
+					room
+				});
+				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
+			});
+		}
+	}
+	group.finish();
 }
 
 pub(crate) fn idle(c: &mut Criterion) {

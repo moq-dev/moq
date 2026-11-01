@@ -51,12 +51,13 @@ futures = { workspace = true }
 moq-clock = { path = "../moq-clock", features = ["sim"] }
 proptest = { workspace = true }
 serde_json = { workspace = true }
-# The benches run on tokio. test-util (tokio::time::pause/advance) is test-only, so
-# it must not leak into the normal dependency feature set.
-tokio = { workspace = true, features = ["rt", "test-util", "time"] }
+# The benches run on tokio, the session fanout bench across worker threads. test-util
+# (tokio::time::pause/advance) is test-only, so it must not leak into the normal
+# dependency feature set.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "test-util", "time"] }
 tracing-test = { workspace = true }
 
-# Optional per-thread CPU timing in the session benchmark.
+# Thread and process CPU timing in the session benchmark.
 [target.'cfg(unix)'.dev-dependencies]
 libc = { workspace = true }
 

@@ -3,8 +3,10 @@
 use std::{collections::VecDeque, future::Future, pin::Pin, task::Poll};
 
 mod cell;
+mod idle;
 mod wake;
 pub(crate) use cell::SendCell;
+pub(crate) use idle::Idle;
 pub(crate) use wake::QueueWake;
 
 /// Prove a future's Send bound here rather than inside every caller's future.

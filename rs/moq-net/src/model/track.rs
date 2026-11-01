@@ -2416,6 +2416,7 @@ impl TrackState {
 		}
 		self.end = Some(end);
 		self.end_error = error;
+		self.cache.declare_end();
 		self.cache.wakes().arrived(fin..);
 		Ok(())
 	}
@@ -6312,6 +6313,11 @@ impl Cursor {
 			let revision = self.subscription.ranges_revision();
 			(revision != self.filter.resolved).then(|| (revision, preferences.ranges.clone()))
 		};
+		// A settled window has nothing to read from the track, whose lock every subscriber
+		// of it takes.
+		if replaced.is_none() && self.filter.window.is_settled() {
+			return false;
+		}
 		let state = self.state.read();
 		let moved = match replaced {
 			Some((revision, ranges)) => {
@@ -6668,15 +6674,16 @@ impl Cursor {
 				order: subscription.order,
 			}
 		};
-		let fills = self.state.read().fills.clone();
 		let misses = self.misses.get_or_insert_with(Box::default);
 		let mut given_up = Vec::new();
 		if misses.lowest().is_some() {
 			misses.retain(from, &below(window.missable(from), cap));
 		}
-		let asks = {
+		// One lock for the judgement and the fills it asks, since every subscriber of the
+		// track probes through it.
+		let (asks, fills) = {
 			let state = self.state.read();
-			misses.judge(
+			let asks = misses.judge(
 				&state,
 				(from, revision, cap),
 				window.named(),
@@ -6694,7 +6701,8 @@ impl Cursor {
 				drift,
 				&mut given_up,
 				waiter,
-			)
+			);
+			(asks, state.fills.clone())
 		};
 		misses.ask(&self.state, &fills, &asks, &asking, &mut given_up);
 		loop {
@@ -6704,7 +6712,10 @@ impl Cursor {
 			}
 			misses.ask(&self.state, &fills, &retry, &asking, &mut given_up);
 		}
-		misses.expire(&self.state.read(), drift, &mut given_up, waiter);
+		// Only what a fill still owes can expire.
+		if misses.is_waiting() {
+			misses.expire(&self.state.read(), drift, &mut given_up, waiter);
+		}
 		if let Some(drops) = &mut self.drops {
 			for run in given_up {
 				drops.give_up(run);
@@ -6715,7 +6726,7 @@ impl Cursor {
 	/// The next group a fill answered for this cursor in its order, cached and not handed
 	/// out yet.
 	fn next_filled(&mut self) -> Option<group::Handle> {
-		let misses = self.misses.as_mut()?;
+		let misses = self.misses.as_mut().filter(|misses| misses.has_filled())?;
 		let order = self.subscription.read().order;
 		let mut given_up = Vec::new();
 		let group = misses.next_filled(&self.state.read(), order, &mut given_up);
@@ -7747,6 +7758,21 @@ impl Subscriber {
 			Poll::Ready(Ok(largest)) => Poll::Ready(largest),
 			Poll::Ready(Err(state)) => Poll::Ready(state.largest()),
 			Poll::Pending => Poll::Pending,
+		}
+	}
+
+	/// The track's declared exclusive end, as [`Self::poll_finished`] reports it, without
+	/// registering a wake. A track that never declared one answers without its lock.
+	pub(super) fn declared_end(&mut self) -> Option<Position> {
+		match &mut self.inner {
+			Inner::Plain(cursor) => match cursor.cache.end_declared() {
+				true => cursor.state.read().end,
+				false => None,
+			},
+			Inner::Resume(..) => match self.poll_finished(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(end)) => Some(end),
+				_ => None,
+			},
 		}
 	}
 

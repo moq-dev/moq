@@ -180,6 +180,11 @@ impl Misses {
 		!self.wanted.is_empty()
 	}
 
+	/// Whether a fill answered a group not handed out yet.
+	pub fn has_filled(&self) -> bool {
+		!self.filled.is_empty()
+	}
+
 	/// The lowest sequence asked and not answered yet.
 	pub fn lowest_wanted(&self) -> Option<u64> {
 		self.wanted.iter().next().map(|run| run.start)
