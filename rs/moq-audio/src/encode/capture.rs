@@ -1029,7 +1029,7 @@ impl Default for Supervisor {
 	fn default() -> Self {
 		Self {
 			next: RETRY_MIN,
-			jitter: |delay| delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0),
+			jitter: |delay| delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0),
 			layout: None,
 		}
 	}
