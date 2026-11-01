@@ -484,14 +484,14 @@ mod tests {
 			let session = request.ok().await.unwrap();
 			(server, identity, sni, session)
 		});
-		let dialed = tokio::time::timeout(Duration::from_secs(5), client.connect(url).established())
+		let dialed = moq_clock::timeout(Duration::from_secs(5), client.connect(url).established())
 			.await
 			.expect("dial timed out");
 		if dialed.is_err() {
 			accept.abort();
 			return None;
 		}
-		let (server, identity, sni, _session) = tokio::time::timeout(Duration::from_secs(5), accept)
+		let (server, identity, sni, _session) = moq_clock::timeout(Duration::from_secs(5), accept)
 			.await
 			.expect("accept timed out")
 			.expect("accept task panicked");
