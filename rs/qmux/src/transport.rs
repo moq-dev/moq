@@ -821,7 +821,7 @@ mod ws_transport {
 
 	use bytes::Bytes;
 	use futures::stream::SplitSink;
-	use moq_clock::{Interval, MissedTickBehavior, Sleep};
+	use kio::clock::{Interval, MissedTickBehavior, Sleep};
 	use tokio::sync::mpsc;
 	use tokio::task::JoinHandle;
 	use tokio_tungstenite::tungstenite;
@@ -901,7 +901,7 @@ mod ws_transport {
 	impl PingState {
 		fn new(config: KeepAlive) -> Self {
 			// The first tick is one interval out, so we don't ping on connect.
-			let mut interval = moq_clock::interval_at(moq_clock::now() + config.interval, config.interval);
+			let mut interval = kio::clock::interval_at(kio::clock::now() + config.interval, config.interval);
 			// Skip catch-up bursts after a long pause; we just want one Ping per tick.
 			interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
 			Self { interval }
@@ -919,13 +919,13 @@ mod ws_transport {
 		fn new(config: KeepAlive) -> Self {
 			let timeout = config.timeout;
 			Self {
-				deadline: moq_clock::sleep(timeout),
+				deadline: kio::clock::sleep(timeout),
 				timeout,
 			}
 		}
 
 		fn observe_recv(&mut self) {
-			self.deadline.reset(moq_clock::now() + self.timeout);
+			self.deadline.reset(kio::clock::now() + self.timeout);
 		}
 	}
 
@@ -1196,7 +1196,7 @@ mod ws_transport {
 
 			// Model a session wedged on a full accept channel: don't read for well
 			// over the 50ms keep-alive timeout while the pump is parked on delivery.
-			moq_clock::sleep(Duration::from_millis(150)).await;
+			kio::clock::sleep(Duration::from_millis(150)).await;
 
 			assert_eq!(
 				rx.recv().await.expect("channel open").expect("no timeout"),
@@ -1222,7 +1222,7 @@ mod ws_transport {
 			let (tx, mut rx) = mpsc::channel(4);
 			let pump = tokio::spawn(ws_pump(stream, Some(DeadlineState::new(ka)), usize::MAX, tx));
 
-			let result = moq_clock::timeout(Duration::from_secs(1), rx.recv())
+			let result = kio::clock::timeout(Duration::from_secs(1), rx.recv())
 				.await
 				.expect("keep-alive deadline should fire on a silent peer");
 			assert!(
@@ -1244,7 +1244,7 @@ mod ws_transport {
 			let pump = tokio::spawn(ws_pump(stream, None, usize::MAX, tx));
 
 			// No deadline, so recv stays pending well past any keep-alive window.
-			let pending = moq_clock::timeout(Duration::from_millis(100), rx.recv()).await;
+			let pending = kio::clock::timeout(Duration::from_millis(100), rx.recv()).await;
 			assert!(pending.is_err(), "recv must not resolve without activity");
 
 			pump.abort();

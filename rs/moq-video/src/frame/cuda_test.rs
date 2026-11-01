@@ -314,7 +314,7 @@ struct Stage {
 
 impl Stage {
 	fn measure<T>(&mut self, f: impl FnOnce() -> T) -> T {
-		let (wall, cpu) = (moq_clock::now(), cpu_now());
+		let (wall, cpu) = (kio::clock::now(), cpu_now());
 		let out = f();
 		self.wall.push(wall.elapsed());
 		self.cpu.push(cpu_now() - cpu);
@@ -384,7 +384,7 @@ async fn vulkan_cuda_three_view_workload() {
 	let (mut encode_hd, mut encode_sd, mut complete) = (Stage::default(), Stage::default(), Stage::default());
 	let mut bytes = (0usize, 0usize);
 	let mut late = 0u64;
-	let mut started = moq_clock::now();
+	let mut started = kio::clock::now();
 
 	for tick_index in 0..WARMUP + TICKS {
 		// Discard the warmup: the first ticks pay for PTX JIT, NVENC's lazy
@@ -399,9 +399,9 @@ async fn vulkan_cuda_three_view_workload() {
 			complete = Stage::default();
 			bytes = (0, 0);
 			late = 0;
-			started = moq_clock::now();
+			started = kio::clock::now();
 		}
-		let deadline = moq_clock::now() + tick;
+		let deadline = kio::clock::now() + tick;
 		let timestamp = moq_net::Timestamp::from_micros(tick_index * 33_333).unwrap();
 
 		for (producer, slot, hd, small, signal) in &mut views {
@@ -430,7 +430,7 @@ async fn vulkan_cuda_three_view_workload() {
 				.expect("encode SD");
 			bytes.1 += packets.iter().map(|p| p.payload.len()).sum::<usize>();
 
-			let (wall, cpu) = (moq_clock::now(), cpu_now());
+			let (wall, cpu) = (kio::clock::now(), cpu_now());
 			let returned = completion.wait().await.expect("completion worker stopped");
 			complete.wall.push(wall.elapsed());
 			complete.cpu.push(cpu_now() - cpu);
@@ -443,8 +443,8 @@ async fn vulkan_cuda_three_view_workload() {
 			*slot = Some(returned);
 		}
 
-		match deadline.checked_duration_since(moq_clock::now()) {
-			Some(idle) => moq_clock::sleep(idle).await,
+		match deadline.checked_duration_since(kio::clock::now()) {
+			Some(idle) => kio::clock::sleep(idle).await,
 			None => late += 1,
 		}
 	}

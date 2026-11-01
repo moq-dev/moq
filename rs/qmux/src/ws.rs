@@ -522,7 +522,7 @@ mod tests {
 		frame.extend_from_slice(&[0; 4]);
 		client.write_all(&frame).await.unwrap();
 
-		moq_clock::timeout(Duration::from_secs(1), session.closed())
+		kio::clock::timeout(Duration::from_secs(1), session.closed())
 			.await
 			.expect("the socket waited to buffer a frame larger than a record");
 	}
