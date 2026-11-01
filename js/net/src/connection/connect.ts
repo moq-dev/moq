@@ -733,8 +733,9 @@ const FINGERPRINT_HEX_LENGTH = 64;
 /**
  * Fetch the SHA-256 certificate fingerprint served at `url`, or `undefined` once `cancel` resolves.
  *
- * Resolving `cancel` aborts the request. The body is read incrementally and refused as soon as it
- * outgrows a fingerprint, so a reply with no `Content-Length` cannot hold more than that in memory.
+ * Resolving `cancel` aborts the request. The body is read chunk by chunk and refused at the first
+ * chunk that takes it past a fingerprint, so a reply with no `Content-Length` cannot accumulate:
+ * it holds at most a fingerprint plus the one chunk the network stack handed over.
  */
 async function fetchFingerprint(url: URL, cancel: Promise<void>): Promise<Uint8Array<ArrayBuffer> | undefined> {
 	const controller = new AbortController();
