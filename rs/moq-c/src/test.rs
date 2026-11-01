@@ -7,6 +7,13 @@ use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+/// A ten-second max delay, the media consumers' usual budget here.
+const TEN_SECONDS: moq_delay = moq_delay {
+	min_us: 0,
+	max_us: 10_000_000,
+	max_unlimited: false,
+};
+
 /// Convert a positive `i32` return value to `u32`, panicking on error.
 fn id(raw: i32) -> u32 {
 	assert!(raw > 0, "expected positive id, got {raw}");
@@ -1405,7 +1412,7 @@ fn raw_loc_video_uses_the_declared_catalog_container() {
 	assert!(video_cfg.container.init.is_null());
 
 	let frame_cb = Callback::new();
-	let consumer = id(unsafe { moq_consume_video(catalog, 0, 10_000_000, Some(channel_callback), frame_cb.ptr) });
+	let consumer = id(unsafe { moq_consume_video(catalog, 0, &TEN_SECONDS, Some(channel_callback), frame_cb.ptr) });
 
 	let timestamp_us = 42_000;
 	let payload = b"codec frame";
@@ -2940,7 +2947,7 @@ fn double_close_all_resource_types() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_audio(catalog_id, 0, &TEN_SECONDS, Some(channel_callback), frame_cb.ptr) });
 
 	let payload = b"test";
 	assert_eq!(
@@ -4173,7 +4180,7 @@ fn local_publish_consume() {
 	);
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_audio(catalog_id, 0, &TEN_SECONDS, Some(channel_callback), frame_cb.ptr) });
 
 	let payload = b"opus audio payload data";
 	let timestamp_us: u64 = 1_000_000;
@@ -4338,7 +4345,7 @@ fn consume_audio_follows_a_sibling_broadcast_reference() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_audio(catalog_id, 0, &TEN_SECONDS, Some(channel_callback), frame_cb.ptr) });
 
 	// Published on the sibling, so it only arrives if the reference was followed.
 	let payload = b"opus audio payload data";
@@ -4804,7 +4811,7 @@ fn video_publish_consume() {
 	);
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_video(catalog_id, 0, 10_000_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_video(catalog_id, 0, &TEN_SECONDS, Some(channel_callback), frame_cb.ptr) });
 
 	let keyframe = [0x00, 0x00, 0x00, 0x01, 0x65, 0xAA, 0xBB, 0xCC];
 	assert_eq!(
@@ -4997,7 +5004,10 @@ fn audio_raw_decode_reads_the_encoder_end() {
 		format: moq_audio_sample_format::MOQ_AUDIO_SAMPLE_FORMAT_F32 as u32,
 		sample_rate: 0,
 		channels: 0,
-		max_delay_us: 30_000_000,
+		delay: moq_delay {
+			max_us: 30_000_000,
+			..moq_delay::default()
+		},
 		start: 0,
 	};
 	let read_cb = Callback::new();
@@ -5099,7 +5109,10 @@ fn video_raw_publish_consume() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let decoder = moq_video_decoder_output {
-		max_delay_us: 10_000_000,
+		delay: moq_delay {
+			max_us: 10_000_000,
+			..moq_delay::default()
+		},
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 0,
 		height: 0,
@@ -5167,7 +5180,7 @@ fn video_raw_decode_output_rejected() {
 	use crate::ffi::ReturnCode;
 
 	let bad_format = moq_video_decoder_output {
-		max_delay_us: 0,
+		delay: moq_delay::default(),
 		format: 999,
 		width: 0,
 		height: 0,
@@ -5179,7 +5192,7 @@ fn video_raw_decode_output_rejected() {
 	);
 
 	let bad_start = moq_video_decoder_output {
-		max_delay_us: 0,
+		delay: moq_delay::default(),
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 0,
 		height: 0,
@@ -5192,7 +5205,7 @@ fn video_raw_decode_output_rejected() {
 
 	for (width, height) in [(320, 0), (0, 240), (321, 240), (320, 241), (u32::MAX - 1, u32::MAX - 1)] {
 		let bad_size = moq_video_decoder_output {
-			max_delay_us: 0,
+			delay: moq_delay::default(),
 			format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 			width,
 			height,
@@ -5211,7 +5224,7 @@ fn video_raw_decode_output_rejected() {
 	);
 
 	let valid = moq_video_decoder_output {
-		max_delay_us: 0,
+		delay: moq_delay::default(),
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 160,
 		height: 120,
@@ -5311,7 +5324,10 @@ fn decode_first_frame(output: &moq_video_decoder_output) -> (u32, u32, usize) {
 #[test]
 fn video_raw_decode_rgba() {
 	let output = moq_video_decoder_output {
-		max_delay_us: 10_000_000,
+		delay: moq_delay {
+			max_us: 10_000_000,
+			..moq_delay::default()
+		},
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_RGBA as u32,
 		width: 0,
 		height: 0,
@@ -5325,7 +5341,10 @@ fn video_raw_decode_rgba() {
 #[test]
 fn video_raw_decode_resize() {
 	let output = moq_video_decoder_output {
-		max_delay_us: 10_000_000,
+		delay: moq_delay {
+			max_us: 10_000_000,
+			..moq_delay::default()
+		},
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 160,
 		height: 120,
@@ -5732,7 +5751,10 @@ fn video_raw_decode() {
 
 	// Subscribe + decode before publishing frames so the keyframe group is delivered.
 	let output = moq_video_decoder_output {
-		max_delay_us: 10_000_000,
+		delay: moq_delay {
+			max_us: 10_000_000,
+			..moq_delay::default()
+		},
 		format: moq_video_pixel_format::MOQ_VIDEO_PIXEL_FORMAT_I420 as u32,
 		width: 0,
 		height: 0,
@@ -5804,7 +5826,7 @@ fn multiple_frames_ordering() {
 	let catalog_id = id(catalog_cb.recv());
 
 	let frame_cb = Callback::new();
-	let track = id(unsafe { moq_consume_audio(catalog_id, 0, 10_000_000, Some(channel_callback), frame_cb.ptr) });
+	let track = id(unsafe { moq_consume_audio(catalog_id, 0, &TEN_SECONDS, Some(channel_callback), frame_cb.ptr) });
 
 	let timestamps: [u64; 5] = [0, 20_000, 40_000, 60_000, 80_000];
 	for (i, &ts) in timestamps.iter().enumerate() {
@@ -6203,8 +6225,8 @@ fn defaults_report_what_a_zeroed_config_dials() {
 	);
 }
 
-/// Zero is a real setting for these two, not "unset": retry forever, and no
-/// keep-alive pings. The flag is what carries that distinction.
+/// Presence flags preserve explicit zero durations; backoff zero retries forever,
+/// while keep-alive zero resolves to the derived interval.
 #[test]
 fn zero_with_a_flag_set_is_a_real_value() {
 	let mut config = client_config();

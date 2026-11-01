@@ -74,8 +74,9 @@ pub enum Error {
 	#[error("peer connection closed")]
 	Closed,
 
-	/// ICE never connected before the establishment deadline.
-	#[error("ICE did not connect before the establishment deadline")]
+	/// ICE never connected before the establishment deadline, or before the DTLS
+	/// handshake gave up waiting for it.
+	#[error("ICE did not connect in time")]
 	Timeout,
 
 	/// The WebRTC stack failed (DTLS, SCTP, or ICE state).
@@ -452,7 +453,7 @@ impl Peer {
 			taken: false,
 		};
 		use tracing::Instrument;
-		crate::runtime::spawn(driver.run().instrument(tracing::Span::current()));
+		crate::runtime::spawn(crate::panic::isolate(driver.run()).instrument(tracing::Span::current()));
 
 		let resolver = Resolver::spawn(commands.clone(), resolver::Mdns);
 		Ok(Self {

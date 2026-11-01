@@ -54,7 +54,8 @@ async fn a_cursor_records_a_publisher_without_fetch() {
 			.await
 			.expect("request timed out")
 			.expect("remote broadcast");
-		let broadcaster = Broadcaster::new(moq_mux::Source::new(origin, remote), Default::default());
+		let (broadcaster, driver) = Broadcaster::new(moq_mux::Source::new(origin, remote), Default::default());
+		tokio::spawn(driver.run());
 		// Recorded as soon as the catalog lists it with its records, as a recorder does.
 		let mut renditions = broadcaster.renditions();
 		let rendition = match kio::clock::timeout(TIMEOUT, renditions.next()).await {

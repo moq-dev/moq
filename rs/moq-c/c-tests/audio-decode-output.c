@@ -96,7 +96,7 @@ static void on_read(void *data, int32_t id) {
 
 int main(void) {
     Context c = {.mutex = PTHREAD_MUTEX_INITIALIZER, .changed = PTHREAD_COND_INITIALIZER};
-    moq_audio_decoder_output invalid = {999, 0, 0, 0};
+    moq_audio_decoder_output invalid = {999, 0, 0, {0}};
     CHECK(moq_decode_audio(INT32_MAX, 0, &invalid, on_read, &c) == -15);
     CHECK(moq_decode_audio(INT32_MAX, 0, NULL, on_read, &c) == -6);
 
@@ -141,7 +141,7 @@ int main(void) {
     for (size_t format = 0; format < sizeof(formats) / sizeof(formats[0]); format++) {
         for (uint32_t channels = 1; channels <= 2; channels++) {
             c.format = formats[format]; c.channels = channels; c.frames = 0; c.decode_done = 0;
-            moq_audio_decoder_output decoded = {c.format, 48000, channels, 30000000};
+            moq_audio_decoder_output decoded = {c.format, 48000, channels, {.max_us = 30000000}};
             int32_t decoder = moq_decode_audio((uint32_t)c.catalog, 0, &decoded, on_read, &c);
             CHECK(decoder > 0);
             pthread_mutex_lock(&c.mutex);

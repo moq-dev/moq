@@ -427,9 +427,8 @@ fps = "24:60"
 url = "https://example.com"
 tls.insecure = true
 "#;
-		let dir = std::env::temp_dir().join("moq-bench-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("bench.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("bench.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		// No CLI flag: TOML values survive the re-parse.
@@ -469,9 +468,8 @@ output = "stats.jsonl"
 [client]
 url = "https://example.com"
 "#;
-		let dir = std::env::temp_dir().join("moq-bench-output-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("bench.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("bench.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![
@@ -570,9 +568,8 @@ url = "https://example.com"
 		if !test_env::Env::default().set("MOQ_BENCH_NAME", "from-env").isolate() {
 			return;
 		}
-		let dir = std::env::temp_dir().join("moq-bench-provenance");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("bench.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("bench.toml");
 		std::fs::write(&path, "name = \"from-file\"\nconnections = 100\n").unwrap();
 
 		let config = Config::parse_and_merge([
@@ -600,9 +597,8 @@ url = "https://example.com"
 	/// Provenance has to follow that alias, or `source("connect.url")` looks unset.
 	#[test]
 	fn file_client_table_records_connect_provenance() {
-		let dir = std::env::temp_dir().join("moq-bench-client-provenance");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("bench.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("bench.toml");
 		std::fs::write(&path, "[client]\nurl = \"https://from-file.example\"\n").unwrap();
 
 		let config = Config::parse_and_merge([

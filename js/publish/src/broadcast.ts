@@ -8,7 +8,8 @@ import { rotateVideoDimensions } from "@moq/video";
 import { CatalogProducer } from "./catalog";
 import { errors } from "./internal";
 import { Order } from "./order";
-import { type Kind, Rendition } from "./rendition";
+import type { Kind, Rendition } from "./rendition";
+import { makeRendition } from "./rendition-internal";
 
 // The refresh ratio video tracks advertise: a joiner forces a keyframe once a group's deltas
 // outweigh twice its keyframe. Matches moq-video's capture `REFRESH`; see it for the measurements.
@@ -204,7 +205,7 @@ export class Broadcast {
 		const track = new Signal<Moq.Track.Producer | undefined>(undefined);
 		this.#tracks.set(name, track);
 
-		const rendition = new Rendition<C>(name, kind, track, () => this.#unregister(name));
+		const rendition = makeRendition<C>(name, kind, track, () => this.#unregister(name));
 		this.#renditions.update((renditions) => ({ ...renditions, [name]: rendition as Rendition<unknown> }));
 
 		return rendition;
