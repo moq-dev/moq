@@ -10,7 +10,7 @@ use moq_clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Tier, Traffic, TrafficEntry};
 use moq_net::{Epoch, Path, broadcast, kio, origin, track};
 use serde::Serialize;
-use web_async::spawn;
+use tracing::Instrument as _;
 
 use crate::{
 	Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track, presence_track, totals_track,
@@ -196,7 +196,7 @@ impl Producer {
 			linger,
 			interval,
 		};
-		spawn(task.run(Arc::downgrade(&keepalive)));
+		tokio::spawn(task.run(Arc::downgrade(&keepalive)).in_current_span());
 
 		Self {
 			registry,
@@ -538,8 +538,8 @@ impl<V: Serialize> Output<V> {
 		}
 	}
 
-	/// Whether any consumer exists.
-	fn is_used(&self) -> bool {
+	/// Whether anyone wants the output.
+	fn is_wanted(&self) -> bool {
 		self.snapshot.demand().wanted().is_some()
 	}
 
@@ -1126,14 +1126,14 @@ impl NodePublisher {
 		// Reclaim before adopting, so a request for a track just reclaimed is
 		// served again by this very drain.
 		self.presence.retain(|_, track| {
-			if track.output.is_used() {
+			if track.output.is_wanted() {
 				return true;
 			}
 			track.output.finish();
 			false
 		});
 		self.prefixes.retain(|_, track| {
-			if track.output.is_used() {
+			if track.output.is_wanted() {
 				return true;
 			}
 			track.output.finish();
@@ -1604,7 +1604,8 @@ mod tests {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}

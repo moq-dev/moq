@@ -447,7 +447,7 @@ impl Leg {
 				clock.advance(deadline.max(clock.now()));
 				continue;
 			}
-			match tokio::time::timeout(Duration::from_millis(10), self.export.next()).await {
+			match moq_clock::timeout(Duration::from_millis(10), self.export.next()).await {
 				Ok(Ok(Some(frame))) => self.out.push((moq_clock::now(), frame)),
 				Ok(Ok(None)) => break,
 				Err(_) if self.export.next_due().is_none() => break,
