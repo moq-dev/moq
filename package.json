@@ -44,6 +44,7 @@
 		"js/pattern",
 		"js/auth",
 		"js/e2ee",
+		"js/sign",
 		"js/json",
 		"js/libav",
 		"js/hang",
@@ -55,7 +56,6 @@
 		"js/room",
 		"js/signals",
 		"js/ui",
-		"js/wasm",
 		"demo/boy",
 		"demo/web",
 		"demo/carla/web",
@@ -67,8 +67,7 @@
 		"test/receive-credit",
 		"test/video",
 		"test/p2p",
-		"test/qmux",
-		"test/wasm"
+		"test/qmux"
 	],
 	"patchedDependencies": {
 		"typedoc@0.28.20": "patches/typedoc@0.28.20.patch"

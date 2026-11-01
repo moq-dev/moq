@@ -33,5 +33,8 @@ cfg_aliases = "0.2"
 rand = "0.10"
 tracing-test = "0.2"
 
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+nix = { workspace = true }
+
 [lints]
 workspace = true

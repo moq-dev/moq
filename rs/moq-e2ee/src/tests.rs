@@ -6,6 +6,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
+use rind::{aead, hmac};
 use serde_json::Value;
 
 use crate::credential::{Config, Credential};
@@ -13,13 +14,12 @@ use crate::datagram::Event;
 use crate::error::Error;
 use crate::generation::{Consumer, Domain, Producer, name_key_info, name_mac_info};
 use crate::limits::{
-	DATAGRAM_WINDOW, KEY_LABEL, KEY_LEN, MAX_DATAGRAM_BODY, MAX_DATAGRAM_HEADER, MAX_DATAGRAM_PAYLOAD,
-	MAX_DATAGRAM_PLAINTEXT, MAX_GROUPED_PAYLOAD, MAX_GROUPED_PLAINTEXT, MAX_INVOCATIONS, MAX_PLAINTEXT_BYTES, MAX_U53,
-	NAME_BLOCK, NAME_KEY_LABEL, NAME_MAC_LABEL, NAME_MAC_LEN, NAME_NONCE_LEN, PATH_LABEL, PATH_LEN, PROFILE,
-	SECRET_LEN, TAG_LEN,
+	DATAGRAM_WINDOW, KEY_LABEL, MAX_DATAGRAM_BODY, MAX_DATAGRAM_HEADER, MAX_DATAGRAM_PAYLOAD, MAX_DATAGRAM_PLAINTEXT,
+	MAX_GROUPED_PAYLOAD, MAX_GROUPED_PLAINTEXT, MAX_INVOCATIONS, MAX_PLAINTEXT_BYTES, MAX_U53, NAME_BLOCK,
+	NAME_KEY_LABEL, NAME_MAC_LABEL, NAME_NONCE_LEN, PATH_LABEL, PATH_LEN, PROFILE, SECRET_LEN, TAG_LEN,
 };
 use crate::name::{Name, pad};
-use crate::protect::{nonce, open, protect};
+use crate::protect::{nonce, protect};
 use crate::{group, track};
 use moq_net::Epoch;
 
@@ -27,6 +27,10 @@ use moq_net::Epoch;
 fn timed() -> moq_net::track::Info {
 	moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
 }
+
+/// Raw lengths of the derived AES-128-GCM and HMAC-SHA-256 keys, which the vectors pin.
+const KEY_LEN: usize = 16;
+const NAME_MAC_LEN: usize = 32;
 
 const VECTORS: &str = include_str!("../../../drafts/moq-e2ee-00.json");
 
@@ -91,6 +95,13 @@ fn identity_u64(value: &Value) -> Result<u64, Error> {
 	}
 }
 
+/// The raw track key bytes the vectors pin; production only derives the expanded key.
+fn key_bytes(generation: &Consumer, semantic: &str, domain: Domain) -> [u8; KEY_LEN] {
+	generation
+		.credential()
+		.expand(&generation.key_info(semantic, domain).unwrap())
+}
+
 fn semantic_from(row: &Value) -> String {
 	let bytes = unhex(row["semantic_name_bytes"].as_str().unwrap());
 	assert_eq!(bytes, row["semantic_name"].as_str().unwrap().as_bytes());
@@ -111,8 +122,10 @@ fn constants_match_vectors() {
 	assert_eq!(c["domain_datagram"], Domain::Datagram as u8);
 	assert_eq!(c["tag_len"], TAG_LEN);
 	assert_eq!(c["key_len"], KEY_LEN);
+	assert_eq!(KEY_LEN, aead::AES_128_GCM.key_len());
 	assert_eq!(c["path_len"], PATH_LEN);
 	assert_eq!(c["name_mac_len"], NAME_MAC_LEN);
+	assert_eq!(NAME_MAC_LEN, hmac::HMAC_SHA256.tag_len());
 	assert_eq!(c["name_nonce_len"], NAME_NONCE_LEN);
 	assert_eq!(c["name_block"], NAME_BLOCK);
 	assert_eq!(c["max_u53"], MAX_U53);
@@ -171,10 +184,7 @@ fn derivation_vectors() {
 			hex::encode(generation.key_info(&semantic, domain).unwrap()),
 			row["key_info"]
 		);
-		assert_eq!(
-			hex::encode(generation.key_bytes(&semantic, domain).unwrap()),
-			row["key"]
-		);
+		assert_eq!(hex::encode(key_bytes(&generation, &semantic, domain)), row["key"]);
 	}
 }
 
@@ -201,16 +211,17 @@ fn payload_row(row: &Value) {
 	let semantic = row["semantic_name"].as_str().unwrap();
 	let name = generation.name(semantic).unwrap();
 	assert_eq!(name.as_str(), row["physical_name"]);
-	let key = generation.key_bytes(semantic, domain_from(row)).unwrap();
-	assert_eq!(hex::encode(key), row["key"]);
+	let domain = domain_from(row);
+	assert_eq!(hex::encode(key_bytes(&generation, semantic, domain)), row["key"]);
+	let mut key = generation.key(semantic, domain).unwrap();
 	let group = row["group"].as_u64().unwrap();
 	let frame = row["frame"].as_u64().unwrap();
 	assert_eq!(hex::encode(nonce(group, frame).unwrap()), row["nonce"]);
 	let plaintext = unhex(row["plaintext"].as_str().unwrap());
 	let limit = row["payload_limit"].as_u64().unwrap() as usize;
-	let payload = protect(&key, group, frame, &plaintext, limit).unwrap();
+	let payload = key.protect(group, frame, &plaintext, limit).unwrap();
 	assert_eq!(hex::encode(&payload), row["payload"], "{}", row["id"]);
-	let opened = open(&key, group, frame, &payload, limit).unwrap();
+	let opened = key.open(group, frame, &payload, limit).unwrap();
 	assert_eq!(&opened[..], &plaintext[..]);
 }
 
@@ -241,13 +252,14 @@ fn negative_vectors() {
 			"open" => {
 				let generation = generation_from(&row["generation"]).unwrap();
 				let semantic = row["semantic_name"].as_str().unwrap();
-				let key = generation.key_bytes(semantic, domain_from(row)).unwrap();
-				assert_eq!(hex::encode(key), row["key"]);
+				let domain = domain_from(row);
+				assert_eq!(hex::encode(key_bytes(&generation, semantic, domain)), row["key"]);
+				let mut key = generation.key(semantic, domain).unwrap();
 				let group = row["group"].as_u64().unwrap();
 				let frame = row["frame"].as_u64().unwrap();
 				let payload = unhex(row["payload"].as_str().unwrap());
 				let limit = row["payload_limit"].as_u64().unwrap() as usize;
-				code(&open(&key, group, frame, &payload, limit).unwrap_err())
+				code(&key.open(group, frame, &payload, limit).unwrap_err())
 			}
 			"identity" => match (identity_u64(&row["group"]), identity_u64(&row["frame"])) {
 				(Ok(g), Ok(f)) => code(&nonce(g, f).err().unwrap_or_else(|| panic!("{id} should fail"))),
@@ -290,7 +302,7 @@ fn negative_vectors() {
 				}
 			}
 			"protect" => {
-				let key = <[u8; KEY_LEN]>::try_from(unhex(row["key"].as_str().unwrap())).unwrap();
+				let key = aead::Key::new(&aead::AES_128_GCM, &unhex(row["key"].as_str().unwrap())).unwrap();
 				let group = row["group"].as_u64().unwrap();
 				let frame = row["frame"].as_u64().unwrap();
 				let plaintext = vec![0u8; row["plaintext_len"].as_u64().unwrap() as usize];
@@ -384,8 +396,8 @@ fn recv_datagram(consumer: &mut track::Consumer) -> Event {
 }
 
 fn datagram_ciphertext(generation: &Consumer, semantic: &str, sequence: u64, plaintext: &[u8]) -> Bytes {
-	let key = generation.key_bytes(semantic, Domain::Datagram).unwrap();
-	protect(&key, sequence, 0, plaintext, MAX_DATAGRAM_PAYLOAD).unwrap()
+	let mut key = generation.key(semantic, Domain::Datagram).unwrap();
+	key.protect(sequence, 0, plaintext, MAX_DATAGRAM_PAYLOAD).unwrap()
 }
 
 #[test]
@@ -718,8 +730,8 @@ fn grouped_authentication_ends_track() {
 
 	// Tamper with a second group by writing ciphertext directly.
 	let semantic = pair.semantic.as_str();
-	let key = pair.generation.key_bytes(semantic, Domain::Group).unwrap();
-	let mut payload = protect(&key, 1, 0, b"ok", MAX_GROUPED_PAYLOAD).unwrap().to_vec();
+	let mut key = pair.generation.key(semantic, Domain::Group).unwrap();
+	let mut payload = key.protect(1, 0, b"ok", MAX_GROUPED_PAYLOAD).unwrap().to_vec();
 	payload[0] ^= 1;
 	let mut bad = pair.net.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 	bad.write_frame(ms(2), payload).unwrap();
@@ -793,13 +805,13 @@ fn grouped_failure_wakes_pending_reads_and_releases_demand() {
 
 	// One authentic frame, then silence. The group and the track stay open.
 	let semantic = pair.semantic.as_str();
-	let key = pair.generation.key_bytes(semantic, Domain::Group).unwrap();
+	let mut key = pair.generation.key(semantic, Domain::Group).unwrap();
 	let mut open = pair.net.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 	let open_demand = open.demand();
-	open.write_frame(ms(1), protect(&key, 0, 0, b"ok", MAX_GROUPED_PAYLOAD).unwrap())
+	open.write_frame(ms(1), key.protect(0, 0, b"ok", MAX_GROUPED_PAYLOAD).unwrap())
 		.unwrap();
 
-	let mut payload = protect(&key, 1, 0, b"nope", MAX_GROUPED_PAYLOAD).unwrap().to_vec();
+	let mut payload = key.protect(1, 0, b"nope", MAX_GROUPED_PAYLOAD).unwrap().to_vec();
 	payload[0] ^= 1;
 	let mut bad = pair.net.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
 	let bad_demand = bad.demand();
