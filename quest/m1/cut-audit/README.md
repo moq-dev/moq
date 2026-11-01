@@ -42,7 +42,7 @@ internal and can ship after the cut:
 [moq-transport request leases](/quest/m2/ietf-request-lease.md),
 [group heads filled in place](/quest/m2/ietf-fill-refill.md),
 [one relay serve path](/quest/m2/relay-serve-path.md),
-[moqsrc pad actors](/quest/m2/moqsrc-pad-actor.md), and
+moqsrc pad actors (since landed), and
 [publish rendition identity](/quest/m2/publish-publication.md). Other
 redesign evidence went into the quests that already own the mechanism:
 [subscribe ranges](/quest/m1/subscribe-ranges/README.md),
