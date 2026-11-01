@@ -19,15 +19,13 @@ use crate::transport::poll::{GroupOf, SendOptions};
 use crate::{
 	DecodeError, Error, Timescale, Timestamp,
 	coding::{Encode as _, Encoder, Stream, Writer},
-	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
+	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, Location, RequestId},
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
-	util::{MaybeBoxedExt, MaybeSendBox},
+	util::BoxFuture,
 };
 
 use super::{Message, Version, cluster, error::request, peer, request_update};
-
-mod tracks;
 
 /// Preserve retained groups when the subscriber supplies no age budget.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
@@ -800,8 +798,6 @@ pub(super) struct Publisher {
 	pub(super) subscriptions: crate::session::Slots,
 	// Ranks every subscription's group streams against each other for the transport.
 	priority: PriorityQueue,
-	// The peer's SUBSCRIBE_TRACKS requests and the PUBLISHes they made.
-	listings: kio::Shared<tracks::Listings>,
 }
 
 /// Authorization selected by dispatch: a standalone path or a live parent subscription.
@@ -810,11 +806,15 @@ enum FetchGate {
 	Joining { id: RequestId, auth: crate::auth::Link },
 }
 
-struct Serve(Arc<AtomicUsize>);
+/// A dispatched SUBSCRIBE or FETCH serve, counted until dropped.
+struct Serve {
+	owed: Arc<AtomicUsize>,
+	_working: crate::session::Working,
+}
 
 impl Drop for Serve {
 	fn drop(&mut self) {
-		self.0.fetch_sub(1, Ordering::Relaxed);
+		self.owed.fetch_sub(1, Ordering::Relaxed);
 	}
 }
 
@@ -884,7 +884,14 @@ impl Publisher {
 			owed: Default::default(),
 			subscriptions: Default::default(),
 			priority: Default::default(),
-			listings: Default::default(),
+		}
+	}
+
+	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one
+	/// unless the subscription forwards.
+	fn pause_join(&self, join: Option<&Join<GroupOf<Transport>>>) {
+		if let Some(join) = join {
+			join.joins.lock().insert(join.request_id, Some(Joined::Empty));
 		}
 	}
 
@@ -1018,13 +1025,16 @@ impl Publisher {
 		body: ietf::Body,
 		stream: Stream<Transport, Version>,
 		epochs: bool,
-	) -> Result<MaybeSendBox<'static, ()>, Error> {
+	) -> Result<BoxFuture<'static, ()>, Error> {
 		let this = self.clone();
 		let mut data = body.decoder(this.version);
 		// Count at dispatch so close cannot pass a request waiting for its first poll.
 		let serve = matches!(id, ietf::Subscribe::ID | ietf::Fetch::ID).then(|| {
 			self.owed.fetch_add(1, Ordering::Relaxed);
-			Serve(self.owed.clone())
+			Serve {
+				owed: self.owed.clone(),
+				_working: self.session.work().start(),
+			}
 		});
 		let task = match id {
 			ietf::Subscribe::ID => {
@@ -1057,7 +1067,7 @@ impl Publisher {
 						tracing::debug!(%err, "subscribe stream error");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			ietf::Fetch::ID => {
 				let msg = match ietf::Fetch::decode_msg(&mut data, this.version) {
@@ -1086,7 +1096,7 @@ impl Publisher {
 						tracing::debug!(%err, "fetch stream error");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			ietf::SubscribeNamespace::ID => {
 				let msg = match ietf::SubscribeNamespace::decode_msg(&mut data, this.version) {
@@ -1121,7 +1131,7 @@ impl Publisher {
 						Ok(()) => {}
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			ietf::SubscribeTracks::ID => {
 				let msg = match ietf::SubscribeTracks::decode_msg(&mut data, this.version) {
@@ -1139,12 +1149,20 @@ impl Publisher {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received subscribe_tracks");
+				// We list no tracks by PUBLISH, so each listing is refused on its own and the
+				// session stays up. Decoded first, so a refusal still admits its Request ID.
+				let error =
+					super::namespace::refusal(&msg.prefix, this.version).unwrap_or_else(|| ietf::RequestError {
+						error_code: request::NOT_SUPPORTED,
+						reason_phrase: "SUBSCRIBE_TRACKS is not supported".into(),
+						retry_interval: 0,
+					});
 				async move {
-					if let Err(err) = this.serve_subscribe_tracks_stream(stream, msg).await {
-						tracing::debug!(%err, "subscribe_tracks stream error");
+					if let Err(err) = super::request_stream::reject(stream, error).await {
+						tracing::debug!(%err, "subscribe_tracks refusal failed");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			ietf::TrackStatus::ID => {
 				let msg = match ietf::TrackStatus::decode_msg(&mut data, this.version) {
@@ -1176,7 +1194,7 @@ impl Publisher {
 						tracing::debug!(%err, "track_status stream error");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type for publisher");
@@ -1194,7 +1212,7 @@ impl Publisher {
 		kind: request::Kind,
 		err: DecodeError,
 		serve: Option<Serve>,
-	) -> MaybeSendBox<'static, ()> {
+	) -> BoxFuture<'static, ()> {
 		let version = self.version;
 		async move {
 			let _serve = serve;
@@ -1202,7 +1220,7 @@ impl Publisher {
 				tracing::debug!(%err, "token refusal failed");
 			}
 		}
-		.maybe_boxed()
+		.boxed()
 	}
 
 	/// Handle a SUBSCRIBE on its bidi stream.
@@ -1233,25 +1251,6 @@ impl Publisher {
 			if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
 				return super::request_stream::reject(stream, error).await;
 			}
-			// Draft-18 allows one subscription per track and role (section 5.1), so a track a
-			// SUBSCRIBE_TRACKS PUBLISHed is subscribed already, and one subscribed here is not
-			// PUBLISHed. Later drafts dropped the rule.
-			let _subscribed = match self.version {
-				Version::Draft18 => {
-					match tracks::Subscribed::subscribe(&self.listings, &msg.track_namespace, &msg.track_name) {
-						Some(subscribed) => Some(subscribed),
-						None => {
-							let error = ietf::RequestError {
-								error_code: request::DUPLICATE_SUBSCRIPTION,
-								reason_phrase: "the track is PUBLISHed to this session".into(),
-								retry_interval: 0,
-							};
-							return super::request_stream::reject(stream, error).await;
-						}
-					}
-				}
-				_ => None,
-			};
 			let request_id = msg.request_id;
 			let track_name = msg.track_name.clone();
 			// Logged beside the root rather than joined, so a namespace too long under it is
@@ -5866,7 +5865,7 @@ mod group_priority_test {
 					assert!(serve.poll(&kio::Waiter::noop()).is_pending());
 					assert!(log.trail().iter().any(|(_, event)| matches!(event, Sent::Finish)));
 				}
-				track.finish_at(track::Position { group: 5, frame: 5 }).unwrap();
+				track.finish_at(track::Position { group: 5, frame: 5 }, None).unwrap();
 				if !finished {
 					group.finish().unwrap();
 				}
@@ -6760,6 +6759,7 @@ mod subscribe_cursor_test {
 mod serve_tests {
 	use super::*;
 	use crate::coding::{Decode, Decoder};
+	use crate::ietf::GroupOrder;
 	use crate::lite::test_transport::{Log, ScriptedSession, Sent, SinkSession};
 	use crate::model::ProduceTest;
 
@@ -10872,7 +10872,7 @@ mod serve_tests {
 			}
 			Largest::IdleEnded => {
 				h.track.set_idle();
-				h.track.finish_at(track::Position::group(10)).unwrap();
+				h.track.finish_at(track::Position::group(10), None).unwrap();
 				None
 			}
 			Largest::IdleFinished => {
@@ -14060,6 +14060,7 @@ mod serve_tests {
 mod tests {
 	use super::*;
 	use crate::coding::Decode;
+	use crate::ietf::GroupOrder;
 	use crate::lite::test_transport::SinkSession;
 	use crate::model::ProduceTest;
 	use futures::FutureExt;
@@ -16884,6 +16885,7 @@ fn fill_range(fill: ietf::Fill, subscription: Filter, largest: Option<Location>)
 mod range_tests {
 	use super::*;
 	use crate::ietf::EndLocation;
+	use crate::ietf::GroupOrder;
 
 	fn subscribe(filter: Filter) -> ietf::Subscribe<'static> {
 		ietf::Subscribe {
@@ -17220,6 +17222,7 @@ mod range_tests {
 #[cfg(test)]
 mod fill_range_tests {
 	use super::*;
+	use crate::ietf::GroupOrder;
 
 	/// Objects 0 through 4 of group 100 are published.
 	const LARGEST: Option<Location> = Some(Location { group: 100, object: 4 });

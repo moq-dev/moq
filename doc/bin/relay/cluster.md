@@ -134,9 +134,10 @@ topology check; whatever generates the peer list applies the layout's rules.
 A link inside a region is rarely congested, so it can skip QUIC: a `tls://`
 peer URL dials qmux over TLS on TCP, verified with the same `connect.tls`
 settings as any other dial. The accepting relay serves it from its TCP
-listener with TLS on. That listener asks for no client certificate, so a peer
-on it authenticates with a token (`cluster.token`, `token`, or `?jwt=`), not
-mTLS.
+listener with TLS on. That listener applies the same client-certificate policy
+as the QUIC listener, so a peer on it authenticates with its `connect.tls`
+certificate against `listen.tls.root`, or with a token (`cluster.token`,
+`token`, or `?jwt=`).
 
 ```toml
 # core.toml
@@ -264,8 +265,8 @@ A peer that crashes or drops off the network sends no goodbye, so a relay only
 learns it is gone when the link goes quiet for [`quic.idle_timeout`](/bin/relay/config#quic)
 (10s by default). Until then its routes stay in place and subscribes through
 them go nowhere. Lower it to fail over faster; raise it if a lossy long-haul
-link drops while the peer is still alive, and keep `quic.keep_alive` well under
-it.
+link drops while the peer is still alive. The keep-alive derives from it, so
+leave `quic.keep_alive` unset.
 
 QUIC uses the smaller of the two endpoints' idle timeouts
 ([RFC 9000 section 10.1](https://www.rfc-editor.org/rfc/rfc9000#section-10.1)),

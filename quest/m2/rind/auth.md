@@ -27,4 +27,4 @@ Public API: moq-auth's error conversions from aws-lc-rs types change
 
 ## Required
 
-- [rind covers MoQ](/quest/m2/rind/covered.md) - the rind release this switches to
+- [rind runs on a Pi 4's aarch64 CPU](/quest/m2/rind/aarch64.md) - the rind release this switches to

@@ -15,9 +15,9 @@ moq-quic and qmux at least, keeping each run deterministic: drive QUIC over
 an in-memory datagram link rather than real sockets if the noise demands it.
 Keep existing bench IDs stable so their history carries over; new
 transports add series rather than renaming old ones. This bench owns the
-qmux series in the regression table; the
-[stream transport](/quest/m2/perf/stream/bench.md) micro-bench stays a local
-profiling tool (decided 2026-10-22, maintainer).
+qmux series in the regression table; the stream transport micro-bench
+(`rs/qmux/examples/bench.rs`) stays a local profiling tool (decided
+2026-10-22, maintainer).
 
 Public API: none. Wire: none.
 
@@ -25,4 +25,3 @@ Public API: none. Wire: none.
 
 - [Benchmark sources](/quest/m2/bench-sources.md) - feeds these series into the regression table
 - [QUIC on the sim](/quest/m2/quic-sim.md) - an in-memory QUIC link the sweep could reuse
-- [Stream transport bench](/quest/m2/perf/stream/bench.md) - a Criterion qmux micro-bench over tcp, tls, ws and wss

@@ -1573,11 +1573,6 @@ impl Publisher {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 
@@ -1876,7 +1871,7 @@ mod tests {
 			let origin = moq_tokio::origin::spawn();
 			let consumer = origin.consume();
 			let (client, server) = tokio::io::duplex(64 * 1024);
-			let start = tokio::time::Instant::now();
+			let start = moq_clock::now();
 			let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
 			// A hangup ends the instance at once, before a follower would hand it out, so this
 			// requests it on its announcement instead.
@@ -1930,7 +1925,7 @@ mod tests {
 		let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
 		publish_one_keyframe(client, Leave::Unpublish).await;
 
-		tokio::time::sleep(Duration::from_secs(5)).await;
+		moq_clock::sleep(Duration::from_secs(5)).await;
 		let finished = consumer.request("live/cam0", None).await.unwrap();
 		let mut video = finished.track("0.flv-v").unwrap().subscribe(None).await.unwrap();
 		assert!(
@@ -1942,11 +1937,11 @@ mod tests {
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		let _reconnect = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
 		let _encoder = tokio::spawn(publish_one_keyframe(client, Leave::Hangup));
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		assert!(!accept.is_finished(), "the newer publisher leaves the linger running");
 		assert!(!finished.is_closed());
 
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		accept.await.unwrap();
 		assert_eq!(start.elapsed(), Duration::from_secs(4));
 		assert!(finished.is_closed());
@@ -2266,7 +2261,7 @@ mod tests {
 		});
 
 		let stream = TcpStream::connect(addr).await.unwrap();
-		let media = tokio::time::timeout(Duration::from_secs(5), play_client_collect(stream, 2, 0, &[]))
+		let media = moq_clock::timeout(Duration::from_secs(5), play_client_collect(stream, 2, 0, &[]))
 			.await
 			.expect("play client timed out");
 
@@ -2333,7 +2328,7 @@ mod tests {
 		let (tx, mut media) = tokio::sync::mpsc::unbounded_channel();
 		let client = tokio::spawn(play_client(TcpStream::connect(addr).await.unwrap(), 0, &[], tx));
 		let mut next = async || {
-			tokio::time::timeout(Duration::from_secs(5), media.recv())
+			moq_clock::timeout(Duration::from_secs(5), media.recv())
 				.await
 				.expect("no media")
 				.expect("the play ended")
@@ -2345,7 +2340,7 @@ mod tests {
 		let epoch = moq_net::Epoch::mint();
 		let mut instances = moq_mux::follow::Instances::new(&consumer, "live/cam0", Some(&epoch)).unwrap();
 		let (_new, _new_catalog) = publish_avc(&origin, epoch, &[0x65, 0x99, 0x99, 0x99, 0x99]);
-		tokio::time::timeout(Duration::from_secs(5), instances.next())
+		moq_clock::timeout(Duration::from_secs(5), instances.next())
 			.await
 			.expect("the new publisher takes over")
 			.unwrap();
@@ -2359,7 +2354,7 @@ mod tests {
 
 		old.abort(moq_net::Error::Transport("connection lost".into()));
 		drop(old_catalog);
-		let played = tokio::time::timeout(Duration::from_secs(5), played)
+		let played = moq_clock::timeout(Duration::from_secs(5), played)
 			.await
 			.expect("the play outlived its route")
 			.unwrap();
@@ -2402,7 +2397,7 @@ mod tests {
 		});
 
 		let stream = TcpStream::connect(addr).await.unwrap();
-		let status = tokio::time::timeout(Duration::from_secs(5), play_client_first_status(stream, 0, &[]))
+		let status = moq_clock::timeout(Duration::from_secs(5), play_client_first_status(stream, 0, &[]))
 			.await
 			.expect("play client timed out");
 
@@ -2681,7 +2676,7 @@ mod tests {
 		// The player advertises multitrack; collect the four video messages (two
 		// sequence headers + two keyframes across the two tracks).
 		let stream = TcpStream::connect(addr).await.unwrap();
-		let media = tokio::time::timeout(
+		let media = moq_clock::timeout(
 			Duration::from_secs(5),
 			play_client_collect(stream, 4, CAPS_EX_MULTITRACK, &[b"avc1"]),
 		)
@@ -2764,7 +2759,7 @@ mod tests {
 			run_client(stream, ClientMode::Publish).await;
 		});
 
-		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+		let request = moq_clock::timeout(Duration::from_secs(5), server.accept())
 			.await
 			.expect("server.accept timed out")
 			.expect("server yielded a request");
@@ -2814,13 +2809,13 @@ mod tests {
 		let fresh_client = tokio::spawn(async move {
 			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
 		});
-		tokio::time::timeout(Duration::from_secs(5), async {
+		moq_clock::timeout(Duration::from_secs(5), async {
 			while !matches!(announced.next().await, Some(moq_net::announce::Event::Restart(_))) {}
 		})
 		.await
 		.expect("the reconnect restarts the broadcast");
 
-		let stale_viewer = tokio::time::timeout(Duration::from_millis(200), async {
+		let stale_viewer = moq_clock::timeout(Duration::from_millis(200), async {
 			loop {
 				match catalog.recv_group().await {
 					Ok(Some(_)) => continue,
@@ -2922,7 +2917,7 @@ mod tests {
 					_ => {}
 				}
 			}
-			let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buffer))
+			let n = moq_clock::timeout(Duration::from_secs(5), stream.read(&mut buffer))
 				.await
 				.expect("timed out awaiting connect _result")
 				.unwrap();
@@ -2966,7 +2961,7 @@ mod tests {
 			run_client(stream, ClientMode::Play).await;
 		});
 
-		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+		let request = moq_clock::timeout(Duration::from_secs(5), server.accept())
 			.await
 			.expect("server.accept timed out")
 			.expect("server yielded a request");
@@ -3060,7 +3055,7 @@ mod tests {
 			run_client(stream, ClientMode::Publish).await;
 		});
 
-		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+		let request = moq_clock::timeout(Duration::from_secs(5), server.accept())
 			.await
 			.expect("server.accept timed out")
 			.expect("server yielded a request");
@@ -3094,7 +3089,7 @@ mod tests {
 			let stream = TcpStream::connect(addr).await.unwrap();
 			run_client(stream, ClientMode::Play).await;
 		});
-		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+		let request = moq_clock::timeout(Duration::from_secs(5), server.accept())
 			.await
 			.expect("plaintext accept timed out")
 			.expect("server yielded a plaintext request");
@@ -3133,7 +3128,7 @@ mod tests {
 		// The refusal comes well inside REQUEST_TIMEOUT, so a client that stayed open
 		// (a bug) fails the outer timeout rather than passing quietly.
 		let refused = tokio::select! {
-			refused = tokio::time::timeout(Duration::from_secs(5), plain) => refused,
+			refused = moq_clock::timeout(Duration::from_secs(5), plain) => refused,
 			request = server.accept() => panic!("plaintext client yielded a request: {}", request.is_some()),
 		};
 		assert!(refused.expect("plaintext client was not refused").unwrap());

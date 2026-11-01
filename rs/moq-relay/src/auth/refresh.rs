@@ -473,7 +473,6 @@ fn with_jwt(query: Option<&str>, token: &str) -> String {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use futures::FutureExt;
@@ -494,6 +493,10 @@ mod tests {
 	/// Whether `future` is still pending once every task has settled. Paused tokio
 	/// only fires the watchdog when nothing else can run, and never moves the manual clock.
 	async fn settles_pending(future: impl std::future::Future) -> bool {
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the watchdog runs on paused tokio, beside the installed manual clock"
+		)]
 		tokio::time::timeout(Duration::from_secs(1), future).await.is_err()
 	}
 
@@ -752,7 +755,7 @@ mod tests {
 			client.closed().await;
 			drop(client);
 			// The server's driver releases the stats once its transport has closed.
-			tokio::time::sleep(Duration::from_secs(1)).await;
+			moq_clock::sleep(Duration::from_secs(1)).await;
 			let presence = registry.snapshot().sessions()[0].1;
 			assert_eq!(presence.sessions_ended, 1, "{reason}");
 			for kind in Failure::ALL {
@@ -855,7 +858,7 @@ mod tests {
 
 		let third = present(&client, "third");
 		assert!(
-			tokio::time::timeout(Duration::from_secs(5), admissions.next())
+			moq_clock::timeout(Duration::from_secs(5), admissions.next())
 				.await
 				.is_err(),
 			"a token past the limit reached the decider"
@@ -887,7 +890,7 @@ mod tests {
 		let held = admissions.next().await.unwrap();
 		let waiting = present(&client, "waiting");
 		// Past the ten-second admission timeout, and the retries that follow it.
-		tokio::time::sleep(Duration::from_secs(30)).await;
+		moq_clock::sleep(Duration::from_secs(30)).await;
 		assert!(
 			!waiting.is_finished() && !slow.is_finished(),
 			"a transient refusal ended a token"
@@ -1002,6 +1005,10 @@ mod tests {
 			assert_eq!(owner.closed().await.0, lease::Reason::from("closed"));
 			drop(client);
 			// The server's driver releases the stats once its transport has closed.
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "paused tokio settles the driver, beside the installed manual clock"
+			)]
 			tokio::time::sleep(Duration::from_secs(1)).await;
 			let presence = registry.snapshot().sessions()[0].1;
 			assert_eq!(presence.sessions_ended, 1);
@@ -1133,12 +1140,12 @@ mod tests {
 		let _ = sent.await;
 
 		let withdrawn = present(&client, "withdrawn");
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		withdrawn.abort();
 		let _ = withdrawn.await;
 		let next = present(&client, "next");
 		assert!(
-			tokio::time::timeout(Duration::from_secs(1), admissions.next())
+			moq_clock::timeout(Duration::from_secs(1), admissions.next())
 				.await
 				.is_err(),
 			"withdrawing a sent check released its slot"

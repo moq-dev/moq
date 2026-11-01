@@ -285,7 +285,6 @@ impl FlvTrack {
 			arrived,
 			read,
 			restart,
-			skip,
 			sync,
 			leading,
 			bytes,
@@ -299,7 +298,6 @@ impl FlvTrack {
 				read,
 				decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?.into(),
 				restart,
-				skip,
 				sync,
 				leading,
 				bytes,
@@ -514,7 +512,6 @@ impl<S: Stream> Export<S> {
 							read: moq_clock::now(),
 							decode: frame.timestamp.into(),
 							restart: track.source.markers(),
-							skip: track.source.skips(),
 							sync: kind == 1 || frame.keyframe,
 							leading: false,
 							bytes: frame.payload.len(),
@@ -968,7 +965,7 @@ fn ensure_legacy(container: &Container, kind: &str, name: &str) -> anyhow::Resul
 		Container::Cmaf { .. } => anyhow::bail!("FLV export does not support CMAF {kind} track '{name}'"),
 		Container::Unknown(unknown) => anyhow::bail!(
 			"FLV export does not support container '{}' on {kind} track '{name}'",
-			unknown.kind().unwrap_or("<missing>")
+			unknown.kind()
 		),
 	}
 }
