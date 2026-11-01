@@ -265,7 +265,7 @@ fn catalog() -> hang::Catalog {
 
 /// An archive served back through an origin by a consumer, and a broadcaster exporting it.
 struct Replay {
-	broadcaster: Arc<Broadcaster>,
+	broadcaster: Broadcaster,
 	/// Keeps the served broadcast's origin open.
 	_origin: moq_net::origin::Producer,
 	consumer: tokio::task::JoinHandle<moq_archive::Result<()>>,
@@ -284,7 +284,7 @@ impl Replay {
 		let consumer = tokio::spawn(consumer.run());
 		broadcast.announce(Default::default()).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "rec").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "rec").await, Config::default());
 		kio::clock::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
 			.expect("a rendition becomes playable or fails");
