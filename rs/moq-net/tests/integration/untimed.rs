@@ -4,8 +4,8 @@
 //! that can say so, and a timed track keeps its timestamps.
 //!
 //! No receiver fills in arrival time. Lite-05 and lite-06 cannot encode absence, so their
-//! encoder writes its send time instead, and their receivers drop every timestamp, which
-//! leaves a timed track untimed too.
+//! encoder writes its send time instead, which their receivers pass through as the track's
+//! time.
 
 use crate::support;
 
@@ -27,14 +27,17 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 enum Arrives {
 	/// Both keep what the publisher wrote.
 	Faithful,
-	/// The wire carries no trustworthy timescale, so even the timed track arrives untimed.
+	/// The timed track keeps its timestamps, but the untimed one arrives timed in
+	/// milliseconds with its send times.
+	SendTimes,
+	/// The wire carries no timescale, so even the timed track arrives untimed.
 	Untimed,
 }
 
 fn expected(version: &str) -> Arrives {
 	match version {
-		// Lite-05 and lite-06 stamp untimed tracks with send times, so their receivers drop them.
-		"moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-lite-06" => Arrives::Untimed,
+		"moq-lite-03" | "moq-lite-04" => Arrives::Untimed,
+		"moq-lite-05" | "moq-lite-06" => Arrives::SendTimes,
 		_ => Arrives::Faithful,
 	}
 }
@@ -130,6 +133,11 @@ async fn frames_arrive_as_published() {
 				assert_eq!(untimed, None, "{version}: absence survives");
 				assert_eq!(untimed_info.timescale, None, "{version}: no timeline is declared");
 			}
+			Arrives::SendTimes => {
+				assert_eq!(timed, Some(millis(7)), "{version}: the timestamp survives");
+				assert!(untimed.is_some(), "{version}: the send time arrives");
+				assert_eq!(untimed_info.timescale, Some(Timescale::MILLI), "{version}");
+			}
 			Arrives::Untimed => {
 				assert_eq!(timed, None, "{version}: no units, so no timestamp");
 				assert_eq!(timed_info.timescale, None, "{version}: no timeline is declared");
@@ -197,8 +205,8 @@ async fn an_explicit_start_holds_on_an_untimed_track() {
 	}
 }
 
-/// An untimed track's datagram arrives untimed, though lite-05 and lite-06 carry a send
-/// time that the receiver drops.
+/// An untimed track's datagram arrives untimed, except that lite-05 and lite-06 carry its
+/// send time.
 #[kio::test]
 async fn datagrams_arrive_as_published() {
 	for version in ["moq-lite-05", "moq-lite-07-wip", "moq-transport-22"] {
@@ -219,11 +227,13 @@ async fn datagrams_arrive_as_published() {
 			.expect("datagram timeout")
 			.unwrap()
 			.expect("a datagram");
-		assert_eq!(datagram.timestamp, None, "{version}");
+		let sent = expected(version) == Arrives::SendTimes;
+		assert_eq!(datagram.timestamp.is_some(), sent, "{version}");
 	}
 }
 
-/// A standalone FETCH of an untimed track answers with untimed objects.
+/// A standalone FETCH of an untimed track answers with untimed objects, except that lite-05
+/// and lite-06 carry each one's send time.
 #[kio::test]
 async fn a_fetched_untimed_frame_arrives_untimed() {
 	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18"] {
@@ -251,6 +261,7 @@ async fn a_fetched_untimed_frame_arrives_untimed() {
 
 		let mut fetched = waiting.await.unwrap();
 		let frame = fetched.read_frame().await.unwrap().unwrap();
-		assert_eq!(frame.timestamp, None, "{version}");
+		let sent = expected(version) == Arrives::SendTimes;
+		assert_eq!(frame.timestamp.is_some(), sent, "{version}");
 	}
 }

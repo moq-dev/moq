@@ -6,7 +6,6 @@ import { Producer as BroadcastProducer } from "../broadcast.ts";
 import { fromTransport, SessionCode, StreamCode, StreamError, toStreamCode } from "../error.ts";
 import type { Producer as GroupProducer } from "../group.ts";
 import { randomHop } from "../hop.ts";
-import { Version as IetfVersion } from "../ietf/version.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, textFrame } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -599,15 +598,15 @@ test.each([0, 5, 6, 7])("a fetched cached tail keeps absolute indices from %s", 
 	}
 });
 
-// An unchecked track goes out untimed, so lite-06 carries its send time, never the frame's own
-// timestamp, which may be a moq-transport arrival time.
-test("lite draft-06: an unchecked track's fetched frames carry their send time", async () => {
+// An unchecked track's frames go out with their own timestamps, which may be moq-transport
+// arrival times, rather than their send time.
+test("lite draft-06: an unchecked track's fetched frames carry their own timestamp", async () => {
 	const pair = createMockTransportPair(ALPN_06);
 	const origin = new OriginProducer();
 	const publisher = new Publisher(pair.server, Version.DRAFT_06, randomHop(), origin.consume());
 
 	const broadcast = publish(origin, Path.from("test"));
-	const track = broadcast.createTrack("video", { timescale: Timescale.MICRO, ietf: IetfVersion.DRAFT_22 });
+	const track = broadcast.createTrack("video", { timescale: Timescale.MICRO, unchecked: true });
 
 	const group = track.createGroup(0);
 	group.writeFrame(textFrame("hello", Timestamp.fromMillis(36_000_000)));
@@ -619,14 +618,10 @@ test("lite draft-06: an unchecked track's fetched frames carry their send time",
 
 	const msg = new Fetch({ broadcast: Path.from("test"), track: "video", priority: 0, group: 0 });
 	try {
-		const before = Math.floor(Timestamp.now().value);
 		await publisher.runFetch(msg, server);
-		const after = Math.ceil(Timestamp.now().value);
 
-		// The first frame's zigzag delta is against 0, in the milliseconds TRACK_INFO declares.
-		const sent = Number((await client.reader.u62()) >> 1n);
-		expect(sent).toBeGreaterThanOrEqual(before);
-		expect(sent).toBeLessThanOrEqual(after);
+		// The first frame's zigzag delta is against 0, in the microseconds TRACK_INFO declares.
+		expect(await client.reader.u62()).toBe(36_000_000_000n << 1n);
 	} finally {
 		publisher.close();
 		client.close();

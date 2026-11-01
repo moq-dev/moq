@@ -102,7 +102,7 @@ pub(crate) const IDLE_LINGER: Duration = Duration::from_secs(30);
 // Deliberately not `Copy`, even though it's now a plain value: adding `Copy` turns
 // every existing `info.clone()` in a consumer's code into a `clippy::clone_on_copy`
 // error under `-D warnings`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Info {
 	/// Units per second for per-frame timestamps on this track, or `None` for an untimed
@@ -175,7 +175,36 @@ pub struct Info {
 	/// Shared, since every group holds a copy of the info.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) properties: Option<Arc<crate::model::object::TrackProperties>>,
+	/// Whether this copy's groups skip the rewind check: set on a lite-05/06 copy, whose
+	/// untimed origin stamps send times, so an older group fetched later looks like a rewind.
+	/// A track with moq-transport provenance ([`Self::ietf`]) skips it too.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) unchecked: bool,
 }
+
+// `unchecked` says how this copy arrived, not what it holds, so copies of one track over
+// different versions still match.
+impl PartialEq for Info {
+	fn eq(&self, other: &Self) -> bool {
+		let Self {
+			timescale,
+			max_age,
+			priority,
+			compress,
+			refresh,
+			properties,
+			unchecked: _,
+		} = self;
+		*timescale == other.timescale
+			&& *max_age == other.max_age
+			&& *priority == other.priority
+			&& *compress == other.compress
+			&& *refresh == other.refresh
+			&& *properties == other.properties
+	}
+}
+
+impl Eq for Info {}
 
 impl Default for Info {
 	fn default() -> Self {
@@ -186,6 +215,7 @@ impl Default for Info {
 			compress: false,
 			refresh: None,
 			properties: None,
+			unchecked: false,
 		}
 	}
 }
@@ -223,13 +253,6 @@ impl Info {
 	pub fn with_refresh(mut self, refresh: impl Into<Option<u32>>) -> Self {
 		self.refresh = refresh.into();
 		self
-	}
-
-	/// The timescale served on a moq-lite hop, preserving moq-transport timestamps only
-	/// when the hop negotiated the `ietf` extension.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn lite_timescale(&self, ietf: bool) -> Option<Timescale> {
-		self.timescale.filter(|_| self.ietf().is_none() || ietf)
 	}
 
 	/// The original moq-transport publisher's draft, whose timestamps may rewind, or
@@ -884,9 +907,13 @@ impl TrackState {
 	/// so the watermark caps it instead.
 	///
 	/// Usually one group lookup each way; only unstarted or partial neighbors are skipped.
-	/// `None` on a track with moq-transport provenance, whose timestamps may rewind.
+	/// `None` on an [unchecked](Info::unchecked) track, whose timestamps may rewind.
 	pub(super) fn neighbors(&self, sequence: u64) -> Option<Neighbors> {
-		if self.info.as_ref().is_some_and(|info| info.ietf().is_some()) {
+		if self
+			.info
+			.as_ref()
+			.is_some_and(|info| info.unchecked || info.ietf().is_some())
+		{
 			return None;
 		}
 		let bounds = self.bounds.lock().unwrap_or_else(PoisonError::into_inner);
