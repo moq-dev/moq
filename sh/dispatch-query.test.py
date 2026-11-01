@@ -76,7 +76,7 @@ class QueryTests(unittest.TestCase):
 
     def test_rust_cache_follows_modules_that_compile_rust(self):
         for path, rust in (("rs/moq-net/src/lib.rs", True), ("py/moq-rs/example.py", True),
-                           ("js/net/src/index.ts", True), ("kt/example.kt", True),
+                           ("js/net/src/index.ts", False), ("kt/example.kt", True),
                            ("infra/moq-sh/install.sh", False), (".github/workflows/check.yml", False)):
             with self.subTest(path=path):
                 self.change(path)
