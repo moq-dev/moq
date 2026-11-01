@@ -30,10 +30,6 @@ import { caughtUp, renditionJitter, switchJitter } from "./playhead";
 import { Recovery } from "./recovery";
 import type { Source } from "./source";
 
-// Decoded chunks a codec may hold before outputting their picture: twice the 16-frame decoded
-// picture buffer H.264 and H.265 allow, which also covers VP9's and AV1's 8 reference slots.
-const REORDER = 32;
-
 // The amount of time to wait before considering the video to be buffering.
 const BUFFERING = Milli(500);
 
@@ -563,7 +559,11 @@ class DecoderTrack {
 					if (signal.aborted) return;
 					const generation = this.#generation;
 					const group = this.#groups.get(frame.timestamp);
-					this.#groups.delete(frame.timestamp);
+					// Pictures come out in presentation order, so a chunk at or before this one that
+					// produced none, such as a hidden VP9 frame, never will.
+					for (const timestamp of this.#groups.keys()) {
+						if (timestamp <= frame.timestamp) this.#groups.delete(timestamp);
+					}
 					const timestamp = Milli.fromMicro(frame.timestamp as Micro);
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
@@ -703,7 +703,7 @@ class DecoderTrack {
 
 				latest = next.group;
 				this.#resetAtKeyframe(decoder, frame.keyframe);
-				this.#track(decoder, frame.timestamp, next.group);
+				this.#groups.set(frame.timestamp, next.group);
 				decoder.decode(this.#chunk(frame));
 				if (!this.sync.playing.peek())
 					await this.#waitStartup(effect, Milli.fromMicro(frame.timestamp as Micro));
@@ -782,7 +782,7 @@ class DecoderTrack {
 				if (decoder.state === "closed") break;
 				latest = next.group;
 				this.#resetAtKeyframe(decoder, frame.keyframe);
-				this.#track(decoder, frame.timestamp, next.group);
+				this.#groups.set(frame.timestamp, next.group);
 				decoder.decode(this.#chunk(frame));
 				if (!this.sync.playing.peek()) await this.#waitStartup(effect, Milli.fromMicro(frame.timestamp));
 			}
@@ -859,18 +859,6 @@ class DecoderTrack {
 		decoder.reset();
 		this.#groups.clear();
 		this.#configure(decoder);
-	}
-
-	// Record the group of a chunk about to be decoded. A chunk that produces no picture, such as a
-	// hidden VP9 frame, leaves its entry behind, so keep only those the codec can still output: the
-	// chunks still queued, plus a reordering window past the deepest decoded picture buffer.
-	#track(decoder: VideoDecoder, timestamp: number, group: number): void {
-		this.#groups.set(timestamp, group);
-		const limit = decoder.decodeQueueSize + REORDER;
-		for (const oldest of this.#groups.keys()) {
-			if (this.#groups.size <= limit) break;
-			this.#groups.delete(oldest);
-		}
 	}
 
 	// The chunk for `frame`, run through the opening rewrite when it opens the codec.
