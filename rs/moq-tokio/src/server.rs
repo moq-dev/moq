@@ -1888,11 +1888,6 @@ impl Request {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 
@@ -2163,7 +2158,7 @@ mod tests {
 		tokio::time::pause();
 		task.abort();
 		let _ = task.await;
-		let closed = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+		let closed = moq_clock::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
 		assert!(matches!(closed, Ok(None)), "stalled handshake outlived its accept loop");
 	}
 
@@ -2193,7 +2188,7 @@ mod tests {
 		tokio::time::pause();
 		task.abort();
 		let _ = task.await;
-		let closed = tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+		let closed = moq_clock::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
 		assert!(matches!(closed, Ok(None)), "stalled handshake outlived its accept loop");
 	}
 
@@ -2493,7 +2488,7 @@ mod tests {
 			server: moq_net::Server::new(),
 			timeout: Some(timeout),
 		};
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let Err(err) = accept_request(
 			&setup.server,
 			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
@@ -2530,7 +2525,7 @@ mod tests {
 					.await;
 			}
 		});
-		tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+		moq_clock::sleep(std::time::Duration::from_secs(1)).await;
 		client.abort();
 		let bytes = std::mem::take(&mut *recorder.written.lock().unwrap());
 		assert!(!bytes.is_empty(), "the client never wrote its SETUP");
@@ -2543,7 +2538,7 @@ mod tests {
 			server: moq_net::Server::new(),
 			timeout: Some(timeout),
 		};
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let Ok((request, deadline)) = accept_request(
 			&setup.server,
 			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
@@ -2619,7 +2614,7 @@ mod tests {
 		tokio::spawn(moq_net::time::run(driver));
 		let _client = connect.await.unwrap();
 
-		tokio::time::sleep(timeout * 2).await;
+		moq_clock::sleep(timeout * 2).await;
 		assert!(
 			client.closed().now_or_never().is_none(),
 			"a completed handshake was closed at its deadline"
@@ -2655,7 +2650,7 @@ mod tests {
 			moq_net::time::run(driver).await
 		});
 
-		let request = tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
+		let request = moq_clock::timeout(std::time::Duration::from_secs(5), listener.accept())
 			.await
 			.expect("a stalled upgrade blocked the accept loop");
 		assert!(request.is_some());
@@ -2790,17 +2785,14 @@ mod tests {
 		// `serve` binds the socket; wait for it. Keep the last error, since a bind
 		// failure is the only clue to why it never showed up.
 		const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
-		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+		let deadline = moq_clock::now() + std::time::Duration::from_secs(5);
 		let mut delay = std::time::Duration::from_millis(1);
 		while let Err(err) = tokio::net::UnixStream::connect(&path).await {
-			assert!(
-				tokio::time::Instant::now() < deadline,
-				"unix listener never bound: {err}"
-			);
+			assert!(moq_clock::now() < deadline, "unix listener never bound: {err}");
 			// Bound to its own statement so the (non-Send) rng doesn't live across the
 			// await, which would make this future unspawnable.
 			let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
-			tokio::time::sleep(wait).await;
+			moq_clock::sleep(wait).await;
 			delay = (delay * 2).min(MAX_DELAY);
 		}
 
@@ -2814,14 +2806,14 @@ mod tests {
 			.init(Default::default())
 			.expect("client init")
 			.with_subscriber(subscriber);
-		let session = tokio::time::timeout(TIMEOUT, client.connect(url).established())
+		let session = moq_clock::timeout(TIMEOUT, client.connect(url).established())
 			.await
 			.expect("connect timeout")
 			.expect("connect");
 
 		// Without the server's publisher the session announces nothing, so this is
 		// where the regression shows up.
-		let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+		let (update, active) = moq_clock::timeout(TIMEOUT, next_update(&mut announced))
 			.await
 			.expect("announce timeout")
 			.expect("origin closed");
@@ -2835,12 +2827,12 @@ mod tests {
 			.subscribe(None)
 			.await
 			.expect("subscribe");
-		let mut group = tokio::time::timeout(TIMEOUT, track.recv_group())
+		let mut group = moq_clock::timeout(TIMEOUT, track.recv_group())
 			.await
 			.expect("recv group timeout")
 			.expect("recv group")
 			.expect("track closed early");
-		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.expect("read frame timeout")
 			.expect("read frame")

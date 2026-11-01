@@ -1065,7 +1065,6 @@ impl web_transport_trait::Session for Session {
 }
 
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::{
 		io::{self, IoSliceMut},
@@ -1448,7 +1447,7 @@ mod tests {
 			)
 		};
 		// Without the header the server never surfaces the streams, so bound the wait.
-		let (uni, bi) = tokio::time::timeout(Duration::from_secs(10), read).await.unwrap();
+		let (uni, bi) = moq_clock::timeout(Duration::from_secs(10), read).await.unwrap();
 		assert!(matches!(uni, crate::quic::web::ReadError::Reset(7)), "{uni:?}");
 		assert!(matches!(bi, crate::quic::web::ReadError::Reset(8)), "{bi:?}");
 	}
@@ -1486,7 +1485,7 @@ mod tests {
 			(uni, client_bi.read_chunk(usize::MAX).await)
 		};
 		// Without the header the server never surfaces the stream, so bound the wait.
-		let (uni, bi) = tokio::time::timeout(Duration::from_secs(10), read).await.unwrap();
+		let (uni, bi) = moq_clock::timeout(Duration::from_secs(10), read).await.unwrap();
 		assert!(matches!(uni, Err(crate::quic::web::ReadError::Reset(0))), "{uni:?}");
 		assert!(matches!(bi, Err(crate::quic::web::ReadError::Reset(0))), "{bi:?}");
 	}
@@ -1521,7 +1520,7 @@ mod tests {
 				}
 			}
 		};
-		let (uni, bi) = tokio::time::timeout(Duration::from_secs(10), async {
+		let (uni, bi) = moq_clock::timeout(Duration::from_secs(10), async {
 			tokio::join!(stopped(uni), stopped(bi))
 		})
 		.await

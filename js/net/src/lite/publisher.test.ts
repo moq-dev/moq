@@ -1,5 +1,5 @@
 import { expect, mock, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Elapsed, Manual, Milli, Nano, sleep, timeout, yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -121,7 +121,7 @@ test.each([
 			},
 		}),
 	});
-	const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+	const settle = () => sleep(Nano.fromMilli(Milli(10)));
 	const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
 	await settle();
 	const initial = written.length;
@@ -158,7 +158,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 				},
 			}),
 		});
-		const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+		const settle = () => sleep(Nano.fromMilli(Milli(10)));
 		const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
 		await settle();
 		const initial = written.length;
@@ -221,7 +221,7 @@ async function subscribeEnd(
 		// Let the publisher drain this group before the next, so arrival order is the
 		// order given rather than whatever the cache hands over in one batch. A group that
 		// arrives late opens no stream at all, so there is nothing firmer to wait on.
-		await new Promise((resolve) => setTimeout(resolve, 5));
+		await sleep(Nano.fromMilli(Milli(5)));
 	}
 	if (error) track.finishAt({ group: Math.max(-1, ...sequences) + 1, frame: 0 }, error);
 	else track.finish();
@@ -397,7 +397,7 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 		// The publisher re-ranks from that same signal, so wait on the send order itself rather
 		// than on the dispatch order between its subscriber and this one.
 		for (let i = 0; i < 200 && stream.sendOrder === sendOrder({ priority: 1 }); i++) {
-			await new Promise((resolve) => setTimeout(resolve, 5));
+			await sleep(Nano.fromMilli(Milli(5)));
 		}
 
 		expect(stream.sendOrder).toBe(sendOrder({ priority: 9 }));
@@ -455,7 +455,7 @@ test("lite draft-05: a subscribe update during the stream open still ranks the g
 		opened.releaseLock();
 
 		for (let i = 0; i < 200 && pair.server.sendStreams.uni[0]?.sendOrder !== sendOrder({ priority: 9 }); i++) {
-			await new Promise((resolve) => setTimeout(resolve, 5));
+			await sleep(Nano.fromMilli(Milli(5)));
 		}
 
 		expect(pair.server.sendStreams.uni[0]?.sendOrder).toBe(sendOrder({ priority: 9 }));
@@ -511,7 +511,7 @@ test("lite draft-05: many concurrent groups share one subscription listener", as
 		const expected = groups.map((group) => sendOrder({ priority: 9, position: count - 1 - group.sequence }));
 		for (let i = 0; i < 200; i++) {
 			if (pair.server.sendStreams.uni.every((stream, at) => stream.sendOrder === expected[at])) break;
-			await new Promise((resolve) => setTimeout(resolve, 5));
+			await sleep(Nano.fromMilli(Milli(5)));
 		}
 
 		expect(pair.server.sendStreams.uni.map((stream) => stream.sendOrder)).toEqual(expected);
@@ -640,7 +640,7 @@ const IDLE_MS = 500;
 // One macrotask turn, which drains every microtask queued behind it. Signal notifications
 // are coalesced per microtask, so this is what lets a just-written group reach the serving
 // loop's armed `recvGroup` without a test guessing at a delay.
-const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+const flush = () => yieldNow();
 
 function lastGroups(ranges: ReturnType<typeof spyOn>) {
 	return ranges.mock.calls.at(-1)?.[0];
@@ -806,12 +806,10 @@ async function servedSubscription(
 		// idle. A group the publisher dropped then fails an assertion instead of hanging the
 		// test on a stream that will never arrive.
 		async servedGroup(): Promise<Served | undefined> {
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const idle = new Promise<undefined>((resolve) => {
-				timer = setTimeout(() => resolve(undefined), IDLE_MS);
+			const next = await timeout(Nano.fromMilli(Milli(IDLE_MS)), opened.read()).catch((error: unknown) => {
+				if (error instanceof Elapsed) return undefined;
+				throw error;
 			});
-			const next = await Promise.race([opened.read(), idle]);
-			clearTimeout(timer);
 			if (!next || next.done) return undefined;
 
 			const reader = new Reader(next.value, undefined, version);
@@ -1682,7 +1680,7 @@ test("lite draft-05: a peer FIN interrupts a blocked SUBSCRIBE_START", async () 
 		sub.client.writer.close();
 		const stopped = await Promise.race([
 			sub.serving.then(() => true),
-			new Promise<false>((resolve) => setTimeout(() => resolve(false), IDLE_MS)),
+			sleep(Nano.fromMilli(Milli(IDLE_MS))).then(() => false as const),
 		]);
 		expect(stopped).toBe(true);
 		expect(resets).toHaveBeenCalledTimes(1);
@@ -1826,7 +1824,7 @@ test("lite draft-06: an errored end is not declared early", async () => {
 				() => "response",
 				() => "reset",
 			),
-			new Promise((resolve) => setTimeout(() => resolve("none"), 20)),
+			sleep(Nano.fromMilli(Milli(20))).then(() => "none"),
 		]);
 		expect(early).toBe("none");
 
@@ -2104,7 +2102,7 @@ async function serve(
 
 		// Let the publisher drain each group before the next, so the streams arrive in
 		// the order written rather than whatever the cache hands over in one batch.
-		await new Promise((resolve) => setTimeout(resolve, 5));
+		await sleep(Nano.fromMilli(Milli(5)));
 	}
 	track.finish();
 	track.close();
@@ -2116,12 +2114,10 @@ async function serve(
 			// The publisher may simply have nothing more to send, so race the read
 			// against an idle timeout. Clear the timer either way, and cancel rather
 			// than release below: releasing with a read still pending would throw.
-			let timer: ReturnType<typeof setTimeout> | undefined;
-			const idle = new Promise<undefined>((resolve) => {
-				timer = setTimeout(() => resolve(undefined), 50);
+			const next = await timeout(Nano.fromMilli(Milli(50)), reader.read()).catch((error: unknown) => {
+				if (error instanceof Elapsed) return undefined;
+				throw error;
 			});
-			const next = await Promise.race([reader.read(), idle]);
-			clearTimeout(timer);
 			if (!next || next.done) break;
 
 			const stream = new Reader(next.value, undefined, Version.DRAFT_06);
@@ -2375,7 +2371,7 @@ test("lite draft-05: a blocked group header is reset when the group expires", as
 
 		const resetBeforeRelease = await Promise.race([
 			streamReset.then(() => true),
-			new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
+			sleep(Nano.fromMilli(Milli(500))).then(() => false as const),
 		]);
 		expect(resetBeforeRelease).toBe(true);
 	} finally {
@@ -2419,7 +2415,7 @@ test("lite draft-05: a group waiting for a stream slot survives the track finish
 
 	// The FIN holds until the queued group is on the wire.
 	const fin = client.reader.closed.then(() => "fin" as const);
-	const idle = new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 20));
+	const idle = sleep(Nano.fromMilli(Milli(20))).then(() => "pending" as const);
 	expect(await Promise.race([fin, idle])).toBe("pending");
 
 	freeSlot();
@@ -2638,7 +2634,7 @@ test("lite draft-06: announces wait for the setup grant", async () => {
 			},
 		}),
 	});
-	const settle = () => new Promise((resolve) => setTimeout(resolve, 10));
+	const settle = () => sleep(Nano.fromMilli(Milli(10)));
 	const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
 	await settle();
 	expect(written.length).toBe(0);
@@ -2681,11 +2677,11 @@ test("lite draft-06: closing while announces wait for the setup grant does not h
 		}),
 	});
 	const running = publisher.runAnnounce(new AnnounceRequest(Path.empty()), stream);
-	await new Promise((resolve) => setTimeout(resolve, 10));
+	await sleep(Nano.fromMilli(Milli(10)));
 
 	const drained = await Promise.race([
 		publisher.drain().then(() => "drained" as const),
-		new Promise((resolve) => setTimeout(() => resolve("hung"), 500)),
+		sleep(Nano.fromMilli(Milli(500))).then(() => "hung" as const),
 	]);
 	expect(drained).toBe("drained");
 	await running;

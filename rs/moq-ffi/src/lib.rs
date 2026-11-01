@@ -1,8 +1,4 @@
 #![warn(missing_docs)]
-#![cfg_attr(
-	test,
-	expect(clippy::disallowed_methods, reason = "tests read the host clock directly")
-)]
 
 //! UniFFI bindings for [`moq_net`].
 //!
@@ -89,4 +85,9 @@ mod test;
 
 // The binding benchmark's Rust baselines; ignored unless a run asks for them (see bench/README.md).
 #[cfg(all(test, unix))]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "the binding benchmark measures real throughput and call cost"
+)]
 mod bench;

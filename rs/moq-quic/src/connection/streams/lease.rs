@@ -572,7 +572,9 @@ impl StreamsState {
 	/// freed; each evicted stream's reader is woken by a [`StreamEvent::Readable`].
 	pub(super) fn evict_if_stuck(&mut self) -> Option<ShouldTransmit> {
 		self.stuck_waiting = false;
-		if self.local_max_data > self.data_recvd {
+		// The window, not the credit a rate cap paces, says whether memory is stuck: a capped
+		// peer out of credit is waiting on time, not on a reader.
+		if self.window_max_data > self.data_recvd {
 			return None;
 		}
 		// An evicted reader has yet to stop its stream, which returns the credit of what it took.
@@ -585,7 +587,7 @@ impl StreamsState {
 		}
 
 		let mut transmit = None;
-		while self.local_max_data <= self.data_recvd
+		while self.window_max_data <= self.data_recvd
 			&& self.evicted_held == 0
 			&& let Some(rank) = self.ranks.pop_first()
 		{

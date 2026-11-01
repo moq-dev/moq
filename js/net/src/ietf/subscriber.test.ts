@@ -1,5 +1,5 @@
 import { expect, jest, onTestFinished, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Elapsed, Manual, Milli, Nano, sleep, timeout, yieldNow } from "@moq/clock";
 import { Once } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
@@ -41,19 +41,15 @@ async function nextStream(transport: WebTransport, version: IetfVersion = VERSIO
 	const reader =
 		transport.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
 
-	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		const next = await Promise.race([
-			reader.read(),
-			new Promise<undefined>((resolve) => {
-				timer = setTimeout(() => resolve(undefined), STREAM_WAIT);
-			}),
-		]);
+		const next = await timeout(Nano.fromMilli(Milli(STREAM_WAIT)), reader.read()).catch((error: unknown) => {
+			if (error instanceof Elapsed) return undefined;
+			throw error;
+		});
 
 		if (!next || next.done) return undefined;
 		return new Stream({ readable: next.value.readable, writable: next.value.writable, version });
 	} finally {
-		clearTimeout(timer);
 		reader.releaseLock();
 	}
 }
@@ -219,7 +215,7 @@ test("an announcement survives the first of its two sources ending", async () =>
 
 	const next = await Promise.race([
 		announced.next(),
-		new Promise<"nothing">((resolve) => setTimeout(() => resolve("nothing"), 250)),
+		sleep(Nano.fromMilli(Milli(250))).then(() => "nothing" as const),
 	]);
 	expect(next).toBe("nothing");
 });
@@ -335,14 +331,11 @@ test("an entry buffered past a consumer close does not pin the path", async () =
 	subscription.writer.close();
 
 	// Whatever the loop managed to attach, the stream gave back on its way out.
-	await new Promise((resolve) => setTimeout(resolve, 50));
+	await sleep(Nano.fromMilli(Milli(50)));
 
 	const fresh = subscriber.announced();
 	await acceptSubscribeNamespace(pair.client);
-	const seeded = await Promise.race([
-		fresh.next(),
-		new Promise<"nothing">((resolve) => setTimeout(() => resolve("nothing"), 250)),
-	]);
+	const seeded = await Promise.race([fresh.next(), sleep(Nano.fromMilli(Milli(250))).then(() => "nothing" as const)]);
 	expect(seeded).toBe("nothing");
 });
 
@@ -465,7 +458,9 @@ test("a NAMESPACE missing its hop path closes the session", async () => {
 
 	await Promise.race([
 		pair.server.closed,
-		new Promise((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), STREAM_WAIT)),
+		sleep(Nano.fromMilli(Milli(STREAM_WAIT))).then(() => {
+			throw new Error("session stayed up");
+		}),
 	]);
 });
 
@@ -501,7 +496,9 @@ test("a malformed PUBLISH_NAMESPACE update closes the session", async () => {
 
 		await Promise.race([
 			pair.server.closed,
-			new Promise((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), STREAM_WAIT)),
+			sleep(Nano.fromMilli(Milli(STREAM_WAIT))).then(() => {
+				throw new Error("session stayed up");
+			}),
 		]);
 	} finally {
 		logged.mockRestore();
@@ -1617,7 +1614,9 @@ async function answerCounted(transport: WebTransport, activeCount: number | unde
 const sessionClosed = (pair: ReturnType<typeof createMockTransportPair>) =>
 	Promise.race([
 		pair.server.closed,
-		new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), STREAM_WAIT)),
+		sleep(Nano.fromMilli(Milli(STREAM_WAIT))).then(() => {
+			throw new Error("session stayed up");
+		}),
 	]);
 
 /** The session closes with PROTOCOL_VIOLATION, not a clean code. */
@@ -1625,7 +1624,7 @@ async function violationClosed(pair: ReturnType<typeof createMockTransportPair>)
 	expect((await sessionClosed(pair)).closeCode).toBe(new ProtocolViolation("").code);
 }
 
-const yieldTask = () => new Promise((resolve) => setTimeout(resolve, 0));
+const yieldTask = () => yieldNow();
 
 /** MoQ Active Count: the consumer syncs once the counted NAMESPACEs are read. */
 test("counted NAMESPACEs sync", async () => {
