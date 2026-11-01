@@ -61,7 +61,6 @@ The epic's own work, once every child has merged:
 - [Drop iroh](/quest/m2/rind/drop-iroh.md) - moq-tokio, moq-relay, and moq-cli lose the `iroh` feature and web-transport-iroh
 - [Transport on rind](/quest/m2/rind/transport.md) - moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take rind, and the `aws-lc-rs`/`ring` features go
 - [moq-auth on rind](/quest/m2/rind/auth.md) - JWT signing, key generation, and JWK loading run on rind
-- [moq-e2ee on rind](/quest/m2/rind/e2ee.md) - frame and name protection use rind's AES-128-GCM, HKDF, and HMAC
 - [moq-rtc on rind](/quest/m2/rind/rtc.md) - str0m and dimpl run DTLS, SRTP, and STUN on rind
 - [Relay ACME on instant-acme](/quest/m2/rind/acme.md) - moq-relay replaces rustls-acme with instant-acme on rind and owns renewal
 - [moq-cli and moq-hls on rind](/quest/m2/rind/cli.md) - object_store, reqwest, and axum-server take rind's provider
