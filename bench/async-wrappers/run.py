@@ -14,6 +14,7 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 HERE = Path(__file__).resolve().parent
 OUT = ROOT / ".tmp/async-wrappers"
+TOOLCHAIN = Path(subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip()) / "bin"
 VARIANTS = ("handwritten", "rules", "attribute")
 MODULES = {
     "rs/kio/src/queue.rs": ("pop",),
@@ -98,7 +99,9 @@ def environment(tree):
     # may turn a clean measurement into a cache hit.
     for key in ("RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER", "CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "RUSTDOCFLAGS"):
         env.pop(key, None)
-    env.update(CARGO_TARGET_DIR=str(tree / "target"), CARGO_INCREMENTAL="1", CARGO_BUILD_JOBS="2")
+    env.update(CARGO_TARGET_DIR=str(tree / "target"), CARGO_INCREMENTAL="1", CARGO_BUILD_JOBS="2",
+               PATH=f"{TOOLCHAIN}:{env['PATH']}", BASH_ENV="/dev/null",
+               RUSTC=str(TOOLCHAIN / "rustc"), RUSTDOC=str(TOOLCHAIN / "rustdoc"))
     return env
 
 
@@ -174,7 +177,7 @@ def main():
     metadata = {
         "head": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "rustc": subprocess.check_output(["rustc", "--version"], text=True).strip(),
-        "jobs": 2, "incremental": True, "rounds": args.rounds,
+        "jobs": 2, "incremental": True, "rounds": args.rounds, "toolchain": str(TOOLCHAIN),
         "system": {key: getattr(os.uname(), key) for key in ("sysname", "release", "machine")},
     }
     if not args.verify_only:
