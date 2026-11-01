@@ -4342,7 +4342,7 @@ mod tests {
 				route: None,
 				subscriber,
 				path: Path::from_static("room"),
-				epoch: None,
+				identity: None,
 				name: "video".to_string(),
 			},
 			request,
