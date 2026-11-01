@@ -100,7 +100,10 @@ with Opus stereo audio, under the `--broadcast` path. Timestamps come from the
 studio's own clock, so a source that stalls repeats its last picture instead of
 holding up the stream.
 
-Video is only encoded while someone watches it. A hardware encoder that reads
+The program encodes whether or not anyone watches, so a viewer who arrives
+late can fetch the recent past. `--on-demand` copies and encodes the video only
+while someone watches it, which saves that work but leaves nothing from before
+the first viewer; audio encodes either way. A hardware encoder that reads
 the GPU (NVENC on Linux, VideoToolbox on macOS, Media Foundation on Windows)
 takes each frame there when it can read the GPU the studio draws on. When it
 cannot, such as NVENC while the studio draws on a laptop's integrated GPU, the

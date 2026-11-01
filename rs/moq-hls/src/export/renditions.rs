@@ -9,7 +9,7 @@
 //! set as [`Added`](Event::Added) when first consumed, and returning `None` once the catalog
 //! finishes cleanly, or an error when the recording is incomplete.
 
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Weak};
 use std::task::Poll;
@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use moq_mux::catalog::hang::Catalog;
 
+use super::driver::{Owner, Spawner};
 use super::master;
 use super::rendition::{Kind, Rendition};
 
@@ -85,8 +86,14 @@ struct Feed {
 	targets: Vec<Weak<Rendition>>,
 	/// Each rendition's discontinuity count.
 	discontinuities: Discontinuities,
+	/// The longest duration the first catalog batch declared, in whole seconds rounded up: the
+	/// floor of every target duration this run (see [`Producer::register`]).
+	baseline: Option<u64>,
 	/// The catalog failed; late-created renditions start failed.
 	failed: Option<crate::Error>,
+	/// Another publisher run replaced this one, so every window ended where it was (see
+	/// [`Producer::cut`]) and no later failure reaches them.
+	cut: bool,
 	/// The estimated wall-clock time of `pts` 0, anchored when the first segment was listed
 	/// (assuming it had just ended). The DASH manifest's `availabilityStartTime` falls back to
 	/// this when the catalog declares no `clock`; set once so reloads see a stable presentation,
@@ -128,23 +135,36 @@ struct State {
 #[derive(Clone)]
 pub(crate) struct Fanout {
 	feed: kio::Producer<Feed>,
+	/// Starts each rendition's background work on the broadcaster's driver.
+	spawner: Spawner,
 }
 
 impl Producer {
-	pub fn new(window: Duration) -> Self {
+	pub fn new(window: Duration, spawner: Spawner) -> Self {
 		Self {
 			state: kio::Producer::new(State::default()),
 			fanout: Fanout {
 				feed: kio::Producer::new(Feed {
 					targets: Vec::new(),
 					discontinuities: Discontinuities::default(),
+					baseline: None,
 					failed: None,
+					cut: false,
 					anchor: None,
 					generation: None,
 					window,
 				}),
+				spawner,
 			},
 		}
+	}
+
+	/// A producer whose renditions run on a driver spawned on the ambient runtime.
+	#[cfg(test)]
+	pub(super) fn spawned(window: Duration) -> Self {
+		let (spawner, driver) = Spawner::new();
+		tokio::spawn(driver.run());
+		Self::new(window, spawner)
 	}
 
 	/// How many renditions the fanout still reaches, dropped ones not yet pruned included.
@@ -233,16 +253,39 @@ impl Producer {
 
 	/// Record the catalog's end before closing its change stream. A failed catalog fails every
 	/// rendition, so none reads as finished.
+	///
+	/// The first end wins. The set stays locked while the windows fail, so a racing
+	/// [`cut`](Self::cut) lands wholly before (and the failure is dropped) or after (and the
+	/// failed windows keep their failure).
 	pub fn finish(&self, result: crate::Result<()>) {
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		if state.finished.is_some() {
+			return;
+		}
 		if let Err(err) = &result {
 			self.fanout.fail(crate::Error::CatalogFailed {
 				source: Box::new(err.clone()),
 			});
 		}
+		state.finished = Some(result);
+		drop(state);
+		self.close();
+	}
+
+	/// End the rendition set and every window at what is listed now, because another publisher
+	/// run replaced this one, which may go on publishing. A cursor drains the listed segments and
+	/// then ends as after a clean finish; one already failed keeps its failure.
+	///
+	/// Closes the set first: that waits out a [`sync`](Self::sync) in flight, so no rendition
+	/// joins after its siblings were cut.
+	pub fn cut(&self) {
 		if let Ok(mut state) = self.state.write() {
-			state.finished = Some(result);
+			state.finished.get_or_insert(Ok(()));
 		}
 		self.close();
+		self.fanout.cut();
 	}
 
 	/// Close the channel, signalling consumers that no more renditions will appear.
@@ -255,6 +298,11 @@ impl Producer {
 }
 
 impl Fanout {
+	/// Run `task` on the broadcaster's driver until it finishes or the returned [`Owner`] drops.
+	pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> Owner {
+		self.spawner.spawn(task)
+	}
+
 	/// The playlist window duration every rendition's window is trimmed to.
 	pub fn window(&self) -> Duration {
 		self.feed.read().window
@@ -266,7 +314,7 @@ impl Fanout {
 	pub fn stamp(&self, key: &Key, broken: bool, end: Duration) -> u64 {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
 		if feed.anchor.is_none() {
-			feed.anchor = Some(moq_clock::wall().checked_sub(end).unwrap_or(Wall::UNIX_EPOCH));
+			feed.anchor = Some(kio::clock::wall().checked_sub(end).unwrap_or(Wall::UNIX_EPOCH));
 		}
 		feed.discontinuities.stamp(key, broken)
 	}
@@ -281,10 +329,10 @@ impl Fanout {
 	/// Replacing a generation drops what was listed under it and the inits built from it: those
 	/// belong to the run it named. The first one only labels the run already flowing, so an
 	/// embedder that supplies it right after construction loses nothing to a race with the first
-	/// records.
+	/// records. A cut set keeps its generation, so its ended playlists keep their URLs.
 	pub fn set_generation(&self, generation: Option<Arc<str>>) {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		if feed.generation == generation {
+		if feed.generation == generation || feed.cut {
 			return;
 		}
 		let restart = feed.generation.is_some();
@@ -306,10 +354,23 @@ impl Fanout {
 		});
 	}
 
+	/// End every window, including those only a cursor still holds (see [`Producer::cut`]).
+	fn cut(&self) {
+		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
+		feed.cut = true;
+		feed.targets.retain(|target| {
+			let Some(rendition) = target.upgrade() else {
+				return false;
+			};
+			rendition.cut();
+			true
+		});
+	}
+
 	/// Fail every window with `err`, so no playlist reads as finished.
 	fn fail(&self, err: crate::Error) {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		if feed.failed.is_some() {
+		if feed.failed.is_some() || feed.cut {
 			return;
 		}
 		feed.failed = Some(err.clone());
@@ -409,26 +470,51 @@ impl Producer {
 		.await
 	}
 
-	/// Enroll a freshly-created rendition with what its siblings share, and start following its
-	/// own records.
-	fn register(&self, rendition: &Arc<Rendition>) {
+	/// Enroll freshly created renditions with what their siblings share, and start following
+	/// their own records.
+	///
+	/// A playlist URI keeps one `EXT-X-TARGETDURATION` while its rendition stays in the catalog
+	/// (RFC 8216 6.2.1). The target is derived rather than stored per name, so a publisher
+	/// churning names can't grow the feed: a new rendition gets the larger of its own declared
+	/// duration and the [baseline](Feed::baseline), the longest the first batch declared.
+	/// Renditions listed first all agree. A reconfigured rendition's replacement keeps its
+	/// predecessor's (see [`Rendition::after`]), which already covers the baseline. One that
+	/// leaves and returns gets the target its declaration derives: the same unless a reconfigure
+	/// had kept an older one.
+	fn register(&self, added: Vec<Rendition>) -> Vec<Arc<Rendition>> {
+		// Most catalog updates only revise estimates; writing the feed would wake every cursor.
+		if added.is_empty() {
+			return Vec::new();
+		}
 		let mut feed = self
 			.fanout
 			.feed
 			.write()
 			.unwrap_or_else(|_| unreachable!("fanout is open"));
-		rendition.label(feed.generation.clone());
-		if let Some(err) = &feed.failed {
-			rendition.fail(err.clone());
-			rendition.close();
-		} else {
-			rendition.watch();
-		}
+		let feed = &mut *feed;
+		// Fixed by the first batch, while each target is still its own declared duration.
+		let baseline = *feed
+			.baseline
+			.get_or_insert_with(|| added.iter().map(Rendition::target_duration).max().unwrap_or(1));
+		let added: Vec<_> = added
+			.into_iter()
+			.map(|rendition| {
+				let target_duration = rendition.target_duration().max(baseline);
+				let rendition = Arc::new(rendition.pin(target_duration));
+				rendition.label(feed.generation.clone());
+				if let Some(err) = &feed.failed {
+					rendition.fail(err.clone());
+					rendition.close();
+				} else {
+					rendition.watch();
+				}
+				feed.targets.push(Arc::downgrade(&rendition));
+				rendition
+			})
+			.collect();
 		// Pruned here, so a catalog that keeps replacing renditions holds only the live ones. A
 		// replacement shares its predecessor's name, so its count survives.
-		let feed = &mut *feed;
 		feed.targets.retain(|target| target.strong_count() > 0);
-		feed.targets.push(Arc::downgrade(rendition));
 		let live: BTreeSet<Key> = feed
 			.targets
 			.iter()
@@ -436,6 +522,7 @@ impl Producer {
 			.map(|rendition| (rendition.kind, rendition.name.clone()))
 			.collect();
 		feed.discontinuities.renditions.retain(|key, _| live.contains(key));
+		added
 	}
 
 	/// Reconcile the rendition set with a complete catalog snapshot. Removed or reconfigured
@@ -498,6 +585,7 @@ impl Producer {
 			}
 		}
 
+		let mut added = Vec::new();
 		for (name, video) in &catalog.video.renditions {
 			if !master::is_path_segment(name) {
 				tracing::warn!(
@@ -517,15 +605,10 @@ impl Producer {
 			let Some(hls) = video.hls.clone() else {
 				continue;
 			};
-			let rendition = match Rendition::video(name.clone(), video, source, hls, clock, self.fanout()) {
-				Ok(rendition) => Arc::new(rendition.after(handoffs.get(&key))),
-				Err(err) => {
-					tracing::warn!(rendition = name, %err, "ignoring unservable video rendition");
-					continue;
-				}
-			};
-			self.register(&rendition);
-			current.renditions.insert(key, rendition);
+			match Rendition::video(name.clone(), video, source, hls, clock, self.fanout()) {
+				Ok(rendition) => added.push(rendition.after(handoffs.get(&key))),
+				Err(err) => tracing::warn!(rendition = name, %err, "ignoring unservable video rendition"),
+			}
 		}
 		for (name, audio) in &catalog.audio.renditions {
 			if !master::is_path_segment(name) {
@@ -543,15 +626,15 @@ impl Producer {
 			let Some(hls) = audio.hls.clone() else {
 				continue;
 			};
-			let rendition = match Rendition::audio(name.clone(), audio, source, hls, clock, self.fanout()) {
-				Ok(rendition) => Arc::new(rendition.after(handoffs.get(&key))),
-				Err(err) => {
-					tracing::warn!(rendition = name, %err, "ignoring unservable audio rendition");
-					continue;
-				}
-			};
-			self.register(&rendition);
-			current.renditions.insert(key, rendition);
+			match Rendition::audio(name.clone(), audio, source, hls, clock, self.fanout()) {
+				Ok(rendition) => added.push(rendition.after(handoffs.get(&key))),
+				Err(err) => tracing::warn!(rendition = name, %err, "ignoring unservable audio rendition"),
+			}
+		}
+		for rendition in self.register(added) {
+			current
+				.renditions
+				.insert((rendition.kind, rendition.name.clone()), rendition);
 		}
 		if current.renditions.is_empty()
 			&& (!catalog.video.renditions.is_empty() || !catalog.audio.renditions.is_empty())
@@ -654,20 +737,20 @@ mod tests {
 	#[tokio::test]
 	async fn cursors_end_only_with_a_finished_catalog() {
 		tokio::time::pause();
-		let producer = Producer::new(Duration::from_secs(30));
+		let producer = Producer::spawned(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
 		assert!(cursor.poll_next(&kio::Waiter::noop()).is_pending());
 		producer.finish(Ok(()));
 		assert!(cursor.next().await.unwrap().is_none());
 		assert!(cursor.next().await.unwrap().is_none());
 
-		let producer = Producer::new(Duration::from_secs(30));
+		let producer = Producer::spawned(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
 		producer.close();
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
 
-		let producer = Producer::new(Duration::from_secs(30));
+		let producer = Producer::spawned(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
 		drop(producer);
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
@@ -703,7 +786,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_failed_catalog_never_completes_a_cursor() {
 		tokio::time::pause();
-		let producer = Producer::new(Duration::from_secs(30));
+		let producer = Producer::spawned(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
 		producer.finish(Err(crate::Error::NoVariants));
 		assert!(matches!(
@@ -711,5 +794,24 @@ mod tests {
 			Err(crate::Error::CatalogFailed { source }) if matches!(*source, crate::Error::NoVariants)
 		));
 		assert!(producer.failure().is_some());
+	}
+
+	// A cut ends the set before it cuts the windows. A catalog failure landing in that gap must
+	// not fail the windows the cut keeps, nor leave the set and its windows disagreeing.
+	#[tokio::test]
+	async fn a_failure_racing_a_cut_is_dropped() {
+		tokio::time::pause();
+		let producer = Producer::spawned(Duration::from_secs(30));
+		let mut cursor = producer.subscribe();
+		// The first half of `cut`: the set ends cleanly while its windows are not cut yet.
+		if let Ok(mut state) = producer.state.write() {
+			state.finished = Some(Ok(()));
+		}
+		producer.close();
+		producer.finish(Err(crate::Error::NoVariants));
+		assert!(producer.failure().is_none(), "the failure reached the windows");
+		producer.cut();
+		assert!(cursor.next().await.unwrap().is_none());
+		assert!(producer.failure().is_none());
 	}
 }

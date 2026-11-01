@@ -2,7 +2,7 @@
 
 ## Goal
 
-The merge gates for moq-dev/moq, kixelated/quest, and kixelated/rust2 run on
+The merge gates for moq-dev/moq, moq-dev/quest, and moq-dev/rust2 run on
 one rented always-on host with a warm on-disk cache, instead of the
 maintainer's home `nixos` box. Gate entries are no slower than the home
 runner's measured times, and the home box is off the merge path. moq.pro's
@@ -75,7 +75,7 @@ Remaining work, once [the host is rented](/quest/m3/ci-host-rented.md):
   generated source trees another job's next build reads. Verify with
   overlapping jobs under cache pressure. Safe collection need not serialize
   jobs.
-- Give kixelated/quest and kixelated/rust2 a gate that runs on the rented
+- Give moq-dev/quest and moq-dev/rust2 a gate that runs on the rented
   runner. Their Check workflows hardcode hosted runners (`ubuntu-latest`,
   `ubuntu-24.04-arm`), and quest's has no `merge_group` trigger, so a runner
   variable alone leaves them off the host. Route only trusted gate runs

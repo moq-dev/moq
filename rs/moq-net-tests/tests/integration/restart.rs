@@ -38,12 +38,12 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) 
 /// Let every task settle, past the update hold. Time is paused, so this returns once
 /// the runtime is idle.
 async fn settle() {
-	moq_clock::sleep(Duration::from_millis(500)).await;
+	kio::clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// The next announce event, failing on a hang.
 async fn next_event(announced: &mut announce::Consumer) -> announce::Event {
-	moq_clock::timeout(Duration::from_secs(10), announced.next())
+	kio::clock::timeout(Duration::from_secs(10), announced.next())
 		.await
 		.expect("announce hung")
 		.expect("announce ended")
@@ -79,7 +79,7 @@ async fn expect_replaced(version: Version, announced: &mut announce::Consumer, p
 
 /// Nothing more arrives, past the update hold.
 async fn quiet(version: Version, announced: &mut announce::Consumer) {
-	if let Ok(event) = moq_clock::timeout(Duration::from_secs(1), announced.next()).await {
+	if let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		panic!("{version}: expected nothing more, got {event:?}");
 	}
 }
@@ -93,7 +93,7 @@ fn write(track: &track::Producer, tag: &str) {
 
 /// The next frame a subscription delivers, as text.
 async fn read(subscription: &mut track::Subscriber) -> String {
-	let mut group = moq_clock::timeout(Duration::from_secs(10), subscription.recv_group())
+	let mut group = kio::clock::timeout(Duration::from_secs(10), subscription.recv_group())
 		.await
 		.expect("subscription hung")
 		.unwrap()
@@ -152,9 +152,9 @@ async fn relay_chain(version: &str) {
 macro_rules! relay_chain_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
-			#[moq_clock::test]
+			#[kio::test]
 			async fn $name() {
-				moq_clock::timeout(TEST_TIMEOUT, relay_chain($version))
+				kio::clock::timeout(TEST_TIMEOUT, relay_chain($version))
 					.await
 					.expect("timed out");
 			}
@@ -187,7 +187,7 @@ impl Worker {
 		);
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
-		drop(moq_clock::sim::spawn(async move {
+		drop(kio::clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
@@ -242,16 +242,16 @@ async fn prefix_pool(version: &str) {
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn prefix_pool_lite06() {
-	moq_clock::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-06"))
+	kio::clock::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-06"))
 		.await
 		.expect("timed out");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn prefix_pool_lite07() {
-	moq_clock::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-07-wip"))
+	kio::clock::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-07-wip"))
 		.await
 		.expect("timed out");
 }
@@ -273,7 +273,7 @@ impl Claim {
 			Rc::new(moq_net::fuzz::requests_route(origin, moq_net::Path::from_static("live"), route).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (dynamic.clone(), outputs.clone());
-		drop(moq_clock::sim::spawn(async move {
+		drop(kio::clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
@@ -330,7 +330,7 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 
 	// A re-price at the same epoch is an update at most: every handle survives.
 	claim.update_route(claim.dynamic.route().with_cost(5));
-	while let Ok(event) = moq_clock::timeout(Duration::from_secs(1), announced.next()).await {
+	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		assert!(
 			matches!(event, Some(announce::Event::Update(_))),
 			"{version}: a re-price delivered {event:?}"
@@ -342,13 +342,12 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	assert!(same.is_clone(&stale), "{version}: a re-price replaced the broadcast");
 	assert_eq!(claim.answered(), 1, "{version}: a re-price asked the handler again");
 
-	// Another epoch, or none, is another instance downstream. lite-07 restarts it in place,
-	// and so does moq-transport (MoQ Epoch) between two epochs: the new instance is
-	// advertised before the old is withdrawn, so the path is never absent.
-	let lite = |name: &str| version == name.parse().unwrap();
-	let in_place = lite("moq-lite-07-wip") || !lite("moq-lite-06") && from.is_some() && to.is_some();
+	// Another epoch, or none, is another instance downstream. Only lite-07 restarts it in
+	// place: the new instance is advertised before the old is withdrawn, so the path is
+	// never absent.
+	let lite07 = version == "moq-lite-07-wip".parse().unwrap();
 	claim.update_epoch(to.clone());
-	expect_replaced(version, &mut announced, "live", in_place).await;
+	expect_replaced(version, &mut announced, "live", lite07).await;
 
 	// The subscription already open stays on the old answer.
 	claim.write(0, "old:2");
@@ -358,11 +357,9 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	let (fresh, mut subscription) = subscribe(&viewer, "live/cam").await;
 	assert!(!fresh.is_clone(&stale), "{version}: joined the old instance's copy");
 	assert_eq!(claim.answered(), 2, "{version}: the old answer was served again");
-	// Every wire here but lite-06 carries the epoch: lite-07, and moq-transport with the
-	// MoQ Epoch extension.
-	if version != "moq-lite-06".parse().unwrap() {
-		assert_eq!(fresh.info().epoch, to, "{version}: resolved under the old epoch");
-	}
+	// Only lite-07 carries the epoch; the other wires resolve an epochless instance.
+	let epoch = if lite07 { to } else { None };
+	assert_eq!(fresh.info().epoch, epoch, "{version}: resolved under the old epoch");
 	claim.write(1, "new:0");
 	assert_eq!(read(&mut subscription).await, "new:0", "{version}");
 
@@ -382,11 +379,11 @@ fn epochs() -> (Epoch, Epoch) {
 macro_rules! dynamic_epoch_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
-			#[moq_clock::test]
+			#[kio::test]
 			async fn $name() {
 				let (a, b) = epochs();
 				for (from, to) in [(Some(a.clone()), Some(b.clone())), (Some(a), None), (None, Some(b))] {
-					moq_clock::timeout(TEST_TIMEOUT, dynamic_epoch($version, from, to))
+					kio::clock::timeout(TEST_TIMEOUT, dynamic_epoch($version, from, to))
 						.await
 						.expect("timed out");
 				}
@@ -405,7 +402,7 @@ dynamic_epoch_tests! {
 /// An update does not override route selection: with a second claim still at the
 /// epoch, a claim dropping it hands re-requests to the second, which outranks any
 /// route without one.
-#[moq_clock::test]
+#[kio::test]
 async fn dynamic_epoch_second_route_keeps_winning() {
 	let (a, _) = epochs();
 	let origin = produce_origin(1);
@@ -427,7 +424,7 @@ async fn dynamic_epoch_second_route_keeps_winning() {
 	// The epoch still stands through the second claim, so this is no restart, and the
 	// instance's subscriptions resume through it.
 	first.update_epoch(None);
-	while let Ok(event) = moq_clock::timeout(Duration::from_secs(1), announced.next()).await {
+	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		assert!(
 			matches!(event, Some(announce::Event::Update(_))),
 			"dropping a shared epoch delivered {event:?}"
@@ -511,9 +508,9 @@ async fn retired_fetch(version: &str, explicit: bool) {
 
 macro_rules! retired_fetch_tests {
 	($($name:ident: $version:literal,)*) => { $(
-		#[moq_clock::test]
+		#[kio::test]
 		async fn $name() {
-			moq_clock::timeout(TEST_TIMEOUT, retired_fetch($version, false)).await.expect("timed out");
+			kio::clock::timeout(TEST_TIMEOUT, retired_fetch($version, false)).await.expect("timed out");
 		}
 	)* };
 }
@@ -553,7 +550,7 @@ async fn unanswered_takeover(version: &str) {
 	expect_restart(version, &mut announced, "live").await;
 	write(&old_track, "old:0");
 
-	let next = moq_clock::timeout(Duration::from_secs(10), subscription.recv_group())
+	let next = kio::clock::timeout(Duration::from_secs(10), subscription.recv_group())
 		.await
 		.expect("subscription hung");
 	match next {
@@ -567,9 +564,9 @@ async fn unanswered_takeover(version: &str) {
 
 macro_rules! unanswered_takeover_tests {
 	($($name:ident: $version:literal,)*) => { $(
-		#[moq_clock::test]
+		#[kio::test]
 		async fn $name() {
-			moq_clock::timeout(TEST_TIMEOUT, unanswered_takeover($version)).await.expect("timed out");
+			kio::clock::timeout(TEST_TIMEOUT, unanswered_takeover($version)).await.expect("timed out");
 		}
 	)* };
 }
@@ -582,14 +579,14 @@ unanswered_takeover_tests! {
 	unanswered_takeover_lite07: "moq-lite-07-wip",
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn retired_fetch_explicit_epoch_control() {
-	moq_clock::timeout(TEST_TIMEOUT, retired_fetch("moq-lite-07-wip", true))
+	kio::clock::timeout(TEST_TIMEOUT, retired_fetch("moq-lite-07-wip", true))
 		.await
 		.expect("timed out");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let version: Version = version.parse().unwrap();
@@ -612,7 +609,7 @@ async fn withdrawal_refuses_new_fetches_but_keeps_open_reads() {
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 	for name in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let version: Version = name.parse().unwrap();
@@ -654,7 +651,7 @@ impl Pool {
 		let outputs = Rc::new(RefCell::new(std::collections::HashMap::new()));
 		let answered = Rc::new(RefCell::new(0));
 		let (handler, served, count) = (claim.clone(), outputs.clone(), answered.clone());
-		drop(moq_clock::sim::spawn(async move {
+		drop(kio::clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let path = request.path().to_string();
 				let prepared = request.prepare(Epoch::mint()).unwrap();
@@ -681,14 +678,16 @@ impl Pool {
 	}
 }
 
-/// Wake the worker for `path` through the claim, then subscribe through the exact route
-/// it published. A relay resolves a path under the claim optimistically, and the first
-/// subscription through it is reset once the exact route arrives: the cold-start reset
-/// accepted until announce takeover lands.
-async fn claimed(origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
-	let cold = origin.consume().request(path, None).await.unwrap();
-	drop(cold.track("video").unwrap().subscribe(None).await);
-	settle().await;
+/// Wake the worker for `path` through the claim and subscribe. moq-lite-07 announces the
+/// answer as a takeover of the claim, so the first subscription keeps reading. Older wires
+/// carry it as an ordinary announcement, which resets the first subscription through the
+/// claim, so they wake the worker first and subscribe through the exact route.
+async fn claimed(version: Version, origin: &origin::Producer, path: &str) -> (broadcast::Consumer, track::Subscriber) {
+	if version != "moq-lite-07-wip".parse().unwrap() {
+		let cold = origin.consume().request(path, None).await.unwrap();
+		drop(cold.track("video").unwrap().subscribe(None).await);
+		settle().await;
+	}
 	subscribe(origin, path).await
 }
 
@@ -705,11 +704,11 @@ async fn claim_restart(version: &str) {
 	let pool = Pool::new(&worker);
 	settle().await;
 
-	let (_sibling, mut sibling) = claimed(&edge, "pool/q").await;
+	let (_sibling, mut sibling) = claimed(version, &edge, "pool/q").await;
 	pool.write("pool/q", "q:0");
 	assert_eq!(read(&mut sibling).await, "q:0", "{version}");
 
-	let (old, mut first) = claimed(&edge, "pool/p").await;
+	let (old, mut first) = claimed(version, &edge, "pool/p").await;
 	for group in 0..3 {
 		pool.write("pool/p", &format!("old:{group}"));
 		assert_eq!(read(&mut first).await, format!("old:{group}"), "{version}");
@@ -718,12 +717,8 @@ async fn claim_restart(version: &str) {
 	pool.close("pool/p");
 	settle().await;
 
-	let (fresh, mut returning) = claimed(&edge, "pool/p").await;
+	let (fresh, mut returning) = claimed(version, &edge, "pool/p").await;
 	assert!(!fresh.is_clone(&old), "{version}: joined the old output");
-	if version == "moq-lite-07-wip".parse().unwrap() {
-		assert!(fresh.info().epoch.is_some(), "{version}: resolved through the claim");
-		assert_ne!(fresh.info().epoch, old.info().epoch, "{version}: reused the old epoch");
-	}
 	assert_eq!(*pool.answered.borrow(), 3, "{version}: the worker was not asked again");
 	pool.write("pool/p", "new:0");
 	assert_eq!(read(&mut returning).await, "new:0", "{version}");
@@ -739,9 +734,9 @@ async fn claim_restart(version: &str) {
 macro_rules! claim_restart_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
-			#[moq_clock::test]
+			#[kio::test]
 			async fn $name() {
-				moq_clock::timeout(TEST_TIMEOUT, claim_restart($version))
+				kio::clock::timeout(TEST_TIMEOUT, claim_restart($version))
 					.await
 					.expect("timed out");
 			}
@@ -755,4 +750,84 @@ claim_restart_tests! {
 	claim_restart_lite07: "moq-lite-07-wip",
 	claim_restart_ietf18: "moq-transport-18",
 	claim_restart_ietf22: "moq-transport-22",
+}
+
+/// A mid-stream priority change on a viewer's subscription reaches the publisher's
+/// aggregate, directly or through a relay (`P -> R -> V`), and on an old instance after
+/// an epoch switch left the subscription on it.
+async fn priority_update(version: &str, relayed: bool, switch: bool) {
+	let version: Version = version.parse().unwrap();
+	let case = format!("{version} relayed={relayed} switch={switch}");
+	let publisher = produce_origin(1);
+	let relay = produce_origin(2);
+	let viewer = produce_origin(3);
+	let mut links = Vec::new();
+	if relayed {
+		links.push(link(version, &publisher, &relay).await);
+		links.push(link(version, &relay, &viewer).await);
+	} else {
+		links.push(link(version, &publisher, &viewer).await);
+	}
+
+	let (a, b) = epochs();
+	let old = publisher
+		.publish("live", origin::Route::default().with_epoch(a))
+		.unwrap();
+	let old_track = old.create_track("video", timed()).unwrap();
+	let mut announced = viewer.consume().announced();
+	assert!(
+		matches!(next_event(&mut announced).await, announce::Event::Start(_)),
+		"{case}"
+	);
+
+	let (_held, mut subscription) = subscribe(&viewer, "live").await;
+	write(&old_track, "old:0");
+	assert_eq!(read(&mut subscription).await, "old:0", "{case}");
+
+	let _new = switch.then(|| {
+		publisher
+			.publish("live", origin::Route::default().with_epoch(b))
+			.unwrap()
+	});
+	if switch {
+		// Only lite-07 carries the epoch, so only it restarts in place.
+		let in_place = version == "moq-lite-07-wip".parse().unwrap();
+		expect_replaced(version, &mut announced, "live", in_place).await;
+	}
+
+	// Demoted, promoted, then back to the default, each reaching the publisher before the
+	// viewer reads again: nothing waits for its next read to forward it.
+	for (group, priority) in [-2, 1, 0].into_iter().enumerate() {
+		subscription
+			.update(subscription.subscription().with_priority(priority))
+			.unwrap();
+		settle().await;
+		let seen = old_track.subscription().map(|subscription| subscription.priority);
+		assert_eq!(seen, Some(priority), "{case}: the publisher saw {seen:?}");
+		let tag = format!("old:{}", group + 1);
+		write(&old_track, &tag);
+		assert_eq!(read(&mut subscription).await, tag, "{case}");
+	}
+}
+
+macro_rules! priority_update_tests {
+	($($name:ident: $version:literal,)*) => { $(
+		#[kio::test]
+		async fn $name() {
+			for relayed in [false, true] {
+				for switch in [false, true] {
+					kio::clock::timeout(TEST_TIMEOUT, priority_update($version, relayed, switch))
+						.await
+						.expect("timed out");
+				}
+			}
+		}
+	)* };
+}
+
+priority_update_tests! {
+	priority_update_lite06: "moq-lite-06",
+	priority_update_lite07: "moq-lite-07-wip",
+	priority_update_ietf18: "moq-transport-18",
+	priority_update_ietf22: "moq-transport-22",
 }

@@ -3,7 +3,7 @@
 use std::task::Poll;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use crate::catalog::{CatalogFormat, Stream};
 use crate::container::consumer::Event;
@@ -53,7 +53,7 @@ impl Release {
 			source,
 			catalog: Some(catalog),
 			track: None,
-			subscribed: moq_clock::now(),
+			subscribed: kio::clock::now(),
 			finished: false,
 			released: false,
 			delay: Duration::ZERO,
@@ -141,7 +141,8 @@ impl Release {
 			&& let Some((name, track)) = self.track.as_mut()
 		{
 			loop {
-				if self.jitter.full(&()) {
+				if self.jitter.full(&(), waiter) {
+					let _ = track.poll_received(waiter);
 					break;
 				}
 				let (frame, arrived) = match track.poll_event(waiter) {
@@ -158,14 +159,14 @@ impl Release {
 				// does not make them late, and a stall of the whole path does not hide that they are.
 				let arrival = Arrival {
 					arrived: arrived.max(self.subscribed),
-					read: moq_clock::now(),
+					read: kio::clock::now(),
 					decode: frame.timestamp.into(),
 					restart: track.markers(),
-					skip: track.skips(),
 					// The output opens on a group, at a random access point; from then on every
 					// object goes out on its own, so one dropped late is a gap of its packets only.
 					sync: frame.keyframe || self.released,
 					leading: false,
+					bytes: frame.payload.len(),
 					item: frame,
 				};
 				if self.jitter.push((), arrival)? == Push::Late {
@@ -207,7 +208,7 @@ impl Release {
 					false => source.live(),
 				};
 				self.track = Some((m2ts.track.clone(), source));
-				self.subscribed = moq_clock::now();
+				self.subscribed = kio::clock::now();
 			}
 			Some((name, _)) if *name != m2ts.track => {
 				return Err(anyhow::anyhow!("the `m2ts` track moved from `{name}` to `{}`", m2ts.track).into());

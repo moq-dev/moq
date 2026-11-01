@@ -14,14 +14,13 @@
 
 use std::ffi::{c_char, c_void};
 use std::sync::{Arc, OnceLock};
-use std::time::Duration;
 
 use tokio::sync::oneshot;
 
 use crate::decode::Read;
 use crate::ffi::OnStatus;
 use crate::task::Task;
-use crate::{Error, Id, NonZeroSlab, Shared, State, ffi, moq_decode_gap, moq_decode_read_kind};
+use crate::{Error, Id, NonZeroSlab, Shared, State, ffi, moq_decode_gap, moq_decode_read_kind, moq_decode_start};
 
 // ---- C-visible types ----
 
@@ -167,11 +166,12 @@ pub struct moq_video_encoder_frame {
 /// with the `libmoq.a` they link.
 #[repr(C)]
 pub struct moq_video_decoder_output {
-	/// Upper bound on buffering before skipping a stalled group, in
-	/// microseconds. Same congestion-control knob as
-	/// `moq_consume_video`'s `max_delay_us`. 0 = skip aggressively
-	/// (the moq-mux default); set to your playout buffer for a softer skip.
-	pub max_delay_us: u64,
+	/// How far behind the live edge to play: where a cold join starts and when
+	/// a stalled group is skipped. Same knob as `moq_consume_video`'s `delay`.
+	/// Zeroed: start at the newest group and skip aggressively (the moq-mux
+	/// default); set `min_us` to your playout delay and `max_us` at or past it
+	/// for a softer skip.
+	pub delay: crate::api::moq_delay,
 	/// `moq_video_pixel_format` discriminant. Unknown values fail
 	/// [`moq_decode_video`] rather than decoding into an assumed layout.
 	pub format: u32,
@@ -179,6 +179,10 @@ pub struct moq_video_decoder_output {
 	pub width: u32,
 	/// Target height in pixels. 0 with `width` 0 means the native size.
 	pub height: u32,
+	/// `moq_decode_start` discriminant: where to start on a track that already
+	/// holds groups. 0 = the oldest, decoding everything cached; a live player
+	/// sets `MOQ_DECODE_START_LATEST`.
+	pub start: u32,
 }
 
 /// One decoded video frame from [`moq_decode_video`]: pixels plus a
@@ -1014,8 +1018,10 @@ pub extern "C" fn moq_encode_video_reservation(producer: u32) -> i32 {
 	})
 }
 
-/// Watch whether the encoded video track has subscribers, so the camera and encoder
-/// run only while someone watches. See [`crate::moq_publish_media_demand`] for the
+/// Watch whether the encoded video track has subscribers. The encoder publishes every
+/// frame written, subscribed or not; opting in to run the camera and encoder only
+/// while someone watches saves that work but leaves a late subscriber nothing to
+/// fetch from before it arrived. See [`crate::moq_publish_media_demand`] for the
 /// callback contract.
 ///
 /// Returns a non-zero watcher handle on success, or a negative code on failure.
@@ -1168,7 +1174,7 @@ pub extern "C" fn moq_encode_video_finish(producer: u32) -> i32 {
 /// again, so release `user_data` there. The terminal callback fires even after
 /// [`moq_decode_video_cancel`].
 ///
-/// Starts at the newest cached group so reopening live playback skips the backlog.
+/// `output->start` picks where it starts on a track that already holds groups.
 ///
 /// # Safety
 /// - `output` must point to a valid [`moq_video_decoder_output`].
@@ -1189,11 +1195,15 @@ pub unsafe extern "C" fn moq_decode_video(
 		// subscription it would immediately drop.
 		let format = pixel_format_from_u32(raw.format)?;
 		let size = decoder_size(raw.width, raw.height)?;
+		let start = match moq_decode_start::from_u32(raw.start)? {
+			moq_decode_start::MOQ_DECODE_START_OLDEST => moq_video::decode::Start::Oldest,
+			moq_decode_start::MOQ_DECODE_START_LATEST => moq_video::decode::Start::Latest,
+		};
 		let catalog = ffi::parse_id(catalog)?;
 
 		let mut options = moq_video::decode::Options::new();
-		options.start = moq_video::decode::Start::Latest;
-		options.max_delay = Duration::from_micros(raw.max_delay_us);
+		options.start = start;
+		options.delay = raw.delay.into();
 		// The C caller takes packed pixels, so let a backend that can decode
 		// straight to the CPU do that rather than downloading afterwards.
 		options.decoder.output = moq_video::Output::Cpu;
@@ -1489,7 +1499,7 @@ mod follow_tests {
 		});
 		assert_eq!(moved, Ok(None));
 
-		let retried = moq_clock::timeout(Duration::from_secs(60), follower.next())
+		let retried = kio::clock::timeout(Duration::from_secs(60), follower.next())
 			.await
 			.expect("the dropped target is asked for again");
 		assert_eq!(retried.unwrap(), Target::Enabled(Rate::from_mbps(2)));
@@ -1504,7 +1514,7 @@ mod follow_tests {
 
 	/// Retune at every target until the follower goes a minute without one.
 	async fn quiet(follower: &mut Follower, ceiling: Rate, mut set: impl FnMut(Rate) -> Result<(), moq_video::Error>) {
-		while let Ok(bitrate) = moq_clock::timeout(Duration::from_secs(60), follower.next()).await {
+		while let Ok(bitrate) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
 			rate(follower, ceiling, bitrate.unwrap(), &mut set).unwrap();
 		}
 	}
