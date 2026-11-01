@@ -409,12 +409,13 @@ Crashes, wrong bytes, missing frames, a window that presents nothing, or an
 unavailable CPU clock fail the run; timing never does. The nightly runs
 `--smoke` and keeps its run directory as the `bench-browser` artifact.
 
-The in-memory frame, retained-history, and gap ledger paths also run directly in Chromium:
+The in-memory frame, retained-history, gap ledger, and peer grant paths also run directly in Chromium:
 
 ```bash
 nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench drift --out .tmp/drift.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench ledger --out .tmp/ledger.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench pattern --out .tmp/pattern.json before=/path/to/main current=. aa=.
 ```
 
 Each variant uses its own workspace source and a persistent page, with one full
@@ -425,21 +426,26 @@ against every checkout, sweeping retained groups, publishers, and readers. Repla
 and group setup stay outside drift timing; each parked read checks its live
 payload. `ledger` uses one fixture against every checkout's internal ledger, sweeping
 ascending, descending, shuffled, and rolling-expiration arrivals over the retained
-gap count. It includes each arrival's expiration and coverage checks.
+gap count. It includes each arrival's expiration and coverage checks. `pattern`
+runs `js/pattern/bench/algebra.ts` against every checkout's `@moq/pattern`: the
+same peer grant shapes as the Rust `pattern-algebra` sweep below, reduced and
+compared against a previous grant, up to a whole `AUTH_OK`.
 The drift sweep includes untimed controls and timed groups with decode-order
 B-frames, independently varying publisher and reader counts and retained history.
 Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
 for mixed millisecond/microsecond timestamps, which exercise exact cross-scale
 comparison.
 
-The browser smoke lane preserves one measured round of all three fixtures, and drift
-and ledger also run in the nightly JS benchmark leg. Timing is
+The browser smoke lane preserves one measured round of all four fixtures, and drift,
+ledger, and pattern also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
 ## Pattern and container coverage
 
 Rust Criterion coverage includes `moq-pattern`'s
-`matching` (pattern count and path depth, last match and miss) and `moq-mux`'s
+`matching` (pattern count and path depth, last match and miss; and, in
+`pattern-algebra`, whole-union operations, including the worst known peer grant
+shapes swept over encoded size up to a whole `AUTH_OK`) and `moq-mux`'s
 `containers` (CMAF and Annex-B import/export). Container cases vary frame count
 and payload size; CMAF also varies track count. Separate frame and byte rates
 use the same fixtures, with byte rates counting the encoded stream size.
