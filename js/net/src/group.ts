@@ -830,8 +830,7 @@ export class FrameConsumer {
 
 	/** When the frame's last byte landed in this node's group; `undefined` until then. */
 	get arrived(): Instant | undefined {
-		const frame = this.#frame;
-		return frame instanceof Chunked ? frame.arrived : frame.arrived;
+		return this.#frame.arrived;
 	}
 
 	#poll(): Uint8Array | undefined | typeof WAIT {

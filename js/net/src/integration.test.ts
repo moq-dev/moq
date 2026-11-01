@@ -2800,7 +2800,7 @@ test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])(
 				for (let i = 0; i < chunk.byteLength; i++) chunk[i] = byte(written + i);
 				frame.write(chunk);
 				written += chunk.byteLength;
-				await sleep(0);
+				await yieldNow();
 			}
 			frame.finish();
 			group.writeFrame(textFrame("after"));
