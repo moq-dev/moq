@@ -8471,3 +8471,288 @@ async fn next_encoded_frame(consumer: &MoqMediaTrackConsumer) -> Result<Option<M
 		}
 	}
 }
+
+/// Drives reads through uniffi's `RustFuture` the way a foreign binding does.
+mod rust_future {
+	use std::sync::{Condvar, Mutex};
+
+	use uniffi::{Handle, LiftArgsError, RustFuturePoll};
+
+	use crate::error::MoqError;
+	use crate::media::MoqFrame;
+
+	/// Each continuation uniffi called, by the `data` its poll was given.
+	static CONTINUATIONS: Mutex<Vec<(u64, RustFuturePoll)>> = Mutex::new(Vec::new());
+	/// Notified on each continuation.
+	static CALLED: Condvar = Condvar::new();
+
+	extern "C" fn continuation(data: u64, poll: RustFuturePoll) {
+		CONTINUATIONS.lock().unwrap().push((data, poll));
+		CALLED.notify_all();
+	}
+
+	/// Wait for a continuation for `data`, then take every one called for it.
+	fn wait_called(data: u64) -> Vec<RustFuturePoll> {
+		let continuations = CONTINUATIONS.lock().unwrap();
+		let (continuations, timeout) = CALLED
+			.wait_timeout_while(continuations, super::TIMEOUT, |continuations| {
+				!continuations.iter().any(|(d, _)| *d == data)
+			})
+			.unwrap();
+		assert!(!timeout.timed_out(), "the read never woke");
+		drop(continuations);
+		called(data)
+	}
+
+	/// Take the continuations called for `data`.
+	fn called(data: u64) -> Vec<RustFuturePoll> {
+		let mut continuations = CONTINUATIONS.lock().unwrap();
+		let (called, rest) = continuations.drain(..).partition(|(d, _)| *d == data);
+		*continuations = rest;
+		called.into_iter().map(|(_, poll)| poll).collect::<Vec<_>>()
+	}
+
+	/// A read as a foreign future, resolving to the frame's payload.
+	pub(super) struct Read {
+		handle: Handle,
+		data: u64,
+	}
+
+	impl Read {
+		pub(super) fn start<F>(read: F, data: u64) -> Self
+		where
+			F: Future<Output = Result<Option<MoqFrame>, MoqError>> + Send + 'static,
+		{
+			let handle = uniffi::rust_future_new(
+				async move {
+					let frame = read.await.expect("read failed").expect("read ended");
+					Ok::<u8, LiftArgsError>(frame.payload[0])
+				},
+				crate::UniFfiTag,
+			);
+			let read = Self { handle, data };
+			read.poll();
+			read
+		}
+
+		fn poll(&self) {
+			// SAFETY: the handle is live until `Drop` frees it.
+			unsafe { uniffi::rust_future_poll::<u8>(self.handle.clone(), continuation, self.data) }
+		}
+
+		/// Whether the read is still parked: no continuation since its last poll.
+		pub(super) fn parked(&self) -> bool {
+			called(self.data).is_empty()
+		}
+
+		/// Stop polling without freeing, which is all `rust_future_cancel` does: Kotlin and Swift
+		/// leave this window open until they free the future.
+		pub(super) fn cancel(&self) {
+			// SAFETY: the handle is live until `Drop` frees it.
+			unsafe { uniffi::rust_future_cancel::<u8>(self.handle.clone()) };
+			assert_eq!(called(self.data), [RustFuturePoll::Ready], "cancel resolves the continuation");
+		}
+
+		/// Poll on every wake until ready, then complete the read.
+		pub(super) fn finish(&self) -> u8 {
+			while !wait_called(self.data).contains(&RustFuturePoll::Ready) {
+				self.poll();
+			}
+			let mut status = uniffi::RustCallStatus::default();
+			// SAFETY: the handle is live, and its continuation reported it ready.
+			let value = unsafe { uniffi::rust_future_complete::<u8>(self.handle.clone(), &mut status) };
+			assert_eq!(status.code, uniffi::RustCallStatusCode::Success);
+			value
+		}
+	}
+
+	impl Drop for Read {
+		fn drop(&mut self) {
+			// SAFETY: freed once, here.
+			unsafe { uniffi::rust_future_free::<u8>(self.handle.clone()) };
+		}
+	}
+}
+
+/// A read the foreign side cancelled but has not freed yet holds nothing the next read on the
+/// same handle needs, so the next read resolves while the first is still allocated.
+fn cancelled_unfreed_read_does_not_block_the_next<F, Fut>(read: F, write: impl FnOnce(), data: u64)
+where
+	F: Fn() -> Fut,
+	Fut: Future<Output = Result<Option<MoqFrame>, MoqError>> + Send + 'static,
+{
+	let first = rust_future::Read::start(read(), data);
+	assert!(first.parked(), "the first read parks");
+	first.cancel();
+
+	let second = rust_future::Read::start(read(), data + 1);
+	write();
+	assert_eq!(second.finish(), 7, "the second read gets the frame written after the cancel");
+	drop(second);
+	drop(first);
+}
+
+#[test]
+fn raw_read_frame_cancelled_unfreed_does_not_block_the_next() {
+	let (_broadcast, track, consumer) = raw_track();
+	cancelled_unfreed_read_does_not_block_the_next(
+		|| {
+			let consumer = consumer.clone();
+			async move { consumer.read_frame().await }
+		},
+		|| track.write_frame(group_frame(&[7])).unwrap(),
+		100,
+	);
+}
+
+#[test]
+fn raw_group_read_frame_cancelled_unfreed_does_not_block_the_next() {
+	let (_broadcast, track, _consumer) = raw_track();
+	let group = track.append_group().unwrap();
+	let consumer = group.consume().unwrap();
+	cancelled_unfreed_read_does_not_block_the_next(
+		|| {
+			let consumer = consumer.clone();
+			async move { consumer.read_frame().await }
+		},
+		|| group.write_frame(group_frame(&[7])).unwrap(),
+		200,
+	);
+}
+
+/// Reads parked together on one track each wake, and between them take every group once,
+/// whether they go through `read_frame` or `next_group`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn raw_track_concurrent_reads_take_every_group_once() {
+	const GROUPS: u64 = 200;
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	// No age limit, so a group nobody has read yet is never skipped for a newer one.
+	let consumer = track
+		.consume(Some(MoqSubscription {
+			max_delay: None,
+			..moq_subscription_defaults()
+		}))
+		.unwrap();
+
+	// Each reader returns the group sequences it took: a frame's payload names its group.
+	let frames = |consumer: Arc<MoqTrackConsumer>| {
+		tokio::spawn(async move {
+			let mut taken = Vec::new();
+			while let Some(frame) = consumer.read_frame().await.unwrap() {
+				taken.push(u64::from_be_bytes(frame.payload.try_into().unwrap()));
+			}
+			taken
+		})
+	};
+	let groups = |consumer: Arc<MoqTrackConsumer>| {
+		tokio::spawn(async move {
+			let mut taken = Vec::new();
+			while let Some(group) = consumer.next_group().await.unwrap() {
+				taken.push(group.sequence());
+			}
+			taken
+		})
+	};
+	let readers = [
+		frames(consumer.clone()),
+		frames(consumer.clone()),
+		groups(consumer.clone()),
+		groups(consumer.clone()),
+	];
+	ffi_caught_up().await;
+
+	for sequence in 0..GROUPS {
+		let group = track.create_group(sequence).unwrap();
+		group
+			.write_frame(MoqFrame {
+				payload: sequence.to_be_bytes().to_vec(),
+				timestamp_us: Some(sequence),
+			})
+			.unwrap();
+		group.finish().unwrap();
+		if sequence % 8 == 0 {
+			tokio::task::yield_now().await;
+		}
+	}
+	track.finish().unwrap();
+
+	let mut taken = Vec::new();
+	let mut each = Vec::new();
+	for reader in readers {
+		let reader = moq_clock::timeout(TIMEOUT, reader)
+			.await
+			.expect("a parked read never woke")
+			.expect("reader panicked");
+		each.push(reader.len());
+		taken.extend(reader);
+	}
+	taken.sort_unstable();
+	assert_eq!(taken, (0..GROUPS).collect::<Vec<_>>(), "per reader: {each:?}");
+}
+
+/// A poll in flight when shutdown starts finishes before shutdown returns, a call parked
+/// across it resolves `Cancelled`, and so does every later call.
+#[test]
+fn shutdown_waits_for_a_polled_call() {
+	if !shutdown_child("shutdown_waits_for_a_polled_call") {
+		return;
+	}
+
+	let polled = Arc::new(crate::ffi::Polled::new(()));
+	let block_on = |future: std::pin::Pin<Box<dyn Future<Output = Result<u8, MoqError>> + Send>>| {
+		std::thread::spawn(move || {
+			tokio::runtime::Builder::new_current_thread()
+				.build()
+				.unwrap()
+				.block_on(future)
+		})
+	};
+
+	// Parked with no item coming: only the shutdown can end it.
+	let parked = block_on(Box::pin({
+		let polled = polled.clone();
+		async move { polled.wait(|_, _| std::task::Poll::Pending).await }
+	}));
+
+	let (entered, entered_rx) = std::sync::mpsc::channel();
+	let (release, release_rx) = std::sync::mpsc::channel::<()>();
+	let holding = block_on(Box::pin({
+		let polled = polled.clone();
+		async move {
+			polled
+				.wait(move |_, _| {
+					entered.send(()).unwrap();
+					// Holds this poll open while shutdown starts on another thread.
+					release_rx.recv().unwrap();
+					std::task::Poll::Ready(Ok(7))
+				})
+				.await
+		}
+	}));
+	entered_rx.recv().unwrap();
+
+	let shutdown = std::thread::spawn(|| crate::moq_ffi_shutdown());
+
+	// A fresh call resolves `Cancelled` on its first poll once shutdown has begun. On another
+	// handle, since the held poll holds this one's state.
+	let probe = crate::ffi::Polled::new(());
+	loop {
+		let mut call = std::pin::pin!(probe.wait(|_, _| std::task::Poll::Ready(Ok(0u8))));
+		let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+		match call.as_mut().poll(&mut cx) {
+			std::task::Poll::Ready(Err(MoqError::Cancelled)) => break,
+			std::task::Poll::Ready(result) => assert!(matches!(result, Ok(0)), "{result:?}"),
+			std::task::Poll::Pending => unreachable!("the call is ready or cancelled"),
+		}
+		std::thread::yield_now();
+	}
+	assert!(!shutdown.is_finished(), "shutdown returned with a poll in flight");
+
+	release.send(()).unwrap();
+	// It began before the shutdown, so it delivers; the shutdown waited for it.
+	assert!(matches!(holding.join().unwrap(), Ok(7)));
+	shutdown.join().unwrap();
+	let parked = parked.join().unwrap();
+	assert!(matches!(parked, Err(MoqError::Cancelled)), "{parked:?}");
+}
