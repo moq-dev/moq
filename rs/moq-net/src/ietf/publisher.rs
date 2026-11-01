@@ -7477,7 +7477,7 @@ mod serve_tests {
 	/// A track aborted as malformed, as a relay does over an upstream's unstamped object on a
 	/// timed track, ends each subscription with PUBLISH_DONE(MALFORMED_TRACK), on either draft.
 	/// A moq-lite or JS upstream's MALFORMED_TRACK reset says the same.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn publish_done_after_a_malformed_track_says_so() {
 		for version in [Version::Draft18, Version::Draft22] {
 			for err in [Error::MalformedTrack, Error::Stream(crate::StreamError::MalformedTrack)] {
@@ -7490,7 +7490,7 @@ mod serve_tests {
 				serve_until(serve.as_mut(), "SUBSCRIBE_OK was sent", || !h.log.trail().is_empty()).await;
 
 				h.track.abort(err.clone()).unwrap();
-				moq_clock::timeout(std::time::Duration::from_secs(10), serve)
+				kio::clock::timeout(std::time::Duration::from_secs(10), serve)
 					.await
 					.expect("the malformed track ends the subscription")
 					.ok();
