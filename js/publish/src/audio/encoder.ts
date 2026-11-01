@@ -215,6 +215,10 @@ export class Encoder {
 	// marker and are dropped.
 	#floor: Micro | undefined;
 
+	// The end of the newest retained frame replayed into the encoder. Chunks below it are history
+	// caught up behind the live edge, not frames written late, so they never raise the catalog delay.
+	#history: Micro | undefined;
+
 	// The last valid group duration, which #runConfig validates.
 	#groupDuration = Micro(20_000);
 
@@ -683,7 +687,8 @@ export class Encoder {
 						const keyframe = live.start === undefined || timestamp - live.start >= this.#groupDuration;
 						if (keyframe) live.start = timestamp;
 						live.producer.encode(frame, timestamp, keyframe);
-						if (this.#estimator.write(frame.timestamp, order)) {
+						const history = this.#history !== undefined && timestamp < this.#history;
+						if (!history && this.#estimator.write(frame.timestamp, order)) {
 							this.#estimate.set({ ...this.#estimator.estimate });
 						}
 					},
@@ -769,7 +774,10 @@ export class Encoder {
 						// Expired history is a real gap, unlike a loss of demand: end the epoch where
 						// the encoded audio stops, so its last frame isn't stretched across the gap.
 						if (backlog.takeEvicted()) this.#cut();
-						for (let frame = backlog.shift(); frame; frame = backlog.shift()) submit(frame);
+						for (let frame = backlog.shift(); frame; frame = backlog.shift()) {
+							submit(frame);
+							this.#history = this.#next;
+						}
 						deadline.set(backlog.deadline);
 					},
 					push: (captured: AudioFrame) => {

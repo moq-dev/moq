@@ -462,6 +462,7 @@ impl Producer {
 		self.active = active;
 		// One codec frame per turn lets capture keep draining while catching up.
 		if active && let Some(raw) = self.backlog.pop() {
+			self.track.history(raw.timestamp);
 			self.encode_raw(raw)?;
 		}
 		Ok(())
@@ -571,6 +572,7 @@ impl Producer {
 		// Preserve the final retained history after capture ends, even without live demand.
 		self.active = true;
 		while let Some(raw) = self.backlog.pop() {
+			self.track.history(raw.timestamp);
 			self.encode_raw(raw)?;
 		}
 		if self.reset_pending
@@ -834,6 +836,51 @@ mod tests {
 		assert!(!listed[0].is_stop() && listed[1].is_stop());
 		assert_eq!(listed[0].pts.as_micros(), 1_000_000);
 		assert!(listed[1].pts.as_micros() >= 1_040_000);
+	}
+
+	/// Replay catches up behind the live edge another track already reached; advertising that as
+	/// delay would buffer playback by the retention for the rest of the broadcast.
+	#[tokio::test(start_paused = true)]
+	async fn replayed_history_raises_no_catalog_delay() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let options = |track: &str| Options {
+			track: Some(track.into()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options("audio")).unwrap();
+		let mut other = Producer::new(&mut broadcast, catalog, Input::default(), &options("other")).unwrap();
+		let at = |index: u64| Timestamp::from_micros(1_000_000 + index * 20_000).unwrap();
+		producer.set_active(false, at(0)).unwrap();
+		for index in 0..50 {
+			producer
+				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros() as u64))
+				.unwrap();
+		}
+		// Another track already reached the live edge.
+		for index in 45..50 {
+			other
+				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros() as u64))
+				.unwrap();
+		}
+		loop {
+			producer.set_active(true, at(50)).unwrap();
+			if !producer.backlog_ready() {
+				break;
+			}
+		}
+		for index in 50..55 {
+			producer
+				.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros() as u64))
+				.unwrap();
+		}
+		producer.finish().unwrap();
+		let delay = producer.track.estimate().delay;
+		assert!(
+			delay.is_none_or(|delay| delay < Duration::from_millis(100)),
+			"{delay:?}"
+		);
+		other.finish().unwrap();
 	}
 
 	/// History that expires unencoded leaves the idle gap out of every HLS segment, as a

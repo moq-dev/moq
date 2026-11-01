@@ -1106,6 +1106,50 @@ test("default audio replays the last second after three seconds without a subscr
 	}
 });
 
+// Replay catches up behind the live edge another rendition already reached; advertising that as
+// `delay` would buffer playback by the retention for the rest of the broadcast.
+test("replayed raw audio raises no catalog delay", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("history.hang"),
+		maxAge: Milli(1000),
+	});
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	let late: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		for (let index = 0; index < 150; index++) {
+			await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });
+			await feed.drain();
+			await clock.advance(Nano.fromMilli(Milli(20)));
+		}
+		// Video already wrote up to the live edge.
+		new Estimator().write(150 * 20_000, broadcast.order);
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		late = net.track("audio").subscribe({ maxDelay: Milli(1000) });
+		await settle();
+		for (let index = 150; index < 153; index++) {
+			await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+		await settle();
+		expect(encoder.out.stats.peek().frames).toBeGreaterThan(50);
+		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
+	} finally {
+		late?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
 // Losing demand keeps the epoch, but history that expires unencoded is a real gap: the frame
 // before it must not read as lasting until the replay resumes.
 test("expired raw audio ends the epoch before the replay resumes", async () => {
