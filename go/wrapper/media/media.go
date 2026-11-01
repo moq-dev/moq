@@ -23,6 +23,10 @@ type (
 	Audio = ffi.MoqAudio
 	// Catalog is a broadcast's manifest: its video and audio renditions plus display metadata.
 	Catalog = ffi.MoqCatalog
+	// Delay is how far behind the live edge a decoder plays: Min is the playout delay and where a
+	// cold join starts, and Max, nil for no limit, is how far a stalled group may fall behind before
+	// it is skipped. Min stays on the consumer; a Min past Max starts at Max.
+	Delay = ffi.MoqDelay
 	// Dimensions is a width and height in pixels.
 	Dimensions = ffi.MoqDimensions
 	// DecodeStart is where an audio or video decoder starts on a track that already holds groups.

@@ -63,8 +63,8 @@ phase is a 206 s build of moq-net's dependents and a 110 s run of 9,049 tests.
 What remains for a moq-net edit, largest first:
 
 - The test build recompiles every dependent after a moq-net edit. Candidates
-  are the epic's [thin generics](/quest/m0/ci/btree-keys.md) and
-  [hakari](/quest/m0/ci/hakari.md) levers, or running the rs lint beside the
+  are the epic's [hakari](/quest/m0/ci/hakari.md) lever (the BTree thin-generics
+  lever was measured at about 30 ms of CPU per build and dropped), or running the rs lint beside the
   test build in a second target directory, which trades CPU for wall time
   against the epic's CPU measure. Decided 2026-10-30 (user): defer that
   parallel lint; measure it after the slow-tests and hakari quests land.

@@ -25,8 +25,8 @@ pub(crate) struct Tail {
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
-	// The publisher ended the subscription, so the track is over even if the session
-	// dies before the tail settles.
+	// The publisher's FIN ended the track, its only end before lite-05, so a session that
+	// dies before the tail settles declares that end before aborting.
 	ended: bool,
 }
 
@@ -47,12 +47,12 @@ impl Tail {
 		}
 	}
 
-	/// Record that the publisher ended the subscription.
+	/// Record that the publisher's FIN ended the track.
 	pub fn end(&mut self) {
 		self.ended = true;
 	}
 
-	/// Whether the publisher ended the subscription.
+	/// Whether the publisher's FIN ended the track.
 	pub fn is_ended(&self) -> bool {
 		self.ended
 	}
