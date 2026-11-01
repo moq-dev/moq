@@ -2881,6 +2881,9 @@ impl Subscriber {
 		route: Option<kio::Consumer<()>>,
 		request: track::Request,
 	) {
+		// Holds the session busy while the request waits on authorization or TRACK_STATUS.
+		// Past that, only a subscription or a fill counts.
+		let mut setup = Some(self.session.work().start());
 		// Data streams wait on the alias bound by SUBSCRIBE_OK, so leave the model request
 		// pending until its immutable track metadata is known.
 		// Subscribe only to what our grant covers (MoQ Auth), and cancel once it no longer
@@ -2934,6 +2937,7 @@ impl Subscriber {
 				else {
 					return;
 				};
+				setup = None;
 				let Some(next) = self
 					.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
 					.await
@@ -2944,6 +2948,8 @@ impl Subscriber {
 			}
 			_ => Target::Request(request),
 		};
+		// `subscribe_once` counts the subscription itself.
+		drop(setup);
 		loop {
 			let Some(idle) = self
 				.subscribe_once(&broadcast_path, &track_name, target, &mut group_fetches, &mut gate)
@@ -3858,6 +3864,7 @@ impl Subscriber {
 					}
 					End::Fill(requested) => {
 						let fetch = self.clone().serve_fill(
+							self.session.work().start(),
 							broadcast_path.clone(),
 							track_name.to_owned(),
 							requested,
@@ -4088,9 +4095,13 @@ impl Subscriber {
 
 			match step {
 				Step::Fill(fill) => {
-					let fetch =
-						self.clone()
-							.serve_fill(broadcast_path.clone(), track_name.to_owned(), fill, idle.timescale);
+					let fetch = self.clone().serve_fill(
+						self.session.work().start(),
+						broadcast_path.clone(),
+						track_name.to_owned(),
+						fill,
+						idle.timescale,
+					);
 					group_fetches.push(fetch);
 				}
 				Step::Subscribe => break true,
@@ -5437,8 +5448,16 @@ impl Subscriber {
 	/// group always goes alone: a run including the group its source is still writing would
 	/// hold the earlier groups until it finishes, or be cut short at the Largest Object by a
 	/// publisher following draft-22 section 9.11.
-	async fn serve_fill(self, broadcast: Path, name: String, fill: track::Fill, timescale: Option<Timescale>) {
-		let _working = self.session.work().start();
+	///
+	/// `_working` counts the fill from when it is queued, before its first poll.
+	async fn serve_fill(
+		self,
+		_working: crate::session::Working,
+		broadcast: Path,
+		name: String,
+		fill: track::Fill,
+		timescale: Option<Timescale>,
+	) {
 		let fill = std::sync::Arc::new(fill);
 		let mut last = None;
 		while let Some(run) = fill.next_run() {

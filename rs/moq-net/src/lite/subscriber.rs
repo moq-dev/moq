@@ -7378,6 +7378,8 @@ enum TrackRunState {
 	Info {
 		request: Option<track::Request>,
 		info: TrackInfoFetch,
+		/// Holds the session busy while the request waits on its TRACK_INFO.
+		_working: crate::session::Working,
 	},
 	Serve(ServeLoop),
 	/// Preserve the lite07 completion FIN until the publisher acknowledges it.
@@ -7395,6 +7397,7 @@ impl TrackServeRun {
 			TrackRunState::Info {
 				request: Some(request),
 				info: TrackInfoFetch::new(&serve),
+				_working: serve.subscriber.session.work().start(),
 			}
 		} else {
 			// Older wires declare no publisher retention limit, and no timeline: their
@@ -7477,7 +7480,7 @@ impl kio::Task for TrackServeRun {
 		}
 		loop {
 			match &mut self.state {
-				TrackRunState::Info { request, info } => {
+				TrackRunState::Info { request, info, .. } => {
 					// Abandonment was checked at the top of this poll, arming its wait.
 					let res = ready!(info.poll_fetch(&self.serve, waiter));
 					let request = request.take().expect("request pending");
