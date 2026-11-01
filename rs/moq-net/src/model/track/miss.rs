@@ -1009,7 +1009,7 @@ mod tests {
 	use super::super::{Servable, Subscription};
 	use super::*;
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_recreated_accounted_group_clears_its_earlier_fill_refusal() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let mut track = broadcast
@@ -1116,7 +1116,7 @@ mod tests {
 		assert!(given_up.is_empty(), "a live recreation is never given up");
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_aborted_live_group_keeps_its_earlier_fill_refusal() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let mut track = broadcast
@@ -1188,7 +1188,7 @@ mod tests {
 		assert!(!asks.contains(&2), "a refused hole is not asked again");
 		assert_eq!(given_up, vec![2..3]);
 	}
-	#[moq_clock::test]
+	#[kio::test]
 	async fn unchanged_probes_and_late_arrivals_keep_other_gap_deadlines() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let track = broadcast.create_track("sparse", crate::track::Info::default()).unwrap();
@@ -1283,7 +1283,7 @@ mod tests {
 
 	/// A grace change with nothing deferred has no deadline to move, so an unchanged probe
 	/// skips it; the next gap is still timed by the new grace.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_grace_change_with_nothing_deferred_times_the_next_gap() {
 		let broadcast = crate::broadcast::Info::default().produce();
 		let track = broadcast.create_track("grace", crate::track::Info::default()).unwrap();

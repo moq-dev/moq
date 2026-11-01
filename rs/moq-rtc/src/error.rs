@@ -18,8 +18,9 @@ pub enum Error {
 	#[error("session closed")]
 	SessionClosed,
 
-	/// ICE connectivity was not established before the establishment deadline.
-	#[error("ICE did not connect before the establishment deadline")]
+	/// ICE never connected before the establishment deadline, or before the DTLS
+	/// handshake gave up waiting for it.
+	#[error("ICE did not connect in time")]
 	IceTimeout,
 
 	/// A broadcast did not produce a catalog before the negotiation deadline.

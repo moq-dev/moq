@@ -13,7 +13,7 @@
 //! `end` against a server whose session limits count other live sessions. `http` is one
 //! `connect` as a relay sends it, a `POST /` over loopback TCP, for scale.
 //!
-//! Validity checks read a [`Manual`](moq_clock::Manual) clock, so every run decides the
+//! Validity checks read a [`Manual`](kio::clock::Manual) clock, so every run decides the
 //! same way. Keys and tokens are generated once into `VERIFY_FIXTURE` (a fresh temporary
 //! directory by default); point repeated runs at one directory so they verify identical
 //! signatures. With `VERIFY_ITERATIONS=n`, the bench skips Criterion and runs the case
@@ -109,7 +109,7 @@ const SESSIONS: [usize; 3] = [0, 1024, 16384];
 const SAMPLES: usize = 1 << 16;
 
 /// Every token expires a year after the manual clock's start, or expired a second before it.
-fn claims(expires: moq_clock::Wall) -> Claims {
+fn claims(expires: kio::clock::Wall) -> Claims {
 	Claims::default()
 		.with_root("demo")
 		.with_publish(["**".parse().unwrap()])
@@ -117,7 +117,7 @@ fn claims(expires: moq_clock::Wall) -> Claims {
 }
 
 fn valid() -> Claims {
-	claims(moq_clock::Manual::WALL_START + Duration::from_secs(365 * 24 * 60 * 60))
+	claims(kio::clock::Manual::WALL_START + Duration::from_secs(365 * 24 * 60 * 60))
 }
 
 fn kid(name: &str) -> Option<KeyId> {
@@ -155,7 +155,7 @@ fn generate(root: &Path) {
 		.unwrap();
 		write(&dir.join("token"), &key.sign(&valid()).unwrap());
 		if algorithm == Algorithm::ES256 {
-			let expired = claims(moq_clock::Manual::WALL_START - Duration::from_secs(1));
+			let expired = claims(kio::clock::Manual::WALL_START - Duration::from_secs(1));
 			write(&root.join("refuse").join("expired"), &key.sign(&expired).unwrap());
 		}
 	}
@@ -587,13 +587,13 @@ fn main() {
 		.enable_all()
 		.build()
 		.unwrap();
-	let _clock = moq_clock::Manual::new().install(runtime.handle());
+	let _clock = kio::clock::Manual::new().install(runtime.handle());
 	let pool = tokio::runtime::Builder::new_multi_thread()
 		.worker_threads(4)
 		.enable_all()
 		.build()
 		.unwrap();
-	let _pool_clock = moq_clock::Manual::new().install(pool.handle());
+	let _pool_clock = kio::clock::Manual::new().install(pool.handle());
 	// Hold the runtime context so validity checks outside `block_on` read the manual clock too.
 	let _enter = runtime.enter();
 	let mut bench = Bench {

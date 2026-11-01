@@ -66,7 +66,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Pipelined requests](/quest/m2/pipeline-requests/README.md) - SUBSCRIBE and the first FETCH go out with the track-info request at every hop, so first data arrives a round trip sooner per hop
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
 - [MoQ in obs-studio](/quest/m2/obs-studio/README.md) - a native MoQ output and service merged into obs-studio, once its maintainers agree; the plugin carries it until then
-- [OBS source renditions](/quest/m2/obs-source-renditions.md) - the OBS source picks the best enabled decodable rendition, using a `preference` the bindings now carry, and resubscribes when a referenced publisher's epoch changes
 - [CMake qlog option for OBS](/quest/m2/obs-qlog.md) - an OBS build can opt into qlog trace capture through moq-ffi's `qlog` feature
 - [AudioToolbox decode](/quest/m2/audio-decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
 - [AudioToolbox encode](/quest/m2/audio-encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
@@ -129,7 +128,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [moq-rtc pacing](/quest/m2/rtc-pacing.md) - a capped WHEP viewer never receives more than its cap plus burst, NACK resends included
 - [SRT rate handle](/quest/m2/srt-rate-handle.md) - a per-connection cap paces SRT pulls, retransmits included, and closes SRT publishers past it
 - [One port on the io_uring workers](/quest/m2/uring-demux.md) - `moq-uring`'s workers host the UDP demux, so a ring relay keeps WebRTC media and SRT on its QUIC port
-- [Hang contribution references](/quest/m2/contribution-ref.md) - a catalog names a whole contribution broadcast that a player opens only when selected, backing moq.pro's composed rooms
 - [Synced data playback](/quest/m2/watch-data-sync.md) - js/watch releases JSON and binary payloads on the media playhead, and a slow data track holds media back
 - [Watch decode gate](/quest/m2/watch-decode-gate.md) - video lookahead stays encoded until it is near presentation, like audio
 - [One support probe for watch audio and video](/quest/m2/watch-support-probe.md) - one probe helper with video's cache, and audio reports unsupported renditions

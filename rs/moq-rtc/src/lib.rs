@@ -114,7 +114,7 @@ mod tests {
 			.await
 			.expect("subscribe to output catalog");
 		let mut catalogs = moq_mux::catalog::hang::Consumer::<()>::new(catalog_track);
-		let catalog = moq_clock::timeout(TIMEOUT, catalogs.next())
+		let catalog = kio::clock::timeout(TIMEOUT, catalogs.next())
 			.await
 			.expect("output catalog timed out")
 			.expect("read output catalog")
@@ -130,7 +130,7 @@ mod tests {
 	}
 
 	async fn next_payload(track: &mut Track) -> Vec<u8> {
-		let frame = moq_clock::timeout(TIMEOUT, track.next())
+		let frame = kio::clock::timeout(TIMEOUT, track.next())
 			.await
 			.expect("output Opus packet timed out")
 			.expect("read output Opus packet")
@@ -171,7 +171,7 @@ mod tests {
 		let mut instances = moq_mux::follow::Instances::new(&origin.consume(), "source", Some(&epoch)).unwrap();
 		let (mut new, catalog) = publish_opus(origin, epoch);
 		push(&mut *new, 20_000, NEW_PACKET);
-		let started = moq_clock::timeout(TIMEOUT, instances.next())
+		let started = kio::clock::timeout(TIMEOUT, instances.next())
 			.await
 			.expect("the replacement never took over")
 			.unwrap();
@@ -225,7 +225,7 @@ mod tests {
 		let url = format!("http://{address}/whep/source").parse().expect("WHEP URL");
 		let fill = output.broadcast().clone();
 		let viewer = tokio::spawn(async move { client.subscribe(url, fill).await });
-		let session = moq_clock::timeout(TIMEOUT, sessions.recv())
+		let session = kio::clock::timeout(TIMEOUT, sessions.recv())
 			.await
 			.expect("WHEP negotiation timed out")
 			.unwrap();
@@ -241,7 +241,7 @@ mod tests {
 		);
 
 		kill(old, old_catalog);
-		let ended = moq_clock::timeout(TIMEOUT, session)
+		let ended = kio::clock::timeout(TIMEOUT, session)
 			.await
 			.expect("the session outlived its route")
 			.unwrap();
@@ -299,7 +299,7 @@ mod tests {
 		);
 
 		kill(old, old_catalog);
-		let pushed = moq_clock::timeout(TIMEOUT, pushed)
+		let pushed = kio::clock::timeout(TIMEOUT, pushed)
 			.await
 			.expect("the push outlived its route")
 			.unwrap();
@@ -332,7 +332,7 @@ mod tests {
 			},
 		)
 		.expect("publish source packet");
-		let (announcement, announcement_active) = moq_clock::timeout(TIMEOUT, next_update(&mut announcements))
+		let (announcement, announcement_active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 			.await
 			.expect("source announcement timed out")
 			.expect("source origin closed");
@@ -404,7 +404,7 @@ mod tests {
 					.await
 			}
 		});
-		let (whip_id, whip_task) = moq_clock::timeout(TIMEOUT, sources_rx.recv())
+		let (whip_id, whip_task) = kio::clock::timeout(TIMEOUT, sources_rx.recv())
 			.await
 			.expect("WHIP negotiation timed out")
 			.unwrap();
@@ -419,7 +419,7 @@ mod tests {
 			.expect("WHEP URL");
 		let fill = output.broadcast().clone();
 		let whep_client = tokio::spawn(async move { client.subscribe(whep, fill).await });
-		let (whep_id, whep_task) = moq_clock::timeout(TIMEOUT, sources_rx.recv())
+		let (whep_id, whep_task) = kio::clock::timeout(TIMEOUT, sources_rx.recv())
 			.await
 			.expect("WHEP negotiation timed out")
 			.unwrap();
@@ -434,13 +434,13 @@ mod tests {
 		}
 		assert!(server.terminate(&whep_id));
 		assert!(server.terminate(&whip_id));
-		moq_clock::timeout(TIMEOUT, whep_task).await.unwrap().unwrap().unwrap();
+		kio::clock::timeout(TIMEOUT, whep_task).await.unwrap().unwrap().unwrap();
 		// The DELETE ended the ingest cleanly, so it serves the finished broadcast for the
 		// linger; dropping the session, as an interrupt does, ends that at once.
 		let ingested = server_origin.consume().request("ingested", None).await.unwrap();
 		assert!(!ingested.is_closed(), "the finished ingest lingers");
 		whip_task.abort();
-		let stopped = moq_clock::timeout(TIMEOUT, whip_task).await.unwrap();
+		let stopped = kio::clock::timeout(TIMEOUT, whip_task).await.unwrap();
 		assert!(stopped.unwrap_err().is_cancelled());
 		assert!(ingested.is_closed(), "the interrupt closes the finished ingest");
 		assert!(!server.terminate(&whip_id));

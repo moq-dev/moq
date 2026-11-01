@@ -198,7 +198,7 @@ impl Stats {
 
 	/// Write a snapshot every interval, for as long as the import runs beside it.
 	pub async fn run(&mut self) -> Infallible {
-		let mut interval = moq_clock::interval(INTERVAL);
+		let mut interval = kio::clock::interval(INTERVAL);
 		loop {
 			interval.tick().await;
 			self.write();
@@ -298,7 +298,7 @@ impl Echo {
 				None
 			}
 		};
-		let mut interval = moq_clock::interval(INTERVAL);
+		let mut interval = kio::clock::interval(INTERVAL);
 		loop {
 			tokio::select! {
 				update = next(&mut catalog) => match update {
@@ -539,7 +539,7 @@ impl Readers {
 		};
 		let id = reader.id();
 		self.drains.spawn(async move {
-			moq_clock::sleep(DRAIN).await;
+			kio::clock::sleep(DRAIN).await;
 			(path, id)
 		});
 	}
@@ -645,9 +645,9 @@ mod tests {
 		assert!(line.contains(r#""n":1"#), "{line}");
 
 		broadcast.unannounce();
-		moq_clock::sleep(DRAIN * 2).await;
+		kio::clock::sleep(DRAIN * 2).await;
 		feedback.update(&serde_json::json!({ "n": 2 })).unwrap();
-		let late = moq_clock::timeout(Duration::from_secs(1), lines.next_line()).await;
+		let late = kio::clock::timeout(Duration::from_secs(1), lines.next_line()).await;
 		assert!(late.is_err(), "a drained reader wrote {late:?}");
 	}
 
@@ -685,7 +685,7 @@ mod tests {
 		tokio::spawn(write_echo(origin.consume(), ".viewers".to_string(), out));
 
 		feedback.update(&serde_json::json!({ "n": 1 })).unwrap();
-		let line = moq_clock::timeout(Duration::from_secs(5), lines.next_line()).await;
+		let line = kio::clock::timeout(Duration::from_secs(5), lines.next_line()).await;
 		let line = line.expect("no feedback read").unwrap().unwrap();
 		assert!(line.contains(r#""n":1"#), "{line}");
 	}

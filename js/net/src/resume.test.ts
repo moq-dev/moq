@@ -1530,6 +1530,43 @@ test("aborting a fetch stops it while its route's properties are still being che
 	b.close();
 });
 
+test("a fetch asks its route alongside that route's properties", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	// a serves tracks on demand but never answers, so its properties never arrive.
+	void wireOf(a).requested();
+	const { route, asked } = counted(a);
+	front.serve(route);
+	const fetching = front.consumer.track("seq").fetchGroup(0);
+	void fetching.catch(() => {});
+	await settle();
+	expect(asked).toEqual([0]);
+
+	front.consumer.close();
+	a.close();
+});
+
+test("a fetch never hands out a group from a route refused for its properties", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const b = new BroadcastProducer();
+	a.createTrack("seq", { priority: 1 });
+	const tb = b.createTrack("seq", { priority: 2 });
+	const group = tb.createGroup(0);
+	group.writeFrame({ payload: enc.encode("b") });
+	group.finish();
+	front.serve(a.consume());
+	await front.consumer.track("seq").info();
+	const { route, asked } = counted(b);
+	front.serve(route);
+	await expect(front.consumer.track("seq").fetchGroup(0)).rejects.toThrow("changed its properties");
+	expect(asked).toEqual([0]);
+
+	front.consumer.close();
+	a.close();
+	b.close();
+});
+
 test("a refused route is not served again by a later compatible source", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
