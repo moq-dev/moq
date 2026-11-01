@@ -1,8 +1,7 @@
 #![cfg(feature = "async")]
 
 //! A relay fetches each group's payload upstream once, independently of how many
-//! viewers ask for it, and keeps serving the cached copy after a reader leaves. Over
-//! moq-lite-07 it asks for the group with a SUBSCRIBE to its range instead of a FETCH.
+//! viewers ask for it, and keeps serving the cached copy after a reader leaves.
 
 use crate::support;
 use moq_net::{Hop, Version, origin, track};
@@ -19,11 +18,6 @@ fn origin(hop: u64) -> origin::Producer {
 async fn sequential_viewers_share_the_relays_fetched_groups() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		let version: Version = version.parse().unwrap();
-		// FETCH's lite stream type is 3 and SUBSCRIBE's 2, each varint one byte.
-		let (asks, other) = match version.as_str() {
-			"moq-lite-07-wip" => (2, 3),
-			_ => (3, 2),
-		};
 		let publisher = origin(1);
 		let broadcast = publisher.publish("room", Default::default()).unwrap();
 		let track = broadcast
@@ -72,11 +66,12 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 					.unwrap();
 				assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"payload");
 				assert!(group.read_frame().await.unwrap().is_none());
+				// FETCH's lite stream type is 3, and its varint occupies one byte.
 				let fetches = upstream
 					.client_transport
 					.bidi_types()
 					.into_iter()
-					.filter(|kind| *kind == asks)
+					.filter(|kind| *kind == 3)
 					.count();
 				assert_eq!(fetches, round as usize + 1, "{version}: viewer {i}, group {sequence}");
 			}
@@ -88,7 +83,7 @@ async fn sequential_viewers_share_the_relays_fetched_groups() {
 			1,
 			"metadata is learned once"
 		);
-		assert!(!types.contains(&other), "{version}: asked the other way");
+		assert!(!types.contains(&2), "a fetch-only relay must never subscribe");
 		assert!(track.subscription().is_none());
 	}
 }
