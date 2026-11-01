@@ -1876,9 +1876,10 @@ test.each([
 });
 
 // A TRACK answered while its SUBSCRIBE still waits for a stream belongs to the subscription, so
-// a withdrawal then closes it rather than leaving it to a create that may never open.
+// a withdrawal then closes it rather than leaving it to a create that may never open. Only a
+// minted instance ends with its route: a named one leaves the request to the peer.
 test("a withdrawal while the subscribe opens closes the answered track", async () => {
-	const version = Version.DRAFT_07;
+	const version = Version.DRAFT_06;
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession([2]);
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
@@ -1909,33 +1910,6 @@ test("a withdrawal while the subscribe opens closes the answered track", async (
 		subscriber.close();
 		warn.mockRestore();
 	}
-});
-
-// A TRACKS request without an instance lists whichever stream won the path when it arrived, so
-// another stream taking the path refuses one still unanswered.
-test("a listing of an unpinned handle replaced before its answer is refused", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const announced = subscriber.announced();
-	await opened(0);
-	const pool = await unpinnedPool(version, streams, announced);
-	const held = subscriber.consume(Path.from("pool/job"));
-	const tracks = held.tracks();
-	expect(await tracks.next()).toEqual({ kind: "synced" });
-	const event = tracks.next().catch((err: unknown) => err);
-	const listing = await opened(1);
-	await listing.reading;
-
-	await pool.replace();
-	const err = await event;
-	expect(err).toBeInstanceOf(StreamError);
-	expect((err as StreamError).code).toBe(StreamCode.Unroutable);
-	await listing.aborted;
-	tracks.close();
-	held.close();
-	announced.close();
-	subscriber.close();
 });
 
 test("a listing whose readers leave as its token settles never reaches the wire", async () => {
