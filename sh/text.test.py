@@ -90,7 +90,8 @@ class TextTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("invalid", result.stderr)
 
-    @unittest.skipIf(os.geteuid() == 0, "root reads files regardless of mode")
+    @unittest.skipIf(not hasattr(os, "geteuid") or os.geteuid() == 0,
+                     "needs POSIX file modes and a non-root user")
     def test_unreadable_tracked_file_fails(self):
         self.write("unreadable.md", "plain text\n")
         self.git("add", ".")
