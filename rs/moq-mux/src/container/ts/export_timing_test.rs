@@ -346,7 +346,7 @@ impl Live {
 	}
 
 	/// End the broadcast and let every leg render what it holds.
-	async fn finish(&mut self, legs: &mut [&mut Leg]) {
+	fn finish(&mut self, legs: &mut [&mut Leg]) {
 		if let Some(mut group) = self.group.take() {
 			group.finish().unwrap();
 		}
@@ -354,7 +354,7 @@ impl Live {
 		self.video.finish().unwrap();
 		self.audio.finish().unwrap();
 		for leg in legs.iter_mut() {
-			leg.drain(&self.clock).await;
+			leg.drain(&self.clock);
 		}
 	}
 
@@ -443,22 +443,20 @@ impl Leg {
 		false
 	}
 
-	/// Read to the end of the broadcast.
-	async fn drain(&mut self, clock: &kio::clock::Deadlines) {
-		loop {
-			if self.poll() {
-				break;
-			}
+	/// Read to the end of the broadcast, or until nothing is due and 10 ms pass with no end.
+	///
+	/// Only `clock` fires the export's timers, so the 10 ms is an advance of it: a timeout armed
+	/// on it would never fire.
+	fn drain(&mut self, clock: &kio::clock::Deadlines) {
+		while !self.poll() {
 			if let Some(deadline) = self.export.next_due() {
 				clock.advance(deadline.max(clock.now()));
 				continue;
 			}
-			match kio::clock::timeout(Duration::from_millis(10), self.export.next()).await {
-				Ok(Ok(Some(frame))) => self.out.push((kio::clock::now(), frame)),
-				Ok(Ok(None)) => break,
-				Err(_) if self.export.next_due().is_none() => break,
-				Err(_) => {}
-				Ok(Err(err)) => panic!("exporter error: {err}"),
+			clock.advance(clock.now() + Duration::from_millis(10));
+			if self.export.next_due().is_none() {
+				self.poll();
+				break;
 			}
 		}
 	}
@@ -897,7 +895,7 @@ async fn the_video_held_at_the_end_goes_out() {
 			let last = 8 * GOP + if declared { 2 } else { 5 };
 			live.run(last, &mut [&mut leg], |_| false);
 			live.run_audio((last + 3 * GOP) * VIDEO_US, &mut [&mut leg]);
-			live.finish(&mut [&mut leg]).await;
+			live.finish(&mut [&mut leg]);
 
 			assert_eq!(leg.export.dropped(), 0, "lag {lag}: frames dropped");
 			let video = leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count() as u64;
@@ -1042,7 +1040,7 @@ async fn pair_at(rate: u64, scale: f64, lag: i64, ticks: u64, stall: impl Fn(u64
 	live.run(JOIN, &mut [&mut a], stall);
 	let mut b = live.join(Duration::from_millis(100)).await;
 	live.run(ticks, &mut [&mut a, &mut b], stall);
-	live.finish(&mut [&mut a, &mut b]).await;
+	live.finish(&mut [&mut a, &mut b]);
 	let joined = b.out.first().expect("the joiner rendered").1.timestamp.as_micros() as u64;
 	(a, b, joined + 2_000_000)
 }
@@ -1217,7 +1215,7 @@ async fn declared_legs_author_the_same_dts() {
 		live.run(join, &mut [&mut a], stall);
 		let mut b = live.join(Duration::from_millis(100)).await;
 		live.run(12 * GOP, &mut [&mut a, &mut b], stall);
-		live.finish(&mut [&mut a, &mut b]).await;
+		live.finish(&mut [&mut a, &mut b]);
 		let (a, b) = (decode_times(&a), decode_times(&b));
 		let shared: Vec<_> = b.iter().filter(|(pts, _)| a.contains_key(pts)).collect();
 		assert!(
