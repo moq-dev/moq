@@ -9,8 +9,16 @@ const MAX_PARAMS: u64 = 64;
 /// A bag of `id -> raw bytes` parameters, the body shared by SETUP (and any other
 /// parameterized message). Encoded as a varint count followed by `id, length, value`
 /// triples; duplicate ids are rejected on decode.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct Parameters(HashMap<u64, Vec<u8>>);
+
+impl std::fmt::Debug for Parameters {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_map()
+			.entries(self.0.iter().map(|(kind, value)| (kind, value.len())))
+			.finish()
+	}
+}
 
 impl Parameters {
 	/// Set a parameter to a raw byte value, replacing any existing entry.

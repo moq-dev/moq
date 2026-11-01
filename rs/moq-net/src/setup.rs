@@ -22,12 +22,18 @@ pub(crate) const SETUP_V17: u64 = 0x2F00;
 /// A credential a moq-transport peer presented in its SETUP's `AUTHORIZATION TOKEN` option.
 ///
 /// The transport never reads the bytes; verifying them is the application's job.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Token {
 	/// The wire Token Type, naming how [`value`](Self::value) is encoded.
 	pub kind: u64,
 	/// The token itself.
 	pub value: Vec<u8>,
+}
+
+impl std::fmt::Debug for Token {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "Token(kind={}, <{} bytes>)", self.kind, self.value.len())
+	}
 }
 
 impl Token {
@@ -38,9 +44,18 @@ impl Token {
 }
 
 /// Draft-17+ unified SETUP message, with the same encoding for both client and server.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Setup {
 	pub parameters: Bytes,
+}
+
+impl std::fmt::Debug for Setup {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		// Opaque parameters can contain credentials, even before we recognize an option.
+		f.debug_struct("Setup")
+			.field("parameters_len", &self.parameters.len())
+			.finish()
+	}
 }
 
 impl Setup {
@@ -121,13 +136,22 @@ impl SetupVersion {
 }
 
 /// A version-agnostic setup message sent by the client.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Client {
 	/// The list of supported versions in preferred order.
 	pub versions: coding::Versions,
 
 	/// Parameters, unparsed because the IETF draft changed the encoding.
 	pub parameters: Bytes,
+}
+
+impl std::fmt::Debug for Client {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Client")
+			.field("versions", &self.versions)
+			.field("parameters_len", &self.parameters.len())
+			.finish()
+	}
 }
 
 impl Client {
@@ -224,13 +248,22 @@ impl Encode<Version> for Client {
 }
 
 /// Sent by the server in response to a client setup.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) struct Server {
 	/// The list of supported versions in preferred order.
 	pub version: coding::Version,
 
 	/// Supported extensions.
 	pub parameters: Bytes,
+}
+
+impl std::fmt::Debug for Server {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Server")
+			.field("version", &self.version)
+			.field("parameters_len", &self.parameters.len())
+			.finish()
+	}
 }
 
 impl Server {
@@ -326,6 +359,105 @@ impl Decode<Version> for Server {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	#[tracing_test::traced_test]
+	fn credentials_stay_out_of_traces() {
+		let secret = "credential-that-must-not-be-logged";
+		let token = Token {
+			kind: Token::OUT_OF_BAND,
+			value: secret.as_bytes().to_vec(),
+		};
+		let setup = lite::Setup {
+			path: Some(format!("/room?jwt={secret}")),
+			..Default::default()
+		};
+		let wire = setup.encode_bytes(lite::Version::Lite06).unwrap();
+		let decoded = lite::Setup::decode(&mut wire.as_ref(), lite::Version::Lite06).unwrap();
+		assert_eq!(decoded, setup);
+
+		let version = ietf::Version::Draft22;
+		let mut params = ietf::Parameters::default();
+		ietf::token::into_setup(&mut params, &token, version).unwrap();
+		params.set_bytes(ietf::ParameterBytes::Path, format!("/room?jwt={secret}").into_bytes());
+		let setup = Setup {
+			parameters: params.encode_bytes(version).unwrap(),
+		};
+		let wire = setup.encode_bytes(Version::Ietf(version)).unwrap();
+		let decoded = Setup::decode(&mut wire.as_ref(), Version::Ietf(version)).unwrap();
+		let params = ietf::Parameters::decode(&mut decoded.parameters.as_ref(), version).unwrap();
+		assert_eq!(ietf::token::from_setup(&params, version).unwrap(), Some(token.clone()));
+		let client = Client {
+			versions: coding::Versions::from([Version::Ietf(version).into()]),
+			parameters: setup.parameters.clone(),
+		};
+		let server = Server {
+			version: Version::Ietf(version).into(),
+			parameters: setup.parameters.clone(),
+		};
+		let mut lite_params = lite::Parameters::default();
+		lite_params.set_bytes(999, secret.as_bytes().to_vec());
+		tracing::trace!(
+			?token,
+			?setup,
+			?decoded,
+			?params,
+			?client,
+			?server,
+			?lite_params,
+			"SETUP diagnostics"
+		);
+
+		let uri = format!("https://relay.example/room?jwt={secret}");
+		let goaway = lite::Goaway {
+			uri: uri.as_str().into(),
+		};
+		let wire = goaway.encode_bytes(lite::Version::Lite06).unwrap();
+		assert_eq!(
+			lite::Goaway::decode(&mut wire.as_ref(), lite::Version::Lite06)
+				.unwrap()
+				.uri,
+			uri
+		);
+		let goaway = ietf::GoAway {
+			new_session_uri: uri.as_str().into(),
+			timeout: 0,
+		};
+		let wire = goaway.encode_bytes(version).unwrap();
+		assert_eq!(
+			ietf::GoAway::decode(&mut wire.as_ref(), version)
+				.unwrap()
+				.new_session_uri,
+			uri
+		);
+		tracing::trace!(goaway = ?crate::goaway::Goaway::redirect(uri), "GOAWAY diagnostics");
+
+		// A malformed message can still contain a valid credential before the error.
+		let mut body = Vec::new();
+		(secret.len() + 1).encode(&mut body, lite::Version::Lite06).unwrap();
+		body.extend_from_slice(secret.as_bytes());
+		let mut malformed = Vec::new();
+		body.len().encode(&mut malformed, lite::Version::Lite06).unwrap();
+		malformed.extend_from_slice(&body);
+		assert!(lite::Goaway::decode(&mut malformed.as_slice(), lite::Version::Lite06).is_err());
+		let mut body = Vec::new();
+		// The required timeout is absent.
+		format!("https://relay.example/?jwt={secret}")
+			.encode(&mut body, version)
+			.unwrap();
+		let mut malformed = Vec::new();
+		(body.len() as u16).encode(&mut malformed, version).unwrap();
+		malformed.extend_from_slice(&body);
+		assert!(ietf::GoAway::decode(&mut malformed.as_slice(), version).is_err());
+
+		assert!(logs_contain("encoding"));
+		assert!(logs_contain("decoded"));
+		assert!(logs_contain("SETUP diagnostics"));
+		assert!(logs_contain("GOAWAY diagnostics"));
+		assert!(!logs_contain(secret));
+		let decimal = format!("{:?}", secret.as_bytes());
+		assert!(!logs_contain(&decimal[1..decimal.len() - 1]));
+	}
 
 	/// Never emit a legacy SETUP our own receiver would refuse.
 	#[test]

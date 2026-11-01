@@ -38,7 +38,8 @@ const GOAWAY_VERSIONS: &[&str] = &[
 /// Server drains with a redirect URI; the client observes it through
 /// `Session::draining()`. Exercises every GOAWAY channel in the version
 /// matrix, in both directions.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
+#[tracing_test::traced_test]
 async fn goaway_send_receive_all_versions() {
 	for version in GOAWAY_VERSIONS {
 		tokio::time::timeout(TEST_TIMEOUT, async {
@@ -48,7 +49,7 @@ async fn goaway_send_receive_all_versions() {
 			// Server -> client.
 			pair.server
 				.drain()
-				.send(Goaway::redirect("https://new.example.com"))
+				.send(Goaway::redirect("https://new.example.com/?jwt=redirect-secret"))
 				.expect("send goaway");
 
 			let goaway = pair
@@ -57,7 +58,11 @@ async fn goaway_send_receive_all_versions() {
 				.recv()
 				.await
 				.expect("session closed before GOAWAY");
-			assert_eq!(goaway.uri(), "https://new.example.com", "version {version}");
+			assert_eq!(
+				goaway.uri(),
+				"https://new.example.com/?jwt=redirect-secret",
+				"version {version}"
+			);
 			assert!(pair.client.draining().peek().is_some(), "version {version}");
 			// No deadline was advertised.
 			assert_eq!(goaway.timeout(), None, "version {version}");
@@ -78,6 +83,8 @@ async fn goaway_send_receive_all_versions() {
 		.await
 		.unwrap_or_else(|_| panic!("test timed out on {version} (likely a mock deadlock)"));
 	}
+	assert!(logs_contain("received goaway"));
+	assert!(!logs_contain("redirect-secret"));
 }
 
 /// The IETF draft-17+ GOAWAY carries a timeout on the wire; the receiver
@@ -229,14 +236,14 @@ async fn goaway_timeout_force_close_moq_transport_17() {
 	.expect("test timed out (likely a mock deadlock)");
 }
 
-/// Regression: a duplicate GOAWAY (a protocol violation; a peer sends at most
-/// one per session) is ignored rather than replacing the first payload, since
-/// an observer may already be acting on the first URI.
+/// A duplicate GOAWAY closes the session without replacing its first payload
+/// or logging credentials from the replacement URI.
 ///
 /// The public API's drain claim only ever sends one GOAWAY per session, so the
 /// handshake is hand-rolled to keep a raw transport clone for injecting
 /// wire-level GOAWAY control streams.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
+#[tracing_test::traced_test]
 async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 	/// Open a raw lite Goaway control stream:
 	/// `[ControlType::Goaway][message size][uri length][uri bytes]`.
@@ -297,7 +304,7 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 
 		// Second GOAWAY: once the client has fully processed the stream, the
 		// observed payload must still carry the FIRST URI.
-		let recv_b = send_goaway_raw(&mut server_raw, "bb").await;
+		let recv_b = send_goaway_raw(&mut server_raw, "https://relay.example/?jwt=duplicate-secret").await;
 		wait_processed(recv_b).await;
 
 		let goaway = client_session
@@ -309,6 +316,8 @@ async fn duplicate_goaway_keeps_first_payload_moq_lite_04() {
 	})
 	.await
 	.expect("test timed out (likely a mock deadlock)");
+	assert!(logs_contain("duplicate GOAWAY received"));
+	assert!(!logs_contain("duplicate-secret"));
 }
 
 /// After a received GOAWAY, new subscriptions are rejected with `GoingAway`

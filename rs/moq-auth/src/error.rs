@@ -72,10 +72,10 @@ pub enum Error {
 	#[error("no publish or subscribe allowed; token is useless")]
 	UselessToken,
 
-	#[error("path `{0}` does not overlap the token root")]
+	#[error("path {0:?} does not overlap the token root")]
 	RootMismatch(String),
 
-	#[error("token grants no access to path `{0}`")]
+	#[error("token grants no access to path {0:?}")]
 	NoAccess(String),
 
 	#[error("no publish or subscribe allowed; key scope is useless")]
