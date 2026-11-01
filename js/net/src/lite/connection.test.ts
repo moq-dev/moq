@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
 import Qmux from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
@@ -104,11 +104,11 @@ test("a lite GOAWAY keeps the session open, and a second one closes it", async (
 		const drain = await wireOf(connection).goaway;
 		expect(drain.uri).toBe("");
 
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		await sleep(Nano.fromMilli(Milli(20)));
 		expect(closed).toBe(false);
 
 		await sendGoaway(pair.server, "https://other.example/");
-		await new Promise((resolve) => setTimeout(resolve, 50));
+		await sleep(Nano.fromMilli(Milli(50)));
 		expect(closed).toBe(true);
 	} finally {
 		connection.abort();
@@ -247,7 +247,7 @@ function finAfterClose(transport: MockTransport) {
 			new TransformStream<Uint8Array, Uint8Array>({
 				async flush() {
 					await transport.closed;
-					await new Promise((resolve) => setTimeout(resolve, 0));
+					await yieldNow();
 				},
 			}),
 		);
@@ -289,7 +289,7 @@ function mockDeadline() {
 
 /** Runs every task queued so far, so a test can assert that something is still pending. */
 async function settle() {
-	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+	for (let i = 0; i < 5; i++) await yieldNow();
 }
 
 for (const [alpn, version] of [

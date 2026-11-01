@@ -1,7 +1,7 @@
 //! Incoming streams: their handles, leases, and errors.
 
 use std::collections::hash_map::{self, Entry};
-use std::{io, mem};
+use std::{io, mem, task::Poll};
 
 use thiserror::Error;
 use tracing::debug;
@@ -12,6 +12,7 @@ use super::{Retransmits, ShouldTransmit, StreamId, StreamsState};
 use crate::connection::assembler::Assembler;
 pub use crate::connection::assembler::Chunk;
 use crate::connection::streams::state::StreamRecv;
+use crate::connection::waits::Wait;
 use crate::{TransportError, VarInt, frame};
 
 pub use super::lease::Lease;
@@ -74,6 +75,8 @@ impl Stream<'_> {
 		self.pending.max_data |= leased.should_transmit() || transmit.should_transmit();
 		// The credit returned may only have paid a shrunk window's debt.
 		self.unstick();
+		// A reader parked on the stream learns it is closed.
+		self.state.waits.wake(self.id, Wait::Read);
 
 		Ok(())
 	}
@@ -497,6 +500,22 @@ impl<'a> Chunks<'a> {
 		}
 	}
 
+	/// [`Self::next`], or wait for more to arrive
+	///
+	/// Pending registers `waiter` until data, a FIN, or a reset arrives. Data that arrived stays
+	/// readable after the connection is lost, and only then does this fail with
+	/// [`Error::ConnectionLost`].
+	pub fn poll_next(&mut self, waiter: &kio::Waiter, max_length: usize) -> Poll<Result<Option<Chunk>, Error>> {
+		match self.next(max_length) {
+			Err(Error::Blocked) if self.streams.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
+			Err(Error::Blocked) => {
+				self.streams.waits.register(self.id, Wait::Read, waiter);
+				Poll::Pending
+			}
+			result => Poll::Ready(result),
+		}
+	}
+
 	/// Mark the read data as consumed from the stream.
 	///
 	/// The number of read bytes will be released from the congestion window,
@@ -558,8 +577,7 @@ enum ChunksState {
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-	/// Nothing more has arrived yet; a [`StreamEvent::Readable`](super::StreamEvent::Readable)
-	/// says when to retry
+	/// Nothing more has arrived yet; [`Chunks::poll_next`] and [`Stream::poll_lease`] wait for it
 	#[error("blocked")]
 	Blocked,
 	/// The peer abandoned the stream, with its code
@@ -579,6 +597,10 @@ pub enum Error {
 	/// The stream was stopped, or never opened, or already read to its end
 	#[error("closed stream")]
 	Closed,
+	/// The connection was lost before the stream ended; [`Connection::poll_closed`](crate::connection::Connection::poll_closed)
+	/// says why
+	#[error("connection lost")]
+	ConnectionLost,
 }
 
 impl From<Error> for io::Error {
@@ -587,7 +609,7 @@ impl From<Error> for io::Error {
 			Error::Blocked => io::ErrorKind::WouldBlock,
 			Error::Reset(_) | Error::Evicted => io::ErrorKind::ConnectionReset,
 			Error::TooLarge => io::ErrorKind::InvalidInput,
-			Error::Closed => io::ErrorKind::NotConnected,
+			Error::Closed | Error::ConnectionLost => io::ErrorKind::NotConnected,
 		};
 		Self::new(kind, err)
 	}
