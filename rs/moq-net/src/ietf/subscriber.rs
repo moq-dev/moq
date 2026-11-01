@@ -2881,6 +2881,9 @@ impl Subscriber {
 		route: Option<kio::Consumer<()>>,
 		request: track::Request,
 	) {
+		// Holds the session busy while the request waits on authorization or TRACK_STATUS.
+		// Past that, only a subscription or a fill counts.
+		let mut setup = Some(self.session.work().start());
 		// Data streams wait on the alias bound by SUBSCRIBE_OK, so leave the model request
 		// pending until its immutable track metadata is known.
 		// Subscribe only to what our grant covers (MoQ Auth), and cancel once it no longer
@@ -2934,6 +2937,7 @@ impl Subscriber {
 				else {
 					return;
 				};
+				setup = None;
 				let Some(next) = self
 					.linger(&broadcast_path, &track_name, idle, &mut group_fetches, &mut gate)
 					.await
@@ -2944,6 +2948,8 @@ impl Subscriber {
 			}
 			_ => Target::Request(request),
 		};
+		// `subscribe_once` counts the subscription itself.
+		drop(setup);
 		loop {
 			let Some(idle) = self
 				.subscribe_once(&broadcast_path, &track_name, target, &mut group_fetches, &mut gate)
@@ -2972,6 +2978,7 @@ impl Subscriber {
 		group_fetches: &mut TaskSet,
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
+		let _working = self.session.work().start();
 		let validity = self.validity.start();
 		let mut resolved = ResolvedRanges::default();
 		let subscription = target
@@ -3182,8 +3189,13 @@ impl Subscriber {
 					group_order: order.into(),
 					filter: join.filter,
 					fill: join.fill,
-					// A resumed copy already knows the track, from the answer that accepted it.
-					properties_wanted: matches!(target, Target::Request(_)),
+					// A resumed copy already knows the track, from the answer that accepted
+					// it, but only a TIMESCALE in this answer opts its objects into the
+					// timestamps a timed copy reads.
+					properties_wanted: match &target {
+						Target::Request(_) => true,
+						Target::Resume(idle) => idle.timescale.is_some(),
+					},
 					forward: true,
 					rendezvous: false,
 					range_filters: false,
@@ -3409,20 +3421,10 @@ impl Subscriber {
 			properties,
 			largest,
 		} = accepted;
-		// What a pause holds again: the properties the track was listed with.
-		let held_properties = properties.clone();
-		// A resumed copy opts out of the properties from draft-22, so it keeps the units it
-		// learned. Before that the answer declares them again.
-		let timescale = properties
-			.timescale
-			.or(resumed.as_ref().and_then(|idle| idle.timescale));
-		let info = accepted_info(
-			&ietf::Properties {
-				timescale,
-				..properties
-			},
-			self.version,
-		);
+		// The objects are stamped in the units the answer declares. A timed copy asked for
+		// them; an untimed one that opted out has none to keep.
+		let timescale = properties.timescale;
+		let info = accepted_info(&properties, self.version);
 		// The copy already holds the track: it is current again up to the answer's Largest
 		// Location once the join's head lands or a newer group does, since leaving cut the
 		// group it was in.
@@ -3857,6 +3859,7 @@ impl Subscriber {
 					}
 					End::Fill(requested) => {
 						let fetch = self.clone().serve_fill(
+							self.session.work().start(),
 							broadcast_path.clone(),
 							track_name.to_owned(),
 							requested,
@@ -3953,7 +3956,8 @@ impl Subscriber {
 				messages,
 				request_id,
 				alias,
-				properties: held_properties,
+				// What a pause holds again: the properties the track was listed with.
+				properties,
 				owed: unanswered.load(Ordering::Relaxed),
 				copy: Some(track.clone()),
 			};
@@ -4087,9 +4091,13 @@ impl Subscriber {
 
 			match step {
 				Step::Fill(fill) => {
-					let fetch =
-						self.clone()
-							.serve_fill(broadcast_path.clone(), track_name.to_owned(), fill, idle.timescale);
+					let fetch = self.clone().serve_fill(
+						self.session.work().start(),
+						broadcast_path.clone(),
+						track_name.to_owned(),
+						fill,
+						idle.timescale,
+					);
 					group_fetches.push(fetch);
 				}
 				Step::Subscribe => break true,
@@ -5440,7 +5448,16 @@ impl Subscriber {
 	/// group always goes alone: a run including the group its source is still writing would
 	/// hold the earlier groups until it finishes, or be cut short at the Largest Object by a
 	/// publisher following draft-22 section 9.11.
-	async fn serve_fill(self, broadcast: Path, name: String, fill: track::Fill, timescale: Option<Timescale>) {
+	///
+	/// `_working` counts the fill from when it is queued, before its first poll.
+	async fn serve_fill(
+		self,
+		_working: crate::session::Working,
+		broadcast: Path,
+		name: String,
+		fill: track::Fill,
+		timescale: Option<Timescale>,
+	) {
 		let fill = std::sync::Arc::new(fill);
 		let mut last = None;
 		while let Some(run) = fill.next_run() {
@@ -8491,13 +8508,17 @@ mod tests {
 	}
 
 	/// A copy that already knows its track, here from TRACK_STATUS_OK, opts out of the
-	/// properties when a subscriber returns, and keeps the units it learned rather than
-	/// taking the empty block the opted-out SUBSCRIBE_OK carries.
+	/// properties when a subscriber returns only if the track is untimed: a publisher stamps
+	/// objects only for a subscriber that took the TIMESCALE.
 	#[moq_clock::test]
-	async fn a_resumed_subscribe_opts_out_of_known_properties() {
+	async fn a_resumed_subscribe_opts_out_only_when_untimed() {
 		let declared = Timescale::new(90_000).unwrap();
-		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
-			let opts_out = ietf::Filter::is_draft20(version);
+		for (version, timed) in [Version::Draft18, Version::Draft20, Version::Draft22]
+			.into_iter()
+			.flat_map(|version| [(version, true), (version, false)])
+		{
+			// Draft 18's SUBSCRIBE cannot opt out.
+			let wanted = timed || !ietf::Filter::is_draft20(version);
 			let declares = |yes: bool| ietf::Properties {
 				timescale: yes.then_some(declared),
 				..Default::default()
@@ -8506,20 +8527,19 @@ mod tests {
 				ietf::TrackStatusOk::ID,
 				&ietf::TrackStatusOk {
 					largest: Some(ietf::Location { group: 3, object: 42 }),
-					properties: declares(true),
+					properties: declares(timed),
 				},
 				version,
 			);
 			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![
 				status_ok,
-				// Empty when opted out. Before draft-22 SUBSCRIBE cannot opt out, so it declares
-				// the units again.
+				// Empty when opted out, which an untimed track's would be anyway.
 				message(
 					ietf::SubscribeOk::ID,
 					&ietf::SubscribeOk {
 						track_alias: 7,
 						largest: None,
-						properties: declares(!opts_out),
+						properties: declares(timed),
 					},
 					version,
 				),
@@ -8575,10 +8595,14 @@ mod tests {
 					subscribes.push(ietf::Subscribe::decode_msg(&mut body, version).unwrap());
 				}
 			}
-			assert_eq!(subscribes.len(), 1, "{version}: the returning subscriber subscribes");
 			assert_eq!(
-				subscribes[0].properties_wanted, !opts_out,
-				"{version}: TRACK_STATUS_OK already gave the properties"
+				subscribes.len(),
+				1,
+				"{version} timed={timed}: the returning subscriber subscribes"
+			);
+			assert_eq!(
+				subscribes[0].properties_wanted, wanted,
+				"{version} timed={timed}: only the TIMESCALE opts the objects into timestamps"
 			);
 
 			let timescale = probe
@@ -8591,8 +8615,8 @@ mod tests {
 				.timescale;
 			assert_eq!(
 				timescale,
-				Some(declared),
-				"{version}: the copy keeps the units it learned"
+				timed.then_some(declared),
+				"{version} timed={timed}: the copy reads objects in the units it learned"
 			);
 			serving.abort();
 		}
