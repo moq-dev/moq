@@ -73,7 +73,10 @@ test("capture resamples live scale when frame dimensions stay unchanged", async 
 			},
 		},
 	});
+	const consumer = new Effect();
 	try {
+		await settle();
+		capture.out.frames.peek()?.subscribe(consumer);
 		let changed = capture.out.display.changed();
 		controller.enqueue(new Frame() as unknown as VideoFrame);
 		expect(await changed).toMatchObject({ width: 1920, height: 1080, scale: 2 });
@@ -82,6 +85,7 @@ test("capture resamples live scale when frame dimensions stay unchanged", async 
 		controller.enqueue(new Frame() as unknown as VideoFrame);
 		expect(await changed).toMatchObject({ width: 1920, height: 1080, scale: 1 });
 	} finally {
+		consumer.close();
 		capture.close();
 		if (processor) Object.defineProperty(globalThis, "MediaStreamTrackProcessor", processor);
 		else Reflect.deleteProperty(globalThis, "MediaStreamTrackProcessor");
@@ -120,7 +124,10 @@ test("rotation follows the live frames, not the track's settings", async () => {
 	const track = { getSettings: () => ({ width: 1280, height: 720 }) } as unknown as StreamTrack;
 	const orientation = new Signal(90);
 	const capture = new Capture({ source: track, orientation });
+	const consumer = new Effect();
 	try {
+		await settle();
+		capture.out.frames.peek()?.subscribe(consumer);
 		const display = capture.out.display.changed();
 		controller.enqueue(sized(720, 1280));
 		expect(await display).toMatchObject({ width: 720, height: 1280 });
@@ -163,6 +170,7 @@ test("rotation follows the live frames, not the track's settings", async () => {
 		controller.enqueue(sized(1280, 720, 0));
 		expect(await rotation).toBe(0);
 	} finally {
+		consumer.close();
 		capture.close();
 		if (processor) Object.defineProperty(globalThis, "MediaStreamTrackProcessor", processor);
 		else Reflect.deleteProperty(globalThis, "MediaStreamTrackProcessor");
@@ -355,11 +363,17 @@ test("the held frame is closed when replaced, when an unread copy is dropped, an
 	using input = frameSource();
 	const capture = new Capture({ source: input.source });
 
+	const watch = new Effect();
+	await settle();
+	const reader = capture.out.frames.peek()?.subscribe(watch).getReader();
 	input.push(1_000);
+	(await reader?.read())?.value?.close();
 	input.push(2_000);
+	(await reader?.read())?.value?.close();
+	watch.close();
 	await flush();
 
-	// Only the newest is held: the source frames reached no reader and the first hold was replaced.
+	// Only the newest is held after the reader leaves.
 	expect(open()).toHaveLength(1);
 
 	// A reader that leaves without reading its copy releases it.
@@ -571,5 +585,89 @@ test("an encoder torn down while a frame is in flight closes that frame", async 
 		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");
 	}
+	expect(open()).toEqual([]);
+});
+
+test("capture parks after its bootstrap and last reader, and cancels while parked", async () => {
+	using _input = frameSource();
+	using _clock = manualAt(0);
+	let pulls = 0;
+	let cancelled = false;
+	let deliver!: (timestamp: number) => void;
+	const frames = new ReadableStream<VideoFrame>(
+		{
+			pull(controller) {
+				pulls++;
+				return new Promise<void>((resolve) => {
+					deliver = (timestamp) => {
+						controller.enqueue(new Frame(undefined, { timestamp }) as unknown as VideoFrame);
+						resolve();
+					};
+				});
+			},
+			cancel() {
+				cancelled = true;
+			},
+		},
+		{ highWaterMark: 0 },
+	);
+	const capture = new Capture({ source: { frames } });
+	const first = new Effect();
+	const second = new Effect();
+	try {
+		await flush();
+		expect(pulls).toBe(1);
+		deliver(1_000);
+		await flush();
+		expect(pulls).toBe(1);
+		expect(open()).toHaveLength(1);
+
+		const fanout = capture.out.frames.peek();
+		if (!fanout) throw new Error("missing fanout");
+		const a = fanout.subscribe(first).getReader();
+		const b = fanout.subscribe(second).getReader();
+		(await a.read()).value?.close();
+		(await b.read()).value?.close();
+		await flush();
+		expect(pulls).toBe(2);
+
+		// One reader leaving does not stop another's capture.
+		first.close();
+		deliver(2_000);
+		(await b.read()).value?.close();
+		await flush();
+		expect(pulls).toBe(3);
+
+		// Stream cancellation and effect teardown must remove demand only once.
+		await b.cancel();
+		second.close();
+		deliver(3_000);
+		await flush();
+		expect(pulls).toBe(3);
+		expect(open()).toHaveLength(1);
+
+		const resumed = new Effect();
+		try {
+			const reader = fanout.subscribe(resumed).getReader();
+			(await reader.read()).value?.close();
+			await flush();
+			expect(pulls).toBe(4);
+			deliver(4_000);
+			(await reader.read()).value?.close();
+			resumed.close();
+			// Settle the read that was already in flight when demand went away.
+			await flush();
+			if (pulls === 5) deliver(5_000);
+			await flush();
+		} finally {
+			resumed.close();
+		}
+	} finally {
+		first.close();
+		second.close();
+		capture.close();
+	}
+	await flush();
+	expect(cancelled).toBe(true);
 	expect(open()).toEqual([]);
 });
