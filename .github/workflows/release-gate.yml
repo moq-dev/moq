@@ -117,6 +117,7 @@ jobs:
               - "cpp/moq/cmake/moq-ffi.cmake"
               - "Cargo.lock"
               - ".github/workflows/c.yml"
+              - ".github/actions/uniffi-bindgen/**"
             cpp:
               - "cpp/moq/**"
               - "cpp/justfile"
@@ -128,6 +129,7 @@ jobs:
               - "doc/lib/samples.sh"
               - "Cargo.lock"
               - ".github/workflows/cpp.yml"
+              - ".github/actions/uniffi-bindgen/**"
             # A backported change to the interop harness itself; nightly covers main.
             interop:
               - "test/lib/**"
@@ -394,7 +396,6 @@ jobs:
     secrets: inherit
     permissions:
       contents: read
-      id-token: write
 
   uring:
     name: io_uring
