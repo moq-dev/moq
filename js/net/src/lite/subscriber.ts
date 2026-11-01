@@ -1871,7 +1871,7 @@ export class Subscriber {
 		});
 		if (!dg) return;
 		// Gone since, too: the subscription ended while the decode awaited.
-		if (!entry ||this.#subscribes.get(dg.subscribe) !== entry) return;
+		if (!entry || this.#subscribes.get(dg.subscribe) !== entry) return;
 
 		const scale = entry.timescale;
 

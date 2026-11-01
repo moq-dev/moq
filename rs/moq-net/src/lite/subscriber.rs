@@ -4295,7 +4295,18 @@ mod tests {
 				for body in [vec![1], vec![1; 1200], vec![1; 1201]] {
 					subscriber.route_datagram(body.into()).unwrap();
 					assert!(received.recv_datagram().now_or_never().is_none());
-					assert!(!subscriber.subscribes.lock().get(&1).unwrap().copy.as_ref().unwrap().producer.is_live());
+					assert!(
+						!subscriber
+							.subscribes
+							.lock()
+							.get(&1)
+							.unwrap()
+							.copy
+							.as_ref()
+							.unwrap()
+							.producer
+							.is_live()
+					);
 				}
 			}
 
