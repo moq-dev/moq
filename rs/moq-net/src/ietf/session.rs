@@ -486,17 +486,8 @@ pub struct PeerSetup {
 	/// The SETUP's encoded size, counted once the session's stats are known.
 	pub size: usize,
 
-	/// The request path the peer advertised, for URL-less transports.
-	pub path: Option<String>,
-
-	/// The credential the peer presented in its `AUTHORIZATION TOKEN` option.
-	pub token: Option<crate::setup::Token>,
-
-	/// The implementation the peer advertised in its `IMPLEMENTATION` option.
-	pub implementation: Option<String>,
-
-	/// The Setup Options it declared (see [`cluster`] and [`solicit`]).
-	pub declared: peer::Peer,
+	/// What the SETUP's parameters say.
+	pub options: SetupOptions,
 
 	/// Uni streams that arrived before the SETUP, type peeked but unread. The drafts say
 	/// to buffer early data until the control streams arrive, so the session classifies
@@ -547,70 +538,72 @@ pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<P
 
 		reader.set_priority(crate::priority::RECV_CONTROL);
 		let (setup, size) = reader.decode_sized::<setup::Setup>().await?;
-		let (params, _) = ietf::Parameters::decode_slice(&setup.parameters, version)?;
-		if session.address() == crate::transport::Address::Uri && params.get_bytes(ietf::ParameterBytes::Path).is_some()
-		{
+		let options = decode_peer_setup(&setup.parameters, version, false)?;
+		if session.address() == crate::transport::Address::Uri && options.path.is_some() {
 			return Err(Error::ProtocolViolation);
 		}
-		let path = match params.get_bytes(ietf::ParameterBytes::Path) {
-			Some(bytes) => Some(
-				std::str::from_utf8(bytes)
-					.map_err(|_| Error::Decode(crate::DecodeError::InvalidValue))?
-					.to_owned(),
-			),
-			None => None,
-		};
-		let token = super::token::from_setup(&params, version)?;
-		let implementation =
-			crate::setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?;
-		let declared = peer_from_params(&params, version)?;
 
 		return Ok(PeerSetup {
 			stream: reader,
 			size,
-			path,
-			token,
-			implementation,
-			declared,
+			options,
 			early,
 		});
 	}
 }
 
-/// Parse the Setup Options we act on out of a raw SETUP parameter block, refusing any the
-/// peer's role may not send.
-pub(crate) fn decode_peer_setup(
-	parameters: bytes::Bytes,
-	version: Version,
-	client: bool,
-) -> Result<(peer::Peer, Option<String>), Error> {
-	let (params, _) = ietf::Parameters::decode_slice(&parameters, version)?;
+/// What a peer's SETUP parameters say, parsed by [`decode_peer_setup`] for every caller.
+pub struct SetupOptions {
+	/// The request path the peer advertised, for URL-less transports.
+	pub path: Option<String>,
+
+	/// The credential the peer presented in its `AUTHORIZATION TOKEN` option.
+	pub token: Option<crate::setup::Token>,
+
+	/// The implementation the peer advertised in its `IMPLEMENTATION` option.
+	pub implementation: Option<String>,
+
+	/// The Setup Options it declared (see [`cluster`] and [`solicit`]).
+	pub declared: peer::Peer,
+}
+
+/// Parse a peer's raw SETUP parameter block, refusing any option the peer's role may not
+/// send. `client` is our role, so `true` means the block came from a server.
+pub(crate) fn decode_peer_setup(parameters: &[u8], version: Version, client: bool) -> Result<SetupOptions, Error> {
+	let (params, _) = ietf::Parameters::decode_slice(parameters, version)?;
+	let path = params.get_bytes(ietf::ParameterBytes::Path);
 	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
-	if client && params.get_bytes(ietf::ParameterBytes::Path).is_some() {
+	if client && path.is_some() {
 		return Err(SessionError::InvalidPath.into());
 	}
 	if client && params.get_bytes(ietf::ParameterBytes::Authority).is_some() {
 		return Err(SessionError::InvalidAuthority.into());
 	}
-	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
-	// session (draft-22 section 8.9).
-	super::token::from_setup(&params, version)?;
-	let implementation = crate::setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?;
-	Ok((peer_from_params(&params, version)?, implementation))
-}
+	let path = match path {
+		Some(bytes) => Some(
+			std::str::from_utf8(bytes)
+				.map_err(|_| Error::Decode(crate::DecodeError::InvalidValue))?
+				.to_owned(),
+		),
+		None => None,
+	};
 
-/// The Setup Options we act on, out of an already-decoded parameter block. One place, so
-/// a future option reaches both the pre-read accept path and the uni loop.
-fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer::Peer, crate::DecodeError> {
-	Ok(peer::Peer {
-		cluster: cluster::peer_from_setup(params)?,
-		solicit: solicit::from_setup(params, version)?,
-		hidden: hidden::from_setup(params, version),
-		max_age: max_age::from_setup(params, version),
-		auth: auth::from_setup(params) == Some(true),
-		active_count: active_count::from_setup(params),
-		epoch: epoch::from_setup(params),
-		flate: super::flate::from_setup(params)?,
+	Ok(SetupOptions {
+		path,
+		// A token that cannot be decoded closes the session even where nothing uses it
+		// (draft-22 section 8.9).
+		token: super::token::from_setup(&params, version)?,
+		implementation: crate::setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?,
+		declared: peer::Peer {
+			cluster: cluster::peer_from_setup(&params)?,
+			solicit: solicit::from_setup(&params, version)?,
+			hidden: hidden::from_setup(&params, version),
+			max_age: max_age::from_setup(&params, version),
+			auth: auth::from_setup(&params) == Some(true),
+			active_count: active_count::from_setup(&params),
+			epoch: epoch::from_setup(&params),
+			flate: super::flate::from_setup(&params)?,
+		},
 	})
 }
 
@@ -948,9 +941,9 @@ impl Uni {
 				reader.set_priority(crate::priority::RECV_CONTROL);
 				let msg = reader.decode::<setup::Setup>().await?;
 				if let Some(peer_setup) = peer_setup {
-					let (declared, implementation) = decode_peer_setup(msg.parameters, version, client)?;
-					peer_setup.set(declared);
-					peer_setup.set_implementation(implementation);
+					let options = decode_peer_setup(&msg.parameters, version, client)?;
+					peer_setup.set(options.declared);
+					peer_setup.set_implementation(options.implementation);
 				}
 
 				// Monitor for GOAWAY after setup completes.
@@ -1396,11 +1389,11 @@ mod tests {
 			}
 			params.encode_bytes(version).unwrap()
 		};
-		let (_, implementation) = decode_peer_setup(encode(Some(b"moq-net-rs/1")), version, true).unwrap();
-		assert_eq!(implementation.as_deref(), Some("moq-net-rs/1"));
-		let (_, implementation) = decode_peer_setup(encode(None), version, true).unwrap();
-		assert_eq!(implementation, None);
-		assert!(decode_peer_setup(encode(Some(&[0xff])), version, true).is_err());
+		let options = decode_peer_setup(&encode(Some(b"moq-net-rs/1")), version, true).unwrap();
+		assert_eq!(options.implementation.as_deref(), Some("moq-net-rs/1"));
+		let options = decode_peer_setup(&encode(None), version, true).unwrap();
+		assert_eq!(options.implementation, None);
+		assert!(decode_peer_setup(&encode(Some(&[0xff])), version, true).is_err());
 	}
 
 	#[kio::test]

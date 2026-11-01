@@ -247,13 +247,17 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 						continue;
 					};
 					any = true;
+					let Some(decoded) = decoded else {
+						continue;
+					};
 
 					let Ok(first) = decoded.encode_bytes(version) else {
 						continue;
 					};
 
 					let echo = lite::Datagram::decode(first, version, negotiated, |_| framing)
-						.expect("could not decode our own encoding");
+						.expect("could not decode our own encoding")
+						.expect("encoded group decoded as padding");
 					assert_eq!(echo, decoded, "datagram did not survive a round trip");
 				}
 			}
@@ -754,9 +758,9 @@ where
 	let outer = crate::Version::Ietf(version);
 	if let Ok((message, _)) = T::decode_slice(data, outer) {
 		let parameters = parameters(&message);
-		if ietf::decode_peer_setup(parameters.clone(), version, true).is_ok() {
+		if ietf::decode_peer_setup(parameters, version, true).is_ok() {
 			assert!(
-				ietf::decode_peer_setup(parameters.clone(), version, false).is_ok(),
+				ietf::decode_peer_setup(parameters, version, false).is_ok(),
 				"a server's Setup Options are refused from a client"
 			);
 		}

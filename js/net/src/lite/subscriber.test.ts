@@ -1091,8 +1091,13 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 			await request.reading;
 			await respond(request, version, [{ start: new SubscribeStart([0]) }]);
 			const received = track.recvDatagram();
-			await writer.write(new DatagramMessage(0n, 0, 0, new Uint8Array(1198)).encode(version));
-			await writer.write(new DatagramMessage(0n, 1, 1, new Uint8Array(1197)).encode(version));
+			if (version === Version.DRAFT_07) {
+				await writer.write(new Uint8Array([1]));
+				await writer.write(new Uint8Array([1, ...new Uint8Array(1199).fill(0xff)]));
+			}
+			const size = version === Version.DRAFT_07 ? 1196 : 1197;
+			await writer.write(new DatagramMessage(0n, 0, 0, new Uint8Array(size + 1)).encode(version));
+			await writer.write(new DatagramMessage(0n, 1, 1, new Uint8Array(size)).encode(version));
 			expect((await received)?.sequence).toBe(1);
 		} finally {
 			await writer.close();

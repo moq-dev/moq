@@ -578,9 +578,12 @@ impl Subscriber {
 		};
 		let mut subscribes = self.subscribes.lock();
 		// An unknown subscription's datagram is dropped below, however it parses.
-		let dg = lite::Datagram::decode(payload, self.version, ietf, |id| {
+		let Some(dg) = lite::Datagram::decode(payload, self.version, ietf, |id| {
 			subscribes.get(&id).map(|entry| entry.framing).unwrap_or_default()
-		})?;
+		})?
+		else {
+			return Ok(());
+		};
 		let Some(entry) = subscribes.get_mut(&dg.subscribe) else {
 			// Unknown or already-closed subscription: drop the datagram.
 			return Ok(());
@@ -3984,88 +3987,107 @@ mod tests {
 	/// rather than outliving the subscription it belonged to.
 	#[kio::test]
 	async fn unsubscribe_drops_the_datagram_and_releases_the_producer() {
-		let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let subscriber = Subscriber::new(SubscriberConfig {
-			runtime: crate::time::sim(),
-			session: crate::driver::Transport::new(SinkSession::default()),
-			origin,
-			recv_bandwidth: None,
-			version: VERSION,
-			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
-			peer_hop: None,
-			cost: None,
-			going_away: Default::default(),
-			auth: crate::auth::Link::new(false),
-		});
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(SinkSession::default()),
+				origin,
+				recv_bandwidth: None,
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
 
-		let broadcast = crate::broadcast::Info::new().produce();
-		// The broadcast keeps only a weak handle, so the map below owns the only strong
-		// `track::Producer`: dropping it is what ends the track.
-		// Untimed, as the subscriber drops lite-05 timestamps.
-		let producer = broadcast
-			.create_track("datagrams", crate::track::Info::default())
-			.unwrap();
-		let mut received = producer.subscribe(None);
-		subscriber.subscribes.lock().insert(
-			7,
-			TrackEntry {
-				producer,
-				framing: lite::Framing {
-					timescale: Some(Timescale::MILLI),
-					ietf: None,
-					compressed: false,
+			let broadcast = crate::broadcast::Info::new().produce();
+			// The broadcast keeps only a weak handle, so the map below owns the only strong
+			// `track::Producer`: dropping it is what ends the track.
+			// Earlier versions drop their wire timestamps.
+			let mut producer = broadcast
+				.create_track(
+					"datagrams",
+					match version.has_media_time() {
+						true => crate::track::Info::default().with_timescale(Timescale::MILLI),
+						false => crate::track::Info::default(),
+					},
+				)
+				.unwrap();
+			producer.set_idle();
+			let mut received = producer.subscribe(None);
+			subscriber.subscribes.lock().insert(
+				1,
+				TrackEntry {
+					producer,
+					framing: lite::Framing {
+						timescale: Some(Timescale::MILLI),
+						ietf: None,
+						compressed: false,
+					},
+					tail: Default::default(),
+					start: None,
+					first: None,
 				},
-				tail: Default::default(),
-				start: None,
-				first: None,
-			},
-		);
+			);
 
-		let payload = |sequence, size| {
-			lite::Datagram {
-				subscribe: 7,
-				sequence,
-				timestamp: Some(sequence),
-				payload: bytes::Bytes::from(vec![0; size]),
-				inflated: None,
-				ietf: None,
+			if version.has_padding() {
+				// These bytes would name the active subscription without the discriminator.
+				for body in [vec![1], vec![1; 1200], vec![1; 1201]] {
+					subscriber.route_datagram(body.into()).unwrap();
+					assert!(received.recv_datagram().now_or_never().is_none());
+					assert!(!subscriber.subscribes.lock().get(&1).unwrap().producer.is_live());
+				}
 			}
-			.encode_bytes(VERSION)
-			.unwrap()
-		};
-		subscriber.route_datagram(payload(1, 1)).unwrap();
-		assert_eq!(
-			received
-				.recv_datagram()
-				.now_or_never()
-				.unwrap()
-				.unwrap()
-				.unwrap()
-				.sequence,
-			1
-		);
 
-		let oversized = payload(2, 1198);
-		assert_eq!(oversized.len(), 1201);
-		subscriber.route_datagram(oversized).unwrap();
-		assert!(
-			received.recv_datagram().now_or_never().is_none(),
-			"oversized body was delivered"
-		);
-		let boundary = payload(3, 1197);
-		assert_eq!(boundary.len(), 1200);
-		subscriber.route_datagram(boundary).unwrap();
-		assert_eq!(received.recv_datagram().await.unwrap().unwrap().sequence, 3);
+			let payload = |sequence, size| {
+				lite::Datagram {
+					subscribe: 1,
+					sequence,
+					timestamp: Some(sequence),
+					payload: bytes::Bytes::from(vec![0; size]),
+					inflated: None,
+					ietf: None,
+				}
+				.encode_bytes(version)
+				.unwrap()
+			};
+			subscriber.route_datagram(payload(1, 1)).unwrap();
+			assert_eq!(
+				received
+					.recv_datagram()
+					.now_or_never()
+					.unwrap()
+					.unwrap()
+					.unwrap()
+					.sequence,
+				1
+			);
 
-		subscriber.remove_subscribe(7);
-		subscriber.route_datagram(payload(4, 1)).unwrap();
-		// Dropping the last producer is an abrupt teardown, so the track resolves with
-		// `Dropped` rather than parking. A route that outlived the removal would keep the
-		// producer alive and leave this pending forever.
-		assert!(
-			matches!(received.recv_datagram().now_or_never(), Some(Err(Error::Dropped))),
-			"the track outlived its subscription"
-		);
+			let max_payload = 1200 - payload(2, 0).len();
+			let oversized = payload(2, max_payload + 1);
+			assert_eq!(oversized.len(), 1201);
+			subscriber.route_datagram(oversized).unwrap();
+			assert!(
+				received.recv_datagram().now_or_never().is_none(),
+				"oversized body was delivered"
+			);
+			let boundary = payload(3, max_payload);
+			assert_eq!(boundary.len(), 1200);
+			subscriber.route_datagram(boundary).unwrap();
+			assert_eq!(received.recv_datagram().await.unwrap().unwrap().sequence, 3);
+
+			subscriber.remove_subscribe(1);
+			subscriber.route_datagram(payload(4, 1)).unwrap();
+			// Dropping the last producer is an abrupt teardown, so the track resolves with
+			// `Dropped` rather than parking. A route that outlived the removal would keep the
+			// producer alive and leave this pending forever.
+			assert!(
+				matches!(received.recv_datagram().now_or_never(), Some(Err(Error::Dropped))),
+				"the track outlived its subscription"
+			);
+		}
 	}
 
 	/// A lite-05 subscribe still waiting on TRACK_INFO is not in the subscribe map.
