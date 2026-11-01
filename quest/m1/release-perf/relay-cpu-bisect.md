@@ -6,7 +6,7 @@ The commits that raised the relay's instructions per delivered frame between [`c
 
 ## Plan
 
-Found by [moq-dev/moq#7505](https://github.com/moq-dev/moq/pull/7505), which profiled the io_uring clock read. At `main` [`30f23c3f8a`](https://github.com/moq-dev/moq/commit/30f23c3f8a), relay instructions per delivered frame had risen 25-56% since `cdff3c8f95`, on both runtimes, with the same delivery:
+Found by [moq-dev/moq#7505](https://github.com/moq-dev/moq/pull/7505), which profiled the io_uring clock read. At `main` [`30f23c3f8a`](https://github.com/moq-dev/moq/commit/30f23c3f8a), relay instructions per delivered frame had risen 25-56% on io_uring since `cdff3c8f95` and 18-38% on the tokio workers since `1dd9b83d1`, with the same delivery:
 
 | workload | runtime | before, kinstr/frame | `30f23c3f8a`, kinstr/frame |
 |---|---|---|---|

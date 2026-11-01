@@ -10,7 +10,7 @@ Found by [moq-dev/moq#7512](https://github.com/moq-dev/moq/pull/7512), which att
 
 Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): m2. This waits on [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211) landing, which rewrites `Sessions`' token bookkeeping (shared request-token grants and attachment leases); indexing the table first would conflict with it, as #7512 noted.
 
-- Keep `HashMap<token, count>` and `HashMap<remote, count>` beside the slots, updated on connect, end, a new token attaching to a known session, and expiry.
+- Keep `HashMap<token, count>` and `HashMap<remote, count>` beside the slots, updated on connect, end, a new token attaching to a known session, and expiry. `Sessions::revalidate` updates them too, since it re-inserts an aged-out or restart-lost slot and appends a token the slot hadn't seen, and it keeps today's rule of enforcing no cap.
 - Age slots from a queue ordered by `seen`, refreshed on each sighting (a re-push with a generation, or an ordered map keyed by `(seen, id)`), so a sweep pops only expired entries. Keep today's rule: a session that missed two cadences is dropped.
 - Keep the semantics the doc comment on the limits describes, including a known id attaching another credential counting only against the new JWT's cap.
 - Measure with #7512's `verify/sessions` bench before and after; the slope should be flat.

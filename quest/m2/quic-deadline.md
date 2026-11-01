@@ -72,6 +72,10 @@ or ordering that suits only some rates.
   it no longer starves the fresh ones.
 - Re-run #7517's `datagram_delivery` bench: p99 behind the bottleneck stays
   within the subscription's max delay, and the loopback viewer is unchanged.
+  Percentiles are over delivered datagrams, so also report offered,
+  delivered, and expired counts separately, and check that datagrams
+  delivered within the max delay don't fall below today's: the deadline may
+  drop only what would have arrived too late anyway.
 
 Measure on bufferbloat: a rate below the media bitrate behind a deep but
 finite queue whose overflow demonstrably drops packets, with competing

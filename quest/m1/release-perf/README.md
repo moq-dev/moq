@@ -271,7 +271,7 @@ Decided 2026-10-30 (maintainer), in
 ## Required
 
 - [Fanout lock contention](/quest/m1/release-perf/fanout-lock.md) - relay fanout subscribers stop contending one track lock, so main's relay CPU matches release's in every round
-- [Relay CPU per frame since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the 25-56% rise in relay instructions per delivered frame is bisected, attributed, and its avoidable cost fixed
+- [Relay CPU per frame since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the 18-56% rise in relay instructions per delivered frame is bisected, attributed, and its avoidable cost fixed
 
 ## Related
 

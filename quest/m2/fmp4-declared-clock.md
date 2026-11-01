@@ -2,7 +2,7 @@
 
 ## Goal
 
-The fMP4 exporter authors decode times from the rendition's declared reorder depth with `container::declared::DeclaredClock`, as the TS, FLV, and MKV exporters do, so sub-GOP fragments of variable-rate B-frame video get exact decode times instead of durations capped at the catalog cadence. `moq export fmp4`, HLS packaging, and `moq export mp4` share the change.
+The fMP4 exporter authors decode times from the rendition's declared reorder depth with `container::declared::DeclaredClock`, as the TS, FLV, and MKV exporters do, so sub-GOP fragments of variable-rate B-frame video decode at their group's presentation slots instead of at durations capped at the catalog cadence: a stall longer than the cadence shows as its real gap, and only each group's first depth frames are spaced one tick apart, as in the other exporters. `moq export fmp4`, HLS packaging, and `moq export mp4` share the change.
 
 ## Plan
 
@@ -12,7 +12,7 @@ Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-a
 
 - `DeclaredClock` (`rs/moq-mux/src/container/declared.rs`) holds depth frames per group before releasing them and decodes the first depth frames one tick apart up to the earliest slot, so a DTS can fall before the timeline's zero. Settle how fMP4 writes that: a version 1 `trun` with signed composition offsets, or an edit list, and what each costs HLS and `export mp4`'s rebuilt sample tables.
 - A rendition that declares no depth keeps today's inference, including #7491's rule.
-- Keep #7491's tests (`tfdt` never steps back across sub-GOP fragments, ffprobe reads every fragment) and add a variable-rate B-frame case whose decode times are exact.
+- Keep #7491's tests (`tfdt` never steps back across sub-GOP fragments, ffprobe reads every fragment) and add a variable-rate B-frame case with a stall longer than the cadence, whose decode times follow the presentation slots across the stall. `DeclaredClock` derives DTS from PTS and depth alone, so a gap that only the encoder's own decode times would show is out of reach and not a goal.
 
 Public API: none. Wire: none.
 
