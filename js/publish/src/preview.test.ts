@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { Fanout } from "./fanout";
 import { Renderer } from "./preview";
 
 async function settle(): Promise<void> {
-	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+	for (let i = 0; i < 5; i++) await yieldNow();
 }
 
 describe("Preview.Renderer", () => {

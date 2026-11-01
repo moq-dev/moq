@@ -9,7 +9,7 @@
 //! set as [`Added`](Event::Added) when first consumed, and returning `None` once the catalog
 //! finishes cleanly, or an error when the recording is incomplete.
 
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Weak};
 use std::task::Poll;
@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use moq_mux::catalog::hang::Catalog;
 
+use super::driver::{Owner, Spawner};
 use super::master;
 use super::rendition::{Kind, Rendition};
 
@@ -131,10 +132,12 @@ struct State {
 #[derive(Clone)]
 pub(crate) struct Fanout {
 	feed: kio::Producer<Feed>,
+	/// Starts each rendition's background work on the broadcaster's driver.
+	spawner: Spawner,
 }
 
 impl Producer {
-	pub fn new(window: Duration) -> Self {
+	pub fn new(window: Duration, spawner: Spawner) -> Self {
 		Self {
 			state: kio::Producer::new(State::default()),
 			fanout: Fanout {
@@ -147,8 +150,17 @@ impl Producer {
 					generation: None,
 					window,
 				}),
+				spawner,
 			},
 		}
+	}
+
+	/// A producer whose renditions run on a driver spawned on the ambient runtime.
+	#[cfg(test)]
+	pub(super) fn spawned(window: Duration) -> Self {
+		let (spawner, driver) = Spawner::new();
+		tokio::spawn(driver.run());
+		Self::new(window, spawner)
 	}
 
 	/// How many renditions the fanout still reaches, dropped ones not yet pruned included.
@@ -259,6 +271,11 @@ impl Producer {
 }
 
 impl Fanout {
+	/// Run `task` on the broadcaster's driver until it finishes or the returned [`Owner`] drops.
+	pub fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) -> Owner {
+		self.spawner.spawn(task)
+	}
+
 	/// The playlist window duration every rendition's window is trimmed to.
 	pub fn window(&self) -> Duration {
 		self.feed.read().window
@@ -270,7 +287,7 @@ impl Fanout {
 	pub fn stamp(&self, key: &Key, broken: bool, end: Duration) -> u64 {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
 		if feed.anchor.is_none() {
-			feed.anchor = Some(moq_clock::wall().checked_sub(end).unwrap_or(Wall::UNIX_EPOCH));
+			feed.anchor = Some(kio::clock::wall().checked_sub(end).unwrap_or(Wall::UNIX_EPOCH));
 		}
 		feed.discontinuities.stamp(key, broken)
 	}
@@ -680,20 +697,20 @@ mod tests {
 	#[tokio::test]
 	async fn cursors_end_only_with_a_finished_catalog() {
 		tokio::time::pause();
-		let producer = Producer::new(Duration::from_secs(30));
+		let producer = Producer::spawned(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
 		assert!(cursor.poll_next(&kio::Waiter::noop()).is_pending());
 		producer.finish(Ok(()));
 		assert!(cursor.next().await.unwrap().is_none());
 		assert!(cursor.next().await.unwrap().is_none());
 
-		let producer = Producer::new(Duration::from_secs(30));
+		let producer = Producer::spawned(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
 		producer.close();
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
 
-		let producer = Producer::new(Duration::from_secs(30));
+		let producer = Producer::spawned(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
 		drop(producer);
 		assert!(matches!(cursor.next().await, Err(crate::Error::IncompleteRecording)));
@@ -729,7 +746,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_failed_catalog_never_completes_a_cursor() {
 		tokio::time::pause();
-		let producer = Producer::new(Duration::from_secs(30));
+		let producer = Producer::spawned(Duration::from_secs(30));
 		let mut cursor = producer.subscribe();
 		producer.finish(Err(crate::Error::NoVariants));
 		assert!(matches!(

@@ -1,0 +1,30 @@
+# Clippy reads the nearest clippy.toml above each crate, so this bans direct clock
+# reads and timers across the workspace; a crate with its own file replaces it whole.
+# Everything else reads the ambient clock: tests run on its simulator or paused tokio,
+# and real-I/O tests bound their waits with it. Only clock backends, explicit
+# measurements, and std clocks handed to third-party APIs touch the host clock,
+# each behind a per-site `expect`.
+#
+# The wasm32 lint builds tokio without `time`, where the tokio paths do not resolve.
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "read the ambient clock: kio::clock::now()" },
+    { path = "std::time::Instant::elapsed", reason = "read the ambient clock: kio::clock::Instant::elapsed()" },
+    { path = "std::time::SystemTime::now", reason = "read the ambient clock: kio::clock::wall()" },
+    { path = "std::time::SystemTime::elapsed", reason = "wall time never measures elapsed time" },
+    { path = "std::thread::sleep", reason = "sleep on the ambient clock: kio::clock::sleep()" },
+    { path = "tokio::time::Instant::now", reason = "read the ambient clock: kio::clock::now()", allow-invalid = true },
+    { path = "tokio::time::sleep", reason = "sleep on the ambient clock: kio::clock::sleep()", allow-invalid = true },
+    { path = "tokio::time::sleep_until", reason = "sleep on the ambient clock: kio::clock::sleep_until()", allow-invalid = true },
+    { path = "tokio::time::timeout", reason = "use the ambient clock: kio::clock::timeout()", allow-invalid = true },
+    { path = "tokio::time::timeout_at", reason = "use the ambient clock: kio::clock::timeout_at()", allow-invalid = true },
+    { path = "tokio::time::interval", reason = "use the ambient clock: kio::clock::interval()", allow-invalid = true },
+    { path = "tokio::time::interval_at", reason = "use the ambient clock: kio::clock::interval_at()", allow-invalid = true },
+]
+
+disallowed-types = [
+    { path = "std::time::SystemTime", reason = "use kio::clock::Wall" },
+    { path = "std::time::Instant", reason = "use kio::clock::Instant" },
+    { path = "tokio::time::Instant", reason = "use kio::clock::Instant", allow-invalid = true },
+    { path = "tokio::time::Sleep", reason = "use kio::clock::Sleep", allow-invalid = true },
+    { path = "tokio::time::Interval", reason = "use kio::clock::Interval", allow-invalid = true },
+]

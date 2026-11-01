@@ -1,4 +1,5 @@
 import { expect, mock, spyOn, test } from "bun:test";
+import { Nano, now } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Order } from "../order";
@@ -363,7 +364,7 @@ test("captures once a gesture resumes a context built before one", async () => {
 	// Blocked, so `<moq-publish>` doesn't hold its announce for audio that may never come.
 	expect(capture.blocked.peek()).toBe(true);
 
-	const before = performance.now() * 1000;
+	const before = Nano.toMicro(Nano(now()));
 	webaudio.gesture();
 	await settle();
 
