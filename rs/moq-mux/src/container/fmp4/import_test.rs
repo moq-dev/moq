@@ -2597,7 +2597,7 @@ struct Imported {
 	video: String,
 	/// The root clock the catalog advertised.
 	clock: hang::catalog::Clock,
-	arrival: std::ops::RangeInclusive<moq_clock::Wall>,
+	arrival: std::ops::RangeInclusive<kio::clock::Wall>,
 	/// Where the video's first HLS segment starts.
 	record: moq_net::Timestamp,
 	/// Why a chunk was refused, if one was.
@@ -2618,7 +2618,7 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 	let video = snapshot.video.renditions.keys().next().unwrap().clone();
 	let mut records = subscribe(&consumer, &video).await;
 
-	let before = moq_clock::wall();
+	let before = kio::clock::wall();
 	let mut after = before;
 	let mut refused = None;
 	for (i, chunk) in chunks.iter().enumerate() {
@@ -2627,7 +2627,7 @@ async fn import_session(chunks: &[Vec<u8>]) -> Imported {
 			break;
 		}
 		if i == 0 {
-			after = moq_clock::wall();
+			after = kio::clock::wall();
 		}
 	}
 	fmp4.finish().unwrap();
@@ -3498,7 +3498,7 @@ async fn ttml_samples_become_timed_text_with_source_metadata() {
 /// The source joins a catalog clock another input already fixed, so its TTML times move with it.
 #[tokio::test(start_paused = true)]
 async fn ttml_follows_a_shifted_source_clock() {
-	let wall = moq_clock::wall();
+	let wall = kio::clock::wall();
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();

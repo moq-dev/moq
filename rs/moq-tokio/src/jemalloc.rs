@@ -188,7 +188,7 @@ mod tests {
 					if super::sampling() {
 						break;
 					}
-					moq_clock::sleep(std::time::Duration::from_millis(10)).await;
+					kio::clock::sleep(std::time::Duration::from_millis(10)).await;
 				}
 
 				assert!(super::sampling(), "SIGUSR1 did not start sampling");

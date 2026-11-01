@@ -8,7 +8,7 @@ use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_quic::{TransportError, TransportErrorCode};
 
 use crate::Error;
@@ -212,7 +212,7 @@ impl<T: Transport> Run<T> {
 					}
 					Step::Idle => return Poll::Pending,
 					Step::Drained => {
-						let deadline = self.timer.closing.unwrap_or_else(|| moq_clock::now() + CLOSE_TIMEOUT);
+						let deadline = self.timer.closing.unwrap_or_else(|| kio::clock::now() + CLOSE_TIMEOUT);
 						self.phase = Phase::Closing(deadline);
 					}
 					Step::Failed(err) => self.finish(Err(err)),
@@ -248,7 +248,7 @@ impl<T: Transport> Run<T> {
 				}
 			}
 		}
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let mut state = self.inner.lock();
 		// Register first: a handle mutating the connection after this re-polls us.
 		waiter.register(&mut state.driver);
@@ -402,7 +402,7 @@ fn finish(inner: &Inner, result: Result<(), Error>) {
 /// The driver's timers.
 #[derive(Default)]
 struct Timer {
-	sleep: Option<moq_clock::Sleep>,
+	sleep: Option<kio::clock::Sleep>,
 	/// When a closing session gives up on delivering its close frame.
 	closing: Option<Instant>,
 	/// Writes are stalled on the transport.
@@ -415,7 +415,7 @@ impl Timer {
 		let Some(deadline) = deadline else {
 			return false;
 		};
-		if moq_clock::now() >= deadline {
+		if kio::clock::now() >= deadline {
 			return true;
 		}
 		let sleep = match &mut self.sleep {
@@ -425,7 +425,7 @@ impl Timer {
 				}
 				sleep
 			}
-			None => self.sleep.insert(moq_clock::sleep_until(deadline)),
+			None => self.sleep.insert(kio::clock::sleep_until(deadline)),
 		};
 		waiter.poll_future(Pin::new(sleep)).is_ready()
 	}

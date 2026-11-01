@@ -137,7 +137,7 @@ export function hasTracks(version: Version): boolean {
 	}
 }
 
-/** Whether either endpoint may open a Padding Stream (0x2). Added in lite-07. */
+/** Whether datagrams have a type and either endpoint may send padding streams or datagrams. */
 export function hasPadding(version: Version): boolean {
 	switch (version) {
 		case Version.DRAFT_01:

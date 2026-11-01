@@ -212,7 +212,7 @@ impl Session {
 	/// Start a session over the transport without waiting for the handshake, for callers
 	/// that resolved the protocol out of band (the WebSocket subprotocol, say).
 	pub(crate) fn new<T: Transport>(mut transport: T, side: Side, config: Config) -> Result<(Self, Driver<T>), Error> {
-		let conn = mux::Connection::new(config.to_mux()?, side, moq_clock::now());
+		let conn = mux::Connection::new(config.to_mux()?, side, kio::clock::now());
 		transport.bind(&config);
 		let inner = Arc::new(Inner {
 			state: Mutex::new(State {

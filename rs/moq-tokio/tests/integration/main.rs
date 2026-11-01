@@ -8,6 +8,7 @@ mod broadcast;
 mod close_code;
 mod keylog;
 mod max_age;
+mod migrate;
 mod receive_credit;
 mod reconnect;
 mod reset_secret;

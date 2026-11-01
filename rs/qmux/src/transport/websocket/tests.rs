@@ -75,7 +75,7 @@ const KEEP_ALIVE: KeepAlive = KeepAlive {
 #[tokio::test(start_paused = true)]
 async fn times_out_a_silent_peer() {
 	let (_peer, mut transport) = transport(Some(KEEP_ALIVE), 16382);
-	let result = moq_clock::timeout(Duration::from_secs(1), recv(&mut transport))
+	let result = kio::clock::timeout(Duration::from_secs(1), recv(&mut transport))
 		.await
 		.expect("the keep-alive deadline should fire on a silent peer");
 	assert!(matches!(result, Err(Error::Closed)), "got {result:?}");
@@ -86,9 +86,9 @@ async fn times_out_a_silent_peer() {
 async fn any_message_keeps_the_peer_alive() {
 	let (peer, mut transport) = transport(Some(KEEP_ALIVE), 16382);
 	for _ in 0..4 {
-		moq_clock::sleep(Duration::from_millis(40)).await;
+		kio::clock::sleep(Duration::from_millis(40)).await;
 		peer.unbounded_send(Ok(Message::Pong(Bytes::new()))).unwrap();
-		let pending = moq_clock::timeout(Duration::from_millis(1), recv(&mut transport)).await;
+		let pending = kio::clock::timeout(Duration::from_millis(1), recv(&mut transport)).await;
 		assert!(pending.is_err(), "a live peer timed out");
 	}
 }
@@ -107,10 +107,10 @@ async fn pings_each_interval() {
 	};
 	assert!(try_recv(&mut transport).is_pending());
 	assert_eq!(pings(&transport), 0, "pinged on connect");
-	moq_clock::sleep(Duration::from_millis(25)).await;
+	kio::clock::sleep(Duration::from_millis(25)).await;
 	assert!(try_recv(&mut transport).is_pending());
 	assert_eq!(pings(&transport), 1, "one Ping per missed tick, not a burst");
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 	assert!(try_recv(&mut transport).is_pending());
 	assert_eq!(pings(&transport), 2);
 }
@@ -119,7 +119,7 @@ async fn pings_each_interval() {
 #[tokio::test(start_paused = true)]
 async fn no_keep_alive_never_times_out() {
 	let (_peer, mut transport) = transport(None, 16382);
-	let pending = moq_clock::timeout(Duration::from_secs(60), recv(&mut transport)).await;
+	let pending = kio::clock::timeout(Duration::from_secs(60), recv(&mut transport)).await;
 	assert!(pending.is_err(), "recv must not resolve without activity");
 }
 

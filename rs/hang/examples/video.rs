@@ -103,7 +103,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	};
 	producer.write(frame)?;
 
-	moq_clock::sleep(tokio::time::Duration::from_secs(1)).await;
+	kio::clock::sleep(tokio::time::Duration::from_secs(1)).await;
 
 	let frame = moq_mux::container::Frame {
 		timestamp: moq_net::Timestamp::from_secs(2).unwrap(),
@@ -113,7 +113,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	};
 	producer.write(frame)?;
 
-	moq_clock::sleep(tokio::time::Duration::from_secs(1)).await;
+	kio::clock::sleep(tokio::time::Duration::from_secs(1)).await;
 
 	// Marking this frame as a keyframe closes the current group and starts a new one.
 	let frame = moq_mux::container::Frame {
@@ -125,7 +125,7 @@ async fn run_broadcast(origin: moq_net::origin::Producer) -> anyhow::Result<()> 
 	producer.write(frame)?;
 
 	// Sleep before exiting and closing the broadcast.
-	moq_clock::sleep(tokio::time::Duration::from_secs(10)).await;
+	kio::clock::sleep(tokio::time::Duration::from_secs(10)).await;
 
 	Ok(())
 }

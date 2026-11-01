@@ -922,7 +922,9 @@ impl Listener {
 			if !server.versions.alpns().contains(&peer.protocol()) {
 				return Err(WebRtcError::Protocol(peer.protocol().to_string()).into());
 			}
-			let deadline = server.timeout.and_then(|timeout| moq_clock::now().checked_add(timeout));
+			let deadline = server
+				.timeout
+				.and_then(|timeout| kio::clock::now().checked_add(timeout));
 
 			let handshake = async {
 				let opened = peer.channel().await?;
@@ -1045,8 +1047,8 @@ struct Setup {
 impl Setup {
 	/// When a connection accepted now must finish its handshake, or `None` to wait
 	/// forever, including past the clock's range.
-	fn deadline(&self) -> Option<moq_clock::Instant> {
-		moq_clock::now().checked_add(self.timeout?)
+	fn deadline(&self) -> Option<kio::clock::Instant> {
+		kio::clock::now().checked_add(self.timeout?)
 	}
 }
 
@@ -1064,7 +1066,7 @@ impl Setup {
 async fn accept_request<S>(
 	server: &moq_net::Server,
 	session: S,
-	deadline: Option<moq_clock::Instant>,
+	deadline: Option<kio::clock::Instant>,
 ) -> crate::Result<(moq_net::server::Handshake, Option<Deadline>)>
 where
 	S: moq_net::transport::poll::Boxable + Send + Sync,
@@ -1081,7 +1083,7 @@ where
 pub(crate) async fn accept_websocket(
 	session: qmux::Session,
 	options: crate::websocket::Options,
-	deadline: Option<moq_clock::Instant>,
+	deadline: Option<kio::clock::Instant>,
 ) -> crate::Result<Request> {
 	let (request, deadline) = accept_request(&options.server, session, deadline).await?;
 	let authority = options.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
@@ -1102,7 +1104,7 @@ pub(crate) async fn accept_websocket(
 /// When an accepted connection's handshake must be done, and how to tell the peer
 /// it wasn't.
 struct Deadline {
-	at: moq_clock::Instant,
+	at: kio::clock::Instant,
 	/// Closes the session with the timeout code.
 	close: Box<dyn Fn() + Send + Sync>,
 }
@@ -1116,7 +1118,7 @@ impl Deadline {
 		all(feature = "uds", unix),
 		feature = "webrtc"
 	))]
-	fn new<S>(at: moq_clock::Instant, session: S) -> Self
+	fn new<S>(at: kio::clock::Instant, session: S) -> Self
 	where
 		S: moq_net::transport::poll::Session + Send + Sync,
 	{
@@ -1140,7 +1142,7 @@ impl Deadline {
 		let Some(deadline) = deadline else {
 			return handshake.await;
 		};
-		match moq_clock::timeout_at(deadline.at, handshake).await {
+		match kio::clock::timeout_at(deadline.at, handshake).await {
 			Ok(res) => res,
 			Err(_) => {
 				(deadline.close)();
@@ -1163,7 +1165,7 @@ impl Deadline {
 	feature = "webrtc"
 ))]
 async fn within<T, E>(
-	deadline: Option<moq_clock::Instant>,
+	deadline: Option<kio::clock::Instant>,
 	handshake: impl Future<Output = Result<T, E>>,
 ) -> crate::Result<T>
 where
@@ -1172,7 +1174,7 @@ where
 	let Some(deadline) = deadline else {
 		return Ok(handshake.await?);
 	};
-	match moq_clock::timeout_at(deadline, handshake).await {
+	match kio::clock::timeout_at(deadline, handshake).await {
 		Ok(res) => Ok(res?),
 		Err(_) => Err(moq_net::Error::Timeout.into()),
 	}
@@ -1564,7 +1566,7 @@ struct Incoming {
 	link: Link,
 	authority: Option<String>,
 	identity: Option<crate::tls::PeerIdentity>,
-	deadline: Option<moq_clock::Instant>,
+	deadline: Option<kio::clock::Instant>,
 	active: moq_net::server::Active,
 }
 
@@ -2160,7 +2162,7 @@ mod tests {
 		tokio::time::pause();
 		task.abort();
 		let _ = task.await;
-		let closed = moq_clock::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+		let closed = kio::clock::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
 		assert!(matches!(closed, Ok(None)), "stalled handshake outlived its accept loop");
 	}
 
@@ -2190,7 +2192,7 @@ mod tests {
 		tokio::time::pause();
 		task.abort();
 		let _ = task.await;
-		let closed = moq_clock::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
+		let closed = kio::clock::timeout(std::time::Duration::from_secs(1), rx.recv()).await;
 		assert!(matches!(closed, Ok(None)), "stalled handshake outlived its accept loop");
 	}
 
@@ -2492,7 +2494,7 @@ mod tests {
 			server: moq_net::Server::new(),
 			timeout: Some(timeout),
 		};
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let Err(err) = accept_request(
 			&setup.server,
 			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
@@ -2529,7 +2531,7 @@ mod tests {
 					.await;
 			}
 		});
-		moq_clock::sleep(std::time::Duration::from_secs(1)).await;
+		kio::clock::sleep(std::time::Duration::from_secs(1)).await;
 		client.abort();
 		let bytes = std::mem::take(&mut *recorder.written.lock().unwrap());
 		assert!(!bytes.is_empty(), "the client never wrote its SETUP");
@@ -2542,7 +2544,7 @@ mod tests {
 			server: moq_net::Server::new(),
 			timeout: Some(timeout),
 		};
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let Ok((request, deadline)) = accept_request(
 			&setup.server,
 			crate::transport::Session::new(peer.clone(), moq_net::transport::Address::Uri),
@@ -2618,7 +2620,7 @@ mod tests {
 		tokio::spawn(moq_net::time::run(driver));
 		let _client = connect.await.unwrap();
 
-		moq_clock::sleep(timeout * 2).await;
+		kio::clock::sleep(timeout * 2).await;
 		assert!(
 			client.closed().now_or_never().is_none(),
 			"a completed handshake was closed at its deadline"
@@ -2656,7 +2658,7 @@ mod tests {
 			moq_net::time::run(driver).await
 		});
 
-		let request = moq_clock::timeout(std::time::Duration::from_secs(5), listener.accept())
+		let request = kio::clock::timeout(std::time::Duration::from_secs(5), listener.accept())
 			.await
 			.expect("a stalled upgrade blocked the accept loop");
 		assert!(request.is_some());
@@ -2791,14 +2793,14 @@ mod tests {
 		// `serve` binds the socket; wait for it. Keep the last error, since a bind
 		// failure is the only clue to why it never showed up.
 		const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(100);
-		let deadline = moq_clock::now() + std::time::Duration::from_secs(5);
+		let deadline = kio::clock::now() + std::time::Duration::from_secs(5);
 		let mut delay = std::time::Duration::from_millis(1);
 		while let Err(err) = tokio::net::UnixStream::connect(&path).await {
-			assert!(moq_clock::now() < deadline, "unix listener never bound: {err}");
+			assert!(kio::clock::now() < deadline, "unix listener never bound: {err}");
 			// Bound to its own statement so the (non-Send) rng doesn't live across the
 			// await, which would make this future unspawnable.
 			let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
-			moq_clock::sleep(wait).await;
+			kio::clock::sleep(wait).await;
 			delay = (delay * 2).min(MAX_DELAY);
 		}
 
@@ -2812,14 +2814,14 @@ mod tests {
 			.init(Default::default())
 			.expect("client init")
 			.with_subscriber(subscriber);
-		let session = moq_clock::timeout(TIMEOUT, client.connect(url).established())
+		let session = kio::clock::timeout(TIMEOUT, client.connect(url).established())
 			.await
 			.expect("connect timeout")
 			.expect("connect");
 
 		// Without the server's publisher the session announces nothing, so this is
 		// where the regression shows up.
-		let (update, active) = moq_clock::timeout(TIMEOUT, next_update(&mut announced))
+		let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 			.await
 			.expect("announce timeout")
 			.expect("origin closed");
@@ -2833,12 +2835,12 @@ mod tests {
 			.subscribe(None)
 			.await
 			.expect("subscribe");
-		let mut group = moq_clock::timeout(TIMEOUT, track.recv_group())
+		let mut group = kio::clock::timeout(TIMEOUT, track.recv_group())
 			.await
 			.expect("recv group timeout")
 			.expect("recv group")
 			.expect("track closed early");
-		let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.expect("read frame timeout")
 			.expect("read frame")
@@ -3069,8 +3071,9 @@ mod tests {
 	#[cfg(all(feature = "uds", unix))]
 	#[tokio::test]
 	async fn certificates_are_empty_without_a_tls_backend() {
+		let dir = tempfile::tempdir().unwrap();
 		let mut config = crate::listen::Config::default();
-		config.unix.bind = Some(PathBuf::from("/tmp/moq-tokio-certificates-test.sock"));
+		config.unix.bind = Some(dir.path().join("certificates.sock"));
 
 		let server = config.init(Default::default()).expect("server init");
 		assert!(server.certificates().fingerprints().is_empty());
