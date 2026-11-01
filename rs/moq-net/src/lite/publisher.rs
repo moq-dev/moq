@@ -4573,18 +4573,41 @@ impl CoverageBench {
 	/// wake each. A range is left open, so the start never resolves and nothing is covered.
 	pub fn new(ranges: u64, skipped: u64) -> Self {
 		assert!(skipped < ranges, "a range must stay open");
+		// Every other group, so no two ranges merge into one run.
+		let wire = (0..ranges).map(|range| 2 * range..2 * range + 1);
+		let drops = (0..skipped)
+			.map(|range| (2 * range..2 * range + 1, StreamError::NotFound))
+			.collect();
+		Self::build(wire, drops)
+	}
+
+	/// Subscribe to one range of `skipped + 1` groups, then give up all but the last, one
+	/// wake each. Alternating errors keep each group its own entry in the skipped record.
+	pub fn adjacent(skipped: u64) -> Self {
+		let drops = (0..skipped)
+			.map(|group| {
+				let err = match group % 2 {
+					0 => StreamError::NotFound,
+					_ => StreamError::Cancel,
+				};
+				(group..group + 1, err)
+			})
+			.collect();
+		Self::build(std::iter::once(0..skipped + 1), drops)
+	}
+
+	fn build(wire: impl Iterator<Item = Range<u64>>, drops: Vec<(Range<u64>, StreamError)>) -> Self {
 		let version = Version::Lite07;
 		let (local, peer) = crate::transport::memory::pair(Default::default());
 		let session = Transport::new(local);
 		let Poll::Ready(Ok(stream)) = session.poll_open_uni(&kio::Waiter::noop(), SendOptions::default()) else {
 			panic!("a memory stream opens at once");
 		};
-		// Every other group, so no two ranges merge into one run.
 		let group = |group| Some(lite::Anchor::Absolute(track::Position::group(group)));
-		let wire: Vec<_> = (0..ranges)
+		let wire: Vec<_> = wire
 			.map(|range| lite::Range {
-				start: group(2 * range),
-				end: group(2 * range + 1),
+				start: group(range.start),
+				end: group(range.end),
 			})
 			.collect();
 		let bounds = Bounds::new(&wire, None).unwrap();
@@ -4616,12 +4639,13 @@ impl CoverageBench {
 			track,
 			_peer: peer,
 		};
-		for range in 0..skipped {
-			this.track.drop_groups(2 * range..2 * range + 1, StreamError::NotFound);
+		let skipped = drops.len();
+		for (groups, err) in drops {
+			this.track.drop_groups(groups, err);
 			while this.step().is_ready() {}
 		}
 		assert!(this.run.start.is_none(), "no group resolves a start");
-		assert_eq!(this.run.skipped.iter().count() as u64, skipped);
+		assert_eq!(this.run.skipped.iter().count(), skipped, "each drop is its own entry");
 		this
 	}
 
@@ -7019,17 +7043,20 @@ mod serve_group_test {
 	/// start resolved, and not while one range is still open.
 	#[moq_clock::test]
 	async fn giving_up_every_range_before_the_start_ends_it() {
-		let mut bench = CoverageBench::new(3, 2);
-		bench.wake();
-		bench.track.drop_groups(4..5, StreamError::NotFound);
-		loop {
-			match bench.run.poll_step(&mut bench.writer, &kio::Waiter::noop()) {
-				Poll::Ready(Ok(ControlFlow::Continue(()))) => continue,
-				Poll::Ready(Ok(ControlFlow::Break(()))) => break,
-				other => panic!("the subscription should end, got {other:?}"),
+		// Disjoint ranges, then one range given up a group at a time with alternating errors.
+		for (mut bench, last) in [(CoverageBench::new(3, 2), 4), (CoverageBench::adjacent(4), 4)] {
+			bench.wake();
+			bench.wake();
+			bench.track.drop_groups(last..last + 1, StreamError::NotFound);
+			loop {
+				match bench.run.poll_step(&mut bench.writer, &kio::Waiter::noop()) {
+					Poll::Ready(Ok(ControlFlow::Continue(()))) => continue,
+					Poll::Ready(Ok(ControlFlow::Break(()))) => break,
+					other => panic!("the subscription should end, got {other:?}"),
+				}
 			}
+			assert!(bench.run.start.is_none());
 		}
-		assert!(bench.run.start.is_none());
 	}
 
 	/// A SUBSCRIBE_UPDATE that lowers the start below SUBSCRIBE_START asks for those groups

@@ -4,7 +4,8 @@
 //! whose source gave up `skipped` of them and has yet to resolve a start, then wakes it with
 //! nothing new to serve. Each wake ends in the check of whether every range was given up.
 //! The range count stays fixed, so a cost that grows with the ranges already given up shows
-//! up as a slope over `skipped`.
+//! up as a slope over `skipped`. `adjacent` gives up the groups of one range instead, each
+//! with a different error from its neighbor, so the record holds one entry per group.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench publisher`.
 
@@ -23,6 +24,11 @@ fn bench_covered_before_start(c: &mut Criterion) {
 	for skipped in SKIPPED {
 		group.bench_function(BenchmarkId::new("wake", skipped), |b| {
 			let mut run = CoverageBench::new(RANGES, skipped);
+			b.iter(|| run.wake());
+		});
+		// The same record within one range, each group its own entry.
+		group.bench_function(BenchmarkId::new("adjacent", skipped), |b| {
+			let mut run = CoverageBench::adjacent(skipped);
 			b.iter(|| run.wake());
 		});
 	}
