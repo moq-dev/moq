@@ -39,7 +39,7 @@ spike assumed no consumer; teleoperation uplinks are one):
   in `moq-congestion`. The moq-shaper presets `cellular-step`,
   `cellular-bursty` and `cellular-deep` decide it. The report states the
   shaper's timing jitter, measured over `near-zero`, as the noise floor of the
-  delay signal. The BBR3 delay bound (`Bbr3Config::delay_bound`) landed
+  delay signal. The BBR3 delay bound (`bbr3::Config::delay_bound`) landed
   first, with the harness the others join: moq-quic's `tests::realtime`
   replays the three presets on the sim, and each candidate adds a
   `Candidate` there (`just rs quic-sim` prints the table).
@@ -106,7 +106,7 @@ Remaining work once the candidates finish (this README's own job):
 - Delete the losing candidates' code.
 - Decide who asks for receive timestamps. The spike added
   `transport::Config::receive_timestamps`, off by default, and the maintainer
-  kept it on 2026-10-30. The winner decides whether its `ControllerFactory`
+  kept it on 2026-10-30. The winner decides whether its `Factory`
   turns them on instead, so only `Realtime` sessions pay the ACK bytes.
 - Wire the winner's moq-shaper run into the nightly so a regression in
   queuing delay shows up.

@@ -17,7 +17,7 @@ use std::ops::Range;
 use rand::RngExt;
 
 use super::*;
-use crate::congestion::Bbr3Config;
+use crate::congestion::bbr3;
 
 /// Packets reaching the bottleneck before this are Startup's, and count for no phase
 const WARMUP: Duration = Duration::from_secs(2);
@@ -120,7 +120,7 @@ const BBR3: Candidate = Candidate {
 const DELAY_BOUND: Candidate = Candidate {
 	name: "BBR3 delay bound",
 	transport: || {
-		let mut bbr = Bbr3Config::default();
+		let mut bbr = bbr3::Config::default();
 		bbr.delay_bound(true).probe_rng_seed(entropy::rng().random());
 		transport::Config {
 			congestion: Arc::new(bbr),
