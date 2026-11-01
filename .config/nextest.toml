@@ -49,6 +49,12 @@ slow-timeout = { period = "60s" }
 filter = "package(moq-tokio) & test(=receive_credit::benchmark_receive_windows)"
 slow-timeout = { period = "60s", terminate-after = 5 }
 
+# The datagram benchmark publishes in real time and drains the bottleneck's backlog,
+# per version and offered load.
+[[profile.default.overrides]]
+filter = "package(moq-tokio) & test(=datagram_delivery::benchmark_datagram_delivery)"
+slow-timeout = { period = "60s", terminate-after = 3 }
+
 [test-groups]
 io-uring = { max-threads = 4 }
 v4l2 = { max-threads = 1 }

@@ -153,7 +153,7 @@ async fn setup_through(
 }
 
 /// The shaper's seed: `MOQ_SHAPER_SEED` to replay a run, or a fresh one, printed.
-fn rand_seed() -> u64 {
+pub(crate) fn rand_seed() -> u64 {
 	let seed = match std::env::var("MOQ_SHAPER_SEED") {
 		Ok(seed) => seed.parse().expect("MOQ_SHAPER_SEED is not a u64"),
 		Err(_) => kio::clock::wall()

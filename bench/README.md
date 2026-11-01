@@ -54,6 +54,34 @@ SUBSCRIBE use uni data streams. No sleep supplies backpressure. Every case
 checks complete payload delivery. Compare paired runs with identical settings
 and disclose host load; CPU timing still depends on hardware contention.
 
+Measure datagram delivery the same way, over publishers and viewers, payload
+size, and cadence (datagrams per track between reads):
+
+```bash
+nix develop --command cargo bench --locked -p moq-net --features fuzz --bench session -- session_delivery_datagram
+nix develop --command env SESSION_ALLOCS=1 cargo bench --locked -p moq-net --features fuzz --bench session -- session_delivery
+```
+
+Throughput counts delivered datagrams. Every one must arrive with its sequence
+and payload; the memory transport loses none at these cadences, so a drop fails
+instead of looking cheaper. `SESSION_ALLOCS=1` prints allocations, allocated
+bytes and, where Linux perf counters are readable, user instructions per
+delivered datagram or viewer-group. Every task runs on the bench's one thread,
+whose counts repeat within a fraction of a percent. The relay target runs the same shapes as
+`relay_session_delivery_datagram`.
+
+Real QUIC adds congestion control and the sender's datagram queue. This sends
+datagrams below and above a bufferbloated bottleneck to a loopback viewer and a
+throttled one:
+
+```bash
+nix develop --command just rs test -p moq-tokio --release -E 'test(benchmark_datagram_delivery)' --run-ignored only --success-output immediate
+```
+
+It reports offered, received and lost datagrams, bottleneck queue drops, reordered
+arrivals and append-to-receive latency per viewer, and fails if the loopback
+viewer loses any. It runs nightly.
+
 Measure 50 fps audio at per-packet, 100 and 200 ms grouping, plus 400 fps
 (2.5 ms packets) at per-packet and the 20 ms default. Frames are 200 bytes:
 
