@@ -48,8 +48,10 @@ by flights, so this waits on Flights and stays in m1.
   it no longer follows from a model limit.
 - Rust readers get a chunked payload read, so a frame larger than memory
   never has to be collected whole. [moq-dev/moq#6628](https://github.com/moq-dev/moq/pull/6628)
-  kept its segments internal; the JS half is in
-  [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md).
+  kept its segments internal. JS already has its chunked read
+  (`nextFrame` and `readChunk`, from
+  [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411)); its wire
+  half is in [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md).
 - Test a frame several times the 32 MB tail through a relay chain: a late
   joiner reads it whole through a flight, and memory stays near 32 MB per
   copy.

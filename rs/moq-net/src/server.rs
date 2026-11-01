@@ -406,18 +406,19 @@ impl Server {
 		version: ietf::Version,
 	) -> Result<Handshake, Error> {
 		let peer_setup = ietf::accept_setup(&mut session, version).await?;
+		let options = &peer_setup.options;
 		Ok(Handshake {
-			path: peer_setup.path.clone(),
+			path: options.path.clone(),
 			role: None,
 			// A moq-transport peer only has an identity if it negotiated the MoQ
 			// Cluster extension and declared a non-zero Hop ID.
-			origin: peer_setup.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
-			token: peer_setup.token.clone(),
-			peer_implementation: peer_setup.implementation.clone(),
+			origin: options.declared.cluster.hop.filter(|h| *h != crate::Hop::UNKNOWN),
+			token: options.token.clone(),
+			peer_implementation: options.implementation.clone(),
 			assigned_hop: crate::Hop::random(),
 			// The client's SETUP already settled whether it offered MoQ Auth, so it is
 			// negotiated exactly when we offer it too.
-			auth: crate::auth::Link::ietf(peer_setup.declared.auth && self.extensions.auth),
+			auth: crate::auth::Link::ietf(options.declared.auth && self.extensions.auth),
 			inner: Some(RequestInner {
 				server: self.clone(),
 				runtime,
@@ -510,7 +511,7 @@ impl PausedIetf {
 		} = self;
 		server.stats.control(stats::Message::Session, peer_setup.size, true);
 		let (publish, subscribe) = server.stat_tagged_origins();
-		let peer_implementation = setup::PeerImplementation::known(peer_setup.implementation);
+		let peer_implementation = setup::PeerImplementation::known(peer_setup.options.implementation);
 
 		// The client's SETUP was read at the pause; hand the stream back
 		// for GOAWAY. A server never advertises a path, hence `None`.
@@ -531,7 +532,7 @@ impl PausedIetf {
 			authority: None,
 			token: None,
 			peer_setup_stream: Some(peer_setup.stream),
-			peer_declared: Some(peer_setup.declared),
+			peer_declared: Some(peer_setup.options.declared),
 			auth: auth.clone(),
 			early_unis: peer_setup.early,
 			extensions: server.extensions,
@@ -1521,10 +1522,12 @@ mod tests {
 							Version::Ietf(version),
 						),
 						size: 0,
-						path: None,
-						token: None,
-						implementation: None,
-						declared: ietf::peer::Peer::default(),
+						options: ietf::SetupOptions {
+							path: None,
+							token: None,
+							implementation: None,
+							declared: ietf::peer::Peer::default(),
+						},
 						early: Vec::new(),
 					},
 				}),
