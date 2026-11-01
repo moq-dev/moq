@@ -8600,12 +8600,7 @@ mod serve_tests {
 			let task = h
 				.publisher
 				.clone()
-				.handle_stream(
-					ietf::TrackStatus::ID,
-					ietf::Body(bytes::Bytes::from(body)),
-					stream,
-					false,
-				)
+				.handle_stream(ietf::TrackStatus::ID, ietf::Body(bytes::Bytes::from(body)), stream)
 				.unwrap();
 			kio::clock::timeout(std::time::Duration::from_secs(1), task)
 				.await
