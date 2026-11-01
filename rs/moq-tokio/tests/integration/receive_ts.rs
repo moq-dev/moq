@@ -86,13 +86,9 @@ impl Controller for Recorder {
 	fn clone_box(&self) -> Box<dyn Controller> {
 		Box::new(self.clone())
 	}
-
-	fn into_any(self: Box<Self>) -> Box<dyn std::any::Any> {
-		self
-	}
 }
 
-impl congestion::ControllerFactory for Recorder {
+impl congestion::Factory for Recorder {
 	fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
 		Box::new((*self).clone())
 	}

@@ -29,8 +29,9 @@ Decided 2026-10-28 (maintainer):
   rendition.
 - **The publisher keeps its probe result across a disable**, and the
   element's `muted` and `invisible` leave capture open.
-- **Encoding no longer waits for demand**
-  ([always-on encoding](/quest/m1/eager-encode/README.md)). A listener who
+- **Encoding no longer waits for demand**, in every first-party publisher
+  (finished by [moq-dev/moq#7554](https://github.com/moq-dev/moq/pull/7554)).
+  A listener who
   subscribes after the unmute still gets the start within its `maxDelay`. This
   replaces a publisher head buffer, which was considered and dropped as the
   same idea special-cased.
@@ -60,7 +61,3 @@ encoder, and record why.
 ## Closes
 
 - [#7101](https://github.com/moq-dev/moq/issues/7101) - a disabled audio rendition is deselected, so the start of the next utterance is lost
-
-## Related
-
-- [Always-on encoding](/quest/m1/eager-encode/README.md) - encoders run while enabled, so a late subscriber can fetch the start
