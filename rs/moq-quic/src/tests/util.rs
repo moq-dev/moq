@@ -760,8 +760,13 @@ impl ::std::ops::DerefMut for TestEndpoint {
 }
 
 pub(super) fn subscribe() -> tracing::subscriber::DefaultGuard {
+	subscribe_at(tracing::Level::TRACE)
+}
+
+/// [`subscribe`] at `level`, for a test whose trace would be too long to read
+pub(super) fn subscribe_at(level: tracing::Level) -> tracing::subscriber::DefaultGuard {
 	let builder = tracing_subscriber::FmtSubscriber::builder()
-		.with_max_level(tracing::Level::TRACE)
+		.with_max_level(level)
 		.with_writer(|| TestWriter);
 	tracing::subscriber::set_default(builder.finish())
 }

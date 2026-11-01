@@ -48,6 +48,18 @@ pub trait Controller: Send + Sync {
     )]
     fn on_app_limited(&mut self, in_flight: u64) {}
 
+    /// A transmit poll drained the source, then filled the rest with bandwidth-probe duplicates
+    /// or was held back by [`ControllerMetrics::probe_inflight`] or the probe's own pace.
+    ///
+    /// Reports the poll [`Controller::on_app_limited`] would have reported without the probe,
+    /// with `in_flight` bytes outstanding. A controller that probes decides which of its
+    /// decisions the duplicates may inform.
+    #[allow(
+        unused_variables,
+        reason = "a no-op default that keeps the parameter names for implementors"
+    )]
+    fn on_probe_filled(&mut self, in_flight: u64) {}
+
     /// An ACK newly acknowledged packets.
     fn on_ack(&mut self, ack: Ack<'_>);
 
