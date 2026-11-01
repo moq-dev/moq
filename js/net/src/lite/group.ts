@@ -1,9 +1,11 @@
 import { race } from "@moq/signals";
 import { FrameTooLarge } from "../error.ts";
-import * as netGroup from "../group.ts";
+import type * as netGroup from "../group.ts";
 import { hooks } from "../internal.ts";
+import { decodePayload, receiveFrame, type WirePayload } from "../payload.ts";
 import type { Cursor, Reader, Writer } from "../stream.ts";
 import * as Time from "../time.ts";
+import { MAX_FRAME_BYTES } from "../util/limits.ts";
 import * as Message from "./message.ts";
 import { hasFrameBounds, type Version } from "./version.ts";
 
@@ -71,8 +73,8 @@ function unzigzag(v: bigint): bigint {
 	return (v >> 1n) ^ -(v & 1n);
 }
 
-/** A decoded frame whose payload may still be a stored slice. */
-export interface WireFrame extends netGroup.Frame {
+/** A decoded frame, whose payload may still be a stored slice or follow on the stream. */
+export interface WireFrame extends WirePayload {
 	/** The declared plain size on a compressed track. */
 	inflated?: number;
 }
@@ -93,13 +95,13 @@ export function frameDecoder({ scale, compress = false }: FrameFormat): (c: Curs
 		const delta = timescale === undefined ? 0n : unzigzag(c.u62());
 		const inflated = compress ? c.u53() : undefined;
 		const size = c.u53();
-		if (size > netGroup.MAX_GROUP_CACHE_BYTES || (inflated ?? 0) > netGroup.MAX_GROUP_CACHE_BYTES)
-			throw new FrameTooLarge();
-		const payload = c.read(size);
+		// A compressed frame is stored whole; a plain one past a segment streams in after this.
+		if (compress && (size > MAX_FRAME_BYTES || (inflated ?? 0) > MAX_FRAME_BYTES)) throw new FrameTooLarge();
+		const payload = compress ? c.read(size) : decodePayload(c, size);
 		// Commit the delta only after the last read: an incomplete decode gets retried.
 		prevTs += delta;
 		const timestamp = timescale === undefined ? undefined : new Time.Timestamp(Number(prevTs), timescale);
-		return { payload, inflated, timestamp };
+		return { size, payload, inflated, timestamp };
 	};
 }
 
@@ -113,6 +115,7 @@ export async function readFrames(stream: Reader, producer: netGroup.Producer, fo
 		// that closes first has already closed (or aborted) this group through its cache.
 		const frame = stream.tryDecode(decode) ?? (await race([stream.decodeMaybe(decode), producer.closed]));
 		if (!frame || frame instanceof Error) return;
-		hooks.writeGroupFrame(producer, frame, frame.inflated);
+		if (frame.payload) hooks.writeGroupFrame(producer, frame as netGroup.Frame, frame.inflated);
+		else if (!(await receiveFrame(stream, producer, frame))) return;
 	}
 }
