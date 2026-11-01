@@ -1452,7 +1452,9 @@ impl IdleRoom {
 /// harness's `fanout` workload does, on multi-threaded runtimes timed in process CPU; see
 /// the module docs.
 pub(crate) fn fanout_threads<B: Backend>(c: &mut Criterion) {
-	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
+	// Process CPU is read through a Unix clock.
+	if !cfg!(unix) || std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some()
+	{
 		return;
 	}
 	let shape = Shape {
