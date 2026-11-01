@@ -32,7 +32,7 @@ import { Timescale } from "../time.ts";
 import type { Groups, Info, Position as TrackPosition, Subscriber as TrackSubscriber } from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
-import { Deadline, REQUEST_TIMEOUT_MS, requestOptions } from "../util/deadline.ts";
+import { Deadline, REQUEST_TIMEOUT_MS } from "../util/deadline.ts";
 import { untilGivenUp } from "../util/given_up.ts";
 import { TimeoutError, withTimeout } from "../util/timeout.ts";
 import * as Varint from "../varint.ts";
@@ -1024,23 +1024,29 @@ export class Publisher {
 			// PUBLISH_DONE is required for every supported draft. The peer may have already
 			// closed its side to unsubscribe, in which case there is nowhere to send it.
 			const updateFailed = publishError instanceof UpdateFailed;
+			// A malformed upstream, such as a moq-lite MALFORMED_TRACK reset, is passed on as one.
+			const malformed = publishError instanceof StreamError && publishError.code === StreamCode.MalformedTrack;
 			try {
 				const done = new PublishDone({
 					statusCode: unauthorized
 						? PublishDoneStatus.UNAUTHORIZED
 						: updateFailed
 							? PublishDoneStatus.UPDATE_FAILED
-							: publishError
-								? PublishDoneStatus.INTERNAL_ERROR
-								: PublishDoneStatus.TRACK_ENDED,
+							: malformed
+								? PublishDoneStatus.MALFORMED_TRACK
+								: publishError
+									? PublishDoneStatus.INTERNAL_ERROR
+									: PublishDoneStatus.TRACK_ENDED,
 					streamCount: BigInt(streams.opened),
 					reasonPhrase: unauthorized
 						? "not granted"
 						: updateFailed
 							? "update failed"
-							: publishError
-								? "internal error"
-								: "track ended",
+							: malformed
+								? "malformed track"
+								: publishError
+									? "internal error"
+									: "track ended",
 				});
 				await Message.write(request.writer, PublishDone.id, done, version);
 			} catch {
@@ -1881,13 +1887,12 @@ export class Publisher {
 			const deadline = new Deadline();
 			const answer = await deadline.wait(
 				(async (): Promise<Answer> => {
-					const stream = await deadline.open(this.#session.openBi(requestOptions));
-					const opened = new RequestStream(stream, this.#session, this.#quic);
+					const opened = await RequestStream.open(this.#session, deadline, this.#quic);
 					request = opened;
 					const version = this.#session.version;
 					const token = this.#auth?.carried(auth);
 					const msg = new PublishNamespace({ requestId, trackNamespace: path, params, token });
-					await deadline.send(stream, async () => {
+					await deadline.send(opened, async () => {
 						await Message.write(opened.writer, PublishNamespace.id, msg, version);
 					});
 
