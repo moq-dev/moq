@@ -195,6 +195,7 @@ per-frame CPU growth since #5926.
 - [fMP4 decode times keep increasing](/quest/m1/fmp4-bframe-decode-time.md) - fragments shorter than a GOP of B-frame video never step `tfdt` backwards
 - [A truncated MKV ends its tracks at finish](/quest/m1/mkv-truncated-finish.md) - `finish()` refusing truncated input still ends the tracks, so subscribers stop waiting
 - [Gate the no-em-dash rule](/quest/m1/em-dash-gate.md) - `just check` fails on an em dash in any tracked text file
+- [Every package shares one minor version](/quest/m1/shared-version.md) - a recipe sets every published package to one minor at the cut (next: 0.22.0), and `just check` enforces it and the `0.0.x` rule for experiments
 
 ## Related
 
