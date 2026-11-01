@@ -105,7 +105,7 @@ impl Grant {
 	}
 
 	/// The paths any of `grants` allows, lapsing at the earliest expiry, which is when
-	/// the union next shrinks. Reduced once, so it costs about the grants' total size.
+	/// the union next shrinks. Reduced once over all of them, not pairwise.
 	fn union<'a>(grants: impl IntoIterator<Item = &'a Self>) -> Self {
 		let mut publish = Vec::new();
 		let mut subscribe = Vec::new();
