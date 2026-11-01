@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Effect } from "@moq/signals";
 import * as Ietf from "../ietf/index.ts";
 import * as Lite from "../lite/index.ts";
@@ -116,18 +116,18 @@ test("Reload exposes its established session stats and probe only while connecte
 	try {
 		const server = await accept(pair.server, url);
 		while (!reload.established.peek()) {
-			await new Promise((resolve) => setTimeout(resolve, 0));
+			await yieldNow();
 		}
 		expect((await reload.established.peek()?.stats())?.bytesSent).toBe(99);
 		expect(reload.probe.peek()).toEqual({});
 
 		server.abort();
 		while (reload.established.peek()) {
-			await new Promise((resolve) => setTimeout(resolve, 0));
+			await yieldNow();
 		}
 		expect(reload.status.peek()).toBe("disconnected");
 		expect(await reload.established.peek()?.stats()).toBeUndefined();
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await yieldNow();
 		expect(reload.probe.peek()).toBeUndefined();
 	} finally {
 		reload.close();

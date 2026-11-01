@@ -190,11 +190,6 @@ fn collapse<E: Aggregate>(mut failures: Vec<Attempt<E>>) -> E {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 	use crate::connect::DEFAULT_RACE;
@@ -261,7 +256,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn second_wins_when_first_hangs() {
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let res: Result<&str, TestError> = race(
 			Candidates::fixed([addr("1.1.1.1:1"), addr("2.2.2.2:2")]),
 			DEFAULT_RACE,
@@ -280,7 +275,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn failure_starts_the_next_attempt_immediately() {
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let res: Result<&str, TestError> = race(
 			Candidates::fixed([addr("1.1.1.1:1"), addr("2.2.2.2:2")]),
 			DEFAULT_RACE,
@@ -309,7 +304,7 @@ mod tests {
 				if dest == addr("1.1.1.1:1") {
 					Err(TestError::Dial("network unreachable"))
 				} else {
-					tokio::time::sleep(Duration::from_secs(1)).await;
+					moq_clock::sleep(Duration::from_secs(1)).await;
 					Err(TestError::Dial("invalid peer certificate"))
 				}
 			},
@@ -335,7 +330,7 @@ mod tests {
 			Duration::from_millis(10),
 			|dest| async move {
 				if dest == addr("1.1.1.1:1") {
-					tokio::time::sleep(Duration::from_secs(30)).await;
+					moq_clock::sleep(Duration::from_secs(30)).await;
 					Err(TestError::Dial("timed out"))
 				} else {
 					Err(TestError::Dial("invalid peer certificate"))
@@ -392,7 +387,7 @@ mod tests {
 						std::future::pending().await
 					} else {
 						drop(guard);
-						tokio::time::sleep(Duration::from_millis(1)).await;
+						moq_clock::sleep(Duration::from_millis(1)).await;
 						Ok("second")
 					}
 				}
@@ -405,7 +400,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn zero_delay_dials_all_at_once() {
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let res: Result<&str, TestError> = race(
 			Candidates::fixed([addr("1.1.1.1:1"), addr("2.2.2.2:2")]),
 			Duration::ZERO,
@@ -438,7 +433,7 @@ mod tests {
 	/// parallel queries exist for.
 	#[tokio::test(start_paused = true)]
 	async fn dials_the_first_address_to_resolve() {
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let res: Result<&str, TestError> = race(
 			Candidates::slow(
 				(&[], Duration::from_secs(30)),
@@ -463,7 +458,7 @@ mod tests {
 	/// carrying the address that works, takes a second.
 	#[tokio::test(start_paused = true)]
 	async fn a_late_candidate_starts_as_soon_as_it_resolves() {
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let res: Result<&str, TestError> = race(
 			Candidates::slow(
 				(&[addr("[2001:db8::1]:1"), addr("1.1.1.1:1")], Duration::from_secs(1)),

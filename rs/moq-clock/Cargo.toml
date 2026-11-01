@@ -27,9 +27,9 @@ serde = ["dep:serde", "dep:serde_with"]
 # The deterministic single-threaded executor and `#[moq_clock::test]`. Meant for
 # dev-dependencies, so production builds never compile it.
 sim = ["dep:futures", "dep:moq-clock-macros", "kio/_sim"]
-runtime = ["dep:tokio", "dep:web-async"]
+runtime = ["dep:tokio"]
 # `Manual::install`: a clock that only a test moves, as one tokio runtime's ambient
-# clock. Native only. Meant for test builds, so production builds never compile it.
+# clock. Meant for test builds, so production builds never compile it.
 manual = ["runtime"]
 
 [dependencies]
@@ -38,30 +38,15 @@ kio = { workspace = true }
 moq-clock-macros = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_with = { workspace = true, optional = true }
-web-async = { workspace = true, optional = true }
-
-# The browser's only clocks, read with or without the runtime's timers.
-[target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dependencies]
-web-async = { workspace = true }
-
-# The runtime handle, to keep a paused runtime's clock on its own origin.
-[target.'cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))'.dependencies]
+# The host timers, and the runtime handle that keeps a paused runtime's clock on its own origin.
 tokio = { workspace = true, features = ["rt", "time"], optional = true }
 
 [dev-dependencies]
-# Enable the simulator so its tests run in the merge gate. Without default features,
-# so `--no-default-features` still tests the build without the runtime.
-moq-clock = { path = ".", default-features = false, features = ["sim", "serde"] }
-serde_json = { workspace = true }
-
-[target.'cfg(all(target_arch = "wasm32", not(target_os = "wasi")))'.dev-dependencies]
-# Match the wasm-bindgen CLI schema used by the browser runner.
-wasm-bindgen = "=0.2.129"
-wasm-bindgen-test = "=0.3.79"
-
-[target.'cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))'.dev-dependencies]
-# Test the installed manual clock, which needs tokio's runtime and so is native only.
+# Enable the simulator and the installed manual clock so their tests run in the merge
+# gate. Without default features, so `--no-default-features` still tests the build
+# without the runtime.
 moq-clock = { path = ".", default-features = false, features = ["manual", "sim", "serde"] }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "test-util", "time"] }
 
 [lints]

@@ -570,7 +570,6 @@ impl Producer {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	async fn decoded_frame(consumer: &mut crate::decode::Consumer) -> Result<Option<Frame>, Error> {
 		loop {
@@ -619,7 +618,7 @@ mod tests {
 			while demand.wanted_changed().await?.is_none() {}
 			moq_net::Result::Ok(())
 		};
-		tokio::time::timeout(Duration::from_secs(1), wanted)
+		moq_clock::timeout(Duration::from_secs(1), wanted)
 			.await
 			.expect("subscription demand")
 			.unwrap();
@@ -631,7 +630,7 @@ mod tests {
 			while demand.wanted_changed().await?.is_some() {}
 			moq_net::Result::Ok(())
 		};
-		tokio::time::timeout(Duration::from_secs(1), unwanted)
+		moq_clock::timeout(Duration::from_secs(1), unwanted)
 			.await
 			.expect("subscription released")
 			.unwrap();
@@ -639,7 +638,7 @@ mod tests {
 
 		producer.finish().unwrap();
 		drop(producer);
-		let closed = tokio::time::timeout(Duration::from_secs(1), demand.closed())
+		let closed = moq_clock::timeout(Duration::from_secs(1), demand.closed())
 			.await
 			.expect("producer closed");
 		assert!(closed.is_ok(), "{closed:?}");
