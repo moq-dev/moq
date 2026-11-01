@@ -22,8 +22,8 @@ use super::delivered::Delivered;
 use super::skipped::Skipped;
 use crate::ledger::{self, Ledger};
 
-pub use super::subscription::{Anchor, Order, Position, Range, Subscription};
 use super::subscription::{Accounted, Containing, Held, Holdings, Resolved, Window, later};
+pub use super::subscription::{Anchor, Order, Position, Range, Subscription};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 mod demand;
