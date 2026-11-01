@@ -2,8 +2,9 @@
 
 //! A range anchored relative to the latest group or at a presentation time resolves where
 //! the track is held, and on a copy received over a wire that tells it enough to resolve
-//! the anchor the same way. A copy received over any other wire refuses the anchor instead
-//! of resolving it against the part of the track it happens to hold.
+//! the anchor the same way. A moq-transport copy resolves a relative anchor from the
+//! Largest Object its live join reports. A copy received over any other wire refuses the
+//! anchor instead of resolving it against the part of the track it happens to hold.
 
 use crate::support;
 
@@ -128,8 +129,15 @@ async fn each_wire_refuses_only_the_anchors_it_drops() {
 			Some("moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-lite-06")
 		);
 		for (range, held) in anchored() {
-			let result = read(version, range).await;
+			let mut result = read(version, range).await;
 			let time = matches!(range.start, Anchor::Time(_)) || matches!(range.end, Some(Anchor::Time(_)));
+			// A moq-transport copy joins live and resolves a relative anchor from the Largest
+			// Object, so the groups below it arrive as fills, after the live one.
+			let transport = matches!(version, Some(version) if version.starts_with("moq-transport"));
+			let carried = carried || (transport && !time);
+			if transport && let Ok(read) = &mut result {
+				read.sort_unstable();
+			}
 			match (&result, time && !timed, carried) {
 				(Err(Error::TimestampMismatch), true, _) => {}
 				(Err(Error::Unsupported), false, false) => {}

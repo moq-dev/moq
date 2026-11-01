@@ -25,8 +25,9 @@ Decided 2026-10-28 (maintainer): keep crossbeam-epoch rather than replace it.
 refcounted segments and per-read refcounts, it supports loom, and moka pulls
 it into moq-relay anyway.
 
-Verify on ARM: the Nightly `Tests (rs loom)` job runs on `ubuntu-24.04-arm`.
-Without an ARM host, force crossbeam's non-x86 branch in a scratch copy, as
-#7134 did, and confirm the model passes without the fence.
+Verify on ARM: run `just rs loom` on an ARM host; Nightly no longer runs it
+(decided 2026-10-31, see the [CI epic](/quest/m0/ci/README.md)). Without an
+ARM host, force crossbeam's non-x86 branch in a scratch copy, as #7134 did,
+and confirm the model passes without the fence.
 
 Public API: none. Wire: none.

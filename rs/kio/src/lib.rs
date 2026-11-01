@@ -20,6 +20,9 @@
 //!
 //! [`coop`] bounds the passes a loop makes per poll, so one that always finds
 //! work ready still yields.
+//!
+//! With the `macros` feature, `#[kio::machine]` writes a `poll_*` state machine from
+//! straight-line code with explicit waits.
 
 #![warn(missing_docs)]
 
@@ -42,7 +45,6 @@ mod consumer;
 mod pending;
 mod producer;
 mod queue;
-mod send;
 mod shared;
 mod task;
 mod weak;
@@ -52,15 +54,17 @@ mod loom;
 #[cfg(all(test, not(loom)))]
 mod tests;
 
+#[cfg(feature = "macros")]
+pub use kio_macros::machine;
+
 pub use bridge::Bridge;
 pub use consumer::Consumer;
 pub use lock::{Lock, LockGuard};
 pub use pending::Pending;
-pub use producer::{Mut, Producer, Ref, Unused};
+pub use producer::{Mut, Producer, Ref, Unwanted};
 pub use queue::{PushError, Queue};
-pub use send::MaybeSend;
 pub use shared::Shared;
-pub use task::{Task, Tasks};
+pub use task::{Task, TaskKey, Tasks};
 pub use waiter::{Park, Waiter, WaiterList, wait};
 pub use weak::{ConsumerWeak, ProducerWeak, Weak};
 
@@ -138,8 +142,7 @@ pub(crate) struct State<T> {
 	pub waiters_value: waiter::WaiterList,
 	/// Closure (`closed`). Woken only when the channel closes.
 	pub waiters_closed: waiter::WaiterList,
-	/// Consumer-count changes (`used`/`unused`). `used`/`unused` are used
-	/// sequentially in practice, so they share one list.
+	/// Consumer-count changes (`wanted_changed`), in either direction.
 	pub waiters_consumer: waiter::WaiterList,
 	pub closed: bool,
 }
