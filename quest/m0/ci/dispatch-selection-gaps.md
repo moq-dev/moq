@@ -32,5 +32,5 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [workspace.test.py ignores the caller's gate filter](/quest/m0/ci/workspace-test-env.md) - #7432's quest, the same dispatcher test environment
+- [workspace.test.py ignores the caller's gate filter](https://github.com/moq-dev/moq/pull/7432) - #7432's quest, the same dispatcher test environment
 - [moq-dev/moq#7440](https://github.com/moq-dev/moq/pull/7440) - plans `quest/m0/ci/check-selection.md`, which makes a jq error in Rust selection fail the run; that turns this jq noise into a failure, so land the fixture fix first or together. It does not cover the tool-list selection gap

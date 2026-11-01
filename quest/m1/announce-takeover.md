@@ -115,15 +115,6 @@ Remove the cold-start warm-up reads (`claimed` in
 assert that the first subscription succeeds. Keep them for moq-transport.
 Run `just check`, `just test interop --all` and `just drafts check`.
 
-Public API: breaking; removes `Takeover` and the predecessor fields in every
-language. Wire: removes lite-07's ANNOUNCE_TAKEOVER (0x5), adding nothing
-beyond [Identity and epoch](/quest/m1/api-audit/route/identity.md)'s fields.
-
-## Required
-
-- [Identity and epoch](/quest/m1/api-audit/route/identity.md) - the identity a job's exact route inherits
-- [One Route handle](/quest/m1/api-audit/route/handle.md) - `request.route` creates the exact route under the claim's identity
-
 ### Once identity replaces ANNOUNCE_TAKEOVER
 
 Decided 2026-10-31 (maintainer, the /quest-complete requeue session). Kept
@@ -145,6 +136,15 @@ planned in [moq-dev/moq#7420](https://github.com/moq-dev/moq/pull/7420).
   folds such a PUBLISH_NAMESPACE into the same epochless route as an update
   instead of End then Start; per-announcement identities resolve it, and
   the test proves they do.
+
+Public API: breaking; removes `Takeover` and the predecessor fields in every
+language. Wire: removes lite-07's ANNOUNCE_TAKEOVER (0x5), adding nothing
+beyond [Identity and epoch](/quest/m1/api-audit/route/identity.md)'s fields.
+
+## Required
+
+- [Identity and epoch](/quest/m1/api-audit/route/identity.md) - the identity a job's exact route inherits
+- [One Route handle](/quest/m1/api-audit/route/handle.md) - `request.route` creates the exact route under the claim's identity
 
 ## Related
 
