@@ -24,12 +24,11 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from moq-dev/quest's hos
   the historical `check flake` failure. The available Cloudflare OAuth token
   received `Forbidden` when querying historical Worker logs, so the original
   incident's R2 code or edge origin remains unconfirmed.
-- Remaining: a maintainer deploys the Worker with `just infra nix deploy`,
-  then verifies cache misses and dev-shell evaluation/build through
-  `nix.moq.dev`. Deployment was not authorized for the implementation task.
-  Inspect the original incident's logs with Workers Observability access;
-  distinguish R2 service errors from configuration errors or edge failures
-  before broadening the handling.
+- Decided 2026-11-01 (maintainer): land the narrow service-code handling
+  without waiting for Workers Observability access to the original incident.
+- Remaining: after the fix merges, the maintainer deploys the Worker with
+  `just infra nix deploy`, then verifies cache misses and dev-shell
+  evaluation/build through `nix.moq.dev`.
 - The [Nix cache verification](/quest/m0/ci/nix-cache-verify.md) owns the
   release side of the cache.
 
