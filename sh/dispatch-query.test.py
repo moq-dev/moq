@@ -11,6 +11,8 @@ import time
 import tempfile
 import unittest
 
+from test_env import dispatch_env
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -28,15 +30,8 @@ class QueryTests(unittest.TestCase):
         self.bin.mkdir()
         for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
             (self.bin / command).symlink_to(shutil.which(command))
-        self.env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
-                        GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
-        # The runner's own Actions variables would move the run's error
-        # annotations to stdout and append to the real job summary, a gate's
-        # CHECK_MODULES split would skip the modules these tests expect, and the
-        # land gate's CHECK_FAIL_FAST would cancel the lanes they expect to finish.
-        for key in ("IN_MOQ_DEV_SHELL", "ALLOW_HOST_TOOLCHAIN", "CHECK_JOBS", "CHECK_MODULES",
-                    "CHECK_FAIL_FAST", "GITHUB_BASE_REF", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY"):
-            self.env.pop(key, None)
+        self.env = dispatch_env(LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
+                                GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "test")
         self.git("config", "user.email", "test@example.com")
@@ -190,7 +185,7 @@ class QueryTests(unittest.TestCase):
 
     def stub_ci(self, just=""):
         for tool in ("bun", "python3", "cargo", "jq", "shellcheck",
-                     "shfmt", "taplo", "nixfmt", "actionlint", "quest", "nix",
+                     "shfmt", "taplo", "nixfmt", "actionlint", "zizmor", "quest", "nix",
                      "c++", "clang-format", "cmake", "dart", "dash", "gersemi", "go",
                      "gradle", "java", "kramdown-rfc", "pkg-config", "uniffi-bindgen-cpp",
                      "clippy-driver", "dpkg-deb", "nfpm", "rpm",

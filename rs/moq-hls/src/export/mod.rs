@@ -15,6 +15,10 @@
 //! group on the first playlist render (in the background on a manifest render) to build its
 //! init, then caches it.
 //!
+//! That background work (the catalog and record watchers, and init builds) runs on the
+//! [`Driver`] [`Broadcaster::new`] returns: poll it or spawn [`Driver::run`] wherever the
+//! embedder runs tasks.
+//!
 //! The same machinery serves two kinds of consumer:
 //!
 //! * the HTTP serve path (pull): [`Route::parse`] names the resource a request path addresses,
@@ -28,6 +32,7 @@
 
 #[cfg(test)]
 mod archive_tests;
+mod driver;
 pub mod master;
 mod mpd;
 mod playlist;
@@ -37,12 +42,13 @@ mod route;
 pub mod renditions;
 pub mod segments;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use moq_mux::catalog::{self, CatalogFormat, Stream};
 use rand::RngExt;
 
+pub use driver::Driver;
 pub(crate) use playlist::render_media;
 pub use rendition::{Kind, Rendition};
 pub use route::{Resource, Route};
@@ -87,6 +93,10 @@ impl Default for Config {
 }
 
 /// All renditions of one broadcast, kept in sync with its catalog.
+///
+/// A cheap handle: clones share the one broadcaster, which stops watching the catalog once the
+/// last clone drops.
+#[derive(Clone)]
 pub struct Broadcaster {
 	#[cfg_attr(
 		not(feature = "server"),
@@ -101,15 +111,31 @@ pub struct Broadcaster {
 	instance: Arc<str>,
 	/// The current rendition set, reconciled from the catalog by the watcher task.
 	renditions: renditions::Producer,
-	/// Aborts the catalog watcher when the broadcaster is dropped; `Drop` then releases the
-	/// renditions themselves (see [`renditions::Producer::clear`]), each of which stops following
-	/// its records once no recording cursor holds it. Set once, right after construction.
-	watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
+	/// Shared by every clone; its drop with the last one ends the catalog watcher.
+	_guard: Arc<Guard>,
+}
+
+/// What the last [`Broadcaster`] clone releases.
+struct Guard {
+	renditions: renditions::Producer,
+	/// Ends the catalog watcher when dropped.
+	_watcher: driver::Owner,
+}
+
+impl Drop for Guard {
+	fn drop(&mut self) {
+		// Release the map: a surviving `renditions::Consumer` would otherwise pin every
+		// `Rendition` forever. A recording cursor's own `Arc<Rendition>` keeps that rendition's
+		// records flowing, so its final segments are not truncated. Each rendition stops
+		// following its records once no recording cursor holds it.
+		self.renditions.clear();
+	}
 }
 
 impl Broadcaster {
-	/// Start tracking the renditions of `source`'s catalog broadcast.
-	pub fn new(source: moq_mux::Source, config: Config) -> Arc<Self> {
+	/// Start tracking the renditions of `source`'s catalog broadcast, once the returned
+	/// [`Driver`] runs.
+	pub fn new(source: moq_mux::Source, config: Config) -> (Self, Driver) {
 		let broadcast = source.broadcast();
 		// An identity names the stream on every edge, so each serves it under the same URLs.
 		let instance = broadcast
@@ -117,18 +143,46 @@ impl Broadcaster {
 			.identity
 			.clone()
 			.unwrap_or_else(moq_net::Identity::random);
-		let renditions = renditions::Producer::new(config.window);
-		let broadcaster = Arc::new(Self {
+		let (spawner, mut driver) = driver::Spawner::new();
+		let renditions = renditions::Producer::new(config.window, spawner);
+		// The watcher owns its own producer clone; dropping the `Broadcaster` ends it so the
+		// standing catalog subscription stops when nobody's serving from this broadcaster.
+		let watcher = driver.lead(watch_catalog(source, renditions.clone()));
+		let broadcaster = Self {
 			broadcast,
 			instance: Arc::from(instance.as_str()),
-			renditions: renditions.clone(),
-			watcher: Mutex::new(None),
-		});
-		// The watcher owns its own producer clone; the `Broadcaster`'s `Drop` aborts it so the
-		// standing catalog subscription stops when nobody's serving from this broadcaster.
-		let watcher = tokio::spawn(watch_catalog(source, renditions));
-		*broadcaster.watcher.lock().unwrap() = Some(watcher);
+			_guard: Arc::new(Guard {
+				renditions: renditions.clone(),
+				_watcher: watcher,
+			}),
+			renditions,
+		};
+		(broadcaster, driver)
+	}
+
+	/// [`new`](Self::new), with its driver spawned on the ambient runtime.
+	#[cfg(test)]
+	pub(crate) fn spawned(source: moq_mux::Source, config: Config) -> Self {
+		let (broadcaster, driver) = Self::new(source, config);
+		tokio::spawn(driver.run());
 		broadcaster
+	}
+
+	/// Return true if this is a clone of the same broadcaster.
+	pub fn is_clone(&self, other: &Self) -> bool {
+		Arc::ptr_eq(&self._guard, &other._guard)
+	}
+
+	/// How many clones of this broadcaster are alive.
+	#[cfg(all(test, feature = "server"))]
+	pub(crate) fn clones(&self) -> usize {
+		Arc::strong_count(&self._guard)
+	}
+
+	/// A weak reference that reports, through its `strong_count`, whether any clone is alive.
+	#[cfg(all(test, feature = "server"))]
+	pub(crate) fn downgrade(&self) -> std::sync::Weak<impl Sized + use<>> {
+		Arc::downgrade(&self._guard)
 	}
 
 	/// The publisher instance every listed URL is under (`@{instance}/{kind}/{rendition}/...`).
@@ -383,18 +437,6 @@ impl Broadcaster {
 	}
 }
 
-impl Drop for Broadcaster {
-	fn drop(&mut self) {
-		if let Some(watcher) = self.watcher.lock().unwrap().take() {
-			watcher.abort();
-		}
-		// Release the map: a surviving `renditions::Consumer` would otherwise pin every
-		// `Rendition` forever. A recording cursor's own `Arc<Rendition>` keeps that rendition's
-		// records flowing, so its final segments are not truncated.
-		self.renditions.clear();
-	}
-}
-
 async fn watch_catalog(source: moq_mux::Source, renditions: renditions::Producer) {
 	// The source's catalog broadcast, so the catalog, the record subscriptions, and the closed
 	// check below all refer to the one broadcast it was built from.
@@ -641,7 +683,7 @@ mod tests {
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 		catalog.video.renditions.insert("video".to_string(), config);
 
-		let renditions = renditions::Producer::new(Config::default().window);
+		let renditions = renditions::Producer::spawned(Config::default().window);
 		renditions.sync(&upstream, &catalog);
 		assert!(renditions.get(Kind::Video, "video").is_none());
 	}
@@ -665,7 +707,7 @@ mod tests {
 			config.hls = Some(hls(name));
 			catalog.audio.renditions.insert(name.to_string(), config);
 		}
-		let renditions = renditions::Producer::new(Config::default().window);
+		let renditions = renditions::Producer::spawned(Config::default().window);
 		renditions.sync(&source, &catalog);
 		let listed = || {
 			renditions
@@ -695,7 +737,7 @@ mod tests {
 		settle().await;
 		let upstream = crate::resolved(&origin, "live").await;
 
-		let renditions = renditions::Producer::new(Config::default().window);
+		let renditions = renditions::Producer::spawned(Config::default().window);
 		let mut cursor = renditions.subscribe();
 		let mut catalog = catalog_with_both();
 		catalog.audio.renditions.get_mut("audio0").unwrap().hls = None;
@@ -732,7 +774,7 @@ mod tests {
 		let upstream = empty_upstream(&origin, "live").await;
 
 		let mut catalog = catalog_with_both();
-		let renditions = renditions::Producer::new(Config::default().window);
+		let renditions = renditions::Producer::spawned(Config::default().window);
 		let mut cursor = renditions.subscribe();
 		renditions.sync(&upstream, &catalog);
 
@@ -802,7 +844,7 @@ mod tests {
 
 		let mut catalog = catalog_with_both();
 		catalog.video.renditions.get_mut("video0").unwrap().framerate = None;
-		let renditions = renditions::Producer::new(Config::default().window);
+		let renditions = renditions::Producer::spawned(Config::default().window);
 		let mut cursor = renditions.subscribe();
 		renditions.sync(&upstream, &catalog);
 		let video = renditions.get(Kind::Video, "video0").expect("video rendition");
@@ -831,7 +873,7 @@ mod tests {
 
 		let mut catalog = catalog_with_both();
 		catalog.audio.renditions.get_mut("audio0").unwrap().bitrate = None;
-		let renditions = renditions::Producer::new(Config::default().window);
+		let renditions = renditions::Producer::spawned(Config::default().window);
 		renditions.sync(&upstream, &catalog);
 		let audio = renditions.get(Kind::Audio, "audio0").expect("audio rendition");
 
@@ -863,7 +905,7 @@ mod tests {
 		let upstream = empty_upstream(&origin, "live").await;
 
 		let mut catalog = catalog_with_both();
-		let renditions = renditions::Producer::new(Config::default().window);
+		let renditions = renditions::Producer::spawned(Config::default().window);
 		let mut cursor = renditions.subscribe();
 		renditions.sync(&upstream, &catalog);
 
@@ -905,7 +947,7 @@ mod tests {
 		let upstream = empty_upstream(&origin, "live").await;
 
 		let mut catalog = catalog_with_both();
-		let renditions = renditions::Producer::new(Config::default().window);
+		let renditions = renditions::Producer::spawned(Config::default().window);
 		for width in 1..=8 {
 			catalog.video.renditions.get_mut("video0").unwrap().coded_width = Some(width);
 			renditions.sync(&upstream, &catalog);
@@ -926,7 +968,7 @@ mod tests {
 		let catalog = hls_catalog(&mut broadcast.broadcast().clone());
 		let mut media = video(&catalog, &broadcast, "video0", video_config());
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let rendition = kio::clock::timeout(Duration::from_secs(5), async {
 			loop {
 				if let Some(rendition) = broadcaster.rendition(Kind::Video, "video0") {
@@ -1009,7 +1051,7 @@ mod tests {
 				records.push(&gop(sequence)).unwrap();
 			}
 		}
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		kio::clock::timeout(Duration::from_secs(5), broadcaster.advertised())
 			.await
 			.expect("video0 is advertised");
@@ -1042,7 +1084,7 @@ mod tests {
 			media.write(vp8_frame(i * 2_000_000, true)).unwrap();
 		}
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		kio::clock::timeout(Duration::from_secs(5), broadcaster.advertised())
 			.await
 			.expect("the rendition is advertised");
@@ -1117,7 +1159,7 @@ mod tests {
 		let (mut catalog, _media) = publish_vp8(&mut broadcast.broadcast().clone(), inline_vp8());
 		broadcast.announce(moq_net::origin::Route::default()).unwrap();
 		settle().await;
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.ready().await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let mut cursor = rendition.segments();
@@ -1150,7 +1192,7 @@ mod tests {
 			records.push(&stop(1, 2_000)).unwrap();
 		}
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.ready().await;
 		let rendition = broadcaster.rendition(Kind::Video, "video1").expect("rendition");
 		until_listed(&rendition, 1).await;
@@ -1294,7 +1336,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
 		listed_in_manifest(&broadcaster).await;
@@ -1311,7 +1353,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
 		kio::clock::timeout(Duration::from_millis(1), broadcaster.video_init())
@@ -1366,7 +1408,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
 		let broken = broadcaster.rendition(Kind::Video, "video0").unwrap();
 		until_listed(&broken, 3).await;
@@ -1399,7 +1441,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
 		let stuck = broadcaster.rendition(Kind::Video, "video1").unwrap();
@@ -1424,7 +1466,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
 		let render = broadcaster.clone();
@@ -1446,7 +1488,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
 		broadcaster.set_generation(Some("run1")).unwrap();
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
@@ -1471,7 +1513,7 @@ mod tests {
 		let mut open = media.create_group(3u64.into()).unwrap();
 		write_keyframe(&mut open, 3);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").unwrap();
 		until_listed(&rendition, 3).await;
@@ -1512,7 +1554,7 @@ mod tests {
 		let mut open = media.create_group(1u64.into()).unwrap();
 		write_keyframe(&mut open, 1);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 2).await;
 		catalog.finish().unwrap();
@@ -1538,7 +1580,7 @@ mod tests {
 		let (origin, broadcast, _catalog, mut records) = inline_pair("video0").await;
 		let media = broadcast.create_track("video0", timed()).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		while broadcaster.rendition(Kind::Video, "video0").is_none() {
 			kio::clock::sleep(Duration::from_millis(10)).await;
 		}
@@ -1575,7 +1617,7 @@ mod tests {
 			group.finish().unwrap();
 		}
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
 		for _ in 0..3 {
@@ -1605,7 +1647,7 @@ mod tests {
 		settle().await;
 		let (_catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let old = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let old_playlist = old
@@ -1644,6 +1686,49 @@ mod tests {
 		assert!(new.init(&old_hash).await.unwrap().is_none());
 	}
 
+	// Background work ends with its owners, not with the publisher: once a reconfigure replaced
+	// the rendition, dropping the broadcaster and both renditions finishes the driver while the
+	// records stay open.
+	#[tokio::test(start_paused = true)]
+	async fn the_driver_finishes_with_its_owners() {
+		let origin = produce_origin();
+		let broadcast = origin.create_broadcast("live").expect("publish allowed");
+		broadcast.announce(Default::default()).expect("publish allowed");
+		settle().await;
+		let (_catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
+
+		let (broadcaster, driver) = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let driving = tokio::spawn(driver.run());
+		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let old = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+
+		let mut config = video_config();
+		config.coded_width = Some(640);
+		media.set(config).unwrap();
+		media.write(vp8_frame(6_000_000, true)).unwrap();
+		let new = kio::clock::timeout(Duration::from_secs(5), async {
+			loop {
+				let current = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
+				if !Arc::ptr_eq(&current, &old) {
+					break current;
+				}
+				kio::clock::sleep(Duration::from_millis(10)).await;
+			}
+		})
+		.await
+		.expect("the reconfigure rebuilt the rendition");
+
+		drop((broadcaster, new));
+		settle().await;
+		assert!(!driving.is_finished(), "a held rendition keeps the driver running");
+		drop(old);
+		kio::clock::timeout(Duration::from_secs(5), driving)
+			.await
+			.expect("the driver finishes once its owners drop")
+			.unwrap();
+		drop(media);
+	}
+
 	// A generation rides every segment URL. The first one labels the run already listed;
 	// replacing it drops that run's rows, and the next run lists under the new generation.
 	#[tokio::test]
@@ -1654,7 +1739,7 @@ mod tests {
 		settle().await;
 		let (_catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let tag = rendition.tag().to_string();
@@ -1716,7 +1801,7 @@ mod tests {
 			media.write(vp8_frame(micros, true)).unwrap();
 		}
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let _ = kio::clock::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -1751,7 +1836,7 @@ mod tests {
 		// Three GOPs, 2s apart: segments 0 and 1 are complete, segment 2 is the live edge.
 		let (catalog, media) = publish_vp8(&mut broadcast.broadcast().clone(), inline_vp8());
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster
 			.rendition(Kind::Video, "video0")
@@ -1813,7 +1898,7 @@ mod tests {
 		settle().await;
 		let (catalog, media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let _ = kio::clock::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -1851,7 +1936,7 @@ mod tests {
 		media.write(vp8_frame(2_000_000, true)).unwrap();
 		media.write(vp8_frame(4_000_000, true)).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let _ = kio::clock::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -1890,7 +1975,7 @@ mod tests {
 		video.write(frame(4_000_000, true)).unwrap(); // live edge
 		audio_write(4_000_000);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let video_rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let audio_rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
@@ -1971,7 +2056,7 @@ mod tests {
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(4_000_000, true)).unwrap(); // live edge
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let _ = kio::clock::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -2032,7 +2117,7 @@ mod tests {
 			records.push(&gop(sequence)).unwrap();
 		}
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let _ = kio::clock::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -2077,7 +2162,7 @@ mod tests {
 
 		// Watch before the first fragment, as a live viewer would, so a catalog the moov
 		// published on a provisional clock would stick.
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		assert!(
 			next_event(&mut broadcaster.renditions()).await.is_none(),
 			"the moov alone lists no rendition"
@@ -2203,7 +2288,7 @@ mod tests {
 			.await
 			.unwrap();
 		let source = crate::resolved(consuming, "live").await;
-		let broadcaster = (!late).then(|| Broadcaster::new(source.clone(), Config::default()));
+		let broadcaster = (!late).then(|| Broadcaster::spawned(source.clone(), Config::default()));
 		for i in 0..20u64 {
 			let fragment = video_muxer
 				.fragment(i as u32, &[vp8_frame(i * 1_000_000, i % 2 == 0)], None)
@@ -2223,7 +2308,7 @@ mod tests {
 			import.decode(&fragment).unwrap();
 			settle().await;
 		}
-		let broadcaster = broadcaster.unwrap_or_else(|| Broadcaster::new(source, Config::default()));
+		let broadcaster = broadcaster.unwrap_or_else(|| Broadcaster::spawned(source, Config::default()));
 		kio::clock::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
 			.unwrap();
@@ -2272,7 +2357,7 @@ mod tests {
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.playable()).await;
 
@@ -2320,7 +2405,7 @@ mod tests {
 			audio.cut(None).unwrap();
 		}
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
 		let _ = kio::clock::timeout(Duration::from_secs(5), rendition.playable()).await;
@@ -2365,7 +2450,7 @@ mod tests {
 		video.write(frame(4_000_000, true)).unwrap(); // segment 2 (live edge)
 		audio_write(4_000_000);
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let video_rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let audio_rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
@@ -2401,7 +2486,7 @@ mod tests {
 	// Dropping the broadcaster must not truncate a recording in progress. A cursor holds its
 	// rendition alive, so the rendition's own watcher still lists the final segment once the
 	// publisher finishes.
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn dropping_the_broadcaster_keeps_a_cursor_drainable() {
 		let origin = produce_origin();
 		let broadcast = origin.create_broadcast("live").expect("publish allowed");
@@ -2414,7 +2499,8 @@ mod tests {
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(3_000_000, false)).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let (broadcaster, driver) = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let driving = tokio::spawn(driver.run());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster
 			.rendition(Kind::Video, "video0")
@@ -2442,7 +2528,14 @@ mod tests {
 			"the final segment survives dropping the broadcaster"
 		);
 
-		drop((catalog, media, broadcast, rendition));
+		// The cursor holds its rendition, and the rendition its share of the driver.
+		assert!(!driving.is_finished(), "the driver outlives a held rendition");
+		drop((segments, rendition));
+		kio::clock::timeout(Duration::from_secs(5), driving)
+			.await
+			.expect("the driver finishes once the cursor drops")
+			.unwrap();
+		drop((catalog, media, broadcast));
 	}
 
 	/// A one-video-rendition catalog snapshot reconciled by hand, which is what `watch_catalog`
@@ -2455,7 +2548,7 @@ mod tests {
 		config.hls = Some(hls("video0"));
 		let mut catalog = moq_mux::catalog::hang::Catalog::default();
 		catalog.video.renditions.insert("video0".to_string(), config);
-		let renditions = renditions::Producer::new(Config::default().window);
+		let renditions = renditions::Producer::spawned(Config::default().window);
 		renditions.sync(upstream, &catalog);
 		let rendition = renditions.get(Kind::Video, "video0").expect("rendition synced");
 		(renditions, rendition)
@@ -3119,7 +3212,7 @@ mod tests {
 		media.write(frame(0, true)).unwrap();
 		media.write(frame(2_000_000, true)).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 
 		let mut renditions = broadcaster.renditions();
 		let added = kio::clock::timeout(Duration::from_secs(5), renditions.next())
@@ -3165,7 +3258,7 @@ mod tests {
 		media.write(frame(2_000_000, true)).unwrap();
 		media.write(frame(4_000_000, true)).unwrap();
 
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 
 		let mut renditions = broadcaster.renditions();
 		let rendition = match kio::clock::timeout(Duration::from_secs(5), renditions.next())
@@ -3205,8 +3298,12 @@ mod tests {
 		let end = kio::clock::timeout(Duration::from_secs(5), segments.next())
 			.await
 			.expect("segment cursor resolves after the source is lost");
+		// The record and catalog watchers race to see the close; either fails the recording.
 		assert!(
-			matches!(end, Err(crate::Error::RecordsFailed { .. })),
+			matches!(
+				end,
+				Err(crate::Error::RecordsFailed { .. } | crate::Error::CatalogFailed { .. })
+			),
 			"an abrupt end fails the recording: {:?}",
 			end.map(|segment| segment.map(|segment| segment.segment))
 		);
@@ -3268,7 +3365,7 @@ mod tests {
 			broadcast: &moq_net::broadcast::Producer,
 			catalog: &moq_mux::catalog::hang::Catalog,
 		) -> renditions::Producer {
-			let renditions = renditions::Producer::new(Config::default().window);
+			let renditions = renditions::Producer::spawned(Config::default().window);
 			renditions.sync(&Self::source(broadcast), catalog);
 			renditions
 		}
@@ -3518,7 +3615,7 @@ mod tests {
 			video0.push(&gop(sequence)).unwrap();
 			video1.push(&gop(sequence)).unwrap();
 		}
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
 		let healthy = broadcaster.rendition(Kind::Video, "video0").unwrap();
 		let broken = broadcaster.rendition(Kind::Video, "video1").unwrap();
