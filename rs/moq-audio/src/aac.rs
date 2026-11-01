@@ -45,9 +45,9 @@ fn validate(config: &moq_mux::codec::aac::Config) -> Result<(), Error> {
 /// The AudioSpecificConfig to open a decoder with, validated as AAC-LC.
 ///
 /// Prefers the catalog `description` verbatim, since re-encoding the parsed
-/// fields would drop any extension it carries. A catalog without one (an MSF
-/// track, or a producer that only filled in the plain fields) gets one
-/// synthesized from the declared profile, rate, and channel count.
+/// fields would drop any extension it carries. Without one, the decoder's config is
+/// synthesized from the declared profile, rate, and channels. Legacy and LOC packets
+/// then carry ADTS headers that must agree with it; CMAF samples remain raw.
 ///
 /// The profile is read back out of the resulting config rather than taken from
 /// the catalog codec string: the description is what the decoder acts on, and

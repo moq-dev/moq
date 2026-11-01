@@ -523,7 +523,7 @@ pub struct Lease {
 	/// grant has no driver, and an auth server's may be mid-outage. Fixed on the ambient
 	/// clock when the grant arrives, so re-polling [`ended`](Self::ended) never
 	/// restarts the countdown.
-	expires: Option<moq_clock::Instant>,
+	expires: Option<kio::clock::Instant>,
 	/// The session's stats context, moved to a re-checked tier.
 	stats: moq_net::stats::Session,
 }
@@ -626,7 +626,7 @@ impl Lease {
 		loop {
 			let expire = async {
 				match self.expires {
-					Some(at) => moq_clock::sleep_until(at).await,
+					Some(at) => kio::clock::sleep_until(at).await,
 					None => std::future::pending().await,
 				}
 			};
@@ -806,7 +806,7 @@ impl Decider {
 					// Nothing here can verify a token, so one is refused rather than ignored:
 					// its holder expects it to count, and the public grant is not what it says.
 					Self::Public(_) if presents_token(&admission.request) => {
-						tracing::debug!(path = %admission.request.path, "a token was presented to public rules");
+						tracing::debug!(path = ?admission.request.path, "a token was presented to public rules");
 						admission.refuse(Error::Refused(Default::default()));
 					}
 					Self::Public(rules) => match rules.authorize(&admission.request.path) {
@@ -817,7 +817,7 @@ impl Decider {
 						// A path the rules don't reach is a refusal, never an outage a
 						// client would retry.
 						Err(err) => {
-							tracing::debug!(path = %admission.request.path, %err, "public rules refused");
+							tracing::debug!(path = ?admission.request.path, ?err, "public rules refused");
 							admission.refuse(Error::Refused(Default::default()));
 						}
 					},
@@ -1119,7 +1119,6 @@ pub(crate) fn peer(identity: &moq_tokio::tls::PeerIdentity) -> Option<moq_auth::
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1399,7 +1398,7 @@ mod tests {
 		let clone = auth.clone();
 		drop(auth);
 		assert!(
-			tokio::time::timeout(std::time::Duration::ZERO, admissions.next())
+			kio::clock::timeout(std::time::Duration::ZERO, admissions.next())
 				.await
 				.is_err()
 		);
@@ -1416,37 +1415,41 @@ mod tests {
 
 	/// The session supervisor re-polls `ended` on every nudge; that must not
 	/// restart the countdown to `expires`.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn re_polling_keeps_the_expiry_deadline() {
 		use std::time::Duration;
 
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(moq_clock::wall() + Duration::from_secs(10));
+		grant.expires = Some(kio::clock::wall() + Duration::from_secs(10));
 		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant)).unwrap();
 		for _ in 0..9 {
-			assert!(moq_clock::timeout(Duration::from_secs(1), lease.ended()).await.is_err());
+			assert!(
+				kio::clock::timeout(Duration::from_secs(1), lease.ended())
+					.await
+					.is_err()
+			);
 		}
 		assert_eq!(lease.ended().await, lease::Reason::Expired);
 		assert_eq!(
-			moq_clock::now(),
+			kio::clock::now(),
 			start + Duration::from_secs(10),
 			"expired at the deadline despite re-polling"
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_expired_grant_ends_at_once() {
 		use std::time::Duration;
 
 		let mut grant = Grant::new(patterns(&["**"]), patterns(&["**"]));
-		grant.expires = Some(moq_clock::wall() - Duration::from_secs(1));
+		grant.expires = Some(kio::clock::wall() - Duration::from_secs(1));
 		assert!(matches!(grant.validate(), Err(moq_auth::Error::GrantExpired)));
 
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut lease = Lease::new("/room", lease::Consumer::fixed(grant)).unwrap();
 		assert_eq!(lease.ended().await, lease::Reason::Expired);
-		assert_eq!(moq_clock::now(), start, "no grace after expiry");
+		assert_eq!(kio::clock::now(), start, "no grace after expiry");
 	}
 
 	#[test]
@@ -1550,5 +1553,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod admission_tests;

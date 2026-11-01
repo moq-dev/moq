@@ -197,7 +197,7 @@ fn case() -> impl Strategy<Value = Case> {
 struct Copy {
 	track: track::Producer,
 	/// Answers the front's requests for the route until the route goes.
-	serving: moq_clock::sim::JoinHandle<()>,
+	serving: kio::clock::sim::JoinHandle<()>,
 	_broadcast: broadcast::Producer,
 	/// Fetches of groups the copy lacks, which the route forwards to the publisher.
 	fills: track::Requests,
@@ -241,11 +241,6 @@ struct Instance {
 impl Instance {
 	fn live(&self) -> impl Iterator<Item = &Copy> {
 		self.routes.iter().flatten()
-	}
-
-	/// The slot of the cheapest live route, which the origin serves the path from.
-	fn winner(&self) -> Option<usize> {
-		self.routes.iter().rposition(Option::is_some)
 	}
 
 	fn newest(&self) -> Option<u64> {
@@ -294,9 +289,6 @@ struct Reader {
 	floor: Option<u64>,
 	/// Its instance lost its last route while it read.
 	doomed: bool,
-	/// The newest group handed out when its routes last changed. A route change resumes
-	/// from there, so a group below it that lands only afterwards may be lost.
-	resumed: Option<u64>,
 	end: Option<Result<(), Error>>,
 	/// What every live route carried in full, in range, when the track ended cleanly.
 	carried: BTreeSet<u64>,
@@ -346,7 +338,7 @@ impl Model {
 			..Default::default()
 		};
 		let (origin, driver) = Producer::new(origin);
-		moq_clock::sim::spawn(crate::time::run(driver));
+		kio::clock::sim::spawn(crate::time::run(driver));
 		Self {
 			consumer: origin.consume(),
 			origin,
@@ -356,26 +348,6 @@ impl Model {
 	}
 
 	async fn apply(&mut self, op: &Op) -> Result<(), TestCaseError> {
-		// A reader moves only when its instance's winning route, the cheapest live one, changes.
-		let rerouted = match *op {
-			Op::Up { epoch, slot } | Op::Down { epoch, slot } => {
-				let instance = &self.instances[epoch];
-				let mut live: Vec<bool> = instance.routes.iter().map(Option::is_some).collect();
-				live[slot] = matches!(op, Op::Up { .. });
-				(live.iter().rposition(|live| *live) != instance.winner()).then_some(epoch)
-			}
-			_ => None,
-		};
-		if let Some(epoch) = rerouted {
-			for reader in self
-				.readers
-				.iter_mut()
-				.flatten()
-				.filter(|reader| reader.instance == epoch)
-			{
-				reader.resumed = reader.resumed.max(reader.handed.iter().max().copied());
-			}
-		}
 		match *op {
 			Op::Up { epoch, slot } => self.up(epoch, slot),
 			Op::Down { epoch, slot } => {
@@ -432,9 +404,9 @@ impl Model {
 				instance.given_up.insert(group);
 			}
 			Op::End { epoch, slot } => self.end(epoch, slot),
-			Op::Advance { ms } => moq_clock::sim::advance(Duration::from_millis(ms)).await,
+			Op::Advance { ms } => kio::clock::sim::advance(Duration::from_millis(ms)).await,
 			Op::Expire => {
-				moq_clock::sim::advance(Duration::from_secs(60)).await;
+				kio::clock::sim::advance(Duration::from_secs(60)).await;
 				for reader in self.readers.iter_mut().flatten() {
 					reader.floor = self.instances[reader.instance].newest();
 				}
@@ -481,11 +453,11 @@ impl Model {
 			.with_epoch(self::epoch(epoch))
 			.with_hops(hops)
 			.with_cost((SLOTS - slot) as u64);
-		let requests = self.origin.requests_route(PATH, route).unwrap();
+		let requests = self.origin.requests_route(PATH, route, None).unwrap();
 		let broadcast = broadcast::Info::new().produce();
 		let track = broadcast.create_track("video", track::Info::timed()).unwrap();
 		let upstream = broadcast.consume();
-		let serving = moq_clock::sim::spawn(async move {
+		let serving = kio::clock::sim::spawn(async move {
 			while let Ok(request) = kio::wait(|waiter| requests.poll_requested_broadcast(waiter)).await {
 				request.accept(&upstream);
 			}
@@ -649,7 +621,6 @@ impl Model {
 			dropped: BTreeSet::new(),
 			floor: self.instances[instance].newest(),
 			doomed: false,
-			resumed: None,
 			end: None,
 			carried: BTreeSet::new(),
 		};
@@ -798,7 +769,7 @@ impl Model {
 	async fn settle(&mut self) -> Result<(), TestCaseError> {
 		let mut quiet = 0;
 		for _ in 0..10_000 {
-			moq_clock::sim::yield_now().await;
+			kio::clock::sim::yield_now().await;
 			let mut woken = self.fill();
 			for index in 0..READERS {
 				if self.readers[index]
@@ -882,7 +853,6 @@ impl Model {
 		let carried = |group: u64| instance.live().all(|copy| copy.complete(group));
 		let mut owed: Vec<u64> = (0..GROUPS)
 			.filter(|group| reader.floor.is_none_or(|floor| *group > floor))
-			.filter(|group| reader.resumed.is_none_or(|resumed| *group > resumed))
 			.filter(|group| reader.covers(*group) && carried(*group))
 			.collect();
 		if reader.spec.ordered {
@@ -935,7 +905,7 @@ impl Model {
 }
 
 fn run(case: &Case) -> Result<(), TestCaseError> {
-	moq_clock::sim::run(async {
+	kio::clock::sim::run(async {
 		let mut model = Model::new();
 		model.up(0, 0);
 		for op in &case.ops {
@@ -962,10 +932,10 @@ fn readers_match_the_logical_track() {
 	runner.run(&case(), |case| run(&case)).unwrap();
 }
 
-/// An Up or Down that leaves the winning route serving resumes nothing, so lower groups stay owed.
+/// An Up or Down that leaves the winning route serving still delivers a group only a standby route has.
 #[test]
 fn unchanged_routes_keep_groups_owed() {
-	moq_clock::sim::run(async {
+	kio::clock::sim::run(async {
 		let mut model = Model::new();
 		model.up(0, 0);
 		let ops = [
@@ -998,7 +968,6 @@ fn unchanged_routes_keep_groups_owed() {
 		}
 		let reader = model.readers[0].as_ref().unwrap();
 		assert!(reader.handed.contains(&8), "handed out {:?}", reader.handed);
-		assert_eq!(reader.resumed, None);
 	});
 }
 
@@ -1076,6 +1045,43 @@ fn regressions() {
 					group: Some(6),
 					frames: 1,
 				},
+			],
+			finish: false,
+		},
+		// A group below the resume point lands late once the route flapped back.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 0,
+					spec: spec(false, Budget::Hour, None, false),
+				},
+				Op::Write {
+					epoch: 0,
+					slot: 0,
+					group: Some(1),
+					frames: 1,
+				},
+				Op::Up { epoch: 0, slot: 1 },
+				Op::Down { epoch: 0, slot: 1 },
+			],
+			finish: false,
+		},
+		// Ranges widened past a route change owe what they newly cover below the resume point.
+		Case {
+			ops: vec![
+				Op::Join {
+					reader: 1,
+					spec: spec(false, Budget::Hour, Some((4, 10)), false),
+				},
+				Op::Write {
+					epoch: 0,
+					slot: 0,
+					group: Some(4),
+					frames: 1,
+				},
+				Op::Up { epoch: 0, slot: 1 },
+				Op::Ranges { reader: 1, range: None },
+				Op::Down { epoch: 0, slot: 0 },
 			],
 			finish: false,
 		},

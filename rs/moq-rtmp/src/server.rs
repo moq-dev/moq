@@ -260,7 +260,7 @@ pub struct Server {
 	/// While set, `accept` stops asking the listener until this instant. In-flight handshakes keep
 	/// being polled meanwhile: a connection that already got through must not wait out a backoff
 	/// earned by a different one.
-	accept_retry: Option<moq_clock::Instant>,
+	accept_retry: Option<kio::clock::Instant>,
 }
 
 impl Server {
@@ -374,11 +374,11 @@ impl Server {
 							let request = Abortable::new(async move {
 								// The TLS handshake (if any) and the RTMP handshake share one
 								// budget, so a client that stalls either is dropped.
-								let outcome = moq_clock::timeout(REQUEST_TIMEOUT, async move {
+								let outcome = kio::clock::timeout(REQUEST_TIMEOUT, async move {
 									#[cfg(feature = "tls")]
 									let conn = match tls {
 										Some(acceptor) if starts_tls(&stream).await? => Conn::Tls(Box::new(
-											moq_clock::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
+											kio::clock::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream))
 												.await
 												.map_err(|_| anyhow::anyhow!("RTMPS handshake timed out"))?
 												.map_err(|e| anyhow::anyhow!("rtmps tls handshake: {e}"))?,
@@ -420,7 +420,7 @@ impl Server {
 						tracing::warn!(%err, "failed to accept RTMP connection; continuing");
 						let wait = self.accept_delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
 						self.accept_delay = (self.accept_delay * 2).min(ACCEPT_RETRY_MAX);
-						self.accept_retry = Some(moq_clock::Instant::now() + wait);
+						self.accept_retry = Some(kio::clock::Instant::now() + wait);
 					}
 				},
 			}
@@ -437,7 +437,7 @@ const TLS_HANDSHAKE_RECORD: u8 = 0x16;
 #[cfg(feature = "tls")]
 async fn starts_tls(stream: &TcpStream) -> io::Result<bool> {
 	let mut first = [0u8; 1];
-	if moq_clock::timeout(HANDSHAKE_TIMEOUT, stream.peek(&mut first))
+	if kio::clock::timeout(HANDSHAKE_TIMEOUT, stream.peek(&mut first))
 		.await
 		.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS detection timed out"))??
 		== 0
@@ -451,9 +451,9 @@ async fn starts_tls(stream: &TcpStream) -> io::Result<bool> {
 ///
 /// The `select!` arm that uses this is guarded on `at` being set; the pending branch keeps the arm
 /// well-formed rather than leaving the macro with a `None` to unwrap.
-async fn sleep_until(at: Option<moq_clock::Instant>) {
+async fn sleep_until(at: Option<kio::clock::Instant>) {
 	match at {
-		Some(at) => moq_clock::sleep_until(at).await,
+		Some(at) => kio::clock::sleep_until(at).await,
 		None => std::future::pending().await,
 	}
 }
@@ -493,7 +493,7 @@ pub fn configure_socket(stream: &TcpStream, peer: SocketAddr) {
 ///
 /// Returns `Ok(None)` if the client disconnects before issuing `publish` or
 /// `play`. The handshake must finish in five seconds; wrap the call in
-/// [`moq_clock::timeout`] to also bound the wait for a publish or play request.
+/// [`kio::clock::timeout`] to also bound the wait for a publish or play request.
 pub async fn accept_stream<S: Stream>(stream: S, peer: SocketAddr) -> Result<Option<Request<S>>> {
 	Ok(accept_until_request(stream, peer).await?)
 }
@@ -826,7 +826,7 @@ impl<S: Stream> Play<S> {
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
 			}
-			resolved = moq_clock::timeout(PLAY_RESOLVE_TIMEOUT, following.available()) => {
+			resolved = kio::clock::timeout(PLAY_RESOLVE_TIMEOUT, following.available()) => {
 				match resolved {
 					Ok(resolved) => resolved,
 					Err(_) => {
@@ -853,7 +853,7 @@ impl<S: Stream> Play<S> {
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
 			}
-			catalog = moq_clock::timeout(PLAY_RESOLVE_TIMEOUT, CatalogStream::next(&mut check)) => {
+			catalog = kio::clock::timeout(PLAY_RESOLVE_TIMEOUT, CatalogStream::next(&mut check)) => {
 				match catalog {
 					Ok(Ok(Some(catalog))) => catalog,
 					Ok(Ok(None)) => {
@@ -901,7 +901,7 @@ impl<S: Stream> Play<S> {
 				tracing::debug!(peer = %self.peer, %path, "viewer disconnected before play started");
 				return Ok(());
 			}
-			chunk = moq_clock::timeout(PLAY_RESOLVE_TIMEOUT, export.next()) => {
+			chunk = kio::clock::timeout(PLAY_RESOLVE_TIMEOUT, export.next()) => {
 				match chunk {
 					Ok(Ok(Some(chunk))) => chunk,
 					Ok(Ok(None)) => {
@@ -1125,7 +1125,7 @@ fn fourcc_label(fourcc: &[u8; 4]) -> String {
 /// Run one connection's handshake and connect exchange, returning a [`Request`]
 /// once the client issues `publish` or `play` (or `None` if it disconnects first).
 async fn accept_until_request<S: Stream>(mut stream: S, peer: SocketAddr) -> anyhow::Result<Option<Request<S>>> {
-	let remaining = moq_clock::timeout(HANDSHAKE_TIMEOUT, run_handshake(&mut stream, peer))
+	let remaining = kio::clock::timeout(HANDSHAKE_TIMEOUT, run_handshake(&mut stream, peer))
 		.await
 		.map_err(|_| anyhow::anyhow!("RTMP handshake timed out"))??;
 
@@ -1261,24 +1261,24 @@ async fn pump<S: Stream>(
 	peer: SocketAddr,
 ) -> anyhow::Result<End> {
 	let mut buffer = [0u8; READ_BUFFER];
-	let mut media_deadline = moq_clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+	let mut media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 	loop {
 		let mut finished = false;
 		while let Some(result) = work.pop_front() {
 			match result {
 				ServerSessionResult::OutboundResponse(packet) => {
-					moq_clock::timeout_at(media_deadline, stream.write_all(&packet.bytes))
+					kio::clock::timeout_at(media_deadline, stream.write_all(&packet.bytes))
 						.await
 						.map_err(|_| anyhow::anyhow!("peer blocked RTMP control output before the media deadline"))??;
 				}
 				ServerSessionResult::RaisedEvent(event) => match event {
 					// A timestamp restart ends this publisher; isolated malformed tags are skipped.
 					ServerSessionEvent::AudioDataReceived { data, timestamp, .. } => {
-						media_deadline = moq_clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+						media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 						publisher.push(flv::TAG_AUDIO, timestamp.value, &data)?;
 					}
 					ServerSessionEvent::VideoDataReceived { data, timestamp, .. } => {
-						media_deadline = moq_clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
+						media_deadline = kio::clock::Instant::now() + PUBLISH_IDLE_TIMEOUT;
 						publisher.push(flv::TAG_VIDEO, timestamp.value, &data)?;
 					}
 					ServerSessionEvent::PublishStreamFinished { .. } => finished = true,
@@ -1300,7 +1300,7 @@ async fn pump<S: Stream>(
 
 		let n = tokio::select! {
 			res = stream.read(&mut buffer) => res?,
-			_ = moq_clock::sleep_until(media_deadline) => {
+			_ = kio::clock::sleep_until(media_deadline) => {
 				anyhow::bail!("peer {peer} sent no RTMP media for {:?}", PUBLISH_IDLE_TIMEOUT);
 			}
 		};
@@ -1573,18 +1573,13 @@ impl Publisher {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 
 	#[tokio::test(start_paused = true)]
 	async fn a_silent_peer_cannot_hold_a_handshake() {
 		let (_client, server) = tokio::io::duplex(4096);
-		let start = moq_clock::Instant::now();
+		let start = kio::clock::Instant::now();
 		let result = accept_stream(server, "127.0.0.1:1935".parse().unwrap()).await;
 		assert!(result.is_err());
 		assert_eq!(start.elapsed(), HANDSHAKE_TIMEOUT);
@@ -1598,7 +1593,7 @@ mod tests {
 		let mut work = VecDeque::from([ServerSessionResult::OutboundResponse(packet)]);
 		let origin = moq_tokio::origin::spawn();
 		let mut publisher = Publisher::new(&origin, "idle", Default::default()).unwrap();
-		let start = moq_clock::Instant::now();
+		let start = kio::clock::Instant::now();
 		assert!(
 			pump(
 				&mut stream,
@@ -1876,7 +1871,7 @@ mod tests {
 			let origin = moq_tokio::origin::spawn();
 			let consumer = origin.consume();
 			let (client, server) = tokio::io::duplex(64 * 1024);
-			let start = tokio::time::Instant::now();
+			let start = kio::clock::now();
 			let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
 			// A hangup ends the instance at once, before a follower would hand it out, so this
 			// requests it on its announcement instead.
@@ -1930,7 +1925,7 @@ mod tests {
 		let accept = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
 		publish_one_keyframe(client, Leave::Unpublish).await;
 
-		tokio::time::sleep(Duration::from_secs(5)).await;
+		kio::clock::sleep(Duration::from_secs(5)).await;
 		let finished = consumer.request("live/cam0", None).await.unwrap();
 		let mut video = finished.track("0.flv-v").unwrap().subscribe(None).await.unwrap();
 		assert!(
@@ -1942,11 +1937,11 @@ mod tests {
 		let (client, server) = tokio::io::duplex(64 * 1024);
 		let _reconnect = tokio::spawn(accept_publish(server, origin.clone(), Duration::from_secs(10)));
 		let _encoder = tokio::spawn(publish_one_keyframe(client, Leave::Hangup));
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(!accept.is_finished(), "the newer publisher leaves the linger running");
 		assert!(!finished.is_closed());
 
-		let start = tokio::time::Instant::now();
+		let start = kio::clock::now();
 		accept.await.unwrap();
 		assert_eq!(start.elapsed(), Duration::from_secs(4));
 		assert!(finished.is_closed());
@@ -2266,7 +2261,7 @@ mod tests {
 		});
 
 		let stream = TcpStream::connect(addr).await.unwrap();
-		let media = tokio::time::timeout(Duration::from_secs(5), play_client_collect(stream, 2, 0, &[]))
+		let media = kio::clock::timeout(Duration::from_secs(5), play_client_collect(stream, 2, 0, &[]))
 			.await
 			.expect("play client timed out");
 
@@ -2333,7 +2328,7 @@ mod tests {
 		let (tx, mut media) = tokio::sync::mpsc::unbounded_channel();
 		let client = tokio::spawn(play_client(TcpStream::connect(addr).await.unwrap(), 0, &[], tx));
 		let mut next = async || {
-			tokio::time::timeout(Duration::from_secs(5), media.recv())
+			kio::clock::timeout(Duration::from_secs(5), media.recv())
 				.await
 				.expect("no media")
 				.expect("the play ended")
@@ -2345,7 +2340,7 @@ mod tests {
 		let epoch = moq_net::Epoch::mint();
 		let mut instances = moq_mux::follow::Instances::new(&consumer, "live/cam0", Some(&epoch)).unwrap();
 		let (_new, _new_catalog) = publish_avc(&origin, epoch, &[0x65, 0x99, 0x99, 0x99, 0x99]);
-		tokio::time::timeout(Duration::from_secs(5), instances.next())
+		kio::clock::timeout(Duration::from_secs(5), instances.next())
 			.await
 			.expect("the new publisher takes over")
 			.unwrap();
@@ -2359,7 +2354,7 @@ mod tests {
 
 		old.abort(moq_net::Error::Transport("connection lost".into()));
 		drop(old_catalog);
-		let played = tokio::time::timeout(Duration::from_secs(5), played)
+		let played = kio::clock::timeout(Duration::from_secs(5), played)
 			.await
 			.expect("the play outlived its route")
 			.unwrap();
@@ -2402,7 +2397,7 @@ mod tests {
 		});
 
 		let stream = TcpStream::connect(addr).await.unwrap();
-		let status = tokio::time::timeout(Duration::from_secs(5), play_client_first_status(stream, 0, &[]))
+		let status = kio::clock::timeout(Duration::from_secs(5), play_client_first_status(stream, 0, &[]))
 			.await
 			.expect("play client timed out");
 
@@ -2681,7 +2676,7 @@ mod tests {
 		// The player advertises multitrack; collect the four video messages (two
 		// sequence headers + two keyframes across the two tracks).
 		let stream = TcpStream::connect(addr).await.unwrap();
-		let media = tokio::time::timeout(
+		let media = kio::clock::timeout(
 			Duration::from_secs(5),
 			play_client_collect(stream, 4, CAPS_EX_MULTITRACK, &[b"avc1"]),
 		)
@@ -2764,7 +2759,7 @@ mod tests {
 			run_client(stream, ClientMode::Publish).await;
 		});
 
-		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+		let request = kio::clock::timeout(Duration::from_secs(5), server.accept())
 			.await
 			.expect("server.accept timed out")
 			.expect("server yielded a request");
@@ -2814,13 +2809,13 @@ mod tests {
 		let fresh_client = tokio::spawn(async move {
 			run_client(TcpStream::connect(addr).await.unwrap(), ClientMode::Publish).await;
 		});
-		tokio::time::timeout(Duration::from_secs(5), async {
+		kio::clock::timeout(Duration::from_secs(5), async {
 			while !matches!(announced.next().await, Some(moq_net::announce::Event::Restart(_))) {}
 		})
 		.await
 		.expect("the reconnect restarts the broadcast");
 
-		let stale_viewer = tokio::time::timeout(Duration::from_millis(200), async {
+		let stale_viewer = kio::clock::timeout(Duration::from_millis(200), async {
 			loop {
 				match catalog.recv_group().await {
 					Ok(Some(_)) => continue,
@@ -2922,7 +2917,7 @@ mod tests {
 					_ => {}
 				}
 			}
-			let n = tokio::time::timeout(Duration::from_secs(5), stream.read(&mut buffer))
+			let n = kio::clock::timeout(Duration::from_secs(5), stream.read(&mut buffer))
 				.await
 				.expect("timed out awaiting connect _result")
 				.unwrap();
@@ -2966,7 +2961,7 @@ mod tests {
 			run_client(stream, ClientMode::Play).await;
 		});
 
-		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+		let request = kio::clock::timeout(Duration::from_secs(5), server.accept())
 			.await
 			.expect("server.accept timed out")
 			.expect("server yielded a request");
@@ -3060,7 +3055,7 @@ mod tests {
 			run_client(stream, ClientMode::Publish).await;
 		});
 
-		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+		let request = kio::clock::timeout(Duration::from_secs(5), server.accept())
 			.await
 			.expect("server.accept timed out")
 			.expect("server yielded a request");
@@ -3094,7 +3089,7 @@ mod tests {
 			let stream = TcpStream::connect(addr).await.unwrap();
 			run_client(stream, ClientMode::Play).await;
 		});
-		let request = tokio::time::timeout(Duration::from_secs(5), server.accept())
+		let request = kio::clock::timeout(Duration::from_secs(5), server.accept())
 			.await
 			.expect("plaintext accept timed out")
 			.expect("server yielded a plaintext request");
@@ -3133,7 +3128,7 @@ mod tests {
 		// The refusal comes well inside REQUEST_TIMEOUT, so a client that stayed open
 		// (a bug) fails the outer timeout rather than passing quietly.
 		let refused = tokio::select! {
-			refused = tokio::time::timeout(Duration::from_secs(5), plain) => refused,
+			refused = kio::clock::timeout(Duration::from_secs(5), plain) => refused,
 			request = server.accept() => panic!("plaintext client yielded a request: {}", request.is_some()),
 		};
 		assert!(refused.expect("plaintext client was not refused").unwrap());
