@@ -4237,6 +4237,92 @@ mod tests {
 		}
 	}
 
+	/// A failed subscription reads a stream whose header arrived to its end before it gives
+	/// the track back, but only while someone holds the copy: once nobody does, a stream the
+	/// publisher never finishes cannot keep the subscription.
+	#[kio::test]
+	async fn a_failed_subscription_drains_only_while_wanted() {
+		for wanted in [true, false] {
+			let version = Version::Lite06;
+			let mut responses = Vec::new();
+			lite::SubscribeResponse::Start(lite::SubscribeStart {
+				largest: None,
+				starts: vec![Some(0)],
+			})
+			.encode(
+				&mut crate::coding::Encoder::new(&mut responses, version.into()),
+				version,
+			)
+			.unwrap();
+			let session = crate::lite::test_transport::ScriptedSession::new(responses);
+			let subscriber = Subscriber::new(SubscriberConfig {
+				runtime: crate::time::sim(),
+				session: crate::driver::Transport::new(session.clone()),
+				origin: origin::Config::new(crate::Hop::new(1).unwrap()).produce(),
+				recv_bandwidth: None,
+				version,
+				peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+				peer_hop: None,
+				cost: None,
+				going_away: Default::default(),
+				auth: crate::auth::Link::new(false),
+			});
+			let serve = TrackServe {
+				validity: Default::default(),
+				route: None,
+				subscriber,
+				path: Path::from_static("room"),
+				epoch: None,
+				name: "video".to_string(),
+			};
+			let broadcast = crate::broadcast::Info::new().produce();
+			let serving = ServeLoop::new(&serve, broadcast.reserve_track("video").unwrap(), crate::track::Info::timed());
+			let mut reader = broadcast
+				.consume()
+				.track("video")
+				.unwrap()
+				.subscribe(None)
+				.await
+				.unwrap();
+			let gate = serve.gate();
+			let mut running = TrackServeRun {
+				serve,
+				state: TrackRunState::Serve(serving),
+				gate,
+			};
+			assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
+
+			// A group stream whose header arrived, still being read.
+			let reading = {
+				let subscribes = running.serve.subscriber.subscribes.lock();
+				let (_, entry) = subscribes.iter().next().expect("subscribed");
+				Reading::open(&entry.tail, Some(0), running.serve.subscriber.runtime.now())
+			};
+			session.close(crate::lite::test_transport::Close::ResetStream(64 + 7));
+			assert!(
+				kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending(),
+				"wanted={wanted}: the stream being read holds the track"
+			);
+
+			match wanted {
+				true => {
+					drop(reading);
+					assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready());
+					assert!(reader.recv_group().await.is_err(), "the track is given back failed");
+				}
+				false => {
+					drop(reader);
+					assert!(
+						kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready(),
+						"nobody holds the copy"
+					);
+					assert!(running.serve.subscriber.subscribes.lock().is_empty());
+					drop(reading);
+				}
+			}
+		}
+	}
+
 	/// Both runtimes abort a track whose tail the other's publisher still owed when the
 	/// session died.
 	#[kio::test]
@@ -8909,13 +8995,24 @@ impl ServeLoop {
 					let ServeMode::Failed { tail, .. } = &self.mode else {
 						unreachable!()
 					};
-					ready!(
-						tail.poll(waiter, |tail| match tail.is_reading() {
+					let drained = tail
+						.poll(waiter, |tail| match tail.is_reading() {
 							true => Poll::Pending,
 							false => Poll::Ready(()),
 						})
-						.map(|_| ())
-					);
+						.is_ready();
+					let _ = self.fetches.poll(waiter);
+					self.feed_fetches
+						.poll(&self.sub, serve.subscriber.runtime.now(), waiter);
+					if !drained {
+						// The groups are drained only for a reader: once nobody holds the
+						// copy, a stream the publisher never finishes must not hold it.
+						if self.fetches.is_empty() && crate::util::poll_unwanted(&mut self.demand, waiter).is_ready()
+						{
+							return Poll::Ready(ServeEnd::Idle);
+						}
+						return Poll::Pending;
+					}
 					let ServeMode::Failed { err, .. } = std::mem::replace(&mut self.mode, ServeMode::Select) else {
 						unreachable!()
 					};
