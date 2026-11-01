@@ -29,8 +29,9 @@ import moq
 async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
-            # A restart is a new publisher run at the same path: request it again.
-            if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart)):
+            # A restart is a new publisher run at the same path: request it again. A
+            # takeover continues what an earlier route served, like a start.
+            if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart, moq.AnnounceEventTakeover)):
                 continue  # AnnounceEventUpdate or AnnounceEventEnd
             # A route covers a prefix and carries no broadcast, so resolve the path.
             broadcast = await client.request(event.announce.prefix)
@@ -183,6 +184,8 @@ client = moq.Client(
   - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.
   - `.abort(error_code)` terminates the track or group with an application error.
   - `.append_datagram(payload, timestamp=None) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
+  - `.insert_datagram(sequence, payload, timestamp=None)` (`TrackProducer`) sends one at the caller's own sequence.
+  - `.largest() -> Position | None` (`TrackProducer`) reports the newest group or datagram written, at its newest frame.
 
 ### Media
 
@@ -260,7 +263,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - `await .requested_broadcast() → BroadcastRequest`. Call `.prepare(mint_epoch())`, fill its `.broadcast`, then `.publish() → Publication` to serve it under a new epoch, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
-  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, or `AnnounceEventRestart`, each carrying an `Announce` whose `.route.epoch` names the publisher run; on a restart, request the path again); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches
+  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, or `AnnounceEventTakeover`, each carrying an `Announce` whose `.route.epoch` names the publisher run; on a restart, request the path again; a takeover continues what the route at `.predecessor` served); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches
   - `.follow(path, epoch=None) → Following` (awaitable, waits until something serves the path, then each instance that takes over; an `epoch` follows only that instance)
   - `.request(path, epoch=None) → BroadcastConsumer` (awaitable; owns discovery and resolves one instance, or raises once synced without a route; an `epoch` refuses any other instance)
 

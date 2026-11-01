@@ -828,16 +828,16 @@ impl Grouped for crate::quic::web::Session {
 		Some(crate::quic::driver::connection::Connection::stats(self).credit.evicted)
 	}
 
-	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::SendGroup> {
+	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::send::Group> {
 		Some(Self::send_group(self, priority))
 	}
 
 	fn send_datagram(
 		&self,
 		payload: Bytes,
-		options: moq_net::transport::poll::SendOptions<'_, crate::quic::driver::SendGroup>,
+		options: moq_net::transport::poll::SendOptions<'_, crate::quic::driver::send::Group>,
 	) -> Result<(), Self::Error> {
-		let options = crate::quic::driver::SendOptions {
+		let options = crate::quic::driver::send::Options {
 			group: options.group,
 			priority: options.priority,
 		};
@@ -847,27 +847,25 @@ impl Grouped for crate::quic::web::Session {
 
 #[cfg(feature = "quic")]
 impl GroupedSend for crate::quic::web::SendStream {
-	type Group = crate::quic::driver::SendGroup;
+	type Group = crate::quic::driver::send::Group;
 
 	fn set_group(&mut self, group: &Self::Group) {
-		// A closed stream has nothing left to schedule.
-		Self::set_group(self, Some(group)).ok();
+		Self::set_group(self, Some(group));
 	}
 
 	fn set_priority(&mut self, priority: i64) {
-		crate::quic::web::SendStream::set_priority(self, priority).ok();
+		crate::quic::web::SendStream::set_priority(self, priority);
 	}
 }
 
 #[cfg(feature = "quic")]
-impl moq_net::transport::poll::SendGroup for crate::quic::driver::SendGroup {
+impl moq_net::transport::poll::SendGroup for crate::quic::driver::send::Group {
 	fn set_priority(&mut self, priority: i64) {
 		Self::set_priority(self, priority)
 	}
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::sync::{
 		Arc, Mutex,
@@ -1284,7 +1282,7 @@ mod tests {
 		drop(send);
 
 		// The write stays blocked forever: the reset must not wait behind it.
-		tokio::time::timeout(std::time::Duration::from_secs(1), async {
+		kio::clock::timeout(std::time::Duration::from_secs(1), async {
 			while fake.resets.lock().unwrap().is_empty() {
 				tokio::task::yield_now().await;
 			}
@@ -1333,7 +1331,7 @@ mod tests {
 		drop(recv);
 
 		// The read stays blocked forever: the stop must not wait behind it.
-		tokio::time::timeout(std::time::Duration::from_secs(1), async {
+		kio::clock::timeout(std::time::Duration::from_secs(1), async {
 			while stops.lock().unwrap().is_empty() {
 				tokio::task::yield_now().await;
 			}

@@ -19,10 +19,11 @@ import { NativeSession } from "./session.ts";
 import { Subscribe, SubscribeOk } from "./subscribe.ts";
 import { ALPN, type IetfVersion, Version } from "./version.ts";
 
-const VERSIONS = [Version.DRAFT_18, Version.DRAFT_22] as const;
+const VERSIONS = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22] as const;
 const D18 = Version.DRAFT_18;
+const D20 = Version.DRAFT_20;
 const D22 = Version.DRAFT_22;
-const ALPNS: Record<IetfVersion, string> = { [D18]: ALPN.DRAFT_18, [D22]: ALPN.DRAFT_22 };
+const ALPNS: Record<IetfVersion, string> = { [D18]: ALPN.DRAFT_18, [D20]: ALPN.DRAFT_20, [D22]: ALPN.DRAFT_22 };
 
 const SUBSCRIBE_ID = 7n;
 const FETCH_ID = 9n;

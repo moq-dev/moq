@@ -79,6 +79,15 @@ impl From<AudioCodecArg> for AudioCodecKind {
 	}
 }
 
+/// Whether to select renditions of a medium.
+#[derive(usage_rs::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+	/// Keep renditions matching the name and codec filters.
+	On,
+	/// Select no rendition of this medium.
+	Off,
+}
+
 /// Rendition selection flags for the stdout container sinks that honor them and
 /// native playback. With no flags set, every rendition is kept.
 #[derive(usage_rs::Args, Clone, Default)]
@@ -92,9 +101,9 @@ pub struct SelectArgs {
 	#[usage(long, value_enum)]
 	pub video_codec: Option<VideoCodecArg>,
 
-	/// Leave video out (audio only); native playback opens no window.
-	#[usage(long, conflicts("--video-name", "--video-codec", "--no-audio"))]
-	pub no_video: bool,
+	/// Select video (on by default); off leaves audio only and opens no playback window.
+	#[usage(long, value_enum)]
+	pub video: Option<Mode>,
 
 	/// Pick the audio rendition with this exact name.
 	#[usage(long)]
@@ -104,12 +113,29 @@ pub struct SelectArgs {
 	#[usage(long, value_enum)]
 	pub audio_codec: Option<AudioCodecArg>,
 
-	/// Leave audio out (video only).
-	#[usage(long, conflicts("--audio-name", "--audio-codec"))]
-	pub no_audio: bool,
+	/// Select audio (on by default); off leaves video only.
+	#[usage(long, value_enum)]
+	pub audio: Option<Mode>,
 }
 
 impl SelectArgs {
+	/// Refuse contradictory filters and a selection with both media disabled.
+	pub(crate) fn validate(&self) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			self.video != Some(Mode::Off) || self.audio != Some(Mode::Off),
+			"--video off and --audio off select no renditions"
+		);
+		anyhow::ensure!(
+			self.video != Some(Mode::Off) || (self.video_name.is_none() && self.video_codec.is_none()),
+			"--video off conflicts with --video-name and --video-codec"
+		);
+		anyhow::ensure!(
+			self.audio != Some(Mode::Off) || (self.audio_name.is_none() && self.audio_codec.is_none()),
+			"--audio off conflicts with --audio-name and --audio-codec"
+		);
+		Ok(())
+	}
+
 	/// Build the rendition selection shared by stdout exports and native playback.
 	///
 	/// `force` takes the place of `--video-codec`, for a sink whose format implies
@@ -117,7 +143,7 @@ impl SelectArgs {
 	pub(crate) fn selection(&self, force: Option<VideoCodecKind>) -> select::Broadcast {
 		let mut selection = select::Broadcast::default();
 
-		if !self.no_video {
+		if self.video != Some(Mode::Off) {
 			let mut video = select::Video::default();
 			if let Some(name) = &self.video_name {
 				video = video.name(name);
@@ -128,7 +154,7 @@ impl SelectArgs {
 			selection = selection.video(video);
 		}
 
-		if !self.no_audio {
+		if self.audio != Some(Mode::Off) {
 			let mut audio = select::Audio::default();
 			if let Some(name) = &self.audio_name {
 				audio = audio.name(name);
@@ -147,8 +173,8 @@ impl SelectArgs {
 		[
 			(self.video_name.is_some(), "--video-name"),
 			(self.video_codec.is_some(), "--video-codec"),
-			(self.no_video, "--no-video"),
-			(self.no_audio, "--no-audio"),
+			(self.video.is_some(), "--video"),
+			(self.audio.is_some(), "--audio"),
 		]
 		.into_iter()
 		.find_map(|(given, flag)| given.then_some(flag))
@@ -158,6 +184,7 @@ impl SelectArgs {
 	/// The first flag passed that selects an audio rendition, for a sink with no audio.
 	pub(crate) fn audio_flag(&self) -> Option<&'static str> {
 		[
+			(self.audio == Some(Mode::On), "--audio"),
 			(self.audio_name.is_some(), "--audio-name"),
 			(self.audio_codec.is_some(), "--audio-codec"),
 		]
@@ -404,7 +431,7 @@ impl Subscribe {
 		// Reports a track that stops reaching the output while the rest keeps flowing,
 		// the way `publish` reports one that stops arriving.
 		let mut log = moq_mux::container::ts::stats::Log::default();
-		let mut sampled = moq_clock::now();
+		let mut sampled = kio::clock::now();
 		// The export's drop, gap and out-of-tolerance counts, as last logged.
 		let mut reported = (0, 0, 0, 0);
 		let sections = self.sections;
@@ -426,7 +453,7 @@ impl Subscribe {
 			stdout.flush().await?;
 
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
-				sampled = moq_clock::now();
+				sampled = kio::clock::now();
 				let stats = ts.export().stats();
 				report(&stats);
 				let release = &stats.release;
@@ -461,14 +488,14 @@ impl Subscribe {
 				sections.set(|report| report.release = Some(stats.clone()));
 			}
 		};
-		let mut sampled = moq_clock::now();
+		let mut sampled = kio::clock::now();
 		let mut reported = (0, 0, 0, 0);
 		while let Some(object) = release.next().await? {
 			stdout.write_all(&object.payload).await?;
 			stdout.flush().await?;
 
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
-				sampled = moq_clock::now();
+				sampled = kio::clock::now();
 				let stats = release.stats();
 				report(&stats);
 				let counts = (stats.dropped, stats.trimmed, stats.gaps, stats.out_of_tolerance);

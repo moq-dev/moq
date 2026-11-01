@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Poll, ready};
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::Timestamp;
 
 use super::{Container, Frame, Read, TimestampRewind};
@@ -126,6 +126,12 @@ pub struct Consumer<F: Container> {
 	// Groups that we are monitoring, sorted by sequence ascending.
 	pending: VecDeque<GroupBuffer<F>>,
 
+	// The last group whose input finished, so watching EOF never rescans that prefix.
+	received: Option<u64>,
+
+	// Reap unread evictions only after metadata doubles, charging each sweep to new handles.
+	collect_at: usize,
+
 	// What the pending groups hold, against the max buffer.
 	memory: Memory,
 
@@ -144,7 +150,7 @@ pub struct Consumer<F: Container> {
 	max_delay: std::time::Duration,
 
 	// Wakes the reader once the hole at the cursor expires.
-	hole_timer: Option<std::pin::Pin<Box<moq_clock::Sleep>>>,
+	hole_timer: Option<std::pin::Pin<Box<kio::clock::Sleep>>>,
 
 	// The furthest presentation point delivered so far: max(timestamp + duration), endpoints
 	// included. `None` until the first item, so a loss before it is no gap.
@@ -270,6 +276,8 @@ impl<F: Container> Consumer<F> {
 			format,
 			current: start.unwrap_or(0),
 			pending: VecDeque::new(),
+			received: None,
+			collect_at: 1,
 			memory: Memory::new(DEFAULT_MAX_BUFFER),
 			gated: false,
 			startup: start.is_none(),
@@ -520,7 +528,7 @@ impl<F: Container> Consumer<F> {
 						// Said now rather than with the gap, which waits for the next group: what
 						// the caller holds of this one need not wait for a successor.
 						return Poll::Ready(Ok(Some(Event::Cut {
-							observed: moq_clock::now(),
+							observed: kio::clock::now(),
 						})));
 					}
 					// Cleanly finished group: advance to the next sequence.
@@ -645,7 +653,7 @@ impl<F: Container> Consumer<F> {
 				if let Some(wake) = since.checked_add(self.max_delay) {
 					let timer = self
 						.hole_timer
-						.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(wake)));
+						.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(wake)));
 					timer.as_mut().reset(wake);
 					let _ = waiter.poll_future(timer.as_mut());
 				}
@@ -736,10 +744,32 @@ impl<F: Container> Consumer<F> {
 		}
 	}
 
+	/// Receive group handles and wait for the track and every received group to finish.
+	pub(crate) fn poll_received(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		if self.track.is_none() {
+			return Poll::Ready(());
+		}
+		ready!(self.poll_read_finish(waiter));
+		if self.track_error.is_some() {
+			return Poll::Pending;
+		}
+		let first = self
+			.pending
+			.partition_point(|group| self.received.is_some_and(|last| group.sequence <= last));
+		for group in self.pending.range_mut(first..) {
+			if !matches!(group.group.poll_finished(waiter), Poll::Ready(Ok(_))) {
+				return Poll::Pending;
+			}
+			self.received = Some(group.sequence);
+		}
+		Poll::Ready(())
+	}
+
 	// Reads any new groups from the track until it finished or failed.
 	//
 	// Returns Pending until all groups have been consumed.
 	fn poll_read_finish(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		self.collect_pending(waiter);
 		self.gated = false;
 		if self.track_error.is_some() {
 			return Poll::Ready(());
@@ -787,7 +817,21 @@ impl<F: Container> Consumer<F> {
 				below.late = reader.late;
 			}
 			self.pending.insert(idx, reader);
+			self.collect_pending(waiter);
 		}
+	}
+
+	fn collect_pending(&mut self, waiter: &kio::Waiter) {
+		if self.pending.len() < self.collect_at {
+			return;
+		}
+		let current = self.current;
+		self.pending.retain_mut(|group| {
+			// Keep the cursor's gap and anything already decoded, including markers and faults.
+			// A never-read evicted group holds no event that its missing sequence cannot say.
+			group.sequence == current || !group.empty || !group.poll_aborted(waiter)
+		});
+		self.collect_at = self.pending.len().saturating_mul(2).max(1);
 	}
 
 	// Whether the max buffer holds back the next group: it is full, and the cursor's group already has a
@@ -875,7 +919,7 @@ struct GroupBuffer<F: Container> {
 
 	// From then on, any sequence missing below this group is late: the earliest arrival among it
 	// and the groups past it, kept on insert so a hole reads it without scanning the backlog.
-	late: moq_clock::Instant,
+	late: kio::clock::Instant,
 
 	// The current frame index within the group.
 	index: usize,
@@ -990,8 +1034,8 @@ impl<F: Container> GroupBuffer<F> {
 			self.bare = frames.is_empty();
 		}
 
-		// Decoded payloads are views of the wire payload, which stays allocated until the last of them
-		// is read, so that one also holds whatever of it the views leave out, such as a large header.
+		// Decoded payloads are views of the wire payload, which stays allocated while any of them is
+		// held, so the last one read also holds whatever of it the views leave out, such as a header.
 		let mut views = 0;
 		let first = self.buffered.len();
 		for mut frame in frames {
@@ -1032,8 +1076,14 @@ impl<F: Container> GroupBuffer<F> {
 			self.charge(cost);
 			self.buffered.push_back((frame, arrived, cost));
 		}
+		// Views that leave out more than they keep are copied out, freeing the wire payload, so
+		// whoever holds a frame after the reader retains at most twice its payload.
 		let rest = size.saturating_sub(views);
-		if self.buffered.len() > first
+		if rest > views {
+			for (frame, ..) in self.buffered.range_mut(first..) {
+				frame.payload = bytes::Bytes::copy_from_slice(&frame.payload);
+			}
+		} else if self.buffered.len() > first
 			&& rest > 0
 			&& let Some((_, _, cost)) = self.buffered.back_mut()
 		{
@@ -1267,7 +1317,7 @@ mod tests {
 	async fn read_all(consumer: &mut Consumer<Container>) -> Result<Vec<Frame>, crate::Error> {
 		let mut frames = Vec::new();
 		loop {
-			match tokio::time::timeout(Duration::from_millis(200), consumer.read_frame()).await {
+			match kio::clock::timeout(Duration::from_millis(200), consumer.read_frame()).await {
 				Ok(Ok(Some(frame))) => frames.push(frame),
 				Ok(Ok(None)) => break,
 				Ok(Err(e)) => return Err(e),
@@ -1377,7 +1427,7 @@ mod tests {
 		write_marker_group(&mut track, 16, ts(1_000_000));
 
 		let mut read = async || {
-			tokio::time::timeout(Duration::from_secs(1), reader.read())
+			kio::clock::timeout(Duration::from_secs(1), reader.read())
 				.await
 				.expect("the end is read while the track stays open")
 				.unwrap()
@@ -1454,8 +1504,8 @@ mod tests {
 				assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
 				tokio::time::advance(budget - Duration::from_millis(1)).await;
 				assert!(reader.poll_read(&kio::Waiter::noop()).is_pending());
-				let before = moq_clock::now();
-				let read = moq_clock::timeout(Duration::from_millis(2), reader.read())
+				let before = kio::clock::now();
+				let read = kio::clock::timeout(Duration::from_millis(2), reader.read())
 					.await
 					.unwrap()
 					.unwrap();
@@ -1965,7 +2015,7 @@ mod tests {
 
 		// Finish group 0 after consumer has had time to accumulate pending groups
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			kio::clock::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
 
@@ -2004,7 +2054,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			kio::clock::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
 
@@ -2040,7 +2090,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			kio::clock::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
 
@@ -2459,7 +2509,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 			group0.finish().unwrap();
 		});
 
@@ -2500,7 +2550,7 @@ mod tests {
 
 		track.finish().unwrap();
 
-		let result = tokio::time::timeout(Duration::from_millis(200), consumer.read()).await;
+		let result = kio::clock::timeout(Duration::from_millis(200), consumer.read()).await;
 		match result {
 			Ok(Ok(None)) => {} // expected: track ended
 			Ok(Ok(Some(_))) => panic!("expected None for empty track, got Some"),
@@ -2523,7 +2573,7 @@ mod tests {
 		// The groups already here drain before the track's error, as in JS.
 		let mut frames = Vec::new();
 		let end = loop {
-			let read = tokio::time::timeout(Duration::from_millis(500), consumer.read())
+			let read = kio::clock::timeout(Duration::from_millis(500), consumer.read())
 				.await
 				.expect("Consumer should not hang after track error");
 			match read {
@@ -2699,7 +2749,7 @@ mod tests {
 
 		// Must skip the evicted group + the gap and reach the live group, without
 		// hanging on a track that never finishes.
-		let next = tokio::time::timeout(Duration::from_secs(1), consumer.read())
+		let next = kio::clock::timeout(Duration::from_secs(1), consumer.read())
 			.await
 			.expect("consumer hung on an evicted group / gap")
 			.unwrap()
@@ -2744,7 +2794,7 @@ mod tests {
 
 		// The age budget alone closes the gap: the deadline sits short of the 100ms
 		// hole timer, so waiting it out fails the test.
-		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+		let frame = kio::clock::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
 			.expect("consumer hung on a missing sequence on a live track")
 			.unwrap()
@@ -2774,7 +2824,7 @@ mod tests {
 		// Group 0 is done; group 1's stream is still racing. Within the budget the
 		// consumer waits at the gap rather than skipping to group 2.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			kio::clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"the gap at sequence 1 is within budget and must be waited for"
@@ -2806,7 +2856,7 @@ mod tests {
 		// Group 1's stream wins the race, and the consumer polls before group 0 lands.
 		write_group(&mut track, 1, &[ts(100_000)]);
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			kio::clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"the requested head is within budget and must be waited for"
@@ -2837,7 +2887,7 @@ mod tests {
 
 		// Startup latches onto the lowest arrived sequence and waits under the budget.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			kio::clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"group 0's frames are within budget and must be waited for"
@@ -2920,7 +2970,7 @@ mod tests {
 		let first = consumer.read_frame().await;
 		assert!(matches!(first, Ok(Some(_))), "first frame should decode, got {first:?}");
 
-		let second = tokio::time::timeout(Duration::from_millis(200), consumer.read())
+		let second = kio::clock::timeout(Duration::from_millis(200), consumer.read())
 			.await
 			.expect("consumer hung on a decode error");
 		assert!(
@@ -2941,7 +2991,7 @@ mod tests {
 	/// Read until something other than a frame, failing if the reader stalls.
 	async fn read_past_frames(consumer: &mut Consumer<FailingDecode>) -> Result<Option<Read>, crate::Error> {
 		loop {
-			let read = tokio::time::timeout(Duration::from_millis(200), consumer.read())
+			let read = kio::clock::timeout(Duration::from_millis(200), consumer.read())
 				.await
 				.expect("consumer hung");
 			match read {
@@ -3036,7 +3086,7 @@ mod tests {
 		assert_eq!(first.timestamp, ts(0));
 		// Lookahead finds the error while the reader waits on the open group, which comes first.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			kio::clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err()
 		);
@@ -3044,10 +3094,10 @@ mod tests {
 		slow.finish().unwrap();
 		let frame = consumer.read_frame().await.unwrap().unwrap();
 		assert_eq!(frame.timestamp, ts(10_000));
-		let read = tokio::time::timeout(Duration::from_millis(50), consumer.read()).await;
+		let read = kio::clock::timeout(Duration::from_millis(50), consumer.read()).await;
 		assert!(matches!(read, Ok(Err(crate::Error::UnknownFormat(_)))), "{read:?}");
 		// The reader stays ended rather than resuming with the group's later frames.
-		let read = tokio::time::timeout(Duration::from_millis(50), consumer.read()).await;
+		let read = kio::clock::timeout(Duration::from_millis(50), consumer.read()).await;
 		assert!(matches!(read, Ok(Ok(None))), "{read:?}");
 	}
 
@@ -3105,7 +3155,7 @@ mod tests {
 		rewound.finish().unwrap();
 		// The reader looks ahead into both while it waits on the open group.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			kio::clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err()
 		);
@@ -3155,7 +3205,7 @@ mod tests {
 		write_failing(&mut later, None);
 		// The reader looks ahead into the later group while it waits on the open one.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			kio::clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err()
 		);
@@ -3188,7 +3238,7 @@ mod tests {
 
 		group.abort(moq_net::Error::Cancel).unwrap();
 		track.finish().unwrap();
-		let read = tokio::time::timeout(Duration::from_millis(50), consumer.read()).await;
+		let read = kio::clock::timeout(Duration::from_millis(50), consumer.read()).await;
 		assert!(matches!(read, Ok(Err(crate::Error::UnknownFormat(_)))), "{read:?}");
 	}
 
@@ -3284,15 +3334,15 @@ mod tests {
 		write_group(&mut track, 1, &[ts(100_000)]);
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			kio::clock::sleep(Duration::from_millis(20)).await;
 			// Write group 2: recv_group fires, drops current buffer_until for group 1
 			write_group(&mut track, 2, &[ts(200_000)]);
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			kio::clock::sleep(Duration::from_millis(20)).await;
 			group0.finish().unwrap();
 			track.finish().unwrap();
 		});
 
-		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+		let frames = kio::clock::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read_frame().await.unwrap() {
 				frames.push(frame);
@@ -3372,11 +3422,11 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			kio::clock::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
 
-		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+		let frames = kio::clock::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read_frame().await.unwrap() {
 				frames.push(frame);
@@ -3421,7 +3471,7 @@ mod tests {
 			.unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			kio::clock::sleep(Duration::from_millis(50)).await;
 			Container::Legacy(crate::container::Kind::Data)
 				.write(
 					&mut group7,
@@ -3437,7 +3487,7 @@ mod tests {
 			track.finish().unwrap();
 		});
 
-		let _frames = tokio::time::timeout(Duration::from_secs(2), async {
+		let _frames = kio::clock::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read_frame().await.unwrap() {
 				frames.push(frame);
@@ -3466,7 +3516,7 @@ mod tests {
 
 		// Group 5 is open and within budget: its frames may still arrive, so wait.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			kio::clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"an open frameless group within budget must be waited for"
@@ -3499,7 +3549,7 @@ mod tests {
 
 		// While group 1 is open its frames may still come, so the consumer waits.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			kio::clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"an open frameless group must be waited for"
@@ -3507,7 +3557,7 @@ mod tests {
 
 		// The abort (an eviction) settles it, and the finished track ends cleanly.
 		group1.abort(moq_net::Error::Old).unwrap();
-		let end = tokio::time::timeout(Duration::from_millis(200), consumer.read())
+		let end = kio::clock::timeout(Duration::from_millis(200), consumer.read())
 			.await
 			.expect("an aborted frameless group must not park the consumer");
 		assert!(end.unwrap().is_none(), "the track ends cleanly");
@@ -3531,7 +3581,7 @@ mod tests {
 		track.finish().unwrap();
 
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			kio::clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"the open head group is within budget and must be waited for"
@@ -3578,7 +3628,7 @@ mod tests {
 
 		let mut micros = Vec::new();
 		for _ in 0..2 {
-			let frame = tokio::time::timeout(Duration::from_millis(200), consumer.read_frame())
+			let frame = kio::clock::timeout(Duration::from_millis(200), consumer.read_frame())
 				.await
 				.expect("the open track still delivers the later range")
 				.unwrap()
@@ -3642,7 +3692,7 @@ mod tests {
 		// group is served, and nothing else arrives.
 		write_group(&mut track, 100, &[ts(3_000_000)]);
 
-		let frame = tokio::time::timeout(Duration::from_millis(200), consumer.read_frame())
+		let frame = kio::clock::timeout(Duration::from_millis(200), consumer.read_frame())
 			.await
 			.expect("an unfloored join must not wait out a gap below the served start")
 			.unwrap()
@@ -3678,7 +3728,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			kio::clock::sleep(Duration::from_millis(20)).await;
 			group0.finish().unwrap();
 		});
 
@@ -3713,7 +3763,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			kio::clock::sleep(Duration::from_millis(20)).await;
 			group0.finish().unwrap();
 		});
 
@@ -3752,7 +3802,7 @@ mod tests {
 		track.finish().unwrap();
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			kio::clock::sleep(Duration::from_millis(50)).await;
 			group0.finish().unwrap();
 		});
 
@@ -3838,7 +3888,7 @@ mod tests {
 		assert_eq!(rest[1].timestamp, ts(30_000));
 	}
 
-	/// A live group that outgrows its cache budget is aborted. A reader whose current
+	/// A live group its upstream gave up as too large is aborted. A reader whose current
 	/// group died that way skips forward; the gap is not a decode error.
 	#[tokio::test]
 	async fn oversized_group_skips_to_next() {
@@ -3857,22 +3907,7 @@ mod tests {
 		Container::Legacy(crate::container::Kind::Data)
 			.write(&mut group0, &[first])
 			.unwrap();
-		// Stay under the per-frame cap (hang prefixes a timestamp) so this is a group overflow,
-		// not FrameTooLarge.
-		let overflow = Frame {
-			timestamp: ts(0),
-			payload: Bytes::from(vec![0u8; (moq_net::group::MAX_CACHE_BYTES - 1024) as usize]),
-			keyframe: false,
-			duration: None,
-		};
-		let overflowed = Container::Legacy(crate::container::Kind::Data).write(&mut group0, &[overflow]);
-		assert!(
-			matches!(
-				overflowed,
-				Err(crate::Error::Hang(hang::Error::Moq(moq_net::Error::GroupTooLarge)))
-			),
-			"oversized group must abort as GroupTooLarge, got {overflowed:?}"
-		);
+		group0.abort(moq_net::Error::GroupTooLarge).unwrap();
 
 		write_group(&mut track, 1, &[ts(30_000)]);
 		track.finish().unwrap();
@@ -3893,13 +3928,13 @@ mod tests {
 		write_group(&mut track, 0, &[ts(0)]);
 
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			kio::clock::sleep(Duration::from_millis(20)).await;
 			write_group(&mut track, 1, &[ts(30_000)]);
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			kio::clock::sleep(Duration::from_millis(20)).await;
 			track.finish().unwrap();
 		});
 
-		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+		let frames = kio::clock::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read_frame().await.unwrap() {
 				frames.push(frame);
@@ -3998,7 +4033,7 @@ mod tests {
 
 		track.finish().unwrap();
 
-		let frames = tokio::time::timeout(Duration::from_secs(2), async { continuous_frames(&mut consumer).await })
+		let frames = kio::clock::timeout(Duration::from_secs(2), async { continuous_frames(&mut consumer).await })
 			.await
 			.expect("consumer hung — duration skip regression");
 
@@ -4057,12 +4092,12 @@ mod tests {
 		// A second frame lands on group 0 and finishes it after the consumer has
 		// had a chance to (incorrectly) skip.
 		let finisher = tokio::spawn(async move {
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			kio::clock::sleep(Duration::from_millis(20)).await;
 			write_duration_frame(&mut group0, ts(20_000), ts(10_000));
 			group0.finish().unwrap();
 		});
 
-		let frames = tokio::time::timeout(Duration::from_secs(2), async {
+		let frames = kio::clock::timeout(Duration::from_secs(2), async {
 			let mut frames = Vec::new();
 			while let Some(frame) = consumer.read_frame().await.unwrap() {
 				frames.push(frame);
@@ -4095,7 +4130,7 @@ mod tests {
 				}],
 			)
 			.unwrap();
-		let frame = tokio::time::timeout(Duration::from_secs(1), consumer.read_frame())
+		let frame = kio::clock::timeout(Duration::from_secs(1), consumer.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
@@ -4135,7 +4170,7 @@ mod tests {
 		let slack = 4 * std::mem::size_of::<GroupBuffer<Container>>() + 1024;
 		let mut reads = Vec::new();
 		loop {
-			let read = tokio::time::timeout(Duration::from_secs(5), consumer.read())
+			let read = kio::clock::timeout(Duration::from_secs(5), consumer.read())
 				.await
 				.expect("consumer hung")
 				.unwrap();
@@ -4261,13 +4296,13 @@ mod tests {
 		assert_eq!(frames, vec![ts(0), ts(20_000)]);
 	}
 
-	/// A decoded payload is a view of its wire frame, which stays allocated while the frame is held, so
-	/// the max buffer charges the whole wire frame rather than the view. Here each is a 1 byte payload
-	/// behind a large LOC property block.
+	/// A decoded payload is a view of its wire frame, which stays allocated while the view is held, so a
+	/// view that leaves out most of its wire frame is copied out: what holds the frame after the reader,
+	/// such as an export's jitter buffer, retains only its payload. Here each is a 1 byte payload behind
+	/// a large LOC property block.
 	#[test]
-	fn a_small_view_of_a_large_wire_frame_is_charged_the_wire_frame() {
+	fn a_small_view_of_a_large_wire_frame_is_copied_out() {
 		const PADDING: usize = 60_000;
-		const MAX_BUFFER: usize = 16 * 1024;
 
 		// A QUIC varint, which is all LOC's framing needs.
 		fn varint(buf: &mut Vec<u8>, value: usize) {
@@ -4282,21 +4317,11 @@ mod tests {
 		let track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let subscriber =
 			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(30)));
-		let loc = Container::Loc(crate::container::Kind::Data);
 		let mut consumer = Consumer::new(subscriber, Container::Loc(crate::container::Kind::Data));
-		consumer.set_max_buffer(MAX_BUFFER);
 
-		let mut stalled = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		let frame = Frame {
-			timestamp: ts(0),
-			payload: Bytes::from_static(&[0xDE]),
-			keyframe: false,
-			duration: None,
-		};
-		loc.write(&mut stalled, &[frame]).unwrap();
-		let mut padded = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		let mut padded = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
 		for i in 0..8 {
-			let timestamp = 10_000 + i * 1_000;
+			let timestamp = i * 1_000;
 			// An unknown video-config property (0x0d) padding the frame, then the timestamp (0x10).
 			let mut props = Vec::new();
 			varint(&mut props, 0x0d);
@@ -4312,25 +4337,20 @@ mod tests {
 		}
 		padded.finish().unwrap();
 
-		// The padded frames fill the max buffer behind the stalled group, which moves the cursor on to them.
-		// Charging only the 1 byte views, the buffer never fills and the reader waits on the stall forever.
-		let slack = PADDING + 1024 + 2 * std::mem::size_of::<GroupBuffer<Container>>();
 		let mut reads = Vec::new();
 		while let Poll::Ready(read) = consumer.poll_read(&waiter) {
-			let used = consumer.buffered_bytes();
-			assert!(
-				used <= MAX_BUFFER + slack,
-				"holding {used} bytes past a {MAX_BUFFER} byte max buffer"
-			);
 			match read.unwrap() {
-				Some(Read::Frame { frame, .. }) => reads.push(Some(frame.timestamp)),
-				Some(Read::Gap { .. }) => reads.push(None),
+				Some(Read::Frame { frame, .. }) => {
+					assert_eq!(frame.payload[..], [0xAD]);
+					// The group still holds its wire frames, so a view of one would share it.
+					assert!(frame.payload.is_unique(), "the payload still shares its wire frame");
+					reads.push(frame.timestamp);
+				}
+				Some(Read::End { .. }) | None => break,
 				other => panic!("unexpected read: {other:?}"),
 			}
 		}
-		let mut expected = vec![Some(ts(0)), None];
-		expected.extend((0..8).map(|i| Some(ts(10_000 + i * 1_000))));
-		assert_eq!(reads, expected);
+		assert_eq!(reads, (0..8).map(|i| ts(i * 1_000)).collect::<Vec<_>>());
 	}
 
 	/// A stalled successor does not hide a readable group behind it once group overhead alone fills the
@@ -4529,5 +4549,73 @@ mod tests {
 			}
 		}
 		assert_eq!(reads, vec![Some(ts(0)), None, Some(ts(10_000))]);
+	}
+
+	/// A paused payload reader must not retain metadata for cache entries that were evicted.
+	#[kio::test]
+	async fn receiving_under_backpressure_releases_aborted_group_handles() {
+		let track = track_producer("backpressured", timed());
+		let mut consumer = Consumer::new(
+			track.subscribe(moq_net::track::Subscription::default()),
+			Container::Legacy(crate::container::Kind::Data),
+		);
+		for sequence in 0..256 {
+			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+			Container::Legacy(crate::container::Kind::Data)
+				.write(
+					&mut group,
+					&[Frame {
+						timestamp: ts(sequence * 20_000),
+						payload: Bytes::from_static(b"payload"),
+						keyframe: true,
+						duration: None,
+					}],
+				)
+				.unwrap();
+			assert!(consumer.poll_received(&kio::Waiter::noop()).is_pending());
+			group.abort(moq_net::Error::Evicted).unwrap();
+		}
+		let _ = consumer.poll_received(&kio::Waiter::noop());
+		assert!(
+			consumer.pending.len() <= 2,
+			"doubling compaction bounds metadata by twice the cursor's one retained gap, retained {} aborted group handles",
+			consumer.pending.len()
+		);
+	}
+
+	/// A finished track may still have bytes in flight on a group already received.
+	#[kio::test]
+	async fn received_input_waits_for_group_fin_without_consuming_payload() {
+		let mut track = track_producer("finite", timed());
+		let mut consumer = Consumer::new(
+			track.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(500))),
+			Container::Legacy(crate::container::Kind::Data),
+		);
+		write_group(&mut track, 0, &[ts(0)]);
+		let mut group = track.create_group(moq_net::group::Info { sequence: 1 }).unwrap();
+		Container::Legacy(crate::container::Kind::Data)
+			.write(
+				&mut group,
+				&[Frame {
+					timestamp: ts(20_000),
+					payload: Bytes::from_static(b"tail"),
+					keyframe: true,
+					duration: None,
+				}],
+			)
+			.unwrap();
+		track.finish().unwrap();
+		assert!(consumer.poll_received(&kio::Waiter::noop()).is_pending());
+		assert!(
+			consumer.pending.iter().all(|group| group.empty),
+			"receipt must not decode payload"
+		);
+		group.finish().unwrap();
+		assert!(consumer.poll_received(&kio::Waiter::noop()).is_ready());
+		let mut frames = Vec::new();
+		while let Some(frame) = consumer.read_frame().await.unwrap() {
+			frames.push(frame.timestamp);
+		}
+		assert_eq!(frames, [ts(0), ts(20_000)]);
 	}
 }

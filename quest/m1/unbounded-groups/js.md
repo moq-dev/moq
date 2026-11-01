@@ -11,8 +11,8 @@ as Rust.
 
 See the [epic](/quest/m1/unbounded-groups/README.md) for the decisions.
 
-Decided 2026-10-27 (maintainer): this waits only on
-[Front eviction](/quest/m1/unbounded-groups/front-eviction.md), since
+Decided 2026-10-27 (maintainer): this waited only on Rust front eviction
+([moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)), since
 removing the caps and adding the JS front trigger need nothing from byte
 holes. The chunked frame read and the byte-offset wire mirror moved to
 [JS byte holes](/quest/m1/unbounded-groups/js-byte-holes.md).
@@ -31,11 +31,7 @@ holes. The chunked frame read and the byte-offset wire mirror moved to
 - Update `js/json` and its tests, which lean on the removed constants, and
   the compression paths now in `js/net`. The
   [m1 compression migration](https://github.com/moq-dev/moq/pull/7046) deleted `js/flate`.
-- If [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) is adopted first,
+- If [JS-only @moq/net from Rust](/quest/m2/rs2ts-js.md) is adopted first,
   Rust's caps and eviction apply and this quest is done.
 
 Public API: removes the JS cap constants. Wire: none.
-
-## Required
-
-- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - the Rust contract this mirrors

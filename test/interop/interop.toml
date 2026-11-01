@@ -19,6 +19,7 @@ version = [
     "moq-lite-02",
     "moq-lite-01",
     "moq-transport-22",
+    "moq-transport-20",
     "moq-transport-18",
 ]
 

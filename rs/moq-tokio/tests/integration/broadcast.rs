@@ -84,20 +84,20 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -111,14 +111,14 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 		.expect("consume_track failed");
 
 	// Read one group.
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
 
 	// Read one frame and verify the payload.
-	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group_sub.read_frame())
 		.await
 		.expect("read_frame timed out")
 		.expect("read_frame failed")
@@ -135,9 +135,7 @@ async fn broadcast_test(scheme: &str, client_version: Option<&str>, server_versi
 }
 
 /// Lite05 publisher↔subscriber round-trip exercising the per-frame timestamp
-/// delta encoding, including negative deltas (B-frame ordering). The subscriber decodes
-/// each delta to stay in step with the payloads, then drops it, since a lite-05 timestamp
-/// may be a send time.
+/// delta encoding, including negative deltas (B-frame ordering).
 async fn lite05_timestamp_roundtrip(scheme: &str) {
 	use moq_tokio::moq_net::{Timescale, Timestamp};
 
@@ -195,18 +193,18 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -218,20 +216,23 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		.await
 		.expect("consume_track failed");
 
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
 
 	for &expected_us in &frames {
-		let mut frame_sub = tokio::time::timeout(TIMEOUT, group_sub.next_frame())
+		let mut frame_sub = kio::clock::timeout(TIMEOUT, group_sub.next_frame())
 			.await
 			.expect("next_frame timed out")
 			.expect("next_frame failed")
 			.expect("group closed prematurely");
 
-		assert_eq!(frame_sub.timestamp, None, "a lite-05 subscriber drops timestamps");
+		let ts = frame_sub.timestamp.expect("timed frame");
+		assert_eq!(ts.scale(), Timescale::MICRO);
+		assert_eq!(ts.value(), expected_us);
+
 		let payload = frame_sub.read_all().await.expect("failed to read frame");
 		assert_eq!(payload, bytes::Bytes::from(format!("frame@{expected_us}")));
 	}
@@ -243,7 +244,6 @@ async fn lite05_timestamp_roundtrip(scheme: &str) {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_05_timestamps_webtransport() {
 	lite05_timestamp_roundtrip("https").await;
@@ -251,7 +251,7 @@ async fn broadcast_moq_lite_05_timestamps_webtransport() {
 
 /// Lite05 FETCH round-trip: retrieve a past group by sequence without holding a
 /// subscription, exercising the bare-FRAME fetch response and per-frame timestamp
-/// decoding on the fetch stream, whose timestamps the subscriber then drops. The track is also `compress`-hinted, so the
+/// decoding on the fetch stream. The track is also `compress`-hinted, so the
 /// fetched frames are Deflate-compressed (matching TRACK_INFO) and inflated by the
 /// subscriber, exercising fetch/TRACK_INFO codec consistency.
 async fn lite05_fetch_roundtrip(scheme: &str) {
@@ -309,45 +309,47 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
 
 	// Fetch group 0 directly, without subscribing. No live producer holds the group
 	// on the client, so this issues a wire FETCH upstream.
-	let mut group_sub = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().fetch_group(0, None).await })
+	let mut group_sub = kio::clock::timeout(TIMEOUT, async { bc.track("video").unwrap().fetch_group(0, None).await })
 		.await
 		.expect("fetch timed out")
 		.expect("fetch failed");
 	assert_eq!(group_sub.sequence, 0);
 
 	for &expected_us in &frames {
-		let mut frame_sub = tokio::time::timeout(TIMEOUT, group_sub.next_frame())
+		let mut frame_sub = kio::clock::timeout(TIMEOUT, group_sub.next_frame())
 			.await
 			.expect("next_frame timed out")
 			.expect("next_frame failed")
 			.expect("group closed prematurely");
 
-		assert_eq!(frame_sub.timestamp, None, "a lite-05 subscriber drops timestamps");
+		let ts = frame_sub.timestamp.expect("timed frame");
+		assert_eq!(ts.scale(), Timescale::MICRO);
+		assert_eq!(ts.value(), expected_us);
 
 		let payload = frame_sub.read_all().await.expect("failed to read frame");
 		assert_eq!(payload, bytes::Bytes::from(format!("frame@{expected_us}")));
 	}
 
 	// The fetched group ends cleanly (stream FIN → no more frames).
-	let end = tokio::time::timeout(TIMEOUT, group_sub.next_frame())
+	let end = kio::clock::timeout(TIMEOUT, group_sub.next_frame())
 		.await
 		.expect("next_frame timed out")
 		.expect("next_frame failed");
@@ -360,7 +362,6 @@ async fn lite05_fetch_roundtrip(scheme: &str) {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_05_fetch_webtransport() {
 	// Exercises the WebTransport path; lite-05 is forced via config on both ends.
@@ -421,40 +422,40 @@ async fn transport_fetch_roundtrip(version: &str) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
 
-	let fetched = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().fetch_group(1, None).await })
+	let fetched = kio::clock::timeout(TIMEOUT, async { bc.track("video").unwrap().fetch_group(1, None).await })
 		.await
 		.expect("fetch timed out");
 	let mut group = fetched.expect("fetch failed");
 	assert_eq!(group.sequence, 1);
 	for frame in 0..2 {
-		let payload = tokio::time::timeout(TIMEOUT, group.read_frame())
+		let payload = kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.expect("read timed out")
 			.expect("read failed")
 			.expect("group ended early");
 		assert_eq!(payload.payload, bytes::Bytes::from(format!("1-{frame}")));
 	}
-	let end = tokio::time::timeout(TIMEOUT, group.read_frame())
+	let end = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("read timed out")
 		.expect("read failed");
 	assert!(end.is_none(), "the group ends after its frames");
 
-	let refused = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().fetch_group(7, None).await })
+	let refused = kio::clock::timeout(TIMEOUT, async { bc.track("video").unwrap().fetch_group(7, None).await })
 		.await
 		.expect("fetch timed out");
 	assert!(
@@ -470,13 +471,11 @@ async fn transport_fetch_roundtrip(version: &str) {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn fetch_moq_transport_18() {
 	transport_fetch_roundtrip("moq-transport-18").await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn fetch_moq_transport_22() {
 	transport_fetch_roundtrip("moq-transport-22").await;
@@ -544,35 +543,35 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
 
 	// Subscribe (starts at the latest group) and read the live group, which
 	// establishes the upstream subscription and leaves it active.
-	let mut track_sub = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().subscribe(None).await })
+	let mut track_sub = kio::clock::timeout(TIMEOUT, async { bc.track("video").unwrap().subscribe(None).await })
 		.await
 		.expect("subscribe timed out")
 		.expect("subscribe failed");
-	let mut live = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut live = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
 	assert_eq!(live.sequence, 1);
-	let frame = tokio::time::timeout(TIMEOUT, live.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, live.read_frame())
 		.await
 		.expect("read_frame timed out")
 		.expect("read_frame failed")
@@ -582,12 +581,12 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 	// While the subscription is still held and active, fetch the older group. The
 	// relay doesn't have it cached (subscription started at the latest), so this
 	// must issue a wire FETCH concurrently with the live subscription.
-	let mut fetched = tokio::time::timeout(TIMEOUT, async { bc.track("video").unwrap().fetch_group(0, None).await })
+	let mut fetched = kio::clock::timeout(TIMEOUT, async { bc.track("video").unwrap().fetch_group(0, None).await })
 		.await
 		.expect("fetch timed out")
 		.expect("fetch failed");
 	assert_eq!(fetched.sequence, 0);
-	let frame = tokio::time::timeout(TIMEOUT, fetched.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, fetched.read_frame())
 		.await
 		.expect("fetch read_frame timed out")
 		.expect("fetch read_frame failed")
@@ -602,18 +601,18 @@ async fn lite05_fetch_during_subscribe(scheme: &str) {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_05_fetch_during_subscribe_webtransport() {
 	lite05_fetch_during_subscribe("https").await;
 }
 
 /// Lite05 can't declare an untimed track, so a track that sets no timescale goes out
-/// in milliseconds, its frames stamped with their send time. The subscriber drops them,
-/// so the track arrives untimed.
-#[tracing_test::traced_test]
+/// in milliseconds, its frames stamped with their send time. The subscriber receives
+/// `Some(ts)` at that scale.
 #[tokio::test]
 async fn broadcast_moq_lite_05_untimed_track() {
+	use moq_tokio::moq_net::Timescale;
+
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("create broadcast");
@@ -651,17 +650,17 @@ async fn broadcast_moq_lite_05_untimed_track() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
 
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timeout")
 		.expect("origin closed");
 	assert!(active, "expected announce");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request(&update.prefix, None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request(&update.prefix, None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -673,20 +672,25 @@ async fn broadcast_moq_lite_05_untimed_track() {
 		.await
 		.expect("consume_track failed");
 
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timeout")
 		.expect("recv_group failed")
 		.expect("track closed");
 
-	let frame_sub = tokio::time::timeout(TIMEOUT, group_sub.next_frame())
+	let frame_sub = kio::clock::timeout(TIMEOUT, group_sub.next_frame())
 		.await
 		.expect("next_frame timeout")
 		.expect("next_frame failed")
 		.expect("group closed");
 
-	assert_eq!(frame_sub.timestamp, None, "the send time is dropped");
-	assert_eq!(track_sub.info().timescale, None, "the track arrives untimed");
+	let ts = frame_sub.timestamp.expect("timed frame");
+	assert_eq!(
+		ts.scale(),
+		Timescale::MILLI,
+		"an untimed track's send times are milliseconds"
+	);
+	assert_eq!(track_sub.info().timescale, Some(Timescale::MILLI));
 
 	drop(connection);
 	server_handle
@@ -703,7 +707,6 @@ async fn broadcast_moq_lite_05_untimed_track() {
 /// Both halves have to land in one group, in order and exactly once. Without the fill the
 /// publisher delivers nothing before the live edge, so the join would start at the next
 /// group boundary instead.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_transport_22_current_group_join() {
 	let pub_origin = moq_tokio::origin::spawn();
@@ -748,7 +751,7 @@ async fn broadcast_moq_transport_22_current_group_join() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
@@ -756,17 +759,17 @@ async fn broadcast_moq_transport_22_current_group_join() {
 	let (announced, announced_active) = next_announce(&mut announcements).await;
 	assert_eq!(announced.prefix.as_str(), "test");
 	assert!(announced_active, "expected an announce");
-	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request(&announced.prefix, None))
+	let remote = kio::clock::timeout(TIMEOUT, sub_consumer.request(&announced.prefix, None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
 
-	let mut subscriber = tokio::time::timeout(TIMEOUT, async { remote.track("video").unwrap().subscribe(None).await })
+	let mut subscriber = kio::clock::timeout(TIMEOUT, async { remote.track("video").unwrap().subscribe(None).await })
 		.await
 		.expect("subscribe timed out")
 		.expect("subscribe failed");
 
-	let mut joined = tokio::time::timeout(TIMEOUT, subscriber.recv_group())
+	let mut joined = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
@@ -774,7 +777,7 @@ async fn broadcast_moq_transport_22_current_group_join() {
 	assert_eq!(joined.sequence, 0);
 
 	async fn read(group: &mut moq_net::group::Consumer) -> Option<Vec<u8>> {
-		tokio::time::timeout(TIMEOUT, group.read_frame())
+		kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.expect("read_frame timed out")
 			.expect("read_frame failed")
@@ -800,7 +803,7 @@ async fn broadcast_moq_transport_22_current_group_join() {
 
 /// Wait for the next announce event, failing the test on a timeout or a closed origin.
 async fn next_announce(announcements: &mut moq_net::announce::Consumer) -> (moq_net::announce::Announce, bool) {
-	tokio::time::timeout(TIMEOUT, next_update(announcements))
+	kio::clock::timeout(TIMEOUT, next_update(announcements))
 		.await
 		.expect("announce timeout")
 		.expect("origin closed")
@@ -810,7 +813,6 @@ async fn next_announce(announcements: &mut moq_net::announce::Consumer) -> (moq_
 /// re-announce, and replacement. On lite-06 every retraction references the implicit
 /// announce id rather than repeating the path (the path form doesn't even encode), so
 /// this exercises the id bookkeeping on both sides of the session.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_06_announce_lifecycle() {
 	announce_lifecycle_test("moq-lite-06").await;
@@ -819,7 +821,6 @@ async fn broadcast_moq_lite_06_announce_lifecycle() {
 /// The same lifecycle on lite-07, where every path shares its head with a live one,
 /// so the announcements after the first copy it from a base that the retractions
 /// keep moving.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_07_announce_lifecycle() {
 	announce_lifecycle_test("moq-lite-07-wip").await;
@@ -859,7 +860,7 @@ async fn announce_lifecycle_test(version: &str) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
@@ -922,12 +923,12 @@ async fn announce_lifecycle_test(version: &str) {
 async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Vec<String> {
 	let mut payloads = Vec::new();
 	for _ in 0..count {
-		let mut group = tokio::time::timeout(TIMEOUT, sub.recv_group())
+		let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("recv_group timeout")
 			.expect("recv_group failed")
 			.expect("track closed");
-		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.expect("read_frame timeout")
 			.expect("read_frame failed")
@@ -945,7 +946,6 @@ async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Ve
 /// re-splices through the standby at a group boundary, without the path ever
 /// being retracted: both routes carry the same epoch over lite-07, so they serve
 /// the same bytes and the subscription rides the failover.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_migration() {
 	use moq_net::Timestamp;
@@ -1054,7 +1054,7 @@ async fn broadcast_route_migration() {
 		let client = config.init(Default::default()).expect("init client");
 		let url: url::Url = format!("moqt://localhost:{port}").parse().unwrap();
 		async move {
-			tokio::time::timeout(TIMEOUT, connect_once(client.with_subscriber(sub), url))
+			kio::clock::timeout(TIMEOUT, connect_once(client.with_subscriber(sub), url))
 				.await
 				.expect("connect timeout")
 				.expect("connect failed")
@@ -1073,7 +1073,7 @@ async fn broadcast_route_migration() {
 	let subscription = moq_net::track::Subscription::default()
 		.with_range(1..)
 		.with_max_delay(Duration::from_secs(10));
-	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("routed broadcast resolves");
@@ -1125,7 +1125,6 @@ async fn broadcast_route_migration() {
 /// rejoining player seconds behind live.
 ///
 /// Pre-06 lite is skipped: nothing on those wires says where a subscription starts.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_rejoin_skips_a_stale_warm_cache() {
 	let pre06 = [
@@ -1195,19 +1194,19 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 	config.version = vec![version.parse().unwrap()];
 	let client = config.init(Default::default()).expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
-	let (_client, session) = tokio::time::timeout(TIMEOUT, connect_once(client.with_subscriber(sub_origin), url))
+	let (_client, session) = kio::clock::timeout(TIMEOUT, connect_once(client.with_subscriber(sub_origin), url))
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
 
 	assert!(next_announce(&mut announcements).await.1);
-	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let remote = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("broadcast resolves");
 	let budget = moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(100));
 	async fn recv(sub: &mut moq_net::track::Subscriber, version: &str) -> u64 {
-		tokio::time::timeout(TIMEOUT, sub.recv_group())
+		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: recv timeout"))
 			.expect("recv failed")
@@ -1225,7 +1224,7 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 	drop(sub);
 
 	// The front parks the track and cancels upstream, while the publisher moves on.
-	tokio::time::timeout(TIMEOUT, crate::unwanted(live.demand()))
+	kio::clock::timeout(TIMEOUT, crate::unwanted(live.demand()))
 		.await
 		.expect("upstream never canceled")
 		.expect("track open");
@@ -1263,7 +1262,6 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 /// publisher answers at once. Asking past it would wait for a group that a quiet track (a
 /// catalog) may never send. Covers a finished newest group (a catalog) and one that stays
 /// open (a JSON log appending frames to group 0), on every version.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_rejoin_replays_a_current_warm_cache() {
 	for version in (0xff0dad00..=0xff0dadff)
@@ -1319,26 +1317,26 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 	config.version = vec![version.parse().unwrap()];
 	let client = config.init(Default::default()).expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
-	let (_client, session) = tokio::time::timeout(TIMEOUT, connect_once(client.with_subscriber(sub_origin), url))
+	let (_client, session) = kio::clock::timeout(TIMEOUT, connect_once(client.with_subscriber(sub_origin), url))
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
 
 	assert!(next_announce(&mut announcements).await.1);
-	let remote = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let remote = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("broadcast resolves");
 
 	async fn recv(sub: &mut moq_net::track::Subscriber, ctx: &str) -> moq_net::group::Consumer {
-		tokio::time::timeout(TIMEOUT, sub.recv_group())
+		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.unwrap_or_else(|_| panic!("{ctx}: recv_group timeout"))
 			.expect("recv_group failed")
 			.expect("track closed")
 	}
 	async fn read(group: &mut moq_net::group::Consumer, ctx: &str) -> String {
-		let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.unwrap_or_else(|_| panic!("{ctx}: read_frame timeout"))
 			.expect("read_frame failed")
@@ -1376,7 +1374,7 @@ async fn rejoin_replays_a_current_warm_cache(version: &str, open: bool) {
 		drop(reading);
 		drop(sub);
 		// The front parks the track and cancels upstream before the next round rejoins.
-		tokio::time::timeout(TIMEOUT, crate::unwanted(live.demand()))
+		kio::clock::timeout(TIMEOUT, crate::unwanted(live.demand()))
 			.await
 			.unwrap_or_else(|_| panic!("{ctx}: upstream never canceled"))
 			.expect("track open");
@@ -1449,7 +1447,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	}
 	let client = client_config.init(Default::default()).expect("init client");
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client.with_subscriber(sub_origin), url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client.with_subscriber(sub_origin), url))
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
@@ -1459,7 +1457,7 @@ async fn route_reannounce_test(version: Option<&str>) {
 	assert!(active, "expected announce");
 	let initial = update.route;
 
-	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timeout")
 		.expect("routed broadcast resolves");
@@ -1503,14 +1501,12 @@ async fn route_reannounce_test(version: Option<&str>) {
 }
 
 /// Route re-advertisement on the default version (lite-06: ANNOUNCE_RESTART by id).
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_reannounce() {
 	route_reannounce_test(None).await;
 }
 
 /// Route re-advertisement on the opt-in lite-07-wip (an explicit ANNOUNCE_RESTART by id).
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_route_reannounce_lite_07() {
 	route_reannounce_test(Some("moq-lite-07-wip")).await;
@@ -1518,43 +1514,36 @@ async fn broadcast_route_reannounce_lite_07() {
 
 // ── Raw QUIC (moqt://) – same version on both sides ─────────────────
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_01() {
 	broadcast_test("moqt", Some("moq-lite-01"), Some("moq-lite-01")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_02() {
 	broadcast_test("moqt", Some("moq-lite-02"), Some("moq-lite-02")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_03() {
 	broadcast_test("moqt", Some("moq-lite-03"), Some("moq-lite-03")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_06() {
 	broadcast_test("moqt", Some("moq-lite-06"), Some("moq-lite-06")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_lite_07() {
 	broadcast_test("moqt", Some("moq-lite-07-wip"), Some("moq-lite-07-wip")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_transport_18() {
 	broadcast_test("moqt", Some("moq-transport-18"), Some("moq-transport-18")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_moq_transport_22() {
 	broadcast_test("moqt", Some("moq-transport-22"), Some("moq-transport-22")).await;
@@ -1562,25 +1551,21 @@ async fn broadcast_moq_transport_22() {
 
 // ── Raw QUIC – server supports all versions, client pins one ─────────
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_server_all_client_lite_01() {
 	broadcast_test("moqt", Some("moq-lite-01"), None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_server_all_client_lite_02() {
 	broadcast_test("moqt", Some("moq-lite-02"), None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_server_all_client_lite_03() {
 	broadcast_test("moqt", Some("moq-lite-03"), None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_server_all_client_transport_18() {
 	broadcast_test("moqt", Some("moq-transport-18"), None).await;
@@ -1588,25 +1573,21 @@ async fn broadcast_negotiate_server_all_client_transport_18() {
 
 // ── Raw QUIC – client supports all versions, server pins one ─────────
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_lite_01() {
 	broadcast_test("moqt", None, Some("moq-lite-01")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_lite_02() {
 	broadcast_test("moqt", None, Some("moq-lite-02")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_lite_03() {
 	broadcast_test("moqt", None, Some("moq-lite-03")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_negotiate_client_all_server_transport_18() {
 	broadcast_test("moqt", None, Some("moq-transport-18")).await;
@@ -1653,7 +1634,7 @@ async fn max_age_test(version: &str, published: Option<Duration>) -> Option<Dura
 	let url: url::Url = format!("moqt://localhost:{}", addr.port()).parse().unwrap();
 	// Reconnecting off: the assertions below are written against a single dial, and
 	// a background redial would re-announce behind them.
-	let session = tokio::time::timeout(
+	let session = kio::clock::timeout(
 		TIMEOUT,
 		client
 			.with_subscriber(sub_origin)
@@ -1668,7 +1649,7 @@ async fn max_age_test(version: &str, published: Option<Duration>) -> Option<Dura
 	let (update, active) = next_announce(&mut announcements).await;
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce");
-	let broadcast = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let broadcast = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -1716,37 +1697,31 @@ async fn broadcast_max_age_legacy_omits_property() {
 
 // ── WebTransport (https://) – same version on both sides ────────────
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport() {
 	broadcast_test("https", None, None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_lite_01() {
 	broadcast_test("https", Some("moq-lite-01"), Some("moq-lite-01")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_lite_02() {
 	broadcast_test("https", Some("moq-lite-02"), Some("moq-lite-02")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_lite_03() {
 	broadcast_test("https", Some("moq-lite-03"), Some("moq-lite-03")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_transport_18() {
 	broadcast_test("https", Some("moq-transport-18"), Some("moq-transport-18")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_moq_transport_22() {
 	broadcast_test("https", Some("moq-transport-22"), Some("moq-transport-22")).await;
@@ -1754,25 +1729,21 @@ async fn broadcast_webtransport_moq_transport_22() {
 
 // ── WebTransport – server supports all, client pins one ─────────────
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_server_all_client_lite_01() {
 	broadcast_test("https", Some("moq-lite-01"), None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_server_all_client_lite_02() {
 	broadcast_test("https", Some("moq-lite-02"), None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_server_all_client_lite_03() {
 	broadcast_test("https", Some("moq-lite-03"), None).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_server_all_client_transport_18() {
 	broadcast_test("https", Some("moq-transport-18"), None).await;
@@ -1780,25 +1751,21 @@ async fn broadcast_webtransport_negotiate_server_all_client_transport_18() {
 
 // ── WebTransport – client supports all, server pins one ─────────────
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_client_all_server_lite_01() {
 	broadcast_test("https", None, Some("moq-lite-01")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_client_all_server_lite_02() {
 	broadcast_test("https", None, Some("moq-lite-02")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_client_all_server_lite_03() {
 	broadcast_test("https", None, Some("moq-lite-03")).await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_webtransport_negotiate_client_all_server_transport_18() {
 	broadcast_test("https", None, Some("moq-transport-18")).await;
@@ -1810,7 +1777,6 @@ async fn broadcast_webtransport_negotiate_client_all_server_transport_18() {
 ///
 /// The server binds a WebSocket TCP listener on a separate port.
 /// The client connects directly via ws://, bypassing QUIC entirely.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_websocket() {
 	// ── publisher (server) ──────────────────────────────────────────
@@ -1875,20 +1841,20 @@ async fn broadcast_websocket() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -1902,14 +1868,14 @@ async fn broadcast_websocket() {
 		.expect("consume_track failed");
 
 	// Read one group.
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
 
 	// Read one frame and verify the payload.
-	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group_sub.read_frame())
 		.await
 		.expect("read_frame timed out")
 		.expect("read_frame failed")
@@ -1929,7 +1895,6 @@ async fn broadcast_websocket() {
 /// The client connects via `http://` to the WebSocket port. QUIC tries to
 /// reach that port over UDP and fails (no QUIC listener there). The WebSocket
 /// fallback converts `http://` → `ws://` and connects over TCP, succeeding.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_websocket_fallback() {
 	// ── publisher (server) ──────────────────────────────────────────
@@ -1999,20 +1964,20 @@ async fn broadcast_websocket_fallback() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
 	// Wait for the broadcast announcement.
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -2025,13 +1990,13 @@ async fn broadcast_websocket_fallback() {
 		.await
 		.expect("consume_track failed");
 
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
 
-	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group_sub.read_frame())
 		.await
 		.expect("read_frame timed out")
 		.expect("read_frame failed")
@@ -2060,7 +2025,6 @@ const NEWEST_LITE: &str = "moq-lite-06";
 /// the qmux subprotocol negotiation produced a bare `moql` (or no match)
 /// instead of the newest lite ALPN, which falls through to legacy SETUP negotiation
 /// and picks Lite02. This test fails immediately if that happens.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_websocket_uses_newest_version() {
 	let pub_origin = moq_tokio::origin::spawn();
@@ -2114,7 +2078,7 @@ async fn broadcast_websocket_uses_newest_version() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, cc) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, cc) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -2134,14 +2098,11 @@ async fn broadcast_websocket_uses_newest_version() {
 /// (subscribe/track/announce) silently loses that span's fields. Mirrors
 /// `moq-relay`'s `Connection::run`, whose `#[instrument("conn", fields(addr =
 /// ...))]` span is exactly what this depends on for a QUIC connection.
-///
-/// Needs the crate's `tracing-test/no-env-filter` feature: plain `traced_test`
-/// scopes its `EnvFilter` to this test binary's own crate name, which never
-/// matches `moq-net`, the crate whose log lines this test inspects.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn quic_driver_task_inherits_connection_span() {
 	use tracing::Instrument;
+
+	let logs = crate::Logs::capture();
 
 	let pub_origin = moq_tokio::origin::spawn();
 	let broadcast = pub_origin.create_broadcast("test").expect("failed to create broadcast");
@@ -2193,17 +2154,17 @@ async fn quic_driver_task_inherits_connection_span() {
 		.instrument(conn_span),
 	);
 
-	let (_client, session) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, session) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request(&update.prefix, None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request(&update.prefix, None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
@@ -2220,12 +2181,12 @@ async fn quic_driver_task_inherits_connection_span() {
 	// Actually read the group/frame (as the server sees it), rather than just
 	// issuing the subscribe, so the SUBSCRIBE message is guaranteed to have
 	// reached and been logged by the server before we inspect the log buffer.
-	let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+	let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
-	let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group_sub.read_frame())
 		.await
 		.expect("read_frame timed out")
 		.expect("read_frame failed")
@@ -2237,19 +2198,15 @@ async fn quic_driver_task_inherits_connection_span() {
 	// not enough for the marker to appear *somewhere* in the logs; it must be on
 	// the exact line moq-net emits from inside the driver task the runtime
 	// spawns, or the assertion would pass even without the fix.
-	logs_assert(|lines| {
-		let subscribed = lines
-			.iter()
-			.find(|line| line.contains("subscribed started"))
-			.ok_or("\"subscribed started\" not logged")?;
-		if subscribed.contains("203.0.113.1:56789") {
-			Ok(())
-		} else {
-			Err(format!(
-				"subscribe log lost the connection span's addr field, the runtime isn't instrumenting the driver task\nline: {subscribed}"
-			))
-		}
-	});
+	let logs = logs.text();
+	let subscribed = logs
+		.lines()
+		.find(|line| line.contains("subscribed started"))
+		.expect("\"subscribed started\" not logged");
+	assert!(
+		subscribed.contains("203.0.113.1:56789"),
+		"subscribe log lost the connection span's addr field, the runtime isn't instrumenting the driver task\nline: {subscribed}"
+	);
 
 	drop(session);
 	server_handle
@@ -2308,31 +2265,31 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
 
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timeout")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
 
 	// First subscription: receive group 0.
 	let mut sub1 = bc.track("video").unwrap().subscribe(None).await.expect("subscribe1");
-	let mut g = tokio::time::timeout(TIMEOUT, sub1.recv_group())
+	let mut g = kio::clock::timeout(TIMEOUT, sub1.recv_group())
 		.await
 		.expect("recv group 0 timeout")
 		.expect("recv group 0 failed")
 		.expect("track closed early");
 	assert_eq!(g.sequence, 0);
-	let frame = tokio::time::timeout(TIMEOUT, g.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, g.read_frame())
 		.await
 		.expect("read frame 0 timeout")
 		.expect("read frame 0 failed")
@@ -2346,7 +2303,7 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 	// Yield a few times so the subscriber task can observe the demand going away
 	// and send the FIN. A small real sleep also makes the test less
 	// scheduler-dependent across runtimes.
-	tokio::time::sleep(Duration::from_millis(20)).await;
+	kio::clock::sleep(Duration::from_millis(20)).await;
 
 	let mut sub2 = bc.track("video").unwrap().subscribe(None).await.expect("subscribe2");
 
@@ -2359,13 +2316,13 @@ async fn resubscribe_keeps_flowing_moq_lite_03() {
 
 	let mut saw_group1 = false;
 	for _ in 0..2 {
-		let mut next = tokio::time::timeout(TIMEOUT, sub2.recv_group())
+		let mut next = kio::clock::timeout(TIMEOUT, sub2.recv_group())
 			.await
 			.expect("recv group timeout")
 			.expect("recv group failed")
 			.expect("track closed early");
 		if next.sequence == 1 {
-			let frame = tokio::time::timeout(TIMEOUT, next.read_frame())
+			let frame = kio::clock::timeout(TIMEOUT, next.read_frame())
 				.await
 				.expect("read frame 1 timeout")
 				.expect("read frame 1 failed")
@@ -2449,28 +2406,28 @@ async fn idle_subscription_releases_the_viewer_count() {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("connect timeout")
 		.expect("connect failed");
 
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timeout")
 		.expect("origin closed");
 	assert!(active, "expected announce");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request(&update.prefix, None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request(&update.prefix, None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
 
 	let mut sub = bc.track("video").unwrap().subscribe(None).await.expect("subscribe");
-	let mut g = tokio::time::timeout(TIMEOUT, sub.recv_group())
+	let mut g = kio::clock::timeout(TIMEOUT, sub.recv_group())
 		.await
 		.expect("recv group timeout")
 		.expect("recv group failed")
 		.expect("track closed early");
-	let frame = tokio::time::timeout(TIMEOUT, g.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, g.read_frame())
 		.await
 		.expect("read frame timeout")
 		.expect("read frame failed")
@@ -2483,9 +2440,9 @@ async fn idle_subscription_releases_the_viewer_count() {
 	drop(g);
 	drop(sub);
 
-	let released = tokio::time::timeout(TIMEOUT, async {
+	let released = kio::clock::timeout(TIMEOUT, async {
 		while active_viewers(&registry) != 0 {
-			tokio::time::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 		}
 	})
 	.await;
@@ -2502,7 +2459,6 @@ async fn idle_subscription_releases_the_viewer_count() {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn websocket_unauthorized_handshake_is_explicit() {
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2527,7 +2483,7 @@ async fn websocket_unauthorized_handshake_is_explicit() {
 	let client = client_config.init(Default::default()).expect("failed to init client");
 	let url: url::Url = format!("ws://{addr}").parse().unwrap();
 
-	let err = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let err = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out");
 	let err = expect_connect_err(err);
@@ -2539,7 +2495,6 @@ async fn websocket_unauthorized_handshake_is_explicit() {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn reconnect_stops_on_websocket_unauthorized() {
 	use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2565,7 +2520,7 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 	let url: url::Url = format!("ws://{addr}").parse().unwrap();
 
 	let reconnect = client.connect(url);
-	let err = tokio::time::timeout(TIMEOUT, reconnect.closed())
+	let err = kio::clock::timeout(TIMEOUT, reconnect.closed())
 		.await
 		.expect("reconnect close timed out")
 		.expect_err("reconnect unexpectedly succeeded");
@@ -2587,7 +2542,6 @@ async fn reconnect_stops_on_websocket_unauthorized() {
 ///
 /// The assertion is that `closed()` resolves at all; before the fix the GOAWAY
 /// arm was not polled without reconnecting, and this hung until the test timeout.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn one_shot_goaway_ends_the_connection() {
 	let (mut server, addr) = test_server().await;
@@ -2610,7 +2564,7 @@ async fn one_shot_goaway_ends_the_connection() {
 	});
 
 	let connection = test_client().with_reconnect(false).connect(url);
-	tokio::time::timeout(TIMEOUT, connection.closed())
+	kio::clock::timeout(TIMEOUT, connection.closed())
 		.await
 		.expect("a one-shot GOAWAY must end the connection, not wait for the peer")
 		.expect("leaving on request is a clean close, not an error");
@@ -2623,7 +2577,6 @@ async fn one_shot_goaway_ends_the_connection() {
 
 /// With reconnecting disabled, the session ending ends the connection: its close
 /// reason surfaces through `closed()` and the loop never dials again.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn one_shot_connect_surfaces_the_session_close() {
 	use std::sync::Arc;
@@ -2655,20 +2608,20 @@ async fn one_shot_connect_surfaces_the_session_close() {
 		.expect("failed to init client")
 		.with_reconnect(false);
 
-	let connection = tokio::time::timeout(TIMEOUT, client.connect(url).established())
+	let connection = kio::clock::timeout(TIMEOUT, client.connect(url).established())
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
 
 	// The server aborts the session; one-shot mode turns that into the terminal error.
-	tokio::time::timeout(TIMEOUT, connection.closed())
+	kio::clock::timeout(TIMEOUT, connection.closed())
 		.await
 		.expect("close timed out")
 		.expect_err("a severed session must surface as an error");
 	assert!(!connection.connected());
 
 	// Give a buggy reconnect loop ample time to redial before counting accepts.
-	tokio::time::sleep(Duration::from_millis(200)).await;
+	kio::clock::sleep(Duration::from_millis(200)).await;
 	assert_eq!(
 		accepts.load(Ordering::SeqCst),
 		1,
@@ -2684,7 +2637,6 @@ async fn one_shot_connect_surfaces_the_session_close() {
 /// retries forever, which used to keep them announced forever). The reconnect
 /// exists to restore service, not to hide the outage: the application observes
 /// the loss, and a successful redial re-announces.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 	let (mut server, addr) = test_server().await;
@@ -2718,7 +2670,7 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 	client_config.backoff.timeout = Some((Duration::ZERO).into());
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
-	let connection = tokio::time::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url).established())
+	let connection = kio::clock::timeout(TIMEOUT, client.with_subscriber(sub_origin).connect(url).established())
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
@@ -2728,7 +2680,7 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 	assert!(active, "expected the initial announce");
 
 	// The server kills the session; the loop starts redialing into the void.
-	let session = tokio::time::timeout(TIMEOUT, session_rx)
+	let session = kio::clock::timeout(TIMEOUT, session_rx)
 		.await
 		.expect("server session timed out")
 		.expect("server task gone");
@@ -2746,7 +2698,6 @@ async fn a_dead_session_unannounces_while_the_reconnect_retries() {
 /// A peer that expresses announce-interest in a prefix the publisher can't serve (e.g. a
 /// subscribe-restricted token) must not tear down the whole session. The publisher FINs that
 /// announce stream cleanly; the connection and other announce streams keep working.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn announce_interest_unauthorized_keeps_session_alive() {
 	// ── publisher (server): only allowed to announce under "allowed" ──
@@ -2804,13 +2755,13 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 	});
 
 	let client = client.with_subscriber(consume);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
 	// The "allowed" announce stream still delivers even though "denied" was FINed.
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
@@ -2819,7 +2770,7 @@ async fn announce_interest_unauthorized_keeps_session_alive() {
 
 	// The unauthorized "denied" interest must not have torn down the session.
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), connection.closed())
+		kio::clock::timeout(Duration::from_millis(200), connection.closed())
 			.await
 			.is_err(),
 		"session closed after unauthorized announce interest",
@@ -2895,7 +2846,7 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 	});
 
 	let client = client.with_subscriber(consume);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -2910,24 +2861,24 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 	);
 	assert!(active);
 	assert!(
-		tokio::time::timeout(Duration::from_millis(200), next_update(&mut announcements))
+		kio::clock::timeout(Duration::from_millis(200), next_update(&mut announcements))
 			.await
 			.is_err(),
 		"a path outside one of the grants was announced"
 	);
 
 	// The granted path serves; the excluded ones are refused before the wire.
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("room/alice/chat", None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("room/alice/chat", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
 	let mut sub = bc.track("data").unwrap().subscribe(None).await.expect("subscribe");
-	let mut group = tokio::time::timeout(TIMEOUT, sub.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
 		.expect("track closed");
-	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("read_frame timed out")
 		.expect("read_frame failed")
@@ -2952,27 +2903,23 @@ async fn wildcard_scope_test(version: &str, server_scope: &str) {
 		.expect("server task failed");
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_wildcard_scopes_lite_05() {
 	wildcard_scope_test("moq-lite-05", "room/alice/**").await;
 }
 
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_wildcard_scopes_lite_06() {
 	wildcard_scope_test("moq-lite-06", "room/alice/**").await;
 }
 
 /// A leading-wildcard server grant still filters literal prefix announcements.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_wildcard_server_scope_lite_06() {
 	wildcard_scope_test("moq-lite-06", "*/alice/chat").await;
 }
 
 /// Older wires use the same literal-head interest and local filtering.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn broadcast_wildcard_server_scope_lite_05() {
 	wildcard_scope_test("moq-lite-05", "*/alice/chat").await;
@@ -2982,7 +2929,6 @@ async fn broadcast_wildcard_server_scope_lite_05() {
 /// serving a subscribe-only server (`with_subscriber`, no `with_publisher`). The server is also
 /// interested in a disjoint "denied" prefix the client can't serve, so the server's
 /// subscriber must survive that FIN and still receive the served broadcast.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn publish_only_client_to_subscribe_only_server() {
 	// ── subscriber (server): interested in both "allowed" and "denied" ──
@@ -3013,13 +2959,13 @@ async fn publish_only_client_to_subscribe_only_server() {
 
 		// The client serves "allowed/test"; the "denied" interest is FINed but must not
 		// tear down the session.
-		let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+		let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 			.await
 			.expect("announce timed out")
 			.expect("origin closed");
 		assert_eq!(update.prefix.as_str(), "allowed/test");
 		assert!(active, "expected announce, got retraction");
-		let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("allowed/test", None))
+		let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("allowed/test", None))
 			.await
 			.expect("request timed out")
 			.expect("announced broadcast resolves");
@@ -3030,12 +2976,12 @@ async fn publish_only_client_to_subscribe_only_server() {
 			.subscribe(None)
 			.await
 			.expect("consume_track failed");
-		let mut group_sub = tokio::time::timeout(TIMEOUT, track_sub.recv_group())
+		let mut group_sub = kio::clock::timeout(TIMEOUT, track_sub.recv_group())
 			.await
 			.expect("recv_group timed out")
 			.expect("recv_group failed")
 			.expect("track closed prematurely");
-		let frame = tokio::time::timeout(TIMEOUT, group_sub.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, group_sub.read_frame())
 			.await
 			.expect("read_frame timed out")
 			.expect("read_frame failed")
@@ -3044,7 +2990,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 
 		// The disjoint "denied" interest must not have torn down the session.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(200), session.closed())
+			kio::clock::timeout(Duration::from_millis(200), session.closed())
 				.await
 				.is_err(),
 			"server session closed after unauthorized announce interest",
@@ -3078,7 +3024,7 @@ async fn publish_only_client_to_subscribe_only_server() {
 		)
 		.expect("failed to scope publish origin");
 
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(test_client().with_publisher(publish), url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(test_client().with_publisher(publish), url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
@@ -3192,36 +3138,36 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 	});
 
 	let client = client.with_subscriber(sub_origin);
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client, url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client, url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
 	// Subscribe and read the pre-GOAWAY group.
-	let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announcements))
+	let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announcements))
 		.await
 		.expect("announce timed out")
 		.expect("origin closed");
 	assert_eq!(update.prefix.as_str(), "test");
 	assert!(active, "expected announce, got retraction");
-	let bc = tokio::time::timeout(TIMEOUT, sub_consumer.request("test", None))
+	let bc = kio::clock::timeout(TIMEOUT, sub_consumer.request("test", None))
 		.await
 		.expect("request timed out")
 		.expect("announced broadcast resolves");
 
-	let mut sub = tokio::time::timeout(TIMEOUT, async {
+	let mut sub = kio::clock::timeout(TIMEOUT, async {
 		bc.track("video").expect("track handle").subscribe(None).await
 	})
 	.await
 	.expect("subscribe timed out")
 	.expect("subscribe failed");
 
-	let mut group = tokio::time::timeout(TIMEOUT, sub.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 		.await
 		.expect("recv_group timed out")
 		.expect("recv_group failed")
 		.expect("track closed prematurely");
-	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("read_frame timed out")
 		.expect("read_frame failed")
@@ -3234,7 +3180,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 
 	// Trigger the drain and observe the GOAWAY.
 	start_drain_tx.send(()).expect("send drain signal");
-	let goaway = tokio::time::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+	let goaway = kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("goaway timed out")
 		.expect("session closed before GOAWAY");
@@ -3256,7 +3202,7 @@ async fn goaway_test(scheme: &str, version: &str, expect_wire_timeout: bool) {
 	// Honor the GOAWAY: leave, letting the server's drain complete cleanly.
 	drop(sub);
 	drop(connection);
-	tokio::time::timeout(TIMEOUT, server_handle)
+	kio::clock::timeout(TIMEOUT, server_handle)
 		.await
 		.expect("server drain timed out")
 		.expect("server task panicked")
@@ -3314,14 +3260,14 @@ async fn goaway_timeout_force_close_moq_transport_22_quic() {
 	});
 
 	let sub_origin = moq_tokio::origin::spawn();
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(client.with_subscriber(sub_origin), url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(client.with_subscriber(sub_origin), url))
 		.await
 		.expect("client connect timed out")
 		.expect("client connect failed");
 
 	// Observe the GOAWAY but do NOT leave.
 	let draining = connection.draining().expect("connected");
-	let goaway = tokio::time::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
+	let goaway = kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
 		.await
 		.expect("goaway timed out")
 		.expect("session closed before GOAWAY");
@@ -3333,12 +3279,12 @@ async fn goaway_timeout_force_close_moq_transport_22_quic() {
 	// close can race the server's CONNECTION_CLOSE and stomp it), so the
 	// structured reason is asserted in the deterministic mock test
 	// (rs/moq-net/tests/integration/goaway.rs) instead.
-	let reason = tokio::time::timeout(Duration::from_secs(3), connection.closed())
+	let reason = kio::clock::timeout(Duration::from_secs(3), connection.closed())
 		.await
 		.expect("force-close was not enforced within the deadline");
 	tracing::info!(?reason, "session force-closed after the GOAWAY deadline");
 
-	tokio::time::timeout(TIMEOUT, server_handle)
+	kio::clock::timeout(TIMEOUT, server_handle)
 		.await
 		.expect("server force-close timed out")
 		.expect("server task panicked")
@@ -3366,7 +3312,6 @@ async fn connect_once(
 /// `initial` is both the first delay and the bar a session must clear to count as
 /// healthy, so at zero every session looked healthy, which reset the give-up
 /// window on every pass. The loop then redialed forever, timeout or not.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 	let (mut server, addr) = test_server().await;
@@ -3389,7 +3334,7 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	let connection = client.connect(url);
-	tokio::time::timeout(TIMEOUT, connection.closed())
+	kio::clock::timeout(TIMEOUT, connection.closed())
 		.await
 		.expect("the loop reset its give-up window instead of exhausting it")
 		.expect_err("a flapping peer must exhaust the retry window");
@@ -3402,7 +3347,6 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 /// rides the specified UNAUTHORIZED session code, so it decodes back into a typed
 /// error rather than an opaque transport string, even in one-shot mode where the
 /// session ending is what ends the connection.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn session_close_surfaces_a_rejection_code() {
 	let (mut server, addr) = test_server().await;
@@ -3415,11 +3359,11 @@ async fn session_close_surfaces_a_rejection_code() {
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let (_client, connection) = tokio::time::timeout(TIMEOUT, connect_once(test_client(), url))
+	let (_client, connection) = kio::clock::timeout(TIMEOUT, connect_once(test_client(), url))
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
-	let err = tokio::time::timeout(TIMEOUT, connection.closed())
+	let err = kio::clock::timeout(TIMEOUT, connection.closed())
 		.await
 		.expect("close timed out")
 		.expect_err("a rejected session must surface as an error");
@@ -3431,7 +3375,6 @@ async fn session_close_surfaces_a_rejection_code() {
 /// The same rejection under the reconnect loop: each auth code is specified, so
 /// the loop treats it as terminal instead of retrying the same credentials with
 /// backoff until the give-up timeout.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn reconnect_stops_on_a_session_level_rejection() {
 	for code in [
@@ -3454,7 +3397,7 @@ async fn reconnect_stops_on_a_session_level_rejection() {
 		// default), so `closed` resolving within TIMEOUT proves it stopped on the
 		// rejection itself.
 		let connection = test_client().connect(url);
-		let err = tokio::time::timeout(TIMEOUT, connection.closed())
+		let err = kio::clock::timeout(TIMEOUT, connection.closed())
 			.await
 			.expect("a rejected session must stop the reconnect loop promptly")
 			.expect_err("a rejected session must surface as an error");
@@ -3470,7 +3413,6 @@ async fn reconnect_stops_on_a_session_level_rejection() {
 
 /// One-shot mode is the other way a caller observes the rejection: with no
 /// reconnect loop in the way, the session's close is the terminal error.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn one_shot_surfaces_a_session_level_rejection() {
 	let (mut server, addr) = test_server().await;
@@ -3484,7 +3426,7 @@ async fn one_shot_surfaces_a_session_level_rejection() {
 	});
 
 	let connection = test_client().with_reconnect(false).connect(url);
-	tokio::time::timeout(TIMEOUT, connection.closed())
+	kio::clock::timeout(TIMEOUT, connection.closed())
 		.await
 		.expect("close timed out")
 		.expect_err("a rejected session must surface as an error");
@@ -3499,7 +3441,6 @@ async fn one_shot_surfaces_a_session_level_rejection() {
 /// This covers the ordinary path, where a session is live when `abort` runs. The
 /// race it is paired with (a redial landing inside the abort window) is not
 /// reachable from here, since it turns on when tokio cancels the loop task.
-#[tracing_test::traced_test]
 #[tokio::test]
 async fn abort_carries_its_code_to_the_peer() {
 	let (mut server, addr) = test_server().await;
@@ -3513,14 +3454,14 @@ async fn abort_carries_its_code_to_the_peer() {
 		Ok::<_, anyhow::Error>(())
 	});
 
-	let connection = tokio::time::timeout(TIMEOUT, test_client().connect(url).established())
+	let connection = kio::clock::timeout(TIMEOUT, test_client().connect(url).established())
 		.await
 		.expect("connect timed out")
 		.expect("connect failed");
 
 	connection.abort(moq_net::Error::App(42));
 
-	let reason = tokio::time::timeout(TIMEOUT, reason_rx)
+	let reason = kio::clock::timeout(TIMEOUT, reason_rx)
 		.await
 		.expect("the peer never saw the close")
 		.expect("server task gone");
@@ -3537,7 +3478,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

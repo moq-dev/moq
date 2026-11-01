@@ -15,8 +15,11 @@ From the 2026-10-24 pre-cut audit at 151a529670. Internal only: no public API
 or wire change, so it can ship after the cut. The audit recommended after
 the cut, not before: a rewrite now would discard the large resume test
 corpus right before release. Decided 2026-10-25 (maintainer): the
-[model test](/quest/m1/resume-model-test.md) comes first and gates the cut;
-this rewrite moves to m1 only if that test shows design-level bugs.
+model test (`rs/moq-net/src/model/resume_model.rs`) came first and gated the
+cut; this rewrite moves to m1 only if that test shows design-level bugs.
+It found single missed checks
+([moq-dev/moq#6947](https://github.com/moq-dev/moq/pull/6947)), so this
+stays after the cut, with the model as its oracle.
 
 **Why.** Main replaced release's splice design with per-reader route copies
 in 0382d309f4 (2026-10-04). Since then about 30 of 58 commits to
@@ -71,7 +74,7 @@ b9398f7459, 68c73349a3). Session copies under a front must stop caching for
 themselves and only feed the logical track.
 
 Land it in Rust first, then mirror `js/net` unless
-[rs2ts](/quest/m2/rs2ts/README.md) has replaced it. Extend
+[JS-only @moq/net](/quest/m2/rs2ts-js.md) has replaced it. Extend
 `benches/origin.rs` with the reader times flap sweep before starting, to
 measure the change.
 
@@ -84,5 +87,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [A reserved group survives a route returning](/quest/m1/cut-audit/reserved-route-return.md) - a pre-cut fix this deletes
 - [Recover reads its budget without a sync](/quest/m2/recover-budget.md) - a per-frame cost this deletes

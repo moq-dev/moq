@@ -132,9 +132,6 @@ fn oversized_retry_token() {
 	}
 }
 
-#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-use wasm_bindgen_test::wasm_bindgen_test as test;
-
 #[test]
 fn stateless_retry() {
 	let _guard = subscribe();
@@ -153,7 +150,7 @@ fn stateless_retry() {
 	assert_eq!(pair.server.known_cids(), 0);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn retry_token_expired() {
 	let _guard = subscribe();
 
@@ -172,7 +169,7 @@ async fn retry_token_expired() {
 	pair.drive_client();
 
 	// to expire retry token
-	moq_clock::sleep(retry_token_lifetime + Duration::from_millis(1)).await;
+	kio::clock::sleep(retry_token_lifetime + Duration::from_millis(1)).await;
 
 	pair.drive();
 	assert_matches!(
@@ -376,7 +373,7 @@ fn use_same_token_twice() {
 	assert_eq!(pair.server.known_cids(), 0);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn use_token_expired() {
 	let _guard = subscribe();
 	let lifetime = Duration::from_secs(10000);
@@ -413,7 +410,7 @@ async fn use_token_expired() {
 	assert_eq!(pair.server.known_connections(), 0);
 	assert_eq!(pair.server.known_cids(), 0);
 
-	moq_clock::sleep(lifetime + Duration::from_secs(1)).await;
+	kio::clock::sleep(lifetime + Duration::from_secs(1)).await;
 
 	pair.server.handle_incoming = Box::new(|incoming| {
 		assert!(!incoming.remote_address_validated());

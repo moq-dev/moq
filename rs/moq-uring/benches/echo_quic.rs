@@ -9,6 +9,7 @@ mod support;
 #[cfg(target_os = "linux")]
 #[expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "benchmarks measure themselves on the host clock"
 )]
 mod linux {
@@ -85,7 +86,7 @@ mod linux {
 				let payload = vec![0x5a; PAYLOAD];
 				while let Ok(done) = start_rx.recv() {
 					let (mut send, mut recv) = session.open_bi(Default::default()).await.expect("open stream");
-					send.write_all(&payload).await.expect("write");
+					send.write_all(&payload[..]).await.expect("write");
 					send.finish().expect("finish");
 					assert_eq!(recv.read_to_end(PAYLOAD + 1).await.expect("read").len(), PAYLOAD);
 					done.send(()).expect("notify server");
