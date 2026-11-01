@@ -380,7 +380,7 @@ step() {
         test:gh) just gh test ;;
         fix:rs) just rs fix-changed "$rs_list" ;;
         fix:js) just js fix-changed "$js_list" ;;
-        fix:biome) just biome --write ;;
+        fix:biome) just biome-fix ;;
         fix:markdown)
             bun install
             sh/markdown.sh fix

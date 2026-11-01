@@ -41,7 +41,7 @@ audit:
 
 # Fix repository lint and rebuild all packages to update their API reports.
 fix:
-    just --justfile ../justfile biome --write
+    just --justfile ../justfile biome-fix
     just fix-changed --all
 
 # Rebuild changed workspace packages (or `--all`) to update their API reports.

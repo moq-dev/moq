@@ -130,6 +130,11 @@ biome *args:
     bun install --frozen-lockfile
     bun biome check --error-on-warnings {{ args }} .
 
+# Apply Biome's fixes; installs without a frozen lockfile, like the other fixers.
+biome-fix:
+    bun install
+    bun biome check --error-on-warnings --write .
+
 # Auto-fix lint and formatting for what the branch changed since BASE.
 fix $BASE="":
     sh/dispatch.sh fix "$BASE"
