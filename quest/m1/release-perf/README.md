@@ -7,10 +7,9 @@ Before the next release cut, every benchmark where `main` is slower than
 is fixed. Cost that pays for a feature `main` deliberately added is accepted,
 and the reason is written here.
 
-This epic's own work: once
-[moq-dev/moq#7493](https://github.com/moq-dev/moq/pull/7493) has landed,
-re-pair the relay `fanout` workload against `release` and confirm main's relay
-CPU is no higher in every round. The sparse rows are accepted (2026-10-30). The browser frame path
+This epic's own work: once its children have landed, re-pair the relay
+`fanout` workload against `release` and confirm main's relay CPU is no higher
+in every round. The sparse rows are accepted (2026-10-30). The browser frame path
 needs no repeat; the [performance audit](/quest/m2/audit-perf.md) now pairs
 every later cut with `release`.
 
@@ -278,6 +277,10 @@ to 28, found no high-mode round on either side: relay CPU 0.066 to 0.090 cores
 against release's 0.062 to 0.104, with mixed-sign paired deltas inside
 release's own spread, and 5 to 36% fewer user-space instructions than release
 in every round. The re-pair above, on a quieter host, is what remains.
+
+## Required
+
+- [Relay CPU per frame since #5926](/quest/m1/release-perf/relay-cpu-bisect.md) - the 18-56% rise in relay instructions per delivered frame is bisected, attributed, and its avoidable cost fixed
 
 ## Related
 
