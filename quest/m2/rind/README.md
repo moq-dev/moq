@@ -60,4 +60,3 @@ The epic's own work, once every child has merged:
 - [moq-e2ee on rind](/quest/m2/rind/e2ee.md) - frame and name protection use rind's AES-128-GCM, HKDF, and HMAC
 - [moq-rtc on rind](/quest/m2/rind/rtc.md) - str0m and dimpl run DTLS, SRTP, and STUN on rind
 - [Relay ACME on instant-acme](/quest/m2/rind/acme.md) - moq-relay replaces rustls-acme with instant-acme on rind and owns renewal
-- [moq-cli and moq-hls on rind](/quest/m2/rind/cli.md) - object_store, reqwest, and axum-server take rind's provider
