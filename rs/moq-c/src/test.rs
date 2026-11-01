@@ -1015,7 +1015,7 @@ fn audio_enabled_snapshots_preserve_a_held_consumer() {
 
 	// A held rendition may be opened from a disabled snapshot, then re-enabled without resubscribing.
 	let frames = Callback::new();
-	let track = id(unsafe { moq_consume_audio(disabled, 0, 10_000_000, Some(channel_callback), frames.ptr) });
+	let track = id(unsafe { moq_consume_audio(disabled, 0, &TEN_SECONDS, Some(channel_callback), frames.ptr) });
 	set_enabled(true);
 	let resumed = id(catalogs.recv());
 	assert_eq!(
