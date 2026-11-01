@@ -43,7 +43,7 @@
 use crate::util::SendCell;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, Weak};
 use std::task::{Poll, ready};
 use std::time::Duration;
@@ -714,6 +714,10 @@ pub(super) struct Track {
 	// lock, and wakes only the readers following it.
 	largest: kio::Shared<Largest>,
 
+	// Whether the track ever declared an end, set under the track lock and never cleared,
+	// so a reader looking for one skips that lock until there is one to read.
+	declared: AtomicBool,
+
 	// What the frames this track's groups are still receiving may allocate up front,
 	// shared with every track minted from the same origin handle.
 	frames: super::frame::Budget,
@@ -822,6 +826,7 @@ impl Track {
 			wakes: Default::default(),
 			aborts: OnceLock::new(),
 			largest: Default::default(),
+			declared: AtomicBool::new(false),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);
@@ -847,6 +852,16 @@ impl Track {
 	/// The track's reads parked on their drift budget.
 	pub(super) fn wakes(&self) -> &expiry::Wakes {
 		&self.wakes
+	}
+
+	/// The track declared an end. Called under the track lock.
+	pub(super) fn declare_end(&self) {
+		self.declared.store(true, Ordering::Release);
+	}
+
+	/// Whether the track ever declared an end, so the end may be worth the track lock.
+	pub(super) fn end_declared(&self) -> bool {
+		self.declared.load(Ordering::Acquire)
 	}
 
 	/// Watch every group the publisher cuts, rather than chosen sequences.

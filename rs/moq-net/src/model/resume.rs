@@ -1200,10 +1200,7 @@ impl Reader {
 					_ => None,
 				},
 				None => match &mut copy.sub {
-					Sub::Ready(sub) => match sub.poll_finished(&kio::Waiter::noop()) {
-						Poll::Ready(Ok(end)) => Some(end),
-						_ => None,
-					},
+					Sub::Ready(sub) => sub.declared_end(),
 					Sub::Pending(_) => copy.track.declared_end(),
 				},
 			};
@@ -1268,11 +1265,17 @@ impl Reader {
 		self.learn_end(None);
 		self.window();
 		self.out.retain(|(_, out)| out.strong_count() > 0);
+		// Only a replaced copy is judged against the edge, which costs the serving track's
+		// lock: a reader following one route never pays it.
+		let edge = match self.copies.iter().any(|copy| copy.replaced) {
+			true => self.copies.last().and_then(|copy| copy.track.latest_sequence()),
+			false => None,
+		};
 		let reader = Retain {
 			groups: self.groups,
 			window: &self.window,
 			groups_read: self.groups_read,
-			edge: self.copies.last().and_then(|copy| copy.track.latest_sequence()),
+			edge,
 			mirrored: &self.mirrored,
 			delivered,
 			out: &self.out,
