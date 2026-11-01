@@ -80,7 +80,7 @@ async fn probe(port: u16, peer: bool) -> Seen {
 
 	// The relay widens a peer before it answers SETUP, so its SETUP stream
 	// arrives behind the new credit.
-	let _setup = tokio::time::timeout(TIMEOUT, conn.accept_uni())
+	let _setup = moq_clock::timeout(TIMEOUT, conn.accept_uni())
 		.await
 		.expect("relay SETUP timeout")
 		.expect("relay SETUP");
@@ -89,7 +89,7 @@ async fn probe(port: u16, peer: bool) -> Seen {
 	while streams.len() < PROBE {
 		let open = conn.open_uni(Default::default());
 		let stream = match peer {
-			true => tokio::time::timeout(TIMEOUT, open)
+			true => moq_clock::timeout(TIMEOUT, open)
 				.await
 				.expect("peer stream credit timeout"),
 			false => match open.now_or_never() {
@@ -115,7 +115,7 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 	let deciding = tokio::spawn(async move {
 		let mut leases = Vec::new();
 		for peer in [true, false] {
-			let admission = tokio::time::timeout(TIMEOUT, admissions.next())
+			let admission = moq_clock::timeout(TIMEOUT, admissions.next())
 				.await
 				.expect("admission timeout")
 				.expect("admission");
@@ -265,7 +265,7 @@ async fn static_dial(
 		.expect("cluster init")
 		.with_connect(connect, quic);
 	let running = tokio::spawn(cluster.start().await.expect("cluster start").run());
-	let conn = tokio::time::timeout(TIMEOUT, server.accept())
+	let conn = moq_clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("dial timeout")
 		.expect("incoming")

@@ -1875,34 +1875,100 @@ fn opus_catalog_uses_the_decode_rate() {
 	assert_eq!(a.warmup, Some(std::time::Duration::from_millis(80)));
 }
 
-/// A dOps with a channel mapping table is refused rather than imported without it.
-#[test]
-fn opus_dops_mapping_family_is_refused() {
-	let (_, data) = opus_init(48_000);
-	let (ftyp, mut moov) = decode_init(&data);
+/// `init` with its Opus sample entry declaring `channels` channels and `mapping`.
+fn opus_init_with_mapping(init: &[u8], channels: u8, mapping: mp4_atom::OpusChannelMapping) -> Vec<u8> {
+	let (ftyp, mut moov) = decode_init(init);
 	let mp4_atom::Codec::Opus(opus) = &mut moov.trak[0].mdia.minf.stbl.stsd.codecs[0] else {
 		panic!("expected Opus sample entry");
 	};
-	opus.dops.channel_mapping = Some(mp4_atom::OpusChannelMapping {
-		family: 1,
-		stream_count: 1,
-		coupled_count: 1,
-		channel_mapping: vec![0, 1],
-	});
+	opus.audio.channel_count = channels.into();
+	opus.dops.output_channel_count = channels;
+	opus.dops.channel_mapping = Some(mapping);
 	let mut data = Vec::new();
 	ftyp.encode(&mut data).unwrap();
 	moov.encode(&mut data).unwrap();
+	data
+}
 
-	let mut broadcast = moq_net::broadcast::Info::new().produce();
-	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
-	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
-	assert!(matches!(
-		fmp4.decode(&bytes::BytesMut::from(data.as_slice())),
-		Err(crate::Error::Cmaf(super::Error::Opus(
-			crate::codec::opus::Error::UnsupportedMappingFamily(1)
-		)))
-	));
-	assert!(catalog.snapshot().audio.renditions.is_empty());
+/// A family 1 5.1 dOps imports with its mapping table in the OpusHead description, and
+/// re-exporting that description writes the same dOps, table included.
+#[test]
+fn opus_dops_surround_round_trips() {
+	let (_, data) = opus_init(48_000);
+	let mapping = mp4_atom::OpusChannelMapping {
+		family: 1,
+		stream_count: 4,
+		coupled_count: 2,
+		channel_mapping: vec![0, 4, 1, 2, 3, 5],
+	};
+	let data = opus_init_with_mapping(&data, 6, mapping.clone());
+	let (_, moov) = decode_init(&data);
+	let mp4_atom::Codec::Opus(source) = &moov.trak[0].mdia.minf.stbl.stsd.codecs[0] else {
+		panic!("expected Opus sample entry");
+	};
+
+	let catalog = run_fmp4(&data);
+	let a = catalog.audio.renditions.values().next().expect("opus rendition");
+	assert_eq!(a.channel_count, 6);
+
+	let desc = a.description.as_ref().expect("opus description");
+	let head = crate::codec::opus::Config::parse(&mut desc.as_ref()).unwrap();
+	assert_eq!(head.channel_count, 6);
+	let parsed = head.mapping.expect("mapping table");
+	assert_eq!(parsed.family(), 1);
+	assert_eq!((parsed.streams(), parsed.coupled()), (4, 2));
+	assert_eq!(parsed.table(), &[0, 4, 1, 2, 3, 5]);
+
+	let trak = super::synthesize_audio_trak(1, 48_000, a).expect("synthesize Opus trak");
+	match &trak.mdia.minf.stbl.stsd.codecs[0] {
+		mp4_atom::Codec::Opus(opus) => {
+			assert_eq!(opus.dops, source.dops);
+			assert_eq!(opus.dops.channel_mapping, Some(mapping));
+			assert_eq!(opus.audio.channel_count, 6);
+		}
+		other => panic!("expected Opus sample entry, got {other:?}"),
+	}
+}
+
+/// A dOps mapping the OpusHead cannot describe is refused rather than imported: family 3,
+/// whose OpusHead carries a demixing matrix, and a family 1 table past its 8 channels.
+#[test]
+fn opus_dops_mapping_the_head_cannot_describe_is_refused() {
+	let (_, init) = opus_init(48_000);
+	let cases = [
+		(
+			mp4_atom::OpusChannelMapping {
+				family: 3,
+				stream_count: 2,
+				coupled_count: 2,
+				channel_mapping: vec![0, 1, 2, 3],
+			},
+			crate::codec::opus::Error::UnsupportedMappingFamily(3),
+		),
+		(
+			mp4_atom::OpusChannelMapping {
+				family: 1,
+				stream_count: 9,
+				coupled_count: 0,
+				channel_mapping: (0..9).collect(),
+			},
+			crate::codec::opus::Error::UnsupportedChannelCount(9),
+		),
+	];
+	for (mapping, expected) in cases {
+		let channels = mapping.channel_mapping.len() as u8;
+		let data = opus_init_with_mapping(&init, channels, mapping);
+
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());
+		let err = fmp4.decode(&bytes::BytesMut::from(data.as_slice())).unwrap_err();
+		assert!(
+			matches!(&err, crate::Error::Cmaf(super::Error::Opus(opus)) if opus.to_string() == expected.to_string()),
+			"{err:?}"
+		);
+		assert!(catalog.snapshot().audio.renditions.is_empty());
+	}
 }
 
 // ---- Segment-driven grouping ----

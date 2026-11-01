@@ -717,7 +717,7 @@ pub struct MoqMediaCatalogProducer {
 }
 
 impl MoqMediaCatalogProducer {
-	#[cfg(all(any(feature = "audio", feature = "video"), not(target_arch = "wasm32")))]
+	#[cfg(any(feature = "audio", feature = "video"))]
 	pub(crate) fn broadcast(&self) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		self.broadcast.upgrade().ok_or(MoqError::Closed)
 	}
@@ -1780,7 +1780,7 @@ mod catalog_tests {
 	}
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod timebase_tests {
 	use super::*;
 	use std::time::Duration;

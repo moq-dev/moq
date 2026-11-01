@@ -49,8 +49,10 @@ Approach:
   it in the release pairing.
 - Verify with seven alternating `fanout` rounds against `origin/release`,
   recording `/proc/loadavg`, busy workers, and voluntary context switches
-  per run; a quiet host is preferred. `just bench-profile` cannot yet run the
-  default shared runtime, where the mode shows up.
+  per run; a quiet host is preferred. `release` has no `listen.tcp.tls`, so a
+  `just bench origin/release` pairing passes `"quic ws wss tcp"` (or just
+  `quic`). `just bench-profile` cannot yet run the default shared runtime,
+  where the mode shows up.
 
 Public API: none expected. Wire: none.
 
