@@ -207,12 +207,13 @@ fn interleaved(init: &[u8], tracks: usize, runs: usize, fragments: usize, payloa
 					trun: (0..runs)
 						.map(|run| mp4_atom::Trun {
 							data_offset: Some(0),
-							entries: vec![mp4_atom::TrunEntry {
+							samples: vec![mp4_atom::TrunEntry {
 								duration: Some(trak.mdia.mdhd.timescale / 50),
 								size: Some(payload.len() as u32),
 								flags: Some(if run == 0 { 0 } else { 0x0001_0000 }),
 								cts: None,
-							}],
+							}]
+							.into(),
 						})
 						.collect(),
 					..Default::default()
@@ -678,10 +679,85 @@ fn mkv_chunks(c: &mut Criterion) {
 	group.finish();
 }
 
+/// A one-track VP9 WebM of `total` bytes of keyframe SimpleBlocks, each carrying `payload` bytes.
+fn mkv_payload_file(payload: usize, total: usize) -> Vec<u8> {
+	use webm_iterable::WebmWriter;
+	use webm_iterable::matroska_spec::{Master, MatroskaSpec, SimpleBlock};
+
+	let frame = vec![0x5a; payload];
+	let blocks: Vec<MatroskaSpec> = (0..total / payload)
+		.map(|index| SimpleBlock::new_uncheked(&frame, 1, (index % 1024) as i16, false, None, false, true).into())
+		.collect();
+	let mut data = Vec::new();
+	let mut writer = WebmWriter::new(&mut data);
+	writer
+		.write(&MatroskaSpec::Ebml(Master::Full(vec![MatroskaSpec::DocType(
+			"webm".into(),
+		)])))
+		.unwrap();
+	writer.write(&MatroskaSpec::Segment(Master::Start)).unwrap();
+	writer
+		.write(&MatroskaSpec::Tracks(Master::Full(vec![MatroskaSpec::TrackEntry(
+			Master::Full(vec![
+				MatroskaSpec::TrackNumber(1),
+				MatroskaSpec::TrackType(1),
+				MatroskaSpec::CodecID("V_VP9".into()),
+			]),
+		)])))
+		.unwrap();
+	// Relative block timestamps are 16-bit, so each cluster holds a bounded run of them.
+	for (cluster, blocks) in blocks.chunks(1024).enumerate() {
+		let mut children = vec![MatroskaSpec::Timestamp(cluster as u64 * 1024)];
+		children.extend_from_slice(blocks);
+		writer.write(&MatroskaSpec::Cluster(Master::Full(children))).unwrap();
+	}
+	writer.write(&MatroskaSpec::Segment(Master::End)).unwrap();
+	writer.flush().unwrap();
+	drop(writer);
+	data
+}
+
+/// MKV block payloads across payload and transport chunk sizes.
+fn mkv_payloads(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_all()
+		.build()
+		.unwrap();
+	let _enter = runtime.enter();
+	let mut group = c.benchmark_group("mkv-payloads");
+	for payload in [1024, 64 * 1024, 1024 * 1024] {
+		let data = mkv_payload_file(payload, 4 * 1024 * 1024);
+		group.throughput(Throughput::Bytes(data.len() as u64));
+		for chunk in [1500, 64 * 1024, data.len()] {
+			let id = BenchmarkId::new(format!("payload-{payload}"), format!("chunk-{chunk}"));
+			group.bench_function(id, |b| {
+				b.iter_batched(
+					|| {
+						let mut broadcast = moq_net::broadcast::Info::new().produce();
+						let catalog = moq_mux::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
+						let import = moq_mux::container::mkv::Import::new(broadcast, catalog.reserve());
+						(catalog, import)
+					},
+					|(catalog, mut import)| {
+						for bytes in std::hint::black_box(&data).chunks(chunk) {
+							import.decode(bytes).unwrap();
+						}
+						import.finish().unwrap();
+						(catalog, import)
+					},
+					BatchSize::PerIteration,
+				);
+			});
+		}
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	containers,
 	mkv_chunks,
+	mkv_payloads,
 	interleaved_runs,
 	queued_groups,
 	ts_si_renewal,
