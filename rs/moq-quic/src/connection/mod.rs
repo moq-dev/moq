@@ -1535,9 +1535,28 @@ impl Connection {
 		self.update_keys(None, false);
 	}
 
-	/// Get a session reference
-	pub fn crypto_session(&self) -> &dyn crypto::Session {
-		&*self.crypto
+	/// What the handshake negotiated, once the connection emits [`Event::HandshakeDataReady`]
+	pub fn handshake_data(&self) -> Option<crypto::HandshakeData> {
+		self.crypto.handshake_data()
+	}
+
+	/// The certificate chain the peer presented, end entity first, if it presented one
+	///
+	/// Complete only once the handshake finishes, signaled by [`Event::Connected`].
+	pub fn peer_identity(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+		self.crypto.peer_identity()
+	}
+
+	/// Fill `output` with keying material exported from the TLS session (RFC 5705), using
+	/// `label` and `context` for domain separation
+	#[cfg(test)]
+	pub(crate) fn export_keying_material(
+		&self,
+		output: &mut [u8],
+		label: &[u8],
+		context: &[u8],
+	) -> Result<(), crypto::ExportKeyingMaterialError> {
+		self.crypto.export_keying_material(output, label, context)
 	}
 
 	/// Whether the connection is in the process of being established

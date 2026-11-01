@@ -911,17 +911,11 @@ mod tests {
 	#[test]
 	fn header_encoding() {
 		use crate::Side;
-		use crate::crypto::rustls::{initial_keys, initial_suite_from_provider};
-		#[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
-		use rustls::crypto::aws_lc_rs::default_provider;
-		#[cfg(feature = "ring")]
-		use rustls::crypto::ring::default_provider;
+		use crate::crypto::rustls::{configured_provider, initial_keys, initial_suite};
 		use rustls::quic::Version;
 
 		let dcid = ConnectionId::new(&hex!("06b858ec6f80452b"));
-		let provider = default_provider();
-
-		let suite = initial_suite_from_provider(&std::sync::Arc::new(provider)).unwrap();
+		let suite = initial_suite(&configured_provider()).unwrap();
 		let client = initial_keys(Version::V1, dcid, Side::Client, &suite);
 		let mut buf = Vec::new();
 		let header = Header::Initial(InitialHeader {

@@ -1654,23 +1654,13 @@ impl Serve {
 ///
 /// Returned by [`crate::server::Request::peer_identity`] when the peer presented a
 /// certificate that chained to a configured [`Listen::root`]. Owns the chain
-/// (leaf first) so callers can inspect it, e.g. [`expiry`](Self::expiry),
-/// without re-parsing the type-erased QUIC identity.
+/// (leaf first) so callers can inspect it, e.g. [`expiry`](Self::expiry).
 #[derive(Debug, Clone)]
 pub struct PeerIdentity {
 	chain: Vec<CertificateDer<'static>>,
 }
 
 impl PeerIdentity {
-	/// Wrap the type-erased identity from the QUIC connection.
-	/// Returns `None` if the peer presented no certificate or the identity is
-	/// not a certificate chain.
-	#[cfg(feature = "quic")]
-	pub(crate) fn from_any(identity: Option<Box<dyn std::any::Any>>) -> Option<Self> {
-		let chain = identity?.downcast::<Vec<CertificateDer<'static>>>().ok()?;
-		Some(Self { chain: *chain })
-	}
-
 	/// Wrap a certificate chain a QUIC backend already validated, leaf first.
 	///
 	/// For a listener living outside this crate (the io_uring workers, say)
@@ -2288,7 +2278,6 @@ mod tests {
 		params.self_signed(&key).unwrap().into()
 	}
 
-	#[cfg(feature = "quic")]
 	#[test]
 	fn peer_identity_expiry_reads_not_after() {
 		// notAfter at a whole second so the round-trip is exact.
@@ -2299,10 +2288,7 @@ mod tests {
 		params.not_after = not_after;
 		let cert: CertificateDer<'static> = params.self_signed(&key).unwrap().into();
 
-		// The QUIC backend hands back the chain as a boxed Vec<CertificateDer>.
-		let identity: Box<dyn std::any::Any> = Box::new(vec![cert]);
-		let parsed = PeerIdentity::from_any(Some(identity)).expect("chain parsed");
-		let expiry = parsed.expiry().expect("expiry parsed");
+		let expiry = PeerIdentity::from_chain(vec![cert]).expiry().expect("expiry parsed");
 		assert_eq!(
 			expiry.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH).as_secs(),
 			2_000_000_000
@@ -2326,15 +2312,6 @@ mod tests {
 			let peer = PeerIdentity { chain: vec![cert] };
 			assert_eq!(peer.expiry(), Some(expected));
 		}
-	}
-
-	#[cfg(feature = "quic")]
-	#[test]
-	fn peer_identity_none_without_chain() {
-		assert!(PeerIdentity::from_any(None).is_none());
-		// A wrong downcast type (not a cert chain) yields None rather than panicking.
-		let bogus: Box<dyn std::any::Any> = Box::new(42u32);
-		assert!(PeerIdentity::from_any(Some(bogus)).is_none());
 	}
 
 	#[test]

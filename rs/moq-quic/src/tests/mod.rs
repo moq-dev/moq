@@ -32,7 +32,6 @@ use crate::{
 	cid_generator::{ConnectionIdGenerator, RandomConnectionIdGenerator},
 	congestion::{self, Controller, Factory, Metrics},
 	connection::{Connection, Error as ConnectionError},
-	crypto::rustls::QuicServerConfig,
 	endpoint::{Accepting, ConnectionHandle, DatagramEvent, Dial, Endpoint, Incoming, Received},
 	frame::FrameStruct,
 	packet::{Header, InitialHeader, PacketNumber},
@@ -369,13 +368,10 @@ fn close_before_a_client_certificate_leaves_ends() {
 				PrivatePkcs8KeyDer::from(identity.signing_key.serialize_der()).into(),
 			)
 			.unwrap();
-		let mut client = client::Config::new(Arc::new(crypto::rustls::QuicClientConfig::try_from(client).unwrap()));
+		let mut client = client::Config::new(Arc::new(client));
 		client.transport = cubic_transport();
 
-		let mut pair = Pair::new(
-			Default::default(),
-			server::Config::new(Arc::new(QuicServerConfig::try_from(server).unwrap())),
-		);
+		let mut pair = Pair::new(Default::default(), server::Config::new(Arc::new(server)));
 		let client_ch = connect_before_the_finished_leaves(&mut pair, client);
 
 		let now = pair.time;
@@ -901,14 +897,12 @@ fn export_keying_material() {
 	// client keying material
 	let mut client_buf = [0u8; 64];
 	pair.client_conn_mut(client_ch)
-		.crypto_session()
 		.export_keying_material(&mut client_buf, LABEL, CONTEXT)
 		.unwrap();
 
 	// server keying material
 	let mut server_buf = [0u8; 64];
 	pair.server_conn_mut(server_ch)
-		.crypto_session()
 		.export_keying_material(&mut server_buf, LABEL, CONTEXT)
 		.unwrap();
 
@@ -1075,7 +1069,6 @@ fn reject_missing_client_cert() {
 		)
 		.with_single_cert(vec![cert], PrivateKeyDer::from(key))
 		.unwrap();
-	let config = QuicServerConfig::try_from(config).unwrap();
 
 	let mut pair = Pair::new(Default::default(), server::Config::new(Arc::new(config)));
 
@@ -1361,19 +1354,12 @@ fn alpn_success() {
 	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::HandshakeConfirmed));
 	assert_matches!(pair.server_conn_mut(server_ch).poll(), Some(Event::Connected));
 
-	let hd = pair
-		.client_conn_mut(client_ch)
-		.crypto_session()
-		.handshake_data()
-		.unwrap()
-		.downcast::<crypto::rustls::HandshakeData>()
-		.unwrap();
-	assert_eq!(hd.protocol.unwrap(), &b"bar"[..]);
-	assert_eq!(
-		hd.protocol_version.unwrap().downcast_ref::<rustls::ProtocolVersion>(),
-		Some(&rustls::ProtocolVersion::TLSv1_3)
-	);
-	assert!(hd.cipher_suite.unwrap().downcast_ref::<rustls::CipherSuite>().is_some());
+	let client = pair.client_conn_mut(client_ch).handshake_data().unwrap();
+	assert_eq!(client.alpn.as_deref(), Some(&b"bar"[..]));
+	assert_eq!(client.server_name, None);
+	let server = pair.server_conn_mut(server_ch).handshake_data().unwrap();
+	assert_eq!(server.alpn.as_deref(), Some(&b"bar"[..]));
+	assert_eq!(server.server_name.as_deref(), Some("localhost"));
 }
 
 #[test]
@@ -5757,7 +5743,8 @@ fn application_close_in_initial_is_rejected() {
 	// connection ID, which travels in the clear, so anyone who observes the handshake can do this.
 	let keys = server_config()
 		.crypto
-		.initial_keys(Version::from_wire(version).unwrap(), orig_dst_cid);
+		.initial_keys(Version::from_wire(version).unwrap(), orig_dst_cid)
+		.unwrap();
 	let number = PacketNumber::U8(0);
 	let header = Header::Initial(InitialHeader {
 		dst_cid: client_cid,

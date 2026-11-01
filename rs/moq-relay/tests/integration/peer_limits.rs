@@ -59,13 +59,12 @@ async fn probe(port: u16, peer: bool) -> Seen {
 	connect.tls.insecure = Some(true);
 	let mut tls = connect.tls.build().expect("tls config");
 	tls.alpn_protocols = vec![b"moq-lite-06".to_vec()];
-	let crypto = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic crypto");
 	let endpoint =
 		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
 			.expect("endpoint");
 	let conn = endpoint
 		.connect(
-			&driver::client::Config::new(std::sync::Arc::new(crypto)),
+			&driver::client::Config::new(std::sync::Arc::new(tls)),
 			([127, 0, 0, 1], port).into(),
 			"localhost",
 		)
@@ -236,10 +235,9 @@ pub(crate) fn bare_server(connect: &moq_tokio::connect::Config) -> driver::endpo
 		.iter()
 		.map(|alpn| alpn.as_bytes().to_vec())
 		.collect();
-	let crypto = driver::crypto::rustls::QuicServerConfig::try_from(tls).expect("quic crypto");
 	let mut transport = driver::transport::Config::default();
 	transport.idle_timeout = Some(BARE_IDLE);
-	let mut config = driver::server::Config::new(std::sync::Arc::new(crypto));
+	let mut config = driver::server::Config::new(std::sync::Arc::new(tls));
 	config.transport = transport;
 	driver::endpoint::Endpoint::new(
 		driver::endpoint::Config::default().with_server(config),

@@ -724,13 +724,7 @@ async fn serve_connection(
 	let sni = conn.server_name().map(str::to_owned);
 	// TLS validated this against the configured roots before the connection
 	// existed, so a chain here is an authenticated peer.
-	let identity = conn.peer_chain().map(|chain| {
-		let chain = chain
-			.into_iter()
-			.map(moq_tokio::rustls::pki_types::CertificateDer::from)
-			.collect();
-		moq_tokio::tls::PeerIdentity::from_chain(chain)
-	});
+	let identity = conn.peer_identity().map(moq_tokio::tls::PeerIdentity::from_chain);
 
 	// Browsers speak WebTransport; everyone else raw QUIC. The moq version
 	// rides the ALPN for raw QUIC and the WebTransport subprotocol for `h3`.

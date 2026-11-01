@@ -40,7 +40,3 @@ Decided with the maintainer on 2026-10-26; see the
 Public API: moq-tokio's and moq-quic's `aws-lc-rs` and `ring` features are
 removed (breaking; migrate by dropping them, since rind is always on).
 Unsupported CPUs now fail at startup. Wire: none.
-
-## Required
-
-- [moq-quic's crypto is rustls](/quest/m1/quic-api/crypto.md) - the sealed crypto surface rind plugs into, without the per-provider gates
