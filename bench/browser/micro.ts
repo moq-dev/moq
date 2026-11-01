@@ -98,7 +98,8 @@ try {
 		pages.set(name, page);
 		rows.set(name, []);
 		page.on("console", (message) => {
-			if (/^(lite|ietf|steady|lookahead|sparse|burst|\d+),/.test(message.text())) rows.get(name)?.push(message.text());
+			if (/^(lite|ietf|steady|lookahead|sparse|burst|\d+),/.test(message.text()))
+				rows.get(name)?.push(message.text());
 		});
 		page.on("pageerror", (error) => {
 			console.error(error);
@@ -116,8 +117,7 @@ try {
 			rows.set(variant, []);
 			await pages.get(variant)?.evaluate("globalThis.measure()");
 			const measured = rows.get(variant);
-			if (measured?.length !== expected)
-				throw new Error(`incomplete rows: ${variant}`);
+			if (measured?.length !== expected) throw new Error(`incomplete rows: ${variant}`);
 			samples.push({ round, variant, rows: measured });
 			await Bun.write(
 				values.out,

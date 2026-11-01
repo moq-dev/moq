@@ -196,8 +196,10 @@ export async function run(): Promise<void> {
 	console.log("scenario,groups,frames,publishers,players,ops,gaps,warnings,ns_per_op");
 	const cases: [Scenario, number, number, number, number][] = [];
 	for (const scenario of ["steady", "lookahead", "sparse", "burst"] as const)
-		for (const groups of [1, 16, 256, 1024]) for (const frames of [1, 30]) cases.push([scenario, groups, frames, 1, 1]);
-	for (const publishers of [1, 4]) for (const players of [1, 8]) cases.push(["lookahead", 64, 30, publishers, players]);
+		for (const groups of [1, 16, 256, 1024])
+			for (const frames of [1, 30]) cases.push([scenario, groups, frames, 1, 1]);
+	for (const publishers of [1, 4])
+		for (const players of [1, 8]) cases.push(["lookahead", 64, 30, publishers, players]);
 	for (const [scenario, groups, frames, publishers, players] of cases) {
 		// Small cases repeat, so a coarse browser clock still resolves them.
 		const total = { ns: 0, ops: 0, gaps: 0, warnings: 0 };
