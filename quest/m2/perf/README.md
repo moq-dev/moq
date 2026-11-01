@@ -20,10 +20,8 @@ Planning quests can settle their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:
 
 - Decided in the 2026-10-05 audit: perf quests that edit moq-uring's QUIC
-  driver (Run to quiescence) measure their before and after on `moq-quic`.
-- `moq-uring`'s only backend is `moq-quic`. Every profile names its backend. The
-  historical quiche-flavor numbers cited in
-  [Run to quiescence](/quest/m2/perf/uring-quiescence.md) are re-measured on `moq-quic`.
+  driver measure their before and after on `moq-quic`.
+- `moq-uring`'s only backend is `moq-quic`. Every profile names its backend.
 - Cross-thread wakeups are already cheap: one futex word per worker, at most
   one `futex(FUTEX_WAKE)` per park cycle, wake bursts coalesce through the
   `kio::Tasks` bitset. No eventfd, no MSG_RING, by design (`SINGLE_ISSUER`).
@@ -84,7 +82,6 @@ revisions on the same host and worker count, and profiles with
 - [Relay allocations](/quest/m2/perf/relay-allocs.md) - fewer allocations per delivered frame, starting with per-stream session clones
 - [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md) - a measured verdict on the tokio driver's connection-wide mutex and per-packet endpoint-to-connection hop, with levers built only on evidence
 - [Borrow-free QUIC state](/quest/m2/perf/quic-borrow-free.md) - a prototyped report on sharing connection state with stream handles without `RefCell` or `Mutex`: context passing vs driver-owned state with per-stream channels
-- [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
 - [Streaming frame read owners](/quest/m2/perf/frame-read-owners.md) - readers of a frame still arriving share one byte owner per publication instead of allocating one each per read
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux

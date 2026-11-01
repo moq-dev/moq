@@ -104,6 +104,7 @@ pub(crate) struct Counters {
 	pub completions: Counter,
 	pub enters: Counter,
 	pub turns: Counter,
+	pub passes: Counter,
 	pub sq_full_enters: Counter,
 	sqes: Distribution,
 	cqes: Distribution,
@@ -156,6 +157,7 @@ impl Metrics {
 			completions: self.0.completions.get(),
 			enters: self.0.enters.get(),
 			turns: self.0.turns.get(),
+			passes: self.0.passes.get(),
 			sq_full_enters: self.0.sq_full_enters.get(),
 			sqes: self.0.sqes.snapshot(),
 			cqes: self.0.cqes.snapshot(),
@@ -211,6 +213,10 @@ pub struct Snapshot {
 	pub enters: u64,
 	/// Drive-loop turns, including the final poll that completes the root future.
 	pub turns: u64,
+	/// Passes over the woken tasks. A turn runs passes until one wakes nothing
+	/// or [`crate::Config::passes`] have run, so this over `turns` is the
+	/// passes a turn takes, and how close the budget is to binding.
+	pub passes: u64,
 	/// Enters forced by a full submission queue.
 	pub sq_full_enters: u64,
 	/// Submission entries accepted by each enter, including zero.

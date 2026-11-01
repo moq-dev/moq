@@ -19,6 +19,12 @@ local (`!Send`) task set, and the UDP sockets bound through it.
   turn, from its one clock read; the earliest deadline rides `io_uring_enter`
   as an absolute timeout. Zero timeout SQEs. The queue is the worker's ambient
   clock, and `Handle::run` drives MoQ with it and a single timer.
+- **Turns**: each turn reaps and dispatches completions first, then polls the
+  root future and runs passes over the woken tasks until a pass wakes nothing
+  or `Config::passes` have run, then parks or submits. So a received
+  datagram's routing, its connection's processing, and the reply that stages
+  are carried by the one enter that follows. A connection stages a bounded
+  number of GSO trains per turn, then yields its backlog to the next turn.
 - **Parking**: a futex word per worker. Remote wakes are an atomic store, plus
   one `futex(2)` wake only while the worker is actually parked (a `FUTEX_WAIT`
   SQE armed on the word).
@@ -48,8 +54,8 @@ local (`!Send`) task set, and the UDP sockets bound through it.
   thread through `metrics::Metrics::snapshot`. Buffer-pool health (`ENOBUFS`,
   provided-buffer exhaustion, TX-pool stalls), batch effectiveness (datagrams
   per receive and per send), ring traffic (submissions, completions,
-  `io_uring_enter` calls), and scheduling (turns, parks, remote futex wakes,
-  timer churn). A turn that parks carries its staged SQEs in that enter;
+  `io_uring_enter` calls), and scheduling (turns, task passes, parks, remote
+  futex wakes, timer churn). A turn that parks carries its staged SQEs in that enter;
   notified turns enter only for staged SQEs, deferred completion work, or CQ
   overflow. `sq_full_enters` counts queue-pressure enters. `sqes` and `cqes`
   are fixed histograms of submissions accepted and completions made visible
