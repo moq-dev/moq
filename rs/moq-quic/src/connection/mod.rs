@@ -639,6 +639,9 @@ impl Connection {
 		// Set only when the congestion window itself was full. This is the spec's
 		// `C.is_cwnd_limited`, which a pacing delay must not stand in for.
 		let mut cwnd_blocked = false;
+		// Set once the bandwidth probe sent a duplicate or held one back, which it only does once
+		// the application ran dry
+		let mut probe_filled = false;
 		// Set when the send rate cap held a send back: a local policy, not the path, so the
 		// controller hears it as application-limited.
 		let mut rate_blocked = false;
@@ -679,9 +682,13 @@ impl Connection {
 							self.timers.set(Timer::Pacing, until);
 						}
 						send_blocked = true;
+						probe_filled = true;
 						false
 					}
-					bandwidth_probe::Ready::Send => true,
+					bandwidth_probe::Ready::Send => {
+						probe_filled = true;
+						true
+					}
 				};
 			if (can_send.is_empty() && !bandwidth_probe && (!close || self.spaces[space_id].crypto.is_none()))
 				|| (finish_first && space_id == SpaceId::Initial)
@@ -1110,6 +1117,8 @@ impl Connection {
 			rate_blocked || (space_idx == spaces.len() && !send_blocked && !self.streams.send_window_full());
 		if self.app_limited {
 			self.path.congestion.on_app_limited(self.path.in_flight.bytes);
+		} else if probe_filled {
+			self.path.congestion.on_probe_filled(self.path.in_flight.bytes);
 		}
 
 		if cwnd_blocked {
