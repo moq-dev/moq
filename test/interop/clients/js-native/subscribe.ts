@@ -242,7 +242,7 @@ async function run(): Promise<void> {
 	};
 	printGrant(connection.auth.grant.peek());
 	const unwatch = connection.auth.grant.subscribe(printGrant);
-	let requested: Moq.Origin.Requesting | undefined;
+	let requested: Moq.Origin.Following | undefined;
 	try {
 		if (values.finish) {
 			console.error("finish reader ready");

@@ -109,7 +109,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 		existing.reporters.set(interest, route);
 		// Another request covering the prefix only holds it; the first reporter drives it.
 		if (joined && existing.reporters.keys().next().value === interest) {
-			follow(existing, prefix, route, event.kind === "restart");
+			updateReported(existing, prefix, route, event.kind === "restart");
 		}
 	};
 
@@ -118,7 +118,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 	 * instance, so nothing resolved through the old one is joined again, and an in-place
 	 * update otherwise.
 	 */
-	const follow = (existing: Reported, prefix: Path.Valid, route: Route, restart: boolean) => {
+	const updateReported = (existing: Reported, prefix: Path.Valid, route: Route, restart: boolean) => {
 		if (restart || route.epoch !== existing.handle.route.epoch) {
 			// Inserted before the old one leaves, so local readers see one restart rather than
 			// an end and a start.
@@ -146,7 +146,7 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 			// The next request takes over driving. Without an epoch nothing proves it reports the
 			// instance the handle serves, and the session consumes each request's announcements as
 			// an instance of their own, so the route restarts rather than stitch two together.
-			follow(existing, prefix, next.value, next.value.epoch === undefined);
+			updateReported(existing, prefix, next.value, next.value.epoch === undefined);
 		}
 	};
 
