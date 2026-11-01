@@ -289,9 +289,14 @@ async fn measure(version: &str, cell: Cell) {
 	}
 	done.notify_waiters();
 
-	let shaped = shaper.verify().unwrap_or_else(|err| panic!("shaper: {err:#}"));
+	// Drain every viewer before the shaper's snapshot, so its drops and any forwarding
+	// failure cover the same window as `received` and `lost`.
+	let mut finished = Vec::with_capacity(receivers.len());
 	for receiver in receivers {
-		let (viewer, arrivals) = receiver.await.unwrap();
+		finished.push(receiver.await.unwrap());
+	}
+	let shaped = shaper.verify().unwrap_or_else(|err| panic!("shaper: {err:#}"));
+	for (viewer, arrivals) in finished {
 		let report = Report::new(&viewer, &arrivals, &sent);
 		let overflowed = if viewer.name == "bufferbloat" {
 			shaped.down.overflowed
