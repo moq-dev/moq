@@ -1713,11 +1713,13 @@ impl MoqMediaGroupConsumer {
 			sequence,
 			options,
 		} = config;
-		let (reference, epoch, name, container) = rendition.into_parts();
+		let (reference, identity, name, container) = rendition.into_parts();
 		// Parse the container before fetching so invalid CMAF init data does not leave a
 		// dynamic group request waiting for a consumer that can never read it.
 		let media = media_container(container, moq_mux::container::Kind::Data)?;
-		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
+		let resolved = broadcast
+			.resolve_inner(reference.as_deref(), identity.as_deref())
+			.await?;
 		let options = options.map(moq_net::group::Fetch::from);
 		let group = broadcast
 			.driver

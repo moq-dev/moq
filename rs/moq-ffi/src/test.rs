@@ -276,14 +276,14 @@ fn rendition(id: &str, container: MoqContainer) -> MoqRendition {
 	}
 }
 
-/// A rendition whose catalog `broadcast` field names `reference`, served under `epoch`, an identity.
-fn referencing(reference: Option<&str>, epoch: Option<&str>) -> MoqRendition {
+/// A rendition whose catalog `broadcast` field names `reference`, served under `identity`.
+fn referencing(reference: Option<&str>, identity: Option<&str>) -> MoqRendition {
 	let mut rendition = rendition("video", MoqContainer::Legacy);
 	let MoqRendition::Video { config, .. } = &mut rendition else {
 		unreachable!()
 	};
 	config.broadcast = reference.map(Into::into);
-	config.identity = epoch.map(Into::into);
+	config.identity = identity.map(Into::into);
 	rendition
 }
 
@@ -443,11 +443,11 @@ fn identity_routes_parse_and_refuse() {
 }
 
 #[tokio::test]
-async fn announced_epoch_restarts_on_a_new_epoch() {
+async fn announced_restarts_on_a_new_identity() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
 	let announced = consumer.announced(MoqAnnounceConfig::default()).unwrap();
-	let publication = origin.create_broadcast("epoch-route".into()).unwrap();
+	let publication = origin.create_broadcast("identity-route".into()).unwrap();
 
 	let first = moq_net::Identity::random().to_string();
 	publication
@@ -469,7 +469,7 @@ async fn announced_epoch_restarts_on_a_new_epoch() {
 		.unwrap();
 	match next_event(&announced).await {
 		MoqAnnounceEvent::Restart { announce } => {
-			assert_eq!(announce.prefix, "epoch-route");
+			assert_eq!(announce.prefix, "identity-route");
 			assert_eq!(announce.route.identity, second);
 		}
 		other => panic!("expected a restart, got {other:?}"),
@@ -3427,7 +3427,7 @@ async fn resolve_returns_a_broadcast_that_resolves_further_references() {
 	source.close().unwrap();
 }
 
-/// A reference's epoch names the instance it expects: a broadcast proven to serve another fails
+/// A reference's identity names the instance it expects: a broadcast proven to serve another fails
 /// the rendition, while an unnamed reference, or a route that cannot prove its instance, reads
 /// whichever instance resolves.
 #[tokio::test]
@@ -3435,9 +3435,9 @@ async fn resolve_honors_the_reference_identity() {
 	async fn resolve(
 		broadcast: &MoqBroadcastConsumer,
 		reference: &str,
-		epoch: Option<&str>,
+		identity: Option<&str>,
 	) -> Result<Arc<MoqBroadcastConsumer>, MoqError> {
-		moq_clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some(reference), epoch)))
+		moq_clock::timeout(TIMEOUT, broadcast.resolve(referencing(Some(reference), identity)))
 			.await
 			.expect("timed out resolving the reference")
 	}
@@ -3488,7 +3488,7 @@ async fn resolve_honors_the_reference_identity() {
 		Err(MoqError::InvalidIdentity { .. })
 	));
 
-	// The rendition-based consumers read the epoch off the rendition.
+	// The rendition-based consumers read the identity off the rendition.
 	let config = MoqMediaTrackConfig {
 		rendition: referencing(Some("./source"), Some(&other)),
 		subscription: None,
@@ -5899,7 +5899,7 @@ async fn roundtrip(media: &MoqMediaTrackProducer, track: &MoqMediaTrackConsumer,
 /// is still open, as a GOAWAY drain does. Under another identity that is another instance: the
 /// next `available()` hands it out, and reading it carries on past the old session's close.
 #[tokio::test]
-async fn follow_follows_an_epochless_replacement() {
+async fn follow_follows_a_minted_replacement() {
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let server = MoqServer::new(MoqServerConfig {
 		bind: Some("127.0.0.1:0".into()),
@@ -6087,28 +6087,28 @@ async fn follow_hands_out_the_instance_again_after_an_end() {
 	publication.broadcast().close().unwrap();
 }
 
-/// An epoch pins both resolutions to one publisher instance: a request for another one is
+/// An identity pins both resolutions to one publisher instance: a request for another one is
 /// unroutable, and a follower never hands out another one taking over.
 #[tokio::test]
 async fn an_identity_pins_request_and_follow() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let epoch = moq_net::Identity::random().to_string();
+	let identity = moq_net::Identity::random().to_string();
 	let first = origin.create_broadcast("live".into()).unwrap();
 	first
 		.announce(MoqAnnounceRoute {
-			identity: Some(epoch.clone()),
+			identity: Some(identity.clone()),
 			..Default::default()
 		})
 		.unwrap();
 
-	let pinned = moq_clock::timeout(TIMEOUT, consumer.request("live".into(), Some(epoch.clone())))
+	let pinned = moq_clock::timeout(TIMEOUT, consumer.request("live".into(), Some(identity.clone())))
 		.await
 		.expect("timed out requesting the pinned instance")
 		.unwrap();
 	assert_eq!(
 		pinned.inner().info().identity.as_ref().map(ToString::to_string),
-		Some(epoch.clone())
+		Some(identity.clone())
 	);
 	let err = moq_clock::timeout(
 		TIMEOUT,
@@ -6128,7 +6128,7 @@ async fn an_identity_pins_request_and_follow() {
 		Err(MoqError::InvalidIdentity { .. })
 	));
 
-	let followed = consumer.follow("live".into(), Some(epoch.clone())).unwrap();
+	let followed = consumer.follow("live".into(), Some(identity.clone())).unwrap();
 	moq_clock::timeout(TIMEOUT, followed.available())
 		.await
 		.expect("timed out following the pinned instance")
@@ -6148,7 +6148,7 @@ async fn an_identity_pins_request_and_follow() {
 		.unwrap();
 	assert_ne!(
 		takeover.inner().info().identity.as_ref().map(ToString::to_string),
-		Some(epoch)
+		Some(identity)
 	);
 	let next = std::pin::pin!(followed.available());
 	assert!(

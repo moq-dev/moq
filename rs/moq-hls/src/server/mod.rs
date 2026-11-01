@@ -507,29 +507,29 @@ mod tests {
 	async fn a_replaced_instance_serves_until_it_closes() {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
-		let (old_epoch, new_epoch) = (moq_net::Identity::random(), moq_net::Identity::random());
-		let route = |epoch: &moq_net::Identity| moq_net::origin::Route::default().with_identity(epoch.clone(), 0);
+		let (old_identity, new_identity) = (moq_net::Identity::random(), moq_net::Identity::random());
+		let route = |identity: &moq_net::Identity| moq_net::origin::Route::default().with_identity(identity.clone(), 0);
 
-		let old = origin.publish("live", route(&old_epoch)).expect("publish allowed");
+		let old = origin.publish("live", route(&old_identity)).expect("publish allowed");
 		settle().await;
 		let first = server.broadcaster("live").await.expect("broadcast announced");
-		assert_eq!(first.instance().as_ref(), old_epoch.as_str());
+		assert_eq!(first.instance().as_ref(), old_identity.as_str());
 
-		let new = origin.publish("live", route(&new_epoch)).expect("publish allowed");
+		let new = origin.publish("live", route(&new_identity)).expect("publish allowed");
 		eventually(async || {
 			let current = server.broadcaster("live").await.expect("broadcast announced");
-			current.instance().as_ref() == new_epoch.as_str()
+			current.instance().as_ref() == new_identity.as_str()
 		})
 		.await;
-		let kept = server.instance("live", old_epoch.as_str()).await;
+		let kept = server.instance("live", old_identity.as_str()).await;
 		assert!(
 			kept.is_some_and(|kept| Arc::ptr_eq(&kept, &first)),
 			"the old instance serves"
 		);
 
 		drop(old);
-		eventually(async || server.instance("live", old_epoch.as_str()).await.is_none()).await;
-		assert!(server.instance("live", new_epoch.as_str()).await.is_some());
+		eventually(async || server.instance("live", old_identity.as_str()).await.is_none()).await;
+		assert!(server.instance("live", new_identity.as_str()).await.is_some());
 
 		drop(new);
 		eventually(async || server.inner.broadcasts.lock().unwrap().is_empty()).await;

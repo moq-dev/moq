@@ -4,8 +4,8 @@
 //! records each through its own ascending SUBSCRIBE, so it holds what the publisher's cache
 //! stops serving: a group still missing once the subscription's max delay passes is a gap, never
 //! a stall. Datagrams are never cached, so a track's are recorded from when its subscription
-//! takes effect. The host picks the key prefix, per broadcast path and epoch say, and runs one
-//! producer per broadcast; the producer stores no epoch. See the [crate docs](crate#layout) for
+//! takes effect. The host picks the key prefix, per broadcast path and identity say, and runs one
+//! producer per broadcast; the producer stores no identity. See the [crate docs](crate#layout) for
 //! what it writes.
 //!
 //! A producer started under a prefix that already holds objects resumes each track at the frame

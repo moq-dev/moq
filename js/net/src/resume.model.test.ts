@@ -32,7 +32,7 @@ const GROUPS = 12;
 /** Routes per identity, cheaper the higher the slot. */
 const SLOTS = 3;
 /** The first identity, then one whose routes all undercut it. */
-const EPOCHS = 2;
+const IDENTITIES = [Identity.parse("first"), Identity.parse("second")];
 const READERS = 4;
 const PATH = Path.from("room/alice");
 /** A budget nothing in a case outlives. */
@@ -47,12 +47,10 @@ function frames(group: number): number {
 	return 1 + (group % 3);
 }
 
-/** Frame `frame` of `group` as `epoch` publishes it: every route of one epoch carries it. */
-function payload(epoch: number, group: number, frame: number): string {
-	return `e${epoch}:${group}.${frame}`;
+/** Frame `frame` of `group` as identity number `identity` publishes it: every route of one identity carries it. */
+function payload(identity: number, group: number, frame: number): string {
+	return `i${identity}:${group}.${frame}`;
 }
-
-const EPOCH_IDS = [Identity.parse("first"), Identity.parse("second")];
 
 /** How a route fails: its session closes on the far side. */
 function routeFailure(): Error {
@@ -79,18 +77,18 @@ interface Spec {
 
 type Op =
 	/** The route announces itself to the origin. */
-	| { kind: "up"; epoch: number; slot: number }
+	| { kind: "up"; identity: number; slot: number }
 	/** The route's session fails, failing its copy. */
-	| { kind: "down"; epoch: number; slot: number }
+	| { kind: "down"; identity: number; slot: number }
 	/**
 	 * The route's copy gets up to `frames` more frames of `group`, or of the lowest group it
 	 * lacks, finishing the group once complete.
 	 */
-	| { kind: "write"; epoch: number; slot: number; group?: number; frames: number }
+	| { kind: "write"; identity: number; slot: number; group?: number; frames: number }
 	/** The route gives up `group` with a verdict on its content. */
-	| { kind: "giveUp"; epoch: number; slot: number; group: number }
+	| { kind: "giveUp"; identity: number; slot: number; group: number }
 	/** The route's copy declares the track's end, once it holds the last group. */
-	| { kind: "end"; epoch: number; slot: number }
+	| { kind: "end"; identity: number; slot: number }
 	| { kind: "advance"; ms: number }
 	/** Long enough for idle cached groups to expire. */
 	| { kind: "expire" }
@@ -115,7 +113,7 @@ const range: fc.Arbitrary<Range> = fc.option(
 		.map(([start, len]): Range => [start, Math.min(start + len, GROUPS)]),
 	{ nil: undefined, freq: 2 },
 );
-const epoch = fc.nat({ max: EPOCHS - 1 });
+const identity = fc.nat({ max: IDENTITIES.length - 1 });
 const slot = fc.nat({ max: SLOTS - 1 });
 const reader = fc.nat({ max: READERS - 1 });
 const spec: fc.Arbitrary<Spec> = fc.record({
@@ -132,7 +130,7 @@ const op: fc.Arbitrary<Op> = fc.oneof(
 		weight: 30,
 		arbitrary: fc.record({
 			kind: fc.constant("write" as const),
-			epoch,
+			identity,
 			slot,
 			group: fc.oneof(
 				{ weight: 7, arbitrary: fc.constant(undefined) },
@@ -141,13 +139,18 @@ const op: fc.Arbitrary<Op> = fc.oneof(
 			frames: fc.integer({ min: 1, max: 3 }),
 		}),
 	},
-	{ weight: 8, arbitrary: fc.record({ kind: fc.constant("up" as const), epoch, slot }) },
-	{ weight: 6, arbitrary: fc.record({ kind: fc.constant("down" as const), epoch, slot }) },
+	{ weight: 8, arbitrary: fc.record({ kind: fc.constant("up" as const), identity, slot }) },
+	{ weight: 6, arbitrary: fc.record({ kind: fc.constant("down" as const), identity, slot }) },
 	{
 		weight: 4,
-		arbitrary: fc.record({ kind: fc.constant("giveUp" as const), epoch, slot, group: fc.nat({ max: GROUPS - 2 }) }),
+		arbitrary: fc.record({
+			kind: fc.constant("giveUp" as const),
+			identity,
+			slot,
+			group: fc.nat({ max: GROUPS - 2 }),
+		}),
 	},
-	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("end" as const), epoch, slot }) },
+	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("end" as const), identity, slot }) },
 	{
 		weight: 6,
 		arbitrary: fc.record({ kind: fc.constant("advance" as const), ms: fc.integer({ min: 1, max: 200 }) }),
@@ -324,7 +327,7 @@ class Model {
 	clock: Manual;
 	origin = new OriginProducer();
 	consumer: OriginConsumer;
-	instances = Array.from({ length: EPOCHS }, () => new Instance());
+	instances = Array.from({ length: IDENTITIES.length }, () => new Instance());
 	readers: (Reader | undefined)[] = Array.from({ length: READERS }, () => undefined);
 	/** The first check a frame read failed, which ends the case once it settles. */
 	failure?: Error;
@@ -339,10 +342,10 @@ class Model {
 	async apply(op: Op): Promise<void> {
 		switch (op.kind) {
 			case "up":
-				this.up(op.epoch, op.slot);
+				this.up(op.identity, op.slot);
 				break;
 			case "down": {
-				const instance = this.instances[op.epoch];
+				const instance = this.instances[op.identity];
 				const copy = instance.routes[op.slot];
 				if (!copy) return;
 				instance.routes[op.slot] = undefined;
@@ -352,13 +355,13 @@ class Model {
 				copy.broadcast.close();
 				if (instance.live().length === 0) {
 					for (const reader of this.readers) {
-						if (reader?.instance === op.epoch) reader.doomed = true;
+						if (reader?.instance === op.identity) reader.doomed = true;
 					}
 				}
 				break;
 			}
 			case "write": {
-				const copy = this.instances[op.epoch].routes[op.slot];
+				const copy = this.instances[op.identity].routes[op.slot];
 				if (!copy) return;
 				let group = op.group;
 				if (group === undefined) {
@@ -369,11 +372,11 @@ class Model {
 						}
 					}
 				}
-				if (group !== undefined) this.write(op.epoch, op.slot, group, op.frames);
+				if (group !== undefined) this.write(op.identity, op.slot, group, op.frames);
 				break;
 			}
 			case "giveUp": {
-				const instance = this.instances[op.epoch];
+				const instance = this.instances[op.identity];
 				const copy = instance.routes[op.slot];
 				if (!copy || complete(copy, op.group) || copy.givenUp.has(op.group)) return;
 				copy.givenUp.add(op.group);
@@ -388,7 +391,7 @@ class Model {
 				break;
 			}
 			case "end":
-				this.end(op.epoch, op.slot);
+				this.end(op.identity, op.slot);
 				break;
 			case "advance":
 				await this.clock.advance(Nano.fromMilli(Milli(op.ms)));
@@ -429,14 +432,14 @@ class Model {
 		}
 	}
 
-	up(epoch: number, slot: number): void {
-		const instance = this.instances[epoch];
+	up(identity: number, slot: number): void {
+		const instance = this.instances[identity];
 		if (instance.routes[slot]) return;
 		const route = Route.normalize({
-			identity: EPOCH_IDS[epoch],
-			hops: [HopSchema.parse(BigInt(10 * (epoch + 1) + slot))],
+			identity: IDENTITIES[identity],
+			hops: [HopSchema.parse(BigInt(10 * (identity + 1) + slot))],
 			// The second identity's routes all undercut the first's.
-			cost: BigInt((EPOCHS - epoch) * SLOTS - slot),
+			cost: BigInt((IDENTITIES.length - identity) * SLOTS - slot),
 		});
 		const serving = wireOf(this.origin).receive(PATH, route);
 		const broadcast = new BroadcastProducer();
@@ -445,15 +448,15 @@ class Model {
 			for await (const request of serving.requested()) {
 				hooks.acceptRequest(
 					request,
-					Upstream.of(broadcast, (sequence, local) => this.fill(epoch, slot, sequence, local)),
+					Upstream.of(broadcast, (sequence, local) => this.fill(identity, slot, sequence, local)),
 				);
 			}
 		})();
 		instance.routes[slot] = { track: producer, serving, broadcast, groups: new Map(), givenUp: new Set() };
 	}
 
-	write(epoch: number, slot: number, group: number, more: number): void {
-		const instance = this.instances[epoch];
+	write(identity: number, slot: number, group: number, more: number): void {
+		const instance = this.instances[identity];
 		const copy = instance.routes[slot];
 		if (!copy || copy.givenUp.has(group) || complete(copy, group)) return;
 		let entry = copy.groups.get(group);
@@ -478,7 +481,7 @@ class Model {
 		const until = Math.min(entry.written + more, frames(group));
 		while (entry.written < until) {
 			const timestamp = Timestamp.fromMillis(group * 10 + entry.written);
-			writer.writeFrame({ payload: enc.encode(payload(epoch, group, entry.written)), timestamp });
+			writer.writeFrame({ payload: enc.encode(payload(identity, group, entry.written)), timestamp });
 			entry.written++;
 		}
 		if (entry.written === frames(group)) {
@@ -494,13 +497,13 @@ class Model {
 	 * holds every frame any of its routes wrote. Later writes to the route continue the group.
 	 */
 	async fill(
-		epoch: number,
+		identity: number,
 		slot: number,
 		sequence: number,
 		local: () => Promise<GroupConsumer>,
 	): Promise<GroupConsumer> {
 		this.progress++;
-		const instance = this.instances[epoch];
+		const instance = this.instances[identity];
 		const copy = instance.routes[slot];
 		if (!copy) throw routeFailure();
 		if (copy.givenUp.has(sequence)) throw giveUp();
@@ -510,12 +513,12 @@ class Model {
 		const writer = copy.track.createGroup(sequence);
 		copy.groups.set(sequence, { written: 0, writer });
 		const group = writer.consume();
-		this.write(epoch, slot, sequence, written);
+		this.write(identity, slot, sequence, written);
 		return group;
 	}
 
-	end(epoch: number, slot: number): void {
-		const instance = this.instances[epoch];
+	end(identity: number, slot: number): void {
+		const instance = this.instances[identity];
 		const copy = instance.routes[slot];
 		if (!copy?.groups.has(GROUPS - 1)) return;
 		copy.track.finish();
@@ -526,9 +529,9 @@ class Model {
 		if (this.readers[index]) return;
 		// The newest instance with a route wins the path.
 		let expected: number | undefined;
-		for (let epoch = EPOCHS - 1; epoch >= 0; epoch--) {
-			if (this.instances[epoch].live().length > 0) {
-				expected = epoch;
+		for (let identity = IDENTITIES.length - 1; identity >= 0; identity--) {
+			if (this.instances[identity].live().length > 0) {
+				expected = identity;
 				break;
 			}
 		}
@@ -544,7 +547,7 @@ class Model {
 			await this.clock.advance(Nano.zero);
 		}
 		const broadcast = request.active.peek();
-		const instance = broadcast?.identity === undefined ? -1 : EPOCH_IDS.indexOf(broadcast.identity);
+		const instance = broadcast?.identity === undefined ? -1 : IDENTITIES.indexOf(broadcast.identity);
 		if (!broadcast || instance === -1) {
 			request.close();
 			throw fail(index, "resolved no known instance");
@@ -725,10 +728,11 @@ class Model {
 	 */
 	async conclude(finish: boolean): Promise<void> {
 		const before = this.readers.map((reader) => reader && max(reader.handed));
-		for (let epoch = 0; epoch < EPOCHS; epoch++) {
+		for (let identity = 0; identity < IDENTITIES.length; identity++) {
 			for (let slot = 0; slot < SLOTS; slot++) {
-				for (let group = 0; group < GROUPS; group++) this.write(epoch, slot, group, Number.POSITIVE_INFINITY);
-				if (finish) this.end(epoch, slot);
+				for (let group = 0; group < GROUPS; group++)
+					this.write(identity, slot, group, Number.POSITIVE_INFINITY);
+				if (finish) this.end(identity, slot);
 			}
 		}
 		await this.settle();
@@ -861,9 +865,9 @@ test("unchanged routes keep groups owed", async () => {
 		model.up(0, 0);
 		const ops: Op[] = [
 			{ kind: "join", reader: 0, spec: { ordered: false, budget: "hour", range: undefined, drops: false } },
-			{ kind: "write", epoch: 0, slot: 0, group: 8, frames: 1 },
-			{ kind: "up", epoch: 0, slot: 0 },
-			{ kind: "down", epoch: 0, slot: 1 },
+			{ kind: "write", identity: 0, slot: 0, group: 8, frames: 1 },
+			{ kind: "up", identity: 0, slot: 0 },
+			{ kind: "down", identity: 0, slot: 1 },
 		];
 		for (const op of ops) {
 			await model.apply(op);
@@ -891,9 +895,9 @@ test("regressions", async () => {
 		// An ordered reader ends once the rest of its range was given up.
 		{
 			ops: [
-				{ kind: "up", epoch: 1, slot: 2 },
+				{ kind: "up", identity: 1, slot: 2 },
 				{ kind: "join", reader: 0, spec: spec(true, "hour", [0, 8], false) },
-				{ kind: "giveUp", epoch: 1, slot: 2, group: 7 },
+				{ kind: "giveUp", identity: 1, slot: 2, group: 7 },
 			],
 			finish: true,
 		},
@@ -901,7 +905,7 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [11, 12], true) },
-				{ kind: "write", epoch: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 				{ kind: "bounds", reader: 0, range: [0, 1] },
 			],
 			finish: false,
@@ -910,20 +914,20 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "short", undefined, true) },
-				{ kind: "write", epoch: 0, slot: 0, group: undefined, frames: 1 },
-				{ kind: "up", epoch: 0, slot: 2 },
-				{ kind: "write", epoch: 0, slot: 2, group: 6, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "write", identity: 0, slot: 2, group: 6, frames: 1 },
 			],
 			finish: false,
 		},
 		// A group whose route failed continues on the next route once it lands there.
 		{
 			ops: [
-				{ kind: "up", epoch: 0, slot: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
 				{ kind: "join", reader: 1, spec: spec(false, "hour", undefined, false) },
-				{ kind: "write", epoch: 0, slot: 1, group: 1, frames: 1 },
-				{ kind: "write", epoch: 0, slot: 0, group: 2, frames: 1 },
-				{ kind: "down", epoch: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 1, group: 1, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 2, frames: 1 },
+				{ kind: "down", identity: 0, slot: 1 },
 			],
 			finish: false,
 		},
@@ -931,22 +935,22 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
-				{ kind: "up", epoch: 0, slot: 2 },
-				{ kind: "write", epoch: 0, slot: 2, group: 4, frames: 1 },
-				{ kind: "down", epoch: 0, slot: 2 },
+				{ kind: "up", identity: 0, slot: 2 },
+				{ kind: "write", identity: 0, slot: 2, group: 4, frames: 1 },
+				{ kind: "down", identity: 0, slot: 2 },
 				{ kind: "expire" },
-				{ kind: "write", epoch: 0, slot: 0, group: undefined, frames: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: undefined, frames: 1 },
 			],
 			finish: false,
 		},
 		// A group a route gave up and the next route carries is handed out after its drop.
 		{
 			ops: [
-				{ kind: "up", epoch: 1, slot: 0 },
-				{ kind: "up", epoch: 1, slot: 2 },
+				{ kind: "up", identity: 1, slot: 0 },
+				{ kind: "up", identity: 1, slot: 2 },
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, true) },
-				{ kind: "giveUp", epoch: 1, slot: 2, group: 0 },
-				{ kind: "down", epoch: 1, slot: 2 },
+				{ kind: "giveUp", identity: 1, slot: 2, group: 0 },
+				{ kind: "down", identity: 1, slot: 2 },
 			],
 			finish: false,
 		},
@@ -954,10 +958,10 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", undefined, false) },
-				{ kind: "up", epoch: 0, slot: 1 },
-				{ kind: "write", epoch: 0, slot: 0, group: 8, frames: 1 },
-				{ kind: "giveUp", epoch: 0, slot: 0, group: 8 },
-				{ kind: "write", epoch: 0, slot: 1, group: 0, frames: 1 },
+				{ kind: "up", identity: 0, slot: 1 },
+				{ kind: "write", identity: 0, slot: 0, group: 8, frames: 1 },
+				{ kind: "giveUp", identity: 0, slot: 0, group: 8 },
+				{ kind: "write", identity: 0, slot: 1, group: 0, frames: 1 },
 			],
 			finish: false,
 		},
@@ -965,11 +969,11 @@ test("regressions", async () => {
 		{
 			ops: [
 				{ kind: "join", reader: 0, spec: spec(false, "hour", [1, 2], false) },
-				{ kind: "up", epoch: 1, slot: 0 },
-				{ kind: "up", epoch: 0, slot: 1 },
+				{ kind: "up", identity: 1, slot: 0 },
+				{ kind: "up", identity: 0, slot: 1 },
 				{ kind: "bounds", reader: 0, range: undefined },
-				{ kind: "write", epoch: 0, slot: 0, group: 1, frames: 1 },
-				{ kind: "down", epoch: 0, slot: 0 },
+				{ kind: "write", identity: 0, slot: 0, group: 1, frames: 1 },
+				{ kind: "down", identity: 0, slot: 0 },
 			],
 			finish: false,
 		},

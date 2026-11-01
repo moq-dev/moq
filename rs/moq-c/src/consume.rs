@@ -114,8 +114,8 @@ async fn resolve(
 
 	let origin = origin.ok_or_else(|| Error::UnresolvableBroadcast(reference.as_str().to_string()))?;
 	let source = moq_mux::Source::new(origin.inner, broadcast);
-	// The C ABI does not expose a reference's epoch yet, so it reads like an older reader: the
-	// first instance resolved, without the epoch's guarantee.
+	// The C ABI does not expose a reference's identity yet, so it reads like an older reader: the
+	// first instance resolved, without the identity's guarantee.
 	origin
 		.driver
 		.watch(async { Ok(source.resolve(Some(&reference), None).await?) })

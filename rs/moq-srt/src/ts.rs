@@ -39,7 +39,7 @@ pub enum Program {
 ///
 /// A step of the source's clock onto another timeline ([`ts::Restart`]), such as a
 /// changeover between two encoders whose clocks were never locked, finishes the broadcast
-/// and republishes the rest of the input on the same path under a new epoch, on the same
+/// and republishes the rest of the input on the same path under a new identity, on the same
 /// connection. [`Program::All`] still ends the ingest there.
 pub struct Publisher {
 	importer: Importer,
@@ -67,7 +67,7 @@ struct One {
 	program: Option<u16>,
 }
 
-/// One program's broadcast, under one epoch.
+/// One program's broadcast, under one identity.
 struct Instance {
 	// TS carries undecoded elementary streams (SCTE-35, teletext, DVB AC-3, ...)
 	// verbatim, so the importer uses the `mpegts` catalog extension rather than the
@@ -80,7 +80,7 @@ struct Instance {
 }
 
 impl Instance {
-	/// Publish `path` under a new epoch, importing `program` of the input, or its only one.
+	/// Publish `path` under a new identity, importing `program` of the input, or its only one.
 	///
 	/// Each instance is its own publisher, so an encoder reconnecting under the same stream id,
 	/// or a source whose clock stepped, replaces the stale broadcast instead of resuming into it.
@@ -90,8 +90,11 @@ impl Instance {
 		config: moq_mux::catalog::Config,
 		program: Option<u16>,
 	) -> Result<(Self, moq_net::Identity)> {
-		let epoch = moq_net::Identity::random();
-		let broadcast = origin.publish(path, moq_net::origin::Route::default().with_identity(epoch.clone(), 0))?;
+		let identity = moq_net::Identity::random();
+		let broadcast = origin.publish(
+			path,
+			moq_net::origin::Route::default().with_identity(identity.clone(), 0),
+		)?;
 		let config = config.with_catalog(moq_mux::catalog::hang::Catalog::<ts::Ext>::default());
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
@@ -103,7 +106,7 @@ impl Instance {
 			catalog,
 			broadcast,
 		};
-		Ok((instance, epoch))
+		Ok((instance, identity))
 	}
 
 	/// Flush the buffered media and finish every track, the catalog included.
@@ -142,8 +145,8 @@ impl Publisher {
 					Some(Program::One(program)) => Some(program),
 					_ => None,
 				};
-				let (instance, epoch) = Instance::publish(origin, path, config.clone(), program)?;
-				tracing::info!(%path, ?program, %epoch, "publishing ingest broadcast");
+				let (instance, identity) = Instance::publish(origin, path, config.clone(), program)?;
+				tracing::info!(%path, ?program, %identity, "publishing ingest broadcast");
 				Importer::One(Box::new(One {
 					instance,
 					origin: origin.clone(),
@@ -182,11 +185,11 @@ impl Publisher {
 				while let Err(err) = instance.import.decode(&data) {
 					let restart = err.downcast::<ts::Restart>().map_err(moq_mux::Error::from)?;
 					// The instance before the step finishes; the rest of the input republishes
-					// the path under a new epoch.
+					// the path under a new identity.
 					instance.finish()?;
 					self.span.in_scope(|| self.log.finish(&instance.import.stats()));
-					let (next, epoch) = Instance::publish(origin, path, config.clone(), *program)?;
-					tracing::warn!(%path, step = %restart.step, %epoch, "the source's clock stepped; republishing");
+					let (next, identity) = Instance::publish(origin, path, config.clone(), *program)?;
+					tracing::warn!(%path, step = %restart.step, %identity, "the source's clock stepped; republishing");
 					// The finished broadcast ends with its publication.
 					*instance = next;
 					self.log = ts::stats::Log::default();
@@ -488,10 +491,10 @@ mod tests {
 	}
 
 	/// A source switched between two encoders whose clocks started hours apart, without a
-	/// `discontinuity_indicator`, either way: the ingest republishes under a new epoch on the
+	/// `discontinuity_indicator`, either way: the ingest republishes under a new identity on the
 	/// same connection, and an egress that stitches replacements carries on into it.
 	#[tokio::test(start_paused = true)]
-	async fn a_clock_step_republishes_under_a_new_epoch() {
+	async fn a_clock_step_republishes_under_a_new_identity() {
 		// The issue's step: two encoders started about 4 h 40 m apart.
 		const SWITCH: i64 = 16_844 * 90_000 + 45_000;
 		for step in [-SWITCH, SWITCH] {
@@ -659,7 +662,7 @@ mod tests {
 	}
 
 	/// A caller reconnecting under the same stream id while its stale connection is
-	/// still open restarts the broadcast at once: each connection is its own epoch, so
+	/// still open restarts the broadcast at once: each connection is its own identity, so
 	/// a fresh request reaches the reconnect, while the stale viewer stays on the old
 	/// one until it leaves.
 	#[tokio::test(start_paused = true)]

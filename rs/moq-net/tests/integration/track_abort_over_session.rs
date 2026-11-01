@@ -71,7 +71,7 @@ abort_test!(abort_05_two, "moq-lite-05", 2);
 abort_test!(abort_06_one, "moq-lite-06", 1);
 abort_test!(abort_06_two, "moq-lite-06", 2);
 
-/// The publisher replaces an aborted track. The epoch lets the front resume onto the
+/// The publisher replaces an aborted track. The identity lets the front resume onto the
 /// replacement, and a group reader alone must drive that, without polling the next
 /// group.
 async fn recreate(finish: bool) {

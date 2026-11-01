@@ -344,7 +344,7 @@ impl<S: Stream> Client<S> {
 
 		// The stream key is the ingest credential (`rtmp://host/<app>/<key>`), so the
 		// app and broadcast path stand in for it.
-		tracing::info!(app = %self.app, %path, epoch = %publisher.epoch, "rtmp play accepted by remote");
+		tracing::info!(app = %self.app, %path, identity = %publisher.identity, "rtmp play accepted by remote");
 
 		let result = self.pull_media(&mut publisher).await;
 		match result {
@@ -590,15 +590,18 @@ struct Publisher {
 	// Controls publication so an end can retract before the importer's fill clone drops.
 	broadcast: moq_net::origin::Publication,
 	// This pull's publisher instance, so pulling again replaces it rather than resuming into it.
-	epoch: moq_net::Identity,
+	identity: moq_net::Identity,
 	media_deadline: moq_clock::Instant,
 }
 
 impl Publisher {
 	fn new(origin: &origin::Producer, path: &str, config: moq_mux::catalog::Config) -> anyhow::Result<Self> {
-		let epoch = moq_net::Identity::random();
+		let identity = moq_net::Identity::random();
 		let broadcast = origin
-			.publish(path, moq_net::origin::Route::default().with_identity(epoch.clone(), 0))
+			.publish(
+				path,
+				moq_net::origin::Route::default().with_identity(identity.clone(), 0),
+			)
 			.map_err(|err| anyhow::anyhow!("broadcast '{path}' could not be published: {err}"))?;
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config)?;
 		let handle = broadcast.clone();
@@ -609,7 +612,7 @@ impl Publisher {
 		Ok(Self {
 			importer,
 			catalog,
-			epoch,
+			identity,
 			media_deadline: moq_clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT,
 			broadcast: handle,
 		})
@@ -891,7 +894,7 @@ mod tests {
 		const OLD_IDR: &[u8] = &[0x65, 0x88, 0x84, 0x21, 0x00];
 		const OLD_DELTA: &[u8] = &[0x41, 0x9a, 0x02, 0x03];
 		const NEW_IDR: &[u8] = &[0x65, 0x99, 0x99, 0x99, 0x99];
-		let publish = |origin: &origin::Producer, epoch: &moq_net::Identity, idr: &[u8]| {
+		let publish = |origin: &origin::Producer, identity: &moq_net::Identity, idr: &[u8]| {
 			let mut vseq = vec![0x17, 0x00, 0x00, 0x00, 0x00];
 			vseq.extend_from_slice(&[0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x04, 0x67, 0x42, 0xc0, 0x1f]);
 			vseq.extend_from_slice(&[0x01, 0x00, 0x04, 0x68, 0xce, 0x3c, 0x80]);
@@ -899,7 +902,7 @@ mod tests {
 			vframe.extend_from_slice(idr);
 			let broadcast = origin.create_broadcast("live/cam0").unwrap();
 			broadcast
-				.announce(origin::Route::default().with_identity(epoch.clone(), 0))
+				.announce(origin::Route::default().with_identity(identity.clone(), 0))
 				.unwrap();
 			let catalog = moq_mux::catalog::Producer::new(
 				&mut broadcast.broadcast().clone(),
@@ -951,9 +954,9 @@ mod tests {
 		};
 		until(OLD_IDR).await;
 
-		let epoch = moq_net::Identity::random();
-		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&epoch)).unwrap();
-		let (_new, _new_catalog) = publish(&upstream, &epoch, NEW_IDR);
+		let identity = moq_net::Identity::random();
+		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&identity)).unwrap();
+		let (_new, _new_catalog) = publish(&upstream, &identity, NEW_IDR);
 		moq_clock::timeout(Duration::from_secs(5), instances.next())
 			.await
 			.expect("the new publisher takes over")

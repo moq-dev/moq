@@ -666,19 +666,19 @@ test("a republish restarts the path", async () => {
 });
 
 test("an identical reconnect restarts without an identity and is quiet with one", async () => {
-	for (const epoch of [undefined, IDENTITY]) {
+	for (const identity of [undefined, IDENTITY]) {
 		const origin = new Producer();
 		const consumer = origin.consume();
 		const path = Path.from("room");
 		const announced = consumer.announced();
-		const route = Route.normalize({ identity: epoch, hops: [PEER] });
+		const route = Route.normalize({ identity, hops: [PEER] });
 
 		const old = wireOf(origin).receive(path, route);
 		expect(await announced.next()).toMatchObject({ prefix: path, kind: "start" });
 
 		// The fresh session wins the tie: another source unless the identity says otherwise.
 		const fresh = wireOf(origin).receive(path, route);
-		if (epoch === undefined) expect(await announced.next()).toMatchObject({ prefix: path, kind: "restart" });
+		if (identity === undefined) expect(await announced.next()).toMatchObject({ prefix: path, kind: "restart" });
 
 		// Retracting the stale twin is quiet, and a re-price of the winner is an update.
 		old.close();
@@ -2575,9 +2575,9 @@ test("a newer identity ends pinned and unpinned requests on the replaced publish
 	const unpinned = reader.request(path);
 	expect(pinned.active.peek()?.identity).toBe(IDENTITY);
 	expect(unpinned.active.peek()?.identity).toBe(IDENTITY);
-	const newerEpoch = Identity.parse("01900000-0000-7000-8000-000000000002");
+	const replacement = Identity.parse("01900000-0000-7000-8000-000000000002");
 	const second = origin.createBroadcast(path);
-	second.announce({ identity: newerEpoch });
+	second.announce({ identity: replacement });
 	expect(() => first.announce({ identity: IDENTITY })).toThrow("broadcast is closed");
 	first.unannounce();
 	expect(pinned.active.peek()).toBeUndefined();
@@ -2585,7 +2585,7 @@ test("a newer identity ends pinned and unpinned requests on the replaced publish
 	expect(unpinned.active.peek()).toBeUndefined();
 	// A fresh unpinned request names the publisher it actually resolved.
 	const fresh = reader.request(path);
-	expect(fresh.active.peek()?.identity).toBe(newerEpoch);
+	expect(fresh.active.peek()?.identity).toBe(replacement);
 	fresh.close();
 	const stale = reader.request(path, { identity: IDENTITY });
 	expect(stale.active.peek()).toBeUndefined();

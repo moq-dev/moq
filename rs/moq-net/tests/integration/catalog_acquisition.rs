@@ -21,8 +21,8 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, 
 	connect_mock(options).await
 }
 
-/// `carries_epoch`: the wire carries the publisher's identity, as only lite-07 does.
-async fn acquisition(version: &str, carries_epoch: bool) {
+/// `carries_identity`: the wire carries the publisher's identity, as only lite-07 does.
+async fn acquisition(version: &str, carries_identity: bool) {
 	let version: Version = version.parse().unwrap();
 	let publisher = origin(1);
 	let subscriber = origin(2);
@@ -55,8 +55,8 @@ async fn acquisition(version: &str, carries_epoch: bool) {
 	// A replacement under a minted identity restarts the advertisement; a carried one only
 	// updates it.
 	let new_cost = match announced.next().await {
-		Some(moq_net::announce::Event::Update(announce)) if carries_epoch => announce.route.cost,
-		Some(moq_net::announce::Event::Restart(announce)) if !carries_epoch => announce.route.cost,
+		Some(moq_net::announce::Event::Update(announce)) if carries_identity => announce.route.cost,
+		Some(moq_net::announce::Event::Restart(announce)) if !carries_identity => announce.route.cost,
 		other => panic!("{version}: unexpected route change {other:?}"),
 	};
 	assert!(new_cost < old_cost, "the cheaper session wins the route");
@@ -65,8 +65,8 @@ async fn acquisition(version: &str, carries_epoch: bool) {
 	group.write_frame(None, b"catalog".to_vec()).unwrap();
 	group.finish().unwrap();
 	let result = pending.await;
-	if carries_epoch {
-		let mut subscription = result.expect("same epoch must acquire");
+	if carries_identity {
+		let mut subscription = result.expect("the same identity must acquire");
 		let mut group = subscription.recv_group().await.unwrap().unwrap();
 		assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"catalog");
 	} else {

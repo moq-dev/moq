@@ -172,7 +172,7 @@ test("capture gaps keep the broadcast identity and its track sequences", async (
 	if (!net) throw new Error("expected a network producer");
 	const request = env.broadcast.in.origin.peek()?.follow(env.broadcast.in.name.peek());
 	if (!request) throw new Error("expected a follower");
-	const epoch = request.active.peek()?.identity;
+	const identity = request.active.peek()?.identity;
 	const active: boolean[] = [];
 	const stop = request.active.subscribe((value) => active.push(value !== undefined));
 	const media = net.track("audio").subscribe();
@@ -194,7 +194,7 @@ test("capture gaps keep the broadcast identity and its track sequences", async (
 		env.audio.settled.set(false);
 		await settle();
 		expect(env.announcing.peek()).toBe(true);
-		expect(request.active.peek()?.identity).toBe(epoch);
+		expect(request.active.peek()?.identity).toBe(identity);
 
 		await start(env);
 		expect(env.broadcast.net.peek()).toBe(net);
@@ -206,7 +206,7 @@ test("capture gaps keep the broadcast identity and its track sequences", async (
 		await settle();
 		expect((await catalog.latest())?.value.audio?.renditions.audio?.track).toBe("audio/1");
 		expect(track.closed.peek()).toBeNull();
-		expect(request.active.peek()?.identity).toBe(epoch);
+		expect(request.active.peek()?.identity).toBe(identity);
 		expect(active).not.toContain(false);
 	} finally {
 		stop();

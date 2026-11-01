@@ -509,7 +509,7 @@ macro_rules! fetch_tests {
 	};
 }
 
-// A fetch needs no epoch. moq-transport is left out: its copy goes idle on the leave
+// A fetch needs no identity. moq-transport is left out: its copy goes idle on the leave
 // and still answers from the open group it can no longer feed.
 fetch_tests! {
 	fetch_lite_06: "moq-lite-06",

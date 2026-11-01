@@ -14828,12 +14828,12 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		// One epoch, so the second route re-prices the instance rather than restart it.
-		let epoch = crate::Identity::random();
+		// One identity, so the second route re-prices the instance rather than restart it.
+		let identity = crate::Identity::random();
 		let cam = origin
 			.announce(
 				"solo-cam",
-				crate::origin::Route::default().with_identity(epoch.clone(), 0),
+				crate::origin::Route::default().with_identity(identity.clone(), 0),
 			)
 			.unwrap();
 		settle().await;
@@ -14869,7 +14869,7 @@ mod tests {
 		let _standby = origin
 			.announce(
 				"solo-cam",
-				crate::origin::Route::default().with_identity(epoch, 0).with_cost(0),
+				crate::origin::Route::default().with_identity(identity, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -14932,13 +14932,13 @@ mod tests {
 			..crate::origin::Config::new(crate::Hop::new(1).unwrap())
 		}
 		.produce();
-		// One epoch, so the warm route re-prices the instance rather than restart it.
-		let epoch = crate::Identity::random();
+		// One identity, so the warm route re-prices the instance rather than restart it.
+		let identity = crate::Identity::random();
 		let _cold = origin
 			.announce(
 				"cam",
 				crate::origin::Route::default()
-					.with_identity(epoch.clone(), 0)
+					.with_identity(identity.clone(), 0)
 					.with_cost(4),
 			)
 			.unwrap();
@@ -14974,7 +14974,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_identity(epoch, 0).with_cost(0),
+				crate::origin::Route::default().with_identity(identity, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -15010,12 +15010,12 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let epoch = crate::Identity::random();
+		let identity = crate::Identity::random();
 		let _cold = origin
 			.announce(
 				"cam",
 				crate::origin::Route::default()
-					.with_identity(epoch.clone(), 0)
+					.with_identity(identity.clone(), 0)
 					.with_cost(4),
 			)
 			.unwrap();
@@ -15068,7 +15068,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_identity(epoch, 0).with_cost(0),
+				crate::origin::Route::default().with_identity(identity, 0).with_cost(0),
 			)
 			.unwrap();
 
@@ -15097,12 +15097,12 @@ mod tests {
 		.produce();
 		let publisher_a = crate::Hops::try_from(vec![crate::Hop::new(7).unwrap()]).unwrap();
 		let publisher_b = crate::Hops::try_from(vec![crate::Hop::new(8).unwrap()]).unwrap();
-		let epoch = crate::Identity::random();
+		let identity = crate::Identity::random();
 		let _from_a = origin
 			.announce(
 				"cam",
 				crate::origin::Route::default()
-					.with_identity(epoch.clone(), 0)
+					.with_identity(identity.clone(), 0)
 					.with_hops(publisher_a)
 					.with_cost(4),
 			)
@@ -15140,7 +15140,7 @@ mod tests {
 			.announce(
 				"cam",
 				crate::origin::Route::default()
-					.with_identity(epoch, 0)
+					.with_identity(identity, 0)
 					.with_hops(publisher_b)
 					.with_cost(0),
 			)
@@ -15751,12 +15751,12 @@ mod tests {
 		const VERSION: Version = Version::Draft18;
 
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
-		let epoch = crate::Identity::random();
+		let identity = crate::Identity::random();
 		let _cold = origin
 			.announce(
 				"cam",
 				crate::origin::Route::default()
-					.with_identity(epoch.clone(), 0)
+					.with_identity(identity.clone(), 0)
 					.with_cost(4),
 			)
 			.unwrap();
@@ -15795,7 +15795,7 @@ mod tests {
 		let _warm = origin
 			.announce(
 				"cam",
-				crate::origin::Route::default().with_identity(epoch, 0).with_cost(0),
+				crate::origin::Route::default().with_identity(identity, 0).with_cost(0),
 			)
 			.unwrap();
 

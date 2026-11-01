@@ -96,7 +96,7 @@ impl<O: Output> Media<O> {
 					};
 					tracing::info!(
 						broadcast = %self.broadcast,
-						epoch = broadcast.info().identity.as_ref().map(tracing::field::display),
+						identity = broadcast.info().identity.as_ref().map(tracing::field::display),
 						"online"
 					);
 
@@ -1769,7 +1769,7 @@ mod tests {
 		player.abort();
 	}
 
-	/// A restarted publisher announces a fresh epoch while its old run still
+	/// A restarted publisher announces a fresh identity while its old run still
 	/// stands. The restart drops the old broadcast and plays the new one, whose
 	/// timeline starts over, instead of waiting for it to catch up.
 	#[tokio::test]
@@ -1779,14 +1779,12 @@ mod tests {
 		const OLD: f32 = 0.25;
 		const NEW: f32 = 0.5;
 		let origin = moq_tokio::origin::spawn();
-		let epoch = || moq_net::origin::Route::default();
-
-		let (_old_broadcast, _old_catalog, mut old) = publish(&origin, epoch());
+		let (_old_broadcast, _old_catalog, mut old) = publish(&origin, Default::default());
 		let recorder = Recorder::default();
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		write(&mut old, 10, OLD).await;
 
-		let (_new_broadcast, _new_catalog, mut new) = publish(&origin, epoch());
+		let (_new_broadcast, _new_catalog, mut new) = publish(&origin, Default::default());
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;

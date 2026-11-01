@@ -347,17 +347,13 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 	const held = subscriber.consume(room);
 
 	// Another identity: a restart, and the handle already out stays.
-	for (const epoch of [Identity.random(), Identity.random()]) {
+	for (const identity of [Identity.random(), Identity.random()]) {
 		await send((w) =>
-			encodeAnnounceBroadcast(
-				w,
-				{ status: "restart", id: 0n, identity: epoch, hops: [PUBLISHER_B] },
-				Version.DRAFT_07,
-			),
+			encodeAnnounceBroadcast(w, { status: "restart", id: 0n, identity, hops: [PUBLISHER_B] }, Version.DRAFT_07),
 		);
 		const restarted = await announced.next();
 		expect(restarted).toMatchObject({ prefix: room, kind: "restart", route: { hops: [PUBLISHER_B, PEER] } });
-		expect(restarted?.route.identity).toBe(epoch);
+		expect(restarted?.route.identity).toBe(identity);
 		const fresh = subscriber.consume(room);
 		expect(fresh.closed).not.toBe(held.closed);
 		expect(held.closed.peek()).toBeUndefined();
@@ -748,11 +744,11 @@ test("an update keeps the identity of an announce skipped as a reflected loop", 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
 
 	// Skipped: the chain reflects back through us. The identity still names the instance.
-	const epoch = Identity.random();
+	const identity = Identity.random();
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room"), identity: epoch, hops: [HopSchema.parse(SELF)] },
+			{ status: "active", suffix: Path.from("room"), identity, hops: [HopSchema.parse(SELF)] },
 			Version.DRAFT_07,
 		),
 	);
@@ -762,7 +758,7 @@ test("an update keeps the identity of an announce skipped as a reflected loop", 
 	await send((w) => encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [PUBLISHER_A] }, Version.DRAFT_07));
 	const started = await announced.next();
 	expect(started).toMatchObject({ prefix: Path.from("room"), kind: "start" });
-	expect(started?.route.identity).toBe(epoch);
+	expect(started?.route.identity).toBe(identity);
 
 	announced.close();
 	subscriber.close();
@@ -1820,12 +1816,8 @@ test("consumes resolve the serving prefix and pin its identity", async () => {
 	await new AnnounceOk(PEER, 0).encode(peer, version);
 	const pool = Path.from("pool");
 	const job = Path.from("pool/job");
-	const epoch = Identity.random();
-	await encodeAnnounceBroadcast(
-		peer,
-		{ status: "active", suffix: pool, identity: epoch, hops: [PUBLISHER_A] },
-		version,
-	);
+	const identity = Identity.random();
+	await encodeAnnounceBroadcast(peer, { status: "active", suffix: pool, identity, hops: [PUBLISHER_A] }, version);
 	await announced.next();
 	const held = subscriber.consume(job);
 	const info = held
@@ -1836,7 +1828,7 @@ test("consumes resolve the serving prefix and pin its identity", async () => {
 	await streams[1].reading;
 	const reader = new Reader(undefined, new Uint8Array(Buffer.concat(streams[1].written)), version);
 	expect(await reader.u53()).toBe(StreamId.Track);
-	expect((await Track.decode(reader, version)).identity).toBe(epoch);
+	expect((await Track.decode(reader, version)).identity).toBe(identity);
 
 	// The more specific source's identity shadows the covering source's.
 	const other = Identity.random();

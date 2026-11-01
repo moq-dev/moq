@@ -36,7 +36,7 @@ async function isPending(promise: Promise<unknown>): Promise<boolean> {
 	return !settled;
 }
 
-/** A stand-in session announcing `path` under the epoch at `cost`, serving `source`. */
+/** A stand-in session announcing `path` under the shared identity at `cost`, serving `source`. */
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
 	const handle = wireOf(origin).receive(path, Route.normalize({ identity: IDENTITY, cost }));
 	void (async () => {

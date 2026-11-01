@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 /// Set `enabled = true` to attach a [`moq_stats::Producer`] to every session
 /// the relay accepts (and every cluster dial). The producer publishes a single
 /// `<prefix>/node/<node>` broadcast (or `<prefix>/node` when [`Self::node`] is
-/// unset) on the cluster origin, under a fresh epoch each run. The broadcast
+/// unset) on the cluster origin, under a fresh identity each run. The broadcast
 /// carries a `totals.json` track of per-tier totals, one `<group>/group.json`
 /// track per [`Self::depth`] group with its per-path traffic and per-label
 /// sessions, and presence and prefix tracks on request, each a compressed JSON

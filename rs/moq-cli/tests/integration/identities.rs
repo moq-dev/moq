@@ -82,8 +82,8 @@ struct Published {
 	media: track::Producer,
 }
 
-fn publish(origin: &origin::Producer, epoch: &Identity, tag: &str) -> Published {
-	let route = origin::Route::default().with_identity(epoch.clone(), 0);
+fn publish(origin: &origin::Producer, identity: &Identity, tag: &str) -> Published {
+	let route = origin::Route::default().with_identity(identity.clone(), 0);
 	let broadcast = origin.publish("live/catalog.hang", route.clone()).unwrap();
 	let sibling = origin.publish("live/media", route).unwrap();
 	let media = sibling
@@ -98,7 +98,7 @@ fn publish(origin: &origin::Producer, epoch: &Identity, tag: &str) -> Published 
 		.mutate(|catalog| {
 			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 			audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
-			audio.identity = Some(epoch.clone());
+			audio.identity = Some(identity.clone());
 			catalog.audio.renditions.insert("audio".into(), audio);
 		})
 		.unwrap();

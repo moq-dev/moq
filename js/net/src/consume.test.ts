@@ -12,13 +12,13 @@ test("cache identity follows the serving announcement, preserving held tracks", 
 	const job = Path.from("pool/job");
 	const broad = {};
 	const specific = {};
-	const epoch = Identity.random();
-	cache.announce(pool, broad, { ...Route.default, identity: epoch });
+	const identity = Identity.random();
+	cache.announce(pool, broad, { ...Route.default, identity });
 	const source = new Producer();
 	const track = source.createTrack("video");
 	const held = cache.insert(job, cache.instance(job), source.consume());
 	const ordered = held.track("video").subscribe().ordered();
-	cache.announce(job, specific, { ...Route.default, identity: epoch });
+	cache.announce(job, specific, { ...Route.default, identity });
 	const same = cache.get(job, cache.instance(job));
 	expect(same?.closed).toBe(held.closed);
 

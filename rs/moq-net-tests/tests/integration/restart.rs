@@ -49,7 +49,7 @@ async fn next_event(announced: &mut announce::Consumer) -> announce::Event {
 		.expect("announce ended")
 }
 
-/// Expect the restart of `prefix` without any epoch, as `version` carries it: one restart
+/// Expect the restart of `prefix` onto another identity, as `version` carries it: one restart
 /// on lite-07, an end then a start elsewhere.
 async fn expect_restart(version: Version, announced: &mut announce::Consumer, prefix: &str) {
 	expect_replaced(
@@ -413,7 +413,7 @@ async fn dynamic_identity(version: &str, from: Option<Identity>, to: Identity) {
 }
 
 /// The identity the claim starts at, and another one it moves to.
-fn epochs() -> (Identity, Identity) {
+fn identities() -> (Identity, Identity) {
 	(
 		"01900000-0000-7000-8000-000000000001".parse().unwrap(),
 		"01900000-0000-7000-8000-000000000002".parse().unwrap(),
@@ -425,7 +425,7 @@ macro_rules! dynamic_identity_tests {
 		$(
 			#[moq_clock::test]
 			async fn $name() {
-				let (a, b) = epochs();
+				let (a, b) = identities();
 				for from in [Some(a), None] {
 					moq_clock::timeout(TEST_TIMEOUT, dynamic_identity($version, from, b.clone()))
 						.await
@@ -449,7 +449,7 @@ async fn retired_fetch(version: &str, explicit: bool) {
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(2);
 	let _session = link(version, &publisher, &viewer).await;
-	let (a, b) = epochs();
+	let (a, b) = identities();
 	let old_route = if explicit {
 		origin::Route::default().with_identity(a, 0)
 	} else {
@@ -584,7 +584,7 @@ unanswered_takeover_tests! {
 }
 
 #[moq_clock::test]
-async fn retired_fetch_explicit_epoch_control() {
+async fn retired_fetch_explicit_identity_control() {
 	moq_clock::timeout(TEST_TIMEOUT, retired_fetch("moq-lite-07-wip", true))
 		.await
 		.expect("timed out");
@@ -642,7 +642,7 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 }
 
 /// A worker claiming `pool` through the public API: each request is prepared under a
-/// fresh epoch and published at its exact path, and `outputs[path]` holds the latest.
+/// fresh identity and published at its exact path, and `outputs[path]` holds the latest.
 struct Pool {
 	_claim: Rc<origin::Requests>,
 	outputs: Rc<RefCell<std::collections::HashMap<String, (origin::Publication, track::Producer)>>>,
@@ -773,7 +773,7 @@ async fn priority_update(version: &str, relayed: bool, switch: bool) {
 		links.push(link(version, &publisher, &viewer).await);
 	}
 
-	let (a, b) = epochs();
+	let (a, b) = identities();
 	let old = publisher
 		.publish("live", origin::Route::default().with_identity(a, 0))
 		.unwrap();

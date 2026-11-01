@@ -225,7 +225,7 @@ mod tests {
 
 	const TIMEOUT: Duration = Duration::from_secs(10);
 
-	/// The epoch each test's catalog broadcast announces, and so the instance its URLs name.
+	/// The identity each test's catalog broadcast announces, and so the instance its URLs name.
 	const RUN: &str = "01920000-0000-7000-8000-000000000000";
 
 	fn run() -> moq_net::origin::Route {

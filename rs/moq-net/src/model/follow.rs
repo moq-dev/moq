@@ -65,7 +65,7 @@ impl Follow {
 	/// beneath it) starts on the route serving the path rather than starting and restarting.
 	/// Once something serves it, each change comes through on its own: an end followed by a
 	/// start is a gap that ended any request on the old route, even when both routes carry one
-	/// epoch. A route whose start came after the serving route's last event, with the cursor
+	/// identity. A route whose start came after the serving route's last event, with the cursor
 	/// never running dry in between, may have arrived after its end, so taking over from it is
 	/// reported as that gap.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
@@ -353,18 +353,18 @@ mod tests {
 		}
 	}
 
-	fn route(epoch: &Identity) -> Route {
-		Route::default().with_identity(epoch.clone(), 0)
+	fn route(identity: &Identity) -> Route {
+		Route::default().with_identity(identity.clone(), 0)
 	}
 
 	#[moq_clock::test]
 	async fn follow_reports_the_route_serving_the_path() {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().routes("pool/job").unwrap();
-		let epoch = Identity::random();
+		let identity = Identity::random();
 
 		// A prefix above the path covers it.
-		let pool = origin.requests_route("pool", route(&epoch), None).unwrap();
+		let pool = origin.requests_route("pool", route(&identity), None).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		// A route beneath the path serves another broadcast.
@@ -372,7 +372,7 @@ mod tests {
 		quiet(&mut follow).await;
 
 		// The path itself, from the same instance, takes over without a restart.
-		let exact = origin.publish("pool/job", route(&epoch)).unwrap();
+		let exact = origin.publish("pool/job", route(&identity)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
 
 		// The covering prefix no longer serves the path, so its changes are not seen.
@@ -410,22 +410,22 @@ mod tests {
 	/// A gap with nothing serving the path ends any request on it, so a covering route that
 	/// arrives after it is a start of its own, even under the same identity.
 	#[moq_clock::test]
-	async fn follow_keeps_a_gap_between_routes_of_one_epoch() {
+	async fn follow_keeps_a_gap_between_routes_of_one_identity() {
 		let origin = Hop::new(1).unwrap().produce();
-		let epoch = Identity::random();
-		let exact = origin.publish("pool/job", route(&epoch)).unwrap();
+		let identity = Identity::random();
+		let exact = origin.publish("pool/job", route(&identity)).unwrap();
 		let mut follow = origin.consume().routes("pool/job").unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
 		// Both land before the follower reads again, and the cursor delivers the prefix's start
 		// ahead of the path's end, but the path went unserved in between.
 		drop(exact);
-		let _pool = origin.requests_route("pool", route(&epoch), None).unwrap();
+		let _pool = origin.requests_route("pool", route(&identity), None).unwrap();
 		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		// A prefix standing while the path's route goes takes over in place.
-		let exact = origin.publish("pool/job", route(&epoch)).unwrap();
+		let exact = origin.publish("pool/job", route(&identity)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
 		drop(exact);
 		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
@@ -440,9 +440,9 @@ mod tests {
 		let mut follow = origin.consume().routes("pool/job").unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
-		let epoch = Identity::random();
-		let _pool = origin.requests_route("pool", route(&epoch), None).unwrap();
-		exact.announce(route(&epoch)).unwrap();
+		let identity = Identity::random();
+		let _pool = origin.requests_route("pool", route(&identity), None).unwrap();
+		exact.announce(route(&identity)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 
 		drop(exact);
@@ -451,7 +451,7 @@ mod tests {
 
 	/// Under another identity nothing says two routes serve the same bytes.
 	#[moq_clock::test]
-	async fn follow_restarts_onto_a_more_specific_route_without_an_epoch() {
+	async fn follow_restarts_onto_a_more_specific_route_under_another_identity() {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().routes("pool/job").unwrap();
 
@@ -565,12 +565,12 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_hands_out_the_instance_again_after_an_end() {
 		let origin = Hop::new(1).unwrap().produce();
-		let epoch = Identity::random();
+		let identity = Identity::random();
 		let mut announced = origin.consume().follow("live", None).unwrap();
-		let exact = origin.publish("live", route(&epoch)).unwrap();
+		let exact = origin.publish("live", route(&identity)).unwrap();
 		let first = available(&mut announced).await;
 
-		let dynamic = origin.requests_route("", route(&epoch), None).unwrap();
+		let dynamic = origin.requests_route("", route(&identity), None).unwrap();
 		exact.unannounce();
 		let served = broadcast::Info::new().produce();
 		let (again, ()) = futures::join!(available(&mut announced), async {
@@ -584,11 +584,11 @@ mod tests {
 	#[moq_clock::test]
 	async fn announced_pinned_refuses_another_instance() {
 		let origin = Hop::new(1).unwrap().produce();
-		let epoch = Identity::random();
-		let _first = origin.publish("live", route(&epoch)).unwrap();
-		let mut announced = origin.consume().follow("live", epoch.clone()).unwrap();
+		let identity = Identity::random();
+		let _first = origin.publish("live", route(&identity)).unwrap();
+		let mut announced = origin.consume().follow("live", identity.clone()).unwrap();
 		let pinned = available(&mut announced).await;
-		assert_eq!(pinned.info().identity.as_ref(), Some(&epoch));
+		assert_eq!(pinned.info().identity.as_ref(), Some(&identity));
 
 		let _second = origin.publish("live", route(&Identity::random())).unwrap();
 		none(&mut announced).await;
@@ -596,20 +596,26 @@ mod tests {
 		// Unpinned, the same takeover is followed.
 		let mut unpinned = origin.consume().follow("live", None).unwrap();
 		let current = available(&mut unpinned).await;
-		assert_ne!(current.info().identity.as_ref(), Some(&epoch));
+		assert_ne!(current.info().identity.as_ref(), Some(&identity));
 	}
 
 	#[moq_clock::test]
 	async fn announced_pinned_hands_out_its_instance_after_a_gap() {
 		let origin = Hop::new(1).unwrap().produce();
-		let epoch = Identity::random();
-		let first = origin.publish("live", route(&epoch)).unwrap();
-		let mut announced = origin.consume().follow("live", epoch.clone()).unwrap();
-		assert_eq!(available(&mut announced).await.info().identity.as_ref(), Some(&epoch));
+		let identity = Identity::random();
+		let first = origin.publish("live", route(&identity)).unwrap();
+		let mut announced = origin.consume().follow("live", identity.clone()).unwrap();
+		assert_eq!(
+			available(&mut announced).await.info().identity.as_ref(),
+			Some(&identity)
+		);
 		first.unannounce();
 		none(&mut announced).await;
-		first.announce(route(&epoch)).unwrap();
-		assert_eq!(available(&mut announced).await.info().identity.as_ref(), Some(&epoch));
+		first.announce(route(&identity)).unwrap();
+		assert_eq!(
+			available(&mut announced).await.info().identity.as_ref(),
+			Some(&identity)
+		);
 	}
 
 	#[moq_clock::test]

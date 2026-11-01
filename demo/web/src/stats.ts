@@ -5,7 +5,7 @@
  * `.stats/node/<node>` carrying JSON tracks that snapshot current activity. We
  * auto-discover all of those nodes (announcements under `.stats/node`), so this
  * works for a single relay and for a cluster alike, then aggregate each node and
- * let you drill into one. A restarted relay announces a new epoch at the same
+ * let you drill into one. A restarted relay announces a new identity at the same
  * path, which arrives as an end then a start, so its history starts over.
  *
  * Per node we read `group.json`, the whole node's group at the relay's default

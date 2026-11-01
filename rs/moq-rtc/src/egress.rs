@@ -297,7 +297,7 @@ impl Rendition {
 		};
 		Target {
 			path: source.resolve_reference(config.broadcast()),
-			epoch: config.identity().cloned(),
+			identity: config.identity().cloned(),
 			track: config.track(name).to_string(),
 		}
 	}
@@ -339,7 +339,7 @@ fn pick_audio<'a>(
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Target {
 	path: Option<moq_net::Path>,
-	epoch: Option<moq_net::Identity>,
+	identity: Option<moq_net::Identity>,
 	track: String,
 }
 

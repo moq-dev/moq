@@ -961,11 +961,11 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	const origin = new OriginProducer();
 	const path = Path.from("test");
 	// One publisher instance, so the two compete on cost alone.
-	const epoch = Identity.random();
+	const identity = Identity.random();
 	const localPublication = origin.createBroadcast(path);
 	const local = localPublication.broadcast;
-	localPublication.announce({ identity: epoch, cost: 5n });
-	const dynamic = origin.requestsRoute(path, { identity: epoch, cost: 1n });
+	localPublication.announce({ identity, cost: 5n });
+	const dynamic = origin.requestsRoute(path, { identity, cost: 1n });
 
 	const [client, server] = await Promise.all([
 		connect(url, { transport: pair.client }),

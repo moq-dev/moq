@@ -447,13 +447,13 @@ async fn churn(version: &str) {
 	assert!(failures.is_empty(), "{version}:\n{}", failures.join("\n"));
 }
 
-/// Routes carry the publisher's epoch, so subscriptions resume across them.
+/// Routes carry the publisher's identity, so subscriptions resume across them.
 #[moq_clock::test]
 async fn catalog_churn_lite_07() {
 	churn("moq-lite-07-wip").await;
 }
 
-/// No epoch on the wire: a route change ends subscriptions, which must fail loudly.
+/// No identity on the wire: a route change ends subscriptions, which must fail loudly.
 #[moq_clock::test]
 async fn catalog_churn_lite_06() {
 	churn("moq-lite-06").await;

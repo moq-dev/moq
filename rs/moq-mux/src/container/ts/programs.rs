@@ -730,7 +730,7 @@ mod test {
 	};
 
 	/// The identity each running program publishes under, announced yet or not.
-	fn epochs(programs: &Programs) -> Vec<(u16, moq_net::Identity)> {
+	fn identities(programs: &Programs) -> Vec<(u16, moq_net::Identity)> {
 		programs
 			.programs
 			.iter()
@@ -792,18 +792,18 @@ mod test {
 		let mut steps = Steps::new();
 
 		steps.step(&mut programs, &[(1, 0x100)]);
-		let one = epochs(&programs);
+		let one = identities(&programs);
 		assert_eq!(one.len(), 1);
 
 		steps.step(&mut programs, &[(1, 0x100), (2, 0x200)]);
-		let both = epochs(&programs);
+		let both = identities(&programs);
 		assert_eq!(both[0], one[0], "program 1 carries on");
 		assert_eq!(both[1].0, 2, "the added program publishes");
 		let two = programs.programs[1].broadcast.consume();
 		let mut catalog = hang::catalog::Catalog::<()>::subscribe(&two).await.unwrap();
 
 		steps.step(&mut programs, &[(1, 0x100)]);
-		assert_eq!(epochs(&programs), one, "program 1 carries on");
+		assert_eq!(identities(&programs), one, "program 1 carries on");
 		assert!(two.is_closed(), "the dropped program is unannounced");
 		while catalog.next().await.unwrap().is_some() {}
 		let retired = &programs.stats().streams[&0x71];
@@ -811,7 +811,7 @@ mod test {
 		assert_eq!(retired.quiet, None, "nothing is expected on a retired PID");
 
 		steps.step(&mut programs, &[(1, 0x100), (2, 0x200)]);
-		let back = epochs(&programs);
+		let back = identities(&programs);
 		assert_eq!(back[0], one[0], "program 1 carries on");
 		assert_eq!(back[1].0, 2);
 		assert_ne!(back[1].1, both[1].1, "the returning program is a new instance");
@@ -840,7 +840,7 @@ mod test {
 		for packet in std::mem::take(&mut steps.mux.out).chunks(188) {
 			programs.decode(packet).unwrap();
 		}
-		let running: Vec<_> = epochs(&programs).into_iter().map(|(number, _)| number).collect();
+		let running: Vec<_> = identities(&programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [2]);
 		programs.finish().unwrap();
 		assert_eq!(programs.stats().streams[&0x71].units, 4, "program 2 read on");
@@ -1062,7 +1062,7 @@ mod test {
 		step(&mut mux, &[(2, 0x100), (4, 0x100)], 1);
 		programs.decode(&std::mem::take(&mut mux.out)).unwrap();
 		programs.finish().unwrap();
-		let running: Vec<_> = epochs(&programs).into_iter().map(|(number, _)| number).collect();
+		let running: Vec<_> = identities(&programs).into_iter().map(|(number, _)| number).collect();
 		assert_eq!(running, [2, 4]);
 		let units = |pid| programs.stats().streams[&pid].units;
 		assert_eq!([0x61, 0x72, 0x74].map(units), [4; 3], "the programs kept read on");
@@ -1530,7 +1530,7 @@ mod test {
 	/// Each program announces as its own publisher instance for the run, so a restart
 	/// replaces it rather than resuming into it.
 	#[test]
-	fn every_program_mints_its_own_epoch() {
+	fn every_program_names_its_own_identity() {
 		let origin = crate::source::produce_origin();
 		let mut programs = Programs::new(
 			origin,
@@ -1539,14 +1539,17 @@ mod test {
 		);
 		programs.decode(&two_section_pat()).unwrap();
 		programs.finish().unwrap();
-		let epochs: Vec<_> = programs
+		let identities: Vec<_> = programs
 			.programs
 			.iter()
 			.map(|program| program.broadcast.route().and_then(|route| route.identity))
 			.collect();
-		assert_eq!(epochs.len(), 2);
-		assert!(epochs.iter().all(Option::is_some), "every program names its instance");
-		assert_ne!(epochs[0], epochs[1]);
+		assert_eq!(identities.len(), 2);
+		assert!(
+			identities.iter().all(Option::is_some),
+			"every program names its instance"
+		);
+		assert_ne!(identities[0], identities[1]);
 	}
 
 	/// A program is announced only once its catalog lists its tracks, never on the PAT alone,

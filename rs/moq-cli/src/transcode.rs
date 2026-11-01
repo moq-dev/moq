@@ -214,16 +214,18 @@ mod tests {
 	}
 
 	#[tokio::test(start_paused = true)]
-	async fn an_epochless_source_restart_also_creates_a_new_derivative() {
+	async fn a_source_restart_under_the_handle_identity_also_creates_a_new_derivative() {
 		restart(false).await;
 	}
 
-	async fn restart(with_epoch: bool) {
+	/// `named` announces each source under an identity the route names, rather than the one its
+	/// handle mints.
+	async fn restart(named: bool) {
 		let origin = moq_tokio::origin::spawn();
 		let publish = moq_tokio::origin::spawn();
 		let route = || {
 			let route = moq_net::origin::Route::default();
-			if with_epoch {
+			if named {
 				route.with_identity(moq_net::Identity::random(), 0)
 			} else {
 				route

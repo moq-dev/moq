@@ -461,18 +461,18 @@ mod test {
 	fn reference_identities_roundtrip_in_every_section() {
 		use crate::catalog::Reference;
 
-		const EPOCH: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
+		const IDENTITY: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
 		let encoded = format!(
 			r#"{{
-				"video": {{"renditions": {{"v": {{"broadcast": "./a", "identity": "{EPOCH}", "codec": "avc1.64001f", "container": {{"kind": "legacy"}}}}}}}},
-				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "identity": "{EPOCH}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
-				"text": {{"renditions": {{"t": {{"broadcast": "./a", "identity": "{EPOCH}", "format": "vtt"}}}}}},
-				"json": {{"tracks": {{"j": {{"broadcast": "./a", "identity": "{EPOCH}", "mode": "snapshot"}}}}}},
-				"binary": {{"tracks": {{"b": {{"broadcast": "./a", "identity": "{EPOCH}", "mode": "snapshot"}}}}}}
+				"video": {{"renditions": {{"v": {{"broadcast": "./a", "identity": "{IDENTITY}", "codec": "avc1.64001f", "container": {{"kind": "legacy"}}}}}}}},
+				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "identity": "{IDENTITY}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
+				"text": {{"renditions": {{"t": {{"broadcast": "./a", "identity": "{IDENTITY}", "format": "vtt"}}}}}},
+				"json": {{"tracks": {{"j": {{"broadcast": "./a", "identity": "{IDENTITY}", "mode": "snapshot"}}}}}},
+				"binary": {{"tracks": {{"b": {{"broadcast": "./a", "identity": "{IDENTITY}", "mode": "snapshot"}}}}}}
 			}}"#
 		);
 		let catalog = Catalog::<()>::from_str(&encoded).unwrap();
-		let epoch: moq_net::Identity = EPOCH.parse().unwrap();
+		let identity: moq_net::Identity = IDENTITY.parse().unwrap();
 		let references: [&dyn Reference; 5] = [
 			&catalog.video.renditions["v"],
 			&catalog.audio.renditions["a"],
@@ -481,13 +481,13 @@ mod test {
 			&catalog.binary.tracks["b"],
 		];
 		for reference in references {
-			assert_eq!(reference.identity(), Some(&epoch));
+			assert_eq!(reference.identity(), Some(&identity));
 		}
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 
 		// Omitted stays omitted, and an empty identity refuses the catalog.
 		assert!(!Catalog::<()>::default().to_json().unwrap().contains("identity"));
-		let encoded = encoded.replace(EPOCH, "");
+		let encoded = encoded.replace(IDENTITY, "");
 		assert!(
 			Catalog::<()>::from_str(&encoded).is_err(),
 			"an empty identity must be refused"

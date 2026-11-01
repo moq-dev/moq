@@ -310,7 +310,7 @@ export class Subscriber {
 	}
 
 	/**
-	 * The epochless route an advertisement carries; one without a path is anonymous and free.
+	 * The route an advertisement carries, before it is minted an identity; one without a path is anonymous and free.
 	 */
 	#route({ cluster }: AdvertParams): Route {
 		return cluster === undefined ? { hops: [UNKNOWN_HOP], cost: Cost.zero } : { ...cluster };

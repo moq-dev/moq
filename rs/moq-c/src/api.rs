@@ -2348,7 +2348,7 @@ pub extern "C" fn moq_origin_request_cancel(task: u32) -> i32 {
 /// Parse an optional publisher identity, where NULL or empty means unpinned.
 ///
 /// # Safety
-/// - `epoch` may be NULL, or must point at `epoch_len` readable bytes.
+/// - `identity` may be NULL, or must point at `identity_len` readable bytes.
 unsafe fn parse_identity(identity: *const c_char, identity_len: usize) -> Result<Option<moq_net::Identity>, Error> {
 	unsafe { ffi::parse_str_optional(identity, identity_len)? }
 		.map(|identity| identity.parse().map_err(|_| Error::InvalidCode))
@@ -2371,10 +2371,10 @@ pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 
 /// Advertise a publication's exact path as a route.
 ///
-/// Announcing again re-prices the route in place, or restarts it under a new epoch. A
-/// NULL `route` uses the default (cost 0, no epoch). Until announced, the broadcast is
-/// invisible and unroutable for local consumers and peers alike. Fails once the
-/// broadcast closed, or when `epoch` is not UUIDv7 text.
+/// Announcing again re-prices the route in place, or restarts it under another identity. A
+/// NULL `route` uses the default: cost 0, under the identity the publication minted. Until
+/// announced, the broadcast is invisible and unroutable for local consumers and peers alike.
+/// Fails once the broadcast closed.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

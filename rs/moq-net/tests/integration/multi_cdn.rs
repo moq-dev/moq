@@ -269,7 +269,7 @@ fn assert_continuous(seen: &[(u64, Vec<u8>, Option<Timestamp>)], groups: u64) {
 	}
 }
 
-/// Two CDNs under one epoch, `B` over `secondary`: `S` reads through `A` although `B` is
+/// Two CDNs under one identity, `B` over `secondary`: `S` reads through `A` although `B` is
 /// cheaper, resumes on `B` when `A` goes, and moves back once `A` returns, every frame once.
 async fn fails_over_and_back(secondary: &str) {
 	moq_clock::timeout(TEST_TIMEOUT, async {
@@ -288,7 +288,7 @@ async fn fails_over_and_back(secondary: &str) {
 		let update = announced.next().await.expect("announced");
 		assert!(
 			matches!(update, announce::Event::Update(_)) && !via_a(&update),
-			"same epoch over B: {update:?}"
+			"same identity over B: {update:?}"
 		);
 		seen.extend(topology.group_anywhere(&mut rx).await);
 

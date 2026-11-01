@@ -147,15 +147,15 @@ mod tests {
 			.expect("publish source packet");
 	}
 
-	/// Publish an Opus instance of `source` under `epoch`, keeping its catalog so the test can
+	/// Publish an Opus instance of `source` under `identity`, keeping its catalog so the test can
 	/// kill the instance.
 	fn publish_opus(
 		origin: &moq_net::origin::Producer,
-		epoch: moq_net::Identity,
+		identity: moq_net::Identity,
 	) -> (Box<dyn Bridge>, moq_mux::catalog::Producer) {
 		let broadcast = origin.create_broadcast("source").expect("create source broadcast");
 		broadcast
-			.announce(moq_net::origin::Route::default().with_identity(epoch, 0))
+			.announce(moq_net::origin::Route::default().with_identity(identity, 0))
 			.expect("announce source broadcast");
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
@@ -167,9 +167,9 @@ mod tests {
 
 	/// Publish a replacement instance of `source`, returning once the origin serves it.
 	async fn take_over(origin: &moq_net::origin::Producer) -> (Box<dyn Bridge>, moq_mux::catalog::Producer) {
-		let epoch = moq_net::Identity::random();
-		let mut instances = moq_mux::follow::Instances::new(&origin.consume(), "source", Some(&epoch)).unwrap();
-		let (mut new, catalog) = publish_opus(origin, epoch);
+		let identity = moq_net::Identity::random();
+		let mut instances = moq_mux::follow::Instances::new(&origin.consume(), "source", Some(&identity)).unwrap();
+		let (mut new, catalog) = publish_opus(origin, identity);
 		push(&mut *new, 20_000, NEW_PACKET);
 		let started = moq_clock::timeout(TIMEOUT, instances.next())
 			.await

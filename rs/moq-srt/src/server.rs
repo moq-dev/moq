@@ -1010,7 +1010,7 @@ mod tests {
 		egress.abort();
 	}
 
-	/// One publisher instance of `live`: an announced broadcast under its own epoch with one
+	/// One publisher instance of `live`: an announced broadcast under its own identity with one
 	/// Legacy AAC track, for the egress tests.
 	struct Instance {
 		_broadcast: moq_net::origin::Publication,

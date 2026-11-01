@@ -960,13 +960,13 @@ async fn replaced_under_another_identity_ends_lite_07() {
 }
 
 /// `P1` publishes a compressed `video` to the relay `R`, and so does `P2` under the same
-/// epoch, compressed only when `compress` is set. `D` reads through `R` over lite-07,
+/// identity, compressed only when `compress` is set. `D` reads through `R` over lite-07,
 /// which forwards the compressed bytes. `P1`'s session to `R` dies between groups. A copy
 /// that frames the track the same way resumes. One that doesn't is refused: `D` never
 /// reads `P2`'s groups under `P1`'s framing, and the track ends with the refusal.
 async fn compression_changes_behind_a_relay(compress: bool) {
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
-	let epoch = moq_net::Identity::random();
+	let identity = moq_net::Identity::random();
 	let relay = produce_origin(3);
 	let downstream = produce_origin(4);
 	let mut replicas = Vec::new();
@@ -977,7 +977,7 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 			.create_track("video", timed().with_compress(compress))
 			.unwrap();
 		broadcast
-			.announce(origin::Route::default().with_identity(epoch.clone(), 0))
+			.announce(origin::Route::default().with_identity(identity.clone(), 0))
 			.unwrap();
 		let link = priced_link(version, &publisher, &relay, cost).await;
 		replicas.push(Replica {
@@ -1058,7 +1058,7 @@ async fn different_compression_is_refused_behind_a_relay() {
 }
 
 /// `P` serves `video` on demand and replaces its producer partway through the broadcast,
-/// the way a publisher restarts an encoder. The epoch lets `P`'s own front resume the
+/// the way a publisher restarts an encoder. The identity lets `P`'s own front resume the
 /// logical track onto the replacement, so `A` and `R` never see the abort. The
 /// replacement continues the track's sequences explicitly, so its first group reaches
 /// `R` at once instead of being skipped as one `R` already read.

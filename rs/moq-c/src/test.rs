@@ -183,7 +183,7 @@ fn announce_info(announced: u32) -> moq_announce_event {
 }
 
 /// A fresh stable identity, as an application would name one.
-fn mint_epoch() -> String {
+fn fresh_identity() -> String {
 	moq_net::Identity::random().to_string()
 }
 
@@ -198,7 +198,7 @@ fn announce_route(cost: u64, identity: &str) -> moq_announce_route {
 }
 
 /// The identity a received route carries.
-fn route_epoch(route: &moq_route) -> Option<String> {
+fn route_identity(route: &moq_route) -> Option<String> {
 	(route.identity.len > 0).then(|| unsafe {
 		std::str::from_utf8(std::slice::from_raw_parts(
 			route.identity.data.cast::<u8>(),
@@ -3108,15 +3108,15 @@ fn announce_route_carries_cost_and_identity_without_hops() {
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 	let (publication, broadcast) = create_broadcast(origin, b"routed");
 
-	let epoch = mint_epoch();
-	let route = announce_route(7, &epoch);
+	let identity = fresh_identity();
+	let route = announce_route(7, &identity);
 	assert_eq!(unsafe { moq_publication_announce(publication, &route) }, 0);
 
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
 	assert_eq!(info.route.hops_len, 0, "a local route claims no hops");
 	assert_eq!(info.route.cost, 7);
-	assert_eq!(route_epoch(&info.route).as_ref(), Some(&epoch));
+	assert_eq!(route_identity(&info.route).as_ref(), Some(&identity));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
 	// A zeroed route is the default: cost 0 and the identity the publication minted.
@@ -3130,7 +3130,7 @@ fn announce_route_carries_cost_and_identity_without_hops() {
 	assert_eq!(unsafe { moq_publication_announce(publication2, &zeroed) }, 0);
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.route.cost, 0);
-	assert!(route_epoch(&info.route).is_some_and(|minted| minted != epoch));
+	assert!(route_identity(&info.route).is_some_and(|minted| minted != identity));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
@@ -3151,24 +3151,24 @@ fn announce_under_a_new_identity_restarts() {
 	let announced_task = id(unsafe { moq_origin_announced(origin, std::ptr::null(), Some(channel_callback), cb.ptr) });
 	let (publication, broadcast) = create_broadcast(origin, b"restarted");
 
-	let first = mint_epoch();
+	let first = fresh_identity();
 	assert_eq!(
 		unsafe { moq_publication_announce(publication, &announce_route(0, &first)) },
 		0
 	);
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_START);
-	assert_eq!(route_epoch(&info.route), Some(first));
+	assert_eq!(route_identity(&info.route), Some(first));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
-	let second = mint_epoch();
+	let second = fresh_identity();
 	assert_eq!(
 		unsafe { moq_publication_announce(publication, &announce_route(0, &second)) },
 		0
 	);
 	let (announced, info) = cb.recv_route();
 	assert_eq!(info.kind, moq_announce_kind::MOQ_ANNOUNCE_KIND_RESTART);
-	assert_eq!(route_epoch(&info.route), Some(second));
+	assert_eq!(route_identity(&info.route), Some(second));
 	assert_eq!(moq_origin_announced_free(announced), 0);
 
 	assert_eq!(moq_origin_announced_cancel(announced_task), 0);
@@ -4351,16 +4351,16 @@ type Resolve = unsafe extern "C" fn(
 	*mut c_void,
 ) -> i32;
 
-/// Resolve `live` on `origin` through `call`, pinned to `epoch`.
-fn resolve_pinned(call: Resolve, origin: u32, epoch: &str, cb: &Callback) -> i32 {
+/// Resolve `live` on `origin` through `call`, pinned to `identity`.
+fn resolve_pinned(call: Resolve, origin: u32, identity: &str, cb: &Callback) -> i32 {
 	let path = b"live";
 	unsafe {
 		call(
 			origin,
 			path.as_ptr() as *const c_char,
 			path.len(),
-			epoch.as_ptr() as *const c_char,
-			epoch.len(),
+			identity.as_ptr() as *const c_char,
+			identity.len(),
 			Some(channel_callback),
 			cb.ptr,
 		)
@@ -4372,16 +4372,16 @@ fn resolve_pinned(call: Resolve, origin: u32, epoch: &str, cb: &Callback) -> i32
 #[test]
 fn an_identity_pins_request_and_follow() {
 	let origin = id(moq_origin_create());
-	let epoch = moq_net::Identity::random();
+	let identity = moq_net::Identity::random();
 	let first = publish(
 		origin,
 		"live",
-		moq_net::origin::Route::default().with_identity(epoch.clone(), 0),
+		moq_net::origin::Route::default().with_identity(identity.clone(), 0),
 	);
-	let epoch = epoch.to_string();
+	let identity = identity.to_string();
 
 	let cb = Callback::new();
-	id(resolve_pinned(moq_origin_request, origin, &epoch, &cb));
+	id(resolve_pinned(moq_origin_request, origin, &identity, &cb));
 	assert_eq!(moq_consume_close(id(cb.recv())), 0);
 	assert_eq!(cb.recv_terminal(), 0);
 	let cb = Callback::new();
@@ -4397,7 +4397,7 @@ fn an_identity_pins_request_and_follow() {
 	// follower delivers it while it still serves, and nothing for the winner.
 	let second = publish_run(origin, "live");
 	let cb = Callback::new();
-	let task = id(resolve_pinned(moq_origin_follow, origin, &epoch, &cb));
+	let task = id(resolve_pinned(moq_origin_follow, origin, &identity, &cb));
 	let delivered = id(cb.recv());
 	let tx = unsafe { &*(cb.ptr as *const mpsc::Sender<i32>) }.clone();
 	crate::ffi::RUNTIME.spawn(async move { tx.send(i32::MAX).unwrap() });
@@ -4449,7 +4449,7 @@ extern "C" fn gated_callback(user_data: *mut c_void, code: i32) {
 
 /// An end is a gap that ended every request on the old route, even when a claim above the path
 /// answers under the same identity. So the instance serving the path afterwards is delivered again,
-/// though the caller still holds a handle to its epoch.
+/// though the caller still holds a handle to it.
 #[test]
 fn follow_delivers_the_instance_again_after_an_end() {
 	let origin = id(moq_origin_create());

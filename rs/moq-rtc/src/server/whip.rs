@@ -106,7 +106,7 @@ async fn delete(State(state): State<RouterState>, Path(path): Path<String>) -> S
 /// scope is enforced by moq-net exactly as for a native session; the bundled
 /// [`Server::publish_router`] passes the server's own (unauthenticated) producer. It parses the
 /// offer, registers a media session on the shared mux, announces the
-/// broadcast under a fresh epoch once negotiation succeeds (so a fast subscriber
+/// broadcast under a fresh identity once negotiation succeeds (so a fast subscriber
 /// doesn't 404 in the gap before the first RTP packet, and a reconnecting
 /// encoder replaces a stale session's broadcast at once), and returns the SDP answer plus an opaque `resource_id` for the WHIP
 /// `Location` header. The caller must run the returned [`Response`] to drive the
@@ -155,8 +155,8 @@ pub async fn accept(
 	// subscriber doesn't see a 404 in the gap before the first RTP packet. Each
 	// offer is its own publisher instance, so a reconnect replaces a stale
 	// session's broadcast instead of resuming into it.
-	let epoch = moq_net::Identity::random();
-	handle.announce(moq_net::origin::Route::default().with_identity(epoch.clone(), 0))?;
+	let identity = moq_net::Identity::random();
+	handle.announce(moq_net::origin::Route::default().with_identity(identity.clone(), 0))?;
 
 	let resource_id = sdp::new_resource_id();
 	let socket = moq_ice::Socket::new(mux.socket(), mux.candidates().to_vec(), inbound)?;
@@ -165,7 +165,7 @@ pub async fn accept(
 	// Register before returning so a DELETE that races the first packet still
 	// finds the session; Response::run unregisters itself when it ends.
 	let cancel = server.register_session(resource_id.clone());
-	tracing::info!(%broadcast, %epoch, "whip publish accepted");
+	tracing::info!(%broadcast, %identity, "whip publish accepted");
 
 	Ok(Response {
 		resource_id: resource_id.clone(),
@@ -252,7 +252,7 @@ mod tests {
 	}
 
 	/// An encoder reconnecting to the same broadcast while its stale session is still
-	/// open restarts the broadcast at once: each offer is its own epoch, so a fresh
+	/// open restarts the broadcast at once: each offer is its own identity, so a fresh
 	/// request reaches the reconnect, while the stale viewer stays on the old one until
 	/// it leaves.
 	#[tokio::test]

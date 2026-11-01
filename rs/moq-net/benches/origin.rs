@@ -249,14 +249,16 @@ fn bench_withdraw(c: &mut Criterion) {
 fn bench_withdraw_wave(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/withdraw_wave");
 	group.sample_size(10);
-	let epoch: Identity = "01900000-0000-7000-8000-000000000001".parse().unwrap();
+	let identity: Identity = "01900000-0000-7000-8000-000000000001".parse().unwrap();
 	// One identity, so the winner moving between the peers is an update, which is held.
 	let route = |chain: &[u64]| {
 		let mut hops = Hops::new();
 		for &hop in chain {
 			hops.push(Hop::new(hop).unwrap()).unwrap();
 		}
-		origin::Route::default().with_identity(epoch.clone(), 0).with_hops(hops)
+		origin::Route::default()
+			.with_identity(identity.clone(), 0)
+			.with_hops(hops)
 	};
 	for broadcasts in [1_000, 10_000] {
 		for subscribers in [1, 20, 100] {
@@ -904,7 +906,7 @@ fn pool_route(hop: u64) -> origin::Route {
 	peer_route(hop, 3)
 }
 
-/// Re-requesting an epoch's stale fronts, swept over the cache around them and the
+/// Re-requesting fronts an identity change left stale, swept over the cache around them and the
 /// number restarted. Setup, route updates, and teardown stay outside the measurement.
 fn bench_restart_fronts(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/restart_fronts");
@@ -1469,9 +1471,9 @@ impl Generation {
 	}
 
 	/// Route the front to this generation without waiting.
-	fn route(&self, epoch: &Identity) {
+	fn route(&self, identity: &Identity) {
 		self.broadcast
-			.announce(origin::Route::default().with_identity(epoch.clone(), 0))
+			.announce(origin::Route::default().with_identity(identity.clone(), 0))
 			.unwrap();
 	}
 
@@ -1481,8 +1483,8 @@ impl Generation {
 	/// copy, before its splice. That bounds the splice only on a current-thread
 	/// runtime, where every local query is ready within the front poll that
 	/// splices it.
-	async fn announce(&self, epoch: &Identity) {
-		self.route(epoch);
+	async fn announce(&self, identity: &Identity) {
+		self.route(identity);
 		for track in &self.tracks {
 			moq_clock::timeout(COPY_WAIT, support::wanted(track.demand()))
 				.await
@@ -1494,7 +1496,7 @@ impl Generation {
 
 /// A front serving [`COPY_PATH`], with `copies` route copies on each of its tracks.
 struct CopyWalk {
-	epoch: Identity,
+	identity: Identity,
 	_producer: origin::Producer,
 	_subscribers: Vec<track::Subscriber>,
 	generations: Vec<Generation>,
@@ -1511,9 +1513,9 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 	assert!(copies >= 1, "a front holds at least the serving copy");
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
-	let epoch = Identity::random();
+	let identity = Identity::random();
 	let first = Generation::build(&producer, tracks);
-	first.route(&epoch);
+	first.route(&identity);
 	let resolved = moq_clock::timeout(COPY_WAIT, producer.consume().request(COPY_PATH, None))
 		.await
 		.expect("front did not resolve")
@@ -1531,12 +1533,12 @@ async fn copy_walk(tracks: usize, copies: usize) -> CopyWalk {
 	generations.push(first);
 	for _ in 1..copies {
 		let generation = Generation::build(&producer, tracks);
-		generation.announce(&epoch).await;
+		generation.announce(&identity).await;
 		generations.push(generation);
 	}
 	CopyWalk {
 		next: Some(Generation::build(&producer, tracks)),
-		epoch,
+		identity,
 		_producer: producer,
 		_subscribers: subscribers,
 		generations,
@@ -1550,7 +1552,7 @@ impl CopyWalk {
 	/// every track, and each reader walks its copies in one driver turn.
 	async fn swap(&mut self) {
 		let generation = self.next.take().expect("one swap per setup");
-		generation.announce(&self.epoch).await;
+		generation.announce(&self.identity).await;
 		self.generations.push(generation);
 	}
 }
@@ -1656,7 +1658,7 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 	} = shape;
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
-	let epoch = Identity::random();
+	let identity = Identity::random();
 	let generation = |order: &mut dyn Iterator<Item = usize>| {
 		let broadcast = producer.create_broadcast(COPY_PATH).unwrap();
 		let track = broadcast.create_track("0", timed()).unwrap();
@@ -1670,7 +1672,7 @@ async fn resume_overlap(shape: ResumeShape, ordered: bool) -> ResumeOverlap {
 			group.finish().unwrap();
 		}
 		broadcast
-			.announce(origin::Route::default().with_identity(epoch.clone(), 0))
+			.announce(origin::Route::default().with_identity(identity.clone(), 0))
 			.unwrap();
 		(broadcast, track)
 	};

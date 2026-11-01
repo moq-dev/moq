@@ -41,11 +41,11 @@ test("a follower moves through restart, end and a later start", async () => {
 test("an identity-pinned follower refuses another instance", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const epoch = Identity.random();
+	const identity = Identity.random();
 	const firstPublication = origin.createBroadcast(path);
 	const first = firstPublication.broadcast;
-	firstPublication.announce({ identity: epoch });
-	const request = origin.follow(path, { identity: epoch });
+	firstPublication.announce({ identity });
+	const request = origin.follow(path, { identity });
 	const secondPublication = origin.createBroadcast(path);
 	const second = secondPublication.broadcast;
 	secondPublication.announce({ identity: Identity.random() });
@@ -572,7 +572,7 @@ test("a forwarded request cannot be prepared by setting a publisher property", a
 test("an identity-pinned follower resumes when its instance returns after a gap", async () => {
 	const origin = new Producer();
 	const path = Path.from("room/audio");
-	const epoch = Identity.random();
+	const identity = Identity.random();
 	const source = new BroadcastProducer();
 	const keeper = source.consume();
 	const serve = (instance: Identity.Valid, broadcast: BroadcastProducer) => {
@@ -582,10 +582,10 @@ test("an identity-pinned follower resumes when its instance returns after a gap"
 		})();
 		return route;
 	};
-	const first = serve(epoch, source);
-	const request = origin.follow(path, { identity: epoch });
+	const first = serve(identity, source);
+	const request = origin.follow(path, { identity });
 	await settle();
-	expect(request.active.peek()?.identity).toBe(epoch);
+	expect(request.active.peek()?.identity).toBe(identity);
 	first.close();
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
@@ -597,9 +597,9 @@ test("an identity-pinned follower resumes when its instance returns after a gap"
 	other.close();
 	await settle();
 	expect(request.closed.peek()).toBeUndefined();
-	const back = serve(epoch, source);
+	const back = serve(identity, source);
 	await settle();
-	expect(request.active.peek()?.identity).toBe(epoch);
+	expect(request.active.peek()?.identity).toBe(identity);
 	request.close();
 	back.close();
 	keeper.close();

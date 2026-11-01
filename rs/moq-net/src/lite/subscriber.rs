@@ -5795,7 +5795,7 @@ mod tests {
 	}
 
 	/// A publisher that names nobody keeps the anonymous mark, and nothing in front of it:
-	/// identity is the epoch's job, so the relay never names the publisher itself. A
+	/// naming the stream is the route identity's job, so the relay never names the publisher. A
 	/// reprice on the same connection keeps it and updates in place.
 	#[moq_clock::test]
 	async fn an_unnamed_publisher_stays_anonymous() {

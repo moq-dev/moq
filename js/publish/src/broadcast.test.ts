@@ -258,7 +258,7 @@ test("serves no catalog until announced, so the first snapshot is the one at ann
 });
 
 // Regression: a re-announce re-created the catalog track, restarting its group sequence under the
-// same epoch, so a resumed viewer mistook the new catalog for the old one. Turning the announce off
+// same identity, so a resumed viewer mistook the new catalog for the old one. Turning the announce off
 // unannounces at once and keeps the broadcast for the next announce.
 test("a re-announce continues the catalog's group sequence", async () => {
 	const announce = new Signal(true);
@@ -478,7 +478,7 @@ test("registering a sibling after an encoder failure keeps the network broadcast
 });
 
 // A name always means the same content, so a served rendition whose decoder identity changes moves to
-// a fresh track name under the same catalog ID and epoch, ending the old track on its old identity.
+// a fresh track name under the same catalog ID and identity, ending the old track on its old identity.
 // Fields a decoder needn't reinitialize for update the served track in place.
 test("a served decoder identity change moves the rendition to a fresh track name", async () => {
 	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("identity.hang") });
@@ -496,7 +496,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 	const net = broadcast.net.peek();
 	if (!net) throw new Error("expected a network producer once connected");
 	const announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
-	const epoch = announced?.active.peek()?.identity;
+	const identity = announced?.active.peek()?.identity;
 	const catalog = new Json.Snapshot.Consumer<Catalog.Root>({
 		track: net.track(Broadcast.CATALOG_TRACK).subscribe(),
 	});
@@ -532,7 +532,7 @@ test("a served decoder identity change moves the rendition to a fresh track name
 		// The replacement is handed over at once, with or without a subscriber.
 		expect(video.track.peek()?.name).toBe("video/1");
 		expect(broadcast.net.peek()).toBe(net);
-		expect(announced?.active.peek()?.identity).toBe(epoch);
+		expect(announced?.active.peek()?.identity).toBe(identity);
 
 		const second = net.track("video/1").subscribe();
 		await settle();

@@ -755,15 +755,15 @@ mod tests {
 		assert!(bound.is_clone(&first), "a binding honors the pin too");
 	}
 
-	fn route(epoch: &moq_net::Identity) -> moq_net::origin::Route {
-		moq_net::origin::Route::default().with_identity(epoch.clone(), 0)
+	fn route(identity: &moq_net::Identity) -> moq_net::origin::Route {
+		moq_net::origin::Route::default().with_identity(identity.clone(), 0)
 	}
 
 	fn is_mismatch(result: crate::Result<moq_net::broadcast::Consumer>, expected: &moq_net::Identity) -> bool {
 		matches!(result, Err(crate::Error::IdentityMismatch { expected: ref named, .. }) if named == expected)
 	}
 
-	/// An omitted or matching epoch resolves the sibling; another epoch fails instead.
+	/// An omitted or matching identity resolves the sibling; another one fails instead.
 	#[tokio::test(start_paused = true)]
 	async fn a_reference_identity_must_match_the_resolved_sibling() {
 		let origin = produce_origin();
@@ -792,47 +792,47 @@ mod tests {
 	/// A replacement before the first resolution fails a reference naming the old instance,
 	/// rather than falling back to the current winner.
 	#[tokio::test(start_paused = true)]
-	async fn a_replaced_sibling_fails_a_reference_to_the_old_epoch() {
+	async fn a_replaced_sibling_fails_a_reference_to_the_old_identity() {
 		let origin = produce_origin();
-		let (old_epoch, new_epoch) = (moq_net::Identity::random(), moq_net::Identity::random());
+		let (old_identity, new_identity) = (moq_net::Identity::random(), moq_net::Identity::random());
 		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
-		let _old = origin.publish("a/source", route(&old_epoch)).unwrap();
-		let _new = origin.publish("a/source", route(&new_epoch)).unwrap();
+		let _old = origin.publish("a/source", route(&old_identity)).unwrap();
+		let _new = origin.publish("a/source", route(&new_identity)).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
 		let rel = Relative::new("./source").unwrap();
 
 		assert!(is_mismatch(
-			source.resolve(Some(&rel), Some(&old_epoch)).await,
-			&old_epoch
+			source.resolve(Some(&rel), Some(&old_identity)).await,
+			&old_identity
 		));
 		// The path's first answer is pinned all the same: later references read that instance.
 		let pinned = source.resolve(Some(&rel), None).await.unwrap();
-		assert_eq!(pinned.info().identity.as_ref(), Some(&new_epoch));
+		assert_eq!(pinned.info().identity.as_ref(), Some(&new_identity));
 	}
 
 	/// A later reference naming the replacement cannot move a pinned sibling, and a new
 	/// catalog instance starts fresh pins that resolve it.
 	#[tokio::test(start_paused = true)]
-	async fn a_conflicting_epoch_cannot_replace_a_pin() {
+	async fn a_conflicting_identity_cannot_replace_a_pin() {
 		let origin = produce_origin();
-		let (old_epoch, new_epoch) = (moq_net::Identity::random(), moq_net::Identity::random());
+		let (old_identity, new_identity) = (moq_net::Identity::random(), moq_net::Identity::random());
 		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
-		let _old = origin.publish("a/source", route(&old_epoch)).unwrap();
+		let _old = origin.publish("a/source", route(&old_identity)).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
 		let rel = Relative::new("./source").unwrap();
-		let first = source.resolve(Some(&rel), Some(&old_epoch)).await.unwrap();
+		let first = source.resolve(Some(&rel), Some(&old_identity)).await.unwrap();
 
-		let _new = origin.publish("a/source", route(&new_epoch)).unwrap();
+		let _new = origin.publish("a/source", route(&new_identity)).unwrap();
 		settle().await;
 		// A rendition added later names the replacement: it fails, and the pin stays.
-		let binding = source.bind(Some(&rel), Some(&new_epoch)).unwrap();
-		assert!(is_mismatch(binding.broadcast().await, &new_epoch));
+		let binding = source.bind(Some(&rel), Some(&new_identity)).unwrap();
+		assert!(is_mismatch(binding.broadcast().await, &new_identity));
 		assert!(source.resolve(Some(&rel), None).await.unwrap().is_clone(&first));
 		assert!(
 			source
-				.resolve(Some(&rel), Some(&old_epoch))
+				.resolve(Some(&rel), Some(&old_identity))
 				.await
 				.unwrap()
 				.is_clone(&first)
@@ -841,12 +841,12 @@ mod tests {
 		// Concurrent consumers: a new catalog instance resolves the replacement while the old
 		// source keeps reading its pin.
 		let fresh = source.switched(&source.broadcast());
-		let replaced = fresh.resolve(Some(&rel), Some(&new_epoch)).await.unwrap();
-		assert_eq!(replaced.info().identity.as_ref(), Some(&new_epoch));
+		let replaced = fresh.resolve(Some(&rel), Some(&new_identity)).await.unwrap();
+		assert_eq!(replaced.info().identity.as_ref(), Some(&new_identity));
 		assert!(source.resolve(Some(&rel), None).await.unwrap().is_clone(&first));
 	}
 
-	/// A self-reference's epoch must not contradict the catalog broadcast's own.
+	/// A self-reference's identity must not contradict the catalog broadcast's own.
 	#[tokio::test(start_paused = true)]
 	async fn a_self_reference_identity_checks_the_catalog_broadcast() {
 		let origin = produce_origin();

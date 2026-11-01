@@ -161,8 +161,8 @@ impl Tls {
 }
 
 /// Pull a remote HLS/LL-HLS playlist (URL or file path) into the Origin under `target.name`,
-/// announced under `epoch`. Once the playlist ends, serve the finished broadcast for the linger.
-pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Identity) -> anyhow::Result<()> {
+/// announced under `identity`. Once the playlist ends, serve the finished broadcast for the linger.
+pub async fn import(target: ImportTarget, args: ImportArgs, identity: moq_net::Identity) -> anyhow::Result<()> {
 	let ImportTarget {
 		origin,
 		name,
@@ -190,7 +190,7 @@ pub async fn import(target: ImportTarget, args: ImportArgs, epoch: moq_net::Iden
 	let ran = match importer.init().await {
 		Ok(()) => {
 			notify_ready();
-			run_announced(&mut importer, &mut listed, &producer, epoch).await
+			run_announced(&mut importer, &mut listed, &producer, identity).await
 		}
 		Err(err) => Err(err.into()),
 	};
@@ -217,7 +217,7 @@ async fn run_announced(
 	importer: &mut moq_hls::import::Import,
 	listed: &mut moq_mux::catalog::hang::Consumer,
 	publication: &moq_net::origin::Publication,
-	epoch: moq_net::Identity,
+	identity: moq_net::Identity,
 ) -> anyhow::Result<()> {
 	let run = importer.run();
 	tokio::pin!(run);
@@ -234,7 +234,7 @@ async fn run_announced(
 	};
 	anyhow::ensure!(catalog.is_some(), "the playlist ended before it declared a track");
 	publication
-		.announce(moq_net::origin::Route::default().with_identity(epoch, 0))
+		.announce(moq_net::origin::Route::default().with_identity(identity, 0))
 		.context("failed to announce broadcast")?;
 	if !ended {
 		run.await?;

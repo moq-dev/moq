@@ -2644,7 +2644,7 @@ mod tests {
 		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
 
 		// Publish broadcast "live": a `video0` rendition plus three keyframe groups whose frames
-		// carry `payload`, so the two epochs' media differs byte for byte. The returned handle
+		// carry `payload`, so the two publishers' media differs byte for byte. The returned handle
 		// keeps the publisher alive until it is dropped.
 		fn publish(origin: &moq_net::origin::Producer, payload: &'static [u8]) -> Box<dyn std::any::Any> {
 			let broadcast = origin.create_broadcast("live").expect("publish allowed");
@@ -2689,7 +2689,7 @@ mod tests {
 		);
 
 		// Control: an export started after the takeover does serve the new publisher's media, so
-		// the assertion above is about which epoch a rendition is bound to, not about a broadcast
+		// the assertion above is about which identity a rendition is bound to, not about a broadcast
 		// that happens to be unreadable.
 		let fresh = crate::resolved(&origin, "live").await;
 		let (_renditions, rendition) = export(&fresh, &video_config());
@@ -2956,7 +2956,7 @@ mod tests {
 	}
 
 	// A replacement already present when the export starts is the sibling the request
-	// resolves to: it is served, not treated as a stale epoch.
+	// resolves to: it is served, not treated as a stale identity.
 	#[tokio::test]
 	async fn a_sibling_present_at_export_start_is_served() {
 		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";

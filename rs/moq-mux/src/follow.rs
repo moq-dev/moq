@@ -122,8 +122,8 @@ mod tests {
 		}
 	}
 
-	fn route(epoch: &moq_net::Identity) -> moq_net::origin::Route {
-		moq_net::origin::Route::default().with_identity(epoch.clone(), 0)
+	fn route(identity: &moq_net::Identity) -> moq_net::origin::Route {
+		moq_net::origin::Route::default().with_identity(identity.clone(), 0)
 	}
 
 	/// The next change a follower reports, which must arrive within the origin's update hold.
@@ -177,20 +177,20 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_follow_restarts_only_without_an_identity() {
 		let origin = produce_origin();
-		let (old_epoch, new_epoch) = (moq_net::Identity::random(), moq_net::Identity::random());
+		let (old_identity, new_identity) = (moq_net::Identity::random(), moq_net::Identity::random());
 		let _catalog = origin.publish("a/pub", Default::default()).unwrap();
-		let _old = origin.publish("a/source", route(&old_epoch)).unwrap();
+		let _old = origin.publish("a/source", route(&old_identity)).unwrap();
 		settle().await;
 		let source = resolved(&origin, "a/pub").await;
 		let rel = Relative::new("./source").unwrap();
 		let mut any = source.follow(Some(&rel), None).unwrap();
-		let mut named = source.follow(Some(&rel), Some(&old_epoch)).unwrap();
+		let mut named = source.follow(Some(&rel), Some(&old_identity)).unwrap();
 		let old = followed(&mut any).await.unwrap();
 		assert!(followed(&mut named).await.unwrap().is_clone(&old));
 
-		let new = origin.publish("a/source", route(&new_epoch)).unwrap();
+		let new = origin.publish("a/source", route(&new_identity)).unwrap();
 		let replaced = followed(&mut any).await.unwrap();
-		assert_eq!(replaced.info().identity.as_ref(), Some(&new_epoch));
+		assert_eq!(replaced.info().identity.as_ref(), Some(&new_identity));
 		assert!(followed(&mut named).await.is_none(), "another identity ends it");
 		quiet(&mut named).await;
 		// The old instance still serves the subscriptions already on it.
@@ -199,9 +199,9 @@ mod tests {
 		// The replacement goes and the old instance wins again.
 		drop(new);
 		let back = followed(&mut named).await.unwrap();
-		assert_eq!(back.info().identity.as_ref(), Some(&old_epoch));
+		assert_eq!(back.info().identity.as_ref(), Some(&old_identity));
 		let back = followed(&mut any).await.unwrap();
-		assert_eq!(back.info().identity.as_ref(), Some(&old_epoch));
+		assert_eq!(back.info().identity.as_ref(), Some(&old_identity));
 	}
 
 	/// A self-reference reads only the catalog instance, whatever replaces it at the path.

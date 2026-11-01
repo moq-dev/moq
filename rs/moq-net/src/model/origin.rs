@@ -7561,7 +7561,7 @@ mod tests {
 	}
 
 	/// One publisher instance, shared by every route in a test that resumes across them.
-	fn epoch() -> crate::Identity {
+	fn identity() -> crate::Identity {
 		"01900000-0000-7000-8000-000000000001".parse().unwrap()
 	}
 
@@ -8570,18 +8570,18 @@ mod tests {
 	/// quiet either way.
 	#[moq_clock::test]
 	async fn identical_reannounce_restarts_under_another_identity() {
-		for identity in [None, Some(epoch())] {
+		for named in [None, Some(identity())] {
 			let producer = origin(1).produce();
 			let mut announced = producer.consume().announced();
 			let mut route = Route::default().with_hops(hops(&[10]));
-			route.identity = identity.clone();
+			route.identity = named.clone();
 
 			let old = producer.announce("room", route.clone()).unwrap();
 			let first = announced.expect_next_active("room").await;
 			assert_eq!(first.hops.as_slice(), hops(&[10]).as_slice());
 
 			let _new = producer.announce("room", route).unwrap();
-			match identity {
+			match named {
 				None => assert_eq!(announced.expect_next_restarted("room").await.hops, hops(&[10])),
 				Some(_) => announced.assert_next_wait(),
 			}
@@ -8934,30 +8934,30 @@ mod tests {
 		assert_eq!(route.cost, Cost::new(9));
 	}
 
-	/// Re-pricing from the current route keeps the epoch, so it stays one broadcast.
+	/// Re-pricing from the current route keeps the identity, so it stays one broadcast.
 	#[moq_clock::test]
-	async fn reprice_from_the_current_route_keeps_the_epoch() {
+	async fn reprice_from_the_current_route_keeps_the_identity() {
 		let producer = origin(1).produce();
 		let mut announced = producer.consume().announced();
 
 		let dynamic = producer
-			.requests_route("room", Route::default().with_identity(epoch(), 0).with_cost(5), None)
+			.requests_route("room", Route::default().with_identity(identity(), 0).with_cost(5), None)
 			.unwrap();
 		announced.expect_next_active("room").await;
 		dynamic.update_route(dynamic.route().with_cost(1)).unwrap();
 		let route = announced.expect_next_active("room").await;
-		assert_eq!((route.identity, route.cost), (Some(epoch()), Cost::new(1)));
+		assert_eq!((route.identity, route.cost), (Some(identity()), Cost::new(1)));
 		assert_eq!(dynamic.route().cost, Cost::new(1));
 
 		let broadcast = producer.create_broadcast("lobby").unwrap();
 		assert!(broadcast.route().is_none(), "not announced yet");
 		broadcast
-			.announce(Route::default().with_identity(epoch(), 0).with_cost(5))
+			.announce(Route::default().with_identity(identity(), 0).with_cost(5))
 			.unwrap();
 		announced.expect_next_active("lobby").await;
 		broadcast.announce(broadcast.route().unwrap().with_cost(1)).unwrap();
 		let route = announced.expect_next_active("lobby").await;
-		assert_eq!((route.identity, route.cost), (Some(epoch()), Cost::new(1)));
+		assert_eq!((route.identity, route.cost), (Some(identity()), Cost::new(1)));
 		broadcast.unannounce();
 		assert!(broadcast.route().is_none(), "withdrawn");
 	}
@@ -9073,7 +9073,7 @@ mod tests {
 		let mut announced = consumer.announced();
 
 		let _local = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0).with_cost(5))
+			.publish("room/alice", Route::default().with_identity(identity(), 0).with_cost(5))
 			.unwrap();
 		assert_eq!(announced.expect_next_active("room/alice").await.cost, Cost::new(5));
 
@@ -9081,7 +9081,7 @@ mod tests {
 			.requests_route(
 				"room/alice",
 				Route::default()
-					.with_identity(epoch(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(1),
 				None,
@@ -9108,12 +9108,12 @@ mod tests {
 		let consumer = producer.consume();
 
 		let _stable = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0))
+			.publish("room/alice", Route::default().with_identity(identity(), 0))
 			.unwrap();
 		let minted = producer.publish("room/bob", Route::default()).unwrap();
 
 		let alice = consumer.request("room/alice", None).await.unwrap();
-		assert_eq!(alice.info().identity, Some(epoch()));
+		assert_eq!(alice.info().identity, Some(identity()));
 		let bob = consumer.request("room/bob", None).await.unwrap();
 		let identity = minted.route().unwrap().identity;
 		assert!(identity.is_some());
@@ -9129,7 +9129,7 @@ mod tests {
 		let consumer = producer.consume();
 
 		let _local = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0).with_cost(5))
+			.publish("room/alice", Route::default().with_identity(identity(), 0).with_cost(5))
 			.unwrap();
 		let first = consumer.request("room/alice", None).await.expect("resolves locally");
 
@@ -9137,7 +9137,7 @@ mod tests {
 			.requests_route(
 				"room/alice",
 				Route::default()
-					.with_identity(epoch(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(1),
 				None,
@@ -9243,7 +9243,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let local = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0).with_cost(5))
+			.publish("room/alice", Route::default().with_identity(identity(), 0).with_cost(5))
 			.unwrap();
 		let _a = local.create_track("a", None).unwrap();
 		let _b = local.create_track("b", None).unwrap();
@@ -9258,7 +9258,7 @@ mod tests {
 			.requests_route(
 				"room/alice",
 				Route::default()
-					.with_identity(epoch(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(1),
 				None,
@@ -9273,11 +9273,11 @@ mod tests {
 		assert_eq!(listed(&mut tracks).await, "-a");
 	}
 
-	/// A takeover without an epoch, in place, continues the front too: it serves from
+	/// A takeover under an unnamed route, in place, continues the front too: it serves from
 	/// the successor once the predecessor retires rather than ending with no route.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	async fn a_front_follows_an_epochless_takeover_in_place() {
+	async fn a_front_follows_an_unnamed_takeover_in_place() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let first = producer
@@ -9314,18 +9314,18 @@ mod tests {
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn a_front_follows_a_chain_of_takeovers() {
-		for epochs in [false, true] {
+		for named in [false, true] {
 			for links in [2, 8] {
-				follows_a_chain_of_takeovers(links, epochs).await;
+				follows_a_chain_of_takeovers(links, named).await;
 			}
 		}
 	}
 
 	#[cfg(feature = "async")]
-	async fn follows_a_chain_of_takeovers(links: u64, epochs: bool) {
+	async fn follows_a_chain_of_takeovers(links: u64, named: bool) {
 		let route = |link: u64| {
 			let route = Route::default().with_hops(hops(&[10]));
-			match epochs {
+			match named {
 				true => route.with_identity(format!("link-{link}").parse().unwrap(), 0),
 				false => route,
 			}
@@ -9356,14 +9356,14 @@ mod tests {
 			.await
 			.expect("the front asked the chain's last route")
 			.accept(&successor);
-		assert_eq!(listed(&mut tracks).await, "+b", "{links} links, epochs: {epochs}");
+		assert_eq!(listed(&mut tracks).await, "+b", "{links} links, named: {named}");
 		assert!(!front.is_closed());
 		// The front carries the last instance, so a request now joins it.
 		let again = consumer.request("room/alice", None).await.unwrap();
-		assert!(again.is_clone(&front), "{links} links, epochs: {epochs}");
+		assert!(again.is_clone(&front), "{links} links, named: {named}");
 	}
 
-	/// A successor renewed to another epoch continues nothing its predecessor served, even
+	/// A successor renewed to another identity continues nothing its predecessor served, even
 	/// before the front resolved through the predecessor looks at the table again.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
@@ -9488,7 +9488,7 @@ mod tests {
 			.requests_route(
 				"room/alice",
 				Route::default()
-					.with_identity(epoch(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(2),
 				None,
@@ -9496,7 +9496,7 @@ mod tests {
 			.unwrap();
 		announced.expect_next_active("room/alice").await;
 		let _local = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0).with_cost(2))
+			.publish("room/alice", Route::default().with_identity(identity(), 0).with_cost(2))
 			.unwrap();
 		assert!(announced.expect_next_active("room/alice").await.hops.is_empty());
 
@@ -9840,7 +9840,7 @@ mod tests {
 				resolved: None,
 				via: None,
 				first: None,
-				selected: epoch(),
+				selected: identity(),
 				refused: false,
 			}),
 			timers: consumer.timers.clone(),
@@ -9905,7 +9905,7 @@ mod tests {
 		let incumbent = producer
 			.requests_route(
 				"room",
-				Route::default().with_identity(epoch(), 0).with_hops(hops(&[10])),
+				Route::default().with_identity(identity(), 0).with_hops(hops(&[10])),
 				None,
 			)
 			.unwrap();
@@ -9920,7 +9920,7 @@ mod tests {
 		let echo = producer
 			.requests_route(
 				"room",
-				Route::default().with_identity(epoch(), 0).with_hops(hops(&[10, 7])),
+				Route::default().with_identity(identity(), 0).with_hops(hops(&[10, 7])),
 				None,
 			)
 			.unwrap();
@@ -9954,7 +9954,7 @@ mod tests {
 			.requests_route(
 				"room/alice",
 				Route::default()
-					.with_identity(epoch(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(5),
 				None,
@@ -10013,7 +10013,7 @@ mod tests {
 			.requests_route(
 				"room/alice",
 				Route::default()
-					.with_identity(epoch(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(cost),
 				None,
@@ -10699,10 +10699,10 @@ mod tests {
 		let mut announced = producer.consume().announced();
 		step(Duration::from_millis(1)).await;
 
-		// One epoch, so the winner moving between routes is an update, not a restart.
+		// One identity, so the winner moving between routes is an update, not a restart.
 		let route = |chain: &[u64], via| {
 			Route::default()
-				.with_identity(epoch(), 0)
+				.with_identity(identity(), 0)
 				.with_hops(hops(chain))
 				.with_via(origin(via))
 		};
@@ -10734,10 +10734,10 @@ mod tests {
 				.poll(Instant::ZERO + Duration::from_secs(1), &kio::Waiter::noop())
 				.unwrap();
 			let peer = producer.clone().with_link(Link::Peer);
-			// One epoch, so the winner moving between routes is an update, not a restart.
+			// One identity, so the winner moving between routes is an update, not a restart.
 			let route = |chain: &[u64], via| {
 				Route::default()
-					.with_identity(epoch(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(chain))
 					.with_via(origin(via))
 			};
@@ -10789,10 +10789,10 @@ mod tests {
 		// Holds count on the driver's clock, which starts at its first poll.
 		moq_clock::sleep(Duration::from_millis(1)).await;
 
-		// One epoch, so the winner moving between routes is an update, not a restart.
+		// One identity, so the winner moving between routes is an update, not a restart.
 		let route = |chain: &[u64], via| {
 			Route::default()
-				.with_identity(epoch(), 0)
+				.with_identity(identity(), 0)
 				.with_hops(hops(chain))
 				.with_via(origin(via))
 		};
@@ -10830,7 +10830,7 @@ mod tests {
 		// Every path is to one publisher, so to one identity.
 		let route = |chain: &[u64], via| {
 			Route::default()
-				.with_identity(epoch(), 0)
+				.with_identity(identity(), 0)
 				.with_hops(hops(chain))
 				.with_via(origin(via))
 		};
@@ -10927,7 +10927,7 @@ mod tests {
 			let producer = origin(1).produce();
 			let peer = producer.clone().with_link(Link::Peer);
 			let mut announced = producer.consume().announced();
-			let route = Route::default().with_identity(epoch(), 0).with_hops(hops(&[9, 2]));
+			let route = Route::default().with_identity(identity(), 0).with_hops(hops(&[9, 2]));
 			let first = peer.requests_route("room", route.clone(), None).unwrap();
 			let second = peer.requests_route("room", route.clone(), None).unwrap();
 			announced.expect_next_active("room").await;
@@ -10973,7 +10973,7 @@ mod tests {
 
 	/// A change of source alone is delivered: the same chain and cost arriving
 	/// from a peer instead of a client is a different fact for the consumer. Under one
-	/// epoch it is an update.
+	/// identity it is an update.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
 	async fn source_change_is_an_update() {
@@ -10982,7 +10982,7 @@ mod tests {
 		let mut announced = producer.consume().announced();
 
 		let route = Route::default()
-			.with_identity(epoch(), 0)
+			.with_identity(identity(), 0)
 			.with_hops(hops(&[7]))
 			.with_via(origin(7));
 		let _forwarded = peer.requests_route("room", route.clone(), None).unwrap();
@@ -11207,14 +11207,14 @@ mod tests {
 		let fill = publication.broadcast().clone();
 		let control = publication.clone();
 		publication
-			.announce(Route::default().with_identity(epoch(), 0))
+			.announce(Route::default().with_identity(identity(), 0))
 			.unwrap();
 		events.expect_next_active("room/alice").await;
 		control.unannounce();
 		events.expect_next_ended("room/alice").await;
 		assert!(publication.route().is_none());
 		publication
-			.announce(Route::default().with_identity(epoch(), 0))
+			.announce(Route::default().with_identity(identity(), 0))
 			.unwrap();
 		events.expect_next_active("room/alice").await;
 		drop(control);
@@ -11232,20 +11232,26 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let old = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0))
+			.publish("room/alice", Route::default().with_identity(identity(), 0))
 			.unwrap();
-		let replacement_epoch: crate::Identity = "01900000-0000-7000-8000-000000000002".parse().unwrap();
+		let replacement_identity: crate::Identity = "01900000-0000-7000-8000-000000000002".parse().unwrap();
 		let replacement = producer
 			.publish(
 				"room/alice",
-				Route::default().with_identity(replacement_epoch.clone(), 0),
+				Route::default().with_identity(replacement_identity.clone(), 0),
 			)
 			.unwrap();
 		old.unannounce();
 		old.close();
-		assert_eq!(replacement.route().unwrap().identity, Some(replacement_epoch.clone()));
-		let resolved = consumer.request("room/alice", replacement_epoch.clone()).await.unwrap();
-		assert_eq!(resolved.info().identity.as_ref(), Some(&replacement_epoch));
+		assert_eq!(
+			replacement.route().unwrap().identity,
+			Some(replacement_identity.clone())
+		);
+		let resolved = consumer
+			.request("room/alice", replacement_identity.clone())
+			.await
+			.unwrap();
+		assert_eq!(resolved.info().identity.as_ref(), Some(&replacement_identity));
 	}
 
 	/// A refused answer keeps its announcer withheld, so a clone cannot announce it later.
@@ -11361,11 +11367,11 @@ mod tests {
 
 		let pending = consumer.request("room/alice", None);
 		let published = queued(&claim).await.prepare().unwrap().publish().unwrap();
-		let epoch = published.route().unwrap().identity.unwrap();
+		let identity = published.route().unwrap().identity.unwrap();
 		pending.await.expect("resolves");
 
-		let pinned = consumer.request("room/alice", epoch.clone()).await;
-		assert_eq!(pinned.expect("resolves").info().identity.as_ref(), Some(&epoch));
+		let pinned = consumer.request("room/alice", identity.clone()).await;
+		assert_eq!(pinned.expect("resolves").info().identity.as_ref(), Some(&identity));
 		let stale = consumer.request("room/alice", crate::Identity::random());
 		assert!(matches!(stale.await, Err(Error::Unroutable)));
 	}
@@ -11807,7 +11813,7 @@ mod tests {
 			let server = producer
 				.requests_route(
 					"room",
-					Route::default().with_identity(epoch(), 0).with_hops(hops(first)),
+					Route::default().with_identity(identity(), 0).with_hops(hops(first)),
 					None,
 				)
 				.unwrap();
@@ -11854,7 +11860,7 @@ mod tests {
 			self.producer
 				.requests_route(
 					"room",
-					Route::default().with_identity(epoch(), 0).with_hops(hops(first)),
+					Route::default().with_identity(identity(), 0).with_hops(hops(first)),
 					None,
 				)
 				.unwrap()
@@ -11904,7 +11910,7 @@ mod tests {
 			.requests_route(
 				"room",
 				Route::default()
-					.with_identity(epoch(), 1)
+					.with_identity(identity(), 1)
 					.with_hops(hops(&[11]))
 					.with_cost(9),
 				None,
@@ -12000,7 +12006,7 @@ mod tests {
 		settle(|| resolved.is_closed()).await;
 		assert!(
 			second.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
-			"another route without an epoch is never asked to resume"
+			"a route of another identity is never asked to resume"
 		);
 	}
 
@@ -12051,12 +12057,12 @@ mod tests {
 		deliver(&new_track, &mut fresh, b"after").await;
 	}
 
-	/// A request in the same tick as a newer epoch's announcement is never handed
+	/// A request in the same tick as another identity's announcement is never handed
 	/// the old front: its watcher has not noticed the replacement yet, but the
-	/// request mints a front on the new epoch instead of joining the replaced one.
+	/// request mints a front on the new identity instead of joining the replaced one.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	async fn a_request_racing_a_newer_epoch_skips_the_old_front() {
+	async fn a_request_racing_a_new_identity_skips_the_old_front() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let first = crate::Identity::random();
@@ -12071,36 +12077,36 @@ mod tests {
 			"an unpinned request names what it resolved"
 		);
 
-		let epoch = crate::Identity::random();
+		let identity = crate::Identity::random();
 		let new = producer
-			.publish("room/alice", Route::default().with_identity(epoch.clone(), 0))
+			.publish("room/alice", Route::default().with_identity(identity.clone(), 0))
 			.unwrap();
 		let new_track = new.create_track("video", crate::track::Info::timed()).unwrap();
-		let named = consumer.request("room/alice", epoch.clone());
+		let named = consumer.request("room/alice", identity.clone());
 		let bare = consumer.request("room/alice", None);
 
-		let named = named.await.expect("the new epoch resolves");
-		let bare = bare.await.expect("the new epoch resolves");
+		let named = named.await.expect("the new identity resolves");
+		let bare = bare.await.expect("the new identity resolves");
 		assert!(
 			!named.is_clone(&resolved),
-			"a request naming the new epoch got the old one"
+			"a request naming the new identity got the old one"
 		);
 		assert!(!bare.is_clone(&resolved), "a bare request joined the replaced front");
 		assert!(named.is_clone(&bare), "both share the new front");
 		assert_eq!(
 			bare.info().identity.as_ref(),
-			Some(&epoch),
-			"an unpinned request names the new epoch"
+			Some(&identity),
+			"an unpinned request names the new identity"
 		);
 		let mut subscription = named.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&new_track, &mut subscription, b"new").await;
 	}
 
-	/// A newer epoch winning while the front's first request is in flight beats that
+	/// Another identity winning while the front's first request is in flight beats that
 	/// route: its late answer is not what requesters resolve to.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	async fn an_answer_racing_a_newer_epoch_resolves_the_winner() {
+	async fn an_answer_racing_a_new_identity_resolves_the_winner() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let old = producer
@@ -12113,7 +12119,7 @@ mod tests {
 		let pending = consumer.request("room/alice", None);
 		let request = queued(&old).await;
 
-		// The answer and the newer epoch land in the same tick.
+		// The answer and the new identity land in the same tick.
 		let new = producer
 			.publish(
 				"room/alice",
@@ -12130,13 +12136,13 @@ mod tests {
 		deliver(&new_track, &mut subscription, b"new").await;
 	}
 
-	/// A request held when its route changes epoch carries over: the handler is asked
-	/// again under the new epoch rather than the requester failing. The old answer is
-	/// neither served under the new epoch nor cached for the next request, and a request
-	/// pinned to the old epoch is refused. `answer_first` lands the old answer just
+	/// A request held when its route changes identity carries over: the handler is asked
+	/// again under the new identity rather than the requester failing. The old answer is
+	/// neither served under the new identity nor cached for the next request, and a request
+	/// pinned to the old identity is refused. `answer_first` lands the old answer just
 	/// before the change instead of after, before the front takes it.
 	#[cfg(feature = "async")]
-	async fn held_request_across_an_epoch_change(answer_first: bool) {
+	async fn held_request_across_an_identity_change(answer_first: bool) {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let old = crate::Identity::random();
@@ -12149,15 +12155,15 @@ mod tests {
 
 		let stale = broadcast::Info::new().produce();
 		let _stale_track = stale.create_track("video", crate::track::Info::timed()).unwrap();
-		let epoch = crate::Identity::random();
+		let identity = crate::Identity::random();
 		if answer_first {
 			request.accept(&stale);
 			dynamic
-				.update_route(dynamic.route().with_identity(epoch.clone(), 0))
+				.update_route(dynamic.route().with_identity(identity.clone(), 0))
 				.unwrap();
 		} else {
 			dynamic
-				.update_route(dynamic.route().with_identity(epoch.clone(), 0))
+				.update_route(dynamic.route().with_identity(identity.clone(), 0))
 				.unwrap();
 			request.accept(&stale);
 		}
@@ -12167,10 +12173,10 @@ mod tests {
 		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		request.accept(&fresh);
 		let resolved = pending.await.expect("the request carries over to the new instance");
-		assert_eq!(resolved.info().identity.as_ref(), Some(&epoch));
+		assert_eq!(resolved.info().identity.as_ref(), Some(&identity));
 		assert!(
 			matches!(pinned.await, Err(Error::Unroutable)),
-			"a request pinned to the old epoch resolved"
+			"a request pinned to the old identity resolved"
 		);
 		let cached = dynamic.state.lock().served.get(&Path::from_static("room/alice"));
 		assert!(
@@ -12183,21 +12189,21 @@ mod tests {
 
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	async fn a_request_held_across_an_epoch_change_is_asked_again() {
-		held_request_across_an_epoch_change(false).await;
+	async fn a_request_held_across_an_identity_change_is_asked_again() {
+		held_request_across_an_identity_change(false).await;
 	}
 
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	async fn an_answer_before_an_epoch_change_is_asked_again() {
-		held_request_across_an_epoch_change(true).await;
+	async fn an_answer_before_an_identity_change_is_asked_again() {
+		held_request_across_an_identity_change(true).await;
 	}
 
-	/// A refusal that lands just before an epoch change, before the front takes it,
+	/// A refusal that lands just before an identity change, before the front takes it,
 	/// was the old instance's answer: the request is asked again, not ended.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	async fn a_refusal_before_an_epoch_change_is_asked_again() {
+	async fn a_refusal_before_an_identity_change_is_asked_again() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let dynamic = producer
@@ -12209,25 +12215,25 @@ mod tests {
 			.unwrap();
 		let pending = consumer.request("room/alice", None);
 		queued(&dynamic).await.reject(Error::NotFound);
-		let epoch = crate::Identity::random();
+		let identity = crate::Identity::random();
 		dynamic
-			.update_route(dynamic.route().with_identity(epoch.clone(), 0))
+			.update_route(dynamic.route().with_identity(identity.clone(), 0))
 			.unwrap();
 
 		let fresh = broadcast::Info::new().produce();
 		let fresh_track = fresh.create_track("video", crate::track::Info::timed()).unwrap();
 		queued(&dynamic).await.accept(&fresh);
 		let resolved = pending.await.expect("the request carries over");
-		assert_eq!(resolved.info().identity.as_ref(), Some(&epoch));
+		assert_eq!(resolved.info().identity.as_ref(), Some(&identity));
 		let mut subscription = resolved.track("video").unwrap().subscribe(None).await.unwrap();
 		deliver(&fresh_track, &mut subscription, b"new").await;
 	}
 
-	/// A release is not undone by the epoch coming back before the front looks: a
+	/// A release is not undone by the identity coming back before the front looks: a
 	/// request held across A to B to A is asked again, not refused.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	async fn a_request_held_across_an_epoch_round_trip_is_asked_again() {
+	async fn a_request_held_across_an_identity_round_trip_is_asked_again() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let old = crate::Identity::random();
@@ -12293,21 +12299,21 @@ mod tests {
 	/// A peer naming one publisher instance is never handed another.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
-	async fn a_request_for_another_epoch_is_refused() {
+	async fn a_request_for_another_identity_is_refused() {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let _broadcast = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0))
+			.publish("room/alice", Route::default().with_identity(identity(), 0))
 			.unwrap();
 
 		let other: crate::Identity = "01900000-0000-7000-8000-000000000002".parse().unwrap();
 		let refused = consumer.request("room/alice", other).await;
 		assert!(matches!(refused, Err(Error::Unroutable)));
 		let named = consumer
-			.request("room/alice", epoch())
+			.request("room/alice", identity())
 			.await
-			.expect("the named epoch resolves");
-		assert_eq!(named.info().identity.as_ref(), Some(&epoch()));
+			.expect("the named identity resolves");
+		assert_eq!(named.info().identity.as_ref(), Some(&identity()));
 	}
 
 	/// The driver's completion contract: it resolves once every producer handle
@@ -12365,8 +12371,8 @@ mod tests {
 		}
 	}
 
-	/// Routes with one epoch serve one broadcast: when the serving route dies, the
-	/// subscription resumes through another with that epoch, whatever its first hop,
+	/// Routes with one identity serve one broadcast: when the serving route dies, the
+	/// subscription resumes through another with that identity, whatever its first hop,
 	/// or with none at all.
 	#[moq_clock::test]
 	#[cfg(feature = "async")]
@@ -12461,7 +12467,7 @@ mod tests {
 			let incumbent = producer
 				.requests_route(
 					"room",
-					Route::default().with_identity(epoch(), 0).with_hops(hops(&[10])),
+					Route::default().with_identity(identity(), 0).with_hops(hops(&[10])),
 					None,
 				)
 				.unwrap();
@@ -12469,7 +12475,7 @@ mod tests {
 			let echo = producer
 				.requests_route(
 					"room",
-					Route::default().with_identity(epoch(), 0).with_hops(hops(&[10, 7])),
+					Route::default().with_identity(identity(), 0).with_hops(hops(&[10, 7])),
 					None,
 				)
 				.unwrap();
@@ -12668,7 +12674,7 @@ mod tests {
 		incumbent
 			.update_route(
 				Route::default()
-					.with_identity(epoch(), 0)
+					.with_identity(identity(), 0)
 					.with_hops(hops(&[10]))
 					.with_cost(Cost::DRAIN),
 			)
@@ -13123,7 +13129,7 @@ mod tests {
 		let consumer = producer.consume();
 
 		let first = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0))
+			.publish("room/alice", Route::default().with_identity(identity(), 0))
 			.unwrap();
 		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
@@ -13141,7 +13147,7 @@ mod tests {
 
 		// The newest source is dispatched the track, and refused for its metadata.
 		let second = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0))
+			.publish("room/alice", Route::default().with_identity(identity(), 0))
 			.unwrap();
 		let _incompatible = second
 			.create_track("video", track::Info::default().with_timescale(crate::Timescale::MICRO))
@@ -13177,7 +13183,7 @@ mod tests {
 		let server = producer
 			.requests_route(
 				"room",
-				Route::default().with_identity(epoch(), 0).with_hops(hops(&[10])),
+				Route::default().with_identity(identity(), 0).with_hops(hops(&[10])),
 				None,
 			)
 			.unwrap();
@@ -13205,7 +13211,9 @@ mod tests {
 
 		let newcomer = producer.create_broadcast("room/alice").unwrap();
 		let mut handler = newcomer.requests();
-		newcomer.announce(Route::default().with_identity(epoch(), 0)).unwrap();
+		newcomer
+			.announce(Route::default().with_identity(identity(), 0))
+			.unwrap();
 		let _unanswered = moq_clock::timeout(Duration::from_secs(1), handler.requested_track())
 			.await
 			.expect("the front asked the newcomer")
@@ -13230,7 +13238,7 @@ mod tests {
 
 		// No handler and no track: refuses "video" with NotFound.
 		let _second = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0))
+			.publish("room/alice", Route::default().with_identity(identity(), 0))
 			.unwrap();
 		for _ in 0..10 {
 			moq_clock::sim::yield_now().await;
@@ -13249,7 +13257,7 @@ mod tests {
 			.expect("open");
 
 		let _third = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0))
+			.publish("room/alice", Route::default().with_identity(identity(), 0))
 			.unwrap();
 		for _ in 0..10 {
 			moq_clock::sim::yield_now().await;
@@ -13325,7 +13333,7 @@ mod tests {
 			.expect("open");
 
 		let newcomer = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0))
+			.publish("room/alice", Route::default().with_identity(identity(), 0))
 			.unwrap();
 		let _video = newcomer.create_track("video", crate::track::Info::timed()).unwrap();
 		for _ in 0..10 {
@@ -13348,7 +13356,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let first = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0))
+			.publish("room/alice", Route::default().with_identity(identity(), 0))
 			.unwrap();
 		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
@@ -13360,7 +13368,7 @@ mod tests {
 		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"before");
 
 		let second = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0))
+			.publish("room/alice", Route::default().with_identity(identity(), 0))
 			.unwrap();
 		let incompatible = second
 			.create_track("video", track::Info::default().with_timescale(crate::Timescale::MICRO))
@@ -13388,7 +13396,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let first = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0))
+			.publish("room/alice", Route::default().with_identity(identity(), 0))
 			.unwrap();
 		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
@@ -13401,7 +13409,7 @@ mod tests {
 		drop(group);
 
 		let second = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0))
+			.publish("room/alice", Route::default().with_identity(identity(), 0))
 			.unwrap();
 		let incompatible = second
 			.create_track("video", track::Info::default().with_timescale(crate::Timescale::MICRO))
@@ -13444,7 +13452,7 @@ mod tests {
 		let producer = origin(1).produce();
 		let consumer = producer.consume();
 		let first = producer
-			.publish("room/alice", Route::default().with_identity(epoch(), 0))
+			.publish("room/alice", Route::default().with_identity(identity(), 0))
 			.unwrap();
 		let track = first.create_track("video", crate::track::Info::timed()).unwrap();
 		let resolved = consumer.request("room/alice", None).await.expect("resolves");
@@ -13458,7 +13466,7 @@ mod tests {
 
 		let second = producer.create_broadcast("room/alice").unwrap();
 		let mut handler = second.requests();
-		second.announce(Route::default().with_identity(epoch(), 0)).unwrap();
+		second.announce(Route::default().with_identity(identity(), 0)).unwrap();
 		let request = moq_clock::timeout(Duration::from_secs(1), handler.requested_track())
 			.await
 			.expect("the front asked the newcomer")
@@ -14018,15 +14026,15 @@ mod tests {
 		let mut selected = consumer.announced();
 		selected.assert_next_wait();
 
-		let first_epoch = crate::Identity::random();
+		let first_identity = crate::Identity::random();
 		let exact = producer
-			.announce("room/alice", Route::default().with_identity(first_epoch.clone(), 0))
+			.announce("room/alice", Route::default().with_identity(first_identity.clone(), 0))
 			.unwrap();
 		assert!(
 			matches!(selected.expect_next().await, AnnounceEvent::Start(a) if a.prefix.is_empty() && a.captures.is_some())
 		);
 		exact
-			.update(Route::default().with_identity(first_epoch, 0).with_cost(2))
+			.update(Route::default().with_identity(first_identity, 0).with_cost(2))
 			.unwrap();
 		assert!(matches!(selected.expect_next().await, AnnounceEvent::Update(a) if a.route.cost == Cost::new(2)));
 		exact

@@ -471,7 +471,7 @@ impl Publish {
 	///
 	/// A TS import whose source's clock steps onto another timeline ([`ts::Restart`]), such as
 	/// a changeover between two encoders whose clocks were never locked, finishes the broadcast
-	/// and republishes the rest of the input at `name` under a new epoch.
+	/// and republishes the rest of the input at `name` under a new identity.
 	pub(super) fn stdin(
 		origin: &moq_net::origin::Producer,
 		name: &str,
@@ -613,12 +613,12 @@ impl Publish {
 		self
 	}
 
-	/// Advertise the broadcast's path under `epoch`.
+	/// Advertise the broadcast's path under `identity`.
 	///
 	/// A capture announces now. A stdin import announces from [`run`](Self::run), once the input
 	/// has declared its tracks: see [`Pending`].
-	pub fn announce(&mut self, epoch: moq_net::Identity) -> anyhow::Result<()> {
-		let route = moq_net::origin::Route::default().with_identity(epoch, 0);
+	pub fn announce(&mut self, identity: moq_net::Identity) -> anyhow::Result<()> {
+		let route = moq_net::origin::Route::default().with_identity(identity, 0);
 		match (&self.source, &self.publication) {
 			(_, None) => {}
 			(Source::Stream { .. }, Some(_)) => self.route = Some(route),
@@ -707,7 +707,7 @@ struct Publication {
 }
 
 /// How a stdin TS import republishes its path when the source's clock steps onto another
-/// timeline ([`ts::Restart`]): as a new broadcast under a new epoch, with the same catalog
+/// timeline ([`ts::Restart`]): as a new broadcast under a new identity, with the same catalog
 /// sections.
 struct Republish {
 	origin: moq_net::origin::Producer,
@@ -720,7 +720,7 @@ struct Republish {
 }
 
 impl Republish {
-	/// A new instance of the broadcast under a new epoch, announced once its catalog goes out.
+	/// A new instance of the broadcast under a new identity, announced once its catalog goes out.
 	///
 	/// `mux_rate` is the previous instance's measurement of the same multiplex, which the new
 	/// catalog carries from its first media rather than waiting on a fresh window.
@@ -739,11 +739,11 @@ impl Republish {
 		if let Some(echo) = &self.echo {
 			catalog.mutate(|catalog| catalog.echo = Some(echo.clone()))?;
 		}
-		let epoch = moq_net::Identity::random();
-		tracing::info!(%epoch, "publisher instance");
+		let identity = moq_net::Identity::random();
+		tracing::info!(%identity, "publisher instance");
 		let pending = Pending::new(
 			control.clone(),
-			moq_net::origin::Route::default().with_identity(epoch, 0),
+			moq_net::origin::Route::default().with_identity(identity, 0),
 		)?;
 		Ok(Instance {
 			decoder: PublishDecoder::Ts(Box::new(import)),
@@ -2184,12 +2184,12 @@ pub(crate) mod tests {
 		);
 	}
 
-	/// A source whose clock steps back republishes the path under a new epoch, announced once
+	/// A source whose clock steps back republishes the path under a new identity, announced once
 	/// its catalog goes out, with the sections the first instance's catalog carried. The new
 	/// catalog reuses the first instance's mux rate, so it goes out with the first media rather
 	/// than after a fresh two-second measurement window.
 	#[tokio::test(start_paused = true)]
-	async fn a_clock_step_republishes_under_a_new_epoch() {
+	async fn a_clock_step_republishes_under_a_new_identity() {
 		// 5 s of H.264 and AAC at a constant 400 kb/s, its clock on PID 0x100.
 		const CLIP: &[u8] = include_bytes!("../../moq-mux/src/container/ts/test_data/bbb5s_cbr.ts");
 		// Its first 1.5 s: short of a measurement window, so only a reused rate releases a catalog.
@@ -2233,19 +2233,19 @@ pub(crate) mod tests {
 		let (mut stdin, input_end) = tokio::io::duplex(2 * CLIP.len() + flag.len());
 		let mut import = std::pin::pin!(decode(decoder, catalog, input_end, publication));
 
-		// The epoch of the next instance announced on the path.
+		// The identity of the next instance announced on the path.
 		let mut next = async |import: &mut std::pin::Pin<&mut _>| {
 			tokio::select! {
 				res = import => panic!("the import returned before its input ended: {res:?}"),
 				_ = moq_clock::sleep(Duration::from_secs(30)) => panic!("never announced"),
-				epoch = async {
+				identity = async {
 					loop {
 						use moq_net::announce::Event;
 						if let Event::Start(announce) | Event::Restart(announce) = announced.next().await.unwrap() {
 							break announce.route.identity.unwrap();
 						}
 					}
-				} => epoch,
+				} => identity,
 			}
 		};
 		tokio::io::AsyncWriteExt::write_all(&mut stdin, CLIP).await.unwrap();
@@ -2264,7 +2264,7 @@ pub(crate) mod tests {
 		tokio::io::AsyncWriteExt::write_all(&mut stdin, &[&flag[..], HEAD].concat())
 			.await
 			.unwrap();
-		assert_ne!(next(&mut import).await, first, "the new instance has its own epoch");
+		assert_ne!(next(&mut import).await, first, "the new instance has its own identity");
 		let broadcast = origin.consume().request("demo", None).await.unwrap();
 		let mut catalogs = hang::catalog::Catalog::<ts::Ext>::subscribe(&broadcast).await.unwrap();
 		let catalog = catalogs.next().await.unwrap().expect("a catalog");

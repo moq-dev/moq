@@ -89,8 +89,8 @@ fn scope_producer(origin: &moq_net::origin::Producer, name: &str) -> anyhow::Res
 }
 
 /// WHEP client: pull a remote broadcast into the Origin under `target.name` (import),
-/// announced under `epoch`.
-pub async fn connect_import(target: ImportTarget, url: Url, epoch: moq_net::Identity) -> anyhow::Result<()> {
+/// announced under `identity`.
+pub async fn connect_import(target: ImportTarget, url: Url, identity: moq_net::Identity) -> anyhow::Result<()> {
 	let name = &target.name;
 	let producer = target
 		.origin
@@ -99,7 +99,7 @@ pub async fn connect_import(target: ImportTarget, url: Url, epoch: moq_net::Iden
 	// The WHEP pull fills the tracks as they arrive; announce up front so viewers
 	// can discover the broadcast while it connects.
 	producer
-		.announce(moq_net::origin::Route::default().with_identity(epoch, 0))
+		.announce(moq_net::origin::Route::default().with_identity(identity, 0))
 		.context("failed to announce broadcast")?;
 
 	tracing::info!(url = %RedactedUrl::new(&url), %name, "WHEP client pulling");

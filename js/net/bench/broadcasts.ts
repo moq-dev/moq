@@ -126,23 +126,23 @@ for (const trackCount of [8, 128, 1024]) {
 
 // Resolve one touched path while both the table and that path's readers grow.
 console.log("request,routes,readers,update_and_read_us");
-const epoch = Identity.parse("01900000-0000-7000-8000-000000000001");
+const identity = Identity.parse("01900000-0000-7000-8000-000000000001");
 for (const pinned of [false, true]) {
 	for (const routeCount of routeCounts) {
 		for (const readerCount of observerCounts) {
 			const origin = new Producer();
 			const reader = origin.consume();
-			const options = pinned ? { identity: epoch } : {};
+			const options = pinned ? { identity } : {};
 			const publishers = Array.from({ length: routeCount }, (_, index) => {
 				const sourcePublication = origin.createBroadcast(Path.from(`room/${index}`));
-				sourcePublication.announce({ identity: epoch });
+				sourcePublication.announce({ identity });
 				return sourcePublication;
 			});
 			const background = publishers.map((_, index) => reader.request(Path.from(`room/${index}`), options));
 			const requests = Array.from({ length: readerCount }, () => reader.request(Path.from("room/0"), options));
 			const start = performance.now();
 			for (let index = 0; index < updates; index++) {
-				publishers[0].announce({ identity: epoch, cost: BigInt(index + 1) });
+				publishers[0].announce({ identity, cost: BigInt(index + 1) });
 				await Promise.resolve();
 				for (const request of requests) {
 					if (!request.active.peek()) throw new Error("same-identity request lost its front");
@@ -235,7 +235,7 @@ const nextIdentity = Identity.parse("01900000-0000-7000-8000-000000000002");
 for (const pathCount of routeCounts) {
 	for (const readerCount of observerCounts) {
 		const origin = new Producer();
-		const dynamic = origin.requestsRoute(Path.from("room"), { identity: epoch });
+		const dynamic = origin.requestsRoute(Path.from("room"), { identity });
 		const pending = dynamic.requested();
 		const requests = Array.from({ length: pathCount }, (_, index) =>
 			Array.from({ length: readerCount }, () => origin.consume().request(Path.from(`room/${index}`))),
@@ -302,11 +302,11 @@ for (const routeCount of routeCounts) {
 		const held = sources.map((source, i) => cache.insert(paths[i], cache.instance(paths[i]), source.consume()));
 		const specific = {};
 		const prefix = Path.from("pool/0/job");
-		const epoch = Identity.random();
+		const identity = Identity.random();
 		let duplicates = 0;
 		const start = performance.now();
 		for (let round = 0; round < 256; round++) {
-			if (round % 2 === 0) cache.announce(prefix, specific, { ...Route.default, identity: epoch });
+			if (round % 2 === 0) cache.announce(prefix, specific, { ...Route.default, identity });
 			else cache.withdraw(prefix, specific);
 			for (let i = 0; i < consumerCount; i++) {
 				const instance = cache.instance(paths[i]);

@@ -21,7 +21,7 @@ const GRACE: Duration = Duration::from_secs(30);
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ExportArgs {
 	/// Where to record: `file:///dir`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://container/prefix`.
-	/// Each broadcast records under `<broadcast>/@<epoch>` beneath it.
+	/// Each broadcast records under `<broadcast>/@<identity>` beneath it.
 	pub store: Url,
 
 	/// Keep only this much recent content (a DVR), deleting older objects. Unset keeps everything.
@@ -38,7 +38,7 @@ pub struct ExportArgs {
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ImportArgs {
-	/// One recorded broadcast: the `<broadcast>/@<epoch>` key prefix `export archive` wrote.
+	/// One recorded broadcast: the `<broadcast>/@<identity>` key prefix `export archive` wrote.
 	pub store: Url,
 
 	/// How often a recording still growing is checked for new objects and tracks. Defaults to 1s.
@@ -234,7 +234,7 @@ fn key(root: &Path, (path, identity): &Instance) -> anyhow::Result<Path> {
 	Ok(key.join(PathPart::from(format!("@{identity}").as_str())))
 }
 
-/// Republish the recording at `args.store` as the broadcast `name`, announced under `epoch`.
+/// Republish the recording at `args.store` as the broadcast `name`, announced under `identity`.
 ///
 /// Every stored track is served with its original groups: each live from its newest stored
 /// group, and history on request. A recording still growing is followed until its producer
@@ -243,7 +243,7 @@ pub async fn import(
 	origin: moq_net::origin::Producer,
 	name: String,
 	args: ImportArgs,
-	epoch: moq_net::Identity,
+	identity: moq_net::Identity,
 ) -> anyhow::Result<()> {
 	let store = open(&args.store)?;
 	let mut config = moq_archive::consumer::Config::default();
@@ -255,7 +255,7 @@ pub async fn import(
 		.await
 		.with_context(|| format!("no readable recording at {}", args.store))?;
 	broadcast
-		.announce(moq_net::origin::Route::default().with_identity(epoch, 0))
+		.announce(moq_net::origin::Route::default().with_identity(identity, 0))
 		.context("failed to announce broadcast")?;
 
 	tracing::info!(%name, store = %args.store, "replaying");
@@ -308,7 +308,7 @@ mod tests {
 	}
 
 	/// `export archive` records each broadcast announced under its prefix into its own
-	/// `<path>/@<epoch>`, and leaves out what is announced elsewhere.
+	/// `<path>/@<identity>`, and leaves out what is announced elsewhere.
 	#[tokio::test]
 	async fn each_broadcast_records_under_its_own_key_prefix() {
 		let dir = tempfile::tempdir().unwrap();
@@ -325,7 +325,7 @@ mod tests {
 		let info = track::Info::default()
 			.with_timescale(Timescale::MILLI)
 			.with_max_age(Duration::from_secs(3600));
-		let mut epochs = Vec::new();
+		let mut identities = Vec::new();
 		let mut broadcasts = Vec::new();
 		for path in ["live/a", "live/b", "other"] {
 			let broadcast = origin.create_broadcast(path).unwrap();
@@ -333,11 +333,11 @@ mod tests {
 			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 			group.write_frame(Timestamp::from_millis(0).unwrap(), path).unwrap();
 			group.finish().unwrap();
-			let epoch = moq_net::Identity::random();
+			let identity = moq_net::Identity::random();
 			broadcast
-				.announce(moq_net::origin::Route::default().with_identity(epoch.clone(), 0))
+				.announce(moq_net::origin::Route::default().with_identity(identity.clone(), 0))
 				.unwrap();
-			epochs.push(epoch);
+			identities.push(identity);
 			broadcasts.push((broadcast, track));
 		}
 
@@ -351,8 +351,8 @@ mod tests {
 			broadcast.close();
 		}
 		let complete = [
-			format!("live/a/@{}/.end", epochs[0]),
-			format!("live/b/@{}/.end", epochs[1]),
+			format!("live/a/@{}/.end", identities[0]),
+			format!("live/b/@{}/.end", identities[1]),
 		];
 		moq_clock::timeout(Duration::from_secs(10), async {
 			while !complete.iter().all(|end| dir.path().join(end).exists()) {
@@ -364,13 +364,13 @@ mod tests {
 		recording.abort();
 
 		let files = files(dir.path());
-		for (path, epoch) in [("live/a", &epochs[0]), ("live/b", &epochs[1])] {
+		for (path, identity) in [("live/a", &identities[0]), ("live/b", &identities[1])] {
 			for file in [".end", "video/.info", "video/end"] {
-				assert!(files.contains(&format!("{path}/@{epoch}/{file}")), "{files:?}");
+				assert!(files.contains(&format!("{path}/@{identity}/{file}")), "{files:?}");
 			}
 			assert!(
 				files.contains(&format!(
-					"{path}/@{epoch}/video/0000000000000000000-0000000000000000000-0000000000000000000"
+					"{path}/@{identity}/video/0000000000000000000-0000000000000000000-0000000000000000000"
 				)),
 				"{files:?}"
 			);
@@ -379,7 +379,7 @@ mod tests {
 	}
 
 	/// `import archive` republishes a recording `export archive` wrote under the given name and
-	/// epoch, serving its stored groups.
+	/// identity, serving its stored groups.
 	#[tokio::test]
 	async fn an_exported_broadcast_imports() {
 		let dir = tempfile::tempdir().unwrap();
@@ -413,14 +413,14 @@ mod tests {
 			store: url,
 			refresh: None,
 		};
-		let epoch = moq_net::Identity::random();
-		let _import = tokio::spawn(import(origin.clone(), "replay".into(), args, epoch.clone()));
+		let identity = moq_net::Identity::random();
+		let _import = tokio::spawn(import(origin.clone(), "replay".into(), args, identity.clone()));
 		let mut announced = origin.consume().announced();
 		moq_clock::timeout(Duration::from_secs(10), async {
 			loop {
 				if let Some(moq_net::announce::Event::Start(announce)) = announced.next().await {
 					assert_eq!(announce.prefix.as_str(), "replay");
-					assert_eq!(announce.route.identity, Some(epoch.clone()));
+					assert_eq!(announce.route.identity, Some(identity.clone()));
 					break;
 				}
 			}
@@ -471,11 +471,11 @@ mod tests {
 	/// delimiter.
 	#[test]
 	fn an_identity_keys_one_segment() {
-		let epoch = moq_net::Identity::random();
-		let pinned = (moq_net::Path::from_static("live/a"), epoch.clone());
+		let identity = moq_net::Identity::random();
+		let pinned = (moq_net::Path::from_static("live/a"), identity.clone());
 		assert_eq!(
 			key(&Path::from("rec"), &pinned).unwrap().as_ref(),
-			format!("rec/live/a/@{epoch}")
+			format!("rec/live/a/@{identity}")
 		);
 		let slashed = (moq_net::Path::from_static("live/a"), "a/b".parse().unwrap());
 		assert_eq!(key(&Path::from("rec"), &slashed).unwrap().parts().count(), 4);
@@ -485,13 +485,13 @@ mod tests {
 	/// key prefix records beside it, never inside it.
 	#[test]
 	fn keys_are_prefix_free() {
-		let epoch = moq_net::Identity::random();
+		let identity = moq_net::Identity::random();
 		let victim = key(
 			&Path::from("rec"),
-			&(moq_net::Path::from_static("live/a"), epoch.clone()),
+			&(moq_net::Path::from_static("live/a"), identity.clone()),
 		)
 		.unwrap();
-		let hostile = format!("live/a/@{epoch}");
+		let hostile = format!("live/a/@{identity}");
 		let nested = key(
 			&Path::from("rec"),
 			&(moq_net::Path::new(&hostile).unwrap(), moq_net::Identity::random()),
@@ -499,14 +499,14 @@ mod tests {
 		.unwrap();
 		assert!(nested.prefix_match(&victim).is_none(), "{nested} is under {victim}");
 		assert!(
-			nested.as_ref().starts_with(&format!("rec/live/a/%40{epoch}/@")),
+			nested.as_ref().starts_with(&format!("rec/live/a/%40{identity}/@")),
 			"{nested}"
 		);
 
 		// `%` is escaped too, so an escaped-looking segment keys apart from the `@` one.
 		let literal = key(
 			&Path::from("rec"),
-			&(moq_net::Path::new(&format!("live/a/%40{epoch}")).unwrap(), epoch),
+			&(moq_net::Path::new(&format!("live/a/%40{identity}")).unwrap(), identity),
 		)
 		.unwrap();
 		assert!(literal.as_ref().starts_with("rec/live/a/%2540"), "{literal}");

@@ -849,7 +849,7 @@ type SubscriberProps = {
 	trace?: boolean;
 	/** The player's `delay` attribute, when not its adaptive default. */
 	delay?: string;
-	/** Pin the reader independently of the epoch-aware publishers. */
+	/** Pin the reader independently of the identity-aware publishers. */
 	versions?: string;
 };
 

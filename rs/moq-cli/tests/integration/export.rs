@@ -87,7 +87,7 @@ struct Relay {
 }
 
 /// A public relay on ephemeral loopback ports that also accepts lite-07, the version that
-/// carries epochs, for a client that opts in with `--connect-version`. Its generated
+/// carries identities, for a client that opts in with `--connect-version`. Its generated
 /// certificate is trusted blindly, since nothing but loopback reaches it.
 async fn relay() -> Relay {
 	let _ = moq_tokio::crypto::install_default();
@@ -250,7 +250,7 @@ fn import(relay: &Relay) -> (Child, JoinHandle<ChildStdin>) {
 	import_with(relay, &[])
 }
 
-/// [`import`] with `global` flags, such as the session version or the epoch.
+/// [`import`] with `global` flags, such as the session version.
 fn import_with(relay: &Relay, global: &[&str]) -> (Child, JoinHandle<ChildStdin>) {
 	import_as(relay, global, TS)
 }
@@ -518,7 +518,7 @@ async fn a_restarted_publisher_is_a_program_switch_with_stitch() {
 #[ignore = "real-time process test: just rs cli-export"]
 async fn the_same_instance_within_the_follow_continues() {
 	let relay = relay().await;
-	let epoch = moq_net::Identity::random();
+	let identity = moq_net::Identity::random();
 	let lite07 = ["--connect-version", LITE_07];
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.create_broadcast("demo").unwrap();
@@ -528,7 +528,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), config).unwrap();
 	let mut import = ts::Import::new(broadcast.broadcast().clone(), catalog.reserve());
 	broadcast
-		.announce(moq_net::origin::Route::default().with_identity(epoch.clone(), 0))
+		.announce(moq_net::origin::Route::default().with_identity(identity.clone(), 0))
 		.unwrap();
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
@@ -563,7 +563,7 @@ async fn the_same_instance_within_the_follow_continues() {
 	export.output_past(0).await;
 	assert!(split < LONG.len(), "the capture has a tail after the export joined");
 	let old = relay.origin.request("demo", None).await.unwrap();
-	assert_eq!(old.info().identity.as_ref(), Some(&epoch));
+	assert_eq!(old.info().identity.as_ref(), Some(&identity));
 	let clock = catalog.snapshot().clock;
 	connection.abort(moq_net::Error::Cancel);
 	connection.closed().await.unwrap();
@@ -576,7 +576,7 @@ async fn the_same_instance_within_the_follow_continues() {
 		.await
 		.expect("the relay observes the returning publication")
 		.unwrap();
-	assert_eq!(back.info().identity.as_ref(), Some(&epoch));
+	assert_eq!(back.info().identity.as_ref(), Some(&identity));
 	assert!(!back.is_clone(&old), "the old relay copy was replaced");
 	for chunk in chunks {
 		pace.tick().await;
@@ -685,7 +685,7 @@ async fn a_standby_before_its_pmt_leaves_the_exports_running() {
 	a_standby_before_its_tracks(&[], TS).await;
 }
 
-/// lite-07 carries the epoch, so this is the version on which the relay queries the standby.
+/// lite-07 carries the identity, so this is the version on which the relay queries the standby.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_standby_before_its_pmt_leaves_the_exports_running_on_lite_07() {
@@ -1054,15 +1054,18 @@ async fn redundant_failover(bufferbloat: bool) {
 	}
 }
 
-/// The epoch of the next route announced for the path.
-async fn next_epoch(announced: &mut moq_net::announce::Consumer) -> moq_net::Identity {
+/// The identity of the next route announced for the path.
+async fn next_identity(announced: &mut moq_net::announce::Consumer) -> moq_net::Identity {
 	moq_clock::timeout(TIMEOUT, async {
 		loop {
 			match announced.next().await.expect("the relay stays up") {
 				moq_net::announce::Event::Start(announce)
 				| moq_net::announce::Event::Restart(announce)
 				| moq_net::announce::Event::Takeover { announce, .. } => {
-					return announce.route.identity.expect("a lite-07 importer announces its epoch");
+					return announce
+						.route
+						.identity
+						.expect("a lite-07 importer announces its identity");
 				}
 				_ => continue,
 			}
@@ -1073,7 +1076,7 @@ async fn next_epoch(announced: &mut moq_net::announce::Consumer) -> moq_net::Ide
 }
 
 /// `export ts --passthrough` follows no restart: it stays on the passthrough importer it
-/// resolved while a backup on its own epoch starts, and ends once that importer goes.
+/// resolved while a backup on its own identity starts, and ends once that importer goes.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
 async fn a_passthrough_export_ends_with_its_redundant_importer() {
@@ -1082,15 +1085,15 @@ async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	let mut announced = relay.origin.scope("", &demo).unwrap().announced();
 	let (feed, feeding) = redundant_feed();
 	let mut first = redundant_import(&relay, &feed, &["--passthrough"]);
-	let incumbent = next_epoch(&mut announced).await;
+	let incumbent = next_identity(&mut announced).await;
 	let mut export = export_with(&relay, &["--connect-version", LITE_07], &["--passthrough"]);
 	export.output_past(0).await;
 
 	let mut second = redundant_import(&relay, &feed, &["--passthrough"]);
 	assert_ne!(
-		next_epoch(&mut announced).await,
+		next_identity(&mut announced).await,
 		incumbent,
-		"the backup mints its own epoch"
+		"the backup mints its own identity"
 	);
 	let mark = export.output.lock().unwrap().len();
 	export.output_past(mark).await;

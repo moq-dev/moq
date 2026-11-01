@@ -92,11 +92,11 @@ test("events and the request round-trip", async () => {
 	expect(await decodeTracksEventMaybe(reader, version)).toEqual({ kind: "synced" });
 	expect(await decodeTracksEventMaybe(reader, version)).toBeUndefined();
 
-	const epoch = Identity.parse("01900000-0000-7000-8000-000000000001");
-	const request = await bytes((w) => new TracksMessage(Path.from("room/alice"), epoch).encode(w, version));
+	const identity = Identity.parse("01900000-0000-7000-8000-000000000001");
+	const request = await bytes((w) => new TracksMessage(Path.from("room/alice"), identity).encode(w, version));
 	const got = await TracksMessage.decode(new Reader(undefined, request, version), version);
 	expect(got.broadcast).toBe(Path.from("room/alice"));
-	expect(got.identity).toBe(epoch);
+	expect(got.identity).toBe(identity);
 });
 
 test("older versions have no tracks stream", async () => {

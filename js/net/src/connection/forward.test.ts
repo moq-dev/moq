@@ -401,7 +401,7 @@ test("an exclusive session closes every request beneath a broader one before it 
 });
 
 const first = Identity.random();
-for (const [name, epochs] of [
+for (const [name, identities] of [
 	["no identity", [undefined, undefined]],
 	["one identity", [first, first]],
 	["another identity", [first, Identity.random()]],
@@ -413,12 +413,12 @@ for (const [name, epochs] of [
 
 		const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
 		await settle();
-		start(session.stream("a/b/**"), "a/b/x", { ...Route.default, identity: epochs[0] });
+		start(session.stream("a/b/**"), "a/b/x", { ...Route.default, identity: identities[0] });
 		await settle();
 		const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
 		const events = record(broad);
 		await settle();
-		start(session.stream("a/**"), "a/b/x", { ...Route.default, identity: epochs[1] });
+		start(session.stream("a/**"), "a/b/x", { ...Route.default, identity: identities[1] });
 		await settle();
 		expect(events).toEqual(["start a/b/x"]);
 

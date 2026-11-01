@@ -942,7 +942,7 @@ async fn broadcast_route_migration() {
 
 	let publisher = Hop::new(0x42).unwrap();
 	// Replicas of one publisher instance, and the only version that carries it.
-	let epoch = moq_net::Identity::random();
+	let identity = moq_net::Identity::random();
 	let lite_07: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
 
 	// ── publisher A: the preferred route (cheaper) ──────────────────
@@ -953,7 +953,7 @@ async fn broadcast_route_migration() {
 	broadcast_a
 		.announce(
 			moq_net::origin::Route::default()
-				.with_identity(epoch.clone(), 0)
+				.with_identity(identity.clone(), 0)
 				.with_hops(hops_a)
 				.with_cost(1),
 		)
@@ -978,7 +978,7 @@ async fn broadcast_route_migration() {
 	broadcast_b
 		.announce(
 			moq_net::origin::Route::default()
-				.with_identity(epoch.clone(), 0)
+				.with_identity(identity.clone(), 0)
 				.with_hops(hops_b)
 				.with_cost(2),
 		)
