@@ -1,32 +1,40 @@
 ---
-title: moq-clock
-description: One clock for time, timers, and deterministic tests
+title: kio
+description: Async primitives, and one clock for time, timers, and deterministic tests
 ---
 
-# moq-clock
+# kio
 
-[![crates.io](https://img.shields.io/crates/v/moq-clock)](https://crates.io/crates/moq-clock)
-[![docs.rs](https://docs.rs/moq-clock/badge.svg)](https://docs.rs/moq-clock)
+[![crates.io](https://img.shields.io/crates/v/kio)](https://crates.io/crates/kio)
+[![docs.rs](https://docs.rs/kio/badge.svg)](https://docs.rs/kio)
 
-One clock for reading time and arming timers, so the same code runs on tokio,
-in the browser, and in a simulator that tests drive.
+The "easy async" primitives the other crates poll through, and `kio::clock`:
+one clock for reading time and arming timers, so the same code runs on tokio
+and in a simulator that tests drive.
 
 ## The clock
 
-`moq_clock::Instant` is a monotonic instant, counted in nanoseconds from the
+`kio::clock::Instant` is a monotonic instant, counted in nanoseconds from the
 clock's origin, with the methods of `std::time::Instant`. `Wall` is wall
 time from the same clock. It is a separate type because wall time can step
 forward or back without any time passing, so it never measures elapsed time.
 
 Async code reads the ambient clock: `now()`, `wall()`, `sleep()`,
 `sleep_until()`, `timeout()`, `interval()`, and `drive()` resolve to the
-current runtime's clock. That is tokio's on native, including paused tokio,
-and `performance.now()` with `setTimeout` in the browser. Nothing is plumbed
-through. On native, every unpaused runtime and every plain thread share one
+current runtime's clock. That is tokio's, including paused tokio. Nothing is
+plumbed through. Every unpaused runtime and every plain thread share one
 clock, so their instants compare. A paused tokio runtime has its own clock,
 and it pauses the instant but not wall time. The simulator is its own clock
 too. A runtime that reads the time itself, like a moq-uring worker, enters a
 `Deadlines` queue on its thread, and the ambient clock is that queue.
+
+Host timers need the `runtime` feature, which is off by default so a kio user
+that never waits on the host clock compiles no runtime backend:
+
+```toml
+[dependencies]
+kio = { version = "0.6", features = ["runtime"] }
+```
 
 Instants from different clocks don't compare. On native, `Instant::into_std()`
 and `Instant::from_std()` convert at a third-party API that takes
@@ -51,19 +59,19 @@ for dev-dependencies only:
 
 ```toml
 [dev-dependencies]
-moq-clock = { version = "0.11", features = ["sim"] }
+kio = { version = "0.6", features = ["sim"] }
 ```
 
 ```rust
 use std::time::Duration;
 
-#[moq_clock::test]
+#[kio::test]
 async fn gives_up_after_five_seconds() {
-    let task = moq_clock::sim::spawn(async {
-        moq_clock::timeout(Duration::from_secs(5), std::future::pending::<()>()).await
+    let task = kio::clock::sim::spawn(async {
+        kio::clock::timeout(Duration::from_secs(5), std::future::pending::<()>()).await
     });
     assert!(task.await.unwrap().is_err());
-    assert_eq!(moq_clock::now(), moq_clock::Instant::ZERO + Duration::from_secs(5));
+    assert_eq!(kio::clock::now(), kio::clock::Instant::ZERO + Duration::from_secs(5));
 }
 ```
 
@@ -88,4 +96,4 @@ reaches them, and other runtimes and threads keep the host clock. Python's
 Tests that do real I/O (sockets, browsers, codecs) can't use the simulator.
 They wait on events and use the host clock only for a watchdog.
 
-API: [docs.rs/moq-clock](https://docs.rs/moq-clock).
+API: [docs.rs/kio](https://docs.rs/kio).

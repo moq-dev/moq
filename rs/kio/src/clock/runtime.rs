@@ -14,7 +14,7 @@ use std::{
 #[cfg(feature = "runtime")]
 use tokio::time as host;
 
-use crate::{Instant, Wall};
+use crate::clock::{Instant, Wall};
 
 /// How far past [`Instant::ZERO`] a runtime clock reads at its origin.
 ///
@@ -160,15 +160,15 @@ pub(crate) struct Timer;
 #[cfg(not(feature = "runtime"))]
 impl Timer {
 	pub(crate) fn new(_: Instant) -> Self {
-		panic!("moq-clock runtime support is disabled")
+		panic!("the kio `runtime` feature is disabled")
 	}
 
 	pub(crate) fn reset(&mut self, _: Instant) {
-		panic!("moq-clock runtime support is disabled")
+		panic!("the kio `runtime` feature is disabled")
 	}
 
 	pub(crate) fn poll(&mut self, _: &mut Context<'_>) -> Poll<()> {
-		panic!("moq-clock runtime support is disabled")
+		panic!("the kio `runtime` feature is disabled")
 	}
 }
 
@@ -183,7 +183,7 @@ mod paused {
 	};
 
 	use super::host;
-	use crate::{Instant, Wall};
+	use crate::clock::{Instant, Wall};
 
 	/// A paused runtime counting from its own origin.
 	struct Own {
@@ -255,17 +255,17 @@ mod tests {
 			.start_paused(true)
 			.build()
 			.unwrap();
-		let _ = crate::now();
+		let _ = crate::clock::now();
 		runtime.block_on(async {
-			let start = crate::now();
-			crate::sleep(Duration::from_secs(5)).await;
-			assert_eq!(crate::now(), start + Duration::from_secs(5));
+			let start = crate::clock::now();
+			crate::clock::sleep(Duration::from_secs(5)).await;
+			assert_eq!(crate::clock::now(), start + Duration::from_secs(5));
 			tokio::time::advance(Duration::from_secs(60)).await;
-			assert_eq!(crate::now(), start + Duration::from_secs(65));
-			let at = crate::sleep_until(start + Duration::from_secs(70));
+			assert_eq!(crate::clock::now(), start + Duration::from_secs(65));
+			let at = crate::clock::sleep_until(start + Duration::from_secs(70));
 			assert_eq!(at.deadline(), start + Duration::from_secs(70));
 			at.await;
-			assert_eq!(crate::now(), start + Duration::from_secs(70));
+			assert_eq!(crate::clock::now(), start + Duration::from_secs(70));
 		});
 	}
 
@@ -284,15 +284,15 @@ mod tests {
 		// from its own origin.
 		let first = paused();
 		let second = paused();
-		let _ = crate::now();
+		let _ = crate::clock::now();
 		first.block_on(async {
-			let _ = crate::now();
+			let _ = crate::clock::now();
 			tokio::time::advance(Duration::from_secs(60)).await;
-			let _ = crate::origin();
+			let _ = crate::clock::origin();
 		});
 		second.block_on(async {
-			let (instant, _) = crate::origin();
-			assert_eq!(instant, crate::now());
+			let (instant, _) = crate::clock::origin();
+			assert_eq!(instant, crate::clock::now());
 		});
 	}
 
@@ -300,7 +300,7 @@ mod tests {
 	/// callers by advancing its clock before the anchor is first taken.
 	#[test]
 	fn a_later_paused_runtime_does_not_skew_the_anchor() {
-		let _ = crate::now();
+		let _ = crate::clock::now();
 		// Built after the origin, so it counts from the shared origin.
 		let runtime = tokio::runtime::Builder::new_current_thread()
 			.enable_time()
@@ -308,12 +308,16 @@ mod tests {
 			.build()
 			.unwrap();
 		runtime.block_on(async {
-			let _ = crate::now();
+			let _ = crate::clock::now();
 			tokio::time::advance(Duration::from_secs(3_600)).await;
-			let _ = crate::origin();
+			let _ = crate::clock::origin();
 		});
-		let (instant, _) = crate::origin();
-		assert!(instant <= crate::now(), "{instant:?} > {:?}", crate::now());
+		let (instant, _) = crate::clock::origin();
+		assert!(
+			instant <= crate::clock::now(),
+			"{instant:?} > {:?}",
+			crate::clock::now()
+		);
 	}
 
 	/// On a running clock, a converted instant is the same moment on std's clock.
@@ -321,13 +325,13 @@ mod tests {
 	#[expect(clippy::disallowed_methods, reason = "the test compares against std's clock")]
 	fn std_conversion_is_exact_on_a_running_clock() {
 		let before = std::time::Instant::now();
-		let now = crate::now();
+		let now = crate::clock::now();
 		let after = std::time::Instant::now();
 		let host = now.into_std();
 		assert!(before <= host && host <= after, "{before:?} <= {host:?} <= {after:?}");
-		assert_eq!(crate::Instant::from_std(host), now);
+		assert_eq!(crate::clock::Instant::from_std(host), now);
 		let earlier = now - Duration::from_secs(3_600);
-		assert_eq!(crate::Instant::from_std(earlier.into_std()), earlier);
+		assert_eq!(crate::clock::Instant::from_std(earlier.into_std()), earlier);
 	}
 
 	/// On paused tokio, converted instants keep the time between them.
@@ -339,13 +343,13 @@ mod tests {
 			.build()
 			.unwrap();
 		runtime.block_on(async {
-			let start = crate::now();
+			let start = crate::clock::now();
 			let host = start.into_std();
 			tokio::time::advance(Duration::from_secs(60)).await;
-			let later = crate::now();
+			let later = crate::clock::now();
 			assert_eq!(later.into_std() - host, Duration::from_secs(60));
 			assert_eq!(
-				crate::Instant::from_std(host + Duration::from_secs(5)),
+				crate::clock::Instant::from_std(host + Duration::from_secs(5)),
 				start + Duration::from_secs(5)
 			);
 		});
@@ -354,9 +358,9 @@ mod tests {
 	/// A std instant past the clock's range saturates instead of wrapping.
 	#[test]
 	fn std_conversion_saturates() {
-		let now = crate::now();
+		let now = crate::clock::now();
 		let far = now.into_std() + Duration::from_secs(1 << 40);
-		assert!(crate::Instant::from_std(far) > now + Duration::from_secs(1 << 33));
+		assert!(crate::clock::Instant::from_std(far) > now + Duration::from_secs(1 << 33));
 	}
 
 	/// A fresh clock names moments before the process started, as std's does, so
@@ -369,10 +373,10 @@ mod tests {
 			.build()
 			.unwrap();
 		runtime.block_on(async {
-			let now = crate::now();
+			let now = crate::clock::now();
 			assert!(now.checked_sub(Duration::from_secs(3_600)).is_some(), "{now:?}");
 		});
-		assert!(crate::now().checked_sub(Duration::from_secs(3_600)).is_some());
+		assert!(crate::clock::now().checked_sub(Duration::from_secs(3_600)).is_some());
 	}
 
 	/// Every worker of a multi-thread runtime, and a thread outside any runtime,
@@ -384,16 +388,16 @@ mod tests {
 			.enable_time()
 			.build()
 			.unwrap();
-		let before = crate::now();
+		let before = crate::clock::now();
 		let reads = runtime.block_on(async {
-			let tasks: Vec<_> = (0..16).map(|_| tokio::spawn(async { crate::now() })).collect();
+			let tasks: Vec<_> = (0..16).map(|_| tokio::spawn(async { crate::clock::now() })).collect();
 			let mut reads = Vec::new();
 			for task in tasks {
 				reads.push(task.await.unwrap());
 			}
 			reads
 		});
-		let after = crate::now();
+		let after = crate::clock::now();
 		for read in reads {
 			assert!(before <= read && read <= after, "{before:?} <= {read:?} <= {after:?}");
 		}

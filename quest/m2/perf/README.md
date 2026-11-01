@@ -57,7 +57,7 @@ profile shows no pool contention.
 
 #3122's per-turn clock read landed in
 [#5926](https://github.com/moq-dev/moq/pull/5926): the io_uring worker is a
-`moq-clock` backend that samples the clock once per turn, cutting
+`kio::clock` backend that samples the clock once per turn, cutting
 `clock_gettime` from 44.7 to 1.05 calls per turn. `perf` was unavailable
 there, so [Profile the io_uring clock read](/quest/m2/perf/uring-clock-profile.md)
 owns the `[vdso]` share and relay CPU measurement.
