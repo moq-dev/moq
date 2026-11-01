@@ -34,7 +34,7 @@ fn mbps(n: u64) -> Rate {
 /// Run until `transport`'s sender is handed `target`.
 async fn probes_to(transport: &MockSession, target: Rate) {
 	while transport.probe_target() != target {
-		moq_clock::sleep(Duration::from_millis(1)).await;
+		moq_net::kio::clock::sleep(Duration::from_millis(1)).await;
 	}
 }
 
@@ -45,7 +45,7 @@ fn reservable() -> (broadcast::Producer, track::Producer) {
 	(broadcast, track)
 }
 
-#[moq_clock::test]
+#[moq_net::kio::test]
 async fn viewers_sum_into_the_peers_target() {
 	for version in VERSIONS {
 		let pair = pair(version, true).await;
@@ -66,7 +66,7 @@ async fn viewers_sum_into_the_peers_target() {
 	}
 }
 
-#[moq_clock::test]
+#[moq_net::kio::test]
 async fn the_sender_probes_to_the_larger_target() {
 	for version in VERSIONS {
 		let pair = pair(version, true).await;
@@ -85,7 +85,7 @@ async fn the_sender_probes_to_the_larger_target() {
 
 /// A session that publishes and watches probes its uplink for what it sends, never
 /// for what it watches, and its peer the other way around.
-#[moq_clock::test]
+#[moq_net::kio::test]
 async fn the_directions_stay_apart() {
 	for version in VERSIONS {
 		let pair = pair(version, true).await;
@@ -95,13 +95,13 @@ async fn the_directions_stay_apart() {
 
 		probes_to(&pair.client_transport, mbps(1)).await;
 		probes_to(&pair.server_transport, mbps(6)).await;
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		moq_net::kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(pair.client_transport.probe_target(), mbps(1), "{version}");
 		assert_eq!(pair.server_transport.probe_target(), mbps(6), "{version}");
 	}
 }
 
-#[moq_clock::test]
+#[moq_net::kio::test]
 async fn opting_out_sends_no_target() {
 	for version in VERSIONS {
 		let pair = pair(version, true).await;
@@ -111,7 +111,7 @@ async fn opting_out_sends_no_target() {
 		let mut grant = viewer.consume();
 		// The estimate arrives, so the PROBE stream is up and the target would have too.
 		assert_eq!(grant.changed().await.unwrap(), Some(mbps(6)), "{version}");
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		moq_net::kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(pair.server_transport.probe_target(), Rate::ZERO, "{version}");
 		assert!(!grant.probed(), "{version}: opted out, nothing probes for it");
 
@@ -122,7 +122,7 @@ async fn opting_out_sends_no_target() {
 }
 
 /// A peer without a sender advertises `Report`, so its viewers are never probed for.
-#[moq_clock::test]
+#[moq_net::kio::test]
 async fn a_peer_without_a_sender_is_sent_no_target() {
 	for version in VERSIONS {
 		let pair = pair(version, false).await;

@@ -1,11 +1,9 @@
 use std::borrow::Cow;
 
 use crate::{
-	Path,
-	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder},
+	Path, StreamError,
+	coding::{Decode, DecodeError, Decoder, Encode, EncodeError, Encoder, StreamCodes},
 };
-#[cfg(feature = "async")]
-use crate::{StreamError, coding::StreamCodes};
 
 use super::{Message, Version};
 use crate::track::Order;
@@ -569,6 +567,8 @@ impl<'a> Message<'a> for SubscribeStart {
 #[derive(Clone, Debug)]
 pub struct SubscribeEnd {
 	pub group: u64,
+	/// The error the track ended with, if it did not end cleanly. Lite-07 and later.
+	pub error: Option<StreamError>,
 }
 
 impl<'a> Message<'a> for SubscribeEnd {
@@ -578,7 +578,13 @@ impl<'a> Message<'a> for SubscribeEnd {
 			return Err(DecodeError::Version);
 		}
 		let group = r.varint()?;
-		Ok(Self { group })
+		let error = match version.has_end_error() {
+			true => r
+				.varint_opt()?
+				.map(|code| u32::try_from(code).map_or(StreamError::Internal, |code| version.decode_stream_code(code))),
+			false => None,
+		};
+		Ok(Self { group, error })
 	}
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -586,6 +592,11 @@ impl<'a> Message<'a> for SubscribeEnd {
 			return Err(EncodeError::Version);
 		}
 		w.varint(self.group)?;
+		match version.has_end_error() {
+			true => w.varint_opt(self.error.as_ref().map(|err| version.encode_stream_code(err).into()))?,
+			false if self.error.is_some() => return Err(EncodeError::Version),
+			false => {}
+		}
 		Ok(())
 	}
 }
@@ -911,7 +922,7 @@ mod test {
 
 	#[test]
 	fn subscribe_end_roundtrips_on_lite05() {
-		let resp = SubscribeResponse::End(SubscribeEnd { group: 7 });
+		let resp = SubscribeResponse::End(SubscribeEnd { group: 7, error: None });
 		let mut buf = Vec::new();
 		resp.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
@@ -925,17 +936,37 @@ mod test {
 	}
 
 	#[test]
-	fn subscribe_end_has_no_stream_count_on_lite07() {
-		let resp = SubscribeResponse::End(SubscribeEnd { group: 7 });
-		let mut buf = Vec::new();
-		resp.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
-			.unwrap();
-		assert_eq!(buf, [1, 1, 7]);
-		let mut slice = buf.as_slice();
-		match crate::coding::decode_buf(&mut slice, Version::Lite07, |r, v| SubscribeResponse::decode(r, v)).unwrap() {
-			SubscribeResponse::End(end) => assert_eq!(end.group, 7),
-			other => panic!("expected End, got {other:?}"),
-		}
+	fn subscribe_end_carries_its_error_on_lite07() {
+		let encode = |error: Option<StreamError>| {
+			let resp = SubscribeResponse::End(SubscribeEnd { group: 7, error });
+			let mut buf = Vec::new();
+			resp.encode(&mut Encoder::new(&mut buf, Version::Lite07.into()), Version::Lite07)
+				.unwrap();
+			buf
+		};
+		let decode = |buf: &[u8]| {
+			let mut slice = buf;
+			match crate::coding::decode_buf(&mut slice, Version::Lite07, |r, v| SubscribeResponse::decode(r, v))
+				.unwrap()
+			{
+				SubscribeResponse::End(end) => (end.group, end.error),
+				other => panic!("expected End, got {other:?}"),
+			}
+		};
+		// Type, length, exclusive final group, then the error code plus one, 0 for a clean end.
+		let clean = encode(None);
+		assert_eq!(clean, [1, 2, 7, 0]);
+		assert_eq!(decode(&clean), (7, None));
+		let errored = encode(Some(StreamError::App(7)));
+		assert_eq!(errored, [1, 2, 7, 64 + 7 + 1]);
+		assert_eq!(decode(&errored), (7, Some(StreamError::App(7))));
+
+		// An older version has nowhere to carry it.
+		let resp = SubscribeResponse::End(SubscribeEnd {
+			group: 7,
+			error: Some(StreamError::App(7)),
+		});
+		assert!(resp.encode_bytes(Version::Lite06).is_err());
 	}
 
 	#[test]
