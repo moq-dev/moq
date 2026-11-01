@@ -1993,8 +1993,9 @@ test("createGroup rejects a duplicate live sequence", async () => {
 	expect(await got?.readString()).toBe("retry");
 });
 
-// Closing a subscriber releases its buffered groups after the producer closes.
-test("closing the subscriber releases a recvGroup parked after a clean close", async () => {
+// A beyond-cap group outlives a clean close for a later widening, so the subscriber
+// leaving is what releases it: widening after close() finds nothing.
+test("closing the subscriber releases a group retained across a clean close", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe();
 
@@ -2006,8 +2007,11 @@ test("closing the subscriber releases a recvGroup parked after a clean close", a
 
 	producer.finish();
 	producer.close();
-	track.close();
 	expect(await pending).toBeUndefined();
+
+	track.close();
+	track.withRange({});
+	expect(await track.recvGroup()).toBeUndefined();
 });
 
 // Same, but with the producer still live: the first close() must also clear the
