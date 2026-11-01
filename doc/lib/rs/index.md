@@ -36,9 +36,10 @@ see [Applications](/bin/). [Examples](/setup/examples) links runnable consumers;
 | [moq-room](/lib/rs/moq-room) | Workspace-only native rooms; use the published JS room API for applications. |
 | [moq-json](/lib/rs/moq-json) | JSON over tracks: snapshots with merge-patch deltas, or append logs. |
 | [moq-e2ee](https://github.com/moq-dev/moq/tree/main/rs/moq-e2ee) | Workspace-only end-to-end encryption of groups, datagrams, and track names, scoped to a publisher epoch. |
+| [moq-sign](https://github.com/moq-dev/moq/tree/main/rs/moq-sign) | Workspace-only per-frame Ed25519 signatures, so relays forward content they cannot forge, retime, or relocate. |
 | [moq-loc](https://docs.rs/moq-loc), [moq-msf](https://docs.rs/moq-msf) | The IETF LOC container and MSF catalog. |
 | [moq-stats](https://docs.rs/moq-stats) | Publish and consume relay traffic counters as tracks. |
-| [moq-clock](/lib/rs/moq-clock) | One clock for time and timers on tokio, the browser, and a deterministic test simulator. |
+| [kio](/lib/rs/kio) | The async primitives everything polls through, and one clock for time and timers on tokio and a deterministic test simulator. |
 | [moq-hls](https://docs.rs/moq-hls), [moq-rtmp](https://docs.rs/moq-rtmp), [moq-srt](https://docs.rs/moq-srt), [moq-rtsp](https://github.com/moq-dev/moq/tree/main/rs/moq-rtsp), [moq-rtc](https://docs.rs/moq-rtc) | The [gateways](/bin/), as libraries you can embed with your own auth. |
 | [moq-ffi](https://docs.rs/moq-ffi), [moq-c](/lib/c/) | The UniFFI core behind the language bindings, and the C ABI. |
 | [moq-relay](/bin/relay/), [moq-cli](/bin/cli) | The binaries, also usable as crates. |
@@ -100,17 +101,6 @@ already in the URL stays the connection credential, which reaches an older
 relay. `http://` is for a relay on localhost only: it fetches the certificate
 fingerprint unauthenticated, so never send a token over it. QUIC tuning shares
 the relay's settings; see the [relay reference](/bin/relay/config#quic).
-
-## WebAssembly
-
-`moq-net` compiles to `wasm32-unknown-unknown` and rides the browser's own
-`WebTransport`, so Rust logic can be shared between native and web. Skip
-`moq-tokio` there. A client handshake returns a session and a separate driver;
-spawn `moq_net::time::run(driver)` on the browser executor, and drive the
-origin the same way. The [browser transport adapter](https://github.com/moq-dev/moq/blob/main/rs/moq-wasm/src/transport.rs)
-and [handshake](https://github.com/moq-dev/moq/blob/main/rs/moq-wasm/src/lib.rs)
-show the setup, including advertising the supported MoQ ALPNs. If you just
-want MoQ in a page, the [TypeScript libraries](/lib/js/) are the easier path.
 
 ## Conventions
 

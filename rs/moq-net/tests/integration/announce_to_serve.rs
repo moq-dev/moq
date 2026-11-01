@@ -52,6 +52,7 @@ fn drain(announced: &mut moq_net::announce::Consumer) -> Vec<String> {
 			Event::Start(announce) => ("Start", announce),
 			Event::Update(announce) => ("Update", announce),
 			Event::Restart(announce) => ("Restart", announce),
+			Event::Takeover { announce, .. } => ("Takeover", announce),
 			Event::End(announce) => ("End", announce),
 		};
 		seen.push(format!("{kind} {}", announce.prefix));
@@ -86,7 +87,7 @@ async fn read(broadcast: &moq_net::broadcast::Consumer, name: &str) -> mpsc::Unb
 		.await
 		.expect("subscribe");
 	let (tx, rx) = mpsc::unbounded();
-	moq_clock::sim::spawn(async move {
+	kio::clock::sim::spawn(async move {
 		loop {
 			let mut group = match sub.recv_group().await {
 				Ok(Some(group)) => group,
@@ -113,7 +114,7 @@ async fn read(broadcast: &moq_net::broadcast::Consumer, name: &str) -> mpsc::Unb
 
 /// The reader's next report, or `stalled` if nothing arrives in time.
 async fn next(rx: &mut mpsc::UnboundedReceiver<String>) -> String {
-	match moq_clock::timeout(SETTLE, rx.next()).await {
+	match kio::clock::timeout(SETTLE, rx.next()).await {
 		Ok(Some(report)) => report,
 		_ => "stalled".to_string(),
 	}
@@ -146,7 +147,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 	// Created, not yet announced: nobody can see or reach it.
 	let broadcast = publisher.create_broadcast(PATH).unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
-	moq_clock::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 	log.push(format!(
 		"created: {:?} {}",
 		drain(&mut announced),
@@ -155,14 +156,14 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 	// Announced: listed, and a request resolves.
 	broadcast.announce(Default::default()).unwrap();
-	moq_clock::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 	let first = request(&consumer).await;
 	log.push(format!("announced: {:?} {}", drain(&mut announced), outcome(&first)));
 	let first = first.expect("an announced broadcast resolves");
 
 	// A track in flight across the unannounce.
 	let mut reader = read(&first, "video").await;
-	moq_clock::timeout(SETTLE, crate::support::wanted(track.demand()))
+	kio::clock::timeout(SETTLE, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
@@ -173,7 +174,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 	// than joining the broadcast still draining, which ends, while the track
 	// already in flight carries on to its own end.
 	broadcast.unannounce();
-	moq_clock::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 	log.push(format!(
 		"unannounced: {:?} {} closed={}",
 		drain(&mut announced),
@@ -190,7 +191,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 	// Announced again: listed and servable, through a fresh broadcast.
 	broadcast.announce(Default::default()).unwrap();
-	moq_clock::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 	let again = request(&consumer).await;
 	log.push(format!(
 		"reannounced: {:?} {} fresh={}",
@@ -202,7 +203,7 @@ async fn lifecycle(observer: Observer) -> Vec<String> {
 
 	let audio = broadcast.create_track("audio", timed()).unwrap();
 	let mut reader = read(&again, "audio").await;
-	moq_clock::timeout(SETTLE, crate::support::wanted(audio.demand()))
+	kio::clock::timeout(SETTLE, crate::support::wanted(audio.demand()))
 		.await
 		.expect("no subscriber appeared after reannouncing")
 		.unwrap();
@@ -222,17 +223,17 @@ const EXPECTED: &[&str] = &[
 	"serving again: again",
 ];
 
-#[moq_clock::test]
+#[kio::test]
 async fn local_consumer_sees_only_announced_broadcasts() {
 	assert_eq!(lifecycle(Observer::Local).await, EXPECTED);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn remote_lite_consumer_sees_what_a_local_one_does() {
 	assert_eq!(lifecycle(Observer::Remote("moq-lite-05")).await, EXPECTED);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn remote_ietf_consumer_sees_what_a_local_one_does() {
 	// Each request has its own stream, which has to end a finished track the way
 	// moq-lite does.

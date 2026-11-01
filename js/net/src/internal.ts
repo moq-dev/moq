@@ -5,20 +5,30 @@
  *
  * @module
  */
-import type { Instant, Milli } from "@moq/clock";
+import { type Instant, Milli } from "@moq/clock";
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import type { Datagram } from "./datagram.ts";
 import type { Delivered } from "./delivered.ts";
 import type * as Epoch from "./epoch.ts";
 import { toStreamCode } from "./error.ts";
-import type { Frame, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
+import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
 import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
+import * as Varint from "./varint.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
+
+/** What a null maxDelay goes out as: the largest value every peer can read, as Rust sends for `None`. */
+export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
+
+/** A subscription's budget as the wire carries it: null for no limit, omitted for zero. */
+export function maxDelayOf(subscription: Pick<Subscription, "maxDelay">): Milli {
+	if (subscription.maxDelay === null) return NO_MAX_DELAY;
+	return subscription.maxDelay ?? Milli.zero;
+}
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
 export function groupBounds(groups: Groups = {}): { start: number; end?: number } {
@@ -202,6 +212,8 @@ export interface ReadGroupFrame {
 	frame: Frame;
 	/** The stored slice's declared plain size, on compressed reads. */
 	inflated?: number;
+	/** The payload to stream instead of `frame.payload`, for a frame written in pieces. */
+	chunks?: FrameConsumer;
 }
 
 /** What a resumed reader's {@link ResumeSource} sees of the subscriber it serves. */
@@ -313,6 +325,8 @@ export interface ResumeSource {
 	start(): number | "pending" | undefined;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Position | undefined;
+	/** The error the logical track's end carries, if it does not end cleanly. */
+	endError(): Error | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
 	finished(): Promise<Position>;
 	/** The serving copy's newest buffered frame, which a wire answer names as its edge. */
@@ -372,7 +386,7 @@ export const hooks: {
 	 * past the grace, or the track closes, since QUIC may deliver a lower group's stream after
 	 * a higher one. Mirrors the Rust `finish_at` on a `received()` copy; assigned by `track.ts`.
 	 */
-	endTrack: (producer: Producer, end: Position) => void;
+	endTrack: (producer: Producer, end: Position, error?: Error) => void;
 	/**
 	 * End a wire subscription's copy cleanly without declaring an end, for a session closed
 	 * locally: a dead route, not finished content, so a resumed reader's replacement route
@@ -407,6 +421,8 @@ export const hooks: {
 	 * forwarding it. Readers await `finished()` instead. Assigned by `track.ts`.
 	 */
 	subscriberEnd: (subscriber: Subscriber) => Position | undefined;
+	/** The error that end carries, if the track does not end cleanly. Assigned by `track.ts`. */
+	subscriberEndError: (subscriber: Subscriber) => Error | undefined;
 	joinSubscriber: (subscriber: Subscriber) => void;
 	/** Re-evaluate a live-edge join at a producer. */
 	joinProducer: (producer: Producer) => void;
@@ -437,6 +453,11 @@ export const hooks: {
 	 * so it names no object; assigned by `track.ts`.
 	 */
 	reportedGroup: (producer: Producer, group: number) => void;
+	/**
+	 * How long a session's tail waits for a late group: the subscribers' max delay, bounded by
+	 * the track's max age; assigned by `track.ts`.
+	 */
+	tailGrace: (producer: Producer) => Milli;
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => number | undefined;
 	/**
@@ -573,7 +594,9 @@ export const hooks: {
 	/** Carry a handed-out group across its logical track's route changes. */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
-	readGroupFrame: (group: GroupConsumer, compressed: boolean) => Promise<ReadGroupFrame | undefined>;
+	readGroupFrame: (group: GroupConsumer, compressed: boolean, from?: number) => Promise<ReadGroupFrame | undefined>;
+	/** Notify the owning track when a reader reaches its shed front. */
+	onShedRead: (group: GroupConsumer, notify: () => void) => void;
 	/**
 	 * Make an evicted mirror terminal while its track timeline still contains it. Whether the
 	 * mirror is released too: not when its group reads on, or may yet, from another copy.
@@ -626,6 +649,9 @@ export const hooks: {
 	subscriberEnd: () => {
 		throw new Error("track.ts not loaded");
 	},
+	subscriberEndError: () => {
+		throw new Error("track.ts not loaded");
+	},
 	joinSubscriber: () => {
 		throw new Error("track.ts not loaded");
 	},
@@ -648,6 +674,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	reportedGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	tailGrace: () => {
 		throw new Error("track.ts not loaded");
 	},
 	latestSequence: () => {
@@ -804,6 +833,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	readGroupFrame: () => {
+		throw new Error("group.ts not loaded");
+	},
+	onShedRead: () => {
 		throw new Error("group.ts not loaded");
 	},
 	evictGroup: () => {

@@ -25,7 +25,3 @@ remove a participant from the scene.
 - **Relay required:** guests join through a relay. Peer-to-peer WHIP ingress
   inside the studio was considered and dropped, because it brings NAT
   traversal and TURN for no capability the relay lacks.
-
-## Related
-
-- [Hang contribution references](/quest/m2/contribution-ref.md) - a composed broadcast naming each guest feed
