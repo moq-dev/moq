@@ -34,8 +34,8 @@ for (const job of [check.jobs.check]) {
 // Release's selector and execution share one job-wide base; Land uses its
 // resolved main SHA for every checked prefix, never the preceding PR's head.
 assert.equal(check.jobs.check.env.CI_BASE, "--all");
-// Over every package, the isolated feature shapes outgrow Check's job; Features runs them.
-assert.equal(check.jobs.check.env.CHECK_MODULES, "-rs_shapes");
+// Check runs the whole gate in one job.
+assert.equal(check.jobs.check.env.CHECK_MODULES, undefined);
 for (const step of check.jobs.check.steps) assert.equal(step.env?.CI_BASE, undefined, `${step.name} overrides CI_BASE`);
 // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
 assert.equal(check.concurrency.group, "check-${{ github.ref }}");
@@ -312,8 +312,7 @@ assert.ok(targets.some((target: string) => target.includes("-windows-")));
 // Neither the feature matrix nor the optimized WASM build shares the queue's
 // default-feature test artifacts, but both must block a release.
 const features = await workflow("features");
-assert.deepEqual(features.jobs.features.strategy.matrix.recipe, ["rs features", "gate rs_shapes", "js wasm"]);
-// Nightly's gate splits across Tests and Features, which together run all of it.
-assert.ok(nightly.jobs.tests.strategy.matrix.recipe.includes("gate -rs_shapes"));
-assert.ok(!nightly.jobs.tests.strategy.matrix.recipe.includes("gate"));
+assert.deepEqual(features.jobs.features.strategy.matrix.recipe, ["rs features", "js wasm"]);
+// Nightly runs the whole gate over every package in one Tests job.
+assert.ok(nightly.jobs.tests.strategy.matrix.recipe.includes("gate"));
 console.log("queue event policy passed");

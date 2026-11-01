@@ -53,10 +53,6 @@ verdicts:
 - Nightly was red every night of the m1 run. The 2026-10-21 night failed 18
   jobs and the 2026-10-22 night 19 plus a cancelled Loom job. By the end of the
   run, merged fixes covered all but these, which had no owner:
-  - `just rs loom` on main `f42b336f0e`: `a_front_sees_a_reader_return`
-    exceeds Loom's branch limit, and the two
-    `a_*_reader_sees_the_front_end_a_refused_track` models run until the job's
-    60-minute timeout cancels it.
   - Windows only: `reconnect::a_protocol_violation_ends_reconnect`, added by
     [moq-dev/moq#6162](https://github.com/moq-dev/moq/pull/6162), redials
     after a protocol violation over TCP.

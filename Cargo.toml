@@ -219,6 +219,7 @@ rcgen = { version = "0.14", default-features = false }
 # default-features off so each consumer picks its own TLS backend and body
 # features; nothing here wants the default native-tls stack.
 reqwest = { version = "0.13", default-features = false }
+rind = "0.1"
 rustc-hash = "2.1.3"
 sd-notify = "0.5"
 send_wrapper = "0.6"

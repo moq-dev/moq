@@ -57,6 +57,5 @@ Dropped, with reasons:
 - [fMP4 import streams mdat](/quest/m1/security-audit/fmp4-stream-mdat.md) - a box header declaring a huge size cannot pin importer memory across segments
 - [MKV import streams blocks](/quest/m1/security-audit/mkv-stream-blocks.md) - a declared block, metadata master, or ignored element cannot pin importer memory
 - [Relay HTTP surface](/quest/m1/security-audit/relay-http.md) - `/fetch` cannot be sniffed as active content, and no web page can reach the ops listener
-- [Lite fetch backstop](/quest/m1/security-audit/fetch-backstop.md) - the pre-lite-05 fetch backstop is bounded by design or by the session's limits, not an unrelated default
 - [Browser input checks](/quest/m1/security-audit/js-input.md) - room metadata is schema-validated and the http:// fingerprint fetch is aborted and length-checked
 - [CI tool pins](/quest/m1/security-audit/ci-pins.md) - binding generators are pinned by commit in one place, and the remaining unpinned installs and broad token grants are fixed

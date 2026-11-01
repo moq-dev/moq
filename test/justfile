@@ -119,8 +119,10 @@ interop-negative *args:
 
 # Browser-to-browser media QA against a deterministic fixture: presented frame progress, audible
 # tone, audio/video skew, and the publication lifecycle (cold start, pause, rejoin, detach,
-# republish, late join). Ends with negative controls that inject a frozen picture, silence, a
-# shifted tone, and a leaked session; each must fail the assertion it names. --timeout 30 gives
+# republish, late join), audio format changes, rendition switches, mute and volume at the
+# speakers, AAC, and the same pattern from a native (ffmpeg + Rust CLI) publisher. Ends with
+# negative controls that inject a frozen picture, silence, a shifted tone, a leaked session, and
+# delayed native audio; each must fail the assertion it names. --timeout 30 gives
 
 # headless Chromium cold-start headroom. --media-engines selects player engines, --media-publisher the
 # fixture's (chromium or firefox).
