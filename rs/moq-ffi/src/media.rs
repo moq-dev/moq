@@ -23,6 +23,40 @@ pub struct MoqDimensions {
 	pub height: u32,
 }
 
+/// How far behind the live edge a decoder plays, the counterpart of `moq_mux::container::Delay`.
+#[derive(Clone, Copy, Debug, uniffi::Record)]
+pub struct MoqDelay {
+	/// The target latency: the playout or jitter-buffer delay held behind the live edge, and
+	/// where a cold join starts. It stays on the consumer and never reaches the subscription. A
+	/// `min` past `max` starts at `max`, since the publisher serves nothing older.
+	pub min: std::time::Duration,
+	/// How far a group may fall behind the live edge before it is skipped, or null for no limit.
+	/// It bounds lateness only, never the start.
+	pub max: Option<std::time::Duration>,
+}
+
+impl From<MoqDelay> for moq_mux::container::Delay {
+	fn from(delay: MoqDelay) -> Self {
+		Self {
+			min: delay.min,
+			max: delay.max,
+		}
+	}
+}
+
+/// Where an audio or video decoder starts on a track that already holds groups.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, uniffi::Enum)]
+pub enum MoqDecodeStart {
+	/// The oldest group the track still holds, decoding everything cached. What a recorder,
+	/// an export, or anything reading a finished track wants.
+	#[default]
+	Oldest,
+	/// The newest group, skipping the cached backlog. What a live player wants, so reopening
+	/// a decoder does not replay what it already played. Opening waits for the track's live
+	/// edge, or its end.
+	Latest,
+}
+
 /// Catalog properties shared by every video rendition.
 ///
 /// Passing an absent field clears it from the next catalog snapshot rather than preserving the previous value.
@@ -704,7 +738,7 @@ pub struct MoqMediaCatalogProducer {
 }
 
 impl MoqMediaCatalogProducer {
-	#[cfg(all(any(feature = "audio", feature = "video"), not(target_arch = "wasm32")))]
+	#[cfg(any(feature = "audio", feature = "video"))]
 	pub(crate) fn broadcast(&self) -> Result<Arc<MoqBroadcastProducer>, MoqError> {
 		self.broadcast.upgrade().ok_or(MoqError::Closed)
 	}
@@ -1767,7 +1801,7 @@ mod catalog_tests {
 	}
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod timebase_tests {
 	use super::*;
 	use std::time::Duration;
@@ -2025,7 +2059,7 @@ mod timebase_tests {
 				reserve();
 			}
 			for touched in [1, 16, 256] {
-				let start = moq_clock::Instant::now();
+				let start = kio::clock::Instant::now();
 				for _ in 0..1000 {
 					for _ in 0..touched {
 						reserve();

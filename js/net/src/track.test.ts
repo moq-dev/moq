@@ -1,10 +1,10 @@
-import { expect, setSystemTime, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { expect, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano, sleep, Wall, yieldNow } from "@moq/clock";
 import { race } from "@moq/signals";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Decoder } from "./flate/decoder.ts";
 import { Encoder } from "./flate/encoder.ts";
-import { type Consumer as GroupConsumer, type Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
+import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
@@ -41,7 +41,7 @@ test("a cached transport tail covers only positions it actually holds", async ()
 
 /** Let every pending microtask and timer callback run, so a parked read gets a turn. */
 function settle(): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, 0));
+	return yieldNow();
 }
 
 // A manual clock reading `initial` milliseconds. `set` moves it to an absolute time and fires
@@ -54,6 +54,7 @@ function manualTime(initial: number) {
 	return {
 		set: (ms: number) => clock.jump(to(ms)),
 		advance: (ms: number) => clock.advance(to(ms)),
+		stepWall: (ms: number) => clock.stepWall(Wall(ms)),
 		installed,
 	};
 }
@@ -826,7 +827,7 @@ test("zero latency takes the latest group when ages are equal", async () => {
 	}
 });
 
-test("the default subscription skips superseded groups and a bare options object sets no limit", async () => {
+test("an omitted maxDelay is the default zero, and null sets no limit", async () => {
 	expect(Subscription.default()).toEqual({ priority: 0, maxDelay: Milli.zero, order: "descending" });
 
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
@@ -837,11 +838,15 @@ test("the default subscription skips superseded groups and a bare options object
 		producer.writeFrame({ payload: enc.encode(`${timestamp}`), timestamp: Timestamp.fromMillis(timestamp) });
 	}
 
-	// No options means the default subscription, whose zero budget keeps only the newest group.
+	// Each spelling of the default keeps only the newest group.
 	expect((await explicit.recvGroup())?.sequence).toBe(2);
 	expect((await implicit.recvGroup())?.sequence).toBe(2);
-	// An omitted maxDelay leaves the publisher's retention as the only bound.
-	for (const sequence of [0, 1, 2]) expect((await bare.recvGroup())?.sequence).toBe(sequence);
+	expect((await bare.recvGroup())?.sequence).toBe(2);
+	expect(producer.subscription.peek()?.maxDelay).toBe(Milli.zero);
+
+	// An explicit null leaves the publisher's retention as the only bound.
+	const unlimited = producer.subscribe({ maxDelay: null });
+	for (const sequence of [0, 1, 2]) expect((await unlimited.recvGroup())?.sequence).toBe(sequence);
 	expect(producer.subscription.peek()?.maxDelay).toBe(Milli(5000));
 	producer.finish();
 	producer.close();
@@ -1609,19 +1614,18 @@ test("retention pruning preserves clean EOF for a drained mirror", async () => {
 
 test("system clock changes do not affect the latency budget", async () => {
 	const clock = manualTime(10_000);
-	setSystemTime(new Date(10_000));
+	clock.stepWall(10_000);
 	try {
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(100) });
 		const track = producer.subscribe({ maxDelay: Milli(100) });
 		producer.writeFrame(textFrame("old"));
 
-		setSystemTime(new Date(20_000));
+		clock.stepWall(20_000);
 		producer.writeFrame(textFrame("new"));
 
 		expect((await track.recvGroup())?.sequence).toBe(0);
 		expect((await track.recvGroup())?.sequence).toBe(1);
 	} finally {
-		setSystemTime();
 		clock.installed.close();
 	}
 });
@@ -1825,7 +1829,7 @@ test("withRange caps frame-level reads like the group cursor", async () => {
 
 	// Group 1 parks above the cap; a clean close must not resolve it as finished.
 	const parked = track.readFrame();
-	const timeout = new Promise((resolve) => setTimeout(() => resolve("pending"), 10));
+	const timeout = sleep(Nano.fromMilli(Milli(10))).then(() => "pending" as const);
 	expect(await Promise.race([parked, timeout])).toBe("pending");
 
 	// Raising the cap releases the parked group, frames intact.
@@ -1890,7 +1894,7 @@ test("withRange parks recvGroup beyond the cap and a raised cap re-offers", asyn
 	// A clean close keeps the parked group claimable: the cap may still rise.
 	producer.finish();
 	producer.close();
-	expect(await Promise.race([pending, new Promise((resolve) => setTimeout(() => resolve("parked"), 10))])).toBe(
+	expect(await Promise.race([pending, sleep(Nano.fromMilli(Milli(10))).then(() => "parked" as const)])).toBe(
 		"parked",
 	);
 
@@ -2087,7 +2091,7 @@ test("a closed track still delivers a group parked above the cap once the cap is
 	const parked = track.nextGroup();
 	producer.finish();
 	producer.close();
-	const timeout = new Promise((resolve) => setTimeout(() => resolve("pending"), 10));
+	const timeout = sleep(Nano.fromMilli(Milli(10))).then(() => "pending" as const);
 	expect(await Promise.race([parked, timeout])).toBe("pending");
 
 	// Raising the cap after close releases the buffered group, frames intact.
@@ -2140,13 +2144,13 @@ test("readFrame does not livelock when a sole group finishes before the next arr
 	g0.finish();
 
 	// The next group arrives via a macrotask; if the reader livelocks on microtasks it never runs.
-	setTimeout(() => {
+	void sleep(Nano.fromMilli(Milli(10))).then(() => {
 		const g1 = producer.appendGroup();
 		g1.writeFrame(textFrame("hello"));
 		g1.finish();
 		producer.finish();
 		producer.close();
-	}, 10);
+	});
 
 	expect(await track.readString()).toBe("hello");
 }, 2000);
@@ -2398,18 +2402,17 @@ test("a live-edge reader starts on an empty largest group", async () => {
 	producer.close();
 });
 
-test("largest survives a mirror replay of an aborted group", async () => {
+test("largest survives a mirror replay of a group with a shed front", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 
 	const group = producer.appendGroup();
-	for (let i = 0; i < MAX_GROUP_FRAMES; i++) {
-		group.writeFrame({ payload: enc.encode(`${i}`), timestamp: Timestamp.now() });
+	for (let i = 0; i < 40; i++) {
+		group.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.now() });
 	}
-	expect(() => group.writeFrame({ payload: enc.encode("overflow"), timestamp: Timestamp.now() })).toThrow();
 
-	// Subscribing now replays into a fresh sink; the last legal frame is still the edge.
+	// Subscribing now replays into a fresh sink; shedding leaves the absolute live edge intact.
 	const late = producer.subscribe();
-	expect(await late.largest()).toEqual({ group: 0, frame: MAX_GROUP_FRAMES - 1 });
+	expect(await late.largest()).toEqual({ group: 0, frame: 40 - 1 });
 
 	producer.finish();
 	producer.close();
@@ -3404,22 +3407,27 @@ test("an endless track with gaps remembers only those within the budget", () => 
 	}
 });
 
-test("IETF provenance survives normalization on timed and untimed tracks", () => {
-	for (const timescale of [undefined, Timescale.MILLI]) {
-		const info = infoDefaults({ ietf: IetfVersion.DRAFT_22, timescale });
-		expect(info.ietf).toBe(IetfVersion.DRAFT_22);
-		expect(info.timescale).toBe(timescale);
-	}
-	const producer = new TrackProducer("ietf").accept({ timescale: Timescale.MILLI, ietf: IetfVersion.DRAFT_22 });
-	try {
-		stampGroup(producer, 0, 1000);
-		stampGroup(producer, 1, 500);
-		producer.writeFrame({ payload: enc.encode("arrival"), timestamp: Timestamp.fromMillis(250) });
-	} finally {
-		producer.finish();
-		producer.close();
-	}
-});
+for (const [name, extra] of [
+	["unchecked", { unchecked: true }],
+	["IETF provenance", { ietf: IetfVersion.DRAFT_22 }],
+] as const) {
+	test(`${name} survives normalization and skips the rewind check`, () => {
+		for (const timescale of [undefined, Timescale.MILLI]) {
+			const info = infoDefaults({ ...extra, timescale });
+			expect(info).toMatchObject(extra);
+			expect(info.timescale).toBe(timescale);
+		}
+		const producer = new TrackProducer("rewind").accept({ timescale: Timescale.MILLI, ...extra });
+		try {
+			stampGroup(producer, 0, 1000);
+			stampGroup(producer, 1, 500);
+			producer.writeFrame({ payload: enc.encode("arrival"), timestamp: Timestamp.fromMillis(250) });
+		} finally {
+			producer.finish();
+			producer.close();
+		}
+	});
+}
 
 test("an appended rewind is refused and an equal start is not", () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
@@ -3955,4 +3963,79 @@ test("a partial maxDelay widening keeps the older skip owed", () => {
 	subscriber.update({ maxDelay: Milli(10_000) });
 	expect(drainGroups(subscriber)).toEqual([1]);
 	producer.close();
+});
+
+for (const refresh of [undefined, 0]) {
+	test(`reading a shed front requests refresh only when opted in (${refresh})`, async () => {
+		const producer = new TrackProducer("test").accept({ refresh });
+		const subscriber = producer.subscribe();
+		const ordered = subscriber.ordered();
+		const group = producer.appendGroup();
+		const consumer = await ordered.nextGroup();
+		if (!consumer) throw new Error("missing group");
+		for (let index = 0; index < 40; index++) group.writeFrame({ payload: new Uint8Array(1024 * 1024) });
+		await expect(consumer.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
+		expect(producer.demand().wanted.peek()).toBe(refresh === undefined ? 0 : 1);
+		const joiner = producer.subscribe();
+		expect(producer.demand().wanted.peek()).toBe(refresh === undefined ? 0 : 1);
+		joiner.close();
+		subscriber.close();
+		producer.finish();
+		producer.close();
+	});
+}
+
+// A first frame written in chunks sheds its own head without advancing the group's start.
+test("reading a shed frame head requests refresh", async () => {
+	const producer = new TrackProducer("test").accept({ refresh: 0 });
+	const subscriber = producer.subscribe();
+	const ordered = subscriber.ordered();
+	const group = producer.appendGroup();
+	const consumer = await ordered.nextGroup();
+	if (!consumer) throw new Error("missing group");
+	const MiB = 1024 * 1024;
+	const frame = group.createFrame({ size: 40 * MiB });
+	for (let index = 0; index < 40; index++) frame.write(new Uint8Array(MiB));
+	frame.finish();
+	await expect(consumer.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
+	expect(producer.demand().wanted.peek()).toBe(1);
+	subscriber.close();
+	producer.finish();
+	producer.close();
+});
+
+// An end declared with an error keeps the history below it: a reader gets every group, then the
+// error, even one arriving after the producer closed.
+test("an errored end keeps its history", async () => {
+	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
+	for (const sequence of [0, 1]) {
+		const group = producer.createGroup(sequence);
+		group.writeFrame(textFrame("a", Timestamp.fromMillis(sequence)));
+		group.finish();
+	}
+	const failed = new StreamError(StreamCode(71));
+	producer.finishAt({ group: 2, frame: 0 }, failed);
+	producer.close();
+	expect(producer.closed.peek()).toBe(failed);
+
+	const replay = { groups: { start: { included: 0 } }, maxDelay: Milli(30_000) };
+	const arrival = producer.subscribe(replay);
+	expect((await arrival.recvGroup())?.sequence).toBe(0);
+	expect((await arrival.recvGroup())?.sequence).toBe(1);
+	await expect(arrival.recvGroup()).rejects.toBe(failed);
+
+	const ordered = producer.subscribe(replay).ordered();
+	expect((await ordered.nextGroup())?.sequence).toBe(0);
+	expect((await ordered.nextGroup())?.sequence).toBe(1);
+	await expect(ordered.nextGroup()).rejects.toBe(failed);
+
+	// The nonblocking reads end the same way.
+	const polled = producer.subscribe(replay);
+	expect(polled.tryRecvGroup()?.sequence).toBe(0);
+	expect(polled.tryRecvGroup()?.sequence).toBe(1);
+	expect(() => polled.tryRecvGroup()).toThrow(failed);
+	const polledOrdered = producer.subscribe(replay).ordered();
+	expect(polledOrdered.tryNextGroup()?.sequence).toBe(0);
+	expect(polledOrdered.tryNextGroup()?.sequence).toBe(1);
+	expect(() => polledOrdered.tryNextGroup()).toThrow(failed);
 });

@@ -3,7 +3,7 @@ import { gzipSync } from "node:zlib";
 import { Encoder } from "../src/flate/encoder.ts";
 import { hooks } from "../src/internal.ts";
 import { Producer as Track } from "../src/track.ts";
-import { fanout } from "./compression-fanout.ts";
+import { fanout, tails } from "./compression-fanout.ts";
 
 console.log("publishers,readers,phase,us,size_bytes");
 for (const row of fanout())
@@ -58,3 +58,16 @@ const bytes = new Uint8Array(await bundle.outputs[0].arrayBuffer());
 console.log("measurement,size_bytes");
 console.log(`consumer_bundle,${bytes.length}`);
 console.log(`consumer_bundle_gzip,${gzipSync(bytes).length}`);
+
+console.log("publishers,readers,frame_bytes,compressed,ns_per_frame,size_bytes");
+for (const row of tails())
+	console.log(
+		[
+			row.publishers,
+			row.readers,
+			row.frame_bytes,
+			row.compressed,
+			row.ns_per_frame.toFixed(0),
+			row.size_bytes,
+		].join(","),
+	);

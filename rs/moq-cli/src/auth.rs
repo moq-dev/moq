@@ -116,6 +116,7 @@ impl Args {
 				println!("{payload:#?}");
 			}
 
+			Command::Mesh(mesh) => mesh.run().await?,
 			Command::Sessions(filter) => filter.get("/sessions").await?,
 			Command::Revalidate(filter) => filter.post("/sessions/revalidate").await?,
 		}
@@ -197,6 +198,9 @@ enum Command {
 
 	/// Answer a relay's auth requests with keys, public rules, an mTLS grant, tiers, and session limits.
 	Serve(Serve),
+
+	/// Manage a mesh served by `moq auth serve --mesh-url`: enrollment keys and devices.
+	Mesh(Mesh),
 
 	/// List live sessions on a relay's internal listener.
 	Sessions(SessionFilter),
@@ -426,6 +430,31 @@ pub struct Serve {
 	/// The most live sessions from one remote address. Needs `--revalidate`.
 	#[usage(long)]
 	limit_remote: Option<usize>,
+
+	/// Coordinate a mesh: the public base URL devices enroll at, which every enrollment
+	/// proof is bound to. Serve it behind TLS; devices refuse plain `http://` beyond loopback.
+	#[usage(long)]
+	mesh_url: Option<url::Url>,
+
+	/// Where to answer devices at `--mesh-url`, usually behind a TLS-terminating proxy.
+	#[usage(long, default = "127.0.0.1:4441", requires = "--mesh-url")]
+	mesh_listen: SocketAddr,
+
+	/// The private key that signs mesh tokens; the relays verify it like any other.
+	#[usage(long, requires = "--mesh-url", value_hint = usage_rs::ValueHint::FilePath, extensions("jwk", "json"))]
+	mesh_key: Option<PathBuf>,
+
+	/// A relay URL enrolled devices dial (repeatable).
+	#[usage(long, requires = "--mesh-url")]
+	mesh_relay: Vec<url::Url>,
+
+	/// The JSON file enrollment keys and devices persist to. Without one, a restart forgets them.
+	#[usage(long, requires = "--mesh-url", value_hint = usage_rs::ValueHint::FilePath)]
+	mesh_state: Option<PathBuf>,
+
+	/// How long a mesh token lasts; devices refresh it two thirds of the way through.
+	#[usage(long, default = "1h", requires = "--mesh-url")]
+	mesh_token_ttl: moq_tokio::cli::Duration,
 }
 
 impl Serve {
@@ -512,29 +541,197 @@ impl Serve {
 		Ok(Listen::Tcp(addr))
 	}
 
+	/// The mesh coordinator these flags describe, if `--mesh-url` asks for one.
+	fn coordinator(&self) -> anyhow::Result<Option<moq_auth::mesh::Coordinator>> {
+		let Some(url) = &self.mesh_url else {
+			return Ok(None);
+		};
+		if self.listen_public {
+			anyhow::bail!(
+				"--mesh-url serves the mesh owner's API on --listen, which has no authentication, so it cannot be combined with --listen-public"
+			);
+		}
+		let path = self
+			.mesh_key
+			.as_ref()
+			.context("--mesh-url needs --mesh-key to sign tokens")?;
+		let key = moq_auth::Key::from_file(path).with_context(|| format!("failed to read {}", path.display()))?;
+		let ttl = std::time::Duration::from(self.mesh_token_ttl);
+		if ttl.is_zero() {
+			anyhow::bail!("--mesh-token-ttl must be longer than 0s");
+		}
+		let mut config = moq_auth::mesh::Config::new(url.clone(), key);
+		config.relays = self.mesh_relay.clone();
+		config.state = self.mesh_state.clone();
+		config.token_ttl = ttl;
+		Ok(Some(moq_auth::mesh::Coordinator::new(config)?))
+	}
+
 	async fn run(self) -> anyhow::Result<()> {
 		let listen = self.listener()?;
-		let server = moq_auth::serve::Server::new(self.policy()?)?;
-		match listen {
-			Listen::Tcp(addr) => {
-				let listener = tokio::net::TcpListener::bind(addr)
-					.await
-					.with_context(|| format!("failed to bind {addr}"))?;
-				tracing::info!(%addr, "auth server listening");
-				server.serve(listener).await?;
+		let mut server = moq_auth::serve::Server::new(self.policy()?)?;
+		// The device-facing contract runs beside the auth server; either stopping ends both.
+		let mut mesh = None;
+		if let Some(coordinator) = self.coordinator()? {
+			let addr = self.mesh_listen;
+			let listener = tokio::net::TcpListener::bind(addr)
+				.await
+				.with_context(|| format!("failed to bind {addr}"))?;
+			tracing::info!(%addr, url = ?self.mesh_url, "mesh coordinator listening");
+			mesh = Some((coordinator.clone(), listener));
+			server = server.with_mesh(coordinator);
+		}
+		let mesh = async move {
+			match mesh {
+				Some((coordinator, listener)) => coordinator.serve(listener).await,
+				None => std::future::pending().await,
 			}
-			#[cfg(unix)]
-			Listen::Unix(path) => {
-				unlink_socket(&path)?;
-				let listener = tokio::net::UnixListener::bind(&path)
-					.with_context(|| format!("failed to bind {}", path.display()))?;
-				tracing::info!(path = %path.display(), "auth server listening");
-				server.serve_unix(listener).await?;
+		};
+		let auth = async move {
+			match listen {
+				Listen::Tcp(addr) => {
+					let listener = tokio::net::TcpListener::bind(addr)
+						.await
+						.with_context(|| format!("failed to bind {addr}"))?;
+					tracing::info!(%addr, "auth server listening");
+					server.serve(listener).await?;
+				}
+				#[cfg(unix)]
+				Listen::Unix(path) => {
+					unlink_socket(&path)?;
+					let listener = tokio::net::UnixListener::bind(&path)
+						.with_context(|| format!("failed to bind {}", path.display()))?;
+					tracing::info!(path = %path.display(), "auth server listening");
+					server.serve_unix(listener).await?;
+				}
+				#[cfg(not(unix))]
+				Listen::Unix(path) => anyhow::bail!("unix sockets are not supported here: {}", path.display()),
 			}
-			#[cfg(not(unix))]
-			Listen::Unix(path) => anyhow::bail!("unix sockets are not supported here: {}", path.display()),
+			anyhow::Ok(())
+		};
+		tokio::select! {
+			res = auth => res,
+			res = mesh => res.context("the mesh coordinator stopped"),
+		}
+	}
+}
+
+/// `moq auth mesh`: the mesh owner's commands, sent to the auth server's own listener.
+#[derive(usage_rs::Args, Clone, Debug)]
+#[usage(unknown_flags = "error", args_override_self = false)]
+pub struct Mesh {
+	/// The auth server's listener, which serves the owner's API alongside `POST /`:
+	/// `http://` for a TCP `--listen`, or `unix:///path` for a unix socket.
+	#[usage(long, default = "http://127.0.0.1:4440")]
+	url: url::Url,
+
+	#[usage(subcommand)]
+	command: MeshCommand,
+}
+
+#[derive(usage_rs::Subcommands, Clone, Debug)]
+enum MeshCommand {
+	/// Create an enrollment key, printing it once.
+	CreateKey {
+		/// A tag every device it enrolls carries (repeatable).
+		#[usage(long)]
+		tag: Vec<String>,
+
+		/// How long until it stops enrolling. Never, by default.
+		#[usage(long)]
+		expires: Option<moq_tokio::cli::Duration>,
+
+		/// Enroll any number of devices, instead of one.
+		#[usage(long)]
+		reusable: bool,
+	},
+
+	/// List enrollment keys, without their secrets.
+	Keys,
+
+	/// Revoke an enrollment key so it enrolls nothing new. Its devices stay.
+	RevokeKey {
+		/// The key's ID: the part before the dot.
+		id: String,
+	},
+
+	/// List enrolled devices.
+	Devices,
+
+	/// Revoke a device: its next refresh fails, and it cannot enroll again.
+	Revoke {
+		/// The device's endpoint ID.
+		endpoint: String,
+	},
+}
+
+impl Mesh {
+	async fn run(self) -> anyhow::Result<()> {
+		let (client, base) = self.client()?;
+		let url = |path: &str, segments: &[&str]| {
+			let mut url = base.clone();
+			let prefix = url.path().trim_end_matches('/').to_string();
+			url.set_path(&format!("{prefix}{path}"));
+			if let Ok(mut parts) = url.path_segments_mut() {
+				parts.extend(segments);
+			}
+			url
+		};
+		let request = match &self.command {
+			MeshCommand::CreateKey { tag, expires, reusable } => {
+				let mut new = moq_auth::mesh::NewKey::default();
+				new.tags = tag.clone();
+				new.expires_in = expires.map(std::time::Duration::from);
+				new.reusable = *reusable;
+				client.post(url("/mesh/keys", &[])).json(&new)
+			}
+			MeshCommand::Keys => client.get(url("/mesh/keys", &[])),
+			MeshCommand::RevokeKey { id } => client.delete(url("/mesh/keys", &[id])),
+			MeshCommand::Devices => client.get(url("/mesh/devices", &[])),
+			MeshCommand::Revoke { endpoint } => client.delete(url("/mesh/devices", &[endpoint])),
+		};
+		let response = request
+			.send()
+			.await
+			.with_context(|| format!("failed to reach {}", self.url))?;
+		let status = response.status();
+		let body = response.text().await.context("failed to read the reply")?;
+		if status == reqwest::StatusCode::NOT_FOUND {
+			// The routes exist only with `--mesh-url`, so a miss there is the likelier cause.
+			anyhow::bail!(match self.command {
+				MeshCommand::RevokeKey { .. } if !body.is_empty() => "no enrollment key has that ID",
+				MeshCommand::Revoke { .. } if !body.is_empty() => "no device has that endpoint ID",
+				_ => "not found; is the server running with --mesh-url?",
+			});
+		}
+		if !status.is_success() {
+			anyhow::bail!("{status}: {body}");
+		}
+		match serde_json::from_str::<serde_json::Value>(&body) {
+			Ok(value) => println!("{}", serde_json::to_string_pretty(&value)?),
+			Err(_) if body.is_empty() => println!("ok"),
+			Err(_) => println!("{body}"),
 		}
 		Ok(())
+	}
+
+	/// The HTTP client for `--url` and the URL its requests target: a `unix://` URL names
+	/// the socket, and the requests go to the server's root over it.
+	fn client(&self) -> anyhow::Result<(reqwest::Client, url::Url)> {
+		let builder = reqwest::Client::builder();
+		match self.url.scheme() {
+			"http" | "https" => Ok((builder.build()?, self.url.clone())),
+			#[cfg(unix)]
+			"unix" => {
+				let path = self
+					.url
+					.to_file_path()
+					.map_err(|()| anyhow::anyhow!("--url {} names no socket path", self.url))?;
+				let target = url::Url::parse("http://localhost/").expect("a constant URL parses");
+				Ok((builder.unix_socket(path).build()?, target))
+			}
+			_ => anyhow::bail!("--url expects http://, https://, or unix://, got {}", self.url),
+		}
 	}
 }
 
@@ -592,9 +789,9 @@ fn read_token(path: &std::path::Path) -> anyhow::Result<String> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct UnixTimestamp(moq_clock::Wall);
+struct UnixTimestamp(kio::clock::Wall);
 
-impl From<UnixTimestamp> for moq_clock::Wall {
+impl From<UnixTimestamp> for kio::clock::Wall {
 	fn from(value: UnixTimestamp) -> Self {
 		value.0
 	}
@@ -608,7 +805,7 @@ impl std::str::FromStr for UnixTimestamp {
 		let timestamp = timestamp.try_into().context("timestamp out of range")?;
 		// Past 2554 saturates, like a decoded token time.
 		Ok(Self(
-			moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::from_secs(timestamp)),
+			kio::clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::from_secs(timestamp)),
 		))
 	}
 }
@@ -654,6 +851,100 @@ mod tests {
 					"{err}"
 				);
 			}
+		}
+	}
+
+	#[test]
+	fn mesh_flags_need_a_mesh_url_and_key() {
+		let err = parse(&["moq", "auth", "serve", "--mesh-relay", "https://relay.example"]).unwrap_err();
+		assert!(err.to_string().contains("--mesh-url"), "{err}");
+
+		let flags = serve(&["moq", "auth", "serve", "--mesh-url", "https://mesh.example"]);
+		let err = flags.coordinator().err().expect("no signing key");
+		assert!(err.to_string().contains("--mesh-key"), "{err}");
+
+		let dir = tempfile::tempdir().unwrap();
+		let key = dir.path().join("mesh.jwk");
+		moq_auth::Key::generate(Algorithm::HS256, None)
+			.unwrap()
+			.to_file(&key)
+			.unwrap();
+		let flags = serve(&[
+			"moq",
+			"auth",
+			"serve",
+			"--mesh-url",
+			"https://mesh.example",
+			"--mesh-key",
+			key.to_str().unwrap(),
+			"--mesh-relay",
+			"https://a.example",
+			"--mesh-relay",
+			"https://b.example",
+		]);
+		assert_eq!(flags.mesh_relay.len(), 2);
+		assert!(flags.mesh_listen.ip().is_loopback());
+		assert!(flags.coordinator().unwrap().is_some());
+		assert!(serve(&["moq", "auth", "serve"]).coordinator().unwrap().is_none());
+
+		// The owner's API rides --listen, so a public one would hand out enrollment keys.
+		let flags = serve(&[
+			"moq",
+			"auth",
+			"serve",
+			"--listen",
+			"0.0.0.0:4440",
+			"--listen-public",
+			"--mesh-url",
+			"https://mesh.example",
+			"--mesh-key",
+			key.to_str().unwrap(),
+		]);
+		let err = flags.coordinator().err().expect("a public owner API");
+		assert!(err.to_string().contains("--listen-public"), "{err}");
+	}
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn mesh_commands_reach_a_unix_listener() {
+		let dir = tempfile::tempdir().unwrap();
+		let key = moq_auth::Key::generate(Algorithm::HS256, None).unwrap();
+		let config = moq_auth::mesh::Config::new("https://mesh.example".parse().unwrap(), key);
+		let coordinator = moq_auth::mesh::Coordinator::new(config).unwrap();
+		let server = moq_auth::serve::Server::new(Policy::default())
+			.unwrap()
+			.with_mesh(coordinator.clone());
+		let path = dir.path().join("auth.sock");
+		let listener = tokio::net::UnixListener::bind(&path).unwrap();
+		tokio::spawn(async move { server.serve_unix(listener).await });
+
+		let url = format!("unix://{}", path.display());
+		run(&["moq", "auth", "mesh", "--url", &url, "create-key", "--expires", "1d"])
+			.await
+			.unwrap();
+		let keys = coordinator.keys();
+		assert_eq!(keys.len(), 1);
+		assert!(keys[0].expires.is_some());
+	}
+
+	#[test]
+	fn mesh_commands_parse() {
+		for args in [
+			&[
+				"moq",
+				"auth",
+				"mesh",
+				"create-key",
+				"--tag",
+				"robot",
+				"--reusable",
+				"--expires",
+				"1d",
+			][..],
+			&["moq", "auth", "mesh", "devices"],
+			&["moq", "auth", "mesh", "--url", "http://127.0.0.1:9000", "revoke", "ab"],
+		] {
+			assert!(matches!(parse(args).unwrap().command, Command::Mesh(_)), "{args:?}");
 		}
 	}
 
@@ -998,8 +1289,8 @@ mod tests {
 
 	#[test]
 	fn timestamp_past_the_wall_range_saturates() {
-		let last = moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
-		let parse = |text: &str| moq_clock::Wall::from(text.parse::<UnixTimestamp>().unwrap());
+		let last = kio::clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
+		let parse = |text: &str| kio::clock::Wall::from(text.parse::<UnixTimestamp>().unwrap());
 		assert_eq!(parse(&i64::MAX.to_string()), last);
 		assert!(parse("18446744073") < last);
 	}

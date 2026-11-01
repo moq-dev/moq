@@ -27,12 +27,12 @@ pub(crate) struct Claims {
 	publish: Option<Patterns>,
 	#[serde(deserialize_with = "present")]
 	subscribe: Option<Patterns>,
-	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
-	exp: Option<moq_clock::Wall>,
-	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
-	iat: Option<moq_clock::Wall>,
-	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
-	nbf: Option<moq_clock::Wall>,
+	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
+	exp: Option<kio::clock::Wall>,
+	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
+	iat: Option<kio::clock::Wall>,
+	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
+	nbf: Option<kio::clock::Wall>,
 	// Registered claims that narrow nothing: an issuer's bookkeeping, read and dropped.
 	// Every other claim is refused, since an unknown one may narrow the grant, and a
 	// misspelled `root` would otherwise widen it to everything.
