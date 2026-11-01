@@ -22,8 +22,7 @@ typealias EncoderInput = uniffi.moq.MoqVideoEncoderInput
 typealias EncoderOutput = uniffi.moq.MoqVideoEncoderOutput
 
 /**
- * What a [Consumer] delivers: an optional resize, a max delay, and the decoder's surface (macOS
- * only).
+ * What a [Consumer] delivers: an optional resize, a delay, and the decoder's surface (macOS only).
  */
 typealias DecoderOutput = uniffi.moq.MoqVideoDecoderOutput
 

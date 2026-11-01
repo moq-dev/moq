@@ -91,6 +91,13 @@ typealias Audio = uniffi.moq.MoqAudio
 typealias Dimensions = uniffi.moq.MoqDimensions
 
 /**
+ * How far behind the live edge a decoder plays: `min` is the playout delay and where a cold join
+ * starts, and `max`, null for no limit, is how far a stalled group may fall behind before it is
+ * skipped. `min` stays on the consumer; a `min` past `max` starts at `max`.
+ */
+typealias Delay = uniffi.moq.MoqDelay
+
+/**
  * Where an audio or video decoder starts on a track that already holds groups: `LATEST` for a live
  * player.
  */
