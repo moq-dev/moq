@@ -30,14 +30,33 @@ added the `ranges` bench.
     since time ranges past the live edge all wait on the same next sequence;
     and charging ranges against request flow control, a wire change.
 
-A lite-07 SUBSCRIBE fits about 32K ranges in its 64 KiB message. Two walks
-still grow with range count. User-space instructions per step on a pinned
-P-core, at 1, 64, 1024, and 16384 ranges, measured on #7542:
+A lite-07 SUBSCRIBE fits about 32K ranges in its 64 KiB message. Three
+paths still grow with range count. User-space instructions per step on a
+pinned P-core, at 1, 64, 1024, and 16384 ranges, measured on #7542:
 
 | bench | 1 | 64 | 1024 | 16384 |
 |---|---|---|---|---|
 | `ranges_fills_out` | 46K | 1.5M | 25M | 449M |
 | `ranges_sparse` | 24K | 63K | 771K | 14M |
+
+`ranges_time_cap` was added after that measurement. It takes 4.1 µs,
+15.6 µs, 388 µs, and 8.2 ms per step at the same counts (criterion, pinned
+P-core).
+
+- **Window moves.** A move costs every fixed run, so a time end whose cap
+  moves on each group multiplies the fixed ranges beside it (`ranges_time_cap`).
+  The cap moves twice per group: a group that arrives yet to start caps the end,
+  and its start lifts the cap. Each move does all of these:
+  - `Window::rebuild` copies the fixed runs.
+  - `Cursor::update_servable` rebuilds the `Servable` and compares the
+    `Published` runs.
+  - `Window::covered_by` restarts from the floor.
+  - `Misses` rebuilds the wanted runs from `Window::missable` for the new
+    revision.
+  - Open question: how a move can cost only the runs that moved. One answer:
+    keep the fixed runs shared, built once per placement and grown as ends
+    settle, with the walks' few runs layered over them. Then `Servable`,
+    `Published`, `covered_by`, and `Misses` each carry or diff only the layer.
 
 - **Outstanding fills.** While fills are out, each probe runs
   `Misses::expire` over every wanted run, calling `poll_drifted` per stretch

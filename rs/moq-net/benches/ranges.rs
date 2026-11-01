@@ -7,6 +7,9 @@
 //!
 //! - `ranges_time_end`: ranges whose time ends lie past the live edge, so none settles. A
 //!   group lands, starting before every end, and the reader drains it.
+//! - `ranges_time_cap`: one time end past the live edge beside fixed ranges far ahead of
+//!   it. A group lands yet to start, which caps the end, then starts inside it, which lifts
+//!   the cap, so the window moves twice per group.
 //! - `ranges_fills_out`: ranges below where the feed starts, asked of a handler that never
 //!   answers, beside one live range. A live group lands and the reader drains it while every
 //!   fill is still out.
@@ -98,6 +101,48 @@ impl TimeEnds {
 		land(&self.track, self.next, self.next);
 		self.next += 1;
 		assert_eq!(drain(&mut self.reader), 1, "every end is past the group");
+	}
+}
+
+/// One reader whose time end moves its cap beside fixed ranges; see `ranges_time_cap`.
+pub(crate) struct TimeCap {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	reader: track::Subscriber,
+	next: u64,
+}
+
+impl TimeCap {
+	pub(crate) fn new(ranges: u64) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		land(&track, 0, 0);
+		// The time end, then disjoint groups far past anything the run lands.
+		let subscription = track::Subscription::default().with_max_delay(BUDGET).with_ranges(
+			std::iter::once(track::Range {
+				start: track::Anchor::Time(millis(0)),
+				end: Some(track::Anchor::Time(millis(LIVE))),
+			})
+			.chain((1..ranges).map(|i| track::Range::groups(LIVE + i * 2..LIVE + i * 2 + 1))),
+		);
+		let mut reader = track.subscribe(subscription);
+		drain(&mut reader);
+		Self {
+			_broadcast: broadcast,
+			track,
+			reader,
+			next: 1,
+		}
+	}
+
+	pub(crate) fn step(&mut self) {
+		let mut group = self.track.create_group(group::Info { sequence: self.next }).unwrap();
+		let mut handed = drain(&mut self.reader);
+		group.write_frame(millis(self.next), Bytes::from_static(b"x")).unwrap();
+		group.finish().unwrap();
+		handed += drain(&mut self.reader);
+		self.next += 1;
+		assert_eq!(handed, 1, "the group is in range");
 	}
 }
 
@@ -270,6 +315,10 @@ fn bench_time_end(c: &mut Criterion) {
 	sweep(c, "ranges_time_end", TimeEnds::new, TimeEnds::step);
 }
 
+fn bench_time_cap(c: &mut Criterion) {
+	sweep(c, "ranges_time_cap", TimeCap::new, TimeCap::step);
+}
+
 fn bench_fills_out(c: &mut Criterion) {
 	sweep(c, "ranges_fills_out", FillsOut::new, FillsOut::step);
 }
@@ -289,6 +338,7 @@ fn bench_frames(c: &mut Criterion) {
 criterion_group!(
 	benches,
 	bench_time_end,
+	bench_time_cap,
 	bench_fills_out,
 	bench_sparse,
 	bench_datagram,
