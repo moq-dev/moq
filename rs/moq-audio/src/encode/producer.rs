@@ -618,7 +618,7 @@ mod tests {
 			while demand.wanted_changed().await?.is_none() {}
 			moq_net::Result::Ok(())
 		};
-		moq_clock::timeout(Duration::from_secs(1), wanted)
+		kio::clock::timeout(Duration::from_secs(1), wanted)
 			.await
 			.expect("subscription demand")
 			.unwrap();
@@ -630,7 +630,7 @@ mod tests {
 			while demand.wanted_changed().await?.is_some() {}
 			moq_net::Result::Ok(())
 		};
-		moq_clock::timeout(Duration::from_secs(1), unwanted)
+		kio::clock::timeout(Duration::from_secs(1), unwanted)
 			.await
 			.expect("subscription released")
 			.unwrap();
@@ -638,7 +638,7 @@ mod tests {
 
 		producer.finish().unwrap();
 		drop(producer);
-		let closed = moq_clock::timeout(Duration::from_secs(1), demand.closed())
+		let closed = kio::clock::timeout(Duration::from_secs(1), demand.closed())
 			.await
 			.expect("producer closed");
 		assert!(closed.is_ok(), "{closed:?}");

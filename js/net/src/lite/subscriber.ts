@@ -1213,14 +1213,15 @@ export class Subscriber {
 	// Map the wire TRACK_INFO onto the model track.Info a producer/consumer holds.
 	#toModelInfo(info: TrackInfo): track.Info {
 		return {
-			// Lite-05/06 timestamps may be send times, so the copy is untimed and the ingest drops them.
-			timescale: hasMediaTime(this.version) ? info.timescale : undefined,
+			timescale: info.timescale,
 			// Publisher Max Age rides on the wire, so the local media-time budget
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
 			priority: info.priority,
 			refresh: info.refresh,
 			compress: info.compress,
+			// Lite-05/06 timestamps may be send times, so the copy's groups skip the rewind check.
+			...(hasMediaTime(this.version) ? {} : { unchecked: true }),
 		};
 	}
 
@@ -1362,8 +1363,9 @@ export class Subscriber {
 		}
 	}
 
-	// Resolve the track's timescale, then open the FETCH stream and wait for it to be accepted.
-	// Closing the group during that wait resets the stream.
+	// Open the FETCH stream alongside the TRACK stream that says the track's timescale, and wait
+	// for both: the response waits unread in its stream until the timescale lands. Closing the
+	// group during that wait resets the stream, and a failed TRACK_INFO fails the fetch.
 	async #fetchSetup(
 		broadcast: Path.Valid,
 		consumed: Consumed,
@@ -1382,29 +1384,41 @@ export class Subscriber {
 		// Only the properties are needed, so the TRACK stream closes however the wait ends.
 		answered.then(
 			({ stream }) => stream.close(),
-			() => {},
+			(err: unknown) => cancel.abort(error(err)),
 		);
-		const { info } = await untilClosed(group, answered);
-		return this.#exchange(
-			{ sendOrder: sendOrder({ priority }), version: this.version },
-			async (stream) => {
-				await stream.writer.u53(StreamId.Fetch);
-				await new FetchMessage({
-					broadcast,
-					epoch,
-					track,
-					priority,
-					maxDelay: hasFetchMaxDelay(this.version) ? maxDelay : undefined,
-					group: sequence,
-				}).encode(stream.writer, this.version);
-				// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
-				// done() buffers that byte so the response pump can decode it normally.
-				await untilClosed(group, stream.reader.done());
-				return { stream, info };
-			},
-			signal,
-			deadline,
-		);
+		let stream: Stream;
+		try {
+			stream = await this.#exchange(
+				{ sendOrder: sendOrder({ priority }), version: this.version },
+				async (stream) => {
+					await stream.writer.u53(StreamId.Fetch);
+					await new FetchMessage({
+						broadcast,
+						epoch,
+						track,
+						priority,
+						maxDelay: hasFetchMaxDelay(this.version) ? maxDelay : undefined,
+						group: sequence,
+					}).encode(stream.writer, this.version);
+					// A byte or an empty-group FIN accepts the fetch; a reset rejects it.
+					// done() buffers that byte so the response pump can decode it normally.
+					await untilClosed(group, stream.reader.done());
+					return stream;
+				},
+				signal,
+				deadline,
+			);
+		} catch (err: unknown) {
+			cancel.abort(error(err));
+			throw err;
+		}
+		try {
+			const { info } = await untilClosed(group, answered);
+			return { stream, info };
+		} catch (err: unknown) {
+			stream.abort(error(err));
+			throw err;
+		}
 	}
 
 	// Read the FETCH response (bare frames, zigzag-delta-timestamped unless `timescale` is 0)
@@ -1414,7 +1428,6 @@ export class Subscriber {
 		try {
 			const decode = frameDecoder({
 				scale: info.timescale ?? 0,
-				timed: hasMediaTime(this.version),
 				compress: info.compress,
 			});
 
@@ -1731,7 +1744,6 @@ export class Subscriber {
 
 			await readFrames(stream, producer, {
 				scale: timescale,
-				timed: hasMediaTime(this.version),
 				compress: entry.compress,
 			});
 
@@ -1806,17 +1818,15 @@ export class Subscriber {
 			timed: !!this.#subscribes.get(id)?.timescale,
 			compressed: this.#subscribes.get(id)?.compress ?? false,
 		}));
+		if (!dg) return;
 
 		const entry = this.#subscribes.get(dg.subscribe);
 		if (!entry) return; // Unknown or already-closed subscription.
 
 		const scale = entry.timescale;
 
-		// Dropped where it may be a send time, like a frame's.
 		const timestamp =
-			dg.timestamp === undefined || !hasMediaTime(this.version)
-				? undefined
-				: new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
+			dg.timestamp === undefined ? undefined : new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
 		// A datagram's sequence is never owed a stream, so it never holds the tail open.
 		entry.tail.account(dg.sequence, dg.sequence + 1);
 		hooks.writeDatagram(entry.track, { sequence: dg.sequence, timestamp, payload: dg.payload }, dg.inflated);

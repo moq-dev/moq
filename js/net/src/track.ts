@@ -157,6 +157,12 @@ export interface Info {
 	refresh?: number;
 	/** The original moq-transport publisher's draft, whose timestamps may rewind. @internal */
 	ietf?: IetfVersion;
+	/**
+	 * Whether this copy's groups skip the rewind check, since its timestamps may be lite-05/06 send
+	 * times. An {@link Info.ietf} track skips it too. Mirrors the Rust `track::Info::unchecked`.
+	 * @internal
+	 */
+	unchecked?: boolean;
 }
 
 // Normalize a duration for the wire, which carries it as an unsigned varint.
@@ -195,6 +201,7 @@ export function infoDefaults(info: Partial<Info> = {}): Info {
 		priority: priorityValue(info.priority ?? DEFAULT_PRIORITY),
 		refresh: info.refresh == null ? undefined : refreshRatio(info.refresh),
 		...(info.ietf === undefined ? {} : { ietf: info.ietf }),
+		...(info.unchecked ? { unchecked: true } : {}),
 	};
 }
 
@@ -1474,9 +1481,10 @@ export class Producer {
 		return group;
 	}
 
-	// Whether this track's timestamps may rewind (see {@link Info.ietf}).
+	// Whether this track's timestamps may rewind (see {@link Info.unchecked} and {@link Info.ietf}).
 	#unchecked(): boolean {
-		return this.#state.info.peek()?.ietf !== undefined;
+		const info = this.#state.info.peek();
+		return info?.unchecked === true || info?.ietf !== undefined;
 	}
 
 	// Fan a datagram out to every live subscriber, dropping the oldest once the ring is full.

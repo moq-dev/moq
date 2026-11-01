@@ -355,7 +355,7 @@ impl Client {
 
 			let session = match self.timeout.is_zero() {
 				true => attempt.await?,
-				false => moq_clock::timeout(self.timeout, attempt)
+				false => kio::clock::timeout(self.timeout, attempt)
 					.await
 					.map_err(|_| Error::ConnectTimeout(self.timeout))??,
 			};
@@ -427,7 +427,7 @@ impl Client {
 		// arm was still pending.
 		let dialed = match self.timeout.is_zero() {
 			true => attempt.await?,
-			false => match moq_clock::timeout(self.timeout, attempt).await {
+			false => match kio::clock::timeout(self.timeout, attempt).await {
 				Ok(res) => res?,
 				Err(_) => return Err(Error::ConnectTimeout(self.timeout)),
 			},
@@ -1104,7 +1104,7 @@ mod tests {
 				.map_err(Error::from)
 		});
 
-		let dialed = moq_clock::timeout(
+		let dialed = kio::clock::timeout(
 			std::time::Duration::from_secs(10),
 			client.race_moq_connect(&client.moq, ws_addr, quic),
 		)
@@ -1357,7 +1357,7 @@ mod tests {
 		let quic = async { Ok("quic") };
 		let websocket = std::future::pending::<Option<crate::Result<&str>>>();
 
-		let value = moq_clock::timeout(
+		let value = kio::clock::timeout(
 			std::time::Duration::from_secs(1),
 			super::race_transport_connect(&race_url(), quic, websocket),
 		)
