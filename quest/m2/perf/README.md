@@ -62,8 +62,9 @@ profile shows no pool contention.
 ([#7505](https://github.com/moq-dev/moq/pull/7505)) put the io_uring relay's
 `[vdso]` cycle share at 0.5% before #5926 and 0.0 to 0.2% after, below the
 tokio workers' 0.2 to 0.4%. #5926 also cut chat's relay instructions per
-delivered frame by about 5%. What still reads the clock is the per-turn read
-and `moq_net` `Timestamp::from(Instant)`.
+delivered frame by about 5%; video's 1.5% drop was within noise. The remaining
+`[vdso]` samples come mostly from the per-turn read and `moq_net`
+`Timestamp::from(Instant)`.
 
 Decided 2026-10-14: kio channel contention ranks first. Its 215% lock wait on
 the default tokio runtime is the largest measured cost, and the lock-wait
