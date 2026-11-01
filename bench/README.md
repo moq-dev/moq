@@ -440,7 +440,7 @@ comparison.
 `replay` sweeps retained groups (64, 512, 2048) against subscribers (1, 8) for
 monotonic, reverse, and shuffled arrivals. `join` rows time each subscriber
 joining the cache and replaying every retained group; `append` rows time each of
-64 arrivals into that many subscribers' unread backlogs, landing inside the
+64 arrivals fanned into every subscriber's unread backlog, landing inside the
 backlog for reverse and shuffled orders. `max_us` is the slowest single operation,
 the longest the event loop was held. An untimed pass first prints each shape's
 `Array.prototype.sort` calls, elements and comparator visits, ahead of the timing

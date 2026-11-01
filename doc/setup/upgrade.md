@@ -67,9 +67,8 @@ These land with the next breaking release.
   publishers together.
 - **Announce restarts.** moq-lite 07 adds `ANNOUNCE_RESTART` (0x3): another
   publisher instance now serves the prefix. lite-06's `ANNOUNCE_RESTART` is
-  named `ANNOUNCE_UPDATE`, as it always meant. moq-transport with the epoch
-  extension advertise another epoch before withdrawing the old
-  one. Elsewhere, a restart is still an end then a start.
+  named `ANNOUNCE_UPDATE`, as it always meant. moq-transport carries no epoch;
+  a restart is still an end then a start.
 - **Publisher epochs ride the route** (#4942). moq-lite 07 carries the epoch
   after the path in `ANNOUNCE_START`, `TRACK`, `SUBSCRIBE`, and `FETCH`.
   Routes without an epoch no longer resume across routes, so default lite-06
@@ -83,10 +82,8 @@ These land with the next breaking release.
   receive.** Tracks from moq-lite before 05, and moq-transport tracks without
   `TIMESCALE` arrive untimed instead of
   stamped with their arrival time. moq-lite 05 and 06 can't encode absence and
-  carry a send time instead, so their receivers drop every timestamp and those
-  tracks arrive untimed too: read media time from the payload. moq-transport
-  timestamps are served to moq-lite untimed; see
-  [untimed tracks](/concept/moq-lite#subscriptions). A new subscriber with no
+  carry a send time instead, which their receivers pass through as the track's
+  time; see [untimed tracks](/concept/moq-lite#subscriptions). A new subscriber with no
   start on an untimed track starts at the latest group.
 - **Max age and max delay count wall-clock time too.** A superseded group is
   stale once its successor arrived a full budget ago, as well as by media

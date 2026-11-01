@@ -22,6 +22,7 @@ import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
 import { Reader, Writer } from "../stream.ts";
+import { Timescale } from "../time.ts";
 import type { Producer } from "../track.ts";
 import { type AnnounceBroadcast, AnnounceInit, AnnounceOk, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -1091,8 +1092,13 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 			await request.reading;
 			await respond(request, version, [{ start: new SubscribeStart([0]) }]);
 			const received = track.recvDatagram();
-			await writer.write(new DatagramMessage(0n, 0, 0, new Uint8Array(1198)).encode(version));
-			await writer.write(new DatagramMessage(0n, 1, 1, new Uint8Array(1197)).encode(version));
+			if (version === Version.DRAFT_07) {
+				await writer.write(new Uint8Array([1]));
+				await writer.write(new Uint8Array([1, ...new Uint8Array(1199).fill(0xff)]));
+			}
+			const size = version === Version.DRAFT_07 ? 1196 : 1197;
+			await writer.write(new DatagramMessage(0n, 0, 0, new Uint8Array(size + 1)).encode(version));
+			await writer.write(new DatagramMessage(0n, 1, 1, new Uint8Array(size)).encode(version));
 			expect((await received)?.sequence).toBe(1);
 		} finally {
 			await writer.close();
@@ -2254,9 +2260,9 @@ async function groupStream(timestamp: number, version: Version = Version.DRAFT_0
 }
 
 // Lite-05/06 stamp an untimed track's frames with their send time, which a receiver cannot tell
-// from media time, so it drops every timestamp there: a group that rewinds or lands out of order is
-// accepted untimed.
-test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p drops received timestamps", async (version) => {
+// from media time, so it keeps every timestamp there unchecked: a group that rewinds or lands out
+// of order is accepted with its timestamp.
+test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received timestamps through", async (version) => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
@@ -2275,14 +2281,14 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p drops received times
 		for (let i = 0; i < 3; i++) {
 			const group = await track.recvGroup();
 			const frame = await group?.readFrame();
-			got.push([group?.sequence, frame?.payload.length, frame?.timestamp]);
+			got.push([group?.sequence, frame?.payload.length, frame?.timestamp?.value]);
 		}
 		expect(got).toEqual([
-			[3, 1, undefined],
-			[4, 1, undefined],
-			[5, 1, undefined],
+			[3, 1, 2000],
+			[4, 1, 1000],
+			[5, 1, 500],
 		]);
-		expect((await track.info()).timescale).toBeUndefined();
+		expect((await track.info()).timescale).toBe(Timescale.MILLI);
 		expect(track.closed.peek()).toBeUndefined();
 	} finally {
 		track.close();
@@ -2448,6 +2454,58 @@ test.each(
 		expect(await track.finished()).toEqual({ group: 0, frame: 0 });
 		expect(await track.closed).toBeNull();
 		expect(closes).toEqual([]);
+	} finally {
+		track.close();
+		broadcast.close();
+		subscriber.close();
+		installed.close();
+	}
+});
+
+// A session that dies once the publisher ended the track, but before the tail settled, cuts it
+// off: the track ends with the session's error unless the declared end settled first. That end
+// is SUBSCRIBE_END on lite-05+, and the FIN before it.
+test.each([
+	["lite-03 ends clean with its last group finished", Version.DRAFT_03, true],
+	["lite-03 aborts with its last group still open", Version.DRAFT_03, false],
+	["lite-05 ends clean with its last group finished", Version.DRAFT_05, true],
+	["lite-05 aborts with its last group still owed", Version.DRAFT_05, false],
+] as const)("a session death before the tail settles: %s", async (_, version, settled) => {
+	const installed = new Manual().install();
+	const { quic, opened } = fakeSession();
+	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
+	const broadcast = subscriber.consume(Path.from("room"));
+	const track = broadcast.track("video").subscribe();
+	const died = new Error("session died");
+	// Lite-05 asks for TRACK_INFO first; untimed, a frame is its size and payload.
+	const legacy = version === Version.DRAFT_03;
+	const frame = (controller: ReadableStreamDefaultController<Uint8Array>) =>
+		controller.enqueue(new Uint8Array([1, 0]));
+	try {
+		if (!legacy) await answerTrackInfo(await opened(0), version);
+		const subscribe = await opened(legacy ? 0 : 1);
+		await subscribe.reading;
+		const responses: SubscribeResponse[] = legacy
+			? [{ ok: new SubscribeOk({}) }]
+			: [{ start: new SubscribeStart([0]) }, { end: new SubscribeEnd(1) }];
+		await respond(subscribe, version, responses, true);
+		if (settled) {
+			const group = new ReadableStream<Uint8Array>({
+				start: (controller) => {
+					frame(controller);
+					controller.close();
+				},
+			});
+			await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0 }), new Reader(group, undefined, version));
+		} else if (legacy) {
+			// Lite-03 says nothing about which groups are owed, so only a stream still being read is.
+			const group = new ReadableStream<Uint8Array>({ start: frame });
+			void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0 }), new Reader(group, undefined, version));
+		}
+		await drainReactions();
+
+		subscriber.close(died);
+		expect(await track.closed).toBe(settled ? null : died);
 	} finally {
 		track.close();
 		broadcast.close();
