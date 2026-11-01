@@ -1685,14 +1685,29 @@ mod tests {
 			write(&mut next, &[66_666]);
 			drop(fetching);
 
+			// Race the two outcomes rather than bound the wait: the decoder and
+			// encoder run on their own threads, and the paused clock jumps ahead
+			// whenever the runtime idles on them, so a deadline here fires early.
+			// Leaving clears the source's demand; opening group 1 puts it on the
+			// rung and holds that demand for as long as the group stays open.
 			let unwanted = async {
 				while source_demand.wanted_changed().await?.is_some() {}
 				moq_net::Result::Ok(())
 			};
-			kio::clock::timeout(std::time::Duration::from_secs(10), unwanted)
-				.await
-				.expect("the live path opened a group nobody asked for")
-				.unwrap();
+			let opened = async {
+				loop {
+					match edge.largest().await {
+						Some(position) if position.group >= 1 => break position.group,
+						Some(_) => {}
+						None => panic!("the rung ended"),
+					}
+				}
+			};
+			tokio::select! {
+				biased;
+				group = opened => panic!("the live path opened group {group}, which nobody asked for"),
+				unwanted = unwanted => unwanted.unwrap(),
+			}
 
 			transcoder.abort();
 		}

@@ -6247,9 +6247,12 @@ name = "moq-transcode"
 version = "0.1.10"
 dependencies = [
  "anyhow",
+ "bench-harness",
  "bytes",
+ "futures",
  "hang",
  "kio 0.6.2",
+ "libc",
  "moq-mux",
  "moq-net",
  "moq-tokio",
