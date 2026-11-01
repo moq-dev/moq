@@ -128,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
 	// The first tick is a full period in, so a line reports traffic, not the start.
 	let mut interval = args
 		.report_interval
-		.map(|period| moq_clock::interval_at(moq_clock::now() + period, period));
+		.map(|period| kio::clock::interval_at(kio::clock::now() + period, period));
 	let shutdown = shutdown();
 	tokio::pin!(shutdown);
 	loop {
@@ -201,7 +201,7 @@ struct Report<'a> {
 }
 
 /// The next report tick, or never without an interval.
-async fn tick(interval: &mut Option<moq_clock::Interval>) {
+async fn tick(interval: &mut Option<kio::clock::Interval>) {
 	match interval {
 		Some(interval) => {
 			interval.tick().await;

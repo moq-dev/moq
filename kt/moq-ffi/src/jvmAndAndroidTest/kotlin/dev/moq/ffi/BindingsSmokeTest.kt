@@ -1,19 +1,18 @@
 package dev.moq.ffi
 
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlinx.coroutines.test.runTest
 import uniffi.moq.MoqClient
 import uniffi.moq.MoqClientConfig
 import uniffi.moq.MoqException
 import uniffi.moq.MoqOriginConfig
 import uniffi.moq.MoqOriginProducer
-import kotlin.test.Test
-import kotlin.test.assertEquals
-import kotlin.test.assertFailsWith
 
 /**
- * Validates the native lib loads and the raw UniFFI surface is usable, with no
- * dependency on the `dev.moq` wrapper. The wrapper's own ergonomics are covered
- * by `:moq:jvmTest`.
+ * Validates the native lib loads and the raw UniFFI surface is usable, with no dependency on the
+ * `dev.moq` wrapper. The wrapper's own ergonomics are covered by `:moq:jvmTest`.
  */
 class BindingsSmokeTest {
     @Test

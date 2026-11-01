@@ -233,6 +233,89 @@ async fn connect_addrs(
 	.await
 }
 
+/// Serves `tls://` on TCP connections another listener accepted, such as a web
+/// server that reads each ClientHello so HTTPS and `tls://` share its port.
+///
+/// From [`crate::Server::tls_acceptor`]: the listen TLS identity, offering the
+/// same `qmux-01.<protocol>` ALPNs as a [`Listener`] serving `tls://`.
+#[cfg(feature = "_certs")]
+#[derive(Clone)]
+pub struct TlsAcceptor {
+	config: std::sync::Arc<rustls::ServerConfig>,
+	qmux: qmux::tls::Server,
+	server: moq_net::Server,
+	timeout: Option<std::time::Duration>,
+}
+
+#[cfg(feature = "_certs")]
+impl TlsAcceptor {
+	pub(crate) fn new(
+		config: std::sync::Arc<rustls::ServerConfig>,
+		server: moq_net::Server,
+		timeout: Option<std::time::Duration>,
+	) -> Self {
+		let qmux = qmux::tls::Server::new(config.clone()).with_session_config(crate::qmux_config());
+		Self {
+			config,
+			qmux,
+			server,
+			timeout,
+		}
+	}
+
+	/// The config to finish the TLS handshake with: the listen identity and its moq ALPNs.
+	pub fn config(&self) -> std::sync::Arc<rustls::ServerConfig> {
+		self.config.clone()
+	}
+
+	/// Whether a ClientHello offering `alpns` asks for `tls://`: it names one of
+	/// [`config`](Self::config)'s ALPNs.
+	pub fn offered<'a>(&self, mut alpns: impl Iterator<Item = &'a [u8]>) -> bool {
+		alpns.any(|offered| self.config.alpn_protocols.iter().any(|alpn| alpn == offered))
+	}
+
+	/// Run the qmux handshake and read SETUP on a connection whose TLS handshake
+	/// finished with [`config`](Self::config).
+	///
+	/// The negotiated ALPN picks the qmux wire format. The request reports the
+	/// socket's addresses, the SNI, the negotiated ALPN, and a client certificate
+	/// the config's verifier accepted, as a [`Listener`] serving `tls://` does.
+	/// The listen timeout bounds the handshake from this call, and `active` keeps
+	/// the connection counted toward the drain.
+	pub async fn accept<T>(
+		&self,
+		stream: tokio_rustls::server::TlsStream<T>,
+		active: moq_net::server::Active,
+	) -> crate::Result<crate::server::Request>
+	where
+		T: tokio::io::AsyncRead + tokio::io::AsyncWrite + AsRef<tokio::net::TcpStream> + Send + Unpin + 'static,
+	{
+		crate::runtime::scope(async move {
+			let deadline = self.timeout.and_then(|timeout| kio::clock::now().checked_add(timeout));
+			let tcp: &tokio::net::TcpStream = stream.get_ref().0.as_ref();
+			let remote = tcp.peer_addr().ok();
+			let local = tcp.local_addr().ok();
+			let stats = qmux::tcp::adopt(tcp).map_err(Error::Io)?;
+			let alpn = stream
+				.get_ref()
+				.1
+				.alpn_protocol()
+				.and_then(|alpn| std::str::from_utf8(alpn).ok())
+				.map(str::to_owned);
+			let handshake = async {
+				self.qmux
+					.accept_established(stream, stats)
+					.await
+					.map_err(|err| Error::Accept(crate::error::message(err)))
+			};
+			let session = crate::server::within(deadline, handshake).await?;
+			let incoming = crate::server::Incoming::tcp(&session, remote, local, deadline, active).with_alpn(alpn);
+			crate::server::accept_stream(&self.server, session, incoming).await
+		})
+		.await
+	}
+}
+
 /// Listens for incoming qmux connections on a TCP port, plaintext or TLS.
 pub struct Listener {
 	listener: tokio::net::TcpListener,
@@ -341,7 +424,7 @@ impl Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						moq_clock::sleep(delay).await;
+						kio::clock::sleep(delay).await;
 					}
 				}
 			}
@@ -484,14 +567,14 @@ mod tests {
 			let session = request.ok().await.unwrap();
 			(server, identity, sni, session)
 		});
-		let dialed = moq_clock::timeout(Duration::from_secs(5), client.connect(url).established())
+		let dialed = kio::clock::timeout(Duration::from_secs(5), client.connect(url).established())
 			.await
 			.expect("dial timed out");
 		if dialed.is_err() {
 			accept.abort();
 			return None;
 		}
-		let (server, identity, sni, _session) = moq_clock::timeout(Duration::from_secs(5), accept)
+		let (server, identity, sni, _session) = kio::clock::timeout(Duration::from_secs(5), accept)
 			.await
 			.expect("accept timed out")
 			.expect("accept task panicked");
@@ -521,16 +604,16 @@ mod tests {
 				.with_reconnect(false)
 				.connect(url.clone())
 		};
-		let untrusted = moq_clock::timeout(Duration::from_secs(5), dial(false).established()).await;
+		let untrusted = kio::clock::timeout(Duration::from_secs(5), dial(false).established()).await;
 		assert!(
 			matches!(untrusted, Ok(Err(_))),
 			"an untrusted certificate must be refused"
 		);
-		let _session = moq_clock::timeout(Duration::from_secs(5), dial(true).established())
+		let _session = kio::clock::timeout(Duration::from_secs(5), dial(true).established())
 			.await
 			.expect("trusted dial timed out")
 			.expect("trusted dial failed");
-		let (_server, _accepted) = moq_clock::timeout(Duration::from_secs(5), accept)
+		let (_server, _accepted) = kio::clock::timeout(Duration::from_secs(5), accept)
 			.await
 			.expect("accept timed out")
 			.expect("accept task panicked");
@@ -551,7 +634,7 @@ mod tests {
 
 		let blackhole: net::SocketAddr = "192.0.2.1:9".parse().unwrap();
 		let candidates = crate::resolve::Candidates::fixed([blackhole, addr]);
-		let session = moq_clock::timeout(
+		let session = kio::clock::timeout(
 			Duration::from_secs(5),
 			connect_addrs(candidates, &["moq-test"], Duration::from_millis(50)),
 		)
