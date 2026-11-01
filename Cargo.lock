@@ -5382,6 +5382,7 @@ dependencies = [
  "aws-lc-rs",
  "axum",
  "base64 0.23.1",
+ "bench-harness",
  "data-encoding",
  "jsonwebtoken",
  "kio 0.6.2",
