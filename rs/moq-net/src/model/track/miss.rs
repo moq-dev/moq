@@ -447,8 +447,9 @@ impl Misses {
 
 	/// Judge the holes in `target` the last probe has not, returning the runs to ask a
 	/// fill for. Gives up a run already stale under this reader's budget. `named` is the
-	/// lowest group the reader's ranges name, which may reach below the feed's start, and
-	/// `taken` what the reader handed out, which an eviction never makes a miss again.
+	/// lowest group the reader's ranges name, which may reach below the feed's start,
+	/// `bound` the exclusive end of a window whose ranges all end, and `taken` what the
+	/// reader handed out, which an eviction never makes a miss again.
 	#[expect(
 		clippy::too_many_arguments,
 		reason = "one probe's inputs, borrowed apart from its cursor"
@@ -458,6 +459,7 @@ impl Misses {
 		state: &TrackState,
 		key: (u64, u64, Option<u64>),
 		named: Option<u64>,
+		bound: Option<u64>,
 		mut target: impl FnMut(RangeInclusive<u64>) -> RangeInclusiveSet<u64>,
 		taken: &Delivered,
 		drift: &Drift,
@@ -465,12 +467,15 @@ impl Misses {
 		waiter: &kio::Waiter,
 	) -> RangeSet<u64> {
 		let mut asks = RangeSet::new();
+		// On a copy no subscription feeds, a bounded window's holes are misses up to its
+		// end, since no feed will deliver them nor produce anything to judge them below.
+		let bound = bound.filter(|_| state.unfed).and_then(|end| end.checked_sub(1));
 		// The feed's start is unknown until the serving session resolves it, and readers
 		// take nothing from a cache that does not reflect the feed.
-		if state.start_pending || !state.readable() {
+		if state.start_pending || !state.readable() && bound.is_none() {
 			return asks;
 		}
-		let Some(newest) = state.newest_produced else {
+		let Some(newest) = state.newest_produced.max(bound) else {
 			return asks;
 		};
 		let at = (
@@ -482,7 +487,7 @@ impl Misses {
 			state.start_sequence,
 			state.drops_revision,
 		);
-		let ended = state.abort.is_some() || state.is_complete();
+		let ended = state.nothing_arrives();
 		let ledger = state.arrivals.changes();
 		let drops = &state.drops_changes;
 		// Every reader probes on every poll, mostly with nothing changed since the last, so
@@ -990,9 +995,10 @@ impl TrackState {
 	) -> (RangeSet<u64>, Vec<(ops::Range<u64>, Option<crate::time::Instant>)>) {
 		let mut unfed = RangeSet::new();
 		let mut awaited = Vec::new();
-		// Nothing more arrives after an abort, a seal, or once the live edge reached a
-		// declared end with no tail owed: until then, a group below the end may still arrive.
-		if self.abort.is_some() || self.is_complete() {
+		// Nothing more arrives after an abort, a seal, once the live edge reached a declared
+		// end with no tail owed, or while no subscription feeds the copy: until then, a group
+		// below the end may still arrive.
+		if self.nothing_arrives() {
 			unfed.insert(hole);
 			return (unfed, awaited);
 		}
@@ -1103,6 +1109,7 @@ mod tests {
 			&state,
 			(0, 0, None),
 			None,
+			None,
 			|span| [span].into_iter().collect(),
 			&Delivered::default(),
 			&drift,
@@ -1143,6 +1150,7 @@ mod tests {
 			&state,
 			(0, 0, None),
 			None,
+			None,
 			|_| panic!("the edge has not moved"),
 			&Delivered::default(),
 			&drift,
@@ -1167,6 +1175,7 @@ mod tests {
 		misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			None,
 			|_| panic!("recreation extends no span"),
 			&Delivered::default(),
@@ -1239,6 +1248,7 @@ mod tests {
 			&state,
 			(0, 0, None),
 			None,
+			None,
 			|span| [span].into_iter().collect(),
 			&Delivered::default(),
 			&drift,
@@ -1272,6 +1282,7 @@ mod tests {
 		let asks = misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			None,
 			|_| panic!("the edge has not moved"),
 			&Delivered::default(),
@@ -1310,6 +1321,7 @@ mod tests {
 					&state,
 					(0, 0, None),
 					None,
+					None,
 					|span| [span].into_iter().collect(),
 					&Delivered::default(),
 					&drift,
@@ -1325,6 +1337,7 @@ mod tests {
 				.judge(
 					&state,
 					(0, 0, None),
+					None,
 					None,
 					|_| panic!("an unchanged probe rebuilds no span"),
 					&Delivered::default(),
@@ -1347,6 +1360,7 @@ mod tests {
 					&state,
 					(0, 0, None),
 					None,
+					None,
 					|_| panic!("a late arrival extends no span"),
 					&Delivered::default(),
 					&drift,
@@ -1363,6 +1377,7 @@ mod tests {
 		let asks = misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			None,
 			|_| panic!("a due gap extends no span"),
 			&Delivered::default(),
@@ -1406,6 +1421,7 @@ mod tests {
 					&state,
 					(0, 0, None),
 					None,
+					None,
 					full,
 					&Delivered::default(),
 					&drift,
@@ -1426,6 +1442,7 @@ mod tests {
 				.judge(
 					&state,
 					(0, 0, None),
+					None,
 					None,
 					|_| panic!("nothing deferred: the new grace waits for a change"),
 					&Delivered::default(),
@@ -1449,6 +1466,7 @@ mod tests {
 				.judge(
 					&state,
 					(0, 0, None),
+					None,
 					None,
 					full,
 					&Delivered::default(),

@@ -516,6 +516,11 @@ pub(crate) struct TrackState {
 	// creation, and only a session's copy goes idle: when its upstream subscription ends
 	// with the copy still held, until the route's answer shows in the cache.
 	feed: Feed,
+	// No subscription feeds this copy: its session holds none upstream for it, so nothing
+	// reaches it but what fills answer. Set and cleared only by the session, from its own
+	// state, never judged from the cache. A bounded read's holes are then misses up to its
+	// end at once, with nothing to wait for (see [`Self::nothing_arrives`]).
+	unfed: bool,
 	// Readers start at this group: the route's live feed starts past a gap after
 	// everything cached, so nothing bounds how old the cache below it is.
 	live_floor: Option<u64>,
@@ -1156,14 +1161,20 @@ impl TrackState {
 		};
 	}
 
-	/// Find the next live group at or after `index` in arrival order.
+	/// Find the next live group at or after `index` in arrival order, for a reader reading
+	/// `window`.
 	///
 	/// Returns the group and its absolute index so the consumer can advance past it.
 	/// The cached producer rather than a consumer: `consume` reads the clock and can
 	/// take the group's own lock, which the caller does once the track guard is gone.
-	fn poll_recv_group(&self, index: usize, min_sequence: u64) -> Poll<Result<Option<(group::Handle, usize)>>> {
+	fn poll_recv_group(
+		&self,
+		index: usize,
+		min_sequence: u64,
+		window: &Window,
+	) -> Poll<Result<Option<(group::Handle, usize)>>> {
 		let start = index.saturating_sub(self.offset);
-		let readable = self.readable();
+		let readable = self.serves_bounded(window);
 		let min_sequence = min_sequence.max(self.live_floor.unwrap_or(0));
 		for (i, (sequence, stamp)) in self.arrival.iter().enumerate().skip(start).filter(|_| readable) {
 			// A cut group is handed out too, so its reader sees why it ended.
@@ -1293,7 +1304,7 @@ impl TrackState {
 
 		let best = window
 			.runs(next_sequence.max(self.live_floor.unwrap_or(0)))
-			.filter(|_| self.readable())
+			.filter(|_| self.serves_bounded(window))
 			.find_map(|run| {
 				// A cut group is handed out too, so its reader sees why it ended.
 				self.lookup
@@ -2594,6 +2605,19 @@ impl TrackState {
 		reached && (self.abort.is_none() || self.settled.load(Ordering::Relaxed))
 	}
 
+	/// Whether nothing more reaches the cache but what fills answer: the track was aborted,
+	/// reached its end, or its session holds no subscription that feeds it.
+	pub(super) fn nothing_arrives(&self) -> bool {
+		self.abort.is_some() || self.is_complete() || self.unfed
+	}
+
+	/// Whether a bounded window reads from the cache: whenever readers may, and on a copy no
+	/// subscription feeds, whose groups in the window are the groups themselves however old
+	/// its live edge is. An open window still waits for the feed.
+	fn serves_bounded(&self, window: &Window) -> bool {
+		self.readable() || self.unfed && window.end().is_some()
+	}
+
 	/// Whether the live edge reached `fin`, or a received copy's tail decides it instead:
 	/// what it still misses up to `fin` is waited for only as long as the grace.
 	fn reaches(&self, fin: u64) -> bool {
@@ -3599,6 +3623,28 @@ impl Producer {
 		if let Ok(mut state) = self.modify() {
 			state.set_live(largest, start);
 		}
+	}
+
+	/// Whether a subscription feeds this copy: its session holds one upstream for it, or
+	/// none, so nothing reaches it but what fills answer. Only the session knows, from its
+	/// own state; the cache never tells. While unfed, a bounded read's holes are misses up
+	/// to its end at once, and it reads the cache whether or not the copy is idle.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn set_unfed(&self, unfed: bool) {
+		// Unchanged wakes nobody: every write wakes the readers.
+		if self.state.read().unfed == unfed {
+			return;
+		}
+		if let Ok(mut state) = self.modify() {
+			state.unfed = unfed;
+		}
+	}
+
+	/// The group of the newest Largest Object the upstream publisher's answers reported,
+	/// kept however far the cache has moved past it: every group below it is history there.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn reported_group(&self) -> Option<u64> {
+		self.state.read().object_edge.map(|((group, _), _)| group)
 	}
 
 	/// The live feed's route answered that it reaches `group`: a relative start counts back
@@ -6657,7 +6703,7 @@ impl Cursor {
 		let ascending = self.subscription.read().order == Order::Ascending;
 		let state = self.state.read();
 		// Nothing is read from the cache now, so leave what is owed until it is.
-		if !state.readable() {
+		if !state.serves_bounded(&self.filter.window) {
 			return None;
 		}
 		let low = state.live_floor.unwrap_or(0);
@@ -6921,6 +6967,7 @@ impl Cursor {
 				&state,
 				(from, revision, cap),
 				window.named(),
+				window.end(),
 				|span| {
 					let end = cap.map_or(*span.end(), |cap| (*span.end()).min(cap.saturating_sub(1)));
 					if cap == Some(0) || *span.start() > end {
@@ -7034,7 +7081,9 @@ impl Cursor {
 				Some((producer, taken)) => (producer.consume(), taken),
 				None => {
 					let floor = self.floor();
-					let polled = self.poll(waiter, |state| state.poll_recv_group(self.index, floor));
+					let polled = self.poll(waiter, |state| {
+						state.poll_recv_group(self.index, floor, &self.filter.window)
+					});
 					// A moved window moved the servable edge `drift` was judged against.
 					if polled.is_pending() && self.watch_time(waiter) {
 						self.admit();
@@ -18216,7 +18265,11 @@ mod test {
 		assert!(consumer.peek_group(1).is_some());
 		let mut walked = Vec::new();
 		let mut index = 0;
-		while let Poll::Ready(Ok(Some((group, next)))) = producer.state.read().poll_recv_group(index, 0) {
+		let window = {
+			let state = producer.state.read();
+			Window::new(&replay().ranges, None, &*state).unwrap()
+		};
+		while let Poll::Ready(Ok(Some((group, next)))) = producer.state.read().poll_recv_group(index, 0, &window) {
 			walked.push(group.sequence);
 			index = next + 1;
 		}
@@ -22547,5 +22600,54 @@ mod test {
 			elapse(&producer, ledger::GRACE);
 			assert_eq!(read_now(&mut reader, false), Some(None), "received: {received}");
 		}
+	}
+
+	/// A copy its session holds no subscription for asks a bounded read's holes as misses
+	/// at once, though it is idle and its feed produced nothing, and the read ends once the
+	/// fill answered or refused each, since nothing else will deliver them.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_unfed_copy_asks_a_bounded_read_s_holes_at_once() {
+		let (mut producer, _pool) = pooled_producer(1 << 40);
+		let dynamic = producer.requests();
+		producer.set_idle();
+		let mut reader = producer.subscribe(replay().with_order(Order::Ascending).with_range(1..3));
+		assert_eq!(read_now(&mut reader, false), None);
+		assert!(
+			dynamic.requested_fill().now_or_never().is_none(),
+			"an idle copy a feed may still answer asks nothing"
+		);
+
+		producer.set_unfed(true);
+		assert_eq!(read_now(&mut reader, false), None, "the fill is out");
+		let fill = dynamic
+			.requested_fill()
+			.now_or_never()
+			.expect("the holes are asked at once")
+			.unwrap();
+		assert_eq!((fill.start(), fill.end()), (Position::group(1), 3));
+		let mut group = fill.accept(1, Info::timed()).unwrap();
+		group
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"filled"))
+			.unwrap();
+		group.finish().unwrap();
+		fill.refuse_groups(2..3, Error::Unsupported);
+		assert_eq!(read_now(&mut reader, false), Some(Some(1)));
+		assert_eq!(read_now(&mut reader, false), Some(None), "the refusal is final");
+	}
+
+	/// On a copy no subscription feeds, a bounded read takes what the cache holds in its
+	/// window, idle or not, while an open read still waits for a feed to answer.
+	#[test]
+	fn an_unfed_copy_serves_a_bounded_read_from_its_cache() {
+		let producer = idle_copy();
+		producer.set_unfed(true);
+		let mut bounded = producer.subscribe(replay().with_order(Order::Ascending).with_range(1..3));
+		assert_eq!(read_now(&mut bounded, false), Some(Some(1)));
+		assert_eq!(read_now(&mut bounded, false), Some(Some(2)));
+		assert_eq!(read_now(&mut bounded, false), Some(None));
+
+		let mut open = producer.subscribe(replay().with_range(1..));
+		assert_eq!(read_now(&mut open, false), None, "the cache is not the live edge");
 	}
 }
