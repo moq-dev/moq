@@ -102,11 +102,15 @@ test("one division matches each share dividing alone", () => {
 		const plan = new Plan(estimate, active);
 
 		for (const { want, active: demanded } of entries) {
-			// An idle reservation reads what it would get were it added after the others.
+			// An idle reservation reads what it would get were it demanded again, in registration order.
 			const expected = demanded
 				? sequential(estimate, active, want.id)
-				: sequential(estimate, [...active, want], want.id);
-			const actual = demanded ? plan.grant(want.id) : plan.rejoin(want.priority, want.max);
+				: sequential(
+						estimate,
+						[...active, want].sort((a, b) => a.id - b.id),
+						want.id,
+					);
+			const actual = demanded ? plan.grant(want.id) : plan.rejoin(want);
 			expect({ want, actual }).toEqual({ want, actual: expected });
 		}
 	}

@@ -668,6 +668,12 @@ impl Want {
 /// A registry's division of its estimate, computed once per change to the estimate, the
 /// entries or a track's demand, and read by every share instead of each re-dividing
 /// the whole table.
+///
+/// One plan is cached, for the last estimate read. That assumes every share of a
+/// registry divides the same value, as they do in practice: a reconnecting connection's
+/// persistent estimate is forwarded from its current session's. Shares reading
+/// different values still get the right slices, but each alternation divides the
+/// cached entries again (without reading the tracks).
 #[derive(Default)]
 struct Grants {
 	/// The latest division, or `None` before the first read.

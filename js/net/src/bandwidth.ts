@@ -28,6 +28,7 @@ export interface Want {
 
 /** A want in the order it is served, with what was left of the estimate before it. */
 interface Served {
+	id: number;
 	priority: number;
 	max: number;
 	budget: number;
@@ -48,16 +49,19 @@ interface Served {
  * Rates are bits per second.
  */
 export class Plan {
-	/** The wants in the order they are served: higher priority first, then ascending by reservation. */
+	/**
+	 * The wants in the order they are served: higher priority first, then ascending by
+	 * reservation, then by registration.
+	 */
 	readonly #order: Served[];
 	readonly #grants = new Map<number, number>();
 	/** What is left once every want is served. */
 	readonly #leftover: number;
 
 	constructor(estimate: number, wants: readonly Want[]) {
-		// Read each want once, then sort stably, so ties keep the order of `wants`.
+		// Read each want once. Registration order breaks ties, as in the Rust allocator.
 		const order = wants.map((want) => ({ id: want.id, priority: want.priority, max: want.max, budget: 0 }));
-		order.sort((a, b) => b.priority - a.priority || a.max - b.max);
+		order.sort((a, b) => b.priority - a.priority || a.max - b.max || a.id - b.id);
 
 		// Integer bits per second: the same truncation the Rust allocator uses.
 		let budget = estimate;
@@ -88,18 +92,24 @@ export class Plan {
 	}
 
 	/**
-	 * What a want missing from this division would get were it added after the others.
+	 * What a want missing from this division would get were it demanded again.
 	 *
 	 * Tiers above its own are served first either way, so only its own tier is walked
 	 * again, with one more want sharing it, as far as where it would be served: after
-	 * every want of its tier reserving no more than it.
+	 * every want of its tier reserving less than it, or as much but registered earlier.
 	 */
-	rejoin(priority: number, max: number): number {
+	rejoin(want: Want): number {
+		const { id, priority, max } = want;
 		const order = this.#order;
 		let start = 0;
 		while (start < order.length && order[start].priority > priority) start++;
 		let at = start;
-		while (at < order.length && order[at].priority === priority && order[at].max <= max) at++;
+		while (
+			at < order.length &&
+			order[at].priority === priority &&
+			(order[at].max < max || (order[at].max === max && order[at].id < id))
+		)
+			at++;
 		let end = at;
 		while (end < order.length && order[end].priority === priority) end++;
 
@@ -161,7 +171,7 @@ interface Division {
  */
 function shareOf(plan: Plan, entry: Entry): number | undefined {
 	if (entry.demand.closed.peek() !== undefined) return undefined;
-	if (entry.demand.wanted.peek() === undefined) return plan.rejoin(entry.priority, entry.max);
+	if (entry.demand.wanted.peek() === undefined) return plan.rejoin(entry);
 	return plan.grant(entry.id);
 }
 

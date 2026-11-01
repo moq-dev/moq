@@ -83,14 +83,14 @@ class Connection {
 	/**
 	 * What `index` should read: strict priority, max-min fair within a tier in ascending
 	 * (ceiling, registration) order, an idle track claiming nothing but its own reader seeing
-	 * what it would get back, served after the demanded tracks with its ceiling.
+	 * what it would get back, served among the demanded tracks by its ceiling and registration.
 	 */
 	expected(index: number): number {
 		let budget = this.estimate.peek() ?? 0;
 		const claims = this.slots
 			.map((slot, other) => ({ ...slot, other, rejoin: !slot.subscriber }))
 			.filter((claim) => claim.other === index || !claim.rejoin);
-		claims.sort((a, b) => b.priority - a.priority || a.max - b.max || +a.rejoin - +b.rejoin || a.other - b.other);
+		claims.sort((a, b) => b.priority - a.priority || a.max - b.max || a.other - b.other);
 		for (let start = 0; start < claims.length; ) {
 			let end = start;
 			while (end < claims.length && claims[end].priority === claims[start].priority) end++;
