@@ -30,7 +30,7 @@ for f in draft-*.md; do
     rm -f "${f%.md}.prepped.xml"
 done
 
-for f in moq-e2ee-*.ts; do
+for f in moq-e2ee-*.ts moq-sign-*.ts; do
     bun tsc --ignoreConfig --noEmit --skipLibCheck --target esnext --module esnext --moduleResolution bundler --types bun "$f"
     bun "$f"
 done

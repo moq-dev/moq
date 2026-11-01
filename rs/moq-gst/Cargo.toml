@@ -23,7 +23,7 @@ bytes = { workspace = true }
 gst = { package = "gstreamer", version = "0.25" }
 gst-audio = { package = "gstreamer-audio", version = "0.25" }
 hang = { workspace = true }
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, default-features = true }

@@ -210,16 +210,15 @@ depth 0) carrying all of the group's tiers, both directions, and its sessions,
 so a reader holds one subscription per group.
 
 A reader discovers the live groups from the broadcast's track listing (TRACKS
-in moq-lite 07, `SUBSCRIBE_TRACKS` in moq-transport draft 18 and later). At
-depth 0 the one group's track is listed for the producer's life. At depth 1 or
-more, a group's track is listed from its first entry until it has lingered
-empty (five minutes by default), then unlisted and ended. A group that returns
-within the linger keeps its track and epoch, and its totals continue. The
-node's announcement never changes, so group churn costs no announce traffic
-across a cluster. Over a hop that cannot carry a listing (moq-lite 06 and
-older, or moq-transport before draft 18) the listing is empty or refused; a
-reader that knows a group's name can still subscribe to it while it is listed,
-and is refused otherwise.
+in moq-lite 07). At depth 0 the one group's track is listed for the producer's
+life. At depth 1 or more, a group's track is listed from its first entry until
+it has lingered empty (five minutes by default), then unlisted and ended. A
+group that returns within the linger keeps its track and epoch, and its totals
+continue. The node's announcement never changes, so group churn costs no
+announce traffic across a cluster. Over a hop that cannot carry a listing
+(moq-lite 06 and older, or moq-transport, whose `SUBSCRIBE_TRACKS` our relay
+refuses) the listing is empty or refused; a reader that knows a group's name
+can still subscribe to it while it is listed, and is refused otherwise.
 
 A group that returns after its linger is a new instance of its track: its
 frames carry a new `epoch` and count from zero, and its group numbers, which

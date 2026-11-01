@@ -701,12 +701,12 @@ mod tests {
 
 		let timeout = std::time::Duration::from_secs(5);
 		let consumer = subscriber.consume();
-		let catalog = tokio::time::timeout(timeout, consumer.follow("a/pub", None).unwrap().available())
+		let catalog = kio::clock::timeout(timeout, consumer.follow("a/pub", None).unwrap().available())
 			.await
 			.expect("the catalog resolves")
 			.unwrap();
 		let source = Source::new(consumer, catalog);
-		let sibling = tokio::time::timeout(timeout, source.resolve(Some(&Relative::new("./source").unwrap()), None))
+		let sibling = kio::clock::timeout(timeout, source.resolve(Some(&Relative::new("./source").unwrap()), None))
 			.await
 			.expect("the sibling resolves without the stalled session")
 			.unwrap();
@@ -718,7 +718,7 @@ mod tests {
 		settle().await;
 		assert!(binding.poll_broadcast(&kio::Waiter::noop()).is_pending());
 		let _late = healthy.publish("a/late", Default::default()).unwrap();
-		let late = tokio::time::timeout(timeout, binding.broadcast())
+		let late = kio::clock::timeout(timeout, binding.broadcast())
 			.await
 			.expect("the later sibling resolves")
 			.unwrap();

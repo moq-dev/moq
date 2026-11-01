@@ -324,6 +324,12 @@ impl Invocation {
 		}
 
 		for command in &self.stages {
+			#[cfg(feature = "capture")]
+			if let Command::Import(import) = command
+				&& let ImportSource::Capture(capture) = &import.source
+			{
+				capture.validate()?;
+			}
 			if let Command::Import(import) = command
 				&& import.report
 				&& let Some(reason) = import.source.report_refusal()
@@ -366,6 +372,7 @@ impl Invocation {
 			let Command::Export(export) = command else {
 				continue;
 			};
+			export.select.validate()?;
 			if let Some(sink) = export.sink.report() {
 				anyhow::ensure!(
 					export.catalog_format.is_none(),
@@ -409,8 +416,8 @@ impl Invocation {
 				);
 				if matches!(stdout.format, SubscribeFormat::H264 | SubscribeFormat::H265) {
 					anyhow::ensure!(
-						!export.select.no_video,
-						"--no-video leaves nothing for a video elementary stream; pick a container format"
+						export.select.video != Some(crate::subscribe::Mode::Off),
+						"--video off leaves nothing for a video elementary stream; pick a container format"
 					);
 					if let Some(flag) = export.select.audio_flag() {
 						anyhow::bail!("a video elementary stream has no audio; remove {flag}");
@@ -833,6 +840,10 @@ impl Import {
 		if self.latency_max.is_some() {
 			found.flag("--latency-max", None, "--max-age");
 		}
+		#[cfg(feature = "capture")]
+		if let ImportSource::Capture(capture) = &self.source {
+			found.extend(capture.deprecated());
+		}
 		found
 	}
 }
@@ -1042,7 +1053,7 @@ pub struct Export {
 	#[usage(long = "catalog-format", value_enum)]
 	pub catalog_format: Option<CatalogFormatArg>,
 
-	/// Rendition selection (`--video-name`, `--no-audio`, ...), refused by sinks that don't apply it.
+	/// Rendition selection (`--video-name`, `--audio off`, ...), refused by sinks that don't apply it.
 	#[usage(flatten)]
 	pub select: crate::subscribe::SelectArgs,
 
@@ -1620,26 +1631,108 @@ mod tests {
 		Invocation::try_parse_from(argv.iter().chain(flags).copied())
 	}
 
+	/// Capture policy values cannot leak into rendition selection or unsupported commands.
+	#[test]
+	fn media_modes_are_command_specific() {
+		// Each command and the arguments that follow its flags: export's selection flags
+		// come before the sink.
+		let mut commands = vec![(vec!["export"], vec!["fmp4"])];
+		if cfg!(feature = "play") {
+			commands.push((vec!["play"], vec![]));
+		}
+		if cfg!(feature = "capture") {
+			commands.push((vec!["import", "capture"], vec![]));
+		}
+		for (command, rest) in commands {
+			let argv = |flags: &[&'static str]| [vec!["moq"], command.clone(), flags.to_vec(), rest.clone()].concat();
+			for flag in ["--video", "--audio"] {
+				for mode in ["on", "off", "demand", "buffered", "always", "true"] {
+					let argv = argv(&[flag, mode]);
+					let supported =
+						matches!(mode, "on" | "off") || (command == ["import", "capture"] && mode == "demand");
+					assert_eq!(Invocation::try_parse_from(argv.clone()).is_ok(), supported, "{argv:?}");
+				}
+				let argv = argv(&[flag]);
+				assert!(
+					Invocation::try_parse_from(argv.clone()).is_err(),
+					"{argv:?} needs a value"
+				);
+			}
+			for flag in ["--no-video", "--no-audio", "--on-demand"] {
+				let argv = argv(&[flag]);
+				assert!(
+					Invocation::try_parse_from(argv.clone()).is_err(),
+					"{argv:?} was removed"
+				);
+			}
+		}
+	}
+
+	/// Capture's released `--no-*` spellings name their replacement instead of an unknown flag.
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_names_the_released_spellings() {
+		for (old, new) in [("--no-video", "--video off"), ("--no-audio", "--audio off")] {
+			let Err(err) = Invocation::try_parse_from(["moq", "import", "capture", old]) else {
+				panic!("{old} parsed");
+			};
+			let err = err.to_string();
+			assert!(err.contains(&format!("{old} -> {new}")), "{err}");
+		}
+	}
+
+	/// Explicit on still permits narrowing a role, and omission still keeps both roles.
+	#[test]
+	fn enabled_media_keep_their_rendition_filters() {
+		for flags in [
+			["fmp4"].as_slice(),
+			&[
+				"--video",
+				"on",
+				"--video-name",
+				"hd",
+				"--video-codec",
+				"h264",
+				"--audio",
+				"on",
+				"--audio-name",
+				"stereo",
+				"--audio-codec",
+				"opus",
+				"fmp4",
+			],
+		] {
+			let cli = export(flags).unwrap();
+			cli.validate().unwrap();
+			let Command::Export(export) = &cli.stages[0] else {
+				panic!("an export stage");
+			};
+			let selection = export.select.selection(None);
+			assert!(selection.has_video());
+			assert!(selection.has_audio());
+		}
+	}
+
 	/// Leaving a role out can't be combined with narrowing it, or with leaving the
 	/// other role out too.
 	#[test]
 	fn leaving_a_role_out_conflicts_with_selecting_it() {
 		for flags in [
-			["--no-video", "--video-name", "hd"].as_slice(),
-			&["--video-codec", "h264", "--no-video"],
-			&["--no-audio", "--audio-name", "stereo"],
-			&["--audio-codec", "opus", "--no-audio"],
-			&["--no-video", "--no-audio"],
-			&["--no-audio", "--no-video"],
+			["--video", "off", "--video-name", "hd"].as_slice(),
+			&["--video-codec", "h264", "--video", "off"],
+			&["--audio", "off", "--audio-name", "stereo"],
+			&["--audio-codec", "opus", "--audio", "off"],
+			&["--video", "off", "--audio", "off"],
+			&["--audio", "off", "--video", "off"],
 		] {
 			let flags = [flags, &["fmp4"]].concat();
-			assert!(export(&flags).is_err(), "{flags:?} must be refused");
+			assert!(export(&flags).unwrap().validate().is_err(), "{flags:?} must be refused");
 		}
 	}
 
 	#[test]
-	fn no_audio_selects_no_audio_role() {
-		let cli = export(&["--no-audio", "fmp4"]).unwrap();
+	fn audio_off_selects_no_audio_role() {
+		let cli = export(&["--audio", "off", "fmp4"]).unwrap();
 		cli.validate().unwrap();
 		let Command::Export(export) = &cli.stages[0] else {
 			panic!("an export stage");
@@ -1651,12 +1744,12 @@ mod tests {
 
 	/// A video elementary stream refuses leaving video out or selecting audio, before dialing.
 	#[test]
-	fn elementary_streams_refuse_no_video() {
+	fn elementary_streams_refuse_video_off() {
 		for format in ["h264", "h265"] {
-			let err = export(&["--no-video", format]).unwrap().validate().unwrap_err();
-			assert!(err.to_string().contains("--no-video"), "{format}: {err}");
-			export(&["--no-audio", format]).unwrap().validate().unwrap();
-			for flag in [["--audio-name", "stereo"], ["--audio-codec", "aac"]] {
+			let err = export(&["--video", "off", format]).unwrap().validate().unwrap_err();
+			assert!(err.to_string().contains("--video off"), "{format}: {err}");
+			export(&["--audio", "off", format]).unwrap().validate().unwrap();
+			for flag in [["--audio-name", "stereo"], ["--audio-codec", "aac"], ["--audio", "on"]] {
 				let err = export(&[flag.as_slice(), &[format]].concat())
 					.unwrap()
 					.validate()
@@ -1665,7 +1758,7 @@ mod tests {
 			}
 		}
 		for format in ["fmp4", "mkv", "flv"] {
-			export(&["--no-video", format]).unwrap().validate().unwrap();
+			export(&["--video", "off", format]).unwrap().validate().unwrap();
 		}
 	}
 
@@ -1686,10 +1779,12 @@ mod tests {
 			for flag in [
 				["--video-name", "hd"].as_slice(),
 				&["--video-codec", "h264"],
-				&["--no-video"],
+				&["--video", "off"],
+				&["--video", "on"],
 				&["--audio-name", "stereo"],
 				&["--audio-codec", "aac"],
-				&["--no-audio"],
+				&["--audio", "off"],
+				&["--audio", "on"],
 			] {
 				let err = export(&[flag, sink].concat()).unwrap().validate().unwrap_err();
 				assert!(err.to_string().contains(flag[0]), "{sink:?} {flag:?}: {err}");
