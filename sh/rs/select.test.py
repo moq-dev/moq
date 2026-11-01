@@ -54,6 +54,15 @@ class SelectTest(unittest.TestCase):
                     calls = self.selected(path, action=action)
                     self.assertTrue(any(call.startswith(f"rs {action} --workspace ") for call in calls), calls)
 
+    def test_workspace_clippy_configuration_selects_workspace(self):
+        # The root clippy.toml is every crate's lint policy, alone or beside one crate's change.
+        for paths in (("clippy.toml",), ("clippy.toml", "rs/moq-stats/src/lib.rs")):
+            with self.subTest(paths=paths):
+                calls = self.selected(*paths)
+                self.assertTrue(any(call.startswith("rs lint --workspace ") for call in calls), calls)
+        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        self.assertRegex("clippy.toml", scope)
+
     def test_gate_runs_no_feature_matrix(self):
         # `just rs features` owns the isolated feature builds, outside the gate.
         for path in ("rs/kio/src/lib.rs", "rs/moq-tokio/src/lib.rs", "rs/moq-quic/src/lib.rs",

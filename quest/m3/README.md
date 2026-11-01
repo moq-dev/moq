@@ -19,6 +19,7 @@ m4's upstream waits in here and moved m2 work with no consumer.
 
 ## Required
 
+- [Mesh over ICE](/quest/m3/mesh-ice.md) - mesh nodes on different networks connect directly through the P2P line's ICE pairs, once a mesh user needs it
 - [Video validation hardware is on hand](/quest/m3/video-hardware-access.md) - the machines the validation runs on, including a Raspberry Pi 4/5 for embedded presenting
 - [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were never run on real machines, including PipeWire on KDE, the camera portal, and a Pi
 - [An Ada NVIDIA GPU is available](/quest/m3/ada-gpu.md) - the hardware AV1 NVENC is verified on

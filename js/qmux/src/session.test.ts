@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
-import { type Installed, Manual, Milli, Nano } from "@moq/clock";
+import { type Installed, Instant, Manual, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
 import { SessionError, StreamError } from "./error.ts";
 import * as Frame from "./frame.ts";
 import { DEFAULT_MAX_RECORD_SIZE, type TransportParams } from "./frame.ts";
@@ -171,10 +171,10 @@ class FakeServerSocket implements WebSocketLike {
 
 /** Poll an observable condition with a bounded timeout (no fixed-yield sleeps). */
 async function waitFor(check: () => boolean, timeoutMs = 1000): Promise<void> {
-	const start = Date.now();
+	const deadline = Instant.add(now(), Nano.fromMilli(Milli(timeoutMs)));
 	while (!check()) {
-		if (Date.now() - start > timeoutMs) throw new Error("timed out waiting for condition");
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		if (now() > deadline) throw new Error("timed out waiting for condition");
+		await yieldNow();
 	}
 }
 
@@ -182,7 +182,7 @@ async function waitFor(check: () => boolean, timeoutMs = 1000): Promise<void> {
  * settle (an unhandled rejection surfaces at the end of the current turn). */
 async function settle(turns = 5): Promise<void> {
 	for (let i = 0; i < turns; i++) {
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await yieldNow();
 	}
 }
 
@@ -557,7 +557,7 @@ describe("Session integration (scripted peer)", () => {
 		const next = reader.read();
 		const resurrected = await Promise.race([
 			next.then(() => true),
-			new Promise<false>((resolve) => setTimeout(() => resolve(false), 50)),
+			sleep(Nano.fromMilli(Milli(50))).then(() => false as const),
 		]);
 		expect(resurrected).toBe(false);
 		session.close();
@@ -1048,7 +1048,7 @@ describe("Session integration (scripted peer)", () => {
 		await settle();
 
 		peer.send({ type: "stop_sending", id: Stream.Id.create(0n, Stream.Dir.Bi, false), code: VarInt.from(5) });
-		const err = await Promise.race([write, new Promise((resolve) => setTimeout(() => resolve("pending"), 500))]);
+		const err = await Promise.race([write, sleep(Nano.fromMilli(Milli(500))).then(() => "pending" as const)]);
 		expect(err).toBeInstanceOf(StreamError);
 		session.close();
 	});

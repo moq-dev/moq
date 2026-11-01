@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { Micro, Milli } from "@moq/clock";
+import { type Micro, Milli, Nano, sleep } from "@moq/clock";
 import { Time, Track, Varint } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Format as LegacyFormat } from "./legacy.ts";
@@ -66,10 +66,7 @@ test("Consumer waits on a non-sequential hang group because it has no per-frame 
 
 	// Within the max delay budget (5s), the parked next() stays parked: no duration means no proof of
 	// contiguity, so the consumer waits instead of eagerly delivering across the gap.
-	const result = await Promise.race([
-		pending,
-		new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 500)),
-	]);
+	const result = await Promise.race([pending, sleep(Nano.fromMilli(Milli(500))).then(() => "timeout" as const)]);
 
 	expect(result).toBe("timeout");
 

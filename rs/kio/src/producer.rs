@@ -1,6 +1,6 @@
 use std::{
 	ops::{Deref, DerefMut},
-	sync::atomic::Ordering,
+	sync::{Arc, atomic::Ordering},
 	task::Poll,
 };
 
@@ -8,7 +8,6 @@ use crate::{
 	Closed, Counts, State,
 	consumer::{self, Consumer},
 	lock::*,
-	sync::Arc,
 	waiter::*,
 	weak::{ProducerWeak, Weak},
 };
@@ -48,7 +47,7 @@ impl<T> Producer<T> {
 	/// channel costs this whether it has one consumer or a thousand.
 	///
 	/// Excludes whatever `T` allocates on its own.
-	pub const HEAP: usize = crate::arc_heap::<crate::sync::Mutex<State<T>>>() + crate::arc_heap::<Counts>();
+	pub const HEAP: usize = crate::arc_heap::<std::sync::Mutex<State<T>>>() + crate::arc_heap::<Counts>();
 
 	/// Create a new producer with the given initial value.
 	pub fn new(value: T) -> Self {
@@ -124,7 +123,7 @@ impl<T> Producer<T> {
 	/// while pending.
 	///
 	/// Returns `Poll::Ready(Err(`[`Ref`]`))` if the channel is closed.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll<F>(&self, waiter: &Waiter, f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<()>,
@@ -151,7 +150,7 @@ impl<T> Producer<T> {
 	/// [`Mut`], so it never flags the state modified and never wakes consumers.
 	/// Use it to wait on a read condition from the producer side without creating
 	/// a [`Consumer`].
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_ref<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
@@ -193,7 +192,7 @@ impl<T> Producer<T> {
 
 	/// Poll for channel closure (an explicit [`Mut::close`], e.g. an abort),
 	/// registering the waiter if still open.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
 		if state.closed {
@@ -220,7 +219,7 @@ impl<T> Producer<T> {
 
 	/// Poll for [`Self::wanted`] to differ from `last`: `Ready(Ok)` with the new value once
 	/// it does, [`Closed`] if the channel closed first, else `Pending`.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_wanted_changed(&self, waiter: &Waiter, last: bool) -> Poll<Result<bool, Closed>> {
 		// Closure is checked first, so a closed channel reports `Closed` from every handle
 		// rather than a consumer count that only dropped because it's dead.
@@ -429,7 +428,7 @@ impl<T> Deref for Ref<'_, T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use super::*;
 
