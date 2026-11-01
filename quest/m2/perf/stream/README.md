@@ -100,7 +100,10 @@ so the [codec](/quest/m2/perf/stream/codec.md) gate must re-profile CPU time. Tw
 paired relay runs (`chat` and `fanout` on `ws`, `wss`, `tcp`, `tls`) were
 inconclusive: the QUIC control, untouched by the driver, moved -8% to +25%, and
 most cases changed sign between runs. Only `tls` `fanout` rose in all six pairs
-(+7% to +44%), so re-measure it on a quiet host.
+(+7% to +44%). Re-measured the same day with three more interleaved runs of six
+pairs each (`tls` only, load 9-17), that rise was noise: CPU per delivered
+frame moved by a median of -16%, +1%, and -8% per run, 11 of 18 pairs fell, and
+pairs ranged from -41% to +106%, while the QUIC control ranged from -12% to +41%.
 
 Decisions (2026-10-22), each with its reason:
 
