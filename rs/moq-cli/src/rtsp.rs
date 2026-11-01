@@ -52,7 +52,7 @@ pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()
 		}
 
 		tracing::info!(%url, ?backoff, "RTSP reconnecting");
-		moq_clock::sleep(backoff).await;
+		kio::clock::sleep(backoff).await;
 		backoff = (backoff * 2).min(BACKOFF_MAX);
 	}
 }

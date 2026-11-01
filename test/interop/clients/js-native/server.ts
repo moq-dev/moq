@@ -143,7 +143,7 @@ try {
 	next.writeFrame({ payload: new Uint8Array(32).fill(1) });
 	next.finish();
 	assert.equal((await commands.next()).value, "done");
-	console.error("js goaway redirect resumed");
+	console.error("js goaway redirect restarted");
 } finally {
 	lines.close();
 	initial?.connection.abort();

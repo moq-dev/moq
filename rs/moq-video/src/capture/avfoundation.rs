@@ -126,7 +126,7 @@ pub(super) async fn open(config: &Config, device: Option<&str>) -> Result<Stream
 
 	// Await the first frame to learn the negotiated resolution (and to surface a
 	// permission failure as an error rather than a silent hang).
-	let first = match moq_clock::timeout(FIRST_FRAME_TIMEOUT, chan.recv()).await {
+	let first = match kio::clock::timeout(FIRST_FRAME_TIMEOUT, chan.recv()).await {
 		Ok(Ok(Some(frame))) => frame,
 		Ok(Err(error)) => return Err(error),
 		Ok(Ok(None)) | Err(_) => {
@@ -179,7 +179,7 @@ async fn ensure_camera_access(media: &AVMediaType) -> Result<(), Error> {
 		});
 		unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(media, &handler) };
 
-		return match moq_clock::timeout(ACCESS_TIMEOUT, rx).await {
+		return match kio::clock::timeout(ACCESS_TIMEOUT, rx).await {
 			Ok(Ok(true)) => Ok(()),
 			Ok(Ok(false)) => Err(Error::PermissionDenied(
 				"camera access; enable it in System Settings > Privacy & Security > Camera".to_string(),

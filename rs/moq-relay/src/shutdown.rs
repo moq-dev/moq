@@ -14,7 +14,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use tokio::sync::watch;
 
 /// Fires the relay-wide shutdown broadcast. Held by `Relay::run` for the OS
@@ -198,7 +198,7 @@ impl Observer {
 			Err(_) => None,
 		};
 		match deadline {
-			Some(deadline) => moq_clock::sleep_until(deadline).await,
+			Some(deadline) => kio::clock::sleep_until(deadline).await,
 			None => std::future::pending().await,
 		}
 	}
@@ -324,7 +324,7 @@ impl Observer {
 		tokio::select! {
 			biased;
 			_ = session.closed() => return,
-			() = moq_clock::sleep_until(deadline) => {}
+			() = kio::clock::sleep_until(deadline) => {}
 		}
 		tracing::debug!("peer did not leave before the drain deadline; closing");
 		session.abort(moq_net::Error::GoawayTimeout);
@@ -464,7 +464,7 @@ mod tests {
 		// Only timers decide what follows.
 		tokio::time::pause();
 		trigger.start();
-		moq_clock::timeout(window + Duration::from_secs(1), activity.close())
+		kio::clock::timeout(window + Duration::from_secs(1), activity.close())
 			.await
 			.expect("a withheld SETUP outlived the drain deadline");
 		running.await.unwrap().unwrap();
@@ -482,7 +482,7 @@ mod tests {
 		let trigger = relay.shutdown_trigger().clone();
 		let running = tokio::spawn(relay.run());
 		trigger.start();
-		moq_clock::sleep(Duration::from_millis(100)).await;
+		kio::clock::sleep(Duration::from_millis(100)).await;
 		assert!(!running.is_finished(), "drain ended under an embedder's admission");
 		drop(active);
 		running.await.unwrap().unwrap();
@@ -533,7 +533,7 @@ mod tests {
 		// is well past the drain window.
 		tokio::time::pause();
 		trigger.start();
-		moq_clock::timeout(window + Duration::from_secs(1), admission.abandoned())
+		kio::clock::timeout(window + Duration::from_secs(1), admission.abandoned())
 			.await
 			.expect("the admission outlived the drain deadline");
 		running.await.unwrap().unwrap();
@@ -627,13 +627,13 @@ mod tests {
 			async move { shutdown.drained().await }
 		});
 
-		moq_clock::sleep(window).await;
+		kio::clock::sleep(window).await;
 		let late = shutdown.serve();
 		tokio::task::yield_now().await;
 		assert!(!drained.is_finished(), "drained under a session still cleaning up");
 
 		drop(established);
-		moq_clock::timeout(Duration::from_secs(1), drained)
+		kio::clock::timeout(Duration::from_secs(1), drained)
 			.await
 			.expect("a session served after the deadline held the drain")
 			.unwrap();
@@ -653,7 +653,7 @@ mod tests {
 		assert_eq!(shutdown.tally().draining, 2);
 
 		drop(left);
-		moq_clock::sleep(window).await;
+		kio::clock::sleep(window).await;
 		drop(straggler);
 
 		let tally = shutdown.tally();

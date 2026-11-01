@@ -15,8 +15,7 @@ categories = ["multimedia", "filesystem"]
 [dependencies]
 bytes = { workspace = true }
 futures = { workspace = true }
-kio = { workspace = true }
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-net = { workspace = true }
 object_store = { workspace = true }
 percent-encoding = { workspace = true }

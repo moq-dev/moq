@@ -1,7 +1,7 @@
 //! Low-level protocol logic for the QUIC protocol
 //!
 //! moq-quic has no networking code: the caller supplies transport timestamps, and address
-//! validation reads the ambient `moq-clock` wall time. Most applications use the Tokio driver
+//! validation reads the ambient `kio::clock` wall time. Most applications use the Tokio driver
 //! in `moq_tokio::quic::driver` instead.
 //!
 //! Use `moq_tokio::quic::driver` for Tokio, or drive this state machine from another runtime.
@@ -29,6 +29,10 @@ mod entropy;
 #[doc(hidden)]
 pub mod fuzz;
 mod range_set;
+// Not part of the public API: the network path the crate's tests and simulated drivers share.
+#[cfg(any(test, feature = "sim"))]
+#[doc(hidden)]
+pub mod sim;
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
 mod tests;
 pub mod transport_parameters;
@@ -89,7 +93,7 @@ use token_memory_cache::TokenMemoryCache;
 
 // Deal with time
 // MoQ's clock, so a caller-driven clock (a test's or the simulator's) reaches the state machine.
-pub(crate) use moq_clock::{Instant, Wall};
+pub(crate) use kio::clock::{Instant, Wall};
 pub(crate) use std::time::Duration;
 pub(crate) const UNIX_EPOCH: Wall = Wall::UNIX_EPOCH;
 

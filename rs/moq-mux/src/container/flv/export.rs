@@ -182,7 +182,7 @@ struct FlvTrack {
 	source: ExportSource,
 	pending: Option<crate::jitter::Arrival<Frame>>,
 	/// When the source was last empty, bounding the next frame's arrival.
-	empty: moq_clock::Instant,
+	empty: kio::clock::Instant,
 	finished: bool,
 	/// The FLV payload shape (legacy CodecID vs enhanced FourCC) to mux this
 	/// track as, fixed from its catalog codec when it's bound.
@@ -209,7 +209,7 @@ impl FlvTrack {
 	fn rebind(&mut self, source: ExportSource) {
 		self.source = source.continuing(&self.source);
 		self.finished = false;
-		self.empty = moq_clock::now();
+		self.empty = kio::clock::now();
 	}
 
 	/// The tag timestamp of a frame presented at `pts` on the tag clock, on the inferred clock.
@@ -226,7 +226,7 @@ impl FlvTrack {
 	fn start_group(
 		&mut self,
 		key: (u8, usize),
-		arrived: moq_clock::Instant,
+		arrived: kio::clock::Instant,
 		shift: u32,
 		jitter: &mut crate::jitter::Buffer<(u8, usize), Tag>,
 	) -> anyhow::Result<()> {
@@ -244,7 +244,7 @@ impl FlvTrack {
 	fn release(
 		&mut self,
 		key: (u8, usize),
-		settled: Option<moq_clock::Instant>,
+		settled: Option<kio::clock::Instant>,
 		shift: u32,
 		flush: bool,
 		jitter: &mut crate::jitter::Buffer<(u8, usize), Tag>,
@@ -446,7 +446,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	#[cfg(test)]
-	pub(super) fn next_deadline(&self) -> Option<moq_clock::Instant> {
+	pub(super) fn next_deadline(&self) -> Option<kio::clock::Instant> {
 		self.jitter.next_deadline()
 	}
 
@@ -499,7 +499,7 @@ impl<S: Stream> Export<S> {
 								break;
 							}
 							Poll::Pending => {
-								track.empty = moq_clock::now();
+								track.empty = kio::clock::now();
 								break;
 							}
 						};
@@ -509,7 +509,7 @@ impl<S: Stream> Export<S> {
 						}
 						crate::jitter::Arrival {
 							arrived: track.empty,
-							read: moq_clock::now(),
+							read: kio::clock::now(),
 							decode: frame.timestamp.into(),
 							restart: track.source.markers(),
 							sync: kind == 1 || frame.keyframe,
@@ -679,7 +679,7 @@ impl<S: Stream> Export<S> {
 				track_id,
 				source,
 				pending: None,
-				empty: moq_clock::now(),
+				empty: kio::clock::now(),
 				finished: false,
 				flavor,
 				fallback_description,
@@ -728,7 +728,7 @@ impl<S: Stream> Export<S> {
 				track_id,
 				source,
 				pending: None,
-				empty: moq_clock::now(),
+				empty: kio::clock::now(),
 				finished: false,
 				flavor,
 				fallback_description: None,

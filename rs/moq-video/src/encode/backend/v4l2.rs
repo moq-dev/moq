@@ -34,7 +34,7 @@
 //! from an implementation that also ran on a Pi Zero 2 W and a Pi 3; those two
 //! have not been re-run with this port.
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::collections::VecDeque;
 use std::time::Duration;
 
