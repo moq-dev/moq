@@ -32,4 +32,11 @@ export class Timeline {
 	at(timestamp: Micro, loop: number): Micro {
 		return (this.#zero + timestamp + loop * this.#duration) as Micro;
 	}
+
+	/** The file timestamp and pass due at the given wall clock time, the inverse of {@link at}. */
+	position(at: Micro): { timestamp: Micro; loop: number } {
+		const elapsed = Math.max(at - this.#zero, 0);
+		const loop = this.loops ? Math.floor(elapsed / this.#duration) : 0;
+		return { timestamp: (elapsed - loop * this.#duration) as Micro, loop };
+	}
 }
