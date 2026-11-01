@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { Instant, Milli, Nano, now, sleep, yieldNow } from "@moq/clock";
+import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as TrackProducer } from "../track.ts";
@@ -117,6 +117,8 @@ test("an idle track on a live connection claims nothing", async () => {
 });
 
 test("a connection samples the transport only while a reservation reads the estimate", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
 	let calls = 0;
 	const stub = function StubWebTransport() {
 		const pair = createMockTransportPair(Lite.ALPN_06, { stats: { estimatedSendRate: 2_000_000 } });
@@ -129,43 +131,48 @@ test("a connection samples the transport only while a reservation reads the esti
 		return pair.client;
 	};
 	globalThis.WebTransport = stub as unknown as typeof WebTransport;
-	const idle = async () => {
+	const advance = (ms: number) => clock.advance(Nano.fromMilli(Milli(ms)));
+	// Snapshots taken over 350 ms of manual time, enough for three 100 ms ticks.
+	const sampled = async () => {
 		const before = calls;
-		await sleep(Nano.fromMilli(Milli(350)));
+		await advance(350);
 		return calls - before;
 	};
 
 	const connection = new Connection({ url });
 	try {
-		await waitUntil(() => connection.status.peek() === "connected");
+		await advance(0);
+		expect(connection.status.peek()).toBe("connected");
 		const allocator = connection.allocator.peek();
 		if (!allocator) throw new Error("missing allocator");
 		// Connected with nothing reserved: no snapshots at all.
-		expect(await idle()).toBe(0);
+		expect(await sampled()).toBe(0);
 
 		const track = new TrackProducer("video").accept({ priority: 60 });
 		track.subscribe();
 		const first = allocator.reserve(track.demand(), 4_000_000);
-		await waitUntil(() => first.peek() === 2_000_000);
-		expect(await idle()).toBeGreaterThan(0);
+		await advance(0);
+		expect(first.peek()).toBe(2_000_000);
+		expect(await sampled()).toBe(3);
 
-		// A snapshot already in flight may land; nothing is scheduled after it.
 		first.close();
-		await sleep(Nano.fromMilli(Milli(50)));
-		expect(await idle()).toBe(0);
+		await advance(0);
+		expect(await sampled()).toBe(0);
 
 		// The estimate cleared with the last reservation, so the next reads nothing stale.
 		const second = allocator.reserve(track.demand(), 4_000_000);
 		expect(second.peek()).toBeUndefined();
-		await waitUntil(() => second.peek() === 2_000_000);
+		await advance(0);
+		expect(second.peek()).toBe(2_000_000);
 
 		// A closed track's reservation reads no slice, so it stops the sampling too.
 		track.close();
-		await sleep(Nano.fromMilli(Milli(50)));
-		expect(await idle()).toBe(0);
+		await advance(0);
+		expect(await sampled()).toBe(0);
 		second.close();
 	} finally {
 		connection.close();
+		installed.close();
 	}
 });
 
