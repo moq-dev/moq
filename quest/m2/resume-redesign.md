@@ -74,7 +74,7 @@ b9398f7459, 68c73349a3). Session copies under a front must stop caching for
 themselves and only feed the logical track.
 
 Land it in Rust first, then mirror `js/net` unless
-[rs2ts](/quest/m2/rs2ts/README.md) has replaced it. Extend
+[JS-only @moq/net](/quest/m2/rs2ts-js.md) has replaced it. Extend
 `benches/origin.rs` with the reader times flap sweep before starting, to
 measure the change.
 

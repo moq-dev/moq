@@ -2,7 +2,7 @@
 // SUBSCRIBE is answered, and the publisher keeps the track wanted until the subscriber closes it.
 
 import { describe, expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Elapsed, Milli, Nano, timeout } from "@moq/clock";
 import { randomHop } from "../hop.ts";
 import { Version as IetfVersion } from "../ietf/version.ts";
 import { createMockTransportPair } from "../mock.ts";
@@ -22,15 +22,13 @@ import { ALPN_05, Version } from "./version.ts";
 
 /** Whether `promise` settles within `ms`. */
 async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const pending = new Promise<false>((resolve) => {
-		timer = setTimeout(() => resolve(false), ms);
-	});
-	try {
-		return await Promise.race([promise.then(() => true), pending]);
-	} finally {
-		clearTimeout(timer);
-	}
+	return await timeout(Nano.fromMilli(Milli(ms)), promise).then(
+		() => true,
+		(error: unknown) => {
+			if (error instanceof Elapsed) return false;
+			throw error;
+		},
+	);
 }
 
 describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (version) => {

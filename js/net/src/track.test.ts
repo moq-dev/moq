@@ -1,5 +1,5 @@
-import { expect, setSystemTime, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { expect, spyOn, test } from "bun:test";
+import { Manual, Milli, Nano, sleep, Wall, yieldNow } from "@moq/clock";
 import { race } from "@moq/signals";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Decoder } from "./flate/decoder.ts";
@@ -41,7 +41,7 @@ test("a cached transport tail covers only positions it actually holds", async ()
 
 /** Let every pending microtask and timer callback run, so a parked read gets a turn. */
 function settle(): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, 0));
+	return yieldNow();
 }
 
 // A manual clock reading `initial` milliseconds. `set` moves it to an absolute time and fires
@@ -54,6 +54,7 @@ function manualTime(initial: number) {
 	return {
 		set: (ms: number) => clock.jump(to(ms)),
 		advance: (ms: number) => clock.advance(to(ms)),
+		stepWall: (ms: number) => clock.stepWall(Wall(ms)),
 		installed,
 	};
 }
@@ -1613,19 +1614,18 @@ test("retention pruning preserves clean EOF for a drained mirror", async () => {
 
 test("system clock changes do not affect the latency budget", async () => {
 	const clock = manualTime(10_000);
-	setSystemTime(new Date(10_000));
+	clock.stepWall(10_000);
 	try {
 		const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(100) });
 		const track = producer.subscribe({ maxDelay: Milli(100) });
 		producer.writeFrame(textFrame("old"));
 
-		setSystemTime(new Date(20_000));
+		clock.stepWall(20_000);
 		producer.writeFrame(textFrame("new"));
 
 		expect((await track.recvGroup())?.sequence).toBe(0);
 		expect((await track.recvGroup())?.sequence).toBe(1);
 	} finally {
-		setSystemTime();
 		clock.installed.close();
 	}
 });
@@ -1829,7 +1829,7 @@ test("withRange caps frame-level reads like the group cursor", async () => {
 
 	// Group 1 parks above the cap; a clean close must not resolve it as finished.
 	const parked = track.readFrame();
-	const timeout = new Promise((resolve) => setTimeout(() => resolve("pending"), 10));
+	const timeout = sleep(Nano.fromMilli(Milli(10))).then(() => "pending" as const);
 	expect(await Promise.race([parked, timeout])).toBe("pending");
 
 	// Raising the cap releases the parked group, frames intact.
@@ -1894,7 +1894,7 @@ test("withRange parks recvGroup beyond the cap and a raised cap re-offers", asyn
 	// A clean close keeps the parked group claimable: the cap may still rise.
 	producer.finish();
 	producer.close();
-	expect(await Promise.race([pending, new Promise((resolve) => setTimeout(() => resolve("parked"), 10))])).toBe(
+	expect(await Promise.race([pending, sleep(Nano.fromMilli(Milli(10))).then(() => "parked" as const)])).toBe(
 		"parked",
 	);
 
@@ -2091,7 +2091,7 @@ test("a closed track still delivers a group parked above the cap once the cap is
 	const parked = track.nextGroup();
 	producer.finish();
 	producer.close();
-	const timeout = new Promise((resolve) => setTimeout(() => resolve("pending"), 10));
+	const timeout = sleep(Nano.fromMilli(Milli(10))).then(() => "pending" as const);
 	expect(await Promise.race([parked, timeout])).toBe("pending");
 
 	// Raising the cap after close releases the buffered group, frames intact.
@@ -2144,13 +2144,13 @@ test("readFrame does not livelock when a sole group finishes before the next arr
 	g0.finish();
 
 	// The next group arrives via a macrotask; if the reader livelocks on microtasks it never runs.
-	setTimeout(() => {
+	void sleep(Nano.fromMilli(Milli(10))).then(() => {
 		const g1 = producer.appendGroup();
 		g1.writeFrame(textFrame("hello"));
 		g1.finish();
 		producer.finish();
 		producer.close();
-	}, 10);
+	});
 
 	expect(await track.readString()).toBe("hello");
 }, 2000);

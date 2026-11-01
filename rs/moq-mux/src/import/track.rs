@@ -919,7 +919,7 @@ mod tests {
 			.decode(&payload, Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
 
-		let frame = tokio::time::timeout(Duration::from_secs(1), media.read_frame())
+		let frame = kio::clock::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
@@ -1239,7 +1239,7 @@ mod tests {
 			.decode(&au, Some(Timestamp::from_micros(1_000).unwrap()))
 			.unwrap();
 
-		let frame = tokio::time::timeout(Duration::from_secs(1), media.read_frame())
+		let frame = kio::clock::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
@@ -1292,7 +1292,7 @@ mod tests {
 			track,
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 		);
-		tokio::time::timeout(Duration::from_secs(1), media.read_frame())
+		kio::clock::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.expect("a frame")
 			.unwrap()
