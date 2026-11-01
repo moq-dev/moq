@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import { FrameTooLarge, StreamCode, StreamError } from "./error.ts";
 import { encodable } from "./flate/group.ts";
@@ -752,7 +752,7 @@ test("a group that ends on its own abandons the replacement it asked for", async
 
 	route.set(1);
 	const read = consumer.readFrame();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	expect(signal?.aborted).toBe(false);
 
 	producer.finish();
@@ -860,7 +860,7 @@ test("a stalled group whose copy then fails asks again with the failure", async 
 
 	route.set(1);
 	const read = consumer.readFrame();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	producer.abort(new Error("route failed"));
 	await expect(read).rejects.toBe(verdict);
 });

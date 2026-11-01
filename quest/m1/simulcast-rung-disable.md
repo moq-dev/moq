@@ -42,5 +42,4 @@ its `moq_video_encode_options`.
 
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - the same rule in `js/publish`, probing with padding
 - [Ladder controller](/quest/m3/ladder/controller.md) - the same rung disable for generated transcode ladders
-- [OBS multitrack](/quest/m2/obs-multitrack.md) - OBS's native multitrack encoders as the renditions this disables
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - the viewer side of moving between renditions as capacity changes

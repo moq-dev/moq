@@ -31,7 +31,7 @@ moq-transport. What is left here is the wire:
 - Test a frame several times the cache window through a Rust relay, read
   as chunks, plus Rust/JS interop of a mid-frame refill. Run
   `just test interop --all`.
-- If [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) is adopted first,
+- If [JS-only @moq/net from Rust](/quest/m2/rs2ts-js.md) is adopted first,
   this shrinks to exposing its byte-offset recovery.
 
 Public API: none beyond the recovery. Wire: the lite wip byte offset, as
