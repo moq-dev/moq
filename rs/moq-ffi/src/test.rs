@@ -5821,7 +5821,9 @@ async fn server_client_run_end(version: &str) {
 		.publish_track("unfinished".into(), Some(timed_info()))
 		.unwrap();
 	let unfinished_consumer = bc.subscribe_track("unfinished".into(), None).await.unwrap();
-	unfinished.write_frame(group_frame(b"still live")).unwrap();
+	let group = unfinished.create_group(0).unwrap();
+	group.write_frame(group_frame(b"still live")).unwrap();
+	group.finish().unwrap();
 	assert_eq!(
 		moq_clock::timeout(TIMEOUT, unfinished_consumer.read_frame())
 			.await
@@ -5877,13 +5879,19 @@ async fn server_client_run_end(version: &str) {
 		"{version}: finished media did not end cleanly"
 	);
 	broadcast.close().unwrap();
-	assert!(
-		moq_clock::timeout(TIMEOUT, unfinished_consumer.read_frame())
-			.await
-			.expect("unfinished track end timed out")
-			.is_err(),
-		"{version}: withdrawal falsely declared the unfinished track complete"
-	);
+	let Err(error) = moq_clock::timeout(TIMEOUT, unfinished_consumer.read_frame())
+		.await
+		.expect("unfinished track end timed out")
+	else {
+		panic!("withdrawal falsely declared the unfinished track complete");
+	};
+	if version == "moq-lite-07-wip" {
+		assert_protocol(&error, crate::error::MoqErrorScope::Stream, MoqProtocolKind::Unroutable);
+	} else {
+		// The IETF PUBLISH_DONE registry cannot carry Unroutable, so the publisher sends
+		// INTERNAL_ERROR. This is the remaining run-end divergence, not a clean EOF.
+		assert!(matches!(error, MoqError::Internal { .. }), "{version}: {error:?}");
+	}
 	while moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("catalog end timed out")
