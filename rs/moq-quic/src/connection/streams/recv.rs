@@ -113,6 +113,24 @@ impl Stream<'_> {
 
 		Ok(Some(code))
 	}
+
+	/// [`Self::received_reset`], or wait for the peer to reset the stream
+	///
+	/// Pending registers `waiter` until data, a FIN, or a reset arrives, after which the answer
+	/// may still be no reset. Fails with [`Error::Closed`] once the stream is gone, as when every
+	/// byte up to a FIN was read, and with [`Error::ConnectionLost`] once the connection is lost
+	/// without a reset.
+	pub fn poll_received_reset(&mut self, waiter: &kio::Waiter) -> Poll<Result<VarInt, Error>> {
+		match self.received_reset() {
+			Ok(Some(code)) => Poll::Ready(Ok(code)),
+			Err(err) => Poll::Ready(Err(err)),
+			Ok(None) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
+			Ok(None) => {
+				self.state.waits.register(self.id, Wait::Read, waiter);
+				Poll::Pending
+			}
+		}
+	}
 }
 
 #[derive(Debug, Default)]
