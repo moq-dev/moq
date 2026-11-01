@@ -5,7 +5,7 @@ import type { Slot } from "./publication";
 /** The media kind of a rendition, selecting its catalog section (`video`, `audio`, or `text`). */
 export type Kind = "video" | "audio" | "text";
 
-/** Register a handle whose track and teardown belong to its broadcast. */
+/** @internal Register a handle whose track and teardown belong to its broadcast. */
 export let makeRendition: <Config>(
 	name: string,
 	kind: Kind,
