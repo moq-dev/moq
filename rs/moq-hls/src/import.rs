@@ -710,7 +710,8 @@ pub struct Import {
 impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
 	///
-	/// Installs rind's rustls provider as the process default unless one already is.
+	/// For an HTTP playlist, installs rind's rustls provider as the process default unless one
+	/// already is. A file playlist builds no HTTP client, so it installs none.
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let fetcher = Fetcher::new(&cfg)?;
 		Ok(Self {
