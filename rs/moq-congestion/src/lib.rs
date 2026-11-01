@@ -15,11 +15,13 @@ mod bbr3;
 mod cubic;
 mod pacer;
 mod rate;
+mod scream;
 mod unlimited;
 
 pub use bbr3::{Bbr3, Bbr3Config};
 pub use cubic::{Cubic, CubicConfig};
 pub use rate::Packet;
+pub use scream::{Scream, ScreamConfig};
 pub use unlimited::Unlimited;
 
 /// Common interface for different congestion controllers

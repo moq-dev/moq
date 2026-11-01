@@ -56,6 +56,13 @@ spike assumed no consumer; teleoperation uplinks are one):
   upgrading `Delay`, so current users see no behavior change.
 - Docs: inline only. The congestion-control lines in `doc/bin/cli.md` and
   `doc/lib/*` gain the new variant; no new page.
+- SCReAMv2 landed as `moq_congestion::Scream`
+  ([moq-dev/moq#7547](https://github.com/moq-dev/moq/pull/7547)). moq-quic's
+  `tests::scream` measures it on the sim beside BBR3, and moq-tokio's
+  `scream` integration tests over the real presets. Its estimate is a window
+  over the RTT rather than a delivery rate: under application-limited media,
+  each keyframe's burst raises it past the path's capacity, which matters
+  for re-enabling a rung.
 
 Remaining work once the candidates finish (this README's own job):
 
@@ -86,7 +93,6 @@ owns that feedback.
 
 - [GCC candidate](/quest/m2/quic-realtime/gcc.md) - libwebrtc's GoogCC vendored into `moq-congestion` and refreshed to current WebRTC
 - [BBR3 delay bound](/quest/m2/quic-realtime/bbr-delay-bound.md) - BBR3 with inflight capped when the forward delay gradient shows queue growth
-- [SCReAMv2 candidate](/quest/m2/quic-realtime/scream.md) - the RFC 8298bis delay path ported to `moq-congestion`
 - [moqsink encoder feedback](/quest/m2/quic-realtime/moqsink-feedback.md) - GStreamer publishers retune their encoder to the target rate
 
 ## Related
