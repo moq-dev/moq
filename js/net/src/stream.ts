@@ -449,6 +449,26 @@ export class Reader {
 		return this.decode((c) => c.read(size));
 	}
 
+	/**
+	 * Read between 1 and `max` bytes as they arrive, without joining them into one buffer, so
+	 * a payload of any size streams through. Throws {@link UnexpectedEnd} at a clean end.
+	 */
+	async readChunk(max: number): Promise<Uint8Array> {
+		if (this.#buffer.byteLength === 0 && this.#chunked === 0 && !(await this.#fill())) throw new UnexpectedEnd();
+		// What a decode ran short of is measured from bytes this consumes.
+		this.#short = undefined;
+		if (this.#buffer.byteLength > 0) return this.#slice(Math.min(max, this.#buffer.byteLength));
+		const chunk = this.#chunks[0];
+		if (chunk.byteLength <= max) {
+			this.#chunks.shift();
+			this.#chunked -= chunk.byteLength;
+			return chunk;
+		}
+		this.#chunks[0] = chunk.subarray(max);
+		this.#chunked -= max;
+		return chunk.subarray(0, max);
+	}
+
 	async readAll(): Promise<Uint8Array> {
 		while (await this.#fill()) {
 			// keep going
