@@ -24,6 +24,22 @@ pub use muxer::*;
 /// A major version bump of `mp4_atom` is a breaking change for moq-mux.
 pub use mp4_atom;
 
+/// The most input [`Import`] holds whole: a `moov` or `moof` body, or one text sample.
+///
+/// Metadata parses and text rewrites only once their last byte arrives, so a larger declaration
+/// is refused at its header rather than retaining later input (across HLS segments, too) until
+/// it completes. It matches the transport's per-group bound,
+/// [`MAX_CACHE_BYTES`](moq_net::group::MAX_CACHE_BYTES). Real fMP4 metadata is kilobytes. Media
+/// samples stream into their frames and have no such bound.
+pub const MAX_HELD_BYTES: usize = moq_net::group::MAX_CACHE_BYTES as usize;
+
+/// The most samples [`Import`] plans for one `moof`.
+///
+/// Every sample's byte range is resolved before any of the fragment publishes. A `moof` at
+/// [`MAX_HELD_BYTES`] holds this many 16-byte `trun` entries; a run without per-sample fields
+/// could otherwise declare billions of samples in a few bytes.
+pub const MAX_FRAGMENT_SAMPLES: u64 = (MAX_HELD_BYTES / 16) as u64;
+
 #[cfg(test)]
 mod export_test;
 #[cfg(test)]
@@ -190,6 +206,31 @@ pub enum Error {
 	/// The fragment data offset cannot address its sample data.
 	#[error("invalid data offset")]
 	InvalidDataOffset,
+
+	/// Streaming import requires each track's sample bytes in decode order.
+	#[error("backwards per-track data offset is unsupported for streaming import")]
+	BackwardsDataOffset,
+
+	/// A `moov` or `moof` must be held whole before it parses, so one declaring more than
+	/// [`MAX_HELD_BYTES`] is refused at its header, before any of its body is buffered.
+	#[error("{kind} declares {size} bytes, more than the {MAX_HELD_BYTES} an importer holds")]
+	MetadataTooLarge {
+		/// The box type.
+		kind: mp4_atom::FourCC,
+		/// The body size its header declares.
+		size: usize,
+	},
+
+	/// A text sample is rewritten whole, so one larger than [`MAX_HELD_BYTES`] is refused
+	/// before any of its bytes are staged.
+	#[error("text sample of {0} bytes is more than the {MAX_HELD_BYTES} an importer holds")]
+	TextSampleTooLarge(usize),
+
+	/// A fragment's samples are planned before any of them publish, so a `moof` declaring more
+	/// than [`MAX_FRAGMENT_SAMPLES`] is refused. A `trun` without per-sample fields declares its
+	/// count in four bytes, so the byte bound alone does not limit it.
+	#[error("moof declares {0} samples, more than the {MAX_FRAGMENT_SAMPLES} an importer plans")]
+	TooManySamples(u64),
 
 	/// Absolute file offsets cannot be resolved in a standalone fragment.
 	#[error("absolute base_data_offset is unsupported; use moof-relative offsets")]

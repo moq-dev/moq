@@ -639,7 +639,7 @@ mod tests {
 
 		fn broadcaster(&self) -> Broadcaster {
 			let source = moq_mux::Source::new(self.origin.consume(), self.broadcast.consume());
-			let (broadcaster, driver) = Broadcaster::new(source, moq_hls::export::Config::default());
+			let (broadcaster, driver) = Broadcaster::new(source, moq_hls::export::Config::default()).unwrap();
 			tokio::spawn(driver.run());
 			broadcaster
 		}
