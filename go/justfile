@@ -20,6 +20,10 @@ check:
 fix:
     gofmt -w . ../sh/go
 
+# Check the staged modules against the Go vulnerability database. Nightly: advisories land without a diff.
+audit:
+    bash ../sh/go/audit.sh
+
 # Release recipes run in the caller's directory, so a relative `--output` or
 # `--tarball` means what it would to the script itself.
 

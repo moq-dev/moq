@@ -4,7 +4,6 @@
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -100,26 +99,11 @@ def selection(root, paths):
             selected = expanded
         selected |= benched
 
-    # A selected consumer can need an unchanged dependency's generated bindings.
-    dependencies = set(selected)
-    while True:
-        expanded = dependencies | {
-            dep
-            for name in dependencies
-            for field in DEPENDENCIES
-            for dep in packages[name]["manifest"].get(field, {})
-            if dep in packages
-        }
-        if expanded == dependencies:
-            break
-        dependencies = expanded
-
     return {
         "packages": {name: packages[name] for name in sorted(selected)},
         "workspaces": [p["directory"] for p in packages.values()],
         "inputs": sorted(set().union(*(p["inputs"] for p in packages.values()))),
         "all": fallback,
-        "wasm": "@moq/wasm" in dependencies,
     }
 
 
@@ -145,11 +129,6 @@ def run(action, plan):
 
     def command(*args, cwd=ROOT):
         subprocess.run(args, cwd=cwd, check=True)
-
-    if action == "check" and plan["wasm"]:
-        missing = [tool for tool in ("cargo", "wasm-bindgen") if not shutil.which(tool)]
-        if missing:
-            raise RuntimeError("selected JS consumers require missing tools: " + " ".join(missing))
 
     def scripts(verb):
         filters = [
@@ -183,7 +162,6 @@ def run(action, plan):
         scripts("test")
         return
     if action == "build":
-        # No build script reads the WASM bindings, and `just js wasm` builds them.
         scripts("build")
         reports()
         return
@@ -209,8 +187,6 @@ def run(action, plan):
         raise RuntimeError("import.meta.env scan found a reference or failed")
     command("python3", "sh/js/playwright.py")
     command("bun", "js/common/deps.ts")
-    if plan["wasm"]:
-        command("just", "js", "wasm", "dev")
     scripts("check")
     if plan["all"]:
         command("bunx", "tsc", "--noEmit", "--project", "test/tsconfig.json")
