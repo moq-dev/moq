@@ -70,7 +70,6 @@ fn ietf_range_updates_interop() {
 			authorization_token: None,
 			new_group: None,
 			max_age: None,
-			epoch: None,
 		}
 		.encode(&mut w, version)
 		.unwrap();
@@ -640,7 +639,6 @@ fn ietf_track_status_interop() {
 				track_namespace: crate::Path::new(namespace).unwrap(),
 				track_name: "video".into(),
 				properties_wanted: wanted,
-				epoch: None,
 			}
 			.encode(&mut w, version)
 			.unwrap();
