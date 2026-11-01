@@ -766,8 +766,8 @@ impl Fill {
 	/// after it. The reader's range then starts there, once that group's first frame is
 	/// written.
 	///
-	/// A lookup owes no group, so [`next`](Self::next) is `None` and [`is_wanted`](Self::is_wanted)
-	/// false throughout; it waits only on its first accept, while [`is_used`](Self::is_used).
+	/// A lookup owes no group, so [`wanted`](Self::wanted) is `None` and
+	/// [`is_wanted`](Self::is_wanted) false throughout; it waits only on its first accept.
 	/// Dropped unanswered, as a handler that can't resolve times does, the reader's range
 	/// reaches back to the oldest group the cache holds. `None` for a fill of groups.
 	pub fn time(&self) -> Option<Timestamp> {

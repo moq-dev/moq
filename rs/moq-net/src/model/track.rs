@@ -19289,7 +19289,7 @@ mod test {
 			(lookup.time(), lookup.start().group, lookup.end()),
 			(Some(at(5)), 0, 10)
 		);
-		assert_eq!(lookup.next(), None, "a lookup owes no group");
+		assert_eq!(lookup.wanted(), None, "a lookup owes no group");
 		drop(lookup);
 		let mut read = drain_groups(&mut subscriber);
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
@@ -19346,7 +19346,7 @@ mod test {
 		// One group at a time past the start, until one starts after the end.
 		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
 			assert_eq!(fill.time(), None);
-			while let Some(sequence) = fill.next() {
+			while let Some(sequence) = fill.wanted() {
 				assert!(sequence >= 5, "group {sequence} is below the looked-up start");
 				write_filled(fill.accept(sequence, None), sequence);
 			}
@@ -19385,7 +19385,7 @@ mod test {
 		drop(lookup);
 		let mut read = drain_groups(&mut subscriber);
 		while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) {
-			while let Some(sequence) = fill.next() {
+			while let Some(sequence) = fill.wanted() {
 				write_filled(fill.accept(sequence, None), sequence);
 			}
 			drop(fill);

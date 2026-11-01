@@ -196,7 +196,7 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill:
 
 	// Newest first: only a group whose first frame an object holds says where it starts.
 	for (start, path) in around {
-		let Some(object) = load(shared, index, fill, start, &path, timed).await else {
+		let Some(object) = load(shared, index, start, &path, timed).await else {
 			return;
 		};
 		let found = object
@@ -223,7 +223,7 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill:
 	// one whose head was pruned, which can't be served from its first frame.
 	let mut next = index.lock().unwrap().after(None);
 	while let Some((start, path)) = next {
-		let Some(object) = load(shared, index, fill, start, &path, timed).await else {
+		let Some(object) = load(shared, index, start, &path, timed).await else {
 			return;
 		};
 		let found = object
@@ -245,21 +245,20 @@ async fn look_up<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, fill:
 	}
 }
 
-/// The object a lookup searches, `None` once nobody waits on the lookup or the store failed.
+/// The object a lookup searches, `None` once the store failed.
+///
+/// An abandoned lookup still finishes the read and answers nobody: a lookup owes no group, so
+/// nothing tells it when its readers stop waiting.
 async fn load<S: ObjectStore>(
 	shared: &Shared<S>,
 	index: &Mutex<Index>,
-	fill: &Fill,
 	start: (u64, u64),
 	path: &object_store::path::Path,
 	timed: bool,
 ) -> Option<Arc<Object>> {
-	let unused = std::pin::pin!(fill.unused());
-	let load = std::pin::pin!(super::object(shared, path, start, timed));
-	match future::select(unused, load).await {
-		Either::Left(_) => None,
-		Either::Right((Ok(object), _)) => Some(object),
-		Either::Right((Err(err), _)) => {
+	match super::object(shared, path, start, timed).await {
+		Ok(object) => Some(object),
+		Err(err) => {
 			if let Error::NotFound(_) = err {
 				// Pruned since it was listed.
 				index.lock().unwrap().forget(start);
@@ -280,22 +279,22 @@ async fn serve_group<S: ObjectStore>(shared: &Shared<S>, index: &Mutex<Index>, f
 		(holding, after, index.timed(), index.timescale)
 	};
 	let next = after.map_or(u64::MAX, |start| start.0);
-	// A lookup owes no group, so it waits on its readers rather than on this one's.
+	// A lookup owes no group, so nothing says when its readers stop waiting: it finishes the read.
 	let lookup = fill.time().is_some();
 
 	let mut objects = Vec::with_capacity(holding.len());
 	for (start, path) in &holding {
-		let unwanted = std::pin::pin!(async {
-			match lookup {
-				true => fill.unused().await,
-				false => fill.unwanted(sequence).await,
+		let load = super::object(shared, path, *start, timed);
+		let loaded = match lookup {
+			true => load.await,
+			false => {
+				let unwanted = std::pin::pin!(fill.unwanted(sequence));
+				match future::select(unwanted, std::pin::pin!(load)).await {
+					// Every reader narrowed past it: the fill moves on to the groups it still owes.
+					Either::Left(_) => return,
+					Either::Right((loaded, _)) => loaded,
+				}
 			}
-		});
-		let load = std::pin::pin!(super::object(shared, path, *start, timed));
-		let loaded = match future::select(unwanted, load).await {
-			// Every reader narrowed past it: the fill moves on to the groups it still owes.
-			Either::Left(_) => return,
-			Either::Right((loaded, _)) => loaded,
 		};
 		match loaded {
 			Ok(object) => objects.push(object),
