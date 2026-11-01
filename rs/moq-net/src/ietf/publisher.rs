@@ -736,6 +736,11 @@ impl Served {
 			Self::Track(Err(Error::Expired | Error::Session(crate::SessionError::Expired))) => {
 				(ietf::PublishDoneStatus::Unauthorized, "token expired")
 			}
+			// The code its group streams reset with, so a relay passes a malformed upstream on
+			// rather than hiding it behind INTERNAL_ERROR.
+			Self::Track(Err(err)) if crate::StreamError::from(err) == crate::StreamError::MalformedTrack => {
+				(ietf::PublishDoneStatus::MalformedTrack, "malformed track")
+			}
 			Self::Track(Err(_)) => (ietf::PublishDoneStatus::InternalError, "internal error"),
 			Self::UpdateFailed(_) | Self::RenewalRefused(_) => (ietf::PublishDoneStatus::UpdateFailed, "update failed"),
 			// Pausing ends no subscription, so nothing reports it.
@@ -7363,6 +7368,33 @@ mod serve_tests {
 		assert_eq!(wire.data.len(), 2, "a group stream and a fill stream");
 		wire.assert_streams_closed_before_publish_done();
 		drop(group);
+	}
+
+	/// A track aborted as malformed, as a relay does over an upstream's unstamped object on a
+	/// timed track, ends each subscription with PUBLISH_DONE(MALFORMED_TRACK), on either draft.
+	/// A moq-lite or JS upstream's MALFORMED_TRACK reset says the same.
+	#[kio::test]
+	async fn publish_done_after_a_malformed_track_says_so() {
+		for version in [Version::Draft18, Version::Draft22] {
+			for err in [Error::MalformedTrack, Error::Stream(crate::StreamError::MalformedTrack)] {
+				let h = serve(version);
+				let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+					.await
+					.unwrap();
+				let msg = subscribe(Filter::NextObject, None);
+				let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+				serve_until(serve.as_mut(), "SUBSCRIBE_OK was sent", || !h.log.trail().is_empty()).await;
+
+				h.track.abort(err.clone()).unwrap();
+				kio::clock::timeout(std::time::Duration::from_secs(10), serve)
+					.await
+					.expect("the malformed track ends the subscription")
+					.ok();
+
+				let (status, _) = Wire::read(&h.log, version).publish_done.expect("PUBLISH_DONE was sent");
+				assert_eq!(status, 0x12, "{version:?} {err:?}");
+			}
+		}
 	}
 
 	/// A subscription that runs to the track's end counts every data stream it opened,
