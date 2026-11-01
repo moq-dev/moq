@@ -264,11 +264,6 @@ fn tungstenite_text_to_axum(text: tungstenite::Utf8Bytes) -> axum::extract::ws::
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 	use axum::{Router, extract::WebSocketUpgrade, routing::any};
@@ -515,7 +510,7 @@ mod tests {
 		// past it, so the headers and body stay in the socket.
 		let mut stream = BufReader::new(stream);
 		let mut status = Vec::new();
-		tokio::time::timeout(Duration::from_secs(5), stream.read_until(b'\n', &mut status))
+		moq_clock::timeout(Duration::from_secs(5), stream.read_until(b'\n', &mut status))
 			.await
 			.expect("server did not respond")
 			.expect("read response");
@@ -604,7 +599,7 @@ mod tests {
 	}
 
 	async fn next_observed(rx: &mut mpsc::UnboundedReceiver<Observed>) -> Observed {
-		tokio::time::timeout(Duration::from_secs(5), rx.recv())
+		moq_clock::timeout(Duration::from_secs(5), rx.recv())
 			.await
 			.expect("server did not report a connection")
 			.expect("server channel closed")
@@ -806,11 +801,11 @@ mod tests {
 
 		// Paused time only advances once every task is idle, so this resolves
 		// exactly when both ends have settled.
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		frozen.store(true, Ordering::Relaxed);
 
 		// Generous versus the 30s deadline: this asserts termination, not timing.
-		tokio::time::timeout(Duration::from_secs(300), server)
+		moq_clock::timeout(Duration::from_secs(300), server)
 			.await
 			.expect("a silent WebSocket peer must be reaped by the keep-alive")
 			.expect("server task panicked")
@@ -839,7 +834,7 @@ mod tests {
 		);
 		options.link.alpn = Some(alpn.clone());
 		options.timeout = Some(timeout);
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let server = tokio::spawn(moq_tokio::websocket::accept(
 			Pipe::new(server_incoming, server_to_client, Arc::new(AtomicBool::new(false))),
 			options,

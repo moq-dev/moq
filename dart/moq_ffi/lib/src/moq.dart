@@ -8,9 +8,7 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
-
 import "package:ffi/ffi.dart";
-
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -20927,7 +20925,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_func_moq_mint_epoch() != 34550) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_func_moq_client_defaults() != 39302) {
+  if (uniffi_moq_ffi_checksum_func_moq_client_defaults() != 15294) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_func_moq_qlog_supported() != 58291) {
@@ -21438,7 +21436,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqclient_cancel() != 29949) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqclient_connect() != 5016) {
+  if (uniffi_moq_ffi_checksum_method_moqclient_connect() != 11393) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_allocator() != 12118) {
@@ -21474,7 +21472,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqsession_stats() != 36396) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqsession_tokens() != 2396) {
+  if (uniffi_moq_ffi_checksum_method_moqsession_tokens() != 44247) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtokens_answered() != 11571) {

@@ -7,6 +7,7 @@ use std::collections::{HashMap, HashSet};
 use super::{Error, Kind, edit::Edit, sample};
 use crate::Result;
 use crate::catalog::Estimator;
+use crate::container::producer::Streamed;
 
 /// Imports fragmented MP4 (fMP4/CMAF) into a MoQ broadcast.
 ///
@@ -961,18 +962,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			}
 			mp4_atom::Codec::Opus(opus) => {
 				// dOps carries the OpusHead fields in ISOBMFF byte order; republish them as the
-				// OpusHead description so decoders apply its pre-skip and gain. The head built here
-				// is family 0, so refuse a mapping table rather than drop it.
+				// OpusHead description so decoders apply its pre-skip, gain, and channel mapping.
 				let dops = &opus.dops;
-				if let Some(mapping) = &dops.channel_mapping {
-					return Err(
-						Error::Opus(crate::codec::opus::Error::UnsupportedMappingFamily(mapping.family)).into(),
-					);
-				}
 				let mut head =
 					crate::codec::opus::Config::new(dops.input_sample_rate, dops.output_channel_count as u32)
 						.with_pre_skip(dops.pre_skip);
 				head.output_gain = dops.output_gain;
+				head.mapping = dops.channel_mapping.as_ref().map(super::opus_mapping).transpose()?;
 
 				// The shared conversion sets the decoder's 48 kHz output rate and Opus warmup,
 				// whatever the sample entry or the informational input rate claims.
@@ -1167,7 +1163,6 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				placement,
 				prefix,
 				writer: None,
-				frame: None,
 				opened: false,
 			});
 		}
@@ -1219,21 +1214,19 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 							pending.placement.new_segment = track.segment != Some(self.segment);
 							pending.placement.declared = pending.placement.new_segment && self.declared;
 						}
-						let (writer, frame, opened) = match &mut track.output {
+						let (writer, opened) = match &mut track.output {
 							Output::Passthrough(output) => {
 								let prefix = pending.prefix.take().expect("one prefix per fragment");
 								let (writer, opened) =
 									output.start(prefix, &pending.run, track.kind, pending.placement)?;
-								(writer, None, opened)
+								(Writer::Fragment(writer), opened)
 							}
 							output => {
-								let (writer, frame, opened) =
-									start_sample(output, pending, *sample_index, track.timescale)?;
-								(writer, Some(frame), opened)
+								let (sample, opened) = open_sample(output, pending, *sample_index, track.timescale)?;
+								(Writer::Sample(sample), opened)
 							}
 						};
 						pending.writer = Some(writer);
-						pending.frame = frame;
 						if opened {
 							pending.opened = true;
 							track.segment = Some(self.segment);
@@ -1244,15 +1237,17 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						let last = *sample_index + 1 == pending.run.samples.len();
 						match &mut track.output {
 							Output::Passthrough(output) if last => {
-								output.complete(pending.writer.take().expect("opened writer"), pending, track.kind)?;
+								let Some(Writer::Fragment(writer)) = pending.writer.take() else {
+									unreachable!("passthrough tracks write whole fragments");
+								};
+								output.complete(writer, pending, track.kind)?;
 							}
 							Output::Passthrough(_) => {}
 							output => media!(output, producer => {
-								producer.finish_sample(
-									pending.writer.take().expect("opened writer"),
-									pending.frame.as_ref().expect("unwrapped sample"),
-									pending.run.samples[*sample_index].range.len(),
-								)?;
+								let Some(Writer::Sample(sample)) = pending.writer.take() else {
+									unreachable!("unwrapped tracks write one frame per sample");
+								};
+								producer.commit(sample)?;
 								if last {
 									producer.burst(pending.run.end.checked_sub(pending.run.earliest)?.into())?;
 								}
@@ -1295,8 +1290,12 @@ struct Mdat {
 impl Mdat {
 	fn abort(&mut self, err: moq_net::Error) {
 		for pending in &mut self.tracks {
-			if let Some(writer) = pending.writer.take() {
-				let _ = writer.abort(err.clone());
+			match pending.writer.take() {
+				Some(Writer::Fragment(writer)) => {
+					let _ = writer.abort(err.clone());
+				}
+				Some(Writer::Sample(sample)) => sample.abort(err.clone()),
+				None => {}
 			}
 		}
 	}
@@ -1308,9 +1307,26 @@ struct PendingTrack {
 	run: Run,
 	placement: Placement,
 	prefix: Option<Bytes>,
-	writer: Option<moq_net::frame::Producer>,
-	frame: Option<crate::container::Frame>,
+	writer: Option<Writer>,
 	opened: bool,
+}
+
+/// The output frame a track's payload streams into.
+enum Writer {
+	/// A passthrough track's whole per-track fragment.
+	Fragment(moq_net::frame::Producer),
+	/// One unwrapped sample.
+	Sample(Streamed),
+}
+
+impl Writer {
+	fn write(&mut self, chunk: &[u8]) -> crate::Result<()> {
+		match self {
+			Self::Fragment(writer) => writer.write(chunk)?,
+			Self::Sample(sample) => sample.write(chunk)?,
+		}
+		Ok(())
+	}
 }
 
 struct Chunk {
@@ -1644,13 +1660,13 @@ impl<E: crate::catalog::hang::CatalogExt> Passthrough<E> {
 	}
 }
 
-/// Open one sample's Legacy frame without retaining its payload in the importer.
-fn start_sample<E: crate::catalog::hang::CatalogExt>(
+/// Open one sample's frame without retaining its payload in the importer.
+fn open_sample<E: crate::catalog::hang::CatalogExt>(
 	output: &mut Output<E>,
 	pending: &PendingTrack,
 	index: usize,
 	timescale: moq_net::Timescale,
-) -> Result<(moq_net::frame::Producer, crate::container::Frame, bool)> {
+) -> Result<(Streamed, bool)> {
 	let kind = if matches!(output, Output::Video(_)) {
 		Kind::Video
 	} else {
@@ -1670,14 +1686,10 @@ fn start_sample<E: crate::catalog::hang::CatalogExt>(
 		if sample.pts > sample.dts {
 			producer.reorder(Timestamp::new(sample.pts - sample.dts, timescale)?);
 		}
-		let frame = crate::container::Frame {
-			timestamp: placement.offset.apply(sample.timestamp)?,
-			payload: Bytes::new(),
-			keyframe,
-			duration: sample.duration.map(|duration| Timestamp::new(duration as u64, timescale)).transpose()?,
-		};
-		let writer = producer.start_sample(&frame, sample.range.len())?;
-		Ok((writer, frame, keyframe))
+		let timestamp = placement.offset.apply(sample.timestamp)?;
+		let duration = sample.duration.map(|duration| Timestamp::new(duration as u64, timescale)).transpose()?;
+		let streamed = producer.open(timestamp, keyframe, duration, sample.range.len())?;
+		Ok((streamed, keyframe))
 	}, _ => unreachable!("passthrough tracks write whole fragments"))
 }
 
