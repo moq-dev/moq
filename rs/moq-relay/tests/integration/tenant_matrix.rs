@@ -175,7 +175,7 @@ impl Running {
 
 	async fn stop(self) {
 		self.trigger.start();
-		tokio::time::timeout(TIMEOUT, self.running)
+		kio::clock::timeout(TIMEOUT, self.running)
 			.await
 			.expect("run did not return after the shutdown trigger")
 			.expect("run panicked")
@@ -193,7 +193,7 @@ struct Publisher {
 impl Publisher {
 	async fn connect(url: url::Url) -> Self {
 		let origin = moq_tokio::origin::spawn();
-		let session = tokio::time::timeout(
+		let session = kio::clock::timeout(
 			TIMEOUT,
 			client()
 				.with_publisher(origin.consume())
@@ -237,7 +237,7 @@ impl Watcher {
 		let origin = moq_tokio::origin::spawn();
 		let consumer = origin.consume();
 		let mut announced = consumer.announced();
-		let session = tokio::time::timeout(
+		let session = kio::clock::timeout(
 			TIMEOUT,
 			client()
 				.with_subscriber(origin)
@@ -278,7 +278,7 @@ impl Watcher {
 
 	/// Wait until `name` is announced.
 	async fn announced(&self, name: &str) {
-		tokio::time::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			loop {
 				let changed = self.changed.notified();
 				if self.seen().iter().any(|seen| seen == name) {
@@ -293,7 +293,7 @@ impl Watcher {
 
 	/// Read the first frame of `name`'s `video` track.
 	async fn read(&self, name: &str) -> bytes::Bytes {
-		tokio::time::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			let broadcast = self.consumer.request(name, None).await.expect("broadcast resolves");
 			let mut track = broadcast
 				.track("video")
@@ -384,7 +384,7 @@ async fn matrix(io_uring: bool) {
 	// anything under `tenant-a`.
 	let target = "/tenant-a/../tenant-b?jwt=b";
 	let (endpoint, conn) = raw_setup(relay.quic, target).await;
-	let decided = tokio::time::timeout(TIMEOUT, async {
+	let decided = kio::clock::timeout(TIMEOUT, async {
 		loop {
 			if relay.tenants.connects("b").len() > 2 {
 				return;
@@ -392,7 +392,7 @@ async fn matrix(io_uring: bool) {
 			if conn.close_reason().is_some() {
 				return;
 			}
-			tokio::time::sleep(Duration::from_millis(20)).await;
+			kio::clock::sleep(Duration::from_millis(20)).await;
 		}
 	})
 	.await;
@@ -410,7 +410,7 @@ async fn matrix(io_uring: bool) {
 	endpoint.close(driver::VarInt::from_u32(0), "done").await;
 
 	// Give anything that should not arrive time to.
-	tokio::time::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 	let a_seen = a_view.seen();
 	assert!(
 		!a_seen
@@ -432,7 +432,7 @@ async fn matrix(io_uring: bool) {
 	// 7. Moving a live session's root from `tenant-b` to `tenant-a` closes it.
 	relay.tenants.grant("b", tenant_a());
 	relay.revalidate().await;
-	let error = tokio::time::timeout(TIMEOUT, b_view.session.closed())
+	let error = kio::clock::timeout(TIMEOUT, b_view.session.closed())
 		.await
 		.expect("a moved root must close the session")
 		.expect_err("a moved root is a refusal");
@@ -493,7 +493,7 @@ async fn http_routes_keep_tenants_apart() {
 	// A fetch waits up to 30 seconds for its broadcast to appear. A's secret is
 	// already here, so a fetch that would serve it answers at once; one still
 	// waiting has served nothing.
-	if let Ok(fetch) = tokio::time::timeout(Duration::from_secs(2), get("/fetch/tenant-a/secret/cam/video?jwt=b")).await
+	if let Ok(fetch) = kio::clock::timeout(Duration::from_secs(2), get("/fetch/tenant-a/secret/cam/video?jwt=b")).await
 	{
 		assert_ne!(fetch.expect("fetch request").status(), 200, "B fetched A's secret");
 	}
