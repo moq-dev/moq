@@ -2095,8 +2095,9 @@ pub extern "C" fn moq_origin_requests_cancel(dynamic: u32) -> i32 {
 
 /// The path of a broadcast request delivered to a [moq_origin_requests] callback.
 ///
-/// The destination borrows the request's storage: copy it out before accept,
-/// reject, or [moq_broadcast_request_free].
+/// The destination borrows the request's storage: copy it out before
+/// [moq_broadcast_request_serve], [moq_broadcast_request_prepare],
+/// [moq_broadcast_request_reject], or [moq_broadcast_request_free].
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

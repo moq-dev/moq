@@ -134,6 +134,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 
 `origin.dynamic_(prefix:)` takes no route, and `update` is gone.
 Replace `request.accept(broadcast:)` with `request.prepare(epoch: mintEpoch())`, which returns a `BroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
+To answer with a broadcast you already hold, `request.serve(broadcast: producer.consume())` serves it under the prefix route without announcing an exact route.
 
 ### Anchors can name a time (#6074)
 
