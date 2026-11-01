@@ -3,6 +3,7 @@
 mod ietf_conformance;
 mod refresh;
 mod restart;
+mod serve;
 
 #[path = "../../../moq-net/tests/integration/support/mod.rs"]
 mod support;

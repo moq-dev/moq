@@ -8,7 +8,7 @@ import { Milli, Nano } from "@moq/clock";
 import { type Dispose, race } from "@moq/signals";
 import type * as Announce from "../announced.ts";
 import { type Route, routesEqual } from "../hop.ts";
-import { coveringPrefixes, hooks } from "../internal.ts";
+import { coveringPrefixes } from "../internal.ts";
 import type { Producer as OriginProducer, RequestSlot, Requests } from "../origin.ts";
 import * as Path from "../path.ts";
 import { after } from "../util/timer.ts";
@@ -294,7 +294,7 @@ async function drive(handle: Requests, conn: Established): Promise<void> {
 	const session = wireOf(conn);
 	try {
 		for await (const request of handle.requested()) {
-			hooks.acceptRequest(request, session.consume(request.path));
+			request.serve(session.consume(request.path));
 		}
 	} catch {
 		handle.close();

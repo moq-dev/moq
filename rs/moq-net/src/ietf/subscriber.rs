@@ -2656,7 +2656,7 @@ impl Subscriber {
 			// The handler exists before the requester sees the source, so a track it asks
 			// for before `run_broadcast` first polls queues instead of failing `NotFound`.
 			let dynamic = source.requests();
-			request.accept(&*source);
+			request.serve(&*source);
 
 			// The namespace's token closes the source as it is retracted. If it was
 			// retracted since the accept, close it here as that retraction would have,

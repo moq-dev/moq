@@ -2095,8 +2095,9 @@ pub extern "C" fn moq_origin_requests_cancel(dynamic: u32) -> i32 {
 
 /// The path of a broadcast request delivered to a [moq_origin_requests] callback.
 ///
-/// The destination borrows the request's storage: copy it out before accept,
-/// reject, or [moq_broadcast_request_free].
+/// The destination borrows the request's storage: copy it out before
+/// [moq_broadcast_request_serve], [moq_broadcast_request_prepare],
+/// [moq_broadcast_request_reject], or [moq_broadcast_request_free].
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -2108,6 +2109,27 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 		let request = ffi::parse_id(request)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		State::lock().origin.broadcast_request_path(request, dst)
+	})
+}
+
+/// Serve a held consumer under the prefix route's instance without announcing an exact route.
+///
+/// Every answer at this path must continue the same sequences and bytes. Start a new
+/// prefix route for different content, or prepare and publish a job with its own instance.
+/// Consumes the request handle; the consumer remains owned by the caller.
+/// Returns zero on success, or a negative error.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_broadcast_request_serve(request: u32, broadcast: u32) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let broadcast = ffi::parse_id(broadcast)?;
+		let mut state = State::lock();
+		let broadcast = state.consume.broadcast(broadcast)?;
+		let (request, driver) = state.origin.broadcast_request_take(request)?;
+		driver.check()?;
+		request.serve(broadcast);
+		driver.check()?;
+		Ok(())
 	})
 }
 

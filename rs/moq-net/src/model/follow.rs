@@ -572,7 +572,7 @@ mod tests {
 		exact.unannounce();
 		let served = broadcast::Info::new().produce();
 		let (again, ()) = futures::join!(available(&mut announced), async {
-			requested(&dynamic).await.accept(&served);
+			requested(&dynamic).await.serve(&served);
 		});
 		assert!(again.is_clone(&first), "the route above did not carry the instance on");
 	}

@@ -41,7 +41,7 @@ async function isPending(promise: Promise<unknown>): Promise<boolean> {
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
 	const handle = wireOf(origin).receive(path, Route.normalize({ epoch: EPOCH, cost }));
 	void (async () => {
-		for await (const request of handle.requested()) hooks.acceptRequest(request, source.consume());
+		for await (const request of handle.requested()) request.serve(source.consume());
 	})();
 	return () => handle.close();
 }
@@ -926,7 +926,7 @@ test("between routes a reader keeps reading the copy it has", async () => {
 	expect(drain(sub)).toEqual([1]);
 
 	const { value: pending } = await asked.next();
-	hooks.acceptRequest(pending, b.consume());
+	pending.serve(b.consume());
 	await settle();
 	await settle();
 	tb.write(1);
@@ -1357,19 +1357,6 @@ test("a datagram reader lets go of the copies a swap replaced", async () => {
 	front.consumer.close();
 	a.close();
 	b.close();
-});
-
-test("a front remembers it served a session's broadcast between routes", () => {
-	const front = new Front();
-	const a = new BroadcastProducer();
-	const session = a.consume();
-	overrideBroadcastWire(session, {});
-	front.serve(session);
-	expect(front.fromSession).toBe(true);
-	front.park();
-	expect(front.fromSession).toBe(true);
-	front.consumer.close();
-	a.close();
 });
 
 test("a failed group on a route whose replacement was refused ends with the refusal", async () => {

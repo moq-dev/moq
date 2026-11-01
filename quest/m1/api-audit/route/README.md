@@ -36,7 +36,7 @@ resets is serving a held broadcast with no separate exact route.
 The user's "it worked before #6496" did not reproduce on any older tree,
 including one before [moq-dev/moq#5678](https://github.com/moq-dev/moq/pull/5678).
 Their proposed `accept_published(&Publication)` would not avoid the reset,
-so it was dropped. Their relay instead gets [serve](/quest/m1/api-audit/route/serve.md).
+so it was dropped. Their relay instead uses `Request::serve` for its held broadcast.
 
 The maintainer then asked for an audit of the origin, claim and epoch API.
 Four read-only audits covered the Rust surface, JS and the bindings, the
@@ -151,7 +151,6 @@ stale, including `doc/concept/identity.md`.
 
 ## Required
 
-- [Serve a held broadcast](/quest/m1/api-audit/route/serve.md) - a prefix route's request can be answered with a broadcast the app already holds, and the first subscribe succeeds on every wire
 - [Identity and epoch](/quest/m1/api-audit/route/identity.md) - every route carries an `identity` (one continuous stream) and a private per-identity epoch, ranked newest within an identity and hashed across identities, with no epochless routes left in the origin
 - [One Route handle](/quest/m1/api-audit/route/handle.md) - `Publication`, `Prepared`, `Announcer` and `Requests` become one `Route` that owns its broadcast, with app options separate from transit facts
 - [Identities are percent-encoded in paths](/quest/m1/api-audit/route/identity-encoding.md) - HLS URLs and archive keys round-trip any stable identity

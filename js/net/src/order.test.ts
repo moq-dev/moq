@@ -271,7 +271,7 @@ test("ietf keeps a closing group stream ranked until it settles", async () => {
 });
 
 // One track fanned out to an ascending and a descending subscriber, the shape a relay serves
-// from one upstream request (a JS app does not proxy, so the track is local here). The
+// from one upstream request (the track is local here). The
 // aggregate a wire would request upstream turns descending once the descending subscriber
 // joins, so it is never held behind the other's backlog, and each session still serves its
 // own subscriber in its own order.

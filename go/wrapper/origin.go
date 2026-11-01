@@ -142,6 +142,12 @@ func (r *BroadcastRequest) Prepare(epoch string) (*BroadcastPrepared, error) {
 	return &BroadcastPrepared{inner: inner}, nil
 }
 
+// Serve answers with held content under the prefix route's continuous sequence space,
+// without announcing an exact route. The broadcast remains the caller's to release.
+func (r *BroadcastRequest) Serve(broadcast *BroadcastConsumer) error {
+	return r.inner.Serve(broadcast.inner)
+}
+
 // Reject fails the request with an application error code.
 func (r *BroadcastRequest) Reject(errorCode uint16) error {
 	return r.inner.Reject(errorCode)

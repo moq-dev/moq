@@ -242,6 +242,15 @@ pub struct Consume {
 }
 
 impl Consume {
+	/// Borrow held content for an on-demand answer without consuming the caller's handle.
+	pub fn broadcast(&self, id: Id) -> Result<moq_net::broadcast::Consumer, Error> {
+		let context = self.broadcast.get(id).ok_or(Error::BroadcastNotFound)?;
+		if let Some(origin) = &context.origin {
+			origin.driver.check()?;
+		}
+		Ok(context.broadcast.clone())
+	}
+
 	/// Buffer a broadcast the origin handed out, keeping the cursor that named it so a catalog
 	/// rendition referencing a sibling broadcast resolves through the same origin.
 	pub fn start(

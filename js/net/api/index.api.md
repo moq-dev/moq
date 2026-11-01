@@ -422,6 +422,7 @@ export namespace Origin {
 		readonly path: Path.Valid;
 		prepare(epoch: Epoch.Valid): Origin.Prepared;
 		reject(err: Error): void;
+		serve(source: Broadcast.Producer | Broadcast.Consumer): void;
 	}
 	export interface RequestOptions {
 		epoch?: Epoch.Valid;

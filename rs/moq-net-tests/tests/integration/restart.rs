@@ -192,7 +192,7 @@ impl Worker {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
 				write(&track, &format!("{hop}"));
-				moq_net::fuzz::accept(request, &output);
+				request.serve(&output);
 				served.borrow_mut().push((output, track));
 			}
 		}));
@@ -277,7 +277,7 @@ impl Claim {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let output = broadcast::Info::new().produce();
 				let track = output.create_track("video", timed()).unwrap();
-				moq_net::fuzz::accept(request, &output);
+				request.serve(&output);
 				served.borrow_mut().push((output, track));
 			}
 		}));

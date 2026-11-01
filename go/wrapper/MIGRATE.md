@@ -126,6 +126,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 
 `OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
 Replace `request.Accept(broadcast)` with `request.Prepare(epoch)`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under that epoch and returns its producer.
+To answer with a broadcast you already hold, `request.Serve(consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to close.
 Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
 
 ### `TrackInfo` gains `Compress` (#5928)
