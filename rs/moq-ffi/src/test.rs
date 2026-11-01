@@ -8628,6 +8628,50 @@ fn raw_group_read_frame_cancelled_unfreed_does_not_block_the_next() {
 	);
 }
 
+/// A `read_frame` parked on a frameless group moves on when `next_group` takes that group
+/// from it, rather than waiting for a frame it no longer reads.
+#[tokio::test]
+async fn raw_read_frame_moves_on_when_next_group_takes_its_group() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
+	let consumer = track
+		.consume(Some(MoqSubscription {
+			max_delay: None,
+			..moq_subscription_defaults()
+		}))
+		.unwrap();
+
+	let open = track.create_group(0).unwrap();
+	let read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.read_frame().await }).await
+	};
+	let later = track.create_group(1).unwrap();
+	later.write_frame(group_frame(b"later")).unwrap();
+	later.finish().unwrap();
+	// Let the read run any wake the new group sent, so it is parked on the open group again.
+	for _ in 0..4 {
+		tokio::task::yield_now().await;
+	}
+	assert!(!read.is_finished(), "the open group has no frame yet");
+
+	let taken = moq_clock::timeout(TIMEOUT, consumer.next_group())
+		.await
+		.expect("next_group timed out")
+		.unwrap()
+		.expect("expected the open group");
+	assert_eq!(taken.sequence(), 0);
+
+	let frame = moq_clock::timeout(TIMEOUT, read)
+		.await
+		.expect("the parked read_frame never moved on")
+		.expect("read task panicked")
+		.unwrap()
+		.expect("expected the later group's frame");
+	assert_eq!(frame.payload, b"later");
+	drop(open);
+}
+
 /// Reads parked together on one track each wake, and between them take every group once,
 /// whether they go through `read_frame` or `next_group`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

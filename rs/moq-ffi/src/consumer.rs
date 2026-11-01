@@ -399,6 +399,8 @@ struct OrderedCursor {
 	track: moq_net::track::Ordered,
 	/// Group whose first frame `read_frame` has not returned yet.
 	pending: Option<moq_net::group::Consumer>,
+	/// `read_frame` calls parked on `pending`, woken when `next_group` takes it from them.
+	readers: kio::WaiterList,
 }
 
 struct TrackInner {
@@ -436,6 +438,7 @@ impl TrackInner {
 			self.track = Cursor::Ordered(Box::new(OrderedCursor {
 				track: track.ordered(),
 				pending: None,
+				readers: kio::WaiterList::new(),
 			}));
 		}
 		match &mut self.track {
@@ -457,6 +460,8 @@ impl TrackInner {
 		match self.ordered() {
 			Ok(ordered) => {
 				if let Some(group) = ordered.pending.take() {
+					// A frame reader parked on it would otherwise wait for a frame it no longer reads.
+					ordered.readers.wake();
 					return Poll::Ready(Ok(Some(group)));
 				}
 				ordered.track.poll_next_group(waiter).map(|r| r.map_err(Into::into))
@@ -468,8 +473,8 @@ impl TrackInner {
 	/// The first frame of the next group in sequence order, skipping completed empty groups.
 	///
 	/// One poll does the whole step, so it never trusts a slot it filled on an earlier poll:
-	/// a group another call took from `pending` in between is simply gone, and this acquires
-	/// the next one. A group still waiting on its first frame stays in `pending`, so a
+	/// a group `next_group` took from `pending` in between is simply gone, and the wake it
+	/// sends on `readers` makes this acquire the next one. A group still waiting on its first frame stays in `pending`, so a
 	/// cancelled call leaves it for the next `read_frame` or `next_group`.
 	fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::frame::Frame>, MoqError>> {
 		let ordered = match self.ordered() {
@@ -485,6 +490,7 @@ impl TrackInner {
 					Err(err) => return Poll::Ready(Err(err.into())),
 				},
 			};
+			waiter.register(&mut ordered.readers);
 			let result = ready!(group.poll_read_frame(waiter));
 			// Drop a completed or failed group so the next pass moves on.
 			ordered.pending = None;
