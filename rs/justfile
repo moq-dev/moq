@@ -449,14 +449,14 @@ gst-smoke *args:
 # rind is built to skip that one startup check, or it refuses the simulated CPU.
 codspeed:
     VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation \
-        -p kio -p moq-audio -p moq-e2ee -p moq-json -p moq-mux -p moq-net -p moq-pattern -p moq-quic -p moq-rtmp \
+        -p kio -p moq-audio -p moq-auth -p moq-e2ee -p moq-json -p moq-mux -p moq-net -p moq-pattern -p moq-quic -p moq-rtmp \
         --features moq-audio/bus,moq-net/fuzz,moq-quic/fuzz \
         --bench tasks --bench waiter --bench bus --bench protect --bench codec --bench table \
         --bench catalog --bench containers --bench decode_clock --bench export --bench jitter \
         --bench parameter_sets --bench ts_programs --bench ts_schedule --bench ts_video \
         --bench announce --bench auth --bench bandwidth --bench canonical --bench frame --bench interests \
         --bench priority --bench retirement --bench schedule --bench stats --bench synced --bench tail \
-        --bench tracks --bench varint --bench viewers --bench matching \
+        --bench tracks --bench varint --bench viewers --bench matching --bench jwt \
         --bench endpoint --bench receive --bench sent_packets --bench streams --bench chunk_interleaving
 
 # Held feed FETCH readiness across independent request and track counts.

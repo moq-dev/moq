@@ -77,10 +77,8 @@ impl EndpointId {
 
 	/// Whether `signature` is this key's Ed25519 signature over `message`.
 	pub fn verify(&self, message: &[u8], signature: &[u8]) -> bool {
-		use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
-		UnparsedPublicKey::new(&ED25519, &self.0)
-			.verify(message, signature)
-			.is_ok()
+		use rind::signature::{PublicKey, verify};
+		PublicKey::new(&verify::ED25519, &self.0).is_ok_and(|key| key.verify(message, signature).is_ok())
 	}
 
 	/// The broadcasts this endpoint may publish: `mesh/<id>/**`.
@@ -207,7 +205,7 @@ impl Proof {
 
 /// An endpoint's secret key, held by whatever stores it.
 ///
-/// Implemented for [`aws_lc_rs::signature::Ed25519KeyPair`]; a daemon implements it for
+/// Implemented for [`rind::signature::Ed25519KeyPair`]; a daemon implements it for
 /// its own key type.
 pub trait Signer: Send + Sync {
 	/// The endpoint ID: this key's public half.
@@ -216,9 +214,8 @@ pub trait Signer: Send + Sync {
 	fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_LEN];
 }
 
-impl Signer for aws_lc_rs::signature::Ed25519KeyPair {
+impl Signer for rind::signature::Ed25519KeyPair {
 	fn endpoint(&self) -> EndpointId {
-		use aws_lc_rs::signature::KeyPair;
 		EndpointId(
 			self.public_key()
 				.as_ref()
@@ -228,7 +225,7 @@ impl Signer for aws_lc_rs::signature::Ed25519KeyPair {
 	}
 
 	fn sign(&self, message: &[u8]) -> [u8; SIGNATURE_LEN] {
-		aws_lc_rs::signature::Ed25519KeyPair::sign(self, message)
+		rind::signature::Ed25519KeyPair::sign(self, message)
 			.as_ref()
 			.try_into()
 			.expect("a 64-byte Ed25519 signature")
@@ -335,8 +332,8 @@ impl fmt::Display for ErrorCode {
 mod tests {
 	use super::*;
 
-	fn signer() -> aws_lc_rs::signature::Ed25519KeyPair {
-		aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap()
+	fn signer() -> rind::signature::Ed25519KeyPair {
+		rind::signature::Ed25519KeyPair::generate().unwrap()
 	}
 
 	#[test]

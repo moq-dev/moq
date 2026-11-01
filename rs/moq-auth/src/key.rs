@@ -3,9 +3,8 @@ use crate::generate::generate;
 use crate::{Algorithm, Claims};
 use base64::Engine;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header};
-use p256::elliptic_curve::SecretKey;
-use p256::elliptic_curve::pkcs8::EncodePrivateKey;
 use pkcs1::der::Encode;
+use rind::signature::{EcdsaKeyPair, Ed25519KeyPair, sign};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::str::FromStr;
 use std::sync::OnceLock;
@@ -271,6 +270,8 @@ impl Jwk {
 	/// is discoverable from here, and `import`/`export` rather than `validate` because the
 	/// `validate` methods elsewhere in this crate check without converting.
 	pub fn import(self) -> crate::Result<Key> {
+		crate::crypto::init()?;
+
 		if let Some(scope) = &self.scope {
 			scope.validate()?;
 		}
@@ -553,22 +554,24 @@ impl Key {
 				Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => EncodingKey::from_secret(secret),
 				_ => return Err(KeyError::InvalidAlgorithm.into()),
 			},
-			KeyMaterial::EC { ref curve, ref d, .. } => {
+			KeyMaterial::EC {
+				ref curve,
+				ref x,
+				ref y,
+				ref d,
+			} => {
 				let d = d.as_ref().ok_or(KeyError::MissingPrivateKey)?;
-
-				match curve {
-					EllipticCurve::P256 => {
-						let secret_key = SecretKey::<p256::NistP256>::from_slice(d)?;
-						let doc = secret_key.to_pkcs8_der()?;
-						EncodingKey::from_ec_der(doc.as_bytes())
-					}
-					EllipticCurve::P384 => {
-						let secret_key = SecretKey::<p384::NistP384>::from_slice(d)?;
-						let doc = secret_key.to_pkcs8_der()?;
-						EncodingKey::from_ec_der(doc.as_bytes())
-					}
+				let algorithm = match curve {
+					EllipticCurve::P256 => &sign::ECDSA_P256_SHA256_FIXED,
+					EllipticCurve::P384 => &sign::ECDSA_P384_SHA384_FIXED,
 					_ => return Err(KeyError::InvalidCurve("EC").into()),
-				}
+				};
+
+				// rind refuses a `d` whose public key is not this `x` and `y`.
+				let point = [&[0x04][..], x.as_slice(), y.as_slice()].concat();
+				let pair = EcdsaKeyPair::from_private_key_and_public_key(algorithm, d, &point)
+					.map_err(crate::Error::crypto)?;
+				EncodingKey::from_ec_der(pair.to_pkcs8().as_ref())
 			}
 			KeyMaterial::OKP {
 				ref curve,
@@ -576,14 +579,12 @@ impl Key {
 				ref x,
 			} => {
 				let d = d.as_ref().ok_or(KeyError::MissingPrivateKey)?;
-
-				let key_pair =
-					aws_lc_rs::signature::Ed25519KeyPair::from_seed_and_public_key(d.as_slice(), x.as_slice())?;
-
-				match curve {
-					EllipticCurve::Ed25519 => EncodingKey::from_ed_der(key_pair.to_pkcs8()?.as_ref()),
-					_ => return Err(KeyError::InvalidCurve("OKP").into()),
+				if *curve != EllipticCurve::Ed25519 {
+					return Err(KeyError::InvalidCurve("OKP").into());
 				}
+
+				let pair = Ed25519KeyPair::from_seed_and_public_key(d, x).map_err(crate::Error::crypto)?;
+				EncodingKey::from_ed_der(pair.to_pkcs8().as_ref())
 			}
 			KeyMaterial::RSA {
 				ref public,
@@ -1597,6 +1598,22 @@ mod tests {
 		for key in [key_es256, key_es384] {
 			test_asymmetric_key(key);
 		}
+	}
+
+	#[test]
+	fn ec_private_key_must_match_its_public_point() {
+		let other = Key::generate(Algorithm::ES256, None).unwrap();
+		let KeyMaterial::EC { d: other_d, .. } = &other.material else {
+			unreachable!("ES256 keys are EC");
+		};
+		let mut jwk = Key::generate(Algorithm::ES256, None).unwrap().export();
+		let KeyMaterial::EC { d, .. } = &mut jwk.material else {
+			unreachable!("ES256 keys are EC");
+		};
+		d.clone_from(other_d);
+
+		// Its tokens would verify under neither key's published half.
+		assert!(jwk.import().unwrap().sign(&create_test_claims()).is_err());
 	}
 
 	#[test]
