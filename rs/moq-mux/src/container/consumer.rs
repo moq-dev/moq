@@ -3124,7 +3124,7 @@ mod tests {
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			moq_clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"an earlier group within the budget must be waited for"
@@ -3151,7 +3151,7 @@ mod tests {
 		let mut consumer = reach_consumer(&mut track, Duration::ZERO, Duration::ZERO, Duration::ZERO);
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);
-		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+		let frame = moq_clock::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
 			.expect("nothing to wait for")
 			.unwrap()
@@ -3186,7 +3186,7 @@ mod tests {
 			// Newest first: group 4 covers the min delay alone, but not the warmup too.
 			write_group(&mut track, 5, &[ts(5_000_000)]);
 			write_group(&mut track, 4, &[ts(4_700_000)]);
-			let first = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame()).await;
+			let first = moq_clock::timeout(Duration::from_millis(50), consumer.read_frame()).await;
 			write_group(&mut track, 3, &[ts(4_400_000)]);
 			track.finish().unwrap();
 
@@ -3216,7 +3216,7 @@ mod tests {
 		// Group 1 is missing, and group 2's content runs 250ms past where it starts: more than the
 		// max delay, though less than the max delay plus the warmup.
 		write_group(&mut track, 2, &[ts(100_000), ts(350_000)]);
-		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+		let frame = moq_clock::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
 			.expect("the hole is skipped at the max delay")
 			.unwrap()
@@ -3247,14 +3247,14 @@ mod tests {
 				.unwrap();
 		};
 		write(&mut covering, 4_900_000);
-		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+		let frame = moq_clock::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
 			.expect("group 4 covers the reach")
 			.unwrap()
 			.unwrap();
 		assert_eq!(frame.timestamp, ts(4_900_000));
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			moq_clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"the covering group's next frame is waited for"
@@ -3302,12 +3302,12 @@ mod tests {
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);
 		assert!(
-			tokio::time::timeout(Duration::from_millis(450), consumer.read())
+			moq_clock::timeout(Duration::from_millis(450), consumer.read())
 				.await
 				.is_err(),
 			"the wait lasts while an earlier group could still cover the reach"
 		);
-		let frame = tokio::time::timeout(Duration::from_millis(100), consumer.read_frame())
+		let frame = moq_clock::timeout(Duration::from_millis(100), consumer.read_frame())
 			.await
 			.expect("the wait ends a reach after the first group arrived")
 			.unwrap()
@@ -3328,7 +3328,7 @@ mod tests {
 		);
 
 		write_group(&mut track, 5, &[ts(5_000_000), ts(5_500_000)]);
-		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+		let frame = moq_clock::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
 			.expect("the newest group covers the reach")
 			.unwrap()
@@ -3350,7 +3350,7 @@ mod tests {
 		consumer.set_max_buffer(1);
 
 		write_group(&mut track, 5, &[ts(5_000_000), ts(5_100_000)]);
-		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+		let frame = moq_clock::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
 			.expect("the max buffer cannot hold an earlier group")
 			.unwrap()
@@ -3377,7 +3377,7 @@ mod tests {
 		);
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);
-		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+		let frame = moq_clock::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
 			.expect("nothing below the range can arrive")
 			.unwrap()
@@ -3394,7 +3394,7 @@ mod tests {
 		let mut consumer = reach_consumer(&mut track, Duration::ZERO, Duration::from_secs(10), Duration::ZERO);
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);
-		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+		let frame = moq_clock::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
 			.expect("nothing to wait for")
 			.unwrap()
@@ -3417,12 +3417,12 @@ mod tests {
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);
 		assert!(
-			tokio::time::timeout(Duration::from_millis(150), consumer.read())
+			moq_clock::timeout(Duration::from_millis(150), consumer.read())
 				.await
 				.is_err(),
 			"the wait lasts the max delay"
 		);
-		let frame = tokio::time::timeout(Duration::from_millis(100), consumer.read_frame())
+		let frame = moq_clock::timeout(Duration::from_millis(100), consumer.read_frame())
 			.await
 			.expect("the wait ends at the max delay, not the min delay")
 			.unwrap()
@@ -3461,7 +3461,7 @@ mod tests {
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);
 		assert!(
-			tokio::time::timeout(Duration::from_millis(50), consumer.read())
+			moq_clock::timeout(Duration::from_millis(50), consumer.read())
 				.await
 				.is_err(),
 			"an earlier group within the min delay must be waited for"
@@ -3482,7 +3482,7 @@ mod tests {
 		let mut consumer = Consumer::new(consumer_track, Container::Legacy(crate::container::Kind::Data));
 
 		write_group(&mut track, 5, &[ts(5_000_000)]);
-		let frame = tokio::time::timeout(Duration::from_millis(50), consumer.read_frame())
+		let frame = moq_clock::timeout(Duration::from_millis(50), consumer.read_frame())
 			.await
 			.expect("an unbounded reach waits for nothing")
 			.unwrap()

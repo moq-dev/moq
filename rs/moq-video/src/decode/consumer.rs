@@ -1258,7 +1258,7 @@ mod tests {
 		let max = consumer.reader(Lane::Max);
 		tokio::time::pause();
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(50), max.read())
+			moq_clock::timeout(std::time::Duration::from_millis(50), max.read())
 				.await
 				.is_err(),
 			"the max-delay decoder started at the live edge"
