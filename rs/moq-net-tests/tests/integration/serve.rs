@@ -58,7 +58,7 @@ async fn first_subscribe(version: &str, publish: bool) {
 			let mut group = track.append_group().unwrap();
 			group.write_frame(Timestamp::ZERO, b"held".as_slice()).unwrap();
 			group.finish().unwrap();
-			Some(prepared.publish().unwrap())
+			Some((prepared.publish().unwrap(), track))
 		} else {
 			requests.requested_broadcast().await.unwrap().serve(&held);
 			None
