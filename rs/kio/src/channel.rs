@@ -185,8 +185,9 @@ impl<T> Channel<T> {
 	/// compiler would otherwise keep it out of line, a call on every pending poll.
 	#[inline(always)]
 	pub fn park_value(&self, waiter: &Waiter, seen: u64) {
-		// Still on the list, and nothing published since `f` judged the value.
-		if waiter.holds(self.value_tag.load(Ordering::Acquire)) && self.version() == seen {
+		// Still on the list, and nothing published since `f` judged the value. A noop
+		// waiter registers nowhere and wakes nothing, so it needs no lock either.
+		if waiter.holds(self.value_tag.load(Ordering::Acquire)) && self.version() == seen || waiter.is_noop() {
 			return;
 		}
 
@@ -437,6 +438,23 @@ mod tests {
 		assert!(channel.poll(&waiter, pending).is_pending());
 		write(&channel, 2);
 		assert_eq!(woken(&count), 2, "the re-registration was lost");
+	}
+
+	/// A noop waiter, polled only for the answer now, parks nowhere.
+	#[test]
+	fn a_noop_waiter_parks_nowhere() {
+		let channel = Channel::new(0u32);
+		assert!(channel.poll(&Waiter::noop(), pending).is_pending());
+		let producer = crate::Producer::new(0u32);
+		let mut watch = crate::Watch::new(producer.consume());
+		assert!(watch.poll(&Waiter::noop(), pending).is_pending());
+		assert!(watch.poll(&Waiter::noop(), pending).is_pending());
+		assert_eq!(channel.waiters().value.tag(), 0, "the list was registered on");
+		assert_eq!(
+			watch.consumer().state.waiters().value.tag(),
+			0,
+			"the watch's list was registered on"
+		);
 	}
 
 	/// A publish that lands after the predicate judged the value, but before the waiter
