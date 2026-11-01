@@ -109,10 +109,18 @@ struct Wire<E> {
 	#[serde(default, getter = "Catalog::min_version", deserialize_with = "deserialize_version")]
 	version: Option<u64>,
 
-	#[serde(default, skip_serializing_if = "Video::is_empty")]
+	#[serde(
+		default,
+		skip_serializing_if = "Video::is_empty",
+		deserialize_with = "crate::catalog::deserialize_object"
+	)]
 	video: Video,
 
-	#[serde(default, skip_serializing_if = "Audio::is_empty")]
+	#[serde(
+		default,
+		skip_serializing_if = "Audio::is_empty",
+		deserialize_with = "crate::catalog::deserialize_object"
+	)]
 	audio: Audio,
 
 	#[serde(default)]
@@ -249,8 +257,12 @@ impl Catalog<()> {
 
 impl<E> Catalog<E> {
 	/// Refuse a catalog with an ID naming both a video and an audio rendition, or with a
-	/// projection or audio layout out of range.
+	/// rendition field out of range, such as a zero sample rate or a projection out of bounds.
+	///
+	/// Decoding already refuses an out-of-range rendition, so this catches a catalog built by hand.
 	pub fn check_renditions(&self) -> Result<()> {
+		use crate::catalog::Rendition;
+
 		if let Some(id) = self
 			.video
 			.renditions
@@ -260,14 +272,10 @@ impl<E> Catalog<E> {
 			return Err(crate::Error::DuplicateRendition(id.clone()));
 		}
 		for config in self.video.renditions.values() {
-			if let Some(projection) = &config.projection {
-				projection.check()?;
-			}
+			config.check()?;
 		}
 		for config in self.audio.renditions.values() {
-			if let Some(layout) = &config.layout {
-				layout.check(config.channel_count)?;
-			}
+			config.check()?;
 		}
 		Ok(())
 	}
@@ -405,6 +413,45 @@ mod test {
 
 	use super::*;
 
+	#[derive(Deserialize)]
+	struct ParityCase {
+		name: String,
+		catalog: serde_json::Value,
+		#[serde(default)]
+		refused: bool,
+		#[serde(default)]
+		video: Vec<String>,
+		#[serde(default)]
+		audio: Vec<String>,
+	}
+
+	/// The corpus `js/hang` also loads: both languages accept the same catalogs and keep the same
+	/// renditions, so a divergence fails CI on whichever side drifts.
+	#[test]
+	fn shared_parity_fixtures() {
+		let cases: Vec<ParityCase> = serde_json::from_str(include_str!("../../fixtures/catalog-parity.json")).unwrap();
+		let mut failures = Vec::new();
+		for case in cases {
+			let parsed = Catalog::<()>::from_str(&case.catalog.to_string()).and_then(|catalog| {
+				catalog.check_renditions()?;
+				Ok(catalog)
+			});
+			match (parsed, case.refused) {
+				(Err(_), true) => {}
+				(Ok(catalog), true) => failures.push(format!("{}: accepted {catalog:?}", case.name)),
+				(Err(err), false) => failures.push(format!("{}: refused: {err}", case.name)),
+				(Ok(catalog), false) => {
+					let video: Vec<_> = catalog.video.renditions.keys().cloned().collect();
+					let audio: Vec<_> = catalog.audio.renditions.keys().cloned().collect();
+					if (&video, &audio) != (&case.video, &case.audio) {
+						failures.push(format!("{}: kept video {video:?} audio {audio:?}", case.name));
+					}
+				}
+			}
+		}
+		assert!(failures.is_empty(), "{}", failures.join("\n"));
+	}
+
 	/// The rendition count is the publisher's to choose: a catalog listing many is accepted.
 	#[test]
 	fn many_renditions_are_accepted() {
@@ -512,23 +559,38 @@ mod test {
 		));
 	}
 
+	/// A publisher building the catalog by hand is caught before it writes a value every reader refuses.
 	#[test]
-	fn spatial_fields_out_of_range_are_refused() {
+	fn fields_out_of_range_are_refused() {
 		use crate::catalog::{AudioLayout, Projection, VideoCodec, VideoConfig};
 
-		let mut catalog = Catalog::<()>::from_str(
-			r#"{"audio": {"renditions": {"amb": {"codec": "opus", "sampleRate": 48000, "numberOfChannels": 6, "layout": "ambisonic", "container": {"kind": "legacy"}}}}}"#,
-		)
-		.unwrap();
+		let mut catalog = Catalog::<()>::default();
+		let mut amb = AudioConfig::new(Opus, 48_000, 6);
+		amb.layout = Some(AudioLayout::Ambisonic);
+		catalog.audio.insert("amb", amb).unwrap();
 		assert!(matches!(
 			catalog.check_renditions(),
 			Err(crate::Error::InvalidAmbisonicChannels(6))
 		));
 		catalog.audio.renditions.get_mut("amb").unwrap().channel_count = 4;
-		assert_eq!(catalog.audio.renditions["amb"].layout, Some(AudioLayout::Ambisonic));
 		catalog.check_renditions().unwrap();
 
-		// A publisher building the catalog by hand is caught before it writes the bad value.
+		catalog.audio.renditions.get_mut("amb").unwrap().sample_rate = 0;
+		assert!(matches!(
+			catalog.check_renditions(),
+			Err(crate::Error::Zero("sampleRate"))
+		));
+		catalog.audio.renditions.get_mut("amb").unwrap().sample_rate = 48_000;
+
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(0);
+		catalog.video.insert("empty", config).unwrap();
+		assert!(matches!(
+			catalog.check_renditions(),
+			Err(crate::Error::Zero("codedWidth"))
+		));
+		catalog.video.remove("empty");
+
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.projection = Some(Projection::Equirectangular { fov: Some(400.0) });
 		catalog.video.insert("vr", config).unwrap();
@@ -794,6 +856,24 @@ mod test {
 	}
 
 	#[test]
+	fn rendition_with_misspelled_broadcast_is_refused() {
+		// Spelled like a path, so an empty segment or a lone backslash makes the rendition malformed,
+		// which refuses the catalog. Mirrors the JS `rendition broadcast reference is parsed and normalized`.
+		for broadcast in ["./source/", "/source", "a//b", r"a\b"] {
+			let encoded = serde_json::json!({
+				"video": {"renditions": {"video": {
+					"broadcast": broadcast,
+					"codec": "avc1.64001f",
+					"container": {"kind": "legacy"}
+				}}}
+			})
+			.to_string();
+
+			Catalog::<()>::from_str(&encoded).expect_err(&format!("{broadcast:?} should be refused"));
+		}
+	}
+
+	#[test]
 	fn rendition_with_parent_broadcast_stays_distinct_from_empty() {
 		let encoded = r#"{
 			"video": {
@@ -846,7 +926,7 @@ mod test {
 		let Container::Unknown(unknown) = &future.container else {
 			panic!("expected unknown container: {:?}", future.container);
 		};
-		assert_eq!(unknown.kind(), Some("future"));
+		assert_eq!(unknown.kind(), "future");
 
 		// The unknown rendition survives a republish intact.
 		let output = parsed.to_json().expect("failed to encode");
