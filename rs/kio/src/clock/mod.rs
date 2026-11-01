@@ -56,7 +56,7 @@ pub use timer::{
 	Elapsed, Interval, MissedTickBehavior, Sleep, Timeout, drive, interval, interval_at, sleep, sleep_until, timeout,
 	timeout_at,
 };
-pub use wall::{OutOfRange, Wall};
+pub use wall::{OutOfRange, Wall, WallMap};
 
 /// The current instant on the ambient clock.
 pub fn now() -> Instant {

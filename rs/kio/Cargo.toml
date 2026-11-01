@@ -55,6 +55,7 @@ futures = "0.3"
 # the merge gate.
 kio = { path = ".", features = ["manual", "sim", "serde"] }
 serde_json = { workspace = true }
+test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "test-util", "time"] }
 
 [[bench]]
