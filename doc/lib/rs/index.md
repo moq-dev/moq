@@ -102,17 +102,6 @@ relay. `http://` is for a relay on localhost only: it fetches the certificate
 fingerprint unauthenticated, so never send a token over it. QUIC tuning shares
 the relay's settings; see the [relay reference](/bin/relay/config#quic).
 
-## WebAssembly
-
-`moq-net` compiles to `wasm32-unknown-unknown` and rides the browser's own
-`WebTransport`, so Rust logic can be shared between native and web. Skip
-`moq-tokio` there. A client handshake returns a session and a separate driver;
-spawn `moq_net::time::run(driver)` on the browser executor, and drive the
-origin the same way. The [browser transport adapter](https://github.com/moq-dev/moq/blob/main/rs/moq-wasm/src/transport.rs)
-and [handshake](https://github.com/moq-dev/moq/blob/main/rs/moq-wasm/src/lib.rs)
-show the setup, including advertising the supported MoQ ALPNs. If you just
-want MoQ in a page, the [TypeScript libraries](/lib/js/) are the easier path.
-
 ## Conventions
 
 The API is producer/consumer pairs at every level (origin, broadcast, track,
