@@ -29,4 +29,3 @@ Public API: none. Wire: none; behavior only.
 ## Required
 
 - [An ended lite track with an unsettled tail aborts at session death](/quest/m1/lite-track-end.md) - its PR, [moq-dev/moq#7295](https://github.com/moq-dev/moq/pull/7295), sets the end signal this finishes aligning
-
