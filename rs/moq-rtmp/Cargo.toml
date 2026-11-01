@@ -35,7 +35,7 @@ bytes = { workspace = true }
 futures = { workspace = true }
 hang = { workspace = true }
 hmac = "0.13"
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 rand = { workspace = true }
@@ -54,7 +54,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
-moq-clock = { path = "../moq-clock", features = ["sim"] }
+kio = { path = "../kio", features = ["sim"] }
 # The RTMPS test borrows moq-tokio's self-signed cert generation to build a
 # `rustls::ServerConfig`. No transport feature: a QUIC backend here would be
 # unified into every other crate a `--workspace` build selects, which is exactly

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::{Path, origin, stats::Registry, track};
 
 use super::{Drain, Task};
@@ -45,7 +45,7 @@ impl Driver {
 		};
 		Some(Self {
 			drain: Drain::new(task)?,
-			now: moq_clock::now(),
+			now: kio::clock::now(),
 		})
 	}
 

@@ -12,7 +12,7 @@ rust-version.workspace = true
 [features]
 default = ["client"]
 # The HTTP client that drives a lease against an auth server.
-client = ["dep:reqwest", "dep:rustls", "dep:tokio", "moq-clock/runtime", "dep:tracing", "dep:rand"]
+client = ["dep:reqwest", "dep:rustls", "dep:tokio", "kio/runtime", "dep:tracing", "dep:rand"]
 # The reference auth server behind `moq auth serve`: the policy a relay held, on axum.
 serve = ["dep:axum", "dep:tokio", "dep:tracing", "tokio/net"]
 
@@ -22,8 +22,7 @@ axum = { workspace = true, optional = true }
 base64 = { workspace = true }
 data-encoding = { workspace = true }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
-kio = { workspace = true }
-moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false, features = ["serde"] }
+kio = { workspace = true, features = ["serde"] }
 moq-pattern = { workspace = true, features = ["serde"] }
 p256 = "0.14.0"
 p384 = "0.14.0"
@@ -42,9 +41,9 @@ url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+kio = { path = "../kio", features = ["runtime", "sim"] }
 moq-auth = { path = ".", features = ["client", "serve"] }
 moq-auth-published = { package = "moq-auth", version = "=0.2.1", default-features = false }
-moq-clock = { path = "../moq-clock", features = ["sim"] }
 moq-token = "0.7"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

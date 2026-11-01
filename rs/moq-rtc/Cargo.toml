@@ -27,7 +27,7 @@ axum = { workspace = true, optional = true }
 bytes = { workspace = true }
 hang = { workspace = true }
 # Drives each str0m connection over its UDP socket.
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-ice = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }

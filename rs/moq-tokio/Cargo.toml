@@ -21,7 +21,7 @@ net = ["dep:moq-net", "dep:web-transport-trait"]
 # the MoQ backend. Needs a crypto-provider feature.
 driver = ["dep:moq-congestion", "dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash"]
 # QUIC and WebTransport over moq-quic, for `https://`, `moqt://`, and `moql://`.
-quic = ["_transport", "_certs", "driver", "dep:http", "dep:kio", "dep:web-transport-proto", "dep:reqwest", "watch", "dep:dns-lookup"]
+quic = ["_transport", "_certs", "driver", "dep:http", "dep:web-transport-proto", "dep:reqwest", "watch", "dep:dns-lookup"]
 # Server-side certificate handling: chains loaded from disk, self-signed generation,
 # in-memory identities, and per-SNI selection. Not one to enable on its own, since
 # nothing turns it into a listener: every QUIC backend needs it for its own TLS, and
@@ -47,7 +47,7 @@ mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["_transport", "dep:qmux", "watch", "dep:dns-lookup"]
 # Qmux over TCP: plaintext `tcp://`, and `tls://` once a crypto provider is on. Server-side and client-side.
-tcp = ["_transport", "dep:qmux", "dep:dns-lookup"]
+tcp = ["_transport", "dep:qmux", "dep:dns-lookup", "dep:tokio-rustls"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
 # inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
 uds = ["tcp", "qmux/uds"]
@@ -67,10 +67,8 @@ http = { version = "1", optional = true }
 humantime = "2.3"
 humantime-serde = { workspace = true }
 if-addrs = { workspace = true, optional = true }
-kio = { workspace = true, optional = true }
+kio = { workspace = true, features = ["runtime"] }
 mdns-sd = { workspace = true, optional = true }
-
-moq-clock = { workspace = true }
 moq-congestion = { workspace = true, optional = true }
 # The ICE agent behind the `webrtc` module. Private, like str0m: neither appears in this crate's API.
 moq-ice = { workspace = true, optional = true }
@@ -103,6 +101,8 @@ tikv-jemalloc-ctl = { version = "0.7", optional = true }
 tikv-jemallocator = { version = "0.7", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+# The TLS stream `tcp::TlsAcceptor` accepts from a listener sharing its port.
+tokio-rustls = { workspace = true, optional = true }
 tokio-util = { workspace = true, features = ["io"], optional = true }
 toml = { workspace = true }
 tracing = "0.1"
@@ -134,7 +134,7 @@ chrono = "0.4"
 # Use the channel type behind `mdns_sd::Receiver` so the mDNS readiness gate can
 # be driven with synthetic daemon events.
 flume = "0.12"
-moq-clock = { path = "../moq-clock", features = ["sim"] }
+kio = { path = "../kio", features = ["sim"] }
 # A bufferbloated path for the receive-credit tests and benchmark.
 moq-shaper = { path = "../moq-shaper" }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }

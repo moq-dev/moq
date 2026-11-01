@@ -20,18 +20,17 @@ quic = ["dep:moq-congestion", "dep:moq-quic", "dep:rustls", "dep:rustls-platform
 # qlog crate and its serde_json encoder into moq-quic, which a production build has
 # no use for.
 qlog = ["moq-quic?/qlog"]
-# Workers created inside a tokio runtime with a `moq_clock::Manual` clock installed
+# Workers created inside a tokio runtime with a `kio::clock::Manual` clock installed
 # run on that clock, so a test decides when their time passes. For test builds.
-_manual = ["moq-clock/manual"]
+_manual = ["kio/manual"]
 
 [target.'cfg(target_os = "linux")'.dependencies]
 bytes = "1"
 http = "1"
 io-uring = { workspace = true }
-kio = { workspace = true }
+# The worker is a kio clock backend: its turn's instant is the ambient clock.
+kio = { workspace = true, features = ["runtime"] }
 libc = { workspace = true }
-# The worker is a moq-clock backend: its turn's instant is the ambient clock.
-moq-clock = { workspace = true }
 moq-congestion = { workspace = true, optional = true }
 moq-net = { workspace = true }
 moq-quic = { workspace = true, features = ["rustls-aws-lc-rs"], optional = true }

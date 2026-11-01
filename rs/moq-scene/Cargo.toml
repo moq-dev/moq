@@ -33,9 +33,8 @@ hang = { workspace = true }
 humantime-serde = { workspace = true }
 # PNG and JPEG still images. Already in a studio's graph through eframe.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
-kio = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-audio = { workspace = true, features = ["bus"] }
-moq-clock = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # `render` is the compositor's whole input path: it turns every decoded or

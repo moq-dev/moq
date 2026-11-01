@@ -21,9 +21,9 @@ Decided with the maintainer on 2026-10-26; see the
 
 Decided 2026-10-31 (maintainer):
 
-- Like every area, this waits on rind's aarch64 path for CPUs without the
-  crypto extensions, so moq-cli never stops starting on a Pi 4, CM4, or
-  Zero 2 W running a 64-bit OS.
+- Like every area, this waits on rind's paths for CPUs without the crypto
+  extensions, so moq-cli never stops starting on a Pi 4, CM4, or Zero 2 W
+  running a 64-bit OS, or on an older x86_64 host.
 - moq-hls returns an unsupported-CPU error from the constructors that first
   need rind (such as `Broadcaster::new` and `Server::new`), rather than
   panicking later or relying on a documented startup check. Like moq-e2ee,
@@ -34,4 +34,4 @@ handle the new error). Wire: none.
 
 ## Required
 
-- [rind runs on a Pi 4's aarch64 CPU](/quest/m2/rind/aarch64.md) - the rind release this switches to
+- [rind runs on CPUs without the crypto extensions](/quest/m2/rind/older-cpus.md) - the rind release this switches to

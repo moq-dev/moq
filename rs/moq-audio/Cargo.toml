@@ -41,7 +41,6 @@ bus = ["dep:ringbuf"]
 # are target-gated, so this is a no-op elsewhere).
 capture = [
     "dep:cpal",
-    "dep:kio",
     "dep:ringbuf",
     "dep:tokio",
     "dep:tracing",
@@ -57,7 +56,7 @@ capture = [
 # Device playback. Mixes any number of `playback::Sink`s into one cpal output
 # stream (CoreAudio / WASAPI / ALSA). Same libasound build dependency on Linux
 # as `capture`.
-playback = ["dep:cpal", "dep:kio", "dep:ringbuf", "dep:tokio", "dep:tracing"]
+playback = ["dep:cpal", "dep:ringbuf", "dep:tokio", "dep:tracing"]
 # Reach devices through the Linux sound server rather than its ALSA plugin, for
 # the server's own device names and routing. These customize cpal only when
 # `capture` or `playback` activates it, so a host flag alone pulls no audio I/O.
@@ -75,8 +74,7 @@ bytes = { workspace = true }
 # without either pulls no new dependency.
 cpal = { version = "0.18", optional = true }
 hang = { workspace = true }
-kio = { workspace = true, optional = true }
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 rand = { workspace = true }

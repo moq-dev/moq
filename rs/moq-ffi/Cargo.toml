@@ -34,15 +34,14 @@ qlog = ["moq-tokio/qlog"]
 # Test-only hooks for the host suites: control of the runtime clock (`just py test`) and a
 # count of moq's heap (the Dart leak tests). Released builds leave it off, so they never
 # carry the `moq_ffi_test_*` symbols or the counting allocator.
-testing = ["moq-clock/manual"]
+testing = ["kio/manual"]
 
 [dependencies]
 bytes = { workspace = true }
 hang = { workspace = true }
-kio = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 # Codecs only: the language wrappers do their own device I/O.
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
-moq-clock = { workspace = true }
 moq-json = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }

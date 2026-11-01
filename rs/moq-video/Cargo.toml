@@ -34,7 +34,7 @@ default = ["mediacodec", "nvidia"]
 # frameworks (Windows display/window capture requires Windows 10 2004+ WGC).
 # Still off by default until every distribution ships it, which is
 # a packaging decision rather than a build cost. moq-cli's `capture` turns it on.
-capture = ["dep:kio", "dep:libc", "dep:moq-v4l", "dep:x11rb", "dep:zune-jpeg"]
+capture = ["dep:libc", "dep:moq-v4l", "dep:x11rb", "dep:zune-jpeg"]
 # Android MediaCodec encode/decode and its AHardwareBuffer frame surface. Kept
 # behind a feature because these NDK entry points require API 26, while the
 # language-binding artifacts still support API 24 and disable default features.
@@ -122,12 +122,10 @@ fast_image_resize = "6"
 h264-reader = "0.9.0"
 # Catalog types (VideoConfig / VideoCodec) the decode consumer reads.
 hang = { workspace = true }
-# The capture publish's control handle.
-kio = { workspace = true, optional = true }
+kio = { workspace = true, features = ["runtime"] }
 # libvpx bindings for the `vpx` feature. The library itself comes from the build
 # host; see the feature above.
 libvpx-native-sys = { version = "5.0.17", optional = true }
-moq-clock = { workspace = true }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Vendored, statically linked software H.264 fallback (no system dependency).

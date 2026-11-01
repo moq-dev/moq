@@ -49,7 +49,7 @@ url = { workspace = true }
 cbindgen = "0.29"
 
 [dev-dependencies]
-moq-clock = { path = "../moq-clock" }
+kio = { path = "../kio", features = ["runtime"] }
 moq-loc = { path = "../moq-loc" }
 # The tests encode with OpenH264, the one encoder a GPU-less host has, so they
 # turn it on without the `openh264` feature.

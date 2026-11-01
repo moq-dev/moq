@@ -15,8 +15,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [dependencies]
 bytes = { workspace = true }
 hex = { workspace = true }
-kio = { workspace = true }
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
 regex = "1"
