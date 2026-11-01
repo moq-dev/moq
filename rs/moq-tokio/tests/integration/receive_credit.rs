@@ -160,7 +160,7 @@ fn rand_seed() -> u64 {
 			.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH)
 			.as_nanos() as u64,
 	};
-	println!("MOQ_SHAPER_SEED={seed}");
+	eprintln!("MOQ_SHAPER_SEED={seed}");
 	seed
 }
 

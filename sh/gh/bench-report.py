@@ -167,8 +167,9 @@ def javascript(directory):
     return checked(entries)
 
 
-# The lines libtest's harness frames each test's output with.
-LIBTEST = re.compile(r'running \d+ tests?|test \S+ \.\.\. \w+|test result: .*')
+# The lines libtest's harness prints around, and during, each test's own output.
+LIBTEST = re.compile(r'running \d+ tests?|test \S+ \.\.\. \w+|test \S+ has been running for over \d+ seconds'
+                     r'|test result: .*')
 
 
 def rust_tests(directory):

@@ -89,7 +89,8 @@ class ReportTest(unittest.TestCase):
         ])
         self.junit('nextest-2.xml', [
             ('moq-tokio::integration', 'receive_credit::benchmark_receive_windows',
-             'path,mib_per_s,overflowed_packets\nloopback,812,0\n'),
+             'path,mib_per_s,overflowed_packets\nloopback,812,0\n'
+             'test receive_credit::benchmark_receive_windows has been running for over 60 seconds\n'),
             ('moq-bench::bin/moq-bench', 'stats::tests::benchmark_observation_contention',
              'writers,snapshots,ns_per_sample\n1,0,57.39\n'),
         ])
