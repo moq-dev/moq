@@ -161,7 +161,7 @@ pub struct Config {
 	pub receive_timestamps: Option<NonZeroU32>,
 
 	/// How to construct each connection's congestion controller, BBRv3 by default
-	pub congestion: Arc<dyn congestion::ControllerFactory + Send + Sync>,
+	pub congestion: Arc<dyn congestion::Factory + Send + Sync>,
 
 	/// An outbound rate limit for each connection, in bytes per second, or `None` (the default)
 	/// for none
@@ -311,7 +311,7 @@ impl Default for Config {
 			receive_timestamps: None,
 
 			congestion: Arc::new({
-				let config = congestion::Bbr3Config::default();
+				let config = congestion::bbr3::Config::default();
 				#[cfg(test)]
 				let config = {
 					let mut config = config;

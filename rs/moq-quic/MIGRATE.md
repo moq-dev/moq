@@ -82,4 +82,4 @@ targets run through the hidden `fuzz` module behind the `fuzz` feature; see
 ### `congestion::NewReno` removed
 
 `congestion::NewReno` and `congestion::NewRenoConfig` are gone.
-Use `Bbr3Config` (the default) or `CubicConfig` instead.
+Use `bbr3::Config` (the default) or `cubic::Config` instead.
