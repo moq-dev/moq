@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/b1f0c40e6733d2799ba35f47b88c2456b2bfc1b6";
+      url = "github:moq-dev/quest/7a191e6197c691f477b4c55edba34cc425c3e77c";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -158,6 +158,8 @@
             cargo-semver-checks
             cargo-deny
             cargo-bloat
+            # Weekly mutation testing of the security-critical modules (`just rs mutants`).
+            cargo-mutants
             cargo-nextest
             cargo-codspeed
             # Source-based test coverage (`just rs coverage`).

@@ -210,6 +210,12 @@ impl Fetcher {
 			}
 		});
 
+		// reqwest reads rustls's process default and panics without one, so install rind's
+		// unless the host already chose a provider.
+		let _ = rind_rustls::default_provider()
+			.map_err(Error::unsupported_cpu)?
+			.install_default();
+
 		let client = Client::builder()
 			.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
 			// Bound playlist/segment fetches so a stuck request can't wedge `run()`.
@@ -694,6 +700,8 @@ pub struct Import {
 
 impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
+	///
+	/// Installs rind's rustls provider as the process default unless one already is.
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let fetcher = Fetcher::new(&cfg)?;
 		Ok(Self {
@@ -787,7 +795,7 @@ impl Import {
 					// Jittered so a fleet of importers pointed at one origin doesn't retry in
 					// lockstep, and never past the deadline the budget promised.
 					let wait = delay
-						.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)
+						.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0)
 						.min(deadline - now);
 					delay = (delay * 2).min(STEP_RETRY_MAX);
 					kio::clock::sleep(wait).await;
