@@ -63,7 +63,7 @@ declare -A scope=(
     # fails a check that reads a cross-tree input this pattern misses.
     # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
     # Root Nix inputs own the browser version every npm Playwright pin matches.
-    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)'
+    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)'
     # Workers with lockfiles outside the Bun workspace.
     [workers]='^(infra/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
@@ -185,10 +185,9 @@ verb=$action
 [[ "$verb" != ci ]] || verb=check
 
 # The modules whose run compiles Rust through Cargo, so CI restores the Rust
-# build cache only when one is selected. JS checks build @moq/wasm for its
-# consumers, and the bindings build moq-ffi.
+# build cache only when one is selected. The bindings build moq-ffi.
 declare -A compiles=(
-    [check]='rs rs_shapes bench js py kt go dart c cpp obs_compile'
+    [check]='rs rs_shapes bench py kt go dart c cpp obs_compile'
     [fix]='rs'
 )
 

@@ -28,7 +28,7 @@ name: Nightly
 # release PRs on them.
 #
 # Main PRs run no cloud CI beyond the landing gate's checks, so every
-# path-filtered gate (Android, C, C++, WASM, X11, the audio replays, the OSS
+# path-filtered gate (Android, C, C++, X11, the audio replays, the OSS
 # Scanner image, platform.yml and the release dry-runs) runs here on main too,
 # and release-gate.yml runs them on release PRs.
 #
@@ -77,10 +77,6 @@ jobs:
 
   cpp:
     uses: ./.github/workflows/cpp.yml
-
-  wasm:
-    uses: ./.github/workflows/wasm.yml
-    secrets: inherit
 
   audio-replay:
     uses: ./.github/workflows/audio-quality.yml
@@ -166,10 +162,6 @@ jobs:
           - name: BBB rendition alignment
             recipe: pub check-bbb
             uncached: true
-          - name: Browser backend baseline
-            recipe: test wasm-baseline --uniffi
-            artifact: wasm-backend-baseline
-            artifact-path: target/test
           # Bounded: fails on crashes, missing output, or invalid samples, never on timing.
           - name: Browser benchmark smoke
             recipe: bench-browser --smoke
@@ -460,7 +452,6 @@ jobs:
 
   # Plays the matrix in headless Chromium and the native player through moq-shaper
   # and grades what the listener heard against test/audio-quality/budgets.json.
-  # ARM64 like wasm.yml.
   audio-quality:
     name: Audio quality
     runs-on: ubuntu-24.04-arm

@@ -12,9 +12,6 @@ rust-version.workspace = true
 keywords = ["quic", "http3", "webtransport", "media", "live"]
 categories = ["multimedia", "network-programming", "web-programming"]
 
-[package.metadata.cargo-shear]
-ignored = ["getrandom"]
-
 [features]
 default = ["async"]
 # Runtime-backed helpers and Lite/IETF sessions; explicit-time model drivers stay available.
@@ -45,7 +42,7 @@ slab = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
-uuid = { workspace = true, features = ["js"] }
+uuid = { workspace = true }
 
 # Model-layer locks must yield to Loom whenever kio does. This is compiled only
 # by `just rs loom`, never in production builds.
@@ -59,18 +56,10 @@ futures = { workspace = true }
 moq-clock = { path = "../moq-clock", features = ["sim"] }
 proptest = { workspace = true }
 serde_json = { workspace = true }
-# The benches run on tokio. test-util (tokio::time::pause/advance) is test-only and
-# is NOT supported on wasm, so it must not leak into the normal dependency feature set.
+# The benches run on tokio. test-util (tokio::time::pause/advance) is test-only, so
+# it must not leak into the normal dependency feature set.
 tokio = { workspace = true, features = ["rt", "test-util", "time"] }
 tracing-test = { workspace = true }
-
-# wasm model-layer tests (tests/wasm.rs). getrandom's wasm backend is enabled
-# only here (dev), so it isn't forced on downstream consumers. They select
-# their own backend in the leaf binary.
-[target.'cfg(target_family = "wasm")'.dev-dependencies]
-getrandom = { workspace = true }
-# Keep this in lockstep with rs/moq-wasm's pinned wasm-bindgen CLI schema.
-wasm-bindgen-test = "=0.3.79"
 
 # Optional per-thread CPU timing in the session benchmark.
 [target.'cfg(unix)'.dev-dependencies]

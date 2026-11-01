@@ -95,16 +95,15 @@ class QueryTests(unittest.TestCase):
                 (self.repo / path).unlink()
 
     def test_nixpkgs_updates_check_browser_pins(self):
-        # JS selection also builds wasm, which is reflected in the Rust cache query.
         self.change("flake.lock")
-        self.expect(True, rust=True)
+        self.expect(True)
 
     def test_empty_diff_keeps_repository_lints(self):
         self.expect(True)
 
     def test_selected_tests_do_not_depend_on_installed_tools(self):
         for path in ("js/net/src/index.ts", "rs/moq-net/src/lib.rs", "py/moq-rs/example.py",
-                     "doc/concept/example.md", "rs/moq-wasm/src/lib.rs", "test/example.ts"):
+                     "doc/concept/example.md", "test/example.ts"):
             with self.subTest(path=path):
                 self.change(path)
                 self.expect(True)
@@ -190,7 +189,7 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
 
     def stub_ci(self, just=""):
-        for tool in ("bun", "python3", "cargo", "cargo-hack", "wasm-bindgen", "jq", "shellcheck",
+        for tool in ("bun", "python3", "cargo", "cargo-hack", "jq", "shellcheck",
                      "shfmt", "taplo", "nixfmt", "actionlint", "quest", "nix",
                      "c++", "clang-format", "cmake", "dart", "dash", "gersemi", "go",
                      "gradle", "java", "kramdown-rfc", "pkg-config", "uniffi-bindgen-cpp",

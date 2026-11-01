@@ -17,8 +17,6 @@ Decided with the maintainer on 2026-10-26; see the
   AES-256-GCM), and Retry integrity (AES-128-GCM). Packet keys and header
   protection come through rustls's QUIC traits from `rind-rustls`. The
   provider is no longer picked per feature.
-- moq-quic's wasm32 ring dependency, inherited from quinn, is deleted: nothing
-  runs moq-quic on wasm.
 - moq-tokio installs `rind-rustls`, generates self-signed certificates through
   `rind-rcgen`, drops rustls's default features and rustls-webpki's `aws-lc-rs`,
   and moves mDNS's HMAC-SHA256 from RustCrypto to rind.

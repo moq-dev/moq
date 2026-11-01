@@ -3,9 +3,9 @@
 //! Tests needing JSON consumers or the hidden `fuzz` module live in `moq-net-tests`.
 //! Each `tests/*.rs` file is its own crate that links this package and its
 //! dependencies again, so add new integration tests here as a module.
-//! `loom.rs`, `wasm.rs`, and `send.rs` stay apart because they build for
-//! another cfg, target, or toolchain. `group_charge.rs` stays apart because its
-//! counting global allocator would apply to every test in the binary.
+//! `loom.rs` and `send.rs` stay apart because they build for another cfg or
+//! toolchain. `group_charge.rs` stays apart because its counting global
+//! allocator would apply to every test in the binary.
 
 mod announce_covering_route;
 mod announce_takeover;

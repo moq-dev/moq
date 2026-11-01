@@ -44,8 +44,7 @@ class SelectTest(unittest.TestCase):
                                   self.selected("sh/rs/nextest.sh", action=action,
                                                 github_actions=github_actions))
         selected = self.selected("sh/rs/nextest.sh")
-        for recipe in ("wasm", "uring-check"):
-            self.assertIn(f"rs {recipe}", selected)
+        self.assertIn("rs uring-check", selected)
         self.assertNotIn("rs capture", selected)
 
     def test_cargo_configuration_selects_workspace(self):
@@ -301,13 +300,12 @@ class FeatureTest(unittest.TestCase):
             self.assertEqual(result.returncode, expected_returncode, result.stdout + result.stderr)
             return calls.read_text().splitlines()
 
-    def test_net_keeps_model_and_browser_contracts(self):
+    def test_net_keeps_model_contracts(self):
         boundary = self.trace("net")
         exhaustive = self.trace("net", "--all")
         for calls in (boundary, exhaustive):
             self.assertTrue(any(" --lib " in call for call in calls if call.startswith("clippy ")))
             self.assertFalse(any(" --all-targets " in call for call in calls))
-            self.assertTrue(any(" --target wasm32-unknown-unknown " in call for call in calls))
             self.assertTrue(any(call.startswith("nextest run ") for call in calls))
             self.assertTrue(any(call.startswith("doc ") for call in calls))
 

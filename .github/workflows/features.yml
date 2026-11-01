@@ -24,7 +24,7 @@ jobs:
         # workflows cover their optimized libraries separately. `gate
         # rs_shapes` is the gate's isolated extremes over every package, which
         # outgrow one hosted job beside the rest of the gate.
-        recipe: ["rs features", "gate rs_shapes", "js wasm"]
+        recipe: ["rs features", "gate rs_shapes"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

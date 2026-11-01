@@ -176,13 +176,6 @@ pub(super) struct Publisher {
 }
 
 impl Publisher {
-	#[cfg_attr(
-		target_arch = "wasm32",
-		expect(
-			clippy::arc_with_non_send_sync,
-			reason = "the browser transport is `!Send`, but native shares this state across threads"
-		)
-	)]
 	pub fn new(config: PublisherConfig) -> Self {
 		// Identity stamped onto outbound announce hops. Derived from the
 		// origin we're consuming so it matches the local relay identity

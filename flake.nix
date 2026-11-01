@@ -71,16 +71,6 @@
           overlays = [ (import rust-overlay) ];
         };
 
-        wasm-bindgen-version =
-          (pkgs.lib.findSingle (package: package.name == "wasm-bindgen")
-            (throw "Cargo.lock has no wasm-bindgen package")
-            (throw "Cargo.lock has multiple wasm-bindgen versions")
-            (builtins.fromTOML (builtins.readFile ./Cargo.lock)).package
-          ).version;
-        wasm-bindgen-cli =
-          pkgs.${"wasm-bindgen-cli_${builtins.replaceStrings [ "." ] [ "_" ] wasm-bindgen-version}"}
-            or (throw "nixpkgs does not package wasm-bindgen-cli ${wasm-bindgen-version} locked in Cargo.lock");
-
         # Pinned build toolchain (not latest stable) so `nix develop` and CI
         # compile against a fixed rustc and the relay's MSRV can't creep up
         # unnoticed. The floor is 1.98, not the 1.95 relay MSRV: earlier rustc
@@ -100,10 +90,7 @@
             # match rustc's LLVM. cargo-llvm-cov finds them in the sysroot.
             "llvm-tools"
           ];
-          targets = [
-            "wasm32-unknown-unknown"
-          ]
-          ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+          targets = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             "aarch64-apple-darwin"
           ];
         };
@@ -184,10 +171,6 @@
                 rustc = rust-toolchain;
               };
             })
-            # Browser/WASM bindings (rs/moq-wasm -> @moq/wasm via `just js wasm`).
-            # Cargo.lock selects the matching schema version, independently of
-            # nixpkgs' default wasm-bindgen-cli.
-            wasm-bindgen-cli
           ]
           ++ gstreamerDeps
           ++ pkgs.lib.optionals (!pkgs.stdenv.hostPlatform.isDarwin) [
