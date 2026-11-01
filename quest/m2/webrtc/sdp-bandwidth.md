@@ -13,4 +13,3 @@ Public API: none. Wire: capped answers gain `b=AS`.
 ## Required
 
 - [Vendor and trim the stack](/quest/m2/webrtc/vendor.md) - the parser this changes
-- [moq-rtc REMB and TIAS](/quest/m2/rtc-remb-tias.md) - its PR, #7373, adds the capped answer

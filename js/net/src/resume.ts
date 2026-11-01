@@ -1935,10 +1935,27 @@ export class Front {
 			const retired = this.#retire.signal;
 			const signal = options?.signal ? AbortSignal.any([options.signal, retired]) : retired;
 			try {
-				await until(this.#verify(name, source), signal);
+				// Asked alongside the check that the source claims the track's recorded properties,
+				// rather than a round trip after it: only handing the group out waits for the check.
 				const fetchGroup = source.wire.fetchGroup;
-				if (!fetchGroup) throw new Error("fetch group is not supported by this session's version");
-				const group = await fetchGroup(name, sequence, { ...options, signal });
+				const ahead = new AbortController();
+				const fetching = fetchGroup?.(name, sequence, {
+					...options,
+					signal: AbortSignal.any([signal, ahead.signal]),
+				});
+				fetching?.catch(() => {});
+				try {
+					await until(this.#verify(name, source), signal);
+				} catch (err) {
+					ahead.abort(err);
+					void fetching?.then(
+						(group) => group.close(),
+						() => {},
+					);
+					throw err;
+				}
+				if (!fetching) throw new Error("fetch group is not supported by this session's version");
+				const group = await fetching;
 				// A copy that already failed continues nothing: that is the route failing again.
 				const failed = group.closed.peek();
 				if (failed instanceof Error) {

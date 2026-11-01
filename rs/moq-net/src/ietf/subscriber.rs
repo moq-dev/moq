@@ -19,6 +19,7 @@ use crate::{
 
 use super::{Message, Version, cluster, error::request, group::ObjectExtensionsLength, peer, request_update};
 use crate::tail::{Reading, Settle, Tail};
+use crate::util::Later;
 
 use kio::Lock;
 
@@ -2916,7 +2917,7 @@ impl Subscriber {
 					.is_none_or(|subscription| subscription.ranges.is_empty()) =>
 			{
 				let Some(idle) = self
-					.track_status(&broadcast_path, &track_name, request, &mut gate)
+					.track_status(&broadcast_path, &track_name, request, &mut group_fetches, &mut gate)
 					.await
 				else {
 					return;
@@ -3847,7 +3848,7 @@ impl Subscriber {
 							broadcast_path.clone(),
 							track_name.to_owned(),
 							requested,
-							timescale,
+							Later::Known(timescale),
 						);
 						group_fetches.push(fetch);
 					}
@@ -4080,7 +4081,7 @@ impl Subscriber {
 						broadcast_path.clone(),
 						track_name.to_owned(),
 						fill,
-						idle.timescale,
+						Later::Known(idle.timescale),
 					);
 					group_fetches.push(fetch);
 				}
@@ -4370,13 +4371,49 @@ impl Subscriber {
 	/// Learn a track nobody subscribes to from TRACK_STATUS, accepting an idle copy that
 	/// [`Self::linger`] serves fetches from and subscribes once someone does. `None` once
 	/// refused or abandoned: a refused status fails the query-only or fetch-only request.
+	///
+	/// Fetches go out meanwhile into `group_fetches`, reading their objects only once the
+	/// status says the timescale, and failing with it.
 	async fn track_status(
 		&mut self,
 		broadcast_path: &Path,
 		track_name: &str,
 		request: track::Request,
+		group_fetches: &mut TaskSet,
 		gate: &mut crate::auth::Gate,
 	) -> Option<Idle> {
+		let timescale = crate::util::Learning::new();
+		let learned = self
+			.learn_track_status(broadcast_path, track_name, request, group_fetches, &timescale, gate)
+			.await;
+		match learned {
+			Ok(idle) => {
+				timescale.resolve(Ok(idle.timescale));
+				Some(idle)
+			}
+			Err(err) => {
+				// The fetches sent alongside fail with the status: let them answer first.
+				timescale.resolve(Err(err));
+				self.drain(group_fetches).await;
+				None
+			}
+		}
+	}
+
+	/// [`Self::track_status`]'s exchange, failing with why the request was refused or
+	/// abandoned.
+	async fn learn_track_status(
+		&mut self,
+		broadcast_path: &Path,
+		track_name: &str,
+		request: track::Request,
+		group_fetches: &mut TaskSet,
+		timescale: &crate::util::Learning<Option<Timescale>>,
+		gate: &mut crate::auth::Gate,
+	) -> Result<Idle, Error> {
+		// Registered before accepting: `accept` releases the request's own fetch gate, and a
+		// cache-miss fetch queued in the gap would be drained as NotFound.
+		let dynamic = request.requests();
 		let validity = self.validity.start();
 		let opening = self.session.clone();
 		let mut stream = match kio::wait(|waiter| {
@@ -4390,8 +4427,8 @@ impl Subscriber {
 		{
 			Ok(stream) => stream,
 			Err(err) => {
-				request.reject(err);
-				return None;
+				request.reject(err.clone());
+				return Err(err);
 			}
 		};
 		stream = stream.with_stats(self.origin.stats());
@@ -4410,14 +4447,15 @@ impl Subscriber {
 			},
 		);
 		if let Err(err) = written {
-			request.reject(err);
-			return None;
+			request.reject(err.clone());
+			return Err(err);
 		}
 
 		// Nobody wanting the track any more ends the wait on a peer that may never answer,
 		// and the session ending fails it with the session's reason.
 		let mut demand = request.demand();
 		let closed = self.session.clone();
+		let this = self.clone();
 		let response = {
 			let mut response = std::pin::pin!(async {
 				kio::wait(|waiter| stream.writer.poll_flush(waiter)).await?;
@@ -4441,6 +4479,18 @@ impl Subscriber {
 					if let Poll::Ready(err) = closed.poll_closed(waiter) {
 						return Poll::Ready(Some(SetupResponse::Cancelled(Error::from_transport(err))));
 					}
+					// A fetch needs nothing from the status to go out, only to read its objects.
+					while let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(waiter) {
+						let fetch = this.clone().serve_fill(
+							this.session.work().start(),
+							broadcast_path.clone(),
+							track_name.to_owned(),
+							fill,
+							timescale.later(),
+						);
+						group_fetches.push(fetch);
+					}
+					let _ = group_fetches.poll(waiter);
 					crate::util::poll_unwanted(&mut demand, waiter).map(|_| None)
 				})
 				.await;
@@ -4454,15 +4504,15 @@ impl Subscriber {
 		let response = match response {
 			Some(SetupResponse::Response(response)) => response,
 			Some(SetupResponse::Cancelled(err)) => {
-				request.reject(err);
+				request.reject(err.clone());
 				stream.reader.abort(&Error::Cancel);
 				let _ = stream.writer.close().await;
-				return None;
+				return Err(err);
 			}
 			None => {
 				stream.reader.abort(&Error::Cancel);
 				stream.writer.abort(&Error::Cancel);
-				return None;
+				return Err(Error::Cancel);
 			}
 		};
 		let _ = stream.writer.finish();
@@ -4478,13 +4528,12 @@ impl Subscriber {
 			Ok(ok) => ok,
 			Err(err) => {
 				tracing::debug!(%err, broadcast = %crate::path::Rooted(self.origin.root(), broadcast_path), track = %track_name, "track status refused");
-				request.reject(err);
-				return None;
+				request.reject(err.clone());
+				return Err(err);
 			}
 		};
 
 		tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), broadcast_path), track = %track_name, "track status known");
-		let dynamic = request.requests();
 		// Nothing feeds this copy live: what it caches is fetched, never the live edge. Idle
 		// from the accept, so no reader takes it as live in between.
 		let track = request.idle().stage(accepted_info(&ok.properties, self.version));
@@ -4495,7 +4544,7 @@ impl Subscriber {
 			track.report_object(largest.group, largest.object);
 		}
 		let track = track.commit();
-		Some(Idle {
+		Ok(Idle {
 			demand: track.demand(),
 			track,
 			dynamic,
@@ -5414,7 +5463,7 @@ impl Subscriber {
 		broadcast: Path,
 		name: String,
 		fill: track::Fill,
-		timescale: Option<Timescale>,
+		timescale: Later<Option<Timescale>>,
 	) {
 		let fill = std::sync::Arc::new(fill);
 		let mut last = None;
@@ -5440,7 +5489,7 @@ impl Subscriber {
 			}
 			last = Some(run.clone());
 			self.clone()
-				.run_range_fetch(broadcast.clone(), name.clone(), fill.clone(), run, timescale)
+				.run_range_fetch(broadcast.clone(), name.clone(), fill.clone(), run, timescale.clone())
 				.await;
 		}
 	}
@@ -5449,7 +5498,7 @@ impl Subscriber {
 	#[cfg(test)]
 	async fn run_group_fetch(self, broadcast: Path, name: String, fill: track::Fill, timescale: Option<Timescale>) {
 		let run = fill.start().group..fill.end();
-		self.run_range_fetch(broadcast, name, std::sync::Arc::new(fill), run, timescale)
+		self.run_range_fetch(broadcast, name, std::sync::Arc::new(fill), run, Later::Known(timescale))
 			.await;
 	}
 
@@ -5467,7 +5516,7 @@ impl Subscriber {
 		name: String,
 		fill: std::sync::Arc<track::Fill>,
 		run: std::ops::Range<u64>,
-		timescale: Option<Timescale>,
+		timescale: Later<Option<Timescale>>,
 	) {
 		let validity = self.validity.start();
 		let last = run.end - 1;
@@ -5486,6 +5535,10 @@ impl Subscriber {
 			}
 			if fill.poll_unwanted_groups(run.clone(), waiter).is_ready() {
 				return Poll::Ready(Err(Error::Cancel));
+			}
+			// A TRACK_STATUS sent alongside that failed fails the fetch.
+			if let Poll::Ready(Err(err)) = timescale.poll(waiter) {
+				return Poll::Ready(Err(err));
 			}
 			Stream::poll_open(&opening, self.version, waiter)
 		})
@@ -5539,10 +5592,14 @@ impl Subscriber {
 				fetch_type,
 				range_filters: false,
 				fill_timeout: false,
-				// The copy learned the track before any fetch, from SUBSCRIBE_OK or
-				// TRACK_STATUS_OK, so a FETCH_OK repeating it is waste, except that only its
-				// TIMESCALE opts the answer into the timestamps a timed copy needs.
-				properties_wanted: timescale.is_some(),
+				// The copy learns the track from SUBSCRIBE_OK or TRACK_STATUS_OK, so a FETCH_OK
+				// repeating it is waste, except that only its TIMESCALE opts the answer into the
+				// timestamps a timed copy needs. A FETCH sent alongside TRACK_STATUS cannot know
+				// yet, so it asks.
+				properties_wanted: match timescale.peek() {
+					Some(Ok(timescale)) => timescale.is_some(),
+					_ => true,
+				},
 				epoch: self.epoch.clone(),
 			},
 		);
@@ -5563,6 +5620,9 @@ impl Subscriber {
 						return Poll::Ready(SetupResponse::Cancelled(err));
 					}
 					if let Poll::Ready(err) = fill.poll_aborted(waiter) {
+						return Poll::Ready(SetupResponse::Cancelled(err));
+					}
+					if let Poll::Ready(Err(err)) = timescale.poll(waiter) {
 						return Poll::Ready(SetupResponse::Cancelled(err));
 					}
 					if let Poll::Ready(res) = response {
@@ -5587,6 +5647,33 @@ impl Subscriber {
 				tracing::debug!(%err, groups = ?run, "group fetch refused");
 				fill.reject_groups(run, err);
 				let _ = stream.writer.close().await;
+				return;
+			}
+		};
+
+		// The objects are stamped in the track's timescale, which the TRACK_STATUS sent
+		// alongside may still owe: they wait unread in their stream until it lands, and its
+		// failure fails the fetch.
+		let timescale = match kio::wait(|waiter| {
+			if let Err(err) = validity.check(waiter) {
+				return Poll::Ready(Err(err));
+			}
+			if let Poll::Ready(err) = fill.poll_aborted(waiter) {
+				return Poll::Ready(Err(err));
+			}
+			if let Poll::Ready(res) = timescale.poll(waiter) {
+				return Poll::Ready(res);
+			}
+			fill.poll_unwanted_groups(run.clone(), waiter)
+				.map(|_| Err(Error::Cancel))
+		})
+		.await
+		{
+			Ok(timescale) => timescale,
+			Err(err) => {
+				fill.reject_groups(run, err);
+				drop(registered);
+				self.cancel_group_fetch(stream).await;
 				return;
 			}
 		};
@@ -7838,7 +7925,13 @@ mod tests {
 			SetupWait::StatusOpen | SetupWait::StatusWrite | SetupWait::StatusResponse => Box::pin(async {
 				assert!(
 					subscriber
-						.track_status(&Path::from_static("broadcast"), "video", request, &mut gate)
+						.track_status(
+							&Path::from_static("broadcast"),
+							"video",
+							request,
+							&mut TaskSet::owned(),
+							&mut gate
+						)
 						.await
 						.is_none()
 				);
