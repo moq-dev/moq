@@ -43,6 +43,7 @@ mod multi_cdn;
 mod partial_group;
 mod quiet_catalog;
 mod range_anchors;
+mod range_fill;
 mod received_rewind;
 mod rejoin;
 mod relay_upstream_close;
