@@ -1984,11 +1984,6 @@ fn terminal(state: &State) -> Error {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 
@@ -2760,7 +2755,7 @@ mod tests {
 		let shared = shared();
 		let mut draining = None;
 
-		let (connected, _session) = tokio::time::timeout(
+		let (connected, _session) = moq_clock::timeout(
 			WALK_TIMEOUT,
 			Connection::dial_any(&shared, &client, &addrs, &mut draining, &mut None),
 		)
@@ -2782,7 +2777,7 @@ mod tests {
 		let shared = shared();
 		let mut draining = None;
 
-		let result = tokio::time::timeout(
+		let result = moq_clock::timeout(
 			WALK_TIMEOUT,
 			Connection::dial_any(&shared, &client, &addrs, &mut draining, &mut None),
 		)
@@ -2830,9 +2825,9 @@ mod tests {
 		config.tls.insecure = Some(true);
 		config.backoff.timeout = Some((Duration::ZERO).into());
 		let client = config.init(Default::default()).expect("build client");
-		let started = tokio::time::Instant::now();
+		let started = moq_clock::now();
 		let connection = client.connect(url("moqz://localhost/"));
-		let err = tokio::time::timeout(Duration::from_secs(1), connection.closed())
+		let err = moq_clock::timeout(Duration::from_secs(1), connection.closed())
 			.await
 			.expect("invalid scheme kept retrying")
 			.expect_err("invalid scheme connected");
@@ -2856,7 +2851,7 @@ mod tests {
 			"tls://a!b:1/",
 		] {
 			let connection = client.connect(url(target));
-			let err = tokio::time::timeout(Duration::from_secs(1), connection.closed())
+			let err = moq_clock::timeout(Duration::from_secs(1), connection.closed())
 				.await
 				.unwrap_or_else(|_| panic!("{target} kept retrying"))
 				.expect_err("invalid server name connected");
@@ -2899,7 +2894,7 @@ mod tests {
 		config.race = Some((Duration::ZERO).into());
 		let client = config.init(Default::default()).expect("build client");
 
-		let started = tokio::time::Instant::now();
+		let started = moq_clock::now();
 		let connection = client.connect(url(&format!("tcp://{addr}/")));
 		let err = connection.closed().await.expect_err("refused socket connected");
 		assert!(matches!(err, Error::Reconnect(_)), "{err}");
@@ -3028,11 +3023,11 @@ mod tests {
 		let mut added = Some(added);
 		let mut token = None;
 		for round in 0..2 {
-			let mut request = tokio::time::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
+			let mut request = moq_clock::timeout(WAIT, listener.accept()).await.unwrap().unwrap();
 			let mut requests = request.requests();
 			let session = request.ok().await.unwrap();
 			loop {
-				let request = tokio::time::timeout(WAIT, requests.next()).await.unwrap().unwrap();
+				let request = moq_clock::timeout(WAIT, requests.next()).await.unwrap().unwrap();
 				if request.token().is_empty() {
 					issued.push(request.accept(moq_net::auth::Grant::default()));
 					continue;
@@ -3046,14 +3041,14 @@ mod tests {
 			}
 			let mut grant = token.as_ref().unwrap().grant();
 			while grant.peek() != Some(moq_net::auth::Grant::all()) {
-				tokio::time::timeout(WAIT, grant.changed()).await.unwrap().unwrap();
+				moq_clock::timeout(WAIT, grant.changed()).await.unwrap().unwrap();
 			}
 			session.abort(moq_net::Error::Cancel);
 		}
 		drop(connection);
 		let token = token.unwrap();
 		// Not `Cancel`, which reads as the peer ending the grant cleanly.
-		let closed = tokio::time::timeout(WAIT, token.closed()).await.unwrap();
+		let closed = moq_clock::timeout(WAIT, token.closed()).await.unwrap();
 		assert!(matches!(closed, moq_net::Error::Closed), "{closed:?}");
 	}
 
@@ -3073,10 +3068,10 @@ mod tests {
 			.unwrap()
 			.connect(url(&format!("tcp://{addr}/")));
 
-		let session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		let session = moq_clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
 		connection.auth().abort(moq_net::Error::App(9));
 		session.abort(moq_net::Error::Cancel);
-		let closed = tokio::time::timeout(WAIT, connection.closed())
+		let closed = moq_clock::timeout(WAIT, connection.closed())
 			.await
 			.expect("the loop kept redialing on an ended auth handle");
 		assert!(
@@ -3099,17 +3094,17 @@ mod tests {
 		let connection = client.connect(url(&format!("tcp://{addr}/")));
 		let monitor = connection.monitor();
 
-		let session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		let session = moq_clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
 		let mut state = monitor.state();
 		while state.phase != Phase::Connected {
-			state = tokio::time::timeout(WAIT, monitor.state_changed(state.revision))
+			state = moq_clock::timeout(WAIT, monitor.state_changed(state.revision))
 				.await
 				.unwrap()
 				.unwrap();
 		}
 		let (woken, _waiter) = Woken::watch(&monitor);
 		session.abort(moq_net::Error::App(7));
-		let closed = tokio::time::timeout(WAIT, connection.closed())
+		let closed = moq_clock::timeout(WAIT, connection.closed())
 			.await
 			.expect("the connection did not close");
 		assert!(closed.is_err(), "the abort ends the loop with an error");
@@ -3292,18 +3287,18 @@ mod tests {
 		config.websocket.delay = Some((Duration::ZERO).into());
 		let client = config.init(Default::default()).unwrap();
 		let url = url(&format!("http://127.0.0.1:{port}/"));
-		let connection = tokio::time::timeout(WAIT, client.connect(url).established())
+		let connection = moq_clock::timeout(WAIT, client.connect(url).established())
 			.await
 			.expect("never connected")
 			.unwrap();
 		assert_eq!(connection.transport(), Some(crate::Transport::WebTransport));
-		let (transport, _session) = tokio::time::timeout(WAIT, sessions.recv())
+		let (transport, _session) = moq_clock::timeout(WAIT, sessions.recv())
 			.await
 			.expect("the server never accepted a session")
 			.unwrap();
 		assert_eq!(transport, crate::Transport::WebTransport);
 
-		tokio::time::timeout(WAIT, cancelled)
+		moq_clock::timeout(WAIT, cancelled)
 			.await
 			.expect("the WebSocket dial outlived QUIC's win")
 			.unwrap();
@@ -3376,10 +3371,10 @@ mod tests {
 		let url: Url = format!("tcp://{HOST}:1/").parse().unwrap();
 		let _connection = client.connect(url);
 
-		let session_a = tokio::time::timeout(WAIT, accepted_a.recv()).await.unwrap().unwrap();
+		let session_a = moq_clock::timeout(WAIT, accepted_a.recv()).await.unwrap().unwrap();
 
 		let consumer = subscriber.consume();
-		let cam = tokio::time::timeout(WAIT, consumer.follow("cam", None).unwrap().available())
+		let cam = moq_clock::timeout(WAIT, consumer.follow("cam", None).unwrap().available())
 			.await
 			.unwrap()
 			.unwrap();
@@ -3388,7 +3383,7 @@ mod tests {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(moq_net::Timestamp::ZERO, b"g0".as_ref()).unwrap();
 		group.finish().unwrap();
-		let g0 = tokio::time::timeout(WAIT, sub.recv_group())
+		let g0 = moq_clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
 			.unwrap()
@@ -3397,13 +3392,13 @@ mod tests {
 
 		// Withdraw A from DNS, then drain it.
 		crate::resolve::hosts::point(HOST, [addr_b]);
-		let drained = tokio::time::Instant::now();
+		let drained = moq_clock::now();
 		session_a
 			.drain()
 			.send(moq_net::goaway::Goaway::new().with_timeout(DEADLINE))
 			.unwrap();
 
-		let _session_b = tokio::time::timeout(WAIT, accepted_b.recv())
+		let _session_b = moq_clock::timeout(WAIT, accepted_b.recv())
 			.await
 			.expect("never redialed through the fresh resolve")
 			.unwrap();
@@ -3411,7 +3406,7 @@ mod tests {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(moq_net::Timestamp::ZERO, b"g1".as_ref()).unwrap();
 		group.finish().unwrap();
-		let mut g1 = tokio::time::timeout(WAIT, sub.recv_group())
+		let mut g1 = moq_clock::timeout(WAIT, sub.recv_group())
 			.await
 			.unwrap()
 			.unwrap()
@@ -3419,7 +3414,7 @@ mod tests {
 		assert_eq!(g1.sequence, 1, "delivery resumes at the next group after the swap");
 		assert_eq!(g1.read_frame().await.unwrap().unwrap().payload[..], b"g1"[..]);
 
-		tokio::time::timeout(WAIT, session_a.closed())
+		moq_clock::timeout(WAIT, session_a.closed())
 			.await
 			.expect("the drained session never closed");
 		assert!(
@@ -3453,16 +3448,16 @@ mod tests {
 			.with_subscriber(subscriber.clone())
 			.with_restart(Restart::Wait);
 		let mut connection = client.connect(url(&format!("tcp://{addr}/")));
-		let status = tokio::time::timeout(WAIT, connection.status()).await.unwrap();
+		let status = moq_clock::timeout(WAIT, connection.status()).await.unwrap();
 		assert_eq!(status.unwrap(), Status::Connected);
-		let session = tokio::time::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
+		let session = moq_clock::timeout(WAIT, accepted.recv()).await.unwrap().unwrap();
 
 		session.drain().send(moq_net::goaway::Goaway::new()).unwrap();
 
 		// A broadcast announced after the GOAWAY still arrives: the drained session serves.
 		let late = origin.create_broadcast("late").unwrap();
 		late.announce(Default::default()).unwrap();
-		tokio::time::timeout(WAIT, subscriber.consume().follow("late", None).unwrap().available())
+		moq_clock::timeout(WAIT, subscriber.consume().follow("late", None).unwrap().available())
 			.await
 			.expect("the drained session stopped serving")
 			.unwrap();
@@ -3480,11 +3475,11 @@ mod tests {
 		assert!(accepted.try_recv().is_err(), "redialed while the session served");
 
 		session.abort(moq_net::Error::GoawayTimeout);
-		let status = tokio::time::timeout(WAIT, connection.status()).await.unwrap();
+		let status = moq_clock::timeout(WAIT, connection.status()).await.unwrap();
 		assert_eq!(status.unwrap(), Status::Disconnected);
-		let status = tokio::time::timeout(WAIT, connection.status()).await.unwrap();
+		let status = moq_clock::timeout(WAIT, connection.status()).await.unwrap();
 		assert_eq!(status.unwrap(), Status::Connected);
-		tokio::time::timeout(WAIT, accepted.recv())
+		moq_clock::timeout(WAIT, accepted.recv())
 			.await
 			.expect("never redialed after the close")
 			.unwrap();
@@ -3511,10 +3506,7 @@ mod tests {
 		max: Duration,
 		timeout: Duration,
 		peers: Vec<(Url, Flap)>,
-	) -> (
-		Client,
-		tokio::sync::mpsc::UnboundedReceiver<(Url, tokio::time::Instant)>,
-	) {
+	) -> (Client, tokio::sync::mpsc::UnboundedReceiver<(Url, moq_clock::Instant)>) {
 		let mut config = crate::connect::Config::default();
 		config.backoff.initial = Some(initial.into());
 		config.backoff.max = Some(max.into());
@@ -3532,7 +3524,7 @@ mod tests {
 			let accepted = accepted.clone();
 			Box::pin(async move {
 				let session = flap_once(flap).await;
-				let _ = accepted.send((url, tokio::time::Instant::now()));
+				let _ = accepted.send((url, moq_clock::now()));
 				Ok(crate::client::Dialed {
 					session,
 					transport: crate::Transport::Tcp,
@@ -3599,7 +3591,7 @@ mod tests {
 	/// have waited: between half of `delay` and all of it, starting at `initial` and
 	/// doubling up to `max`.
 	#[cfg(feature = "tcp")]
-	fn assert_paced(accepts: &[(Url, tokio::time::Instant)], initial: Duration, max: Duration) {
+	fn assert_paced(accepts: &[(Url, moq_clock::Instant)], initial: Duration, max: Duration) {
 		let mut delay = initial;
 		for (index, pair) in accepts.windows(2).enumerate() {
 			let gap = pair[1].1 - pair[0].1;
@@ -3685,7 +3677,7 @@ mod tests {
 				// Leave the session the time a multithreaded runtime may give it before the dial
 				// returns: on the paused clock, every exchange the session can make lands first,
 				// the connection credential's answer included.
-				tokio::time::sleep(Duration::from_millis(10)).await;
+				moq_clock::sleep(Duration::from_millis(10)).await;
 				Ok(crate::client::Dialed {
 					session,
 					transport: crate::Transport::Tcp,
@@ -3725,7 +3717,7 @@ mod tests {
 		let peer = url("tcp://peer:1/");
 		let (client, mut accepted) = flapping(INITIAL, MAX, TIMEOUT, vec![(peer.clone(), Flap::Close)]);
 
-		let started = tokio::time::Instant::now();
+		let started = moq_clock::now();
 		let err = client
 			.connect(peer)
 			.closed()
@@ -3781,7 +3773,7 @@ mod tests {
 		];
 		let (client, mut accepted) = flapping(INITIAL, MAX, TIMEOUT, peers);
 
-		let started = tokio::time::Instant::now();
+		let started = moq_clock::now();
 		let err = client
 			.connect(a.clone())
 			.closed()
