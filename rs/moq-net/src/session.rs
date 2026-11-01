@@ -172,6 +172,8 @@ pub struct Session {
 	goaway: Arc<goaway::Handle>,
 	auth: auth::Handle,
 	credential: Option<auth::Credential>,
+	/// The subscriptions and fetches the protocol tasks carry.
+	work: Work,
 }
 
 impl Session {
@@ -361,6 +363,22 @@ impl Session {
 		self.goaway.consumer()
 	}
 
+	/// Poll until the session carries no subscription or fetch, in either direction.
+	///
+	/// Ready at once while it carries none. A track request still being set up, waiting
+	/// on authorization or the track's info, counts too. Announcements and the other
+	/// control streams don't, so a session can be idle while it still serves discovery.
+	pub fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.work.poll_idle(waiter)
+	}
+
+	/// Wait until the session carries no subscription or fetch, in either direction.
+	///
+	/// See [`poll_idle`](Self::poll_idle).
+	pub async fn idle(&self) {
+		kio::wait(|waiter| self.poll_idle(waiter)).await
+	}
+
 	/// The tokens this side presented and the grant they earned, plus the tokens
 	/// the peer presents. See [`auth`].
 	///
@@ -445,6 +463,7 @@ impl Session {
 			sample,
 			demanded: false,
 		});
+		let work = session.work().clone();
 
 		let supervisor = Supervisor {
 			goaway: Some(goaway.deadline(&runtime)),
@@ -478,6 +497,7 @@ impl Session {
 			goaway,
 			auth: auth.handle().clone(),
 			credential,
+			work,
 		};
 		let driver = crate::Driver::new(
 			runtime.clone(),
@@ -755,7 +775,7 @@ impl Supervisor {
 		// before the protocol, so the estimate a consumer reads is at most one
 		// interval old.
 		let Some(estimate) = &self.estimate else { return };
-		if estimate.poll_used(waiter).is_pending() {
+		if estimate.poll_wanted_changed(waiter, false).is_pending() {
 			return;
 		}
 		let now = self.runtime.now();
@@ -776,8 +796,8 @@ impl Supervisor {
 				SamplerMode::Idle => {
 					// Demand is a bandwidth consumer appearing or a stats read.
 					let mut demanded = match &self.send_bandwidth {
-						Some(producer) => match producer.poll_used(waiter) {
-							Poll::Ready(Ok(())) => true,
+						Some(producer) => match producer.poll_wanted_changed(waiter, false) {
+							Poll::Ready(Ok(_)) => true,
 							Poll::Ready(Err(_)) => {
 								self.send_bandwidth = None;
 								false
@@ -803,8 +823,11 @@ impl Supervisor {
 						return;
 					}
 					// The interval elapsed: pause unless someone still cares.
-					let used = self.send_bandwidth.as_ref().is_some_and(bandwidth::Producer::is_used);
-					if !used && !self.stats.read().demanded {
+					let wanted = self
+						.send_bandwidth
+						.as_ref()
+						.is_some_and(|producer| producer.demand().wanted());
+					if !wanted && !self.stats.read().demanded {
 						self.mode = SamplerMode::Idle;
 						continue;
 					}
@@ -881,6 +904,37 @@ pub(crate) struct Withdrawing(Withdrawal);
 impl Drop for Withdrawing {
 	fn drop(&mut self) {
 		self.0.0.lock().active -= 1;
+	}
+}
+
+/// The subscriptions and fetches a session carries in either direction, which
+/// [`Session::idle`] waits to reach zero.
+#[derive(Clone, Default)]
+pub(crate) struct Work(kio::Shared<usize>);
+
+impl Work {
+	/// Count one subscription or fetch until the returned guard drops.
+	pub(crate) fn start(&self) -> Working {
+		*self.0.lock() += 1;
+		Working(self.clone())
+	}
+
+	fn poll_idle(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.0
+			.poll(
+				waiter,
+				|count| if **count == 0 { Poll::Ready(()) } else { Poll::Pending },
+			)
+			.map(|_| ())
+	}
+}
+
+/// One subscription or fetch counted in [`Work`], released on drop.
+pub(crate) struct Working(Work);
+
+impl Drop for Working {
+	fn drop(&mut self) {
+		*self.0.0.lock() -= 1;
 	}
 }
 
