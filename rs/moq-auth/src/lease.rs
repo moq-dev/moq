@@ -118,8 +118,8 @@ pub(crate) enum Due {
 #[cfg(feature = "client")]
 #[derive(Debug)]
 struct Clock {
-	next: Option<moq_clock::Instant>,
-	expires: Option<moq_clock::Instant>,
+	next: Option<kio::clock::Instant>,
+	expires: Option<kio::clock::Instant>,
 	cadence: Option<Duration>,
 	failures: u32,
 	revision: u64,
@@ -132,7 +132,7 @@ impl Clock {
 			// A cadence too far out to schedule is no scheduled re-check; `expires` still bounds the grant.
 			next: grant
 				.revalidate
-				.and_then(|cadence| moq_clock::now().checked_add(cadence)),
+				.and_then(|cadence| kio::clock::now().checked_add(cadence)),
 			expires: grant.deadline(),
 			cadence: grant.revalidate,
 			failures: 0,
@@ -210,13 +210,13 @@ impl Producer {
 			};
 			let revalidate = async {
 				match next {
-					Some(at) => moq_clock::sleep_until(at).await,
+					Some(at) => kio::clock::sleep_until(at).await,
 					None => std::future::pending().await,
 				}
 			};
 			let expire = async {
 				match expires {
-					Some(at) => moq_clock::sleep_until(at).await,
+					Some(at) => kio::clock::sleep_until(at).await,
 					None => std::future::pending().await,
 				}
 			};
@@ -253,7 +253,7 @@ impl Producer {
 		let base = Duration::from_secs(1) * 2u32.saturating_pow(clock.failures.saturating_sub(1).min(16));
 		let base = base.min(clock.cadence.unwrap_or(BACKOFF_MAX)).min(BACKOFF_MAX);
 		let delay = base.mul_f64(rand::rng().random_range(0.75..=1.25));
-		clock.next = Some(moq_clock::now() + delay);
+		clock.next = Some(kio::clock::now() + delay);
 		clock.revision = clock.revision.wrapping_add(1);
 		drop(clock);
 		self.clock_changed.notify_waiters();
@@ -593,12 +593,12 @@ mod tests {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
 		grant.revalidate = Some(Duration::from_secs(10));
-		grant.expires = Some(moq_clock::wall() + Duration::from_secs(60));
+		grant.expires = Some(kio::clock::wall() + Duration::from_secs(60));
 		let (producer, consumer) = Producer::new(grant.clone());
-		assert!(moq_clock::timeout(Duration::ZERO, producer.due()).await.is_err());
+		assert!(kio::clock::timeout(Duration::ZERO, producer.due()).await.is_err());
 		tokio::time::advance(Duration::from_secs(10)).await;
 		assert_eq!(producer.due().await, Due::Revalidate);
-		assert!(moq_clock::timeout(Duration::ZERO, producer.due()).await.is_err());
+		assert!(kio::clock::timeout(Duration::ZERO, producer.due()).await.is_err());
 
 		let delay = producer.failed();
 		assert!(delay >= Duration::from_millis(750) && delay <= Duration::from_millis(1250));
@@ -609,7 +609,7 @@ mod tests {
 		producer.update(grant);
 		consumer.revalidate();
 		assert_eq!(producer.due().await, Due::Revalidate);
-		assert!(moq_clock::timeout(Duration::ZERO, producer.due()).await.is_err());
+		assert!(kio::clock::timeout(Duration::ZERO, producer.due()).await.is_err());
 	}
 
 	#[cfg(feature = "client")]
@@ -618,7 +618,7 @@ mod tests {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
 		grant.revalidate = Some(Duration::from_secs(30));
-		grant.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
+		grant.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		let (producer, _consumer) = Producer::new(grant.clone());
 		let producer = std::sync::Arc::new(producer);
 		let waiter = tokio::spawn({
@@ -638,7 +638,7 @@ mod tests {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
 		grant.revalidate = Some(Duration::from_secs(30));
-		grant.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
+		grant.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 		let (producer, _consumer) = Producer::new(grant);
 		let first = producer.failed();
 		assert!(first >= Duration::from_millis(750) && first <= Duration::from_millis(1250));
@@ -657,7 +657,7 @@ mod tests {
 		grant.revalidate = Some(Duration::MAX);
 		let (producer, _consumer) = Producer::new(grant);
 		tokio::time::advance(Duration::from_secs(3600)).await;
-		assert!(moq_clock::timeout(Duration::ZERO, producer.due()).await.is_err());
+		assert!(kio::clock::timeout(Duration::ZERO, producer.due()).await.is_err());
 	}
 
 	#[cfg(feature = "client")]
@@ -665,7 +665,7 @@ mod tests {
 	async fn due_expires_even_without_a_recheck() {
 		tokio::time::pause();
 		let mut grant = grant("a/**");
-		grant.expires = Some(moq_clock::wall() - Duration::from_secs(4));
+		grant.expires = Some(kio::clock::wall() - Duration::from_secs(4));
 		let (producer, _consumer) = Producer::new(grant);
 		let task = tokio::spawn(async move { producer.due().await });
 		tokio::task::yield_now().await;

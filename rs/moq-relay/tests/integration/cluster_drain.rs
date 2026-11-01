@@ -136,7 +136,7 @@ async fn peer(name: &str, forwarder: &Forwarder) -> (cluster::Cluster, moq_net::
 }
 
 /// Advance the manual clock by `total`, one [`STEP`] at a time.
-async fn pass(clock: &moq_clock::Installed, total: Duration) {
+async fn pass(clock: &kio::clock::Installed, total: Duration) {
 	let mut passed = Duration::ZERO;
 	while passed < total {
 		clock.advance(STEP);
@@ -155,7 +155,7 @@ fn draining_relay_keeps_its_peers_until_it_restarts() {
 }
 
 async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
-	let clock = moq_clock::Manual::new().install(&tokio::runtime::Handle::current());
+	let clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
 
 	let (b, b_addr, _b_broadcast) = relay("b").await;
 	let b_origin = b.cluster().origin.clone();

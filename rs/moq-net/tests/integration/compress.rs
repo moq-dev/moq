@@ -119,7 +119,7 @@ const RANGED: &[&str] = &["moq-lite-07-wip", "moq-transport-18", "moq-transport-
 
 /// A subscription starting at a group delivers it whole from its first frame across every
 /// pair of hops, compressed or not, whether the group began before it subscribed or after.
-#[moq_clock::test]
+#[kio::test]
 async fn a_start_group_arrives_whole() {
 	use moq_net::track::{Anchor, Subscription};
 	let write = |group: &mut moq_net::group::Producer, frames: std::ops::Range<u64>| {
@@ -138,7 +138,7 @@ async fn a_start_group_arrives_whole() {
 				// or fill delivers.
 				for head in [0, 3] {
 					let case = format!("{upstream} -> {downstream}, compress {compress}, head {head}");
-					moq_clock::timeout(TIMEOUT, async {
+					kio::clock::timeout(TIMEOUT, async {
 						let info = match compress {
 							true => compressed(),
 							false => moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
@@ -180,10 +180,10 @@ async fn a_start_group_arrives_whole() {
 
 /// Whole and chunked frames on a compressed track read back as written on every version,
 /// and only a peer that can signal it learns the track is compressed.
-#[moq_clock::test]
+#[kio::test]
 async fn relay_serves_every_version() {
 	for &version in VERSIONS {
-		moq_clock::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			let mut fixture = connect("moq-lite-07-wip", version).await;
 			assert_eq!(
 				fixture.subscriber.info().compress,
@@ -230,10 +230,10 @@ async fn relay_serves_every_version() {
 
 /// A compressed track's datagrams read back as written, whether the subscriber takes them
 /// compressed or inflated.
-#[moq_clock::test]
+#[kio::test]
 async fn datagrams_serve_every_version() {
 	for &version in &["moq-lite-07-wip", "moq-lite-06", "moq-transport-18", "moq-transport-22"] {
-		moq_clock::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			let mut fixture = connect("moq-lite-07-wip", version).await;
 			fixture
 				.track
@@ -261,10 +261,10 @@ fn traffic(registry: &moq_net::stats::Registry, role: moq_net::stats::Role) -> m
 /// A relay meters a compressed track's datagram in the form each wire carries: compressed
 /// on ingress and on moq-lite 07 egress, inflated to an older subscriber. Only `inflated`
 /// counts the bytes the relay inflated.
-#[moq_clock::test]
+#[kio::test]
 async fn datagrams_meter_the_bytes_on_the_wire() {
 	for &version in &["moq-lite-07-wip", "moq-lite-06"] {
-		moq_clock::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let broadcast = publisher.create_broadcast("bcast").unwrap();
 			let mut track = broadcast.create_track("data", compressed()).unwrap();
@@ -324,11 +324,11 @@ async fn datagrams_meter_the_bytes_on_the_wire() {
 }
 
 /// Negotiated IETF ingress stays compressed across a relay to IETF or lite-07 egress.
-#[moq_clock::test]
+#[kio::test]
 async fn ietf_ingress_stays_compressed_across_protocols() {
 	for upstream in ["moq-transport-18", "moq-transport-22"] {
 		for downstream in ["moq-lite-07-wip", "moq-transport-22"] {
-			moq_clock::timeout(TIMEOUT, async {
+			kio::clock::timeout(TIMEOUT, async {
 				let mut fixture = connect(upstream, downstream).await;
 				assert!(fixture.subscriber.info().compress, "{upstream} -> {downstream}");
 				let mut group = fixture.track.append_group().unwrap();
@@ -369,10 +369,10 @@ async fn ietf_ingress_stays_compressed_across_protocols() {
 }
 
 /// A finished compressed track remains fetchable without subscribing to its live feed.
-#[moq_clock::test]
+#[kio::test]
 async fn ietf_fetch_keeps_the_stored_form() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
-		moq_clock::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			let publisher = produce_origin(1);
 			let broadcast = publisher.create_broadcast("bcast").unwrap();
 			let track = broadcast.create_track("data", compressed()).unwrap();
