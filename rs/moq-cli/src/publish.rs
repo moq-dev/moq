@@ -1769,9 +1769,8 @@ pub(crate) mod tests {
 			// Joining once every group is out, with a budget half the jump, reads every group
 			// after it past the marker, and none of the groups the jump left more than
 			// the budget behind. An IETF subscription starts at the newest group, so only lite
-			// has the groups behind it to read, and a lite-06 subscriber drops the timestamps
-			// that carry the jump.
-			if version == "moq-lite-07-wip" {
+			// has the groups behind it to read.
+			if version.starts_with("moq-lite") {
 				let late =
 					read(start(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10))).await)
 						.await

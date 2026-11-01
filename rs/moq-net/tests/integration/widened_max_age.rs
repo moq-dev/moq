@@ -4,8 +4,8 @@
 //! relay would: the widened SUBSCRIBE_UPDATE has the publisher re-offer the cached groups
 //! it skipped as stale, below where the copy started.
 //!
-//! Lite-06 relies on that re-offer alone: its copy is untimed and its FETCH carries no max
-//! age, so a reader asks no fills below the start the publisher resolved from the budget.
+//! Lite-06 relies on that re-offer alone: its FETCH carries no max age, so a reader asks no
+//! fills below the start the publisher resolved from the budget.
 
 use std::collections::BTreeSet;
 use std::time::Duration;
@@ -186,14 +186,10 @@ async fn a_warm_relay_serves_a_wider_newcomer_what_a_cold_one_would() {
 		let mut wide = kio::clock::timeout(TIMEOUT, warm.subscribe(WIDE)).await.unwrap();
 		let got = kio::clock::timeout(TIMEOUT, received(&mut wide)).await.unwrap();
 		assert_eq!(got, want, "{version}: warm");
-		// A lite-06 copy has no media time to find the re-offer stale by, and each group in
-		// it arrives just now, so the narrow reader takes it too, once per widening.
+		// The copy keeps the publisher's media time, lite-06's included, so the narrow
+		// reader finds the re-offered groups stale and takes none of them.
 		let late = kio::clock::timeout(TIMEOUT, received(&mut narrow)).await.unwrap();
-		let reoffered = match version {
-			"moq-lite-06" => (2..6).collect(),
-			_ => BTreeSet::new(),
-		};
-		assert_eq!(late, reoffered, "{version}: what the narrow reader takes late");
+		assert_eq!(late, BTreeSet::new(), "{version}: what the narrow reader takes late");
 	}
 }
 

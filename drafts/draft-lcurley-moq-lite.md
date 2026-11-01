@@ -190,7 +190,7 @@ A Track without a `Timescale` is untimed: its frames and datagrams carry no time
 A timestamp MUST be less than 2^61, so every version can carry it; a receiver treats a larger one as a malformed Track.
 Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a timed Group's frame 0 earlier than that of any lower-sequence Group it publishes.
 A receiver MAY check a received Group against this rule, refusing a violating Group's stream (STOP_SENDING) with TIMESTAMP_MISMATCH.
-A relay that cannot vouch for a Track's timestamps, such as ones received over another protocol, MUST serve the Track untimed unless a negotiated extension identifies their unchecked provenance.
+A relay serves a Track's timestamps on as it received them, including ones it did not check, unless a negotiated extension specifies otherwise.
 
 ## Positions {#positions}
 A Position is a (Group Sequence, Frame Index) pair identifying one frame within a Track.
@@ -1832,7 +1832,7 @@ The `Message Length` describes the payload size on the wire.
 
 - Replaced ANNOUNCE_OK Active Count with an ordered, empty SYNCED event (0x4), marking the initial set without retaining routes that end before delivery.
 
-- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's, and a receiver may refuse a Group that does. A relay serves a Track whose timestamps it cannot vouch for untimed unless a negotiated extension identifies their unchecked provenance.
+- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.
 
 - Bounded every timestamp below 2^61. A larger one is a malformed Track.
 

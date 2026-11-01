@@ -1,0 +1,40 @@
+# Opt-in test targets with no CI caller, each owned by the quest that gives it
+# one: `<kind> <name> <quest>`. sh/gh/test-inventory.py prints the name of any
+# orphan missing here, and fails on an entry that has a caller.
+
+# Need a GPU, a desktop, or a device that no CI runner has.
+ignore moq-carla-bridge::gpu_video_reaches_the_worker /quest/m2/carla-bridge.md
+recipe carla::bridge-gpu /quest/m2/carla-bridge.md
+recipe rs::gpu /quest/m2/gpu-ci.md
+ignore moq-video::frame::vulkan::tests::vulkan_gpu_device /quest/m2/gpu-ci.md
+ignore moq-video::frame::vulkan::tests::vulkan_cuda_slot_reuse_and_teardown /quest/m2/gpu-ci.md
+ignore moq-video::frame::cuda::tests::vulkan_cuda_auto_external_encode /quest/m2/gpu-ci.md
+ignore moq-video::frame::cuda::tests::vulkan_cuda_convert_resize_encode /quest/m2/gpu-ci.md
+ignore moq-video::frame::cuda::tests::vulkan_cuda_three_view_workload /quest/m2/gpu-ci.md
+ignore moq-video::render::export::vulkan::tests::nvenc_encodes_the_export_in_place /quest/m2/gpu-ci.md
+ignore moq-video::render::export::vulkan::tests::vulkan_export_round_trips /quest/m2/gpu-ci.md
+ignore moq-video::render::renderer::tests::decoded_frames_reach_the_gpu_without_a_download /quest/m2/vaapi-render-tests.md
+ignore moq-video::render::renderer::tests::packed_dmabuf_renders_through_vulkan /quest/m2/vaapi-render-tests.md
+ignore moq-video::render::renderer::tests::recycled_decoder_surfaces_draw_the_latest_picture /quest/m2/vaapi-render-tests.md
+ignore moq-video::render::renderer::tests::the_i420_dmabuf_import_matches_the_cpu_path /quest/m2/vaapi-render-tests.md
+ignore moq-video::render::renderer::tests::the_nv12_dmabuf_import_matches_the_cpu_path /quest/m2/vaapi-render-tests.md
+ignore moq-video::decode::backend::mediacodec::tests::decodes_what_the_encoder_produced /quest/m2/android-mediacodec-ci.md
+ignore moq-video::encode::backend::mediacodec::tests::encodes_a_keyframe_with_parameter_sets_inline /quest/m2/android-mediacodec-ci.md
+ignore moq-video::capture::wgc::native::tests::wgc_displays_reopen_with_cursor_on_and_off /quest/m2/capture-wgc.md
+ignore moq-video::capture::wgc::native::tests::wgc_minimized_window_is_rejected_before_the_first_frame /quest/m2/capture-wgc.md
+ignore moq-video::capture::wgc::native::tests::wgc_window_reopens_with_cursor_on_and_off /quest/m2/capture-wgc.md
+ignore moq-video::capture::pipewire::camera::tests::pipewire_camera_captures_frames /quest/m3/video-hardware.md
+ignore moq-video::capture::pipewire::tests::portal_captures_frames /quest/m3/video-hardware.md
+ignore moq-video::decode::decoder::tests::mediafoundation_resized_texture_reencodes_in_place /quest/m3/video-hardware.md
+ignore moq-video::encode::encoder::tests::mediafoundation_camera_texture /quest/m3/video-hardware.md
+ignore moq-video::encode::encoder::tests::mediafoundation_cpu_rgba /quest/m3/video-hardware.md
+ignore moq-video::encode::encoder::tests::wgc_nv12_encodes_with_matching_color_on_gpu_and_software /quest/m3/video-hardware.md
+ignore moq-video::frame::d3d11::tests::wgc_conversion_crops_odd_edges_and_preserves_color /quest/m3/video-hardware.md
+ignore moq-video::frame::d3d11::tests::wgc_conversion_workload /quest/m3/video-hardware.md
+ignore moq-video::frame::tests::d3d11_resize_defaults_to_the_gpu /quest/m3/video-hardware.md
+ignore moq-video::frame::tests::d3d11_resize_matches_cpu /quest/m3/video-hardware.md
+ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m3/video-hardware.md
+ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m3/video-hardware.md
+
+# Waiting on pinned bundlers before it can run nightly.
+recipe js::worklet-matrix /quest/m2/browser-test-gaps.md
