@@ -29,6 +29,10 @@ mod entropy;
 #[doc(hidden)]
 pub mod fuzz;
 mod range_set;
+// Not part of the public API: the network path the crate's tests and simulated drivers share.
+#[cfg(any(test, feature = "sim"))]
+#[doc(hidden)]
+pub mod sim;
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
 mod tests;
 pub mod transport_parameters;
