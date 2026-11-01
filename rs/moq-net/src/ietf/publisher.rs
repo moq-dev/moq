@@ -173,7 +173,27 @@ async fn prepare_fetch(
 		let reason = err.to_string();
 		(err, reason)
 	};
-	track.info().await.map_err(failed)?;
+	// Asking for the group needs nothing from the track's info, only judging and answering
+	// it: a relay's FETCH goes upstream alongside the request for the info, driven while
+	// that resolves.
+	let mut ahead = largest_filter.is_none().then(|| {
+		Ahead::Fetching(track.fetch_group(
+			range.start.group,
+			group::Fetch {
+				priority,
+				..Default::default()
+			},
+		))
+	});
+	let info = track.info();
+	kio::wait(|waiter| {
+		if let Some(ahead) = &mut ahead {
+			ahead.poll(waiter);
+		}
+		info.poll_ok(waiter)
+	})
+	.await
+	.map_err(failed)?;
 	// The cache's newest object is Largest Object while a live feed writes the track, or once
 	// the track ended at its newest group. A fetch-only copy retains its publisher's report
 	// independently. A joining FETCH ends where its subscription starts instead.
@@ -236,10 +256,34 @@ async fn prepare_fetch(
 		range.until(range.start.group),
 		priority,
 		compression,
+		ahead,
 	)
 	.await
 	.map_err(failed)?;
 	Ok(PreparedFetch { range, last })
+}
+
+/// A whole-group fetch made before the track's info resolved.
+enum Ahead {
+	Fetching(kio::Pending<track::Fetching>),
+	Fetched(Result<group::Consumer, Error>),
+}
+
+impl Ahead {
+	fn poll(&mut self, waiter: &kio::Waiter) {
+		if let Self::Fetching(fetching) = self
+			&& let Poll::Ready(result) = kio::Task::poll(&mut **fetching, waiter)
+		{
+			*self = Self::Fetched(result);
+		}
+	}
+
+	async fn fetched(self) -> Result<group::Consumer, Error> {
+		match self {
+			Self::Fetching(fetching) => fetching.await,
+			Self::Fetched(result) => result,
+		}
+	}
 }
 
 /// The group a FETCH answers with, read out of the cache so a later eviction cannot
@@ -309,7 +353,8 @@ impl FetchedGroup {
 /// `until`, or through the end of the group without one.
 ///
 /// This is a [`track::Consumer::fetch_group`], so a relay fetches a miss upstream. The
-/// track's info resolves first, as it would for a SUBSCRIBE.
+/// track's info resolves first, as it would for a SUBSCRIBE; `ahead` is the whole group
+/// already asked for, used for a miss.
 async fn read_fetch(
 	track: &track::Consumer,
 	sequence: u64,
@@ -317,6 +362,7 @@ async fn read_fetch(
 	until: Option<u64>,
 	priority: i8,
 	compression: bool,
+	ahead: Option<Ahead>,
 ) -> Result<FetchedGroup, Error> {
 	let info = track.info().await?;
 	let cached = track.peek_group(sequence);
@@ -333,16 +379,21 @@ async fn read_fetch(
 		(None, Some(_)) => skip,
 		(_, None) => 0,
 	};
-	let mut group = track
-		.fetch_group(
-			sequence,
-			group::Fetch {
-				priority,
-				frame_start,
-				..Default::default()
-			},
-		)
-		.await?;
+	let mut group = match ahead {
+		Some(ahead) if frame_start == 0 => ahead.fetched().await?,
+		_ => {
+			track
+				.fetch_group(
+					sequence,
+					group::Fetch {
+						priority,
+						frame_start,
+						..Default::default()
+					},
+				)
+				.await?
+		}
+	};
 	if compression {
 		group = group.compressed();
 	}
@@ -6748,7 +6799,8 @@ mod subscribe_cursor_test {
 		open.write_frame(crate::Timestamp::ZERO, b"a".to_vec()).unwrap();
 
 		let consumer = track.consume();
-		let read = kio::clock::sim::spawn(async move { read_fetch(&consumer, 0, 0, None, 0, false).await.map(|_| ()) });
+		let read =
+			kio::clock::sim::spawn(async move { read_fetch(&consumer, 0, 0, None, 0, false, None).await.map(|_| ()) });
 		kio::clock::sim::yield_now().await;
 		// The track runs a full second past the group's successor.
 		for ms in [1000, 2000] {
