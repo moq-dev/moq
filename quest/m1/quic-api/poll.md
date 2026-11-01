@@ -24,7 +24,7 @@ primary surface. [Native WebTransport](/quest/m1/quic-api/native-web.md) and
 
 Decided 2026-10-25 (maintainer), replacing the 2026-10-23 shape:
 
-- **moq-quic owns the waits** ([waits](/quest/m1/quic-api/waits.md)). Each
+- **moq-quic owns the waits** (landed: `connection/waits.rs`). Each
   connection and stream form here takes the lock and forwards to moq-quic's
   `poll_*` in one line; the driver keeps no waiter table of its own. Only
   `Endpoint::poll_accept` waits on driver state, the queue of handshaken
@@ -59,7 +59,7 @@ async forms unchanged.
 
 Added 2026-11-01 (maintainer, follow-up planning after the 2026-11-01
 /quest-afk run), from [moq-dev/moq#7490](https://github.com/moq-dev/moq/pull/7490),
-which finishes [waits](/quest/m1/quic-api/waits.md):
+which finishes the waits quest:
 
 - **Remove `ShouldTransmit`.** Once moq-quic wakes the transmit waiter itself,
   the `ShouldTransmit` that `Chunks::finalize` and the send lease methods
@@ -75,10 +75,6 @@ which finishes [waits](/quest/m1/quic-api/waits.md):
   Add one (a test socket whose sends return `WouldBlock` until released) and
   a test that a close behind it is still bounded, mirroring qmux's
   `a_close_behind_a_stalled_peer_is_bounded`.
-
-## Required
-
-- [Waits](/quest/m1/quic-api/waits.md) - moq-quic's `poll_*` forms these forward to
 
 ## Related
 

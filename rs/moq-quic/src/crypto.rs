@@ -31,7 +31,7 @@ pub trait Session: Send + Sync + 'static {
 
 	/// Get data negotiated during the handshake, if available
 	///
-	/// Returns `None` until the connection emits `HandshakeDataReady`.
+	/// Returns `None` until the connection's `poll_handshake_data` is ready.
 	fn handshake_data(&self) -> Option<Box<dyn Any>>;
 
 	/// Get the peer's identity, if available

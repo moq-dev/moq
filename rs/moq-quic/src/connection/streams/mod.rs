@@ -3,7 +3,7 @@ use std::task::Poll;
 use tracing::trace;
 
 use super::spaces::{Retransmits, ThinRetransmits};
-use crate::{Dir, StreamId, VarInt, connection::Error, frame};
+use crate::{Dir, StreamId, connection::Error, frame};
 
 mod lease;
 pub mod recv;
@@ -48,6 +48,8 @@ impl<'a> Streams<'a> {
 		if self.state.next[dir as usize] >= self.state.max[dir as usize] {
 			self.state.streams_blocked[dir as usize] = true;
 			self.state.open_refused[dir as usize] = true;
+			// STREAMS_BLOCKED
+			self.state.waits.wake_transmit();
 			return None;
 		}
 
@@ -155,6 +157,7 @@ impl StreamsState {
 	) -> bool {
 		let group = options.group.map(|g| g.index(self.tag));
 		let frame = datagram.size();
+		self.waits.wake_transmit();
 		self.pending
 			.push_datagram(group, options.priority, datagram, frame, budget)
 	}
@@ -178,59 +181,6 @@ impl StreamsState {
 	pub(crate) fn datagram_bytes(&self) -> usize {
 		self.pending.datagram_bytes()
 	}
-}
-
-/// Application events about streams
-#[derive(Debug, PartialEq, Eq)]
-pub enum StreamEvent {
-	/// One or more new streams has been opened and can be accepted
-	///
-	/// A separate [`StreamEvent::Readable`] is emitted once data arrives.
-	Opened {
-		/// Directionality for which streams have been opened
-		dir: Dir,
-	},
-	/// A currently open stream likely has data or errors waiting to be read
-	Readable {
-		/// Which stream is now readable
-		id: StreamId,
-	},
-	/// A formerly write-blocked stream might be ready for a write or have been stopped
-	///
-	/// Only generated for streams that are currently open.
-	Writable {
-		/// Which stream is now writable
-		id: StreamId,
-	},
-	/// A finished stream has been fully acknowledged or stopped
-	Finished {
-		/// Which stream has been finished
-		id: StreamId,
-	},
-	/// The answer changed for the lowest offset a [`send::Stream::acked`] call is waiting for
-	///
-	/// The stream's contiguous acknowledged prefix reached it, or a reset or STOP_SENDING may have
-	/// failed any waiter. Every waiter on the stream polls again: one at or below `offset` is
-	/// acknowledged, and one past it learns its error or registers again. Reported before a [`StreamEvent::Finished`] from the same ACK.
-	/// Not reported when the connection closes, which fails [`send::Stream::acked`] instead.
-	Acked {
-		/// Which stream was acknowledged
-		id: StreamId,
-		/// The end of the stream's contiguous acknowledged prefix
-		offset: u64,
-	},
-	/// The peer asked us to stop sending on an outgoing stream
-	Stopped {
-		/// Which stream has been stopped
-		id: StreamId,
-		/// Error code supplied by the peer
-		error_code: VarInt,
-	},
-	/// At least one new stream of a certain directionality may be opened
-	Available {
-		/// Directionality for which streams are newly available
-		dir: Dir,
-	},
 }
 
 /// Indicates whether a frame needs to be transmitted

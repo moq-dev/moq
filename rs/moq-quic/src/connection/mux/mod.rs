@@ -10,7 +10,7 @@
 //! Like [`crate::connection::Connection`], it performs no I/O. Feed it each record (each frame on
 //! draft-00) the transport delimits with [`Connection::handle_record`], write out what
 //! [`Connection::poll_transmit`] returns, run [`Connection::handle_timeout`] at
-//! [`Connection::poll_timeout`], and drain [`Connection::poll`] for events.
+//! [`Connection::poll_timeout`], and wait on its `poll_*` forms as on QUIC.
 
 use std::{collections::VecDeque, num::NonZeroU64, task::Poll};
 
@@ -22,7 +22,7 @@ use super::{
 	datagrams::DatagramState,
 	spaces::Retransmits,
 	stats::FrameStats,
-	streams::{StreamEvent, Streams, StreamsState, recv, send},
+	streams::{Streams, StreamsState, recv, send},
 };
 use crate::{
 	ApplicationClose, Dir, Duration, Instant, Limits, MAX_STREAM_COUNT, Side, TransportError, VarInt,
@@ -127,22 +127,6 @@ fn limit(limit: Option<NonZeroU64>, default: u64) -> VarInt {
 	VarInt::from_u64(limit.map_or(default, NonZeroU64::get)).unwrap_or(VarInt::MAX)
 }
 
-/// Events from [`Connection::poll`]
-#[derive(Debug)]
-pub enum Event {
-	/// The peer's transport parameters arrived, so streams can be opened
-	Connected,
-	/// Stream activity, as on QUIC
-	Stream(StreamEvent),
-	/// One or more datagrams arrived
-	DatagramReceived,
-	/// The connection ended
-	ConnectionLost {
-		/// Why: [`ConnectionError::Reset`] means the transport ended without a close frame
-		reason: ConnectionError,
-	},
-}
-
 /// A QMux connection over a reliable, ordered transport
 pub struct Connection {
 	side: Side,
@@ -170,7 +154,6 @@ pub struct Connection {
 	close: Option<Close>,
 	close_sent: bool,
 	error: Option<ConnectionError>,
-	events: VecDeque<Event>,
 	/// Draft-00 frames already serialized, one per transport message
 	queued: VecDeque<Bytes>,
 }
@@ -211,7 +194,6 @@ impl Connection {
 			close: None,
 			close_sent: false,
 			error: None,
-			events: VecDeque::new(),
 			queued: VecDeque::new(),
 		}
 	}
@@ -329,8 +311,23 @@ impl Connection {
 		});
 	}
 
-	/// The next record to write, without its Size field, or the next frame on draft-00
-	pub fn poll_transmit(&mut self, now: Instant) -> Option<Bytes> {
+	/// The next record to write, without its Size field, or the next frame on draft-00, or wait
+	/// for one
+	///
+	/// Pending registers `waiter` until the application queues something, as on QUIC. Poll
+	/// again after [`Self::handle_record`] and at [`Self::poll_timeout`].
+	pub fn poll_transmit(&mut self, waiter: &kio::Waiter, now: Instant) -> Poll<Bytes> {
+		match self.transmit(now) {
+			Some(record) => Poll::Ready(record),
+			None => {
+				self.streams.waits.register_transmit(waiter);
+				Poll::Pending
+			}
+		}
+	}
+
+	/// The next record to write, if any, as [`Self::poll_transmit`] without the wait
+	pub(crate) fn transmit(&mut self, now: Instant) -> Option<Bytes> {
 		if let Some(frame) = self.queued.pop_front() {
 			return Some(frame);
 		}
@@ -366,14 +363,6 @@ impl Connection {
 		} else if due.ping {
 			self.ping_request = true;
 		}
-	}
-
-	/// The next event
-	pub fn poll(&mut self) -> Option<Event> {
-		if let Some(event) = self.events.pop_front() {
-			return Some(event);
-		}
-		self.streams.poll().map(Event::Stream)
 	}
 
 	/// Open and accept streams
@@ -731,7 +720,6 @@ impl Connection {
 					.datagrams
 					.received(datagram, &Some(self.config.datagram_receive_buffer_size))?
 				{
-					self.events.push_back(Event::DatagramReceived);
 					self.streams.waits.wake_datagram();
 				}
 			}
@@ -794,7 +782,6 @@ impl Connection {
 		};
 		self.timer.established(idle, self.config.rtt_interval, now);
 		self.peer = Some(peer);
-		self.events.push_back(Event::Connected);
 		self.streams.waits.connected();
 		Ok(())
 	}
@@ -807,7 +794,6 @@ impl Connection {
 		self.error = Some(reason.clone());
 		self.streams.waits.lose(reason.clone());
 		self.conn_state = ConnectionState::Draining;
-		self.events.push_back(Event::ConnectionLost { reason });
 	}
 }
 

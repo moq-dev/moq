@@ -18,7 +18,7 @@ whose C, C++, and Kotlin bindings drive it from their own loops
 Decided with the maintainer on 2026-10-28, from
 [moq-dev/rust2#215](https://github.com/moq-dev/rust2/pull/215):
 
-- **After [waits](/quest/m1/quic-api/waits.md) and [poll](/quest/m1/quic-api/poll.md).**
+- **After the waits (landed) and [poll](/quest/m1/quic-api/poll.md).**
   Once moq-quic owns its waits, a driver is I/O, timers, and a lock. This one is the
   timers and the lock, with the caller doing the I/O. Built earlier, it would carry the
   waiter tables that waits deletes.
@@ -49,7 +49,6 @@ impl.
 
 ## Required
 
-- [Waits](/quest/m1/quic-api/waits.md) - moq-quic owns every wait, so the driver keeps no waiter table
 - [Poll forms](/quest/m1/quic-api/poll.md) - the drivers' poll shape this one mirrors
 
 ## Related

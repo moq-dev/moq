@@ -105,7 +105,7 @@ pub use stats::{CreditStats, FrameStats, PathStats, Stats, UdpStats};
 
 mod streams;
 pub(crate) use streams::StreamsState;
-pub use streams::{ShouldTransmit, StreamEvent, Streams, recv, send};
+pub use streams::{ShouldTransmit, Streams, recv, send};
 
 mod timer;
 
@@ -227,8 +227,6 @@ pub struct Connection {
 	/// Authenticated 1-RTT packets that arrived before the handshake completed, to be processed
 	/// once it has
 	early_1rtt: Vec<EarlyPacket>,
-	/// Why the connection was lost, if it has been
-	error: Option<Error>,
 	/// Identifies Data-space packet numbers to skip. Not used in earlier spaces.
 	packet_number_filter: PacketNumberFilter,
 
@@ -371,7 +369,6 @@ impl Connection {
 			timers: TimerTable::default(),
 			authentication_failures: 0,
 			early_1rtt: Vec::new(),
-			error: None,
 			#[cfg(test)]
 			packet_number_filter: match config.deterministic_packet_numbers {
 				false => PacketNumberFilter::new(&mut rng),
@@ -449,6 +446,15 @@ impl Connection {
 		}
 	}
 
+	/// Wait for the handshake's negotiated parameters, which
+	/// [`crypto_session().handshake_data()`](crypto::Session::handshake_data) then returns
+	///
+	/// Ready once they arrived, even if the connection was lost since, or with the reason the
+	/// connection was lost first.
+	pub fn poll_handshake_data(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.streams.waits.poll_handshake_data(waiter)
+	}
+
 	/// Wait for the handshake to complete
 	///
 	/// Ready once it did, even if the connection was lost since, or with the reason the
@@ -469,26 +475,19 @@ impl Connection {
 		self.streams.waits.poll_closed(waiter)
 	}
 
-	/// Returns application-facing events
+	/// Why the connection was lost, if it was, as [`poll_closed`](Self::poll_closed) reports it
+	pub fn error(&self) -> Option<&Error> {
+		self.streams.waits.lost()
+	}
+
+	/// Returns application-facing notifications that no `poll_*` wait covers
 	///
 	/// Connections should be polled for events after:
 	/// - a call was made to `handle_event`
 	/// - a call was made to `handle_timeout`
 	#[must_use]
 	pub fn poll(&mut self) -> Option<Event> {
-		if let Some(x) = self.events.pop_front() {
-			return Some(x);
-		}
-
-		if let Some(event) = self.streams.poll() {
-			return Some(Event::Stream(event));
-		}
-
-		if let Some(err) = self.error.take() {
-			return Some(Event::ConnectionLost { reason: err });
-		}
-
-		None
+		self.events.pop_front()
 	}
 
 	/// Return endpoint-facing events
@@ -537,17 +536,36 @@ impl Connection {
 		}
 	}
 
-	/// Returns packets to transmit
+	/// Returns packets to transmit, or waits for something to send
 	///
-	/// Connections should be polled for transmit after:
-	/// - the application performed some I/O on the connection
-	/// - a call was made to `handle_event`
-	/// - a call was made to `handle_timeout`
+	/// Pending registers `waiter` until the application queues something: a write, a finish, a
+	/// reset or stop, a refused open, returned credit, a datagram, new limits, a local address
+	/// change, or a close. Only the application's calls wake it. Poll again after a call to
+	/// `handle_event` or `handle_timeout`, and at [`Self::poll_timeout`], which covers pacing and
+	/// loss recovery. A new probe target waits for the next poll, since probing only resends data
+	/// in flight.
 	///
 	/// `max_datagrams` specifies how many datagrams can be returned inside a
 	/// single Transmit using GSO. This must be at least 1.
+	pub fn poll_transmit(
+		&mut self,
+		waiter: &kio::Waiter,
+		now: Instant,
+		max_datagrams: usize,
+		buf: &mut Vec<u8>,
+	) -> Poll<Transmit> {
+		match self.transmit(now, max_datagrams, buf) {
+			Some(transmit) => Poll::Ready(transmit),
+			None => {
+				self.streams.waits.register_transmit(waiter);
+				Poll::Pending
+			}
+		}
+	}
+
+	/// The packets to transmit now, if any, as [`Self::poll_transmit`] without the wait
 	#[must_use]
-	pub fn poll_transmit(&mut self, now: Instant, max_datagrams: usize, buf: &mut Vec<u8>) -> Option<Transmit> {
+	pub(crate) fn transmit(&mut self, now: Instant, max_datagrams: usize, buf: &mut Vec<u8>) -> Option<Transmit> {
 		assert!(max_datagrams != 0);
 		let max_datagrams = match self.config.segmentation_offload {
 			false => 1,
@@ -1432,16 +1450,14 @@ impl Connection {
 	///
 	/// This does not ensure delivery of outstanding data. It is the application's responsibility to
 	/// call this only when all important communications have been completed, e.g. by calling
-	/// [`send::Stream::finish`] on outstanding streams and waiting for the corresponding
-	/// [`StreamEvent::Finished`] event.
+	/// [`send::Stream::finish`] on outstanding streams and waiting for
+	/// [`send::Stream::poll_end`].
 	///
 	/// If [`Streams::send_streams`] returns 0, all outstanding stream data has been
 	/// delivered. There may still be data from the peer that has not been received.
 	///
 	/// A connection not already closed reports [`Error::LocallyClosed`] with `error_code` and
-	/// `reason` as its [`ConnectionLost`](Event::ConnectionLost).
-	///
-	/// [`StreamEvent::Finished`]: crate::StreamEvent::Finished
+	/// `reason` from [`poll_closed`](Self::poll_closed), and fails every other wait.
 	pub fn close(&mut self, now: Instant, error_code: VarInt, reason: String) {
 		if !self.state.is_closed() {
 			self.lose(Error::LocallyClosed {
@@ -1542,9 +1558,8 @@ impl Connection {
 
 	/// Whether the connection is in the process of being established
 	///
-	/// If this returns `false`, the connection may be either established or closed, signaled by the
-	/// emission of a [`Connected`](Event::Connected) or [`ConnectionLost`](Event::ConnectionLost)
-	/// event respectively.
+	/// If this returns `false`, the connection may be either established or closed, as
+	/// [`poll_connected`](Self::poll_connected) and [`poll_closed`](Self::poll_closed) report.
 	pub fn is_handshaking(&self) -> bool {
 		self.state.is_handshake()
 	}
@@ -1555,9 +1570,8 @@ impl Connection {
 	/// either peer application intentionally closes it, or when either transport layer detects an
 	/// error such as a time-out or certificate validation failure.
 	///
-	/// A [`ConnectionLost`](Event::ConnectionLost) event is emitted with details however the
-	/// connection closes, with [`Error::LocallyClosed`] when the local application closed it via
-	/// [`close()`](Self::close).
+	/// [`poll_closed`](Self::poll_closed) reports why however the connection closes, with
+	/// [`Error::LocallyClosed`] when the local application closed it via [`close()`](Self::close).
 	pub fn is_closed(&self) -> bool {
 		self.state.is_closed()
 	}
@@ -1694,6 +1708,8 @@ impl Connection {
 			self.set_max_concurrent_streams(Dir::Bi, streams);
 			self.set_max_concurrent_streams(Dir::Uni, streams);
 		}
+		// MAX_DATA or MAX_STREAMS may be due, and a new rate moves the pacing deadline.
+		self.streams.waits.wake_transmit();
 		Ok(())
 	}
 
@@ -2406,7 +2422,7 @@ impl Connection {
 		while let Some(chunk) = space.crypto_stream.read(usize::MAX) {
 			trace!("consumed {} CRYPTO bytes", chunk.bytes.len());
 			if self.crypto.read_handshake(&chunk.bytes)? {
-				self.events.push_back(Event::HandshakeDataReady);
+				self.streams.waits.handshake_data();
 			}
 		}
 
@@ -2908,12 +2924,10 @@ impl Connection {
 					// Server-only
 					self.spaces[SpaceId::Data].pending.handshake_done = true;
 					self.discard_space(now, SpaceId::Handshake);
-					self.events.push_back(Event::HandshakeConfirmed);
 					self.streams.waits.confirmed();
 					trace!("handshake confirmed");
 				}
 
-				self.events.push_back(Event::Connected);
 				self.streams.waits.connected();
 				self.state = State::Established;
 				// Swap the handshake idle timeout for the negotiated one.
@@ -3267,7 +3281,6 @@ impl Connection {
 						.datagrams
 						.received(datagram, &self.config.datagram.receive_buffer)?
 					{
-						self.events.push_back(Event::DatagramReceived);
 						self.streams.waits.wake_datagram();
 					}
 				}
@@ -3303,7 +3316,6 @@ impl Connection {
 					if self.spaces[SpaceId::Handshake].crypto.is_some() {
 						self.discard_space(now, SpaceId::Handshake);
 					}
-					self.events.push_back(Event::HandshakeConfirmed);
 					self.streams.waits.confirmed();
 					trace!("handshake confirmed");
 				}
@@ -3397,6 +3409,8 @@ impl Connection {
 	pub fn local_address_changed(&mut self) {
 		self.update_rem_cid();
 		self.ping();
+		// The PING and any RETIRE_CONNECTION_ID are due now.
+		self.streams.waits.wake_transmit();
 	}
 
 	/// Switch to a previously unused remote connection ID, if possible
@@ -4051,10 +4065,9 @@ impl Connection {
 
 	/// Record why the connection was lost, failing every wait once it drains what it can
 	///
-	/// [`Self::poll`] reports it once as [`Event::ConnectionLost`].
+	/// The first reason sticks, as [`Self::error`] and [`Self::poll_closed`] report it.
 	fn lose(&mut self, reason: Error) {
-		self.streams.waits.lose(reason.clone());
-		self.error = Some(reason);
+		self.streams.waits.lose(reason);
 	}
 
 	/// Terminate the connection instantly, without sending a close packet
@@ -4365,29 +4378,13 @@ mod state {
 	}
 }
 
-/// Events of interest to the application
+/// Notifications of interest to the application that no `poll_*` wait covers
+///
+/// Everything an application waits for (a connection, a stream, data, credit, an end, a loss)
+/// is a `poll_*` taking its [`kio::Waiter`] instead.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Event {
-	/// The connection's handshake data is ready
-	HandshakeDataReady,
-	/// The connection was successfully established
-	Connected,
-	/// The TLS handshake was confirmed
-	HandshakeConfirmed,
-	/// The connection was lost
-	///
-	/// Emitted when the connection is closed due to an error, a timeout, the peer closing it, or
-	/// the local application closing it via [`Connection::close()`], which reports
-	/// [`Error::LocallyClosed`].
-	ConnectionLost {
-		/// Reason that the connection was closed
-		reason: Error,
-	},
-	/// Stream events
-	Stream(StreamEvent),
-	/// One or more application datagrams have been received
-	DatagramReceived,
 	/// The currently active path was updated
 	PathUpdated,
 }
@@ -4517,7 +4514,7 @@ mod tests {
 			}
 			conn.close(now, 0u32.into(), String::new());
 			let mut buf = Vec::new();
-			assert!(conn.poll_transmit(now, 1, &mut buf).is_some());
+			assert!(conn.transmit(now, 1, &mut buf).is_some());
 			assert!(buf.len() <= 1200);
 			assert!(!conn.close);
 

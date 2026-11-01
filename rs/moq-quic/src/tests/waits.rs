@@ -28,22 +28,6 @@ fn open_uni(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: ConnectionH
 	s
 }
 
-/// Poll the server's next chunk of `s`
-fn poll_read(
-	pair: &mut Pair,
-	ch: ConnectionHandle,
-	s: StreamId,
-	waiter: &kio::Waiter,
-) -> Poll<Result<Option<Bytes>, recv::Error>> {
-	let mut recv = pair.server_recv(ch, s);
-	let mut chunks = recv.read().unwrap();
-	let poll = chunks
-		.poll_next(waiter, usize::MAX)
-		.map(|r| r.map(|chunk| chunk.map(|c| c.bytes)));
-	let _ = chunks.finalize();
-	poll
-}
-
 #[test]
 fn read_wakes_every_waiter() {
 	let _guard = subscribe();
@@ -368,6 +352,98 @@ fn handshake_waits() {
 	assert_eq!(conn.poll_connected(&connected), Poll::Ready(Ok(())));
 }
 
+#[test]
+fn handshake_data_waits() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let client_ch = pair.begin_connect(client_config());
+
+	let waiter = Counter::new();
+	assert!(
+		pair.client_conn_mut(client_ch)
+			.poll_handshake_data(&waiter)
+			.is_pending()
+	);
+	pair.drive();
+	assert_eq!(waiter.wakes(), 1);
+	let now = pair.time;
+	let conn = pair.client_conn_mut(client_ch);
+	assert_eq!(conn.poll_handshake_data(&waiter), Poll::Ready(Ok(())));
+	assert!(conn.crypto_session().handshake_data().is_some());
+
+	// Still available once lost: the parameters did arrive.
+	conn.close(now, VarInt(0), String::new());
+	assert_eq!(conn.poll_handshake_data(&waiter), Poll::Ready(Ok(())));
+}
+
+/// A connection lost before its handshake parameters arrived fails the wait with the reason.
+#[test]
+fn handshake_data_fails_once_lost_first() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let client_ch = pair.begin_connect(client_config());
+
+	let waiter = Counter::new();
+	let now = pair.time;
+	let conn = pair.client_conn_mut(client_ch);
+	assert!(conn.poll_handshake_data(&waiter).is_pending());
+	conn.close(now, VarInt(7), String::new());
+	assert_eq!(waiter.wakes(), 1);
+	let reason = assert_matches!(conn.poll_handshake_data(&waiter), Poll::Ready(Err(reason)) => reason);
+	assert_matches!(&reason, ConnectionError::LocallyClosed { code: VarInt(7), .. });
+	assert_eq!(conn.error(), Some(&reason));
+}
+
+#[test]
+fn received_reset_waits_for_the_reset() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let s = open_uni(&mut pair, client_ch, server_ch, b"a");
+
+	let waiter = Counter::new();
+	assert!(pair.server_recv(server_ch, s).poll_received_reset(&waiter).is_pending());
+
+	// Data wakes it too, and the answer is still no reset.
+	pair.client_send(client_ch, s).write(&mut &b"b"[..]).unwrap();
+	pair.drive();
+	assert_eq!(waiter.wakes(), 1);
+	assert!(pair.server_recv(server_ch, s).poll_received_reset(&waiter).is_pending());
+
+	pair.client_send(client_ch, s).reset(VarInt(5)).unwrap();
+	pair.drive();
+	assert_eq!(waiter.wakes(), 2);
+	assert_eq!(
+		pair.server_recv(server_ch, s).poll_received_reset(&waiter),
+		Poll::Ready(Ok(VarInt(5)))
+	);
+	// Observing the reset discards the stream.
+	assert_eq!(
+		pair.server_recv(server_ch, s).poll_received_reset(&waiter),
+		Poll::Ready(Err(recv::Error::Closed))
+	);
+}
+
+/// A stream the connection's loss ends without a reset fails the wait.
+#[test]
+fn received_reset_fails_once_lost() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let s = open_uni(&mut pair, client_ch, server_ch, b"a");
+
+	let waiter = Counter::new();
+	assert!(pair.server_recv(server_ch, s).poll_received_reset(&waiter).is_pending());
+	let now = pair.time;
+	pair.client_conn_mut(client_ch).close(now, VarInt(0), String::new());
+	pair.drive();
+	assert_eq!(waiter.wakes(), 1);
+	assert_eq!(
+		pair.server_recv(server_ch, s).poll_received_reset(&waiter),
+		Poll::Ready(Err(recv::Error::ConnectionLost))
+	);
+}
+
 /// What arrived before the loss stays available, then every wait fails with the reason.
 #[test]
 fn lost_drains_then_fails() {
@@ -468,4 +544,105 @@ fn stop_wakes_a_parked_reader() {
 		pair.server_recv(server_ch, s).read(),
 		Err(recv::Error::Closed)
 	));
+}
+
+/// Poll the client's transmit until it waits, parking `driver` on it
+fn park_transmit(pair: &mut Pair, ch: ConnectionHandle, driver: &kio::Waiter) {
+	let now = pair.time;
+	let mut buf = Vec::new();
+	let conn = pair.client_conn_mut(ch);
+	while conn.poll_transmit(driver, now, 1, &mut buf).is_ready() {
+		buf.clear();
+	}
+}
+
+/// What the application queues wakes the driver parked on `poll_transmit`, which then finds it
+/// to send; nothing else does.
+#[test]
+fn transmit_waits_for_the_application() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let s = open_uni(&mut pair, client_ch, server_ch, b"a");
+
+	let driver = Counter::new();
+	park_transmit(&mut pair, client_ch, &driver);
+	// Reading what is already sent queues nothing.
+	assert_eq!(pair.client_send(client_ch, s).end(), Ok(None));
+	assert_eq!(driver.wakes(), 0);
+
+	pair.client_send(client_ch, s).write(&mut &b"b"[..]).unwrap();
+	assert_eq!(driver.wakes(), 1);
+	park_transmit(&mut pair, client_ch, &driver);
+	pair.client_send(client_ch, s).finish().unwrap();
+	assert_eq!(driver.wakes(), 2);
+	park_transmit(&mut pair, client_ch, &driver);
+	pair.client_datagrams(client_ch)
+		.send(&b"hi"[..], Default::default())
+		.unwrap();
+	assert_eq!(driver.wakes(), 3);
+	park_transmit(&mut pair, client_ch, &driver);
+	let now = pair.time;
+	pair.client_conn_mut(client_ch).close(now, VarInt(0), String::new());
+	assert_eq!(driver.wakes(), 4);
+	// The close is what it finds to send.
+	let mut buf = Vec::new();
+	assert!(
+		pair.client_conn_mut(client_ch)
+			.poll_transmit(&driver, now, 1, &mut buf)
+			.is_ready()
+	);
+}
+
+/// A reset, a stop, and a refused open each queue a frame, and wake the driver for it.
+#[test]
+fn transmit_hears_resets_stops_and_refused_opens() {
+	let _guard = subscribe();
+	let mut pair = pair_with(Limits {
+		max_streams: NonZeroU64::new(1),
+		..Limits::default()
+	});
+	let (client_ch, server_ch) = pair.connect();
+	let s = open_uni(&mut pair, client_ch, server_ch, b"a");
+
+	let driver = Counter::new();
+	park_transmit(&mut pair, client_ch, &driver);
+	// The peer allows one stream, which is open.
+	assert_eq!(pair.client_streams(client_ch).open(Dir::Uni, Default::default()), None);
+	assert_eq!(driver.wakes(), 1, "STREAMS_BLOCKED");
+	park_transmit(&mut pair, client_ch, &driver);
+	pair.client_send(client_ch, s).reset(VarInt(7)).unwrap();
+	assert_eq!(driver.wakes(), 2, "RESET_STREAM");
+
+	let t = pair
+		.server_streams(server_ch)
+		.open(Dir::Bi, Default::default())
+		.unwrap();
+	pair.server_send(server_ch, t).write(&mut &b"x"[..]).unwrap();
+	pair.drive();
+	assert_eq!(pair.client_streams(client_ch).accept(Dir::Bi), Some(t));
+	park_transmit(&mut pair, client_ch, &driver);
+	pair.client_conn_mut(client_ch).recv_stream(t).stop(VarInt(9)).unwrap();
+	assert_eq!(driver.wakes(), 3, "STOP_SENDING");
+}
+
+/// A local address change queues a PING, and wakes the driver for it.
+#[test]
+fn transmit_hears_a_local_address_change() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, _) = pair.connect();
+
+	let driver = Counter::new();
+	park_transmit(&mut pair, client_ch, &driver);
+	pair.client_conn_mut(client_ch).local_address_changed();
+	assert_eq!(driver.wakes(), 1, "PING");
+	// The PING is what it finds to send.
+	let now = pair.time;
+	let mut buf = Vec::new();
+	assert!(
+		pair.client_conn_mut(client_ch)
+			.poll_transmit(&driver, now, 1, &mut buf)
+			.is_ready()
+	);
 }

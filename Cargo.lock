@@ -6189,6 +6189,7 @@ name = "moq-tokio"
 version = "0.19.23"
 dependencies = [
  "anyhow",
+ "bench-harness",
  "bytes",
  "chrono",
  "dns-lookup",
@@ -8554,7 +8555,6 @@ dependencies = [
  "moq-quic",
  "qmux 0.6.5",
  "rcgen 0.14.10",
- "rustc-hash 2.1.3",
  "rustls",
  "thiserror 2.0.21",
  "tokio",

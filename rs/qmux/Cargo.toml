@@ -27,7 +27,6 @@ kio = { workspace = true, features = ["runtime"] }
 moq-net = { workspace = true }
 # The stream state machine, shared with QUIC. `mux` drives it over a reliable transport.
 moq-quic = { workspace = true, features = ["mux"] }
-rustc-hash = { workspace = true }
 rustls = { version = "0.23", default-features = false, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }

@@ -430,9 +430,7 @@ fn unsupported_after_finish() {
 	);
 	pair.drive();
 	assert_eq!(pair.client_streams(client_ch).send_streams(), 0);
-	while let Some(event) = pair.client_conn_mut(client_ch).poll() {
-		assert!(!matches!(event, Event::Stream(StreamEvent::Finished { .. })));
-	}
+	assert_eq!(pair.client_send(client_ch, s).end(), Ok(Some(send::End::Reset(ERROR))));
 }
 
 #[test]
