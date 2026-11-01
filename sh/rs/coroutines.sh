@@ -53,7 +53,7 @@ cargo rustc --locked -p "$package" --lib "$@" -- --emit "mir=$mir"
 found=$(grep -oE '\{async (fn body of [^{}]*|block@[^{}]*|closure@[^{}]*)\}' "$mir" | sort -u || true)
 unexpected=$found
 for name in ${allowed[@]+"${allowed[@]}"}; do
-    pattern="^\{async fn body of ([A-Za-z0-9_<>, ]+::)*$name[<(]"
+    pattern="^\{async fn body of ([A-Za-z0-9_<>, ]+::)*${name}[<(]"
     if ! grep -qE -- "$pattern" <<<"$found"; then
         echo "error: $package no longer compiles async fn $name; remove its --allow" >&2
         exit 1
