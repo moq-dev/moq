@@ -176,6 +176,18 @@ impl Import {
 		Ok(())
 	}
 
+	/// Report frames the encoder feeding this track skipped. See
+	/// [`Producer::report_skipped`](crate::container::Producer::report_skipped).
+	pub fn report_skipped(&self, frames: u64) {
+		self.track.report_skipped(frames);
+	}
+
+	/// Report the target bitrate of the encoder feeding this track. See
+	/// [`Producer::report_bitrate`](crate::container::Producer::report_bitrate).
+	pub fn report_bitrate(&self, bitrate: moq_net::bandwidth::Rate) {
+		self.track.report_bitrate(bitrate);
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;

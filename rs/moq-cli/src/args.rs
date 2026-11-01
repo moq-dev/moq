@@ -332,7 +332,7 @@ impl Invocation {
 			}
 			if let Command::Import(import) = command
 				&& import.report
-				&& let Some(reason) = import.source.report_refusal()
+				&& let Some(reason) = import.source.catalog_refusal()
 			{
 				anyhow::bail!("--report names a track in the catalog the import builds, but {reason}");
 			}
@@ -816,13 +816,14 @@ pub struct Import {
 	latency_max: Option<moq_tokio::cli::Duration>,
 
 	/// Name a media report track in the catalog's `stats` section and fill it with what each
-	/// track has written, about once a second while subscribed. The stdin imports only.
+	/// track has written, about once a second while subscribed. The stdin imports and capture
+	/// only.
 	#[usage(long)]
 	pub report: bool,
 
 	/// Solicit viewer feedback in the catalog: `export --echo <NAME>` publishes `<NAME>.echo`
 	/// under this prefix, resolved against the broadcast like a relative URL (`viewers` from
-	/// `room/event` is `room/viewers`). The stdin imports only.
+	/// `room/event` is `room/viewers`). The stdin imports and capture only.
 	#[usage(long, value_name = "PATH")]
 	pub echo_path: Option<String>,
 
@@ -898,7 +899,8 @@ impl ImportSource {
 	}
 
 	/// Why the CLI can't add a section to this source's first catalog, or `None` when it can:
-	/// a stdin import's one catalog waits for its importer's tracks.
+	/// a stdin import's one catalog waits for its importer's tracks, and a capture's for its
+	/// encoders.
 	fn catalog_refusal(&self) -> Option<&'static str> {
 		match self {
 			Self::Ts(args) if args.program == Some(TsProgram::All) => {
@@ -908,19 +910,9 @@ impl ImportSource {
 				Some("the gateway and archive imports build their own catalogs")
 			}
 			#[cfg(feature = "capture")]
-			Self::Capture(_) => Some("`import capture` publishes its catalog as its encoders start"),
+			Self::Capture(_) => None,
 			Self::Avc3 | Self::Fmp4(_) | Self::Ts(_) | Self::Flv => None,
 		}
-	}
-
-	/// Why `--report` can't report this source, or `None` when it can: the CLI builds the one
-	/// catalog of a stdin import, whose tracks `moq-mux` counts.
-	fn report_refusal(&self) -> Option<&'static str> {
-		#[cfg(feature = "capture")]
-		if matches!(self, Self::Capture(_)) {
-			return Some("`import capture` encodes, and its encoders do not count yet");
-		}
-		self.catalog_refusal()
 	}
 
 	/// Why `--linger` can't apply to this source, or `None` when it can: only a source with a
@@ -1809,6 +1801,8 @@ mod tests {
 			] {
 				import(flags, source).validate().unwrap();
 			}
+			#[cfg(feature = "capture")]
+			import(flags, &["capture"]).validate().unwrap();
 			for source in [
 				["ts", "--program", "all"].as_slice(),
 				&["hls", "http://origin/master.m3u8"],

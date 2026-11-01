@@ -111,8 +111,8 @@ connection view and the dashboard flow.
 
 ## Required
 
-- [Rust reporters](/quest/m2/stats/rust.md) - the player, encoders, and
-  gateways publish stats and feedback, as the CLI remuxes do
+- [Rust reporters](/quest/m2/stats/rust.md) - the player and gateways
+  publish stats and feedback, as the CLI remuxes and capture do
 - [Browser reporters](/quest/m2/stats/js.md) - `<moq-publish>` publishes
   stats and `<moq-watch>` publishes feedback
 - [Preflight](/quest/m2/stats/preflight.md) - a bounded test run over a
