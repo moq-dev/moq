@@ -2,7 +2,7 @@
 
 ## Goal
 
-Under the `moq-clock` sim, every source of randomness that affects behavior
+Under the `kio::clock` sim, every source of randomness that affects behavior
 (moq-net's clock anchor jitter, backoff jitter, alert jitter) draws from one
 seeded generator the sim owns, and a failing sim test prints its seed so it
 replays bit-exact.

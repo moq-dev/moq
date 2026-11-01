@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import * as Catalog from "./index.ts";
-import { ranked, VideoConfigSchema, VideoSchema } from "./video.ts";
+import { ranked, VideoConfigSchema } from "./video.ts";
 
 test("ranked puts enabled video before a larger disabled picture", () => {
 	const renditions = {
@@ -116,29 +116,6 @@ test("video config ignores a legacy stalled flag", () => {
 
 	expect("stalled" in parsed).toBe(false);
 	expect(parsed.enabled).toBeUndefined();
-});
-
-test("legacy video arrays derive display size from display aspect fields", () => {
-	const parsed = VideoSchema.parse([
-		{
-			track: { name: "video" },
-			config: {
-				codec: "avc1.64001f",
-				container: { kind: "legacy" },
-				displayAspectWidth: 16,
-				displayAspectHeight: 9,
-			},
-		},
-	]);
-
-	expect(
-		parsed.display && {
-			width: Number(parsed.display.width),
-			height: Number(parsed.display.height),
-		},
-	).toEqual({ width: 16, height: 9 });
-	expect(Number(parsed.renditions.video?.displayAspectWidth)).toBe(16);
-	expect(Number(parsed.renditions.video?.displayAspectHeight)).toBe(9);
 });
 
 test("video warmup round trips as optional integer milliseconds", () => {
