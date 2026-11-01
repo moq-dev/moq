@@ -53,9 +53,8 @@ were checked against `moq-video`'s consumers:
 
 - AV1 hierarchical B-frames, UHQ iterative encoding, additional profiles and
   multiview support do not serve the current low-latency H.264/H.265 NV12
-  encoder. It disables B-frames and lookahead. AV1 and Main10 already have
-  [separate](../../quest/m3/nvenc-av1.md)
-  [quests](../../quest/m3/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md).
+  encoder. It disables B-frames and keeps the low-latency tuning's default of
+  no lookahead. AV1 encode and Main10 are tracked as separate work.
 - Decode statistics, multiview metadata and sample-app seeking have no current
   consumer in the live H.264/H.265/AV1 decoder.
 - Application-owned CUDA arrays could remove the decoder's device-to-device
