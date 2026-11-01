@@ -275,7 +275,9 @@ impl Background {
 	/// Ready with the owner's failure once it fails; pending while it runs or after it ended
 	/// cleanly, the same split [`Self::watch`] makes.
 	pub fn poll_failed(&self, waiter: &kio::Waiter) -> Poll<MoqError> {
-		let Some(result) = &self.result else { return Poll::Pending };
+		let Some(result) = &self.result else {
+			return Poll::Pending;
+		};
 		let completed = ready!(result.poll(waiter, |state| match &**state {
 			Some(completed) => Poll::Ready(completed.clone()),
 			None => Poll::Pending,

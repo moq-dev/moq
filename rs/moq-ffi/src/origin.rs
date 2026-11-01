@@ -167,7 +167,6 @@ pub struct MoqBroadcastPrepared {
 	driver: Background,
 }
 
-
 /// A route over a prefix, carried by a [`MoqAnnounceEvent`].
 ///
 /// Carries no broadcast: resolve a specific path with

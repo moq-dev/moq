@@ -40,7 +40,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [A runtime-free QUIC driver](/quest/m2/quic-sansio-driver.md) - a caller's own loop moves UDP datagrams and polls moq sessions over moq-quic, for rust2's bindings
 - [MoQ on rind](/quest/m2/rind/README.md) - every MoQ crate takes its crypto from rind, a pure-Rust graviola fork, so no build compiles C crypto
 - [Benchmark sources](/quest/m2/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run
-- [Poll-native async](/quest/m2/ffi-poll-migrate.md) - moq-ffi's pure-kio async exports poll their state directly instead of going through `ffi::Task`
 - [QoS](/quest/m2/qos/README.md) - the relay's egress `lag` histogram and `dropped` counters on the stats totals and prefix tracks
 - [Lazy retained HLS instances](/quest/m2/hls-lazy-instances.md) - a replaced HLS instance starts its watchers only when a request reaches it
 - [HLS and DASH browser playback](/quest/m2/hls-player-test.md) - hls.js and dash.js play, reload, switch, and survive reconfiguration nightly

@@ -1510,7 +1510,6 @@ mod read_tests {
 	}
 }
 
-
 /// A finite, container-decoded media group, fetched or decoded from a raw group.
 #[derive(uniffi::Object)]
 pub struct MoqMediaGroupConsumer {

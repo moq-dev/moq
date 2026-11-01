@@ -7187,8 +7187,8 @@ async fn cancel_before_connect_fails_fast() {
 /// Dropping the future returned by a `Task::run` call used to leave the spawned
 /// closure detached and still holding the state lock, so it consumed the next
 /// transition into its own cursor and the retry blocked behind it, missing the
-/// edge. Every repeatable read on the bindings (`status`, `next`, `read_frame`,
-/// `recv_datagram`) sits on that path; `status` is just the easiest to drive.
+/// edge. Session `status` still sits on that path; the poll-native reads have their
+/// own cancelled-call tests.
 #[tokio::test]
 async fn cancelled_state_wait_does_not_swallow_the_next_transition() {
 	let server = MoqServer::new(MoqServerConfig {
@@ -8550,7 +8550,11 @@ mod rust_future {
 		pub(super) fn cancel(&self) {
 			// SAFETY: the handle is live until `Drop` frees it.
 			unsafe { uniffi::rust_future_cancel::<u8>(self.handle.clone()) };
-			assert_eq!(called(self.data), [RustFuturePoll::Ready], "cancel resolves the continuation");
+			assert_eq!(
+				called(self.data),
+				[RustFuturePoll::Ready],
+				"cancel resolves the continuation"
+			);
 		}
 
 		/// Poll on every wake until ready, then complete the read.
@@ -8587,7 +8591,11 @@ where
 
 	let second = rust_future::Read::start(read(), data + 1);
 	write();
-	assert_eq!(second.finish(), 7, "the second read gets the frame written after the cancel");
+	assert_eq!(
+		second.finish(),
+		7,
+		"the second read gets the frame written after the cancel"
+	);
 	drop(second);
 	drop(first);
 }
