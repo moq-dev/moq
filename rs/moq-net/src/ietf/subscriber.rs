@@ -751,6 +751,18 @@ fn largest_group(track: &track::Producer, answer: Option<ietf::Location>) -> Opt
 	answer.map(|largest| largest.group).max(track.latest_sequence())
 }
 
+/// Whether `subscription` needs a live feed for a copy whose publisher reported its Largest
+/// Object in group `edge`: one of its ranges is open, counts back from the live edge, or
+/// reaches the group the publisher may still be writing. Ranges wholly below it read only
+/// history, which fills serve.
+fn wants_feed(subscription: &track::Subscription, edge: Option<u64>) -> bool {
+	if subscription.ranges.is_empty() {
+		return false;
+	}
+	let history = subscription.start().is_some() && subscription.end().zip(edge).is_some_and(|(end, edge)| end <= edge);
+	!history
+}
+
 /// A copy with no subscription upstream, kept for fetches and a returning subscriber.
 struct Idle {
 	track: track::Producer,
@@ -3963,6 +3975,12 @@ impl Subscriber {
 	/// Keep a copy nobody subscribes to, cache and all, for fetches and a subscriber
 	/// returning soon: `Some` once one does, to subscribe again, `None` once nobody held
 	/// it through the linger, or the session ended. A finished copy never subscribes again.
+	///
+	/// The session holds no upstream subscription for the copy meanwhile, so it marks the
+	/// copy unfed: a bounded read's holes are misses at once, which the fills answer. A
+	/// subscription whose ranges all lie below the Largest Object the publisher reported
+	/// reads only history, so it is served that way too, as a FETCH would be, rather than
+	/// subscribing.
 	async fn linger(
 		&mut self,
 		broadcast_path: &Path,
@@ -3980,10 +3998,11 @@ impl Subscriber {
 			id
 		};
 		let mut linger = crate::time::Deadline::new(&self.runtime);
+		idle.track.set_unfed(true);
 		let mut subscribed = idle
 			.track
 			.subscription()
-			.is_some_and(|subscription| !subscription.ranges.is_empty());
+			.is_some_and(|subscription| wants_feed(&subscription, idle.track.reported_group()));
 		enum Step {
 			Fill(track::Fill),
 			Subscribe,
@@ -4006,7 +4025,7 @@ impl Subscriber {
 				while let Poll::Ready(Ok(subscription)) = idle.track.poll_subscription_changed(waiter) {
 					subscribed = subscription
 						.as_ref()
-						.is_some_and(|subscription| !subscription.ranges.is_empty());
+						.is_some_and(|subscription| wants_feed(subscription, idle.track.reported_group()));
 				}
 				if subscribed && !idle.finished {
 					return Poll::Ready(Step::Subscribe);
@@ -4038,7 +4057,11 @@ impl Subscriber {
 					);
 					group_fetches.push(fetch);
 				}
-				Step::Subscribe => break true,
+				Step::Subscribe => {
+					// Marked before the SUBSCRIBE goes out: a hole may arrive live from here.
+					idle.track.set_unfed(false);
+					break true;
+				}
 				Step::Expired => match idle.track.abort_unwanted(Error::Cancel) {
 					Ok(()) => {
 						tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), broadcast_path), track = %track_name, "track released (idle)");
