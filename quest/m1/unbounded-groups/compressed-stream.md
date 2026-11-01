@@ -26,17 +26,17 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
   So no wire change: keep the declared compressed size, drop only the guard,
   and bound decompression while streaming.
 - Milestone: ✅ m1. Not chosen: m2.
-- JS (after [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411)): drop the guard and the `Encoder.bound` preflight in
+- JS ([moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) merged): drop the guard and the `Encoder.bound` preflight in
   `js/net/src/group.ts` (`writeFrame`, `createFrame`, binding compression)
   and JSON's mirrored `MAX_FRAME_BYTES`. Inflate a received slice in chunks
   into the chunked frame storage [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) added, checking output against the
   declared `Inflated Size`.
 - Rust: the guard is `rs/moq-net/src/model/group/content.rs:117` (`size` and
   `inflated` against `MAX_CACHE_BYTES`). The inflated copy inflates each
-  frame whole (`GroupState::inflate`, `rs/moq-net/src/model/group.rs:619`).
+  frame whole (`GroupState::inflate`, `rs/moq-net/src/model/group.rs:621`).
   Inflate into `frame::SEGMENT` segments instead, bounded the same way.
 - This also resolves [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411)'s Rust follow-up: `GroupProducer::write_frame` and
-  `write_frames` (`group.rs:1683`, `:1762`) check only the plain payload
+  `write_frames` (`group.rs:1680`, `:1759`) check only the plain payload
   against 32 MB, so an incompressible frame near the cap encodes to a slice
   every receiver refuses. With no compressed cap, there is nothing to
   mismatch; [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) removes
@@ -55,5 +55,4 @@ JSON preflight). Wire: none.
 
 ## Required
 
-- [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) lands JS chunked frame storage, which streamed inflation writes into
 - [Byte holes](/quest/m1/unbounded-groups/byte-holes.md) - Rust frames past 32 MB at all

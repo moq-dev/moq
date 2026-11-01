@@ -13,16 +13,23 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /que
 
 - **Base build**: #7347's `just ci` bench comparison reported "base build
   failed" for `rust/gst/moq-gst/catalog` against `origin/main`, from a
-  change that doesn't touch moq-gst. `bench/run.sh:375-382` builds the base
+  change that doesn't touch moq-gst. `bench/run.sh:396-404` builds the base
   in a detached `git worktree` under `$RUN/base` through
-  `criterion_build_base` (`:308`), and any failure there marks every
+  `criterion_build_base` (`:330`), and any failure there marks every
   selected target unavailable without showing why. The bench target
   (`rs/moq-gst/Cargo.toml:47`, `benches/catalog.rs`) has existed since
-  2026-10-14, so a missing target is not the cause; look for what the
-  fresh worktree lacks that the checkout has (GStreamer's build
-  environment, a generated or untracked input, submodules). Reproduce with
-  the bench command #7347's `just ci` ran, fix the cause, and have the base
-  build log its error into the run's output.
+  2026-10-14, so a missing target is not the cause. Check first whether
+  it was the nested-checkout Cargo alias merge that
+  [the paired bench baseline builds](/quest/m0/nightly/bench-baseline-build.md)
+  found in Nightly: `$RUN` sits under `.tmp/bench` inside the checkout
+  (`bench/run.sh:157`), and #7347's run predates
+  [moq-dev/moq#7245](https://github.com/moq-dev/moq/pull/7245), which made
+  those aliases strings. If a comparison on current main builds the base,
+  only the logging below is left. Otherwise look for what the fresh
+  worktree lacks that the checkout has (GStreamer's build environment, a
+  generated or untracked input, submodules), reproducing with the bench
+  command #7347's `just ci` ran, and fix the cause. Either way, have the
+  base build log its error into the run's output.
 - **quest version**: in the same run, the `quest` on the host's PATH was
   not the build `flake.nix` pins (`github:moq-dev/quest/1ef2ca7`, served by
   the dev shell); the review was rerun with the pinned one. Check which
@@ -35,4 +42,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Paired bench regressions bisected](/quest/m0/nightly/bench-regressions.md) - other paired-comparison work
+- [The paired bench baseline builds](/quest/m0/nightly/bench-baseline-build.md) - the same "base build failed" in Nightly, from a nested checkout's Cargo aliases

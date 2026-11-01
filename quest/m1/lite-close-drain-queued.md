@@ -16,7 +16,7 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 
 Milestone: ✅ m1 (moved from m2). Not chosen: m2.
 
-- [moq-dev/moq#7386](https://github.com/moq-dev/moq/pull/7386) made JS accept loops yield on the shared `acceptBudget`
+- [moq-dev/moq#7386](https://github.com/moq-dev/moq/pull/7386) (merged) made JS accept loops yield on the shared `acceptBudget`
   (`js/net/src/stream.ts`), and the closing lite session now waits for the
   accept loop to take streams that arrived before the close. But the drain
   still reads only streams the transport delivers after `close()`, and on a
@@ -34,10 +34,6 @@ Milestone: ✅ m1 (moved from m2). Not chosen: m2.
   injectable (`@internal`) and add the mid-drain yield test.
 
 Public API: none (`acceptBudget` is `@internal`). Wire: none.
-
-## Required
-
-- [Stream-accept loops yield on a per-poll budget](/quest/m1/cut-audit/accept-budget.md) - [moq-dev/moq#7386](https://github.com/moq-dev/moq/pull/7386) adds the JS `acceptBudget` and the close-drain wait
 
 ## Related
 

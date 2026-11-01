@@ -16,8 +16,8 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411).
 
 - moq-transport FETCH egress: the user: "absolutely don't buffer."
-  `readFetched` (`js/net/src/ietf/publisher.ts:3424`, called at `:3064` and
-  `:3177`) collects each requested group slice before writing it. Stream it
+  `readFetched` (`js/net/src/ietf/publisher.ts:2753`, called at `:2401` and
+  `:2514`) collects each requested group slice before writing it. Stream it
   the way [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411)'s subgroup egress (`#serveGroup`) does, with `nextFrame`-style
   reads and chunked writes for a payload past one segment.
 - lite FETCH whose readers all leave mid-frame: the user: "fix that I
@@ -33,7 +33,3 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 - Milestone: ✅ m1. Not chosen: m2.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) lands the chunked frames and streamed egress this follows

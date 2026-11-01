@@ -16,7 +16,7 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 
 Milestone: ✅ m1. Not chosen: m2.
 
-- [moq-dev/moq#7294](https://github.com/moq-dev/moq/pull/7294)'s overnight decision (2026-10-31, on the maintainer's standing
+- [moq-dev/moq#7294](https://github.com/moq-dev/moq/pull/7294) (merged)'s overnight decision (2026-10-31, on the maintainer's standing
   authorization) merged shared-PID stats as is and filed this root-cause fix:
   a stalled owner's clock hides shared-PID timing errors
   ([review](https://github.com/moq-dev/moq/pull/7294#pullrequestreview-5709848438)),
@@ -38,7 +38,3 @@ Milestone: ✅ m1. Not chosen: m2.
 
 Public API: none expected (stats fields only if a new counter is needed).
 Wire: none.
-
-## Related
-
-- [TS stats count a shared PID once](/quest/m1/ts-reliability/shared-pid-stats.md) - [moq-dev/moq#7294](https://github.com/moq-dev/moq/pull/7294), which made a shared PID behave like the single-program case

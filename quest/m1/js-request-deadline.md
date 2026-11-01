@@ -14,7 +14,7 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 
 Milestone: ✅ m1 (moved from m2). Not chosen: m2.
 
-- [moq-dev/moq#7355](https://github.com/moq-dev/moq/pull/7355) routes a deadline failure through the owning `RequestStream`
+- [moq-dev/moq#7355](https://github.com/moq-dev/moq/pull/7355) (merged) routes a deadline failure through the owning `RequestStream`
   (`js/net/src/ietf/request_stream.ts`, `js/net/src/util/deadline.ts`), so a
   timed-out request is ended once. Its online review suggested one more test,
   left as this follow-up: resolve the opening stream only after the deadline
@@ -27,7 +27,3 @@ Milestone: ✅ m1 (moved from m2). Not chosen: m2.
   owner.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [JS IETF requests own their stream](/quest/m2/js-request-stream.md) - [moq-dev/moq#7355](https://github.com/moq-dev/moq/pull/7355) adds the `RequestStream` owner under test

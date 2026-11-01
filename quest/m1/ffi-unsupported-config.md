@@ -16,7 +16,7 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 
 Milestone: ✅ m1 (moved from m2). Not chosen: m2.
 
-- [moq-dev/moq#7331](https://github.com/moq-dev/moq/pull/7331) gates audio in OBS with `moq_source_audio_decodes` (opus, pcm, mono
+- [moq-dev/moq#7331](https://github.com/moq-dev/moq/pull/7331) (merged) gates audio in OBS with `moq_source_audio_decodes` (opus, pcm, mono
   or stereo AAC-LC), mirroring moq-audio's rules, because moq-ffi reports a
   setup refusal only as an async `MoqError::Audio { reason }`
   (`rs/moq-ffi/src/error.rs:235`; video at `:243`). A configuration moq-audio
@@ -31,7 +31,3 @@ Milestone: ✅ m1 (moved from m2). Not chosen: m2.
   rejected by the peer, first decode fails), which [moq-dev/moq#7331](https://github.com/moq-dev/moq/pull/7331) also listed.
 
 Public API: adds a `MoqError` variant (bindings and moq-c). Wire: none.
-
-## Required
-
-- [OBS source picks renditions by the catalog contract](/quest/m2/obs-source-renditions.md) - [moq-dev/moq#7331](https://github.com/moq-dev/moq/pull/7331) adds the ranked fall-through this hooks into

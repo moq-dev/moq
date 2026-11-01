@@ -24,8 +24,9 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
   the copy's own resolution ends at its earlier cap and would pin a range
   ending relative to the latest group.
 - The bug: returning to a route reuses its newest copy
-  (`rs/moq-net/src/model/resume.rs:1044`), clears `until`, and calls
-  `copy.update(&self.mirrored)`. `Copy::wire` (`resume.rs:436`) then takes
+  (`rs/moq-net/src/model/resume.rs:1147`), clears `until`, and calls
+  `copy.update(&self.mirrored)`. `Copy::wire` (`resume.rs:500`)
+  then takes
   the `Sub::Ready(sub) if reader.ranges == self.from` arm and re-reads
   `sub.resolved_ranges()`, which is the capped wire it was last sent. So the
   reused copy stays at its old cap and delivers nothing past it. Re-resolve
@@ -35,12 +36,10 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
   flaps away and back; the returning route delivers groups past the old cap.
   Add the shrunk case to the resume model's regressions if the nightly sweep
   finds one.
-- [moq-dev/moq#7364](https://github.com/moq-dev/moq/pull/7364) is still open and edits the same code. Land after it, or have
-  whichever lands second reconcile `Copy::wire`.
+- [moq-dev/moq#7364](https://github.com/moq-dev/moq/pull/7364) (merged) edited the same code first.
 
 Public API: none. Wire: none.
 
 ## Related
 
-- [Resume delivers late groups below its resume point](/quest/m2/resume-late-groups.md) - [moq-dev/moq#7364](https://github.com/moq-dev/moq/pull/7364), which fixed the same capped-resolution mechanism for widened backfills
 - [Resume as producer replacement](/quest/m2/resume-redesign.md) - would remove copy reuse altogether

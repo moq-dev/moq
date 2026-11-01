@@ -54,7 +54,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts-js.md).
 
 ## Required
 
-- [Stream-accept loops yield on a per-poll budget](/quest/m1/cut-audit/accept-budget.md) - a peer opening many streams cannot monopolize a session driver
 - [Rust and JS skip a backlog by the same measure](/quest/m1/cut-audit/catalog-parity.md) - a backlog join starts at the same group in every player
 - [Each export-clock rule kept by the jitter audit has its own test](/quest/m1/cut-audit/jitter-rule-tests.md) - `stale`, `unheard_lag`, and the horizon shift in `rs/moq-mux/src/jitter.rs` each have a test that fails when that rule alone is removed
 - [Text and data sections keep a prototype-named ID](/quest/m1/cut-audit/catalog-proto-ids.md) - text and data entries keep the ID JS's `z.record` drops

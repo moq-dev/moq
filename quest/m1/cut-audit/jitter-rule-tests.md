@@ -33,10 +33,6 @@ Rerun the knockouts the way [moq-dev/moq#7412](https://github.com/moq-dev/moq/pu
 record in the PR which new test fails for each. If a rule turns out to have
 no case only it covers, stop and report rather than delete it.
 
-Land after [moq-dev/moq#7412](https://github.com/moq-dev/moq/pull/7412), which removes the `leapt` arm from the same file.
+[moq-dev/moq#7412](https://github.com/moq-dev/moq/pull/7412) (merged) removed the `leapt` arm from the same file.
 
 Public API: none (`jitter` is crate-private). Wire: none.
-
-## Required
-
-- [Jitter admission](/quest/m1/cut-audit/jitter-admission.md) - [moq-dev/moq#7412](https://github.com/moq-dev/moq/pull/7412) settles which rules stay

@@ -20,8 +20,8 @@ Milestone: ✅ m1 (moved from m2). Not chosen: m2. There is no m1 mesh epic,
 so this sits at the m1 top level; the [mesh epic](/quest/m2/mesh/README.md)
 is related.
 
-- [moq-dev/moq#7301](https://github.com/moq-dev/moq/pull/7301) adds `moq_auth::mesh::EndpointId` (an Ed25519 key with z-base-32
-  text, via `data-encoding` with a custom `Specification`). [moq-dev/moq#7092](https://github.com/moq-dev/moq/pull/7092) adds
+- [moq-dev/moq#7301](https://github.com/moq-dev/moq/pull/7301) (merged) added `moq_auth::mesh::EndpointId` (an Ed25519 key with z-base-32
+  text, via `data-encoding` with a custom `Specification`). [moq-dev/moq#7092](https://github.com/moq-dev/moq/pull/7092) (merged) added
   `rs/moq-sign` with `SecretKey`/`PublicKey` using the same specification,
   and a separate JS codec in `js/sign/src/zbase32.ts`. Both chose z-base-32
   so they would share one format; whichever landed second was to dedupe.
@@ -35,10 +35,6 @@ is related.
 
 Public API: breaking for moq-auth (`mesh::EndpointId` becomes
 `moq_sign::PublicKey` or a re-export). Wire: none.
-
-## Required
-
-- [Enrollment](/quest/m2/mesh/enroll.md) - [moq-dev/moq#7301](https://github.com/moq-dev/moq/pull/7301) adds `moq_auth::mesh::EndpointId`
 
 ## Related
 

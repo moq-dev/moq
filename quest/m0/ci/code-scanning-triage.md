@@ -43,8 +43,9 @@ earlier dismissals 25 to 34. Open alerts, as of 2026-10-31 on `38566f5a84`:
   as one.
 
 Dismiss through `gh api -X PATCH repos/moq-dev/moq/code-scanning/alerts/<n>`
-with `state=dismissed`, the reason, and a comment ending in the model line.
-If a fix is needed, it lands in this quest's PR; a dismissal-only finish
+with `state=dismissed`, `dismissed_reason` (`false positive` or
+`used in tests`), and `dismissed_comment`, the comment ending in the model
+line. If a fix is needed, it lands in this quest's PR; a dismissal-only finish
 needs no code change, so the PR only deletes this quest.
 
 Public API: none. Wire: none.

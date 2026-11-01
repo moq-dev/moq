@@ -19,12 +19,12 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
     remaining cost is one buffered request per namespace, not a leak.
   - Drop it.
 
-[moq-dev/moq#7414](https://github.com/moq-dev/moq/pull/7414) (open, owns [the withdraw quest](/quest/m1/ietf-withdraw-credit.md))
+[moq-dev/moq#7414](https://github.com/moq-dev/moq/pull/7414) (merged)
 buffers each message and starts `ADVERTISE_TIMEOUT`
-(`rs/moq-net/src/ietf/publisher.rs:513`, 5 s) only once the bytes reach the
-transport; its `NamespacePending::Writing` state has no deadline, and the PR
+(`rs/moq-net/src/ietf/publisher.rs:559`, 5 s) only once the bytes reach the
+transport (`:3586`); its `NamespacePending::Writing` state has no deadline, and the PR
 notes "send backpressure alone does not start answer timeouts or retries".
-Build on it once it lands:
+Build on it:
 
 - Give `Writing` a deadline too, reusing `ADVERTISE_TIMEOUT` from when the
   message was buffered rather than adding a second constant, and on expiry
@@ -38,5 +38,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [A withdrawn moq-transport advertisement stops writing](/quest/m1/ietf-withdraw-credit.md) - [moq-dev/moq#7414](https://github.com/moq-dev/moq/pull/7414) lands this first and adds the buffering this bounds
 - [One request lease](/quest/m2/ietf-request-lease.md) - other request lifetimes on the same streams

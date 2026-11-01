@@ -21,7 +21,7 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /que
   selecting less. It may relate to
   [moq-dev/moq#7289](https://github.com/moq-dev/moq/pull/7289), which
   moved the land base off jq on the worker.
-- **send-depth on a pin change**: #7280 runs `just rs send-depth` on a
+- **send-depth on a pin change**: #7280 (merged) runs `just rs send-depth` on a
   pinned `legacyPackages.rust-nightly` in `flake.nix`, selected when moq-net
   or a dependency changes. A diff that only bumps that pin selects nothing,
   because `flake.nix` is outside the `rs` dispatch scope. Select send-depth
@@ -39,7 +39,3 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /que
   typecheck.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [The merge gate runs send-depth](/quest/m0/ci/send-depth-gate.md) - its PR, #7280, adds the pinned nightly and the send-depth selection this extends

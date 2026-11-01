@@ -29,15 +29,14 @@ bounded timeout that fails loudly, like `waitFor` in
 move the tests onto it. Keep a plain yield only where the test asserts that
 nothing changed, and say so there.
 
-Scope error: `#requestBroadcast` (`js/watch/src/broadcast.ts:247`) calls
+Scope error: `#requestBroadcast` (`js/watch/src/broadcast.ts:252`) calls
 `origin.follow(path)`/`origin.request(path)`, which throw for a path outside
 the origin's scope; `#runBroadcast` catches the same throw into `out.error`,
-and [moq-dev/moq#7312](https://github.com/moq-dev/moq/pull/7312) (open) catches it again in its contribution branch. Catch it once
+and [moq-dev/moq#7312](https://github.com/moq-dev/moq/pull/7312) (merged) catches it again in its contribution branch. Catch it once
 in `#requestBroadcast`, return `undefined`, and report it as the other
 refusals are, then drop the per-caller catch. The error stays with the
 rendition that asked, not the broadcast's root `out.error`: test a catalog
 with one out-of-scope rendition beside valid ones and assert the valid ones
-still play. Merge main after [moq-dev/moq#7312](https://github.com/moq-dev/moq/pull/7312) if it lands
-first.
+still play.
 
 Public API: none. Wire: none.

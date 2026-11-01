@@ -37,8 +37,8 @@ bound fixes the exhaustion on `release` without changing what it imports.
   `Cluster` arrive as start and end events and are never held whole, so a
   large file is unaffected. Do not set ebml-iterable's
   `max_allowable_tag_size`: it applies to every sized tag including
-  `Segment`, which [MKV import streams blocks](/quest/m1/security-audit/mkv-stream-blocks.md)
-  ruled out. Pick the cap from the largest legitimate block `release` can
+  `Segment`, which [moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234)
+  (merged) ruled out. Pick the cap from the largest legitimate block `release` can
   publish (its transport frame limit, if it has one), and name the choice in
   the PR. The cap applies to every held element, so it must also clear the
   largest legitimate `Tracks`/`TrackEntry` (CodecPrivate) and `Void`; if one
@@ -55,5 +55,4 @@ Public API: none; if refusing needs a new `mkv::Error` variant on
 
 ## Related
 
-- [MKV import streams blocks](/quest/m1/security-audit/mkv-stream-blocks.md) - the full fix on main, from #7234
 - [Backport the relay and auth hardening to release](/quest/m0/backport-release-hardening.md) - other security backports for the same patch release

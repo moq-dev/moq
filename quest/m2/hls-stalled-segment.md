@@ -11,8 +11,8 @@ itself stays unbounded; nothing is cut or discarded on a timer.
 
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 /quest-complete run), from
-[moq-dev/moq#7399](https://github.com/moq-dev/moq/pull/7399) (open; it owns
-[the restart drain cutoff](/quest/m2/hls-restart-drain-cutoff.md)):
+[moq-dev/moq#7399](https://github.com/moq-dev/moq/pull/7399) (merged; it finished
+the restart drain cutoff quest):
 
 - A recording waiting on a listed segment whose group never closes:
   - Bound it with a timer.
@@ -22,8 +22,7 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
   - Leave it as is.
 
 This is a general stalled-publisher case, not only takeover: a replaced
-instance's cut and a live recording hang the same way. After [moq-dev/moq#7399](https://github.com/moq-dev/moq/pull/7399) lands,
-find where a cursor waits on a listed row's media
+instance's cut and a live recording hang the same way. Find where a cursor waits on a listed row's media
 (`rs/moq-hls/src/export/rendition.rs`, the read [moq-dev/moq#7399](https://github.com/moq-dev/moq/pull/7399)'s Codex P2 pointed
 at) and surface the wait through the existing status or stats the export
 exposes, plus one `warn` per stalled segment, logged when the wait starts
@@ -38,5 +37,4 @@ Wire: none.
 
 ## Related
 
-- [Finite drain for a replaced run's HLS recording](/quest/m2/hls-restart-drain-cutoff.md) - [moq-dev/moq#7399](https://github.com/moq-dev/moq/pull/7399) lands the cut this reports on
 - [A library recorder gets the takeover cut](/quest/m2/mux-source-cut.md) - the other [moq-dev/moq#7399](https://github.com/moq-dev/moq/pull/7399) follow-up

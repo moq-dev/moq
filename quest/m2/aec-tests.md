@@ -13,7 +13,7 @@ partial frame into the next output.
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 /quest-complete run), from
 [moq-dev/moq#7369](https://github.com/moq-dev/moq/pull/7369): m2, as
-recommended. Start after [moq-dev/moq#7369](https://github.com/moq-dev/moq/pull/7369) (open) lands; it exposes `aec::Processor`,
+recommended. [moq-dev/moq#7369](https://github.com/moq-dev/moq/pull/7369) (merged) exposes `aec::Processor`,
 `aec::Stream`, and `aec::Stats` for caller-supplied PCM.
 
 Add the tests beside [moq-dev/moq#7369](https://github.com/moq-dev/moq/pull/7369)'s unit tests in `rs/moq-audio/src/aec/`. Fix any

@@ -13,8 +13,10 @@ kio's `log::test` eviction tests, and
 
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#6985](https://github.com/moq-dev/moq/pull/6985), [moq-dev/moq#7036](https://github.com/moq-dev/moq/pull/7036), and [moq-dev/moq#7360](https://github.com/moq-dev/moq/pull/7360). Milestone: ✅ m0 (user, "all recommended" for quests 1-8).
 
-They share no fixture, but each is a wall-clock bound that a starved host
-misses, so they land together. Reproduce each under load first (for example
+They share no fixture, but each fails only under load, so they land
+together: three are wall-clock bounds a starved host misses, and kio's
+eviction tests depend on global state other tests in the same binary hold.
+Reproduce each under load first (for example
 beside a `cargo build` of the workspace, or with `stress-ng`), and fix the
 cause rather than raising a bound.
 

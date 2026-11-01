@@ -59,3 +59,5 @@ Public API: none. Wire: none.
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
 - [Browser buffering and Firefox audio-tone tests pass under load](/quest/m0/test-flakes-2/browser-media-flakes.md) - the two `harness.browser.ts` buffering tests and the Firefox player's audio-tone checks pass reliably in Interop and Nightly, each fixed at its cause under the epic's rules
 - [Timing-bound tests pass beside a busy build](/quest/m0/test-flakes-2/load-timing-bounds.md) - four tests that pass alone but have failed under a loaded `just check` pass reliably there, each fixed at its cause under the epic's rules
+- [moq-relay's auth-trust test survives load](/quest/m0/test-flakes-2/relay-auth-trust.md) - it stops timing out on a busy host
+- [Draft-22 interop with a native publisher](/quest/m0/test-flakes-2/draft22-interop.md) - no "invalid fetch range" or audio gap with a Rust or C++ publisher

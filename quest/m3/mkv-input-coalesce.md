@@ -5,8 +5,9 @@
 The MKV importer fed one byte at a time is no slower than before
 [moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234) (about 81 µs
 on its `mkv-chunks/1` bench, 155 µs after it), with the same memory bound:
-a block's bytes stay readable before the block completes, and the importer
-retains no more than a split element header plus the fields it reads.
+readers lag the input by at most a small fixed buffer, so a block larger
+than it stays readable before the block completes, and the importer retains
+no more than that buffer, a split element header, and the fields it reads.
 
 ## Plan
 
@@ -21,13 +22,11 @@ Already-larger chunks write their whole span at once, so only tiny calls
 need help. Hold payload bytes in a small fixed buffer and write them when
 it fills, when the payload ends, or on `finish()`/abort. Settle the bound
 (a few KiB, well under one moq-net segment): it caps both the importer's
-extra retention and how far readers lag the input.
+extra retention and how far readers lag the input. A payload shorter than
+the buffer is therefore readable only once it ends; that delay is bounded by
+the buffer and is the point of coalescing, so no flush per input call.
 
 Measure with [moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234)'s `mkv-payloads` and `mkv-chunks` benches in
 `rs/moq-mux/benches`, and keep its retention tests passing.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Stream MKV blocks](/quest/m1/security-audit/mkv-stream-blocks.md) - its PR, [moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234), adds the streaming writer this speeds up

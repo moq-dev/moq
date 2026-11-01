@@ -11,12 +11,12 @@ instead of being read as a channel table.
 
 ## Plan
 
-Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7336](https://github.com/moq-dev/moq/pull/7336),
-which finishes [surround Opus through CMAF](/quest/m2/cmaf-opus-surround.md),
+Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7336](https://github.com/moq-dev/moq/pull/7336) (merged),
+which finished the surround-Opus-through-CMAF quest,
 and [moq-dev/moq#7308](https://github.com/moq-dev/moq/pull/7308).
 
 - No description: on main the `None` arm in
-  `rs/moq-mux/src/container/fmp4/mod.rs` (around line 1024) builds
+  `rs/moq-mux/src/container/fmp4/mod.rs` (around line 1100) builds
   `opus::Config::new` and writes `channel_mapping: None` (family 0) for any
   channel count, which RFC 7845 allows only for 1 or 2 channels. Use
   `opus::Mapping::vorbis` (`rs/moq-mux/src/codec/opus/mapping.rs`) for 3
@@ -32,7 +32,3 @@ Cover both with unit tests beside [moq-dev/moq#7336](https://github.com/moq-dev/
 `opus_dops_mapping_the_head_cannot_describe_is_refused`.
 
 Public API: none, or a new error variant. Wire: none.
-
-## Required
-
-- [Carry surround Opus through CMAF](/quest/m2/cmaf-opus-surround.md) - its PR, [moq-dev/moq#7336](https://github.com/moq-dev/moq/pull/7336), writes the family 1 table on export, which this reuses

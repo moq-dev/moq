@@ -21,7 +21,7 @@ Milestone: ✅ m1. Not chosen: m2.
   [Generated async wrappers](/quest/m1/poll-first/async-feature.md) converts
   the handshake by hand; once it has, convert these two through
   `#[kio::machine]`, following the conventions in `kio::machine`'s docs and
-  [straight-line bodies become machines](/quest/m1/poll-first/machine-bodies.md).
+  the bodies [moq-dev/moq#7284](https://github.com/moq-dev/moq/pull/7284) (merged) converted.
 - If the handshake's poll form makes either body a loop rather than
   straight-line, hand-write that `poll_*` instead and say so in the PR.
 

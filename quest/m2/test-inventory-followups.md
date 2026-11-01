@@ -9,8 +9,8 @@ each orphan once, and it checks JS bench scripts too.
 
 ## Plan
 
-Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7316](https://github.com/moq-dev/moq/pull/7316),
-which finishes [opt-in test inventory](/quest/m2/test-inventory.md).
+Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7316](https://github.com/moq-dev/moq/pull/7316) (merged),
+which finished the opt-in test inventory quest.
 Milestone m2 (user: "use recommended for any CI/flakes").
 
 [moq-dev/moq#7316](https://github.com/moq-dev/moq/pull/7316)'s review fixed a false pass: reaching any `gh nightly` group counted
@@ -34,7 +34,3 @@ old walk. Optional, only if it falls out: trim `#[ignore]` reasons that
 now duplicate the allowlist's owner (WGC, MediaCodec, NVIDIA).
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Every opt-in test target has a CI caller](/quest/m2/test-inventory.md) - its PR, [moq-dev/moq#7316](https://github.com/moq-dev/moq/pull/7316), adds the inventory this extends

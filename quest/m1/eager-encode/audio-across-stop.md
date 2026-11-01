@@ -33,7 +33,3 @@ Milestone: ✅ m1. Not chosen: m2.
   [moq-dev/moq#7261](https://github.com/moq-dev/moq/pull/7261) (merged), not this quest.
 
 Public API: none expected. Wire: none.
-
-## Required
-
-- [Audio encodes on demand from a raw backbuffer](/quest/m1/eager-encode/raw-audio.md) - [moq-dev/moq#7238](https://github.com/moq-dev/moq/pull/7238) lands buffered audio by default

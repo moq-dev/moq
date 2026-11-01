@@ -12,7 +12,7 @@ live pad per rendition, no duplicate or leaked pads, and no deadlock.
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
 /quest-complete run), from
 [moq-dev/moq#7368](https://github.com/moq-dev/moq/pull/7368): m2, as
-recommended. Start after [moq-dev/moq#7368](https://github.com/moq-dev/moq/pull/7368) (open) lands; it moves each rendition pad
+recommended. [moq-dev/moq#7368](https://github.com/moq-dev/moq/pull/7368) (merged) moved each rendition pad
 into one actor (`rs/moq-gst/src/source/`).
 
 Reuse [moq-dev/moq#7368](https://github.com/moq-dev/moq/pull/7368)'s restart/relist/retire/finish tests and their blocked-pad
@@ -21,7 +21,3 @@ rather than relying on stress runs, and check pad count and EOS state after
 each.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [moqsrc owns each rendition pad in one actor](/quest/m2/moqsrc-pad-actor.md) - [moq-dev/moq#7368](https://github.com/moq-dev/moq/pull/7368) lands the actor this tests

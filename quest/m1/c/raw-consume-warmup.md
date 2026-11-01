@@ -21,8 +21,8 @@ Milestone: ✅ m1. Not chosen: m2.
   consumer with only `with_max_delay(max_delay)` (`:531`), on main as well.
   Add `with_warmup` from the rendition's catalog `warmup`, and add the same
   warmup to the subscription's budget, as `moq_audio::decode::Consumer` and
-  `moq_video::decode::Consumer` do. [moq-dev/moq#7311](https://github.com/moq-dev/moq/pull/7311) replaces `with_max_delay` with a
-  `Delay { min, max }`; land after it and use its shape (C mirrors `MoqDelay`).
+  `moq_video::decode::Consumer` do. [moq-dev/moq#7311](https://github.com/moq-dev/moq/pull/7311) (merged) replaced `with_max_delay` with a
+  `Delay { min, max }`; use its shape (C mirrors `MoqDelay`).
 - Rung disable ([moq-dev/moq#7029](https://github.com/moq-dev/moq/pull/7029)'s decision 4): `moq_publish_media_set_enabled`, the
   pre-encoded media track's lower rendition and priority, and a C rate
   control over `moq_reservation`, mirroring moq-ffi's `MoqRateControl`,
@@ -34,5 +34,4 @@ disable functions. Wire: none.
 
 ## Required
 
-- [Max-delay decoders join an earlier group](/quest/m2/intra-refresh/join-earlier-group.md) - [moq-dev/moq#7311](https://github.com/moq-dev/moq/pull/7311)'s `Delay` shape the warmup change uses
 - [OBS disables simulcast rungs](/quest/m1/simulcast-rung-disable.md) - [moq-dev/moq#7029](https://github.com/moq-dev/moq/pull/7029)'s FFI rung disable that C mirrors

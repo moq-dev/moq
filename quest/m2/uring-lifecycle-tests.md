@@ -14,12 +14,12 @@ narrowed if that removes adapter state.
 ## Plan
 
 Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7309](https://github.com/moq-dev/moq/pull/7309)
-(its online review's non-blocking coverage suggestions), which finishes
-[io_uring handle lifecycle](/quest/m2/uring-lifecycle.md).
+(merged; its online review's non-blocking coverage suggestions), which
+finished the io_uring handle lifecycle quest.
 
 - Newly spawned queue: [moq-dev/moq#7309](https://github.com/moq-dev/moq/pull/7309) makes `Worker::drop` also drop tasks spawned
-  since its last turn (`rs/moq-uring/src/worker.rs`, `spawn` at :609 and
-  :692 on main) and gives `Driver` a `Drop` that fails the connection.
+  since its last turn (`rs/moq-uring/src/worker.rs`, `spawn` at :629 and
+  :721) and gives `Driver` a `Drop` that fails the connection.
   Spawn a driver, drop the worker before its next turn, and check a handle
   fails with the worker-gone error instead of pending.
 - Reset at the cap: [moq-dev/moq#7309](https://github.com/moq-dev/moq/pull/7309)'s `recv_closed_sees_a_reset_at_the_cap` and
@@ -31,7 +31,3 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /que
   narrower shape passes both tests, take it.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [io_uring handles follow their worker and owner](/quest/m2/uring-lifecycle.md) - its PR, [moq-dev/moq#7309](https://github.com/moq-dev/moq/pull/7309), adds the paths these test

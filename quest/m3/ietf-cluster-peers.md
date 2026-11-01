@@ -30,7 +30,7 @@ accumulates ROUTE_COST; and SUBSCRIBE_TRACKS resolves per namespace and
 resumes a track's preferred source only while the track has demand. Neither
 `rs/moq-net` nor `js/net` carries HOP_PATH or ROUTE_COST on PUBLISH yet.
 Implement both here, and reconcile with
-[moq-transport refuses SUBSCRIBE_TRACKS](/quest/m1/ietf-tracks-refuse.md),
+[moq-dev/moq#7236](https://github.com/moq-dev/moq/pull/7236) (merged),
 whose publishers refuse inbound SUBSCRIBE_TRACKS: once this lands, a
 cluster peer serves it instead.
 
