@@ -30,8 +30,10 @@
 //! A rendition the ladder retires before it encodes a single frame is dropped
 //! rather than kept for a bill it never ran up, so a source that keeps resizing
 //! does not grow the ladder without bound. A cursor that already reported it
-//! never mentions it again, and its handle stays at zero. One that did encode
-//! stays, since its counters are owed.
+//! stops mentioning it, and its handle stays at zero, unless a pipeline already
+//! running for it (a fetch that beat retirement) encodes after all: the entry
+//! then comes back under the same handle and is reported as encoding. One that
+//! did encode stays, since its counters are owed.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -77,7 +79,9 @@ impl Rendition {
 	///
 	/// Fixed for the life of the rendition: a source that resizes the ladder
 	/// under it retires this rung and publishes the replacement under a new name.
-	/// A retired rendition that never encoded is not reported again.
+	/// A retired rendition that never encoded is not reported again, unless a
+	/// pipeline already running for it encodes after all (see the
+	/// [module docs](self)).
 	pub fn size(&self) -> moq_video::Size {
 		self.0.rung.size
 	}
@@ -315,8 +319,9 @@ impl Drop for Guard {
 ///
 /// It is a cursor, not a log: a rendition that starts and stops between two
 /// calls is reported neither time. Bill from [`Rendition::frames`], which counts
-/// it regardless. A rendition retired before it encoded anything is never
-/// reported again (see the [module docs](self)).
+/// it regardless. A rendition retired before it encoded anything is not
+/// reported again unless a pipeline already running for it encodes after all,
+/// which reports it under its original handle (see the [module docs](self)).
 ///
 /// ```no_run
 /// # async fn example(active: &mut moq_transcode::active::Consumer) {
