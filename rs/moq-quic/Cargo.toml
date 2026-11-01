@@ -41,11 +41,10 @@ aws-lc-rs = { version = "1.9", default-features = false, optional = true }
 bytes = { workspace = true }
 fastbloom = { version = "0.17", default-features = false }
 indexmap = { workspace = true }
-# The waiter every `poll_*` wait registers, owned by the caller.
+# The waiter every `poll_*` wait registers, owned by the caller, and the clock
+# without the runtime, which is meant for dev-dependencies; a driver brings its own.
 kio = { workspace = true }
 lru-slab = "0.1.2"
-# Without the runtime, which is meant for dev-dependencies; a driver brings its own.
-moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 moq-congestion = { workspace = true }
 qlog = { version = "0.18", optional = true }
 rand = { workspace = true }
@@ -64,7 +63,7 @@ cpu-time = "1.0.0"
 criterion = { package = "bench-harness", path = "../bench-harness" }
 hex-literal = "1"
 # The tests and benches read time through the runtime, as the drivers do.
-moq-clock = { path = "../moq-clock", features = ["sim"] }
+kio = { path = "../kio", features = ["runtime", "sim"] }
 # The tests seed BBR3's probe phases.
 moq-congestion = { workspace = true, features = ["testing"] }
 # The mux module's tests run in the default merge gate.

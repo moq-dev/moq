@@ -89,6 +89,8 @@ pub struct Producer<C: Container, R = ()> {
 	/// Measures bitrate, reorder, batch, and explicit encoder flush observations for the catalog.
 	/// A caller without a published rendition simply never reads the estimate.
 	estimator: crate::catalog::Estimator,
+	/// Frames at or before this are history caught up behind the live edge; see [`Self::history`].
+	history: Option<moq_net::Timestamp>,
 
 	/// Peak-hold claim on the connection allocator, when one was supplied.
 	/// Named `bandwidth` so it is not confused with the catalog-gate [`Reserved`].
@@ -266,6 +268,7 @@ impl<C: Container> Producer<C> {
 			cadence: None,
 			reordered: false,
 			estimator: crate::catalog::Estimator::new(),
+			history: None,
 			bandwidth: None,
 			rendition: None,
 			sent: None,
@@ -303,6 +306,7 @@ where
 			cadence: None,
 			reordered: false,
 			estimator: rendition.estimator(),
+			history: None,
 			bandwidth: None,
 			rendition: Some(Box::new(rendition)),
 			sent: None,
@@ -457,6 +461,16 @@ where
 	/// Frames carry no decode time, so a caller that demuxed one (a container importer) supplies it.
 	pub fn reorder(&mut self, delay: moq_net::Timestamp) {
 		self.estimator.reorder(delay);
+	}
+
+	/// Mark frames at or before `until` as retained history being caught up, rather than live
+	/// frames written late.
+	///
+	/// History never measures [`delay`](crate::catalog::Estimate::delay) against the other tracks:
+	/// a publisher replaying a backlog behind the live edge would otherwise advertise the backlog's
+	/// age as playout delay for the rest of the track.
+	pub fn history(&mut self, until: moq_net::Timestamp) {
+		self.history = Some(until);
 	}
 
 	/// Record the media duration emitted together by a container importer.
@@ -671,9 +685,20 @@ where
 		if let Some(recorder) = self.recorder.as_mut() {
 			recorder.frame(sequence, timestamp);
 		}
-		self.estimator.write(timestamp, bytes);
+		self.estimator.rate(timestamp, bytes);
+		self.order(timestamp);
 		self.count(bytes, keyframe);
 		self.observe_end(timestamp, duration);
+	}
+
+	/// Place a written frame in the write order, unless it is history; see [`Self::history`].
+	fn order(&mut self, timestamp: moq_net::Timestamp) {
+		if self
+			.history
+			.is_none_or(|until| timestamp.as_micros() > until.as_micros())
+		{
+			self.estimator.order(timestamp);
+		}
 	}
 
 	/// Cut the current group, flushing buffered frames and closing it.
@@ -885,11 +910,13 @@ where
 			recorder.frame(group.sequence, self.buffer[0].timestamp);
 		}
 		// Counted only once written: an abort discards the buffer, and those frames were never sent.
-		for frame in &self.buffer {
-			self.estimator.order(frame.timestamp);
+		let mut buffer = std::mem::take(&mut self.buffer);
+		for frame in &buffer {
+			self.order(frame.timestamp);
 			self.count(frame.payload.len(), frame.keyframe);
 		}
-		self.buffer.clear();
+		buffer.clear();
+		self.buffer = buffer;
 
 		Ok(())
 	}
@@ -1052,6 +1079,25 @@ mod tests {
 		assert_eq!(renditions["slow"].delay, Some(ms(200)));
 		assert_eq!(renditions["fast"].delay, None);
 		assert_eq!(renditions["slow"].jitter, None, "a constant trail is not jitter");
+	}
+
+	/// History caught up behind the live edge is not a late write: only what follows it measures delay.
+	#[test]
+	fn history_measures_no_delay() {
+		let (_broadcast, catalog, mut tracks) = renditions(&["live", "replay"]);
+		tracks[0].write(frame(2_000_000, true)).unwrap();
+
+		tracks[1].history(moq_net::Timestamp::from_micros(1_960_000).unwrap());
+		for i in 1..=49u64 {
+			tracks[1].write(frame(i * 40_000, true)).unwrap();
+		}
+		tracks[1].cut(None).unwrap();
+		assert_eq!(catalog.snapshot().video.renditions["replay"].delay, None);
+
+		// A live frame past the history that still trails the other rendition is a late write.
+		tracks[1].write(frame(1_980_000, true)).unwrap();
+		tracks[1].cut(None).unwrap();
+		assert_eq!(tracks[1].estimate().delay, Some(std::time::Duration::from_millis(20)));
 	}
 
 	/// Buffered frames reach the transport when the buffer flushes, so that is where they are ordered:
@@ -1809,7 +1855,7 @@ mod tests {
 		assert!(producer.cut(Some(Timestamp::from_micros(10_000).unwrap())).is_err());
 		assert!(!producer.needs_keyframe());
 		assert!(
-			moq_clock::timeout(std::time::Duration::from_millis(1), group.read_frame())
+			kio::clock::timeout(std::time::Duration::from_millis(1), group.read_frame())
 				.await
 				.is_err()
 		);
