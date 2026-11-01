@@ -55,6 +55,7 @@ serde_json = { workspace = true }
 # it must not leak into the normal dependency feature set.
 tokio = { workspace = true, features = ["rt", "test-util", "time"] }
 tracing-test = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 # Optional per-thread CPU timing in the session benchmark.
 [target.'cfg(unix)'.dev-dependencies]

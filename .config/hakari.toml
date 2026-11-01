@@ -25,4 +25,4 @@ platforms = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-pc-win
 workspace-members = ["moq-net-fuzz", "moq-quic-fuzz"]
 
 [final-excludes]
-workspace-members = ["kio", "kio-macros", "moq-audio", "moq-clock", "moq-net", "moq-quic", "moq-tokio", "moq-transcode", "moq-video"]
+workspace-members = ["kio-macros"]

@@ -28,6 +28,7 @@ hex = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "sign"

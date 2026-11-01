@@ -29,6 +29,7 @@ smallvec = { version = "1.15", features = ["union"] }
 criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = "0.3"
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "tasks"

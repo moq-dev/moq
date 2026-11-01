@@ -4794,6 +4794,7 @@ dependencies = [
  "kio-macros",
  "smallvec",
  "tokio",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5378,6 +5379,7 @@ dependencies = [
  "tokio",
  "tracing",
  "unsafe-libopus",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5587,6 +5589,7 @@ dependencies = [
  "serde_json",
  "serde_with",
  "tokio",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5840,6 +5843,7 @@ dependencies = [
  "tracing-test",
  "url",
  "uuid",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5924,6 +5928,7 @@ dependencies = [
  "tinyvec",
  "tracing",
  "tracing-subscriber",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6139,6 +6144,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -6304,6 +6310,7 @@ dependencies = [
  "web-transport-proto",
  "web-transport-trait",
  "webpki-roots 1.0.10",
+ "workspace-hack",
  "x509-parser",
 ]
 
@@ -6325,6 +6332,7 @@ dependencies = [
  "tracing",
  "url",
  "usage-rs",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6437,6 +6445,7 @@ dependencies = [
  "tracing-test",
  "wgpu",
  "windows",
+ "workspace-hack",
  "x11rb 0.14.0",
  "yuv",
  "zune-jpeg",
