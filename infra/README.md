@@ -267,7 +267,9 @@ sets `fallback = true` because that expiry can remove a path before one that
 depends on it.
 
 The Worker logs R2 internal errors (10001) and service-unavailable errors
-(10043), then returns a non-cacheable 404 so Nix can build from source.
+(10043) and treats the failed read as a miss: the other bucket can still
+serve the path, and otherwise the 404 is non-cacheable so Nix builds from
+source.
 Other errors, including invalid object names, permissions, and bucket
 configuration, still fail the request. A failure after the archive body
 starts streaming remains a failed download, covered by `fallback`.

@@ -13,8 +13,9 @@ Decided 2026-10-31 (user, /quest-plan of the follow-ups from moq-dev/quest's hos
 - On 2026-10-31 one HTTP 500 for a `.narinfo` failed `check flake` and
   ejected a seven-PR batch in the host land gate.
 - [The Worker fix](https://github.com/moq-dev/moq/pull/7537) turns R2 internal
-  errors (10001) and service-unavailable errors (10043) into logged,
-  non-cacheable 404 misses. Malformed input, bad bindings, authorization
+  errors (10001) and service-unavailable errors (10043) into logged misses:
+  the other bucket is still tried, and a resulting 404 is non-cacheable.
+  Malformed input, bad bindings, authorization
   errors, and unknown failures still fail. No retries or client settings
   change. Both buckets and metadata/archive reads have local test coverage.
 - A local HTTP fault-injection probe verified that the real dev shell

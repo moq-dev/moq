@@ -27,14 +27,15 @@ describe("bucket reads", () => {
 					}
 					expect(log).toHaveBeenCalledTimes(4);
 					expect(failed).toHaveBeenCalledTimes(4);
-					if (binding === "RELEASE") expect(env.CI.get).not.toHaveBeenCalled();
+					expect(env.RELEASE.get).toHaveBeenCalledTimes(4);
+					expect(env.CI.get).toHaveBeenCalledTimes(4);
 				} finally {
 					log.mockRestore();
 				}
 			});
 		}
 
-		test.each([
+		for (const error of [
 			new Error("get: Unauthorized (10002)"),
 			new Error("get: Access denied (10003)"),
 			new Error("get: No such bucket (10006)"),
@@ -42,20 +43,20 @@ describe("bucket reads", () => {
 			new Error("get: Unknown failure (0)"),
 			new Error("unrelated 10001"),
 			new TypeError("bad binding"),
-		])(`${binding} preserves %s`, async (error) => {
-			const env = {
-				RELEASE: bucket(),
-				CI: bucket(),
-				[binding]: bucket(mock(async () => Promise.reject(error))),
-			};
-			await expect(worker.fetch(request(), env)).rejects.toBe(error);
-		});
+		]) {
+			test(`${binding} preserves ${error}`, async () => {
+				const env = {
+					RELEASE: bucket(),
+					CI: bucket(),
+					[binding]: bucket(mock(async () => Promise.reject(error))),
+				};
+				await expect(worker.fetch(request(), env)).rejects.toBe(error);
+			});
+		}
 	}
 
 	test("a missing binding is a configuration error", async () => {
-		await expect(worker.fetch(request(), { RELEASE: undefined, CI: bucket() } as never)).rejects.toThrow(
-			TypeError,
-		);
+		await expect(worker.fetch(request(), { RELEASE: undefined, CI: bucket() } as never)).rejects.toThrow(TypeError);
 	});
 
 	test("a release miss checks CI and preserves the object's headers and body", async () => {
@@ -69,6 +70,30 @@ describe("bucket reads", () => {
 		expect(response.headers.get("Cache-Control")).toBe("public, max-age=300");
 		expect(release).toHaveBeenCalledWith(key);
 		expect(ci).toHaveBeenCalledWith(key);
+	});
+
+	test("a release service error still serves the path from CI", async () => {
+		const body = "signed metadata";
+		const release = mock(async () => {
+			throw new Error("get: Internal error (10001)");
+		});
+		const ci = mock(async () => ({ size: body.length, body: new Response(body).body }) as R2ObjectBody);
+		const log = spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const response = await worker.fetch(request(), { RELEASE: bucket(release), CI: bucket(ci) });
+			expect(response.status).toBe(200);
+			expect(await response.text()).toBe(body);
+			expect(response.headers.get("Cache-Control")).toBe("public, max-age=300");
+			expect(log).toHaveBeenCalledTimes(1);
+		} finally {
+			log.mockRestore();
+		}
+	});
+
+	test("a plain miss stays cacheable", async () => {
+		const response = await worker.fetch(request(), { RELEASE: bucket(), CI: bucket() });
+		expect(response.status).toBe(404);
+		expect(response.headers.get("Cache-Control")).toBeNull();
 	});
 
 	test("cache metadata needs no bucket read", async () => {
