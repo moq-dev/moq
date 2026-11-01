@@ -30,7 +30,7 @@ ends that broadcast, and `follow` yields the next one. Consumers, pins and
 catalog references see only the identity; the epoch is never public.
 
 Non-goals: carrying identity over moq-transport (it carries none,
-[decided 2026-10-28](/quest/m1/ietf-epoch-cut.md)), public-key identities
+[decided 2026-10-28](https://github.com/moq-dev/moq/pull/7239)), public-key identities
 (a later option), and the route-handle API shape
 ([One Route handle](/quest/m1/api-audit/route/handle.md)).
 

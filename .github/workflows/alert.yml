@@ -1,7 +1,8 @@
 name: Alert
 
 # Posts cron, release, and deployment failures to the Discord #alerts channel.
-# PRs, the landing gate, branch validation, and cache warming stay on GitHub.
+# PRs, branch validation, and cache warming stay on GitHub; the landing gate
+# runs on the maintainer's host.
 #
 # Needs a DISCORD_WEBHOOK repo secret (Discord: Channel > Integrations >
 # Webhooks). Nothing else reads it.
@@ -22,6 +23,7 @@ on:
       - moq-gst
       - moq-relay
       - moq.sh
+      - Mutants
       - Nightly
       - release-brew
       - Release C
@@ -68,7 +70,7 @@ jobs:
       github.event.workflow_run.event != 'pull_request' &&
       github.event.workflow_run.event != 'pull_request_target' &&
       (github.event.workflow_run.event == 'schedule' ||
-      !contains(fromJSON('["Interop", "Nightly", "Smoke", "Smoke toolchain update", "TS", "Video"]'), github.event.workflow_run.name))
+      !contains(fromJSON('["Interop", "Mutants", "Nightly", "Smoke", "Smoke toolchain update", "TS", "Video"]'), github.event.workflow_run.name))
     runs-on: ubuntu-latest
     # The webhook lives in the `publish` Environment, which only protected refs
     # can deploy to; workflow_run runs on `main`.

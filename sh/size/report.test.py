@@ -2,6 +2,7 @@
 import importlib.util
 import unittest
 from pathlib import Path
+
 spec = importlib.util.spec_from_file_location("report", Path(__file__).with_name("report.py"))
 report = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(report)
