@@ -5,7 +5,7 @@ use std::task::{Poll, ready};
 use super::{Message, Version};
 use crate::{
 	Error,
-	coding::{Decode, DecodeError, Decoder, Stream},
+	coding::{Decode, DecodeError, Decoder, Stream, Writer},
 };
 
 pub(super) fn fin_cancels(version: Version) -> bool {
@@ -204,15 +204,51 @@ pub(super) async fn reject(
 	mut stream: Stream<Transport, Version>,
 	error: super::RequestError<'_>,
 ) -> Result<(), Error> {
-	stream.writer.encode_message(&error).await?;
-	// A peer dropping the response after reading the refusal is a normal end.
-	let _ = stream.writer.close().await;
-	Ok(())
+	stream.writer.buffer_message(super::RequestError::ID, &error)?;
+	deliver(&mut stream.writer).await
 }
 
-/// Write the REQUEST_ERROR refusing a `kind` request with `err`.
-pub(super) async fn write_error<W: crate::transport::poll::SendStream>(
-	writer: &mut crate::coding::Writer<W, Version>,
+/// Deliver the last message buffered on a response: flush it, then finish the stream and
+/// wait for the peer's acknowledgement.
+///
+/// Only the flush can fail: a peer dropping the response once it has read it is a normal
+/// end. The acknowledgement releases the stream, so dropping the writer resets nothing.
+pub(super) struct Deliver {
+	state: DeliverState,
+}
+
+#[kio::machine(self.state: DeliverState)]
+impl Deliver {
+	pub(super) fn new() -> Self {
+		Self {
+			state: DeliverState::Start,
+		}
+	}
+
+	pub(super) fn poll(
+		&mut self,
+		waiter: &kio::Waiter,
+		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
+	) -> Poll<Result<(), Error>> {
+		wait!(Flush => writer.poll_flush(waiter))?;
+		let finished: bool = writer.finish().is_ok();
+		let _ = wait!(Close => match *finished {
+			true => writer.poll_close(waiter),
+			false => Poll::Ready(Ok(())),
+		});
+		Poll::Ready(Ok(()))
+	}
+}
+
+/// Await [`Deliver`].
+pub(super) async fn deliver(writer: &mut Writer<crate::transport::boxed::SendStream, Version>) -> Result<(), Error> {
+	let mut deliver = Deliver::new();
+	kio::wait(|waiter| deliver.poll(waiter, writer)).await
+}
+
+/// Buffer the REQUEST_ERROR refusing a `kind` request with `err`.
+pub(super) fn buffer_error<W: crate::transport::poll::SendStream>(
+	writer: &mut Writer<W, Version>,
 	kind: super::error::request::Kind,
 	err: &Error,
 	reason: &str,
@@ -225,7 +261,18 @@ pub(super) async fn write_error<W: crate::transport::poll::SendStream>(
 			reason_phrase: reason.into(),
 			retry_interval: 0,
 		},
-	)?;
+	)
+}
+
+/// Write the REQUEST_ERROR refusing a `kind` request with `err`.
+pub(super) async fn write_error<W: crate::transport::poll::SendStream>(
+	writer: &mut Writer<W, Version>,
+	kind: super::error::request::Kind,
+	err: &Error,
+	reason: &str,
+	version: Version,
+) -> Result<(), Error> {
+	buffer_error(writer, kind, err, reason, version)?;
 	kio::wait(|waiter| writer.poll_flush(waiter)).await
 }
 
@@ -329,11 +376,9 @@ impl<'a> Decode<'a, Version> for Update {
 	}
 }
 
-/// The namespace-only parameters of a REQUEST_UPDATE. `TRACKS` marks one on a
-/// SUBSCRIBE_TRACKS, which from draft-22 may also carry TRACK_PROPERTY_FILTER and
-/// FORWARD.
+/// The namespace-only parameters of a REQUEST_UPDATE.
 #[derive(Debug)]
-pub(crate) struct NamespaceUpdate<const TRACKS: bool = false> {
+pub(crate) struct NamespaceUpdate {
 	pub(super) request_id: super::RequestId,
 	pub(super) prefix: Option<crate::Path>,
 	pub(super) refused: Option<Error>,
@@ -351,7 +396,7 @@ impl super::parameters::Param for NamespacePrefix {
 	}
 }
 
-impl<'a, const TRACKS: bool> Decode<'a, Version> for NamespaceUpdate<TRACKS> {
+impl<'a> Decode<'a, Version> for NamespaceUpdate {
 	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if r.varint()? != super::SubscribeUpdate::ID {
 			return Err(DecodeError::InvalidValue);
@@ -363,8 +408,6 @@ impl<'a, const TRACKS: bool> Decode<'a, Version> for NamespaceUpdate<TRACKS> {
 			let request_id = super::RequestId::decode(&mut data, version)?;
 			decode_params!(&mut data, version,
 				0x03 => token: Vec<super::token::RequestToken>,
-				0x10 => _forward: Option<bool> where TRACKS && super::Filter::is_draft20(version),
-				0x29 => _track_filter: Vec<super::Opaque> where TRACKS && super::subscribe::has_range_filters(version),
 				0x34 => prefix: Option<NamespacePrefix>,
 			);
 			if !data.is_empty() {
@@ -387,7 +430,7 @@ impl<'a, const TRACKS: bool> Decode<'a, Version> for NamespaceUpdate<TRACKS> {
 mod tests {
 	use super::*;
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn request_messages_keep_goaway_state_across_response_phases() {
 		use crate::lite::test_transport::ScriptedSession;
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
@@ -409,7 +452,7 @@ mod tests {
 
 	/// A request-stream message counts as its sender counts it: the length and body, not the
 	/// type that selects it, including a GOAWAY read ahead of the response.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn request_stream_messages_count_without_their_type() {
 		use crate::lite::test_transport::ScriptedSession;
 		use crate::stats::{Message, Registry, Tier};
@@ -431,7 +474,7 @@ mod tests {
 		assert_eq!(rx(Message::Other), Some(2));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_goaway_does_not_cancel_a_pending_request() {
 		use crate::lite::test_transport::ScriptedSession;
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
@@ -490,24 +533,17 @@ mod tests {
 		);
 	}
 
-	/// From draft-22 a SUBSCRIBE_TRACKS update may carry TRACK_PROPERTY_FILTER (0x29), so it
-	/// decodes there, to be refused per request, while a SUBSCRIBE_NAMESPACE's still closes.
+	/// TRACK_PROPERTY_FILTER (0x29) belongs only to SUBSCRIBE_TRACKS updates, so on a
+	/// SUBSCRIBE_NAMESPACE's it closes the session.
 	#[test]
-	fn track_property_filter_on_listing_update_decodes() {
+	fn track_property_filter_on_namespace_update_closes() {
 		// REQUEST_UPDATE, 6 bytes: Request ID 2, one parameter: 0x29 with a two-byte value.
 		const FRAME: &[u8] = &[0x02, 0x00, 0x06, 2, 1, 0x29, 2, 0, 0];
-		let version = Version::Draft22;
-		let mut buf = bytes::Bytes::from_static(FRAME);
-		let update =
-			crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::<true>::decode(r, v)).unwrap();
-		assert!(update.refused.is_none(), "{version}: {:?}", update.refused);
-		let mut buf = bytes::Bytes::from_static(FRAME);
-		assert!(crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::<false>::decode(r, v)).is_err());
-		let mut buf = bytes::Bytes::from_static(FRAME);
-		assert!(
-			crate::coding::decode_buf(&mut buf, Version::Draft18, |r, v| NamespaceUpdate::<true>::decode(r, v))
-				.is_err()
-		);
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
+			let mut buf = bytes::Bytes::from_static(FRAME);
+			let decoded = crate::coding::decode_buf(&mut buf, version, |r, v| NamespaceUpdate::decode(r, v));
+			assert!(decoded.is_err(), "{version}");
+		}
 	}
 
 	/// TRACK_NAMESPACE_PREFIX (0x34) updates a SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS only,

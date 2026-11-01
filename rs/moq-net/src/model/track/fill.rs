@@ -327,6 +327,11 @@ impl Join {
 		pending.result.weak().same_channel(&self.attempt)
 	}
 
+	/// The part of the fill the reader still reads.
+	pub(super) fn held(&self) -> &RangeSet<u64> {
+		&self.held
+	}
+
 	/// Whether the reader holds none of the fill any more.
 	pub(super) fn is_empty(&self) -> bool {
 		self.held.is_empty()
@@ -1158,7 +1163,7 @@ impl Inner {
 		if let Ok(mut state) = TrackState::modify(&self.state)
 			&& state.end.is_none()
 		{
-			let _ = state.set_end(Position::group(final_sequence));
+			let _ = state.set_end(Position::group(final_sequence), None);
 		}
 	}
 }
