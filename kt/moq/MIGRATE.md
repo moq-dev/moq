@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Decoder outputs take a `Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`audio.DecoderOutput` replaces `maxDelay` and the playout `delay: Duration?` with `delay: media.Delay?` and `estimate: Boolean = true`.
+`video.DecoderOutput.maxDelay` is `delay: media.Delay?`.
+`Delay(min, max)`: `max` (null for no limit) is the old `maxDelay`, and `min` is the playout delay, where a cold join starts.
+A fixed audio playout delay `d` is `delay = Delay(min = d, max = ...)` with `estimate = false`.
+
 ### Compression moves to the track
 
 `dev.moq.flate` is removed: publish opaque bytes on a `TrackProducer`.
@@ -32,7 +39,7 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 The records carry durations as `java.time.Duration` fields instead of `*Us` microsecond integers, so the duration extension properties are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
 Convert with `toKotlinDuration()` and `toJavaDuration()` where you want `kotlin.time.Duration`.
 `AudioEncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs = 0u` for the codec's own frame.
-`Subscription.maxDelay` defaults to null, which sets no subscriber limit: start from `Subscription.default()`, or pass `java.time.Duration.ZERO`, for the old default.
+`Subscription.maxDelay` has no default: start from `Subscription.default()`, or pass `java.time.Duration.ZERO`, for the old default. Null sets no subscriber limit.
 `TrackConsumer.info()` no longer throws.
 
 ### Connection state

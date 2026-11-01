@@ -589,13 +589,21 @@ fn sink_pads_are_named_through_child_proxy() {
 #[test]
 fn a_pipeline_description_names_the_track() {
 	init();
-	let sink = gst::parse::launch("moqsink name=publisher url=https://127.0.0.1:1 broadcast=test sink_0::track=camera")
-		.expect("parse the description");
+	let sink = gst::parse::launch(
+		"moqsink name=publisher url=https://127.0.0.1:1 broadcast=test \
+		 sink_0::track=camera sink_0::bandwidth-ceiling=4000000",
+	)
+	.expect("parse the description");
 	let _pad = sink.request_pad_simple("sink_0").expect("request sink_0");
 	assert_eq!(
 		child_of(&sink, "sink_0").property::<String>("track"),
 		"camera",
 		"sink_0::track reached the pad"
+	);
+	assert_eq!(
+		child_of(&sink, "sink_0").property::<u64>("bandwidth-ceiling"),
+		4_000_000,
+		"sink_0::bandwidth-ceiling reached the pad"
 	);
 }
 

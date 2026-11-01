@@ -117,12 +117,11 @@ class Subscription:
     to deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which
     pending group the publisher sends first, ``None`` for newest first.
 
-    Start from :meth:`default` for moq-net's defaults; a bare ``Subscription()`` sets no
-    max delay.
+    A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
     """
 
     priority: int = 0
-    max_delay: timedelta | None = None
+    max_delay: timedelta | None = timedelta(0)
     ranges: Sequence[MoqRange] | None = None
     order: MoqOrder | None = None
 
@@ -262,7 +261,7 @@ class QuicConfig:
     ``max_streams`` caps the concurrent streams the peer may open toward this endpoint
     (0 is refused); MoQ opens one per group, so a subscriber to many tracks wants it
     raised. ``idle_timeout`` is how long an idle connection survives, and ``keep_alive``
-    the ping interval (zero disables it). ``gso``, ``mtu_discovery``, and
+    the ping interval (zero uses the default). ``gso``, ``mtu_discovery``, and
     ``congestion_control`` leave the choice to the backend when ``None``. ``qlog`` is a
     directory, which must exist, for qlog traces when :func:`qlog_supported`.
     ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for

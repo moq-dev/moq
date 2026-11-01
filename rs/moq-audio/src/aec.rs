@@ -177,8 +177,7 @@ impl Control {
 	///
 	/// Called when `capture` opens a device, so the allocation lands there
 	/// rather than in the first callback. This runs again every time capture
-	/// reopens, after a stop, a device failure, or an on-demand listener coming
-	/// back: the adaptive filter survives that as long as the format hasn't
+	/// reopens after a stop or device failure: the adaptive filter survives that as long as the format hasn't
 	/// changed, since it is still the same room.
 	pub(crate) fn attach(&self, sample_rate: u32, channels: u32) -> Result<Attachment, Error> {
 		// sonora reports a bad format per call, by which point we are on the
@@ -627,11 +626,6 @@ fn channel(rate: u32) -> (ring::Producer, ring::Consumer) {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use std::collections::VecDeque;
 
@@ -1151,10 +1145,10 @@ mod tests {
 		// Until the tap hears it rather than for a fixed count: writes are dropped
 		// until the device first reads, and a device can take seconds to start
 		// (PulseAudio's idle null sink renders two seconds ahead).
-		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-		while energy <= 1.0 && tokio::time::Instant::now() < deadline {
+		let deadline = kio::clock::Instant::now() + std::time::Duration::from_secs(10);
+		while energy <= 1.0 && kio::clock::Instant::now() < deadline {
 			let _ = sink.write(&tone).expect("write");
-			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+			kio::clock::sleep(std::time::Duration::from_millis(100)).await;
 
 			// Drain the tap the way the microphone callback would, and add up
 			// what the speaker was given.

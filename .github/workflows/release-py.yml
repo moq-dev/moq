@@ -20,7 +20,9 @@ on:
       - "py/moq-rs/**"
       - ".github/workflows/release-py.yml"
       - "sh/gh/release.sh"
-  workflow_run:
+  # Publishes only a protected release tag at the run's commit; see
+  # "Require a release tag at the run's commit".
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: ["Release Py FFI"]
     types:
       - completed
