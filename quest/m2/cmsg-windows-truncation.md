@@ -11,7 +11,3 @@ Follow-up of [moq-dev/moq#7394](https://github.com/moq-dev/moq/pull/7394), which
 Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run). Match #7394's handling; verify with a cross-target `cargo check` and the platform workflow, since no Windows host runs locally.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Bound cmsg payload reads](/quest/m2/cmsg-decode-bound.md) - its PR, #7394, adds the Unix handling this mirrors

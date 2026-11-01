@@ -145,13 +145,8 @@ authorization and hidden names work exactly as without one.
 The epoch and the restart and takeover messages travel on moq-lite 07, which is
 opt-in. Older versions carry a takeover as an ordinary announcement, so the
 first subscription through a claim is reset once the output's route arrives.
-moq-transport carries the epoch when both sides offer the [epoch
-extension](/draft/moq-epoch), on by default. A restart onto another epoch is
-advertised before the old one is withdrawn, so the path is never absent, and one
-that gains or loses an epoch is an end then a start. Older moq-lite versions
-and a side that declines the extension carry no
-epoch. Without an epoch, any other route winning is a restart, even a reconnect
-over the same path, since nothing says it serves the same bytes. A peer that
+moq-transport and older moq-lite versions carry no epoch. Without an epoch,
+any other route winning is a restart, even a reconnect over the same path, since nothing says it serves the same bytes. A peer that
 ignores the end and start may keep cached objects of the old run under the same
 names, so an end and a start is not a cache flush.
 
@@ -172,8 +167,7 @@ compared. A subscription uses the preferred link that has a route and moves to t
 next when that route goes; a publisher pushes the same broadcast to every CDN.
 
 The move resumes without a seam only between routes with the same epoch, which
-needs moq-lite 07, or moq-transport with the epoch extension,
-on both links. A CDN link that carries no epoch makes moving onto it, or back
+needs moq-lite 07 on both links. A CDN link that carries no epoch makes moving onto it, or back
 off it, a restart, and the player requests the path again. Both links must
 also speak the same protocol and draft: a copy's track info records the
 moq-transport draft it crossed, and a copy whose track info differs is refused,
@@ -349,13 +343,13 @@ frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
 
 A publisher refuses a group that starts before a lower one, and so does a
-moq-lite 07 receiver. Since moq-lite 05 and 06 send times look like media time,
-a receiver drops every timestamp it gets over them and the track arrives
-untimed.
-Timestamps received over moq-transport, whose peers may stamp arrival times,
-are not checked. Rust relays preserve them across moq-lite 07 when both peers
-negotiate the [ietf extension](/draft/moq-ietf), which carries their origin and
-keeps them unchecked. A moq-lite peer without it receives that track untimed.
+moq-lite 07 receiver. A receiver passes on the timestamps it gets over moq-lite
+05 and 06 without checking them, since their send times look like media time and
+an older group fetched later would look like a rewind. Timestamps received over
+moq-transport, whose peers may stamp arrival times, are not checked either. A
+relay serves both on over every version. Over moq-lite 07 the
+[ietf extension](/draft/moq-ietf) keeps moq-transport ones unchecked; without
+it, the receiver checks them and may refuse a group that rewinds.
 
 A publisher may [compress](/concept/compression) a track, which pays off for
 repetitive data such as JSON and not for media. Each group's frames become one

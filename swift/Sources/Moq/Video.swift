@@ -9,7 +9,7 @@ public enum Video {
     public typealias EncoderInput = VideoEncoderInput
     /// The codec, bitrate, group mode, and backend preference.
     public typealias EncoderOutput = VideoEncoderOutput
-    /// What a `Consumer` delivers: an optional resize, a max delay, and the decoder's surface (macOS only).
+    /// What a `Consumer` delivers: an optional resize, a delay, and the decoder's surface (macOS only).
     public typealias DecoderOutput = VideoDecoderOutput
     /// One raw picture with its presentation timestamp.
     public typealias Frame = VideoFrame
@@ -118,12 +118,13 @@ public enum Video {
             rendition: Media.Video,
             output: DecoderOutput = DecoderOutput()
         ) async throws -> Consumer {
-            Consumer(try await MoqVideoConsumer.subscribe(
-                broadcast: broadcast.ffi,
-                id: id,
-                catalogVideo: rendition,
-                output: output
-            ))
+            Consumer(
+                try await MoqVideoConsumer.subscribe(
+                    broadcast: broadcast.ffi,
+                    id: id,
+                    catalogVideo: rendition,
+                    output: output
+                ))
         }
 
         /// The next frame, gap, or end, or `nil` once the track ends or is closed.

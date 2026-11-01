@@ -11,7 +11,3 @@ Follow-up of [moq-dev/moq#7357](https://github.com/moq-dev/moq/pull/7357), which
 Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run). Flush through the fMP4 exporter's normal fragment path so the flushed fragment is indexed by the final `moov` like any other; extend #7357's nightly SIGINT test to check the last frames received before the signal are in the file.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [moq export mp4](/quest/m2/mp4-export.md) - its PR, #7357, adds the recorder
