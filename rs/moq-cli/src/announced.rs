@@ -171,7 +171,6 @@ impl View {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::args::{Command, Invocation};
@@ -232,7 +231,7 @@ mod tests {
 
 			// Every broadcast is on the relay before anything follows it.
 			for (path, _) in &broadcasts {
-				tokio::time::timeout(TIMEOUT, relay.follow(*path, None).unwrap().available())
+				moq_clock::timeout(TIMEOUT, relay.follow(*path, None).unwrap().available())
 					.await
 					.expect("relay routes the broadcast")
 					.expect("broadcast");
@@ -274,7 +273,7 @@ mod tests {
 
 	/// The next line printed.
 	async fn next(lines: &mut Lines<BufReader<DuplexStream>>) -> String {
-		tokio::time::timeout(TIMEOUT, lines.next_line())
+		moq_clock::timeout(TIMEOUT, lines.next_line())
 			.await
 			.expect("a line in time")
 			.expect("read")
@@ -352,7 +351,7 @@ mod tests {
 		assert_eq!(next(&mut lines).await, "+ other/c");
 
 		fixture.shutdown.start();
-		let result = tokio::time::timeout(TIMEOUT, task)
+		let result = moq_clock::timeout(TIMEOUT, task)
 			.await
 			.expect("exits once the session ends")
 			.expect("task");

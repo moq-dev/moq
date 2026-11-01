@@ -1,14 +1,12 @@
 use std::fmt;
 use std::str::FromStr;
 
-use aws_lc_rs::aead::{AES_128_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
-use aws_lc_rs::hmac;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use zeroize::Zeroize;
+use rind::{aead, hmac};
 
 use crate::error::{Error, Result};
-use crate::limits::{KEY_LEN, NAME_BLOCK, NAME_MAC_LEN, NAME_NONCE_LEN, TAG_LEN, check_bytes};
+use crate::limits::{NAME_BLOCK, NAME_NONCE_LEN, TAG_LEN, check_bytes};
 
 /// An opaque physical track name: unpadded base64url of a semantic name sealed under its generation.
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -70,18 +68,12 @@ impl AsRef<str> for Name {
 /// A generation's name keys: an HMAC-SHA-256 key for nonces and an AES-128-GCM key for sealing.
 pub(crate) struct Keys {
 	mac: hmac::Key,
-	seal: LessSafeKey,
+	seal: aead::Key,
 }
 
 impl Keys {
-	pub(crate) fn new(mut mac: [u8; NAME_MAC_LEN], mut seal: [u8; KEY_LEN]) -> Self {
-		let keys = Self {
-			mac: hmac::Key::new(hmac::HMAC_SHA256, &mac),
-			seal: LessSafeKey::new(UnboundKey::new(&AES_128_GCM, &seal).expect("16-byte AES-128-GCM key")),
-		};
-		mac.zeroize();
-		seal.zeroize();
-		keys
+	pub(crate) fn new(mac: hmac::Key, seal: aead::Key) -> Self {
+		Self { mac, seal }
 	}
 
 	/// The physical name for a semantic name: its HMAC nonce, then the padded name sealed under it.
@@ -93,8 +85,8 @@ impl Keys {
 		let mut padded = pad(semantic.as_bytes())?;
 		let nonce = self.nonce(&padded);
 		self.seal
-			.seal_in_place_append_tag(Nonce::assume_unique_for_key(nonce), Aad::empty(), &mut padded)
-			.expect("AES-128-GCM seal with a valid key and nonce");
+			.seal_in_place_append_tag(aead::Nonce::assume_unique_for_key(nonce), &[], &mut padded)
+			.expect("AES-128-GCM seals a name within the limit");
 		let mut material = Vec::with_capacity(NAME_NONCE_LEN + padded.len());
 		material.extend_from_slice(&nonce);
 		material.extend_from_slice(&padded);
@@ -117,7 +109,7 @@ impl Keys {
 		let nonce: [u8; NAME_NONCE_LEN] = (&*nonce).try_into().expect("parsed with a nonce");
 		let padded = self
 			.seal
-			.open_in_place(Nonce::assume_unique_for_key(nonce), Aad::empty(), sealed)
+			.open_in_place(aead::Nonce::assume_unique_for_key(nonce), &[], sealed)
 			.map_err(|_| Error::Authentication)?;
 		// One physical name per semantic name, so two tracks never share its payload keys.
 		if self.nonce(padded) != nonce {

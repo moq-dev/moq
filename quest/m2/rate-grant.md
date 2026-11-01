@@ -3,9 +3,9 @@
 ## Goal
 
 An honest client targets its cap instead of discovering it through
-backpressure: the in-band AUTH grant carries the session's `publish.rate`
-and `subscribe.rate`, and `@moq/publish` (and the Rust publisher) clamp the
-encoder's target bitrate to `publish.rate`.
+backpressure: the in-band AUTH grant carries the session's `publish_rate`
+and `subscribe_rate`, and `@moq/publish` (and the Rust publisher) clamp the
+encoder's target bitrate to `publish_rate`.
 
 ## Plan
 
