@@ -1,11 +1,11 @@
-[2m2026-11-01T14:55:18.411278Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m1869892401125035 [3mconfigured[0m[2m=[0mfalse
-[2m2026-11-01T14:55:18.416169Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
-[2m2026-11-01T14:55:18.416197Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
-[2m2026-11-01T14:55:18.420192Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
-[2m2026-11-01T14:55:18.420578Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://fb.mvfst.net:9448
-[2m2026-11-01T14:55:18.728546Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-14
-[2m2026-11-01T14:55:18.728581Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mhttps://fb.mvfst.net:9448
-[2m2026-11-01T14:55:18.787852Z[0m [33m WARN[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe_namespace error [3merr[0m[2m=[0mremote error: code=16 [3mreason[0m[2m=[0mempty
-[2m2026-11-01T14:55:18.787897Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m subscribe_namespace failed, continuing without [3merr[0m[2m=[0mremote error: code=16
-[2m2026-11-01T14:55:48.466031Z[0m [33m WARN[0m [2mweb_transport_moq::session[0m[2m:[0m unknown capsule [3mtyp[0m[2m=[0m420171077 [3msize[0m[2m=[0m1
-[2m2026-11-01T14:55:48.466132Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0munknown code=386759528
+[2m2026-11-01T15:53:41.197529Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m cluster initialized [3mhop_id[0m[2m=[0m6432217839809248 [3mconfigured[0m[2m=[0mfalse
+[2m2026-11-01T15:53:41.204415Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP receive buffer is smaller than requested; raise `net.core.rmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m1048576
+[2m2026-11-01T15:53:41.204449Z[0m [33m WARN[0m [2mmoq_sock::bind[0m[2m:[0m UDP send buffer is smaller than requested; raise `net.core.wmem_max` or expect packet loss under load [3mwanted[0m[2m=[0m8388608 [3mgranted[0m[2m=[0m4194304
+[2m2026-11-01T15:53:41.208016Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connecting [3mpeer[0m[2m=[0mhttps://fb.mvfst.net:9448
+[2m2026-11-01T15:53:41.208785Z[0m [32m INFO[0m [2mmoq_relay::cluster[0m[2m:[0m no cluster peers configured; running standalone
+[2m2026-11-01T15:53:41.460914Z[0m [32m INFO[0m [2mmoq_tokio::client[0m[2m:[0m connected [3mversion[0m[2m=[0mmoq-transport-14
+[2m2026-11-01T15:53:41.461090Z[0m [32m INFO[0m [2mmoq_tokio::connection[0m[2m:[0m connected [3mpeer[0m[2m=[0mhttps://fb.mvfst.net:9448
+[2m2026-11-01T15:53:41.514912Z[0m [33m WARN[0m [2mmoq_net::ietf::subscriber[0m[2m:[0m subscribe_namespace error [3merr[0m[2m=[0mremote error: code=16 [3mreason[0m[2m=[0mempty
+[2m2026-11-01T15:53:41.514952Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m subscribe_namespace failed, continuing without [3merr[0m[2m=[0mremote error: code=16
+[2m2026-11-01T15:54:11.247553Z[0m [33m WARN[0m [2mweb_transport_moq::session[0m[2m:[0m unknown capsule [3mtyp[0m[2m=[0m420171077 [3msize[0m[2m=[0m1
+[2m2026-11-01T15:54:11.247641Z[0m [33m WARN[0m [2mmoq_net::ietf::session[0m[2m:[0m session error [3merr[0m[2m=[0munknown code=386759528

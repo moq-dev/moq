@@ -13,10 +13,10 @@ announced: broadcast=moqtail/ch05 active=true
 announced: broadcast=moqtail/ch04 active=true
 announced: broadcast=moqtail/ch00_all active=true
 announced: broadcast=moqtail/ch03 active=true
-announced: broadcast=smoke-js-web-4858-27909.hang active=true
-subscribe start: id=2 broadcast=smoke-js-web-4858-27909.hang track=catalog.json
-subscribe written: id=2 broadcast=smoke-js-web-4858-27909.hang track=catalog.json
-subscribe ok: id=2 broadcast=smoke-js-web-4858-27909.hang track=catalog.json
+announced: broadcast=smoke-js-web-4981-1369.hang active=true
+subscribe start: id=2 broadcast=smoke-js-web-4981-1369.hang track=catalog.json
+subscribe written: id=2 broadcast=smoke-js-web-4981-1369.hang track=catalog.json
+subscribe ok: id=2 broadcast=smoke-js-web-4981-1369.hang track=catalog.json
 error: timed out waiting for data
 subscribe_namespace error: connection error: closed (source=session)
 announced: broadcast=moqtail/ch06 active=false
@@ -30,7 +30,7 @@ announced: broadcast=moqtail/ch05 active=false
 announced: broadcast=moqtail/ch04 active=false
 announced: broadcast=moqtail/ch00_all active=false
 announced: broadcast=moqtail/ch03 active=false
-announced: broadcast=smoke-js-web-4858-27909.hang active=false
+announced: broadcast=smoke-js-web-4981-1369.hang active=false
 broadcast discovery failed; broadcasts resolve on request only. WebTransportError {
   source: "session",
   streamErrorCode: null,
@@ -64,4 +64,4 @@ broadcast discovery failed; broadcasts resolve on request only. WebTransportErro
   DATA_CLONE_ERR: 25,
   toString: [Function: toString],
 }
-subscribe error: id=2 broadcast=smoke-js-web-4858-27909.hang track=catalog.json error=remote error: 0 (connection error: closed)
+subscribe error: id=2 broadcast=smoke-js-web-4981-1369.hang track=catalog.json error=remote error: 0 (connection error: closed)
