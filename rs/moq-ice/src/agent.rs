@@ -4,7 +4,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use str0m::net::{Protocol, Receive};
 use str0m::{Candidate, IceConnectionState, Input, Output, Rtc};
 use stun_types::attribute::XorMappedAddress;
@@ -250,7 +250,7 @@ impl Agent {
 						self.receive(&data, src);
 						continue;
 					}
-					_ = moq_clock::sleep_until(deadline) => {}
+					_ = kio::clock::sleep_until(deadline) => {}
 				}
 			}
 

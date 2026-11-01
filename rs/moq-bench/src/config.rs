@@ -225,7 +225,7 @@ impl Config {
 		deprecated.extend(config.deprecated());
 		anyhow::ensure!(deprecated.is_empty(), "{deprecated}");
 		config.origins = Some(resolved);
-		// `Stats::report` feeds this into `moq_clock::interval`, which panics on a
+		// `Stats::report` feeds this into `kio::clock::interval`, which panics on a
 		// zero period. Reject it up front with a clear message.
 		anyhow::ensure!(!config.report().is_zero(), "--report must be greater than 0s");
 		if let Some(fanout) = &config.fanout {
@@ -485,7 +485,7 @@ url = "https://example.com"
 
 	#[test]
 	fn zero_report_is_rejected() {
-		// A zero report interval would panic `moq_clock::interval`; reject it early.
+		// A zero report interval would panic `kio::clock::interval`; reject it early.
 		let err = Config::parse_and_merge(["moq-bench", "--report", "0s"]).unwrap_err();
 		assert!(err.to_string().contains("report"), "unexpected error: {err}");
 	}

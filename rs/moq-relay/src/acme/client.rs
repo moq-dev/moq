@@ -5,7 +5,7 @@
 //! that resolver to every TLS listener, so QUIC, HTTPS, and every worker serve
 //! the same certificate and pick up a renewal on their next handshake.
 
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::{
 	io,
 	net::SocketAddr,
@@ -161,8 +161,8 @@ impl Acme {
 		let health = moq_tokio::accept::Health::new("acme");
 		// Readiness waits on issuance, so keep extending systemd's start timeout
 		// rather than letting the unit's default kill the relay inside the budget.
-		let mut extend = moq_clock::interval(EXTEND_INTERVAL);
-		let deadline = moq_clock::sleep(self.timeout);
+		let mut extend = kio::clock::interval(EXTEND_INTERVAL);
+		let deadline = kio::clock::sleep(self.timeout);
 		tokio::pin!(deadline);
 		let mut last = None;
 		let mut issued = false;
@@ -211,13 +211,13 @@ impl Acme {
 							let handshake = challenge.accept(stream);
 							// The validator only needs the handshake, then closes.
 							handshakes.spawn(async move {
-								let _ = moq_clock::timeout(CHALLENGE_TIMEOUT, handshake).await;
+								let _ = kio::clock::timeout(CHALLENGE_TIMEOUT, handshake).await;
 							});
 						}
 					}
 					Err(err) => {
 						if let Some(pause) = health.failed(&err) {
-							moq_clock::sleep(pause).await;
+							kio::clock::sleep(pause).await;
 						}
 					}
 				},
@@ -265,7 +265,7 @@ async fn renew(
 			// An unknown budget counts as spent, rather than risk the directory's limit.
 			Err(err) => {
 				tracing::error!(err = format!("{err:#}"), %domains, "failed to read the ACME failure record");
-				Some(moq_clock::wall().saturating_add(FAILURE_WINDOW))
+				Some(kio::clock::wall().saturating_add(FAILURE_WINDOW))
 			}
 		};
 		if let Some(resume) = resume {
@@ -274,7 +274,7 @@ async fn renew(
 				resume = %humantime::format_rfc3339_seconds(resume.into()),
 				"ACME renewal paused after {FAILURE_LIMIT} failed validations within the hour, short of the directory's limit; still serving the previous certificate"
 			);
-			moq_clock::sleep(resume.saturating_duration_since(moq_clock::wall())).await;
+			kio::clock::sleep(resume.saturating_duration_since(kio::clock::wall())).await;
 			continue;
 		}
 
@@ -298,7 +298,7 @@ async fn renew(
 					// Unrecorded, it would never count, so assume the budget is spent.
 					Err(record) => {
 						tracing::error!(%err, record = format!("{record:#}"), %domains, "ACME renewal validation failed and could not be recorded; pausing renewal for an hour");
-						moq_clock::sleep(FAILURE_WINDOW).await;
+						kio::clock::sleep(FAILURE_WINDOW).await;
 					}
 				}
 			}
@@ -335,7 +335,7 @@ impl Failures {
 		let Some(contents) = Cache::read(&self.path)? else {
 			return Ok(Vec::new());
 		};
-		let cutoff = moq_clock::wall()
+		let cutoff = kio::clock::wall()
 			.checked_sub(FAILURE_WINDOW)
 			.unwrap_or(Wall::UNIX_EPOCH);
 		let mut recent = Vec::new();
@@ -357,7 +357,7 @@ impl Failures {
 	/// Record a failure now, returning the recent ones including it.
 	fn record(&self) -> anyhow::Result<Vec<Wall>> {
 		let mut recent = self.recent()?;
-		recent.push(moq_clock::wall());
+		recent.push(kio::clock::wall());
 		let lines: String = recent
 			.iter()
 			.map(|at| format!("{}\n", at.saturating_duration_since(Wall::UNIX_EPOCH).as_secs()))
@@ -377,7 +377,7 @@ impl Failures {
 	fn refuse(&self, failed: &[Wall], domains: &str, addr: SocketAddr, last: Option<&str>) -> anyhow::Error {
 		let retry = failed
 			.first()
-			.map_or(Some(moq_clock::wall()), |oldest| oldest.checked_add(FAILURE_WINDOW))
+			.map_or(Some(kio::clock::wall()), |oldest| oldest.checked_add(FAILURE_WINDOW))
 			.map(|retry| humantime::format_rfc3339_seconds(retry.into()).to_string())
 			.unwrap_or_else(|| "the supported wall-time range".to_string());
 		let last = last.map(|last| format!("; last error: {last}")).unwrap_or_default();
@@ -476,10 +476,5 @@ impl rustls_acme::AccountCache for Cache {
 }
 
 #[cfg(all(test, unix))]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 #[path = "tests.rs"]
 mod tests;
