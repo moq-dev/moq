@@ -877,7 +877,7 @@ export class Publisher {
 		try {
 			// A time anchor counts in the timescale this peer was told, so it waits for the info.
 			const timescale = hasWireTime(msg.ranges)
-				? liteTimescale(await untilAborted(consumer.info(), left.signal))
+				? ((await untilAborted(consumer.info(), left.signal)).timescale ?? undefined)
 				: undefined;
 			ranges = requestedRanges(msg, timescale);
 		} catch (err: unknown) {
@@ -978,7 +978,7 @@ export class Publisher {
 						priority: update.priority,
 						order: update.order,
 						maxDelay: servingMaxDelay(this.version, update.maxDelay),
-						ranges: requestedRanges(update, liteTimescale(info)),
+						ranges: requestedRanges(update, info.timescale ?? undefined),
 					});
 				},
 			});
