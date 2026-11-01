@@ -58,7 +58,7 @@ anyhow = { workspace = true, features = ["backtrace"] }
 async-trait = { workspace = true }
 aws-lc-rs = { workspace = true }
 axum = { workspace = true }
-axum-server = { workspace = true }
+axum-server = { workspace = true, features = ["tls-rustls"] }
 bytes = { workspace = true }
 bytesize = "2.4.2"
 futures = { workspace = true }
