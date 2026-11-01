@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::bandwidth::Rate;
 use tokio::sync::watch;
 
