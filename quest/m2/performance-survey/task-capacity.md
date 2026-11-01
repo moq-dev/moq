@@ -1,59 +1,54 @@
-# [M] Task polling recovers after a burst
+# [M] Task sets release memory after a burst
 
 ## Goal
 
-Long-lived task sets do not pay an unjustified steady-state CPU or memory
-cost for a burst that has already drained.
+A long-lived task set does not keep an unjustified amount of memory for a
+burst that has already drained, or the measurement shows that the retained
+capacity is worth what it saves.
 
 ## Plan
 
-[kio::Tasks](/rs/kio/src/task.rs) grows slots and per-slot wakers, retains
-them after completion, and snapshots every allocated wake-bit word in each
-`Tasks::poll`. Dispatch scans those words again. Work can depend on
-historical peak/64 even when only one task remains. The io_uring worker and
-session serving loops are current consumers.
+[kio::Tasks](/rs/kio/src/task.rs) keeps every slot it ever grew: the slab
+entry (`Option<Occupant<T>>`, whose `Park` holds an inline `Waiter` of about
+100 B), the per-slot waker allocation, and the wake bitset. The CPU half of
+this quest landed in [moq-dev/moq#7513](https://github.com/moq-dev/moq/pull/7513).
+A three-level wake index means an owner poll visits only woken words, so poll
+cost no longer depends on the historical peak. The memory half remains.
 
-Extend [task benchmarks](/rs/kio/benches/tasks.rs) with peak slots × current
-live/ready slots: burst then one survivor, sparse live slots, full occupancy,
-and empty-but-polled. Report instructions and CPU per owner poll/per ready
-task, allocations and retained bytes after draining. Compare a long-lived
-worker or session before and after connection/subscription churn.
+Decided 2026-11-01 by the maintainer on
+[moq-dev/moq#7513](https://github.com/moq-dev/moq/pull/7513):
 
-The present sparse-wake case fixes 16 ready tasks among 1,000 residents; it
-does not isolate historical capacity. Any reclamation or ready-word index
-must preserve stale-waker safety, concurrent wakeups, coalescing and snapshot
-fairness. Do not trade cheap burst reuse for churn without measuring both.
+- ✅ (a) Land the CPU half as is, and keep this quest for the memory half:
+  reclaimable slot chunks, measured against repeat-burst cost and the real
+  consumers' task sizes.
+- (b) Treat retained capacity as justified and delete this quest.
+- (c) Implement chunk reclaim in the same PR.
 
-A 2026-10-22 staging CDN profile (`f57c0aad`, DWARF stacks, 27-36% incomplete)
-put `Tasks<GroupServe>::poll` at 2.40% self-time on a 501-connection chat
-shape and 1.90% on SD, the largest moq-net site on both, and kio
-tasks/waiters at 7.5-11.5% of samples. Self-time only; it does not show how
-much is historical capacity.
+The [`task_capacity` bench](/rs/kio/benches/task_capacity.rs) reports
+retained bytes after a burst. With an 8-byte task, the set keeps about
+184 B per peak slot whatever is still live: 188,912 B after a 1,024-task
+burst and 12,085,304 B after 65,536. A real task adds `size_of::<T>()`
+per slot, so measure the actual consumers (`GroupServe`, the io_uring worker's
+`Task`, the session sets) before judging the cost. Dropping the set returns
+the heap to baseline, so this is retained capacity, not a leak.
 
-Measured in the 2026-10-27 audit on main
-[`651c30fee9`](https://github.com/moq-dev/moq/commit/651c30fee9d88fd56f4079433dd3e1f98d77f21c),
-one live, non-ready task left after a burst (the task carries only a `bool`,
-so real session tasks retain more per slot). Dropping the set returned the
-heap to baseline, so this is retained capacity, not a leak. Timings are
-unpinned wall clock on a shared host, so they show the slope only:
+The candidate is reclaimable slot chunks. Store slots, wakers and wake bits per
+1,024-slot chunk, and free a chunk once it empties. That needs allocation to
+prefer low free slots, so chunks can drain while one survivor stays behind,
+plus some hysteresis so a set oscillating across a chunk boundary does not
+reallocate 1,024 wakers each time. Today's LIFO free list and full reuse make
+a repeated burst cheap. In the harness from
+[moq-dev/moq#7513](https://github.com/moq-dev/moq/pull/7513), a repeated
+1,024-task burst through a drained set costs about 840 instructions per task,
+the task's own allocations included, and the set allocates nothing for it. Do
+not trade that for reclaimed memory without measuring both, with an A/A control.
 
-| Historical peak | Retained heap | Median ns per owner poll |
-|---|---|---|
-| 1 | 912 B | 79.9 |
-| 1,024 | 188,768 B | 86.6 |
-| 16,384 | 3,019,184 B | 1,216.1 |
-| 65,536 | 12,076,592 B | 4,830.8 |
-
-Candidates to evaluate: reclaimable slot chunks, and an index of nonempty
-ready words so a poll does not scan historical capacity. Include owner polls
-triggered by unrelated active work in the sweep.
-
-Related: [worker quiescence](/quest/m2/perf/uring-quiescence.md) and
-[relay allocations](/quest/m2/perf/relay-allocs.md) own other costs.
-Worker quiescence also reshapes the `Tasks::poll` snapshot with a pass
-budget; whichever of the two lands second rebases its benchmark on the other.
+Any reclamation must preserve stale-waker safety. A waker that outlives its
+chunk must keep its chunk alive or point at nothing. It must also keep
+concurrent wakeups, coalescing, snapshot fairness and the rotation order
+(`concurrent_wakes_are_never_lost`, `wakes_past_64_chunks_run_in_slot_order`).
 
 Follow the [survey's benchmark contract](/quest/m2/performance-survey/README.md):
-measure the baseline before optimizing, retain paired evidence, verify equivalent
-work, schedule coverage nightly, and accept a measured no-win. Expected public
-API and wire impact: none; report the actual impact in the implementation PR.
+measure the baseline before optimizing, retain paired evidence, verify
+equivalent work, schedule coverage nightly, and accept a measured no-win.
+Expected public API and wire impact: none.
