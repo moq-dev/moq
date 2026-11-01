@@ -64,6 +64,14 @@ Decided 2026-10-28 (maintainer, after an audit of the plan):
   (`CloseKind::Evicted`), which could reset the very byte stream pacing keeps
   lossless. Bring the mechanism to the maintainer before coding, and align it
   with the [receive pool](/quest/m2/receive-pool.md).
+- Folded in 2026-11-01 (maintainer, follow-up of
+  [moq-dev/moq#7328](https://github.com/moq-dev/moq/pull/7328)): the same cap
+  covers streams parked waiting for TRACK_INFO. Group data that a SUBSCRIBE
+  sent alongside TRACK, or a FETCH, leaves unread until TRACK_INFO arrives
+  must not use up the connection receive window, or TRACK_INFO itself can't
+  arrive. TRACK_INFO and other control messages always get connection
+  credit, in Rust and JS. Test it: enough parked groups to fill the
+  connection window, with TRACK_INFO still arriving and the groups then read.
 
 Prior art splits the same way (2026-10-28 survey): Varnish streaming, ATS
 read-while-writer, and WHATWG `tee()` fan out at the writer's pace and buffer
