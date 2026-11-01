@@ -616,9 +616,10 @@ impl FrameContent {
 		// With the creator's SeqCst store to `writing` and load of `attached`, at least one
 		// side sees the other's store: either the creator takes the lock, or this waits.
 		self.attached.store(true, Ordering::SeqCst);
-		// A lock-free write is a bounded copy that never waits on anything.
+		// A lock-free write is a bounded copy that never waits on anything, so this ends
+		// once its thread runs again.
 		while self.writing.load(Ordering::SeqCst) {
-			std::hint::spin_loop();
+			std::thread::yield_now();
 		}
 		// The creator's admission joins the shared count; its reservation stays with it
 		// until it ends, and passes to any producer still active then.
