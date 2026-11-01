@@ -25,8 +25,9 @@ fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
 ///
 /// Start from [`moq_subscription_defaults`] for moq-net's defaults (priority 0, a `max_delay`
-/// of 0, everything still fresh, newest first) and change the fields you care about. A record
-/// built field by field leaves out `max_delay`, which means no subscriber limit.
+/// of 0, everything still fresh, newest first) and change the fields you care about. Kotlin and
+/// Swift make a record built field by field name `max_delay`; Dart, Go, and C can still omit it,
+/// which means no subscriber limit.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
@@ -34,12 +35,12 @@ pub struct MoqSubscription {
 	#[uniffi(default = 0)]
 	pub priority: i8,
 	/// Maximum age of a non-latest group before it is skipped.
-	/// `0` skips immediately; a larger value tolerates that much reordering; null, the
-	/// default, sets no subscriber limit and leaves the publisher's max age alone to bound it.
+	/// `0` skips immediately; a larger value tolerates that much reordering; null sets no
+	/// subscriber limit and leaves the publisher's max age alone to bound it. Required,
+	/// since uniffi can't default a duration to `0`.
 	///
 	/// Enforced both by the publisher's cache (sent on the wire) and by any local
 	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
-	#[uniffi(default = None)]
 	pub max_delay: Option<Duration>,
 	/// The spans of the track to deliver, or null for everything `max_delay` still
 	/// considers fresh. An empty list asks for nothing.
@@ -308,6 +309,19 @@ impl MoqBroadcastConsumer {
 				driver: self.driver.clone(),
 			},
 		}))
+	}
+
+	/// Wait until the broadcast ends: its publisher closed it, or every producer of it left.
+	///
+	/// Resolves rather than erroring when it ends, since an ended broadcast is not a failure.
+	/// Errors only when the session driving it fails first. Cancel the call to stop waiting.
+	pub async fn closed(&self) -> Result<(), MoqError> {
+		self.driver
+			.watch(async {
+				self.inner.closed().await;
+				Ok(())
+			})
+			.await
 	}
 
 	/// Subscribe to a track by name, the same pattern as moq-boy's command/status tracks.

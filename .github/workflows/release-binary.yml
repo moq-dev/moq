@@ -142,12 +142,15 @@ jobs:
 
       - name: Build and package tarball
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.parse.outputs.version }}
         run: |
           just rs package-binary \
             --crate "$CRATE" \
             --bin "$BIN" \
-            --target ${{ matrix.target }} \
-            --version ${{ steps.parse.outputs.version }} \
+            --target "$TARGET" \
+            --version "$VERSION" \
             --output dist
 
       - name: Upload artifact
@@ -192,12 +195,15 @@ jobs:
 
       - name: Build and package zip
         shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ steps.parse.outputs.version }}
         run: |
           just rs package-windows \
             --crate "$CRATE" \
             --bin "$BIN" \
-            --target ${{ matrix.target }} \
-            --version ${{ steps.parse.outputs.version }} \
+            --target "$TARGET" \
+            --version "$VERSION" \
             --output dist
 
       - name: Upload artifact

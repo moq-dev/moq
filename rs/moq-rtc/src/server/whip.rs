@@ -204,7 +204,6 @@ fn status_for(err: &Error) -> StatusCode {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use str0m::{
 		format::Codec,
@@ -276,7 +275,7 @@ mod tests {
 			.await
 			.unwrap();
 		// The session binds a real UDP socket, so this runs on the wall clock.
-		let stale_viewer = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+		let stale_viewer = moq_clock::timeout(std::time::Duration::from_millis(200), async {
 			loop {
 				match catalog.recv_group().await {
 					Ok(Some(_)) => continue,

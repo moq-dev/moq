@@ -106,6 +106,7 @@
 
 #![expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "custom timings measure the real time the work took, not the ambient clock"
 )]
 
@@ -1901,7 +1902,7 @@ impl RangeFills {
 			"everything is a miss"
 		);
 		while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
-			while let Some(sequence) = fill.next() {
+			while let Some(sequence) = fill.wanted() {
 				let mut group = fill.accept(sequence, None).unwrap();
 				group
 					.write_frame(Timestamp::from_millis(sequence).unwrap(), Bytes::from_static(b"x"))
