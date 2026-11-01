@@ -4229,6 +4229,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-test",
  "url",
  "wiremock",
 ]
@@ -4517,6 +4518,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-test",
  "wasm-bindgen-test",
  "web-async",
  "web-transport-trait",

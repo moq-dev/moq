@@ -9,11 +9,21 @@ use super::Message;
 use super::Version;
 
 /// GoAway message (0x10)
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct GoAway<'a> {
 	pub new_session_uri: Cow<'a, str>,
 	/// Draft-17: timeout in milliseconds before closing the session
 	pub timeout: u64,
+}
+
+impl std::fmt::Debug for GoAway<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		// The new session URI carries whatever credentials the peer needs to dial it.
+		f.debug_struct("GoAway")
+			.field("new_session_uri_len", &self.new_session_uri.len())
+			.field("timeout", &self.timeout)
+			.finish()
+	}
 }
 
 impl Message for GoAway<'_> {
