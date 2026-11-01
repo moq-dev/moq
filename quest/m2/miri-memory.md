@@ -4,7 +4,7 @@
 
 The hand-written unsafe in `kio` and `moq-net` that touches only memory (no
 sockets, GPU, or FFI) runs under Miri nightly, so a use-after-free, data race,
-or aliasing violation fails a test instead of waiting for Loom or production.
+or aliasing violation fails a test instead of waiting for production.
 
 ## Plan
 

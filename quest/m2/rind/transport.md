@@ -2,7 +2,8 @@
 
 ## Goal
 
-moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take all their crypto from
+moq-quic, moq-tokio, moq-uring, moq-rtmp, qmux, and moq-relay's own HTTP and
+TLS take all their crypto from
 rind and `rind-rustls`, their graphs hold no aws-lc-sys or ring, and moq-tokio's
 and moq-quic's `aws-lc-rs` and `ring` features are gone. Every binary built on
 moq-tokio checks rind's CPU support at startup.
@@ -17,8 +18,6 @@ Decided with the maintainer on 2026-10-26; see the
   AES-256-GCM), and Retry integrity (AES-128-GCM). Packet keys and header
   protection come through rustls's QUIC traits from `rind-rustls`. The
   provider is no longer picked per feature.
-- moq-quic's wasm32 ring dependency, inherited from quinn, is deleted: nothing
-  runs moq-quic on wasm.
 - moq-tokio installs `rind-rustls`, generates self-signed certificates through
   `rind-rcgen`, drops rustls's default features and rustls-webpki's `aws-lc-rs`,
   and moves mDNS's HMAC-SHA256 from RustCrypto to rind.
@@ -27,7 +26,9 @@ Decided with the maintainer on 2026-10-26; see the
 - moq-rtmp's handshake HMAC-SHA256 moves to rind, and its rustls stops forcing
   aws-lc. qmux's TLS takes `rind-rustls`; tungstenite's own `sha1` stays.
 - reqwest and axum-server switch to their no-provider features wherever these
-  crates enable them.
+  crates enable them. Decided 2026-10-31 (maintainer): this includes
+  moq-relay's own reqwest, axum-server, and rustls `aws-lc-rs` features, which
+  no other area owns; relay ACME still owns rustls-acme.
 - The roughly 100 test call sites that install aws-lc's provider install
   rind's.
 - The startup check runs where moq-tokio's crypto is first configured, and its
@@ -42,5 +43,5 @@ Unsupported CPUs now fail at startup. Wire: none.
 
 ## Required
 
-- [rind covers MoQ](/quest/m2/rind/covered.md) - the rind release this switches to
+- [rind runs on a Pi 4's aarch64 CPU](/quest/m2/rind/aarch64.md) - the rind release this switches to
 - [moq-quic's crypto is rustls](/quest/m1/quic-api/crypto.md) - the sealed crypto surface rind plugs into, without the per-provider gates

@@ -215,11 +215,6 @@ fn server_error(err: crate::Error) -> Response {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 
@@ -282,7 +277,7 @@ mod tests {
 	}
 
 	async fn wait_listed(app: &axum::Router, playlist: &str, segment: &str) {
-		let deadline = tokio::time::Instant::now() + TIMEOUT;
+		let deadline = moq_clock::now() + TIMEOUT;
 		let mut last = String::new();
 		loop {
 			let response = oneshot(app.clone(), playlist).await;
@@ -293,11 +288,8 @@ mod tests {
 					return;
 				}
 			}
-			assert!(
-				tokio::time::Instant::now() < deadline,
-				"{playlist} never listed {segment}: {last}"
-			);
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			assert!(moq_clock::now() < deadline, "{playlist} never listed {segment}: {last}");
+			moq_clock::sleep(Duration::from_millis(50)).await;
 		}
 	}
 
@@ -419,7 +411,7 @@ mod tests {
 			)
 			.unwrap();
 		let app = Server::new(restricted, Default::default()).router();
-		let start = tokio::time::Instant::now();
+		let start = moq_clock::now();
 		let response = oneshot(app, "/room/live/manifest.mpd").await;
 		assert!(start.elapsed() < READY_TIMEOUT, "waited {:?}", start.elapsed());
 		assert_eq!(response.status(), StatusCode::OK);
@@ -466,13 +458,10 @@ mod tests {
 		assert_eq!(status(&app, &old_segment).await, StatusCode::OK);
 
 		drop((old_catalog, old_track, old_media, old));
-		let deadline = tokio::time::Instant::now() + TIMEOUT;
+		let deadline = moq_clock::now() + TIMEOUT;
 		while status(&app, &old_playlist).await != StatusCode::NOT_FOUND {
-			assert!(
-				tokio::time::Instant::now() < deadline,
-				"the closed instance kept serving"
-			);
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			assert!(moq_clock::now() < deadline, "the closed instance kept serving");
+			moq_clock::sleep(Duration::from_millis(50)).await;
 		}
 		assert_eq!(status(&app, &old_segment).await, StatusCode::NOT_FOUND);
 		assert_eq!(status(&app, &new_playlist).await, StatusCode::OK);
@@ -511,14 +500,14 @@ mod tests {
 			.abort(moq_net::Error::Transport("connection lost".into()))
 			.unwrap();
 		for uri in [&format!("/live/@{RUN}/video/video0/media.m3u8"), "/live/manifest.mpd"] {
-			let deadline = tokio::time::Instant::now() + TIMEOUT;
+			let deadline = moq_clock::now() + TIMEOUT;
 			let response = loop {
 				let response = oneshot(app.clone(), uri).await;
 				if response.status() != StatusCode::OK {
 					break response;
 				}
-				assert!(tokio::time::Instant::now() < deadline, "{uri} never failed");
-				tokio::time::sleep(Duration::from_millis(50)).await;
+				assert!(moq_clock::now() < deadline, "{uri} never failed");
+				moq_clock::sleep(Duration::from_millis(50)).await;
 			};
 			assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR, "{uri}");
 			assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store", "{uri}");

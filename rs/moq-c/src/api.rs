@@ -688,10 +688,10 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_demand {
-	/// At least one subscriber is active. Repeats when the wanted group moves.
-	MOQ_DEMAND_USED = 1,
-	/// No subscriber is active.
-	MOQ_DEMAND_UNUSED = 2,
+	/// At least one subscriber wants the track. Repeats when the wanted group moves.
+	MOQ_DEMAND_WANTED = 1,
+	/// No subscriber wants the track.
+	MOQ_DEMAND_UNWANTED = 2,
 }
 
 /// Subscriber-side raw track delivery preferences.
@@ -956,9 +956,13 @@ pub enum moq_announce_kind {
 	/// Another publisher instance now serves the prefix: drop what was resolved under
 	/// it and request afresh.
 	MOQ_ANNOUNCE_KIND_RESTART = 3,
+	/// A route now covers the prefix and continues what the route at
+	/// [moq_announce_event::predecessor] served beneath it: keep what was resolved through it.
+	MOQ_ANNOUNCE_KIND_TAKEOVER = 4,
 }
 
-/// An announce event from an origin: a route starting, updating, ending, or restarting.
+/// An announce event from an origin: a route starting, updating, ending, restarting, or
+/// taking over.
 #[repr(C)]
 pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
@@ -981,6 +985,11 @@ pub struct moq_announce_event {
 	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_END` it carries the last
 	/// advertised route.
 	pub route: moq_route,
+	/// For [moq_announce_kind::MOQ_ANNOUNCE_KIND_TAKEOVER], the prefix of the route continued,
+	/// relative to the origin, NOT NULL terminated. Empty for every other kind.
+	pub predecessor: *const c_char,
+	/// The length in bytes of `predecessor`.
+	pub predecessor_len: usize,
 }
 
 /// Where a session is in its lifecycle, reported by [moq_connection_state].
@@ -1393,7 +1402,8 @@ pub struct moq_client_config {
 	pub quic_idle_timeout_us: u64,
 	/// Whether `quic_idle_timeout_us` is present.
 	pub has_quic_idle_timeout: bool,
-	/// The QUIC keep-alive interval in microseconds.
+	/// The QUIC keep-alive interval in microseconds, 0 to disable. Absent derives it
+	/// from the idle timeout both ends negotiate, so the defaults leave it absent.
 	pub quic_keep_alive_us: u64,
 	/// Whether `quic_keep_alive_us` is present.
 	pub has_quic_keep_alive: bool,

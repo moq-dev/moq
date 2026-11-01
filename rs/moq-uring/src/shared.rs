@@ -67,8 +67,11 @@ pub(crate) struct Shared {
 	/// This worker's counters, also held by its sockets, timers, and park
 	/// word.
 	pub metrics: std::sync::Arc<Counters>,
-	/// The next provided-buffer group id; one per socket.
-	pub next_bgid: Cell<u16>,
+	/// Provided-buffer group ids, one per multishot socket.
+	pub bgids: RefCell<Bgids>,
+	/// A ring failure found where it could not be returned, such as a dropped
+	/// socket's cancel. The worker's next turn fails with it.
+	pub failed: Cell<Option<io::Error>>,
 	/// Set by [`crate::Worker`]'s drop: handles outlive the loop that would
 	/// drive them, so operations must fail instead of pending forever.
 	pub stopped: Cell<bool>,
@@ -76,6 +79,37 @@ pub(crate) struct Shared {
 	/// kernel reported it full mid-submit. [`crate::Worker`]'s pump dispatches
 	/// these before anything newer in the CQ.
 	pub spill: RefCell<VecDeque<Cqe>>,
+	/// Errors the next inline enters report instead of submitting.
+	#[cfg(test)]
+	pub enter_faults: RefCell<VecDeque<i32>>,
+}
+
+/// The provided-buffer group ids a worker hands its multishot sockets.
+///
+/// An id comes back only once the kernel has unregistered its buffer ring,
+/// so a worker opening a socket per dial never runs out.
+#[derive(Default)]
+pub(crate) struct Bgids {
+	/// The lowest id never handed out; past `u16::MAX`, only reuse remains.
+	pub next: u32,
+	pub free: Vec<u16>,
+}
+
+impl Bgids {
+	/// A free id, or `None` while every id names a live buffer ring.
+	pub fn take(&mut self) -> Option<u16> {
+		if let Some(id) = self.free.pop() {
+			return Some(id);
+		}
+		let id = u16::try_from(self.next).ok()?;
+		self.next += 1;
+		Some(id)
+	}
+
+	/// Return an id the kernel no longer has registered.
+	pub fn give(&mut self, id: u16) {
+		self.free.push(id);
+	}
 }
 
 impl Shared {
@@ -123,15 +157,21 @@ impl Shared {
 			}
 			self.metrics.sq_full_enters.add(1);
 			let before = ring.completion().len();
+			#[cfg(test)]
+			let submitted = match self.enter_faults.borrow_mut().pop_front() {
+				Some(code) => Err(io::Error::from_raw_os_error(code)),
+				None => ring.submit(),
+			};
+			#[cfg(not(test))]
 			let submitted = ring.submit();
 			self.metrics.entered(
 				submitted.as_ref().map_or(0, |count| *count),
 				ring.completion().len().saturating_sub(before),
 			);
 			if let Err(err) = submitted {
-				// A deadline-bounded teardown can safely retry an interrupted
-				// enter; ordinary callers surface it to their worker.
-				if deadline.is_some() && err.raw_os_error() == Some(libc::EINTR) {
+				// A signal interrupted the enter before it consumed anything;
+				// the ring is fine, so try again.
+				if err.raw_os_error() == Some(libc::EINTR) {
 					continue;
 				}
 				// EBUSY: the CQ is full, the kernel could not flush its
@@ -184,6 +224,12 @@ impl Shared {
 			return Err(err);
 		}
 		Ok(())
+	}
+
+	/// Record a ring failure for the worker's next turn, keeping the first.
+	pub fn fail(&self, err: io::Error) {
+		let first = self.failed.take().unwrap_or(err);
+		self.failed.set(Some(first));
 	}
 
 	/// Insert an op and return its `user_data` key.

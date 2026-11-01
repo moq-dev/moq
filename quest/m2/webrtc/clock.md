@@ -6,7 +6,7 @@ The vendored str0m and dimpl take `moq_clock::Instant` instead of `std::time::In
 
 ## Plan
 
-Decided 2026-10-30 with the maintainer (planning interview). Every call into str0m converts with `into_std()` today (see the third-party clocks note in [time-test-sweep](/quest/m2/time-test-sweep.md)). Change the vendored modules' time type, delete the conversions, and move any moq-webrtc test that pauses tokio time onto the sim.
+Decided 2026-10-30 with the maintainer (planning interview). Every call into str0m converts with `Instant::into_std` today, the way the workspace handles any third-party API that takes `std::time::Instant`. Change the vendored modules' time type, delete the conversions, and move any moq-webrtc test that pauses tokio time onto the sim.
 
 Public API: none. Wire: none.
 

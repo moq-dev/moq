@@ -91,7 +91,7 @@ impl Budget {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests {
 	use std::{
 		sync::{

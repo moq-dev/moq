@@ -19,15 +19,13 @@ use crate::transport::poll::{GroupOf, SendOptions};
 use crate::{
 	DecodeError, Error, Timescale, Timestamp,
 	coding::{Encode as _, Encoder, Stream, Writer},
-	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, GroupOrder, Location, RequestId},
+	ietf::{self, Control, EndLocation, FetchHeader, FetchType, Filter, Location, RequestId},
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::{Order, Subscription},
-	util::{MaybeBoxedExt, MaybeSendBox},
+	util::BoxFuture,
 };
 
 use super::{Message, Version, cluster, error::request, peer, request_update};
-
-mod tracks;
 
 /// Preserve retained groups when the subscriber supplies no age budget.
 fn serving_subscription(subscriber_priority: u8) -> Subscription {
@@ -799,8 +797,6 @@ pub(super) struct Publisher {
 	pub(super) subscriptions: crate::session::Slots,
 	// Ranks every subscription's group streams against each other for the transport.
 	priority: PriorityQueue,
-	// The peer's SUBSCRIBE_TRACKS requests and the PUBLISHes they made.
-	listings: kio::Shared<tracks::Listings>,
 }
 
 /// Authorization selected by dispatch: a standalone path or a live parent subscription.
@@ -809,11 +805,15 @@ enum FetchGate {
 	Joining { id: RequestId, auth: crate::auth::Link },
 }
 
-struct Serve(Arc<AtomicUsize>);
+/// A dispatched SUBSCRIBE or FETCH serve, counted until dropped.
+struct Serve {
+	owed: Arc<AtomicUsize>,
+	_working: crate::session::Working,
+}
 
 impl Drop for Serve {
 	fn drop(&mut self) {
-		self.0.fetch_sub(1, Ordering::Relaxed);
+		self.owed.fetch_sub(1, Ordering::Relaxed);
 	}
 }
 
@@ -883,7 +883,14 @@ impl Publisher {
 			owed: Default::default(),
 			subscriptions: Default::default(),
 			priority: Default::default(),
-			listings: Default::default(),
+		}
+	}
+
+	/// Mark a paused subscription for joining FETCHes: draft-18 section 5.1 refuses one
+	/// unless the subscription forwards.
+	fn pause_join(&self, join: Option<&Join<GroupOf<Transport>>>) {
+		if let Some(join) = join {
+			join.joins.lock().insert(join.request_id, Some(Joined::Empty));
 		}
 	}
 
@@ -1017,13 +1024,16 @@ impl Publisher {
 		body: ietf::Body,
 		stream: Stream<Transport, Version>,
 		epochs: bool,
-	) -> Result<MaybeSendBox<'static, ()>, Error> {
+	) -> Result<BoxFuture<'static, ()>, Error> {
 		let this = self.clone();
 		let mut data = body.decoder(this.version);
 		// Count at dispatch so close cannot pass a request waiting for its first poll.
 		let serve = matches!(id, ietf::Subscribe::ID | ietf::Fetch::ID).then(|| {
 			self.owed.fetch_add(1, Ordering::Relaxed);
-			Serve(self.owed.clone())
+			Serve {
+				owed: self.owed.clone(),
+				_working: self.session.work().start(),
+			}
 		});
 		let task = match id {
 			ietf::Subscribe::ID => {
@@ -1056,7 +1066,7 @@ impl Publisher {
 						tracing::debug!(%err, "subscribe stream error");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			ietf::Fetch::ID => {
 				let msg = match ietf::Fetch::decode_msg(&mut data, this.version) {
@@ -1085,7 +1095,7 @@ impl Publisher {
 						tracing::debug!(%err, "fetch stream error");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			ietf::SubscribeNamespace::ID => {
 				let msg = match ietf::SubscribeNamespace::decode_msg(&mut data, this.version) {
@@ -1120,7 +1130,7 @@ impl Publisher {
 						Ok(()) => {}
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			ietf::SubscribeTracks::ID => {
 				let msg = match ietf::SubscribeTracks::decode_msg(&mut data, this.version) {
@@ -1138,12 +1148,20 @@ impl Publisher {
 					return Err(Error::WrongSize);
 				}
 				tracing::debug!(message = ?msg, "received subscribe_tracks");
+				// We list no tracks by PUBLISH, so each listing is refused on its own and the
+				// session stays up. Decoded first, so a refusal still admits its Request ID.
+				let error =
+					super::namespace::refusal(&msg.prefix, this.version).unwrap_or_else(|| ietf::RequestError {
+						error_code: request::NOT_SUPPORTED,
+						reason_phrase: "SUBSCRIBE_TRACKS is not supported".into(),
+						retry_interval: 0,
+					});
 				async move {
-					if let Err(err) = this.serve_subscribe_tracks_stream(stream, msg).await {
-						tracing::debug!(%err, "subscribe_tracks stream error");
+					if let Err(err) = super::request_stream::reject(stream, error).await {
+						tracing::debug!(%err, "subscribe_tracks refusal failed");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			ietf::TrackStatus::ID => {
 				let msg = match ietf::TrackStatus::decode_msg(&mut data, this.version) {
@@ -1175,7 +1193,7 @@ impl Publisher {
 						tracing::debug!(%err, "track_status stream error");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type for publisher");
@@ -1193,7 +1211,7 @@ impl Publisher {
 		kind: request::Kind,
 		err: DecodeError,
 		serve: Option<Serve>,
-	) -> MaybeSendBox<'static, ()> {
+	) -> BoxFuture<'static, ()> {
 		let version = self.version;
 		async move {
 			let _serve = serve;
@@ -1201,7 +1219,7 @@ impl Publisher {
 				tracing::debug!(%err, "token refusal failed");
 			}
 		}
-		.maybe_boxed()
+		.boxed()
 	}
 
 	/// Handle a SUBSCRIBE on its bidi stream.
@@ -1226,31 +1244,12 @@ impl Publisher {
 		gate: crate::auth::Gate,
 	) -> impl std::future::Future<Output = Result<(), Error>> {
 		// Register during dispatch, before either request task can be polled.
-		let join = (!Filter::is_draft22(self.version)).then(|| self.register_join(msg.request_id));
+		let join = (!Filter::is_draft20(self.version)).then(|| self.register_join(msg.request_id));
 		async move {
 			let _join = join;
 			if let Some(error) = super::namespace::refusal(&msg.track_namespace, self.version) {
 				return super::request_stream::reject(stream, error).await;
 			}
-			// Draft-18 allows one subscription per track and role (section 5.1), so a track a
-			// SUBSCRIBE_TRACKS PUBLISHed is subscribed already, and one subscribed here is not
-			// PUBLISHed. Later drafts dropped the rule.
-			let _subscribed = match self.version {
-				Version::Draft18 => {
-					match tracks::Subscribed::subscribe(&self.listings, &msg.track_namespace, &msg.track_name) {
-						Some(subscribed) => Some(subscribed),
-						None => {
-							let error = ietf::RequestError {
-								error_code: request::DUPLICATE_SUBSCRIPTION,
-								reason_phrase: "the track is PUBLISHed to this session".into(),
-								retry_interval: 0,
-							};
-							return super::request_stream::reject(stream, error).await;
-						}
-					}
-				}
-				_ => None,
-			};
 			let request_id = msg.request_id;
 			let track_name = msg.track_name.clone();
 			// Logged beside the root rather than joined, so a namespace too long under it is
@@ -1381,9 +1380,7 @@ impl Publisher {
 						None => return Ok(Subscribed::Withdrawn),
 					};
 					let cache = track;
-					// A subscriber that opted out of this SUBSCRIBE_OK's properties learns the
-					// Timestamp's units from TRACK_STATUS, so the opt-out strips nothing from the
-					// objects.
+					// The fill stamps its objects as the subscription does.
 					let timescale = track_serve.timescale;
 					let properties = match track_properties(
 						track_serve.track.info(),
@@ -1427,7 +1424,7 @@ impl Publisher {
 					// subscription's cursor.
 					let fill = msg
 						.fill
-						.filter(|_| msg.forward && Filter::is_draft22(self.version))
+						.filter(|_| msg.forward && Filter::is_draft20(self.version))
 						.map(|fill| (fill_range(fill, msg.filter, edge.largest), cache, timescale));
 
 					// Buffered whole before its first await, so however the subscription is
@@ -1639,7 +1636,7 @@ impl Publisher {
 	async fn released(&self, credit: &kio::Producer<()>) {
 		let session = self.session.clone();
 		kio::wait(|waiter| {
-			if session.poll_closed(waiter).is_ready() || credit.poll_unused(waiter).is_ready() {
+			if session.poll_closed(waiter).is_ready() || credit.poll_wanted_changed(waiter, true).is_ready() {
 				return Poll::Ready(());
 			}
 			Poll::Pending
@@ -1968,16 +1965,16 @@ impl Publisher {
 		let mut range = subscribe_range(msg.filter, edge, self.version);
 		let fill = msg
 			.fill
-			.filter(|_| msg.forward && Filter::is_draft22(self.version))
+			.filter(|_| msg.forward && Filter::is_draft20(self.version))
 			.map(|fill| fill_range(fill, msg.filter, edge.largest));
 		if let Some(next) = range.fill_tail(fill, edge) {
 			range.start = Some(next);
 		}
 		range.apply(&mut subscription);
 		let _ = subscribed.update(subscription);
-		// A Timestamp goes out wherever the track has units. An untimed track declares none,
-		// so its objects stay unstamped.
-		let timescale = subscribed.info().timescale;
+		// Only the TIMESCALE in SUBSCRIBE_OK opts the answer into timestamps, so an untimed
+		// track, or a subscriber that opted out of the properties, gets unstamped objects.
+		let timescale = subscribed.info().timescale.filter(|_| msg.properties_wanted);
 
 		// Serve the track while reading updates; only abrupt closure cancels on draft-22. A
 		// fill or joining FETCH ranks in the same subscription as the group it carries.
@@ -2144,7 +2141,7 @@ impl Publisher {
 			Some(err) => Some(("REQUEST_UPDATE parameters not supported", err)),
 			// A SUBSCRIBE serves the range it asked for. A subscription we initiated with
 			// PUBLISH decodes those parameters itself.
-			None if update.fill.is_some() && !Filter::is_draft22(self.version) => {
+			None if update.fill.is_some() && !Filter::is_draft20(self.version) => {
 				Some(("REQUEST_UPDATE parameters not supported", Error::Unsupported))
 			}
 			None if update.authorization_token.is_some()
@@ -2946,7 +2943,7 @@ impl Publisher {
 			Ok(properties) => properties,
 			Err(err) => return self.reject_fetch(stream, &err, &err.to_string()).await,
 		};
-		let draft22 = Filter::is_draft22(self.version);
+		let draft20 = Filter::is_draft20(self.version);
 		// Only a finished track's final object ends it, never a live track's Largest Object.
 		let end_of_track = !joined && group.complete && track.final_sequence() == group.sequence.checked_add(1);
 
@@ -2959,7 +2956,7 @@ impl Publisher {
 					.await;
 			}
 			end
-		} else if draft22 {
+		} else if draft20 {
 			// Draft-22's End Location is inclusive. An empty answer still covers its start.
 			let object = match range.until(group.sequence) {
 				// The track's last object as this draft writes it, without a status object.
@@ -4014,7 +4011,8 @@ impl Publisher {
 			match event {
 				crate::announce::Event::Start(update)
 				| crate::announce::Event::Update(update)
-				| crate::announce::Event::Restart(update) => {
+				| crate::announce::Event::Restart(update)
+				| crate::announce::Event::Takeover { announce: update, .. } => {
 					initial.insert(update.prefix.clone(), update);
 				}
 				crate::announce::Event::End(update) => {
@@ -4126,6 +4124,11 @@ impl Publisher {
 								(update, true, false)
 							}
 							crate::announce::Event::Restart(update) => (update, true, true),
+							// moq-transport has no takeover: another instance, in place or not.
+							crate::announce::Event::Takeover { announce, predecessor } => {
+								let restart = predecessor == announce.prefix;
+								(announce, true, restart)
+							}
 							crate::announce::Event::End(update) => (update, false, false),
 						})));
 					}
@@ -4469,7 +4472,7 @@ impl TrackServe {
 			// Unfiltered on an update widens back to zero. A fresh live join here
 			// would discard history before an empty relay can request its fill.
 			self.requested = match filter {
-				Filter::Unfiltered if Filter::is_draft22(self.version) => ServeRange {
+				Filter::Unfiltered if Filter::is_draft20(self.version) => ServeRange {
 					start: Some(Location { group: 0, object: 0 }),
 					end: None,
 				},
@@ -5808,7 +5811,7 @@ mod group_priority_test {
 	#[moq_clock::test]
 	async fn exact_end_of_track_survives_the_final_group_fin() {
 		use crate::lite::test_transport::Sent;
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for finished in [false, true] {
 				let log = crate::lite::test_transport::Log::default();
 				let mut track = track::Producer::new(
@@ -5834,7 +5837,7 @@ mod group_priority_test {
 					assert!(serve.poll(&kio::Waiter::noop()).is_pending());
 					assert!(log.trail().iter().any(|(_, event)| matches!(event, Sent::Finish)));
 				}
-				track.finish_at(track::Position { group: 5, frame: 5 }).unwrap();
+				track.finish_at(track::Position { group: 5, frame: 5 }, None).unwrap();
 				if !finished {
 					group.finish().unwrap();
 				}
@@ -6728,6 +6731,7 @@ mod subscribe_cursor_test {
 mod serve_tests {
 	use super::*;
 	use crate::coding::{Decode, Decoder};
+	use crate::ietf::GroupOrder;
 	use crate::lite::test_transport::{Log, ScriptedSession, Sent, SinkSession};
 	use crate::model::ProduceTest;
 
@@ -6815,7 +6819,7 @@ mod serve_tests {
 
 	#[moq_clock::test]
 	async fn a_subscription_keeps_its_goaway_count_until_the_final_marker() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let h = serve(version);
 			let session = ScriptedSession::new(vec![0x10, 0, 2, 0, 0]);
 			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
@@ -6937,7 +6941,7 @@ mod serve_tests {
 
 	#[moq_clock::test]
 	async fn requester_fin_is_version_gated_for_subscriptions() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let h = serve(version);
 			let session = ScriptedSession::per_stream_eof(vec![vec![]]);
 			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
@@ -6982,7 +6986,7 @@ mod serve_tests {
 	/// A reset request stream still cancels the subscription on every draft.
 	#[moq_clock::test]
 	async fn requester_reset_cancels_subscriptions() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let h = serve(version);
 			let session = ScriptedSession::per_stream_reset(vec![vec![]]);
 			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
@@ -7012,7 +7016,7 @@ mod serve_tests {
 	/// when a dispatched task is cancelled or its message is refused.
 	#[moq_clock::test]
 	async fn drain_counts_dispatched_subscribe_and_fetch() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let h = serve(version);
 			let mut subscribe_body = Vec::new();
 			subscribe(Filter::NextObject, None)
@@ -7023,9 +7027,9 @@ mod serve_tests {
 				request_id: FETCH_ID,
 				subscriber_priority: 128,
 				group_order: GroupOrder::Ascending,
-				// Draft-22 dropped the Fetch Type tag, leaving only the filtered form.
+				// Draft-20 dropped the Fetch Type tag, leaving only the filtered form.
 				fetch_type: match version {
-					Version::Draft22 => FetchType::Filtered {
+					Version::Draft20 | Version::Draft22 => FetchType::Filtered {
 						namespace: crate::Path::from_static("missing"),
 						track: "video".into(),
 						filter: Filter::Unfiltered,
@@ -8119,7 +8123,7 @@ mod serve_tests {
 
 	#[moq_clock::test]
 	async fn subscription_track_property_filter_closes_the_session() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let h = serve(version);
 			let session = ScriptedSession::new(vec![0x02, 0, 6, 2, 1, 0x29, 2, 0, 0]);
 			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
@@ -8157,7 +8161,7 @@ mod serve_tests {
 	/// A source track failing to decode ends only the subscriptions it feeds, not the requester's session.
 	#[moq_clock::test]
 	async fn source_decode_failure_keeps_the_session() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let h = serve(version);
 			let session = ScriptedSession::new(Vec::new());
 			let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), version)
@@ -8190,7 +8194,7 @@ mod serve_tests {
 
 	#[moq_clock::test]
 	async fn namespace_updates_do_not_postpone_an_auth_withdrawal() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let h = serve(version);
 			settle().await;
 			let session = ScriptedSession::new(Vec::new());
@@ -8268,7 +8272,7 @@ mod serve_tests {
 
 	#[moq_clock::test]
 	async fn namespace_updates_move_the_prefix_after_acknowledgement() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let h = serve(version);
 			let _old = h
 				._origin
@@ -8328,7 +8332,7 @@ mod serve_tests {
 
 	#[moq_clock::test]
 	async fn namespace_requester_fin_is_version_gated() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let h = serve(version);
 			moq_clock::sim::yield_now().await;
 			let session = ScriptedSession::per_stream_eof(vec![vec![]]);
@@ -8408,7 +8412,7 @@ mod serve_tests {
 	/// origin's own, which is what carries a refusal the registry has no value for.
 	#[moq_clock::test]
 	async fn a_missing_broadcast_is_refused_with_the_draft_s_code() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let error_code = 0x10;
 
 			let h = serve(version);
@@ -8623,7 +8627,7 @@ mod serve_tests {
 		}
 	}
 
-	const ALL_VERSIONS: [Version; 2] = [Version::Draft18, Version::Draft22];
+	const ALL_VERSIONS: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 	fn track_status(namespace: &str, wanted: bool, version: Version) -> Vec<u8> {
 		let msg = ietf::TrackStatus {
@@ -8677,7 +8681,7 @@ mod serve_tests {
 
 				let expected = match version {
 					// Only draft-22 can carry the opt-out.
-					_ if !wanted && Filter::is_draft22(version) => ietf::Properties::default(),
+					_ if !wanted && Filter::is_draft20(version) => ietf::Properties::default(),
 					_ => track_properties(&track::Info::timed(), true, version, true).unwrap(),
 				};
 				assert_eq!(
@@ -8707,7 +8711,7 @@ mod serve_tests {
 			let mut h = serve(version);
 			let claim = h
 				._origin
-				.requests_route("live", crate::origin::Route::default())
+				.requests_route("live", crate::origin::Route::default(), None)
 				.unwrap();
 			let auth = crate::auth::Link::new(false);
 			auth.handle().authorize(&nothing());
@@ -8730,7 +8734,7 @@ mod serve_tests {
 			let mut h = serve(version);
 			let claim = h
 				._origin
-				.requests_route("live", crate::origin::Route::default())
+				.requests_route("live", crate::origin::Route::default(), None)
 				.unwrap();
 			let auth = crate::auth::Link::new(false);
 			h.publisher = h.publisher.clone().with_auth(auth.clone());
@@ -8907,10 +8911,10 @@ mod serve_tests {
 		}
 	}
 
-	/// Opting out of SUBSCRIBE_OK's properties does not strip the objects' timestamps:
-	/// their units come from TRACK_STATUS instead.
+	/// Opting out of SUBSCRIBE_OK's properties also opts out of timestamps: with no
+	/// TIMESCALE declared, the objects go out unstamped.
 	#[moq_clock::test]
-	async fn the_properties_opt_out_keeps_object_timestamps() {
+	async fn the_properties_opt_out_strips_object_timestamps() {
 		let version = Version::Draft22;
 		let stamp = crate::Timestamp::from_millis(123_456).unwrap();
 		let mut properties = Vec::new();
@@ -8932,7 +8936,11 @@ mod serve_tests {
 			run_live(&mut h, msg).await;
 
 			assert_eq!(occurrences(&h.log, b"stamped"), 1, "wanted={wanted}");
-			assert_eq!(occurrences(&h.log, &properties), 1, "wanted={wanted}: object unstamped");
+			assert_eq!(
+				occurrences(&h.log, &properties),
+				usize::from(wanted),
+				"wanted={wanted}: stamped only when TIMESCALE is declared"
+			);
 		}
 	}
 
@@ -8961,7 +8969,7 @@ mod serve_tests {
 
 	#[moq_clock::test]
 	async fn range_filters_over_the_default_limit_get_invalid_filter() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let h = serve(version);
 			for fetch in [false, true] {
 				let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
@@ -8977,7 +8985,7 @@ mod serve_tests {
 								request_id: RequestId(REQUEST_ID),
 								subscriber_priority: 128,
 								group_order: GroupOrder::Descending,
-								fetch_type: if Filter::is_draft22(version) {
+								fetch_type: if Filter::is_draft20(version) {
 									FetchType::Filtered {
 										namespace: crate::Path::from_static("room"),
 										track: "video".into(),
@@ -9016,7 +9024,7 @@ mod serve_tests {
 
 	#[moq_clock::test]
 	async fn rendezvous_wait_is_capped_at_zero_but_answers_timeout() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			// A wait applies only to a missing publisher; a missing track on a live one does not exist.
 			for (namespace, track, publisher) in [("missing", "video", false), ("room", "audio", true)] {
 				for wait in [None, Some(0), Some(7)] {
@@ -9049,7 +9057,10 @@ mod serve_tests {
 		let version = Version::Draft22;
 		for path in [".", "./child", ".session", ".session/extension"] {
 			let h = serve(version);
-			let claim = h._origin.requests_route("", crate::origin::Route::default()).unwrap();
+			let claim = h
+				._origin
+				.requests_route("", crate::origin::Route::default(), None)
+				.unwrap();
 			settle().await;
 			let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
 				.await
@@ -10298,12 +10309,12 @@ mod serve_tests {
 	}
 
 	/// Every draft, each carrying a standalone FETCH or draft-22's filtered one.
-	const FETCH_DRAFTS: [Version; 2] = [Version::Draft18, Version::Draft22];
+	const FETCH_DRAFTS: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 	/// A bounded FETCH_OK's End Location: one past `last` before draft 22,
 	/// and the object itself from then on. Whole-group answers use Object 0 before draft 22.
 	fn end_location(version: Version, group: u64, last: u64) -> Location {
-		let object = match Filter::is_draft22(version) {
+		let object = match Filter::is_draft20(version) {
 			true => last,
 			false => last + 1,
 		};
@@ -10379,7 +10390,7 @@ mod serve_tests {
 	fn fetch_range(version: Version, track: &'static str, start: Location, end: Location) -> FetchType<'static> {
 		let namespace = crate::Path::from_static("room");
 		let track = track.into();
-		match Filter::is_draft22(version) {
+		match Filter::is_draft20(version) {
 			true => FetchType::Filtered {
 				namespace,
 				track,
@@ -10504,7 +10515,7 @@ mod serve_tests {
 			)
 			.await;
 			let (ok, objects) = fetch_answer(buf, version);
-			let end = match Filter::is_draft22(version) {
+			let end = match Filter::is_draft20(version) {
 				true => Location { group: 2, object: 1 },
 				false => Location { group: 2, object: 0 },
 			};
@@ -10530,7 +10541,7 @@ mod serve_tests {
 
 		for version in FETCH_DRAFTS {
 			// Only draft-22's FETCH can carry the opt-out.
-			let opt_out = Filter::is_draft22(version).then_some(false);
+			let opt_out = Filter::is_draft20(version).then_some(false);
 			for wanted in [Some(true), opt_out].into_iter().flatten() {
 				let h = serve(version);
 				let track = h._broadcast.create_track("timed", info.clone()).unwrap();
@@ -10788,7 +10799,7 @@ mod serve_tests {
 				.await;
 				let (ok, objects) = fetch_answer(buf, version);
 				assert_eq!(objects, Vec::new(), "{version} end={end}");
-				if Filter::is_draft22(version) {
+				if Filter::is_draft20(version) {
 					assert_eq!(
 						ok.end_location,
 						Location {
@@ -10836,7 +10847,7 @@ mod serve_tests {
 			}
 			Largest::IdleEnded => {
 				h.track.set_idle();
-				h.track.finish_at(track::Position::group(10)).unwrap();
+				h.track.finish_at(track::Position::group(10), None).unwrap();
 				None
 			}
 			Largest::IdleFinished => {
@@ -11015,7 +11026,7 @@ mod serve_tests {
 			)
 			.await;
 			let (ok, objects) = fetch_answer(buf, version);
-			let end = match Filter::is_draft22(version) {
+			let end = match Filter::is_draft20(version) {
 				true => end_location(version, 4, 1),
 				false => Location { group: 4, object: 0 },
 			};
@@ -11159,7 +11170,7 @@ mod serve_tests {
 			let (ok, objects) = fetch_answer(buf, version);
 			assert_eq!(
 				ok.end_location,
-				if Filter::is_draft22(version) {
+				if Filter::is_draft20(version) {
 					Location { group: 4, object: 1 }
 				} else {
 					Location { group: 4, object: 0 }
@@ -11829,7 +11840,11 @@ mod serve_tests {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let (claim, published) = match parked {
 			Parked::Resolving => (
-				Some(origin.requests_route("room", crate::origin::Route::default()).unwrap()),
+				Some(
+					origin
+						.requests_route("room", crate::origin::Route::default(), None)
+						.unwrap(),
+				),
 				None,
 			),
 			Parked::Acking | Parked::Ending => {
@@ -12063,7 +12078,9 @@ mod serve_tests {
 		let mut idle = None;
 		match setup {
 			Setup::Resolving => {
-				let route = origin.requests_route("room", crate::origin::Route::default()).unwrap();
+				let route = origin
+					.requests_route("room", crate::origin::Route::default(), None)
+					.unwrap();
 				let request = {
 					let requested = std::pin::pin!(route.requested_broadcast());
 					match futures::future::select(requested, serving.as_mut()).await {
@@ -12360,7 +12377,7 @@ mod serve_tests {
 	/// subscription asked for.
 	#[moq_clock::test]
 	async fn subscribe_ok_announces_the_default_order() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for requested in [GroupOrder::Ascending, GroupOrder::Descending, GroupOrder::Any] {
 				let mut h = serve(version);
 				let mut msg = subscribe(Filter::NextObject, None);
@@ -14018,6 +14035,7 @@ mod serve_tests {
 mod tests {
 	use super::*;
 	use crate::coding::Decode;
+	use crate::ietf::GroupOrder;
 	use crate::lite::test_transport::SinkSession;
 	use crate::model::ProduceTest;
 	use futures::FutureExt;
@@ -14658,7 +14676,7 @@ mod tests {
 	/// plus STOP_SENDING. A FIN there is a protocol violation some peers close on.
 	#[moq_clock::test]
 	async fn publish_namespace_withdraws_by_reset() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let local = origin.announce("local-cam", crate::origin::Route::default()).unwrap();
 			settle().await;
@@ -14907,7 +14925,7 @@ mod tests {
 
 	#[moq_clock::test]
 	async fn hidden_discovery_obeys_peer_setup_and_requested_prefix() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for declared in [false, true] {
 				for solicit in [Some(false), Some(true)] {
 					for scoped in [false, true] {
@@ -16667,7 +16685,7 @@ mod tests {
 	/// on a request we already refused. Finishing first makes the drop-time reset a no-op.
 	#[moq_clock::test]
 	async fn missing_broadcast_is_refused_without_resetting_the_stream() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let (writes, resets) = subscribe_missing(version).await;
 
 			assert!(!writes.is_empty(), "{version}: nothing was sent");
@@ -16707,7 +16725,7 @@ mod tests {
 			]
 		};
 
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (label, fetch_type) in refused() {
 				let (writes, resets) = fetch_refused(version, fetch_type).await;
 
@@ -16927,7 +16945,7 @@ struct GroupSlice {
 /// Next Object is honored on every draft so a joining FETCH owns the cached prefix.
 /// Other draft-18 filters retain their existing serving behavior.
 fn subscribe_range(filter: Filter, edge: LiveEdge, version: Version) -> ServeRange {
-	if !Filter::is_draft22(version) && filter != Filter::NextObject {
+	if !Filter::is_draft20(version) && filter != Filter::NextObject {
 		if !matches!(filter, Filter::NextObject | Filter::Unfiltered) {
 			tracing::warn!(?filter, "filter not supported before draft-22, ignoring");
 		}
@@ -17051,6 +17069,7 @@ fn fill_range(fill: ietf::Fill, subscription: Filter, largest: Option<Location>)
 mod range_tests {
 	use super::*;
 	use crate::ietf::EndLocation;
+	use crate::ietf::GroupOrder;
 
 	fn subscribe(filter: Filter) -> ietf::Subscribe<'static> {
 		ietf::Subscribe {
@@ -17387,6 +17406,7 @@ mod range_tests {
 #[cfg(test)]
 mod fill_range_tests {
 	use super::*;
+	use crate::ietf::GroupOrder;
 
 	/// Objects 0 through 4 of group 100 are published.
 	const LARGEST: Option<Location> = Some(Location { group: 100, object: 4 });
@@ -17594,7 +17614,7 @@ mod compression_tests {
 	use super::*;
 	#[test]
 	fn sealed_compression_refuses_incompatible_egress() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut sealed = Vec::new();
 			let mut encoder = Encoder::new(&mut sealed, version.into());
 			encoder.varint(super::super::flate::COMPRESSION).unwrap();
