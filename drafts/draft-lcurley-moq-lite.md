@@ -190,7 +190,7 @@ A Track without a `Timescale` is untimed: its frames and datagrams carry no time
 A timestamp MUST be less than 2^61, so every version can carry it; a receiver treats a larger one as a malformed Track.
 Unless a negotiated extension specifies otherwise, a publisher MUST NOT start a timed Group's frame 0 earlier than that of any lower-sequence Group it publishes.
 A receiver MAY check a received Group against this rule, refusing a violating Group's stream (STOP_SENDING) with TIMESTAMP_MISMATCH.
-A relay that cannot vouch for a Track's timestamps, such as ones received over another protocol, MUST serve the Track untimed unless a negotiated extension identifies their unchecked provenance.
+A relay serves a Track's timestamps on as it received them, including ones it did not check, unless a negotiated extension specifies otherwise.
 
 ## Positions {#positions}
 A Position is a (Group Sequence, Frame Index) pair identifying one frame within a Track.
@@ -763,6 +763,12 @@ The subscriber MAY cache the error and potentially retry later.
 ## Datagrams
 QUIC datagrams provide unreliable, unordered delivery for latency-sensitive content that does not need retransmission.
 
+Every datagram begins with a Type (i): 0x0 for a Group Datagram, or 0x1 for a Padding Datagram.
+A receiver MUST discard a datagram with an unknown type.
+The total datagram body, including Type, MUST NOT exceed 1200 bytes; a sender MUST NOT send a larger one and a receiver MUST silently drop it.
+
+### Group Datagram
+
 A publisher MAY transmit a Group consisting of exactly one Frame as a single QUIC datagram, in addition to (or instead of) opening a Group Stream, based on application hints, group size, and network conditions; a multi-frame Group is delivered via a Group Stream only.
 A publisher sends a datagram to a subscription only when its Group Sequence is inside one of the subscription's Ranges, where a start Position past frame 0 excludes its group (see [Positions](#positions)).
 A datagram is never cached or retransmitted, and FETCH never returns one.
@@ -775,6 +781,7 @@ Each datagram body has the following encoding (note: there is no message length 
 
 ~~~
 DATAGRAM Body {
+  Type (i) = 0x0
   Subscribe ID (i)
   Group Sequence (i)
   [Timestamp (i)]
@@ -800,10 +807,12 @@ Present only when the Track's Compression is not none; the datagram payload is t
 
 **Payload**:
 The frame payload, extending to the end of the datagram.
-The total datagram body MUST NOT exceed 1200 bytes, ensuring it fits within the minimum QUIC path MTU without IP-layer fragmentation; a publisher MUST NOT send a larger one and a receiver MUST silently drop it.
 A group whose frame does not fit is simply not eligible for datagram delivery.
 
+### Padding Datagram
 
+Either endpoint MAY send a Padding Datagram (0x1), followed by arbitrary bytes to the datagram boundary.
+A receiver MUST discard it without changing session or subscription state.
 
 # Encoding
 This section covers the encoding of each message.
@@ -1852,7 +1861,7 @@ The `Message Length` describes the payload size on the wire.
 - Added TRACK_INFO `Refresh` and SUBSCRIBE_UPDATE `Wanted Group`, carrying ratio-based refresh demand through relays.
 - Added `Compression` to TRACK_INFO: none (0x0) or DEFLATE (0x1), whose Groups are DEFLATE streams per draft-lcurley-moq-flate. FRAME and datagrams carry an `Inflated Size` when it is not none.
 - An untimed Track declares a `Timescale` of 0 in TRACK_INFO, and its FRAME messages and datagrams omit the timestamp.
-- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's, and a receiver may refuse a Group that does. A relay serves a Track whose timestamps it cannot vouch for untimed, unless a negotiated extension preserves them with explicitly unchecked provenance.
+- A publisher must not start a timed Group's frame 0 earlier than a lower-sequence Group's, and a receiver may refuse a Group that does. A relay serves every Track's timestamps on as received.
 - Bounded every timestamp below 2^61. A larger one is a malformed Track.
 
 ### Subscriptions {#changelog-07-subscribe}
@@ -1874,6 +1883,7 @@ The `Message Length` describes the payload size on the wire.
 
 ### Delivery {#changelog-07-delivery}
 
+- Added a leading Type to datagrams: Group (0x0) or Padding (0x1), which either endpoint discards without changing session or subscription state.
 - Expiration also measures a group's arrival age, the time since its successor arrived at this hop, so a group of an untimed Track expires by arrival age alone.
 - A publisher resets the Group Stream of an expired, unfinished group with OLD rather than finishing it, even after sending every frame it holds.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.

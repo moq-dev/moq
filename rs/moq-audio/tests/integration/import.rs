@@ -25,7 +25,7 @@ async fn ts_surround_opus_decodes() {
 	let mut options = decode::Options::default();
 	options.output.format = Format::F32;
 	// The whole file is imported before anything decodes it.
-	options.max_delay = Duration::from_secs(30);
+	options.delay.max = Some(Duration::from_secs(30));
 	let mut consumer = decode::Consumer::new(&broadcast_consumer, config, name, options)
 		.await
 		.unwrap();
@@ -34,7 +34,7 @@ async fn ts_surround_opus_decodes() {
 	// Canonical 5.1 order: FL, FR, FC, LFE, SL, SR.
 	let mut energy = [0.0f64; 6];
 	let mut frames = 0;
-	while let Some(frame) = moq_clock::timeout(Duration::from_secs(5), next_frame(&mut consumer))
+	while let Some(frame) = kio::clock::timeout(Duration::from_secs(5), next_frame(&mut consumer))
 		.await
 		.expect("decoded frame timed out")
 		.unwrap()

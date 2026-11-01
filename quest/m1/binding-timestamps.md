@@ -69,5 +69,5 @@ keep "untimed as absent" until then too. At the cut
 timed, and [bindings by start](/quest/m1/time-addressing/bindings.md) drops
 that `Option` from reads only.
 
-Wall and monotonic times stay `moq_clock::Wall` and `moq_clock::Instant`, not
+Wall and monotonic times stay `kio::clock::Wall` and `kio::clock::Instant`, not
 media timestamps; keep the types distinct.

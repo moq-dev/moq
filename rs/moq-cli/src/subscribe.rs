@@ -431,7 +431,7 @@ impl Subscribe {
 		// Reports a track that stops reaching the output while the rest keeps flowing,
 		// the way `publish` reports one that stops arriving.
 		let mut log = moq_mux::container::ts::stats::Log::default();
-		let mut sampled = moq_clock::now();
+		let mut sampled = kio::clock::now();
 		// The export's drop, gap and out-of-tolerance counts, as last logged.
 		let mut reported = (0, 0, 0, 0);
 		let sections = self.sections;
@@ -453,7 +453,7 @@ impl Subscribe {
 			stdout.flush().await?;
 
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
-				sampled = moq_clock::now();
+				sampled = kio::clock::now();
 				let stats = ts.export().stats();
 				report(&stats);
 				let release = &stats.release;
@@ -488,14 +488,14 @@ impl Subscribe {
 				sections.set(|report| report.release = Some(stats.clone()));
 			}
 		};
-		let mut sampled = moq_clock::now();
+		let mut sampled = kio::clock::now();
 		let mut reported = (0, 0, 0, 0);
 		while let Some(object) = release.next().await? {
 			stdout.write_all(&object.payload).await?;
 			stdout.flush().await?;
 
 			if sampled.elapsed() >= moq_mux::container::ts::stats::Log::INTERVAL {
-				sampled = moq_clock::now();
+				sampled = kio::clock::now();
 				let stats = release.stats();
 				report(&stats);
 				let counts = (stats.dropped, stats.trimmed, stats.gaps, stats.out_of_tolerance);

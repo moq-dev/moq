@@ -66,13 +66,13 @@ fn limits(announces: usize) -> Limits {
 
 /// Many more requests than the stream credit admits at once, opened and closed in turn, all
 /// succeed: each one that closes is granted back.
-#[moq_clock::test]
+#[kio::test]
 async fn closed_requests_are_granted_back() {
 	const ROUNDS: usize = 64;
 
 	for version in VERSIONS {
 		let setup = setup(version, limits(0), ROUNDS).await;
-		let broadcast = moq_clock::timeout(
+		let broadcast = kio::clock::timeout(
 			TIMEOUT,
 			setup.client.consume().follow("bcast", None).unwrap().available(),
 		)
@@ -82,7 +82,7 @@ async fn closed_requests_are_granted_back() {
 
 		for round in 0..ROUNDS {
 			let track = broadcast.track(&format!("t{round}")).unwrap();
-			let subscriber = moq_clock::timeout(TIMEOUT, track.subscribe(None))
+			let subscriber = kio::clock::timeout(TIMEOUT, track.subscribe(None))
 				.await
 				.unwrap_or_else(|_| panic!("{version}: round {round} stalled"))
 				.unwrap_or_else(|err| panic!("{version}: round {round} refused: {err}"));
@@ -91,7 +91,7 @@ async fn closed_requests_are_granted_back() {
 
 			// Wait for the server to see it end, so the next round is a fresh request.
 			let published = &setup.tracks[round];
-			moq_clock::timeout(TIMEOUT, crate::support::unwanted(published.demand()))
+			kio::clock::timeout(TIMEOUT, crate::support::unwanted(published.demand()))
 				.await
 				.unwrap_or_else(|_| panic!("{version}: round {round} never ended"))
 				.unwrap();
@@ -102,7 +102,7 @@ async fn closed_requests_are_granted_back() {
 /// With no subscription cap, a client asking for more subscriptions than the server admits
 /// still holds no more than the stream credit at once. The rest wait rather than close the
 /// session.
-#[moq_clock::test]
+#[kio::test]
 async fn flow_control_bounds_the_subscriptions_a_peer_holds() {
 	// 8 bidi streams toward the server.
 	const BOUND: usize = 8;
@@ -125,26 +125,26 @@ async fn flow_control_bounds_the_subscriptions_a_peer_holds() {
 		options.server_limits = Some(limits(0));
 		let pair = connect_mock(options).await;
 
-		let remote = moq_clock::timeout(TIMEOUT, client.consume().follow("bcast", None).unwrap().available())
+		let remote = kio::clock::timeout(TIMEOUT, client.consume().follow("bcast", None).unwrap().available())
 			.await
 			.expect("announce timeout")
 			.unwrap();
 		let subscribing: Vec<_> = (0..TRACKS)
 			.map(|i| {
 				let track = remote.track(&format!("t{i}")).unwrap();
-				moq_clock::sim::spawn(async move {
+				kio::clock::sim::spawn(async move {
 					let _subscriber = track.subscribe(None).await;
 					std::future::pending::<()>().await
 				})
 			})
 			.collect();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 
 		let held = tracks.iter().filter(|track| track.demand().wanted().is_some()).count();
 		assert!(held > 0, "{version}: nothing was subscribed");
 		assert!(held <= BOUND, "{version}: the server holds {held} subscriptions");
 		assert!(
-			moq_clock::timeout(Duration::from_millis(100), pair.client.closed())
+			kio::clock::timeout(Duration::from_millis(100), pair.client.closed())
 				.await
 				.is_err(),
 			"{version}: the session closed"
@@ -156,7 +156,7 @@ async fn flow_control_bounds_the_subscriptions_a_peer_holds() {
 }
 
 /// A broadcast announced past the cap closes the session with TOO_MANY_REQUESTS.
-#[moq_clock::test]
+#[kio::test]
 async fn an_announce_past_the_cap_closes_the_session() {
 	for version in VERSIONS {
 		let version: Version = version.parse().unwrap();
@@ -173,7 +173,7 @@ async fn an_announce_past_the_cap_closes_the_session() {
 		options.server_limits = Some(limits(1));
 		let pair = connect_mock(options).await;
 
-		let err = moq_clock::timeout(TIMEOUT, pair.client.closed())
+		let err = kio::clock::timeout(TIMEOUT, pair.client.closed())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the session stayed open"));
 		assert!(

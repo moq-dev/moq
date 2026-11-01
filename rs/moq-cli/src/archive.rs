@@ -345,7 +345,7 @@ mod tests {
 
 		// Each recording ends with its broadcast, once it subscribed.
 		for (broadcast, mut track) in broadcasts.drain(..2) {
-			moq_clock::timeout(Duration::from_secs(10), track.subscription_changed())
+			kio::clock::timeout(Duration::from_secs(10), track.subscription_changed())
 				.await
 				.expect("the export subscribes")
 				.unwrap();
@@ -356,9 +356,9 @@ mod tests {
 			format!("live/a/@{}/.end", epochs[0]),
 			format!("live/b/@{}/.end", epochs[1]),
 		];
-		moq_clock::timeout(Duration::from_secs(10), async {
+		kio::clock::timeout(Duration::from_secs(10), async {
 			while !complete.iter().all(|end| dir.path().join(end).exists()) {
-				moq_clock::sleep(Duration::from_millis(10)).await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
 		})
 		.await
@@ -400,9 +400,9 @@ mod tests {
 		let recording =
 			tokio::spawn(moq_archive::Producer::new(open(&url).unwrap(), source.consume(), Default::default()).run());
 		// Its objects, then the markers once the broadcast ends.
-		moq_clock::timeout(Duration::from_secs(10), async {
+		kio::clock::timeout(Duration::from_secs(10), async {
 			while files(dir.path()).len() < 2 {
-				moq_clock::sleep(Duration::from_millis(10)).await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
 		})
 		.await
@@ -418,7 +418,7 @@ mod tests {
 		let epoch = moq_net::Epoch::mint();
 		let _import = tokio::spawn(import(origin.clone(), "replay".into(), args, epoch.clone()));
 		let mut announced = origin.consume().announced();
-		moq_clock::timeout(Duration::from_secs(10), async {
+		kio::clock::timeout(Duration::from_secs(10), async {
 			loop {
 				if let Some(moq_net::announce::Event::Start(announce)) = announced.next().await {
 					assert_eq!(announce.prefix.as_str(), "replay");
