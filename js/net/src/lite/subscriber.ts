@@ -1212,14 +1212,15 @@ export class Subscriber {
 	// Map the wire TRACK_INFO onto the model track.Info a producer/consumer holds.
 	#toModelInfo(info: TrackInfo): track.Info {
 		return {
-			// Lite-05/06 timestamps may be send times, so the copy is untimed and the ingest drops them.
-			timescale: hasMediaTime(this.version) ? info.timescale : undefined,
+			timescale: info.timescale,
 			// Publisher Max Age rides on the wire, so the local media-time budget
 			// matches what the upstream advertises (relays re-serve with the same bound).
 			maxAge: info.maxAge === undefined ? undefined : Milli(info.maxAge),
 			priority: info.priority,
 			refresh: info.refresh,
 			compress: info.compress,
+			// Lite-05/06 timestamps may be send times, so the copy's groups skip the rewind check.
+			...(hasMediaTime(this.version) ? {} : { unchecked: true }),
 		};
 	}
 
@@ -1426,7 +1427,6 @@ export class Subscriber {
 		try {
 			const decode = frameDecoder({
 				scale: info.timescale ?? 0,
-				timed: hasMediaTime(this.version),
 				compress: info.compress,
 			});
 
@@ -1738,7 +1738,6 @@ export class Subscriber {
 
 			await readFrames(stream, producer, {
 				scale: timescale,
-				timed: hasMediaTime(this.version),
 				compress: entry.compress,
 			});
 
@@ -1820,11 +1819,8 @@ export class Subscriber {
 
 		const scale = entry.timescale;
 
-		// Dropped where it may be a send time, like a frame's.
 		const timestamp =
-			dg.timestamp === undefined || !hasMediaTime(this.version)
-				? undefined
-				: new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
+			dg.timestamp === undefined ? undefined : new Time.Timestamp(dg.timestamp, Time.Timescale(scale));
 		// A datagram's sequence is never owed a stream, so it never holds the tail open.
 		entry.tail.account(dg.sequence, dg.sequence + 1);
 		hooks.writeDatagram(entry.track, { sequence: dg.sequence, timestamp, payload: dg.payload }, dg.inflated);

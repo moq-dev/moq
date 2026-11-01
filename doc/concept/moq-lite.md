@@ -349,13 +349,13 @@ frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
 
 A publisher refuses a group that starts before a lower one, and so does a
-moq-lite 07 receiver. Since moq-lite 05 and 06 send times look like media time,
-a receiver drops every timestamp it gets over them and the track arrives
-untimed.
-Timestamps received over moq-transport, whose peers may stamp arrival times,
-are not checked. Rust relays preserve them across moq-lite 07 when both peers
-negotiate the [ietf extension](/draft/moq-ietf), which carries their origin and
-keeps them unchecked. A moq-lite peer without it receives that track untimed.
+moq-lite 07 receiver. A receiver passes on the timestamps it gets over moq-lite
+05 and 06 without checking them, since their send times look like media time and
+an older group fetched later would look like a rewind. Timestamps received over
+moq-transport, whose peers may stamp arrival times, are not checked either. A
+relay serves both on over every version. Over moq-lite 07 the
+[ietf extension](/draft/moq-ietf) keeps moq-transport ones unchecked; without
+it, the receiver checks them and may refuse a group that rewinds.
 
 A publisher may [compress](/concept/compression) a track, which pays off for
 repetitive data such as JSON and not for media. Each group's frames become one

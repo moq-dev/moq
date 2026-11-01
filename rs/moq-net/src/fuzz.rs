@@ -758,9 +758,9 @@ where
 	let outer = crate::Version::Ietf(version);
 	if let Ok((message, _)) = T::decode_slice(data, outer) {
 		let parameters = parameters(&message);
-		if ietf::decode_peer_setup(parameters.clone(), version, true).is_ok() {
+		if ietf::decode_peer_setup(parameters, version, true).is_ok() {
 			assert!(
-				ietf::decode_peer_setup(parameters.clone(), version, false).is_ok(),
+				ietf::decode_peer_setup(parameters, version, false).is_ok(),
 				"a server's Setup Options are refused from a client"
 			);
 		}
