@@ -256,14 +256,19 @@ impl Worker {
 		// The turn's one clock read: every timer due by now fires, and
 		// everything polled below sees this instant.
 		self.shared.deadlines.advance(self.shared.clock.now());
+		// Dispatch what the last enter brought back first, so the passes below
+		// run on it and the sends they stage ride the next enter.
+		self.reap(None)?;
+		// Everything below polls whatever a wake so far could have readied, so
+		// take the notifications that came before it, and leave only the ones
+		// raised from here on to keep the turn from parking. The swap acquires
+		// a remote wake's store, so the task bits it set before it are seen.
+		self.shared.unpark.word.swap(RUNNING, Ordering::AcqRel);
 		// Adopt tasks spawned since the last turn (spawning wakes us).
 		let spawns = std::mem::take(&mut *self.shared.spawns.borrow_mut());
 		for task in spawns {
 			self.tasks.push(task);
 		}
-		// Dispatch what the last enter brought back first, so the passes below
-		// run on it and the sends they stage ride the next enter.
-		self.reap(None)?;
 		// A failure recorded between calls (or as the last call's future
 		// resolved) surfaces before a ready future can return past it.
 		if let Some(err) = self.shared.failed.take() {
@@ -1063,6 +1068,87 @@ mod tests {
 			panic!("one busy turn must publish the receive");
 		};
 		assert_eq!(packet.payload(), b"deferred");
+	}
+
+	/// A completion's wake chain runs in the turn that reaps it: a receive task
+	/// hands each request to a sending task, so with a pass for each hop the
+	/// reply is staged before the turn submits, and rides its parked enter.
+	#[test]
+	fn a_reply_is_staged_in_the_turn_that_reaps_its_request() {
+		const ROUNDS: u64 = 16;
+
+		/// Turns and enters over `ROUNDS` round trips under a pass budget.
+		fn per_round(passes: usize) -> Option<(u64, u64)> {
+			let mut config = Config::default();
+			config.passes = NonZeroUsize::new(passes).unwrap();
+			let mut worker = worker_with(config)?;
+			let handle = worker.handle();
+			let mut udp_config = udp::Config::default();
+			udp_config.gro = false;
+			udp_config.gso = false;
+			let bind = || std::net::UdpSocket::bind("127.0.0.1:0").expect("bind");
+			let client = handle.udp(bind(), udp_config.clone()).expect("client");
+			let server = Rc::new(handle.udp(bind(), udp_config).expect("server"));
+			let (client_addr, server_addr) = (client.local_addr().unwrap(), server.local_addr().unwrap());
+
+			let requests = kio::Producer::new(0u64);
+			let receiver = server.clone();
+			let received = requests.clone();
+			handle.spawn(async move {
+				while receiver.recv().await.is_ok() {
+					let Ok(mut count) = received.write() else { return };
+					*count += 1;
+				}
+			});
+			let sender = server.clone();
+			let consumer = requests.consume();
+			handle.spawn(async move {
+				let mut replied = 0;
+				loop {
+					let next = kio::wait(|waiter: &kio::Waiter| {
+						match consumer.poll(waiter, |count| match **count > replied {
+							true => Poll::Ready(**count),
+							false => Poll::Pending,
+						}) {
+							Poll::Ready(Ok(count)) => Poll::Ready(count),
+							Poll::Ready(Err(_)) => Poll::Ready(replied),
+							Poll::Pending => Poll::Pending,
+						}
+					})
+					.await;
+					if next == replied {
+						return;
+					}
+					replied = next;
+					let mut tx = sender.acquire().await.expect("send buffer");
+					tx.extend_from_slice(b"pong");
+					tx.send(udp::Transmit::new(client_addr, 4)).expect("reply");
+				}
+			});
+
+			let (before, after) = worker
+				.block_on(async {
+					let round = || async {
+						let mut tx = client.acquire().await.expect("send buffer");
+						tx.extend_from_slice(b"ping");
+						tx.send(udp::Transmit::new(server_addr, 4)).expect("request");
+						assert_eq!(client.recv().await.expect("reply").payload(), b"pong");
+					};
+					round().await;
+					let before = handle.metrics().snapshot();
+					for _ in 0..ROUNDS {
+						round().await;
+					}
+					(before, handle.metrics().snapshot())
+				})
+				.expect("worker");
+			Some((after.turns - before.turns, after.enters - before.enters))
+		}
+
+		let Some(one) = per_round(1) else { return };
+		let Some(two) = per_round(2) else { return };
+		assert_eq!(two, (2 * ROUNDS, 2 * ROUNDS), "each hop is one turn and one enter");
+		assert_eq!(one, (3 * ROUNDS, 2 * ROUNDS), "a pass per turn spends a turn on the hand-off");
 	}
 
 	#[test]
