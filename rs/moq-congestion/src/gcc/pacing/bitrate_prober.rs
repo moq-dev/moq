@@ -81,7 +81,7 @@ impl BitrateProber {
     const PROBE_CLUSTER_TIMEOUT: TimeDelta = TimeDelta::from_seconds(5);
     const MAX_PENDING_PROBE_CLUSTERS: usize = 5;
     /// Restarted clusters take ids from here up, above any GoogCC's ProbeController counts to
-    const RESTART_ID_BASE: i32 = 1 << 30;
+    pub const RESTART_ID_BASE: i32 = 1 << 30;
 
     // Returns true if the prober is in a probing session, i.e., it currently
     // wants packets to be sent out according to the time returned by

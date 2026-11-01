@@ -525,9 +525,16 @@ fn size(bytes: u64) -> DataSize {
     DataSize::from_bytes(bytes.min(i64::MAX as u64 / 2) as i64)
 }
 
-/// The probe cluster id a [`Packet`] stores: GoogCC's, which counts up from one, wrapped to
-/// sixteen bits without zero.
+/// The probe cluster id a [`Packet`] stores, in sixteen bits without zero. GoogCC's ids, which
+/// count up from one, wrap within the lower half, and the prober's restart ids within the upper
+/// half, so a restarted cluster never shares a short id with one of GoogCC's.
 fn short_id(id: i32) -> Option<NonZeroU16> {
+    const HALF: u32 = 1 << 15;
     let id = u32::try_from(id).ok().filter(|&id| id > 0)?;
-    NonZeroU16::new(((id - 1) % u32::from(u16::MAX) + 1) as u16)
+    let restart_base = BitrateProber::RESTART_ID_BASE as u32;
+    let short = match id.checked_sub(restart_base) {
+        Some(restart) => HALF | (restart % HALF),
+        None => (id - 1) % (HALF - 1) + 1,
+    };
+    NonZeroU16::new(short as u16)
 }

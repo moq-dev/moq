@@ -411,6 +411,33 @@ fn probe_inflight_rounds_up_to_a_packet() {
     assert_eq!(gcc.metrics().probe_inflight, None, "the cluster went on");
 }
 
+/// A restarted cluster's short id never matches one of GoogCC's, whatever either counter reached,
+/// so a packet resolves to the cluster it was sent in
+#[test]
+fn restart_ids_never_alias_googcc_ids() {
+    let base = BitrateProber::RESTART_ID_BASE;
+    for googcc in [
+        1,
+        2,
+        16_384,
+        16_385,
+        32_767,
+        32_768,
+        65_535,
+        65_536,
+        1 << 20,
+    ] {
+        let short = short_id(googcc).unwrap().get();
+        assert!(short < 1 << 15, "GoogCC id {googcc} took short id {short}");
+    }
+    for restart in [0, 1, 16_383, 16_384, 32_767, 32_768, 65_535, (1 << 30) - 1] {
+        let short = short_id(base + restart).unwrap().get();
+        assert!(short >= 1 << 15, "restart {restart} took short id {short}");
+    }
+    assert_eq!(short_id(0), None);
+    assert_eq!(short_id(-1), None);
+}
+
 /// Receive times a peer controls, however far off, regressing, or unreported, never panic or
 /// leave the estimate outside GoogCC's bounds
 #[test]

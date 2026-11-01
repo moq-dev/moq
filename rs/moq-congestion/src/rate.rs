@@ -32,7 +32,8 @@ pub struct Packet {
     /// equivalent to P.is_app_limited: whether C.app_limited was set when the packet was sent.
     pub(crate) is_app_limited: bool,
     /// The GCC probe cluster it was sent in, if any. Sixteen bits fit the padding after the
-    /// fields above, and a cluster's results are kept for a second, far fewer than wrap.
+    /// fields above. GoogCC's clusters and the prober's restarts each wrap within half of them,
+    /// far more than either starts in the two seconds a cluster is kept.
     pub(crate) probe_cluster: Option<NonZeroU16>,
 }
 

@@ -79,8 +79,11 @@ impl AlrDetector {
             self.last_send_time = Some(send_time);
             return;
         };
-        // In whole milliseconds of each time, as upstream's `int64_t` send times are, so packets
-        // under a millisecond apart still add up to the time between them
+        // A deliberate departure from upstream, which rounds each interval to whole milliseconds
+        // (`(send_time - last_send_time).ms()`), so sends under half a millisecond apart never
+        // refill its budget and sends 0.5-1ms apart refill it for a whole millisecond. Rounding
+        // each time instead, as upstream did before its send times became `Timestamp`s, keeps the
+        // intervals adding up to the time between the sends.
         let delta_time_ms = send_time.ms() - last_send_time.ms();
         self.last_send_time = Some(send_time);
 
