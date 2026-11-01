@@ -90,6 +90,18 @@ class TextTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("invalid", result.stderr)
 
+    @unittest.skipIf(os.geteuid() == 0, "root reads files regardless of mode")
+    def test_unreadable_tracked_file_fails(self):
+        self.write("unreadable.md", "plain text\n")
+        self.git("add", ".")
+        path = self.repo / "unreadable.md"
+        path.chmod(0)
+        self.addCleanup(path.chmod, 0o644)
+        result = self.check()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("unreadable.md", result.stderr)
+        self.assertIn("could not scan", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

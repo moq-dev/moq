@@ -4,7 +4,7 @@
 # Usage:
 #   release.sh parse-version <prefix>          - extract SemVer from GITHUB_REF given a tag prefix
 #   release.sh prev-tag <prefix>               - find the tag immediately before the current one
-#   release.sh create <artifacts_dir>          - create or update a GitHub release with artifacts + SHA256SUMS
+#   release.sh create <artifacts_dir>          - create or update a GitHub release with artifacts + checksum manifest
 #   release.sh git-tag-exists <repo> <tag>     - check whether a tag exists on a remote repo
 #   release.sh read-version <pyproject.toml>   - read `version = "x.y.z"` from a manifest
 #   release.sh pypi-exists <dist> <version>    - check whether <dist>==<version> is already on PyPI
@@ -96,7 +96,7 @@ sha256() {
     fi
 }
 
-# Create or update a GitHub release with artifacts and their SHA256SUMS.
+# Create or update a GitHub release with artifacts and their checksum manifest.
 # Args: <artifacts_dir>
 # Reads tag/title/prev_tag from environment or step outputs.
 create_release() {
