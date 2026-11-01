@@ -7,6 +7,7 @@ use std::{
 	net::{Ipv6Addr, SocketAddr, UdpSocket},
 	str,
 	sync::{Arc, LazyLock, Mutex},
+	task::Poll,
 };
 
 use assert_matches::assert_matches;
@@ -249,13 +250,10 @@ impl Pair {
 		client_ch
 	}
 
+	/// Asserts both sides finished the handshake
 	pub(super) fn finish_connect(&mut self, client_ch: ConnectionHandle, server_ch: ConnectionHandle) {
-		assert_matches!(self.client_conn_mut(client_ch).poll(), Some(Event::HandshakeDataReady));
-		assert_matches!(self.client_conn_mut(client_ch).poll(), Some(Event::Connected));
-		assert_matches!(self.server_conn_mut(server_ch).poll(), Some(Event::HandshakeDataReady));
-		assert_matches!(self.server_conn_mut(server_ch).poll(), Some(Event::HandshakeConfirmed));
-		assert_matches!(self.server_conn_mut(server_ch).poll(), Some(Event::Connected));
-		assert_matches!(self.client_conn_mut(client_ch).poll(), Some(Event::HandshakeConfirmed));
+		assert_established(self.client_conn_mut(client_ch));
+		assert_established(self.server_conn_mut(server_ch));
 	}
 
 	pub(super) fn client_conn_mut(&mut self, ch: ConnectionHandle) -> &mut Connection {
@@ -757,6 +755,59 @@ impl ::std::ops::DerefMut for TestEndpoint {
 	fn deref_mut(&mut self) -> &mut Endpoint {
 		&mut self.endpoint
 	}
+}
+
+/// Poll the server's next chunk of `s`
+pub(super) fn poll_read(
+	pair: &mut Pair,
+	ch: ConnectionHandle,
+	s: StreamId,
+	waiter: &kio::Waiter,
+) -> Poll<Result<Option<Bytes>, recv::Error>> {
+	let mut recv = pair.server_recv(ch, s);
+	let mut chunks = recv.read().unwrap();
+	let poll = chunks
+		.poll_next(waiter, usize::MAX)
+		.map(|r| r.map(|chunk| chunk.map(|c| c.bytes)));
+	let _ = chunks.finalize();
+	poll
+}
+
+/// Polls a wait with a waiter nothing wakes, to read its answer as it stands
+pub(super) fn peek<T>(poll: impl FnOnce(&kio::Waiter) -> Poll<T>) -> Poll<T> {
+	poll(&kio::Waiter::noop())
+}
+
+/// Asserts the connection has its handshake data, is connected and confirmed, and is still alive
+///
+/// Waits count wakes rather than order them, so this checks where the handshake ended, not the
+/// order its steps completed in.
+pub(super) fn assert_established(conn: &mut Connection) {
+	assert!(has_handshake_data(conn));
+	assert!(is_connected(conn));
+	assert!(is_confirmed(conn));
+	assert_matches!(conn.error(), None);
+}
+
+/// How far the connection's handshake got: whether it has its handshake data, is connected, and
+/// is confirmed
+pub(super) fn handshake_progress(conn: &mut Connection) -> (bool, bool, bool) {
+	(has_handshake_data(conn), is_connected(conn), is_confirmed(conn))
+}
+
+/// Whether the connection's handshake data is available
+pub(super) fn has_handshake_data(conn: &mut Connection) -> bool {
+	peek(|waiter| conn.poll_handshake_data(waiter)) == Poll::Ready(Ok(()))
+}
+
+/// Whether the connection completed its handshake
+pub(super) fn is_connected(conn: &mut Connection) -> bool {
+	peek(|waiter| conn.poll_connected(waiter)) == Poll::Ready(Ok(()))
+}
+
+/// Whether the connection's handshake was confirmed
+pub(super) fn is_confirmed(conn: &mut Connection) -> bool {
+	peek(|waiter| conn.poll_handshake_confirmed(waiter)) == Poll::Ready(Ok(()))
 }
 
 pub(super) fn subscribe() -> tracing::subscriber::DefaultGuard {

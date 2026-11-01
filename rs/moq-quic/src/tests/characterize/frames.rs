@@ -280,14 +280,17 @@ fn retire_connection_id_in_use() {
 }
 
 /// A connection closed by its own transport error sends CONNECTION_CLOSE to a CID the server
-/// retired, and the server answers with a stateless reset, which must neither replace the unread
-/// close reason with `Reset` nor, once the reason was read, report a second `ConnectionLost`.
+/// retired, and the server answers with a stateless reset, which must neither replace the close
+/// reason with `Reset`, whether or not it was read first, nor wake the closed wait again.
 fn stateless_reset_after_local_close(poll_early: bool) {
 	let _guard = subscribe();
 	let (mut pair, client_ch, server_ch) = connected();
 	retire_in_use(&mut pair, client_ch, server_ch);
+	let closed = Counter::new();
+	assert!(pair.client_conn_mut(client_ch).poll_closed(&closed).is_pending());
 	pair.drive_client();
 	if poll_early {
+		assert_eq!(closed.wakes(), 1);
 		assert_eq!(
 			lost_code(pair.client_conn_mut(client_ch)),
 			TransportErrorCode::CONNECTION_ID_LIMIT_ERROR
@@ -295,18 +298,14 @@ fn stateless_reset_after_local_close(poll_early: bool) {
 	}
 
 	pair.drive();
-	let lost = lost(pair.client_conn_mut(client_ch));
-	if poll_early {
-		assert_eq!(lost, None);
-	} else {
-		assert_matches!(
-			lost,
-			Some(ConnectionError::TransportError(TransportError {
-				code: TransportErrorCode::CONNECTION_ID_LIMIT_ERROR,
-				..
-			}))
-		);
-	}
+	assert_eq!(closed.wakes(), 1);
+	assert_matches!(
+		lost(pair.client_conn_mut(client_ch)),
+		Some(ConnectionError::TransportError(TransportError {
+			code: TransportErrorCode::CONNECTION_ID_LIMIT_ERROR,
+			..
+		}))
+	);
 }
 
 #[test]

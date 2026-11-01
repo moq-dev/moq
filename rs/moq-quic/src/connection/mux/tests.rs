@@ -1,7 +1,9 @@
 use bytes::{BufMut, Bytes};
 
 use super::*;
-use crate::{StreamId, TransportErrorCode, coding::BufMutExt, frame::FrameType, recv, send};
+use crate::{
+	StreamId, TransportErrorCode, coding::BufMutExt, connection::waits::Counter, frame::FrameType, recv, send,
+};
 
 /// Two connections joined by an in-memory transport, on a clock the test advances
 struct Pair {
@@ -58,10 +60,6 @@ fn config(version: Version) -> Config {
 	}
 }
 
-fn events(conn: &mut Connection) -> Vec<Event> {
-	std::iter::from_fn(|| conn.poll()).collect()
-}
-
 /// Read every byte currently available on `id`
 fn read_all(conn: &mut Connection, id: StreamId) -> (Vec<u8>, bool) {
 	let mut recv = conn.recv_stream(id);
@@ -84,10 +82,7 @@ fn read_all(conn: &mut Connection, id: StreamId) -> (Vec<u8>, bool) {
 }
 
 fn lost(conn: &mut Connection) -> Option<ConnectionError> {
-	events(conn).into_iter().find_map(|event| match event {
-		Event::ConnectionLost { reason } => Some(reason),
-		_ => None,
-	})
+	conn.error().cloned()
 }
 
 #[test]
@@ -96,8 +91,10 @@ fn handshake() {
 		let mut pair = Pair::new(config(version));
 		assert!(pair.client.is_established(), "{version:?}");
 		assert!(pair.server.is_established(), "{version:?}");
-		assert!(matches!(events(&mut pair.client)[..], [Event::Connected]));
-		assert!(matches!(events(&mut pair.server)[..], [Event::Connected]));
+		for conn in [&mut pair.client, &mut pair.server] {
+			assert_eq!(conn.poll_connected(&kio::Waiter::noop()), Poll::Ready(Ok(())));
+			assert!(conn.error().is_none());
+		}
 	}
 }
 
@@ -113,6 +110,8 @@ fn streams_carry_data_and_fin() {
 			pair.drive();
 		}
 		pair.client.send_stream(id).finish().unwrap();
+		let end = Counter::new();
+		assert!(pair.client.send_stream(id).poll_end(&end).is_pending());
 		pair.drive();
 
 		assert_eq!(pair.server.streams().accept(Dir::Bi), Some(id));
@@ -127,10 +126,10 @@ fn streams_carry_data_and_fin() {
 		}
 		assert_eq!(received, payload, "{version:?}");
 		// Serializing the FIN acknowledged it
-		assert!(
-			events(&mut pair.client)
-				.iter()
-				.any(|e| matches!(e, Event::Stream(StreamEvent::Finished { id: done }) if *done == id))
+		assert_eq!(end.wakes(), 1);
+		assert_eq!(
+			pair.client.send_stream(id).poll_end(&end),
+			Poll::Ready(Ok(send::End::Finished))
 		);
 	}
 }
@@ -472,16 +471,14 @@ fn datagrams() {
 	let mut pair = Pair::new(config(Version::QMux02));
 	let max = pair.client.datagrams().max_size().unwrap();
 	assert!(max > 16_000);
+	let waiter = Counter::new();
+	assert!(pair.server.datagrams().poll_recv(&waiter).is_pending());
 	pair.client
 		.datagrams()
 		.send(Bytes::from_static(b"hello"), send::Options::default())
 		.unwrap();
 	pair.drive();
-	assert!(
-		events(&mut pair.server)
-			.iter()
-			.any(|e| matches!(e, Event::DatagramReceived))
-	);
+	assert_eq!(waiter.wakes(), 1);
 	assert_eq!(pair.server.datagrams().recv().unwrap(), &b"hello"[..]);
 
 	// Draft-00 has none

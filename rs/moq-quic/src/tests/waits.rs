@@ -28,22 +28,6 @@ fn open_uni(pair: &mut Pair, client_ch: ConnectionHandle, server_ch: ConnectionH
 	s
 }
 
-/// Poll the server's next chunk of `s`
-fn poll_read(
-	pair: &mut Pair,
-	ch: ConnectionHandle,
-	s: StreamId,
-	waiter: &kio::Waiter,
-) -> Poll<Result<Option<Bytes>, recv::Error>> {
-	let mut recv = pair.server_recv(ch, s);
-	let mut chunks = recv.read().unwrap();
-	let poll = chunks
-		.poll_next(waiter, usize::MAX)
-		.map(|r| r.map(|chunk| chunk.map(|c| c.bytes)));
-	let _ = chunks.finalize();
-	poll
-}
-
 #[test]
 fn read_wakes_every_waiter() {
 	let _guard = subscribe();
@@ -366,6 +350,98 @@ fn handshake_waits() {
 	// Still connected once lost: the handshake did complete.
 	conn.close(now, VarInt(0), String::new());
 	assert_eq!(conn.poll_connected(&connected), Poll::Ready(Ok(())));
+}
+
+#[test]
+fn handshake_data_waits() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let client_ch = pair.begin_connect(client_config());
+
+	let waiter = Counter::new();
+	assert!(
+		pair.client_conn_mut(client_ch)
+			.poll_handshake_data(&waiter)
+			.is_pending()
+	);
+	pair.drive();
+	assert_eq!(waiter.wakes(), 1);
+	let now = pair.time;
+	let conn = pair.client_conn_mut(client_ch);
+	assert_eq!(conn.poll_handshake_data(&waiter), Poll::Ready(Ok(())));
+	assert!(conn.crypto_session().handshake_data().is_some());
+
+	// Still available once lost: the parameters did arrive.
+	conn.close(now, VarInt(0), String::new());
+	assert_eq!(conn.poll_handshake_data(&waiter), Poll::Ready(Ok(())));
+}
+
+/// A connection lost before its handshake parameters arrived fails the wait with the reason.
+#[test]
+fn handshake_data_fails_once_lost_first() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let client_ch = pair.begin_connect(client_config());
+
+	let waiter = Counter::new();
+	let now = pair.time;
+	let conn = pair.client_conn_mut(client_ch);
+	assert!(conn.poll_handshake_data(&waiter).is_pending());
+	conn.close(now, VarInt(7), String::new());
+	assert_eq!(waiter.wakes(), 1);
+	let reason = assert_matches!(conn.poll_handshake_data(&waiter), Poll::Ready(Err(reason)) => reason);
+	assert_matches!(&reason, ConnectionError::LocallyClosed { code: VarInt(7), .. });
+	assert_eq!(conn.error(), Some(&reason));
+}
+
+#[test]
+fn received_reset_waits_for_the_reset() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let s = open_uni(&mut pair, client_ch, server_ch, b"a");
+
+	let waiter = Counter::new();
+	assert!(pair.server_recv(server_ch, s).poll_received_reset(&waiter).is_pending());
+
+	// Data wakes it too, and the answer is still no reset.
+	pair.client_send(client_ch, s).write(&mut &b"b"[..]).unwrap();
+	pair.drive();
+	assert_eq!(waiter.wakes(), 1);
+	assert!(pair.server_recv(server_ch, s).poll_received_reset(&waiter).is_pending());
+
+	pair.client_send(client_ch, s).reset(VarInt(5)).unwrap();
+	pair.drive();
+	assert_eq!(waiter.wakes(), 2);
+	assert_eq!(
+		pair.server_recv(server_ch, s).poll_received_reset(&waiter),
+		Poll::Ready(Ok(VarInt(5)))
+	);
+	// Observing the reset discards the stream.
+	assert_eq!(
+		pair.server_recv(server_ch, s).poll_received_reset(&waiter),
+		Poll::Ready(Err(recv::Error::Closed))
+	);
+}
+
+/// A stream the connection's loss ends without a reset fails the wait.
+#[test]
+fn received_reset_fails_once_lost() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let s = open_uni(&mut pair, client_ch, server_ch, b"a");
+
+	let waiter = Counter::new();
+	assert!(pair.server_recv(server_ch, s).poll_received_reset(&waiter).is_pending());
+	let now = pair.time;
+	pair.client_conn_mut(client_ch).close(now, VarInt(0), String::new());
+	pair.drive();
+	assert_eq!(waiter.wakes(), 1);
+	assert_eq!(
+		pair.server_recv(server_ch, s).poll_received_reset(&waiter),
+		Poll::Ready(Err(recv::Error::ConnectionLost))
+	);
 }
 
 /// What arrived before the loss stays available, then every wait fails with the reason.

@@ -13,6 +13,7 @@ use std::{
 	net::{Ipv6Addr, SocketAddr},
 	num::NonZeroU64,
 	sync::{Arc, Mutex},
+	task::{Poll, Waker},
 	time::Duration,
 };
 
@@ -25,12 +26,12 @@ use criterion::{
 use moq_clock::Instant;
 use moq_congestion::{Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent};
 use moq_quic::{
-	ConnectionId, ConnectionIdGenerator, Event, RandomConnectionIdGenerator, StreamEvent, VarInt, client,
+	ConnectionId, ConnectionIdGenerator, RandomConnectionIdGenerator, VarInt, client,
 	connection::Connection,
 	endpoint::{self, ConnectionHandle, DatagramEvent, Dial, Endpoint, Received as Inbound},
 	fuzz::Plaintext,
-	recv, server,
-	stream::Id as StreamId,
+	recv, send, server,
+	stream::{Dir, Id as StreamId},
 	transport,
 };
 
@@ -103,6 +104,79 @@ impl Default for Setup {
 	}
 }
 
+/// What one of the application's waiters waits on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Task {
+	/// Data, a FIN, or a reset to read on a stream the peer opened.
+	Read(ConnectionHandle, StreamId),
+	/// The end of a stream this side opened, to answer a STOP_SENDING.
+	End(ConnectionHandle, StreamId),
+}
+
+impl Task {
+	fn conn(self) -> ConnectionHandle {
+		match self {
+			Self::Read(ch, _) | Self::End(ch, _) => ch,
+		}
+	}
+}
+
+/// Queues its task when woken, as an executor's run queue would.
+struct Wake {
+	task: Task,
+	ready: Arc<Mutex<Vec<Task>>>,
+}
+
+impl std::task::Wake for Wake {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		self.ready.lock().unwrap().push(self.task);
+	}
+}
+
+/// The application's parked waiters, so it only runs what the connection woke.
+#[derive(Default)]
+struct Tasks {
+	waiters: HashMap<Task, kio::Waiter>,
+	/// Tasks woken, or newly started, since the application last ran them.
+	ready: Arc<Mutex<Vec<Task>>>,
+}
+
+impl Tasks {
+	/// The waiter for `task`, made on first use.
+	fn waiter(&mut self, task: Task) -> &kio::Waiter {
+		let ready = &self.ready;
+		self.waiters.entry(task).or_insert_with(|| {
+			let wake = Wake {
+				task,
+				ready: ready.clone(),
+			};
+			kio::Waiter::new(Waker::from(Arc::new(wake)))
+		})
+	}
+
+	/// Runs `task` on the application's next pass.
+	fn start(&mut self, task: Task) {
+		self.ready.lock().unwrap().push(task);
+	}
+
+	/// Forgets `task`, which will not wait again.
+	fn done(&mut self, task: Task) {
+		self.waiters.remove(&task);
+	}
+
+	/// Takes the woken tasks of connection `ch`, leaving the others queued.
+	fn woken(&mut self, ch: ConnectionHandle) -> Vec<Task> {
+		let mut ready = self.ready.lock().unwrap();
+		let (ours, rest) = ready.drain(..).partition(|task| task.conn() == ch);
+		*ready = rest;
+		ours
+	}
+}
+
 /// One endpoint and its connections, with an application that drains whatever arrives.
 pub(crate) struct Peer {
 	pub(crate) endpoint: Endpoint,
@@ -112,6 +186,7 @@ pub(crate) struct Peer {
 	pub(crate) received: Received,
 	/// Wall time spent in [`Peer::process`], to time one side of an exchange.
 	pub(crate) busy: Duration,
+	tasks: Tasks,
 	inbound: VecDeque<(SocketAddr, BytesMut)>,
 	outbound: Vec<(SocketAddr, BytesMut)>,
 	buf: Vec<u8>,
@@ -126,6 +201,7 @@ impl Peer {
 			sink: Sink::Read,
 			received: Received::default(),
 			busy: Duration::ZERO,
+			tasks: Tasks::default(),
 			inbound: VecDeque::new(),
 			outbound: Vec::new(),
 			buf: Vec::new(),
@@ -186,26 +262,27 @@ impl Peer {
 					conn.handle_event(event);
 				}
 			}
-			while let Some(event) = conn.poll() {
-				match event {
-					Event::ConnectionLost { reason } => panic!("connection lost: {reason}"),
-					Event::Stream(StreamEvent::Opened { .. }) if self.sink == Sink::Ignore => {}
-					Event::Stream(StreamEvent::Opened { dir }) => {
-						while let Some(id) = conn.streams().accept(dir) {
-							drain(conn, id, self.sink, &mut self.received);
-						}
+			if let Some(reason) = conn.error() {
+				panic!("connection lost: {reason}");
+			}
+			if self.sink != Sink::Ignore {
+				for dir in [Dir::Uni, Dir::Bi] {
+					while let Some(id) = conn.streams().accept(dir) {
+						self.tasks.start(Task::Read(ch, id));
 					}
-					Event::Stream(StreamEvent::Readable { id }) => drain(conn, id, self.sink, &mut self.received),
-					// The application answers STOP_SENDING the way a writer does: it gives up.
-					Event::Stream(StreamEvent::Stopped { id, error_code }) => {
-						let _ = conn.send_stream(id).reset(error_code);
-					}
-					Event::DatagramReceived => {
-						while conn.datagrams().recv().is_some() {
-							self.received.datagrams += 1;
-						}
-					}
-					_ => {}
+				}
+			}
+			while conn.datagrams().recv().is_some() {
+				self.received.datagrams += 1;
+			}
+			// Runs what woke, then what those runs woke in turn.
+			loop {
+				let woken = self.tasks.woken(ch);
+				if woken.is_empty() {
+					break;
+				}
+				for task in woken {
+					run(conn, task, self.sink, &mut self.received, &mut self.tasks);
 				}
 			}
 			buf.clear();
@@ -224,65 +301,88 @@ impl Peer {
 	}
 }
 
-/// Reads or stops one stream, recording what the application saw.
-fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Received) {
+/// Runs one woken task, forgetting it once it will not wait again.
+fn run(conn: &mut Connection, task: Task, sink: Sink, received: &mut Received, tasks: &mut Tasks) {
+	let done = match task {
+		Task::Read(_, id) => drain(conn, id, sink, received, tasks.waiter(task)),
+		// The application answers STOP_SENDING the way a writer does: it gives up.
+		Task::End(_, id) => match conn.send_stream(id).poll_end(tasks.waiter(task)) {
+			Poll::Pending => false,
+			Poll::Ready(Ok(send::End::Stopped(code))) => {
+				let _ = conn.send_stream(id).reset(code);
+				true
+			}
+			Poll::Ready(_) => true,
+		},
+	};
+	if done {
+		tasks.done(task);
+	}
+}
+
+/// Reads or stops one stream, recording what the application saw, and returns whether it is done
+/// with the stream rather than parked on it with `waiter`.
+fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Received, waiter: &kio::Waiter) -> bool {
 	if let Sink::Lease(want) = sink {
-		return lease(conn, id, want, received);
+		return lease(conn, id, want, received, waiter);
 	}
 	if sink == Sink::Ignore {
-		return;
+		return false;
 	}
 	let mut stream = conn.recv_stream(id);
 	if sink == Sink::Stop {
 		if stream.stop(VarInt::from_u32(0)).is_ok() {
 			received.stopped += 1;
 		}
-		return;
+		return true;
 	}
 	// A stream already stopped, finished, or reset is gone.
 	let Ok(mut chunks) = stream.read() else {
-		return;
+		return true;
 	};
-	loop {
-		match chunks.next(usize::MAX) {
-			Ok(Some(chunk)) => received.bytes += chunk.bytes.len() as u64,
-			Ok(None) => {
+	let done = loop {
+		match chunks.poll_next(waiter, usize::MAX) {
+			Poll::Ready(Ok(Some(chunk))) => received.bytes += chunk.bytes.len() as u64,
+			Poll::Ready(Ok(None)) => {
 				received.finished += 1;
-				break;
+				break true;
 			}
-			Err(recv::Error::Blocked) => break,
-			Err(recv::Error::Reset(_)) => {
+			Poll::Pending => break false,
+			Poll::Ready(Err(recv::Error::Reset(_))) => {
 				received.reset += 1;
-				break;
+				break true;
 			}
 			#[allow(
 				unreachable_patterns,
 				reason = "unreachable today, but keeps the suite compiling against a rewrite's new variants"
 			)]
-			Err(err) => panic!("read failed: {err}"),
+			Poll::Ready(Err(err)) => panic!("read failed: {err}"),
 		}
-	}
+	};
 	let _ = chunks.finalize();
+	done
 }
 
-/// Leases one stream until it waits, releasing whatever it leased.
+/// Leases one stream until it waits, releasing whatever it leased, and returns whether it is done
+/// with the stream rather than parked on it with `waiter`.
 ///
 /// A stream that ends is stopped, as a driver does when its reader drops, which is what
 /// discards its lease.
-fn lease(conn: &mut Connection, id: StreamId, want: usize, received: &mut Received) {
+fn lease(conn: &mut Connection, id: StreamId, want: usize, received: &mut Received, waiter: &kio::Waiter) -> bool {
 	loop {
 		let mut stream = conn.recv_stream(id);
-		let mut lease = match stream.lease(want).0 {
-			Ok(lease) => lease,
-			Err(recv::Error::Blocked | recv::Error::Closed) => return,
-			Err(err) => {
+		let mut lease = match stream.poll_lease(waiter, want).0 {
+			Poll::Ready(Ok(lease)) => lease,
+			Poll::Pending => return false,
+			Poll::Ready(Err(recv::Error::Closed)) => return true,
+			Poll::Ready(Err(err)) => {
 				match err {
 					recv::Error::Reset(_) => received.reset += 1,
 					recv::Error::Evicted => received.evicted += 1,
 					err => panic!("lease failed: {err}"),
 				}
 				let _ = stream.stop(VarInt::from_u32(0));
-				return;
+				return true;
 			}
 		};
 		let fin = lease.is_fin();
@@ -295,7 +395,7 @@ fn lease(conn: &mut Connection, id: StreamId, want: usize, received: &mut Receiv
 		if fin {
 			received.finished += 1;
 			let _ = stream.stop(VarInt::from_u32(0));
-			return;
+			return true;
 		}
 	}
 }
@@ -399,6 +499,18 @@ impl Pair {
 	pub(crate) fn client(&mut self) -> &mut Connection {
 		assert_eq!(self.clients.len(), 1, "pair has more than one client");
 		self.clients[0].conn()
+	}
+
+	/// Opens a stream on the only client and writes all of `data` to it, with the client's
+	/// application watching how the stream ends, so it answers a STOP_SENDING.
+	pub(crate) fn open_uni(&mut self, data: &Bytes) -> StreamId {
+		assert_eq!(self.clients.len(), 1, "pair has more than one client");
+		let client = &mut self.clients[0];
+		let (&ch, conn) = client.conns.iter_mut().next().expect("client has a connection");
+		let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
+		assert_eq!(conn.send_stream(id).write(&mut data.clone()).unwrap(), data.len());
+		client.tasks.start(Task::End(ch, id));
+		id
 	}
 
 	/// Runs every peer once and delivers what they sent, returning whether anything moved.

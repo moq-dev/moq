@@ -46,8 +46,8 @@ fn oversized_cached_initial_token() {
 			assert!(conn.stats().frame_tx.crypto > 0);
 		} else {
 			assert_matches!(
-				conn.poll(),
-				Some(Event::ConnectionLost { reason: ConnectionError::TransportError(err) })
+				conn.error(),
+				Some(ConnectionError::TransportError(err))
 				if err.code == TransportErrorCode::PROTOCOL_VIOLATION
 			);
 			assert!(conn.poll_transmit(now, 1, &mut buf).is_none());
@@ -122,8 +122,8 @@ fn oversized_retry_token() {
 			assert!(buf.len() <= 1200);
 		} else {
 			assert_matches!(
-				conn.poll(),
-				Some(Event::ConnectionLost { reason: ConnectionError::TransportError(err) })
+				conn.error(),
+				Some(ConnectionError::TransportError(err))
 				if err.code == TransportErrorCode::PROTOCOL_VIOLATION
 			);
 			assert!(conn.poll_transmit(now, 1, &mut buf).is_none());
@@ -173,8 +173,8 @@ async fn retry_token_expired() {
 
 	pair.drive();
 	assert_matches!(
-		pair.client_conn_mut(client_ch).poll(),
-		Some(Event::ConnectionLost { reason: ConnectionError::ConnectionClosed(err) })
+		pair.client_conn_mut(client_ch).error(),
+		Some(ConnectionError::ConnectionClosed(err))
 		if err.error_code == TransportErrorCode::INVALID_TOKEN
 	);
 

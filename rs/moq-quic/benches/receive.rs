@@ -123,12 +123,9 @@ fn bench_lease(c: &mut Criterion<ThreadCpu>) {
 							for _ in 0..iters {
 								pair.server.busy = Duration::ZERO;
 								let target = pair.server.received.finished + streams as u64;
-								let conn = pair.client();
 								for _ in 0..streams {
-									let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
-									let mut stream = conn.send_stream(id);
-									assert_eq!(stream.write(&mut data.clone()).unwrap(), data.len());
-									stream.finish().unwrap();
+									let id = pair.open_uni(&data);
+									pair.client().send_stream(id).finish().unwrap();
 								}
 								pair.drive_until(|pair| pair.server.received.finished >= target);
 								pair.settle();
@@ -171,14 +168,7 @@ fn bench_evict(c: &mut Criterion<ThreadCpu>) {
 				for _ in 0..iters {
 					pair.server.busy = Duration::ZERO;
 					let target = pair.server.received.evicted + 1;
-					let conn = pair.client();
-					let ids: Vec<_> = (0..streams)
-						.map(|_| {
-							let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
-							assert_eq!(conn.send_stream(id).write(&mut data.clone()).unwrap(), PACKET);
-							id
-						})
-						.collect();
+					let ids: Vec<_> = (0..streams).map(|_| pair.open_uni(&data)).collect();
 					pair.drive_until(|pair| pair.server.received.evicted >= target);
 					busy += pair.server.busy;
 
@@ -215,10 +205,8 @@ fn bench_evict_churn(c: &mut Criterion<ThreadCpu>) {
 				});
 				pair.server.sink = Sink::Lease(window);
 				let data = payload(PACKET);
-				let conn = pair.client();
 				for _ in 0..streams {
-					let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
-					assert_eq!(conn.send_stream(id).write(&mut data.clone()).unwrap(), PACKET);
+					pair.open_uni(&data);
 				}
 				pair.drive_until(|pair| pair.server.received.evicted >= 1);
 				pair.settle();
@@ -230,9 +218,7 @@ fn bench_evict_churn(c: &mut Criterion<ThreadCpu>) {
 				for _ in 0..iters {
 					pair.server.busy = Duration::ZERO;
 					let target = pair.server.received.evicted + 1;
-					let conn = pair.client();
-					let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
-					assert_eq!(conn.send_stream(id).write(&mut data.clone()).unwrap(), PACKET);
+					pair.open_uni(&data);
 					pair.drive_until(|pair| pair.server.received.evicted >= target);
 					busy += pair.server.busy;
 					// The evicted stream's stop and reset settle untimed.
@@ -272,10 +258,8 @@ fn bench_reset_debt(c: &mut Criterion<ThreadCpu>) {
 						// Each reader waits for the whole window, which no single stream fills.
 						pair.server.sink = Sink::Lease(window);
 						let data = payload(PACKET);
-						let conn = pair.client();
 						for _ in 0..holders {
-							let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
-							assert_eq!(conn.send_stream(id).write(&mut data.clone()).unwrap(), PACKET);
+							pair.open_uni(&data);
 						}
 						pair.settle();
 						pair.server.sink = Sink::Ignore;
@@ -348,10 +332,8 @@ fn bench_stop(c: &mut Criterion<ThreadCpu>) {
 					let data = payload(bytes);
 					b.iter(|| {
 						let target = pair.server.received.stopped + streams as u64;
-						let conn = pair.client();
 						for _ in 0..streams {
-							let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
-							assert_eq!(conn.send_stream(id).write(&mut data.clone()).unwrap(), bytes);
+							pair.open_uni(&data);
 						}
 						pair.drive_until(|pair| {
 							pair.server.received.stopped >= target && pair.client().streams().send_streams() == 0

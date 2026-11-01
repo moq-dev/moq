@@ -351,15 +351,13 @@ impl Peer {
 		Ok(())
 	}
 
-	/// Drains events, failing if the connection was lost
-	fn poll(&self, pair: &mut Pair) -> Result<(), TestCaseError> {
-		while let Some(event) = self.conn(pair).poll() {
-			if let Event::ConnectionLost { reason } = event {
-				return Err(TestCaseError::fail(format!(
-					"{} lost the connection: {reason}",
-					self.side()
-				)));
-			}
+	/// Fails if the connection was lost
+	fn check_alive(&self, pair: &mut Pair) -> Result<(), TestCaseError> {
+		if let Some(reason) = self.conn(pair).error() {
+			return Err(TestCaseError::fail(format!(
+				"{} lost the connection: {reason}",
+				self.side()
+			)));
 		}
 		Ok(())
 	}
@@ -450,8 +448,8 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
 			}
 			next_read = pair.time + case.read_interval;
 		}
-		client.poll(&mut pair)?;
-		server.poll(&mut pair)?;
+		client.check_alive(&mut pair)?;
+		server.check_alive(&mut pair)?;
 		if client.done(&server.sends) && server.done(&client.sends) && extra.as_ref().is_none_or(|extra| extra.done()) {
 			break;
 		}
@@ -499,12 +497,8 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
 	let now = pair.time;
 	pair.client_conn_mut(client_ch).close(now, VarInt(0), String::new());
 	pair.drive();
-	let reason = loop {
-		match pair.server_conn_mut(server_ch).poll() {
-			Some(Event::ConnectionLost { reason }) => break reason,
-			Some(_) => {}
-			None => return Err(TestCaseError::fail("server never saw the close")),
-		}
+	let Some(reason) = pair.server_conn_mut(server_ch).error().cloned() else {
+		return Err(TestCaseError::fail("server never saw the close"));
 	};
 	prop_assert!(
 		matches!(&reason, ConnectionError::ApplicationClosed(close) if close.error_code == VarInt(0)),
