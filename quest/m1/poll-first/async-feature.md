@@ -28,7 +28,7 @@ ergonomic layer, and the gating proceeds regardless of the build measurement.
   bodies with a loop or a branch around a wait (about 59 in moq-net) are
   converted by hand, since the macro stays straight-line only (decided
   2026-10-28).
-- **Tests:** `#[moq_clock::test]` and `#[tokio::test]` bodies stay async, so test
+- **Tests:** `#[kio::test]` and `#[tokio::test]` bodies stay async, so test
   targets enable the feature.
 - **Cargo:** feature unification means one dependent enabling `async` enables it
   for the whole build. Make sure library-only builds, such as `cargo check -p

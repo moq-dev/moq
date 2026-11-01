@@ -3598,7 +3598,7 @@ impl Connection {
 			let token = Token::new(
 				TokenPayload::Validation {
 					ip: remote_addr.ip(),
-					issued: moq_clock::wall(),
+					issued: kio::clock::wall(),
 				},
 				&mut self.rng,
 			);

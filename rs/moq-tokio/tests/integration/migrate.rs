@@ -89,7 +89,7 @@ fn publish(origin: &moq_net::origin::Producer, name: &str, route: moq_net::origi
 				.write_frame(moq_net::Timestamp::ZERO, payload)
 				.expect("write frame");
 			group.finish().expect("finish group");
-			moq_clock::sleep(Duration::from_millis(20)).await;
+			kio::clock::sleep(Duration::from_millis(20)).await;
 		}
 	});
 }
@@ -130,7 +130,7 @@ fn view(origin: &moq_net::origin::Producer, name: &str) -> tokio::sync::mpsc::Un
 /// Receive `count` sequences, after any already queued.
 async fn read(sequences: &mut tokio::sync::mpsc::UnboundedReceiver<u64>, count: usize, into: &mut Vec<u64>) {
 	for _ in 0..count {
-		let sequence = moq_clock::timeout(TIMEOUT, sequences.recv())
+		let sequence = kio::clock::timeout(TIMEOUT, sequences.recv())
 			.await
 			.expect("no group arrived")
 			.expect("the viewer stopped");
@@ -147,7 +147,7 @@ fn assert_contiguous(who: &str, sequences: &[u64]) {
 
 /// Wait for `old` to close, and check it closed cleanly rather than at a cap.
 async fn assert_closes(old: &moq_net::Session) {
-	let closed = moq_clock::timeout(TIMEOUT, old.closed())
+	let closed = kio::clock::timeout(TIMEOUT, old.closed())
 		.await
 		.expect("the old session waited for the handover cap");
 	assert!(
@@ -167,7 +167,7 @@ async fn a_migrated_session_closes_once_nothing_flows() {
 	let (port, mut sessions) = relay(&origin, versions.clone()).await;
 	let local = moq_tokio::origin::spawn();
 	let _connection = connect(&local, port, versions);
-	let old = moq_clock::timeout(TIMEOUT, sessions.recv())
+	let old = kio::clock::timeout(TIMEOUT, sessions.recv())
 		.await
 		.expect("the client never connected")
 		.expect("the relay stopped");
@@ -183,7 +183,7 @@ async fn a_migrated_session_closes_once_nothing_flows() {
 
 	old.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
 	// Held, since dropping the last handle closes the replacement.
-	let _replacement = moq_clock::timeout(TIMEOUT, sessions.recv())
+	let _replacement = kio::clock::timeout(TIMEOUT, sessions.recv())
 		.await
 		.expect("the client never redialed")
 		.expect("the relay stopped");
@@ -206,7 +206,7 @@ async fn a_predecessor_serves_until_its_last_subscription_leaves() {
 	let (port, mut sessions) = relay(&origin, Vec::new()).await;
 	let local = moq_tokio::origin::spawn();
 	let _connection = connect(&local, port, Vec::new());
-	let old = moq_clock::timeout(TIMEOUT, sessions.recv())
+	let old = kio::clock::timeout(TIMEOUT, sessions.recv())
 		.await
 		.expect("the client never connected")
 		.expect("the relay stopped");
@@ -218,7 +218,7 @@ async fn a_predecessor_serves_until_its_last_subscription_leaves() {
 
 	old.drain().send(moq_net::goaway::Goaway::new()).expect("send goaway");
 	// Held, since dropping the last handle closes the replacement.
-	let _replacement = moq_clock::timeout(TIMEOUT, sessions.recv())
+	let _replacement = kio::clock::timeout(TIMEOUT, sessions.recv())
 		.await
 		.expect("the client never redialed")
 		.expect("the relay stopped");

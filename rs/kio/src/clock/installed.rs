@@ -14,7 +14,7 @@ use std::{
 	time::Duration,
 };
 
-use crate::{Instant, Manual, Wall};
+use crate::clock::{Instant, Manual, Wall};
 
 /// Installed clocks by runtime. Never pruned: one entry per runtime a test installs on.
 static CLOCKS: LazyLock<Mutex<HashMap<tokio::runtime::Id, Installed>>> = LazyLock::new(Default::default);
@@ -23,8 +23,8 @@ static ANY: AtomicBool = AtomicBool::new(false);
 
 /// A [`Manual`] clock that one tokio runtime reads as its ambient clock.
 ///
-/// Inside that runtime, or a thread that entered it, [`now`](crate::now) and
-/// [`wall`](crate::wall) read this clock and timers fire only once
+/// Inside that runtime, or a thread that entered it, [`now`](crate::clock::now) and
+/// [`wall`](crate::clock::wall) read this clock and timers fire only once
 /// [`advance`](Self::advance) reaches them. Clones share the clock.
 #[derive(Clone)]
 pub struct Installed(Arc<Mutex<State>>);
@@ -77,8 +77,8 @@ impl Installed {
 	}
 
 	/// Complete once this clock reaches `at`, whichever thread polls it.
-	pub fn sleep_until(&self, at: Instant) -> crate::Sleep {
-		crate::Sleep::installed(self.clone(), at)
+	pub fn sleep_until(&self, at: Instant) -> crate::clock::Sleep {
+		crate::clock::Sleep::installed(self.clone(), at)
 	}
 
 	/// The current instant.
@@ -225,9 +225,9 @@ mod tests {
 		let runtime = runtime(true);
 		let clock = Manual::new().install(runtime.handle());
 		runtime.block_on(async {
-			let start = crate::now();
+			let start = crate::clock::now();
 			assert_eq!(start, Instant::ZERO);
-			let mut sleep = pin!(crate::sleep(Duration::from_secs(1)));
+			let mut sleep = pin!(crate::clock::sleep(Duration::from_secs(1)));
 			assert!(poll_once(&mut sleep).is_pending());
 
 			// Idle on tokio's paused clock for an hour: the installed clock stays put.
@@ -236,14 +236,14 @@ mod tests {
 				reason = "the test idles on tokio's clock, not the installed one"
 			)]
 			tokio::time::sleep(Duration::from_secs(3_600)).await;
-			assert_eq!(crate::now(), start);
+			assert_eq!(crate::clock::now(), start);
 			assert!(poll_once(&mut sleep).is_pending());
 
 			clock.advance(Duration::from_millis(999));
 			assert!(poll_once(&mut sleep).is_pending());
 			clock.advance(Duration::from_millis(1));
 			sleep.await;
-			assert_eq!(crate::now(), start + Duration::from_secs(1));
+			assert_eq!(crate::clock::now(), start + Duration::from_secs(1));
 		});
 	}
 
@@ -258,10 +258,10 @@ mod tests {
 		let clock = Manual::new().install(runtime.handle());
 		let (armed, armed_rx) = std::sync::mpsc::channel();
 		let task = runtime.spawn(async move {
-			let sleep = crate::sleep(Duration::from_secs(5));
+			let sleep = crate::clock::sleep(Duration::from_secs(5));
 			armed.send(()).unwrap();
 			sleep.await;
-			crate::now()
+			crate::clock::now()
 		});
 		armed_rx.recv().unwrap();
 		clock.advance(Duration::from_secs(5));
@@ -274,7 +274,7 @@ mod tests {
 		let runtime = runtime(false);
 		let clock = Manual::new().install(runtime.handle());
 		runtime.block_on(async {
-			let mut sleep = pin!(crate::sleep(Duration::from_secs(1)));
+			let mut sleep = pin!(crate::clock::sleep(Duration::from_secs(1)));
 			assert!(poll_once(&mut sleep).is_pending());
 			sleep.as_mut().reset(Instant::ZERO + Duration::from_secs(2));
 			clock.advance(Duration::from_secs(1));
@@ -290,16 +290,16 @@ mod tests {
 		let runtime = runtime(false);
 		let clock = Manual::new().install(runtime.handle());
 		let _entered = runtime.enter();
-		assert_eq!(crate::wall(), Manual::WALL_START);
-		assert_eq!(crate::origin(), (Instant::ZERO, Manual::WALL_START));
+		assert_eq!(crate::clock::wall(), Manual::WALL_START);
+		assert_eq!(crate::clock::origin(), (Instant::ZERO, Manual::WALL_START));
 
 		clock.advance(Duration::from_secs(5));
-		assert_eq!(crate::wall(), Manual::WALL_START + Duration::from_secs(5));
+		assert_eq!(crate::clock::wall(), Manual::WALL_START + Duration::from_secs(5));
 		clock.step_wall(Manual::WALL_START);
-		assert_eq!(crate::wall(), Manual::WALL_START);
-		assert_eq!(crate::now(), Instant::ZERO + Duration::from_secs(5));
+		assert_eq!(crate::clock::wall(), Manual::WALL_START);
+		assert_eq!(crate::clock::now(), Instant::ZERO + Duration::from_secs(5));
 		assert_eq!(
-			crate::origin(),
+			crate::clock::origin(),
 			(Instant::ZERO, Manual::WALL_START),
 			"the origin is fixed at its first read"
 		);
@@ -313,9 +313,9 @@ mod tests {
 		let other = runtime(false);
 		// The host clock reads far past zero from its first instant.
 		let host = Instant::ZERO + Duration::from_secs(1 << 31);
-		assert!(other.block_on(async { crate::now() }) > host);
-		assert!(crate::now() > host);
-		assert_eq!(installed.block_on(async { crate::now() }), Instant::ZERO);
+		assert!(other.block_on(async { crate::clock::now() }) > host);
+		assert!(crate::clock::now() > host);
+		assert_eq!(installed.block_on(async { crate::clock::now() }), Instant::ZERO);
 	}
 
 	/// An advance past the range is refused whole, leaving the clock where it was.

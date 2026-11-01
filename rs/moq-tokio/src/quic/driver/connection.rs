@@ -643,7 +643,7 @@ pub(crate) struct Shared {
 pub(crate) struct State {
 	pub(crate) inner: moq_quic::connection::Connection,
 	handle: ConnectionHandle,
-	timer: Option<moq_clock::Sleep>,
+	timer: Option<kio::clock::Sleep>,
 	timer_deadline: Option<Instant>,
 	conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
 	endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
@@ -797,7 +797,7 @@ impl State {
 				delay.reset(deadline);
 			}
 			None => {
-				self.timer = Some(moq_clock::sleep_until(deadline));
+				self.timer = Some(kio::clock::sleep_until(deadline));
 			}
 			_ => {}
 		}
