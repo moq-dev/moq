@@ -36,7 +36,7 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   remains Restart even when the origin node is unchanged; only a matching
   explicit epoch or the separately proven Takeover operation preserves an
   instance (superseded 2026-10-30: a shared `identity` preserves it, per
-  [Identity and epoch](/quest/m1/api-audit/route/identity.md)). Test a same-origin next-hop change with no epoch.
+  [Identity and epoch](https://github.com/moq-dev/moq/pull/7489)). Test a same-origin next-hop change with no epoch.
   ANNOUNCE_UPDATE re-prices it and ANNOUNCE_END withdraws this origin's claim
   while the route stays up. A wildcard claim is capability, not an inventory
   of broadcasts; another origin may still serve the same epoch. An announce
@@ -241,7 +241,7 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   requested path's forwarding choice.
 - Only the first hop selects the origin. It keeps `route_order`'s shape over
   the origin nodes announcing the path: longest prefix, newest epoch (within
-  one identity only, per [Identity and epoch](/quest/m1/api-audit/route/identity.md),
+  one identity only, per [Identity and epoch](https://github.com/moq-dev/moq/pull/7489),
   decided 2026-10-30), the link's priority (`origin::Producer::with_preference`), seed plus route
   metric, then a rendezvous hash of the path and the identity, and the newest
   connection only for an otherwise identical route. The hash drops the hop
@@ -672,7 +672,7 @@ local-broadcast tie and relays disagree on a pool path's winner, while
 ranking a minted epoch last keeps the renewal it was meant to delete.
 
 Moved 2026-10-30 (maintainer, the [route epic](/quest/m1/api-audit/route/README.md)):
-[Identity and epoch](/quest/m1/api-audit/route/identity.md) now deletes that
+[Identity and epoch](https://github.com/moq-dev/moq/pull/7489) now deletes that
 epochless machinery, so this quest no longer does. A session mints
 an `identity` (the session ID plus the announcement's ID) for any route that
 arrives without one, and newest-wins compares epochs only within one

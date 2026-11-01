@@ -22,7 +22,7 @@ Non-goals: moq-transport, which keeps the cold-start reset
 (moq-transport carries no epoch (decided 2026-10-28, removed in
 [moq-dev/moq#7239](https://github.com/moq-dev/moq/pull/7239)), and an
 edge mints a new identity for each announcement,
-[Identity and epoch](/quest/m1/api-audit/route/identity.md)).
+[Identity and epoch](https://github.com/moq-dev/moq/pull/7489)).
 
 ## Plan
 
@@ -118,11 +118,10 @@ Run `just check`, `just test interop --all` and `just drafts check`.
 
 Public API: breaking; removes `Takeover` and the predecessor fields in every
 language. Wire: removes lite-07's ANNOUNCE_TAKEOVER (0x5), adding nothing
-beyond [Identity and epoch](/quest/m1/api-audit/route/identity.md)'s fields.
+beyond [Identity and epoch](https://github.com/moq-dev/moq/pull/7489)'s fields.
 
 ## Required
 
-- [Identity and epoch](/quest/m1/api-audit/route/identity.md) - the identity a job's exact route inherits
 - [One Route handle](/quest/m1/api-audit/route/handle.md) - `request.route` creates the exact route under the claim's identity
 
 ## Related

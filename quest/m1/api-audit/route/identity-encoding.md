@@ -11,7 +11,7 @@ surface proves it.
 ## Plan
 
 Planned 2026-10-31 (`/quest-plan`, maintainer), a follow-up reported by the
-[Identity and epoch](/quest/m1/api-audit/route/identity.md) implementation.
+[Identity and epoch](https://github.com/moq-dev/moq/pull/7489) implementation.
 Minted identities (`~` plus random bits) are URL-safe, so only a stable
 identity set by a publisher can break these paths today. Reuse the
 percent-encoding the archive already applies to track names (see
@@ -21,7 +21,3 @@ scheme. List any other surface that embeds an identity, found with
 
 Public API: none. Wire: none. Existing keys stay readable, since minted
 identities encode to themselves.
-
-## Required
-
-- [Identity and epoch](/quest/m1/api-audit/route/identity.md) - the identity these paths embed

@@ -27,7 +27,7 @@ before the larger rework.
   `serve` and drop `hooks.acceptRequest` if nothing else needs it.
 - Contract, in rustdoc and `doc/concept/identity.md`: a served answer is
   part of the prefix route's stream at that path. Today that means its
-  instance; after [Identity and epoch](/quest/m1/api-audit/route/identity.md),
+  instance; after [Identity and epoch](https://github.com/moq-dev/moq/pull/7489),
   its identity, which promises one continuous sequence space per path. To
   serve different bytes at a path that was already served, start a new
   prefix route rather than serving new bytes under the old one. A job that
