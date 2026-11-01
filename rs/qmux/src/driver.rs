@@ -1,5 +1,6 @@
 //! The driver: one future that owns the transport and moves the session's records over it.
 
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -63,6 +64,8 @@ impl<T: Transport> Driver<T> {
 				inbound: Vec::new(),
 				reading: true,
 				unflushed: false,
+				room: true,
+				outbound: VecDeque::new(),
 				phase: Phase::Open,
 				sent_bytes: 0,
 				received_bytes: 0,
@@ -183,6 +186,10 @@ struct Run<T> {
 	reading: bool,
 	/// The last flush did not finish.
 	unflushed: bool,
+	/// The transport took everything and flushed it, so the connection may hand over more.
+	room: bool,
+	/// Records taken from the connection but not yet handed to the transport, which had no room.
+	outbound: VecDeque<Bytes>,
 	phase: Phase,
 	sent_bytes: u64,
 	received_bytes: u64,
@@ -265,28 +272,16 @@ impl<T: Transport> Run<T> {
 			state.conn.handle_timeout(now);
 		}
 
-		let mut written = 0;
-		let mut blocked = false;
-		let mut failed = None;
-		while written < BATCH_BYTES {
-			match self.transport.poll_ready(waiter) {
-				Poll::Ready(Ok(())) => {}
-				Poll::Ready(Err(err)) => {
-					failed = Some(err);
+		// Take a batch from the connection only while the transport has room for it, so a
+		// stalled transport leaves unreliable datagrams in the connection to be shed.
+		let mut gathered = 0;
+		if self.room && self.outbound.is_empty() {
+			while gathered < BATCH_BYTES {
+				let Some(record) = state.conn.poll_transmit(now) else {
 					break;
-				}
-				Poll::Pending => {
-					blocked = true;
-					break;
-				}
-			}
-			let Some(record) = state.conn.poll_transmit(now) else {
-				break;
-			};
-			written += record.len();
-			if let Err(err) = self.transport.send(record) {
-				failed = Some(err);
-				break;
+				};
+				gathered += record.len();
+				self.outbound.push_back(record);
 			}
 		}
 		state.sweep();
@@ -295,14 +290,31 @@ impl<T: Transport> Run<T> {
 		}
 		let drained = state.conn.is_drained();
 		let deadline = state.conn.poll_timeout();
+		// Hand the batch to the transport outside the lock: it copies each record, and
+		// tungstenite may write to the socket, while the handles on other threads wait.
 		drop(state);
+
+		let mut written = 0;
+		let mut blocked = false;
+		while let Some(record) = self.outbound.front() {
+			match self.transport.poll_ready(waiter) {
+				Poll::Ready(Ok(())) => {}
+				Poll::Ready(Err(err)) => return Step::Failed(err),
+				Poll::Pending => {
+					blocked = true;
+					break;
+				}
+			}
+			written += record.len();
+			let record = self.outbound.pop_front().expect("peeked above");
+			if let Err(err) = self.transport.send(record) {
+				return Step::Failed(err);
+			}
+		}
 
 		self.inner.wire.set_received_bytes(self.received_bytes);
 		self.sent_bytes += written as u64;
 		self.inner.wire.set_sent_bytes(self.sent_bytes);
-		if let Some(err) = failed {
-			return Step::Failed(err);
-		}
 
 		// Flush what this step queued, what an earlier flush left, and what the transport may
 		// have queued on its own while receiving, such as a WebSocket Pong. Skipping it
@@ -316,9 +328,10 @@ impl<T: Transport> Run<T> {
 			false => true,
 		};
 		self.unflushed = !flushed;
-		self.set_stalled(blocked || !flushed);
+		let had_room = std::mem::replace(&mut self.room, flushed && !blocked);
+		self.set_stalled(!self.room);
 
-		if drained && flushed && !blocked {
+		if drained && self.outbound.is_empty() && self.room {
 			return Step::Drained;
 		}
 		if self.timer.closing.is_some_and(|at| now >= at) {
@@ -326,8 +339,9 @@ impl<T: Transport> Run<T> {
 			return Step::Failed(Error::Closed);
 		}
 		// Each step already wrote what the records it read made the connection say, so go again
-		// only when a batch cut a direction short.
-		if more_to_read || (written >= BATCH_BYTES && flushed && !blocked) {
+		// only when a batch cut a direction short, or the transport has room again for what the
+		// connection held back meanwhile.
+		if more_to_read || (self.room && (gathered >= BATCH_BYTES || !had_room)) {
 			return Step::Progress;
 		}
 		let deadline = match (deadline, self.timer.closing) {
