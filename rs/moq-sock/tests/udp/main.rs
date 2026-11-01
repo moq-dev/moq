@@ -922,7 +922,7 @@ fn draining_error_queue_before_send_prevents_absorption() {
 	)]
 	std::thread::sleep(Duration::from_millis(20));
 
-	// Drain the error queue before sending — this is the intended usage pattern
+	// Drain the error queue before sending - this is the intended usage pattern
 	let mut got_error = false;
 	for _ in 0..10 {
 		match state.recv_transport_error((&sock).into()) {

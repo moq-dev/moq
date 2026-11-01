@@ -288,7 +288,7 @@ function extractAudioSpecificConfig(esds: Uint8Array): Uint8Array | undefined {
 		}
 
 		if (tag === 0x05) {
-			// Found DecoderSpecificInfo — payload is the AudioSpecificConfig
+			// Found DecoderSpecificInfo - payload is the AudioSpecificConfig
 			if (offset + size <= esds.length) {
 				return new Uint8Array(esds.buffer, esds.byteOffset + offset, size);
 			}
@@ -302,7 +302,7 @@ function extractAudioSpecificConfig(esds: Uint8Array): Uint8Array | undefined {
 		} else if (tag === 0x04) {
 			offset += 13; // objectTypeIndication (1) + streamType (1) + bufferSizeDB (3) + maxBitrate (4) + avgBitrate (4)
 		} else {
-			// Unknown tag — skip its payload entirely
+			// Unknown tag - skip its payload entirely
 			offset += size;
 		}
 	}

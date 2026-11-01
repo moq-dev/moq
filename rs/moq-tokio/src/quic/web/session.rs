@@ -249,8 +249,8 @@ impl Session {
 	/// Accept a new unidirectional stream. See [`crate::quic::driver::connection::Connection::accept_uni`].
 	pub async fn accept_uni(&self) -> Result<RecvStream, SessionError> {
 		if let Some(accept) = &self.accept {
-			// `kio::wait` owns the waiter, so dropping this future — a `timeout` that
-			// expires, say — also drops its registration in `SessionAccept`.
+			// `kio::wait` owns the waiter, so dropping this future - a `timeout` that
+			// expires, say - also drops its registration in `SessionAccept`.
 			kio::wait(|waiter| poll_accept_uni_shared(accept, waiter))
 				.await
 				.map_err(|e| self.map_error(e))
@@ -736,7 +736,7 @@ pub struct SessionAccept {
 
 	// Waiters from concurrent callers of accept_bi / accept_uni.
 	// Every clone of the session polls this one struct, so an arrival has to be fanned
-	// out: each caller registers here and all of them are woken when a stream lands —
+	// out: each caller registers here and all of them are woken when a stream lands -
 	// by the caller that saw it, once it has released the lock on this struct.
 	bi_waiters: Fan,
 	uni_waiters: Fan,
@@ -801,7 +801,7 @@ impl SessionAccept {
 	/// with [`kio::wait`], which holds the waiter inside the future it builds.
 	///
 	/// A `Ready` here means every *other* parked accepter should be woken so it can
-	/// retry. This does not do that itself — see `poll_accept_uni_shared`, which wakes
+	/// retry. This does not do that itself - see `poll_accept_uni_shared`, which wakes
 	/// them once the lock on this struct is released.
 	//
 	// Poll-based because we accept and decode streams in parallel. In async land this

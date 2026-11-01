@@ -2,7 +2,7 @@
  *
  * Replenishes only when the remaining advertised window has dropped to at most
  * half, and always sets the new limit relative to bytes the application has
- * actually **consumed** (`consumed` is cumulative) — never relative to bytes
+ * actually **consumed** (`consumed` is cumulative) - never relative to bytes
  * received. That keeps the peer's send credit bounded to one `window` ahead of
  * the reader: a stalled reader stops advancing `consumed`, so the limit stops
  * moving and the peer's credit drains.

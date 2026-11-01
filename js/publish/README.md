@@ -66,7 +66,7 @@ The simplest way to publish a stream:
 | `url`       | string  | required | Relay server URL                |
 | `name`      | string  | required | Broadcast name                  |
 | `versions`  | string  | stable versions | Comma-separated protocol versions to offer, most preferred first, like `moq-transport-18,moq-lite-06` |
-| `source`    | string  | —        | `"camera"`, `"screen"`, `"file"` |
+| `source`    | string  | -        | `"camera"`, `"screen"`, `"file"` |
 | `muted`     | boolean | false    | Stop publishing audio; the microphone stays open |
 | `invisible` | boolean | false    | Stop publishing video; the camera stays open |
 | `preview`   | string  | `"source"` | What the preview renders: `"source"`, `"encoded"`, `"none"` |

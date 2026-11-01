@@ -114,6 +114,7 @@ declare -A scope=(
     [markdown]=''
     [shell]=''
     [large_files]=''
+    [text]=''
     [toml]=''
     [nix]=''
     [justfile]=''
@@ -175,6 +176,7 @@ declare -A tools=(
     [python]='ruff'
     [shell]='shellcheck shfmt'
     [large_files]=''
+    [text]=''
     [toml]='taplo'
     [nix]='nixfmt'
     [justfile]=''
@@ -195,7 +197,7 @@ declare -A compiles=(
 # Lanes start in this order, so the slowest come first. dart runs alone (see
 # below), so it waits for the rest.
 case "$action" in
-    check | ci) modules=(py rs c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths python shell large_files toml nix justfile dart) ;;
+    check | ci) modules=(py rs c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths python shell large_files text toml nix justfile dart) ;;
     fix) modules=(js rs dart go kt swift c cpp obs python markdown shell toml nix justfile) ;;
 esac
 
@@ -363,6 +365,7 @@ step() {
             sh/markdown.sh check
             ;;
         check:large_files) sh/large-files.sh "$large_base" ;;
+        check:text) sh/text.sh ;;
         check:python)
             files '*.py' '*.pyi' | xargs -0 ruff check --force-exclude
             files '*.py' '*.pyi' | xargs -0 ruff format --check --force-exclude

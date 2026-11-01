@@ -316,12 +316,12 @@ function renderLatest(r) {
 				if (s.total === 0) return `<span class="muted">–</span>`;
 				return `<button class="score ${grade(s, e.ok)}" data-url="${esc(e.url)}" aria-label="${esc(`${e.transport} ${s.passed} of ${s.total} passing; show logs`)}">${s.passed}/${s.total}</button>`;
 			});
-			return `<td class="score-col">${scores.length ? scores.join("") : `<span class="muted">—</span>`}</td>`;
+			return `<td class="score-col">${scores.length ? scores.join("") : `<span class="muted">-</span>`}</td>`;
 		}).join("");
 		const tag = g.required ? `<span class="tag required">required</span>` : "";
 		return `<tr class="${grade(sum(g.endpoints.map(endpointTally)), complete(g.endpoints))}">
 			<td><span class="name">${esc(g.name)}</span>${tag}<br><span class="host">${hosts.map(esc).join(", ")}</span></td>
-			<td class="ver ver-col">${versions.length ? versions.map(esc).join("<br>") : `<span class="muted">—</span>`}</td>
+			<td class="ver ver-col">${versions.length ? versions.map(esc).join("<br>") : `<span class="muted">-</span>`}</td>
 			${cols}</tr>`;
 	}).join("");
 	document.getElementById("latest").innerHTML = head + rows;
