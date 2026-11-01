@@ -277,7 +277,6 @@ Pass `timestamp=` on every write to a timed track.
 ### Subscriber staleness is `max_delay`
 
 `Subscription.max_age_us` is `max_delay`, a `timedelta`, and the decoder outputs take `max_delay`, also a `timedelta`.
-`Subscription.max_delay` defaults to `None`, which sets no subscriber limit: start from `Subscription.default()` for the old default of zero.
 `TrackInfo` keeps its `max_age`: it is the publisher's retention.
 
 ### Error payloads are named `reason`

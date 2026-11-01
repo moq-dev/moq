@@ -538,7 +538,6 @@ impl<S: Stream> Export<S> {
 						read: moq_clock::now(),
 						decode: frame.timestamp.into(),
 						restart: track.source.markers(),
-						skip: track.source.skips(),
 						sync: track.kind == TrackKind::Audio || frame.keyframe,
 						leading: false,
 						bytes: frame.payload.len() + name.len(),

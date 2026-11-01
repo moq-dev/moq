@@ -47,6 +47,18 @@ impl TryFrom<&crate::catalog::VideoHint> for Container {
 	}
 }
 
+impl Container {
+	/// The bytes preceding a frame's payload, when they depend on nothing but its timestamp, so the
+	/// payload can stream in after them. `None` for CMAF, whose `moof` describes the payload.
+	pub(crate) fn prefix(&self, timestamp: moq_net::Timestamp) -> crate::Result<Option<bytes::Bytes>> {
+		match self {
+			Self::Legacy(kind) => legacy::Wire(*kind).prefix(timestamp).map(Some),
+			Self::Loc(kind) => loc::Wire(*kind).prefix(timestamp).map(Some),
+			Self::Cmaf(_) => Ok(None),
+		}
+	}
+}
+
 /// Whether a rendition's frames can be parsed by this build, logging the ones dropped.
 ///
 /// The hang spec requires a consumer to ignore a rendition whose container `kind` it does not

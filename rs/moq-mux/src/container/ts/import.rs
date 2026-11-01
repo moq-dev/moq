@@ -5254,7 +5254,7 @@ pub(super) mod test {
 		import.decode(&bytes).unwrap();
 		import.finish().unwrap();
 
-		let first = tokio::time::timeout(Duration::from_secs(10), updates.next())
+		let first = moq_clock::timeout(Duration::from_secs(10), updates.next())
 			.await
 			.expect("the cue track publishes the initial catalog")
 			.unwrap()
@@ -5296,7 +5296,7 @@ pub(super) mod test {
 		// SCTE detection takes no lock here (video/audio would still publish later): the old
 		// discarding ScteStream took the lock and republished an empty catalog on this path.
 		assert!(
-			tokio::time::timeout(Duration::from_millis(10), updates.next())
+			moq_clock::timeout(Duration::from_millis(10), updates.next())
 				.await
 				.is_err(),
 			"SCTE detection must not publish the base catalog"
@@ -5375,7 +5375,7 @@ pub(super) mod test {
 			.await
 			.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
-		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read_frame())
+		let frame = moq_clock::timeout(Duration::from_secs(1), reader.read_frame())
 			.await
 			.expect("cue read timed out")
 			.unwrap()
@@ -5676,7 +5676,7 @@ pub(super) mod test {
 		.unwrap();
 		let mut exporter = exporter.with_delay(RECORDING_MAX_AGE).with_replay();
 		let mut ts = Vec::new();
-		while let Ok(Some(frame)) = tokio::time::timeout(RECORDING_MAX_AGE * 3, exporter.next())
+		while let Ok(Some(frame)) = moq_clock::timeout(RECORDING_MAX_AGE * 3, exporter.next())
 			.await
 			.map(|r| r.unwrap())
 		{
@@ -6060,7 +6060,7 @@ pub(super) mod test {
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Audio),
 		);
 		let mut frames = Vec::new();
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read_frame()).await {
+		while let Ok(Ok(Some(frame))) = moq_clock::timeout(Duration::from_millis(50), reader.read_frame()).await {
 			frames.push(frame);
 		}
 		frames
@@ -6124,7 +6124,7 @@ pub(super) mod test {
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 		);
 		let mut frames = Vec::new();
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read_frame()).await {
+		while let Ok(Ok(Some(frame))) = moq_clock::timeout(Duration::from_millis(50), reader.read_frame()).await {
 			frames.push(frame);
 		}
 		frames
@@ -7051,7 +7051,7 @@ pub(super) mod test {
 			track,
 			crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 		);
-		let published = tokio::time::timeout(Duration::from_millis(50), reader.read_frame()).await;
+		let published = moq_clock::timeout(Duration::from_millis(50), reader.read_frame()).await;
 		assert!(
 			matches!(published, Ok(Ok(Some(_)))),
 			"a PID that never published held the catalog shut: {published:?}"
@@ -7102,7 +7102,7 @@ pub(super) mod test {
 		import.decode(&mux.out).unwrap();
 		assert_eq!(import.stats().streams[&AAC_PID].damaged, 1);
 
-		let first = tokio::time::timeout(Duration::from_millis(10), updates.next())
+		let first = moq_clock::timeout(Duration::from_millis(10), updates.next())
 			.await
 			.expect("the catalog waits on a track that cannot resolve")
 			.unwrap()
@@ -7118,7 +7118,7 @@ pub(super) mod test {
 		import.finish().unwrap();
 
 		let audio = loop {
-			let update = tokio::time::timeout(Duration::from_millis(10), updates.next())
+			let update = moq_clock::timeout(Duration::from_millis(10), updates.next())
 				.await
 				.expect("the AAC track never joined")
 				.unwrap()
@@ -7443,7 +7443,7 @@ pub(super) mod test {
 			.await
 			.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
-		let frame = tokio::time::timeout(Duration::from_secs(1), reader.read_frame())
+		let frame = moq_clock::timeout(Duration::from_secs(1), reader.read_frame())
 			.await
 			.expect("cue read timed out")
 			.unwrap()
@@ -7737,7 +7737,7 @@ pub(super) mod test {
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
 		let mut breaks = 0;
-		while let Ok(Ok(Some(read))) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read()).await {
+		while let Ok(Ok(Some(read))) = moq_clock::timeout(std::time::Duration::from_millis(50), reader.read()).await {
 			match read {
 				crate::container::Read::Frame { frame, .. } => frames.push(frame),
 				crate::container::Read::Gap { .. } | crate::container::Read::End { .. } => breaks += 1,
@@ -8789,6 +8789,11 @@ pub(super) mod test {
 
 	#[test]
 	#[ignore = "benchmark"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures host CPU time"
+	)]
 	fn benchmark_pes_staging() {
 		println!("pids,payload_bytes,fragmented,ns_per_pes");
 		for pids in [1u16, 8, 64] {
@@ -8978,7 +8983,7 @@ pub(super) mod test {
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
-		while let Ok(Ok(Some(frame))) = tokio::time::timeout(Duration::from_millis(50), reader.read_frame()).await {
+		while let Ok(Ok(Some(frame))) = moq_clock::timeout(Duration::from_millis(50), reader.read_frame()).await {
 			if !frame.payload.is_empty() {
 				frames.push(frame);
 			}
@@ -9199,7 +9204,7 @@ pub(super) mod test {
 						.with_delay(Duration::from_secs(30))
 						.with_replay();
 				let mut ts = Vec::new();
-				while let Ok(frame) = tokio::time::timeout(Duration::from_secs(100), export.next()).await {
+				while let Ok(frame) = moq_clock::timeout(Duration::from_secs(100), export.next()).await {
 					let Some(frame) = frame.unwrap() else {
 						break;
 					};
@@ -9832,7 +9837,7 @@ pub(super) mod test {
 			.with_delay(Duration::from_secs(30))
 			.with_replay();
 		let mut ts = Vec::new();
-		while let Ok(res) = tokio::time::timeout(Duration::from_secs(100), exporter.next()).await {
+		while let Ok(res) = moq_clock::timeout(Duration::from_secs(100), exporter.next()).await {
 			let Some(frame) = res.expect("the exporter must take the open GOP after the break") else {
 				break;
 			};

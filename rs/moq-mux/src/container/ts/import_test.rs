@@ -96,7 +96,7 @@ async fn public_container_preserves_loc_for_ts() {
 		track,
 		crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 	);
-	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read_frame())
+	let frame = moq_clock::timeout(std::time::Duration::from_secs(1), media.read_frame())
 		.await
 		.unwrap()
 		.unwrap()
@@ -262,7 +262,7 @@ async fn import_opus_frames() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let mut frames = Vec::new();
-	while let Ok(res) = tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await {
+	while let Ok(res) = moq_clock::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await {
 		let Some(frame) = res.unwrap() else { break };
 		frames.push(frame.payload);
 	}
@@ -480,7 +480,7 @@ async fn import_export_import_roundtrip() {
 		.with_delay(RECORDING_MAX_AGE)
 		.with_replay();
 	let mut out = BytesMut::new();
-	while let Ok(res) = tokio::time::timeout(DRAIN, exporter.next()).await {
+	while let Ok(res) = moq_clock::timeout(DRAIN, exporter.next()).await {
 		match res.expect("exporter error") {
 			Some(frame) => out.extend_from_slice(&frame.payload),
 			None => break,
@@ -541,8 +541,7 @@ async fn survives_midstream_join() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let mut frames = Vec::new();
-	while let Ok(Ok(Some(frame))) =
-		tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
+	while let Ok(Ok(Some(frame))) = moq_clock::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
 	{
 		frames.push(frame);
 	}
@@ -597,8 +596,7 @@ async fn kyrion_dirtystart_extracts_real_cues() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	let mut cues = Vec::new();
-	while let Ok(Ok(Some(frame))) =
-		tokio::time::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
+	while let Ok(Ok(Some(frame))) = moq_clock::timeout(std::time::Duration::from_millis(50), reader.read_frame()).await
 	{
 		cues.push((frame.payload.to_vec(), frame.timestamp));
 	}

@@ -21,9 +21,10 @@ runner-vm-ci:
 runner-vm:
     bash sh/local.sh nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
 
-# Lint GitHub Actions workflows, their alert coverage, and that every step runs a recipe.
+# Lint GitHub Actions workflows, their security, their alert coverage, and that every step runs a recipe.
 check:
     actionlint
+    zizmor --offline --quiet .github
     sh/gh/alert.sh check-coverage
     bun test sh/gh/alert.test.ts
     bun sh/gh/check-runs.ts

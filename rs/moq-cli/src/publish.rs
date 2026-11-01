@@ -38,9 +38,21 @@ impl From<VideoCodec> for moq_video::encode::Codec {
 	}
 }
 
+/// When a captured medium produces a track.
+#[cfg(feature = "capture")]
+#[derive(usage_rs::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+	/// Capture and encode for the whole publish.
+	On,
+	/// Capture and encode only while subscribed.
+	Demand,
+	/// Publish no track of this medium.
+	Off,
+}
+
 /// Device capture options. Video (camera/screen -> H.264/H.265) maps to
 /// `moq-video`; audio (microphone/system -> Opus) to `moq-audio`. Both are
-/// captured by default; use `--no-video` / `--no-audio` to publish only one.
+/// captured by default; use `--video off` / `--audio off` to publish only one.
 ///
 /// The video source is one of `--camera` / `--display` / `--window` / `--app`,
 /// and the audio source one of `--microphone` / `--system-audio`, defaulting to
@@ -127,20 +139,23 @@ pub struct CaptureArgs {
 	#[usage(long)]
 	pub audio_bitrate: Option<u32>,
 
-	/// Capture audio only (no camera).
-	#[usage(long, conflicts("--no-audio", "--camera", "--display", "--window", "--app"))]
-	pub no_video: bool,
+	/// Video mode: on keeps the recent past; demand captures only while subscribed;
+	/// off publishes no video. Video probes its source once at startup even in demand mode.
+	#[usage(long, value_enum, default = "on")]
+	pub video: Mode,
 
-	/// Capture video only (no microphone).
-	#[usage(long, conflicts("--microphone", "--system-audio"))]
-	pub no_audio: bool,
+	/// Audio mode: on keeps the recent past; demand opens the source only while
+	/// subscribed; off publishes no audio.
+	#[usage(long, value_enum, default = "on")]
+	pub audio: Mode,
 
-	/// Capture and encode each source only while its track has a subscriber,
-	/// releasing it when the last one leaves. Video still opens its source once
-	/// at startup to probe the mode. By default capture runs for the whole
-	/// publish, so a late subscriber can fetch the recent past.
-	#[usage(long)]
-	pub on_demand: bool,
+	/// The released spelling of `--video off`.
+	#[usage(long = "no-video", hide = true)]
+	no_video: bool,
+
+	/// The released spelling of `--audio off`.
+	#[usage(long = "no-audio", hide = true)]
+	no_audio: bool,
 }
 
 enum PublishDecoder {
@@ -526,12 +541,12 @@ impl Publish {
 		let config = moq_mux::catalog::Config::default().with_max_age(max_age);
 		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config)?;
 
-		let video = if args.no_video {
+		let video = if args.video == Mode::Off {
 			None
 		} else {
 			Some(args.video_capture(bandwidth.clone())?)
 		};
-		let audio = (!args.no_audio).then(|| args.audio_capture(bandwidth));
+		let audio = (args.audio != Mode::Off).then(|| args.audio_capture(bandwidth));
 		anyhow::ensure!(video.is_some() || audio.is_some(), "nothing to capture");
 
 		Ok(Self {
@@ -642,7 +657,7 @@ impl Publish {
 				// broadcast + catalog. Both stamp frames on the catalog's
 				// advertised clock, so HLS/DASH wall times match the mapping on
 				// the wire. Both capture for the whole run, or only while
-				// subscribed with `--on-demand`. Both run on this task rather
+				// subscribed in demand mode. Both run on this task rather
 				// than a spawn: on macOS the audio future holds ObjC handles
 				// across an await, so it is `!Send`.
 				let video_fut = {
@@ -982,6 +997,35 @@ fn feed(
 
 #[cfg(feature = "capture")]
 impl CaptureArgs {
+	pub(crate) fn deprecated(&self) -> moq_tokio::cli::Deprecated {
+		let mut found = moq_tokio::cli::Deprecated::default();
+		if self.no_video {
+			found.flag("--no-video", None, "--video off");
+		}
+		if self.no_audio {
+			found.flag("--no-audio", None, "--audio off");
+		}
+		found
+	}
+
+	/// Refuse disabled sources and an invocation with nothing to capture before publishing.
+	pub(crate) fn validate(&self) -> anyhow::Result<()> {
+		anyhow::ensure!(
+			self.video != Mode::Off || self.audio != Mode::Off,
+			"--video off and --audio off leave nothing to capture"
+		);
+		anyhow::ensure!(
+			self.video != Mode::Off
+				|| (self.camera.is_none() && self.display.is_none() && self.window.is_none() && self.app.is_none()),
+			"--video off conflicts with --camera, --display, --window, and --app"
+		);
+		anyhow::ensure!(
+			self.audio != Mode::Off || (self.microphone.is_none() && !self.system_audio),
+			"--audio off conflicts with --microphone and --system-audio"
+		);
+		Ok(())
+	}
+
 	/// The video source named by the flags, defaulting to the default camera.
 	/// The `video-source` arg group makes these mutually exclusive, so the order
 	/// here only decides the default.
@@ -1048,7 +1092,7 @@ impl CaptureArgs {
 			moq_video::encode::Kind::Auto
 		};
 		options.bandwidth = bandwidth;
-		options.on_demand = self.on_demand;
+		options.on_demand = self.video == Mode::Demand;
 		Ok(options)
 	}
 
@@ -1087,17 +1131,12 @@ impl CaptureArgs {
 		let mut options = moq_audio::encode::Capture::default();
 		options.capture = self.audio_config();
 		options.encode = self.audio_encode(bandwidth);
-		options.on_demand = self.on_demand;
+		options.on_demand = self.audio == Mode::Demand;
 		options
 	}
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 pub(crate) mod tests {
 	use std::time::Duration;
 
@@ -1127,31 +1166,65 @@ pub(crate) mod tests {
 	#[cfg(feature = "capture")]
 	#[test]
 	fn capture_window_picker_accepts_following_flags() {
-		let args = capture_args(&["--window", "--no-audio"]);
-		assert!(args.no_audio);
+		let args = capture_args(&["--window", "--audio", "off"]);
+		assert_eq!(args.audio, Mode::Off);
 		assert_eq!(args.window, Some(None));
 		assert_eq!(capture_args(&["--window"]).window, Some(None));
 	}
 
 	#[cfg(feature = "capture")]
 	#[test]
-	fn capture_runs_always_unless_on_demand() {
+	fn capture_modes_are_independent() {
 		use moq_net::bandwidth::Allocator;
 
 		let args = capture_args(&[]);
 		assert!(!args.video_capture(Allocator::unlimited()).unwrap().on_demand);
 		assert!(!args.audio_capture(Allocator::unlimited()).on_demand);
 
-		let args = capture_args(&["--on-demand"]);
-		assert!(args.video_capture(Allocator::unlimited()).unwrap().on_demand);
-		assert!(args.audio_capture(Allocator::unlimited()).on_demand);
+		for (video, audio) in [("on", "demand"), ("demand", "on"), ("demand", "demand")] {
+			let args = capture_args(&["--video", video, "--audio", audio]);
+			args.validate().unwrap();
+			assert_eq!(
+				args.video_capture(Allocator::unlimited()).unwrap().on_demand,
+				video == "demand"
+			);
+			assert_eq!(args.audio_capture(Allocator::unlimited()).on_demand, audio == "demand");
+		}
+	}
+
+	#[cfg(feature = "capture")]
+	#[test]
+	fn capture_off_refuses_selected_sources_and_empty_publications() {
+		for medium in ["--video", "--audio"] {
+			capture_args(&[medium, "off"]).validate().unwrap();
+		}
+		for flags in [
+			["--video", "off", "--audio", "off"].as_slice(),
+			&["--video", "off", "--camera"],
+			&["--display", "--video", "off"],
+			&["--window", "123", "--video", "off"],
+			&["--video", "off", "--app", "app"],
+			&["--audio", "off", "--microphone"],
+			&["--system-audio", "--audio", "off"],
+		] {
+			let argv = [vec!["moq", "import", "capture"], flags.to_vec()].concat();
+			assert!(
+				crate::args::Invocation::try_parse_from(argv)
+					.unwrap()
+					.validate()
+					.is_err(),
+				"{flags:?}"
+			);
+		}
 	}
 
 	#[cfg(feature = "capture")]
 	#[test]
 	fn capture_window_id_preserves_native_selection() {
 		for id in ["39193", "x11:0x400001"] {
-			let config = capture_args(&["--window", id, "--no-audio"]).video_config().unwrap();
+			let config = capture_args(&["--window", id, "--audio", "off"])
+				.video_config()
+				.unwrap();
 			assert!(matches!(config.source, moq_video::capture::Source::Window(value) if value == id));
 		}
 	}
@@ -1170,14 +1243,16 @@ pub(crate) mod tests {
 	#[cfg(all(feature = "capture", target_os = "linux", feature = "pipewire"))]
 	#[test]
 	fn capture_window_picker_uses_portal() {
-		let config = capture_args(&["--window", "--no-audio"]).video_config().unwrap();
+		let config = capture_args(&["--window", "--audio", "off"]).video_config().unwrap();
 		assert!(matches!(config.source, moq_video::capture::Source::Portal(_)));
 	}
 
 	#[cfg(all(feature = "capture", not(all(target_os = "linux", feature = "pipewire"))))]
 	#[test]
 	fn capture_window_picker_refuses_unsupported_builds() {
-		let error = capture_args(&["--window", "--no-audio"]).video_config().unwrap_err();
+		let error = capture_args(&["--window", "--audio", "off"])
+			.video_config()
+			.unwrap_err();
 		assert!(
 			error
 				.to_string()
@@ -1220,7 +1295,7 @@ pub(crate) mod tests {
 		// Past the export's release delay and the send-ahead window behind it, so the first
 		// frame goes out before it ends.
 		let wait = RECORDING_MAX_AGE * 3 + Duration::from_secs(1);
-		while let Ok(res) = tokio::time::timeout(wait, exporter.next()).await {
+		while let Ok(res) = moq_clock::timeout(wait, exporter.next()).await {
 			match res.expect("exporter error") {
 				Some(frame) => out.extend_from_slice(&frame.payload),
 				None => break,
@@ -1598,12 +1673,12 @@ pub(crate) mod tests {
 			// the lead holds; the jump is in the copy after it.
 			const WAIT: Duration = Duration::from_secs(10);
 			decoder.decode_chunk(&lead).unwrap();
-			let consumer = tokio::time::timeout(WAIT, remote.consume().follow("pt.hang", None).unwrap().available())
+			let consumer = moq_clock::timeout(WAIT, remote.consume().follow("pt.hang", None).unwrap().available())
 				.await
 				.unwrap()
 				.unwrap();
 			let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&consumer).await.unwrap();
-			let catalog = tokio::time::timeout(WAIT, catalogs.next())
+			let catalog = moq_clock::timeout(WAIT, catalogs.next())
 				.await
 				.unwrap()
 				.unwrap()
@@ -1615,13 +1690,13 @@ pub(crate) mod tests {
 			// SUBSCRIBE arrives, not when it is sent.
 			let start = async |subscription: moq_net::track::Subscription| {
 				let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
-				let first = tokio::time::timeout(WAIT, track.recv_group()).await.unwrap().unwrap();
+				let first = moq_clock::timeout(WAIT, track.recv_group()).await.unwrap().unwrap();
 				(track, first)
 			};
 			// Each group's sequence and frames, read until the track ends. A read cut off as
 			// stale leaves `None` for that group's frames, and a marker leaves none.
 			let read = |(mut track, first): (moq_net::track::Subscriber, Option<moq_net::group::Consumer>)| {
-				tokio::spawn(tokio::time::timeout(WAIT, async move {
+				tokio::spawn(moq_clock::timeout(WAIT, async move {
 					let mut groups = Vec::new();
 					let mut next = first;
 					while let Some(mut group) = next {
@@ -1888,7 +1963,7 @@ pub(crate) mod tests {
 			let Source::Stream { decoder, catalog } = publish.source else {
 				panic!("expected a stream source");
 			};
-			let start = std::time::Instant::now();
+			let start = moq_clock::now();
 			decode(decoder, catalog, input, Publication::default()).await.unwrap();
 			let elapsed = start.elapsed();
 			let bytes = INPUT.len() * copies;
@@ -1923,7 +1998,7 @@ pub(crate) mod tests {
 
 		let mut last = None;
 		loop {
-			let next = tokio::time::timeout(Duration::from_secs(1), catalogs.next())
+			let next = moq_clock::timeout(Duration::from_secs(1), catalogs.next())
 				.await
 				.expect("the catalog track ends");
 			match next.expect("the catalog ends cleanly") {
@@ -1956,7 +2031,7 @@ pub(crate) mod tests {
 		let Source::Stream { decoder, catalog } = publish.source else {
 			panic!("expected a stream source");
 		};
-		let started = tokio::time::Instant::now();
+		let started = moq_clock::Instant::now();
 		let publication = Publication {
 			broadcast: publish.broadcast.clone(),
 			linger: LINGER,
@@ -2031,7 +2106,7 @@ pub(crate) mod tests {
 
 			tokio::select! {
 				res = &mut import => panic!("the import returned before its input ended: {res:?}"),
-				event = tokio::time::timeout(Duration::from_secs(5), announced.next()) => {
+				event = moq_clock::timeout(Duration::from_secs(5), announced.next()) => {
 					assert!(event.is_err(), "announced before any input: {event:?}");
 				}
 			}
@@ -2039,7 +2114,7 @@ pub(crate) mod tests {
 			tokio::io::AsyncWriteExt::write_all(&mut stdin, input).await.unwrap();
 			let resolved = tokio::select! {
 				res = &mut import => panic!("the import returned before its input ended: {res:?}"),
-				_ = tokio::time::sleep(Duration::from_secs(30)) => panic!("never announced"),
+				_ = moq_clock::sleep(Duration::from_secs(30)) => panic!("never announced"),
 				resolved = async {
 					let event = announced.next().await.expect("origin closed");
 					assert!(matches!(event, moq_net::announce::Event::Start(_)), "{event:?}");
@@ -2159,7 +2234,7 @@ pub(crate) mod tests {
 		let mut next = async |import: &mut std::pin::Pin<&mut _>| {
 			tokio::select! {
 				res = import => panic!("the import returned before its input ended: {res:?}"),
-				_ = tokio::time::sleep(Duration::from_secs(30)) => panic!("never announced"),
+				_ = moq_clock::sleep(Duration::from_secs(30)) => panic!("never announced"),
 				epoch = async {
 					loop {
 						use moq_net::announce::Event;
@@ -2240,7 +2315,7 @@ pub(crate) mod tests {
 			};
 			let err = decode(decoder, catalog, &input[..], publication).await.unwrap_err();
 			assert!(err.to_string().contains("declared"), "{err:#}");
-			let event = tokio::time::timeout(Duration::from_secs(1), announced.next()).await;
+			let event = moq_clock::timeout(Duration::from_secs(1), announced.next()).await;
 			assert!(event.is_err(), "announced an empty broadcast: {event:?}");
 		}
 	}
@@ -2362,7 +2437,7 @@ pub(crate) mod tests {
 	async fn read_frame(consumer: &moq_net::broadcast::Consumer, name: &str) -> Vec<u8> {
 		let track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy(moq_mux::container::Kind::Data));
-		let frame = tokio::time::timeout(Duration::from_secs(1), next_frame(&mut reader))
+		let frame = moq_clock::timeout(Duration::from_secs(1), next_frame(&mut reader))
 			.await
 			.expect("verbatim read timed out");
 		frame.payload.to_vec()
