@@ -1,7 +1,7 @@
 # Async-wrapper generator spike
 
 This checkpoint compares generation on `kio::Queue::pop` and all four wrappers in
-`moq_net::broadcast`: `Producer::{requested_track, closed}`, `Consumer::closed`,
+`moq_net::broadcast`: `Requests::{requested_track, closed}`, `Consumer::closed`,
 and `Demand::wanted_changed`. It does not pick a generator or change production
 crates. The remaining work belongs to
 [async-feature](/quest/m1/poll-first/async-feature.md).
@@ -26,7 +26,9 @@ and gives each variant its own target directory. It compares:
   behind `async`. This controls for equivalent generated code and documentation.
 - **Declarative:** `rules.rs` replaces each poll declaration with one macro
   invocation containing its docs, signature, and body. The explicit `poll => async`
-  names avoid an identifier-concatenation dependency. The bracketed attributes
+  names avoid an identifier-concatenation dependency. A direct stable 1.98.1
+  probe rejects `${concat(poll_, $name)}` with E0658, so that spelling cannot
+  remove the duplicated names on the supported toolchain. The bracketed attributes
   apply only to the poll method, preserving `_sim`'s `track_caller`.
 - **Attribute:** `attribute.rs` is appended to the existing kio-macros crate, and
   re-exported through kio only in the snapshots. A method attribute derives the
@@ -65,7 +67,7 @@ maintainer's settled direction regardless of speed.
 
 Verification checks feature-on and feature-off library builds, Rustdoc with
 warnings denied, and identical rendered poll/wrapper docs for `Queue::pop` and
-`Producer::requested_track`. It also compiles an owned-receiver mistake and
+`Requests::requested_track`. It also compiles an owned-receiver mistake and
 requires failure; inspect `*-bad-receiver.log` for error spans. Other wrappers
 and unrelated kio async bodies remain untouched, so a feature-off success here
 does **not** establish the quest's eventual no-coroutines condition.

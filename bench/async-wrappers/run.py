@@ -123,7 +123,7 @@ def verify(tree):
         command(args, tree, OUT / f"{tree.name}-{package}-docs.log", env)
     for file, poll, wrapper, phrase in (
         ("kio/struct.Queue.html", "poll_pop", "pop", "Poll for the next item."),
-        ("moq_net/broadcast/struct.Producer.html", "poll_requested_track", "requested_track", "Poll"),
+        ("moq_net/broadcast/struct.Requests.html", "poll_requested_track", "requested_track", "Poll"),
     ):
         html = (tree / "target/doc" / file).read_text()
         # Compare actual rendered documentation, not just matching source attrs.
