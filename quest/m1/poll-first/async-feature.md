@@ -14,6 +14,10 @@ and the bindings and JS keep their APIs.
 Decided with the maintainer on 2026-10-25: poll is canonical, async is the
 ergonomic layer, and the gating proceeds regardless of the build measurement.
 
+- **Generator checkpoint:** [the reproducible spike](/bench/async-wrappers/README.md)
+  targets `kio::Queue::pop` and the four broadcast wrappers without changing
+  production crates. The generator choice remains the maintainer's; finish the
+  comparison and choose before broad rollout.
 - **Spike the generator first** on kio and one moq-net module, then pick one:
   - a `macro_rules!` over a list of signatures (no proc-macro cost);
   - a proc macro attribute on the `poll_*` method or its impl block;
