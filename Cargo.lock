@@ -5353,6 +5353,7 @@ dependencies = [
  "dispatch2",
  "hang",
  "kio 0.6.2",
+ "libc",
  "moq-mux",
  "moq-net",
  "objc2 0.6.5",
