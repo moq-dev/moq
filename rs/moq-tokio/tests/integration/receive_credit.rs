@@ -153,7 +153,7 @@ async fn setup_through(
 }
 
 /// The shaper's seed: `MOQ_SHAPER_SEED` to replay a run, or a fresh one, printed.
-fn rand_seed() -> u64 {
+pub(crate) fn rand_seed() -> u64 {
 	let seed = match std::env::var("MOQ_SHAPER_SEED") {
 		Ok(seed) => seed.parse().expect("MOQ_SHAPER_SEED is not a u64"),
 		Err(_) => kio::clock::wall()
@@ -937,7 +937,7 @@ async fn benchmark_receive_windows() {
 
 /// Accepts any server certificate: the test dials its own self-signed server.
 #[derive(Debug)]
-struct AnyCert;
+pub(crate) struct AnyCert;
 
 impl rustls::client::danger::ServerCertVerifier for AnyCert {
 	fn verify_server_cert(
