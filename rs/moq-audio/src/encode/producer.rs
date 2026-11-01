@@ -393,24 +393,41 @@ impl Producer {
 
 	/// Encode and publish every full frame in `pending`, keeping any partial
 	/// trailing frame for the next call.
+	///
+	/// Frames are encoded in place and the remainder moves to the front once, so a
+	/// large batch costs linear rather than quadratic copying.
 	fn publish_full_frames(&mut self, anchor_us: u64) -> Result<(), Error> {
 		let frame_samples = self.encoder()?.frame_size() * self.encoder()?.codec_channels() as usize;
-		while self.pending.len() >= frame_samples {
-			let chunk: Vec<f32> = self.pending.drain(..frame_samples).collect();
-			let packet = self.encoder.as_mut().ok_or(moq_net::Error::Closed)?.encode(&chunk)?;
-
-			let timestamp = Self::timestamp(
-				anchor_us,
-				self.frames_produced,
-				self.encoder()?.folded_delay(),
-				self.encoder()?.codec_rate(),
-			)?;
-			self.frames_produced += self.encoder()?.frame_size() as u64;
-			self.activity = packet.activity;
-			self.publish(packet, timestamp)?;
-			self.decoder_boundary = false;
+		let mut consumed = 0;
+		let mut result = Ok(());
+		while result.is_ok() && self.pending.len() - consumed >= frame_samples {
+			let frame = consumed..consumed + frame_samples;
+			// A frame that fails is consumed too, so it is never encoded twice.
+			consumed = frame.end;
+			result = self.publish_frame(anchor_us, frame);
 		}
+		self.pending.drain(..consumed);
+		result
+	}
 
+	/// Encode and publish the frame at `samples` in `pending`.
+	fn publish_frame(&mut self, anchor_us: u64, samples: std::ops::Range<usize>) -> Result<(), Error> {
+		let packet = self
+			.encoder
+			.as_mut()
+			.ok_or(moq_net::Error::Closed)?
+			.encode(&self.pending[samples])?;
+
+		let timestamp = Self::timestamp(
+			anchor_us,
+			self.frames_produced,
+			self.encoder()?.folded_delay(),
+			self.encoder()?.codec_rate(),
+		)?;
+		self.frames_produced += self.encoder()?.frame_size() as u64;
+		self.activity = packet.activity;
+		self.publish(packet, timestamp)?;
+		self.decoder_boundary = false;
 		Ok(())
 	}
 
@@ -769,7 +786,9 @@ mod tests {
 			let input = Input::new(input_rate, Layout::Stereo);
 			// Not a whole number of codec frames, so finish flushes a partial tail.
 			let frames = input_rate as usize + 123;
-			let samples: Vec<f32> = (0..frames * 2).map(|index| (index as f32 * 0.01).sin() * 0.25).collect();
+			let samples: Vec<f32> = (0..frames * 2)
+				.map(|index| (index as f32 * 0.01).sin() * 0.25)
+				.collect();
 			let mut reference = None;
 			for batch in [1, 7, 959, 961, 1921, 4410, frames] {
 				let mut broadcast = moq_net::broadcast::Info::new().produce();
@@ -803,9 +822,10 @@ mod tests {
 				let mut published = Vec::new();
 				while let Some(read) = reader.read().await.unwrap() {
 					published.push(match read {
-						moq_mux::container::Read::Frame { group, frame } => {
-							(format!("{group} {:?} {}", frame.timestamp, frame.keyframe), frame.payload)
-						}
+						moq_mux::container::Read::Frame { group, frame } => (
+							format!("{group} {:?} {}", frame.timestamp, frame.keyframe),
+							frame.payload,
+						),
 						other => (format!("{other:?}"), Bytes::new()),
 					});
 				}
@@ -813,7 +833,11 @@ mod tests {
 					// PCM at the codec rate publishes exactly the input, its final frame zero-padded.
 					let payload: Vec<u8> = published.iter().flat_map(|(_, payload)| payload.to_vec()).collect();
 					let expected: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();
-					assert_eq!(payload.len(), expected.len().next_multiple_of(1920 * 4), "batch={batch}");
+					assert_eq!(
+						payload.len(),
+						expected.len().next_multiple_of(1920 * 4),
+						"batch={batch}"
+					);
 					assert_eq!(payload[..expected.len()], expected[..], "batch={batch}");
 					assert!(payload[expected.len()..].iter().all(|&byte| byte == 0), "batch={batch}");
 				}
