@@ -5,7 +5,7 @@
 //! packet's [`Packet`] state is stored by the transport and handed back on ACK or loss, so a
 //! controller keeps no per-packet table of its own.
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::time::Duration;
 
 use std::any::Any;

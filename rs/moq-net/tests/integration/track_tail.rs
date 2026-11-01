@@ -86,7 +86,7 @@ async fn connect(version: &str) -> Pair {
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -110,7 +110,7 @@ async fn round(version: &str, late: Late, final_sequence: u64, max_delay: Option
 		_keep,
 	} = connect(version).await;
 
-	let reader = moq_clock::sim::spawn(async move {
+	let reader = kio::clock::sim::spawn(async move {
 		let subscription = moq_net::track::Subscription::default()
 			.with_range(0..)
 			.with_max_delay(max_delay);
@@ -135,17 +135,17 @@ async fn round(version: &str, late: Late, final_sequence: u64, max_delay: Option
 				}
 			}
 		};
-		(frames, err, moq_clock::now())
+		(frames, err, kio::clock::now())
 	});
 
-	moq_clock::timeout(TIMEOUT, support::harness::subscribed(&track))
+	kio::clock::timeout(TIMEOUT, support::harness::subscribed(&track))
 		.await
 		.expect("no subscriber appeared");
 	// Let the publisher answer while the track is still empty. Before draft 22, a group
 	// written first sits below SUBSCRIBE_OK's Largest Object, so it would arrive as a
 	// joining FETCH, which the track ending first refuses, not as the subscription's own
 	// late stream. Paused time advances only once every task is idle.
-	moq_clock::sleep(Duration::from_millis(1)).await;
+	kio::clock::sleep(Duration::from_millis(1)).await;
 
 	pair.server_transport.hold_unis();
 	if final_sequence > 0 {
@@ -161,20 +161,20 @@ async fn round(version: &str, late: Late, final_sequence: u64, max_delay: Option
 	if final_sequence > 0 {
 		// Paused time advances only when every task is idle, after the publisher and
 		// subscriber have processed the subscription's end.
-		moq_clock::sleep(GRACE / 10).await;
+		kio::clock::sleep(GRACE / 10).await;
 		assert!(
 			!reader.is_finished(),
 			"{version}: the track ended before its group arrived"
 		);
 	}
 
-	let released = moq_clock::now();
+	let released = kio::clock::now();
 	match late {
 		Late::Delivered => pair.server_transport.release_unis(),
 		Late::Lost => pair.server_transport.drop_unis(),
 	}
 
-	let (frames, err, ended) = moq_clock::timeout(TIMEOUT, reader)
+	let (frames, err, ended) = kio::clock::timeout(TIMEOUT, reader)
 		.await
 		.expect("the subscription never ended")
 		.expect("reader panicked");
@@ -188,7 +188,7 @@ async fn round(version: &str, late: Late, final_sequence: u64, max_delay: Option
 
 /// A group whose header arrives after the subscription's end is delivered, then the track
 /// ends cleanly. An unbounded max delay waits for it too: its grace never runs out.
-#[moq_clock::test]
+#[kio::test]
 async fn a_group_after_the_end_is_delivered() {
 	for version in VERSIONS {
 		// moq-lite-03 declares no end, so an unbounded subscription there waits forever.
@@ -220,7 +220,7 @@ async fn a_group_after_the_end_is_delivered() {
 
 /// A group that never arrives is given up on after the grace, and the track still ends
 /// cleanly without it.
-#[moq_clock::test]
+#[kio::test]
 async fn a_lost_group_ends_the_track_after_the_grace() {
 	for version in VERSIONS {
 		let outcome = round(version, Late::Lost, 1, Some(Duration::ZERO)).await;
@@ -239,7 +239,7 @@ async fn a_lost_group_ends_the_track_after_the_grace() {
 }
 
 /// Skipped sequences have no stream, so lite-05+ publishers name them with SUBSCRIBE_DROP.
-#[moq_clock::test]
+#[kio::test]
 async fn skipped_groups_end_without_the_grace() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		let outcome = round(version, Late::Delivered, 3, Some(Duration::ZERO)).await;
@@ -254,7 +254,7 @@ async fn skipped_groups_end_without_the_grace() {
 }
 
 /// An empty track leaves no tail to wait for.
-#[moq_clock::test]
+#[kio::test]
 async fn lite07_empty_track_ends_without_the_grace() {
 	let outcome = round("moq-lite-07-wip", Late::Delivered, 0, Some(Duration::ZERO)).await;
 	assert!(outcome.err.is_none());
@@ -267,7 +267,7 @@ const IETF: &[&str] = &["moq-transport-18", "moq-transport-22"];
 
 /// A subscriber that leaves while END_OF_TRACK waits for stream credit ends the publisher's
 /// request, instead of parking it until credit that may never come.
-#[moq_clock::test]
+#[kio::test]
 async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 	for version in IETF {
 		let Pair {
@@ -284,14 +284,14 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 			.subscribe(subscription)
 			.await
 			.expect("subscribe");
-		moq_clock::timeout(TIMEOUT, support::harness::subscribed(&track))
+		kio::clock::timeout(TIMEOUT, support::harness::subscribed(&track))
 			.await
 			.expect("no subscriber appeared");
 
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
 		group.finish().unwrap();
-		let mut group = moq_clock::timeout(TIMEOUT, sub.recv_group())
+		let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()
@@ -301,7 +301,7 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 		// Out of stream credit, so the marker cannot open.
 		pair.server_transport.withhold_unis();
 		track.finish().unwrap();
-		moq_clock::sleep(GRACE / 10).await;
+		kio::clock::sleep(GRACE / 10).await;
 		assert!(
 			track.subscription().is_some(),
 			"{version}: the publisher is still ending the request"
@@ -309,9 +309,9 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 
 		// The request task holds the publisher's subscription until it ends.
 		drop((group, sub));
-		moq_clock::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			while track.subscription().is_some() {
-				moq_clock::sleep(GRACE / 100).await;
+				kio::clock::sleep(GRACE / 100).await;
 			}
 		})
 		.await
@@ -322,7 +322,7 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 
 /// A lost datagram is indistinguishable from a reordered stream header, so its hole
 /// waits out the tail grace on every lite version.
-#[moq_clock::test]
+#[kio::test]
 async fn a_lost_datagram_delays_the_end() {
 	for version in ["moq-lite-05", "moq-lite-07-wip"] {
 		let Pair {
@@ -332,7 +332,7 @@ async fn a_lost_datagram_delays_the_end() {
 			_keep,
 		} = connect(version).await;
 
-		let reader = moq_clock::sim::spawn(async move {
+		let reader = kio::clock::sim::spawn(async move {
 			let subscription = moq_net::track::Subscription::default().with_range(0..);
 			let mut sub = remote
 				.track("video")
@@ -344,9 +344,9 @@ async fn a_lost_datagram_delays_the_end() {
 			while let Some(group) = sub.recv_group().await.expect("track aborted") {
 				groups.push(group.sequence);
 			}
-			(groups, moq_clock::now())
+			(groups, kio::clock::now())
 		});
-		moq_clock::timeout(TIMEOUT, support::harness::subscribed(&track))
+		kio::clock::timeout(TIMEOUT, support::harness::subscribed(&track))
 			.await
 			.expect("no subscriber appeared");
 
@@ -359,12 +359,12 @@ async fn a_lost_datagram_delays_the_end() {
 				group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
 				group.finish().unwrap();
 			}
-			moq_clock::sleep(GRACE / 100).await;
+			kio::clock::sleep(GRACE / 100).await;
 		}
-		let finished = moq_clock::now();
+		let finished = kio::clock::now();
 		track.finish().unwrap();
 
-		let (groups, ended) = moq_clock::timeout(TIMEOUT, reader)
+		let (groups, ended) = kio::clock::timeout(TIMEOUT, reader)
 			.await
 			.expect("the subscription never ended")
 			.expect("reader panicked");
@@ -381,7 +381,7 @@ async fn a_lost_datagram_delays_the_end() {
 /// A publisher can declare the end, then open each group's stream before writing its first
 /// frame. The subscriber withholds a group until that frame lands, and the end waits for
 /// it: a reader that ended at the boundary would miss every group.
-#[moq_clock::test]
+#[kio::test]
 async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		let Pair {
@@ -391,7 +391,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 			_keep,
 		} = connect(version).await;
 
-		let reader = moq_clock::sim::spawn(async move {
+		let reader = kio::clock::sim::spawn(async move {
 			let subscription = moq_net::track::Subscription::default()
 				.with_range(0..)
 				.with_max_delay(TIMEOUT);
@@ -409,7 +409,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 			}
 			groups
 		});
-		moq_clock::timeout(TIMEOUT, support::harness::subscribed(&track))
+		kio::clock::timeout(TIMEOUT, support::harness::subscribed(&track))
 			.await
 			.expect("no subscriber appeared");
 
@@ -417,7 +417,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 		let mut groups = [track.append_group().unwrap(), track.append_group().unwrap()];
 		// Paused time advances only once every task is idle: both headers and the end
 		// have reached the subscriber, ahead of any frame.
-		moq_clock::sleep(GRACE / 10).await;
+		kio::clock::sleep(GRACE / 10).await;
 		assert!(
 			!reader.is_finished(),
 			"{version}: the track ended before its groups showed"
@@ -427,7 +427,7 @@ async fn a_group_whose_first_frame_trails_its_header_is_delivered() {
 			group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
 			group.finish().unwrap();
 		}
-		let mut groups = moq_clock::timeout(TIMEOUT, reader)
+		let mut groups = kio::clock::timeout(TIMEOUT, reader)
 			.await
 			.expect("the subscription never ended")
 			.expect("reader panicked");

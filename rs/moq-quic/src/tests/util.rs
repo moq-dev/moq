@@ -450,7 +450,7 @@ pub(super) struct TestEndpoint {
 	pub(super) addr: SocketAddr,
 	socket: Option<UdpSocket>,
 	/// Each connection's next timer, as of its last poll
-	timeouts: BTreeMap<ConnectionHandle, Instant>,
+	pub(super) timeouts: BTreeMap<ConnectionHandle, Instant>,
 	pub(super) outbound: VecDeque<(Transmit, Bytes)>,
 	delayed: VecDeque<(Transmit, Bytes)>,
 	/// Datagrams in flight to this endpoint, in arrival order
@@ -768,9 +768,6 @@ pub(super) fn subscribe_at(level: tracing::Level) -> tracing::subscriber::Defaul
 	let builder = tracing_subscriber::FmtSubscriber::builder()
 		.with_max_level(level)
 		.with_writer(|| TestWriter);
-	// tracing uses std::time to trace time, which panics in wasm.
-	#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-	let builder = builder.without_time();
 	tracing::subscriber::set_default(builder.finish())
 }
 

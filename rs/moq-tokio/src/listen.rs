@@ -506,7 +506,7 @@ impl Config {
 	/// forever: for zero, and for a timeout too long for the clock to reach.
 	pub fn resolved_timeout(&self) -> Option<std::time::Duration> {
 		let timeout = self.timeout.map(Into::into).unwrap_or(DEFAULT_TIMEOUT);
-		(!timeout.is_zero() && moq_clock::now().checked_add(timeout).is_some()).then_some(timeout)
+		(!timeout.is_zero() && kio::clock::now().checked_add(timeout).is_some()).then_some(timeout)
 	}
 
 	/// The QUIC listener settings, for a runtime outside this crate to map.

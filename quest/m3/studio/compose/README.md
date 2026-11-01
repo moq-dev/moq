@@ -29,13 +29,13 @@ Decided 2026-10-26 (maintainer), the studio's flagship and first in its epic:
   into its source's own track before publishing rather than living in the
   layout.
 - **Wire layout:** local sources are tracks in the studio's one broadcast.
-  Guests stay their own broadcasts, named through
-  [contribution references](/quest/m2/contribution-ref.md).
+  Guests stay their own broadcasts, named through the hang catalog's
+  `contributions` references.
 - **Layout:** the live scene state (items, transforms, transitions, and each
   element's priority and toggleable flag) as a hang JSON track on the media
   clock, so any host composites the same frame the studio shows.
-- **Browser build:** whichever line [Rust-backed @moq/net](/quest/m2/rs2ts/README.md)
-  lands (WASM first, then JS built from Rust). Not fixed to WASM.
+- **Browser build:** whichever line [JS-only @moq/net from Rust](/quest/m2/rs2ts-js.md)
+  lands. moq's WASM support was removed on 2026-10-31.
 - **Cost:** every source and the program follow MoQ's pull model and are
   encoded only while something subscribes, so a fallback nobody uses costs
   nothing.
@@ -47,4 +47,3 @@ Decided 2026-10-26 (maintainer), the studio's flagship and first in its epic:
 - [Browser composition](/quest/m3/studio/compose/browser.md) - `@moq/watch` composes a broadcast with a layout track through moq-scene's browser build
 - [Server composition](/quest/m3/studio/compose/server.md) - `moq compose` renders the program from sources and layout, headless
 - [Viewer controls](/quest/m3/studio/compose/controls.md) - viewers toggle elements and the layout's priorities steer what they fetch
-- [Hang contribution references](/quest/m2/contribution-ref.md) - guests composed by reference

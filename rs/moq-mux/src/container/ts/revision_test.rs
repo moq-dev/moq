@@ -97,7 +97,7 @@ async fn reexport_frames(spans: &[(u16, &Span<'_>)], intervals: u64) -> Vec<Fram
 					.unwrap();
 				let export = export.insert(opened.with_delay(DELAY).with_replay());
 				// The first frame out carries the tables built from this span alone.
-				let first = tokio::time::timeout(DELAY * 2, export.next()).await;
+				let first = kio::clock::timeout(DELAY * 2, export.next()).await;
 				frames.push(first.expect("a first frame").unwrap().unwrap());
 				export
 			}
@@ -120,7 +120,7 @@ async fn settle<S: crate::catalog::Stream>(export: &mut super::Export<S>, frames
 where
 	S::Ext: super::catalog::Catalog,
 {
-	while let Ok(frame) = tokio::time::timeout(Duration::from_millis(1), export.next()).await {
+	while let Ok(frame) = kio::clock::timeout(Duration::from_millis(1), export.next()).await {
 		frames.push(frame.unwrap().expect("the export runs on"));
 	}
 }
@@ -131,7 +131,7 @@ where
 	S::Ext: super::catalog::Catalog,
 {
 	loop {
-		match tokio::time::timeout(DELAY * 10, export.next())
+		match kio::clock::timeout(DELAY * 10, export.next())
 			.await
 			.expect("the export ends")
 		{
@@ -421,7 +421,7 @@ async fn a_listed_track_keeps_its_descriptors() {
 		.unwrap()
 		.descriptors = vec![language(ENG)];
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 0, 3_000).await;
 	catalog
@@ -477,7 +477,7 @@ async fn the_clock_moves_behind_the_pmt_naming_its_pid() {
 	let (name, mut clock) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let (_, mut other) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(
 		&mut export,
@@ -554,7 +554,7 @@ async fn a_program_descriptor_change_revises_the_pmt() {
 	.unwrap();
 	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 0, 3_000).await;
 	catalog.modify().unwrap().ext.mpegts.program_descriptors = vec![super::catalog::Descriptor {
@@ -635,6 +635,7 @@ fn aac_track(
 		.unwrap();
 	let name = track.name().to_string();
 	let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
+	config.description = Some(bytes::Bytes::from_static(&[0x11, 0x90]));
 	config.container = hang::catalog::Container::Legacy;
 	let mut guard = catalog.modify().unwrap();
 	guard.audio.renditions.insert(name.clone(), config);
@@ -708,7 +709,7 @@ async fn open(
 	frames: &mut Vec<Frame>,
 ) -> super::Export<crate::catalog::Consumer<Ext>> {
 	let mut export = export_of(consumer).await;
-	let out = tokio::time::timeout(DELAY * 2, export.next()).await;
+	let out = kio::clock::timeout(DELAY * 2, export.next()).await;
 	frames.push(out.expect("the tables went out").unwrap().unwrap());
 	settle(&mut export, frames).await;
 	export
@@ -741,7 +742,7 @@ async fn a_pid_recorded_after_its_track_takes_the_held_frames_along() {
 		.await
 		.unwrap();
 	let mut export = opened.with_delay(DELAY).with_replay();
-	let out = tokio::time::timeout(DELAY * 2, export.next()).await;
+	let out = kio::clock::timeout(DELAY * 2, export.next()).await;
 	let mut frames = vec![out.expect("the tables went out").unwrap().unwrap()];
 	settle(&mut export, &mut frames).await;
 
@@ -796,7 +797,7 @@ async fn next<S: crate::catalog::Stream>(export: &mut super::Export<S>) -> Frame
 where
 	S::Ext: super::catalog::Catalog,
 {
-	let out = tokio::time::timeout(DELAY * 4, export.next()).await;
+	let out = kio::clock::timeout(DELAY * 4, export.next()).await;
 	out.expect("a frame").unwrap().expect("the export runs on")
 }
 
@@ -911,7 +912,7 @@ async fn a_track_taking_a_pid_over_goes_out_behind_the_tail_before_it() {
 	let (name, mut old) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let (_, mut other) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(
 		&mut export,
@@ -972,7 +973,7 @@ async fn a_pid_that_leaves_the_pmt_is_gone_until_it_returns() {
 	let (name, mut old) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let (_, mut other) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(
 		&mut export,
@@ -1086,7 +1087,7 @@ async fn a_pid_taken_from_a_stream_that_never_ends_cuts_it() {
 	.unwrap();
 	let (name, mut old) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(&mut export, &mut frames, start, &mut [(&mut old, 0x21)], 0, 2_000).await;
 	remove(&mut catalog, &name);
@@ -1132,7 +1133,7 @@ async fn a_track_recorded_on_the_pmt_pid_after_the_catalog_moves_it_takes_anothe
 	catalog.modify().unwrap().ext.mpegts.program = Some(program(PMT_PID, 1));
 	let (_, mut first) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], 0, 3_000).await;
 	catalog.modify().unwrap().ext.mpegts.program = Some(program(OWN_PMT_PID, 7));
@@ -1183,7 +1184,7 @@ async fn a_moved_pmt_moves_behind_a_new_pat() {
 	catalog.modify().unwrap().ext.mpegts.program = Some(program(PMT_PID));
 	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 0, 3_000).await;
 	catalog.modify().unwrap().ext.mpegts.program = Some(program(MOVED_PMT_PID));
@@ -1218,11 +1219,11 @@ async fn a_pmt_moved_onto_a_stream_fails_the_export() {
 	catalog.modify().unwrap().ext.mpegts.program = Some(program(PMT_PID));
 	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 0, 3_000).await;
 	catalog.modify().unwrap().ext.mpegts.program = Some(program(AUDIO_PID));
-	let err = tokio::time::timeout(DELAY * 2, async {
+	let err = kio::clock::timeout(DELAY * 2, async {
 		loop {
 			if let Err(err) = export.next().await {
 				return err;
@@ -1245,7 +1246,7 @@ async fn a_pmt_moved_onto_a_draining_stream_waits_for_it() {
 	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let (name, mut leaving) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(
 		&mut export,
@@ -1315,7 +1316,7 @@ async fn a_catalog_dropping_the_pmt_pid_cancels_a_waiting_move() {
 	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let (name, mut leaving) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	let mut tracks = [(&mut audio, 0x21), (&mut leaving, 0x22)];
 	live(&mut export, &mut frames, start, &mut tracks, 0, 3_000).await;
@@ -1342,7 +1343,7 @@ async fn a_stream_returning_to_the_pid_the_pmt_waits_for_fails_the_export() {
 	let (name, mut leaving) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
 	let config = catalog.snapshot().audio.renditions[&name].clone();
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	let mut tracks = [(&mut audio, 0x21), (&mut leaving, 0x22)];
 	live(&mut export, &mut frames, start, &mut tracks, 0, 3_000).await;
@@ -1358,7 +1359,7 @@ async fn a_stream_returning_to_the_pid_the_pmt_waits_for_fails_the_export() {
 			.tracks
 			.insert(name, super::catalog::Track::new(OTHER_AUDIO_PID));
 	}
-	let err = tokio::time::timeout(DELAY * 2, async {
+	let err = kio::clock::timeout(DELAY * 2, async {
 		loop {
 			if let Err(err) = export.next().await {
 				return err;
@@ -1381,10 +1382,10 @@ async fn a_pmt_moved_while_its_tables_go_out_moves_behind_them() {
 	catalog.modify().unwrap().ext.mpegts.program = Some(program(PMT_PID));
 	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await.with_mux_rate(rate(4));
 	for millis in (0..6_000).step_by(50) {
-		tokio::time::sleep_until(start + Duration::from_millis(millis)).await;
+		kio::clock::sleep_until(start + Duration::from_millis(millis)).await;
 		match millis {
 			// Three packets of PMT from here, in slots of four.
 			2_500 => {
@@ -1467,7 +1468,7 @@ async fn a_revision_out_before_the_one_it_follows_takes_its_version() {
 	.unwrap();
 	let (_, mut first) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], 0, 3_000).await;
 
@@ -1495,7 +1496,7 @@ async fn a_revision_out_before_the_one_it_follows_takes_its_version() {
 	);
 	let (_, mut added) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
 	settle(&mut export, &mut frames).await;
-	tokio::time::sleep_until(start + Duration::from_millis(3_000)).await;
+	kio::clock::sleep_until(start + Duration::from_millis(3_000)).await;
 	cue.write(Frame {
 		timestamp: moq_net::Timestamp::from_millis(3_000).unwrap(),
 		duration: None,
@@ -1541,7 +1542,7 @@ async fn a_stream_taking_a_pid_over_leaves_the_buffer_before_it() {
 	let (_, mut first) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let (name, mut before) = aac_track(&mut broadcast, &mut catalog, Some(DATA_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(
 		&mut export,
@@ -1577,7 +1578,7 @@ async fn a_stream_taking_a_pid_over_leaves_the_buffer_before_it() {
 		crate::catalog::hang::Container::Legacy(crate::container::Kind::Data),
 	);
 	settle(&mut export, &mut frames).await;
-	tokio::time::sleep_until(start + Duration::from_millis(6_000)).await;
+	kio::clock::sleep_until(start + Duration::from_millis(6_000)).await;
 	let mut section = vec![0x80, 0x7f, 0xfd];
 	section.resize(4_096, 0xab);
 	private
@@ -1638,7 +1639,7 @@ async fn a_stream_too_many_for_the_pmt_section_fails_the_export() {
 	let (_, mut second) = track(&mut broadcast, &mut catalog, OTHER_AUDIO_PID);
 	let (name, mut leaving) = track(&mut broadcast, &mut catalog, 0x105);
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	let mut tracks = [(&mut first, 0x21), (&mut second, 0x21), (&mut leaving, 0x21)];
 	live(&mut export, &mut frames, start, &mut tracks, 0, 3_000).await;
@@ -1650,13 +1651,13 @@ async fn a_stream_too_many_for_the_pmt_section_fails_the_export() {
 		(&mut leaving, 0x21),
 		(&mut added, 0x21),
 	];
-	let err = tokio::time::timeout(DELAY * 2, async {
+	let err = kio::clock::timeout(DELAY * 2, async {
 		loop {
 			for (track, mark) in tracks.iter_mut() {
 				write_marked(track, start.elapsed().as_millis() as u64, *mark);
 			}
-			tokio::time::sleep(Duration::from_millis(20)).await;
-			while let Ok(next) = tokio::time::timeout(Duration::from_millis(1), export.next()).await {
+			kio::clock::sleep(Duration::from_millis(20)).await;
+			while let Ok(next) = kio::clock::timeout(Duration::from_millis(1), export.next()).await {
 				if let Err(err) = next {
 					return err;
 				}
@@ -1681,7 +1682,7 @@ async fn tracks_withdrawn_before_sending_anything_go() {
 	.unwrap();
 	let (_, mut first) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], 0, 3_000).await;
 	let mut open = Vec::new();
@@ -1712,7 +1713,7 @@ async fn tracks_withdrawn_before_sending_anything_go() {
 async fn live<S: crate::catalog::Stream>(
 	export: &mut super::Export<S>,
 	frames: &mut Vec<Frame>,
-	start: tokio::time::Instant,
+	start: kio::clock::Instant,
 	tracks: &mut [(&mut Writer, u8)],
 	from: u64,
 	to: u64,
@@ -1720,7 +1721,7 @@ async fn live<S: crate::catalog::Stream>(
 	S::Ext: super::catalog::Catalog,
 {
 	for millis in (from..to).step_by(20) {
-		tokio::time::sleep_until(start + Duration::from_millis(millis)).await;
+		kio::clock::sleep_until(start + Duration::from_millis(millis)).await;
 		for (track, mark) in tracks.iter_mut() {
 			write_marked(track, millis, *mark);
 		}
@@ -1757,12 +1758,12 @@ async fn the_clock_moves_behind_the_last_packet_of_the_pmt_naming_its_pid() {
 	let (name, mut clock) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let (_, mut other) = aac_track(&mut broadcast, &mut catalog, Some(OTHER_AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await.with_mux_rate(rate(4));
 	// Frames 50 ms apart, for room beside the tables; the second track's from 500 ms, for room
 	// beside the first tables.
 	for millis in (0..6_000).step_by(50) {
-		tokio::time::sleep_until(start + Duration::from_millis(millis)).await;
+		kio::clock::sleep_until(start + Duration::from_millis(millis)).await;
 		match millis {
 			..3_000 => write_marked(&mut clock, millis, 0x21),
 			// The revision moving the clock lays three packets of PMT, in slots of four.
@@ -1817,7 +1818,7 @@ async fn a_rate_change_applies_behind_the_revision_it_comes_with() {
 	catalog.modify().unwrap().ext.mpegts.mux_rate = Some(rate(OLD));
 	let (_, mut audio) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(&mut export, &mut frames, start, &mut [(&mut audio, 0x21)], 0, 3_000).await;
 	{
@@ -1878,7 +1879,7 @@ async fn withdraw_and_return(listed: bool) {
 	.unwrap();
 	let (_, mut first) = aac_track(&mut broadcast, &mut catalog, Some(AUDIO_PID));
 	let mut frames = Vec::new();
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	let mut export = export_of(&consumer).await;
 	live(&mut export, &mut frames, start, &mut [(&mut first, 0x21)], 0, 2_000).await;
 

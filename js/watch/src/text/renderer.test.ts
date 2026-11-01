@@ -30,6 +30,7 @@ function showing(s: CueStore, time: number): string[] {
 
 // A VTT timestamp for a time under an hour.
 function vttTime(seconds: number): string {
+	// biome-ignore lint/style/noRestrictedGlobals: formats a duration as data, not a clock read.
 	return new Date(seconds * 1000).toISOString().slice(11, 23);
 }
 
