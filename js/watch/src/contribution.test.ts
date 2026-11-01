@@ -1,4 +1,5 @@
 import { expect, it } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import { Epoch, Origin, Path, type Track } from "@moq/net";
@@ -13,7 +14,7 @@ function publish(origin: Origin.Producer, path: string, epoch?: Epoch.Valid) {
 }
 
 const settle = async (): Promise<void> => {
-	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+	for (let i = 0; i < 5; i++) await yieldNow();
 };
 
 async function quietly<T>(fn: () => Promise<T>): Promise<T> {
