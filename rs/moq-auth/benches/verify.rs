@@ -30,7 +30,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::collections::VecDeque;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -38,31 +38,38 @@ use criterion::Criterion;
 use moq_auth::serve::{Denial, Keys, Policy, Server};
 use moq_auth::{Algorithm, Bytes, Claims, Event, Grant, Key, KeyId, KeySet, Request, Transport, lease};
 
-/// Counts every allocation on every thread, including tokio's blocking pool that reads files.
+/// Counts every allocation on every thread, including tokio's blocking pool that reads files,
+/// while [`COUNTING`] is set. Only the fixed-iteration mode sets it, so timed runs share no
+/// counter between threads.
 struct Counter;
 
+static COUNTING: AtomicBool = AtomicBool::new(false);
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static ALLOCATED: AtomicU64 = AtomicU64::new(0);
+
+fn count(size: usize) {
+	if COUNTING.load(Ordering::Relaxed) {
+		ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+		ALLOCATED.fetch_add(size as u64, Ordering::Relaxed);
+	}
+}
 
 #[global_allocator]
 static ALLOCATOR: Counter = Counter;
 
 unsafe impl GlobalAlloc for Counter {
 	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-		ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		ALLOCATED.fetch_add(layout.size() as u64, Ordering::Relaxed);
+		count(layout.size());
 		unsafe { System.alloc(layout) }
 	}
 
 	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-		ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		ALLOCATED.fetch_add(layout.size() as u64, Ordering::Relaxed);
+		count(layout.size());
 		unsafe { System.alloc_zeroed(layout) }
 	}
 
 	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-		ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		ALLOCATED.fetch_add(new_size as u64, Ordering::Relaxed);
+		count(new_size);
 		unsafe { System.realloc(ptr, layout, new_size) }
 	}
 
@@ -322,7 +329,7 @@ impl Bench {
 	}
 
 	/// Time one `connect` as a relay asks it: a `POST /` to the server over loopback TCP,
-	/// on a kept-alive connection.
+	/// on a kept-alive connection, reading and decoding the grant it answers with.
 	fn http(&mut self, name: String, keys: Keys, token: String) {
 		let mut policy = Policy::default();
 		policy.keys = Some(keys);
@@ -336,9 +343,13 @@ impl Bench {
 		let client = reqwest::Client::new();
 		let post = move || {
 			let response = client.post(&url).json(&request).send();
-			async move { response.await.unwrap().status() }
+			async move {
+				let response = response.await.unwrap().error_for_status().unwrap();
+				response.json::<Grant>().await.unwrap()
+			}
 		};
-		assert!(runtime.block_on(post()).is_success(), "{name}");
+		let grant = runtime.block_on(post());
+		assert_eq!(grant.publish, ["**".parse().unwrap()].into_iter().collect(), "{name}");
 		self.add(name, move || {
 			black_box(runtime.block_on(post()));
 		});
@@ -604,15 +615,16 @@ fn main() {
 			.unwrap_or_else(|| panic!("no case {name}"));
 		// One untimed run first, so lazily initialized statics are not counted.
 		run();
-		let (allocations, allocated) = (ALLOCATIONS.load(Ordering::Relaxed), ALLOCATED.load(Ordering::Relaxed));
+		COUNTING.store(true, Ordering::Relaxed);
 		for _ in 0..iterations {
 			run();
 		}
-		let per = |total: u64, start: u64| (total - start) as f64 / iterations.max(1) as f64;
+		COUNTING.store(false, Ordering::Relaxed);
+		let per = |total: &AtomicU64| total.load(Ordering::Relaxed) as f64 / iterations.max(1) as f64;
 		println!(
 			"{name}: {:.1} allocations, {:.0} bytes allocated per iteration",
-			per(ALLOCATIONS.load(Ordering::Relaxed), allocations),
-			per(ALLOCATED.load(Ordering::Relaxed), allocated),
+			per(&ALLOCATIONS),
+			per(&ALLOCATED),
 		);
 	} else {
 		let mut criterion = Criterion::default().configure_from_args();
