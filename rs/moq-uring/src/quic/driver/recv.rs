@@ -28,6 +28,7 @@ pub struct Stream {
 
 impl Stream {
 	pub(crate) fn new(shared: Shared, id: stream::Id) -> Self {
+		shared.hold();
 		Self {
 			shared,
 			id,
@@ -365,12 +366,12 @@ fn fill(chunks: &mut Chunks<'_>, buf: &mut impl BufMut) -> ReadStatus<usize> {
 impl Drop for Stream {
 	fn drop(&mut self) {
 		self.shared.forget_recv(self.id);
-		if self.all_data_read || self.shared.closed().is_some() {
-			return;
+		if !self.all_data_read && self.shared.closed().is_none() {
+			// Fails harmlessly once the stream is gone.
+			let _ = self.shared.conn.borrow_mut().recv_stream(self.id).stop(self.drop_stop);
+			self.shared.kick();
 		}
-		// Fails harmlessly once the stream is gone.
-		let _ = self.shared.conn.borrow_mut().recv_stream(self.id).stop(self.drop_stop);
-		self.shared.kick();
+		self.shared.release();
 	}
 }
 
