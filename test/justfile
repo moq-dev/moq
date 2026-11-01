@@ -64,13 +64,14 @@ harness:
 [positional-arguments]
 interop *args:
     cd .. && bun install --frozen-lockfile
-    just rs test -p moq-net --lib \
+    just rs test -p moq-net -p moq-sign --lib \
         auth_unsupported_interop \
         ietf_compression_fallback_interop \
         ietf_datagram_interop \
         ietf_track_status_interop \
         ietf_range_updates_interop \
         padding_interop \
+        sign_interop \
         tracks_interop \
         varint_interop \
         --run-ignored all

@@ -317,6 +317,8 @@ class Reader implements ResumeSource {
 	#last?: { largest?: track.Position; object?: track.Position; ended: true };
 	/** The first end any copy declared: the logical track's, whichever copy serves. */
 	#declared?: track.Position;
+	// The error a copy's end carried, kept with the boundary so releasing that copy keeps it.
+	#declaredError?: Error;
 	/** The subscriber's record of groups handed out, as the last read passed it. */
 	#delivered = new Delivered();
 	/** Runs the serving copy gave up and the reader has yet to report; see {@link #tryDrop}. */
@@ -1025,7 +1027,9 @@ class Reader implements ResumeSource {
 	#learnEnd(): track.Position | undefined {
 		for (const copy of this.#copies) {
 			const end = hooks.subscriberEnd(copy.sub);
-			if (end) this.#declare(end);
+			if (!end) continue;
+			this.#declare(end);
+			this.#declaredError ??= hooks.subscriberEndError(copy.sub);
 		}
 		const declared = this.#declared;
 		if (declared && !this.#closed) {
@@ -1079,6 +1083,13 @@ class Reader implements ResumeSource {
 	end(): track.Position | undefined {
 		this.sync();
 		return this.#learnEnd();
+	}
+
+	/** The error the logical track's end carries, if it does not end cleanly. */
+	endError(): Error | undefined {
+		this.sync();
+		this.#learnEnd();
+		return this.#declaredError;
 	}
 
 	async finished(): Promise<track.Position> {

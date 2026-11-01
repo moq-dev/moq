@@ -4,6 +4,18 @@ use web_transport_proto::{ConnectRequest, ConnectResponse, VarInt};
 
 use thiserror::Error;
 
+/// CONNECT headers can carry credentials under any name, so log only routing metadata.
+struct Request<'a>(&'a ConnectRequest);
+
+impl std::fmt::Debug for Request<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("ConnectRequest")
+			.field("url", &crate::RedactedUrl::new(&self.0.url))
+			.field("protocols", &self.0.protocols)
+			.finish()
+	}
+}
+
 #[derive(Error, Debug, Clone)]
 #[non_exhaustive]
 pub enum ConnectError {
@@ -46,7 +58,7 @@ impl Connecting {
 		let (send, mut recv) = conn.accept_bi().await?;
 
 		let request = web_transport_proto::ConnectRequest::read(&mut recv).await?;
-		tracing::debug!(?request, "received CONNECT request");
+		tracing::debug!(request = ?Request(&request), "received CONNECT request");
 
 		// The request was successfully decoded, so we can send a response.
 		Ok(Self { request, send, recv })
@@ -115,7 +127,7 @@ impl Connected {
 		// Create a new stream that will be used to send the CONNECT frame.
 		let (mut send, mut recv) = conn.open_bi(Default::default()).await?;
 
-		tracing::debug!(?request, "sending CONNECT request");
+		tracing::debug!(request = ?Request(&request), "sending CONNECT request");
 		request.write(&mut send).await?;
 
 		let response = web_transport_proto::ConnectResponse::read(&mut recv).await?;

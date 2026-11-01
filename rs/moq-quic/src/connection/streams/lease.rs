@@ -3,6 +3,7 @@
 
 use std::cmp::Reverse;
 use std::collections::VecDeque;
+use std::task::Poll;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 
@@ -11,6 +12,7 @@ use super::{ShouldTransmit, StreamEvent, StreamId};
 use super::{StreamsState, state::get_or_insert_recv};
 use crate::VarInt;
 use crate::connection::assembler::Assembler;
+use crate::connection::waits::Wait;
 
 /// The bytes of a receive stream read in order but not yet released.
 ///
@@ -329,6 +331,34 @@ impl Stream<'_> {
 		}
 	}
 
+	/// [`Self::lease()`], or wait for more to arrive
+	///
+	/// Pending registers `waiter` until more arrives, the stream ends, or an eviction fails it.
+	/// Bytes that arrived stay leasable after the connection is lost, and only then does this
+	/// fail with [`Error::ConnectionLost`]. As with [`Self::lease()`], transmit soon if the
+	/// returned [`ShouldTransmit::should_transmit()`] is `true`, whatever the result.
+	///
+	/// # Panics
+	/// - when the last lease of the stream was not handed back
+	#[must_use = "a lease may need a transmit"]
+	pub fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> (Poll<Result<Lease, Error>>, ShouldTransmit) {
+		let (result, transmit) = self.lease(want);
+		let poll = match result {
+			// A stuck window may have evicted this very stream, waking its readers before this
+			// one parked.
+			Err(Error::Blocked) if self.state.lease_mut(self.id).is_some_and(|lease| lease.evicted) => {
+				Poll::Ready(Err(Error::Evicted))
+			}
+			Err(Error::Blocked) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
+			Err(Error::Blocked) => {
+				self.state.waits.register(self.id, Wait::Read, waiter);
+				Poll::Pending
+			}
+			result => Poll::Ready(result),
+		};
+		(poll, transmit)
+	}
+
 	/// Hand a lease back, keeping the connection credit of the bytes read from it
 	///
 	/// They wait for a later [`Self::release()`], as the start of a message read only in part
@@ -629,7 +659,7 @@ impl StreamsState {
 		self.held -= leased;
 		self.unlooked.remove(&id);
 		self.evicted += 1;
-		self.events.push_back(StreamEvent::Readable { id });
+		self.notify(StreamEvent::Readable { id });
 		self.add_read_credits(leased + unread)
 	}
 

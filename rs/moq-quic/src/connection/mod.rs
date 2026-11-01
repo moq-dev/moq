@@ -7,6 +7,7 @@ use std::{
 	fmt, io, mem,
 	net::{IpAddr, SocketAddr},
 	sync::Arc,
+	task::Poll,
 };
 
 use bytes::{Bytes, BytesMut};
@@ -103,6 +104,8 @@ pub(crate) use streams::StreamsState;
 pub use streams::{ShouldTransmit, StreamEvent, Streams, recv, send};
 
 mod timer;
+
+pub(crate) mod waits;
 use crate::congestion::{self, Controller};
 use timer::{Timer, TimerTable};
 
@@ -417,6 +420,26 @@ impl Connection {
 	#[must_use]
 	pub fn poll_timeout(&self) -> Option<Instant> {
 		self.timers.next_timeout()
+	}
+
+	/// Wait for the handshake to complete
+	///
+	/// Ready once it did, even if the connection was lost since, or with the reason the
+	/// connection was lost first.
+	pub fn poll_connected(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.streams.waits.poll_connected(waiter)
+	}
+
+	/// Wait for the handshake to be confirmed, as [`poll_connected`](Self::poll_connected) does
+	pub fn poll_handshake_confirmed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.streams.waits.poll_confirmed(waiter)
+	}
+
+	/// Wait for the connection to be lost, returning why
+	///
+	/// A local [`close()`](Self::close) reports [`Error::LocallyClosed`].
+	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		self.streams.waits.poll_closed(waiter)
 	}
 
 	/// Returns application-facing events
@@ -1351,7 +1374,7 @@ impl Connection {
 	/// [`StreamEvent::Finished`]: crate::StreamEvent::Finished
 	pub fn close(&mut self, now: Instant, error_code: VarInt, reason: String) {
 		if !self.state.is_closed() {
-			self.error = Some(Error::LocallyClosed {
+			self.lose(Error::LocallyClosed {
 				code: error_code,
 				reason: reason.clone(),
 			});
@@ -1404,6 +1427,12 @@ impl Connection {
 		stats.credit = self.streams.credit_stats();
 
 		stats
+	}
+
+	/// The streams with a waiter entry, to prove the map stays bounded
+	#[cfg(test)]
+	pub(crate) fn waiting_streams(&self) -> usize {
+		self.streams.waits.stream_entries()
 	}
 
 	/// Assert that the receive lease books balance, for the fuzz target.
@@ -2565,7 +2594,7 @@ impl Connection {
 			// Preserve the original close reason once the connection has closed.
 			self.state = State::Drained;
 		} else if let Err(conn_err) = result {
-			self.error = Some(conn_err.clone());
+			self.lose(conn_err.clone());
 			self.state = match conn_err {
 				Error::ApplicationClosed(reason) => State::closed(reason),
 				Error::ConnectionClosed(reason) => State::closed(reason),
@@ -2775,10 +2804,12 @@ impl Connection {
 					self.spaces[SpaceId::Data].pending.handshake_done = true;
 					self.discard_space(now, SpaceId::Handshake);
 					self.events.push_back(Event::HandshakeConfirmed);
+					self.streams.waits.confirmed();
 					trace!("handshake confirmed");
 				}
 
 				self.events.push_back(Event::Connected);
+				self.streams.waits.connected();
 				self.state = State::Established;
 				// Swap the handshake idle timeout for the negotiated one.
 				self.reset_idle_timeout(now, SpaceId::Data);
@@ -2872,7 +2903,7 @@ impl Connection {
 				// appear in Initial or Handshake packets. An application close (0x1d) falls
 				// through to the catch-all arm below.
 				Frame::Close(reason @ Close::Connection(_)) => {
-					self.error = Some(reason.into());
+					self.lose(reason.into());
 					self.state = State::Draining;
 					return Ok(());
 				}
@@ -3117,6 +3148,7 @@ impl Connection {
 						.received(datagram, &self.config.datagram.receive_buffer)?
 					{
 						self.events.push_back(Event::DatagramReceived);
+						self.streams.waits.wake_datagram();
 					}
 				}
 				Frame::AckFrequency(ack_frequency) => {
@@ -3152,6 +3184,7 @@ impl Connection {
 						self.discard_space(now, SpaceId::Handshake);
 					}
 					self.events.push_back(Event::HandshakeConfirmed);
+					self.streams.waits.confirmed();
 					trace!("handshake confirmed");
 				}
 			}
@@ -3175,7 +3208,7 @@ impl Connection {
 		self.streams.queue_max_stream_id(pending);
 
 		if let Some(reason) = close {
-			self.error = Some(reason.into());
+			self.lose(reason.into());
 			self.state = State::Draining;
 			self.close = true;
 		}
@@ -3859,10 +3892,18 @@ impl Connection {
 		}
 	}
 
+	/// Record why the connection was lost, failing every wait once it drains what it can
+	///
+	/// [`Self::poll`] reports it once as [`Event::ConnectionLost`].
+	fn lose(&mut self, reason: Error) {
+		self.streams.waits.lose(reason.clone());
+		self.error = Some(reason);
+	}
+
 	/// Terminate the connection instantly, without sending a close packet
 	fn kill(&mut self, reason: Error) {
 		self.close_common();
-		self.error = Some(reason);
+		self.lose(reason);
 		self.state = State::Drained;
 		self.report_draining();
 		self.endpoint_events.push_back(EndpointEventInner::Drained);

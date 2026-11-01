@@ -4,6 +4,8 @@
 # them in order and streams their output. CHECK_MODULES limits the selection to
 # the modules it names, or skips those named with a leading `-`, so a gate too
 # large for one job splits across several.
+# CHECK_FAIL_FAST=1 stops every lane at the first failed module, for the land
+# gate, which ejects a failing batch either way and gains nothing from the rest.
 # `--query` prints the selection before CI installs its toolchain and caches.
 # `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
@@ -175,7 +177,7 @@ declare -A tools=(
     [toml]='taplo'
     [nix]='nixfmt'
     [justfile]=''
-    [gh]='actionlint bun python3 cargo clippy-driver dpkg-deb nfpm rpm'
+    [gh]='actionlint zizmor bun python3 cargo clippy-driver dpkg-deb nfpm rpm'
 )
 
 # CI and the local check share one selection and one lint/test dispatch.
@@ -289,6 +291,8 @@ fi
 # rs selects crates from the same list, or the whole workspace.
 rs_list=$changed
 [[ -z "$all" ]] || rs_list=--all
+rs_feature_scope=
+[[ "$action" != check ]] || rs_feature_scope=changed
 
 # large_files diffs against the same base, or checks every file.
 large_base=$base
@@ -316,8 +320,10 @@ step() {
         check:moq_sh) just infra moq-sh test ;;
         # The check keeps docs and target-specific lints; the test phase
         # enforces default-feature clippy without a second compile.
-        check:rs) just rs lint-changed "$rs_list" ;;
-        check:rs_shapes) just rs feature-shapes-changed "$rs_list" ;;
+        # Locally, the feature-contract checks skip the dependents of the
+        # changed crates; the landing worker keeps them (see sh/rs/select.sh).
+        check:rs) RS_FEATURE_SCOPE=$rs_feature_scope just rs lint-changed "$rs_list" ;;
+        check:rs_shapes) RS_FEATURE_SCOPE=$rs_feature_scope just rs feature-shapes-changed "$rs_list" ;;
         check:bench)
             python3 bench/compare.test.py
             bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
@@ -448,6 +454,7 @@ run_lane() {
                 record failed
                 ((lane_status)) || lane_status=$status
                 current=
+                [[ -z "${CHECK_FAIL_FAST:-}" ]] || return "$lane_status"
                 break
             fi
             record
@@ -518,10 +525,12 @@ trap 'exit 143' TERM
 # run's stderr as it starts and ends, so a run cut off mid-phase, such as by a
 # job timeout that never reaches this script, names the phase it stopped in.
 # Every lane completes even when another fails, so one unavailable check cannot
-# hide unrelated failures.
+# hide unrelated failures; under CHECK_FAIL_FAST the first failure cancels the
+# running lanes and starts no more.
 set -m
+stopping=
 while true; do
-    while [[ -z "$lone" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
+    while [[ -z "$lone$stopping" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
         name=${lanes[next]}
         if [[ -v "alone[$name]" ]] && ((${#running[@]})); then
             break
@@ -543,9 +552,13 @@ while true; do
     name=${running[$pid]}
     unset "running[$pid]"
     [[ "$pid" != "$lone" ]] || lone=
-    if ((status)); then
+    if ((status)) && [[ -z "$stopping" ]]; then
         failed+=("$name")
         ((failed_status)) || failed_status=$status
+        if [[ -n "${CHECK_FAIL_FAST:-}" ]]; then
+            stopping=1
+            cancel
+        fi
     fi
     ((limit == 1)) || cat "$logs/$name.log"
 done
