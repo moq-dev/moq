@@ -567,7 +567,7 @@ test("closing a reader ends a whole read of a stalled frame", async () => {
 	open.write(new Uint8Array(4));
 	const failing = aborted.readFrame();
 	const ending = closed.readFrame();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	hooks.releaseGroupReader(aborted, new Error("cancelled"));
 	closed.close();
 	await expect(failing).rejects.toThrow("cancelled");
@@ -644,7 +644,7 @@ test("a whole read of a frame being written collects it as it streams", async ()
 	const whole = reader.readFrame();
 	for (let written = 0; written < size; written += MiB) {
 		open.write(pattern(written, MiB));
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await yieldNow();
 	}
 	open.finish();
 	const frame = await whole;
@@ -678,7 +678,7 @@ test("a whole read grows with the bytes that arrive, never with the declared siz
 	const open = producer.createFrame({ size: 2 ** 50 });
 	open.write(new Uint8Array(1));
 	const whole = reader.readFrame();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	producer.abort(new Error("gone"));
 	await expect(whole).rejects.toThrow("gone");
 });
@@ -691,7 +691,7 @@ test("a whole read of a frame stalled partway fails with Old when its budget giv
 	const open = producer.createFrame({ size: 10 });
 	open.write(new Uint8Array(4));
 	const whole = reader.readFrame();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	expired.set(true);
 	await expect(whole).rejects.toMatchObject({ code: StreamCode.Old });
 	producer.abort(new Error("done"));
