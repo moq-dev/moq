@@ -204,6 +204,7 @@ rcgen = { version = "0.14", default-features = false }
 # features; nothing here wants the default native-tls stack.
 reqwest = { version = "0.13", default-features = false }
 rind = "0.1.2"
+rind-jsonwebtoken = "0.1.2"
 rind-object-store = "0.1.2"
 rind-rustls = "0.1.2"
 rustc-hash = "2.1.3"

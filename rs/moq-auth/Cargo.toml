@@ -12,26 +12,27 @@ rust-version.workspace = true
 [features]
 default = ["client"]
 # The HTTP client that drives a lease against an auth server.
-client = ["dep:reqwest", "dep:rustls", "dep:tokio", "kio/runtime", "dep:tracing", "dep:rand"]
+client = ["dep:reqwest", "dep:rind-rustls", "dep:rustls", "dep:rustls-platform-verifier", "dep:tokio", "kio/runtime", "dep:tracing", "dep:rand"]
 # The reference auth server behind `moq auth serve`: the policy a relay held, on axum.
 serve = ["dep:axum", "dep:tokio", "dep:tracing", "tokio/net"]
 
 [dependencies]
-aws-lc-rs = { workspace = true }
 axum = { workspace = true, optional = true }
 base64 = { workspace = true }
 data-encoding = { workspace = true }
-jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
+jsonwebtoken = { workspace = true }
 # `async` for `Shared::wait`, until moq-auth grows an `async` feature of its own.
 kio = { workspace = true, features = ["async", "serde"] }
 moq-pattern = { workspace = true, features = ["serde"] }
-p256 = "0.14.0"
-p384 = "0.14.0"
-pkcs1 = { workspace = true }
+pkcs1 = { workspace = true, features = ["std"] }
 pkcs8 = { workspace = true }
 rand = { workspace = true, optional = true }
-reqwest = { workspace = true, features = ["rustls", "json"], optional = true }
+reqwest = { workspace = true, features = ["rustls-no-provider", "json"], optional = true }
+rind = { workspace = true }
+rind-jsonwebtoken = { workspace = true }
+rind-rustls = { workspace = true, optional = true }
 rustls = { version = "0.23", default-features = false, optional = true }
+rustls-platform-verifier = { version = "0.7", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["base64"] }
@@ -42,6 +43,7 @@ url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 anyhow = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 kio = { path = "../kio", features = ["runtime", "sim"] }
 moq-auth = { path = ".", features = ["client", "serve"] }
 moq-auth-published = { package = "moq-auth", version = "=0.2.1", default-features = false }
@@ -50,6 +52,10 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-test = { workspace = true }
 wiremock = "0.6"
+
+[[bench]]
+name = "jwt"
+harness = false
 
 [lints]
 workspace = true

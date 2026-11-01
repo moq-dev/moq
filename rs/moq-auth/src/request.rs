@@ -95,7 +95,7 @@ impl Request {
 	/// `#[non_exhaustive]`, so this stays the way to build one as fields are added.
 	pub fn new(node: impl Into<String>, transport: Transport, path: impl Into<String>) -> Self {
 		let mut bytes = [0u8; 16];
-		aws_lc_rs::rand::fill(&mut bytes).expect("failed to generate a session id");
+		rind::rand::fill(&mut bytes).expect("failed to generate a session id");
 		let id: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
 		Self {
 			id,
