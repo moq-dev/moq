@@ -4,11 +4,11 @@
 //! what arrives, not what one subscriber asked for. A [`Window`] is the per-subscriber
 //! side: resolved at the hop serving the subscriber, it filters that subscriber's reads.
 
-use std::{collections::BTreeSet, ops};
+use std::{collections::BTreeSet, ops, sync::Arc};
 
 use rangemap::RangeInclusiveSet;
 
-use super::{Anchor, Range};
+use super::{Anchor, Layered, Range, Runs};
 use crate::{Error, Result, Timestamp};
 
 /// One range resolved to groups: from `start` up to the exclusive `end`, `None` while it
@@ -123,14 +123,12 @@ pub(in crate::model) struct Window {
 	spans: Vec<Span>,
 	/// The unsettled time ends, grouped by walk.
 	walks: Vec<Walk>,
-	/// The groups the spans cover, an unsettled time end through its cap.
-	groups: RangeInclusiveSet<u64>,
-	/// The part of `groups` a miss may ask for: see [`Self::missable`].
-	missable: RangeInclusiveSet<u64>,
-	/// What `groups` and `missable` hold outside the walks: every settled span, and what the
-	/// walks have put in range for good. Kept so a walk that moves rebuilds only the walks.
-	fixed: RangeInclusiveSet<u64>,
-	fixed_missable: RangeInclusiveSet<u64>,
+	/// The groups the spans cover, an unsettled time end through its cap: every settled span
+	/// in the fixed runs, shared with what reads them, and one run per walk layered over
+	/// them, so a walk that moves rebuilds only the layer.
+	groups: Layered,
+	/// The part of `groups` a miss may ask for, layered the same way: see [`Self::missable`].
+	missable: Layered,
 	/// A relative anchor waits on a first group, so nothing is filtered yet.
 	pending: bool,
 	/// Nothing is left to resolve: see [`Self::is_settled`]. Kept so a read checks it once
@@ -185,6 +183,10 @@ struct Walk {
 	/// The ends sharing it, earliest first.
 	ends: BTreeSet<Ending>,
 	trail: Trail,
+	/// The lowest group any of its spans reads, and the lowest a miss asks for: each span
+	/// reads on from its start up to the cap, so the walk's groups are one run from here.
+	low: u64,
+	low_reach: u64,
 	/// The cap when the settle under way began, inherited by the walks split off since, so
 	/// each knows whether the groups it reads moved.
 	was: Option<u64>,
@@ -221,8 +223,8 @@ impl Eq for Ending {}
 /// are equal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct Trail {
-	/// The lowest group the walk reads. Each of its spans starts here, or at or below
-	/// `known`, below which [`Walk::fix`] holds the groups in range for good.
+	/// The lowest group the walk has yet to put in range for good. Each of its spans starts
+	/// here, or at or below `known`, past which [`Walk::fix`] moves it.
 	floor: u64,
 	/// The lowest group a miss asks for in what the walk reads: a time start before every
 	/// group held asks none below the oldest, since which of them it reaches is unknown
@@ -268,15 +270,6 @@ impl Trail {
 			None => Some(self.floor),
 		}
 	}
-
-	/// The groups the walk reads now, `None` for none.
-	fn reads(&self) -> Option<ops::RangeInclusive<u64>> {
-		let last = match self.limit {
-			Some(end) => end.checked_sub(1).filter(|last| *last >= self.floor)?,
-			None => u64::MAX,
-		};
-		Some(self.floor..=last)
-	}
 }
 
 impl Walk {
@@ -298,6 +291,8 @@ impl Walk {
 		forks.push(Walk {
 			ends: std::mem::replace(&mut self.ends, rest),
 			trail: self.trail,
+			low: self.low,
+			low_reach: self.low_reach,
 			was: self.was,
 		});
 		false
@@ -420,23 +415,37 @@ impl Walk {
 		self.trail.after
 	}
 
-	/// Hold what the walk has put in range for good in the window's fixed groups, so it
-	/// reads only from above `known` on. The groups in range stay the same.
-	fn fix(&mut self, groups: &mut RangeInclusiveSet<u64>, missable: &mut RangeInclusiveSet<u64>) {
+	/// Walk on only from above `known`, what the walk has put in range for good staying in
+	/// its run from [`Self::low`]. Walks that started apart then agree once they get here.
+	fn fix(&mut self) {
 		let Some(known) = self.trail.known else { return };
 		if self.trail.floor > known {
 			return;
-		}
-		groups.insert(self.trail.floor..=known);
-		if self.trail.reach <= known {
-			missable.insert(self.trail.reach..=known);
 		}
 		self.trail.floor = known.saturating_add(1);
 		self.trail.reach = self.trail.reach.max(self.trail.floor);
 	}
 
-	/// Take on `other`'s ends, its trail being this one's.
+	/// The walk's groups now, and the part a miss may ask for: one run each, from where its
+	/// spans start up to its cap. Everything from `low` up to `known` is in range for good,
+	/// and the cap never falls below it.
+	fn runs(&self) -> (Option<ops::RangeInclusive<u64>>, Option<ops::RangeInclusive<u64>>) {
+		let last = match self.trail.limit {
+			Some(end) => end.checked_sub(1).filter(|last| *last >= self.low),
+			None => Some(u64::MAX),
+		};
+		let Some(last) = last else {
+			return (None, None);
+		};
+		let missable = (self.low_reach <= last).then_some(self.low_reach..=last);
+		(Some(self.low..=last), missable)
+	}
+
+	/// Take on `other`'s ends, its trail being this one's. Both runs end where the trails
+	/// put them, so the merged runs start at the lower of each.
 	fn merge(&mut self, mut other: Walk) {
+		self.low = self.low.min(other.low);
+		self.low_reach = self.low_reach.min(other.low_reach);
 		if other.ends.len() > self.ends.len() {
 			std::mem::swap(&mut self.ends, &mut other.ends);
 		}
@@ -454,10 +463,8 @@ impl Window {
 			ranges: ranges.to_vec(),
 			spans: Vec::new(),
 			walks: Vec::new(),
-			groups: RangeInclusiveSet::new(),
-			missable: RangeInclusiveSet::new(),
-			fixed: RangeInclusiveSet::new(),
-			fixed_missable: RangeInclusiveSet::new(),
+			groups: Layered::default(),
+			missable: Layered::default(),
 			pending: false,
 			settled: false,
 			covered: None,
@@ -509,16 +516,17 @@ impl Window {
 			walk.was = walk.trail.limit;
 		}
 		let mut kept = Vec::with_capacity(walks.len());
+		// What settles joins the fixed runs, which readers share: copied once per settle.
+		let (mut groups, mut missable) = (Vec::new(), Vec::new());
 		while let Some(mut walk) = walks.pop() {
 			match walk.advance(holdings, &mut walks) {
 				Some(end) => {
 					moved = true;
-					let trail = walk.trail;
-					if trail.floor < end {
-						self.fixed.insert(trail.floor..=end - 1);
+					if walk.low < end {
+						groups.push(walk.low..=end - 1);
 					}
-					if trail.reach < end {
-						self.fixed_missable.insert(trail.reach..=end - 1);
+					if walk.low_reach < end {
+						missable.push(walk.low_reach..=end - 1);
 					}
 					for ending in walk.ends {
 						self.spans[ending.span].end = End::Before(end);
@@ -526,9 +534,21 @@ impl Window {
 				}
 				None => {
 					moved |= walk.trail.limit != walk.was;
-					walk.fix(&mut self.fixed, &mut self.fixed_missable);
+					walk.fix();
 					kept.push(walk);
 				}
+			}
+		}
+		if !groups.is_empty() {
+			let fixed = self.groups.fixed_mut();
+			for run in groups {
+				fixed.insert(run);
+			}
+		}
+		if !missable.is_empty() {
+			let fixed = self.missable.fixed_mut();
+			for run in missable {
+				fixed.insert(run);
 			}
 		}
 		kept.sort_unstable_by_key(|walk| walk.trail);
@@ -555,7 +575,7 @@ impl Window {
 
 	/// Whether group `sequence` is in range. Everything is while a relative anchor waits.
 	pub fn contains(&self, sequence: u64) -> bool {
-		self.pending || self.groups.contains(&sequence)
+		self.pending || self.groups.contains(sequence)
 	}
 
 	/// Whether a datagram is in range, judged on its own and never through a time end's
@@ -573,7 +593,7 @@ impl Window {
 	pub fn floor(&self) -> Option<u64> {
 		match self.pending {
 			true => None,
-			false => Some(self.groups.iter().next().map_or(0, |run| *run.start())),
+			false => Some(self.groups.lowest().unwrap_or(0)),
 		}
 	}
 
@@ -631,8 +651,8 @@ impl Window {
 		if !self.settled {
 			return None;
 		}
-		match self.groups.iter().next_back() {
-			Some(run) => run.end().checked_add(1),
+		match self.groups.highest() {
+			Some(last) => last.checked_add(1),
 			None => Some(0),
 		}
 	}
@@ -676,18 +696,20 @@ impl Window {
 		self.from(&self.missable, from)
 	}
 
-	fn from<'a>(
-		&'a self,
-		groups: &'a RangeInclusiveSet<u64>,
-		from: u64,
-	) -> impl Iterator<Item = ops::RangeInclusive<u64>> + 'a {
+	fn from<'a>(&'a self, groups: &'a Layered, from: u64) -> impl Iterator<Item = ops::RangeInclusive<u64>> + 'a {
 		let all = self.pending.then_some(from..=u64::MAX);
-		let runs = (!self.pending).then(|| {
-			groups
-				.overlapping(from..=u64::MAX)
-				.map(move |run| (*run.start()).max(from)..=*run.end())
-		});
+		let runs = (!self.pending).then(|| groups.runs(from));
 		all.into_iter().chain(runs.into_iter().flatten())
+	}
+
+	/// The groups in range, `None` while a relative anchor waits and every group is.
+	pub fn groups(&self) -> Option<&Layered> {
+		(!self.pending).then_some(&self.groups)
+	}
+
+	/// The groups a miss may ask for, as [`Self::groups`].
+	pub fn missable_groups(&self) -> Option<&Layered> {
+		(!self.pending).then_some(&self.missable)
 	}
 
 	/// The first run of `range` that is in range.
@@ -696,7 +718,7 @@ impl Window {
 		if self.pending {
 			return Some(range);
 		}
-		let run = self.groups.overlapping(range.start..=last).next()?;
+		let run = self.groups.first(range.start, last)?;
 		let end = match run.end().checked_add(1) {
 			Some(end) => end.min(range.end),
 			None => range.end,
@@ -719,8 +741,7 @@ impl Window {
 		}
 		self.spans.clear();
 		self.walks.clear();
-		self.fixed = RangeInclusiveSet::new();
-		self.fixed_missable = RangeInclusiveSet::new();
+		let (mut fixed, mut fixed_missable) = (RangeInclusiveSet::new(), RangeInclusiveSet::new());
 		self.pending = false;
 		// The time ends that start alike walk alike, until a group starts between them.
 		let mut walks = std::collections::BTreeMap::<(u64, u64), BTreeSet<Ending>>::new();
@@ -748,9 +769,9 @@ impl Window {
 			if let Some(last) = limit.map_or(Some(u64::MAX), |end| end.checked_sub(1))
 				&& last >= start
 			{
-				self.fixed.insert(start..=last);
+				fixed.insert(start..=last);
 				if reach <= last {
-					self.fixed_missable.insert(reach..=last);
+					fixed_missable.insert(reach..=last);
 				}
 			}
 			self.spans.push(Span {
@@ -768,11 +789,15 @@ impl Window {
 			.map(|span| span.start)
 			.min();
 		self.all_named = self.spans.iter().all(|span| span.floored);
+		self.groups = Layered::new(Arc::new(Runs::new(fixed)), Runs::default());
+		self.missable = Layered::new(Arc::new(Runs::new(fixed_missable)), Runs::default());
 		self.walks = walks
 			.into_iter()
 			.map(|((start, reach), ends)| Walk {
 				ends,
 				trail: Trail::new(start, reach),
+				low: start,
+				low_reach: reach,
 				was: Some(start),
 			})
 			.collect();
@@ -781,20 +806,14 @@ impl Window {
 		Ok(())
 	}
 
-	/// The groups in range: the fixed ones, and those each walk reads now.
+	/// The groups in range: the fixed ones, and the run each walk reads now layered over
+	/// them. Costs the walks, never the fixed runs.
 	fn rebuild(&mut self) {
 		self.covered = None;
 		self.settled = !self.pending && self.walks.is_empty();
-		self.groups = self.fixed.clone();
-		self.missable = self.fixed_missable.clone();
-		for walk in &self.walks {
-			let Some(reads) = walk.trail.reads() else { continue };
-			// A walk's reach is never below its floor.
-			if walk.trail.reach <= *reads.end() {
-				self.missable.insert(walk.trail.reach..=*reads.end());
-			}
-			self.groups.insert(reads);
-		}
+		let (groups, missable): (Vec<_>, Vec<_>) = self.walks.iter().map(Walk::runs).unzip();
+		self.groups.set_layer(Runs::new(groups.into_iter().flatten()));
+		self.missable.set_layer(Runs::new(missable.into_iter().flatten()));
 	}
 }
 

@@ -27,6 +27,7 @@ use std::{
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 use super::super::delivered::Delivered;
+use super::super::subscription::Layered;
 pub(super) use super::fill::Asking;
 use super::fill::{Ask, FillState, Join};
 use super::{Drift, Order, Position, TrackState};
@@ -68,8 +69,12 @@ pub(super) struct Misses {
 	filled: BTreeSet<u64>,
 	/// Never asked again: named dropped to the reader.
 	given_up: RangeSet<u64>,
-	/// The window revision and cap what this holds was last clipped to.
-	clipped: Option<(u64, Option<u64>)>,
+	/// The window revision and cap what this holds was last clipped to, with the window's
+	/// missable groups then, `None` while every group was.
+	clipped: Option<(u64, Option<u64>, Option<Layered>)>,
+	/// The window's missable groups the last probe judged against, `None` while every group
+	/// was, so a move of only its time ends' runs judges only what they moved over.
+	view: Option<Layered>,
 	/// Where the track leaves what it evicts that this reader judged cached, once it judged.
 	inbox: Option<Inbox>,
 	/// The track's eviction count this reader last emptied its inbox at.
@@ -191,6 +196,25 @@ impl Misses {
 		}
 	}
 
+	/// The highest sequence still to come from a fill.
+	fn highest(&self) -> Option<u64> {
+		let wanted = self.wanted.iter().next_back().map(|run| run.end - 1);
+		wanted.max(self.filled.last().copied())
+	}
+
+	/// Forget `lost`, which the reader no longer reads: its fills no longer owe it those
+	/// groups.
+	fn lose(&mut self, lost: &RangeSet<u64>) {
+		for run in lost.iter() {
+			let filled: Vec<u64> = self.filled.range(run.clone()).copied().collect();
+			for sequence in filled {
+				self.filled.remove(&sequence);
+			}
+			self.wanted.remove(run.clone());
+		}
+		self.release(lost);
+	}
+
 	/// Whether a fill still owes this reader a group.
 	pub fn is_waiting(&self) -> bool {
 		!self.wanted.is_empty()
@@ -295,28 +319,46 @@ impl Misses {
 	}
 
 	/// Forget what the reader no longer reads: below `from`, or outside `admitted`, its window
-	/// at `revision` below the exclusive `cap`. Its fills no longer owe it those groups, and one
-	/// nobody waits on is withdrawn once its last join goes.
+	/// at `revision` below the exclusive `cap`, whose missable groups are `view`. Its fills no
+	/// longer owe it those groups, and one nobody waits on is withdrawn once its last join goes.
 	///
 	/// Clips to the window only once it moves, since everything taken in since lies inside it,
-	/// so a poll under the same window costs only what falls below a raised floor.
+	/// so a poll under the same window costs only what falls below a raised floor. A move of
+	/// only the window's time ends costs what their runs no longer cover where this holds
+	/// anything, never every run of the window.
 	pub fn retain(
 		&mut self,
 		(from, revision, cap): (u64, u64, Option<u64>),
+		view: Option<&Layered>,
 		admitted: impl FnOnce() -> RangeInclusiveSet<u64>,
 	) {
-		let clipped = self.clipped.replace((revision, cap));
+		let clipped = self.clipped.replace((revision, cap, view.cloned()));
 		// A join holds only what is still wanted or filled.
 		let Some(lowest) = self.lowest() else {
 			return;
 		};
-		if clipped == Some((revision, cap)) {
+		let moved = match &clipped {
+			Some((clipped, at, _)) if (*clipped, *at) == (revision, cap) => Some(Vec::new()),
+			Some((_, at, Some(old))) if *at == cap => {
+				let highest = self.highest().unwrap_or(lowest);
+				view.and_then(|view| old.gained(view, from, highest))
+			}
+			_ => None,
+		};
+		if let Some(lost) = moved {
 			if lowest < from {
 				self.filled = self.filled.split_off(&from);
 				self.wanted.remove(0..from);
 				let mut below = RangeSet::new();
 				below.insert(0..from);
 				self.release(&below);
+			}
+			let lost: RangeSet<u64> = lost
+				.into_iter()
+				.map(|run| *run.start()..run.end().saturating_add(1))
+				.collect();
+			if !lost.is_empty() {
+				self.lose(&lost);
 			}
 			return;
 		}
@@ -448,6 +490,7 @@ impl Misses {
 		&mut self,
 		state: &TrackState,
 		key: (u64, u64, Option<u64>),
+		view: Option<&Layered>,
 		named: Option<u64>,
 		mut target: impl FnMut(RangeInclusive<u64>) -> RangeInclusiveSet<u64>,
 		taken: &Delivered,
@@ -500,8 +543,18 @@ impl Misses {
 			state.cache.watch_wall(at, waiter);
 			return asks;
 		}
+		// A window that moved only its time ends' runs keeps its fixed runs, so only what those
+		// runs moved over is judged again below.
+		let layered = match (&self.view, view) {
+			(Some(old), Some(view)) if old.shares_fixed(view) => Some((old.clone(), view)),
+			_ => None,
+		};
 		let terms = self.at.is_none_or(|previous| {
-			previous.1 != at.1 || previous.2 != at.2 || previous.4 != at.4 || previous.5 != at.5 || at.0 < previous.0
+			(previous.1 != at.1 && layered.is_none())
+				|| previous.2 != at.2
+				|| previous.4 != at.4
+				|| previous.5 != at.5
+				|| at.0 < previous.0
 		}) || self.budget != Some(drift.budget)
 			|| self.grace != Some(grace)
 			|| self.ended != ended;
@@ -551,6 +604,34 @@ impl Misses {
 					set.remove(0..low);
 				}
 				self.deferred.remove(0..low);
+			}
+			// What the time ends' runs no longer cover is forgotten, and what they newly cover
+			// judged, within what the probe judges: from the floor up to the newest group,
+			// below the cap.
+			let last = key
+				.2
+				.map_or(Some(top), |cap| cap.checked_sub(1).map(|cap| cap.min(top)));
+			if let Some((old, view)) = &layered
+				&& let Some(last) = last
+				&& self.at.is_some_and(|previous| previous.1 != at.1)
+			{
+				let half = |run: RangeInclusive<u64>| *run.start()..run.end().saturating_add(1);
+				for run in old.gained(view, low, last).into_iter().flatten().map(half) {
+					for set in [
+						&mut self.judged,
+						&mut self.refused,
+						&mut self.given_up,
+						&mut self.refilled,
+					] {
+						set.remove(run.clone());
+					}
+					self.deferred.remove(run);
+				}
+				for run in view.gained(old, low, last).into_iter().flatten().map(half) {
+					for fresh in self.judged.gaps(&run) {
+						candidates.insert(fresh);
+					}
+				}
 			}
 			let first = self
 				.at
@@ -658,6 +739,7 @@ impl Misses {
 		self.grace = Some(grace);
 		self.ended = ended;
 		self.at = Some(at);
+		self.view = view.cloned();
 		for run in candidates.iter() {
 			self.deferred.remove(run.clone());
 			self.judged.insert(run.clone());
@@ -1088,6 +1170,7 @@ mod tests {
 			&state,
 			(0, 0, None),
 			None,
+			None,
 			|span| [span].into_iter().collect(),
 			&Delivered::default(),
 			&drift,
@@ -1128,6 +1211,7 @@ mod tests {
 			&state,
 			(0, 0, None),
 			None,
+			None,
 			|_| panic!("the edge has not moved"),
 			&Delivered::default(),
 			&drift,
@@ -1152,6 +1236,7 @@ mod tests {
 		misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			None,
 			|_| panic!("recreation extends no span"),
 			&Delivered::default(),
@@ -1224,6 +1309,7 @@ mod tests {
 			&state,
 			(0, 0, None),
 			None,
+			None,
 			|span| [span].into_iter().collect(),
 			&Delivered::default(),
 			&drift,
@@ -1257,6 +1343,7 @@ mod tests {
 		let asks = misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			None,
 			|_| panic!("the edge has not moved"),
 			&Delivered::default(),
@@ -1295,6 +1382,7 @@ mod tests {
 					&state,
 					(0, 0, None),
 					None,
+					None,
 					|span| [span].into_iter().collect(),
 					&Delivered::default(),
 					&drift,
@@ -1310,6 +1398,7 @@ mod tests {
 				.judge(
 					&state,
 					(0, 0, None),
+					None,
 					None,
 					|_| panic!("an unchanged probe rebuilds no span"),
 					&Delivered::default(),
@@ -1332,6 +1421,7 @@ mod tests {
 					&state,
 					(0, 0, None),
 					None,
+					None,
 					|_| panic!("a late arrival extends no span"),
 					&Delivered::default(),
 					&drift,
@@ -1348,6 +1438,7 @@ mod tests {
 		let asks = misses.judge(
 			&state,
 			(0, 0, None),
+			None,
 			None,
 			|_| panic!("a due gap extends no span"),
 			&Delivered::default(),
@@ -1391,6 +1482,7 @@ mod tests {
 					&state,
 					(0, 0, None),
 					None,
+					None,
 					full,
 					&Delivered::default(),
 					&drift,
@@ -1411,6 +1503,7 @@ mod tests {
 				.judge(
 					&state,
 					(0, 0, None),
+					None,
 					None,
 					|_| panic!("nothing deferred: the new grace waits for a change"),
 					&Delivered::default(),
@@ -1434,6 +1527,7 @@ mod tests {
 				.judge(
 					&state,
 					(0, 0, None),
+					None,
 					None,
 					full,
 					&Delivered::default(),
