@@ -625,3 +625,24 @@ fn transmit_hears_resets_stops_and_refused_opens() {
 	pair.client_conn_mut(client_ch).recv_stream(t).stop(VarInt(9)).unwrap();
 	assert_eq!(driver.wakes(), 3, "STOP_SENDING");
 }
+
+/// A local address change queues a PING, and wakes the driver for it.
+#[test]
+fn transmit_hears_a_local_address_change() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, _) = pair.connect();
+
+	let driver = Counter::new();
+	park_transmit(&mut pair, client_ch, &driver);
+	pair.client_conn_mut(client_ch).local_address_changed();
+	assert_eq!(driver.wakes(), 1, "PING");
+	// The PING is what it finds to send.
+	let now = pair.time;
+	let mut buf = Vec::new();
+	assert!(
+		pair.client_conn_mut(client_ch)
+			.poll_transmit(&driver, now, 1, &mut buf)
+			.is_ready()
+	);
+}

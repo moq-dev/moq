@@ -539,9 +539,11 @@ impl Connection {
 	/// Returns packets to transmit, or waits for something to send
 	///
 	/// Pending registers `waiter` until the application queues something: a write, a finish, a
-	/// reset or stop, a refused open, returned credit, a datagram, new limits, or a close. Only
-	/// the application's calls wake it. Poll again after a call to `handle_event` or
-	/// `handle_timeout`, and at [`Self::poll_timeout`], which covers pacing and loss recovery.
+	/// reset or stop, a refused open, returned credit, a datagram, new limits, a local address
+	/// change, or a close. Only the application's calls wake it. Poll again after a call to
+	/// `handle_event` or `handle_timeout`, and at [`Self::poll_timeout`], which covers pacing and
+	/// loss recovery. A new probe target waits for the next poll, since probing only resends data
+	/// in flight.
 	///
 	/// `max_datagrams` specifies how many datagrams can be returned inside a
 	/// single Transmit using GSO. This must be at least 1.
@@ -3407,6 +3409,8 @@ impl Connection {
 	pub fn local_address_changed(&mut self) {
 		self.update_rem_cid();
 		self.ping();
+		// The PING and any RETIRE_CONNECTION_ID are due now.
+		self.streams.waits.wake_transmit();
 	}
 
 	/// Switch to a previously unused remote connection ID, if possible

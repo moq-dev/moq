@@ -50,16 +50,17 @@ struct State {
 	/// own reason once it is set, since it can say more (the transport's I/O error, say).
 	///
 	/// The connection's `poll_closed` resolves the moment it is closed, but a close this side
-	/// asked for is published here only once the writer delivered it and shut the transport
-	/// (see `local_close`), so [`Session`]'s `poll_closed` keeps this latch and its own list.
+	/// asked for is published here only once the writer delivered it and shut the transport, or
+	/// gave up after [`CLOSE_TIMEOUT`] (see `local_close`), so [`Session`]'s `poll_closed` keeps
+	/// this latch and its own list.
 	/// Only the writer knows when the close frame reached the transport, which the sans-I/O
 	/// connection cannot see, and a caller may exit the moment `poll_closed` resolves, so
 	/// publishing earlier would leave the frame unwritten.
 	closed: Option<Error>,
 	closed_waiters: kio::WaiterList,
 	/// The error for a close this side asked for, published once the writer has delivered
-	/// the close frame, so a caller that exits the moment `poll_closed` resolves already
-	/// handed it to the transport.
+	/// the close frame or gave up on a stalled one, so a caller that exits the moment
+	/// `poll_closed` resolves already handed it to the transport.
 	local_close: Option<Error>,
 
 	sent_bytes: u64,
