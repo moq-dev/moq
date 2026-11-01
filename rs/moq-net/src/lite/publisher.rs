@@ -8317,7 +8317,7 @@ mod tests {
 
 		let mut script = Vec::new();
 		lite::Track {
-			epoch: None,
+			identity: None,
 			broadcast: crate::Path::from_static("room"),
 			track: "video".into(),
 		}

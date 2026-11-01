@@ -4281,7 +4281,7 @@ mod tests {
 			route: None,
 			subscriber,
 			path: Path::from_static("room"),
-			epoch: None,
+			identity: None,
 			name: "video".to_string(),
 		};
 		let broadcast = crate::broadcast::Info::new().produce();
@@ -4351,7 +4351,7 @@ mod tests {
 				route: None,
 				subscriber,
 				path: Path::from_static("room"),
-				epoch: None,
+				identity: None,
 				name: "video".to_string(),
 			};
 			let broadcast = crate::broadcast::Info::new().produce();
@@ -4760,7 +4760,7 @@ mod tests {
 			route: None,
 			subscriber: subscriber.clone(),
 			path: Path::from_static("room"),
-			epoch: None,
+			identity: None,
 			name: "video".to_string(),
 		};
 		(waiting, TrackServeRun::new(serve, request))
