@@ -5,6 +5,8 @@ import * as Pattern from "./pattern";
 // The oracle is the browser's own decoder: ffmpeg renders the filters and decode must name every
 // frame, so the native picture cannot drift from the one the fixture paints.
 const ffmpeg = Bun.which("ffmpeg");
+// ffmpeg renders thousands of frames synchronously; a loaded CI host outlasts bun's 5s default.
+const FFMPEG_TIMEOUT_MS = 60_000;
 
 function render(args: string[]): Uint8Array {
 	const run = Bun.spawnSync([ffmpeg ?? "ffmpeg", "-hide_banner", "-loglevel", "error", ...args]);
@@ -44,7 +46,7 @@ test.skipIf(!ffmpeg)("the native picture decodes as the frame ffmpeg numbered it
 		expect(decoded.map((d) => d?.generation)).toEqual(wanted.map(() => 2));
 		expect(decoded.map((d) => d?.frameId)).toEqual(wanted.map((n) => n % 2 ** Pattern.FRAME_BITS));
 	}
-});
+}, FFMPEG_TIMEOUT_MS);
 
 test.skipIf(!ffmpeg)("the native tone plays each step's frequency for its whole step", () => {
 	const rate = 48_000;
@@ -80,4 +82,4 @@ test.skipIf(!ffmpeg)("the native tone plays each step's frequency for its whole 
 	let jump = 0;
 	for (let i = 1; i < samples.length; i++) jump = Math.max(jump, Math.abs(samples[i] - samples[i - 1]));
 	expect(jump).toBeLessThan(limit);
-});
+}, FFMPEG_TIMEOUT_MS);
