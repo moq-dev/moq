@@ -143,7 +143,10 @@ mod tests {
 
 	async fn serve_auth(listener: &tokio::net::TcpListener, tls: &rustls::ServerConfig) -> Option<moq_auth::Request> {
 		let (stream, _) = listener.accept().await.unwrap();
-		let Ok(mut stream) = tokio_rustls::TlsAcceptor::from(Arc::new(tls.clone())).accept(stream).await else {
+		let Ok(mut stream) = tokio_rustls::TlsAcceptor::from(Arc::new(tls.clone()))
+			.accept(stream)
+			.await
+		else {
 			return None;
 		};
 		let request = read_request(&mut stream).await;
