@@ -5,7 +5,7 @@ use std::{
 	convert::TryInto,
 	iter, mem,
 	net::{Ipv4Addr, Ipv6Addr, SocketAddr},
-	num::NonZeroU64,
+	num::{NonZeroU32, NonZeroU64},
 	sync::{
 		Arc, Mutex,
 		atomic::{AtomicU64, Ordering},
@@ -45,6 +45,7 @@ mod acked;
 mod characterize;
 mod probe;
 mod rate;
+mod receive_ts;
 mod reset_stream_at;
 mod sim;
 mod token;
@@ -67,6 +68,7 @@ fn pending_incoming_survives_server_config_change() {
 				local_ip: None,
 				ecn,
 				data: data.clone(),
+				arrival: None,
 			},
 			&mut response,
 		) else {
@@ -83,7 +85,8 @@ fn pending_incoming_survives_server_config_change() {
 						remote: pair.client.addr,
 						local_ip: None,
 						ecn,
-						data
+						data,
+						arrival: None,
 					},
 					&mut response
 				)
@@ -146,6 +149,7 @@ fn version_negotiate_server() {
 			local_ip: None,
 			ecn: None,
 			data: header[..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -161,6 +165,7 @@ fn version_negotiate_server() {
 			local_ip: None,
 			ecn: None,
 			data: packet[..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -217,6 +222,7 @@ fn version_negotiate_client() {
                  0a1a2a3a"
 			)[..]
 				.into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -306,6 +312,7 @@ fn connect_before_the_finished_leaves(pair: &mut Pair, config: client::Config) -
 				local_ip: None,
 				ecn,
 				data: packet,
+				arrival: None,
 			},
 			&mut buf,
 		) else {
@@ -668,6 +675,7 @@ fn reset_secret_resets_connections_each_millisecond() {
 				local_ip: None,
 				ecn: None,
 				data: packet[..].into(),
+				arrival: None,
 			},
 			&mut buf,
 		);
@@ -682,6 +690,7 @@ fn reset_secret_resets_connections_each_millisecond() {
 				local_ip: None,
 				ecn: None,
 				data: packet[..].into(),
+				arrival: None,
 			},
 			&mut buf,
 		);
@@ -838,6 +847,7 @@ fn stateless_reset_limit() {
 			local_ip: None,
 			ecn: None,
 			data: [0u8; 1024][..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -849,6 +859,7 @@ fn stateless_reset_limit() {
 			local_ip: None,
 			ecn: None,
 			data: [0u8; 1024][..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -860,6 +871,7 @@ fn stateless_reset_limit() {
 			local_ip: None,
 			ecn: None,
 			data: [0u8; 1024][..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -871,6 +883,7 @@ fn stateless_reset_limit() {
 			local_ip: None,
 			ecn: None,
 			data: [0u8; 1024][..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -2678,7 +2691,6 @@ fn keep_alive_derives_from_a_shorter_peer_idle_timeout() {
 	const PEER: Duration = Duration::from_secs(2);
 	let mut server = server_config();
 	server.transport.idle_timeout = Some(PEER);
-	server.transport.keep_alive = Some(Duration::ZERO);
 	let mut client = client_config();
 	client.transport.idle_timeout = Some(Duration::from_secs(10));
 	let mut pair = Pair::new(Default::default(), server);
@@ -2696,7 +2708,6 @@ fn keep_alive_follows_the_local_idle_timeout() {
 	for local in [Duration::from_secs(10), Duration::from_secs(5)] {
 		let mut server = server_config();
 		server.transport.idle_timeout = Some(Duration::from_secs(30));
-		server.transport.keep_alive = Some(Duration::ZERO);
 		let mut client = client_config();
 		client.transport.idle_timeout = Some(local);
 		let mut pair = Pair::new(Default::default(), server);
@@ -2710,15 +2721,14 @@ fn keep_alive_follows_the_local_idle_timeout() {
 }
 
 /// An explicit keep-alive no shorter than the negotiated idle timeout is capped at the derived
-/// interval, and zero sends none.
+/// interval, and zero uses that same default.
 #[test]
-fn keep_alive_explicit_cap_and_disable() {
+fn keep_alive_explicit_cap_and_default() {
 	let _guard = subscribe();
 	const IDLE: Duration = Duration::from_secs(2);
 	let connect = |keep_alive| {
 		let mut server = server_config();
 		server.transport.idle_timeout = Some(IDLE);
-		server.transport.keep_alive = Some(Duration::ZERO);
 		let mut client = client_config();
 		client.transport.keep_alive = Some(keep_alive);
 		let mut pair = Pair::new(Default::default(), server);
@@ -2730,23 +2740,10 @@ fn keep_alive_explicit_cap_and_disable() {
 	let gaps = idle_keep_alive_gaps(&mut pair, client_ch, server_ch, IDLE);
 	assert!(gaps.iter().all(|&gap| gap * 3 < IDLE), "{gaps:?}");
 
-	let (mut pair, client_ch, _) = connect(Duration::ZERO);
-	let start = pair.time;
-	while !pair.client_conn_mut(client_ch).is_closed() {
-		if !pair.step() {
-			let Some(time) = min_opt(pair.client.next_wakeup(), pair.server.next_wakeup()) else {
-				break;
-			};
-			pair.time = time;
-		}
-	}
-	assert_matches!(
-		pair.client_conn_mut(client_ch).poll(),
-		Some(Event::ConnectionLost {
-			reason: ConnectionError::TimedOut
-		})
-	);
-	assert!(pair.time - start < 2 * IDLE, "{:?}", pair.time - start);
+	let (mut pair, client_ch, server_ch) = connect(Duration::ZERO);
+	let gaps = idle_keep_alive_gaps(&mut pair, client_ch, server_ch, IDLE);
+	assert!(gaps.len() >= 10, "{gaps:?}");
+	assert!(gaps.iter().all(|&gap| gap * 3 < IDLE), "{gaps:?}");
 }
 
 /// A peer advertising the largest idle timeout the wire carries derives a keep-alive too far
@@ -2769,12 +2766,14 @@ fn keep_alive_derived_from_a_huge_peer_idle_timeout() {
 fn keep_alive_interval_derivation() {
 	use transport::keep_alive_interval as interval;
 	let secs = Duration::from_secs;
-	assert_eq!(interval(None, Some(secs(10))), Some(secs(3)));
-	assert_eq!(interval(None, None), None);
-	assert_eq!(interval(Some(Duration::ZERO), Some(secs(10))), None);
-	assert_eq!(interval(Some(secs(5)), Some(secs(10))), Some(secs(5)));
-	assert_eq!(interval(Some(secs(10)), Some(secs(10))), Some(secs(3)));
-	assert_eq!(interval(Some(secs(60)), None), Some(secs(60)));
+	assert_eq!(interval(None, Some(secs(10))), secs(3));
+	assert_eq!(interval(None, None), secs(9));
+	assert_eq!(interval(Some(Duration::ZERO), None), secs(9));
+	assert_eq!(interval(None, Some(Duration::from_nanos(1))), Duration::from_nanos(1));
+	assert_eq!(interval(Some(Duration::ZERO), Some(secs(10))), secs(3));
+	assert_eq!(interval(Some(secs(5)), Some(secs(10))), secs(5));
+	assert_eq!(interval(Some(secs(10)), Some(secs(10))), secs(3));
+	assert_eq!(interval(Some(secs(60)), None), secs(60));
 }
 
 #[test]
@@ -3956,6 +3955,7 @@ fn a_peer_heard_on_a_new_path_brings_no_probe_forward() {
 			local_ip: None,
 			ecn,
 			data: datagram,
+			arrival: None,
 		},
 		&mut buf,
 	) else {
@@ -4250,6 +4250,7 @@ fn malformed_token_len() {
 			local_ip: None,
 			ecn: None,
 			data: hex!("8900 0000 0101 0000 1b1b 841b 0000 0000 3f00")[..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -5504,6 +5505,7 @@ fn path_changes_unblock_oversized_datagrams() {
 						local_ip: None,
 						ecn,
 						data: packet,
+						arrival: None,
 					},
 					&mut buf,
 				) else {
@@ -5612,6 +5614,7 @@ fn reject_short_idcid() {
 			local_ip: None,
 			ecn: None,
 			data: initial,
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -5777,6 +5780,7 @@ fn application_close_in_initial_is_rejected() {
 			local_ip: None,
 			ecn: None,
 			data: BytesMut::from(&packet[..]),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -6823,13 +6827,15 @@ fn bbr_burst_after_long_idle_keeps_learned_bandwidth() {
 
 	let _guard = subscribe();
 	entropy::reseed(SEED);
-	// Only the sender pings. A ping from the receiver would reset the sender's keep-alive timer,
-	// leaving its controller nothing to sample during the idle.
+	// The receiver's interval is longer than the idle measurement, so its pings cannot
+	// reset the sender's keep-alive timer and leave its controller nothing to sample.
 	let mut server = server_config();
-	server.transport.keep_alive = Some(Duration::ZERO);
+	server.transport.idle_timeout = None;
+	server.transport.keep_alive = Some(Duration::from_secs(3600));
 	let mut pair = Pair::new(Default::default(), server);
 	pair.latency = Duration::from_millis(25);
 	let mut client_cfg = client_config();
+	client_cfg.transport.idle_timeout = None;
 	client_cfg.transport.keep_alive = Some(Duration::from_secs(10));
 	let (client_ch, server_ch) = pair.connect_with(client_cfg);
 	pair.to_server.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 100_000, false));

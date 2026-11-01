@@ -1,7 +1,7 @@
 //! The connection: shared state, the driver task, and the session handle.
 
-use moq_clock::Instant;
-use std::cell::RefCell;
+use kio::clock::Instant;
+use std::cell::{Cell, RefCell};
 use std::net::SocketAddr;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll};
@@ -39,6 +39,9 @@ pub(crate) struct Inner {
 	/// The worker driving this connection, which anything layered on it
 	/// (the WebTransport handshake, say) runs on too.
 	pub(crate) owner: Owner,
+	/// Live [`Connection`] and stream handles; the last one to drop closes the
+	/// connection, since nothing could use it again.
+	handles: Cell<usize>,
 }
 
 pub(crate) struct State {
@@ -149,6 +152,21 @@ impl Inner {
 		self.state.borrow().closed.clone()
 	}
 
+	/// Count a new connection or stream handle.
+	pub(crate) fn hold(&self) {
+		self.handles.set(self.handles.get() + 1);
+	}
+
+	/// Uncount a dropped handle, closing the connection after the last one
+	/// rather than leaving the driver to idle it out.
+	pub(crate) fn release(&self) {
+		let handles = self.handles.get() - 1;
+		self.handles.set(handles);
+		if handles == 0 && !self.conn.borrow().is_closed() {
+			self.close_code(0, "");
+		}
+	}
+
 	/// Wake the driver so it flushes what a handle just queued.
 	pub(crate) fn kick(&self) {
 		self.state.borrow_mut().driver.wake();
@@ -217,16 +235,16 @@ impl Inner {
 /// [`server::accept`](crate::quic::server::accept) shorthands), already
 /// established. Clones share the connection; each carries its own parking so
 /// concurrent pending operations don't trample each other's wakeups. Dropping
-/// every handle (and every stream) drops the driver's `Rc` peers, but the
-/// driver itself keeps the connection alive until it ends; close explicitly
-/// with [`close`](web_transport_trait::poll::Session::close), or wrap it in
-/// [`crate::quic::web::Session`], whose last handle closes it.
+/// the last handle, streams included, closes the connection with code 0.
 ///
-/// That close only records the code: the driver task is what frames the
-/// CONNECTION_CLOSE and hands it to the socket. Drive the worker until
-/// [`poll_closed`](web_transport_trait::poll::Session::poll_closed) resolves
-/// before stopping it, or the packet is never built and the peer idles out
-/// instead.
+/// Once the connection ends, or the worker driving it is dropped, every
+/// operation fails with the terminal error instead of pending, except reads
+/// and accepts of what already arrived.
+///
+/// A close, implicit or by [`close`](Self::close), only records the code: the
+/// driver task is what frames the CONNECTION_CLOSE and hands it to the socket.
+/// Drive the worker until [`closed`](Self::closed) resolves before stopping
+/// it, or the packet is never built and the peer idles out instead.
 pub struct Connection {
 	shared: Shared,
 	// Retains this clone's waiter registrations across polls.
@@ -374,6 +392,7 @@ impl Connection {
 
 impl Clone for Connection {
 	fn clone(&self) -> Self {
+		self.shared.hold();
 		Self {
 			shared: self.shared.clone(),
 			park: kio::Park::default(),
@@ -410,6 +429,7 @@ pub(crate) fn launch(
 		conn: RefCell::new(conn),
 		state: RefCell::new(State::new()),
 		owner: owner.clone(),
+		handles: Cell::new(0),
 	});
 
 	let mut driver = Driver {
@@ -491,6 +511,7 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 		(alpn, server_name, remote)
 	};
 
+	shared.hold();
 	let conn = Connection {
 		shared,
 		park: kio::Park::default(),
@@ -613,6 +634,12 @@ impl Connection {
 			rtt: stats.path.rtt,
 			bandwidth: stats.path.bandwidth_estimate,
 		}
+	}
+}
+
+impl Drop for Connection {
+	fn drop(&mut self) {
+		self.shared.release();
 	}
 }
 
@@ -764,6 +791,18 @@ struct Driver {
 	/// flush that came back empty: moq-quic paces the close like any other packet,
 	/// so it can sit behind a pacing timer after the application asked for it.
 	close_staged: bool,
+}
+
+/// The worker dropped its tasks, this driver among them: nothing will ever
+/// drive the connection again, so every handle fails rather than pending.
+/// After a normal end the terminal error is already set, and this keeps it.
+impl Drop for Driver {
+	fn drop(&mut self) {
+		let mut state = self.shared.state.borrow_mut();
+		if state.closed.is_none() {
+			state.fail(Error::Io(crate::shared::Shared::gone_error().to_string()));
+		}
+	}
 }
 
 impl Driver {
