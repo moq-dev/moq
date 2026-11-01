@@ -11,17 +11,10 @@ use crate::error::MoqError;
 use crate::ffi::Task;
 use crate::origin::{MoqOriginConsumer, MoqOriginProducer};
 
-#[cfg(target_arch = "wasm32")]
-mod dial;
-#[cfg(target_arch = "wasm32")]
-pub(crate) use dial::Dial;
-
 /// Configuration for [`MoqClient::new`], mirroring moq-tokio's client config.
 ///
 /// Every field has a default, so set only what you need; [`moq_client_defaults`] reports
-/// them. The browser owns the socket and the trust store, so a wasm build honors only
-/// `versions`, `tls.fingerprints`, and the origins, always dials once, and fails `new` with
-/// `Unsupported` when anything else is set.
+/// them.
 #[derive(Clone, Default, uniffi::Record)]
 pub struct MoqClientConfig {
 	/// Local UDP address to bind, e.g. `0.0.0.0:0`. Null binds an ephemeral dual-stack port.
@@ -158,7 +151,6 @@ pub enum MoqCongestionControl {
 	None,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl From<MoqCongestionControl> for moq_tokio::quic::CongestionControl {
 	fn from(family: MoqCongestionControl) -> Self {
 		match family {
@@ -169,7 +161,6 @@ impl From<MoqCongestionControl> for moq_tokio::quic::CongestionControl {
 	}
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl From<MoqQuicConfig> for moq_tokio::quic::Config {
 	fn from(config: MoqQuicConfig) -> Self {
 		let mut quic = Self::default();
@@ -247,45 +238,38 @@ pub(crate) fn implementation(prefix: Option<&str>) -> Result<String, MoqError> {
 ///
 /// Dialing with it behaves the same as the default. Knobs whose default depends on the backend
 /// (`tls.system_roots`, `quic.gso`, `quic.mtu_discovery`, `quic.congestion_control`) stay null,
-/// as do the ones that are off by default. A wasm build honors none of the tuning, so it
-/// reports none.
+/// as do the ones that are off by default.
 #[uniffi::export]
 pub fn moq_client_defaults() -> MoqClientConfig {
-	#[cfg(not(target_arch = "wasm32"))]
-	{
-		let connect = moq_tokio::connect::Config::default();
-		let resolved = connect.resolve();
-		let websocket = connect.websocket.resolve();
-		let backoff = connect.backoff;
-		let quic = moq_tokio::quic::Config::default().resolve();
+	let connect = moq_tokio::connect::Config::default();
+	let resolved = connect.resolve();
+	let websocket = connect.websocket.resolve();
+	let backoff = connect.backoff;
+	let quic = moq_tokio::quic::Config::default().resolve();
 
-		MoqClientConfig {
-			timeout: Some(resolved.timeout),
-			race: Some(resolved.race),
-			resolution_delay: Some(resolved.resolution_delay),
-			quic: MoqQuicConfig {
-				max_streams: Some(quic.max_streams),
-				idle_timeout: Some(quic.idle_timeout),
-				// Unset: derived from the idle timeout the peers negotiate.
-				keep_alive: quic.keep_alive,
-				..Default::default()
-			},
-			websocket: MoqWebSocketConfig {
-				enabled: Some(websocket.enabled),
-				delay: Some(websocket.delay),
-			},
-			backoff: MoqBackoff {
-				initial: Some(backoff.initial()),
-				multiplier: Some(backoff.multiplier),
-				max: Some(backoff.max()),
-				timeout: Some(backoff.timeout()),
-			},
+	MoqClientConfig {
+		timeout: Some(resolved.timeout),
+		race: Some(resolved.race),
+		resolution_delay: Some(resolved.resolution_delay),
+		quic: MoqQuicConfig {
+			max_streams: Some(quic.max_streams),
+			idle_timeout: Some(quic.idle_timeout),
+			// Unset: derived from the idle timeout the peers negotiate.
+			keep_alive: quic.keep_alive,
 			..Default::default()
-		}
+		},
+		websocket: MoqWebSocketConfig {
+			enabled: Some(websocket.enabled),
+			delay: Some(websocket.delay),
+		},
+		backoff: MoqBackoff {
+			initial: Some(backoff.initial()),
+			multiplier: Some(backoff.multiplier),
+			max: Some(backoff.max()),
+			timeout: Some(backoff.timeout()),
+		},
+		..Default::default()
 	}
-
-	#[cfg(target_arch = "wasm32")]
-	MoqClientConfig::default()
 }
 
 /// The protocol versions offered by default, most preferred first, spelled the way
@@ -300,11 +284,7 @@ pub fn moq_versions() -> Vec<String> {
 /// Whether this build can write qlog traces, so a UI can hide `MoqQuicConfig::qlog` otherwise.
 #[uniffi::export]
 pub fn moq_qlog_supported() -> bool {
-	#[cfg(not(target_arch = "wasm32"))]
-	return moq_tokio::qlog_supported();
-
-	#[cfg(target_arch = "wasm32")]
-	false
+	moq_tokio::qlog_supported()
 }
 
 /// Parse protocol version names, as `MoqClientConfig::versions` and
@@ -316,7 +296,6 @@ pub(crate) fn parse_versions(versions: &[String]) -> Result<Vec<moq_net::Version
 		.collect()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 fn parse_tokens(tokens: Vec<String>) -> Result<Vec<moq_net::auth::Token>, MoqError> {
 	tokens
 		.into_iter()
@@ -331,14 +310,12 @@ fn parse_tokens(tokens: Vec<String>) -> Result<Vec<moq_net::auth::Token>, MoqErr
 }
 
 /// Native QUIC/WebTransport client state: the configured endpoint and the wired origins.
-#[cfg(not(target_arch = "wasm32"))]
 struct Client {
 	client: moq_tokio::Client,
 	publish: Option<Arc<MoqOriginProducer>>,
 	consume: Option<Arc<MoqOriginProducer>>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Client {
 	fn new(config: MoqClientConfig) -> Result<Self, MoqError> {
 		let _guard = crate::ffi::enter();
@@ -431,7 +408,6 @@ impl Client {
 /// another handle shuts the connection down underneath it, and reporting that as a
 /// connect error would make every lifecycle watcher treat an expected teardown as a
 /// broken connection.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn map_closed_error(err: moq_tokio::Error) -> MoqError {
 	match err {
 		moq_tokio::Error::Panic => MoqError::Task {
@@ -451,58 +427,9 @@ pub(crate) fn map_closed_error(err: moq_tokio::Error) -> MoqError {
 	}
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod tests {
 	use super::*;
-
-	const VALID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-	#[test]
-	fn decodes_a_sha256_fingerprint() {
-		let bytes = decode_hex(VALID).unwrap();
-		assert_eq!(bytes.len(), 32);
-		assert_eq!(bytes[0], 0x01);
-
-		// Colons are the other shape `MoqServer::cert_fingerprints` and openssl print.
-		let colons = VALID
-			.as_bytes()
-			.chunks(2)
-			.map(|c| std::str::from_utf8(c).unwrap())
-			.collect::<Vec<_>>()
-			.join(":");
-		assert_eq!(decode_hex(&colons).unwrap(), bytes);
-	}
-
-	/// Byte-index slicing used to land inside a multi-byte character and panic, which an
-	/// FFI caller could reach with any non-ASCII string of even byte length.
-	#[test]
-	fn rejects_non_ascii_instead_of_panicking() {
-		for input in ["aéa", "é", "ééééééééééééééééééééééééééééééé"] {
-			assert!(matches!(decode_hex(input), Err(MoqError::Config { .. })), "{input}");
-		}
-	}
-
-	#[test]
-	fn rejects_a_wrong_length_fingerprint() {
-		assert!(decode_hex("").is_err());
-		assert!(decode_hex("abcd").is_err());
-		assert!(decode_hex(&VALID[..62]).is_err());
-		assert!(decode_hex(&format!("{VALID}ab")).is_err());
-	}
-
-	#[test]
-	fn rejects_non_hex_digits() {
-		for bad in [
-			format!("zz{}", &VALID[2..]),
-			// `u8::from_str_radix` accepts a leading sign, so an unchecked chunk would
-			// decode "+a" to 10 and silently yield a fingerprint matching no certificate.
-			format!("+0{}", &VALID[2..]),
-			format!("{}+0", &VALID[..62]),
-			format!(" 0{}", &VALID[2..]),
-		] {
-			assert!(matches!(decode_hex(&bad), Err(MoqError::Config { .. })), "{bad}");
-		}
-	}
 
 	#[test]
 	fn maps_native_auth_connect_errors() {
@@ -641,148 +568,10 @@ mod tests {
 	}
 }
 
-/// Browser WebTransport client state.
-///
-/// The browser owns the socket and the trust store, so none of the native TLS knobs
-/// (roots, mTLS, bind address) have an equivalent. Certificate hashes are the one
-/// thing WebTransport does expose.
-#[cfg(target_arch = "wasm32")]
-struct Client {
-	fingerprints: Vec<Vec<u8>>,
-	/// Offered as ALPNs to WebTransport and then enforced by moq-net, so the two agree.
-	versions: moq_net::Versions,
-	/// What SETUP advertises, with the caller's prefix joined.
-	implementation: String,
-	publish: Option<Arc<MoqOriginProducer>>,
-	consume: Option<Arc<MoqOriginProducer>>,
-}
-
-#[cfg(target_arch = "wasm32")]
-impl Client {
-	fn new(config: MoqClientConfig) -> Result<Self, MoqError> {
-		let MoqClientConfig {
-			bind,
-			versions,
-			// Presenting tokens needs the native client's dial and AUTH handling.
-			tokens,
-			timeout,
-			race,
-			resolution_delay,
-			tls,
-			quic,
-			websocket,
-			// A browser session never redials, so it dials once either way.
-			once: _,
-			backoff,
-			implementation: prefix,
-			publish,
-			consume,
-		} = config;
-
-		let native_tls = MoqClientTls {
-			fingerprints: Vec::new(),
-			..tls.clone()
-		};
-		if bind.is_some()
-			|| !tokens.is_empty()
-			|| timeout.is_some()
-			|| race.is_some()
-			|| resolution_delay.is_some()
-			|| native_tls != MoqClientTls::default()
-			|| quic != MoqQuicConfig::default()
-			|| websocket != MoqWebSocketConfig::default()
-			|| backoff != MoqBackoff::default()
-		{
-			return Err(MoqError::Unsupported);
-		}
-
-		Ok(Self {
-			fingerprints: tls
-				.fingerprints
-				.iter()
-				.map(|hex| decode_hex(hex))
-				.collect::<Result<_, _>>()?,
-			versions: match versions.is_empty() {
-				true => moq_net::Versions::default(),
-				false => parse_versions(&versions)?.into(),
-			},
-			implementation: implementation(prefix.as_deref())?,
-			publish,
-			consume,
-		})
-	}
-
-	async fn connect(&self, url: Url) -> Result<Arc<MoqSession>, MoqError> {
-		let (publish, subscribe) = crate::origin::resolve_pair(self.publish.as_ref(), self.consume.as_ref());
-
-		let versions = self.versions.clone();
-		let fingerprints = self.fingerprints.clone();
-		let client = moq_net::Client::new().with_url(url.clone());
-		let transport = async move {
-			match fingerprints.is_empty() {
-				true => crate::transport::connect(url, &versions).await,
-				false => crate::transport::connect_with_hashes(url, &versions, fingerprints).await,
-			}
-		};
-		let client = client
-			.with_versions(self.versions.clone())
-			.with_implementation(self.implementation.clone())
-			.with_publisher(&publish.inner)
-			.with_subscriber(subscribe.inner.clone());
-
-		Ok(Arc::new(MoqSession::build(
-			Inner::Dial(Dial::start(client, transport)),
-			publish,
-			subscribe,
-		)))
-	}
-}
-
-/// Decode a hex-encoded SHA-256 certificate fingerprint into raw bytes.
-///
-/// Not gated on wasm alone so the native test suite covers it: this parses a string an
-/// FFI caller controls, and nothing in this repo runs a wasm test.
-#[cfg(any(target_arch = "wasm32", test))]
-fn decode_hex(hex: &str) -> Result<Vec<u8>, MoqError> {
-	/// A sha-256 digest is 32 bytes, so 64 hex characters.
-	const LEN: usize = 64;
-
-	let hex = hex.replace(':', "");
-
-	// This string comes straight from the caller, and one check covers two hazards:
-	// non-ASCII would let a 2-byte chunk split a character, and `from_str_radix` accepts
-	// a leading sign, so an unchecked "+a" would decode to 10 rather than erroring.
-	if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-		return Err(MoqError::Config {
-			reason: format!("fingerprint is not hex: {hex}"),
-		});
-	}
-
-	// WebTransport's `serverCertificateHashes` only accepts a 32-byte sha-256, so a
-	// different length can never match a certificate. Rejecting here beats failing
-	// opaquely inside the browser.
-	if hex.len() != LEN {
-		return Err(MoqError::Config {
-			reason: format!("expected a {LEN}-character sha-256 fingerprint, got {}", hex.len()),
-		});
-	}
-
-	hex.as_bytes()
-		.chunks(2)
-		.map(|pair| {
-			let pair = std::str::from_utf8(pair).expect("checked ascii above");
-			u8::from_str_radix(pair, 16).map_err(|err| MoqError::Config {
-				reason: format!("{err}"),
-			})
-		})
-		.collect()
-}
-
 /// Dials a [`MoqSession`] with the configuration it was built from.
 ///
-/// The configuration differs by what the target honors, because the transport does; see
-/// [`MoqClientConfig`]. [`connect`](Self::connect) may be called again for another session
-/// until [`cancel`](Self::cancel).
+/// [`connect`](Self::connect) may be called again for another session until
+/// [`cancel`](Self::cancel).
 #[derive(uniffi::Object)]
 pub struct MoqClient {
 	task: Task<Client>,
@@ -801,9 +590,9 @@ impl MoqClient {
 
 	/// Start a connection without waiting for its first dial to succeed.
 	///
-	/// A native session automatically reconnects with backoff when the transport drops
-	/// (unless [`MoqClientConfig::once`] is set), and broadcasts consumed through it ride out
-	/// the gap. A browser session dials once and never reconnects. Read [`MoqSession::state`]
+	/// The session automatically reconnects with backoff when the transport drops (unless
+	/// [`MoqClientConfig::once`] is set), and broadcasts consumed through it ride out the
+	/// gap. Read [`MoqSession::state`]
 	/// and wait with [`MoqSession::state_changed`] for first-dial failures and reconnects;
 	/// [`MoqSession::closed`] waits for the terminal result.
 	///
@@ -830,7 +619,6 @@ impl MoqClient {
 /// Returned by [`MoqSession::tokens`], seeded from [`MoqClientConfig::tokens`].
 #[derive(uniffi::Object)]
 pub struct MoqTokens {
-	#[cfg(not(target_arch = "wasm32"))]
 	inner: moq_net::auth::Tokens,
 }
 
@@ -844,15 +632,9 @@ impl MoqTokens {
 	/// token once its replacements are answered, even when one is refused. After an
 	/// authorization refusal the session redials only if they changed.
 	pub fn set(&self, tokens: Vec<String>) -> Result<(), MoqError> {
-		#[cfg(not(target_arch = "wasm32"))]
 		{
 			self.inner.set(parse_tokens(tokens)?);
 			Ok(())
-		}
-		#[cfg(target_arch = "wasm32")]
-		{
-			let _ = tokens;
-			Err(MoqError::Unsupported)
 		}
 	}
 
@@ -864,14 +646,9 @@ impl MoqTokens {
 	/// [`MoqError::Unsupported`] when the session cannot carry an in-band token, and the
 	/// connection's end, such as a refused dial, is its close reason.
 	pub async fn answered(&self) -> Result<(), MoqError> {
-		#[cfg(not(target_arch = "wasm32"))]
 		{
 			let tokens = self.inner.clone();
 			crate::ffi::detached(async move { tokens.answered().await.map_err(MoqError::from) }).await
-		}
-		#[cfg(target_arch = "wasm32")]
-		{
-			Err(MoqError::Unsupported)
 		}
 	}
 }
@@ -879,7 +656,7 @@ impl MoqTokens {
 /// A snapshot of connection statistics for a [`MoqSession`].
 ///
 /// Each field is `None` when the transport backend doesn't report that metric (native QUIC
-/// reports all of them; the browser WebTransport reports few or none), or when it isn't yet
+/// reports all of them), or when it isn't yet
 /// available (e.g. `estimated_send_rate_bps` before the congestion controller has a window). A `None` is
 /// not the same as a zero value.
 #[derive(uniffi::Record)]
@@ -953,7 +730,6 @@ pub struct MoqConnectionState {
 	pub version: Option<String>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl From<moq_tokio::connection::Observation> for MoqConnectionState {
 	fn from(state: moq_tokio::connection::Observation) -> Self {
 		use moq_tokio::connection::Phase;
@@ -973,17 +749,12 @@ impl From<moq_tokio::connection::Observation> for MoqConnectionState {
 	}
 }
 
-/// What backs a [`MoqSession`]: a native client connection (a loop that may redial),
-/// a server-accepted session (one transport; the peer redialing yields a fresh
-/// `accept()`), or a browser dial (one attempt, then its session).
+/// What backs a [`MoqSession`]: a client connection (a loop that may redial), or a
+/// server-accepted session (one transport; the peer redialing yields a fresh `accept()`).
 #[derive(Clone)]
 enum Inner {
-	#[cfg(not(target_arch = "wasm32"))]
 	Connection(moq_tokio::Connection),
-	#[cfg(not(target_arch = "wasm32"))]
 	Session(Accepted),
-	#[cfg(target_arch = "wasm32")]
-	Dial(Dial),
 }
 
 #[derive(Clone)]
@@ -1038,10 +809,7 @@ struct Shutdown {
 impl Shutdown {
 	async fn finished(&self) -> Result<(), MoqError> {
 		// Publish a background panic before reading the channel it dropped.
-		#[cfg(not(target_arch = "wasm32"))]
 		self.task.finished().await?;
-		#[cfg(target_arch = "wasm32")]
-		self.task.check()?;
 		self.result
 			.wait(|result| match &**result {
 				Some(result) => std::task::Poll::Ready(result.clone()),
@@ -1069,7 +837,6 @@ pub struct MoqSession {
 
 impl MoqSession {
 	/// Wrap a client connection (see [`MoqClient::connect`]).
-	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) fn connected(
 		connection: moq_tokio::Connection,
 		publish: crate::origin::Origin,
@@ -1079,7 +846,6 @@ impl MoqSession {
 	}
 
 	/// Wrap a server-accepted session (see `MoqServer::accept`).
-	#[cfg(not(target_arch = "wasm32"))]
 	pub(crate) fn accepted(
 		session: moq_net::Session,
 		publish: crate::origin::Origin,
@@ -1092,13 +858,8 @@ impl MoqSession {
 		match inner {
 			// Persistent across reconnects: `None` while disconnected, then a grant
 			// again on the next connection. Reservations survive the gap.
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => connection.allocator(),
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Session(session) => session.allocator(),
-			// Persistent from before the handshake, so a reservation made while dialing counts.
-			#[cfg(target_arch = "wasm32")]
-			Inner::Dial(dial) => dial.allocator(),
 		}
 	}
 
@@ -1130,12 +891,8 @@ impl MoqSession {
 	/// Abort the live transport (if any) with `err` and stop any dial or reconnect loop.
 	fn teardown(&self, err: moq_net::Error) {
 		match &self.inner {
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => connection.abort(err),
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Session(session) => session.abort(err),
-			#[cfg(target_arch = "wasm32")]
-			Inner::Dial(dial) => dial.stop(err),
 		}
 	}
 }
@@ -1168,12 +925,8 @@ impl MoqSession {
 		let terminal = self
 			.watch(self.closed.run(|inner| async move {
 				match &*inner {
-					#[cfg(not(target_arch = "wasm32"))]
 					Inner::Connection(connection) => connection.closed().await.map_err(map_closed_error),
-					#[cfg(not(target_arch = "wasm32"))]
 					Inner::Session(session) => session.closed().await,
-					#[cfg(target_arch = "wasm32")]
-					Inner::Dial(dial) => dial.closed().await,
 				}
 			}))
 			.await;
@@ -1190,12 +943,8 @@ impl MoqSession {
 	pub fn state(&self) -> MoqConnectionState {
 		let _runtime = crate::ffi::enter();
 		match &self.inner {
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => connection.monitor().state().into(),
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Session(session) => session.state(),
-			#[cfg(target_arch = "wasm32")]
-			Inner::Dial(dial) => dial.state(),
 		}
 	}
 
@@ -1207,14 +956,12 @@ impl MoqSession {
 	pub async fn state_changed(&self, after: u64) -> Result<MoqConnectionState, MoqError> {
 		self.watch(Task::new(self.inner.clone()).run(|inner| async move {
 			match &*inner {
-				#[cfg(not(target_arch = "wasm32"))]
 				Inner::Connection(connection) => Ok(connection
 					.monitor()
 					.state_changed(after)
 					.await
 					.map_err(map_closed_error)?
 					.into()),
-				#[cfg(not(target_arch = "wasm32"))]
 				Inner::Session(session) => {
 					let state = session.state();
 					if state.revision != after {
@@ -1226,8 +973,6 @@ impl MoqSession {
 					let _ = session.closed::<()>().await;
 					Ok(session.state())
 				}
-				#[cfg(target_arch = "wasm32")]
-				Inner::Dial(dial) => dial.state_changed(after).await,
 			}
 		}))
 		.await
@@ -1264,12 +1009,8 @@ impl MoqSession {
 		let consumer = self.consumer.clone();
 		let task = crate::ffi::spawn(async move {
 			let completed = match inner {
-				#[cfg(not(target_arch = "wasm32"))]
 				Inner::Connection(connection) => connection.close().await.map_err(map_closed_error),
-				#[cfg(not(target_arch = "wasm32"))]
 				Inner::Session(session) => session.close().await,
-				#[cfg(target_arch = "wasm32")]
-				Inner::Dial(dial) => dial.close().await,
 			};
 			let completed = publisher
 				.inner()
@@ -1318,41 +1059,28 @@ impl MoqSession {
 	/// reconnect, reading `None` while offline.
 	pub fn grants(&self) -> Arc<MoqGrantConsumer> {
 		Arc::new(MoqGrantConsumer::new(&match &self.inner {
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => connection.auth(),
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Session(session) => session.auth(),
-			#[cfg(target_arch = "wasm32")]
-			Inner::Dial(dial) => dial.auth(),
 		}))
 	}
 
-	/// The credentials a native client session presents, to replace while it runs.
+	/// The credentials a client session presents, to replace while it runs.
 	///
-	/// `None` for a server-accepted session, which presents none, and in the browser, where
-	/// the URL carries the credential.
+	/// `None` for a server-accepted session, which presents none.
 	pub fn tokens(&self) -> Option<Arc<MoqTokens>> {
 		match &self.inner {
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => Some(Arc::new(MoqTokens {
 				inner: connection.tokens(),
 			})),
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Session(_) => None,
-			#[cfg(target_arch = "wasm32")]
-			Inner::Dial(_) => None,
 		}
 	}
 
 	/// Hold receive-estimate demand until the returned consumer is released.
 	pub fn recv_bandwidth(&self) -> Option<Arc<crate::bandwidth::MoqBandwidthConsumer>> {
 		let consumer = match &self.inner {
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => Some(connection.recv_bandwidth()),
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Session(session) => session.recv_bandwidth(),
-			#[cfg(target_arch = "wasm32")]
-			Inner::Dial(dial) => Some(dial.recv_bandwidth()),
 		}?;
 		Some(Arc::new(crate::bandwidth::MoqBandwidthConsumer::new(consumer)))
 	}
@@ -1367,18 +1095,11 @@ impl MoqSession {
 	pub fn stats(&self) -> MoqConnectionStats {
 		let _guard = crate::ffi::enter();
 		match &self.inner {
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Connection(connection) => match connection.monitor().snapshot() {
 				Some(snapshot) => MoqConnectionStats::new(snapshot.stats, Some(snapshot.version)),
 				None => MoqConnectionStats::new(Default::default(), None),
 			},
-			#[cfg(not(target_arch = "wasm32"))]
 			Inner::Session(session) => MoqConnectionStats::new(session.stats(), Some(session.version())),
-			#[cfg(target_arch = "wasm32")]
-			Inner::Dial(dial) => match dial.session() {
-				Some(session) => MoqConnectionStats::new(session.stats(), Some(session.version())),
-				None => MoqConnectionStats::new(Default::default(), None),
-			},
 		}
 	}
 }

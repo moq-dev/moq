@@ -5,7 +5,7 @@ use std::{
 	convert::TryInto,
 	iter, mem,
 	net::{Ipv4Addr, Ipv6Addr, SocketAddr},
-	num::NonZeroU64,
+	num::{NonZeroU32, NonZeroU64},
 	sync::{
 		Arc, Mutex,
 		atomic::{AtomicU64, Ordering},
@@ -45,17 +45,12 @@ use util::*;
 mod acked;
 mod characterize;
 mod probe;
+mod rate;
+mod receive_ts;
 mod reset_stream_at;
 mod sim;
 mod token;
-
-#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-use wasm_bindgen_test::wasm_bindgen_test as test;
-
-// Enable this if you want to run these tests in the browser.
-// Unfortunately it's either-or: Enable this and you can run in the browser, disable to run in nodejs.
-// #[cfg(all(target_family = "wasm", target_os = "unknown"))]
-// wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+mod waits;
 
 #[test]
 fn pending_incoming_survives_server_config_change() {
@@ -74,6 +69,7 @@ fn pending_incoming_survives_server_config_change() {
 				local_ip: None,
 				ecn,
 				data: data.clone(),
+				arrival: None,
 			},
 			&mut response,
 		) else {
@@ -90,7 +86,8 @@ fn pending_incoming_survives_server_config_change() {
 						remote: pair.client.addr,
 						local_ip: None,
 						ecn,
-						data
+						data,
+						arrival: None,
 					},
 					&mut response
 				)
@@ -153,6 +150,7 @@ fn version_negotiate_server() {
 			local_ip: None,
 			ecn: None,
 			data: header[..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -168,6 +166,7 @@ fn version_negotiate_server() {
 			local_ip: None,
 			ecn: None,
 			data: packet[..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -224,6 +223,7 @@ fn version_negotiate_client() {
                  0a1a2a3a"
 			)[..]
 				.into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -313,6 +313,7 @@ fn connect_before_the_finished_leaves(pair: &mut Pair, config: client::Config) -
 				local_ip: None,
 				ecn,
 				data: packet,
+				arrival: None,
 			},
 			&mut buf,
 		) else {
@@ -678,6 +679,7 @@ fn reset_secret_resets_connections_each_millisecond() {
 				local_ip: None,
 				ecn: None,
 				data: packet[..].into(),
+				arrival: None,
 			},
 			&mut buf,
 		);
@@ -692,6 +694,7 @@ fn reset_secret_resets_connections_each_millisecond() {
 				local_ip: None,
 				ecn: None,
 				data: packet[..].into(),
+				arrival: None,
 			},
 			&mut buf,
 		);
@@ -848,6 +851,7 @@ fn stateless_reset_limit() {
 			local_ip: None,
 			ecn: None,
 			data: [0u8; 1024][..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -859,6 +863,7 @@ fn stateless_reset_limit() {
 			local_ip: None,
 			ecn: None,
 			data: [0u8; 1024][..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -870,6 +875,7 @@ fn stateless_reset_limit() {
 			local_ip: None,
 			ecn: None,
 			data: [0u8; 1024][..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -881,6 +887,7 @@ fn stateless_reset_limit() {
 			local_ip: None,
 			ecn: None,
 			data: [0u8; 1024][..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -3962,6 +3969,7 @@ fn a_peer_heard_on_a_new_path_brings_no_probe_forward() {
 			local_ip: None,
 			ecn,
 			data: datagram,
+			arrival: None,
 		},
 		&mut buf,
 	) else {
@@ -4256,6 +4264,7 @@ fn malformed_token_len() {
 			local_ip: None,
 			ecn: None,
 			data: hex!("8900 0000 0101 0000 1b1b 841b 0000 0000 3f00")[..].into(),
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -5510,6 +5519,7 @@ fn path_changes_unblock_oversized_datagrams() {
 						local_ip: None,
 						ecn,
 						data: packet,
+						arrival: None,
 					},
 					&mut buf,
 				) else {
@@ -5618,6 +5628,7 @@ fn reject_short_idcid() {
 			local_ip: None,
 			ecn: None,
 			data: initial,
+			arrival: None,
 		},
 		&mut buf,
 	);
@@ -5782,6 +5793,7 @@ fn application_close_in_initial_is_rejected() {
 			local_ip: None,
 			ecn: None,
 			data: BytesMut::from(&packet[..]),
+			arrival: None,
 		},
 		&mut buf,
 	);

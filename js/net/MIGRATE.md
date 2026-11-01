@@ -4,20 +4,9 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### An omitted `maxDelay` sets no subscriber limit ([#7077](https://github.com/moq-dev/moq/pull/7077))
+### `maxDelay: null` sets no subscriber limit ([#7403](https://github.com/moq-dev/moq/pull/7403))
 
-A `Track.Subscription` without `maxDelay` now reaches back as far as the publisher's `Track.Info.maxAge` keeps, as `None` does in Rust, instead of meaning zero.
-`subscribe()` with no options still uses the default subscription, now spelled `Track.Subscription.default()`, whose zero `maxDelay` skips a superseded group at once.
-A live reader that passed options without `maxDelay` spreads the default to keep its behavior:
-
-```ts
-// Before
-const sub = track.subscribe({ priority: 2 });
-// After
-const sub = track.subscribe({ ...Track.Subscription.default(), priority: 2 });
-```
-
-The same applies to `Subscriber.update(options)`, which replaces every field.
+A `Track.Subscription` whose `maxDelay` is `null` reaches back as far as the publisher's `Track.Info.maxAge` keeps, as `None` does in Rust. An omitted or `undefined` `maxDelay` is still zero.
 
 ### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 
@@ -163,8 +152,8 @@ A new group or datagram raises it at frame 0 before any frame lands, and it can 
 
 A local write whose first frame starts before a lower-sequence group's, or after a higher one's, throws `TimestampMismatch`.
 A group received over moq-lite-07 is checked the same way.
-A track received over moq-lite-05/06 arrives untimed, since its timestamps may be send times: read times from the payload, such as the hang container's, instead of the frame's `timestamp`.
-One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
+A track received over moq-lite-05/06 keeps its timestamps unchecked, since they may be an untimed origin's send times, and so does one received over moq-transport.
+A relay serves both on over every version, where a moq-lite-07 receiver checks them and may refuse a group that rewinds.
 A publisher whose timeline restarts publishes a new broadcast instead.
 
 ### `Auth.Auth` is `Auth.Handle`, and `Auth.Token` is `Auth.Auth` (#5695)
