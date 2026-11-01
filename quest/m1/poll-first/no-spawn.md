@@ -2,12 +2,10 @@
 
 ## Goal
 
-web-async is gone from the workspace, and the crates that used it (kio's
-clock backend, moq-ffi, moq-stats, moq-wasm) plus moq-relay's cluster and
-auth decider spawn no tasks: their background work runs as `kio::Tasks`
-children that the owner polls, returned as a handle whose poll drives it. Only
-the edges spawn a root task: binaries, the bindings' runtime, and wasm entry
-points. moq-relay's in-memory integration tests
+moq-ffi, moq-stats, and moq-relay's cluster and auth decider spawn no tasks:
+their background work runs as `kio::Tasks` children that the owner polls,
+returned as a handle whose poll drives it. Only the edges spawn a root task:
+binaries and the bindings' runtime. moq-relay's in-memory integration tests
 (`rs/moq-relay/tests/integration/connection.rs`) run on kio's simulator
 instead of paused tokio.
 
@@ -26,9 +24,7 @@ Decided with the maintainer on 2026-10-25, replacing the m2 runtime trait
 - **Blocking work is out of scope.** OS threads for blocking capture, encode,
   or file I/O are not async tasks and stay.
 
-Per crate: the browser clock reads `performance.now()` and `setTimeout`
-through web-sys directly; moq-ffi and moq-wasm spawn only their root at the
-binding boundary; moq-stats and moq-relay's `Cluster::new` and auth decider
+Per crate: moq-ffi spawns only its root at the binding boundary; moq-stats and moq-relay's `Cluster::new` and auth decider
 return work their owner polls. List any spawn that has to stay, with why, in
 the PR.
 

@@ -26,6 +26,7 @@ import {
 	groupBounds,
 	hiddenBelow,
 	hooks,
+	maxDelayOf,
 	scopeCaptures,
 	scopeHead,
 	scopeOverlaps,
@@ -746,9 +747,9 @@ export class Subscriber {
 	async #refuseListing(lister: Lister): Promise<void> {
 		try {
 			for (;;) {
-				while (!lister.used.peek()) {
+				while (!lister.wanted.peek()) {
 					if (lister.closed.peek() !== undefined) return;
-					await race([Signal.race(lister.used, lister.closed)]);
+					await race([Signal.race(lister.wanted, lister.closed)]);
 				}
 				lister.abort(new Error("track listing requires moq-lite-07 or newer"));
 			}
@@ -1087,7 +1088,7 @@ export class Subscriber {
 			// keeps what it last asked for until one returns, as on lite and in Rust.
 			const subscription = producer.subscription.peek();
 			const wanted = toWire(subscription?.priority ?? 0);
-			const wantedMaxAge = this.#maxAge ? subscription?.maxDelay : undefined;
+			const wantedMaxAge = this.#maxAge && subscription ? maxDelayOf(subscription) : undefined;
 			if (!subscription || (wanted === sent && wantedMaxAge === sentMaxAge) || unanswered.peek() > 0) {
 				const disposes: Dispose[] = [];
 				const wake = new Promise<void>((resolve) => {

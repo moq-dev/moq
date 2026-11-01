@@ -1,5 +1,5 @@
 import { expect, onTestFinished, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Elapsed, Manual, Milli, Nano, sleep, timeout, yieldNow } from "@moq/clock";
 import { Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
@@ -14,6 +14,7 @@ import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Producer as TrackProducer } from "../track.ts";
+import { unwanted } from "../util/demand.ts";
 import { wireOf } from "../wire.ts";
 import type * as Cluster from "./cluster.ts";
 import { ObjectDatagram } from "./datagram.ts";
@@ -95,19 +96,15 @@ async function nextStream(transport: WebTransport): Promise<Stream | undefined> 
 	const reader =
 		transport.incomingBidirectionalStreams.getReader() as ReadableStreamDefaultReader<WebTransportBidirectionalStream>;
 
-	let timer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		const next = await Promise.race([
-			reader.read(),
-			new Promise<undefined>((resolve) => {
-				timer = setTimeout(() => resolve(undefined), STREAM_WAIT);
-			}),
-		]);
+		const next = await timeout(Nano.fromMilli(Milli(STREAM_WAIT)), reader.read()).catch((error: unknown) => {
+			if (error instanceof Elapsed) return undefined;
+			throw error;
+		});
 
 		if (!next || next.done) return undefined;
 		return new Stream({ readable: next.value.readable, writable: next.value.writable, version: VERSION });
 	} finally {
-		clearTimeout(timer);
 		reader.releaseLock();
 	}
 }
@@ -385,7 +382,9 @@ test("a second GOAWAY on an unanswered SUBSCRIBE closes the session", async () =
 
 		const closed = await Promise.race([
 			pair.server.closed,
-			new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), 500)),
+			sleep(Nano.fromMilli(Milli(500))).then(() => {
+				throw new Error("session stayed up");
+			}),
 		]);
 		expect(closed.closeCode).toBe(SessionCode.ProtocolViolation);
 		await task;
@@ -446,12 +445,14 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		const served = new BroadcastProducer();
 		const trackRequest = wireOf(served).requested();
 		hooks.acceptRequest(request, served);
-		expect((await trackRequest)?.name).toBe("video");
-		expect(served.demand().used.peek()).toBe(true);
+		const track = await trackRequest;
+		expect(track?.name).toBe("video");
 		late.cancel();
 		await looking;
 		expect(late.written).toEqual([]);
-		await served.demand().unused();
+		// The withdrawn lookup no longer holds the track, so the answer lets it go.
+		const producer = track?.accept({ timescale: Timescale.MILLI });
+		await producer?.closed;
 
 		await requests.return?.();
 		served.close();
@@ -496,12 +497,14 @@ test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", as
 		const served = new BroadcastProducer();
 		const trackRequest = wireOf(served).requested();
 		hooks.acceptRequest(request, served);
-		expect((await trackRequest)?.name).toBe("video");
-		expect(served.demand().used.peek()).toBe(true);
+		const track = await trackRequest;
+		if (!track) throw new Error("no request for video");
+		expect(track.name).toBe("video");
+		expect(track.demand().wanted.peek()).toBeDefined();
 		late.withdraw();
 		await subscribing;
 		expect(late.written).toEqual([]);
-		await served.demand().unused();
+		await unwanted(track.demand());
 
 		await requests.return?.();
 		served.close();
@@ -777,7 +780,7 @@ test("a blocked group header is reset when the group expires", async () => {
 
 		const resetBeforeRelease = await Promise.race([
 			streamReset.then(() => true),
-			new Promise<false>((resolve) => setTimeout(() => resolve(false), 500)),
+			sleep(Nano.fromMilli(Milli(500))).then(() => false as const),
 		]);
 		expect(resetBeforeRelease).toBe(true);
 	} finally {
@@ -1026,7 +1029,7 @@ test("a group that goes stale while its stream opens writes nothing", async () =
 
 		expect(String(await streamReset)).toContain("abandoned waiting for a stream slot");
 		expect(writes).toBe(0);
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await yieldNow();
 		expect(unhandled).toEqual([]);
 	} finally {
 		process.off("unhandledRejection", onUnhandled);
@@ -1057,7 +1060,7 @@ test("a broadcast published mid-advertisement is still announced", async () => {
 
 	// Publish while the loop is parked on that reply.
 	publish(origin, Path.from("second"));
-	await new Promise((resolve) => setTimeout(resolve, SETTLE));
+	await sleep(Nano.fromMilli(Milli(SETTLE)));
 
 	await acceptPublishNamespace(one);
 
@@ -1320,7 +1323,7 @@ test("republishing a path clears a refusal without unannouncing first", async ()
 	if (!declined) throw new Error("the namespace was never advertised");
 	expect(await readPublishNamespace(declined)).toBe(Path.from("recycled"));
 	await declinePublishNamespace(declined, 0n);
-	await new Promise((resolve) => setTimeout(resolve, SETTLE));
+	await sleep(Nano.fromMilli(Milli(SETTLE)));
 
 	// A new broadcast takes the path over outright: no close, no gap.
 	publish(origin, Path.from("recycled"));
@@ -1351,7 +1354,7 @@ test("a new epoch at the same path clears a refusal", async () => {
 	if (!declined) throw new Error("the namespace was never advertised");
 	expect(await readPublishNamespace(declined)).toBe(Path.from("restarted"));
 	await declinePublishNamespace(declined, 0n);
-	await new Promise((resolve) => setTimeout(resolve, SETTLE));
+	await sleep(Nano.fromMilli(Milli(SETTLE)));
 
 	broadcast.announce({ ...broadcast.route, epoch: Epoch.mint() });
 
@@ -1384,7 +1387,7 @@ test("re-announcing a path clears a refusal that forbade retrying", async () => 
 
 	// The broadcast goes away, taking the refusal with it, and a new one takes its place.
 	first.close();
-	await new Promise((resolve) => setTimeout(resolve, SETTLE));
+	await sleep(Nano.fromMilli(Milli(SETTLE)));
 	publish(origin, Path.from("recycled"));
 
 	const retried = await nextStream(pair.client);
@@ -1419,9 +1422,9 @@ test("closing the session ends the unsolicited announce loop", async () => {
 	// Ending with the session's error is ending too: the close fails its open streams.
 	await Promise.race([
 		loop.catch(() => undefined),
-		new Promise((_resolve, reject) =>
-			setTimeout(() => reject(new Error("the announce loop outlived its session")), STREAM_WAIT),
-		),
+		sleep(Nano.fromMilli(Milli(STREAM_WAIT))).then(() => {
+			throw new Error("the announce loop outlived its session");
+		}),
 	]);
 
 	// The origin really did survive the session, so publishing into it is still valid.
@@ -2454,19 +2457,12 @@ async function runSubscribe(
 async function nextUni(
 	uni: ReadableStreamDefaultReader<ReadableStream<Uint8Array>>,
 ): Promise<ReadableStream<Uint8Array> | undefined> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		const next = await Promise.race([
-			uni.read(),
-			new Promise<undefined>((resolve) => {
-				timer = setTimeout(() => resolve(undefined), STREAM_WAIT);
-			}),
-		]);
-		if (!next || next.done) return undefined;
-		return next.value;
-	} finally {
-		clearTimeout(timer);
-	}
+	const next = await timeout(Nano.fromMilli(Milli(STREAM_WAIT)), uni.read()).catch((error: unknown) => {
+		if (error instanceof Elapsed) return undefined;
+		throw error;
+	});
+	if (!next || next.done) return undefined;
+	return next.value;
 }
 
 /** Read a group stream to its end. */
@@ -3424,7 +3420,7 @@ test("draft-22: PUBLISH_DONE waits for a queued group and counts every stream", 
 
 		// Nothing ends the subscription while the group waits for its slot.
 		const response = client.reader.u53();
-		const idle = new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), 20));
+		const idle = sleep(Nano.fromMilli(Milli(20))).then(() => "pending" as const);
 		expect(await Promise.race([response, idle])).toBe("pending");
 
 		slot.resolve();
@@ -4019,7 +4015,9 @@ test.each([0, Number.MAX_SAFE_INTEGER + 2])(
 
 		const closed = await Promise.race([
 			pair.server.closed,
-			new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("session stayed up")), 500)),
+			sleep(Nano.fromMilli(Milli(500))).then(() => {
+				throw new Error("session stayed up");
+			}),
 		]);
 		expect(closed.closeCode).toBe(new ProtocolViolation("").code);
 		origin.close();
