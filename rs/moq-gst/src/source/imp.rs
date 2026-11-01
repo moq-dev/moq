@@ -2217,11 +2217,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod session_tests {
 	use std::collections::{BTreeMap, HashSet};
 	use std::sync::atomic::Ordering;
@@ -2243,6 +2238,16 @@ mod session_tests {
 
 	fn pad_ids() -> std::sync::MutexGuard<'static, ()> {
 		PAD_IDS.lock().unwrap_or_else(|err| err.into_inner())
+	}
+
+	/// Blocks the test thread while GStreamer's streaming threads and the session's runtime
+	/// do real work.
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "the test thread runs outside any runtime and waits on real GStreamer threads"
+	)]
+	fn block(duration: Duration) {
+		std::thread::sleep(duration);
 	}
 
 	/// The readers push from their own tasks, so the element only has to exist and own pads.
@@ -2519,7 +2524,7 @@ mod session_tests {
 	/// its subscriber stays parked. Bounded so a session that never subscribes fails the test.
 	fn await_request(dynamic: &mut moq_net::broadcast::Requests) -> moq_net::track::Request {
 		super::RUNTIME
-			.block_on(async { tokio::time::timeout(Duration::from_secs(10), dynamic.requested_track()).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), dynamic.requested_track()).await })
 			.expect("no track was ever requested")
 			.expect("broadcast closed")
 	}
@@ -2531,7 +2536,7 @@ mod session_tests {
 			if let Some(pad) = pads(element, kind).into_iter().next() {
 				return pad;
 			}
-			std::thread::sleep(Duration::from_millis(50));
+			block(Duration::from_millis(50));
 		}
 		panic!("no {kind} pad ever appeared");
 	}
@@ -2583,7 +2588,7 @@ mod session_tests {
 			.unwrap()
 			.broadcast = Some(moq_net::path::Relative::new("./right").unwrap());
 		let next = super::RUNTIME
-			.block_on(async { tokio::time::timeout(Duration::from_secs(10), replacement.requested_track()).await });
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), replacement.requested_track()).await });
 		stopping.send(true).unwrap();
 		super::RUNTIME.block_on(following).unwrap().unwrap();
 		assert_eq!(
@@ -2713,7 +2718,7 @@ mod session_tests {
 			moq_net::Result::Ok(())
 		};
 		super::RUNTIME
-			.block_on(async { tokio::time::timeout(Duration::from_secs(10), unwanted).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), unwanted).await })
 			.expect("the cancelled reader never dropped its subscription")
 			.expect("the pending request is still open");
 
@@ -2841,7 +2846,7 @@ mod session_tests {
 
 		// No shutdown is sent: the run has to end on the media draining alone.
 		super::RUNTIME
-			.block_on(async { tokio::time::timeout(Duration::from_secs(10), session).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), session).await })
 			.expect("the run outlived the renditions it was serving")
 			.unwrap()
 			.unwrap();
@@ -2927,7 +2932,7 @@ mod session_tests {
 			if buffers.load(Ordering::Relaxed) == HEAD {
 				break;
 			}
-			std::thread::sleep(Duration::from_millis(50));
+			block(Duration::from_millis(50));
 		}
 		assert_eq!(
 			buffers.load(Ordering::Relaxed),
@@ -2951,7 +2956,7 @@ mod session_tests {
 			if pads(&element, "video_").is_empty() {
 				break;
 			}
-			std::thread::sleep(Duration::from_millis(50));
+			block(Duration::from_millis(50));
 		}
 
 		// The tail of the track and its clean end arrive last.
@@ -2965,7 +2970,7 @@ mod session_tests {
 			if pads(&element, "video_").is_empty() {
 				break;
 			}
-			std::thread::sleep(Duration::from_millis(50));
+			block(Duration::from_millis(50));
 		}
 		assert!(pads(&element, "video_").is_empty(), "the reader never ended");
 
@@ -3056,7 +3061,7 @@ mod session_tests {
 				if buffers.load(Ordering::Relaxed) == n {
 					break;
 				}
-				std::thread::sleep(Duration::from_millis(50));
+				block(Duration::from_millis(50));
 			}
 		};
 
@@ -3092,7 +3097,7 @@ mod session_tests {
 		audio.finish().unwrap();
 		catalog.finish().unwrap();
 		super::RUNTIME
-			.block_on(async { tokio::time::timeout(Duration::from_secs(10), session).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), session).await })
 			.expect("the run outlived its broadcast")
 			.unwrap()
 			.unwrap();
@@ -3344,7 +3349,7 @@ mod session_tests {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		video: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
-		start: std::time::Instant,
+		start: kio::clock::Instant,
 	}
 
 	impl Publisher {
@@ -3385,7 +3390,7 @@ mod session_tests {
 				broadcast,
 				catalog,
 				video,
-				start: std::time::Instant::now(),
+				start: kio::clock::now(),
 			}
 		}
 
@@ -3545,7 +3550,7 @@ mod session_tests {
 			cancel,
 		};
 		super::RUNTIME
-			.block_on(async { tokio::time::timeout(Duration::from_secs(10), super::RUNTIME.spawn(reader.run())).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), super::RUNTIME.spawn(reader.run())).await })
 			.expect("a push on a pad added after the flush blocked")
 			.unwrap();
 	}
@@ -3726,7 +3731,7 @@ mod session_tests {
 			panic!("the origin closed");
 		};
 		super::RUNTIME
-			.block_on(async { tokio::time::timeout(Duration::from_secs(10), next).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), next).await })
 			.expect("the announcement never arrived");
 	}
 
@@ -3735,7 +3740,7 @@ mod session_tests {
 		let mut demand = publisher.video.demand();
 		let changed = async { while demand.wanted_changed().await.expect("the track closed").is_some() != wanted {} };
 		super::RUNTIME
-			.block_on(async { tokio::time::timeout(Duration::from_secs(10), changed).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), changed).await })
 			.expect("the demand never changed");
 	}
 
@@ -3844,7 +3849,7 @@ mod session_tests {
 		let pool = origin.requests("").unwrap();
 		let session = follow(&element, &origin);
 		let pending = super::RUNTIME.block_on(async {
-			tokio::time::timeout(Duration::from_secs(10), pool.requested_broadcast())
+			kio::clock::timeout(Duration::from_secs(10), pool.requested_broadcast())
 				.await
 				.unwrap()
 				.unwrap()
@@ -3927,7 +3932,7 @@ mod session_tests {
 		let mut second = None;
 		for _ in 0..200 {
 			new.write(5);
-			std::thread::sleep(Duration::from_millis(50));
+			block(Duration::from_millis(50));
 			second = recorder.seen().into_iter().find_map(|seen| match seen {
 				Seen::Buffer(pad, 5) if pad != first => Some(pad),
 				_ => None,
@@ -4019,13 +4024,13 @@ mod session_tests {
 			if pads(&element, "video_").is_empty() {
 				break;
 			}
-			std::thread::sleep(Duration::from_millis(50));
+			block(Duration::from_millis(50));
 		}
 		assert!(pads(&element, "video_").is_empty(), "the removal never landed");
 
 		room.catalog.finish().unwrap();
 		super::RUNTIME
-			.block_on(async { tokio::time::timeout(Duration::from_secs(10), run).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), run).await })
 			.expect("the sibling's follower outlived the catalog")
 			.unwrap()
 			.unwrap();
@@ -4062,7 +4067,7 @@ mod session_tests {
 			moq_net::Result::Ok(())
 		};
 		super::RUNTIME
-			.block_on(async { tokio::time::timeout(Duration::from_secs(10), unwanted).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), unwanted).await })
 			.expect("the sibling outlived its catalog's broadcast")
 			.expect("the sibling track closed");
 		stop(session);
@@ -4113,7 +4118,7 @@ mod session_tests {
 				);
 				while track.read().await.unwrap().is_some() {}
 			};
-			tokio::time::timeout(Duration::from_secs(10), finished)
+			kio::clock::timeout(Duration::from_secs(10), finished)
 				.await
 				.expect("the track never finished");
 		});
@@ -4166,7 +4171,7 @@ mod session_tests {
 			if pads(&element, "audio_").len() == 2 {
 				break;
 			}
-			std::thread::sleep(Duration::from_millis(50));
+			block(Duration::from_millis(50));
 		}
 		assert_eq!(pads(&element, "audio_").len(), 2, "the re-enable never landed");
 		let replayed = recorder.count(|seen| *seen == Seen::Buffer(pad.clone(), 1));
@@ -4227,7 +4232,7 @@ mod session_tests {
 			if pads(&element, "audio_").len() == 2 {
 				break;
 			}
-			std::thread::sleep(Duration::from_millis(50));
+			block(Duration::from_millis(50));
 		}
 		assert_eq!(pads(&element, "audio_").len(), 2, "the relist never landed");
 
@@ -4325,7 +4330,9 @@ mod session_tests {
 		await_event(&mut follow, |event| {
 			matches!(
 				event,
-				moq_net::announce::Event::Restart(_) | moq_net::announce::Event::Start(_)
+				moq_net::announce::Event::Restart(_)
+					| moq_net::announce::Event::Takeover { .. }
+					| moq_net::announce::Event::Start(_)
 			)
 		});
 
@@ -4379,7 +4386,7 @@ mod session_tests {
 			if recorder.seen().contains(&Seen::Eos(pad.clone())) {
 				break;
 			}
-			std::thread::sleep(Duration::from_millis(50));
+			block(Duration::from_millis(50));
 		}
 		assert!(
 			recorder.seen().contains(&Seen::Eos(pad.clone())),
@@ -4390,7 +4397,7 @@ mod session_tests {
 		await_event(&mut follow, |event| matches!(event, moq_net::announce::Event::Start(_)));
 		for _ in 0..10 {
 			second.write(2);
-			std::thread::sleep(Duration::from_millis(50));
+			block(Duration::from_millis(50));
 		}
 		stop(session);
 
@@ -4422,7 +4429,7 @@ mod session_tests {
 			if recorder.seen().contains(&Seen::Eos(pad.clone())) {
 				break;
 			}
-			std::thread::sleep(Duration::from_millis(50));
+			block(Duration::from_millis(50));
 		}
 		assert!(
 			recorder.seen().contains(&Seen::Eos(pad.clone())),
@@ -4720,7 +4727,7 @@ mod session_tests {
 
 		old.video.finish().unwrap();
 		// The media and the catalog travel apart, so their ends arrive apart too.
-		std::thread::sleep(Duration::from_millis(100));
+		block(Duration::from_millis(100));
 		old.catalog.finish().unwrap();
 		drop(old);
 		await_event(&mut announced, |event| {
@@ -4832,7 +4839,7 @@ mod session_tests {
 
 		let (_shutdown, session) = follow(&element, &origin);
 		let err = super::RUNTIME
-			.block_on(async { tokio::time::timeout(Duration::from_secs(10), session).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), session).await })
 			.expect("the refusal held the session")
 			.unwrap()
 			.expect_err("the refusal did not fail the session");
@@ -4978,7 +4985,7 @@ mod session_tests {
 
 		for _ in 0..FRAMES {
 			publisher.write(tag);
-			std::thread::sleep(Duration::from_millis(50));
+			block(Duration::from_millis(50));
 		}
 		let mut frames = 0;
 		while let Some(tagged) = pull(Duration::from_millis(500)) {
@@ -5030,7 +5037,7 @@ mod session_tests {
 			))
 		);
 		assert!(video.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
-		let start = std::time::Instant::now();
+		let start = kio::clock::now();
 		let frame = || {
 			let mut frame = gst::Buffer::from_slice(crate::sink::h264_keyframe_au());
 			frame
@@ -5059,7 +5066,7 @@ mod session_tests {
 		let mut dropped = relay.dropped.subscribe();
 		super::RUNTIME
 			.block_on(async {
-				tokio::time::timeout(Duration::from_secs(30), dropped.wait_for(|dropped| *dropped >= 4)).await
+				kio::clock::timeout(Duration::from_secs(30), dropped.wait_for(|dropped| *dropped >= 4)).await
 			})
 			.expect("the elements stopped redialing")
 			.unwrap();
@@ -5132,7 +5139,7 @@ mod session_tests {
 		rendered(&sink, &mut old, 1);
 
 		// Long enough that a restarted run placed at the old segment would be a second late.
-		std::thread::sleep(Duration::from_secs(1));
+		block(Duration::from_secs(1));
 		let mut new = Publisher::new(&relay.origin, epoch(), video_rendition());
 		rendered(&sink, &mut new, 2);
 		assert_played_cleanly(pipeline);

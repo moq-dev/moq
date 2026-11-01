@@ -128,7 +128,7 @@ impl Directory {
 	#[cfg(all(target_os = "linux", feature = "_quic"))]
 	async fn wait_issued(&self, count: usize) -> Vec<CertificateDer<'static>> {
 		let mut issued = self.state.issued.subscribe();
-		tokio::time::timeout(TIMEOUT, issued.wait_for(|issued| issued.len() >= count))
+		kio::clock::timeout(TIMEOUT, issued.wait_for(|issued| issued.len() >= count))
 			.await
 			.expect("the directory never issued")
 			.unwrap()
@@ -390,7 +390,7 @@ impl Running {
 		let ready = relay.ready();
 		let trigger = relay.shutdown_trigger().clone();
 		let task = tokio::spawn(relay.run());
-		tokio::time::timeout(TIMEOUT, ready.wait())
+		kio::clock::timeout(TIMEOUT, ready.wait())
 			.await
 			.expect("the relay never became ready")
 			.unwrap();
@@ -428,9 +428,9 @@ impl Running {
 	/// Wait for HTTPS to serve `leaf`, which deploys just after the directory hands it out.
 	#[cfg(all(target_os = "linux", feature = "_quic"))]
 	async fn wait_served(&self, directory: &Directory, leaf: &CertificateDer<'static>) {
-		tokio::time::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			while self.served(directory, DOMAIN).await != *leaf {
-				tokio::time::sleep(Duration::from_millis(20)).await;
+				kio::clock::sleep(Duration::from_millis(20)).await;
 			}
 		})
 		.await
@@ -444,7 +444,7 @@ impl Running {
 		config.bind = Some("127.0.0.1:0".parse().unwrap());
 		let client = config.init(Default::default()).unwrap().with_reconnect(false);
 		let url: Url = format!("moql://127.0.0.1:{}/", self.quic.port()).parse().unwrap();
-		let _session = tokio::time::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
+		let _session = kio::clock::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
 			.await
 			.expect("QUIC connect timed out")
 			.expect("QUIC must serve the same certificate as HTTPS");
@@ -557,8 +557,8 @@ async fn unreachable_directory_fails_inside_the_budget() {
 	let relay = Relay::load(config).await.unwrap().with_signals(false);
 	let https = relay.web_addrs().https.unwrap();
 	let ready = relay.ready();
-	let started = std::time::Instant::now();
-	let err = tokio::time::timeout(TIMEOUT, relay.run())
+	let started = kio::clock::now();
+	let err = kio::clock::timeout(TIMEOUT, relay.run())
 		.await
 		.expect("the budget must bound the first issuance")
 		.expect_err("no certificate means no relay");
@@ -591,7 +591,7 @@ async fn a_signal_during_issuance_stops_startup() {
 	// Nothing awaits before issuance, so one poll leaves `run` waiting on it.
 	assert!(futures::FutureExt::now_or_never(run.as_mut()).is_none());
 	crate::shutdown::raise(libc::SIGTERM).await;
-	let started = tokio::time::Instant::now();
+	let started = kio::clock::now();
 	run.await.expect("a stop during issuance is not a failure");
 	assert_eq!(started.elapsed(), Duration::ZERO, "waited out the issuance");
 	assert!(ready.wait().await.is_err(), "reported ready without a certificate");
@@ -610,7 +610,7 @@ async fn failed_validations_stop_short_of_the_rate_limit() {
 		let mut config = relay_config(&directory.url, dir.path(), &[DOMAIN]);
 		config.acme.timeout = Some((TIMEOUT).into());
 		let relay = Relay::load(config).await.unwrap().with_signals(false);
-		let err = tokio::time::timeout(TIMEOUT, relay.run())
+		let err = kio::clock::timeout(TIMEOUT, relay.run())
 			.await
 			.expect("failed validations must end startup before the budget")
 			.expect_err("no certificate means no relay");
@@ -668,7 +668,7 @@ async fn failed_renewal_keeps_serving() {
 	let relay = Running::start(relay_config(&directory.url, dir.path(), &[DOMAIN]), &directory).await;
 
 	let mut refused = directory.state.refused.subscribe();
-	tokio::time::timeout(TIMEOUT, refused.wait_for(|refused| *refused >= 1))
+	kio::clock::timeout(TIMEOUT, refused.wait_for(|refused| *refused >= 1))
 		.await
 		.expect("the relay never tried to renew")
 		.unwrap();
@@ -736,7 +736,7 @@ fn bad_auth() -> rustls_acme::EventError<io::Error, io::Error> {
 
 /// Failed renewal validations stop ordering at the startup budget, which a start
 /// inside the window honors too, and renewal resumes once the oldest leaves it.
-#[moq_clock::test]
+#[kio::test]
 async fn renewal_pauses_once_failed_validations_spend_the_budget() {
 	let dir = tempfile::tempdir().unwrap();
 	let mut acme = uncontacted(dir.path());
@@ -755,15 +755,15 @@ async fn renewal_pauses_once_failed_validations_spend_the_budget() {
 	.chain(futures::stream::pending())
 	.inspect({
 		let polled = polled.clone();
-		move |_| polled.borrow_mut().push(moq_clock::wall())
+		move |_| polled.borrow_mut().push(kio::clock::wall())
 	});
-	let start = moq_clock::wall();
+	let start = kio::clock::wall();
 	let failures = Failures {
 		path: acme.failures.path.clone(),
 	};
-	let renewal = moq_clock::sim::spawn(renew(events, failures, DOMAIN.into()));
+	let renewal = kio::clock::sim::spawn(renew(events, failures, DOMAIN.into()));
 
-	moq_clock::sleep(FAILURE_WINDOW - Duration::from_secs(1)).await;
+	kio::clock::sleep(FAILURE_WINDOW - Duration::from_secs(1)).await;
 	assert_eq!(
 		*polled.borrow(),
 		[start; FAILURE_LIMIT],
@@ -780,8 +780,8 @@ async fn renewal_pauses_once_failed_validations_spend_the_budget() {
 		"{message}"
 	);
 
-	moq_clock::sleep(Duration::from_secs(1)).await;
-	moq_clock::sim::idle().await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	kio::clock::sim::idle().await;
 	let resumed = start + FAILURE_WINDOW;
 	assert_eq!(*polled.borrow(), [start, start, start, resumed, resumed]);
 	assert!(
@@ -806,7 +806,7 @@ async fn a_spent_budget_still_serves_the_cached_certificate() {
 
 	let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
 	listener.set_nonblocking(true).unwrap();
-	tokio::time::timeout(TIMEOUT, acme.issue(&listener))
+	kio::clock::timeout(TIMEOUT, acme.issue(&listener))
 		.await
 		.expect("the cached certificate deploys at once")
 		.expect("a valid cached certificate serves despite a spent budget");
@@ -816,7 +816,7 @@ async fn a_spent_budget_still_serves_the_cached_certificate() {
 	let leaf = &pem[pem.find("-----BEGIN CERTIFICATE-----").unwrap()..];
 	Cache::write(&acme.cert, leaf.as_bytes()).unwrap();
 	let mut acme = uncontacted(dir.path());
-	let err = tokio::time::timeout(TIMEOUT, acme.issue(&listener))
+	let err = kio::clock::timeout(TIMEOUT, acme.issue(&listener))
 		.await
 		.expect("an undeployable cached certificate must not order past the budget")
 		.expect_err("an undeployable cached certificate is no certificate");

@@ -80,9 +80,8 @@ impl Version {
 	}
 
 	/// Whether the session may deliver groups over unreliable QUIC datagrams (lite-05 §6.4).
-	/// A datagram carries one single-frame group's `subscribe | sequence | timestamp | payload`
-	/// and is routed over the existing subscription. Added in lite-05; older versions never
-	/// send or accept datagram bodies.
+	/// Group datagrams route one frame over an existing subscription; lite-07 adds a
+	/// leading type and padding. Older than lite-05 never sends or accepts datagrams.
 	pub fn has_datagrams(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
 	}
@@ -108,7 +107,7 @@ impl Version {
 		)
 	}
 
-	/// Whether either endpoint may open a Padding Stream (0x2). Added in lite-07.
+	/// Whether datagrams have a type and either endpoint may send padding streams or datagrams.
 	pub(crate) fn has_padding(self) -> bool {
 		!matches!(
 			self,
@@ -282,6 +281,15 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE_END carries the error the track ended with, so an errored end
+	/// keeps its history across a hop. Added in lite-07; earlier versions can only reset.
+	pub(crate) fn has_end_error(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether announcements and track requests carry the publisher epoch, the
 	/// identity that says two routes serve the same bytes. Added in lite-07.
 	/// Older versions carry nothing, so a received route has no epoch and is
@@ -307,6 +315,16 @@ impl Version {
 	/// replacing an advertisement in place. Added in lite-07. Older versions send an
 	/// ANNOUNCE_END then an ANNOUNCE_START.
 	pub fn has_announce_restart(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
+	/// Whether the announce stream has ANNOUNCE_TAKEOVER: a new advertisement that
+	/// continues what a live one served beneath its prefix. Added in lite-07. Older
+	/// versions send an ANNOUNCE_START, which the receiver treats as another instance.
+	pub(crate) fn has_announce_takeover(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06

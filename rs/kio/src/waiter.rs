@@ -2,7 +2,6 @@ use std::{
 	fmt,
 	future::Future,
 	pin::Pin,
-	// std, not `crate::sync`: loom's Arc has no `downgrade`. See `sync.rs`.
 	sync::{
 		Arc, OnceLock, Weak,
 		atomic::{AtomicBool, AtomicU64, Ordering},
@@ -156,7 +155,7 @@ impl Waiter {
 
 	/// Poll a foreign [`Future`] against this waiter, so it re-wakes the enclosing
 	/// `poll_*` step when it is ready.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_future<F: Future + ?Sized>(&self, future: Pin<&mut F>) -> Poll<F::Output> {
 		match future.poll(&mut self.context()) {
 			Poll::Ready(value) => crate::coop::ready(value),
@@ -432,7 +431,7 @@ where
 	crate::Pending::new(poll)
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 

@@ -10,8 +10,8 @@ today, so embedders change nothing.
 ## Plan
 
 The browser build comes from whichever line
-[Rust-backed @moq/net](/quest/m2/rs2ts/README.md) lands (decided 2026-10-26),
-WASM first and JS built from Rust later, so this quest does not fix the
+[JS-only @moq/net from Rust](/quest/m2/rs2ts-js.md) lands (decided 2026-10-26; moq's WASM
+support was removed on 2026-10-31), so this quest does not fix the
 mechanism. A thin package (e.g. `@moq/scene`) wraps it and `@moq/watch` uses
 it. Frames reach it as WebCodecs `VideoFrame`s through the same browser import
 path the [web studio](/quest/m3/studio/web/video-web.md) adds.

@@ -20,7 +20,7 @@ Group stitching across two streams drew repeated fixes:
 [#6251](https://github.com/moq-dev/moq/pull/6251),
 [#6348](https://github.com/moq-dev/moq/pull/6348),
 [#6407](https://github.com/moq-dev/moq/pull/6407), plus
-[headless groups](/quest/m2/ietf-headless-group.md) and
+[#7322](https://github.com/moq-dev/moq/pull/7322) (headless groups) and
 [join after finish](/quest/m2/ietf-join-after-finish.md). The `Fill` enum
 and its handoff (`rs/moq-net/src/ietf/subscriber.rs` about lines 273-396
 and 4712-4862) exist only because the model has one producer per group.
