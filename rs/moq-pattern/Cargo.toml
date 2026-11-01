@@ -20,7 +20,7 @@ serde = ["dep:serde"]
 serde = { workspace = true, optional = true }
 
 [dev-dependencies]
-criterion = { workspace = true }
+criterion = { package = "bench-harness", path = "../bench-harness" }
 # Enable serde so the crate's own tests cover the optional impls in the merge gate.
 moq-pattern = { path = ".", features = ["serde"] }
 serde_json = { workspace = true }

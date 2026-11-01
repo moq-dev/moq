@@ -164,21 +164,25 @@ pub struct MoqAudioDecoderOutput {
 	/// the decoder remixes to it.
 	#[uniffi(default = None)]
 	pub channels: Option<u32>,
-	/// Upper bound on buffering before skipping a stalled group. Same
-	/// congestion-control knob as
-	/// [`MoqSubscription::max_delay`](crate::consumer::MoqSubscription::max_delay):
-	/// when a group stalls and a newer group is more than this far ahead,
-	/// the consumer skips. `None` keeps the moq-mux default of zero (skip
-	/// aggressively). Distinct from [`delay`](Self::delay): this one
-	/// bounds how stale a group may be and adds no buffering.
+	/// How far behind the live edge to play. `min` is the playout delay: the
+	/// jitter buffer to hold ahead of the playhead, reported by
+	/// [`MoqAudioConsumer::delay`], and where a cold join starts; with
+	/// [`estimate`](Self::estimate) it floors the measured delay instead. A `min`
+	/// beyond the track's retention is refused. `max` is the congestion-control
+	/// knob [`MoqSubscription::max_delay`](crate::consumer::MoqSubscription::max_delay)
+	/// carries: a stalled group more than this far behind a newer one is skipped,
+	/// with no buffering added. `None` keeps the moq-mux default of zero for both.
 	#[uniffi(default = None)]
-	pub max_delay: Option<Duration>,
-	/// A fixed playout delay, or `None` to estimate it from arrival timing. This
-	/// is the jitter buffer to hold ahead of the playhead, reported by
-	/// [`MoqAudioConsumer::delay`]. A fixed delay beyond the track's retention
-	/// is refused.
+	pub delay: Option<crate::media::MoqDelay>,
+	/// Measure the playout delay from arrival timing, never below `delay.min`.
+	/// `false` holds exactly `delay.min`.
+	#[uniffi(default = true)]
+	pub estimate: bool,
+	/// Where to start on a track that already holds groups, or `None` for the oldest. A live
+	/// player picks [`Latest`](crate::media::MoqDecodeStart::Latest) so a reopened decoder
+	/// skips the backlog.
 	#[uniffi(default = None)]
-	pub delay: Option<Duration>,
+	pub start: Option<crate::media::MoqDecodeStart>,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -592,7 +596,8 @@ impl MoqAudioConsumer {
 	}
 
 	/// The playout delay to hold ahead of the playhead: the fixed
-	/// [`MoqAudioDecoderOutput::delay`], or the estimate from every frame read
+	/// [`MoqAudioDecoderOutput::delay`]'s min, or with
+	/// [`MoqAudioDecoderOutput::estimate`] the estimate from every frame read
 	/// so far.
 	///
 	/// The estimate measures when [`Self::next`] returns each frame, so call it
@@ -611,9 +616,6 @@ impl MoqAudioConsumer {
 }
 
 fn audio_config(catalog_audio: crate::media::MoqAudio) -> Result<hang::catalog::AudioConfig, MoqError> {
-	if !catalog_audio.enabled {
-		return Err(MoqError::NotFound);
-	}
 	let codec = catalog_audio.codec.parse().map_err(|_| MoqError::Unsupported)?;
 	// What moq-audio's decoder opens. It rejects the rest itself, so this is only
 	// here to report an unusable rendition as a plain Unsupported rather than a
@@ -642,6 +644,11 @@ impl MoqAudioConsumer {
 	/// [`MoqMediaCatalogConsumer::next`](crate::media::MoqMediaCatalogConsumer::next));
 	/// the codec is inferred from it. Only Opus, AAC-LC, and PCM are supported.
 	///
+	/// A [disabled](crate::media::MoqAudio::enabled) rendition subscribes too, and decodes once its
+	/// publisher re-enables it: a muted speaker's listener stays subscribed, so the unmute plays
+	/// from its first frame. Don't pick one, but keep one already playing while no enabled
+	/// rendition is on offer.
+	///
 	/// `id` is the rendition's catalog key. Its [`track`](crate::media::MoqAudio::track), or `id`
 	/// when unset, is subscribed in the broadcast its
 	/// [`broadcast`](crate::media::MoqAudio::broadcast) reference names.
@@ -663,8 +670,12 @@ impl MoqAudioConsumer {
 		config.output.format = output.format.into();
 		config.output.sample_rate = output.sample_rate;
 		config.output.layout = output.channels.map(moq_audio::Layout::from_channels).transpose()?;
-		config.max_delay = output.max_delay.unwrap_or_default();
-		config.delay = output.delay;
+		config.delay = output.delay.map(Into::into).unwrap_or_default();
+		config.estimate = output.estimate;
+		config.start = match output.start.unwrap_or_default() {
+			crate::media::MoqDecodeStart::Oldest => moq_audio::decode::Start::Oldest,
+			crate::media::MoqDecodeStart::Latest => moq_audio::decode::Start::Latest,
+		};
 
 		let consumer = broadcast
 			.driver
@@ -705,12 +716,11 @@ mod tests {
 		}
 	}
 
+	/// A consumer holds a disabled rendition it already plays, so one converts like any other.
 	#[test]
-	fn audio_config_refuses_disabled_renditions() {
+	fn audio_config_accepts_disabled_renditions() {
 		let mut config = catalog_audio("opus");
 		config.enabled = false;
-		assert!(matches!(audio_config(config.clone()), Err(MoqError::NotFound)));
-		config.enabled = true;
 		assert!(audio_config(config).is_ok());
 	}
 

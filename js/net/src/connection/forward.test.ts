@@ -46,7 +46,12 @@ function advance(ms: number): Promise<void> {
  */
 class FakeSession {
 	/** Every announce request the forwarder opened, by scope, in order. */
-	readonly requests: { scope: string; hidden: boolean | undefined; stream: Announce.Producer }[] = [];
+	readonly requests: {
+		scope: string;
+		hidden: boolean | undefined;
+		covering: boolean | undefined;
+		stream: Announce.Producer;
+	}[] = [];
 
 	/**
 	 * Every broadcast the forwarder consumed, per path. An announcement consumes the path
@@ -78,7 +83,7 @@ class FakeSession {
 
 	announced(scope: Path.Pattern = Path.Pattern.all(), options?: Announce.Options): Announce.Consumer {
 		const stream = new Announce.Producer();
-		this.requests.push({ scope: scope.text, hidden: options?.hidden, stream });
+		this.requests.push({ scope: scope.text, hidden: options?.hidden, covering: options?.covering, stream });
 		if (this.syncedAtOnce) stream.synced();
 		const consumer = stream.consume();
 		const close = consumer.close.bind(consumer);
@@ -150,6 +155,8 @@ test("a request discovers an unwatched path and waits for its initial set", asyn
 	const request = origin.request(Path.from("room"));
 	await settle();
 	expect(session.open()).toEqual(["room/**"]);
+	// The origin routes through every route the request reports, a covering one included.
+	expect(session.requests[0]).toMatchObject({ hidden: true, covering: true });
 	expect(request.active.peek()).toBeUndefined();
 	expect(session.consumes(Path.from("room"))).toBe(0);
 	start(session.stream("room/**"), "room");

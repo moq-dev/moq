@@ -505,29 +505,26 @@ mod tests {
 	/// [`output`](super::super::output) keeps GPU frames only for a device that
 	/// imports them, so a source feeding a device without the import feature
 	/// decodes to the CPU instead of handing over DMA-BUFs it would refuse.
+	///
+	/// Mesa's software driver cannot import DMA-BUFs, so the supported half
+	/// asks for the device's answer with the feature present instead of
+	/// opening a second device that has it.
 	#[cfg(all(target_os = "linux", feature = "dmabuf"))]
 	#[tokio::test]
 	#[ignore = "needs a Vulkan device; run by just rs render-sw"]
 	async fn the_output_follows_the_device() {
-		let instance = wgpu::Instance::default();
-		let adapter = instance
-			.request_adapter(&wgpu::RequestAdapterOptions::default())
-			.await
-			.expect("a GPU adapter");
-		let open = |features| {
-			adapter.request_device(&wgpu::DeviceDescriptor {
-				required_features: features,
-				..Default::default()
-			})
-		};
+		use super::super::source::output_with;
 
-		let (without, _queue) = open(wgpu::Features::empty()).await.expect("a GPU device");
-		assert_eq!(super::super::output(&without), crate::Output::Cpu);
-
+		let (device, _queue) = gpu().await;
 		let import = wgpu::Features::VULKAN_EXTERNAL_MEMORY_DMA_BUF;
-		assert!(adapter.features().contains(import), "the adapter imports DMA-BUFs");
-		let (with, _queue) = open(import).await.expect("a DMA-BUF-capable GPU device");
-		assert_eq!(super::super::output(&with), crate::Output::Render);
+		assert!(
+			!device.features().contains(import),
+			"the device was opened without import"
+		);
+		assert_eq!(super::super::output(&device), crate::Output::Cpu);
+
+		assert_eq!(output_with(&device, device.features()), crate::Output::Cpu);
+		assert_eq!(output_with(&device, device.features() | import), crate::Output::Render);
 	}
 
 	/// Capture packed PipeWire DMA-BUFs, import them through Vulkan, and turn
@@ -538,7 +535,6 @@ mod tests {
 	#[cfg(all(target_os = "linux", feature = "pipewire"))]
 	#[tokio::test]
 	#[ignore = "needs a PipeWire desktop and Vulkan GPU"]
-	#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 	async fn packed_dmabuf_renders_through_vulkan() {
 		let instance = wgpu::Instance::default();
 		let adapter = instance
@@ -574,7 +570,7 @@ mod tests {
 		let mut stream = crate::capture::open(&capture).await.expect("portal screen capture");
 
 		for index in 0..16 {
-			let frame = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read())
+			let frame = kio::clock::timeout(std::time::Duration::from_secs(5), stream.read())
 				.await
 				.unwrap_or_else(|_| panic!("timed out waiting for frame {index}"))
 				.unwrap_or_else(|error| panic!("capture failed before frame {index}: {error}"))

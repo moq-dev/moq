@@ -9,7 +9,7 @@ error type per direction, terminal operations that consume their handle,
 plain config structs, and no quinn compatibility baggage. Consumers lose the
 workarounds quinn's shape forced on them.
 
-Non-goals: the congestion controller API (redesigned in another quest), a
+Non-goals: the congestion controller API, a
 buffer pool ([QUIC I/O boundary](/quest/m2/quic-io-boundary.md)), and the
 non-QUIC backends' move off `web_transport_trait`, which has landed.
 
@@ -46,7 +46,6 @@ side by side and fix any name or signature that still differs, and check
 
 ## Required
 
-- [Streams](/quest/m1/quic-api/streams.md) - `send::`/`recv::` namespaces, one error per direction, `finish(self) -> send::Finished`, consuming `reset`/`stop`, `Buf` writes, both drivers mirrored
 - [Crypto](/quest/m1/quic-api/crypto.md) - crypto traits sealed to rustls, concrete peer identity and handshake data
 - [Waits](/quest/m1/quic-api/waits.md) - moq-quic owns every wait as a `poll_*` on `&kio::Waiter`, deleting `StreamEvent` and the drivers' and qmux's waiter tables
 - [Poll forms](/quest/m1/quic-api/poll.md) - both drivers' waits poll as `&self, &kio::Waiter` forwards to moq-quic, the async forms wrap them, and `send::Finished` is a future

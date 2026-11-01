@@ -100,6 +100,34 @@ test("AnnounceBroadcast carries a restart only on draft-07", async () => {
 	expect(await decodeAnnounceBroadcast(reader, Version.DRAFT_06)).toEqual({ status: "skipped" });
 });
 
+test("AnnounceBroadcast carries a takeover only on draft-07", async () => {
+	const hops = [HopSchema.parse(7n)];
+	const msg = {
+		status: "takeover" as const,
+		predecessor: 2n,
+		suffix: Path.from("p"),
+		pathBase: { distance: 1n, keep: 1 },
+		epoch: Epoch.mint(),
+		hops,
+		hopBase: undefined,
+		cost: 12n,
+	};
+	expect(await roundTrip(msg, Version.DRAFT_07)).toEqual(msg);
+
+	// Older versions send a start instead.
+	await expect(
+		bytes(
+			(w) =>
+				encodeAnnounceBroadcast(
+					w,
+					{ status: "takeover", predecessor: 0n, suffix: Path.from("p"), hops: [] },
+					Version.DRAFT_06,
+				),
+			Version.DRAFT_06,
+		),
+	).rejects.toThrow();
+});
+
 test("AnnounceBroadcast skips an unknown type on draft-06", async () => {
 	const encoded = await bytes(async (w) => {
 		await w.u53(4);
@@ -388,6 +416,17 @@ test("AnnounceHistory rejects a keep longer than the base", () => {
 		ProtocolViolation,
 	);
 	expect(() => history.update({ id: 0n, hops: [], hopBase: { distance: 1n, keep: 2 } })).toThrow(ProtocolViolation);
+});
+
+test("AnnounceHistory keeps segments split at an escaped slash", () => {
+	const history = new AnnounceHistory();
+	history.start({ suffix: Path.from("a\\/b"), hops: [] });
+	// The kept `a\` is half an escape, which the rest completes or nothing does.
+	const { suffix } = history.start({ suffix: Path.from("c"), hops: [], pathBase: { distance: 1n, keep: 1 } });
+	expect(suffix).toBe(Path.from("a\\/c"));
+	expect(() => history.start({ suffix: Path.empty(), hops: [], pathBase: { distance: 1n, keep: 1 } })).toThrow(
+		ProtocolViolation,
+	);
 });
 
 test("AnnounceHistory rejects a resolved path past the byte limit", () => {

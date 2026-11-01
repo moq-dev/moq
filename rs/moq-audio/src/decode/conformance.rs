@@ -211,7 +211,10 @@ async fn consumer_preserves_reference_samples_and_timeline() {
 	for vector in VECTORS {
 		let (_source, broadcast, name, config) = import(vector);
 		let options = decode::Options {
-			max_delay: Duration::from_secs(1),
+			delay: decode::Delay {
+				max: Some(Duration::from_secs(1)),
+				..Default::default()
+			},
 			..Default::default()
 		};
 		let mut decoder = decode::Consumer::new(&broadcast, &config, name, options).await.unwrap();

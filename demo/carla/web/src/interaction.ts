@@ -75,3 +75,16 @@ export function hashWithFocus(hash: string, truck: string | undefined): string {
 	const value = params.toString();
 	return value ? `#${value}` : "";
 }
+
+/**
+ * Whether a key aimed at `target` belongs to the player rendered in `root`.
+ *
+ * The window sees every key on the host page, so the player takes only keys aimed
+ * inside it or at nothing in particular; the host page's own controls keep theirs.
+ */
+export function ownsKey(target: EventTarget | undefined, root: ShadowRoot): boolean {
+	if (!target || !("nodeType" in target)) return true;
+	const node = target as Node;
+	const doc = root.ownerDocument;
+	return node === doc.body || node === doc.documentElement || node === root.host || root.contains(node);
+}

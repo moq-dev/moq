@@ -4,6 +4,17 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Media consumers take a `moq_delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`moq_consume_video` and `moq_consume_audio` take `const moq_delay *delay` in place of `uint64_t max_delay_us`; NULL is the default.
+`moq_video_decoder_output.max_delay_us` and `moq_audio_decoder_output.max_delay_us` are `moq_delay delay`, which changes both structs' layout.
+Set `delay.max_us` to the old `max_delay_us`, `delay.max_unlimited` for no limit, and `delay.min_us` to your playout delay, where a cold join starts. A zeroed `moq_delay` is zero for both.
+
+### A subscription without `max_delay_present` has no limit
+
+A `moq_subscription` with `max_delay_present` false sets no subscriber limit, leaving the publisher's max age alone to bound it, instead of moq-net's default of zero.
+Start from `moq_subscription_defaults()`, or set `max_delay_present`, where you relied on a zeroed struct; a NULL pointer still means the defaults.
+
 ### Compression moves to the track
 
 `moq_json_snapshot_config.compression`, `moq_json_stream_config`, `moq_binary_config`, and the `moq_publish_binary_snapshot*` and `moq_publish_binary_stream*` functions are removed.
