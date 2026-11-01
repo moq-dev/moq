@@ -23,8 +23,7 @@ wss = ["ws", "dep:rustls", "tokio-tungstenite/rustls-tls-native-roots"]
 [dependencies]
 bytes = { workspace = true }
 futures = { workspace = true, optional = true }
-kio = { workspace = true }
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-net = { workspace = true }
 # The stream state machine, shared with QUIC. `mux` drives it over a reliable transport.
 moq-quic = { workspace = true, features = ["mux"] }

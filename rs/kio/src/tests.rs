@@ -194,8 +194,7 @@ fn write_unwanted_reports_wanted_closed_and_idle() {
 
 /// The deal the guard makes: a consumer minted before it declines the teardown,
 /// and one asked for after the teardown committed is never handed out. Single
-/// threaded here, so this pins the ordering rather than the race; the
-/// interleavings are `loom.rs`'s job.
+/// threaded here, so this pins the ordering rather than the race.
 #[test]
 fn a_consumer_minted_before_the_guard_declines_it() {
 	let producer = Producer::new(0u32);

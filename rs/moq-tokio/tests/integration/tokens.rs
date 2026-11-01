@@ -88,7 +88,7 @@ fn config(version: &str, tokens: &[&str]) -> moq_tokio::connect::Config {
 }
 
 async fn next(server: &mut Server) -> Seen {
-	tokio::time::timeout(Duration::from_secs(10), server.seen.recv())
+	kio::clock::timeout(Duration::from_secs(10), server.seen.recv())
 		.await
 		.expect("no handshake arrived")
 		.unwrap()
@@ -125,7 +125,7 @@ async fn lite_05_presents_the_token_in_the_url() {
 			token: None,
 		}
 	);
-	tokio::time::timeout(Duration::from_secs(10), connection.tokens().answered())
+	kio::clock::timeout(Duration::from_secs(10), connection.tokens().answered())
 		.await
 		.expect("the credential was never answered")
 		.expect("the credential was refused");
@@ -144,7 +144,7 @@ async fn a_refused_credential_redials_with_its_replacement() {
 	tokens.set(vec!["new".parse().unwrap()]);
 	server.release.notify_one();
 	assert_eq!(next(&mut server).await.token.as_deref(), Some("new"));
-	tokio::time::timeout(Duration::from_secs(10), tokens.answered())
+	kio::clock::timeout(Duration::from_secs(10), tokens.answered())
 		.await
 		.expect("the replacement was never answered")
 		.expect("the replacement was refused");
@@ -180,7 +180,7 @@ async fn refused_credential_is_terminal(config: moq_tokio::connect::Config) {
 	);
 	server.release.notify_one();
 	// A lite client is live before the server's answer, so the refusal may close it after.
-	let err = tokio::time::timeout(Duration::from_secs(10), async {
+	let err = kio::clock::timeout(Duration::from_secs(10), async {
 		match connection.established().await {
 			Ok(connection) => connection.closed().await.expect_err("closed without an error"),
 			Err(err) => err,
