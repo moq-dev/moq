@@ -8,8 +8,8 @@
 //!   [`Deadline`]s on a [`Deadlines`] queue, and tests step them with a
 //!   [`Manual`] clock.
 //! - Async code reads the ambient clock: [`now`], [`wall`], [`sleep`],
-//!   [`sleep_until`], [`timeout`], [`interval`], and [`drive`] resolve to the
-//!   current runtime's clock. That is tokio's (paused tokio included), the
+//!   [`sleep_until`], [`timeout`], [`interval`], and `drive` (with the `async`
+//!   feature) resolve to the current runtime's clock. That is tokio's (paused tokio included), the
 //!   simulator inside `sim::run`, and a [`Deadlines`] queue on a thread that
 //!   [entered](Deadlines::enter) it, which is how a runtime that reads the host
 //!   clock itself (an io_uring worker) becomes a backend.
@@ -52,8 +52,10 @@ pub use installed::Installed;
 pub use instant::Instant;
 pub use manual::Manual;
 pub use random::{Rng, rng, seed};
+#[cfg(feature = "async")]
+pub use timer::drive;
 pub use timer::{
-	Elapsed, Interval, MissedTickBehavior, Sleep, Timeout, drive, interval, interval_at, sleep, sleep_until, timeout,
+	Elapsed, Interval, MissedTickBehavior, Sleep, Timeout, interval, interval_at, sleep, sleep_until, timeout,
 	timeout_at,
 };
 pub use wall::{OutOfRange, Wall, WallMap};
