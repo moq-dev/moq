@@ -144,6 +144,9 @@ pub(in crate::model) struct Window {
 	/// Nothing is left to resolve: see [`Self::is_settled`]. Kept so a read checks it once
 	/// per group, not once per range.
 	settled: bool,
+	/// The floor the last [`Self::covered_by`] checked from, and where it stopped finding the
+	/// groups accounted for.
+	covered: Option<(u64, u64)>,
 }
 
 /// One non-empty range, resolved.
@@ -351,6 +354,7 @@ impl Window {
 			missable: RangeInclusiveSet::new(),
 			pending: false,
 			settled: false,
+			covered: None,
 		};
 		window.place(latest, holdings)?;
 		Ok(window)
@@ -527,15 +531,30 @@ impl Window {
 
 	/// Whether `accounted` holds every group in range from `from` up to the exclusive `cap`,
 	/// `false` while a range stays open (see [`Self::end`]).
-	pub fn covered_by(&self, from: u64, cap: Option<u64>, accounted: &impl Accounted) -> bool {
+	///
+	/// The caller only grows `accounted` between checks, so each resumes where the last
+	/// stopped unless `from` fell below its floor: one made on every wake visits each range
+	/// once over the subscription, not once per wake. The last stop never passes its cap, so
+	/// a wider one is checked past it anyway.
+	pub fn covered_by(&mut self, from: u64, cap: Option<u64>, accounted: &impl Accounted) -> bool {
 		let Some(end) = self.end() else {
 			return false;
 		};
 		let end = cap.map_or(end, |cap| cap.min(end));
-		self.runs(from).take_while(|run| *run.start() < end).all(|run| {
+		let mut through = match self.covered {
+			Some((floor, through)) if floor <= from => through.max(from),
+			_ => from,
+		};
+		let covered = self.runs(through).take_while(|run| *run.start() < end).all(|run| {
 			let run_end = run.end().checked_add(1).map_or(end, |next| next.min(end));
-			accounted.holds(&(*run.start()..run_end))
-		})
+			let whole = accounted.holds(&(*run.start()..run_end));
+			if whole {
+				through = run_end;
+			}
+			whole
+		});
+		self.covered = Some((from, through));
+		covered
 	}
 
 	/// The groups in range from `from` on, lowest first.
@@ -622,6 +641,7 @@ impl Window {
 	}
 
 	fn rebuild(&mut self) {
+		self.covered = None;
 		self.settled = !self.pending && !self.spans.iter().any(|span| matches!(span.end, End::Time(_)));
 		self.groups = RangeInclusiveSet::new();
 		self.missable = RangeInclusiveSet::new();
@@ -1123,6 +1143,39 @@ mod tests {
 		assert!(!window.admits_datagram(5, Some(at(5000))));
 		assert!(window.admits_datagram(5, Some(at(5500))));
 		assert!(window.admits_datagram(6, Some(at(5000))));
+	}
+
+	/// A coverage check resumes where the last stopped, but not below its floor or past its
+	/// cap: a lower floor or a wider cap reaches groups no check has seen.
+	#[test]
+	fn coverage_resumes_within_what_was_checked() {
+		let mut window = Window::new(&[Range::groups(0..2), Range::groups(4..6)], None, &Untimed).unwrap();
+		let accounted = rangemap::RangeSet::from_iter([0..1, 4..6]);
+		assert!(window.covered_by(4, None, &accounted));
+		assert!(
+			!window.covered_by(0, None, &accounted),
+			"group 1 is owed below the old floor"
+		);
+
+		let accounted = rangemap::RangeSet::from_iter([0..2, 4..5]);
+		assert!(window.covered_by(0, Some(5), &accounted));
+		assert!(
+			!window.covered_by(0, None, &accounted),
+			"group 5 is owed past the old cap"
+		);
+		assert!(window.covered_by(1, Some(5), &accounted), "a raised floor resumes");
+	}
+
+	/// A map keyed by the groups accounted for counts as a set of them, whatever its values.
+	#[test]
+	fn coverage_reads_a_map_of_the_groups_accounted_for() {
+		let mut window = Window::new(&[Range::groups(0..2), Range::groups(4..6)], None, &Untimed).unwrap();
+		let mut accounted = rangemap::RangeMap::new();
+		accounted.insert(0..2, 'a');
+		accounted.insert(4..5, 'b');
+		assert!(!window.covered_by(0, None, &accounted), "group 5 is owed");
+		accounted.insert(5..6, 'a');
+		assert!(window.covered_by(0, None, &accounted));
 	}
 
 	#[test]
