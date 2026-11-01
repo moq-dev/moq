@@ -77,9 +77,9 @@ async fn first_subscribe(version: &str, publish: bool) {
 
 macro_rules! cases {
 	($($name:ident: $version:literal, $publish:literal;)*) => {$(
-		#[moq_clock::test]
+		#[kio::test]
 		async fn $name() {
-			moq_clock::timeout(Duration::from_secs(10), first_subscribe($version, $publish))
+			kio::clock::timeout(Duration::from_secs(10), first_subscribe($version, $publish))
 				.await.expect("first subscribe stalled");
 		}
 	)*};

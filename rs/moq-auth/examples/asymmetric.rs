@@ -20,8 +20,8 @@ fn main() -> anyhow::Result<()> {
 		.with_root("rooms/meeting-123")
 		.with_publish(["alice/**".parse()?])
 		.with_subscribe(["**".parse()?])
-		.with_expires(moq_clock::wall() + Duration::from_secs(3600))
-		.with_issued(moq_clock::wall());
+		.with_expires(kio::clock::wall() + Duration::from_secs(3600))
+		.with_issued(kio::clock::wall());
 
 	let token = private_key.sign(&claims)?;
 	println!("Signed token:\n{token}\n");

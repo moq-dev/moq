@@ -2,10 +2,10 @@
 """Check all manifests without inspecting installed or smoke-owned dependencies."""
 
 import json
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 from playwright import check
 

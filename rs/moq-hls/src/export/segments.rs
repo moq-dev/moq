@@ -15,7 +15,7 @@
 //! rendition numbers its own segments, so a number means the same on every edge and reload of
 //! that rendition, but nothing across renditions: players match renditions by timestamp.
 
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::task::{Poll, ready};
