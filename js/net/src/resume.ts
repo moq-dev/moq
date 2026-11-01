@@ -20,7 +20,9 @@
  * A new copy is asked from where the reader got to, so it never has the groups below the reader's
  * local floor that the copies it replaced cached. Lowering that floor asks the newest route for
  * them through a backfill: another copy of that route, bounded to the groups the floor newly
- * covers, and kept like a replaced copy.
+ * covers, and kept like a replaced copy. A switch asks the same way for the groups below where the
+ * reader got to that it still lacks, from the lowest one: one late, reordered, or in flight on the
+ * replaced route still arrives within the reader's budget, as it would on one cursor.
  *
  * A group carries on across the switch through its {@link Recover}: once its copy stalls while a
  * newer route serves, it continues from the serving route's copy of the same group at the same
@@ -102,7 +104,9 @@ export function routeFailed(err: Error): boolean {
 	return err instanceof SessionError || sessionClosed(err);
 }
 
-// Every `track.Info` field, so one added later fails to compile until it is listed here.
+// Every `track.Info` field but `unchecked`, so one added later fails to compile until it is
+// listed here. `unchecked` says how a copy arrived, not what it holds, so copies over different
+// lite versions still match. `ietf` is compared, like Rust's moq-transport `properties`.
 const INFO_FIELDS = Object.keys({
 	compress: true,
 	timescale: true,
@@ -110,7 +114,7 @@ const INFO_FIELDS = Object.keys({
 	priority: true,
 	refresh: true,
 	ietf: true,
-} satisfies Record<keyof track.Info, true>) as (keyof track.Info)[];
+} satisfies Record<Exclude<keyof track.Info, "unchecked">, true>) as (keyof track.Info)[];
 
 /** Two copies claiming the same content must agree on all of it, like Rust's `Info` equality. */
 function compatible(a: track.Info, b: track.Info): boolean {
@@ -295,6 +299,11 @@ class Reader implements ResumeSource {
 	#start: number;
 	/** The newest group handed out: where a new copy is asked to start. */
 	#newest?: number;
+	/**
+	 * Set once the route changed, so the serving copy's resume point may pass over groups the
+	 * reader lacks. Kept until the gaps are backfilled; see {@link #backfillGaps}.
+	 */
+	#resumed = false;
 	/** The last datagram handed out, which never ages until another supersedes it. */
 	#datagram?: number;
 	/**
@@ -317,6 +326,8 @@ class Reader implements ResumeSource {
 	#last?: { largest?: track.Position; object?: track.Position; ended: true };
 	/** The first end any copy declared: the logical track's, whichever copy serves. */
 	#declared?: track.Position;
+	// The error a copy's end carried, kept with the boundary so releasing that copy keeps it.
+	#declaredError?: Error;
 	/** The subscriber's record of groups handed out, as the last read passed it. */
 	#delivered = new Delivered();
 	/** Runs the serving copy gave up and the reader has yet to report; see {@link #tryDrop}. */
@@ -379,6 +390,9 @@ class Reader implements ResumeSource {
 		this.#drops = [];
 		const source = route.source;
 		if (!source) return;
+		// The new copy starts at the newest group handed out, so a lower one still missing is
+		// asked of its route once a read says which; see #backfillGaps.
+		this.#resumed = true;
 		// The replaced copies keep delivering until the new one delivers its first group: a
 		// group they get meanwhile may be one the new route never has. See #observe.
 		for (const copy of this.#copies) copy.replaced = true;
@@ -509,12 +523,22 @@ class Reader implements ResumeSource {
 		if (this.#delivered.covers(start, end)) return;
 		// A floor lowered again asks once.
 		const closed = newest.source.from.closed;
-		const asked = (copy: Copy) =>
-			copy.source.from.closed === closed &&
-			copy.floor !== undefined &&
-			copy.floor <= start &&
-			(copyEnd(copy) ?? Number.POSITIVE_INFINITY) >= end;
-		if (this.#copies.some(asked)) return;
+		const asks = (copy: Copy) =>
+			copy.source.from.closed === closed && copy.floor !== undefined && copy.floor <= start;
+		if (this.#copies.some((copy) => asks(copy) && (copyEnd(copy) ?? Number.POSITIVE_INFINITY) >= end)) return;
+		// A later resume point widens the route's backfill rather than asking again, so flaps over
+		// a gap keep one per route. Waited for as long as a new one would be.
+		const widened = this.#copies
+			.slice(0, -1)
+			.find((copy) => copy.done === undefined && copy.until !== undefined && asks(copy));
+		if (widened) {
+			widened.until = end - 1;
+			widened.since = now();
+			this.#update(widened);
+			this.#bound(widened);
+			this.wake();
+			return;
+		}
 		const backfill = { floor: start, until: end - 1 };
 		this.#add(
 			{
@@ -530,6 +554,23 @@ class Reader implements ResumeSource {
 			},
 			this.#copies.length - 1,
 		);
+	}
+
+	/**
+	 * Ask the serving route for the groups below its copy's resume point that the reader still
+	 * lacks: a late or reordered one, or one in flight on the route it replaced, as one cursor on
+	 * the logical track would still get. From the lowest gap within the reader's cursor, which
+	 * decides what it reads, so groups already handed out are not asked for again below it. A gap
+	 * past the reader's budget was already forgotten as handed out. A lowered cursor asks through
+	 * {@link #backfill} itself. Mirrors the Rust `Reader::backfill_gaps`.
+	 */
+	#backfillGaps(delivered: Delivered): void {
+		if (!this.#resumed) return;
+		this.#resumed = false;
+		const resumed = this.#copies.at(-1)?.floor;
+		if (resumed === undefined) return;
+		const [gap] = delivered.gaps(this.#shell.cursor.peek().start, resumed);
+		if (gap) this.#backfill(gap.start, resumed);
 	}
 
 	/** Wake parked reads, so they look again and let go of what nothing needs. */
@@ -592,6 +633,7 @@ class Reader implements ResumeSource {
 		this.#learnEnd();
 		if (this.#closed) return this.#refused ? { kind: "error", error: this.#refused } : { kind: "done" };
 		this.#groupsRead = true;
+		this.#backfillGaps(delivered);
 		if (dispositions) {
 			const dropped = this.#tryDrop(delivered);
 			if (dropped) return dropped;
@@ -1025,7 +1067,9 @@ class Reader implements ResumeSource {
 	#learnEnd(): track.Position | undefined {
 		for (const copy of this.#copies) {
 			const end = hooks.subscriberEnd(copy.sub);
-			if (end) this.#declare(end);
+			if (!end) continue;
+			this.#declare(end);
+			this.#declaredError ??= hooks.subscriberEndError(copy.sub);
 		}
 		const declared = this.#declared;
 		if (declared && !this.#closed) {
@@ -1079,6 +1123,13 @@ class Reader implements ResumeSource {
 	end(): track.Position | undefined {
 		this.sync();
 		return this.#learnEnd();
+	}
+
+	/** The error the logical track's end carries, if it does not end cleanly. */
+	endError(): Error | undefined {
+		this.sync();
+		this.#learnEnd();
+		return this.#declaredError;
 	}
 
 	async finished(): Promise<track.Position> {
@@ -1501,7 +1552,7 @@ export class Front {
 					next?: Promise<{ event?: TracksEvent; err?: Error }>;
 			  }
 			| undefined;
-		const wait = () => race([Signal.race(lister.used, this.#changed), closed]);
+		const wait = () => race([Signal.race(lister.wanted, this.#changed), closed]);
 		const stop = () => {
 			listing?.reader?.close();
 			listing = undefined;
@@ -1525,7 +1576,7 @@ export class Front {
 		try {
 			for (;;) {
 				if (closed.peek() !== undefined) return;
-				if (!lister.used.peek()) {
+				if (!lister.wanted.peek()) {
 					if (listing) {
 						stop();
 						lister.clear();
@@ -1886,10 +1937,27 @@ export class Front {
 			const retired = this.#retire.signal;
 			const signal = options?.signal ? AbortSignal.any([options.signal, retired]) : retired;
 			try {
-				await until(this.#verify(name, source), signal);
+				// Asked alongside the check that the source claims the track's recorded properties,
+				// rather than a round trip after it: only handing the group out waits for the check.
 				const fetchGroup = source.wire.fetchGroup;
-				if (!fetchGroup) throw new Error("fetch group is not supported by this session's version");
-				const group = await fetchGroup(name, sequence, { ...options, signal });
+				const ahead = new AbortController();
+				const fetching = fetchGroup?.(name, sequence, {
+					...options,
+					signal: AbortSignal.any([signal, ahead.signal]),
+				});
+				fetching?.catch(() => {});
+				try {
+					await until(this.#verify(name, source), signal);
+				} catch (err) {
+					ahead.abort(err);
+					void fetching?.then(
+						(group) => group.close(),
+						() => {},
+					);
+					throw err;
+				}
+				if (!fetching) throw new Error("fetch group is not supported by this session's version");
+				const group = await fetching;
 				// A copy that already failed continues nothing: that is the route failing again.
 				const failed = group.closed.peek();
 				if (failed instanceof Error) {

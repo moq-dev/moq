@@ -25,8 +25,8 @@ Placed elsewhere (decided 2026-10-27, maintainer):
 - qmux buffering a peer-declared size (NET-3): owned by
   [qmux receive lease](/quest/m2/qmux-receive-lease.md).
 - Media parser fuzzing: owned by [media fuzz](/quest/m2/media-fuzz.md).
-- E2EE cloned-process rule and CryptoKey length:
-  [cloned process](/quest/m2/e2ee/cloned-process.md).
+- E2EE cloned-process rule and CryptoKey length: documented in the
+  E2EE draft and the `moq-e2ee` and `@moq/e2ee` docs.
 
 Dropped, with reasons:
 
@@ -55,8 +55,5 @@ Dropped, with reasons:
 ## Required
 
 - [fMP4 import streams mdat](/quest/m1/security-audit/fmp4-stream-mdat.md) - a box header declaring a huge size cannot pin importer memory across segments
-- [MKV import streams blocks](/quest/m1/security-audit/mkv-stream-blocks.md) - a declared block, metadata master, or ignored element cannot pin importer memory
-- [Relay HTTP surface](/quest/m1/security-audit/relay-http.md) - `/fetch` cannot be sniffed as active content, and no web page can reach the ops listener
-- [Lite fetch backstop](/quest/m1/security-audit/fetch-backstop.md) - the pre-lite-05 fetch backstop is bounded by design or by the session's limits, not an unrelated default
 - [Browser input checks](/quest/m1/security-audit/js-input.md) - room metadata is schema-validated and the http:// fingerprint fetch is aborted and length-checked
 - [CI tool pins](/quest/m1/security-audit/ci-pins.md) - binding generators are pinned by commit in one place, and the remaining unpinned installs and broad token grants are fixed

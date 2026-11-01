@@ -383,9 +383,10 @@ static void on_finish_health_frame(void *ud, int32_t frame) {
     int32_t read = moq_consume_track_frame((uint32_t)frame, &info);
     const char payload[] = "session-alive";
     pthread_mutex_lock(&c->mu);
+    // Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
     if (read < 0 || info.payload_size != sizeof(payload) - 1 ||
         memcmp(info.payload, payload, sizeof(payload) - 1) != 0 ||
-        info.timestamp_present || ++c->finish.health_frames != 1) c->finish.failed = 1;
+        ++c->finish.health_frames != 1) c->finish.failed = 1;
     pthread_cond_broadcast(&c->cv);
     pthread_mutex_unlock(&c->mu);
     moq_consume_track_frame_free((uint32_t)frame);

@@ -1,51 +1,54 @@
-# [S] Backport draining shutdown and the qmux stream limit to release
+# [XS] Publish the release line's drain() wrappers
 
 ## Goal
 
-The `release` line publishes a non-breaking moq-ffi 0.4.x (wheel, Swift, and
-Kotlin) and moq-tokio whose sessions can drain before closing and whose qmux
-sessions accept the QUIC stream limit:
+The `release` line's hand-written wrappers that gained `drain()` in
+[moq-dev/moq#6642](https://github.com/moq-dev/moq/pull/6642) are on their
+registries:
 
-- An async `MoqSession.drain()` drains finished tracks within one second
-  and returns any delivery error, as the earlier async shutdown implementation did
-  (7bbac3272, with 03fb0d1c1, f9de31167, and #5558's explicit Lite 07 test).
-  Explicit `moq-lite-07-wip` waits for the peer to receive the tail; older
-  Lite versions, including the default lite-06, and IETF wait only for
-  transport ACKs. The sync `shutdown()` stays `cancel(0)`.
-- qmux sessions get the QUIC stream limit (#5609) instead of the 100-stream
-  default.
+- Python [`moq-rs`](https://pypi.org/project/moq-rs/) 0.5.2 on PyPI.
+- Dart [`moq`](https://pub.dev/packages/moq) 0.1.1 on pub.dev.
 
-Check: release-plz publishes the release commits, and the newest moq-ffi on
-PyPI, the Swift package, and Maven Central contains both. Swift and Kotlin
-publish from their own tag workflows, so check each. The newest hand-written
-wrappers (`moq-rs`, the Swift and Kotlin libraries, and the other wrappers
-that gain `drain()`) expose it too.
+Check: each registry lists the version. Both versions are already set on
+`release` (`py/moq-rs/pyproject.toml`, `dart/moq/pubspec.yaml`), so this needs
+a publish, not code. Each publish is outward-facing, so the maintainer runs it;
+agents do not push tags, dispatch workflows, or bump versions.
 
 ## Plan
 
-Decided 2026-10-20 (maintainer): additive `drain()` on `release` rather than
-backporting async `shutdown()` as-is. Why: making `shutdown()` async breaks
-the 0.4.x Python, Swift, and Kotlin bindings. `main` requests the drain with synchronous `shutdown()` and reports its result
-through `closed()`; it gains no separate `drain()`. Callers replace the release
-line's awaited `drain()` with `shutdown()` followed by awaiting `closed()` at the
-next breaking cut.
+Already published (checked 2026-10-31): moq-ffi 0.4.19 carries `drain()` and
+qmux 0.5.3 on PyPI, Maven Central, and pub.dev; moq-ffi 0.4.20 followed.
+Swift `Moq` 0.5.2 is tagged, and Kotlin `dev.moq:moq` 0.5.3 is on Maven Central
+from `gh workflow run release-kt-lib.yml --ref release`
+([run](https://github.com/moq-dev/moq/actions/runs/40904381781), after
+[moq-dev/moq#7026](https://github.com/moq-dev/moq/pull/7026)'s fix).
 
-Decided 2026-10-20 (maintainer): keep #5609 in the backport, on a qmux
-0.5.3 published from web-transport's `qmux-v0.5.x`. Why: `release` locks
-qmux 0.5.2, which lacks the builder session config #5609 uses, and
-moq-dev/web-transport#427 already carries that config for 0.5.
+Decided 2026-10-30 (maintainer): `moq-rs` 0.5.2 and Dart `moq` 0.1.1 ship in
+the next combined patch cut on `release`, which the maintainer cuts.
 
-Follow the backport workflow. #5609 moves `release` to qmux 0.5.3 and takes
-its builder session config instead of 0.6.3's. The drain backport
-adapts 7bbac3272's session close to the `release` line's moq-net and keeps
-its tests, renamed to `drain()`. Follow the Cross-Package Sync row for
-`rs/moq-ffi`: every binding and its docs gain `drain()`, or the PR says why
-one has none. Wrapper workflows skip versions already published, so bump
-each changed wrapper's human-owned version (CONTRIBUTING's Versions). Leave
-`go/wrapper/VERSION` alone: CI derives Go's patch, and `drain()` is
-additive. Run each binding's tests and `just test interop --all`. The
-qmux credit fix is out of scope: main has it from the in-tree qmux
-([moq-dev/moq#6231](https://github.com/moq-dev/moq/pull/6231)).
+Python: `workflow_run` runs `main`'s `release-py.yml` against the `release`
+checkout, which lacked `.github/actions/nix`. The maintainer picked the
+backport of that action to `release`, which landed in
+[moq-dev/moq#7421](https://github.com/moq-dev/moq/pull/7421). The
+`moq-ffi-v0.4.20` tag's chained run
+([failed](https://github.com/moq-dev/moq/actions/runs/41038297141)) came before
+that merge, and a re-run checks out the same tag commit, so it fails again.
+`release-py.yml` has no `workflow_dispatch`. What publishes 0.5.2 now:
 
-Public API: additive (`MoqSession.drain()` and its binding wrappers). Wire:
-none.
+- The next `moq-ffi-v*` tag at a `release` commit with the nix action, which
+  chains Release Py FFI into Release Py.
+- A `release` push touching `py/moq-rs/**`, `.github/workflows/release-py.yml`,
+  or `sh/gh/release.sh`: the push gate publishes, since `release`'s moq-ffi
+  0.4.20 is tagged and on PyPI.
+
+Dart: pub.dev publishes `moq` only from a `moq-dart-v*` tag, and only
+`moq-dart-v0.1.0` exists. Pushing `moq-dart-v0.1.1` at `release`'s head
+publishes 0.1.1 and exercises the unproven path in
+[A Dart tag publishes unattended](/quest/m2/release/dart-publish.md). Decided
+2026-10-30 (maintainer): push it during the combined cut, not before.
+
+Public API: none. Wire: none.
+
+## Related
+
+- [A Dart tag publishes unattended](/quest/m2/release/dart-publish.md) - proves the `moq-dart-v*` tag path this publish uses

@@ -2,7 +2,7 @@
 
 ## Goal
 
-Growth in release binaries, the FFI library, WASM, and JS bundles since the
+Growth in release binaries, the FFI library, and JS bundles since the
 previous run is explained, fixed, or planned.
 
 ## Plan
@@ -55,13 +55,13 @@ successful Shipping sizes report for its actual shipping effect; do not infer
 it from a local ELF or the earlier experiment below. Hosted build durations are
 recorded but are not deterministic size or runtime-performance comparisons.
 
-### Local native and WASM baseline
+### Local native baseline
 
 Source `78e5b329458e5823415e0fe3f43678170b1df57b`, measured on 2026-10-23
 with pinned Rust 1.98.1 / LLVM 22.1.8 and Bun 1.4.2 in Nix. The empty claim
 `d2e15d270fb681b81ac7317329a3b13bab5aa5bb` has the same source tree.
-Native rows target the x86_64-unknown-linux-gnu host; WASM rows target
-wasm32-unknown-unknown. Remeasure on the same targets or start a new baseline.
+Rows target the x86_64-unknown-linux-gnu host. Remeasure on the same target
+or start a new baseline.
 The relay, CLI, and FFI rows were each built separately with default features
 using
 `cargo bloat --locked --profile profiling -p PACKAGE --crates -n 0 --message-format json`
@@ -78,8 +78,6 @@ cargo-zigbuild.
 | FFI .so with UniFFI symbols | 28,039,912 | profiling, objcopy --strip-debug |
 | FFI .so, diagnostic only | 23,770,704 | profiling, objcopy --strip-all |
 | C static archive | 226,828,912 | cargo build --locked --profile profiling -p moq-c; unstripped |
-| moq_bg.wasm | 2,611,008 | just js wasm; wasm-release; wasm-bindgen web |
-| moq_bg.wasm gzip | 885,186 | gzip -n -9 |
 
 UniFFI requires the regular symbol table. Its 4,269,208-byte difference here
 is metadata, not executable code that bindings can safely discard. The C
@@ -94,19 +92,7 @@ per-transport driver copies are gone. The prior
 fully stripped FFI. Those were earlier revisions, not a matched A/B against
 this run; do not report their difference from this table as new growth.
 
-WASM was about 861.9 KB gzip at the previous local `7d2a91fe66` baseline.
-Current source adds listing, discovery, resume, range, TRACKS and IETF
-compression behavior while erasing duplicated transport drivers. A diagnostic
-name-preserving wasm-release build attributes roughly 1.73 MB of function
-bodies to names containing `moq_net`, 53 KB to `zlib_rs`, and 44 KB to
-`moq_pattern`. This is approximate current attribution, not a matched byte
-delta: preserving names changes retained exports during wasm-bindgen processing.
-No codec/profile change is justified by these sizes alone.
-
-The scheduled history currently has no WASM row. Keep the local method for
-this run's successor; if adding scheduled WASM coverage, review the artifact-set
-and history transition explicitly rather than silently resetting the existing
-history or treating the missing row as zero.
+moq's WASM build was removed on 2026-10-31, so there is no WASM row to repeat.
 
 ### Browser bundles and compression
 
@@ -162,7 +148,6 @@ sdist grew 17% (7,733,152 to 9,016,318 bytes).
 
 ## Related
 
-- [The catalog publish path compiles once](/quest/m2/catalog-publish-once.md)
 - [FFI size profile](/quest/m2/ffi-size-profile.md)
 - [Native synchronous codecs](/quest/m2/native-compression-sync.md)
 - [Native browser codecs](/quest/m2/native-compression-adopt.md)

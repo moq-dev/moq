@@ -34,7 +34,7 @@ const HANDOVER: Duration = Duration::from_secs(1);
 /// Bound `fut` by [`TEST_TIMEOUT`], panicking with `step` so a hang names the
 /// exact stage that failed instead of a bare "test timed out".
 async fn within<T>(step: &str, fut: impl std::future::Future<Output = T>) -> T {
-	tokio::time::timeout(TEST_TIMEOUT, fut)
+	kio::clock::timeout(TEST_TIMEOUT, fut)
 		.await
 		.unwrap_or_else(|_| panic!("timed out: {step}"))
 }
@@ -216,7 +216,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 			// Without an epoch, B's route is another source: a restart.
 			if let moq_net::announce::Event::Start(update)
 			| moq_net::announce::Event::Update(update)
-			| moq_net::announce::Event::Restart(update) = event
+			| moq_net::announce::Event::Restart(update)
+			| moq_net::announce::Event::Takeover { announce: update, .. } = event
 				&& update.route.cost != moq_net::origin::Cost::DRAIN
 			{
 				break;
@@ -285,7 +286,7 @@ async fn spawn_upstream(
 async fn cluster_migrates_on_upstream_goaway_inner() {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	tokio::time::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		// ── the shared "live" broadcast both siblings can serve ─────────
 		let upstream_origin = moq_tokio::origin::spawn();
 		let broadcast = upstream_origin.create_broadcast("cam").expect("create broadcast");
@@ -382,7 +383,7 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 		// updates (the drain re-pricing, the sibling's route) are expected and
 		// harmless; an inactive event means the path flapped.
 		loop {
-			match tokio::time::timeout(Duration::from_millis(500), next_update(&mut announcements)).await {
+			match kio::clock::timeout(Duration::from_millis(500), next_update(&mut announcements)).await {
 				Err(_) => break,
 				Ok(Some((_, true))) => continue,
 				Ok(event) => panic!("migration must not retract the path on the cluster origin: {event:?}"),
@@ -611,7 +612,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 					.expect("write frame");
 			}
 			g.finish().expect("finish");
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 		// Hand the track back so the post-drain phase can keep publishing.
 		track
@@ -666,7 +667,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 					.expect("write frame");
 			}
 			g.finish().expect("finish");
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 	});
 
@@ -696,7 +697,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// The async observer must stay pending too (bounded probe: everything
 	// above already synchronized, so 500ms of silence is decisive).
 	let draining = sub_connection.draining().expect("connected");
-	let leaked = tokio::time::timeout(
+	let leaked = kio::clock::timeout(
 		Duration::from_millis(500),
 		moq_net::kio::wait(|waiter| draining.poll(waiter)),
 	)
@@ -709,7 +710,7 @@ async fn cluster_diamond_goaway_seamless_failover_inner() {
 	// ── announcement stability: the path never retracted under the swap ──
 	// Metadata updates (route re-pricing, the new leg's hops) are expected.
 	loop {
-		match tokio::time::timeout(Duration::from_millis(500), next_update(&mut announcements)).await {
+		match kio::clock::timeout(Duration::from_millis(500), next_update(&mut announcements)).await {
 			Err(_) => break,
 			Ok(Some((_, true))) => continue,
 			Ok(event) => panic!("failover must not retract the path under the subscriber: {event:?}"),
@@ -822,7 +823,7 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 
 	// Clear the healthy bar, so the GOAWAY continues straight into the replacement
 	// dial rather than sleeping first.
-	tokio::time::sleep(Duration::from_millis(120)).await;
+	kio::clock::sleep(Duration::from_millis(120)).await;
 
 	// Send the client somewhere that will never finish handshaking. No wire timeout:
 	// our own `--connect-goaway-handover` is then the only thing bounding the old session.
@@ -836,8 +837,8 @@ async fn goaway_handover_is_enforced_while_the_replacement_dial_hangs_inner() {
 	// The predecessor must close on its own deadline, not whenever that dial gives
 	// up. The bound is generous against a loaded runner but far below the seconds a
 	// hanging handshake takes, which is the gap being measured.
-	let sent = std::time::Instant::now();
-	let closed = tokio::time::timeout(handover * 10, server_session.closed()).await;
+	let sent = kio::clock::now();
+	let closed = kio::clock::timeout(handover * 10, server_session.closed()).await;
 	let elapsed = sent.elapsed();
 	assert!(
 		closed.is_ok() && elapsed < handover * 5,
@@ -853,7 +854,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

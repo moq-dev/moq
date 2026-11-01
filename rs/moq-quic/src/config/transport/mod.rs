@@ -2,7 +2,11 @@
 
 #[cfg(test)]
 use rand::RngExt;
-use std::{fmt, num::NonZeroU64, sync::Arc};
+use std::{
+	fmt,
+	num::{NonZeroU32, NonZeroU64},
+	sync::Arc,
+};
 
 use crate::{
 	ConfigError, Duration, INITIAL_MTU, Limits, MAX_UDP_PAYLOAD, VarInt, congestion, connection::qlog::QlogSink,
@@ -65,12 +69,18 @@ pub struct Config {
 	/// `HandshakeIdleTimeoutMs`.
 	pub handshake_timeout: Duration,
 
-	/// Period of inactivity before sending a keep-alive packet, or `None` (the default) to send
-	/// none
+	/// Period of inactivity before sending a keep-alive packet, `None` (the default) to derive it
+	/// from the negotiated idle timeout, or zero to send none
 	///
 	/// Keep-alive packets prevent an inactive but otherwise healthy connection from timing out.
 	/// Only one side of any given connection needs keep-alive enabled for the connection to be
-	/// preserved. Must be set lower than the idle timeout of both peers to be effective.
+	/// preserved. The derived interval is under a third of the idle timeout both peers settled
+	/// on, so a lost keep-alive and its probe land before either times out, and it follows a peer
+	/// that advertises a shorter timeout than ours. With no idle timeout at all it sends none.
+	///
+	/// An explicit interval wins, for a NAT binding that lives shorter than the idle timeout,
+	/// except one no shorter than the negotiated idle timeout, which could never keep the
+	/// connection up and is capped at the derived interval. See [`keep_alive_interval`].
 	pub keep_alive: Option<Duration>,
 
 	/// Whether to implement fair queuing for send streams having the same priority, on by default
@@ -140,6 +150,14 @@ pub struct Config {
 	/// Ignored if the peer does not support the acknowledgement frequency QUIC extension. Even when
 	/// `None`, the local side still supports the extension.
 	pub ack_frequency: Option<ack_frequency::Config>,
+
+	/// The most receive timestamps to ask the peer for in each ACK, or `None` (the default) to ask
+	/// for none
+	///
+	/// Only a peer that supports draft-ietf-quic-receive-ts sends them, and then only for 1-RTT
+	/// packets, as space in its ACKs allows. Whatever this is set to, the local side sends them to
+	/// a peer that asks.
+	pub receive_timestamps: Option<NonZeroU32>,
 
 	/// How to construct each connection's congestion controller, BBRv3 by default
 	pub congestion: Arc<dyn congestion::ControllerFactory + Send + Sync>,
@@ -251,6 +269,21 @@ impl Config {
 	}
 }
 
+/// The keep-alive interval a connection runs with, or `None` to send no keep-alives
+///
+/// `keep_alive` is the configured [`Config::keep_alive`] and `idle_timeout` the negotiated idle
+/// timeout (RFC 9000 section 10.1), the smaller of both peers' `max_idle_timeout`.
+pub fn keep_alive_interval(keep_alive: Option<Duration>, idle_timeout: Option<Duration>) -> Option<Duration> {
+	// 3/10 leaves a lost keep-alive room for another and its probe retransmits.
+	let derived = idle_timeout.map(|timeout| timeout * 3 / 10);
+	match (keep_alive, idle_timeout) {
+		(Some(interval), _) if interval.is_zero() => None,
+		(Some(interval), Some(timeout)) if interval >= timeout => derived,
+		(Some(interval), _) => Some(interval),
+		(None, _) => derived,
+	}
+}
+
 /// A limit on the wire, or its default when unset
 fn varint(limit: Option<NonZeroU64>, default: u64) -> VarInt {
 	VarInt::from_u64(limit.map_or(default, NonZeroU64::get)).expect("validated")
@@ -274,6 +307,7 @@ impl Default for Config {
 			pad_to_mtu: false,
 			mtu: Some(mtu::Config::default()),
 			ack_frequency: None,
+			receive_timestamps: None,
 
 			congestion: Arc::new({
 				let config = congestion::Bbr3Config::default();
@@ -321,6 +355,7 @@ impl fmt::Debug for Config {
 			pad_to_mtu,
 			mtu,
 			ack_frequency,
+			receive_timestamps,
 			congestion: _,
 			max_outgoing_bytes_per_second,
 			datagram,
@@ -348,6 +383,7 @@ impl fmt::Debug for Config {
 			.field("pad_to_mtu", pad_to_mtu)
 			.field("mtu", mtu)
 			.field("ack_frequency", ack_frequency)
+			.field("receive_timestamps", receive_timestamps)
 			// congestion not debug
 			.field("max_outgoing_bytes_per_second", max_outgoing_bytes_per_second)
 			.field("datagram", datagram)
