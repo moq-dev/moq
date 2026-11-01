@@ -1058,6 +1058,10 @@ pub struct MoqVideoDecoderOutput {
 	/// [`MoqError::Unsupported`] elsewhere.
 	#[uniffi(default = false)]
 	pub surface: bool,
+	/// Where to start on a track that already holds groups, or `None` for the oldest. Same
+	/// knob as [`MoqAudioDecoderOutput::start`](crate::audio::MoqAudioDecoderOutput::start).
+	#[uniffi(default = None)]
+	pub start: Option<crate::media::MoqDecodeStart>,
 }
 
 /// A borrowed platform handle to a decoded frame's surface, from
@@ -1306,6 +1310,10 @@ impl MoqVideoConsumer {
 
 		options.decoder.scale_hint = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
 		options.max_delay = output.max_delay.unwrap_or_default();
+		options.start = match output.start.unwrap_or_default() {
+			crate::media::MoqDecodeStart::Oldest => moq_video::decode::Start::Oldest,
+			crate::media::MoqDecodeStart::Latest => moq_video::decode::Start::Latest,
+		};
 
 		let consumer = broadcast
 			.driver
@@ -1557,7 +1565,7 @@ mod follow_tests {
 		});
 		assert_eq!(moved, Ok(None));
 
-		let retried = moq_clock::timeout(Duration::from_secs(60), follower.next())
+		let retried = kio::clock::timeout(Duration::from_secs(60), follower.next())
 			.await
 			.expect("the dropped target is asked for again");
 		assert_eq!(retried.unwrap(), Target::Enabled(Rate::from_mbps(2)));
@@ -1572,7 +1580,7 @@ mod follow_tests {
 
 	/// Retune at every target until the follower goes a minute without one.
 	async fn quiet(follower: &mut Follower, ceiling: Rate, mut set: impl FnMut(Rate) -> Result<(), moq_video::Error>) {
-		while let Ok(bitrate) = moq_clock::timeout(Duration::from_secs(60), follower.next()).await {
+		while let Ok(bitrate) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
 			rate(follower, ceiling, bitrate.unwrap(), &mut set).unwrap();
 		}
 	}

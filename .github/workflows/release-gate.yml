@@ -48,7 +48,6 @@ jobs:
       ts: ${{ steps.filter.outputs.ts }}
       uring: ${{ steps.filter.outputs.uring }}
       video: ${{ steps.filter.outputs.video }}
-      wasm: ${{ steps.filter.outputs.wasm }}
       x11: ${{ steps.filter.outputs.x11 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -240,7 +239,6 @@ jobs:
               - "rs/moq-archive/**"
               - "rs/moq-auth/**"
               - "rs/moq-cli/**"
-              - "rs/moq-clock/**"
               - "rs/moq-congestion/**"
               - "rs/moq-hls/**"
               - "rs/moq-ice/**"
@@ -299,27 +297,6 @@ jobs:
               - "flake.nix"
               - "flake.lock"
               - ".github/workflows/video.yml"
-            wasm:
-              - "rs/moq-wasm/**"
-              - "rs/moq-clock/**"
-              - "rs/moq-net/**"
-              - "rs/kio/**"
-              - "js/wasm/**"
-              - "test/wasm/**"
-              - "test/lib/**"
-              - "justfile"
-              - "js/justfile"
-              - "rs/justfile"
-              - "test/justfile"
-              - ".cargo/config.toml"
-              - "package.json"
-              - "bun.lock"
-              - "Cargo.toml"
-              - "Cargo.lock"
-              - "rust-toolchain.toml"
-              - "flake.nix"
-              - "flake.lock"
-              - ".github/workflows/wasm.yml"
             x11:
               - "rs/moq-video/**"
               - "rs/justfile"
@@ -432,13 +409,6 @@ jobs:
     if: needs.scope.outputs.video == 'true'
     uses: ./.github/workflows/video.yml
 
-  wasm:
-    name: WASM
-    needs: scope
-    if: needs.scope.outputs.wasm == 'true'
-    uses: ./.github/workflows/wasm.yml
-    secrets: inherit
-
   x11:
     name: X11 capture
     needs: scope
@@ -525,7 +495,6 @@ jobs:
       - ts
       - uring
       - video
-      - wasm
       - x11
       - release-dart
       - release-dart-ffi

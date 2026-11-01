@@ -107,10 +107,10 @@ bytes = { workspace = true }
 futures = { workspace = true }
 hang = { workspace = true }
 humantime = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-archive = { workspace = true }
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
 moq-auth = { workspace = true, features = ["serve"] }
-moq-clock = { workspace = true }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
 # Writes and reads the stats and feedback snapshots.

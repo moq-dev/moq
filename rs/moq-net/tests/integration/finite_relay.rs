@@ -76,13 +76,13 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 	let downstream = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
 	let (mut heads, mut opened) = futures::channel::mpsc::unbounded();
-	let reader = moq_clock::sim::spawn(async move {
+	let reader = kio::clock::sim::spawn(async move {
 		let subscription = Subscription::default().with_max_delay(MAX_DELAY).with_range(0..);
 		let mut sub = remote
 			.track("tail")
@@ -104,7 +104,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 			};
 			assert_eq!(&head.payload[..], b"head");
 			heads.send(group.sequence).await.unwrap();
-			tails.push(moq_clock::sim::spawn(async move {
+			tails.push(kio::clock::sim::spawn(async move {
 				let tail = group.read_frame().await?.expect("tail frame");
 				assert_eq!(&tail.payload[..], b"tail");
 				assert!(group.read_frame().await?.is_none(), "extra frame");
@@ -122,15 +122,15 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 		(seen, end)
 	});
 
-	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
+	kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
 	// Let the publisher answer while the track is still empty, so no Largest Object
 	// tells the relay where its feed starts; otherwise the outcome rests on whether the
 	// first group is written before SUBSCRIBE_OK.
-	moq_clock::sleep(Duration::from_millis(1)).await;
-	track.finish_at(moq_net::track::Position::group(GROUPS)).unwrap();
+	kio::clock::sleep(Duration::from_millis(1)).await;
+	track.finish_at(moq_net::track::Position::group(GROUPS), None).unwrap();
 	match arrival {
 		Arrival::HeldTails => {
 			let mut groups = Vec::new();
@@ -139,7 +139,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 				group.write_frame(Timestamp::ZERO, &b"head"[..]).unwrap();
 				groups.push(group);
 				// IETF requests the live edge, so observe each header before advancing it.
-				match moq_clock::timeout(TIMEOUT, opened.next()).await.expect("head timeout") {
+				match kio::clock::timeout(TIMEOUT, opened.next()).await.expect("head timeout") {
 					Some(head) => assert_eq!(head, sequence, "{name}"),
 					None => panic!("{name}: the reader stopped: {:?}", reader.await),
 				}
@@ -147,7 +147,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 
 			// Simulated time advances only once every task is idle: each group has reached
 			// the subscriber, so the relay's downstream subscription has seen the end.
-			moq_clock::sleep(Duration::from_millis(100)).await;
+			kio::clock::sleep(Duration::from_millis(100)).await;
 			for mut group in groups {
 				group.write_frame(Timestamp::ZERO, &b"tail"[..]).unwrap();
 				group.finish().unwrap();
@@ -162,17 +162,17 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 				group.finish().unwrap();
 				// IETF serves from the live edge, so let each group open its stream before
 				// the next one supersedes it.
-				moq_clock::sleep(Duration::from_millis(10)).await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
 
 			// Once idle, the publisher has opened every stream and ended the subscription,
 			// so the relay knows the end before any group arrives.
-			moq_clock::sleep(Duration::from_millis(100)).await;
+			kio::clock::sleep(Duration::from_millis(100)).await;
 			// Deliver streams newest first (IETF also carries the end on a stream of its
 			// own) until the last group reaches the subscriber, at the declared boundary.
 			let newest = loop {
 				let held = upstream.server_transport.release_newest_uni();
-				moq_clock::sleep(Duration::from_millis(10)).await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 				match opened.try_recv() {
 					Ok(head) => break head,
 					Err(TryRecvError::Closed) => panic!("{name}: the reader stopped: {:?}", reader.await),
@@ -181,13 +181,13 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 				assert!(held > 0, "{name}: no group reached the subscriber");
 			};
 			assert_eq!(newest, GROUPS - 1, "{name}");
-			moq_clock::sleep(Duration::from_millis(100)).await;
+			kio::clock::sleep(Duration::from_millis(100)).await;
 			upstream.server_transport.release_unis();
 		}
 	}
 
 	// Lite03 carries no declared end: each of the two hops waits one max-delay grace.
-	let outcome = moq_clock::timeout(MAX_DELAY * 2 + TIMEOUT, reader)
+	let outcome = kio::clock::timeout(MAX_DELAY * 2 + TIMEOUT, reader)
 		.await
 		.unwrap_or_else(|_| panic!("{name}: the track never ended"))
 		.expect("reader panicked");
@@ -195,7 +195,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 	outcome
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn relay_keeps_groups_in_flight_past_the_end() {
 	for version in VERSIONS {
 		let (seen, end) = round(version, Arrival::HeldTails).await;
@@ -206,7 +206,7 @@ async fn relay_keeps_groups_in_flight_past_the_end() {
 
 /// The relay learns the end, then receives the last group's stream before the others: it
 /// keeps serving until the upstream tail settles instead of ending at the boundary.
-#[moq_clock::test]
+#[kio::test]
 async fn relay_waits_for_reordered_upstream_headers() {
 	for version in VERSIONS {
 		let (seen, end) = round(version, Arrival::NewestFirst).await;
