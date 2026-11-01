@@ -8671,14 +8671,14 @@ async fn raw_read_frame_moves_on_when_next_group_takes_its_group() {
 	}
 	assert!(!read.is_finished(), "the open group has no frame yet");
 
-	let taken = moq_clock::timeout(TIMEOUT, consumer.next_group())
+	let taken = kio::clock::timeout(TIMEOUT, consumer.next_group())
 		.await
 		.expect("next_group timed out")
 		.unwrap()
 		.expect("expected the open group");
 	assert_eq!(taken.sequence(), 0);
 
-	let frame = moq_clock::timeout(TIMEOUT, read)
+	let frame = kio::clock::timeout(TIMEOUT, read)
 		.await
 		.expect("the parked read_frame never moved on")
 		.expect("read task panicked")
@@ -8748,7 +8748,7 @@ async fn raw_track_concurrent_reads_take_every_group_once() {
 	let mut taken = Vec::new();
 	let mut each = Vec::new();
 	for reader in readers {
-		let reader = moq_clock::timeout(TIMEOUT, reader)
+		let reader = kio::clock::timeout(TIMEOUT, reader)
 			.await
 			.expect("a parked read never woke")
 			.expect("reader panicked");
