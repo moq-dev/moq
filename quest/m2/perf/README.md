@@ -94,7 +94,6 @@ revisions on the same host and worker count, and profiles with
 - [kio waiter costs](/quest/m2/perf/kio-waiter-costs.md) - long-lived waiters stop being rebuilt every poll, IETF fetch keeps one close watch per stream, and a short `kio::log` costs less
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux
 - [io_uring buffer pool memory](/quest/m2/perf/uring-pool-memory.md) - measure reserved versus resident pool memory before any shrink policy
-- [An idle export poll is cheap](/quest/m2/perf/export-idle-poll.md) - an export poll nothing woke skips the track fill and catalog work it repeats today
 - [Mesh session cost](/quest/m2/perf/mesh-session-cost.md) - moq-net's per-session announce, route sync, and scope work drops, swept over sessions and announces
 - [Cluster route memory](/quest/m2/perf/cluster-route-memory.md) - a full-mesh cluster's ~3.7 KB per route per broadcast shrinks, the in-memory hop is profiled, and `bench-profile lock` tolerates lost records
 - [Adapter reads reuse their waker](/quest/m2/perf/adapter-waker-alloc.md) - a measured verdict on the per-read waker allocation moq-tokio and moq-uring reads pay since #7042, fixed if real
