@@ -8,7 +8,7 @@
 //! module for its platform's clock.
 
 use std::hash::{Hash, Hasher};
-#[cfg(any(test, loom))]
+#[cfg(test)]
 use std::sync::LazyLock;
 use std::time::Duration;
 
