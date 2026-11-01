@@ -748,6 +748,18 @@ test("an untimed track or a moq-transport copy refuses a time anchor", () => {
 	expect(() => copy.subscribe({ ranges }).tryRecvGroup()).toThrow("moq-transport");
 });
 
+// Waiting reads see the refusal once the track is accepted, with no group or datagram arriving.
+test("accepting an untimed track refuses a waiting read's time anchor", async () => {
+	const producer = new TrackProducer("test");
+	const reader = producer.subscribe({ ranges: [{ start: { time: Timestamp.fromMillis(0) } }] });
+	const group = reader.recvGroup();
+	const datagram = reader.recvDatagram();
+	producer.accept({});
+	const [grouped, received] = await Promise.allSettled([group, datagram]);
+	expect(grouped).toMatchObject({ status: "rejected", reason: expect.any(TimestampMismatch) });
+	expect(received).toMatchObject({ status: "rejected", reason: expect.any(TimestampMismatch) });
+});
+
 // A resume floor above the live edge must not hide the latest group from a reader that
 // joins after it: on a quiet track that group may be the only one for a long time.
 test("an unfloored subscriber clears a resume floor above the live edge", () => {

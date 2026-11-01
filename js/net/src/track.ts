@@ -2921,6 +2921,8 @@ export class Subscriber {
 			this.#state.startChanged.changed(fn),
 			// A group starting may settle a time end, or move the cap it holds reads back with.
 			...(this.#window.settled ? [] : [this.#state.timelineChanged.changed(fn)]),
+			// Accepting the track may refuse a time anchor, with no group arriving to say so.
+			this.#state.info.changed(fn),
 			this.#state.dropsAnchors.changed(fn),
 			this.#cursor.changed(fn),
 			// A widened budget re-offers the groups it skipped as stale.
@@ -2985,6 +2987,9 @@ export class Subscriber {
 			else
 				await Signal.race(
 					this.#state.datagrams,
+					// Either may refuse the ranges, with no datagram arriving to say so.
+					this.#state.info,
+					this.#state.dropsAnchors,
 					this.#state.closed,
 					this.#state.end,
 					this.#state.received,
