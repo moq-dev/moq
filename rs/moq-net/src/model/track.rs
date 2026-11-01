@@ -2362,7 +2362,7 @@ impl TrackState {
 			let size = slot.cache_size();
 			if size > self.debt {
 				self.evict.push_front((sequence, stamp));
-				break;
+				return paid;
 			}
 
 			self.debt -= size;
@@ -17636,6 +17636,27 @@ mod test {
 
 		let read = group0.read_frame().await;
 		assert!(matches!(read, Err(Error::Evicted)), "expected Evicted, got {read:?}");
+	}
+
+	/// Waiting for enough debt to evict an old group must not shed the live group's
+	/// frames instead: its reader has not had a chance to take them yet.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn carried_debt_keeps_the_live_group() {
+		let unit = 100 * cache::ENTRY_OVERHEAD;
+		let (mut producer, _) = pooled_producer(22 * unit);
+		finished_group(&mut producer, 20 * unit as usize);
+
+		let mut group = producer.append_group().unwrap();
+		let mut reader = group.consume();
+		for _ in 0..3 {
+			group.write_frame(Timestamp::ZERO, vec![0u8; unit as usize]).unwrap();
+		}
+		group.finish().unwrap();
+		for _ in 0..3 {
+			assert_eq!(reader.read_frame().await.unwrap().unwrap().payload.len(), unit as usize);
+		}
+		assert!(reader.read_frame().await.unwrap().is_none());
 	}
 
 	/// A write smaller than the next victim carries debt instead of evicting: a
