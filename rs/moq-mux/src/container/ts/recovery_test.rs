@@ -27,7 +27,7 @@
 use std::ops::Range;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use mpeg2ts::pes::{PesPacketReader, ReadPesPacket};
 use mpeg2ts::ts::TsPacketReader;
 
@@ -500,7 +500,7 @@ async fn record(profile: Profile) -> Recording {
 			.await
 			.unwrap();
 		let mut groups = Vec::new();
-		while let Some(mut group) = moq_clock::timeout(Duration::from_secs(1), track.recv_group())
+		while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
 			.await
 			.unwrap()
 			.unwrap()
@@ -907,7 +907,7 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 		let mut open: Vec<Option<moq_net::group::Producer>> = producers.iter().map(|_| None).collect();
 		let mut kept = vec![0; producers.len()];
 		for (at, event) in events {
-			moq_clock::sleep_until(start + at).await;
+			kio::clock::sleep_until(start + at).await;
 			let Some((t, g, step)) = event else {
 				let snapshot = snapshot.clone();
 				catalog
@@ -947,12 +947,12 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 		std::future::pending::<()>().await;
 	});
 
-	moq_clock::sleep_until(start + arm.join).await;
+	kio::clock::sleep_until(start + arm.join).await;
 	let source = crate::source::announced(&consumer).await;
 	let mut export = (open_ts(source, crate::catalog::CatalogFormat::Hang).await.unwrap()).with_delay(DELAY);
 	let mut frames = Vec::new();
 	let mut samples = Vec::new();
-	while let Ok(next) = moq_clock::timeout(STALL, export.next()).await {
+	while let Ok(next) = kio::clock::timeout(STALL, export.next()).await {
 		let Some(frame) = next.expect("export error") else {
 			break;
 		};

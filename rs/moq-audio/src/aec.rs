@@ -1146,10 +1146,10 @@ mod tests {
 		// Until the tap hears it rather than for a fixed count: writes are dropped
 		// until the device first reads, and a device can take seconds to start
 		// (PulseAudio's idle null sink renders two seconds ahead).
-		let deadline = moq_clock::Instant::now() + std::time::Duration::from_secs(10);
-		while energy <= 1.0 && moq_clock::Instant::now() < deadline {
+		let deadline = kio::clock::Instant::now() + std::time::Duration::from_secs(10);
+		while energy <= 1.0 && kio::clock::Instant::now() < deadline {
 			let _ = sink.write(&tone).expect("write");
-			moq_clock::sleep(std::time::Duration::from_millis(100)).await;
+			kio::clock::sleep(std::time::Duration::from_millis(100)).await;
 
 			// Drain the tap the way the microphone callback would, and add up
 			// what the speaker was given.
