@@ -153,8 +153,12 @@ No duplicate quest or workflow edit belongs here.
 - The 2026-10-22 release audit bounded the media
   reorder queues in [moq-dev/moq#6453](https://github.com/moq-dev/moq/pull/6453)
   and fixed QMux copying in
-  [moq-dev/moq#6381](https://github.com/moq-dev/moq/pull/6381). MKV
-  fragmentation below concerns parser replay before those queues.
+  [moq-dev/moq#6381](https://github.com/moq-dev/moq/pull/6381). The MKV
+  importer's replay of accumulated input before those queues was removed by
+  [moq-dev/moq#6908](https://github.com/moq-dev/moq/pull/6908) and
+  [moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234); the
+  measured no-win is in [moq-dev/moq#7515](https://github.com/moq-dev/moq/pull/7515),
+  and the nightly `mkv-chunks` and `mkv-payloads` series cover the slope.
 - [Binding bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md),
   [foreign polling](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-poll-protocol.md),
   [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md),
@@ -180,7 +184,6 @@ No duplicate quest or workflow edit belongs here.
 - [Bandwidth grants](/quest/m2/performance-survey/bandwidth-grants.md) - repeated full allocation in Rust and JS
 - [Cached JS group joins](/quest/m2/performance-survey/js-cached-groups.md) - repeated sorting while replaying retained groups
 - [PCM batch processing](/quest/m2/performance-survey/audio-batches.md) - repeated tail movement during encoding and resampling
-- [Fragmented MKV import](/quest/m2/performance-survey/mkv-fragments.md) - accumulated-buffer copies and parser replay
 - [QUIC scheduling churn](/quest/m2/performance-survey/quic-schedule-churn.md) - priority and retirement work across unrelated groups
 - [HLS request fan-out](/quest/m2/performance-survey/hls-serving.md) - repeated fetch, remux and playlist construction per viewer
 - [Buffered browser groups](/quest/m2/performance-survey/hang-buffered.md) - per-frame scans and bulk skip work
