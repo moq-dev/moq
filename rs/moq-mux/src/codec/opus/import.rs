@@ -118,6 +118,11 @@ impl From<Config> for hang::catalog::AudioConfig {
 	fn from(config: Config) -> Self {
 		let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, config.channel_count);
 		audio.warmup = Some(super::WARMUP);
+		// Family 2 is ambisonics in AmbiX order (RFC 8486 §3.1); its mapping refuses the channel
+		// counts the catalog's layout cannot carry.
+		if config.mapping.is_some_and(|mapping| mapping.family() == 2) {
+			audio.layout = Some(hang::catalog::AudioLayout::Ambisonic);
+		}
 		audio.description = config.encode().ok();
 		audio.container = hang::catalog::Container::Legacy;
 		audio
@@ -141,6 +146,30 @@ mod tests {
 
 		let config: hang::catalog::AudioConfig = super::Config::new(44_100, 2).into();
 		assert_eq!(config.sample_rate, 48_000);
+	}
+
+	#[test]
+	fn family_two_is_ambisonic() {
+		// First order ambisonics, one stream per channel, in ACN order.
+		let mapping = crate::codec::opus::Mapping::new(crate::codec::opus::mapping::Config {
+			family: 2,
+			streams: 4,
+			coupled: 0,
+			table: &[0, 1, 2, 3],
+		})
+		.unwrap();
+		let mut head = super::Config::new(48_000, 4);
+		head.mapping = Some(mapping);
+		let config = super::config(&head.encode().unwrap()).unwrap();
+		assert_eq!(config.layout, Some(hang::catalog::AudioLayout::Ambisonic));
+		assert_eq!(config.channel_count, 4);
+
+		// Family 1 surround and family 0 stereo stay plain channels.
+		let mut head = super::Config::new(48_000, 6);
+		head.mapping = Some(crate::codec::opus::Mapping::vorbis(6).unwrap());
+		assert_eq!(super::config(&head.encode().unwrap()).unwrap().layout, None);
+		let head = super::Config::new(48_000, 2).encode().unwrap();
+		assert_eq!(super::config(&head).unwrap().layout, None);
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -168,7 +197,7 @@ mod tests {
 			subscriber,
 			crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 		);
-		let frame = tokio::time::timeout(Duration::from_secs(1), media.read_frame())
+		let frame = kio::clock::timeout(Duration::from_secs(1), media.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
