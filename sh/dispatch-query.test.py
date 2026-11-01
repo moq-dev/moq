@@ -104,6 +104,13 @@ class QueryTests(unittest.TestCase):
                 self.assertTrue(any(call.startswith("rs test-changed ") for call in calls), calls)
                 (self.repo / path).unlink()
 
+    def test_generator_pin_checks_the_bindings_it_renders(self):
+        self.change("rs/uniffi-bindgen/Cargo.toml")
+        calls = self.run_ci()
+        for module in ("py", "kt", "swift"):
+            self.assertIn(f"{module} check", calls)
+        self.assertNotIn("go check", calls)
+
     def test_nixpkgs_updates_check_browser_pins(self):
         self.change("flake.lock")
         self.expect(True)

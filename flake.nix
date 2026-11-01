@@ -375,15 +375,17 @@
         # carries the uniffi 0.32 port, library-mode CLI, and RustBuffer leak
         # fixes while those changes remain open upstream. Its tags add a
         # `-kixelated.N` pre-release so they never collide with upstream's.
+        # Pinned to kixelated/uniffi-dart#7's head, which adds the upstream
+        # allocation-failure ownership fixes, until it lands and is tagged.
         uniffi-bindgen-dart = pkgs.rustPlatform.buildRustPackage rec {
           pname = "uniffi-bindgen-dart";
-          version = "0.3.1-kixelated.6+v0.32.0";
+          version = "0.3.1-kixelated.6-unstable-2026-10-31";
 
           src = pkgs.fetchFromGitHub {
             owner = "kixelated";
             repo = "uniffi-dart";
-            rev = "v${version}";
-            hash = "sha256-Ff5o3n4l1O578gJ5pInAqf6/MkM+lkwzovJtEffvpqk=";
+            rev = "657cbff560dcca4cd32e32cbe0c4f3b3e34803b7";
+            hash = "sha256-uSApyCocEhADWu8Koj5vXIt0fMYQVjnBVKctDWQHqLM=";
           };
 
           # The upstream repository ignores Cargo.lock so cargo installs test

@@ -85,10 +85,11 @@ declare -A scope=(
     [drill]='^(rs/|test/drill/)'
     # maturin bundles rs/moq-ffi into the moq-ffi wheel, and the other
     # bindings generate from it, built by the `cargo build-ffi` alias in
-    # .cargo/config.toml. Each check also compiles its doc samples.
-    [py]='^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/lib/samples\.sh$)'
-    [kt]='^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|doc/lib/kt/|doc/lib/samples\.sh$)'
-    [swift]='^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
+    # .cargo/config.toml. Each check also compiles its doc samples. Python,
+    # Kotlin, and Swift render through the rs/uniffi-bindgen generator fork.
+    [py]='^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/py/|doc/lib/samples\.sh$)'
+    [kt]='^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/kt/|doc/lib/samples\.sh$)'
+    [swift]='^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|rs/uniffi-bindgen/|doc/lib/swift/|doc/lib/samples\.sh$)'
     [go]='^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)'
     [dart]='^(\.cargo/config\.toml$|dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)'
     # The C package links moq-c's native-libs lists, and the C++ package's FFI
