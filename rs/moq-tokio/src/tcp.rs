@@ -350,7 +350,6 @@ impl Listener {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use moq_net::transport::poll::Session as _;
@@ -485,14 +484,14 @@ mod tests {
 			let session = request.ok().await.unwrap();
 			(server, identity, sni, session)
 		});
-		let dialed = tokio::time::timeout(Duration::from_secs(5), client.connect(url).established())
+		let dialed = moq_clock::timeout(Duration::from_secs(5), client.connect(url).established())
 			.await
 			.expect("dial timed out");
 		if dialed.is_err() {
 			accept.abort();
 			return None;
 		}
-		let (server, identity, sni, _session) = tokio::time::timeout(Duration::from_secs(5), accept)
+		let (server, identity, sni, _session) = moq_clock::timeout(Duration::from_secs(5), accept)
 			.await
 			.expect("accept timed out")
 			.expect("accept task panicked");
@@ -522,16 +521,16 @@ mod tests {
 				.with_reconnect(false)
 				.connect(url.clone())
 		};
-		let untrusted = tokio::time::timeout(Duration::from_secs(5), dial(false).established()).await;
+		let untrusted = moq_clock::timeout(Duration::from_secs(5), dial(false).established()).await;
 		assert!(
 			matches!(untrusted, Ok(Err(_))),
 			"an untrusted certificate must be refused"
 		);
-		let _session = tokio::time::timeout(Duration::from_secs(5), dial(true).established())
+		let _session = moq_clock::timeout(Duration::from_secs(5), dial(true).established())
 			.await
 			.expect("trusted dial timed out")
 			.expect("trusted dial failed");
-		let (_server, _accepted) = tokio::time::timeout(Duration::from_secs(5), accept)
+		let (_server, _accepted) = moq_clock::timeout(Duration::from_secs(5), accept)
 			.await
 			.expect("accept timed out")
 			.expect("accept task panicked");
@@ -552,7 +551,7 @@ mod tests {
 
 		let blackhole: net::SocketAddr = "192.0.2.1:9".parse().unwrap();
 		let candidates = crate::resolve::Candidates::fixed([blackhole, addr]);
-		let session = tokio::time::timeout(
+		let session = moq_clock::timeout(
 			Duration::from_secs(5),
 			connect_addrs(candidates, &["moq-test"], Duration::from_millis(50)),
 		)

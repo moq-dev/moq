@@ -841,7 +841,6 @@ async fn drain(sink: impl Sink) {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use bytes::Bytes;
 	use hang::catalog::{AudioCodec, AudioConfig};
@@ -1042,7 +1041,7 @@ mod tests {
 			pcm.keyframe = index == 0;
 			audio.write(pcm).unwrap();
 			video.write(picture(index, index == 0)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			moq_clock::sleep(PACKET_DURATION).await;
 		}
 		if audio_end {
 			audio.discontinuity().unwrap();
@@ -1315,7 +1314,7 @@ mod tests {
 		});
 		for index in 0..5 {
 			producer.write(packet(index, 0.25)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			moq_clock::sleep(PACKET_DURATION).await;
 		}
 		// Video declares an end two seconds out, holding the audio replacement back.
 		let video = Role::new(presentation.clone(), Kind::Video);
@@ -1325,7 +1324,7 @@ mod tests {
 		const REPLACEMENT: u64 = 100;
 		for index in 0..REPLACEMENT {
 			producer.write(packet(5 + index, 0.5)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			moq_clock::sleep(PACKET_DURATION).await;
 		}
 		producer.finish().unwrap();
 		task.await.unwrap();
@@ -1388,7 +1387,7 @@ mod tests {
 		};
 		for index in 0..3 {
 			video.write(picture(index * 20, index == 0)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			moq_clock::sleep(PACKET_DURATION).await;
 		}
 		video.discontinuity().unwrap();
 		// A burst longer than the age budget evicts this replacement's only keyframe.
@@ -1486,7 +1485,7 @@ mod tests {
 		for index in 10..40 {
 			high.write(packet(index, 0.25)).unwrap();
 			low.write(packet(index, 0.5)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			moq_clock::sleep(PACKET_DURATION).await;
 		}
 		low.finish().unwrap();
 		catalog.finish().unwrap();
@@ -1522,13 +1521,13 @@ mod tests {
 		// Half a second muted, with the timeline running on through it.
 		let demand = audio.demand();
 		for _ in 0..25 {
-			tokio::time::sleep(PACKET_DURATION).await;
+			moq_clock::sleep(PACKET_DURATION).await;
 			assert!(demand.wanted().is_some(), "the mute unsubscribed");
 		}
 		enable(true);
 		for index in 35..60 {
 			audio.write(packet(index, 0.5)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			moq_clock::sleep(PACKET_DURATION).await;
 		}
 
 		settle(player, &recorder).await;
@@ -1722,7 +1721,7 @@ mod tests {
 		catalog::Producer,
 		moq_mux::container::Producer<Container, AudioConfig>,
 	) {
-		let request = tokio::time::timeout(Duration::from_secs(5), claim.requested_broadcast())
+		let request = moq_clock::timeout(Duration::from_secs(5), claim.requested_broadcast())
 			.await
 			.expect("the claim is asked")
 			.unwrap();
@@ -1737,7 +1736,7 @@ mod tests {
 	async fn write(audio: &mut moq_mux::container::Producer<Container, AudioConfig>, count: u64, sample: f32) {
 		for index in 0..count {
 			audio.write(packet(index, sample)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			moq_clock::sleep(PACKET_DURATION).await;
 		}
 	}
 
@@ -1753,7 +1752,7 @@ mod tests {
 	/// ends on its own: give it long enough to play out what it was handed, then
 	/// stop it.
 	async fn settle(player: tokio::task::JoinHandle<()>, recorder: &Recorder) {
-		tokio::time::sleep(Duration::from_secs(5)).await;
+		moq_clock::sleep(Duration::from_secs(5)).await;
 		for event in recorder.events() {
 			match event {
 				Event::Failed(err) => panic!("playback failed: {err}"),
@@ -1808,7 +1807,7 @@ mod tests {
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		let request = handler.requested_broadcast().await.unwrap();
 		request.reject(moq_net::Error::NotFound);
-		tokio::time::timeout(Duration::from_secs(1), player)
+		moq_clock::timeout(Duration::from_secs(1), player)
 			.await
 			.expect("a refusal held the player")
 			.unwrap();
@@ -1834,7 +1833,7 @@ mod tests {
 		// A restart without an epoch waits out the origin's update hold, since a
 		// withdrawal wave's stale route looks just like one, and the player joins the
 		// new broadcast at its live edge.
-		tokio::time::sleep(moq_net::origin::Config::default().update_hold).await;
+		moq_clock::sleep(moq_net::origin::Config::default().update_hold).await;
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
@@ -1869,7 +1868,7 @@ mod tests {
 		drop((old_broadcast, old_catalog, old));
 
 		// Offline for longer than any timeout the player might give up on.
-		tokio::time::sleep(Duration::from_secs(60)).await;
+		moq_clock::sleep(Duration::from_secs(60)).await;
 		assert!(!player.is_finished(), "the player stopped following the path");
 
 		let (_new_broadcast, _new_catalog, mut new) = publish(&origin, Default::default());
@@ -1965,7 +1964,7 @@ mod tests {
 		exact_catalog.finish().unwrap();
 		drop((exact_catalog, old));
 		// The broadcast ends while its route stands, so the player goes idle.
-		tokio::time::sleep(Duration::from_secs(60)).await;
+		moq_clock::sleep(Duration::from_secs(60)).await;
 
 		let pool = origin.requests("").unwrap();
 		drop(exact);
@@ -2000,7 +1999,7 @@ mod tests {
 		let player = tokio::spawn(media(&origin, Duration::from_millis(500), recorder.clone()).run());
 		for index in 0..50 {
 			old.write(packet(index, OLD)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			moq_clock::sleep(PACKET_DURATION).await;
 		}
 
 		exact.unannounce();
@@ -2008,7 +2007,7 @@ mod tests {
 		let (mirror, mirror_catalog, mut copy) = answer(&pool, &route).await;
 		for index in 50..60 {
 			copy.write(packet(index, NEW)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			moq_clock::sleep(PACKET_DURATION).await;
 		}
 
 		settle(player, &recorder).await;
@@ -2037,7 +2036,7 @@ mod tests {
 				broadcast.announce(route.clone().with_cost(5)).unwrap();
 			}
 			audio.write(packet(index, SAMPLE)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			moq_clock::sleep(PACKET_DURATION).await;
 		}
 
 		settle(player, &recorder).await;
@@ -2059,7 +2058,7 @@ mod tests {
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		let mut audio = rendition(&broadcast, &catalog, "audio");
 		audio.write(packet(0, 0.25)).unwrap();
-		tokio::time::sleep(PACKET_DURATION).await;
+		moq_clock::sleep(PACKET_DURATION).await;
 		audio.finish().unwrap();
 		drop(audio);
 		catalog.finish().unwrap();

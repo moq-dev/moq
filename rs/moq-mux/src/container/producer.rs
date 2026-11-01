@@ -1809,7 +1809,7 @@ mod tests {
 		assert!(producer.cut(Some(Timestamp::from_micros(10_000).unwrap())).is_err());
 		assert!(!producer.needs_keyframe());
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(1), group.read_frame())
+			moq_clock::timeout(std::time::Duration::from_millis(1), group.read_frame())
 				.await
 				.is_err()
 		);

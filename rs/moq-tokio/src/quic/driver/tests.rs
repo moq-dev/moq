@@ -22,6 +22,7 @@ use std::{
 use crate::quic::driver::runtime::{AsyncUdpSocket, wrap_udp_socket};
 use crate::quic::driver::{Duration, Instant};
 use bytes::{Buf, Bytes};
+use moq_clock::{sleep, timeout};
 use moq_quic::{
 	ConnectionId, RandomConnectionIdGenerator, Version,
 	crypto::rustls::{QuicClientConfig, QuicServerConfig},
@@ -34,7 +35,6 @@ use rustls::{
 	RootCertStore,
 	pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
 };
-use tokio::time::{sleep, timeout};
 use tokio::{
 	join,
 	runtime::{Builder, Runtime},
@@ -2373,7 +2373,7 @@ async fn close_during_handshake_does_not_wait_for_silent_peer() {
 	// Let the driver send the Initial.
 	tokio::task::yield_now().await;
 
-	let start = tokio::time::Instant::now();
+	let start = moq_clock::now();
 	client.close(0u32.into(), "closing").await;
 	let elapsed = start.elapsed();
 	assert!(connect.await.is_err());

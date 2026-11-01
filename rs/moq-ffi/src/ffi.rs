@@ -686,9 +686,7 @@ mod tests {
 
 	/// Fail the test instead of hanging when a wakeup goes missing.
 	async fn soon<F: Future>(f: F) -> F::Output {
-		tokio::time::timeout(Duration::from_secs(5), f)
-			.await
-			.expect("timed out")
+		moq_clock::timeout(Duration::from_secs(5), f).await.expect("timed out")
 	}
 
 	#[tokio::test]

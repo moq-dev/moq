@@ -47,6 +47,10 @@ Decided 2026-10-25 with the maintainer (planning interview):
   already runs as a relay node.
 - Services are opt-in and named; nothing is exposed by default and sshd's own
   authentication still applies.
+- Enrollment is automated, with no human in the loop (decided 2026-10-30): a
+  device presents an enrollment key the owner created (single-use or reusable,
+  tagged, expiring) and then refreshes by proving its key. There is no OAuth
+  device grant.
 - Robots are a primary use case: aarch64 builds, headless enrollment, and
   flapping uplinks are acceptance criteria, not follow-ups.
 - Upstream exposes an iroh-shaped Rust API (not wire-compatible with iroh), and
@@ -87,7 +91,6 @@ relay path to the third, surviving a relay restart.
 
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - a local relay dials its relays and prefers LAN peers
 - [Byte streams](/quest/m2/stream/README.md) - lossless TCP-level streams over MoQ
-- [Enrollment](/quest/m2/mesh/enroll.md) - a device proves its key and gets a relay URL and a scoped token, by device grant or a pre-authorized key
 - [Endpoint API](/quest/m2/mesh/endpoint.md) - an iroh-shaped `Endpoint` that connects to an endpoint ID and service and accepts byte streams
 - [Daemon](/quest/m2/mesh/daemon.md) - `moq mesh up`, `serve`, `pipe`, and `install`, with SSH by ID on two hosts
 - [Address hints](/quest/m2/mesh/addr.md) - nodes publish their addresses on mesh tracks and dial each other directly where mDNS cannot find them

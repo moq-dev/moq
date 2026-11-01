@@ -838,7 +838,7 @@ async fn public_container_preserves_loc_for_mkv() {
 		track,
 		crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 	);
-	let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read_frame())
+	let frame = moq_clock::timeout(std::time::Duration::from_secs(1), media.read_frame())
 		.await
 		.unwrap()
 		.unwrap()

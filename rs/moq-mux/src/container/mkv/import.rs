@@ -1609,7 +1609,7 @@ mod tests {
 		// The Legacy timestamp prefix and the first chunk are readable while the rest is in flight.
 		let mut read = Vec::new();
 		while read.len() < 1 + 1024 {
-			let chunk = tokio::time::timeout(WAIT, frame.read_chunk()).await.unwrap().unwrap();
+			let chunk = moq_clock::timeout(WAIT, frame.read_chunk()).await.unwrap().unwrap();
 			read.extend_from_slice(&chunk.expect("the frame is still open"));
 		}
 		assert_eq!(read, [&[0][..], &[1; 1024]].concat());
@@ -1618,7 +1618,7 @@ mod tests {
 			import.decode(&[1; 1024]).unwrap();
 			assert!(import.reader.retained() <= 12, "{}", import.reader.retained());
 		}
-		while let Some(chunk) = tokio::time::timeout(WAIT, frame.read_chunk()).await.unwrap().unwrap() {
+		while let Some(chunk) = moq_clock::timeout(WAIT, frame.read_chunk()).await.unwrap().unwrap() {
 			read.extend_from_slice(&chunk);
 		}
 		assert_eq!(read.len(), 1 + SIZE);
@@ -1810,7 +1810,7 @@ mod tests {
 		let mut frame = first_frame(&catalog, &consumer).await;
 		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
 		// The importer is still owned, and the frame fails rather than waiting on it.
-		let read = tokio::time::timeout(WAIT, frame.read_all()).await.unwrap();
+		let read = moq_clock::timeout(WAIT, frame.read_all()).await.unwrap();
 		assert!(read.is_err(), "a truncated frame must not read as complete: {read:?}");
 		drop(import);
 	}
@@ -1827,7 +1827,7 @@ mod tests {
 				true => std::mem::drop(import),
 				false => import.abort(moq_net::Error::Cancel),
 			}
-			let read = tokio::time::timeout(WAIT, frame.read_all()).await.unwrap();
+			let read = moq_clock::timeout(WAIT, frame.read_all()).await.unwrap();
 			assert!(read.is_err(), "a frame cut short must not read as complete: {read:?}");
 		}
 	}

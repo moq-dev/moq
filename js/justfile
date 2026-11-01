@@ -57,7 +57,7 @@ test-changed list:
 coverage package="":
     python3 ../sh/js/coverage.py '{{ package }}'
 
-# Run one net benchmark: broadcasts, forward, requests, fills, reader, frames, track, resume, observed, drift, ledger, varint, lite-varint, priority, subscribe-drop, subscribe-tracks, refresh, or compression.
+# Run one net benchmark: broadcasts, forward, requests, fills, reader, frames, track, resume, observed, drift, ledger, varint, lite-varint, priority, subscribe-drop, refresh, or compression.
 bench name:
     bun install --frozen-lockfile
     bun net/bench/{{ name }}.ts

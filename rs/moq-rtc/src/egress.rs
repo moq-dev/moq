@@ -600,7 +600,6 @@ pub fn dispatch(rtc: &mut str0m::Rtc, request: WriteRequest, wallclock: Instant)
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	/// Build an origin producer, spawning its driver on the ambient runtime.
 	fn produce_origin() -> moq_net::origin::Producer {
@@ -823,7 +822,7 @@ mod tests {
 
 	/// The payload of the next write, required without another frame arriving.
 	async fn written(writes: &mut mpsc::Receiver<WriteRequest>) -> Bytes {
-		tokio::time::timeout(Duration::from_millis(10), writes.recv())
+		moq_clock::timeout(Duration::from_millis(10), writes.recv())
 			.await
 			.expect("a frame is written")
 			.expect("the pump is alive")
@@ -832,7 +831,7 @@ mod tests {
 
 	/// Nothing is written without another frame arriving.
 	async fn idle(writes: &mut mpsc::Receiver<WriteRequest>) {
-		let next = tokio::time::timeout(Duration::from_millis(10), writes.recv()).await;
+		let next = moq_clock::timeout(Duration::from_millis(10), writes.recv()).await;
 		assert!(
 			next.is_err(),
 			"unexpected write: {:?}",
@@ -988,7 +987,7 @@ mod tests {
 			.unwrap();
 
 		let next = async |writes: &mut mpsc::Receiver<WriteRequest>| {
-			let write = tokio::time::timeout(Duration::from_millis(10), writes.recv())
+			let write = moq_clock::timeout(Duration::from_millis(10), writes.recv())
 				.await
 				.expect("a frame is written")
 				.expect("the pump is alive");
@@ -1295,7 +1294,7 @@ mod tests {
 			while demand.wanted_changed().await?.is_some() {}
 			moq_net::Result::Ok(())
 		};
-		tokio::time::timeout(Duration::from_secs(1), unwanted)
+		moq_clock::timeout(Duration::from_secs(1), unwanted)
 			.await
 			.expect("the line unsubscribes")
 			.unwrap();

@@ -2017,69 +2017,12 @@ struct Held {
 	/// Why the request ended, once it has. A channel, so every clone waiting on the grant
 	/// wakes when [`RequestGrant::end`] latches it.
 	ended: kio::Producer<Option<Refusal>>,
-	/// How many times this grant took on a new verdict, so its observers adopt each one.
-	renewals: kio::Producer<u64>,
-	/// For an observer, the grant it watches, without keeping that request alive, and the
-	/// renewals it already adopted from it. Cleared once a renewal of its own replaces it.
-	source: Option<(std::sync::Weak<std::sync::Mutex<Held>>, u64)>,
 }
 
 impl Held {
-	/// Count a new verdict, waking this grant's observers to adopt it.
-	fn renewed(&self) {
-		if let Ok(mut renewals) = self.renewals.write() {
-			*renewals += 1;
-		}
-	}
-
-	/// For an observer, the refusal its source ended with, or adopt the verdict its source
-	/// renewed to since it last looked, refusing once that no longer covers the observer's own
-	/// request. Without this an observer stays on the replaced verdict, which ends with the
-	/// replaced token.
-	fn follow(&mut self, waiter: &kio::Waiter) -> Option<Refusal> {
-		let (source, seen) = self.source.as_ref()?;
-		let seen = *seen;
-		// Gone with its request: the verdict held now ends as that request's token does.
-		let source = source.upgrade()?;
-		let source = source.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-		// Ended with its source, such as by a refused renewal, as a request sharing it would.
-		if let Poll::Ready(Ok(ended)) = source.ended.poll_ref(waiter, |ended| match &**ended {
-			Some(ended) => Poll::Ready(ended.clone()),
-			None => Poll::Pending,
-		}) {
-			return Some(ended);
-		}
-		let renewals = match source.renewals.poll_ref(waiter, |renewals| match **renewals != seen {
-			true => Poll::Ready(**renewals),
-			false => Poll::Pending,
-		}) {
-			Poll::Ready(Ok(renewals)) => renewals,
-			// Never closed: the source owns its only producer.
-			Poll::Ready(Err(_)) | Poll::Pending => return None,
-		};
-		self.source = Some((self.source.take()?.0, renewals));
-		self.verdict = RequestVerdict {
-			issue: source.verdict.issue.clone(),
-			_lifetime: None,
-			seen: std::sync::Mutex::new(*source.verdict.seen.lock().unwrap()),
-		};
-		self.grant = source.grant.clone();
-		self.deadline.set(self.grant.expires);
-		self.epoch += 1;
-		drop(source);
-		self.renewed();
-		if !self.kind.covers(&self.grant, self.path.as_str()) {
-			return Some(Refusal::new(Error::Unauthorized, "request token no longer granted"));
-		}
-		None
-	}
-
 	/// See [`RequestGrant::poll_ended`].
 	fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Refusal> {
 		loop {
-			if let Some(refusal) = self.follow(waiter) {
-				return Poll::Ready(refusal);
-			}
 			if let Some(err) = self.verdict.issue.as_ref().and_then(|issue| issue.read().peer.clone()) {
 				return Poll::Ready(err.into());
 			}
@@ -2158,53 +2101,11 @@ impl RequestGrant {
 			clock: clock.clone(),
 			epoch: 1,
 			ended: kio::Producer::new(None),
-			renewals: kio::Producer::new(0),
-			source: None,
 		}))))
 	}
 
 	fn held(&self) -> std::sync::MutexGuard<'_, Held> {
 		self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-	}
-
-	/// Watch this grant without owning a naming request or its verification credit. The
-	/// observer adopts each renewal of this grant, until it renews on its own.
-	fn observe(&self) -> Self {
-		let (path, kind) = {
-			let held = self.held();
-			(held.path.clone(), held.kind)
-		};
-		self.observe_as(path, kind)
-	}
-
-	/// [`Self::observe`] for a request of its own under the grant, such as a PUBLISH a token
-	/// listing sends: it ends once the grant no longer covers `path` as `kind`.
-	pub(crate) fn observe_as(&self, path: crate::Path, kind: RequestKind) -> Self {
-		let held = self.held();
-		let mut deadline = crate::time::Deadline::new(&held.clock);
-		deadline.set(held.grant.expires);
-		let ended = held.ended.read().clone().or_else(|| {
-			(!kind.covers(&held.grant, path.as_str()))
-				.then(|| Refusal::new(Error::Unauthorized, "request token no longer granted"))
-		});
-		Self(std::sync::Arc::new(std::sync::Mutex::new(Held {
-			verdict: RequestVerdict {
-				issue: held.verdict.issue.clone(),
-				_lifetime: None,
-				seen: std::sync::Mutex::new(*held.verdict.seen.lock().unwrap()),
-			},
-			grant: held.grant.clone(),
-			deadline,
-			path,
-			kind,
-			hold: None,
-			renewing: None,
-			clock: held.clock.clone(),
-			epoch: held.epoch,
-			ended: kio::Producer::new(ended),
-			renewals: kio::Producer::new(0),
-			source: Some((std::sync::Arc::downgrade(&self.0), *held.renewals.read())),
-		})))
 	}
 
 	/// The grant in force right now. Observed by the lifecycle tests.
@@ -2248,9 +2149,6 @@ impl RequestGrant {
 		held.deadline.set(grant.expires);
 		held.grant = grant;
 		held.epoch += 1;
-		// Its own token now, which a renewal of the grant it observed no longer replaces.
-		held.source = None;
-		held.renewed();
 		Ok(())
 	}
 
@@ -2618,11 +2516,6 @@ impl Gate {
 	/// Hold this request's current token across its serving future, including renewals.
 	pub(crate) fn token_guard(&self) -> Option<RequestGrant> {
 		self.token.clone()
-	}
-
-	/// Observe the token without keeping its naming request alive.
-	pub(crate) fn token_observer(&self) -> Option<RequestGrant> {
-		self.token.as_ref().map(RequestGrant::observe)
 	}
 
 	/// Start another request under this session gate, without inheriting a request token.
@@ -3649,7 +3542,7 @@ mod request_token_tests {
 	}
 
 	#[moq_clock::test]
-	async fn discovery_uses_its_token_alone_and_observers_do_not_hold_its_lease() {
+	async fn discovery_uses_its_token_alone() {
 		let runtime = crate::time::sim();
 		let handle = Link::new(true);
 		handle.handle().authorize(&Grant::all());
@@ -3659,7 +3552,6 @@ mod request_token_tests {
 		let issued = requests.next().await.unwrap().accept(subscribe_only("room"));
 		let answer = verdict.grant().await;
 		gate.admit(&runtime, (verdict, answer)).unwrap();
-		let observer = gate.token_observer().unwrap();
 		let mut epoch = 0;
 		let Poll::Ready(permit) = gate.poll_permit(&mut epoch, &kio::Waiter::noop()) else {
 			panic!("no initial permit");
@@ -3674,7 +3566,6 @@ mod request_token_tests {
 		assert!(!permit.matches("room/alice"));
 		drop(gate);
 		assert!(matches!(issued.closed().await, Error::Cancel));
-		assert!(observer.poll_ended(&kio::Waiter::noop()).is_ready());
 	}
 
 	/// A gate bound to a token reports the token ending as a permit that allows nothing, so a
@@ -3701,91 +3592,6 @@ mod request_token_tests {
 		};
 		assert!(!permit.matches("room/alice"));
 		assert!(gate.poll_permit(&mut epoch, &kio::Waiter::noop()).is_pending());
-	}
-
-	/// An observer for a request of its own ends once the grant stops covering that request,
-	/// even where the observed grant, a discovery's, still stands.
-	#[moq_clock::test]
-	async fn an_observer_as_another_request_checks_its_own_coverage() {
-		let runtime = crate::time::sim();
-		let handle = Link::new(true);
-		let mut requests = handle.handle().requests();
-		let mut gate = Gate::new(handle.clone(), crate::Path::default(), Direction::Publish).discovery();
-		let verdict = gate.verify(token(b"room", 0), None);
-		let issued = requests.next().await.unwrap().accept(subscribe_only("room"));
-		let answer = verdict.grant().await;
-		gate.admit(&runtime, (verdict, answer)).unwrap();
-		let listing = gate.token_guard().unwrap();
-		let publish = listing.observe_as(subscribe_path(), RequestKind::Subscribe);
-		let waiter = kio::Waiter::noop();
-		assert!(publish.poll_ended(&waiter).is_pending());
-		issued.update(subscribe_only("elsewhere"));
-		assert!(listing.poll_ended(&waiter).is_pending(), "the discovery still stands");
-		assert!(
-			publish.poll_ended(&waiter).is_ready(),
-			"the publish outlived its coverage"
-		);
-		assert!(
-			listing
-				.observe_as(subscribe_path(), RequestKind::Subscribe)
-				.poll_ended(&waiter)
-				.is_ready(),
-			"an observer made after narrowing starts ended"
-		);
-	}
-
-	/// An observer adopts each renewal its source accepts, rather than ending with the token
-	/// the renewal replaced, and is then held to the new token.
-	#[moq_clock::test]
-	async fn an_observer_follows_its_sources_renewal() {
-		let runtime = crate::time::sim();
-		let handle = Link::new(true);
-		let mut requests = handle.handle().requests();
-		let mut gate = Gate::new(handle.clone(), crate::Path::default(), Direction::Publish).discovery();
-		let verdict = gate.verify(token(b"room", 0), None);
-		let first = requests.next().await.unwrap().accept(subscribe_only("room"));
-		let answer = verdict.grant().await;
-		gate.admit(&runtime, (verdict, answer)).unwrap();
-		let source = gate.token_guard().unwrap();
-		let observer = source.observe_as(subscribe_path(), RequestKind::Subscribe);
-		let waiter = kio::Waiter::noop();
-		assert!(observer.poll_ended(&waiter).is_pending());
-
-		let renewal = source.verify_renewal(&handle, token(b"room2", 0));
-		let second = requests.next().await.unwrap().accept(subscribe_only("room"));
-		let answer = renewal.grant().await;
-		source.renew(renewal, answer).unwrap();
-		assert!(matches!(first.closed().await, Error::Cancel), "the old token ended");
-		assert!(
-			observer.poll_ended(&waiter).is_pending(),
-			"the observer ended with the replaced token"
-		);
-
-		second.revoke(SessionError::Unauthorized, "revoked");
-		assert!(
-			observer.poll_ended(&waiter).is_ready(),
-			"the observer outlived the token it adopted"
-		);
-	}
-
-	/// An observer ends with its source, such as on a refused renewal, as a request sharing
-	/// the grant would.
-	#[moq_clock::test]
-	async fn an_observer_ends_with_its_source() {
-		let runtime = crate::time::sim();
-		let handle = Link::new(true);
-		let mut requests = handle.handle().requests();
-		let mut gate = Gate::new(handle.clone(), crate::Path::default(), Direction::Publish).discovery();
-		let verdict = gate.verify(token(b"room", 0), None);
-		let _issued = requests.next().await.unwrap().accept(subscribe_only("room"));
-		let answer = verdict.grant().await;
-		gate.admit(&runtime, (verdict, answer)).unwrap();
-		let source = gate.token_guard().unwrap();
-		let observer = source.observe_as(subscribe_path(), RequestKind::Subscribe);
-		let waiter = kio::Waiter::noop();
-		assert!(observer.poll_ended(&waiter).is_pending());
-		source.end(Refusal::new(Error::Unauthorized, "renewal refused"));
-		assert!(observer.poll_ended(&waiter).is_ready());
 	}
 
 	/// A request guarded by a grant it names only later, such as with an update's first
