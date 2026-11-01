@@ -555,6 +555,7 @@ impl TestEndpoint {
 					local_ip: None,
 					ecn,
 					data: packet,
+					arrival: Some(recv_time),
 				},
 				&mut buf,
 			) {
