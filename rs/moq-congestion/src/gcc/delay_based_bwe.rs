@@ -519,6 +519,7 @@ mod test {
 
             let packet = PacketResult {
                 receive_time,
+                ambiguous_receive_time: false,
                 sent_packet: SentPacket {
                     send_time,
                     size: DataSize::from_bytes(payload_size as _),

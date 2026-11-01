@@ -130,6 +130,9 @@ pub struct RoundTripTimeUpdate {
 pub struct PacketResult {
     pub sent_packet: SentPacket,
     pub receive_time: Timestamp,
+    /// Whether `receive_time` is only a stand-in, so the packet counts as received but not in
+    /// delay or RTT calculations, as upstream marks a retransmission it cannot match
+    pub ambiguous_receive_time: bool,
 }
 
 impl PacketResult {
@@ -143,6 +146,7 @@ impl Default for PacketResult {
         Self {
             sent_packet: SentPacket::default(),
             receive_time: Timestamp::plus_infinity(),
+            ambiguous_receive_time: false,
         }
     }
 }
@@ -165,8 +169,12 @@ impl Default for TransportPacketsFeedback {
 }
 
 impl TransportPacketsFeedback {
+    /// Packets received at a known time; one received at an ambiguous time is left out, since
+    /// every caller reads the time
     pub fn received_with_send_info(&self) -> impl Iterator<Item = &PacketResult> {
-        self.packet_feedbacks.iter().filter(|fb| fb.is_received())
+        self.packet_feedbacks
+            .iter()
+            .filter(|fb| fb.is_received() && !fb.ambiguous_receive_time)
     }
 
     pub fn sorted_by_receive_time(&self) -> Vec<PacketResult> {

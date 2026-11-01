@@ -285,6 +285,41 @@ fn falls_back_to_ack_arrival() {
     );
 }
 
+/// A packet acknowledged without a receive time, once the peer reports some, reaches the
+/// feedback as received, for the loss-based estimate's loss rate, but not among the packets whose
+/// times the delay-based estimate and the RTT read
+#[test]
+fn counts_packets_acknowledged_without_times() {
+    let mut sim = Sim::new(LINK, Source::Bulk);
+    let untimed = |gcc: &mut Gcc, now| {
+        let packet = gcc.on_sent(Sent {
+            now,
+            bytes: MTU,
+            in_flight: MTU.into(),
+        });
+        let acked = Acked {
+            sent: now,
+            bytes: MTU,
+            packet,
+            received: None,
+        };
+        TransportPacketsFeedback {
+            packet_feedbacks: vec![gcc.acked(&acked, now)],
+            ..Default::default()
+        }
+    };
+
+    // Before any time is reported, the ACK's arrival is the packet's
+    let feedback = untimed(&mut sim.gcc, sim.now);
+    assert_eq!(feedback.received_with_send_info().count(), 1);
+
+    sim.run(Duration::from_millis(500));
+    let feedback = untimed(&mut sim.gcc, sim.now);
+    assert!(feedback.packet_feedbacks[0].is_received());
+    assert_eq!(feedback.received_with_send_info().count(), 0);
+    assert!(feedback.sorted_by_receive_time().is_empty());
+}
+
 /// An application-limited sender gets probe clusters to fill: duplicates filling them carry the
 /// estimate far past the media's rate, which GoogCC's increase alone holds within 1.5x of it
 #[test]

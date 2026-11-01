@@ -631,6 +631,7 @@ mod test {
                 ..Default::default()
             },
             receive_time: arrival_time,
+            ambiguous_receive_time: false,
         }
     }
 

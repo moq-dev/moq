@@ -1507,6 +1507,7 @@ mod test {
                         ..Default::default()
                     },
                     receive_time: Timestamp::plus_infinity(),
+                    ambiguous_receive_time: false,
                 });
             }
 
@@ -1517,6 +1518,7 @@ mod test {
                     ..Default::default()
                 },
                 receive_time: Timestamp::plus_infinity(),
+                ambiguous_receive_time: false,
             });
 
             enough_feedback

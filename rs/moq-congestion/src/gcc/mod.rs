@@ -250,6 +250,29 @@ impl Gcc {
         Timestamp::from_micros(mapped as i64)
     }
 
+    /// The feedback for `packet`, acknowledged at `now`.
+    ///
+    /// Until the peer reports a receive time, the ACK's arrival stands in for each packet's, so
+    /// GoogCC runs on the round-trip delay. Once it reports one, a packet without one, as when
+    /// the ACK carrying its time was lost, still counts as received for the loss-based estimate,
+    /// but not toward delay, rather than mix the two clocks.
+    fn acked(&mut self, packet: &crate::Acked, now: Instant) -> PacketResult {
+        let (receive_time, ambiguous_receive_time) = match packet.received {
+            Some(received) => (self.receive_time(received, now), false),
+            None => (timestamp(now), self.receive_basis.is_some()),
+        };
+        PacketResult {
+            sent_packet: SentPacket {
+                send_time: timestamp(packet.sent),
+                size: DataSize::from_bytes(packet.bytes.into()),
+                pacing_info: self.cluster(packet.packet.probe_cluster),
+                data_in_flight: DataSize::zero(),
+            },
+            receive_time,
+            ambiguous_receive_time,
+        }
+    }
+
     /// The pacing info of the probe cluster `id` was sent in.
     fn cluster(&self, id: Option<NonZeroU16>) -> PacedPacketInfo {
         id.and_then(|id| {
@@ -356,23 +379,7 @@ impl Controller for Gcc {
             });
         }
         for packet in ack.packets {
-            // Until the peer reports a receive time, the ACK's arrival stands in for each
-            // packet's, so GoogCC runs on the round-trip delay. Once it reports one, a packet
-            // without one is left out rather than mix the two clocks.
-            let receive_time = match packet.received {
-                Some(received) => self.receive_time(received, ack.now),
-                None if self.receive_basis.is_none() => timestamp(ack.now),
-                None => continue,
-            };
-            let result = PacketResult {
-                sent_packet: SentPacket {
-                    send_time: timestamp(packet.sent),
-                    size: DataSize::from_bytes(packet.bytes.into()),
-                    pacing_info: self.cluster(packet.packet.probe_cluster),
-                    data_in_flight: DataSize::zero(),
-                },
-                receive_time,
-            };
+            let result = self.acked(packet, ack.now);
             self.feedback.packet_feedbacks.push(result);
         }
         self.feed(ack.now, ack.in_flight);
@@ -390,6 +397,7 @@ impl Controller for Gcc {
                     data_in_flight: DataSize::zero(),
                 },
                 receive_time: Timestamp::plus_infinity(),
+                ambiguous_receive_time: false,
             };
             self.feedback.packet_feedbacks.push(result);
         }
