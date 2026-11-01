@@ -94,9 +94,10 @@ signals-bench:
     bun signals/bench/effect.ts
 
 # Bundle the worklets with Vite, webpack, esbuild, and Bun, and load them in Chromium, with and
-# without a strict CSP. Manual only: it installs webpack and launches a browser.
+# without a strict CSP. Nightly, against the bundlers pinned in test/worklet.
 worklet-matrix:
-    bun common/worklet-matrix.ts
+    bun install --frozen-lockfile
+    bun ../test/worklet/matrix.ts
 
 # Build all packages.
 build:
@@ -174,3 +175,9 @@ p2p-bench:
 e2ee-bench:
     bun install --frozen-lockfile
     bun e2ee/bench/pump.ts
+
+# Sweep audio renditions x raw retention through native WebCodecs in Chromium.
+raw-audio-bench:
+    bun install --frozen-lockfile
+    bunx tsc --noEmit --project publish/bench/tsconfig.json
+    bun publish/bench/audio.ts
