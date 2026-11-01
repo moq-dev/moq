@@ -27,7 +27,7 @@ export interface Racing {
 	mode: Mode;
 	/** Distinct URLs, spread over `lanes`. */
 	urls: number;
-	/** Sequential dials per URL, each closing before the next. */
+	/** Sequential dials per URL, each closing before the next. `sticky` takes 3. */
 	reconnects: number;
 	/** Padding characters in each URL's query. */
 	length: number;
@@ -93,8 +93,7 @@ async function dial(config: Racing, index: number, attempt: number): Promise<Dia
 
 /** Dials every URL `reconnects` times, URLs spread over parallel lanes and each URL's dials in order. */
 async function run(config: Racing): Promise<Dial[]> {
-	// A sticky URL races a WebSocket win, then two dials with WebTransport open again.
-	const reconnects = config.mode === "sticky" ? 3 : config.reconnects;
+	const { reconnects } = config;
 	const dials: Dial[] = [];
 	let next = 0;
 	const lane = async () => {

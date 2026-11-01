@@ -108,6 +108,8 @@ const racingShape = (mode: Mode, shape: Partial<RacingShape> = {}): RacingShape 
 	rotate: false,
 	lanes: 1,
 	...shape,
+	// A sticky URL races a WebSocket win, then two dials with WebTransport open again.
+	...(mode === "sticky" && { reconnects: 3 }),
 });
 const RACING: RacingShape[] = smoke
 	? [
@@ -621,9 +623,8 @@ async function racing(variant: string, shape: RacingShape, round: number) {
 		const kept = await retained(opened.cdp, `${marker}-`);
 		const after = await metrics(opened);
 		if (opened.errors.length) throw new Error(opened.errors.join("; "));
-		const reconnects = shape.mode === "sticky" ? 3 : shape.reconnects;
-		if (dials.length !== shape.urls * reconnects)
-			throw new Error(`${key} ${variant}: ${dials.length} dials, expected ${shape.urls * reconnects}`);
+		if (dials.length !== shape.urls * shape.reconnects)
+			throw new Error(`${key} ${variant}: ${dials.length} dials, expected ${shape.urls * shape.reconnects}`);
 		// Only a refused or disabled arm fixes the winner; an open race is reported, never asserted.
 		const forced = (dial: Dial) =>
 			shape.mode === "websocket" || shape.mode === "alternate" || (shape.mode === "sticky" && dial.attempt === 0)
@@ -649,9 +650,9 @@ async function racing(variant: string, shape: RacingShape, round: number) {
 		};
 		const all = summary(dials);
 		const first = summary(dials.filter((dial) => dial.attempt === 0));
-		// Per later attempt: sticky's second and third dials race with WebTransport open again.
+		// Per later attempt, such as sticky's second and third dials, which race with WebTransport open again.
 		const attempts = Object.fromEntries(
-			Array.from({ length: Math.min(reconnects, 3) - 1 }, (_, index) => index + 1).flatMap((attempt) => {
+			Array.from({ length: shape.reconnects - 1 }, (_, index) => index + 1).flatMap((attempt) => {
 				const phase = summary(dials.filter((dial) => dial.attempt === attempt));
 				return [
 					[`dial${attempt + 1}_p50_ms`, phase.p50],
