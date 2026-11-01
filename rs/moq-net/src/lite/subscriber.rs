@@ -1214,15 +1214,18 @@ impl FrameIngest {
 		}
 	}
 
-	/// Read a frame header varint. Only a plain group may end in its place.
+	/// Read a frame header varint. EOF may end a plain group only at a frame's
+	/// first field (`boundary`); a truncated header is an error.
 	fn poll_header_varint<R: crate::transport::poll::RecvStream>(
 		&self,
 		reader: &mut Reader<R, Version>,
+		boundary: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<u64>, Error>> {
-		match self.records {
-			Some(_) => reader.poll_varint(waiter).map_ok(Some),
-			None => reader.poll_varint_maybe(waiter),
+		if boundary && self.records.is_none() {
+			reader.poll_varint_maybe(waiter)
+		} else {
+			reader.poll_varint(waiter).map_ok(Some)
 		}
 	}
 
@@ -1315,7 +1318,7 @@ impl FrameIngest {
 						continue;
 					};
 					// The timestamp delta doubles as the per-frame sentinel.
-					let Some(zz) = ready!(self.poll_header_varint(reader, waiter))? else {
+					let Some(zz) = ready!(self.poll_header_varint(reader, true, waiter))? else {
 						return Poll::Ready(Ok(()));
 					};
 					let next: u64 = (self.prev_ts as i128 + crate::coding::varint::unzigzag(zz) as i128)
@@ -1338,7 +1341,9 @@ impl FrameIngest {
 						};
 						continue;
 					}
-					let Some(inflated) = ready!(self.poll_header_varint(reader, waiter))? else {
+					let Some(inflated) =
+						ready!(self.poll_header_varint(reader, self.framing.timescale.is_none(), waiter))?
+					else {
 						return Poll::Ready(Ok(()));
 					};
 					self.phase = IngestPhase::Size {
@@ -1348,7 +1353,8 @@ impl FrameIngest {
 				}
 				IngestPhase::Size { timestamp, inflated } => {
 					let (timestamp, inflated) = (*timestamp, *inflated);
-					let Some(size) = ready!(self.poll_header_varint(reader, waiter))? else {
+					let boundary = self.framing.timescale.is_none() && !group.compressed();
+					let Some(size) = ready!(self.poll_header_varint(reader, boundary, waiter))? else {
 						return Poll::Ready(Ok(()));
 					};
 					// A frame that says nothing a plain frame would not keeps no fields.
