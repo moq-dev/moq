@@ -16,6 +16,6 @@ Port #7403's Rust tests, using JS's manual clock.
 
 Public API: none. Wire: none.
 
-## Required
+## Related
 
-- [Ordered reads wait only on owed groups](/quest/m2/ordered-owed-wait.md) - its PR, #7403, is the Rust rule this ports
+- [Ordered reads wait only on owed groups](https://github.com/moq-dev/moq/pull/7403) - its PR, #7403, is the Rust rule this ports

@@ -23,5 +23,8 @@ Public API: breaking in every binding. Wire: lite-07 SUBSCRIBE and SUBSCRIBE_UPD
 
 ## Required
 
-- [Ordered reads wait only on owed groups](/quest/m2/ordered-owed-wait.md) - the Rust rule; its PR, #7403, settles the max-delay defaults and touches the same fields
 - [A max-delay decoder joins an earlier group](/quest/m2/intra-refresh/join-earlier-group.md) - its PR, #7311, adds `Delay`
+
+## Related
+
+- [Ordered reads wait only on owed groups](https://github.com/moq-dev/moq/pull/7403) - the Rust rule; its PR, #7403, settles the max-delay defaults and touches the same fields
