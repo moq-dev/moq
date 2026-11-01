@@ -215,7 +215,7 @@ async fn dimensionless_video_waits_for_catalog_geometry() {
 	live.track.write(raw_frame(0, &[0x31, 0x00, 0x00], true)).unwrap();
 
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
-	let pending = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await;
+	let pending = kio::clock::timeout(std::time::Duration::from_secs(1), exporter.next()).await;
 	assert!(
 		pending.is_err(),
 		"exporter emitted an init without geometry: {pending:?}"
@@ -427,7 +427,7 @@ async fn cmaf_source_to_cmaf_export_passthrough() {
 		.expect("catalog consumer");
 	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer).await, catalog_stream);
 
-	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+	let init = kio::clock::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out")
 		.expect("exporter result")
@@ -488,7 +488,7 @@ async fn single_track_export_init_matches_fragment_track_id() {
 	let mut exporter = crate::container::fmp4::Export::new(crate::source::announced(&consumer).await, selected)
 		.with_max_delay(RECORDING_MAX_DELAY);
 
-	let init = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+	let init = kio::clock::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out")
 		.expect("exporter result")
@@ -497,7 +497,7 @@ async fn single_track_export_init_matches_fragment_track_id() {
 	// A fragment is a group, and ending the track is what closes the last one. The
 	// next non-init fragment is a moof+mdat for the same (only) track.
 	importer.finish().unwrap();
-	let fragment = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+	let fragment = kio::clock::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out")
 		.expect("exporter result")
@@ -900,22 +900,22 @@ fn synthesize_opus_trak_refuses_a_contradicting_head() {
 	assert!(matches!(err, super::Error::OpusChannelCount { catalog: 2, head: 1 }));
 }
 
-/// dOps has nowhere to put a channel mapping table, so a family 1 head is refused rather
-/// than written as family 0 without it.
+/// A family 3 head carries a demixing matrix that dOps has no room for, so it is refused
+/// rather than written as a channel table.
 #[test]
-fn synthesize_opus_trak_refuses_mapping_family() {
+fn synthesize_opus_trak_refuses_mapping_family_three() {
 	use hang::catalog::{AudioCodec, AudioConfig};
 
 	let mut head = crate::codec::opus::Config::new(48_000, 2).encode().unwrap().to_vec();
-	head[18] = 1; // channel mapping family
-	head.extend_from_slice(&[1, 1, 0, 1]); // one coupled stream feeding both channels
+	head[18] = 3; // channel mapping family
+	head.extend_from_slice(&[1, 1, 0, 1]); // read as a table: one coupled stream feeding both channels
 	let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 	config.description = Some(head.into());
 
 	let err = super::synthesize_audio_trak(1, 48_000, &config).unwrap_err();
 	assert!(matches!(
 		err,
-		super::Error::Opus(crate::codec::opus::Error::UnsupportedMappingFamily(1))
+		super::Error::Opus(crate::codec::opus::Error::UnsupportedMappingFamily(3))
 	));
 }
 
@@ -1183,7 +1183,7 @@ fn traf_samples(fragment: &Bytes) -> Vec<(u32, usize)> {
 			continue;
 		};
 		for traf in moof.traf {
-			let samples = traf.trun.iter().map(|trun| trun.entries.len()).sum();
+			let samples = traf.trun.iter().map(|trun| trun.samples.len()).sum();
 			trafs.push((traf.tfhd.track_id, samples));
 		}
 	}
@@ -1270,7 +1270,7 @@ async fn drain_now(
 	exporter: &mut crate::container::fmp4::Export<crate::catalog::Consumer>,
 ) -> Vec<crate::container::fmp4::Fragment> {
 	let mut fragments = Vec::new();
-	while let Ok(next) = tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await {
+	while let Ok(next) = kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await {
 		match next.expect("exporter failed") {
 			Some(chunk) => fragments.push(chunk.fragment().expect("a media fragment after the init")),
 			None => break,
@@ -1350,7 +1350,7 @@ fn wait_for_sps(live: &mut Live) {
 async fn chunk_now(
 	exporter: &mut crate::container::fmp4::Export<crate::catalog::Consumer>,
 ) -> crate::container::fmp4::Chunk {
-	tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk())
+	kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk())
 		.await
 		.expect("waited for a successor frame")
 		.expect("exporter failed")
@@ -1399,7 +1399,7 @@ fn samples_per_track(fragments: &[crate::container::fmp4::Fragment]) -> std::col
 /// The first error the exporter returns, skipping any chunks before it.
 async fn error_now(exporter: &mut crate::container::fmp4::Export<crate::catalog::Consumer>) -> crate::Error {
 	loop {
-		match tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk())
+		match kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk())
 			.await
 			.expect("the exporter stalled instead of failing")
 		{
@@ -1426,7 +1426,7 @@ async fn audio_before_the_first_keyframe_is_kept() {
 	// Two seconds of audio, published live with no video yet.
 	for i in 0..20u64 {
 		write_audio(&mut audio, i * 100_000, 5);
-		let pending = tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
+		let pending = kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
 		assert!(pending.is_err(), "a chunk before the video could be described");
 	}
 	live.track.write(video_frame(2_000_000, true)).unwrap();
@@ -1629,7 +1629,7 @@ async fn an_opus_head_before_the_init_is_written() {
 	write_audio(&mut audio, 0, 6);
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
 	assert!(
-		tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk())
+		kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk())
 			.await
 			.is_err(),
 		"the init waits for the video"
@@ -2021,7 +2021,7 @@ async fn a_track_that_never_describes_itself_fails() {
 		assert!(second < 40, "the queue outgrew its bound");
 		write_audio(&mut audio, second * 1_000_000, 50);
 		second += 1;
-		match tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await {
+		match kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await {
 			Err(_) => continue,
 			Ok(Ok(chunk)) => panic!("a chunk before the video could be described: {chunk:?}"),
 			Ok(Err(err)) => break err,
@@ -2056,7 +2056,7 @@ async fn an_uncut_audio_backlog_is_bounded() {
 				.unwrap();
 		}
 		second += 1;
-		match tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await {
+		match kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await {
 			Err(_) => continue,
 			Ok(Ok(chunk)) => panic!("a chunk before the video could be described: {chunk:?}"),
 			Ok(Err(err)) => break err,
@@ -2101,7 +2101,7 @@ async fn hevc_main10_is_described_from_its_sps() {
 		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
-	let pending = tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
+	let pending = kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
 	assert!(pending.is_err(), "an init before the SPS: {pending:?}");
 
 	let mut keyframe = BytesMut::new();
@@ -2320,7 +2320,7 @@ async fn high10_waits_for_its_sps() {
 	let mut live = Live::avc3();
 	wait_for_sps(&mut live);
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
-	let pending = tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
+	let pending = kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
 	assert!(pending.is_err(), "an init before the SPS: {pending:?}");
 
 	live.track.write(video_frame(0, true)).unwrap();
@@ -2381,7 +2381,7 @@ async fn annexb_without_dimensions_waits_for_the_sps() {
 		catalog.modify().unwrap().video.renditions.insert(name, config);
 	});
 	let mut exporter = crate::container::fmp4::Export::new(live.source().await, live.catalog_stream().await);
-	let pending = tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
+	let pending = kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next_chunk()).await;
 	assert!(pending.is_err(), "an init before dimensions: {pending:?}");
 
 	let sps = crate::codec::h264::fixtures::SPS_IPB;

@@ -31,7 +31,7 @@ async fn spawn_relay(set: impl FnOnce(&mut Config)) -> (u16, moq_relay::auth::Ad
 
 /// Admit the next session, returning the implementation its auth request carried.
 async fn admit_next(admissions: &mut moq_relay::auth::Admissions) -> Option<String> {
-	let admission = tokio::time::timeout(TIMEOUT, admissions.next())
+	let admission = kio::clock::timeout(TIMEOUT, admissions.next())
 		.await
 		.expect("admission timeout")
 		.expect("admission");
@@ -75,7 +75,7 @@ async fn the_relay_and_client_exchange_implementations() {
 			Some("app/1 moq-net-rs/9"),
 			"{configured:?}"
 		);
-		let seen = tokio::time::timeout(TIMEOUT, session.peer_implementation())
+		let seen = kio::clock::timeout(TIMEOUT, session.peer_implementation())
 			.await
 			.expect("relay SETUP timeout");
 		assert_eq!(seen, expected, "{configured:?}");

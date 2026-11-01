@@ -115,7 +115,7 @@ const LITE_VERSIONS: &[lite::Version] = &[
 ];
 
 /// The moq-transport drafts a target decodes at, selected by the input's first byte.
-const IETF_VERSIONS: &[ietf::Version] = &[ietf::Version::Draft18, ietf::Version::Draft22];
+const IETF_VERSIONS: &[ietf::Version] = &[ietf::Version::Draft18, ietf::Version::Draft20, ietf::Version::Draft22];
 
 /// How many types [`lite_wire`] dispatches over.
 const LITE_KINDS: u8 = 30;
@@ -229,7 +229,12 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 	let mut any = false;
 	for &negotiated in negotiated {
 		for timescale in [Some(crate::Timescale::MILLI), None] {
-			for ietf in [None, Some(ietf::Version::Draft18), Some(ietf::Version::Draft22)] {
+			for ietf in [
+				None,
+				Some(ietf::Version::Draft18),
+				Some(ietf::Version::Draft20),
+				Some(ietf::Version::Draft22),
+			] {
 				for compressed in [false, true] {
 					let framing = lite::Framing {
 						timescale,
@@ -242,13 +247,17 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 						continue;
 					};
 					any = true;
+					let Some(decoded) = decoded else {
+						continue;
+					};
 
 					let Ok(first) = decoded.encode_bytes(version) else {
 						continue;
 					};
 
 					let echo = lite::Datagram::decode(first, version, negotiated, |_| framing)
-						.expect("could not decode our own encoding");
+						.expect("could not decode our own encoding")
+						.expect("encoded group decoded as padding");
 					assert_eq!(echo, decoded, "datagram did not survive a round trip");
 				}
 			}
@@ -383,7 +392,18 @@ pub fn requests_route(
 	prefix: impl Into<crate::Path>,
 	route: crate::origin::Route,
 ) -> Result<crate::origin::Requests, crate::Error> {
-	origin.requests_route(prefix, route)
+	origin.requests_route(prefix, route, None)
+}
+
+/// Land a claim taking over the peer's `predecessor` claim, as a session lands an
+/// ANNOUNCE_TAKEOVER, for the origin bench.
+pub fn takeover_route(
+	origin: &crate::origin::Producer,
+	prefix: impl Into<crate::Path>,
+	route: crate::origin::Route,
+	predecessor: &crate::origin::Requests,
+) -> Result<crate::origin::Requests, crate::Error> {
+	origin.requests_route(prefix, route, Some(predecessor))
 }
 
 /// Replace a peer claim's route in place, as a session does on a route update.
