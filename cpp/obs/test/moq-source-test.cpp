@@ -8,8 +8,8 @@
 // connect or a wait for the broadcast is still pending. The relay publishes real
 // media, so each scenario runs the whole chain from connect to decoded frame.
 //
-// Every scenario ends by checking that destroy returned promptly and that nothing
-// the source allocated outlived it.
+// Every scenario ends by checking that destroy released the connection and closed
+// the worker, and that nothing the source allocated outlived it.
 //
 // Run with `just obs test` (ThreadSanitizer) or `just obs ci` (plain). This is
 // not part of the plugin build.
@@ -23,6 +23,7 @@
 #include <cstring>
 #include <deque>
 #include <functional>
+#include <future>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -539,24 +540,23 @@ void *createSource()
 	return g_info.create(settingsData(), fakeSource());
 }
 
-// Destroy, then check the invariants every scenario shares: teardown returned
-// promptly, without waiting on a call that was still pending, nothing reached OBS
-// afterwards, and nothing was left allocated.
+// Destroy, then check the invariants every scenario shares: the connection is gone,
+// the worker refuses further output, and nothing was left allocated.
 void destroySource(void *source)
 {
-	auto start = std::chrono::steady_clock::now();
+	auto *ctx = static_cast<moq_source *>(source);
+	std::weak_ptr<Connection> connection;
+	{
+		std::lock_guard<std::mutex> lock(ctx->mutex);
+		connection = ctx->connection;
+	}
+	auto executor = ctx->worker.Executor();
 	g_info.destroy(source);
-	auto elapsed = std::chrono::steady_clock::now() - start;
-	const int frames = g_output_frames;
-	const int audio = g_output_audio;
 
-	CHECK(elapsed < std::chrono::milliseconds(500));
+	CHECK(connection.expired());
+	CHECK(!executor([] { std::abort(); }));
 	CHECK(g_live_allocs == 0);
 	CHECK(g_av_allocs == 0);
-
-	std::this_thread::sleep_for(std::chrono::milliseconds(20));
-	CHECK(g_output_frames == frames);
-	CHECK(g_output_audio == audio);
 }
 
 // Close out a scenario, naming it and saying whether any of its assertions
@@ -1506,13 +1506,41 @@ int main()
 	}
 	report("connect failure");
 
-	// Destroy while the connect is still pending: it is cancelled, not waited on.
+	// Park the worker before dialing so it cannot process the connect result. Only
+	// cancellation releases it: destroy must cancel before joining, then wait for
+	// the running task to finish before returning.
 	{
 		TestRelay relay(false);
-		reset(relay.Url());
+		reset("");
 		void *source = createSource();
-		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		auto *ctx = static_cast<moq_source *>(source);
+		std::promise<void> started;
+		std::promise<void> cancelled;
+		auto cancellation = cancelled.get_future();
+		std::atomic<bool> finished{false};
+		// Bounded like WaitFor, so joining before cancelling fails instead of hanging.
+		CHECK(ctx->worker.Executor()([&] {
+			started.set_value();
+			finished = cancellation.wait_for(std::chrono::seconds(10)) == std::future_status::ready;
+		}));
+		started.get_future().wait();
+
+		g_settings.url = relay.Url();
+		g_info.update(source, settingsData());
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			auto &call = ctx->connection->session_call;
+			CHECK(call.has_value());
+			// Keep the real cancellation, observing when it returns without retaining
+			// the Connection whose destruction must invoke it.
+			auto pending = std::make_shared<moq::Continuation>(std::move(*call));
+			call.emplace([pending, &cancelled] {
+				pending->cancel();
+				cancelled.set_value();
+			});
+		}
 		destroySource(source);
+		CHECK(finished);
 	}
 	report("destroy during connect");
 
@@ -1521,8 +1549,11 @@ int main()
 		TestRelay relay;
 		reset(relay.Url(), "obs/missing");
 		void *source = createSource();
-		CHECK(WaitFor([&] { return relay.Accepted() == 1; }));
-		std::this_thread::sleep_for(std::chrono::milliseconds(20));
+		auto *ctx = static_cast<moq_source *>(source);
+		CHECK(WaitFor([&] {
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			return ctx->connection && ctx->connection->available_call.has_value();
+		}));
 		destroySource(source);
 	}
 	report("destroy waiting for the broadcast");

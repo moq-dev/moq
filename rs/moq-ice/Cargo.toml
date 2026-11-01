@@ -13,7 +13,7 @@ keywords = ["webrtc", "ice", "stun", "str0m", "moq"]
 categories = ["network-programming", "multimedia"]
 
 [dependencies]
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 str0m = { workspace = true }
 stun-types = { workspace = true }
 thiserror = { workspace = true }

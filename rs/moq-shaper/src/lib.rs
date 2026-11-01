@@ -42,9 +42,9 @@ mod preset;
 pub use preset::Preset;
 
 use anyhow::Context;
+use kio::clock::Instant;
 #[cfg(test)]
 use mem::UdpSocket;
-use moq_clock::Instant;
 use rand::{RngExt, SeedableRng, rngs::Xoshiro256PlusPlus};
 use serde::{Deserialize, Serialize};
 #[cfg(not(test))]
@@ -898,7 +898,7 @@ async fn deliver(
 					None => ready.push(parcel),
 				}
 			}
-			_ = moq_clock::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
+			_ = kio::clock::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {
 				// The window closes a batch that never filled.
 				if let Some(closes) = held.closes.filter(|&closes| closes <= Instant::now()) {
 					held.release(closes, &mut ready, &tally[direction]);
@@ -1238,7 +1238,6 @@ fn gaussian(rng: &mut Xoshiro256PlusPlus) -> f64 {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1329,7 +1328,7 @@ mod tests {
 		for _ in 0..3 {
 			link.push(start, vec![0; 1000], &socket, LOCALHOST, &tally);
 		}
-		tokio::time::timeout(Duration::from_secs(1), burst.completed())
+		kio::clock::timeout(Duration::from_secs(1), burst.completed())
 			.await
 			.expect("the gate never opened")
 			.unwrap();
@@ -1478,7 +1477,7 @@ mod tests {
 		}
 		let mut got = Vec::new();
 		let mut buf = [0u8; 4];
-		while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(200), client.recv(&mut buf)).await {
+		while let Ok(Ok(_)) = kio::clock::timeout(Duration::from_millis(200), client.recv(&mut buf)).await {
 			got.push(u32::from_be_bytes(buf));
 		}
 		got
@@ -1506,7 +1505,7 @@ mod tests {
 		let (shaper, client) = setup(1, delayed, Profile::default()).await;
 		client.send(b"held").await.unwrap();
 		while shaper.stats().up.packets == 0 {
-			tokio::time::sleep(Duration::from_millis(1)).await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 		}
 
 		let outage = shaper.cut();
@@ -1581,18 +1580,18 @@ mod tests {
 		drop(dead);
 		client.send(b"lost").await.unwrap();
 		while shaper.stats().up.packets < 2 {
-			tokio::time::sleep(Duration::from_millis(1)).await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 		}
 
 		shaper.retarget(next.local_addr().unwrap()).unwrap();
 		client.send(b"after").await.unwrap();
-		let (size, flow) = tokio::time::timeout(Duration::from_secs(1), next.recv_from(&mut buf))
+		let (size, flow) = kio::clock::timeout(Duration::from_secs(1), next.recv_from(&mut buf))
 			.await
 			.expect("the retarget never forwarded")
 			.unwrap();
 		assert_eq!(&buf[..size], b"after");
 		next.send_to(b"reply", flow).await.unwrap();
-		let size = tokio::time::timeout(Duration::from_secs(1), client.recv(&mut buf))
+		let size = kio::clock::timeout(Duration::from_secs(1), client.recv(&mut buf))
 			.await
 			.expect("the reply never arrived")
 			.unwrap();
@@ -1610,7 +1609,7 @@ mod tests {
 		gone.send(b"gone").await.unwrap();
 		drop(gone);
 		while shaper.stats().down.packets < 1 {
-			tokio::time::sleep(Duration::from_millis(1)).await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 		}
 
 		let got = round_trip(&client, 10).await;
@@ -2138,7 +2137,7 @@ mod tests {
 
 		let mut got = Vec::new();
 		let mut buf = [0u8; 4];
-		while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(500), target.recv_from(&mut buf)).await {
+		while let Ok(Ok(_)) = kio::clock::timeout(Duration::from_millis(500), target.recv_from(&mut buf)).await {
 			got.push((u32::from_be_bytes(buf), start.elapsed()));
 		}
 		got
@@ -2195,14 +2194,14 @@ mod tests {
 			for id in 0..count {
 				sent.push(Instant::now());
 				client.send(&id.to_be_bytes()).await.unwrap();
-				tokio::time::sleep(spacing).await;
+				kio::clock::sleep(spacing).await;
 			}
 			sent
 		};
 		let receive = async {
 			let mut got = Vec::new();
 			let mut buf = [0u8; 4];
-			while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(500), client.recv(&mut buf)).await {
+			while let Ok(Ok(_)) = kio::clock::timeout(Duration::from_millis(500), client.recv(&mut buf)).await {
 				got.push((u32::from_be_bytes(buf), Instant::now()));
 			}
 			got
@@ -2585,7 +2584,7 @@ mod tests {
 		let mut buf = [0u8; 4];
 		client.send(&0u32.to_be_bytes()).await.unwrap();
 		client.recv(&mut buf).await.unwrap();
-		tokio::time::sleep(ms(250)).await;
+		kio::clock::sleep(ms(250)).await;
 		client.send(&1u32.to_be_bytes()).await.unwrap();
 		client.recv(&mut buf).await.unwrap();
 
@@ -2616,7 +2615,7 @@ mod tests {
 		.await;
 
 		// The first datagram comes after the step, so the 5ms phase passes with nothing in it.
-		tokio::time::sleep(ms(250)).await;
+		kio::clock::sleep(ms(250)).await;
 		let mut buf = [0u8; 4];
 		client.send(&0u32.to_be_bytes()).await.unwrap();
 		client.recv(&mut buf).await.unwrap();

@@ -38,6 +38,9 @@ application's channel on a wire older than lite-07), so the key always matches t
 it reads. It binds the epoch with `credential.consume(epoch)` and wraps the broadcast in a
 `broadcast::Consumer`. Its `subscribe(semantic, subscription)` opens the track a decrypted
 catalog names. A consuming generation cannot produce. Nothing survives a publisher instance: a restart mints a new epoch.
+A cloned process image (a `fork` without `exec`, a restored VM snapshot or checkpoint, or a
+producing generation copied to another process) is a new instance too: each copy must call
+`produce()` itself, since copies of one generation reuse its nonces.
 
 ## Processing
 
