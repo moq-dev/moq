@@ -1,4 +1,4 @@
-use moq_clock::Wall;
+use kio::clock::Wall;
 use serde::{Deserialize, Serialize};
 use serde_with::base64::{Base64, UrlSafe};
 use serde_with::formats::Unpadded;
@@ -15,7 +15,7 @@ use crate::lease::Reason;
 /// query parameter is special and a credential can be whatever the server understands. The same shape carries
 /// every [`Event`]; an `end` adds what the session did.
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[non_exhaustive]
 pub struct Request {
 	/// Random 128-bit hex, unique per session; the key every event for it shares.
@@ -66,6 +66,28 @@ pub struct Request {
 	pub tls: Option<Peer>,
 }
 
+impl std::fmt::Debug for Request {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Request")
+			.field("id", &self.id)
+			.field("event", &self.event)
+			.field("node", &self.node)
+			.field("transport", &self.transport)
+			.field("remote", &self.remote)
+			.field("local", &self.local)
+			.field("server_name", &self.server_name)
+			.field("alpn", &self.alpn)
+			.field("path", &self.path)
+			// The contract permits credentials under any query key.
+			.field("query", &self.query.as_ref().map(|_| "..."))
+			.field("token", &self.token)
+			.field("role", &self.role)
+			.field("implementation", &self.implementation)
+			.field("tls", &self.tls)
+			.finish()
+	}
+}
+
 impl Request {
 	/// A `connect` for a fresh session, minting a random 128-bit hex id.
 	///
@@ -96,13 +118,19 @@ impl Request {
 
 /// A credential from a moq-transport SETUP's `AUTHORIZATION TOKEN` option, unparsed.
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Token {
 	/// The moq-transport Token Type, naming how [`value`](Self::value) is encoded.
 	pub kind: u64,
 	/// The token bytes, base64url without padding on the wire.
 	#[serde_as(as = "Base64<UrlSafe, Unpadded>")]
 	pub value: Vec<u8>,
+}
+
+impl std::fmt::Debug for Token {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		write!(f, "Token(kind={}, <{} bytes>)", self.kind, self.value.len())
+	}
 }
 
 impl Token {
@@ -213,7 +241,7 @@ pub struct Peer {
 	/// SHA-256 of the leaf certificate, hex.
 	pub fingerprint: String,
 	/// The certificate's notAfter.
-	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
+	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
 	pub expires: Option<Wall>,
 	/// The issuer's distinguished name.
 	pub issuer: String,

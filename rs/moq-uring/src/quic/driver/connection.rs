@@ -1,6 +1,6 @@
 //! The connection: shared state, the driver task, and the session handle.
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::cell::RefCell;
 use std::net::SocketAddr;
 use std::rc::{Rc, Weak};

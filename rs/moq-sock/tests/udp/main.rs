@@ -74,6 +74,54 @@ fn basic_src_ip() {
 	);
 }
 
+#[test]
+#[cfg(apple)]
+fn ipv4_source_address_override() {
+	use nix::{ifaddrs::getifaddrs, net::if_::InterfaceFlags};
+
+	// A wildcard socket sending to loopback would pick 127.0.0.1, so any other assigned address
+	// proves the override was honored.
+	let Some(src_ip) = getifaddrs()
+		.unwrap()
+		.filter(|interface| interface.flags.contains(InterfaceFlags::IFF_UP))
+		.filter_map(|interface| Some(interface.address?.as_sockaddr_in()?.ip()))
+		.find(|ip| *ip != Ipv4Addr::LOCALHOST && !ip.is_unspecified() && !ip.is_multicast() && !ip.is_broadcast())
+	else {
+		eprintln!("skipping source override test: no alternate assigned IPv4 address");
+		return;
+	};
+
+	let send = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).unwrap();
+	let recv = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+	recv.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+	let send_state = UdpSocketState::new((&send).into()).unwrap();
+	#[cfg(apple_fast)]
+	// SAFETY: sendmsg_x is available on the macOS test host.
+	unsafe {
+		send_state.set_apple_fast_path();
+	}
+	UdpSockRef::from(&send).set_nonblocking(false).unwrap();
+
+	let contents = b"hello";
+	send_state
+		.try_send(
+			(&send).into(),
+			&Transmit {
+				destination: recv.local_addr().unwrap(),
+				ecn: None,
+				contents,
+				segment_size: None,
+				src_ip: Some(src_ip.into()),
+			},
+		)
+		.unwrap();
+
+	let mut buf = [0; 32];
+	let (received, source) = recv.recv_from(&mut buf).unwrap();
+	assert_eq!(&buf[..received], contents);
+	assert_eq!(source.ip(), src_ip);
+}
+
 // The WASI backend sets no ECN codepoint and always reports `None`.
 #[test]
 #[cfg(not(target_os = "wasi"))]
@@ -714,7 +762,6 @@ struct AlignedCmsgBuf([u8; 32]);
 
 #[test]
 #[cfg(any(target_os = "linux", target_os = "android"))]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 fn recv_transport_error() {
 	let sock = Socket::from(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap());
 
@@ -752,6 +799,10 @@ fn recv_transport_error() {
 				break;
 			}
 			_ => {
+				#[expect(
+					clippy::disallowed_methods,
+					reason = "a sync test with no runtime polls a real kernel socket"
+				)]
 				std::thread::sleep(Duration::from_millis(10));
 			}
 		}
@@ -776,7 +827,6 @@ fn recv_transport_error() {
 
 #[test]
 #[cfg(any(target_os = "linux", target_os = "android"))]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 fn recv_transport_error_ipv6() {
 	let sock = Socket::from(UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).unwrap());
 
@@ -812,6 +862,10 @@ fn recv_transport_error_ipv6() {
 			received = Some(err);
 			break;
 		}
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "a sync test with no runtime polls a real kernel socket"
+		)]
 		std::thread::sleep(Duration::from_millis(10));
 	}
 
@@ -833,7 +887,6 @@ fn recv_transport_error_ipv6() {
 /// doing so allows a subsequent send to succeed and deliver its payload.
 #[test]
 #[cfg(any(target_os = "linux", target_os = "android"))]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 fn draining_error_queue_before_send_prevents_absorption() {
 	let sock = Socket::from(UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap());
 
@@ -863,6 +916,10 @@ fn draining_error_queue_before_send_prevents_absorption() {
 		)
 		.unwrap();
 
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "a sync test with no runtime polls a real kernel socket"
+	)]
 	std::thread::sleep(Duration::from_millis(20));
 
 	// Drain the error queue before sending — this is the intended usage pattern
@@ -873,6 +930,10 @@ fn draining_error_queue_before_send_prevents_absorption() {
 				got_error = true;
 				break;
 			}
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "a sync test with no runtime polls a real kernel socket"
+			)]
 			_ => std::thread::sleep(Duration::from_millis(10)),
 		}
 	}
@@ -894,6 +955,10 @@ fn draining_error_queue_before_send_prevents_absorption() {
 		)
 		.expect("send failed after draining the error queue");
 
+	#[expect(
+		clippy::disallowed_methods,
+		reason = "a sync test with no runtime polls a real kernel socket"
+	)]
 	std::thread::sleep(Duration::from_millis(20));
 
 	let mut buf = [0u8; 64];

@@ -38,12 +38,12 @@ test("cron workflows only alert on scheduled failures", async () => {
 });
 
 test("ordinary CI never subscribes to Discord alerts", () => {
-	for (const name of ["Check", "Cache", "Land", "OBS", "Platform", "Quest"]) {
+	for (const name of ["Check", "Cache", "OBS", "Platform", "Quest"]) {
 		expect(watched).not.toContain(name);
 	}
 });
 
-test("alert coverage excludes queue-only workflows and retains release and nightly workflows", () => {
+test("alert coverage excludes CI-only workflows and retains release and nightly workflows", () => {
 	const root = mkdtempSync(join(tmpdir(), "moq-alert-"));
 	try {
 		mkdirSync(join(root, "sh/gh"), { recursive: true });
@@ -52,7 +52,6 @@ test("alert coverage excludes queue-only workflows and retains release and night
 		const configs = {
 			alert: { name: "Alert", on: { workflow_run: { workflows: ["Release", "Nightly"] } } },
 			check: { name: "Check", on: { pull_request: null } },
-			land: { name: "Land", on: { pull_request_target: null, workflow_dispatch: null, push: null } },
 			quest: { name: "Quest", on: { push: { branches: ["quest/**"] } } },
 			cache: { name: "Cache", on: { push: { branches: ["main"] } } },
 			release: { name: "Release", on: { pull_request: null, push: null } },

@@ -688,10 +688,47 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_demand {
-	/// At least one subscriber is active. Repeats when the wanted group moves.
-	MOQ_DEMAND_USED = 1,
-	/// No subscriber is active.
-	MOQ_DEMAND_UNUSED = 2,
+	/// At least one subscriber wants the track. Repeats when the wanted group moves.
+	MOQ_DEMAND_WANTED = 1,
+	/// No subscriber wants the track.
+	MOQ_DEMAND_UNWANTED = 2,
+}
+
+/// How far behind the live edge a media consumer plays.
+///
+/// A zeroed struct is the default, and so is a null pointer where one is taken: start at
+/// the newest group and skip aggressively.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct moq_delay {
+	/// The target latency in microseconds: the playout or jitter-buffer delay held behind
+	/// the live edge, and where a cold join starts. It stays on the consumer and never
+	/// reaches the subscription. A `min_us` past the max starts at the max, since the
+	/// publisher serves nothing older.
+	pub min_us: u64,
+	/// How far a group may fall behind the live edge before it is skipped, in
+	/// microseconds. It bounds lateness only, never the start. Ignored when
+	/// `max_unlimited` is set.
+	pub max_us: u64,
+	/// No max: wait on a stalled group as long as anything could.
+	pub max_unlimited: bool,
+}
+
+impl From<moq_delay> for moq_mux::container::Delay {
+	fn from(delay: moq_delay) -> Self {
+		Self {
+			min: std::time::Duration::from_micros(delay.min_us),
+			max: (!delay.max_unlimited).then(|| std::time::Duration::from_micros(delay.max_us)),
+		}
+	}
+}
+
+/// A [moq_delay] from a pointer that may be null, for the defaults.
+///
+/// # Safety
+/// - `delay` must be null or point to a valid [moq_delay].
+pub(crate) unsafe fn parse_delay(delay: *const moq_delay) -> moq_mux::container::Delay {
+	unsafe { delay.as_ref() }.copied().unwrap_or_default().into()
 }
 
 /// Subscriber-side raw track delivery preferences.
@@ -956,9 +993,13 @@ pub enum moq_announce_kind {
 	/// Another publisher instance now serves the prefix: drop what was resolved under
 	/// it and request afresh.
 	MOQ_ANNOUNCE_KIND_RESTART = 3,
+	/// A route now covers the prefix and continues what the route at
+	/// [moq_announce_event::predecessor] served beneath it: keep what was resolved through it.
+	MOQ_ANNOUNCE_KIND_TAKEOVER = 4,
 }
 
-/// An announce event from an origin: a route starting, updating, ending, or restarting.
+/// An announce event from an origin: a route starting, updating, ending, restarting, or
+/// taking over.
 #[repr(C)]
 pub struct moq_announce_event {
 	/// The covered prefix, relative to the origin, NOT NULL terminated
@@ -981,6 +1022,11 @@ pub struct moq_announce_event {
 	/// The route serving the prefix. On `MOQ_ANNOUNCE_KIND_END` it carries the last
 	/// advertised route.
 	pub route: moq_route,
+	/// For [moq_announce_kind::MOQ_ANNOUNCE_KIND_TAKEOVER], the prefix of the route continued,
+	/// relative to the origin, NOT NULL terminated. Empty for every other kind.
+	pub predecessor: *const c_char,
+	/// The length in bytes of `predecessor`.
+	pub predecessor_len: usize,
 }
 
 /// Where a session is in its lifecycle, reported by [moq_connection_state].
@@ -1393,7 +1439,8 @@ pub struct moq_client_config {
 	pub quic_idle_timeout_us: u64,
 	/// Whether `quic_idle_timeout_us` is present.
 	pub has_quic_idle_timeout: bool,
-	/// The QUIC keep-alive interval in microseconds.
+	/// The QUIC keep-alive interval in microseconds; zero or absent derives it
+	/// from the idle timeout both ends negotiate, so the defaults leave it absent.
 	pub quic_keep_alive_us: u64,
 	/// Whether `quic_keep_alive_us` is present.
 	pub has_quic_keep_alive: bool,
@@ -3906,7 +3953,8 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 
 /// Consume a video track from a broadcast, delivering encoded frames, gaps, and encoder ends in order.
 ///
-/// - `max_delay_us` controls the maximum amount of buffering allowed before skipping a GoP.
+/// - `delay` is how far behind the live edge to play: where a cold join starts and when a
+///   stalled GoP is skipped. NULL uses the defaults (see [moq_delay]).
 /// - `on_read` is called with a positive read ID per item, then exactly once
 ///   more with a terminal code: `0` (closed cleanly) or a negative error. After
 ///   the terminal (`<= 0`) callback, `on_read` is never called again and
@@ -3916,23 +3964,24 @@ pub unsafe extern "C" fn moq_consume_catalog_section(
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
+/// - `delay` must be NULL or point to a valid [moq_delay].
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_read` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_video(
 	catalog: u32,
 	index: u32,
-	max_delay_us: u64,
+	delay: *const moq_delay,
 	on_read: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let max_delay = std::time::Duration::from_micros(max_delay_us);
+		let delay = unsafe { parse_delay(delay) };
 		let on_read = unsafe { ffi::OnStatus::new(user_data, on_read)? };
 		State::lock()
 			.consume
-			.media::<hang::catalog::VideoConfig>(catalog, index, max_delay, on_read)
+			.media::<hang::catalog::VideoConfig>(catalog, index, delay, on_read)
 	})
 }
 
@@ -3957,28 +4006,30 @@ pub extern "C" fn moq_consume_video_cancel(track: u32) -> i32 {
 /// the terminal (`<= 0`) callback, `on_read` is never called again and
 /// `user_data` is never touched again, so release `user_data` there. The
 /// terminal callback fires even after [moq_consume_audio_cancel].
-/// The `max_delay_us` parameter controls how long to wait before skipping frames.
+/// `delay` is how far behind the live edge to play: where a cold join starts and when
+/// frames are skipped. NULL uses the defaults (see [moq_delay]).
 ///
 /// Returns a non-zero handle to the track on success, or a negative code on failure.
 ///
 /// # Safety
+/// - `delay` must be NULL or point to a valid [moq_delay].
 /// - The caller must keep `user_data` valid until the terminal (`<= 0`) `on_read` callback.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_consume_audio(
 	catalog: u32,
 	index: u32,
-	max_delay_us: u64,
+	delay: *const moq_delay,
 	on_read: ffi::moq_status_callback,
 	user_data: *mut c_void,
 ) -> i32 {
 	ffi::enter(move || {
 		let catalog = ffi::parse_id(catalog)?;
 		let index = index as usize;
-		let max_delay = std::time::Duration::from_micros(max_delay_us);
+		let delay = unsafe { parse_delay(delay) };
 		let on_read = unsafe { ffi::OnStatus::new(user_data, on_read)? };
 		State::lock()
 			.consume
-			.media::<hang::catalog::AudioConfig>(catalog, index, max_delay, on_read)
+			.media::<hang::catalog::AudioConfig>(catalog, index, delay, on_read)
 	})
 }
 

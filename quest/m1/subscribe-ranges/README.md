@@ -65,8 +65,8 @@ relay bounds a sparse FETCH only if the model can request ranges:
   still caps every range, so `Absolute(0)..` means everything not stale.
   A relay that cannot resolve a relative end locally forwards it upstream as
   relative over lite-07; a moq-transport bridge resolves it to an absolute
-  Group ID first ([Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md),
-  decided 2026-10-27).
+  Group ID first, from its cache or the Largest Object of a live join
+  (decided 2026-10-27).
 - **Time ends** (maintainer, 2026-10-17, for DVR seek in the
   [archive line](/quest/m1/archive/README.md)). A range end may also be
   `Time(pts)`, in the track's timescale. Whoever holds the track resolves it:
@@ -102,8 +102,8 @@ every sequence delivered or dropped.
 
 ## Required
 
-- [Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md) - filling stays flat as range count and span grow, so a subscription's range count cannot multiply per-group cost
 - [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - `fetch_group` becomes a one-range subscription that ends once its range is accounted for
+- [Range count cost](/quest/m1/subscribe-ranges/fill-linear.md) - time anchors, outstanding fills, sparse live numbering, and lite-07 frame bounds stop walking every range per poll
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity, and the on-demand request surface
 - [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - FETCH removed from lite-07 in Rust, JS, and the draft

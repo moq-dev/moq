@@ -18,13 +18,14 @@ function sessionFailure(err: unknown): boolean {
 
 /** One fatal deadline for a request, including every stream its setup creates. @internal */
 export class Deadline {
-	#opening = false;
+	/** Creates still waiting on credit: a fetch opens its TRACK stream alongside. */
+	#opening = 0;
 	#streams: Stream[] = [];
 	#failure?: Error;
 
 	/** Record a create so deadline failures reset its stream even if it opens late. */
 	async open(opening: Stream | Promise<Stream>): Promise<Stream> {
-		this.#opening = true;
+		this.#opening++;
 		let stream: Stream;
 		try {
 			stream = await opening;
@@ -32,7 +33,7 @@ export class Deadline {
 			if (sessionFailure(cause)) throw cause;
 			throw new NoStreamCredit({ cause });
 		} finally {
-			this.#opening = false;
+			this.#opening--;
 		}
 		if (this.#failure) {
 			stream.abort(this.#failure);
@@ -60,7 +61,7 @@ export class Deadline {
 		} catch (cause) {
 			const failure =
 				cause instanceof TimeoutError
-					? this.#opening
+					? this.#opening > 0
 						? new NoStreamCredit({ cause })
 						: controlTimeout(cause)
 					: error(cause);
