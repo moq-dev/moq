@@ -43,11 +43,11 @@ async fn relay(version: &str) -> Relay {
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
-	let remote = moq_clock::timeout(TIMEOUT, relay.consume().follow("live", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, relay.consume().follow("live", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
-	let subscriber = moq_clock::timeout(
+	let subscriber = kio::clock::timeout(
 		TIMEOUT,
 		remote
 			.track("data")
@@ -66,7 +66,7 @@ async fn relay(version: &str) -> Relay {
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn an_idle_reader_paces_the_relay_and_loses_nothing() {
 	let payload = Bytes::from(vec![7u8; MB]);
 	for version in VERSIONS {
@@ -74,7 +74,7 @@ async fn an_idle_reader_paces_the_relay_and_loses_nothing() {
 
 		let mut group = relay.track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
-		let mut reader = moq_clock::timeout(TIMEOUT, relay.subscriber.recv_group())
+		let mut reader = kio::clock::timeout(TIMEOUT, relay.subscriber.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()
@@ -86,7 +86,7 @@ async fn an_idle_reader_paces_the_relay_and_loses_nothing() {
 		group.finish().unwrap();
 
 		// Simulated time moves only once every task is parked: the relay's ingest stopped.
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		let held = reader.frame_count();
 		assert!(
 			(15..=18).contains(&held),
@@ -94,14 +94,14 @@ async fn an_idle_reader_paces_the_relay_and_loses_nothing() {
 		);
 
 		for index in 0..30 {
-			let frame = moq_clock::timeout(TIMEOUT, reader.read_frame())
+			let frame = kio::clock::timeout(TIMEOUT, reader.read_frame())
 				.await
 				.unwrap_or_else(|_| panic!("{version}: frame {index} never arrived"))
 				.unwrap_or_else(|err| panic!("{version}: frame {index}: {err}"))
 				.expect("a frame");
 			assert_eq!(frame.payload.len(), MB, "{version}: frame {index}");
 		}
-		let end = moq_clock::timeout(TIMEOUT, reader.read_frame())
+		let end = kio::clock::timeout(TIMEOUT, reader.read_frame())
 			.await
 			.expect("end timeout");
 		assert!(matches!(end, Ok(None)), "{version}: {end:?}");
@@ -110,7 +110,7 @@ async fn an_idle_reader_paces_the_relay_and_loses_nothing() {
 
 /// A paused stream is not read, so the relay watches it for a reset instead: a publisher
 /// aborting the group ends the relay's copy while its reader still takes nothing.
-#[moq_clock::test]
+#[kio::test]
 async fn a_reset_reaches_a_paused_relay() {
 	let payload = Bytes::from(vec![7u8; MB]);
 	for version in VERSIONS {
@@ -118,7 +118,7 @@ async fn a_reset_reaches_a_paused_relay() {
 
 		let mut group = relay.track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
-		let mut reader = moq_clock::timeout(TIMEOUT, relay.subscriber.recv_group())
+		let mut reader = kio::clock::timeout(TIMEOUT, relay.subscriber.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()
@@ -126,11 +126,11 @@ async fn a_reset_reaches_a_paused_relay() {
 		for _ in 1..30 {
 			group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 		}
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(reader.frame_count() < 30, "{version}: the relay never paused");
 
 		group.abort(moq_net::Error::Cancel).unwrap();
-		let end = moq_clock::timeout(TIMEOUT, reader.finished())
+		let end = kio::clock::timeout(TIMEOUT, reader.finished())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the reset never reached the paused relay"));
 		assert!(end.is_err(), "{version}: {end:?}");
@@ -139,7 +139,7 @@ async fn a_reset_reaches_a_paused_relay() {
 
 /// A frame larger than the room left waits to be admitted, since admitting it trims the
 /// tail to fit: an idle reader loses nothing to a large frame either.
-#[moq_clock::test]
+#[kio::test]
 async fn a_large_frame_sheds_nothing_an_idle_reader_wants() {
 	let payload = Bytes::from(vec![7u8; MB]);
 	for version in VERSIONS {
@@ -147,7 +147,7 @@ async fn a_large_frame_sheds_nothing_an_idle_reader_wants() {
 
 		let mut group = relay.track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
-		let mut reader = moq_clock::timeout(TIMEOUT, relay.subscriber.recv_group())
+		let mut reader = kio::clock::timeout(TIMEOUT, relay.subscriber.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()
@@ -157,20 +157,20 @@ async fn a_large_frame_sheds_nothing_an_idle_reader_wants() {
 		}
 		// Let the relay take what fits, so the publisher's egress has sent every frame the
 		// large one sheds from the publisher's own tail.
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		group
 			.write_frame(Timestamp::ZERO, Bytes::from(vec![7u8; 20 * MB]))
 			.unwrap();
 		group.finish().unwrap();
 
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(
 			reader.frame_count(),
 			15,
 			"{version}: the large frame waits for the reader"
 		);
 		for index in 0..16 {
-			let frame = moq_clock::timeout(TIMEOUT, reader.read_frame())
+			let frame = kio::clock::timeout(TIMEOUT, reader.read_frame())
 				.await
 				.unwrap_or_else(|_| panic!("{version}: frame {index} never arrived"))
 				.unwrap_or_else(|err| panic!("{version}: frame {index}: {err}"))
@@ -183,7 +183,7 @@ async fn a_large_frame_sheds_nothing_an_idle_reader_wants() {
 
 /// A session whose paused streams would hold more than half its connection window reads
 /// on instead, and its idle reader keeps what the live tail holds.
-#[moq_clock::test]
+#[kio::test]
 async fn a_session_past_its_credit_cap_reads_on() {
 	let payload = Bytes::from(vec![7u8; MB]);
 	for version in VERSIONS {
@@ -194,7 +194,7 @@ async fn a_session_past_its_credit_cap_reads_on() {
 
 		let mut group = relay.track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
-		let reader = moq_clock::timeout(TIMEOUT, relay.subscriber.recv_group())
+		let reader = kio::clock::timeout(TIMEOUT, relay.subscriber.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()
@@ -204,13 +204,13 @@ async fn a_session_past_its_credit_cap_reads_on() {
 		}
 		group.finish().unwrap();
 
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		let held = reader.frame_count();
 		assert_eq!(held, 30, "{version}: the relay paused past its credit cap");
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_slow_reader_falls_off_without_slowing_the_fast_one() {
 	let payload = Bytes::from(vec![7u8; MB]);
 	for version in VERSIONS {
@@ -218,7 +218,7 @@ async fn a_slow_reader_falls_off_without_slowing_the_fast_one() {
 
 		let mut group = relay.track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
-		let mut fast = moq_clock::timeout(TIMEOUT, relay.subscriber.recv_group())
+		let mut fast = kio::clock::timeout(TIMEOUT, relay.subscriber.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()
@@ -230,7 +230,7 @@ async fn a_slow_reader_falls_off_without_slowing_the_fast_one() {
 			if index > 0 {
 				group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
 			}
-			let frame = moq_clock::timeout(TIMEOUT, fast.read_frame())
+			let frame = kio::clock::timeout(TIMEOUT, fast.read_frame())
 				.await
 				.unwrap_or_else(|_| panic!("{version}: the fast reader stalled at frame {index}"))
 				.unwrap_or_else(|err| panic!("{version}: frame {index}: {err}"))
@@ -239,7 +239,7 @@ async fn a_slow_reader_falls_off_without_slowing_the_fast_one() {
 		}
 		group.finish().unwrap();
 
-		let fell = moq_clock::timeout(TIMEOUT, slow.read_frame())
+		let fell = kio::clock::timeout(TIMEOUT, slow.read_frame())
 			.await
 			.expect("read timeout");
 		assert!(
