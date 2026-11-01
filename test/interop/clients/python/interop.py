@@ -256,7 +256,7 @@ async def _decode_audio(
     """
     out = f"{out}.{audio.codec.split('.')[0]}"
     decoder = await moq.audio.Consumer.subscribe(
-        consumer, id, audio, moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, max_delay=MAX_DELAY)
+        consumer, id, audio, moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, delay=moq.media.Delay(min=timedelta(0), max=MAX_DELAY))
     )
     frame_bytes = 4 * audio.channel_count
     decoded = 0

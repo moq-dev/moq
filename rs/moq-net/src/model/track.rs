@@ -31,6 +31,7 @@ pub(super) use demand::Preferences;
 use demand::Subscriptions;
 
 mod fill;
+mod idle;
 mod miss;
 pub use fill::Fill;
 use fill::FillState;
@@ -474,9 +475,9 @@ pub(crate) struct TrackState {
 	// [`Subscriber::poll_start`]) wait on it; everything else treats the floor as usual.
 	start_pending: bool,
 
-	// The budget the publisher resolved `start_sequence` from (a lite-06+ SUBSCRIBE_START),
-	// skipping every older group as stale under it. Cleared by any other declaration.
-	start_budget: Option<Duration>,
+	// Whether the publisher resolved `start_sequence` (a lite-06+ SUBSCRIBE_START), which
+	// may sit above history a reader can still fill. Cleared by any other declaration.
+	start_resolved: bool,
 
 	// A copy received from a remote publisher, whose declared end waits for groups still
 	// in flight below it (see `tail`), and whose readers' relative and time anchors are
@@ -2495,7 +2496,7 @@ impl TrackState {
 		self.latch_settled();
 		self.start_sequence = start_sequence;
 		self.start_pending = pending;
-		self.start_budget = None;
+		self.start_resolved = false;
 		if let Some(start) = start_sequence {
 			self.cache.wakes().arrived(..start);
 			let now = self.cache.pool().now_wall();
@@ -3492,13 +3493,14 @@ impl Producer {
 		Ok(())
 	}
 
-	/// [`Self::start_at`] a start the publisher resolved from `budget`: every older group
-	/// is stale under it, so a reader whose budget is no looser gives them up unasked.
+	/// [`Self::start_at`] a start the publisher resolved from its subscriber's budget. An
+	/// update can cross the response, so that budget is unknown: every older group stays
+	/// fillable, and a fill that finds none ends empty.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn start_resolved(&mut self, sequence: u64, budget: Duration) -> Result<()> {
+	pub(crate) fn start_resolved(&mut self, sequence: u64) -> Result<()> {
 		let mut state = self.modify()?;
 		state.set_start(Some(sequence), false);
-		state.start_budget = Some(budget);
+		state.start_resolved = true;
 		Ok(())
 	}
 
@@ -6164,6 +6166,9 @@ struct Cursor {
 	drops: Option<Box<DropCursor>>,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
+	/// The group read that last parked, answered again without the walk until something
+	/// it parked on fires, once it first parks.
+	idle: Option<Box<idle::Idle>>,
 }
 
 /// A group a cursor found but has not moved past; see [`Cursor::take`].
@@ -6378,6 +6383,7 @@ impl Cursor {
 			skipped: Skipped::default(),
 			drops: None,
 			misses: None,
+			idle: None,
 		}
 	}
 
@@ -6428,6 +6434,8 @@ impl Cursor {
 	/// Resolve [`Self::servable`] again once the window or cap moved, and publish it to the
 	/// groups already handed out. Costs the ranges, never the cache.
 	fn update_servable(&mut self) {
+		// A moved window or cap notifies nothing this cursor parked on.
+		idle::Idle::disarm(&mut self.idle);
 		let runs = Servable::new(self.filter.window.runs(0));
 		let (revision, cap) = (self.filter.resolved, self.end_sequence);
 		self.servable = runs.below(cap);
@@ -6676,6 +6684,11 @@ impl Cursor {
 		})
 	}
 
+	/// Whether a group read in `walk` order would park again at once; see [`idle`].
+	fn parked(&self, walk: idle::Walk, waiter: &kio::Waiter) -> bool {
+		idle::Idle::parked(&self.idle, walk, waiter)
+	}
+
 	/// Take the groups skipped since the last call, for the owner to meter.
 	fn take_stale(&mut self) -> stats::Content {
 		std::mem::take(&mut self.stale)
@@ -6884,10 +6897,17 @@ impl Cursor {
 	/// Find the next group in arrival order, or in sequence order for `ordered`, without
 	/// moving past it.
 	fn poll_peek(&mut self, ordered: bool, taken: &Delivered, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
-		match ordered {
-			true => self.poll_peek_next(taken, waiter),
-			false => self.poll_peek_recv(taken, waiter),
+		let walk = idle::Walk::new(ordered);
+		if self.parked(walk, waiter) {
+			return Poll::Pending;
 		}
+		let mut idle = idle::Idle::start(&mut self.idle, waiter);
+		let polled = match ordered {
+			true => self.poll_peek_next(taken, idle.waiter()),
+			false => self.poll_peek_recv(taken, idle.waiter()),
+		};
+		idle.finish(&mut self.idle, walk, polled.is_pending());
+		polled
 	}
 
 	/// Move past the group `peeked` found and hand it out: the exact group, even if its
@@ -7051,6 +7071,7 @@ impl Cursor {
 		if next == self.next_sequence {
 			return;
 		}
+		idle::Idle::disarm(&mut self.idle);
 		self.next_sequence = next;
 		// A group delivered on another copy is not a stale skip on this one.
 		if !self.seek_pending.is_empty() {
@@ -7408,6 +7429,15 @@ impl Subscriber {
 	/// The next group in arrival order, or in sequence order for `ordered`, skipping any
 	/// already handed out.
 	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		// Ahead of the meter: a read that parks again counts only what a peek skipped.
+		if let Inner::Plain(cursor) = &self.inner
+			&& cursor.parked(idle::Walk::new(ordered), waiter)
+		{
+			if cursor.stale != stats::Content::default() && self.stats.is_tagged() {
+				self.count_stale(&self.stats.meter());
+			}
+			return Poll::Pending;
+		}
 		match self.poll_peek_group(ordered, waiter) {
 			Poll::Ready(Ok(Some(reserved))) => Poll::Ready(self.take(reserved).map(Some)),
 			res => {
@@ -8952,6 +8982,34 @@ mod test {
 
 		fn take(&self) -> bool {
 			self.0.swap(false, std::sync::atomic::Ordering::SeqCst)
+		}
+	}
+
+	/// A read that found nothing parks again at once until something it parked on fires,
+	/// but parks anew for another task, which the next group then wakes instead.
+	#[test]
+	fn an_idle_read_parks_for_the_task_polling_it() {
+		for ordered in [false, true] {
+			let producer = track_producer("test", Info::default());
+			let mut first = framed(&producer, 0, 1);
+			first.finish().unwrap();
+			let mut reader = producer.subscribe(replay());
+			let mut read = |waiter: &kio::Waiter| match ordered {
+				true => reader.poll_group(true, waiter),
+				false => reader.poll_group(false, waiter),
+			};
+			let (flag, waiter) = Flag::waiter();
+			assert!(matches!(read(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(read(&waiter).is_pending());
+			assert!(read(&waiter).is_pending(), "nothing fired, so it parks again");
+			assert!(!flag.take());
+
+			let (other, moved) = Flag::waiter();
+			assert!(read(&moved).is_pending());
+			let mut next = framed(&producer, 1, 1);
+			next.finish().unwrap();
+			assert!(other.take(), "the next group wakes the task that polled last");
+			assert!(matches!(read(&moved), Poll::Ready(Ok(Some(_)))));
 		}
 	}
 
@@ -18750,29 +18808,26 @@ mod test {
 		assert!(dynamic.poll_requested_fill(&waiter).is_pending());
 	}
 
-	/// Below a start its publisher resolved from a budget, a reader no looser than it gives
-	/// every group up unasked, while a looser one may still reach some, so it asks.
+	/// Below a start its publisher resolved, a reader asks for the history its budget
+	/// reaches: an update may have crossed the start, so the copy cannot tell which budget
+	/// skipped those groups, and a fill that finds none ends empty.
 	#[test]
 	#[cfg(feature = "async")]
-	fn below_a_start_resolved_from_a_budget_only_a_looser_reader_asks() {
+	fn below_a_resolved_start_a_reader_asks() {
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
-		let mut narrow = producer.subscribe(replay());
-		let mut wide = producer.subscribe(Subscription::default().with_max_delay(Duration::from_secs(60)));
-		producer.start_resolved(2, Duration::from_secs(30)).unwrap();
+		let mut reader = producer.subscribe(replay());
+		producer.start_resolved(2).unwrap();
 		write_group(&producer, 2);
 		write_group(&producer, 3);
 		let waiter = kio::Waiter::noop();
-		assert_eq!(drain_groups(&mut narrow), [2, 3]);
-		assert_eq!(drained_drops(&mut narrow), [(0, 2)]);
+		assert_eq!(drain_groups(&mut reader), [2, 3]);
 		assert!(
-			dynamic.poll_requested_fill(&waiter).is_pending(),
-			"the narrow reader asks nothing"
+			drained_drops(&mut reader).is_empty(),
+			"nothing below the start is given up unasked"
 		);
-
-		assert_eq!(drain_groups(&mut wide), [2, 3]);
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
-			panic!("the wide reader asks below the start");
+			panic!("the reader asks below the start");
 		};
 		assert_eq!((fill.start().group, fill.end()), (0, 2));
 	}

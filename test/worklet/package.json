@@ -1,0 +1,13 @@
+{
+	"name": "@moq/worklet-matrix",
+	"private": true,
+	"type": "module",
+	"//devDependencies": "Exact pins, so a failing night means a change here or a deliberate bump.",
+	"devDependencies": {
+		"esbuild": "0.28.2",
+		"playwright": "1.64.1",
+		"vite": "8.3.4",
+		"webpack": "5.112.2",
+		"webpack-cli": "7.2.3"
+	}
+}

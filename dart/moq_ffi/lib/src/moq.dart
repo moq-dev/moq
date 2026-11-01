@@ -16,15 +16,15 @@ class MoqAudioDecoderOutput {
   final MoqAudioSampleFormat format;
   final int? sampleRate;
   final int? channels;
-  final Duration? maxDelay;
-  final Duration? delay;
+  final MoqDelay? delay;
+  final bool estimate;
   final MoqDecodeStart? start;
   MoqAudioDecoderOutput({
     required this.format,
     this.sampleRate = null,
     this.channels = null,
-    this.maxDelay = null,
     this.delay = null,
+    this.estimate = true,
     this.start = null,
   });
 }
@@ -51,16 +51,16 @@ class FfiConverterMoqAudioDecoderOutput {
     );
     final channels = channels_lifted.value;
     new_offset += channels_lifted.bytesRead;
-    final maxDelay_lifted = FfiConverterOptionalDuration.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final maxDelay = maxDelay_lifted.value;
-    new_offset += maxDelay_lifted.bytesRead;
-    final delay_lifted = FfiConverterOptionalDuration.read(
+    final delay_lifted = FfiConverterOptionalMoqDelay.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final delay = delay_lifted.value;
     new_offset += delay_lifted.bytesRead;
+    final estimate_lifted = FfiConverterBool.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final estimate = estimate_lifted.value;
+    new_offset += estimate_lifted.bytesRead;
     final start_lifted = FfiConverterOptionalMoqDecodeStart.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -71,8 +71,8 @@ class FfiConverterMoqAudioDecoderOutput {
         format: format,
         sampleRate: sampleRate,
         channels: channels,
-        maxDelay: maxDelay,
         delay: delay,
+        estimate: estimate,
         start: start,
       ),
       new_offset - buf.offsetInBytes,
@@ -84,8 +84,8 @@ class FfiConverterMoqAudioDecoderOutput {
         FfiConverterMoqAudioSampleFormat.allocationSize(value.format) +
         FfiConverterOptionalUInt32.allocationSize(value.sampleRate) +
         FfiConverterOptionalUInt32.allocationSize(value.channels) +
-        FfiConverterOptionalDuration.allocationSize(value.maxDelay) +
-        FfiConverterOptionalDuration.allocationSize(value.delay) +
+        FfiConverterOptionalMoqDelay.allocationSize(value.delay) +
+        FfiConverterBool.allocationSize(value.estimate) +
         FfiConverterOptionalMoqDecodeStart.allocationSize(value.start) +
         0;
     final buf = Uint8List(total_length);
@@ -107,12 +107,12 @@ class FfiConverterMoqAudioDecoderOutput {
       value.channels,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalDuration.write(
-      value.maxDelay,
+    new_offset += FfiConverterOptionalMoqDelay.write(
+      value.delay,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalDuration.write(
-      value.delay,
+    new_offset += FfiConverterBool.write(
+      value.estimate,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalMoqDecodeStart.write(
@@ -126,8 +126,8 @@ class FfiConverterMoqAudioDecoderOutput {
     return FfiConverterMoqAudioSampleFormat.allocationSize(value.format) +
         FfiConverterOptionalUInt32.allocationSize(value.sampleRate) +
         FfiConverterOptionalUInt32.allocationSize(value.channels) +
-        FfiConverterOptionalDuration.allocationSize(value.maxDelay) +
-        FfiConverterOptionalDuration.allocationSize(value.delay) +
+        FfiConverterOptionalMoqDelay.allocationSize(value.delay) +
+        FfiConverterBool.allocationSize(value.estimate) +
         FfiConverterOptionalMoqDecodeStart.allocationSize(value.start) +
         0;
   }
@@ -1707,6 +1707,65 @@ class FfiConverterMoqDatagram {
     return FfiConverterUInt64.allocationSize(value.sequence) +
         FfiConverterOptionalUInt64.allocationSize(value.timestampUs) +
         FfiConverterUint8List.allocationSize(value.payload) +
+        0;
+  }
+}
+
+class MoqDelay {
+  final Duration min;
+  final Duration? max;
+  MoqDelay({required this.min, this.max});
+}
+
+class FfiConverterMoqDelay {
+  static MoqDelay lift(RustBuffer buf) {
+    return FfiConverterMoqDelay.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqDelay> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final min_lifted = FfiConverterDuration.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final min = min_lifted.value;
+    new_offset += min_lifted.bytesRead;
+    final max_lifted = FfiConverterOptionalDuration.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final max = max_lifted.value;
+    new_offset += max_lifted.bytesRead;
+    return LiftRetVal(
+      MoqDelay(min: min, max: max),
+      new_offset - buf.offsetInBytes,
+    );
+  }
+
+  static RustBuffer lower(MoqDelay value) {
+    final total_length =
+        FfiConverterDuration.allocationSize(value.min) +
+        FfiConverterOptionalDuration.allocationSize(value.max) +
+        0;
+    final buf = Uint8List(total_length);
+    write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqDelay value, Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    new_offset += FfiConverterDuration.write(
+      value.min,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalDuration.write(
+      value.max,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset - buf.offsetInBytes;
+  }
+
+  static int allocationSize(MoqDelay value) {
+    return FfiConverterDuration.allocationSize(value.min) +
+        FfiConverterOptionalDuration.allocationSize(value.max) +
         0;
   }
 }
@@ -4196,12 +4255,12 @@ class FfiConverterMoqWebSocketConfig {
 
 class MoqVideoDecoderOutput {
   final MoqDimensions? resize;
-  final Duration? maxDelay;
+  final MoqDelay? delay;
   final bool surface;
   final MoqDecodeStart? start;
   MoqVideoDecoderOutput({
     this.resize = null,
-    this.maxDelay = null,
+    this.delay = null,
     this.surface = false,
     this.start = null,
   });
@@ -4219,11 +4278,11 @@ class FfiConverterMoqVideoDecoderOutput {
     );
     final resize = resize_lifted.value;
     new_offset += resize_lifted.bytesRead;
-    final maxDelay_lifted = FfiConverterOptionalDuration.read(
+    final delay_lifted = FfiConverterOptionalMoqDelay.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final maxDelay = maxDelay_lifted.value;
-    new_offset += maxDelay_lifted.bytesRead;
+    final delay = delay_lifted.value;
+    new_offset += delay_lifted.bytesRead;
     final surface_lifted = FfiConverterBool.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -4237,7 +4296,7 @@ class FfiConverterMoqVideoDecoderOutput {
     return LiftRetVal(
       MoqVideoDecoderOutput(
         resize: resize,
-        maxDelay: maxDelay,
+        delay: delay,
         surface: surface,
         start: start,
       ),
@@ -4248,7 +4307,7 @@ class FfiConverterMoqVideoDecoderOutput {
   static RustBuffer lower(MoqVideoDecoderOutput value) {
     final total_length =
         FfiConverterOptionalMoqDimensions.allocationSize(value.resize) +
-        FfiConverterOptionalDuration.allocationSize(value.maxDelay) +
+        FfiConverterOptionalMoqDelay.allocationSize(value.delay) +
         FfiConverterBool.allocationSize(value.surface) +
         FfiConverterOptionalMoqDecodeStart.allocationSize(value.start) +
         0;
@@ -4263,8 +4322,8 @@ class FfiConverterMoqVideoDecoderOutput {
       value.resize,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalDuration.write(
-      value.maxDelay,
+    new_offset += FfiConverterOptionalMoqDelay.write(
+      value.delay,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterBool.write(
@@ -4280,7 +4339,7 @@ class FfiConverterMoqVideoDecoderOutput {
 
   static int allocationSize(MoqVideoDecoderOutput value) {
     return FfiConverterOptionalMoqDimensions.allocationSize(value.resize) +
-        FfiConverterOptionalDuration.allocationSize(value.maxDelay) +
+        FfiConverterOptionalMoqDelay.allocationSize(value.delay) +
         FfiConverterBool.allocationSize(value.surface) +
         FfiConverterOptionalMoqDecodeStart.allocationSize(value.start) +
         0;
@@ -15638,6 +15697,51 @@ class FfiConverterOptionalMoqDecodeStart {
   }
 }
 
+class FfiConverterOptionalMoqDelay {
+  static MoqDelay? lift(RustBuffer buf) {
+    return FfiConverterOptionalMoqDelay.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqDelay?> read(Uint8List buf) {
+    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
+      return LiftRetVal(null, 1);
+    }
+    final result = FfiConverterMoqDelay.read(
+      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+    );
+    return LiftRetVal<MoqDelay?>(result.value, result.bytesRead + 1);
+  }
+
+  static int allocationSize([MoqDelay? value]) {
+    if (value == null) {
+      return 1;
+    }
+    return FfiConverterMoqDelay.allocationSize(value) + 1;
+  }
+
+  static RustBuffer lower(MoqDelay? value) {
+    if (value == null) {
+      return toRustBuffer(Uint8List.fromList([0]));
+    }
+    final buf = Uint8List(FfiConverterOptionalMoqDelay.allocationSize(value));
+    FfiConverterOptionalMoqDelay.write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqDelay? value, Uint8List buf) {
+    if (value == null) {
+      buf[0] = 0;
+      return 1;
+    }
+    buf[0] = 1;
+    return FfiConverterMoqDelay.write(
+          value,
+          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
+        ) +
+        1;
+  }
+}
+
 class FfiConverterOptionalMoqDimensions {
   static MoqDimensions? lift(RustBuffer buf) {
     return FfiConverterOptionalMoqDimensions.read(buf.asUint8List()).value;
@@ -21206,7 +21310,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqaudioconsumer_cancel() != 62285) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqaudioconsumer_delay() != 48052) {
+  if (uniffi_moq_ffi_checksum_method_moqaudioconsumer_delay() != 18211) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqaudioconsumer_next() != 7650) {
