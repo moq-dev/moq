@@ -6396,8 +6396,9 @@ struct Filter {
 	/// budget, scanned in the cache in the subscription's order and handed out ahead of the
 	/// walk: each cached group in them is visited once.
 	owed: RangeInclusiveSet<u64>,
-	/// Groups of a bounded window skipped as stale, which account for it as handed out
-	/// would, until a wider budget owes them again.
+	/// Groups skipped as stale, which account for a bounded window as handed out would,
+	/// until a wider budget owes them again. Kept under an open window too, which a reader
+	/// may narrow to a bounded one.
 	written_off: RangeSet<u64>,
 }
 
@@ -7163,9 +7164,9 @@ impl Cursor {
 					true => self.skipped.remove(consumer.sequence),
 					false => self.skip(consumer.sequence, drift.budget),
 				}
-				if self.filter.window.end().is_some()
-					&& let Some(end) = consumer.sequence.checked_add(1)
-				{
+				// Whatever the window is now: narrowed to a bounded one later, it accounts for
+				// this group by it, even once the group left the cache.
+				if let Some(end) = consumer.sequence.checked_add(1) {
 					self.filter.written_off.insert(consumer.sequence..end);
 				}
 				continue;
@@ -22744,6 +22745,57 @@ mod test {
 				reader.written_off_runs()
 			);
 		}
+		assert_eq!(read_now(&mut reader, false), Some(None));
+	}
+
+	/// A read that skipped a group as stale while its window was open, then narrows to a
+	/// bounded window holding that group, still ends, whether the group is cached or evicted.
+	#[test]
+	fn a_read_narrowed_past_a_stale_skip_ends() {
+		for evict in [false, true] {
+			let (producer, _pool) = pooled_producer(if evict { 1 } else { 1 << 40 });
+			let mut reader = producer.subscribe(
+				Subscription::default()
+					.with_max_delay(Duration::from_millis(10))
+					.with_order(Order::Ascending)
+					.with_range(0..),
+			);
+			for (sequence, frames) in [(0u64, &[0u64][..]), (1, &[1_000, 1_100])] {
+				let mut group = producer.create_group(sequence.into()).unwrap();
+				for at in frames {
+					group
+						.write_frame(Timestamp::from_millis(*at).unwrap(), bytes::Bytes::from_static(b"f"))
+						.unwrap();
+				}
+				group.finish().unwrap();
+			}
+			assert_eq!(read_now(&mut reader, false), Some(Some(1)), "evict: {evict}");
+			reader
+				.update(
+					Subscription::default()
+						.with_max_delay(Duration::from_millis(10))
+						.with_order(Order::Ascending)
+						.with_range(0..2),
+				)
+				.unwrap();
+			assert_eq!(read_now(&mut reader, false), Some(None), "evict: {evict}");
+		}
+	}
+
+	/// A hole below the start that no fill handler can take is held as refused while the feed
+	/// may still deliver it, and the hold ending wakes the parked reader.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn an_unfillable_hole_below_the_start_wakes_its_reader() {
+		let (mut producer, _pool) = pooled_producer(1 << 40);
+		producer.start_at(10).unwrap();
+		producer.create_group(10u64.into()).unwrap().finish().unwrap();
+		let mut reader = producer.subscribe(Subscription::default().with_max_delay(None).with_range(5..6));
+		let (flag, waiter) = Flag::waiter();
+		assert!(reader.poll_group(false, &waiter).is_pending());
+		flag.take();
+		elapse(&producer, ledger::GRACE);
+		assert!(flag.take(), "the hold's end woke the reader");
 		assert_eq!(read_now(&mut reader, false), Some(None));
 	}
 }

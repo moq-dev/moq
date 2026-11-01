@@ -351,7 +351,6 @@ impl Misses {
 		waiter: &kio::Waiter,
 	) -> RangeSet<u64> {
 		let mut retry = RangeSet::new();
-		let deadline = self.deferred.deadline();
 		// Only the joins holding something unanswered: one holding only filled groups until
 		// they are taken has nothing to answer.
 		let keys: BTreeSet<u64> = self
@@ -436,10 +435,10 @@ impl Misses {
 			// Judged again: the same join may have more to answer, or park the waiter now.
 		}
 		// A refusal held while the feed may still deliver its groups is judged again once
-		// the feed gives up on them, which nothing else wakes this reader for.
-		if let Some(at) = self.deferred.deadline()
-			&& Some(at) != deadline
-		{
+		// the feed gives up on them, which nothing else wakes this reader for. Registered
+		// whether or not the deadline moved here: `ask` settles what no handler can take
+		// before this runs, and the judge registered only the deadline it saw.
+		if let Some(at) = self.deferred.deadline() {
 			state.read().cache.watch_wall(at, waiter);
 		}
 		retry
