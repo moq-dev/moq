@@ -13,6 +13,11 @@ DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cl
 LINUX = os.uname().sysname == "Linux"
 
 
+def dispatch_scope():
+    """The rs module's impact pattern, as sh/dispatch.sh registers it."""
+    return re.search(r"^module rs '([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+
+
 class SelectTest(unittest.TestCase):
     # CI runs target lints before its test build.
     def selected(self, *paths, action="lint", github_actions=False):
@@ -71,7 +76,7 @@ class SelectTest(unittest.TestCase):
             with self.subTest(paths=paths):
                 calls = self.selected(*paths)
                 self.assertTrue(any(call.startswith("rs lint --workspace ") for call in calls), calls)
-        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        scope = dispatch_scope()
         self.assertRegex("clippy.toml", scope)
 
     def test_gate_runs_no_feature_matrix(self):
@@ -157,11 +162,11 @@ class SelectTest(unittest.TestCase):
         # moq-relay's tests read the module.
         calls = self.selected("nix/modules/moq-relay.nix", action="test")
         self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
-        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        scope = dispatch_scope()
         self.assertRegex("nix/modules/moq-relay.nix", scope)
 
     def test_dispatch_scope_covers_out_of_crate_targets(self):
-        scope = re.search(r"^\s*\[rs\]='([^']*)'", (ROOT / "sh/dispatch.sh").read_text(), re.M).group(1)
+        scope = dispatch_scope()
         metadata = json.loads(
             subprocess.check_output(["cargo", "metadata", "--format-version", "1", "--no-deps"], cwd=ROOT, text=True)
         )
