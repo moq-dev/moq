@@ -35,7 +35,10 @@ impl Assembler {
 		if data.capacity() > RETAINED_CHUNKS {
 			data = VecDeque::new();
 		}
-		*self = Self { data, ..Self::default() };
+		*self = Self {
+			data,
+			..Self::default()
+		};
 	}
 
 	/// Get the the next chunk

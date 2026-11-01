@@ -228,7 +228,11 @@ fn finish(pair: &mut Pair, streams: usize) {
 fn settle(pair: &mut Pair) {
 	pair.settle();
 	for conn in pair.server.conns.values_mut() {
-		assert_eq!(conn.streams().remote_open_streams(Dir::Uni), 0, "a burst stream outlived it");
+		assert_eq!(
+			conn.streams().remote_open_streams(Dir::Uni),
+			0,
+			"a burst stream outlived it"
+		);
 	}
 }
 
@@ -309,7 +313,10 @@ fn bench_reuse(c: &mut Criterion<ThreadCpu>) {
 				let mut pair = None;
 				group.throughput(Throughput::Bytes((streams * packets * PACKET) as u64));
 				group.bench_function(
-					BenchmarkId::new(format!("{}/streams_{streams}", mode.name()), format!("packets_{packets}")),
+					BenchmarkId::new(
+						format!("{}/streams_{streams}", mode.name()),
+						format!("packets_{packets}"),
+					),
 					|b| {
 						let pair = pair.get_or_insert_with(|| {
 							let mut pair = Pair::new(Setup::default());
