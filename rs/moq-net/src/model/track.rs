@@ -31,6 +31,7 @@ pub(super) use demand::Preferences;
 use demand::Subscriptions;
 
 mod fill;
+mod idle;
 mod miss;
 pub use fill::Fill;
 use fill::FillState;
@@ -5593,6 +5594,10 @@ pub(super) struct Unread<'a> {
 }
 
 /// How a [`Subscriber`] reads: its track's own cache, or a front's routes.
+#[expect(
+	clippy::large_enum_variant,
+	reason = "the plain cursor is the hot path; boxing it costs every read an indirection"
+)]
 enum Inner {
 	Plain(Cursor),
 	/// A front's logical track, read straight from its routes' copies; see
@@ -6018,6 +6023,9 @@ struct Cursor {
 	drops: Option<Box<DropCursor>>,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
+	/// The group read that last parked, answered again without the walk until something
+	/// it parked on fires, once it first parks.
+	idle: Option<Box<idle::Idle>>,
 }
 
 struct Peeked {
@@ -6231,6 +6239,7 @@ impl Cursor {
 			skipped: Skipped::default(),
 			drops: None,
 			misses: None,
+			idle: None,
 		}
 	}
 
@@ -6279,6 +6288,8 @@ impl Cursor {
 	/// Resolve [`Self::servable`] again once the window or cap moved, and publish it to the
 	/// groups already handed out. Costs the ranges, never the cache.
 	fn update_servable(&mut self) {
+		// A moved window or cap notifies nothing this cursor parked on.
+		idle::Idle::disarm(&mut self.idle);
 		let runs = Servable::new(self.filter.window.runs(0));
 		let (revision, cap) = (self.filter.resolved, self.end_sequence);
 		self.servable = runs.below(cap);
@@ -6742,6 +6753,17 @@ impl Cursor {
 			peeked.group.cache_refresh();
 			return Poll::Ready(Ok(Some(self.deliver(peeked.group))));
 		}
+		if idle::Idle::parked(&self.idle, idle::Walk::Arrival, waiter) {
+			return Poll::Pending;
+		}
+		let idle = idle::Idle::start(&mut self.idle, waiter);
+		let polled = self.poll_recv_walk(take, idle.waiter());
+		idle.finish(&mut self.idle, idle::Walk::Arrival, polled.is_pending());
+		polled
+	}
+
+	/// [`Self::poll_recv_group`] past a peeked group, parking on `waiter`.
+	fn poll_recv_walk(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		self.sync();
 		if let Some(err) = &self.filter.refused {
 			return Poll::Ready(Err(err.clone()));
@@ -6919,6 +6941,7 @@ impl Cursor {
 		if next == self.next_sequence {
 			return;
 		}
+		idle::Idle::disarm(&mut self.idle);
 		self.next_sequence = next;
 		if self
 			.peeked
@@ -6941,6 +6964,17 @@ impl Cursor {
 			self.sync();
 			return Poll::Ready(Ok(Some(self.advance_sequence(peeked.group))));
 		}
+		if idle::Idle::parked(&self.idle, idle::Walk::Sequence, waiter) {
+			return Poll::Pending;
+		}
+		let idle = idle::Idle::start(&mut self.idle, waiter);
+		let polled = self.poll_next_walk(take, idle.waiter());
+		idle.finish(&mut self.idle, idle::Walk::Sequence, polled.is_pending());
+		polled
+	}
+
+	/// [`Self::poll_next_group`] past a peeked group, parking on `waiter`.
+	fn poll_next_walk(&mut self, take: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		let Some(next) = self.next_sequence else {
 			return Poll::Ready(Ok(None));
 		};
