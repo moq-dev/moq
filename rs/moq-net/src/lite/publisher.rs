@@ -5962,12 +5962,13 @@ mod serve_group_test {
 					);
 					let session = SinkSession::new(Log::default()).with_datagrams(transport);
 					let (mut run, _, _) = lite_run(version, session, track.subscribe(None));
-					// The subscribe ID, sequence, and timestamp each use one byte.
+					// Lite-07's type adds one byte to the three one-byte group fields.
+					let header = if version.has_padding() { 4 } else { 3 };
 					let sent = run.ctx.serve_datagram(crate::model::datagram::Stored {
 						datagram: crate::Datagram {
 							sequence: 1,
 							timestamp: Some(Timestamp::ZERO),
-							payload: bytes::Bytes::from(vec![0; size - 3]),
+							payload: bytes::Bytes::from(vec![0; size - header]),
 						},
 						wire: None,
 						deflated: None,

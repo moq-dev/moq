@@ -291,20 +291,30 @@ impl Feed {
 	}
 }
 
+/// How far a track got toward a live [`Producer`]; each step replaces the last.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Publication {
+	/// Nobody answered the request yet.
+	#[default]
+	Pending,
+	/// A dynamic handler took the request. Its answer is the handler's call, so ending
+	/// the broadcast leaves it pending rather than rejecting it.
+	Claimed,
+	/// Minted by `Request::stage` and not committed yet: the producer writes, but waiting
+	/// subscribers resolve only at `Staged::commit`, with everything written by then.
+	Staged,
+	/// A live Producer was minted and committed.
+	Published,
+}
+
 #[derive(Default)]
 pub(crate) struct TrackState {
 	// The publisher's properties, once known; always Some for Subscriber/Producer.
 	// Copied by value into each group it creates.
 	info: Option<Info>,
-	// Whether a live Producer was minted. A reverse fetch may install `info`
-	// before acceptance, so the two states are deliberately separate.
-	published: bool,
-	// Minted by `Request::stage` and not committed yet: the producer writes, but waiting
-	// subscribers resolve only at `Staged::commit`, with everything written by then.
-	staged: bool,
-	// Whether a dynamic handler took the request. Its answer is the handler's call,
-	// so ending the broadcast leaves it pending rather than rejecting it.
-	claimed: bool,
+	// How far the track got toward a live Producer. A reverse fetch may install `info`
+	// before acceptance, so the two are deliberately separate.
+	publication: Publication,
 
 	// The broadcast this track belongs to. Supplies the cache pool its groups charge
 	// into and the local `cache_duration` ceiling.
@@ -1033,13 +1043,36 @@ impl TrackState {
 		self.drops.get(&sequence).cloned().map(Error::Stream)
 	}
 
-	fn accept(&mut self, info: Info) {
-		self.published = true;
+	/// Whether a Producer was minted, committed or not.
+	fn minted(&self) -> bool {
+		matches!(self.publication, Publication::Staged | Publication::Published)
+	}
+
+	/// A dynamic handler took the request.
+	fn claim(&mut self) {
+		self.publication = Publication::Claimed;
+	}
+
+	/// Mint the Producer, holding waiting subscribers until [`Self::commit`].
+	fn stage(&mut self, info: Info) {
+		self.publication = Publication::Staged;
+		self.install(info);
+	}
+
+	/// Resolve waiting subscribers with what the minted Producer wrote.
+	fn commit(&mut self) {
+		debug_assert_eq!(self.publication, Publication::Staged, "only a staged track commits");
+		self.publication = Publication::Published;
+	}
+
+	/// Mint the Producer and resolve waiting subscribers at once.
+	fn publish(&mut self, info: Info) {
+		self.publication = Publication::Published;
 		self.install(info);
 	}
 
 	fn poll_info(&self) -> Poll<Result<Info>> {
-		if let Some(info) = self.info.as_ref().filter(|_| !self.staged) {
+		if let Some(info) = self.info.as_ref().filter(|_| self.publication != Publication::Staged) {
 			Poll::Ready(Ok(info.clone()))
 		} else if let Some(err) = &self.abort {
 			// Aborted before anyone served it, so the info can never arrive: fail the
@@ -1999,13 +2032,21 @@ impl TrackState {
 	/// A group that starts above `frame_start` is also replaceable: it cannot answer a
 	/// request from there, so the wider producer takes the slot. Readers already
 	/// draining the old one keep their own handle.
+	///
+	/// A fetched backfill never holds the sequence against the feed: subscribers read only
+	/// the feed's groups, so its copy takes the slot, and the fetch's readers keep theirs.
 	fn claim_sequence(&mut self, sequence: u64, frame_start: u64) -> Result<()> {
-		// Either copy that can still answer from `frame_start` takes the sequence.
-		if self.covering_group(sequence, frame_start).is_some() {
+		if self.holding_group(sequence, frame_start).is_some() {
 			return Err(Error::Duplicate);
 		}
 		self.displace(sequence);
 		Ok(())
+	}
+
+	/// The copy of the feed's `sequence` that still answers from `frame_start`, if any.
+	fn holding_group(&self, sequence: u64, frame_start: u64) -> Option<&group::Handle> {
+		self.lookup.get(&sequence).filter(|slot| slot.visible)?;
+		self.covering_group(sequence, frame_start)
 	}
 
 	/// Insert a freshly-created group into the cache.
@@ -3045,7 +3086,7 @@ impl Producer {
 		let name = name.into();
 		let info = info.into().unwrap_or_default();
 		let state = TrackState::spawn(broadcast.clone());
-		state.write().ok().expect("a new track is open").accept(info.clone());
+		state.write().ok().expect("a new track is open").publish(info.clone());
 		let alive = Alive::new(name.clone(), state.clone());
 		alive.publish(None);
 		Self {
@@ -3111,7 +3152,7 @@ impl Producer {
 		}
 		let start = received.unwrap_or(0);
 		let content = if received.is_some() {
-			if state.covering_group(info.sequence, start).is_some() {
+			if state.holding_group(info.sequence, start).is_some() {
 				return Err(Error::Duplicate);
 			}
 			state.content_for_copy(info.sequence)?
@@ -4161,7 +4202,7 @@ impl TrackWeak {
 		let Ok(mut state) = producer.write() else {
 			return false;
 		};
-		if state.published || state.claimed || state.abort.is_some() {
+		if state.publication != Publication::Pending || state.abort.is_some() {
 			return false;
 		}
 		state.abort = Some(err);
@@ -4943,7 +4984,7 @@ impl Consumer {
 		self.with_state(|state| {
 			state.is_some_and(|state| {
 				let state = state.read();
-				state.routes.is_none() && state.published && !state.closed && state.feed.is_live()
+				state.routes.is_none() && state.minted() && !state.closed && state.feed.is_live()
 			})
 		})
 	}
@@ -5406,8 +5447,8 @@ impl kio::Task for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
-		// Made before a front accepted its logical track, which caches nothing: the
-		// serving route answers instead.
+		// Made before a front took its logical track, which caches nothing: the serving
+		// route answers instead.
 		if self.resume.is_none()
 			&& let Some(routes) = self.state.read().routes.clone()
 		{
@@ -8166,7 +8207,7 @@ impl Staged {
 	pub(crate) fn commit(mut self) -> Producer {
 		let producer = self.producer.take().expect("taken only by commit");
 		if let Ok(mut state) = producer.state.write() {
-			state.staged = false;
+			state.commit();
 		}
 		producer
 	}
@@ -8236,9 +8277,6 @@ pub struct Request {
 	// Whether the accepted track starts idle; see [`Self::idle`].
 	idle: bool,
 
-	// Served from a front's routes; see [`Self::routes`].
-	routes: Option<super::resume::Consumer>,
-
 	// A track the producer reserved, listed by its broadcast once accepted.
 	list: Option<broadcast::ListOnAccept>,
 }
@@ -8267,7 +8305,6 @@ impl Request {
 			stats: stats::Scope::default(),
 			requested_start: RequestedStart::Unset,
 			idle: false,
-			routes: None,
 			list: None,
 		}
 	}
@@ -8279,10 +8316,12 @@ impl Request {
 	}
 
 	/// Serve the track from a front's routes, read straight from their copies; see
-	/// [`super::resume`]. Applied atomically with [`Self::accept`], so no reader ever sees
-	/// the accepted track without it.
-	pub(super) fn routes(mut self, routes: super::resume::Consumer) -> Self {
-		self.routes = Some(routes);
+	/// [`super::resume`]. Applied at once, so a fetch made before [`Self::accept`] already
+	/// reaches the copy whose info is still in flight.
+	pub(super) fn routes(self, routes: super::resume::Consumer) -> Self {
+		if let Ok(mut state) = self.state.write() {
+			state.routes = Some(routes);
+		}
 		self
 	}
 
@@ -8351,7 +8390,7 @@ impl Request {
 	/// Mark this request as taken by a dynamic handler, which alone decides its answer.
 	pub(super) fn claim(self) -> Self {
 		if let Ok(mut state) = self.state.write() {
-			state.claimed = true;
+			state.claim();
 		}
 		self
 	}
@@ -8393,15 +8432,13 @@ impl Request {
 		// tolerate it: the Producer we hand back simply can't write.
 		let open = match self.state.write() {
 			Ok(mut state) => {
-				state.accept(info.clone());
-				state.staged = true;
+				state.stage(info.clone());
 				if let RequestedStart::Pending(floor) = self.requested_start {
 					state.set_start(floor, true);
 				}
 				if self.idle {
 					state.set_idle();
 				}
-				state.routes = self.routes;
 				true
 			}
 			Err(_) => false,
@@ -9991,6 +10028,7 @@ mod test {
 			ietf: None,
 			compressed: false,
 		})
+		.unwrap()
 		.unwrap();
 		let mut downstream = track_producer("test", Info::timed());
 		let mut downstream_dg = downstream.subscribe(None);
@@ -18242,6 +18280,50 @@ mod test {
 		assert_eq!(subscriber.assert_group().sequence, 5);
 		assert_eq!(subscriber.assert_group().sequence, 6);
 		subscriber.assert_no_group();
+	}
+
+	/// The feed's copy of a group a fetch cached first takes the slot, so a subscriber reads
+	/// it, while the fetch's reader keeps its own copy, abandoned or not.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn the_feed_takes_a_group_a_fetch_cached_first() {
+		let (producer, _pool) = pooled_producer(1 << 40);
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let mut subscriber = producer.subscribe(replay());
+
+		let pending = consumer.fetch_group(0, None);
+		let req = dynamic
+			.requested_fill_group()
+			.now_or_never()
+			.expect("should not block")
+			.unwrap();
+		let mut fetching = req.accept(Info::timed()).unwrap();
+		fetching
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"snapshot"))
+			.unwrap();
+		let mut fetched = pending.await.unwrap();
+		subscriber.assert_no_group();
+
+		let mut live = producer
+			.create_group_at(0u64.into(), 0)
+			.expect("the feed takes the slot");
+		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"snapshot"))
+			.unwrap();
+		let mut group = subscriber.assert_group();
+		assert_eq!(group.sequence, 0);
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"snapshot");
+		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"snapshot");
+
+		// The fetch giving up never cuts the group short for the subscriber.
+		drop(fetched);
+		fetching.abort(Error::Cancel).unwrap();
+		live.finish().unwrap();
+		assert!(group.read_frame().await.unwrap().is_none());
+		assert!(matches!(
+			producer.create_group_at(0u64.into(), 0),
+			Err(Error::Duplicate)
+		));
 	}
 
 	/// Fetched backfill isn't in arrival order, so it ages out through the eviction

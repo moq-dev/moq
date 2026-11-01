@@ -32,9 +32,9 @@ served it are deleted once the generated `moq-c` publishes. The generated
 
 ## Required
 
-- [Generated C publication](/quest/m2/release/c-publish.md) - the replacement is available and verified
+- [Generated C publication](/quest/m2/release/c-publish.md) - the replacement is available and verified, and the smoke client checks it
 
-- [C consumers](/quest/m2/c/consumers.md) - nothing in the repository still calls the hand-written ABI
+- [C consumers](/quest/m2/c/consumers.md) - the interop client and `doc/lib/c` samples no longer call the hand-written ABI
 
 ## Related
 

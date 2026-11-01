@@ -990,13 +990,14 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			const reader = sub.datagrams.getReader();
 			const max = Math.min(1200, transport);
 			try {
-				// Each body has three one-byte varints before its payload.
-				sub.track.insertDatagram(0, Timestamp.fromMillis(0), new Uint8Array(max - 2));
-				sub.track.insertDatagram(1, Timestamp.fromMillis(1), new Uint8Array(max - 3));
+				// Lite-07's type adds one byte to the three one-byte group fields.
+				const header = version === Version.DRAFT_07 ? 4 : 3;
+				sub.track.insertDatagram(0, Timestamp.fromMillis(0), new Uint8Array(max - header + 1));
+				sub.track.insertDatagram(1, Timestamp.fromMillis(1), new Uint8Array(max - header));
 				const next = await reader.read();
 				if (next.done) throw new Error("datagrams ended early");
 				expect(next.value.byteLength).toBe(max);
-				expect((await DatagramMessage.decode(next.value, version, () => ({ timed: true }))).sequence).toBe(1);
+				expect((await DatagramMessage.decode(next.value, version, () => ({ timed: true })))?.sequence).toBe(1);
 			} finally {
 				await reader.cancel();
 				await sub.close();
@@ -1021,7 +1022,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group 
 	const recv = async () => {
 		const next = await reader.read();
 		if (next.done) throw new Error("datagrams ended early");
-		return (await DatagramMessage.decode(next.value, version, () => ({ timed: true }))).sequence;
+		return (await DatagramMessage.decode(next.value, version, () => ({ timed: true })))?.sequence;
 	};
 	// The publisher applies an update's datagram bounds before forwarding its group range, and
 	// each update here moves the range's end.

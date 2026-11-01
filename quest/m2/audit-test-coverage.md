@@ -46,6 +46,11 @@ which is expensive on a shared machine.
   point at GPU code and generated bindings instead.
 - When sampling `fix` commits for regression tests, count
   `#[kio::test]` as well as `#[test]` and `#[tokio::test]`.
+- `just gh check` fails on any `#[ignore]` test, fuzz or bench target, test
+  recipe, or standalone test script that no workflow reaches
+  (`sh/gh/test-inventory.py`). The local-only ones are in
+  `sh/gh/test-inventory.allow`, each with its owning quest, so the `#[ignore]`
+  walk starts from that list instead of grepping.
 
 ### m1 baselines
 
