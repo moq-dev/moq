@@ -72,11 +72,12 @@ impl Skipped {
 		self.0.as_ref().is_none_or(|skipped| skipped.runs.is_empty())
 	}
 
-	/// Whether `sequence` is skipped, so a wider budget may offer it again.
-	pub fn contains(&self, sequence: u64) -> bool {
-		self.0
-			.as_ref()
-			.is_some_and(|skipped| skipped.runs.contains_key(&sequence))
+	/// The parts of `groups` not skipped, which no wider budget offers again.
+	pub fn gaps(&self, groups: RangeInclusive<u64>) -> Vec<RangeInclusive<u64>> {
+		match &self.0 {
+			Some(skipped) => skipped.runs.gaps(&groups).collect(),
+			None => vec![groups],
+		}
 	}
 
 	/// The lowest sequence skipped.

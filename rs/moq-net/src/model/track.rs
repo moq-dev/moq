@@ -6701,16 +6701,17 @@ impl Cursor {
 		if self.filter.written_off.is_empty() {
 			return;
 		}
-		let settled: Vec<u64> = self
+		// By run, so a long stale run costs one lookup rather than one per group.
+		let settled: Vec<ops::Range<u64>> = self
 			.filter
 			.written_off
 			.iter()
-			.flat_map(|run| run.clone())
-			.filter(|&sequence| !self.skipped.contains(sequence))
+			.flat_map(|run| self.skipped.gaps(run.start..=run.end - 1))
+			.map(|gap| *gap.start()..gap.end() + 1)
 			.collect();
-		for sequence in settled {
-			self.filter.written_off.remove(sequence..sequence + 1);
-			taken.insert(sequence);
+		for run in settled {
+			self.filter.written_off.remove(run.clone());
+			taken.insert_run(run);
 		}
 	}
 
