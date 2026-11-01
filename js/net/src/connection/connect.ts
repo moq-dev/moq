@@ -406,7 +406,9 @@ async function connectInner(
 	const headstart =
 		!webtransport || websocketWon.has(server) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
 	const websocket =
-		props.websocket?.enabled !== false ? connectWebSocket(websocketUrl, headstart, cancel, offered.alpns) : undefined;
+		props.websocket?.enabled !== false
+			? connectWebSocket(websocketUrl, headstart, cancel, offered.alpns)
+			: undefined;
 
 	if (!websocket && !webtransport) {
 		throw new Error("no transport available; WebTransport not supported and WebSocket is disabled");

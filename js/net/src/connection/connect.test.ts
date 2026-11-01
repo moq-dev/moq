@@ -1138,13 +1138,14 @@ async function raceOnce(
 test("a WebSocket win skips the head start for any path or query on that host and port", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
+	const at = (path: string) => new URL(path, "https://preferred.example.com");
 	try {
-		expect(await raceOnce(clock, new URL("https://preferred.example.com/a?jwt=one"), "hang", "open")).toEqual([500]);
+		expect(await raceOnce(clock, at("/a?jwt=one"), "hang", "open")).toEqual([500]);
 		// Another path and a rotated token reach the same server.
-		expect(await raceOnce(clock, new URL("https://preferred.example.com/b?jwt=two"), "hang", "open")).toEqual([0]);
-		expect(await raceOnce(clock, new URL("https://preferred.example.com:443/c"), "hang", "open")).toEqual([0]);
+		expect(await raceOnce(clock, at("/b?jwt=two"), "hang", "open")).toEqual([0]);
+		expect(await raceOnce(clock, at("https://preferred.example.com:443/c"), "hang", "open")).toEqual([0]);
 		// Another port is another server.
-		expect(await raceOnce(clock, new URL("https://preferred.example.com:4443/a"), "hang", "open")).toEqual([500]);
+		expect(await raceOnce(clock, at("https://preferred.example.com:4443/a"), "hang", "open")).toEqual([500]);
 	} finally {
 		installed.close();
 	}
