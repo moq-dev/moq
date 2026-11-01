@@ -1402,7 +1402,8 @@ pub struct moq_client_config {
 	pub quic_idle_timeout_us: u64,
 	/// Whether `quic_idle_timeout_us` is present.
 	pub has_quic_idle_timeout: bool,
-	/// The QUIC keep-alive interval in microseconds.
+	/// The QUIC keep-alive interval in microseconds, 0 to disable. Absent derives it
+	/// from the idle timeout both ends negotiate, so the defaults leave it absent.
 	pub quic_keep_alive_us: u64,
 	/// Whether `quic_keep_alive_us` is present.
 	pub has_quic_keep_alive: bool,

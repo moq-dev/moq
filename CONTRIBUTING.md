@@ -104,7 +104,7 @@ For an advisory against Quinn, follow the advisory triage in [`rs/moq-quic/READM
 Releases are cut separately; bump only when asked. Each package's version lives in one place:
 
 - **Rust**: release-plz owns crate versions and Rust dependency requirements.
-- **JavaScript**: `js/*/package.json` packages with a `scripts.release` entry (skip private ones like `@moq/wasm`), plus the matching workspace version in `bun.lock`.
+- **JavaScript**: `js/*/package.json` packages with a `scripts.release` entry (skip private ones), plus the matching workspace version in `bun.lock`.
 - **Python**: `py/moq-rs/pyproject.toml`, plus the matching `moq-rs` entry in the root `uv.lock`; `py/moq-ffi` follows the `moq-ffi-v*` tag and Rust crate.
 - **Swift**: `swift/VERSION`. **Kotlin**: `moq.version` in `kt/gradle.properties`. **Dart**: `version` in `dart/moq/pubspec.yaml`. Their FFI counterparts track the Rust crate.
 - **Go**: `go/wrapper/VERSION` holds a human-owned `MAJOR.MINOR` line; CI derives the patch, so only edit it for a breaking API. Leave the placeholder FFI version in `go.mod` alone.

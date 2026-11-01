@@ -590,7 +590,6 @@ async fn read_echo(origin: moq_net::origin::Consumer, path: moq_net::Path, lines
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use tokio::io::{AsyncBufReadExt, BufReader};
@@ -646,9 +645,9 @@ mod tests {
 		assert!(line.contains(r#""n":1"#), "{line}");
 
 		broadcast.unannounce();
-		tokio::time::sleep(DRAIN * 2).await;
+		moq_clock::sleep(DRAIN * 2).await;
 		feedback.update(&serde_json::json!({ "n": 2 })).unwrap();
-		let late = tokio::time::timeout(Duration::from_secs(1), lines.next_line()).await;
+		let late = moq_clock::timeout(Duration::from_secs(1), lines.next_line()).await;
 		assert!(late.is_err(), "a drained reader wrote {late:?}");
 	}
 
@@ -686,7 +685,7 @@ mod tests {
 		tokio::spawn(write_echo(origin.consume(), ".viewers".to_string(), out));
 
 		feedback.update(&serde_json::json!({ "n": 1 })).unwrap();
-		let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await;
+		let line = moq_clock::timeout(Duration::from_secs(5), lines.next_line()).await;
 		let line = line.expect("no feedback read").unwrap().unwrap();
 		assert!(line.contains(r#""n":1"#), "{line}");
 	}
@@ -694,5 +693,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "report/echo_test.rs"]
-#[expect(clippy::disallowed_methods, reason = "tests control the clock directly")]
 mod echo_test;
