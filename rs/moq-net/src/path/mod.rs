@@ -303,8 +303,8 @@ impl Path {
 	/// The path as a string, with no leading or trailing slash.
 	pub fn as_str(&self) -> &str {
 		match &self.0 {
-			// SAFETY: `Repr::copy` and `concat` fill `buf[..len]` only from whole `&str`s and an
-			// ASCII `/`, so those bytes are valid UTF-8.
+			// SAFETY: `Repr::copy_bounded` fills `buf[..len]` only from a whole `&str`, so those
+			// bytes are valid UTF-8.
 			Repr::Inline { len, buf } => unsafe { std::str::from_utf8_unchecked(&buf[..*len as usize]) },
 			Repr::Static(s) => s,
 			Repr::Shared { buf, start } => &buf[*start as usize..],
@@ -358,29 +358,15 @@ impl Path {
 		self.join(other).expect("a rejoined path fits")
 	}
 
-	// `a/b` for two non-empty valid paths, built in place.
+	// `a/b` for two non-empty valid paths. Joined on the stack, which `arrayvec` leaves
+	// uninitialized, so the path's own copy is the only allocation, and a short path makes
+	// none. A `String` would be a second one, copied again into the shared `Arc<str>`.
 	pub(crate) fn concat(a: &str, b: &str) -> Result<Path, Error> {
-		let len = a.len() + 1 + b.len();
-		if len > Self::MAX_BYTES {
-			return Err(Error::TooLong);
+		let mut buf = arrayvec::ArrayString::<{ Self::MAX_BYTES }>::new();
+		for part in [a, "/", b] {
+			buf.try_push_str(part).map_err(|_| Error::TooLong)?;
 		}
-		if len <= INLINE {
-			let mut buf = [0; INLINE];
-			buf[..a.len()].copy_from_slice(a.as_bytes());
-			buf[a.len()] = b'/';
-			buf[a.len() + 1..len].copy_from_slice(b.as_bytes());
-			Ok(Path(Repr::Inline { len: len as u8, buf }))
-		} else {
-			// Sized up front: `format!` guesses low and reallocates.
-			let mut buf = String::with_capacity(len);
-			buf.push_str(a);
-			buf.push('/');
-			buf.push_str(b);
-			Ok(Path(Repr::Shared {
-				buf: buf.into(),
-				start: 0,
-			}))
-		}
+		Ok(Path(Repr::copy_bounded(&buf)))
 	}
 
 	/// Resolve a [`Relative`] against this path.
