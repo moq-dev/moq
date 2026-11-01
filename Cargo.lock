@@ -3662,7 +3662,6 @@ dependencies = [
  "derive_more 2.1.1",
  "hex",
  "kio 0.6.2",
- "moq-clock",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -4789,8 +4788,13 @@ dependencies = [
  "bench-harness",
  "crossbeam-epoch",
  "futures",
+ "kio 0.6.2",
  "kio-macros",
+ "serde",
+ "serde_json",
+ "serde_with",
  "smallvec",
+ "test-env",
  "tokio",
 ]
 
@@ -5325,7 +5329,6 @@ dependencies = [
  "bytes",
  "futures",
  "kio 0.6.2",
- "moq-clock",
  "moq-net",
  "object_store",
  "percent-encoding",
@@ -5351,7 +5354,6 @@ dependencies = [
  "dispatch2",
  "hang",
  "kio 0.6.2",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "objc2 0.6.5",
@@ -5387,7 +5389,6 @@ dependencies = [
  "kio 0.6.2",
  "moq-auth 0.2.1",
  "moq-auth 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "moq-clock",
  "moq-pattern 0.1.2",
  "moq-token",
  "p256",
@@ -5436,7 +5437,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "humantime",
- "moq-clock",
+ "kio 0.6.2",
  "moq-net",
  "moq-tokio",
  "moq-uring",
@@ -5444,6 +5445,7 @@ dependencies = [
  "rand 0.10.3",
  "serde",
  "serde_json",
+ "tempfile",
  "test-env",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
@@ -5459,8 +5461,8 @@ dependencies = [
  "boytacean",
  "bytes",
  "hang",
+ "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -5482,7 +5484,6 @@ dependencies = [
  "hang",
  "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-json",
  "moq-loc",
  "moq-mux",
@@ -5525,11 +5526,11 @@ dependencies = [
  "futures",
  "hang",
  "humantime",
+ "kio 0.6.2",
  "libc",
  "moq-archive",
  "moq-audio",
  "moq-auth 0.2.1",
- "moq-clock",
  "moq-hls",
  "moq-json",
  "moq-mux",
@@ -5547,6 +5548,8 @@ dependencies = [
  "percent-encoding",
  "pollster",
  "reqwest",
+ "rind-object-store",
+ "rind-rustls",
  "rustls",
  "sd-notify",
  "serde",
@@ -5555,6 +5558,7 @@ dependencies = [
  "terminal_size",
  "test-env",
  "tokio",
+ "tokio-util",
  "tower-http 0.7.1",
  "tracing",
  "url",
@@ -5564,29 +5568,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-clock"
-version = "0.11.0"
-dependencies = [
- "futures",
- "kio 0.6.2",
- "moq-clock",
- "moq-clock-macros",
- "serde",
- "serde_json",
- "serde_with",
- "tokio",
-]
-
-[[package]]
-name = "moq-clock-macros"
-version = "0.1.0"
-
-[[package]]
 name = "moq-congestion"
 version = "0.1.0"
 dependencies = [
  "cpu-time",
- "moq-clock",
+ "kio 0.6.2",
  "rand 0.10.3",
  "rand_pcg",
  "stats_alloc",
@@ -5601,7 +5587,6 @@ dependencies = [
  "bytes",
  "hex",
  "kio 0.6.2",
- "moq-clock",
  "moq-net",
  "rind",
  "serde_json",
@@ -5619,7 +5604,6 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "moq-audio",
- "moq-clock",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -5647,8 +5631,8 @@ dependencies = [
  "gstreamer",
  "gstreamer-audio",
  "hang",
+ "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -5672,7 +5656,6 @@ dependencies = [
  "kio 0.6.2",
  "m3u8-rs",
  "moq-archive",
- "moq-clock",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -5680,9 +5663,10 @@ dependencies = [
  "percent-encoding",
  "rand 0.10.3",
  "reqwest",
+ "rind",
+ "rind-rustls",
  "serde",
  "serde_json",
- "sha2 0.11.1",
  "thiserror 2.0.21",
  "tokio",
  "tower",
@@ -5695,7 +5679,7 @@ dependencies = [
 name = "moq-ice"
 version = "0.1.0"
 dependencies = [
- "moq-clock",
+ "kio 0.6.2",
  "str0m",
  "stun-types",
  "thiserror 2.0.21",
@@ -5756,7 +5740,6 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "memchr",
- "moq-clock",
  "moq-json",
  "moq-loc",
  "moq-msf",
@@ -5797,7 +5780,6 @@ dependencies = [
  "hashlink",
  "kio 0.6.2",
  "libc",
- "moq-clock",
  "moq-pattern 0.1.2",
  "num_enum",
  "proptest",
@@ -5827,7 +5809,7 @@ name = "moq-net-tests"
 version = "0.0.0"
 dependencies = [
  "futures",
- "moq-clock",
+ "kio 0.6.2",
  "moq-json",
  "moq-net",
  "serde_json",
@@ -5877,7 +5859,6 @@ dependencies = [
  "indexmap 2.14.2",
  "kio 0.6.2",
  "lru-slab",
- "moq-clock",
  "moq-congestion",
  "moq-quic",
  "proptest",
@@ -5925,7 +5906,6 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "moq-auth 0.2.1",
- "moq-clock",
  "moq-congestion",
  "moq-net",
  "moq-quic",
@@ -5970,7 +5950,6 @@ version = "0.2.11"
 dependencies = [
  "kio 0.6.2",
  "moq-auth 0.2.1",
- "moq-clock",
  "moq-json",
  "moq-net",
  "moq-tokio",
@@ -5986,7 +5965,7 @@ dependencies = [
  "axum",
  "bytes",
  "hang",
- "moq-clock",
+ "kio 0.6.2",
  "moq-ice",
  "moq-mux",
  "moq-net",
@@ -6012,7 +5991,7 @@ dependencies = [
  "futures",
  "hang",
  "hmac 0.13.0",
- "moq-clock",
+ "kio 0.6.2",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -6034,7 +6013,7 @@ dependencies = [
  "base64 0.23.1",
  "futures",
  "hang",
- "moq-clock",
+ "kio 0.6.2",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -6057,7 +6036,6 @@ dependencies = [
  "image",
  "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-video",
@@ -6078,7 +6056,7 @@ dependencies = [
  "clap",
  "humantime",
  "humantime-serde",
- "moq-clock",
+ "kio 0.6.2",
  "rand 0.10.3",
  "serde",
  "serde_json",
@@ -6127,7 +6105,7 @@ dependencies = [
  "bytes",
  "futures",
  "hang",
- "moq-clock",
+ "kio 0.6.2",
  "moq-mux",
  "moq-net",
  "srt-protocol",
@@ -6144,7 +6122,7 @@ version = "0.2.12"
 dependencies = [
  "bench-harness",
  "futures",
- "moq-clock",
+ "kio 0.6.2",
  "moq-json",
  "moq-net",
  "serde",
@@ -6164,8 +6142,8 @@ dependencies = [
  "eframe",
  "egui",
  "egui_dock",
+ "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-relay",
@@ -6218,13 +6196,13 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "mdns-sd",
- "moq-clock",
  "moq-congestion",
  "moq-ice",
  "moq-net",
  "moq-quic",
  "moq-shaper",
  "moq-sock",
+ "moq-tokio",
  "noq-proto",
  "notify",
  "pin-project-lite",
@@ -6273,7 +6251,6 @@ dependencies = [
  "bytes",
  "hang",
  "kio 0.6.2",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -6296,7 +6273,6 @@ dependencies = [
  "io-uring",
  "kio 0.6.2",
  "libc",
- "moq-clock",
  "moq-congestion",
  "moq-net",
  "moq-quic",
@@ -6365,7 +6341,6 @@ dependencies = [
  "libloading 0.9.0",
  "libvpx-native-sys",
  "linux-raw-sys 0.12.1",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-nvenc",
@@ -8544,7 +8519,6 @@ dependencies = [
  "futures",
  "kio 0.6.2",
  "libc",
- "moq-clock",
  "moq-net",
  "moq-quic",
  "qmux 0.6.5",
@@ -9060,9 +9034,9 @@ dependencies = [
 
 [[package]]
 name = "rind"
-version = "0.1.0"
+version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdc0a91565c59d87e36dcb47a73b2c5fd252b3cd7017920aec393875f1c4c0df"
+checksum = "460a4041e5ae933ff4e2c11aad0d05a60ddf21a89eaea0806520b8c50f1d5727"
 dependencies = [
  "cfg-if",
  "curve25519-dalek",
@@ -9076,6 +9050,27 @@ dependencies = [
  "libcrux-p256",
  "libcrux-poly1305",
  "libcrux-traits",
+]
+
+[[package]]
+name = "rind-object-store"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd6733c2630ffae76432b1d1a9c4e43febf2a4959292e43c9a922978f11b550a"
+dependencies = [
+ "object_store",
+ "rind",
+ "rustls-pki-types",
+]
+
+[[package]]
+name = "rind-rustls"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10988f0bacd30c97c41510648647d97d68fdef593f737724dd05d5cdb72d948d"
+dependencies = [
+ "rind",
+ "rustls",
 ]
 
 [[package]]

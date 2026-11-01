@@ -187,7 +187,7 @@ async fn renew_refreshes_before_expiry() {
 	let device = mesh.device();
 	let enrollment = device.enroll(&mesh.key(true), None).await.unwrap();
 	let renewed = device.renew(&enrollment).await.unwrap();
-	assert!(moq_clock::wall() < enrollment.expires);
+	assert!(kio::clock::wall() < enrollment.expires);
 	assert!(renewed.expires > enrollment.expires);
 }
 

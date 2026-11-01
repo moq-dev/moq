@@ -39,17 +39,17 @@ pub struct PeerGrant {
 	pub presenter: Key,
 
 	/// When the relay issued the grant (`iat`).
-	pub issued: moq_clock::Wall,
+	pub issued: kio::clock::Wall,
 
 	/// When the grant lapses (`exp`).
-	pub expires: moq_clock::Wall,
+	pub expires: kio::clock::Wall,
 }
 
 impl PeerGrant {
 	/// A grant bound to `presenter`, valid from `issued` until `expires`, granting nothing yet.
 	///
 	/// Fails unless `presenter` is a public asymmetric key.
-	pub fn new(presenter: Key, issued: moq_clock::Wall, expires: moq_clock::Wall) -> crate::Result<Self> {
+	pub fn new(presenter: Key, issued: kio::clock::Wall, expires: kio::clock::Wall) -> crate::Result<Self> {
 		validate_presenter(&presenter)?;
 		Ok(Self {
 			root: String::new(),
@@ -181,7 +181,7 @@ impl Key {
 		grant.validate()?;
 		self.validate_scope(&grant.as_claims())?;
 
-		if grant.expires <= moq_clock::wall() {
+		if grant.expires <= kio::clock::wall() {
 			return Err(crate::Error::TokenExpired);
 		}
 		Ok(grant)
@@ -256,10 +256,10 @@ mod wire {
 		pub subscribe: Patterns,
 		/// RFC 7800 confirmation: the presenter's public key.
 		pub cnf: Confirmation,
-		#[serde_as(as = "moq_clock::serde::UnixSeconds")]
-		pub iat: moq_clock::Wall,
-		#[serde_as(as = "moq_clock::serde::UnixSeconds")]
-		pub exp: moq_clock::Wall,
+		#[serde_as(as = "kio::clock::serde::UnixSeconds")]
+		pub iat: kio::clock::Wall,
+		#[serde_as(as = "kio::clock::serde::UnixSeconds")]
+		pub exp: kio::clock::Wall,
 	}
 
 	#[derive(Serialize, Deserialize)]
@@ -294,7 +294,7 @@ mod tests {
 	}
 
 	fn grant(presenter: &Key) -> PeerGrant {
-		let now = moq_clock::wall();
+		let now = kio::clock::wall();
 		PeerGrant::new(presenter.to_public().unwrap(), now, now + Duration::from_secs(60))
 			.unwrap()
 			.with_root("room")
@@ -403,7 +403,7 @@ mod tests {
 	fn expired_grant_is_refused() {
 		let relay = relay(Algorithm::EdDSA);
 		let presenter = presenter();
-		let now = moq_clock::wall();
+		let now = kio::clock::wall();
 		let mut expired = grant(&presenter);
 		expired.issued = now.checked_sub(Duration::from_secs(120)).unwrap();
 		expired.expires = now.checked_sub(Duration::from_secs(60)).unwrap();
@@ -423,7 +423,7 @@ mod tests {
 
 	#[test]
 	fn presenter_must_be_public_and_asymmetric() {
-		let now = moq_clock::wall();
+		let now = kio::clock::wall();
 		let later = now + Duration::from_secs(60);
 		assert!(PeerGrant::new(presenter(), now, later).is_err());
 		assert!(PeerGrant::new(Key::generate(Algorithm::HS256, None).unwrap(), now, later).is_err());
@@ -449,7 +449,7 @@ mod tests {
 	#[test]
 	fn useless_grant_is_refused() {
 		let relay = relay(Algorithm::ES256);
-		let now = moq_clock::wall();
+		let now = kio::clock::wall();
 		let empty = PeerGrant::new(presenter().to_public().unwrap(), now, now + Duration::from_secs(60)).unwrap();
 		assert!(relay.sign_peer(&empty).is_err());
 	}

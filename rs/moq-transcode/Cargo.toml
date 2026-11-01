@@ -45,7 +45,7 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
-moq-clock = { workspace = true, features = ["sim"] }
+kio = { workspace = true, features = ["runtime", "sim"] }
 moq-tokio = { path = "../moq-tokio", default-features = false, features = ["quic", "aws-lc-rs", "websocket"] }
 # The tests encode with OpenH264, the one encoder a GPU-less host has, so they
 # turn it on without making it a default of the library.
