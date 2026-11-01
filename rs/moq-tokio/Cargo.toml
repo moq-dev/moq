@@ -131,6 +131,7 @@ libc = { workspace = true }
 anyhow = "1"
 bytes = "1"
 chrono = "0.4"
+criterion = { package = "bench-harness", path = "../bench-harness" }
 # Use the channel type behind `mdns_sd::Receiver` so the mDNS readiness gate can
 # be driven with synthetic daemon events.
 flume = "0.12"
@@ -167,5 +168,12 @@ required-features = ["net"]
 name = "integration"
 path = "tests/integration/main.rs"
 required-features = ["net"]
+
+# Stream fanout through the driver on localhost, swept over streams per connection.
+[[bench]]
+name = "fanout"
+harness = false
+required-features = ["driver", "aws-lc-rs"]
+
 [lints]
 workspace = true
