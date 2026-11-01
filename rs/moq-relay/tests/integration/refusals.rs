@@ -78,7 +78,7 @@ async fn start(config: Config) -> Running {
 impl Running {
 	async fn stop(self) {
 		self.trigger.start();
-		moq_clock::timeout(TIMEOUT, self.running)
+		kio::clock::timeout(TIMEOUT, self.running)
 			.await
 			.expect("run did not return after the shutdown trigger")
 			.expect("run panicked")
@@ -121,12 +121,12 @@ async fn assert_refused(url: url::Url, publisher: bool) {
 		true => client().with_publisher(origin.consume()),
 		false => client().with_subscriber(origin),
 	};
-	let connected = moq_clock::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
+	let connected = kio::clock::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
 		.await
 		.expect("connect timeout");
 	if let Ok(session) = connected {
 		// How it closed does not matter here; /metrics says why.
-		let _ = moq_clock::timeout(TIMEOUT, session.closed())
+		let _ = kio::clock::timeout(TIMEOUT, session.closed())
 			.await
 			.expect("the relay kept a session it should refuse");
 	}
@@ -244,7 +244,7 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 		1,
 		"native admission counts exactly once"
 	);
-	let broadcast = moq_clock::timeout(
+	let broadcast = kio::clock::timeout(
 		TIMEOUT,
 		relay.origin.follow(".stats/node/test", None).unwrap().available(),
 	)
@@ -253,7 +253,7 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 	.unwrap();
 	let consumer = moq_stats::Consumer::new(broadcast, Default::default());
 	let mut totals = consumer.totals().await.unwrap();
-	moq_clock::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			let frame = totals.next().await.unwrap().unwrap();
 			if frame
@@ -275,7 +275,7 @@ async fn refused_only_stats_depth_one_has_root_totals_and_shared_embedder_metric
 		1,
 		"embedder stats and metrics share the counter"
 	);
-	moq_clock::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			let frame = totals.next().await.unwrap().unwrap();
 			if frame
@@ -318,7 +318,7 @@ async fn peer_zero_close_is_clean_and_application_close_counts_once() {
 			.connect(format!("https://{}/", relay.quic).parse::<url::Url>().unwrap());
 		let session = connection.established().await.unwrap();
 		session.abort(error);
-		moq_clock::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			loop {
 				let frame = totals.next().await.unwrap().unwrap();
 				if let Some(total) = frame.get("")
@@ -376,7 +376,7 @@ async fn expired_verified_tokens_count_under_the_token_root_and_auth_tier() {
 	let mut claims = moq_auth::Claims::default()
 		.with_root("verified/tenant")
 		.with_subscribe([moq_auth::Pattern::all()]);
-	claims.expires = Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1));
+	claims.expires = Some(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1));
 	let token = key.sign(&claims).unwrap();
 	for tier in [None, Some("edge")] {
 		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -481,7 +481,7 @@ async fn uri_setup_paths(io_uring: bool) {
 			Some("/admin?jwt=setup-token"),
 			None,
 		] {
-			let peer = moq_clock::timeout(TIMEOUT, web_peer(addr, version.alpn()))
+			let peer = kio::clock::timeout(TIMEOUT, web_peer(addr, version.alpn()))
 				.await
 				.unwrap();
 			// Minimal SETUP: lite has a parameter count and varint size; IETF has
@@ -507,7 +507,7 @@ async fn uri_setup_paths(io_uring: bool) {
 				setup.finish().unwrap();
 			}
 			if path.is_some() {
-				let error = moq_clock::timeout(TIMEOUT, async {
+				let error = kio::clock::timeout(TIMEOUT, async {
 					tokio::select! {
 						error = peer.closed() => error,
 						_ = admissions.next() => panic!("{version} admitted SETUP Path {path:?}"),
@@ -520,7 +520,7 @@ async fn uri_setup_paths(io_uring: bool) {
 					"{version}, {path:?}: {error:?}"
 				);
 			} else {
-				let admission = moq_clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
+				let admission = kio::clock::timeout(TIMEOUT, admissions.next()).await.unwrap().unwrap();
 				assert_eq!(admission.request.path, "/room", "{version}");
 				assert_eq!(admission.request.query.as_deref(), Some("jwt=url-token"), "{version}");
 				// A valid request reached authorization; no session needs to start.
@@ -529,7 +529,7 @@ async fn uri_setup_paths(io_uring: bool) {
 		}
 	}
 	trigger.start();
-	moq_clock::timeout(TIMEOUT, running).await.unwrap().unwrap().unwrap();
+	kio::clock::timeout(TIMEOUT, running).await.unwrap().unwrap().unwrap();
 }
 
 #[tokio::test]

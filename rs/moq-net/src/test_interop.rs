@@ -285,6 +285,7 @@ struct Echo {
 	varints: Vec<u8>,
 	setup: Vec<u8>,
 	datagram: Vec<u8>,
+	padding: Vec<u8>,
 	untimed_datagram: Vec<u8>,
 	track_info: Vec<u8>,
 	group: Vec<u8>,
@@ -328,6 +329,16 @@ fn lite_varint_interop() {
 
 		// Only lite-07 can carry an untimed track; lite-06 stamps it, so it has no untimed bytes.
 		let untimed = version.wire_timescale(None).is_none();
+		let padding = match version.has_padding() {
+			true => {
+				let mut bytes = Vec::new();
+				let mut w = Encoder::new(&mut bytes, version.into());
+				w.varint(1).unwrap();
+				w.slice(&[0xff; 1199]);
+				bytes
+			}
+			false => Vec::new(),
+		};
 
 		// The body doesn't say it is untimed; the subscription's track does.
 		let untimed_datagram = lite::Datagram {
@@ -380,6 +391,7 @@ fn lite_varint_interop() {
 			"varints": varints,
 			"setup": setup.to_vec(),
 			"datagram": datagram.to_vec(),
+			"padding": padding,
 			"untimedDatagram": untimed_datagram,
 			"trackInfo": track_info.to_vec(),
 			"group": group,
@@ -392,6 +404,16 @@ fn lite_varint_interop() {
 		assert_eq!(echo.varints, varints, "{version}: JS encoded the values differently");
 		assert_eq!(echo.setup, setup, "{version}: SETUP");
 		assert_eq!(echo.datagram, datagram, "{version}: datagram");
+		assert_eq!(echo.padding, padding, "{version}: padding");
+		if version.has_padding() {
+			assert!(
+				lite::Datagram::decode(echo.padding.into(), version, false, |_| {
+					panic!("padding must not look up a subscription")
+				})
+				.unwrap()
+				.is_none()
+			);
+		}
 		assert_eq!(echo.untimed_datagram, untimed_datagram, "{version}: untimed datagram");
 		assert_eq!(echo.track_info, track_info, "{version}: TRACK_INFO");
 		assert_eq!(echo.group, group, "{version}: group");

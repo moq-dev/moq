@@ -308,7 +308,8 @@ starts) is asked of the track's dynamic handler
 as a fill, which a relay serves by fetching upstream one group at a time, skipping
 a group once every subscriber that asked for it narrows past it; with
 no handler it is reported as dropped once the feed stops waiting for it. One
-evicted after the subscriber saw it cached, but before it read it, is skipped. A relay merges its subscribers' ranges into one upstream request, which
+evicted after the subscriber saw it cached, but before it read it, is asked the same
+way, once: evicted again before it is read, it is reported as dropped. A relay merges its subscribers' ranges into one upstream request, which
 moq-lite-07 carries range by range and older wire versions as the single span
 covering them. A relative or time anchor resolves on the hop that publishes the
 track, and over moq-lite-07, which carries a relative or time start upstream and
@@ -348,13 +349,13 @@ frames go out stamped with their send time; the work-in-progress 07 carries it
 untimed.
 
 A publisher refuses a group that starts before a lower one, and so does a
-moq-lite 07 receiver. Since moq-lite 05 and 06 send times look like media time,
-a receiver drops every timestamp it gets over them and the track arrives
-untimed.
-Timestamps received over moq-transport, whose peers may stamp arrival times,
-are not checked. Rust relays preserve them across moq-lite 07 when both peers
-negotiate the [ietf extension](/draft/moq-ietf), which carries their origin and
-keeps them unchecked. A moq-lite peer without it receives that track untimed.
+moq-lite 07 receiver. A receiver passes on the timestamps it gets over moq-lite
+05 and 06 without checking them, since their send times look like media time and
+an older group fetched later would look like a rewind. Timestamps received over
+moq-transport, whose peers may stamp arrival times, are not checked either. A
+relay serves both on over every version. Over moq-lite 07 the
+[ietf extension](/draft/moq-ietf) keeps moq-transport ones unchecked; without
+it, the receiver checks them and may refuse a group that rewinds.
 
 A publisher may [compress](/concept/compression) a track, which pays off for
 repetitive data such as JSON and not for media. Each group's frames become one

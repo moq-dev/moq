@@ -486,17 +486,8 @@ pub struct PeerSetup {
 	/// The SETUP's encoded size, counted once the session's stats are known.
 	pub size: usize,
 
-	/// The request path the peer advertised, for URL-less transports.
-	pub path: Option<String>,
-
-	/// The credential the peer presented in its `AUTHORIZATION TOKEN` option.
-	pub token: Option<crate::setup::Token>,
-
-	/// The implementation the peer advertised in its `IMPLEMENTATION` option.
-	pub implementation: Option<String>,
-
-	/// The Setup Options it declared (see [`cluster`] and [`solicit`]).
-	pub declared: peer::Peer,
+	/// What the SETUP's parameters say.
+	pub options: SetupOptions,
 
 	/// Uni streams that arrived before the SETUP, type peeked but unread. The drafts say
 	/// to buffer early data until the control streams arrive, so the session classifies
@@ -547,70 +538,72 @@ pub async fn accept_setup(session: &mut Transport, version: Version) -> Result<P
 
 		reader.set_priority(crate::priority::RECV_CONTROL);
 		let (setup, size) = reader.decode_sized::<setup::Setup>().await?;
-		let (params, _) = ietf::Parameters::decode_slice(&setup.parameters, version)?;
-		if session.address() == crate::transport::Address::Uri && params.get_bytes(ietf::ParameterBytes::Path).is_some()
-		{
+		let options = decode_peer_setup(&setup.parameters, version, false)?;
+		if session.address() == crate::transport::Address::Uri && options.path.is_some() {
 			return Err(Error::ProtocolViolation);
 		}
-		let path = match params.get_bytes(ietf::ParameterBytes::Path) {
-			Some(bytes) => Some(
-				std::str::from_utf8(bytes)
-					.map_err(|_| Error::Decode(crate::DecodeError::InvalidValue))?
-					.to_owned(),
-			),
-			None => None,
-		};
-		let token = super::token::from_setup(&params, version)?;
-		let implementation =
-			crate::setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?;
-		let declared = peer_from_params(&params, version)?;
 
 		return Ok(PeerSetup {
 			stream: reader,
 			size,
-			path,
-			token,
-			implementation,
-			declared,
+			options,
 			early,
 		});
 	}
 }
 
-/// Parse the Setup Options we act on out of a raw SETUP parameter block, refusing any the
-/// peer's role may not send.
-pub(crate) fn decode_peer_setup(
-	parameters: bytes::Bytes,
-	version: Version,
-	client: bool,
-) -> Result<(peer::Peer, Option<String>), Error> {
-	let (params, _) = ietf::Parameters::decode_slice(&parameters, version)?;
+/// What a peer's SETUP parameters say, parsed by [`decode_peer_setup`] for every caller.
+pub struct SetupOptions {
+	/// The request path the peer advertised, for URL-less transports.
+	pub path: Option<String>,
+
+	/// The credential the peer presented in its `AUTHORIZATION TOKEN` option.
+	pub token: Option<crate::setup::Token>,
+
+	/// The implementation the peer advertised in its `IMPLEMENTATION` option.
+	pub implementation: Option<String>,
+
+	/// The Setup Options it declared (see [`cluster`] and [`solicit`]).
+	pub declared: peer::Peer,
+}
+
+/// Parse a peer's raw SETUP parameter block, refusing any option the peer's role may not
+/// send. `client` is our role, so `true` means the block came from a server.
+pub(crate) fn decode_peer_setup(parameters: &[u8], version: Version, client: bool) -> Result<SetupOptions, Error> {
+	let (params, _) = ietf::Parameters::decode_slice(parameters, version)?;
+	let path = params.get_bytes(ietf::ParameterBytes::Path);
 	// A server sends neither PATH nor AUTHORITY (draft-22 sections 9.1.1 and 9.1.2).
-	if client && params.get_bytes(ietf::ParameterBytes::Path).is_some() {
+	if client && path.is_some() {
 		return Err(SessionError::InvalidPath.into());
 	}
 	if client && params.get_bytes(ietf::ParameterBytes::Authority).is_some() {
 		return Err(SessionError::InvalidAuthority.into());
 	}
-	// Nothing here uses the peer's token, but one that cannot be decoded still closes the
-	// session (draft-22 section 8.9).
-	super::token::from_setup(&params, version)?;
-	let implementation = crate::setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?;
-	Ok((peer_from_params(&params, version)?, implementation))
-}
+	let path = match path {
+		Some(bytes) => Some(
+			std::str::from_utf8(bytes)
+				.map_err(|_| Error::Decode(crate::DecodeError::InvalidValue))?
+				.to_owned(),
+		),
+		None => None,
+	};
 
-/// The Setup Options we act on, out of an already-decoded parameter block. One place, so
-/// a future option reaches both the pre-read accept path and the uni loop.
-fn peer_from_params(params: &ietf::Parameters, version: Version) -> Result<peer::Peer, crate::DecodeError> {
-	Ok(peer::Peer {
-		cluster: cluster::peer_from_setup(params)?,
-		solicit: solicit::from_setup(params, version)?,
-		hidden: hidden::from_setup(params, version),
-		max_age: max_age::from_setup(params, version),
-		auth: auth::from_setup(params) == Some(true),
-		active_count: active_count::from_setup(params),
-		epoch: epoch::from_setup(params),
-		flate: super::flate::from_setup(params)?,
+	Ok(SetupOptions {
+		path,
+		// A token that cannot be decoded closes the session even where nothing uses it
+		// (draft-22 section 8.9).
+		token: super::token::from_setup(&params, version)?,
+		implementation: crate::setup::decode_implementation(params.get_bytes(ietf::ParameterBytes::Implementation))?,
+		declared: peer::Peer {
+			cluster: cluster::peer_from_setup(&params)?,
+			solicit: solicit::from_setup(&params, version)?,
+			hidden: hidden::from_setup(&params, version),
+			max_age: max_age::from_setup(&params, version),
+			auth: auth::from_setup(&params) == Some(true),
+			active_count: active_count::from_setup(&params),
+			epoch: epoch::from_setup(&params),
+			flate: super::flate::from_setup(&params)?,
+		},
 	})
 }
 
@@ -948,9 +941,9 @@ impl Uni {
 				reader.set_priority(crate::priority::RECV_CONTROL);
 				let msg = reader.decode::<setup::Setup>().await?;
 				if let Some(peer_setup) = peer_setup {
-					let (declared, implementation) = decode_peer_setup(msg.parameters, version, client)?;
-					peer_setup.set(declared);
-					peer_setup.set_implementation(implementation);
+					let options = decode_peer_setup(&msg.parameters, version, client)?;
+					peer_setup.set(options.declared);
+					peer_setup.set_implementation(options.implementation);
 				}
 
 				// Monitor for GOAWAY after setup completes.
@@ -1396,14 +1389,14 @@ mod tests {
 			}
 			params.encode_bytes(version).unwrap()
 		};
-		let (_, implementation) = decode_peer_setup(encode(Some(b"moq-net-rs/1")), version, true).unwrap();
-		assert_eq!(implementation.as_deref(), Some("moq-net-rs/1"));
-		let (_, implementation) = decode_peer_setup(encode(None), version, true).unwrap();
-		assert_eq!(implementation, None);
-		assert!(decode_peer_setup(encode(Some(&[0xff])), version, true).is_err());
+		let options = decode_peer_setup(&encode(Some(b"moq-net-rs/1")), version, true).unwrap();
+		assert_eq!(options.implementation.as_deref(), Some("moq-net-rs/1"));
+		let options = decode_peer_setup(&encode(None), version, true).unwrap();
+		assert_eq!(options.implementation, None);
+		assert!(decode_peer_setup(&encode(Some(&[0xff])), version, true).is_err());
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn announce_interest_without_credit_keeps_the_session_alive() {
 		use std::sync::atomic::Ordering;
 		for version in [Version::Draft18] {
@@ -1445,7 +1438,7 @@ mod tests {
 				1,
 				"{version}: interest was attempted"
 			);
-			moq_clock::sleep(std::time::Duration::from_secs(20)).await;
+			kio::clock::sleep(std::time::Duration::from_secs(20)).await;
 			assert!(
 				futures::poll!(driver.as_mut()).is_pending(),
 				"{version}: local refusal ended the session"
@@ -1460,7 +1453,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn auth_ids_need_the_peers_parity() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for client in [false, true] {
@@ -1529,7 +1522,7 @@ mod tests {
 						extensions: Default::default(),
 					})
 					.unwrap();
-					let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
+					let err = kio::clock::timeout(std::time::Duration::from_secs(10), driver)
 						.await
 						.expect("invalid AUTH ID left the session open")
 						.expect_err("invalid request ID must be fatal");
@@ -1543,7 +1536,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn malformed_auth_replies_close_the_session() {
 		for version in [Version::Draft22] {
 			for (id, body) in [
@@ -1586,7 +1579,7 @@ mod tests {
 					extensions: Default::default(),
 				})
 				.unwrap();
-				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
+				let err = kio::clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.expect("the session outlived a malformed AUTH reply")
 					.expect_err("malformed AUTH is fatal");
@@ -1598,7 +1591,7 @@ mod tests {
 
 	/// A granted token whose Auth request the peer resets is presented again on the same
 	/// session, backing off while each attempt is lost before a reply: at 0s, 1s, and 3s.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_lost_auth_request_is_presented_again() {
 		let version = Version::Draft18;
 		let mut grant = Vec::new();
@@ -1640,7 +1633,7 @@ mod tests {
 		.unwrap();
 		let token = handle.present(bytes::Bytes::from_static(b"token")).unwrap();
 
-		let res = moq_clock::timeout(std::time::Duration::from_secs(5), driver).await;
+		let res = kio::clock::timeout(std::time::Duration::from_secs(5), driver).await;
 		assert!(res.is_err(), "the session ended: {res:?}");
 		assert_eq!(occurrences(&log, b"token"), 3);
 		assert!(
@@ -1651,7 +1644,7 @@ mod tests {
 
 	/// A peer that negotiated MoQ Auth but resets a token's request before any reply gave it
 	/// nothing: the token fails as unsupported rather than being presented again.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_auth_request_reset_before_its_reply_is_unsupported() {
 		let version = Version::Draft18;
 		let mut grant = Vec::new();
@@ -1694,14 +1687,14 @@ mod tests {
 		.unwrap();
 		let token = handle.present(bytes::Bytes::from_static(b"token")).unwrap();
 
-		let res = moq_clock::timeout(std::time::Duration::from_secs(5), driver).await;
+		let res = kio::clock::timeout(std::time::Duration::from_secs(5), driver).await;
 		assert!(res.is_err(), "the session ended: {res:?}");
 		assert_eq!(occurrences(&log, b"token"), 1, "presented again");
 		let err = futures::FutureExt::now_or_never(token.closed()).expect("the token is still open");
 		assert!(matches!(err, Error::Unsupported), "{err:?}");
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn malformed_presenter_auth_closes_the_session() {
 		for version in [Version::Draft22] {
 			for body in [vec![0, 2], vec![0, 0, 0]] {
@@ -1739,7 +1732,7 @@ mod tests {
 					extensions: Default::default(),
 				})
 				.unwrap();
-				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
+				let err = kio::clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.expect("malformed presenter AUTH was ignored")
 					.expect_err("malformed AUTH is fatal");
@@ -1804,7 +1797,7 @@ mod tests {
 	/// Driven through `start` rather than `run_subscribe_namespace` directly: the
 	/// stream surfaces the error either way, so only this loop's handling of it decides
 	/// between a close and a warning, and a test below the loop would pass regardless.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_namespace_without_a_hop_path_closes_the_session() {
 		const VERSION: Version = Version::Draft18;
 
@@ -1849,7 +1842,7 @@ mod tests {
 		})
 		.expect("start the session");
 
-		let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
+		let err = kio::clock::timeout(std::time::Duration::from_secs(10), driver)
 			.await
 			.expect("the session ended rather than carrying on")
 			.expect_err("a malformed NAMESPACE fails the session");
@@ -1867,7 +1860,7 @@ mod tests {
 	/// Driven through `start` so the per-prefix fan-out is exercised, not just one stream
 	/// in isolation: a loop that opened a single stream would still satisfy a test that
 	/// called `run_subscribe_namespace` itself.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn every_permitted_prefix_gets_its_own_subscribe_namespace() {
 		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 		let scope: crate::Patterns = ["cam", "mic"]
@@ -1907,14 +1900,14 @@ mod tests {
 			extensions: Default::default(),
 		})
 		.expect("start the session");
-		let _driver = moq_clock::sim::spawn(driver);
+		let _driver = kio::clock::sim::spawn(driver);
 
 		// Both requests are written before either peer response, which never comes.
 		for _ in 0..100 {
 			if occurrences(&log, b"cam") > 0 && occurrences(&log, b"mic") > 0 {
 				break;
 			}
-			moq_clock::sleep(std::time::Duration::from_millis(5)).await;
+			kio::clock::sleep(std::time::Duration::from_millis(5)).await;
 		}
 
 		assert_eq!(occurrences(&log, b"cam"), 1, "one SUBSCRIBE_NAMESPACE for cam");
@@ -1957,7 +1950,7 @@ mod tests {
 		solicit: Option<bool>,
 	) -> (
 		crate::lite::test_transport::Log,
-		moq_clock::sim::JoinHandle<Result<(), Error>>,
+		kio::clock::sim::JoinHandle<Result<(), Error>>,
 	) {
 		let gate = kio::Producer::new(true);
 		let session = crate::lite::test_transport::SinkSession::gated_bi(gate.consume());
@@ -1972,7 +1965,7 @@ mod tests {
 		solicit: Option<bool>,
 	) -> (
 		crate::lite::test_transport::Log,
-		moq_clock::sim::JoinHandle<Result<(), Error>>,
+		kio::clock::sim::JoinHandle<Result<(), Error>>,
 	) {
 		let log = session.log.clone();
 		let session = crate::driver::Transport::new(session);
@@ -2003,7 +1996,7 @@ mod tests {
 			extensions: Default::default(),
 		})
 		.expect("start the session");
-		(log, moq_clock::sim::spawn(driver))
+		(log, kio::clock::sim::spawn(driver))
 	}
 
 	/// Let the driver run until `needle` reaches the wire, or give up after a while.
@@ -2012,13 +2005,13 @@ mod tests {
 			if occurrences(log, needle) > 0 {
 				return true;
 			}
-			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+			kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 		false
 	}
 
 	/// A client asks nothing until something is watched, then only about what is.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_client_asks_only_about_what_is_watched() {
 		for version in [Version::Draft18] {
 			let subscribe = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
@@ -2042,7 +2035,7 @@ mod tests {
 	/// Each request has a stream of its own, so at a foreign peer the broader one waits for
 	/// the peer to close the narrower one's, which ends with a FIN on draft-18 and a
 	/// reset on draft-22: a peer that never closes it never sees the two overlap.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_broader_watch_waits_for_the_narrower_to_leave_the_wire() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let subscribe = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
@@ -2053,7 +2046,7 @@ mod tests {
 
 			let _cam = watch(&subscribe, "cam");
 			for _ in 0..ANNOUNCE_TURNS {
-				moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+				kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 			}
 			assert_eq!(log.bi_opens(), opened, "{version:?} overlapped the narrower request");
 			let ended = log.trail().into_iter().any(|(_, sent)| match sent {
@@ -2067,7 +2060,7 @@ mod tests {
 
 	/// A request ended while it waits on the peer for stream credit holds nothing: the
 	/// broader request that replaced it goes out alone once the credit arrives.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_request_ended_before_it_opened_does_not_block_the_broader_one() {
 		for version in [Version::Draft22] {
 			let subscribe = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
@@ -2081,11 +2074,11 @@ mod tests {
 
 			let _front = watch(&subscribe, "cam/front");
 			for _ in 0..ANNOUNCE_TURNS {
-				moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+				kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 			}
 			let _cam = watch(&subscribe, "cam");
 			for _ in 0..ANNOUNCE_TURNS {
-				moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+				kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 			}
 			*credit.write().ok().unwrap() = true;
 			assert!(sent(&log, b"cam").await, "{version:?} never asked the broader prefix");
@@ -2097,7 +2090,7 @@ mod tests {
 	/// A peer that declared MoQ Solicit is ours and holds overlapping requests, so a broader
 	/// watch leaves the narrower request open, as on moq-lite: neither takes the other's
 	/// routes over before it has synced.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_broader_watch_keeps_the_narrower_open_at_our_peer() {
 		for version in [Version::Draft18] {
 			let subscribe = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
@@ -2159,14 +2152,14 @@ mod tests {
 			extensions: Default::default(),
 		})
 		.expect("start the session");
-		let _driver = moq_clock::sim::spawn(driver);
+		let _driver = kio::clock::sim::spawn(driver);
 
 		// Drive until the announce lands, rather than betting on one fixed window.
 		for _ in 0..ANNOUNCE_TURNS {
 			if occurrences(&log, b"solo-cam") > 0 {
 				break;
 			}
-			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+			kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
 		occurrences(&log, b"solo-cam")
@@ -2174,7 +2167,7 @@ mod tests {
 
 	/// The peer's SETUP decides whether an advertisement may go out unasked, so nothing
 	/// can be sent before it arrives.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn no_announce_before_the_peer_setup() {
 		assert_eq!(
 			announce_occurrences(None).await,
@@ -2185,7 +2178,7 @@ mod tests {
 
 	/// A peer that requires solicitation hears nothing until it asks, which is the
 	/// behavior the IETF draft describes for a relay.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_peer_requiring_solicitation_is_not_told_unasked() {
 		let declared = peer::Peer {
 			solicit: Some(true),
@@ -2202,7 +2195,7 @@ mod tests {
 	/// A peer that declared nothing is told without being asked. Every relay that never
 	/// sends SUBSCRIBE_NAMESPACE depends on this, and the session is what wires the
 	/// unsolicited loop up at all.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_peer_declaring_nothing_is_told_unasked() {
 		assert_eq!(
 			announce_occurrences(Some(peer::Peer::default())).await,
@@ -2229,7 +2222,7 @@ mod tests {
 		_cam: crate::AnnounceProducer,
 		_gate: kio::Producer<bool>,
 		_goaway: crate::goaway::Handle,
-		_driver: moq_clock::sim::JoinHandle<Result<(), Error>>,
+		_driver: kio::clock::sim::JoinHandle<Result<(), Error>>,
 	}
 
 	fn auth_session(auth: bool) -> AuthSession {
@@ -2274,19 +2267,19 @@ mod tests {
 			_cam: cam,
 			_gate: gate,
 			_goaway: goaway,
-			_driver: moq_clock::sim::spawn(driver),
+			_driver: kio::clock::sim::spawn(driver),
 		}
 	}
 
 	/// A peer that never offered MoQ Auth sees no Auth request and the session keeps
 	/// working. A token resolves promptly rather than hanging, kept with an unknown grant
 	/// for the requests that name it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_peer_without_auth_sees_no_auth_request() {
 		let session = auth_session(false);
 		let (handle, log) = (&session.handle, &session.log);
 
-		let (auth, answer) = moq_clock::timeout(std::time::Duration::from_secs(1), handle.handle().add("token"))
+		let (auth, answer) = kio::clock::timeout(std::time::Duration::from_secs(1), handle.handle().add("token"))
 			.await
 			.expect("resolved promptly")
 			.expect("kept for requests");
@@ -2298,7 +2291,7 @@ mod tests {
 			if occurrences(log, b"solo-cam") > 0 {
 				break;
 			}
-			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+			kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 		assert_eq!(occurrences(log, b"solo-cam"), 1, "the session stopped advertising");
 		assert_eq!(
@@ -2309,7 +2302,7 @@ mod tests {
 	}
 
 	/// A peer that offered it gets the connection's own credential right away.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_negotiating_peer_gets_the_setup_token() {
 		let session = auth_session(true);
 		let log = &session.log;
@@ -2317,7 +2310,7 @@ mod tests {
 			if occurrences(log, &auth_type()) > 0 {
 				break;
 			}
-			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+			kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 		assert_eq!(occurrences(log, &auth_type()), 1, "one AUTH for the setup token");
 	}
@@ -2353,7 +2346,7 @@ mod tests {
 		.expect("start the session");
 
 		// The driver parks once SETUP is out.
-		moq_clock::timeout(std::time::Duration::from_secs(10), driver)
+		kio::clock::timeout(std::time::Duration::from_secs(10), driver)
 			.await
 			.expect_err("the session ended instead of parking after SETUP");
 
@@ -2367,7 +2360,7 @@ mod tests {
 	}
 
 	/// Each extension reaches our SETUP only while this side offers it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_declined_extension_stays_out_of_setup() {
 		let all = crate::setup::Extensions::default();
 		let mut no_auth = all;
@@ -2389,7 +2382,7 @@ mod tests {
 
 	/// A server's handle supports AUTH only when the client offered it too, so a server
 	/// answering a client that did not offer it leaves the option out, whatever it offers.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_server_offers_auth_only_to_a_client_that_did() {
 		let all = crate::setup::Extensions::default();
 		assert_eq!(our_setup(false, crate::auth::Link::new(true), all).await, (true, true));
@@ -2454,7 +2447,7 @@ mod tests {
 		})
 		.expect("start the session");
 
-		let res = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
+		let res = kio::clock::timeout(std::time::Duration::from_secs(10), driver)
 			.await
 			.ok();
 		(res, log.closes())
@@ -2462,7 +2455,7 @@ mod tests {
 
 	/// The Auth draft negotiates the extension only when both sides offer it, so an Auth
 	/// request reaching a side that declined it is a protocol violation, not a token to grant.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_auth_request_to_a_side_that_declined_it_is_refused() {
 		let (res, closes) = serve_auth_request(true).await;
 		assert!(res.is_none(), "both offered: the request is served, {res:?}");
@@ -2543,7 +2536,7 @@ mod tests {
 		})
 		.expect("start the session");
 
-		moq_clock::timeout(std::time::Duration::from_secs(10), driver)
+		kio::clock::timeout(std::time::Duration::from_secs(10), driver)
 			.await
 			.expect_err("the session ended over one dead stream");
 
@@ -2552,7 +2545,7 @@ mod tests {
 
 	/// A client advertises its AUTHORITY and connection credential in the SETUP it writes on
 	/// its uni stream.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn setup_carries_the_authority_and_token() {
 		const AUTHORITY: &[u8] = b"relay.example.com:4443";
 		const TOKEN: &[u8] = b"connection-credential";
@@ -2591,7 +2584,7 @@ mod tests {
 		})
 		.expect("start the session");
 
-		moq_clock::timeout(std::time::Duration::from_secs(10), driver)
+		kio::clock::timeout(std::time::Duration::from_secs(10), driver)
 			.await
 			.expect_err("the session ended instead of parking after SETUP");
 
@@ -2607,12 +2600,12 @@ mod tests {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_uni_stream_dead_before_its_type_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::unis(1)).await;
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_bidi_stream_dead_before_its_header_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::bis(1)).await;
 	}
@@ -2620,12 +2613,12 @@ mod tests {
 	/// moxygen resets a subgroup stream it opened but never wrote with its own CANCELLED
 	/// (0x1). Over raw QUIC our transport reads that code through the WebTransport space
 	/// and cannot map it, which used to end the session.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_uni_stream_reset_with_an_unmapped_code_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::unis(1).unmapped()).await;
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_bidi_stream_reset_with_an_unmapped_code_does_not_end_the_session() {
 		a_dead_incoming_stream_is_not_fatal(crate::lite::test_transport::DeadStreamSession::bis(1).unmapped()).await;
 	}
@@ -2727,14 +2720,14 @@ mod tests {
 			if !log.stops().is_empty() {
 				break;
 			}
-			moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+			kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 		}
 
 		(log, None)
 	}
 
 	/// A late group must reach the dispatch loop and stop with CANCELLED.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_group_for_a_retired_alias_is_stopped_with_cancelled() {
 		let (log, result) =
 			dispatch_uni(Version::Draft18, subgroup_header(Version::Draft18, 7, 0).await, Some(7)).await;
@@ -2754,7 +2747,7 @@ mod tests {
 	/// accepted can be one whose bytes the peer has not sent yet, held back by connection
 	/// flow control that the later streams' unread data is using up. Waiting on its type
 	/// before reading them deadlocks the connection.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_silent_stream_does_not_hold_up_the_next() {
 		let header = subgroup_header(Version::Draft18, 7, 0).await;
 		let session =
@@ -2770,7 +2763,7 @@ mod tests {
 	}
 
 	/// A stalled bidi header must not block a SUBSCRIBE on the next stream.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_silent_bidi_does_not_hold_up_the_next() {
 		const VERSION: Version = Version::Draft18;
 		let mut subscribe = Vec::new();
@@ -2805,7 +2798,7 @@ mod tests {
 				.with_incoming_bidis(vec![stalled, subscribe.clone()]);
 			let driver = bidi_driver(session, Some(origin.consume()));
 			let subscribed = Box::pin(async { while track.subscription_changed().await.unwrap().is_none() {} });
-			let result = moq_clock::timeout(
+			let result = kio::clock::timeout(
 				std::time::Duration::from_secs(10),
 				futures::future::select(driver, subscribed),
 			)
@@ -2819,7 +2812,7 @@ mod tests {
 	}
 
 	/// Child tasks must report malformed and unknown requests to the session driver.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn invalid_bidi_requests_still_end_the_session() {
 		for id in [ietf::Subscribe::ID, 0x3f] {
 			let mut header = Vec::new();
@@ -2828,7 +2821,7 @@ mod tests {
 			encoder.slice(&[0, 0]); // Complete, empty body: malformed for SUBSCRIBE.
 			let session =
 				crate::lite::test_transport::ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![header]);
-			let err = moq_clock::timeout(std::time::Duration::from_secs(10), bidi_driver(session, None))
+			let err = kio::clock::timeout(std::time::Duration::from_secs(10), bidi_driver(session, None))
 				.await
 				.expect("invalid request did not end the session")
 				.expect_err("invalid request was accepted");
@@ -2869,7 +2862,7 @@ mod tests {
 	}
 
 	/// A non-zero subgroup is refused on its own stream, never by closing the session.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_non_zero_subgroup_is_stopped_without_closing_the_session() {
 		let (log, result) = dispatch_uni(Version::Draft18, subgroup_header(Version::Draft18, 7, 1).await, None).await;
 
@@ -2888,7 +2881,7 @@ mod tests {
 	}
 
 	/// Padding is read and dropped: no STOP_SENDING, and the session stays up.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_padding_stream_is_discarded() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let (log, result) = dispatch_uni(version, uni_stream(version, PADDING), None).await;
@@ -2906,7 +2899,7 @@ mod tests {
 	/// A server waiting on the client's SETUP holds the padding and group streams that beat
 	/// it, then classifies them once the session starts. The drafts say to buffer early
 	/// data; rejecting it reached the wire as INTERNAL_ERROR.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn uni_streams_before_setup_are_held_until_it_lands() {
 		const VERSION: Version = Version::Draft18;
 
@@ -2941,7 +2934,7 @@ mod tests {
 
 	/// An unknown or invalid stream type MUST close the session, so it stops nothing on its own:
 	/// the session close takes the stream with it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unknown_uni_type_closes_the_session() {
 		for (version, kind) in [
 			(Version::Draft18, 0),
@@ -2959,7 +2952,7 @@ mod tests {
 	}
 
 	/// The bidi dispatcher closes the session for an unknown full-width message type.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_unknown_bidi_type_closes_the_session() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for kind in [0u64, 1 << 53] {
@@ -2994,7 +2987,7 @@ mod tests {
 				})
 				.unwrap();
 
-				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
+				let err = kio::clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.expect("unknown bidi type must end the session")
 					.expect_err("unknown bidi type must fail the session");
@@ -3011,7 +3004,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn an_invalid_group_order_closes_the_session() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (value, nested) in [
@@ -3063,7 +3056,7 @@ mod tests {
 					limits: Default::default(),
 				})
 				.unwrap();
-				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
+				let err = kio::clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.expect("invalid GROUP_ORDER must close the session")
 					.expect_err("invalid GROUP_ORDER must fail");
@@ -3098,7 +3091,7 @@ mod tests {
 
 	/// A request's AUTHORIZATION TOKEN decodes by the SETUP option's rules, so one this
 	/// endpoint cannot use closes the session with the draft's code.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_request_token_that_cannot_be_used_closes_the_session() {
 		for version in [Version::Draft22] {
 			for (token, expected, why) in [
@@ -3150,7 +3143,7 @@ mod tests {
 				})
 				.unwrap();
 
-				let err = moq_clock::timeout(std::time::Duration::from_secs(10), driver)
+				let err = kio::clock::timeout(std::time::Duration::from_secs(10), driver)
 					.await
 					.unwrap_or_else(|_| panic!("{version:?} {why}: the session stayed up"))
 					.expect_err("the token must fail the session");
@@ -3214,7 +3207,7 @@ mod tests {
 	}
 
 	/// What a server may not send in its SETUP closes the session with the draft's code.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_server_setup_with_path_or_authority_closes_the_session() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (param, expected) in [
@@ -3232,7 +3225,7 @@ mod tests {
 	/// The server's AUTHORIZATION TOKEN is decoded even though a client has no use for it: a
 	/// malformed one closes the session, and a registration overflowing our cache of 0 is
 	/// read as the value it carries (draft-22 section 9.1.4).
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_server_setup_token_decodes_by_the_setup_rules() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for (token, expected) in [
@@ -3251,7 +3244,7 @@ mod tests {
 
 	/// The SETUP stream carries one GOAWAY and nothing else: anything more, or a GOAWAY that
 	/// is malformed, closes the session as a PROTOCOL_VIOLATION. One GOAWAY leaves it up.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn the_setup_stream_carries_at_most_one_goaway() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let request_id = (version == Version::Draft18).then_some(0);
@@ -3297,7 +3290,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_control_stream_fin_or_reset_is_a_protocol_violation() {
 		use crate::lite::test_transport::{Close, DeadStreamSession, ScriptedSession};
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
@@ -3330,7 +3323,7 @@ mod tests {
 
 	/// A second GOAWAY arriving with the first closes the session before the first surfaces,
 	/// so an application leaving over it cannot close first, without our code.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_goaway_with_more_behind_it_never_surfaces() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let request_id = (version == Version::Draft18).then_some(0);
@@ -3360,7 +3353,7 @@ mod tests {
 
 	/// A fatal error closes the session before its streams drop. A reset of our SETUP stream
 	/// reaching a strict peer first has it close over that, and it never sees our code.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn the_session_closes_before_its_streams_reset() {
 		const VERSION: Version = Version::Draft22;
 		let mut params = ietf::Parameters::default();
@@ -3391,7 +3384,7 @@ mod tests {
 			extensions: Default::default(),
 		})
 		.unwrap();
-		let _ = moq_clock::timeout(std::time::Duration::from_secs(10), driver).await;
+		let _ = kio::clock::timeout(std::time::Duration::from_secs(10), driver).await;
 
 		let closes = log.closes();
 		assert_eq!(closes.len(), 1, "{closes:?}");
@@ -3410,7 +3403,7 @@ mod tests {
 	/// A draft-18 GOAWAY names one of the receiver's own Request IDs, so one with the sender's
 	/// parity closes the session with INVALID_REQUEST_ID rather than redirecting it, and one
 	/// without a Request ID closes it as a PROTOCOL_VIOLATION.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_draft18_goaway_request_id_has_the_receivers_parity() {
 		const VERSION: Version = Version::Draft18;
 		// The loop runs as a client, whose Request IDs are even.
@@ -3430,7 +3423,7 @@ mod tests {
 
 	/// Draft-18 GOAWAY names the first peer ID past every one used, preserving the peer's
 	/// parity, and still admits one a reordered stream skipped below it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn our_draft18_goaway_names_the_admitted_request_cutoff() {
 		const VERSION: Version = Version::Draft18;
 		for client in [false, true] {
@@ -3498,7 +3491,7 @@ mod tests {
 			extensions: Default::default(),
 		})
 		.unwrap();
-		let _ = moq_clock::timeout(std::time::Duration::from_secs(10), driver).await;
+		let _ = kio::clock::timeout(std::time::Duration::from_secs(10), driver).await;
 		let closes = log.closes();
 		// A request stream closes at the source and its task may close again; the transport
 		// keeps the first, so only a disagreeing code would reach the peer.
@@ -3512,7 +3505,7 @@ mod tests {
 	/// A request past our GOAWAY cutoff is refused in the answer its kind reads: an AUTH
 	/// with AUTH_ERROR carrying GOING_AWAY, since its presenter takes anything else as a
 	/// violation, and the rest with REQUEST_ERROR.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_request_past_our_goaway_is_refused_in_its_own_answer() {
 		const VERSION: Version = Version::Draft18;
 		let reason = b"going away";
@@ -3537,7 +3530,7 @@ mod tests {
 	/// A malformed request closes the session with the draft's code: a Request ID of the
 	/// wrong parity, a namespace or name outside its bounds, or a body that does not fill
 	/// its length.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_malformed_request_closes_the_session() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let subscribe = |body: &[u8]| frame(version, ietf::Subscribe::ID, body);
@@ -3609,7 +3602,7 @@ mod tests {
 	/// A request stream may carry one GOAWAY, migrating that request alone: it leaves the
 	/// session up, even on two streams at once. A second on one stream, or an unknown
 	/// message, closes the session as a PROTOCOL_VIOLATION.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_request_stream_carries_at_most_one_goaway() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let one = goaway(version, None);
@@ -3638,7 +3631,7 @@ mod tests {
 
 	/// Only a server may name a new session in a request stream GOAWAY: a client that does
 	/// closes the session as a PROTOCOL_VIOLATION.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_request_stream_goaway_redirects_only_from_a_server() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut body = Vec::new();

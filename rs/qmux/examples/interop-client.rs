@@ -19,7 +19,7 @@ async fn run(session: Session, version: Version) -> anyhow::Result<()> {
 	}
 
 	// Rust -> TypeScript.
-	let mut send = moq_clock::timeout(TIMEOUT, session.open_uni(SendOptions::default()))
+	let mut send = kio::clock::timeout(TIMEOUT, session.open_uni(SendOptions::default()))
 		.await
 		.context("timed out opening the client unidirectional stream")??;
 	send_all(&mut send, &payload(CLIENT_SEED), "the client flow-control payload").await?;
@@ -27,7 +27,7 @@ async fn run(session: Session, version: Version) -> anyhow::Result<()> {
 	// TypeScript -> Rust. Server-initiated streams are the ids only a
 	// `Session::accept` session may mint; a client-role server would be rejected
 	// here rather than accepted.
-	let mut recv = moq_clock::timeout(TIMEOUT, session.accept_uni())
+	let mut recv = kio::clock::timeout(TIMEOUT, session.accept_uni())
 		.await
 		.context("timed out accepting the server unidirectional stream")??;
 	let received = recv_all(&mut recv, "the server flow-control payload").await?;
@@ -36,7 +36,7 @@ async fn run(session: Session, version: Version) -> anyhow::Result<()> {
 	}
 
 	// Exercise both halves of one bidirectional stream and FIN propagation.
-	let (mut send, mut recv) = moq_clock::timeout(TIMEOUT, session.open_bi(SendOptions::default()))
+	let (mut send, mut recv) = kio::clock::timeout(TIMEOUT, session.open_bi(SendOptions::default()))
 		.await
 		.context("timed out opening the bidirectional stream")??;
 	let request = format!("ping:{}", version.alpn());
@@ -49,7 +49,7 @@ async fn run(session: Session, version: Version) -> anyhow::Result<()> {
 	// DATAGRAM is available only on record-framed drafts (QMux01+).
 	if version.uses_records() {
 		session.send_datagram(Bytes::from_static(b"rust-datagram"), SendOptions::default())?;
-		let datagram = moq_clock::timeout(TIMEOUT, session.recv_datagram())
+		let datagram = kio::clock::timeout(TIMEOUT, session.recv_datagram())
 			.await
 			.context("timed out receiving the TypeScript datagram")??;
 		if datagram.as_ref() != b"typescript-datagram" {
@@ -59,7 +59,7 @@ async fn run(session: Session, version: Version) -> anyhow::Result<()> {
 		bail!("QMux00 unexpectedly negotiated datagram support");
 	}
 
-	let closed = moq_clock::timeout(TIMEOUT, session.closed())
+	let closed = kio::clock::timeout(TIMEOUT, session.closed())
 		.await
 		.context("timed out waiting for the TypeScript server to close")?;
 	match closed {

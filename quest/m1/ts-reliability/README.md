@@ -100,7 +100,6 @@ catalog linger (#5305).
 ## Required
 
 - [A small step back keeps the TS export's video](/quest/m1/ts-reliability/step-back.md) - the export re-acquires on a sub-group step back from any source instead of dropping its video
-- [Shared PID stats](/quest/m1/ts-reliability/shared-pid-stats.md) - `ts::stats` counts a shared PID once in the shared parser, so its timing counts survive program changes
 
 ## Related
 

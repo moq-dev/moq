@@ -37,8 +37,5 @@ Public API: none. Wire: none.
 
 - [The browser backend baseline completes on IETF22](/quest/m0/nightly/browser-baseline.md) - the WASM and UniFFI backend baseline completes every supported transport case without an internal error
 - [Probing beside Cubic](/quest/m0/nightly/competing-cubic.md) - the `competing_cubic` probe test stays within its deadline and p99 budgets
-- [OBS TSan passes without a wall-clock bound](/quest/m0/nightly/obs-tsan.md) - `destroySource` asserts ordering instead of `elapsed < 500ms`
 - [Paired bench regressions bisected](/quest/m0/nightly/bench-regressions.md) - retirement/selection's +21-24% and two 10% rows fixed or shown to be noise
 - [Firefox's player closes every VideoFrame](/quest/m0/nightly/firefox-videoframe.md) - the Media job's Firefox player stops leaking an unclosed VideoFrame
-- [moq-tokio's isolated feature builds pass](/quest/m0/nightly/tokio-features.md) - `Incoming::refuse` stops failing `tokio-features --all` on dead_code, so the rest of `rs features` runs
-- [moq-uring's tests build on macOS and Windows](/quest/m0/nightly/kio-e0433.md) - the platform jobs stop failing with E0433 on `kio` in moq-uring's integration tests

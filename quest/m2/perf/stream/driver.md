@@ -32,7 +32,7 @@ What goes, per the audit in the [epic](/quest/m2/perf/stream/README.md):
 - the separate `run_reader` and `run_writer` tasks
 - `tokio::io::split` and the `reader_loop` task on plain streams
 - `tokio::select!` and `tokio::time`. The WebSocket keep-alive moves to
-  `moq_clock` like the mux timers.
+  `kio::clock` like the mux timers.
 
 Buffers: parse inbound records from one reusable read buffer into `Bytes`
 slices, with no zeroed allocation per record. Encode outbound records and
