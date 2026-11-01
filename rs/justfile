@@ -65,7 +65,7 @@ fix *args:
 check-changed $LIST:
     sh/rs/select.sh check "$LIST"
 
-# Like `lint`, with the loom and Send-depth checks for the selected crates.
+# Like `lint`, with the Send-depth check for the selected crates.
 lint-changed $LIST:
     sh/rs/select.sh lint "$LIST"
 
@@ -315,28 +315,6 @@ play *args:
 [positional-arguments]
 doctest *args:
     bash sh/local.sh cargo test --locked --doc "$@"
-
-# `--cfg loom` swaps kio's primitives for loom's, so it rebuilds the world and
-# executes only in Nightly; the selected Rust gate compiles it with `loom-check`.
-# `--release` because a model check runs the body once
-# per interleaving (411s -> 51s); the assertions are plain `assert!`. kio's
-# models search every interleaving; moq-net's cap preemptions (see
-# `tests/loom.rs`, `LOOM_MAX_PREEMPTIONS`). kio's own unit tests are
-# `cfg(not(loom))`.
-
-# Permutation-test the concurrent handoffs with loom. `crossbeam_loom` puts the
-# epoch collector that frees `kio::log` segments under loom too.
-[positional-arguments]
-loom *args:
-    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p kio --lib loom:: "$@"
-    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p moq-net --test loom "$@"
-    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --release -p moq-net --test expiry-loom "$@"
-
-# Compile the loom models without running them. The dev profile type-checks
-# the same code: after a moq-net edit it took 46s against release's 146s.
-loom-check:
-    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --no-run -p kio --lib
-    RUSTFLAGS="--cfg loom --cfg crossbeam_loom" cargo test --locked --no-run -p moq-net --test loom --test expiry-loom
 
 # Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite.
 quic-sim:

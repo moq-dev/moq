@@ -151,7 +151,6 @@ case "$action" in
         # The isolated feature builds (`just rs features`) stay out of the
         # gate; the Features workflow runs them nightly and on release PRs.
         just rs "$action" "${flags[@]}"
-        if wants '(kio|moq-net)'; then just rs loom-check; fi
         # Native Send proofs at the default recursion limit, on the pinned nightly.
         if wants moq-net; then just rs send-depth; fi
         # Device code behind the off-by-default `capture` feature. check-test

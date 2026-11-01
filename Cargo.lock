@@ -1940,7 +1940,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
 dependencies = [
  "crossbeam-utils",
- "loom",
 ]
 
 [[package]]
@@ -1948,9 +1947,6 @@ name = "crossbeam-utils"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
-dependencies = [
- "loom",
-]
 
 [[package]]
 name = "crunchy"
@@ -4706,7 +4702,6 @@ dependencies = [
  "crossbeam-epoch",
  "futures",
  "kio-macros",
- "loom",
  "smallvec",
  "tokio",
 ]
@@ -5599,7 +5594,6 @@ dependencies = [
  "hashlink",
  "kio 0.6.2",
  "libc",
- "loom",
  "moq-clock",
  "moq-pattern 0.1.2",
  "num_enum",

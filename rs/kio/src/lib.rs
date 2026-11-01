@@ -29,12 +29,10 @@
 use std::{
 	fmt,
 	ops::{Deref, DerefMut},
+	sync::atomic::AtomicUsize,
 };
 
-use crate::sync::AtomicUsize;
-
 mod lock;
-mod sync;
 mod waiter;
 
 pub mod coop;
@@ -50,9 +48,7 @@ mod shared;
 mod task;
 mod weak;
 
-#[cfg(all(test, loom))]
-mod loom;
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests;
 
 #[cfg(feature = "macros")]
@@ -110,7 +106,10 @@ mod heap {
 
 		assert_eq!(arc_heap::<u8>(), layout::<u8>());
 		assert_eq!(arc_heap::<Overaligned>(), layout::<Overaligned>());
-		assert_eq!(arc_heap::<sync::Mutex<State<()>>>(), layout::<sync::Mutex<State<()>>>());
+		assert_eq!(
+			arc_heap::<std::sync::Mutex<State<()>>>(),
+			layout::<std::sync::Mutex<State<()>>>()
+		);
 	}
 }
 

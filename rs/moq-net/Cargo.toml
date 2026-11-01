@@ -47,11 +47,6 @@ tracing = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["js"] }
 
-# Model-layer locks must yield to Loom whenever kio does. This is compiled only
-# by `just rs loom`, never in production builds.
-[target.'cfg(loom)'.dependencies]
-loom = { workspace = true }
-
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }

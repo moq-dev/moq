@@ -310,7 +310,7 @@ step() {
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
-        # The check keeps docs and the loom and Send-depth compiles; the test phase
+        # The check keeps docs and the Send-depth compile; the test phase
         # enforces default-feature clippy without a second compile.
         check:rs) just rs lint-changed "$rs_list" ;;
         check:bench)
