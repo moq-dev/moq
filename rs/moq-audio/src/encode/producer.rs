@@ -589,6 +589,12 @@ impl Producer {
 		// so only the final partial frame reaches the encoder's terminal drain.
 		let anchor_us = self.anchor_us.unwrap_or(0);
 		self.publish_full_frames(anchor_us)?;
+		// A gap no full frame carried, such as history expiring right before capture ended,
+		// still separates the final partial frame from the epoch before it.
+		if std::mem::take(&mut self.pending_discontinuity) && !self.decoder_boundary && !self.pending.is_empty() {
+			self.track.discontinuity()?;
+			self.decoder_boundary = true;
+		}
 
 		let frame_size = self.encoder()?.frame_size();
 		let codec_rate = self.encoder()?.codec_rate();
@@ -828,6 +834,97 @@ mod tests {
 		assert!(!listed[0].is_stop() && listed[1].is_stop());
 		assert_eq!(listed[0].pts.as_micros(), 1_000_000);
 		assert!(listed[1].pts.as_micros() >= 1_040_000);
+	}
+
+	/// History that expires unencoded leaves the idle gap out of every HLS segment, as a
+	/// released microphone does: the resumed audio starts a segment of its own.
+	#[tokio::test(start_paused = true)]
+	async fn hls_stops_the_segment_where_retained_history_expired() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let options = Options {
+			track: Some("audio".into()),
+			..Options::default()
+		};
+		let mut producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
+		producer.write(&pcm_frame(&vec![0.1; 1920], 1_000_000)).unwrap();
+		producer
+			.set_active(false, Timestamp::from_micros(1_020_000).unwrap())
+			.unwrap();
+		// Capture runs on with nobody subscribed, past the default 30-second retention.
+		let at = |index: u64| Timestamp::from_micros(1_000_000 + index * 20_000).unwrap();
+		for index in 1..=1600 {
+			producer.write(&pcm_frame(&vec![0.1; 1920], at(index).as_micros() as u64)).unwrap();
+			producer.set_active(false, at(index + 1)).unwrap();
+		}
+		loop {
+			producer.set_active(true, at(1601)).unwrap();
+			if !producer.backlog_ready() {
+				break;
+			}
+		}
+		producer.finish().unwrap();
+		let hls = catalog.snapshot().audio.renditions["audio"].hls.clone().unwrap();
+		catalog.finish().unwrap();
+		let mut records = moq_mux::hls::Consumer::subscribe(&consumer, &hls).await.unwrap();
+		let mut listed = Vec::new();
+		while let Some(event) = records.next().await.unwrap() {
+			match event {
+				moq_mux::hls::Event::Push { entry, .. } => listed.push(entry),
+				other => panic!("unexpected record event {other:?}"),
+			}
+		}
+		assert!(!listed[0].is_stop() && listed[1].is_stop(), "{listed:?}");
+		assert_eq!(listed[0].pts.as_micros(), 1_000_000);
+		assert!(listed[1].pts.as_micros() <= 1_020_000, "the idle gap joined a segment: {listed:?}");
+		// The replay resumes at the oldest retained frame, 30 seconds before demand returned.
+		assert!(!listed[2].is_stop(), "{listed:?}");
+		assert!(listed[2].pts.as_micros() >= 2_000_000, "{listed:?}");
+		assert!(listed.last().unwrap().is_stop(), "{listed:?}");
+	}
+
+	/// History expiring right before capture ends still marks the gap before the final partial frame.
+	#[tokio::test(start_paused = true)]
+	async fn finish_marks_a_gap_no_full_frame_carried() {
+		let input = Input::default();
+		let options = Options {
+			track: Some("audio".into()),
+			config: Config::from_input(super::super::Codec::Pcm, &input),
+			..Options::default()
+		};
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let mut producer = Producer::new(&mut broadcast, catalog, input, &options).unwrap();
+		let track = consumer
+			.track("audio")
+			.unwrap()
+			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60)))
+			.await
+			.unwrap();
+		let mut reader =
+			moq_mux::container::Consumer::new(track, moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio));
+		producer.write(&pcm_frame(&vec![0.1; 1920], 1_000_000)).unwrap();
+		producer
+			.set_active(false, Timestamp::from_micros(1_020_000).unwrap())
+			.unwrap();
+		producer.write(&pcm_frame(&vec![0.1; 1920], 1_020_000)).unwrap();
+		// Half a codec frame stays pending, then the retention expires the backlog as capture stops.
+		producer.write(&pcm_frame(&vec![0.1; 960], 1_040_000)).unwrap();
+		producer
+			.set_active(false, Timestamp::from_micros(31_100_000).unwrap())
+			.unwrap();
+		producer.finish().unwrap();
+
+		let first = reader.read().await.unwrap().unwrap();
+		assert!(matches!(first, moq_mux::container::Read::Frame { .. }), "{first:?}");
+		// The terminal packet carries its own end; the marker ends the epoch before the gap, ahead of it.
+		let next = reader.read().await.unwrap().unwrap();
+		assert!(
+			matches!(next, moq_mux::container::Read::End { end, .. } if end.as_micros() < 1_040_000),
+			"the final partial frame joined the epoch before the gap: {next:?}"
+		);
 	}
 
 	#[test]
