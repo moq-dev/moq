@@ -19848,12 +19848,13 @@ mod test {
 	}
 
 	/// A handler refusing a wide fill one group at a time, as a FETCH-capable session does,
-	/// pays for each refusal rather than for every refusal before it.
+	/// advances after each refusal and coalesces the resolved run, forgetting consumed answers.
+	/// `track_fill_refusal` benchmarks the cost over refusals and readers.
 	#[test]
 	#[cfg(feature = "async")]
 	fn a_fill_refused_group_by_group_stays_linear() {
 		const WIDE: u64 = 1 << 40;
-		const REFUSED: u64 = 100_000;
+		const REFUSED: u64 = 32;
 		let mut producer = track_producer("test", Info::timed());
 		let dynamic = producer.requests();
 		let mut subscriber = producer.subscribe(replay().with_range(0..));
@@ -19864,12 +19865,18 @@ mod test {
 		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&kio::Waiter::noop()) else {
 			panic!("the miss below the start is asked");
 		};
-		for _ in 0..REFUSED {
+		for refused in 1..=REFUSED {
 			let sequence = fill.wanted().unwrap();
 			fill.drop_groups(sequence..sequence + 1);
 			assert!(subscriber.poll_recv_group(&kio::Waiter::noop()).is_pending());
+			assert_eq!(fill.wanted(), Some(WIDE - refused - 1));
+			assert_eq!(fill.answers(), 0, "the reader consumed the refusal");
+			assert_eq!(
+				fill.resolved_runs(),
+				vec![WIDE - refused..WIDE],
+				"adjacent refusals remain one resolved run"
+			);
 		}
-		assert_eq!(fill.wanted(), Some(WIDE - REFUSED - 1));
 	}
 
 	/// A descending reader joining a queued fill makes it newest first, as any descending
