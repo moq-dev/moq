@@ -31,6 +31,7 @@ pub(super) use demand::Preferences;
 use demand::Subscriptions;
 
 mod fill;
+mod idle;
 mod miss;
 pub use fill::Fill;
 use fill::FillState;
@@ -6164,6 +6165,9 @@ struct Cursor {
 	drops: Option<Box<DropCursor>>,
 	/// What this cursor misses and asks fills for, once it first reads.
 	misses: Option<Box<miss::Misses>>,
+	/// The group read that last parked, answered again without the walk until something
+	/// it parked on fires, once it first parks.
+	idle: Option<Box<idle::Idle>>,
 }
 
 /// A group a cursor found but has not moved past; see [`Cursor::take`].
@@ -6378,6 +6382,7 @@ impl Cursor {
 			skipped: Skipped::default(),
 			drops: None,
 			misses: None,
+			idle: None,
 		}
 	}
 
@@ -6428,6 +6433,8 @@ impl Cursor {
 	/// Resolve [`Self::servable`] again once the window or cap moved, and publish it to the
 	/// groups already handed out. Costs the ranges, never the cache.
 	fn update_servable(&mut self) {
+		// A moved window or cap notifies nothing this cursor parked on.
+		idle::Idle::disarm(&mut self.idle);
 		let runs = Servable::new(self.filter.window.runs(0));
 		let (revision, cap) = (self.filter.resolved, self.end_sequence);
 		self.servable = runs.below(cap);
@@ -6676,6 +6683,11 @@ impl Cursor {
 		})
 	}
 
+	/// Whether a group read in `walk` order would park again at once; see [`idle`].
+	fn parked(&self, walk: idle::Walk, waiter: &kio::Waiter) -> bool {
+		idle::Idle::parked(&self.idle, walk, waiter)
+	}
+
 	/// Take the groups skipped since the last call, for the owner to meter.
 	fn take_stale(&mut self) -> stats::Content {
 		std::mem::take(&mut self.stale)
@@ -6884,10 +6896,17 @@ impl Cursor {
 	/// Find the next group in arrival order, or in sequence order for `ordered`, without
 	/// moving past it.
 	fn poll_peek(&mut self, ordered: bool, taken: &Delivered, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
-		match ordered {
-			true => self.poll_peek_next(taken, waiter),
-			false => self.poll_peek_recv(taken, waiter),
+		let walk = idle::Walk::new(ordered);
+		if self.parked(walk, waiter) {
+			return Poll::Pending;
 		}
+		let mut idle = idle::Idle::start(&mut self.idle, waiter);
+		let polled = match ordered {
+			true => self.poll_peek_next(taken, idle.waiter()),
+			false => self.poll_peek_recv(taken, idle.waiter()),
+		};
+		idle.finish(&mut self.idle, walk, polled.is_pending());
+		polled
 	}
 
 	/// Move past the group `peeked` found and hand it out: the exact group, even if its
@@ -7051,6 +7070,7 @@ impl Cursor {
 		if next == self.next_sequence {
 			return;
 		}
+		idle::Idle::disarm(&mut self.idle);
 		self.next_sequence = next;
 		// A group delivered on another copy is not a stale skip on this one.
 		if !self.seek_pending.is_empty() {
@@ -7408,6 +7428,15 @@ impl Subscriber {
 	/// The next group in arrival order, or in sequence order for `ordered`, skipping any
 	/// already handed out.
 	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
+		// Ahead of the meter: a read that parks again counts only what a peek skipped.
+		if let Inner::Plain(cursor) = &self.inner
+			&& cursor.parked(idle::Walk::new(ordered), waiter)
+		{
+			if cursor.stale != stats::Content::default() && self.stats.is_tagged() {
+				self.count_stale(&self.stats.meter());
+			}
+			return Poll::Pending;
+		}
 		match self.poll_peek_group(ordered, waiter) {
 			Poll::Ready(Ok(Some(reserved))) => Poll::Ready(self.take(reserved).map(Some)),
 			res => {
@@ -8952,6 +8981,34 @@ mod test {
 
 		fn take(&self) -> bool {
 			self.0.swap(false, std::sync::atomic::Ordering::SeqCst)
+		}
+	}
+
+	/// A read that found nothing parks again at once until something it parked on fires,
+	/// but parks anew for another task, which the next group then wakes instead.
+	#[test]
+	fn an_idle_read_parks_for_the_task_polling_it() {
+		for ordered in [false, true] {
+			let producer = track_producer("test", Info::default());
+			let mut first = framed(&producer, 0, 1);
+			first.finish().unwrap();
+			let mut reader = producer.subscribe(replay());
+			let mut read = |waiter: &kio::Waiter| match ordered {
+				true => reader.poll_group(true, waiter),
+				false => reader.poll_group(false, waiter),
+			};
+			let (flag, waiter) = Flag::waiter();
+			assert!(matches!(read(&waiter), Poll::Ready(Ok(Some(_)))));
+			assert!(read(&waiter).is_pending());
+			assert!(read(&waiter).is_pending(), "nothing fired, so it parks again");
+			assert!(!flag.take());
+
+			let (other, moved) = Flag::waiter();
+			assert!(read(&moved).is_pending());
+			let mut next = framed(&producer, 1, 1);
+			next.finish().unwrap();
+			assert!(other.take(), "the next group wakes the task that polled last");
+			assert!(matches!(read(&moved), Poll::Ready(Ok(Some(_)))));
 		}
 	}
 
