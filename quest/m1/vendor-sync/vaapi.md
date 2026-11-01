@@ -1,11 +1,13 @@
-# [XS] Release the audited moq-vaapi fix and consume it
+# [XS] moq-vaapi has every cros-codecs fix it needs
 
 ## Goal
 
-Release [moq-dev/vaapi](https://github.com/moq-dev/vaapi)'s audited upstream
-logging fix to crates.io, then update MoQ's `moq-vaapi` dependency and lockfile
-to that release. The source audit is recorded below; this cycle is unfinished
-until MoQ consumes the released fix.
+[moq-dev/vaapi](https://github.com/moq-dev/vaapi) carries every fix that
+[chromeos/cros-libva](https://github.com/chromeos/cros-libva) and
+[chromeos/cros-codecs](https://github.com/chromeos/cros-codecs) have landed
+since the last check, for the code it vendors, each ported with its test or
+recorded as not applying, and released to crates.io if anything changed, with
+moq's `moq-vaapi` dependency bumped to that release.
 
 ## Plan
 
@@ -45,10 +47,8 @@ Checked 2026-10-31:
   queries for `cros-libva` and `cros-codecs`. This does not cover undisclosed
   vulnerabilities.
 
-Remaining: finish local review and merge the VA-API source fix, publish a new
-`moq-vaapi` release, then bump MoQ from `0.1.0` and run the affected checks.
-No crate was published and no version was guessed during this audit.
-VA-API's pinned Nix `just ci` passed; the Claude local review attempt was
-quota-blocked (reported reset: 2026-11-02 02:00 America/Los_Angeles), so the
-source fix still needs that review before it is ready. Public API and wire
-formats are unchanged; applications retain control of their release log level.
+Remaining this cycle: merge the ported fix,
+[moq-dev/vaapi#5](https://github.com/moq-dev/vaapi/pull/5), publish a new
+`moq-vaapi` release to crates.io, then bump moq's workspace `moq-vaapi = "0.1.0"`
+and lockfile to it and run the affected checks. Public API and wire formats are
+unchanged; applications regain control of their release log level.
