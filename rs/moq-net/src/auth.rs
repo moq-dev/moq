@@ -724,7 +724,7 @@ struct Detach {
 	id: u64,
 	/// Request tokens, indexed only while at least one naming request holds them. Kept out of
 	/// the handle's state, whose every lock wakes everything waiting on the session's permits.
-	request_tokens: crate::sync::Mutex<BTreeMap<Bytes, std::sync::Weak<RequestLifetime>>>,
+	request_tokens: std::sync::Mutex<BTreeMap<Bytes, std::sync::Weak<RequestLifetime>>>,
 }
 
 impl Drop for Detach {
@@ -1887,7 +1887,7 @@ pub(crate) struct RequestVerdict {
 	issue: Option<kio::Shared<Issue>>,
 	// Each request owns one reference, independent of its reader's progress.
 	_lifetime: Option<std::sync::Arc<RequestLifetime>>,
-	seen: crate::sync::Mutex<u64>,
+	seen: std::sync::Mutex<u64>,
 }
 
 struct RequestLifetime {
@@ -2021,7 +2021,7 @@ struct Held {
 	renewals: kio::Producer<u64>,
 	/// For an observer, the grant it watches, without keeping that request alive, and the
 	/// renewals it already adopted from it. Cleared once a renewal of its own replaces it.
-	source: Option<(std::sync::Weak<crate::sync::Mutex<Held>>, u64)>,
+	source: Option<(std::sync::Weak<std::sync::Mutex<Held>>, u64)>,
 }
 
 impl Held {
@@ -2061,7 +2061,7 @@ impl Held {
 		self.verdict = RequestVerdict {
 			issue: source.verdict.issue.clone(),
 			_lifetime: None,
-			seen: crate::sync::Mutex::new(*source.verdict.seen.lock().unwrap()),
+			seen: std::sync::Mutex::new(*source.verdict.seen.lock().unwrap()),
 		};
 		self.grant = source.grant.clone();
 		self.deadline.set(self.grant.expires);
@@ -2187,11 +2187,11 @@ impl RequestGrant {
 			(!kind.covers(&held.grant, path.as_str()))
 				.then(|| Refusal::new(Error::Unauthorized, "request token no longer granted"))
 		});
-		Self(std::sync::Arc::new(crate::sync::Mutex::new(Held {
+		Self(std::sync::Arc::new(std::sync::Mutex::new(Held {
 			verdict: RequestVerdict {
 				issue: held.verdict.issue.clone(),
 				_lifetime: None,
-				seen: crate::sync::Mutex::new(*held.verdict.seen.lock().unwrap()),
+				seen: std::sync::Mutex::new(*held.verdict.seen.lock().unwrap()),
 			},
 			grant: held.grant.clone(),
 			deadline,
@@ -2301,10 +2301,10 @@ impl RequestGrant {
 
 	/// [`Self::guard`] under the grant `named` holds, which the request may name only later,
 	/// such as with an update's first token.
-	pub(crate) fn guard_named<F: std::future::Future + kio::MaybeSend>(
+	pub(crate) fn guard_named<F: std::future::Future + Send>(
 		named: kio::Shared<Option<Self>>,
 		body: F,
-	) -> impl std::future::Future<Output = std::result::Result<F::Output, Refusal>> + kio::MaybeSend {
+	) -> impl std::future::Future<Output = std::result::Result<F::Output, Refusal>> + Send {
 		crate::util::sendable(until(body, move |waiter| poll_named_ended(&named, waiter)))
 	}
 }
