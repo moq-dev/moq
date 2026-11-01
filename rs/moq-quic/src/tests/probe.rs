@@ -6,11 +6,16 @@
 //! are held to the budgets below, which were set before the probe was tuned. The merge gate runs
 //! the short cases on one seed; the `#[ignore]`d acceptance suite runs nightly in release with
 //! `just rs quic-sim`, holding each budget on the mean across [`SEEDS`], since one seed's outcome
-//! beside a competing upload is a coin flip.
+//! beside a competing upload is a coin flip. Each seed also draws when the media starts within
+//! a frame interval of the handshake and any competing upload, so that mean averages over their
+//! alignment rather than carrying one alignment's bias.
 //!
 //! The same media trace without a target also checks when BBR3 skips ProbeRTT.
 
 use std::collections::HashMap;
+
+use rand::{RngExt, SeedableRng};
+use rand_pcg::Pcg32;
 
 use super::*;
 use crate::congestion::{Bbr3, CubicConfig};
@@ -65,6 +70,7 @@ fn frame_size(keyframe: u64, index: u64) -> u64 {
 /// One run's network and workload
 #[derive(Clone)]
 struct Scenario {
+	/// Seeds the run's entropy and, from its own generator, the media's start offset
 	seed: u64,
 	/// One-way propagation delay
 	latency: Duration,
@@ -288,7 +294,10 @@ fn run(scenario: &Scenario) -> Outcome {
 		super::upload(&mut pair, client_ch, server_ch, scenario.warmup, |_| {});
 	}
 
-	let start = pair.time;
+	// The media starts up to a frame interval after the handshake and any competing upload, drawn
+	// apart from the run's entropy so that a seed's other draws stay as they were
+	let offset = Pcg32::seed_from_u64(scenario.seed).random_range(Duration::ZERO..Duration::from_secs(1) / FPS as u32);
+	let start = pair.time + offset;
 	let end = start + scenario.duration;
 	let mut outcome = Outcome::default();
 	let mut groups: Vec<Group> = Vec::new();
@@ -304,8 +313,7 @@ fn run(scenario: &Scenario) -> Outcome {
 
 	loop {
 		let now = pair.time;
-		let elapsed = now - start;
-		if next_rate < scenario.rates.len() && elapsed >= scenario.rates[next_rate].0 {
+		if next_rate < scenario.rates.len() && now >= start + scenario.rates[next_rate].0 {
 			let rate = scenario.rates[next_rate].1;
 			pair.to_server.bottleneck.as_mut().unwrap().set_rate(rate);
 			next_rate += 1;
