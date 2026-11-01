@@ -10,7 +10,7 @@ moq-net's types by default and against a wrapper's types when handed one.
 ## Plan
 
 See the [questline](/quest/m2/net-wrap/README.md) for the decisions: generics
-with moq-net's types as the default, no `Send` bounds wasm can't meet, and
+with moq-net's types as the default, no `Send` bounds beyond moq-net's own, and
 the methods exactly as moq-net has them today.
 
 - Every handle a writer or reader can get from moq-net's public API,
