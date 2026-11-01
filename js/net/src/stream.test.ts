@@ -994,7 +994,9 @@ test("Reader u53 decodes every size in both formats, one byte per chunk", async 
 // each accept resolves in a microtask, so only a yield lets a sibling task run in between.
 // The CPU slice is stubbed to pass on every check, so the yield does not depend on load.
 // The stub only moves forward, since the budget's slice start outlives each test.
-let fakeNow = performance.now();
+// biome-ignore lint/style/noRestrictedGlobals: stubs the host CPU clock the budget reads.
+const host = performance;
+let fakeNow = host.now();
 for (const kind of ["uni", "bidi"] as const) {
 	test(`a flood of ${kind} streams yields to the host's other tasks`, async () => {
 		const STREAMS = 1024;
@@ -1004,7 +1006,7 @@ for (const kind of ["uni", "bidi"] as const) {
 			else await client.createBidirectionalStream();
 		}
 
-		const clock = spyOn(performance, "now").mockImplementation(() => (fakeNow += 5));
+		const clock = spyOn(host, "now").mockImplementation(() => (fakeNow += 5));
 		try {
 			const readers = kind === "uni" ? new Readers(server, QUIC) : undefined;
 			let accepted = 0;
