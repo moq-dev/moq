@@ -31,10 +31,11 @@ class QueryTests(unittest.TestCase):
         self.env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
                         GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
         # The runner's own Actions variables would move the run's error
-        # annotations to stdout and append to the real job summary, and a
-        # gate's CHECK_MODULES split would skip the modules these tests expect.
+        # annotations to stdout and append to the real job summary, a gate's
+        # CHECK_MODULES split would skip the modules these tests expect, and the
+        # land gate's CHECK_FAIL_FAST would cancel the lanes they expect to finish.
         for key in ("IN_MOQ_DEV_SHELL", "ALLOW_HOST_TOOLCHAIN", "CHECK_JOBS", "CHECK_MODULES",
-                    "GITHUB_BASE_REF", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY"):
+                    "CHECK_FAIL_FAST", "GITHUB_BASE_REF", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY"):
             self.env.pop(key, None)
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "test")
