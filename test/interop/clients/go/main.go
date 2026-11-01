@@ -465,8 +465,8 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 	codec, _, _ := strings.Cut(rendition.Codec, ".")
 	out += "." + codec
 	decoder, err := moqaudio.Subscribe(ctx, consumer, id, rendition, moqaudio.DecoderOutput{
-		Format:   moq.AudioSampleFormatF32,
-		MaxDelay: durationPtr(maxDelay),
+		Format: moq.AudioSampleFormatF32,
+		Delay:  &moqmedia.Delay{Max: durationPtr(maxDelay)},
 	})
 	if err != nil {
 		return err
