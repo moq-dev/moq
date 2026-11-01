@@ -237,6 +237,9 @@ struct Reading {
 }
 
 fn run(scenario: &Scenario) -> Outcome {
+	// Each run's packet trace is about 30 MB and takes most of its time; what it measured is
+	// reported once it returns
+	let _guard = subscribe_at(tracing::Level::INFO);
 	entropy::reseed(scenario.seed);
 	let mut server_transport = transport::Config::default();
 	if let Some(window) = scenario.receive_window {

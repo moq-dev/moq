@@ -881,7 +881,6 @@ impl Default for Messages {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
-				epoch: None,
 			},
 			ietf_ok: ietf::SubscribeOk {
 				track_alias: 5,
@@ -1033,7 +1032,6 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			authorization_token: None,
 			new_group: None,
 			max_age: None,
-			epoch: None,
 		}
 		.encode(w, BENCH_IETF)
 		.unwrap(),
@@ -1375,7 +1373,6 @@ pub fn seeds() -> Vec<Seed> {
 				range_filters: false,
 				fill_timeout: false,
 				properties_wanted: true,
-				epoch: None,
 			};
 			fetch.encode_bytes(*version).ok()
 		}) else {
@@ -1674,20 +1671,32 @@ impl crate::transport::Error for NoError {
 }
 
 /// A source-selection watch for the private request-lifetime benchmark.
-pub struct RequestValidity(crate::model::broadcast::RequestValidity);
+pub struct RequestValidity {
+	watch: crate::model::broadcast::RequestValidity,
+	/// Every period [`Self::start`] captured. A pending request holds its route and
+	/// answering leases until it ends, so a replacement closes both without freeing
+	/// either, and the benchmark must not charge it for freeing them.
+	periods: Vec<crate::model::broadcast::RequestValidity>,
+}
 
 impl RequestValidity {
 	/// Watch which instance this route's peer selects for a path.
 	pub fn new(route: &crate::origin::Requests, path: &crate::Path) -> Self {
-		Self(crate::model::broadcast::RequestValidity::for_source(route, path))
+		Self {
+			watch: crate::model::broadcast::RequestValidity::for_source(route, path),
+			periods: Vec::new(),
+		}
 	}
 
-	/// Capture the lifetime of one pending request.
-	pub fn start(&self) -> kio::Consumer<()> {
-		match self.0.start() {
-			crate::model::broadcast::RequestValidity::Period(route, ..) => route,
-			_ => unreachable!("a source watch always captures a route lease"),
-		}
+	/// Capture the lifetime of one pending request, retaining its leases until this drops.
+	pub fn start(&mut self) -> kio::Consumer<()> {
+		let period = self.watch.start();
+		let crate::model::broadcast::RequestValidity::Period(route, ..) = &period else {
+			unreachable!("a source watch always captures a route lease");
+		};
+		let route = route.clone();
+		self.periods.push(period);
+		route
 	}
 }
 
