@@ -630,7 +630,6 @@ impl Subscriber {
 		self.state.lock().subscribes.insert(
 			request_id,
 			TrackState {
-				epoch: self.epoch.clone(),
 				..TrackState::pending(key.1.to_string(), key.0.clone(), kio::Producer::new(Fill::Done))
 			},
 		);
@@ -656,7 +655,6 @@ impl Subscriber {
 					rendezvous: false,
 					range_filters: false,
 					authorization_token: None,
-					epoch: self.epoch.clone(),
 				},
 			)?;
 			let mut response = std::pin::pin!(async {
@@ -899,7 +897,6 @@ impl Subscriber {
 		self.state.lock().subscribes.insert(
 			request_id,
 			TrackState {
-				epoch: self.epoch.clone(),
 				..TrackState::pending(key.1.to_string(), key.0.clone(), kio::Producer::new(Fill::Done))
 			},
 		);
@@ -1191,7 +1188,6 @@ impl Subscriber {
 		}
 		let parked = TrackState {
 			alias: held.alias,
-			epoch: held.epoch.clone(),
 			tail: std::mem::take(&mut held.tail),
 			..TrackState::pending(
 				std::mem::take(&mut held.name),

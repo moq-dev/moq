@@ -10,7 +10,6 @@ use crate::{
 };
 
 use super::Message;
-use super::epoch;
 
 use super::Version;
 
@@ -137,9 +136,6 @@ pub struct Fetch<'a> {
 	/// Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES,
 	/// draft-22). Always `true` before draft-22, which has no way to opt out.
 	pub properties_wanted: bool,
-	/// The publisher instance the requester expects (MoQ Epoch). Only on a
-	/// request that names its track: a joining FETCH takes its subscription's.
-	pub epoch: Option<crate::Epoch>,
 }
 
 impl Fetch<'_> {
@@ -190,7 +186,6 @@ impl Fetch<'_> {
 			range_filters: self.range_filters,
 			fill_timeout: self.fill_timeout,
 			properties_wanted: self.properties_wanted,
-			epoch: self.epoch,
 		}
 	}
 }
@@ -208,12 +203,10 @@ impl<'a> Message<'a> for Fetch<'a> {
 		match version {
 			Version::Draft18 => {
 				self.fetch_type.encode(w, version)?;
-				let epoch = self.epoch.clone();
 				encode_params!(w, version,
 					0x03 => self.authorization_token.clone(),
 					0x20 => self.subscriber_priority,
 					0x22 => group_order,
-					epoch::EPOCH_PARAM => epoch,
 				);
 			}
 			_ => {
@@ -235,7 +228,6 @@ impl<'a> Message<'a> for Fetch<'a> {
 					0x21 => *filter,
 					0x22 => group_order,
 					0x35 => include_properties,
-					epoch::EPOCH_PARAM => self.epoch.clone(),
 				);
 			}
 		}
@@ -252,7 +244,6 @@ impl<'a> Message<'a> for Fetch<'a> {
 			range_filters,
 			fill_timeout,
 			properties_wanted,
-			epoch,
 			authorization_token,
 		) = match version {
 			Version::Draft18 => {
@@ -262,7 +253,6 @@ impl<'a> Message<'a> for Fetch<'a> {
 					0x0A => fill_timeout: Option<u64>,
 					0x20 => subscriber_priority: Option<u8>,
 					0x22 => group_order: Option<GroupOrder>,
-					epoch::EPOCH_PARAM => epoch: Option<crate::Epoch>,
 				);
 				let authorization_token = super::token::single(authorization_token)?;
 
@@ -273,7 +263,6 @@ impl<'a> Message<'a> for Fetch<'a> {
 					false,
 					fill_timeout.is_some(),
 					true,
-					epoch,
 					authorization_token,
 				)
 			}
@@ -292,7 +281,6 @@ impl<'a> Message<'a> for Fetch<'a> {
 					0x27 => priority_filter: Vec<Opaque>,
 					0x28 => object_property_filter: Vec<Opaque>,
 					0x35 => include_properties: Option<bool>,
-					epoch::EPOCH_PARAM => epoch: Option<crate::Epoch>,
 				);
 				let authorization_token = super::token::single(authorization_token)?;
 				let range_filters = [
@@ -318,20 +306,10 @@ impl<'a> Message<'a> for Fetch<'a> {
 					fill_timeout.is_some(),
 					// Defaults to 1, so an absent parameter means the requester wants them.
 					include_properties.unwrap_or(true),
-					epoch,
 					authorization_token,
 				)
 			}
 		};
-
-		// A joining FETCH is served by its subscription's instance; naming one is malformed.
-		if epoch.is_some()
-			&& matches!(
-				fetch_type,
-				FetchType::RelativeJoining { .. } | FetchType::AbsoluteJoining { .. }
-			) {
-			return Err(DecodeError::InvalidValue);
-		}
 
 		Ok(Self {
 			authorization_token,
@@ -343,7 +321,6 @@ impl<'a> Message<'a> for Fetch<'a> {
 			range_filters,
 			fill_timeout,
 			properties_wanted,
-			epoch,
 		})
 	}
 }
@@ -643,7 +620,6 @@ mod tests {
 			range_filters: false,
 			fill_timeout: false,
 			properties_wanted: true,
-			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -752,7 +728,6 @@ mod tests {
 			range_filters: false,
 			fill_timeout: false,
 			properties_wanted: true,
-			epoch: None,
 		};
 
 		#[rustfmt::skip]
