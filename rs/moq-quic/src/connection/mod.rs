@@ -7,6 +7,7 @@ use std::{
 	fmt, io, mem,
 	net::{IpAddr, SocketAddr},
 	sync::Arc,
+	task::Poll,
 };
 
 use bytes::{Bytes, BytesMut};
@@ -17,7 +18,7 @@ use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
-	Dir, Duration, Frame, Instant, Limits, LimitsError, MAX_CID_SIZE, MAX_STREAM_COUNT, MIN_INITIAL_SIZE, Side,
+	Dir, Duration, Frame, Instant, Limits, LimitsError, MAX_CID_SIZE, MAX_STREAM_COUNT, MIN_INITIAL_SIZE, Rate, Side,
 	StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError, TransportErrorCode, VarInt, Version,
 	cid_queue::CidQueue,
 	coding::BufMutExt,
@@ -71,6 +72,8 @@ use paths::{PathData, PathResponses};
 pub(crate) mod qlog;
 use qlog::QlogSink;
 
+mod rate;
+
 mod send_buffer;
 
 mod sent_packets;
@@ -103,6 +106,8 @@ pub(crate) use streams::StreamsState;
 pub use streams::{ShouldTransmit, StreamEvent, Streams, recv, send};
 
 mod timer;
+
+pub(crate) mod waits;
 use crate::congestion::{self, Controller};
 use timer::{Timer, TimerTable};
 
@@ -205,6 +210,8 @@ pub struct Connection {
 	permit_idle_reset: bool,
 	/// Negotiated idle timeout
 	idle_timeout: Option<Duration>,
+	/// Keep-alive interval, derived from [`Self::idle_timeout`] unless configured
+	keep_alive: Option<Duration>,
 	/// The time we send next bundled ACK
 	///
 	/// The goal is to wait long enough for the peer to acknowledge our previous
@@ -260,6 +267,8 @@ pub struct Connection {
 	acked: Vec<congestion::Acked>,
 	/// Resends in-flight data to probe for bandwidth while `app_limited`
 	bandwidth_probe: BandwidthProbe,
+	/// Holds sending to a cap below whatever the congestion controller allows
+	send_rate: Option<rate::Bucket>,
 
 	streams: StreamsState,
 	/// Surplus remote CIDs for future use on new paths
@@ -351,6 +360,8 @@ impl Connection {
 				None | Some(VarInt(0)) => None,
 				Some(dur) => Some(Duration::from_millis(dur.0)),
 			},
+			// Armed only once established, after the peer's parameters set it.
+			keep_alive: None,
 			timers: TimerTable::default(),
 			authentication_failures: 0,
 			early_1rtt: Vec::new(),
@@ -374,6 +385,7 @@ impl Connection {
 			probe_when_heard: false,
 
 			app_limited: false,
+			send_rate: None,
 			acked: Vec::new(),
 			bandwidth_probe: BandwidthProbe::new(&config, now),
 			receiving_ecn: false,
@@ -393,6 +405,13 @@ impl Connection {
 			stats: Stats::default(),
 			version,
 		};
+		// The caps take the live path, so the initial window counts as credit already granted.
+		let rates = Limits {
+			receive_rate: this.config.limits.receive_rate,
+			send_rate: this.config.limits.send_rate,
+			..Limits::default()
+		};
+		this.set_limits(rates).expect("rate caps are always valid");
 		if path_validated {
 			this.on_path_validated();
 		}
@@ -412,7 +431,34 @@ impl Connection {
 	/// - a call was made to `handle_timeout`
 	#[must_use]
 	pub fn poll_timeout(&self) -> Option<Instant> {
-		self.timers.next_timeout()
+		let credit = match self.state.is_closed() {
+			true => None,
+			false => self.streams.receive_rate_deadline(),
+		};
+		match (self.timers.next_timeout(), credit) {
+			(Some(timer), Some(credit)) => Some(timer.min(credit)),
+			(timer, credit) => timer.or(credit),
+		}
+	}
+
+	/// Wait for the handshake to complete
+	///
+	/// Ready once it did, even if the connection was lost since, or with the reason the
+	/// connection was lost first.
+	pub fn poll_connected(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.streams.waits.poll_connected(waiter)
+	}
+
+	/// Wait for the handshake to be confirmed, as [`poll_connected`](Self::poll_connected) does
+	pub fn poll_handshake_confirmed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.streams.waits.poll_confirmed(waiter)
+	}
+
+	/// Wait for the connection to be lost, returning why
+	///
+	/// A local [`close()`](Self::close) reports [`Error::LocallyClosed`].
+	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		self.streams.waits.poll_closed(waiter)
 	}
 
 	/// Returns application-facing events
@@ -593,6 +639,9 @@ impl Connection {
 		// Set only when the congestion window itself was full. This is the spec's
 		// `C.is_cwnd_limited`, which a pacing delay must not stand in for.
 		let mut cwnd_blocked = false;
+		// Set when the send rate cap held a send back: a local policy, not the path, so the
+		// controller hears it as application-limited.
+		let mut rate_blocked = false;
 
 		// Iterate over all spaces and find data to send
 		let mut space_idx = 0;
@@ -713,6 +762,21 @@ impl Connection {
 						trace!("blocked by pacing");
 						break;
 					}
+				}
+
+				// Loss probes are held to the send rate cap too: it refills with time, unlike the
+				// congestion window, so a probe only waits, and a peer faking loss cannot draw
+				// probes past the cap.
+				if ack_eliciting
+					&& !close && let Some(delay) = self
+					.send_rate
+					.as_mut()
+					.and_then(|cap| cap.delay(now, segment_size as u64 + untracked_bytes))
+				{
+					self.timers.set(Timer::Pacing, delay);
+					rate_blocked = true;
+					trace!("blocked by the send rate cap");
+					break;
 				}
 
 				// Finish current packet
@@ -1042,7 +1106,8 @@ impl Connection {
 		// Exhausting the packet spaces also catches a partial poll that drains the source.
 		// A full local send buffer prevents writes from reaching this queue; it is a sender
 		// limit, not evidence that the application has no more data.
-		self.app_limited = space_idx == spaces.len() && !send_blocked && !self.streams.send_window_full();
+		self.app_limited =
+			rate_blocked || (space_idx == spaces.len() && !send_blocked && !self.streams.send_window_full());
 		if self.app_limited {
 			self.path.congestion.on_app_limited(self.path.in_flight.bytes);
 		}
@@ -1268,6 +1333,15 @@ impl Connection {
 	/// `Instant` that was output by `poll_timeout`; however spurious extra calls will simply
 	/// no-op and therefore are safe.
 	pub fn handle_timeout(&mut self, now: Instant) {
+		if !self.state.is_closed()
+			&& self
+				.streams
+				.receive_rate_deadline()
+				.is_some_and(|deadline| deadline <= now)
+			&& self.streams.grant_receive_rate(now).should_transmit()
+		{
+			self.spaces[SpaceId::Data].pending.max_data = true;
+		}
 		for &timer in &Timer::VALUES {
 			if !self.timers.is_expired(timer, now) {
 				continue;
@@ -1347,7 +1421,7 @@ impl Connection {
 	/// [`StreamEvent::Finished`]: crate::StreamEvent::Finished
 	pub fn close(&mut self, now: Instant, error_code: VarInt, reason: String) {
 		if !self.state.is_closed() {
-			self.error = Some(Error::LocallyClosed {
+			self.lose(Error::LocallyClosed {
 				code: error_code,
 				reason: reason.clone(),
 			});
@@ -1400,6 +1474,12 @@ impl Connection {
 		stats.credit = self.streams.credit_stats();
 
 		stats
+	}
+
+	/// The streams with a waiter entry, to prove the map stays bounded
+	#[cfg(test)]
+	pub(crate) fn waiting_streams(&self) -> usize {
+		self.streams.waits.stream_entries()
 	}
 
 	/// Assert that the receive lease books balance, for the fuzz target.
@@ -1564,11 +1644,24 @@ impl Connection {
 	/// Errors, changing nothing, on limits [`Limits::validate`] refuses.
 	pub fn set_limits(&mut self, limits: Limits) -> Result<(), LimitsError> {
 		limits.validate()?;
+		// The cap first, so a window opened with it is paced rather than granted at once.
+		if let Some(rate) = limits.receive_rate
+			&& self.streams.set_receive_rate(rate).should_transmit()
+		{
+			self.spaces[SpaceId::Data].pending.max_data = true;
+		}
 		if let Some(window) = limits.receive_window {
 			self.set_receive_window(VarInt::from_u64(window.get()).expect("validated"));
 		}
 		if let Some(window) = limits.stream_receive_window {
 			self.streams.set_stream_receive_window(window.get());
+		}
+		if let Some(rate) = limits.send_rate {
+			match (rate, &mut self.send_rate) {
+				(Rate::Unlimited, bucket) => *bucket = None,
+				(Rate::BytesPerSecond(rate), Some(bucket)) => bucket.set_rate(rate),
+				(Rate::BytesPerSecond(rate), bucket @ None) => *bucket = Some(rate::Bucket::new(rate)),
+			}
 		}
 		if let Some(window) = limits.send_window {
 			self.set_send_window(window.get());
@@ -2170,11 +2263,16 @@ impl Connection {
 	}
 
 	fn reset_keep_alive(&mut self, now: Instant) {
-		let interval = match self.config.keep_alive {
+		let interval = match self.keep_alive {
 			Some(x) if self.state.is_established() => x,
 			_ => return,
 		};
-		self.timers.set(Timer::KeepAlive, now + interval);
+		// A peer may advertise an idle timeout whose derived interval is too far out to represent;
+		// that keep-alive never fires.
+		match now.checked_add(interval) {
+			Some(deadline) => self.timers.set(Timer::KeepAlive, deadline),
+			None => self.timers.stop(Timer::KeepAlive),
+		}
 	}
 
 	fn reset_cid_retirement(&mut self) {
@@ -2556,7 +2654,7 @@ impl Connection {
 			// Preserve the original close reason once the connection has closed.
 			self.state = State::Drained;
 		} else if let Err(conn_err) = result {
-			self.error = Some(conn_err.clone());
+			self.lose(conn_err.clone());
 			self.state = match conn_err {
 				Error::ApplicationClosed(reason) => State::closed(reason),
 				Error::ConnectionClosed(reason) => State::closed(reason),
@@ -2766,10 +2864,12 @@ impl Connection {
 					self.spaces[SpaceId::Data].pending.handshake_done = true;
 					self.discard_space(now, SpaceId::Handshake);
 					self.events.push_back(Event::HandshakeConfirmed);
+					self.streams.waits.confirmed();
 					trace!("handshake confirmed");
 				}
 
 				self.events.push_back(Event::Connected);
+				self.streams.waits.connected();
 				self.state = State::Established;
 				// Swap the handshake idle timeout for the negotiated one.
 				self.reset_idle_timeout(now, SpaceId::Data);
@@ -2863,7 +2963,7 @@ impl Connection {
 				// appear in Initial or Handshake packets. An application close (0x1d) falls
 				// through to the catch-all arm below.
 				Frame::Close(reason @ Close::Connection(_)) => {
-					self.error = Some(reason.into());
+					self.lose(reason.into());
 					self.state = State::Draining;
 					return Ok(());
 				}
@@ -2894,6 +2994,11 @@ impl Connection {
 		packet: Packet,
 	) -> Result<(), TransportError> {
 		let payload = packet.payload.freeze();
+		// Earned before anything this packet carries is charged against the cap, and granted now:
+		// the refill retires the credit deadline, so a later timeout would not grant it.
+		if self.streams.grant_receive_rate(now).should_transmit() {
+			self.spaces[SpaceId::Data].pending.max_data = true;
+		}
 		let mut is_probing_packet = true;
 		let mut close = None;
 		let payload_len = payload.len();
@@ -3103,11 +3208,16 @@ impl Connection {
 					{
 						return Err(TransportError::PROTOCOL_VIOLATION("oversized datagram"));
 					}
+					if !self.streams.admit_datagram(datagram.data.len()) {
+						debug!("dropping datagram past the receive rate cap");
+						continue;
+					}
 					if self
 						.datagrams
 						.received(datagram, &self.config.datagram.receive_buffer)?
 					{
 						self.events.push_back(Event::DatagramReceived);
+						self.streams.waits.wake_datagram();
 					}
 				}
 				Frame::AckFrequency(ack_frequency) => {
@@ -3143,6 +3253,7 @@ impl Connection {
 						self.discard_space(now, SpaceId::Handshake);
 					}
 					self.events.push_back(Event::HandshakeConfirmed);
+					self.streams.waits.confirmed();
 					trace!("handshake confirmed");
 				}
 			}
@@ -3166,7 +3277,7 @@ impl Connection {
 		self.streams.queue_max_stream_id(pending);
 
 		if let Some(reason) = close {
-			self.error = Some(reason.into());
+			self.lose(reason.into());
 			self.state = State::Draining;
 			self.close = true;
 		}
@@ -3477,7 +3588,7 @@ impl Connection {
 			let token = Token::new(
 				TokenPayload::Validation {
 					ip: remote_addr.ip(),
-					issued: moq_clock::wall(),
+					issued: kio::clock::wall(),
 				},
 				&mut self.rng,
 			);
@@ -3611,7 +3722,11 @@ impl Connection {
 	fn set_peer_params(&mut self, params: TransportParameters) {
 		self.streams.set_params(&params);
 		self.idle_timeout = negotiate_max_idle_timeout(self.config.max_idle_timeout(), Some(params.max_idle_timeout));
-		trace!("negotiated max idle timeout {:?}", self.idle_timeout);
+		self.keep_alive = transport::keep_alive_interval(self.config.keep_alive, self.idle_timeout);
+		trace!(
+			"negotiated max idle timeout {:?}, keep-alive {:?}",
+			self.idle_timeout, self.keep_alive
+		);
 		if let Some(info) = params.preferred_address {
 			self.rem_cids
 				.insert(NewConnectionId {
@@ -3774,9 +3889,18 @@ impl Connection {
 		self.path.congestion.window().saturating_sub(self.path.in_flight.bytes)
 	}
 
+	/// When the receive rate cap next grants credit
+	#[cfg(test)]
+	pub(crate) fn receive_rate_deadline(&self) -> Option<Instant> {
+		self.streams.receive_rate_deadline()
+	}
+
 	/// Whether no timers but keepalive, idle, rtt, pushnewcid, and key discard are running
 	#[cfg(test)]
 	pub(crate) fn is_idle(&self) -> bool {
+		if self.streams.receive_rate_deadline().is_some() {
+			return false;
+		}
 		Timer::VALUES
 			.iter()
 			.filter(|&&t| !matches!(t, Timer::KeepAlive | Timer::PushNewCid | Timer::KeyDiscard))
@@ -3846,10 +3970,18 @@ impl Connection {
 		}
 	}
 
+	/// Record why the connection was lost, failing every wait once it drains what it can
+	///
+	/// [`Self::poll`] reports it once as [`Event::ConnectionLost`].
+	fn lose(&mut self, reason: Error) {
+		self.streams.waits.lose(reason.clone());
+		self.error = Some(reason);
+	}
+
 	/// Terminate the connection instantly, without sending a close packet
 	fn kill(&mut self, reason: Error) {
 		self.close_common();
-		self.error = Some(reason);
+		self.lose(reason);
 		self.state = State::Drained;
 		self.report_draining();
 		self.endpoint_events.push_back(EndpointEventInner::Drained);

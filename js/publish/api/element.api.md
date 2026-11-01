@@ -17,7 +17,7 @@ export default class extends HTMLElement {
 	constructor();
 	get announce(): AnnounceMode | undefined;
 	set announce(value: AnnounceMode);
-	attributeChangedCallback(name: "source" | "url" | "name" | "announce" | "backend" | "versions" | "muted" | "invisible" | "preview", oldValue: string | null, newValue: string | null): void;
+	attributeChangedCallback(name: "source" | "url" | "announce" | "name" | "backend" | "versions" | "muted" | "invisible" | "preview", oldValue: string | null, newValue: string | null): void;
 	audio: Audio.Encoder;
 	get backend(): Preview.Backend;
 	set backend(value: Preview.Backend);

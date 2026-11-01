@@ -102,8 +102,7 @@ impl<'a> Encoder<'a> {
 	}
 
 	/// Write a varint, or fail with [`EncodeError::BoundsExceeded`] if the form cannot carry it.
-	#[cfg_attr(target_arch = "wasm32", inline)]
-	#[cfg_attr(not(target_arch = "wasm32"), inline(always))]
+	#[inline(always)]
 	pub fn varint(&mut self, v: u64) -> Result<(), EncodeError> {
 		Ok(varint::write(v, self.form, self.buf)?)
 	}

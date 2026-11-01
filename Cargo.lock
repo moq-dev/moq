@@ -891,6 +891,8 @@ dependencies = [
  "cexpr",
  "clang-sys",
  "itertools 0.13.0",
+ "log",
+ "prettyplease",
  "proc-macro2",
  "quote",
  "regex",
@@ -1599,16 +1601,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "console_error_panic_hook"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
-dependencies = [
- "cfg-if",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1728,6 +1720,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-models"
+version = "0.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee3344d349528f449816cfa85e558c439bdca5a6d8a738cfb21e69f0b2b1952f"
+dependencies = [
+ "hax-lib 0.3.7",
+ "pastey",
+ "rand 0.10.3",
+]
+
+[[package]]
 name = "core_affinity"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1824,6 +1827,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ca28b0ae3115b884660db4118d803791fd6756b6e88f39c0f3f7859060d7566"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "crabgrind"
+version = "0.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "035c801dc4b418e1d857a6536dc88b4d1929c7a1fd163389766e18d322d34a84"
+dependencies = [
+ "bindgen 0.72.1",
+ "cc",
+ "pkg-config",
+ "rustversion",
 ]
 
 [[package]]
@@ -1940,7 +1955,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc74980687109a3b14c72fd458107bf0baa1da1a1a805e178d15501ba9b86d9d"
 dependencies = [
  "crossbeam-utils",
- "loom",
 ]
 
 [[package]]
@@ -1948,9 +1962,6 @@ name = "crossbeam-utils"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
-dependencies = [
- "loom",
-]
 
 [[package]]
 name = "crunchy"
@@ -3651,7 +3662,6 @@ dependencies = [
  "derive_more 2.1.1",
  "hex",
  "kio 0.6.2",
- "moq-clock",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -3711,6 +3721,79 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
  "hashbrown 0.17.1",
+]
+
+[[package]]
+name = "hax-lib"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01a33cb227f97ee5c419064c31d7c55a7d895f28d8019ccdadc311cc036500c4"
+dependencies = [
+ "hax-lib-macros 0.3.7",
+ "num-bigint",
+ "num-traits",
+]
+
+[[package]]
+name = "hax-lib"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb3bfcfc915e894c331662e4ac76706b777a5956535ea24535f4df30da04b1bf"
+dependencies = [
+ "hax-lib-macros 0.4.2",
+ "num-bigint",
+ "num-traits",
+]
+
+[[package]]
+name = "hax-lib-macros"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28da835a5f153e9f3d0cc1f42ee605a1cfa9093c93348193793d60a1b0908b51"
+dependencies = [
+ "hax-lib-macros-types 0.3.7",
+ "proc-macro-error2",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "hax-lib-macros"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6e9010990fcba1d1494047fa433a433be0a5df23653a9784c739f7bba270272e"
+dependencies = [
+ "hax-lib-macros-types 0.4.2",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
+name = "hax-lib-macros-types"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eed327e9a28d6ee018a4a9ba842d4ee27e378c8a591d2beb6f42f32b24a02fcb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "hax-lib-macros-types"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e053e3a5aeb92df47b07323180c5088edc488ca49883a234f6c73255c54cc520"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -4705,8 +4788,11 @@ dependencies = [
  "bench-harness",
  "crossbeam-epoch",
  "futures",
+ "kio 0.6.2",
  "kio-macros",
- "loom",
+ "serde",
+ "serde_json",
+ "serde_with",
  "smallvec",
  "tokio",
 ]
@@ -4778,6 +4864,136 @@ name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "libcrux-aes"
+version = "0.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd415025511a0bd8731cae34ae2d5e07c1b3f0443d5c12bd199c9e9b2f1fd4d5"
+dependencies = [
+ "libcrux-intrinsics",
+ "libcrux-platform",
+ "libcrux-secrets",
+ "libcrux-traits",
+]
+
+[[package]]
+name = "libcrux-hacl-rs"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27ce64ead37fc67c1039fdbcf1e8c97044e6a644cb3d1f79060b5c9ac8fdfe0a"
+dependencies = [
+ "libcrux-macros",
+]
+
+[[package]]
+name = "libcrux-intrinsics"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de82722c9c7419a311e84ee902e9643a15e39a6fcaade87f21e94f8d0f30fa70"
+dependencies = [
+ "core-models",
+ "hax-lib 0.4.2",
+]
+
+[[package]]
+name = "libcrux-macros"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2afdd4da30d6e23f76bd6f3ad61be5c773720349eef3e791f8b79cfea3fe1436"
+dependencies = [
+ "quote",
+ "syn 3.0.6",
+]
+
+[[package]]
+name = "libcrux-ml-kem"
+version = "0.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ceed00367748ec0b545bc4a7b0521f8c9fd476d02484340f0a95b0f45f828cd"
+dependencies = [
+ "hax-lib 0.4.2",
+ "libcrux-intrinsics",
+ "libcrux-platform",
+ "libcrux-secrets",
+ "libcrux-sha3",
+ "libcrux-traits",
+]
+
+[[package]]
+name = "libcrux-p256"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7489aa205be22524e2f6ddbe006c0c4ff5f1dfc7c17b783e3d02f1cb2a01c605"
+dependencies = [
+ "libcrux-hacl-rs",
+ "libcrux-macros",
+ "libcrux-secrets",
+ "libcrux-sha2",
+ "libcrux-traits",
+]
+
+[[package]]
+name = "libcrux-platform"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8bf8bee8c35d34867a3762d6ee7b74e8523a882855c3cfce30484e9554342206"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "libcrux-poly1305"
+version = "0.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d727ee28ee0d5d2661daa5f2f47965cd3489a0ac9130f3410e95632a98b12e49"
+dependencies = [
+ "libcrux-hacl-rs",
+ "libcrux-macros",
+]
+
+[[package]]
+name = "libcrux-secrets"
+version = "0.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "03c4ba47b3596f2771213ff162c792e9b93ddc0cdd178a2e407e00bb8ae4afcd"
+dependencies = [
+ "crabgrind",
+ "hax-lib 0.4.2",
+]
+
+[[package]]
+name = "libcrux-sha2"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86aa35d8fc9576a41df34af4d95d1f11186c1f65cd6c829329748915ea556d71"
+dependencies = [
+ "libcrux-hacl-rs",
+ "libcrux-macros",
+ "libcrux-traits",
+]
+
+[[package]]
+name = "libcrux-sha3"
+version = "0.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2c8117e86e1f03417d8ebe50ed298c6ee0b05557783a75697d0c59a2ef2dcfc6"
+dependencies = [
+ "hax-lib 0.4.2",
+ "libcrux-intrinsics",
+ "libcrux-platform",
+ "libcrux-traits",
+]
+
+[[package]]
+name = "libcrux-traits"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8958bb5c3780eb7c3355aeeb051629b830e47bfefd36befed93c81b53366bbc4"
+dependencies = [
+ "libcrux-secrets",
+ "rand 0.10.3",
+]
 
 [[package]]
 name = "libfuzzer-sys"
@@ -5045,16 +5261,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
-name = "minicov"
-version = "0.3.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4869b6a491569605d66d3952bcdf03df789e5b536e5f0cf7758a7f08a55ae24d"
-dependencies = [
- "cc",
- "walkdir",
-]
-
-[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5122,7 +5328,6 @@ dependencies = [
  "bytes",
  "futures",
  "kio 0.6.2",
- "moq-clock",
  "moq-net",
  "object_store",
  "percent-encoding",
@@ -5148,7 +5353,6 @@ dependencies = [
  "dispatch2",
  "hang",
  "kio 0.6.2",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "objc2 0.6.5",
@@ -5179,11 +5383,11 @@ dependencies = [
  "aws-lc-rs",
  "axum",
  "base64 0.23.1",
+ "data-encoding",
  "jsonwebtoken",
  "kio 0.6.2",
  "moq-auth 0.2.1",
  "moq-auth 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
- "moq-clock",
  "moq-pattern 0.1.2",
  "moq-token",
  "p256",
@@ -5200,6 +5404,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-test",
  "url",
  "wiremock",
 ]
@@ -5231,7 +5436,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "humantime",
- "moq-clock",
+ "kio 0.6.2",
  "moq-net",
  "moq-tokio",
  "moq-uring",
@@ -5239,6 +5444,7 @@ dependencies = [
  "rand 0.10.3",
  "serde",
  "serde_json",
+ "tempfile",
  "test-env",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
@@ -5254,8 +5460,8 @@ dependencies = [
  "boytacean",
  "bytes",
  "hang",
+ "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -5277,7 +5483,6 @@ dependencies = [
  "hang",
  "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-json",
  "moq-loc",
  "moq-mux",
@@ -5320,11 +5525,11 @@ dependencies = [
  "futures",
  "hang",
  "humantime",
+ "kio 0.6.2",
  "libc",
  "moq-archive",
  "moq-audio",
  "moq-auth 0.2.1",
- "moq-clock",
  "moq-hls",
  "moq-json",
  "moq-mux",
@@ -5359,32 +5564,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-clock"
-version = "0.11.0"
-dependencies = [
- "futures",
- "kio 0.6.2",
- "moq-clock",
- "moq-clock-macros",
- "serde",
- "serde_json",
- "serde_with",
- "tokio",
- "wasm-bindgen",
- "wasm-bindgen-test",
- "web-async",
-]
-
-[[package]]
-name = "moq-clock-macros"
-version = "0.1.0"
-
-[[package]]
 name = "moq-congestion"
 version = "0.1.0"
 dependencies = [
  "cpu-time",
- "moq-clock",
+ "kio 0.6.2",
  "rand 0.10.3",
  "rand_pcg",
  "stats_alloc",
@@ -5394,13 +5578,13 @@ dependencies = [
 name = "moq-e2ee"
 version = "0.0.11"
 dependencies = [
- "aws-lc-rs",
  "base64 0.23.1",
  "bench-harness",
  "bytes",
  "hex",
  "kio 0.6.2",
  "moq-net",
+ "rind",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
@@ -5412,12 +5596,10 @@ name = "moq-ffi"
 version = "0.4.12"
 dependencies = [
  "bytes",
- "getrandom 0.4.3",
  "hang",
  "kio 0.6.2",
  "libc",
  "moq-audio",
- "moq-clock",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -5431,8 +5613,6 @@ dependencies = [
  "tracing",
  "uniffi 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "url",
- "web-async",
- "web-transport-wasm",
 ]
 
 [[package]]
@@ -5447,8 +5627,8 @@ dependencies = [
  "gstreamer",
  "gstreamer-audio",
  "hang",
+ "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -5472,7 +5652,6 @@ dependencies = [
  "kio 0.6.2",
  "m3u8-rs",
  "moq-archive",
- "moq-clock",
  "moq-json",
  "moq-mux",
  "moq-net",
@@ -5495,7 +5674,7 @@ dependencies = [
 name = "moq-ice"
 version = "0.1.0"
 dependencies = [
- "moq-clock",
+ "kio 0.6.2",
  "str0m",
  "stun-types",
  "thiserror 2.0.21",
@@ -5556,7 +5735,6 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "memchr",
- "moq-clock",
  "moq-json",
  "moq-loc",
  "moq-msf",
@@ -5593,13 +5771,10 @@ dependencies = [
  "bytes",
  "flate2",
  "futures",
- "getrandom 0.4.3",
  "hashbrown 0.17.1",
  "hashlink",
  "kio 0.6.2",
  "libc",
- "loom",
- "moq-clock",
  "moq-pattern 0.1.2",
  "num_enum",
  "proptest",
@@ -5611,9 +5786,9 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "tracing-test",
  "url",
  "uuid",
- "wasm-bindgen-test",
 ]
 
 [[package]]
@@ -5629,7 +5804,7 @@ name = "moq-net-tests"
 version = "0.0.0"
 dependencies = [
  "futures",
- "moq-clock",
+ "kio 0.6.2",
  "moq-json",
  "moq-net",
  "serde_json",
@@ -5675,11 +5850,10 @@ dependencies = [
  "bytes",
  "cpu-time",
  "fastbloom",
- "getrandom 0.4.3",
  "hex-literal",
  "indexmap 2.14.2",
+ "kio 0.6.2",
  "lru-slab",
- "moq-clock",
  "moq-congestion",
  "moq-quic",
  "proptest",
@@ -5690,13 +5864,11 @@ dependencies = [
  "ring",
  "rustc-hash 2.1.3",
  "rustls",
- "rustls-pki-types",
  "slab",
  "thiserror 2.0.21",
  "tinyvec",
  "tracing",
  "tracing-subscriber",
- "wasm-bindgen-test",
 ]
 
 [[package]]
@@ -5729,7 +5901,6 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "moq-auth 0.2.1",
- "moq-clock",
  "moq-congestion",
  "moq-net",
  "moq-quic",
@@ -5774,7 +5945,6 @@ version = "0.2.11"
 dependencies = [
  "kio 0.6.2",
  "moq-auth 0.2.1",
- "moq-clock",
  "moq-json",
  "moq-net",
  "moq-tokio",
@@ -5790,7 +5960,7 @@ dependencies = [
  "axum",
  "bytes",
  "hang",
- "moq-clock",
+ "kio 0.6.2",
  "moq-ice",
  "moq-mux",
  "moq-net",
@@ -5816,7 +5986,7 @@ dependencies = [
  "futures",
  "hang",
  "hmac 0.13.0",
- "moq-clock",
+ "kio 0.6.2",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -5838,7 +6008,7 @@ dependencies = [
  "base64 0.23.1",
  "futures",
  "hang",
- "moq-clock",
+ "kio 0.6.2",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -5861,7 +6031,6 @@ dependencies = [
  "image",
  "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-video",
@@ -5882,12 +6051,30 @@ dependencies = [
  "clap",
  "humantime",
  "humantime-serde",
- "moq-clock",
+ "kio 0.6.2",
  "rand 0.10.3",
  "serde",
  "serde_json",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
+]
+
+[[package]]
+name = "moq-sign"
+version = "0.0.1"
+dependencies = [
+ "aws-lc-rs",
+ "bench-harness",
+ "bytes",
+ "data-encoding",
+ "hex",
+ "kio 0.6.2",
+ "moq-net",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]
@@ -5897,6 +6084,7 @@ dependencies = [
  "cfg_aliases",
  "core_affinity",
  "libc",
+ "nix",
  "rand 0.10.3",
  "socket2 0.6.5",
  "thiserror 2.0.21",
@@ -5912,6 +6100,7 @@ dependencies = [
  "bytes",
  "futures",
  "hang",
+ "kio 0.6.2",
  "moq-mux",
  "moq-net",
  "srt-protocol",
@@ -5928,7 +6117,7 @@ version = "0.2.12"
 dependencies = [
  "bench-harness",
  "futures",
- "moq-clock",
+ "kio 0.6.2",
  "moq-json",
  "moq-net",
  "serde",
@@ -5937,7 +6126,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
- "web-async",
 ]
 
 [[package]]
@@ -5949,8 +6137,8 @@ dependencies = [
  "eframe",
  "egui",
  "egui_dock",
+ "kio 0.6.2",
  "moq-audio",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-relay",
@@ -6003,7 +6191,6 @@ dependencies = [
  "kio 0.6.2",
  "libc",
  "mdns-sd",
- "moq-clock",
  "moq-congestion",
  "moq-ice",
  "moq-net",
@@ -6058,7 +6245,6 @@ dependencies = [
  "bytes",
  "hang",
  "kio 0.6.2",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -6081,7 +6267,6 @@ dependencies = [
  "io-uring",
  "kio 0.6.2",
  "libc",
- "moq-clock",
  "moq-congestion",
  "moq-net",
  "moq-quic",
@@ -6150,7 +6335,6 @@ dependencies = [
  "libloading 0.9.0",
  "libvpx-native-sys",
  "linux-raw-sys 0.12.1",
- "moq-clock",
  "moq-mux",
  "moq-net",
  "moq-nvenc",
@@ -6184,25 +6368,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "moq-wasm"
-version = "0.0.0"
-dependencies = [
- "bytes",
- "console_error_panic_hook",
- "futures",
- "getrandom 0.4.3",
- "js-sys",
- "moq-net",
- "thiserror 2.0.21",
- "tracing-wasm",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-async",
- "web-transport-wasm",
-]
-
-[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6214,9 +6379,9 @@ dependencies = [
 
 [[package]]
 name = "mp4-atom"
-version = "0.16.2"
+version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6f6638ef4f165c7eb423d7ab9666fff423c8ab53f0dc67ec523aa49530729a7"
+checksum = "718b5227fa90c52ed2e72d4d553560130d9e128acb6217d9fe0ea57312ee7063"
 dependencies = [
  "bytes",
  "derive_more 2.1.1",
@@ -8200,6 +8365,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "proc-macro-error-attr2"
+version = "2.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96de42df36bb9bba5542fe9f1a054b8cc87e172759a1868aa05c1f3acc89dfc5"
+dependencies = [
+ "proc-macro2",
+ "quote",
+]
+
+[[package]]
+name = "proc-macro-error2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "11ec05c52be0a07b08061f7dd003e7d7092e0472bc731b4af7bb1ef876109802"
+dependencies = [
+ "proc-macro-error-attr2",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "proc-macro2"
 version = "1.0.107"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8326,10 +8513,10 @@ dependencies = [
  "futures",
  "kio 0.6.2",
  "libc",
- "moq-clock",
  "moq-net",
  "moq-quic",
  "qmux 0.6.5",
+ "rcgen 0.14.10",
  "rustc-hash 2.1.3",
  "rustls",
  "thiserror 2.0.21",
@@ -8837,6 +9024,26 @@ checksum = "b4a459cddafb3fe76b31fd8f1108007566c40301feb64dc7b54656eb7388172b"
 dependencies = [
  "crypto-bigint",
  "hmac 0.13.0",
+]
+
+[[package]]
+name = "rind"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdc0a91565c59d87e36dcb47a73b2c5fd252b3cd7017920aec393875f1c4c0df"
+dependencies = [
+ "cfg-if",
+ "curve25519-dalek",
+ "fiat-crypto",
+ "getrandom 0.4.3",
+ "libc",
+ "libcrux-aes",
+ "libcrux-hacl-rs",
+ "libcrux-macros",
+ "libcrux-ml-kem",
+ "libcrux-p256",
+ "libcrux-poly1305",
+ "libcrux-traits",
 ]
 
 [[package]]
@@ -11142,17 +11349,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-wasm"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4575c663a174420fa2d78f4108ff68f65bf2fbb7dd89f33749b6e826b3626e07"
-dependencies = [
- "tracing",
- "tracing-subscriber",
- "wasm-bindgen",
-]
-
-[[package]]
 name = "transform-stream"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11823,45 +12019,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm-bindgen-test"
-version = "0.3.79"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ae7499dfd45780a0a91d7ee6bb9ac51970a4479a41a89da443fdda5a39547d42"
-dependencies = [
- "async-trait",
- "cast",
- "js-sys",
- "libm",
- "minicov",
- "nu-ansi-term",
- "num-traits",
- "oorandom",
- "serde",
- "serde_json",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-bindgen-test-macro",
- "wasm-bindgen-test-shared",
-]
-
-[[package]]
-name = "wasm-bindgen-test-macro"
-version = "0.3.79"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3b84b5ac638bfb168196a1a461fcc8f46a294a18b1b6be52133b4e0db122cc9f"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.6",
-]
-
-[[package]]
-name = "wasm-bindgen-test-shared"
-version = "0.2.129"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4f692aa943ccd88363733b77063f32cfed5bc6cbea8e6e8b251b302f881606fe"
-
-[[package]]
 name = "wasm-streams"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11872,19 +12029,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
-]
-
-[[package]]
-name = "wasmtimer"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1c598d6b99ea013e35844697fc4670d08339d5cda15588f193c6beedd12f644b"
-dependencies = [
- "futures",
- "js-sys",
- "parking_lot",
- "pin-utils",
- "wasm-bindgen",
 ]
 
 [[package]]
@@ -12023,18 +12167,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "web-async"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ba1426dcf56093a94d9415ba4c016e45c1323679501e7309f1919ab32f08206"
-dependencies = [
- "tokio",
- "tracing",
- "wasm-bindgen-futures",
- "wasmtimer",
-]
-
-[[package]]
 name = "web-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12094,22 +12226,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60221f03172c9e8e8d19d1c038c87ef2804d05f8a71264817f60a28bbd03edab"
 dependencies = [
  "bytes",
-]
-
-[[package]]
-name = "web-transport-wasm"
-version = "0.8.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "05d0b90c2042f28eeb99ceb76625a141c4b6914e828168aeeeb38d22c8114f3b"
-dependencies = [
- "bytes",
- "js-sys",
- "thiserror 2.0.21",
- "url",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
- "web-transport-trait",
 ]
 
 [[package]]

@@ -49,7 +49,7 @@ async fn fetch_ahead(
 ) -> (
 	moq_net::track::Request,
 	moq_net::track::Fill,
-	moq_clock::sim::JoinHandle<Result<moq_net::group::Consumer, Error>>,
+	kio::clock::sim::JoinHandle<Result<moq_net::group::Consumer, Error>>,
 	Held,
 ) {
 	let version: Version = version.parse().unwrap();
@@ -65,17 +65,17 @@ async fn fetch_ahead(
 		links.push(link(version, &upstream, &next).await);
 		upstream = next;
 	}
-	let remote = moq_clock::timeout(TIMEOUT, upstream.consume().follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, upstream.consume().follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
-	let fetching = moq_clock::sim::spawn(async move { remote.track("video").unwrap().fetch_group(0, None).await });
+	let fetching = kio::clock::sim::spawn(async move { remote.track("video").unwrap().fetch_group(0, None).await });
 
-	let request = moq_clock::timeout(TIMEOUT, dynamic.requested_track())
+	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
 		.await
 		.expect("the info request arrives")
 		.unwrap();
-	let fill = moq_clock::timeout(TIMEOUT, request.requests().requested_fill())
+	let fill = kio::clock::timeout(TIMEOUT, request.requests().requested_fill())
 		.await
 		.unwrap_or_else(|_| panic!("{version}: the FETCH waited for the info"))
 		.unwrap();
@@ -89,7 +89,7 @@ async fn fetch_ahead(
 
 /// The FETCH is on the wire before the info is answered, at every hop, and the group comes
 /// back once it is.
-#[moq_clock::test]
+#[kio::test]
 async fn the_first_fetch_goes_out_with_the_info_request() {
 	for version in VERSIONS {
 		for relays in [0, 1] {
@@ -98,12 +98,12 @@ async fn the_first_fetch_goes_out_with_the_info_request() {
 			let mut group = fill.accept(0, timed()).unwrap();
 			group.write_frame(Timestamp::ZERO, b"early".as_ref()).unwrap();
 			group.finish().unwrap();
-			let mut fetched = moq_clock::timeout(TIMEOUT, fetching)
+			let mut fetched = kio::clock::timeout(TIMEOUT, fetching)
 				.await
 				.expect("the fetch resolves")
 				.expect("fetch panicked")
 				.unwrap_or_else(|err| panic!("{version}, {relays} relays: {err:?}"));
-			let frame = moq_clock::timeout(TIMEOUT, fetched.read_frame())
+			let frame = kio::clock::timeout(TIMEOUT, fetched.read_frame())
 				.await
 				.expect("read timeout")
 				.unwrap()
@@ -114,13 +114,13 @@ async fn the_first_fetch_goes_out_with_the_info_request() {
 }
 
 /// A refused info fails the fetch sent alongside it rather than leaving it waiting.
-#[moq_clock::test]
+#[kio::test]
 async fn a_refused_info_fails_the_fetch_sent_with_it() {
 	for version in VERSIONS {
 		for relays in [0, 1] {
 			let (request, fill, fetching, _held) = fetch_ahead(version, relays).await;
 			request.reject(Error::NotFound);
-			let res = moq_clock::timeout(TIMEOUT, fetching)
+			let res = kio::clock::timeout(TIMEOUT, fetching)
 				.await
 				.unwrap_or_else(|_| panic!("{version}, {relays} relays: the fetch never ended"))
 				.expect("fetch panicked");
@@ -153,28 +153,28 @@ async fn first_fetch(version: &str, relays: u64, rtt: Duration) -> Duration {
 		links.push(connect_mock(options).await);
 		upstream = next;
 	}
-	let remote = moq_clock::timeout(TIMEOUT, upstream.consume().follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, upstream.consume().follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
-	let start = moq_clock::now();
-	let mut fetched = moq_clock::timeout(TIMEOUT, remote.track("video").unwrap().fetch_group(0, None))
+	let start = kio::clock::now();
+	let mut fetched = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().fetch_group(0, None))
 		.await
 		.expect("fetch timeout")
 		.unwrap_or_else(|err| panic!("{version}: {err:?}"));
-	moq_clock::timeout(TIMEOUT, fetched.read_frame())
+	kio::clock::timeout(TIMEOUT, fetched.read_frame())
 		.await
 		.expect("read timeout")
 		.unwrap()
 		.expect("a frame");
-	let elapsed = moq_clock::now() - start;
+	let elapsed = kio::clock::now() - start;
 	drop((links, track, broadcast, publisher));
 	elapsed
 }
 
 /// The first fetch costs one round trip per hop, not the two of asking for the track's info
 /// first: the info and the fetch travel together.
-#[moq_clock::test]
+#[kio::test]
 async fn the_first_fetch_takes_one_round_trip_per_hop() {
 	const RTT: Duration = Duration::from_millis(100);
 	for version in VERSIONS {
