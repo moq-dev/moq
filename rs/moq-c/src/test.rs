@@ -3260,6 +3260,39 @@ fn dynamic_serves_a_request_under_a_prefix() {
 }
 
 #[test]
+fn dynamic_serves_a_held_consumer_without_taking_its_handle() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"source");
+	let held = consume_local(broadcast);
+	let cb = Callback::new();
+	let dynamic =
+		id(unsafe { moq_origin_requests(origin, b"live".as_ptr().cast(), 4, Some(channel_callback), cb.ptr) });
+	let result = Callback::new();
+	let _task = id(unsafe {
+		moq_origin_request(
+			origin,
+			b"live/cam".as_ptr().cast(),
+			8,
+			std::ptr::null(),
+			0,
+			Some(channel_callback),
+			result.ptr,
+		)
+	});
+	let request = id(cb.recv());
+	assert_eq!(moq_broadcast_request_serve(request, held), 0);
+	let served = id(result.recv());
+	assert!(moq_broadcast_request_serve(request, held) < 0, "request is consumed");
+	assert_eq!(moq_consume_close(held), 0, "source handle remains caller-owned");
+	result.recv_terminal();
+	assert_eq!(moq_consume_close(served), 0);
+	assert_eq!(moq_origin_requests_cancel(dynamic), 0);
+	cb.recv_terminal();
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+#[test]
 fn dynamic_refuses_a_missing_callback() {
 	let origin = id(moq_origin_create());
 	let prefix = b"live";

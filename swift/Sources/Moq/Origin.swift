@@ -59,6 +59,11 @@ public final class BroadcastRequest: Sendable {
         BroadcastPrepared(try ffi.prepare(epoch: epoch))
     }
 
+    /// Serve held content under the prefix route's continuous sequence space, without an exact route.
+    public func serve(broadcast: BroadcastConsumer) throws {
+        try ffi.serve(broadcast: broadcast.ffi)
+    }
+
     /// Reject the request with an application error code.
     public func reject(errorCode: UInt16) throws {
         try ffi.reject(errorCode: errorCode)

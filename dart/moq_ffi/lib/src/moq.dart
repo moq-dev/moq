@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -11876,6 +11878,7 @@ abstract class MoqBroadcastRequestInterface {
   String path();
   MoqBroadcastPrepared prepare({required String epoch});
   void reject({required int errorCode});
+  void serve({required MoqBroadcastConsumer broadcast});
 }
 
 final _MoqBroadcastRequestFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -11939,6 +11942,16 @@ class MoqBroadcastRequest implements MoqBroadcastRequestInterface {
       uniffi_moq_ffi_fn_method_moqbroadcastrequest_reject(
         uniffiClonePointer(),
         FfiConverterUInt16.lower(errorCode),
+        status,
+      );
+    }, moqExceptionErrorHandler);
+  }
+
+  void serve({required MoqBroadcastConsumer broadcast}) {
+    return rustCall((status) {
+      uniffi_moq_ffi_fn_method_moqbroadcastrequest_serve(
+        uniffiClonePointer(),
+        FfiConverterMoqBroadcastConsumer.lower(broadcast),
         status,
       );
     }, moqExceptionErrorHandler);
@@ -18636,6 +18649,15 @@ external void uniffi_moq_ffi_fn_method_moqbroadcastrequest_reject(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
+@Native<Void Function(Pointer<Void>, Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
+external void uniffi_moq_ffi_fn_method_moqbroadcastrequest_serve(
+  Pointer<Void> ptr,
+  Pointer<Void> broadcast,
+  Pointer<RustCallStatus> uniffiStatus,
+);
+
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
   assetId: _uniffiAssetId,
 )
@@ -20508,6 +20530,9 @@ external int uniffi_moq_ffi_checksum_method_moqbroadcastrequest_prepare();
 external int uniffi_moq_ffi_checksum_method_moqbroadcastrequest_reject();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
+external int uniffi_moq_ffi_checksum_method_moqbroadcastrequest_serve();
+
+@Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_method_moqfollowing_available();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
@@ -21224,6 +21249,9 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_reject() != 9727) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_serve() != 16802) {
+    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
+  }
   if (uniffi_moq_ffi_checksum_method_moqfollowing_available() != 39867) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
@@ -21253,7 +21281,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginrequests_requested_broadcast() !=
-      31253) {
+      47029) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqpublication_announce() != 60624) {

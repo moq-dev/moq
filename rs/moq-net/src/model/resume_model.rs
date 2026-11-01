@@ -459,7 +459,7 @@ impl Model {
 		let upstream = broadcast.consume();
 		let serving = moq_clock::sim::spawn(async move {
 			while let Ok(request) = kio::wait(|waiter| requests.poll_requested_broadcast(waiter)).await {
-				request.accept(&upstream);
+				request.serve(&upstream);
 			}
 		});
 		self.instances[epoch].routes[slot] = Some(Copy {

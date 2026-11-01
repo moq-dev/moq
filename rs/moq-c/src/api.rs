@@ -2074,6 +2074,27 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 	})
 }
 
+/// Serve a held consumer under the prefix route's instance without announcing an exact route.
+///
+/// Every answer at this path must continue the same sequences and bytes. Start a new
+/// prefix route for different content, or prepare and publish a job with its own instance.
+/// Consumes the request handle; the consumer remains owned by the caller.
+/// Returns zero on success, or a negative error.
+#[unsafe(no_mangle)]
+pub extern "C" fn moq_broadcast_request_serve(request: u32, broadcast: u32) -> i32 {
+	ffi::enter(move || {
+		let request = ffi::parse_id(request)?;
+		let broadcast = ffi::parse_id(broadcast)?;
+		let mut state = State::lock();
+		let broadcast = state.consume.broadcast(broadcast)?;
+		let (request, driver) = state.origin.broadcast_request_take(request)?;
+		driver.check()?;
+		request.serve(broadcast);
+		driver.check()?;
+		Ok(())
+	})
+}
+
 /// Start a broadcast request answer under `epoch`, hidden until published.
 ///
 /// Consumes the request handle, writes the new broadcast handle to `broadcast`

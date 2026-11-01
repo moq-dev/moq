@@ -4,7 +4,6 @@ import { expect, test } from "bun:test";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
-import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { createMockTransportPair } from "./mock.ts";
 import { Producer as OriginProducer } from "./origin.ts";
@@ -134,7 +133,7 @@ test("a forwarded untimed track stays untimed", async () => {
 		for await (const request of dynamic.requested()) {
 			const input = wireOf(ingest).consume(request.path);
 			inputs.push(input);
-			hooks.acceptRequest(request, await republish(input));
+			request.serve(await republish(input));
 		}
 	})();
 

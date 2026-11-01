@@ -2607,42 +2607,75 @@ test("create then announce is discoverable on the wire", async () => {
 	origin.close();
 });
 
-test("a handle serves a request under live/** over the wire", async () => {
-	const pair = createMockTransportPair(Lite.ALPN_06);
-	const origin = new OriginProducer();
-	const handle = origin.requestsRoute(Path.from("live"));
+test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
+	"a held answer's first subscribe succeeds on %s without an exact route",
+	async (protocol) => {
+		const pair = createMockTransportPair(protocol);
+		const origin = new OriginProducer();
+		const consumer = new OriginProducer();
+		const handle = origin.requests(Path.empty());
+		const held = new BroadcastProducer();
+		held.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
+		const serving = (async () => {
+			for await (const request of handle.requested()) request.serve(held.consume());
+		})();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client, consume: consumer }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+		const requested = consumer.request(Path.from("live/cam"));
+		const remote = await waitFor(requested.active, (broadcast) => broadcast !== undefined);
+		if (!remote) throw new Error("request did not resolve");
+		const track = remote.track("chat").subscribe().ordered();
+		expect(await track.readString()).toBe("hello");
+		expect(wireOf(origin.consume()).advertised.peek()?.has(Path.from("live/cam"))).toBe(false);
+		track.close();
+		requested.close();
+		handle.close();
+		await serving;
+		held.close();
+		client.abort();
+		server.abort();
+		origin.close();
+		consumer.close();
+	},
+);
 
-	const serving = (async () => {
-		for await (const request of handle.requested()) {
-			const produced = new BroadcastProducer();
-			produced.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("hello"));
-			hooks.acceptRequest(request, produced);
-		}
-	})();
-
-	const [client, server] = await Promise.all([
-		connect(url, { transport: pair.client }),
-		accept(pair.server, url, { publish: origin.consume() }),
-	]);
-
-	const announced = client.announced();
-	const entry = await announced.next();
-	expect(entry?.prefix).toBe("live" as Path.Valid);
-	expect(entry?.kind).toBe("start");
-
-	const remote = wireOf(client).consume(Path.from("live/cam"));
-	const track = remote.track("chat").subscribe().ordered();
-	expect(await track.readString()).toBe("hello");
-
-	track.close();
-	remote.close();
-	announced.close();
-	handle.close();
-	await serving;
-	client.abort();
-	server.abort();
-	origin.close();
-});
+test.each([Lite.ALPN_06, Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
+	"publishing a job still resets its first subscribe on %s",
+	async (protocol) => {
+		const pair = createMockTransportPair(protocol);
+		const origin = new OriginProducer();
+		const consumer = new OriginProducer();
+		const handle = origin.requests(Path.empty());
+		const serving = (async () => {
+			const requests = handle.requested();
+			const request = (await requests.next()).value;
+			if (!request) throw new Error("missing job request");
+			const prepared = request.prepare(Epoch.mint());
+			prepared.broadcast.createTrack("chat", { timescale: Timescale.MILLI }).writeFrame(textFrame("job"));
+			return prepared.publish();
+		})();
+		const [client, server] = await Promise.all([
+			connect(url, { transport: pair.client, consume: consumer }),
+			accept(pair.server, url, { publish: origin.consume() }),
+		]);
+		const requested = consumer.request(Path.from("live/cam"));
+		const remote = await waitFor(requested.active, (broadcast) => broadcast !== undefined);
+		if (!remote) throw new Error("request did not resolve");
+		const track = remote.track("chat").subscribe().ordered();
+		await expect(track.readString()).rejects.toBeInstanceOf(Error);
+		const publication = await serving;
+		track.close();
+		requested.close();
+		handle.close();
+		publication.broadcast.close();
+		client.abort();
+		server.abort();
+		origin.close();
+		consumer.close();
+	},
+);
 
 // The peer's close code a killed session carries.
 const DEATH = SessionCode(71);

@@ -796,6 +796,27 @@ async def test_dynamic_broadcast_request():
     served.broadcast.close()
 
 
+async def test_dynamic_serves_held_content_without_an_exact_route():
+    origin = moq.OriginProducer()
+    dynamic = origin.requests("live")
+    held = moq.BroadcastProducer()
+    track = held.publish_track("status", moq.TrackInfo(timescale=1_000_000))
+    source = held.consume()
+    requesting = asyncio.create_task(origin.consume().request("live/cam"))
+    request = await dynamic.requested_broadcast()
+    request.serve(source)
+    with pytest.raises(Exception):
+        request.serve(source)
+    broadcast = await requesting
+    reader = await broadcast.subscribe_track("status")
+    track.write_frame(b"held", timedelta(microseconds=1))
+    frame = await reader.read_frame()
+    assert frame is not None and frame.payload == b"held"
+    track.finish()
+    held.close()
+    dynamic.cancel()
+
+
 async def test_dynamic_broadcast_request_can_reject():
     origin = moq.OriginProducer()
     dynamic = origin.requests("")

@@ -8782,7 +8782,7 @@ mod serve_tests {
 			auth.handle().authorize(&nothing());
 			let output = crate::broadcast::Info::new().produce();
 			let _track = output.create_track("video", None).unwrap();
-			request.accept(&output);
+			request.serve(&output);
 			answer.await;
 
 			let code = refusal_code(&h.log.writes.lock().unwrap()[mark..], version);

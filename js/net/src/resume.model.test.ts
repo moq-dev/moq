@@ -445,10 +445,7 @@ class Model {
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 		void (async () => {
 			for await (const request of serving.requested()) {
-				hooks.acceptRequest(
-					request,
-					Upstream.of(broadcast, (sequence, local) => this.fill(epoch, slot, sequence, local)),
-				);
+				request.serve(Upstream.of(broadcast, (sequence, local) => this.fill(epoch, slot, sequence, local)));
 			}
 		})();
 		instance.routes[slot] = { track: producer, serving, broadcast, groups: new Map(), givenUp: new Set() };

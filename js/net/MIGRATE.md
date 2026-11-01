@@ -106,7 +106,8 @@ Only `publish` announces it: `prepared.broadcast` has no announcement methods.
 `Prepared.reject(err)` is replaced by idempotent `close()` and `[Symbol.dispose]()`; either refuses the unpublished answer as `Unroutable` and closes its broadcast. Closing that broadcast also refuses the request. `using` handles normal scope exit and exceptions; after `publish()`, disposal leaves the returned publication and its fill producer live.
 Use `request.reject(err)` to refuse before preparing. A retained, unclosed `Prepared` keeps its request pending; garbage collection provides no prompt cleanup guarantee.
 Construct a `Prepared` only with `request.prepare()`. Its constructor and the `Request.publisher`, `publishPrepared`, and `rejectPrepared` completion hooks are no longer public.
-`Dynamic.update` is no longer part of the public API, and `Request` has no `accept` (#6496): only the built-in sessions answer with a broadcast they already hold.
+`Dynamic.update` is no longer part of the public API (#6496).
+`Request.serve(broadcast)` additively exposes the former private answer path: serve held content without announcing an exact route. The prefix route promises the same bytes and continuous sequences at each served path; start a new prefix route for different content, or prepare and publish an independent job.
 Close the claim and claim again to change it, and close an answer's producer to end that output.
 
 ### `largest()` reports within a reader's `setGroups` bounds

@@ -61,7 +61,7 @@ this quest removes the predecessor machinery and grows to [XL].
   [One Route handle](/quest/m1/api-audit/route/handle.md) creates the
   path's exact route under the prefix route's identity by default, and the
   answer it gives the waiting request is that route's broadcast. A job
-  that serves a held broadcast through [serve](/quest/m1/api-audit/route/serve.md)
+  that serves a held broadcast through `Request::serve`
   never announces an exact route, so it needs none of this.
 - **One stream per path and identity.** A claim may answer a path under
   its identity only while that stream is live. Once the job's route ends,

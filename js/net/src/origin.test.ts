@@ -6,7 +6,7 @@ import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } fro
 import * as Epoch from "./epoch.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import { HopSchema, Route } from "./hop.ts";
-import { hooks, spreadHash } from "./internal.ts";
+import { spreadHash } from "./internal.ts";
 import { SessionBroadcast, textFrame } from "./mock.ts";
 import type { Consumer, Table } from "./origin.ts";
 import { Producer } from "./origin.ts";
@@ -33,7 +33,7 @@ function serve(origin: Producer, prefix: Path.Valid, consume: () => BroadcastCon
 	void (async () => {
 		try {
 			for await (const request of handle.requested()) {
-				hooks.acceptRequest(request, consume());
+				request.serve(consume());
 			}
 		} catch {
 			handle.close();
@@ -1108,7 +1108,7 @@ test("a handle serves a request under live", async () => {
 
 	const produced = new BroadcastProducer();
 	produced.createTrack("video", { timescale: Timescale.MILLI });
-	hooks.acceptRequest(req, produced);
+	req.serve(produced);
 	await settle();
 
 	expect(request.active.peek()).toBeDefined();
@@ -1122,7 +1122,7 @@ test("a handle serves a request under live", async () => {
 	origin.close();
 });
 
-test("an originated route refuses a broadcast a session delivered", async () => {
+test("an originated route serves held content a session delivered", async () => {
 	const origin = new Producer();
 	const handle = origin.requestsRoute(Path.from("live"));
 	const it = handle.requested();
@@ -1133,15 +1133,10 @@ test("an originated route refuses a broadcast a session delivered", async () => 
 	// What lite and IETF do when a session hands back a consumed broadcast.
 	const foreign = new BroadcastProducer().consume();
 	overrideBroadcastWire(foreign, {});
-	expect(() => hooks.acceptRequest(req, foreign)).toThrow("origin cannot serve a broadcast it did not produce");
-
-	const produced = new BroadcastProducer();
-	produced.createTrack("video");
-	hooks.acceptRequest(req, produced.consume());
+	req.serve(foreign);
 	expect(await pending).toBeDefined();
 
 	handle.close();
-	produced.close();
 	foreign.close();
 	origin.close();
 });
@@ -1188,7 +1183,7 @@ test("an accepted dynamic broadcast is retired when it closes", async () => {
 	const first = await it.next();
 	const produced = new BroadcastProducer();
 	produced.createTrack("video", { timescale: Timescale.MILLI });
-	hooks.acceptRequest(first.value, produced);
+	first.value.serve(produced);
 	await settle();
 	expect(request.active.peek()?.track("video").subscribe()).toBeDefined();
 
@@ -1200,7 +1195,7 @@ test("an accepted dynamic broadcast is retired when it closes", async () => {
 	expect(second.value?.path).toBe(path);
 	const replacement = new BroadcastProducer();
 	replacement.createTrack("video", { timescale: Timescale.MILLI });
-	hooks.acceptRequest(second.value, replacement);
+	second.value.serve(replacement);
 	await settle();
 	expect(request.active.peek()?.track("video").subscribe()).toBeDefined();
 
@@ -1238,7 +1233,7 @@ test("a peer is offered and served the cheapest originated route", async () => {
 	const pending = wireOf(consumer).demand(Path.from("live/cam"));
 	const { value: req } = await cheap.requested().next();
 	const upstream = new BroadcastProducer();
-	hooks.acceptRequest(req, upstream.consume());
+	req.serve(upstream.consume());
 	expect(await pending).toBeDefined();
 
 	// An exact-path local broadcast competes with them on cost too.
@@ -1298,7 +1293,7 @@ test("a request refusal does not keep demand from asking again", async () => {
 	const { value: second } = await it.next();
 	expect(second?.path).toBe(Path.from("live/cam"));
 	const produced = new BroadcastProducer();
-	hooks.acceptRequest(second, produced);
+	second.serve(produced);
 	await expect(pending).resolves.toBeDefined();
 
 	handle.close();
@@ -1322,7 +1317,7 @@ test("advancing requested without settling rejects the previous request", async 
 
 	await expect(firstDemand).rejects.toMatchObject({ code: StreamCode.Unroutable });
 	const produced = new BroadcastProducer();
-	hooks.acceptRequest(second.value, produced);
+	second.value.serve(produced);
 	await expect(secondDemand).resolves.toBeDefined();
 
 	handle.close();
@@ -1388,7 +1383,7 @@ test("an outranked route keeps serving until its replacement answers", async () 
 	// Once it answers, the request's tracks read it, under the same broadcast.
 	const replacement = new BroadcastProducer();
 	const { value: req } = await asked;
-	hooks.acceptRequest(req, replacement.consume());
+	req.serve(replacement.consume());
 	await settle();
 	expect(request.active.peek()).toBe(first);
 	expect(readsFrom(first, replacement)).toBe(true);
@@ -1724,7 +1719,7 @@ test("a refusal from a superseded route does not end the request", async () => {
 	expect(request.closed.peek()).toBeUndefined();
 
 	const produced = new BroadcastProducer();
-	hooks.acceptRequest(req, produced);
+	req.serve(produced);
 	await settle();
 	expect(request.active.peek()).toBeDefined();
 
@@ -1776,7 +1771,7 @@ test("close rejects queued requests as unroutable", async () => {
 
 	expect((await handle.requested().next()).done).toBe(true);
 	expect(request.active.peek()).toBeUndefined();
-	hooks.acceptRequest(req, new BroadcastProducer());
+	req.serve(new BroadcastProducer());
 	await settle();
 	expect(request.active.peek()).toBeUndefined();
 
@@ -1846,7 +1841,7 @@ test("announced filters before rooting and retains lifecycle, routing and watch 
 	const request = reader.request(Path.from("cam"));
 	const incoming = await broad.requested().next();
 	if (!incoming.value) throw new Error("missing served request");
-	hooks.acceptRequest(incoming.value, source.consume());
+	incoming.value.serve(source.consume());
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(request.active.peek()).toBeDefined();
 	request.close();
@@ -1892,7 +1887,7 @@ test("an equal-cost pool spreads its paths the same way on every node", async ()
 			void (async () => {
 				for await (const request of handle.requested()) {
 					served.set(request.path, hop);
-					hooks.acceptRequest(request, new BroadcastProducer());
+					request.serve(new BroadcastProducer());
 				}
 			})();
 			return handle;
@@ -1931,7 +1926,7 @@ test("an equal-cost replacement at its own path wins whatever its hop", async ()
 			void (async () => {
 				for await (const request of handle.requested()) {
 					served.push(hop);
-					hooks.acceptRequest(request, new BroadcastProducer());
+					request.serve(new BroadcastProducer());
 				}
 			})();
 			return handle;
@@ -2153,7 +2148,7 @@ test("a scoped dynamic only serves allowed paths and presents relative requests"
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(pending.value?.path).toBe(Path.from("room/alice/chat"));
 	const broadcast = new BroadcastProducer();
-	hooks.acceptRequest(pending.value, broadcast);
+	pending.value.serve(broadcast);
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(request.active.peek()).toBeDefined();
 	dynamic.updateRoute({ cost: 2n });
@@ -2291,7 +2286,7 @@ test("broadcast handles carry the path they were created or requested at", async
 	const request = origin.request(Path.from("live/bob"));
 	const pending = await dynamic.requested().next();
 	const served = new BroadcastProducer();
-	hooks.acceptRequest(pending.value, served);
+	pending.value.serve(served);
 	expect(request.active.peek()?.path).toBe(Path.from("live/bob"));
 
 	clone?.close();
@@ -2339,12 +2334,12 @@ test("demand held across an epoch change asks again, unless it named the old epo
 
 	// Another instance now serves the route: the old handler's answer is for the old one.
 	handle.updateRoute({ ...handle.route, epoch: NEWER });
-	hooks.acceptRequest(req, new BroadcastProducer().consume());
+	req.serve(new BroadcastProducer().consume());
 	await expect(pinned).rejects.toThrow("unroutable");
 
 	const next = new BroadcastProducer();
 	const track = next.createTrack("video");
-	hooks.acceptRequest((await it.next()).value, next);
+	(await it.next()).value.serve(next);
 	const subscription = (await unpinned)?.track("video").subscribe();
 	track.createGroup(7);
 	expect((await subscription?.recvGroup())?.sequence).toBe(7);
@@ -2388,11 +2383,11 @@ test("demand held across an epoch round trip still asks again", async () => {
 	// Released by the first change; the epoch coming back does not undo that.
 	handle.updateRoute({ ...handle.route, epoch: NEWER });
 	handle.updateRoute({ ...handle.route, epoch: EPOCH });
-	hooks.acceptRequest(req, new BroadcastProducer().consume());
+	req.serve(new BroadcastProducer().consume());
 
 	const next = new BroadcastProducer();
 	const track = next.createTrack("video");
-	hooks.acceptRequest((await it.next()).value, next);
+	(await it.next()).value.serve(next);
 	const subscription = (await demanded)?.track("video").subscribe();
 	track.createGroup(7);
 	expect((await subscription?.recvGroup())?.sequence).toBe(7);
@@ -2482,13 +2477,13 @@ test("a request held across an epoch change asks again and never takes the old h
 	const old = (await requests.next()).value;
 	dynamic.updateRoute({ ...dynamic.route, epoch: NEWER });
 	const current = origin.consume().request(path, { epoch: NEWER });
-	hooks.acceptRequest(old, new BroadcastProducer().consume());
+	old.serve(new BroadcastProducer().consume());
 	await settle();
 	expect(pinned.active.peek()).toBeUndefined();
 	expect(unpinned.active.peek()).toBeUndefined();
 	expect(current.active.peek()).toBeUndefined();
 	const next = (await requests.next()).value;
-	hooks.acceptRequest(next, new BroadcastProducer().consume());
+	next.serve(new BroadcastProducer().consume());
 	await settle();
 	expect(unpinned.active.peek()?.epoch).toBe(NEWER);
 	expect(current.active.peek()?.epoch).toBe(NEWER);
@@ -2517,7 +2512,7 @@ test.each([
 	const held = origin.consume().request(path);
 	const old = new BroadcastProducer();
 	const oldTrack = old.createTrack("video");
-	hooks.acceptRequest((await requests.next()).value, old);
+	(await requests.next()).value.serve(old);
 	await settle();
 	const resolved = held.active.peek();
 	expect(resolved?.epoch).toBe(from);
@@ -2554,7 +2549,7 @@ test.each([
 	const demanded = wireOf(origin.consume()).demand(path);
 	const next = new BroadcastProducer();
 	const nextTrack = next.createTrack("video");
-	hooks.acceptRequest((await requests.next()).value, next);
+	(await requests.next()).value.serve(next);
 	await settle();
 	expect(fresh.active.peek()?.epoch).toBe(to);
 	const subscription = fresh.active.peek()?.track("video").subscribe();
@@ -2595,7 +2590,7 @@ test("an epoch update does not retain an answer that already closed", async () =
 	const requests = dynamic.requested();
 	const held = origin.consume().request(path);
 	const old = new BroadcastProducer();
-	hooks.acceptRequest((await requests.next()).value, old);
+	(await requests.next()).value.serve(old);
 	old.close();
 	// The server's closure callback has not removed the answer yet.
 	dynamic.updateRoute({ epoch: NEWER });
@@ -2604,7 +2599,7 @@ test("an epoch update does not retain an answer that already closed", async () =
 		expect(held.active.peek()).toBeUndefined();
 		const fresh = origin.consume().request(path);
 		const next = new BroadcastProducer();
-		hooks.acceptRequest((await requests.next()).value, next);
+		(await requests.next()).value.serve(next);
 		expect(fresh.active.peek()?.epoch).toBe(NEWER);
 		fresh.close();
 		next.close();
@@ -2623,7 +2618,7 @@ test("an unread resolved request retains its broadcast until its last handle clo
 	const requests = dynamic.requested();
 	const held = origin.consume().request(path);
 	const old = new SessionBroadcast();
-	hooks.acceptRequest((await requests.next()).value, old);
+	(await requests.next()).value.serve(old);
 	// Change epochs before the active getter or its subscription can clone the answer.
 	dynamic.updateRoute({ epoch: NEWER });
 	expect(old.closed.peek()).toBeUndefined();
@@ -2645,14 +2640,14 @@ test("a session's re-request after an epoch update asks the handler again", asyn
 
 	const before = wire.demand(path);
 	const old = new BroadcastProducer();
-	hooks.acceptRequest((await requests.next()).value, old);
+	(await requests.next()).value.serve(old);
 	expect(await before).toBeDefined();
 
 	dynamic.updateRoute({ ...dynamic.route, epoch: NEWER });
 	const after = wire.demand(path);
 	const next = new BroadcastProducer();
 	const track = next.createTrack("video");
-	hooks.acceptRequest((await requests.next()).value, next);
+	(await requests.next()).value.serve(next);
 	const subscription = (await after)?.track("video").subscribe();
 	track.createGroup(7);
 	expect((await subscription?.recvGroup())?.sequence).toBe(7);
@@ -2676,7 +2671,7 @@ test("an update does not override route selection: another claim at the epoch ke
 
 	const held = origin.consume().request(path);
 	const answer = new BroadcastProducer();
-	hooks.acceptRequest((await firstRequests.next()).value, answer);
+	(await firstRequests.next()).value.serve(answer);
 	await settle();
 	expect(held.active.peek()?.epoch).toBe(EPOCH);
 
@@ -2686,7 +2681,7 @@ test("an update does not override route selection: another claim at the epoch ke
 	const fresh = origin.consume().request(path);
 	const replacement = new BroadcastProducer();
 	const track = replacement.createTrack("video");
-	hooks.acceptRequest((await secondRequests.next()).value, replacement);
+	(await secondRequests.next()).value.serve(replacement);
 	await settle();
 	expect(held.active.peek()?.epoch).toBe(EPOCH);
 	expect(fresh.active.peek()?.epoch).toBe(EPOCH);

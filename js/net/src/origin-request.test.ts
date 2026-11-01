@@ -3,8 +3,7 @@ import { Producer as BroadcastProducer } from "./broadcast";
 import * as Epoch from "./epoch";
 import { StreamCode, StreamError } from "./error";
 import { Route } from "./hop";
-import { hooks } from "./internal.ts";
-import { Producer, type Publication, type Request } from "./origin";
+import { Producer, type Publication } from "./origin";
 import * as Path from "./path";
 import { wireOf } from "./wire";
 
@@ -170,7 +169,7 @@ test("followers track the serving prefix, ignoring descendants and re-prices", a
 	const keeper = source.consume();
 	const prefix = origin.requestsRoute(Path.from("pool"));
 	const serving = (async () => {
-		for await (const request of prefix.requested()) hooks.acceptRequest(request, source.consume());
+		for await (const request of prefix.requested()) request.serve(source.consume());
 	})();
 	const request = origin.follow(Path.from("pool/job"));
 	await settle();
@@ -226,7 +225,7 @@ test("a follower tracks an epochless route replaced by an identical one", async 
 	const serve = (source: BroadcastProducer) => {
 		const route = origin.requestsRoute(path);
 		void (async () => {
-			for await (const request of route.requested()) hooks.acceptRequest(request, source.consume());
+			for await (const request of route.requested()) request.serve(source.consume());
 		})();
 		return route;
 	};
@@ -257,7 +256,7 @@ test("an origin closing settles a follower a served route resolved", async () =>
 	const source = new BroadcastProducer();
 	const route = origin.requestsRoute(path);
 	void (async () => {
-		for await (const request of route.requested()) hooks.acceptRequest(request, source.consume());
+		for await (const request of route.requested()) request.serve(source.consume());
 	})();
 	const request = origin.follow(path);
 	await settle();
@@ -307,7 +306,7 @@ for (const received of [false, true]) {
 		const source = new BroadcastProducer();
 		const route = received ? wireOf(origin).receive(path, Route.default) : origin.requestsRoute(path);
 		void (async () => {
-			for await (const request of route.requested()) hooks.acceptRequest(request, source.consume());
+			for await (const request of route.requested()) request.serve(source.consume());
 		})();
 
 		const request = origin.request(path);
@@ -372,19 +371,55 @@ test("a prepared answer cannot announce itself before publish", async () => {
 	origin.close();
 });
 
-test("an application claim cannot accept an arbitrary broadcast", async () => {
+test("an application serves held content without an exact route", async () => {
 	const origin = new Producer();
 	const claim = origin.requests(Path.from("room"));
 	const requests = claim.requested();
 	const request = origin.request(Path.from("room/alice"));
-	const pending: Request | undefined = (await requests.next()).value;
+	const pending = (await requests.next()).value;
 	if (!pending) throw new Error("expected a request");
-	// @ts-expect-error Only sessions accept a request; an application prepares and publishes.
-	expect(pending.accept).toBeUndefined();
+	const source = new BroadcastProducer();
+	source.createTrack("data").writeFrame({ payload: new TextEncoder().encode("held") });
+	pending.serve(source.consume());
+	await settle();
+	const reader = request.active.peek()?.track("data").subscribe().ordered();
+	expect(await reader?.readString()).toBe("held");
+	expect(wireOf(origin.consume()).advertised.peek()?.has(Path.from("room/alice"))).toBe(false);
+	reader?.close();
 	request.close();
 	claim.close();
+	source.close();
 	origin.close();
 });
+
+for (const withdraw of ["unannounce", "replace"] as const) {
+	test(`a published answer is not cached after ${withdraw}`, async () => {
+		const origin = new Producer();
+		const claim = origin.requests(Path.from("room"));
+		const requests = claim.requested();
+		const path = Path.from("room/alice");
+		const first = origin.request(path);
+		const pending = (await requests.next()).value;
+		if (!pending) throw new Error("expected a request");
+		const publication = pending.prepare(Epoch.mint()).publish();
+		await settle();
+		const held = first.active.peek()?.clone();
+		if (withdraw === "unannounce") publication.unannounce();
+		else origin.createBroadcast(path).broadcast.close();
+		const next = origin.request(path);
+		await settle();
+		expect(next.active.peek()).toBeUndefined();
+		const fresh = (await requests.next()).value;
+		if (!fresh) throw new Error("expected another request");
+		fresh.reject(new Error("no replacement"));
+		held?.close();
+		next.close();
+		first.close();
+		publication.broadcast.close();
+		claim.close();
+		origin.close();
+	});
+}
 
 test("closing a prepared answer refuses the request and closes its broadcast", async () => {
 	const origin = new Producer();
@@ -578,7 +613,7 @@ test("an epoch-pinned follower resumes when its instance returns after a gap", a
 	const serve = (instance: Epoch.Valid, broadcast: BroadcastProducer) => {
 		const route = origin.requestsRoute(path, { epoch: instance });
 		void (async () => {
-			for await (const request of route.requested()) hooks.acceptRequest(request, broadcast.consume());
+			for await (const request of route.requested()) request.serve(broadcast.consume());
 		})();
 		return route;
 	};
@@ -731,7 +766,7 @@ test("a pending request retries a route gap and never retargets after resolving"
 	if (!pending) throw new Error("replacement route was not requested");
 	const source = new BroadcastProducer();
 	const keeper = source.consume();
-	hooks.acceptRequest(pending, source.consume());
+	pending.serve(source.consume());
 	await settle();
 	expect(requested.active.peek()?.closed).toBe(source.closed);
 	const replacement = origin.createBroadcast(path);
