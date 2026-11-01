@@ -376,7 +376,7 @@ mod tests {
 			.await
 			.expect("IPv4 peer must reach a dual-stack mux");
 
-		let (_data, src) = moq_clock::timeout(Duration::from_secs(5), rx.packets.recv())
+		let (_data, src) = kio::clock::timeout(Duration::from_secs(5), rx.packets.recv())
 			.await
 			.expect("the demux must route the IPv4 peer's binding request")
 			.expect("session inbox stayed open");
