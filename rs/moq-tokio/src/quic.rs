@@ -35,7 +35,7 @@ pub mod web;
 /// Parsed from, and serialized as, a hex string. Its length must match the load
 /// balancer's configured server-ID length.
 #[serde_with::serde_as]
-#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] pub(crate) Vec<u8>);
 
 impl ServerId {
@@ -67,6 +67,20 @@ pub(crate) struct LoadBalancer {
 	pub id: ServerId,
 	/// Number of random nonce bytes appended to each connection ID.
 	pub nonce: usize,
+	/// Forwarding to the other servers behind this one's address.
+	pub forward: Option<Forward>,
+}
+
+/// Resolved QUIC-LB forwarding, every setting present.
+#[cfg(feature = "quic")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Forward {
+	/// The forward socket's address.
+	pub bind: std::net::SocketAddr,
+	/// The shared key file.
+	pub key: PathBuf,
+	/// The peer map file.
+	pub peers: PathBuf,
 }
 
 /// The congestion control family for a QUIC connection.

@@ -544,6 +544,13 @@ fn server_stateless_reset() {
 	// Force the server to generate the smallest possible stateless reset
 	pair.client.connections.get_mut(&client_ch).unwrap().ping();
 	info!("resetting");
+	pair.drive_client();
+	pair.drive_server();
+	// The client recognizes the reset before handling it, and not just any short header.
+	let (_, _, reset) = pair.client.inbound.back().unwrap();
+	assert!(pair.client.endpoint.is_stateless_reset(pair.server.addr, reset));
+	assert!(!pair.client.endpoint.is_stateless_reset(pair.server.addr, &[0x40; 64]));
+	assert!(!pair.client.endpoint.is_stateless_reset(pair.client.addr, reset));
 	pair.drive();
 	assert_matches!(
 		pair.client_conn_mut(client_ch).poll(),

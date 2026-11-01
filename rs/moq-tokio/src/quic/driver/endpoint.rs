@@ -31,6 +31,7 @@ pub use crate::quic::driver::runtime::AsyncUdpSocket;
 use crate::quic::driver::{
 	ConnectionEvent, IO_LOOP_BOUND, Instant, RECV_TIME_BOUND, VarInt,
 	connection::Connecting,
+	forward::Forward,
 	runtime::{Slot, wrap_udp_socket},
 	udp_transmit,
 	work_limiter::WorkLimiter,
@@ -100,8 +101,19 @@ impl Endpoint {
 	/// The endpoint's tasks run on the caller's tokio runtime, else moq-tokio's fallback. With
 	/// the `sim` feature, an endpoint made inside `kio::clock::sim::run` runs them on the simulator.
 	pub fn new(config: Config, socket: impl Into<Socket>) -> Result<Self, Error> {
+		Self::start(config, socket.into(), None)
+	}
+
+	/// [`new`](Self::new), forwarding each packet whose QUIC-LB server ID names another server
+	/// and accepting the packets those servers forward here.
+	#[cfg_attr(not(feature = "quic"), expect(dead_code, reason = "only the QUIC backend forwards"))]
+	pub(crate) fn forwarding(config: Config, socket: impl Into<Socket>, forward: Forward) -> Result<Self, Error> {
+		Self::start(config, socket.into(), Some(forward))
+	}
+
+	fn start(config: Config, socket: Socket, forward: Option<Forward>) -> Result<Self, Error> {
 		let runtime = crate::runtime::Spawner::current();
-		let socket = socket.into().into_async()?;
+		let socket = socket.into_async()?;
 		let addr = socket.local_addr()?;
 		let allow_mtud = !socket.may_fragment();
 		let max_receive_segments = socket.max_receive_segments();
@@ -113,6 +125,7 @@ impl Endpoint {
 			max_udp_payload_size,
 			max_receive_segments,
 			runtime.clone(),
+			forward,
 		);
 		let driver = EndpointDriver(rc.clone());
 		runtime.spawn(
@@ -503,6 +516,8 @@ pub(crate) struct State {
 	driver_lost: bool,
 	/// Connections in the process of being accepted
 	pending_accepts: usize,
+	/// QUIC-LB forwarding to and from the other servers behind this one's address
+	forward: Option<Forward>,
 }
 
 #[derive(Debug)]
@@ -523,6 +538,7 @@ impl State {
 			let poll_res = self.recv_state.poll_socket(
 				cx,
 				&mut self.inner,
+				self.forward.as_mut(),
 				&mut |cx, bufs, meta| socket.poll_recv(cx, bufs, meta),
 				slot,
 				now,
@@ -534,10 +550,19 @@ impl State {
 		let poll_res = self.recv_state.poll_socket(
 			cx,
 			&mut self.inner,
+			self.forward.as_mut(),
 			&mut |cx, bufs, meta| slot.poll_recv(cx, bufs, meta),
 			slot,
 			now,
 		);
+		// Polled even when the socket used up the budget, which still admits one forward, so a
+		// busy socket cannot starve them.
+		let forwards = match self.forward.as_mut() {
+			Some(forward) => self
+				.recv_state
+				.poll_forwards(cx, &mut self.inner, forward, self.ipv6, slot, now),
+			None => Ok(false),
+		};
 		self.recv_state.recv_limiter.finish_cycle(get_time);
 		let poll_res = poll_res?;
 		if poll_res.received_connection_packet {
@@ -545,7 +570,7 @@ impl State {
 			// one anymore. TODO: Account for multiple outgoing connections.
 			self.prev_socket = None;
 		}
-		Ok(poll_res.keep_going)
+		Ok(poll_res.keep_going || forwards?)
 	}
 
 	fn handle_events(&mut self, cx: &mut Context<'_>, shared: &Shared) -> bool {
@@ -769,6 +794,7 @@ impl EndpointRef {
 		max_udp_payload_size: u16,
 		max_receive_segments: usize,
 		runtime: crate::runtime::Spawner,
+		forward: Option<Forward>,
 	) -> Self {
 		let (sender, events) = mpsc::unbounded_channel();
 		let recv_state = RecvState::new(sender, max_receive_segments, max_udp_payload_size);
@@ -793,6 +819,7 @@ impl EndpointRef {
 				driver_lost: false,
 				recv_state,
 				pending_accepts: 0,
+				forward,
 			}),
 		}))
 	}
@@ -869,6 +896,7 @@ impl RecvState {
 		&mut self,
 		cx: &mut Context<'_>,
 		endpoint: &mut moq_quic::endpoint::Endpoint,
+		mut forward: Option<&mut Forward>,
 		recv: &mut PollRecv<'_>,
 		slot: &Slot,
 		now: Instant,
@@ -916,7 +944,12 @@ impl RecvState {
 						);
 						while !data.is_empty() {
 							let buf = data.split_to(meta.stride.min(data.len()));
-							let mut response_buffer = Vec::new();
+							if let Some(forward) = forward.as_deref_mut()
+								&& forward.route(&buf, meta.addr, meta.dst_ip, meta.ecn, || {
+									endpoint.is_stateless_reset(meta.addr, &buf)
+								}) {
+								continue;
+							}
 							let received = Received {
 								remote: meta.addr,
 								local_ip: meta.dst_ip,
@@ -924,30 +957,8 @@ impl RecvState {
 								data: buf,
 								arrival: arrival.take(),
 							};
-							match endpoint.handle(now, received, &mut response_buffer) {
-								Some(DatagramEvent::NewConnection(incoming)) => {
-									if self.connections.close.is_none() {
-										self.incoming.push_back(incoming);
-									} else {
-										let transmit = endpoint.refuse(incoming, &mut response_buffer);
-										respond(transmit, &response_buffer, slot);
-									}
-								}
-								Some(DatagramEvent::ConnectionEvent(handle, event)) => {
-									// Ignoring errors from dropped connections that haven't yet been cleaned up
-									received_connection_packet = true;
-									let _ = self
-										.connections
-										.senders
-										.get_mut(&handle)
-										.unwrap()
-										.send(ConnectionEvent::Proto(event));
-								}
-								Some(DatagramEvent::Response(transmit)) => {
-									respond(transmit, &response_buffer, slot);
-								}
-								None => {}
-							}
+							received_connection_packet |=
+								Self::handle(&mut self.incoming, &mut self.connections, endpoint, now, received, slot);
 						}
 					}
 				}
@@ -978,6 +989,92 @@ impl RecvState {
 					received_connection_packet,
 					keep_going: true,
 				});
+			}
+		}
+	}
+}
+
+impl RecvState {
+	/// Hand one received datagram to the endpoint, returning whether it reached a connection.
+	fn handle(
+		incoming_queue: &mut VecDeque<moq_quic::endpoint::Incoming>,
+		connections: &mut ConnectionSet,
+		endpoint: &mut moq_quic::endpoint::Endpoint,
+		now: Instant,
+		received: Received,
+		slot: &Slot,
+	) -> bool {
+		let mut response_buffer = Vec::new();
+		match endpoint.handle(now, received, &mut response_buffer) {
+			Some(DatagramEvent::NewConnection(incoming)) => {
+				if connections.close.is_none() {
+					incoming_queue.push_back(incoming);
+				} else {
+					let transmit = endpoint.refuse(incoming, &mut response_buffer);
+					respond(transmit, &response_buffer, slot);
+				}
+			}
+			Some(DatagramEvent::ConnectionEvent(handle, event)) => {
+				// Ignoring errors from dropped connections that haven't yet been cleaned up
+				let _ = connections
+					.senders
+					.get_mut(&handle)
+					.unwrap()
+					.send(ConnectionEvent::Proto(event));
+				return true;
+			}
+			Some(DatagramEvent::Response(transmit)) => {
+				respond(transmit, &response_buffer, slot);
+			}
+			None => {}
+		}
+		false
+	}
+
+	/// Process the packets other servers forwarded here, returning whether the work limiter
+	/// stopped before they ran out.
+	fn poll_forwards(
+		&mut self,
+		cx: &mut Context<'_>,
+		endpoint: &mut moq_quic::endpoint::Endpoint,
+		forward: &mut Forward,
+		ipv6: bool,
+		slot: &Slot,
+		now: Instant,
+	) -> Result<bool, io::Error> {
+		loop {
+			match forward.poll_recv(cx) {
+				Poll::Ready(Ok(Some(unwrapped))) => {
+					// The client's address as this socket would have reported it, so the
+					// connection sees the path its handshake took. An IPv6 client cannot have
+					// shaken hands on an IPv4 socket.
+					let remote = match (ipv6, unwrapped.remote) {
+						(true, remote) => Some(SocketAddr::V6(ensure_ipv6(remote))),
+						(false, remote @ SocketAddr::V4(_)) => Some(remote),
+						(false, SocketAddr::V6(_)) => None,
+					};
+					if let Some(remote) = remote {
+						self.datagrams.extend_from_slice(unwrapped.packet);
+						let received = Received {
+							remote,
+							local_ip: unwrapped.local_ip,
+							ecn: unwrapped.ecn.map(proto_ecn),
+							data: self.datagrams.split(),
+							// When the forward reached this server: the hop between servers is
+							// part of the client's path now, and their clocks are not shared.
+							arrival: Some(Instant::now()),
+						};
+						Self::handle(&mut self.incoming, &mut self.connections, endpoint, now, received, slot);
+					}
+				}
+				Poll::Ready(Ok(None)) => {}
+				Poll::Pending => return Ok(false),
+				Poll::Ready(Err(e)) if e.kind() == io::ErrorKind::ConnectionReset || is_msg_size_err(&e) => {}
+				Poll::Ready(Err(e)) => return Err(e),
+			}
+			self.recv_limiter.record_work(1);
+			if !self.recv_limiter.allow_work(Instant::now) {
+				return Ok(true);
 			}
 		}
 	}
@@ -1041,6 +1138,7 @@ mod tests {
 					.poll_socket(
 						&mut cx,
 						&mut endpoint,
+						None,
 						&mut |cx, bufs, meta| socket.poll_recv(cx, bufs, meta),
 						&slot,
 						now,

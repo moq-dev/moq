@@ -330,11 +330,16 @@ impl EndpointFactory {
 		self.endpoint_with_config(transport::Config::default())
 	}
 
-	fn endpoint_with_config(&self, transport_config: transport::Config) -> Endpoint {
+	fn server_config(&self, transport_config: transport::Config) -> server::Config {
 		let key = PrivateKeyDer::Pkcs8(self.cert.signing_key.serialize_der().into());
 		let mut server_config =
 			crate::quic::driver::server::Config::with_single_cert(vec![self.cert.cert.der().clone()], key).unwrap();
-		server_config.transport = transport_config.clone();
+		server_config.transport = transport_config;
+		server_config
+	}
+
+	fn endpoint_with_config(&self, transport_config: transport::Config) -> Endpoint {
+		let server_config = self.server_config(transport_config.clone());
 
 		let mut roots = RootCertStore::empty();
 		roots.add(self.cert.cert.der().clone()).unwrap();
@@ -1370,6 +1375,103 @@ async fn remote_address_follows_migration() {
 
 	server_task.await.unwrap();
 	client_conn.close(0u32.into(), "done");
+}
+
+/// Three servers sit behind one front address. A connection whose handshake reached the first
+/// keeps working while the front sends its packets to the second, then the third: each forwards
+/// them to the first, which replies to the client directly.
+#[tokio::test]
+async fn forwarded_packets_reach_their_owner() {
+	use crate::quic::driver::forward::{Forward, Map, Peers, ServerIdGenerator};
+
+	let _guard = subscribe();
+	let localhost = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+	let factory = EndpointFactory::new();
+	let key = [7; 32];
+
+	let sockets: Vec<UdpSocket> = (0..3).map(|_| UdpSocket::bind(localhost).unwrap()).collect();
+	let peers = Peers::default();
+	let mut map = Map::default();
+	for (id, socket) in (1u8..).zip(&sockets) {
+		map.insert(&[id], socket.local_addr().unwrap());
+	}
+	peers.set(map);
+	let servers: Vec<Endpoint> = (1u8..)
+		.zip(sockets)
+		.map(|(id, socket)| {
+			let mut config = factory.endpoint_config.clone();
+			config.cid_generator = Some(Arc::new(move || Box::new(ServerIdGenerator::new(&[id], 4))));
+			let forward = Forward::new(socket, &[id], peers.clone(), &key, config.max_udp_payload_size).unwrap();
+			Endpoint::forwarding(
+				config.with_server(factory.server_config(transport::Config::default())),
+				UdpSocket::bind(localhost).unwrap(),
+				forward,
+			)
+			.unwrap()
+		})
+		.collect();
+
+	// The front end: the client's packets go to whichever server it names, from one address, and
+	// a reply from any server goes back to the client.
+	let front = tokio::net::UdpSocket::bind(localhost).await.unwrap();
+	let front_addr = front.local_addr().unwrap();
+	let back = tokio::net::UdpSocket::bind(localhost).await.unwrap();
+	let back_addr = back.local_addr().unwrap();
+	let target = Arc::new(Mutex::new(servers[0].local_addr()));
+	let front_task = tokio::spawn({
+		let target = target.clone();
+		async move {
+			let (mut up, mut down) = ([0; 1500], [0; 1500]);
+			let mut client = None;
+			loop {
+				tokio::select! {
+					received = front.recv_from(&mut up) => {
+						let (len, from) = received.unwrap();
+						client = Some(from);
+						let to = *target.lock().unwrap();
+						back.send_to(&up[..len], to).await.unwrap();
+					}
+					received = back.recv_from(&mut down) => {
+						let (len, _) = received.unwrap();
+						front.send_to(&down[..len], client.unwrap()).await.unwrap();
+					}
+				}
+			}
+		}
+	});
+
+	let owner = servers[0].clone();
+	let server_task = tokio::spawn(async move {
+		let conn = owner.accept().await.unwrap().accept().unwrap().await.unwrap();
+		loop {
+			let Ok(stream) = conn.accept_bi().await else { break };
+			// The client's packets keep arriving from the address its handshake took, whichever
+			// server they reached first.
+			assert_eq!(conn.remote_address(), back_addr);
+			echo(stream).await;
+		}
+	});
+
+	let client = factory.endpoint();
+	let conn = client.dial(front_addr, "localhost").unwrap().await.unwrap();
+	for (round, server) in [0, 1, 2, 0].into_iter().enumerate() {
+		*target.lock().unwrap() = servers[server].local_addr();
+		let message = format!("round {round} through server {server}");
+		let (mut send, mut recv) = conn.open_bi(Default::default()).await.unwrap();
+		send.write_all(message.as_bytes()).await.unwrap();
+		let _ = send.finish();
+		let echoed = timeout(Duration::from_secs(10), recv.read_to_end(1024))
+			.await
+			.expect("the owner answered")
+			.unwrap();
+		assert_eq!(echoed, message.as_bytes());
+	}
+	assert_eq!(servers[1].open_connections(), 0);
+	assert_eq!(servers[2].open_connections(), 0);
+
+	conn.close(0u32.into(), "done");
+	server_task.await.unwrap();
+	front_task.abort();
 }
 
 /// A send group from another connection panics where it is passed in, without poisoning the

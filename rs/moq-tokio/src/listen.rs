@@ -447,6 +447,34 @@ impl Config {
 				"--listen-quic-lb-nonce requires --listen-quic-lb-id",
 			));
 		}
+		let forward = &self.lb.forward;
+		if forward.configured() {
+			let refused = [
+				(
+					self.lb.id.is_none(),
+					"--listen-quic-lb-forward-* requires --listen-quic-lb-id",
+				),
+				(
+					forward.bind.is_none(),
+					"--listen-quic-lb-forward-* requires --listen-quic-lb-forward-bind",
+				),
+				(
+					forward.key.is_none(),
+					"--listen-quic-lb-forward-bind requires --listen-quic-lb-forward-key",
+				),
+				(
+					forward.peers.is_none(),
+					"--listen-quic-lb-forward-bind requires --listen-quic-lb-forward-peers",
+				),
+				(
+					forward.bind.is_some_and(|bind| bind.ip().is_unspecified()),
+					"--listen-quic-lb-forward-bind needs a specific IP, which its peers list",
+				),
+			];
+			if let Some((_, reason)) = refused.into_iter().find(|(set, _)| *set) {
+				return Err(crate::Error::NoBackend(reason));
+			}
+		}
 		Ok(())
 	}
 
@@ -562,9 +590,18 @@ impl Config {
 	#[cfg(feature = "quic")]
 	/// Return the effective QUIC-LB connection-ID encoding.
 	pub(crate) fn load_balancer(&self) -> Option<crate::quic::LoadBalancer> {
+		let forward = &self.lb.forward;
 		self.lb.id.clone().map(|id| crate::quic::LoadBalancer {
 			id,
 			nonce: self.lb.nonce.unwrap_or(8),
+			forward: match (forward.bind, &forward.key, &forward.peers) {
+				(Some(bind), Some(key), Some(peers)) => Some(crate::quic::Forward {
+					bind,
+					key: key.clone(),
+					peers: peers.clone(),
+				}),
+				_ => None,
+			},
 		})
 	}
 }
@@ -706,6 +743,7 @@ mod tests {
 			Some(crate::quic::LoadBalancer {
 				id: "ab".parse().unwrap(),
 				nonce: 9,
+				forward: None,
 			})
 		);
 	}
@@ -741,6 +779,11 @@ mod tests {
 [lb]
 id = "ab"
 nonce = 8
+
+[lb.forward]
+bind = "10.0.0.1:4443"
+key = "forward.key"
+peers = "peers.toml"
 "#,
 		)
 		.unwrap();
@@ -749,8 +792,44 @@ nonce = 8
 			Some(crate::quic::LoadBalancer {
 				id: "ab".parse().unwrap(),
 				nonce: 8,
+				forward: Some(crate::quic::Forward {
+					bind: "10.0.0.1:4443".parse().unwrap(),
+					key: "forward.key".into(),
+					peers: "peers.toml".into(),
+				}),
 			})
 		);
+	}
+
+	/// Forwarding needs a server ID and all three of its settings, and a bind its peers can name.
+	#[test]
+	fn quic_lb_forward_refuses_a_partial_config() {
+		let complete = "[lb]\nid = \"ab\"\n[lb.forward]\nbind = \"10.0.0.1:4443\"\nkey = \"k\"\npeers = \"p\"\n";
+		let config: Config = toml::from_str(complete).unwrap();
+		config.validate().expect("complete");
+
+		for (body, needle) in [
+			(complete.replace("id = \"ab\"\n", ""), "requires --listen-quic-lb-id"),
+			(
+				complete.replace("bind = \"10.0.0.1:4443\"\n", ""),
+				"requires --listen-quic-lb-forward-bind",
+			),
+			(
+				complete.replace("key = \"k\"\n", ""),
+				"requires --listen-quic-lb-forward-key",
+			),
+			(
+				complete.replace("peers = \"p\"\n", ""),
+				"requires --listen-quic-lb-forward-peers",
+			),
+			(complete.replace("10.0.0.1", "0.0.0.0"), "needs a specific IP"),
+		] {
+			let config: Config = toml::from_str(&body).unwrap();
+			match config.validate() {
+				Err(crate::Error::NoBackend(reason)) => assert!(reason.contains(needle), "{body}: {reason}"),
+				other => panic!("{body}: {other:?}"),
+			}
+		}
 	}
 
 	/// A stream-only server opens no QUIC listener even with a bind configured,
@@ -902,4 +981,66 @@ pub struct LoadBalancer {
 	)]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub nonce: Option<usize>,
+
+	/// Forwarding to the other servers behind this one's address (`[listen.lb.forward]`).
+	#[usage(flatten)]
+	#[serde(default)]
+	pub forward: Forward,
+}
+
+/// QUIC-LB forwarding (`[listen.lb.forward]`, `--listen-quic-lb-forward-*`).
+///
+/// Behind an anycast address or a load-balanced VIP, a route change or a rebalance can land an
+/// established connection's packets on another server. With forwarding, that server hands each
+/// packet whose connection ID names another server to the owner, which processes it as if the
+/// client had sent it there and keeps replying from the shared address. Only packets after the
+/// handshake are forwarded, so the front end must still keep a handshake on one server.
+#[derive(Clone, Debug, Default, usage_rs::Args, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct Forward {
+	/// The UDP address this server receives forwards on, and the one its peers name it by.
+	/// Needs a specific IP, since a forward is accepted only from a peer's listed address.
+	#[usage(
+		name = "listen-quic-lb-forward-bind",
+		long = "listen-quic-lb-forward-bind",
+		env = "MOQ_LISTEN_QUIC_LB_FORWARD_BIND",
+		setting = "listen.lb.forward.bind"
+	)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub bind: Option<std::net::SocketAddr>,
+
+	/// A file holding the key every server forwarding to this one shares, as 64 hexadecimal
+	/// characters (`openssl rand -hex 32`). It authenticates each forward, which carries a
+	/// client address the receiver would otherwise take on trust.
+	#[usage(
+		name = "listen-quic-lb-forward-key",
+		long = "listen-quic-lb-forward-key",
+		env = "MOQ_LISTEN_QUIC_LB_FORWARD_KEY",
+		setting = "listen.lb.forward.key"
+	)]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub key: Option<std::path::PathBuf>,
+
+	/// A TOML file naming each server's forward address by its hex server ID, such as
+	/// `"02" = "10.0.0.2:4443"`. Reloaded when it changes, keeping the last valid map.
+	/// This server's own entry is skipped, so every server can share one file. A packet for
+	/// a server missing from it is dropped.
+	#[usage(
+		name = "listen-quic-lb-forward-peers",
+		long = "listen-quic-lb-forward-peers",
+		env = "MOQ_LISTEN_QUIC_LB_FORWARD_PEERS",
+		setting = "listen.lb.forward.peers"
+	)]
+	#[usage(value_hint = usage_rs::ValueHint::FilePath)]
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub peers: Option<std::path::PathBuf>,
+}
+
+impl Forward {
+	/// Whether any forwarding setting is present.
+	pub fn configured(&self) -> bool {
+		self.bind.is_some() || self.key.is_some() || self.peers.is_some()
+	}
 }

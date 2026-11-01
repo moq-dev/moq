@@ -239,6 +239,27 @@ pub enum Error {
 	/// The flow-control limits are ones a peer would refuse, so none were applied.
 	#[error("invalid quic limits: {0}")]
 	Limits(#[from] moq_quic::LimitsError),
+
+	/// The QUIC-LB forward socket failed to bind.
+	#[error("failed to bind the QUIC-LB forward socket")]
+	BindForward(#[source] std::io::Error),
+
+	/// The QUIC-LB forward key file could not be read or does not hold 64 hexadecimal characters.
+	#[error("invalid QUIC-LB forward key")]
+	ForwardKey(#[source] crate::secret::Error),
+
+	/// The QUIC-LB peers file could not be read, or names a peer this server cannot forward to.
+	#[error("invalid QUIC-LB peers file {}: {reason}", path.display())]
+	ForwardPeers {
+		/// The peers file.
+		path: std::path::PathBuf,
+		/// What is wrong with it.
+		reason: String,
+	},
+
+	/// The QUIC-LB peers file could not be watched for changes.
+	#[error("failed to watch the QUIC-LB peers file: {0}")]
+	WatchPeers(String),
 }
 
 impl crate::failover::Aggregate for Error {
@@ -554,6 +575,8 @@ fn proto_status(err: &web::proto::ConnectError) -> Option<u16> {
 pub(crate) struct Server {
 	pub quic: driver::endpoint::Endpoint,
 	tls: crate::tls::Serve,
+	/// Reloads the QUIC-LB peers for as long as the server runs.
+	_peers: Option<notify::RecommendedWatcher>,
 }
 
 pub(crate) struct Options {
@@ -619,6 +642,7 @@ impl Server {
 			endpoint_config.reset_secret = Some(*secret.as_bytes());
 		}
 
+		let mut forward = None;
 		// Configure connection ID generator with server ID if provided
 		if let Some(shard) = member.as_ref().map(listen::Socket::shard) {
 			if load_balancer.is_some() {
@@ -653,8 +677,15 @@ impl Server {
 				nonce_len,
 				"using QUIC-LB compatible connection ID generation"
 			);
+			if let Some(config) = &load_balancer.forward {
+				forward = Some(Forwarding::start(
+					config,
+					&server_id,
+					endpoint_config.max_udp_payload_size,
+				)?);
+			}
 			endpoint_config.cid_generator = Some(Arc::new(move || {
-				Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len))
+				Box::new(driver::forward::ServerIdGenerator::new(&server_id.0, nonce_len))
 			}));
 		}
 
@@ -665,9 +696,20 @@ impl Server {
 			None => crate::bind::udp(crate::bind::Udp::new(listen)).map_err(Error::BindSocket)?,
 		};
 
-		let quic = driver::endpoint::Endpoint::new(endpoint_config, socket).map_err(Error::CreateEndpoint)?;
+		let (quic, peers) = match forward {
+			Some(Forwarding { forward, watcher }) => (
+				driver::endpoint::Endpoint::forwarding(endpoint_config, socket, forward),
+				Some(watcher),
+			),
+			None => (driver::endpoint::Endpoint::new(endpoint_config, socket), None),
+		};
+		let quic = quic.map_err(Error::CreateEndpoint)?;
 
-		Ok(Self { quic, tls: served })
+		Ok(Self {
+			quic,
+			tls: served,
+			_peers: peers,
+		})
 	}
 
 	pub fn accept(&self) -> impl std::future::Future<Output = Option<driver::endpoint::Incoming>> + '_ {
@@ -811,38 +853,73 @@ pub(crate) async fn accept(
 	}
 }
 
-// ── ServerIdGenerator ───────────────────────────────────────────────
+// ── Forwarding ──────────────────────────────────────────────────────
 
-struct ServerIdGenerator {
-	server_id: ServerId,
-	nonce_len: usize,
+/// A forward socket, and the watcher that keeps its peers current.
+struct Forwarding {
+	forward: driver::forward::Forward,
+	watcher: notify::RecommendedWatcher,
 }
 
-impl ServerIdGenerator {
-	fn new(server_id: ServerId, nonce_len: usize) -> Self {
-		Self { server_id, nonce_len }
+impl Forwarding {
+	fn start(config: &crate::quic::Forward, id: &ServerId, max_udp_payload_size: u16) -> Result<Self> {
+		let key = crate::secret::Secret::read(&config.key).map_err(Error::ForwardKey)?;
+		let peers = driver::forward::Peers::default();
+		peers.set(read_peers(&config.peers, id, config.bind)?);
+
+		let reload = peers.clone();
+		let (path, own, bind) = (config.peers.clone(), id.clone(), config.bind);
+		let watcher = crate::watch::callback(std::slice::from_ref(&config.peers), move || {
+			match read_peers(&path, &own, bind) {
+				Ok(map) => {
+					reload.set(map);
+					tracing::info!(path = %path.display(), "reloaded QUIC-LB peers");
+				}
+				Err(err) => tracing::warn!(%err, "failed to reload QUIC-LB peers; retaining the previous ones"),
+			}
+		})
+		.map_err(|err| Error::WatchPeers(err.to_string()))?;
+
+		let socket = std::net::UdpSocket::bind(config.bind).map_err(Error::BindForward)?;
+		let forward = driver::forward::Forward::new(socket, &id.0, peers, key.as_bytes(), max_udp_payload_size)
+			.map_err(Error::BindForward)?;
+		tracing::info!(bind = %config.bind, "forwarding QUIC-LB packets");
+		Ok(Self { forward, watcher })
 	}
 }
 
-impl driver::ConnectionIdGenerator for ServerIdGenerator {
-	fn generate_cid(&mut self) -> driver::ConnectionId {
-		use rand::RngExt;
-		let cid_len = self.cid_len();
-		let mut cid = Vec::with_capacity(cid_len);
-		// First byte has "self-encoded length" of server ID + nonce
-		cid.push((cid_len - 1) as u8);
-		cid.extend(self.server_id.0.iter());
-		cid.extend(rand::rng().random_iter::<u8>().take(self.nonce_len));
-		driver::ConnectionId::new(cid.as_slice())
-	}
+/// Read the peers file, skipping this server's own entry.
+///
+/// Refuses the whole file for one bad entry, so a typo cannot quietly strand that server's
+/// clients: a server ID of another length, which this server's connection IDs could not carry,
+/// or an address it cannot send to or accept from.
+fn read_peers(path: &std::path::Path, own: &ServerId, bind: net::SocketAddr) -> Result<driver::forward::Map> {
+	let invalid = |reason: String| Error::ForwardPeers {
+		path: path.to_owned(),
+		reason,
+	};
+	let text = std::fs::read_to_string(path).map_err(|err| invalid(err.to_string()))?;
+	let peers: std::collections::HashMap<ServerId, net::SocketAddr> =
+		toml::from_str(&text).map_err(|err| invalid(err.to_string()))?;
 
-	fn cid_len(&self) -> usize {
-		1 + self.server_id.len() + self.nonce_len
+	let mut map = driver::forward::Map::default();
+	for (id, addr) in peers {
+		if id.len() != own.len() {
+			return Err(invalid(format!(
+				"{id:?} is not {} bytes like this server's ID",
+				own.len()
+			)));
+		}
+		if addr.ip().is_unspecified() || addr.is_ipv4() != bind.is_ipv4() {
+			return Err(invalid(format!(
+				"{id:?} has an address {bind} cannot forward to: {addr}"
+			)));
+		}
+		if id != *own {
+			map.insert(&id.0, addr);
+		}
 	}
-
-	fn cid_lifetime(&self) -> Option<Duration> {
-		None
-	}
+	Ok(map)
 }
 
 #[cfg(test)]
@@ -1061,5 +1138,34 @@ mod tests {
 		})
 		.await
 		.expect("test timed out");
+	}
+
+	/// The peers file skips this server's own entry, so every server can share it, and refuses
+	/// the whole file for one entry this server could not forward to.
+	#[test]
+	fn peers_file_is_shared_and_refused_whole() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("peers.toml");
+		let own: ServerId = "01".parse().unwrap();
+		let bind: net::SocketAddr = "10.0.0.1:4443".parse().unwrap();
+		let read = |body: &str| {
+			std::fs::write(&path, body).unwrap();
+			read_peers(&path, &own, bind)
+		};
+
+		let map = read("\"01\" = \"10.0.0.1:4443\"\n\"02\" = \"10.0.0.2:4443\"\n").unwrap();
+		let expected: std::collections::HashMap<Box<[u8]>, net::SocketAddr> =
+			[(Box::from(&[2u8][..]), "10.0.0.2:4443".parse().unwrap())].into();
+		assert_eq!(map.peers(), &expected);
+
+		for (body, needle) in [
+			("\"0203\" = \"10.0.0.2:4443\"\n", "not 1 bytes"),
+			("\"02\" = \"[2001:db8::2]:4443\"\n", "cannot forward to"),
+			("\"02\" = \"0.0.0.0:4443\"\n", "cannot forward to"),
+			("\"zz\" = \"10.0.0.2:4443\"\n", "Invalid character"),
+		] {
+			let err = read(body).expect_err(body).to_string();
+			assert!(err.contains(needle), "{body}: {err}");
+		}
 	}
 }

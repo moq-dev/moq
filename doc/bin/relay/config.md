@@ -24,6 +24,15 @@ implementation = "edge/1"            # SETUP name for the relay. Omit for moq-re
 [listen.reset]
 secret = "/etc/moq/reset.key"        # File holding 64 hex chars. Omit for a random key.
 
+[listen.lb]                          # QUIC-LB: name this relay in its connection IDs.
+id = "01"                            # Server ID, hex. The same length on every relay.
+nonce = 8                            # Random bytes after it. Default.
+
+[listen.lb.forward]                  # Forward packets that land on the wrong relay to their owner.
+bind = "10.0.0.1:4443"               # This relay's forward socket, a specific IP its peers list.
+key = "/etc/moq/forward.key"         # File holding 64 hex chars, the same on every relay.
+peers = "/etc/moq/peers.toml"        # Server ID to forward socket. Reloaded on change.
+
 [listen.tls]
 cert = "cert.pem"                    # Certificate chain and key. Reloaded on change.
 key = "key.pem"
@@ -71,6 +80,31 @@ The io\_uring runtime refuses `preferred_v4`, `preferred_v6`, and `lb.id`;
 use the tokio runtime when the listener needs these settings.
 `[listen.lb] nonce` needs an `id` in the same table; unset nonce uses 8.
 The `--listen-quic-lb-id` and `--listen-quic-lb-nonce` flags update that table.
+
+`[listen.lb.forward]` keeps a connection alive when its packets land on another relay behind
+the same anycast address or load-balanced VIP, after a route change or a rebalance. That relay
+reads the server ID in the packet's connection ID and forwards the packet to the owner's
+forward socket, which processes it as if the client had sent it there. The owner keeps replying
+straight to the client from the shared address its handshake arrived on, so only the
+client-to-server direction takes the extra hop. A browser never leaves that address: Chrome's
+WebTransport ignores the QUIC `preferred_address`. Handshakes are not forwarded, so the front
+end must keep each new flow on one relay until it completes; a split handshake fails and the
+client retries.
+
+The peers file maps every relay's server ID to its forward `bind`, and may list this relay too,
+so one file can serve the whole cluster:
+
+```toml
+"01" = "10.0.0.1:4443"
+"02" = "10.0.0.2:4443"
+```
+
+A packet for a server ID missing from it is dropped. A forward is accepted only from a listed
+address and under the shared `key` (`openssl rand -hex 32 > forward.key`), since it carries a
+client address the owner takes on trust. A changed file replaces the map; an invalid one is
+logged and the last valid map kept, while an invalid one at startup stops it. Forwarding needs
+`lb.id` and all three settings, and the
+`--listen-quic-lb-forward-bind`, `-key`, and `-peers` flags update that table.
 `unix.allow` needs `unix.bind`.
 
 ## \[quic]
