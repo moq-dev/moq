@@ -4,7 +4,7 @@
 //! what arrives, not what one subscriber asked for. A [`Window`] is the per-subscriber
 //! side: resolved at the hop serving the subscriber, it filters that subscriber's reads.
 
-use std::ops;
+use std::{collections::BTreeSet, ops};
 
 use rangemap::RangeInclusiveSet;
 
@@ -106,8 +106,13 @@ impl Holdings for Unheld {
 /// Whether `time` is strictly after `other`, as instants: exact across scales, unlike
 /// [`Timestamp`]'s `Ord`, which breaks a tie between scales.
 pub(in crate::model) fn later(time: Timestamp, other: Timestamp) -> bool {
-	u128::from(time.value()) * u128::from(other.scale().as_u64())
-		> u128::from(other.value()) * u128::from(time.scale().as_u64())
+	instant(time, other).is_gt()
+}
+
+/// How `time` orders against `other` as instants, exact across scales.
+fn instant(time: Timestamp, other: Timestamp) -> std::cmp::Ordering {
+	(u128::from(time.value()) * u128::from(other.scale().as_u64()))
+		.cmp(&(u128::from(other.value()) * u128::from(time.scale().as_u64())))
 }
 
 /// A subscriber's [`Range`]s resolved to the group sequences it reads.
@@ -116,10 +121,16 @@ pub(in crate::model) struct Window {
 	/// What these were resolved from, so only replacing the ranges resolves again.
 	ranges: Vec<Range>,
 	spans: Vec<Span>,
+	/// The unsettled time ends, grouped by walk.
+	walks: Vec<Walk>,
 	/// The groups the spans cover, an unsettled time end through its cap.
 	groups: RangeInclusiveSet<u64>,
 	/// The part of `groups` a miss may ask for: see [`Self::missable`].
 	missable: RangeInclusiveSet<u64>,
+	/// What `groups` and `missable` hold outside the walks: every settled span, and what the
+	/// walks have put in range for good. Kept so a walk that moves rebuilds only the walks.
+	fixed: RangeInclusiveSet<u64>,
+	fixed_missable: RangeInclusiveSet<u64>,
 	/// A relative anchor waits on a first group, so nothing is filtered yet.
 	pending: bool,
 	/// Nothing is left to resolve: see [`Self::is_settled`]. Kept so a read checks it once
@@ -145,21 +156,6 @@ struct Span {
 	end: End,
 	/// Whether the start names a group, rather than reaching back to the oldest one.
 	floored: bool,
-	/// The lowest group a miss asks for. A time start before every group held asks none
-	/// below the oldest: which of them it reaches is unknown until they start.
-	reach: u64,
-}
-
-impl Span {
-	/// The exclusive end of the groups read now, `None` for none: an unsettled time end
-	/// reads up to its cap.
-	fn limit(&self) -> Option<u64> {
-		match self.end {
-			End::Before(end) => Some(end),
-			End::Open => None,
-			End::Time(time) => time.limit,
-		}
-	}
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -168,23 +164,74 @@ enum End {
 	Before(u64),
 	/// Past every group.
 	Open,
-	/// Before the first group starting after a time, once that is known.
-	Time(TimeEnd),
+	/// Before the first group starting after this time, once a [`Walk`] settles it.
+	Time(Timestamp),
 }
 
-/// A time end not settled yet, and how far the walk to settle it got.
+/// Unsettled time ends whose walks agree, so one walk serves them all.
 ///
-/// Timestamps never rewind, so the end falls before the lowest group starting past `pts`,
-/// once every sequence between it and the newest one starting at or before `pts` is
-/// accounted for. Every position below only moves forward, so each group or run of
-/// sequences is passed once, whatever a peer leaves missing.
+/// Ends that start alike walk the same groups until one starts between their times, so
+/// the ends sharing a walk differ only in when they end. A group starting at time `t`
+/// splits off the ends before `t`, which walk on, and settle, as a walk of their own.
+/// Walks that come to agree merge. Each end settles once, and a settle costs the walks
+/// rather than the ends.
+///
+/// Timestamps never rewind, so an end falls before the lowest group starting past it, once
+/// every sequence between it and the newest group starting at or before it is accounted
+/// for. Every position below only moves forward, so each group or run of sequences is
+/// passed once, whatever a peer leaves missing.
+#[derive(Debug)]
+struct Walk {
+	/// The ends sharing it, earliest first.
+	ends: BTreeSet<Ending>,
+	trail: Trail,
+	/// The cap when the settle under way began, inherited by the walks split off since, so
+	/// each knows whether the groups it reads moved.
+	was: Option<u64>,
+}
+
+/// An unsettled time end: the span it ends, ordered by when, as instants.
 #[derive(Clone, Copy, Debug)]
-struct TimeEnd {
+struct Ending {
 	pts: Timestamp,
-	/// The newest group known to start at or before `pts`: it and everything below it in
-	/// the span is in range.
+	span: usize,
+}
+
+impl Ord for Ending {
+	fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+		instant(self.pts, other.pts).then(self.span.cmp(&other.span))
+	}
+}
+
+impl PartialOrd for Ending {
+	fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl PartialEq for Ending {
+	fn eq(&self, other: &Self) -> bool {
+		self.cmp(other).is_eq()
+	}
+}
+
+impl Eq for Ending {}
+
+/// How far a [`Walk`] got: the same for every end sharing it, so walks merge once theirs
+/// are equal.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Trail {
+	/// The lowest group the walk reads. Each of its spans starts here, or at or below
+	/// `known`, below which [`Walk::fix`] holds the groups in range for good.
+	floor: u64,
+	/// The lowest group a miss asks for in what the walk reads: a time start before every
+	/// group held asks none below the oldest, since which of them it reaches is unknown
+	/// until they start.
+	reach: u64,
+	/// The newest group known to start at or before every end: it and everything below it
+	/// in the spans is in range.
 	known: Option<u64>,
-	/// The lowest group known to start after `pts`: where the end falls once settled.
+	/// The lowest group known to start after every end: where they fall once settled.
 	after: Option<u64>,
 	/// Where the walk over held groups resumes: those below it started, or never will.
 	held: u64,
@@ -193,14 +240,15 @@ struct TimeEnd {
 	/// The exclusive cap on what is read meanwhile, `None` for none.
 	limit: Option<u64>,
 	/// The group the cap admits on speculation: the first above `known` that may still
-	/// start, which may start past `pts`.
+	/// start, which may start past the ends.
 	speculative: Option<u64>,
 }
 
-impl TimeEnd {
-	fn new(pts: Timestamp, start: u64) -> Self {
+impl Trail {
+	fn new(start: u64, reach: u64) -> Self {
 		Self {
-			pts,
+			floor: start,
+			reach,
 			known: None,
 			after: None,
 			held: start,
@@ -211,75 +259,125 @@ impl TimeEnd {
 	}
 
 	/// The lowest sequence not known to be in range, `None` once the last sequence is.
-	fn unknown(&self, start: u64) -> Option<u64> {
+	///
+	/// `known` is only ever found at or above every span's start, so it alone decides once
+	/// set.
+	fn unknown(&self) -> Option<u64> {
 		match self.known {
-			Some(known) => known.checked_add(1).map(|next| next.max(start)),
-			None => Some(start),
+			Some(known) => known.checked_add(1),
+			None => Some(self.floor),
 		}
 	}
 
-	/// Walk the held groups on from where the last call stopped. Returns where the end
-	/// falls once it settles.
-	fn advance(&mut self, start: u64, holdings: &impl Holdings) -> Option<u64> {
+	/// The groups the walk reads now, `None` for none.
+	fn reads(&self) -> Option<ops::RangeInclusive<u64>> {
+		let last = match self.limit {
+			Some(end) => end.checked_sub(1).filter(|last| *last >= self.floor)?,
+			None => u64::MAX,
+		};
+		Some(self.floor..=last)
+	}
+}
+
+impl Walk {
+	/// Whether every end is before `time`, so a group starting then lies past each.
+	///
+	/// When only some are, those leave as a walk of their own from here, queued in `forks`
+	/// to walk on, and this one keeps the rest: `false`.
+	fn past(&mut self, time: Timestamp, forks: &mut Vec<Walk>) -> bool {
+		let (Some(first), Some(last)) = (self.ends.first(), self.ends.last()) else {
+			return false;
+		};
+		if later(time, last.pts) {
+			return true;
+		}
+		if !later(time, first.pts) {
+			return false;
+		}
+		let rest = self.ends.split_off(&Ending { pts: time, span: 0 });
+		forks.push(Walk {
+			ends: std::mem::replace(&mut self.ends, rest),
+			trail: self.trail,
+			was: self.was,
+		});
+		false
+	}
+
+	/// Walk the held groups on from where the last call stopped, splitting off into `forks`
+	/// the ends a group starts between. Returns where the ends fall once they settle.
+	///
+	/// A split-off walks again from the state it split at: each call resumes where the
+	/// last stopped, so it takes the other branch there, passing nothing twice.
+	fn advance(&mut self, holdings: &impl Holdings, forks: &mut Vec<Walk>) -> Option<u64> {
 		// The starts index passes a group that may still start, so a stalled one never
-		// keeps a later group known to start inside the end from being read.
-		while let Some(from) = self.unknown(start)
+		// keeps a later group known to start inside the ends from being read.
+		while let Some(from) = self.trail.unknown()
 			&& let Some((sequence, at)) = holdings.next_start(from)
-			&& self.after.is_none_or(|after| sequence < after)
+			&& self.trail.after.is_none_or(|after| sequence < after)
 		{
-			match later(at, self.pts) {
-				true => self.after = Some(sequence),
-				false => self.known = Some(sequence),
+			match self.past(at, forks) {
+				true => self.trail.after = Some(sequence),
+				false => self.trail.known = Some(sequence),
 			}
 		}
 
 		// The first sequence above `known` that may still start is the one read on
 		// speculation: a held group yet to start, or a missing one that may arrive. Only a
-		// group starting inside the end is jumped to, since it puts all below it in range.
-		self.speculative = None;
-		while let Some(from) = self.unknown(start) {
-			let at = self.held.max(from);
-			if self.after.is_some_and(|after| at >= after) {
+		// group starting inside the ends is jumped to, since it puts all below it in range.
+		self.trail.speculative = None;
+		while let Some(from) = self.trail.unknown() {
+			let at = self.trail.held.max(from);
+			if self.trail.after.is_some_and(|after| at >= after) {
 				break;
 			}
 			let next = holdings
 				.next_held(at)
-				.filter(|(sequence, _)| self.after.is_none_or(|after| *sequence < after));
+				.filter(|(sequence, _)| self.trail.after.is_none_or(|after| *sequence < after));
+			// A later group starting inside some ends but not others splits them first: those
+			// it starts past account for `at` on their own.
+			let jump = match next {
+				Some((sequence, Held::Started(time))) if sequence != at => {
+					(!self.past(time, forks)).then_some(sequence)
+				}
+				_ => None,
+			};
 			match next {
 				Some((sequence, held)) if sequence == at => match held {
-					Held::Started(time) if later(time, self.pts) => self.after = Some(at),
-					Held::Started(_) => self.known = Some(at),
+					Held::Started(time) => match self.past(time, forks) {
+						true => self.trail.after = Some(at),
+						false => self.trail.known = Some(at),
+					},
 					Held::Never => {}
 					Held::Pending => {
-						self.held = at;
-						self.speculative = Some(at);
+						self.trail.held = at;
+						self.trail.speculative = Some(at);
 						break;
 					}
 				},
-				Some((sequence, Held::Started(time))) if !later(time, self.pts) => self.known = Some(sequence),
+				Some(_) if jump.is_some() => self.trail.known = jump,
 				// Past every held group: the next to arrive is the speculative one, judged
 				// once a settle sees it, before it is read.
-				None if self.after.is_none() => {
-					self.held = at;
+				None if self.trail.after.is_none() => {
+					self.trail.held = at;
 					break;
 				}
 				_ => match holdings.gone(at) {
 					Some(end) if end > at => {
-						self.held = end;
+						self.trail.held = end;
 						continue;
 					}
 					_ => {
-						self.held = at;
-						self.speculative = (!holdings.complete()).then_some(at);
+						self.trail.held = at;
+						self.trail.speculative = (!holdings.complete()).then_some(at);
 						break;
 					}
 				},
 			}
 			// Nothing sits above the last sequence, so the walk ends on it.
 			let Some(next) = at.checked_add(1) else { break };
-			self.held = next;
+			self.trail.held = next;
 		}
-		self.limit = match (self.speculative, self.after) {
+		self.trail.limit = match (self.trail.speculative, self.trail.after) {
 			_ if holdings.complete() => None,
 			(Some(speculative), _) => speculative.checked_add(1),
 			(None, Some(after)) => Some(after),
@@ -287,39 +385,62 @@ impl TimeEnd {
 			(None, None) => None,
 		};
 
-		// Settle once every sequence up to the first group starting past `pts` can no
-		// longer start inside it.
+		// Settle once every sequence up to the first group starting past the ends can no
+		// longer start inside them.
 		//
 		// Datagrams stay ephemeral and never index where their group starts, so a sequence
 		// that arrived only as a datagram counts as gone here. A stream copy of that group
-		// arriving later is read even if it starts past `pts`: accepted, since a publisher
-		// that streams a group it also sent as a datagram is rare.
-		let after = self.after?;
+		// arriving later is read even if it starts past the ends: accepted, since a
+		// publisher that streams a group it also sent as a datagram is rare.
+		let after = self.trail.after?;
 		// Everything at or below `known` is in range, and `after` lies above it.
-		self.accounted = self.accounted.max(self.unknown(start).unwrap_or(after));
-		while self.accounted < after {
-			let next = holdings.next_held(self.accounted);
+		self.trail.accounted = self.trail.accounted.max(self.trail.unknown().unwrap_or(after));
+		while self.trail.accounted < after {
+			let next = holdings.next_held(self.trail.accounted);
 			match next {
-				Some((sequence, held)) if sequence == self.accounted => match held {
+				Some((sequence, held)) if sequence == self.trail.accounted => match held {
 					Held::Pending => return None,
-					// It started past `pts` since the walk above stopped on it: everything
-					// below is accounted for, so the end falls here.
-					Held::Started(at) if later(at, self.pts) => {
-						self.after = Some(sequence);
-						return self.after;
+					// It started past the ends since the walk above stopped on it: everything
+					// below is accounted for, so they fall here.
+					Held::Started(at) if self.past(at, forks) => {
+						self.trail.after = Some(sequence);
+						return self.trail.after;
 					}
-					_ => self.accounted += 1,
+					_ => self.trail.accounted += 1,
 				},
 				_ => {
 					let below = next.map_or(after, |(sequence, _)| sequence.min(after));
-					self.accounted = match holdings.complete() {
+					self.trail.accounted = match holdings.complete() {
 						true => below,
-						false => holdings.gone(self.accounted)?.min(below),
+						false => holdings.gone(self.trail.accounted)?.min(below),
 					};
 				}
 			}
 		}
-		self.after
+		self.trail.after
+	}
+
+	/// Hold what the walk has put in range for good in the window's fixed groups, so it
+	/// reads only from above `known` on. The groups in range stay the same.
+	fn fix(&mut self, groups: &mut RangeInclusiveSet<u64>, missable: &mut RangeInclusiveSet<u64>) {
+		let Some(known) = self.trail.known else { return };
+		if self.trail.floor > known {
+			return;
+		}
+		groups.insert(self.trail.floor..=known);
+		if self.trail.reach <= known {
+			missable.insert(self.trail.reach..=known);
+		}
+		self.trail.floor = known.saturating_add(1);
+		self.trail.reach = self.trail.reach.max(self.trail.floor);
+	}
+
+	/// Take on `other`'s ends, its trail being this one's.
+	fn merge(&mut self, mut other: Walk) {
+		if other.ends.len() > self.ends.len() {
+			std::mem::swap(&mut self.ends, &mut other.ends);
+		}
+		self.ends.extend(other.ends);
 	}
 }
 
@@ -332,8 +453,11 @@ impl Window {
 		let mut window = Self {
 			ranges: ranges.to_vec(),
 			spans: Vec::new(),
+			walks: Vec::new(),
 			groups: RangeInclusiveSet::new(),
 			missable: RangeInclusiveSet::new(),
+			fixed: RangeInclusiveSet::new(),
+			fixed_missable: RangeInclusiveSet::new(),
 			pending: false,
 			settled: false,
 			covered: None,
@@ -366,19 +490,53 @@ impl Window {
 			let _ = self.place(latest, holdings);
 			return !self.pending;
 		}
-		let mut moved = false;
-		for span in &mut self.spans {
-			let End::Time(time) = &mut span.end else { continue };
-			let limit = time.limit;
-			if let Some(end) = time.advance(span.start, holdings) {
-				span.end = End::Before(end);
-				moved = true;
-			} else {
-				moved |= time.limit != limit;
-			}
+		if self.walks.is_empty() {
+			return false;
 		}
+		let moved = self.walk(holdings);
 		if moved {
 			self.rebuild();
+		}
+		moved
+	}
+
+	/// Walk each unsettled time end on, settling those that can be, and merge the walks
+	/// that come to agree. Returns whether the groups in range moved.
+	fn walk(&mut self, holdings: &impl Holdings) -> bool {
+		let mut moved = false;
+		let mut walks = std::mem::take(&mut self.walks);
+		for walk in &mut walks {
+			walk.was = walk.trail.limit;
+		}
+		let mut kept = Vec::with_capacity(walks.len());
+		while let Some(mut walk) = walks.pop() {
+			match walk.advance(holdings, &mut walks) {
+				Some(end) => {
+					moved = true;
+					let trail = walk.trail;
+					if trail.floor < end {
+						self.fixed.insert(trail.floor..=end - 1);
+					}
+					if trail.reach < end {
+						self.fixed_missable.insert(trail.reach..=end - 1);
+					}
+					for ending in walk.ends {
+						self.spans[ending.span].end = End::Before(end);
+					}
+				}
+				None => {
+					moved |= walk.trail.limit != walk.was;
+					walk.fix(&mut self.fixed, &mut self.fixed_missable);
+					kept.push(walk);
+				}
+			}
+		}
+		kept.sort_unstable_by_key(|walk| walk.trail);
+		for walk in kept {
+			match self.walks.last_mut() {
+				Some(last) if last.trail == walk.trail => last.merge(walk),
+				_ => self.walks.push(walk),
+			}
 		}
 		moved
 	}
@@ -386,22 +544,13 @@ impl Window {
 	/// The groups an unsettled time end reads on speculation, which may start past it: a
 	/// read parked on the cap wakes when one of them starts.
 	pub fn speculative(&self) -> impl Iterator<Item = u64> + '_ {
-		self.spans.iter().filter_map(|span| match span.end {
-			End::Time(time) => time.speculative,
-			_ => None,
-		})
+		self.walks.iter().filter_map(|walk| walk.trail.speculative)
 	}
 
 	/// The lowest sequence whose start could still move an unsettled time end, `None`
 	/// without one or once the last sequence is in range.
 	pub fn watch_starts(&self) -> Option<u64> {
-		self.spans
-			.iter()
-			.filter_map(|span| match span.end {
-				End::Time(time) => time.unknown(span.start),
-				_ => None,
-			})
-			.min()
+		self.walks.iter().filter_map(|walk| walk.trail.unknown()).min()
 	}
 
 	/// Whether group `sequence` is in range. Everything is while a relative anchor waits.
@@ -569,30 +718,46 @@ impl Window {
 			return Err(Error::Unsupported);
 		}
 		self.spans.clear();
+		self.walks.clear();
+		self.fixed = RangeInclusiveSet::new();
+		self.fixed_missable = RangeInclusiveSet::new();
 		self.pending = false;
+		// The time ends that start alike walk alike, until a group starts between them.
+		let mut walks = std::collections::BTreeMap::<(u64, u64), BTreeSet<Ending>>::new();
 		for (index, range) in self.ranges.iter().enumerate().filter(|(_, range)| !range.is_empty()) {
 			let (Some((start, floored)), Some(end)) = (start(range.start, latest, holdings), end(range.end, latest))
 			else {
 				self.pending = true;
 				continue;
 			};
-			let end = match end {
-				End::Time(mut time) => {
-					time = TimeEnd::new(time.pts, start);
-					time.advance(start, holdings).map_or(End::Time(time), End::Before)
-				}
-				end => end,
-			};
+			// The lowest group a miss asks for: a time start before every group held asks none
+			// below the oldest, since which of them it reaches is unknown until they start.
 			let reach = match range.start {
 				Anchor::Time(_) if !floored => holdings.next_start(0).map_or(start, |(oldest, _)| oldest),
 				_ => start,
 			};
+			let limit = match end {
+				End::Before(end) => Some(end),
+				End::Open => None,
+				End::Time(pts) => {
+					let span = self.spans.len();
+					walks.entry((start, reach)).or_default().insert(Ending { pts, span });
+					Some(start)
+				}
+			};
+			if let Some(last) = limit.map_or(Some(u64::MAX), |end| end.checked_sub(1))
+				&& last >= start
+			{
+				self.fixed.insert(start..=last);
+				if reach <= last {
+					self.fixed_missable.insert(reach..=last);
+				}
+			}
 			self.spans.push(Span {
 				index,
 				start,
 				end,
 				floored,
-				reach,
 			});
 		}
 		self.admission = Admission::new(&self.ranges, &self.spans);
@@ -603,27 +768,32 @@ impl Window {
 			.map(|span| span.start)
 			.min();
 		self.all_named = self.spans.iter().all(|span| span.floored);
+		self.walks = walks
+			.into_iter()
+			.map(|((start, reach), ends)| Walk {
+				ends,
+				trail: Trail::new(start, reach),
+				was: Some(start),
+			})
+			.collect();
+		self.walk(holdings);
 		self.rebuild();
 		Ok(())
 	}
 
+	/// The groups in range: the fixed ones, and those each walk reads now.
 	fn rebuild(&mut self) {
 		self.covered = None;
-		self.settled = !self.pending && !self.spans.iter().any(|span| matches!(span.end, End::Time(_)));
-		self.groups = RangeInclusiveSet::new();
-		self.missable = RangeInclusiveSet::new();
-		for span in &self.spans {
-			let last = match span.limit() {
-				Some(end) => match end.checked_sub(1) {
-					Some(last) if last >= span.start => last,
-					_ => continue,
-				},
-				None => u64::MAX,
-			};
-			self.groups.insert(span.start..=last);
-			if span.reach <= last {
-				self.missable.insert(span.reach..=last);
+		self.settled = !self.pending && self.walks.is_empty();
+		self.groups = self.fixed.clone();
+		self.missable = self.fixed_missable.clone();
+		for walk in &self.walks {
+			let Some(reads) = walk.trail.reads() else { continue };
+			// A walk's reach is never below its floor.
+			if walk.trail.reach <= *reads.end() {
+				self.missable.insert(walk.trail.reach..=*reads.end());
 			}
+			self.groups.insert(reads);
 		}
 	}
 }
@@ -713,9 +883,7 @@ impl Point for u64 {
 
 impl Point for Timestamp {
 	fn order(self, other: Self) -> std::cmp::Ordering {
-		// Exact across scales, as [`later`] is.
-		(u128::from(self.value()) * u128::from(other.scale().as_u64()))
-			.cmp(&(u128::from(other.value()) * u128::from(self.scale().as_u64())))
+		instant(self, other)
 	}
 }
 
@@ -787,7 +955,7 @@ fn end(anchor: Option<Anchor>, latest: Option<u64>) -> Option<End> {
 			.saturating_sub(back)
 			.checked_add(1)
 			.map_or(End::Open, End::Before),
-		Some(Anchor::Time(pts)) => End::Time(TimeEnd::new(pts, 0)),
+		Some(Anchor::Time(pts)) => End::Time(pts),
 	})
 }
 
@@ -1097,6 +1265,174 @@ mod tests {
 		assert!(window.contains(count - 1));
 		let asked = groups.asked.get();
 		assert!(asked < 8 * count as usize, "{asked} queries for {count} groups");
+	}
+
+	/// Time ends that start alike share one walk, so a settle costs the walk, not the ends.
+	/// A group starting between them splits off and settles the ends before it.
+	#[test]
+	fn time_ends_that_start_alike_share_one_walk() {
+		let ends = 1_000;
+		let mut groups = Groups::new([Groups::started(0, 0)]);
+		let ranges: Vec<Range> = (0..ends).map(|i| range(time(0), time(1_000_000 + i))).collect();
+		let mut window = Window::new(&ranges, Some(0), &groups).unwrap();
+		assert_eq!(window.walks.len(), 1);
+
+		let count = 200;
+		let asked = groups.asked.get();
+		for sequence in 1..count {
+			groups.held.insert(sequence, Held::Started(at(sequence)));
+			window.settle(Some(sequence), &groups);
+		}
+		let asked = groups.asked.get() - asked;
+		assert!(asked < 8 * count as usize, "{asked} queries for {count} groups");
+		assert_eq!(window.walks.len(), 1);
+		assert!(!window.is_settled() && window.contains(count));
+
+		// Group 200 starts inside the later half of the ends: the earlier half settles before it.
+		groups.held.insert(count, Held::Started(at(1_000_000 + ends / 2)));
+		assert!(window.settle(Some(count), &groups));
+		assert_eq!(window.walks.len(), 1);
+		let resolved = window.resolved();
+		let split = usize::try_from(ends / 2).unwrap();
+		assert!(resolved[..split].iter().all(|r| *r
+			== Some(Resolved {
+				start: 0,
+				end: Some(count)
+			})));
+		assert!(
+			resolved[split..]
+				.iter()
+				.all(|r| *r == Some(Resolved { start: 0, end: None }))
+		);
+
+		// Once a group starts past every end, they all settle.
+		groups.held.insert(count + 1, Held::Started(at(2_000_000)));
+		assert!(window.settle(Some(count + 1), &groups));
+		assert!(window.is_settled() && window.walks.is_empty());
+		assert_eq!(covered(&window, count + 3), (0..=count).collect::<Vec<_>>());
+	}
+
+	/// Shared walks resolve every range as walking it alone would, as groups arrive, start,
+	/// never start, or go missing in any order, with ends in mixed scales.
+	#[test]
+	fn shared_walks_match_each_end_walked_alone() {
+		// A small deterministic generator, so a failure replays.
+		let seed = Cell::new(0x2545_f491_4f6c_dd1d_u64);
+		let next = |bound: u64| {
+			let mut x = seed.get();
+			x ^= x << 13;
+			x ^= x >> 7;
+			x ^= x << 17;
+			seed.set(x);
+			x % bound
+		};
+		let micros = |value| Anchor::Time(Timestamp::new(value, crate::Timescale::MICRO).unwrap());
+		const SEQUENCES: u64 = 16;
+		for round in 0..400 {
+			// Each group starts in its own ten milliseconds, so starts ascend with the sequence.
+			let starts: Vec<u64> = (0..SEQUENCES).map(|sequence| sequence * 10 + next(10)).collect();
+			let pts = |end: bool| match next(3) {
+				0 => micros(next(SEQUENCES * 10_000)),
+				// Exactly a group's start, in either scale.
+				1 if next(2) == 0 => time(starts[next(SEQUENCES) as usize]),
+				1 => micros(starts[next(SEQUENCES) as usize] * 1000),
+				_ => time(next(SEQUENCES * 10) + u64::from(end) * 5),
+			};
+			let ranges: Vec<Range> = (0..1 + next(12))
+				.map(|_| {
+					let start = match next(3) {
+						0 => Anchor::Absolute(next(SEQUENCES)),
+						1 => Anchor::Relative(next(4)),
+						_ => pts(false),
+					};
+					let end = match next(6) {
+						0 => None,
+						1 => Some(Anchor::Absolute(next(SEQUENCES + 2))),
+						_ => Some(pts(true)),
+					};
+					range(start, end)
+				})
+				.collect();
+
+			let mut groups = Groups::default();
+			for _ in 0..next(6) {
+				let sequence = next(SEQUENCES);
+				groups
+					.held
+					.insert(sequence, Held::Started(at(starts[sequence as usize])));
+			}
+			let latest = Some(next(SEQUENCES));
+			let mut window = Window::new(&ranges, latest, &groups).unwrap();
+			let mut alone: Vec<Window> = ranges
+				.iter()
+				.map(|range| Window::new(std::slice::from_ref(range), latest, &groups).unwrap())
+				.collect();
+
+			for step in 0..40 {
+				let sequence = next(SEQUENCES);
+				let started = Held::Started(at(starts[sequence as usize]));
+				match next(6) {
+					0 | 1 => {
+						groups.held.entry(sequence).or_insert(Held::Pending);
+					}
+					2 | 3 => {
+						if groups.held.get(&sequence).is_none_or(|held| *held == Held::Pending) {
+							groups.held.insert(sequence, started);
+						}
+					}
+					4 => {
+						if groups.held.get(&sequence).is_none_or(|held| *held == Held::Pending) {
+							groups.held.insert(sequence, Held::Never);
+						}
+					}
+					_ => {
+						let end = sequence + 1 + next(3);
+						if groups.held.range(sequence..end).next().is_none() {
+							groups.gone.push(sequence..end);
+						}
+					}
+				}
+				groups.complete |= step == 39 && round % 4 == 0;
+
+				let before: Vec<u64> = covered(&window, SEQUENCES + 4);
+				let moved = window.settle(latest, &groups);
+				for window in &mut alone {
+					window.settle(latest, &groups);
+				}
+				let context = || format!("round {round} step {step}: {ranges:?} over {:?}", groups.held);
+
+				let union: Vec<u64> = (0..SEQUENCES + 4)
+					.filter(|sequence| alone.iter().any(|window| window.contains(*sequence)))
+					.collect();
+				let now = covered(&window, SEQUENCES + 4);
+				assert_eq!(now, union, "{}", context());
+				assert!(moved || now == before, "{}: moved unreported", context());
+
+				let mut missable = RangeInclusiveSet::new();
+				for run in alone.iter().flat_map(|window| window.missable(0)) {
+					missable.insert(run);
+				}
+				assert!(window.missable(0).eq(missable.iter().cloned()), "{}", context());
+
+				let resolved: Vec<_> = alone.iter().map(|window| window.resolved()[0]).collect();
+				assert_eq!(window.resolved(), resolved, "{}", context());
+				assert_eq!(
+					window.is_settled(),
+					alone.iter().all(Window::is_settled),
+					"{}",
+					context()
+				);
+				let speculative: std::collections::BTreeSet<u64> = window.speculative().collect();
+				let each: std::collections::BTreeSet<u64> = alone.iter().flat_map(Window::speculative).collect();
+				assert_eq!(speculative, each, "{}", context());
+				assert_eq!(
+					window.watch_starts(),
+					alone.iter().filter_map(Window::watch_starts).min(),
+					"{}",
+					context()
+				);
+			}
+		}
 	}
 
 	/// A datagram is one frame, so its own timestamp places it against a time end.
