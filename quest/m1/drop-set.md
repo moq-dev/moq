@@ -172,8 +172,8 @@ window as the groups they sit between, and expiry applies the same
 fold-or-`TooFarBehind` rule as a Rust eviction. A run sits between cached
 sequences, so there are at most about one per cached sequence (alternating
 drop and arrival), and JS run state grows no faster than the JS cache
-itself. The JS byte bound for both is
-[JS unbounded groups](/quest/m1/unbounded-groups/js.md).
+itself. The JS byte bound for both is the 32 MiB group tail that
+[moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) landed.
 
 Only a final run folds into a cursor's floor: a delivered run, a run
 skipped at the track's max age bound (no widening reaches past it), or a
@@ -311,4 +311,3 @@ timing. Settle it here, where cancelled and expired runs get a reason.
 ## Related
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
-- [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - the JS byte bound for groups and the runs between them; not required, since JS runs never outgrow the JS cache
