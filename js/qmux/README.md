@@ -23,6 +23,21 @@ await transport.ready
 const stream = await transport.createBidirectionalStream()
 ```
 
+### Datagrams
+
+Use `transport.datagrams.readable` to receive packets and `.writable` to send them.
+`.maxDatagramSize` reports the negotiated payload limit; oversized or unsupported writes are dropped.
+The datagram transport is created and managed by the session.
+
+Set `.incomingHighWaterMark` to change the live receive queue limit (1024 packets by default).
+New arrivals are dropped when the queue reaches that limit. Lowering it preserves queued packets
+until they are read. Values below 1 are clamped to 1; negative values and `NaN` throw `RangeError`.
+The value must be a number.
+
+Expiry and changes to the outbound queue policy are unsupported. Assigning anything except `null`
+to `.incomingMaxAge` or `.outgoingMaxAge`, or anything except 1024 to `.outgoingHighWaterMark`,
+throws `NotSupportedError`.
+
 ### Servers
 
 `Session.accept` runs the other role, over a WebSocket your server has already accepted. The host

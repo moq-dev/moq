@@ -181,6 +181,12 @@ jobs:
           - name: JS audit
             recipe: js audit
             uncached: true
+          # Builds moq-ffi to stage the modules it checks, so it keeps the Rust cache.
+          - name: Go audit
+            recipe: go audit
+          - name: Python audit
+            recipe: py audit
+            uncached: true
           # Uncached: the instrumented build bypasses mbx, so the cache can't serve it.
           - name: Rust coverage
             recipe: rs coverage
