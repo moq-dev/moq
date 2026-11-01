@@ -1442,7 +1442,7 @@ impl IdleRoom {
 	async fn measure(&self, iters: u64) -> Duration {
 		let start = Instant::now();
 		for _ in 0..iters {
-			moq_clock::sleep(Duration::from_secs(1)).await;
+			kio::clock::sleep(Duration::from_secs(1)).await;
 		}
 		start.elapsed()
 	}
@@ -1535,7 +1535,7 @@ pub(crate) fn withdrawal<B: Backend>(c: &mut Criterion) {
 										.unwrap()
 								})
 								.collect();
-							while moq_clock::timeout(Duration::from_secs(1), announced.next())
+							while kio::clock::timeout(Duration::from_secs(1), announced.next())
 								.await
 								.is_ok()
 							{}
@@ -1543,7 +1543,7 @@ pub(crate) fn withdrawal<B: Backend>(c: &mut Criterion) {
 							drop(live);
 							let mut retracted = 0;
 							while let Ok(Some(event)) =
-								moq_clock::timeout(Duration::from_secs(1), announced.next()).await
+								kio::clock::timeout(Duration::from_secs(1), announced.next()).await
 							{
 								assert!(matches!(event, moq_net::announce::Event::End(_)), "{event:?}");
 								retracted += 1;

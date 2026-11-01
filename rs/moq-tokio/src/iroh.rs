@@ -604,7 +604,7 @@ mod tests {
 	/// same pairing as the quic backend.
 	#[test]
 	fn congestion_factory_maps_each_family() {
-		let now = moq_clock::now().into_std();
+		let now = kio::clock::now().into_std();
 		let mtu = 1200;
 
 		let loss = congestion_factory(CongestionControl::Loss).build(now, mtu);

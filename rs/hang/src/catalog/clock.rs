@@ -67,7 +67,7 @@ impl Clock {
 	///
 	/// Exact down to the nanosecond; an instant finer than that (a 90 kHz tick) is floored.
 	/// Refuses a result past the JSON-safe range or the wall clock's 1970-2554 range.
-	pub fn wall_clock(&self, pts: moq_net::Timestamp) -> Result<moq_clock::Wall> {
+	pub fn wall_clock(&self, pts: moq_net::Timestamp) -> Result<kio::clock::Wall> {
 		let overflow = || crate::Error::TimestampOverflow(moq_net::TimeOverflow);
 		let wall_scale = self.wall.scale().as_u64() as u128;
 		let pts_scale = pts.scale().as_u64() as u128;
@@ -90,7 +90,7 @@ impl Clock {
 		let nanos = (num % den).checked_mul(1_000_000_000).ok_or_else(overflow)? / den;
 		let since_moq_epoch = std::time::Duration::new(secs, nanos as u32);
 		// A catalog can name a wall beyond the clock's nanosecond range.
-		moq_clock::Wall::UNIX_EPOCH
+		kio::clock::Wall::UNIX_EPOCH
 			.checked_add(std::time::Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS))
 			.and_then(|moq_epoch| moq_epoch.checked_add(since_moq_epoch))
 			.ok_or_else(overflow)
@@ -187,13 +187,13 @@ mod test {
 	#[test]
 	fn wall_clock_converts_across_timescales() {
 		let clock = Clock::new(moq_net::Timestamp::from_micros(1_000_000).unwrap()).unwrap();
-		let epoch = moq_clock::Wall::UNIX_EPOCH + std::time::Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS + 1_000);
+		let epoch = kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS + 1_000);
 		assert_eq!(
 			clock.wall_clock(moq_net::Timestamp::from_millis(0).unwrap()).unwrap(),
 			epoch
 		);
 
-		let second = moq_clock::Wall::UNIX_EPOCH + std::time::Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS + 2_000);
+		let second = kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS + 2_000);
 		assert_eq!(
 			clock
 				.wall_clock(moq_net::Timestamp::from_millis(1000).unwrap())
@@ -217,7 +217,7 @@ mod test {
 	/// Regression: the result was floored to the millisecond, dropping the sub-millisecond part.
 	#[test]
 	fn wall_clock_keeps_sub_millisecond_precision() {
-		let moq_epoch = moq_clock::Wall::UNIX_EPOCH + std::time::Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS);
+		let moq_epoch = kio::clock::Wall::UNIX_EPOCH + std::time::Duration::from_millis(MOQ_EPOCH_UNIX_MILLIS);
 		let micros = |v| moq_net::Timestamp::from_micros(v).unwrap();
 		let nanos = std::time::Duration::from_nanos;
 

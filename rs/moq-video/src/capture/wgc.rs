@@ -4,7 +4,7 @@
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use moq_net::Timestamp;
 

@@ -464,7 +464,7 @@ pub(crate) struct SockShared {
 	/// datagrams go out alone: the route or driver cannot segment.
 	gso: Cell<bool>,
 	/// When a lost send was last logged, so a flood of them logs once per interval.
-	lost_logged: Cell<Option<moq_clock::Instant>>,
+	lost_logged: Cell<Option<kio::clock::Instant>>,
 	closed: Cell<bool>,
 	rx: RefCell<Rx>,
 	tx: RefCell<Tx>,
@@ -555,7 +555,7 @@ impl SockShared {
 			tracing::debug!(%err, to = %op.to, "send lost");
 			return;
 		}
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		if self
 			.lost_logged
 			.get()

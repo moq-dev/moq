@@ -24,7 +24,7 @@ Nothing public decodes a `VarInt` or the other former `Codec` types (`StreamId`,
 
 Packet parsers and headers, `HashedConnectionIdGenerator` (with `set_lifetime`), `BloomTokenLog`, `TokenMemoryCache`, token policy traits (`TokenLog`, `TokenStore`, and `TokenReuseError`), `NoneTokenLog`, `NoneTokenStore`, `ClientConfig::token_store`, and `ValidationTokenConfig::log` are internal.
 Use `Endpoint` to parse incoming datagrams, `RandomConnectionIdGenerator` or a consumer's `ConnectionIdGenerator`, and the default token policy.
-`TimeSource`, `StdSystemTime`, and `ServerConfig::time_source` are gone; address validation uses `moq_clock::wall()`, including an installed simulated clock.
+`TimeSource`, `StdSystemTime`, and `ServerConfig::time_source` are gone; address validation uses `kio::clock::wall()`, including an installed simulated clock.
 Unused `Connection::local_ip`, `min_rtt`, `has_pending_retransmits`, `ping`, `force_key_update`, `path_changed`, and `max_concurrent_streams` accessors are no longer public.
 `Endpoint::set_server_config`, `incoming_buffer_bytes`, and `Incoming::orig_dst_cid` are also internal or removed; configure the endpoint at construction.
 To rotate TLS certificates on a running endpoint, give the `ServerConfig`'s rustls config a `ResolvesServerCert` that returns the current certificate, as moq-tokio's `tls::Serve` does.
