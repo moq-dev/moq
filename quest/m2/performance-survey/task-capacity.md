@@ -48,10 +48,10 @@ Candidates to evaluate: reclaimable slot chunks, and an index of nonempty
 ready words so a poll does not scan historical capacity. Include owner polls
 triggered by unrelated active work in the sweep.
 
-Related: [worker quiescence](/quest/m2/perf/uring-quiescence.md) and
-[relay allocations](/quest/m2/perf/relay-allocs.md) own other costs.
-Worker quiescence also reshapes the `Tasks::poll` snapshot with a pass
-budget; whichever of the two lands second rebases its benchmark on the other.
+Related: [relay allocations](/quest/m2/perf/relay-allocs.md) owns other costs.
+The io_uring worker now polls its set through `Tasks::poll_passes`, which runs
+the per-pass snapshot up to a pass budget per turn, so a snapshot's cost is
+paid once per pass, not once per turn.
 
 Follow the [survey's benchmark contract](/quest/m2/performance-survey/README.md):
 measure the baseline before optimizing, retain paired evidence, verify equivalent
