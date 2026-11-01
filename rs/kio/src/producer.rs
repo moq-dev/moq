@@ -1,6 +1,6 @@
 use std::{
 	ops::{Deref, DerefMut},
-	sync::atomic::Ordering,
+	sync::{Arc, atomic::Ordering},
 	task::Poll,
 };
 
@@ -8,7 +8,6 @@ use crate::{
 	Closed, Counts, State,
 	consumer::{self, Consumer},
 	lock::*,
-	sync::Arc,
 	waiter::*,
 	weak::{ProducerWeak, Weak},
 };
@@ -48,7 +47,7 @@ impl<T> Producer<T> {
 	/// channel costs this whether it has one consumer or a thousand.
 	///
 	/// Excludes whatever `T` allocates on its own.
-	pub const HEAP: usize = crate::arc_heap::<crate::sync::Mutex<State<T>>>() + crate::arc_heap::<Counts>();
+	pub const HEAP: usize = crate::arc_heap::<std::sync::Mutex<State<T>>>() + crate::arc_heap::<Counts>();
 
 	/// Create a new producer with the given initial value.
 	pub fn new(value: T) -> Self {
@@ -429,7 +428,7 @@ impl<T> Deref for Ref<'_, T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use super::*;
 

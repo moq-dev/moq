@@ -18,7 +18,7 @@ async fn running<T>(child: &mut Child, what: &str, step: impl Future<Output = T>
 	tokio::select! {
 		out = step => out,
 		status = child.wait() => panic!("moq exited with {} before {what}", status.expect("wait for moq")),
-		_ = tokio::time::sleep(TIMEOUT) => panic!("{what} timed out"),
+		_ = moq_clock::sleep(TIMEOUT) => panic!("{what} timed out"),
 	}
 }
 

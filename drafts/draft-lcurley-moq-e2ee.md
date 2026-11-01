@@ -149,6 +149,8 @@ A relay that presents a wrong epoch causes authentication failure; a relay that 
 Neither can cause a nonce to repeat, because only the publisher instance chooses the epoch it encrypts under.
 
 A restart or replacement of a publisher is a new instance and mints a new epoch.
+So is a cloned process image, such as a `fork` without `exec`, a restored VM snapshot or process checkpoint, or a producing generation prepared once and copied to two processes: each copy MUST mint its own generation before it encrypts.
+A clone copies the epoch and the per-track counters verbatim, so two copies that both encrypt would protect different plaintext under the same key and nonce, and nothing on the wire lets a receiver or relay detect it.
 Transport sequence numbers therefore restart freely without any coordination between instances.
 An ended instance stays readable only for as long as relays or archives retain it under its epoch; once a newer epoch wins the shared path, subscribers resolve the newer one.
 
