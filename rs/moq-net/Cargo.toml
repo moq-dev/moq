@@ -18,7 +18,8 @@ default = ["async"]
 async = ["dep:futures", "moq-clock/runtime"]
 
 # Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, frame, and canonical storage benches,
-# and session views of an origin to the viewers bench, through the hidden `fuzz` module. Off by
+# session views of an origin to the viewers bench, and the lite publisher's run loop to the
+# publisher bench, through the hidden `fuzz` module. Off by
 # default and hidden from the docs.
 fuzz = ["async"]
 
@@ -141,6 +142,12 @@ harness = false
 
 [[bench]]
 name = "tail"
+harness = false
+required-features = ["fuzz"]
+
+# Drives the lite publisher's run loop through the hidden `fuzz` module.
+[[bench]]
+name = "publisher"
 harness = false
 required-features = ["fuzz"]
 

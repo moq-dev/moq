@@ -4317,10 +4317,7 @@ impl TrackRun {
 			// `SubStream::owed`), so only a range given up whole is covered. Datagrams
 			// resolve no start, and a FIN would overtake them, so a range they served
 			// keeps the subscription open.
-			(None, _) => {
-				let skipped: RangeSet<u64> = self.skipped.iter().map(|(range, _)| range.clone()).collect();
-				self.track.covered(self.floor, &skipped)
-			}
+			(None, _) => self.track.covered(self.floor, &self.skipped),
 			(Some(_), None) => false,
 		}
 	}
@@ -4548,6 +4545,88 @@ impl TrackRun {
 			rank,
 			group,
 		));
+	}
+}
+
+/// A bounded lite-07 subscription's run loop still waiting on SUBSCRIBE_START, for the
+/// `publisher` bench: a wake that finds nothing new ends in the coverage check.
+#[cfg(any(test, feature = "fuzz"))]
+pub struct CoverageBench {
+	run: TrackRun,
+	writer: Writer<crate::transport::boxed::SendStream, Version>,
+	track: track::Producer,
+	_peer: crate::transport::memory::Session,
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+impl CoverageBench {
+	/// Subscribe to `ranges` one-group ranges, then give up the first `skipped` of them, one
+	/// wake each. A range is left open, so the start never resolves and nothing is covered.
+	pub fn new(ranges: u64, skipped: u64) -> Self {
+		assert!(skipped < ranges, "a range must stay open");
+		let version = Version::Lite07;
+		let (local, peer) = crate::transport::memory::pair(Default::default());
+		let session = Transport::new(local);
+		let Poll::Ready(Ok(stream)) = session.poll_open_uni(&kio::Waiter::noop(), SendOptions::default()) else {
+			panic!("a memory stream opens at once");
+		};
+		// Every other group, so no two ranges merge into one run.
+		let group = |group| Some(lite::Anchor::Absolute(track::Position::group(group)));
+		let wire: Vec<_> = (0..ranges)
+			.map(|range| lite::Range {
+				start: group(2 * range),
+				end: group(2 * range + 1),
+			})
+			.collect();
+		let bounds = Bounds::new(&wire, None).unwrap();
+		let track = track::Producer::new(
+			Arc::new(crate::broadcast::Info::default()),
+			"bench",
+			track::Info::default(),
+		);
+		let subscriber = track.subscribe(bounds.groups());
+		let steer = kio::Producer::new(Steer::default());
+		let ctx = Subscription {
+			session,
+			id: 0,
+			track_name: "bench".into(),
+			priority: PriorityQueue::default(),
+			publisher: 0,
+			group: None,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
+			version,
+			stamp: None,
+			runtime: crate::time::Deadlines::new(moq_clock::now()),
+			outcomes: Default::default(),
+			ietf: false,
+		};
+		let mut this = Self {
+			run: TrackRun::new(ctx, subscriber, bounds, 0, steer),
+			writer: Writer::new(stream, version),
+			track,
+			_peer: peer,
+		};
+		for range in 0..skipped {
+			this.track.drop_groups(2 * range..2 * range + 1, StreamError::NotFound);
+			while this.step().is_ready() {}
+		}
+		assert!(this.run.start.is_none(), "no group resolves a start");
+		assert_eq!(this.run.skipped.iter().count() as u64, skipped);
+		this
+	}
+
+	/// One wake with nothing new to serve.
+	pub fn wake(&mut self) {
+		assert!(self.step().is_pending(), "the open range keeps the subscription parked");
+	}
+
+	fn step(&mut self) -> Poll<()> {
+		match self.run.poll_step(&mut self.writer, &kio::Waiter::noop()) {
+			Poll::Ready(Ok(ControlFlow::Continue(()))) => Poll::Ready(()),
+			Poll::Ready(res) => panic!("the subscription ended: {res:?}"),
+			Poll::Pending => Poll::Pending,
+		}
 	}
 }
 
@@ -6925,6 +7004,23 @@ mod serve_group_test {
 			assert_eq!(run.start, Some(0), "{version}");
 			assert_eq!(drops(&mut writer, &log, version).await, [(2, 3)], "{version}");
 		}
+	}
+
+	/// A bounded lite-07 subscription ends once its source gives up every range, even with no
+	/// start resolved, and not while one range is still open.
+	#[moq_clock::test]
+	async fn giving_up_every_range_before_the_start_ends_it() {
+		let mut bench = CoverageBench::new(3, 2);
+		bench.wake();
+		bench.track.drop_groups(4..5, StreamError::NotFound);
+		loop {
+			match bench.run.poll_step(&mut bench.writer, &kio::Waiter::noop()) {
+				Poll::Ready(Ok(ControlFlow::Continue(()))) => continue,
+				Poll::Ready(Ok(ControlFlow::Break(()))) => break,
+				other => panic!("the subscription should end, got {other:?}"),
+			}
+		}
+		assert!(bench.run.start.is_none());
 	}
 
 	/// A SUBSCRIBE_UPDATE that lowers the start below SUBSCRIBE_START asks for those groups

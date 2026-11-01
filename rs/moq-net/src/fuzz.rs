@@ -16,6 +16,9 @@ mod request;
 pub use ingest::ingest;
 pub use request::request;
 
+/// A lite-07 publisher run loop waiting on SUBSCRIBE_START, for the publisher bench.
+pub use crate::lite::CoverageBench;
+
 use bytes::Bytes;
 
 use crate::{

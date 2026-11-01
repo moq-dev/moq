@@ -19,6 +19,25 @@ pub(in crate::model) struct Resolved {
 	pub end: Option<u64>,
 }
 
+/// The groups a publisher accounted for, which [`Window::covered_by`] checks against: a
+/// set, or a map keyed by them, read in place so a check copies nothing.
+pub(crate) trait Accounted {
+	/// Whether every group in `range` is accounted for.
+	fn holds(&self, range: &ops::Range<u64>) -> bool;
+}
+
+impl Accounted for rangemap::RangeSet<u64> {
+	fn holds(&self, range: &ops::Range<u64>) -> bool {
+		self.gaps(range).next().is_none()
+	}
+}
+
+impl<V: Clone + Eq> Accounted for rangemap::RangeMap<u64, V> {
+	fn holds(&self, range: &ops::Range<u64>) -> bool {
+		self.gaps(range).next().is_none()
+	}
+}
+
 /// When a serving hop's groups start, for resolving time anchors.
 ///
 /// Each query answers from ordered indexes, so a time end that walks them forward a step
@@ -508,14 +527,14 @@ impl Window {
 
 	/// Whether `accounted` holds every group in range from `from` up to the exclusive `cap`,
 	/// `false` while a range stays open (see [`Self::end`]).
-	pub fn covered_by(&self, from: u64, cap: Option<u64>, accounted: &rangemap::RangeSet<u64>) -> bool {
+	pub fn covered_by(&self, from: u64, cap: Option<u64>, accounted: &impl Accounted) -> bool {
 		let Some(end) = self.end() else {
 			return false;
 		};
 		let end = cap.map_or(end, |cap| cap.min(end));
 		self.runs(from).take_while(|run| *run.start() < end).all(|run| {
 			let run_end = run.end().checked_add(1).map_or(end, |next| next.min(end));
-			accounted.gaps(&(*run.start()..run_end)).next().is_none()
+			accounted.holds(&(*run.start()..run_end))
 		})
 	}
 
