@@ -102,7 +102,7 @@ impl Script {
 	async fn handle(State(script): State<Script>, Json(request): Json<Request>) -> Response {
 		script.seen.lock().unwrap().push(request.clone());
 		let answer = match request.event {
-			Event::Connect => script.connect.lock().unwrap().clone(),
+			Event::Connect | Event::Attach => script.connect.lock().unwrap().clone(),
 			Event::Revalidate if request.transport == moq_auth::Transport::Http => script
 				.revalidate_http
 				.lock()
@@ -175,9 +175,15 @@ async fn spawn_relay_with(
 	auth: moq_relay::auth::Auth,
 	cluster: cluster::Cluster,
 ) -> (u16, tokio::task::JoinHandle<()>) {
-	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	spawn_relay_config(auth, cluster, moq_tokio::listen::Config::default()).await
+}
 
-	let mut config = moq_tokio::listen::Config::default();
+async fn spawn_relay_config(
+	auth: moq_relay::auth::Auth,
+	cluster: cluster::Cluster,
+	mut config: moq_tokio::listen::Config,
+) -> (u16, tokio::task::JoinHandle<()>) {
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	config.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	// Opt in to lite-07 beside the defaults, so a client pinned to it can reach the AUTH stream.
 	config.version = moq_net::Versions::all()
@@ -1826,6 +1832,97 @@ async fn in_band_tokens_widen_and_withdraw_live_prefixes() {
 		relay.abort();
 		let _ = relay.await;
 	}
+}
+
+/// Request tokens share one auth-server lease until their last announce ends.
+#[tokio::test]
+async fn request_token_lease_ends_before_the_connection_and_reopens_later() {
+	let script = Script::new(Grant::new(all(), all()));
+	let mut server = moq_tokio::listen::Config::default();
+	server.extensions.solicit = false;
+	let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+	let (port, relay) = spawn_relay_config(build_auth(script.spawn().await), cluster, server).await;
+	let mut config = moq_tokio::connect::Config::default();
+	config.version = vec!["moq-transport-22".parse().unwrap()];
+	config.extensions.auth = false;
+	config.extensions.solicit = false;
+	let client = config.init(Default::default()).unwrap().with_reconnect(false);
+	let origin = moq_tokio::origin::spawn();
+	let publisher = client
+		.clone()
+		.with_publisher(origin.consume())
+		.connect(room_url("tcp", port))
+		.established()
+		.await
+		.unwrap();
+	let received = moq_tokio::origin::spawn();
+	let read = received.consume();
+	let subscriber = client
+		.with_subscriber(received)
+		.connect(room_url("tcp", port))
+		.established()
+		.await
+		.unwrap();
+	let (token, _) = publisher.auth().add("shared").await.unwrap();
+	let first = origin
+		.publish("first", moq_net::origin::Route::default().with_auth(token.clone()))
+		.unwrap();
+	let second = origin
+		.publish("second", moq_net::origin::Route::default().with_auth(token.clone()))
+		.unwrap();
+	for path in ["first", "second"] {
+		kio::clock::timeout(TIMEOUT, read.follow(path, None).unwrap().available())
+			.await
+			.unwrap()
+			.unwrap();
+	}
+	let attaches = || {
+		script
+			.seen
+			.lock()
+			.unwrap()
+			.iter()
+			.filter(|request| request.event == Event::Attach)
+			.cloned()
+			.collect::<Vec<_>>()
+	};
+	let attached = attaches();
+	assert_eq!(attached.len(), 1);
+	let mut announced = read.announced();
+	drop(first);
+	kio::clock::timeout(TIMEOUT, async {
+		while let Some((route, live)) = next_update(&mut announced).await {
+			if route.prefix.as_str() == "first" && !live {
+				break;
+			}
+		}
+	})
+	.await
+	.unwrap();
+	assert!(script.ends().iter().all(|request| request.auth.is_none()));
+	drop(second);
+	kio::clock::timeout(TIMEOUT, script.end_arrived.notified())
+		.await
+		.unwrap();
+	let ended = script.ends();
+	assert_eq!(ended.len(), 1);
+	assert_eq!(ended[0].id, attached[0].id);
+	assert_eq!(ended[0].auth, attached[0].auth);
+	assert!(ended[0].auth.is_some());
+	let _later = origin
+		.publish("later", moq_net::origin::Route::default().with_auth(token))
+		.unwrap();
+	kio::clock::timeout(TIMEOUT, read.follow("later", None).unwrap().available())
+		.await
+		.unwrap()
+		.unwrap();
+	let reopened = attaches();
+	assert_eq!(reopened.len(), 2);
+	assert_ne!(reopened[0].auth, reopened[1].auth);
+	publisher.abort(moq_net::Error::Cancel);
+	subscriber.abort(moq_net::Error::Cancel);
+	relay.abort();
+	let _ = relay.await;
 }
 
 /// Both admission paths apply the selected cap before starting the session driver.

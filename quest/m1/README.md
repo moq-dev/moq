@@ -142,7 +142,6 @@ removed).
 - [Moxygen pin bump](/quest/m1/moxygen-pin-bump.md) - waiting on moxygen#264, then the TRACK_STATUS patch is dropped
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [moq-transport 18, 20, and 22 only](/quest/m1/ietf-drop/README.md) - drafts 14-17, 19, and 21 are deleted from Rust, JS, tests, interop lanes, and docs, removing the legacy control-stream adapter and its request limit
-- [A moq-transport request token is one auth per distinct token](/quest/m1/ietf-token-auth.md) - requests naming the same token share one verification and grant, on any request type, ending with the last such request
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
 - [On-demand JavaScript FETCH](/quest/m1/js-fetch-on-demand.md) - browser publishers answer IETF FETCH for evicted or uncached groups through the JS ranges request surface
 - [Rust cancels an unclaimed fill head when a subscription ends](/quest/m1/ietf-fill-end-cancel.md) - SUBSCRIPTION_ENDED cancels, not finishes, a fill no group was sent for, as in JS

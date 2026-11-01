@@ -54,6 +54,23 @@ test("an end request carries its facts beside the rest", () => {
 	expect(invalid.reason).toBe("invalid");
 });
 
+test("an attachment has its own identity through its end", () => {
+	const base = { id: "connection", node: "relay", transport: "quic", path: "/room" };
+	expect(() => RequestSchema.parse({ ...base, event: "attach" })).toThrow();
+	const attach = RequestSchema.parse({ ...base, event: "attach", auth: "credential" });
+	const end = RequestSchema.parse({
+		...base,
+		event: "end",
+		auth: "credential",
+		reason: "dropped",
+		duration: 1,
+		bytes: { sent: 0, received: 0 },
+	});
+	expect(attach.auth).toBe("credential");
+	expect(end.auth).toBe(attach.auth);
+	expect(end.id).toBe(attach.id);
+});
+
 test("a SETUP token parses as the Rust vector", () => {
 	// What `moq_auth::Request` serializes a CAT of bytes 00 fb ff to.
 	const request = RequestSchema.parse(

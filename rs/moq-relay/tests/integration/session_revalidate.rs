@@ -73,7 +73,7 @@ impl Script {
 	async fn handle(State(script): State<Script>, Json(request): Json<Request>) -> Response {
 		script.seen.lock().unwrap().push(request.clone());
 		let answer = match request.event {
-			Event::Connect => script.connect.lock().unwrap().clone(),
+			Event::Connect | Event::Attach => script.connect.lock().unwrap().clone(),
 			Event::Revalidate => script.revalidate.lock().unwrap().clone(),
 			Event::End { .. } => return StatusCode::NO_CONTENT.into_response(),
 		};

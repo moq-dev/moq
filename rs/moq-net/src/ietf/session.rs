@@ -1480,6 +1480,7 @@ mod tests {
 								auth::Auth::ID
 							} else {
 								ietf::TrackStatus {
+									authorization_token: None,
 									request_id: RequestId(id),
 									track_namespace: crate::Path::from_static("test"),
 									track_name: "video".into(),
@@ -1927,6 +1928,7 @@ mod tests {
 			version,
 		);
 		let msg = ietf::SubscribeNamespace {
+			authorization_token: None,
 			request_id,
 			namespace: crate::Path::new(namespace).unwrap(),
 			hidden: false,
@@ -3687,6 +3689,7 @@ mod tests {
 	fn subscribe_namespace_then(version: Version, request_id: u64, after: &[u8]) -> Vec<u8> {
 		let mut body = Vec::new();
 		ietf::SubscribeNamespace {
+			authorization_token: None,
 			request_id: RequestId(request_id),
 			namespace: crate::Path::from_static(""),
 			hidden: false,
