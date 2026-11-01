@@ -1,13 +1,8 @@
 use std::{
 	fmt,
 	ops::{Deref, DerefMut},
-	// std, not `crate::sync`: [`WeakLock`] needs `Arc::downgrade`, which loom's Arc
-	// doesn't have. Loom still models the `Mutex` inside, which is the part that
-	// orders every handle against every other.
-	sync::{Arc, PoisonError, Weak},
+	sync::{Arc, Mutex, MutexGuard, PoisonError, Weak},
 };
-
-use crate::sync::{Mutex, MutexGuard};
 
 /// A cloneable mutex wrapper backed by `Arc<Mutex<T>>`.
 ///
@@ -34,12 +29,12 @@ pub struct Lock<T> {
 	inner: Arc<Mutex<T>>,
 }
 
-// SAFETY: std and loom's Mutex<T> are Send + Sync when T: Send, so this is
+// SAFETY: Mutex<T> is Send + Sync when T: Send, so this is
 // exactly Arc<Mutex<T>>'s derived bound. Stopping here keeps recursive channel
 // graphs from expanding the same Arc/Mutex proof at every level.
 unsafe impl<T: Send> Send for Lock<T> {}
 
-// SAFETY: Arc<Mutex<T>> has the same T: Send bound for Sync, with either mutex.
+// SAFETY: Arc<Mutex<T>> has the same T: Send bound for Sync.
 unsafe impl<T: Send> Sync for Lock<T> {}
 
 impl<T> Lock<T> {
@@ -158,7 +153,7 @@ impl<T> Default for WeakLock<T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 

@@ -36,7 +36,7 @@ The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 
 `server_name` is the SNI that selected the relay's certificate. It is absent
-over plaintext, on the `tls://` TCP listener, and for an IP-literal dial, and
+over plaintext and for an IP-literal dial, and
 never filled from a `Host` header or a WebTransport authority. The client still picks it among the names
 the relay serves, so a hostname-scoped server binds the tenant to the
 credential, not to `server_name` alone.
@@ -304,8 +304,8 @@ the relay reports it in the request and enforces the grant it gets back.
 `moq auth serve` grants a certificate only what `--mtls-publish` and
 `--mtls-subscribe` name, nothing by default. Public rules ignore certificates,
 so `--auth-public` with a client CA refuses to start. Only the QUIC listener
-verifies client certificates, so a relay without `listen.bind` refuses
-`listen.tls.root` too.
+and a `tls://` TCP listener (`listen.tcp.tls`) verify client certificates, so a
+relay with neither refuses `listen.tls.root` too.
 
 Cluster peers are admitted the same way, so a mesh runs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` (or a
@@ -438,5 +438,6 @@ identity. The Unix socket is created mode `0666`, so gate it with a restrictive
 parent directory or an allowlist.
 
 `listen.tcp.tls = true` serves the TCP listener over TLS instead, for `tls://`
-dials such as [cluster links](/bin/relay/cluster#tls-links). It asks for no
-client certificate, so a peer on it presents a token, not mTLS.
+dials such as [cluster links](/bin/relay/cluster#tls-links). It asks for a
+client certificate as the QUIC listener does, under the same `listen.tls.root`,
+so a peer on it presents a certificate or a token.

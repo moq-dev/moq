@@ -2306,6 +2306,27 @@ test("a group-only reader of a finite track settles closed and lets go of its co
 	a.close();
 });
 
+test("a routed track's errored end outlives the copy that declared it", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	const failed = new StreamError(StreamCode(71));
+	ta.producer.finishAt({ group: 1, frame: 0 }, failed);
+	const group = await sub.recvGroup();
+	expect(group?.sequence).toBe(0);
+	group?.close();
+	// Concluding releases the copy that declared the end.
+	await settle();
+	await expect(sub.recvGroup()).rejects.toBe(failed);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
 test("a group-only fork of a finite track settles closed and lets go of its copy", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

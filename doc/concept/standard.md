@@ -14,7 +14,7 @@ with it, while shipping a simpler profile you can use today.
 | [moq-transport](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) | The IETF pub/sub protocol | Drafts 18, 20, and 22 negotiated by ALPN; [moq-lite](/concept/moq-lite) is a forward-compatible subset |
 | [MSF](https://datatracker.ietf.org/doc/draft-ietf-moq-msf/) | The IETF catalog format | Read and written; broadcasts ending in `.msf` select it |
 | [LOC](https://datatracker.ietf.org/doc/draft-ietf-moq-loc/) | The IETF low-overhead container | Supported as a hang container kind |
-| [moq-lite](/draft/moq-lite), [hang](/draft/moq-hang), [e2ee](/draft/moq-e2ee), and friends | This project's own drafts | Normative for the implementation, published to the datatracker from [`drafts/`](https://github.com/moq-dev/moq/tree/main/drafts) |
+| [moq-lite](/draft/moq-lite), [hang](/draft/moq-hang), [e2ee](/draft/moq-e2ee), [sign](/draft/moq-sign), and friends | This project's own drafts | Normative for the implementation, published to the datatracker from [`drafts/`](https://github.com/moq-dev/moq/tree/main/drafts) |
 
 ## moq-transport
 
@@ -62,7 +62,9 @@ does not offer it does not carry this state. Only Rust offers the extension, whe
 `extensions.ietf` is set, and `moq-relay` always does on moq-lite-07.
 [moq-e2ee](/draft/moq-e2ee) is not a transport extension. It encrypts
 application payloads, so relays still forward named tracks they cannot read.
-See [Encryption](/concept/hang#encryption).
+See [Encryption](/concept/hang#encryption). [moq-sign](/draft/moq-sign) is not
+one either: it appends an Ed25519 signature to each frame, so relays still
+forward and cache frames they cannot forge.
 
 ### Deliberate deviations
 

@@ -344,12 +344,7 @@ impl MoqOriginProducer {
 /// Build an origin whose host handles retain its driver's completion.
 pub(crate) fn spawn(config: moq_net::origin::Config) -> Origin {
 	let (inner, driver) = moq_net::origin::Producer::new(config);
-	#[cfg(not(target_arch = "wasm32"))]
 	let driver = Background::driver(driver);
-	#[cfg(target_arch = "wasm32")]
-	let driver = crate::ffi::spawn(async move {
-		moq_net::time::run(driver).await;
-	});
 	Origin { inner, driver }
 }
 
@@ -694,7 +689,7 @@ impl MoqFollowing {
 	}
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod supervision_tests {
 	use super::*;
 

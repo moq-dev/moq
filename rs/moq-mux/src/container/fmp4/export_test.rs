@@ -900,22 +900,22 @@ fn synthesize_opus_trak_refuses_a_contradicting_head() {
 	assert!(matches!(err, super::Error::OpusChannelCount { catalog: 2, head: 1 }));
 }
 
-/// dOps has nowhere to put a channel mapping table, so a family 1 head is refused rather
-/// than written as family 0 without it.
+/// A family 3 head carries a demixing matrix that dOps has no room for, so it is refused
+/// rather than written as a channel table.
 #[test]
-fn synthesize_opus_trak_refuses_mapping_family() {
+fn synthesize_opus_trak_refuses_mapping_family_three() {
 	use hang::catalog::{AudioCodec, AudioConfig};
 
 	let mut head = crate::codec::opus::Config::new(48_000, 2).encode().unwrap().to_vec();
-	head[18] = 1; // channel mapping family
-	head.extend_from_slice(&[1, 1, 0, 1]); // one coupled stream feeding both channels
+	head[18] = 3; // channel mapping family
+	head.extend_from_slice(&[1, 1, 0, 1]); // read as a table: one coupled stream feeding both channels
 	let mut config = AudioConfig::new(AudioCodec::Opus, 48_000, 2);
 	config.description = Some(head.into());
 
 	let err = super::synthesize_audio_trak(1, 48_000, &config).unwrap_err();
 	assert!(matches!(
 		err,
-		super::Error::Opus(crate::codec::opus::Error::UnsupportedMappingFamily(1))
+		super::Error::Opus(crate::codec::opus::Error::UnsupportedMappingFamily(3))
 	));
 }
 
