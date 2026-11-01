@@ -622,8 +622,11 @@ impl FrameContent {
 		if start >= end {
 			return Bytes::new();
 		}
-		// Loaded only to build a new owner, under the storage's lock, so every byte it
-		// covers is already in the segment that lock guards.
+		// Loaded only to build a new owner. The Acquire pairs with `store_written`'s
+		// Release, so every byte it covers is initialized. `Growing`/`Chain` also load it
+		// under the lock that holds their segment steady, so those bytes are in the
+		// segment being sliced; a `Fixed` segment never moves, and its writers never take
+		// the `shared` lock.
 		let published = || self.written.load(Ordering::Acquire);
 		match self.storage.get() {
 			Some(FrameStorage::Shared(payload)) => {
