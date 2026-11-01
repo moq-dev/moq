@@ -688,15 +688,8 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 	// OBS can't stop one encoder of a running output, or force it to keyframe, so a
 	// disabled rung keeps encoding and its packets are dropped here. It resumes on
 	// the encoder's next natural keyframe once the grant funds it again.
-	if (!track.sending) {
-		if (!track.enabled || !packet->keyframe)
-			return;
-		if (auto result = track.producer->set_enabled(true); !result) {
-			LOG_ERROR("Failed to enable video track: %s", result.error().to_string().c_str());
-			return;
-		}
-		track.sending = true;
-	}
+	if (!track.sending && (!track.enabled || !packet->keyframe))
+		return;
 
 	auto timestamp = PacketTimestamp(packet);
 	if (!timestamp) {
@@ -704,8 +697,25 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 		return;
 	}
 
+	// A resume that fails to write its keyframe stays disabled, so it retries on the
+	// next keyframe instead of advertising a rung whose deltas have no group to join.
+	bool resumed = false;
+	if (!track.sending) {
+		if (auto result = track.producer->set_enabled(true); !result) {
+			LOG_ERROR("Failed to enable video track: %s", result.error().to_string().c_str());
+			return;
+		}
+		track.sending = true;
+		resumed = true;
+	}
+
 	if (auto result = track.producer->write_frame(PacketFrame(packet, *timestamp)); !result) {
 		LOG_ERROR("Failed to write video frame: %s", result.error().to_string().c_str());
+		if (resumed) {
+			track.sending = false;
+			if (auto disable = track.producer->set_enabled(false); !disable)
+				LOG_ERROR("Failed to disable video track: %s", disable.error().to_string().c_str());
+		}
 		return;
 	}
 	track.started = true;
