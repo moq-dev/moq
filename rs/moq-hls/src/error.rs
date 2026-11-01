@@ -255,7 +255,9 @@ mod tests {
 		drop(listener);
 
 		// reqwest reads rustls's process default, as the importer installs it.
-		let _ = rind_rustls::default_provider().expect("supported CPU").install_default();
+		let _ = rind_rustls::default_provider()
+			.expect("supported CPU")
+			.install_default();
 		let err: Error = reqwest::get(format!("http://user:pass@{address}/media.m3u8?jwt=secret"))
 			.await
 			.expect_err("dial a closed port")

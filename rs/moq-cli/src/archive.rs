@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use anyhow::Context;
 use hang::moq_net;
-use object_store::{ObjectStore, ObjectStoreScheme};
 use object_store::path::{Path, PathPart};
+use object_store::{ObjectStore, ObjectStoreScheme};
 use url::Url;
 
 use crate::moq::notify_ready;

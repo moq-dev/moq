@@ -82,7 +82,10 @@ struct Init {
 impl Init {
 	fn new(bytes: Bytes) -> Self {
 		// 64 bits: the URL only has to tell apart the inits one rendition name ever carries.
-		let hash = rind::digest::digest(&rind::digest::SHA256, &bytes).as_ref()[..8].iter().map(|b| format!("{b:02x}")).collect();
+		let hash = rind::digest::digest(&rind::digest::SHA256, &bytes).as_ref()[..8]
+			.iter()
+			.map(|b| format!("{b:02x}"))
+			.collect();
 		Self { bytes, hash }
 	}
 }
