@@ -280,7 +280,7 @@ capture; the other was refused for nonalternating switch records.
 - High fan-out wins at 16 workers. Chat drops from 9.5 to 2.2 cores, kernel
   instructions per frame from 427k to 28k, and p50 from 34 to 18 ms.
   Fanout drops from 0.45 to 0.16 cores while user instructions rise 16%,
-  which is the hop's encode and decode. At 4 workers the gain is small.
+  the hop's own session work. At 4 workers the gain is small.
 - What stays contended with replicas is mostly the shared track, whose
   readers are now the hops, one per worker. In chat at 16 workers (four
   captures), `TrackState` is 86% of the wait: `Subscriber::poll_drop` 28%,
