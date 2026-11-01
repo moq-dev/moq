@@ -4317,8 +4317,7 @@ impl Resolve {
 			return Poll::Ready(Ok(None));
 		};
 		// The immediate lookup: answering a peer never starts discovery of its own.
-		let requesting: kio::Pending<crate::model::origin::Lookup> =
-			origin.lookup(self.path.clone(), None);
+		let requesting: kio::Pending<crate::model::origin::Lookup> = origin.lookup(self.path.clone(), None);
 		let found = wait!(Lookup => match publisher.poll_withdrawn(&mut self.session, stream, waiter) {
 			Poll::Ready(()) => Poll::Ready(None),
 			Poll::Pending => requesting.poll_ok(waiter).map(Some),

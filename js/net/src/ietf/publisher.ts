@@ -7,7 +7,6 @@ import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import * as DatagramStream from "../datagram_stream.ts";
-import type * as Epoch from "../epoch.ts";
 import {
 	controlTimeout,
 	error,
@@ -2580,10 +2579,10 @@ export class Publisher {
 	 * Resolve the broadcast a request names for serving: a local publish, or else the
 	 * origin's routes and dynamic handlers. Rejects with the abort once `signal` aborts.
 	 */
-	async #resolve(name: Path.Valid, signal: AbortSignal, epoch?: Epoch.Valid): Promise<broadcast.Consumer> {
+	async #resolve(name: Path.Valid, signal: AbortSignal): Promise<broadcast.Consumer> {
 		const broadcast =
 			this.#publish &&
-			(wireOf(this.#publish).local(name, epoch) ?? (await wireOf(this.#publish).demand(name, epoch, signal)));
+			(wireOf(this.#publish).local(name) ?? (await wireOf(this.#publish).demand(name, undefined, signal)));
 		if (!broadcast) throw new NotFound(`broadcast ${name}`);
 		return broadcast;
 	}
