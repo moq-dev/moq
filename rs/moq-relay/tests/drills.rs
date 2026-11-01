@@ -22,8 +22,8 @@
 //! data ever moved cannot hide here.
 //!
 //! See `test/drill/README.md` for the recipe, the sensitivity proof that each
-//! drill fails when its recovery behavior is removed, and the loom/fuzz cases
-//! covering the primitives underneath.
+//! drill fails when its recovery behavior is removed, and the fuzz targets
+//! covering the wire underneath.
 #![cfg(all(feature = "quic", feature = "websocket"))]
 #![expect(
 	clippy::disallowed_methods,
@@ -1382,7 +1382,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }
