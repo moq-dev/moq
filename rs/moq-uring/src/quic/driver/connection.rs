@@ -59,8 +59,10 @@ pub(crate) struct State {
 	/// moq-quic cannot take and so overrides its reason everywhere.
 	///
 	/// A latch of its own rather than moq-quic's `poll_closed`, which resolves a
-	/// local close as soon as it is asked for. Whether to keep that delay is an
-	/// open question; until it is settled, the current behavior stays.
+	/// local close as soon as it is asked for. Only the driver knows when the
+	/// CONNECTION_CLOSE is staged on the socket, which moq-quic cannot see, and
+	/// a caller may stop driving the worker the moment `poll_closed` resolves,
+	/// so publishing earlier would leave the packet unsent.
 	closed: Option<Error>,
 	closed_waiters: kio::WaiterList,
 
