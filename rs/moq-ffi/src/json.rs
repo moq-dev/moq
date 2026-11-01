@@ -8,13 +8,14 @@
 //! parses and serializes on its own side.
 
 use std::sync::Arc;
+use std::task::{Poll, ready};
 
 use serde_json::Value;
 
 use crate::consumer::{MoqTrackConsumer, timestamp_us};
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
-use crate::ffi::Task;
+use crate::ffi::Polled;
 use crate::producer::{Child, MoqBroadcastProducer, MoqTrackProducer};
 
 /// Options for a JSON snapshot producer (lossy latest-value mode).
@@ -222,14 +223,10 @@ impl MoqJsonValue {
 	}
 }
 
-struct SnapshotConsumer {
-	inner: moq_json::snapshot::Consumer<Value>,
-}
-
 /// Consumes a JSON snapshot track, yielding each reconstructed state or skipping to the newest.
 #[derive(uniffi::Object)]
 pub struct MoqJsonSnapshotConsumer {
-	task: Task<SnapshotConsumer>,
+	reads: Polled<moq_json::snapshot::Consumer<Value>>,
 }
 
 #[uniffi::export]
@@ -244,7 +241,7 @@ impl MoqJsonSnapshotConsumer {
 		let (track, driver) = track.take()?;
 		let consumer = moq_json::snapshot::Consumer::<Value>::new(track, Default::default());
 		Ok(Arc::new(Self {
-			task: Task::new(SnapshotConsumer { inner: consumer }).supervised(driver),
+			reads: Polled::new(consumer).supervised(driver),
 		}))
 	}
 
@@ -253,25 +250,29 @@ impl MoqJsonSnapshotConsumer {
 	/// Groups older than the subscription's `max_delay` are skipped, so a playhead
 	/// reader sets that budget to its distance behind live.
 	pub async fn next(&self) -> Result<Option<MoqJsonValue>, MoqError> {
-		self.task
-			.run(|mut state| async move { MoqJsonValue::new(state.inner.next().await?) })
-			.await
+		let value = self
+			.reads
+			.wait(|consumer, waiter| Poll::Ready(Ok(ready!(consumer.poll_next(waiter))?)))
+			.await?;
+		MoqJsonValue::new(value)
 	}
 
 	/// Skip to the newest state, or wait for one. Returns `None` once the track ends.
 	///
 	/// Skipped states are gone; a later `next()` continues after this one.
 	pub async fn latest(&self) -> Result<Option<MoqJsonValue>, MoqError> {
-		self.task
-			.run(|mut state| async move { MoqJsonValue::new(state.inner.latest().await?) })
-			.await
+		let value = self
+			.reads
+			.wait(|consumer, waiter| Poll::Ready(Ok(ready!(consumer.poll_latest(waiter))?)))
+			.await?;
+		MoqJsonValue::new(value)
 	}
 
 	/// Cancel all current and future `next()` and `latest()` calls.
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }
 
@@ -354,14 +355,10 @@ impl MoqJsonStreamProducer {
 	}
 }
 
-struct StreamConsumer {
-	inner: moq_json::stream::Consumer<Value>,
-}
-
 /// Consumes an ordered log of JSON records, yielding every record in order.
 #[derive(uniffi::Object)]
 pub struct MoqJsonStreamConsumer {
-	task: Task<StreamConsumer>,
+	reads: Polled<moq_json::stream::Consumer<Value>>,
 }
 
 #[uniffi::export]
@@ -376,22 +373,24 @@ impl MoqJsonStreamConsumer {
 		let (track, driver) = track.take()?;
 		let consumer = moq_json::stream::Consumer::<Value>::new(track, Default::default());
 		Ok(Arc::new(Self {
-			task: Task::new(StreamConsumer { inner: consumer }).supervised(driver),
+			reads: Polled::new(consumer).supervised(driver),
 		}))
 	}
 
 	/// Get the next record. Returns `None` once the track ends.
 	pub async fn next(&self) -> Result<Option<MoqJsonValue>, MoqError> {
-		self.task
-			.run(|mut state| async move { MoqJsonValue::new(state.inner.next().await?) })
-			.await
+		let value = self
+			.reads
+			.wait(|consumer, waiter| Poll::Ready(Ok(ready!(consumer.poll_next(waiter))?)))
+			.await?;
+		MoqJsonValue::new(value)
 	}
 
 	/// Cancel all current and future `next()` calls.
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }
 
@@ -607,14 +606,10 @@ impl MoqJsonWindowTimed {
 	}
 }
 
-struct WindowConsumer {
-	inner: moq_json::window::Consumer<Value>,
-}
-
 /// Consumes a sliding window of JSON records, yielding each push, pop, and skip in order.
 #[derive(uniffi::Object)]
 pub struct MoqJsonWindowConsumer {
-	task: Task<WindowConsumer>,
+	reads: Polled<moq_json::window::Consumer<Value>>,
 }
 
 #[uniffi::export]
@@ -629,7 +624,7 @@ impl MoqJsonWindowConsumer {
 		let (track, driver) = track.take()?;
 		let consumer = moq_json::window::Consumer::<Value>::new(track, Default::default());
 		Ok(Arc::new(Self {
-			task: Task::new(WindowConsumer { inner: consumer }).supervised(driver),
+			reads: Polled::new(consumer).supervised(driver),
 		}))
 	}
 
@@ -637,15 +632,17 @@ impl MoqJsonWindowConsumer {
 	///
 	/// Group rolls never surface: a restated record this reader already has yields nothing.
 	pub async fn next(&self) -> Result<Option<MoqJsonWindowTimed>, MoqError> {
-		self.task
-			.run(|mut state| async move { MoqJsonWindowTimed::new(state.inner.next().await?) })
-			.await
+		let event = self
+			.reads
+			.wait(|consumer, waiter| Poll::Ready(Ok(ready!(consumer.poll_next(waiter))?)))
+			.await?;
+		MoqJsonWindowTimed::new(event)
 	}
 
 	/// Cancel all current and future `next()` calls.
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }

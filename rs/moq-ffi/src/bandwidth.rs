@@ -249,15 +249,13 @@ mod tests {
 /// An owned bandwidth estimate; holding it requests estimates until released.
 #[derive(uniffi::Object)]
 pub struct MoqBandwidthConsumer {
-	inner: std::sync::Mutex<Option<moq_net::bandwidth::Consumer>>,
-	changed: crate::ffi::Task<()>,
+	inner: crate::ffi::Polled<moq_net::bandwidth::Consumer>,
 }
 
 impl MoqBandwidthConsumer {
 	pub(crate) fn new(inner: moq_net::bandwidth::Consumer) -> Self {
 		Self {
-			inner: std::sync::Mutex::new(Some(inner)),
-			changed: crate::ffi::Task::new(()),
+			inner: crate::ffi::Polled::new(inner),
 		}
 	}
 }
@@ -267,36 +265,26 @@ impl MoqBandwidthConsumer {
 	/// The current estimate in bits per second, or None while unavailable.
 	pub fn rate(&self) -> Option<u64> {
 		self.inner
-			.lock()
-			.unwrap()
-			.as_ref()
-			.and_then(moq_net::bandwidth::Consumer::peek)
+			.peek(moq_net::bandwidth::Consumer::peek)
+			.flatten()
 			.map(moq_net::bandwidth::Rate::as_bps)
 	}
 
 	/// Wait for the estimate to change and return the new [`rate`](Self::rate), erroring when
 	/// its producer closes.
 	pub async fn rate_changed(&self) -> Result<Option<u64>, MoqError> {
-		self.changed
-			.run(|_guard| async move {
-				moq_net::kio::wait(|waiter| {
-					let mut inner = self.inner.lock().unwrap();
-					let inner = inner.as_mut().ok_or(MoqError::Cancelled)?;
-					inner.poll_changed(waiter).map(|result| {
-						result
-							.map(|rate| rate.map(moq_net::bandwidth::Rate::as_bps))
-							.map_err(Into::into)
-					})
-				})
-				.await
+		self.inner
+			.wait(|inner, waiter| {
+				std::task::Poll::Ready(Ok(
+					std::task::ready!(inner.poll_changed(waiter))?.map(moq_net::bandwidth::Rate::as_bps)
+				))
 			})
 			.await
 	}
 
 	/// Release this consumer's demand, including a pending wait.
 	pub fn cancel(&self) {
-		self.inner.lock().unwrap().take();
-		self.changed.cancel();
+		self.inner.cancel();
 	}
 }
 

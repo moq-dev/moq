@@ -1,5 +1,7 @@
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::task::{Poll, ready};
 
 use crate::error::MoqError;
 
@@ -22,22 +24,22 @@ pub(crate) struct Runtime {
 	clock: Option<moq_clock::Installed>,
 	/// Taken by [`shutdown`], so the thread is stopped and joined once.
 	thread: std::sync::Mutex<Option<Thread>>,
-	/// Set by [`shutdown`] to wake the [`Task::run`] calls parked in place, so they observe
-	/// [`Polls::stopped`] and resolve `Cancelled`.
-	stopped: tokio::sync::watch::Sender<bool>,
-	/// The [`Task::run`] polls in flight on host threads, which [`shutdown`] waits out.
-	polls: std::sync::Mutex<Polls>,
-	/// Notified when the last in-flight poll finishes.
+	/// Closed by [`shutdown`] to wake the calls parked in place, so their next poll finds
+	/// [`STOPPED`] and resolves `Cancelled`.
+	stopped: kio::Producer<()>,
+	/// The polls in flight on host threads, which [`shutdown`] waits out, plus [`STOPPED`]
+	/// once it has begun.
+	polls: AtomicUsize,
+	/// Taken to sleep on and notify [`Self::idle`], so the last poll cannot wake shutdown
+	/// between its check and its wait.
+	idling: std::sync::Mutex<()>,
+	/// Notified when the last in-flight poll finishes after [`STOPPED`] is set.
 	idle: std::sync::Condvar,
 }
 
-#[derive(Default)]
-struct Polls {
-	active: usize,
-	/// Set by [`shutdown`]: no poll may start once the drivers are about to stop, because a
-	/// tokio timer polled after its driver is gone panics rather than erroring.
-	stopped: bool,
-}
+/// Set in [`Runtime::polls`] by [`shutdown`]: no poll may start once the drivers are about to
+/// stop, because a tokio timer polled after its driver is gone panics rather than erroring.
+const STOPPED: usize = 1 << (usize::BITS - 1);
 
 struct Thread {
 	/// Resolves the `block_on` the thread parks in.
@@ -112,8 +114,9 @@ impl Runtime {
 			#[cfg(feature = "testing")]
 			clock,
 			thread: std::sync::Mutex::new(Some(Thread { stop, join })),
-			stopped: tokio::sync::watch::Sender::new(false),
-			polls: Default::default(),
+			stopped: kio::Producer::new(()),
+			polls: AtomicUsize::new(0),
+			idling: Default::default(),
 			idle: Default::default(),
 		}
 	}
@@ -135,16 +138,16 @@ impl Runtime {
 			return;
 		};
 		// Before the thread stops, so no call awaited in place polls the runtime after it is gone.
-		let mut polls = runtime.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-		polls.stopped = true;
+		let idling = runtime.idling.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		runtime.polls.fetch_or(STOPPED, Ordering::SeqCst);
 		drop(
 			runtime
 				.idle
-				.wait_while(polls, |polls| polls.active > 0)
+				.wait_while(idling, |_| runtime.polls.load(Ordering::SeqCst) != STOPPED)
 				.unwrap_or_else(std::sync::PoisonError::into_inner),
 		);
 		// Outside the lock: a waker may poll inline, which takes it.
-		runtime.stopped.send_replace(true);
+		let _ = runtime.stopped.close();
 		let _ = thread.stop.send(());
 		thread.join.join().expect("runtime owner panicked");
 		// Retain the owner lock until the join completes, including concurrent shutdown calls.
@@ -154,35 +157,29 @@ impl Runtime {
 
 /// Resolves once [`shutdown`] has run.
 async fn stopped() {
-	let mut stopped = runtime().stopped.subscribe();
-	// `Err` only when the sender is dropped, which a static never is.
-	let _ = stopped.wait_for(|&stopped| stopped).await;
+	kio::wait(|waiter| runtime().stopped.poll_closed(waiter)).await
 }
 
-/// Marks a [`Task::run`] poll in flight, so [`shutdown`] waits for it to finish.
+/// Marks a poll in flight on a host thread, so [`shutdown`] waits for it to finish.
 struct Polling;
 
 impl Polling {
 	/// `None` once [`shutdown`] has begun.
 	fn start() -> Option<Self> {
-		let mut polls = runtime()
-			.polls
-			.lock()
-			.unwrap_or_else(std::sync::PoisonError::into_inner);
-		if polls.stopped {
-			return None;
-		}
-		polls.active += 1;
-		Some(Self)
+		let previous = runtime().polls.fetch_add(1, Ordering::SeqCst);
+		let polling = Self;
+		// Dropped rather than forgotten, so a shutdown already waiting sees the count fall back.
+		(previous & STOPPED == 0).then_some(polling)
 	}
 }
 
 impl Drop for Polling {
 	fn drop(&mut self) {
 		let runtime = runtime();
-		let mut polls = runtime.polls.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-		polls.active -= 1;
-		if polls.active == 0 {
+		if runtime.polls.fetch_sub(1, Ordering::SeqCst) == STOPPED + 1 {
+			// The last poll a waiting shutdown counts. Under the lock, so the wake cannot land
+			// between its check and its wait.
+			let _idling = runtime.idling.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 			runtime.idle.notify_all();
 		}
 	}
@@ -273,6 +270,21 @@ impl Background {
 				.map_err(crate::session::map_closed_error);
 		}
 		Ok(())
+	}
+
+	/// Ready with the owner's failure once it fails; pending while it runs or after it ended
+	/// cleanly, the same split [`Self::watch`] makes.
+	pub fn poll_failed(&self, waiter: &kio::Waiter) -> Poll<MoqError> {
+		let Some(result) = &self.result else { return Poll::Pending };
+		let completed = ready!(result.poll(waiter, |state| match &**state {
+			Some(completed) => Poll::Ready(completed.clone()),
+			None => Poll::Pending,
+		}));
+		match completed {
+			Ok(Ok(())) => Poll::Pending,
+			Ok(Err(err)) => Poll::Ready(crate::session::map_closed_error(err)),
+			Err(_) => Poll::Ready(crate::session::map_closed_error(moq_net::Error::Cancel.into())),
+		}
 	}
 
 	pub async fn watch<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
@@ -368,6 +380,180 @@ where
 		Ok(result) => result,
 		Err(e) if e.is_cancelled() => Err(MoqError::Cancelled),
 		Err(e) => Err(e.into()),
+	}
+}
+
+/// A handle's state for async calls that only poll it, which UniFFI's `RustFuture` polls directly.
+///
+/// The state sits behind a std mutex held across one poll, never across a wait. Concurrent
+/// calls on one handle all park, and each poll takes the next item atomically, so between
+/// them they take every item once, though not in call order. Unlike [`Task`], nothing queues:
+/// a call the foreign side cancelled but has not freed yet stops polling and holds nothing
+/// the next call needs.
+///
+/// Each poll runs inside [`shutdown`]'s in-flight accounting and the runtime context, so a poll
+/// that missed the shutdown finishes before the drivers stop, and a tokio timer in the state
+/// stays pollable. [`Self::cancel`] closes a channel every poll checks, then drops the state.
+/// A call that awaits tokio channels, codecs, or I/O uses [`Task`] instead.
+pub(crate) struct Polled<T> {
+	/// `None` once cancelled or taken.
+	state: std::sync::Mutex<Option<T>>,
+	/// Closed by [`Self::cancel`] and [`Self::take`], waking every parked call.
+	cancel: kio::Producer<()>,
+	driver: Background,
+	/// Calls polled at least once and not yet dropped, for [`Self::busy`].
+	calls: AtomicUsize,
+	/// A panic dropping the state, which every later call reports.
+	cleanup: std::sync::OnceLock<MoqError>,
+}
+
+impl<T> Polled<T> {
+	pub fn new(inner: T) -> Self {
+		Self {
+			state: std::sync::Mutex::new(Some(inner)),
+			cancel: kio::Producer::new(()),
+			driver: Background::default(),
+			calls: AtomicUsize::new(0),
+			cleanup: Default::default(),
+		}
+	}
+
+	/// End every call with the owner's failure, as [`Task::supervised`] does.
+	pub fn supervised(mut self, driver: Background) -> Self {
+		self.driver = driver;
+		self
+	}
+
+	fn check(&self) -> Result<(), MoqError> {
+		self.driver.check()?;
+		match self.cleanup.get() {
+			Some(err) => Err(err.clone()),
+			None => Ok(()),
+		}
+	}
+
+	/// Poll `poll` against the state until it is ready.
+	///
+	/// Resolves [`MoqError::Cancelled`] once [`Self::cancel`] or [`shutdown`] has run, and the
+	/// owner's error once it fails. `poll` must leave the state consistent at every return,
+	/// since another call may poll it before this one polls again.
+	pub async fn wait<R>(
+		&self,
+		mut poll: impl FnMut(&mut T, &kio::Waiter) -> Poll<Result<R, MoqError>>,
+	) -> Result<R, MoqError> {
+		self.calls.fetch_add(1, Ordering::Relaxed);
+		let _call = Call(&self.calls);
+		kio::wait(|waiter| self.poll(waiter, &mut poll)).await
+	}
+
+	fn poll<R>(
+		&self,
+		waiter: &kio::Waiter,
+		poll: &mut impl FnMut(&mut T, &kio::Waiter) -> Poll<Result<R, MoqError>>,
+	) -> Poll<Result<R, MoqError>> {
+		let Some(_polling) = Polling::start() else {
+			return Poll::Ready(Err(MoqError::Cancelled));
+		};
+		let _runtime = enter();
+		// Only registers: the signal closes after every in-flight poll, this one included, ends.
+		let _ = runtime().stopped.poll_closed(waiter);
+		if let Poll::Ready(err) = self.driver.poll_failed(waiter) {
+			return Poll::Ready(Err(err));
+		}
+		if let Some(err) = self.cleanup.get() {
+			return Poll::Ready(Err(err.clone()));
+		}
+		if self.cancel.poll_closed(waiter).is_ready() {
+			return Poll::Ready(Err(MoqError::Cancelled));
+		}
+		let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		match state.as_mut() {
+			Some(state) => poll(state, waiter),
+			None => Poll::Ready(Err(MoqError::Cancelled)),
+		}
+	}
+
+	/// Whether a call is in flight: polled at least once and not yet dropped.
+	pub fn busy(&self) -> bool {
+		self.calls.load(Ordering::Relaxed) > 0
+	}
+
+	/// Read the state synchronously, or `None` once it is gone.
+	pub fn peek<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
+		self.state
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.as_ref()
+			.map(f)
+	}
+
+	/// Whether [Self::cancel] or [Self::take] has run.
+	pub fn is_cancelled(&self) -> bool {
+		self.state
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.is_none()
+	}
+
+	/// Move the state to a new owner, ending this handle as [Self::cancel] would.
+	///
+	/// `check` sees the state first, and an error there leaves this handle untouched.
+	/// [`MoqError::Cancelled`] once the state is gone.
+	pub fn take(&self, check: impl FnOnce(&T) -> Result<(), MoqError>) -> Result<T, MoqError> {
+		self.check()?;
+		let mut state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+		check(state.as_ref().ok_or(MoqError::Cancelled)?)?;
+		let inner = state.take().ok_or(MoqError::Cancelled)?;
+		drop(state);
+		let _ = self.cancel.close();
+		Ok(inner)
+	}
+
+	/// Cancel all current and future calls and drop the state before returning.
+	///
+	/// Calls resolve [MoqError::Cancelled]; later calls report a panic dropping the state.
+	/// Terminal: there is no way back from here, and the state is gone rather than idle.
+	pub fn cancel(&self) {
+		let _ = self.cancel.close();
+		let state = self
+			.state
+			.lock()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.take();
+		self.release(state);
+	}
+
+	/// Drop `state` inside the runtime, so the reactor unregisters whatever it held, and keep
+	/// a panic for later calls rather than unwinding into the caller's.
+	fn release(&self, state: Option<T>) {
+		let Some(state) = state else { return };
+		let polling = Polling::start();
+		let _runtime = polling.as_ref().map(|_| enter());
+		if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(state))).is_err() {
+			let _ = self
+				.cleanup
+				.set(crate::session::map_closed_error(moq_tokio::Error::Panic));
+		}
+	}
+}
+
+impl<T> Drop for Polled<T> {
+	fn drop(&mut self) {
+		let state = self
+			.state
+			.get_mut()
+			.unwrap_or_else(std::sync::PoisonError::into_inner)
+			.take();
+		self.release(state);
+	}
+}
+
+/// Counts one [`Polled::wait`] call until it is dropped.
+struct Call<'a>(&'a AtomicUsize);
+
+impl Drop for Call<'_> {
+	fn drop(&mut self) {
+		self.0.fetch_sub(1, Ordering::Relaxed);
 	}
 }
 
@@ -516,31 +702,6 @@ impl<T: Send + 'static> Task<T> {
 		}
 	}
 
-	/// Move the state to a new owner, ending this handle as [Self::cancel] would.
-	///
-	/// `check` sees the state first, and an error there leaves this handle untouched.
-	/// [`MoqError::Busy`] while a [Self::run] owns the state, [`MoqError::Cancelled`] after
-	/// [Self::cancel].
-	pub fn take(&self, check: impl FnOnce(&T) -> Result<(), MoqError>) -> Result<T, MoqError> {
-		self.driver.check()?;
-		if let Some(cleanup) = self.cleanup.lock().unwrap().as_ref() {
-			cleanup.check()?;
-		}
-		if *self.cancel.borrow() {
-			return Err(MoqError::Cancelled);
-		}
-		let mut state = self.state.clone().try_lock_owned().map_err(|_| MoqError::Busy)?;
-		// Re-read under the lock, as `lock` does: a cancel we don't see here has not taken the state.
-		if *self.cancel.borrow() {
-			return Err(MoqError::Cancelled);
-		}
-		check(state.as_ref().ok_or(MoqError::Cancelled)?)?;
-		let inner = state.take().ok_or(MoqError::Cancelled)?;
-		// The state is already gone, so this only fails later runs; nothing is left to drop.
-		self.cancel.send_replace(true);
-		Ok(inner)
-	}
-
 	/// Cancel all current and future [Self::run] calls and drop the state.
 	///
 	/// Calls return [MoqError::Cancelled]; later calls report a completed cleanup panic.
@@ -643,13 +804,11 @@ mod tests {
 
 		// Wait until the first caller has flagged the stop, so it holds the owner lock and is
 		// joining the workers while the callback is still held.
-		let mut stopped = runtime.stopped.subscribe();
 		let first = std::thread::spawn(shutdown(runtime.clone(), finished.clone()));
 		tokio::runtime::Builder::new_current_thread()
 			.build()
 			.unwrap()
-			.block_on(stopped.wait_for(|&stopped| stopped))
-			.unwrap();
+			.block_on(kio::wait(|waiter| runtime.stopped.poll_closed(waiter)));
 
 		let (started, starting) = std::sync::mpsc::channel();
 		let second = std::thread::spawn({
@@ -820,49 +979,145 @@ mod tests {
 		assert!(matches!(err, MoqError::Cancelled));
 	}
 
-	#[tokio::test]
-	async fn take_is_busy_while_a_run_holds_the_lock() {
-		let task = Task::new(7);
-		let (started, running) = tokio::sync::oneshot::channel();
-		let run = task.run(move |state| async move {
-			let _state = state;
-			started.send(()).expect("test should still be waiting");
-			std::future::pending::<Result<(), MoqError>>().await
-		});
-		tokio::pin!(run);
+	/// A cursor over items `0..` behind a [`Polled`], read the way a moq-net consumer is.
+	struct Cursor {
+		/// How many items exist, closed once no more will.
+		produced: kio::Consumer<u32>,
+		/// The next item to take.
+		next: u32,
+	}
 
-		soon(async {
-			tokio::select! {
-				_ = &mut run => panic!("a pending run should not resolve"),
-				started = running => started.expect("the run should start"),
-			}
-		})
-		.await;
-		assert!(matches!(task.take(|_| Ok(())), Err(MoqError::Busy)));
+	fn queue() -> (kio::Producer<u32>, Polled<Cursor>) {
+		let producer = kio::Producer::new(0);
+		let polled = Polled::new(Cursor {
+			produced: producer.consume(),
+			next: 0,
+		});
+		(producer, polled)
+	}
+
+	/// Take the next item, or `None` once every item is taken and no more will come.
+	async fn pop(polled: &Polled<Cursor>) -> Result<Option<u32>, MoqError> {
+		polled
+			.wait(|cursor, waiter| {
+				let next = cursor.next;
+				let available = cursor.produced.poll(waiter, |produced| match **produced > next {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				});
+				Poll::Ready(Ok(match ready!(available) {
+					Ok(()) => {
+						cursor.next += 1;
+						Some(next)
+					}
+					Err(_closed) => None,
+				}))
+			})
+			.await
+	}
+
+	/// Poll `future` once with a no-op waker.
+	fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
+		future.poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
 	}
 
 	#[tokio::test]
-	async fn take_moves_the_state_unless_refused() {
-		let task = Task::new(7);
+	async fn polled_take_moves_the_state_unless_refused() {
+		let polled = Polled::new(7);
 		assert!(matches!(
-			task.take(|_| Err(MoqError::AlreadyCommitted)),
+			polled.take(|_| Err(MoqError::AlreadyCommitted)),
 			Err(MoqError::AlreadyCommitted)
 		));
 		assert_eq!(
-			task.take(|state| {
-				assert_eq!(*state, 7);
-				Ok(())
-			})
-			.unwrap(),
+			polled
+				.take(|state| {
+					assert_eq!(*state, 7);
+					Ok(())
+				})
+				.unwrap(),
 			7
 		);
 
-		let err = task
-			.run(|_| async { Ok(()) })
+		let err = polled
+			.wait(|_, _| Poll::Ready(Ok(())))
 			.await
-			.expect_err("taken state cannot run");
+			.expect_err("taken state cannot be polled");
 		assert!(matches!(err, MoqError::Cancelled));
-		assert!(matches!(task.take(|_| Ok(())), Err(MoqError::Cancelled)));
+		assert!(matches!(polled.take(|_| Ok(())), Err(MoqError::Cancelled)));
+	}
+
+	#[tokio::test]
+	async fn polled_is_busy_until_a_parked_call_is_dropped() {
+		let (_producer, polled) = queue();
+		assert!(!polled.busy());
+		let mut parked = Box::pin(pop(&polled));
+		assert!(poll_once(parked.as_mut()).is_pending());
+		assert!(polled.busy(), "a parked call is in flight");
+		drop(parked);
+		assert!(!polled.busy());
+	}
+
+	#[tokio::test]
+	async fn polled_cancel_drops_the_state_and_ends_a_parked_call() {
+		let (tx, mut dropped) = tokio::sync::oneshot::channel();
+		let polled = Polled::new(Tracked(Some(tx)));
+		let mut parked = Box::pin(polled.wait(|_, _| Poll::<Result<(), MoqError>>::Pending));
+		assert!(poll_once(parked.as_mut()).is_pending());
+
+		polled.cancel();
+		// Dropped before cancel returns, though the parked call still holds a borrow.
+		assert!(matches!(dropped.try_recv(), Ok(())));
+		assert!(polled.is_cancelled());
+		assert!(matches!(soon(parked).await, Err(MoqError::Cancelled)));
+		assert!(matches!(
+			polled.wait(|_, _| Poll::Ready(Ok(()))).await,
+			Err(MoqError::Cancelled)
+		));
+	}
+
+	#[tokio::test]
+	async fn polled_cleanup_panic_reaches_later_calls() {
+		struct Panics;
+		impl Drop for Panics {
+			fn drop(&mut self) {
+				panic!("injected cleanup panic");
+			}
+		}
+		let polled = Polled::new(Panics);
+		polled.cancel();
+		let result = polled.wait(|_, _| Poll::Ready(Ok(()))).await;
+		assert!(matches!(result, Err(MoqError::Task { .. })), "{result:?}");
+	}
+
+	/// Two calls parked on one handle both wake, and between them take every item once.
+	#[tokio::test]
+	async fn polled_concurrent_calls_take_every_item_once() {
+		let (producer, polled) = queue();
+		let polled = Arc::new(polled);
+		let reader = |polled: Arc<Polled<_>>| {
+			tokio::spawn(async move {
+				let mut items = Vec::new();
+				while let Some(item) = pop(&polled).await.unwrap() {
+					items.push(item);
+				}
+				items
+			})
+		};
+		let first = reader(polled.clone());
+		let second = reader(polled.clone());
+		// Let both park before anything arrives.
+		tokio::task::yield_now().await;
+		for _ in 0..100 {
+			*producer.write().ok().unwrap() += 1;
+			tokio::task::yield_now().await;
+		}
+		assert!(producer.close().is_ok());
+
+		let first = soon(first).await.unwrap();
+		let second = soon(second).await.unwrap();
+		let mut all: Vec<u32> = first.iter().chain(&second).copied().collect();
+		all.sort_unstable();
+		assert_eq!(all, (0..100).collect::<Vec<_>>());
 	}
 
 	#[test]

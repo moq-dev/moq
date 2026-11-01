@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
+use std::task::{Poll, ready};
 
 use bytes::Buf;
 use moq_mux::catalog::hang::Extra;
@@ -11,7 +12,7 @@ use crate::consumer::{
 };
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
-use crate::ffi::Task;
+use crate::ffi::Polled;
 use crate::producer::{Child, Children, MoqBroadcastProducer, MoqTrackRequest};
 
 /// A width and height in pixels.
@@ -1352,23 +1353,9 @@ fn media_container(
 /// Reads the latest catalog snapshots from a broadcast.
 #[derive(uniffi::Object)]
 pub struct MoqMediaCatalogConsumer {
-	task: Task<Catalog>,
-}
-
-struct Catalog {
 	// Consume with the untyped `Extra` extension so application sections survive into
 	// `MoqCatalog.sections` instead of being dropped.
-	inner: moq_mux::catalog::hang::Consumer<moq_mux::catalog::hang::Extra>,
-}
-
-impl Catalog {
-	async fn next(&mut self) -> Result<Option<MoqCatalog>, MoqError> {
-		match self.inner.next().await {
-			Ok(Some(catalog)) => Ok(Some(convert_catalog(&catalog))),
-			Ok(None) => Ok(None),
-			Err(e) => Err(e.into()),
-		}
-	}
+	reads: Polled<moq_mux::catalog::hang::Consumer<moq_mux::catalog::hang::Extra>>,
 }
 
 /// One encoded media read: a container-decoded frame, a gap, or an encoder end.
@@ -1418,17 +1405,7 @@ impl TryFrom<moq_mux::container::Read> for MoqMediaRead {
 /// Reads encoded frames and the breaks between them from a live media track.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackConsumer {
-	task: Task<Media>,
-}
-
-struct Media {
-	inner: moq_mux::container::Consumer<moq_mux::catalog::hang::Container>,
-}
-
-impl Media {
-	async fn next(&mut self) -> Result<Option<MoqMediaRead>, MoqError> {
-		self.inner.read().await?.map(MoqMediaRead::try_from).transpose()
-	}
+	reads: Polled<moq_mux::container::Consumer<moq_mux::catalog::hang::Container>>,
 }
 
 #[cfg(test)]
@@ -1533,21 +1510,12 @@ mod read_tests {
 	}
 }
 
-struct MediaGroupInner {
-	inner: moq_mux::container::GroupConsumer<moq_mux::catalog::hang::Container>,
-}
-
-impl MediaGroupInner {
-	async fn next(&mut self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		self.inner.read().await?.map(media_frame).transpose()
-	}
-}
 
 /// A finite, container-decoded media group, fetched or decoded from a raw group.
 #[derive(uniffi::Object)]
 pub struct MoqMediaGroupConsumer {
 	sequence: u64,
-	task: Task<MediaGroupInner>,
+	reads: Polled<moq_mux::container::GroupConsumer<moq_mux::catalog::hang::Container>>,
 }
 
 impl MoqMediaGroupConsumer {
@@ -1559,7 +1527,7 @@ impl MoqMediaGroupConsumer {
 		let inner = moq_mux::container::GroupConsumer::new(group, container);
 		Self {
 			sequence: inner.sequence(),
-			task: Task::new(MediaGroupInner { inner }).supervised(driver),
+			reads: Polled::new(inner).supervised(driver),
 		}
 	}
 }
@@ -1573,14 +1541,18 @@ impl MoqMediaGroupConsumer {
 
 	/// Read the next decoded media frame, or `None` when the group ends.
 	pub async fn next(&self) -> Result<Option<MoqMediaFrame>, MoqError> {
-		self.task.run(|mut state| async move { state.next().await }).await
+		let frame = self
+			.reads
+			.wait(|group, waiter| Poll::Ready(Ok(ready!(group.poll_read(waiter))?)))
+			.await?;
+		frame.map(media_frame).transpose()
 	}
 
 	/// Cancel all current and future `next()` calls.
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }
 
@@ -1590,14 +1562,18 @@ impl MoqMediaGroupConsumer {
 impl MoqMediaCatalogConsumer {
 	/// Get the next catalog update. Returns `None` when the track ends or is closed.
 	pub async fn next(&self) -> Result<Option<MoqCatalog>, MoqError> {
-		self.task.run(|mut state| async move { state.next().await }).await
+		let catalog = self
+			.reads
+			.wait(|catalog, waiter| Poll::Ready(Ok(ready!(catalog.poll_next(waiter))?)))
+			.await?;
+		Ok(catalog.as_ref().map(convert_catalog))
 	}
 
 	/// Cancel all current and future `next()` calls.
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }
 
@@ -1607,14 +1583,18 @@ impl MoqMediaCatalogConsumer {
 impl MoqMediaTrackConsumer {
 	/// Get the next encoded frame, gap, or end; `None` once the track ends or is closed.
 	pub async fn next(&self) -> Result<Option<MoqMediaRead>, MoqError> {
-		self.task.run(|mut state| async move { state.next().await }).await
+		let read = self
+			.reads
+			.wait(|media, waiter| Poll::Ready(Ok(ready!(media.poll_read(waiter))?)))
+			.await?;
+		read.map(MoqMediaRead::try_from).transpose()
 	}
 
 	/// Cancel all current and future `next()` calls.
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }
 
@@ -1635,7 +1615,7 @@ impl MoqMediaCatalogConsumer {
 			.await?;
 		let consumer = moq_mux::catalog::hang::Consumer::from(track);
 		Ok(Arc::new(MoqMediaCatalogConsumer {
-			task: Task::new(Catalog { inner: consumer }).supervised(broadcast.driver.clone()),
+			reads: Polled::new(consumer).supervised(broadcast.driver.clone()),
 		}))
 	}
 }
@@ -1675,7 +1655,7 @@ impl MoqMediaTrackConsumer {
 			.await?;
 		let consumer = moq_mux::container::Consumer::new(track, media);
 		Ok(Arc::new(MoqMediaTrackConsumer {
-			task: Task::new(Media { inner: consumer }).supervised(broadcast.driver.clone()),
+			reads: Polled::new(consumer).supervised(broadcast.driver.clone()),
 		}))
 	}
 }
