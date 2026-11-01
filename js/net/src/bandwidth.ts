@@ -136,6 +136,20 @@ export interface Handle {
 	reserve(track: Demand, max: number): Reservation;
 }
 
+// Assigned by Allocator's static block, which runs before any instance exists.
+let reservedOf: (allocator: Allocator) => Getter<boolean>;
+
+/**
+ * Whether `allocator` holds a reservation that reads the estimate.
+ *
+ * The estimate's source can stop sampling while this is false: nothing reads it.
+ *
+ * @internal
+ */
+export function reserved(allocator: Allocator): Getter<boolean> {
+	return reservedOf(allocator);
+}
+
 /**
  * Divides one connection's bandwidth estimate among the tracks sharing it.
  *
@@ -154,6 +168,7 @@ export class Allocator implements Handle {
 	#estimate: Getter<number | undefined> | undefined;
 	#entries = new Signal<Entry[]>([]);
 	#alive = new Signal(true);
+	#reserved = new Signal(false);
 	#nextId = 0;
 	#signals = new Effect();
 	#registry: Registry;
@@ -177,12 +192,20 @@ export class Allocator implements Handle {
 			if (!effect.get(this.#alive)) return;
 			if (this.#estimate) effect.get(this.#estimate);
 			const entries = effect.get(this.#entries);
+			let reserved = false;
 			for (const entry of entries) {
 				effect.get(entry.demand.wanted);
 				effect.get(hooks.demandReleased(entry.demand));
+				// The same test shareOf applies: a closed demand reads no slice.
+				if (effect.get(entry.demand.closed) === undefined) reserved = true;
 			}
+			this.#reserved.set(reserved);
 			this.#publish();
 		});
+	}
+
+	static {
+		reservedOf = (allocator) => allocator.#reserved;
 	}
 
 	/**
@@ -246,6 +269,7 @@ export class Allocator implements Handle {
 	close(): void {
 		if (!this.#alive.peek()) return;
 		this.#alive.set(false);
+		this.#reserved.set(false);
 		for (const entry of this.#entries.peek()) {
 			entry.rate.set(undefined);
 		}
