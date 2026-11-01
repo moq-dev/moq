@@ -108,7 +108,7 @@ impl<T> Clone for Shared<T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use std::{
 		future::Future,

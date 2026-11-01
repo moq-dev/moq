@@ -71,7 +71,7 @@ fallback cannot connect: the session is WebTransport through the shaper, or the 
 
 ## Native rows
 
-The `native` runtime is the shipped binary, `moq play --no-video`, through the same shaper on the same
+The `native` runtime is the shipped binary, `moq play --video off`, through the same shaper on the same
 profiles, writing [`--metrics`](../../doc/bin/cli.md#play) samples in the `Sample` shape below, which
 the same analyzer reduces and the same budget file grades. It plays through the production
 ALSA/cpal output into a private PulseAudio null sink ([`../lib/pulse.py`](../lib/pulse.py)), one per

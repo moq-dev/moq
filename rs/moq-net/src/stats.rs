@@ -2635,7 +2635,6 @@ mod tests {
 		assert_eq!(retired.sessions.len(), 1);
 	}
 
-	#[cfg(not(target_family = "wasm"))]
 	#[test]
 	fn snapshot_and_report_transfer_counters_once() {
 		let stats = test_stats();
