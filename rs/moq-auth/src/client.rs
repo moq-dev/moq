@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use url::Url;
 
 use crate::lease::{self, Due, Reason};
@@ -369,7 +369,7 @@ async fn ask<S: Post>(server: &S, request: &Request) -> crate::Result<Grant> {
 /// Finish a request that nothing else bounds within [`TIMEOUT`], or report the
 /// server as unavailable, so a stalled server cannot pile up requests.
 async fn bounded<T>(request: impl Future<Output = crate::Result<T>>) -> crate::Result<T> {
-	moq_clock::timeout(TIMEOUT, request).await.unwrap_or_else(|_| {
+	kio::clock::timeout(TIMEOUT, request).await.unwrap_or_else(|_| {
 		Err(Error::Unavailable(format!(
 			"the auth server did not answer within {TIMEOUT:?}"
 		)))
@@ -614,7 +614,7 @@ mod tests {
 	/// as zero and be refused; these tests run on a one-second cadence.
 	fn grant(expires_in: Option<Duration>, revalidate: Option<Duration>) -> Grant {
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
-		grant.expires = expires_in.map(|d| moq_clock::wall() + d);
+		grant.expires = expires_in.map(|d| kio::clock::wall() + d);
 		grant.revalidate = revalidate;
 		grant
 	}
@@ -797,7 +797,7 @@ mod tests {
 		struct Slow(Script);
 		impl Post for Slow {
 			async fn post(&self, request: &Request) -> crate::Result<Grant> {
-				moq_clock::sleep(TIMEOUT + Duration::from_secs(1)).await;
+				kio::clock::sleep(TIMEOUT + Duration::from_secs(1)).await;
 				self.0.post(request).await
 			}
 			async fn post_end(&self, request: &Request) -> crate::Result<()> {
@@ -807,7 +807,7 @@ mod tests {
 		let script = Script::new(Log::default(), |_| Some(Ok(grant(None, None))));
 		let server = Slow(script.clone());
 
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let owner = match admit(
 			server.clone(),
 			request(),
@@ -823,7 +823,7 @@ mod tests {
 		let mut attached = request();
 		attached.query = Some("jwt=replacement".into());
 		let context = owner.context().unwrap().attach(&attached, &script.identity).unwrap();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let Err(err) = admit(server, attached, context).await else {
 			panic!("an attached credential waited past its bound");
 		};
@@ -1194,7 +1194,7 @@ mod tests {
 		});
 
 		let mut consumer = script.connect().await.unwrap();
-		let fresh = moq_clock::timeout(Duration::from_secs(3), consumer.changed())
+		let fresh = kio::clock::timeout(Duration::from_secs(3), consumer.changed())
 			.await
 			.expect("a re-check within the cadence")
 			.unwrap();
@@ -1217,7 +1217,7 @@ mod tests {
 			});
 
 			let consumer = script.connect().await.unwrap();
-			let reason = moq_clock::timeout(Duration::from_secs(3), consumer.closed())
+			let reason = kio::clock::timeout(Duration::from_secs(3), consumer.closed())
 				.await
 				.expect("revoked within the cadence");
 			assert_eq!(reason, Reason::Refused);
@@ -1234,7 +1234,7 @@ mod tests {
 		});
 
 		let consumer = script.connect().await.unwrap();
-		let reason = moq_clock::timeout(Duration::from_secs(3), consumer.closed())
+		let reason = kio::clock::timeout(Duration::from_secs(3), consumer.closed())
 			.await
 			.expect("revoked within the cadence");
 		assert_eq!(reason, Reason::Invalid);
@@ -1244,7 +1244,7 @@ mod tests {
 	async fn an_expired_grant_is_refused() {
 		tokio::time::pause();
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::new());
-		grant.expires = Some(moq_clock::wall() - Duration::from_secs(1));
+		grant.expires = Some(kio::clock::wall() - Duration::from_secs(1));
 		let script = Script::new(Log::default(), move |_| Some(Ok(grant.clone())));
 		assert!(matches!(script.connect().await, Err(Error::GrantExpired)));
 	}
@@ -1265,7 +1265,7 @@ mod tests {
 		let consumer = script.connect().await.unwrap();
 		// A nudge's reply schedules the next re-check the same way.
 		consumer.revalidate();
-		let reason = moq_clock::timeout(Duration::from_secs(4), consumer.closed())
+		let reason = kio::clock::timeout(Duration::from_secs(4), consumer.closed())
 			.await
 			.expect("closed at expires");
 		assert_eq!(reason, Reason::Expired);
@@ -1277,7 +1277,7 @@ mod tests {
 	#[tokio::test]
 	async fn an_outage_keeps_the_grant_until_expires() {
 		tokio::time::pause();
-		let expires = moq_clock::wall() + Duration::from_secs(3);
+		let expires = kio::clock::wall() + Duration::from_secs(3);
 		let log = Log::default();
 		let script = Script::new(log.clone(), move |request| {
 			Some(match request.event {
@@ -1292,15 +1292,15 @@ mod tests {
 
 		// `expires` is wall-clock time, which the client maps onto Tokio's clock
 		// somewhere inside `connect`, so bracket it: the bounds hold however long it takes.
-		let (wall, tick) = (moq_clock::wall(), moq_clock::now());
+		let (wall, tick) = (kio::clock::wall(), kio::clock::now());
 		let consumer = script.connect().await.unwrap();
-		let earliest = tick + expires.checked_duration_since(moq_clock::wall()).unwrap();
-		let latest = moq_clock::now() + expires.checked_duration_since(wall).unwrap();
+		let earliest = tick + expires.checked_duration_since(kio::clock::wall()).unwrap();
+		let latest = kio::clock::now() + expires.checked_duration_since(wall).unwrap();
 
 		// A millisecond either side for Tokio's timer resolution.
 		let tolerance = Duration::from_millis(1);
 		assert!(
-			moq_clock::timeout_at(earliest - tolerance, consumer.closed())
+			kio::clock::timeout_at(earliest - tolerance, consumer.closed())
 				.await
 				.is_err(),
 			"an outage must not close before expires"
@@ -1311,7 +1311,7 @@ mod tests {
 			patterns(&["**"]),
 			"the grant stands through the outage"
 		);
-		let reason = moq_clock::timeout_at(latest + tolerance, consumer.closed())
+		let reason = kio::clock::timeout_at(latest + tolerance, consumer.closed())
 			.await
 			.expect("closed at expires, not later");
 		assert_eq!(reason, Reason::Expired);
@@ -1334,7 +1334,7 @@ mod tests {
 		});
 		let consumer = script.connect().await.unwrap();
 
-		let reason = moq_clock::timeout(Duration::from_secs(5), consumer.closed())
+		let reason = kio::clock::timeout(Duration::from_secs(5), consumer.closed())
 			.await
 			.expect("expired while the re-check was in flight");
 		assert_eq!(reason, Reason::Expired);
@@ -1405,7 +1405,7 @@ mod tests {
 		let consumer = client(&server).connect(request()).await.unwrap();
 		assert_eq!(log.events(), [Event::Connect]);
 		consumer.revalidate();
-		moq_clock::timeout(
+		kio::clock::timeout(
 			Duration::from_secs(2),
 			log.until(|log| log.iter().any(|r| r.event == Event::Revalidate)),
 		)
@@ -1428,7 +1428,7 @@ mod tests {
 
 		let consumer = client(&server).connect(request()).await.unwrap();
 		consumer.revalidate();
-		moq_clock::timeout(
+		kio::clock::timeout(
 			Duration::from_secs(2),
 			log.until(|log| log.iter().any(|r| r.event == Event::Revalidate)),
 		)
@@ -1439,7 +1439,7 @@ mod tests {
 		consumer.revalidate();
 		// `changed` jumps to the latest grant epoch, so two replies can arrive as one
 		// observation. The request log does not coalesce.
-		moq_clock::timeout(
+		kio::clock::timeout(
 			Duration::from_secs(3),
 			log.until(|log| log.iter().filter(|r| r.event == Event::Revalidate).count() >= 2),
 		)

@@ -181,6 +181,13 @@ export const ContainerSchema: ZodMiniDefault<ZodMiniUnion<readonly [ZodMiniDiscr
 	kind: string;
 }>>]>>;
 
+export type Contribution = infer<typeof ContributionSchema>;
+
+export const ContributionSchema: ZodMiniObject<{
+	broadcast: ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>;
+	epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
+}, $strip>;
+
 export const DEFAULT_FORMAT: Format;
 
 export class DuplicateRendition extends Error {
@@ -331,6 +338,10 @@ export const RootSchema: ZodMiniObject<{
 		timescale: ZodMiniDefault<ZodMiniNumber<number>>;
 		wall: $ZodBranded<ZodMiniNumber<number>, "u53", "out">;
 	}, $strip>>;
+	contributions: ZodMiniOptional<ZodMiniRecord<ZodMiniString<string>, ZodMiniObject<{
+		broadcast: ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>;
+		epoch: ZodMiniOptional<ZodMiniType<ReferenceEpoch, string, $ZodTypeInternals<ReferenceEpoch, string>>>;
+	}, $strip>>>;
 	echo: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniObject<{
 		path: ZodMiniType<RelativeBroadcast, string, $ZodTypeInternals<RelativeBroadcast, string>>;
 	}, $strip>, ZodMiniPipe<ZodMiniCustom<unknown, unknown>, ZodMiniTransform<undefined, unknown>>]>>;

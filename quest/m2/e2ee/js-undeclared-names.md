@@ -4,8 +4,8 @@
 
 `@moq/net` exposes a public broadcast request handler, and `@moq/e2ee`'s
 broadcast producer answers requests for track names it never created
-through it, under semantic names, as
-[undeclared names](/quest/m2/e2ee/undeclared-names.md) does in Rust. A JS
+through it, under semantic names, as `moq_e2ee::broadcast::Requests` does in
+Rust. A JS
 application then serves on-demand tracks from a plaintext or encrypted
 broadcast the same way.
 
@@ -26,10 +26,11 @@ Decided with the maintainer on 2026-10-24:
   2026-10-17 refusal, so every identity stays unique and a handler can serve
   a dropped name again).
 - The handler offers the lister, taking semantic names and listing their
-  physical names, as undeclared-names does. `@moq/net`'s broadcast lister is
+  physical names, as Rust's `moq_e2ee::broadcast::Lister` does. `@moq/net`'s broadcast lister is
   internal today (tests reach it through `wireOf`), so export it with the
   handler.
-- Port undeclared-names' tests: a relay-forged name, an older epoch's name,
+- Port Rust's `requests_refuse_names_the_generation_did_not_issue` and
+  `requests_serve_a_dropped_name_above_its_marks` tests: a relay-forged name, an older epoch's name,
   and a burst of forged names that leaves no state behind.
 
 Public API: a public broadcast `requests()` in `@moq/net`, and a request
@@ -37,5 +38,4 @@ handler on `@moq/e2ee`'s broadcast producer. Wire: none.
 
 ## Required
 
-- [Undeclared track names](/quest/m2/e2ee/undeclared-names.md) - the Rust handler this mirrors
 - [JS mirror](/quest/m2/net-wrap/js.md) - the `@moq/net` interfaces the `@moq/e2ee` wrappers implement
