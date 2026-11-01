@@ -603,8 +603,6 @@ struct Namespaces {
 	/// The update whose request token the acceptor is still verifying. It is answered once
 	/// the verdict lands, while the loop keeps advertising and withdrawing meanwhile.
 	verifying: Option<Verifying>,
-	/// Updates that arrived behind [`Self::verifying`], answered in order once it is.
-	queued: VecDeque<super::request_stream::NamespaceUpdate>,
 	/// The auth epoch last applied to `permit`.
 	epoch: u64,
 	/// Whether this discovery cursor includes hidden namespaces.
@@ -628,7 +626,6 @@ impl Namespaces {
 			gate: None,
 			token: None,
 			verifying: None,
-			queued: VecDeque::new(),
 			epoch: 0,
 			hidden: false,
 			epochs: false,
@@ -734,8 +731,6 @@ enum NamespaceEvent {
 	Closed(Result<(), Error>),
 	/// A requester changes the namespace prefix.
 	Request(super::request_stream::NamespaceUpdate),
-	/// The update at the front of the queue is next to answer.
-	Next,
 	/// The acceptor answered the token of the update being verified.
 	Verified(std::result::Result<crate::auth::Grant, crate::auth::Refusal>),
 	/// An origin-level route (un)announce: whether it is active and whether it
@@ -4280,6 +4275,7 @@ impl Publisher {
 		// its side first. A peer streaming REQUEST_UPDATEs must not hold the session's other
 		// tasks.
 		let mut budget = kio::coop::Budget::new(32);
+		let mut session = self.session.clone();
 		let res = loop {
 			kio::wait(|waiter| budget.poll_yield(waiter)).await;
 			match ns.watched.values().any(|watch| watch.deferred) {
@@ -4304,7 +4300,6 @@ impl Publisher {
 					updates,
 					gate,
 					verifying,
-					queued,
 					..
 				} = &mut ns;
 				kio::wait(|waiter| {
@@ -4325,18 +4320,26 @@ impl Publisher {
 					if let Poll::Ready(permit) = permit {
 						return Poll::Ready(NamespaceEvent::Regrant(permit));
 					}
-					if let Poll::Ready(event) = target.poll_event(&mut finished, &mut goaways, self.version, waiter) {
-						return Poll::Ready(event);
-					}
-					// A token being verified holds up only the updates behind it.
 					match verifying {
+						// Nothing more is read until the token's verdict, so the updates behind it
+						// wait in the stream, under its flow control, and are answered in order.
 						Some(verifying) => {
+							if let Some(stream) = target.stream()
+								&& self.poll_withdrawn(&mut session, stream, waiter).is_ready()
+							{
+								return Poll::Ready(NamespaceEvent::Closed(Ok(())));
+							}
 							if let Poll::Ready(answer) = verifying.verdict.poll_grant(waiter) {
 								return Poll::Ready(NamespaceEvent::Verified(answer));
 							}
 						}
-						None if !queued.is_empty() => return Poll::Ready(NamespaceEvent::Next),
-						None => {}
+						None => {
+							if let Poll::Ready(event) =
+								target.poll_event(&mut finished, &mut goaways, self.version, waiter)
+							{
+								return Poll::Ready(event);
+							}
+						}
 					}
 					// Each update in flight is answered on its own stream, so many renew at
 					// once and none holds up the announcements behind it.
@@ -4392,10 +4395,6 @@ impl Publisher {
 							break Err(err);
 						}
 					}
-					ns.queued.push_back(update);
-				}
-				NamespaceEvent::Next => {
-					let update = ns.queued.pop_front().expect("an update is queued");
 					let refusal = update
 						.refused
 						.map(|error| ietf::RequestError {
