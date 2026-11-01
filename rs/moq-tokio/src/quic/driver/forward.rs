@@ -115,7 +115,11 @@ impl Peers {
 	}
 
 	fn contains(&self, addr: &SocketAddr) -> bool {
-		self.0.read().unwrap_or_else(PoisonError::into_inner).addrs.contains(addr)
+		self.0
+			.read()
+			.unwrap_or_else(PoisonError::into_inner)
+			.addrs
+			.contains(addr)
 	}
 }
 

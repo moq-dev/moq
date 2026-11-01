@@ -147,12 +147,13 @@ impl Workers {
 			tls: listen_tls,
 			preferred_v4,
 			preferred_v6,
-			lb: moq_tokio::listen::LoadBalancer {
-				id: lb_id,
-				nonce: _,
-				// Needs an id, refused below.
-				forward: _,
-			},
+			lb:
+				moq_tokio::listen::LoadBalancer {
+					id: lb_id,
+					nonce: _,
+					// Needs an id, refused below.
+					forward: _,
+				},
 			reset_secret,
 		} = server.listen.resolve()?;
 		let quic = &server.quic;

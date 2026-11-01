@@ -905,10 +905,15 @@ fn read_peers(path: &std::path::Path, own: &ServerId, bind: net::SocketAddr) -> 
 	let mut map = driver::forward::Map::default();
 	for (id, addr) in peers {
 		if id.len() != own.len() {
-			return Err(invalid(format!("{id:?} is not {} bytes like this server's ID", own.len())));
+			return Err(invalid(format!(
+				"{id:?} is not {} bytes like this server's ID",
+				own.len()
+			)));
 		}
 		if addr.ip().is_unspecified() || addr.is_ipv4() != bind.is_ipv4() {
-			return Err(invalid(format!("{id:?} has an address {bind} cannot forward to: {addr}")));
+			return Err(invalid(format!(
+				"{id:?} has an address {bind} cannot forward to: {addr}"
+			)));
 		}
 		if id != *own {
 			map.insert(&id.0, addr);

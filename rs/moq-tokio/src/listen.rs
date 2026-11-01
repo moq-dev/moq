@@ -814,7 +814,10 @@ peers = "peers.toml"
 				complete.replace("bind = \"10.0.0.1:4443\"\n", ""),
 				"requires --listen-quic-lb-forward-bind",
 			),
-			(complete.replace("key = \"k\"\n", ""), "requires --listen-quic-lb-forward-key"),
+			(
+				complete.replace("key = \"k\"\n", ""),
+				"requires --listen-quic-lb-forward-key",
+			),
 			(
 				complete.replace("peers = \"p\"\n", ""),
 				"requires --listen-quic-lb-forward-peers",
