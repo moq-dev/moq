@@ -513,10 +513,7 @@ mod tests {
 			if current.instance().as_ref() == next.as_str() {
 				break current;
 			}
-			assert!(
-				kio::clock::now() < deadline,
-				"the replacement was never served"
-			);
+			assert!(kio::clock::now() < deadline, "the replacement was never served");
 			kio::clock::sleep(Duration::from_millis(50)).await;
 		};
 		let mut renditions = successor.renditions();
