@@ -95,7 +95,7 @@ fn traffic(registry: &stats::Registry, role: stats::Role) -> stats::Traffic {
 /// The hop the dialer attributed `path` to, once that announce has arrived.
 async fn learned_hop(dialer: &origin::Producer, path: &str) -> Hop {
 	let mut announced = dialer.consume().announced();
-	let event = moq_clock::timeout(SETTLE, async {
+	let event = kio::clock::timeout(SETTLE, async {
 		loop {
 			let event = announced.next().await.expect("announce cursor closed");
 			let announce = match event {
@@ -124,13 +124,13 @@ fn hop(id: u64) -> Hop {
 }
 
 /// Edges that declare their own hop over the MoQ Cluster extension.
-#[moq_clock::test]
+#[kio::test]
 async fn dialed_named_session_does_not_echo_or_route_subscribe_back() {
 	split_horizon("moq-transport-18", [hop(2), hop(3)]).await;
 }
 
 /// moq-lite-01 carries no hop, so neither side declares one.
-#[moq_clock::test]
+#[kio::test]
 async fn dialed_anonymous_session_does_not_echo_or_route_subscribe_back() {
 	split_horizon("moq-lite-01", [hop(2), hop(3)]).await;
 }
@@ -161,7 +161,7 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2])
 	// The other edge learns the namespace, attributed to a different hop, so the
 	// two dials are not one endpoint.
 	let mut subscriber_announced = subscriber.consume().announced();
-	let subscriber_saw = moq_clock::timeout(SETTLE, subscriber_announced.next())
+	let subscriber_saw = kio::clock::timeout(SETTLE, subscriber_announced.next())
 		.await
 		.expect("the other edge never learned the namespace")
 		.expect("announce cursor closed");
@@ -176,7 +176,7 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2])
 	assert_ne!(subscriber_hop, publisher_hop, "each dial gets its own hop");
 	assert_ne!(subscriber_hop, Hop::UNKNOWN);
 
-	moq_clock::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 
 	let echoed = traffic(&to_publisher.registry, stats::Role::Subscriber);
 	assert_eq!(
@@ -204,12 +204,12 @@ async fn split_horizon(version: &str, [publisher_hop, subscriber_hop]: [Hop; 2])
 		.subscribe(subscription)
 		.await
 		.expect("subscriber subscribes");
-	moq_clock::timeout(SETTLE, crate::support::wanted(track.demand()))
+	kio::clock::timeout(SETTLE, crate::support::wanted(track.demand()))
 		.await
 		.expect("the subscribe never reached the announcer")
 		.unwrap();
 
-	moq_clock::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 
 	let from_announcer = traffic(&to_publisher.registry, stats::Role::Publisher);
 	assert_eq!(

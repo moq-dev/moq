@@ -372,7 +372,9 @@ fn ended(conn: &mut State, id: stream::Id) -> Option<Result<Option<VarInt>, Erro
 
 impl Drop for Half {
 	fn drop(&mut self) {
-		let mut conn = self.conn.state.lock();
+		let Some(mut conn) = self.conn.state.lock_for_drop() else {
+			return;
+		};
 
 		// clean up any previously registered wakers
 		conn.blocked_writers.remove(&self.id);
@@ -527,8 +529,9 @@ impl Group {
 
 impl Drop for GroupInner {
 	fn drop(&mut self) {
-		if let Some(group) = self.group.take() {
-			let mut conn = self.conn.state.lock();
+		if let Some(group) = self.group.take()
+			&& let Some(mut conn) = self.conn.state.lock_for_drop()
+		{
 			conn.inner.send_groups().close(group);
 		}
 	}

@@ -1,10 +1,9 @@
-import { Group, Error as NetError } from "@moq/net";
+import { Error as NetError } from "@moq/net";
 import type * as z from "@zod/mini";
-
 import { deepEqual, diff } from "../diff.ts";
+import { MAX_FRAME_BYTES, TAIL_BYTES, tailCharge } from "../limits.ts";
 
-// Maximum frames (snapshot + deltas) in a single group before a new snapshot is forced. Kept
-// well below the per-group frame cap so a late joiner can always read the snapshot at frame 0.
+// Bound the number of patches a joiner must apply before reaching the current value.
 const MAX_DELTA_FRAMES = 256;
 
 /** Options shared by an {@link Encoder} and the {@link Producer} that wraps one. */
@@ -34,8 +33,7 @@ export interface Config<T> {
 	 *
 	 * A delta that would pass it rolls a fresh snapshot instead, and a snapshot past it throws
 	 * `FrameTooLarge`. Lowering it lets a test reach the limit without megabytes of JSON; a value
-	 * above moq-net's per-group cache limit is clamped to it, since moq-net refuses a larger group
-	 * anyway. Defaults to that limit.
+	 * above moq-net's current whole-frame limit is clamped to it. Defaults to that limit.
 	 */
 	maxGroupBytes?: number;
 }
@@ -108,8 +106,10 @@ export class Encoder<T> {
 	// baseline every delta is diffed against, and `undefined` until the first snapshot commits.
 	#last?: unknown;
 
-	// Bytes charged to the current group, snapshot included.
+	// Payload bytes in the current group, snapshot included.
 	#groupBytes = 0;
+	// What moq-net's group tail charges for them, which must keep the snapshot retained.
+	#groupCharge = 0;
 	// Frames emitted into the current group, snapshot included.
 	#groupFrames = 0;
 
@@ -128,7 +128,7 @@ export class Encoder<T> {
 
 	constructor(config: Config<T> = {}) {
 		this.#config = config;
-		this.#maxGroupBytes = Math.min(config.maxGroupBytes ?? Infinity, Group.MAX_GROUP_CACHE_BYTES);
+		this.#maxGroupBytes = Math.min(config.maxGroupBytes ?? Infinity, MAX_FRAME_BYTES);
 	}
 
 	/**
@@ -153,6 +153,7 @@ export class Encoder<T> {
 	 */
 	reset(): void {
 		this.#groupBytes = 0;
+		this.#groupCharge = 0;
 		this.#groupFrames = 0;
 		this.#resync = true;
 		this.#pending = false;
@@ -193,11 +194,11 @@ export class Encoder<T> {
 		// The baseline advances on commit, so it never runs ahead of the wire.
 		if (delta) {
 			// A delta is only readable while the group still holds the snapshot it applies to.
-			// Admitting a patch that pushes the group past that budget would abort it
-			// (`GroupTooLarge`), leaving a late subscriber with no value, so fall through to a fresh
-			// snapshot instead.
-			if (this.#groupBytes + delta.length <= this.#maxGroupBytes) {
+			// Roll before the group's tail sheds the snapshot, so a joiner always finds it.
+			const charge = tailCharge(delta.length);
+			if (this.#groupBytes + delta.length <= this.#maxGroupBytes && this.#groupCharge + charge <= TAIL_BYTES) {
 				this.#groupBytes += delta.length;
+				this.#groupCharge += charge;
 				this.#groupFrames += 1;
 				return this.#pend({ payload: delta, keyframe: false }, json);
 			}
@@ -263,6 +264,7 @@ export class Encoder<T> {
 	#snapshot(frame: Uint8Array): Uint8Array {
 		if (frame.length > this.#maxGroupBytes) throw new NetError.FrameTooLarge();
 		this.#groupBytes = frame.length;
+		this.#groupCharge = tailCharge(frame.length);
 		this.#groupFrames = 1;
 		this.#resync = false;
 		return frame;

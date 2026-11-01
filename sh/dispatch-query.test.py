@@ -11,6 +11,8 @@ import time
 import tempfile
 import unittest
 
+from test_env import dispatch_env
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -28,15 +30,8 @@ class QueryTests(unittest.TestCase):
         self.bin.mkdir()
         for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
             (self.bin / command).symlink_to(shutil.which(command))
-        self.env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
-                        GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
-        # The runner's own Actions variables would move the run's error
-        # annotations to stdout and append to the real job summary, a gate's
-        # CHECK_MODULES split would skip the modules these tests expect, and the
-        # land gate's CHECK_FAIL_FAST would cancel the lanes they expect to finish.
-        for key in ("IN_MOQ_DEV_SHELL", "ALLOW_HOST_TOOLCHAIN", "CHECK_JOBS", "CHECK_MODULES",
-                    "CHECK_FAIL_FAST", "GITHUB_BASE_REF", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY"):
-            self.env.pop(key, None)
+        self.env = dispatch_env(LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
+                                GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "test")
         self.git("config", "user.email", "test@example.com")
@@ -190,7 +185,7 @@ class QueryTests(unittest.TestCase):
 
     def stub_ci(self, just=""):
         for tool in ("bun", "python3", "cargo", "jq", "shellcheck",
-                     "shfmt", "taplo", "nixfmt", "actionlint", "quest", "nix",
+                     "shfmt", "taplo", "nixfmt", "actionlint", "zizmor", "quest", "nix",
                      "c++", "clang-format", "cmake", "dart", "dash", "gersemi", "go",
                      "gradle", "java", "kramdown-rfc", "pkg-config", "uniffi-bindgen-cpp",
                      "clippy-driver", "dpkg-deb", "nfpm", "rpm",
@@ -391,7 +386,7 @@ class QueryTests(unittest.TestCase):
     "rs lint-changed "*) echo $$ >"{pid}"; echo >"{started}"; exec sleep 600 ;;
 esac
 ''')
-        self.change("rs/moq-clock/src/lib.rs")
+        self.change("rs/kio/src/clock/mod.rs")
         for jobs in ("1", "3"):
             with self.subTest(jobs=jobs):
                 run = subprocess.Popen(["bash", "sh/dispatch.sh", "ci", "origin/main"],
@@ -413,7 +408,7 @@ esac
                     os.kill(int(pid.read_text()), 0)
 
     def test_ci_runs_one_lint_preamble_and_one_test_pass(self):
-        self.change("rs/moq-clock/src/lib.rs")
+        self.change("rs/kio/src/clock/mod.rs")
         calls = self.run_ci()
         self.assertTrue(any(call.startswith("rs lint-changed ") for call in calls), calls)
         self.assertFalse(any(call.startswith("rs check-changed ") for call in calls), calls)
@@ -423,7 +418,7 @@ esac
                         next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")))
 
     def test_rust_lane_runs_only_the_lint_and_the_test_build(self):
-        self.change("rs/moq-clock/src/lib.rs")
+        self.change("rs/kio/src/clock/mod.rs")
         calls = [call.split()[1] for call in self.run_ci() if call.startswith("rs ")]
         self.assertEqual(calls, ["lint-changed", "test-changed"])
 

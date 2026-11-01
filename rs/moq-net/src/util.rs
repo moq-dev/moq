@@ -3,8 +3,12 @@
 use std::{collections::VecDeque, future::Future, pin::Pin, task::Poll};
 
 mod cell;
+#[cfg(feature = "async")]
+mod later;
 mod wake;
 pub(crate) use cell::SendCell;
+#[cfg(feature = "async")]
+pub(crate) use later::{Later, Learning};
 pub(crate) use wake::QueueWake;
 
 /// Prove a future's Send bound here rather than inside every caller's future.
