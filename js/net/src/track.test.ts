@@ -3536,6 +3536,39 @@ test("an untimed track takes groups in any order", () => {
 	}
 });
 
+test("replay and backlogs deliver sparse out-of-order arrivals ascending without sorting", () => {
+	const producer = new TrackProducer("test").accept({});
+	const all = { groups: { start: { included: 0 } }, maxDelay: null };
+	const write = (sequence: number) => {
+		const group = producer.createGroup(sequence);
+		group.writeFrame({ payload: enc.encode(`${sequence}`) });
+		group.finish();
+	};
+	const drain = (reader: ReturnType<typeof producer.subscribe>) => {
+		const seen: number[] = [];
+		for (let group = reader.tryRecvGroup(); group; group = reader.tryRecvGroup()) {
+			const frame = group.tryReadFrame();
+			expect(frame && dec.decode(frame.payload)).toBe(`${group.sequence}`);
+			seen.push(group.sequence);
+		}
+		return seen;
+	};
+	const sort = spyOn(Array.prototype, "sort");
+	try {
+		const live = producer.subscribe(all);
+		for (const sequence of [40, 10, 30, 0, 20]) write(sequence);
+		const joined = producer.subscribe(all);
+		// Arrivals below, between and above the joiner's replayed cache.
+		for (const sequence of [25, 50, 5, 35]) write(sequence);
+		expect(sort).not.toHaveBeenCalled();
+		const expected = [0, 5, 10, 20, 25, 30, 35, 40, 50];
+		expect(drain(live)).toEqual(expected);
+		expect(drain(joined)).toEqual(expected);
+	} finally {
+		sort.mockRestore();
+	}
+});
+
 // A received track as a wire subscription leaves it: the feed starts at group 0 and its end is
 // pending, so lower groups may still arrive behind a higher one.
 function pendingTail(end: number, maxDelay = Milli(60_000)) {

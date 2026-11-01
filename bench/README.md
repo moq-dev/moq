@@ -409,17 +409,22 @@ Crashes, wrong bytes, missing frames, a window that presents nothing, or an
 unavailable CPU clock fail the run; timing never does. The nightly runs
 `--smoke` and keeps its run directory as the `bench-browser` artifact.
 
-The in-memory frame, retained-history, and gap ledger paths also run directly in Chromium:
+The in-memory frame, retained-history, gap ledger, and cached-group replay paths
+also run directly in Chromium:
 
 ```bash
 nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench drift --out .tmp/drift.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench ledger --out .tmp/ledger.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench replay --out .tmp/replay.json before=/path/to/main current=. aa=.
 ```
 
-Each variant uses its own workspace source and a persistent page, with one full
+Each variant uses its own workspace source and a persistent, cross-origin isolated
+page, so `performance.now()` resolves 5 µs rather than 100 µs, with one full
 warmup before three alternating measured rounds. `aa` must bundle identically to
-`current`. The JSON preserves every CSV sample and the browser version. `frames`
+`current`. The JSON preserves every CSV sample and the browser version, plus each
+variant's main-thread GC count, pause and reclaimed heap from one traced run after
+the timed rounds. `frames`
 runs the checkout's existing `js/net/bench/frames.ts`; `drift` uses the same fixture
 against every checkout, sweeping retained groups, publishers, and readers. Replay
 and group setup stay outside drift timing; each parked read checks its live
@@ -432,8 +437,18 @@ Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
 for mixed millisecond/microsecond timestamps, which exercise exact cross-scale
 comparison.
 
-The browser smoke lane preserves one measured round of all three fixtures, and drift
-and ledger also run in the nightly JS benchmark leg. Timing is
+`replay` sweeps retained groups (64, 512, 2048) against subscribers (1, 8) for
+monotonic, reverse, and shuffled arrivals. `join` rows time each subscriber
+joining the cache and replaying every retained group; `append` rows time each of
+64 arrivals into that many subscribers' unread backlogs, landing inside the
+backlog for reverse and shuffled orders. `max_us` is the slowest single operation,
+the longest the event loop was held. An untimed pass first prints each shape's
+`Array.prototype.sort` calls, elements and comparator visits, ahead of the timing
+header so the nightly report keeps only timings as series. Every subscriber then
+drains, requiring each sequence once, ascending, with its payload.
+
+The browser smoke lane preserves one measured round of all four fixtures, and drift,
+ledger and replay also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
 ## Pattern and container coverage
