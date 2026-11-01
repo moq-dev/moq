@@ -25,8 +25,10 @@ const TRAIN_SEGMENTS: usize = 63;
 
 /// The GSO trains a connection stages per worker turn before it yields to
 /// the next, so one connection's backlog shares the socket with the others
-/// and with the completions the next reap brings back.
-const TRAINS_PER_TURN: usize = 1;
+/// and with the completions the next reap brings back. More than one, so a
+/// reply's lone train is followed by an empty flush rather than a yield and a
+/// turn of its own; four cut a bulk sender's enters by a quarter against one.
+const TRAINS_PER_TURN: usize = 4;
 
 /// Everything the handles and the driver share, single-threaded.
 ///

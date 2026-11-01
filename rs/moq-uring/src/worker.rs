@@ -55,7 +55,9 @@ const TEARDOWN_EINTR_RETRIES: usize = 8;
 /// Maximum time spent staging cancellations and draining completions.
 const TEARDOWN_TIMEOUT: Duration = Duration::from_millis(3200);
 
-/// The default [`Config::passes`].
+/// The default [`Config::passes`]. A received datagram's chain is the demux,
+/// its connection, the application task it wakes, and the connection again
+/// for the reply; more found nothing left to run.
 const PASSES: NonZeroUsize = NonZeroUsize::new(4).unwrap();
 
 /// Worker construction knobs.
