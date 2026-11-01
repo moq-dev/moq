@@ -14,7 +14,6 @@ questions to a harness. For builds and CI selection, see the
 | [registry smoke](smoke/README.md) | `just test smoke` | published packages install and interoperate; see the guide for matrix selection |
 | [browser media](interop/README.md) | `just test media` | browser capture and playback deliver video and audio through publication lifecycle changes |
 | [failure drills](drill/README.md) | `just test drill` | relay and transport failures terminate or recover as expected |
-| [wasm](wasm/README.md) | `just test wasm` | the `@moq/wasm` bindings work in a real browser |
 | [ts](ts/README.md) | `just test ts` | the subscriber's `export ts` output is IRD-compliant |
 | [native-play](native-play/README.md) | `just test native-play` | the shipped headless player follows overlapping publishers and fallback through decoded PCM on a private Linux null audio device |
 | [audio-quality](audio-quality/README.md) | `just test audio-quality` | browser and native audio playout stay within budget over an impaired path |
@@ -55,7 +54,7 @@ ports.
 
 The reservation settles contention between harness runs, not with the rest of the
 machine, so each harness still refuses a port something unrelated is already
-serving on. Pinning a port (`INTEROP_PORT`, `WASM_PORT`, `TSC_PORT`, `--port`) takes
+serving on. Pinning a port (`INTEROP_PORT`, `TSC_PORT`, `--port`) takes
 that exact one or fails.
 
 Every port, pinned or walked to from `HARNESS_PORT_BASE`, has to be 1024..65535
@@ -100,8 +99,8 @@ what the test did not assert. Either way the children are still reaped and the
 ports still released: what is kept is evidence, not a live session. Remove it
 with the `rm -rf` the run prints; nothing expires it for you.
 
-In CI the harness writes under `HARNESS_RUNS`, and `interop.yml` and `wasm.yml`
-upload that directory as a short-lived artifact when the job fails.
+In CI the harness writes under `HARNESS_RUNS`, and `interop.yml`
+uploads that directory as a short-lived artifact when the job fails.
 
 `HARNESS_RESULTS` names a JSON Lines file a harness appends one record per case to,
 through `harness_result`; `interop.yml` builds its report from it. See

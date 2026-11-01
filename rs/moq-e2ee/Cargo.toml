@@ -14,17 +14,18 @@ keywords = ["quic", "http3", "webtransport", "encryption", "live"]
 categories = ["cryptography", "multimedia", "network-programming"]
 
 [dependencies]
-aws-lc-rs = { workspace = true }
 base64 = { workspace = true }
 bytes = { workspace = true }
 kio = { workspace = true }
 moq-net = { workspace = true }
+rind = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
 hex = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 

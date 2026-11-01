@@ -192,7 +192,7 @@ async fn resets_and_stops_carry_their_codes() {
 	write_all(&mut send, Bytes::from_static(b"refused")).await;
 	let mut recv = server.accept_uni().await.unwrap();
 	recv.stop(11);
-	moq_clock::sleep(Duration::from_millis(1)).await;
+	kio::clock::sleep(Duration::from_millis(1)).await;
 	assert!(matches!(send.finish(), Err(Error::StreamStop(11))));
 	assert!(matches!(send.closed().await, Err(Error::StreamStop(11))));
 }
@@ -206,7 +206,7 @@ async fn dropping_an_unfinished_send_resets_it() {
 	write_all(&mut send, Bytes::from_static(b"partial")).await;
 	drop(send);
 	let mut recv = server.accept_uni().await.unwrap();
-	let read = moq_clock::timeout(Duration::from_secs(5), read_all(&mut recv)).await;
+	let read = kio::clock::timeout(Duration::from_secs(5), read_all(&mut recv)).await;
 	assert!(matches!(read, Ok(Err(Error::StreamReset(0)))), "{read:?}");
 }
 
@@ -283,7 +283,7 @@ async fn a_request_before_the_handshake_waits_for_credit() {
 
 /// Poll `future` once, after letting every other task run.
 async fn futures_poll_once<F: std::future::Future + Unpin>(future: &mut F) -> Option<F::Output> {
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 	std::future::poll_fn(|cx| {
 		Poll::Ready(match Pin::new(&mut *future).poll(cx) {
 			Poll::Ready(output) => Some(output),
@@ -352,7 +352,7 @@ async fn websocket_keep_alive_runs_during_continuous_output() {
 			if b_write.write_all(&buf[..n]).await.is_err() {
 				return;
 			}
-			moq_clock::sleep(Duration::from_millis(1)).await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 		}
 	});
 	tokio::spawn(async move { tokio::io::copy(&mut b_read, &mut a_write).await });
@@ -370,7 +370,7 @@ async fn websocket_keep_alive_runs_during_continuous_output() {
 	let sender = Session::new(a, Side::Client, config.clone()).unwrap();
 	let _receiver = Session::new(b, Side::Server, config).unwrap();
 	while sender.max_datagram_size() == 0 {
-		moq_clock::sleep(Duration::from_millis(1)).await;
+		kio::clock::sleep(Duration::from_millis(1)).await;
 	}
 
 	// Far past the 500ms deadline, queueing more each tick than one batch carries
@@ -450,10 +450,10 @@ async fn a_close_behind_a_stalled_peer_is_bounded() {
 	up.send(Flow::Stall).unwrap();
 	// Fill the pipe so the writer is mid-write when the close comes.
 	let mut send = client.open_uni(SendOptions::default()).await.unwrap();
-	let _ = moq_clock::timeout(Duration::from_millis(100), send.write(&payload(1 << 20, 0))).await;
-	moq_clock::sleep(Duration::from_millis(100)).await;
+	let _ = kio::clock::timeout(Duration::from_millis(100), send.write(&payload(1 << 20, 0))).await;
+	kio::clock::sleep(Duration::from_millis(100)).await;
 
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	client.close(5, "stalled");
 	let err = client.closed().await;
 	assert!(matches!(err, Error::ConnectionClosed { code: 5, .. }), "got {err:?}");
@@ -471,7 +471,7 @@ async fn a_silent_peer_times_out() {
 
 	up.send(Flow::Drop).unwrap();
 	down.send(Flow::Drop).unwrap();
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	assert!(matches!(client.closed().await, Error::IdleTimeout));
 	assert!(matches!(server.closed().await, Error::IdleTimeout));
 	assert!(start.elapsed() >= Duration::from_secs(30) - Duration::from_secs(1));
@@ -481,7 +481,7 @@ async fn a_silent_peer_times_out() {
 #[tokio::test(start_paused = true)]
 async fn an_idle_session_stays_up() {
 	let (client, _server) = pair(config(Version::QMux01), config(Version::QMux01)).await;
-	let closed = moq_clock::timeout(Duration::from_secs(120), client.closed()).await;
+	let closed = kio::clock::timeout(Duration::from_secs(120), client.closed()).await;
 	assert!(closed.is_err(), "closed with {closed:?}");
 }
 
@@ -489,7 +489,7 @@ async fn an_idle_session_stays_up() {
 async fn a_peer_that_never_sends_parameters_times_out_the_handshake() {
 	let (client, _silent) = tokio::io::duplex(PIPE);
 	let config = config(Version::QMux02);
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	let err = Session::connect(Stream::new(client), config).await.unwrap_err();
 	assert!(matches!(err, Error::HandshakeTimeout), "got {err:?}");
 	assert!(start.elapsed() >= Duration::from_secs(10));
