@@ -59,6 +59,9 @@ pub struct BitrateProber {
 
     max_probe_delay: TimeDelta,
     min_packet_size: DataSize,
+
+    /// Clusters restarted so far, numbering their new ids
+    restarts: i32,
 }
 
 impl Default for BitrateProber {
@@ -69,6 +72,7 @@ impl Default for BitrateProber {
             next_probe_time: Timestamp::plus_infinity(),
             max_probe_delay: TimeDelta::from_millis(10),
             min_packet_size: DataSize::from_bytes(200),
+            restarts: 0,
         }
     }
 }
@@ -76,6 +80,8 @@ impl Default for BitrateProber {
 impl BitrateProber {
     const PROBE_CLUSTER_TIMEOUT: TimeDelta = TimeDelta::from_seconds(5);
     const MAX_PENDING_PROBE_CLUSTERS: usize = 5;
+    /// Restarted clusters take ids from here up, above any GoogCC's ProbeController counts to
+    const RESTART_ID_BASE: i32 = 1 << 30;
 
     // Returns true if the prober is in a probing session, i.e., it currently
     // wants packets to be sent out according to the time returned by
@@ -217,6 +223,31 @@ impl BitrateProber {
         if self.clusters.is_empty() {
             self.probing_state = ProbingState::Inactive;
         }
+    }
+
+    /// The sender ran out of data to send.
+    ///
+    /// WebRTC's pacer pads a probe cluster when media runs out, so a gap means the pacer fell
+    /// behind and the cluster is dropped. Here only the transport's duplicates can pad it, so a
+    /// sender with nothing to send restarts the cluster with its next packet instead, under a new
+    /// id: the packets it already sent span the gap, and estimating from them would read the gap
+    /// as the path's rate.
+    pub fn on_app_limited(&mut self) {
+        if self.probing_state != ProbingState::Active {
+            return;
+        }
+        let Some(cluster) = self.clusters.front_mut() else {
+            return;
+        };
+        if cluster.sent_probes == 0 {
+            return;
+        }
+        cluster.sent_probes = 0;
+        cluster.sent_bytes = 0;
+        cluster.started_at = Timestamp::plus_infinity();
+        self.restarts = (self.restarts + 1) % Self::RESTART_ID_BASE;
+        cluster.pace_info.probe_cluster_id = Self::RESTART_ID_BASE + self.restarts;
+        self.probing_state = ProbingState::Inactive;
     }
 
     fn maybe_set_active_state(&mut self, packet_size: DataSize) {

@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::congestion::{Bbr3, CubicConfig};
+use crate::congestion::{Bbr3, CubicConfig, gcc};
 
 /// The media's bitrate, 2 Mbit/s, which the probe has to see past
 const MEDIA: u64 = 250_000;
@@ -87,6 +87,8 @@ struct Scenario {
 	ack_threshold: Option<u32>,
 	/// Bytes of bulk upload before the media starts, to learn the path's rate first
 	warmup: usize,
+	/// Whether the media runs GCC, reading the receive timestamps it asks for, rather than BBR3
+	gcc: bool,
 }
 
 impl Default for Scenario {
@@ -104,6 +106,7 @@ impl Default for Scenario {
 			receive_window: None,
 			ack_threshold: None,
 			warmup: 0,
+			gcc: false,
 		}
 	}
 }
@@ -267,6 +270,10 @@ fn run(scenario: &Scenario) -> Outcome {
 		};
 		transport.ack_frequency = Some(ack);
 	}
+	if scenario.gcc {
+		transport.congestion = Arc::new(gcc::Config::default());
+		transport.receive_timestamps = NonZeroU32::new(32);
+	}
 	let mut config = client_config();
 	config.transport = transport;
 	let (client_ch, server_ch) = pair.connect_with(config);
@@ -370,15 +377,11 @@ fn run(scenario: &Scenario) -> Outcome {
 		if now >= next_sample {
 			let estimate = conn.stats().path.bandwidth_estimate.unwrap_or(0);
 			outcome.probing += conn.congestion_state().metrics().probe_inflight.is_some() as u64;
-			let bbr = conn
-				.congestion_state()
-				.clone_box()
-				.into_any()
-				.downcast::<Bbr3>()
-				.expect("BBR3");
-			outcome.probe_rtts += (bbr.probing_rtt() && !probing_rtt) as u64;
-			probing_rtt = bbr.probing_rtt();
-			outcome.min_rtt = outcome.min_rtt.max(bbr.min_rtt());
+			if let Ok(bbr) = conn.congestion_state().clone_box().into_any().downcast::<Bbr3>() {
+				outcome.probe_rtts += (bbr.probing_rtt() && !probing_rtt) as u64;
+				probing_rtt = bbr.probing_rtt();
+				outcome.min_rtt = outcome.min_rtt.max(bbr.min_rtt());
+			}
 			let read: u64 = readings.values().map(|r| r.read).sum();
 			outcome.unread = outcome.unread.max(outcome.unique - read);
 			outcome.samples.push(Sample {
@@ -692,6 +695,40 @@ fn rises_to_target() {
 	rises(&compare("rises", scenario, GATE), Duration::from_secs(5));
 }
 
+/// The same under GCC, which probes every five seconds from the application-limited region at
+/// twice its estimate, and reads a probe at the slower of its send and receive rates. The
+/// duplicates filling a probe leave no faster than the target in all, so past a frame's media
+/// they trail the cluster and the reading falls short of the target. This measures how far the
+/// estimate gets, holding the probe's own budgets, until GCC can raise it to the target.
+#[test]
+#[ignore = "nightly: just rs quic-sim"]
+fn rises_toward_target_under_gcc() {
+	let _guard = subscribe();
+	let scenario = Scenario {
+		latency: Duration::from_millis(50),
+		buffer: 170_000,
+		keyframe: 0,
+		rates: vec![(Duration::ZERO, 375_000), (Duration::from_secs(5), 1_500_000)],
+		duration: Duration::from_secs(15),
+		gcc: true,
+		..Scenario::default()
+	};
+	for Trial {
+		seed,
+		probing,
+		baseline,
+	} in compare("rises gcc", scenario, SEEDS)
+	{
+		info!(
+			seed,
+			rise = ?probing.rise(Duration::from_secs(5)),
+			probing = probing.samples.last().expect("sampled").estimate,
+			baseline = baseline.samples.last().expect("sampled").estimate,
+			"estimate after the path opened up, in B/s"
+		);
+	}
+}
+
 /// A path short of the target, behind a queue a second deep: each attempt that misses sits out
 /// past the longest BBR3 waits between its own probes, and the path opening up is still found
 #[test]
@@ -858,6 +895,17 @@ fn probe_inflight_limits_only_an_attempt() {
 fn steps_keyframes() {
 	let _guard = subscribe();
 	let trials = compare("steps keyframes", steps(), SEEDS);
+	rises(&trials, Duration::from_secs(20));
+	falls(&trials, Duration::from_secs(40), 375_000);
+}
+
+/// Under GCC, as the keyframed steps under BBR3
+#[test]
+#[ignore = "nightly: just rs quic-sim"]
+fn steps_gcc() {
+	let _guard = subscribe();
+	let scenario = Scenario { gcc: true, ..steps() };
+	let trials = compare("steps gcc", scenario, SEEDS);
 	rises(&trials, Duration::from_secs(20));
 	falls(&trials, Duration::from_secs(40), 375_000);
 }

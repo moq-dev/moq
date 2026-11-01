@@ -1,4 +1,22 @@
-//! libwebrtc's Google Congestion Control, vendored from kixelated/goog_cc.
+//! libwebrtc's Google Congestion Control (GoogCC), driven by QUIC receive timestamps.
+//!
+//! The submodules are a Rust port of WebRTC's `modules/congestion_controller/goog_cc`, with the
+//! parts of `api/transport`, `api/units`, `modules/pacing` and `modules/remote_bitrate_estimator`
+//! it uses. They began as [goog_cc](https://github.com/kixelated/goog_cc) 0.1.4, a port of WebRTC
+//! [da2a3d6c4d](https://webrtc.googlesource.com/src/+/da2a3d6c4d) (2024-12-09), and are refreshed
+//! to WebRTC [556f7eec27](https://webrtc.googlesource.com/src/+/556f7eec27) (2026-11-01). They keep
+//! WebRTC's BSD license, in `LICENSE` beside them, with its `PATENTS` grant and `AUTHORS`.
+//!
+//! Each file follows its upstream counterpart, so a refresh diffs WebRTC between the recorded
+//! revision and a newer one and applies the changes file by file. What a QUIC sender has no source
+//! for is gone, and each file's own docs say what: RTCP receiver reports and REMB, route changes,
+//! the network state estimate, separate audio detection, RTP sequence numbers, ECN feedback,
+//! padding, and the `AcknowledgedBitrateEstimator` that a disabled-by-default field trial selects.
+//! Field trials are typed settings with upstream's defaults ([`experiments::FieldTrials`]).
+//!
+//! [`Gcc`] adapts it to [`Controller`]: each ACK becomes transport feedback carrying the peer's
+//! receive times and each loss a feedback of lost packets, GoogCC's process timer runs from the
+//! controller's calls, and a port of WebRTC's `BitrateProber` paces its probe clusters.
 
 /// `approx::assert_relative_eq!`: within `epsilon`, or within a relative `f64::EPSILON`.
 #[cfg(test)]
@@ -49,6 +67,9 @@ use trendline_estimator::*;
 
 use goog_cc_network_control::{GoogCcNetworkController, NetworkControllerConfig};
 
+#[cfg(test)]
+mod tests;
+
 use std::{any::Any, collections::VecDeque, num::NonZeroU16, sync::Arc, time::Duration};
 
 use kio::clock::Instant;
@@ -78,33 +99,18 @@ const MIN_WINDOW: u64 = 2 * 1500;
 /// `ProbeBitrateEstimator`'s own one second of history
 const CLUSTER_HISTORY: TimeDelta = TimeDelta::from_seconds(2);
 
-/// Configuration for the [`Gcc`] congestion controller.
-#[derive(Debug, Clone)]
-pub struct GccConfig {
-    initial_rate: u64,
+/// The rate GoogCC starts at and first probes from, WebRTC's default of 300 kbit/s
+const INITIAL_RATE: DataRate = DataRate::from_kilobits_per_sec(300);
+
+/// Configuration for the [`Gcc`] congestion controller, which has no settings yet.
+#[derive(Debug, Clone, Default)]
+pub struct Config {
+    _private: (),
 }
 
-impl GccConfig {
-    /// The rate GoogCC starts at and first probes from, in bytes per second.
-    ///
-    /// Defaults to WebRTC's 300 kbit/s.
-    pub fn initial_rate(&mut self, bytes_per_second: u64) -> &mut Self {
-        self.initial_rate = bytes_per_second;
-        self
-    }
-}
-
-impl Default for GccConfig {
-    fn default() -> Self {
-        Self {
-            initial_rate: 300_000 / 8,
-        }
-    }
-}
-
-impl ControllerFactory for GccConfig {
+impl ControllerFactory for Config {
     fn build(self: Arc<Self>, init: Init) -> Box<dyn Controller> {
-        Box::new(Gcc::new(&self, init))
+        Box::new(Gcc::new(init))
     }
 }
 
@@ -135,10 +141,14 @@ pub struct Gcc {
     /// The window until GoogCC computes one from feedback
     initial_window: u64,
     in_flight: u64,
+    /// Whether an ACK has arrived, which makes the network available to GoogCC and starts its
+    /// initial probes: before then a probe would only pace the handshake, which waits a round
+    /// trip between flights
+    available: bool,
     next_process: Instant,
     /// The local time, in microseconds, a peer receive time of zero maps to, fixed by the first
     /// receive time the peer reports
-    receive_basis: Option<i64>,
+    receive_basis: Option<i128>,
     /// Recently sent probe clusters, oldest first
     clusters: VecDeque<Cluster>,
     /// Reused for each ACK's and loss's feedback
@@ -146,9 +156,9 @@ pub struct Gcc {
 }
 
 impl Gcc {
-    fn new(config: &GccConfig, init: Init) -> Self {
+    fn new(init: Init) -> Self {
         let now = timestamp(init.now);
-        let starting_rate = DataRate::from_bytes_per_sec(config.initial_rate.max(1) as i64);
+        let starting_rate = INITIAL_RATE;
         let cc = GoogCcNetworkController::new(NetworkControllerConfig {
             constraints: TargetRateConstraints {
                 at_time: now,
@@ -181,20 +191,16 @@ impl Gcc {
                 init.now,
             ),
             mtu: init.mtu,
-            pacing_rate: config.initial_rate.max(1),
-            target_rate: config.initial_rate,
+            pacing_rate: starting_rate.bytes_per_sec() as u64,
+            target_rate: starting_rate.bytes_per_sec() as u64,
             initial_window,
             in_flight: 0,
+            available: false,
             next_process: init.now,
             receive_basis: None,
             clusters: VecDeque::new(),
             feedback: TransportPacketsFeedback::default(),
         };
-        let update = gcc.cc.on_network_availability(NetworkAvailability {
-            at_time: now,
-            network_available: true,
-        });
-        gcc.apply(update);
         gcc.process(init.now);
         gcc
     }
@@ -230,13 +236,15 @@ impl Gcc {
     /// times carry the forward delay of that packet as a constant offset, which GoogCC's
     /// gradients ignore.
     fn receive_time(&mut self, received: Duration, now: Instant) -> Timestamp {
-        let now = timestamp(now);
-        let received = i64::try_from(received.as_micros()).unwrap_or(i64::MAX);
+        let now = timestamp(now).us();
+        // In i128, where a peer's time, at most 2^64 seconds, cannot overflow
+        let received = received.as_micros() as i128;
         let basis = *self
             .receive_basis
-            .get_or_insert_with(|| now.us().saturating_sub(received));
-        let mapped = Timestamp::from_micros(received.saturating_add(basis));
-        mapped.clamp(now - RECEIVE_SKEW, now + RECEIVE_SKEW)
+            .get_or_insert_with(|| i128::from(now) - received);
+        let skew = i128::from(RECEIVE_SKEW.us());
+        let mapped = (received + basis).clamp(i128::from(now) - skew, i128::from(now) + skew);
+        Timestamp::from_micros(mapped as i64)
     }
 
     /// The pacing info of the probe cluster `id` was sent in.
@@ -287,6 +295,10 @@ impl Controller for Gcc {
         self.pacer.on_transmit(sent.bytes);
         let bytes = DataSize::from_bytes(sent.bytes.into());
 
+        // A large enough packet starts a pending probe cluster, as WebRTC's pacer starts one
+        // when media is queued, so the handshake's small last flight does not start a cluster
+        // only for the idle round trip after it to abandon
+        self.prober.on_incoming_packet(bytes);
         let info = self.prober.current_cluster(now);
         if info.is_some() {
             self.prober.probe_sent(now, bytes);
@@ -325,6 +337,14 @@ impl Controller for Gcc {
     fn on_ack(&mut self, ack: Ack<'_>) {
         self.process(ack.now);
         self.in_flight = ack.in_flight;
+        if !self.available {
+            self.available = true;
+            let update = self.cc.on_network_availability(NetworkAvailability {
+                at_time: timestamp(ack.now),
+                network_available: true,
+            });
+            self.apply(update);
+        }
         if !ack.rtt.is_zero() {
             self.cc.on_round_trip_time_update(RoundTripTimeUpdate {
                 round_trip_time: TimeDelta::from_micros(
@@ -380,6 +400,11 @@ impl Controller for Gcc {
         self.mtu = new_mtu;
     }
 
+    fn on_app_limited(&mut self, in_flight: u64) {
+        self.in_flight = in_flight;
+        self.prober.on_app_limited();
+    }
+
     fn window(&self) -> u64 {
         self.congestion_window()
     }
@@ -387,9 +412,6 @@ impl Controller for Gcc {
     fn pace(&mut self, now: Instant, bytes: u64) -> Option<Instant> {
         self.process(now);
         let at = timestamp(now);
-        // A packet is ready, which starts a pending probe cluster
-        self.prober
-            .on_incoming_packet(DataSize::from_bytes(bytes.min(i64::MAX as u64) as i64));
         if self.prober.current_cluster(at).is_some() {
             let next = self.prober.next_probe_time();
             if next <= at {

@@ -96,7 +96,7 @@ impl DelayBasedBwe {
         // all acks were too late and that the send time history had
         // timed out. We should reduce the rate when this occurs.
         if packet_feedback_vector.is_empty() {
-            tracing::warn!("Very late feedback received.");
+            tracing::debug!("Very late feedback received.");
             return DelayBasedBweResult::default();
         }
 
