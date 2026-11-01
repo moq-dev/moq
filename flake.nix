@@ -158,6 +158,8 @@
             cargo-semver-checks
             cargo-deny
             cargo-bloat
+            # Weekly mutation testing of the security-critical modules (`just rs mutants`).
+            cargo-mutants
             cargo-nextest
             cargo-codspeed
             # Source-based test coverage (`just rs coverage`).
