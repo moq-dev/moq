@@ -13,10 +13,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'avc3.64001F'",
@@ -32,10 +29,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'avc1.6400'",
@@ -115,10 +109,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'AVC1.64001f'",
@@ -134,10 +125,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'hvc1.1.6.L93.B0'",
@@ -153,10 +141,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'hev1.1.6.L93.90'",
@@ -172,10 +157,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'hvc1.1.6.L93'",
@@ -191,10 +173,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'hvc1.A1.6.L93.B0'",
@@ -210,10 +189,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'hvc1.2.4.H120.B0.0.0.0.0.0'",
@@ -229,10 +205,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'hvc1.1.6.L93.B0.'",
@@ -248,10 +221,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'hvc1.D1.6.L93'",
@@ -427,10 +397,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'vp09.00.10.08'",
@@ -446,10 +413,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'vp09.02.10.10.01.09.16.09.01'",
@@ -465,10 +429,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'vp09.0.10.8'",
@@ -564,10 +525,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'av01.0.04M.10.0.110.01.01.01.0'",
@@ -583,10 +541,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec 'av01.3.04M.08'",
@@ -666,10 +621,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec ''",
@@ -685,10 +637,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio codec 'mp4a.40.2'",
@@ -708,10 +657,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio codec 'mp4a.40.02'",
@@ -731,10 +677,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio codec 'mp4a.40.29'",
@@ -754,10 +697,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio codec 'mp4a.40.'",
@@ -877,10 +817,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio codec 'opus'",
@@ -900,10 +837,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio codec 'pcm'",
@@ -923,10 +857,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio codec 'flac'",
@@ -946,10 +877,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio codec 'mp3'",
@@ -969,10 +897,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio codec 'mp2'",
@@ -992,10 +917,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio codec 'ac-3'",
@@ -1015,10 +937,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio codec 'ec-3'",
@@ -1038,10 +957,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio codec 'future'",
@@ -1061,10 +977,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video codedWidth 1",
@@ -1081,10 +994,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codedWidth 4294967295",
@@ -1101,10 +1011,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codedWidth 4294967296",
@@ -1223,10 +1130,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codedHeight 4294967295",
@@ -1243,10 +1147,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codedHeight 4294967296",
@@ -1365,10 +1266,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video displayAspectWidth 4294967295",
@@ -1385,10 +1283,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video displayAspectWidth 4294967296",
@@ -1507,10 +1402,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video displayAspectHeight 4294967295",
@@ -1527,10 +1419,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video displayAspectHeight 4294967296",
@@ -1652,10 +1541,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio sampleRate 4294967295",
@@ -1675,10 +1561,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio sampleRate 4294967296",
@@ -1778,10 +1661,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio numberOfChannels 4294967295",
@@ -1801,10 +1681,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio numberOfChannels 4294967296",
@@ -1901,10 +1778,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio bitrate 0",
@@ -1925,10 +1799,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video bitrate 9007199254740991",
@@ -1945,10 +1816,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio bitrate 9007199254740991",
@@ -1969,10 +1837,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video bitrate 9007199254740992",
@@ -2103,10 +1968,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio jitter 0",
@@ -2127,10 +1989,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video jitter 9007199254740991",
@@ -2147,10 +2006,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio jitter 9007199254740991",
@@ -2171,10 +2027,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video jitter 9007199254740992",
@@ -2305,10 +2158,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio warmup 0",
@@ -2329,10 +2179,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video warmup 9007199254740991",
@@ -2349,10 +2196,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio warmup 9007199254740991",
@@ -2373,10 +2217,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video warmup 9007199254740992",
@@ -2507,10 +2348,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio delay 0",
@@ -2531,10 +2369,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video delay 9007199254740991",
@@ -2551,10 +2386,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio delay 9007199254740991",
@@ -2575,10 +2407,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video delay 9007199254740992",
@@ -2709,10 +2538,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video reorder 255",
@@ -2729,10 +2555,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video reorder 256",
@@ -2783,10 +2606,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video preference 2147483647",
@@ -2803,10 +2623,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video preference 2147483648",
@@ -2876,10 +2693,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio container {\"kind\": \"legacy\"}",
@@ -2902,10 +2716,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video container {\"kind\": \"loc\"}",
@@ -2924,10 +2735,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio container {\"kind\": \"loc\"}",
@@ -2950,10 +2758,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video container {\"kind\": \"cmaf\", \"init\": \"AAEC\"}",
@@ -2973,10 +2778,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio container {\"kind\": \"cmaf\", \"init\": \"AAEC\"}",
@@ -3000,10 +2802,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video container {\"kind\": \"future\", \"magic\": 7}",
@@ -3023,10 +2822,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio container {\"kind\": \"future\", \"magic\": 7}",
@@ -3050,10 +2846,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video container {\"kind\": \"cmaf\"}",
@@ -3306,10 +3099,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video codec not a string",
@@ -3415,10 +3205,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "video undecodable hls",
@@ -3437,10 +3224,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok",
-			"probe"
-		]
+		"video": ["ok", "probe"]
 	},
 	{
 		"name": "audio ambisonic with 6 channels",
@@ -3482,10 +3266,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "audio unknown layout",
@@ -3506,10 +3287,7 @@
 				}
 			}
 		},
-		"audio": [
-			"ok",
-			"probe"
-		]
+		"audio": ["ok", "probe"]
 	},
 	{
 		"name": "video rendition not an object",
@@ -3610,10 +3388,7 @@
 				}
 			}
 		},
-		"video": [
-			"",
-			"__proto__"
-		]
+		"video": ["", "__proto__"]
 	},
 	{
 		"name": "empty catalog",
@@ -3634,9 +3409,7 @@
 				}
 			}
 		},
-		"video": [
-			"ok"
-		]
+		"video": ["ok"]
 	},
 	{
 		"name": "legacy video array",

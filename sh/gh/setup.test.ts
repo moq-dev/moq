@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noTemplateCurlyInString: GitHub Actions expressions are literal strings.
 // Runner timing and action execution stay in CI. These tests check the setup gates.
 import { expect, test } from "bun:test";
 

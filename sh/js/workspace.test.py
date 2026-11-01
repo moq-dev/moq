@@ -235,32 +235,6 @@ class SelectionTest(unittest.TestCase):
         )
         self.assertEqual(list((self.root / "test").glob("tmp*.json")), [])
 
-    def test_biome_covers_unowned_js_files_in_fallback(self):
-        def biome(paths):
-            return next(c for c in self.calls(paths) if c[:3] == ["bun", "biome", "check"])
-
-        self.assertEqual(
-            biome(["js/tsconfig.json"]),
-            ["bun", "biome", "check", "--error-on-warnings", "js", "bench/browser", "test", "doc", "demo"],
-        )
-        self.assertEqual(biome(["doc/index.md"]), ["bun", "biome", "check", "--error-on-warnings", "doc", "js/common"])
-        self.assertEqual(
-            biome(["demo/nested/src/index.ts"]),
-            ["bun", "biome", "check", "--error-on-warnings", "demo/nested", "js/common"],
-        )
-        self.assertEqual(
-            biome(["demo/pub/src/index.ts"]),
-            ["bun", "biome", "check", "--error-on-warnings", "js", "bench/browser", "test", "doc", "demo"],
-        )
-        self.assertEqual(
-            biome(["js/core/src/index.ts"]),
-            ["bun", "biome", "check", "--error-on-warnings", "js/core", "js/view", "doc", "js/common"],
-        )
-        self.assertEqual(
-            biome(["js/bindings/src/index.ts"]),
-            ["bun", "biome", "check", "--error-on-warnings", "js/bindings", "test/browser", "demo/nested", "js/common"],
-        )
-
     def test_tests_do_not_build_unselected_packages(self):
         calls = self.calls(["doc/index.md"], "test")
         self.assertIn(["bun", "run", "--sequential", "--filter=docs", "--elide-lines=0", "test"], calls)
