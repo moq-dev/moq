@@ -531,7 +531,7 @@ mod tests {
 
 	/// Append everything the export writes without waiting for more input.
 	async fn record(export: &mut super::Export<crate::catalog::Consumer>, file: &mut Vec<u8>) {
-		while let Ok(next) = tokio::time::timeout(Duration::from_millis(1), export.next()).await {
+		while let Ok(next) = kio::clock::timeout(Duration::from_millis(1), export.next()).await {
 			match next.expect("export failed") {
 				Some(data) => file.extend_from_slice(&data),
 				None => break,

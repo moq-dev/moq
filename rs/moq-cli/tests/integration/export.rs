@@ -1136,9 +1136,9 @@ async fn an_interrupted_mp4_recording_is_finished() {
 		.expect("spawn export");
 	let (mut publisher, feeding) = import(&relay);
 
-	tokio::time::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		while std::fs::metadata(&path).map_or(0, |file| file.len()) < 10_000 {
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			kio::clock::sleep(Duration::from_millis(50)).await;
 		}
 	})
 	.await
