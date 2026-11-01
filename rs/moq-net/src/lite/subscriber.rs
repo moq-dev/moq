@@ -8564,9 +8564,14 @@ enum ServeMode {
 		/// subscription, after which the copy stays for its readers.
 		track: bool,
 	},
-	/// The upstream subscription failed with this error. Group streams that beat the accept
-	/// arrived before it, so they are delivered first, then the track is given back.
-	Failed(Error),
+	/// The upstream subscription failed with `err`. Every group stream whose header arrived
+	/// before it, parked on the accept or not, is read to its end first, as a group ends on
+	/// its own stream's FIN or reset: then the track is given back.
+	Failed {
+		err: Error,
+		/// The subscription's tail, whose readers say which streams are still being read.
+		tail: kio::Consumer<Tail>,
+	},
 }
 
 /// Fills a pre-lite-05 upstream has no FETCH for, held while the live subscription may
@@ -8897,10 +8902,21 @@ impl ServeLoop {
 						}
 					}
 				}
-				ServeMode::Failed(_) => {
+				ServeMode::Failed { .. } => {
+					// The accept counts each parked stream as read until its group settles, so
+					// the wait below covers the ones it opens.
 					self.unpark(serve);
-					ready!(poll_unparked(&self.sub, serve, waiter));
-					let ServeMode::Failed(err) = std::mem::replace(&mut self.mode, ServeMode::Select) else {
+					let ServeMode::Failed { tail, .. } = &self.mode else {
+						unreachable!()
+					};
+					ready!(
+						tail.poll(waiter, |tail| match tail.is_reading() {
+							true => Poll::Pending,
+							false => Poll::Ready(()),
+						})
+						.map(|_| ())
+					);
+					let ServeMode::Failed { err, .. } = std::mem::replace(&mut self.mode, ServeMode::Select) else {
 						unreachable!()
 					};
 					return Poll::Ready(ServeEnd::GiveBack(err));
@@ -9263,7 +9279,10 @@ impl ServeLoop {
 							}
 							Err(err) => {
 								tracing::warn!(broadcast = %serve.subscriber.log_path(&serve.path), track = %serve.name, %err, "subscribe error");
-								self.mode = ServeMode::Failed(err);
+								self.mode = ServeMode::Failed {
+									err,
+									tail: active.tail.consume(),
+								};
 								continue;
 							}
 						}
