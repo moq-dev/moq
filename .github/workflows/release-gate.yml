@@ -202,6 +202,8 @@ jobs:
               - "sh/go/publish-ffi.sh"
               - "rs/moq-ffi/build.sh"
               - ".cargo/config.toml"
+              # release-ffi.yml installs the Go generator through this action.
+              - ".github/actions/uniffi-bindgen/**"
             release-js:
               - "js/**"
               - ".github/workflows/release-js.yml"
