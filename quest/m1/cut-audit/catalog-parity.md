@@ -1,41 +1,34 @@
-# [M] Rust and JS accept the same catalogs
+# [S] Rust and JS skip a backlog by the same measure
 
 ## Goal
 
-A catalog that one language accepts, the other accepts, and a malformed
-known-codec rendition is refused per rendition in both, so a browser never
-plays what moq-cli, moqsrc, and HLS refuse, or the reverse.
+A player joining a backlog starts at the same group in moq-cli, moqsrc, and
+the browser. If they start at different groups, align the two container
+consumers' skip measurements, with a test in each.
 
 ## Plan
 
-Found by the 2026-10-24 pre-cut audit at 151a529670. Reproduced with probes
-in both languages, inherited.
+Found by the 2026-10-24 pre-cut audit at 151a529670. The catalog half of
+this quest (Rust and JS accept the same catalogs) landed separately in
+[moq-dev/moq#7035](https://github.com/moq-dev/moq/pull/7035): any malformed
+rendition refuses the whole catalog in both languages (maintainer,
+2026-10-30).
 
-| Input | JS | Rust |
-|---|---|---|
-| `codec:"avc1.6400"` | accepts | refuses |
-| `codedWidth:5000000000` | accepts | refuses (u32) |
-| legacy `video:[{track,config}]` | accepts | refuses |
-| `container:{}` | refuses | accepts as Unknown |
+Rust measures newest content minus the next group's start
+(`rs/moq-mux/src/container/consumer.rs`, the `should_skip` check in the
+blocking-group path). JS measures from the oldest unread frame
+(`js/hang/src/container/consumer.ts`, `#checkMaxDelay`). The Rust comment
+argues for its measure: a group's own first frame is no bound, since a group
+longer than the budget would be cut short whenever it blocks behind a newer
+one, as a join's backlog does.
 
-`sampleRate:0` and `numberOfChannels:0` pass both and fail later in
-`Timescale::new`. Rust: `rs/hang/src/catalog/video/codec.rs:62`,
-`video/mod.rs:192`, `audio/mod.rs:136`, `container.rs:88`. JS:
-`js/hang/src/catalog/video.ts:129,146,229`, `audio.ts:110`,
-`container.ts:15`.
+They diverge, reproduced by a throwaway probe in each consumer: five
+finished one-second groups of ten frames plus a one-frame sixth group, all
+landing before the first read, with a 1500 ms budget. JS starts at the 4.0 s
+group, while Rust starts at 0 and plays the whole backlog, whether the sixth
+group is open or finished. Rust's skip only runs while the current group
+blocks, so a fully buffered backlog never triggers it.
 
-Decided 2026-10-25 (maintainer): strict and per rendition. Both languages
-validate codec strings and dimension ranges the same way, refuse zero rates
-and channel counts, and skip a malformed rendition while keeping the rest of
-the catalog. Strict means JS drops the legacy `video:[{track,config}]` array
-form, as Rust already refuses it. Add a shared fixture corpus both test
-suites load, so a future divergence fails CI.
-
-Also check the container consumer's skip measurement: Rust measures newest
-content minus the next group's start (`rs/moq-mux/src/container/consumer.rs:576`),
-JS from the oldest unread frame (`js/hang/src/container/consumer.ts:401`).
-They may diverge on a backlog join (unverified); align them if a test shows
-it.
-
-Public API: stricter catalog acceptance in one or both languages. Wire: a
-stricter catalog contract, stated in `drafts/draft-lcurley-moq-hang.md`.
+Decide which start is right (likely JS's, which keeps the join within the
+budget), align the other consumer, and keep the scenario as a paired test in
+both.

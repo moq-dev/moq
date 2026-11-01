@@ -92,8 +92,10 @@ and waits up to one second for them to be delivered. An abort skips that.
 
 A broadcast has no finished state. Online means announced, and offline means
 no route is left. The end of content is a track FIN: the publisher finishes
-each track, and a hang broadcast also finishes its catalog. A finished track
-stays servable to the subscribers it already has, including through a relay
+each track, and a hang broadcast also finishes its catalog. A track can also
+finish with an error, such as a replayed recording whose source failed: readers
+get its groups, then the error. Only moq-lite-07 carries that error across a
+hop; older versions reset instead. A finished track stays servable to the subscribers it already has, including through a relay
 whose upstream session has since gone. How long a finished broadcast stays
 announced for late readers is the application's retention policy, such as the
 `--linger` of [`moq import`](/bin/cli), not a protocol state.
@@ -109,7 +111,10 @@ authorization and hidden names work exactly as without one.
   its worker answers each requested path by announcing that exact path under
   the output's own epoch. Restarting one output is then a new epoch every hop
   sees, so a viewer returning within a relay's cache window never gets the old
-  output's groups.
+  output's groups. On moq-lite 07 that announcement is a takeover of the claim:
+  what a viewer already resolved through the claim keeps playing from the
+  output rather than being reset to the new route. A different worker, or a
+  replacement output, never inherits those viewers.
 - **Newest wins.** Among routes at the same prefix, the newest epoch ranks
   first, ahead of cost, and a route without an epoch ranks last. Newest means
   the latest UUIDv7 timestamp, so hosts with skewed clocks can lose a restart
@@ -137,7 +142,9 @@ authorization and hidden names work exactly as without one.
   name instead of stalling viewers on the old sequence. A relay drops its copy
   of the old instance, so a new subscriber never sees its cached groups.
 
-The epoch and the restart message travel on moq-lite 07, which is opt-in.
+The epoch and the restart and takeover messages travel on moq-lite 07, which is
+opt-in. Older versions carry a takeover as an ordinary announcement, so the
+first subscription through a claim is reset once the output's route arrives.
 moq-transport carries the epoch when both sides offer the [epoch
 extension](/draft/moq-epoch), on by default. A restart onto another epoch is
 advertised before the old one is withdrawn, so the path is never absent, and one
@@ -301,7 +308,8 @@ starts) is asked of the track's dynamic handler
 as a fill, which a relay serves by fetching upstream one group at a time, skipping
 a group once every subscriber that asked for it narrows past it; with
 no handler it is reported as dropped once the feed stops waiting for it. One
-evicted after the subscriber saw it cached, but before it read it, is skipped. A relay merges its subscribers' ranges into one upstream request, which
+evicted after the subscriber saw it cached, but before it read it, is asked the same
+way, once: evicted again before it is read, it is reported as dropped. A relay merges its subscribers' ranges into one upstream request, which
 moq-lite-07 carries range by range and older wire versions as the single span
 covering them. A relative or time anchor resolves on the hop that publishes the
 track, and over moq-lite-07, which carries a relative or time start upstream and

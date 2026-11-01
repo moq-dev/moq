@@ -268,7 +268,7 @@ impl Config {
 			quic.validate().map_err(Error::Config)?;
 
 			let quic = quic.resolve();
-			if quic.keep_alive.is_none() {
+			if quic.keep_alive.is_some_and(|interval| interval.is_zero()) {
 				return Err(Error::Config(crate::Error::NoBackend(
 					"Iroh cannot disable keep-alive; omit quic.keep_alive or set a positive interval",
 				)));
@@ -321,11 +321,11 @@ impl Config {
 
 /// The per-connection transport config, shared by both roles.
 ///
-/// `keep_alive` is the value [`crate::quic::Config::resolve`] already produced:
-/// `Some` is the interval, and `None` (`0s`) means disabled. iroh 1.4's setter
-/// only stores `Some`, and the builder starts at its own 5s heartbeat, so a
-/// disabled interval is refused at bind. A zero duration would rearm the timer
-/// for immediately and spin, so it is not passed. iroh's separate per-path
+/// The keep-alive is [`crate::quic::Resolved::keep_alive_interval`]: iroh does
+/// not expose the negotiated idle timeout, so an unset interval derives from our
+/// own. iroh 1.4's setter only stores `Some`, and the builder starts at its own
+/// 5s heartbeat, so a disabled interval (`0s`) is refused at bind. A zero duration
+/// would rearm the timer for immediately and spin, so it is not passed. iroh's separate per-path
 /// heartbeat stays at the 5s it ships with: that setter ignores anything longer
 /// and cannot clear it either.
 fn transport_config(quic: &crate::quic::Resolved) -> iroh::endpoint::QuicTransportConfigBuilder {
@@ -336,7 +336,7 @@ fn transport_config(quic: &crate::quic::Resolved) -> iroh::endpoint::QuicTranspo
 		.max_concurrent_bidi_streams(max_streams)
 		.max_concurrent_uni_streams(max_streams)
 		.max_idle_timeout(Some(quic.idle_timeout.try_into().expect("idle timeout out of range")));
-	if let Some(interval) = quic.keep_alive {
+	if let Some(interval) = quic.keep_alive_interval() {
 		transport = transport.keep_alive_interval(interval);
 	}
 	if !quic.mtu_discovery {
@@ -503,11 +503,6 @@ fn url_set_scheme(url: Url, scheme: &str) -> Result<Url> {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 
@@ -609,7 +604,7 @@ mod tests {
 	/// same pairing as the quic backend.
 	#[test]
 	fn congestion_factory_maps_each_family() {
-		let now = std::time::Instant::now();
+		let now = kio::clock::now().into_std();
 		let mtu = 1200;
 
 		let loss = congestion_factory(CongestionControl::Loss).build(now, mtu);
@@ -622,14 +617,23 @@ mod tests {
 		assert!(none.into_any().downcast::<Unlimited>().is_ok());
 	}
 
-	/// The connection keep-alive is the resolved interval, not iroh's 5s heartbeat.
+	/// The connection keep-alive is the resolved interval, not iroh's 5s heartbeat,
+	/// and unset derives from the idle timeout.
 	///
 	/// The setter cannot store `None`, so a disabled interval is not asserted here.
 	#[test]
 	fn keep_alive_interval_follows_resolved_config() {
-		for interval in [std::time::Duration::from_secs(3), std::time::Duration::from_millis(500)] {
+		use std::time::Duration;
+		let secs = Duration::from_secs;
+		for (idle, keep_alive, interval) in [
+			(secs(10), Some(secs(3)), secs(3)),
+			(secs(10), Some(Duration::from_millis(500)), Duration::from_millis(500)),
+			(secs(10), None, secs(3)),
+			(secs(30), None, secs(9)),
+		] {
 			let quic = crate::quic::Resolved {
-				keep_alive: Some(interval),
+				idle_timeout: idle,
+				keep_alive,
 				..Default::default()
 			};
 			let rendered = format!("{:?}", transport_config(&quic));
