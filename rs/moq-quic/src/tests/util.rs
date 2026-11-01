@@ -450,7 +450,7 @@ pub(super) struct TestEndpoint {
 	pub(super) addr: SocketAddr,
 	socket: Option<UdpSocket>,
 	/// Each connection's next timer, as of its last poll
-	timeouts: BTreeMap<ConnectionHandle, Instant>,
+	pub(super) timeouts: BTreeMap<ConnectionHandle, Instant>,
 	pub(super) outbound: VecDeque<(Transmit, Bytes)>,
 	delayed: VecDeque<(Transmit, Bytes)>,
 	/// Datagrams in flight to this endpoint, in arrival order
@@ -760,8 +760,13 @@ impl ::std::ops::DerefMut for TestEndpoint {
 }
 
 pub(super) fn subscribe() -> tracing::subscriber::DefaultGuard {
+	subscribe_at(tracing::Level::TRACE)
+}
+
+/// [`subscribe`] at `level`, for a test whose trace would be too long to read
+pub(super) fn subscribe_at(level: tracing::Level) -> tracing::subscriber::DefaultGuard {
 	let builder = tracing_subscriber::FmtSubscriber::builder()
-		.with_max_level(tracing::Level::TRACE)
+		.with_max_level(level)
 		.with_writer(|| TestWriter);
 	tracing::subscriber::set_default(builder.finish())
 }

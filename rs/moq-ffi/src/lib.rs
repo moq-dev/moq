@@ -1,8 +1,4 @@
 #![warn(missing_docs)]
-#![cfg_attr(
-	test,
-	expect(clippy::disallowed_methods, reason = "tests read the host clock directly")
-)]
 
 //! UniFFI bindings for [`moq_net`].
 //!
@@ -79,7 +75,7 @@ pub extern "C" fn moq_ffi_test_clock_advance(nanos: u64) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn moq_ffi_test_clock_now() -> u64 {
 	ffi::test_clock().map_or(u64::MAX, |clock| {
-		clock.now().duration_since(moq_clock::Instant::ZERO).as_nanos() as u64
+		clock.now().duration_since(kio::clock::Instant::ZERO).as_nanos() as u64
 	})
 }
 
@@ -89,4 +85,9 @@ mod test;
 
 // The binding benchmark's Rust baselines; ignored unless a run asks for them (see bench/README.md).
 #[cfg(all(test, unix))]
+#[expect(
+	clippy::disallowed_methods,
+	clippy::disallowed_types,
+	reason = "the binding benchmark measures real throughput and call cost"
+)]
 mod bench;

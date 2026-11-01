@@ -178,7 +178,7 @@ async fn stopping_the_group_closes_its_sessions() {
 	let session = client.connect(url).established().await.expect("connect");
 
 	group.shutdown().await;
-	tokio::time::timeout(std::time::Duration::from_secs(5), session.closed())
+	kio::clock::timeout(std::time::Duration::from_secs(5), session.closed())
 		.await
 		.expect("the session must see the close")
 		.expect_err("a stopped server ends the session");
@@ -270,7 +270,7 @@ async fn spawner_abort_reaches_the_worker() {
 	has_started.await.expect("future started");
 	task.abort();
 
-	let waited = tokio::time::timeout(std::time::Duration::from_secs(5), was_dropped).await;
+	let waited = kio::clock::timeout(std::time::Duration::from_secs(5), was_dropped).await;
 	assert!(waited.expect("abort reached the worker").is_err());
 	group.shutdown().await;
 }
@@ -303,7 +303,7 @@ async fn spawner_abort_races_the_handoff() {
 	// the oneshot the forwarding task has yet to read.
 	task.abort();
 
-	let waited = tokio::time::timeout(std::time::Duration::from_secs(5), was_dropped).await;
+	let waited = kio::clock::timeout(std::time::Duration::from_secs(5), was_dropped).await;
 	assert!(waited.expect("abort reached the worker").is_err());
 	group.shutdown().await;
 }
@@ -592,16 +592,16 @@ async fn completing_a_member_stops_its_siblings() {
 	drop(members);
 
 	assert_eq!(
-		tokio::time::timeout(std::time::Duration::from_secs(10), done)
+		kio::clock::timeout(std::time::Duration::from_secs(10), done)
 			.await
 			.expect("completing member hangs")
 			.expect("completing member failed"),
 		"done"
 	);
-	tokio::time::timeout(std::time::Duration::from_secs(10), group.finished())
+	kio::clock::timeout(std::time::Duration::from_secs(10), group.finished())
 		.await
 		.expect("the group must report the end of serving");
-	let _ = tokio::time::timeout(std::time::Duration::from_secs(10), sibling)
+	let _ = kio::clock::timeout(std::time::Duration::from_secs(10), sibling)
 		.await
 		.expect("a stopped sibling must not hang");
 
@@ -638,14 +638,14 @@ async fn cancelling_a_member_stops_its_siblings() {
 	drop(members);
 
 	task_a.abort();
-	tokio::time::timeout(std::time::Duration::from_secs(10), group.finished())
+	kio::clock::timeout(std::time::Duration::from_secs(10), group.finished())
 		.await
 		.expect("an abort must end the group");
 	// The aborted handle reports cancellation; the sibling is stopped with it.
-	let _ = tokio::time::timeout(std::time::Duration::from_secs(10), task_a)
+	let _ = kio::clock::timeout(std::time::Duration::from_secs(10), task_a)
 		.await
 		.expect("an aborted member must not hang");
-	let _ = tokio::time::timeout(std::time::Duration::from_secs(10), task_b)
+	let _ = kio::clock::timeout(std::time::Duration::from_secs(10), task_b)
 		.await
 		.expect("a cancelled sibling must not hang");
 
@@ -682,15 +682,15 @@ async fn a_panicking_member_stops_its_siblings() {
 	});
 	drop(members);
 
-	let err = tokio::time::timeout(std::time::Duration::from_secs(10), panics)
+	let err = kio::clock::timeout(std::time::Duration::from_secs(10), panics)
 		.await
 		.expect("a panicking member must not hang")
 		.expect_err("a panic must reach its handle");
 	assert!(err.is_panic(), "expected a panic, got cancellation");
-	tokio::time::timeout(std::time::Duration::from_secs(10), group.finished())
+	kio::clock::timeout(std::time::Duration::from_secs(10), group.finished())
 		.await
 		.expect("a panic must end the group");
-	let _ = tokio::time::timeout(std::time::Duration::from_secs(10), sibling)
+	let _ = kio::clock::timeout(std::time::Duration::from_secs(10), sibling)
 		.await
 		.expect("a panicking sibling must not hang");
 
@@ -719,7 +719,7 @@ async fn shutdown_with_work_in_flight_joins() {
 
 	group.shutdown().await;
 	for task in tasks {
-		let _ = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+		let _ = kio::clock::timeout(std::time::Duration::from_secs(10), task)
 			.await
 			.expect("shutdown must stop every member");
 	}
@@ -752,7 +752,7 @@ async fn dropping_the_group_with_work_in_flight_stops() {
 
 	drop(group);
 	for task in tasks {
-		let _ = tokio::time::timeout(std::time::Duration::from_secs(10), task)
+		let _ = kio::clock::timeout(std::time::Duration::from_secs(10), task)
 			.await
 			.expect("dropping the group must stop every member");
 	}
@@ -834,7 +834,7 @@ async fn rotated_identity_reaches_every_worker() {
 			}
 		}
 	};
-	let result = tokio::time::timeout(std::time::Duration::from_secs(10), probe).await;
+	let result = kio::clock::timeout(std::time::Duration::from_secs(10), probe).await;
 	group.shutdown().await;
 	result.expect("every worker must serve both snapshots");
 }

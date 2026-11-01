@@ -859,7 +859,7 @@ pub(crate) struct State {
 	handle: ConnectionHandle,
 	on_handshake_data: Option<oneshot::Sender<()>>,
 	connected: bool,
-	timer: Option<moq_clock::Sleep>,
+	timer: Option<kio::clock::Sleep>,
 	timer_deadline: Option<Instant>,
 	conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
 	endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
@@ -1054,7 +1054,7 @@ impl State {
 				delay.reset(deadline);
 			}
 			None => {
-				self.timer = Some(moq_clock::sleep_until(deadline));
+				self.timer = Some(kio::clock::sleep_until(deadline));
 			}
 			_ => {}
 		}
