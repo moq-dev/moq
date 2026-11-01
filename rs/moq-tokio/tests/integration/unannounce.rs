@@ -19,13 +19,13 @@ async fn release(unannounce: bool, settle: bool) {
 	if unannounce {
 		broadcast.unannounce();
 		if settle {
-			moq_clock::sleep(Duration::from_secs(1)).await;
+			kio::clock::sleep(Duration::from_secs(1)).await;
 		}
 	}
 
 	drop(sub);
 	drop(consumer);
-	moq_clock::timeout(Duration::from_secs(600), crate::unwanted(track.demand()))
+	kio::clock::timeout(Duration::from_secs(600), crate::unwanted(track.demand()))
 		.await
 		.expect("demand released")
 		.unwrap();

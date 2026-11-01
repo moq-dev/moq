@@ -90,7 +90,7 @@ async fn opus_roundtrip(case: Case) {
 	options.output.sample_rate = Some(case.rate);
 	options.output.layout = Some(case.layout);
 	// The whole clip is queued before subscription; retain every group.
-	options.max_delay = Duration::from_secs(30);
+	options.delay.max = Some(Duration::from_secs(30));
 	let mut consumer = decode::Consumer::new(&source, rendition, "audio", options)
 		.await
 		.unwrap();

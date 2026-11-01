@@ -15,8 +15,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context;
+use kio::clock::Instant;
 use moq_audio::playback::{Observation, Observer};
-use moq_clock::Instant;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
@@ -98,7 +98,7 @@ pub(super) struct Metrics {
 	/// What closed engines counted, added to the current one's totals.
 	base: Totals,
 	start: Instant,
-	interval: moq_clock::Interval,
+	interval: kio::clock::Interval,
 }
 
 impl Metrics {
@@ -109,8 +109,8 @@ impl Metrics {
 	) -> anyhow::Result<(Self, mpsc::UnboundedSender<Observer>)> {
 		let file = File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
 		let (observe, observers) = mpsc::unbounded_channel();
-		let mut interval = moq_clock::interval(INTERVAL);
-		interval.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Delay);
+		let mut interval = kio::clock::interval(INTERVAL);
+		interval.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
 		let metrics = Self {
 			file: BufWriter::new(file),
 			presentation,
@@ -140,7 +140,7 @@ impl Metrics {
 			// The audio thread closes the gap on its next buffer. One that never
 			// comes is a device that stopped pulling, which the render clock
 			// already shows, so the wait is bounded rather than hung on it.
-			if moq_clock::timeout(FINISH_WAIT, observer.finish()).await.is_err() {
+			if kio::clock::timeout(FINISH_WAIT, observer.finish()).await.is_err() {
 				tracing::warn!("the speaker never closed out the measurement; the last gap may be missing");
 			}
 		}

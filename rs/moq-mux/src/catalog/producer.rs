@@ -98,7 +98,7 @@ const ESTIMATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(1);
 #[derive(Default)]
 struct Throttle {
 	/// When the last publish carrying an estimate went out.
-	last: Option<moq_clock::Instant>,
+	last: Option<kio::clock::Instant>,
 	/// An estimate is in the catalog but not yet on the wire.
 	pending: bool,
 }
@@ -107,7 +107,7 @@ impl Throttle {
 	/// A publish is going out: any held estimate rides it and opens a new window.
 	fn fold(&mut self) {
 		if std::mem::take(&mut self.pending) {
-			self.last = Some(moq_clock::now());
+			self.last = Some(kio::clock::now());
 		}
 	}
 }
@@ -679,7 +679,7 @@ impl<E: CatalogExt> Producer<E> {
 		&mut self,
 		timebase: &std::sync::OnceLock<super::Offset>,
 		pts: moq_net::Timestamp,
-		wall: Option<moq_clock::Wall>,
+		wall: Option<kio::clock::Wall>,
 	) -> crate::Result<super::Offset> {
 		let mut guard = self.modify()?;
 		// Another clone of the timebase may have anchored first; the lock orders them. A placement
@@ -1246,7 +1246,7 @@ impl<E: CatalogExt> Guard<'_, E> {
 		if !estimates.pending {
 			return Ok(());
 		}
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		if throttle && estimates.last.is_some_and(|last| now < last + ESTIMATE_WINDOW) {
 			return Ok(());
 		}
@@ -1363,19 +1363,17 @@ fn video_sap_type(codec: &hang::catalog::VideoCodec) -> Option<u8> {
 	}
 }
 
-/// The MSF packaging that announces `container`, or `None` to leave the rendition out of the catalog.
+/// The MSF packaging that announces `container`.
 ///
 /// Exhaustive on purpose: a catch-all is what announced LOC as legacy, and it would do the same to the
 /// next container added. hang says an unrecognized one must be ignored, so it keeps its wire kind (no
-/// MSF consumer claims one it does not know) and is dropped when it does not even name one.
-fn packaging_of(container: &hang::catalog::Container) -> Option<moq_msf::Packaging> {
+/// MSF consumer claims one it does not know).
+fn packaging_of(container: &hang::catalog::Container) -> moq_msf::Packaging {
 	match container {
-		hang::catalog::Container::Cmaf { .. } => Some(moq_msf::Packaging::Cmaf),
-		hang::catalog::Container::Loc => Some(moq_msf::Packaging::Loc),
-		hang::catalog::Container::Legacy => Some(moq_msf::Packaging::Legacy),
-		hang::catalog::Container::Unknown(unknown) => {
-			unknown.kind().map(|kind| moq_msf::Packaging::Unknown(kind.to_string()))
-		}
+		hang::catalog::Container::Cmaf { .. } => moq_msf::Packaging::Cmaf,
+		hang::catalog::Container::Loc => moq_msf::Packaging::Loc,
+		hang::catalog::Container::Legacy => moq_msf::Packaging::Legacy,
+		hang::catalog::Container::Unknown(unknown) => moq_msf::Packaging::Unknown(unknown.kind().to_string()),
 	}
 }
 
@@ -1423,9 +1421,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 
 	let has_multiple_video = catalog.video.renditions.len() > 1;
 	for (name, config) in &catalog.video.renditions {
-		let Some(packaging) = packaging_of(&config.container) else {
-			continue;
-		};
+		let packaging = packaging_of(&config.container);
 
 		let init_data = match &config.container {
 			hang::catalog::Container::Cmaf { init, .. } => Some(base64::engine::general_purpose::STANDARD.encode(init)),
@@ -1460,9 +1456,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 
 	let has_multiple_audio = catalog.audio.renditions.len() > 1;
 	for (name, config) in &catalog.audio.renditions {
-		let Some(packaging) = packaging_of(&config.container) else {
-			continue;
-		};
+		let packaging = packaging_of(&config.container);
 
 		let init_data = match &config.container {
 			hang::catalog::Container::Cmaf { init, .. } => Some(base64::engine::general_purpose::STANDARD.encode(init)),
@@ -1494,9 +1488,7 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 	}
 
 	for (name, config) in &catalog.text.renditions {
-		let Some(packaging) = packaging_of(&config.container) else {
-			continue;
-		};
+		let packaging = packaging_of(&config.container);
 		let Some((wire, namespace)) = reference(name, config) else {
 			continue;
 		};
@@ -2286,8 +2278,8 @@ mod test {
 	fn sibling_broadcasts_share_a_clock_and_capture_time() {
 		use std::time::Duration;
 
-		let captured = moq_clock::now();
-		let wall = moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
+		let captured = kio::clock::now();
+		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
 		let clock = crate::Clock::at(captured, wall).unwrap();
 		let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
 		let front = origin.create_broadcast("robot/front.hang").unwrap();
@@ -2340,14 +2332,14 @@ mod test {
 
 	/// A `with_clock` catalog is fixed from the start: even the first importer shifts onto it,
 	/// landing at the clock's reading on arrival, and the advertised mapping never moves.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn with_clock_shifts_the_first_importer() {
 		use std::time::Duration;
 
-		moq_clock::sleep(Duration::from_secs(5)).await;
+		kio::clock::sleep(Duration::from_secs(5)).await;
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
-		let wall = moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
-		let start = moq_clock::now() - Duration::from_secs(5);
+		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS + 60_000);
+		let start = kio::clock::now() - Duration::from_secs(5);
 		let config = Config::default().with_clock(crate::Clock::at(start, wall).expect("a representable wall"));
 		let catalog = Producer::new(&mut broadcast, config).unwrap();
 
@@ -2383,7 +2375,7 @@ mod test {
 		let clock = catalog.clock();
 		assert_eq!(catalog.snapshot().clock, clock.wall(), "the anchor is advertised");
 		let actual = clock.wall_clock(first).unwrap();
-		let now = moq_clock::wall();
+		let now = kio::clock::wall();
 		let drift = actual.max(now).saturating_duration_since(actual.min(now));
 		assert!(drift < Duration::from_secs(1), "the first timestamp is live on arrival");
 
@@ -2454,7 +2446,7 @@ mod test {
 	fn a_placed_input_lands_where_it_says() {
 		use std::time::Duration;
 
-		let wall = moq_clock::Wall::now() - Duration::from_secs(2);
+		let wall = kio::clock::Wall::now() - Duration::from_secs(2);
 		let pts = moq_net::Timestamp::from_micros(100_000_000).unwrap();
 		let later = moq_net::Timestamp::from_micros(101_000_000).unwrap();
 
@@ -2490,7 +2482,7 @@ mod test {
 	fn a_placement_alone_publishes_nothing() {
 		use std::time::Duration;
 
-		let wall = moq_clock::Wall::now() - Duration::from_secs(2);
+		let wall = kio::clock::Wall::now() - Duration::from_secs(2);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		catalog.timebase().place(moq_net::Timestamp::ZERO, wall).unwrap();
@@ -2516,7 +2508,7 @@ mod test {
 
 		let now = Duration::from_secs(86_400);
 		crate::clock::fake_host_wall(
-			moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS) + now,
+			kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS) + now,
 		);
 		let zero = moq_net::Timestamp::from_secs(now.as_secs() - 3600).unwrap();
 		hang::catalog::Clock::new(zero.convert(scale).unwrap()).unwrap()
@@ -2569,12 +2561,12 @@ mod test {
 
 		// The same mapping from `with_clock` agrees in any units, without reading the host's wall
 		// clock, which may be unset.
-		let zero = moq_clock::Wall::UNIX_EPOCH
+		let zero = kio::clock::Wall::UNIX_EPOCH
 			+ Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS)
 			+ Duration::from_micros(input.wall.as_micros() as u64);
-		let fixed = crate::Clock::at(moq_clock::now(), zero).unwrap();
+		let fixed = crate::Clock::at(kio::clock::now(), zero).unwrap();
 		seed.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
-		crate::clock::fake_host_wall(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
+		crate::clock::fake_host_wall(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
 		let config = Config::default().with_catalog(seed.clone()).with_clock(fixed);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
@@ -2583,7 +2575,7 @@ mod test {
 		assert_eq!(catalog.snapshot().clock, Some(input));
 
 		// A different one is refused before any catalog track exists.
-		let other = crate::Clock::at(moq_clock::now(), zero + Duration::from_secs(1)).unwrap();
+		let other = crate::Clock::at(kio::clock::now(), zero + Duration::from_secs(1)).unwrap();
 		let config = Config::default().with_catalog(seed).with_clock(other);
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		assert!(matches!(
@@ -2653,12 +2645,12 @@ mod test {
 	fn an_unset_host_clock_publishes_without_a_wall() {
 		use std::time::Duration;
 
-		crate::clock::fake_host_wall(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
+		crate::clock::fake_host_wall(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
 		assert_eq!(catalog.snapshot().clock, None);
 
-		let wall = moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
+		let wall = kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(hang::catalog::MOQ_EPOCH_UNIX_MILLIS);
 		let pts = moq_net::Timestamp::from_micros(1_000_000).unwrap();
 		assert!(matches!(
 			catalog.timebase().place(pts, wall),

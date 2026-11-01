@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use crate::container::Frame;
 
