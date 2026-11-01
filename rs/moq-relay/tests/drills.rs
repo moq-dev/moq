@@ -22,14 +22,9 @@
 //! data ever moved cannot hide here.
 //!
 //! See `test/drill/README.md` for the recipe, the sensitivity proof that each
-//! drill fails when its recovery behavior is removed, and the loom/fuzz cases
-//! covering the primitives underneath.
+//! drill fails when its recovery behavior is removed, and the fuzz targets
+//! covering the wire underneath.
 #![cfg(all(feature = "quic", feature = "websocket"))]
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 
 use std::time::Duration;
 
@@ -245,7 +240,7 @@ impl RelayHost {
 			}
 		});
 
-		let addr = tokio::time::timeout(TIMEOUT, bound)
+		let addr = kio::clock::timeout(TIMEOUT, bound)
 			.await
 			.expect("relay startup timed out")
 			.expect("relay task vanished during startup")
@@ -359,7 +354,7 @@ fn write_group(track: &mut moq_net::track::Producer, payload: &[u8]) {
 /// Read the next group's first frame, failing the drill on a timeout, a clean
 /// finish, or an empty group.
 async fn read_group(reader: &mut Reader, what: &str) -> (u64, Vec<u8>) {
-	let group = tokio::time::timeout(TIMEOUT, reader.groups.recv_group())
+	let group = kio::clock::timeout(TIMEOUT, reader.groups.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("{what}: no group within {TIMEOUT:?}"))
 		.unwrap_or_else(|err| panic!("{what}: track aborted: {err}"))
@@ -367,7 +362,7 @@ async fn read_group(reader: &mut Reader, what: &str) -> (u64, Vec<u8>) {
 	let sequence = group.sequence;
 
 	let mut group = group;
-	let frame = tokio::time::timeout(TIMEOUT, group.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.unwrap_or_else(|_| panic!("{what}: no frame within {TIMEOUT:?}"))
 		.unwrap_or_else(|err| panic!("{what}: group aborted: {err}"))
@@ -383,7 +378,7 @@ async fn read_group(reader: &mut Reader, what: &str) -> (u64, Vec<u8>) {
 /// the old session is skipped here. A track-level failure is still fatal: that
 /// says the subscription itself did not survive.
 async fn read_until(reader: &mut Reader, want: &[u8], what: &str) {
-	tokio::time::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			let mut group = match reader.groups.recv_group().await {
 				Ok(Some(group)) => group,
@@ -416,13 +411,13 @@ struct Reader {
 async fn subscribe(origin: &moq_net::origin::Consumer, path: &str) -> Reader {
 	// Following parks until a route covers the path, where a request could find the
 	// discovery synced before the announcement reaches this relay.
-	let broadcast = tokio::time::timeout(TIMEOUT, origin.follow(path, None).unwrap().available())
+	let broadcast = kio::clock::timeout(TIMEOUT, origin.follow(path, None).unwrap().available())
 		.await
 		.expect("announcement timed out")
 		.expect("origin closed before announcing");
 
 	let track = broadcast.track(TRACK).expect("track");
-	let groups = tokio::time::timeout(TIMEOUT, track.subscribe(None))
+	let groups = kio::clock::timeout(TIMEOUT, track.subscribe(None))
 		.await
 		.expect("subscribe timed out")
 		.expect("subscribe rejected");
@@ -456,7 +451,7 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	let broadcast = publisher.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
-	let publish_session = tokio::time::timeout(
+	let publish_session = kio::clock::timeout(
 		TIMEOUT,
 		client(&url)
 			.with_publisher(&publisher)
@@ -470,7 +465,7 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 
 	let subscriber = moq_tokio::origin::spawn();
 	let subscribed = subscriber.consume();
-	let subscribe_session = tokio::time::timeout(
+	let subscribe_session = kio::clock::timeout(
 		TIMEOUT,
 		client(&url)
 			.with_subscriber(subscriber)
@@ -490,7 +485,7 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	// The stall: the reader stops asking while the publisher runs ahead of it.
 	for i in 0..STALL_GROUPS {
 		write_group(&mut track, format!("stalled {i}").as_bytes());
-		tokio::time::sleep(STALL / STALL_GROUPS as u32).await;
+		kio::clock::sleep(STALL / STALL_GROUPS as u32).await;
 	}
 
 	// Fault activation: the groups reached the subscriber and stacked up behind a
@@ -500,7 +495,7 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	// far behind is shed rather than waited for), so an unread backlog is what
 	// backpressure looks like from here.
 	let mut behind = None;
-	let backlog = tokio::time::timeout(TIMEOUT, async {
+	let backlog = kio::clock::timeout(TIMEOUT, async {
 		while let Some(largest) = reader.track.largest().await {
 			behind = Some(largest.group - first);
 			if largest.group >= first + STALL_GROUPS as u64 {
@@ -531,7 +526,7 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 
 	// Resource release: everything that session was feeding is closed, rather
 	// than left parked on a subscription nobody will ever serve again.
-	tokio::time::timeout(TIMEOUT, cancelled.closed())
+	kio::clock::timeout(TIMEOUT, cancelled.closed())
 		.await
 		.expect("the cancelled subscriber's broadcast never closed");
 	println!("resource released: the cancelled broadcast closed");
@@ -540,7 +535,7 @@ async fn cancel_under_backpressure_releases_the_reader(lane: Lane) {
 	// upstream subscription the cancel left in place.
 	let rejoin = moq_tokio::origin::spawn();
 	let rejoined = rejoin.consume();
-	let rejoin_session = tokio::time::timeout(
+	let rejoin_session = kio::clock::timeout(
 		TIMEOUT,
 		client(&url)
 			.with_subscriber(rejoin)
@@ -606,12 +601,12 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 	let mut open = track.append_group().expect("append group");
 	open.write_frame(moq_net::Timestamp::ZERO, b"read".as_ref())
 		.expect("write frame");
-	let mut open_reader = tokio::time::timeout(TIMEOUT, reader.groups.recv_group())
+	let mut open_reader = kio::clock::timeout(TIMEOUT, reader.groups.recv_group())
 		.await
 		.expect("open group timed out")
 		.expect("track aborted")
 		.expect("track finished");
-	tokio::time::timeout(TIMEOUT, open_reader.read_frame())
+	kio::clock::timeout(TIMEOUT, open_reader.read_frame())
 		.await
 		.expect("open frame timed out")
 		.expect("open group aborted")
@@ -624,7 +619,7 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 
 	// Terminal result: the unread half of the open group fails. `Ok(None)` here
 	// would be the relay's death passing for the publisher finishing.
-	let err = tokio::time::timeout(TIMEOUT, open_reader.read_frame())
+	let err = kio::clock::timeout(TIMEOUT, open_reader.read_frame())
 		.await
 		.expect("the interrupted group never resolved")
 		.expect_err("the interrupted group reported a clean finish");
@@ -642,7 +637,7 @@ async fn relay_killed_mid_group_aborts_then_resumes(lane: Lane) {
 
 	// The outage is observed, not hidden: the broadcast the dead session fed closed
 	// with it, so the old subscription ends rather than reading from a stale route.
-	let err = match tokio::time::timeout(TIMEOUT, reader.groups.recv_group())
+	let err = match kio::clock::timeout(TIMEOUT, reader.groups.recv_group())
 		.await
 		.expect("the interrupted subscription never resolved")
 	{
@@ -671,7 +666,7 @@ lanes!(relay_killed_mid_group_aborts_then_resumes);
 /// Wait for a reconnect loop to report `want`, failing with what it said instead.
 async fn expect_status(reconnect: &mut moq_tokio::Connection, want: moq_tokio::Status, who: &str) {
 	loop {
-		let status = tokio::time::timeout(TIMEOUT, reconnect.status())
+		let status = kio::clock::timeout(TIMEOUT, reconnect.status())
 			.await
 			.unwrap_or_else(|_| panic!("{who}: no status change within {TIMEOUT:?}, wanted {want:?}"))
 			.unwrap_or_else(|err| panic!("{who}: reconnect loop gave up: {err}"));
@@ -694,7 +689,7 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 
 	let subscriber = moq_tokio::origin::spawn();
 	let subscribed = subscriber.consume();
-	let subscribe_session = tokio::time::timeout(
+	let subscribe_session = kio::clock::timeout(
 		TIMEOUT,
 		client(&url)
 			.with_subscriber(subscriber)
@@ -711,7 +706,7 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	let broadcast = first.create_broadcast("live").expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
-	let first_session = tokio::time::timeout(
+	let first_session = kio::clock::timeout(
 		TIMEOUT,
 		client(&url)
 			.with_publisher(&first)
@@ -749,7 +744,7 @@ async fn interrupted_publisher_republishes_new_content(lane: Lane) {
 	let broadcast = second.create_broadcast("live").expect("re-create broadcast");
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, timed()).expect("re-create track");
-	let second_session = tokio::time::timeout(
+	let second_session = kio::clock::timeout(
 		TIMEOUT,
 		client(&url)
 			.with_publisher(&second)
@@ -784,7 +779,7 @@ lanes!(interrupted_publisher_republishes_new_content);
 /// Wait for `path` to be announced (`want`) or unannounced (`!want`).
 async fn expect_announce(announced: &mut moq_net::announce::Consumer, path: &str, want: bool, who: &str) {
 	loop {
-		let (update, active) = tokio::time::timeout(TIMEOUT, next_update(announced))
+		let (update, active) = kio::clock::timeout(TIMEOUT, next_update(announced))
 			.await
 			.unwrap_or_else(|_| panic!("{who}: no announcement change within {TIMEOUT:?}"))
 			.unwrap_or_else(|| panic!("{who}: the announcement stream closed"));
@@ -969,7 +964,7 @@ enum Flap {
 	/// Cut at `at`, with the route over it still announced.
 	Cut {
 		outage: moq_shaper::Outage,
-		at: tokio::time::Instant,
+		at: kio::clock::Instant,
 	},
 	/// The edge withdrew the route after the link was down for `cut`. The link
 	/// is back and the edge redials.
@@ -1030,7 +1025,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	broadcast.announce(Default::default()).expect("announce broadcast");
 	let mut track = broadcast.create_track(TRACK, timed()).expect("create track");
 	let url = publish_path.url.clone();
-	let publish_session = tokio::time::timeout(
+	let publish_session = kio::clock::timeout(
 		TIMEOUT,
 		client_over(&url, credit(lane, quic()))
 			.with_publisher(&publisher)
@@ -1046,7 +1041,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	let subscribed = subscriber.consume();
 	let mut announced = subscribed.announced();
 	let url = subscribe_path.url.clone();
-	let subscribe_session = tokio::time::timeout(
+	let subscribe_session = kio::clock::timeout(
 		TIMEOUT,
 		client_over(&url, credit(lane, quic()))
 			.with_subscriber(subscriber)
@@ -1065,7 +1060,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// ingress burst holds every publisher datagram, including the replies and
 	// credit the origin needs before it subscribes, so arming it any earlier
 	// starves the publisher's session until it idles out.
-	tokio::time::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		while track.subscription().is_none() {
 			track.subscription_changed().await.expect("track aborted");
 		}
@@ -1094,18 +1089,18 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// Write the next burst, cutting a flapping link just before the flap burst.
 	// A burst is written without yielding, so a cut partway through it would
 	// still land before any of it left the publisher.
-	let burst = |track: &mut moq_net::track::Producer, written: &mut Vec<tokio::time::Instant>, flap: &mut Flap| {
+	let burst = |track: &mut moq_net::track::Producer, written: &mut Vec<kio::clock::Instant>, flap: &mut Flap| {
 		if link == PeerLink::Flapping && written.len() as u64 == FLAP_BURST * BURST_GROUPS {
 			let outage = peer.shaper.as_ref().expect("a flapping link has a shaper").cut();
 			*flap = Flap::Cut {
 				outage,
-				at: tokio::time::Instant::now(),
+				at: kio::clock::now(),
 			};
 		}
 		for _ in 0..BURST_GROUPS {
 			let sequence = written.len() as u64;
 			write_group(track, &payload(sequence));
-			written.push(tokio::time::Instant::now());
+			written.push(kio::clock::now());
 		}
 	};
 	burst(&mut track, &mut written, &mut flap);
@@ -1137,7 +1132,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 		|pending: &mut tokio::task::JoinSet<_>, track: &moq_net::track::Consumer, sequence: u64, generation: u64| {
 			let fetching = track.fetch_group(sequence, None);
 			pending.spawn(async move {
-				let fetched = tokio::time::timeout(wait, async {
+				let fetched = kio::clock::timeout(wait, async {
 					let group = fetching.await.map_err(|err| err.to_string())?;
 					read_payload(group, sequence).await
 				});
@@ -1154,7 +1149,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 	// reported by name rather than as a generic stall.
 	let step_timeout = wait + Duration::from_secs(1);
 	while (outcomes.len() as u64) < total {
-		let step = tokio::time::timeout(step_timeout, async {
+		let step = kio::clock::timeout(step_timeout, async {
 			tokio::select! {
 				group = reader.groups.recv_group(), if subscription_up => Step::Group(Box::new(group)),
 				Some(settled) = pending.join_next() => {
@@ -1213,7 +1208,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 					}
 					(false, _) => panic!("the route was withdrawn while the peer link was up"),
 					(true, Flap::Withdrawn { cut }) => {
-						restored_at = Some(tokio::time::Instant::now());
+						restored_at = Some(kio::clock::now());
 						reader = subscribe(&subscribed, "live").await;
 						generation += 1;
 						subscription_up = true;
@@ -1246,7 +1241,7 @@ async fn cross_cluster(lane: Lane, link: PeerLink) {
 				if claimed.insert(sequence) {
 					live.insert(sequence);
 					pending.spawn(async move {
-						let outcome = match tokio::time::timeout(wait, read_payload(group, sequence)).await {
+						let outcome = match kio::clock::timeout(wait, read_payload(group, sequence)).await {
 							Ok(Ok(())) => Outcome::Live,
 							Ok(Err(err)) => Outcome::Failed(err),
 							Err(_) => Outcome::Stalled,
@@ -1338,7 +1333,7 @@ async fn no_publisher_never_delivers(lane: Lane) {
 
 	let subscriber = moq_tokio::origin::spawn();
 	let subscribed = subscriber.consume();
-	let session = tokio::time::timeout(
+	let session = kio::clock::timeout(
 		TIMEOUT,
 		client(&url)
 			.with_subscriber(subscriber)
@@ -1361,8 +1356,8 @@ async fn no_publisher_never_delivers(lane: Lane) {
 	let mut announced = subscribed.announced();
 	let mut following = subscribed.follow("live", None).unwrap();
 	let (update, resolved) = tokio::join!(
-		tokio::time::timeout(quiet, next_update(&mut announced)),
-		tokio::time::timeout(quiet, following.available()),
+		kio::clock::timeout(quiet, next_update(&mut announced)),
+		kio::clock::timeout(quiet, following.available()),
 	);
 	if let Ok(update) = update {
 		let path = update.map(|(update, _)| update.prefix.to_string());
@@ -1382,7 +1377,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }
@@ -1448,7 +1444,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 		.await
 		.unwrap();
 	write_group(&mut track, b"warmup");
-	let remote = tokio::time::timeout(TIMEOUT, consumed.follow("live", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumed.follow("live", None).unwrap().available())
 		.await
 		.unwrap()
 		.unwrap();
@@ -1463,7 +1459,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 		warmup.read_frame().await.unwrap().unwrap().payload,
 		b"warmup".as_slice()
 	);
-	tokio::time::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		loop {
 			if track
 				.subscription()
@@ -1487,7 +1483,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 		.unwrap();
 	let payload = vec![42u8; 32_000];
 	write_group(&mut track, &payload);
-	tokio::time::timeout(TIMEOUT, burst.completed())
+	kio::clock::timeout(TIMEOUT, burst.completed())
 		.await
 		.expect("rate-limit queue never filled")
 		.unwrap();
@@ -1499,7 +1495,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 			.write_frame(moq_net::Timestamp::from_millis(sequence * 50).unwrap(), payload.clone())
 			.unwrap();
 		group.finish().unwrap();
-		tokio::time::sleep(Duration::from_millis(50)).await;
+		kio::clock::sleep(Duration::from_millis(50)).await;
 	}
 	let mut newest = track.append_group().unwrap();
 	newest
@@ -1507,8 +1503,8 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 		.unwrap();
 	newest.finish().unwrap();
 	// No successor means this snapshot must survive even after its budget elapsed.
-	tokio::time::sleep(Duration::from_millis(500)).await;
-	let sequence = tokio::time::timeout(TIMEOUT, async {
+	kio::clock::sleep(Duration::from_millis(500)).await;
+	let sequence = kio::clock::timeout(TIMEOUT, async {
 		loop {
 			let mut group = groups.recv_group().await.unwrap().expect("subscription ended");
 			if let Ok(Some(frame)) = group.read_frame().await
