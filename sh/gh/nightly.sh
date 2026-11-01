@@ -151,6 +151,7 @@ case "$1" in
         javascript json-codec just js json-codec-bench
         javascript json-parse just js json-parse-bench
         javascript slow-group just js slow-group-bench
+        javascript buffered just js buffered-bench
         javascript jitter just js jitter-bench
         javascript audio-warmup just js audio-warmup-bench
         javascript clock just js clock-bench

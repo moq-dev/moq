@@ -167,30 +167,28 @@ follow-up quest. The m1 run added none of these:
    complete adapter delivery across publishers and viewers.
 3. LOC and CMAF wire containers in moq-mux: `containers` and `export` only use
    `Container::Legacy`; sweep container x frame size x frames.
-4. [Buffered browser groups](/quest/m2/performance-survey/hang-buffered.md)
-   owns per-frame scans and bulk skip work in the Hang consumer.
-5. [Browser media copies](/quest/m2/performance-survey/browser-media-copies.md)
+4. [Browser media copies](/quest/m2/performance-survey/browser-media-copies.md)
    owns CMAF sample copies and LOC encode allocation. Generic `js/msf` and
    `js/flate` benchmark coverage remains here.
-6. moq-quic loss recovery and real congestion controllers: every bench pins
+5. moq-quic loss recovery and real congestion controllers: every bench pins
    `Unlimited`; sweep controller x flight x loss x streams.
-7. [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md)
+6. [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md)
    owns HTTP snapshot/rendering costs across routes and pollers.
-8. [JWT verification](/quest/m2/performance-survey/jwt-verification.md) owns
+7. [JWT verification](/quest/m2/performance-survey/jwt-verification.md) owns
    key-source I/O, import, lookup, parsing and crypto attribution.
-9. MPEG-TS import with real repeated media (the CLI bench mostly skips null
+8. MPEG-TS import with real repeated media (the CLI bench mostly skips null
    padding), and MKV, FLV, H.265, AV1 importers.
-10. JS watch audio ring buffer and publish `Fanout` (lower impact). Include
-    capture-to-encoder staging: `audio/framer.ts` copies planes before
-    `audio/encoder.ts` joins them. AudioData already uses a transfer list;
-    do not count that transfer as another mandatory copy. Sweep publishers
-    x renditions, channels and frame duration in a browser.
+9. JS watch audio ring buffer and publish `Fanout` (lower impact). Include
+   capture-to-encoder staging: `audio/framer.ts` copies planes before
+   `audio/encoder.ts` joins them. AudioData already uses a transfer list;
+   do not count that transfer as another mandatory copy. Sweep publishers
+   x renditions, channels and frame duration in a browser.
 
 The [2026-10-22 source survey](/quest/m2/performance-survey/README.md) owns
 the extracted items above and additional algorithmic hypotheses, with paired
 benchmarks required before optimization. This audit still owns nightly
 regression attribution and the remaining coverage. Its fragmented-MKV child
-specializes item 9's MKV work.
+specializes item 8's MKV work.
 
 Single-axis fan-out benches to widen: `session_delivery_paced` (viewers only),
 `track_fanout_*` (subscribers only), `memory` (lite-06 only), and

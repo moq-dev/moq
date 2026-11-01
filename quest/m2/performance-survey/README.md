@@ -183,7 +183,6 @@ No duplicate quest or workflow edit belongs here.
 - [Fragmented MKV import](/quest/m2/performance-survey/mkv-fragments.md) - accumulated-buffer copies and parser replay
 - [QUIC scheduling churn](/quest/m2/performance-survey/quic-schedule-churn.md) - priority and retirement work across unrelated groups
 - [HLS request fan-out](/quest/m2/performance-survey/hls-serving.md) - repeated fetch, remux and playlist construction per viewer
-- [Buffered browser groups](/quest/m2/performance-survey/hang-buffered.md) - per-frame scans and bulk skip work
 - [Idle browser stats](/quest/m2/performance-survey/browser-idle-stats.md) - local transport polling without active publishing demand
 - [Transport preference history](/quest/m2/performance-survey/transport-history.md) - full URL retention across retired sessions
 - [Resume identity history](/quest/m2/performance-survey/resume-history.md) - historical source graphs held by first-seen track metadata

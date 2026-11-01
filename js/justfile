@@ -146,6 +146,11 @@ slow-group-bench:
     bun install --frozen-lockfile
     bun hang/bench/slow-group.ts
 
+# Sweep a hang consumer's buffered groups, frames per group, publishers and players across arrival orders.
+buffered-bench:
+    bun install --frozen-lockfile
+    bun hang/bench/buffered.ts
+
 # Sweep the audio jitter estimator's held history against in-order and reordered frames.
 jitter-bench:
     bun install --frozen-lockfile
