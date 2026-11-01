@@ -16,9 +16,10 @@ use super::{
 	send::{End, Error},
 };
 use crate::{
-	Dir, MAX_STREAM_COUNT, Side, StreamId, TransportError, VarInt,
+	Dir, Instant, MAX_STREAM_COUNT, Rate, Side, StreamId, TransportError, VarInt,
 	coding::BufMutExt,
 	connection::ConnectionTag,
+	connection::rate::Bucket,
 	connection::stats::{CreditStats, FrameStats},
 	connection::waits::{Wait, Waits},
 	frame::{self, FrameStruct, StreamMetaVec},
@@ -134,7 +135,13 @@ pub(crate) struct StreamsState {
 	/// The initial receive window
 	pub(super) receive_window: u64,
 	/// Limit on incoming data, which is transmitted through `MAX_DATA` frames
+	///
+	/// Never past `window_max_data`, and equal to it unless a receive rate cap holds it back.
 	pub(super) local_max_data: u64,
+	/// The limit the receive window alone allows: the memory the peer's data may occupy
+	pub(super) window_max_data: u64,
+	/// Paces `local_max_data` and admits datagrams, while the peer's sending is capped
+	receive_rate: Option<Bucket>,
 	/// The last value of `MAX_DATA` which had been queued for transmission in
 	/// an outgoing `MAX_DATA` frame
 	sent_max_data: VarInt,
@@ -229,6 +236,8 @@ impl StreamsState {
 			max_data: 0,
 			receive_window: receive_window.into(),
 			local_max_data: receive_window.into(),
+			window_max_data: receive_window.into(),
+			receive_rate: None,
 			sent_max_data: receive_window,
 			data_sent: 0,
 			data_recvd: 0,
@@ -346,16 +355,19 @@ impl StreamsState {
 		Ok(self.evict_after_arrival(transmit))
 	}
 
-	/// Count `new_bytes` of connection credit the peer spent.
+	/// Count `new_bytes` of connection credit the peer spent, charging them to any rate cap.
 	fn spend(&mut self, new_bytes: u64) {
 		self.data_recvd = self.data_recvd.saturating_add(new_bytes);
+		if let Some(bucket) = &mut self.receive_rate {
+			bucket.charge(new_bytes);
+		}
 		// Credit only returns between arrivals, so an arrival is when the most is spent. A shrink
 		// leaves the advertised limit in place as debt, so that credit is still outstanding.
 		let spent = self
 			.data_recvd
 			.saturating_add(self.receive_window)
 			.saturating_add(self.receive_window_shrink_debt)
-			.saturating_sub(self.local_max_data);
+			.saturating_sub(self.window_max_data);
 		self.peak_spent = self.peak_spent.max(spent);
 	}
 
@@ -1119,8 +1131,8 @@ impl StreamsState {
 			let growth: u64 = receive_window - self.receive_window;
 			let cancelled = growth.min(self.receive_window_shrink_debt);
 			self.receive_window_shrink_debt -= cancelled;
-			self.local_max_data = self.local_max_data.saturating_add(growth - cancelled);
-			expanded = true;
+			self.window_max_data = self.window_max_data.saturating_add(growth - cancelled);
+			expanded = self.grant();
 		} else {
 			let diff = self.receive_window - receive_window;
 			self.receive_window_shrink_debt = self.receive_window_shrink_debt.saturating_add(diff);
@@ -1176,12 +1188,99 @@ impl StreamsState {
 	pub(super) fn add_read_credits(&mut self, credits: u64) -> ShouldTransmit {
 		if credits > self.receive_window_shrink_debt {
 			let net_credits = credits - self.receive_window_shrink_debt;
-			self.local_max_data = self.local_max_data.saturating_add(net_credits);
+			self.window_max_data = self.window_max_data.saturating_add(net_credits);
 			self.receive_window_shrink_debt = 0;
 		} else {
 			self.receive_window_shrink_debt -= credits;
 		}
 
+		self.grant();
+		ShouldTransmit(self.max_data_due())
+	}
+
+	/// Raise `local_max_data` as far as the window and any rate cap allow, returning whether
+	/// it rose.
+	///
+	/// A cap grants only what its bucket holds, counting the credit still outstanding, so the
+	/// peer never holds more unspent credit than one burst. It grants in steps of
+	/// [`rate_step`](Self::rate_step), or whatever the window has room for, so a peer kept at
+	/// its limit is not answered with a grant of a few bytes per packet.
+	fn grant(&mut self) -> bool {
+		let limit = match &self.receive_rate {
+			None => self.window_max_data,
+			Some(bucket) => {
+				let limit = self
+					.window_max_data
+					.min(self.data_recvd.saturating_add(bucket.available()));
+				let step = rate_step(bucket).min(self.window_max_data - self.local_max_data);
+				match limit >= self.local_max_data.saturating_add(step) {
+					true => limit,
+					false => self.local_max_data,
+				}
+			}
+		};
+		let raised = limit > self.local_max_data;
+		self.local_max_data = self.local_max_data.max(limit);
+		raised
+	}
+
+	/// Cap what the peer sends, or lift the cap, returning whether a `MAX_DATA` frame is due.
+	///
+	/// A new cap starts with a full burst, which counts the credit already outstanding.
+	pub(crate) fn set_receive_rate(&mut self, rate: Rate) -> ShouldTransmit {
+		match (rate, &mut self.receive_rate) {
+			(Rate::Unlimited, bucket) => *bucket = None,
+			(Rate::BytesPerSecond(rate), Some(bucket)) => bucket.set_rate(rate),
+			(Rate::BytesPerSecond(rate), bucket @ None) => *bucket = Some(Bucket::new(rate)),
+		}
+		self.grant();
+		ShouldTransmit(self.max_data_due())
+	}
+
+	/// Earn the rate cap's credit up to `now`.
+	fn refill_receive_rate(&mut self, now: Instant) {
+		if let Some(bucket) = &mut self.receive_rate {
+			bucket.refill(now);
+		}
+	}
+
+	/// Charge a received datagram's payload to the rate cap, returning whether it fits.
+	///
+	/// A datagram the cap has no room for is dropped, the same as one lost in the network.
+	/// It is not refused for the credit outstanding, so unspent stream credit never starves
+	/// datagrams; the stream bytes that spend that credit later overdraw the bucket instead,
+	/// which withholds the next grant.
+	pub(crate) fn admit_datagram(&mut self, len: usize) -> bool {
+		let Some(bucket) = &mut self.receive_rate else {
+			return true;
+		};
+		if bucket.available() < len as u64 {
+			return false;
+		}
+		bucket.charge(len as u64);
+		true
+	}
+
+	/// When the rate cap next earns enough beyond the peer's unspent credit to be worth a grant.
+	///
+	/// Set whether or not the window has room, so a reader releasing memory later finds the
+	/// credit already earned and grants it on the spot: a release alone may not wake the
+	/// connection to ask again.
+	pub(crate) fn receive_rate_deadline(&self) -> Option<Instant> {
+		let bucket = self.receive_rate.as_ref()?;
+		let outstanding = self.local_max_data - self.data_recvd;
+		let want = outstanding.saturating_add(rate_step(bucket)).min(bucket.burst());
+		if want <= outstanding {
+			// The peer already holds a burst of unspent credit.
+			return None;
+		}
+		bucket.ready_at(want)
+	}
+
+	/// Grant the rate cap's credit earned by `now`, returning whether a `MAX_DATA` frame is due.
+	pub(crate) fn grant_receive_rate(&mut self, now: Instant) -> ShouldTransmit {
+		self.refill_receive_rate(now);
+		self.grant();
 		ShouldTransmit(self.max_data_due())
 	}
 
@@ -1196,9 +1295,15 @@ impl StreamsState {
 		}
 
 		let sent = self.sent_max_data.into_inner();
-		let threshold = self.receive_window / 8;
+		// A cap grants a burst at most, so batch to that.
+		let window = match &self.receive_rate {
+			Some(bucket) => self.receive_window.min(bucket.burst()),
+			None => self.receive_window,
+		};
+		let threshold = window / 8;
 		let diff = self.local_max_data - sent;
-		diff >= threshold || (diff > 0 && sent.saturating_sub(self.data_recvd) < threshold)
+		// A cap under eight bytes a second batches to nothing, so require new credit first.
+		diff > 0 && (diff >= threshold || sent.saturating_sub(self.data_recvd) < threshold)
 	}
 
 	pub(crate) fn credit_stats(&self) -> CreditStats {
@@ -1280,6 +1385,12 @@ impl StreamsState {
 			Dir::Bi => self.initial_max_stream_data_bidi_remote,
 		}
 	}
+}
+
+/// The least a rate cap grants at once: an eighth of its burst, as the window batches its own
+/// grants to an eighth of itself.
+fn rate_step(bucket: &Bucket) -> u64 {
+	(bucket.burst() / 8).max(1)
 }
 
 #[inline]
@@ -4679,5 +4790,36 @@ mod tests {
 		let id = StreamId::new(Side::Server, Dir::Uni, 0);
 		let result = server.received_stop_sending(id, 0u32.into());
 		assert_eq!(result.map_err(|e| e.code), Err(TransportErrorCode::STREAM_STATE_ERROR),);
+	}
+
+	/// A capped peer that sends past the paced credit, as if the larger window were granted, is
+	/// a flow control violation, not a burst to absorb.
+	#[test]
+	fn sending_past_paced_credit_is_a_flow_control_error() {
+		let mut server = StreamsState::new(
+			Side::Server,
+			128u32.into(),
+			128u32.into(),
+			1024 * 1024,
+			1000u32.into(),
+			(1024 * 1024u32).into(),
+		);
+		let rate = std::num::NonZeroU64::new(1000).unwrap();
+		let _ = server.set_receive_rate(Rate::BytesPerSecond(rate));
+		assert!(!server.set_receive_window((1024 * 1024u32).into()));
+		assert_eq!(server.local_max_data, 1000, "the window opened past one burst");
+
+		let id = StreamId::new(Side::Client, Dir::Uni, 0);
+		let frame = |offset: u64, len: usize| frame::Stream {
+			id,
+			offset,
+			fin: false,
+			data: Bytes::from(vec![0; len]),
+		};
+		let _ = server.received(frame(0, 1000), 1000).unwrap();
+		assert_eq!(
+			server.received(frame(1000, 1), 1).unwrap_err().code,
+			TransportErrorCode::FLOW_CONTROL_ERROR
+		);
 	}
 }
