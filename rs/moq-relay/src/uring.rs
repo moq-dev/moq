@@ -919,13 +919,14 @@ async fn serve_request(
 	let mut limits = serve.cluster.quic_limits(&lease);
 	limits.receive_window = limits.receive_window.or(serve.window);
 	conn.set_limits(limits)?;
-	// Dropping the lease, and with it `pacer`, closes `caps`, which ends this task.
+	// The task holds only a consumer: dropping the lease, and with it `pacer`, closes
+	// `caps`, which ends the task and releases its handle on the connection.
 	let mut applied = lease.caps();
 	if let Ok(mut caps) = caps.write() {
 		*caps = applied;
 	}
+	let caps = caps.consume();
 	let pacing = async move {
-		let caps = caps.consume();
 		while let Ok(next) = caps
 			.wait(|caps| match **caps != applied {
 				true => std::task::Poll::Ready(**caps),
