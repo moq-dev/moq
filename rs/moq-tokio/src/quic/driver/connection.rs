@@ -199,6 +199,10 @@ impl Future for ConnectionDriver {
 		}
 
 		if !conn.inner.is_drained() {
+			// A local close still reaches a driver whose socket holds output back, which skips
+			// `poll_transmit` and so parks nothing there, to re-arm the timer for its closing
+			// period. Waiting on the close consumes no transmit.
+			let _ = conn.inner.poll_closed(waiter);
 			// Otherwise `poll_transmit` parked the waiter for the application's next call, and the
 			// ingress channel, the timer, and the socket hold the context.
 			if keep_going {
