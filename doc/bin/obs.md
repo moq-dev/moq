@@ -17,7 +17,7 @@ The client's automatic reconnects keep the same epoch. A stop/start, or an OBS
 auto-reconnect after the client gives up, republishes the broadcast under a new
 epoch, which peers using an epoch-capable protocol see as a new publisher run.
 
-MoQ Source follows catalog changes while keeping the current audio and video playing until a replacement produces decoded output. A failed replacement leaves the current rendition playing; removing a media kind from the catalog clears it. It also follows a restarted or replaced publisher, playing the new one from its first keyframe.
+MoQ Source plays the best enabled audio and video rendition it can decode and place. It follows catalog changes while keeping the current audio and video playing until a replacement produces decoded output. A failed replacement leaves the current rendition playing. Disabling every rendition of a media kind keeps the one already playing; removing the media kind from the catalog clears it. It also follows a restarted or replaced publisher, including a sibling broadcast the catalog points at, playing the new one from its first keyframe.
 
 The source plays Opus, AAC-LC (mono or stereo), and PCM audio. A channel count names its speakers by the WAVE convention: 1, 2, 3 (2.1), 6 (5.1), and 8 (7.1) play on the matching OBS layout, while quad and 5.0 are upmixed to 5.1 and 6.1 to 7.1, which OBS lacks. Other counts are refused.
 

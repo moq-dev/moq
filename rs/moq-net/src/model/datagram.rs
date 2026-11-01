@@ -24,7 +24,7 @@ use bytes::Bytes;
 
 use crate::Timestamp;
 use crate::cache;
-use crate::sync::Mutex;
+use std::sync::Mutex;
 
 /// Hard ceiling on a datagram payload, matching the QUIC DATAGRAM frame limit.
 ///
