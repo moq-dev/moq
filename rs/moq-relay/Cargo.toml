@@ -58,7 +58,7 @@ anyhow = { workspace = true, features = ["backtrace"] }
 async-trait = { workspace = true }
 aws-lc-rs = { workspace = true }
 axum = { workspace = true }
-axum-server = { workspace = true }
+axum-server = { workspace = true, features = ["tls-rustls"] }
 bytes = { workspace = true }
 bytesize = "2.4.2"
 futures = { workspace = true }
@@ -76,6 +76,8 @@ moq-net = { workspace = true }
 moq-quic = { workspace = true }
 moq-stats = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
+# The /metrics text encoder; the protobuf features stay off.
+prometheus-client = "0.25.1"
 qmux = { workspace = true, features = ["ws"], optional = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }
