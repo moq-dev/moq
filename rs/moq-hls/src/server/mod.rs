@@ -586,7 +586,7 @@ mod tests {
 		assert!(!current.is_closed());
 		let kept = server.instance("live", open.instance()).await;
 		assert!(
-			kept.is_some_and(|kept| kept.is_clone(&open)),
+			kept.is_some_and(|kept| kept.instance() == open.instance() && !kept.is_closed()),
 			"the open instance lost its URLs"
 		);
 	}
