@@ -6197,7 +6197,7 @@ struct Cursor {
 	idle: Option<Box<idle::Idle>>,
 	/// [`Self::state`] for [`Self::poll_finished`], which a publisher re-polls on every
 	/// wake: one the track has not changed since skips the lock. Made on the first poll.
-	finished: Option<kio::Watch<TrackState>>,
+	finished: Option<Box<kio::Watch<TrackState>>>,
 }
 
 /// A group a cursor found but has not moved past; see [`Cursor::take`].
@@ -6720,7 +6720,9 @@ impl Cursor {
 	/// unchanged version proves the answer unchanged. [`Self::poll`]'s tail watch is no loss
 	/// here: a pending answer means no end, and the tail only waits once one is declared.
 	fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
-		let watch = self.finished.get_or_insert_with(|| kio::Watch::new(self.state.clone()));
+		let watch = self
+			.finished
+			.get_or_insert_with(|| Box::new(kio::Watch::new(self.state.clone())));
 		Poll::Ready(match ready!(watch.poll(waiter, |state| state.poll_finished())) {
 			Ok(res) => res,
 			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
