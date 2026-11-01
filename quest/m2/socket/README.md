@@ -13,8 +13,8 @@ hand-rolling the announce, watch, and request loop. Rust, JS, and Python
 Non-goals: a wire change to moq-lite (a socket is a path and track convention
 over existing announce, Tracks, and subscribe streams); session caps, leases,
 or idle timeouts, which stay application logic (boy's 60 s idle, CARLA's
-one-driver lease and 1 s watchdog); announcement backpressure, which is planned
-separately.
+one-driver lease and 1 s watchdog); announcement backpressure, which
+[announce credit](/quest/m2/announce-credit.md) owns.
 
 ## Plan
 
@@ -54,7 +54,8 @@ replacement arc):
   dialer's broadcast is requested only when the application accepts it, so an
   application that stops accepting holds no subscriptions. Backpressure on the
   announcements themselves (paced by the fastest consumer, made hard by merging
-  overlapping prefixes) is a separate design.
+  overlapping prefixes) is a separate design, settled as wire-level
+  [announce credit](/quest/m2/announce-credit.md).
 - The convention is specified on a doc.moq.dev concept page,
   `doc/concept/socket.md`, written with the Rust implementation. It is not a
   section of the moq-lite draft or a new draft: it is an application
