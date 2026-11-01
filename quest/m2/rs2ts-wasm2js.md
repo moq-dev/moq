@@ -11,10 +11,13 @@ unvalidated replacement or treating WASM as the final destination.
 
 ## Plan
 
-Decided 2026-10-12: evaluate sequentially after production WASM. Reuse its
-public interface, parity tests, build inputs, and browser workload. Compare
-against production WASM and the retained handwritten baseline, measuring
-complete artifacts and matching startup paths. Require full-width u64,
+Decided 2026-10-31 (maintainer): moq's WASM support (`rs/moq-wasm`,
+`@moq/wasm`, moq-ffi's wasm32 build, and the browser backend baseline) is
+removed, since nobody used it and it is being replaced. There is no production
+WASM backend to follow or compare against. wasm2js needs a wasm32 build of the
+Rust implementation again; confirm that route with the maintainer before
+restoring one, or start from a source translator. Compare against the
+handwritten `@moq/net`, measuring complete artifacts and matching startup paths. Require full-width u64,
 lifetime, cancellation, backpressure, malformed-input, and memory-growth
 coverage; the limited fixtures in #5337 do not prove these generally.
 
@@ -42,8 +45,7 @@ Sources: [Charon](https://github.com/AeneasVerif/charon),
 [rust-js](https://github.com/rust-js-lang/rust-js), and
 [jco](https://bytecodealliance.github.io/jco/transpiling.html).
 Jco is an interface/distribution alternative, not evidence of faster output.
-A JS-only result need not be readable TypeScript. WASM itself remains the
-production baseline while an alternative is unproven.
+A JS-only result need not be readable TypeScript.
 
 If wasm2js is acceptable, scope its adoption. If not, record the concrete
 reason and plan the smallest source-translator investigation that addresses
@@ -81,7 +83,3 @@ Preserve earlier source-translation evidence:
   proposed safe-storage or sans-IO rewrite measured and separately justified.
 
 Public API: none; the report scopes any later changes. Wire: none.
-
-## Required
-
-- [Rust-backed @moq/net](/quest/m2/rs2ts/README.md) - the production implementation and browser evidence this reuses

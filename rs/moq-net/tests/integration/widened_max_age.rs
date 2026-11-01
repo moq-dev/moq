@@ -107,7 +107,7 @@ impl Chain {
 /// Every group `subscriber` receives until it goes quiet.
 async fn received(subscriber: &mut track::Subscriber) -> BTreeSet<u64> {
 	let mut got = BTreeSet::new();
-	while let Ok(group) = moq_clock::timeout(Duration::from_secs(1), subscriber.recv_group()).await {
+	while let Ok(group) = kio::clock::timeout(Duration::from_secs(1), subscriber.recv_group()).await {
 		let group = group.unwrap().expect("the track is live");
 		assert!(got.insert(group.sequence), "group {} delivered twice", group.sequence);
 	}
@@ -117,7 +117,7 @@ async fn received(subscriber: &mut track::Subscriber) -> BTreeSet<u64> {
 /// A fresh reader asks no fill for the history below where its feed starts, through a relay
 /// or not: below a start resolved from a budget no tighter than its own, every group is
 /// stale, and below a live edge start it names no floor under, none was asked for.
-#[moq_clock::test]
+#[kio::test]
 async fn a_fresh_reader_fills_nothing_below_its_start() {
 	for (version, want) in [
 		("moq-lite-04", 6..GROUPS),
@@ -130,8 +130,8 @@ async fn a_fresh_reader_fills_nothing_below_its_start() {
 	] {
 		for relay in [false, true] {
 			let chain = Chain::new(version, relay).await;
-			let mut reader = moq_clock::timeout(TIMEOUT, chain.subscribe(NARROW)).await.unwrap();
-			let got = moq_clock::timeout(TIMEOUT, received(&mut reader)).await.unwrap();
+			let mut reader = kio::clock::timeout(TIMEOUT, chain.subscribe(NARROW)).await.unwrap();
+			let got = kio::clock::timeout(TIMEOUT, received(&mut reader)).await.unwrap();
 			assert_eq!(got, want.clone().collect(), "{version} relay={relay}");
 			if version.starts_with("moq-lite") {
 				assert_eq!(chain.fetches(), 0, "{version} relay={relay}: fetched below the start");
@@ -141,20 +141,20 @@ async fn a_fresh_reader_fills_nothing_below_its_start() {
 }
 
 /// What the subscriber reads after widening its own max age, through a relay or not.
-#[moq_clock::test]
+#[kio::test]
 async fn a_widened_reader_gets_what_was_skipped() {
 	for &version in VERSIONS {
 		for relay in [false, true] {
 			let chain = Chain::new(version, relay).await;
-			let mut reader = moq_clock::timeout(TIMEOUT, chain.subscribe(NARROW)).await.unwrap();
-			let first = moq_clock::timeout(TIMEOUT, received(&mut reader)).await.unwrap();
+			let mut reader = kio::clock::timeout(TIMEOUT, chain.subscribe(NARROW)).await.unwrap();
+			let first = kio::clock::timeout(TIMEOUT, received(&mut reader)).await.unwrap();
 			assert_eq!(first, (6..GROUPS).collect(), "{version} relay={relay}");
 
 			let wide = Subscription::default()
 				.with_max_delay(WIDE)
 				.with_ranges([Range::oldest()]);
 			reader.update(wide).unwrap();
-			let widened = moq_clock::timeout(TIMEOUT, received(&mut reader)).await.unwrap();
+			let widened = kio::clock::timeout(TIMEOUT, received(&mut reader)).await.unwrap();
 			assert_eq!(
 				widened,
 				(2..6).collect(),
@@ -164,17 +164,17 @@ async fn a_widened_reader_gets_what_was_skipped() {
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_warm_relay_serves_a_wider_newcomer_what_a_cold_one_would() {
 	for &version in VERSIONS {
 		let cold = Chain::new(version, true).await;
-		let mut wide = moq_clock::timeout(TIMEOUT, cold.subscribe(WIDE)).await.unwrap();
-		let want = moq_clock::timeout(TIMEOUT, received(&mut wide)).await.unwrap();
+		let mut wide = kio::clock::timeout(TIMEOUT, cold.subscribe(WIDE)).await.unwrap();
+		let want = kio::clock::timeout(TIMEOUT, received(&mut wide)).await.unwrap();
 		assert_eq!(want, (2..GROUPS).collect(), "{version}: cold");
 
 		let warm = Chain::new(version, true).await;
-		let mut narrow = moq_clock::timeout(TIMEOUT, warm.subscribe(NARROW)).await.unwrap();
-		let first = moq_clock::timeout(TIMEOUT, received(&mut narrow)).await.unwrap();
+		let mut narrow = kio::clock::timeout(TIMEOUT, warm.subscribe(NARROW)).await.unwrap();
+		let first = kio::clock::timeout(TIMEOUT, received(&mut narrow)).await.unwrap();
 		assert_eq!(
 			first,
 			(6..GROUPS).collect(),
@@ -183,12 +183,12 @@ async fn a_warm_relay_serves_a_wider_newcomer_what_a_cold_one_would() {
 
 		// The widened max age lowers the start the publisher resolved, and its re-offer
 		// serves what lies between.
-		let mut wide = moq_clock::timeout(TIMEOUT, warm.subscribe(WIDE)).await.unwrap();
-		let got = moq_clock::timeout(TIMEOUT, received(&mut wide)).await.unwrap();
+		let mut wide = kio::clock::timeout(TIMEOUT, warm.subscribe(WIDE)).await.unwrap();
+		let got = kio::clock::timeout(TIMEOUT, received(&mut wide)).await.unwrap();
 		assert_eq!(got, want, "{version}: warm");
 		// A lite-06 copy has no media time to find the re-offer stale by, and each group in
 		// it arrives just now, so the narrow reader takes it too, once per widening.
-		let late = moq_clock::timeout(TIMEOUT, received(&mut narrow)).await.unwrap();
+		let late = kio::clock::timeout(TIMEOUT, received(&mut narrow)).await.unwrap();
 		let reoffered = match version {
 			"moq-lite-06" => (2..6).collect(),
 			_ => BTreeSet::new(),
@@ -198,22 +198,22 @@ async fn a_warm_relay_serves_a_wider_newcomer_what_a_cold_one_would() {
 }
 
 /// A reader joining with the max age the relay already asks for changes nothing upstream.
-#[moq_clock::test]
+#[kio::test]
 async fn the_same_max_age_sends_no_update() {
 	let mut chain = Chain::new(VERSION, true).await;
-	let mut narrow = moq_clock::timeout(TIMEOUT, chain.subscribe(NARROW)).await.unwrap();
-	moq_clock::timeout(TIMEOUT, received(&mut narrow)).await.unwrap();
-	while moq_clock::timeout(Duration::from_secs(1), chain.source.subscription_changed())
+	let mut narrow = kio::clock::timeout(TIMEOUT, chain.subscribe(NARROW)).await.unwrap();
+	kio::clock::timeout(TIMEOUT, received(&mut narrow)).await.unwrap();
+	while kio::clock::timeout(Duration::from_secs(1), chain.source.subscription_changed())
 		.await
 		.is_ok()
 	{}
 
-	let mut same = moq_clock::timeout(TIMEOUT, chain.subscribe(NARROW)).await.unwrap();
+	let mut same = kio::clock::timeout(TIMEOUT, chain.subscribe(NARROW)).await.unwrap();
 	assert_eq!(
-		moq_clock::timeout(TIMEOUT, received(&mut same)).await.unwrap(),
+		kio::clock::timeout(TIMEOUT, received(&mut same)).await.unwrap(),
 		(6..GROUPS).collect()
 	);
-	let changed = moq_clock::timeout(Duration::from_secs(1), chain.source.subscription_changed()).await;
+	let changed = kio::clock::timeout(Duration::from_secs(1), chain.source.subscription_changed()).await;
 	assert!(changed.is_err(), "the publisher saw {changed:?}");
 }
 
@@ -230,7 +230,7 @@ fn sent_groups(registry: &moq_net::stats::Registry) -> u64 {
 
 /// Only the newcomer that widens the relay's max age pulls a re-offer upstream; the ones
 /// after it are served from what the relay cached, however many there are.
-#[moq_clock::test]
+#[kio::test]
 async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 	let version: Version = VERSION.parse().unwrap();
 	let publisher = origin(1);
@@ -274,13 +274,13 @@ async fn wider_newcomers_after_the_first_pull_nothing_upstream() {
 		readers.push((viewer, reader));
 		got
 	};
-	let narrow = moq_clock::timeout(TIMEOUT, join(NARROW)).await.unwrap();
+	let narrow = kio::clock::timeout(TIMEOUT, join(NARROW)).await.unwrap();
 	assert_eq!(narrow, (6..GROUPS).collect());
-	let wide = moq_clock::timeout(TIMEOUT, join(WIDE)).await.unwrap();
+	let wide = kio::clock::timeout(TIMEOUT, join(WIDE)).await.unwrap();
 	assert_eq!(wide, (2..GROUPS).collect());
 	let widened = sent_groups(&registry);
 	for newcomer in 0..3 {
-		let got = moq_clock::timeout(TIMEOUT, join(WIDE)).await.unwrap();
+		let got = kio::clock::timeout(TIMEOUT, join(WIDE)).await.unwrap();
 		assert_eq!(got, wide, "newcomer {newcomer}");
 	}
 	assert_eq!(sent_groups(&registry), widened, "later newcomers pull nothing upstream");
