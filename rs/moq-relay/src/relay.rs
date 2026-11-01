@@ -865,12 +865,26 @@ async fn serve_listening(
 ) -> anyhow::Result<()> {
 	loop {
 		let request = listener.accept().await?;
-		let conn = Connection::new(request, cluster.clone(), auth.clone())
-			.with_id(cluster.next_connection_id())
-			.with_shutdown(shutdown.clone())
-			.with_sessions(sessions.clone());
-		tokio::spawn(conn.run());
+		spawn_connection(request, &cluster, &auth, &shutdown, &sessions);
 	}
+}
+
+/// Spawn the [`Connection`] task for one accepted `request`.
+///
+/// Its own frame, so the session future built on the stack before `spawn` moves it
+/// to the heap stays out of the accept loop's frame, which every accept stacks on.
+fn spawn_connection(
+	request: moq_tokio::server::Request,
+	cluster: &cluster::Cluster,
+	auth: &auth::Auth,
+	shutdown: &shutdown::Observer,
+	sessions: &crate::session::Registry,
+) {
+	let conn = Connection::new(request, cluster.clone(), auth.clone())
+		.with_id(cluster.next_connection_id())
+		.with_shutdown(shutdown.clone())
+		.with_sessions(sessions.clone());
+	tokio::spawn(conn.run());
 }
 
 #[cfg(test)]

@@ -8,6 +8,7 @@
 //! `shutdown_signal` owns those signals, which reach every listener in this process.
 
 mod auth_lifetime;
+mod bitrate_caps;
 mod cluster_close;
 mod cluster_drain;
 mod cluster_idle;

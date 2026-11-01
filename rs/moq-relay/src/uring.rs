@@ -82,6 +82,9 @@ struct Serve {
 	/// `listen.reset.secret`, shared so any worker resets any worker's
 	/// connections, a restarted group's included.
 	reset_secret: Option<[u8; 32]>,
+	/// `[quic] receive_window`, opened once a session is admitted: until then a
+	/// connection holds [`moq_net::transport::SETUP_RECEIVE_WINDOW`].
+	window: Option<NonZeroU64>,
 }
 
 /// A bound group of io_uring QUIC workers sharing one port.
@@ -100,6 +103,8 @@ pub struct Workers {
 	members: Vec<moq_sock::shard::Socket>,
 	addr: SocketAddr,
 	server: moq_uring::quic::server::Config,
+	/// `[quic] receive_window`, which admission opens; see [`Serve::window`].
+	window: Option<NonZeroU64>,
 	/// The same live resolver used by every worker and the fingerprint endpoint.
 	certificates: moq_tokio::tls::Certificates,
 	/// One counter set per worker, in shard order. Created here rather than on
@@ -232,6 +237,8 @@ impl Workers {
 		}
 		let mut server = moq_uring::quic::server::Config::new(tls);
 		server.transport = transport(&quic)?;
+		let window = server.transport.limits.receive_window;
+		server.transport.limits.receive_window = NonZeroU64::new(moq_net::transport::SETUP_RECEIVE_WINDOW);
 
 		// GSO is a property of the socket, not the connection, so it rides the
 		// worker's UDP config rather than the connection's.
@@ -253,6 +260,7 @@ impl Workers {
 			members,
 			addr,
 			server,
+			window,
 			certificates,
 			udp,
 			pin: config.pin,
@@ -323,6 +331,7 @@ impl Workers {
 			local: self.addr,
 			timeout: self.timeout,
 			reset_secret: self.reset_secret,
+			window: self.window,
 		};
 
 		let cores = match self.pin {
@@ -846,10 +855,24 @@ async fn serve_request(
 	auth_request.alpn = alpn.clone();
 	auth_request.tls = identity.as_ref().and_then(crate::auth::peer);
 	let admission = lifecycle.clone();
+	// The connection is pinned to this worker, so a cap that changes on the shared
+	// runtime reaches it through `caps`, which a task here applies.
+	let caps = kio::Producer::new(auth::Caps::default());
+	let pacer = {
+		let caps = caps.clone();
+		auth::Pacer::new(move |new| {
+			if let Ok(mut caps) = caps.write() {
+				*caps = new;
+			}
+		})
+	};
 	// The handshake deadline covers admission too, so a peer cannot hold the connection
 	// open behind a decision that never comes. Dropping the shared task withdraws it.
 	let decided = deadline
-		.bound(lifecycle.shared(&serve.tokio, async move { admission.admit(auth_request).await }))
+		.bound(lifecycle.shared(
+			&serve.tokio,
+			async move { admission.admit(auth_request, Some(pacer)).await },
+		))
 		.await
 		.inspect_err(|err| {
 			if matches!(err.downcast_ref::<moq_net::Error>(), Some(moq_net::Error::Timeout)) {
@@ -871,10 +894,6 @@ async fn serve_request(
 		stats,
 	} = admitted;
 
-	// A peer's QUIC limits widen before SETUP OK, so its first requests see them.
-	if let Some(limits) = serve.cluster.quic_limits(&lease) {
-		conn.set_limits(limits)?;
-	}
 	let mut request = request.with_stats(stats).with_limits(serve.cluster.limits(&lease));
 	if let Some(subscriber) = subscriber {
 		request = request.with_publisher(subscriber);
@@ -895,6 +914,33 @@ async fn serve_request(
 			return Err(err.into());
 		}
 	};
+	// Before SETUP OK, so the first requests see them: a peer's wider limits, the caps,
+	// and then the window the handshake held back, which the caps pace.
+	let mut limits = serve.cluster.quic_limits(&lease);
+	limits.receive_window = limits.receive_window.or(serve.window);
+	conn.set_limits(limits)?;
+	// The task holds only a consumer: dropping the lease, and with it `pacer`, closes
+	// `caps`, which ends the task and releases its handle on the connection.
+	let mut applied = lease.caps();
+	if let Ok(mut caps) = caps.write() {
+		*caps = applied;
+	}
+	let caps = caps.consume();
+	let pacing = async move {
+		while let Ok(next) = caps
+			.wait(|caps| match **caps != applied {
+				true => std::task::Poll::Ready(**caps),
+				false => std::task::Poll::Pending,
+			})
+			.await
+		{
+			if let Err(err) = conn.set_limits(next.limits()) {
+				tracing::warn!(%err, "failed to apply bitrate caps");
+			}
+			applied = next;
+		}
+	};
+	handle.spawn(pacing.in_current_span());
 	let serving = serve.shutdown.serve();
 	// Bounded by the drain deadline too, like the tokio path, so a peer that stalls
 	// the SETUP reply cannot hold the drain. That is a tokio timer, so it runs on the

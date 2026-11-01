@@ -233,7 +233,7 @@ impl Policy {
 		if jwt.is_some() && request.tls.is_some() {
 			return Err(Denial::TokenAndCertificate);
 		}
-		let (permissions, expires, certificate, root) = if let Some(jwt) = jwt {
+		let (permissions, rates, expires, certificate, root) = if let Some(jwt) = jwt {
 			let claims = self.verify(&jwt).await?;
 			let permissions = claims.authorize(&request.path).map_err(|err| match err {
 				crate::Error::RootMismatch(path) => Denial::RootMismatch {
@@ -246,20 +246,28 @@ impl Policy {
 				},
 				other => Denial::InvalidToken(other.to_string()),
 			})?;
-			(permissions, claims.expires, false, Some(claims.root))
+			let rates = (claims.publish_rate, claims.subscribe_rate);
+			(permissions, rates, claims.expires, false, Some(claims.root))
 		} else if let Some(peer) = &request.tls {
 			if self.mtls.is_empty() {
 				return Err(Denial::NoMtlsGrant);
 			}
-			(authorize(&self.mtls, &request.path)?, peer.expires, true, None)
+			(
+				authorize(&self.mtls, &request.path)?,
+				(None, None),
+				peer.expires,
+				true,
+				None,
+			)
 		} else {
 			if self.public.is_empty() {
 				return Err(Denial::NoPublicGrant);
 			}
-			(authorize(&self.public, &request.path)?, None, false, None)
+			(authorize(&self.public, &request.path)?, (None, None), None, false, None)
 		};
 
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
+		(grant.publish_rate, grant.subscribe_rate) = rates;
 		grant.expires = match (expires, self.expires) {
 			(Some(expires), _) => Some(expires),
 			(None, Some(bound)) => Some(kio::clock::wall().checked_add(bound).ok_or(Denial::ExpiresOutOfRange)?),

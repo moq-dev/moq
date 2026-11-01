@@ -1,5 +1,6 @@
 /**
- * The payload of a token: a root, plus the publish/subscribe patterns granted beneath it.
+ * The payload of a token: a root, plus the publish/subscribe patterns granted beneath it
+ * and an optional bitrate cap on each.
  *
  * @module
  */
@@ -7,24 +8,9 @@
 import { Pattern, Patterns } from "@moq/pattern";
 import * as z from "@zod/mini";
 import * as Path from "./path.ts";
-import { decodeGrants } from "./wire.ts";
+import { decodeGrants, decodeRoles, PatternListSchema, WireRoleSchema } from "./wire.ts";
 
-/** A list of pattern texts, each validated by `Pattern.parse`. */
-export const PatternListSchema = z.array(
-	z.string().check(
-		z.refine(
-			(text) => {
-				try {
-					Pattern.parse(text);
-					return true;
-				} catch {
-					return false;
-				}
-			},
-			{ message: "invalid path pattern" },
-		),
-	),
-);
+export { PatternListSchema } from "./wire.ts";
 
 /** Parse a list of pattern texts into a reduced union. */
 export function patterns(texts: readonly string[] | undefined): Patterns {
@@ -45,7 +31,8 @@ const ScopeFields = {
  *
  * `root` is optional on the wire to match the Rust `moq-auth` crate, which omits it
  * when the scope sits at the top level. A legacy `put`/`get` prefix scope reads as the
- * subtree patterns it meant. Any other field is refused.
+ * subtree patterns it meant. A scope bounds paths, never bitrate, so a capped role is
+ * refused. Any other field is refused.
  */
 export const ScopeSchema = z
 	.pipe(
@@ -67,6 +54,10 @@ export type Scope = z.output<typeof ScopeSchema>;
 
 const ClaimsFields = {
 	...ScopeFields,
+	/** Patterns the holder may publish, relative to `root`, optionally with a bitrate cap. */
+	publish: z.optional(WireRoleSchema),
+	/** Patterns the holder may subscribe to, relative to `root`, optionally with a bitrate cap. */
+	subscribe: z.optional(WireRoleSchema),
 	/** Expiration time, as a whole unix timestamp in seconds. */
 	exp: z.optional(z.int()),
 	/** Issued-at time, as a whole unix timestamp in seconds. */
@@ -94,8 +85,10 @@ const PrefixListSchema = z.union([z.string(), z.array(z.string())]);
  * exactly what it says: `alice` is one broadcast, `alice/**` is a subtree, and `**` is
  * everything under the root. Legacy `moq-token` claims read too, each `put`/`get`
  * prefix `p` as the subtree `p/**`, and signing writes that form whenever it says the
- * same thing. The registered `iss`, `sub`, and `jti` claims are read and dropped; any
- * other field fails verification.
+ * same thing. A role may instead be `{"path": [...], "rate": bps}`, which parses into
+ * `publish_rate` or `subscribe_rate` beside the patterns; a capped role is never written
+ * as a prefix, since an older verifier would drop the cap. The registered `iss`, `sub`,
+ * and `jti` claims are read and dropped; any other field fails verification.
  */
 export const ClaimsSchema = z
 	.pipe(
@@ -105,7 +98,7 @@ export const ClaimsSchema = z
 			put: z.optional(PrefixListSchema),
 			get: z.optional(PrefixListSchema),
 		}),
-		z.transform(({ iss: _iss, sub: _sub, jti: _jti, ...claims }, ctx) => decodeGrants(claims, ctx)),
+		z.transform(({ iss: _iss, sub: _sub, jti: _jti, ...claims }, ctx) => decodeRoles(decodeGrants(claims, ctx))),
 	)
 	.check(
 		// Emptiness, not just presence: `publish: []` grants nothing, and the Rust crate

@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, VecDeque};
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use moq_net::{SessionError, auth, setup::Role};
 
-use super::{Grant, Source, Token, lease};
+use super::{Caps, Grant, Pacer, Source, Token, caps, lease};
 
 /// A connection owns its lifecycle while each credential owns only its grant.
 pub(super) struct Refresh {
@@ -31,6 +31,11 @@ pub(super) struct Refresh {
 	/// queue doubles keeps a push amortized O(1).
 	survivors: usize,
 	next: u64,
+	/// What holds the connection to the union's caps, or `None` on a transport that
+	/// cannot, where every capped credential is refused.
+	pacer: Option<Pacer>,
+	/// The caps of the union of every live credential, which the connection holds.
+	caps: Caps,
 }
 
 type Verified = (auth::Request, Result<lease::Consumer, super::Error>);
@@ -108,8 +113,13 @@ impl Refresh {
 			Err(lease::Reason::Expired) => return Err(moq_net::Error::Expired),
 			Err(_) => return Err(moq_net::Error::Unauthorized),
 		}
+		if lease.pacer.is_none() && Caps::of(&initial.grant).is_capped() {
+			return Err(moq_net::Error::Unauthorized);
+		}
 		initial.initial = true;
-		let this = Self {
+		// The connection applies the first caps itself, with the window it opens.
+		let caps = Caps::of(&initial.grant);
+		let mut this = Self {
 			handle,
 			requests,
 			requests_open: true,
@@ -124,16 +134,43 @@ impl Refresh {
 			waiting: VecDeque::new(),
 			survivors: 0,
 			next: 1,
+			pacer: lease.pacer.clone(),
+			caps,
 		};
 		this.authorize();
 		Ok(this)
+	}
+
+	/// The caps the connection is held to.
+	pub(super) fn caps(&self) -> Caps {
+		self.caps
+	}
+
+	/// Why `grant` cannot join this session, if it cannot: a cap the transport cannot
+	/// enforce, or a grant that does not keep the session's root, routing, and role.
+	fn refusal(&self, grant: &Grant) -> Option<String> {
+		if self.unenforced(grant) {
+			return Some(caps::UNENFORCED.to_string());
+		}
+		(!self.valid(grant)).then(|| {
+			format!(
+				"token must retain root {}, connection routing, and usable SETUP role permissions",
+				self.admitted.root
+			)
+		})
+	}
+
+	/// Whether `grant` caps a bitrate this connection cannot be held to.
+	fn unenforced(&self, grant: &Grant) -> bool {
+		self.pacer.is_none() && Caps::of(grant).is_capped()
 	}
 
 	fn valid(&self, grant: &Grant) -> bool {
 		let Ok(fresh) = self.admitted.recheck(grant) else {
 			return false;
 		};
-		super::still_valid(grant).is_ok()
+		!self.unenforced(grant)
+			&& super::still_valid(grant).is_ok()
 			&& fresh.root == self.admitted.root
 			&& fresh.mounts == self.admitted.mounts
 			&& fresh.peer == self.admitted.peer
@@ -148,7 +185,10 @@ impl Refresh {
 
 	/// The connection credential's grant. moq-net adds every grant issued to an AUTH token
 	/// itself, and keeps a request token's grant to that request alone.
-	fn authorize(&self) {
+	///
+	/// The caps cover every live credential, request tokens included: each is a grant the
+	/// decider issued to this connection.
+	fn authorize(&mut self) {
 		let mut union = auth::Grant::default();
 		for credential in self.credentials.values().filter(|credential| credential.initial) {
 			let grant = credential.wire(self.role);
@@ -158,6 +198,19 @@ impl Refresh {
 		// Credential timers remove one grant at a time; no single deadline may
 		// expire a union that another credential still covers.
 		self.handle.authorize(&union);
+
+		// The last credential leaving ends the session, which needs no caps.
+		if self.credentials.is_empty() {
+			return;
+		}
+		let caps = Caps::union(self.credentials.values().map(|credential| &credential.grant));
+		if caps != self.caps
+			&& let Some(pacer) = &self.pacer
+		{
+			tracing::info!(%caps, "bitrate caps changed");
+			pacer.pace(caps);
+			self.caps = caps;
+		}
 	}
 
 	fn request(&mut self, request: auth::Request) {
@@ -185,7 +238,11 @@ impl Refresh {
 			// exact snapshot that would be issued.
 			let mut credential = Credential::new(self.owner.clone());
 			if !self.valid(&credential.grant) {
-				request.reject(SessionError::Unauthorized, "connection credential no longer valid");
+				let reason = match self.unenforced(&credential.grant) {
+					true => caps::UNENFORCED,
+					false => "connection credential no longer valid",
+				};
+				request.reject(SessionError::Unauthorized, reason);
 				return;
 			}
 			credential.initial = true;
@@ -356,19 +413,15 @@ impl Refresh {
 					// Validate the exact snapshot that is issued, not a later read.
 					let credential = result.map(Credential::new);
 					match credential {
-						Ok(mut credential) if self.valid(&credential.grant) => {
-							credential.issued = Some(request.accept(credential.wire(self.role)));
-							self.credentials.insert(self.next, credential);
-							self.next += 1;
-							self.authorize();
-						}
-						Ok(_) => request.reject(
-							SessionError::Unauthorized,
-							format!(
-								"token must retain root {}, connection routing, and usable SETUP role permissions",
-								self.admitted.root
-							),
-						),
+						Ok(mut credential) => match self.refusal(&credential.grant) {
+							None => {
+								credential.issued = Some(request.accept(credential.wire(self.role)));
+								self.credentials.insert(self.next, credential);
+								self.next += 1;
+								self.authorize();
+							}
+							Some(refusal) => request.reject(SessionError::Unauthorized, refusal),
+						},
 						Err(err) => refuse(request, err),
 					}
 				}
@@ -393,6 +446,7 @@ impl Refresh {
 						Change::Withdrawn => lease::Reason::Dropped,
 						Change::Grant(grant) => match super::still_valid(&grant) {
 							Err(reason) => reason,
+							Ok(()) if self.unenforced(&grant) => caps::UNENFORCED.into(),
 							Ok(()) => lease::Reason::Narrowed,
 						},
 					};
@@ -731,6 +785,107 @@ mod tests {
 		client.abort(moq_net::Error::Cancel);
 		supervising.abort();
 		let _ = supervising.await;
+	}
+
+	fn capped(prefix: &str, publish: Option<u64>, subscribe: Option<u64>) -> Grant {
+		let mut grant = grant(prefix, 3000);
+		grant.publish_rate = publish.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+		grant.subscribe_rate = subscribe.map(|bps| moq_auth::Rate::from_bps(bps).unwrap());
+		grant
+	}
+
+	fn rate(bps: u64) -> Option<moq_auth::Rate> {
+		Some(moq_auth::Rate::from_bps(bps).unwrap())
+	}
+
+	/// A pacer that records every set of caps it applies.
+	fn recorder() -> (Pacer, std::sync::Arc<std::sync::Mutex<Vec<Caps>>>) {
+		let applied = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+		let record = applied.clone();
+		(Pacer::new(move |caps| record.lock().unwrap().push(caps)), applied)
+	}
+
+	/// A session admitted on `initial`, held to its caps by `pacer`.
+	async fn paced(initial: lease::Consumer, pacer: Option<Pacer>) -> (super::super::Lease, super::super::Admissions) {
+		let (auth, mut admissions) = super::super::Auth::embedded("test");
+		let request = auth.request(moq_auth::Transport::Quic, "/room");
+		let (lease, ()) = tokio::join!(auth.admit_paced(request, pacer), async {
+			admissions.next().await.unwrap().grant(initial);
+		});
+		(lease.unwrap(), admissions)
+	}
+
+	/// In-band tokens join the caps: the highest holds, an uncapped grant lifts it, and a
+	/// re-check that caps that grant restores the highest. Each change reaches the
+	/// live connection.
+	#[tokio::test(start_paused = true)]
+	async fn the_union_of_credentials_paces_the_connection() {
+		let (pacer, applied) = recorder();
+		let initial = lease::Consumer::fixed(capped("a/**", Some(1_000), None));
+		let (lease, mut admissions) = paced(initial, Some(pacer)).await;
+		assert_eq!(
+			lease.caps(),
+			Caps {
+				publish: rate(1_000),
+				subscribe: None
+			}
+		);
+		let (client, supervising) = sessions(lease).await;
+		let auth = client.auth();
+
+		let (higher, ()) = tokio::join!(auth.add("higher"), async {
+			let higher = capped("a/**", Some(4_000), None);
+			admissions.next().await.unwrap().grant(lease::Consumer::fixed(higher));
+		});
+		// Held, since dropping a token withdraws its credential.
+		let _higher = higher.unwrap();
+		let (producer, uncapped) = lease::Producer::new(capped("a/**", None, None));
+		let (lifted, ()) = tokio::join!(auth.add("uncapped"), async {
+			admissions.next().await.unwrap().grant(uncapped);
+		});
+		let _lifted = lifted.unwrap();
+		// The auth server caps the grant it had left uncapped.
+		producer.update(capped("a/**", Some(2_000), None));
+		while applied.lock().unwrap().len() < 3 {
+			kio::clock::sleep(Duration::from_millis(1)).await;
+		}
+		let highest = Caps {
+			publish: rate(4_000),
+			subscribe: None,
+		};
+		assert_eq!(*applied.lock().unwrap(), [highest, Caps::default(), highest]);
+		client.abort(moq_net::Error::Cancel);
+		supervising.abort();
+		let _ = supervising.await;
+	}
+
+	/// Without a pacer, a capped in-band token is refused, and the session keeps its grant.
+	#[tokio::test(start_paused = true)]
+	async fn an_unpaced_session_refuses_a_capped_token() {
+		let (lease, mut admissions) = admission(grant("a/**", 3000)).await;
+		let (client, supervising) = sessions(lease).await;
+		let auth = client.auth();
+		let (result, ()) = tokio::join!(auth.add("capped"), async {
+			let capped = capped("a/**", None, Some(8_000));
+			admissions.next().await.unwrap().grant(lease::Consumer::fixed(capped));
+		});
+		assert!(result.is_err(), "the cap was discarded");
+		assert!(!supervising.is_finished(), "a refused token ended the session");
+		client.abort(moq_net::Error::Cancel);
+		supervising.abort();
+		let _ = supervising.await;
+	}
+
+	/// Without a pacer, a re-check that adds a cap ends the session rather than drop it.
+	#[tokio::test(start_paused = true)]
+	async fn an_unpaced_session_ends_when_rechecked_into_a_cap() {
+		let (producer, consumer) = lease::Producer::new(grant("a/**", 3000));
+		let (lease, _admissions) = paced(consumer, None).await;
+		let (client, supervising) = sessions(lease).await;
+		producer.update(capped("a/**", Some(8_000), None));
+		let reason = supervising.await.unwrap();
+		assert_eq!(reason.to_string(), caps::UNENFORCED);
+		client.abort(moq_net::Error::Cancel);
 	}
 
 	/// How a lease ends decides how its session's stats count the end: an expired grant as
