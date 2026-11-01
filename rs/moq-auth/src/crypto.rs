@@ -9,6 +9,24 @@ pub(crate) fn init() -> crate::Result<()> {
 	Ok(())
 }
 
+/// TLS on rind with the platform's roots, for an HTTP client given no config of its own.
+///
+/// reqwest has no crypto provider of its own and builds a TLS config for every scheme, so
+/// each client hands it one.
+#[cfg(feature = "client")]
+pub(crate) fn tls() -> crate::Result<rustls::ClientConfig> {
+	use rustls_platform_verifier::BuilderVerifierExt;
+	let provider = rind_rustls::default_provider().map_err(crate::Error::crypto)?;
+	Ok(
+		rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(provider))
+			.with_safe_default_protocol_versions()
+			.map_err(crate::Error::crypto)?
+			.with_platform_verifier()
+			.map_err(crate::Error::crypto)?
+			.with_no_client_auth(),
+	)
+}
+
 #[cfg(test)]
 mod tests {
 	/// The dev-dependencies turn on jsonwebtoken's aws-lc backend, so signing alone can't show

@@ -33,7 +33,7 @@ fn generate_hmac_key<const SIZE: usize>() -> crate::Result<KeyMaterial> {
 	Ok(KeyMaterial::OCT { secret: key.to_vec() })
 }
 
-// rind exports private keys only as PKCS#8, so each JWK field is read back out of it.
+// rind exports an RSA private key only as PKCS#8, so each JWK field is read back out of it.
 fn generate_rsa_key() -> crate::Result<KeyMaterial> {
 	let pkcs8 = RsaKeyPair::generate(RsaKeySize::Rsa2048)
 		.map_err(Error::crypto)?
@@ -66,29 +66,20 @@ fn generate_ec_key(algorithm: &'static EcdsaSigningAlgorithm, curve: EllipticCur
 	let point = &public.as_ref()[1..];
 	let (x, y) = point.split_at(point.len() / 2);
 
-	let pkcs8 = pair.to_pkcs8();
-	let info = pkcs8::PrivateKeyInfoRef::from_der(pkcs8.as_ref()).map_err(Error::crypto)?;
-	let d = sec1::EcPrivateKey::from_der(info.private_key.as_bytes()).map_err(Error::crypto)?;
-
 	Ok(KeyMaterial::EC {
 		curve,
 		x: x.to_vec(),
 		y: y.to_vec(),
-		d: Some(d.private_key.to_vec()),
+		d: Some(pair.to_scalar().as_ref().to_vec()),
 	})
 }
 
 fn generate_ed25519_key() -> crate::Result<KeyMaterial> {
 	let pair = Ed25519KeyPair::generate().map_err(Error::crypto)?;
 
-	// RFC 8410 wraps the seed in a second OCTET STRING inside the PKCS#8 one.
-	let pkcs8 = pair.to_pkcs8();
-	let info = pkcs8::PrivateKeyInfoRef::from_der(pkcs8.as_ref()).map_err(Error::crypto)?;
-	let seed = <&pkcs8::der::asn1::OctetStringRef>::from_der(info.private_key.as_bytes()).map_err(Error::crypto)?;
-
 	Ok(KeyMaterial::OKP {
 		curve: EllipticCurve::Ed25519,
 		x: pair.public_key().as_ref().to_vec(),
-		d: Some(seed.as_bytes().to_vec()),
+		d: Some(pair.to_seed().as_ref().to_vec()),
 	})
 }

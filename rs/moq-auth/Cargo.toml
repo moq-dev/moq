@@ -12,16 +12,16 @@ rust-version.workspace = true
 [features]
 default = ["client"]
 # The HTTP client that drives a lease against an auth server.
-client = ["dep:reqwest", "dep:rind-rustls", "dep:rustls", "dep:rustls-platform-verifier", "dep:tokio", "moq-clock/runtime", "dep:tracing", "dep:rand"]
+client = ["dep:reqwest", "dep:rind-rustls", "dep:rustls", "dep:rustls-platform-verifier", "dep:tokio", "kio/runtime", "dep:tracing", "dep:rand"]
 # The reference auth server behind `moq auth serve`: the policy a relay held, on axum.
 serve = ["dep:axum", "dep:tokio", "dep:tracing", "tokio/net"]
 
 [dependencies]
 axum = { workspace = true, optional = true }
 base64 = { workspace = true }
+data-encoding = { workspace = true }
 jsonwebtoken = { workspace = true }
-kio = { workspace = true }
-moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false, features = ["serde"] }
+kio = { workspace = true, features = ["serde"] }
 moq-pattern = { workspace = true, features = ["serde"] }
 pkcs1 = { workspace = true, features = ["std"] }
 pkcs8 = { workspace = true }
@@ -32,21 +32,20 @@ rind-jsonwebtoken = { workspace = true }
 rind-rustls = { workspace = true, optional = true }
 rustls = { version = "0.23", default-features = false, optional = true }
 rustls-platform-verifier = { version = "0.7", optional = true }
-sec1 = { version = "0.8", default-features = false, features = ["der"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["base64"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt", "time", "sync"], optional = true }
 tracing = { workspace = true, optional = true }
-url = { workspace = true }
+url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 anyhow = { workspace = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
+kio = { path = "../kio", features = ["runtime", "sim"] }
 moq-auth = { path = ".", features = ["client", "serve"] }
 moq-auth-published = { package = "moq-auth", version = "=0.2.1", default-features = false }
-moq-clock = { path = "../moq-clock", features = ["sim"] }
 moq-token = "0.7"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
