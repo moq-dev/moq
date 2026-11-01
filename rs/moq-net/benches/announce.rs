@@ -31,9 +31,10 @@ fn scanned(events: Vec<announce::Event>) -> Vec<announce::Announce> {
 	let mut initial: Vec<announce::Announce> = Vec::new();
 	for event in events {
 		let (update, active) = match event {
-			announce::Event::Start(update) | announce::Event::Update(update) | announce::Event::Restart(update) => {
-				(update, true)
-			}
+			announce::Event::Start(update)
+			| announce::Event::Update(update)
+			| announce::Event::Restart(update)
+			| announce::Event::Takeover { announce: update, .. } => (update, true),
 			announce::Event::End(update) => (update, false),
 		};
 		initial.retain(|held| held.prefix != update.prefix);

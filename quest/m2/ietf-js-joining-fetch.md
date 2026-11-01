@@ -29,7 +29,3 @@ plus the browser publisher.
 
 Public API: none. Wire: none; a late joining FETCH is answered where it was
 refused.
-
-## Related
-
-- [Headless moq-transport groups](/quest/m2/ietf-headless-group.md) - what a subscriber does with a tail whose head never comes
