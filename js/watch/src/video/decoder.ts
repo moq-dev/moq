@@ -559,7 +559,11 @@ class DecoderTrack {
 					if (signal.aborted) return;
 					const generation = this.#generation;
 					const group = this.#groups.get(frame.timestamp);
-					this.#groups.delete(frame.timestamp);
+					// Pictures come out in presentation order, so a chunk at or before this one that
+					// produced none, such as a hidden VP9 frame, never will.
+					for (const timestamp of this.#groups.keys()) {
+						if (timestamp <= frame.timestamp) this.#groups.delete(timestamp);
+					}
 					const timestamp = Milli.fromMicro(frame.timestamp as Micro);
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
