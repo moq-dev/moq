@@ -18,7 +18,7 @@ function limited(mode: "refuse" | "queue" | "open") {
 	const cancelled = Promise.withResolvers<unknown>();
 	const written: Uint8Array[] = [];
 	const options: unknown[] = [];
-	// Each create gets its own stream: a fetch opens its TRACK stream alongside.
+	// Each open gets its own stream; the first abort and cancel among them resolve.
 	const stream = () => ({
 		readable: new ReadableStream<Uint8Array>({ cancel: cancelled.resolve }),
 		writable: new WritableStream<Uint8Array>({
@@ -74,7 +74,11 @@ for (const protocol of ["lite", "ietf"] as const) {
 				} else {
 					expect(failure?.name).toBe("NoStreamCredit");
 				}
-				expect(transport.options).toEqual([{ sendOrder: undefined, waitUntilAvailable: false }]);
+				// A lite subscription opens its SUBSCRIBE alongside its TRACK, under the one deadline.
+				const opened = protocol === "lite" ? 2 : 1;
+				expect(transport.options).toEqual(
+					Array.from({ length: opened }, () => ({ sendOrder: undefined, waitUntilAvailable: false })),
+				);
 				if (mode === "queue") {
 					transport.release();
 					await transport.aborted;
@@ -86,7 +90,7 @@ for (const protocol of ["lite", "ietf"] as const) {
 					await transport.cancelled;
 				}
 				await clock.advance(Nano.fromMilli(Milli(30_000)));
-				expect(transport.options).toHaveLength(1);
+				expect(transport.options).toHaveLength(opened);
 			} finally {
 				track.close();
 				broadcast.close();
