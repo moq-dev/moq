@@ -1074,18 +1074,21 @@ mod tests {
 
 	/// A completion's wake chain runs in the turn that reaps it: a receive task
 	/// hands each request to a sending task, so with a pass for each hop the
-	/// reply is staged before the turn submits, and rides its parked enter.
+	/// reply is staged in the turn that reaped its request, before that turn
+	/// submits. Each task records the worker turn it ran in, which the network's
+	/// completion order and timing cannot change.
 	#[test]
 	fn a_reply_is_staged_in_the_turn_that_reaps_its_request() {
-		const ROUNDS: u64 = 16;
+		const ROUNDS: usize = 16;
 
-		/// Turns and enters over `ROUNDS` round trips under a pass budget.
-		fn per_round(passes: usize) -> Option<(u64, u64)> {
+		/// For each round trip, the turns from the request's receive to its reply.
+		fn hand_offs(passes: usize) -> Option<Vec<u64>> {
 			let mut worker = worker_with(Config {
 				passes: NonZeroUsize::new(passes).unwrap(),
 				..Config::default()
 			})?;
 			let handle = worker.handle();
+			let owner = Owner::new(&handle.shared);
 			let udp_config = udp::Config {
 				gro: false,
 				gso: false,
@@ -1096,68 +1099,59 @@ mod tests {
 			let server = Rc::new(handle.udp(bind(), udp_config).expect("server"));
 			let (client_addr, server_addr) = (client.local_addr().unwrap(), server.local_addr().unwrap());
 
-			let requests = kio::Producer::new(0u64);
-			let receiver = server.clone();
-			let received = requests.clone();
+			// The turn each request was received in, handed from one task to the other.
+			let requests = kio::Producer::new(Vec::<u64>::new());
+			let gaps = Rc::new(RefCell::new(Vec::new()));
+			let (receiver, received, turns) = (server.clone(), requests.clone(), owner.clone());
 			handle.spawn(async move {
 				while receiver.recv().await.is_ok() {
-					let Ok(mut count) = received.write() else { return };
-					*count += 1;
+					let Ok(mut turn) = received.write() else { return };
+					turn.push(turns.turn());
 				}
 			});
-			let sender = server.clone();
-			let consumer = requests.consume();
+			let (sender, consumer, recorded) = (server.clone(), requests.consume(), gaps.clone());
 			handle.spawn(async move {
 				let mut replied = 0;
 				loop {
-					let next = kio::wait(|waiter: &kio::Waiter| {
-						match consumer.poll(waiter, |count| match **count > replied {
-							true => Poll::Ready(**count),
+					let Some(received) = kio::wait(|waiter: &kio::Waiter| {
+						match consumer.poll(waiter, |turns| match turns.len() > replied {
+							true => Poll::Ready(turns[replied]),
 							false => Poll::Pending,
 						}) {
-							Poll::Ready(Ok(count)) => Poll::Ready(count),
-							Poll::Ready(Err(_)) => Poll::Ready(replied),
+							Poll::Ready(Ok(turn)) => Poll::Ready(Some(turn)),
+							Poll::Ready(Err(_)) => Poll::Ready(None),
 							Poll::Pending => Poll::Pending,
 						}
 					})
-					.await;
-					if next == replied {
+					.await
+					else {
 						return;
-					}
-					replied = next;
+					};
+					replied += 1;
 					let mut tx = sender.acquire().await.expect("send buffer");
 					tx.extend_from_slice(b"pong");
 					tx.send(udp::Transmit::new(client_addr, 4)).expect("reply");
+					recorded.borrow_mut().push(owner.turn() - received);
 				}
 			});
 
-			let (before, after) = worker
+			worker
 				.block_on(async {
-					let round = || async {
+					for _ in 0..ROUNDS {
 						let mut tx = client.acquire().await.expect("send buffer");
 						tx.extend_from_slice(b"ping");
 						tx.send(udp::Transmit::new(server_addr, 4)).expect("request");
 						assert_eq!(client.recv().await.expect("reply").payload(), b"pong");
-					};
-					round().await;
-					let before = handle.metrics().snapshot();
-					for _ in 0..ROUNDS {
-						round().await;
 					}
-					(before, handle.metrics().snapshot())
 				})
 				.expect("worker");
-			Some((after.turns - before.turns, after.enters - before.enters))
+			Some(gaps.take())
 		}
 
-		let Some(one) = per_round(1) else { return };
-		let Some(two) = per_round(2) else { return };
-		assert_eq!(two, (2 * ROUNDS, 2 * ROUNDS), "each hop is one turn and one enter");
-		assert_eq!(
-			one,
-			(3 * ROUNDS, 2 * ROUNDS),
-			"a pass per turn spends a turn on the hand-off"
-		);
+		let Some(two) = hand_offs(2) else { return };
+		assert_eq!(two, [0; ROUNDS], "the reply is staged in its request's turn");
+		let Some(one) = hand_offs(1) else { return };
+		assert_eq!(one, [1; ROUNDS], "a pass per turn spends a turn on the hand-off");
 	}
 
 	#[test]
