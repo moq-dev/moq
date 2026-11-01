@@ -1,9 +1,10 @@
-//! Wire-level QUIC datagram body for moq-lite-05 (§6.4).
+//! Wire-level QUIC datagram bodies for moq-lite.
 //!
 //! One datagram carries a single-frame group routed over an existing subscription. The body is
 //! `subscribe (i) | sequence (i) | [timestamp (i)] | [inflated size (i)] | payload (b)`, with the
 //! timestamp present only when the subscription's track carries one (see
-//! [`Version::wire_timescale`]) and the inflated size only when it is compressed (lite-07). The
+//! [`Version::wire_timescale`]) and the inflated size only when it is compressed (lite-07).
+//! Lite-07 prefixes group datagrams with type 0x0; type 0x1 is discarded padding. The
 //! payload runs to the datagram boundary, so unlike a [`super::Message`] there is no inner length
 //! prefix. The model counterpart is [`crate::Datagram`].
 
@@ -48,6 +49,9 @@ impl Encode<Version> for Datagram {
 			return Err(EncodeError::Version);
 		}
 
+		if version.has_padding() {
+			w.varint(0x0)?;
+		}
 		w.varint(self.subscribe)?;
 		w.varint(self.sequence)?;
 		if let Some(wire) = &self.ietf {
@@ -81,7 +85,7 @@ impl Datagram {
 	/// The largest encoded datagram body a lite hop carries.
 	pub(super) const MAX_SIZE: usize = 1200;
 
-	/// Decode a whole datagram body. The payload shares `buf` rather than copying it.
+	/// Decode a group datagram, or discard padding with `None`, without copying its payload.
 	///
 	/// `ietf` says whether the session negotiated the extension, and `framing` describes
 	/// the track of the given subscribe ID, which the body itself does not.
@@ -90,12 +94,19 @@ impl Datagram {
 		version: Version,
 		ietf: bool,
 		framing: impl FnOnce(u64) -> super::Framing,
-	) -> Result<Self, DecodeError> {
+	) -> Result<Option<Self>, DecodeError> {
 		if !version.has_datagrams() || (ietf && !version.has_ietf()) {
 			return Err(DecodeError::Version);
 		}
 
 		let mut r = Decoder::new(&buf, version.into());
+		if version.has_padding() {
+			match r.varint()? {
+				0x0 => (),
+				0x1 => return Ok(None),
+				_ => return Err(DecodeError::InvalidValue),
+			}
+		}
 		let subscribe = r.varint()?;
 		let sequence = r.varint()?;
 		let framing = framing(subscribe);
@@ -126,14 +137,14 @@ impl Datagram {
 			return Err(DecodeError::InvalidValue);
 		}
 
-		Ok(Self {
+		Ok(Some(Self {
 			subscribe,
 			sequence,
 			timestamp,
 			inflated,
 			payload,
 			ietf,
-		})
+		}))
 	}
 }
 
@@ -141,6 +152,37 @@ impl Datagram {
 mod test {
 	use super::*;
 	use crate::Timescale;
+
+	#[test]
+	fn padding_needs_no_subscription_framing() {
+		for mut body in [vec![1], vec![1; Datagram::MAX_SIZE], vec![0x80, 1, 0xff]] {
+			// Padding bytes need not be valid varints or any other structured encoding.
+			if body.len() == Datagram::MAX_SIZE {
+				body[1..].fill(0xff);
+			}
+			for ietf in [false, true] {
+				assert!(
+					Datagram::decode(body.clone().into(), Version::Lite07, ietf, |_| {
+						panic!("padding must not look up a subscription")
+					})
+					.unwrap()
+					.is_none()
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn invalid_types_never_reach_a_subscription() {
+		for body in [&[][..], &[0x80][..], &[2, 1, 2, 3][..], &[0xff; 9][..]] {
+			assert!(
+				Datagram::decode(Bytes::copy_from_slice(body), Version::Lite07, false, |_| {
+					panic!("invalid type must not look up a subscription")
+				})
+				.is_err()
+			);
+		}
+	}
 
 	/// A millisecond track a moq-lite publisher published.
 	fn timed() -> super::super::Framing {
@@ -179,9 +221,11 @@ mod test {
 			ietf: None,
 		};
 		let buf = dg.encode_bytes(Version::Lite07).unwrap();
-		assert_eq!(&buf[..4], [1, 2, 3, 40]);
+		assert_eq!(&buf[..5], [0, 1, 2, 3, 40]);
 		assert_eq!(
-			Datagram::decode(buf, Version::Lite07, false, |_| compressed()).unwrap(),
+			Datagram::decode(buf, Version::Lite07, false, |_| compressed())
+				.unwrap()
+				.unwrap(),
 			dg
 		);
 
@@ -196,16 +240,18 @@ mod test {
 	#[test]
 	fn roundtrip() {
 		let original = Datagram {
-			subscribe: 7,
+			subscribe: 1,
 			sequence: 42,
 			timestamp: Some(1_000),
 			inflated: None,
 			payload: Bytes::from_static(b"hello"),
 			ietf: None,
 		};
-		let buf = original.encode_bytes(Version::Lite05).unwrap();
-		let decoded = Datagram::decode(buf, Version::Lite05, false, |_| timed()).unwrap();
-		assert_eq!(decoded, original, "payload has no trailing length prefix");
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			let buf = original.encode_bytes(version).unwrap();
+			let decoded = Datagram::decode(buf, version, false, |_| timed()).unwrap().unwrap();
+			assert_eq!(decoded, original, "payload has no trailing length prefix");
+		}
 	}
 
 	#[test]
@@ -219,7 +265,9 @@ mod test {
 			ietf: None,
 		};
 		let buf = original.encode_bytes(Version::Lite05).unwrap();
-		let decoded = Datagram::decode(buf, Version::Lite05, false, |_| timed()).unwrap();
+		let decoded = Datagram::decode(buf, Version::Lite05, false, |_| timed())
+			.unwrap()
+			.unwrap();
 		assert_eq!(decoded, original);
 	}
 
@@ -252,12 +300,13 @@ mod test {
 			ietf: None,
 		};
 		let buf = dg.encode_bytes(Version::Lite07).unwrap();
-		assert_eq!(buf.len(), 7);
-		assert_eq!(&buf[2..], b"world");
+		assert_eq!(buf.len(), 8);
+		assert_eq!(&buf[3..], b"world");
 		let decoded = Datagram::decode(buf, Version::Lite07, false, |id| {
 			assert_eq!(id, 1);
 			Default::default()
 		})
+		.unwrap()
 		.unwrap();
 		assert_eq!(decoded, dg);
 	}
@@ -357,7 +406,9 @@ mod test {
 					..relayed()
 				},
 			] {
-				let decoded = Datagram::decode(Bytes::from(buf.clone()), Version::Lite07, true, |_| framing).unwrap();
+				let decoded = Datagram::decode(Bytes::from(buf.clone()), Version::Lite07, true, |_| framing)
+					.unwrap()
+					.unwrap();
 				assert_eq!(decoded, empty, "{status}");
 			}
 			buf.push(b'x');

@@ -21,7 +21,7 @@ fork.
   Controller's per-packet send and receive instants; drop the parts that only
   serve RTCP or probe clusters unless the comparison needs them.
 - GCC outputs a target rate and pacing rate; map them to the Controller's
-  window and `ControllerMetrics::{pacing_rate, bandwidth_estimate}`, keeping
+  window and `Metrics::{pacing_rate, bandwidth_estimate}`, keeping
   its congestion-window pushback as the inflight bound.
 - Keep the BSD license and PATENTS file with the vendored code.
 - Implement `Controller::probes` and report `probe_inflight` so moq-quic's
@@ -29,7 +29,3 @@ fork.
   see the [epic](/quest/m2/quic-realtime/README.md)). Measure that a stopped
   rung recovers under it.
 - Unit tests drive the controller with mocked time, not wall clock.
-
-## Required
-
-- [Receive-ts spike](/quest/m2/quic-realtime/receive-ts.md) - the per-packet receive instants and the shared presets

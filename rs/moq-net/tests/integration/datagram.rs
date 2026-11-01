@@ -48,7 +48,6 @@ async fn connect_datagram_track() -> Fixture {
 	let producer = broadcast.create_track("datagrams", timed()).unwrap();
 	broadcast.announce(Default::default()).unwrap();
 
-	// Lite-07, since a lite-05/06 subscriber drops every timestamp it receives.
 	let mut options = MockConnectOptions::new("moq-lite-07-wip".parse::<Version>().unwrap());
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(consumer_origin.clone());
