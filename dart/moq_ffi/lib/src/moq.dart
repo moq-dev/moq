@@ -8792,9 +8792,15 @@ class MoqAudioCodec implements MoqAudioCodecInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqAudioCodecFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqaudiocodec(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqaudiocodec(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 }
 
@@ -8878,9 +8884,15 @@ class MoqAudioConsumer implements MoqAudioConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqAudioConsumerFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqaudioconsumer(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqaudioconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -8987,9 +8999,15 @@ class MoqAudioEncoder implements MoqAudioEncoderInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqAudioEncoderFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqaudioencoder(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqaudioencoder(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   MoqAudioPacket encode({required List<double> pcm}) {
@@ -9122,9 +9140,15 @@ class MoqAudioProducer implements MoqAudioProducerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqAudioProducerFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqaudioproducer(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqaudioproducer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   MoqTrackDemand demand() {
@@ -9236,9 +9260,15 @@ class MoqGrantConsumer implements MoqGrantConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqGrantConsumerFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqgrantconsumer(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqgrantconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -9332,9 +9362,15 @@ class MoqAllocator implements MoqAllocatorInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqAllocatorFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqallocator(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqallocator(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   MoqReservation reserve({
@@ -9414,11 +9450,15 @@ class MoqBandwidthConsumer implements MoqBandwidthConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqBandwidthConsumerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqbandwidthconsumer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqbandwidthconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -9513,9 +9553,15 @@ class MoqReservation implements MoqReservationInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqReservationFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqreservation(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqreservation(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   int? rate() {
@@ -9610,11 +9656,15 @@ class MoqBroadcastConsumer implements MoqBroadcastConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqBroadcastConsumerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqbroadcastconsumer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqbroadcastconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   UniffiRustFuture<void> closed() {
@@ -9750,9 +9800,15 @@ class MoqGroupConsumer implements MoqGroupConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqGroupConsumerFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqgroupconsumer(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqgroupconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -9852,9 +9908,15 @@ class MoqTrackConsumer implements MoqTrackConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqTrackConsumerFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqtrackconsumer(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqtrackconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -10002,9 +10064,15 @@ class MoqTrackDemand implements MoqTrackDemandInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqTrackDemandFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqtrackdemand(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqtrackdemand(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   String name() {
@@ -10114,11 +10182,15 @@ class MoqJsonSnapshotConsumer implements MoqJsonSnapshotConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqJsonSnapshotConsumerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqjsonsnapshotconsumer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqjsonsnapshotconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -10234,11 +10306,15 @@ class MoqJsonSnapshotProducer implements MoqJsonSnapshotProducerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqJsonSnapshotProducerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqjsonsnapshotproducer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqjsonsnapshotproducer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   MoqTrackDemand demand() {
@@ -10342,11 +10418,15 @@ class MoqJsonStreamConsumer implements MoqJsonStreamConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqJsonStreamConsumerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqjsonstreamconsumer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqjsonstreamconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -10446,11 +10526,15 @@ class MoqJsonStreamProducer implements MoqJsonStreamProducerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqJsonStreamProducerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqjsonstreamproducer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqjsonstreamproducer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void append({required String value, int? timestampUs = null}) {
@@ -10554,11 +10638,15 @@ class MoqJsonWindowConsumer implements MoqJsonWindowConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqJsonWindowConsumerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqjsonwindowconsumer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqjsonwindowconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -10660,11 +10748,15 @@ class MoqJsonWindowProducer implements MoqJsonWindowProducerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqJsonWindowProducerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqjsonwindowproducer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqjsonwindowproducer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cut() {
@@ -10795,11 +10887,15 @@ class MoqMediaCatalogConsumer implements MoqMediaCatalogConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqMediaCatalogConsumerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqmediacatalogconsumer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqmediacatalogconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -10898,11 +10994,15 @@ class MoqMediaCatalogProducer implements MoqMediaCatalogProducerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqMediaCatalogProducerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqmediacatalogproducer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqmediacatalogproducer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void finish() {
@@ -11033,12 +11133,15 @@ class MoqMediaContainerProducer implements MoqMediaContainerProducerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqMediaContainerProducerFinalizer.detach(this);
-    rustCall(
-      (status) =>
-          uniffi_moq_ffi_fn_free_moqmediacontainerproducer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqmediacontainerproducer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cut() {
@@ -11172,11 +11275,15 @@ class MoqMediaGroupConsumer implements MoqMediaGroupConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqMediaGroupConsumerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqmediagroupconsumer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqmediagroupconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -11278,9 +11385,15 @@ class MoqMediaTimebase implements MoqMediaTimebaseInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqMediaTimebaseFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqmediatimebase(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqmediatimebase(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 }
 
@@ -11362,11 +11475,15 @@ class MoqMediaTrackConsumer implements MoqMediaTrackConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqMediaTrackConsumerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqmediatrackconsumer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqmediatrackconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -11486,11 +11603,15 @@ class MoqMediaTrackProducer implements MoqMediaTrackProducerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqMediaTrackProducerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqmediatrackproducer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqmediatrackproducer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cut() {
@@ -11630,12 +11751,15 @@ class MoqMediaTrackStreamProducer
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqMediaTrackStreamProducerFinalizer.detach(this);
-    rustCall(
-      (status) =>
-          uniffi_moq_ffi_fn_free_moqmediatrackstreamproducer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqmediatrackstreamproducer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   MoqTrackDemand demand() {
@@ -11726,11 +11850,15 @@ class MoqAnnounceConsumer implements MoqAnnounceConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqAnnounceConsumerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqannounceconsumer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqannounceconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -11816,11 +11944,15 @@ class MoqBroadcastPrepared implements MoqBroadcastPreparedInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqBroadcastPreparedFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqbroadcastprepared(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqbroadcastprepared(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   MoqBroadcastProducer broadcast() {
@@ -11904,11 +12036,15 @@ class MoqBroadcastRequest implements MoqBroadcastRequestInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqBroadcastRequestFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqbroadcastrequest(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqbroadcastrequest(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   String path() {
@@ -12002,9 +12138,15 @@ class MoqFollowing implements MoqFollowingInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqFollowingFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqfollowing(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqfollowing(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   UniffiRustFuture<MoqBroadcastConsumer> available() {
@@ -12092,11 +12234,15 @@ class MoqOriginConsumer implements MoqOriginConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqOriginConsumerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqoriginconsumer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqoriginconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   MoqAnnounceConsumer announced({required MoqAnnounceConfig config}) {
@@ -12213,11 +12359,15 @@ class MoqOriginProducer implements MoqOriginProducerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqOriginProducerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqoriginproducer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqoriginproducer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   MoqOriginConsumer consume() {
@@ -12313,11 +12463,15 @@ class MoqOriginRequests implements MoqOriginRequestsInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqOriginRequestsFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqoriginrequests(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqoriginrequests(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -12403,9 +12557,15 @@ class MoqPublication implements MoqPublicationInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqPublicationFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqpublication(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqpublication(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void announce({required MoqAnnounceRoute route}) {
@@ -12511,11 +12671,15 @@ class MoqBroadcastProducer implements MoqBroadcastProducerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqBroadcastProducerFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqbroadcastproducer(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqbroadcastproducer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void close() {
@@ -12625,11 +12789,15 @@ class MoqBroadcastRequests implements MoqBroadcastRequestsInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqBroadcastRequestsFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqbroadcastrequests(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqbroadcastrequests(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -12721,9 +12889,15 @@ class MoqFill implements MoqFillInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqFillFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqfill(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqfill(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   MoqGroupProducer accept({required int sequence}) {
@@ -12923,9 +13097,15 @@ class MoqGroupProducer implements MoqGroupProducerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqGroupProducerFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqgroupproducer(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqgroupproducer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void abort({required int errorCode}) {
@@ -13047,9 +13227,15 @@ class MoqTrackProducer implements MoqTrackProducerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqTrackProducerFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqtrackproducer(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqtrackproducer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void abort({required int errorCode}) {
@@ -13243,9 +13429,15 @@ class MoqTrackRequest implements MoqTrackRequestInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqTrackRequestFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqtrackrequest(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqtrackrequest(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void abort({required int errorCode}) {
@@ -13361,9 +13553,15 @@ class MoqTrackRequests implements MoqTrackRequestsInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqTrackRequestsFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqtrackrequests(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqtrackrequests(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -13456,9 +13654,15 @@ class MoqRequest implements MoqRequestInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqRequestFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqrequest(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqrequest(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   UniffiRustFuture<MoqSession> accept({
@@ -13624,9 +13828,15 @@ class MoqServer implements MoqServerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqServerFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqserver(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqserver(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   UniffiRustFuture<MoqRequest?> accept() {
@@ -13738,9 +13948,15 @@ class MoqClient implements MoqClientInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqClientFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqclient(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqclient(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -13832,9 +14048,15 @@ class MoqSession implements MoqSessionInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqSessionFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqsession(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqsession(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   MoqAllocator allocator() {
@@ -14029,9 +14251,15 @@ class MoqTokens implements MoqTokensInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqTokensFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqtokens(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqtokens(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   UniffiRustFuture<void> answered() {
@@ -14136,9 +14364,15 @@ class MoqVideoConsumer implements MoqVideoConsumerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqVideoConsumerFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqvideoconsumer(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqvideoconsumer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cancel() {
@@ -14226,11 +14460,15 @@ class MoqVideoDecodedFrame implements MoqVideoDecodedFrameInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqVideoDecodedFrameFinalizer.detach(this);
-    rustCall(
-      (status) => uniffi_moq_ffi_fn_free_moqvideodecodedframe(_ptr, status),
-    );
+    try {
+      uniffi_moq_ffi_fn_free_moqvideodecodedframe(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   int height() {
@@ -14363,9 +14601,15 @@ class MoqVideoEncoder implements MoqVideoEncoderInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqVideoEncoderFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqvideoencoder(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqvideoencoder(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cut() {
@@ -14496,9 +14740,15 @@ class MoqVideoProducer implements MoqVideoProducerInterface {
     if (_isDisposed) {
       return;
     }
+    final status = calloc<RustCallStatus>();
     _isDisposed = true;
     _MoqVideoProducerFinalizer.detach(this);
-    rustCall((status) => uniffi_moq_ffi_fn_free_moqvideoproducer(_ptr, status));
+    try {
+      uniffi_moq_ffi_fn_free_moqvideoproducer(_ptr, status);
+      checkCallStatus(NullRustCallStatusErrorHandler(), status);
+    } finally {
+      calloc.free(status);
+    }
   }
 
   void cut() {
