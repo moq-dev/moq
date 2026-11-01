@@ -187,11 +187,13 @@ test("a time start is the group containing it, and an end stops past it once a l
 	// Before every start held: reach back to the oldest.
 	expect(covered(new Window([{ start: time(1000), end: time(2500) }], 6, groups), 8)).toEqual([0, 1, 2]);
 
-	// Nothing started yet: a time start waits for a group that has, reading none meanwhile, since a
-	// group arrives before the frame that shows where it starts.
+	// Nothing started yet: a time start waits on a first group, as a relative one does, then on
+	// one starting, reading none meanwhile, since a group arrives before the frame that shows
+	// where it starts.
 	window = new Window([{ start: time(1000) }], undefined, new Groups());
-	expect([window.contains(3), window.floor(), window.settled]).toEqual([false, undefined, false]);
-	expect(window.settle(4, new Groups([[4, "pending"]]))).toBe(false);
+	expect([window.pending, window.floor(), window.settled]).toEqual([true, undefined, false]);
+	expect(window.settle(4, new Groups([[4, "pending"]]))).toBe(true);
+	expect([window.pending, window.contains(4), window.settled]).toEqual([false, false, false]);
 	expect(window.settle(4, new Groups([[4, started(500)]]))).toBe(true);
 	expect([window.floor(), window.settled]).toEqual([4, true]);
 	// Nothing can start any more: it reaches back to the oldest.

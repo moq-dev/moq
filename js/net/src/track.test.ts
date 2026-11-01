@@ -4180,7 +4180,7 @@ test("an errored end keeps its history", async () => {
 	producer.close();
 	expect(producer.closed.peek()).toBe(failed);
 
-	const replay = { groups: { start: { included: 0 } }, maxDelay: Milli(30_000) };
+	const replay = { ranges: [{ start: { absolute: 0 } }], maxDelay: Milli(30_000) };
 	const arrival = producer.subscribe(replay);
 	expect((await arrival.recvGroup())?.sequence).toBe(0);
 	expect((await arrival.recvGroup())?.sequence).toBe(1);

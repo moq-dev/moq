@@ -2356,12 +2356,20 @@ export class Subscriber {
 		};
 		hooks.tryRecvGroup = (subscriber, dispositions) => subscriber.#tryRecvGroup(dispositions);
 		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
+		// A reader following route copies leaves its ranges to the serving copy, which resolves
+		// their anchors against the groups it holds, then narrows them to its own local bounds.
 		hooks.servingRuns = (subscriber, start, end) => {
 			const cursor = subscriber.#cursor.peek();
-			return subscriber.#window.runs(Math.max(start, cursor.start), Math.min(end, cursor.end ?? end));
+			const from = Math.max(start, cursor.start);
+			const to = Math.min(end, cursor.end ?? end);
+			return subscriber.#resume?.runs(from, to) ?? subscriber.#window.runs(from, to);
 		};
-		hooks.servingEnd = (subscriber) =>
-			subscriber.#window.end() === undefined ? undefined : subscriber.#cursor.peek().end;
+		hooks.servingEnd = (subscriber) => {
+			const cursor = subscriber.#cursor.peek();
+			if (!subscriber.#resume) return subscriber.#window.end() === undefined ? undefined : cursor.end;
+			const end = subscriber.#resume.servingEnd();
+			return end === undefined ? undefined : Math.min(end, cursor.end ?? end);
+		};
 		hooks.servingStarts = (subscriber, from) => {
 			const resumed = subscriber.#resume?.starts(from);
 			if (resumed) return resumed;

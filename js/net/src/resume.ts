@@ -1123,6 +1123,19 @@ class Reader implements ResumeSource {
 		return serving && hooks.servingStarts(serving.sub, from);
 	}
 
+	// The reader's ranges resolve on the copies, which hold the groups their anchors name.
+	runs(start: number, end: number): Run[] | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.servingRuns(serving.sub, start, end);
+	}
+
+	servingEnd(): number | undefined {
+		this.sync();
+		const serving = this.#serving();
+		return serving && hooks.servingEnd(serving.sub);
+	}
+
 	/** The error the logical track's end carries, if it does not end cleanly. */
 	endError(): Error | undefined {
 		this.sync();

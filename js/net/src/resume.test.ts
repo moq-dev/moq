@@ -287,6 +287,27 @@ test("a routed source start follows the serving copy and its subscriber floor", 
 	}
 });
 
+test("a routed reader serves its relative ranges as the serving copy resolves them", async () => {
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	for (let sequence = 0; sequence < 5; sequence++) ta.write(sequence);
+	const front = new Front();
+	front.serve(a.consume());
+	const sub = front.consumer
+		.track("seq")
+		.subscribe({ maxDelay: null, ranges: [{ start: { relative: 2 }, end: { relative: 1 } }] });
+	try {
+		await settle();
+		// The copy holds the groups the anchors count back from, so the ranges end there.
+		expect(hooks.servingEnd(sub)).toBe(4);
+		expect(hooks.servingRuns(sub, 0, 10)).toEqual([{ start: 2, end: 4 }]);
+	} finally {
+		sub.close();
+		front.consumer.close();
+		a.close();
+	}
+});
+
 test("a fork continues its open group across a route failure after its parent closes", async () => {
 	const a = new BroadcastProducer();
 	const b = new BroadcastProducer();

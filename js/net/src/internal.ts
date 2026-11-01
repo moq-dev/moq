@@ -332,6 +332,13 @@ export interface ResumeSource {
 	end(): Position | undefined;
 	/** Where each range starts on the serving copy once delivery starts at `from`, undefined without one. */
 	starts(from: number): (number | undefined)[] | undefined;
+	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
+	runs(start: number, end: number): Run[] | undefined;
+	/**
+	 * The exclusive end past every group the serving copy reads: undefined while one of its
+	 * ranges stays open or without a serving copy.
+	 */
+	servingEnd(): number | undefined;
 	/** The error the logical track's end carries, if it does not end cleanly. */
 	endError(): Error | undefined;
 	/** Resolve with the logical track's exclusive end once known. */

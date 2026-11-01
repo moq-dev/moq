@@ -761,14 +761,17 @@ function startOf(
 	const pts = time(anchor);
 	if (pts !== undefined) {
 		const containing = holdings.containing(pts);
-		// The group holding it is older than any held, so reach back to the oldest, as when
-		// nothing can start any more.
-		if (containing === "before" || (containing === "unknown" && holdings.complete())) {
-			return { group: 0, floored: false };
-		}
+		if (containing !== "before" && containing !== "unknown") return { group: containing.group, floored: true };
+		// The group holding it is older than any held, so reach back to the oldest.
+		if (containing === "before") return { group: 0, floored: false };
+		// Before any group, as for a relative anchor, which a hop that holds none (such as a
+		// reader following route copies) leaves to the copies to resolve.
+		if (latest === undefined) return undefined;
+		// Nothing can start any more, so nothing held reaches past it.
+		if (holdings.complete()) return { group: 0, floored: false };
 		// Nothing has started yet, so wait for a group that has. A copy may hear the live edge
 		// before the groups its publisher resolved the time to, which the edge would skip.
-		return containing === "unknown" ? "waiting" : { group: containing.group, floored: true };
+		return "waiting";
 	}
 	const back = relative(anchor);
 	if (back === undefined) return { group: 0, floored: false };
