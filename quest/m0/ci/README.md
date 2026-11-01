@@ -100,6 +100,30 @@ per merged PR today (PR and queue), at 13 minutes median and 26 minutes p90 of
 wall time per PR run. Superseded in part 2026-10-24: the PR gate checks
 feature shapes for the crates a branch changes; Nightly keeps the full matrix.
 
+Decided 2026-10-31 (maintainer), reversing 2026-10-24: "revert the moq-tokio
+features change. It's dumb to build all of the permutations. Maybe as a nightly
+but tbh I don't care, just test the default features (or all-features)." On
+the wasm32 pass: "nobody uses it and it's going to be replaced soon"; on
+io_uring: "keep testing uring in CI, but I guess add it to the default features
+on CI". The land gate's Rust lane is the default-feature test build (with the
+device features, and on Linux the relay's io_uring runtime) plus fmt, doc,
+shear, and sort. It drops the isolated feature
+shapes (`rs_shapes`, cargo-hack), the net, QUIC, tokio, and media feature
+contracts, and the wasm32 and io_uring clippy passes; `just rs features` keeps
+the feature matrix in the Features workflow (nightly and release PRs). On a host land batch the Rust lane had taken about 1,340 s, 691 s
+of it `rs_shapes` and 238 s `tokio-features`.
+
+Decided 2026-10-31 (maintainer), on the gate's remaining lint compiles: "Remove
+loom entirely": moq's history holds only upkeep of the loom models
+([moq-dev/moq#2543](https://github.com/moq-dev/moq/pull/2543) added them, later
+PRs bounded them so Nightly finishes, fixed them after code changes, and
+restored their gate compile checks) and no commit where loom found a race. The
+gate drops `loom-check` and Nightly its loom job; a separate PR deletes the
+models. On Send-depth: "Move it to Nightly." It guards a real downstream
+breakage (moq-net futures not Send at the default recursion limit), so
+`just rs send-depth` keeps its pinned nightly and runs as its own Nightly job
+instead of in the land gate.
+
 Decided 2026-10-25 (maintainer): across moq's many CI and release builds
 (targets, features, FFI languages, Nix packages), each crate configuration
 compiles once and is reused through the cache, and each run builds and tests
@@ -129,15 +153,15 @@ The historical samples locate candidates; they are not controlled benchmarks.
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
 - [Land main through quest land](/quest/m0/ci/land.md) - a host daemon tests small batches of queued PRs once and lands each as its tested squash commit
+- [A cache error is a miss](/quest/m0/ci/nix-cache-5xx.md) - a transient `nix.moq.dev` 5xx no longer fails `just ci`
+- [Cheap checks skip the queue](/quest/m0/ci/gate-quick.md) - condition: quest ships `quest gate --quick`; then cheap modules wait at most a minute
 - [Gate each diff in under five minutes](/quest/m0/ci/five-minutes.md) - `just check` and `just test` each finish within a worker's 5-minute prompt cache, admission wait included
 - [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm releases use `nix.moq.dev`, check its bucket sizes, and retire Cachix
 - [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs
-- [Fewer BTreeMap instantiations](/quest/m0/ci/btree-keys.md) - moq-net shares BTreeMap key and value types, kept only if its CPU time drops
 - [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the slowest 1% of tests take under half their 289 CPU-seconds, with coverage kept
-- [Gate send-depth](/quest/m0/ci/send-depth-gate.md) - the merge gate runs send-depth on a pinned nightly when moq-net changes, after #6890 fixes main
 - [Release credentials off main](/quest/m0/ci/publish-release-only.md) - `publish` admits only `release` and release tags once its `workflow_run` publishers run on their tag
+- [The queue host keeps the queue's disk](/quest/m0/ci/queue-host-disk.md) - agent sessions can't starve the queue runner of disk, and a crashed runner restarts
+- [The next test-CPU cuts](/quest/m0/ci/test-cost-followups.md) - the slow-test leftovers from #6987, cut at their source
 - [Biome checks every file it can parse](/quest/m0/ci/biome-whole-repo.md) - Biome runs over the whole repository and main is clean under it
-- [workspace.test.py ignores the caller's gate filter](/quest/m0/ci/workspace-test-env.md) - the dispatcher test passes under any `just gate` module filter
-- [PRs build the feature shapes they can break](/quest/m0/ci/pr-feature-builds.md) - a PR touching a crate's source runs that crate's isolated feature builds
