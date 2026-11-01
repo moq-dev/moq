@@ -207,10 +207,12 @@ median): deque 30, runs 30, log 46, ring 42. Draining it: 14, 15, 12, 19.
   growing stops every reader or needs epochs. Its per-slot locks cost 40%
   more for a burst on one thread and lose to the log across cores. It wins
   one-frame groups only because its reader holds no channel handle.
-- Not run: `just bench-profile lock` on a multi-frame shape
+- Not run on this host: `just bench-profile lock` on a multi-frame shape
   (`bench/workloads/video-heavy.toml` is one), which needs
-  `kernel.perf_event_paranoid=-1` and this host has 4. So a relay's share of
-  `GroupState` wait with multi-frame groups is still unmeasured.
+  `kernel.perf_event_paranoid=-1` and this host has 4. The replica spike
+  below captured video-heavy's total lock wait but doesn't split it by
+  channel, so a relay's share of `GroupState` wait with multi-frame groups
+  is still unmeasured.
 
 Decided (maintainer, 2026-10-24): Front eviction lands on the lock-free
 append-only log (`kio::log`) itself, a tail run from
@@ -249,8 +251,9 @@ window. The relay was pinned to the 16 E-cores and the generator to the 8
 P-cores. The harness pins everything to the P-cores by default, so these
 numbers don't compare with the baseline above. Load average 5 to 21. Each
 cell is the median of 3 runs (chat at 16 workers: 9 base, 5 replica;
-video-heavy: 2). Instructions are user and kernel per delivered frame, in
-thousands; CPU and RSS come from the host sampler; latency is the
+video-heavy: 2). Mutex wait is the median of the runs whose lock capture
+the harness accepted, which is fewer where noted below. Instructions are
+user and kernel per delivered frame, in thousands; CPU and RSS come from the host sampler; latency is the
 generator's p50 in whole milliseconds. Each cell reads base → replica:
 
 | shape | workers | CPU cores | user instr | kernel instr | mutex wait (share) | RSS MiB | p50 ms |
@@ -287,21 +290,26 @@ capture; the other was refused for nonalternating switch records.
   `Subscriber::poll_finished` via `resume::Reader::learn_end` 26%,
   `GroupExpiry::is_expired` 10%, and the rest 21%. Another 13% is the
   per-track cache mutex in `cache::Track::watch_wall`, also under
-  `GroupExpiry::is_expired`. The version counter still targets those reads.
-- Low fan-out loses. Video-heavy pays the hop on nearly every subscription:
-  73 to 78% more user instructions per frame, 41 to 53% more CPU, and 12 to
-  28% more memory, with no lock-wait gain at 16 workers.
+  `GroupExpiry::is_expired`. The version counter targets the `TrackState`
+  reads, and only the ones that find nothing changed: a read of new data
+  still locks, and the cache mutex isn't a channel, so it stays.
+- Low fan-out loses. Video-heavy pays the hop on nearly every subscription.
+  At 4 and 16 workers that is 73 to 78% more user instructions per frame,
+  41 to 53% more CPU, and 18 to 28% more memory, with no lock-wait gain at
+  16 workers. At 1 worker the hop saturates the worker instead: 12% more
+  user instructions and 12% more memory, CPU pinned at one core, fewer
+  frames delivered, and p50 from 2.5 to 227 ms.
 - Memory: fanout and chat grow 0 to 11%. Replicated one-frame groups are
   small, and multi-frame groups cost the most.
 
 Recommendation: a conditional win. Replicas pay off only on high-fan-out
 tracks. Applied to every track, they cost low fan-out about 1.8 times the
-user instructions per frame. If sharding reopens, replicate per track on demand:
-never on the publisher's own worker, and only above a per-worker fan-out
+user instructions per frame at 4 and 16 workers. If sharding reopens,
+replicate per track on demand: never on the publisher's own worker, and only above a per-worker fan-out
 threshold, serving the rest from the shared origin. Rerun this comparison
 once the [Version counter](/quest/m2/perf/kio-channel-contention/version.md)
-lands, since it attacks the same 16-worker chat waits without the hop. Weigh
-it against the
+lands, since it attacks the same 16-worker chat `TrackState` waits without
+the hop. Weigh it against the
 [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md)
 before `/quest-plan`.
 
