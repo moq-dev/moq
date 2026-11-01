@@ -2791,14 +2791,14 @@ fn media_consumers_cancel_while_subscribing() {
 	let catalog_task = id(unsafe { moq_consume_catalog(consume, Some(channel_callback), catalog_cb.ptr) });
 	let catalog = id(catalog_cb.recv());
 
-	type Media = unsafe extern "C" fn(u32, u32, u64, ffi::moq_status_callback, *mut c_void) -> i32;
+	type Media = unsafe extern "C" fn(u32, u32, *const moq_delay, ffi::moq_status_callback, *mut c_void) -> i32;
 	let consumers: [(Media, extern "C" fn(u32) -> i32); 2] = [
 		(moq_consume_video, moq_consume_video_cancel),
 		(moq_consume_audio, moq_consume_audio_cancel),
 	];
 	for (consumer, cancel) in consumers {
 		let cb = Callback::new();
-		let task = id(unsafe { consumer(catalog, 0, 0, Some(channel_callback), cb.ptr) });
+		let task = id(unsafe { consumer(catalog, 0, std::ptr::null(), Some(channel_callback), cb.ptr) });
 		let request = id(request_cb.recv());
 
 		assert_eq!(cancel(task), 0);
