@@ -46,6 +46,11 @@
 //! wall clock: each empty group is handed out like any other, so a walk over the rest of
 //! the run per group shows up as a slope over it.
 //!
+//! `track_evict_fanout` writes groups into a full pool, each evicting one that every reader
+//! judged cached, swept over the readers and the groups written between their reads: each
+//! eviction leaves the group in every reader's inbox, so its cost grows with the readers,
+//! and a cost that grows with the groups written beyond that shows up as a slope.
+//!
 //! `track_fanout_frame` writes frames into an open group while every subscriber is parked
 //! on the next one, re-polling whichever reader the write woke: a frame wakes no track
 //! reader, so waking them shows up as a slope over the subscribers.
@@ -106,6 +111,7 @@
 
 #![expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "custom timings measure the real time the work took, not the ambient clock"
 )]
 
@@ -548,6 +554,46 @@ fn bench_fanout(c: &mut Criterion) {
 				b.iter(|| fanout.cycle());
 			},
 		);
+	}
+	group.finish();
+}
+
+/// Groups written between reads in `track_evict_fanout`, each evicting one.
+const EVICTED: [usize; 3] = [1, 8, 64];
+
+fn bench_evict_fanout(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_evict_fanout");
+	for subscribers in FANOUT {
+		for evicted in EVICTED {
+			group.throughput(Throughput::Elements(evicted as u64));
+			group.bench_function(BenchmarkId::new(format!("{subscribers}r"), evicted), |b| {
+				let mut fanout = Fanout::new(subscribers);
+				// Twice what the pool holds, so every write evicts.
+				for _ in 0..2 * CACHE_CAPACITY / PAYLOAD as u64 {
+					fanout.cycle();
+				}
+				// Only the writes and the evictions they cause are timed, not the reads that
+				// judge each written group cached again.
+				b.iter_custom(|iterations| {
+					let mut elapsed = Duration::ZERO;
+					for _ in 0..iterations {
+						let start = Instant::now();
+						for _ in 0..evicted {
+							let mut group = fanout.track.append_group().unwrap();
+							group.write_frame(Timestamp::ZERO, fanout.payload.clone()).unwrap();
+							group.finish().unwrap();
+						}
+						elapsed += start.elapsed();
+						for (subscriber, waiter) in fanout.subscribers.iter_mut().zip(&fanout.waiters) {
+							while let Poll::Ready(Ok(Some(group))) = subscriber.poll_recv_group(waiter) {
+								black_box(group);
+							}
+						}
+					}
+					elapsed
+				});
+			});
+		}
 	}
 	group.finish();
 }
@@ -1901,7 +1947,7 @@ impl RangeFills {
 			"everything is a miss"
 		);
 		while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
-			while let Some(sequence) = fill.next() {
+			while let Some(sequence) = fill.wanted() {
 				let mut group = fill.accept(sequence, None).unwrap();
 				group
 					.write_frame(Timestamp::from_millis(sequence).unwrap(), Bytes::from_static(b"x"))
@@ -1945,6 +1991,7 @@ criterion_group!(
 	bench_budget_widening,
 	bench_fanout,
 	bench_fanout_frame,
+	bench_evict_fanout,
 	bench_fetch_expiry,
 	bench_fetch_budgets,
 	bench_fetch_park,

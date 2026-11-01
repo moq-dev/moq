@@ -25,7 +25,10 @@
 //!
 //! Everything here is unauthenticated, so bind it only to a trusted plane -
 //! loopback for a co-located scraper/agent, or a private overlay address; see
-//! [`Config::listen`]. Unset by default (opt-in). A push can only cause
+//! [`Config::listen`]. Browser requests carrying `Origin` are refused. The
+//! request authority must name the accepted socket's local IP and port, or
+//! `localhost` for a loopback connection. DNS names and forwarded hosts are not
+//! trusted. Unset by default (opt-in). A push can only cause
 //! re-checks, never close a session on its own, so it belongs on this plane.
 
 use std::net;
@@ -38,7 +41,7 @@ use axum::{
 	response::{IntoResponse, Response},
 	routing::{get, post},
 };
-use axum_server::accept::DefaultAcceptor;
+use axum_server::accept::Accept;
 
 /// One io_uring worker's counters, as [`with_uring`](Internal::with_uring) takes
 /// them.
@@ -248,7 +251,8 @@ impl Internal {
 	/// [`serve`](Self::serve).
 	///
 	/// Anything merged in inherits this listener's "unauthenticated,
-	/// trusted-plane-only" contract; see the module docs.
+	/// trusted-plane-only" contract; see the module docs. [`serve`](Self::serve)
+	/// applies the Origin and authority policy to the completed router.
 	pub fn routes(&self) -> Router {
 		Router::new()
 			.route("/metrics", get(serve_metrics))
@@ -273,7 +277,9 @@ impl Internal {
 	///
 	/// The mirror of [`Web::serve`](crate::web::Web::serve): the caller builds `app`
 	/// from [`routes`](Self::routes) plus whatever extra ops routes it merged in,
-	/// and this owns the listener. An embedder that binds the socket itself
+	/// and this owns the listener. Every route refuses `Origin` and requires the
+	/// request authority to match the connection's local IP and port (`localhost`
+	/// is also accepted on loopback). An embedder that binds the socket itself
 	/// instead would fork both the socket options and the disabled-listener
 	/// contract below.
 	///
@@ -303,7 +309,7 @@ impl Internal {
 				timeout,
 				activity: None,
 			},
-			DefaultAcceptor::new(),
+			InternalAcceptor,
 		)?
 		.serve(app.into_make_service())
 		.await?;
@@ -317,6 +323,95 @@ impl Internal {
 		let app = self.routes();
 		self.serve(app).await
 	}
+}
+
+/// Apply the policy after an embedder has finished assembling its router, using
+/// the accepted socket's destination even when the listener binds a wildcard.
+#[derive(Clone)]
+struct InternalAcceptor;
+
+impl<S> Accept<crate::listener::Accepted, S> for InternalAcceptor {
+	type Stream = crate::listener::Accepted;
+	type Service = InternalService<S>;
+	type Future = std::future::Ready<std::io::Result<(Self::Stream, Self::Service)>>;
+
+	fn accept(&self, stream: Self::Stream, inner: S) -> Self::Future {
+		std::future::ready(
+			stream
+				.local_addr()
+				.map(|local| (stream, InternalService { inner, local })),
+		)
+	}
+}
+
+#[derive(Clone)]
+struct InternalService<S> {
+	inner: S,
+	local: net::SocketAddr,
+}
+
+impl<S, B> tower_service::Service<http::Request<B>> for InternalService<S>
+where
+	S: tower_service::Service<http::Request<B>, Response = Response>,
+{
+	type Response = Response;
+	type Error = S::Error;
+	type Future = futures::future::Either<S::Future, std::future::Ready<Result<Response, S::Error>>>;
+
+	fn poll_ready(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+		self.inner.poll_ready(cx)
+	}
+
+	fn call(&mut self, request: http::Request<B>) -> Self::Future {
+		if allows_request(&request, self.local) {
+			futures::future::Either::Left(self.inner.call(request))
+		} else {
+			futures::future::Either::Right(std::future::ready(Ok(StatusCode::FORBIDDEN.into_response())))
+		}
+	}
+}
+
+fn allows_request<B>(request: &http::Request<B>, local: net::SocketAddr) -> bool {
+	// Origin alone blocks a cross-site form POST to the literal loopback IP.
+	// Authority validation also blocks same-origin reads through DNS rebinding.
+	if request.headers().contains_key(http::header::ORIGIN) {
+		return false;
+	}
+	// HTTP/1.1 carries one Host header, HTTP/2 and absolute-form requests a URI
+	// authority. At least one must be present, and each present must name this socket.
+	let mut hosts = request.headers().get_all(http::header::HOST).iter();
+	let host = match (hosts.next(), hosts.next()) {
+		(None, _) => None,
+		(Some(host), None) => match http::uri::Authority::try_from(host.as_bytes()) {
+			Ok(host) => Some(host),
+			Err(_) => return false,
+		},
+		(Some(_), Some(_)) => return false,
+	};
+	let mut authorities = host.iter().chain(request.uri().authority()).peekable();
+	authorities.peek().is_some() && authorities.all(|authority| owns_authority(authority, local))
+}
+
+fn owns_authority(authority: &http::uri::Authority, local: net::SocketAddr) -> bool {
+	let port = match authority.port_u16() {
+		Some(port) => port,
+		None if authority.as_str() == authority.host() => 80,
+		None => return false,
+	};
+	if port != local.port() || authority.as_str().contains('@') {
+		return false;
+	}
+	let host = authority.host();
+	if host.eq_ignore_ascii_case("localhost") {
+		// A dual-stack wildcard bind reports an IPv4 peer as `::ffff:127.0.0.1`.
+		return local.ip().to_canonical().is_loopback();
+	}
+	let host = host
+		.strip_prefix('[')
+		.and_then(|host| host.strip_suffix(']'))
+		.unwrap_or(host);
+	host.parse::<net::IpAddr>()
+		.is_ok_and(|ip| ip.to_canonical() == local.ip().to_canonical())
 }
 
 /// Liveness probe mirror for the internal listener. Always `200 ok`. The
@@ -895,9 +990,150 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 fn render_uring(_out: &mut String, _workers: &[UringWorker]) {}
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn authority_matches_only_the_local_address_and_port() {
+		for (local, authority, expected) in [
+			("127.0.0.1:80", "127.0.0.1", true),
+			("127.0.0.1:80", "LOCALHOST", true),
+			("127.0.0.1:80", "localhost:", false),
+			("127.0.0.1:80", "localhost:invalid", false),
+			("127.0.0.1:80", "127.0.0.1:65536", false),
+			("127.0.0.1:80", "user@127.0.0.1", false),
+			("127.0.0.1:9101", "127.0.0.2:9101", false),
+			("192.0.2.1:9101", "localhost:9101", false),
+			("[::1]:80", "[::1]", true),
+			("[::1]:9101", "[0:0:0:0:0:0:0:1]:9101", true),
+			("[::ffff:127.0.0.1]:9101", "127.0.0.1:9101", true),
+			("[::ffff:127.0.0.1]:9101", "localhost:9101", true),
+			("[::ffff:192.0.2.1]:9101", "localhost:9101", false),
+		] {
+			assert_eq!(
+				owns_authority(&authority.parse().unwrap(), local.parse().unwrap()),
+				expected,
+				"{local}, {authority}"
+			);
+		}
+	}
+
+	#[tokio::test]
+	async fn internal_http2_checks_authority_without_a_host_header() {
+		let internal = Internal::new(
+			Config {
+				listen: Some("127.0.0.1:0".parse().unwrap()),
+			},
+			moq_net::stats::Registry::disabled(),
+		)
+		.bind()
+		.unwrap();
+		let addr = internal.addr().unwrap();
+		let app = internal.routes();
+		let server = tokio::spawn(internal.serve(app));
+		let socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+		let (mut client, connection) = h2::client::handshake(socket).await.unwrap();
+		let connection = tokio::spawn(connection);
+		for (authority, host, origin, expected) in [
+			(addr.to_string(), None, None, StatusCode::OK),
+			("evil.example".into(), None, None, StatusCode::FORBIDDEN),
+			(addr.to_string(), Some("evil.example"), None, StatusCode::FORBIDDEN),
+			(addr.to_string(), None, Some("null"), StatusCode::FORBIDDEN),
+		] {
+			let mut request = http::Request::builder().uri(format!("http://{authority}/sessions"));
+			if let Some(host) = host {
+				request = request.header(http::header::HOST, host);
+			}
+			if let Some(origin) = origin {
+				request = request.header(http::header::ORIGIN, origin);
+			}
+			let (response, _) = client.send_request(request.body(()).unwrap(), true).unwrap();
+			assert_eq!(
+				response.await.unwrap().status(),
+				expected,
+				"{authority}, host={host:?}, origin={origin:?}"
+			);
+		}
+		connection.abort();
+		assert!(connection.await.unwrap_err().is_cancelled());
+		server.abort();
+		assert!(server.await.unwrap_err().is_cancelled());
+	}
+
+	#[tokio::test]
+	async fn internal_requests_require_the_listener_authority_and_no_origin() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		for listen in ["127.0.0.1:0", "0.0.0.0:0", "[::1]:0", "[::]:0"] {
+			let internal = Internal::new(
+				Config {
+					listen: Some(listen.parse().unwrap()),
+				},
+				moq_net::stats::Registry::disabled(),
+			)
+			.bind()
+			.unwrap();
+			let bound = internal.addr().unwrap();
+			let ip = if bound.is_ipv4() { "127.0.0.1" } else { "::1" };
+			let addr = net::SocketAddr::new(ip.parse().unwrap(), bound.port());
+			let app = internal
+				.routes()
+				.merge(Router::new().route("/embedder", get(async || "embedded")));
+			let server = tokio::spawn(internal.serve(app));
+			for (method, path, headers, expected) in [
+				("GET", "/sessions", format!("Host: {addr}\r\n"), 200),
+				("POST", "/sessions/revalidate", format!("Host: {addr}\r\n"), 200),
+				("GET", "/embedder", format!("Host: localhost:{}\r\n", addr.port()), 200),
+				(
+					"POST",
+					"/sessions/revalidate",
+					format!("Host: {addr}\r\nOrigin: https://evil.example\r\n"),
+					403,
+				),
+				(
+					"POST",
+					"/sessions/revalidate",
+					format!("Host: {addr}\r\nOrigin: null\r\n"),
+					403,
+				),
+				(
+					"GET",
+					"/sessions",
+					format!("Host: evil.example:{}\r\n", addr.port()),
+					403,
+				),
+				(
+					"GET",
+					"/embedder",
+					format!("Host: evil.example:{}\r\n", addr.port()),
+					403,
+				),
+				("GET", "/health", format!("Host: {addr}\r\nOrigin: \r\n"), 403),
+				("GET", "/sessions", "Host: 192.0.2.1:9101\r\n".into(), 403),
+				("GET", "/sessions", format!("Host: {ip}\r\n"), 403),
+				("GET", "/sessions", String::new(), 403),
+				("GET", "/sessions", format!("Host: {addr}\r\nHost: {addr}\r\n"), 403),
+				("GET", "http://evil.example/sessions", format!("Host: {addr}\r\n"), 403),
+			] {
+				let mut socket = tokio::net::TcpStream::connect(addr).await.unwrap();
+				socket
+					.write_all(
+						format!("{method} {path} HTTP/1.1\r\n{headers}Connection: close\r\nContent-Length: 0\r\n\r\n")
+							.as_bytes(),
+					)
+					.await
+					.unwrap();
+				let mut response = String::new();
+				socket.read_to_string(&mut response).await.unwrap();
+				assert!(
+					response.starts_with(&format!("HTTP/1.1 {expected} ")),
+					"listen={listen}, {method} {path}, {headers:?}: {response}"
+				);
+			}
+			server.abort();
+			assert!(server.await.unwrap_err().is_cancelled());
+		}
+	}
 
 	#[tokio::test]
 	async fn stun_metrics_are_present_only_for_a_configured_listener() {
@@ -931,7 +1167,8 @@ mod tests {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
@@ -1165,7 +1402,7 @@ mod tests {
 		let internal = Internal::new(Config::default(), moq_net::stats::Registry::disabled());
 		let app = internal.routes();
 
-		let elapsed = tokio::time::timeout(std::time::Duration::from_secs(60), internal.serve(app)).await;
+		let elapsed = kio::clock::timeout(std::time::Duration::from_secs(60), internal.serve(app)).await;
 		assert!(elapsed.is_err(), "serve resolved with no listen address configured");
 	}
 
@@ -1371,8 +1608,8 @@ mod tests {
 		sub_source.announce(Default::default()).unwrap();
 		let sub_track = sub_source.create_track("audio", timed()).unwrap();
 
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 
 		// Leave 46 bytes across two frames behind the live edge, then read 1234
 		// egress bytes out of the default-tier broadcast.

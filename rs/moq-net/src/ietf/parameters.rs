@@ -53,10 +53,27 @@ pub enum ParameterBytes {
 /// SETUP parameters, in the order they were set or decoded.
 ///
 /// A handful at most, so a linear scan beats hashing, and the encoding is deterministic.
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct Parameters {
 	vars: Vec<(ParameterVarInt, u64)>,
 	bytes: Vec<(ParameterBytes, Vec<u8>)>,
+}
+
+impl std::fmt::Debug for Parameters {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Parameters")
+			.field("vars", &self.vars)
+			// Values can carry credentials, so only their lengths.
+			.field(
+				"bytes",
+				&self
+					.bytes
+					.iter()
+					.map(|(kind, value)| (kind, value.len()))
+					.collect::<Vec<_>>(),
+			)
+			.finish()
+	}
 }
 
 impl<'a> Decode<'a, Version> for Parameters {
@@ -450,7 +467,7 @@ mod tests {
 
 	#[test]
 	fn setup_allows_repeated_unknown_options() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for kind in [0x20, 0x21, 0x9d, 0x11c] {
 				let mut buf = Vec::new();
 				let mut w = Encoder::new(&mut buf, version.into());
@@ -472,7 +489,7 @@ mod tests {
 
 	#[test]
 	fn setup_rejects_repeated_known_options() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for bytes in [&[4, 1, 0, 2][..], &[7, 1, b'a', 0, 1, b'b'][..]] {
 				assert!(matches!(
 					Parameters::decode_slice(bytes, version),
@@ -484,14 +501,14 @@ mod tests {
 
 	#[test]
 	fn setup_repeated_unknown_options_still_require_complete_values() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			assert!(Parameters::decode_slice(&[0x21, 1, b'a', 0, 2, b'b'], version).is_err());
 		}
 	}
 
 	#[test]
 	fn group_order_parameter_rejects_values_outside_one_and_two() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			for value in [0u8, 3, 255] {
 				let bytes = [value];
 				let mut r = Decoder::new(&bytes, version.into());

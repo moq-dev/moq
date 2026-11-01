@@ -32,7 +32,7 @@ type Read = (Vec<Vec<u8>>, Result<(), Error>);
 struct Setup {
 	pair: MockPair,
 	track: moq_net::track::Producer,
-	reader: moq_clock::sim::JoinHandle<Read>,
+	reader: kio::clock::sim::JoinHandle<Read>,
 	_broadcast: moq_net::origin::Publication,
 }
 
@@ -54,14 +54,14 @@ async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Se
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
 	// The publisher only learns of a subscription once the subscriber polls it.
 	let (ready, active) = futures::channel::oneshot::channel();
-	let reader = moq_clock::sim::spawn(async move {
+	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote.track("video").unwrap().subscribe(None).await.expect("subscribe");
 		let _ = ready.send(());
 		let mut got = Vec::new();
@@ -81,12 +81,12 @@ async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Se
 		}
 	});
 
-	moq_clock::timeout(TIMEOUT, support::harness::subscribed(&track))
+	kio::clock::timeout(TIMEOUT, support::harness::subscribed(&track))
 		.await
 		.expect("no subscriber appeared");
 	// Both ends hold the subscription, so a close tests only the group tail and not a
 	// control response still in flight.
-	moq_clock::timeout(TIMEOUT, active)
+	kio::clock::timeout(TIMEOUT, active)
 		.await
 		.expect("the subscription never became active")
 		.expect("reader alive");
@@ -100,7 +100,7 @@ async fn setup_with_gate(version: &str, gate: Option<kio::Consumer<bool>>) -> Se
 }
 
 /// TRACK_INFO creates demand before any SUBSCRIBE, so demand alone cannot gate a drain test.
-#[moq_clock::test]
+#[kio::test]
 async fn track_info_interest_precedes_a_subscription() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		let publisher = produce_origin(1);
@@ -125,12 +125,12 @@ async fn track_info_interest_precedes_a_subscription() {
 
 /// A finished track's last group and FIN reach the subscriber, even though the
 /// close is requested before the session wrote them.
-#[moq_clock::test]
+#[kio::test]
 async fn close_delivers_a_finished_track() {
 	close_delivers_a_finished_track_for("moq-lite-05").await;
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn ietf_close_delivers_a_finished_track() {
 	close_delivers_a_finished_track_for("moq-transport-22").await;
 }
@@ -145,17 +145,17 @@ async fn close_delivers_a_finished_track_for(version: &str) {
 	group.finish().unwrap();
 	track.finish().unwrap();
 
-	let started = moq_clock::now();
-	moq_clock::timeout(TIMEOUT, pair.client.close())
+	let started = kio::clock::now();
+	kio::clock::timeout(TIMEOUT, pair.client.close())
 		.await
 		.expect("close timed out")
 		.expect("the close drains");
 	assert!(
-		(moq_clock::now() - started) < Duration::from_secs(1),
+		(kio::clock::now() - started) < Duration::from_secs(1),
 		"drained before the deadline"
 	);
 
-	let (got, end) = moq_clock::timeout(TIMEOUT, reader)
+	let (got, end) = kio::clock::timeout(TIMEOUT, reader)
 		.await
 		.expect("reader timed out")
 		.unwrap();
@@ -165,12 +165,12 @@ async fn close_delivers_a_finished_track_for(version: &str) {
 
 /// A track that never finishes holds the drain until the deadline, then the
 /// session closes anyway.
-#[moq_clock::test]
+#[kio::test]
 async fn close_gives_up_on_a_live_track() {
 	close_gives_up_on_a_live_track_for("moq-lite-05").await;
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn ietf_close_gives_up_on_a_live_track() {
 	close_gives_up_on_a_live_track_for("moq-transport-22").await;
 }
@@ -180,21 +180,21 @@ async fn close_gives_up_on_a_live_track_for(version: &str) {
 		pair, track: _track, ..
 	} = setup(version).await;
 
-	let started = moq_clock::now();
-	let res = moq_clock::timeout(TIMEOUT, pair.client.close())
+	let started = kio::clock::now();
+	let res = kio::clock::timeout(TIMEOUT, pair.client.close())
 		.await
 		.expect("close timed out");
 	assert!(matches!(res, Err(Error::Timeout)), "{res:?}");
-	assert_eq!((moq_clock::now() - started), Duration::from_secs(1));
+	assert_eq!((kio::clock::now() - started), Duration::from_secs(1));
 }
 
 /// An abort from another handle cuts a drain short.
-#[moq_clock::test]
+#[kio::test]
 async fn abort_cuts_a_drain_short() {
 	abort_cuts_a_drain_short_for("moq-lite-05").await;
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn ietf_abort_cuts_a_drain_short() {
 	abort_cuts_a_drain_short_for("moq-transport-22").await;
 }
@@ -205,24 +205,24 @@ async fn abort_cuts_a_drain_short_for(version: &str) {
 	} = setup(version).await;
 
 	let other = pair.client.clone();
-	let started = moq_clock::now();
-	let close = moq_clock::sim::spawn(pair.client.close());
-	moq_clock::sleep(Duration::from_millis(100)).await;
+	let started = kio::clock::now();
+	let close = kio::clock::sim::spawn(pair.client.close());
+	kio::clock::sleep(Duration::from_millis(100)).await;
 	other.abort(Error::Cancel);
 
-	let res = moq_clock::timeout(TIMEOUT, close)
+	let res = kio::clock::timeout(TIMEOUT, close)
 		.await
 		.expect("close timed out")
 		.unwrap();
 	assert!(res.is_err() && !matches!(res, Err(Error::Timeout)), "{res:?}");
 	assert!(
-		(moq_clock::now() - started) < Duration::from_secs(1),
+		(kio::clock::now() - started) < Duration::from_secs(1),
 		"{res:?} after {:?}",
-		(moq_clock::now() - started)
+		(kio::clock::now() - started)
 	);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn close_withdraws_announcements_before_closing_the_transport() {
 	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let publisher = produce_origin(1);
@@ -243,7 +243,7 @@ async fn close_withdraws_announcements_before_closing_the_transport() {
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn close_times_out_waiting_for_announcement_acknowledgements() {
 	for version in ["moq-lite-01", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let publisher = produce_origin(1);
@@ -256,14 +256,14 @@ async fn close_times_out_waiting_for_announcement_acknowledgements() {
 		let pair = connect_mock(options).await;
 		crate::support::announced(&subscriber.consume(), "bcast").await;
 		pair.client_transport.hold_fin_acknowledgements();
-		let started = moq_clock::now();
+		let started = kio::clock::now();
 		assert!(matches!(pair.client.close().await, Err(Error::Timeout)), "{version}");
-		assert_eq!(moq_clock::now() - started, Duration::from_secs(1));
+		assert_eq!(kio::clock::now() - started, Duration::from_secs(1));
 	}
 }
 
 /// A transport ACK is not proof the subscriber read the final group.
-#[moq_clock::test]
+#[kio::test]
 async fn close_tail() {
 	let Setup {
 		pair, track, reader, ..
@@ -274,8 +274,8 @@ async fn close_tail() {
 	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
 	group.finish().unwrap();
 	track.finish().unwrap();
-	let close = moq_clock::sim::spawn(pair.client.close());
-	moq_clock::sleep(Duration::from_millis(100)).await;
+	let close = kio::clock::sim::spawn(pair.client.close());
+	kio::clock::sleep(Duration::from_millis(100)).await;
 	assert!(
 		!close.is_finished(),
 		"close must wait for the subscriber, not the transport ACK"
@@ -291,7 +291,7 @@ async fn close_tail() {
 }
 
 /// A lite07 peer that never acknowledges the track end cannot report a successful close.
-#[moq_clock::test]
+#[kio::test]
 async fn close_requires_subscriber_fin() {
 	let Setup {
 		pair,
@@ -305,27 +305,27 @@ async fn close_requires_subscriber_fin() {
 	group.write_frame(Timestamp::ZERO, b"last".as_slice()).unwrap();
 	group.finish().unwrap();
 	track.finish().unwrap();
-	let started = moq_clock::now();
+	let started = kio::clock::now();
 	assert!(matches!(pair.client.close().await, Err(Error::Timeout)));
-	assert_eq!(moq_clock::now() - started, Duration::from_secs(1));
+	assert_eq!(kio::clock::now() - started, Duration::from_secs(1));
 }
 
 /// Released drafts retain ACK-based close even when application delivery is delayed.
-#[moq_clock::test]
+#[kio::test]
 async fn older_lite_close_keeps_ack_drain() {
 	for version in ["moq-lite-05", "moq-lite-06"] {
 		peer_close_reads_buffered_tail(version).await;
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn earlier_lite_peer_close_reads_buffered_tail() {
 	for version in ["moq-lite-01", "moq-lite-02", "moq-lite-03", "moq-lite-04"] {
 		peer_close_reads_buffered_tail(version).await;
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn ietf_peer_close_reads_buffered_tail() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
 		peer_close_reads_buffered_tail(version).await;
@@ -350,7 +350,7 @@ async fn peer_close_reads_buffered_tail(version: &str) {
 
 /// Legacy session/control streams and the accept error race the buffered group.
 /// Holding the whole receiver ensures the close is visible on its first poll.
-#[moq_clock::test]
+#[kio::test]
 async fn peer_close_before_receiver_poll_keeps_buffered_tail() {
 	for version in [
 		"moq-lite-01",
@@ -377,7 +377,7 @@ async fn peer_close_before_receiver_poll_keeps_buffered_tail() {
 }
 
 /// A locally unsupported feature uses only the negotiated session registry.
-#[moq_clock::test]
+#[kio::test]
 async fn unsupported_abort_uses_the_negotiated_session_registry() {
 	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let version: Version = protocol.parse().unwrap();
@@ -390,7 +390,7 @@ async fn unsupported_abort_uses_the_negotiated_session_registry() {
 }
 
 /// A Lite-only close code arriving on IETF stays unknown instead of gaining Lite semantics.
-#[moq_clock::test]
+#[kio::test]
 async fn unsupported_close_is_decoded_by_the_negotiated_session_registry() {
 	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		let version: Version = protocol.parse().unwrap();
@@ -408,7 +408,7 @@ async fn unsupported_close_is_decoded_by_the_negotiated_session_registry() {
 
 /// moq-lite's own session range (0x30-0x3f) is never sent as an unknown code on either
 /// wire, while a code outside it passes through.
-#[moq_clock::test]
+#[kio::test]
 async fn an_unknown_lite_range_abort_is_unspecified_on_every_wire() {
 	for protocol in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-18", "moq-transport-22"] {
 		for (unknown, expected) in [(0x31, 0x1), (0x20, 0x20)] {
@@ -432,12 +432,12 @@ async fn ended(version: &str, close: impl FnOnce(&MockPair)) -> (Error, moq_net:
 		.session(moq_net::Path::from_static("room"));
 	let pair = connect_mock(options).await;
 	close(&pair);
-	let err = moq_clock::timeout(TIMEOUT, pair.server.closed())
+	let err = kio::clock::timeout(TIMEOUT, pair.server.closed())
 		.await
 		.expect("the session closes");
 	drop(pair);
 	// The drivers release the stats once the transport has closed under them.
-	moq_clock::sleep(Duration::from_secs(1)).await;
+	kio::clock::sleep(Duration::from_secs(1)).await;
 	let presence = registry.snapshot().sessions()[0].1;
 	assert_eq!(presence.sessions_ended, 1, "{version}: the session ended");
 	(err, presence.sessions_failed)
@@ -445,7 +445,7 @@ async fn ended(version: &str, close: impl FnOnce(&MockPair)) -> (Error, moq_net:
 
 /// A clean close is `Error::Cancel` and no failure, whichever side closed. Anything else
 /// counts by its kind, without the caller recording it.
-#[moq_clock::test]
+#[kio::test]
 async fn a_session_records_how_it_ended() {
 	use moq_net::stats::Failures;
 	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {

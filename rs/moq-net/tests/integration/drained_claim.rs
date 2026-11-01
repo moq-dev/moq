@@ -40,7 +40,7 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, 
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
 async fn settle() {
-	moq_clock::sleep(Duration::from_millis(500)).await;
+	kio::clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// A worker claiming `pool`, answering each request with an output whose `video`
@@ -58,7 +58,7 @@ impl Worker {
 		let claim = Rc::new(origin.requests("pool").unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
-		drop(moq_clock::sim::spawn(async move {
+		drop(kio::clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let prepared = request.prepare(Epoch::mint()).unwrap();
 				let track = prepared.broadcast().create_track("video", timed()).unwrap();
@@ -81,13 +81,16 @@ impl Worker {
 	}
 }
 
-/// Read the first frame of `video` at `pool/p` through `relay`. The first subscription
-/// through a claim is reset once the answer's exact route arrives, the cold-start reset
-/// accepted until announce takeover lands, so the read retries once.
-async fn watch(relay: &origin::Producer) -> String {
-	let cold = relay.consume().request("pool/p", None).await.unwrap();
-	drop(cold.track("video").unwrap().subscribe(None).await);
-	settle().await;
+/// Read the first frame of `video` at `pool/p` through `relay`. moq-lite-07 announces the
+/// answer as a takeover of the claim, so the first subscription reads. Older wires carry it
+/// as an ordinary announcement, which resets the first subscription through the claim, so
+/// they wake the worker first.
+async fn watch(version: Version, relay: &origin::Producer) -> String {
+	if version != "moq-lite-07-wip".parse().unwrap() {
+		let cold = relay.consume().request("pool/p", None).await.unwrap();
+		drop(cold.track("video").unwrap().subscribe(None).await);
+		settle().await;
+	}
 	let broadcast = relay.consume().request("pool/p", None).await.unwrap();
 	let mut subscription = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
 	let mut group = subscription.recv_group().await.unwrap().expect("a group");
@@ -104,17 +107,17 @@ async fn drained_claim(version: &str) {
 	let _b = link(version, &b.origin, &relay, 10).await;
 	settle().await;
 
-	assert_eq!(watch(&relay).await, "a", "{version}");
+	assert_eq!(watch(version, &relay).await, "a", "{version}");
 
 	// A closes its output and drains its session, so B wins the path from here on.
 	a.outputs.borrow().iter().for_each(|(output, _)| output.close());
 	a_link.server.drain().send(Goaway::new()).unwrap();
 	// Past the linger, which is as long as the cache window, nothing reads the relay's
 	// front for the path.
-	moq_clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2).await;
+	kio::clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2).await;
 
 	assert_eq!(
-		watch(&relay).await,
+		watch(version, &relay).await,
 		"b",
 		"{version}: the relay kept the drained worker's front"
 	);
@@ -122,16 +125,16 @@ async fn drained_claim(version: &str) {
 	assert_eq!(b.served(), 1, "{version}");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_drained_claims_front_ends_once_unread_lite06() {
-	moq_clock::timeout(TEST_TIMEOUT, drained_claim("moq-lite-06"))
+	kio::clock::timeout(TEST_TIMEOUT, drained_claim("moq-lite-06"))
 		.await
 		.expect("timed out");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_drained_claims_front_ends_once_unread_lite07() {
-	moq_clock::timeout(TEST_TIMEOUT, drained_claim("moq-lite-07-wip"))
+	kio::clock::timeout(TEST_TIMEOUT, drained_claim("moq-lite-07-wip"))
 		.await
 		.expect("timed out");
 }
