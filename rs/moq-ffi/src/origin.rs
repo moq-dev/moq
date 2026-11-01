@@ -278,6 +278,14 @@ pub enum MoqAnnounceEvent {
 		/// The broadcast announcement affected by this event.
 		announce: MoqAnnounce,
 	},
+	/// A route now covers the prefix and continues what the route at `predecessor`
+	/// served beneath it: keep what was resolved through that one.
+	Takeover {
+		/// The broadcast announcement affected by this event.
+		announce: MoqAnnounce,
+		/// The prefix of the route it continues, at or above `announce`'s.
+		predecessor: String,
+	},
 }
 
 impl From<moq_net::announce::Event> for MoqAnnounceEvent {
@@ -295,6 +303,10 @@ impl From<moq_net::announce::Event> for MoqAnnounceEvent {
 			},
 			Event::Restart(announce) => Self::Restart {
 				announce: announce.into(),
+			},
+			Event::Takeover { announce, predecessor } => Self::Takeover {
+				announce: announce.into(),
+				predecessor: predecessor.to_string(),
 			},
 		}
 	}
@@ -332,12 +344,7 @@ impl MoqOriginProducer {
 /// Build an origin whose host handles retain its driver's completion.
 pub(crate) fn spawn(config: moq_net::origin::Config) -> Origin {
 	let (inner, driver) = moq_net::origin::Producer::new(config);
-	#[cfg(not(target_arch = "wasm32"))]
 	let driver = Background::driver(driver);
-	#[cfg(target_arch = "wasm32")]
-	let driver = crate::ffi::spawn(async move {
-		moq_net::time::run(driver).await;
-	});
 	Origin { inner, driver }
 }
 
@@ -682,7 +689,7 @@ impl MoqFollowing {
 	}
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod supervision_tests {
 	use super::*;
 

@@ -1,4 +1,4 @@
-//! MoQ sessions over QUIC on moq-clock's simulator: no sockets and no host clock, with the
+//! MoQ sessions over QUIC on kio's simulator: no sockets and no host clock, with the
 //! path's latency, bandwidth, loss, and reordering drawn from a seed.
 //!
 //! A publisher serves a track of one-frame groups to a subscriber across the simulated path.
@@ -10,7 +10,7 @@
 
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_tokio::moq_net::{self, Timescale, Timestamp, Version, origin, track};
 use moq_tokio::quic::driver::{
 	self,
@@ -121,11 +121,11 @@ fn sequences(arrivals: &Arrivals) -> Vec<u64> {
 /// the client's datagrams and `down` the server's, on a fresh simulator seeded with `seed`.
 fn run(version: &str, seed: u64, up: Path, down: Path) -> (Arrivals, Network) {
 	let version: Version = version.parse().unwrap();
-	moq_clock::sim::run(async move {
+	kio::clock::sim::run(async move {
 		let network = Network::new(seed);
 		network.path(CLIENT, SERVER, |path| *path = up);
 		network.path(SERVER, CLIENT, |path| *path = down);
-		let arrivals = moq_clock::timeout(TIMEOUT, serve(&network, version, seed))
+		let arrivals = kio::clock::timeout(TIMEOUT, serve(&network, version, seed))
 			.await
 			.unwrap_or_else(|_| panic!("{version} seed {seed}: the track never finished"));
 		(arrivals, network)
@@ -154,7 +154,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 		let (session, driver) = moq_net::Server::new()
 			.with_versions(version.into())
 			.with_publisher(publisher.consume())
-			.accept(moq_clock::now(), session)
+			.accept(kio::clock::now(), session)
 			.await
 			.unwrap();
 		spawn(driver);
@@ -170,7 +170,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 		let (session, driver) = moq_net::Client::new()
 			.with_versions(version.into())
 			.with_subscriber(viewer.clone())
-			.connect(moq_clock::now(), session)
+			.connect(kio::clock::now(), session)
 			.await
 			.unwrap();
 		spawn(driver);
@@ -196,7 +196,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 			let timestamp = Timestamp::from_millis(sequence * INTERVAL.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, vec![sequence as u8; FRAME]).unwrap();
 			group.finish().unwrap();
-			moq_clock::sleep(INTERVAL).await;
+			kio::clock::sleep(INTERVAL).await;
 		}
 		source.finish().unwrap();
 	};
@@ -210,7 +210,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 				frame.payload.iter().all(|&byte| byte == sequence as u8),
 				"group {sequence} is corrupted"
 			);
-			arrivals.push((sequence, moq_clock::now()));
+			arrivals.push((sequence, kio::clock::now()));
 		}
 		arrivals
 	};
@@ -277,7 +277,7 @@ fn origin_producer(hop: u64) -> origin::Producer {
 
 /// Run a protocol driver on the simulator for as long as the run lasts
 fn spawn<D: moq_net::time::Driver + Unpin + 'static>(mut driver: D) {
-	drop(moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
+	drop(kio::clock::sim::spawn(kio::clock::drive(move |now, waiter| {
 		moq_net::time::Driver::poll(&mut driver, now, waiter)
 	})));
 }

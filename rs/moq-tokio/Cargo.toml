@@ -21,7 +21,7 @@ net = ["dep:moq-net", "dep:web-transport-trait"]
 # the MoQ backend. Needs a crypto-provider feature.
 driver = ["dep:moq-congestion", "dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash"]
 # QUIC and WebTransport over moq-quic, for `https://`, `moqt://`, and `moql://`.
-quic = ["_transport", "_certs", "driver", "dep:http", "dep:kio", "dep:web-transport-proto", "dep:reqwest", "watch", "dep:dns-lookup"]
+quic = ["_transport", "_certs", "driver", "dep:http", "dep:web-transport-proto", "dep:reqwest", "watch", "dep:dns-lookup"]
 # Server-side certificate handling: chains loaded from disk, self-signed generation,
 # in-memory identities, and per-SNI selection. Not one to enable on its own, since
 # nothing turns it into a listener: every QUIC backend needs it for its own TLS, and
@@ -54,11 +54,11 @@ uds = ["tcp", "qmux/uds"]
 # Native WebRTC data channels over str0m, with a full ICE agent (the `webrtc` module).
 webrtc = ["_transport", "dep:qmux", "dep:moq-ice", "dep:str0m", "dep:if-addrs", "dep:mdns-sd"]
 ring = ["_certs", "rustls/ring", "rcgen/ring", "moq-quic?/ring"]
-# Inside `moq_clock::sim::run`, detached tasks spawn on moq-clock's deterministic simulator,
+# Inside `kio::clock::sim::run`, detached tasks spawn on kio's deterministic simulator,
 # and with `driver`, `quic::driver::sim` carries datagrams over seeded, impaired
 # `moq_quic::sim::Link`s with no sockets. Turns on no transport of its own. Hidden from the
 # docs. Meant for dev-dependencies, so production builds never compile it.
-sim = ["moq-clock/sim", "moq-quic?/sim"]
+sim = ["kio/sim", "moq-quic?/sim"]
 
 [dependencies]
 bytes = "1"
@@ -72,10 +72,8 @@ http = { version = "1", optional = true }
 humantime = "2.3"
 humantime-serde = { workspace = true }
 if-addrs = { workspace = true, optional = true }
-kio = { workspace = true, optional = true }
+kio = { workspace = true, features = ["runtime"] }
 mdns-sd = { workspace = true, optional = true }
-
-moq-clock = { workspace = true }
 moq-congestion = { workspace = true, optional = true }
 # The ICE agent behind the `webrtc` module. Private, like str0m: neither appears in this crate's API.
 moq-ice = { workspace = true, optional = true }
@@ -139,7 +137,7 @@ chrono = "0.4"
 # Use the channel type behind `mdns_sd::Receiver` so the mDNS readiness gate can
 # be driven with synthetic daemon events.
 flume = "0.12"
-moq-clock = { path = "../moq-clock", features = ["sim"] }
+kio = { path = "../kio", features = ["sim"] }
 # The simulator tests seed BBR3's probe phases.
 moq-congestion = { path = "../moq-congestion", features = ["testing"] }
 # A bufferbloated path for the receive-credit tests and benchmark.

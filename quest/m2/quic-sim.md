@@ -3,14 +3,14 @@
 ## Goal
 
 The relay, and moq-tokio's `Client` and `Server`, run over `moq-quic` on the
-`moq-clock` sim with configurable latency, loss, reordering, and bandwidth,
+`kio::clock` sim with configurable latency, loss, reordering, and bandwidth,
 so relay hops, the transport race, and reconnects over real QUIC are tested
 deterministically with no sockets.
 
 ## Plan
 
 Already landed: MoQ sessions over moq-quic on the sim. The QUIC driver
-spawns on the simulator inside `moq_clock::sim::run`, under moq-tokio's
+spawns on the simulator inside `kio::clock::sim::run`, under moq-tokio's
 hidden `sim` feature. `quic::driver::sim::Network` binds a socket per address
 and carries datagrams across moq-quic's seeded `Link` (now
 `moq_quic::sim`), so one seed replays a run.

@@ -2,7 +2,7 @@
 //! duplication, jitter, and reordering
 //!
 //! Not part of the public API. The crate's own tests drive two endpoints across a [`Link`]
-//! each way, and the `sim` feature exposes it for drivers that run QUIC on `moq-clock`'s
+//! each way, and the `sim` feature exposes it for drivers that run QUIC on kio's
 //! simulator with no sockets.
 
 use rand::{RngExt, rngs::StdRng};

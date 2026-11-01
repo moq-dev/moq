@@ -28,11 +28,11 @@ secret = "/etc/moq/reset.key"        # File holding 64 hex chars. Omit for a ran
 cert = "cert.pem"                    # Certificate chain and key. Reloaded on change.
 key = "key.pem"
 generate = ["localhost"]             # Or: a self-signed cert for development.
-root = ["peer-ca.pem"]               # Optional: CAs for client certs (mTLS), reported to the auth server. Needs QUIC.
+root = ["peer-ca.pem"]               # Optional: CAs for client certs (mTLS), reported to the auth server. Needs QUIC or tcp.tls.
 
 [listen.tcp]                         # Plaintext qmux over TCP for trusted local workers.
 bind = "127.0.0.1:4444"
-# tls = true                         # Or: qmux over TLS (tls://) with the listen certificate, no client certs.
+# tls = true                         # Or: qmux over TLS (tls://) with the listen certificate and client-cert policy.
 
 [listen.unix]                        # Plaintext qmux over a Unix socket, gated by peer credentials.
 bind = "/run/moq/internal.sock"
@@ -83,7 +83,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 congestion_control = "delay"         # "delay" (BBR, the default), "loss" (CUBIC), or "none".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
-keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh refuses zero and keeps a separate 5s path heartbeat. Default.
+# keep_alive = "3s"                  # Ping interval; unset derives it from the idle timeout, "0s" disables it. iroh refuses zero and keeps a separate 5s path heartbeat.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 134217728           # Whole-connection window, in bytes. Default (128 MiB).
@@ -105,7 +105,15 @@ Iroh currently refuses an explicit keylog path when enabled.
 `idle_timeout` is how long a peer that vanished without a close keeps its
 sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).
 QUIC uses the smaller of the two endpoints' values, so this also bounds the
-other end. Keep `keep_alive` under a third of it.
+other end.
+
+Leave `keep_alive` unset to derive it from the idle timeout both ends settle
+on: 3/10 of it, so 3s against the 10s default, and shorter against a peer that
+advertises a shorter `max_idle_timeout`. Changing `idle_timeout` then needs no
+matching change here. Set it only for a NAT binding that expires sooner than
+the idle timeout. A value no shorter than the negotiated idle timeout could
+never keep the connection up, so it is capped at the derived interval. iroh
+cannot see the peer's timeout, so it derives from the local `idle_timeout`.
 
 Raise the receive windows when a fat, long path idles below the link rate. The
 128 MiB `receive_window` default carries several Gbps at a 100 ms RTT and bounds
@@ -326,7 +334,8 @@ A draining upstream may name a replacement URI. `same-host` follows it only
 onto the host already dialed, so a peer can move us between ports and schemes;
 `follow` also lets it choose the host, which trusts it not to point us into
 the local network; `ignore` keeps the current address. `handover` caps how long
-the old connection keeps serving after a GOAWAY.
+the old connection keeps serving after a GOAWAY; it closes sooner, once the
+replacement is up and it carries no subscription or fetch.
 
 ## \[cache]
 

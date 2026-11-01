@@ -98,7 +98,7 @@ impl Endpoint {
 	/// Run an endpoint on `socket`, serving incoming connections if [`Config::server`] is set
 	///
 	/// The endpoint's tasks run on the caller's tokio runtime, else moq-tokio's fallback. With
-	/// the `sim` feature, an endpoint made inside `moq_clock::sim::run` runs them on the simulator.
+	/// the `sim` feature, an endpoint made inside `kio::clock::sim::run` runs them on the simulator.
 	pub fn new(config: Config, socket: impl Into<Socket>) -> Result<Self, Error> {
 		let runtime = crate::runtime::Spawner::current();
 		let socket = socket.into().into_async()?;

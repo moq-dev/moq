@@ -21,17 +21,17 @@ pub(crate) fn enter() -> Option<tokio::runtime::EnterGuard<'static>> {
 pub(crate) enum Spawner {
 	/// The caller's tokio runtime, else the fallback.
 	Tokio(tokio::runtime::Handle),
-	/// The `moq-clock` simulator the caller was running in.
+	/// The `kio::clock` simulator the caller was running in.
 	#[cfg(feature = "sim")]
 	Sim,
 }
 
 #[cfg(any(feature = "driver", feature = "net"))]
 impl Spawner {
-	/// The `moq-clock` simulator when called inside one, else the caller's runtime or the fallback.
+	/// The `kio::clock` simulator when called inside one, else the caller's runtime or the fallback.
 	pub(crate) fn current() -> Self {
 		#[cfg(feature = "sim")]
-		if moq_clock::sim::is_running() {
+		if kio::clock::sim::is_running() {
 			return Self::Sim;
 		}
 		Self::Tokio(tokio::runtime::Handle::try_current().unwrap_or_else(|_| fallback().handle().clone()))
@@ -45,7 +45,7 @@ impl Spawner {
 		match self {
 			Self::Tokio(handle) => drop(handle.spawn(future)),
 			#[cfg(feature = "sim")]
-			Self::Sim => drop(moq_clock::sim::spawn(future)),
+			Self::Sim => drop(kio::clock::sim::spawn(future)),
 		}
 	}
 }

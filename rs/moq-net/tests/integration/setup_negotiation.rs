@@ -45,7 +45,7 @@ async fn dial(
 	)
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn every_lite_version_negotiates_in_setup() {
 	for name in [
 		"moq-lite-07-wip",
@@ -70,7 +70,7 @@ async fn every_lite_version_negotiates_in_setup() {
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn disjoint_versions_are_refused() {
 	let (upstream, downstream) = (origin(), origin());
 	let (client, server) = dial(

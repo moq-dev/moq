@@ -1,4 +1,4 @@
-//! QUIC with no sockets: endpoints on `moq-clock`'s simulator, joined by seeded, impaired paths
+//! QUIC with no sockets: endpoints on kio's simulator, joined by seeded, impaired paths
 //!
 //! A [`Network`] binds a [`Socket`] per address for [`Endpoint::new`](super::endpoint::Endpoint::new).
 //! Each datagram crosses the [`Path`] from its sender to its destination: the [`Link`]'s
@@ -6,7 +6,7 @@
 //! reordering, all drawn from the network's seed so a seed replays a run exactly. A
 //! destination nobody bound drops the datagram, as UDP does.
 //!
-//! Not part of the public API. It runs only inside `moq_clock::sim::run`, where every
+//! Not part of the public API. It runs only inside `kio::clock::sim::run`, where every
 //! arrival is a simulated timer.
 
 use std::{
@@ -91,7 +91,7 @@ impl Network {
 
 	/// Send one datagram from `from`, scheduling each copy that survives the path
 	fn send(&self, from: SocketAddr, to: SocketAddr, ecn: Option<EcnCodepoint>, contents: &[u8]) {
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let (marked, arrivals) = {
 			let state = &mut *self.0.lock().unwrap();
 			let path = state.paths.entry((from, to)).or_default();
@@ -109,8 +109,8 @@ impl Network {
 				ecn,
 				contents: contents.to_vec(),
 			};
-			drop(moq_clock::sim::spawn(async move {
-				moq_clock::sleep_until(arrival).await;
+			drop(kio::clock::sim::spawn(async move {
+				kio::clock::sleep_until(arrival).await;
 				network.deliver(to, datagram);
 			}));
 		}

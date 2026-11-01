@@ -1,6 +1,6 @@
 use std::{
 	ops::{Deref, DerefMut},
-	sync::atomic::Ordering,
+	sync::{Arc, atomic::Ordering},
 	task::Poll,
 };
 
@@ -8,7 +8,6 @@ use crate::{
 	Closed, Counts, State,
 	consumer::{self, Consumer},
 	lock::*,
-	sync::Arc,
 	waiter::*,
 	weak::{ProducerWeak, Weak},
 };
@@ -48,7 +47,7 @@ impl<T> Producer<T> {
 	/// channel costs this whether it has one consumer or a thousand.
 	///
 	/// Excludes whatever `T` allocates on its own.
-	pub const HEAP: usize = crate::arc_heap::<crate::sync::Mutex<State<T>>>() + crate::arc_heap::<Counts>();
+	pub const HEAP: usize = crate::arc_heap::<std::sync::Mutex<State<T>>>() + crate::arc_heap::<Counts>();
 
 	/// Create a new producer with the given initial value.
 	pub fn new(value: T) -> Self {
@@ -66,30 +65,30 @@ impl<T> Producer<T> {
 	/// Acquire mutable access only while nothing is consuming the channel.
 	///
 	/// The count is read under the lock [`consume`](Self::consume) takes when
-	/// demand is zero, so the returned guard keeps the channel unused until it
-	/// drops. That is what a teardown decided by [`poll_unused`](Self::poll_unused)
+	/// demand is zero, so the returned guard keeps the channel unwanted until it
+	/// drops. That is what a teardown decided by [`poll_wanted_changed`](Self::poll_wanted_changed)
 	/// needs: the poll is a level snapshot, so committing on it directly can cancel
 	/// a consumer that appeared in the gap. Commit through this instead, and take
-	/// [`Unused::Used`] as "a consumer got there first, keep going".
+	/// [`Unwanted::Wanted`] as "a consumer got there first, keep going".
 	///
 	/// Pair it with [`ProducerWeak::try_consume`], which refuses to mint a consumer for
 	/// a closed channel: between the two, a consumer either exists in time to
 	/// decline the teardown or is never handed out at all.
-	pub fn write_unused(&self) -> Unused<'_, T> {
+	pub fn write_unwanted(&self) -> Unwanted<'_, T> {
 		let state = self.state.lock();
 		if state.closed {
-			return Unused::Closed;
+			return Unwanted::Closed;
 		}
 
 		// Relaxed is enough: a zero-to-one increment happens under this lock.
 		// Further increments cannot pass through zero. A decrement runs outside
 		// it, so this may still read a consumer that is going away, which only
-		// declines a teardown that the next `unused` wake will offer again.
+		// declines a teardown that the next `wanted_changed` wake will offer again.
 		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
-			return Unused::Used;
+			return Unwanted::Wanted;
 		}
 
-		Unused::Idle(Mut::new(state))
+		Unwanted::Idle(Mut::new(state))
 	}
 
 	/// Close the channel, notifying all consumers.
@@ -124,7 +123,7 @@ impl<T> Producer<T> {
 	/// while pending.
 	///
 	/// Returns `Poll::Ready(Err(`[`Ref`]`))` if the channel is closed.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll<F>(&self, waiter: &Waiter, f: F) -> Poll<Result<Mut<'_, T>, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<()>,
@@ -151,7 +150,7 @@ impl<T> Producer<T> {
 	/// [`Mut`], so it never flags the state modified and never wakes consumers.
 	/// Use it to wait on a read condition from the producer side without creating
 	/// a [`Consumer`].
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_ref<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
@@ -193,7 +192,7 @@ impl<T> Producer<T> {
 
 	/// Poll for channel closure (an explicit [`Mut::close`], e.g. an abort),
 	/// registering the waiter if still open.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
 		if state.closed {
@@ -204,71 +203,41 @@ impl<T> Producer<T> {
 		Poll::Pending
 	}
 
-	/// Wait until all consumers have been dropped.
+	/// Whether any consumer handle exists right now.
 	///
-	/// Returns `Ok(())` when no consumers remain, or [`Closed`] if the channel closes first.
-	pub async fn unused(&self) -> Result<(), Closed> {
-		crate::wait(move |waiter| self.poll_unused(waiter)).await
-	}
-
-	/// Poll-based variant of [`Self::unused`]: `Ready(Ok(()))` when no consumers
-	/// remain, [`Closed`] if the channel closed first, else `Pending`.
-	#[cfg_attr(feature = "_sim", track_caller)]
-	pub fn poll_unused(&self, waiter: &Waiter) -> Poll<Result<(), Closed>> {
-		let mut state = self.state.lock();
-		if state.closed {
-			return crate::coop::ready(Err(Closed));
-		}
-
-		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
-			return crate::coop::ready(Ok(()));
-		}
-
-		waiter.register(&mut state.waiters_consumer);
-
-		// Re-check after registration to avoid TOCTOU race where the last
-		// consumer drops between the initial check and waiter registration.
-		if self.counts.consumers.load(Ordering::Relaxed) == 0 {
-			return crate::coop::ready(Ok(()));
-		}
-
-		Poll::Pending
-	}
-
-	/// Whether any consumer handle currently exists.
-	///
-	/// A point-in-time snapshot with no registration; use [`Self::poll_used`] /
-	/// [`Self::poll_unused`] to wait for the edge instead.
-	pub fn is_used(&self) -> bool {
+	/// A point-in-time snapshot with no registration; use
+	/// [`Self::poll_wanted_changed`] to wait for it to change instead.
+	pub fn wanted(&self) -> bool {
 		self.counts.consumers.load(Ordering::Relaxed) > 0
 	}
 
-	/// Wait until at least one consumer exists.
-	///
-	/// Returns `Ok(())` when a consumer is created, or [`Closed`] if the channel closes first.
-	pub async fn used(&self) -> Result<(), Closed> {
-		crate::wait(move |waiter| self.poll_used(waiter)).await
+	/// Wait until [`Self::wanted`] differs from `last`, returning the new value, or
+	/// [`Closed`] if the channel closes first.
+	pub async fn wanted_changed(&self, last: bool) -> Result<bool, Closed> {
+		crate::wait(move |waiter| self.poll_wanted_changed(waiter, last)).await
 	}
 
-	/// Poll-based variant of [`Self::used`]: `Ready(Ok(()))` once a consumer
-	/// exists, [`Closed`] if the channel closed first, else `Pending`.
-	#[cfg_attr(feature = "_sim", track_caller)]
-	pub fn poll_used(&self, waiter: &Waiter) -> Poll<Result<(), Closed>> {
+	/// Poll for [`Self::wanted`] to differ from `last`: `Ready(Ok)` with the new value once
+	/// it does, [`Closed`] if the channel closed first, else `Pending`.
+	#[cfg_attr(feature = "sim", track_caller)]
+	pub fn poll_wanted_changed(&self, waiter: &Waiter, last: bool) -> Poll<Result<bool, Closed>> {
+		// Closure is checked first, so a closed channel reports `Closed` from every handle
+		// rather than a consumer count that only dropped because it's dead.
 		let mut state = self.state.lock();
 		if state.closed {
 			return crate::coop::ready(Err(Closed));
 		}
 
-		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
-			return crate::coop::ready(Ok(()));
+		if self.wanted() != last {
+			return crate::coop::ready(Ok(!last));
 		}
 
 		waiter.register(&mut state.waiters_consumer);
 
-		// Re-check after registration to avoid TOCTOU race where a consumer
-		// is created between the initial check and waiter registration.
-		if self.counts.consumers.load(Ordering::Relaxed) > 0 {
-			return crate::coop::ready(Ok(()));
+		// Re-check after registration to avoid a TOCTOU race where the count moves
+		// between the initial check and waiter registration.
+		if self.wanted() != last {
+			return crate::coop::ready(Ok(!last));
 		}
 
 		Poll::Pending
@@ -333,7 +302,7 @@ impl<T> Drop for Producer<T> {
 			}
 
 			// We were the last producer, so close. Every waiter reacts to closure
-			// (value/closed resolve, `used`/`unused` resolve to `None`), so drain
+			// (value/closed resolve, `wanted_changed` resolves to `Closed`), so drain
 			// every list and wake them once the lock is released.
 			state.closed = true;
 			state.take_close_waiters()
@@ -345,16 +314,16 @@ impl<T> Drop for Producer<T> {
 	}
 }
 
-/// What [`Producer::write_unused`] found.
+/// What [`Producer::write_unwanted`] found.
 #[must_use]
 #[derive(Debug)]
-pub enum Unused<'a, T> {
+pub enum Unwanted<'a, T> {
 	/// Nothing is consuming the channel: write access, held under the lock a new
 	/// consumer has to take, so the write lands before one can exist.
 	Idle(Mut<'a, T>),
-	/// A consumer exists, so whatever was decided while the channel looked unused
+	/// A consumer exists, so whatever was decided while the channel looked unwanted
 	/// is stale.
-	Used,
+	Wanted,
 	/// The channel is already closed, so there is nothing left to write.
 	Closed,
 }
@@ -459,7 +428,7 @@ impl<T> Deref for Ref<'_, T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use super::*;
 
