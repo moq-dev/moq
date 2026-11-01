@@ -61,7 +61,7 @@ impl<T> Shared<T> {
 	/// [`Ref`], so it can't flag the state modified and spuriously wake this poll's own
 	/// waiter. Registers `waiter` while pending; any mutation through a [`lock`](Self::lock)
 	/// guard re-polls it.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll<F>(&self, waiter: &Waiter, f: F) -> Poll<Mut<'_, T>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<()>,
@@ -108,7 +108,7 @@ impl<T> Clone for Shared<T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use std::{
 		future::Future,

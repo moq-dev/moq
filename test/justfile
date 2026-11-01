@@ -238,15 +238,6 @@ ts-controls:
 drain *args:
     ./drain/run.sh {{ args }}
 
-# Runs the @moq/wasm bindings in headless Chromium against a real relay, one per
-# protocol flavour. The crate is `#![cfg(target_arch = "wasm32")]`, so nothing in
-# `just check` or `just rs wasm` gets past compiling it. See wasm/README.md.
-
-# Browser coverage for the @moq/wasm bindings.
-[positional-arguments]
-wasm *args:
-    ./wasm/run.sh "$@"
-
 # The @moq/video renderer in headless Chromium: WebGPU, a lost device, and the Canvas2D fallback.
 video:
     cd .. && bun install --frozen-lockfile
@@ -288,9 +279,3 @@ qmux:
 p2p:
     cd .. && bun install --frozen-lockfile
     cd p2p && bash ../../sh/local.sh bun test ./transport.browser.ts
-
-# Retain complete backend assets, parity, and raw alternating browser samples.
-[positional-arguments]
-wasm-baseline *args:
-    HARNESS_RUNS="${HARNESS_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh "$@"
-    HARNESS_RUNS="${HARNESS_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh --baseline "$@"

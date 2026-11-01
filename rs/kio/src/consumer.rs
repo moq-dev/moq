@@ -1,6 +1,9 @@
-use std::{sync::atomic::Ordering, task::Poll};
+use std::{
+	sync::{Arc, atomic::Ordering},
+	task::Poll,
+};
 
-use crate::{Closed, Counts, State, lock::*, producer::Ref, sync::Arc, waiter::*, weak::ConsumerWeak};
+use crate::{Closed, Counts, State, lock::*, producer::Ref, waiter::*, weak::ConsumerWeak};
 
 /// The consuming side of a shared state channel.
 ///
@@ -72,7 +75,7 @@ impl<T> Consumer<T> {
 	/// channel is still open, registers the [`Waiter`] for notification.
 	/// Returns `Err(`[`Ref`]`)` if the channel has been closed while the
 	/// condition returned by `f` is still pending.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
@@ -96,7 +99,7 @@ impl<T> Consumer<T> {
 	}
 
 	/// Poll for channel closure, registering the waiter if still open.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
 		if state.closed {
@@ -191,7 +194,7 @@ impl<T> Clone for Consumer<T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use crate::{Closed, Producer};
 	use std::task::Poll;

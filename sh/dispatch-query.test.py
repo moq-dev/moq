@@ -11,6 +11,8 @@ import time
 import tempfile
 import unittest
 
+from test_env import dispatch_env
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -28,15 +30,8 @@ class QueryTests(unittest.TestCase):
         self.bin.mkdir()
         for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
             (self.bin / command).symlink_to(shutil.which(command))
-        self.env = dict(os.environ, LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
-                        GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
-        # The runner's own Actions variables would move the run's error
-        # annotations to stdout and append to the real job summary, a gate's
-        # CHECK_MODULES split would skip the modules these tests expect, and the
-        # land gate's CHECK_FAIL_FAST would cancel the lanes they expect to finish.
-        for key in ("IN_MOQ_DEV_SHELL", "ALLOW_HOST_TOOLCHAIN", "CHECK_JOBS", "CHECK_MODULES",
-                    "CHECK_FAIL_FAST", "GITHUB_BASE_REF", "GITHUB_ACTIONS", "GITHUB_STEP_SUMMARY"):
-            self.env.pop(key, None)
+        self.env = dispatch_env(LOCAL_SUPERVISED="1", PATH=str(self.bin), GIT_CONFIG_NOSYSTEM="1",
+                                GIT_CONFIG_GLOBAL=os.devnull, CI_STRICT="1")
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.name", "test")
         self.git("config", "user.email", "test@example.com")
@@ -76,7 +71,7 @@ class QueryTests(unittest.TestCase):
 
     def test_rust_cache_follows_modules_that_compile_rust(self):
         for path, rust in (("rs/moq-net/src/lib.rs", True), ("py/moq-rs/example.py", True),
-                           ("js/net/src/index.ts", True), ("kt/example.kt", True),
+                           ("js/net/src/index.ts", False), ("kt/example.kt", True),
                            ("infra/moq-sh/install.sh", False), (".github/workflows/check.yml", False)):
             with self.subTest(path=path):
                 self.change(path)
@@ -95,16 +90,15 @@ class QueryTests(unittest.TestCase):
                 (self.repo / path).unlink()
 
     def test_nixpkgs_updates_check_browser_pins(self):
-        # JS selection also builds wasm, which is reflected in the Rust cache query.
         self.change("flake.lock")
-        self.expect(True, rust=True)
+        self.expect(True)
 
     def test_empty_diff_keeps_repository_lints(self):
         self.expect(True)
 
     def test_selected_tests_do_not_depend_on_installed_tools(self):
         for path in ("js/net/src/index.ts", "rs/moq-net/src/lib.rs", "py/moq-rs/example.py",
-                     "doc/concept/example.md", "rs/moq-wasm/src/lib.rs", "test/example.ts"):
+                     "doc/concept/example.md", "test/example.ts"):
             with self.subTest(path=path):
                 self.change(path)
                 self.expect(True)
@@ -190,8 +184,8 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
 
     def stub_ci(self, just=""):
-        for tool in ("bun", "python3", "cargo", "cargo-hack", "wasm-bindgen", "jq", "shellcheck",
-                     "shfmt", "taplo", "nixfmt", "actionlint", "quest", "nix",
+        for tool in ("bun", "python3", "cargo", "jq", "shellcheck",
+                     "shfmt", "taplo", "nixfmt", "actionlint", "zizmor", "quest", "nix",
                      "c++", "clang-format", "cmake", "dart", "dash", "gersemi", "go",
                      "gradle", "java", "kramdown-rfc", "pkg-config", "uniffi-bindgen-cpp",
                      "clippy-driver", "dpkg-deb", "nfpm", "rpm",
@@ -219,20 +213,6 @@ class QueryTests(unittest.TestCase):
                                 cwd=self.repo, env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
-
-    def test_only_the_local_check_narrows_feature_contracts(self):
-        # The landing worker's `just ci` keeps the dependents' feature shapes.
-        self.change("rs/moq-net/src/lib.rs")
-        for action, scope in (("check", "changed"), ("ci", "")):
-            with self.subTest(action=action):
-                self.stub_ci('[[ "$1" != "rs" || "$2" != *-changed ]] || '
-                             'printf "%s scope=%s\\n" "$2" "${RS_FEATURE_SCOPE:-}" >>"$CALLS"\n')
-                result = subprocess.run(["bash", "sh/dispatch.sh", action, "origin/main"],
-                                        cwd=self.repo, env=self.env, text=True, capture_output=True)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                calls = (self.root / "calls").read_text().splitlines()
-                for recipe in ("lint-changed", "feature-shapes-changed"):
-                    self.assertIn(f"{recipe} scope={scope}", calls)
 
     def test_failure_keeps_running_lanes_and_starts_remaining_modules(self):
         # The failed lane finishes before go releases the two parked lanes.
@@ -406,7 +386,7 @@ class QueryTests(unittest.TestCase):
     "rs lint-changed "*) echo $$ >"{pid}"; echo >"{started}"; exec sleep 600 ;;
 esac
 ''')
-        self.change("rs/moq-clock/src/lib.rs")
+        self.change("rs/kio/src/clock/mod.rs")
         for jobs in ("1", "3"):
             with self.subTest(jobs=jobs):
                 run = subprocess.Popen(["bash", "sh/dispatch.sh", "ci", "origin/main"],
@@ -428,7 +408,7 @@ esac
                     os.kill(int(pid.read_text()), 0)
 
     def test_ci_runs_one_lint_preamble_and_one_test_pass(self):
-        self.change("rs/moq-clock/src/lib.rs")
+        self.change("rs/kio/src/clock/mod.rs")
         calls = self.run_ci()
         self.assertTrue(any(call.startswith("rs lint-changed ") for call in calls), calls)
         self.assertFalse(any(call.startswith("rs check-changed ") for call in calls), calls)
@@ -437,14 +417,13 @@ esac
         self.assertLess(next(i for i, call in enumerate(calls) if call.startswith("rs lint-changed ")),
                         next(i for i, call in enumerate(calls) if call.startswith("rs test-changed ")))
 
-    def test_feature_shapes_follow_the_rust_tests_in_their_lane(self):
-        self.change("rs/moq-clock/src/lib.rs")
+    def test_rust_lane_runs_only_the_lint_and_the_test_build(self):
+        self.change("rs/kio/src/clock/mod.rs")
         calls = [call.split()[1] for call in self.run_ci() if call.startswith("rs ")]
-        self.assertEqual(calls, ["lint-changed", "test-changed", "feature-shapes-changed"])
+        self.assertEqual(calls, ["lint-changed", "test-changed"])
 
     def test_module_filter_splits_the_gate(self):
-        modules = {"rs_shapes": ["rs feature-shapes-changed --all"],
-                   "-rs_shapes": ["rs lint-changed --all", "rs test-changed --all"]}
+        modules = {"rs": ["rs lint-changed --all", "rs test-changed --all"], "-rs": []}
         for filter, expected in modules.items():
             with self.subTest(filter=filter):
                 self.env["CHECK_MODULES"] = filter
@@ -452,11 +431,11 @@ esac
                 self.assertEqual([call for call in calls if call.startswith("rs ")], expected)
                 # Every other module runs in the job that does not name one.
                 self.assertEqual("gh check" in calls, filter.startswith("-"))
-        self.env["CHECK_MODULES"] = "rs_shape"
+        self.env["CHECK_MODULES"] = "rs_shapes"
         result = subprocess.run(["bash", "sh/dispatch.sh", "ci", "--all"], cwd=self.repo,
                                 env=self.env, text=True, capture_output=True)
         self.assertEqual(result.returncode, 2, result.stderr)
-        self.assertIn("CHECK_MODULES names 'rs_shape'", result.stderr)
+        self.assertIn("CHECK_MODULES names 'rs_shapes'", result.stderr)
 
     def test_flake_checks_follow_nix_inputs_instead_of_rust_source(self):
         for path, expected in ((".cargo/config.toml", True),

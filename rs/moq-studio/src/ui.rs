@@ -224,7 +224,7 @@ impl Panels {
 				state.compositor.cut();
 			}
 			if ui.button(format!("Fade ({} ms)", fade.as_millis())).clicked() {
-				state.compositor.fade(fade, moq_clock::Instant::now());
+				state.compositor.fade(fade, kio::clock::Instant::now());
 			}
 			ui.label(format!(
 				"Program: {}",
