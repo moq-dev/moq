@@ -497,6 +497,7 @@ mod tests {
 		reason = "the benchmark measures mixer callbacks on the host clock"
 	)]
 	fn benchmark_mixer_callbacks() {
+		println!("sinks,frames,ns_per_callback");
 		for sinks in [1, 8, 32, MAX_SINKS] {
 			for frames in [128, 480, 1024, 2048] {
 				let mut harness = Harness::with_depth(Layout::Stereo, MAX_SINKS);
@@ -514,10 +515,7 @@ mod tests {
 					elapsed += start.elapsed();
 					std::hint::black_box(&out);
 				}
-				println!(
-					"sinks={sinks} frames={frames}: {:.1} ns/callback",
-					elapsed.as_nanos() as f64 / 1000.0
-				);
+				println!("{sinks},{frames},{:.1}", elapsed.as_nanos() as f64 / 1000.0);
 			}
 		}
 	}

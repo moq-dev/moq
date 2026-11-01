@@ -121,6 +121,9 @@ jobs:
             runner: ubuntu-24.04
           - name: Rust benchmark tests
             recipe: gh nightly rust-test
+            artifact: bench-rust-test
+            artifact-path: target/bench/nightly/rust-test
+            benchmark: true
           - name: Binding benchmark runners
             recipe: gh nightly bindings
           - name: Rust bench targets
@@ -261,7 +264,7 @@ jobs:
   # Explicit Pages deployment works with GITHUB_TOKEN; a branch push alone does not.
   benchmark-site:
     name: Benchmark site
-    needs: nightly
+    needs: [nightly, sizes]
     if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
@@ -673,6 +676,21 @@ jobs:
             size-report/js/*.metafile.json
           retention-days: 45
           if-no-files-found: error
+      # The benchmark table records tonight's sizes even when the comparison fails on growth.
+      - name: Convert sizes for the benchmark table
+        id: size-table
+        if: ${{ !cancelled() && hashFiles('size-report/sizes.json') != '' }}
+        run: nix develop --command just gh benchmark-report size size-report target/bench/size/report.json
+      - name: Record benchmark outcome
+        if: ${{ !cancelled() }}
+        run: nix develop --command just gh benchmark-report status "${{ steps.size-table.outcome }}" target/bench/size
+      - name: Preserve benchmark report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: bench-size
+          path: target/bench/size
+          retention-days: 45
 
   fuzz:
     name: Fuzz (${{ matrix.target }})

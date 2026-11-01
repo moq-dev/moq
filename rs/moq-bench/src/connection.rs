@@ -766,6 +766,7 @@ mod tests {
 		reason = "the benchmark measures real establishment time"
 	)]
 	fn benchmark_readiness_establishment() {
+		println!("connections,broadcasts_per_connection,elapsed_ns");
 		for connections in [1, 16, 128] {
 			for broadcasts in [1, 16, 128] {
 				let count = connections * broadcasts;
@@ -793,10 +794,7 @@ mod tests {
 					}
 				}
 				assert!(std::hint::black_box(stats.ready()));
-				println!(
-					"readiness connections={connections} broadcasts_per_connection={broadcasts} elapsed_ns={}",
-					start.elapsed().as_nanos()
-				);
+				println!("{connections},{broadcasts},{}", start.elapsed().as_nanos());
 				assert_eq!(stats.broadcasts_established.load(Ordering::Relaxed), count);
 			}
 		}

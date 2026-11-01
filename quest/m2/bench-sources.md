@@ -9,25 +9,27 @@ is a smoke run that measures nothing.
 ## Plan
 
 Split from the benchmark trend site on 2026-10-20, when that quest became
-the m0 table. Sources decided with the maintainer on 2026-10-15: the binding
-benchmark's JSON and the "Rust benchmark tests", "Rust bench targets" and "JS
-benchmarks" nightly jobs, converted to the history input format where they
-don't already emit one.
+the m0 table. The Criterion targets, the JS benchmarks, the Rust benchmark
+tests and the nightly shipping sizes feed it now
+([moq-dev/moq#7510](https://github.com/moq-dev/moq/pull/7510) added the last
+two). The binding runners stay an unmeasured smoke run: rust2 measures them,
+and [moq-dev/moq#6629](https://github.com/moq-dev/moq/pull/6629) retired their
+series. What remains joins through the same input format; the sources decided
+with the maintainer on 2026-10-15 left these for later:
 
-- Criterion targets now measure through `just gh criterion` in
-  `sh/gh/nightly.sh` (`rust-bench`, `rust-shared`, `rust-extra`, `rust-uring`), and the
-  comparison harness uses quick mode. Check their published histories
-  rather than converting them again; the unreported sources below remain.
-- The "Rust benchmark tests" job is not recorded yet: its nextest benchmarks
-  print no structured measurements.
-- Check each JS bench reports a measurement before recording it.
-- Nightly size history (today a 45-day artifact) is a natural extra series
-  if it fits cheaply.
-- The relay load benches (`bench-audio`, `bench-profile`) and the
-  audio-quality job's benchmarks can join later through the same input
-  format.
-- The paired nightly comparison publishes beside the table from the same
-  `gh-pages` branch (`bench/paired.json`); a new Rust source joins it through
-  `just gh benchmark-report rust`.
+- The relay load benches, `bench-audio` and `bench-shard` (the "Audio grouping
+  relay benchmark" and "Relay shard sweep" Nightly jobs). Each writes a JSON
+  summary per workload; pick the metrics a trend should follow (delivered
+  throughput, relay CPU, loss, latency) and convert them in
+  `sh/gh/bench-report.py`. "Relay profiles" and "Browser benchmark smoke" only
+  check their capture paths and stay out.
+- The audio-quality job's benchmarks: `just js qmux-bench`, `serve-bench` and
+  `ring-bench`. Check each prints a CSV table the `js` converter reads before
+  recording it.
+
+A source joins as a `bench-*` artifact with a recorded outcome, which the
+benchmark-site job collects. The paired nightly comparison publishes beside the
+table from the same `gh-pages` branch (`bench/paired.json`); a new Rust source
+joins it through `just gh benchmark-report rust`.
 
 Public API: none. Wire: none.

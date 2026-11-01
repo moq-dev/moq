@@ -275,4 +275,5 @@ to the results.
 
 `just rs bench-latency` measures latency recording with 1, 4 and 16 concurrent
 writers and 0, 10 and 100 snapshots per run. It checks final sample conservation
-and prints throughput for each case. The nightly workflow runs the same matrix.
+and prints the cost per sample for each case. The nightly workflow runs the same
+matrix and records it on the benchmark table.

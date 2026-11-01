@@ -53,6 +53,12 @@ slow-timeout = { period = "60s", terminate-after = 5 }
 io-uring = { max-threads = 4 }
 v4l2 = { max-threads = 1 }
 
+# Nightly's ignored benchmark tests (`just gh nightly rust-test`) keep each test's
+# printed tables in target/nextest/bench/junit.xml for the benchmark report.
+[profile.bench.junit]
+path = "junit.xml"
+store-success-output = true
+
 # CI has noisier neighbours and cold caches, so give a test longer before
 # calling it wedged.
 [profile.ci]

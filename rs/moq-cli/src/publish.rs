@@ -1943,6 +1943,7 @@ pub(crate) mod tests {
 		let mut null = [0xff; 188];
 		null[..4].copy_from_slice(&[0x47, 0x1f, 0xff, 0x10]);
 		let padding = null.repeat(INPUT.len() / 188);
+		println!("copies,ns_per_byte");
 		for copies in [1, 16, 128] {
 			let mut file = tempfile::NamedTempFile::new().unwrap();
 			file.write_all(INPUT).unwrap();
@@ -1967,10 +1968,7 @@ pub(crate) mod tests {
 			decode(decoder, catalog, input, Publication::default()).await.unwrap();
 			let elapsed = start.elapsed();
 			let bytes = INPUT.len() * copies;
-			println!(
-				"bytes={bytes}: {elapsed:?}, {:.2} Mbit/s",
-				bytes as f64 * 8.0 / elapsed.as_secs_f64() / 1e6
-			);
+			println!("{copies},{:.3}", elapsed.as_nanos() as f64 / bytes as f64);
 		}
 	}
 

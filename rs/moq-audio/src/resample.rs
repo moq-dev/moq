@@ -539,6 +539,7 @@ mod tests {
 	#[test]
 	#[ignore = "run with just rs bench-playback"]
 	fn benchmark_resampler() {
+		println!("input_rate,output_rate,channels,chunk,packet,ns_per_input_frame");
 		for (input_rate, output_rate) in [(44_100, 48_000), (48_000, 44_100), (96_000, 48_000)] {
 			for channels in [1, 2, 6] {
 				let mut chunks = vec![input_rate as usize / 50, (input_rate as usize / 50).clamp(1, 960)];
@@ -567,7 +568,7 @@ mod tests {
 							assert_eq!(count, output_rate as usize * channels as usize);
 						}
 						println!(
-							"{input_rate}->{output_rate} channels={channels} chunk={chunk} packet={packet}: {:.1} ns/input-frame",
+							"{input_rate},{output_rate},{channels},{chunk},{packet},{:.1}",
 							elapsed.as_nanos() as f64 / (10 * frames) as f64
 						);
 					}
