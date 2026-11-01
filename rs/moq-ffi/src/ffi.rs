@@ -12,19 +12,14 @@ pub(crate) fn duration(duration: std::time::Duration) -> std::time::Duration {
 }
 
 /// A worker runtime driving I/O, timers, and background work beside host-polled calls.
-///
-/// wasm32 has neither threads nor a tokio driver. uniffi's `RustFuture` is polled by the
-/// JS event loop instead.
-#[cfg(not(target_arch = "wasm32"))]
 static RUNTIME: std::sync::OnceLock<Runtime> = std::sync::OnceLock::new();
 
 /// The worker runtime and the owner thread that joins it on shutdown.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct Runtime {
 	handle: tokio::runtime::Handle,
 	/// The clock a test drives, when the runtime started with one.
 	#[cfg(feature = "testing")]
-	clock: Option<moq_clock::Installed>,
+	clock: Option<kio::clock::Installed>,
 	/// Taken by [`shutdown`], so the thread is stopped and joined once.
 	thread: std::sync::Mutex<Option<Thread>>,
 	/// Set by [`shutdown`] to wake the [`Task::run`] calls parked in place, so they observe
@@ -36,7 +31,6 @@ pub(crate) struct Runtime {
 	idle: std::sync::Condvar,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 #[derive(Default)]
 struct Polls {
 	active: usize,
@@ -45,14 +39,12 @@ struct Polls {
 	stopped: bool,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 struct Thread {
 	/// Resolves the `block_on` the thread parks in.
 	stop: tokio::sync::oneshot::Sender<()>,
 	join: std::thread::JoinHandle<()>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl std::ops::Deref for Runtime {
 	type Target = tokio::runtime::Handle;
 
@@ -62,15 +54,14 @@ impl std::ops::Deref for Runtime {
 }
 
 /// The runtime, started on first use.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn runtime() -> &'static Runtime {
 	RUNTIME.get_or_init(|| Runtime::new(false))
 }
 
-/// Start the runtime on a [`moq_clock::Manual`] clock that only a test moves.
+/// Start the runtime on a [`kio::clock::Manual`] clock that only a test moves.
 ///
 /// False when the runtime already started, since its timers are armed on the host clock.
-#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
+#[cfg(feature = "testing")]
 pub(crate) fn start_test_clock() -> bool {
 	let mut started = false;
 	RUNTIME.get_or_init(|| {
@@ -81,12 +72,11 @@ pub(crate) fn start_test_clock() -> bool {
 }
 
 /// The clock [`start_test_clock`] installed, if it did.
-#[cfg(all(feature = "testing", not(target_arch = "wasm32")))]
-pub(crate) fn test_clock() -> Option<&'static moq_clock::Installed> {
+#[cfg(feature = "testing")]
+pub(crate) fn test_clock() -> Option<&'static kio::clock::Installed> {
 	RUNTIME.get()?.clock.as_ref()
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Runtime {
 	fn new(
 		#[cfg_attr(
@@ -103,7 +93,7 @@ impl Runtime {
 		let handle = runtime.handle().clone();
 		// Before any task runs, so every read and timer lands on it.
 		#[cfg(feature = "testing")]
-		let clock = test_clock.then(|| moq_clock::Manual::new().install(&handle));
+		let clock = test_clock.then(|| kio::clock::Manual::new().install(&handle));
 		let (stop, stopped) = tokio::sync::oneshot::channel();
 
 		let join = std::thread::Builder::new()
@@ -132,13 +122,11 @@ impl Runtime {
 /// Stop the runtime workers and wait for them to finish; a no-op when it never started.
 ///
 /// See [`crate::moq_ffi_shutdown`] for what this is for.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn shutdown() {
 	let Some(runtime) = RUNTIME.get() else { return };
 	runtime.shutdown();
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Runtime {
 	fn shutdown(&self) {
 		let runtime = self;
@@ -165,24 +153,15 @@ impl Runtime {
 }
 
 /// Resolves once [`shutdown`] has run.
-#[cfg(not(target_arch = "wasm32"))]
 async fn stopped() {
 	let mut stopped = runtime().stopped.subscribe();
 	// `Err` only when the sender is dropped, which a static never is.
 	let _ = stopped.wait_for(|&stopped| stopped).await;
 }
 
-/// wasm32's runtime is the JS event loop, which never stops under us.
-#[cfg(target_arch = "wasm32")]
-async fn stopped() {
-	std::future::pending().await
-}
-
 /// Marks a [`Task::run`] poll in flight, so [`shutdown`] waits for it to finish.
-#[cfg(not(target_arch = "wasm32"))]
 struct Polling;
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Polling {
 	/// `None` once [`shutdown`] has begun.
 	fn start() -> Option<Self> {
@@ -198,7 +177,6 @@ impl Polling {
 	}
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Drop for Polling {
 	fn drop(&mut self) {
 		let runtime = runtime();
@@ -210,42 +188,17 @@ impl Drop for Polling {
 	}
 }
 
-/// wasm32's runtime is the JS event loop, which never stops under us.
-#[cfg(target_arch = "wasm32")]
-struct Polling;
-
-#[cfg(target_arch = "wasm32")]
-impl Polling {
-	fn start() -> Option<Self> {
-		Some(Self)
-	}
-}
-
 /// Enter the runtime context, so a handle built outside [`Task::run`] can still spawn.
-///
-/// A no-op on wasm32, where the JS event loop is the only runtime.
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn enter() -> tokio::runtime::EnterGuard<'static> {
 	runtime().enter()
-}
-
-/// Stands in for tokio's `EnterGuard` on wasm32, so callers bind a guard either way.
-#[cfg(target_arch = "wasm32")]
-pub(crate) struct EnterGuard;
-
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn enter() -> EnterGuard {
-	EnterGuard
 }
 
 /// Completion of an owned operation, retained by the object's host calls.
 #[derive(Clone, Default)]
 pub(crate) struct Background {
-	#[cfg(not(target_arch = "wasm32"))]
 	result: Option<kio::Consumer<Option<moq_tokio::Result<()>>>>,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Background {
 	pub fn new(future: impl Future<Output = moq_tokio::Result<()>> + Send + 'static) -> Self {
 		let result = kio::Producer::new(None);
@@ -312,7 +265,6 @@ impl Background {
 
 impl Background {
 	pub fn check(&self) -> Result<(), MoqError> {
-		#[cfg(not(target_arch = "wasm32"))]
 		if let Some(result) = &self.result {
 			return result
 				.read()
@@ -325,7 +277,6 @@ impl Background {
 
 	pub async fn watch<T>(&self, future: impl Future<Output = Result<T, MoqError>>) -> Result<T, MoqError> {
 		self.check()?;
-		#[cfg(not(target_arch = "wasm32"))]
 		let result = if self.result.is_some() {
 			tokio::pin!(future);
 			tokio::select! {
@@ -336,14 +287,12 @@ impl Background {
 		} else {
 			future.await
 		};
-		#[cfg(target_arch = "wasm32")]
-		let result = future.await;
 		self.check()?;
 		result
 	}
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 pub(crate) fn panicking_origin() -> (moq_net::origin::Producer, Background, kio::Producer<bool>) {
 	struct Driver {
 		inner: moq_net::origin::Driver,
@@ -371,10 +320,8 @@ pub(crate) fn panicking_origin() -> (moq_net::origin::Producer, Background, kio:
 	(origin, driver, failed)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 struct Borrowed<'a, D>(&'a mut D);
 
-#[cfg(not(target_arch = "wasm32"))]
 impl<D: moq_net::time::Driver> moq_net::time::Driver for Borrowed<'_, D> {
 	fn poll(
 		&mut self,
@@ -385,8 +332,7 @@ impl<D: moq_net::time::Driver> moq_net::time::Driver for Borrowed<'_, D> {
 	}
 }
 
-/// Spawn an owned background future on the native runtime.
-#[cfg(not(target_arch = "wasm32"))]
+/// Spawn an owned background future on the runtime.
 pub(crate) fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) -> Background {
 	Background::new(async move {
 		future.await;
@@ -394,21 +340,11 @@ pub(crate) fn spawn<F: Future<Output = ()> + Send + 'static>(future: F) -> Backg
 	})
 }
 
-/// Spawn onto the JS event loop, whose current toolchain aborts on panic.
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn spawn<F: Future<Output = ()> + 'static>(future: F) -> Background {
-	web_async::spawn(future);
-	Background::default()
-}
-
 /// Aborts a spawned task when the future awaiting it is dropped.
 ///
 /// Aborting one that already finished is a no-op, so this is inert on the happy path.
-/// Native only: wasm32 has no runtime to spawn onto, so its callers await in place.
-#[cfg(not(target_arch = "wasm32"))]
 struct AbortOnDrop(tokio::task::AbortHandle);
 
-#[cfg(not(target_arch = "wasm32"))]
 impl Drop for AbortOnDrop {
 	fn drop(&mut self) {
 		self.0.abort();
@@ -416,7 +352,6 @@ impl Drop for AbortOnDrop {
 }
 
 /// Run a future to completion off the caller's thread, mapping its error into [`MoqError`].
-#[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn detached<F, T, E>(future: F) -> Result<T, MoqError>
 where
 	F: Future<Output = Result<T, E>> + Send + 'static,
@@ -436,23 +371,12 @@ where
 	}
 }
 
-/// Await a future in place: wasm32 has no other thread to hand it to.
-#[cfg(target_arch = "wasm32")]
-pub(crate) async fn detached<F, T, E>(future: F) -> Result<T, MoqError>
-where
-	F: Future<Output = Result<T, E>> + 'static,
-	T: 'static,
-	E: Into<MoqError> + 'static,
-{
-	future.await.map_err(Into::into)
-}
-
 /// Serializes access to `T` across the FFI boundary, and releases it on cancel.
 ///
 /// The state is dropped rather than parked once [Self::cancel] runs, so a handle the foreign
 /// side has cancelled but not yet released stops holding whatever it wrapped: a subscription,
 /// a codec session.
-pub(crate) struct Task<T: kio::MaybeSend + 'static> {
+pub(crate) struct Task<T: Send + 'static> {
 	/// `None` once cancelled, which is what makes running against a released state
 	/// unrepresentable rather than merely documented.
 	state: Arc<tokio::sync::Mutex<Option<T>>>,
@@ -464,7 +388,7 @@ pub(crate) struct Task<T: kio::MaybeSend + 'static> {
 /// Exclusive access to a [Task]'s state, held for as long as the guard lives.
 pub(crate) type Guard<T> = tokio::sync::OwnedMappedMutexGuard<Option<T>, T>;
 
-impl<T: kio::MaybeSend + 'static> Task<T> {
+impl<T: Send + 'static> Task<T> {
 	pub fn new(inner: T) -> Self {
 		Self {
 			state: Arc::new(tokio::sync::Mutex::new(Some(inner))),
@@ -480,8 +404,7 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 	}
 
 	/// Try to lock the state synchronously. Returns `None` if a task is running or it was cancelled.
-	// Only the native server and its requests read state synchronously.
-	#[cfg(not(target_arch = "wasm32"))]
+	// Only the server and its requests read state synchronously.
 	pub fn lock(&self) -> Option<Guard<T>> {
 		let guard = self.state.clone().try_lock_owned().ok()?;
 
@@ -498,7 +421,6 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 
 	/// Whether [Self::cancel] has run, which [Self::lock] folds into the same `None` as a busy
 	/// state. The state may still be a moment away from being dropped.
-	#[cfg(not(target_arch = "wasm32"))]
 	pub fn is_cancelled(&self) -> bool {
 		*self.cancel.borrow()
 	}
@@ -509,7 +431,6 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 	/// Configuration must apply or fail, so this splits them: [`MoqError::Busy`]
 	/// while a [`Self::run`] owns the state, [`MoqError::Cancelled`] after
 	/// [`Self::cancel`].
-	#[cfg(not(target_arch = "wasm32"))]
 	pub fn configure(&self) -> Result<Guard<T>, MoqError> {
 		self.driver.check()?;
 		if let Some(cleanup) = self.cleanup.lock().unwrap().as_ref() {
@@ -645,13 +566,13 @@ impl<T: kio::MaybeSend + 'static> Task<T> {
 	}
 }
 
-impl<T: kio::MaybeSend + 'static> Drop for Task<T> {
+impl<T: Send + 'static> Drop for Task<T> {
 	fn drop(&mut self) {
 		self.cancel();
 	}
 }
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+#[cfg(test)]
 mod tests {
 
 	#[tokio::test]
@@ -765,9 +686,7 @@ mod tests {
 
 	/// Fail the test instead of hanging when a wakeup goes missing.
 	async fn soon<F: Future>(f: F) -> F::Output {
-		tokio::time::timeout(Duration::from_secs(5), f)
-			.await
-			.expect("timed out")
+		kio::clock::timeout(Duration::from_secs(5), f).await.expect("timed out")
 	}
 
 	#[tokio::test]

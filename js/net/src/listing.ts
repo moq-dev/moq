@@ -173,7 +173,7 @@ export class Listing {
 	#lister = false;
 	/** Whether the lister's answer has synced. */
 	#answered = false;
-	#used = new Signal(false);
+	#wanted = new Signal(false);
 	#closed: GetPromise<null>;
 
 	constructor(closed: GetPromise<null>) {
@@ -181,8 +181,8 @@ export class Listing {
 	}
 
 	/** Whether anyone lists the broadcast. */
-	get used(): Getter<boolean> {
-		return this.#used;
+	get wanted(): Getter<boolean> {
+		return this.#wanted;
 	}
 
 	/** Settles once the broadcast ended. */
@@ -195,7 +195,7 @@ export class Listing {
 	}
 
 	#counted() {
-		this.#used.set(this.#readers.size > 0);
+		this.#wanted.set(this.#readers.size > 0);
 	}
 
 	/** Re-evaluate whether the listing has synced, telling readers when it changed. */
@@ -411,27 +411,33 @@ export class Tracks {
 	}
 }
 
+/** Make the lister attached to a broadcast's listing state. @internal */
+export let makeLister: (listing: Listing) => Lister;
+
 /**
  * Answers a broadcast's listings for a handler that knows the tracks it would serve, as a
  * session lists its peer's. A broadcast has at most one.
  *
  * While it exists, readers wait for it to {@link synced} before reporting `synced`. Answer
- * while {@link used}: list what the publisher behind it holds and keep it current, then
- * {@link clear} once unused. {@link close} withdraws what it listed.
+ * while {@link wanted}: list what the publisher behind it holds and keep it current, then
+ * {@link clear} once unwanted. {@link close} withdraws what it listed.
  */
 export class Lister {
 	#listing: Listing;
 	#closed = false;
 
-	/** @internal */
-	constructor(listing: Listing) {
+	private constructor(listing: Listing) {
 		listing.attach();
 		this.#listing = listing;
 	}
 
+	static {
+		makeLister = (listing) => new Lister(listing);
+	}
+
 	/** Whether anyone lists the broadcast. */
-	get used(): Getter<boolean> {
-		return this.#listing.used;
+	get wanted(): Getter<boolean> {
+		return this.#listing.wanted;
 	}
 
 	/** Settles once the broadcast ended, as every listing of it does. */

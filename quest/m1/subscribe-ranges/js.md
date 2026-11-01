@@ -24,6 +24,8 @@ update moved the range and the groups that arrived leave it uncovered. Reopen
 that demand on the same track instead, as the Rust copy does.
 
 Mirror the Rust names, including `Time(pts)` ends and their refusal on an untimed track.
+The publisher resolves no relative or time start, serving it from the oldest
+group its budget allows, and SUBSCRIBE_OK `Range Start` says so; resolve them.
 Also mirror Rust's optional `Subscription::max_delay`
 ([moq-dev/moq#6171](https://github.com/moq-dev/moq/pull/6171)): a `null`
 `maxDelay` asks for the publisher's max age alone, dominates when subscriptions

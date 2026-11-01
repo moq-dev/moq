@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
 import Qmux from "@moq/qmux";
 import { accept } from "../connection/accept.ts";
 import { connect } from "../connection/connect.ts";
@@ -104,11 +104,11 @@ test("a lite GOAWAY keeps the session open, and a second one closes it", async (
 		const drain = await wireOf(connection).goaway;
 		expect(drain.uri).toBe("");
 
-		await new Promise((resolve) => setTimeout(resolve, 20));
+		await sleep(Nano.fromMilli(Milli(20)));
 		expect(closed).toBe(false);
 
 		await sendGoaway(pair.server, "https://other.example/");
-		await new Promise((resolve) => setTimeout(resolve, 50));
+		await sleep(Nano.fromMilli(Milli(50)));
 		expect(closed).toBe(true);
 	} finally {
 		connection.abort();
@@ -247,7 +247,7 @@ function finAfterClose(transport: MockTransport) {
 			new TransformStream<Uint8Array, Uint8Array>({
 				async flush() {
 					await transport.closed;
-					await new Promise((resolve) => setTimeout(resolve, 0));
+					await yieldNow();
 				},
 			}),
 		);
@@ -289,7 +289,7 @@ function mockDeadline() {
 
 /** Runs every task queued so far, so a test can assert that something is still pending. */
 async function settle() {
-	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+	for (let i = 0; i < 5; i++) await yieldNow();
 }
 
 for (const [alpn, version] of [
@@ -394,6 +394,52 @@ for (const [alpn, version] of [
 				for (const frame of frames) expect(await group?.readString()).toBe(frame);
 				expect(await group?.readString()).toBeUndefined();
 				expect(await track.nextGroup()).toBeUndefined();
+			} finally {
+				track.close();
+				remote.close();
+				client.abort();
+				server.abort();
+				broadcast.close();
+				origin.close();
+			}
+		});
+	}
+
+	// A local close reads what already arrived as the peer's close does: a track whose
+	// SUBSCRIBE FIN is in flight, its only end on legacy drafts, still finishes.
+	if (!hasTrackStream(version)) {
+		test(`a local close drains a FIN sent first over ${versionName(version)}`, async () => {
+			const pair = createMockTransportPair(alpn);
+			finAfterClose(pair.client);
+			const origin = new Producer();
+			const broadcastPublication = origin.createBroadcast(Path.from("room"));
+			const broadcast = broadcastPublication.broadcast;
+			broadcastPublication.announce();
+			const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
+			const url = new URL("https://localhost/test");
+			const client = new Connection({ url, quic: pair.client, version });
+			const server = new Connection({
+				url,
+				quic: pair.server,
+				version,
+				publish: origin.consume(),
+				client: false,
+			});
+			const remote = wireOf(client).consume(Path.from("room"));
+			const track = remote.track("video").subscribe().ordered();
+			try {
+				const group = producer.appendGroup();
+				group.writeFrame(textFrame("only"));
+				group.finish();
+				expect(await (await track.nextGroup())?.readString()).toBe("only");
+
+				producer.finish();
+				producer.close();
+				await settle();
+				client.abort();
+
+				expect(await track.nextGroup()).toBeUndefined();
+				expect(await track.closed).toBeNull();
 			} finally {
 				track.close();
 				remote.close();
@@ -829,7 +875,7 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 						sub = stream;
 					}
 				}
-				await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart(0) }, version);
+				await encodeSubscribeResponse(sub.writer, { start: new SubscribeStart([0]) }, version);
 
 				let group: GroupMessage;
 				if (violation === "a partial group") {
