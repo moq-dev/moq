@@ -1,4 +1,4 @@
-# TS fidelity and recovery
+# [L] TS fidelity and recovery
 
 ## Goal
 
@@ -96,10 +96,6 @@ before the open stream-routes and PAT drafts, which rebase onto it.
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
 decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
 catalog linger (#5305).
-
-## Required
-
-- [A small step back keeps the TS export's video](/quest/m1/ts-reliability/step-back.md) - the export re-acquires on a sub-group step back from any source instead of dropping its video
 
 ## Related
 
