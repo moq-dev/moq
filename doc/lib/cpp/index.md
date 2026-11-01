@@ -142,7 +142,7 @@ ok(publication->announce(route));
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. A pre-encoded video track takes `lower` in its `VideoInit` too, which only places it one priority below; follow its reservation with `RateControl`, and while it reports disabled, drop the frames, call `set_enabled(false)` after a `discontinuity()`, and `set_enabled(true)` on the keyframe that resumes it.
 
 ## Futures
 

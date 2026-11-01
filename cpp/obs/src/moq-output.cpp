@@ -388,9 +388,9 @@ void MoQOutput::Reset()
 	for (auto &[encoder, track] : video_tracks) {
 		if (track.producer)
 			track.producer->finish();
-		if (track.rate && track.rate->Target() != track.rate->Max()) {
+		if (track.rate && track.applied_bps != track.bitrate_bps) {
 			if (OBSEncoder strong = OBSGetStrongRef(track.encoder))
-				restore.emplace_back(std::move(strong), track.rate->Max());
+				restore.emplace_back(std::move(strong), track.bitrate_bps);
 		}
 	}
 	video_tracks.clear();
@@ -577,8 +577,8 @@ bool MoQOutput::TryGetVideoRate(VideoRate *out)
 			if (!track.rate || !track.reservation)
 				continue;
 			following = true;
-			rate.target_bps += track.rate->Target();
-			rate.configured_bps += track.rate->Max();
+			rate.target_bps += track.enabled ? track.applied_bps : 0;
+			rate.configured_bps += track.bitrate_bps;
 		}
 	}
 	if (following && out)
@@ -667,6 +667,9 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 
 	auto it = video_tracks.find(encoder);
 	if (it == video_tracks.end()) {
+		// A track opens on a keyframe; deltas before it have no group to join.
+		if (!packet->keyframe)
+			return;
 		VideoInit(encoder);
 		it = video_tracks.find(encoder);
 	}
@@ -678,9 +681,15 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 	// Read before the frame is written, so a retune lands on the encoder's next
 	// frame. obs_encoder_update only flags an active encoder for its own thread.
 	if (track.rate && track.reservation) {
-		if (auto next = track.rate->Update(track.reservation->rate(), MoQRate::Clock::now()))
-			SetBitrate(encoder, *next);
+		if (auto next = track.rate->update(track.reservation))
+			Retarget(encoder, track, *next);
 	}
+
+	// OBS can't stop one encoder of a running output, or force it to keyframe, so a
+	// disabled rung keeps encoding and its packets are dropped here. It resumes on
+	// the encoder's next natural keyframe once the grant funds it again.
+	if (!track.sending && (!track.enabled || !packet->keyframe))
+		return;
 
 	auto timestamp = PacketTimestamp(packet);
 	if (!timestamp) {
@@ -688,12 +697,56 @@ void MoQOutput::VideoData(struct encoder_packet *packet)
 		return;
 	}
 
+	// A resume that fails to write its keyframe stays disabled, so it retries on the
+	// next keyframe instead of advertising a rung whose deltas have no group to join.
+	bool resumed = false;
+	if (!track.sending) {
+		if (auto result = track.producer->set_enabled(true); !result) {
+			LOG_ERROR("Failed to enable video track: %s", result.error().to_string().c_str());
+			return;
+		}
+		track.sending = true;
+		resumed = true;
+	}
+
 	if (auto result = track.producer->write_frame(PacketFrame(packet, *timestamp)); !result) {
 		LOG_ERROR("Failed to write video frame: %s", result.error().to_string().c_str());
+		if (resumed) {
+			track.sending = false;
+			if (auto disable = track.producer->set_enabled(false); !disable)
+				LOG_ERROR("Failed to disable video track: %s", disable.error().to_string().c_str());
+		}
+		return;
+	}
+	track.started = true;
+
+	total_bytes_sent += packet->size;
+}
+
+// NOTE: Caller must hold media_mutex.
+void MoQOutput::Retarget(obs_encoder_t *encoder, Track &track, const moq::RateTarget &target)
+{
+	if (const auto *enabled = std::get_if<moq::RateTarget::kEnabled>(&target.get_variant())) {
+		SetBitrate(encoder, enabled->bitrate_bps);
+		track.applied_bps = enabled->bitrate_bps;
+		track.enabled = true;
 		return;
 	}
 
-	total_bytes_sent += packet->size;
+	track.enabled = false;
+	if (!track.sending)
+		return;
+	track.sending = false;
+	// The lower renditions keep their share; viewers switch to one instead of
+	// waiting on frames that stopped coming. Before the first frame there is no
+	// timeline to break, and the marker would drop the init's parameter sets, which
+	// an encoder that sends them only as extra data never repeats.
+	if (track.started) {
+		if (auto result = track.producer->discontinuity(); !result)
+			LOG_ERROR("Failed to mark a disabled video track: %s", result.error().to_string().c_str());
+	}
+	if (auto result = track.producer->set_enabled(false); !result)
+		LOG_ERROR("Failed to disable video track: %s", result.error().to_string().c_str());
 }
 
 // NOTE: Caller must hold media_mutex.
@@ -767,6 +820,51 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	hint.optimize_for_latency = true;
 	config.hint = hint;
 
+	// Every video encoder on the output encodes the same program, so the encoder with
+	// the next lower bitrate is this rendition's fallback. That track is published
+	// first, so this one can sit one priority below it and the allocator funds it first.
+	obs_encoder_t *lower = nullptr;
+	int lower_kbps = 0;
+	for (uint32_t idx = 0; idx < MAX_OUTPUT_VIDEO_ENCODERS; idx++) {
+		obs_encoder_t *other = obs_output_get_video_encoder2(output, idx);
+		if (!other || other == encoder)
+			continue;
+		// An encoder already publishing may have been retuned, so read the bitrate it
+		// was configured with.
+		int kbps = 0;
+		if (auto known = video_tracks.find(other); known != video_tracks.end()) {
+			kbps = (int)(known->second.bitrate_bps / 1000);
+		} else {
+			OBSDataAutoRelease other_settings = obs_encoder_get_settings(other);
+			kbps = other_settings ? (int)obs_data_get_int(other_settings, "bitrate") : 0;
+		}
+		if (kbps > lower_kbps && kbps < video_bitrate_kbps) {
+			lower = other;
+			lower_kbps = kbps;
+		}
+	}
+	std::optional<uint64_t> lower_bps;
+	if (lower) {
+		if (video_tracks.find(lower) == video_tracks.end()) {
+			// The lower track keeps the headers it starts with, and some encoders only have
+			// them after their first frame. Wait for its first packet to start it instead;
+			// this rendition opens on its next keyframe after that.
+			uint8_t *lower_data = nullptr;
+			size_t lower_size = 0;
+			if (!obs_encoder_get_extra_data(lower, &lower_data, &lower_size) || lower_size == 0)
+				return;
+			VideoInit(lower);
+		}
+		// The lower rendition waits on one further down, so this one waits with it.
+		auto below = video_tracks.find(lower);
+		if (below == video_tracks.end())
+			return;
+		if (below->second.producer) {
+			config.lower = below->second.producer;
+			lower_bps = (uint64_t)lower_kbps * 1000ULL;
+		}
+	}
+
 	auto track = moq::MediaTrackProducer::video(broadcast, moq::MediaTarget::kNamed{}, config);
 	if (!track) {
 		LOG_ERROR("Failed to initialize video track: %s", track.error().to_string().c_str());
@@ -782,7 +880,8 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 		// bitrate drives; a quality target (CQP, CRF) only reserves.
 		const bool dynamic = obs_encoder_get_caps(encoder) & OBS_ENCODER_CAP_DYN_BITRATE;
 		if (dynamic && BitrateDriven(rate_control)) {
-			entry.rate.emplace(entry.bitrate_bps);
+			entry.rate = moq::RateControl::init(moq::RatePolicy{entry.bitrate_bps, lower_bps});
+			entry.applied_bps = entry.bitrate_bps;
 			entry.encoder = OBSGetWeakRef(encoder);
 		} else {
 			LOG_INFO("Video bitrate stays at %d kbps: the encoder cannot follow the bandwidth grant (%s)",
@@ -791,7 +890,11 @@ void MoQOutput::VideoInit(obs_encoder_t *encoder)
 	}
 	video_tracks[encoder] = std::move(entry);
 
-	LOG_INFO("Video track initialized (%ux%u, %d kbps)", video_width, video_height, video_bitrate_kbps);
+	if (lower_bps)
+		LOG_INFO("Video track initialized (%ux%u, %d kbps, above a %d kbps rendition)", video_width,
+			 video_height, video_bitrate_kbps, lower_kbps);
+	else
+		LOG_INFO("Video track initialized (%ux%u, %d kbps)", video_width, video_height, video_bitrate_kbps);
 }
 
 // NOTE: Caller must hold media_mutex.

@@ -138,6 +138,15 @@ fn build_av1<E: CatalogExt>(
 	Ok((split, import))
 }
 
+/// An audio format handed to a video-only operation.
+fn not_video(format: AudioFormat) -> crate::Error {
+	crate::Error::WrongKind {
+		format: format.to_string(),
+		actual: "audio",
+		wanted: "video",
+	}
+}
+
 enum TrackKind {
 	/// H.264 avc3 (Annex-B, inline SPS/PPS). The split owns byte parsing; the
 	/// import publishes.
@@ -272,11 +281,7 @@ impl Track {
 	) -> Result<Self> {
 		use hang::catalog::VideoCodec;
 
-		let track = request.accept(track_info(
-			&reserved,
-			hang::catalog::PRIORITY.video,
-			&init.hint.container,
-		)?);
+		let track = request.accept(track_info(&reserved, init.priority, &init.hint.container)?);
 		let data = init.data.as_ref();
 		let kind = match init.format {
 			VideoFormat::Avc1 => {
@@ -461,6 +466,30 @@ impl Track {
 		import!(&mut self.kind, import => import.discontinuity())
 	}
 
+	/// Advertise whether this video rendition is being produced, as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled).
+	///
+	/// Disable it when the sender stops for lack of bandwidth (a
+	/// [`rate::Target::Disabled`](crate::rate::Target::Disabled)) and mark the
+	/// [`discontinuity`](Self::discontinuity), so viewers select a lower rendition instead
+	/// of waiting for frames. Enable it again with the keyframe that resumes it. Audio has
+	/// no lower rendition to fall back to, so an audio track refuses with
+	/// [`Error::WrongKind`](crate::Error::WrongKind).
+	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+		match &mut self.kind {
+			TrackKind::Avc3 { import, .. } | TrackKind::Avc1 { import, .. } => import.set_enabled(enabled)?,
+			TrackKind::Hev1 { import, .. } | TrackKind::Hvc1 { import, .. } => import.set_enabled(enabled)?,
+			TrackKind::Av01 { import, .. } => import.set_enabled(enabled)?,
+			TrackKind::Vp8(import) => import.set_enabled(enabled)?,
+			TrackKind::Vp9(import) => import.set_enabled(enabled)?,
+			TrackKind::Aac(_) => return Err(not_video(AudioFormat::Aac)),
+			TrackKind::Opus(_) => return Err(not_video(AudioFormat::Opus)),
+			TrackKind::Mp3(_) => return Err(not_video(AudioFormat::Mp3)),
+			TrackKind::Flac(_) => return Err(not_video(AudioFormat::Flac)),
+		}
+		Ok(())
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.group_start = None;
@@ -576,11 +605,7 @@ impl TrackStream {
 		reserved: crate::catalog::Reserved<E>,
 		init: VideoInit,
 	) -> Result<Self> {
-		let track = request.accept(track_info(
-			&reserved,
-			hang::catalog::PRIORITY.video,
-			&init.hint.container,
-		)?);
+		let track = request.accept(track_info(&reserved, init.priority, &init.hint.container)?);
 		let hint = video_hint(&init, None);
 		// Only the self-delimiting codecs can be recovered from a raw byte stream.
 		let kind = match init.format {
@@ -1154,6 +1179,49 @@ mod tests {
 
 		let video = consumer.track("video").unwrap().info().await.unwrap();
 		assert_eq!(video.priority, PRIORITY.video);
+
+		// A higher rung asks for its own priority, below the rendition it sits above.
+		let request = broadcast.reserve_track("top").unwrap();
+		let _top = Track::video(
+			request,
+			catalog.reserve(),
+			VideoInit {
+				priority: PRIORITY.video - 1,
+				..VideoInit::new(VideoFormat::Vp8, Vec::new())
+			},
+		)
+		.unwrap();
+		let top = consumer.track("top").unwrap().info().await.unwrap();
+		assert_eq!(top.priority, PRIORITY.video - 1);
+	}
+
+	/// Disabling a video rendition flips its catalog `enabled` and keeps the rest of it;
+	/// audio has no lower rendition to fall back to, so it refuses.
+	#[tokio::test(start_paused = true)]
+	async fn video_disables_and_audio_refuses() {
+		let (broadcast, catalog) = new_broadcast();
+		let request = broadcast.reserve_track("video").unwrap();
+		let mut video = Track::video(request, catalog.reserve(), VideoInit::new(VideoFormat::Vp8, Vec::new())).unwrap();
+
+		video.set_enabled(false).unwrap();
+		let rendition = catalog.snapshot().video.renditions.get("video").cloned().unwrap();
+		assert!(!rendition.enabled);
+		assert_eq!(rendition.codec.to_string(), "vp8");
+
+		video.set_enabled(true).unwrap();
+		assert!(catalog.snapshot().video.renditions["video"].enabled);
+
+		let request = broadcast.reserve_track("audio").unwrap();
+		let mut audio = Track::audio(
+			request,
+			catalog.reserve(),
+			AudioInit::new(AudioFormat::Opus, opus_head()),
+		)
+		.unwrap();
+		assert!(matches!(
+			audio.set_enabled(false),
+			Err(crate::Error::WrongKind { actual: "audio", .. })
+		));
 	}
 
 	/// An audio format with no init bytes errors up front (audio can't resolve its config from frames),

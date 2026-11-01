@@ -61,9 +61,30 @@ type (
 
 	// AudioInit describes an audio codec and its initialization bytes.
 	AudioInit = ffi.MoqAudioInit
-	// VideoInit describes a video codec, initialization bytes, and hints.
-	VideoInit = ffi.MoqVideoInit
 )
+
+// VideoInit describes a video codec, initialization bytes, and hints.
+type VideoInit struct {
+	// Format selects the video codec.
+	Format VideoFormat
+	// Data supplies codec init bytes (an avcC, an hvcC, ...); may be empty for a format that resolves in band.
+	Data []byte
+	// Label is a human-readable rendition name for a track picker.
+	Label *string
+	// Hint carries catalog fields the stream cannot reveal itself.
+	Hint *VideoHint
+	// Lower is the next lower rendition of the same source: this track then sits one
+	// priority below it, so a bandwidth allocator funds that one first.
+	Lower *TrackProducer
+}
+
+func (init VideoInit) ffi() ffi.MoqVideoInit {
+	var lower **ffi.MoqMediaTrackProducer
+	if init.Lower != nil {
+		lower = &init.Lower.inner
+	}
+	return ffi.MoqVideoInit{Format: init.Format, Data: init.Data, Label: init.Label, Hint: init.Hint, Lower: lower}
+}
 
 // Timebase shares a source's timestamp offset without keeping its broadcast open.
 type Timebase struct{ inner *ffi.MoqMediaTimebase }
@@ -191,7 +212,7 @@ func NewVideoTrackProducer(broadcast *moq.BroadcastProducer, target Target, init
 	if err != nil {
 		return nil, err
 	}
-	inner, err := ffi.MoqMediaTrackProducerVideo(bridge.BroadcastProducer(broadcast), resolved, init)
+	inner, err := ffi.MoqMediaTrackProducerVideo(bridge.BroadcastProducer(broadcast), resolved, init.ffi())
 	if err != nil {
 		return nil, err
 	}
@@ -204,7 +225,7 @@ func NewVideoTrackStreamProducer(broadcast *moq.BroadcastProducer, target Target
 	if err != nil {
 		return nil, err
 	}
-	inner, err := ffi.MoqMediaTrackStreamProducerVideo(bridge.BroadcastProducer(broadcast), resolved, init)
+	inner, err := ffi.MoqMediaTrackStreamProducerVideo(bridge.BroadcastProducer(broadcast), resolved, init.ffi())
 	if err != nil {
 		return nil, err
 	}
@@ -398,6 +419,14 @@ func (m *TrackProducer) WriteFrame(frame moq.Frame) error {
 // Discontinuity marks a timeline break, preserving the advertised jitter and delay.
 func (m *TrackProducer) Discontinuity() error {
 	return m.inner.Discontinuity()
+}
+
+// SetEnabled advertises whether this video rendition is being produced, as its catalog
+// enabled flag. Disable it when its sender stops for lack of bandwidth and mark a
+// Discontinuity; enable it again just before the keyframe that resumes it. An audio
+// track refuses.
+func (m *TrackProducer) SetEnabled(enabled bool) error {
+	return m.inner.SetEnabled(enabled)
 }
 
 // Cut draws a group boundary here.

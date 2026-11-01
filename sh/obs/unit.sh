@@ -64,7 +64,7 @@ for name in moq-audio-encoder moq-output moq-settings moq-source obs-moq; do
         -o "$out/$name-test" "${sources[@]}" "$out/moq.o" $moq_libs
     TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/test/tsan.supp" "$out/$name-test"
 done
-for name in moq-quality-defaults moq-dock-stop moq-error moq-encoder-latency moq-dial moq-spark moq-rate; do
+for name in moq-quality-defaults moq-dock-stop moq-error moq-encoder-latency moq-dial moq-spark; do
     "$cxx" "${flags[@]}" "${includes[@]}" \
         -o "$out/$name-test" "test/$name-test.cpp"
     TSAN_OPTIONS="halt_on_error=1 suppressions=$PWD/test/tsan.supp" "$out/$name-test"

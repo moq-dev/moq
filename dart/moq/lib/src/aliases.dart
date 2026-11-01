@@ -167,6 +167,15 @@ typedef BandwidthConsumer = MoqBandwidthConsumer;
 /// One track's standing claim on an [Allocator].
 typedef Reservation = MoqReservation;
 
+/// Turns a [Reservation]'s grant into a sender's [RateTarget]; call `update` on every frame.
+typedef RateControl = MoqRateControl;
+
+/// How a [RateControl] maps a grant onto a bitrate, and the lower rendition that disables it.
+typedef RatePolicy = MoqRatePolicy;
+
+/// What a sender following a [RateControl] should be doing: an enabled bitrate, or disabled.
+typedef RateTarget = MoqRateTarget;
+
 /// A snapshot of transport connection statistics.
 typedef ConnectionStats = MoqConnectionStats;
 

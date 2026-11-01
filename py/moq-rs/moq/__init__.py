@@ -42,7 +42,15 @@ from .publish import (
     TrackRequests,
 )
 from .server import Request, Server, Transport
-from .session import Allocator, BandwidthConsumer, GrantConsumer, Reservation, Session, Tokens
+from .session import (
+    Allocator,
+    BandwidthConsumer,
+    GrantConsumer,
+    RateControl,
+    Reservation,
+    Session,
+    Tokens,
+)
 from .subscribe import (
     BroadcastConsumer,
     GroupConsumer,
@@ -70,6 +78,7 @@ from .types import (
     ProtocolKind,
     QuicConfig,
     Range,
+    RateTarget,
     Route,
     Subscription,
     TrackInfo,
@@ -131,6 +140,8 @@ __all__ = [
     "Position",
     "Publication",
     "Range",
+    "RateControl",
+    "RateTarget",
     "Request",
     "Reservation",
     "Route",

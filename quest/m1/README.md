@@ -147,7 +147,7 @@ removed).
 - [On-demand JavaScript FETCH](/quest/m1/js-fetch-on-demand.md) - browser publishers answer IETF FETCH for evicted or uncached groups through the JS ranges request surface
 - [Rust cancels an unclaimed fill head when a subscription ends](/quest/m1/ietf-fill-end-cancel.md) - SUBSCRIPTION_ENDED cancels, not finishes, a fill no group was sent for, as in JS
 - [Rust marks a lost listed group unknown](/quest/m1/ietf-publisher-unknown-range.md) - the Rust IETF publisher sends End of Unknown Range for a listed group it can't serve, after the publisher's open quests land
-- [Native rung disable](/quest/m1/simulcast-rung-disable.md) - OBS stops sending the top renditions its grant cannot fund, as the Rust/FFI publishers do, and a shaped uplink through moq-ffi proves the resume
+- [Native rung disable proof](/quest/m1/simulcast-rung-disable.md) - a shaped uplink through moq-ffi proves the top rendition stops and resumes over real BBR3 probing
 - [Audio jitter target](/quest/m1/audio-jitter-target/README.md) - the playout target is default in both languages; a manual browser proof and a native trace replay remain
 - [A/V clock](/quest/m1/av-clock.md) - the audio playhead drives Sync.reference while audio plays, through per-track sync handles
 - [Decoding from a track's first packet keeps its start](/quest/m1/opus-preskip.md) - moq-audio drops only OpusHead's pre-skip from a track's first packet, keeping the 80 ms warmup for mid-stream joins
