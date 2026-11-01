@@ -771,7 +771,6 @@ fn instance_id(fullname: &str) -> Option<&str> {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1186,7 +1185,7 @@ mod tests {
 				}
 			}
 		};
-		tokio::time::timeout(std::time::Duration::from_secs(30), wait)
+		moq_clock::timeout(std::time::Duration::from_secs(30), wait)
 			.await
 			.unwrap_or_else(|_| panic!("timed out discovering {fingerprint}"))
 	}
@@ -1252,7 +1251,7 @@ mod tests {
 	async fn stopped(monitor: mdns_sd::Receiver<mdns_sd::DaemonEvent>) {
 		// Monitor senders belong to the worker, not the command handle. Their
 		// closure proves the worker released them rather than just accepting Exit.
-		tokio::time::timeout(std::time::Duration::from_secs(5), async {
+		moq_clock::timeout(std::time::Duration::from_secs(5), async {
 			while monitor.recv_async().await.is_ok() {}
 		})
 		.await
@@ -1374,7 +1373,7 @@ mod tests {
 			"exactly one side of the pair dials"
 		);
 
-		let leaked = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+		let leaked = moq_clock::timeout(std::time::Duration::from_secs(2), async {
 			loop {
 				match foreign.recv().await {
 					Some(Event::Found(peer))

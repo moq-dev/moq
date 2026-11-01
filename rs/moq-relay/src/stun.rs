@@ -275,11 +275,6 @@ impl Server {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 	use stun_types::message::{MessageType, MessageWriteVec};
@@ -459,7 +454,7 @@ mod tests {
 		let client = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
 		client.send_to(&request(), addr).await.unwrap();
 		let mut output = [0; 44];
-		let (len, sender) = tokio::time::timeout(Duration::from_secs(5), client.recv_from(&mut output))
+		let (len, sender) = moq_clock::timeout(Duration::from_secs(5), client.recv_from(&mut output))
 			.await
 			.unwrap()
 			.unwrap();
@@ -515,6 +510,11 @@ mod tests {
 
 	#[test]
 	#[ignore = "benchmark"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures real per-request cost"
+	)]
 	fn benchmark_stun_sources() {
 		println!("sources,requests_per_source,ns_per_request");
 		for sources in [1u32, 64, SOURCES_MAX as u32] {

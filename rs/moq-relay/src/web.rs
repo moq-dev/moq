@@ -1207,11 +1207,6 @@ impl IntoResponse for ServeGroup {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 	use rcgen::{CertificateParams, KeyPair};
@@ -2100,11 +2095,11 @@ mod tests {
 		let serving = tokio::spawn(web.serve(Router::new()));
 
 		let mut tcp = tokio::net::TcpStream::connect(http).await.unwrap();
-		let start = std::time::Instant::now();
+		let start = moq_clock::now();
 		tcp.write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n").await.unwrap();
 
 		let mut rest = Vec::new();
-		tokio::time::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
+		moq_clock::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
 			.await
 			.expect("slow headers held the connection open")
 			.ok();
@@ -2138,13 +2133,13 @@ mod tests {
 		let serving = tokio::spawn(web.serve(routes));
 
 		let mut tcp = tokio::net::TcpStream::connect(http).await.unwrap();
-		let start = std::time::Instant::now();
+		let start = moq_clock::now();
 		tcp.write_all(b"GET /announced HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
 			.await
 			.unwrap();
 
 		let mut response = Vec::new();
-		tokio::time::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut response))
+		moq_clock::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut response))
 			.await
 			.expect("the unanswered admission held the request open")
 			.ok();
@@ -2256,7 +2251,7 @@ mod tests {
 		tcp.write_all(&frame).await.unwrap();
 
 		let mut rest = Vec::new();
-		tokio::time::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
+		moq_clock::timeout(std::time::Duration::from_secs(10), tcp.read_to_end(&mut rest))
 			.await
 			.expect("the socket waited to buffer a frame larger than a record")
 			.ok();

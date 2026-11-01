@@ -255,7 +255,7 @@ impl<S: ObjectStore> Consumer<S> {
 		if let Some(ends) = refreshed.ends {
 			for (name, end) in ends {
 				if let Some(track) = self.tracks.get_mut(&name) {
-					track.live.end(end, &name)?;
+					track.live.end(end)?;
 				}
 			}
 			self.ended = true;
