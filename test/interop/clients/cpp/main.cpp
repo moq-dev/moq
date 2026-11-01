@@ -295,7 +295,7 @@ void decode_audio(
     }
     moq::AudioDecoderOutput output{};
     output.format = moq::AudioSampleFormat::kF32;
-    output.max_delay = MAX_DELAY;
+    output.delay = moq::Delay{std::chrono::nanoseconds(0), MAX_DELAY};
     auto decoder = until(moq::AudioConsumer::subscribe(consumer, id, audio, output), deadline, "audio consumer");
 
     std::ofstream log(out + ".txt");
