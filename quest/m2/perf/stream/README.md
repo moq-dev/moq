@@ -128,7 +128,6 @@ Decided 2026-10-31 (maintainer), in
 
 ## Required
 
-- [Driver](/quest/m2/perf/stream/driver.md) - a qmux session is one caller-spawned task polling the socket it owns, with no split, pump, channel, or per-record allocation
 - [Ring TCP ablation](/quest/m2/perf/stream/ablation.md) - measured ring TCP against tokio TCP under the qmux workload picks the mechanisms the port uses
 - [Ring TCP](/quest/m2/perf/stream/ring.md) - moq-uring serves TCP, and hyper (therefore axum) runs on it
 - [Relay listeners on the workers](/quest/m2/perf/stream/relay.md) - the relay's WebSocket, qmux TCP, and HTTP listeners run on the io_uring workers

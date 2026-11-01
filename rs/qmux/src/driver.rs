@@ -2,8 +2,9 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -35,6 +36,9 @@ const ROUNDS: usize = 16;
 #[must_use = "the session makes no progress unless its driver is polled"]
 pub struct Driver<T> {
 	park: kio::Park,
+	/// Polls the transport's receive side, so it is polled again only once it asks to be.
+	recv: kio::Waiter,
+	recv_wake: Arc<RecvWake>,
 	run: Run<T>,
 }
 
@@ -43,14 +47,22 @@ impl<T> Unpin for Driver<T> {}
 
 impl<T: Transport> Driver<T> {
 	pub(crate) fn new(inner: Arc<Inner>, transport: T) -> Self {
+		let recv_wake = Arc::new(RecvWake {
+			// Nothing is known about the receive side until it is polled once.
+			woken: AtomicBool::new(true),
+			task: Mutex::new(None),
+		});
 		Self {
 			park: kio::Park::default(),
+			recv: kio::Waiter::new(Waker::from(recv_wake.clone())),
+			recv_wake,
 			run: Run {
 				inner,
 				transport,
 				timer: Timer::default(),
 				inbound: Vec::new(),
 				reading: true,
+				unflushed: false,
 				phase: Phase::Open,
 				sent_bytes: 0,
 				received_bytes: 0,
@@ -64,8 +76,65 @@ impl<T: Transport> Future for Driver<T> {
 
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
 		let this = self.get_mut();
+		this.recv_wake.track(cx.waker());
 		let waiter = this.park.hold(cx);
-		waiter.batch(|| this.run.poll(waiter))
+		let recv = Recv {
+			waiter: &this.recv,
+			wake: &this.recv_wake,
+		};
+		waiter.batch(|| this.run.poll(waiter, &recv))
+	}
+}
+
+/// Wakes the driver's task for the transport's receive side, and records that it did.
+///
+/// Polling the receive side is not free on every transport: tungstenite zeroes its whole
+/// read buffer on each attempt, even one that finds nothing. So the driver polls it only
+/// after it asked to be woken, rather than on every wakeup a write or a handle caused.
+struct RecvWake {
+	woken: AtomicBool,
+	/// The task that polls the driver.
+	task: Mutex<Option<Waker>>,
+}
+
+impl RecvWake {
+	/// Wake `waker` from now on.
+	fn track(&self, waker: &Waker) {
+		let mut task = self.task.lock().unwrap();
+		if !task.as_ref().is_some_and(|task| task.will_wake(waker)) {
+			*task = Some(waker.clone());
+		}
+	}
+}
+
+impl Wake for RecvWake {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		self.woken.store(true, Ordering::Release);
+		if let Some(task) = self.task.lock().unwrap().as_ref() {
+			task.wake_by_ref();
+		}
+	}
+}
+
+/// The receive side's waiter, and whether it was woken.
+struct Recv<'a> {
+	waiter: &'a kio::Waiter,
+	wake: &'a RecvWake,
+}
+
+impl Recv<'_> {
+	/// Whether the receive side was woken since it was last found pending, clearing it.
+	fn take(&self) -> bool {
+		self.wake.woken.swap(false, Ordering::AcqRel)
+	}
+
+	/// Poll the receive side again on the next round, since it stopped short of pending.
+	fn again(&self) {
+		self.wake.woken.store(true, Ordering::Release);
 	}
 }
 
@@ -112,13 +181,15 @@ struct Run<T> {
 	inbound: Vec<Result<Bytes, Error>>,
 	/// The transport's receive side has not ended.
 	reading: bool,
+	/// The last flush did not finish.
+	unflushed: bool,
 	phase: Phase,
 	sent_bytes: u64,
 	received_bytes: u64,
 }
 
 impl<T: Transport> Run<T> {
-	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+	fn poll(&mut self, waiter: &kio::Waiter, recv: &Recv<'_>) -> Poll<()> {
 		let mut rounds = 0;
 		loop {
 			match self.phase {
@@ -131,7 +202,7 @@ impl<T: Transport> Run<T> {
 					}
 					self.finish(Ok(()));
 				}
-				Phase::Open => match self.step(waiter) {
+				Phase::Open => match self.step(waiter, recv) {
 					Step::Progress => {
 						rounds += 1;
 						if rounds == ROUNDS {
@@ -151,23 +222,32 @@ impl<T: Transport> Run<T> {
 	}
 
 	/// Read a batch into the connection, write a batch out of it, and flush.
-	fn step(&mut self, waiter: &kio::Waiter) -> Step {
-		let mut read = 0;
-		while self.reading && read < BATCH_BYTES {
-			match self.transport.poll_recv(waiter) {
-				Poll::Ready(Ok(record)) => {
-					read += record.len().max(1);
-					self.inbound.push(Ok(record));
+	fn step(&mut self, waiter: &kio::Waiter, recv: &Recv<'_>) -> Step {
+		// Whether this step polled the receive side, and whether it stopped short of pending.
+		let polled = self.reading && recv.take();
+		let mut more_to_read = false;
+		if polled {
+			let mut read = 0;
+			loop {
+				if read >= BATCH_BYTES {
+					recv.again();
+					more_to_read = true;
+					break;
 				}
-				Poll::Ready(Err(err)) => {
-					self.reading = false;
-					self.inbound.push(Err(err));
+				match self.transport.poll_recv(recv.waiter) {
+					Poll::Ready(Ok(record)) => {
+						read += record.len().max(1);
+						self.inbound.push(Ok(record));
+					}
+					Poll::Ready(Err(err)) => {
+						self.reading = false;
+						self.inbound.push(Err(err));
+						break;
+					}
+					Poll::Pending => break,
 				}
-				Poll::Pending => break,
 			}
 		}
-		let received = !self.inbound.is_empty();
-
 		let now = moq_clock::now();
 		let mut state = self.inner.lock();
 		// Register first: a handle mutating the connection after this re-polls us.
@@ -224,13 +304,18 @@ impl<T: Transport> Run<T> {
 			return Step::Failed(err);
 		}
 
-		// Flush even with nothing new queued, which also sends what the transport queued on its
-		// own, such as a WebSocket Pong.
-		let flushed = match self.transport.poll_flush(waiter) {
-			Poll::Ready(Ok(())) => true,
-			Poll::Ready(Err(err)) => return Step::Failed(err),
-			Poll::Pending => false,
+		// Flush what this step queued, what an earlier flush left, and what the transport may
+		// have queued on its own while receiving, such as a WebSocket Pong. Skipping it
+		// otherwise matters: a flush through TLS and tungstenite is not free.
+		let flushed = match written > 0 || blocked || self.unflushed || polled {
+			true => match self.transport.poll_flush(waiter) {
+				Poll::Ready(Ok(())) => true,
+				Poll::Ready(Err(err)) => return Step::Failed(err),
+				Poll::Pending => false,
+			},
+			false => true,
 		};
+		self.unflushed = !flushed;
 		self.set_stalled(blocked || !flushed);
 
 		if drained && flushed && !blocked {
@@ -240,7 +325,9 @@ impl<T: Transport> Run<T> {
 			// The close never got through a stalled transport.
 			return Step::Failed(Error::Closed);
 		}
-		if received || (written > 0 && flushed) {
+		// Each step already wrote what the records it read made the connection say, so go again
+		// only when a batch cut a direction short.
+		if more_to_read || (written >= BATCH_BYTES && flushed && !blocked) {
 			return Step::Progress;
 		}
 		let deadline = match (deadline, self.timer.closing) {
