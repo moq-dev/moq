@@ -92,6 +92,9 @@ sd-notify = { workspace = true }
 
 [dev-dependencies]
 aws-lc-rs = { workspace = true }
+criterion = { workspace = true }
+# The http_auth bench drives the web listener over HTTP/2.
+h2 = "0.4"
 hex = { workspace = true }
 moq-auth = { path = "../moq-auth", features = ["client", "serve"] }
 moq-shaper = { path = "../moq-shaper" }
@@ -109,3 +112,7 @@ socket2 = { workspace = true, features = ["all"] }
 # path rather than the trigger behind it.
 [target.'cfg(unix)'.dev-dependencies]
 libc = "0.2"
+
+[[bench]]
+name = "http_auth"
+harness = false

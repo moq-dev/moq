@@ -77,9 +77,13 @@ fn session_report(c: &mut Criterion) {
 				})
 				.collect();
 			let mut report = stats::Report::default();
-			group.bench_function(BenchmarkId::from_parameter(format!("{labels}x{sessions}")), |b| {
-				b.iter(|| registry.report(&mut report));
-			});
+			// `main`'s `connections=0` row: `release` has no transport wires to walk.
+			group.bench_function(
+				BenchmarkId::from_parameter(format!("{labels}x{sessions}/connections=0")),
+				|b| {
+					b.iter(|| registry.report(&mut report));
+				},
+			);
 			std::hint::black_box(contexts);
 		}
 	}

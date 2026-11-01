@@ -55,3 +55,7 @@ harness = false
 [[bench]]
 name = "containers"
 harness = false
+
+[[bench]]
+name = "parameter_sets"
+harness = false
