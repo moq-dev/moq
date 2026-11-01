@@ -360,21 +360,23 @@ mod linux {
 			};
 
 			// Drop targets that exited; sampling the survivors is still useful.
-			targets.retain_mut(|target| match sample(target, tps, page, args.threads, host, sockets.as_ref()) {
-				Ok(record) => {
-					// A serialization failure is a bug, not a runtime condition.
-					let line = serde_json::to_string(&record).expect("sample must serialize");
-					if let Err(err) = writeln!(out, "{line}") {
-						eprintln!("write failed: {err}");
-						std::process::exit(1);
+			targets.retain_mut(
+				|target| match sample(target, tps, page, args.threads, host, sockets.as_ref()) {
+					Ok(record) => {
+						// A serialization failure is a bug, not a runtime condition.
+						let line = serde_json::to_string(&record).expect("sample must serialize");
+						if let Err(err) = writeln!(out, "{line}") {
+							eprintln!("write failed: {err}");
+							std::process::exit(1);
+						}
+						true
 					}
-					true
-				}
-				Err(_) => {
-					eprintln!("pid {} exited, dropping", target.proc.pid);
-					false
-				}
-			});
+					Err(_) => {
+						eprintln!("pid {} exited, dropping", target.proc.pid);
+						false
+					}
+				},
+			);
 			// Every line lands on disk before the sleep, so a Ctrl-C loses nothing.
 			out.flush()?;
 

@@ -124,6 +124,21 @@ just rs bench-udp --sample-size 20 --measurement-time 2 --warm-up-time 1
 just rs bench-echo
 ```
 
+`benchmark_socket_queues` (an ignored integration test, run nightly) attributes
+UDP loss between a sender and a steered worker group, on this ring and on
+moq-sock's `recvmmsg` under Tokio. It sweeps the kernel queue, the receive pool
+depth, workers, flows and GSO one at a time across worker stalls, CPU
+contention, sustained overload, and a rate-limited path with a deep finite
+queue (moq-shaper). Each row accounts for every datagram: delivered, dropped
+at a socket (`sk_drops` via `SO_MEMINFO`), dropped on the path, or
+unattributed, beside `rx_enobufs`, peak queued bytes, delay and receive CPU.
+`rx_enobufs` is pool starvation, which leaves datagrams queued in the socket:
+with a 16-buffer pool it fired hundreds of times and dropped nothing.
+
+```bash
+just rs test -p moq-uring --release -E 'test(benchmark_socket_queues)' --run-ignored only --success-output immediate
+```
+
 ## Parallel test runs
 
 Locked memory is charged per user across processes, not per nextest run.

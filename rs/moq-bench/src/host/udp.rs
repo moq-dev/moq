@@ -79,7 +79,13 @@ pub fn dump() -> io::Result<HashMap<u64, Socket>> {
 
 fn dump_family(family: u8, sockets: &mut HashMap<u64, Socket>) -> io::Result<()> {
 	// SAFETY: plain socket creation; the result is checked before use.
-	let fd = unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, NETLINK_SOCK_DIAG) };
+	let fd = unsafe {
+		libc::socket(
+			libc::AF_NETLINK,
+			libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+			NETLINK_SOCK_DIAG,
+		)
+	};
 	if fd < 0 {
 		return Err(io::Error::last_os_error());
 	}
@@ -312,7 +318,10 @@ mod tests {
 			drops,
 		};
 		let owned: HashSet<u64> = [1, 2].into();
-		let sample = drops.observe(&owned, &[(1, socket(u32::MAX - 1)), (2, socket(3)), (9, socket(100))].into());
+		let sample = drops.observe(
+			&owned,
+			&[(1, socket(u32::MAX - 1)), (2, socket(3)), (9, socket(100))].into(),
+		);
 		assert_eq!(sample.sockets, 2);
 		assert_eq!(sample.drops, u64::from(u32::MAX - 1) + 3);
 		assert_eq!((sample.rcvbuf_min, sample.sndbuf_min, sample.queued), (8, 4, 2));
@@ -336,7 +345,11 @@ mod tests {
 		let owned = inodes(&process).unwrap();
 		let all = dump().unwrap();
 		let mine: Vec<_> = owned.iter().filter_map(|inode| all.get(inode)).collect();
-		assert!(!mine.is_empty(), "the dump must include the bound socket: owned {owned:?}, dumped {}", all.len());
+		assert!(
+			!mine.is_empty(),
+			"the dump must include the bound socket: owned {owned:?}, dumped {}",
+			all.len()
+		);
 		assert!(mine.iter().all(|socket| socket.rcvbuf > 0));
 		drop(socket);
 	}

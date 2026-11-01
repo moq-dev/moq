@@ -47,7 +47,6 @@
 
 #![expect(
 	clippy::disallowed_methods,
-	clippy::disallowed_types,
 	reason = "a benchmark paces load and stalls workers on the host clock"
 )]
 
@@ -294,7 +293,9 @@ fn print_host() {
 		std::thread::available_parallelism().map_or(0, usize::from),
 		read("/proc/loadavg")
 	);
-	println!("# offered {RATE} datagrams/s of {SEGMENT} bytes for {DURATION:?} per cell; {STALL_PERIOD:?} between stalls");
+	println!(
+		"# offered {RATE} datagrams/s of {SEGMENT} bytes for {DURATION:?} per cell; {STALL_PERIOD:?} between stalls"
+	);
 }
 
 #[derive(Default)]
@@ -379,7 +380,15 @@ fn meminfo(fd: RawFd) -> io::Result<[u32; SK_MEMINFO_VARS]> {
 	let mut mem = [0u32; SK_MEMINFO_VARS];
 	let mut len = std::mem::size_of_val(&mem) as libc::socklen_t;
 	// SAFETY: `mem` is writable for `len` bytes, which the kernel truncates to.
-	let res = unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_MEMINFO, mem.as_mut_ptr().cast(), &mut len) };
+	let res = unsafe {
+		libc::getsockopt(
+			fd,
+			libc::SOL_SOCKET,
+			libc::SO_MEMINFO,
+			mem.as_mut_ptr().cast(),
+			&mut len,
+		)
+	};
 	if res != 0 {
 		return Err(io::Error::last_os_error());
 	}
@@ -684,7 +693,10 @@ fn measure(path: Path, cell: Cell) -> anyhow::Result<Result> {
 		}
 	}
 	// Duplicates of each member, read for its queue while the worker owns it.
-	let monitors = sockets.iter().map(UdpSocket::try_clone).collect::<io::Result<Vec<_>>>()?;
+	let monitors = sockets
+		.iter()
+		.map(UdpSocket::try_clone)
+		.collect::<io::Result<Vec<_>>>()?;
 	let rcvbuf = meminfo(monitors[0].as_raw_fd())?[SK_MEMINFO_RCVBUF] as usize;
 	let drops_before = drops(&monitors)?;
 	let backlog_before = backlog_drops();
