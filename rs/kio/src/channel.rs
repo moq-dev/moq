@@ -185,9 +185,12 @@ impl<T> Channel<T> {
 	/// compiler would otherwise keep it out of line, a call on every pending poll.
 	#[inline(always)]
 	pub fn park_value(&self, waiter: &Waiter, seen: u64) {
-		// Still on the list, and nothing published since `f` judged the value. A noop
-		// waiter registers nowhere and wakes nothing, so it needs no lock either.
-		if waiter.holds(self.value_tag.load(Ordering::Acquire)) && self.version() == seen || waiter.is_noop() {
+		// Still on the list, and nothing published since `f` judged the value.
+		if waiter.holds(self.value_tag.load(Ordering::Acquire)) && self.version() == seen {
+			return;
+		}
+		// Nothing would see a noop waiter's wake, so it needs no entry and no lock.
+		if waiter.is_noop() {
 			return;
 		}
 
