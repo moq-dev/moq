@@ -2044,11 +2044,14 @@ impl Controller for Bbr3 {
     }
 
     fn metrics(&self) -> Metrics {
+        // The delay bound's `bw_delay` caps the estimate: it marks the path slower than `max_bw`,
+        // so a bandwidth follower, such as an encoder, should follow it. Infinite unless on.
+        let estimate = self.max_bw.min(self.bw_delay);
         Metrics {
             congestion_window: self.window(),
             ssthresh: None,
             pacing_rate: Some(self.pacing_rate.round() as u64),
-            bandwidth_estimate: (self.max_bw > 0.0).then_some(self.max_bw.round() as u64),
+            bandwidth_estimate: (estimate > 0.0).then_some(estimate.round() as u64),
             probe_inflight: self.probe_inflight(),
         }
     }
@@ -8349,6 +8352,19 @@ mod test {
         sim.bbr.bound_queue_growth(now);
         assert_eq!(sim.bbr.bw_delay, f64::INFINITY);
         assert_eq!(sim.bbr.delay_round_delivered, 0);
+    }
+
+    /// The bandwidth estimate reports the delay bound when it is below `max_bw`, so a bandwidth
+    /// follower slows with the brake
+    #[test]
+    fn delay_bound_caps_the_bandwidth_estimate() {
+        let mut sim = scripted();
+        sim.bbr.max_bw = 1_000_000.0;
+        assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(1_000_000));
+        sim.bbr.bw_delay = 400_000.0;
+        assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(400_000));
+        sim.bbr.bw_delay = 2_000_000.0;
+        assert_eq!(sim.bbr.metrics().bandwidth_estimate, Some(1_000_000));
     }
 
     /// The delay bound reads only receive timestamps: without them it changes nothing
