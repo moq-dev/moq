@@ -264,21 +264,15 @@ impl Config {
 	/// Fails when this machine cannot encode the config at all, which makes it a fail-fast check:
 	/// better here than on the first frame of a track that is already advertised.
 	pub async fn probe(&self) -> Result<hang::catalog::VideoConfig, Error> {
-		Ok(self.probe_sink().await?.0)
-	}
-
-	/// [`probe`](Self::probe), handing back the throwaway encoder so the caller can ask it more
-	/// before dropping it.
-	pub(crate) async fn probe_sink(&self) -> Result<(hang::catalog::VideoConfig, super::Sink), Error> {
 		// Mid-gray, since the picture only has to make the encoder emit its parameter sets.
 		let size = self.size();
 		let i420 = crate::I420::new(size, vec![0x80u8; crate::I420::len(size)?])?;
 		let frame = Frame::new(crate::Surface::I420(i420), moq_net::Timestamp::from_micros(0)?);
-		self.probe_frame(frame).await
+		Ok(self.probe_frame(frame).await?.0)
 	}
 
-	/// [`probe_sink`](Self::probe_sink), encoding `frame` rather than a CPU picture, so the probe
-	/// also proves the encoder reads that kind of surface.
+	/// [`probe`](Self::probe), encoding `frame` rather than a CPU picture and handing back the
+	/// throwaway encoder, so the probe also proves the encoder reads that kind of surface.
 	pub(crate) async fn probe_frame(&self, frame: Frame) -> Result<(hang::catalog::VideoConfig, super::Sink), Error> {
 		// A `Sink` rather than an `Encoder`: this runs on whatever executor thread the caller is on,
 		// and the Windows backend's COM apartment has to be opened and closed on one thread.

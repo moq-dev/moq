@@ -34,7 +34,10 @@ async fn finish(
 /// Disables Nagle: the session already batches records and flushes once per batch,
 /// so Nagle has nothing left to coalesce and would only hold a batch's tail until
 /// the peer's delayed ACK.
-pub(crate) fn adopt(stream: &TcpStream) -> std::io::Result<Option<crate::SharedSocketStats>> {
+///
+/// For a socket whose session starts elsewhere, such as
+/// `tls::Server::accept_established`.
+pub fn adopt(stream: &TcpStream) -> std::io::Result<Option<crate::SharedSocketStats>> {
 	stream.set_nodelay(true)?;
 
 	// The kernel already tracks this socket's RTT (and, on Linux, its delivery

@@ -4,7 +4,6 @@ use qmux::ws::tokio_tungstenite::WebSocketStream;
 use qmux::ws::tungstenite::{self, protocol::Role};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_rustls::server::TlsStream;
 
 use axum::{
 	extract::{ConnectInfo, Extension, OriginalUri, Request, State},
@@ -12,7 +11,7 @@ use axum::{
 	response::Response,
 };
 
-use crate::listener::{Accepted, Io};
+use crate::listener::{Io, Stream};
 use crate::{web::MtlsPeer, web::ServerName, web::WebState, web::landing_response};
 
 #[expect(
@@ -140,7 +139,7 @@ fn socket_config() -> tungstenite::protocol::WebSocketConfig {
 
 /// Reclaim the socket from under hyper's upgrade and serve a MoQ session on it.
 ///
-/// The relay's own listeners hand hyper a plain or TLS stream, which comes back whole with
+/// The relay's web listener hands hyper a classified plain or TLS stream, which comes back whole with
 /// whatever hyper read past the request, so qmux polls the socket directly rather than through
 /// hyper's boxed IO. A router served by another HTTP server keeps that IO.
 async fn serve_upgraded(
@@ -148,15 +147,10 @@ async fn serve_upgraded(
 	options: moq_tokio::websocket::Options,
 	state: Arc<WebState>,
 ) {
-	let upgraded = match upgraded.downcast::<TokioIo<Io<Accepted>>>() {
-		Ok(parts) => return serve_socket(parts.io.into_inner().into_inner(), parts.read_buf, options, state).await,
-		Err(upgraded) => upgraded,
-	};
-	let upgraded = match upgraded.downcast::<TokioIo<Io<TlsStream<Accepted>>>>() {
-		Ok(parts) => return serve_socket(parts.io.into_inner().into_inner(), parts.read_buf, options, state).await,
-		Err(upgraded) => upgraded,
-	};
-	serve_socket(TokioIo::new(upgraded), Bytes::new(), options, state).await
+	match upgraded.downcast::<TokioIo<Io<Stream>>>() {
+		Ok(parts) => serve_socket(parts.io.into_inner().into_inner(), parts.read_buf, options, state).await,
+		Err(upgraded) => serve_socket(TokioIo::new(upgraded), Bytes::new(), options, state).await,
+	}
 }
 
 /// Run a MoQ session over the WebSocket on `io`, whose first bytes, `read`, were already read.

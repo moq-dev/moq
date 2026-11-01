@@ -150,12 +150,8 @@ impl<T> ProducerWeak<T> {
 		self.state.lock().closed
 	}
 
-	/// Wait until the channel is closed.
-	pub async fn closed(&self) {
-		crate::wait(move |waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll for channel closure, registering the waiter if still open.
+	/// Resolves once the channel is closed.
+	#[cfg_attr(feature = "async", kio_macros::wrapper)]
 	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
@@ -242,7 +238,7 @@ impl<T> ConsumerWeak<T> {
 	/// Poll the shared state with a closure, exactly as [`Consumer::poll`] does.
 	///
 	/// Available here so a watcher can register for changes without joining the
-	/// consumer count, which is what [`Producer::wanted_changed`](crate::Producer::wanted_changed)
+	/// consumer count, which is what [`Producer::poll_wanted_changed`](crate::Producer::poll_wanted_changed)
 	/// keys off.
 	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
@@ -271,12 +267,8 @@ impl<T> ConsumerWeak<T> {
 		self.state.lock().closed
 	}
 
-	/// Wait until the channel is closed.
-	pub async fn closed(&self) {
-		crate::wait(move |waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll for channel closure, registering the waiter if still open.
+	/// Resolves once the channel is closed.
+	#[cfg_attr(feature = "async", kio_macros::wrapper)]
 	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
 		let mut state = self.state.lock();
