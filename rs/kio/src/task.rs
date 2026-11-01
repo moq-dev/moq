@@ -41,15 +41,14 @@
 
 use std::{
 	cell::{Cell, RefCell},
-	// std's `Arc`: `Waker::from` needs it. The atomics are loom's under `--cfg loom`.
-	sync::{Arc, atomic::Ordering},
+	sync::{
+		Arc, Mutex,
+		atomic::{AtomicBool, AtomicU64, Ordering},
+	},
 	task::{Context, Poll, RawWakerVTable, Wake, Waker},
 };
 
-use crate::{
-	sync::{AtomicBool, AtomicU64, Mutex},
-	waiter::{Park, Waiter},
-};
+use crate::waiter::{Park, Waiter};
 
 /// Wake-bits per chunk word and words per chunk: one chunk covers 1024 slots.
 const WORD_BITS: usize = 64;
@@ -146,14 +145,8 @@ impl Shared {
 	}
 }
 
-// Loom runs its threads on one OS thread, so the scope must be loom's to stay per thread.
-#[cfg(not(loom))]
 std::thread_local! {
 	static POLLING: Polling = const { Polling { current: Cell::new(None), held: RefCell::new(Vec::new()) } };
-}
-#[cfg(loom)]
-loom::thread_local! {
-	static POLLING: Polling = Polling { current: Cell::new(None), held: RefCell::new(Vec::new()) };
 }
 
 /// A waker's identity: what [`Waker::will_wake`] compares.
@@ -382,7 +375,7 @@ impl<T: Task<Output = ()>> Tasks<T> {
 	/// such an arm with [`is_empty`](Self::is_empty).
 	/// `waiter` is registered for the next task wake or push; the tasks
 	/// themselves park on their own wakers.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
 		self.poll_each(waiter, |_, ()| {})
 	}
@@ -391,7 +384,7 @@ impl<T: Task<Output = ()>> Tasks<T> {
 impl<T: Task> Tasks<T> {
 	/// [`poll`](Self::poll) a set whose tasks resolve to a value: `done` takes
 	/// each task that returned `Ready`, with its output, as it retires.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_each(&mut self, waiter: &Waiter, mut done: impl FnMut(T, T::Output)) -> Poll<()> {
 		{
 			let mut parent = self.shared.parent.lock().unwrap();
@@ -454,7 +447,7 @@ impl<T: Task> Tasks<T> {
 					let child_waiter = occupant.park.hold(&cx);
 					// Each child is its own task, so a large sweep of finite children is not
 					// one spinning poll.
-					#[cfg(feature = "_sim")]
+					#[cfg(feature = "sim")]
 					let _scope = crate::coop::child();
 					if let Poll::Ready(output) = occupant.task.poll(child_waiter) {
 						let occupant = self.children[index].take().expect("polled slot is occupied");
@@ -480,7 +473,7 @@ impl<T> Default for Tasks<T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 	use std::sync::{Mutex, atomic::AtomicUsize};

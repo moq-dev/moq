@@ -23,7 +23,7 @@ follow-up through `/quest-plan`.
 
 Nightly keeps both reports as artifacts: `just rs coverage` (cargo-llvm-cov
 over nextest, the native workspace at default features, both fuzz packages
-and the native moq-wasm stub excluded) and `just js coverage` (Bun's own
+excluded) and `just js coverage` (Bun's own
 coverage, one process per package, line hits unioned across processes).
 Start from those artifacts (`gh run download <nightly run> -n rust-coverage`
 and `-n js-coverage`) rather than re-running the instrumented workspace,
@@ -45,7 +45,7 @@ which is expensive on a shared machine.
   binding facades below in minutes. Per-file uncovered line counts mostly
   point at GPU code and generated bindings instead.
 - When sampling `fix` commits for regression tests, count
-  `#[moq_clock::test]` as well as `#[test]` and `#[tokio::test]`.
+  `#[kio::test]` as well as `#[test]` and `#[tokio::test]`.
 - `just gh check` fails on any `#[ignore]` test, fuzz or bench target, test
   recipe, or standalone test script that no workflow reaches
   (`sh/gh/test-inventory.py`). The local-only ones are in
@@ -90,7 +90,7 @@ Lines covered / measured:
 | pattern | 435 / 523 | 0 | publish | 2773 / 3308 | 22 |
 | auth | 725 / 788 | 2 | room | 493 / 530 | 1 |
 | e2ee | 568 / 569 | 2 | signals | 580 / 763 | 2 |
-| flate | 233 / 333 | 0 | wasm | 0 / 0 | 0 |
+| flate | 233 / 333 | 0 | | | |
 | json | 804 / 1093 | 0 | moq-boy | 155 / 194 | 8 |
 | hang | 2076 / 2899 | 1 | | | |
 

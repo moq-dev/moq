@@ -54,7 +54,6 @@
 		"js/room",
 		"js/signals",
 		"js/ui",
-		"js/wasm",
 		"demo/boy",
 		"demo/web",
 		"demo/carla/web",
@@ -66,7 +65,6 @@
 		"test/receive-credit",
 		"test/video",
 		"test/p2p",
-		"test/qmux",
-		"test/wasm"
+		"test/qmux"
 	]
 }

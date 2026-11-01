@@ -180,7 +180,7 @@ fn a_wildcard_endpoint_handshakes_on_a_secondary_address() {
 			let request = moq_tokio::quic::web::proto::ConnectRequest::new(
 				url::Url::parse(&format!("https://{addr}/")).expect("url"),
 			);
-			moq_clock::timeout(TIMEOUT, crate::support::web_connect(request, Default::default()))
+			kio::clock::timeout(TIMEOUT, crate::support::web_connect(request, Default::default()))
 				.await
 				.expect("handshake stalled")
 				.expect("connect");

@@ -36,7 +36,7 @@
 //!
 //! A value timed on the broadcast [`Clock`](crate::Clock) is written at that timestamp as given,
 //! and the entry advertises how late values reach the transport as its `jitter` and `delay`, the
-//! way a media rendition does. A capture [`Instant`](moq_clock::Instant) converts with
+//! way a media rendition does. A capture [`Instant`](kio::clock::Instant) converts with
 //! [`Clock::capture`](crate::Clock::capture) on the catalog's clock:
 //!
 //! ```no_run
@@ -44,7 +44,7 @@
 //! #     catalog: &moq_mux::catalog::Producer,
 //! #     gps: &mut moq_mux::json::Stream<serde_json::Value>,
 //! #     fix: serde_json::Value,
-//! #     received: moq_clock::Instant,
+//! #     received: kio::clock::Instant,
 //! # ) -> moq_mux::Result<()> {
 //! let at = catalog.clock().capture(received)?;
 //! gps.append(moq_net::Timed::from(&fix).at(at))?;

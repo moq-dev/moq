@@ -1627,23 +1627,9 @@ impl Serve {
 
 	/// Build a TLS policy with these ALPNs and the shared identity and client verifier.
 	pub fn config(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
-		self.build(alpn, true)
-	}
-
-	#[cfg(feature = "_transport")]
-	pub(crate) fn client_auth(&self) -> bool {
-		self.0.verifier.is_some()
-	}
-
-	#[cfg(feature = "tcp")]
-	pub(crate) fn anonymous(&self, alpn: Vec<Vec<u8>>) -> Result<Arc<rustls::ServerConfig>> {
-		self.build(alpn, false)
-	}
-
-	fn build(&self, alpn: Vec<Vec<u8>>, client_auth: bool) -> Result<Arc<rustls::ServerConfig>> {
 		let builder =
 			rustls::ServerConfig::builder_with_provider(crypto::provider()).with_safe_default_protocol_versions()?;
-		let verifier = client_auth.then_some(self.0.verifier.as_ref()).flatten();
+		let verifier = self.0.verifier.as_ref();
 		let mut config = match verifier {
 			Some(verifier) => builder
 				.with_client_cert_verifier(verifier.clone())
@@ -1656,6 +1642,11 @@ impl Serve {
 			config.send_tls13_tickets = 0;
 		}
 		Ok(Arc::new(config))
+	}
+
+	#[cfg(feature = "_transport")]
+	pub(crate) fn client_auth(&self) -> bool {
+		self.0.verifier.is_some()
 	}
 }
 
@@ -1741,13 +1732,13 @@ impl PeerIdentity {
 	}
 
 	/// The leaf certificate's `notAfter`, if it parses, saturated to the wall range.
-	pub fn expiry(&self) -> Option<moq_clock::Wall> {
+	pub fn expiry(&self) -> Option<kio::clock::Wall> {
 		let leaf = self.chain.first()?;
 		let (_, cert) = x509_parser::parse_x509_certificate(leaf).ok()?;
 		// Before 1970 reads as the epoch and past 2554 as the last wall time: no
 		// representable now compares differently against the saturated value.
 		let secs = u64::try_from(cert.validity().not_after.timestamp()).unwrap_or(0);
-		Some(moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::from_secs(secs)))
+		Some(kio::clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::from_secs(secs)))
 	}
 }
 
@@ -2313,7 +2304,7 @@ mod tests {
 		let parsed = PeerIdentity::from_any(Some(identity)).expect("chain parsed");
 		let expiry = parsed.expiry().expect("expiry parsed");
 		assert_eq!(
-			expiry.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH).as_secs(),
+			expiry.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH).as_secs(),
 			2_000_000_000
 		);
 	}
@@ -2321,10 +2312,10 @@ mod tests {
 	#[cfg(feature = "quic")]
 	#[test]
 	fn peer_expiry_saturates_to_the_wall_range() {
-		let last = moq_clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
+		let last = kio::clock::Wall::UNIX_EPOCH.saturating_add(std::time::Duration::MAX);
 		// rcgen's default notAfter is in 4096.
 		for (seconds, expected) in [
-			(-1, moq_clock::Wall::UNIX_EPOCH),
+			(-1, kio::clock::Wall::UNIX_EPOCH),
 			(18_446_744_074, last),
 			(67_090_118_400, last),
 		] {
