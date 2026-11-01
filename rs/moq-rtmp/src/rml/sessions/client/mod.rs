@@ -607,44 +607,25 @@ impl ClientSession {
 		}
 	}
 
-	fn handle_amf0_command_failed_result(
-		&mut self,
-		transaction_id: f64,
-		mut additional_args: Values<'_>,
-	) -> ClientResult {
-		let outstanding_transaction = match self.outstanding_transactions.remove(&(transaction_id as u32)) {
-			Some(transaction) => transaction,
-			None => {
-				let event = ClientSessionEvent::UnknownTransactionResultReceived { transaction_id };
-
-				return Ok(vec![ClientSessionResult::RaisedEvent(event)]);
+	fn handle_amf0_command_failed_result(&mut self, transaction_id: f64, additional_args: Values<'_>) -> ClientResult {
+		let (code, description) = status_code_and_description(additional_args);
+		let event = match self.outstanding_transactions.remove(&(transaction_id as u32)) {
+			Some(OutstandingTransaction::ConnectionRequested { app_name: _ }) => {
+				ClientSessionEvent::ConnectionRequestRejected { code, description }
 			}
-		};
-
-		match outstanding_transaction {
-			OutstandingTransaction::ConnectionRequested { app_name: _ } => {
-				let description = if additional_args.len() > 0 {
-					if let Value::Object(properties) = additional_args.next().unwrap() {
-						if let Some(Value::Utf8String(value)) = properties.get("description") {
-							value.to_owned()
-						} else {
-							"".to_string()
-						}
-					} else {
-						"".to_string()
-					}
-				} else {
-					"".to_string()
-				};
-
-				let event = ClientSessionEvent::ConnectionRequestRejected { description };
-				Ok(vec![ClientSessionResult::RaisedEvent(event)])
-			}
-
-			OutstandingTransaction::CreateStream { purpose: _ } => {
+			Some(OutstandingTransaction::CreateStream { purpose: _ }) => {
 				return Err(ClientSessionError::CreateStreamFailed);
 			}
-		}
+			// `publish` and `play` carry transaction 0 and have no outstanding transaction,
+			// so their `_error` is matched by the request we're waiting on.
+			None => match self.current_state {
+				ClientState::PublishRequested => ClientSessionEvent::PublishRequestRejected { code, description },
+				ClientState::PlayRequested => ClientSessionEvent::PlaybackRequestRejected { code, description },
+				_ => ClientSessionEvent::UnknownTransactionResultReceived { transaction_id },
+			},
+		};
+
+		Ok(vec![ClientSessionResult::RaisedEvent(event)])
 	}
 
 	fn handle_amf0_command_success_result(
@@ -881,6 +862,18 @@ impl ClientSession {
 		self.next_transaction_id += 1;
 		transaction_id
 	}
+}
+
+/// The `code` and `description` of the status object an `_error` carries, empty when absent.
+fn status_code_and_description(mut arguments: Values<'_>) -> (String, String) {
+	let Some(Value::Object(properties)) = arguments.next() else {
+		return Default::default();
+	};
+	let field = |name| match properties.get(name) {
+		Some(Value::Utf8String(value)) => value.to_string(),
+		_ => String::new(),
+	};
+	(field("code"), field("description"))
 }
 
 #[cfg(test)]
