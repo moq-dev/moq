@@ -479,7 +479,7 @@ impl Key {
 		}
 	}
 
-	fn to_decoding_key(&self) -> crate::Result<&DecodingKey> {
+	pub(crate) fn to_decoding_key(&self) -> crate::Result<&DecodingKey> {
 		if let Some(key) = self.decode.get() {
 			return Ok(key);
 		}
@@ -543,7 +543,7 @@ impl Key {
 		Ok(self.decode.get_or_init(|| decoding_key))
 	}
 
-	fn to_encoding_key(&self) -> crate::Result<&EncodingKey> {
+	pub(crate) fn to_encoding_key(&self) -> crate::Result<&EncodingKey> {
 		if let Some(key) = self.encode.get() {
 			return Ok(key);
 		}
@@ -603,23 +603,14 @@ impl Key {
 	/// [`Claims::authorize`].
 	pub fn verify(&self, token: &str) -> crate::Result<Claims> {
 		let claims = self.verify_claims(token)?;
-		validate_times(&claims, moq_clock::wall())?;
+		validate_times(&claims, kio::clock::wall())?;
 		Ok(claims)
 	}
 
 	/// Verify the signature, claims, and key scope but not the times, so an expired
 	/// token's root is still known to be genuine.
 	pub(crate) fn verify_claims(&self, token: &str) -> crate::Result<Claims> {
-		if !self.operations.contains(&KeyOperation::Verify) {
-			return Err(KeyError::VerifyUnsupported.into());
-		}
-		let header = jsonwebtoken::decode_header(token)?;
-		match (self.kid.as_ref(), header.kid.as_deref()) {
-			(Some(expected), Some(actual)) if expected.encode() == actual => {}
-			(Some(_), None) => return Err(KeyError::MissingKid.into()),
-			(_, Some(actual)) => return Err(KeyError::KeyNotFound(actual.to_string()).into()),
-			(None, None) => {}
-		}
+		self.check_kid(token)?;
 
 		let mut validation = jsonwebtoken::Validation::new(self.algorithm.into());
 		validation.required_spec_claims = Default::default();
@@ -630,6 +621,20 @@ impl Key {
 		claims.validate()?;
 		self.validate_scope(&claims)?;
 		Ok(claims)
+	}
+
+	/// Refuse a key that cannot verify, or a token whose `kid` header names another key.
+	pub(crate) fn check_kid(&self, token: &str) -> crate::Result<()> {
+		if !self.operations.contains(&KeyOperation::Verify) {
+			return Err(KeyError::VerifyUnsupported.into());
+		}
+		let header = jsonwebtoken::decode_header(token)?;
+		match (self.kid.as_ref(), header.kid.as_deref()) {
+			(Some(expected), Some(actual)) if expected.encode() == actual => Ok(()),
+			(Some(_), None) => Err(KeyError::MissingKid.into()),
+			(_, Some(actual)) => Err(KeyError::KeyNotFound(actual.to_string()).into()),
+			(None, None) => Ok(()),
+		}
 	}
 
 	/// Sign the claims with this key, returning the encoded token.
@@ -676,7 +681,7 @@ impl Key {
 		self
 	}
 
-	fn validate_scope(&self, claims: &Claims) -> crate::Result<()> {
+	pub(crate) fn validate_scope(&self, claims: &Claims) -> crate::Result<()> {
 		if let Some(scope) = &self.scope {
 			scope.validate()?;
 			if !scope.allows(claims) {
@@ -688,7 +693,7 @@ impl Key {
 }
 
 /// Refuse claims expired at `now` (`exp <= now`) or not yet valid (`nbf > now`), as `jose` does.
-pub(crate) fn validate_times(claims: &Claims, now: moq_clock::Wall) -> crate::Result<()> {
+pub(crate) fn validate_times(claims: &Claims, now: kio::clock::Wall) -> crate::Result<()> {
 	if claims.expires.is_some_and(|exp| exp <= now) {
 		return Err(crate::Error::TokenExpired);
 	}
@@ -758,7 +763,7 @@ mod tests {
 	fn patterns(texts: &[&str]) -> crate::Patterns {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
-	use moq_clock::Wall;
+	use kio::clock::Wall;
 	use std::time::Duration;
 
 	fn create_test_key() -> Key {
@@ -777,8 +782,8 @@ mod tests {
 			root: "test-path".to_string(),
 			publish: patterns(&["test-pub/**"]),
 			subscribe: patterns(&["test-sub/**"]),
-			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
-			issued: Some(moq_clock::wall()),
+			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
+			issued: Some(kio::clock::wall()),
 			not_before: None,
 		}
 	}
@@ -1128,7 +1133,7 @@ mod tests {
 	#[test]
 	fn test_key_verify_only_registered_claims() {
 		let key = create_test_key();
-		let now = moq_clock::wall()
+		let now = kio::clock::wall()
 			.checked_duration_since(Wall::UNIX_EPOCH)
 			.unwrap()
 			.as_secs();
@@ -1166,7 +1171,7 @@ mod tests {
 	fn test_key_verify_enforces_not_before() {
 		let key = create_test_key();
 		let at = |offset: i64| {
-			let now = moq_clock::wall()
+			let now = kio::clock::wall()
 				.checked_duration_since(Wall::UNIX_EPOCH)
 				.unwrap()
 				.as_secs() as i64;
@@ -1208,22 +1213,22 @@ mod tests {
 	fn test_key_verify_expired_token() {
 		let key = create_test_key();
 		let mut claims = create_test_claims();
-		claims.expires = Some(moq_clock::wall() - Duration::from_secs(3600)); // 1 hour ago
+		claims.expires = Some(kio::clock::wall() - Duration::from_secs(3600)); // 1 hour ago
 		let token = key.sign(&claims).unwrap();
 
 		let result = key.verify(&token);
 		assert!(result.is_err());
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn token_validity_uses_the_ambient_wall() {
 		let key = create_test_key();
 		let mut claims = create_test_claims();
-		claims.issued = Some(moq_clock::wall());
-		claims.expires = Some(moq_clock::wall() + Duration::from_secs(10));
+		claims.issued = Some(kio::clock::wall());
+		claims.expires = Some(kio::clock::wall() + Duration::from_secs(10));
 		let token = key.sign(&claims).unwrap();
 		key.verify(&token).unwrap();
-		moq_clock::sleep(Duration::from_secs(10)).await;
+		kio::clock::sleep(Duration::from_secs(10)).await;
 		assert!(matches!(key.verify(&token), Err(crate::Error::TokenExpired)));
 	}
 
@@ -1254,8 +1259,8 @@ mod tests {
 			root: "test-path".to_string(),
 			publish: patterns(&["test-pub/**"]),
 			subscribe: patterns(&["test-sub/**"]),
-			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
-			issued: Some(moq_clock::wall()),
+			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
+			issued: Some(kio::clock::wall()),
 			not_before: None,
 		};
 
@@ -1926,8 +1931,8 @@ mod tests {
 	#[test]
 	fn test_file_io_base64url() {
 		let key = create_test_key();
-		let temp_dir = std::env::temp_dir();
-		let temp_path = temp_dir.join("test_jwk.key");
+		let temp_dir = tempfile::tempdir().unwrap();
+		let temp_path = temp_dir.path().join("test_jwk.key");
 
 		// Write key to file as base64url
 		key.to_file(&temp_path).unwrap();
@@ -1964,16 +1969,13 @@ mod tests {
 		} else {
 			panic!("Expected both keys to be OCT variant");
 		}
-
-		// Clean up
-		std::fs::remove_file(temp_path).ok();
 	}
 
 	#[test]
 	fn test_file_io_raw_json() {
 		let key = create_test_key();
-		let temp_dir = std::env::temp_dir();
-		let temp_path = temp_dir.join("test_jwk_raw_json.key");
+		let temp_dir = tempfile::tempdir().unwrap();
+		let temp_path = temp_dir.path().join("test_jwk_raw_json.key");
 
 		// Write key as raw JSON (backwards compat format)
 		let json = serde_json::to_string(&key).unwrap();
@@ -1999,9 +2001,6 @@ mod tests {
 		} else {
 			panic!("Expected both keys to be OCT variant");
 		}
-
-		// Clean up
-		std::fs::remove_file(temp_path).ok();
 	}
 
 	#[cfg(unix)]
@@ -2010,7 +2009,7 @@ mod tests {
 		use std::os::unix::fs::PermissionsExt;
 
 		fn temp_path(name: &str) -> std::path::PathBuf {
-			let unique = moq_clock::wall()
+			let unique = kio::clock::wall()
 				.checked_duration_since(Wall::UNIX_EPOCH)
 				.unwrap()
 				.as_nanos();

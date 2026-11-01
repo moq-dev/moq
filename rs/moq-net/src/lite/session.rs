@@ -438,22 +438,20 @@ impl Driver {
 					self.session.abort(&Error::Cancel, SessionError::Cancel.to_code(), "");
 				}
 			}
-			if self.session.closing().is_local() {
-				self.subscriber.close();
-				return Poll::Ready(res);
-			}
 			self.ending = Some(res);
 		}
 		// Closing the transport first bounds every read, including when a control
 		// stream ended the protocol while the connection itself was still live.
-		// Keep control machines and their subscription entries until data drains.
+		// Keep control machines and their subscription entries until data drains,
+		// whichever side closed it.
 		std::task::ready!(self.subscriber.poll_drain(waiter));
 		let res = self.ending.take().expect("draining a terminal session");
-		if let Err(err) = &res {
-			self.subscriber.abort(err);
-		} else {
-			self.subscriber.close();
-		}
+		// A clean close, by dropping or draining here or by the peer, cuts off what is
+		// still arriving with the cancelled session either way.
+		self.subscriber.abort(match &res {
+			Err(err) if !self.session.closing().is_local() => err,
+			_ => &Error::Session(SessionError::Cancel),
+		});
 		Poll::Ready(res)
 	}
 
@@ -636,6 +634,7 @@ impl kio::Task for PresentToken {
 impl PresentToken {
 	/// Run the stream, resolving with why the token ended.
 	fn poll_present(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			match &mut self.state {
 				PresentState::Open { token, answered } => {
@@ -693,6 +692,9 @@ impl PresentToken {
 									expires,
 								},
 							);
+							// Each grant recomputes the session's permits, so a peer streaming
+							// them must not hold the session's other tasks.
+							ready!(budget.poll_yield(waiter));
 						}
 						super::AuthReply::Error(refused) => {
 							// Session codes are u32 everywhere else, so a wider one is malformed.
@@ -734,7 +736,10 @@ impl PresentToken {
 /// the stream dies (a FIN counts: the peer abandoned the session).
 // TODO do something useful with the updates
 fn poll_session_stream(stream: &mut Stream<Transport, Version>, waiter: &kio::Waiter) -> Poll<Error> {
+	// A yield only skips this arm: the rest of the driver still runs this turn.
+	let mut budget = kio::coop::Budget::new(32);
 	loop {
+		ready!(budget.poll_yield(waiter));
 		match ready!(stream.reader.poll_decode_maybe::<SessionInfo>(waiter)) {
 			Ok(Some(_info)) => {}
 			Ok(None) => return Poll::Ready(Error::Cancel),
@@ -874,7 +879,7 @@ mod tests {
 	use crate::coding::Encode;
 	use crate::lite::test_transport::ScriptedSession;
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn malformed_auth_replies_close_the_session() {
 		// Unknown reply, invalid code, truncated error, and trailing body bytes.
 		for script in [
@@ -889,7 +894,7 @@ mod tests {
 
 	/// A protocol error on a live connection must end partial receive reads before
 	/// waiting for them, otherwise receive draining could wait for new peer data.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn malformed_auth_closes_before_draining_a_partial_group_header() {
 		assert_session_closes(
 			ScriptedSession::per_stream(vec![vec![99]]).with_incoming_unis(vec![vec![0]]),
@@ -900,7 +905,7 @@ mod tests {
 
 	/// After close, no stream can deliver the peer SETUP a GROUP stream waits on to read
 	/// its header, whether the SETUP stream was truncated or never opened.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn drain_ends_when_groups_wait_on_an_undeliverable_setup() {
 		let version = Version::Lite07;
 		let mut group = Vec::new();
@@ -947,7 +952,7 @@ mod tests {
 		.unwrap();
 		let mut driver = start.driver;
 
-		let res = moq_clock::timeout(
+		let res = kio::clock::timeout(
 			std::time::Duration::from_secs(10),
 			kio::wait(|waiter| driver.poll(waiter)),
 		)
@@ -993,7 +998,7 @@ mod tests {
 		let mut driver = start.driver;
 		let token = handle.present(bytes::Bytes::from_static(b"token")).unwrap();
 
-		let res = moq_clock::timeout(
+		let res = kio::clock::timeout(
 			std::time::Duration::from_secs(5),
 			kio::wait(|waiter| driver.poll(waiter)),
 		)
@@ -1004,7 +1009,7 @@ mod tests {
 
 	/// A granted token whose stream the peer resets is presented again on the same session,
 	/// backing off while each attempt is lost before a reply: at 0s, 1s, and 3s.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_lost_stream_is_presented_again() {
 		let grant = empty_grant(Version::Lite07);
 		let transport = ScriptedSession::per_stream(vec![grant.clone(), grant]);
@@ -1025,7 +1030,7 @@ mod tests {
 	/// A retry's stream that ends before its reply is lost, not a peer without AUTH: the
 	/// peer already answered the token, so it is presented again, backing off from the
 	/// refusal's delay: at 0s, 1s, and 3s.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_lost_retry_is_presented_again() {
 		let version = Version::Lite07;
 		let mut busy = Vec::new();
@@ -1049,7 +1054,7 @@ mod tests {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn malformed_presenter_auth_closes_the_session() {
 		for script in [vec![7, 1, 2], vec![7, 1, 0, 0]] {
 			let transport = ScriptedSession::new(Vec::new()).with_incoming_bidis(vec![script]);
@@ -1079,7 +1084,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn malformed_auth_ok_closes_the_session() {
 		for pattern in [
 			b"*/**".as_slice(),
@@ -1111,7 +1116,7 @@ mod tests {
 
 	/// A reply cut off inside its declared size fails to decode, unlike a peer that
 	/// resets before answering.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn truncated_auth_reply_closes_the_session() {
 		let mut script = Vec::new();
 		let mut w = crate::coding::Encoder::new(&mut script, Version::Lite07.into());
@@ -1121,7 +1126,7 @@ mod tests {
 		assert_session_closes(ScriptedSession::per_stream_eof(vec![script]), Setup::default()).await;
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn malformed_auth_error_reasons_close_the_session() {
 		for reason in [vec![0xff], vec![b'a'; 8193]] {
 			let mut script = Vec::new();
@@ -1158,7 +1163,7 @@ mod tests {
 		})
 		.unwrap();
 		let mut driver = start.driver;
-		let res = moq_clock::timeout(
+		let res = kio::clock::timeout(
 			std::time::Duration::from_secs(10),
 			kio::wait(|waiter| driver.poll(waiter)),
 		)
@@ -1168,7 +1173,7 @@ mod tests {
 		assert_eq!(log.closes()[0].0, SessionError::ProtocolViolation.to_code());
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn accept_setup_does_not_wait_on_an_early_stream_header() {
 		let version = Version::Lite05;
 		let mut setup = Vec::new();
@@ -1186,7 +1191,7 @@ mod tests {
 		assert_eq!(accepted.early.len(), 1);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn accept_setup_refuses_two_incomplete_setup_streams() {
 		use futures::FutureExt;
 		let session =
@@ -1197,7 +1202,7 @@ mod tests {
 		));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn duplicate_setup_closes_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			for complete in [false, true] {
@@ -1242,7 +1247,7 @@ mod tests {
 
 	/// A SETUP that fails to decode leaves nothing to wait on, since the Setup Stream is
 	/// already claimed.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn malformed_setup_closes_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let mut truncated = Vec::new();
@@ -1319,7 +1324,7 @@ mod tests {
 		.unwrap()
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn server_setup_client_parameters_close_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			for body in [vec![1, 2, 0], vec![1, 3, 1, 0], vec![1, 3, 1, 1], vec![1, 3, 1, 3]] {
@@ -1339,7 +1344,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn unknown_client_role_remains_bidirectional() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![1, 4, 1, 3, 1, 3]]);
@@ -1354,7 +1359,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn malformed_probe_reports_close_the_session() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let transport = if version.has_auth() {
@@ -1388,7 +1393,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn malformed_group_headers_remain_per_stream() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let transport = ScriptedSession::new(Vec::new()).with_incoming_unis(vec![vec![0, 0]]);
@@ -1402,7 +1407,7 @@ mod tests {
 
 	// GOAWAY is not a request: refusing it without credit would leave the peer
 	// unaware that we are draining.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn goaway_waits_for_stream_credit() {
 		let transport = ScriptedSession::new(Vec::new()).without_credit();
 		let log = transport.log.clone();
@@ -1416,7 +1421,7 @@ mod tests {
 		assert!(log.closes().is_empty());
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn clients_never_emit_a_goaway_redirect() {
 		for version in [Version::Lite04, Version::Lite05, Version::Lite06, Version::Lite07] {
 			let client = raw_session(ScriptedSession::new(Vec::new()), version, true, None);

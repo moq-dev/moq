@@ -8,8 +8,8 @@ is served again when the publisher allows replay, without any frame being
 fetched faster than its readers take it. Readers replaying the same part of a
 group share one upstream fill, and a reader that catches up hands over to the
 copy ahead, whose fill then stops. A track whose publisher has no
-`track::Requests` handler keeps refresh-or-`Evicted` from
-[Front eviction](/quest/m1/unbounded-groups/front-eviction.md).
+`track::Requests` handler keeps the refresh-or-`Evicted` behavior of front eviction
+([moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)).
 
 ## Plan
 
@@ -75,7 +75,3 @@ Public API: none. Wire: none, beyond the existing frame-offset fills.
 ## Required
 
 - [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - flights pace on their fastest rider the same way the live edge does
-
-## Related
-
-- [Refill evicted groups](/quest/m2/evicted-refill.md) - refills whole groups evicted before a reader took them

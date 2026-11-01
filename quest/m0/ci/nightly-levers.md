@@ -18,8 +18,8 @@ total queue time, with Cranelift included. Risks to measure, not assume:
 - The gate no longer compiles with the toolchain that ships, and nightly mbx
   keys split from Nightly's stable R2 writers.
 
-Decided 2026-10-27 (maintainer): moq keeps LLVM, accepting kixelated/rust2's
-Cranelift verdict ([build benchmark](https://github.com/kixelated/rust2/blob/main/bench/build/README.md),
+Decided 2026-10-27 (maintainer): moq keeps LLVM, accepting moq-dev/rust2's
+Cranelift verdict ([build benchmark](https://github.com/moq-dev/rust2/blob/main/bench/build/README.md),
 "Cranelift for moq's CI", 2026-10-25). 42 of moq's 5418 tests fail under
 Cranelift (panics it cannot unwind, and an x86 SIMD intrinsic it lacks), and
 the CPU saving is only 4% with a warm cache and 12% cold. This quest is

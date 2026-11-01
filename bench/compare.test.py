@@ -58,9 +58,9 @@ class Paired(unittest.TestCase):
 
 
 class Load(unittest.TestCase):
-    def write(self, root, label, rounds):
+    def write(self, root, label, rounds, case="quic/video"):
         for index in rounds:
-            path = root / "relay" / label / f"round-{index}" / "video"
+            path = root / "relay" / label / f"round-{index}" / case
             path.mkdir(parents=True)
             (path / "summary.json").write_text(json.dumps({"round": index}))
 
@@ -69,7 +69,7 @@ class Load(unittest.TestCase):
             root = Path(directory)
             for label in ("base", "current"):
                 self.write(root, label, [1, 2, 10])
-            pairs = compare.load(root, "video")
+            pairs = compare.load(root, "quic/video")
         self.assertEqual([p["base"]["round"] for p in pairs], [1, 2, 10])
 
     def test_unpaired_rounds(self):
@@ -78,7 +78,24 @@ class Load(unittest.TestCase):
             self.write(root, "base", [1, 2])
             self.write(root, "current", [1, 2, 3])
             with self.assertRaises(ValueError):
-                compare.load(root, "video")
+                compare.load(root, "quic/video")
+
+    def test_cases_span_transports(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for label in ("base", "current"):
+                for case in ("quic/video", "ws/chat"):
+                    self.write(root, label, [1, 2], case)
+            self.assertEqual(compare.cases(root), ["quic/video", "ws/chat"])
+
+    def test_a_case_missing_from_one_round(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for label in ("base", "current"):
+                self.write(root, label, [1, 2])
+            self.write(root, "current", [2], "ws/chat")
+            with self.assertRaises(ValueError):
+                compare.cases(root)
 
 
 class Criterion(unittest.TestCase):

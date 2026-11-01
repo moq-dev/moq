@@ -187,8 +187,8 @@ impl Lister {
 	/// # Errors
 	///
 	/// [`moq_net::Error::Closed`] once the broadcast ended.
-	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.inner.poll_used(waiter).map_err(Error::Net)
+	pub fn poll_wanted(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		self.inner.poll_wanted(waiter).map_err(Error::Net)
 	}
 
 	/// Ready once nobody lists the broadcast.
@@ -196,8 +196,8 @@ impl Lister {
 	/// # Errors
 	///
 	/// [`moq_net::Error::Closed`] once the broadcast ended.
-	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.inner.poll_unused(waiter).map_err(Error::Net)
+	pub fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
+		self.inner.poll_unwanted(waiter).map_err(Error::Net)
 	}
 
 	/// List the track for `semantic`.

@@ -2,8 +2,7 @@
 
 ## Goal
 
-A relay fills a lite-07 upstream by subscribing to the missing ranges. Older
-wires and moq-transport carry the anchors they can, and refuse only the rest. FETCH stays on lite-07 until
+A relay fills a lite-07 upstream by subscribing to the missing ranges. FETCH stays on lite-07 until
 [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md)
 removes it from both implementations.
 
@@ -50,25 +49,6 @@ such a miss sooner. A range served only by datagrams never completes: they
 resolve no SUBSCRIBE_START, so a FIN overtaking them leaves the receiver no
 owed range to wait on. Datagram fills need the receiver told what is owed
 first.
-
-### moq-transport anchors
-
-Decided 2026-10-27 (maintainer): a bridge never sends a relative anchor to
-moq-transport. It resolves `Relative(n)` to an absolute Group ID, from its
-cache or the live edge, before sending, replacing the planned mapping of
-`Relative(n)..` onto draft-22's `Filter::Relative(n + 1)` and draft 18's
-relative joining FETCH. Reason: both count back by Group ID arithmetic, which
-breaks once [time addressing](/quest/m1/time-addressing/model.md) makes legacy
-Group IDs sparse start ticks. A range with a bounded end
-resolves both bounds against the Largest Object and goes upstream as an
-absolute range. Live keeps today's join (`ietf::subscriber::subscribe_join`). A copy already
-resolves what its cache settles (`ResolvedRanges`, from
-[moq-dev/moq#6815](https://github.com/moq-dev/moq/pull/6815)) and refuses the
-rest (`anchored_cached`); what remains is a cold copy resolving `Relative(n)`
-from the Largest Object of a live join instead of refusing it.
-Each mapping that makes a wire carry an anchor lifts that wire's
-`Unsupported` refusal for it, and extends the per-wire table in
-`rs/moq-net/tests/integration/range_anchors.rs`.
 
 Update `drafts/draft-lcurley-moq-lite.md` with each wire change here. Run
 `just drafts check` and `just test interop --all`.

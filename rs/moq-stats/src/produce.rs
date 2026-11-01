@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use std::task::Poll;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::stats::{Presence, Registry, Report, Tier, Traffic, TrafficEntry};
 use moq_net::{Epoch, Path, broadcast, kio, origin, track};
 use serde::Serialize;
-use web_async::spawn;
+use tracing::Instrument as _;
 
 use crate::{
 	Prefix, Totals, Usage, parse_prefix_track, parse_presence_track, prefix_track, presence_track, totals_track,
@@ -196,7 +196,7 @@ impl Producer {
 			linger,
 			interval,
 		};
-		spawn(task.run(Arc::downgrade(&keepalive)));
+		tokio::spawn(task.run(Arc::downgrade(&keepalive)).in_current_span());
 
 		Self {
 			registry,
@@ -232,8 +232,8 @@ impl Task {
 			return;
 		};
 
-		let mut ticker = moq_clock::interval(interval);
-		ticker.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Delay);
+		let mut ticker = kio::clock::interval(interval);
+		ticker.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Delay);
 
 		loop {
 			// Scheduled instants are at least an interval apart, even after a late tick,
@@ -281,7 +281,7 @@ impl Drain {
 	/// `None` if the origin refused it.
 	fn new(task: Task) -> Option<Self> {
 		let node = NodePublisher::create(&task)?;
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		Some(Self {
 			task,
 			node,
@@ -412,10 +412,9 @@ impl<T: Serialize> Snapshot<T> {
 	/// written; `None` means the value was unchanged, the interval already has a group for a
 	/// snapshot, or the track already ended, and nothing was written.
 	///
-	/// A frame over the cache limit aborts the track with
+	/// A frame over the group budget aborts the track with
 	/// [`moq_net::Error::FrameTooLarge`]: skipping it would leave readers on the
-	/// previous snapshot with no sign it stopped tracking. A compressed track
-	/// holds a frame to the same limit by its uncompressed size.
+	/// previous snapshot with no sign it stopped tracking.
 	fn update(&mut self, value: &T, stamp: Stamp) -> moq_json::Result<Option<usize>> {
 		#[cfg(feature = "bench")]
 		{
@@ -433,9 +432,10 @@ impl<T: Serialize> Snapshot<T> {
 			self.encoder.reset();
 		}
 		let frame = match self.encoder.update(value) {
-			Ok(Some(frame)) if frame.payload.len() as u64 <= moq_net::group::MAX_CACHE_BYTES => frame,
+			Ok(Some(frame)) => frame,
 			Ok(None) => return Ok(None),
-			Ok(Some(_)) | Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge)) => {
+			// The encoder refuses a frame past the group budget before anything is written.
+			Err(moq_json::Error::Net(moq_net::Error::FrameTooLarge)) => {
 				let err = moq_net::Error::FrameTooLarge;
 				if let Some(group) = self.group.take() {
 					let _ = group.abort(err.clone());
@@ -505,6 +505,15 @@ fn info() -> track::Info {
 		.with_refresh(8)
 }
 
+/// The snapshot codec every stats track encodes with.
+fn config() -> moq_json::snapshot::Config {
+	let config = moq_json::snapshot::Config::default();
+	// A test overflows a group with a few KiB rather than moq-net's 32 MiB.
+	#[cfg(test)]
+	let config = config.with_max_group_bytes(tests::MAX_GROUP_BYTES);
+	config
+}
+
 impl<V: Serialize> Output<V> {
 	fn create(broadcast: &broadcast::Producer, name: &str) -> Result<Self, moq_net::Error> {
 		Ok(Self::new(broadcast.create_track(name, info())?))
@@ -524,13 +533,13 @@ impl<V: Serialize> Output<V> {
 
 	fn new(track: track::Producer) -> Self {
 		Self {
-			snapshot: Snapshot::new(track, moq_json::snapshot::Config::default()),
+			snapshot: Snapshot::new(track, config()),
 			frame: Frame::default(),
 		}
 	}
 
-	/// Whether any consumer exists.
-	fn is_used(&self) -> bool {
+	/// Whether anyone wants the output.
+	fn is_wanted(&self) -> bool {
 		self.snapshot.demand().wanted().is_some()
 	}
 
@@ -808,7 +817,7 @@ impl GroupTrack {
 		let track = broadcast.create_track(name.as_str(), info())?;
 		Ok(Self {
 			name,
-			snapshot: Snapshot::new(track, moq_json::snapshot::Config::default()),
+			snapshot: Snapshot::new(track, config()),
 			body: GroupBody {
 				// A new instance of the name: readers keep its counters apart from
 				// an earlier instance's.
@@ -1117,14 +1126,14 @@ impl NodePublisher {
 		// Reclaim before adopting, so a request for a track just reclaimed is
 		// served again by this very drain.
 		self.presence.retain(|_, track| {
-			if track.output.is_used() {
+			if track.output.is_wanted() {
 				return true;
 			}
 			track.output.finish();
 			false
 		});
 		self.prefixes.retain(|_, track| {
-			if track.output.is_used() {
+			if track.output.is_wanted() {
 				return true;
 			}
 			track.output.finish();
@@ -1299,6 +1308,10 @@ fn advertised_path(prefix: &Path, node: Option<&Path>) -> Result<Path, moq_net::
 
 #[cfg(test)]
 mod tests {
+	/// The group budget every stats track has under test, small enough that a test
+	/// overflows it with a handful of paths.
+	pub(super) const MAX_GROUP_BYTES: u64 = 64 * 1024;
+
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
 		moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)
@@ -1307,7 +1320,7 @@ mod tests {
 	/// A drain at the current instant, numbered `group`.
 	fn stamp(group: u64) -> Stamp {
 		Stamp {
-			at: moq_clock::now(),
+			at: kio::clock::now(),
 			group,
 		}
 	}
@@ -1391,12 +1404,12 @@ mod tests {
 			.with_versions(version.into())
 			.with_publisher(upstream.consume().with_hidden(true));
 		let client = async {
-			let (session, driver) = client.connect(moq_clock::now(), client_transport).await.unwrap();
+			let (session, driver) = client.connect(kio::clock::now(), client_transport).await.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
 			session
 		};
 		let server = async {
-			let (session, driver) = server.accept(moq_clock::now(), server_transport).await.unwrap();
+			let (session, driver) = server.accept(kio::clock::now(), server_transport).await.unwrap();
 			tokio::spawn(moq_net::time::run(driver));
 			session
 		};
@@ -1524,10 +1537,8 @@ mod tests {
 		}
 	}
 
-	/// A frame that outgrows the cache ends the track with `FrameTooLarge`
-	/// instead of leaving readers on their last snapshot. DEFLATE would shrink
-	/// the frame under the limit, but a reader inflates it whole, so the track
-	/// holds it to the same budget by its uncompressed size.
+	/// A frame that outgrows the group budget ends the track with `FrameTooLarge`
+	/// instead of leaving readers on their last snapshot.
 	#[tokio::test]
 	async fn oversized_frame_ends_the_track() {
 		use futures::FutureExt;
@@ -1566,11 +1577,11 @@ mod tests {
 		));
 	}
 
-	/// Distinct paths under `prefix` whose JSON overflows a group's cache, since one
-	/// path holds at most [`Path::MAX_BYTES`].
+	/// Distinct paths under `prefix` whose JSON overflows [`MAX_GROUP_BYTES`], since
+	/// one path holds at most [`Path::MAX_BYTES`].
 	fn oversized_paths(prefix: &str) -> Vec<Path> {
 		let filler = "a".repeat(Path::MAX_BYTES - 16);
-		(0..=moq_net::group::MAX_CACHE_BYTES as usize / filler.len())
+		(0..=MAX_GROUP_BYTES as usize / filler.len())
 			.map(|i| Path::new(&format!("{prefix}{i}/{filler}")).unwrap())
 			.collect()
 	}
@@ -1593,7 +1604,8 @@ mod tests {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
@@ -1828,7 +1840,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_late_drain_leaves_the_next_its_own_interval() {
 		// Schedule the drains a millisecond before an interval boundary.
-		let phase = Duration::from(Timestamp::from(moq_clock::now())).as_millis() % 1000;
+		let phase = Duration::from(Timestamp::from(kio::clock::now())).as_millis() % 1000;
 		tokio::time::advance(Duration::from_millis(((1999 - phase) % 1000) as u64)).await;
 
 		let origin = produce_origin();
@@ -1884,7 +1896,7 @@ mod tests {
 			interval,
 		})
 		.unwrap();
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		for phase in (0..1500).step_by(100) {
 			let at = start + Duration::from_micros(phase);
 			assert_eq!(
@@ -2354,7 +2366,7 @@ mod tests {
 		.expect("drain");
 		let mut tick = || {
 			drain.collect();
-			drain.publish(moq_clock::now());
+			drain.publish(kio::clock::now());
 			drain.node.presence.len()
 		};
 		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
@@ -2609,7 +2621,7 @@ mod tests {
 		.expect("drain");
 		let mut tick = || {
 			drain.collect();
-			drain.publish(moq_clock::now());
+			drain.publish(kio::clock::now());
 			drain.node.prefixes.len()
 		};
 		let broadcast = origin.consume().request(".stats/node", None).await.expect("resolve");
@@ -2840,24 +2852,24 @@ mod tests {
 				// Warm up: create the groups and tracks and grow every buffer.
 				for _ in 0..3 {
 					drain.collect();
-					drain.publish(moq_clock::now());
+					drain.publish(kio::clock::now());
 				}
 				// Hold a prefix with a child per tier, as a reader would.
 				let _held = hold.then(|| {
 					let tick = drain.tick;
-					let stamp = drain.stamp(moq_clock::now());
+					let stamp = drain.stamp(kio::clock::now());
 					drain
 						.node
 						.adopt_prefix(&drain.report, Path::from_static("room0"), None, tick, stamp);
 					drain.node.prefixes["room0"].output.snapshot.track.subscribe(None)
 				});
 				drain.collect();
-				drain.publish(moq_clock::now());
+				drain.publish(kio::clock::now());
 
 				let before = counting::allocs();
 				drain.collect();
 				let allocs = counting::allocs() - before;
-				drain.publish(moq_clock::now());
+				drain.publish(kio::clock::now());
 
 				assert!(!drain.report.traffic.is_empty(), "the drain carried entries");
 				assert_eq!(

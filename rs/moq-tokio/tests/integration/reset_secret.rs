@@ -81,7 +81,7 @@ impl Fixture {
 
 /// Connect, crash the server and restart it on the same port, then report how the
 /// client's connection ended once it next sent something.
-fn restart(reset_secret: bool) -> Result<driver::connection::Error, tokio::time::error::Elapsed> {
+fn restart(reset_secret: bool) -> Result<driver::connection::Error, kio::clock::Elapsed> {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let fixture = Fixture::new();
 	let client = tokio::runtime::Builder::new_current_thread()
@@ -120,11 +120,11 @@ fn restart(reset_secret: bool) -> Result<driver::connection::Error, tokio::time:
 
 	client.block_on(async {
 		let mut send = conn.open_uni(Default::default()).await.expect("open");
-		send.write_all(&[0; 64]).await.expect("write");
-		send.finish().expect("finish");
+		send.write_all(&[0; 64][..]).await.expect("write");
+		send.finish();
 		// Far below the client's 30s idle timeout, and ample for a loopback round
 		// trip; the keyless arm waits all of it.
-		tokio::time::timeout(Duration::from_secs(1), conn.closed()).await
+		kio::clock::timeout(Duration::from_secs(1), conn.closed()).await
 	})
 }
 
