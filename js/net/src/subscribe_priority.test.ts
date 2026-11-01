@@ -42,7 +42,7 @@ function lateAcks(transport: MockTransport) {
 		const writable = new WritableStream<Uint8Array>({
 			async write(chunk) {
 				await inner.write(chunk);
-				await new Promise((resolve) => setTimeout(resolve, 0));
+				await yieldNow();
 			},
 			close: () => inner.close(),
 			abort: (reason) => inner.abort(reason),
