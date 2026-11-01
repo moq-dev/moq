@@ -41,9 +41,9 @@ HTTP auth servers can return that JSON shape with 403; legacy plain-text 401/403
 
 ### `Grant` reads the ambient clock
 
-`Grant::deadline` returns a `moq_clock::Instant` instead of a `tokio::time::Instant`, and no longer needs the `tokio` feature.
-Wait on it with `moq_clock::sleep_until`, which runs on tokio's clock in production.
-`deadline` and `validate` read wall time from `moq_clock::wall()`, so a test on `moq_clock::sim` or a `moq_clock::Manual` clock decides when a grant expires; stamp `expires` from that clock too.
+`Grant::deadline` returns a `kio::clock::Instant` instead of a `tokio::time::Instant`, and no longer needs the `tokio` feature.
+Wait on it with `kio::clock::sleep_until`, which runs on tokio's clock in production.
+`deadline` and `validate` read wall time from `kio::clock::wall()`, so a test on `kio::clock::sim` or a `kio::clock::Manual` clock decides when a grant expires; stamp `expires` from that clock too.
 
 `Key::verify` and the reference server's default expiry use that wall clock too.
 Session `End` durations and the server's idle-session accounting use its monotonic clock, so advancing controlled time advances those durations without a host-clock wait.
