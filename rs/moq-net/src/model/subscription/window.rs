@@ -642,13 +642,19 @@ impl Window {
 			Anchor::Time(_) if !floored => holdings.next_start(0).map_or(start, |(oldest, _)| oldest),
 			_ => start,
 		};
-		self.spans.push(Span {
-			index,
-			start,
-			end,
-			floored,
-			reach,
-		});
+		// Kept in range order, which `admits_datagram` pairs them by, though a waiting start
+		// resolves after the ranges past it.
+		let at = self.spans.partition_point(|span| span.index < index);
+		self.spans.insert(
+			at,
+			Span {
+				index,
+				start,
+				end,
+				floored,
+				reach,
+			},
+		);
 		true
 	}
 
@@ -1234,6 +1240,23 @@ mod tests {
 		assert!(window.admits_datagram(9, Some(at(3500))));
 		assert!(!window.admits_datagram(10, Some(at(3500))));
 		assert!(!window.admits_datagram(9, Some(at(2900))));
+	}
+
+	/// A waiting time start that resolves after a later range still bounds datagrams by its
+	/// own relative end.
+	#[test]
+	fn a_resolved_waiting_start_judges_datagrams_by_its_own_end() {
+		let mut groups = Groups::new((2..10).map(|sequence| (sequence, Held::Pending)));
+		let ranges = [
+			range(time(2500), Anchor::Relative(0)),
+			range(Anchor::Absolute(20), Anchor::Absolute(21)),
+		];
+		let mut window = Window::new(&ranges, Some(9), &groups).unwrap();
+		groups.held.insert(2, Held::Started(at(2000)));
+		assert!(window.settle(Some(9), &groups));
+		assert_eq!(window.resolved()[0], Some(Resolved { start: 2, end: Some(10) }));
+		assert!(window.admits_datagram(9, Some(at(3000))));
+		assert!(!window.admits_datagram(15, Some(at(3000))), "past the relative end");
 	}
 
 	/// A datagram is in range only when one range admits its sequence and time together,
