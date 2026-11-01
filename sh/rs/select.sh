@@ -22,7 +22,7 @@ select_packages() {
         echo ALL
         return
     fi
-    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest|(net|tokio|media)-features)\.sh|\.config/nextest\.toml)$' "$list"; then
+    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest|send-depth|(net|tokio|media)-features)\.sh|\.config/nextest\.toml)$' "$list"; then
         echo ALL
         return
     fi
@@ -182,6 +182,8 @@ case "$action" in
         [[ "$action" == lint || -z "$shape_packages" ]] || just rs feature-shapes "${shape_flags[@]}"
         if wants '(kio|moq-net)'; then just rs loom-check; fi
         if shapes_want moq-net; then just rs net-features; fi
+        # Native Send proofs at the default recursion limit, on the pinned nightly.
+        if wants moq-net; then just rs send-depth; fi
         if shapes_want moq-quic; then just rs quic-features; fi
         if shapes_want moq-tokio; then just rs tokio-features; fi
         if shapes_want '(moq-video|moq-audio|moq-transcode)'; then just rs media-features; fi

@@ -141,6 +141,7 @@ case "$1" in
         done
         javascript catalog just js catalog-bench
         javascript qmux-record just js qmux-record-bench
+        javascript qmux-datagrams just js qmux-datagrams-bench
         javascript cmaf just js cmaf-bench
         javascript arrivals just js arrivals-bench
         javascript p2p just js p2p-bench
