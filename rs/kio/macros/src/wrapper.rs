@@ -4,7 +4,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{
 	Attribute, FnArg, GenericArgument, GenericParam, Ident, ImplItemFn, Pat, PathArguments, ReturnType, Type,
-	punctuated::Punctuated, spanned::Spanned,
+	ext::IdentExt, punctuated::Punctuated, spanned::Spanned,
 };
 
 pub(crate) fn expand(args: TokenStream, method: &ImplItemFn) -> syn::Result<TokenStream> {
@@ -51,10 +51,19 @@ pub(crate) fn expand(args: TokenStream, method: &ImplItemFn) -> syn::Result<Toke
 			"#[kio::wrapper] needs a `poll_<name>` method",
 		));
 	};
-	// `poll_match` waits as `r#match`.
-	let name = match syn::parse_str::<Ident>(name) {
-		Ok(_) => Ident::new(name, poll.span()),
-		Err(_) => Ident::new_raw(name, poll.span()),
+	// `poll_match` waits as `r#match`. `poll_self`, `poll__`, and `poll_1` have no
+	// such name: those keywords cannot be raw, and a digit cannot start one.
+	let name = if syn::parse_str::<Ident>(name).is_ok() {
+		Ident::new(name, poll.span())
+	} else if syn::parse::Parser::parse_str(Ident::parse_any, name).is_ok()
+		&& !matches!(name, "_" | "self" | "Self" | "super" | "crate")
+	{
+		Ident::new_raw(name, poll.span())
+	} else {
+		return Err(syn::Error::new_spanned(
+			poll,
+			format!("#[kio::wrapper] cannot name the wrapper `{name}`, even as a raw identifier"),
+		));
 	};
 
 	let mut inputs = sig.inputs.iter();
