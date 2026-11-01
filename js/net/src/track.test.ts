@@ -4,7 +4,7 @@ import { race } from "@moq/signals";
 import { ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
 import { Decoder } from "./flate/decoder.ts";
 import { Encoder } from "./flate/encoder.ts";
-import { type Consumer as GroupConsumer, type Producer as GroupProducer, MAX_GROUP_FRAMES } from "./group.ts";
+import type { Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
@@ -2408,18 +2408,17 @@ test("a live-edge reader starts on an empty largest group", async () => {
 	producer.close();
 });
 
-test("largest survives a mirror replay of an aborted group", async () => {
+test("largest survives a mirror replay of a group with a shed front", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
 
 	const group = producer.appendGroup();
-	for (let i = 0; i < MAX_GROUP_FRAMES; i++) {
-		group.writeFrame({ payload: enc.encode(`${i}`), timestamp: Timestamp.now() });
+	for (let i = 0; i < 40; i++) {
+		group.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.now() });
 	}
-	expect(() => group.writeFrame({ payload: enc.encode("overflow"), timestamp: Timestamp.now() })).toThrow();
 
-	// Subscribing now replays into a fresh sink; the last legal frame is still the edge.
+	// Subscribing now replays into a fresh sink; shedding leaves the absolute live edge intact.
 	const late = producer.subscribe();
-	expect(await late.largest()).toEqual({ group: 0, frame: MAX_GROUP_FRAMES - 1 });
+	expect(await late.largest()).toEqual({ group: 0, frame: 40 - 1 });
 
 	producer.finish();
 	producer.close();
@@ -3414,22 +3413,27 @@ test("an endless track with gaps remembers only those within the budget", () => 
 	}
 });
 
-test("IETF provenance survives normalization on timed and untimed tracks", () => {
-	for (const timescale of [undefined, Timescale.MILLI]) {
-		const info = infoDefaults({ ietf: IetfVersion.DRAFT_22, timescale });
-		expect(info.ietf).toBe(IetfVersion.DRAFT_22);
-		expect(info.timescale).toBe(timescale);
-	}
-	const producer = new TrackProducer("ietf").accept({ timescale: Timescale.MILLI, ietf: IetfVersion.DRAFT_22 });
-	try {
-		stampGroup(producer, 0, 1000);
-		stampGroup(producer, 1, 500);
-		producer.writeFrame({ payload: enc.encode("arrival"), timestamp: Timestamp.fromMillis(250) });
-	} finally {
-		producer.finish();
-		producer.close();
-	}
-});
+for (const [name, extra] of [
+	["unchecked", { unchecked: true }],
+	["IETF provenance", { ietf: IetfVersion.DRAFT_22 }],
+] as const) {
+	test(`${name} survives normalization and skips the rewind check`, () => {
+		for (const timescale of [undefined, Timescale.MILLI]) {
+			const info = infoDefaults({ ...extra, timescale });
+			expect(info).toMatchObject(extra);
+			expect(info.timescale).toBe(timescale);
+		}
+		const producer = new TrackProducer("rewind").accept({ timescale: Timescale.MILLI, ...extra });
+		try {
+			stampGroup(producer, 0, 1000);
+			stampGroup(producer, 1, 500);
+			producer.writeFrame({ payload: enc.encode("arrival"), timestamp: Timestamp.fromMillis(250) });
+		} finally {
+			producer.finish();
+			producer.close();
+		}
+	});
+}
 
 test("an appended rewind is refused and an equal start is not", () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI });
@@ -3964,6 +3968,45 @@ test("a partial maxDelay widening keeps the older skip owed", () => {
 	expect(drainGroups(subscriber)).toEqual([4]);
 	subscriber.update({ maxDelay: Milli(10_000) });
 	expect(drainGroups(subscriber)).toEqual([1]);
+	producer.close();
+});
+
+for (const refresh of [undefined, 0]) {
+	test(`reading a shed front requests refresh only when opted in (${refresh})`, async () => {
+		const producer = new TrackProducer("test").accept({ refresh });
+		const subscriber = producer.subscribe();
+		const ordered = subscriber.ordered();
+		const group = producer.appendGroup();
+		const consumer = await ordered.nextGroup();
+		if (!consumer) throw new Error("missing group");
+		for (let index = 0; index < 40; index++) group.writeFrame({ payload: new Uint8Array(1024 * 1024) });
+		await expect(consumer.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
+		expect(producer.demand().wanted.peek()).toBe(refresh === undefined ? 0 : 1);
+		const joiner = producer.subscribe();
+		expect(producer.demand().wanted.peek()).toBe(refresh === undefined ? 0 : 1);
+		joiner.close();
+		subscriber.close();
+		producer.finish();
+		producer.close();
+	});
+}
+
+// A first frame written in chunks sheds its own head without advancing the group's start.
+test("reading a shed frame head requests refresh", async () => {
+	const producer = new TrackProducer("test").accept({ refresh: 0 });
+	const subscriber = producer.subscribe();
+	const ordered = subscriber.ordered();
+	const group = producer.appendGroup();
+	const consumer = await ordered.nextGroup();
+	if (!consumer) throw new Error("missing group");
+	const MiB = 1024 * 1024;
+	const frame = group.createFrame({ size: 40 * MiB });
+	for (let index = 0; index < 40; index++) frame.write(new Uint8Array(MiB));
+	frame.finish();
+	await expect(consumer.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
+	expect(producer.demand().wanted.peek()).toBe(1);
+	subscriber.close();
+	producer.finish();
 	producer.close();
 });
 

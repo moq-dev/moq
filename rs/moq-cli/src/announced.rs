@@ -231,7 +231,7 @@ mod tests {
 
 			// Every broadcast is on the relay before anything follows it.
 			for (path, _) in &broadcasts {
-				moq_clock::timeout(TIMEOUT, relay.follow(*path, None).unwrap().available())
+				kio::clock::timeout(TIMEOUT, relay.follow(*path, None).unwrap().available())
 					.await
 					.expect("relay routes the broadcast")
 					.expect("broadcast");
@@ -273,7 +273,7 @@ mod tests {
 
 	/// The next line printed.
 	async fn next(lines: &mut Lines<BufReader<DuplexStream>>) -> String {
-		moq_clock::timeout(TIMEOUT, lines.next_line())
+		kio::clock::timeout(TIMEOUT, lines.next_line())
 			.await
 			.expect("a line in time")
 			.expect("read")
@@ -351,7 +351,7 @@ mod tests {
 		assert_eq!(next(&mut lines).await, "+ other/c");
 
 		fixture.shutdown.start();
-		let result = moq_clock::timeout(TIMEOUT, task)
+		let result = kio::clock::timeout(TIMEOUT, task)
 			.await
 			.expect("exits once the session ends")
 			.expect("task");

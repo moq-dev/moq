@@ -84,41 +84,41 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 	if !matches!(arrival, Arrival::Together) {
 		reader.hold_bidis();
 	}
-	let start = moq_clock::now();
-	let subscribing = moq_clock::sim::spawn(remote.track("video").unwrap().subscribe(None));
+	let start = kio::clock::now();
+	let subscribing = kio::clock::sim::spawn(remote.track("video").unwrap().subscribe(None));
 	match arrival {
 		Arrival::Together => {}
 		Arrival::Serial => {
-			moq_clock::sleep(Duration::from_millis(1)).await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 			reader.release_oldest_bidi();
-			moq_clock::sleep(RTT).await;
+			kio::clock::sleep(RTT).await;
 			reader.release_bidis();
 		}
 		Arrival::SubscribeFirst => {
-			moq_clock::sleep(Duration::from_millis(1)).await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 			reader.release_bidis_reversed();
 		}
 	}
-	let mut subscriber = moq_clock::timeout(TIMEOUT, subscribing)
+	let mut subscriber = kio::clock::timeout(TIMEOUT, subscribing)
 		.await
 		.unwrap_or_else(|_| panic!("{label}: subscribe stalled"))
 		.unwrap()
 		.unwrap_or_else(|err| panic!("{label}: subscribe failed: {err}"));
 
-	let mut group = moq_clock::timeout(TIMEOUT, subscriber.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("{label}: no group arrived"))
 		.unwrap()
 		.expect("the track is live");
 	let frame = group.read_frame().await.unwrap().expect("the group has a frame");
-	let elapsed = moq_clock::now() - start;
+	let elapsed = kio::clock::now() - start;
 	assert_eq!(frame.payload.as_ref(), b"cached", "{label}");
 
 	let mut live = track.append_group().unwrap();
 	live.write_frame(Timestamp::from_millis(1).unwrap(), b"live".as_ref())
 		.unwrap();
 	live.finish().unwrap();
-	let mut group = moq_clock::timeout(TIMEOUT, subscriber.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("{label}: the live group did not arrive"))
 		.unwrap()
@@ -128,7 +128,7 @@ async fn first_frame(version: &str, relays: usize, arrival: Arrival) -> Duration
 	elapsed
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn every_arrival_order_delivers() {
 	for version in VERSIONS {
 		let pipelined = !matches!(version, "moq-lite-03" | "moq-lite-04");
@@ -144,7 +144,7 @@ async fn every_arrival_order_delivers() {
 }
 
 /// The first frame arrives one round trip after asking, per hop.
-#[moq_clock::test]
+#[kio::test]
 async fn first_frame_takes_one_round_trip_per_hop() {
 	for version in ["moq-lite-05", "moq-lite-06", "moq-lite-07-wip"] {
 		for relays in 0..=2 {

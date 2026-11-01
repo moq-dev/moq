@@ -130,7 +130,11 @@ for (const operation of ["info", "fetch"] as const) {
 					await transport.cancelled;
 					expect(transport.written).toEqual([]);
 				}
-				expect(transport.options).toEqual([{ sendOrder: undefined, waitUntilAvailable: false }]);
+				// A fetch opens its FETCH stream alongside the TRACK stream, under the same deadline.
+				const opened = transport.options as { sendOrder?: number; waitUntilAvailable: boolean }[];
+				expect(opened).toHaveLength(operation === "info" ? 1 : 2);
+				expect(opened[0]).toEqual({ sendOrder: undefined, waitUntilAvailable: false });
+				for (const open of opened) expect(open.waitUntilAvailable).toBe(false);
 			} finally {
 				subscriber.close();
 				installed.close();
