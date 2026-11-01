@@ -846,6 +846,14 @@ async fn serve(
 	// Each QUIC worker binds here; Relay::run binds the shared listener before
 	// readiness and passes it to the same accept loop.
 	let mut listener = server.listen().await.context("failed to bind listeners")?;
+	// SPIKE (replica): `SPIKE_REPLICA=1` gives each worker its own data-plane replica.
+	let (cluster, _hop) = match std::env::var_os("SPIKE_REPLICA") {
+		Some(_) => {
+			let (cluster, hop) = cluster.spike_replica().await?;
+			(cluster, Some(hop))
+		}
+		None => (cluster, None),
+	};
 	serve_listening(&mut listener, cluster, auth, shutdown, sessions).await
 }
 

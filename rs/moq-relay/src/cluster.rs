@@ -1151,6 +1151,12 @@ pub struct Cluster {
 	/// (filtered by their auth token) and remote dials both read and write here.
 	pub origin: origin::Producer,
 
+	/// SPIKE (replica): this worker's data-plane replica. Downstream sessions
+	/// subscribe from it instead of [`Self::origin`]; it is fed from the shared
+	/// origin over one in-memory moq-lite session per worker. `None` serves
+	/// subscribers from the shared origin, as today.
+	replica: Option<origin::Producer>,
+
 	/// Stats registry. One instance per relay; sessions pick a billing tier via
 	/// [`stats::Registry::tier`](moq_net::stats::Registry::tier) at acceptance time
 	/// (the default tier unless configured otherwise, or any label the auth API
@@ -1274,6 +1280,7 @@ impl Cluster {
 			connection_ids: Arc::default(),
 			critical,
 			origin,
+			replica: None,
 			stats: moq_net::stats::Registry::disabled(),
 			_stats_publisher: None,
 		})
@@ -1449,7 +1456,64 @@ impl Cluster {
 	/// equivalent per-request setter), which derives the read handle. On an
 	/// upstream grant that handle never sees a route learned from another upstream.
 	pub fn subscriber(&self, token: &auth::Token) -> Option<origin::Producer> {
-		self.mounted(token)?.scope(&token.root, &token.subscribe).ok()
+		let base = self.replica.as_ref().unwrap_or(&self.origin);
+		self.mounted_on(base, token)?.scope(&token.root, &token.subscribe).ok()
+	}
+
+	/// SPIKE (replica): build this worker's replica on the current (worker)
+	/// runtime and return a cluster whose subscribers read from it.
+	///
+	/// The replica is a second origin with its own hop, fed by a moq-lite session
+	/// over the in-memory transport: the server half publishes the shared origin
+	/// (hidden paths included), the client half lands every route in the replica.
+	/// A track subscribed on this worker is subscribed once over that session and
+	/// fanned out locally. Publishers still publish into the shared origin. The
+	/// returned sessions keep the hop alive.
+	pub(crate) async fn spike_replica(&self) -> anyhow::Result<(Self, [moq_net::Session; 2])> {
+		use moq_net::transport::memory;
+
+		let mut config = self.origin.config();
+		config.hop = Hop::random();
+		let (replica, driver) = origin::Producer::new(config);
+		tokio::spawn(moq_net::time::run(driver));
+
+		// The newest moq-lite, fixed by ALPN as a cluster peer would negotiate it.
+		let version: moq_net::Version = "moq-lite-07-wip".parse().expect("known version");
+		let mut transport = memory::Config::default();
+		transport.protocol = Some(version.alpn().to_string());
+		let (client_transport, server_transport) = memory::pair(transport);
+		let server = moq_net::Server::new()
+			.with_versions(version.into())
+			.with_publisher(self.origin.clone().with_link(origin::Link::Peer).consume().with_hidden(true))
+			.with_limits(self.peer_limits);
+		let client = moq_net::Client::new()
+			.with_versions(version.into())
+			.with_subscriber(replica.clone().with_link(origin::Link::Peer))
+			.with_limits(self.peer_limits);
+		let now = moq_net::time::Instant::now();
+		// Each side's driver runs as soon as its half is up: the client's SETUP is
+		// sent by its driver, so the server's accept waits on it.
+		let accept = async {
+			let (session, driver) = server.accept(now, server_transport).await?;
+			tokio::spawn(moq_net::time::run(driver));
+			Ok::<_, moq_net::Error>(session)
+		};
+		let connect = async {
+			let (session, driver) = client.connect(now, client_transport).await?;
+			tokio::spawn(moq_net::time::run(driver));
+			Ok::<_, moq_net::Error>(session)
+		};
+		let (accepted, connected) =
+			tokio::time::timeout(std::time::Duration::from_secs(5), async { tokio::join!(accept, connect) })
+				.await
+				.context("replica hop handshake timed out")?;
+		let server_session = accepted.context("replica hop accept")?;
+		let client_session = connected.context("replica hop connect")?;
+		tracing::info!(replica = %replica.hop(), shared = %self.origin.hop(), "spike: worker replica linked");
+
+		let mut cluster = self.clone();
+		cluster.replica = Some(replica);
+		Ok((cluster, [server_session, client_session]))
 	}
 
 	/// Returns an [`origin::Producer`] scoped to this session's publish permissions,
@@ -1464,10 +1528,14 @@ impl Cluster {
 	/// before it is scoped to the session. A mount the origin refuses
 	/// (overlapping another) admits nothing.
 	fn mounted(&self, token: &auth::Token) -> Option<origin::Producer> {
+		self.mounted_on(&self.origin, token)
+	}
+
+	fn mounted_on(&self, base: &origin::Producer, token: &auth::Token) -> Option<origin::Producer> {
 		let mut origin = match (token.upstream, token.peer) {
-			(true, _) => self.origin.clone().with_link(origin::Link::Upstream),
-			(false, true) => self.origin.clone().with_link(origin::Link::Peer),
-			(false, false) => self.origin.clone(),
+			(true, _) => base.clone().with_link(origin::Link::Upstream),
+			(false, true) => base.clone().with_link(origin::Link::Peer),
+			(false, false) => base.clone(),
 		};
 		for (at, target) in &token.mounts {
 			let mounted = token.root.join(at).map_err(moq_net::Error::from);
@@ -4035,5 +4103,32 @@ mod tests {
 				.verify_lan_credential("anything"),
 			None
 		);
+	}
+
+	/// SPIKE (replica): a broadcast published into the shared origin reaches a
+	/// subscriber of a worker's replica over the in-memory hop.
+	#[tokio::test]
+	async fn spike_replica_serves_the_shared_origin() {
+		let cluster = new_cluster(Config::default()).expect("cluster");
+		let (worker, _hop) = cluster.spike_replica().await.expect("replica");
+		let broadcast = cluster.origin.create_broadcast("cam").expect("create");
+		let mut track = broadcast.create_track("data", timed()).expect("track");
+		broadcast.announce(Default::default()).expect("announce");
+
+		let consumer = worker.replica.as_ref().expect("replica set").consume();
+		let remote = kio::clock::timeout(Duration::from_secs(5), consumer.request("cam", None))
+			.await
+			.expect("broadcast resolves")
+			.expect("broadcast present");
+		let mut reader = remote.track("data").unwrap().subscribe(None).await.unwrap();
+		let mut group = track.append_group().unwrap();
+		group.write_frame(moq_net::Timestamp::ZERO, "hello").unwrap();
+		group.finish().unwrap();
+		let mut group = kio::clock::timeout(Duration::from_secs(5), reader.recv_group())
+			.await
+			.expect("group arrives")
+			.unwrap()
+			.unwrap();
+		assert_eq!(group.read_frame().await.unwrap().unwrap().payload, "hello".as_bytes());
 	}
 }
