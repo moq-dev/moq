@@ -14,8 +14,8 @@ const { values, positionals } = parseArgs({
 	},
 });
 const benchmark = values.bench;
-if (benchmark !== "frames" && benchmark !== "drift" && benchmark !== "ledger")
-	throw new Error("--bench must be frames, drift, or ledger");
+if (benchmark !== "frames" && benchmark !== "drift" && benchmark !== "ledger" && benchmark !== "pattern")
+	throw new Error("--bench must be frames, drift, ledger, or pattern");
 const rounds = Number(values.rounds);
 if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("--rounds must be a positive integer");
 const roots = new Map<string, string>();
@@ -30,7 +30,9 @@ for (const [name, root] of roots) {
 	const entry =
 		benchmark === "frames"
 			? resolve(root, "js/net/bench/frames.ts")
-			: resolve(import.meta.dir, `../../js/net/bench/${benchmark}.ts`);
+			: benchmark === "pattern"
+				? resolve(import.meta.dir, "../../js/pattern/bench/algebra.ts")
+				: resolve(import.meta.dir, `../../js/net/bench/${benchmark}.ts`);
 	const result = await Bun.build({
 		entrypoints: [entry],
 		target: "browser",
@@ -43,7 +45,7 @@ for (const [name, root] of roots) {
 					build.onResolve({ filter: /^\.\.\/src\/ledger\.ts$/ }, () => ({
 						path: resolve(root, "js/net/src/ledger.ts"),
 					}));
-					build.onLoad({ filter: /\/bench\/(frames|drift|ledger)\.ts$/ }, async ({ path }) => {
+					build.onLoad({ filter: /\/bench\/(frames|drift|ledger|algebra)\.ts$/ }, async ({ path }) => {
 						const source = await Bun.file(path).text();
 						if (benchmark !== "frames")
 							return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
@@ -109,7 +111,7 @@ try {
 			rows.set(variant, []);
 			await pages.get(variant)?.evaluate("globalThis.measure()");
 			const measured = rows.get(variant);
-			if (measured?.length !== (benchmark === "frames" ? 26 : benchmark === "drift" ? 36 : 12))
+			if (measured?.length !== { frames: 26, drift: 36, ledger: 12, pattern: 12 }[benchmark])
 				throw new Error(`incomplete rows: ${variant}`);
 			samples.push({ round, variant, rows: measured });
 			await Bun.write(

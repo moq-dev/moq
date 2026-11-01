@@ -117,6 +117,12 @@ arrivals-bench:
     bun install --frozen-lockfile
     bun watch/bench/arrivals.ts
 
+# Reduce and compare the worst known peer grant shapes, swept over AUTH_OK size.
+pattern-bench:
+    bun install --frozen-lockfile
+    bunx tsc --noEmit --project pattern/bench/tsconfig.json
+    bun pattern/bench/algebra.ts
+
 # Sweep manual-clock armed timers x due timers, with independent and shared abort scopes.
 clock-bench:
     bun install --frozen-lockfile

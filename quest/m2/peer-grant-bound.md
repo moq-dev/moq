@@ -10,15 +10,24 @@ Measure JS in a browser, not node or bun.
 
 [moq-dev/moq#6356](https://github.com/moq-dev/moq/pull/6356) indexed
 whole-union operations in `moq-pattern` and `@moq/pattern` by segment. That
-made every benchmarked shape linear, but the worst case is still about
-25 ms per 64 KiB message in Rust. The shape is 1024 incomparable `*`/`a`
-masks against literal queries that fail only at the last segment. Containment
-between patterns with wildcards reduces to Orthogonal Vectors, so no index
-closes that gap. Correlated partials (`a^i*z^(n-i)`) cost 8.6 ms, growing as
-bytes^1.5 (see the
-[Codex thread](https://github.com/moq-dev/moq/pull/6356#discussion_r4352967969)).
+made every benchmarked shape linear, but containment between patterns with
+wildcards reduces to Orthogonal Vectors, so no index closes the gap. The
+`pattern-algebra` benchmark (Rust Criterion) and `js/pattern/bench/algebra.ts`
+(Chromium through `bench/browser/micro.ts --bench pattern`) sweep the two worst
+known shapes over message size up to a whole `AUTH_OK`:
 
-Candidate approaches, needing a fresh `/quest-plan`:
+- `mask`: equal-weight `*`/`y` masks beside literal queries that fail only at
+  the last segment. At 64 KiB one reduction costs about 40 ms in Rust and
+  250 ms in Chromium, growing as bytes^1.7.
+- `chain`: correlated partials `a^i*z^(n-i)`. At 64 KiB about 9 ms in Rust and
+  24 ms in Chromium, growing as bytes^1.3.
+
+Each `AUTH_OK` pays this more than once: Rust reduces on decode and again in
+`Grant::union`, then every moq-lite announce stream's regrant runs `Permit::covers`
+(the same walk) against its previous permit. JS reduces on decode and in
+`union`.
+
+Candidate approaches, needing a decision:
 
 - Keep peer grants unreduced: decode into a sorted, deduplicated list in
   O(n log n), and make `Permit::covers` syntactic (its docs already allow a
@@ -27,9 +36,6 @@ Candidate approaches, needing a fresh `/quest-plan`:
 - A joint prefix/suffix index for partial segments (rectangle stabbing on
   trie traversal order). This removes the correlated-partial chain but not
   the segment-level floor.
-
-Prove it with the `pattern-algebra` benchmark extended by the mask and
-partial-chain shapes, each sweeping message size.
 
 ## Related
 
