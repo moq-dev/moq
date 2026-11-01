@@ -6762,7 +6762,7 @@ impl Cursor {
 		if idle::Idle::parked(&self.idle, idle::Walk::Arrival, waiter) {
 			return Poll::Pending;
 		}
-		let idle = idle::Idle::start(&mut self.idle, waiter);
+		let mut idle = idle::Idle::start(&mut self.idle, waiter);
 		let polled = self.poll_recv_walk(take, idle.waiter());
 		idle.finish(&mut self.idle, idle::Walk::Arrival, polled.is_pending());
 		polled
@@ -6973,7 +6973,7 @@ impl Cursor {
 		if idle::Idle::parked(&self.idle, idle::Walk::Sequence, waiter) {
 			return Poll::Pending;
 		}
-		let idle = idle::Idle::start(&mut self.idle, waiter);
+		let mut idle = idle::Idle::start(&mut self.idle, waiter);
 		let polled = self.poll_next_walk(take, idle.waiter());
 		idle.finish(&mut self.idle, idle::Walk::Sequence, polled.is_pending());
 		polled

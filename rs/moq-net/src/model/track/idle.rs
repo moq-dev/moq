@@ -31,9 +31,13 @@ pub(super) struct Idle {
 	/// The read that parked, or `None` while nothing is parked.
 	parked: Option<Walk>,
 	woken: Arc<Woken>,
-	/// Wraps [`Self::woken`]. Kept across reads, so parking again on a list that still
-	/// holds it is free, as it would be for the task's own waiter.
-	waiter: kio::Waiter,
+	/// Wakes [`Self::woken`].
+	wake: Waker,
+	/// Holds the waiter reads park on with [`Self::wake`]. Kept across reads, so parking
+	/// again on a list that still holds it is free, as it would be for the task's own
+	/// waiter, and retired as a task's own park retires one that parked on more lists
+	/// than it can record.
+	park: kio::Park,
 }
 
 /// Records a wake, then wakes the task.
@@ -62,8 +66,9 @@ impl Idle {
 		});
 		Self {
 			parked: None,
-			waiter: kio::Waiter::new(Waker::from(woken.clone())),
+			wake: Waker::from(woken.clone()),
 			woken,
+			park: kio::Park::default(),
 		}
 	}
 
@@ -94,8 +99,8 @@ impl Idle {
 	}
 
 	/// The waiter a full read parks on.
-	pub(super) fn waiter(&self) -> &kio::Waiter {
-		&self.waiter
+	pub(super) fn waiter(&mut self) -> &kio::Waiter {
+		self.park.hold(&std::task::Context::from_waker(&self.wake))
 	}
 
 	/// Put the gate back after a full read of `walk`, armed if it parked.
@@ -108,6 +113,34 @@ impl Idle {
 	pub(super) fn disarm(this: &mut Option<Box<Self>>) {
 		if let Some(idle) = this {
 			idle.parked = None;
+		}
+	}
+}
+
+#[cfg(test)]
+mod test {
+	use super::*;
+
+	/// The waiter reads park on is kept across reads, but retired once it parked on more
+	/// lists than it records, so re-parking cannot stack entries those lists never collect.
+	#[test]
+	fn a_waiter_parked_past_its_records_is_retired() {
+		let task = kio::Waiter::noop();
+		let mut slot = None;
+		for (lists, retired) in [(1, false), (9, true)] {
+			let mut idle = Idle::start(&mut slot, &task);
+			let mut parked: Vec<_> = (0..lists).map(|_| kio::WaiterList::new()).collect();
+			let waiter = idle.waiter();
+			for list in &mut parked {
+				waiter.register(list);
+			}
+			idle.finish(&mut slot, Walk::Arrival, true);
+			assert!(Idle::parked(&slot, Walk::Arrival, &task));
+
+			let mut idle = Idle::start(&mut slot, &task);
+			idle.waiter();
+			assert_eq!(parked.iter().all(kio::WaiterList::is_empty), retired);
+			idle.finish(&mut slot, Walk::Arrival, false);
 		}
 	}
 }
