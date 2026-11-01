@@ -1,7 +1,6 @@
 name: Check
 
 permissions:
-  id-token: write
   contents: read
 
 # Main PRs report Check as skipped; Land tests their combined prefix.
@@ -29,9 +28,6 @@ jobs:
     timeout-minutes: 60
     env:
       CI_BASE: --all
-      # Over every package, the isolated feature shapes outgrow this job beside
-      # the rest; release PRs run them in Features (`just gate rs_shapes`).
-      CHECK_MODULES: -rs_shapes
 
     steps:
       - name: Checkout

@@ -2,6 +2,7 @@
 //!
 //! A [Producer] is used to set the current estimated bitrate, notifying consumers.
 //! A [Consumer] can read the current estimate and wait for changes.
+//! A [Demand] watches whether anyone reads it, so a producer estimates only on demand.
 //!
 //! One estimate covers a whole connection, so senders sharing one divide it with
 //! an [Allocator] rather than each targeting the whole thing. How a sender then
@@ -114,31 +115,69 @@ impl Producer {
 		Weak(self.state.weak())
 	}
 
-	/// Block until there are no active consumers.
+	/// A watch-only handle to whether anyone reads the estimate.
+	pub fn demand(&self) -> Demand {
+		Demand {
+			state: self.state.weak(),
+			prev: None,
+		}
+	}
+
+	/// Poll for consumer presence to differ from `last`, with the new value once it does.
+	/// Errors once the channel closes.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn poll_wanted_changed(&self, waiter: &kio::Waiter, last: bool) -> Poll<Result<bool>> {
+		self.state.poll_wanted_changed(waiter, last).map_err(|_| Error::Dropped)
+	}
+}
+
+/// A cloneable, watch-only handle to whether anyone reads a bandwidth estimate.
+///
+/// Holding it is not demand and keeps nothing open. Once every [`Producer`] is gone, its
+/// waits end with [`Error::Dropped`]. Each clone watches on its own, so its first
+/// [`poll_wanted_changed`](Self::poll_wanted_changed) reports the current value.
+pub struct Demand {
+	state: kio::ProducerWeak<State>,
+	// The value `poll_wanted_changed` last returned, or `None` before it returned any.
+	prev: Option<bool>,
+}
+
+impl Clone for Demand {
+	fn clone(&self) -> Self {
+		Self {
+			state: self.state.clone(),
+			prev: None,
+		}
+	}
+}
+
+impl Demand {
+	/// Whether the estimate is still produced and a consumer reads it right now.
+	pub fn wanted(&self) -> bool {
+		!self.state.is_closed() && self.state.wanted()
+	}
+
+	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
+	/// immediately on the first call, then on each change. Errors once every producer is gone.
 	#[cfg(feature = "async")]
-	pub async fn unused(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_unused(waiter)).await
+	pub async fn wanted_changed(&mut self) -> Result<bool> {
+		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
 	}
 
-	/// Poll until there are no active consumers. Errors if the channel closes first.
-	pub fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_unused(waiter).map_err(|_| Error::Dropped)
-	}
-
-	/// Whether at least one active consumer exists right now.
-	pub fn is_used(&self) -> bool {
-		self.state.is_used()
-	}
-
-	/// Block until there is at least one active consumer.
-	#[cfg(feature = "async")]
-	pub async fn used(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_used(waiter)).await
-	}
-
-	/// Poll until at least one active consumer exists. Errors if the channel closes first.
-	pub fn poll_used(&self, waiter: &kio::Waiter) -> Poll<Result<()>> {
-		self.state.poll_used(waiter).map_err(|_| Error::Dropped)
+	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
+	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool>> {
+		loop {
+			if self.state.is_closed() {
+				return Poll::Ready(Err(Error::Dropped));
+			}
+			let wanted = self.state.wanted();
+			if self.prev != Some(wanted) {
+				self.prev = Some(wanted);
+				return Poll::Ready(Ok(wanted));
+			}
+			// Closing fails the wait, which errors above.
+			let _ = std::task::ready!(self.state.poll_wanted_changed(waiter, wanted));
+		}
 	}
 }
 
@@ -557,7 +596,7 @@ impl Share {
 			// then left, needs that to know when to resume.
 			.filter(|(want, demand)| match want.id == self.id {
 				true => !demand.is_closed(),
-				false => demand.is_used(),
+				false => demand.is_wanted(),
 			})
 			.map(|(want, _)| want)
 			.collect();
@@ -897,7 +936,7 @@ mod tests {
 
 	/// The headline case: two encoders on one connection must not each target the
 	/// whole estimate.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn concurrent_tracks_split_the_estimate() {
 		let estimate = Producer::new();
@@ -950,7 +989,7 @@ mod tests {
 
 	/// Demand transitions have to wake a parked share, not just change what a later
 	/// `peek` would see; the encoder is sitting in a `select!` on `changed`.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_share_wakes_when_a_sibling_goes_idle() {
 		let estimate = Producer::new();
@@ -1011,7 +1050,7 @@ mod tests {
 	/// waker armed. Reservations cap the slice, so most estimate changes don't reach
 	/// it, and a poll that returned the value without arming anything would park the
 	/// encoder with nothing left to wake it.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn an_unchanged_slice_keeps_watching_the_estimate() {
 		let estimate = Producer::new();
@@ -1038,7 +1077,7 @@ mod tests {
 	}
 
 	/// The same, for the other input: a sibling's demand.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_parked_share_is_woken_by_sibling_demand() {
 		let estimate = Producer::new();
@@ -1064,7 +1103,7 @@ mod tests {
 
 	/// A share follows the estimate's own lifecycle: unavailable while disconnected
 	/// (hold the current rate), terminal once the session is gone for good.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_share_follows_the_estimate_lifecycle() {
 		let estimate = Producer::new();
@@ -1108,7 +1147,7 @@ mod tests {
 	/// Dropping the reservation hands the room back. The registry only ever prunes
 	/// tracks that have *closed*, so a claim left behind by a track that is still
 	/// publishing would stand for the rest of the connection.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn dropping_a_reservation_releases_it() {
 		let estimate = Producer::new();
@@ -1205,12 +1244,12 @@ mod tests {
 		retired.update(bps(4_000_000));
 		assert_eq!(sibling.rate(), Some(bps(1_000_000)));
 		assert_eq!(target.poll_changed(&waiter), Poll::Ready(bps(12_000_000)));
-		assert!(encoder.demand().is_used());
+		assert!(encoder.demand().is_wanted());
 	}
 
 	/// A reader parked on `changed` has to be woken by its own reservation moving, not
 	/// just by the estimate or a sibling: the encoder is sitting in a `select!` on it.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn update_wakes_a_parked_reader() {
 		let estimate = Producer::new();
@@ -1233,7 +1272,7 @@ mod tests {
 
 	/// The registry is the allocator's, not a share's: a share that outlives every
 	/// allocator reports the estimate as gone rather than keeping the channel open.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_share_outliving_the_allocator_reports_closed() {
 		let estimate = Producer::new();
@@ -1253,7 +1292,7 @@ mod tests {
 	/// holds its rate for the former and stops watching for the latter.
 	/// Reporting closure as `Ok(None)` would spin any `select!` over `changed()`,
 	/// because a closed channel is always immediately ready.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn closed_is_distinct_from_unavailable() {
 		let producer = Producer::new();
