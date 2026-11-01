@@ -25,9 +25,10 @@ const TRAIN_SEGMENTS: usize = 63;
 /// Everything the handles and the driver share, single-threaded.
 ///
 /// The connection and the bookkeeping live in separate `RefCell`s so a stream
-/// operation can mutate the connection, drop that borrow, and then kick the
-/// driver or read the terminal error without ever holding both. moq-quic owns
-/// every handle's wait; the bookkeeping is the driver's kick and the close.
+/// operation can mutate the connection, drop that borrow, and then read the
+/// terminal error without ever holding both. moq-quic owns every handle's wait
+/// and the driver's transmit wait; the bookkeeping is the driver's ingress wake
+/// and the close.
 pub(crate) struct Inner {
 	pub(crate) conn: RefCell<moq_quic::connection::Connection>,
 	/// Updated by packet ingress and egress, so readers never wake the worker to sample.
@@ -43,8 +44,10 @@ pub(crate) struct Inner {
 
 pub(crate) struct State {
 	pub(crate) active: Option<moq_net::server::Active>,
-	/// Wakes the driver; handles kick it after mutating the connection so
-	/// fresh egress reaches the wire.
+	/// Wakes the driver when the endpoint fed the connection (a received
+	/// datagram, an unreachable peer) so it answers and re-arms its timers, or
+	/// failed it from outside. Handles need no wake of their own: whatever
+	/// they queue wakes the driver's `poll_transmit`.
 	driver: kio::WaiterList,
 
 	/// The terminal error as the handle's `poll_closed` reports it, set exactly
@@ -109,7 +112,8 @@ impl Inner {
 		self.closed().expect("moq-quic reported the connection lost")
 	}
 
-	/// Wake the driver so it flushes what a handle just queued.
+	/// Wake the driver after the endpoint fed the connection, so it answers and
+	/// re-arms its timers.
 	pub(crate) fn kick(&self) {
 		self.state.borrow_mut().driver.wake();
 	}
@@ -137,12 +141,13 @@ impl Inner {
 	/// to `u32`; the WebTransport layer maps its codes into HTTP/3's error
 	/// space, which needs the whole varint range.
 	pub(crate) fn close_code(&self, code: u64, reason: &str) {
+		// The close wakes the driver itself, through its `poll_closed` and
+		// `poll_transmit` waits, even one stalled on a full transmit pool.
 		self.conn.borrow_mut().close(
 			self.owner.now(),
 			VarInt::from_u64(code).unwrap_or(VarInt::MAX),
 			reason.to_string(),
 		);
-		self.state.borrow_mut().driver.wake();
 	}
 }
 
@@ -217,7 +222,6 @@ impl Connection {
 			Err(moq_quic::send::Error::TooLarge) => return Err(send::Error::TooLarge),
 			Err(_) => return Err(send::Error::Unsupported),
 		}
-		self.shared.kick();
 		Ok(())
 	}
 
@@ -293,7 +297,6 @@ impl Connection {
 	/// refuses.
 	pub fn set_limits(&self, limits: crate::quic::Limits) -> Result<(), Error> {
 		self.shared.conn.borrow_mut().set_limits(limits)?;
-		self.shared.kick();
 		Ok(())
 	}
 
@@ -680,7 +683,8 @@ impl web_transport_trait::Stats for Stats {
 
 /// The per-connection task: endpoint events, the connection's loss, timers,
 /// and packets out. Packets in come from the endpoint's demux task, which feeds
-/// moq-quic directly and kicks this driver.
+/// moq-quic directly and kicks this driver; what the handles queue wakes it
+/// through `poll_transmit`.
 struct Driver {
 	shared: Shared,
 	socket: Rc<udp::Socket>,
@@ -705,8 +709,8 @@ impl Driver {
 			if state.dead {
 				return Poll::Ready(());
 			}
-			// Register the kick first: a handle mutating the connection after
-			// this turn's checks still re-polls us.
+			// Register for ingress first: a datagram the endpoint feeds the
+			// connection after this turn's checks still re-polls us.
 			waiter.register(&mut state.driver);
 		}
 
@@ -821,9 +825,10 @@ impl Driver {
 
 	/// Fill one transmit buffer and stage it.
 	///
-	/// Pacing happens inside `poll_transmit`: a paced path returns nothing
-	/// and arms a timer that `poll_timeout` reports, and the driver loop
-	/// flushes again once it fires.
+	/// `poll_transmit` is the driver's wait for egress: with nothing to send it
+	/// registers `waiter`, which whatever a handle queues wakes. Pacing happens
+	/// inside it too: a paced path returns `Pending` and arms a timer that
+	/// `poll_timeout` reports, and the driver loop flushes again once it fires.
 	fn flush_one(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
 		let mut tx = match self.socket.poll_acquire(waiter) {
 			Poll::Ready(Ok(tx)) => tx,
@@ -846,13 +851,15 @@ impl Driver {
 				))));
 			}
 			// A new target waits for the next egress: probing only resends data in flight, so it
-			// has nothing to send until a write or an ACK kicks the driver anyway.
+			// has nothing to send until a write or an ACK wakes the driver anyway.
 			if let Some(probe) = &self.shared.probe {
 				conn.set_probe_target(probe.target().as_bps() / 8);
 			}
 			// moq-quic encrypts the train straight into the socket's buffer.
-			// Nothing to send, or paced; the buffer returns to the pool on drop.
-			let Some(transmit) = conn.poll_transmit(self.shared.owner.now(), segments, &mut tx) else {
+			// Nothing to send registers us until the application queues
+			// something; paced, the timer re-polls us. Either way the buffer
+			// returns to the pool on drop.
+			let Poll::Ready(transmit) = conn.poll_transmit(waiter, self.shared.owner.now(), segments, &mut tx) else {
 				return Poll::Pending;
 			};
 			self.shared.wire.set_sent_bytes(conn.stats().udp_tx.bytes);

@@ -220,10 +220,8 @@ impl Reader {
 			return Poll::Ready(Err(Error::Reset(code)));
 		}
 		let mut conn = self.conn.state.lock();
-		let (result, transmit) = conn.inner.recv_stream(self.id).poll_lease(waiter, want);
-		if transmit.should_transmit() {
-			conn.wake();
-		}
+		// moq-quic wakes the driver for any credit the lease returned.
+		let (result, _) = conn.inner.recv_stream(self.id).poll_lease(waiter, want);
 		let err = match ready!(result) {
 			Ok(lease) => return Poll::Ready(Ok(lease)),
 			Err(err) => err,
@@ -248,10 +246,8 @@ impl Reader {
 		Poll::Ready(
 			match ready!(conn.inner.recv_stream(self.id).poll_received_reset(waiter)) {
 				Ok(error_code) => {
-					// Stream state has just now been freed, so the connection may need to issue new
-					// stream ID flow control credit, and later reads fail with the cached code.
+					// Stream state has just now been freed, so later reads fail with the cached code.
 					self.reset = Some(error_code);
-					conn.wake();
 					Ok(Some(error_code))
 				}
 				Err(moq_quic::recv::Error::ConnectionLost) => Err(Error::Connection(conn.lost())),
@@ -286,17 +282,15 @@ impl Reader {
 			Some(code) => ReadStatus::Failed(None, Reset(code)),
 			None => {
 				let mut recv = conn.inner.recv_stream(self.id);
-				let (status, transmit) = match recv.read() {
+				match recv.read() {
 					Ok(mut chunks) => {
 						let status = read_fn(&mut chunks, waiter);
-						(status, chunks.finalize().should_transmit())
+						// moq-quic wakes the driver for the credit the read returned.
+						let _ = chunks.finalize();
+						status
 					}
-					Err(err) => (ReadStatus::Failed(None, err), false),
-				};
-				if transmit {
-					conn.wake();
+					Err(err) => ReadStatus::Failed(None, err),
 				}
-				status
 			}
 		};
 
@@ -420,9 +414,7 @@ impl Lease<'_> {
 	pub fn release(mut self) {
 		let lease = self.inner.take().expect("only taken to hand it back");
 		let mut conn = self.reader.conn.state.lock();
-		if conn.inner.recv_stream(self.reader.id).release(lease).should_transmit() {
-			conn.wake();
-		}
+		let _ = conn.inner.recv_stream(self.reader.id).release(lease);
 	}
 }
 
@@ -449,9 +441,7 @@ impl Drop for Lease<'_> {
 	fn drop(&mut self) {
 		if let Some(lease) = self.inner.take() {
 			let mut conn = self.reader.conn.state.lock();
-			if conn.inner.recv_stream(self.reader.id).restore(lease).should_transmit() {
-				conn.wake();
-			}
+			let _ = conn.inner.recv_stream(self.reader.id).restore(lease);
 		}
 	}
 }
@@ -492,7 +482,6 @@ impl Drop for Stream {
 
 		// Fails harmlessly once the stream is gone.
 		let _ = conn.inner.recv_stream(reader.id).stop(reader.drop_stop);
-		conn.wake();
 	}
 }
 

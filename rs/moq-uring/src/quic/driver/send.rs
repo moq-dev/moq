@@ -1,7 +1,7 @@
 //! Outgoing streams and datagrams: their handles, scheduling, and errors.
 //!
 //! Single-threaded sans-IO means a write goes straight into moq-quic's send queue (no staging
-//! copy); the handles just kick the driver so egress reaches the wire, and wait through
+//! copy), which wakes the driver's transmit wait itself, and the handles wait through
 //! moq-quic's poll forms, which wake them.
 
 use std::future::poll_fn;
@@ -90,10 +90,7 @@ impl Stream {
 		// moq-quic wakes us once the stream is writable again, or stopped.
 		let written = shared.conn.borrow_mut().send_stream(id).poll_write(waiter, buf);
 		match ready!(written) {
-			Ok(written) => {
-				shared.kick();
-				Poll::Ready(Ok(written))
-			}
+			Ok(written) => Poll::Ready(Ok(written)),
 			Err(moq_quic::send::Error::Stopped(code)) => Poll::Ready(Err(Error::Stopped(code))),
 			Err(moq_quic::send::Error::ConnectionLost) => Poll::Ready(Err(Error::Connection(shared.lost()))),
 			Err(err) => unreachable!("an open stream failed to write: {err:?}"),
@@ -238,9 +235,7 @@ impl Finished {
 impl Half {
 	fn finish(&mut self) {
 		// A STOP_SENDING may have beaten us here, which `stopped` reports.
-		if self.shared.conn.borrow_mut().send_stream(self.id).finish().is_ok() {
-			self.shared.kick();
-		}
+		let _ = self.shared.conn.borrow_mut().send_stream(self.id).finish();
 		self.state = HalfState::Finished;
 	}
 
@@ -249,14 +244,10 @@ impl Half {
 		let mut conn = self.shared.conn.borrow_mut();
 		let mut stream = conn.send_stream(self.id);
 		// Fails harmlessly once the connection is gone.
-		let reset = match offset {
+		let _ = match offset {
 			Some(offset) => stream.reset_at(offset, code),
 			None => stream.reset(code),
 		};
-		drop(conn);
-		if reset.is_ok() {
-			self.shared.kick();
-		}
 	}
 
 	fn set_priority(&mut self, priority: i64) {
@@ -303,22 +294,19 @@ impl Drop for Half {
 			Ok(Some(End::Stopped(code))) => Some(code),
 			_ => None,
 		};
-		let reset = match (&self.state, stopped) {
-			(HalfState::Reset, _) => None,
+		// A reset fails harmlessly once the connection is gone.
+		let _ = match (&self.state, stopped) {
+			(HalfState::Reset, _) => Ok(()),
 			// Echo the code, as RFC 9000 section 3.5 asks, even after `finish`: the peer reads
 			// nothing more, so retransmitting the rest is wasted.
-			(_, Some(code)) => Some(stream.reset(code)),
-			(HalfState::Finished, None) => None,
-			(HalfState::Open(offset, code), None) => Some(match offset {
+			(_, Some(code)) => stream.reset(code),
+			(HalfState::Finished, None) => Ok(()),
+			(HalfState::Open(offset, code), None) => match offset {
 				Some(offset) => stream.reset_at(*offset, *code),
 				None => stream.reset(*code),
-			}),
+			},
 		};
 		stream.release();
-		drop(conn);
-		if reset.is_some_and(|reset| reset.is_ok()) {
-			self.shared.kick();
-		}
 	}
 }
 

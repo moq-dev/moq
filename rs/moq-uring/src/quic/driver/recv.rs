@@ -1,7 +1,8 @@
 //! Incoming streams: their handles, leases, and errors.
 //!
-//! A read comes straight out of moq-quic's reassembly buffer; the handles kick the driver when
-//! a read owes the peer credit, and wait through moq-quic's poll forms, which wake them.
+//! A read comes straight out of moq-quic's reassembly buffer, which wakes the driver's transmit
+//! wait itself when a read owes the peer credit, and the handles wait through moq-quic's poll
+//! forms, which wake them.
 
 use std::future::poll_fn;
 use std::task::{Context, Poll, ready};
@@ -159,15 +160,12 @@ impl Stream {
 		if let Some(code) = self.reset {
 			return Poll::Ready(Err(Error::Reset(code)));
 		}
-		let (result, transmit) = self
+		let (result, _) = self
 			.shared
 			.conn
 			.borrow_mut()
 			.recv_stream(self.id)
 			.poll_lease(waiter, want);
-		if transmit.should_transmit() {
-			self.shared.kick();
-		}
 		let err = match ready!(result) {
 			Ok(lease) => return Poll::Ready(Ok(lease)),
 			Err(moq_quic::recv::Error::Reset(code)) => Error::Reset(code),
@@ -228,10 +226,8 @@ impl Stream {
 			.poll_received_reset(waiter);
 		match ready!(reset) {
 			Ok(code) => {
-				// The stream's state was just freed, so the peer may be owed stream credit, and
-				// later reads fail with the cached code.
+				// The stream's state was just freed, so later reads fail with the cached code.
 				self.reset = Some(code);
-				self.shared.kick();
 				Poll::Ready(Ok(Some(code)))
 			}
 			Err(moq_quic::recv::Error::ConnectionLost) => Poll::Ready(Err(Error::Connection(self.shared.lost()))),
@@ -286,19 +282,15 @@ impl Stream {
 			Some(code) => ReadStatus::Failed(None, Reset(code)),
 			None => {
 				let mut conn = self.shared.conn.borrow_mut();
-				let (status, transmit) = match conn.recv_stream(self.id).read() {
+				match conn.recv_stream(self.id).read() {
 					Ok(mut chunks) => {
 						let status = read_fn(&mut chunks, waiter);
-						(status, chunks.finalize().should_transmit())
+						// Reading is what returns the peer's flow control credit.
+						let _ = chunks.finalize();
+						status
 					}
-					Err(err) => (ReadStatus::Failed(None, err), false),
-				};
-				drop(conn);
-				// Reading is what returns the peer's flow control credit.
-				if transmit {
-					self.shared.kick();
+					Err(err) => ReadStatus::Failed(None, err),
 				}
-				status
 			}
 		};
 
@@ -364,7 +356,6 @@ impl Drop for Stream {
 		}
 		// Fails harmlessly once the stream is gone.
 		let _ = self.shared.conn.borrow_mut().recv_stream(self.id).stop(self.drop_stop);
-		self.shared.kick();
 	}
 }
 
@@ -409,10 +400,7 @@ impl Lease<'_> {
 	pub fn release(mut self) {
 		let lease = self.inner.take().expect("only taken to hand it back");
 		let stream = &*self.stream;
-		let transmit = stream.shared.conn.borrow_mut().recv_stream(stream.id).release(lease);
-		if transmit.should_transmit() {
-			stream.shared.kick();
-		}
+		let _ = stream.shared.conn.borrow_mut().recv_stream(stream.id).release(lease);
 	}
 }
 
@@ -439,10 +427,7 @@ impl Drop for Lease<'_> {
 	fn drop(&mut self) {
 		if let Some(lease) = self.inner.take() {
 			let stream = &*self.stream;
-			let transmit = stream.shared.conn.borrow_mut().recv_stream(stream.id).restore(lease);
-			if transmit.should_transmit() {
-				stream.shared.kick();
-			}
+			let _ = stream.shared.conn.borrow_mut().recv_stream(stream.id).restore(lease);
 		}
 	}
 }

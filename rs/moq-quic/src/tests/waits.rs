@@ -545,3 +545,80 @@ fn stop_wakes_a_parked_reader() {
 		Err(recv::Error::Closed)
 	));
 }
+
+/// Poll the client's transmit until it waits, parking `driver` on it
+fn park_transmit(pair: &mut Pair, ch: ConnectionHandle, driver: &kio::Waiter) {
+	let now = pair.time;
+	let mut buf = Vec::new();
+	let conn = pair.client_conn_mut(ch);
+	while conn.poll_transmit(driver, now, 1, &mut buf).is_ready() {
+		buf.clear();
+	}
+}
+
+/// What the application queues wakes the driver parked on `poll_transmit`, which then finds it
+/// to send; nothing else does.
+#[test]
+fn transmit_waits_for_the_application() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	let (client_ch, server_ch) = pair.connect();
+	let s = open_uni(&mut pair, client_ch, server_ch, b"a");
+
+	let driver = Counter::new();
+	park_transmit(&mut pair, client_ch, &driver);
+	// Reading what is already sent queues nothing.
+	assert_eq!(pair.client_send(client_ch, s).end(), Ok(None));
+	assert_eq!(driver.wakes(), 0);
+
+	pair.client_send(client_ch, s).write(&mut &b"b"[..]).unwrap();
+	assert_eq!(driver.wakes(), 1);
+	park_transmit(&mut pair, client_ch, &driver);
+	pair.client_send(client_ch, s).finish().unwrap();
+	assert_eq!(driver.wakes(), 2);
+	park_transmit(&mut pair, client_ch, &driver);
+	pair.client_datagrams(client_ch)
+		.send(&b"hi"[..], Default::default())
+		.unwrap();
+	assert_eq!(driver.wakes(), 3);
+	park_transmit(&mut pair, client_ch, &driver);
+	let now = pair.time;
+	pair.client_conn_mut(client_ch).close(now, VarInt(0), String::new());
+	assert_eq!(driver.wakes(), 4);
+	// The close is what it finds to send.
+	let mut buf = Vec::new();
+	assert!(
+		pair.client_conn_mut(client_ch)
+			.poll_transmit(&driver, now, 1, &mut buf)
+			.is_ready()
+	);
+}
+
+/// A reset, a stop, and a refused open each queue a frame, and wake the driver for it.
+#[test]
+fn transmit_hears_resets_stops_and_refused_opens() {
+	let _guard = subscribe();
+	let mut pair = pair_with(Limits {
+		max_streams: NonZeroU64::new(1),
+		..Limits::default()
+	});
+	let (client_ch, server_ch) = pair.connect();
+	let s = open_uni(&mut pair, client_ch, server_ch, b"a");
+
+	let driver = Counter::new();
+	park_transmit(&mut pair, client_ch, &driver);
+	// The peer allows one stream, which is open.
+	assert_eq!(pair.client_streams(client_ch).open(Dir::Uni, Default::default()), None);
+	assert_eq!(driver.wakes(), 1, "STREAMS_BLOCKED");
+	park_transmit(&mut pair, client_ch, &driver);
+	pair.client_send(client_ch, s).reset(VarInt(7)).unwrap();
+	assert_eq!(driver.wakes(), 2, "RESET_STREAM");
+
+	let t = pair.server_streams(server_ch).open(Dir::Bi, Default::default()).unwrap();
+	pair.server_send(server_ch, t).write(&mut &b"x"[..]).unwrap();
+	pair.drive();
+	assert_eq!(pair.client_streams(client_ch).accept(Dir::Bi), Some(t));
+	park_transmit(&mut pair, client_ch, &driver);
+	pair.client_conn_mut(client_ch).recv_stream(t).stop(VarInt(9)).unwrap();
+	assert_eq!(driver.wakes(), 3, "STOP_SENDING");
+}

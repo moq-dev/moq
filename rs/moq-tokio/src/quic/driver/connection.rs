@@ -11,7 +11,7 @@ use std::{
 		Arc,
 		atomic::{AtomicUsize, Ordering},
 	},
-	task::{Context, Poll, Waker, ready},
+	task::{Context, Poll, ready},
 };
 
 use bytes::{Buf, Bytes};
@@ -140,6 +140,8 @@ impl Future for Connecting {
 struct ConnectionDriver {
 	conn: ConnectionRef,
 	span: Span,
+	/// Holds the waiter `poll_transmit` parks on, which the application's calls wake
+	park: kio::Park,
 }
 
 impl ConnectionDriver {
@@ -149,7 +151,11 @@ impl ConnectionDriver {
 			debug_span!("drive", id = conn.handle.0)
 		};
 
-		Self { conn, span }
+		Self {
+			conn,
+			span,
+			park: kio::Park::default(),
+		}
 	}
 }
 
@@ -157,8 +163,10 @@ impl Future for ConnectionDriver {
 	type Output = Result<(), io::Error>;
 
 	fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-		let conn = &mut *self.conn.state.lock();
-		let _guard = self.span.enter();
+		let this = self.get_mut();
+		let waiter = this.park.hold(cx);
+		let conn = &mut *this.conn.state.lock();
+		let _guard = this.span.enter();
 
 		if let Err(e) = conn.process_conn_events(cx) {
 			conn.terminate(e);
@@ -167,10 +175,10 @@ impl Future for ConnectionDriver {
 		// A new target waits for the next poll: probing only resends data in flight, so it has
 		// nothing to send until a write or an ACK polls anyway.
 		#[cfg(feature = "net")]
-		if let Some(probe) = &self.conn.shared.probe {
+		if let Some(probe) = &this.conn.shared.probe {
 			conn.inner.set_probe_target(probe.target().as_bps() / 8);
 		}
-		let mut keep_going = conn.drive_transmit(cx).inspect_err(|_| {
+		let mut keep_going = conn.drive_transmit(waiter, cx).inspect_err(|_| {
 			// Transmit failed, so close the connection and clean state before returning the error.
 			if !conn.inner.is_closed() {
 				conn.implicit_close();
@@ -186,19 +194,16 @@ impl Future for ConnectionDriver {
 		#[cfg(feature = "net")]
 		{
 			let stats = conn.inner.stats();
-			self.conn.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
-			self.conn.shared.wire.set_received_bytes(stats.udp_rx.bytes);
+			this.conn.shared.wire.set_sent_bytes(stats.udp_tx.bytes);
+			this.conn.shared.wire.set_received_bytes(stats.udp_rx.bytes);
 		}
 
 		if !conn.inner.is_drained() {
+			// Otherwise `poll_transmit` parked the waiter for the application's next call, and the
+			// ingress channel, the timer, and the socket hold the context.
 			if keep_going {
 				// If the connection hasn't processed all tasks, schedule it again
 				cx.waker().wake_by_ref();
-			} else {
-				match conn.driver.as_mut() {
-					Some(old_waker) => old_waker.clone_from(cx.waker()),
-					None => conn.driver = Some(cx.waker().clone()),
-				};
 			}
 			return Poll::Pending;
 		}
@@ -402,12 +407,10 @@ impl Connection {
 			return Err(send::Error::Connection(x));
 		}
 		match conn.inner.datagrams().send(data, options) {
-			Ok(()) => {}
-			Err(moq_quic::send::Error::TooLarge) => return Err(send::Error::TooLarge),
-			Err(_) => return Err(send::Error::Unsupported),
+			Ok(()) => Ok(()),
+			Err(moq_quic::send::Error::TooLarge) => Err(send::Error::TooLarge),
+			Err(_) => Err(send::Error::Unsupported),
 		}
-		conn.wake();
-		Ok(())
 	}
 
 	/// Compute the maximum size of datagrams that may be passed to [`send_datagram()`].
@@ -538,11 +541,7 @@ impl Connection {
 
 	/// See [`moq_quic::connection::Connection::set_limits`]
 	pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), moq_quic::LimitsError> {
-		let mut conn = self.0.state.lock();
-		conn.inner.set_limits(limits)?;
-		// May need to send MAX_DATA or MAX_STREAMS to make progress
-		conn.wake();
-		Ok(())
+		self.0.state.lock().inner.set_limits(limits)
 	}
 }
 
@@ -572,7 +571,6 @@ fn poll_accept(waiter: &kio::Waiter, conn: &ConnectionRef, dir: Dir) -> Poll<Res
 		Ok(id) => id,
 		Err(err) => return Poll::Ready(Err(state.lost_as(err))),
 	};
-	state.wake(); // To send additional stream ID credit
 	drop(state); // Release the lock so clone can take it
 	Poll::Ready(Ok((conn.clone(), id)))
 }
@@ -640,7 +638,6 @@ pub(crate) struct Shared {
 
 pub(crate) struct State {
 	pub(crate) inner: moq_quic::connection::Connection,
-	driver: Option<Waker>,
 	handle: ConnectionHandle,
 	timer: Option<moq_clock::Sleep>,
 	timer_deadline: Option<Instant>,
@@ -667,7 +664,6 @@ impl State {
 	) -> Self {
 		Self {
 			inner,
-			driver: None,
 			handle,
 			timer: None,
 			timer_deadline: None,
@@ -680,7 +676,9 @@ impl State {
 		}
 	}
 
-	fn drive_transmit(&mut self, cx: &mut Context<'_>) -> io::Result<bool> {
+	/// Send what moq-quic has, parking `waiter` until the application queues more once it has
+	/// nothing, or `cx` on the socket once it is full
+	fn drive_transmit(&mut self, waiter: &kio::Waiter, cx: &mut Context<'_>) -> io::Result<bool> {
 		let now = Instant::now();
 		let mut transmits = 0;
 
@@ -693,15 +691,15 @@ impl State {
 				None => {
 					self.send_buffer.clear();
 					self.send_buffer.reserve(self.inner.current_mtu() as usize);
-					match self.inner.poll_transmit(now, max_datagrams, &mut self.send_buffer) {
-						Some(t) => {
+					match self.inner.poll_transmit(waiter, now, max_datagrams, &mut self.send_buffer) {
+						Poll::Ready(t) => {
 							transmits += match t.segment_size {
 								None => 1,
 								Some(s) => t.size.div_ceil(s), // round up
 							};
 							t
 						}
-						None => break,
+						Poll::Pending => break,
 					}
 				}
 			};
@@ -809,13 +807,6 @@ impl State {
 		true
 	}
 
-	/// Wake up a blocked `Driver` task to process I/O
-	pub(crate) fn wake(&mut self) {
-		if let Some(x) = self.driver.take() {
-			x.wake();
-		}
-	}
-
 	/// Why the connection was lost, if it was: the driver's external reason, or moq-quic's
 	pub(crate) fn error(&self) -> Option<Error> {
 		self.external.clone().or_else(|| self.inner.error().cloned())
@@ -850,7 +841,6 @@ impl State {
 	fn close(&mut self, error_code: VarInt, reason: String) {
 		// moq-quic fails pending operations now, with the close's own code and reason.
 		self.inner.close(Instant::now(), error_code, reason);
-		self.wake();
 	}
 
 	/// Close for a reason other than the application's explicit request

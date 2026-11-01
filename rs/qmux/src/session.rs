@@ -4,7 +4,8 @@
 //! records over the transport. A writer task drains [`mux::Connection::poll_transmit`]
 //! into the transport and runs the timers, and a reader task feeds each received record
 //! back in. The handles call straight into the connection under its lock and park on the
-//! connection's own waiter lists, which it wakes as the tasks feed it.
+//! connection's own waiter lists, which it wakes as the tasks feed it. Whatever a handle
+//! queues wakes the writer through `poll_transmit` itself.
 
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -41,8 +42,8 @@ struct Inner {
 
 struct State {
 	conn: mux::Connection,
-	/// Wakes the writer; handles kick it after mutating the connection so fresh egress
-	/// reaches the transport.
+	/// Wakes the writer on ingress: the reader fed the connection a record, which may queue
+	/// an answer or move a timer. What the handles queue wakes it through `poll_transmit`.
 	driver: kio::WaiterList,
 
 	/// The terminal error, set exactly once. Handles report it in place of the connection's
@@ -63,17 +64,16 @@ struct State {
 }
 
 impl State {
-	/// Terminate with `err` (the first one wins), waking the writer and whoever waits on the
-	/// session's `poll_closed`.
+	/// Terminate with `err` (the first one wins), waking whoever waits on the session's
+	/// `poll_closed`.
 	///
 	/// Every caller loses the connection under the same lock, which wakes everyone parked on
-	/// it.
+	/// it, the writer included.
 	fn fail(&mut self, err: Error) {
 		if self.closed.is_some() {
 			return;
 		}
 		self.closed = Some(err);
-		self.driver.wake();
 		self.closed_waiters.wake();
 	}
 
@@ -120,20 +120,21 @@ impl Inner {
 			return;
 		}
 		// Closing wakes everyone parked on the connection, the reader included: a closing
-		// connection ignores whatever else the peer sends.
+		// connection ignores whatever else the peer sends. The writer hears it too, through
+		// `poll_transmit` to deliver the close, or `poll_closed` to start a stalled one's close
+		// bound.
 		state
 			.conn
 			.close(VarInt::from_u64(code).unwrap_or(VarInt::MAX), reason.to_string());
 		state.check_lost();
-		// The writer delivers the close, and a stalled one starts its close bound.
-		state.driver.wake();
 	}
 
 	/// Gather the next records to write, running the timers while there are none, or `None`
 	/// once the connection has nothing left to say.
 	fn poll_batch(&self, waiter: &kio::Waiter, timer: &mut Timer) -> Poll<Option<Vec<Bytes>>> {
 		let mut state = self.lock();
-		// Register first: a handle mutating the connection after this sweep re-polls us.
+		// Ingress may queue an answer or move a timer; what the handles queue wakes us through
+		// `poll_transmit`.
 		waiter.register(&mut state.driver);
 		loop {
 			let now = moq_clock::now();
@@ -144,7 +145,7 @@ impl Inner {
 			let mut batch = Vec::new();
 			let mut size = 0;
 			while size < BATCH_BYTES {
-				let Some(record) = state.conn.poll_transmit(now) else {
+				let Poll::Ready(record) = state.conn.poll_transmit(waiter, now) else {
 					break;
 				};
 				size += record.len();
@@ -167,7 +168,11 @@ impl Inner {
 	/// its [`CLOSE_TIMEOUT`] and should drop the transport.
 	fn poll_stalled(&self, waiter: &kio::Waiter, timer: &mut Timer) -> Poll<()> {
 		let mut state = self.lock();
+		// Ingress may move a timer. A close, local or not, starts the close bound; wait for it
+		// with `poll_closed` rather than `poll_transmit`, which would take the records the
+		// stalled write has no room for.
 		waiter.register(&mut state.driver);
+		let _ = state.conn.poll_closed(waiter);
 		if !timer.stalled {
 			// The peer is evidently there but slow, which defers the idle timeout.
 			timer.stalled = true;
@@ -351,6 +356,7 @@ async fn run_reader<R: Reader>(inner: Arc<Inner>, mut reader: R) {
 			}
 		}
 		state.check_lost();
+		// Ingress: the record may owe the peer an answer or move a timer.
 		state.driver.wake();
 	}
 }
@@ -482,7 +488,6 @@ impl Session {
 		let mut state = self.inner.lock();
 		// The peer's MAX_STREAMS credit is what gates us: this parks while it is spent.
 		let id = ready!(state.conn.streams().poll_open(waiter, dir, to_quic(options))).map_err(|_| state.lost())?;
-		state.driver.wake();
 		Poll::Ready(Ok(id))
 	}
 }
@@ -557,9 +562,6 @@ impl poll::Session for Session {
 		// the peer's transport parameters arrive. Until then its credit is unknown, not spent.
 		ready!(state.conn.poll_connected(waiter)).map_err(|_| state.lost())?;
 		let id = state.conn.streams().open(Dir::Bi, to_quic(options));
-		if id.is_some() {
-			state.driver.wake();
-		}
 		drop(state);
 		Poll::Ready(Ok(id.map(|id| {
 			(
@@ -583,7 +585,6 @@ impl poll::Session for Session {
 			Err(send::Error::TooLarge) => return Err(Error::DatagramTooLarge),
 			Err(_) => return Err(Error::DatagramsUnsupported),
 		}
-		state.driver.wake();
 		Ok(())
 	}
 
@@ -674,7 +675,6 @@ impl poll::SendGroup for SendGroup {
 	fn set_priority(&mut self, priority: i64) {
 		let mut state = self.0.inner.lock();
 		state.conn.send_groups().set_priority(self.id(), priority);
-		state.driver.wake();
 	}
 }
 
@@ -721,7 +721,6 @@ impl SendStream {
 		let mut state = self.inner.lock();
 		// Err means the stream is already gone, which is what we wanted.
 		let _ = state.conn.send_stream(self.id).reset(code);
-		state.driver.wake();
 		self.reset = true;
 	}
 }
@@ -741,10 +740,7 @@ impl poll::SendStream for SendStream {
 		let mut state = self.inner.lock();
 		// Takes only what the connection accepts, which for a `Bytes` source is no copy at all.
 		match ready!(state.conn.send_stream(self.id).poll_write(waiter, buf)) {
-			Ok(n) => {
-				state.driver.wake();
-				Poll::Ready(Ok(n))
-			}
+			Ok(n) => Poll::Ready(Ok(n)),
 			Err(send::Error::Stopped(code)) => Poll::Ready(Err(Error::StreamStop(code.into_inner()))),
 			Err(send::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
 			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
@@ -777,7 +773,6 @@ impl poll::SendStream for SendStream {
 			// Already finished or reset, so the FIN it wanted is out.
 			Err(_) => {}
 		}
-		state.driver.wake();
 		self.fin = true;
 		Ok(())
 	}
@@ -811,7 +806,6 @@ impl Drop for SendStream {
 		// Reset before giving up the ID, which refuses every later call on it.
 		if !self.fin && !self.reset {
 			let _ = state.conn.send_stream(self.id).reset(VarInt::from_u32(0));
-			state.driver.wake();
 		}
 		state.conn.send_stream(self.id).release();
 	}
@@ -915,7 +909,6 @@ impl poll::Chunks for RecvChunks {
 		let mut state = self.inner.lock();
 		// Err means the stream is already gone, which is what we wanted.
 		let _ = state.conn.recv_stream(self.id).stop(VarInt::from_u32(code));
-		state.driver.wake();
 		self.stopped = true;
 	}
 }
@@ -923,8 +916,8 @@ impl poll::Chunks for RecvChunks {
 /// Take up to `max` bytes out of the reassembly buffer, or wait for more, returning `None`
 /// once every byte up to the FIN has been handed over.
 ///
-/// Reading is what returns the peer's flow control credit, so a read that owes it a frame
-/// kicks the writer.
+/// Reading is what returns the peer's flow control credit; a read that owes it a frame wakes
+/// the writer through the connection.
 fn poll_read(
 	state: &mut State,
 	waiter: &kio::Waiter,
@@ -937,9 +930,7 @@ fn poll_read(
 		return Poll::Ready(Ok(None));
 	};
 	let read = chunks.poll_next(waiter, max);
-	if chunks.finalize().should_transmit() {
-		state.driver.wake();
-	}
+	let _ = chunks.finalize();
 	read.map_ok(|chunk| chunk.map(|chunk| chunk.bytes))
 }
 
@@ -948,7 +939,6 @@ impl Drop for RecvChunks {
 		let mut state = self.inner.lock();
 		if !self.finished && !self.stopped && self.reset.is_none() {
 			let _ = state.conn.recv_stream(self.id).stop(VarInt::from_u32(0));
-			state.driver.wake();
 		}
 	}
 }

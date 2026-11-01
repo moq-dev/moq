@@ -280,10 +280,7 @@ impl Half {
 		}
 		Poll::Ready(
 			match ready!(conn.inner.send_stream(self.stream.id).poll_write(waiter, buf)) {
-				Ok(written) => {
-					conn.wake();
-					Ok(written)
-				}
+				Ok(written) => Ok(written),
 				Err(moq_quic::send::Error::Stopped(code)) => Err(Error::Stopped(code)),
 				Err(moq_quic::send::Error::ConnectionLost) => Err(Error::Connection(conn.lost())),
 				Err(err) => unreachable!("an open stream failed to write: {err:?}"),
@@ -294,9 +291,7 @@ impl Half {
 	fn finish(&mut self) {
 		let mut conn = self.stream.conn.state.lock();
 		// A STOP_SENDING may have beaten us here, which `stopped` reports.
-		if conn.inner.send_stream(self.stream.id).finish().is_ok() {
-			conn.wake();
-		}
+		let _ = conn.inner.send_stream(self.stream.id).finish();
 		self.state = HalfState::Finished;
 	}
 
@@ -318,7 +313,6 @@ impl Half {
 		// Fails harmlessly once the connection is gone.
 		if reset.is_ok() {
 			let _ = self.stream.reset.set(stopped);
-			conn.wake();
 		}
 	}
 
@@ -393,7 +387,6 @@ impl Drop for Half {
 		};
 		if reset.is_some_and(|reset| reset.is_ok()) {
 			let _ = self.stream.reset.set(stopped);
-			conn.wake();
 		}
 		// `stream` releases the ID once this and every `stopped` future dropped it, after the
 		// lock here is let go.
