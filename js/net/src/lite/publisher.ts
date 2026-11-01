@@ -7,7 +7,16 @@ import { enforceGrant } from "../auth_session.ts";
 import type * as broadcast from "../broadcast.ts";
 import { Withdrawal } from "../connection/withdrawal.ts";
 import * as DatagramStream from "../datagram_stream.ts";
-import { error, NotFound, ProtocolViolation, reason, StreamCode, StreamError, unauthorized } from "../error.ts";
+import {
+	error,
+	NotFound,
+	ProtocolViolation,
+	reason,
+	StreamCode,
+	StreamError,
+	toStreamCode,
+	unauthorized,
+} from "../error.ts";
 import { stored } from "../flate/group.ts";
 import type * as group from "../group.ts";
 import { Cost, type Hop, type Route, routesEqual } from "../hop.ts";
@@ -31,6 +40,7 @@ import { Probe } from "./probe.ts";
 import {
 	encodeSubscribeResponse,
 	exclusiveGroupEnd,
+	type RangeGroups,
 	type Subscribe,
 	SubscribeDrop,
 	SubscribeEnd,
@@ -46,6 +56,7 @@ import {
 	hasAnnounceRestart,
 	hasCompression,
 	hasDatagrams,
+	hasEndError,
 	hasLargest,
 	hasProbeRtt,
 	hasRouteCost,
@@ -345,6 +356,17 @@ class SubscriptionControls {
 		}
 		this.#finish(null);
 	}
+}
+
+// Where each range starts once delivery starts at `from`, `undefined` for one with no group
+// there. Before lite-07 there is one range, which starts there.
+function rangeStarts(ranges: (RangeGroups | undefined)[] | undefined, from: number): (number | undefined)[] {
+	if (!ranges) return [from];
+	return ranges.map((range) => {
+		if (!range) return undefined;
+		const start = Math.max(range.start, from);
+		return range.end === undefined || range.end > start ? start : undefined;
+	});
 }
 
 // The later of two locations, either of which may be unknown.
@@ -832,6 +854,11 @@ export class Publisher {
 			return;
 		}
 
+		if (msg.ranges?.some((range) => range?.unresolved)) {
+			stream.abort(new Error("relative and time subscription anchors are not supported"));
+			return;
+		}
+
 		// The requester leaving while the broadcast and track resolve ends the request, as
 		// Rust polls the requester throughout, so a cancelled subscription gives back its
 		// charge instead of holding it until the track is answered, which may be never. A
@@ -943,6 +970,8 @@ export class Publisher {
 				writer: stream.writer,
 				version: this.version,
 				apply: (update) => {
+					if (update.ranges?.some((range) => range?.unresolved))
+						throw new Error("relative and time subscription anchors are not supported");
 					Object.assign(datagramBounds, {
 						startGroup: update.startGroup,
 						startFrame: update.startFrame,
@@ -975,6 +1004,7 @@ export class Publisher {
 				served,
 				floor,
 				bounds,
+				ranges: msg.ranges,
 			});
 
 			console.debug(`publish done: broadcast=${msg.broadcast} track=${track.name}`);
@@ -1139,11 +1169,14 @@ export class Publisher {
 			// The read cursor's floor; see {@link cursorFloor}.
 			floor: number;
 			bounds: FrameBounds;
+			// Each lite-07 range, which SUBSCRIBE_START answers for.
+			ranges: (RangeGroups | undefined)[] | undefined;
 		},
 	): Promise<boolean> {
 		const { sub, broadcast, stamp, publisher, compress, served, bounds } = serving;
 		// The read cursor's floor, assigned with the cap in {@link bounds} on every move.
 		let floor = serving.floor;
+		let ranges = serving.ranges;
 		const moveCursor = () =>
 			track.withRange({
 				start: { included: floor },
@@ -1193,14 +1226,25 @@ export class Publisher {
 			return end ? finalSequence(end) : (hooks.latestSequence(track) ?? -1) + 1;
 		};
 
-		// Declare the boundary immediately; groups below it can still be in flight.
+		// Declare the boundary immediately; groups below it can still be in flight. Lite-07 carries
+		// an errored end's error with it, which older versions reset with once the end is reached.
 		const sendEnd = async (): Promise<boolean> => {
 			endSent = true;
 			if (!emitRange) return true;
+			const endError = hooks.subscriberEndError(track);
+			const code = endError && hasEndError(this.version) ? toStreamCode(endError) : undefined;
 			return controls.response(
-				encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary()) }, this.version),
+				encodeSubscribeResponse(stream, { end: new SubscribeEnd(boundary(), code) }, this.version),
 			);
 		};
+
+		// Before lite-07 an errored end is only the reset at that end: a clean SUBSCRIBE_END sent
+		// early could let the subscriber settle before the reset arrives. A subscription capped
+		// short of the end is owed no error, so its boundary goes out.
+		const declareEarly = () =>
+			hasEndError(this.version) ||
+			!hooks.subscriberEndError(track) ||
+			(bounds.endGroup !== undefined && bounds.endGroup + 1 < boundary());
 
 		// One ranking for the whole subscription, shared by every group it serves.
 		const priority = new Priority(track, publisher);
@@ -1279,6 +1323,7 @@ export class Publisher {
 							bounds.startFrame = update.startFrame;
 							bounds.endGroup = update.endGroup;
 							bounds.endFrame = update.endFrame;
+							ranges = update.ranges;
 							moveCursor();
 							// A microtask is too short: decoding one framed update crosses several
 							// awaits, each of which can requeue behind the serving continuation. A
@@ -1327,7 +1372,7 @@ export class Publisher {
 								startSent = true;
 								startSequence = bounds.startGroup;
 								raiseFloor(bounds.startGroup);
-								const start = new SubscribeStart(bounds.startGroup, largest);
+								const start = new SubscribeStart(rangeStarts(ranges, bounds.startGroup), largest);
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)
@@ -1336,7 +1381,7 @@ export class Publisher {
 							}
 						}
 						// A declared end goes out while lower groups are still being produced.
-						if (!endSent && hooks.subscriberEnd(track) !== undefined) {
+						if (!endSent && hooks.subscriberEnd(track) !== undefined && declareEarly()) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
@@ -1345,13 +1390,20 @@ export class Publisher {
 					case "boundary":
 						// The producer finished but is still holding groups above the cap.
 						// Declare the boundary, then wait for an update to release them.
-						if (!endSent) {
+						if (!endSent && declareEarly()) {
 							if (!(await sendEnd())) return false;
 							continue;
 						}
 						await waitForSubscription(controls, track, drops);
 						continue;
 					case "done": {
+						const endError = hooks.subscriberEndError(track);
+						if (
+							endError &&
+							!hasEndError(this.version) &&
+							(bounds.endGroup === undefined || bounds.endGroup + 1 >= boundary())
+						)
+							throw endError;
 						// Name every sequence from the start to the end this subscription never
 						// got. A cap below the end bounds what the subscriber is owed, as on its side.
 						if (startSequence !== undefined) {
@@ -1410,7 +1462,7 @@ export class Publisher {
 						!(await controls.response(
 							encodeSubscribeResponse(
 								stream,
-								{ start: new SubscribeStart(startSequence, largest) },
+								{ start: new SubscribeStart(rangeStarts(ranges, startSequence), largest) },
 								this.version,
 							),
 						))

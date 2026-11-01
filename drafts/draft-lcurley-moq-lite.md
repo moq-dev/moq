@@ -131,6 +131,7 @@ Any broadcasts and subscriptions are transparently proxied by the CDN behind the
 A Broadcast is a collection of Tracks named by a path.
 This corresponds to a MoqTransport's "track namespace".
 A path is a sequence of non-empty segments joined by `/` (0x2F), so it never starts or ends with `/` or contains two in a row; the empty path has no segments and prefixes every path.
+A `\` (0x5C) escapes the `\` or `/` that follows it, as a MoqTransport namespace field holding either is spelled; a path with any other `\` is a PROTOCOL_VIOLATION.
 A publisher instance is identified by an Epoch, carried on its routes (see [ANNOUNCE_START](#announce-start)): a path and an Epoch name one Broadcast, and a publisher MUST NOT serve different content under the same pair.
 A restarted publisher mints a new Epoch rather than reusing the path's old one, while replicas of the same content MAY share one.
 A route without an Epoch names no instance: nothing says another route serves the same bytes.
@@ -395,6 +396,7 @@ The publisher replies with a single ANNOUNCE_OK message followed by announcement
 - ANNOUNCE_END: a previously started route is no longer advertised.
 - ANNOUNCE_UPDATE: a previously started advertisement was atomically updated (new hops or cost).
 - ANNOUNCE_RESTART: another publisher instance now serves a previously started advertisement.
+- ANNOUNCE_TAKEOVER: a matching route is available and continues what a previously started advertisement served beneath it.
 - SYNCED: the initial set is complete.
 
 ANNOUNCE_OK carries metadata that applies to every announcement on the stream: the publisher's own `Hop ID` (the implicit trailing entry of every announcement's path) (see [ANNOUNCE_OK](#announce-ok)).
@@ -404,14 +406,14 @@ The initial set is relative to this hop: a relay answers with what it holds with
 The publisher MAY coalesce changes to a route it has not yet sent, and sends no more events before SYNCED than the initial set holds routes.
 A retraction of a route already sent MAY precede SYNCED.
 
-Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream: a counter starting at 0 that increments by 1 per advertisement.
+Each ANNOUNCE_START or ANNOUNCE_TAKEOVER implicitly assigns the next Announce ID on the stream: a counter starting at 0 that increments by 1 per advertisement.
 The id never appears on the wire; both endpoints derive it from the message order on the (reliable, ordered) stream.
-ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART reference the Announce ID instead of repeating the route's prefix.
+ANNOUNCE_END, ANNOUNCE_UPDATE, ANNOUNCE_RESTART, and ANNOUNCE_TAKEOVER reference an Announce ID instead of repeating the route's prefix.
 
 Each route has at most one current advertisement per stream.
-A second ANNOUNCE_START for an already-advertised route is a protocol violation; an ANNOUNCE_UPDATE or ANNOUNCE_RESTART atomically replaces the current advertisement while keeping its id live.
+A second ANNOUNCE_START for an already-advertised route is a protocol violation; an ANNOUNCE_UPDATE or ANNOUNCE_RESTART atomically replaces the current advertisement while keeping its id live, and an ANNOUNCE_TAKEOVER at its predecessor's own prefix replaces it under a new id.
 
-The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives an ANNOUNCE_END, ANNOUNCE_UPDATE, or ANNOUNCE_RESTART referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START for a route that is already advertised, or any announcement before ANNOUNCE_OK.
+The subscriber MUST close the session with a PROTOCOL_VIOLATION if it receives an ANNOUNCE_END, ANNOUNCE_UPDATE, ANNOUNCE_RESTART, or ANNOUNCE_TAKEOVER referencing an Announce ID that was never assigned or already retired, an ANNOUNCE_START or ANNOUNCE_TAKEOVER for a route that is already advertised other than as its predecessor, or any announcement before ANNOUNCE_OK.
 When the stream is closed, the subscriber MUST assume that all routes are now unavailable.
 
 A broadcast path has at most 32 segments and at most 4,096 bytes; a receiver MUST close the session with a PROTOCOL_VIOLATION on a longer one, including one resolved by [Compression](#announce-compression).
@@ -420,9 +422,9 @@ A publisher answering a request stream presents each of its routes clamped to th
 There MAY be multiple Announce Streams, potentially containing overlapping prefixes, that get their own ANNOUNCE_OK + announcements.
 
 #### Compression {#announce-compression}
-An ANNOUNCE_START, ANNOUNCE_UPDATE, or ANNOUNCE_RESTART MAY copy the head of a path or the tail of a Hop ID list from a live advertisement on the same stream, its base.
-A `Base` field names it by distance: the base's Announce ID is the next unassigned Announce ID minus `Base`, so 1 names the latest ANNOUNCE_START, and 0 names no base.
-The receiver resolves every base against the advertisements live when the message arrives, and the result is identical to the literal encoding: a base ending later changes nothing.
+An ANNOUNCE_START, ANNOUNCE_UPDATE, ANNOUNCE_RESTART, or ANNOUNCE_TAKEOVER MAY copy the head of a path or the tail of a Hop ID list from a live advertisement on the same stream, its base.
+A `Base` field names it by distance: the base's Announce ID is the next unassigned Announce ID minus `Base`, so 1 names the latest ANNOUNCE_START or ANNOUNCE_TAKEOVER, and 0 names no base.
+The receiver resolves every base against the advertisements live when the message arrives, and the result is identical to the literal encoding: a base ending later changes nothing, including a predecessor that the ANNOUNCE_TAKEOVER naming it as a base retires.
 A publisher MAY always send a `Base` of 0.
 
 The subscriber MUST close the session with a PROTOCOL_VIOLATION if a non-zero `Base` names an Announce ID that was never assigned or already retired, a `Keep` is non-zero with a `Base` of 0 or exceeds what the base has, or the resolved path or Hop ID list breaks its own rules.
@@ -452,6 +454,7 @@ Of the paths that remain a publisher SHOULD advertise the best, and nothing when
 Selection is per subscriber, so a subscriber that the serving path flows through still receives the best standby path, which is what lets it fail over if its own copy dies.
 The per-subscriber winner changing travels as an ANNOUNCE_UPDATE when the new winner serves the same Broadcast, and as an ANNOUNCE_RESTART when it does not: another Epoch, or, between routes without one, another route; the last qualifying path appearing or disappearing travels as an ANNOUNCE_START or ANNOUNCE_END.
 A relay whose resolution of a path beneath a prefix moves to another route without an Epoch while the prefix's own winner stays (see the Spread Hash below) sends an ANNOUNCE_RESTART of that prefix.
+A route continuing what the subscriber was sent for its predecessor travels as an ANNOUNCE_TAKEOVER (see [ANNOUNCE_TAKEOVER](#announce-takeover)); where continuity does not hold, it travels as an ANNOUNCE_START, or an ANNOUNCE_RESTART at the predecessor's own prefix.
 
 When serving a subscription, a publisher MUST select the source by that same exclusion; if only excluded sources remain, the subscription is unroutable.
 Applying one rule to both advertisement and dispatch keeps advertised paths truthful, which is what prevents subscription cycles of any length.
@@ -467,6 +470,7 @@ Routes with the same Epoch serve the same Broadcast, so a relay MAY move a live 
 A relay MUST NOT move a subscription to a route with a different Epoch, or between routes without one: it stays on its route and ends with it.
 When another Broadcast wins the path, subscriptions already open stay on theirs until the subscriber drops them or the route goes; new requests resolve the winner, and the ANNOUNCE_RESTART tells subscribers to request again.
 A receiver of an ANNOUNCE_RESTART (or of the ANNOUNCE_END and ANNOUNCE_START standing in for one) MUST NOT serve a new request under its prefix from anything resolved through the replaced advertisement.
+An ANNOUNCE_TAKEOVER is the one exception to staying on a route: what was resolved through its predecessor beneath its prefix is the Broadcast the new route serves, so those subscriptions continue on the new route and new requests MAY join them, whatever either route's Epoch.
 Epochs compare as their 16 bytes, which for a UUIDv7 orders them by creation time.
 Ordering Epochs minted on different hosts therefore trusts their clocks: a restart on a host whose clock runs behind loses to the older instance until that one is retracted.
 
@@ -491,16 +495,16 @@ An advertiser signals capacity through its route alone, withdrawing or re-pricin
 A subscriber opens Subscribe Streams to request a Track.
 
 The subscriber MUST start a Subscribe Stream with a SUBSCRIBE message followed by any number of SUBSCRIBE_UPDATE messages.
-The publisher replies with a SUBSCRIBE_OK message once the start group is resolved, followed by a SUBSCRIBE_END message once the subscription ends.
+The publisher replies with a SUBSCRIBE_OK message once each Range's start is resolved, followed by a SUBSCRIBE_END message once the subscription ends.
 For a live track the publisher MAY withhold SUBSCRIBE_OK until the first matching group resolves the start; if the track has already ended with no matching groups, it sends SUBSCRIBE_END with no preceding SUBSCRIBE_OK.
-A requested start past the publisher's largest position is the exception: the publisher MUST send SUBSCRIBE_OK without waiting, with `Group` set to the requested start group, so a subscriber resuming just past what it holds learns where the live feed is from the answer alone (a quiet track may not reach the start for a long time).
+A requested start past the publisher's largest position is the exception: the publisher MUST send SUBSCRIBE_OK without waiting, so a subscriber resuming just past what it holds learns where the live feed is from the answer alone (a quiet track may not reach the start for a long time).
 A rejection is a stream reset: a publisher that cannot serve the subscription (no such track, an ended broadcast, or any other refusal) MUST promptly reset the stream rather than leave it pending, so a subscriber distinguishes "pending" from "refused" by the reset, not by a timeout.
 A route claims capability rather than inventory, so a subscription for a covered path that names nothing is refused this way too.
 
 The track's immutable publisher properties are not carried here; they are fetched once via a [Track Stream](#track-stream).
 The subscriber needs the track's TRACK_INFO (notably its timescale) to interpret FRAME messages, and MAY open the Track and Subscribe streams concurrently, buffering frames until it arrives.
 
-The publisher sends SUBSCRIBE_OK once the absolute start position is resolved, and SUBSCRIBE_END as soon as the exclusive final group is known (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
+The publisher sends SUBSCRIBE_OK once the start is resolved, and SUBSCRIBE_END as soon as the exclusive final group is known (see [SUBSCRIBE_OK](#subscribe-ok) and [SUBSCRIBE_END](#subscribe-end)).
 The publisher closes its side of the stream (FIN) after SUBSCRIBE_END, once every Group Stream has finished or been reset.
 A subscription whose every Range has an `End` other than None is covered once every Group in its Ranges has been sent as a Group Stream or a datagram, or named by SUBSCRIBE_DROP.
 The publisher MAY then close its side (FIN) without SUBSCRIBE_END, once every Group Stream has finished or been reset, rather than wait for a SUBSCRIBE_UPDATE to widen it.
@@ -983,7 +987,7 @@ Indicate interest for any broadcasts with a path that starts with this prefix.
 1 to also receive hidden routes (see [Hidden Paths](#hidden)), 0 otherwise.
 Any other value is a PROTOCOL_VIOLATION.
 
-The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching routes, followed by ANNOUNCE_START, ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART messages for any future updates, subject to [Routing](#routing).
+The publisher MUST respond with an ANNOUNCE_OK message followed by ANNOUNCE_START messages for any matching routes, followed by ANNOUNCE_START, ANNOUNCE_END, ANNOUNCE_UPDATE, ANNOUNCE_RESTART, and ANNOUNCE_TAKEOVER messages for any future updates, subject to [Routing](#routing).
 Implementations SHOULD consider reasonable limits on the number of matching broadcasts to prevent resource exhaustion.
 
 
@@ -1000,7 +1004,7 @@ ANNOUNCE_OK Message {
 
 **Hop ID**:
 The publisher's own Hop ID.
-This is treated as the implicit trailing entry of every ANNOUNCE_START, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART Hop ID list on this stream; those messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
+This is treated as the implicit trailing entry of every ANNOUNCE_START, ANNOUNCE_UPDATE, ANNOUNCE_RESTART, and ANNOUNCE_TAKEOVER Hop ID list on this stream; those messages MUST NOT repeat this value as the last entry of their `Hop ID` list.
 The value 0 is reserved to mean "unknown": either no Hop ID was assigned (e.g. when bridging from an older protocol version) or the endpoint deliberately withholds it to obscure the underlying routing.
 A publisher that assigns a Hop ID MUST choose a non-zero value, and SHOULD assign itself one (a fresh random value per session suffices), so downstream receivers can detect loops through it.
 Receivers reconstruct the full path as `Hop IDs ++ [ANNOUNCE_OK.Hop ID]`.
@@ -1022,7 +1026,7 @@ An Announce Stream ending before SYNCED is a PROTOCOL_VIOLATION; a Tracks Stream
 
 ## ANNOUNCE_START {#announce-start}
 A publisher sends an ANNOUNCE_START message to advertise a route: a claim that paths under a prefix can be served.
-Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END, ANNOUNCE_UPDATE, and ANNOUNCE_RESTART (see [Announce](#announce)).
+Each ANNOUNCE_START implicitly assigns the next Announce ID on the stream, later referenced by ANNOUNCE_END, ANNOUNCE_UPDATE, ANNOUNCE_RESTART, and ANNOUNCE_TAKEOVER (see [Announce](#announce)).
 
 Only the suffix is encoded on the wire, as the full route prefix can be constructed by prepending the requested prefix.
 
@@ -1060,7 +1064,7 @@ An empty suffix advertises the requested prefix itself, which is how a route cov
 The publisher instance the route serves: 16 bytes holding a UUIDv7 [RFC9562], or empty when unknown.
 Any other length, or a UUID of another version or variant, is a PROTOCOL_VIOLATION.
 A relay forwards the Epoch unchanged and MUST NOT invent one for a route that arrived without one.
-Only an ANNOUNCE_RESTART changes it; ANNOUNCE_UPDATE never does.
+Only an ANNOUNCE_RESTART or ANNOUNCE_TAKEOVER changes it; ANNOUNCE_UPDATE never does.
 
 **Hop Base** and **Hop Keep**:
 The Hop ID list ends with the last `Hop Keep` entries of the list advertised by the base that `Hop Base` names (see [Compression](#announce-compression)), following the literal `Hop ID` entries.
@@ -1167,6 +1171,43 @@ As defined for [ANNOUNCE_UPDATE](#announce-update).
 **Epoch**, **Hops**, and **Route Cost**:
 As defined for [ANNOUNCE_START](#announce-start), replacing the advertisement's.
 `Hop Base` may name this advertisement itself, which resolves against the list being replaced.
+
+## ANNOUNCE_TAKEOVER {#announce-takeover}
+A publisher sends an ANNOUNCE_TAKEOVER message to advertise a route that continues what a live advertisement, its predecessor, served beneath the new route's prefix.
+A worker advertising a prefix without an Epoch answers a request under it by publishing that path under a fresh Epoch; the ANNOUNCE_TAKEOVER keeps subscriptions already resolved through the prefix rather than resetting them to the more specific route.
+It is an ANNOUNCE_START in every other respect and assigns the next Announce ID.
+
+~~~
+ANNOUNCE_TAKEOVER Message {
+  Type (i) = 0x5
+  Message Length (i)
+  Predecessor (i),
+  Path Base (i),
+  Path Keep (i),
+  Route Prefix Suffix (s),
+  Epoch (b),
+  Hops (..),
+  Route Cost (i),
+}
+~~~
+
+**Type**:
+Set to 0x5 to indicate an ANNOUNCE_TAKEOVER message.
+
+**Predecessor**:
+The Announce ID of a live advertisement whose prefix covers the new route's prefix.
+One at the predecessor's own prefix retires the predecessor's id, which this advertisement replaces; otherwise the predecessor stays live.
+The receiver MUST close the session with a PROTOCOL_VIOLATION if the predecessor was never assigned, is already retired, or does not cover the new prefix.
+
+**Path Base**, **Path Keep**, **Route Prefix Suffix**, **Epoch**, **Hops**, and **Route Cost**:
+As defined for [ANNOUNCE_START](#announce-start), resolved before the predecessor retires.
+
+The receiver treats whatever it resolved through the predecessor beneath the new prefix as served by the new route: subscriptions on it continue, and a new request for those paths MAY join them.
+Only what the predecessor's current advertisement resolved continues; anything resolved before an earlier ANNOUNCE_RESTART of it does not.
+
+A publisher MUST send an ANNOUNCE_TAKEOVER only when the new route serves exactly what the subscriber resolved through the predecessor beneath its prefix: the instance that answered requests through the predecessor now advertises their paths.
+A relay forwards one only when the subscriber was last sent that predecessor, and every route the relay presented there serves the same instance; otherwise it sends an ANNOUNCE_START, or an ANNOUNCE_RESTART at the predecessor's own prefix.
+Before moq-lite-07, a publisher sends an ANNOUNCE_START instead, or an ANNOUNCE_END and then an ANNOUNCE_START at the predecessor's own prefix.
 
 
 ## SUBSCRIBE
@@ -1423,46 +1464,36 @@ TRACKS_FINISH Message {
 The name a TRACKS_ADD on the stream listed.
 
 ## SUBSCRIBE_OK {#subscribe-ok}
-A SUBSCRIBE_OK message confirms a subscription and resolves its absolute start position.
-It is the first message the publisher sends on the Subscribe Stream, once the start position is known.
+A SUBSCRIBE_OK message confirms a subscription and resolves where each Range starts.
+It is the first message the publisher sends on the Subscribe Stream, once those starts are known.
 
-This is the trimmed-down counterpart of MoqTransport's SUBSCRIBE_OK: it retains the name and the role of the publisher's positive response, but carries only the resolved start position and the publisher's largest position (all other per-track properties live in [TRACK_INFO](#track-info)).
+This is the trimmed-down counterpart of MoqTransport's SUBSCRIBE_OK: it retains the name and the role of the publisher's positive response, but carries only the publisher's largest position and where each Range starts (all other per-track properties live in [TRACK_INFO](#track-info)).
 
 ~~~
 SUBSCRIBE_OK Message {
   Type (i) = 0x0
   Message Length (i)
-  Group (i)
   Largest Group (i)
   [Largest Frame (i)]
+  Range Start Count (i)
+  Range Start (i) ...
 }
 ~~~
 
 **Type**:
 Set to 0x0 to indicate a SUBSCRIBE_OK message.
 
-**Group**:
-The absolute sequence number where delivery starts when the subscription resolves.
-Group streams can arrive out of order, so it need not be the first group sent.
-It MUST be greater than or equal to the lowest requested `Start`, as resolved for a Relative or Time Anchor.
-This group is not a new floor.
-A subscriber SHOULD NOT wait for a group between the requested floor and this group.
-The publisher still delivers such a group if it is created or becomes available later, while it is within `Subscriber Max Age`.
-A subscriber whose `Subscriber Max Age` resolves the start to the latest group learns that sequence here.
-
-There is no matching frame field, because the start frame is never in doubt: a partial group is only delivered when it was asked for, so the subscription starts either exactly where it asked or at the beginning of a later group (see [Positions](#positions)).
-The subscriber derives the start frame from `Group` and its own request:
-
-- `Group` equals the requested start group: delivery begins at the requested start frame.
-- `Group` is greater: delivery begins at frame 0.
-
-The second case is easy to get wrong, so to be explicit: a subscriber that requested group 5 frame 15 and receives `Group` = 6 starts at **frame 0** of group 6, not frame 15.
-The frame offset belonged to group 5 and is gone along with the rest of it; it does not carry forward to whichever group the publisher resolved to.
-
 **Largest Group** and **Largest Frame**:
 The largest position the publisher knows of for the track when it answers: the last frame that exists, like moq-transport's Largest Location, including one a relay's source reported that has yet to arrive.
 `Largest Group` is the group sequence plus one, and 0 means the track has nothing yet, in which case `Largest Frame` is absent.
 A subscriber takes it as where the live feed is: a relay holding groups from an earlier subscription serves them from cache only once this says they are current, which a publisher answering promptly lets it do without waiting for a frame.
+
+**Range Start**:
+One per Range the publisher is serving, in order: the Group where the Range's delivery starts, plus one, so a subscriber learns where a Relative or Time Anchor landed.
+0 means the Range has no Group to deliver.
+The Range's Groups from this one are owed as described in [SUBSCRIBE_DROP](#subscribe-drop); an earlier one is not, though it MAY still arrive.
+A Range whose `Range Start` is its requested start Group begins at the requested frame, and otherwise at frame 0 (see [Positions](#positions)).
+The Ranges are those of the SUBSCRIBE unless the publisher applied a SUBSCRIBE_UPDATE before answering; a subscriber that sent none MUST treat a count other than its number of Ranges as a PROTOCOL_VIOLATION.
 
 ## SUBSCRIBE_END {#subscribe-end}
 A SUBSCRIBE_END message is sent by the publisher to signal that no group at or after a given sequence will be produced.
@@ -1472,6 +1503,7 @@ SUBSCRIBE_END Message {
   Type (i) = 0x1
   Message Length (i)
   Group (i)
+  Error Code (i)
 }
 ~~~
 
@@ -1482,6 +1514,10 @@ Set to 0x1 to indicate a SUBSCRIBE_END message.
 The exclusive end of the range: the absolute sequence number of the first group that will never be delivered.
 A value of 0 means the track ended before producing any groups.
 The subscriber MUST NOT wait for any group at or after this sequence.
+
+**Error Code**:
+0 if the track ended cleanly, otherwise the stream error code it ended with plus 1.
+Groups below the end stay deliverable either way; a subscriber reaching the end surfaces the error instead of a clean end, and a relay forwards it with the end.
 
 The publisher SHOULD send SUBSCRIBE_END as soon as the exclusive final group is known, even while lower groups are still in flight.
 
@@ -1766,6 +1802,8 @@ The `Message Length` describes the payload size on the wire.
 
 - A path never has an empty segment, so a leading, trailing, or doubled `/` is a PROTOCOL_VIOLATION rather than a second spelling of the same path.
 
+- A `\` in a path escapes only `\` or `/`; any other `\` is a PROTOCOL_VIOLATION rather than a second spelling of the same namespace field.
+
 - Added the SETUP `Implementation` parameter (0x6): the sender's software as `name/version` product tokens.
 
 - Hop IDs span 64 bits.
@@ -1792,7 +1830,7 @@ The `Message Length` describes the payload size on the wire.
 - Added `Group Order` to SUBSCRIBE and SUBSCRIBE_UPDATE: descending (0x0, the previous fixed order) or ascending (0x1).
 - Listed the shared EXPIRED_AUTH_TOKEN (0x18) session code. A request that expires on its own resets with the UNAUTHORIZED stream code.
 
-- SUBSCRIBE_OK `Group` names where delivery starts when the subscription resolves, which need not be the first group sent. It is not a new floor. A subscriber does not wait for a group between the requested floor and it, but a publisher still delivers one that arrives later within Subscriber Max Age.
+- Replaced SUBSCRIBE_OK `Group` with a `Range Start` per Range: the Group where that Range's delivery starts, including at a Relative or Time Anchor, from which its Groups are owed.
 - Replaced `Group Start`, `Group End`, `Frame Start`, and `Frame End` in SUBSCRIBE and SUBSCRIBE_UPDATE with a non-empty list of Ranges. Each end is an Anchor: none, an absolute Position (exclusive as an end), a count of Groups back from the latest, or a presentation time.
 - A subscription's range bounds datagrams like groups, and FETCH never returns a datagram.
 - A SUBSCRIBE_UPDATE that lowers a `Start` covers the groups below the old start that the publisher still holds, not only those that arrive later. A group already sent is not sent again.
@@ -1810,6 +1848,7 @@ The `Message Length` describes the payload size on the wire.
 - Added `Largest Group` and `Largest Frame` to SUBSCRIBE_OK: the publisher's largest position when it answers, which a subscriber takes as where the live feed is. A publisher MUST answer at once when the requested start is past it.
 - Added `Epoch` to ANNOUNCE_START, SUBSCRIBE, TRACK, and FETCH: a UUIDv7 naming the publisher instance, or empty. A path and an Epoch name one Broadcast. A relay MAY move a subscription between routes with the same Epoch, continuing from the first frame the subscriber lacks instead of at a group boundary, and never between routes with different Epochs or none. The newest Epoch wins a path for new requests, while subscriptions to the older one stay until their route goes. Replaces the first-hop identity.
 - Added ANNOUNCE_RESTART (0x3): another publisher instance replaces a live advertisement, under a new Epoch or, without one, through another route, including a path beneath a prefix moving to another route.
+- Added ANNOUNCE_TAKEOVER (0x5): a route that continues what a live advertisement served beneath it, such as a job answering a request through a worker's prefix at its exact path, so subscriptions resolved through the prefix are not reset.
 - An untimed Track declares a `Timescale` of 0 in TRACK_INFO, and its FRAME messages and datagrams omit the timestamp.
 - Expiration also measures a group's arrival age, the time since its successor arrived at this hop, so a group of an untimed Track expires by arrival age alone.
 - A publisher resets the Group Stream of an expired, unfinished group with OLD rather than finishing it, even after sending every frame it holds.
@@ -1819,6 +1858,7 @@ The `Message Length` describes the payload size on the wire.
 - Added the client-only Token Setup Parameter (0x7), carrying the connection credential in SETUP instead of only the request URI.
 - Switched every variable-length integer, including SETUP parameter values, from QUIC's two-bit length prefix to moq-transport's leading-ones encoding, widening the range to 64 bits.
 - Hid routes with a `.`-prefixed segment below the requested prefix from announce discovery, and added the ANNOUNCE_REQUEST `Hidden` field to opt in.
+- Added `Error Code` to SUBSCRIBE_END: a track can end with an error while keeping the groups below its end.
 - Restored SUBSCRIBE_DROP (type 0x2), replacing Stream Count on SUBSCRIBE_END. Every sequence is accounted for by a Group Stream, a datagram, or a drop; a publisher SHOULD send a drop as soon as it gives a sequence up.
 - SUBSCRIBE_DROP's Error Code is a stream error code, which ends the dropped groups' readers, including one still arriving.
 - SUBSCRIBE_END declares the final boundary while lower groups can still be in flight; the Subscribe Stream FIN follows once every Group Stream has finished or been reset.

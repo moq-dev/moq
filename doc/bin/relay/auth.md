@@ -36,7 +36,7 @@ The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 
 `server_name` is the SNI that selected the relay's certificate. It is absent
-over plaintext, on the `tls://` TCP listener, and for an IP-literal dial, and
+over plaintext and for an IP-literal dial, and
 never filled from a `Host` header or a WebTransport authority. The client still picks it among the names
 the relay serves, so a hostname-scoped server binds the tenant to the
 credential, not to `server_name` alone.
@@ -82,7 +82,11 @@ bytes sent and received. A shutdown waits for these reports before exiting.
 **The link.** `https://` presents the relay's `connect.tls` client certificate
 when one is configured, so a remote server can tell which relay is asking;
 `unix://` speaks HTTP over a socket; `http://` is accepted for a loopback host
-only. There is no shared secret. Redirects are not followed, since each request
+only. HTTPS verifies the URL's hostname with system roots. For a private CA,
+set `auth.root` to PEM paths (or repeat `--auth-root`); these replace system
+trust for auth only and reload for new connections when rotated. Mesh roots,
+fingerprints, insecure mode, and hostname overrides never apply to auth.
+There is no shared secret. Redirects are not followed, since each request
 carries a credential: point `url` at the final address.
 
 ```toml
@@ -253,6 +257,24 @@ the same way, as a token with an empty root.
 
 Libraries: [`moq-auth`](/lib/rs/moq-auth) (Rust) and [`@moq/auth`](/lib/js/auth) (TypeScript) sign and verify the same tokens.
 
+### Peer grants
+
+A peer grant is the relay's short-lived statement of one session's publish and
+subscribe patterns, bound to a public key the client holds (`cnf`). Another
+client verifies it with the relay's public keys and serves the presenter only
+those paths on a direct connection. It is not a token: presented as `?jwt=`
+it is refused, and a token is never a peer grant.
+
+Peer grants need an asymmetric key, ES256 or EdDSA. A relay configured with
+only HMAC keys (HS256 and friends) issues none, since giving a client an HMAC
+key would let it forge grants, and its sessions serve nothing on a direct
+connection. The set of public keys that verify peer grants is not a secret: it
+holds only ES256 and EdDSA public keys, never HMAC material.
+
+[`moq-auth`](/lib/rs/moq-auth) signs and verifies peer grants
+(`KeySet::sign_peer`, `KeySet::verify_peer`, `KeySet::to_peer_set`). The relay
+does not issue them on the AUTH stream yet.
+
 ## Anonymous access
 
 ```toml
@@ -282,8 +304,8 @@ the relay reports it in the request and enforces the grant it gets back.
 `moq auth serve` grants a certificate only what `--mtls-publish` and
 `--mtls-subscribe` name, nothing by default. Public rules ignore certificates,
 so `--auth-public` with a client CA refuses to start. Only the QUIC listener
-verifies client certificates, so a relay without `listen.bind` refuses
-`listen.tls.root` too.
+and a `tls://` TCP listener (`listen.tcp.tls`) verify client certificates, so a
+relay with neither refuses `listen.tls.root` too.
 
 Cluster peers are admitted the same way, so a mesh runs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` (or a
@@ -416,5 +438,6 @@ identity. The Unix socket is created mode `0666`, so gate it with a restrictive
 parent directory or an allowlist.
 
 `listen.tcp.tls = true` serves the TCP listener over TLS instead, for `tls://`
-dials such as [cluster links](/bin/relay/cluster#tls-links). It asks for no
-client certificate, so a peer on it presents a token, not mTLS.
+dials such as [cluster links](/bin/relay/cluster#tls-links). It asks for a
+client certificate as the QUIC listener does, under the same `listen.tls.root`,
+so a peer on it presents a certificate or a token.

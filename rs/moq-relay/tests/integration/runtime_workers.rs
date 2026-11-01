@@ -156,7 +156,8 @@ async fn next_update(announced: &mut moq_net::announce::Consumer) -> Option<(moq
 	match announced.next().await? {
 		moq_net::announce::Event::Start(route)
 		| moq_net::announce::Event::Update(route)
-		| moq_net::announce::Event::Restart(route) => Some((route, true)),
+		| moq_net::announce::Event::Restart(route)
+		| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 		moq_net::announce::Event::End(route) => Some((route, false)),
 	}
 }

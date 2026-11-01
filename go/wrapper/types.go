@@ -38,12 +38,11 @@ type (
 	// Route is an observed route: the publisher Epoch it serves (nil when unknown), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
 	Route = ffi.MoqRoute
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
-	// wildcard matched (nil Captures for a route that only overlaps the scope), and the
-	// Route serving it. It carries no broadcast; resolve a path with
-	// [OriginConsumer.RequestBroadcast].
+	// wildcard matched (Captures), and the Route serving it. It carries no broadcast;
+	// resolve a path with [OriginConsumer.Request].
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
-	// AnnounceEventUpdate, AnnounceEventEnd, or AnnounceEventRestart.
+	// AnnounceEventUpdate, AnnounceEventEnd, AnnounceEventRestart, or AnnounceEventTakeover.
 	AnnounceEvent = ffi.MoqAnnounceEvent
 	// AnnounceEventStart reports a route now covering a prefix that had none.
 	AnnounceEventStart = ffi.MoqAnnounceEventStart
@@ -54,6 +53,9 @@ type (
 	// AnnounceEventRestart reports another publisher instance now serving a prefix:
 	// drop what was resolved under it and request afresh.
 	AnnounceEventRestart = ffi.MoqAnnounceEventRestart
+	// AnnounceEventTakeover reports a route now covering a prefix that continues what the
+	// route at Predecessor served beneath it: keep what was resolved through that one.
+	AnnounceEventTakeover = ffi.MoqAnnounceEventTakeover
 	// Range is a span of a track to deliver: from Start up to End, or onward when End is nil.
 	// A relative start is the first frame of its group, a relative end includes its whole
 	// group, and an absolute end is exclusive.
@@ -68,6 +70,8 @@ type (
 	AnchorTime = ffi.MoqAnchorTime
 	// Order is which of a subscription's pending groups the publisher sends first.
 	Order = ffi.MoqOrder
+	// Position is a location within a track: a group sequence and a frame index in it.
+	Position = ffi.MoqPosition
 	// VideoDecoderOutput configures what a video.Consumer delivers: an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only; refused elsewhere).
 	VideoDecoderOutput = ffi.MoqVideoDecoderOutput
 	// VideoSurface is a decoded frame's platform surface, from VideoDecodedFrame.Surface: VideoSurfacePixelBuffer on macOS and iOS.
@@ -258,6 +262,20 @@ const (
 	ProtocolKindUnknown = ffi.MoqProtocolKindUnknown
 	// ProtocolKindTooManyRequests identifies an exceeded session request cap.
 	ProtocolKindTooManyRequests = ffi.MoqProtocolKindTooManyRequests
+	// ProtocolKindAuthTokenCacheOverflow identifies an exceeded token cache limit.
+	ProtocolKindAuthTokenCacheOverflow = ffi.MoqProtocolKindAuthTokenCacheOverflow
+	// ProtocolKindMalformedAuthToken identifies an unparseable authorization token.
+	ProtocolKindMalformedAuthToken = ffi.MoqProtocolKindMalformedAuthToken
+	// ProtocolKindUnknownAuthTokenAlias identifies an unregistered token alias.
+	ProtocolKindUnknownAuthTokenAlias = ffi.MoqProtocolKindUnknownAuthTokenAlias
+	// ProtocolKindInvalidRequestId identifies an invalid request ID.
+	ProtocolKindInvalidRequestId = ffi.MoqProtocolKindInvalidRequestId
+	// ProtocolKindInvalidPath identifies an invalid session path.
+	ProtocolKindInvalidPath = ffi.MoqProtocolKindInvalidPath
+	// ProtocolKindInvalidAuthority identifies an invalid session authority.
+	ProtocolKindInvalidAuthority = ffi.MoqProtocolKindInvalidAuthority
+	// ProtocolKindTooManyRequestUpdates identifies an exceeded request update limit.
+	ProtocolKindTooManyRequestUpdates = ffi.MoqProtocolKindTooManyRequestUpdates
 )
 
 // AudioSampleFormat values: the raw PCM sample layout fed to or returned from the

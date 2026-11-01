@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:kixelated/quest/21d2159d504295c629d545a126f0cefd6da80149";
+      url = "github:moq-dev/quest/1ef2ca70053ed8bc4785ddaaafb2a6c445e87614";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -311,6 +311,7 @@
           shellcheck
           shfmt
           actionlint
+          zizmor
           taplo
           nixfmt
         ];
@@ -374,6 +375,8 @@
         goDeps = [
           pkgs.go
           uniffi-bindgen-go
+          # `just go audit`, nightly.
+          pkgs.govulncheck
         ];
 
         # uniffi-bindgen-dart renders rs/moq-ffi into dart/moq_ffi. The fork
@@ -603,6 +606,12 @@
           moxygen = pkgs.callPackage ./nix/moxygen.nix { };
 
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
+
+          # The nightly `just rs send-depth` proves native Send futures on.
+          # Pinned so a toolchain release alone never fails the merge gate;
+          # bump it on purpose, like the stable toolchain above. Kept out of
+          # the dev shell, which every CI job downloads.
+          rust-nightly = pkgs.rust-bin.nightly."2026-10-18".minimal;
 
           # `nix develop .#obs`: the default shell plus obs-studio, which linking
           # the plugin on Linux needs (`just obs build`, `just obs ci`). Kept out

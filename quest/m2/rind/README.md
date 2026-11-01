@@ -2,7 +2,7 @@
 
 ## Goal
 
-Every MoQ crate takes its crypto from [rind](https://github.com/kixelated/rind),
+Every MoQ crate takes its crypto from [rind](https://github.com/moq-dev/rind),
 a pure-Rust fork of graviola, so no build compiles C crypto: on every release
 target, including armv7 Android, `cargo tree -e normal,build -i` finds no
 aws-lc-sys, ring, or `cc` in a crypto crate's graph. rind is MoQ's only crypto,
@@ -19,9 +19,9 @@ supersedes the m3 pure-crypto epic, which only moved moq-relay to graviola once
 upstream graviola and ACME releases made it cheap. rind owns those gaps
 instead, so every crate drops C, not just the relay.
 
-- rind lives at kixelated/rind, a GitHub fork of ctz/graviola with moq's repo
+- rind lives at moq-dev/rind, a GitHub fork of ctz/graviola with moq's repo
   setup. Its own quests live in its `quest/` tree; its
-  [MoQ coverage epic](https://github.com/kixelated/rind/blob/main/quest/m1/moq/README.md)
+  [MoQ coverage epic](https://github.com/moq-dev/rind/blob/main/quest/m1/moq/README.md)
   carries rind's plan.
 - MoQ uses rind's own API plus its adapter crates (`rind-rustls`,
   `rind-jsonwebtoken`, ...), never a ring facade through `[patch.crates-io]`,
@@ -37,8 +37,12 @@ instead, so every crate drops C, not just the relay.
   [embedded video](/quest/m3/video-embedded.md) on those boards.
 - moq-tokio's and moq-quic's `aws-lc-rs` and `ring` features are removed, not
   kept as alternatives, so there is one provider and no exclusion gate.
-- The migration waits for rind's armv7 support, so MoQ switches once, with no
-  interim aws-lc gate or dropped target.
+- The migration waits for rind's armv7 support, so no target is dropped.
+  Decided 2026-10-31 (maintainer): each area waits only on the rind pieces it
+  uses, so most areas switch once rind 0.1.0 is on crates.io (published
+  2026-10-31), and only relay
+  ACME waits on `rind-instant-acme`. aws-lc-rs stays in the workspace until
+  the last area lands, which is when this epic removes it.
 - Split per area, each landing once rind covers it. Docs a change makes stale
   (CPU requirements, removed features) are edited inline in that area's PR; no
   separate docs page.
@@ -53,7 +57,7 @@ The epic's own work, once every child has merged:
 
 ## Required
 
-- [rind covers MoQ](/quest/m2/rind/covered.md) - waiting on a rind release with every primitive, adapter, and armv7 MoQ needs
+- [rind-instant-acme is on crates.io](/quest/m2/rind/instant-acme.md) - waiting on the adapter relay ACME needs
 - [Drop iroh](/quest/m2/rind/drop-iroh.md) - moq-tokio, moq-relay, and moq-cli lose the `iroh` feature and web-transport-iroh
 - [Transport on rind](/quest/m2/rind/transport.md) - moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take rind, and the `aws-lc-rs`/`ring` features go
 - [moq-auth on rind](/quest/m2/rind/auth.md) - JWT signing, key generation, and JWK loading run on rind
