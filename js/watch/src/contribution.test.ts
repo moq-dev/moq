@@ -1,7 +1,7 @@
 import { expect, it } from "bun:test";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Epoch, Origin, Path } from "@moq/net";
+import { Epoch, Origin, Path, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast";
 import { Source } from "./video/source";
@@ -26,18 +26,23 @@ async function quietly<T>(fn: () => Promise<T>): Promise<T> {
 	}
 }
 
+// Resolves once nobody subscribes to the track.
+async function unwanted(track: Track.Producer): Promise<void> {
+	const { wanted } = track.demand();
+	while (wanted.peek() !== undefined) await wanted.changed();
+}
+
 const video = (codec: string) => ({ codec, container: { kind: "legacy" as const } });
 
 it("opens a listed contribution only on selection, keeping its rendition IDs its own", async () => {
 	const origin = new Origin.Producer();
 	const parent = publish(origin, "room/main.hang");
 	const contribution = publish(origin, "room/extra.hang");
-	const catalog = new Json.Snapshot.Producer<Catalog.Root>({
-		track: contribution.createTrack(Catalog.TRACK),
-		deltas: false,
-	});
+	const contributionCatalog = contribution.createTrack(Catalog.TRACK);
+	const catalog = new Json.Snapshot.Producer<Catalog.Root>({ track: contributionCatalog, deltas: false });
 	parent.createTrack("video").writeFrame({ payload: new TextEncoder().encode("source frames") });
-	contribution.createTrack("video").writeFrame({ payload: new TextEncoder().encode("contribution frames") });
+	const contributionVideo = contribution.createTrack("video");
+	contributionVideo.writeFrame({ payload: new TextEncoder().encode("contribution frames") });
 
 	// The contribution and a source rendition share the ID "video".
 	const root = Catalog.RootSchema.parse({
@@ -55,12 +60,12 @@ it("opens a listed contribution only on selection, keeping its rendition IDs its
 		await settle();
 		expect(source.out.catalog.peek()?.contributions).toEqual(root.contributions);
 		// Listing the entry does not subscribe to its catalog.
-		expect(contribution.demand().used.peek()).toBe(false);
+		expect(contributionCatalog.demand().wanted.peek()).toBeUndefined();
 
 		const child = source.contribution(selection, "video");
 		catalog.update({ value: { video: { renditions: { video: video("vp8") } } } });
 		await settle();
-		expect(contribution.demand().used.peek()).toBe(true);
+		expect(contributionCatalog.demand().wanted.peek()).toBeDefined();
 		expect(child.out.catalog.peek()?.video?.renditions.video?.codec).toBe("vp8");
 		expect(source.out.catalog.peek()?.video?.renditions.video?.codec).toBe("avc1.42001f");
 
@@ -86,8 +91,8 @@ it("opens a listed contribution only on selection, keeping its rendition IDs its
 		expect(source.contribution(selection, "unknown").in.enabled.peek()).toBe(false);
 
 		selection.close();
-		await contribution.demand().unused();
-		expect(contribution.demand().used.peek()).toBe(false);
+		await unwanted(contributionCatalog);
+		await unwanted(contributionVideo);
 	} finally {
 		selection.close();
 		source.close();
@@ -160,7 +165,7 @@ it("reports a contribution outside the origin's scope as an error, leaving the p
 it("tracks the contribution entry without reopening it on unrelated catalog updates", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const first = publish(origin, "room/first.hang");
+	const firstCatalog = publish(origin, "room/first.hang").createTrack(Catalog.TRACK);
 	publish(origin, "room/second.hang");
 	const catalog = new Signal(Catalog.RootSchema.parse({ contributions: { extra: { broadcast: "./first.hang" } } }));
 	const parent = new Broadcast({
@@ -178,10 +183,11 @@ it("tracks the contribution entry without reopening it on unrelated catalog upda
 		expect(active?.path).toBe(Path.from("room/first.hang"));
 
 		// An update that leaves the entry alone keeps the same request.
+		expect(firstCatalog.demand().wanted.peek()).toBeDefined();
 		let withdrawals = 0;
 		owner.cleanup(
-			first.demand().used.subscribe((used) => {
-				if (!used) withdrawals += 1;
+			firstCatalog.demand().wanted.subscribe((wanted) => {
+				if (wanted === undefined) withdrawals += 1;
 			}),
 		);
 		catalog.set(
@@ -314,7 +320,7 @@ it("never reads a contribution proven to be another epoch, but reads an epochles
 		expect(refused.out.active.peek()).toBeUndefined();
 		expect(refused.out.error.peek()).toBeUndefined();
 		expect(track.closed.peek()).toBeUndefined();
-		expect(proven.demand().used.peek()).toBe(false);
+		expect(track.demand().wanted.peek()).toBeUndefined();
 		// An epochless route cannot prove its instance, so the epoch cannot refuse it.
 		expect(accepted.out.active.peek()?.path).toBe(Path.from("room/plain.hang"));
 
@@ -333,7 +339,7 @@ it("shares the parent's resolution, so a new epoch checks the held handle", asyn
 	const origin = new Origin.Producer();
 	const [served, other] = [Epoch.mint(), Epoch.mint()];
 	publish(origin, "room/main.hang", served);
-	const extra = publish(origin, "room/extra.hang", served);
+	const extraCatalog = publish(origin, "room/extra.hang", served).createTrack(Catalog.TRACK);
 	const entries = (epoch?: Epoch.Valid) =>
 		Catalog.RootSchema.parse({
 			contributions: {
@@ -365,10 +371,11 @@ it("shares the parent's resolution, so a new epoch checks the held handle", asyn
 		expect(empty.in.name.peek()).toBe(Path.from("room/main.hang"));
 		expect(empty.in.enabled.peek()).toBe(true);
 
+		expect(extraCatalog.demand().wanted.peek()).toBeDefined();
 		let withdrawals = 0;
 		owner.cleanup(
-			extra.demand().used.subscribe((used) => {
-				if (!used) withdrawals += 1;
+			extraCatalog.demand().wanted.subscribe((wanted) => {
+				if (wanted === undefined) withdrawals += 1;
 			}),
 		);
 
