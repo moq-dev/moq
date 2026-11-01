@@ -1872,26 +1872,11 @@ mod timebase_tests {
 			.unwrap();
 			tokio::time::advance(Duration::from_secs(1)).await;
 			let first = clock.now().as_micros();
-			// Drive the private importers on the paused clock, without entering the unpaused FFI worker.
-			chunks
-				.inner
-				.lock()
-				.unwrap()
-				.as_mut()
-				.unwrap()
-				.import
-				.decode(&fragment(&source, 3600, 1))
-				.unwrap();
+			// Each write enters the unpaused FFI worker, whose ambient clock is the host's. The
+			// broadcast still stamps on the paused clock it was built under.
+			chunks.write(fragment(&source, 3600, 1).to_vec()).unwrap();
 			tokio::time::advance(Duration::from_secs(5)).await;
-			audio_chunks
-				.inner
-				.lock()
-				.unwrap()
-				.as_mut()
-				.unwrap()
-				.import
-				.decode(&fragment(&audio, 3602, 2))
-				.unwrap();
+			audio_chunks.write(fragment(&audio, 3602, 2).to_vec()).unwrap();
 			let mut readers = Vec::new();
 			let snapshot = catalog.snapshot();
 			let containers =
@@ -1930,6 +1915,18 @@ mod timebase_tests {
 				first + if shared { 2_000_000 } else { 5_000_000 },
 				"shared={shared}"
 			);
+
+			// The catalog the second write published is on the same timeline as the media.
+			let mut catalogs = consumer
+				.track(hang::catalog::Catalog::DEFAULT_NAME)
+				.unwrap()
+				.subscribe(moq_net::track::Subscription::default())
+				.await
+				.unwrap()
+				.ordered();
+			let mut group = catalogs.next_group().await.unwrap().unwrap();
+			let stamp = group.read_frame().await.unwrap().unwrap().timestamp.unwrap();
+			assert_eq!(stamp.as_micros(), first + 5_000_000, "shared={shared}");
 		}
 	}
 

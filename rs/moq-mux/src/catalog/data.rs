@@ -88,8 +88,9 @@ impl Listing {
 		if clock != self.clock {
 			self.estimator.discontinuity();
 		}
+		let now = clock.now();
 		self.clock = clock;
-		self.record_at(clock.now(), bytes, captured)
+		self.record_at(now, bytes, captured)
 	}
 
 	/// [`record`](Self::record) at a chosen time, which a test needs since the broadcast clock only
