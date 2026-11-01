@@ -5761,7 +5761,9 @@ async fn server_client_run_end_draft22() {
 	server_client_run_end("moq-transport-22").await;
 }
 
-/// Finishing content and withdrawing a run are distinct from aborting an open track.
+/// Finishing content and withdrawing a run are distinct from aborting an open track, and a
+/// follower picks up the next run by announcement over every protocol. The aborted track keeps
+/// the error its wire carries, so readers follow runs by lifecycle, not by error kind.
 async fn server_client_run_end(version: &str) {
 	// Server side: bind, set a publish origin, accept incoming sessions.
 	let server_origin = MoqOriginProducer::new(MoqOriginConfig::default());
@@ -5831,8 +5833,12 @@ async fn server_client_run_end(version: &str) {
 	let announcement = next_announced(&announced).await;
 	assert_eq!(announcement.prefix, "hello");
 
-	// Subscribe to the audio track and verify a frame round-trips.
-	let bc = await_announced(&consumer, "hello").await;
+	// Follow the path as a player does, then subscribe and verify a frame round-trips.
+	let following = consumer.follow("hello".into(), None).unwrap();
+	let bc = kio::clock::timeout(TIMEOUT, following.available())
+		.await
+		.expect("timed out waiting for the first run")
+		.unwrap();
 	let unfinished = broadcast
 		.publish_track("unfinished".into(), Some(timed_info()))
 		.unwrap();
@@ -5841,7 +5847,7 @@ async fn server_client_run_end(version: &str) {
 	group.write_frame(group_frame(b"still live")).unwrap();
 	group.finish().unwrap();
 	assert_eq!(
-		moq_clock::timeout(TIMEOUT, unfinished_consumer.read_frame())
+		kio::clock::timeout(TIMEOUT, unfinished_consumer.read_frame())
 			.await
 			.expect("unfinished track read timed out")
 			.unwrap()
@@ -5887,7 +5893,7 @@ async fn server_client_run_end(version: &str) {
 
 	media.finish().unwrap();
 	assert!(
-		moq_clock::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
+		kio::clock::timeout(TIMEOUT, next_encoded_frame(&media_consumer))
 			.await
 			.expect("media end timed out")
 			.unwrap()
@@ -5895,7 +5901,7 @@ async fn server_client_run_end(version: &str) {
 		"{version}: finished media did not end cleanly"
 	);
 	broadcast.close().unwrap();
-	let Err(error) = moq_clock::timeout(TIMEOUT, unfinished_consumer.read_frame())
+	let Err(error) = kio::clock::timeout(TIMEOUT, unfinished_consumer.read_frame())
 		.await
 		.expect("unfinished track end timed out")
 	else {
@@ -5904,20 +5910,44 @@ async fn server_client_run_end(version: &str) {
 	if version == "moq-lite-07-wip" {
 		assert_protocol(&error, crate::error::MoqErrorScope::Stream, MoqProtocolKind::Unroutable);
 	} else {
-		// The IETF PUBLISH_DONE registry cannot carry Unroutable, so the publisher sends
-		// INTERNAL_ERROR. This is the remaining run-end divergence, not a clean EOF.
+		// The IETF PUBLISH_DONE registry has no Unroutable, so the publisher sends INTERNAL_ERROR
+		// and the reader keeps it. Neither TRACK_ENDED nor an EOF fits withdrawn content.
 		assert!(matches!(error, MoqError::Internal { .. }), "{version}: {error:?}");
 	}
-	while moq_clock::timeout(TIMEOUT, catalog_consumer.next())
+	while kio::clock::timeout(TIMEOUT, catalog_consumer.next())
 		.await
 		.expect("catalog end timed out")
 		.unwrap()
 		.is_some()
 	{}
-	moq_clock::timeout(TIMEOUT, bc.closed())
+	kio::clock::timeout(TIMEOUT, bc.closed())
 		.await
 		.expect("broadcast end timed out")
 		.unwrap();
+
+	// The announcement, not the track's error, ends the run.
+	match next_event(&announced).await {
+		MoqAnnounceEvent::End { announce } => assert_eq!(announce.prefix, "hello"),
+		other => panic!("{version}: expected the run's end, got {other:?}"),
+	}
+
+	// A replacement run at the same path reaches the follower on its next `available()`.
+	let replacement = create_announced(&server_origin, "hello");
+	let replacement_media = MoqMediaTrackProducer::audio(
+		&replacement,
+		MoqMediaTarget::Named { name: None },
+		audio_init(MoqAudioFormat::Opus, opus_head()),
+	)
+	.unwrap();
+	let next = kio::clock::timeout(TIMEOUT, following.available())
+		.await
+		.unwrap_or_else(|_| panic!("{version}: the next run was never handed out"))
+		.unwrap();
+	let next_track = subscribe_audio(&next).await;
+	roundtrip(&replacement_media, &next_track, b"next run", 2_000_000).await;
+	replacement_media.finish().unwrap();
+	replacement.close().unwrap();
+	following.cancel();
 
 	// Exercise both shutdown paths after content ended with the session still open.
 	cs.shutdown();

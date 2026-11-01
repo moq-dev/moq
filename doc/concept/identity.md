@@ -81,11 +81,14 @@ Choose between two kinds of reader.
 **Follow announcements** when the reader should outlive any one publisher
 run, as a player does. Start on each instance, drop all decoder and buffer
 state on a restart, and wait on an end. Rust uses
-`consumer.follow(path, None)` (or `moq_mux::follow::Instances`), and
-JavaScript `origin.follow(path)`. `@moq/watch`, `moq play`,
+`consumer.follow(path, None)` (or `moq_mux::follow::Instances`),
+JavaScript `origin.follow(path)`, and the moq-ffi bindings `follow(path)` with
+`available()`. `@moq/watch`, `moq play`,
 and `moqsrc` follow this way, and `moq export ts --stitch` can splice a
 replacement as a marked program switch. A request failing is never the signal
-to restart; the announcement is.
+to restart; the announcement is. Nor is a track's error kind: a track withdrawn
+unfinished ends `Unroutable` over moq-lite but `Internal` over moq-transport,
+whose wire has no code for it.
 
 **Hold one instance** when the output must not splice two runs, as an exporter
 or recorder does. Rust and JavaScript

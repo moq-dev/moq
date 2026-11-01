@@ -853,7 +853,7 @@ struct MediaStreamProducer {
 /// Imports a container into a broadcast, from chunks split anywhere such as a raw byte stream.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its tracks with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaContainerProducer {
 	driver: crate::ffi::Background,
@@ -864,7 +864,7 @@ pub struct MoqMediaContainerProducer {
 /// Imports complete encoded frames onto one track.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackProducer {
 	inner: std::sync::Mutex<Option<MediaProducer>>,
@@ -874,7 +874,7 @@ pub struct MoqMediaTrackProducer {
 /// Imports a video byte stream onto one track.
 ///
 /// Released before its finish, or still open when its broadcast closes, it ends its track with
-/// `Unroutable`, which readers take as the publisher leaving.
+/// `Unroutable`, which a moq-transport reader sees as `Internal`: its wire has no such code.
 #[derive(uniffi::Object)]
 pub struct MoqMediaTrackStreamProducer {
 	inner: std::sync::Mutex<Option<MediaStreamProducer>>,

@@ -2487,10 +2487,9 @@ pub extern "C" fn moq_publication_free(publication: u32) -> i32 {
 /// End a broadcast for good and release its handle.
 ///
 /// The origin retracts the path immediately and serves no new tracks. Every media, raw track,
-/// container, encoder, and JSON handle still open on the broadcast ends with `UNROUTABLE`,
-/// the way a reader sees a publisher leave, and is released; finish a track first to end it
-/// cleanly. The
-/// handles are invalid afterwards, so closing it again fails like any unknown handle, and so
+/// container, encoder, and JSON handle still open on the broadcast ends with `UNROUTABLE`
+/// (an internal error to a moq-transport reader), and is released; finish a track first to end
+/// it cleanly. The handles are invalid afterwards, so closing it again fails like any unknown handle, and so
 /// does any later call on a released child.
 ///
 /// Returns a zero on success, or a negative code on failure.
