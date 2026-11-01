@@ -69,7 +69,7 @@ These land with the next breaking release.
   instance, or a higher epoch of the same one, now serves the prefix. lite-06's
   `ANNOUNCE_RESTART` is named `ANNOUNCE_UPDATE`, as it always meant. Elsewhere,
   a restart is still an end then a start.
-- **Stream instances ride the route.** moq-lite 07 carries the instance and
+- **Publisher instances ride the route.** moq-lite 07 carries the instance and
   epoch after the path in `ANNOUNCE_START` and `ANNOUNCE_RESTART`, and the
   pinned instance in `TRACK`, `TRACKS`, `SUBSCRIBE`, and `FETCH`. Older wires
   carry none, so the receiving session mints an instance per announcement:

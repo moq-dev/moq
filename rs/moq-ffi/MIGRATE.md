@@ -76,9 +76,10 @@ settings. Regenerate bindings and rebuild the native library together.
 
 ### `announce` takes a `MoqAnnounceRoute`
 
-`MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.
+`MoqBroadcastProducer::announce` takes `MoqAnnounceRoute { cost, instance, epoch }` instead of a `MoqRoute`: the origin builds the hop chain, so a publisher no longer passes `hops` or `anonymous`.
 `MoqRoute` is only what `MoqAnnounceConsumer` reports, so its fields lose their defaults, and `MoqError::InvalidRoute` is gone.
-To re-announce an observed route, copy its `cost` and `epoch`.
+Leave `instance` null to keep the one the broadcast minted; name a stable one only for a publisher that continues its group sequences across restarts, raising `epoch` on each.
+To re-announce an observed route, copy its `cost`, and its `instance` only when forwarding that same stream.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
@@ -126,11 +127,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `MoqContainerFormat::Fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `MoqContainerFormat::Cmaf` to keep publishing CMAF.
 
-### Catalog references carry their epoch
+### Catalog references carry their instance
 
-`MoqVideo` and `MoqAudio` gain `epoch`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `epoch: None`.
-`MoqBroadcastConsumer::resolve` takes the catalog `MoqRendition` instead of its `reference`, and reads the reference and its `epoch` from it.
-Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another epoch with `Mux`.
+`MoqVideo` and `MoqAudio` gain `instance`, the publisher instance their `broadcast` reference names. It defaults to null in every generated binding; a Rust struct literal adds `instance: None`.
+`MoqBroadcastConsumer::resolve` takes the catalog `MoqRendition` instead of its `reference`, and reads the reference and its `instance` from it.
+Resolving, and the rendition-based consumers, fail a rendition whose broadcast is proven to serve another instance with `Mux`.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -146,8 +147,8 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `MoqOriginProducer::dynamic(prefix)` takes no `MoqRoute`, and `MoqOriginDynamic::update` is gone.
-`MoqBroadcastRequest::accept` is replaced by `prepare(epoch)`, which returns a `MoqBroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under that epoch and returns its producer.
-Mint a fresh epoch per output run with `moq_mint_epoch()`. Dropping a prepared answer unpublished refuses the request.
+`MoqBroadcastRequest::accept` is replaced by `prepare()`, which returns a `MoqBroadcastPrepared`: fill its `broadcast()`, then `publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
+Dropping a prepared answer unpublished refuses the request.
 
 ### `MoqTrackInfo` gains `compress` (#5928)
 

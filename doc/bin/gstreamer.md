@@ -96,7 +96,7 @@ comma-separated list, matching the CLI's repeatable `--connect-version`;
 unknown versions fail startup. QUIC durations are milliseconds. Zero disables the local idle timeout; a zero
 or unset keep-alive derives from the idle timeout and reads back as zero.
 Each run from `READY` publishes under a fresh
-[instance](/concept/moq-lite#stream-instances), so viewers switch to a
+[instance](/concept/moq-lite#publisher-instances), so viewers switch to a
 restarted pipeline at once instead of stalling on the old one; reconnects
 within a run keep it. The first catalog waits for a timed buffer
 to place the shared wall clock and for every requested pad to negotiate its

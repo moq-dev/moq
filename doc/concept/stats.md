@@ -170,7 +170,7 @@ generate more stats.
   prefix, so a consumer skips any path without `node` where it expects one.
 
 The broadcast stays announced for the producer's life. Each announcement
-carries a fresh [instance](/concept/moq-lite#stream-instances) on its
+carries a fresh [instance](/concept/moq-lite#publisher-instances) on its
 route, so a restarted node is a new broadcast at the same path: it replaces the
 old one, and no relay serves it groups cached under the old instance. A reader
 treats each instance as its own set of counters. The instance rides moq-lite 07

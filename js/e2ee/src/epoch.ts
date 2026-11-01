@@ -23,7 +23,7 @@ export function parse(text: string): Valid {
 	return text as Valid;
 }
 
-/** Mint a fresh identity using the wall clock and secure randomness, ordered newest last. */
+/** Mint a fresh epoch using the wall clock and secure randomness, ordered newest last. */
 export function mint(): Valid {
 	return parse(v7());
 }

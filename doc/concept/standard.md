@@ -53,7 +53,7 @@ its `peek()` or `changed()` methods; session statistics do not request PROBE.
 Both libraries offer solicit and auth unless a side's
 `extensions` setting declines one, which connects it as a peer that does not
 speak that extension. The pooled JavaScript `Connection` has no such setting yet.
-moq-transport carries no [stream instance](/concept/moq-lite#stream-instances),
+moq-transport carries no [publisher instance](/concept/moq-lite#publisher-instances),
 so the receiving session mints one per announcement; the
 [epoch draft](/draft/moq-epoch) remains an unimplemented proposal.
 [ietf](/draft/moq-ietf) goes the other way: it extends moq-lite-07 to carry this

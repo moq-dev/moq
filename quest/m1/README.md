@@ -149,7 +149,7 @@ per-frame CPU growth since #5926.
 - [A broadcast stamps everything from one clock](/quest/m1/broadcast-clock.md) - catalog, MSF, and HLS record groups are stamped from the broadcast's clock, never the ambient one
 - [moq export ends when the broadcast ends](/quest/m1/export-broadcast-end.md) - the export finishes on its own, proven without a give-up timeout
 - [A relay answers a SUBSCRIBE on a copy it kept after a fetch](/quest/m1/relay-fetched-copy-subscribe.md) - the downstream SUBSCRIBE_OK waits for the upstream edge instead of hanging
-- [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's identity, replacing the ANNOUNCE_TAKEOVER predecessor design
+- [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's instance, replacing the ANNOUNCE_TAKEOVER predecessor design
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for a per-rendition `hls` field

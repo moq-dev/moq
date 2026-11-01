@@ -261,8 +261,8 @@ Treat a failed group read as the loss of that group and keep reading the track, 
 
 ### A claim answers by publishing (#5678)
 
-`origin::Producer::dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
-Answer each `origin::Request` with `request.prepare(epoch)?` (a fresh `Epoch::mint()` per output run), fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under that epoch and returns its producer.
+`origin::Producer::dynamic(prefix)` takes no route: an application claim has no instance, cost, or hops.
+Answer each `origin::Request` with `request.prepare()?`, fill `prepared.broadcast()`, then `prepared.publish()?`, which announces the broadcast at the exact path under a fresh instance of its own and returns its producer.
 Only `publish` announces it: `prepared.broadcast().announce(..)` fails with `Error::Closed`.
 `Dynamic::update` is gone: drop the claim and claim again to change it, and close an answer's producer to end that output.
 `Request::accept`, `Producer::dynamic_route`, and `Dynamic::update_route` are crate-private (#6496): only the built-in sessions answer with a broadcast they already hold.
@@ -452,13 +452,13 @@ Pick the start sequence yourself with `create_group(group::Info { sequence })`, 
 `announce::Consumer` yields `announce::Event`, carrying an `announce::Announce { prefix, captures, route }`.
 `announce::Update` and `announce::Kind` are gone.
 `Restart` means another publisher instance now serves the prefix: request the path again.
-A newer epoch no longer ends open subscriptions with `Unroutable`; they stay on the old instance until dropped or its route goes.
+Another instance winning the path no longer ends open subscriptions with `Unroutable`; they stay on the old instance until dropped or its last route goes.
 
 ```rust
 while let Some(event) = announced.next().await {
 	match event {
 		announce::Event::Start(a) | announce::Event::Restart(a) => {
-			let broadcast = origin.request_broadcast(&a.prefix, a.route.epoch).await?;
+			let broadcast = origin.request(&a.prefix, a.route.instance.clone()).await?;
 		}
 		announce::Event::Update(_) => {}
 		announce::Event::End(_) => {}
@@ -466,16 +466,18 @@ while let Some(event) = announced.next().await {
 }
 ```
 
-### Routes carry the publisher epoch (#4942)
+### Routes carry an instance and a per-instance epoch (#4942, [#7489](https://github.com/moq-dev/moq/pull/7489))
 
-An epoch is a property of the route, not the path.
-`Path::join_epoch` and `Path::split_epoch` are gone; publish the plain path with `route.with_epoch(epoch)` and read `Route::epoch`.
-Nothing mints an epoch by default, and a route without one does not resume across routes.
+Every route carries an `Instance`: non-empty text naming one continuous run of group numbers at its path, like a cloud instance ID that survives a reboot.
+Every broadcast mints a random one when it is created and keeps it across withdraw, re-announce, and reconnect, so most publishers set nothing.
+A publisher that continues its group sequences across restarts may name a stable one with `Route::with_instance(instance, epoch)`, raising `epoch` on each run; within one instance only the highest epoch is eligible.
+Read `Route::instance` and `broadcast::Info::instance`; the epoch is never readable.
+A session of moq-lite 06 or older, or moq-transport, mints an instance starting with `~` for each announcement (`Instance::is_minted`).
 
-### `request_broadcast` takes an epoch
+### `request` and `follow` take an instance
 
-Pass `None` to accept any publisher instance, or an `Epoch` to refuse every other one.
-A dynamic route updated to another epoch refuses the requests its handler still holds with `Unroutable`.
+Pass `None` to accept whichever instance wins the path, or an `Instance` to refuse every other one.
+A route updated to another instance refuses the requests its handler still holds with `Unroutable`.
 
 ### Demand is read through `demand()`
 

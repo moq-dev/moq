@@ -35,7 +35,7 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   permission to stitch. A concrete serving-route change without an epoch
   remains Restart even when the origin node is unchanged; only a matching
   explicit epoch or the separately proven Takeover operation preserves an
-  instance (superseded 2026-10-30: a shared `identity` preserves it, per
+  instance (superseded 2026-10-30: a shared route `instance` preserves it, per
   [Instance and epoch](https://github.com/moq-dev/moq/pull/7489)). Test a same-origin next-hop change with no epoch.
   ANNOUNCE_UPDATE re-prices it and ANNOUNCE_END withdraws this origin's claim
   while the route stays up. A wildcard claim is capability, not an inventory
@@ -674,11 +674,11 @@ ranking a minted epoch last keeps the renewal it was meant to delete.
 Moved 2026-10-30 (maintainer, the [route epic](/quest/m1/api-audit/route/README.md)):
 [Instance and epoch](https://github.com/moq-dev/moq/pull/7489) now deletes that
 epochless machinery, so this quest no longer does. A session mints
-an `identity` (the session ID plus the announcement's ID) for any route that
+an `instance` (`~` plus random bits) for any route that
 arrives without one, and newest-wins compares epochs only within one
-identity, so mint order no longer outranks cost or preference. The rest of
+instance, so mint order no longer outranks cost or preference. The rest of
 the 2026-10-27 decision stands. The broadcast epoch fields here become that
-publisher identity and its per-identity epoch, in place of the UUIDv7
+publisher instance and its per-instance epoch, in place of the UUIDv7
 epoch. The route layer's own origin-node identity, with its seqno and
 revision, stays separate ("keep administrative identity and broadcast epoch
 separate", above).

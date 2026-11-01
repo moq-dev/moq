@@ -12,13 +12,15 @@ source of a name serves the same bytes. This page is the contract publishers,
 players, and relays share to keep that true across restarts, failover, and work
 started on demand. Wire details live in the [moq-lite](/draft/moq-lite) draft.
 
-## Instance is a path and a stream
+## Identity is a path and an instance
 
-Every route in an origin carries an **instance**: any non-empty text naming one
-continuous stream at its path. Within one instance, group sequences never
-restart and never name two different groups, so a reader stitches across every
-route and incarnation that shares it. Two instances are two independent
-streams, never stitched together.
+A broadcast's identity is its path plus its **instance**. Every route in an
+origin carries an instance: any non-empty text naming one continuous run of
+group numbers at its path. Within one instance, group sequences never restart
+and never name two different groups, so a reader stitches across every route
+and incarnation that shares it. Two instances are two independent streams,
+never stitched together. An instance names a run, not who publishes it: it is
+no credential, and auth decides who may publish the path.
 
 - **A new stream takes a new instance.** Every broadcast mints a random one
   when it is created and keeps it while it is withdrawn and announced again or
@@ -45,10 +47,12 @@ streams, never stitched together.
   [hang](/concept/hang#catalog)), and continue past the old sequence when a
   track is replaced within one stream.
 
-The epoch is a counter within one instance, never compared across instances
-and never shown to readers. It only picks the live incarnation of a stable
-instance while a stale route lingers: within one instance, only its highest
-epoch is eligible, however cheap an older one is. Nothing assumes it is a clock.
+Think of a cloud instance ID that survives a reboot: the instance stays the
+same, and the epoch counts the boots. The epoch is a counter within one
+instance, never compared across instances and never shown to readers. It only
+picks the live incarnation of a stable instance while a stale route lingers:
+within one instance, only its highest epoch is eligible, however cheap an older
+one is, so it fences out an older run. Nothing assumes it is a clock.
 
 | Situation | Instance | What readers see |
 | --- | --- | --- |

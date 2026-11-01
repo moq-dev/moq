@@ -369,7 +369,7 @@ linger = "5m"                        # Keep an empty group's track listed this l
 Each node publishes its traffic and session counters as MoQ tracks, split by a
 **tier** label from the auth server's grant (`--cluster-tier` for links this
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
-Each run announces under a fresh [instance](/concept/moq-lite#stream-instances),
+Each run announces under a fresh [instance](/concept/moq-lite#publisher-instances),
 so a restart is a new broadcast at the same path. Each group is a
 [track](/concept/stats#group-tracks) of that broadcast, and one returning after
 its linger restarts its counters under a new run id without an announce. The

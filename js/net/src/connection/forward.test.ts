@@ -406,7 +406,7 @@ for (const [name, instances] of [
 	["one instance", [first, first]],
 	["another instance", [first, Instance.random()]],
 ] as const) {
-	test(`a route changing hands restarts unless one instance proves one instance (${name})`, async () => {
+	test(`a route changing hands restarts unless both routes carry one instance (${name})`, async () => {
 		const origin = new OriginProducer();
 		const session = new FakeSession();
 		forwardAnnounced(session.session, origin);

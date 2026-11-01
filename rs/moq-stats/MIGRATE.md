@@ -21,7 +21,7 @@ A frame whose uncompressed JSON passes the 32 MB group budget ends the track wit
 
 The single-broadcast readers are named like the aggregate ones: `consume::Traffic` is now `consume::TrafficConsumer` and `consume::Sessions` is `consume::SessionsConsumer`.
 
-### A returning group restarts under a new epoch (#4904)
+### A returning group restarts under a new instance (#4904)
 
-A stats group that returns announces a new epoch and starts its group numbers at zero, instead of continuing the old sequence.
+A stats group that returns announces a new instance and starts its group numbers at zero, instead of continuing the old sequence.
 A reader that keyed history on the path alone should end that history when the announcement ends and start fresh on the next one.

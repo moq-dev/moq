@@ -16,7 +16,7 @@ publisher's broadcast can resume the same stream.
 | Independent publishers, separate paths | Leaves selection to the subscriber. |
 | One publisher, several routes | Resumes the same broadcast on another route. |
 
-A path and an [instance](/concept/moq-lite#stream-instances) name one
+A path and an [instance](/concept/moq-lite#publisher-instances) name one
 stream, so a redundant pair is two instances. Every independent publisher
 mints its own instance, even if both read the same source. Sharing one would
 claim that their group and frame numbers name the same content, which

@@ -57,8 +57,8 @@ the matching generated bindings and native library.
 
 ### `Announce` takes an `AnnounceRoute`
 
-`BroadcastProducer.Announce` takes `moq.AnnounceRoute{Cost, Epoch}` instead of a `moq.Route`: the origin builds the hop chain, so `Hops` is no longer an input, and `ErrInvalidRoute` is gone.
-`Route` is only what announcements report. To re-announce an observed route, copy its `Cost` and `Epoch`.
+`BroadcastProducer.Announce` takes `moq.AnnounceRoute{Cost, Instance, Epoch}` instead of a `moq.Route`: the origin builds the hop chain, so `Hops` is no longer an input, and `ErrInvalidRoute` is gone.
+`Route` is only what announcements report. To re-announce an observed route, copy its `Cost`, and its `Instance` only when forwarding that same stream; leave `Instance` unset to keep the one the broadcast minted.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
@@ -105,11 +105,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `media.ContainerFormatFmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `media.ContainerFormatCmaf` to keep publishing CMAF.
 
-### Catalog references carry their epoch
+### Catalog references carry their instance
 
-`ffi.MoqVideo` and `ffi.MoqAudio` gain `Epoch`, the publisher instance their `Broadcast` reference names.
-`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, rendition)`, taking the catalog rendition (`media.VideoRendition` or `media.AudioRendition`) and reading its `Broadcast` and `Epoch` from it.
-Resolving, and the rendition-based consumers, error for a rendition whose broadcast is proven to serve another epoch.
+`ffi.MoqVideo` and `ffi.MoqAudio` gain `Instance`, the publisher instance their `Broadcast` reference names.
+`BroadcastConsumer.Resolve(ctx, reference)` becomes `Resolve(ctx, rendition)`, taking the catalog rendition (`media.VideoRendition` or `media.AudioRendition`) and reading its `Broadcast` and `Instance` from it.
+Resolving, and the rendition-based consumers, error for a rendition whose broadcast is proven to serve another instance.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -125,7 +125,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.Dynamic(prefix)` takes no route, and `OriginDynamic.Update` is gone.
-Replace `request.Accept(broadcast)` with `request.Prepare(epoch)`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under that epoch and returns its producer.
+Replace `request.Accept(broadcast)` with `request.Prepare()`, which returns a `*BroadcastPrepared`: fill its `Broadcast()`, then `Publish()` announces it at the exact path under a fresh instance of its own and returns its producer.
 Where you rejected a request after a failed setup, `Close()` the prepared answer instead.
 
 ### `TrackInfo` gains `Compress` (#5928)

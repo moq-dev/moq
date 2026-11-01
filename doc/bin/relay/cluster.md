@@ -29,7 +29,7 @@ requests follow the new best route immediately. For 2 s after a relay retracts
 a broadcast, it holds back a worse path to the same publisher that a peer still
 hunting offers, instead of announcing the broadcast again.
 
-Routes carrying the same [instance](/concept/moq-lite#stream-instances)
+Routes carrying the same [instance](/concept/moq-lite#publisher-instances)
 serve one stream. When the route serving it dies, withdraws, or is beaten by
 a cheaper one of that instance, or a higher epoch of it, each subscription
 continues on the new route from the first frame its readers lack, so they see

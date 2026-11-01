@@ -18,7 +18,7 @@ pub struct Epoch(Arc<str>);
 pub struct InvalidEpoch;
 
 impl Epoch {
-	/// Mint a fresh identity using the wall clock and secure randomness, ordered newest last.
+	/// Mint a fresh epoch using the wall clock and secure randomness, ordered newest last.
 	pub fn mint() -> Self {
 		Self(uuid::Uuid::now_v7().hyphenated().to_string().into())
 	}

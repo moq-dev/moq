@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as Epoch from "./epoch.ts";
 
-test("mint parses as canonical and orders successive identities", () => {
+test("mint parses as canonical and orders successive epochs", () => {
 	const epoch = Epoch.mint();
 	expect(Epoch.parse(epoch)).toBe(epoch);
 	expect(Epoch.mint() > epoch).toBe(true);

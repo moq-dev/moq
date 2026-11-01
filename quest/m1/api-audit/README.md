@@ -74,7 +74,7 @@ Rejected in planning:
 ## Required
 
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve/README.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
-- [Routes are the origin API](/quest/m1/api-audit/route/README.md) - apps announce exact or prefix routes through one `Route` handle that owns its broadcast and carries an `identity`, prefix routes can serve a held broadcast, and readers get a listing plus `follow`
+- [Routes are the origin API](/quest/m1/api-audit/route/README.md) - apps announce exact or prefix routes through one `Route` handle that owns its broadcast and carries an `instance`, prefix routes can serve a held broadcast, and readers get a listing plus `follow`
 - [@moq/net names the origin read side](/quest/m1/api-audit/origin-reader.md) - `Origin.Reader`, which `Origin.Table` extends, replaces `Pick` lists
 
 ## Related

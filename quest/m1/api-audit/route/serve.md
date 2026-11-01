@@ -5,7 +5,7 @@
 An application answering a prefix route's request can hand over a broadcast
 it already holds: `request.serve(consumer)` in Rust and
 `request.serve(broadcast)` in JS, mirrored in moq-ffi, moq-c and the
-wrappers. The answer is served under the prefix route's own identity and
+wrappers. The answer is served under the prefix route's own instance and
 announces no exact route. A client's first subscribe through it succeeds
 over moq-transport-18, moq-transport-22, moq-lite-06 and moq-lite-07-wip.
 
@@ -28,7 +28,7 @@ before the larger rework.
 - Contract, in rustdoc and `doc/concept/identity.md`: a served answer is
   part of the prefix route's stream at that path. Today that means its
   instance; after [Instance and epoch](https://github.com/moq-dev/moq/pull/7489),
-  its identity, which promises one continuous sequence space per path. To
+  its instance, which promises one continuous sequence space per path. To
   serve different bytes at a path that was already served, start a new
   prefix route rather than serving new bytes under the old one. A job that
   may restart per path answers with `prepare`/`publish`, and takes the

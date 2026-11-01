@@ -19,7 +19,7 @@ import * as Track from "./track.ts";
  * Announce the wrapped broadcast with {@link instance} on its route.
  */
 export class Producer {
-	/** The instance this instance signs under, to announce on the broadcast's route. */
+	/** The instance this producer signs under, to announce on the broadcast's route. */
 	readonly instance: Instance.Valid = Instance.random();
 	#inner: NetBroadcast.Producer;
 	#key: SecretKey;

@@ -3,12 +3,12 @@
 ## Goal
 
 A worker advertises a prefix route to accept lazy work. When a request
-starts a job, the job's exact route carries the prefix route's identity, so
+starts a job, the job's exact route carries the prefix route's instance, so
 a reader first served through the claim continues on the exact route with
 no cold-start reset, across relays, on lite-07. A different worker, or a
-restarted job, never continues those readers: each is another identity.
+restarted job, never continues those readers: each is another instance.
 Readers holding `follow` or `request` simply continue, and see a new
-broadcast only when the identity changes. Rust and JS players keep playing
+broadcast only when the instance changes. Rust and JS players keep playing
 through a claim.
 
 The ANNOUNCE_TAKEOVER work that landed in
@@ -21,26 +21,26 @@ lite draft and the concept docs. No wire message or public event replaces it.
 Non-goals: moq-transport, which keeps the cold-start reset
 (moq-transport carries no epoch (decided 2026-10-28, removed in
 [moq-dev/moq#7239](https://github.com/moq-dev/moq/pull/7239)), and an
-edge mints a new identity for each announcement,
+edge mints a new instance for each announcement,
 [Instance and epoch](https://github.com/moq-dev/moq/pull/7489)).
 
 ## Plan
 
 Re-planned 2026-10-30 (maintainer, the [route epic](/quest/m1/api-audit/route/README.md)):
-continuity is the identity promise, not an `ANNOUNCE_TAKEOVER` predecessor
-ID. An identity is one continuous sequence space at a path, so the exact
+continuity is the instance promise, not an `ANNOUNCE_TAKEOVER` predecessor
+ID. An instance is one continuous sequence space at a path, so the exact
 route and the claim's answer are the same consumer route,
-origin → route(path, identity) → broadcast. The 2026-10-10 plan (TAKEOVER as
+origin → route(path, instance) → broadcast. The 2026-10-10 plan (TAKEOVER as
 START plus a predecessor Announce ID, with per-stream ID translation in
 relays) is dropped. Its safety requirements carry over, as follows.
 
 Decided 2026-10-31 (maintainer, merging main into
-[moq-dev/moq#7420](https://github.com/moq-dev/moq/pull/7420)): identity
+[moq-dev/moq#7420](https://github.com/moq-dev/moq/pull/7420)): instance
 wins over the predecessor design that landed in
 [moq-dev/moq#6994](https://github.com/moq-dev/moq/pull/6994) meanwhile.
-Keeping both would give two continuity rules, one by identity and one by
+Keeping both would give two continuity rules, one by instance and one by
 predecessor prefix, that every origin, relay and binding must agree on. The
-identity rule already covers the claim case and needs no wire message, so
+instance rule already covers the claim case and needs no wire message, so
 this quest removes the predecessor machinery and grows to [XL].
 
 - **Removing ANNOUNCE_TAKEOVER.** Delete the 0x5 message and its codec in
@@ -58,25 +58,25 @@ this quest removes the predecessor machinery and grows to [XL].
   `lite/announce.ts` and `lite/subscriber.ts`. Remove the takeover sections
   from `drafts/draft-lcurley-moq-lite.md`, `doc/concept/identity.md` and
   `doc/concept/moq-lite.md`.
-- **Inheriting the identity.** `request.route(options)` from
+- **Inheriting the instance.** `request.route(options)` from
   [One Route handle](/quest/m1/api-audit/route/handle.md) creates the
-  path's exact route under the prefix route's identity by default, and the
+  path's exact route under the prefix route's instance by default, and the
   answer it gives the waiting request is that route's broadcast. A job
   that serves a held broadcast through [serve](/quest/m1/api-audit/route/serve.md)
   never announces an exact route, so it needs none of this.
-- **One stream per path and identity.** A claim may answer a path under
-  its identity only while that stream is live. Once the job's route ends,
-  the next request for that path gets a fresh identity, because its
-  sequences restart. A request pinned to the old identity is refused as
+- **One stream per path and instance.** A claim may answer a path under
+  its instance only while that stream is live. Once the job's route ends,
+  the next request for that path gets a fresh instance, because its
+  sequences restart. A request pinned to the old instance is refused as
   ended, never answered with new bytes. This is the old rule "a worker
   restarting a job under an unchanged claim cannot relabel the previous
   job's cached content", now enforced in the origin. Prove it in the
   model, including retained generations and pending answers, before
   relying on it.
 - **Relays.** An aggregated prefix can be served by several workers, but
-  each worker has its own identity. A relay can therefore only continue a
-  reader on routes carrying the identity it resolved, and readers of A
-  never move to B. A relay that cannot keep the identity, such as an
+  each worker has its own instance. A relay can therefore only continue a
+  reader on routes carrying the instance it resolved, and readers of A
+  never move to B. A relay that cannot keep the instance, such as an
   older-lite hop, mints a new one, so its readers see a new broadcast
   rather than a splice.
 - **What a continued reader keeps.** Handles, group positions, metadata,
@@ -84,14 +84,14 @@ this quest removes the predecessor machinery and grows to [XL].
   TRACK/SUBSCRIBE/FETCH requests. Unrelated sibling paths are unchanged. A
   continued stream does not renew a composed catalog.
 - **JS players.** `js/net`'s lite subscriber continues a consumer resolved
-  through the claim on the exact route with the same identity instead of
+  through the claim on the exact route with the same instance instead of
   invalidating it, in `BroadcastCache` and `connection/forward.ts`, so a
   `@moq/watch` reader through a claim keeps playing.
 - **Epoch-bound requests through a continued route.** A front or selection
   that continues on the exact route keeps the upstream SUBSCRIBE it already
   sent under the claim's route; a later request naming the exact route's
   epoch joins it without restamping. This is accepted while the answering
-  worker is the same identity by construction. Decide whether that join
+  worker is the same instance by construction. Decide whether that join
   needs the upstream's answer to confirm the epoch.
 - **Docs.** Update the lazy-job lifecycle in `doc/concept/identity.md`:
   the cold-start step no longer resets on lite-07. Also update the lite
@@ -103,7 +103,7 @@ Tests with controlled time cover:
 - a job restarting on one worker, and a request pinned to an ended stream;
 - pending TRACK/SUBSCRIBE/FETCH at the front between its resolve and the
   exact route landing, and late groups across the transition;
-- conflicting epochs within one identity;
+- conflicting epochs within one instance;
 - independently ending prefix and exact routes (a claim ending before or
   after its child), and late snapshots;
 - multi-hop and diamond relays, and mixed versions with an older-lite hop;
@@ -122,11 +122,11 @@ beyond [Instance and epoch](https://github.com/moq-dev/moq/pull/7489)'s fields.
 
 ## Required
 
-- [One Route handle](/quest/m1/api-audit/route/handle.md) - `request.route` creates the exact route under the claim's identity
+- [One Route handle](/quest/m1/api-audit/route/handle.md) - `request.route` creates the exact route under the claim's instance
 
 ## Related
 
 - [Listing and follow](/quest/m1/api-audit/route/events.md) - continuity shows up inside `follow`, not as an event
 - [Claim answer epochs](https://github.com/moq-dev/moq/pull/5678) - why a restarted job must never be stitched to its predecessor
 - [Retired requests](https://github.com/moq-dev/moq/pull/5294) - replacements never substitute content into held handles
-- [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route layer whose ANNOUNCE_START layout carries the identity
+- [Routes and announces](/quest/m1/cluster-routing/routes.md) - the route layer whose ANNOUNCE_START layout carries the instance

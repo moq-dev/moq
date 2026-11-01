@@ -31,7 +31,7 @@ captions on, or a transcoder's extra renditions.
 ## Failover and restarts
 
 A broadcast can be announced over several connections. Seamless failover
-between them needs a [stream instance](/concept/moq-lite#stream-instances)
+between them needs a [publisher instance](/concept/moq-lite#publisher-instances)
 carried on every hop (moq-lite 07, opt-in), which names the stream behind a
 broadcast: replicas sharing one fail over mid-group, and a restart is a new
 instance that viewers switch to instead of stalling on the old group numbers.

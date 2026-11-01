@@ -15,7 +15,7 @@ implement in an afternoon. The wire spec is
 Rust and TypeScript speak moq-lite 01 through 06 and moq-transport drafts 18
 through 22. Clients offer `moq-lite-06` first. moq-lite 07 is still in progress
 (`moq-lite-07-wip`, and only when both sides enable it). It is the version that
-carries [stream instances](#stream-instances).
+carries [publisher instances](#publisher-instances).
 
 ## Terminology
 
@@ -74,7 +74,7 @@ tracks follow.
 Each route carries the chain of relay identities it passed through, which is
 how forwarding loops are caught, and a cost, which is how a subscriber picks
 among several routes to the same broadcast. On moq-lite 07 it also carries a
-[stream instance](#stream-instances), which says which routes serve the same
+[publisher instance](#publisher-instances), which says which routes serve the same
 bytes. A hop of 0 is the anonymous mark and travels the chain unchanged. A
 route that passed through an anonymous hop at any depth ranks below
 every fully identified route, whatever the costs say.
@@ -100,11 +100,12 @@ whose upstream session has since gone. How long a finished broadcast stays
 announced for late readers is the application's retention policy, such as the
 `--linger` of [`moq import`](/bin/cli), not a protocol state.
 
-### Stream instances
+### Publisher instances
 
-Every route carries an instance: any non-empty text naming one continuous
-stream at its path, plus an epoch, a counter within that instance. A path and
-an instance name one stream. The path never changes, so authorization and
+Every route carries an instance: any non-empty text naming one continuous run
+of group numbers at its path, plus an epoch, a counter within that instance,
+like a cloud instance ID that survives a reboot and a count of its boots. A
+path and an instance name one stream. The path never changes, so authorization and
 hidden names work exactly as before.
 
 - **One stream, one instance.** Every broadcast mints a random instance and

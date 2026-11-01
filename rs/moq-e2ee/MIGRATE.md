@@ -27,9 +27,9 @@ A track served on demand is reserved up front with `broadcast::Producer::reserve
 
 ### The epoch comes from the route (#4942)
 
-The protected path is the opaque broadcast path; the publisher epoch is read from the route instead of a path suffix.
-On wires that do not carry an epoch, the application supplies it.
-Drop `join_epoch` and `split_epoch`: announce with `Route::default().with_epoch(epoch)`, and read it back with `consumer.routed(&path).await.and_then(|route| route.epoch)`.
+The protected path is the opaque broadcast path; the publisher epoch is read from the route's instance instead of a path suffix.
+On wires that do not carry an instance, the session mints one, so the application supplies the epoch.
+Drop `join_epoch` and `split_epoch`: announce the generation's `moq_e2ee::Epoch` as the route's instance with `Route::default().with_instance(generation.epoch().instance(), 0)`, and read it back from the resolved broadcast with `moq_e2ee::Epoch::of(&broadcast)`.
 
 ### Timestamps are optional
 

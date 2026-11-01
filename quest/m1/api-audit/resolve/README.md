@@ -14,7 +14,7 @@ Rust, JS, and every binding:
   `announced_broadcast`), pinned to `epoch` when given.
 
 [Instance and epoch](https://github.com/moq-dev/moq/pull/7489) later changes the
-pin from `epoch` to an `identity` in both; the two
+pin from `epoch` to an `instance` in both; the two
 resolutions stay as they are.
 
 No caller can assemble a racy two-step resolve, and no crate hand-rolls
