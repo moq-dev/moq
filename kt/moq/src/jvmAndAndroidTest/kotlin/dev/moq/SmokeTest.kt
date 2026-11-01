@@ -274,7 +274,12 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("events", TrackInfo(timescale = 1_000_000uL))
             val group = track.appendGroup()
-            group.writeFrame(Frame(payload = "cached".encodeToByteArray(), timestamp = Timestamp(0uL, 1_000_000uL)))
+            group.writeFrame(
+                Frame(
+                    payload = "cached".encodeToByteArray(),
+                    timestamp = Timestamp(0uL, 1_000_000uL),
+                )
+            )
             group.finish()
 
             val fetched =
@@ -380,7 +385,10 @@ class SmokeTest {
             val (name, audio) = catalog(consumer).audio.entries.single()
 
             media.writeFrame(
-                Frame(payload = "opus frame".encodeToByteArray(), timestamp = 5.seconds.toTimestamp())
+                Frame(
+                    payload = "opus frame".encodeToByteArray(),
+                    timestamp = 5.seconds.toTimestamp(),
+                )
             )
 
             // Fetch while the track is still published: finishing the media producer
@@ -479,7 +487,9 @@ class SmokeTest {
             499_999_999.nanoseconds,
             Timestamp((1uL shl 61) - 1uL, (1uL shl 62) - 1uL).toDuration(),
         )
-        assertFailsWith<IllegalArgumentException> { Timestamp((1uL shl 61) - 1uL, 1uL).toDuration() }
+        assertFailsWith<IllegalArgumentException> {
+            Timestamp((1uL shl 61) - 1uL, 1uL).toDuration()
+        }
         assertNull(AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
     }
 
@@ -1016,7 +1026,9 @@ class SmokeTest {
                     val rgba = ByteArray(320 * 240 * 4) { 0x80.toByte() }
                     video.cut()
                     for (i in 0 until 10) {
-                        video.write(VideoFrame(timestamp = Timestamp(i.toULong(), 30uL), data = rgba))
+                        video.write(
+                            VideoFrame(timestamp = Timestamp(i.toULong(), 30uL), data = rgba)
+                        )
                     }
 
                     val consumer = origin.consume().request("video-decode-frame")
@@ -1028,7 +1040,9 @@ class SmokeTest {
 
                     // Keep the encoder fed so the decoder sees frames after it joined.
                     for (i in 10 until 40) {
-                        video.write(VideoFrame(timestamp = Timestamp(i.toULong(), 30uL), data = rgba))
+                        video.write(
+                            VideoFrame(timestamp = Timestamp(i.toULong(), 30uL), data = rgba)
+                        )
                     }
 
                     assertIs<VideoReadFrame>(decoder.next()).frame.use { frame ->

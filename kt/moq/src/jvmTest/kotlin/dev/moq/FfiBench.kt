@@ -120,7 +120,8 @@ class FfiBench {
                             group.writeFrame(
                                 Frame(
                                     payload = payload,
-                                    timestamp = Timestamp((n * case.frames + f).toULong(), 1_000_000uL),
+                                    timestamp =
+                                        Timestamp((n * case.frames + f).toULong(), 1_000_000uL),
                                 )
                             )
                         }
