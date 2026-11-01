@@ -47,7 +47,7 @@ archive (per-track `.timeline.z` records named by the catalog's root
   `<prefix>/<track>/<first group>-<first frame>-<first pts>`
   (`<first group>-<first frame>` for an untimed track, `<track>` percent-encoded as one
   segment), beside a small per-track `.info` holding its timescale and
-  priority. Each stored sequence keeps its form, group or datagram. A
+  priority. Datagram tracks are never stored ([Datagram tracks](/quest/m1/datagram-tracks/README.md), maintainer 2026-11-01). A
   track's `end` records how it ended, clean or with its error code, written
   with the broadcast's `.end` once the broadcast's listing ends; without
   them an archive reads as live. A served track advertises the archive's retention (no limit), not

@@ -62,7 +62,7 @@ Ranges stay whole groups ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull
 so the group model keeps refusing a nonzero lite `frameStart` as a protocol
 violation, as `lite/subscriber.ts` `runGroup` does. Preserve the per-reader
 group-bound rule for reliable reads, live-edge selection, subscription
-updates, and publisher datagrams.
+and subscription updates. Datagrams move to their own track kind ([Datagram tracks](/quest/m1/datagram-tracks/README.md)).
 
 ## Related
 

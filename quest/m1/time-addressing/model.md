@@ -76,7 +76,7 @@ it:
 - Resume across route flips (`resume.rs`), mid-group `Position` and
   `frame_start`, priority order within a subscription, `Demand::wanted`, and
   refresh.
-- The datagram namespace, which shares the group space.
+- Not datagrams: they become their own track kind with their own sequence ([Datagram tracks](/quest/m1/datagram-tracks/README.md)).
 - The legacy codecs: lite GROUP, SUBSCRIBE and SUBSCRIBE_UPDATE bounds,
   SUBSCRIBE_START and its largest, SUBSCRIBE_END, SUBSCRIBE_DROP, FETCH, and
   every IETF Location, Filter, FETCH, Largest, and NEW_GROUP_REQUEST.
@@ -111,7 +111,7 @@ resume model (`rs/moq-net/src/model/resume_model.rs`,
 The PR's Impact section says how to migrate.
 
 Public API: breaking. `group::Info`, `create_group`, `append_group`,
-`Position`, `Range` ends, `fetch_group`, `Subscriber::floor`, datagrams, and
+`Position`, `Range` ends, `fetch_group`, `Subscriber::floor`, and
 group consumers address by start timestamp, and untimed tracks go away.
 Wire: no format change; legacy and lite-07-wip group IDs become start ticks.
 
