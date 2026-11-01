@@ -2823,7 +2823,7 @@ async fn video_rung_sits_below_its_lower_and_disables() {
 
 	high.set_enabled(false).unwrap();
 	let disabled = loop {
-		let catalog = tokio::time::timeout(TIMEOUT, catalog_consumer.next())
+		let catalog = moq_clock::timeout(TIMEOUT, catalog_consumer.next())
 			.await
 			.expect("timed out waiting for catalog")
 			.unwrap()
