@@ -32,7 +32,8 @@ Decided 2026-11-01 (maintainer, in `/quest-plan`):
     of those rules carry a datagram exception.
 - **Own request.** ✅ A datagram track is subscribed through its own lite-07
   request, not SUBSCRIBE, and that request carries only a priority. ✅ It is
-  live from now: no start, end, order, or max delay. An update changes only
+  live from now: no start, end, order, or `Delay`
+  ([Subscription delay](/quest/m1/subscription-delay.md) exempts it). An update changes only
   the priority. A datagram still waits behind higher-priority traffic.
 - **No group terminology.** ✅ A datagram carries a sequence number and a
   timestamp, with no group. The sequence is the datagram track's own, not

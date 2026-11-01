@@ -2,7 +2,7 @@
 
 ## Goal
 
-`moq-archive` stores every track of every broadcast under a path prefix into
+`moq-archive` stores every stream track of every broadcast (datagram tracks are never stored) under a path prefix into
 any `object_store::ObjectStore` and serves a stored broadcast back as an
 ordinary broadcast, with no catalog dependency. A host finds
 broadcasts by ANNOUNCE and runs one `archive::Producer` per broadcast, which

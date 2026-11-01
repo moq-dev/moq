@@ -35,18 +35,24 @@ The decisions are in the [epic](/quest/m1/datagram-tracks/README.md).
   - NOT_FETCHABLE;
   - datagrams in SUBSCRIBE_DROP coverage;
   - the datagram grace in the subscriber's end (`a_lost_datagram_delays_the_end`).
-- On lite-01..06, map today's group datagrams onto the datagram types:
-  - Inbound, a group datagram on a subscription goes to the datagram track of
-    the same name.
-  - Outbound, a datagram track's subscriber on an old version gets group
-    datagrams keyed by its sequence.
+- On lite-01..06, one subscription to a name carries both group streams and
+  group datagrams. Map it the way moq-transport does, keeping the requested
+  kind:
+  - Inbound, a datagram-track subscription keeps only group datagrams and
+    drops group streams. A stream-track subscription drops group datagrams.
+  - Outbound, an old-version SUBSCRIBE for a name is served from the stream
+    track of that name. It is served from the datagram track, as group
+    datagrams keyed by its sequence, only when no stream track has that name.
+  - This outbound rule is the plan's default. This quest may revisit it, and
+    records why if it does.
 
 **Elsewhere**
 - The relay forwards each kind as it received it.
 - moq-archive's producer and consumer drop their datagram form.
-- moq-ffi keeps its public datagram surface, mapped onto the new types
-  internally. Its public API changes in
-  [bindings](/quest/m1/datagram-tracks/bindings.md).
+- moq-ffi's public datagram API (`append_datagram`, `recv_datagram`) is
+  unchanged in this quest, and is backed internally by the new types. The
+  [bindings](/quest/m1/datagram-tracks/bindings.md) quest then replaces it
+  with the separate types.
 - Update `drafts/draft-lcurley-moq-lite.md`: the Datagrams section, the
   request, the error table, and the lite-07 changelog. Then run
   `just drafts check` and `just test interop --all`.
