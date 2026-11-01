@@ -43,6 +43,9 @@ libc = { workspace = true }
 anyhow = { workspace = true }
 # The last release before this crate moved here, for wire interop tests only.
 qmux06 = { package = "qmux", version = "0.6.3", default-features = false, features = ["tcp", "ws"] }
+# A self-signed identity and the relay's crypto provider, for the bench example's TLS transports.
+rcgen = { workspace = true, features = ["aws_lc_rs"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 # The 0.6 release's stream API, for driving it in the interop tests.
 web-transport-trait = { workspace = true }
@@ -54,6 +57,10 @@ required-features = ["tcp", "ws"]
 [[example]]
 name = "interop-server"
 required-features = ["tcp", "ws"]
+
+[[example]]
+name = "bench"
+required-features = ["tls", "wss"]
 
 [lints]
 workspace = true
