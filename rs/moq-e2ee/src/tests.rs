@@ -490,46 +490,59 @@ fn oversize_datagram_keeps_the_sequence() {
 }
 
 #[test]
-fn track_produced_once_per_generation() {
+fn reproduced_track_resumes_above_its_marks() {
 	let generation = test_generation();
 	let name = generation.name("video").unwrap();
 	let net = net_track(&name);
-	let producer = generation.produce(net.clone(), "video").unwrap();
+	let mut producer = generation.produce(net.clone(), "video").unwrap();
 	assert_eq!(producer.name(), name.as_str());
+	producer.create_group(4).unwrap();
+	assert_eq!(producer.append_datagram(ms(1), b"x").unwrap(), 5);
 	drop(producer);
-	let again = generation.clone();
-	assert_eq!(
-		again.produce(net.clone(), "video").map(|_| ()).unwrap_err().to_string(),
-		"reuse"
-	);
+
+	// A clone of the generation reopening the name, on any output, resumes above its marks.
+	let mut again = generation.clone().produce(net_track(&name), "video").unwrap();
+	for sequence in [0, 5] {
+		assert_eq!(
+			again.create_group(sequence).map(|_| ()).unwrap_err().to_string(),
+			"reuse"
+		);
+		assert_eq!(
+			again.insert_datagram(sequence, ms(1), b"x").unwrap_err().to_string(),
+			"reuse"
+		);
+	}
+	assert_eq!(again.append_group().unwrap().sequence(), 6);
+	// Two live producers of the name share one sequence namespace.
+	let mut other = generation.produce(net_track(&name), "video").unwrap();
+	assert_eq!(other.append_datagram(ms(1), b"x").unwrap(), 7);
+	assert_eq!(again.append_group().unwrap().sequence(), 8);
+
 	// A new epoch is a new publisher instance.
 	let fresh = generation.credential().produce();
-	fresh
+	let mut fresh = fresh
 		.produce(net_track(&fresh.name("video").unwrap()), "video")
 		.unwrap();
+	assert_eq!(fresh.append_group().unwrap().sequence(), 0);
 	// Consuming never claims.
 	consume(&generation)
 		.consume(net.subscribe(subscribe_all()), "video")
 		.unwrap();
-	consume(&generation)
-		.consume(net.subscribe(subscribe_all()), "video")
-		.unwrap();
+	assert_eq!(generation.claims(), 1);
 }
 
 #[test]
 fn refused_track_is_aborted() {
 	let generation = test_generation();
-	let name = generation.name("video").unwrap();
-	drop(generation.produce(net_track(&name), "video").unwrap());
-	// The same physical name on another output, as a clone of the generation would claim it.
-	let net = net_track(&name);
+	let net = net_track(&generation.name("video").unwrap());
+	let unnameable = "x".repeat(65536);
 	assert_eq!(
 		generation
-			.produce(net.clone(), "video")
+			.produce(net.clone(), &unnameable)
 			.map(|_| ())
 			.unwrap_err()
 			.to_string(),
-		"reuse"
+		"identity"
 	);
 	assert!(matches!(
 		net.poll_closed(&kio::Waiter::noop()),
@@ -588,10 +601,7 @@ fn broadcast_speaks_semantic_names() {
 fn reserved_track_serves_on_demand() {
 	let protected = protected();
 	let request = protected.producer.reserve_track("audio").unwrap();
-	assert_eq!(
-		request.name(),
-		protected.producer.generation().name("audio").unwrap().as_str()
-	);
+	assert_eq!(request.name(), "audio");
 	let demand = request.demand();
 	assert!(!demand.wanted().is_some());
 
@@ -612,17 +622,18 @@ fn reserved_track_serves_on_demand() {
 fn broadcast_claims_span_outputs() {
 	let generation = test_generation();
 	let first = crate::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), generation.clone());
-	let _video = first.create_track("video", timed()).unwrap();
-	let _audio = first.reserve_track("audio").unwrap();
+	let mut video = first.create_track("video", timed()).unwrap();
+	video.create_group(2).unwrap();
+	let mut audio = first.reserve_track("audio").unwrap().accept(timed());
+	audio.append_datagram(ms(1), b"opus").unwrap();
 
-	// A clone of the generation on another output cannot reopen either name.
+	// A clone of the generation on another output resumes either name above its marks.
 	let second = crate::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), generation);
-	for semantic in ["video", "audio"] {
-		let created = second.create_track(semantic, timed()).map(|_| ()).unwrap_err();
-		assert_eq!(created.to_string(), "reuse");
-		let reserved = second.reserve_track(semantic).map(|_| ()).unwrap_err();
-		assert_eq!(reserved.to_string(), "reuse");
-	}
+	let mut video = second.create_track("video", timed()).unwrap();
+	assert_eq!(video.append_group().unwrap().sequence(), 3);
+	let request = second.reserve_track("audio").unwrap();
+	assert_eq!(request.name(), "audio");
+	assert_eq!(request.accept(timed()).append_datagram(ms(1), b"opus").unwrap(), 1);
 }
 
 #[test]
@@ -631,10 +642,194 @@ fn recovery_claims_nothing() {
 	let name = generation.name("video").unwrap();
 	assert_eq!(generation.open(&name).unwrap(), "video");
 	// Opening a name neither claims it nor derives its payload keys.
-	generation.produce(net_track(&name), "video").unwrap();
+	assert_eq!(generation.claims(), 0);
 	// The same semantic name under another epoch of the same credential does not open.
 	let other = test_credential().produce().name("video").unwrap();
 	assert_eq!(generation.open(&other).unwrap_err().to_string(), "authentication");
+}
+
+/// Poll a handler once, expecting a request.
+fn requested(requests: &mut crate::broadcast::Requests) -> track::Request {
+	match requests.poll_requested_track(&kio::Waiter::noop()) {
+		Poll::Ready(Ok(request)) => request,
+		other => panic!("expected a request, got {other:?}"),
+	}
+}
+
+/// Subscribe to `name` the way a relay forwards it, and poll once so it reaches the handler.
+fn subscribe_raw(raw: &moq_net::broadcast::Consumer, name: &str) -> kio::Pending<moq_net::track::Subscribing> {
+	let subscribing = raw.track(name).unwrap().subscribe(subscribe_all());
+	let _ = subscribing.poll_ok(&kio::Waiter::noop());
+	subscribing
+}
+
+#[test]
+fn requests_serve_undeclared_names() {
+	let protected = protected();
+	let mut requests = protected.producer.requests();
+	assert!(requests.poll_requested_track(&kio::Waiter::noop()).is_pending());
+
+	let subscribing = protected.consumer.subscribe("stats/viewers", subscribe_all()).unwrap();
+	assert!(subscribing.poll_ok(&kio::Waiter::noop()).is_pending());
+	let request = requested(&mut requests);
+	assert_eq!(request.name(), "stats/viewers");
+	assert!(request.demand().wanted().is_some());
+	assert_eq!(protected.producer.generation().claims(), 0);
+
+	let mut track = request.accept(timed());
+	assert_eq!(protected.producer.generation().claims(), 1);
+	let mut reader = resolve(&subscribing).unwrap();
+	let mut group = track.append_group().unwrap();
+	group.write_frame(ms(1), b"42").unwrap();
+	group.finish().unwrap();
+	assert_eq!(read_frame(&mut recv_group(&mut reader)).plaintext, &b"42"[..]);
+
+	// The handler's own consumer reads the broadcast under semantic names too.
+	let mut local = resolve(&requests.consume().subscribe("stats/viewers", subscribe_all()).unwrap()).unwrap();
+	assert_eq!(read_frame(&mut recv_group(&mut local)).plaintext, &b"42"[..]);
+}
+
+#[test]
+fn requests_refuse_names_the_generation_did_not_issue() {
+	let protected = protected();
+	let mut requests = protected.producer.requests();
+	let generation = protected.producer.generation();
+
+	let older = test_credential().produce().name("video").unwrap();
+	let forged = URL_SAFE_NO_PAD.encode([0u8; NAME_NONCE_LEN + NAME_BLOCK + TAG_LEN]);
+	for name in [older.as_str(), forged.as_str(), "video", "!!", ""] {
+		let subscribing = subscribe_raw(&protected.raw, name);
+		assert!(
+			requests.poll_requested_track(&kio::Waiter::noop()).is_pending(),
+			"{name:?} reached the handler"
+		);
+		assert!(
+			matches!(
+				subscribing.poll_ok(&kio::Waiter::noop()),
+				Poll::Ready(Err(moq_net::Error::NotFound))
+			),
+			"{name:?} was not answered as missing"
+		);
+	}
+	assert_eq!(generation.claims(), 0);
+
+	// A burst of forged names leaves nothing behind, and a real request still gets through.
+	let burst: Vec<_> = (0..256u32)
+		.map(|i| {
+			let mut material = vec![0u8; NAME_NONCE_LEN + NAME_BLOCK + TAG_LEN];
+			material[..4].copy_from_slice(&i.to_be_bytes());
+			subscribe_raw(&protected.raw, &URL_SAFE_NO_PAD.encode(material))
+		})
+		.collect();
+	let _video = protected.consumer.subscribe("video", subscribe_all()).unwrap();
+	assert_eq!(requested(&mut requests).name(), "video");
+	assert!(requests.poll_requested_track(&kio::Waiter::noop()).is_pending());
+	for subscribing in &burst {
+		assert!(matches!(
+			subscribing.poll_ok(&kio::Waiter::noop()),
+			Poll::Ready(Err(moq_net::Error::NotFound))
+		));
+	}
+	// Not accepted, so not claimed either.
+	assert_eq!(generation.claims(), 0);
+}
+
+#[test]
+fn requests_claim_only_accepted_names() {
+	let protected = protected();
+	let mut requests = protected.producer.requests();
+	let generation = protected.producer.generation();
+
+	// A credential holder can name any track: rejecting or dropping its requests keeps nothing.
+	for i in 0..256 {
+		let name = generation.name(&format!("unknown/{i}")).unwrap();
+		let subscribing = subscribe_raw(&protected.raw, name.as_str());
+		let request = requested(&mut requests);
+		assert_eq!(request.name(), format!("unknown/{i}"));
+		if i % 2 == 0 {
+			request.reject(moq_net::Error::NotFound);
+		} else {
+			drop(request);
+		}
+		assert!(subscribing.poll_ok(&kio::Waiter::noop()).is_ready());
+	}
+	assert_eq!(generation.claims(), 0);
+
+	// A name claimed while its request waits resumes that claim once accepted.
+	let subscribing = protected.consumer.subscribe("video", subscribe_all()).unwrap();
+	let _ = subscribing.poll_ok(&kio::Waiter::noop());
+	let request = requested(&mut requests);
+	assert_eq!(generation.claims(), 0);
+	let other = crate::broadcast::Producer::new(moq_net::broadcast::Info::new().produce(), generation.clone());
+	other.create_track("video", timed()).unwrap().create_group(5).unwrap();
+	let mut video = request.accept(timed());
+	assert_eq!(generation.claims(), 1);
+	assert_eq!(video.append_group().unwrap().sequence(), 6);
+}
+
+#[test]
+fn requests_serve_a_dropped_name_above_its_marks() {
+	let protected = protected();
+	let mut requests = protected.producer.requests();
+
+	let subscribing = protected.consumer.subscribe("presence", subscribe_all()).unwrap();
+	let _ = subscribing.poll_ok(&kio::Waiter::noop());
+	let mut track = requested(&mut requests).accept(timed());
+	let reader = resolve(&subscribing).unwrap();
+	track.create_group(3).unwrap();
+	// The handler drops the idle track.
+	drop(reader);
+	drop(subscribing);
+	drop(track);
+
+	let subscribing = protected.consumer.subscribe("presence", subscribe_all()).unwrap();
+	let _ = subscribing.poll_ok(&kio::Waiter::noop());
+	let request = requested(&mut requests);
+	assert_eq!(request.name(), "presence");
+	let mut track = request.accept(timed());
+	assert_eq!(track.create_group(3).map(|_| ()).unwrap_err().to_string(), "reuse");
+	assert_eq!(track.append_group().unwrap().sequence(), 4);
+	let mut reader = resolve(&subscribing).unwrap();
+	assert_eq!(recv_group(&mut reader).sequence(), 4);
+}
+
+#[test]
+fn lister_lists_physical_names() {
+	let protected = protected();
+	let requests = protected.producer.requests();
+	let lister = requests.lister().unwrap();
+	assert!(matches!(requests.lister(), Err(Error::Net(moq_net::Error::Duplicate))));
+
+	let mut tracks = protected.raw.tracks().unwrap();
+	assert!(lister.poll_wanted(&kio::Waiter::noop()).is_ready());
+	lister.add("stats/viewers", timed()).unwrap();
+	lister.synced();
+	let next = |tracks: &mut moq_net::broadcast::Tracks| match tracks.poll_next(&kio::Waiter::noop()) {
+		Poll::Ready(Ok(Some(event))) => event,
+		other => panic!("expected a listing event, got {other:?}"),
+	};
+	let moq_net::broadcast::TracksEvent::Added { name, .. } = next(&mut tracks) else {
+		panic!("expected the listed track");
+	};
+	// A listed name round-trips to its semantic name.
+	let physical: Name = name.parse().unwrap();
+	assert_eq!(
+		protected.producer.generation().open(&physical).unwrap(),
+		"stats/viewers"
+	);
+	assert!(matches!(next(&mut tracks), moq_net::broadcast::TracksEvent::Synced));
+
+	lister.finish("stats/viewers").unwrap();
+	assert!(matches!(
+		next(&mut tracks),
+		moq_net::broadcast::TracksEvent::Finished { name: finished } if finished == name
+	));
+	assert!(matches!(
+		lister.remove("stats/viewers"),
+		Err(Error::Net(moq_net::Error::NotFound))
+	));
+	// Listing claims nothing: only serving a name does.
+	assert_eq!(protected.producer.generation().claims(), 0);
 }
 
 #[test]

@@ -27,6 +27,7 @@ mod fetch_cancel;
 mod fetch_fanout;
 mod fetch_from_feed;
 mod fetch_only;
+mod fetch_pipeline;
 mod finished_broadcast_mock;
 mod finite_relay;
 mod goaway;

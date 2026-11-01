@@ -691,6 +691,50 @@ moq::Catalog CatalogSnapshot(Publisher &publisher)
 	CHECK(snapshot.has_value());
 	return *snapshot;
 }
+
+// The publisher's catalog with `id` ranked first in its section: the preferred video, or the
+// highest audio bitrate. Neither is part of a rendition's identity.
+moq::Catalog CatalogPreferring(Publisher &publisher, const std::string &id)
+{
+	auto catalog = CatalogSnapshot(publisher);
+	auto video = catalog.video.find(id);
+	auto audio = catalog.audio.find(id);
+	CHECK(video != catalog.video.end() || audio != catalog.audio.end());
+	if (video != catalog.video.end())
+		video->second.preference = 1;
+	if (audio != catalog.audio.end())
+		audio->second.bitrate = UINT64_MAX;
+	return catalog;
+}
+
+// Stops the source reading the publisher's catalog, so a scenario delivers its own. The
+// publisher measures a track's bitrate once it has written a second of media, which
+// would otherwise re-rank renditions partway through a scenario.
+void FreezeCatalog(moq_source *ctx, Publisher &publisher)
+{
+	for (;;) {
+		{
+			// Cancelling stops a catalog not yet completed, but one already completed is
+			// queued on the worker, and running it reads the next. Stop that one in turn.
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			auto &call = ctx->connection->catalog_call;
+			if (!call)
+				return;
+			call.reset();
+		}
+		// The worker runs in order, so once more media is out, a catalog it had queued has run.
+		const int outputs = g_output_frames + g_output_audio;
+		CHECK(publisher.WriteUntil([&] { return g_output_frames + g_output_audio >= outputs + 3; }));
+	}
+}
+
+// Delivers a catalog as the source's catalog reader would.
+void DeliverCatalog(moq_source *ctx, const moq::Catalog &catalog)
+{
+	std::lock_guard<std::mutex> lock(ctx->mutex);
+	moq_source_subscribe_video(ctx, ctx->connection, catalog);
+	moq_source_subscribe_audio(ctx, ctx->connection, catalog);
+}
 } // namespace
 
 int main()
@@ -886,6 +930,7 @@ int main()
 		void *source = createSource();
 		auto *ctx = static_cast<moq_source *>(source);
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+		FreezeCatalog(ctx, publisher);
 		moq::VideoInit init{};
 		init.format = moq::VideoFormat::kAvc3;
 		init.data = TestH264Init();
@@ -893,6 +938,7 @@ int main()
 			moq::MediaTrackProducer::video(publisher.broadcast,
 						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
 			"replacement video");
+		DeliverCatalog(ctx, CatalogPreferring(publisher, "!replacement"));
 		const auto pending = [&] {
 			std::lock_guard lock(ctx->mutex);
 			const auto &candidate = ctx->connection->pending_video;
@@ -1062,13 +1108,276 @@ int main()
 	}
 	report("reshaped rendition replaces decoder");
 
+	// Renditions rank the way hang's `ranked()` does, whatever their names: video by enabled,
+	// preference, coded area, then bitrate; audio by enabled, bitrate, sample rate, then channel
+	// count. An unknown bitrate ranks below a known one, and exact ties keep name order.
+	{
+		TestRelay relay;
+		Publisher publisher(relay, "obs/test");
+		const auto snapshot = CatalogSnapshot(publisher);
+		const auto base_video = snapshot.video.begin()->second;
+		const auto base_audio = snapshot.audio.begin()->second;
+		const auto names = [](const auto &ranked) {
+			std::vector<std::string> out;
+			for (const auto *entry : ranked)
+				out.push_back(entry->first);
+			return out;
+		};
+		const auto video = [&](bool enabled, int32_t preference, uint32_t width, uint32_t height,
+				       std::optional<uint64_t> bitrate) {
+			auto config = base_video;
+			config.codec = "avc1.42c01e";
+			config.enabled = enabled;
+			config.preference = preference;
+			config.coded = moq::Dimensions{width, height};
+			config.bitrate = bitrate;
+			return config;
+		};
+		std::unordered_map<std::string, moq::Video> videos = {
+			{"a-disabled", video(false, 5, 1920, 1080, 9000000)},
+			{"b-low", video(true, 0, 640, 360, 500000)},
+			{"c-unknown-bitrate", video(true, 0, 1280, 720, std::nullopt)},
+			{"d-tie", video(true, 0, 1280, 720, 2000000)},
+			{"e-tie", video(true, 0, 1280, 720, 2000000)},
+			// 65536x65536 wraps to 0 as a 32-bit area.
+			{"f-huge", video(true, 0, 65536, 65536, 1)},
+			{"g-preferred", video(true, 1, 320, 240, 100000)},
+		};
+		CHECK((names(moq_source_ranked_video(videos)) ==
+		       std::vector<std::string>{"g-preferred", "f-huge", "d-tie", "e-tie", "c-unknown-bitrate", "b-low",
+						"a-disabled"}));
+
+		const auto audio = [&](bool enabled, std::optional<uint64_t> bitrate, uint32_t sample_rate,
+				       uint32_t channel_count) {
+			auto config = base_audio;
+			config.codec = "opus";
+			config.enabled = enabled;
+			config.bitrate = bitrate;
+			config.sample_rate = sample_rate;
+			config.channel_count = channel_count;
+			return config;
+		};
+		std::unordered_map<std::string, moq::Audio> audios = {
+			{"a-disabled", audio(false, 512000, 48000, 2)},
+			{"b-unknown-bitrate", audio(true, std::nullopt, 48000, 2)},
+			{"c-low", audio(true, 64000, 48000, 2)},
+			{"d-mono", audio(true, 128000, 48000, 1)},
+			{"e-slow", audio(true, 128000, 44100, 2)},
+			{"f-stereo", audio(true, 128000, 48000, 2)},
+		};
+		CHECK((names(moq_source_ranked_audio(audios)) ==
+		       std::vector<std::string>{"f-stereo", "d-mono", "e-slow", "c-low", "b-unknown-bitrate",
+						"a-disabled"}));
+
+		// Only enabled renditions are candidates while any is, even one the source holds.
+		const auto all = [](const auto &) {
+			return true;
+		};
+		const auto none = [](const auto &) {
+			return false;
+		};
+		CHECK((names(moq_source_candidates(moq_source_ranked_audio(audios), all)) ==
+		       std::vector<std::string>{"f-stereo", "d-mono", "e-slow", "c-low", "b-unknown-bitrate"}));
+		// With every rendition disabled, only a held one remains, and nothing when none is held.
+		for (auto &entry : audios)
+			entry.second.enabled = false;
+		const auto held = [](const auto &entry) {
+			return entry.first == "c-low";
+		};
+		CHECK((names(moq_source_candidates(moq_source_ranked_audio(audios), held)) ==
+		       std::vector<std::string>{"c-low"}));
+		CHECK(moq_source_candidates(moq_source_ranked_audio(audios), none).empty());
+
+		// The codecs moq-audio decodes, with AAC-LC in either spelling hang parses.
+		const auto decodes = [&](const char *codec, uint32_t channels) {
+			auto config = base_audio;
+			config.codec = codec;
+			config.channel_count = channels;
+			return moq_source_audio_decodes(config);
+		};
+		for (const char *codec : {"opus", "pcm", "mp4a.40.2", "mp4a.40.02"})
+			CHECK(decodes(codec, 2));
+		for (const char *codec : {"flac", "mp4a.40.5", "mp4a.40.20", "mp4a.40.", "mp4a.40.0"})
+			CHECK(!decodes(codec, 2));
+		// moq-audio decodes AAC only in mono or stereo, unlike Opus and PCM.
+		CHECK(decodes("mp4a.40.2", 1));
+		CHECK(!decodes("mp4a.40.2", 6));
+		CHECK(decodes("opus", 6));
+		CHECK(decodes("pcm", 6));
+	}
+	report("renditions rank like hang");
+
+	// A disabled rendition is never chosen while an enabled one is available, and an
+	// undecodable top rendition (a codec nothing decodes, a layout moq-audio does not decode
+	// it in, or a channel count OBS has no layout for) falls through to the next playable one.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		auto snapshot = CatalogSnapshot(publisher);
+		const auto video_id = snapshot.video.begin()->first;
+		const auto audio_id = snapshot.audio.begin()->first;
+		auto video = snapshot.video.begin()->second;
+		auto audio = snapshot.audio.begin()->second;
+		video.track = video_id;
+		audio.track = audio_id;
+
+		moq::Catalog catalog = snapshot;
+		catalog.video.clear();
+		catalog.audio.clear();
+		// Disabled, yet it sorts first by name and outranks everything else.
+		auto disabled_video = video;
+		disabled_video.enabled = false;
+		disabled_video.preference = 10;
+		catalog.video.emplace("a", disabled_video);
+		auto bogus_video = video;
+		bogus_video.codec = "bogus";
+		bogus_video.preference = 5;
+		catalog.video.emplace("b", bogus_video);
+		// A new shape, so choosing it starts a replacement rather than keeping the playing track.
+		auto playable_video = video;
+		playable_video.coded = moq::Dimensions{(video.coded ? video.coded->width : 0) + 16, 16};
+		catalog.video.emplace("c", playable_video);
+
+		auto disabled_audio = audio;
+		disabled_audio.enabled = false;
+		disabled_audio.bitrate = 10000000;
+		catalog.audio.emplace("a", disabled_audio);
+		auto flac_audio = audio;
+		flac_audio.codec = "flac";
+		flac_audio.bitrate = 6000000;
+		catalog.audio.emplace("flac", flac_audio);
+		// HE-AAC: moq-ffi takes any AAC, but moq-audio decodes only AAC-LC.
+		auto he_aac_audio = audio;
+		he_aac_audio.codec = "mp4a.40.5";
+		he_aac_audio.description.reset();
+		he_aac_audio.bitrate = 5500000;
+		catalog.audio.emplace("he-aac", he_aac_audio);
+		// 5.1 AAC-LC: OBS has the layout, but moq-audio decodes AAC only in mono or stereo.
+		auto surround_aac_audio = audio;
+		surround_aac_audio.codec = "mp4a.40.2";
+		surround_aac_audio.description.reset();
+		surround_aac_audio.channel_count = 6;
+		surround_aac_audio.bitrate = 5200000;
+		catalog.audio.emplace("surround-aac", surround_aac_audio);
+		auto unplaceable_audio = audio;
+		unplaceable_audio.channel_count = 9;
+		unplaceable_audio.bitrate = 5000000;
+		catalog.audio.emplace("b", unplaceable_audio);
+		auto playable_audio = audio;
+		playable_audio.sample_rate += 1;
+		catalog.audio.emplace("c", playable_audio);
+
+		auto *ctx = static_cast<moq_source *>(source);
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			moq_source_subscribe_video(ctx, conn, catalog);
+			moq_source_subscribe_audio(ctx, conn, catalog);
+			CHECK(conn->pending_video && conn->pending_video->id == "c");
+			CHECK(conn->pending_audio && conn->pending_audio->id == "c");
+			// The playing tracks stay until the replacement delivers.
+			CHECK(conn->video && conn->video->id == video_id);
+			CHECK(conn->audio && conn->audio->id == audio_id);
+		}
+		destroySource(source);
+	}
+	report("disabled and undecodable renditions fall through");
+
+	// With every rendition disabled, the source holds the one it plays; with none of them
+	// held, the section is handled like an absent one.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		auto snapshot = CatalogSnapshot(publisher);
+		auto *ctx = static_cast<moq_source *>(source);
+		std::weak_ptr<Track> video;
+		std::weak_ptr<Track> audio;
+		for (auto &entry : snapshot.video)
+			entry.second.enabled = false;
+		for (auto &entry : snapshot.audio)
+			entry.second.enabled = false;
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			video = conn->video;
+			audio = conn->audio;
+			moq_source_subscribe_video(ctx, conn, snapshot);
+			moq_source_subscribe_audio(ctx, conn, snapshot);
+			CHECK(conn->video && conn->video == video.lock() && !conn->pending_video);
+			CHECK(conn->audio && conn->audio == audio.lock() && !conn->pending_audio);
+		}
+		const int frames = g_output_frames;
+		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
+
+		// A disabled rendition the source does not play is not held.
+		auto &config = snapshot.video.begin()->second;
+		config.coded = moq::Dimensions{(config.coded ? config.coded->width : 0) + 16, 16};
+		snapshot.audio.begin()->second.sample_rate += 1;
+		const int blanks = g_blank_calls;
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			moq_source_subscribe_video(ctx, conn, snapshot);
+			moq_source_subscribe_audio(ctx, conn, snapshot);
+			CHECK(!conn->video && !conn->pending_video);
+			CHECK(!conn->audio && !conn->pending_audio);
+		}
+		CHECK(g_blank_calls > blanks);
+		destroySource(source);
+	}
+	report("all-disabled section holds the playing rendition");
+
+	// A rendition's publisher epoch is part of its identity, for the active and the pending
+	// track alike: a sibling publisher restarting behind a stable catalog resubscribes.
+	{
+		TestRelay relay;
+		reset(relay.Url());
+		Publisher publisher(relay, "obs/test");
+		void *source = createSource();
+		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		auto snapshot = CatalogSnapshot(publisher);
+		auto *ctx = static_cast<moq_source *>(source);
+		{
+			std::lock_guard<std::mutex> lock(ctx->mutex);
+			const auto &conn = ctx->connection;
+			snapshot.video.begin()->second.epoch = "01900000-0000-7000-8000-000000000001";
+			snapshot.audio.begin()->second.epoch = "01900000-0000-7000-8000-000000000001";
+			moq_source_subscribe_video(ctx, conn, snapshot);
+			moq_source_subscribe_audio(ctx, conn, snapshot);
+			CHECK(conn->pending_video && conn->pending_audio);
+			const auto pending_video = conn->pending_video;
+			const auto pending_audio = conn->pending_audio;
+			// The same epoch keeps the pending track.
+			moq_source_subscribe_video(ctx, conn, snapshot);
+			moq_source_subscribe_audio(ctx, conn, snapshot);
+			CHECK(conn->pending_video == pending_video && conn->pending_audio == pending_audio);
+			// Another epoch replaces it.
+			snapshot.video.begin()->second.epoch = "01900000-0000-7000-8000-000000000002";
+			snapshot.audio.begin()->second.epoch = "01900000-0000-7000-8000-000000000002";
+			moq_source_subscribe_video(ctx, conn, snapshot);
+			moq_source_subscribe_audio(ctx, conn, snapshot);
+			CHECK(conn->pending_video && conn->pending_video != pending_video);
+			CHECK(conn->pending_audio && conn->pending_audio != pending_audio);
+		}
+		destroySource(source);
+	}
+	report("epoch change resubscribes");
+
 	// A new rendition that has not delivered a frame cannot stop the old track.
 	{
 		TestRelay relay;
 		reset(relay.Url());
 		Publisher publisher(relay, "obs/test");
 		void *source = createSource();
+		auto *ctx = static_cast<moq_source *>(source);
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0; }));
+		FreezeCatalog(ctx, publisher);
 		moq::VideoInit init{};
 		init.format = moq::VideoFormat::kAvc3;
 		init.data = TestH264Init();
@@ -1076,6 +1385,7 @@ int main()
 			moq::MediaTrackProducer::video(publisher.broadcast,
 						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
 			"replacement");
+		DeliverCatalog(ctx, CatalogPreferring(publisher, "!replacement"));
 		const int frames = g_output_frames;
 		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 10; }));
 		CHECK(publisher.WriteUntil([&] {
@@ -1093,7 +1403,9 @@ int main()
 		reset(relay.Url());
 		Publisher publisher(relay, "obs/test");
 		void *source = createSource();
+		auto *ctx = static_cast<moq_source *>(source);
 		CHECK(publisher.WriteUntil([] { return g_output_frames > 0 && g_output_audio > 0; }));
+		FreezeCatalog(ctx, publisher);
 		g_candidate_decode = failure;
 		moq::VideoInit init{};
 		init.format = moq::VideoFormat::kAvc3;
@@ -1102,6 +1414,8 @@ int main()
 			moq::MediaTrackProducer::video(publisher.broadcast,
 						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
 			"replacement video");
+		const auto preferring = CatalogPreferring(publisher, "!replacement");
+		DeliverCatalog(ctx, preferring);
 		auto write = [&] {
 			TestOk(replacement->write_frame(moq::Frame{TestH264Keyframe(), 1'000'000'000}),
 			       "replacement frame");
@@ -1114,8 +1428,8 @@ int main()
 		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
 		if (failure == 3) {
 			// Metadata-only updates must preserve the candidate's accumulated decode state.
-			auto snapshot = CatalogSnapshot(publisher);
-			auto *ctx = static_cast<moq_source *>(source);
+			auto snapshot = preferring;
+			snapshot.video.at("!replacement").label = "relabeled";
 			{
 				std::lock_guard lock(ctx->mutex);
 				auto pending = ctx->connection->pending_video;
@@ -1147,6 +1461,7 @@ int main()
 			std::lock_guard<std::mutex> lock(ctx->mutex);
 			active = ctx->connection->audio;
 		}
+		FreezeCatalog(ctx, publisher);
 		moq::AudioInit init{};
 		init.format = moq::AudioFormat::kOpus;
 		init.data = TestOpusHead();
@@ -1154,6 +1469,7 @@ int main()
 			moq::MediaTrackProducer::audio(publisher.broadcast,
 						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
 			"replacement audio");
+		DeliverCatalog(ctx, CatalogPreferring(publisher, "!replacement"));
 		std::weak_ptr<Track> candidate;
 		CHECK(publisher.WriteUntil([&] {
 			std::lock_guard<std::mutex> lock(ctx->mutex);
@@ -1190,7 +1506,9 @@ int main()
 		reset(relay.Url());
 		Publisher publisher(relay, "obs/test");
 		void *source = createSource();
+		auto *ctx = static_cast<moq_source *>(source);
 		CHECK(publisher.WriteUntil([] { return g_output_audio > 0; }));
+		FreezeCatalog(ctx, publisher);
 		moq::AudioInit init{};
 		init.format = moq::AudioFormat::kOpus;
 		init.data = TestOpusHead();
@@ -1198,7 +1516,7 @@ int main()
 			moq::MediaTrackProducer::audio(publisher.broadcast,
 						       moq::MediaTarget::kNamed{std::string("!replacement")}, init),
 			"replacement audio");
-		auto *ctx = static_cast<moq_source *>(source);
+		DeliverCatalog(ctx, CatalogPreferring(publisher, "!replacement"));
 		std::shared_ptr<Track> pending;
 		CHECK(WaitFor([&] {
 			std::lock_guard<std::mutex> lock(ctx->mutex);
