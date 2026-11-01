@@ -14,6 +14,7 @@ import { install, read } from "./counters.ts";
 import { check, digest, payload } from "./fixture.ts";
 import type { Cmaf, Phase } from "./page/cmaf.ts";
 import type { Media } from "./page/media.ts";
+import type { Dial, Mode, Racing } from "./page/racing.ts";
 import type { Delivery, Transport } from "./page/transport.ts";
 import { compare, type Row, summarize } from "./summary.ts";
 
@@ -25,7 +26,7 @@ const { values } = parseArgs({
 		variants: { type: "string" },
 		rounds: { type: "string", default: "5" },
 		warmup: { type: "string", default: "1" },
-		scenarios: { type: "string", default: "transport,cmaf,media" },
+		scenarios: { type: "string", default: "transport,cmaf,media,racing" },
 		smoke: { type: "boolean", default: false },
 		timeout: { type: "string", default: "60" },
 	},
@@ -52,7 +53,7 @@ const warmup = smoke ? 0 : integer("warmup", values.warmup, 0);
 const timeout = integer("timeout", values.timeout, 1) * 1000;
 const scenarios = new Set(values.scenarios.split(","));
 for (const scenario of scenarios)
-	if (!["transport", "cmaf", "media"].includes(scenario)) throw new Error(`unknown scenario: ${scenario}`);
+	if (!["transport", "cmaf", "media", "racing"].includes(scenario)) throw new Error(`unknown scenario: ${scenario}`);
 
 // Fixed so a run on another host or day compares like with like. Software rendering and decode:
 // a hardware path appearing or disappearing would change what is measured.
@@ -73,6 +74,8 @@ const HEADLINE = new Set([
 	"watcher_ms_per_s",
 	"publisher_ms_per_s",
 	"presented_fps",
+	"connect_p50_ms",
+	"retained_strings",
 ]);
 // Deterministic or one-off metrics from the traced, counted and probed passes.
 const INSTRUMENTED = /^(copied|allocated|gc_|frame_delay)/;
@@ -93,6 +96,44 @@ const CMAF: Cmaf[] = [
 	{ kind: "audio", sizes: Array(50).fill(160), iterations: smoke ? 2 : 200 },
 	{ kind: "video", sizes: [65536, ...Array(29).fill(4096)], iterations: smoke ? 2 : 100 },
 ];
+// One axis varies from the 16 URL x 4 reconnect x 256 character base at a time. One lane keeps
+// each dial's latency its own; the 128 URL shape takes 8 lanes to finish, so its latency is
+// contended and only its retention compares.
+type RacingShape = Pick<Racing, "mode" | "urls" | "reconnects" | "length" | "rotate" | "lanes">;
+const racingShape = (mode: Mode, shape: Partial<RacingShape> = {}): RacingShape => ({
+	mode,
+	urls: smoke ? 4 : 16,
+	reconnects: smoke ? 2 : 4,
+	length: smoke ? 64 : 256,
+	rotate: false,
+	lanes: 1,
+	...shape,
+});
+const RACING: RacingShape[] = smoke
+	? [
+			racingShape("websocket"),
+			racingShape("websocket", { rotate: true }),
+			racingShape("webtransport"),
+			racingShape("sticky"),
+			racingShape("alternate"),
+			racingShape("disabled"),
+		]
+	: [
+			racingShape("websocket"),
+			racingShape("websocket", { urls: 1 }),
+			racingShape("websocket", { urls: 128, lanes: 8 }),
+			racingShape("websocket", { reconnects: 1 }),
+			racingShape("websocket", { reconnects: 16 }),
+			racingShape("websocket", { length: 64 }),
+			racingShape("websocket", { length: 2048 }),
+			racingShape("websocket", { rotate: true }),
+			racingShape("webtransport"),
+			racingShape("sticky"),
+			racingShape("alternate"),
+			racingShape("disabled"),
+		];
+// Past the pool's two-second linger, so nothing a closed session scheduled still holds a URL.
+const RACING_LINGER_MS = 2500;
 const MEDIA = { width: 1280, height: 720, fps: 30, codec: "avc1", bitrate: 2_500_000, keyframe_ms: 1000 };
 const MEDIA_WARMUP_MS = smoke ? 1000 : 3000;
 const MEDIA_WINDOW_MS = smoke ? 3000 : 10000;
@@ -104,7 +145,7 @@ const server = Bun.serve({
 		const path = new URL(request.url).pathname;
 		if (path === "/cmaf-fixtures.json")
 			return new Response(Bun.file(new URL("../../js/hang/src/cmaf/fixtures.json", import.meta.url)));
-		const page = /^\/([a-z0-9-]+)\/(transport|cmaf|media)$/.exec(path);
+		const page = /^\/([a-z0-9-]+)\/(transport|cmaf|media|racing)$/.exec(path);
 		if (page)
 			return new Response(
 				`<!doctype html><body><script type="module" src="/${page[1]}/${page[2]}.js"></script>`,
@@ -143,6 +184,8 @@ const report = {
 		"GC pauses and reclaimed JS heap come from a separate traced pass; tracing overhead never enters a timed sample.",
 		"Copied and allocated bytes count JS-visible typed-array copies only, from a separate counted pass. Native copies (WebTransport, WebCodecs) are unavailable.",
 		"Software decode and rendering (--disable-gpu). Hardware paths are not measured.",
+		"Racing retention counts flat heap-snapshot strings holding the run's URL marker after every session closed, the pool linger passed and V8 collected. Heap growth is JSHeapUsedSize across the run and includes unrelated state V8 kept.",
+		"Racing refuses WebTransport in the page's constructor, as a blocked network fails it; the WebSocket head start still runs, so the fallback's latency matches a silent UDP drop.",
 		"Frame delay joins publisher paint time with watcher presentation time across pages on one host clock; only the probed pass reads frame ids back.",
 	],
 	samples: [] as Row[],
@@ -178,6 +221,8 @@ try {
 		if (scenarios.has("cmaf"))
 			for (const shape of CMAF) for (const variant of order) await sample(cmaf(variant, shape, round, "timed"));
 		if (scenarios.has("media")) for (const variant of order) await sample(media(variant, round, "timed"));
+		if (scenarios.has("racing"))
+			for (const shape of RACING) for (const variant of order) await sample(racing(variant, shape, round));
 	}
 	console.log("── traced and counted passes");
 	for (const variant of variants) {
@@ -508,6 +553,139 @@ async function cmaf(variant: string, shape: Cmaf, round: number, pass: Pass) {
 			record(row);
 			log(row);
 		}
+	} finally {
+		await opened.close();
+	}
+}
+
+function racingKey(shape: RacingShape) {
+	const lanes = shape.lanes > 1 ? ` ${shape.lanes} lanes` : "";
+	return `racing ${shape.mode} ${shape.urls}u x${shape.reconnects} ${shape.length}c${shape.rotate ? " rotated" : ""}${lanes}`;
+}
+
+/**
+ * Flat strings in the page's heap holding `marker` after a full collection: how many, their V8
+ * object bytes, and the characters of their snapshot names, which V8 truncates at 1024.
+ */
+async function retained(cdp: CDPSession, marker: string) {
+	const chunks: string[] = [];
+	const onChunk = ({ chunk }: { chunk: string }) => chunks.push(chunk);
+	cdp.on("HeapProfiler.addHeapSnapshotChunk", onChunk);
+	try {
+		await cdp.send("HeapProfiler.collectGarbage");
+		await cdp.send("HeapProfiler.takeHeapSnapshot", { reportProgress: false });
+	} finally {
+		cdp.off("HeapProfiler.addHeapSnapshotChunk", onChunk);
+	}
+	const snapshot = JSON.parse(chunks.join("")) as {
+		snapshot: { meta: { node_fields: string[]; node_types: [string[], ...unknown[]] } };
+		nodes: number[];
+		strings: string[];
+	};
+	const fields = snapshot.snapshot.meta.node_fields;
+	const stride = fields.length;
+	const [typeAt, nameAt, sizeAt] = ["type", "name", "self_size"].map((field) => fields.indexOf(field));
+	// Flat strings only: a cons or sliced string's name repeats characters a flat string owns.
+	const flat = snapshot.snapshot.meta.node_types[0].indexOf("string");
+	let strings = 0;
+	let bytes = 0;
+	let chars = 0;
+	for (let node = 0; node < snapshot.nodes.length; node += stride) {
+		if (snapshot.nodes[node + typeAt] !== flat) continue;
+		const name = snapshot.strings[snapshot.nodes[node + nameAt]];
+		if (!name.includes(marker)) continue;
+		strings++;
+		bytes += snapshot.nodes[node + sizeAt];
+		chars += name.length;
+	}
+	return { strings, bytes, chars };
+}
+
+async function racing(variant: string, shape: RacingShape, round: number) {
+	const key = racingKey(shape);
+	const marker = `rh${crypto.randomUUID().replaceAll("-", "")}`;
+	const config: Racing = { url: relay, marker, ...shape };
+	const opened = await open(variant, "racing");
+	try {
+		await opened.cdp.send("HeapProfiler.enable");
+		await opened.cdp.send("HeapProfiler.collectGarbage");
+		const before = await metrics(opened);
+		const start = performance.now();
+		const dials: Dial[] = await bounded(
+			opened.page.evaluate((config) => window.racing.run(config), config),
+			`${key} dials`,
+		);
+		const wall_ms = performance.now() - start;
+		await Bun.sleep(RACING_LINGER_MS);
+		// Every dialed URL extends the marker with `-`, so the bare marker the page was handed never counts.
+		const kept = await retained(opened.cdp, `${marker}-`);
+		const after = await metrics(opened);
+		if (opened.errors.length) throw new Error(opened.errors.join("; "));
+		const reconnects = shape.mode === "sticky" ? 3 : shape.reconnects;
+		if (dials.length !== shape.urls * reconnects)
+			throw new Error(`${key} ${variant}: ${dials.length} dials, expected ${shape.urls * reconnects}`);
+		// Only a refused or disabled arm fixes the winner; an open race is reported, never asserted.
+		const forced = (dial: Dial) =>
+			shape.mode === "websocket" || shape.mode === "alternate" || (shape.mode === "sticky" && dial.attempt === 0)
+				? "websocket"
+				: shape.mode === "disabled"
+					? "webtransport"
+					: undefined;
+		for (const dial of dials) {
+			const expected = forced(dial);
+			if (expected && dial.transport !== expected)
+				throw new Error(
+					`${key} ${variant}: dial ${dial.attempt} won over ${dial.transport}, expected ${expected}`,
+				);
+		}
+		const summary = (subset: Dial[]) => {
+			const ms = subset.map((dial) => dial.ms).sort((a, b) => a - b);
+			const at = (q: number) => ms[Math.min(ms.length - 1, Math.floor(q * ms.length))];
+			return {
+				websocket: subset.filter((dial) => dial.transport === "websocket").length / subset.length,
+				p50: at(0.5),
+				p95: at(0.95),
+			};
+		};
+		const all = summary(dials);
+		const first = summary(dials.filter((dial) => dial.attempt === 0));
+		// Per later attempt: sticky's second and third dials race with WebTransport open again.
+		const attempts = Object.fromEntries(
+			Array.from({ length: Math.min(reconnects, 3) - 1 }, (_, index) => index + 1).flatMap((attempt) => {
+				const phase = summary(dials.filter((dial) => dial.attempt === attempt));
+				return [
+					[`dial${attempt + 1}_p50_ms`, phase.p50],
+					[`dial${attempt + 1}_websocket_fraction`, phase.websocket],
+				];
+			}),
+		);
+		const wins = dials.filter((dial) => dial.transport === "websocket").length;
+		const row: Row = {
+			scenario: "racing",
+			key,
+			shape: { ...shape, linger_ms: RACING_LINGER_MS },
+			variant,
+			round,
+			pass: "timed",
+			delivered: { frames: dials.length, bytes: kept.bytes, digest: wins },
+			metrics: {
+				wall_ms,
+				connect_p50_ms: all.p50,
+				connect_p95_ms: all.p95,
+				dial1_p50_ms: first.p50,
+				...attempts,
+				websocket_fraction: all.websocket,
+				key_chars: Math.max(...dials.map((dial) => dial.chars)),
+				retained_strings: kept.strings,
+				retained_v8_bytes: kept.bytes,
+				retained_chars: kept.chars,
+				...(before.heap !== null && after.heap !== null && { heap_growth_bytes: after.heap - before.heap }),
+			},
+			heap: { before: before.heap, after: after.heap },
+			load: loadavg(),
+		};
+		record(row);
+		log(row);
 	} finally {
 		await opened.close();
 	}
