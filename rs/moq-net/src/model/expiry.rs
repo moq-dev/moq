@@ -4,13 +4,8 @@
 //! frame write advances, and the wall clock, which the cache pool's driver advances.
 
 use std::collections::BTreeMap;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering, fence};
 use std::time::Duration;
-
-#[cfg(loom)]
-use ::loom::sync::atomic::{AtomicBool, AtomicU64, fence};
-#[cfg(not(loom))]
-use std::sync::atomic::{AtomicBool, AtomicU64, fence};
 
 use super::Timestamp;
 
@@ -362,7 +357,7 @@ impl Wakes {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use super::*;
 

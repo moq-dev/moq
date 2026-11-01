@@ -134,7 +134,7 @@ protocol. [Peer route policy](/quest/m2/p2p/cost-scopes.md) sets the cost
 knobs and defaults.
 
 Target the public `@moq/net` interface regardless of whether its
-[browser backend](/quest/m2/rs2ts/README.md) is transitional WASM or JS-only.
+[backend](/quest/m2/rs2ts-js.md) is handwritten or built from Rust.
 Backend choice does not change the policy that watching tabs never re-serve.
 
 ### Risks
