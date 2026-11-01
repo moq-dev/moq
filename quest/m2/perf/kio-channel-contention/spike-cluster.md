@@ -5,9 +5,9 @@
 Measure a relay per worker thread, each with its own `Cluster` and origin and
 nothing shared, clustered over the
 in-memory transport (`moq_net::transport::memory`) instead
-of QUIC. Compare it with the
-[replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md), which
-shares the control plane. The spike is a draft PR that never merges; its
+of QUIC. Compare it with the replica spike, which shares the control plane;
+its numbers are in the
+[epic](/quest/m2/perf/kio-channel-contention/README.md). The spike is a draft PR that never merges; its
 numbers and a recommendation go in the
 [epic](/quest/m2/perf/kio-channel-contention/README.md).
 

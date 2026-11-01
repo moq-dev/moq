@@ -18,7 +18,11 @@ stays on its mutex.
 - Waits on the spikes (decided 2026-10-14 for the log, kept here): with
   per-thread sessions every consumer of a replica is on one thread, so its
   mutex is uncontended and a lock-free multi-reader log only pays off if the
-  shared model survives.
+  shared model survives. The replica spike (2026-11-01, in the
+  [epic](/quest/m2/perf/kio-channel-contention/README.md)) does not settle
+  it: replicas lose on low fan-out, so shared tracks would stay, and the
+  shared track it keeps is still the most contended channel, with one reader
+  per worker.
 - Audit moq-net (and moq-relay's `critical.rs`) for other state that is
   appended at the back, read by cursor, and evicted from the front, beyond
   `GroupState` frames, which the log quest already moves. List the
@@ -29,5 +33,4 @@ stays on its mutex.
 
 ## Required
 
-- [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - if per-worker replicas win, each channel's cross-core readers collapse to one flow-controlled stream per worker and adoption is likely abandoned
-- [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - the same question with nothing shared
+- [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - if a relay per thread wins, each channel's cross-core readers collapse to one flow-controlled stream per worker and adoption is likely abandoned
