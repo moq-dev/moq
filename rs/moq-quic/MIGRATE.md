@@ -9,8 +9,7 @@ How to update your code for each breaking change, newest first.
 Wait for `Event::Connected` before opening streams or sending application data.
 `Connection::has_0rtt`, `accepted_0rtt`, and the `crypto::Session::early_crypto` and `early_data_accepted` hooks are gone.
 Custom crypto sessions no longer implement those hooks.
-Leave early data off in caller-supplied rustls configs, as rustls does by default, since the transport discards 0-RTT packets.
-Session tickets still resume 1-RTT handshakes.
+Rustls configs disable early data, including caller-supplied configs, while session tickets still resume 1-RTT handshakes.
 
 ### QUIC APIs follow their consumers
 

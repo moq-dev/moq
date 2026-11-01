@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### QUIC early data is disabled
 
-The shared moq-quic core no longer sends early data and discards 0-RTT packets, so leave early data off in caller-supplied rustls server configs, as rustls does by default.
+The shared moq-quic core no longer sends or accepts early data, including with caller-supplied rustls server configs.
 The uring driver already returns established sessions, so no source migration is needed.
 TLS session tickets still enable resumed 1-RTT handshakes.
 
