@@ -35,24 +35,31 @@ JSR's repository OIDC trust while the token is unset. The repository's
 `MBX_R2_*` pair is read-only: a branch's write to `mbx-moq-dev` is refused
 with AccessDenied.
 
+Prepared in [moq-dev/moq#7202](https://github.com/moq-dev/moq/pull/7202): the
+workflow backport to `release`, including its legacy Cachix publishers and
+JSR token handling. Its moq-bot jobs name `bot`, as on `main`.
+
+Done 2026-10-31 for the backport's legacy Cachix publishers: `publish` also
+admits `moq-boy-v*`, `moq-gst-v*`, and `libmoq-v*` tags, and the `release
+tags` ruleset now also covers `libmoq-v*`. The moq-bot key
+(`APP_CLIENT_ID`, `APP_PRIVATE_KEY`) already lives in `bot` and `publish`;
+the repository's copy and its access to the organization's are gone.
+
 What remains, in order. Deleting a repository-level secret earlier breaks a
 publish, since jobs that do not name `publish` still read it:
 
-1. Backport the workflow changes to `release`. Release pushes and release
-   tags run `release`'s own copies of the workflows, which differ widely from
-   `main`'s.
+1. Land the backport. Release pushes and tags run `release`'s own workflow
+   copies, so it must land before repository credentials are removed.
 2. The maintainer copies each value into the `publish` Environment:
    `CARGO_REGISTRY_TOKEN`, `CLOUDFLARE_API_TOKEN`, `DOCKER_USERNAME`,
    `DOCKER_PASSWORD`, `MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`,
    `SIGNING_KEY`, `SIGNING_PASSWORD`, `WINGET_TOKEN`, `R2_ACCESS_KEY_ID`,
-   `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, `CACHIX_AUTH_TOKEN`,
-   `APP_PRIVATE_KEY` (the value jobs use today, the repository's, which
-   shadows the organization's) and `DISCORD_WEBHOOK`.
+   `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID`, `CACHIX_AUTH_TOKEN` and
+   `DISCORD_WEBHOOK` (today the organization's).
 3. Then deletes those repository secrets, the unused ones
    (`GCP_SERVICE_ACCOUNT_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
-   `META_MODEL_API_KEY`, `APP_ID`), and this repository's access to the
-   organization's `APP_PRIVATE_KEY` and `DISCORD_WEBHOOK`. `APP_CLIENT_ID`
-   and `APP_ID` are identifiers and can stay. `MBX_R2_*` stays.
+   `META_MODEL_API_KEY`), and this repository's access to the
+   organization's `DISCORD_WEBHOOK`. `MBX_R2_*` stays.
 4. The maintainer names the Environment in each trusted publisher: npm's
    (`npm`, for every `@moq/*` package), PyPI's (`pypi`, for `moq-rs` and
    `moq-ffi`) and pub.dev's (`pub.dev`, for `moq` and `moq_ffi`). Until then a
