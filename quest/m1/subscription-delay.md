@@ -19,6 +19,8 @@ Decided 2026-10-30 (maintainer, follow-up planning): m1, because it breaks the p
 
   Each one's omitted or zeroed form becomes 0, and unlimited stays expressible. Dart defaults the parameter to `Duration.zero`, so an explicit `null` stays unlimited. Go's nil and C's unset `present` can't mean both, so each gains an explicit unlimited flag in the delay; the PR names it. The breaking binding changes get MIGRATE notes under `## Unreleased`.
 
+- **Not datagram subscriptions:** a datagram track's request carries only a priority and takes no `Delay` ([Datagram tracks](/quest/m1/datagram-tracks/README.md), maintainer 2026-11-01).
+
 Public API: breaking in every binding. Wire: lite-07 SUBSCRIBE and SUBSCRIBE_UPDATE gain `min`.
 
 ## Related

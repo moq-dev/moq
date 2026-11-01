@@ -25,14 +25,14 @@ f235fcfcbd, df0bd5c36f, 342445f251, 06765f4c1a, 4927167904, f52848d634,
 plus `cursor_floor` and a pre-06 re-pin branch, encoding three wire
 generations of "start".
 
-- On lite-07 a stream or a DROP accounts for every sequence except one sent
-  only as a datagram, which can be lost unseen
-  (`a_lost_datagram_delays_the_end` in `tests/integration/track_tail.rs`).
-  So the subscriber's end is "owed range covered and no stream active",
-  except that a hole a datagram may have left still settles within a bounded
-  grace; only reliable accounting of datagram sequences could remove that.
-  Keep `Settle`'s full grace for lite-05/06 and moq-transport behind one
-  version predicate.
+- On lite-07 every owed range is covered by delivered stream groups or a
+  DROP, since
+  [Datagram tracks](/quest/m1/datagram-tracks/README.md) takes datagrams out
+  of stream tracks (maintainer, 2026-11-01). The subscriber's end is "owed
+  range covered and no stream active", with no datagram grace;
+  `a_lost_datagram_delays_the_end` becomes a lite-05/06 case. Keep
+  `Settle`'s full grace for lite-05/06 and moq-transport behind one version
+  predicate.
 - Lite-07 is unpublished, so sending a fresh START per update can remove the
   `requested == start` gate (`lite/subscriber.rs`, about line 4898).
 

@@ -45,10 +45,9 @@ resolved end and it resolves the end itself (`wire_ranges`), so only absolute
 bounded ranges complete upstream. A hole on a live track counts as dropped
 only once the feed gives up on it, past the arrivals grace;
 [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) owns judging
-such a miss sooner. A range served only by datagrams never completes: they
-resolve no SUBSCRIBE_START, so a FIN overtaking them leaves the receiver no
-owed range to wait on. Datagram fills need the receiver told what is owed
-first.
+such a miss sooner. A range never covers a datagram on lite-07, since datagrams become their
+own track kind ([Datagram tracks](/quest/m1/datagram-tracks/README.md),
+maintainer 2026-11-01), so datagram fills need no handling here.
 
 Update `drafts/draft-lcurley-moq-lite.md` with each wire change here. Run
 `just drafts check` and `just test interop --all`.
