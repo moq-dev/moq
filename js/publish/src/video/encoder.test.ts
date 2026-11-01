@@ -1346,7 +1346,6 @@ test("a failed video encoder disables only its rendition and recovers on a fresh
 test("a new network broadcast clears a video encoder failure and its maxima", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockResolvedValue({ supported: true });
-	using _now = spyOn(performance, "now").mockReturnValue(0);
 	const flush = async () => {
 		for (let i = 0; i < 10; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
 	};
