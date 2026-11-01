@@ -1999,13 +1999,21 @@ impl TrackState {
 	/// A group that starts above `frame_start` is also replaceable: it cannot answer a
 	/// request from there, so the wider producer takes the slot. Readers already
 	/// draining the old one keep their own handle.
+	///
+	/// A fetched backfill never holds the sequence against the feed: subscribers read only
+	/// the feed's groups, so its copy takes the slot, and the fetch's readers keep theirs.
 	fn claim_sequence(&mut self, sequence: u64, frame_start: u64) -> Result<()> {
-		// Either copy that can still answer from `frame_start` takes the sequence.
-		if self.covering_group(sequence, frame_start).is_some() {
+		if self.holding_group(sequence, frame_start).is_some() {
 			return Err(Error::Duplicate);
 		}
 		self.displace(sequence);
 		Ok(())
+	}
+
+	/// The copy of the feed's `sequence` that still answers from `frame_start`, if any.
+	fn holding_group(&self, sequence: u64, frame_start: u64) -> Option<&group::Handle> {
+		self.lookup.get(&sequence).filter(|slot| slot.visible)?;
+		self.covering_group(sequence, frame_start)
 	}
 
 	/// Insert a freshly-created group into the cache.
@@ -3111,7 +3119,7 @@ impl Producer {
 		}
 		let start = received.unwrap_or(0);
 		let content = if received.is_some() {
-			if state.covering_group(info.sequence, start).is_some() {
+			if state.holding_group(info.sequence, start).is_some() {
 				return Err(Error::Duplicate);
 			}
 			state.content_for_copy(info.sequence)?
@@ -5406,8 +5414,8 @@ impl kio::Task for Fetching {
 	type Output = Result<group::Consumer>;
 
 	fn poll(&mut self, waiter: &kio::Waiter) -> Poll<Self::Output> {
-		// Made before a front accepted its logical track, which caches nothing: the
-		// serving route answers instead.
+		// Made before a front took its logical track, which caches nothing: the serving
+		// route answers instead.
 		if self.resume.is_none()
 			&& let Some(routes) = self.state.read().routes.clone()
 		{
@@ -8236,9 +8244,6 @@ pub struct Request {
 	// Whether the accepted track starts idle; see [`Self::idle`].
 	idle: bool,
 
-	// Served from a front's routes; see [`Self::routes`].
-	routes: Option<super::resume::Consumer>,
-
 	// A track the producer reserved, listed by its broadcast once accepted.
 	list: Option<broadcast::ListOnAccept>,
 }
@@ -8267,7 +8272,6 @@ impl Request {
 			stats: stats::Scope::default(),
 			requested_start: RequestedStart::Unset,
 			idle: false,
-			routes: None,
 			list: None,
 		}
 	}
@@ -8279,10 +8283,12 @@ impl Request {
 	}
 
 	/// Serve the track from a front's routes, read straight from their copies; see
-	/// [`super::resume`]. Applied atomically with [`Self::accept`], so no reader ever sees
-	/// the accepted track without it.
-	pub(super) fn routes(mut self, routes: super::resume::Consumer) -> Self {
-		self.routes = Some(routes);
+	/// [`super::resume`]. Applied at once, so a fetch made before [`Self::accept`] already
+	/// reaches the copy whose info is still in flight.
+	pub(super) fn routes(self, routes: super::resume::Consumer) -> Self {
+		if let Ok(mut state) = self.state.write() {
+			state.routes = Some(routes);
+		}
 		self
 	}
 
@@ -8401,7 +8407,6 @@ impl Request {
 				if self.idle {
 					state.set_idle();
 				}
-				state.routes = self.routes;
 				true
 			}
 			Err(_) => false,
@@ -18242,6 +18247,50 @@ mod test {
 		assert_eq!(subscriber.assert_group().sequence, 5);
 		assert_eq!(subscriber.assert_group().sequence, 6);
 		subscriber.assert_no_group();
+	}
+
+	/// The feed's copy of a group a fetch cached first takes the slot, so a subscriber reads
+	/// it, while the fetch's reader keeps its own copy, abandoned or not.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn the_feed_takes_a_group_a_fetch_cached_first() {
+		let (producer, _pool) = pooled_producer(1 << 40);
+		let dynamic = producer.requests();
+		let consumer = producer.consume();
+		let mut subscriber = producer.subscribe(replay());
+
+		let pending = consumer.fetch_group(0, None);
+		let req = dynamic
+			.requested_fill_group()
+			.now_or_never()
+			.expect("should not block")
+			.unwrap();
+		let mut fetching = req.accept(Info::timed()).unwrap();
+		fetching
+			.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"snapshot"))
+			.unwrap();
+		let mut fetched = pending.await.unwrap();
+		subscriber.assert_no_group();
+
+		let mut live = producer
+			.create_group_at(0u64.into(), 0)
+			.expect("the feed takes the slot");
+		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"snapshot"))
+			.unwrap();
+		let mut group = subscriber.assert_group();
+		assert_eq!(group.sequence, 0);
+		assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"snapshot");
+		assert_eq!(&fetched.read_frame().await.unwrap().unwrap().payload[..], b"snapshot");
+
+		// The fetch giving up never cuts the group short for the subscriber.
+		drop(fetched);
+		fetching.abort(Error::Cancel).unwrap();
+		live.finish().unwrap();
+		assert!(group.read_frame().await.unwrap().is_none());
+		assert!(matches!(
+			producer.create_group_at(0u64.into(), 0),
+			Err(Error::Duplicate)
+		));
 	}
 
 	/// Fetched backfill isn't in arrival order, so it ages out through the eviction

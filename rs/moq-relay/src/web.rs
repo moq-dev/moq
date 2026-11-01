@@ -394,12 +394,28 @@ impl Web {
 	/// once across the merged router). GET CORS is applied to the complete router by [`Self::serve`],
 	/// including any routes the embedder merges in without their own policy.
 	pub fn routes(&self) -> Router {
+		// These responses depend on the caller's grant, including when auth or
+		// extraction fails. Publisher bytes must never become active content.
+		let granted = Router::new()
+			.route("/announced", get(serve_announced))
+			.route("/announced/{*prefix}", get(serve_announced))
+			.route("/fetch/{*path}", get(serve_fetch))
+			.layer(axum::middleware::map_response(async |mut response: Response| {
+				let headers = response.headers_mut();
+				headers.insert(
+					http::header::CACHE_CONTROL,
+					http::HeaderValue::from_static("private, no-store"),
+				);
+				headers.insert(
+					http::header::X_CONTENT_TYPE_OPTIONS,
+					http::HeaderValue::from_static("nosniff"),
+				);
+				response
+			}));
 		let app = Router::new()
 			.route("/health", get(serve_health))
 			.route("/certificate.sha256", get(serve_fingerprint))
-			.route("/announced", get(serve_announced))
-			.route("/announced/{*prefix}", get(serve_announced))
-			.route("/fetch/{*path}", get(serve_fetch));
+			.merge(granted);
 
 		// If WebSocket is enabled, add the WebSocket route. Both `/` and
 		// `/{*path}` map to the same handler so a client that dials a bare
@@ -1202,7 +1218,11 @@ impl IntoResponse for ServeGroup {
 				}
 			}
 		});
-		Response::new(Body::from_stream(frames))
+		(
+			[(http::header::CONTENT_TYPE, "application/octet-stream")],
+			Body::from_stream(frames),
+		)
+			.into_response()
 	}
 }
 
@@ -1212,6 +1232,92 @@ mod tests {
 	use rcgen::{CertificateParams, KeyPair};
 	use std::io::Write;
 	use tempfile::TempDir;
+
+	#[tokio::test(start_paused = true)]
+	async fn authenticated_http_responses_are_private_and_cannot_be_sniffed() {
+		let dir = TempDir::new().unwrap();
+		let (_, cert, _) = make_certs(&dir);
+		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(cert).unwrap()).unwrap();
+		let auth = crate::auth::Config {
+			public_subscribe: vec![moq_auth::Pattern::all()],
+			..Default::default()
+		}
+		.init("test", &moq_tokio::tls::Connect::default(), false)
+		.unwrap();
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let broadcast = cluster.origin.create_broadcast("room").unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let track = broadcast
+			.create_track(
+				"video",
+				moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+			)
+			.unwrap();
+		let mut group = track.append_group().unwrap();
+		const PAYLOAD: &[u8] = b"<!doctype html><script>alert(1)</script>";
+		group.write_frame(moq_net::Timestamp::ZERO, PAYLOAD).unwrap();
+		group.finish().unwrap();
+		let mut refused = Web::new(
+			auth::Auth::refuse("test"),
+			cluster.clone(),
+			certificates.clone(),
+			Config::default(),
+		)
+		.routes();
+		for path in ["/fetch/room/video", "/announced/room"] {
+			let mut request = http::Request::builder().uri(path).body(Body::empty()).unwrap();
+			request
+				.extensions_mut()
+				.insert(ConnectInfo("127.0.0.1:1234".parse::<net::SocketAddr>().unwrap()));
+			let response = refused.call(request).await.unwrap();
+			assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+			assert_eq!(response.headers()[http::header::CACHE_CONTROL], "private, no-store");
+			assert_eq!(response.headers()[http::header::X_CONTENT_TYPE_OPTIONS], "nosniff");
+		}
+		let web = Web::new(auth, cluster, certificates, Config::default());
+		let mut routes = web.routes();
+		for (path, expected, content_type) in [
+			(
+				"/fetch/room/video?group=0",
+				StatusCode::OK,
+				Some("application/octet-stream"),
+			),
+			("/fetch/room/video?group=1", StatusCode::NOT_FOUND, None),
+			("/fetch/room/video?group=invalid", StatusCode::BAD_REQUEST, None),
+			("/announced/room", StatusCode::OK, Some("text/plain; charset=utf-8")),
+			("/announced", StatusCode::OK, Some("text/plain; charset=utf-8")),
+		] {
+			let mut request = http::Request::builder().uri(path).body(Body::empty()).unwrap();
+			request
+				.extensions_mut()
+				.insert(ConnectInfo("127.0.0.1:1234".parse::<net::SocketAddr>().unwrap()));
+			let response = routes.call(request).await.unwrap();
+			assert_eq!(response.status(), expected, "{path}");
+			assert_eq!(
+				response.headers().get(http::header::CACHE_CONTROL).unwrap(),
+				"private, no-store",
+				"{path}"
+			);
+			assert_eq!(
+				response.headers().get(http::header::X_CONTENT_TYPE_OPTIONS).unwrap(),
+				"nosniff",
+				"{path}"
+			);
+			if let Some(content_type) = content_type {
+				assert_eq!(
+					response.headers().get(http::header::CONTENT_TYPE).unwrap(),
+					content_type,
+					"{path}"
+				);
+			}
+			if path == "/fetch/room/video?group=0" {
+				assert_eq!(
+					axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+					PAYLOAD
+				);
+			}
+		}
+	}
 
 	#[tokio::test(start_paused = true)]
 	async fn http_refusals_count_at_both_endpoints() {
