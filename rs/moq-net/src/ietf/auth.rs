@@ -189,10 +189,8 @@ pub(super) async fn refuse_going_away(mut stream: Stream<Transport, Version>) ->
 		code: GOING_AWAY,
 		reason: "going away".to_string(),
 	};
-	stream.writer.encode_message(&reply).await?;
-	// A peer dropping the response after reading the refusal is a normal end.
-	let _ = stream.writer.close().await;
-	Ok(())
+	stream.writer.buffer_message(AuthError::ID, &reply)?;
+	super::request_stream::deliver(&mut stream.writer).await
 }
 
 /// What the peer's connection credential earns by default: publishing what our

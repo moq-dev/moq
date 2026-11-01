@@ -438,10 +438,11 @@ pub struct Goaway {
 	)]
 	pub redirect: Redirect,
 
-	/// How long the old session keeps serving after its replacement connects, e.g.
-	/// "10s" or "500ms". This is a cap: a GOAWAY naming a shorter deadline wins,
-	/// since the peer force-closes at its own deadline regardless, but a longer one
-	/// does not extend it. Defaults to 10 seconds.
+	/// The longest the old session keeps serving after a GOAWAY, e.g. "10s" or
+	/// "500ms". It closes sooner, once its replacement is up and it carries no
+	/// subscription or fetch. A GOAWAY naming a shorter deadline wins, since the peer
+	/// force-closes at its own deadline regardless, but a longer one does not extend
+	/// it. Defaults to 10 seconds.
 	/// `None` uses the default; zero disables this duration.
 	#[usage(
 		name = "connect-goaway-handover",
@@ -1727,8 +1728,11 @@ enum Ended {
 /// of leaving an orphan holding the connection open.
 struct Draining {
 	session: moq_net::Session,
+	/// Resolves once the session closes, on its own or through [`Self::poll_idle`].
 	closed: std::pin::Pin<Box<dyn Future<Output = ()> + Send>>,
 	deadline: std::pin::Pin<Box<moq_clock::Sleep>>,
+	/// Whether [`Self::poll_idle`] started the graceful close.
+	closing: bool,
 	/// Mirrors the session into [`State::predecessor`] for as long as this lives.
 	state: kio::Producer<State>,
 }
@@ -1750,6 +1754,7 @@ impl Draining {
 			session,
 			closed,
 			deadline,
+			closing: false,
 			state: state.clone(),
 		}
 	}
@@ -1757,6 +1762,23 @@ impl Draining {
 	/// Close the old session now, whatever remains of its window.
 	fn retire(&mut self) {
 		self.session.abort(moq_net::Error::GoawayTimeout);
+	}
+
+	/// Close the old session gracefully once it carries no subscription or fetch.
+	///
+	/// Only while a replacement serves: until then everything new still lands here. The
+	/// handover window still bounds the close.
+	fn poll_idle(&mut self, waiter: &kio::Waiter) {
+		if self.closing || self.session.poll_idle(waiter).is_pending() {
+			return;
+		}
+		tracing::debug!("old session carries nothing after GOAWAY; closing");
+		self.closing = true;
+		let session = self.session.clone();
+		self.closed = Box::pin(async move {
+			// A drain cut short by its own deadline still ends the session.
+			let _ = session.close().await;
+		});
 	}
 
 	/// Poll the drain; `true` once it is over and the handle should be released.
@@ -1821,7 +1843,8 @@ async fn sleep_draining(delay: Duration, draining: &mut Option<Draining>, shared
 
 /// Wait for `session` to close or receive a GOAWAY, forwarding its send/recv bandwidth estimates
 /// into the persistent producers meanwhile so [`Connection`] consumers track the live estimates
-/// across the connection, and draining any predecessor left over from an earlier migration.
+/// across the connection, and closing any predecessor left over from an earlier migration once
+/// it carries nothing.
 ///
 /// One `poll_*` step drives it all: [`poll_forward`] mirrors each kio bandwidth estimate, the
 /// GOAWAY consumer is a kio channel, and the transport's close future (the one non-kio source) is
@@ -1846,8 +1869,11 @@ async fn run_session(
 		poll_forward(&mut send, &shared.send_bw, waiter);
 		recv.poll(&shared.recv_bw, waiter, || session.recv_bandwidth());
 
-		// Retire the predecessor once it closes or overstays its handover window.
-		// The replacement is already serving, so the state stays as it is.
+		// The replacement serves, so a predecessor carrying nothing closes now. One that
+		// closes or overstays its handover window retires, and the state stays as it is.
+		if let Some(old) = draining.as_mut() {
+			old.poll_idle(waiter);
+		}
 		poll_draining(draining, waiter);
 
 		// Checked before the close arm: a GOAWAY means the session is still up, and

@@ -10,7 +10,7 @@ pub(crate) struct Number;
 impl SerializeAs<u64> for Number {
 	fn serialize_as<S: serde::Serializer>(value: &u64, serializer: S) -> Result<S::Ok, S::Error> {
 		if *value > crate::catalog::MAX_SAFE_INTEGER {
-			return Err(serde::ser::Error::custom("snapshot integer exceeds JSON safe range"));
+			return Err(serde::ser::Error::custom("integer exceeds the JSON safe range"));
 		}
 		value.serialize(serializer)
 	}
@@ -19,7 +19,7 @@ impl<'de> DeserializeAs<'de, u64> for Number {
 	fn deserialize_as<D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
 		let value = u64::deserialize(deserializer)?;
 		if value > crate::catalog::MAX_SAFE_INTEGER {
-			return Err(serde::de::Error::custom("snapshot integer exceeds JSON safe range"));
+			return Err(serde::de::Error::custom("integer exceeds the JSON safe range"));
 		}
 		Ok(value)
 	}
