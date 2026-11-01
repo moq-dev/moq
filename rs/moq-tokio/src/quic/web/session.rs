@@ -1026,7 +1026,6 @@ impl web_transport_trait::Session for Session {
 }
 
 #[cfg(all(test, any(feature = "aws-lc-rs", feature = "ring")))]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::{
 		io::{self, IoSliceMut},
@@ -1100,6 +1099,28 @@ mod tests {
 	) {
 		let (client, server, endpoints, _) = gated_pair().await;
 		(client, server, endpoints)
+	}
+
+	#[tokio::test]
+	#[tracing_test::traced_test]
+	async fn connect_credentials_stay_out_of_traces() {
+		let (client, server, _endpoints) = pair().await;
+		let url: url::Url = "https://localhost/room?jwt=url-credential".parse().unwrap();
+		let request = ConnectRequest::new(url)
+			.with_header(http::header::AUTHORIZATION, "Bearer header-credential".parse().unwrap())
+			.with_header(http::header::COOKIE, "session=cookie-credential".parse().unwrap());
+		let accept = async {
+			let request = crate::quic::web::Connecting::accept(&server).await.unwrap();
+			assert_eq!(request.headers[http::header::COOKIE], "session=cookie-credential");
+			request.respond(http::StatusCode::OK).await.unwrap()
+		};
+		let (client, server) = tokio::join!(Connected::open(&client, request), accept);
+		assert_eq!(client.unwrap().request.url, server.request.url);
+		assert!(logs_contain("sending CONNECT request"));
+		assert!(logs_contain("received CONNECT request"));
+		for secret in ["url-credential", "header-credential", "cookie-credential"] {
+			assert!(!logs_contain(secret));
+		}
 	}
 
 	async fn gated_pair() -> (
@@ -1387,7 +1408,7 @@ mod tests {
 			)
 		};
 		// Without the header the server never surfaces the streams, so bound the wait.
-		let (uni, bi) = tokio::time::timeout(Duration::from_secs(10), read).await.unwrap();
+		let (uni, bi) = moq_clock::timeout(Duration::from_secs(10), read).await.unwrap();
 		assert!(matches!(uni, crate::quic::web::ReadError::Reset(7)), "{uni:?}");
 		assert!(matches!(bi, crate::quic::web::ReadError::Reset(8)), "{bi:?}");
 	}
@@ -1425,7 +1446,7 @@ mod tests {
 			(uni, client_bi.read_chunk(usize::MAX).await)
 		};
 		// Without the header the server never surfaces the stream, so bound the wait.
-		let (uni, bi) = tokio::time::timeout(Duration::from_secs(10), read).await.unwrap();
+		let (uni, bi) = moq_clock::timeout(Duration::from_secs(10), read).await.unwrap();
 		assert!(matches!(uni, Err(crate::quic::web::ReadError::Reset(0))), "{uni:?}");
 		assert!(matches!(bi, Err(crate::quic::web::ReadError::Reset(0))), "{bi:?}");
 	}
@@ -1460,7 +1481,7 @@ mod tests {
 				}
 			}
 		};
-		let (uni, bi) = tokio::time::timeout(Duration::from_secs(10), async {
+		let (uni, bi) = moq_clock::timeout(Duration::from_secs(10), async {
 			tokio::join!(stopped(uni), stopped(bi))
 		})
 		.await

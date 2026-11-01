@@ -176,6 +176,7 @@ broadcast, and producers advertise it in the catalog.
    AnnounceEventUpdate
    AnnounceEventEnd
    AnnounceEventRestart
+   AnnounceEventTakeover
 ```
 
 ## Data types
