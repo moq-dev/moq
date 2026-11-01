@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 /// (the broadcast's one wall-clock mapping), the data sections
 /// (`json`, `binary`) for application tracks that aren't media, and the optional `m2ts` (a
 /// transport stream carried whole), plus `stats` naming the publisher's media snapshot track and
-/// `echo` soliciting viewer feedback under a relative broadcast prefix.
+/// `echo` soliciting viewer feedback under a relative broadcast prefix, and `contributions` naming
+/// whole broadcasts for explicit selection.
 /// Applications extend it with their own root sections (e.g. `scte35`) through `E`. The catalog
 /// does not deny unknown fields, so a base consumer ignores the extra sections and an extended
 /// catalog stays wire-compatible. See the `extension_roundtrip` test.
@@ -86,6 +87,12 @@ pub struct Catalog<E = ()> {
 	/// An `echo` value without a string `path` decodes as absent, the same as [`stats`](Self::stats).
 	pub echo: Option<crate::catalog::Echo>,
 
+	/// Whole broadcasts listed for explicit, lazy selection, keyed by contribution ID.
+	///
+	/// Listing one subscribes to nothing; see [`Contribution`](crate::catalog::Contribution).
+	/// Omitted from the wire when empty. A malformed entry refuses the catalog.
+	pub contributions: std::collections::BTreeMap<String, crate::catalog::Contribution>,
+
 	/// Application-defined root sections, flattened alongside the base catalog sections.
 	///
 	/// The root `version` is reserved: serializing computes it from the base sections, and fails if
@@ -156,6 +163,9 @@ struct Wire<E> {
 	#[serde(default, deserialize_with = "crate::catalog::deserialize_echo")]
 	echo: Option<crate::catalog::Echo>,
 
+	#[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+	contributions: std::collections::BTreeMap<String, crate::catalog::Contribution>,
+
 	#[serde(flatten, serialize_with = "serialize_ext")]
 	ext: E,
 }
@@ -190,6 +200,7 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			m2ts,
 			stats,
 			echo,
+			contributions,
 			ext,
 		} = wire;
 		Self {
@@ -202,6 +213,7 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			m2ts,
 			stats,
 			echo,
+			contributions,
 			ext,
 		}
 	}
@@ -503,6 +515,33 @@ mod test {
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 	}
 
+	/// A contribution round-trips, stays off the wire when none is listed, and a malformed entry
+	/// refuses the catalog rather than being dropped.
+	#[test]
+	fn contributions_roundtrip_and_refuse_malformed_entries() {
+		let json = r#"{"contributions":{"alice":{"broadcast":"./alice.hang"}},"video":{"renditions":{"alice":{"codec":"avc1.64001f","container":{"kind":"legacy"}}}}}"#;
+		let catalog = Catalog::<()>::from_str(json).unwrap();
+		assert_eq!(
+			catalog.contributions["alice"],
+			crate::catalog::Contribution::new(moq_net::path::Relative::new("./alice.hang").unwrap())
+		);
+		// Contribution IDs are their own namespace, so one may share a rendition's ID.
+		assert!(catalog.check_renditions().is_ok());
+		assert!(catalog.video.renditions.contains_key("alice"));
+		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
+		assert!(!Catalog::<()>::default().to_json().unwrap().contains("contributions"));
+
+		for bad in [
+			r#"{"contributions":[]}"#,
+			r#"{"contributions":{"alice":null}}"#,
+			r#"{"contributions":{"alice":{}}}"#,
+			r#"{"contributions":{"alice":{"broadcast":42}}}"#,
+			r#"{"contributions":{"alice":{"broadcast":"./alice.hang","epoch":"not-an-epoch"}}}"#,
+		] {
+			assert!(Catalog::<()>::from_str(bad).is_err(), "{bad} must be refused");
+		}
+	}
+
 	/// Every reference-bearing section carries an optional epoch beside its `broadcast`.
 	#[test]
 	fn reference_epochs_roundtrip_in_every_section() {
@@ -511,6 +550,7 @@ mod test {
 		const EPOCH: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
 		let encoded = format!(
 			r#"{{
+				"contributions": {{"c": {{"broadcast": "./a", "epoch": "{EPOCH}"}}}},
 				"video": {{"renditions": {{"v": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "avc1.64001f", "container": {{"kind": "legacy"}}}}}}}},
 				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
 				"text": {{"renditions": {{"t": {{"broadcast": "./a", "epoch": "{EPOCH}", "format": "vtt"}}}}}},
@@ -530,6 +570,7 @@ mod test {
 		for reference in references {
 			assert_eq!(reference.epoch(), Some(&epoch));
 		}
+		assert_eq!(catalog.contributions["c"].epoch.as_ref(), Some(&epoch));
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 
 		// Omitted stays omitted, and a malformed or noncanonical epoch refuses the catalog.

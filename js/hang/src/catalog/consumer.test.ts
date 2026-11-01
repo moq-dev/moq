@@ -45,6 +45,12 @@ test("the shared containment check covers every section carrying a broadcast ref
 		expect(() => checkResolvable(reference("../../x"), base)).toThrow(EscapingBroadcast);
 		expect(checkResolvable(reference("../x"), base)).toBeDefined();
 	}
+
+	// A contribution is a whole broadcast, keyed directly under its section.
+	const contribution = (broadcast: string) =>
+		({ contributions: { entry: { broadcast: Moq.Path.normalizeRelative(broadcast) } } }) as Root;
+	expect(() => checkResolvable(contribution("../../x"), base)).toThrow(EscapingBroadcast);
+	expect(checkResolvable(contribution("../x"), base)).toBeDefined();
 });
 
 test("watch yields a catalog with many renditions", async () => {

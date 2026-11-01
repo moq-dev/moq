@@ -7,8 +7,9 @@
 //! (evicted, or a gap the feed skipped). A hole the ledger still waits for is deferred and
 //! judged again as the feed moves.
 //!
-//! Each sequence is judged once, so a group evicted after the reader judged it cached is
-//! not a miss: judging it again would refill a group an arrival-order reader already took.
+//! Each sequence is judged once, except a group evicted after the reader judged it cached
+//! and before it took it: judged again as a miss, once. A refill evicted again before it is
+//! taken is given up, so a slow reader's refills cannot evict each other without bound.
 //!
 //! A start is no promise, since a group below it may still arrive late. A hole under it is
 //! asked at once, but a refusal is final only once the ledger gives up on it too; until
@@ -18,12 +19,14 @@
 use std::{
 	collections::{BTreeMap, BTreeSet},
 	ops::{self, RangeInclusive},
+	sync::{Arc, Mutex, PoisonError},
 	task::Poll,
 	time::Duration,
 };
 
 use rangemap::{RangeInclusiveSet, RangeSet};
 
+use super::super::delivered::Delivered;
 pub(super) use super::fill::Asking;
 use super::fill::{Ask, FillState, Join};
 use super::{Drift, Order, Position, TrackState};
@@ -60,6 +63,12 @@ pub(super) struct Misses {
 	filled: BTreeSet<u64>,
 	/// Never asked again: named dropped to the reader.
 	given_up: RangeSet<u64>,
+	/// Where the track leaves what it evicts that this reader judged cached, once it judged.
+	inbox: Option<Inbox>,
+	/// The track's eviction count this reader last emptied its inbox at.
+	evictions: u64,
+	/// Judged again after an eviction, within the judged span: never refilled twice.
+	refilled: RangeSet<u64>,
 }
 
 /// A run of misses the reader gives up, for the drop cursor to name.
@@ -190,8 +199,14 @@ impl Misses {
 		&self.given_up
 	}
 
-	/// The next answered group still cached in `order`, forgetting one evicted before it was
-	/// read.
+	/// What was refilled after an eviction and not handed out yet.
+	#[cfg(all(test, feature = "async"))]
+	pub fn refilled(&self) -> &RangeSet<u64> {
+		&self.refilled
+	}
+
+	/// The next answered group still cached in `order`, giving up one evicted before it was
+	/// read: [`Self::judge`] asked a first eviction again, so this one was refilled already.
 	pub fn next_filled(
 		&mut self,
 		state: &TrackState,
@@ -213,8 +228,13 @@ impl Misses {
 		}
 	}
 
-	/// Take `sequence` as handed out, if a fill answered it.
+	/// Take `sequence` as handed out, if a fill answered it. A refill handed out is never
+	/// judged again, so it is forgotten too.
 	pub fn take_filled(&mut self, sequence: u64) {
+		// The last sequence is never judged, so never refilled.
+		if let Some(end) = sequence.checked_add(1) {
+			self.refilled.remove(sequence..end);
+		}
 		if self.filled.remove(&sequence) {
 			self.release(sequence);
 		}
@@ -336,6 +356,10 @@ impl Misses {
 								taken.remove(sequence..sequence + 1);
 							}
 						}
+						// Seen cached, though judging may not run again before it is evicted.
+						if let Some(inbox) = &self.inbox {
+							inbox.saw(state.cached);
+						}
 					}
 					Err((Error::Old, asked)) if looser(max_delay, asked) => retry.insert(groups),
 					// A drop the track recorded is named by the drop cursor already.
@@ -351,7 +375,8 @@ impl Misses {
 
 	/// Judge the holes in `target` the last probe has not, returning the runs to ask a
 	/// fill for. Gives up a run already stale under this reader's budget. `named` is the
-	/// lowest group the reader's ranges name, which may reach below the feed's start.
+	/// lowest group the reader's ranges name, which may reach below the feed's start, and
+	/// `taken` what the reader handed out, which an eviction never makes a miss again.
 	#[expect(
 		clippy::too_many_arguments,
 		reason = "one probe's inputs, borrowed apart from its cursor"
@@ -362,6 +387,7 @@ impl Misses {
 		key: (u64, u64, Option<u64>),
 		named: Option<u64>,
 		mut target: impl FnMut(RangeInclusive<u64>) -> RangeInclusiveSet<u64>,
+		taken: &Delivered,
 		drift: &Drift,
 		given_up: &mut GivenUp,
 		waiter: &kio::Waiter,
@@ -393,7 +419,8 @@ impl Misses {
 			&& self.budget == Some(drift.budget)
 			&& self.ended == ended
 			&& self.ledger_revision == ledger.revision()
-			&& self.drops_revision == drops.revision();
+			&& self.drops_revision == drops.revision()
+			&& self.evictions == state.evictions;
 		// The grace only times deferred gaps, so with none a new one has nothing to move.
 		// It is judged once something else changes.
 		if unchanged && self.deferred.runs.is_empty() {
@@ -436,6 +463,7 @@ impl Misses {
 			self.judged = clip(&self.judged);
 			self.refused = clip(&self.refused);
 			self.given_up = clip(&self.given_up);
+			self.refilled = clip(&self.refilled);
 			for (&start, &(end, _)) in &self.deferred.runs {
 				for run in span.overlapping(&(start..end)) {
 					candidates.insert(start.max(run.start)..end.min(run.end));
@@ -451,7 +479,12 @@ impl Misses {
 			// A moving read floor removes only its retired prefix. New production extends the
 			// judged span; neither path visits older deferred gaps.
 			if low > 0 {
-				for set in [&mut self.judged, &mut self.refused, &mut self.given_up] {
+				for set in [
+					&mut self.judged,
+					&mut self.refused,
+					&mut self.given_up,
+					&mut self.refilled,
+				] {
 					set.remove(0..low);
 				}
 				self.deferred.remove(0..low);
@@ -495,6 +528,65 @@ impl Misses {
 				.collect();
 			for sequence in arrived {
 				self.refused.remove(sequence..sequence + 1);
+			}
+		}
+		// What it judged cached and the track evicted since, before this reader took it, is a
+		// miss now.
+		let inbox = self.inbox.get_or_insert_with(|| {
+			let inbox = Inbox::default();
+			state
+				.inboxes
+				.lock()
+				.unwrap_or_else(PoisonError::into_inner)
+				.register(inbox.clone());
+			inbox
+		});
+		let evicted = inbox.judge(state.cached, low, top);
+		self.evictions = state.evictions;
+		let mut refills = RangeSet::new();
+		let mut again = RangeSet::new();
+		for run in evicted.iter() {
+			let run = run.start.max(low)..run.end.min(top.saturating_add(1));
+			if run.is_empty() {
+				continue;
+			}
+			for part in target(run.start..=run.end - 1).iter() {
+				for gap in taken.gaps(*part.start()..*part.end() + 1) {
+					for judged in self.judged.overlapping(&gap) {
+						let judged = judged.start.max(gap.start)..judged.end.min(gap.end);
+						for fresh in self.refilled.gaps(&judged) {
+							refills.insert(fresh);
+						}
+						for refilled in self.refilled.overlapping(&judged) {
+							again.insert(refilled.start.max(judged.start)..refilled.end.min(judged.end));
+						}
+					}
+				}
+			}
+		}
+		// Settled here rather than when read, since an ordered reader never looks at what a
+		// fill answered: it reads past a group gone from the cache. Still asked, its fill
+		// settles it; given up already, it was named.
+		for run in self.wanted.iter().chain(self.given_up.iter()) {
+			again.remove(run.clone());
+		}
+		for (run, refill) in refills
+			.iter()
+			.map(|run| (run, true))
+			.chain(again.iter().map(|run| (run, false)))
+		{
+			// A fill's answer evicted before it was taken is no longer held for this reader.
+			let filled: Vec<u64> = self.filled.range(run.clone()).copied().collect();
+			for sequence in filled {
+				self.filled.remove(&sequence);
+				self.release(sequence);
+			}
+			match refill {
+				true => {
+					self.refilled.insert(run.clone());
+					candidates.insert(run.clone());
+				}
+				false => self.give_up(run.clone(), given_up),
 			}
 		}
 		self.ledger_revision = ledger.revision();
@@ -725,6 +817,96 @@ impl Misses {
 	}
 }
 
+/// What the track evicted that one reader judged cached, and what it judged: a slot cached
+/// by the count it judged at, within the span it judged. Holds no more than the slots it
+/// judged cached, so a stalled reader pins nothing cached after.
+#[derive(Clone, Default)]
+pub(super) struct Inbox(Arc<Mutex<Judging>>);
+
+#[derive(Default)]
+struct Judging {
+	cached: u64,
+	span: Option<RangeInclusive<u64>>,
+	evicted: RangeSet<u64>,
+}
+
+impl Inbox {
+	/// Take what was evicted since the last call, and judge `low..=top` from here on, with
+	/// every slot cached by `cached`.
+	fn judge(&self, cached: u64, low: u64, top: u64) -> RangeSet<u64> {
+		let mut judging = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		judging.cached = cached;
+		judging.span = Some(low..=top);
+		std::mem::take(&mut judging.evicted)
+	}
+
+	/// Count every slot cached by `cached` as judged cached, within the span judged last.
+	fn saw(&self, cached: u64) {
+		let mut judging = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+		judging.cached = judging.cached.max(cached);
+	}
+}
+
+/// Every reader's [`Inbox`], pruned of dropped readers on each eviction, or once
+/// registrations double it past what the last prune kept.
+#[derive(Default)]
+pub(super) struct Inboxes {
+	inboxes: Vec<Inbox>,
+	kept: usize,
+}
+
+impl Inboxes {
+	fn register(&mut self, inbox: Inbox) {
+		self.inboxes.push(inbox);
+		if self.inboxes.len() > 2 * self.kept.max(1) {
+			self.inboxes.retain(|inbox| Arc::strong_count(&inbox.0) > 1);
+			self.kept = self.inboxes.len();
+		}
+	}
+
+	/// How many inboxes are registered, live or not.
+	#[cfg(all(test, feature = "async"))]
+	pub(super) fn len(&self) -> usize {
+		self.inboxes.len()
+	}
+
+	/// What each live reader's inbox holds, in registration order.
+	#[cfg(all(test, feature = "async"))]
+	pub(super) fn held(&self) -> Vec<Vec<(u64, u64)>> {
+		self.inboxes
+			.iter()
+			.filter(|inbox| Arc::strong_count(&inbox.0) > 1)
+			.map(|inbox| {
+				let judging = inbox.0.lock().unwrap_or_else(PoisonError::into_inner);
+				judging.evicted.iter().map(|run| (run.start, run.end)).collect()
+			})
+			.collect()
+	}
+
+	/// Leave `sequence`, cached as count `cached`, with each reader that judged it cached.
+	/// Returns whether any did.
+	pub(super) fn evicted(&mut self, sequence: u64, cached: u64) -> bool {
+		let Some(end) = sequence.checked_add(1) else {
+			return false;
+		};
+		let mut landed = false;
+		// Every inbox is visited anyway, so a dropped reader's goes here too.
+		self.inboxes.retain(|inbox| {
+			if Arc::strong_count(&inbox.0) == 1 {
+				return false;
+			}
+			let mut judging = inbox.0.lock().unwrap_or_else(PoisonError::into_inner);
+			if cached <= judging.cached && judging.span.as_ref().is_some_and(|span| span.contains(&sequence)) {
+				judging.evicted.insert(sequence..end);
+				landed = true;
+			}
+			true
+		});
+		self.kept = self.inboxes.len();
+		landed
+	}
+}
+
 impl TrackState {
 	/// Split `hole`, which the cache holds nothing for, into what the live feed will never
 	/// deliver and the gaps it still waits for, with when each stops being waited for.
@@ -857,6 +1039,7 @@ mod tests {
 			(0, 0, None),
 			None,
 			|span| [span].into_iter().collect(),
+			&Delivered::default(),
 			&drift,
 			&mut given_up,
 			&waiter,
@@ -896,6 +1079,7 @@ mod tests {
 			(0, 0, None),
 			None,
 			|_| panic!("the edge has not moved"),
+			&Delivered::default(),
 			&drift,
 			&mut given_up,
 			&waiter,
@@ -920,6 +1104,7 @@ mod tests {
 			(0, 0, None),
 			None,
 			|_| panic!("recreation extends no span"),
+			&Delivered::default(),
 			&drift,
 			&mut given_up,
 			&waiter,
@@ -961,6 +1146,7 @@ mod tests {
 			(0, 0, None),
 			None,
 			|span| [span].into_iter().collect(),
+			&Delivered::default(),
 			&drift,
 			&mut given_up,
 			&waiter,
@@ -994,6 +1180,7 @@ mod tests {
 			(0, 0, None),
 			None,
 			|_| panic!("the edge has not moved"),
+			&Delivered::default(),
 			&drift,
 			&mut given_up,
 			&waiter,
@@ -1030,6 +1217,7 @@ mod tests {
 					(0, 0, None),
 					None,
 					|span| [span].into_iter().collect(),
+					&Delivered::default(),
 					&drift,
 					&mut given_up,
 					&waiter
@@ -1045,6 +1233,7 @@ mod tests {
 					(0, 0, None),
 					None,
 					|_| panic!("an unchanged probe rebuilds no span"),
+					&Delivered::default(),
 					&drift,
 					&mut given_up,
 					&waiter
@@ -1065,6 +1254,7 @@ mod tests {
 					(0, 0, None),
 					None,
 					|_| panic!("a late arrival extends no span"),
+					&Delivered::default(),
 					&drift,
 					&mut given_up,
 					&waiter
@@ -1081,6 +1271,7 @@ mod tests {
 			(0, 0, None),
 			None,
 			|_| panic!("a due gap extends no span"),
+			&Delivered::default(),
 			&drift,
 			&mut given_up,
 			&waiter,
@@ -1117,7 +1308,16 @@ mod tests {
 		let full = |span| [span].into_iter().collect();
 		assert!(
 			misses
-				.judge(&state, (0, 0, None), None, full, &drift, &mut given_up, &waiter)
+				.judge(
+					&state,
+					(0, 0, None),
+					None,
+					full,
+					&Delivered::default(),
+					&drift,
+					&mut given_up,
+					&waiter
+				)
 				.is_empty()
 		);
 		assert!(misses.deferred.runs.is_empty(), "a contiguous feed defers nothing");
@@ -1134,6 +1334,7 @@ mod tests {
 					(0, 0, None),
 					None,
 					|_| panic!("nothing deferred: the new grace waits for a change"),
+					&Delivered::default(),
 					&drift,
 					&mut given_up,
 					&waiter
@@ -1151,7 +1352,16 @@ mod tests {
 		let opened = state.cache.pool().now_wall();
 		assert!(
 			misses
-				.judge(&state, (0, 0, None), None, full, &drift, &mut given_up, &waiter)
+				.judge(
+					&state,
+					(0, 0, None),
+					None,
+					full,
+					&Delivered::default(),
+					&drift,
+					&mut given_up,
+					&waiter
+				)
 				.is_empty()
 		);
 		assert_eq!(misses.deferred.overlapping(0..5).collect::<Vec<_>>(), vec![3..4]);
