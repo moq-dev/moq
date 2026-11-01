@@ -817,7 +817,7 @@ impl Endpoint {
 		let payload = TokenPayload::Retry {
 			address: incoming.addresses.remote,
 			orig_dst_cid: incoming.packet.header.dst_cid,
-			issued: moq_clock::wall(),
+			issued: kio::clock::wall(),
 		};
 		let token = Token::new(payload, &mut self.rng).encode(&*server_config.token_key);
 

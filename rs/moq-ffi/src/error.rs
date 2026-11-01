@@ -230,7 +230,7 @@ pub enum MoqError {
 
 	// Native codec errors, behind the optional `audio`/`video` features.
 	/// An audio codec operation failed.
-	#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+	#[cfg(feature = "audio")]
 	#[error("{reason}")]
 	Audio {
 		/// A diagnostic message describing the failure.
@@ -238,7 +238,7 @@ pub enum MoqError {
 	},
 
 	/// A video codec operation failed.
-	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+	#[cfg(feature = "video")]
 	#[error("{reason}")]
 	Video {
 		/// A diagnostic message describing the failure.
@@ -264,7 +264,6 @@ pub enum MoqError {
 	},
 
 	/// An owned native task panicked; cancellation is reported separately.
-	#[cfg(not(target_arch = "wasm32"))]
 	#[error("task: {reason}")]
 	Task {
 		/// A diagnostic message describing the failure.
@@ -491,7 +490,7 @@ impl From<moq_json::Error> for MoqError {
 	}
 }
 
-#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+#[cfg(feature = "audio")]
 impl From<moq_audio::Error> for MoqError {
 	fn from(err: moq_audio::Error) -> Self {
 		Self::Audio {
@@ -500,7 +499,7 @@ impl From<moq_audio::Error> for MoqError {
 	}
 }
 
-#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+#[cfg(feature = "video")]
 impl From<moq_video::Error> for MoqError {
 	fn from(err: moq_video::Error) -> Self {
 		Self::Video {
@@ -537,7 +536,6 @@ from_message! {
 	moq_net::InvalidEpoch => InvalidEpoch,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 from_message! {
 	tokio::task::JoinError => Task,
 }
