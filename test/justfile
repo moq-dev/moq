@@ -64,13 +64,14 @@ harness:
 [positional-arguments]
 interop *args:
     cd .. && bun install --frozen-lockfile
-    just rs test -p moq-net --lib \
+    just rs test -p moq-net -p moq-sign --lib \
         auth_unsupported_interop \
         ietf_compression_fallback_interop \
         ietf_datagram_interop \
         ietf_track_status_interop \
         ietf_range_updates_interop \
         padding_interop \
+        sign_interop \
         tracks_interop \
         varint_interop \
         --run-ignored all
@@ -118,10 +119,13 @@ interop-negative *args:
 
 # Browser-to-browser media QA against a deterministic fixture: presented frame progress, audible
 # tone, audio/video skew, and the publication lifecycle (cold start, pause, rejoin, detach,
-# republish, late join). Ends with negative controls that inject a frozen picture, silence, a
-# shifted tone, and a leaked session; each must fail the assertion it names. --timeout 30 gives
+# republish, late join), audio format changes, rendition switches, mute and volume at the
+# speakers, AAC, and the same pattern from a native (ffmpeg + Rust CLI) publisher. Ends with
+# negative controls that inject a frozen picture, silence, a shifted tone, a leaked session, and
+# delayed native audio; each must fail the assertion it names. --timeout 30 gives
 
-# headless Chromium cold-start headroom. --media-engines selects player engines; the fixture stays Chromium.
+# headless Chromium cold-start headroom. --media-engines selects player engines, --media-publisher the
+# fixture's (chromium or firefox).
 [positional-arguments]
 media *args:
     ./interop/interop.sh --media --timeout 30 "$@"
@@ -234,15 +238,6 @@ ts-controls:
 drain *args:
     ./drain/run.sh {{ args }}
 
-# Runs the @moq/wasm bindings in headless Chromium against a real relay, one per
-# protocol flavour. The crate is `#![cfg(target_arch = "wasm32")]`, so nothing in
-# `just check` or `just rs wasm` gets past compiling it. See wasm/README.md.
-
-# Browser coverage for the @moq/wasm bindings.
-[positional-arguments]
-wasm *args:
-    ./wasm/run.sh "$@"
-
 # The @moq/video renderer in headless Chromium: WebGPU, a lost device, and the Canvas2D fallback.
 video:
     cd .. && bun install --frozen-lockfile
@@ -284,9 +279,3 @@ qmux:
 p2p:
     cd .. && bun install --frozen-lockfile
     cd p2p && bash ../../sh/local.sh bun test ./transport.browser.ts
-
-# Retain complete backend assets, parity, and raw alternating browser samples.
-[positional-arguments]
-wasm-baseline *args:
-    HARNESS_RUNS="${HARNESS_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh "$@"
-    HARNESS_RUNS="${HARNESS_RUNS:-../target/test/wasm-backend}" ./wasm/run.sh --baseline "$@"

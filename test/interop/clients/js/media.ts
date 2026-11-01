@@ -10,14 +10,26 @@
  *
  * Launches with Chromium's gesture-required autoplay policy. The capture case adds a fake device
  * while Playwright controls permission. No page reloads: the publisher reports when it is ready.
+ * `--publisher-engine` and `--player-engine` pick each role's engine, so a Firefox publisher takes
+ * the capture path Chromium never does.
  *
  *     bun media.ts --url http://127.0.0.1:4443 [--timeout 30] [--cases pause,detach]
+ *     bun media.ts --url ... --publisher-engine firefox --player-engine chromium
  *     bun media.ts --url ... --fault silent-audio --cases none --expect-fail "audio tone"
  *     bun media.ts --url ... --lag --cases late-join --expect-fail "late join reaches live"
+ *     bun media.ts --url ... --publisher native --broadcast B [--cases audio-switch]
+ *
+ * `--publisher native` watches a broadcast someone else publishes with the same pattern (interop.sh
+ * runs ffmpeg into the Rust CLI, see `src/native.ts`) instead of opening the fixture, so only the
+ * cases that need nothing from the publisher's page run.
+ *
+ * The AAC cases need a publisher that can encode AAC, which Chromium does only through a platform
+ * encoder. Where it has none, selecting them exits {@link SKIPPED} after the capability probe.
  *
  * @module
  */
 import { parseArgs } from "node:util";
+import type MoqWatch from "@moq/watch/element";
 import type { Browser, Page } from "playwright";
 import {
 	type BrowserErrors,
@@ -27,12 +39,12 @@ import {
 	type Engine,
 	Failure,
 	finishTraces,
-	inspect,
 	launch,
 	open,
 	POLL_INTERVAL_MS,
 	pageUrl,
 	pause,
+	readCaptureState,
 	readFixtureState,
 	readPlayerState,
 	SELECTORS,
@@ -46,9 +58,11 @@ import {
 	waitForState,
 	waitForWatch,
 } from "./harness";
-import { type Capabilities, missing, probe, type Role } from "./src/capabilities";
+import { type Capabilities, capturePath, missing, probe, type Role } from "./src/capabilities";
 import {
-	type CaptureState,
+	ALT_AUDIO,
+	AUDIBLE_RMS,
+	CHANGED_SAMPLE_RATE,
 	FAULTS,
 	KEYFRAME_INTERVAL_MS,
 	LONG_FRAMES,
@@ -73,13 +87,30 @@ const CASES = [
 	"replacement",
 	"late-join",
 	"rename",
+	"audio-format",
+	"audio-switch",
+	"mute-volume",
 ] as const;
-type Case = (typeof CASES)[number];
+
+/** Cases that need the publisher to encode AAC, run only when selected. */
+const AAC_CASES = ["aac", "audio-codec"] as const;
+
+/** Cases a native publisher supports: those that drive only the player. */
+const NATIVE_CASES = ["audio-switch"] as const;
+
+type Case = (typeof CASES)[number] | (typeof AAC_CASES)[number];
+const KNOWN: readonly Case[] = [...CASES, ...AAC_CASES];
+
+/** The exit code of a run whose selected cases this host cannot run, which interop.sh records as a skip. */
+const SKIPPED = 77;
 
 const { values } = parseArgs({
 	options: {
 		url: { type: "string" },
+		"publisher-engine": { type: "string", default: "chromium" },
 		"player-engine": { type: "string", default: "chromium" },
+		publisher: { type: "string", default: "fixture" },
+		broadcast: { type: "string" },
 		timeout: { type: "string", default: "30" },
 		fault: { type: "string", default: "none" },
 		cases: { type: "string" },
@@ -94,30 +125,58 @@ const url = values.url;
 const timeoutMs = Number.parseFloat(values.timeout ?? "30") * 1000;
 const fault = values.fault ?? "none";
 const expectFail = values["expect-fail"];
-const requestedEngine = values["player-engine"] ?? "chromium";
+const native = values.publisher === "native";
+const isEngine = (name: string): name is Engine => ENGINES.some((engine) => engine === name);
+const requestedPublisher = values["publisher-engine"] ?? "chromium";
+const requestedPlayer = values["player-engine"] ?? "chromium";
 const selected = new Set<string>(
-	values.cases === undefined ? CASES : values.cases === "none" ? [] : values.cases.split(","),
+	values.cases === undefined
+		? native
+			? NATIVE_CASES
+			: CASES
+		: values.cases === "none"
+			? []
+			: values.cases.split(","),
 );
-const unknown = [...selected].filter((name) => !CASES.some((c) => c === name));
+const unknown = [...selected].filter((name) => !(native ? NATIVE_CASES : KNOWN).some((c: string) => c === name));
 if (
 	!url ||
 	!Number.isFinite(timeoutMs) ||
 	timeoutMs <= 0 ||
 	!FAULTS.some((f) => f === fault) ||
 	unknown.length > 0 ||
-	!ENGINES.some((engine) => engine === requestedEngine) ||
-	(values.focused && (values.cases === undefined || selected.size === 0))
+	!isEngine(requestedPublisher) ||
+	!isEngine(requestedPlayer) ||
+	(values.focused && (values.cases === undefined || selected.size === 0)) ||
+	(values.publisher !== "fixture" && !native) ||
+	native !== (values.broadcast !== undefined) ||
+	(native && (fault !== "none" || values.leak || values.lag || requestedPublisher !== "chromium"))
 ) {
 	console.error(
-		`usage: media.ts --url U [--player-engine ${ENGINES.join("|")}] [--timeout S>0] [--fault ${FAULTS.join("|")}] [--cases none|${CASES.join(",")}] [--focused] [--leak] [--lag] [--expect-fail TEXT]`,
+		`usage: media.ts --url U [--publisher-engine ${ENGINES.join("|")}] [--player-engine ${ENGINES.join("|")}] [--timeout S>0] [--fault ${FAULTS.join("|")}] [--cases none|${KNOWN.join(",")}] [--focused] [--leak] [--lag] [--expect-fail TEXT]\n` +
+			`       media.ts --url U --publisher native --broadcast B [--player-engine ${ENGINES.join("|")}] [--cases none|${NATIVE_CASES.join(",")}] [--expect-fail TEXT]`,
 	);
 	process.exit(2);
 }
-const playerEngine = requestedEngine as Engine;
+const publisherEngine = requestedPublisher as Engine;
+const playerEngine = requestedPlayer as Engine;
 const wants = (name: Case) => selected.has(name);
 
 // process.exit narrows `url` above, but not inside the function declarations below.
 const relay: string = url;
+
+/**
+ * The relay URL a page in `engine` dials. Chromium keeps normal transport selection; the others
+ * explicitly use WebSocket, so a run never measures their QUIC paths.
+ */
+function relayFor(engine: Engine): string {
+	const address = new URL(relay);
+	if (engine !== "chromium") address.protocol = address.protocol === "https:" ? "wss:" : "ws:";
+	return address.toString();
+}
+
+/** What `@moq/publish` logs when it captures through a `<video>` element; see its `processor.ts`. */
+const CAPTURE_FALLBACK_WARNING = "MediaStreamTrackProcessor polyfill";
 
 /** How long each media measurement window runs. Long enough to cover several tone cycles. */
 const WINDOW_MS = 4000;
@@ -487,7 +546,8 @@ function traceLine(sample: Sample, start: number): string {
 		`step=${sample.toneStep ?? "-"}/${step} tone=${margin.toFixed(0)}dB ${sample.toneHz?.toFixed(0) ?? "-"}Hz ` +
 		`rms=${sample.rms?.toFixed(3) ?? "-"} ats=${sample.audioTimestamp?.toFixed(0) ?? "-"} vts=${sample.videoTimestamp?.toFixed(0) ?? "-"} ` +
 		`generation=${sample.generation ?? "-"} track=${sample.videoTrack ?? "-"} codec=${sample.videoCodec ?? "-"} ` +
-		`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""}`
+		`paused=${sample.paused} delay=${sample.delay}ms audio=${sample.audioBytes}B${sample.audioStalled ? " stalled" : ""} ` +
+		`${sample.audioTrack ?? "-"}:${sample.audioCodec ?? "-"}/${sample.audioSampleRate ?? "-"}x${sample.audioChannels ?? "-"} speaker=${sample.speakerRms?.toFixed(3) ?? "-"}`
 	);
 }
 
@@ -575,6 +635,146 @@ function measure(samples: Sample[], label: string): void {
 	);
 }
 
+/**
+ * Change the audio a player is receiving and grade one window across the change: the player has to
+ * follow onto `arrived` and stay there, with the window's tone and sync held to the same agreement
+ * as any other. A format change mints a new rendition track, so following it at all is the check,
+ * not how it switches. The longest gap is reported.
+ */
+async function followAudio(
+	player: Page,
+	playerErrors: BrowserErrors,
+	label: string,
+	change: () => Promise<void>,
+	arrived: (sample: Sample, before: Sample) => boolean,
+): Promise<void> {
+	console.error(`=== ${label} ===`);
+	const before = await readPlayerState(player);
+	await change();
+	const window = await observe(player, playerErrors, label);
+	const samples = window.samples;
+	const first = samples.findIndex((sample) => arrived(sample, before));
+	await window.grade(() => {
+		try {
+			followed(samples, first, before, arrived, label);
+		} catch (err) {
+			// assertMedia prints the window only when it fails itself.
+			console.error(`  ${label}: ${samples.length} samples`);
+			for (const sample of samples) console.error(traceLine(sample, samples[0]?.at ?? 0));
+			throw err;
+		}
+	});
+	const now = samples[samples.length - 1];
+	// Reported rather than gated: today's player rebuffers across a re-minted or swapped track, so
+	// the window above grades only the agreement the cold start is held to.
+	console.error(
+		`  ${label}: ${before.audioRendition}:${before.audioTrack} ${before.audioCodec} ${before.audioSampleRate}Hz x${before.audioChannels} ` +
+			`-> ${now.audioRendition}:${now.audioTrack} ${now.audioCodec} ${now.audioSampleRate}Hz x${now.audioChannels}, ` +
+			`longest audio gap ${longestGap(samples)}ms`,
+	);
+}
+
+// The checks behind followAudio, over the window it collected.
+function followed(
+	samples: Sample[],
+	first: number,
+	before: Sample,
+	arrived: (sample: Sample, before: Sample) => boolean,
+	label: string,
+): void {
+	check(
+		first >= 0,
+		label,
+		() =>
+			`the player never followed from ${before.audioRendition}:${before.audioTrack} ` +
+			`(${before.audioCodec} ${before.audioSampleRate}Hz x${before.audioChannels}): ${JSON.stringify(samples.at(-1))}`,
+	);
+	check(
+		samples.slice(first).every((sample) => arrived(sample, before)),
+		label,
+		() => "the player went back to the audio it had before the change",
+	);
+}
+
+/**
+ * The longest stretch of a window the player spent without the tone, in milliseconds: from the first
+ * sample that lost it, stalled or silent, to the next that carried it again.
+ */
+function longestGap(samples: Sample[]): number {
+	let longest = 0;
+	let since: number | undefined;
+	for (const sample of samples) {
+		const playing = sample.toneStep !== undefined && !sample.audioStalled;
+		if (!playing) since ??= sample.at;
+		else if (since !== undefined) {
+			longest = Math.max(longest, sample.at - since);
+			since = undefined;
+		}
+	}
+	if (since !== undefined) longest = Math.max(longest, (samples.at(-1)?.at ?? since) - since);
+	return Math.round(longest);
+}
+
+/** The audio renditions the player's catalog offers. Evaluates, so only after the player's gesture. */
+function audioRenditions(player: Page): Promise<string[]> {
+	return player
+		.locator(SELECTORS.watch)
+		.evaluate((el: MoqWatch) => Object.keys(el.broadcast.out.catalog.peek()?.audio?.renditions ?? {}));
+}
+
+/** Pin the player to an audio rendition by name, or back to its own choice. */
+function targetAudio(player: Page, name: string | undefined): Promise<void> {
+	return player
+		.locator(SELECTORS.watch)
+		.evaluate(
+			(el: MoqWatch, name) => el.controls.audio.target.set(name === undefined ? undefined : { name }),
+			name,
+		);
+}
+
+/**
+ * How far the speaker level may stray from the graph root's level times the volume.
+ *
+ * Both analysers sit in one context and are read in one tick, so they hold the same samples up to
+ * the render quantum (128 frames, ~3ms) the two reads can straddle, against a 2048-frame window.
+ */
+const VOLUME_TOLERANCE = 0.1;
+
+/** How long a volume change takes to land: the emitter's 200ms ramp, then a full analyser window. */
+const VOLUME_SETTLE_MS = 200 + 50;
+
+/**
+ * Set the player's volume and check the speakers carry the graph root's level scaled by it.
+ *
+ * The probe's tone analyser hangs off the graph root, upstream of the emitter's private gain, so it
+ * cannot see volume. The speaker tap (`src/instrument.ts`) sums what reaches the destination.
+ */
+async function checkVolume(player: Page, playerErrors: BrowserErrors, volume: number): Promise<void> {
+	await player.locator(SELECTORS.watch).evaluate((el: MoqWatch, volume) => {
+		el.volume = volume;
+	}, volume);
+	await sleep(VOLUME_SETTLE_MS);
+	const samples = await collect(player, playerErrors, HELD_MS);
+	const ratios = samples
+		.filter((s) => s.rms !== undefined && s.rms >= AUDIBLE_RMS && s.speakerRms !== undefined && !s.audioStalled)
+		.map((s) => (s.speakerRms as number) / (s.rms as number));
+	check(
+		ratios.length >= samples.length * AGREEMENT,
+		"volume scales the output",
+		() => `volume ${volume}: only ${ratios.length}/${samples.length} samples carried audio at the graph root`,
+	);
+	const median = percentile(ratios, 0.5);
+	const off = ratios.filter((ratio) => Math.abs(ratio - volume) > VOLUME_TOLERANCE * Math.max(volume, 0.1));
+	check(
+		off.length <= ratios.length * (1 - AGREEMENT) && Math.abs(median - volume) <= VOLUME_TOLERANCE * volume,
+		"volume scales the output",
+		() =>
+			`volume ${volume}: the speakers carried ${median.toFixed(3)} of the graph root's level (median), ` +
+			`${off.length}/${ratios.length} samples outside ±${VOLUME_TOLERANCE * 100}%`,
+	);
+	console.error(`  volume ${volume}: speakers at ${median.toFixed(3)} of the graph root's level`);
+}
+
 // The capability page has its own context. Evaluation may grant activation there,
 // but cannot unlock the measured fixture or player's audio graph.
 const observed = new Map<Engine, { version: string; found: Capabilities }>();
@@ -629,7 +829,7 @@ const browsers: Browser[] = [];
 // its fake output clock: on the private null sink interop.sh provides for Firefox, Chromium's graph
 // barely advances.
 async function browserFor(role: Role, args: string[] = []): Promise<Browser> {
-	const engine = role === "publisher" ? "chromium" : playerEngine;
+	const engine = role === "publisher" ? publisherEngine : playerEngine;
 	console.error(`=== launching ${engine} ${role} ===`);
 	const browser = await launch(
 		engine === "chromium"
@@ -661,10 +861,8 @@ async function subscriber(
 ): Promise<[Page, BrowserErrors]> {
 	// visible="always" because the window is never frontmost in a headless run, and the default
 	// policy would stop downloading video and leave the canvas black.
-	const address = new URL(relay);
-	if (playerEngine !== "chromium") address.protocol = address.protocol === "https:" ? "wss:" : "ws:";
 	const params: Record<string, string> = {
-		url: address.toString(),
+		url: relayFor(playerEngine),
 		broadcast,
 		visible: "always",
 		muted: String(muted),
@@ -684,29 +882,19 @@ async function subscriber(
 // A real click, so the page carries user activation. Every audio path is gated on it.
 const gesture = (page: Page) => page.mouse.click(1, 1);
 
-async function readCapture(page: Page): Promise<CaptureState> {
-	const state = await inspect(
-		page,
-		() => document.querySelector<HTMLElement>("moq-publish")?.dataset.interopCapture,
-		undefined,
-	);
-	if (!state) throw new Error("the publisher has not published its capture state");
-	return JSON.parse(state) as CaptureState;
-}
-
 /** A denied browser permission is visible, silent to discovery, and revives on a later grant. */
 async function captureDenial(broadcast: string): Promise<void> {
 	console.error("=== capture denial and grant ===");
 	const [viewer, viewerErrors] = await subscriber(broadcast, "capture viewer", { muted: true });
 	const [publisher, publisherErrors] = await open(
 		await browserFor("publisher", ["--use-fake-device-for-media-stream"]),
-		pageUrl(server.origin, "publish", { url: relay, broadcast }),
+		pageUrl(server.origin, "publish", { url: relayFor(publisherEngine), broadcast }),
 		"capture publisher",
 		false,
 		{ permissions: [] },
 	);
 
-	const denied = await waitFor(publisher, publisherErrors, readCapture, {
+	const denied = await waitFor(publisher, publisherErrors, readCaptureState, {
 		deadline: Date.now() + timeoutMs,
 		assertion: "capture denial is visible",
 		description: "both refused capture sources to report NotAllowedError",
@@ -733,7 +921,7 @@ async function captureDenial(broadcast: string): Promise<void> {
 	);
 
 	await publisher.context().grantPermissions(["camera"]);
-	const partial = await waitFor(publisher, publisherErrors, readCapture, {
+	const partial = await waitFor(publisher, publisherErrors, readCaptureState, {
 		deadline: Date.now() + timeoutMs,
 		assertion: "partial capture is withheld",
 		description: "camera capture while microphone permission remains denied",
@@ -750,7 +938,7 @@ async function captureDenial(broadcast: string): Promise<void> {
 	);
 
 	await publisher.context().grantPermissions(["camera", "microphone"]);
-	await waitFor(publisher, publisherErrors, readCapture, {
+	await waitFor(publisher, publisherErrors, readCaptureState, {
 		deadline: Date.now() + timeoutMs,
 		assertion: "capture grant recovers",
 		description: "camera and microphone to capture after permission changes without a reload",
@@ -768,34 +956,64 @@ async function captureDenial(broadcast: string): Promise<void> {
 }
 
 let failure: Error | undefined;
+// Set when the selected cases cannot run on this host, which is neither a pass nor a failure.
+let skipped = false;
 try {
-	const broadcast = `media-${process.pid}.hang`;
+	const broadcast = values.broadcast ?? `media-${process.pid}.hang`;
 
 	// ── publisher ────────────────────────────────────────────────────────────
-	const [publisher, publisherErrors] = await open(
-		await browserFor("publisher"),
-		pageUrl(server.origin, "fixture", { url: relay, broadcast, fault }),
-		"fixture",
-	);
-	fixturePage = publisher;
+	// Only the fixture's cases read these, and none of them can be selected with a native publisher.
+	let publisher!: Page;
+	let publisherErrors!: BrowserErrors;
+	if (native) {
+		console.error(`=== native publisher: ${broadcast} ===`);
+	} else {
+		const browser = await browserFor("publisher");
+		const aac = AAC_CASES.filter(wants);
+		if (aac.length > 0 && !observed.get(publisherEngine)?.found["encode mp4a.40.2"]) {
+			console.error(
+				`SKIP ${aac.join(", ")}: the ${publisherEngine} ${browser.version()} publisher cannot encode AAC (no platform encoder)`,
+			);
+			skipped = true;
+			throw new Error("skipped");
+		}
+		[publisher, publisherErrors] = await open(
+			browser,
+			pageUrl(server.origin, "fixture", { url: relayFor(publisherEngine), broadcast, fault }),
+			"fixture",
+		);
+		fixturePage = publisher;
 
-	console.error("=== publisher readiness ===");
-	const beforePublisherGesture = await readFixtureState(publisher);
-	check(
-		beforePublisherGesture.audioState === "suspended" && beforePublisherGesture.frameId < 0,
-		"publisher gesture gate",
-		() => `fixture started without a gesture: ${JSON.stringify(beforePublisherGesture)}`,
-	);
-	console.error("  fixture graph suspended before a click under document activation policy");
+		console.error("=== publisher readiness ===");
+		const beforePublisherGesture = await readFixtureState(publisher);
+		check(
+			beforePublisherGesture.audioState === "suspended" && beforePublisherGesture.frameId < 0,
+			"publisher gesture gate",
+			() => `fixture started without a gesture: ${JSON.stringify(beforePublisherGesture)}`,
+		);
+		console.error("  fixture graph suspended before a click under document activation policy");
 
-	await gesture(publisher);
-	const ready = await waitForFixture(publisher, publisherErrors, {
-		deadline: Date.now() + timeoutMs,
-		assertion: "publisher readiness",
-		description: "the fixture to announce a video and audio catalog and start its clock",
-		predicate: (state) => state.ready && state.frameId > 0,
-	});
-	console.error(`  announced ${broadcast}, painting from frame ${ready.frameId}`);
+		await gesture(publisher);
+		const ready = await waitForFixture(publisher, publisherErrors, {
+			deadline: Date.now() + timeoutMs,
+			assertion: "publisher readiness",
+			description: "the fixture to announce a video and audio catalog and start its clock",
+			predicate: (state) => state.ready && state.frameId > 0,
+		});
+		console.error(`  announced ${broadcast}, painting from frame ${ready.frameId}`);
+
+		// The fixture must capture the way the probe says production would on this engine. Only the
+		// <video> fallback announces itself, so a fallback taken by mistake, or a missed one, fails here.
+		const publisherCapture = capturePath(observed.get(publisherEngine)?.found ?? {});
+		const fellBack = publisherErrors.warnings.some((warning) => warning.includes(CAPTURE_FALLBACK_WARNING));
+		check(
+			fellBack === (publisherCapture === "element"),
+			"capture path",
+			() =>
+				`probed ${publisherCapture} capture, but the fixture ${fellBack ? "fell back" : "did not fall back"} to <video>`,
+		);
+		console.error(`  captured through the ${publisherCapture} path`);
+	}
 
 	// ── cold start ───────────────────────────────────────────────────────────
 	// No reload anywhere below. The publisher is known ready, so a subscriber that needs a second
@@ -1059,7 +1277,7 @@ try {
 			const [old, oldErrors] = await open(
 				sourceBrowser,
 				pageUrl(server.origin, "fixture", {
-					url: relay,
+					url: relayFor(publisherEngine),
 					broadcast: name,
 					versions: "moq-lite-07-wip",
 					generation: "0",
@@ -1097,7 +1315,7 @@ try {
 				const [replacement, replacementErrors] = await open(
 					sourceBrowser,
 					pageUrl(server.origin, "fixture", {
-						url: relay,
+						url: relayFor(publisherEngine),
 						broadcast: name,
 						versions: "moq-lite-07-wip",
 						generation: "1",
@@ -1212,15 +1430,161 @@ try {
 		await measurePlayback(player, playerErrors, "late join");
 	}
 
+	// ── audio format changes ─────────────────────────────────────────────────
+	// A rate or channel-count change re-mints the audio rendition's track; the player has to follow
+	// it without its audio stalling or slipping out of sync with the picture.
+	if (wants("audio-format")) {
+		await followAudio(
+			player,
+			playerErrors,
+			"audio sample-rate change",
+			() => command(publisher, "changeAudioRate"),
+			(s, before) => s.audioSampleRate === CHANGED_SAMPLE_RATE && s.audioTrack !== before.audioTrack,
+		);
+		await measurePlayback(player, playerErrors, "after sample-rate change");
+		await followAudio(
+			player,
+			playerErrors,
+			"audio channel-count change",
+			() => command(publisher, "changeAudioChannels"),
+			(s, before) => s.audioChannels === 2 && s.audioTrack !== before.audioTrack,
+		);
+		await measurePlayback(player, playerErrors, "after channel-count change");
+	}
+
+	if (wants("audio-codec")) {
+		await followAudio(
+			player,
+			playerErrors,
+			"audio codec change",
+			() => command(publisher, "changeAudioCodec"),
+			(s, before) => s.audioCodec?.startsWith("mp4a") === true && s.audioTrack !== before.audioTrack,
+		);
+		await measurePlayback(player, playerErrors, "after audio codec change");
+	}
+
+	// ── audio rendition switch ───────────────────────────────────────────────
+	// The fixture adds a second rendition of the same tone; a native publisher already sends one per
+	// codec, so there the switch also changes codec.
+	if (wants("audio-switch")) {
+		if (!native) await command(publisher, "addAudioRendition");
+		const renditions = await waitFor(player, playerErrors, audioRenditions, {
+			deadline: Date.now() + SETTLE_MS,
+			assertion: "audio rendition switch",
+			description: "a second audio rendition in the player's catalog",
+			predicate: (names) => names.length >= 2,
+		});
+		const from = (await readPlayerState(player)).audioRendition;
+		const to = native ? renditions.find((name) => name !== from) : ALT_AUDIO;
+		if (to === undefined || from === undefined) throw new Error(`no rendition to switch to from ${from}`);
+		for (const [name, back] of [
+			[to, false],
+			[from, true],
+		] as const) {
+			await followAudio(
+				player,
+				playerErrors,
+				back ? "audio rendition switch back" : "audio rendition switch",
+				() => targetAudio(player, name),
+				(s) => s.audioRendition === name,
+			);
+		}
+		await targetAudio(player, undefined);
+		if (!native) await command(publisher, "removeAudioRendition");
+		await measurePlayback(player, playerErrors, "after audio rendition switch");
+	}
+
+	// ── mute and volume ──────────────────────────────────────────────────────
+	// Graded where samples reach the speakers, after the player's own gain: the graph root the other
+	// cases read sits upstream of it.
+	if (wants("mute-volume")) {
+		console.error("=== mute and volume ===");
+		await checkVolume(player, playerErrors, 1);
+		await checkVolume(player, playerErrors, 0.25);
+
+		await player.locator(SELECTORS.watch).evaluate((el: MoqWatch) => {
+			el.muted = true;
+		});
+		await sleep(VOLUME_SETTLE_MS);
+		const muted = await collect(player, playerErrors, HELD_MS);
+		const loud = muted.filter((s) => (s.speakerRms ?? 0) >= AUDIBLE_RMS);
+		check(
+			muted.length > 0 && loud.length === 0,
+			"mute silences the output",
+			() =>
+				`${loud.length}/${muted.length} muted samples reached the speakers, up to ${Math.max(...loud.map((s) => s.speakerRms ?? 0)).toFixed(3)} rms`,
+		);
+		const shown = muted.filter((s) => s.frameId !== undefined);
+		check(
+			shown.length >= 2 && (shown.at(-1)?.frameId ?? 0) > (shown[0].frameId ?? 0),
+			"mute keeps the picture playing",
+			() => `the picture stopped while muted: ${JSON.stringify(muted.at(-1))}`,
+		);
+
+		await player.locator(SELECTORS.watch).evaluate((el: MoqWatch) => {
+			el.muted = false;
+			el.volume = 0.5;
+		});
+		await waitForState(player, playerErrors, {
+			deadline: Date.now() + SETTLE_MS,
+			assertion: "unmute restores the output",
+			description: "the tone to reach the speakers again after unmuting",
+			predicate: (s) => (s.speakerRms ?? 0) >= AUDIBLE_RMS,
+		});
+		console.error(`  muted: speakers silent for ${muted.length} samples while the picture kept playing`);
+		await measurePlayback(player, playerErrors, "after unmute");
+	}
+
+	// ── browser AAC publish ──────────────────────────────────────────────────
+	// The fixture publishing AAC from its first frame, on a broadcast of its own.
+	if (wants("aac")) {
+		console.error("=== AAC publish ===");
+		const name = `${broadcast}-aac.hang`;
+		const [source, sourceErrors] = await open(
+			await browserFor("publisher"),
+			pageUrl(server.origin, "fixture", {
+				url: relayFor(publisherEngine),
+				broadcast: name,
+				"audio-codec": "aac",
+			}),
+			"aac-fixture",
+		);
+		let viewer: Page | undefined;
+		try {
+			await gesture(source);
+			await waitForFixture(source, sourceErrors, {
+				deadline: Date.now() + timeoutMs,
+				assertion: "AAC publish",
+				description: "the AAC fixture to announce an AAC audio catalog and start its clock",
+				predicate: (s) => s.ready && s.frameId > 0 && s.audio.audio?.codec.startsWith("mp4a") === true,
+			});
+			const [watch, watchErrors] = await subscriber(name, "aac-player");
+			viewer = watch;
+			await gesture(watch);
+			await waitForState(watch, watchErrors, {
+				deadline: Date.now() + timeoutMs,
+				assertion: "AAC publish",
+				description: "the player to select the AAC rendition",
+				predicate: (s) => s.audioCodec?.startsWith("mp4a") === true,
+			});
+			await measurePlayback(watch, watchErrors, "AAC publish");
+		} finally {
+			await viewer?.context().close();
+			await source.context().close();
+		}
+	}
+
 	if (wants("capture-denial")) await captureDenial(`${broadcast}-capture.hang`);
 } catch (err) {
-	failure = err instanceof Error ? err : new Error(String(err));
+	if (!skipped) failure = err instanceof Error ? err : new Error(String(err));
 }
 
 // The verdict decides whether the trace is evidence: a negative control passes by failing, so a
 // caught error alone is not a failure.
 let code = 0;
-if (expectFail !== undefined) {
+if (skipped) {
+	code = SKIPPED;
+} else if (expectFail !== undefined) {
 	// A negative control. The run has to fail, and fail on the assertion it was aimed at: a pass, or
 	// a failure somewhere else, both mean the assertion does not measure what it claims to.
 	if (!failure) {
@@ -1237,7 +1601,7 @@ if (expectFail !== undefined) {
 	code = 1;
 } else {
 	console.error(
-		`media: ${playerEngine} player over ${playerEngine === "chromium" ? "automatic transport selection" : "WebSocket fallback"} measured; all checks passed (Chromium publisher)`,
+		`media: ${playerEngine} player over ${playerEngine === "chromium" ? "automatic transport selection" : "WebSocket fallback"} measured; all checks passed (${native ? "native publisher" : `${publisherEngine} publisher, ${capturePath(observed.get(publisherEngine)?.found ?? {})} capture`})`,
 	);
 }
 
