@@ -1118,12 +1118,12 @@ mod tests {
 		});
 		let server = accepting.await.unwrap();
 		tokio::spawn(moq_relay::supervise(server, lease.unwrap(), observer.serve(), None));
-		moq_clock::sleep(std::time::Duration::from_millis(1)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 		reading.store(false, Ordering::Relaxed);
 
 		let mut signals = Signals::new().unwrap();
 		let shutdown = Shutdown { trigger, observer };
-		moq_clock::timeout(window * 2, drain(shutdown, &mut signals))
+		kio::clock::timeout(window * 2, drain(shutdown, &mut signals))
 			.await
 			.expect("a stalled session held the drain past its deadline");
 		let (reason, _) = producer
@@ -1226,7 +1226,7 @@ mod tests {
 			);
 			tokio::time::advance(Duration::from_secs(1)).await;
 			tokio::time::resume();
-			let error = moq_clock::timeout(TIMEOUT, listening.connection.closed())
+			let error = kio::clock::timeout(TIMEOUT, listening.connection.closed())
 				.await
 				.unwrap()
 				.unwrap_err();
@@ -1257,12 +1257,12 @@ mod tests {
 					moq_auth::Pattern::all(),
 				)));
 				tokio::time::resume();
-				let connection = moq_clock::timeout(TIMEOUT, listening.connection.clone().established())
+				let connection = kio::clock::timeout(TIMEOUT, listening.connection.clone().established())
 					.await
 					.unwrap()
 					.unwrap();
 				// Media proves the CLI admitted the session, even on a transport that establishes early.
-				let payload = moq_clock::timeout(TIMEOUT, async {
+				let payload = kio::clock::timeout(TIMEOUT, async {
 					let broadcast = listening
 						.consumer
 						.follow("probe", None)
@@ -1510,7 +1510,7 @@ mod tests {
 		}
 
 		assert!(
-			moq_clock::timeout(std::time::Duration::from_millis(50), tasks.join_next())
+			kio::clock::timeout(std::time::Duration::from_millis(50), tasks.join_next())
 				.await
 				.is_err(),
 			"the server task should still be accepting connections"

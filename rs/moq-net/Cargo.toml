@@ -15,7 +15,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [features]
 default = ["async"]
 # Runtime-backed helpers and Lite/IETF sessions; explicit-time model drivers stay available.
-async = ["dep:futures", "moq-clock/runtime"]
+async = ["dep:futures", "kio/runtime"]
 
 # Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, frame, and canonical storage benches,
 # and session views of an origin to the viewers bench, through the hidden `fuzz` module. Off by
@@ -32,7 +32,6 @@ futures = { workspace = true, optional = true }
 hashbrown = { workspace = true }
 hashlink = { workspace = true }
 kio = { workspace = true, features = ["macros"] }
-moq-clock = { version = "0.11.0", path = "../moq-clock", default-features = false }
 moq-pattern = { workspace = true, features = ["serde"] }
 num_enum = { workspace = true }
 rand = { workspace = true }
@@ -48,7 +47,7 @@ uuid = { workspace = true }
 criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 # The tests' executor, with simulated time.
-moq-clock = { path = "../moq-clock", features = ["sim"] }
+kio = { path = "../kio", features = ["runtime", "sim"] }
 proptest = { workspace = true }
 serde_json = { workspace = true }
 # The benches run on tokio. test-util (tokio::time::pause/advance) is test-only, so

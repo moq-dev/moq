@@ -1,6 +1,6 @@
 //! JSON adapters that preserve existing wall-time encodings.
 
-use crate::Wall;
+use crate::clock::Wall;
 use ::serde::{Deserialize, Deserializer, Serializer};
 use serde_with::{DeserializeAs, SerializeAs, TimestampSeconds};
 

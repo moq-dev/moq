@@ -1,15 +1,13 @@
 [workspace]
 # Keep source-only members discoverable in Maturin's dependency-pruned archive,
 # including the separately packaged UniFFI generator.
-members = ["demo/carla/bridge", "rs/*", "rs/kio/macros", "rs/moq-clock/macros", "rs/moq-net/fuzz", "rs/moq-quic/fuzz"]
+members = ["demo/carla/bridge", "rs/*", "rs/kio/macros", "rs/moq-net/fuzz", "rs/moq-quic/fuzz"]
 default-members = [
     "rs/bench-harness",
     "rs/kio",
     "rs/kio/macros",
     "rs/hang",
     # "rs/moq-c",     # requires C toolchain
-    "rs/moq-clock",
-    "rs/moq-clock/macros",
     "rs/moq-congestion",
     "rs/moq-archive",
     "rs/moq-auth",
@@ -129,8 +127,6 @@ mdns-sd = { version = "0.21", features = ["async"] }
 moq-archive = { version = "0.0.11", path = "rs/moq-archive" }
 moq-audio = { version = "0.1.10", path = "rs/moq-audio", default-features = false }
 moq-auth = { version = "0.2.1", path = "rs/moq-auth" }
-moq-clock = { version = "0.11.0", path = "rs/moq-clock" }
-moq-clock-macros = { version = "0.1.0", path = "rs/moq-clock/macros" }
 moq-congestion = { version = "0.1.0", path = "rs/moq-congestion" }
 moq-hls = { version = "0.5.11", path = "rs/moq-hls", default-features = false }
 moq-ice = { version = "0.1.0", path = "rs/moq-ice" }

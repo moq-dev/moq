@@ -138,7 +138,6 @@ removed).
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [A tightened SUBSCRIBE keeps the start's budget honest](/quest/m1/start-budget-update.md) - a relay copy records the delay its start was resolved under, so a SUBSCRIBE_UPDATE tightening cannot make later readers skip fillable history
 - [Broadcast archives](/quest/m1/archive/README.md) - ANNOUNCE, TRACKS, and a SUBSCRIBE per track record every track under a prefix to any object_store, a host serves a stored broadcast back, and the catalog drops its archive pointer for a per-rendition `hls` field
-- [Lite-07 padding datagram](/quest/m1/lite07-padding-datagram.md) - lite-07 defines a padding datagram that receivers discard, so browser probes can pad below media
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Smoke token subject](/quest/m1/smoke-token-subject.md) - condition: grant subject ships; then the release smoke test signs with `--subject`
 - [Moxygen pin bump](/quest/m1/moxygen-pin-bump.md) - waiting on moxygen#264, then the TRACK_STATUS patch is dropped
@@ -164,7 +163,7 @@ removed).
 - [CI housekeeping](/quest/m1/ci-housekeeping.md) - remove the actionlint queue ignore once a release after 1.7.12 reaches the dev shell
 - [crates.io trusts the workflow](/quest/m1/crates-trusted-publisher.md) - maintainer action: every published crate gets a trusted publisher for `release-rs.yml`
 - [Rust releases publish through OIDC](/quest/m1/release-rs-oidc.md) - release-plz publishes with trusted publishing and `CARGO_REGISTRY_TOKEN` is revoked
-- [moq-clock's tests pass under cargo test](/quest/m1/clock-test-process.md) - `paused_runtimes_own_their_anchors` stops depending on being first in its process
+- [kio's clock tests pass under cargo test](/quest/m1/clock-test-process.md) - `paused_runtimes_own_their_anchors` stops depending on being first in its process
 - [The JS stalled-consumer eviction test ages its groups](/quest/m1/js-cache-age-test.md) - the test drives the clock the cache reads, so it can fail
 - [moq-transport-22 FETCH cost](/quest/m1/ietf22-fetch-poll-cost.md) - #7042's +12.8% instructions on draft-22 FETCH is fixed or attributed
 - [An idle track poll exits cheaply](/quest/m1/idle-poll-exit.md) - a reader's poll on a track with nothing new costs a small constant, not ~3,800 instructions
@@ -177,11 +176,9 @@ removed).
 - [Lite track end at session death](/quest/m1/lite-track-end.md) - Rust and JS abort an ended lite track whose tail never settled, and agree on what declares the end
 - [Legacy lite close drain](/quest/m1/lite-legacy-close-drain.md) - a lite-01..06 graceful close never cuts a final group the subscriber has not read
 - [moqsrc max-delay](/quest/m1/gst-max-delay.md) - GStreamer's `moqsrc` takes a `max-delay` property instead of a hard-coded 1 s budget
-- [moq-clock moves into kio::clock](/quest/m1/kio-clock.md) - moq-clock and its test macro become `kio::clock` and `#[kio::test]` before the cut publishes them
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
 - [Binding announcements always carry captures](/quest/m1/ffi-required-captures.md) - moq-ffi and its generated bindings make `captures` a required list, as #7266 always sets it
 - [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - a decoder-identity change under the same codec string starts a new init and segment tag
-- [The last AAC segment advertises its full duration](/quest/m1/hls-final-aac-segment.md) - a TS import's final audio segment's EXTINF matches what decodes
 - [A JS reader finishes after a clean close](/quest/m1/js-close-range-finish.md) - a range ending below the cache delivers what's held and then ends
 - [fMP4 decode times keep increasing](/quest/m1/fmp4-bframe-decode-time.md) - fragments shorter than a GOP of B-frame video never step `tfdt` backwards
 - [A JS relay floors an unresolved copy at its newest group](/quest/m1/js-early-latest.md) - lite-01..05 subscribes without a start don't replay the cache from group 0

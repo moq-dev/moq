@@ -6,7 +6,7 @@ use std::{
 	time::Duration,
 };
 
-use crate::Instant;
+use crate::clock::Instant;
 
 /// A future that completes once the ambient clock reaches an instant.
 ///
@@ -21,25 +21,25 @@ pub struct Sleep {
 }
 
 enum Timer {
-	Queue(crate::deadline::Timer),
-	Host(crate::runtime::Timer),
+	Queue(crate::clock::deadline::Timer),
+	Host(crate::clock::runtime::Timer),
 	#[cfg(feature = "sim")]
-	Sim(crate::sim::Timer),
+	Sim(crate::clock::sim::Timer),
 	#[cfg(feature = "manual")]
-	Installed(crate::installed::Timer),
+	Installed(crate::clock::installed::Timer),
 }
 
 /// Complete once the ambient clock reaches `at`; at once if it already has.
 pub fn sleep_until(at: Instant) -> Sleep {
-	if let Some(deadlines) = crate::deadline::entered() {
+	if let Some(deadlines) = crate::clock::deadline::entered() {
 		return Sleep {
 			at: Some(at),
-			timer: Timer::Queue(crate::deadline::Timer::new(&deadlines, Some(at))),
+			timer: Timer::Queue(crate::clock::deadline::Timer::new(&deadlines, Some(at))),
 			parked: None,
 		};
 	}
 	#[cfg(feature = "sim")]
-	if let Some(timer) = crate::sim::Timer::new(at) {
+	if let Some(timer) = crate::clock::sim::Timer::new(at) {
 		return Sleep {
 			at: Some(at),
 			timer: Timer::Sim(timer),
@@ -47,12 +47,12 @@ pub fn sleep_until(at: Instant) -> Sleep {
 		};
 	}
 	#[cfg(feature = "manual")]
-	if let Some(clock) = crate::installed::current() {
+	if let Some(clock) = crate::clock::installed::current() {
 		return Sleep::installed(clock, at);
 	}
 	Sleep {
 		at: Some(at),
-		timer: Timer::Host(crate::runtime::Timer::new(at)),
+		timer: Timer::Host(crate::clock::runtime::Timer::new(at)),
 		parked: None,
 	}
 }
@@ -61,7 +61,7 @@ pub fn sleep_until(at: Instant) -> Sleep {
 ///
 /// A duration past the clock's range never completes.
 pub fn sleep(duration: Duration) -> Sleep {
-	let now = crate::now();
+	let now = crate::clock::now();
 	let mut sleep = sleep_until(now);
 	sleep.set(now.checked_add(duration));
 	sleep
@@ -70,10 +70,10 @@ pub fn sleep(duration: Duration) -> Sleep {
 impl Sleep {
 	/// A sleep on an installed clock, whichever thread polls it.
 	#[cfg(feature = "manual")]
-	pub(crate) fn installed(clock: crate::Installed, at: Instant) -> Self {
+	pub(crate) fn installed(clock: crate::clock::Installed, at: Instant) -> Self {
 		Self {
 			at: Some(at),
-			timer: Timer::Installed(crate::installed::Timer::new(clock, at)),
+			timer: Timer::Installed(crate::clock::installed::Timer::new(clock, at)),
 			parked: None,
 		}
 	}
@@ -210,7 +210,7 @@ pub struct Interval {
 ///
 /// When `period` is zero.
 pub fn interval(period: Duration) -> Interval {
-	interval_at(crate::now(), period)
+	interval_at(crate::clock::now(), period)
 }
 
 /// Tick every `period` on the ambient clock, the first tick at `start`.
@@ -239,7 +239,7 @@ impl Interval {
 			return Poll::Pending;
 		}
 		let scheduled = self.sleep.deadline();
-		let now = crate::now();
+		let now = crate::clock::now();
 		// A tick past the clock's range never comes.
 		let next = scheduled.checked_add(self.period).and_then(|next| {
 			if next > now {
@@ -275,11 +275,11 @@ impl Interval {
 ///
 /// `poll` is called with the current instant and returns when it next wants to be
 /// polled: `Ok(Some(at))` by `at` or on a wake, `Ok(None)` only on a wake.
-pub async fn drive<E>(mut poll: impl FnMut(Instant, &kio::Waiter) -> Result<Option<Instant>, E> + Unpin) -> E {
+pub async fn drive<E>(mut poll: impl FnMut(Instant, &crate::Waiter) -> Result<Option<Instant>, E> + Unpin) -> E {
 	let mut timer: Option<Sleep> = None;
-	kio::wait(move |waiter| {
+	crate::wait(move |waiter| {
 		loop {
-			let at = match poll(crate::now(), waiter) {
+			let at = match poll(crate::clock::now(), waiter) {
 				Ok(Some(at)) => at,
 				Ok(None) => {
 					timer = None;
@@ -323,7 +323,8 @@ mod tests {
 			.start_paused(true)
 			.build()
 			.unwrap();
-		let (mut sleep, at) = runtime.block_on(async { (sleep(Duration::MAX), crate::now() + Duration::from_secs(1)) });
+		let (mut sleep, at) =
+			runtime.block_on(async { (sleep(Duration::MAX), crate::clock::now() + Duration::from_secs(1)) });
 		sleep.reset(at);
 		runtime.block_on(sleep);
 	}

@@ -32,7 +32,7 @@ async fn stops_on(signal: libc::c_int) {
 	// Signal only once the handler can be installed: before that, the default action
 	// would kill the process whether or not the fix is in.
 	let mut lines = BufReader::new(child.stderr.take().expect("stderr")).lines();
-	moq_clock::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		while let Some(line) = lines.next_line().await.expect("read stderr") {
 			if line.contains("auth server listening") {
 				return;
@@ -47,7 +47,7 @@ async fn stops_on(signal: libc::c_int) {
 	// SAFETY: `kill` has no memory-safety preconditions; the pid is our live child.
 	assert_eq!(unsafe { libc::kill(pid, signal) }, 0, "failed to signal moq");
 
-	let status = moq_clock::timeout(TIMEOUT, child.wait())
+	let status = kio::clock::timeout(TIMEOUT, child.wait())
 		.await
 		.expect("moq ignored the signal")
 		.expect("wait for moq");

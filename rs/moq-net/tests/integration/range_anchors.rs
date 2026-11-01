@@ -62,14 +62,14 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 	let _pair;
 	let remote = match version {
 		// Through the origin, as a reader of a local route.
-		None => moq_clock::timeout(TIMEOUT, publisher.consume().request("room", None))
+		None => kio::clock::timeout(TIMEOUT, publisher.consume().request("room", None))
 			.await
 			.expect("resolve timeout")
 			.expect("broadcast resolves"),
 		Some(version) => {
 			_pair = peer(version.parse::<Version>().unwrap(), &publisher, &subscriber).await;
 			let consumer = subscriber.consume();
-			moq_clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
+			kio::clock::timeout(TIMEOUT, consumer.follow("room", None).unwrap().available())
 				.await
 				.expect("resolve timeout")
 				.expect("broadcast resolves")
@@ -80,12 +80,12 @@ async fn read(version: Option<&str>, range: Range) -> Result<Vec<u64>, Error> {
 		.with_max_delay(FOREVER)
 		.with_order(Order::Ascending)
 		.with_ranges([range]);
-	let mut reader = moq_clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
+	let mut reader = kio::clock::timeout(TIMEOUT, remote.track("data").unwrap().subscribe(subscription))
 		.await
 		.expect("subscribe timeout")?;
 
 	let mut read = Vec::new();
-	while let Ok(group) = moq_clock::timeout(TIMEOUT, reader.recv_group()).await {
+	while let Ok(group) = kio::clock::timeout(TIMEOUT, reader.recv_group()).await {
 		match group? {
 			Some(group) => read.push(group.sequence),
 			None => break,
@@ -117,7 +117,7 @@ fn anchored() -> [(Range, Vec<u64>); 6] {
 
 /// Each wire resolves the anchors it carries as the held track does and refuses the rest,
 /// rather than resolve them against the part of the track its copy happens to hold.
-#[moq_clock::test]
+#[kio::test]
 async fn each_wire_refuses_only_the_anchors_it_drops() {
 	for version in std::iter::once(None).chain(VERSIONS.iter().copied().map(Some)) {
 		// Lite-07 reports the largest and media time and asks for everything the budget
@@ -150,7 +150,7 @@ async fn each_wire_refuses_only_the_anchors_it_drops() {
 
 /// Every wire carries the live and oldest starts, which it spells with no floor. A wire whose
 /// copy starts at the live edge reads oldest from there: no floor asks for the older groups.
-#[moq_clock::test]
+#[kio::test]
 async fn every_wire_carries_the_live_and_oldest_starts() {
 	for version in VERSIONS {
 		let live = read(Some(version), Range::live()).await;

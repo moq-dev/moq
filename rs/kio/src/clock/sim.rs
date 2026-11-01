@@ -1,9 +1,9 @@
 //! A single-threaded, deterministic executor with simulated time.
 //!
-//! Inside [`run`], the ambient clock is the simulator's: [`now`](crate::now) starts
-//! at [`Instant::ZERO`], [`wall`](crate::wall) at [`Manual::WALL_START`], and
-//! [`sleep`](crate::sleep), [`timeout`](crate::timeout), and
-//! [`interval`](crate::interval) arm simulated timers. Time never moves on its own:
+//! Inside [`run`], the ambient clock is the simulator's: [`now`](crate::clock::now) starts
+//! at [`Instant::ZERO`], [`wall`](crate::clock::wall) at [`Manual::WALL_START`], and
+//! [`sleep`](crate::clock::sleep), [`timeout`](crate::clock::timeout), and
+//! [`interval`](crate::clock::interval) arm simulated timers. Time never moves on its own:
 //! once every task has stalled, [`run`] jumps the clock to the earliest armed
 //! timer and wakes it, like tokio's paused clock, so a test never waits on the
 //! host clock. A run whose tasks are all parked with nothing armed can never
@@ -12,10 +12,10 @@
 //!
 //! A task poll that makes more than 4096 ready kio polls panics with the caller's
 //! source location, so a loop that forgets to yield fails instead of starving its siblings.
-//! Each `kio::Tasks` child poll counts on its own, like a spawned task.
+//! Each `crate::Tasks` child poll counts on its own, like a spawned task.
 //!
 //! Caller-driven state machines take time from their caller:
-//! [`drive`](crate::drive) polls one with the simulated instant, and [`attach`]
+//! [`drive`](crate::clock::drive) polls one with the simulated instant, and [`attach`]
 //! keeps a [`Deadlines`] queue in step.
 
 use std::{
@@ -34,7 +34,7 @@ use std::{
 
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 
-use crate::{Deadlines, Instant, Manual, Wall, deadline::WeakDeadlines};
+use crate::clock::{Deadlines, Instant, Manual, Wall, deadline::WeakDeadlines};
 
 thread_local! {
 	static CURRENT: RefCell<Option<Rc<Runtime>>> = const { RefCell::new(None) };
@@ -43,7 +43,7 @@ thread_local! {
 type Task = Pin<Box<dyn Future<Output = ()>>>;
 
 fn poll<F: Future + ?Sized>(future: Pin<&mut F>, cx: &mut Context<'_>) -> Poll<F::Output> {
-	let _scope = kio::coop::scope();
+	let _scope = crate::coop::scope();
 	future.poll(cx)
 }
 
@@ -84,7 +84,7 @@ impl Runtime {
 		});
 		CURRENT.with(|current| {
 			let mut current = current.borrow_mut();
-			assert!(current.is_none(), "moq_clock::sim::run cannot nest");
+			assert!(current.is_none(), "kio::clock::sim::run cannot nest");
 			*current = Some(runtime.clone());
 		});
 		runtime
@@ -161,7 +161,7 @@ fn current() -> Option<Rc<Runtime>> {
 }
 
 fn expect_current() -> Rc<Runtime> {
-	current().expect("not inside moq_clock::sim::run")
+	current().expect("not inside kio::clock::sim::run")
 }
 
 /// The simulated instant, when the calling thread is inside [`run`].
@@ -344,10 +344,10 @@ pub fn yield_now() -> impl Future<Output = ()> {
 	})
 }
 
-/// A simulated timer behind [`Sleep`](crate::Sleep).
+/// A simulated timer behind [`Sleep`](crate::clock::Sleep).
 ///
 /// Holds plain data rather than the runtime, so enabling `sim` in a test build
-/// leaves [`Sleep`](crate::Sleep) `Send`. It finds its run as the thread's current one.
+/// leaves [`Sleep`](crate::clock::Sleep) `Send`. It finds its run as the thread's current one.
 pub(crate) struct Timer {
 	run: u64,
 	at: Instant,
@@ -388,7 +388,7 @@ impl Timer {
 	pub(crate) fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
 		let runtime = self
 			.runtime()
-			.expect("a simulated sleep polled outside its moq_clock::sim::run");
+			.expect("a simulated sleep polled outside its kio::clock::sim::run");
 		let mut time = runtime.time.borrow_mut();
 		if time.clock.now() >= self.at {
 			if let Some(key) = self.key.take() {
@@ -594,12 +594,12 @@ impl<T> Drop for Cancel<T> {
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::{Deadline, Deadlines, Elapsed, MissedTickBehavior};
+	use crate::clock::{Deadline, Deadlines, Elapsed, MissedTickBehavior};
 
 	fn spin() {
-		let producer = kio::Producer::new(());
+		let producer = crate::Producer::new(());
 		let consumer = producer.consume();
-		let waiter = kio::Waiter::noop();
+		let waiter = crate::Waiter::noop();
 		for _ in 0..10_000 {
 			assert!(consumer.poll(&waiter, |_| Poll::Ready(())).is_ready());
 		}
@@ -629,13 +629,13 @@ mod tests {
 				turns.set(turns.get() + 1);
 			}
 		});
-		let producer = kio::Producer::new(());
+		let producer = crate::Producer::new(());
 		let consumer = producer.consume();
-		let mut budget = kio::coop::Budget::new(32);
+		let mut budget = crate::coop::Budget::new(32);
 		for _ in 0..10_000 {
-			kio::wait(|waiter| budget.poll_yield(waiter)).await;
+			crate::wait(|waiter| budget.poll_yield(waiter)).await;
 			assert!(
-				kio::wait(|waiter| consumer.poll(waiter, |_| Poll::Ready(())))
+				crate::wait(|waiter| consumer.poll(waiter, |_| Poll::Ready(())))
 					.await
 					.is_ok()
 			);
@@ -646,9 +646,9 @@ mod tests {
 
 	#[crate::test]
 	async fn pending_polls_do_not_count_as_work() {
-		let producer = kio::Producer::new(());
+		let producer = crate::Producer::new(());
 		let consumer = producer.consume();
-		let waiter = kio::Waiter::noop();
+		let waiter = crate::Waiter::noop();
 		for _ in 0..10_000 {
 			assert!(consumer.poll(&waiter, |_| Poll::<()>::Pending).is_pending());
 		}
@@ -663,36 +663,36 @@ mod tests {
 
 	#[crate::test]
 	async fn a_large_task_set_counts_each_child_alone() {
-		let producer = kio::Producer::new(());
-		let mut tasks = kio::Tasks::new();
+		let producer = crate::Producer::new(());
+		let mut tasks = crate::Tasks::new();
 		for _ in 0..10_000 {
 			let consumer = producer.consume();
-			tasks.push(move |waiter: &kio::Waiter| consumer.poll(waiter, |_| Poll::Ready(())).map(drop));
+			tasks.push(move |waiter: &crate::Waiter| consumer.poll(waiter, |_| Poll::Ready(())).map(drop));
 		}
-		kio::wait(|waiter| tasks.poll(waiter)).await;
+		crate::wait(|waiter| tasks.poll(waiter)).await;
 	}
 
 	#[test]
 	#[should_panic(expected = "kio Ready poll limit")]
 	fn a_spinning_task_set_child_fails() {
 		run(async {
-			let mut tasks = kio::Tasks::new();
-			tasks.push(|_: &kio::Waiter| {
+			let mut tasks = crate::Tasks::new();
+			tasks.push(|_: &crate::Waiter| {
 				spin();
 				Poll::Ready(())
 			});
-			kio::wait(|waiter| tasks.poll(waiter)).await;
+			crate::wait(|waiter| tasks.poll(waiter)).await;
 		});
 	}
 
 	#[test]
 	fn a_task_set_outside_the_simulator_counts_nothing() {
-		let mut tasks = kio::Tasks::new();
-		tasks.push(|_: &kio::Waiter| {
+		let mut tasks = crate::Tasks::new();
+		tasks.push(|_: &crate::Waiter| {
 			spin();
 			Poll::Ready(())
 		});
-		assert!(tasks.poll(&kio::Waiter::noop()).is_ready());
+		assert!(tasks.poll(&crate::Waiter::noop()).is_ready());
 	}
 
 	fn at(secs: u64) -> Instant {
@@ -739,8 +739,8 @@ mod tests {
 
 	#[crate::test]
 	async fn starts_at_zero() {
-		assert_eq!(crate::now(), Instant::ZERO);
-		assert_eq!(crate::wall(), Manual::WALL_START);
+		assert_eq!(crate::clock::now(), Instant::ZERO);
+		assert_eq!(crate::clock::wall(), Manual::WALL_START);
 	}
 
 	#[test]
@@ -750,13 +750,13 @@ mod tests {
 			for secs in [1, 5, 3] {
 				let fired = fired.clone();
 				drop(spawn(async move {
-					crate::sleep(Duration::from_secs(secs)).await;
+					crate::clock::sleep(Duration::from_secs(secs)).await;
 					fired.set(fired.get() + 1);
 				}));
 			}
 			idle().await;
 			assert_eq!(fired.get(), 3);
-			assert_eq!(crate::now(), at(5));
+			assert_eq!(crate::clock::now(), at(5));
 		});
 	}
 
@@ -764,18 +764,18 @@ mod tests {
 	fn time_moves_only_when_every_task_stalls() {
 		run(async {
 			let a = spawn(async {
-				crate::sleep(Duration::from_secs(5)).await;
-				crate::now()
+				crate::clock::sleep(Duration::from_secs(5)).await;
+				crate::clock::now()
 			});
 			let b = spawn(async {
-				crate::sleep(Duration::from_secs(2)).await;
-				crate::now()
+				crate::clock::sleep(Duration::from_secs(2)).await;
+				crate::clock::now()
 			});
-			assert_eq!(crate::now(), Instant::ZERO, "spawning does not move time");
+			assert_eq!(crate::clock::now(), Instant::ZERO, "spawning does not move time");
 			assert_eq!(b.await.unwrap(), at(2));
 			assert_eq!(a.await.unwrap(), at(5));
 			assert_eq!(
-				crate::wall(),
+				crate::clock::wall(),
 				Manual::WALL_START + Duration::from_secs(5),
 				"wall time moved too"
 			);
@@ -784,39 +784,39 @@ mod tests {
 
 	#[crate::test]
 	async fn timeout_uses_simulated_time() {
-		let slow = crate::timeout(Duration::from_secs(1), crate::sleep(Duration::from_secs(60))).await;
+		let slow = crate::clock::timeout(Duration::from_secs(1), crate::clock::sleep(Duration::from_secs(60))).await;
 		assert_eq!(slow.unwrap_err(), Elapsed);
-		assert_eq!(crate::now(), at(1));
-		let fast = crate::timeout(Duration::from_secs(60), async { 7 }).await;
+		assert_eq!(crate::clock::now(), at(1));
+		let fast = crate::clock::timeout(Duration::from_secs(60), async { 7 }).await;
 		assert_eq!(fast, Ok(7));
 	}
 
 	#[crate::test]
 	async fn timeout_at_ends_at_the_deadline() {
-		let slow = crate::timeout_at(at(2), crate::sleep(Duration::from_secs(60))).await;
+		let slow = crate::clock::timeout_at(at(2), crate::clock::sleep(Duration::from_secs(60))).await;
 		assert_eq!(slow.unwrap_err(), Elapsed);
-		assert_eq!(crate::now(), at(2));
-		let late = crate::timeout_at(at(1), async { 7 }).await;
+		assert_eq!(crate::clock::now(), at(2));
+		let late = crate::clock::timeout_at(at(1), async { 7 }).await;
 		assert_eq!(late, Ok(7), "a ready future wins even past the deadline");
 	}
 
 	#[crate::test]
 	async fn advance_wakes_due_timers() {
-		let timer = spawn(crate::sleep(Duration::from_secs(3)));
+		let timer = spawn(crate::clock::sleep(Duration::from_secs(3)));
 		yield_now().await;
 		advance(Duration::from_secs(3)).await;
 		assert!(timer.is_finished());
-		assert_eq!(crate::now(), at(3));
+		assert_eq!(crate::clock::now(), at(3));
 	}
 
 	#[crate::test]
 	async fn a_wall_step_passes_no_time() {
 		advance(Duration::from_secs(10)).await;
 		step_wall(Manual::WALL_START + Duration::from_secs(4));
-		assert_eq!(crate::now(), at(10), "a step back passes no time");
-		assert_eq!(crate::wall(), Manual::WALL_START + Duration::from_secs(4));
+		assert_eq!(crate::clock::now(), at(10), "a step back passes no time");
+		assert_eq!(crate::clock::wall(), Manual::WALL_START + Duration::from_secs(4));
 		advance(Duration::from_secs(1)).await;
-		assert_eq!(crate::wall(), Manual::WALL_START + Duration::from_secs(5));
+		assert_eq!(crate::clock::wall(), Manual::WALL_START + Duration::from_secs(5));
 	}
 
 	#[crate::test]
@@ -825,7 +825,7 @@ mod tests {
 		let task = spawn({
 			let fired = fired.clone();
 			async move {
-				crate::sleep(Duration::from_secs(1)).await;
+				crate::clock::sleep(Duration::from_secs(1)).await;
 				fired.set(true);
 			}
 		});
@@ -833,29 +833,29 @@ mod tests {
 		task.abort();
 		assert!(task.await.unwrap_err().is_cancelled());
 		// Nothing else is armed: a dropped sleep left no timer behind, so time jumps here.
-		crate::sleep(Duration::from_secs(5)).await;
+		crate::clock::sleep(Duration::from_secs(5)).await;
 		assert!(!fired.get());
-		assert_eq!(crate::now(), at(5));
+		assert_eq!(crate::clock::now(), at(5));
 	}
 
 	#[crate::test]
 	async fn rearming() {
-		let mut sleep = crate::sleep(Duration::from_secs(1));
+		let mut sleep = crate::clock::sleep(Duration::from_secs(1));
 		sleep.reset(at(3));
 		(&mut sleep).await;
-		assert_eq!(crate::now(), at(3), "the old instant is gone");
+		assert_eq!(crate::clock::now(), at(3), "the old instant is gone");
 		sleep.reset(at(4));
 		sleep.await;
-		assert_eq!(crate::now(), at(4), "a completed sleep re-arms");
+		assert_eq!(crate::clock::now(), at(4), "a completed sleep re-arms");
 	}
 
 	#[crate::test]
 	async fn an_expired_deadline_fires_at_once() {
 		advance(Duration::from_secs(10)).await;
-		crate::sleep_until(at(5)).await;
-		crate::sleep_until(at(10)).await;
-		crate::sleep(Duration::ZERO).await;
-		assert_eq!(crate::now(), at(10));
+		crate::clock::sleep_until(at(5)).await;
+		crate::clock::sleep_until(at(10)).await;
+		crate::clock::sleep(Duration::ZERO).await;
+		assert_eq!(crate::clock::now(), at(10));
 	}
 
 	#[crate::test]
@@ -863,9 +863,9 @@ mod tests {
 		let order = Rc::new(RefCell::new(Vec::new()));
 		// Created in one order; a sleep arms on its first poll, so spawning them in
 		// the other order arms them in that order.
-		let first = crate::sleep_until(at(1));
-		let second = crate::sleep_until(at(1));
-		let record = |name: &'static str, sleep: crate::Sleep| {
+		let first = crate::clock::sleep_until(at(1));
+		let second = crate::clock::sleep_until(at(1));
+		let record = |name: &'static str, sleep: crate::clock::Sleep| {
 			let order = order.clone();
 			spawn(async move {
 				sleep.await;
@@ -881,32 +881,32 @@ mod tests {
 
 	#[crate::test]
 	async fn interval_bursts_missed_ticks_by_default() {
-		let mut ticks = crate::interval(Duration::from_secs(1));
+		let mut ticks = crate::clock::interval(Duration::from_secs(1));
 		assert_eq!(ticks.tick().await, at(0), "the first tick is immediate");
 		advance(Duration::from_millis(3500)).await;
 		assert_eq!(ticks.tick().await, at(1));
 		assert_eq!(ticks.tick().await, at(2));
 		assert_eq!(ticks.tick().await, at(3));
 		assert_eq!(
-			crate::now(),
+			crate::clock::now(),
 			Instant::ZERO + Duration::from_millis(3500),
 			"caught up at once"
 		);
 		assert_eq!(ticks.tick().await, at(4));
-		assert_eq!(crate::now(), at(4));
+		assert_eq!(crate::clock::now(), at(4));
 	}
 
 	#[crate::test]
 	async fn interval_at_starts_at_its_first_tick() {
-		let mut ticks = crate::interval_at(at(2), Duration::from_secs(1));
+		let mut ticks = crate::clock::interval_at(at(2), Duration::from_secs(1));
 		assert_eq!(ticks.tick().await, at(2));
-		assert_eq!(crate::now(), at(2), "nothing ticks before the start");
+		assert_eq!(crate::clock::now(), at(2), "nothing ticks before the start");
 		assert_eq!(ticks.tick().await, at(3));
 	}
 
 	#[crate::test]
 	async fn interval_delay_restarts_from_the_late_tick() {
-		let mut ticks = crate::interval(Duration::from_secs(1));
+		let mut ticks = crate::clock::interval(Duration::from_secs(1));
 		ticks.set_missed_tick_behavior(MissedTickBehavior::Delay);
 		ticks.tick().await;
 		advance(Duration::from_millis(3500)).await;
@@ -916,7 +916,7 @@ mod tests {
 
 	#[crate::test]
 	async fn interval_skip_resumes_the_schedule() {
-		let mut ticks = crate::interval(Duration::from_secs(1));
+		let mut ticks = crate::clock::interval(Duration::from_secs(1));
 		ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
 		ticks.tick().await;
 		advance(Duration::from_millis(3500)).await;
@@ -986,7 +986,7 @@ mod tests {
 	#[test]
 	#[should_panic(expected = "deadlock")]
 	fn a_sleep_past_the_range_never_fires() {
-		run(async { crate::sleep(Duration::MAX).await });
+		run(async { crate::clock::sleep(Duration::MAX).await });
 	}
 
 	/// The last instant is a real deadline, not the never-firing overflow.
@@ -994,7 +994,7 @@ mod tests {
 	async fn the_last_instant_is_reachable() {
 		// From the epoch, so the wall clock has room to reach it too.
 		step_wall(Wall::UNIX_EPOCH);
-		let task = spawn(crate::sleep_until(Instant::MAX));
+		let task = spawn(crate::clock::sleep_until(Instant::MAX));
 		yield_now().await;
 		advance(Duration::from_nanos(u64::MAX)).await;
 		task.await.unwrap();
@@ -1007,7 +1007,7 @@ mod tests {
 		run(async {
 			// From the epoch, so the wall clock could reach the last instant.
 			step_wall(Wall::UNIX_EPOCH);
-			let mut interval = crate::interval(Duration::MAX);
+			let mut interval = crate::clock::interval(Duration::MAX);
 			interval.tick().await;
 			interval.tick().await;
 		});
@@ -1016,22 +1016,22 @@ mod tests {
 	/// A queue attached behind the clock catches up before the run decides it stalled.
 	#[crate::test]
 	async fn a_queue_attached_behind_the_clock_wakes_at_once() {
-		let deadlines = Deadlines::new(crate::now());
+		let deadlines = Deadlines::new(crate::clock::now());
 		let mut deadline = Deadline::after(&deadlines, Duration::from_secs(5));
 		advance(Duration::from_secs(10)).await;
-		let task = spawn(async move { kio::wait(|waiter| deadline.poll(waiter)).await });
+		let task = spawn(async move { crate::wait(|waiter| deadline.poll(waiter)).await });
 		yield_now().await;
 
 		attach(&deadlines);
 		task.await.unwrap();
-		assert_eq!(crate::now(), at(10));
+		assert_eq!(crate::clock::now(), at(10));
 	}
 
 	/// Attaching brings the queue to the simulated instant at once, so a deadline
 	/// armed right after counts from it.
 	#[crate::test]
 	async fn attaching_syncs_the_queue() {
-		let deadlines = Deadlines::new(crate::now());
+		let deadlines = Deadlines::new(crate::clock::now());
 		advance(Duration::from_secs(10)).await;
 		attach(&deadlines);
 		assert_eq!(deadlines.now(), at(10));
@@ -1048,16 +1048,16 @@ mod tests {
 	async fn a_sleep_reset_by_another_task_rearms() {
 		// Armed, and past the clock's range so never firing.
 		for duration in [Duration::from_secs(10), Duration::MAX] {
-			let sleep = Rc::new(RefCell::new(crate::sleep(duration)));
+			let sleep = Rc::new(RefCell::new(crate::clock::sleep(duration)));
 			let polled = sleep.clone();
 			let task = spawn(std::future::poll_fn(move |cx| {
 				Pin::new(&mut *polled.borrow_mut()).poll(cx)
 			}));
 			yield_now().await;
-			let target = crate::now() + Duration::from_secs(3);
+			let target = crate::clock::now() + Duration::from_secs(3);
 			sleep.borrow_mut().reset(target);
 			task.await.unwrap();
-			assert_eq!(crate::now(), target);
+			assert_eq!(crate::clock::now(), target);
 		}
 	}
 
@@ -1072,26 +1072,26 @@ mod tests {
 			}
 		}
 		let count = Arc::new(Count(Default::default()));
-		let owner = kio::Waiter::new(Waker::from(count.clone()));
+		let owner = crate::Waiter::new(Waker::from(count.clone()));
 
-		let deadlines = Deadlines::new(crate::now());
+		let deadlines = Deadlines::new(crate::clock::now());
 		attach(&deadlines);
-		deadlines.advance(crate::now());
+		deadlines.advance(crate::clock::now());
 		deadlines.park(&owner);
-		crate::sleep(Duration::from_secs(1)).await;
+		crate::clock::sleep(Duration::from_secs(1)).await;
 
 		let mut deadline = Deadline::new(&deadlines);
-		deadline.set(Some(crate::now() + Duration::from_secs(1)));
+		deadline.set(Some(crate::clock::now() + Duration::from_secs(1)));
 		assert_eq!(count.0.load(Ordering::SeqCst), 1, "the parked owner was not woken");
 	}
 
 	/// The run holds an attached queue weakly and forgets it once its owner drops it.
 	#[crate::test]
 	async fn an_attached_queue_detaches_once_dropped() {
-		let deadlines = Deadlines::new(crate::now());
+		let deadlines = Deadlines::new(crate::clock::now());
 		attach(&deadlines);
 		drop(deadlines);
-		crate::sleep(Duration::from_secs(1)).await;
+		crate::clock::sleep(Duration::from_secs(1)).await;
 		assert!(expect_current().queues.borrow().is_empty());
 	}
 
@@ -1106,10 +1106,10 @@ mod tests {
 
 	/// A sleep answers to the clock it was created on, not to the poller's.
 	#[test]
-	#[should_panic(expected = "polled outside its moq_clock::sim::run")]
+	#[should_panic(expected = "polled outside its kio::clock::sim::run")]
 	#[expect(clippy::async_yields_async, reason = "the sleep escapes the run on purpose")]
 	fn a_sleep_polled_in_another_run_panics() {
-		let mut sleep = run(async { crate::sleep(Duration::from_secs(1)) });
+		let mut sleep = run(async { crate::clock::sleep(Duration::from_secs(1)) });
 		run(async move {
 			advance(Duration::from_secs(2)).await;
 			(&mut sleep).await;
@@ -1118,18 +1118,18 @@ mod tests {
 
 	#[crate::test]
 	async fn attached_deadlines_advance_with_time() {
-		let deadlines = Deadlines::new(crate::now());
+		let deadlines = Deadlines::new(crate::clock::now());
 		attach(&deadlines);
 		let mut deadline = Deadline::after(&deadlines, Duration::from_secs(4));
 		// Nothing else is armed, so the stall jumps straight to the queue's deadline.
-		kio::wait(|waiter| deadline.poll(waiter)).await;
-		assert_eq!(crate::now(), at(4));
+		crate::wait(|waiter| deadline.poll(waiter)).await;
+		assert_eq!(crate::clock::now(), at(4));
 	}
 
 	#[crate::test]
 	async fn drive_polls_at_each_requested_instant() {
 		let mut polls = Vec::new();
-		let err = crate::drive(|now, _waiter| {
+		let err = crate::clock::drive(|now, _waiter| {
 			polls.push(now);
 			match polls.len() {
 				3 => Err("done"),
