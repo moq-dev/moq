@@ -5,6 +5,7 @@ import * as Util from "@moq/hang/util";
 import type * as Moq from "@moq/net";
 import {
 	type Computed,
+	Derived,
 	Effect,
 	type Getter,
 	getter,
@@ -486,7 +487,8 @@ class DecoderTrack {
 	#consume(effect: Effect, sub: Moq.Track.Subscriber, format: Container.Format): Container.Consumer {
 		const consumer = new Container.Consumer(sub, {
 			format,
-			maxDelay: this.sync.out.maxDelay,
+			// The playout delay is where a cold join starts, and the shared max delay how late it may fall.
+			delay: new Derived([this.sync.out.delay, this.sync.out.maxDelay], (min, max) => ({ min, max })),
 			predecessor: this.consumer ?? this.#predecessor,
 		});
 		effect.cleanup(() => consumer.close());
@@ -504,9 +506,14 @@ class DecoderTrack {
 		});
 		if (!sub) return;
 
+		// Keep output tied to this codec lifetime even if the effect opens another run.
+		const signal = effect.abort;
 		const decoder = new VideoDecoder({
 			output: async (frame: VideoFrame) => {
 				try {
+					// A cancelled codec must not recreate the poster its track already released. Firefox can
+					// still deliver output after close().
+					if (signal.aborted) return;
 					const timestamp = Milli.fromMicro(frame.timestamp as Micro);
 					if (timestamp < (this.timestamp.peek() ?? 0)) {
 						// Late frame, don't render it.
@@ -522,9 +529,7 @@ class DecoderTrack {
 					}
 
 					// Resolves at once when the delay is "instant". Closing the track releases it.
-					// Capture the signal: a rerun replaces `effect.abort`, and can abort it after the wait
-					// resolves but before this continuation runs.
-					const signal = effect.abort;
+					// Check the captured signal again in case cancellation followed the resolved wait.
 					if (!(await this.sync.wait(timestamp, signal)) || signal.aborted) return;
 
 					if (timestamp < (this.timestamp.peek() ?? 0)) {

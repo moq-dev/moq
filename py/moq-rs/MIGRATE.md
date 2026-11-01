@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Decoder outputs take a `Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`audio.DecoderOutput` replaces `max_delay` and the playout `delay: timedelta | None` with `delay: media.Delay | None` and `estimate: bool = True`.
+`video.DecoderOutput.max_delay` is `delay: media.Delay | None`.
+`media.Delay(min=..., max=...)`: `max` (`None` for no limit) is the old `max_delay`, and `min` is the playout delay, where a cold join starts.
+A fixed audio playout delay `d` is `delay=Delay(min=d, max=...)` with `estimate=False`.
+
 ### Compression moves to the track
 
 `moq.flate` is removed: publish opaque bytes on a `TrackProducer`.
@@ -277,7 +284,6 @@ Pass `timestamp=` on every write to a timed track.
 ### Subscriber staleness is `max_delay`
 
 `Subscription.max_age_us` is `max_delay`, a `timedelta`, and the decoder outputs take `max_delay`, also a `timedelta`.
-`Subscription.max_delay` defaults to `None`, which sets no subscriber limit: start from `Subscription.default()` for the old default of zero.
 `TrackInfo` keeps its `max_age`: it is the publisher's retention.
 
 ### Error payloads are named `reason`

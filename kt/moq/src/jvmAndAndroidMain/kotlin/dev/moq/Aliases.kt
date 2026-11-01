@@ -59,7 +59,7 @@ typealias Following = uniffi.moq.MoqFollowing
 typealias Announce = uniffi.moq.MoqAnnounce
 /**
  * What an [AnnounceConsumer] yields: [AnnounceEventStart], [AnnounceEventUpdate],
- * [AnnounceEventEnd], or [AnnounceEventRestart].
+ * [AnnounceEventEnd], [AnnounceEventRestart], or [AnnounceEventTakeover].
  */
 typealias AnnounceEvent = uniffi.moq.MoqAnnounceEvent
 // Kotlin cannot reach a sealed class's subtypes through its typealias, so each
@@ -72,6 +72,11 @@ typealias AnnounceEventUpdate = uniffi.moq.MoqAnnounceEvent.Update
 typealias AnnounceEventEnd = uniffi.moq.MoqAnnounceEvent.End
 /** Another publisher instance now serves the prefix: drop what was resolved under it and request afresh. */
 typealias AnnounceEventRestart = uniffi.moq.MoqAnnounceEvent.Restart
+/**
+ * A route now covers the prefix and continues what the route at `predecessor` served beneath
+ * it: keep what was resolved through that one.
+ */
+typealias AnnounceEventTakeover = uniffi.moq.MoqAnnounceEvent.Takeover
 // Broadcast / track / group producers and consumers.
 /** The write side of a broadcast: publish tracks into it. */
 typealias BroadcastProducer = uniffi.moq.MoqBroadcastProducer
@@ -110,8 +115,8 @@ typealias Subscription = uniffi.moq.MoqSubscription
 
 /**
  * moq-net's defaults, whose `maxDelay` of zero skips a superseded group at once. A null
- * subscription means the same; `copy` this one to change a field. A `Subscription()` leaves
- * `maxDelay` null, which sets no subscriber limit.
+ * subscription means the same; `copy` this one to change a field. A `Subscription(...)`
+ * must name `maxDelay`, where null sets no subscriber limit.
  */
 fun uniffi.moq.MoqSubscription.Companion.default(): Subscription = uniffi.moq.moqSubscriptionDefaults()
 
@@ -127,6 +132,8 @@ typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
 typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 /** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */
 typealias Order = uniffi.moq.MoqOrder
+/** A location within a track: a group sequence and a frame index in it. */
+typealias Position = uniffi.moq.MoqPosition
 /** Options for fetching one past group by sequence. */
 typealias FetchGroupOptions = uniffi.moq.MoqFetchGroupOptions
 /** Delivery settings for a raw track: priority, ordering, latency budget, and timescale. */

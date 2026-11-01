@@ -1,4 +1,3 @@
-import type * as Epoch from "../epoch.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Order } from "../track.ts";
@@ -57,7 +56,7 @@ function decodeGroupOrder(value: number): Order {
  */
 export function joinFilter(version: IetfVersion): { filter: Filter.Filter; fill?: Filter.Fill } {
 	const filter: Filter.Filter = { kind: "nextObject" };
-	if (!Filter.isDraft22(version)) return { filter };
+	if (!Filter.isDraft20(version)) return { filter };
 	return { filter, fill: { filter: { kind: "relative", groups: 1n }, rangeFilters: false } };
 }
 
@@ -92,12 +91,6 @@ export class Subscribe {
 	/** Whether RENDEZVOUS_TIMEOUT requested a wait; never encoded. */
 	rendezvous: boolean;
 
-	/**
-	 * The publisher instance the subscriber expects (EPOCH, MoQ Epoch). Only a
-	 * session that negotiated the extension names one; the session refuses one otherwise.
-	 */
-	epoch?: Epoch.Valid;
-
 	constructor({
 		requestId,
 		trackNamespace,
@@ -111,7 +104,6 @@ export class Subscribe {
 		forward,
 		rangeFilters,
 		rendezvous,
-		epoch,
 	}: {
 		requestId: bigint;
 		trackNamespace: Path.Valid;
@@ -125,7 +117,6 @@ export class Subscribe {
 		forward?: boolean;
 		rangeFilters?: boolean;
 		rendezvous?: boolean;
-		epoch?: Epoch.Valid;
 	}) {
 		this.requestId = requestId;
 		this.trackNamespace = trackNamespace;
@@ -139,7 +130,6 @@ export class Subscribe {
 		this.forward = forward ?? true;
 		this.rangeFilters = rangeFilters ?? false;
 		this.rendezvous = rendezvous ?? false;
-		this.epoch = epoch;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -156,7 +146,7 @@ export class Subscribe {
 		// FILL_PARAMETERS and INCLUDE_PROPERTIES arrived in draft-22. An older peer reads
 		// either as an unknown parameter, which is a protocol violation, so they are
 		// dropped rather than downgraded.
-		if (Filter.isDraft22(version)) {
+		if (Filter.isDraft20(version)) {
 			if (this.fill) {
 				params.fillParameters = Filter.encodeFill(this.fill, version);
 			}
@@ -165,7 +155,6 @@ export class Subscribe {
 				params.includeProperties = false;
 			}
 		}
-		params.epoch = this.epoch;
 
 		await params.encode(w, version);
 	}
@@ -190,7 +179,7 @@ export class Subscribe {
 		// additions. An unknown message parameter is a protocol violation, so
 		// they stay rejected on the drafts that predate them rather than being quietly
 		// tolerated.
-		const draft22 = Filter.isDraft22(version);
+		const draft22 = Filter.isDraft20(version);
 		if ((params.fillParameters !== undefined || params.includeProperties !== undefined) && !draft22) {
 			throw new Error("FILL_PARAMETERS and INCLUDE_PROPERTIES need draft-22");
 		}
@@ -220,7 +209,6 @@ export class Subscribe {
 			forward: params.forward ?? true,
 			rangeFilters: params.rangeFilters,
 			rendezvous: (params.vars.get(0x04n) ?? 0n) > 0n,
-			epoch: params.epoch,
 		});
 	}
 }

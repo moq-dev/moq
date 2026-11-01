@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Path } from "@moq/net";
 import { Signal } from "@moq/signals";
@@ -7,7 +8,7 @@ import { supportCacheKey } from "../support-probe";
 import { decoderConfigKey } from "./config";
 import { Source } from "./source";
 
-const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+const flush = () => yieldNow();
 
 async function settle(): Promise<void> {
 	for (let i = 0; i < 5; i++) await flush();

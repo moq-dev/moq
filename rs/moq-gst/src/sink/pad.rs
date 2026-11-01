@@ -46,6 +46,15 @@ impl Sink {
 			Sink::Opaque(producer) => producer.name().to_owned(),
 		}
 	}
+
+	/// A watch-only handle to this track's subscriber demand.
+	fn demand(&self) -> moq_net::track::Demand {
+		match self {
+			Sink::Media(media) => media.track.demand(),
+			Sink::Text(text) => text.producer.track().demand(),
+			Sink::Opaque(producer) => producer.demand(),
+		}
+	}
 }
 
 /// Every configured track name a run has published, and whether it ended.
@@ -389,6 +398,11 @@ impl Pad {
 	/// True once this pad has been invalidated by a bad caps/bitstream; the caller drops its buffers.
 	pub fn is_failed(&self) -> bool {
 		self.failed
+	}
+
+	/// A watch-only handle to the active track's subscriber demand.
+	pub(super) fn demand(&self) -> Option<moq_net::track::Demand> {
+		self.track.as_ref().map(Sink::demand)
 	}
 
 	/// (Re)build the producer when the pad's caps change, under `track` when the pad was given a name.
@@ -1293,7 +1307,6 @@ pub(crate) fn h264_keyframe_au() -> Bytes {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1495,7 +1508,7 @@ mod tests {
 		let vp8 = gst::Caps::builder("video/x-vp8").build();
 		pad.observe_caps(&broadcast, &catalog, producer_options(&vp8, Some("camera")));
 		let drained = async { while records.recv_group().await.unwrap().is_some() {} };
-		let ended = tokio::time::timeout(Duration::from_secs(1), drained).await;
+		let ended = kio::clock::timeout(Duration::from_secs(1), drained).await;
 		assert!(ended.is_ok(), "the old track's records end");
 	}
 
@@ -2062,7 +2075,7 @@ mod tests {
 			subscriber,
 			moq_mux::catalog::hang::Container::Loc(moq_mux::container::Kind::Data),
 		);
-		let frame = tokio::time::timeout(std::time::Duration::from_secs(1), media.read())
+		let frame = kio::clock::timeout(std::time::Duration::from_secs(1), media.read())
 			.await
 			.expect("LOC media read timed out")
 			.unwrap();

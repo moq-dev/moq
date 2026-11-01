@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
@@ -19,16 +20,14 @@ function broadcast(renditions: Record<string, Catalog.AudioConfig>) {
 	return { catalog, broadcast: { out: { catalog } } as unknown as Broadcast };
 }
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
-
 // Wait out the probe, then a tick for the effects its result wakes. A probe served wholly from
 // the cache sets and clears `pending` in one run, which notifies nothing, so start with a tick
 // that lets the rerun happen rather than waiting on a change that may never come.
 async function settled(source: Source): Promise<void> {
-	await tick();
+	await yieldNow();
 	while (source.pending.peek()) {
 		await source.pending.changed();
-		await tick();
+		await yieldNow();
 	}
 }
 
@@ -158,7 +157,7 @@ test("does not carry a hold to another broadcast", async () => {
 
 		// The same catalog on another broadcast probes nothing new, so wait on a timer, not the probe.
 		current.set(broadcast({ mic: config("opus", { enabled: false }) }).broadcast);
-		await tick();
+		await yieldNow();
 		expect(source.out.track.peek()).toBeUndefined();
 	} finally {
 		source.close();
@@ -173,7 +172,7 @@ test("does not hold an enabled selection into another broadcast's disabled rendi
 		expect(source.out.track.peek()).toBe("mic");
 
 		current.set(broadcast({ mic: config("opus", { enabled: false }) }).broadcast);
-		for (let i = 0; i < 5; i++) await tick();
+		for (let i = 0; i < 5; i++) await yieldNow();
 		expect(source.out.track.peek()).toBeUndefined();
 		expect(source.out.config.peek()).toBeUndefined();
 	} finally {
@@ -276,7 +275,7 @@ test("a catalog replaced while its probe is pending publishes only the replaceme
 		expect(old).toBeDefined();
 
 		state.catalog.set({ audio: { renditions: { next: config("mp4a.40.2") } } });
-		while (!probes.has("mp4a.40.2")) await tick();
+		while (!probes.has("mp4a.40.2")) await yieldNow();
 
 		// The torn-down probe settles late; its result must not land.
 		old?.(true);

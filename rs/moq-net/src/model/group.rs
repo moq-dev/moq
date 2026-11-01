@@ -2467,16 +2467,16 @@ impl Handle {
 
 	/// Abort with `err` only while nothing consumes the group, returning whether it is
 	/// closed. Consumer creation and the check share a lock, so a reader arriving after
-	/// [`poll_unused`](Self::poll_unused) keeps the group alive instead of reading the abort.
+	/// [`poll_unwanted`](Self::poll_unwanted) keeps the group alive instead of reading the abort.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn abort_unused(&self, err: Error) -> bool {
-		match self.state.write_unused() {
-			kio::Unused::Idle(guard) => {
+	pub(crate) fn abort_unwanted(&self, err: Error) -> bool {
+		match self.state.write_unwanted() {
+			kio::Unwanted::Idle(guard) => {
 				self.commit_abort(guard, err);
 				true
 			}
-			kio::Unused::Closed => true,
-			kio::Unused::Used => false,
+			kio::Unwanted::Closed => true,
+			kio::Unwanted::Wanted => false,
 		}
 	}
 
@@ -2771,7 +2771,7 @@ impl Handle {
 	}
 
 	/// Create a consumer, or `None` once the group is aborted. Paired with
-	/// [`abort_unused`](Self::abort_unused): the closed check and the count share its
+	/// [`abort_unwanted`](Self::abort_unwanted): the closed check and the count share its
 	/// lock, so a consumer either exists in time to decline the abort or is never made.
 	pub(super) fn try_consume(&self) -> Option<Consumer> {
 		self.state.weak().try_consume().map(|state| self.consumer(state))
@@ -2843,10 +2843,10 @@ impl Handle {
 		}
 	}
 
-	/// Poll for the group becoming unused (every consumer dropped).
+	/// Poll for the group becoming unwanted (every consumer dropped).
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn poll_unused(&self, waiter: &kio::Waiter) -> Poll<()> {
-		self.state.poll_unused(waiter).map(|_| ())
+	pub(crate) fn poll_unwanted(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.state.poll_wanted_changed(waiter, true).map(drop)
 	}
 
 	/// The recorded abort reason, or [`Error::Dropped`] if the group closed without one.
@@ -2901,7 +2901,7 @@ impl Demand {
 
 	/// Whether the group is open and has readers right now.
 	pub fn wanted(&self) -> bool {
-		!self.state.is_closed() && self.state.is_used()
+		!self.state.is_closed() && self.state.wanted()
 	}
 
 	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
@@ -2917,16 +2917,13 @@ impl Demand {
 			if self.state.is_closed() {
 				return Poll::Ready(Err(self.abort_reason()));
 			}
-			let wanted = self.state.is_used();
+			let wanted = self.state.wanted();
 			if self.prev != Some(wanted) {
 				self.prev = Some(wanted);
 				return Poll::Ready(Ok(wanted));
 			}
-			// Wait for the opposite; closing fails either wait, which errors above.
-			let _ = ready!(match wanted {
-				true => self.state.poll_unused(waiter),
-				false => self.state.poll_used(waiter),
-			});
+			// Closing fails the wait, which errors above.
+			let _ = ready!(self.state.poll_wanted_changed(waiter, wanted));
 		}
 	}
 
@@ -3593,13 +3590,6 @@ impl Consumer {
 	/// resumed onto a replacement copy keeps the original group's arrival.
 	pub fn arrived(&self) -> crate::time::Instant {
 		self.arrived
-	}
-
-	/// The timescale a moq-lite hop serves the parent track at (see
-	/// [`track::Info::lite_timescale`]).
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn lite_timescale(&self, ietf: bool) -> Option<Timescale> {
-		self.track.lite_timescale(ietf)
 	}
 
 	/// The draft the parent track's moq-transport publisher spoke, which serialized every
@@ -4659,17 +4649,17 @@ mod test {
 	}
 
 	#[test]
-	fn abort_unused_pairs_with_try_consume() {
+	fn abort_unwanted_pairs_with_try_consume() {
 		let producer = Info { sequence: 0 }.produce();
 
 		let consumer = producer.handle.try_consume().expect("open");
 		assert!(
-			!producer.handle.abort_unused(crate::Error::Cancel),
+			!producer.handle.abort_unwanted(crate::Error::Cancel),
 			"a reader declines the abort"
 		);
 		drop(consumer);
 
-		assert!(producer.handle.abort_unused(crate::Error::Cancel));
+		assert!(producer.handle.abort_unwanted(crate::Error::Cancel));
 		assert!(
 			producer.handle.try_consume().is_none(),
 			"an aborted group mints no reader"
@@ -5415,7 +5405,7 @@ mod test {
 	/// a write guard was mutably accessed, so `frame_notify` must mark the guard
 	/// modified; a guard dropped untouched wakes nobody and the reader would
 	/// stall until the frame completed.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn chunk_write_wakes_parked_reader() {
 		let producer = Info { sequence: 0 }.produce();
@@ -5427,11 +5417,11 @@ mod test {
 			})
 			.unwrap();
 		let mut f = consumer.next_frame().await.unwrap().unwrap();
-		let handle = moq_clock::sim::spawn(async move { f.read_chunk().await });
+		let handle = kio::clock::sim::spawn(async move { f.read_chunk().await });
 		// Let the reader park on the empty partial before the chunk lands.
-		moq_clock::sleep(std::time::Duration::from_millis(50)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(50)).await;
 		frame.write(Bytes::from_static(b"foo")).unwrap();
-		let chunk = moq_clock::timeout(std::time::Duration::from_secs(2), handle)
+		let chunk = kio::clock::timeout(std::time::Duration::from_secs(2), handle)
 			.await
 			.expect("parked chunk reader was never woken by the chunk write")
 			.unwrap()
@@ -5441,16 +5431,16 @@ mod test {
 
 	/// Each frame is stamped when its last byte lands, whichever way it is written, and
 	/// readers see that stamp however late they read.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn frames_carry_when_they_landed() {
 		use std::time::Duration;
 
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut producer = Info { sequence: 0 }.produce();
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
 
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		let mut chunked = producer
 			.create_frame(frame::Info {
 				size: 2,
@@ -5458,23 +5448,23 @@ mod test {
 			})
 			.unwrap();
 		chunked.write(Bytes::from_static(b"b")).unwrap();
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		chunked.write(Bytes::from_static(b"c")).unwrap();
 		producer = chunked.finish().unwrap();
 
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		let mut batch = frame::Buffer::<2>::new();
 		batch
 			.push(Frame::new(Timestamp::ZERO, Bytes::from_static(b"d")))
 			.unwrap();
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		batch
 			.push(Frame::new(Timestamp::ZERO, Bytes::from_static(b"e")))
 			.unwrap();
 		producer.write_frames(&mut batch).unwrap();
 		producer.finish().unwrap();
 
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		let mut consumer = producer.consume();
 		let mut arrived = Vec::new();
 		while let Some(frame) = consumer.read_frame().await.unwrap() {
@@ -5485,10 +5475,10 @@ mod test {
 
 	/// A group is stamped when it is created here, and a reader pulling it late from its track
 	/// still sees that stamp.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn groups_carry_when_they_landed() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut alone = Info { sequence: 0 }.produce();
 		let track = crate::broadcast::Info::new()
 			.produce()
@@ -5497,7 +5487,7 @@ mod test {
 		let mut subscriber = track.subscribe(None);
 		let mut live = track.create_group(Info { sequence: 0 }).unwrap();
 
-		moq_clock::sleep(std::time::Duration::from_secs(1)).await;
+		kio::clock::sleep(std::time::Duration::from_secs(1)).await;
 		assert_eq!(alone.consume().arrived(), start);
 		let group = subscriber.recv_group().await.unwrap().expect("the live group");
 		assert_eq!(group.arrived(), start);

@@ -5,6 +5,13 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Decoder outputs take a `MoqDelay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`MoqAudioDecoderOutput` replaces `max_delay` and the playout `delay: Option<Duration>` with `delay: Option<MoqDelay>` and `estimate: bool` (default `true`).
+`MoqVideoDecoderOutput::max_delay` is `delay: Option<MoqDelay>`.
+`MoqDelay { min, max }`: `max` (null for no limit) is the old `max_delay`, and `min` is the playout delay, where a cold join starts. A null `delay` is zero for both.
+A fixed audio playout delay `d` is `delay: MoqDelay { min: d, max }` with `estimate: false`; with `estimate` it floors the estimate instead.
+
 ### Compression moves to the track
 
 The `MoqFlate*` producers and `MoqFlateConfig` are deleted: publish opaque bytes on a `MoqTrackProducer`.
@@ -42,7 +49,8 @@ It defaults to empty in every generated binding; a Rust struct literal adds `tok
 Every duration is a UniFFI `Duration` instead of an integer microsecond field, and drops its `_us` suffix: each language receives its own duration type (`timedelta`, `TimeInterval`, `java.time.Duration`, `time.Duration`, Dart `Duration`, C++ `std::chrono` nanoseconds).
 The renamed fields are `MoqClientConfig.{timeout, race, resolution_delay}`, `MoqQuicConfig.{idle_timeout, keep_alive}`, `MoqWebSocketConfig.delay`, `MoqBackoff.{initial, max, timeout}`, `MoqConnectionStats.rtt`, `MoqGrant.expires`, `MoqTrackInfo.max_age`, `MoqSubscription.max_delay`, `MoqFetchGroupOptions.max_delay`, `MoqAudio.jitter`, `MoqAudioDecoderOutput.{max_delay, delay}`, and `MoqVideoDecoderOutput.max_delay`; the methods are `MoqFill::max_delay()` and `MoqAudioConsumer::delay()`.
 `MoqAudioEncoderOutput.frame_duration_us: u32` is `frame_duration: Option<Duration>`: pass null where you passed 0 for the codec's own frame.
-`MoqSubscription.max_delay` defaults to null, which sets no subscriber limit: a record that omits it no longer gets moq-net's 0.
+`MoqSubscription.max_delay` has no default, since UniFFI can't default a duration to 0: Kotlin and Swift must name it, `0` for moq-net's default or null for no subscriber limit.
+Dart, Go, and C can still omit it (Dart's optional parameter, Go's nil `*time.Duration`, a zeroed C struct), which means no subscriber limit; name it there too.
 Start from `moq_subscription_defaults()` where you relied on that default; a null subscription argument still means it.
 `MoqTrackConsumer::info()` no longer fails.
 A duration handed out saturates at `i64::MAX` nanoseconds (about 292 years), so C, C++, and Go hold every value.

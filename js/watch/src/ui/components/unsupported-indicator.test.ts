@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import { Effect, Signal } from "@moq/signals";
 import type MoqWatch from "../../element";
 import { unsupportedIndicator } from "./unsupported-indicator";
@@ -30,24 +31,23 @@ test("reports unsupported audio only when the broadcast has no video", async () 
 	} as unknown as MoqWatch;
 
 	const effect = new Effect();
-	const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 	try {
 		unsupportedIndicator(effect, watch);
-		await tick();
+		await yieldNow();
 		expect(container.style.display).toBe("none");
 
 		audio.error.set(unsupported());
-		await tick();
+		await yieldNow();
 		expect(container.style.display).toBe("");
 		expect(text.textContent).toBe("This audio codec is not supported by your browser: opus");
 
 		// Playable video carries the broadcast, so unsupported audio alone is not reported.
 		video.catalog.set({ renditions: { hd: { codec: "avc1.640028" } } });
-		await tick();
+		await yieldNow();
 		expect(container.style.display).toBe("none");
 
 		video.error.set(unsupported());
-		await tick();
+		await yieldNow();
 		expect(container.style.display).toBe("");
 		expect(text.textContent).toBe("This video codec is not supported by your browser: avc1.640028");
 	} finally {
