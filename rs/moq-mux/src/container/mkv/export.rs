@@ -185,8 +185,8 @@ impl MkvTrack {
 		match &mut self.declared {
 			Some(clock) => clock.push(arrival, pts)?,
 			None => {
-				let arrived = arrival.arrived;
-				self.clock.push(arrival, pts, arrived)
+				let (arrived, bytes) = (arrival.arrived, arrival.bytes);
+				self.clock.push(arrival, pts, arrived, bytes)
 			}
 		}
 		self.release(name, jitter, false)
@@ -227,7 +227,9 @@ impl MkvTrack {
 		loop {
 			let settle = match flush {
 				true => Settle::All,
-				false => self.clock.settle(lookahead, self.latest, jitter.delay()),
+				false => self
+					.clock
+					.settle(lookahead, self.latest, jitter.delay(), crate::jitter::MAX_BYTES),
 			};
 			let Some((mut arrival, dts)) = self.clock.pop(lookahead, floor, settle) else {
 				break;
@@ -477,11 +479,12 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	/// Read each track until it has a frame due, preserving ingress timing before buffering.
+	/// Read each track within its jitter window, preserving ingress timing before buffering.
 	fn fill(&mut self, waiter: &kio::Waiter) -> Result<()> {
 		for (name, track) in &mut self.tracks {
 			loop {
-				if self.header_emitted && self.jitter.full(name) {
+				if self.header_emitted && self.jitter.full(name, waiter) {
+					let _ = track.source.poll_received(waiter);
 					break;
 				}
 				if !self.header_emitted && track.pending.is_some() {
@@ -535,9 +538,9 @@ impl<S: Stream> Export<S> {
 						read: moq_clock::now(),
 						decode: frame.timestamp.into(),
 						restart: track.source.markers(),
-						skip: track.source.skips(),
 						sync: track.kind == TrackKind::Audio || frame.keyframe,
 						leading: false,
+						bytes: frame.payload.len() + name.len(),
 						item: frame,
 					}
 				};

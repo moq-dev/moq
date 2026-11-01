@@ -325,7 +325,7 @@ fn run(scenario: &Scenario) -> Outcome {
 
 		if let Some((client, _, id, _)) = &competing {
 			let mut stream = pair.client_send(*client, *id);
-			while stream.write(&[0; 16_384]).is_ok() {}
+			while stream.write(&mut &[0; 16_384][..]).is_ok() {}
 		}
 
 		pair.drive_client();
@@ -426,7 +426,7 @@ fn write_frame(pair: &mut Pair, ch: ConnectionHandle, groups: &mut Vec<Group>, k
 			.client_streams(ch)
 			.open(
 				Dir::Uni,
-				SendOptions {
+				send::Options {
 					group: None,
 					priority: sequence,
 				},
@@ -454,9 +454,9 @@ fn flush(pair: &mut Pair, ch: ConnectionHandle, groups: &mut [Group]) {
 	for group in groups.iter_mut().filter(|g| g.reset.is_none() && !g.finished) {
 		let mut stream = pair.client_send(ch, group.id);
 		while !group.backlog.is_empty() {
-			match stream.write(&group.backlog) {
+			match stream.write(&mut &group.backlog[..]) {
 				Ok(n) => drop(group.backlog.drain(..n)),
-				Err(WriteError::Blocked) => return,
+				Err(send::Error::Blocked) => return,
 				Err(e) => panic!("write: {e}"),
 			}
 		}
@@ -517,7 +517,7 @@ fn receive(
 					reading.done = true;
 					break;
 				}
-				Err(ReadError::Blocked) => break,
+				Err(recv::Error::Blocked) => break,
 				Err(_) => {
 					reading.done = true;
 					break;
@@ -762,7 +762,7 @@ fn single_packet_writes() {
 	let mut next_write = pair.time;
 	while pair.time < end {
 		if pair.time >= next_write {
-			pair.client_send(client_ch, id).write(&[0; 100]).unwrap();
+			pair.client_send(client_ch, id).write(&mut &[0; 100][..]).unwrap();
 			next_write += Duration::from_millis(200);
 		}
 		pair.drive_client();
@@ -787,7 +787,7 @@ fn batch_within_probe_inflight() {
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, id).write(&[0; 1400]).unwrap();
+	pair.client_send(client_ch, id).write(&mut &[0; 1400][..]).unwrap();
 	pair.drive_client();
 
 	let conn = pair.client_conn_mut(client_ch);
@@ -801,6 +801,52 @@ fn batch_within_probe_inflight() {
 		conn.bytes_in_flight() <= inflight,
 		"{} bytes in flight past the probe's {inflight}",
 		conn.bytes_in_flight()
+	);
+}
+
+/// The inflight the controller allows a probe holds the sender back only once an attempt has
+/// sent a duplicate: media alone past it leaves the sender application-limited
+#[test]
+fn probe_inflight_limits_only_an_attempt() {
+	let _guard = subscribe();
+	let mut pair = Pair::default();
+	pair.latency = Duration::from_millis(20);
+	let (client_ch, _) = pair.connect();
+	pair.client_conn_mut(client_ch).set_probe_target(1000 * TARGET);
+	let inflight = pair
+		.client_conn_mut(client_ch)
+		.congestion_state()
+		.metrics()
+		.probe_inflight
+		.expect("probing in Startup");
+
+	// More media than the probe may fill, within the initial window
+	let media = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, media)
+		.write(&mut &vec![0; inflight as usize + 2400][..])
+		.unwrap();
+	// Past the pacer's bursts, short of the first ACK
+	for _ in 0..10 {
+		pair.drive_client();
+		pair.time += Duration::from_millis(1);
+	}
+	let conn = pair.client_conn_mut(client_ch);
+	assert!(conn.bytes_in_flight() > inflight);
+	assert_eq!(conn.stats().path.sent_bandwidth_probes, 0);
+	assert!(conn.app_limited(), "media alone past the bound held the sender back");
+
+	// Once the media drains, an attempt fills up to the bound, which then holds it back
+	pair.drive();
+	pair.client_send(client_ch, media).write(&mut &[0; 1400][..]).unwrap();
+	pair.drive_client();
+	let conn = pair.client_conn_mut(client_ch);
+	assert!(conn.stats().path.sent_bandwidth_probes > 0);
+	assert!(
+		!conn.app_limited(),
+		"an attempt held back by the bound was application-limited"
 	);
 }
 

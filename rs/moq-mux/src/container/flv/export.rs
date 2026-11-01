@@ -285,9 +285,9 @@ impl FlvTrack {
 			arrived,
 			read,
 			restart,
-			skip,
 			sync,
 			leading,
+			bytes,
 			item,
 			..
 		} = arrival;
@@ -298,9 +298,9 @@ impl FlvTrack {
 				read,
 				decode: moq_net::Timestamp::from_millis(u64::from(timestamp))?.into(),
 				restart,
-				skip,
 				sync,
 				leading,
+				bytes,
 				item: Tag {
 					frame: item,
 					timestamp,
@@ -462,20 +462,21 @@ impl<S: Stream> Export<S> {
 		self
 	}
 
-	/// Read each track until it has a frame due, preserving ingress timing before buffering.
+	/// Read each track within its jitter window, preserving ingress timing before buffering.
 	fn fill(&mut self, waiter: &kio::Waiter) -> anyhow::Result<()> {
 		for kind in [0, 1] {
 			let count = if kind == 0 { self.video.len() } else { self.audio.len() };
 			for index in 0..count {
 				loop {
-					if self.header_emitted && self.jitter.full(&(kind, index)) {
-						break;
-					}
 					let track = if kind == 0 {
 						&mut self.video[index]
 					} else {
 						&mut self.audio[index]
 					};
+					if self.header_emitted && self.jitter.full(&(kind, index), waiter) {
+						let _ = track.source.poll_received(waiter);
+						break;
+					}
 					if !self.header_emitted && track.pending.is_some() {
 						break;
 					}
@@ -511,9 +512,9 @@ impl<S: Stream> Export<S> {
 							read: moq_clock::now(),
 							decode: frame.timestamp.into(),
 							restart: track.source.markers(),
-							skip: track.source.skips(),
 							sync: kind == 1 || frame.keyframe,
 							leading: false,
+							bytes: frame.payload.len(),
 							item: frame,
 						}
 					};

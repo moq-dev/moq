@@ -201,7 +201,7 @@ mod tests {
 		));
 	}
 
-	const VERSIONS: [Version; 2] = [Version::Draft18, Version::Draft22];
+	const VERSIONS: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 	fn token() -> Token {
 		// A kind past one varint byte and a value that is not text, so neither is mistaken

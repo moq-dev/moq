@@ -110,6 +110,9 @@ when its session does.
 
 `MediaTrackConsumer` reads `MediaRead` records in decode order: `kFrame`, `kGap`, or
 `kEnd`, like the audio and video decoders. Match the variant before taking its frame.
+A decoder reads everything the track still holds unless a live player sets `start` to
+`moq::DecodeStart::kLatest` in its decoder output, which joins at the newest group and skips
+the cached backlog.
 A gap breaks continuity. An encoder end is not stream EOF: following frames before its
 endpoint are the old encoder's drain; the first at or past it starts fresh. For arrival-order reads, decode each group
 from `TrackConsumer::recv_group` with `moq::MediaGroupConsumer::init(group, container)`;
@@ -206,6 +209,10 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 ## Compressed tracks
 
 `moq::TrackInfo::compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
+
+## Subscription defaults
+
+`moq::subscription_defaults()` returns moq-net's defaults, whose zero `max_delay` skips a superseded group at once; passing `std::nullopt` for a subscription means the same. Change its fields rather than starting from `moq::Subscription{}`, whose unset `max_delay` sets no subscriber limit.
 
 ## Track demand
 

@@ -6,8 +6,9 @@
 relays and discovers LAN peers. `moq mesh serve ssh tcp://localhost:22`
 publishes a service, and `ssh -o ProxyCommand='moq mesh pipe %h ssh' <id>`
 reaches it from another host by endpoint ID, taking the LAN path when both
-hosts share a network. `moq mesh install` runs it as a systemd (user or system)
-or launchd service.
+hosts share a network. `moq mesh install` runs it as a system service by default
+(a systemd system unit or a launchd daemon), with `--user` for a per-user
+unit that warns about macOS's Local Network prompt.
 
 ## Plan
 
@@ -26,6 +27,10 @@ the epic's first shippable outcome.
   signing with the endpoint key through its `Signer` trait, and pass the
   hostname as the default name. The
   contract is in `doc/bin/relay/auth.md#mesh-enrollment`.
+- Decided 2026-10-31 (maintainer): install defaults to a system service
+  because macOS exempts launchd daemons and root from Local Network privacy
+  but prompts launchd agents, and a denied prompt silently breaks LAN
+  discovery.
 - Update `doc/bin/cli.md` inline.
 
 ## Required

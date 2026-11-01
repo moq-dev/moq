@@ -71,7 +71,8 @@ typedef AnnounceRoute = MoqAnnounceRoute;
 typedef Announce = MoqAnnounce;
 
 /// What an [AnnounceConsumer] yields: [AnnounceEventStart],
-/// [AnnounceEventUpdate], [AnnounceEventEnd], or [AnnounceEventRestart].
+/// [AnnounceEventUpdate], [AnnounceEventEnd], [AnnounceEventRestart], or
+/// [AnnounceEventTakeover].
 typedef AnnounceEvent = MoqAnnounceEvent;
 
 /// A route now covers the prefix; the stream had none there.
@@ -86,6 +87,10 @@ typedef AnnounceEventEnd = EndMoqAnnounceEvent;
 /// Another publisher instance now serves the prefix: drop what was resolved
 /// under it and request afresh.
 typedef AnnounceEventRestart = RestartMoqAnnounceEvent;
+
+/// A route now covers the prefix and continues what the route at `predecessor`
+/// served beneath it: keep what was resolved through that one.
+typedef AnnounceEventTakeover = TakeoverMoqAnnounceEvent;
 
 /// The write side of a broadcast: publish tracks into it.
 typedef BroadcastProducer = MoqBroadcastProducer;
@@ -129,6 +134,12 @@ typedef Frame = MoqFrame;
 /// Tunes how a track subscription is delivered: priority, latency budget, ranges, and group ordering.
 typedef Subscription = MoqSubscription;
 
+/// moq-net's defaults, whose `maxDelay` of zero skips a superseded group at once.
+///
+/// A null subscription means the same. A `Subscription()` leaves `maxDelay` null, which
+/// sets no subscriber limit, so pass `maxDelay: Duration.zero` when building one to match.
+Subscription defaultSubscription() => moqSubscriptionDefaults();
+
 /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is null.
 typedef Range = MoqRange;
 
@@ -137,6 +148,9 @@ typedef Anchor = MoqAnchor;
 
 /// Which pending group the publisher sends first.
 typedef Order = MoqOrder;
+
+/// A location within a track: a group sequence and a frame index in it.
+typedef Position = MoqPosition;
 
 /// Options for fetching one past group by sequence.
 typedef FetchGroupOptions = MoqFetchGroupOptions;
