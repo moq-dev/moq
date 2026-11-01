@@ -2956,7 +2956,7 @@ test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while 
  * A PROBE stream to a peer whose SETUP advertised `level`: `sent` reads back what the
  * subscriber wrote, and `finish` plays the peer's FIN.
  */
-function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean }) {
+function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean; stallTarget?: boolean }) {
 	const version = Version.DRAFT_06;
 	let written!: ReadableStreamDefaultController<Uint8Array>;
 	const sent = new Reader(
@@ -2966,13 +2966,29 @@ function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean 
 	);
 	let inbound!: ReadableStreamDefaultController<Uint8Array>;
 	let writes = 0;
+	let stall!: () => void;
+	const stalled = new Promise<void>((resolve) => (stall = resolve));
+	let reset!: (reason: unknown) => void;
+	const aborted = new Promise<unknown>((resolve) => (reset = resolve));
 	const quic = {
 		createBidirectionalStream: async () => ({
 			readable: new ReadableStream<Uint8Array>({ start: (controller) => (inbound = controller) }),
 			writable: new WritableStream<Uint8Array>({
-				write: (chunk) => {
+				write: async (chunk, controller) => {
 					// Only the stream type precedes the first target.
-					if (options?.failTarget && writes++ > 0) throw new Error("write failed");
+					if (writes++ > 0) {
+						if (options?.failTarget) throw new Error("write failed");
+						// A peer that never drains the stream: only a reset ends the write.
+						if (options?.stallTarget) {
+							stall();
+							await new Promise<void>((_, reject) => {
+								controller.signal.addEventListener("abort", () => {
+									reset(controller.signal.reason);
+									reject(controller.signal.reason);
+								});
+							});
+						}
+					}
 					written.enqueue(new Uint8Array(chunk));
 				},
 				close: () => written.close(),
@@ -2985,6 +3001,8 @@ function probeTargetHarness(level: ProbeLevel, options?: { failTarget?: boolean 
 		subscriber,
 		sent,
 		version,
+		stalled,
+		aborted,
 		finish: () => inbound.close(),
 	};
 }
@@ -3030,6 +3048,25 @@ test("a failed PROBE target write ends the probe", async () => {
 	expect(await sent.u53()).toBe(StreamId.Probe);
 
 	await running;
+	viewer.close();
+	subscriber.close();
+	viewers.close();
+});
+
+// Ending the probe resets a stream whose target write the peer never drained, rather than
+// queueing a close behind that write and holding the stream open.
+test("ending the probe resets a stalled PROBE target write", async () => {
+	const { subscriber, sent, stalled, aborted } = probeTargetHarness(ProbeLevel.Increase, { stallTarget: true });
+	const viewers = new Viewers();
+	const viewer = viewers.watch(1_000_000);
+	const stop = new AbortController();
+	const running = subscriber.runProbe(stop.signal, viewers.target);
+	expect(await sent.u53()).toBe(StreamId.Probe);
+	await stalled;
+
+	stop.abort();
+	await running;
+	expect(await aborted).toBeDefined();
 	viewer.close();
 	subscriber.close();
 	viewers.close();

@@ -1989,6 +1989,11 @@ export class Subscriber {
 			effect.get(target);
 			if (!writing) void write();
 		});
+		// A close queues behind a write the peer is not reading, which would hold the stream
+		// open past the probe; a reset rejects that write and frees the stream.
+		scope.cleanup(() => {
+			if (writing) stream.abort(new StreamError(StreamCode.Cancel, { message: "probe ended" }));
+		});
 	}
 
 	/**
