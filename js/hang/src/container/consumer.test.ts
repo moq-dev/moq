@@ -1,6 +1,6 @@
 import { expect, spyOn, test } from "bun:test";
 import { readFileSync } from "node:fs";
-import { Manual, type Micro, Milli, Nano } from "@moq/clock";
+import { Manual, type Micro, Milli, Nano, sleep } from "@moq/clock";
 import { Format as LocFormat } from "@moq/loc";
 import { type Group, Error as NetError, SessionCode, StreamCode, Time, Track, Varint } from "@moq/net";
 import { decodeInitSegment, type InitSegment } from "../cmaf/decode.ts";
@@ -73,7 +73,7 @@ function timedFrame(data: number, timestamp: number, _sequence: number): Group.F
 
 /** Yield long enough for the consumer's spawned group readers to drain what's been written. */
 function settle(ms = 20): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
+	return sleep(Nano.fromMilli(Milli(ms)));
 }
 
 // Keep transport drift filtering out of container-consumer tests. These cases
@@ -528,10 +528,7 @@ async function drainFrames(
 ): Promise<{ timestamp: Micro; group: number; keyframe: boolean }[]> {
 	const frames: { timestamp: Micro; group: number; keyframe: boolean }[] = [];
 	for (;;) {
-		const result = await Promise.race([
-			consumer.next(),
-			new Promise<null>((resolve) => setTimeout(() => resolve(null), timeout)),
-		]);
+		const result = await Promise.race([consumer.next(), sleep(Nano.fromMilli(Milli(timeout))).then(() => null)]);
 		if (result === null || result === undefined) break;
 		if (result.kind === "frame") {
 			frames.push({ timestamp: result.frame.timestamp, group: result.group, keyframe: result.frame.keyframe });
@@ -728,10 +725,10 @@ test("Consumer releases its open groups when an error ends it", async () => {
 	const later = track.createGroup(1);
 	later.writeFrame({ payload: new Uint8Array([0x01]), timestamp: Time.Timestamp.now() });
 	await open;
-	expect(later.demand().used.peek()).toBe(true);
+	expect(later.demand().wanted.peek()).toBe(true);
 
 	await expect(consumer.next()).rejects.toThrow("malformed");
-	expect(later.demand().used.peek()).toBe(false);
+	expect(later.demand().wanted.peek()).toBe(false);
 	consumer.close();
 });
 
@@ -868,7 +865,7 @@ test("Consumer delivers groups in sequence order regardless of arrival order", a
 	track.finish();
 	track.close();
 
-	await new Promise((resolve) => setTimeout(resolve, 100));
+	await sleep(Nano.fromMilli(Milli(100)));
 
 	const frames = await drainFrames(consumer, 500);
 	expect(frames).toHaveLength(3);
@@ -884,7 +881,7 @@ test("Consumer delivers a group that arrives below the cursor", async () => {
 
 	// Group.Producer 5 arrives first (sets active = 5)
 	writeGroupWithLegacyFrames(track, 5, [100_000 as Micro]);
-	await new Promise((resolve) => setTimeout(resolve, 50));
+	await sleep(Nano.fromMilli(Milli(50)));
 
 	// Group.Producer 3 lands behind it, and Group.Producer 6 ahead of it. Arriving below the
 	// cursor is not what makes content stale: how far behind the live edge a group may be is
@@ -895,7 +892,7 @@ test("Consumer delivers a group that arrives below the cursor", async () => {
 	track.finish();
 	track.close();
 
-	await new Promise((resolve) => setTimeout(resolve, 100));
+	await sleep(Nano.fromMilli(Milli(100)));
 
 	const frames = await drainFrames(consumer, 500);
 	expect(frames.map((frame) => frame.group)).toEqual([3, 5, 6]);
@@ -913,14 +910,11 @@ test("Consumer next() yields no gap before the first frame", async () => {
 	track.finish();
 	track.close();
 
-	await new Promise((resolve) => setTimeout(resolve, 50));
+	await sleep(Nano.fromMilli(Milli(50)));
 
 	const seen: string[] = [];
 	for (;;) {
-		const result = await Promise.race([
-			consumer.next(),
-			new Promise<null>((resolve) => setTimeout(() => resolve(null), 500)),
-		]);
+		const result = await Promise.race([consumer.next(), sleep(Nano.fromMilli(Milli(500))).then(() => null)]);
 		if (result === null || result === undefined) break;
 		seen.push(describe(result));
 	}
@@ -1322,7 +1316,7 @@ test("Consumer buffered signal updates as frames arrive", async () => {
 	writeGroupWithLegacyFrames(track, 0, [0 as Micro, 33_000 as Micro]);
 	writeGroupWithLegacyFrames(track, 1, [66_000 as Micro, 99_000 as Micro]);
 
-	await new Promise((resolve) => setTimeout(resolve, 100));
+	await sleep(Nano.fromMilli(Milli(100)));
 
 	const ranges = consumer.buffered.peek();
 	expect(ranges.length).toBe(1);
@@ -1349,7 +1343,7 @@ test("Consumer recovers from gap in group sequence numbers", async () => {
 	track.finish();
 	track.close();
 
-	await new Promise((resolve) => setTimeout(resolve, 100));
+	await sleep(Nano.fromMilli(Milli(100)));
 
 	const frames = await drainFrames(consumer, 500);
 	expect(frames.length >= 4).toBeTruthy();
@@ -1532,7 +1526,7 @@ test("Consumer does not duration-skip when the gap is not covered", async () => 
 	g1.finish();
 
 	// Let the consumer settle on group 0, then extend it before closing.
-	await new Promise((resolve) => setTimeout(resolve, 20));
+	await sleep(Nano.fromMilli(Milli(20)));
 	g0.writeFrame({ payload: new Uint8Array([20]), timestamp: Time.Timestamp.now() });
 	g0.finish();
 	track.finish();
@@ -1578,10 +1572,7 @@ test("Consumer delivers a PTS-contiguous next group whose sequence jumped (Legac
 		timestamp: at(3045),
 	});
 
-	const result = await Promise.race([
-		pending,
-		new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 500)),
-	]);
+	const result = await Promise.race([pending, sleep(Nano.fromMilli(Milli(500))).then(() => "timeout" as const)]);
 	expect(result).not.toBe("timeout");
 	expect(frameOf(result).payload).toEqual(new Uint8Array([0x02]));
 
@@ -1619,10 +1610,7 @@ test("Consumer waits on a PTS gap instead of skipping to a later buffered group 
 		timestamp: at(90_000),
 	});
 
-	const gap = await Promise.race([
-		pending,
-		new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 300)),
-	]);
+	const gap = await Promise.race([pending, sleep(Nano.fromMilli(Milli(300))).then(() => "timeout" as const)]);
 	expect(gap).toBe("timeout"); // held: the gap is not eagerly skipped
 
 	// The missing group B arrives, contiguous with A (first PTS 3000 ticks = 33_333µs = A.end); it

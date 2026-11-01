@@ -45,17 +45,11 @@ use util::*;
 mod acked;
 mod characterize;
 mod probe;
+mod rate;
 mod reset_stream_at;
 mod sim;
 mod token;
-
-#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-use wasm_bindgen_test::wasm_bindgen_test as test;
-
-// Enable this if you want to run these tests in the browser.
-// Unfortunately it's either-or: Enable this and you can run in the browser, disable to run in nodejs.
-// #[cfg(all(target_family = "wasm", target_os = "unknown"))]
-// wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+mod waits;
 
 #[test]
 fn pending_incoming_survives_server_config_change() {
@@ -2658,6 +2652,143 @@ fn keep_alive() {
 		assert!(!pair.client_conn_mut(client_ch).is_closed());
 		assert!(!pair.server_conn_mut(server_ch).is_closed());
 	}
+}
+
+/// Runs `pair` idle well past `idle_timeout`, asserting neither side closes, and returns the
+/// gaps between the client's keep-alive packets.
+fn idle_keep_alive_gaps(
+	pair: &mut Pair,
+	client_ch: ConnectionHandle,
+	server_ch: ConnectionHandle,
+	idle_timeout: Duration,
+) -> Vec<Duration> {
+	let end = pair.time + 20 * idle_timeout;
+	let mut sent = pair.client_conn_mut(client_ch).stats().path.sent_packets;
+	let mut last = pair.time;
+	let mut gaps = Vec::new();
+	while pair.time < end {
+		if !pair.step()
+			&& let Some(time) = min_opt(pair.client.next_wakeup(), pair.server.next_wakeup())
+		{
+			pair.time = time;
+		}
+		assert!(!pair.client_conn_mut(client_ch).is_closed());
+		assert!(!pair.server_conn_mut(server_ch).is_closed());
+		let now = pair.client_conn_mut(client_ch).stats().path.sent_packets;
+		if now != sent {
+			sent = now;
+			gaps.push(pair.time - last);
+			last = pair.time;
+		}
+	}
+	gaps
+}
+
+/// A client that sets no keep-alive and no per-connection config still pings a server that
+/// advertises a shorter idle timeout, below the negotiated timeout rather than its own.
+#[test]
+fn keep_alive_derives_from_a_shorter_peer_idle_timeout() {
+	let _guard = subscribe();
+	const PEER: Duration = Duration::from_secs(2);
+	let mut server = server_config();
+	server.transport.idle_timeout = Some(PEER);
+	server.transport.keep_alive = Some(Duration::ZERO);
+	let mut client = client_config();
+	client.transport.idle_timeout = Some(Duration::from_secs(10));
+	let mut pair = Pair::new(Default::default(), server);
+	let (client_ch, server_ch) = pair.connect_with(client);
+	let gaps = idle_keep_alive_gaps(&mut pair, client_ch, server_ch, PEER);
+	assert!(gaps.len() >= 10, "{gaps:?}");
+	assert!(gaps.iter().all(|&gap| gap * 3 < PEER), "{gaps:?}");
+}
+
+/// The derived interval follows the local idle timeout whenever it is the smaller one.
+#[test]
+fn keep_alive_follows_the_local_idle_timeout() {
+	let _guard = subscribe();
+	let mut last = None;
+	for local in [Duration::from_secs(10), Duration::from_secs(5)] {
+		let mut server = server_config();
+		server.transport.idle_timeout = Some(Duration::from_secs(30));
+		server.transport.keep_alive = Some(Duration::ZERO);
+		let mut client = client_config();
+		client.transport.idle_timeout = Some(local);
+		let mut pair = Pair::new(Default::default(), server);
+		let (client_ch, server_ch) = pair.connect_with(client);
+		let gaps = idle_keep_alive_gaps(&mut pair, client_ch, server_ch, local);
+		let longest = gaps.iter().copied().max().unwrap();
+		assert!(longest * 3 < local, "{local:?}: {gaps:?}");
+		assert!(last.is_none_or(|last| longest < last), "{local:?}: {gaps:?}");
+		last = Some(longest);
+	}
+}
+
+/// An explicit keep-alive no shorter than the negotiated idle timeout is capped at the derived
+/// interval, and zero sends none.
+#[test]
+fn keep_alive_explicit_cap_and_disable() {
+	let _guard = subscribe();
+	const IDLE: Duration = Duration::from_secs(2);
+	let connect = |keep_alive| {
+		let mut server = server_config();
+		server.transport.idle_timeout = Some(IDLE);
+		server.transport.keep_alive = Some(Duration::ZERO);
+		let mut client = client_config();
+		client.transport.keep_alive = Some(keep_alive);
+		let mut pair = Pair::new(Default::default(), server);
+		let (client_ch, server_ch) = pair.connect_with(client);
+		(pair, client_ch, server_ch)
+	};
+
+	let (mut pair, client_ch, server_ch) = connect(Duration::from_secs(60));
+	let gaps = idle_keep_alive_gaps(&mut pair, client_ch, server_ch, IDLE);
+	assert!(gaps.iter().all(|&gap| gap * 3 < IDLE), "{gaps:?}");
+
+	let (mut pair, client_ch, _) = connect(Duration::ZERO);
+	let start = pair.time;
+	while !pair.client_conn_mut(client_ch).is_closed() {
+		if !pair.step() {
+			let Some(time) = min_opt(pair.client.next_wakeup(), pair.server.next_wakeup()) else {
+				break;
+			};
+			pair.time = time;
+		}
+	}
+	assert_matches!(
+		pair.client_conn_mut(client_ch).poll(),
+		Some(Event::ConnectionLost {
+			reason: ConnectionError::TimedOut
+		})
+	);
+	assert!(pair.time - start < 2 * IDLE, "{:?}", pair.time - start);
+}
+
+/// A peer advertising the largest idle timeout the wire carries derives a keep-alive too far
+/// out to schedule, which must not panic.
+#[test]
+fn keep_alive_derived_from_a_huge_peer_idle_timeout() {
+	let _guard = subscribe();
+	let mut server = server_config();
+	server.transport.idle_timeout = Some(Duration::from_millis(VarInt::MAX.into_inner()));
+	let mut client = client_config();
+	client.transport.idle_timeout = None;
+	let mut pair = Pair::new(Default::default(), server);
+	let (client_ch, _) = pair.connect_with(client);
+	pair.client_conn_mut(client_ch).ping();
+	pair.drive();
+	assert!(!pair.client_conn_mut(client_ch).is_closed());
+}
+
+#[test]
+fn keep_alive_interval_derivation() {
+	use transport::keep_alive_interval as interval;
+	let secs = Duration::from_secs;
+	assert_eq!(interval(None, Some(secs(10))), Some(secs(3)));
+	assert_eq!(interval(None, None), None);
+	assert_eq!(interval(Some(Duration::ZERO), Some(secs(10))), None);
+	assert_eq!(interval(Some(secs(5)), Some(secs(10))), Some(secs(5)));
+	assert_eq!(interval(Some(secs(10)), Some(secs(10))), Some(secs(3)));
+	assert_eq!(interval(Some(secs(60)), None), Some(secs(60)));
 }
 
 #[test]
@@ -6705,11 +6836,13 @@ fn bbr_burst_after_long_idle_keeps_learned_bandwidth() {
 
 	let _guard = subscribe();
 	entropy::reseed(SEED);
-	let mut pair = Pair::default();
-	pair.latency = Duration::from_millis(25);
-	let mut client_cfg = client_config();
 	// Only the sender pings. A ping from the receiver would reset the sender's keep-alive timer,
 	// leaving its controller nothing to sample during the idle.
+	let mut server = server_config();
+	server.transport.keep_alive = Some(Duration::ZERO);
+	let mut pair = Pair::new(Default::default(), server);
+	pair.latency = Duration::from_millis(25);
+	let mut client_cfg = client_config();
 	client_cfg.transport.keep_alive = Some(Duration::from_secs(10));
 	let (client_ch, server_ch) = pair.connect_with(client_cfg);
 	pair.to_server.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 100_000, false));

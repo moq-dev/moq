@@ -89,7 +89,6 @@ impl Instant {
 	///
 	/// When std's clock cannot represent it, as with a simulated instant near zero
 	/// on a platform whose std clock starts at boot.
-	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 	pub fn into_std(self) -> std::time::Instant {
 		crate::runtime::into_std(self).expect("instant outside std's clock range")
 	}
@@ -97,7 +96,6 @@ impl Instant {
 	/// The instant `at` names on std's clock, the inverse of [`Instant::into_std`].
 	///
 	/// Saturates at the clock's range, like a deadline past it.
-	#[cfg(any(not(target_arch = "wasm32"), target_os = "wasi"))]
 	pub fn from_std(at: std::time::Instant) -> Self {
 		crate::runtime::from_std(at)
 	}

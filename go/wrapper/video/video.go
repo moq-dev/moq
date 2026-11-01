@@ -59,15 +59,23 @@ func packet(raw ffi.MoqVideoPacket) Packet {
 	return Packet{Timestamp: time.Duration(raw.TimestampUs) * time.Microsecond, Data: raw.Data, Keyframe: raw.Keyframe}
 }
 
-// DecoderOutput configures an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only).
+// DecoderOutput configures an optional resize, a max delay, whether frames keep the decoder's surface (macOS only), and where to start.
 type DecoderOutput struct {
 	Resize   *media.Dimensions
 	MaxDelay *time.Duration
 	Surface  bool
+	// Start is where to begin on a track that already holds groups; zero is media.DecodeStartOldest.
+	// A live player sets media.DecodeStartLatest so a reopened decoder skips the cached backlog.
+	Start media.DecodeStart
 }
 
 func (o DecoderOutput) ffi() (ffi.MoqVideoDecoderOutput, error) {
-	return ffi.MoqVideoDecoderOutput{Resize: o.Resize, MaxDelay: o.MaxDelay, Surface: o.Surface}, bridge.NonNegative(o.MaxDelay, "video max delay")
+	// Go's zero value is the native null: the oldest group.
+	var start *media.DecodeStart
+	if o.Start != 0 {
+		start = &o.Start
+	}
+	return ffi.MoqVideoDecoderOutput{Resize: o.Resize, MaxDelay: o.MaxDelay, Surface: o.Surface, Start: start}, bridge.NonNegative(o.MaxDelay, "video max delay")
 }
 
 // Producer encodes raw pictures and publishes them as a track in a broadcast's catalog.
