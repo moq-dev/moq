@@ -2,7 +2,8 @@
 
 ## Goal
 
-moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take all their crypto from
+moq-quic, moq-tokio, moq-uring, moq-rtmp, qmux, and moq-relay's own HTTP and
+TLS take all their crypto from
 rind and `rind-rustls`, their graphs hold no aws-lc-sys or ring, and moq-tokio's
 and moq-quic's `aws-lc-rs` and `ring` features are gone. Every binary built on
 moq-tokio checks rind's CPU support at startup.
@@ -27,7 +28,9 @@ Decided with the maintainer on 2026-10-26; see the
 - moq-rtmp's handshake HMAC-SHA256 moves to rind, and its rustls stops forcing
   aws-lc. qmux's TLS takes `rind-rustls`; tungstenite's own `sha1` stays.
 - reqwest and axum-server switch to their no-provider features wherever these
-  crates enable them.
+  crates enable them. Decided 2026-10-31 (maintainer): this includes
+  moq-relay's own reqwest, axum-server, and rustls `aws-lc-rs` features, which
+  no other area owns; relay ACME still owns rustls-acme.
 - The roughly 100 test call sites that install aws-lc's provider install
   rind's.
 - The startup check runs where moq-tokio's crypto is first configured, and its
@@ -42,4 +45,5 @@ Unsupported CPUs now fail at startup. Wire: none.
 
 ## Required
 
+- [rind runs on a Pi 4's aarch64 CPU](/quest/m2/rind/aarch64.md) - the rind release this switches to
 - [moq-quic's crypto is rustls](/quest/m1/quic-api/crypto.md) - the sealed crypto surface rind plugs into, without the per-provider gates

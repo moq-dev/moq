@@ -31,16 +31,20 @@ instead, so every crate drops C, not just the relay.
   armv7 through libcrux. A host missing a CPU feature fails at startup with an
   error naming it. wasm32 and other targets do not build rind; nothing in MoQ
   needs native crypto there.
-- Raspberry Pi 4, CM4, and Zero 2 W lack aarch64 crypto extensions, so they
-  run an armv7 Linux build instead, keeping
+- Raspberry Pi 4, CM4, and Zero 2 W lack aarch64 crypto extensions. Decided
+  2026-10-31 (maintainer): rind picks a NEON path for them at startup, as ring
+  and aws-lc-rs do, so their aarch64 builds keep running, and every area
+  that runs in moq-cli or moq-relay switches only once that rind release
+  ships. This keeps
   [cli-packaging](/quest/m2/cli-packaging.md)'s Pi 4 V4L2 publishing and
   [embedded video](/quest/m3/video-embedded.md) on those boards.
 - moq-tokio's and moq-quic's `aws-lc-rs` and `ring` features are removed, not
   kept as alternatives, so there is one provider and no exclusion gate.
 - The migration waits for rind's armv7 support, so no target is dropped.
   Decided 2026-10-31 (maintainer): each area waits only on the rind pieces it
-  uses, so most areas switch once rind 0.1.0 is on crates.io (published
-  2026-10-31), and only relay
+  uses, so most areas switch once rind runs on a Pi 4's aarch64 CPU (0.1.0
+  shipped 2026-10-31 without it; e2ee, which no binary links, switches on
+  0.1.0), and only relay
   ACME waits on `rind-instant-acme`. aws-lc-rs stays in the workspace until
   the last area lands, which is when this epic removes it.
 - Split per area, each landing once rind covers it. Docs a change makes stale
@@ -53,11 +57,12 @@ The epic's own work, once every child has merged:
   release target's graph holds aws-lc-sys, ring, or `cc` through a crypto
   crate.
 - Add an `armv7-unknown-linux-gnueabihf` moq-cli release with v4l2, and point
-  `doc/bin/cli.md`'s board note at it for the Pi 4, CM4, and Zero 2 W.
+  `doc/bin/cli.md`'s board note at it for boards running a 32-bit OS.
 
 ## Required
 
 - [rind-instant-acme is on crates.io](/quest/m2/rind/instant-acme.md) - waiting on the adapter relay ACME needs
+- [rind runs on a Pi 4's aarch64 CPU](/quest/m2/rind/aarch64.md) - waiting on the rind release the areas in moq-cli and moq-relay switch to
 - [Drop iroh](/quest/m2/rind/drop-iroh.md) - moq-tokio, moq-relay, and moq-cli lose the `iroh` feature and web-transport-iroh
 - [Transport on rind](/quest/m2/rind/transport.md) - moq-quic, moq-tokio, moq-uring, moq-rtmp, and qmux take rind, and the `aws-lc-rs`/`ring` features go
 - [moq-auth on rind](/quest/m2/rind/auth.md) - JWT signing, key generation, and JWK loading run on rind
