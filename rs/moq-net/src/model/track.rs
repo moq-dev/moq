@@ -13448,13 +13448,14 @@ mod test {
 		assert!(done.is_none(), "missing groups below the boundary are not an error");
 	}
 
-	/// A finished track ends a sequence reader with nothing left in its range, as it ends
-	/// an arrival reader: whether the range ends at the cursor or the rest was given up.
+	/// A finished track ends both readers with nothing left in range, whether the range
+	/// ends at the cursor or the rest was given up.
 	#[test]
-	fn ordered_ends_once_a_finished_track_leaves_nothing_in_range() {
+	fn readers_end_once_a_finished_track_leaves_nothing_in_range() {
 		for given_up in [false, true] {
 			let producer = track_producer("test", Info::timed());
 			let end = if given_up { 4 } else { 3 };
+			let mut arrival = producer.subscribe(replay().with_range(0..end));
 			let mut ordered = producer.subscribe(replay().with_range(0..end)).ordered();
 			if given_up {
 				producer.drop_groups(3..4, StreamError::DeliveryTimeout);
@@ -13468,10 +13469,18 @@ mod test {
 					panic!("group {sequence}, given_up={given_up}")
 				};
 				assert_eq!(group.sequence, sequence);
+				let Poll::Ready(Ok(Some(group))) = arrival.poll_recv_group(&kio::Waiter::noop()) else {
+					panic!("arrival group {sequence}, given_up={given_up}")
+				};
+				assert_eq!(group.sequence, sequence);
 			}
 			assert!(
 				matches!(ordered.poll_next_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
 				"given_up={given_up}"
+			);
+			assert!(
+				matches!(arrival.poll_recv_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
+				"arrival, given_up={given_up}"
 			);
 		}
 	}
