@@ -43,17 +43,20 @@ version = providers.gradleProperty("moq.version").get()
 
 // Sessions advertise the wrapper's version in SETUP (see Client.kt), so compile it in
 // from the same property rather than keeping a second copy in source.
-val generateVersion = tasks.register("generateVersion") {
-    val output = layout.buildDirectory.dir("generated/version")
-    val wrapperVersion = version.toString()
-    inputs.property("version", wrapperVersion)
-    outputs.dir(output)
-    doLast {
-        val file = output.get().file("dev/moq/Version.kt").asFile
-        file.parentFile.mkdirs()
-        file.writeText("package dev.moq\n\n/** This wrapper's version. */\ninternal const val VERSION = \"$wrapperVersion\"\n")
+val generateVersion =
+    tasks.register("generateVersion") {
+        val output = layout.buildDirectory.dir("generated/version")
+        val wrapperVersion = version.toString()
+        inputs.property("version", wrapperVersion)
+        outputs.dir(output)
+        doLast {
+            val file = output.get().file("dev/moq/Version.kt").asFile
+            file.parentFile.mkdirs()
+            file.writeText(
+                "package dev.moq\n\n/** This wrapper's version. */\ninternal const val VERSION = \"$wrapperVersion\"\n"
+            )
+        }
     }
-}
 
 // Compatible-patch range for the bindings: 0.4.3 (the WebSocket fallback
 // setters) or newer, never 0.5.0. Published into the wrapper's POM so consumers
@@ -86,35 +89,39 @@ kotlin {
     sourceSets {
         // Gradle 9.6 deprecates the `by getting` / `by creating` delegates,
         // and Kotlin DSL treats those as script compilation errors.
-        val commonMain = getByName("commonMain") {
-            dependencies {
-                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
-                // api: the typed JSON helpers are inline+reified, so they
-                // resolve serializers at the consumer's call site.
-                api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
-            }
-        }
-        val commonTest = getByName("commonTest") {
-            dependencies {
-                implementation(kotlin("test"))
-                implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
-            }
-        }
-
-        val jvmAndAndroidMain = create("jvmAndAndroidMain") {
-            dependsOn(commonMain)
-            kotlin.srcDir(generateVersion)
-            dependencies {
-                // api: the wrapper re-exports the FFI types, so consumers get
-                // `uniffi.moq.*` (and the native libs) transitively.
-                api("dev.moq:moq-ffi") {
-                    version { require(MOQ_FFI_RANGE) }
+        val commonMain =
+            getByName("commonMain") {
+                dependencies {
+                    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
+                    // api: the typed JSON helpers are inline+reified, so they
+                    // resolve serializers at the consumer's call site.
+                    api("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
                 }
             }
-        }
-        val jvmAndAndroidTest = create("jvmAndAndroidTest") {
-            dependsOn(commonTest)
-        }
+        val commonTest =
+            getByName("commonTest") {
+                dependencies {
+                    implementation(kotlin("test"))
+                    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
+                }
+            }
+
+        val jvmAndAndroidMain =
+            create("jvmAndAndroidMain") {
+                dependsOn(commonMain)
+                kotlin.srcDir(generateVersion)
+                dependencies {
+                    // api: the wrapper re-exports the FFI types, so consumers get
+                    // `uniffi.moq.*` (and the native libs) transitively.
+                    api("dev.moq:moq-ffi") {
+                        version { require(MOQ_FFI_RANGE) }
+                    }
+                }
+            }
+        val jvmAndAndroidTest =
+            create("jvmAndAndroidTest") {
+                dependsOn(commonTest)
+            }
 
         getByName("jvmMain") {
             dependsOn(jvmAndAndroidMain)
@@ -199,8 +206,13 @@ mavenPublishing {
 // POM is written.
 tasks.withType<GenerateMavenPom>().configureEach {
     val range = MOQ_FFI_RANGE
-    val ffi = Regex("(<groupId>dev\\.moq</groupId>\\s*<artifactId>moq-ffi[^<]*</artifactId>\\s*<version>)[^<]*(</version>)")
+    val ffi =
+        Regex(
+            "(<groupId>dev\\.moq</groupId>\\s*<artifactId>moq-ffi[^<]*</artifactId>\\s*<version>)[^<]*(</version>)"
+        )
     doLast {
-        destination.writeText(ffi.replace(destination.readText()) { it.groupValues[1] + range + it.groupValues[2] })
+        destination.writeText(
+            ffi.replace(destination.readText()) { it.groupValues[1] + range + it.groupValues[2] }
+        )
     }
 }

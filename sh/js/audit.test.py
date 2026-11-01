@@ -1,10 +1,10 @@
 """Every Bun lockfile is audited, including when an earlier audit fails."""
 
 import os
-from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 # The script finds projects through `git ls-files`, so these only shape the fixture.

@@ -736,6 +736,11 @@ impl Served {
 			Self::Track(Err(Error::Expired | Error::Session(crate::SessionError::Expired))) => {
 				(ietf::PublishDoneStatus::Unauthorized, "token expired")
 			}
+			// The code its group streams reset with, so a relay passes a malformed upstream on
+			// rather than hiding it behind INTERNAL_ERROR.
+			Self::Track(Err(err)) if crate::StreamError::from(err) == crate::StreamError::MalformedTrack => {
+				(ietf::PublishDoneStatus::MalformedTrack, "malformed track")
+			}
 			Self::Track(Err(_)) => (ietf::PublishDoneStatus::InternalError, "internal error"),
 			Self::UpdateFailed(_) | Self::RenewalRefused(_) => (ietf::PublishDoneStatus::UpdateFailed, "update failed"),
 			// Pausing ends no subscription, so nothing reports it.
@@ -7458,6 +7463,33 @@ mod serve_tests {
 		drop(group);
 	}
 
+	/// A track aborted as malformed, as a relay does over an upstream's unstamped object on a
+	/// timed track, ends each subscription with PUBLISH_DONE(MALFORMED_TRACK), on either draft.
+	/// A moq-lite or JS upstream's MALFORMED_TRACK reset says the same.
+	#[kio::test]
+	async fn publish_done_after_a_malformed_track_says_so() {
+		for version in [Version::Draft18, Version::Draft22] {
+			for err in [Error::MalformedTrack, Error::Stream(crate::StreamError::MalformedTrack)] {
+				let h = serve(version);
+				let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+					.await
+					.unwrap();
+				let msg = subscribe(Filter::NextObject, None);
+				let mut serve = std::pin::pin!(h.publisher.clone().run_subscribe_stream(stream, msg));
+				serve_until(serve.as_mut(), "SUBSCRIBE_OK was sent", || !h.log.trail().is_empty()).await;
+
+				h.track.abort(err.clone()).unwrap();
+				kio::clock::timeout(std::time::Duration::from_secs(10), serve)
+					.await
+					.expect("the malformed track ends the subscription")
+					.ok();
+
+				let (status, _) = Wire::read(&h.log, version).publish_done.expect("PUBLISH_DONE was sent");
+				assert_eq!(status, 0x12, "{version:?} {err:?}");
+			}
+		}
+	}
+
 	/// A subscription that runs to the track's end counts every data stream it opened,
 	/// the fill and the END_OF_TRACK marker included, and closes each one before
 	/// PUBLISH_DONE(TRACK_ENDED).
@@ -9831,6 +9863,93 @@ mod serve_tests {
 		match futures::future::select(std::pin::pin!(joined), std::pin::pin!(serving)).await {
 			futures::future::Either::Left(_) => {}
 			futures::future::Either::Right((result, _)) => panic!("subscription ended before registering: {result:?}"),
+		}
+	}
+
+	/// A cold copy's frame zero retains the upstream Object ID, so a Next Object floor
+	/// compares wire IDs rather than discarding that many locally received frames.
+	#[kio::test]
+	async fn a_cold_reported_copy_serves_its_first_wire_object() {
+		for version in [Version::Draft18, Version::Draft22] {
+			for streamed in [false, true] {
+				let h = serve(version);
+				h.track.report_object(3, 4);
+				settle().await;
+				let stream = Stream::open(&mut crate::driver::Transport::new(h.session.clone()), version)
+					.await
+					.unwrap();
+				let mut serving = std::pin::pin!(
+					h.publisher
+						.clone()
+						.run_subscribe_stream(stream, subscribe(Filter::NextObject, None))
+				);
+				std::future::poll_fn(|cx| {
+					assert!(std::future::Future::poll(serving.as_mut(), cx).is_pending());
+					if !h.log.trail().is_empty() && Wire::read(&h.log, version).sent(ietf::SubscribeOk::ID).is_some() {
+						Poll::Ready(())
+					} else {
+						Poll::Pending
+					}
+				})
+				.await;
+				let group = h.track.create_group(group::Info { sequence: 3 }).unwrap();
+				group
+					.set_wire(group::Wire {
+						sparse: true,
+						first_object: false,
+						first_id: 5,
+						extensions: true,
+						has_end: true,
+						fetchable: true,
+						last: None,
+					})
+					.unwrap();
+				group.mark_gap(5, None).unwrap();
+				let payload = b"first locally received";
+				let mut frame = group
+					.create_object(frame::Header {
+						info: frame::Info {
+							size: payload.len() as u64,
+							timestamp: Some(timestamp()),
+						},
+						fields: Some(std::sync::Arc::new(crate::model::object::Fields {
+							id: 5,
+							properties: Default::default(),
+						})),
+						inflated: None,
+					})
+					.unwrap();
+				frame.write(payload.as_slice()).unwrap();
+				if streamed {
+					assert!(futures::poll!(serving.as_mut()).is_pending());
+				}
+				frame.finish().unwrap().finish().unwrap();
+				h.track.finish().unwrap();
+				serving.await.unwrap();
+				assert_eq!(occurrences(&h.log, payload), 1, "{version} streamed={streamed}");
+				assert!(h.log.resets().is_empty(), "{version} streamed={streamed}");
+
+				// The first object's delta is its absolute Object ID.
+				let ids: Vec<u64> = data_streams(&h.log)
+					.into_values()
+					.filter_map(|sent| {
+						let bytes: Vec<u8> = sent
+							.into_iter()
+							.filter_map(|sent| match sent {
+								Sent::Write(bytes) => Some(bytes),
+								_ => None,
+							})
+							.flatten()
+							.collect();
+						let mut buf = bytes::Bytes::from(bytes);
+						let header =
+							crate::coding::decode_buf(&mut buf, version, |r, v| ietf::GroupHeader::decode(r, v))
+								.ok()?;
+						(header.group_id == 3).then(|| crate::coding::decode_varint(&mut &buf[..], version).unwrap())
+					})
+					.collect();
+				assert_eq!(ids, [5], "{version} streamed={streamed}");
+			}
 		}
 	}
 
