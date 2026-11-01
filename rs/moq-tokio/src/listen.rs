@@ -134,6 +134,7 @@ pub struct Config {
 			"moq-lite-06",
 			"moq-lite-07-wip",
 			"moq-transport-18",
+			"moq-transport-20",
 			"moq-transport-22"
 		)
 	)]
@@ -319,6 +320,7 @@ pub(crate) struct Legacy {
 			"moq-lite-06",
 			"moq-lite-07-wip",
 			"moq-transport-18",
+			"moq-transport-20",
 			"moq-transport-22"
 		),
 		hide = true
@@ -504,7 +506,7 @@ impl Config {
 	/// forever: for zero, and for a timeout too long for the clock to reach.
 	pub fn resolved_timeout(&self) -> Option<std::time::Duration> {
 		let timeout = self.timeout.map(Into::into).unwrap_or(DEFAULT_TIMEOUT);
-		(!timeout.is_zero() && moq_clock::now().checked_add(timeout).is_some()).then_some(timeout)
+		(!timeout.is_zero() && kio::clock::now().checked_add(timeout).is_some()).then_some(timeout)
 	}
 
 	/// The QUIC listener settings, for a runtime outside this crate to map.
