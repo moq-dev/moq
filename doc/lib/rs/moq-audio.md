@@ -19,7 +19,7 @@ capture or playback is enabled.
 | `encode` | PCM to Opus (mono or stereo, with DTX and voice activity) or raw PCM |
 | `decode` | Opus (up to 7.1), PCM, and AAC-LC (mono or stereo) back to PCM, resampled to the rate you want |
 | `playback` | One output device mixing every track in a call, with click-free volume ramps |
-| `aec` | Acoustic echo cancellation (a port of WebRTC's), so a laptop with no headset doesn't feed itself back |
+| `aec` | Acoustic echo cancellation (a port of WebRTC's) for caller-supplied PCM or the built-in devices |
 
 The microphone stays open while enabled. Without a subscriber it keeps raw PCM
 up to the track's `max_age`, then encodes that history before continuing live when
@@ -36,14 +36,16 @@ AAC encode request is refused; AAC decode is for broadcasts from the ingest gate
 Playback writes never block: samples that do not fit are dropped and
 reported, and retrying them would only add latency. Voice activity is read off the Opus
 stream, so a call UI needs no second detector. Echo cancellation pairs one
-playback engine with one live microphone. A microphone buffer is stamped at
+playback engine with one live microphone, or processes playback and microphone
+PCM supplied by another audio stack. A microphone buffer is stamped at
 the capture instant of its first sample, so it lines up with video acquired
 then: up to 10 ms later with echo cancellation on, and at the read time on a
 host with no usable capture timestamp.
 
 ```bash
 cargo add moq-audio --features playback
-cargo add moq-audio --features capture,playback,aec    # Linux: cpal links libasound
+cargo add moq-audio --features aec    # Built-in devices; Linux: cpal links libasound
+cargo add moq-audio                   # PCM echo processing needs no device feature
 cargo add moq-audio --features capture,pipewire
 ```
 
