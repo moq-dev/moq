@@ -1,11 +1,12 @@
 //! What cached frames received from the network keep alive beyond the bytes the cache bills.
 //!
 //! A receiving session hands each frame's payload to the cache as the transport delivered
-//! it. A frame that arrives whole in one chunk is cached as that chunk, a slice of whatever
-//! receive allocation the packet was copied into, while a frame spanning packets is copied
-//! into storage of its own. The pool bills each frame's length, so a small frame can keep a
-//! much larger receive allocation alive, including the other frames' bytes that were copied
-//! out of it.
+//! it. A frame that arrives whole in one chunk would be cached as that chunk, a slice of
+//! whatever receive allocation the packet was copied into, while a frame spanning packets is
+//! copied into storage of its own. The pool bills each frame's length, so a small frame could
+//! keep a much larger receive allocation alive, including the other frames' bytes that were
+//! copied out of it. The session's frame reader therefore copies a whole frame of at most
+//! 2 KiB out of its chunk, and this bench guards that every backing stays near the control.
 //!
 //! Each case receives [`SECONDS`] of media on `tracks` video and audio track pairs sharing one
 //! pool, through the session's frame reader ([`moq_net::fuzz::GroupRecv`]). Frames are
