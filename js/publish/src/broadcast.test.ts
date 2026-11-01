@@ -761,3 +761,133 @@ test("identity changes before the first announce take a fresh track name", async
 
 	broadcast.close();
 });
+
+// Identity follows hang's `same_identity`: interlacing reinitializes a video decoder.
+test("an interlacing change takes a fresh track name", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("interlaced.hang") });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	await settle();
+	video.config.set({ ...videoConfig, interlaced: true });
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBe("video/1");
+	expect(video.track.peek()?.name).toBe("video/1");
+
+	broadcast.close();
+});
+
+// Names belong to one network broadcast, so a new one serves each rendition under its ID again.
+test("a new network broadcast starts every track name over", async () => {
+	const name = new Signal(Path.from("one.hang"));
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	await settle();
+	video.config.set({ ...videoConfig, codec: "vp8" });
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBe("video/1");
+	expect(() => broadcast.video("video/1")).toThrow("replacement track");
+
+	name.set(Path.from("two.hang"));
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBeUndefined();
+	expect(video.track.peek()?.name).toBe("video");
+	expect(video.track.peek()?.appendGroup().sequence).toBe(0);
+	expect(() => broadcast.video("video/1").close()).not.toThrow();
+
+	broadcast.close();
+});
+
+// A fold that throws publishes nothing, so it must not move a track the catalog still lists.
+test("a refused catalog fold renames no track", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("refused.hang") });
+	const video = broadcast.video("video");
+	const audio = broadcast.audio("audio");
+	video.config.set(videoConfig);
+	await settle();
+	const track = video.track.peek();
+
+	video.config.set({ ...videoConfig, codec: "vp8" });
+	audio.config.set({ ...audioConfig, track: "elsewhere" });
+	await settle();
+	expect(video.track.peek()).toBe(track);
+	expect(track?.closed.peek()).toBeUndefined();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.codec).toBe(videoConfig.codec);
+
+	// Once the fold succeeds, the new identity moves to a fresh name.
+	audio.config.set(audioConfig);
+	await settle();
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBe("video/1");
+	expect(video.track.peek()?.name).toBe("video/1");
+
+	broadcast.close();
+});
+
+// A failure keeps the rendition down, even across a sibling's registration, until it clears. The
+// rendition then recovers under a fresh track name, so its group sequence can start over.
+test("a failed rendition stays down until its failure clears", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("failed.hang") });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	await settle();
+	const track = video.track.peek();
+	const slot = video.slot.peek();
+	if (!track || !slot) throw new Error("expected a served rendition");
+
+	const failure = new Error("encoder failed");
+	slot.error.set(failure);
+	await settle();
+	expect(track.closed.peek()).toBe(failure);
+	expect(video.track.peek()).toBeUndefined();
+	broadcast.audio("audio").config.set(audioConfig);
+	await settle();
+	expect(video.track.peek()).toBeUndefined();
+
+	slot.error.set(undefined);
+	await settle();
+	expect(video.track.peek()?.name).toBe("video/1");
+	expect((await readCatalog(broadcast))?.video?.renditions.video?.track).toBe("video/1");
+
+	broadcast.close();
+});
+
+// A producer may abort its track itself, which fails the rendition's slot the same way.
+test("aborting a rendition's track fails its slot", async () => {
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name: Path.from("aborted.hang") });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	await settle();
+	const failure = new Error("encoder failed");
+	video.track.peek()?.abort(failure);
+	await settle();
+	expect(video.slot.peek()?.error.peek()).toBe(failure);
+
+	broadcast.close();
+});
+
+// What a producer keeps for a rendition belongs to one network broadcast, so a new one starts it over.
+test("a new network broadcast starts each rendition's slot over", async () => {
+	const name = new Signal(Path.from("one.hang"));
+	const broadcast = new Broadcast({ origin: new Origin.Producer(), name });
+	const video = broadcast.video("video");
+	video.config.set(videoConfig);
+	await settle();
+	const first = video.slot.peek();
+	if (!first) throw new Error("expected a slot");
+	first.bitrate = 1_000_000;
+	first.error.set(new Error("encoder failed"));
+	await settle();
+	expect(video.track.peek()).toBeUndefined();
+
+	name.set(Path.from("two.hang"));
+	await settle();
+	const second = video.slot.peek();
+	expect(second).toBeDefined();
+	expect(second).not.toBe(first);
+	expect(second?.bitrate).toBe(0);
+	expect(second?.error.peek()).toBeUndefined();
+	expect(video.track.peek()?.name).toBe("video");
+	expect(video.track.peek()?.closed.peek()).toBeUndefined();
+
+	broadcast.close();
+});
