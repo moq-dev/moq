@@ -2306,11 +2306,7 @@ impl Subscriber {
 	/// End an advertisement we accepted, leaving the session up: a closed stream.
 	async fn cancel_announce(&self, stream: &mut Stream<Transport, Version>) -> Result<(), Error> {
 		// An OK cut short by the grant ending is still buffered, and goes out ahead of the FIN.
-		kio::wait(|waiter| stream.writer.poll_flush(waiter)).await?;
-		if stream.writer.finish().is_ok() {
-			let _ = stream.writer.closed().await;
-		}
-		Ok(())
+		super::request_stream::deliver(&mut stream.writer).await
 	}
 
 	/// Reject an incoming PUBLISH.
@@ -2341,13 +2337,11 @@ impl Subscriber {
 		// it, and a rejected request has no lifetime of ours to hang the cleanup on, so the
 		// entry would have to be swept asynchronously. Any data streams the publisher opened
 		// before reading this are dropped by the unknown-alias path instead.
-		self.write_publish_error(&mut stream, &Error::Unsupported, "PUBLISH is not supported")
-			.await?;
+		let (kind, err) = (request::Kind::Publish, &Error::Unsupported);
+		super::request_stream::buffer_error(&mut stream.writer, kind, err, "PUBLISH is not supported", self.version)?;
 		// The rejection is the whole exchange, but it still has to arrive: a finish alone
 		// leaves the drop-time reset free to discard it before the peer acknowledges it.
-		let _ = stream.writer.close().await;
-
-		Ok(())
+		super::request_stream::deliver(&mut stream.writer).await
 	}
 
 	/// Send OK on the bidi stream.
@@ -2392,16 +2386,6 @@ impl Subscriber {
 			self.version,
 		)
 		.await
-	}
-
-	/// Refuse a PUBLISH on the bidi stream that carries it.
-	async fn write_publish_error(
-		&self,
-		stream: &mut Stream<Transport, Version>,
-		err: &Error,
-		reason: &str,
-	) -> Result<(), Error> {
-		super::request_stream::write_error(&mut stream.writer, request::Kind::Publish, err, reason, self.version).await
 	}
 
 	/// Attach the route for one newly advertised namespace, returning the id that names
@@ -5413,30 +5397,8 @@ impl Subscriber {
 		producer: &mut crate::recv::Group,
 		payload: FetchPayload,
 	) -> Result<(), Error> {
-		let FetchPayload { decoded, timescale, id } = payload;
-		producer.mark_gap(id, decoded.gap)?;
-		let size = stream.varint().await?;
-		super::object::check_frame(&decoded.properties, timescale)?;
-		let timestamp = object_time(timescale, decoded.timestamp)?;
-		let plain = id == producer.frame_count() as u64 && decoded.properties.is_empty();
-		let fields = (!plain).then(|| {
-			std::sync::Arc::new(crate::model::object::Fields {
-				id,
-				properties: decoded.properties,
-			})
-		});
-		let header = frame::Header {
-			info: frame::Info { size, timestamp },
-			fields,
-			inflated: super::object::inflated(decoded.inflated, producer.compressed())?,
-		};
-		let mut frame = producer.create_object(header)?;
-		if let Err(err) = kio::wait(|waiter| stream.poll_read_frame(waiter, &mut frame)).await {
-			let _ = frame.abort(err.clone());
-			return Err(err);
-		}
-		producer.restore(frame.finish()?);
-		Ok(())
+		let mut recv = FetchPayloadRecv::new(payload);
+		kio::wait(|waiter| recv.poll(waiter, stream, producer)).await
 	}
 
 	/// Serve a fill a run at a time, newest run first for a descending reader, until it is
@@ -5964,6 +5926,56 @@ struct FetchPayload {
 	decoded: super::object::Decoded,
 	timescale: Option<Timescale>,
 	id: u64,
+}
+
+/// Read one fetch object's length and payload into a group, after its header.
+struct FetchPayloadRecv {
+	payload: Option<FetchPayload>,
+	state: FetchPayloadState,
+}
+
+#[kio::machine(self.state: FetchPayloadState)]
+impl FetchPayloadRecv {
+	fn new(payload: FetchPayload) -> Self {
+		Self {
+			payload: Some(payload),
+			state: FetchPayloadState::Start,
+		}
+	}
+
+	fn poll(
+		&mut self,
+		waiter: &kio::Waiter,
+		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
+		producer: &mut crate::recv::Group,
+	) -> Poll<Result<(), Error>> {
+		let payload: FetchPayload = self.payload.take().expect("a machine starts once");
+		producer.mark_gap(payload.id, payload.decoded.gap)?;
+		let size = wait!(Size => stream.poll_varint(waiter))?;
+		let FetchPayload { decoded, timescale, id } = payload;
+		super::object::check_frame(&decoded.properties, timescale)?;
+		let timestamp = object_time(timescale, decoded.timestamp)?;
+		let plain = id == producer.frame_count() as u64 && decoded.properties.is_empty();
+		let fields = (!plain).then(|| {
+			std::sync::Arc::new(crate::model::object::Fields {
+				id,
+				properties: decoded.properties,
+			})
+		});
+		let header = frame::Header {
+			info: frame::Info { size, timestamp },
+			fields,
+			inflated: super::object::inflated(decoded.inflated, producer.compressed())?,
+		};
+		let mut frame: crate::frame::Producer = producer.create_object(header)?;
+		let read: Result<(), Error> = wait!(Read => stream.poll_read_frame(waiter, frame));
+		if let Err(err) = read {
+			let _ = frame.abort(err.clone());
+			return Poll::Ready(Err(err));
+		}
+		producer.restore(frame.finish()?);
+		Poll::Ready(Ok(()))
+	}
 }
 
 /// One Object header on a fetch stream, after version-specific decoding.

@@ -927,13 +927,8 @@ impl Publisher {
 	///
 	/// The same exclusion the announce path applies (see [`Self::select`]), which is what
 	/// keeps advertised paths truthful and prevents subscription cycles of any length.
-	fn poll_serving_origin(&self, waiter: &kio::Waiter) -> Poll<origin::Consumer> {
+	pub(super) fn poll_serving_origin(&self, waiter: &kio::Waiter) -> Poll<origin::Consumer> {
 		self.poll_peer(waiter).map(|peer| self.excluding(&peer))
-	}
-
-	/// Await [`Self::poll_serving_origin`].
-	pub(super) async fn serving_origin(&self) -> origin::Consumer {
-		kio::wait(|waiter| self.poll_serving_origin(waiter)).await
 	}
 
 	/// Resolve a request's broadcast while the peer still wants the answer.
@@ -943,17 +938,8 @@ impl Publisher {
 		path: &crate::Path,
 		epoch: Option<crate::Epoch>,
 	) -> Result<Option<crate::broadcast::Consumer>, Error> {
-		let Some(origin) = self
-			.until_withdrawn(stream, |waiter| self.poll_serving_origin(waiter))
-			.await
-		else {
-			return Ok(None);
-		};
-		// The immediate lookup: answering a peer never starts discovery of its own.
-		let requesting = origin.lookup(path.clone(), epoch.as_ref());
-		self.until_withdrawn(stream, |waiter| requesting.poll_ok(waiter))
-			.await
-			.transpose()
+		let mut resolve = Resolve::new(self.session.clone(), path.clone(), epoch);
+		kio::wait(|waiter| resolve.poll(waiter, self, stream)).await
 	}
 
 	/// Our origin handle with [`Self::exclude`] applied, the view both the data plane
@@ -1659,10 +1645,10 @@ impl Publisher {
 			return;
 		};
 		let request_id = track_serve.request_id;
-		let mut marker = std::pin::pin!(track_serve.write_end_of_track(end));
+		let mut marker = EndOfTrack::new(end);
 		let closed_session = self.session.clone();
 		let written = kio::wait(|waiter| {
-			if let Poll::Ready(res) = waiter.poll_future(marker.as_mut()) {
+			if let Poll::Ready(res) = marker.poll(waiter, track_serve) {
 				return Poll::Ready(res);
 			}
 			if super::request_stream::poll_cancel(stream, request_finished, goaways, self.version, waiter).is_ready()
@@ -2223,19 +2209,17 @@ impl Publisher {
 	///
 	/// Takes the whole stream because delivering the error is the other half of the job:
 	/// [`Writer`] resets on drop, and a reset discards data the peer has not acknowledged, so
-	/// returning here without [`Writer::close`] leaves the subscriber waiting on a request we
-	/// already refused.
+	/// returning here without its acknowledgement leaves the subscriber waiting on a request
+	/// we already refused.
 	async fn reject_subscribe(
 		&self,
 		mut stream: Stream<Transport, Version>,
 		err: &Error,
 		reason: &str,
 	) -> Result<(), Error> {
-		self.write_subscribe_error(&mut stream.writer, err, reason).await?;
-
-		// The peer dropping the stream once it has the rejection is a normal end, not our failure.
-		let _ = stream.writer.close().await;
-		Ok(())
+		let kind = request::Kind::Subscribe;
+		super::request_stream::buffer_error(&mut stream.writer, kind, err, reason, self.version)?;
+		super::request_stream::deliver(&mut stream.writer).await
 	}
 
 	/// Write a subscribe error on the bidi stream writer.
@@ -2620,12 +2604,8 @@ impl Publisher {
 		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
 		payload: crate::frame::Payload,
 	) -> Result<(), Error> {
-		stream.varint(payload.len() as u64).await?;
-		if !payload.is_empty() {
-			let mut payload = payload;
-			stream.write_all(&mut payload).await?;
-		}
-		Ok(())
+		let mut write = FetchPayloadWrite::new(payload);
+		kio::wait(|waiter| write.poll(waiter, stream)).await
 	}
 
 	/// Register a pending subscription until the returned guard drops.
@@ -3242,9 +3222,8 @@ impl Publisher {
 
 	async fn reject_track_status(&self, mut stream: Stream<Transport, Version>, err: &Error) -> Result<(), Error> {
 		let (kind, reason) = (request::Kind::TrackStatus, err.to_string());
-		super::request_stream::write_error(&mut stream.writer, kind, err, &reason, self.version).await?;
-		let _ = stream.writer.close().await;
-		Ok(())
+		super::request_stream::buffer_error(&mut stream.writer, kind, err, &reason, self.version)?;
+		super::request_stream::deliver(&mut stream.writer).await
 	}
 
 	/// Reject a FETCH, ending the request stream. See [`Self::reject_subscribe`] for why the
@@ -3256,9 +3235,8 @@ impl Publisher {
 		reason: &str,
 	) -> Result<(), Error> {
 		let kind = request::Kind::Fetch;
-		super::request_stream::write_error(&mut stream.writer, kind, err, reason, self.version).await?;
-		let _ = stream.writer.close().await;
-		Ok(())
+		super::request_stream::buffer_error(&mut stream.writer, kind, err, reason, self.version)?;
+		super::request_stream::deliver(&mut stream.writer).await
 	}
 
 	/// Bring the peer's view of one namespace in line with the current selection.
@@ -4346,6 +4324,50 @@ struct LiveGroup {
 	retired: Arc<AtomicBool>,
 }
 
+/// Resolve a request's broadcast while the peer still wants the answer, `None` once the
+/// requester withdraws or the session closes.
+struct Resolve {
+	session: Transport,
+	path: crate::Path,
+	epoch: Option<crate::Epoch>,
+	state: ResolveState,
+}
+
+#[kio::machine(self.state: ResolveState)]
+impl Resolve {
+	fn new(session: Transport, path: crate::Path, epoch: Option<crate::Epoch>) -> Self {
+		Self {
+			session,
+			path,
+			epoch,
+			state: ResolveState::Start,
+		}
+	}
+
+	fn poll(
+		&mut self,
+		waiter: &kio::Waiter,
+		publisher: &Publisher,
+		stream: &mut Stream<Transport, Version>,
+	) -> Poll<Result<Option<crate::broadcast::Consumer>, Error>> {
+		let origin = wait!(Origin => match publisher.poll_withdrawn(&mut self.session, stream, waiter) {
+			Poll::Ready(()) => Poll::Ready(None),
+			Poll::Pending => publisher.poll_serving_origin(waiter).map(Some),
+		});
+		let Some(origin) = origin else {
+			return Poll::Ready(Ok(None));
+		};
+		// The immediate lookup: answering a peer never starts discovery of its own.
+		let requesting: kio::Pending<crate::model::origin::Lookup> =
+			origin.lookup(self.path.clone(), self.epoch.as_ref());
+		let found = wait!(Lookup => match publisher.poll_withdrawn(&mut self.session, stream, waiter) {
+			Poll::Ready(()) => Poll::Ready(None),
+			Poll::Pending => requesting.poll_ok(waiter).map(Some),
+		});
+		Poll::Ready(found.transpose())
+	}
+}
+
 /// Serves a track's groups, one machine per group. One at a time waits for stream credit;
 /// the rest wait in the cache, so what a peer withholding credit makes this hold is bounded
 /// by the credit it grants, not by how long it withholds it.
@@ -4608,35 +4630,11 @@ impl TrackServe {
 		reached.then_some(end)
 	}
 
-	/// Send the original terminal on a separate stream when its group already sent FIN,
-	/// ranked as the group it ends.
+	/// Await [`EndOfTrack`].
+	#[cfg(test)]
 	async fn write_end_of_track(&mut self, end: track::Position) -> Result<(), Error> {
-		let mut rank = self.ranking.rank(Location {
-			group: end.group,
-			object: end.frame,
-		});
-		let options = rank.options();
-		let stream = kio::wait(|waiter| self.session.poll_open_uni(waiter, options))
-			.await
-			.map_err(Error::from_transport)?;
-		self.opened.fetch_add(1, Ordering::Relaxed);
-		let stream = Ranked::new(stream, Some(rank));
-		let mut writer = Writer::new(stream, self.version);
-		writer.buffer(&ietf::GroupHeader {
-			track_alias: self.request_id.0,
-			group_id: end.group,
-			sub_group_id: 0,
-			publisher_priority: super::priority::to_wire(self.track.info().priority),
-			flags: ietf::GroupFlags {
-				has_end: false,
-				first_object: end.frame == 0,
-				..Default::default()
-			},
-		})?;
-		writer.buffer_varint(end.frame)?;
-		writer.buffer_varint(0)?;
-		writer.varint(END_OF_TRACK).await?;
-		settle(&mut writer).await
+		let mut marker = EndOfTrack::new(end);
+		kio::wait(|waiter| marker.poll(waiter, self)).await
 	}
 
 	fn serve_group(&mut self, group: group::Consumer, slice: GroupSlice) -> GroupServe {
@@ -5030,6 +5028,81 @@ impl<T: crate::transport::poll::SendStream> crate::transport::poll::SendStream f
 		let mut inner = self.inner.lock().unwrap();
 		inner.follow(waiter);
 		inner.stream.poll_closed(waiter)
+	}
+}
+
+/// Write a whole fetch object's length and payload, after its header.
+struct FetchPayloadWrite {
+	payload: crate::frame::Payload,
+	state: FetchPayloadState,
+}
+
+#[kio::machine(self.state: FetchPayloadState)]
+impl FetchPayloadWrite {
+	fn new(payload: crate::frame::Payload) -> Self {
+		Self {
+			payload,
+			state: FetchPayloadState::Start,
+		}
+	}
+
+	fn poll(
+		&mut self,
+		waiter: &kio::Waiter,
+		stream: &mut Writer<Ranked<crate::transport::boxed::SendStream>, Version>,
+	) -> Poll<Result<(), Error>> {
+		stream.buffer_varint(self.payload.len() as u64)?;
+		wait!(Size => stream.poll_flush(waiter))?;
+		// Nothing to write for an empty payload, so it returns at once.
+		Poll::Ready(wait!(Payload => stream.poll_write_all(waiter, &mut self.payload)))
+	}
+}
+
+/// Send a track's original terminal on a separate stream when its group already sent FIN,
+/// ranked as the group it ends.
+struct EndOfTrack {
+	end: track::Position,
+	state: EndOfTrackState,
+}
+
+#[kio::machine(self.state: EndOfTrackState)]
+impl EndOfTrack {
+	fn new(end: track::Position) -> Self {
+		Self {
+			end,
+			state: EndOfTrackState::Start,
+		}
+	}
+
+	fn poll(&mut self, waiter: &kio::Waiter, serve: &mut TrackServe) -> Poll<Result<(), Error>> {
+		let mut rank: Rank<GroupOf<Transport>> = serve.ranking.rank(Location {
+			group: self.end.group,
+			object: self.end.frame,
+		});
+		let stream =
+			wait!(Open => serve.session.poll_open_uni(waiter, rank.options())).map_err(Error::from_transport)?;
+		serve.opened.fetch_add(1, Ordering::Relaxed);
+		let stream = Ranked::new(stream, Some(rank));
+		let mut writer: Writer<Ranked<crate::transport::boxed::SendStream>, Version> =
+			Writer::new(stream, serve.version);
+		writer.buffer(&ietf::GroupHeader {
+			track_alias: serve.request_id.0,
+			group_id: self.end.group,
+			sub_group_id: 0,
+			publisher_priority: super::priority::to_wire(serve.track.info().priority),
+			flags: ietf::GroupFlags {
+				has_end: false,
+				first_object: self.end.frame == 0,
+				..Default::default()
+			},
+		})?;
+		writer.buffer_varint(self.end.frame)?;
+		writer.buffer_varint(0)?;
+		writer.buffer_varint(END_OF_TRACK)?;
+		wait!(Flush => writer.poll_flush(waiter))?;
+		// Keeps the stream, and its rank, until the acknowledgement, like `settle`.
+		writer.finish()?;
+		Poll::Ready(wait!(Close => writer.poll_close(waiter)))
 	}
 }
 
