@@ -44,7 +44,7 @@ Decided in quest-plan (2026-10-30):
   Lite-07-wip and moq-transport 18 and 22 are required too, through a
   topology that announces without an epoch, as `replacement.rs` already does
   for its newcomer cases. Moq-transport routes all become epochless with
-  [moq-transport carries no epoch](/quest/m1/ietf-epoch-cut.md), so this
+  [moq-transport carries no epoch](https://github.com/moq-dev/moq/pull/7239), so this
   path must hold there whichever lands first. Player-level resume is already
   covered on a graceful leave by `just test native-play` (lite-06 publishers) and
   `just test media --media-cases replacement`. A crash differs only in when
