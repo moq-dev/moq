@@ -15,7 +15,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [features]
 default = ["async"]
 # Runtime-backed helpers and Lite/IETF sessions; explicit-time model drivers stay available.
-async = ["dep:futures", "kio/runtime"]
+async = ["dep:futures", "kio/async", "kio/runtime"]
 
 # Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, frame, and canonical storage benches,
 # session views of an origin to the viewers bench, and a lite-07 publisher's frame bounds to the
