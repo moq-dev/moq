@@ -79,11 +79,13 @@ impl AlrDetector {
             self.last_send_time = Some(send_time);
             return;
         };
-        let delta_time = send_time - last_send_time;
+        // In whole milliseconds of each time, as upstream's `int64_t` send times are, so packets
+        // under a millisecond apart still add up to the time between them
+        let delta_time_ms = send_time.ms() - last_send_time.ms();
         self.last_send_time = Some(send_time);
 
         self.alr_budget.use_budget(bytes_sent.bytes() as usize);
-        self.alr_budget.increase_budget(delta_time.ms());
+        self.alr_budget.increase_budget(delta_time_ms);
         if self.alr_budget.budget_ratio() > self.conf.start_budget_level_ratio
             && self.alr_started_time.is_none()
         {
@@ -112,6 +114,7 @@ impl AlrDetector {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::gcc::api::units::TimeDelta;
 
     const ESTIMATED_BITRATE_BPS: i64 = 300000;
 
@@ -339,6 +342,25 @@ mod test {
             (alr_detector
                 .get_application_limited_region_start_time()
                 .is_some())
+        );
+    }
+
+    /// Packets under a millisecond apart refill the budget for the time between them: 1200 bytes
+    /// every 400us is 24 Mbit/s, under 80% of a 40 Mbit/s estimate, so the sender is
+    /// application-limited
+    #[test]
+    fn sub_millisecond_sends_refill_the_budget() {
+        let mut alr_detector = AlrDetector::default();
+        alr_detector.set_estimated_bitrate(DataRate::from_kilobits_per_sec(40_000));
+        let mut send_time = Timestamp::from_millis(1000);
+        for _ in 0..10_000 {
+            alr_detector.on_bytes_sent(DataSize::from_bytes(1200), send_time);
+            send_time += TimeDelta::from_micros(400);
+        }
+        assert!(
+            alr_detector
+                .get_application_limited_region_start_time()
+                .is_some()
         );
     }
 }
