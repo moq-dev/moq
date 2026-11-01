@@ -441,6 +441,15 @@ impl Connection {
 		}
 	}
 
+	/// Wait for the handshake's negotiated parameters, which
+	/// [`crypto_session().handshake_data()`](crypto::Session::handshake_data) then returns
+	///
+	/// Ready once they arrived, even if the connection was lost since, or with the reason the
+	/// connection was lost first.
+	pub fn poll_handshake_data(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.streams.waits.poll_handshake_data(waiter)
+	}
+
 	/// Wait for the handshake to complete
 	///
 	/// Ready once it did, even if the connection was lost since, or with the reason the
@@ -459,6 +468,11 @@ impl Connection {
 	/// A local [`close()`](Self::close) reports [`Error::LocallyClosed`].
 	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
 		self.streams.waits.poll_closed(waiter)
+	}
+
+	/// Why the connection was lost, if it was, as [`poll_closed`](Self::poll_closed) reports it
+	pub fn error(&self) -> Option<&Error> {
+		self.streams.waits.lost()
 	}
 
 	/// Returns application-facing events
@@ -2362,6 +2376,7 @@ impl Connection {
 			trace!("consumed {} CRYPTO bytes", chunk.bytes.len());
 			if self.crypto.read_handshake(&chunk.bytes)? {
 				self.events.push_back(Event::HandshakeDataReady);
+				self.streams.waits.handshake_data();
 			}
 		}
 
