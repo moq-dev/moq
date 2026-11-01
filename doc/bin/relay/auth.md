@@ -36,7 +36,7 @@ The fields are documented on `moq_auth::Request` and `moq_auth::Grant`
 ([Rust](/lib/rs/moq-auth), [TypeScript](/lib/js/auth)).
 
 `server_name` is the SNI that selected the relay's certificate. It is absent
-over plaintext, on the `tls://` TCP listener, and for an IP-literal dial, and
+over plaintext and for an IP-literal dial, and
 never filled from a `Host` header or a WebTransport authority. The client still picks it among the names
 the relay serves, so a hostname-scoped server binds the tenant to the
 credential, not to `server_name` alone.
@@ -257,6 +257,24 @@ the same way, as a token with an empty root.
 
 Libraries: [`moq-auth`](/lib/rs/moq-auth) (Rust) and [`@moq/auth`](/lib/js/auth) (TypeScript) sign and verify the same tokens.
 
+### Peer grants
+
+A peer grant is the relay's short-lived statement of one session's publish and
+subscribe patterns, bound to a public key the client holds (`cnf`). Another
+client verifies it with the relay's public keys and serves the presenter only
+those paths on a direct connection. It is not a token: presented as `?jwt=`
+it is refused, and a token is never a peer grant.
+
+Peer grants need an asymmetric key, ES256 or EdDSA. A relay configured with
+only HMAC keys (HS256 and friends) issues none, since giving a client an HMAC
+key would let it forge grants, and its sessions serve nothing on a direct
+connection. The set of public keys that verify peer grants is not a secret: it
+holds only ES256 and EdDSA public keys, never HMAC material.
+
+[`moq-auth`](/lib/rs/moq-auth) signs and verifies peer grants
+(`KeySet::sign_peer`, `KeySet::verify_peer`, `KeySet::to_peer_set`). The relay
+does not issue them on the AUTH stream yet.
+
 ## Anonymous access
 
 ```toml
@@ -286,8 +304,8 @@ the relay reports it in the request and enforces the grant it gets back.
 `moq auth serve` grants a certificate only what `--mtls-publish` and
 `--mtls-subscribe` name, nothing by default. Public rules ignore certificates,
 so `--auth-public` with a client CA refuses to start. Only the QUIC listener
-verifies client certificates, so a relay without `listen.bind` refuses
-`listen.tls.root` too.
+and a `tls://` TCP listener (`listen.tcp.tls`) verify client certificates, so a
+relay with neither refuses `listen.tls.root` too.
 
 Cluster peers are admitted the same way, so a mesh runs
 `moq auth serve --mtls-publish '**' --mtls-subscribe '**' --mtls-link peer` (or a
@@ -359,6 +377,45 @@ they gate admission without revoking.
 loopback address needs `--listen-public`: the server has no authentication of
 its own. See `moq auth serve --help` for the rest.
 
+### Mesh enrollment
+
+`--mesh-url URL` also makes the server a mesh coordinator: a device holding an
+Ed25519 endpoint key enrolls and receives the relay URLs to dial and a JWT that
+publishes `mesh/<id>/**` and subscribes `mesh/**`, where `<id>` is the key in
+z-base-32 (52 characters, the form pkarr and iroh's DNS discovery use). It is
+verified like any other token, so the verifying keys (`--key`, `--key-dir`,
+or `--key-set`) must include `--mesh-key`'s public half.
+
+```bash
+moq auth serve --key-dir /etc/moq/keys \
+  --mesh-url https://mesh.example.com --mesh-listen 127.0.0.1:4441 \
+  --mesh-key /etc/moq/mesh.jwk --mesh-state /var/lib/moq/mesh.json \
+  --mesh-relay https://relay.example.com
+moq auth mesh create-key --tag robot --reusable --expires 7d
+moq auth mesh revoke <endpoint id>
+```
+
+Every request proves the endpoint key by signing a fresh, single-use
+challenge bound to `--mesh-url`, so no token is issued for a key the caller
+does not hold. A device joins with an enrollment key, with no human in the
+loop (single-use unless `--reusable`; revoked or expired keys enroll
+nothing). It refreshes its token
+two thirds of the way through `--mesh-token-ttl` (default 1h) by proving
+the key again, so a revoked device is cut off within one token lifetime. A
+revoked device cannot enroll again. Each enrollment and refresh also returns
+every member's unique, DNS-safe name, defaulting to the device's hostname.
+
+The device-facing API on `--mesh-listen` is meant to be public behind a TLS
+proxy, since devices refuse plain `http://` beyond loopback. A challenge holds
+no state until a proof uses it, so unauthenticated requests cannot crowd out a
+device's; the proxy should still rate-limit each client. The owner's
+commands go to `--listen` (`moq auth mesh --url`, `unix:///path` for a
+socket), which has no authentication, so `--mesh-url` refuses
+`--listen-public`. A hosted coordinator implements
+the same JSON contract, documented in
+[`moq_auth::mesh`](https://docs.rs/moq-auth/latest/moq_auth/mesh/); it adds
+no token claims.
+
 ### Migrating from the relay flags
 
 The 0.14 relay's auth flags moved to `moq auth serve`, and the relay points
@@ -420,5 +477,6 @@ identity. The Unix socket is created mode `0666`, so gate it with a restrictive
 parent directory or an allowlist.
 
 `listen.tcp.tls = true` serves the TCP listener over TLS instead, for `tls://`
-dials such as [cluster links](/bin/relay/cluster#tls-links). It asks for no
-client certificate, so a peer on it presents a token, not mTLS.
+dials such as [cluster links](/bin/relay/cluster#tls-links). It asks for a
+client certificate as the QUIC listener does, under the same `listen.tls.root`,
+so a peer on it presents a certificate or a token.

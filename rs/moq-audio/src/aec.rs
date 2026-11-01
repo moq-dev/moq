@@ -627,11 +627,6 @@ fn channel(rate: u32) -> (ring::Producer, ring::Consumer) {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use std::collections::VecDeque;
 
@@ -1151,10 +1146,10 @@ mod tests {
 		// Until the tap hears it rather than for a fixed count: writes are dropped
 		// until the device first reads, and a device can take seconds to start
 		// (PulseAudio's idle null sink renders two seconds ahead).
-		let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-		while energy <= 1.0 && tokio::time::Instant::now() < deadline {
+		let deadline = moq_clock::Instant::now() + std::time::Duration::from_secs(10);
+		while energy <= 1.0 && moq_clock::Instant::now() < deadline {
 			let _ = sink.write(&tone).expect("write");
-			tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+			moq_clock::sleep(std::time::Duration::from_millis(100)).await;
 
 			// Drain the tap the way the microphone callback would, and add up
 			// what the speaker was given.

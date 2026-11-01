@@ -33,8 +33,8 @@ each broadcast's exact path, so subscribers can enumerate broadcasts from routes
 
 AnnounceEvent = MoqAnnounceEvent
 """What :class:`AnnounceConsumer` yields: :data:`AnnounceEventStart`,
-:data:`AnnounceEventUpdate`, :data:`AnnounceEventEnd`, or
-:data:`AnnounceEventRestart`, each carrying an :data:`Announce` as ``announce``.
+:data:`AnnounceEventUpdate`, :data:`AnnounceEventEnd`, :data:`AnnounceEventRestart`,
+or :data:`AnnounceEventTakeover`, each carrying an :data:`Announce` as ``announce``.
 """
 
 AnnounceEventStart = MoqAnnounceEvent.START
@@ -49,6 +49,10 @@ AnnounceEventEnd = MoqAnnounceEvent.END
 AnnounceEventRestart = MoqAnnounceEvent.RESTART
 """Another publisher instance now serves the prefix: drop what was resolved under
 it and request afresh."""
+
+AnnounceEventTakeover = MoqAnnounceEvent.TAKEOVER
+"""A route now covers the prefix and continues what the route at ``predecessor``
+served beneath it: keep what was resolved through that one."""
 
 
 class AnnounceConsumer(_Stream[MoqAnnounceEvent]):
