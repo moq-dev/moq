@@ -212,7 +212,7 @@ impl Server {
 		// A request answers once the origin has synced with the relay, so a path with no route
 		// fails now rather than waiting out a publisher that has gone. The source resolves a
 		// rendition's sibling `broadcast` reference through the same origin.
-		let broadcast = match moq_clock::timeout(RESOLVE_TIMEOUT, self.inner.origin.request(name, None)).await {
+		let broadcast = match kio::clock::timeout(RESOLVE_TIMEOUT, self.inner.origin.request(name, None)).await {
 			Ok(Ok(broadcast)) => broadcast,
 			Ok(Err(moq_net::Error::Unroutable)) => return None,
 			Ok(Err(err)) => {
@@ -421,7 +421,7 @@ mod tests {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
 
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		assert!(server.broadcaster("live").await.is_none());
 		assert_eq!(start.elapsed(), Duration::ZERO);
 	}
@@ -495,7 +495,7 @@ mod tests {
 			if ready().await {
 				return;
 			}
-			moq_clock::sleep(Duration::from_millis(100)).await;
+			kio::clock::sleep(Duration::from_millis(100)).await;
 		}
 		panic!("never happened");
 	}

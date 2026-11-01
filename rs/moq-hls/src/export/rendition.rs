@@ -1,6 +1,6 @@
 //! One rendition: playlists from its own HLS records, and segments fetched on demand.
 
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::task::Poll;
@@ -1722,10 +1722,10 @@ mod tests {
 			let rendition = rendition.clone();
 			async move { kio::wait(|waiter| rendition.poll_refused(waiter)).await }
 		});
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		assert!(!refused.is_finished(), "the records have not failed yet");
 		rendition.fail(crate::Error::Moq(moq_net::Error::Transport("connection lost".into())));
-		moq_clock::timeout(Duration::from_secs(1), refused)
+		kio::clock::timeout(Duration::from_secs(1), refused)
 			.await
 			.expect("the failure wakes the wait")
 			.unwrap();

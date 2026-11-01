@@ -61,7 +61,7 @@ fn announced(origin: &origin::Producer, path: &str) -> bool {
 /// A side that declines MoQ Solicit invites unsolicited advertisements, so its peer
 /// announces unasked and that is not held against the peer, even though the peer
 /// implements the extension itself.
-#[moq_clock::test]
+#[kio::test]
 async fn a_side_that_declines_solicit_takes_unsolicited_announces() {
 	for name in MOQT {
 		let version: Version = name.parse().unwrap();
@@ -88,7 +88,7 @@ async fn a_side_that_declines_solicit_takes_unsolicited_announces() {
 
 			let broadcast = publisher.create_broadcast("room/cam").unwrap();
 			broadcast.announce(Default::default()).unwrap();
-			moq_clock::sleep(SETTLE).await;
+			kio::clock::sleep(SETTLE).await;
 
 			assert!(announced(&subscriber, "room/cam"), "{context}: never announced");
 			assert_open(&pair, &context);
@@ -99,7 +99,7 @@ async fn a_side_that_declines_solicit_takes_unsolicited_announces() {
 /// A side that declines MoQ Auth leaves it un-negotiated whichever side declines:
 /// neither side holds a grant, and a token is kept for the requests that name it
 /// rather than presented on an AUTH stream.
-#[moq_clock::test]
+#[kio::test]
 async fn a_declined_auth_extension_is_not_negotiated() {
 	for name in AUTH {
 		let version: Version = name.parse().unwrap();
@@ -107,7 +107,7 @@ async fn a_declined_auth_extension_is_not_negotiated() {
 		// Control: offered by both, the client's connection credential earns a grant.
 		let pair = connect_mock(MockConnectOptions::new(version)).await;
 		let mut grant = pair.client.auth().grant();
-		moq_clock::timeout(SETTLE, async {
+		kio::clock::timeout(SETTLE, async {
 			while grant.peek().is_none() {
 				grant.changed().await.expect("grant watch ended");
 			}
@@ -124,13 +124,13 @@ async fn a_declined_auth_extension_is_not_negotiated() {
 				false => options.client_extensions = no_auth,
 			}
 			let pair = connect_mock(options).await;
-			moq_clock::sleep(SETTLE).await;
+			kio::clock::sleep(SETTLE).await;
 
 			for session in [&pair.client, &pair.server] {
 				assert_eq!(session.auth().grant().peek(), None, "{context}");
 				// Only a request that names it can carry the token, so it resolves at once with
 				// a grant that stays unknown.
-				let (added, answer) = moq_clock::timeout(SETTLE, session.auth().add("token"))
+				let (added, answer) = kio::clock::timeout(SETTLE, session.auth().add("token"))
 					.await
 					.unwrap_or_else(|_| panic!("{context}: add never resolved"))
 					.unwrap_or_else(|err| panic!("{context}: {err:?}"));

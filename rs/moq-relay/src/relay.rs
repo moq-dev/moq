@@ -888,7 +888,7 @@ mod tests {
 		let request = Message::builder_request(BINDING, MessageWriteVec::new()).finish();
 		client.send_to(&request, addr).await.unwrap();
 		let mut reply = [0; 44];
-		let (len, sender) = moq_clock::timeout(std::time::Duration::from_secs(5), client.recv_from(&mut reply))
+		let (len, sender) = kio::clock::timeout(std::time::Duration::from_secs(5), client.recv_from(&mut reply))
 			.await
 			.unwrap()
 			.unwrap();
@@ -928,7 +928,7 @@ mod tests {
 			trigger.start();
 			let mut signals = crate::shutdown::Signals::new().unwrap();
 			crate::shutdown::raise(libc::SIGTERM).await;
-			let started = moq_clock::now();
+			let started = kio::clock::now();
 			super::drain(trigger, shutdown, Some(&mut signals)).await;
 			assert_eq!(started.elapsed(), std::time::Duration::ZERO, "waited out the drain");
 		}

@@ -333,7 +333,7 @@ mod tests {
 
 	/// The follower's next event, which must arrive within the origin's update hold.
 	async fn followed(follow: &mut Follow) -> (&'static str, String) {
-		let event = moq_clock::timeout(Duration::from_secs(1), follow.next())
+		let event = kio::clock::timeout(Duration::from_secs(1), follow.next())
 			.await
 			.expect("no event")
 			.expect("the origin closed");
@@ -348,7 +348,7 @@ mod tests {
 
 	/// The follower stays quiet past the origin's update hold.
 	async fn quiet(follow: &mut Follow) {
-		if let Ok(event) = moq_clock::timeout(Duration::from_secs(1), follow.next()).await {
+		if let Ok(event) = kio::clock::timeout(Duration::from_secs(1), follow.next()).await {
 			panic!("expected nothing, got {event:?}");
 		}
 	}
@@ -357,7 +357,7 @@ mod tests {
 		Route::default().with_identity(identity.clone(), 0)
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn follow_reports_the_route_serving_the_path() {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().routes("pool/job").unwrap();
@@ -396,7 +396,7 @@ mod tests {
 
 	/// A follower that joins late starts on the route serving the path, not on whichever
 	/// covering route the replay happened to reach first.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn follow_starts_on_the_serving_route_when_joining_late() {
 		let origin = Hop::new(1).unwrap().produce();
 		let _pool = origin.requests_route("pool", Route::default(), None).unwrap();
@@ -409,7 +409,7 @@ mod tests {
 
 	/// A gap with nothing serving the path ends any request on it, so a covering route that
 	/// arrives after it is a start of its own, even under the same identity.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn follow_keeps_a_gap_between_routes_of_one_identity() {
 		let origin = Hop::new(1).unwrap().produce();
 		let identity = Identity::random();
@@ -433,7 +433,7 @@ mod tests {
 
 	/// A prefix that started before the serving route's last change stood before the route's
 	/// end, so it takes over in place even when the cursor never ran dry in between.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn follow_hands_over_to_a_prefix_that_started_before_the_last_change() {
 		let origin = Hop::new(1).unwrap().produce();
 		let exact = origin.publish("pool/job", route(&Identity::random())).unwrap();
@@ -450,7 +450,7 @@ mod tests {
 	}
 
 	/// Under another identity nothing says two routes serve the same bytes.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn follow_restarts_onto_a_more_specific_route_under_another_identity() {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().routes("pool/job").unwrap();
@@ -464,7 +464,7 @@ mod tests {
 
 	/// A route whose claim covers only paths beneath the followed one never serves it, so it
 	/// cannot mask the route that does, even when it would win the prefix on cost.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn follow_ignores_a_route_scoped_beneath_the_path() {
 		let origin = Hop::new(1).unwrap().produce();
 		let chat = Patterns::from("room/*/chat".parse::<Pattern>().unwrap());
@@ -476,7 +476,7 @@ mod tests {
 		let mut follow = origin.consume().routes("room/alice").unwrap();
 
 		let first = origin.publish("room/alice", Route::default().with_cost(5)).unwrap();
-		let event = moq_clock::timeout(Duration::from_secs(1), follow.next())
+		let event = kio::clock::timeout(Duration::from_secs(1), follow.next())
 			.await
 			.unwrap()
 			.unwrap();
@@ -488,7 +488,7 @@ mod tests {
 		// A republish is another instance of the route that serves the path.
 		let _second = origin.publish("room/alice", Route::default().with_cost(5)).unwrap();
 		drop(first);
-		let event = moq_clock::timeout(Duration::from_secs(1), follow.next())
+		let event = kio::clock::timeout(Duration::from_secs(1), follow.next())
 			.await
 			.unwrap()
 			.unwrap();
@@ -500,7 +500,7 @@ mod tests {
 
 	/// The next instance handed out, which must arrive within the origin's update hold.
 	async fn available(announced: &mut Following) -> broadcast::Consumer {
-		moq_clock::timeout(Duration::from_secs(1), announced.available())
+		kio::clock::timeout(Duration::from_secs(1), announced.available())
 			.await
 			.expect("no instance")
 			.expect("the wait failed")
@@ -509,7 +509,7 @@ mod tests {
 	/// Nothing more is handed out past the origin's update hold.
 	async fn none(announced: &mut Following) {
 		let hold = super::super::origin_impl::DEFAULT_UPDATE_HOLD * 2;
-		if let Ok(result) = moq_clock::timeout(hold, announced.available()).await {
+		if let Ok(result) = kio::clock::timeout(hold, announced.available()).await {
 			panic!(
 				"expected nothing, got {:?}",
 				result.map(|broadcast| broadcast.info().identity.clone())
@@ -519,7 +519,7 @@ mod tests {
 
 	/// The next request a dynamic route receives for its path.
 	async fn requested(dynamic: &crate::origin::Requests) -> crate::origin::Request {
-		moq_clock::timeout(Duration::from_secs(1), dynamic.requested_broadcast())
+		kio::clock::timeout(Duration::from_secs(1), dynamic.requested_broadcast())
 			.await
 			.expect("never asked")
 			.expect("the route closed")
@@ -527,7 +527,7 @@ mod tests {
 
 	/// Another instance taking over while a wait resolves is the one it hands out, so the
 	/// restart the origin holds for it must not hand it out again while the caller holds it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn announced_hands_out_a_held_takeover_once() {
 		let origin = Hop::new(1).unwrap().produce();
 		let dynamic = origin.requests("live").unwrap();
@@ -544,7 +544,7 @@ mod tests {
 	/// The route a wait resolves through leaving, and another instance arriving before it
 	/// resolves, reach the follower as an end and a start alongside the answer. That start must
 	/// not hand the newcomer out again.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn announced_hands_out_a_gap_while_resolving_once() {
 		let origin = Hop::new(1).unwrap().produce();
 		let dynamic = origin.requests("").unwrap();
@@ -553,7 +553,7 @@ mod tests {
 		let (_arrival, _publish) = futures::join!(available(&mut announced), async {
 			let _unanswered = requested(&dynamic).await;
 			drop(dynamic);
-			moq_clock::sleep(super::super::origin_impl::DEFAULT_UPDATE_HOLD * 2).await;
+			kio::clock::sleep(super::super::origin_impl::DEFAULT_UPDATE_HOLD * 2).await;
 			origin.publish("live", Route::default()).unwrap()
 		});
 		none(&mut announced).await;
@@ -562,7 +562,7 @@ mod tests {
 	/// An end is a gap that ended every request on the old route, even when a route above the
 	/// path with the same identity carries the instance on. So the instance serving the path
 	/// afterwards is handed out again, though it is the one the caller still holds.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn announced_hands_out_the_instance_again_after_an_end() {
 		let origin = Hop::new(1).unwrap().produce();
 		let identity = Identity::random();
@@ -581,7 +581,7 @@ mod tests {
 
 	/// An announced request that pins an identity refuses another instance taking over instead of
 	/// following it.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn announced_pinned_refuses_another_instance() {
 		let origin = Hop::new(1).unwrap().produce();
 		let identity = Identity::random();
@@ -599,7 +599,7 @@ mod tests {
 		assert_ne!(current.info().identity.as_ref(), Some(&identity));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn announced_pinned_hands_out_its_instance_after_a_gap() {
 		let origin = Hop::new(1).unwrap().produce();
 		let identity = Identity::random();
@@ -618,13 +618,13 @@ mod tests {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn announced_reports_a_dropped_prepared_answer() {
 		let origin = Hop::new(1).unwrap().produce();
 		let claim = origin.requests("live").unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 		let (result, ()) = futures::join!(
-			moq_clock::timeout(Duration::from_secs(1), announced.available()),
+			kio::clock::timeout(Duration::from_secs(1), announced.available()),
 			async {
 				let prepared = requested(&claim).await.prepare().unwrap();
 				drop(prepared);

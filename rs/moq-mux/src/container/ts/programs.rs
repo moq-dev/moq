@@ -1717,7 +1717,7 @@ mod test {
 		);
 
 		let input = two_programs();
-		let before = moq_clock::wall();
+		let before = kio::clock::wall();
 		programs.decode(&input[..100]).unwrap();
 		assert!(
 			programs.programs.is_empty(),
@@ -1725,7 +1725,7 @@ mod test {
 		);
 		programs.decode(&input[100..]).unwrap();
 		programs.finish().unwrap();
-		let after = moq_clock::wall();
+		let after = kio::clock::wall();
 
 		for (path, fills) in [("event/1.hang", [0xAA, 0xBB]), ("event/2.hang", [0xCC, 0xDD])] {
 			let consumer = origin.consume().request(path, None).await.unwrap();

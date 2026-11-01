@@ -39,7 +39,7 @@ test("rendition broadcast reference is parsed and normalized", () => {
 		},
 	};
 	const parsed = RootSchema.parse(catalog);
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+	if (!parsed.video) throw new Error("missing video section");
 	// Normalized like Rust path::Relative: redundant `.` segments are dropped.
 	expect(parsed.video.renditions.video?.broadcast).toBe("source" as RelativeBroadcast);
 
@@ -54,6 +54,7 @@ test("rendition broadcast reference is parsed and normalized", () => {
 test("every reference-bearing section carries an optional identity", () => {
 	const IDENTITY = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceIdentity;
 	const catalog = (identity: string) => ({
+		contributions: { c: { broadcast: "./a", identity } },
 		video: {
 			renditions: {
 				v: { broadcast: "./a", identity, codec: "avc1.64001f", container: { kind: "legacy" } },
@@ -77,16 +78,40 @@ test("every reference-bearing section carries an optional identity", () => {
 	});
 
 	const parsed = RootSchema.parse(catalog(IDENTITY));
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
-	if (!parsed.audio || !("renditions" in parsed.audio)) throw new Error("missing audio section");
+	if (!parsed.video) throw new Error("missing video section");
+	if (!parsed.audio) throw new Error("missing audio section");
 	expect(parsed.video.renditions.v?.identity).toBe(IDENTITY);
 	expect(parsed.audio.renditions.a?.identity).toBe(IDENTITY);
 	expect(parsed.text?.renditions.t?.identity).toBe(IDENTITY);
 	expect(parsed.json?.tracks.j?.identity).toBe(IDENTITY);
 	expect(parsed.binary?.tracks.b?.identity).toBe(IDENTITY);
+	expect(parsed.contributions?.c?.identity).toBe(IDENTITY);
 
 	// An empty identity refuses the catalog, as in Rust.
 	expect(RootSchema.safeParse(catalog("")).success).toBe(false);
+});
+
+// Mirrors Rust's `contributions_roundtrip_and_refuse_malformed_entries`.
+test("a contribution parses beside a same-ID rendition and a malformed one is refused", () => {
+	const video = { alice: { codec: "avc1.64001f", container: { kind: "legacy" } } };
+	const parsed = RootSchema.parse({
+		contributions: { alice: { broadcast: "./alice.hang" } },
+		video: { renditions: video },
+	});
+	expect(parsed.contributions?.alice).toEqual({ broadcast: "alice.hang" as RelativeBroadcast });
+	// Contribution IDs are their own namespace, so one may share a rendition's ID.
+	expect(() => checkRenditions(parsed)).not.toThrow();
+	expect(encode(parsed).version).toBeUndefined();
+
+	for (const contributions of [
+		[],
+		{ alice: null },
+		{ alice: {} },
+		{ alice: { broadcast: 42 } },
+		{ alice: { broadcast: "./alice.hang", identity: "" } },
+	]) {
+		expect(RootSchema.safeParse({ contributions }).success).toBe(false);
+	}
 });
 
 test("rendition parent broadcast reference stays distinct from empty", () => {
@@ -102,7 +127,7 @@ test("rendition parent broadcast reference stays distinct from empty", () => {
 		},
 	};
 	const parsed = RootSchema.parse(catalog);
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+	if (!parsed.video) throw new Error("missing video section");
 	expect(parsed.video.renditions.video?.broadcast).toBe("." as RelativeBroadcast);
 });
 
@@ -115,7 +140,7 @@ test("rendition without broadcast reference stays undefined", () => {
 		},
 	};
 	const parsed = RootSchema.parse(catalog);
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+	if (!parsed.video) throw new Error("missing video section");
 	expect(parsed.video.renditions.video?.broadcast).toBeUndefined();
 });
 
@@ -184,7 +209,7 @@ test("a rendition's hls field round-trips", () => {
 	const parsed = RootSchema.parse({
 		video: { renditions: { video: { codec: "avc1.64001f", container: { kind: "legacy" }, hls } } },
 	});
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+	if (!parsed.video) throw new Error("missing video section");
 	expect(parsed.video.renditions.video?.hls).toEqual({ track: hls.track, duration: u53(hls.duration) });
 	expect(JSON.stringify(parsed)).toContain('"hls":{"track":"video.hls","duration":2000}');
 });
@@ -193,7 +218,7 @@ test("a malformed hls field leaves the rendition playable", () => {
 	const config = { codec: "avc1.64001f", container: { kind: "legacy" } };
 	for (const hls of [{ track: "video.hls" }, { duration: 2000 }, { track: 42, duration: 2000 }, "video.hls", null]) {
 		const parsed = RootSchema.parse({ video: { renditions: { video: { ...config, hls } } } });
-		if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+		if (!parsed.video) throw new Error("missing video section");
 		expect(parsed.video.renditions.video?.hls).toBeUndefined();
 		expect(parsed.video.renditions.video?.codec).toBe(config.codec);
 	}

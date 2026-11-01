@@ -66,7 +66,7 @@ fn tagged(name: &str, group: u64, frame: u64) -> Vec<u8> {
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
 async fn settle() {
-	moq_clock::sleep(Duration::from_millis(500)).await;
+	kio::clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// How the serving route goes away (or is beaten).
@@ -182,7 +182,7 @@ type Delivery = (u64, moq_net::Result<(Option<Timestamp>, Vec<u8>)>);
 /// Read every group in full, reporting each frame as it arrives.
 fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 	let (tx, rx) = mpsc::unbounded();
-	moq_clock::sim::spawn(async move {
+	kio::clock::sim::spawn(async move {
 		loop {
 			let mut group = match sub.recv_group().await {
 				Ok(Some(group)) => group,
@@ -220,7 +220,7 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Vec<u8>) {
 
 /// [`next`], keeping the frame's timestamp.
 async fn next_timed(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timestamp>, Vec<u8>) {
-	let (group, frame) = moq_clock::timeout(Duration::from_secs(10), rx.next())
+	let (group, frame) = kio::clock::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
 		.expect("reader ended");
@@ -342,7 +342,7 @@ async fn route_dies_across_identities(version: &str, trigger: Trigger) {
 	let mut group = topology.track.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, payload(1, 0)).unwrap();
 	settle().await;
-	match moq_clock::timeout(Duration::from_secs(10), rx.next())
+	match kio::clock::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
 	{
@@ -423,37 +423,37 @@ macro_rules! route_change_tests {
 				use super::*;
 
 				async fn run(trigger: Trigger, position: Position) {
-					moq_clock::timeout(TEST_TIMEOUT, route_change($version, trigger, position))
+					kio::clock::timeout(TEST_TIMEOUT, route_change($version, trigger, position))
 						.await
 						.expect("timed out");
 				}
 
-				#[moq_clock::test]
+				#[kio::test]
 				async fn disconnect_between_groups() {
 					run(Trigger::Disconnect, Position::BetweenGroups).await;
 				}
 
-				#[moq_clock::test]
+				#[kio::test]
 				async fn disconnect_mid_group() {
 					run(Trigger::Disconnect, Position::MidGroup).await;
 				}
 
-				#[moq_clock::test]
+				#[kio::test]
 				async fn unannounce_between_groups() {
 					run(Trigger::Unannounce, Position::BetweenGroups).await;
 				}
 
-				#[moq_clock::test]
+				#[kio::test]
 				async fn unannounce_mid_group() {
 					run(Trigger::Unannounce, Position::MidGroup).await;
 				}
 
-				#[moq_clock::test]
+				#[kio::test]
 				async fn better_route_between_groups() {
 					run(Trigger::BetterRoute, Position::BetweenGroups).await;
 				}
 
-				#[moq_clock::test]
+				#[kio::test]
 				async fn better_route_mid_group() {
 					run(Trigger::BetterRoute, Position::MidGroup).await;
 				}
@@ -474,26 +474,26 @@ macro_rules! pinned_tests {
 				use super::*;
 
 				async fn run(trigger: Trigger) {
-					moq_clock::timeout(TEST_TIMEOUT, route_dies_across_identities($version, trigger))
+					kio::clock::timeout(TEST_TIMEOUT, route_dies_across_identities($version, trigger))
 						.await
 						.expect("timed out");
 				}
 
-				#[moq_clock::test]
+				#[kio::test]
 				async fn disconnect_ends_the_subscription() {
 					run(Trigger::Disconnect).await;
 				}
 
-				#[moq_clock::test]
+				#[kio::test]
 				async fn unannounce_ends_the_subscription() {
 					run(Trigger::Unannounce).await;
 				}
 
 				/// A better route under another identity wins new requests and announces as a
 				/// restart, while the incumbent's subscriptions continue.
-				#[moq_clock::test]
+				#[kio::test]
 				async fn better_route_keeps_the_incumbent() {
-					moq_clock::timeout(TEST_TIMEOUT, better_route_restarts($version))
+					kio::clock::timeout(TEST_TIMEOUT, better_route_restarts($version))
 						.await
 						.expect("timed out");
 				}
@@ -600,7 +600,7 @@ async fn lagging_route_dies(version: Version) {
 	let _keep = (broadcast, track, group, p_a, p_b, b_w, b_r, warm, a_r, p, a, b, r, w);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn lite_resumes_after_a_lagging_route_dies() {
 	lagging_route_dies("moq-lite-07-wip".parse().unwrap()).await;
 }
@@ -660,7 +660,7 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 					pair.client_transport.set_latency(Duration::from_secs(3600));
 				}
 			}
-			moq_clock::sleep(STEP).await;
+			kio::clock::sleep(STEP).await;
 		}
 		group.finish().unwrap();
 		if sequence == O_NOTICES {
@@ -669,13 +669,13 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 		}
 		if sequence == E_NOTICES {
 			// Off the group boundary, so no group's age sits on the budget.
-			moq_clock::sleep(STEP * 5 / 2).await;
+			kio::clock::sleep(STEP * 5 / 2).await;
 			// The groups `O` asks for again reach it newest first, as a congested `P` sends
 			// a descending track.
 			p_o.server_transport.hold_unis();
 			m1_e.server.abort(Error::Cancel);
 			m1_e.client.abort(Error::Cancel);
-			moq_clock::sleep(STEP).await;
+			kio::clock::sleep(STEP).await;
 			p_o.server_transport.release_unis_by_priority();
 		}
 		while let Ok((group, frame)) = rx.try_recv() {
@@ -700,9 +700,9 @@ fn resumed(groups: std::ops::RangeInclusive<u64>) -> BTreeMap<u64, Vec<String>> 
 }
 
 /// A budget that outlasts the outage gets every group it held back.
-#[moq_clock::test]
+#[kio::test]
 async fn resume_delivers_an_outage_within_the_budget() {
-	let after = moq_clock::timeout(TEST_TIMEOUT, undetected_outage(Duration::from_secs(10)))
+	let after = kio::clock::timeout(TEST_TIMEOUT, undetected_outage(Duration::from_secs(10)))
 		.await
 		.expect("timed out");
 	assert_eq!(after, resumed(5..=12));
@@ -711,9 +711,9 @@ async fn resume_delivers_an_outage_within_the_budget() {
 /// A budget shorter than the outage gets only the groups it still covers: a group is
 /// stale once its successor arrived a full budget ago. Group 4 is the one being read, so
 /// it continues regardless.
-#[moq_clock::test]
+#[kio::test]
 async fn resume_delivers_the_outage_tail_within_the_budget() {
-	let after = moq_clock::timeout(TEST_TIMEOUT, undetected_outage(Duration::from_secs(4)))
+	let after = kio::clock::timeout(TEST_TIMEOUT, undetected_outage(Duration::from_secs(4)))
 		.await
 		.expect("timed out");
 	assert_eq!(after, resumed(6..=12));
@@ -722,9 +722,9 @@ async fn resume_delivers_the_outage_tail_within_the_budget() {
 macro_rules! route_flap_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
-			#[moq_clock::test]
+			#[kio::test]
 			async fn $name() {
-				moq_clock::timeout(TEST_TIMEOUT, route_flaps($version))
+				kio::clock::timeout(TEST_TIMEOUT, route_flaps($version))
 					.await
 					.expect("timed out");
 			}
@@ -844,10 +844,10 @@ async fn redundant_pair_follows_the_next_identity(version: &str, loss: Loss) {
 	drop(kept);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn redundant_pair_follows_the_next_identity_when_unreachable() {
 	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"] {
-		moq_clock::timeout(
+		kio::clock::timeout(
 			TEST_TIMEOUT,
 			redundant_pair_follows_the_next_identity(version, Loss::Unreachable),
 		)
@@ -856,10 +856,10 @@ async fn redundant_pair_follows_the_next_identity_when_unreachable() {
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn redundant_pair_follows_the_next_identity_when_the_incumbent_ends() {
 	for version in ["moq-lite-07-wip", "moq-lite-06", "moq-transport-22"] {
-		moq_clock::timeout(
+		kio::clock::timeout(
 			TEST_TIMEOUT,
 			redundant_pair_follows_the_next_identity(version, Loss::Ends),
 		)
@@ -945,16 +945,16 @@ async fn replaced_behind_a_relay(version: &str) {
 	drop((dead, replicas));
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn replaced_under_another_identity_ends_lite_06() {
-	moq_clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-06"))
+	kio::clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-06"))
 		.await
 		.expect("timed out");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn replaced_under_another_identity_ends_lite_07() {
-	moq_clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-07-wip"))
+	kio::clock::timeout(TEST_TIMEOUT, replaced_behind_a_relay("moq-lite-07-wip"))
 		.await
 		.expect("timed out");
 }
@@ -1043,16 +1043,16 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 	drop((dead, replicas));
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn same_compression_resumes_behind_a_relay() {
-	moq_clock::timeout(TEST_TIMEOUT, compression_changes_behind_a_relay(true))
+	kio::clock::timeout(TEST_TIMEOUT, compression_changes_behind_a_relay(true))
 		.await
 		.expect("timed out");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn different_compression_is_refused_behind_a_relay() {
-	moq_clock::timeout(TEST_TIMEOUT, compression_changes_behind_a_relay(false))
+	kio::clock::timeout(TEST_TIMEOUT, compression_changes_behind_a_relay(false))
 		.await
 		.expect("timed out");
 }
@@ -1074,7 +1074,7 @@ async fn producer_replaced(version: &str) {
 		.announce(origin::Route::default().with_identity(moq_net::Identity::random(), 0))
 		.unwrap();
 	let (tx, mut producers) = mpsc::unbounded();
-	moq_clock::sim::spawn(async move {
+	kio::clock::sim::spawn(async move {
 		while let Ok(request) = dynamic.requested_track().await {
 			if tx.unbounded_send(request.accept(timed())).is_err() {
 				return;
@@ -1105,7 +1105,7 @@ async fn producer_replaced(version: &str) {
 	// The encoder restarts: the old producer goes away mid-broadcast, and the resumed
 	// subscription asks for the track again.
 	first.abort(Error::Cancel).unwrap();
-	let second = moq_clock::timeout(Duration::from_secs(10), producers.next())
+	let second = kio::clock::timeout(Duration::from_secs(10), producers.next())
 		.await
 		.expect("the track was not requested again")
 		.unwrap();
@@ -1129,9 +1129,9 @@ async fn producer_replaced(version: &str) {
 macro_rules! producer_replaced_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
-			#[moq_clock::test]
+			#[kio::test]
 			async fn $name() {
-				moq_clock::timeout(TEST_TIMEOUT, producer_replaced($version))
+				kio::clock::timeout(TEST_TIMEOUT, producer_replaced($version))
 					.await
 					.expect("timed out");
 			}

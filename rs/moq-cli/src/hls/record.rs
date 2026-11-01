@@ -440,7 +440,7 @@ struct Entry {
 	/// The rendition's discontinuity sequence for the segment; the playlist adds its offset.
 	discontinuity: u64,
 	/// Written on the first entry and after each discontinuity.
-	program_date_time: Option<moq_clock::Wall>,
+	program_date_time: Option<kio::clock::Wall>,
 	/// The init file the instance's first media segment maps.
 	map: Option<String>,
 }
@@ -684,7 +684,7 @@ mod tests {
 
 	async fn record(dir: &Path, broadcaster: &Broadcaster) -> anyhow::Result<()> {
 		let recording = Recording::create(dir.to_path_buf())?;
-		moq_clock::timeout(TIMEOUT, recording.run(broadcaster))
+		kio::clock::timeout(TIMEOUT, recording.run(broadcaster))
 			.await
 			.expect("the recording ends")
 	}
@@ -712,7 +712,7 @@ mod tests {
 	async fn recorded(dir: &Path, name: &str) {
 		let playlist = dir.join("video").join(name).join("media.m3u8");
 		// The recording writes from blocking threads, which wake nothing here.
-		moq_clock::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			while !std::fs::read_to_string(&playlist).is_ok_and(|text| text.contains("\n0.m4s\n")) {
 				tokio::task::yield_now().await;
 			}
@@ -834,7 +834,7 @@ mod tests {
 			publisher.gop(n);
 		}
 		publisher.finish();
-		moq_clock::timeout(TIMEOUT, recording)
+		kio::clock::timeout(TIMEOUT, recording)
 			.await
 			.expect("the recording ends")
 			.unwrap()
@@ -884,7 +884,7 @@ mod tests {
 			.unwrap();
 		publisher.gop(5);
 		publisher.gop(6);
-		moq_clock::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			while removed.strong_count() > 0 {
 				tokio::task::yield_now().await;
 			}
@@ -894,7 +894,7 @@ mod tests {
 
 		publisher.gop(7);
 		publisher.finish();
-		moq_clock::timeout(TIMEOUT, recording)
+		kio::clock::timeout(TIMEOUT, recording)
 			.await
 			.expect("the recording ends")
 			.unwrap()
@@ -916,7 +916,7 @@ mod tests {
 		let recording = Recording::create(dir.path().to_path_buf()).unwrap();
 		// Stands in for the colliding sibling, which a case-sensitive filesystem cannot produce.
 		std::fs::create_dir_all(dir.path().join("video").join("video0")).unwrap();
-		let err = moq_clock::timeout(TIMEOUT, recording.run(&broadcaster))
+		let err = kio::clock::timeout(TIMEOUT, recording.run(&broadcaster))
 			.await
 			.expect("the recording ends")
 			.unwrap_err();
@@ -942,7 +942,7 @@ mod tests {
 		}
 		catalog.abort(lost);
 
-		let ended = moq_clock::timeout(TIMEOUT, recording)
+		let ended = kio::clock::timeout(TIMEOUT, recording)
 			.await
 			.expect("the recording ends");
 		let err = ended.unwrap().expect_err("an abrupt end fails");
@@ -1041,7 +1041,7 @@ mod tests {
 	/// running sum of durations no longer gives it.
 	#[test]
 	fn a_discontinuity_restates_the_program_date_time() {
-		let at = |secs| Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(secs));
+		let at = |secs| Some(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(secs));
 		let mut playlist = Playlist::new(2);
 		for (segment, discontinuity, secs) in [(0, 0, 0), (1, 0, 2), (2, 1, 10), (3, 1, 12)] {
 			playlist.push(Entry {

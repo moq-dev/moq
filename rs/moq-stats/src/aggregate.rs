@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::task::Poll;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::kio::{self, Pending, Waiter};
 use moq_net::stats::{Presence, Traffic};
 use moq_net::track::Subscribing;
@@ -836,7 +836,7 @@ impl<S: Shape> Merged<S> {
 		// then fold every departed node whose grace elapsed. A fold leaves the
 		// merged view unchanged, and only an announce adds a node, which polls
 		// here, so no timer is needed to keep the map bounded.
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let config = &self.config;
 		let name = self.name.as_str();
 		let origin = &self.origin;
@@ -896,7 +896,7 @@ impl<S: Shape> Merged<S> {
 			// grace re-arms it.
 			return match self.nodes.get_mut(&key) {
 				Some(node) => {
-					node.departed = Some(moq_clock::now());
+					node.departed = Some(kio::clock::now());
 					node.depart()
 				}
 				None => false,
@@ -916,7 +916,7 @@ impl<S: Shape> Merged<S> {
 				let node = entry.get_mut();
 				// A return after the grace starts over, even when this announce
 				// is the first poll since the grace elapsed.
-				node.fold_expired(&mut self.retired, self.grace, moq_clock::now());
+				node.fold_expired(&mut self.retired, self.grace, kio::clock::now());
 				node.departed = None;
 				if matches!(node.reader, Reader::Ended) {
 					node.reader = resolve(&self.origin, &node.path, node.identity.clone());

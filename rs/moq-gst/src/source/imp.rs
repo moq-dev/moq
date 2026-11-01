@@ -2331,7 +2331,7 @@ mod session_tests {
 	/// its subscriber stays parked. Bounded so a session that never subscribes fails the test.
 	fn await_request(dynamic: &mut moq_net::broadcast::Requests) -> moq_net::track::Request {
 		super::RUNTIME
-			.block_on(async { moq_clock::timeout(Duration::from_secs(10), dynamic.requested_track()).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), dynamic.requested_track()).await })
 			.expect("no track was ever requested")
 			.expect("broadcast closed")
 	}
@@ -2395,7 +2395,7 @@ mod session_tests {
 			.unwrap()
 			.broadcast = Some(moq_net::path::Relative::new("./right").unwrap());
 		let next = super::RUNTIME
-			.block_on(async { moq_clock::timeout(Duration::from_secs(10), replacement.requested_track()).await });
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), replacement.requested_track()).await });
 		stopping.send(true).unwrap();
 		super::RUNTIME.block_on(following).unwrap().unwrap();
 		assert_eq!(
@@ -2525,7 +2525,7 @@ mod session_tests {
 			moq_net::Result::Ok(())
 		};
 		super::RUNTIME
-			.block_on(async { moq_clock::timeout(Duration::from_secs(10), unwanted).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), unwanted).await })
 			.expect("the cancelled reader never dropped its subscription")
 			.expect("the pending request is still open");
 
@@ -2653,7 +2653,7 @@ mod session_tests {
 
 		// No shutdown is sent: the run has to end on the media draining alone.
 		super::RUNTIME
-			.block_on(async { moq_clock::timeout(Duration::from_secs(10), session).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), session).await })
 			.expect("the run outlived the renditions it was serving")
 			.unwrap()
 			.unwrap();
@@ -2904,7 +2904,7 @@ mod session_tests {
 		audio.finish().unwrap();
 		catalog.finish().unwrap();
 		super::RUNTIME
-			.block_on(async { moq_clock::timeout(Duration::from_secs(10), session).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), session).await })
 			.expect("the run outlived its broadcast")
 			.unwrap()
 			.unwrap();
@@ -3159,7 +3159,7 @@ mod session_tests {
 		broadcast: moq_net::broadcast::Producer,
 		catalog: moq_mux::catalog::Producer,
 		video: moq_mux::container::Producer<moq_mux::catalog::hang::Container>,
-		start: moq_clock::Instant,
+		start: kio::clock::Instant,
 	}
 
 	impl Publisher {
@@ -3200,7 +3200,7 @@ mod session_tests {
 				broadcast,
 				catalog,
 				video,
-				start: moq_clock::now(),
+				start: kio::clock::now(),
 			}
 		}
 
@@ -3360,7 +3360,7 @@ mod session_tests {
 			cancel,
 		};
 		super::RUNTIME
-			.block_on(async { moq_clock::timeout(Duration::from_secs(10), super::RUNTIME.spawn(reader.run())).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), super::RUNTIME.spawn(reader.run())).await })
 			.expect("a push on a pad added after the flush blocked")
 			.unwrap();
 	}
@@ -3541,7 +3541,7 @@ mod session_tests {
 			panic!("the origin closed");
 		};
 		super::RUNTIME
-			.block_on(async { moq_clock::timeout(Duration::from_secs(10), next).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), next).await })
 			.expect("the announcement never arrived");
 	}
 
@@ -3550,7 +3550,7 @@ mod session_tests {
 		let mut demand = publisher.video.demand();
 		let changed = async { while demand.wanted_changed().await.expect("the track closed").is_some() != wanted {} };
 		super::RUNTIME
-			.block_on(async { moq_clock::timeout(Duration::from_secs(10), changed).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), changed).await })
 			.expect("the demand never changed");
 	}
 
@@ -3649,7 +3649,7 @@ mod session_tests {
 		let pool = origin.requests("").unwrap();
 		let session = follow(&element, &origin);
 		let pending = super::RUNTIME.block_on(async {
-			moq_clock::timeout(Duration::from_secs(10), pool.requested_broadcast())
+			kio::clock::timeout(Duration::from_secs(10), pool.requested_broadcast())
 				.await
 				.unwrap()
 				.unwrap()
@@ -3830,7 +3830,7 @@ mod session_tests {
 
 		room.catalog.finish().unwrap();
 		super::RUNTIME
-			.block_on(async { moq_clock::timeout(Duration::from_secs(10), run).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), run).await })
 			.expect("the sibling's follower outlived the catalog")
 			.unwrap()
 			.unwrap();
@@ -3867,7 +3867,7 @@ mod session_tests {
 			moq_net::Result::Ok(())
 		};
 		super::RUNTIME
-			.block_on(async { moq_clock::timeout(Duration::from_secs(10), unwanted).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), unwanted).await })
 			.expect("the sibling outlived its catalog's broadcast")
 			.expect("the sibling track closed");
 		stop(session);
@@ -3918,7 +3918,7 @@ mod session_tests {
 				);
 				while track.read().await.unwrap().is_some() {}
 			};
-			moq_clock::timeout(Duration::from_secs(10), finished)
+			kio::clock::timeout(Duration::from_secs(10), finished)
 				.await
 				.expect("the track never finished");
 		});
@@ -4588,7 +4588,7 @@ mod session_tests {
 
 		let (_shutdown, session) = follow(&element, &origin);
 		let err = super::RUNTIME
-			.block_on(async { moq_clock::timeout(Duration::from_secs(10), session).await })
+			.block_on(async { kio::clock::timeout(Duration::from_secs(10), session).await })
 			.expect("the refusal held the session")
 			.unwrap()
 			.expect_err("the refusal did not fail the session");
@@ -4786,7 +4786,7 @@ mod session_tests {
 			))
 		);
 		assert!(video.send_event(gst::event::Segment::new(&gst::FormattedSegment::<gst::ClockTime>::new())));
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let frame = || {
 			let mut frame = gst::Buffer::from_slice(crate::sink::h264_keyframe_au());
 			frame
@@ -4815,7 +4815,7 @@ mod session_tests {
 		let mut dropped = relay.dropped.subscribe();
 		super::RUNTIME
 			.block_on(async {
-				moq_clock::timeout(Duration::from_secs(30), dropped.wait_for(|dropped| *dropped >= 4)).await
+				kio::clock::timeout(Duration::from_secs(30), dropped.wait_for(|dropped| *dropped >= 4)).await
 			})
 			.expect("the elements stopped redialing")
 			.unwrap();

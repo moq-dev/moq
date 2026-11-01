@@ -78,14 +78,14 @@ async fn acquisition(version: &str, carries_identity: bool) {
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn minted_replacement_refuses_pending_catalog() {
 	acquisition("moq-lite-06", false).await;
 	acquisition("moq-transport-18", false).await;
 	acquisition("moq-transport-22", false).await;
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn carried_replacement_acquires_pending_catalog() {
 	acquisition("moq-lite-07-wip", true).await;
 }

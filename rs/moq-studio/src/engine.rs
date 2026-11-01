@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bytes::Bytes;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_scene::source::{self, Driver, Sources};
 use moq_scene::{Collection, Compositor, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
@@ -292,8 +292,8 @@ impl Engine {
 	) {
 		let canvas = self.state.lock().unwrap().collection.canvas;
 		let period = Duration::from_secs(1) / canvas.framerate;
-		let mut clock = moq_clock::interval_at(start, period);
-		clock.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Skip);
+		let mut clock = kio::clock::interval_at(start, period);
+		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
 		let mut watched = false;
 
 		loop {
@@ -356,8 +356,8 @@ impl Engine {
 		let config = self.bus.config().clone();
 		let rate = u128::from(config.sample_rate);
 		let channels = config.layout.channels() as usize;
-		let mut clock = moq_clock::interval_at(start, AUDIO_PERIOD);
-		clock.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Skip);
+		let mut clock = kio::clock::interval_at(start, AUDIO_PERIOD);
+		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
 		let mut samples = Vec::new();
 		let mut written: u128 = 0;
 
@@ -632,7 +632,7 @@ mod tests {
 			.await
 			.expect("the studio starts");
 
-		let broadcast = moq_clock::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
+		let broadcast = kio::clock::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
 			.await
 			.expect("the relay routes the program")
 			.expect("broadcast");
@@ -649,7 +649,7 @@ mod tests {
 			.expect("video decoder");
 		// The canvas is black until the color source delivers its first
 		// picture, so wait for the composed one rather than take the first.
-		moq_clock::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			loop {
 				let frame = match decoder.read().await.expect("decode") {
 					Some(moq_video::decode::Read::Frame(frame)) => frame,
@@ -688,7 +688,7 @@ mod tests {
 		let mut decoder = moq_audio::decode::Consumer::new(&broadcast, config, audio.clone(), options)
 			.await
 			.expect("audio decoder");
-		moq_clock::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			loop {
 				match decoder.read().await.expect("decode") {
 					Some(moq_audio::decode::Read::Frame(_)) => return,

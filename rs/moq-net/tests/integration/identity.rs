@@ -25,7 +25,7 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer) 
 
 /// The identity of the next route `announced` starts, failing on any other event.
 async fn started(announced: &mut announce::Consumer) -> Identity {
-	match moq_clock::timeout(Duration::from_secs(10), announced.next())
+	match kio::clock::timeout(Duration::from_secs(10), announced.next())
 		.await
 		.expect("announce hung")
 		.expect("announce ended")
@@ -36,7 +36,7 @@ async fn started(announced: &mut announce::Consumer) -> Identity {
 }
 
 async fn ended(announced: &mut announce::Consumer) {
-	match moq_clock::timeout(Duration::from_secs(10), announced.next())
+	match kio::clock::timeout(Duration::from_secs(10), announced.next())
 		.await
 		.expect("announce hung")
 		.expect("announce ended")
@@ -79,19 +79,19 @@ async fn job_reannounced(version: &str) {
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn lite07_carries_the_identity() {
 	job_reannounced("moq-lite-07-wip").await;
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn older_lite_mints_per_announcement() {
 	for version in ["moq-lite-06", "moq-lite-05", "moq-lite-03"] {
 		job_reannounced(version).await;
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn moq_transport_mints_per_announcement() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
 		job_reannounced(version).await;

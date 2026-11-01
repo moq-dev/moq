@@ -45,7 +45,6 @@ coverage on `main` at `3ab6cbf81d`.
 ## Required
 
 - [Draft-18 TRACK_STATUS FIN](/quest/m1/interop-coverage/draft18-status-fin.md) - a draft-18 TRACK_STATUS followed at once by a FIN is answered, so moqx-forwarded status requests reach moq-dev publishers
-- [JS namespace lifecycle](/quest/m1/interop-coverage/js-namespace-done.md) - the runner's moq-dev-js client moves to an `@moq/net` that withdraws namespaces by reset, so subscribe-namespace-lifecycle passes on Cloudflare draft-18 and aiomoqt
 - [JS subgroup data through imquic](/quest/m1/interop-coverage/js-imquic-objects.md) - the runner's moq-dev-js client moves to an `@moq/net` patch that writes data stream headers in one write, so data-subgroup-basic passes against imquic
 - [JS subscribers FETCH](/quest/m1/interop-coverage/js-ietf-fetch.md) - `@moq/net` fetches past groups over moq-transport, and joins the CLI FETCH round
 
