@@ -16,14 +16,8 @@ pub(crate) const KEY_LABEL: &[u8] = b"moq-e2ee-00 key";
 /// AES-GCM tag length in bytes.
 pub(crate) const TAG_LEN: usize = 16;
 
-/// Derived AEAD key length in bytes.
-pub(crate) const KEY_LEN: usize = 16;
-
 /// Opaque path material length in bytes.
 pub(crate) const PATH_LEN: usize = 16;
-
-/// HMAC-SHA-256 name key length in bytes.
-pub(crate) const NAME_MAC_LEN: usize = 32;
 
 /// Leading HMAC bytes a physical name uses as its AES-GCM nonce.
 pub(crate) const NAME_NONCE_LEN: usize = 12;
