@@ -4,7 +4,7 @@
 
 Condition: the unscoped npm package `qmux` exists, is owned by the moq-dev
 maintainers, and has a trusted publisher for `moq-dev/moq`, workflow
-`release-js.yml`, environment `publish`. Then the cut's release workflow can
+`release-js.yml`, environment `npm`. Then the cut's release workflow can
 publish the [renamed `js/qmux`](/quest/m0/qmux-npm-rename.md) under it. A
 maintainer does this by hand. Delete this quest once these checks pass:
 
