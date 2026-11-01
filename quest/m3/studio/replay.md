@@ -18,7 +18,10 @@ Sources and the program encode whatever the subscriber demand (decided
 2026-10-28, from [#7101](https://github.com/moq-dev/moq/issues/7101); see
 [source tracks](/quest/m3/studio/compose/sources.md)), so a track nobody
 watched still holds its recent groups, as far back as its `max_age`. Replay
-needs no arming and no local subscriber. A stretch where a source was offline
+needs no arming and no local subscriber. A studio started with `--on-demand`
+encodes the program only while someone watches, so the program has no past
+from before its first viewer to replay (decided ✅ 2026-11-01, maintainer, on
+[moq-dev/moq#7554](https://github.com/moq-dev/moq/pull/7554)). A stretch where a source was offline
 or removed replays as a gap rather than being skipped. Acceptance covers the
 case where every viewer composes sources themselves and nothing outside the
 studio subscribes to the program.

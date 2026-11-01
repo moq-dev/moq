@@ -17,5 +17,13 @@ finds its recent past, but costs no upload. Static sources (images, colors) publ
 than as a video stream. Consumer GPUs cap concurrent hardware encode
 sessions, so when the hardware refuses one, that source's track fails loudly
 with the reason shown rather than silently degrading.
+
+✅ 2026-11-01 (maintainer, on
+[moq-dev/moq#7554](https://github.com/moq-dev/moq/pull/7554)): sources stay
+always-on, accepting that a collection with many sources reaches the
+hardware encode-session cap when it loads rather than when viewers
+subscribe; the loud failure above is the answer to that cap. Rejected:
+sources on demand, which would make replaying a source need an armed local
+subscriber again.
 Track names stay stable for a source's life, and an edited source that
 changes what it shows gets a new name.
