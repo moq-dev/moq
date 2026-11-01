@@ -177,7 +177,7 @@ def lock(pid, delay, duration, directory):
     # DWARF unwinding keeps it. Switch timestamps bound CPU and open waits alike.
     # The default 512 KiB buffer drops samples at 16 workers; 2 MiB does not.
     subprocess.run(['perf', 'record', '--quiet', '--no-buildid-cache', '-e', EVENT, '-c', '1', '--call-graph', 'dwarf', '--switch-events',
-                    '-k', 'monotonic', '-m', os.environ.get('SPIKE_PERF_BUFFER', '2M'), '-p', str(pid), '-o', str(data), '--', 'sleep', str(duration)], check=True)
+                    '-k', 'monotonic', '-m', '2M', '-p', str(pid), '-o', str(data), '--', 'sleep', str(duration)], check=True)
     after = schedstat(pid, names)
     result, folded = reduce(names, parse(perf_script(data, '--show-switch-events')), before, after)
     (directory / 'lock.json').write_text(json.dumps(result, indent=2) + '\n')

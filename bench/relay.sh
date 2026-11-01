@@ -38,7 +38,7 @@ relay_config() {
                 ''
                 '[runtime]'
                 "workers = $workers"
-                "pin = ${BENCH_PIN:-false}"
+                'pin = false'
             )
             ;;
         io-uring-workers)
@@ -305,13 +305,6 @@ run_workload() {
         HOST_PID=$!
         # The second half of the host window, matching the summary's throughput window.
         # Its own process group, so cleanup also stops perf and its workload.
-        # Spike: count the relay's instructions over the same steady window as the profile.
-        local stat_pid=
-        if [[ -n ${SPIKE_PERF_STAT:-} && -z $PROFILE ]]; then
-            (sleep 5 && exec perf stat -x, -e instructions:u,instructions:k,cycles:u,cycles:k \
-                -p "$relay_pid" -o "$directory/perfstat.csv" -- sleep 5) >"$directory/perfstat.log" 2>&1 &
-            stat_pid=$!
-        fi
         case $PROFILE in
             lock | cpu)
                 setsid python3 "$ROOT/bench/profile.py" "$PROFILE" "$relay_pid" "$profile" --delay 5 --duration 5 \
@@ -333,10 +326,6 @@ run_workload() {
             return 1
         fi
         HOST_PID=
-        if [[ -n $stat_pid ]] && ! wait "$stat_pid"; then
-            cat "$directory/perfstat.log" >&2
-            return 1
-        fi
         if [[ -n $PROFILE ]]; then
             if ! wait "$PROFILE_PID"; then
                 cat "$directory/profile.log" >&2

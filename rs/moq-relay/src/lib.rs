@@ -32,7 +32,6 @@ mod relay;
 pub mod runtime;
 pub mod session;
 mod settings;
-mod spike;
 pub mod shutdown;
 pub mod stats;
 #[cfg(any(feature = "stun", test))]

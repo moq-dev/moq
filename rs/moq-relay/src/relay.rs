@@ -574,7 +574,6 @@ impl Relay {
 			workers,
 			#[cfg(all(target_os = "linux", feature = "_uring"))]
 			uring,
-			config,
 			..
 		} = self;
 
@@ -685,28 +684,13 @@ impl Relay {
 		let quic_workers = {
 			let mut running = futures::stream::FuturesUnordered::new();
 			if let Some(workers) = workers.as_mut() {
-				let members = workers.members();
-				let mut mesh = match crate::spike::enabled() {
-					true => {
-						tracing::warn!(workers = members.len(), "spike: a cluster per worker, meshed in memory");
-						crate::spike::mesh(members.len()).into_iter().map(Some).collect()
-					}
-					false => Vec::new(),
-				};
-				for member in members {
+				for member in workers.members() {
 					let index = member.index();
 					let cluster = cluster.clone();
 					let auth = auth.clone();
 					let worker_shutdown = shutdown.clone();
 					let sessions = sessions.clone();
-					let spike = mesh.get_mut(usize::from(index)).and_then(Option::take).map(|ends| (config.clone(), ends));
-					let task = member.serve(move |server| async move {
-						let cluster = match spike {
-							Some((config, ends)) => crate::spike::worker(&config, ends)?,
-							None => cluster,
-						};
-						serve(server, cluster, auth, worker_shutdown, sessions).await
-					});
+					let task = member.serve(move |server| serve(server, cluster, auth, worker_shutdown, sessions));
 					running.push(async move {
 						match task.await {
 							Ok(res) => res.with_context(|| format!("QUIC worker {index} failed")),
