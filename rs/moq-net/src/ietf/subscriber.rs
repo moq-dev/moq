@@ -1,5 +1,6 @@
 use crate::driver::Transport;
 use crate::transport::poll::Session as _;
+use futures::FutureExt as _;
 use std::{
 	collections::{BTreeMap, HashMap, hash_map::Entry},
 	sync::atomic::{AtomicU64, Ordering},
@@ -13,7 +14,7 @@ use crate::{
 	frame, group,
 	ietf::{self, Control, FetchType, Filter, GroupOrder, RequestId},
 	origin, track,
-	util::{MaybeBoxedExt, MaybeSendBox, TaskSet, Tasks},
+	util::{BoxFuture, TaskSet, Tasks},
 };
 
 use super::{Message, Version, cluster, error::request, group::ObjectExtensionsLength, peer, request_update};
@@ -908,7 +909,7 @@ struct Held {
 /// A joining request may be abandoned before it takes an ID. Once committed, the session
 /// owns ending it on the wire.
 struct JoiningTask {
-	work: Option<MaybeSendBox<'static, Result<(), Error>>>,
+	work: Option<BoxFuture<'static, Result<(), Error>>>,
 	state: kio::Shared<JoiningState>,
 	tasks: Tasks,
 }
@@ -1658,7 +1659,7 @@ impl Subscriber {
 		peer: cluster::Peer,
 		epoch: bool,
 		declared: Option<bool>,
-	) -> Result<MaybeSendBox<'static, ()>, Error> {
+	) -> Result<BoxFuture<'static, ()>, Error> {
 		let mut this = self.clone();
 		let mut data = body.decoder(this.version);
 		let task = match id {
@@ -1684,7 +1685,7 @@ impl Subscriber {
 						tracing::debug!(%err, "publish stream error");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			ietf::PublishNamespace::ID => {
 				// A negotiated session that omits HOP_PATH fails the decode here, which
@@ -1733,7 +1734,7 @@ impl Subscriber {
 						tracing::debug!(%err, "publish_namespace stream error");
 					}
 				}
-				.maybe_boxed()
+				.boxed()
 			}
 			_ => {
 				tracing::warn!(id, "unexpected bidi stream type for subscriber");
@@ -1750,14 +1751,14 @@ impl Subscriber {
 		stream: Stream<Transport, Version>,
 		kind: request::Kind,
 		err: DecodeError,
-	) -> MaybeSendBox<'static, ()> {
+	) -> BoxFuture<'static, ()> {
 		let version = self.version;
 		async move {
 			if let Err(err) = super::token::reject(stream, kind, err, version).await {
 				tracing::debug!(%err, "token refusal failed");
 			}
 		}
-		.maybe_boxed()
+		.boxed()
 	}
 
 	/// What the peer declared about being solicited (MoQ Solicit).
@@ -4234,7 +4235,7 @@ impl Subscriber {
 			}
 			res
 		}
-		.maybe_boxed();
+		.boxed();
 		Some(JoiningTask {
 			work: Some(work),
 			state,

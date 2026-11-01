@@ -447,10 +447,6 @@
         "typescript": "7.0.2",
       },
     },
-    "js/wasm": {
-      "name": "@moq/wasm",
-      "version": "0.0.0",
-    },
     "js/watch": {
       "name": "@moq/watch",
       "version": "0.6.2",
@@ -579,19 +575,6 @@
         "playwright": "1.64.1",
         "typescript": "7.0.2",
         "vite": "^8.3.4",
-      },
-    },
-    "test/wasm": {
-      "name": "@moq/wasm-test",
-      "dependencies": {
-        "@moq/clock": "workspace:*",
-        "@moq/net": "workspace:*",
-        "@moq/wasm": "workspace:*",
-      },
-      "devDependencies": {
-        "@ubjs/core": "0.31.0-6",
-        "@ubjs/wasm": "0.31.0-6",
-        "playwright": "1.64.1",
       },
     },
   },
@@ -920,10 +903,6 @@
 
     "@moq/video-test": ["@moq/video-test@workspace:test/video"],
 
-    "@moq/wasm": ["@moq/wasm@workspace:js/wasm"],
-
-    "@moq/wasm-test": ["@moq/wasm-test@workspace:test/wasm"],
-
     "@moq/watch": ["@moq/watch@workspace:js/watch"],
 
     "@moq/web-transport": ["@moq/web-transport@0.1.6", "", { "optionalDependencies": { "@moq/web-transport-darwin-arm64": "0.1.6", "@moq/web-transport-darwin-x64": "0.1.6", "@moq/web-transport-linux-arm64-gnu": "0.1.6", "@moq/web-transport-linux-x64-gnu": "0.1.6", "@moq/web-transport-win32-x64-msvc": "0.1.6" } }, "sha512-ojNDQEO9EnTyaPgiqng9cll/JNh6eDAe6LS6zeEEx9ZVwKRikeb2wSFJA/hErrMmCmuE2YYmcXHPf0BIqcOASg=="],
@@ -1187,10 +1166,6 @@
     "@typescript/typescript-win32-arm64": ["@typescript/typescript-win32-arm64@7.0.2", "", { "os": "win32", "cpu": "arm64" }, "sha512-Gyl1Vy6OsWesLzmq+EP0Fb7b4Nid5232AvcA2SFcdYreldpNtYFFofPjnt62y9hQy7VTaZp65ICJjuAQRaVcIQ=="],
 
     "@typescript/typescript-win32-x64": ["@typescript/typescript-win32-x64@7.0.2", "", { "os": "win32", "cpu": "x64" }, "sha512-0BQ3HkAHHlKLSp1qRvf3SUhGpGsDuhB/jgFw75guyqbxJqEaS0Cw/VFO8i2nHglJUzQCRtMMR/IBAKE3ETMC4g=="],
-
-    "@ubjs/core": ["@ubjs/core@0.31.0-6", "", {}, "sha512-pscv6Zj8mVmd5+ikb1Zr6XZ0yqYwKGeIV8HU8rf9sTvs7GW34OARAp03xFJ7rE9XE4R6LgwQhzYW9knAuz5yxA=="],
-
-    "@ubjs/wasm": ["@ubjs/wasm@0.31.0-6", "", { "peerDependencies": { "@ubjs/core": "^0.31.0-6" } }, "sha512-ja7pEcA4bCfEyFR8/zxivypUhhudr9n45lwcMR2r9U5hyTGkPnNnp1Ef5NbpTQieJd8wDkumV8Z0Yn0T0JEPAg=="],
 
     "@ungap/global-this": ["@ungap/global-this@0.4.4", "", {}, "sha512-mHkm6FvepJECMNthFuIgpAEFmPOk71UyXuIxYfjytvFTnSDBIz7jmViO+LfHI/AjrazWije0PnSP3+/NlwzqtA=="],
 

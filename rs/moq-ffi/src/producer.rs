@@ -117,18 +117,10 @@ impl Drop for BroadcastProducer {
 	}
 }
 
-/// `Send + Sync` natively, where any thread may close a broadcast; nothing on single-threaded wasm.
-#[cfg(not(target_family = "wasm"))]
-pub(crate) trait Shared: Send + Sync {}
-#[cfg(not(target_family = "wasm"))]
-impl<T: Send + Sync + ?Sized> Shared for T {}
-#[cfg(target_family = "wasm")]
-pub(crate) trait Shared {}
-#[cfg(target_family = "wasm")]
-impl<T: ?Sized> Shared for T {}
-
 /// A handle publishing tracks on a broadcast, which its broadcast ends on close.
-pub(crate) trait Child: Shared {
+///
+/// `Send + Sync`, since any thread may close a broadcast.
+pub(crate) trait Child: Send + Sync {
 	/// End whatever this handle still publishes with `err`, so later calls fail with `Closed`.
 	///
 	/// A track that already finished ends cleanly instead.
@@ -141,7 +133,7 @@ enum Family {
 		/// Handles that may still publish, ended on close.
 		open: Vec<std::sync::Weak<dyn Child>>,
 		/// Finished producers, kept so a late subscriber still finds their tracks.
-		kept: Vec<Box<dyn kio::MaybeSend>>,
+		kept: Vec<Box<dyn Send>>,
 	},
 	/// The broadcast handle was dropped without a close: each child ends on its own.
 	Released,
@@ -195,8 +187,8 @@ impl Children {
 	}
 
 	/// Keep a finished producer until the broadcast ends, or drop it now if it already has.
-	pub(crate) fn keep(&self, producer: impl kio::MaybeSend + 'static) {
-		let producer: Box<dyn kio::MaybeSend> = Box::new(producer);
+	pub(crate) fn keep(&self, producer: impl Send + 'static) {
+		let producer: Box<dyn Send> = Box::new(producer);
 		if let Family::Open { kept, .. } = &mut *self.0.lock().unwrap() {
 			kept.push(producer);
 		}

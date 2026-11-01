@@ -36,11 +36,11 @@
 //! failure, once no copy it replaced may still deliver it. A route change discards what the
 //! former serving copy gave up and the reader had yet to report.
 
-use crate::sync::{Mutex, MutexGuard};
 use rangemap::{RangeMap, RangeSet};
 use std::collections::{BTreeSet, VecDeque};
 use std::ops::Bound;
 use std::sync::{Arc, PoisonError, Weak};
+use std::sync::{Mutex, MutexGuard};
 use std::task::{Poll, ready};
 use std::time::Duration;
 
