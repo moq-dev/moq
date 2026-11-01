@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import * as Epoch from "./epoch.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
@@ -22,7 +22,7 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 }
 
 /** Whether `promise` is still pending once queued work settles. */
@@ -2306,6 +2306,27 @@ test("a group-only reader of a finite track settles closed and lets go of its co
 	a.close();
 });
 
+test("a routed track's errored end outlives the copy that declared it", async () => {
+	const front = new Front();
+	const a = new BroadcastProducer();
+	const ta = copy(a);
+	front.serve(a.consume());
+	const sub = front.consumer.track("seq").subscribe();
+	ta.write(0);
+	const failed = new StreamError(StreamCode(71));
+	ta.producer.finishAt({ group: 1, frame: 0 }, failed);
+	const group = await sub.recvGroup();
+	expect(group?.sequence).toBe(0);
+	group?.close();
+	// Concluding releases the copy that declared the end.
+	await settle();
+	await expect(sub.recvGroup()).rejects.toBe(failed);
+
+	sub.close();
+	front.consumer.close();
+	a.close();
+});
+
 test("a group-only fork of a finite track settles closed and lets go of its copy", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();
@@ -2955,7 +2976,7 @@ for (const fetched of [false, true]) {
 			if (!hostile) return undefined;
 			const copy = new GroupProducer(sequence);
 			copy.writeFrame({ payload: enc.encode(`${sequence}.0`) });
-			setTimeout(() => copy.abort(malformed), 0);
+			void yieldNow().then(() => copy.abort(malformed));
 			return copy.consume();
 		});
 		const sub = front.consumer.track("seq").subscribe();

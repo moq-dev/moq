@@ -144,7 +144,7 @@ typenum = { version = "1", default-features = false, features = ["const-generics
 url = { version = "2", features = ["serde"] }
 usage-argv = { version = "7", default-features = false, features = ["complete", "diagnostics", "help-advanced"] }
 usage-rs = { version = "7", features = ["completions", "config"] }
-uuid = { version = "1", features = ["js", "v4", "v7"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 winnow-dff4ba8e3ae991db = { package = "winnow", version = "1", features = ["simd"] }
 x509-parser = { version = "0.18", features = ["verify", "verify-aws"] }
 zeroize = { version = "1", features = ["derive"] }
@@ -277,7 +277,7 @@ typenum = { version = "1", default-features = false, features = ["const-generics
 url = { version = "2", features = ["serde"] }
 usage-argv = { version = "7", default-features = false, features = ["complete", "diagnostics", "help-advanced"] }
 usage-rs = { version = "7", features = ["completions", "config"] }
-uuid = { version = "1", features = ["js", "v4", "v7"] }
+uuid = { version = "1", features = ["v4", "v7"] }
 winnow-ca01ad9e24f5d932 = { package = "winnow", version = "0.7" }
 winnow-dff4ba8e3ae991db = { package = "winnow", version = "1", features = ["simd"] }
 x509-parser = { version = "0.18", features = ["verify", "verify-aws"] }
@@ -295,6 +295,7 @@ hyper-util = { version = "0.1", default-features = false, features = ["client-le
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
 libc = { version = "0.2", features = ["extra_traits"] }
 miniz_oxide = { version = "0.8", features = ["simd"] }
+nix = { version = "0.31", features = ["net", "uio"] }
 objc2 = { version = "0.6" }
 objc2-core-audio = { version = "0.3", default-features = false, features = ["AudioHardware", "AudioHardwareDeprecated", "objc2", "objc2-core-audio-types", "objc2-foundation", "std"] }
 objc2-core-audio-types = { version = "0.3" }
@@ -332,6 +333,7 @@ hyper-util = { version = "0.1", default-features = false, features = ["client-le
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "tiff"] }
 libc = { version = "0.2", features = ["extra_traits"] }
 miniz_oxide = { version = "0.8", features = ["simd"] }
+nix = { version = "0.31", features = ["net", "uio"] }
 objc2 = { version = "0.6" }
 objc2-core-audio = { version = "0.3", default-features = false, features = ["AudioHardware", "AudioHardwareDeprecated", "objc2", "objc2-core-audio-types", "objc2-foundation", "std"] }
 objc2-core-audio-types = { version = "0.3" }
