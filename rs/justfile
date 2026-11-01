@@ -65,7 +65,7 @@ fix *args:
 check-changed $LIST:
     sh/rs/select.sh check "$LIST"
 
-# Like `lint`, with the loom and Send-depth checks for the selected crates.
+# Like `lint`, but only the crates in a changed-file list plus their dependents.
 lint-changed $LIST:
     sh/rs/select.sh lint "$LIST"
 
@@ -317,7 +317,7 @@ doctest *args:
     bash sh/local.sh cargo test --locked --doc "$@"
 
 # `--cfg loom` swaps kio's primitives for loom's, so it rebuilds the world and
-# executes only in Nightly; the selected Rust gate compiles it with `loom-check`.
+# runs only on demand.
 # `--release` because a model check runs the body once
 # per interleaving (411s -> 51s); the assertions are plain `assert!`. kio's
 # models search every interleaving; moq-net's cap preemptions (see
@@ -351,7 +351,8 @@ quic-sim:
     # The bandwidth probe's acceptance suite, over fixed seeds: the merge gate runs only its short cases.
     bash sh/rs/nextest.sh cargo nextest run --locked --release -p moq-quic --lib --run-ignored only -E 'test(/^tests::probe::/)'
 
-# Prove downstream futures are Send at the default recursion limit on nightly.
+# Prove downstream futures are Send at the default recursion limit on the
+# flake's pinned nightly. Nightly runs it; the land gate does not.
 send-depth:
     bash sh/rs/send-depth.sh
 

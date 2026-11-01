@@ -107,11 +107,22 @@ the wasm32 pass: "nobody uses it and it's going to be replaced soon"; on
 io_uring: "keep testing uring in CI, but I guess add it to the default features
 on CI". The land gate's Rust lane is the default-feature test build (with the
 device features, and on Linux the relay's io_uring runtime) plus fmt, doc,
-shear, sort, and the loom and Send-depth compiles. It drops the isolated feature
+shear, and sort. It drops the isolated feature
 shapes (`rs_shapes`, cargo-hack), the net, QUIC, tokio, and media feature
 contracts, and the wasm32 and io_uring clippy passes; `just rs features` keeps
 the feature matrix in the Features workflow (nightly and release PRs). On a host land batch the Rust lane had taken about 1,340 s, 691 s
 of it `rs_shapes` and 238 s `tokio-features`.
+
+Decided 2026-10-31 (maintainer), on the gate's remaining lint compiles: "Remove
+loom entirely": moq's history holds only upkeep of the loom models
+([moq-dev/moq#2543](https://github.com/moq-dev/moq/pull/2543) added them, later
+PRs bounded them so Nightly finishes, fixed them after code changes, and
+restored their gate compile checks) and no commit where loom found a race. The
+gate drops `loom-check` and Nightly its loom job; a separate PR deletes the
+models. On Send-depth: "Move it to Nightly." It guards a real downstream
+breakage (moq-net futures not Send at the default recursion limit), so
+`just rs send-depth` keeps its pinned nightly and runs as its own Nightly job
+instead of in the land gate.
 
 Decided 2026-10-25 (maintainer): across moq's many CI and release builds
 (targets, features, FFI languages, Nix packages), each crate configuration

@@ -20,7 +20,7 @@ select_packages() {
         echo ALL
         return
     fi
-    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest|send-depth)\.sh|\.config/nextest\.toml)$' "$list"; then
+    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest)\.sh|\.config/nextest\.toml)$' "$list"; then
         echo ALL
         return
     fi
@@ -150,10 +150,9 @@ case "$action" in
     check | check-test | lint)
         # The isolated feature builds (`just rs features`) stay out of the
         # gate; the Features workflow runs them nightly and on release PRs.
+        # Nightly runs the Send-depth proof (`just rs send-depth`) on its
+        # pinned toolchain.
         just rs "$action" "${flags[@]}"
-        if wants '(kio|moq-net)'; then just rs loom-check; fi
-        # Native Send proofs at the default recursion limit, on the pinned nightly.
-        if wants moq-net; then just rs send-depth; fi
         # Device code behind the off-by-default `capture` feature. check-test
         # lints it through the test build, as for the default features.
         if [[ "$action" != lint ]] && wants '(moq-video|moq-audio|moq-scene|moq-studio)'; then

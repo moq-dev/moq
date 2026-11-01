@@ -66,23 +66,15 @@ class SelectTest(unittest.TestCase):
         for owner in ("tokio", "media", "net"):
             self.assertEqual(self.selected(f"sh/rs/{owner}-features.sh"), [])
 
-    def test_send_depth_follows_moq_net(self):
-        for action in ("check", "check-test", "lint"):
-            for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "sh/rs/send-depth.sh"):
-                with self.subTest(action=action, path=path):
-                    self.assertIn("rs send-depth", self.selected(path, action=action))
-            with self.subTest(action=action, path="rs/moq-tokio/src/lib.rs"):
-                self.assertNotIn("rs send-depth", self.selected("rs/moq-tokio/src/lib.rs", action=action))
-
-    def test_loom_compiles_only_when_its_model_changes(self):
-        for action in ("check", "check-test", "lint"):
-            for path in ("rs/kio/src/lib.rs", "rs/moq-net/tests/loom.rs", "Cargo.lock"):
-                with self.subTest(action=action, path=path):
-                    self.assertIn("rs loom-check", self.selected(path, action=action))
-            for path in ("rs/moq-tokio/src/lib.rs", "rs/moq-stats/benches/producer_tick.rs"):
-                with self.subTest(action=action, path=path):
-                    self.assertNotIn("rs loom-check", self.selected(path, action=action))
-        self.assertNotIn("rs loom-check", self.selected("rs/moq-net/src/lib.rs", action="test"))
+    def test_gate_leaves_send_depth_to_nightly(self):
+        # Nightly runs `rs send-depth` on the pinned toolchain; the gate's lint
+        # is the one cargo pass.
+        for path in ("rs/moq-net/src/lib.rs", "rs/kio/src/lib.rs", "Cargo.lock"):
+            with self.subTest(path=path):
+                calls = self.selected(path)
+                self.assertEqual(len(calls), 1, calls)
+                self.assertTrue(calls[0].startswith("rs lint "), calls)
+        self.assertEqual(self.selected("sh/rs/send-depth.sh"), [])
 
     def test_device_features_join_the_one_test_build(self):
         for path, features in (("rs/moq-audio/src/lib.rs", DEVICE_FEATURES),

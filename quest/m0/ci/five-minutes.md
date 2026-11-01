@@ -71,8 +71,9 @@ What remains for a moq-net edit, largest first:
 - The test run is the [slow tests](/quest/m0/ci/slow-tests.md) quest's.
 - The lint's remaining 230 s: the dev loom compile and `cargo doc`. Decided
   2026-10-31 (maintainer, see the [epic](/quest/m0/ci/README.md)): the gate
-  drops the feature shapes, the feature contracts (net-features's 62 s among
-  them), and the wasm32 clippy pass, and tests the relay's io_uring runtime in
+  drops the loom compile, the Send-depth check (now its own Nightly job), the
+  feature shapes, the feature contracts (net-features's 62 s among them), and
+  the wasm32 clippy pass, and tests the relay's io_uring runtime in
   the one test build instead of a separate clippy pass.
 - Measure the other routes the same way: a moq-ffi edit, which selects every
   binding's lane under `CHECK_JOBS=3`, and a JS-only edit.
