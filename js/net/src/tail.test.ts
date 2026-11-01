@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { type Installed, Manual, Milli, Nano } from "@moq/clock";
+import { type Installed, Instant, Manual, Milli, Nano, now } from "@moq/clock";
 import { Once } from "@moq/signals";
 import { accept, connect } from "./connection/index.ts";
 import * as Ietf from "./ietf/index.ts";
@@ -93,7 +93,7 @@ test.each([Ietf.ALPN.DRAFT_22])("%s: END_OF_TRACK carries the declared end", asy
 		video.finishAt({ group: 4, frame: 0 });
 		video.writeFrame(textFrame("1"));
 		video.writeFrame(textFrame("2"));
-		const ended = performance.now();
+		const ended = now();
 		video.finish();
 		video.close();
 
@@ -101,7 +101,7 @@ test.each([Ietf.ALPN.DRAFT_22])("%s: END_OF_TRACK carries the declared end", asy
 		expect(await reader.closed).toBeNull();
 		expect(await reader.finished()).toEqual({ group: 4, frame: 0 });
 		// Every counted stream arrived, so nothing waited out the grace.
-		expect(performance.now() - ended).toBeLessThan(TAIL_GRACE_MS);
+		expect(Nano.toMilli(Instant.durationSince(now(), ended))).toBeLessThan(TAIL_GRACE_MS);
 	} finally {
 		close();
 	}

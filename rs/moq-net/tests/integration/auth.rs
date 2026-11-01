@@ -401,7 +401,8 @@ async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 	let apply = |live: &mut std::collections::HashSet<String>, event: moq_net::announce::Event| match event {
 		moq_net::announce::Event::Start(update)
 		| moq_net::announce::Event::Update(update)
-		| moq_net::announce::Event::Restart(update) => {
+		| moq_net::announce::Event::Restart(update)
+		| moq_net::announce::Event::Takeover { announce: update, .. } => {
 			live.insert(update.prefix.to_string());
 		}
 		moq_net::announce::Event::End(update) => {

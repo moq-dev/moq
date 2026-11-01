@@ -27,7 +27,6 @@
 //!   storage.
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod archive_tests;
 pub mod master;
 mod mpd;
@@ -443,11 +442,6 @@ async fn watch_catalog(source: moq_mux::Source, renditions: renditions::Producer
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	/// A millisecond track: the frames written here carry timestamps.
 	fn timed() -> moq_net::track::Info {
@@ -562,7 +556,7 @@ mod tests {
 
 	/// The next rendition event, or `None` if the set is quiet.
 	async fn next_event(cursor: &mut renditions::Consumer) -> Option<renditions::Event> {
-		tokio::time::timeout(Duration::from_millis(50), cursor.next())
+		moq_clock::timeout(Duration::from_millis(50), cursor.next())
 			.await
 			.ok()
 			.and_then(Result::unwrap)
@@ -611,7 +605,7 @@ mod tests {
 		while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).unwrap() {
 			if let mp4_atom::Any::Moof(moof) = atom {
 				return moof.traf[0].trun[0]
-					.entries
+					.samples
 					.iter()
 					.map(|entry| entry.duration)
 					.collect();
@@ -943,7 +937,7 @@ mod tests {
 		let mut media = video(&catalog, &broadcast, "video0", video_config());
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let rendition = tokio::time::timeout(Duration::from_secs(5), async {
+		let rendition = moq_clock::timeout(Duration::from_secs(5), async {
 			loop {
 				if let Some(rendition) = broadcaster.rendition(Kind::Video, "video0") {
 					break rendition;
@@ -963,7 +957,7 @@ mod tests {
 			"master advertised a media playlist that would return 404"
 		);
 		assert!(
-			tokio::time::timeout(Duration::from_millis(10), broadcaster.ready())
+			moq_clock::timeout(Duration::from_millis(10), broadcaster.ready())
 				.await
 				.is_err(),
 			"broadcaster became ready before it had a playable rendition"
@@ -972,7 +966,7 @@ mod tests {
 		media.write(vp8_frame(0, true)).unwrap();
 		media.write(vp8_frame(2_000_000, true)).unwrap();
 		media.write(vp8_frame(4_000_000, true)).unwrap();
-		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
+		moq_clock::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
 			.expect("broadcaster becomes ready with a complete segment");
 		assert!(broadcaster.master_playlist(None).contains("video/video0/media.m3u8"));
@@ -1026,7 +1020,7 @@ mod tests {
 			}
 		}
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		tokio::time::timeout(Duration::from_secs(5), broadcaster.advertised())
+		moq_clock::timeout(Duration::from_secs(5), broadcaster.advertised())
 			.await
 			.expect("video0 is advertised");
 
@@ -1059,7 +1053,7 @@ mod tests {
 		}
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		tokio::time::timeout(Duration::from_secs(5), broadcaster.advertised())
+		moq_clock::timeout(Duration::from_secs(5), broadcaster.advertised())
 			.await
 			.expect("the rendition is advertised");
 		let rendition = broadcaster.rendition(Kind::Video, "video0").unwrap();
@@ -1077,7 +1071,7 @@ mod tests {
 		let mut disabled = video_config();
 		disabled.enabled = false;
 		media.set(disabled).unwrap();
-		tokio::time::timeout(Duration::from_secs(5), async {
+		moq_clock::timeout(Duration::from_secs(5), async {
 			while listed() {
 				tokio::task::yield_now().await;
 			}
@@ -1093,10 +1087,10 @@ mod tests {
 			let broadcaster = broadcaster.clone();
 			async move { broadcaster.advertised().await }
 		});
-		tokio::time::sleep(Duration::from_millis(10)).await;
+		moq_clock::sleep(Duration::from_millis(10)).await;
 		assert!(!waiting.is_finished(), "nothing enabled is advertised");
 		media.set(video_config()).unwrap();
-		tokio::time::timeout(Duration::from_secs(5), waiting)
+		moq_clock::timeout(Duration::from_secs(5), waiting)
 			.await
 			.expect("a re-enable wakes the master's long-poll")
 			.unwrap();
@@ -1144,7 +1138,7 @@ mod tests {
 		while !rendition.snapshot().finished {
 			tokio::task::yield_now().await;
 		}
-		let init = tokio::time::timeout(Duration::from_secs(1), rendition.latest_init())
+		let init = moq_clock::timeout(Duration::from_secs(1), rendition.latest_init())
 			.await
 			.expect("init must not wait for the unfinished trailing group")
 			.unwrap()
@@ -1172,7 +1166,7 @@ mod tests {
 		until_listed(&rendition, 1).await;
 		let mut blocked = std::pin::pin!(rendition.latest_init());
 		assert!(
-			tokio::time::timeout(Duration::from_millis(10), blocked.as_mut())
+			moq_clock::timeout(Duration::from_millis(10), blocked.as_mut())
 				.await
 				.is_err(),
 			"the bootstrap reads the open group"
@@ -1198,7 +1192,7 @@ mod tests {
 			.unwrap()
 			.expect("completed segment");
 		assert!(!segment.is_empty());
-		tokio::time::timeout(Duration::from_secs(1), rendition.latest_init())
+		moq_clock::timeout(Duration::from_secs(1), rendition.latest_init())
 			.await
 			.expect("init must not wait behind the blocked bootstrap")
 			.unwrap()
@@ -1272,9 +1266,9 @@ mod tests {
 
 	/// Wait until `rendition` lists at least `count` segments.
 	async fn until_listed(rendition: &Rendition, count: usize) {
-		tokio::time::timeout(Duration::from_secs(5), async {
+		moq_clock::timeout(Duration::from_secs(5), async {
 			while rendition.snapshot().segments.len() < count {
-				tokio::time::sleep(Duration::from_millis(10)).await;
+				moq_clock::sleep(Duration::from_millis(10)).await;
 			}
 		})
 		.await
@@ -1283,13 +1277,13 @@ mod tests {
 
 	/// Render the manifest until it lists `video1`.
 	async fn listed_in_manifest(broadcaster: &Broadcaster) -> String {
-		tokio::time::timeout(Duration::from_secs(5), async {
+		moq_clock::timeout(Duration::from_secs(5), async {
 			loop {
 				let manifest = broadcaster.manifest(None).unwrap().unwrap();
 				if manifest.contains("id=\"video/video1\"") {
 					return manifest;
 				}
-				tokio::time::sleep(Duration::from_millis(10)).await;
+				moq_clock::sleep(Duration::from_millis(10)).await;
 			}
 		})
 		.await
@@ -1330,7 +1324,7 @@ mod tests {
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 		broadcaster.advertised().await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
-		tokio::time::timeout(Duration::from_millis(1), broadcaster.video_init())
+		moq_clock::timeout(Duration::from_millis(1), broadcaster.video_init())
 			.await
 			.expect("one video init is enough to render");
 		let manifest = broadcaster.manifest(None).unwrap().expect("video0 renders");
@@ -1338,7 +1332,7 @@ mod tests {
 		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
 
 		// The background build is parked on the open group, and every render stays current.
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		let manifest = broadcaster.manifest(None).unwrap().expect("video0 renders");
 		assert!(!manifest.contains("id=\"video/video1\""), "{manifest}");
 
@@ -1391,12 +1385,12 @@ mod tests {
 		assert!(broadcaster.manifest(None).unwrap().is_none());
 
 		open.finish().unwrap();
-		let manifest = tokio::time::timeout(Duration::from_secs(5), async {
+		let manifest = moq_clock::timeout(Duration::from_secs(5), async {
 			loop {
 				if let Some(manifest) = broadcaster.manifest(None).unwrap() {
 					return manifest;
 				}
-				tokio::time::sleep(Duration::from_millis(10)).await;
+				moq_clock::sleep(Duration::from_millis(10)).await;
 			}
 		})
 		.await
@@ -1420,7 +1414,7 @@ mod tests {
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
 		let stuck = broadcaster.rendition(Kind::Video, "video1").unwrap();
 		stuck.start_init();
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		assert!(stuck.init_pending(), "the build is parked on the open group");
 		let weak = Arc::downgrade(&stuck);
 		drop(stuck);
@@ -1468,11 +1462,11 @@ mod tests {
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
 		let stuck = broadcaster.rendition(Kind::Video, "video1").unwrap();
 		stuck.start_init();
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		assert!(stuck.init_pending(), "the build is parked on the open group");
 
 		broadcaster.set_generation(Some("run2")).unwrap();
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		assert!(!stuck.init_pending(), "the old run's build still holds the init lock");
 		drop(open);
 	}
@@ -1496,9 +1490,9 @@ mod tests {
 			records.finish().unwrap();
 		}
 		catalog.finish().unwrap();
-		tokio::time::timeout(Duration::from_secs(5), async {
+		moq_clock::timeout(Duration::from_secs(5), async {
 			while !rendition.snapshot().finished {
-				tokio::time::sleep(Duration::from_millis(10)).await;
+				moq_clock::sleep(Duration::from_millis(10)).await;
 			}
 		})
 		.await
@@ -1529,20 +1523,20 @@ mod tests {
 		write_keyframe(&mut open, 1);
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 2).await;
 		catalog.finish().unwrap();
 		settle().await;
 
 		let mut waiting = std::pin::pin!(broadcaster.video_init());
 		assert!(
-			tokio::time::timeout(Duration::from_secs(1), waiting.as_mut())
+			moq_clock::timeout(Duration::from_secs(1), waiting.as_mut())
 				.await
 				.is_err(),
 			"resolved without a listable video"
 		);
 		open.finish().unwrap();
-		tokio::time::timeout(Duration::from_secs(1), waiting)
+		moq_clock::timeout(Duration::from_secs(1), waiting)
 			.await
 			.expect("video0 is listable once its init is built");
 	}
@@ -1596,7 +1590,7 @@ mod tests {
 		until_listed(&broadcaster.rendition(Kind::Video, "video0").unwrap(), 3).await;
 		for _ in 0..3 {
 			assert!(broadcaster.manifest(None).unwrap().is_some());
-			tokio::time::sleep(Duration::from_secs(1)).await;
+			moq_clock::sleep(Duration::from_secs(1)).await;
 		}
 		let disabled = broadcaster.rendition(Kind::Video, "video1").unwrap();
 		assert!(!disabled.snapshot().segments.is_empty());
@@ -1622,7 +1616,7 @@ mod tests {
 		let (_catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let old = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let old_playlist = old
 			.media_playlist(None)
@@ -1639,20 +1633,20 @@ mod tests {
 			media.write(vp8_frame(micros, true)).unwrap();
 		}
 
-		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+		let deadline = moq_clock::now() + Duration::from_secs(5);
 		let new = loop {
 			let current = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 			if !Arc::ptr_eq(&current, &old) {
 				break current;
 			}
 			assert!(
-				tokio::time::Instant::now() < deadline,
+				moq_clock::now() < deadline,
 				"the reconfigure never rebuilt the rendition"
 			);
-			tokio::time::sleep(Duration::from_millis(10)).await;
+			moq_clock::sleep(Duration::from_millis(10)).await;
 		};
 		let new_init = new.latest_init().await.unwrap().expect("init segment");
-		let _ = tokio::time::timeout(Duration::from_secs(5), new.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), new.playable()).await;
 		let new_playlist = new.media_playlist(None).unwrap().expect("playable");
 		let new_hash = init_hash(&new_playlist);
 		assert_ne!(new_hash, old_hash, "different init bytes get a different URL");
@@ -1671,7 +1665,7 @@ mod tests {
 		let (_catalog, mut media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
 		let tag = rendition.tag().to_string();
 		let unversioned = rendition.media_playlist(None).unwrap().expect("playable");
@@ -1706,7 +1700,7 @@ mod tests {
 		);
 
 		media.write(vp8_frame(6_000_000, true)).unwrap();
-		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), rendition.playable()).await;
 		let restarted = rendition.media_playlist(None).unwrap().expect("the new run lists");
 		assert!(restarted.contains(&format!("\nseg/run-2.{tag}.2.m4s\n")), "{restarted}");
 		assert!(!restarted.contains("run-1"));
@@ -1757,9 +1751,9 @@ mod tests {
 		}
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
-		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), rendition.playable()).await;
 		let old = rendition.latest_init().await.unwrap().expect("init segment");
 		broadcaster.set_generation(Some("run-1")).unwrap();
 		broadcaster.set_generation(Some("run-2")).unwrap();
@@ -1775,7 +1769,7 @@ mod tests {
 				})
 				.unwrap();
 		}
-		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), rendition.playable()).await;
 		let new = rendition.latest_init().await.unwrap().expect("init segment");
 		assert_ne!(new, old, "the new run's init is built from its own media");
 		let playlist = rendition.media_playlist(None).unwrap().expect("playable");
@@ -1792,11 +1786,11 @@ mod tests {
 		let (catalog, media) = publish_vp8(&mut broadcast.broadcast().clone(), inline_vp8());
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster
 			.rendition(Kind::Video, "video0")
 			.expect("rendition discovered from the catalog");
-		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), rendition.playable()).await;
 
 		let master = broadcaster.master_playlist(None);
 		assert!(master.contains("video/video0/media.m3u8"), "master lists the rendition");
@@ -1854,9 +1848,9 @@ mod tests {
 		let (catalog, media) = publish_vp8(&mut broadcast.broadcast().clone(), video_config());
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
-		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), rendition.playable()).await;
 
 		// Segment 0 holds a keyframe at 0s and a delta at 1s; segment 1 starts at 2s.
 		let segment = rendition.listed_segment(0).await.unwrap().expect("segment 0");
@@ -1892,9 +1886,9 @@ mod tests {
 		media.write(vp8_frame(4_000_000, true)).unwrap();
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("rendition");
-		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), rendition.playable()).await;
 
 		let segment = rendition.listed_segment(0).await.unwrap().expect("segment 0");
 		let timescale = rendition.muxer().unwrap().timescale().as_u64();
@@ -1931,11 +1925,11 @@ mod tests {
 		audio_write(4_000_000);
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let video_rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let audio_rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
-		let _ = tokio::time::timeout(Duration::from_secs(5), video_rendition.playable()).await;
-		let _ = tokio::time::timeout(Duration::from_secs(5), audio_rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), video_rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), audio_rendition.playable()).await;
 
 		let manifest = broadcaster
 			.manifest(None)
@@ -2012,9 +2006,9 @@ mod tests {
 		media.write(frame(4_000_000, true)).unwrap(); // live edge
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
-		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), rendition.playable()).await;
 
 		let snapshot = rendition.snapshot();
 		assert_eq!(snapshot.segments[0].program_date_time, Some(wall));
@@ -2073,9 +2067,9 @@ mod tests {
 		}
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
-		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), rendition.playable()).await;
 
 		assert_eq!(rendition.snapshot().segments[0].program_date_time, None);
 		let playlist = rendition.media_playlist(None).unwrap().expect("playlist renders");
@@ -2126,7 +2120,7 @@ mod tests {
 		import.decode(&fragments).unwrap();
 		let anchored = catalog.snapshot().clock.expect("the catalog advertises a clock");
 
-		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
+		moq_clock::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
 			.expect("a rendition becomes playable");
 		let video = catalog
@@ -2137,7 +2131,7 @@ mod tests {
 			.next()
 			.expect("a video rendition");
 		let rendition = broadcaster.rendition(Kind::Video, &video).expect("video discovered");
-		let playlist = tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None))
+		let playlist = moq_clock::timeout(Duration::from_secs(5), rendition.playlist(None))
 			.await
 			.expect("a listed segment")
 			.unwrap()
@@ -2264,7 +2258,7 @@ mod tests {
 			settle().await;
 		}
 		let broadcaster = broadcaster.unwrap_or_else(|| Broadcaster::new(source, Config::default()));
-		tokio::time::timeout(Duration::from_secs(5), broadcaster.ready())
+		moq_clock::timeout(Duration::from_secs(5), broadcaster.ready())
 			.await
 			.unwrap();
 		for (kind, name) in [
@@ -2278,7 +2272,7 @@ mod tests {
 			),
 		] {
 			let rendition = broadcaster.rendition(kind, &name).unwrap();
-			tokio::time::timeout(Duration::from_secs(5), rendition.playlist(None))
+			moq_clock::timeout(Duration::from_secs(5), rendition.playlist(None))
 				.await
 				.unwrap()
 				.unwrap()
@@ -2291,7 +2285,7 @@ mod tests {
 				assert!(media.is_some(), "listed segment {} must have media", row.segment);
 			}
 			let mut cursor = rendition.segments();
-			let segment = tokio::time::timeout(Duration::from_secs(5), cursor.next())
+			let segment = moq_clock::timeout(Duration::from_secs(5), cursor.next())
 				.await
 				.expect("a live recording produces a media segment")
 				.unwrap();
@@ -2313,21 +2307,21 @@ mod tests {
 		media.write(frame(2_000_000, true)).unwrap();
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.playable()).await;
 
 		// A clean finish stops the open segment and ends the records.
 		media.finish().unwrap();
 		catalog.finish().unwrap();
 
-		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+		let deadline = moq_clock::now() + Duration::from_secs(5);
 		let manifest = loop {
 			let manifest = broadcaster.manifest(None).unwrap().expect("manifest renders");
 			if manifest.contains(" type=\"static\"") {
 				break manifest;
 			}
-			assert!(tokio::time::Instant::now() < deadline, "manifest never turned static");
-			tokio::time::sleep(Duration::from_millis(50)).await;
+			assert!(moq_clock::now() < deadline, "manifest never turned static");
+			moq_clock::sleep(Duration::from_millis(50)).await;
 		};
 		// The trailing segment holds one frame that nothing bounds, so it lasts no time. HLS
 		// lists it, but a SegmentTimeline entry at the presentation end would never be
@@ -2361,9 +2355,9 @@ mod tests {
 		}
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
-		let _ = tokio::time::timeout(Duration::from_secs(5), rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), rendition.playable()).await;
 
 		let playlist = rendition.snapshot();
 		assert_eq!(numbers(&playlist), [0, 1, 2]);
@@ -2406,11 +2400,11 @@ mod tests {
 		audio_write(4_000_000);
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let video_rendition = broadcaster.rendition(Kind::Video, "video0").expect("video discovered");
 		let audio_rendition = broadcaster.rendition(Kind::Audio, "audio0").expect("audio discovered");
-		let _ = tokio::time::timeout(Duration::from_secs(5), video_rendition.playable()).await;
-		let _ = tokio::time::timeout(Duration::from_secs(5), audio_rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), video_rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), audio_rendition.playable()).await;
 
 		// Both playlists list the same segment numbers over the same spans.
 		let video_playlist = video_rendition.snapshot();
@@ -2455,7 +2449,7 @@ mod tests {
 		media.write(frame(3_000_000, false)).unwrap();
 
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
-		let _ = tokio::time::timeout(Duration::from_secs(5), broadcaster.ready()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
 		let rendition = broadcaster
 			.rendition(Kind::Video, "video0")
 			.expect("rendition discovered");
@@ -2468,7 +2462,7 @@ mod tests {
 		catalog.finish().unwrap();
 
 		let mut listed = Vec::new();
-		while let Some(segment) = tokio::time::timeout(Duration::from_secs(5), segments.next())
+		while let Some(segment) = moq_clock::timeout(Duration::from_secs(5), segments.next())
 			.await
 			.expect("the cursor drains without parking")
 			.unwrap()
@@ -2715,7 +2709,7 @@ mod tests {
 		settle().await;
 
 		let (_renditions, rendition) = export(&upstream, &video_config());
-		let _ = tokio::time::timeout(Duration::from_secs(1), rendition.playable()).await;
+		let _ = moq_clock::timeout(Duration::from_secs(1), rendition.playable()).await;
 		let served = rendition.listed_segment(0).await.unwrap();
 		if let Some(served) = &served {
 			assert!(
@@ -2733,7 +2727,7 @@ mod tests {
 		// that happens to be unreadable.
 		let fresh = crate::resolved(&origin, "live").await;
 		let (_renditions, rendition) = export(&fresh, &video_config());
-		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+		moq_clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the new publisher's records arrive");
 		let served = rendition
@@ -2792,7 +2786,7 @@ mod tests {
 		config.broadcast = Some(moq_net::path::Relative::new("media").unwrap());
 
 		let (_renditions, rendition) = export(&upstream, &config);
-		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+		moq_clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the records reach the rendition");
 
@@ -2819,7 +2813,7 @@ mod tests {
 		// Control: an export started after the takeover does serve the new publisher's media.
 		let fresh = crate::resolved(&origin, "live").await;
 		let (_renditions, rendition) = export(&fresh, &config);
-		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+		moq_clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the records reach the fresh rendition");
 		let served = rendition
@@ -2848,12 +2842,12 @@ mod tests {
 	}
 
 	async fn until_finished(rendition: &Rendition) {
-		let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+		let deadline = moq_clock::now() + Duration::from_secs(5);
 		loop {
 			if rendition.snapshot().finished {
 				return;
 			}
-			assert!(tokio::time::Instant::now() < deadline, "the playlist did not end");
+			assert!(moq_clock::now() < deadline, "the playlist did not end");
 			tokio::task::yield_now().await;
 		}
 	}
@@ -2921,7 +2915,7 @@ mod tests {
 		settle().await;
 		let (_renditions, rendition) = export(&test.upstream, &test.config);
 		old_media.announce(sibling_route(10)).unwrap();
-		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+		moq_clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the records reach the rendition");
 		let served = rendition
@@ -2949,7 +2943,7 @@ mod tests {
 		// A publisher serving the path afterwards, with records written for it, is never bound.
 		let (new_media, new_track) = test.media(NEW, 3, 6_000_000);
 		new_media.announce(sibling_route(11)).unwrap();
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		let snapshot = rendition.snapshot();
 		assert_eq!(snapshot.segments.len(), before, "nothing of the replacement is listed");
 		assert!(snapshot.finished);
@@ -2970,14 +2964,14 @@ mod tests {
 		let (media, _track) = test.media(KEYFRAME, 0, 0);
 		settle().await;
 		let (renditions, rendition) = export(&test.upstream, &test.config);
-		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+		moq_clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the records reach the rendition");
 
 		// The sibling is unannounced, so the segment waits for its media broadcast.
 		let mut segment = std::pin::pin!(rendition.listed_segment(0));
 		assert!(
-			tokio::time::timeout(Duration::from_millis(10), segment.as_mut())
+			moq_clock::timeout(Duration::from_millis(10), segment.as_mut())
 				.await
 				.is_err()
 		);
@@ -3007,7 +3001,7 @@ mod tests {
 		settle().await;
 
 		let (_renditions, rendition) = export(&test.upstream, &test.config);
-		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+		moq_clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the records reach the rendition");
 		let served = rendition
@@ -3032,7 +3026,7 @@ mod tests {
 		settle().await;
 		let (_renditions, rendition) = export(&test.upstream, &test.config);
 		old_media.announce(sibling_route(10)).unwrap();
-		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+		moq_clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the records reach the rendition");
 		assert!(rendition.listed_segment(0).await.unwrap().is_some());
@@ -3044,7 +3038,7 @@ mod tests {
 
 		let (new_media, new_track) = test.media(NEW, 3, 6_000_000);
 		new_media.announce(sibling_route(11)).unwrap();
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		let snapshot = rendition.snapshot();
 		assert_eq!(snapshot.segments.len(), before, "only the old rows remain listed");
 		assert!(snapshot.finished, "the playlist ended with its sibling");
@@ -3070,13 +3064,13 @@ mod tests {
 		settle().await;
 		let (_renditions, rendition) = export(&test.upstream, &test.config);
 		media.announce(sibling_route(10)).unwrap();
-		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+		moq_clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the records reach the rendition");
 
 		let mut cursor = rendition.segments();
 		loop {
-			match tokio::time::timeout(Duration::from_secs(1), cursor.next()).await {
+			match moq_clock::timeout(Duration::from_secs(1), cursor.next()).await {
 				Ok(Ok(Some(_))) => continue,
 				Err(_) => break,
 				other => panic!(
@@ -3088,7 +3082,7 @@ mod tests {
 
 		// Only the sibling broadcast goes: its records stay quiet.
 		drop(media);
-		let end = tokio::time::timeout(Duration::from_secs(5), cursor.next())
+		let end = moq_clock::timeout(Duration::from_secs(5), cursor.next())
 			.await
 			.expect("the cursor wakes when its sibling ends")
 			.unwrap();
@@ -3107,7 +3101,7 @@ mod tests {
 		let (media, _track) = test.media(OLD, 0, 0);
 		settle().await;
 		let (_renditions, rendition) = export(&test.upstream, &test.config);
-		tokio::time::timeout(Duration::from_secs(5), rendition.playable())
+		moq_clock::timeout(Duration::from_secs(5), rendition.playable())
 			.await
 			.expect("the catalog's rows are listed before the sibling resolves");
 
@@ -3137,7 +3131,7 @@ mod tests {
 
 		// The catalog drops the rendition: its cursor must run dry rather than park.
 		renditions.sync(&upstream, &moq_mux::catalog::hang::Catalog::default());
-		let ended = tokio::time::timeout(Duration::from_secs(5), segments.next())
+		let ended = moq_clock::timeout(Duration::from_secs(5), segments.next())
 			.await
 			.expect("a removed rendition's cursor ends instead of parking")
 			.unwrap();
@@ -3162,7 +3156,7 @@ mod tests {
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 
 		let mut renditions = broadcaster.renditions();
-		let added = tokio::time::timeout(Duration::from_secs(5), renditions.next())
+		let added = moq_clock::timeout(Duration::from_secs(5), renditions.next())
 			.await
 			.expect("a rendition is discovered");
 		let Ok(Some(renditions::Event::Added(_rendition))) = added else {
@@ -3172,7 +3166,7 @@ mod tests {
 		// The cursor and the handed-out rendition both outlive the broadcaster.
 		drop(broadcaster);
 
-		let next = tokio::time::timeout(Duration::from_secs(5), renditions.next())
+		let next = moq_clock::timeout(Duration::from_secs(5), renditions.next())
 			.await
 			.expect("the cursor resolves after the broadcaster drops");
 		assert!(
@@ -3181,7 +3175,7 @@ mod tests {
 		);
 
 		// ...and the cursor then reaches a terminal state rather than parking.
-		let ended = tokio::time::timeout(Duration::from_secs(5), renditions.next())
+		let ended = moq_clock::timeout(Duration::from_secs(5), renditions.next())
 			.await
 			.expect("the cursor terminates after the broadcaster drops");
 		assert!(matches!(ended, Err(crate::Error::IncompleteRecording)));
@@ -3208,7 +3202,7 @@ mod tests {
 		let broadcaster = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
 
 		let mut renditions = broadcaster.renditions();
-		let rendition = match tokio::time::timeout(Duration::from_secs(5), renditions.next())
+		let rendition = match moq_clock::timeout(Duration::from_secs(5), renditions.next())
 			.await
 			.expect("a rendition is discovered")
 			.unwrap()
@@ -3222,7 +3216,7 @@ mod tests {
 		let mut segments = rendition.segments();
 		assert!(segments.init().await.unwrap().is_some(), "init is buildable");
 
-		let first = tokio::time::timeout(Duration::from_secs(5), segments.next())
+		let first = moq_clock::timeout(Duration::from_secs(5), segments.next())
 			.await
 			.expect("first segment finalizes")
 			.unwrap()
@@ -3242,7 +3236,7 @@ mod tests {
 		drop((catalog, media));
 		broadcast.close();
 
-		let end = tokio::time::timeout(Duration::from_secs(5), segments.next())
+		let end = moq_clock::timeout(Duration::from_secs(5), segments.next())
 			.await
 			.expect("segment cursor resolves after the source is lost");
 		assert!(
@@ -3252,7 +3246,7 @@ mod tests {
 		);
 
 		// The renditions cursor also fails when the source closes abruptly.
-		let ended = tokio::time::timeout(Duration::from_secs(5), renditions.next())
+		let ended = moq_clock::timeout(Duration::from_secs(5), renditions.next())
 			.await
 			.expect("renditions cursor resolves");
 		assert!(ended.is_err(), "an abrupt broadcast close fails the renditions cursor");
@@ -3376,7 +3370,7 @@ mod tests {
 				if snapshot.segments.last().is_some_and(|s| s.segment >= last) {
 					return snapshot;
 				}
-				tokio::time::sleep(Duration::from_millis(10)).await;
+				moq_clock::sleep(Duration::from_millis(10)).await;
 			}
 			panic!("{name} never listed segment {last}");
 		}
@@ -3388,7 +3382,7 @@ mod tests {
 				if snapshot.finished {
 					return snapshot;
 				}
-				tokio::time::sleep(Duration::from_millis(10)).await;
+				moq_clock::sleep(Duration::from_millis(10)).await;
 			}
 			panic!("{name} never ended");
 		}
@@ -3403,7 +3397,7 @@ mod tests {
 		async fn drain(&self, name: &str) -> (Vec<u64>, crate::Result<()>) {
 			let mut segments = self.rendition(name).segments();
 			let mut drained = Vec::new();
-			let end = tokio::time::timeout(Duration::from_secs(5), async {
+			let end = moq_clock::timeout(Duration::from_secs(5), async {
 				loop {
 					match segments.next().await {
 						Ok(Some(segment)) => drained.push(segment.segment),
@@ -3444,7 +3438,7 @@ mod tests {
 				assert!(matches!(err, crate::Error::RecordsFailed { .. }), "{err}");
 				return err;
 			}
-			tokio::time::sleep(Duration::from_millis(10)).await;
+			moq_clock::sleep(Duration::from_millis(10)).await;
 		}
 		panic!("{} never failed", rendition.name);
 	}
@@ -3564,7 +3558,7 @@ mod tests {
 		let broken = broadcaster.rendition(Kind::Video, "video1").unwrap();
 		for rendition in [&healthy, &broken] {
 			while rendition.snapshot().segments.len() < 3 {
-				tokio::time::sleep(Duration::from_millis(10)).await;
+				moq_clock::sleep(Duration::from_millis(10)).await;
 			}
 		}
 		let before = broadcaster.manifest(None).unwrap().expect("both renditions are listed");
@@ -3592,11 +3586,11 @@ mod tests {
 		let (track, video1) = test.publish("video1");
 		let rendition = test.rendition("video1");
 		let pending = tokio::spawn(async move { rendition.playlist(None).await });
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		moq_clock::sleep(Duration::from_secs(1)).await;
 		assert!(!pending.is_finished(), "nothing is listed yet");
 
 		cut(track, video1);
-		let answer = tokio::time::timeout(Duration::from_secs(5), pending).await;
+		let answer = moq_clock::timeout(Duration::from_secs(5), pending).await;
 		let err = answer.expect("the failure wakes the request").unwrap().unwrap_err();
 		assert!(matches!(err, crate::Error::RecordsFailed { .. }), "{err}");
 	}
@@ -3622,7 +3616,7 @@ mod tests {
 		let test = Records::new();
 		// A handler keeps the unpublished records' requests waiting rather than refused.
 		let _handler = test.broadcast.requests();
-		tokio::time::sleep(Duration::from_secs(60)).await;
+		moq_clock::sleep(Duration::from_secs(60)).await;
 		assert!(!test.rendition("video0").snapshot().finished);
 
 		test.broadcast.close();

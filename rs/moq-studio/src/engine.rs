@@ -632,7 +632,7 @@ mod tests {
 			.await
 			.expect("the studio starts");
 
-		let broadcast = tokio::time::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
+		let broadcast = moq_clock::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
 			.await
 			.expect("the relay routes the program")
 			.expect("broadcast");
@@ -649,7 +649,7 @@ mod tests {
 			.expect("video decoder");
 		// The canvas is black until the color source delivers its first
 		// picture, so wait for the composed one rather than take the first.
-		tokio::time::timeout(TIMEOUT, async {
+		moq_clock::timeout(TIMEOUT, async {
 			loop {
 				let frame = match decoder.read().await.expect("decode") {
 					Some(moq_video::decode::Read::Frame(frame)) => frame,
@@ -688,7 +688,7 @@ mod tests {
 		let mut decoder = moq_audio::decode::Consumer::new(&broadcast, config, audio.clone(), options)
 			.await
 			.expect("audio decoder");
-		tokio::time::timeout(TIMEOUT, async {
+		moq_clock::timeout(TIMEOUT, async {
 			loop {
 				match decoder.read().await.expect("decode") {
 					Some(moq_audio::decode::Read::Frame(_)) => return,

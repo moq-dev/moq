@@ -16,8 +16,15 @@ import { Milli, Nano } from "@moq/clock";
 import * as Moq from "@moq/net";
 import * as Publish from "@moq/publish";
 import { Effect, Signal } from "@moq/signals";
-import type { Fault, FixtureState } from "./contract";
-import { KEYFRAME_INTERVAL_MS, OFFSET_STEPS, SAMPLE_RATE } from "./contract";
+import type { AudioCodec, Fault, FixtureState } from "./contract";
+import {
+	ALT_AUDIO,
+	CHANGED_SAMPLE_RATE,
+	FIXTURE_EVENT,
+	KEYFRAME_INTERVAL_MS,
+	OFFSET_STEPS,
+	SAMPLE_RATE,
+} from "./contract";
 import * as Pattern from "./pattern";
 
 /** Cap the encoder rather than letting it track a bandwidth estimate, so runs are comparable. */
@@ -31,11 +38,6 @@ const SCHEDULE_AHEAD = 2; // seconds
 
 /** Peak amplitude of the tone. Low enough to leave Opus headroom, high enough to dominate noise. */
 const AMPLITUDE = 0.5;
-
-// A canvas capture track is a MediaStreamTrack with requestFrame(); the publish types describe a
-// getUserMedia track, whose settings a canvas track does not carry. Only the MediaStreamTrack half
-// is ever touched at runtime.
-type CanvasSource = Publish.Video.StreamTrack & Pick<CanvasCaptureMediaStreamTrack, "requestFrame">;
 
 /**
  * A running fixture publisher.
@@ -54,6 +56,10 @@ export class Fixture {
 	#timer: number | undefined;
 	readonly #canvas: HTMLCanvasElement;
 	readonly #video: Publish.Video.Encoder;
+	readonly #broadcast: Publish.Broadcast;
+	readonly #audioCapture: Publish.Audio.Capture;
+	readonly #audioEncoder: Publish.Audio.Encoder;
+	readonly #alt = new Signal<Publish.Audio.Encoder | undefined>(undefined);
 	#generation = 0;
 
 	constructor(
@@ -64,12 +70,14 @@ export class Fixture {
 			fault,
 			versions,
 			generation = 0,
+			audioCodec = "opus",
 		}: {
 			url: string;
 			name: string;
 			fault: Fault;
 			versions?: string[];
 			generation?: number;
+			audioCodec?: AudioCodec;
 		},
 	) {
 		this.#generation = generation;
@@ -87,8 +95,16 @@ export class Fixture {
 		// captureStream(0) never samples on its own: every frame comes from an explicit
 		// requestFrame(), which is what ties the emitted frames to the pattern clock.
 		const stream = canvas.captureStream(0);
-		const videoTrack = stream.getVideoTracks()[0] as unknown as CanvasSource;
+		// The publish types describe a getUserMedia track, whose settings a canvas track does not carry.
+		// Only the MediaStreamTrack half is ever touched at runtime.
+		const videoTrack = stream.getVideoTracks()[0] as unknown as Publish.Video.StreamTrack;
 		this.#signals.cleanup(() => videoTrack.stop());
+		// The spec puts requestFrame() on the track, which Chromium follows; Firefox has it on the
+		// stream instead.
+		const capturing = stream.getVideoTracks()[0] as Partial<CanvasCaptureMediaStreamTrack>;
+		const requestFrame = capturing.requestFrame
+			? () => capturing.requestFrame?.()
+			: () => (stream as unknown as { requestFrame(): void }).requestFrame();
 
 		this.#audio = new AudioContext({ sampleRate: SAMPLE_RATE, latencyHint: "interactive" });
 		this.#signals.cleanup(() => void this.#audio.close());
@@ -114,6 +130,7 @@ export class Fixture {
 			name: Moq.Path.from(name),
 			display: capture.out.display,
 		});
+		this.#broadcast = broadcast;
 		this.#signals.cleanup(() => broadcast.close());
 
 		const video = new Publish.Video.Encoder("video", {
@@ -149,14 +166,18 @@ export class Fixture {
 			source: { track: audioTrack, kind: "music" },
 			channelCount: 1,
 		});
+		this.#audioCapture = audioCapture;
 		this.#signals.cleanup(() => audioCapture.close());
 
 		const audio = new Publish.Audio.Encoder("audio", {
 			broadcast,
 			capture: audioCapture,
 			enabled: true,
+			codec: audioCodec,
 		});
+		this.#audioEncoder = audio;
 		this.#signals.cleanup(() => audio.close());
+		this.#signals.cleanup(() => this.#alt.peek()?.close());
 
 		// The tone and the picture share this clock, so neither can start until the audio graph runs.
 		// Without the permissive launch flags that takes a real gesture, and `resume()` on a
@@ -169,7 +190,7 @@ export class Fixture {
 			const start = this.#audio.currentTime + 0.2;
 			oscillator.start(start);
 			this.#runTone(oscillator, start, fault);
-			this.#runPicture(ctx, videoTrack, start, fault);
+			this.#runPicture(ctx, requestFrame, start, fault);
 		};
 		const unlock = () => void this.#audio.resume().catch(() => {});
 
@@ -199,8 +220,25 @@ export class Fixture {
 				audioActive: effect.get(audio.out.active),
 				encodedFrames: effect.get(video.out.stats).frames,
 				videoEnabled: effect.get(video.out.catalog)?.enabled !== false,
+				audio: Object.fromEntries(
+					[audio, effect.get(this.#alt)].flatMap((encoder) => {
+						const config = encoder && effect.get(encoder.out.catalog);
+						return config
+							? [
+									[
+										encoder.name,
+										{
+											codec: config.codec,
+											sampleRate: config.sampleRate,
+											numberOfChannels: config.numberOfChannels,
+										},
+									],
+								]
+							: [];
+					}),
+				),
 			};
-			host.dataset.interopFixture = JSON.stringify(state);
+			console.debug(FIXTURE_EVENT + JSON.stringify(state));
 		});
 	}
 
@@ -224,7 +262,7 @@ export class Fixture {
 
 	// Paint and request capture per pattern tick. Capture and encoding can finish later. The counter
 	// comes from the audio clock, so a coalesced tick skips a frame instead of drifting the two apart.
-	#runPicture(ctx: CanvasRenderingContext2D, track: CanvasSource, start: number, fault: Fault): void {
+	#runPicture(ctx: CanvasRenderingContext2D, requestFrame: () => void, start: number, fault: Fault): void {
 		let painted = -1;
 
 		const tick = () => {
@@ -236,7 +274,7 @@ export class Fixture {
 			painted = frameId;
 
 			Pattern.paint(ctx, fault === "frozen-video" ? 0 : frameId, this.#generation);
-			track.requestFrame();
+			requestFrame();
 			this.#frameId.set(frameId);
 		};
 
@@ -266,10 +304,47 @@ export class Fixture {
 		this.#canvas.height = Pattern.HEIGHT * 2;
 	}
 
+	/** Switch the audio rendition from Opus to AAC, which re-mints its track. */
+	changeAudioCodec(): void {
+		this.#audioEncoder.codec.set("aac");
+	}
+
+	/** Rebuild the capture graph at a rate Opus carries natively, which re-mints the audio track. */
+	changeAudioRate(): void {
+		this.#audioCapture.sampleRate.set(CHANGED_SAMPLE_RATE);
+	}
+
+	/** Capture the tone in stereo, which re-mints the audio track. The tone is the same in both channels. */
+	changeAudioChannels(): void {
+		this.#audioCapture.channelCount.set(2);
+	}
+
+	/**
+	 * Publish {@link ALT_AUDIO} beside the main rendition, encoding the same capture at twice the
+	 * bitrate, so a player has a second rendition of the same tone to switch to.
+	 */
+	addAudioRendition(): void {
+		if (this.#alt.peek()) return;
+		this.#alt.set(
+			new Publish.Audio.Encoder(ALT_AUDIO, {
+				broadcast: this.#broadcast,
+				capture: this.#audioCapture,
+				enabled: true,
+				codec: { mime: "opus", bitrate: 64_000 },
+			}),
+		);
+	}
+
+	/** Stop publishing {@link ALT_AUDIO}, dropping it from the catalog. */
+	removeAudioRendition(): void {
+		this.#alt.peek()?.close();
+		this.#alt.set(undefined);
+	}
+
 	/** Stop publishing and release the capture, audio graph, and session. */
 	close(): void {
 		this.#signals.close();
 		this.host.replaceChildren();
-		delete this.host.dataset.interopFixture;
+		console.debug(`${FIXTURE_EVENT}null`);
 	}
 }
