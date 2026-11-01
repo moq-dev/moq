@@ -194,7 +194,10 @@ def main():
                 results[variant]["net_clean"].append(check(tree, "moq-net", f"clean-{round_number}"))
                 path = tree / "rs/moq-net/src/model/broadcast.rs"
                 original = path.read_text()
-                path.write_text(original + f"\n// edit round {round_number}\n")
+                edited = original.replace("predicate guaranteed a request", f"spike edit {round_number}: request predicate guaranteed an entry")
+                if edited == original:
+                    raise RuntimeError("body edit missed its target")
+                path.write_text(edited)
                 try:
                     results[variant]["net_edit"].append(check(tree, "moq-net", f"edit-{round_number}"))
                 finally:

@@ -51,11 +51,12 @@ Three rounds rotate the variant order. Each round measures wall time for:
    kio/async`, exposing the proc-macro dependency cost.
 2. A fresh-target `cargo check --lib -p moq-net --no-default-features --features
    moq-net/async`, including its dependency graph.
-3. The same moq-net command after a comment edit in `model/broadcast.rs`, with
+3. The same moq-net command after an assertion-message edit in `model/broadcast.rs`, with
    incremental compilation enabled. This measures a recompilation of the changed
-   module, not an idle Cargo check or an algorithm change.
+   method body, not an idle Cargo check, a comment-only edit, or an algorithm change.
 
-The runner disables compiler wrappers and custom Rust flags, uses two Cargo
+The runner invokes Cargo/rustc/rustdoc from the pinned toolchain's sysroot,
+disables compiler wrappers, shell startup injection, and custom Rust flags, uses two Cargo
 jobs for every variant, and records all samples plus toolchain and source SHA in
 `results.json`. OS file caches remain warm, and host contention can affect wall
 time. This small spike measures generator overhead for five wrappers, not the
