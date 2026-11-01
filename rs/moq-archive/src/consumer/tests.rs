@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_clock::{sleep, timeout};
+use kio::clock::{sleep, timeout};
 use moq_net::track::{Order, Position, Subscription};
 use moq_net::{Timescale, Timestamp, broadcast, group, track};
 use object_store::ObjectStoreExt;
