@@ -102,10 +102,11 @@
 //! fill, so asking, updating, dropping, and settling must cost each reader the same per
 //! run, and a cost that grows with the audience or the runs beyond that shows up as a slope.
 //!
-//! `track_range_filling` has one reader fill disjoint ranges below where the feed starts,
-//! swept over how many ranges and how many groups each spans, the filling counterpart of
-//! `track_range_serving`: each group filled must cost the same, so a walk over the ranges or
-//! the groups of each fill shows up as a slope.
+//! `track_range_filling` has readers fill disjoint ranges below where the feed starts, the
+//! filling counterpart of `track_range_serving`: one reader swept over how many ranges and how
+//! many groups each spans, then the readers sharing those fills swept over the ranges. Each
+//! group filled must cost each reader the same, so a walk over the ranges, the groups of each
+//! fill, or the audience shows up as a slope.
 //!
 //! Run with `cargo bench -p moq-net --bench track`.
 
@@ -1898,18 +1899,18 @@ fn bench_fill(c: &mut Criterion) {
 	group.finish();
 }
 
-/// One reader whose disjoint ranges all fall below where the feed starts, and the handler
-/// that answers its fills; see [`bench_range_filling`].
+/// Readers whose disjoint ranges all fall below where the feed starts, and the handler that
+/// answers the fills they share; see [`bench_range_filling`].
 struct RangeFills {
 	_broadcast: broadcast::Producer,
 	_track: track::Producer,
 	dynamic: track::Requests,
-	reader: track::Subscriber,
+	readers: Vec<track::Subscriber>,
 	groups: u64,
 }
 
 impl RangeFills {
-	fn new(ranges: u64, span: u64) -> Self {
+	fn new(readers: usize, ranges: u64, span: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let mut track = broadcast.create_track("bench", timed()).unwrap();
 		let dynamic = track.requests();
@@ -1928,24 +1929,23 @@ impl RangeFills {
 				let first = i * (span + 1);
 				track::Range::groups(first..first + span)
 			}));
-		let reader = track.subscribe(subscription);
+		let readers = (0..readers).map(|_| track.subscribe(subscription.clone())).collect();
 		Self {
 			_broadcast: broadcast,
 			_track: track,
 			dynamic,
-			reader,
+			readers,
 			groups: ranges * span,
 		}
 	}
 
-	/// The reader asks for its misses, the handler accepts every group of every fill, and the
-	/// reader drains what they filled.
+	/// The readers ask for their misses, the handler accepts every group of every fill once,
+	/// and each reader drains what they filled.
 	fn run(&mut self) {
 		let waiter = kio::Waiter::noop();
-		assert!(
-			self.reader.poll_recv_group(&waiter).is_pending(),
-			"everything is a miss"
-		);
+		for reader in &mut self.readers {
+			assert!(reader.poll_recv_group(&waiter).is_pending(), "everything is a miss");
+		}
 		while let Poll::Ready(Ok(fill)) = self.dynamic.poll_requested_fill(&waiter) {
 			while let Some(sequence) = fill.wanted() {
 				let mut group = fill.accept(sequence, None).unwrap();
@@ -1955,31 +1955,47 @@ impl RangeFills {
 				group.finish().unwrap();
 			}
 		}
-		let mut filled = 0;
-		while let Poll::Ready(Ok(Some(group))) = self.reader.poll_recv_group(&waiter) {
-			black_box(group);
-			filled += 1;
+		for reader in &mut self.readers {
+			let mut filled = 0;
+			while let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) {
+				black_box(group);
+				filled += 1;
+			}
+			assert_eq!(filled, self.groups);
 		}
-		assert_eq!(filled, self.groups);
 	}
 }
 
-/// One reader filling disjoint ranges below the feed's start, swept over how many ranges and
-/// how many groups each spans. Each group filled must cost the same, so a walk over the ranges
-/// or the groups of each fill shows up as a slope over either axis.
+/// Readers filling disjoint ranges below the feed's start, swept over how many ranges and how
+/// many groups each spans for one reader, then over the ranges and the readers sharing their
+/// fills. Each group filled must cost each reader the same, so a walk over the ranges, the
+/// groups of each fill, or the readers shows up as a slope over that axis.
 fn bench_range_filling(c: &mut Criterion) {
 	let mut group = c.benchmark_group("track_range_filling");
 	group.sample_size(10);
+	let mut sweep = |readers: usize, ranges: u64, span: u64, id: BenchmarkId| {
+		group.throughput(Throughput::Elements(ranges * span * readers as u64));
+		group.bench_function(id, |b| {
+			b.iter_batched_ref(
+				|| RangeFills::new(readers, ranges, span),
+				RangeFills::run,
+				BatchSize::PerIteration,
+			);
+		});
+	};
 	for span in SERVED_SPAN {
 		for ranges in SERVED_RANGES {
-			group.throughput(Throughput::Elements(ranges * span));
-			group.bench_function(BenchmarkId::new(format!("span_{span}"), ranges), |b| {
-				b.iter_batched_ref(
-					|| RangeFills::new(ranges, span),
-					RangeFills::run,
-					BatchSize::PerIteration,
-				);
-			});
+			sweep(1, ranges, span, BenchmarkId::new(format!("span_{span}"), ranges));
+		}
+	}
+	for readers in [8, 64] {
+		for ranges in SERVED_RANGES {
+			sweep(
+				readers,
+				ranges,
+				8,
+				BenchmarkId::new(format!("span_8/{readers}r"), ranges),
+			);
 		}
 	}
 	group.finish();
