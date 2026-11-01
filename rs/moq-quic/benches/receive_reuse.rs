@@ -35,6 +35,9 @@ use common::{Pair, Setup, Sink, ThreadCpu, payload};
 /// Stream data per packet, so a stream of `n` packets spans about `n` datagrams.
 const PACKET: usize = 1100;
 
+/// Packets written between exchanges, about what one socket receive batch carries.
+const BATCH: usize = 64;
+
 /// The most packets one table burst may send across every connection, so the widest sweeps
 /// skip the longest streams rather than buffer hundreds of megabytes.
 const BURST_PACKETS: usize = 1 << 16;
@@ -173,16 +176,39 @@ fn resume(pair: &mut Pair, streams: usize) {
 	settle(pair);
 }
 
-/// Opens and finishes `streams` streams of `packets` packets on every client.
+/// Opens `streams` streams on every client, writes `packets` packets to each a packet per stream
+/// at a time, then finishes them.
+///
+/// The exchange steps every [`BATCH`] packets, so the server takes the burst a receive batch at a
+/// time, as a socket driver does, rather than every datagram before its application runs.
 fn open(pair: &mut Pair, streams: usize, packets: usize) {
-	let data = payload(packets * PACKET);
-	for client in &mut pair.clients {
-		let conn = client.conn();
-		for _ in 0..streams {
-			let id = conn.streams().open(Dir::Uni, Default::default()).expect("stream limit");
-			let mut stream = conn.send_stream(id);
-			assert_eq!(stream.write(&mut data.clone()).unwrap(), data.len());
-			stream.finish().unwrap();
+	let data = payload(PACKET);
+	let ids: Vec<Vec<_>> = pair
+		.clients
+		.iter_mut()
+		.map(|client| {
+			let conn = client.conn();
+			(0..streams)
+				.map(|_| conn.streams().open(Dir::Uni, Default::default()).expect("stream limit"))
+				.collect()
+		})
+		.collect();
+	let mut written = 0;
+	for _ in 0..packets {
+		for (client, ids) in ids.iter().enumerate() {
+			for &id in ids {
+				let mut stream = pair.clients[client].conn().send_stream(id);
+				assert_eq!(stream.write(&mut data.clone()).unwrap(), PACKET);
+				written += 1;
+				if written % BATCH == 0 {
+					pair.step();
+				}
+			}
+		}
+	}
+	for (client, ids) in ids.iter().enumerate() {
+		for &id in ids {
+			pair.clients[client].conn().send_stream(id).finish().unwrap();
 		}
 	}
 }
