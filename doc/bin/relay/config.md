@@ -82,7 +82,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 congestion_control = "delay"         # "delay" (BBR, the default), "loss" (CUBIC), or "none".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
-# keep_alive = "3s"                  # Ping interval; unset derives it from the idle timeout, "0s" disables it. iroh refuses zero and keeps a separate 5s path heartbeat.
+# keep_alive = "3s"                  # Ping interval; unset or "0s" derives it from the idle timeout. iroh keeps a separate 5s path heartbeat.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 134217728           # Whole-connection window, in bytes. Default (128 MiB).
@@ -106,10 +106,11 @@ sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).
 QUIC uses the smaller of the two endpoints' values, so this also bounds the
 other end.
 
-Leave `keep_alive` unset to derive it from the idle timeout both ends settle
+Leave `keep_alive` unset or set it to `"0s"` to derive it from the idle timeout both ends settle
 on: 3/10 of it, so 3s against the 10s default, and shorter against a peer that
 advertises a shorter `max_idle_timeout`. Changing `idle_timeout` then needs no
-matching change here. Set it only for a NAT binding that expires sooner than
+matching change here. If neither end sets an idle timeout, pings still run every
+9s. Set it only for a NAT binding that expires sooner than
 the idle timeout. A value no shorter than the negotiated idle timeout could
 never keep the connection up, so it is capped at the derived interval. iroh
 cannot see the peer's timeout, so it derives from the local `idle_timeout`.
