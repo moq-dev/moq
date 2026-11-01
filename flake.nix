@@ -158,9 +158,6 @@
             cargo-semver-checks
             cargo-deny
             cargo-bloat
-            # Per-crate feature matrices (`just rs features`), where workspace
-            # unification would otherwise hide a broken single-crate build.
-            cargo-hack
             cargo-nextest
             cargo-codspeed
             # Source-based test coverage (`just rs coverage`).
@@ -590,8 +587,8 @@
 
           runner-userns-profile = import ./nix/runner/unshare.nix { inherit pkgs; };
 
-          # The nightly `just rs send-depth` proves native Send futures on.
-          # Pinned so a toolchain release alone never fails the merge gate;
+          # Nightly's `just rs send-depth` proves native Send futures on it.
+          # Pinned so a toolchain release alone never fails that job;
           # bump it on purpose, like the stable toolchain above. Kept out of
           # the dev shell, which every CI job downloads.
           rust-nightly = pkgs.rust-bin.nightly."2026-10-18".minimal;

@@ -116,9 +116,6 @@ declare -A scope=(
     [justfile]=''
     [gh]=''
 )
-# rs's crates again, each compiled alone at its feature extremes: its own
-# module because one clippy pass per package outgrows a hosted job beside rs.
-scope[rs_shapes]=${scope[rs]}
 
 # Report each native suite from the same impact map, before any toolchain is
 # installed. Rust dependencies can break external consumers too, so include
@@ -154,7 +151,6 @@ declare -A tools=(
     [workers]='bun'
     [moq_sh]='dash'
     [rs]='cargo jq'
-    [rs_shapes]='cargo cargo-hack jq'
     [bench]='cargo'
     [carla]='uv'
     [drafts]='bun kramdown-rfc xml2rfc'
@@ -187,22 +183,20 @@ verb=$action
 # The modules whose run compiles Rust through Cargo, so CI restores the Rust
 # build cache only when one is selected. The bindings build moq-ffi.
 declare -A compiles=(
-    [check]='rs rs_shapes bench py kt go dart c cpp obs_compile'
+    [check]='rs bench py kt go dart c cpp obs_compile'
     [fix]='rs'
 )
 
 # Lanes start in this order, so the slowest come first. dart runs alone (see
 # below), so it waits for the rest.
 case "$action" in
-    check | ci) modules=(py rs rs_shapes c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
+    check | ci) modules=(py rs c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
     fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
 esac
 
 # Modules that share mutable state run in one lane, in module order; every
 # other module is a lane of its own, and lanes run concurrently.
 declare -A lane=(
-    # Both build the workspace in one target directory.
-    [rs_shapes]=rs
     # `bun install` relinks the root workspace's packages even when nothing
     # changed, so a concurrent install or import of them fails.
     [js]=bun
@@ -290,8 +284,6 @@ fi
 # rs selects crates from the same list, or the whole workspace.
 rs_list=$changed
 [[ -z "$all" ]] || rs_list=--all
-rs_feature_scope=
-[[ "$action" != check ]] || rs_feature_scope=changed
 
 # large_files diffs against the same base, or checks every file.
 large_base=$base
@@ -317,12 +309,9 @@ step() {
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
-        # The check keeps docs and target-specific lints; the test phase
-        # enforces default-feature clippy without a second compile.
-        # Locally, the feature-contract checks skip the dependents of the
-        # changed crates; the landing worker keeps them (see sh/rs/select.sh).
-        check:rs) RS_FEATURE_SCOPE=$rs_feature_scope just rs lint-changed "$rs_list" ;;
-        check:rs_shapes) RS_FEATURE_SCOPE=$rs_feature_scope just rs feature-shapes-changed "$rs_list" ;;
+        # The check keeps docs; the test phase enforces default-feature clippy
+        # without a second compile.
+        check:rs) just rs lint-changed "$rs_list" ;;
         check:bench)
             python3 bench/compare.test.py
             bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
