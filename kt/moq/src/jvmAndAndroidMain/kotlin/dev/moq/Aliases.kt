@@ -55,7 +55,7 @@ typealias AnnounceConsumer = uniffi.moq.MoqAnnounceConsumer
 typealias AnnounceConfig = uniffi.moq.MoqAnnounceConfig
 /** Follows a specific broadcast path across the publisher instances that serve it. */
 typealias Following = uniffi.moq.MoqFollowing
-/** A route over a prefix: its origin-relative path, wildcard captures, and route metadata. */
+/** A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata. */
 typealias Announce = uniffi.moq.MoqAnnounce
 /**
  * What an [AnnounceConsumer] yields: [AnnounceEventStart], [AnnounceEventUpdate],

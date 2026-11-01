@@ -2537,9 +2537,13 @@ class FfiConverterMoqVideoProperties {
 
 class MoqAnnounce {
   final String prefix;
-  final List<String>? captures;
+  final List<String> captures;
   final MoqRoute route;
-  MoqAnnounce({required this.prefix, this.captures, required this.route});
+  MoqAnnounce({
+    required this.prefix,
+    required this.captures,
+    required this.route,
+  });
 }
 
 class FfiConverterMoqAnnounce {
@@ -2554,7 +2558,7 @@ class FfiConverterMoqAnnounce {
     );
     final prefix = prefix_lifted.value;
     new_offset += prefix_lifted.bytesRead;
-    final captures_lifted = FfiConverterOptionalSequenceString.read(
+    final captures_lifted = FfiConverterSequenceString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final captures = captures_lifted.value;
@@ -2573,7 +2577,7 @@ class FfiConverterMoqAnnounce {
   static RustBuffer lower(MoqAnnounce value) {
     final total_length =
         FfiConverterString.allocationSize(value.prefix) +
-        FfiConverterOptionalSequenceString.allocationSize(value.captures) +
+        FfiConverterSequenceString.allocationSize(value.captures) +
         FfiConverterMoqRoute.allocationSize(value.route) +
         0;
     final buf = Uint8List(total_length);
@@ -2587,7 +2591,7 @@ class FfiConverterMoqAnnounce {
       value.prefix,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalSequenceString.write(
+    new_offset += FfiConverterSequenceString.write(
       value.captures,
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -2600,7 +2604,7 @@ class FfiConverterMoqAnnounce {
 
   static int allocationSize(MoqAnnounce value) {
     return FfiConverterString.allocationSize(value.prefix) +
-        FfiConverterOptionalSequenceString.allocationSize(value.captures) +
+        FfiConverterSequenceString.allocationSize(value.captures) +
         FfiConverterMoqRoute.allocationSize(value.route) +
         0;
   }
@@ -16622,53 +16626,6 @@ class FfiConverterOptionalSequenceMoqRange {
     }
     buf[0] = 1;
     return FfiConverterSequenceMoqRange.write(
-          value,
-          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
-        ) +
-        1;
-  }
-}
-
-class FfiConverterOptionalSequenceString {
-  static List<String>? lift(RustBuffer buf) {
-    return FfiConverterOptionalSequenceString.read(buf.asUint8List()).value;
-  }
-
-  static LiftRetVal<List<String>?> read(Uint8List buf) {
-    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
-      return LiftRetVal(null, 1);
-    }
-    final result = FfiConverterSequenceString.read(
-      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
-    );
-    return LiftRetVal<List<String>?>(result.value, result.bytesRead + 1);
-  }
-
-  static int allocationSize([List<String>? value]) {
-    if (value == null) {
-      return 1;
-    }
-    return FfiConverterSequenceString.allocationSize(value) + 1;
-  }
-
-  static RustBuffer lower(List<String>? value) {
-    if (value == null) {
-      return toRustBuffer(Uint8List.fromList([0]));
-    }
-    final buf = Uint8List(
-      FfiConverterOptionalSequenceString.allocationSize(value),
-    );
-    FfiConverterOptionalSequenceString.write(value, buf);
-    return toRustBuffer(buf);
-  }
-
-  static int write(List<String>? value, Uint8List buf) {
-    if (value == null) {
-      buf[0] = 0;
-      return 1;
-    }
-    buf[0] = 1;
-    return FfiConverterSequenceString.write(
           value,
           Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
         ) +

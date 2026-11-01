@@ -45,7 +45,7 @@ for try await event in announced {
     }
     // Prefix stays origin-relative; captures reports what * matched.
     print("got broadcast \(announcement.prefix)")
-    print("captures \(announcement.captures ?? [])")
+    print("captures \(announcement.captures)")
 
     let broadcast = try await session.consume.request(path: announcement.prefix)
     let catalog = try await Media.CatalogConsumer.subscribe(broadcast: broadcast)

@@ -3290,7 +3290,7 @@ async fn followed_broadcasts_resolve_siblings_under_the_prefix() {
 		);
 		assert_eq!(
 			announcement.captures,
-			Some(vec![prefix.strip_prefix("a/").unwrap().to_string()]),
+			vec![prefix.strip_prefix("a/").unwrap().to_string()],
 			"the implicit trailing glob captures the suffix beneath the literal prefix"
 		);
 		if prefix == "a/pub" {
@@ -3317,25 +3317,28 @@ async fn followed_broadcasts_resolve_siblings_under_the_prefix() {
 async fn announced_filters_patterns_and_reports_captures() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let consumer = origin.consume();
-	let announced = consumer
-		.announced(MoqAnnounceConfig {
-			prefix: "room".into(),
-			filter: Some("*/chat".into()),
-			hidden: false,
-		})
-		.unwrap();
+	for (filter, captures) in [("*/chat", vec!["alice"]), ("alice/chat", vec![])] {
+		let announced = consumer
+			.announced(MoqAnnounceConfig {
+				prefix: "room".into(),
+				filter: Some(filter.into()),
+				hidden: false,
+			})
+			.unwrap();
 
-	// A claim at `room` could serve a match, but its own name is none, so it is not listed.
-	let _broad = origin.requests("room".into()).unwrap();
+		// A claim at `room` could serve a match, but its own name is none, so it is not listed.
+		let broad = origin.requests("room".into()).unwrap();
+		let chat = create_announced(&origin, "room/alice/chat");
+		let audio = create_announced(&origin, "room/alice/audio");
+		let update = next_announced(&announced).await;
 
-	let chat = create_announced(&origin, "room/alice/chat");
-	let _audio = create_announced(&origin, "room/alice/audio");
-	let update = next_announced(&announced).await;
+		assert_eq!(update.prefix, "room/alice/chat");
+		assert_eq!(update.captures, captures);
 
-	assert_eq!(update.prefix, "room/alice/chat");
-	assert_eq!(update.captures, Some(vec!["alice".into()]));
-
-	chat.close().unwrap();
+		chat.close().unwrap();
+		audio.close().unwrap();
+		broad.cancel();
+	}
 }
 
 /// A `.`-named broadcast is listed only when the config opts in or the prefix names it.

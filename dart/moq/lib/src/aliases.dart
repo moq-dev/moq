@@ -67,7 +67,7 @@ typedef Following = MoqFollowing;
 /// How a broadcast advertises its exact path: its static production cost and publisher epoch.
 typedef AnnounceRoute = MoqAnnounceRoute;
 
-/// A route over a prefix: its origin-relative path, wildcard captures, and route metadata.
+/// A route over a prefix: its origin-relative path, required wildcard captures (empty without wildcards), and route metadata.
 typedef Announce = MoqAnnounce;
 
 /// What an [AnnounceConsumer] yields: [AnnounceEventStart],

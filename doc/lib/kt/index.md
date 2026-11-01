@@ -59,7 +59,7 @@ Moq.connect("https://relay.example.com", ClientConfig(tls = ClientTls(roots = li
             is AnnounceEventTakeover -> event.announce
             else -> return@collect // Update or End
         }
-        // Prefixes stay origin-relative; captures reports what each wildcard matched.
+        // Prefixes stay origin-relative; captures is a list of wildcard matches, empty without wildcards.
         println(announce.captures)
         val broadcast = moq.request(announce.prefix)
         println(catalog(broadcast))

@@ -64,6 +64,7 @@ moq
         AnnounceEventRestart(:final announce) ||
         AnnounceEventTakeover(:final announce):
       print(announce.prefix);
+      // Captures are a list of wildcard matches, empty without wildcards.
       print(announce.captures);
     default:
   }

@@ -236,8 +236,8 @@ impl Following {
 pub struct MoqAnnounce {
 	/// The covered prefix, relative to the origin.
 	pub prefix: String,
-	/// What each wildcard matched. Only full matches are listed, so it is always set.
-	pub captures: Option<Vec<String>>,
+	/// What each wildcard matched, empty when the filter has no wildcards.
+	pub captures: Vec<String>,
 	/// The route serving the prefix: its epoch, hops, and a static cost.
 	pub route: MoqRoute,
 }
@@ -248,7 +248,10 @@ impl From<moq_net::announce::Announce> for MoqAnnounce {
 			prefix: announce.prefix.to_string(),
 			captures: announce
 				.captures
-				.map(|captures| captures.into_iter().map(|capture| capture.to_string()).collect()),
+				.expect("bindings only list full announcement matches")
+				.into_iter()
+				.map(|capture| capture.to_string())
+				.collect(),
 			route: announce.route.into(),
 		}
 	}
