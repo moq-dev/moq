@@ -1970,6 +1970,12 @@ impl Clone for Scope {
 }
 
 impl Scope {
+	/// Whether a [`Meter`] from this scope can count anything, without resolving it: the
+	/// no-op context never does.
+	pub(crate) fn is_tagged(&self) -> bool {
+		self.session.inner.is_some() && self.resolved.is_some()
+	}
+
 	/// The counters for the session's current tier. Skips the registry unless the
 	/// tier changed since the last call, so the per-group path stays cheap.
 	fn counters(&self) -> Option<Arc<TierCounters>> {

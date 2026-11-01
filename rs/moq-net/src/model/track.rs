@@ -6538,10 +6538,10 @@ impl Cursor {
 		})
 	}
 
-	/// Whether a group read in `walk` order would park again at once, with nothing peeked
-	/// or skipped for its owner to take; see [`idle`].
+	/// Whether a group read in `walk` order would park again at once, with nothing
+	/// peeked; see [`idle`].
 	fn parked(&self, walk: idle::Walk, waiter: &kio::Waiter) -> bool {
-		self.peeked.is_none() && self.stale == stats::Content::default() && idle::Idle::parked(&self.idle, walk, waiter)
+		self.peeked.is_none() && idle::Idle::parked(&self.idle, walk, waiter)
 	}
 
 	/// Take the groups skipped since the last call, for the owner to meter.
@@ -7343,10 +7343,14 @@ impl Subscriber {
 			true => idle::Walk::Sequence,
 			false => idle::Walk::Arrival,
 		};
-		// Ahead of the meter: a read that parks again has nothing to count.
+		// Ahead of the meter: a read that parks again counts only what a peek skipped.
 		if let Inner::Plain(cursor) = &self.inner
 			&& cursor.parked(walk, waiter)
 		{
+			if cursor.stale != stats::Content::default() && self.stats.is_tagged() {
+				let meter = self.stats.meter();
+				self.count_stale(&meter);
+			}
 			return Poll::Pending;
 		}
 		let meter = self.stats.meter();
