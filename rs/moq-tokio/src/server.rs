@@ -931,7 +931,7 @@ impl Listener {
 				}
 				let config = opened.config;
 				let protocol = opened.protocol;
-				let session = qmux::Session::accept(opened.channel, config).await?;
+				let session = crate::spawn_qmux(qmux::Session::accept(opened.channel, config).await?);
 				Ok((session, protocol))
 			};
 			let (session, protocol) = within(deadline, handshake).await?;
@@ -1988,7 +1988,7 @@ mod tests {
 			biased;
 			_ = stalled.read_to_end(&mut remaining) => panic!("first handshake ended before second completed"),
 			result = qmux::tcp::connect(addr, { let mut config = qmux::Config::new(qmux::Version::QMux01); config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]); config }) => {
-				result.expect("second handshake completes");
+				let _session = result.expect("second handshake completes");
 			}
 		}
 		task.abort();
@@ -2065,9 +2065,7 @@ mod tests {
 			if allowed {
 				let mut config = qmux::Config::new(qmux::Version::QMux01);
 				config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]);
-				let session = qmux::uds::connect(&path, config)
-					.await
-					.expect("allowed peer negotiates");
+				let session = crate::spawn_qmux(qmux::uds::connect(&path, config).await.expect("allowed peer negotiates"));
 				assert_eq!(session.protocol(), Some("moq-lite-06"));
 			} else {
 				let mut peer = tokio::net::UnixStream::connect(&path).await.unwrap();
@@ -2121,7 +2119,7 @@ mod tests {
 			biased;
 			_ = stalled.read_to_end(&mut remaining) => panic!("first handshake ended before second completed"),
 			result = qmux::uds::connect(&path, { let mut config = qmux::Config::new(qmux::Version::QMux01); config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-06".into()]); config }) => {
-				result.expect("second handshake completes");
+				let _session = result.expect("second handshake completes");
 			}
 		}
 		task.abort();
@@ -2203,8 +2201,8 @@ mod tests {
 		let client = WebSocketStream::from_raw_socket(client, Role::Client, None).await;
 		let server = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
 		(
-			qmux::ws::Upgraded::new(client, ALPN).connect().unwrap(),
-			qmux::ws::Upgraded::new(server, ALPN).accept().unwrap(),
+			crate::spawn_qmux(qmux::ws::Upgraded::new(client, ALPN).connect().unwrap()),
+			crate::spawn_qmux(qmux::ws::Upgraded::new(server, ALPN).accept().unwrap()),
 		)
 	}
 
@@ -2229,9 +2227,11 @@ mod tests {
 		};
 		options.identity = Some(crate::tls::PeerIdentity::from_chain(Vec::new()));
 		let accept = tokio::spawn(crate::websocket::accept(server, options));
-		let client = qmux::ws::Upgraded::new(client, "qmux-01.moq-lite-06")
-			.connect()
-			.unwrap();
+		let client = crate::spawn_qmux(
+			qmux::ws::Upgraded::new(client, "qmux-01.moq-lite-06")
+				.connect()
+				.unwrap(),
+		);
 		let mut setup = client.open_uni(SendOptions::default()).await.unwrap();
 		assert_eq!(setup.write(&[1, 1, 0]).await.unwrap(), 3);
 		setup.finish().unwrap();
@@ -2269,7 +2269,7 @@ mod tests {
 				);
 				options.link.alpn = Some(protocol.into());
 				let accept = tokio::spawn(crate::websocket::accept(server, options));
-				let client = qmux::ws::Upgraded::new(client, protocol).connect().unwrap();
+				let client = crate::spawn_qmux(qmux::ws::Upgraded::new(client, protocol).connect().unwrap());
 				// A single Path parameter, including the empty value: lite uses a
 				// counted parameter bag; IETF uses a u16-sized SETUP option block.
 				let mut bytes = if protocol.contains("moq-lite") {
@@ -2638,11 +2638,13 @@ mod tests {
 
 		let _stalled = tokio::net::TcpStream::connect(addr).await.unwrap();
 		let client = tokio::spawn(async move {
-			let session = qmux::ws::Client::new()
-				.with_protocol("moq-lite-06", &[qmux::Version::QMux01])
-				.connect(&format!("ws://{addr}/"))
-				.await
-				.expect("upgrade");
+			let session = crate::spawn_qmux(
+				qmux::ws::Client::new()
+					.with_protocol("moq-lite-06", &[qmux::Version::QMux01])
+					.connect(&format!("ws://{addr}/"))
+					.await
+					.expect("upgrade"),
+			);
 			let (_session, driver) = moq_net::Client::new()
 				.connect(moq_net::time::Instant::now(), session)
 				.await

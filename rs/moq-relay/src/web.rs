@@ -2442,9 +2442,10 @@ mod tests {
 				None,
 			)
 			.await;
-			let transport = qmux::ws::Upgraded::new(socket, "qmux-01.moq-lite-06")
+			let (transport, driver) = qmux::ws::Upgraded::new(socket, "qmux-01.moq-lite-06")
 				.connect()
 				.unwrap();
+			tokio::spawn(driver);
 			let origin = moq_tokio::origin::spawn();
 			let (session, driver) = moq_net::Client::new()
 				.with_versions("moq-lite-06".parse::<moq_net::Version>().unwrap().into())

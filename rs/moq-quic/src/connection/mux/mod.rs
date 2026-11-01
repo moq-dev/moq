@@ -14,7 +14,7 @@
 
 use std::{collections::VecDeque, num::NonZeroU64, task::Poll};
 
-use bytes::{Buf, Bytes};
+use bytes::{Buf, Bytes, BytesMut};
 use tracing::{debug, trace};
 
 use super::{
@@ -173,6 +173,9 @@ pub struct Connection {
 	events: VecDeque<Event>,
 	/// Draft-00 frames already serialized, one per transport message
 	queued: VecDeque<Bytes>,
+	/// Where records are serialized. Each one handed out is split off, so the allocation is
+	/// reused once the transport drops the records it holds.
+	out: BytesMut,
 }
 
 impl Connection {
@@ -213,6 +216,7 @@ impl Connection {
 			error: None,
 			events: VecDeque::new(),
 			queued: VecDeque::new(),
+			out: BytesMut::new(),
 		}
 	}
 
@@ -334,7 +338,7 @@ impl Connection {
 		if let Some(frame) = self.queued.pop_front() {
 			return Some(frame);
 		}
-		let buf = Bytes::from(self.fill(now)?);
+		let buf = self.fill(now)?;
 		if self.config.version.uses_records() {
 			return Some(buf);
 		}
@@ -449,18 +453,27 @@ impl Connection {
 	}
 
 	/// Serialize the next batch of frames, each counted as acknowledged on the spot
-	fn fill(&mut self, now: Instant) -> Option<Vec<u8>> {
+	fn fill(&mut self, now: Instant) -> Option<Bytes> {
 		if self.close_sent {
 			return None;
 		}
 		let budget = self.budget();
-		let mut buf = Vec::new();
+		let mut buf = std::mem::take(&mut self.out);
+		// Reuses the allocation in place once every record split from it was dropped.
+		buf.reserve(budget);
+		let filled = self.fill_into(&mut buf, budget, now);
+		let record = filled.then(|| buf.split().freeze());
+		self.out = buf;
+		record
+	}
 
+	/// Serialize the next batch of frames into the empty `buf`, returning whether it wrote any
+	fn fill_into(&mut self, buf: &mut BytesMut, budget: usize, now: Instant) -> bool {
 		// The transport parameters go first
 		if !self.params_sent {
 			let mut blob = Vec::new();
 			self.local_params().encode(&mut blob);
-			wire::encode_transport_parameters(&mut buf, &blob);
+			wire::encode_transport_parameters(buf, &blob);
 			self.params_sent = true;
 		}
 
@@ -468,29 +481,29 @@ impl Connection {
 			// Write the close frame, if any, and go quiet
 			if let Some(close) = self.close.take() {
 				let room = budget - buf.len();
-				close.encode(&mut buf, room);
+				close.encode(buf, room);
 			}
 			self.close_sent = true;
 			if buf.is_empty() {
-				return None;
+				return false;
 			}
 			self.timer.on_send(now);
-			return Some(buf);
+			return true;
 		}
 
 		if let Some(seq) = self.ping_response.take() {
-			wire::encode_ping(&mut buf, true, seq);
+			wire::encode_ping(buf, true, seq);
 		}
 		if std::mem::take(&mut self.ping_request) {
 			let seq = VarInt::from_u64(self.next_ping).expect("QX_PING sequence overflow");
-			wire::encode_ping(&mut buf, false, seq);
+			wire::encode_ping(buf, false, seq);
 			self.timer.ping_sent(self.next_ping, now);
 			self.next_ping += 1;
 		}
 
 		let mut written = ThinRetransmits::default();
 		self.streams
-			.write_control_frames(&mut buf, &mut self.pending, &mut written, &mut self.stats, budget);
+			.write_control_frames(buf, &mut self.pending, &mut written, &mut self.stats, budget);
 		if let Some(written) = written.get() {
 			for &(id, reliable_size) in &written.reset_stream {
 				self.streams.reset_acked(id, reliable_size);
@@ -501,7 +514,7 @@ impl Connection {
 		// end of the record
 		let written = self
 			.streams
-			.write_frames(&mut buf, 0..budget, self.config.send_fairness);
+			.write_frames(buf, 0..budget, self.config.send_fairness);
 		for meta in written.streams {
 			let id = meta.id;
 			// A reset held until the peer has the data below its Reliable Size goes out now
@@ -513,10 +526,10 @@ impl Connection {
 		self.streams.queue_max_stream_id(&mut self.pending);
 
 		if buf.is_empty() {
-			return None;
+			return false;
 		}
 		self.timer.on_send(now);
-		Some(buf)
+		true
 	}
 
 	/// Queue a draft-00 batch one frame per message, each STREAM frame with its Length field
@@ -558,6 +571,10 @@ impl Connection {
 		if size as u64 > limit {
 			return Err(self.oversized());
 		}
+		// What the record keeps allocated while a stream holds a slice of it, which bounds how
+		// much memory the peer's buffered data pins. A transport may slice records out of a
+		// shared read buffer of up to `MAX_FRAME_SIZE`, so count at least that much.
+		let allocation = size.max(MAX_FRAME_SIZE);
 
 		let mut frames = 0;
 		loop {
@@ -576,7 +593,7 @@ impl Connection {
 					"draft-00 message carries more than one frame",
 				));
 			}
-			self.on_frame(frame, size, frame_len, now)?;
+			self.on_frame(frame, allocation, frame_len, now)?;
 			if self.error.is_some() {
 				// The peer closed; ignore the rest
 				return Ok(());
@@ -607,7 +624,7 @@ impl Connection {
 	fn on_frame(
 		&mut self,
 		frame: wire::Frame,
-		payload_len: usize,
+		allocation: usize,
 		frame_len: usize,
 		now: Instant,
 	) -> Result<(), TransportError> {
@@ -656,7 +673,7 @@ impl Connection {
 				if let Some(offset) = self.streams.rx_offset(stream.id) {
 					stream.offset = offset;
 				}
-				return self.on_stream(stream, payload_len);
+				return self.on_stream(stream, allocation);
 			}
 			wire::Frame::Quic(frame) => frame,
 		};
@@ -672,7 +689,7 @@ impl Connection {
 				{
 					return Err(TransportError::PROTOCOL_VIOLATION("stream data out of order"));
 				}
-				self.on_stream(stream, payload_len)?;
+				self.on_stream(stream, allocation)?;
 			}
 			frame::Frame::ResetStream(reset) => {
 				if reset.reliable_size.is_some() && self.config.version != Version::QMux02 {
@@ -746,8 +763,8 @@ impl Connection {
 		Ok(())
 	}
 
-	fn on_stream(&mut self, stream: frame::Stream, payload_len: usize) -> Result<(), TransportError> {
-		if self.streams.received(stream, payload_len)?.should_transmit() {
+	fn on_stream(&mut self, stream: frame::Stream, allocation: usize) -> Result<(), TransportError> {
+		if self.streams.received(stream, allocation)?.should_transmit() {
 			self.pending.max_data = true;
 		}
 		Ok(())

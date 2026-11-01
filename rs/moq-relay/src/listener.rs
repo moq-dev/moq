@@ -15,7 +15,7 @@
 //! sleep is unreachable.
 
 mod idle;
-pub(crate) use idle::Admission;
+pub(crate) use idle::{Admission, Io};
 
 use std::{
 	io,

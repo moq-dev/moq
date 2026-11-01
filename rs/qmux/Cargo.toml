@@ -14,9 +14,9 @@ categories = ["network-programming", "asynchronous"]
 
 [features]
 default = ["tls", "wss"]
-tcp = ["tokio/net", "tokio/io-util"]
+tcp = ["tokio/net"]
 tls = ["tcp", "dep:tokio-rustls", "dep:rustls"]
-uds = ["tokio/net", "tokio/io-util"]
+uds = ["tokio/net"]
 ws = ["dep:tokio-tungstenite", "dep:futures"]
 wss = ["ws", "dep:rustls", "tokio-tungstenite/rustls-tls-native-roots"]
 
@@ -31,7 +31,9 @@ moq-quic = { workspace = true, features = ["mux"] }
 rustc-hash = { workspace = true }
 rustls = { version = "0.23", default-features = false, optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time", "macros", "rt"] }
+tokio = { workspace = true }
+# `poll_read_buf`, which reads into a `BytesMut` without zeroing it first.
+tokio-util = { workspace = true, features = ["io"] }
 tokio-rustls = { workspace = true, optional = true }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"], optional = true }
 tracing = { workspace = true }

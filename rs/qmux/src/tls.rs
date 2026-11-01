@@ -6,7 +6,7 @@ use tokio_rustls::TlsAcceptor;
 use tokio_rustls::TlsConnector;
 
 use crate::transport::Stream;
-use crate::{Config, Error, Session, Version, alpn};
+use crate::{Config, Driver, Error, Session, Version, alpn};
 
 /// A QMux client over TLS that advertises `(alpn, versions)` entries.
 ///
@@ -68,7 +68,11 @@ impl Client {
 
 	/// Connect to `addr` and start a client session. `server_name` is used for
 	/// SNI and certificate verification.
-	pub async fn connect(&self, addr: impl ToSocketAddrs, server_name: &str) -> Result<Session, Error> {
+	pub async fn connect(
+		&self,
+		addr: impl ToSocketAddrs,
+		server_name: &str,
+	) -> Result<(Session, Driver<Stream<tokio_rustls::client::TlsStream<TcpStream>>>), Error> {
 		let stream = TcpStream::connect(&addr).await?;
 		// Adopt the socket before TLS takes ownership; the kernel's view of the TCP
 		// connection is the same either side of the encryption.
@@ -109,7 +113,8 @@ impl Client {
 			transport = transport.with_socket_stats(stats);
 		}
 		// `connect` awaits the peer's transport parameters so `protocol()` is resolved.
-		Ok(Session::connect(transport, session_config).await?.with_tls(handshake))
+		let (session, driver) = Session::connect(transport, session_config).await?;
+		Ok((session.with_tls(handshake), driver))
 	}
 }
 
@@ -146,14 +151,17 @@ impl Server {
 	///
 	/// This awaits both the TLS handshake and the QMux handshake (the peer's
 	/// transport parameters, bounded by the session's
-	/// [`handshake_timeout`](crate::Config::handshake_timeout)). Drive each
-	/// connection with `tokio::spawn` so a slow or non-cooperative peer can't
-	/// stall your `listener.accept()` loop.
+	/// [`handshake_timeout`](crate::Config::handshake_timeout)). Run each accept
+	/// on its own task so a slow or non-cooperative peer can't stall your
+	/// `listener.accept()` loop.
 	///
 	/// The returned session reports the client's certificate chain, when the
 	/// `rustls::ServerConfig` asked for one and the client presented it, and the
 	/// SNI it sent (see [`Session::peer_certificates`] and [`Session::server_name`]).
-	pub async fn accept(&self, stream: TcpStream) -> Result<Session, Error> {
+	pub async fn accept(
+		&self,
+		stream: TcpStream,
+	) -> Result<(Session, Driver<Stream<tokio_rustls::server::TlsStream<TcpStream>>>), Error> {
 		let socket_stats = crate::tcp::adopt(&stream)?;
 		let acceptor = TlsAcceptor::from(self.config.clone());
 		let tls_stream = acceptor.accept(stream).await?;
@@ -173,7 +181,8 @@ impl Server {
 			transport = transport.with_socket_stats(stats);
 		}
 		// `accept` awaits the peer's transport parameters so `protocol()` is resolved.
-		Ok(Session::accept(transport, session_config).await?.with_tls(handshake))
+		let (session, driver) = Session::accept(transport, session_config).await?;
+		Ok((session.with_tls(handshake), driver))
 	}
 }
 

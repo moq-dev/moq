@@ -1,17 +1,18 @@
-use futures::{Sink, Stream};
-use qmux::ws::tungstenite;
-use std::{
-	pin::Pin,
-	sync::Arc,
-	task::{Context, Poll},
-};
+use bytes::Bytes;
+use hyper_util::rt::TokioIo;
+use qmux::ws::tokio_tungstenite::WebSocketStream;
+use qmux::ws::tungstenite::{self, protocol::Role};
+use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio_rustls::server::TlsStream;
 
 use axum::{
-	extract::{ConnectInfo, Extension, OriginalUri, State, WebSocketUpgrade, ws::rejection::WebSocketUpgradeRejection},
-	http::{HeaderMap, HeaderValue, StatusCode, header::HOST},
+	extract::{ConnectInfo, Extension, OriginalUri, Request, State},
+	http::{HeaderMap, HeaderValue, Method, StatusCode, header},
 	response::Response,
 };
 
+use crate::listener::{Accepted, Io};
 use crate::{web::MtlsPeer, web::ServerName, web::WebState, web::landing_response};
 
 #[expect(
@@ -21,9 +22,7 @@ use crate::{web::MtlsPeer, web::ServerName, web::WebState, web::landing_response
 // The `Err` is axum's own `ErrorResponse`, so there is nothing here to box.
 #[expect(clippy::result_large_err, reason = "the error type is axum's, not ours")]
 pub(crate) async fn serve_ws(
-	ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 	OriginalUri(uri): OriginalUri,
-	headers: HeaderMap,
 	mtls: Option<Extension<MtlsPeer>>,
 	server_name: Option<Extension<ServerName>>,
 	ConnectInfo(remote): ConnectInfo<std::net::SocketAddr>,
@@ -33,10 +32,11 @@ pub(crate) async fn serve_ws(
 	Extension(extensions): Extension<moq_net::setup::Extensions>,
 	Extension(crate::web::Implementation(implementation)): Extension<crate::web::Implementation>,
 	State(state): State<Arc<WebState>>,
+	mut request: Request,
 ) -> axum::response::Result<Response> {
 	// If this isn't a WebSocket upgrade (e.g. a plain browser visit), serve
 	// the informational landing page instead of an error response.
-	let Ok(ws) = ws else {
+	let Some(key) = upgrade_key(&request) else {
 		return Ok(landing_response());
 	};
 
@@ -47,14 +47,13 @@ pub(crate) async fn serve_ws(
 		.or_else(|| state.shutdown.activity.enter())
 		.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 	let alpns = versions.alpns();
-	// The socket buffers a message whole before qmux sees it, so it reads no more than a record.
-	let max = moq_tokio::websocket::max_message_size();
-	let ws = negotiate_subprotocol(ws.max_message_size(max).max_frame_size(max), &alpns)?;
+	let protocol = negotiate_subprotocol(request.headers(), &alpns)?;
 
+	let headers = request.headers();
 	let host = uri
 		.authority()
 		.map(axum::http::uri::Authority::as_str)
-		.or_else(|| headers.get(HOST).and_then(|value| value.to_str().ok()))
+		.or_else(|| headers.get(header::HOST).and_then(|value| value.to_str().ok()))
 		.ok_or(StatusCode::BAD_REQUEST)?;
 	let url = url::Url::parse(&format!(
 		"ws://{host}{}",
@@ -69,41 +68,121 @@ pub(crate) async fn serve_ws(
 	}
 	let mut options = moq_tokio::websocket::Options::new(url, server, active);
 	options.link.remote = Some(remote);
-	options.link.alpn = ws.selected_protocol().and_then(|p| p.to_str().ok()).map(str::to_owned);
+	options.link.alpn = Some(protocol.clone());
 	options.link.server_name = server_name.map(|Extension(ServerName(name))| name);
 	options.identity = mtls.map(|Extension(MtlsPeer(identity))| identity);
 	options.socket_stats = socket_stats.map(|Extension(stats)| stats.0);
 	// The listener reads `None` as no deadline; `Options` reads it as the default.
 	options.timeout = Some(state.timeout.unwrap_or_default());
 
-	Ok(ws.on_upgrade(async move |socket| {
-		// Axum hides its Tungstenite socket to avoid exposing its dependency version.
-		let socket = WebSocketAdapter::new(socket);
-		let handshake = moq_tokio::websocket::accept(socket, options);
-		let Some(request) = state.shutdown.until_deadline(handshake).await else {
-			return;
-		};
-		let request = match request {
-			Ok(request) => request,
+	let upgrade = hyper::upgrade::on(&mut request);
+	tokio::spawn(async move {
+		let upgraded = match upgrade.await {
+			Ok(upgraded) => upgraded,
 			Err(err) => {
-				tracing::debug!(%err, "failed to accept WebSocket SETUP");
+				tracing::debug!(%err, "WebSocket upgrade failed");
 				return;
 			}
 		};
-		// Numbered like a QUIC accept, so its `conn{id=...}` never reuses a QUIC one's id.
-		crate::connection::Connection::new(request, state.cluster.clone(), state.auth.clone())
-			.with_id(state.cluster.next_connection_id())
-			.with_shutdown(state.shutdown.clone())
-			.with_sessions(state.sessions.clone())
-			.run()
-			.await;
-	}))
+		serve_upgraded(upgraded, options, state).await;
+	});
+	Ok(switching_protocols(&key, &protocol))
+}
+
+/// The `Sec-WebSocket-Key` of an HTTP/1.1 WebSocket upgrade, or `None` for any other request.
+fn upgrade_key(request: &Request) -> Option<HeaderValue> {
+	let headers = request.headers();
+	// A comma-separated header that lists `token`, ignoring case.
+	let lists = |name: header::HeaderName, token: &str| {
+		headers.get_all(name).iter().any(|value| {
+			value
+				.as_bytes()
+				.split(|&b| b == b',')
+				.any(|item| item.trim_ascii().eq_ignore_ascii_case(token.as_bytes()))
+		})
+	};
+	let upgrade = request.method() == Method::GET
+		&& lists(header::CONNECTION, "upgrade")
+		&& lists(header::UPGRADE, "websocket")
+		&& headers
+			.get(header::SEC_WEBSOCKET_VERSION)
+			.is_some_and(|version| version == "13")
+		// hyper hands this out only for a connection that can switch protocols.
+		&& request.extensions().get::<hyper::upgrade::OnUpgrade>().is_some();
+	upgrade.then(|| headers.get(header::SEC_WEBSOCKET_KEY).cloned()).flatten()
+}
+
+/// The 101 response accepting the upgrade keyed `key` with `protocol`.
+fn switching_protocols(key: &HeaderValue, protocol: &str) -> Response {
+	Response::builder()
+		.status(StatusCode::SWITCHING_PROTOCOLS)
+		.header(header::CONNECTION, "upgrade")
+		.header(header::UPGRADE, "websocket")
+		.header(
+			header::SEC_WEBSOCKET_ACCEPT,
+			tungstenite::handshake::derive_accept_key(key.as_bytes()),
+		)
+		.header(header::SEC_WEBSOCKET_PROTOCOL, protocol)
+		.body(axum::body::Body::empty())
+		.expect("every header is a valid value")
+}
+
+/// The socket config for an upgraded connection: a message is one qmux record, so the socket
+/// buffers no more than one before qmux sees it.
+fn socket_config() -> tungstenite::protocol::WebSocketConfig {
+	let max = moq_tokio::websocket::max_message_size();
+	tungstenite::protocol::WebSocketConfig::default()
+		.max_message_size(Some(max))
+		.max_frame_size(Some(max))
+}
+
+/// Reclaim the socket from under hyper's upgrade and serve a MoQ session on it.
+///
+/// The relay's own listeners hand hyper a plain or TLS stream, which comes back whole with
+/// whatever hyper read past the request, so qmux polls the socket directly rather than through
+/// hyper's boxed IO. A router served by another HTTP server keeps that IO.
+async fn serve_upgraded(upgraded: hyper::upgrade::Upgraded, options: moq_tokio::websocket::Options, state: Arc<WebState>) {
+	let upgraded = match upgraded.downcast::<TokioIo<Io<Accepted>>>() {
+		Ok(parts) => return serve_socket(parts.io.into_inner().into_inner(), parts.read_buf, options, state).await,
+		Err(upgraded) => upgraded,
+	};
+	let upgraded = match upgraded.downcast::<TokioIo<Io<TlsStream<Accepted>>>>() {
+		Ok(parts) => return serve_socket(parts.io.into_inner().into_inner(), parts.read_buf, options, state).await,
+		Err(upgraded) => upgraded,
+	};
+	serve_socket(TokioIo::new(upgraded), Bytes::new(), options, state).await
+}
+
+/// Run a MoQ session over the WebSocket on `io`, whose first bytes, `read`, were already read.
+async fn serve_socket<S>(io: S, read: Bytes, options: moq_tokio::websocket::Options, state: Arc<WebState>)
+where
+	S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+	let socket = WebSocketStream::from_partially_read(io, read.to_vec(), Role::Server, Some(socket_config())).await;
+	let handshake = moq_tokio::websocket::accept(socket, options);
+	let Some(request) = state.shutdown.until_deadline(handshake).await else {
+		return;
+	};
+	let request = match request {
+		Ok(request) => request,
+		Err(err) => {
+			tracing::debug!(%err, "failed to accept WebSocket SETUP");
+			return;
+		}
+	};
+	// Numbered like a QUIC accept, so its `conn{id=...}` never reuses a QUIC one's id.
+	crate::connection::Connection::new(request, state.cluster.clone(), state.auth.clone())
+		.with_id(state.cluster.next_connection_id())
+		.with_shutdown(state.shutdown.clone())
+		.with_sessions(state.sessions.clone())
+		.run()
+		.await;
 }
 
 /// Pick a subprotocol for the upgrade, or fail the handshake outright.
 ///
 /// We advertise the configured qmux × moq-net subprotocol matrix, with bare
-/// qmux fallbacks last. axum picks the first entry that the client also offered, so
+/// qmux fallbacks last, and pick the first entry that the client also offered, so
 /// a modern client lands on `qmux-01.moq-lite-06`; one that only offers a bare
 /// `qmux-0X` negotiates the moq version via SETUP.
 ///
@@ -112,22 +191,27 @@ pub(crate) async fn serve_ws(
 /// client MUST treat a missing `Sec-WebSocket-Protocol` response header as a
 /// failure anyway, so upgrading only wastes a connection that has already agreed
 /// on nothing. A client that offers none at all names no QMux version either.
-fn negotiate_subprotocol(ws: WebSocketUpgrade, alpns: &[&str]) -> Result<WebSocketUpgrade, StatusCode> {
+fn negotiate_subprotocol(headers: &HeaderMap, alpns: &[&str]) -> Result<String, StatusCode> {
 	let supported = supported_subprotocols(alpns);
-
-	if !subprotocols_acceptable(ws.requested_protocols().map(HeaderValue::as_bytes), &supported) {
+	let requested = headers
+		.get_all(header::SEC_WEBSOCKET_PROTOCOL)
+		.iter()
+		.flat_map(|value| value.as_bytes().split(|&b| b == b','));
+	select_subprotocol(requested, &supported).cloned().ok_or_else(|| {
 		tracing::debug!("rejecting WebSocket upgrade: no supported subprotocol offered");
-		return Err(StatusCode::BAD_REQUEST);
-	}
-
-	Ok(ws.protocols(supported))
+		StatusCode::BAD_REQUEST
+	})
 }
 
-/// Whether the client offered a subprotocol we support.
-fn subprotocols_acceptable<'a>(requested: impl IntoIterator<Item = &'a [u8]>, supported: &[String]) -> bool {
-	requested
-		.into_iter()
-		.any(|protocol| supported.iter().any(|s| s.as_bytes() == protocol.trim_ascii()))
+/// Our most preferred subprotocol among those the client offered.
+fn select_subprotocol<'a, 'b>(
+	requested: impl IntoIterator<Item = &'a [u8]>,
+	supported: &'b [String],
+) -> Option<&'b String> {
+	let requested: Vec<&[u8]> = requested.into_iter().map(<[u8]>::trim_ascii).collect();
+	supported
+		.iter()
+		.find(|supported| requested.contains(&supported.as_bytes()))
 }
 
 /// QMux wire-format versions that can ride under a `{prefix}.{alpn}` pair.
@@ -165,202 +249,20 @@ fn supported_subprotocols(alpns: &[&str]) -> Vec<String> {
 	out
 }
 
-// https://github.com/tokio-rs/axum/discussions/848#discussioncomment-11443587
-
-struct WebSocketAdapter<T> {
-	inner: T,
-}
-
-impl<T> WebSocketAdapter<T> {
-	fn new(inner: T) -> Self {
-		Self { inner }
-	}
-}
-
-impl<T> Stream for WebSocketAdapter<T>
-where
-	T: Stream<Item = Result<axum::extract::ws::Message, axum::Error>> + Unpin,
-{
-	type Item = Result<tungstenite::Message, tungstenite::Error>;
-
-	fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-		Pin::new(&mut self.inner)
-			.poll_next(cx)
-			.map(|message| message.map(|message| message.map(axum_to_tungstenite).map_err(map_axum_error)))
-	}
-}
-
-impl<T> Sink<tungstenite::Message> for WebSocketAdapter<T>
-where
-	T: Sink<axum::extract::ws::Message, Error = axum::Error> + Unpin,
-{
-	type Error = tungstenite::Error;
-
-	fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Pin::new(&mut self.inner).poll_ready(cx).map_err(map_axum_error)
-	}
-
-	fn start_send(mut self: Pin<&mut Self>, message: tungstenite::Message) -> Result<(), Self::Error> {
-		Pin::new(&mut self.inner)
-			.start_send(tungstenite_to_axum(message))
-			.map_err(map_axum_error)
-	}
-
-	fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Pin::new(&mut self.inner).poll_flush(cx).map_err(map_axum_error)
-	}
-
-	fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-		Pin::new(&mut self.inner).poll_close(cx).map_err(map_axum_error)
-	}
-}
-
-fn map_axum_error(err: axum::Error) -> tungstenite::Error {
-	tracing::warn!(%err, "WebSocket error");
-	tungstenite::Error::ConnectionClosed
-}
-
-fn axum_to_tungstenite(message: axum::extract::ws::Message) -> tungstenite::Message {
-	match message {
-		axum::extract::ws::Message::Text(text) => tungstenite::Message::Text(axum_text_to_tungstenite(text)),
-		axum::extract::ws::Message::Binary(bin) => tungstenite::Message::Binary(bin),
-		axum::extract::ws::Message::Ping(ping) => tungstenite::Message::Ping(ping),
-		axum::extract::ws::Message::Pong(pong) => tungstenite::Message::Pong(pong),
-		axum::extract::ws::Message::Close(close) => {
-			tungstenite::Message::Close(close.map(|c| tungstenite::protocol::CloseFrame {
-				code: c.code.into(),
-				reason: axum_text_to_tungstenite(c.reason),
-			}))
-		}
-	}
-}
-
-fn tungstenite_to_axum(message: tungstenite::Message) -> axum::extract::ws::Message {
-	match message {
-		tungstenite::Message::Text(text) => axum::extract::ws::Message::Text(tungstenite_text_to_axum(text)),
-		tungstenite::Message::Binary(bin) => axum::extract::ws::Message::Binary(bin),
-		tungstenite::Message::Ping(ping) => axum::extract::ws::Message::Ping(ping),
-		tungstenite::Message::Pong(pong) => axum::extract::ws::Message::Pong(pong),
-		tungstenite::Message::Frame(_frame) => unreachable!(),
-		tungstenite::Message::Close(close) => {
-			axum::extract::ws::Message::Close(close.map(|c| axum::extract::ws::CloseFrame {
-				code: c.code.into(),
-				reason: tungstenite_text_to_axum(c.reason),
-			}))
-		}
-	}
-}
-
-fn axum_text_to_tungstenite(text: axum::extract::ws::Utf8Bytes) -> tungstenite::Utf8Bytes {
-	axum::body::Bytes::from(text)
-		.try_into()
-		.expect("axum text is valid UTF-8")
-}
-
-fn tungstenite_text_to_axum(text: tungstenite::Utf8Bytes) -> axum::extract::ws::Utf8Bytes {
-	axum::body::Bytes::from(text)
-		.try_into()
-		.expect("tungstenite text is valid UTF-8")
-}
-
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use axum::{Router, extract::WebSocketUpgrade, routing::any};
-	use futures::SinkExt;
+	use axum::{Router, routing::any};
+	use futures::{Sink, Stream};
 	use std::{
-		io,
+		pin::Pin,
 		sync::atomic::{AtomicBool, Ordering},
+		task::{Context, Poll},
 		time::Duration,
 	};
 	use tokio::sync::mpsc;
 	// Brings `qmux::Session::protocol` and `::closed` into scope.
 	use moq_net::transport::poll::Session as _;
-
-	struct DoubleErrorSocket;
-
-	impl Stream for DoubleErrorSocket {
-		type Item = Result<axum::extract::ws::Message, axum::Error>;
-
-		fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-			Poll::Pending
-		}
-	}
-
-	impl Sink<axum::extract::ws::Message> for DoubleErrorSocket {
-		type Error = axum::Error;
-
-		fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
-		}
-
-		fn start_send(self: Pin<&mut Self>, _message: axum::extract::ws::Message) -> Result<(), Self::Error> {
-			Err(axum::Error::new(io::Error::from(io::ErrorKind::BrokenPipe)))
-		}
-
-		fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Ok(()))
-		}
-
-		fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-			Poll::Ready(Err(axum::Error::new(io::Error::from(io::ErrorKind::BrokenPipe))))
-		}
-	}
-
-	#[tokio::test]
-	async fn websocket_adapter_maps_close_error_after_send_error() {
-		let mut socket = WebSocketAdapter::new(DoubleErrorSocket);
-
-		let send = socket.send(tungstenite::Message::Binary(Vec::new().into())).await;
-		assert!(matches!(send, Err(tungstenite::Error::ConnectionClosed)));
-
-		let close = socket.close().await;
-		assert!(matches!(close, Err(tungstenite::Error::ConnectionClosed)));
-	}
-
-	#[test]
-	fn websocket_binary_conversion_is_zero_copy() {
-		let payload = axum::body::Bytes::from(vec![1, 2, 3]);
-		let retained = payload.clone();
-		let tungstenite::Message::Binary(converted) = axum_to_tungstenite(axum::extract::ws::Message::Binary(payload))
-		else {
-			panic!("expected binary message");
-		};
-		assert_eq!(converted, retained);
-		assert_eq!(converted.as_ptr(), retained.as_ptr());
-
-		let payload = axum::body::Bytes::from(vec![4, 5, 6]);
-		let retained = payload.clone();
-		let axum::extract::ws::Message::Binary(converted) = tungstenite_to_axum(tungstenite::Message::Binary(payload))
-		else {
-			panic!("expected binary message");
-		};
-		assert_eq!(converted, retained);
-		assert_eq!(converted.as_ptr(), retained.as_ptr());
-	}
-
-	#[test]
-	fn websocket_text_conversion_is_zero_copy() {
-		let payload = axum::body::Bytes::from("hello from axum");
-		let retained = payload.clone();
-		let text = axum::extract::ws::Utf8Bytes::try_from(payload).expect("valid UTF-8");
-		let tungstenite::Message::Text(converted) = axum_to_tungstenite(axum::extract::ws::Message::Text(text)) else {
-			panic!("expected text message");
-		};
-		let converted = axum::body::Bytes::from(converted);
-		assert_eq!(converted, retained);
-		assert_eq!(converted.as_ptr(), retained.as_ptr());
-
-		let payload = axum::body::Bytes::from("hello from tungstenite");
-		let retained = payload.clone();
-		let text = tungstenite::Utf8Bytes::try_from(payload).expect("valid UTF-8");
-		let axum::extract::ws::Message::Text(converted) = tungstenite_to_axum(tungstenite::Message::Text(text)) else {
-			panic!("expected text message");
-		};
-		let converted = axum::body::Bytes::from(converted);
-		assert_eq!(converted, retained);
-		assert_eq!(converted.as_ptr(), retained.as_ptr());
-	}
 
 	/// The newest moq ALPN both sides agree on. Derived from the same source
 	/// of truth that `supported_subprotocols` and `qmux::ws::Client::with_protocols`
@@ -453,32 +355,37 @@ mod tests {
 	}
 
 	#[test]
-	fn subprotocols_acceptable_requires_a_match_when_any_are_offered() {
+	fn select_subprotocol_requires_a_match_when_any_are_offered() {
 		let supported = supported_subprotocols(moq_net::ALPNS);
 		let known = supported.first().expect("no supported subprotocols").clone();
+		let select = |requested: &[&[u8]]| select_subprotocol(requested.iter().copied(), &supported).cloned();
 
 		// Offering nothing names no QMux version, and neither does a blank header.
-		assert!(!subprotocols_acceptable([], &supported));
-		assert!(!subprotocols_acceptable([b"" as &[u8], b"  "], &supported));
+		assert_eq!(select(&[]), None);
+		assert_eq!(select(&[b"", b"  "]), None);
 		// The retired legacy wire format is no longer ours.
-		assert!(!subprotocols_acceptable([b"webtransport" as &[u8]], &supported));
+		assert_eq!(select(&[b"webtransport"]), None);
 
-		// Something we know, alone or among identifiers we don't.
-		assert!(subprotocols_acceptable([known.as_bytes()], &supported));
-		assert!(subprotocols_acceptable(
-			[b"bogus-99" as &[u8], known.as_bytes()],
-			&supported
-		));
+		// Something we know, alone or among identifiers we don't, padded as a header list is.
+		assert_eq!(select(&[known.as_bytes()]), Some(known.clone()));
+		assert_eq!(
+			select(&[b"bogus-99", format!(" {known}").as_bytes()]),
+			Some(known.clone())
+		);
 
 		// Nothing we know: the draft says fail the handshake.
-		assert!(!subprotocols_acceptable([b"bogus-99" as &[u8]], &supported));
-		assert!(!subprotocols_acceptable([b"bogus-99" as &[u8], b"soap"], &supported));
+		assert_eq!(select(&[b"bogus-99"]), None);
+		assert_eq!(select(&[b"bogus-99", b"soap"]), None);
 
 		// Near misses must not sneak through a prefix or substring match.
-		assert!(!subprotocols_acceptable(
-			[format!("{known}-next").as_bytes()],
-			&supported
-		));
+		assert_eq!(select(&[format!("{known}-next").as_bytes()]), None);
+
+		// Our preference wins over the client's order.
+		let fallback = supported.last().expect("no supported subprotocols");
+		assert_eq!(
+			select(&[fallback.as_bytes(), known.as_bytes()]),
+			Some(known.clone())
+		);
 	}
 
 	/// Send a raw WebSocket handshake and return its HTTP status line.
@@ -552,38 +459,42 @@ mod tests {
 	/// What a single accepted WebSocket connection negotiated, as seen by the server.
 	#[derive(Debug)]
 	struct Observed {
-		/// Raw `Sec-WebSocket-Protocol` axum selected (keeps the `qmux-XX.` prefix).
+		/// Raw `Sec-WebSocket-Protocol` the upgrade selected (keeps the `qmux-XX.` prefix).
 		wire: Option<String>,
 		/// The moq app ALPN qmux derived from it (prefix stripped, `None` for bare).
 		app: Option<String>,
 	}
 
-	/// Spawn an axum server that mirrors `serve_ws`'s subprotocol wiring.
+	/// Spawn an axum server that mirrors `serve_ws`'s upgrade and subprotocol wiring.
 	///
 	/// Returns its address and a receiver yielding one [`Observed`] per accepted
 	/// connection, in acceptance order.
 	async fn spawn_test_server() -> (std::net::SocketAddr, mpsc::UnboundedReceiver<Observed>) {
 		let (tx, rx) = mpsc::unbounded_channel::<Observed>();
 
-		let route = any(move |ws: WebSocketUpgrade| {
+		let route = any(move |mut request: Request| {
 			let tx = tx.clone();
 			async move {
-				let ws = negotiate_subprotocol(ws, moq_net::ALPNS)?;
-				Ok::<_, StatusCode>(ws.on_upgrade(move |socket| async move {
-					let wire = socket.protocol().and_then(|h| h.to_str().ok()).map(str::to_owned);
-					let socket = WebSocketAdapter::new(socket);
-
-					let session = qmux::ws::Upgraded::new(socket, wire.as_deref().unwrap_or_default())
+				let key = upgrade_key(&request).ok_or(StatusCode::BAD_REQUEST)?;
+				let wire = negotiate_subprotocol(request.headers(), moq_net::ALPNS)?;
+				let upgrade = hyper::upgrade::on(&mut request);
+				let response = switching_protocols(&key, &wire);
+				tokio::spawn(async move {
+					let upgraded = upgrade.await.expect("upgrade");
+					let socket = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
+					let (session, driver) = qmux::ws::Upgraded::new(socket, &wire)
 						.accept()
 						.expect("the upgrade selected a QMux subprotocol");
+					tokio::spawn(driver);
 					let _ = tx.send(Observed {
-						wire,
+						wire: Some(wire),
 						app: session.protocol().map(str::to_owned),
 					});
 					// Hold the session open so the client stays alive long enough
 					// to observe the negotiated subprotocol.
 					let _ = session.closed().await;
-				}))
+				});
+				Ok::<_, StatusCode>(response)
 			}
 		});
 
@@ -621,11 +532,12 @@ mod tests {
 	async fn axum_ws_negotiates_newest_moq_alpn() {
 		let (addr, mut rx) = spawn_test_server().await;
 
-		let session = qmux::ws::Client::new()
+		let (session, driver) = qmux::ws::Client::new()
 			.with_protocols(moq_net::ALPNS.iter().map(|&a| (a, &[] as &[qmux::Version])))
 			.connect(&format!("ws://{addr}/"))
 			.await
 			.expect("qmux client connect");
+		tokio::spawn(driver);
 
 		assert_eq!(
 			session.protocol(),
@@ -660,11 +572,12 @@ mod tests {
 				continue;
 			};
 
-			let session = qmux::ws::Client::new()
+			let (session, driver) = qmux::ws::Client::new()
 				.with_protocol(app, &[version])
 				.connect(&url)
 				.await
 				.unwrap_or_else(|e| panic!("server rejected advertised pair {entry}: {e}"));
+			tokio::spawn(driver);
 
 			let observed = next_observed(&mut rx).await;
 			assert_eq!(
@@ -680,11 +593,12 @@ mod tests {
 		// offering only `qmux-00.moqt-18` still carries qmux's default bare fallbacks
 		// (`qmux-01`, etc.), so the server gracefully downgrades to a bare ALPN
 		// rather than failing. It just never lands on `moqt-18`.
-		let session = qmux::ws::Client::new()
+		let (session, driver) = qmux::ws::Client::new()
 			.with_protocol("moqt-18", &[qmux::Version::QMux00])
 			.connect(&url)
 			.await
 			.expect("qmux-00.moqt-18 should downgrade to a bare fallback, not fail");
+		tokio::spawn(driver);
 
 		let observed = next_observed(&mut rx).await;
 		assert_eq!(
@@ -792,12 +706,13 @@ mod tests {
 		// timeout is out of the picture before we go silent. It never speaks moq,
 		// so the server is parked awaiting SETUP -- exactly where an idle
 		// publisher's session sits between groups.
-		let client = qmux::ws::Upgraded::new(
+		let (client, driver) = qmux::ws::Upgraded::new(
 			Pipe::new(client_incoming, client_to_server, Arc::new(AtomicBool::new(false))),
 			&alpn,
 		)
 		.connect()
 		.unwrap();
+		tokio::spawn(driver);
 
 		// Paused time only advances once every task is idle, so this resolves
 		// exactly when both ends have settled.
@@ -841,12 +756,13 @@ mod tests {
 		));
 
 		// A live qmux peer that answers keep-alives but never speaks moq.
-		let client = qmux::ws::Upgraded::new(
+		let (client, driver) = qmux::ws::Upgraded::new(
 			Pipe::new(client_incoming, client_to_server, Arc::new(AtomicBool::new(false))),
 			&alpn,
 		)
 		.connect()
 		.unwrap();
+		tokio::spawn(driver);
 
 		let err = server
 			.await

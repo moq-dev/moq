@@ -185,6 +185,14 @@ pub(crate) struct Io<I> {
 	timer: Pin<Box<Sleep>>,
 }
 impl<I> Io<I> {
+	/// The stream underneath, once HTTP has handed it to another protocol and no longer
+	/// needs the idle deadline.
+	#[cfg(feature = "websocket")]
+	#[allow(dead_code, reason = "the http_idle benchmark includes this module without the WebSocket route")]
+	pub(crate) fn into_inner(self) -> I {
+		self.inner
+	}
+
 	fn poll_deadline(&mut self, cx: &mut Context<'_>) -> io::Result<()> {
 		self.state.wake.register(cx.waker());
 		let activity = self.state.activity.lock().unwrap_or_else(PoisonError::into_inner);

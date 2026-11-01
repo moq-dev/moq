@@ -101,6 +101,15 @@ fn qmux_config() -> qmux::Config {
 	config
 }
 
+/// Run a qmux session's driver on the runtime, handing back the session.
+#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+fn spawn_qmux<T: qmux::transport::Transport + Send + 'static>(
+	(session, driver): (qmux::Session, qmux::Driver<T>),
+) -> qmux::Session {
+	runtime::spawn(driver);
+	session
+}
+
 // Enumerated rather than globbed, so the root surface is a deliberate list and a
 // new `pub` item in these modules doesn't silently join it.
 #[cfg(feature = "net")]

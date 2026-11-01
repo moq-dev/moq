@@ -52,7 +52,7 @@ tcp = ["_transport", "dep:qmux", "dep:dns-lookup"]
 # inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
 uds = ["tcp", "qmux/uds"]
 # Native WebRTC data channels over str0m, with a full ICE agent (the `webrtc` module).
-webrtc = ["_transport", "dep:qmux", "dep:moq-ice", "dep:str0m", "dep:if-addrs", "dep:mdns-sd"]
+webrtc = ["_transport", "dep:kio", "dep:qmux", "dep:moq-ice", "dep:str0m", "dep:if-addrs", "dep:mdns-sd"]
 ring = ["_certs", "rustls/ring", "rcgen/ring", "moq-quic?/ring"]
 
 [dependencies]

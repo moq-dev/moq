@@ -123,14 +123,12 @@ fn record(index: usize) -> Bytes {
 /// keeps acknowledging, so the remote writer gets well past the send window.
 #[tokio::test]
 async fn unread_records_do_not_stall_the_writer() {
-	use qmux::transport::{Reader as _, Writer as _};
-
 	let (_offerer, _answerer, sent, received) = channels().await;
 	let (mut writer, mut reader) = (sent.channel.writer, received.channel.reader);
 	let count = 8 * SEND_WINDOW / RECORD_SIZE as usize;
 	moq_clock::timeout(TIMEOUT, async {
 		for index in 0..count {
-			writer.send(record(index)).await.unwrap();
+			writer.write(record(index)).await.unwrap();
 		}
 	})
 	.await
@@ -145,15 +143,13 @@ async fn unread_records_do_not_stall_the_writer() {
 /// has the channel closed, after the records within the budget.
 #[tokio::test]
 async fn ignoring_flow_control_closes_the_channel() {
-	use qmux::transport::{Reader as _, Writer as _};
-
 	let (_offerer, _answerer, sent, received) = channels().await;
 	let budget = RECEIVE_WINDOW + READ_SLACK;
 	let within = (budget / RECORD_SIZE) as usize;
 	let (mut writer, mut reader) = (sent.channel.writer, received.channel.reader);
 	moq_clock::timeout(TIMEOUT, async {
 		for index in 0..within + 8 {
-			if writer.send(record(index)).await.is_err() {
+			if writer.write(record(index)).await.is_err() {
 				break;
 			}
 		}

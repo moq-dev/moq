@@ -43,7 +43,7 @@ _quic = []
 # congestion-control testing. Covers the io_uring workers too, so one feature
 # means one thing whichever runtime is serving.
 qlog = ["moq-tokio/qlog", "moq-uring?/qlog"]
-websocket = ["moq-tokio/websocket", "dep:qmux", "axum/ws"]
+websocket = ["moq-tokio/websocket", "dep:qmux", "dep:hyper"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.
 uds = ["moq-tokio/uds"]
@@ -68,6 +68,8 @@ http-body = "1.0.1"
 # reqwest-middleware 0.4, while this line matches reqwest 0.13 below.
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
 humantime = { workspace = true }
+# Reclaims the socket under a WebSocket upgrade.
+hyper = { workspace = true, optional = true }
 hyper-util = { workspace = true }
 moq-auth = { workspace = true, features = ["client"] }
 moq-clock = { workspace = true, features = ["serde"] }
