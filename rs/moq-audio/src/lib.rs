@@ -20,10 +20,9 @@
 //!     the input while preserving one track identity, and reports the active
 //!     device, failures, and post-processing level.
 //!   - `encode::publish_capture` is the turnkey shorthand. The track and
-//!     catalog are advertised up front, and the device captures and encodes
-//!     whether or not anyone is listening, so a late subscriber can fetch the
-//!     recent past. `encode::Capture::on_demand` opens the device only while a
-//!     subscriber is listening instead, releasing it when the last one leaves.
+//!     catalog are advertised up front. Capture keeps running while raw audio
+//!     waits for a subscriber, then encodes that history and continues live.
+//!     Set `encode::Capture::on_demand` to false to encode continuously instead.
 //!   - [`encode::Producer`] publishes PCM you hand it.
 //! - [`decode`] subscribes to an encoded track and decodes it back to PCM.
 //!   [`decode::Consumer`] is the mirror of [`encode::Producer`]. It reads AAC-LC

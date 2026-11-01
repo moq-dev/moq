@@ -4,6 +4,8 @@
 # them in order and streams their output. CHECK_MODULES limits the selection to
 # the modules it names, or skips those named with a leading `-`, so a gate too
 # large for one job splits across several.
+# CHECK_FAIL_FAST=1 stops every lane at the first failed module, for the land
+# gate, which ejects a failing batch either way and gains nothing from the rest.
 # `--query` prints the selection before CI installs its toolchain and caches.
 # `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
@@ -111,13 +113,8 @@ module py '^(py/|sh/py/|pyproject\.toml$|uv\.lock$|rs/moq-ffi/|doc/lib/py/|doc/l
 # moq-cli builds the Rust interop clients as examples from outside its
 # crate; sh/rs/select.test.py fails when a target's directory is missing.
 # moq-relay's tests read its NixOS module.
-module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
+module rs '^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)' \
     tools='cargo jq' compiles='check fix' fix
-# rs's crates again, each compiled alone at its feature extremes: its own
-# module because one clippy pass per package outgrows a hosted job beside rs.
-# It shares rs's lane because both build the workspace in one target directory.
-module rs_shapes "${scope[rs]}" \
-    tools='cargo cargo-hack jq' compiles=check lane=rs
 # The C package links moq-c's native-libs lists, and the C++ package's FFI pin.
 module c '^(\.cargo/config\.toml$|c/|sh/c/|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)' \
     tools='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp' compiles=check
@@ -134,12 +131,11 @@ module obs_compile '^(\.cargo/config\.toml$|cpp/obs/|cpp/moq/|sh/obs/|rs/moq-ffi
 # fails a check that reads a cross-tree input this pattern misses.
 # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
 # Root Nix inputs own the browser version every npm Playwright pin matches.
-# Its check builds @moq/wasm for its consumers.
 # The bun lane exists because `bun install` relinks the root workspace's
 # packages even when nothing changed, so a concurrent install or import of
 # them fails.
-module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
-    tools='bun python3' compiles=check lane=bun fix
+module js '^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)' \
+    tools='bun python3' lane=bun fix
 module kt '^(\.cargo/config\.toml$|kt/|sh/kt/|rs/moq-ffi/|doc/lib/kt/|doc/lib/samples\.sh$)' \
     tools='cargo gradle java' compiles=check
 # Rust source is compiled below. Nix reads Cargo metadata, packaging inputs,
@@ -294,8 +290,6 @@ fi
 # rs selects crates from the same list, or the whole workspace.
 rs_list=$changed
 [[ -z "$all" ]] || rs_list=--all
-rs_feature_scope=
-[[ "$action" != check ]] || rs_feature_scope=changed
 
 # large_files diffs against the same base, or checks every file.
 large_base=$base
@@ -321,12 +315,9 @@ step() {
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
-        # The check keeps docs and target-specific lints; the test phase
-        # enforces default-feature clippy without a second compile.
-        # Locally, the feature-contract checks skip the dependents of the
-        # changed crates; the landing worker keeps them (see sh/rs/select.sh).
-        check:rs) RS_FEATURE_SCOPE=$rs_feature_scope just rs lint-changed "$rs_list" ;;
-        check:rs_shapes) RS_FEATURE_SCOPE=$rs_feature_scope just rs feature-shapes-changed "$rs_list" ;;
+        # The check keeps docs; the test phase enforces default-feature clippy
+        # without a second compile.
+        check:rs) just rs lint-changed "$rs_list" ;;
         check:bench)
             python3 bench/compare.test.py
             bash sh/local.sh cargo check --locked --package moq-relay --package moq-bench --features moq-relay/io-uring
@@ -457,6 +448,7 @@ run_lane() {
                 record failed
                 ((lane_status)) || lane_status=$status
                 current=
+                [[ -z "${CHECK_FAIL_FAST:-}" ]] || return "$lane_status"
                 break
             fi
             record
@@ -527,10 +519,12 @@ trap 'exit 143' TERM
 # run's stderr as it starts and ends, so a run cut off mid-phase, such as by a
 # job timeout that never reaches this script, names the phase it stopped in.
 # Every lane completes even when another fails, so one unavailable check cannot
-# hide unrelated failures.
+# hide unrelated failures; under CHECK_FAIL_FAST the first failure cancels the
+# running lanes and starts no more.
 set -m
+stopping=
 while true; do
-    while [[ -z "$lone" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
+    while [[ -z "$lone$stopping" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
         name=${lanes[next]}
         if [[ -v "alone[$name]" ]] && ((${#running[@]})); then
             break
@@ -552,9 +546,13 @@ while true; do
     name=${running[$pid]}
     unset "running[$pid]"
     [[ "$pid" != "$lone" ]] || lone=
-    if ((status)); then
+    if ((status)) && [[ -z "$stopping" ]]; then
         failed+=("$name")
         ((failed_status)) || failed_status=$status
+        if [[ -n "${CHECK_FAIL_FAST:-}" ]]; then
+            stopping=1
+            cancel
+        fi
     fi
     ((limit == 1)) || cat "$logs/$name.log"
 done

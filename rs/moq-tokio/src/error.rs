@@ -166,9 +166,9 @@ pub enum Error {
 	#[error("Iroh support is not enabled")]
 	IrohDisabled,
 
-	/// A client CA or pinned peers were configured on a stream-only server, which has no QUIC listener to verify them.
+	/// A client CA or pinned peers were configured on a server with no QUIC or `tls://` listener to verify them.
 	#[error(
-		"mTLS (--listen-tls-root or tls.peers) needs a QUIC listener (--listen); the TCP and Unix listeners never ask for a client certificate"
+		"mTLS (--listen-tls-root or tls.peers) needs a QUIC listener (--listen) or a TLS TCP listener (--listen-tcp-tls); the plaintext TCP and Unix listeners never ask for a client certificate"
 	)]
 	MtlsUnsupported,
 
@@ -229,6 +229,12 @@ pub enum Error {
 	/// A task serving this connection panicked. The panic itself is logged.
 	#[error("panicked")]
 	Panic,
+
+	/// A listener's endpoint stopped, so [`Listener::accept`](crate::Listener::accept) can never
+	/// yield another session. The endpoint's own failure is logged where it happened.
+	#[cfg(feature = "_transport")]
+	#[error("the {0} listener stopped accepting")]
+	Accept(crate::Transport),
 
 	/// Loading certificates or building the TLS config failed.
 	#[error(transparent)]
