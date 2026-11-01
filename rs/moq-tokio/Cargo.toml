@@ -19,7 +19,7 @@ default = ["net", "quic", "aws-lc-rs", "websocket", "tcp", "uds"]
 net = ["dep:moq-net", "dep:web-transport-trait"]
 # The async QUIC driver alone (`quic::driver`): moq-quic on tokio, without moq-net or
 # the MoQ backend. Needs a crypto-provider feature.
-driver = ["dep:moq-congestion", "dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash"]
+driver = ["dep:hmac", "dep:moq-congestion", "dep:moq-quic", "dep:pin-project-lite", "dep:rustc-hash", "dep:sha2"]
 # QUIC and WebTransport over moq-quic, for `https://`, `moqt://`, and `moql://`.
 quic = ["_transport", "_certs", "driver", "dep:http", "dep:web-transport-proto", "dep:reqwest", "watch", "dep:dns-lookup"]
 # Server-side certificate handling: chains loaded from disk, self-signed generation,
