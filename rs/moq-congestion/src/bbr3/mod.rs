@@ -1,4 +1,4 @@
-#[cfg(all(test, not(target_family = "wasm")))]
+#[cfg(test)]
 mod bench;
 mod max_filter;
 
@@ -408,6 +408,9 @@ pub struct Bbr3 {
     /// equivalent to BBR.full_bw_count: The number of non-app-limited round trips without large
     /// increases in BBR.full_bw.
     full_bw_count: u64,
+    /// Round trips in a row the full-bandwidth check skipped as application-limited: from
+    /// `MAX_FULL_BW_COUNT` on, the sender's own data filled none of the rounds the check needs.
+    app_limited_rounds: u64,
     /// equivalent to BBR.min_rtt_stamp: The wall clock time at which the current BBR.min_rtt
     /// sample was obtained.
     min_rtt_stamp: Option<Instant>,
@@ -635,6 +638,7 @@ impl Bbr3 {
             full_bw_now: false,
             full_bw: 0.0,
             full_bw_count: 0,
+            app_limited_rounds: 0,
             min_rtt_stamp: None,
             probe_rtt_cwnd_gain,
             probe_rtt_duration: Duration::from_millis(PROBE_RTT_DURATION_MS),
@@ -853,8 +857,10 @@ impl Bbr3 {
         }
         if let Some(rate_sample) = self.rs {
             if rate_sample.is_app_limited {
+                self.app_limited_rounds += 1;
                 return;
             }
+            self.app_limited_rounds = 0;
             if rate_sample.delivery_rate >= self.full_bw * FULL_BW_GROWTH {
                 self.reset_full_bw();
                 self.full_bw = rate_sample.delivery_rate;
@@ -1752,13 +1758,19 @@ impl Bbr3 {
     /// gain: an application-limited flow never leaves Startup, so ProbeBW_UP alone would never
     /// probe, and Startup's own gain would queue nearly twice the BDP at the bottleneck.
     ///
+    /// Startup is filled only once the full-bandwidth check has skipped its last
+    /// `MAX_FULL_BW_COUNT` rounds as application-limited, counting the rounds the probe filled
+    /// ([`Controller::on_probe_filled`]). Until then the sender's own data fills Startup's rounds,
+    /// so BBR3 measures the path without the probe, and duplicates would only perturb a flow
+    /// whose Startup ends on its own.
+    ///
     /// At most one ProbeBW_UP per `bw_probe_wait` is filled. Reno coexistence begins one every
     /// BDP's worth of rounds, about a second on a 3 Mbit/s, 40ms path: filling each would cost a
     /// sender the path holds below its target a seventh of its media in redundant data, to keep
     /// pace with Reno, which only a bulk flow needs.
     fn probe_inflight(&self) -> Option<u64> {
         let probing = match self.state {
-            BbrState::Startup => true,
+            BbrState::Startup => self.app_limited_rounds >= MAX_FULL_BW_COUNT,
             BbrState::ProbeBw(ProbeBwSubstate::Up) => self.bw_probe_fill,
             _ => false,
         };
@@ -1804,6 +1816,21 @@ impl Controller for Bbr3 {
         }
         self.rate.mark_app_limited(in_flight);
         self.probe_rtt_skip_app_limited = true;
+    }
+
+    /// Marks C.app_limited in Startup, so the probe's duplicates never end it.
+    ///
+    /// An application-limited sample above BBR.max_bw still raises it, so duplicates raise the
+    /// estimate as before, but the full-bandwidth check skips their rounds. Their growth is held
+    /// to ProbeBW_UP's gain, no more than the check's growth threshold, so their rounds read as a
+    /// plateau. Startup instead ends where it would without the probe, on rounds the sender's own
+    /// data filled. ProbeBW_UP leaves duplicates non-application-limited: its exit needs their
+    /// plateau. As in [`Controller::on_app_limited`], a full window marks nothing; ProbeRTT's
+    /// skip is left to the transport's own report.
+    fn on_probe_filled(&mut self, in_flight: u64) {
+        if self.state == BbrState::Startup && in_flight < self.cwnd {
+            self.rate.mark_app_limited(in_flight);
+        }
     }
 
     /// equivalent to UpdateRateSample, GenerateRateSample, BBRUpdateModelAndState, and
@@ -2074,6 +2101,7 @@ mod test {
                 sent: now,
                 bytes,
                 packet,
+                received: None,
             };
             assert!(self.sent.insert(pn, acked).is_none(), "{pn} sent twice");
         }
@@ -2086,6 +2114,7 @@ mod test {
                     sent,
                     bytes: bytes as u16,
                     packet: acked.packet,
+                    received: None,
                 });
             }
         }
@@ -2275,6 +2304,12 @@ mod test {
         /// Report an empty transmit poll that nothing held back, as the transport does.
         fn starve(&mut self) {
             self.bbr.on_app_limited(self.inflight);
+        }
+
+        /// Report a transmit poll the bandwidth probe filled once the application ran dry, as the
+        /// transport does.
+        fn fill_probe(&mut self) {
+            self.bbr.on_probe_filled(self.inflight);
         }
 
         /// Declare packet `pn` lost at `now_ns`, outside any ACK.
@@ -7210,7 +7245,8 @@ mod test {
         sim
     }
 
-    /// An application-limited sender may fill Startup, and the first ProbeBW_UP each
+    /// An application-limited sender may fill Startup once its own data has left Startup's last
+    /// `MAX_FULL_BW_COUNT` rounds application-limited, and the first ProbeBW_UP each
     /// `bw_probe_wait`, up to the inflight ProbeBW_UP sustains; a ProbeBW_UP begun sooner waits
     /// for the rest of the wait.
     #[test]
@@ -7219,7 +7255,30 @@ mod test {
         assert_eq!(sim.bbr.probe_inflight(), None, "no RTT sample yet");
         sim.round(0, 100, 10 * MS);
         assert_eq!(sim.bbr.state, BbrState::Startup);
+        assert_eq!(
+            sim.bbr.probe_inflight(),
+            None,
+            "the sender filled the last round"
+        );
+        let limited = |sim: &mut Sim, round: u64| {
+            let pn = sim.pn;
+            sim.starve();
+            sim.send(round * 20 * MS, 1);
+            sim.ack(round * 20 * MS + 10 * MS, [pn], true);
+        };
+        for round in 1..MAX_FULL_BW_COUNT {
+            limited(&mut sim, round);
+            assert_eq!(sim.bbr.probe_inflight(), None, "round {round}");
+        }
+        limited(&mut sim, MAX_FULL_BW_COUNT);
         assert!(sim.bbr.probe_inflight().is_some());
+        sim.round((MAX_FULL_BW_COUNT + 1) * 20 * MS, 100, 10 * MS);
+        assert_eq!(sim.bbr.state, BbrState::Startup);
+        assert_eq!(
+            sim.bbr.probe_inflight(),
+            None,
+            "the sender filled a round again"
+        );
 
         let mut sim = probed();
         assert_eq!(sim.bbr.probe_inflight(), None, "ProbeBW_DOWN");
@@ -7243,6 +7302,37 @@ mod test {
             Some(inflight),
             "once the wait passes"
         );
+    }
+
+    /// Rounds the probe fills raise the estimate but never end Startup, as the same flat rounds of
+    /// the sender's own data do; in ProbeBW_UP they stay the samples its exit reads.
+    #[test]
+    fn probe_filled_rounds_never_end_startup() {
+        for probe in [false, true] {
+            let mut sim = scripted();
+            for round in 0..6 {
+                let first = sim.pn;
+                if probe {
+                    sim.fill_probe();
+                }
+                sim.send(round * 20 * MS, 10);
+                sim.ack(round * 20 * MS + 10 * MS, first..sim.pn, false);
+            }
+            assert_eq!(sim.bbr.state == BbrState::Startup, probe, "probe {probe}");
+            if probe {
+                let max_bw = sim.bbr.max_bw;
+                let first = sim.pn;
+                sim.fill_probe();
+                sim.send(120 * MS, 20);
+                sim.ack(130 * MS, first..sim.pn, false);
+                assert!(sim.bbr.max_bw > max_bw, "the probe raised nothing");
+            }
+        }
+
+        let mut sim = probed();
+        sim.bbr.start_probe_bw_up();
+        sim.fill_probe();
+        assert!(!sim.bbr.rate.is_app_limited());
     }
 
     /// Finishing a probe ages the max-bw window once, so cruise rounds keep the probe's maximum,

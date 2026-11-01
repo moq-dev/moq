@@ -24,8 +24,8 @@
 // owner.
 //
 // What a cancel tears down depends on the call. A one-shot call (a subscribe, a
-// fetch, Request, Resolve, a TrackDemand's WantedChanged, a
-// Fill's Unused, Server.Accept) aborts on its own and leaves the
+// fetch, Request, Resolve, a TrackDemand's or Fill's WantedChanged,
+// Server.Accept) aborts on its own and leaves the
 // object it was made on usable, so the same
 // broadcast, producer, or server takes the next call. A stream read (any Next,
 // RecvGroup, ReadFrame, or the iterators over them) instead cancels the stream

@@ -1,4 +1,4 @@
-"""Exercise graph selection without installing dependencies or building WASM."""
+"""Exercise graph selection without installing dependencies."""
 
 import importlib.util
 import json
@@ -10,6 +10,9 @@ import subprocess
 import sys
 import unittest
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from test_env import dispatch_env
 
 spec = importlib.util.spec_from_file_location("select_js", Path(__file__).with_name("workspace.py"))
 selector = importlib.util.module_from_spec(spec)
@@ -25,12 +28,12 @@ class SelectionTest(unittest.TestCase):
             "js/core": {"name": "@example/core"},
             "js/view": {"name": "@example/view", "dependencies": {"@example/core": "workspace:*"}},
             "doc": {"name": "docs", "devDependencies": {"@example/view": "workspace:*"}},
-            "js/wasm": {"name": "@moq/wasm"},
-            "test/browser": {"name": "browser", "optionalDependencies": {"@moq/wasm": "workspace:*"}},
+            "js/bindings": {"name": "@example/bindings"},
+            "test/browser": {"name": "browser", "optionalDependencies": {"@example/bindings": "workspace:*"}},
             "demo/nested": {"name": "demo", "peerDependencies": {"browser": "workspace:*"}},
         }
         for package in self.packages.values():
-            if package["name"] != "@moq/wasm":
+            if package["name"] != "@example/bindings":
                 package["scripts"] = {action: "fixture" for action in ("check", "test", "build")}
         self.write()
         (self.root / "test/tsconfig.json").write_text('{"exclude":["**/dist"]}')
@@ -62,8 +65,11 @@ class SelectionTest(unittest.TestCase):
         just = tools / "just"
         subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
         calls = self.root / "calls"
-        env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", ALLOW_HOST_TOOLCHAIN="1",
-                   SELECT_CALLS=str(calls))
+        summary = self.root / "summary"
+        with patch.dict(os.environ, CI_STRICT="1", CHECK_MODULES="py", CHECK_JOBS="invalid", GITHUB_ACTIONS="true",
+                        GITHUB_BASE_REF="missing", GITHUB_STEP_SUMMARY=str(summary)):
+            env = dispatch_env(PATH=f"{tools}:{os.environ['PATH']}", ALLOW_HOST_TOOLCHAIN="1",
+                               SELECT_CALLS=str(calls))
         for script in ("markdown.sh", "shell.sh", "large-files.sh"):
             path = sh / script
             path.write_text("#!/bin/sh\nexit 0\n")
@@ -74,20 +80,19 @@ class SelectionTest(unittest.TestCase):
         subprocess.run(["bash", "sh/dispatch.sh", "ci", "base"], cwd=self.root, env=env, check=True)
         self.assertEqual(calls.read_text().splitlines(),
                          ["js test-changed", "js/auth/src/token.ts", "demo/pub/worker.ts"])
+        self.assertFalse(summary.exists())
 
     def test_cli_loads_without_shadowing_standard_library_modules(self):
         result = subprocess.run([sys.executable, str(Path(__file__).with_name("workspace.py")),
                                  "plan", "--all"], capture_output=True, text=True, check=True)
         plan = json.loads(result.stdout)
         self.assertTrue(plan["all"])
-        self.assertTrue(plan["wasm"])
         self.assertIn("@moq/auth", plan["packages"])
 
     def test_transitive_dependents_from_manifests(self):
         plan = self.plan(["js/core/src/deleted.ts"])
         self.assertEqual(set(plan["packages"]), {"@example/core", "@example/view", "docs"})
         self.assertFalse(plan["all"])
-        self.assertFalse(plan["wasm"])
 
     def test_a_bench_selects_only_its_workspace(self):
         self.assertEqual(list(self.plan(["js/core/bench/frames.ts"])["packages"]), ["@example/core"])
@@ -104,16 +109,10 @@ class SelectionTest(unittest.TestCase):
                 plan = self.plan([path])
                 self.assertTrue(plan["all"])
                 self.assertEqual(len(plan["packages"]), len(self.packages))
-                self.assertTrue(plan["wasm"])
 
-    def test_wasm_selected_by_consumer_dependency_closure(self):
-        plan = self.plan(["demo/nested/src/index.ts"])
-        self.assertEqual(list(plan["packages"]), ["demo"])
-        self.assertTrue(plan["wasm"])
-
-    def test_wasm_change_selects_transitive_consumers(self):
-        self.assertEqual(set(self.plan(["js/wasm/README.md"])["packages"]),
-                         {"@moq/wasm", "browser", "demo"})
+    def test_optional_dependency_selects_transitive_consumers(self):
+        self.assertEqual(set(self.plan(["js/bindings/README.md"])["packages"]),
+                         {"@example/bindings", "browser", "demo"})
 
     def test_multiple_seeds_and_empty_diff(self):
         self.assertEqual(set(self.plan(["doc/index.md", "test/browser/src/index.ts"])["packages"]),
@@ -184,17 +183,15 @@ class SelectionTest(unittest.TestCase):
             return type("Result", (), {"returncode": 1 if args[0] == "grep" else 0})()
         with patch.dict(selector.os.environ, GITHUB_ACTIONS=str(github_actions).lower()), \
                 patch.object(selector, "ROOT", self.root), patch.object(selector.os, "chdir"), \
-                patch.object(selector.subprocess, "run", side_effect=invoke), \
-                patch.object(selector.shutil, "which", return_value="tool"):
+                patch.object(selector.subprocess, "run", side_effect=invoke):
             selector.run(action, self.plan(paths))
         return calls
 
-    def test_executor_runs_only_selected_package_scripts_without_wasm(self):
+    def test_executor_runs_only_selected_package_scripts(self):
         calls = self.calls(["doc/index.md"])
         scripts = [c for c in calls if c[:2] == ["bun", "run"]]
         self.assertEqual(scripts, [["bun", "run", "--sequential", "--filter=docs", "--elide-lines=0", action]
                                   for action in ("check", "build")])
-        self.assertNotIn(["just", "js", "wasm", "dev"], calls)
         self.assertTrue(any(c[:2] == ["bunx", "tsc"] for c in calls))
         self.assertEqual(self.configurations, [{"extends": "./tsconfig.json", "exclude":
                           ["**/dist", str(self.root / "test/browser")]}])
@@ -212,19 +209,11 @@ class SelectionTest(unittest.TestCase):
                          ["bun", "biome", "check", "--error-on-warnings", "js", "bench/browser", "test", "doc", "demo"])
         self.assertEqual(biome(["js/core/src/index.ts"]),
                          ["bun", "biome", "check", "--error-on-warnings", "js/core", "js/view", "doc", "js/common"])
-        self.assertEqual(biome(["js/wasm/src/index.ts"]),
-                         ["bun", "biome", "check", "--error-on-warnings", "js/wasm", "test/browser", "demo/nested", "js/common"])
+        self.assertEqual(biome(["js/bindings/src/index.ts"]),
+                         ["bun", "biome", "check", "--error-on-warnings", "js/bindings", "test/browser", "demo/nested",
+                          "js/common"])
 
-    def test_build_never_generates_wasm(self):
-        self.assertNotIn(["just", "js", "wasm", "dev"], self.calls(None, "build"))
-        self.assertIn(["just", "js", "wasm", "dev"], self.calls(None, "check"))
-
-    def test_executor_builds_wasm_before_consumer_check(self):
-        calls = self.calls(["demo/nested/src/index.ts"])
-        self.assertLess(calls.index(["just", "js", "wasm", "dev"]),
-                        next(i for i, c in enumerate(calls) if c[:2] == ["bun", "run"]))
-
-    def test_tests_do_not_build_wasm_or_unselected_packages(self):
+    def test_tests_do_not_build_unselected_packages(self):
         calls = self.calls(["doc/index.md"], "test")
         self.assertIn(["bun", "run", "--sequential", "--filter=docs", "--elide-lines=0", "test"], calls)
         hosted = self.calls(["doc/index.md"], "test", github_actions=True)
