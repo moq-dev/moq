@@ -393,9 +393,9 @@ where
 /// queues: a call the foreign side cancelled but has not freed yet stops polling and holds
 /// nothing the next call needs.
 ///
-/// The bridge is what lets calls park together: the state always polls with the bridge's one
-/// waiter, which wakes every parked call, since a handle may keep one waker per wait (moq-net's
-/// track cursor does) and would otherwise wake only its latest caller. It also holds a wake the
+/// The bridge is what lets calls park together: each call polls the state with a waiter on the
+/// bridge's one waker, which wakes every parked call, since a handle may keep one waker per wait
+/// (moq-net's track cursor does) and would otherwise wake only its latest caller. It also holds a wake the
 /// state sends while locked until the lock is released, since UniFFI runs the foreign
 /// continuation on the waking thread and a binding may poll the woken call right there.
 ///
@@ -404,7 +404,8 @@ where
 /// stays pollable. [`Self::cancel`] closes a channel every poll checks, then drops the state.
 /// A call that awaits tokio channels, codecs, or I/O uses [`Task`] instead.
 pub(crate) struct Polled<T> {
-	state: kio::Bridge<Slot<T>>,
+	/// `None` once cancelled or taken.
+	state: kio::Bridge<Option<T>>,
 	/// Closed by [`Self::cancel`] and [`Self::take`], waking every parked call.
 	cancel: kio::Producer<()>,
 	driver: Background,
@@ -414,23 +415,10 @@ pub(crate) struct Polled<T> {
 	cleanup: std::sync::OnceLock<MoqError>,
 }
 
-/// What a [`Polled`] bridges.
-struct Slot<T> {
-	/// `None` once cancelled or taken.
-	state: Option<T>,
-	/// The waiter every poll hands the state, made from the bridge's waker on the first poll.
-	/// Kept across calls, so the state's registrations stay live and its one-waker waits always
-	/// see the same waker.
-	waiter: Option<kio::Waiter>,
-}
-
 impl<T> Polled<T> {
 	pub fn new(inner: T) -> Self {
 		Self {
-			state: kio::Bridge::new(Slot {
-				state: Some(inner),
-				waiter: None,
-			}),
+			state: kio::Bridge::new(Some(inner)),
 			cancel: kio::Producer::new(()),
 			driver: Background::default(),
 			calls: AtomicUsize::new(0),
@@ -463,12 +451,15 @@ impl<T> Polled<T> {
 	) -> Result<R, MoqError> {
 		self.calls.fetch_add(1, Ordering::Relaxed);
 		let _call = Call(&self.calls);
-		kio::wait(|waiter| self.poll(waiter, &mut poll)).await
+		// The waiter this call polls the state with, on the bridge's waker.
+		let mut park = kio::Park::default();
+		kio::wait(|waiter| self.poll(waiter, &mut park, &mut poll)).await
 	}
 
 	fn poll<R>(
 		&self,
 		waiter: &kio::Waiter,
+		park: &mut kio::Park,
 		poll: &mut impl FnMut(&mut T, &kio::Waiter) -> Poll<Result<R, MoqError>>,
 	) -> Poll<Result<R, MoqError>> {
 		let Some(_polling) = Polling::start() else {
@@ -486,12 +477,9 @@ impl<T> Polled<T> {
 		if self.cancel.poll_closed(waiter).is_ready() {
 			return Poll::Ready(Err(MoqError::Cancelled));
 		}
-		self.state.poll(waiter, |slot, cx| {
-			let waiter = slot.waiter.get_or_insert_with(|| kio::Waiter::new(cx.waker().clone()));
-			match slot.state.as_mut() {
-				Some(state) => poll(state, waiter),
-				None => Poll::Ready(Err(MoqError::Cancelled)),
-			}
+		self.state.poll(waiter, |state, cx| match state.as_mut() {
+			Some(state) => poll(state, park.hold(cx)),
+			None => Poll::Ready(Err(MoqError::Cancelled)),
 		})
 	}
 
@@ -502,12 +490,12 @@ impl<T> Polled<T> {
 
 	/// Read the state synchronously, or `None` once it is gone.
 	pub fn peek<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
-		self.state.lock().state.as_ref().map(f)
+		self.state.lock().as_ref().map(f)
 	}
 
 	/// Whether [Self::cancel] or [Self::take] has run.
 	pub fn is_cancelled(&self) -> bool {
-		self.state.lock().state.is_none()
+		self.state.lock().is_none()
 	}
 
 	/// Move the state to a new owner, ending this handle as [Self::cancel] would.
@@ -516,10 +504,10 @@ impl<T> Polled<T> {
 	/// [`MoqError::Cancelled`] once the state is gone.
 	pub fn take(&self, check: impl FnOnce(&T) -> Result<(), MoqError>) -> Result<T, MoqError> {
 		self.check()?;
-		let mut slot = self.state.lock();
-		check(slot.state.as_ref().ok_or(MoqError::Cancelled)?)?;
-		let inner = slot.state.take().ok_or(MoqError::Cancelled)?;
-		drop(slot);
+		let mut state = self.state.lock();
+		check(state.as_ref().ok_or(MoqError::Cancelled)?)?;
+		let inner = state.take().ok_or(MoqError::Cancelled)?;
+		drop(state);
 		let _ = self.cancel.close();
 		Ok(inner)
 	}
@@ -530,7 +518,7 @@ impl<T> Polled<T> {
 	/// Terminal: there is no way back from here, and the state is gone rather than idle.
 	pub fn cancel(&self) {
 		let _ = self.cancel.close();
-		let state = self.state.lock().state.take();
+		let state = self.state.lock().take();
 		self.release(state);
 	}
 
@@ -550,7 +538,7 @@ impl<T> Polled<T> {
 
 impl<T> Drop for Polled<T> {
 	fn drop(&mut self) {
-		let state = self.state.get_mut().state.take();
+		let state = self.state.get_mut().take();
 		self.release(state);
 	}
 }
