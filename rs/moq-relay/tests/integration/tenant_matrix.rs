@@ -42,7 +42,7 @@ fn rooted(root: &str) -> Grant {
 	let all: Patterns = [Pattern::all()].into_iter().collect();
 	let mut grant = Grant::new(all.clone(), all);
 	grant.root = Some(root.into());
-	grant.expires = Some(moq_clock::wall() + Duration::from_secs(3600));
+	grant.expires = Some(kio::clock::wall() + Duration::from_secs(3600));
 	grant.revalidate = Some(Duration::from_secs(3600));
 	grant
 }
