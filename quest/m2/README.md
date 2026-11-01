@@ -232,6 +232,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Clean ALSA playback onset](/quest/m2/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
 - [Interop audit](/quest/m2/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
+- [moq-gst playback shares one session context](/quest/m2/gst-session-context.md) - the playback helpers take one context instead of six arguments
 - [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
 - [Bindings see a broadcast end](/quest/m2/binding-broadcast-end.md) - `MoqBroadcastConsumer` exposes the close, and a moq-transport run end is a protocol error
 - [We own our WebRTC stack](/quest/m2/webrtc/README.md) - moq-rtc becomes moq-webrtc with moq-ice, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
