@@ -11,6 +11,9 @@ import sys
 import unittest
 from unittest.mock import patch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from test_env import dispatch_env
+
 spec = importlib.util.spec_from_file_location("select_js", Path(__file__).with_name("workspace.py"))
 selector = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(selector)
@@ -62,8 +65,11 @@ class SelectionTest(unittest.TestCase):
         just = tools / "just"
         subprocess.run(["git", "init", "--quiet", str(self.root)], check=True)
         calls = self.root / "calls"
-        env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", ALLOW_HOST_TOOLCHAIN="1",
-                   SELECT_CALLS=str(calls))
+        summary = self.root / "summary"
+        with patch.dict(os.environ, CI_STRICT="1", CHECK_MODULES="py", CHECK_JOBS="invalid", GITHUB_ACTIONS="true",
+                        GITHUB_BASE_REF="missing", GITHUB_STEP_SUMMARY=str(summary)):
+            env = dispatch_env(PATH=f"{tools}:{os.environ['PATH']}", ALLOW_HOST_TOOLCHAIN="1",
+                               SELECT_CALLS=str(calls))
         for script in ("markdown.sh", "shell.sh", "large-files.sh"):
             path = sh / script
             path.write_text("#!/bin/sh\nexit 0\n")
@@ -74,6 +80,7 @@ class SelectionTest(unittest.TestCase):
         subprocess.run(["bash", "sh/dispatch.sh", "ci", "base"], cwd=self.root, env=env, check=True)
         self.assertEqual(calls.read_text().splitlines(),
                          ["js test-changed", "js/auth/src/token.ts", "demo/pub/worker.ts"])
+        self.assertFalse(summary.exists())
 
     def test_cli_loads_without_shadowing_standard_library_modules(self):
         result = subprocess.run([sys.executable, str(Path(__file__).with_name("workspace.py")),
