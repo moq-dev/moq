@@ -19,10 +19,8 @@ and OBS through moq-ffi's `MoqRateControl`, `MoqVideoInit.lower`, and
 `MoqMediaTrackProducer::set_enabled`, which a pre-encoded publisher follows
 the same way.
 
-- `moq-shaper` never steps its rate limit (queued datagrams would reorder),
-  so a run whose bottleneck opens back up needs either a rate step the shaper
-  can apply without reordering, or a second shaper the first retargets to.
-- Shape it as bufferbloat: a rate limit below the top rung behind a deep but
+- Shape it with a `moq-shaper` profile whose rate steps down below the top
+  rung and back up (like the `cellular-step` built-in), behind a deep but
   finite queue whose overflow drops packets. Assert the disable, the catalog
   `enabled` flips, and the resume, not exact timings.
 - Run it nightly with an `#[ignore]` test and a recipe in `rs/justfile`,

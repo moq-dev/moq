@@ -637,9 +637,11 @@ mod tests {
 			}
 		}
 
-		fn broadcaster(&self) -> Arc<Broadcaster> {
+		fn broadcaster(&self) -> Broadcaster {
 			let source = moq_mux::Source::new(self.origin.consume(), self.broadcast.consume());
-			Broadcaster::new(source, moq_hls::export::Config::default())
+			let (broadcaster, driver) = Broadcaster::new(source, moq_hls::export::Config::default());
+			tokio::spawn(driver.run());
+			broadcaster
 		}
 
 		/// Write GOP `n`, two seconds from `2n`, to every rendition.
@@ -702,7 +704,7 @@ mod tests {
 			.collect()
 	}
 
-	fn spawn(dir: &Path, broadcaster: &Arc<Broadcaster>) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+	fn spawn(dir: &Path, broadcaster: &Broadcaster) -> tokio::task::JoinHandle<anyhow::Result<()>> {
 		let recording = Recording::create(dir.to_path_buf()).unwrap();
 		let broadcaster = broadcaster.clone();
 		tokio::spawn(async move { recording.run(&broadcaster).await })

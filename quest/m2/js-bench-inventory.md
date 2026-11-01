@@ -11,7 +11,3 @@ Found by the agent on [moq-dev/moq#7316](https://github.com/moq-dev/moq/pull/731
 Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run). Make the bench list something the checker can read (a static list Nightly loops over, or a recipe per bench) rather than teaching the checker shell indirection, and stop skipping `/bench/`.
 
 Public API: none. Wire: none.
-
-## Required
-
-- [Every opt-in test target has a CI caller](/quest/m2/test-inventory.md) - its PR, #7316, adds the checker

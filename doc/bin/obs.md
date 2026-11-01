@@ -17,7 +17,7 @@ The client's automatic reconnects keep the same epoch. A stop/start, or an OBS
 auto-reconnect after the client gives up, republishes the broadcast under a new
 epoch, which peers using an epoch-capable protocol see as a new publisher run.
 
-MoQ Source follows catalog changes while keeping the current audio and video playing until a replacement produces decoded output. A failed replacement leaves the current rendition playing; removing a media kind from the catalog clears it. It also follows a restarted or replaced publisher, playing the new one from its first keyframe.
+MoQ Source plays the best enabled audio and video rendition it can decode and place. It follows catalog changes while keeping the current audio and video playing until a replacement produces decoded output. A failed replacement leaves the current rendition playing. Disabling every rendition of a media kind keeps the one already playing; removing the media kind from the catalog clears it. It also follows a restarted or replaced publisher, including a sibling broadcast the catalog points at, playing the new one from its first keyframe.
 
 The source plays Opus, AAC-LC (mono or stereo), and PCM audio. A channel count names its speakers by the WAVE convention: 1, 2, 3 (2.1), 6 (5.1), and 8 (7.1) play on the matching OBS layout, while quad and 5.0 are upmixed to 5.1 and 6.1 to 7.1, which OBS lacks. Other counts are refused.
 
@@ -119,7 +119,8 @@ otherwise pass to `moq` on the command line: pinning a protocol version, the
 local bind address and connect timing, trusting a self-signed relay or private
 CA, reconnect pacing, QUIC tuning (congestion control, idle timeout,
 keep-alive, segmentation offload, MTU discovery, and qlog traces when the build
-supports them), and the WebSocket fallback race. A rejected value stops the
+supports them), and the WebSocket fallback race. A keep-alive interval of 0
+uses the negotiated idle timeout to choose how often to ping. A rejected value stops the
 stream with the reason in the log rather than silently using a default.
 To decrypt a packet capture, turn on **TLS key log** here or in a MoQ Source's
 properties and start OBS with `SSLKEYLOGFILE` naming the file; the variable

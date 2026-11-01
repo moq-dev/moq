@@ -29,6 +29,10 @@ public enum Media {
     public typealias Audio = MoqFFI.MoqAudio
     /// A width and height in pixels.
     public typealias Dimensions = MoqFFI.MoqDimensions
+    /// How far behind the live edge a decoder plays: `min` is the playout delay and where a
+    /// cold join starts, and `max`, nil for no limit, is how far a stalled group may fall
+    /// behind before it is skipped. `min` stays on the consumer; a `min` past `max` starts at `max`.
+    public typealias Delay = MoqFFI.MoqDelay
     /// Where an audio or video decoder starts on a track that already holds
     /// groups: `.latest` for a live player.
     public typealias DecodeStart = MoqFFI.MoqDecodeStart
@@ -91,7 +95,9 @@ public enum Media {
         /// Read the broadcast clock in microseconds, fixing it for subsequent media producers.
         public func now() throws -> UInt64 { try ffi.now() }
         /// Replace the video properties shared by every rendition.
-        public func setVideoProperties(_ properties: VideoProperties) throws { try ffi.setVideoProperties(properties: properties) }
+        public func setVideoProperties(_ properties: VideoProperties) throws {
+            try ffi.setVideoProperties(properties: properties)
+        }
         /// Set an application catalog section from its serialized JSON value.
         public func setSection(name: String, json: String) throws { try ffi.setSection(name: name, json: json) }
         /// Remove an application catalog section if present.
@@ -225,14 +231,19 @@ public enum Media {
         let ffi: MoqMediaTrackProducer
 
         /// Import complete audio frames on a named or requested track.
-        public static func audio(broadcast: BroadcastProducer, initData: AudioInit, target: Target = .named(name: nil)) throws -> TrackProducer {
+        public static func audio(broadcast: BroadcastProducer, initData: AudioInit, target: Target = .named(name: nil))
+            throws -> TrackProducer
+        {
             TrackProducer(try MoqMediaTrackProducer.audio(broadcast: broadcast.ffi, target: target.ffi, init: initData))
         }
         /// Import complete video frames on a named or requested track.
         ///
         /// Pass `lower`, the next lower rendition of the same source, to publish this track one
         /// priority below it, so a bandwidth allocator funds that one first.
-        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil), lower: TrackProducer? = nil) throws -> TrackProducer {
+        public static func video(
+            broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil),
+            lower: TrackProducer? = nil
+        ) throws -> TrackProducer {
             var initData = initData
             if let lower { initData.lower = lower.ffi }
             return TrackProducer(try MoqMediaTrackProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
@@ -337,10 +348,14 @@ public enum Media {
         /// Import a video byte stream, inferring frame boundaries.
         ///
         /// `lower` is as for ``TrackProducer/video(broadcast:initData:target:lower:)``.
-        public static func video(broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil), lower: TrackProducer? = nil) throws -> TrackStreamProducer {
+        public static func video(
+            broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil),
+            lower: TrackProducer? = nil
+        ) throws -> TrackStreamProducer {
             var initData = initData
             if let lower { initData.lower = lower.ffi }
-            return TrackStreamProducer(try MoqMediaTrackStreamProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
+            return TrackStreamProducer(
+                try MoqMediaTrackStreamProducer.video(broadcast: broadcast.ffi, target: target.ffi, init: initData))
         }
         init(_ ffi: MoqMediaTrackStreamProducer) {
             self.ffi = ffi
