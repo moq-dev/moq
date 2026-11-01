@@ -1405,11 +1405,6 @@ pub(super) fn get_or_insert_recv(opt: &mut Option<StreamRecv>, initial_max_data:
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use super::*;
 	use crate::{
@@ -4652,6 +4647,11 @@ mod tests {
 	/// The lease cost must stay flat as the stream count grows.
 	#[test]
 	#[ignore = "release benchmark, run by nightly"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures real receive cost"
+	)]
 	fn benchmark_receive_credit() {
 		const BYTES: usize = 1 << 30;
 		println!("streams,payload,plain_ns_per_read,lease_ns_per_read");

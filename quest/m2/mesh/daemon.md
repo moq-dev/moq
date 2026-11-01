@@ -23,6 +23,10 @@ the epic's first shippable outcome.
   configure.
 - Nothing is served unless `serve` names it. A restart keeps the endpoint key
   and enrollment, so a node never re-enrolls on its own.
+- Enroll with an enrollment key and renew with `moq_auth::mesh::Client`,
+  signing with the endpoint key through its `Signer` trait, and pass the
+  hostname as the default name. The
+  contract is in `doc/bin/relay/auth.md#mesh-enrollment`.
 - Decided 2026-10-31 (maintainer): install defaults to a system service
   because macOS exempts launchd daemons and root from Local Network privacy
   but prompts launchd agents, and a denied prompt silently breaks LAN
@@ -32,5 +36,4 @@ the epic's first shippable outcome.
 ## Required
 
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - upstream links and LAN preference
-- [Enrollment](/quest/m2/mesh/enroll.md) - the relay URLs and token the daemon runs on
 - [Endpoint API](/quest/m2/mesh/endpoint.md) - the streams `serve` and `pipe` use

@@ -2727,7 +2727,11 @@ mod tests {
 						}
 						let (track, _callers, tail, sub, scan, fetches) = &mut fixtures[0];
 						moq_clock::sim::yield_now().await;
-						#[expect(clippy::disallowed_methods, reason = "the scan cost is real elapsed time")]
+						#[expect(
+							clippy::disallowed_methods,
+							clippy::disallowed_types,
+							reason = "the scan cost is real elapsed time"
+						)]
 						let began = std::time::Instant::now();
 						for sequence in runs * 2..runs * 2 + EVENTS {
 							arrive(track, tail, sequence, start);
@@ -2737,6 +2741,7 @@ mod tests {
 								scan.poll(sub, start, &waiter);
 							}
 						}
+						#[expect(clippy::disallowed_methods, reason = "the scan cost is real elapsed time")]
 						samples.push(began.elapsed().as_nanos() / u128::from(EVENTS));
 					}
 					samples.sort_unstable();
