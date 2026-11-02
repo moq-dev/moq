@@ -349,6 +349,7 @@ impl Client {
 				let config = opened.config;
 				let session = qmux::Session::connect(opened.channel, config)
 					.await
+					.map(crate::spawn_qmux)
 					.map_err(crate::webrtc::Error::from)?;
 				Ok::<_, Error>(connect_session(&self.moq, session).await?)
 			};
