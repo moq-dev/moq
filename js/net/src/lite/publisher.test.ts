@@ -163,7 +163,7 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 		await settle();
 		const initial = written.length;
 
-		// Another broadcast at the path, without an epoch: another instance.
+		// Another broadcast at the path, without an instance: another instance.
 		const republished = publish(origin, Path.from("cam"));
 		await settle();
 		const bytes = Uint8Array.from(written.slice(initial).flatMap((chunk) => [...chunk]));

@@ -80,6 +80,8 @@ fn grant(path: &str) -> Grant {
 	grant
 }
 
+const LITE_07: &str = "moq-lite-07-wip";
+
 async fn node(id: u64, connect: Vec<Peer>) -> Node {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let mut tasks = tokio::task::JoinSet::new();
@@ -88,6 +90,9 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 	listen.tcp.bind = Some("127.0.0.1:0".parse().expect("parse addr"));
 	listen.tcp.tls = Some(true);
 	listen.tls.generate = vec!["localhost".into()];
+	// Links speak lite-07, which carries each route's instance, so every edge ranks a path's
+	// routes alike: over an older version each edge mints instances of its own.
+	listen.version = vec![LITE_07.parse().expect("lite-07")];
 	let mut listener = listen
 		.init(Default::default())
 		.expect("server init")
@@ -98,6 +103,7 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 
 	let mut client = moq_tokio::connect::Config::default();
 	client.tls.insecure = Some(true);
+	client.version = vec![LITE_07.parse().expect("lite-07")];
 
 	let mut config = cluster::Config::default();
 	config.id = Some(id);

@@ -366,7 +366,7 @@ std::optional<moq::Catalog> relayCatalog(const std::shared_ptr<moq::BroadcastCon
 // The production commit boundary lets a real stats call race retirement without
 // callbacks or branches in the output's hot path.
 struct MoQOutputStatsTest {
-	static std::optional<std::string> Epoch(MoQOutput &output)
+	static std::optional<std::string> Instance(MoQOutput &output)
 	{
 		std::shared_ptr<moq::OriginProducer> origin;
 		{
@@ -381,7 +381,9 @@ struct MoQOutputStatsTest {
 		if (!event)
 			return std::nullopt;
 		const auto *start = std::get_if<moq::AnnounceEvent::kStart>(&event->get_variant());
-		return start ? start->announce.route.epoch : std::nullopt;
+		if (!start)
+			return std::nullopt;
+		return start->announce.route.instance;
 	}
 
 	static std::shared_ptr<moq::Session> Session(MoQOutput &output)
@@ -457,26 +459,22 @@ int main()
 		reset(relay.Url());
 		MoQOutput output(nullptr, OUTPUT);
 		CHECK(output.Start());
-		const auto first = MoQOutputStatsTest::Epoch(output);
-		CHECK(first.has_value());
-		CHECK(first == output.GetEpoch());
+		const auto first = MoQOutputStatsTest::Instance(output);
+		CHECK(first.has_value() && !first->empty());
 		CHECK(WaitFor([&] { return output.IsLiveSession() && relay.Accepted() == 1; }));
 		// The plugin names itself ahead of the C++ package, so a relay can tell it apart.
 		CHECK(relay.Advertised("moq-obs/dev moq-cpp/"));
 		relay.DropSessions();
 		CHECK(WaitFor([&] { return output.GetReconnectCount() == 1 && output.IsLiveSession(); }));
-		CHECK(MoQOutputStatsTest::Epoch(output) == first);
-		CHECK(first == output.GetEpoch());
+		CHECK(MoQOutputStatsTest::Instance(output) == first);
 		output.Stop();
-		CHECK(output.GetEpoch().empty());
 		CHECK(output.Start());
-		const auto second = MoQOutputStatsTest::Epoch(output);
-		CHECK(second.has_value());
+		const auto second = MoQOutputStatsTest::Instance(output);
+		CHECK(second.has_value() && !second->empty());
 		CHECK(second != first);
-		CHECK(second == output.GetEpoch());
 		output.Stop();
 	}
-	printf("each start announces a fresh epoch, reconnect preserves it: ok\n");
+	printf("each start announces a fresh instance, reconnect preserves it: ok\n");
 
 	{
 		TestRelay relay;

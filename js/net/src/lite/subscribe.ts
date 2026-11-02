@@ -1,9 +1,9 @@
-import type * as Epoch from "../epoch.ts";
 import { fromTransport, ProtocolViolation, StreamCode, StreamError, toStreamCode } from "../error.ts";
+import type * as Instance from "../instance.ts";
 import * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import type { Order, Position } from "../track.ts";
-import { decodeEpoch, encodeEpoch } from "./epoch.ts";
+import { decodePin, encodePin } from "./instance.ts";
 import * as Message from "./message.ts";
 import { fromWire, toWire } from "./priority.ts";
 import {
@@ -457,7 +457,7 @@ export class Subscribe {
 	id: bigint;
 	broadcast: Path.Valid;
 	/** The publisher instance the subscriber expects. Lite-07+. */
-	epoch?: Epoch.Valid;
+	instance?: Instance.Valid;
 	track: string;
 	priority: number;
 	/**
@@ -498,7 +498,7 @@ export class Subscribe {
 	constructor(props: {
 		id: bigint;
 		broadcast: Path.Valid;
-		epoch?: Epoch.Valid;
+		instance?: Instance.Valid;
 		track: string;
 		priority: number;
 		order?: Order;
@@ -512,7 +512,7 @@ export class Subscribe {
 	}) {
 		this.id = props.id;
 		this.broadcast = props.broadcast;
-		this.epoch = props.epoch;
+		this.instance = props.instance;
 		this.track = props.track;
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
@@ -528,7 +528,7 @@ export class Subscribe {
 	async #encode(w: Writer, version: Version) {
 		await w.u62(this.id);
 		await w.string(Path.encode(this.broadcast));
-		await encodeEpoch(w, version, this.epoch);
+		await encodePin(w, version, this.instance);
 		await w.string(this.track);
 		await w.u8(toWire(this.priority));
 
@@ -548,7 +548,7 @@ export class Subscribe {
 	static async #decode(r: Reader, version: Version): Promise<Subscribe> {
 		const id = await r.u62();
 		const broadcast = Path.decode(await r.string());
-		const epoch = await decodeEpoch(r, version);
+		const instance = await decodePin(r, version);
 		const track = await r.string();
 		const priority = fromWire(await r.u8());
 
@@ -564,7 +564,7 @@ export class Subscribe {
 				return new Subscribe({
 					id,
 					broadcast,
-					epoch,
+					instance,
 					track,
 					priority,
 					order,
