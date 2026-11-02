@@ -99,7 +99,7 @@ final encoder = video.Producer(
   ),
 );
 encoder.write(frame: video.Frame(timestamp: pts, data: rgba));
-camera.announce(route: AnnounceRoute(epoch: mintEpoch()));
+camera.announce(route: AnnounceRoute());
 encoder.finish();
 ```
 
@@ -132,7 +132,7 @@ final track = mine.publishTrack(name: 'video', info: null);
 final group = track.appendGroup();
 group.writeFrame(frame: Frame(payload: bytes, timestamp: null));
 group.finish();
-publication.announce(route: AnnounceRoute(epoch: mintEpoch())); // a fresh epoch per run
+publication.announce(route: AnnounceRoute()); // the broadcast mints its own instance
 track.finish();
 mine.close();
 
