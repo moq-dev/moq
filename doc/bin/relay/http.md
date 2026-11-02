@@ -98,7 +98,10 @@ With `--runtime-io-uring`, each QUIC worker also reports `moq_relay_uring_*`
 counters under a `worker` label. Datagrams per enter and the SQE/CQE
 histograms show whether syscalls carry useful work. Compare turns and
 queue-pressure enters with throughput: flushing deferred work can remove
-empty busy turns, so enters/turn alone does not grade efficiency. The
+empty busy turns, so enters/turn alone does not grade efficiency.
+`moq_relay_uring_passes_total` over turns is how many passes over its woken
+tasks a turn runs; a ratio near the default budget of 4 shows heavy use of
+the pass budget but does not prove that work spilled into the next turn. The
 histograms include empty enters. A dead worker shows stuck zeros rather than
 disappearing.
 
