@@ -117,13 +117,14 @@ export function firstEligible<T extends { readonly route: Route; readonly prefix
 	admits: (candidate: T) => boolean = () => true,
 ): T | undefined {
 	const admitted = candidates.filter(admits);
-	return admitted.find(
-		(candidate) =>
-			!superseded(
-				candidate.route,
-				admitted.filter((other) => other.prefix === candidate.prefix).map((other) => other.route),
-			),
-	);
+	const byPrefix = new Map<Path.Valid | undefined, Route[]>();
+	for (const candidate of admitted) {
+		const routes = byPrefix.get(candidate.prefix);
+		if (routes) routes.push(candidate.route);
+		else byPrefix.set(candidate.prefix, [candidate.route]);
+	}
+	const epochs = new Map([...byPrefix].map(([prefix, routes]) => [prefix, new Epochs(routes)]));
+	return admitted.find((candidate) => !epochs.get(candidate.prefix)?.supersedes(candidate.route));
 }
 
 /** Whether the announced prefix's subtree overlaps `scope`. */
@@ -941,10 +942,31 @@ export function* coveringPrefixes(path: Path.Valid): Generator<Path.Valid> {
  * however cheap, since its publisher was replaced.
  */
 export function superseded(route: Route, others: Iterable<Route>): boolean {
-	for (const other of others) {
-		if (other.instance === route.instance && (other.epoch ?? 0n) > (route.epoch ?? 0n)) return true;
+	return new Epochs(others).supersedes(route);
+}
+
+/**
+ * The highest epoch each instance reaches among a set of routes, built in one pass so ranking
+ * N routes stays linear. Only epochs above 0 are kept, since nothing is below 0: the common
+ * case, where every instance announces epoch 0, stores nothing. Mirrors `Epochs` in rs/moq-net.
+ */
+export class Epochs {
+	readonly #highest = new Map<Instance.Valid | undefined, bigint>();
+
+	constructor(routes: Iterable<Route>) {
+		for (const route of routes) {
+			const epoch = route.epoch ?? 0n;
+			if (epoch === 0n) continue;
+			const highest = this.#highest.get(route.instance);
+			if (highest === undefined || epoch > highest) this.#highest.set(route.instance, epoch);
+		}
 	}
-	return false;
+
+	/** Whether a route carries `route`'s instance at a higher epoch. */
+	supersedes(route: Route): boolean {
+		const highest = this.#highest.get(route.instance);
+		return highest !== undefined && highest > (route.epoch ?? 0n);
+	}
 }
 
 /** Prefer identified publishers, then lower static cost. */

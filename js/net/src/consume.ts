@@ -2,7 +2,7 @@ import type * as broadcast from "./broadcast.ts";
 import { StreamCode, StreamError } from "./error.ts";
 import type { Route } from "./hop.ts";
 import * as Instance from "./instance.ts";
-import { compareRouteCandidates, coveringPrefixes, superseded } from "./internal.ts";
+import { compareRouteCandidates, coveringPrefixes, Epochs } from "./internal.ts";
 import type * as Path from "./path.ts";
 import { type Served, sameInstance } from "./wire.ts";
 
@@ -85,9 +85,9 @@ export class BroadcastCache {
 			const entries = this.#announced.get(prefix);
 			if (!entries) continue;
 			let best: { identity: object; route: Route } | undefined;
-			const routes = [...entries.values()].map((entry) => entry.route);
+			const epochs = new Epochs([...entries.values()].map((entry) => entry.route));
 			for (const entry of entries.values()) {
-				if (superseded(entry.route, routes)) continue;
+				if (epochs.supersedes(entry.route)) continue;
 				if (!best || compareRouteCandidates(path, prefix, entry.route, best.route) < 0) best = entry;
 			}
 			if (best) {

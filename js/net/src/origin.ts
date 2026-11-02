@@ -21,6 +21,7 @@ import {
 	compareRouteCandidates,
 	compareRoutes,
 	coveringPrefixes,
+	Epochs,
 	firstEligible,
 	hiddenBelow,
 	hooks,
@@ -318,11 +319,11 @@ function preferredEntry(
 ): RouteEntry | undefined {
 	const eligible = entries.filter((entry) => !skip?.(entry));
 	// `others` compete at the prefix too, such as a broadcast announced here at the path.
-	const routes = [...eligible.map((entry) => entry.route.peek()), ...others];
+	const epochs = new Epochs([...eligible.map((entry) => entry.route.peek()), ...others]);
 	let best: RouteEntry | undefined;
 	for (const entry of eligible) {
 		// Only the highest epoch of an instance is eligible, however cheap an older one is.
-		if (superseded(entry.route.peek(), routes)) continue;
+		if (epochs.supersedes(entry.route.peek())) continue;
 		if (!best) {
 			best = entry;
 			continue;

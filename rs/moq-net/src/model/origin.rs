@@ -656,15 +656,32 @@ fn chain_key(path: &str, hops: &Hops) -> u64 {
 	fnv_key(path, hops.iter().flat_map(|hop| hop.id().to_le_bytes()))
 }
 
-/// Whether a candidate among `candidates` carries `entry`'s instance at a higher epoch
-/// on the same prefix: an older incarnation of an instance is never eligible, however
-/// cheap, since its publisher was replaced.
-fn superseded<'a>(entry: &RouteEntry, mut candidates: impl Iterator<Item = &'a RouteEntry>) -> bool {
-	candidates
-		.any(|other| other.epoch > entry.epoch && other.instance == entry.instance && other.prefix == entry.prefix)
+/// The highest epoch each instance reaches among a set of candidates, per prefix: an older
+/// incarnation of an instance is never eligible, however cheap, since its publisher was
+/// replaced. Built in one pass, so ranking N candidates stays linear. Only epochs above 0
+/// are kept, since nothing is below 0: the common case, where every instance announces
+/// epoch 0, allocates nothing.
+struct Epochs<'a>(HashMap<(&'a Path, &'a Instance), u64>);
+
+impl<'a> Epochs<'a> {
+	fn of(candidates: impl Iterator<Item = &'a RouteEntry>) -> Self {
+		let mut highest = HashMap::new();
+		for entry in candidates.filter(|entry| entry.epoch > 0) {
+			let epoch = highest.entry((&entry.prefix, &entry.instance)).or_insert(0);
+			*epoch = (*epoch).max(entry.epoch);
+		}
+		Self(highest)
+	}
+
+	/// Whether a candidate carries `entry`'s instance at a higher epoch on the same prefix.
+	fn superseded(&self, entry: &RouteEntry) -> bool {
+		self.0
+			.get(&(&entry.prefix, &entry.instance))
+			.is_some_and(|&highest| highest > entry.epoch)
+	}
 }
 
-/// Ordering key for an eligible route entry resolving `path` (see [`superseded`]).
+/// Ordering key for an eligible route entry resolving `path` (see [`Epochs`]).
 /// Lower wins: the higher link [`Preference`], so metrics from different operators are
 /// never compared. Then an identified chain (no 0) outranks an anonymous one regardless
 /// of cost, then the cheapest cost, then a broadcast published on this origin (it serves
@@ -1721,9 +1738,10 @@ impl TableCursor {
 	/// then the first eligible one in [`route_order`].
 	fn best<'a>(&self, candidates: impl Iterator<Item = &'a RouteEntry> + Clone) -> Option<&'a RouteEntry> {
 		let visible = candidates.filter(|entry| self.visible(entry));
+		let epochs = Epochs::of(visible.clone());
 		visible
 			.clone()
-			.filter(|entry| !superseded(entry, visible.clone()))
+			.filter(|entry| !epochs.superseded(entry))
 			.min_by_key(|entry| (Reverse(entry.prefix.len()), route_order(&entry.prefix, entry)))
 	}
 
@@ -4840,10 +4858,11 @@ impl RouteTable {
 				.filter(|entry| only(entry))
 				.peekable();
 			if candidates.peek().is_some() {
+				let epochs = Epochs::of(candidates.clone());
 				best = candidates
 					.clone()
 					.filter(|entry| entry.serves(path))
-					.filter(|entry| !superseded(entry, candidates.clone()))
+					.filter(|entry| !epochs.superseded(entry))
 					.min_by_key(|entry| route_order(path, entry));
 			}
 		}
@@ -5199,7 +5218,8 @@ impl OriginState {
 						.iter()
 						.map(|(_, entry)| *entry)
 						.filter(|entry| cursor.visible(entry));
-					let best = visible.clone().find(|entry| !superseded(entry, visible.clone()));
+					let epochs = Epochs::of(visible.clone());
+					let best = visible.clone().find(|entry| !epochs.superseded(entry));
 					cursor.update(&presented, best, now, routes);
 				}
 			}
