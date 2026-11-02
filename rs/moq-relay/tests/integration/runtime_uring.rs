@@ -1319,5 +1319,8 @@ async fn uring_startup_reports_the_memlock_limit() {
 	] {
 		assert!(message.contains(expected), "{message}");
 	}
-	running.await.expect("join relay").expect_err("run fails with the waiter");
+	running
+		.await
+		.expect("join relay")
+		.expect_err("run fails with the waiter");
 }
