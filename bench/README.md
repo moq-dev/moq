@@ -462,6 +462,36 @@ use the same fixtures, with byte rates counting the encoded stream size.
 Fixture generation, publisher setup and destruction stay outside timing.
 The shared Rust benchmark nightly invocation measures both targets in quick mode.
 
+## Auth verification
+
+`moq-auth`'s `verify` target measures what `moq auth serve` spends on one JWT:
+
+```bash
+nix develop --command cargo bench --locked --manifest-path rs/moq-auth/Cargo.toml --bench verify
+```
+
+`decide` runs `Policy::decide` end to end for every supported algorithm against a
+key file, a key directory and a one-key set, rereading and importing the key as the
+server does per request. `stage` times each part alone: the async file read beside a
+blocking one, key and set parsing, header decoding, `kid` lookup, import, and
+verification with a fresh (`verify_cold`) or already used (`verify_warm`) key. `set`
+sweeps the set size (1, 16, 256) against a first, last or missing `kid`; `refuse`
+covers expired, forged, unknown-`kid`, `kid`-less and malformed tokens. `clients`
+runs 1, 16 or 64 concurrent requests on a four-worker runtime against one key, a
+16-key directory or a 16-key set, plus a refusal burst and a key replaced and
+removed by atomic rename during the requests; each prints its per-request
+p50/p95/p99 after the run. `sessions` times a `connect` and `end` while the
+server's session limits count 0, 1024 or 16384 other live sessions. `http` is one
+HS256 or ES256 `connect` as a relay sends it, a `POST /` over loopback TCP, which
+puts the verification in scale.
+
+Validity checks read a manual clock, so every run decides alike. Set
+`VERIFY_FIXTURE` to a directory to reuse its keys and tokens across runs, and
+`VERIFY_CASE` with `VERIFY_ITERATIONS=n` to skip Criterion and run one case exactly
+`n` times, printing its allocations per iteration. Under `perf stat`, the
+instruction difference between `n` and 0 iterations, divided by `n`, is that case's
+deterministic cost on a loaded host. It runs nightly in the `rust-extra` group.
+
 ## Nightly trends
 
 <https://git.moq.dev/bench/> is one static table of every nightly series,

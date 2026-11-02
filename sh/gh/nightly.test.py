@@ -158,6 +158,7 @@ class NightlyTest(unittest.TestCase):
                 if args[:3] != ["just", "gh", "criterion"]:
                     continue
                 packages = [args[i + 1] for i, arg in enumerate(args) if arg == "-p"]
+                packages += [Path(args[i + 1]).parent.name for i, arg in enumerate(args) if arg == "--manifest-path"]
                 targets = [args[i + 1] for i, arg in enumerate(args) if arg == "--bench"]
                 names = set()
                 for package in packages:
