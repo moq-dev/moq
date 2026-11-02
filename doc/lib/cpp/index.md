@@ -56,6 +56,9 @@ Rust core, so a program links one of the two, never both.
 
 ## Example
 
+Announcement captures are a required vector of wildcard matches, empty when
+the filter has no wildcards.
+
 Every fallible call returns `moq::expected`, and nothing throws. The samples
 unwrap results with this helper, which stops the program on an error; a real
 app branches on the error instead (see [Errors](#errors)).
@@ -139,9 +142,7 @@ moq::VideoEncoderOutput output{moq::VideoCodec::kH264, std::nullopt, std::nullop
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
 auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba, 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
 ok(video->write({{0, 30'000}, rgba}));
-moq::AnnounceRoute route;
-route.epoch = moq::mint_epoch(); // a fresh epoch per run
-ok(publication->announce(route));
+ok(publication->announce({})); // each broadcast mints a fresh instance
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
 
@@ -238,9 +239,8 @@ Set `ClientConfig::tokens` instead of putting the credential in the URL. The fir
 ## Shutdown
 
 `session->shutdown()` requests a drain immediately; `session->closed().get()` waits up to one second and reports its result.
-Application delivery requires explicitly selecting `moq-lite-07-wip` on both
-peers; older Lite versions (including default lite-06) and IETF wait only for
-transport ACKs. Finish or abort live tracks first.
+moq-lite-05 and newer wait for the peer to receive finished tails; older Lite
+versions and IETF wait only for transport ACKs. Finish or abort live tracks first.
 
 To end a broadcast cleanly, finish every track, then call `catalog->finish()` on
 its `moq::MediaCatalogProducer` to finish the catalog, which ends the content.

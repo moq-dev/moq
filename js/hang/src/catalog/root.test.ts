@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import * as z from "@zod/mini";
 import { u53 } from "./integers.ts";
-import type { ReferenceEpoch, RelativeBroadcast } from "./path.ts";
+import type { ReferenceInstance, RelativeBroadcast } from "./path.ts";
 import { checkRenditions, DuplicateRendition, encode, RootSchema, UnsupportedVersion, VERSION } from "./root.ts";
 import { track } from "./track.ts";
 
@@ -50,21 +50,21 @@ test("rendition broadcast reference is parsed and normalized", () => {
 	}
 });
 
-// Mirrors Rust's `reference_epochs_roundtrip_in_every_section`.
-test("every reference-bearing section carries an optional epoch", () => {
-	const EPOCH = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceEpoch;
-	const catalog = (epoch: string) => ({
-		contributions: { c: { broadcast: "./a", epoch } },
+// Mirrors Rust's `reference_instances_roundtrip_in_every_section`.
+test("every reference-bearing section carries an optional instance", () => {
+	const INSTANCE = "01890a5d-ac96-774b-bcce-b302099a8057" as ReferenceInstance;
+	const catalog = (instance: string) => ({
+		contributions: { c: { broadcast: "./a", instance } },
 		video: {
 			renditions: {
-				v: { broadcast: "./a", epoch, codec: "avc1.64001f", container: { kind: "legacy" } },
+				v: { broadcast: "./a", instance, codec: "avc1.64001f", container: { kind: "legacy" } },
 			},
 		},
 		audio: {
 			renditions: {
 				a: {
 					broadcast: "./a",
-					epoch,
+					instance,
 					codec: "opus",
 					sampleRate: 48000,
 					numberOfChannels: 2,
@@ -72,25 +72,23 @@ test("every reference-bearing section carries an optional epoch", () => {
 				},
 			},
 		},
-		text: { renditions: { t: { broadcast: "./a", epoch, format: "vtt" } } },
-		json: { tracks: { j: { broadcast: "./a", epoch, mode: "snapshot" } } },
-		binary: { tracks: { b: { broadcast: "./a", epoch, mode: "snapshot" } } },
+		text: { renditions: { t: { broadcast: "./a", instance, format: "vtt" } } },
+		json: { tracks: { j: { broadcast: "./a", instance, mode: "snapshot" } } },
+		binary: { tracks: { b: { broadcast: "./a", instance, mode: "snapshot" } } },
 	});
 
-	const parsed = RootSchema.parse(catalog(EPOCH));
+	const parsed = RootSchema.parse(catalog(INSTANCE));
 	if (!parsed.video) throw new Error("missing video section");
 	if (!parsed.audio) throw new Error("missing audio section");
-	expect(parsed.video.renditions.v?.epoch).toBe(EPOCH);
-	expect(parsed.audio.renditions.a?.epoch).toBe(EPOCH);
-	expect(parsed.text?.renditions.t?.epoch).toBe(EPOCH);
-	expect(parsed.json?.tracks.j?.epoch).toBe(EPOCH);
-	expect(parsed.binary?.tracks.b?.epoch).toBe(EPOCH);
-	expect(parsed.contributions?.c?.epoch).toBe(EPOCH);
+	expect(parsed.video.renditions.v?.instance).toBe(INSTANCE);
+	expect(parsed.audio.renditions.a?.instance).toBe(INSTANCE);
+	expect(parsed.text?.renditions.t?.instance).toBe(INSTANCE);
+	expect(parsed.json?.tracks.j?.instance).toBe(INSTANCE);
+	expect(parsed.binary?.tracks.b?.instance).toBe(INSTANCE);
+	expect(parsed.contributions?.c?.instance).toBe(INSTANCE);
 
-	// A malformed or noncanonical epoch refuses the catalog, as in Rust.
-	for (const bad of ["not-a-uuid", EPOCH.toUpperCase(), "01890a5d-ac96-474b-bcce-b302099a8057"]) {
-		expect(RootSchema.safeParse(catalog(bad)).success).toBe(false);
-	}
+	// An empty instance refuses the catalog, as in Rust.
+	expect(RootSchema.safeParse(catalog("")).success).toBe(false);
 });
 
 // Mirrors Rust's `contributions_roundtrip_and_refuse_malformed_entries`.
@@ -110,7 +108,7 @@ test("a contribution parses beside a same-ID rendition and a malformed one is re
 		{ alice: null },
 		{ alice: {} },
 		{ alice: { broadcast: 42 } },
-		{ alice: { broadcast: "./alice.hang", epoch: "not-an-epoch" } },
+		{ alice: { broadcast: "./alice.hang", instance: "" } },
 	]) {
 		expect(RootSchema.safeParse({ contributions }).success).toBe(false);
 	}
