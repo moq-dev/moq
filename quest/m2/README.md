@@ -23,7 +23,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Sockets](/quest/m2/socket/README.md) - a generic dial/accept `Socket` in moq-net, Rust, JS, and Python, with tracks as streams; moq-boy and CARLA move onto it
 - [Announce credit](/quest/m2/announce-credit.md) - a subscriber bounds an Announce Stream's routes with credit at the wire, so a path flood never closes a session
 - [JS announced coalescing](/quest/m2/js-announced-coalesce.md) - `@moq/net`'s `Announced` keeps one pending event per path, like Rust
-- [Mesh](/quest/m2/mesh/README.md) - `moq mesh` enrolls a host, robot, or app and reaches any node by endpoint ID or name for SSH, forwards, and agents, over relays or a sparse direct overlay
+- [Mesh libraries](/quest/m2/mesh/README.md) - an `Endpoint` reaches any enrolled node by endpoint ID over relays or a sparse direct overlay, with address hints and a `.status` track; the mesh binary and UI live in Kixel
 - [Byte streams](/quest/m2/stream/README.md) - TCP connections ride MoQ losslessly through relays, proxied per hop rather than as IP packets
 - [Release execution](/quest/m2/release/README.md) - publication, installed-artifact proof, cleanup, and downstream adoption after m1
 - [Untrusted media parsers have fuzz targets](/quest/m2/media-fuzz.md) - fMP4, MKV, FLV, TS, Annex-B, catalog, and AMF0 parsing fuzzed with a bounded-work invariant
@@ -193,7 +193,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Auth session caps cost O(1)](/quest/m2/auth-session-index.md) - per-token and per-remote counts and a time-ordered expiry queue replace the scans, after #7211
 - [The relay refuses a cluster peer it cannot dial](/quest/m2/relay-undialable-peers.md) - moq-tokio reports the schemes it can dial, and the relay refuses an undialable peer at startup instead of retrying forever
 - [Drop moq-auth's iroh transport](/quest/m2/auth-drop-iroh.md) - the next breaking moq-auth release drops `Transport::Iroh` and the JS `"iroh"` value
-- [H.264 parsing with maintained crates](/quest/m2/h264-reader.md) - moq-mux parses SPS VUI with h264-reader and shares one bit reader across codec config parsers
 - [moq-transport finish interop](/quest/m2/ietf-finish.md) - the interop `finish` case runs on every even moq-transport draft instead of being skipped
 - [JS joining FETCH](/quest/m2/ietf-js-joining-fetch.md) - the JS publisher answers a joining FETCH that arrives after a quick finish, mirroring the Rust bound
 - [ashpd uses maintained D-Bus crates](/quest/m2/ashpd-maintained.md) - wait for a stable zbus 6 port, then remove the portal dependency exceptions
@@ -234,9 +233,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [We own our WebRTC stack](/quest/m2/webrtc/README.md) - moq-rtc becomes moq-webrtc with moq-ice, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
 - [Certificate reload and qmux's tasks are supervised](/quest/m2/tls-reload-supervision.md) - a panic in either fails loudly instead of silently stopping
 - [PUBLISH_DONE says why](/quest/m2/publish-done-codes.md) - GOING_AWAY, TOO_FAR_BEHIND, and EXPIRED round-trip as stream codes
-- [Repair a crashed mp4 recording](/quest/m2/mp4-repair.md) - a crashed recording's fragmented file becomes a regular MP4
-- [moq repair refuses a live recording](/quest/m2/mp4-repair-lock.md) - the recorder's advisory lock keeps `moq repair` off a file still being written
-- [Windows receives notice truncated control data](/quest/m2/cmsg-windows-truncation.md) - Windows handles `MSG_CTRUNC` like the Unix paths
+- [moq repair refuses a live recording](/quest/m2/mp4-repair-lock.md) - the recorder's advisory lock keeps `moq repair mp4` off a file still being written
 - [The error-queue reader decodes truncated control data](/quest/m2/errqueue-truncation.md) - `MSG_ERRQUEUE` keeps what fit on `MSG_CTRUNC`, like the receive paths
 - [moq-quic's internal dev-dependencies are path-only](/quest/m2/quic-dev-dep-path.md) - moq-congestion is a path dev-dependency
 - [moq-mux's AAC config reports SBR](/quest/m2/aac-sbr-config.md) - moq-audio reads backward-compatible SBR from the config
