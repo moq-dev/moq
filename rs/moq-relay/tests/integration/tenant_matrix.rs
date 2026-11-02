@@ -143,7 +143,9 @@ async fn start(io_uring: bool) -> Running {
 	let http = relay.web_addrs().http.expect("http listener bound");
 	let internal = relay.internal().addr().expect("internal listener bound");
 	let trigger = relay.shutdown_trigger().clone();
-	let running = crate::start::start_relay(relay).await.expect("start relay");
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 	Running {
 		tenants,
 		quic,

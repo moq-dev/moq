@@ -177,9 +177,9 @@ async fn embed_and_stop(mut config: Config) {
 			axum::routing::post(|| async { ([("access-control-allow-origin", "https://trusted.example")], "private") }),
 		)
 		.route("/plain-post", axum::routing::post(|| async { "plain" }));
-	let running = crate::start::start_relay(relay.with_web(web))
-		.await
-		.expect("start relay");
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.with_web(web).run());
+	ready.wait().await.expect("relay ready");
 	assert!(!running.is_finished(), "the relay stopped while serving");
 
 	let body = reqwest::get(format!("http://127.0.0.1:{}/embedded", http.port()))
@@ -505,9 +505,9 @@ async fn embedded_listener_health_reaches_metrics() {
 	let internal = relay.internal().addr().expect("internal listener bound");
 	let trigger = relay.shutdown_trigger().clone();
 	let health = moq_tokio::accept::Health::new("embedded");
-	let running = crate::start::start_relay(relay.with_listeners([health]))
-		.await
-		.expect("start relay");
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.with_listeners([health]).run());
+	ready.wait().await.expect("relay ready");
 	let body = reqwest::get(format!("http://{internal}/metrics"))
 		.await
 		.expect("fetch metrics")

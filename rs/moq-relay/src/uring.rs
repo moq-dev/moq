@@ -1131,7 +1131,9 @@ mod tests {
 		let port = relay.addr().unwrap().port();
 		let mut admissions = relay.admissions().unwrap();
 		let trigger = relay.shutdown_trigger().clone();
-		let running = crate::start::start_relay(relay).await.expect("start relay");
+		let ready = relay.ready();
+		let running = tokio::spawn(relay.run());
+		ready.wait().await.expect("relay ready");
 
 		let mut client = moq_tokio::connect::Config::default();
 		client.tls.insecure = Some(true);
@@ -1189,7 +1191,9 @@ mod tests {
 		let port = relay.addr().unwrap().port();
 		let mut admissions = relay.admissions().unwrap();
 		let trigger = relay.shutdown_trigger().clone();
-		let running = crate::start::start_relay(relay).await.expect("start relay");
+		let ready = relay.ready();
+		let running = tokio::spawn(relay.run());
+		ready.wait().await.expect("relay ready");
 
 		let mut client = moq_tokio::connect::Config::default();
 		client.tls.insecure = Some(true);

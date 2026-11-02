@@ -128,7 +128,9 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 		}
 		leases
 	});
-	let running = crate::start::start_relay(relay).await.expect("start relay");
+	let ready = relay.ready();
+	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	let peer = probe(port, true).await;
 	assert_eq!(peer.streams, PROBE, "a peer opens past the viewer stream limit");

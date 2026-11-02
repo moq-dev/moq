@@ -33,9 +33,6 @@ pub mod runtime;
 pub mod session;
 mod settings;
 pub mod shutdown;
-#[cfg(all(test, target_os = "linux", feature = "_uring"))]
-#[path = "../tests/integration/start.rs"]
-mod start;
 pub mod stats;
 #[cfg(any(feature = "stun", test))]
 pub mod stun;
