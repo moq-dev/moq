@@ -4003,7 +4003,8 @@ impl TrackRun {
 		// Apply the initial cap from the original Subscribe. Subsequent updates
 		// flow through the SUBSCRIBE_UPDATE arm below.
 		let cap = bounds.groups().end().map_or(Bound::Unbounded, Bound::Excluded);
-		let track = track.with_range((Bound::Included(floor), cap));
+		// The FIN of a covered subscription is the wire's to send, below.
+		let track = track.with_range((Bound::Included(floor), cap)).parked();
 
 		let emit_range = ctx.version.has_track_stream();
 		let datagrams = ctx.version.has_datagrams() && ctx.session.max_datagram_size() > 0;
