@@ -51,7 +51,3 @@ impl.
 
 - [Waits](/quest/m1/quic-api/waits.md) - moq-quic owns every wait, so the driver keeps no waiter table
 - [Poll forms](/quest/m1/quic-api/poll.md) - the drivers' poll shape this one mirrors
-
-## Related
-
-- [UDP demux](/quest/m2/p2p/udp-demux.md) - also feeds datagrams from a socket the endpoint doesn't own

@@ -215,6 +215,7 @@ c-tests:
 # Compile the full feature matrix, including isolated combinations and their tests.
 features:
     just rs net-features --all
+    just rs coroutines
     just rs quic-features --all
     just rs tokio-features --all
     just rs media-features --all
@@ -226,6 +227,8 @@ features:
     just rs test -p moq-cli --no-default-features --features capture,pipewire,websocket -E 'test(capture_window)'
     bash sh/local.sh cargo check --locked -p moq-bench --no-default-features
     bash sh/local.sh cargo check --locked -p moq-boy --no-default-features
+    # Alone, since the workspace's `kio/sim` dev-dependencies would unify `kio/async` back in.
+    bash sh/local.sh cargo check --locked --manifest-path rs/moq-auth/Cargo.toml --lib --all-features
     bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
     bash sh/local.sh cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
@@ -235,6 +238,13 @@ features:
 [positional-arguments]
 net-features *args:
     bash sh/rs/net-features.sh "$@"
+
+# Prove the poll-only library builds compile no coroutines and document cleanly.
+# moq-net allows the async fns still waiting on a poll conversion.
+coroutines:
+    bash sh/rs/coroutines.sh kio -- --no-default-features --features macros,runtime,manual,serde
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p kio --no-deps --no-default-features --features macros,runtime,manual,serde
+    bash sh/rs/coroutines.sh moq-net --allow until --allow run_front --allow serve_front -- --no-default-features
 
 # Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
 [positional-arguments]
@@ -382,6 +392,12 @@ fuzz target *args:
 # Report native workspace or one crate's coverage under target/coverage/<crate>.
 coverage crate="workspace":
     bash sh/rs/coverage.sh '{{ crate }}'
+
+# Fail on mutants of .cargo/mutants.toml's scope that no test catches, under
+# target/mutants. Arguments pass to cargo-mutants: `just rs mutants --shard 0/8`.
+[positional-arguments]
+mutants *args:
+    bash sh/rs/mutants.sh "$@"
 
 # Build the default workspace members.
 build:

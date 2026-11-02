@@ -1029,7 +1029,7 @@ impl Default for Supervisor {
 	fn default() -> Self {
 		Self {
 			next: RETRY_MIN,
-			jitter: |delay| delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0),
+			jitter: |delay| delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0),
 			layout: None,
 		}
 	}
@@ -2104,7 +2104,7 @@ mod tests {
 				let mut broadcast = moq_net::broadcast::Info::new().produce();
 				let consumer = broadcast.consume();
 				let config = moq_mux::catalog::Config::default()
-					.with_clock(clock)
+					.with_clock(clock.clone())
 					.with_max_age(RETAIN);
 				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 				let mut options = Capture::default();

@@ -23,7 +23,9 @@ export interface Delay {
 	 * late group is waited for. A missing sequence also expires this much monotonic time after
 	 * the first group past it arrived, even when the next group is a marker on a paused track.
 	 * The local half of the subscription's `maxDelay`; both measure the same budget, one on the wire
-	 * and one as frames are read. It bounds lateness only: it never moves the start.
+	 * and one as frames are read. It bounds a join's lateness too: a backlog that landed before the
+	 * first read starts at the first group whose first frame is within it, plus any warmup, of the
+	 * newest content, though the start keeps the group covering the live edge less `min` and the warmup.
 	 */
 	max?: Milli | null;
 }
@@ -511,11 +513,21 @@ export class Consumer {
 
 			const age = max - min;
 			if (age <= threshold) break;
-			// Until the reader warms, a group may cover the start's reach though it began before it: it is
-			// stale only once its successor starts a whole budget behind the newest content.
+			// Until the reader warms, a group may cover the start's reach though it began before it.
 			if (this.#warming()) {
 				const nextStart = this.#groups[1].start;
-				if (nextStart === undefined || max - nextStart < threshold) break;
+				if (nextStart === undefined) break;
+				if (this.#edge === undefined) {
+					// Before the first item, a backlog that landed whole starts within the budget, so only
+					// the group covering the live edge less the reach is kept: one whose successor starts
+					// past that point. Rust's start skip, in `Consumer::poll_event_once`, measures the same.
+					const target = this.#startTarget(this.#reach(this.#delay.peek()));
+					if (target !== undefined && nextStart > target) break;
+				} else if (max - nextStart < threshold) {
+					// Once reading began, it is stale only once its successor starts a whole budget behind
+					// the newest content.
+					break;
+				}
 			}
 
 			this.#groups.shift();

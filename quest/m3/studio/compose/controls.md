@@ -12,8 +12,9 @@ the studio.
 
 Map element priority onto the subscription priorities moq-lite already has
 (`doc/concept/moq-lite.md`), rather than a second mechanism. A toggled-off
-element is unsubscribed, so it costs the viewer and the relay nothing, and
-the pull model may stop its encode. Subscriptions are per track, not per
+element is unsubscribed, so it costs the viewer and the relay nothing; the
+studio keeps encoding it, so toggling it back on can reach its recent past.
+Subscriptions are per track, not per
 element: a linked source shown by several items stays subscribed while any
 of them is on, at the highest priority among them.
 
