@@ -576,6 +576,8 @@ mod hardware_tests {
 
 	/// Decode one 1080p source and scale/encode every picture at each ladder size.
 	/// Explicitly requested hardware must fail, never skip or accept CPU transfers.
+	/// The tests above check pixels with an independent software decoder; this
+	/// proof deliberately compiles without a software codec.
 	#[test]
 	#[ignore = "requires an Intel VA-API decode/VPP/encode device"]
 	fn vaapi_1080p_ladder_stays_on_the_gpu() {
@@ -595,7 +597,7 @@ mod hardware_tests {
 		config.kind = decode::Kind::Hardware;
 		config.output = Output::Native;
 		let mut decoder = decode::Decoder::new(&video, &config).expect("hardware source decoder");
-		assert_eq!(decoder.name(), NAME);
+		assert_eq!(decoder.name(), crate::decode::backend::vaapi::NAME);
 
 		let pixels = I420::new(size, vec![128; size.pixels() as usize * 3 / 2]).unwrap();
 		let mut frames = Vec::new();
@@ -637,6 +639,7 @@ mod hardware_tests {
 				},
 			)
 			.expect("rung decoder");
+			assert_eq!(output.name(), crate::decode::backend::vaapi::NAME);
 			let mut decoded = Vec::new();
 			for (index, frame) in frames.iter().enumerate() {
 				let scaled = frame

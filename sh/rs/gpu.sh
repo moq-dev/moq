@@ -58,6 +58,8 @@ for vendor in "${!vendors[@]}"; do
                 LD_LIBRARY_PATH="$va/lib" LIBVA_DRIVERS_PATH="$media/lib/dri" LIBVA_DRIVER_NAME=iHD \
                     just rs test -p moq-video --no-default-features --features vaapi --lib --run-ignored only \
                     -E 'test(=encode::backend::vaapi::hardware_tests::vaapi_1080p_ladder_stays_on_the_gpu)'
+            else
+                echo 'AMD VA-API encode and VPP are not covered by this hardware selection'
             fi
             echo "GPU $vendor: Vulkan driver verified"
             ;;
