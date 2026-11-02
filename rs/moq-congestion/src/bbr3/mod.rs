@@ -7310,7 +7310,11 @@ mod test {
         }
         limited(&mut sim, MAX_FULL_BW_COUNT);
         assert!(sim.bbr.probe_inflight().is_some());
+        // The idle ACK renewed the application-limited marker, so the round sent right after it
+        // still counts as application-limited; the sender's next round is its own.
         sim.round((MAX_FULL_BW_COUNT + 1) * 20 * MS, 100, 10 * MS);
+        assert!(sim.bbr.probe_inflight().is_some(), "sent under the marker");
+        sim.round((MAX_FULL_BW_COUNT + 2) * 20 * MS, 100, 10 * MS);
         assert_eq!(sim.bbr.state, BbrState::Startup);
         assert_eq!(
             sim.bbr.probe_inflight(),
