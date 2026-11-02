@@ -5608,6 +5608,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "uuid",
  "workspace-hack",
  "zeroize",
 ]
@@ -5821,7 +5822,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "uuid",
  "workspace-hack",
 ]
 
@@ -6178,6 +6178,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "uuid",
  "workspace-hack",
 ]
 
