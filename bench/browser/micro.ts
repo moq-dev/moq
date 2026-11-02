@@ -2,6 +2,7 @@
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { chromium, type Page } from "playwright";
+import { collections, GC_CATEGORIES, rendererPid, traceEvents } from "./trace.ts";
 import { workspace } from "./workspace.ts";
 
 const { values, positionals } = parseArgs({
@@ -14,10 +15,16 @@ const { values, positionals } = parseArgs({
 	},
 });
 const benchmark = values.bench;
-const expectedRows = (
-	{ frames: 26, drift: 36, ledger: 12, bandwidth: 44, "resume-history": 72 } as Record<string, number>
-)[benchmark];
-if (expectedRows === undefined) throw new Error("--bench must be frames, drift, ledger, bandwidth, or resume-history");
+// The rows each benchmark prints per run.
+const ROWS: Record<string, number> = {
+	frames: 26,
+	drift: 36,
+	ledger: 12,
+	bandwidth: 44,
+	replay: 72,
+	"resume-history": 72,
+};
+if (!Object.hasOwn(ROWS, benchmark)) throw new Error(`--bench must be one of ${Object.keys(ROWS).join(", ")}`);
 const rounds = Number(values.rounds);
 if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("--rounds must be a positive integer");
 const roots = new Map<string, string>();
@@ -48,7 +55,7 @@ for (const [name, root] of roots) {
 							: undefined,
 					);
 					build.onLoad(
-						{ filter: /\/bench\/(frames|drift|ledger|bandwidth|resume-history)\.ts$/ },
+						{ filter: /\/bench\/(frames|drift|ledger|bandwidth|replay|resume-history)\.ts$/ },
 						async ({ path }) => {
 							const source = await Bun.file(path).text();
 							if (benchmark !== "frames")
@@ -83,8 +90,13 @@ const server = Bun.serve({
 			});
 		}
 		if (!scripts.has(name)) return new Response("unknown variant", { status: 404 });
+		// Cross-origin isolated, so performance.now() resolves 5 us instead of 100 us.
 		return new Response(`<script type="module" src="/${name}.js"></script>`, {
-			headers: { "Content-Type": "text/html" },
+			headers: {
+				"Content-Type": "text/html",
+				"Cross-Origin-Opener-Policy": "same-origin",
+				"Cross-Origin-Embedder-Policy": "require-corp",
+			},
 		});
 	},
 });
@@ -95,6 +107,18 @@ const browser = await chromium.launch({
 	args: benchmark === "resume-history" ? ["--js-flags=--expose-gc", "--enable-precise-memory-info"] : [],
 });
 const samples: { round: number; variant: string; rows: string[] }[] = [];
+const traced: { variant: string; rows: string[] }[] = [];
+// Main-thread GC across one whole run per variant, from a traced pass after the timed rounds.
+const gc: Record<string, ReturnType<typeof collections>> = {};
+const save = () =>
+	Bun.write(
+		values.out,
+		JSON.stringify(
+			{ benchmark, browser: browser.version(), warmup: 1, roots: Object.fromEntries(roots), samples, traced, gc },
+			null,
+			2,
+		),
+	);
 try {
 	const pages = new Map<string, Page>();
 	const rows = new Map<string, string[]>();
@@ -110,34 +134,47 @@ try {
 			void page.close();
 		});
 		await page.goto(`http://127.0.0.1:${server.port}/${name}`);
+		if (!(await page.evaluate("crossOriginIsolated"))) throw new Error(`${name} page is not cross-origin isolated`);
 		await page.waitForFunction(() => typeof (globalThis as unknown as { measure: unknown }).measure === "function");
 		await page.evaluate("globalThis.measure()");
 		console.log(`warmed ${name}`);
 	}
+	// One run of `variant`'s page, requiring every row.
+	const measure = async (variant: string) => {
+		rows.set(variant, []);
+		await pages.get(variant)?.evaluate("globalThis.measure()");
+		const measured = rows.get(variant) ?? [];
+		if (measured.length !== ROWS[benchmark]) throw new Error(`incomplete rows: ${variant}`);
+		return measured;
+	};
 	for (let round = 0; round < rounds; round++) {
 		const names = [...roots.keys()];
 		if (round % 2) names.reverse();
 		for (const variant of names) {
-			rows.set(variant, []);
-			await pages.get(variant)?.evaluate("globalThis.measure()");
-			const measured = rows.get(variant);
-			if (measured?.length !== expectedRows) throw new Error(`incomplete rows: ${variant}`);
-			samples.push({ round, variant, rows: measured });
-			await Bun.write(
-				values.out,
-				JSON.stringify(
-					{ benchmark, browser: browser.version(), warmup: 1, roots: Object.fromEntries(roots), samples },
-					null,
-					2,
-				),
-			);
+			samples.push({ round, variant, rows: await measure(variant) });
+			await save();
 			console.log(`measured ${round} ${variant}`);
 		}
+	}
+	// Traced apart from the timed rounds, so tracing overhead never enters a timing.
+	for (const [variant, page] of pages) {
+		if (benchmark !== "replay" && benchmark !== "resume-history") continue;
+		await browser.startTracing(page, { categories: GC_CATEGORIES });
+		let buffer: Buffer | undefined;
+		try {
+			traced.push({ variant, rows: await measure(variant) });
+		} finally {
+			buffer = await browser.stopTracing();
+		}
+		const events = traceEvents(buffer);
+		gc[variant] = collections(events, rendererPid(events, page.url()));
+		await save();
+		console.log(`traced ${variant}`);
 	}
 	// Reachability is exact here, so a retired route still reachable fails the run, once every
 	// variant's samples are written for comparison.
 	if (benchmark === "resume-history") {
-		const retaining = samples.filter(({ rows }) =>
+		const retaining = [...samples, ...traced].filter(({ rows }) =>
 			rows.some((row) =>
 				row
 					.split(",")
