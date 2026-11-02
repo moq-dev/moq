@@ -1,8 +1,8 @@
-# [M] Find and fix the relay's per-frame CPU growth since [moq-dev/moq#5926](https://github.com/moq-dev/moq/pull/5926)
+# [M] Find and fix the relay's per-frame CPU growth
 
 ## Goal
 
-The commits that raised the relay's instructions per delivered frame between [[cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95)](https://github.com/moq-dev/moq/commit/cdff3c8f95) ([moq-dev/moq#5926](https://github.com/moq-dev/moq/pull/5926) as merged) and `main` are found, each rise is attributed to a cause, and the avoidable costs are fixed. A rise that pays for a deliberate feature is accepted with its reason in the [release-perf epic](/quest/m1/release-perf/README.md).
+The commits that raised the relay's instructions per delivered frame between [cdff3c8f95](https://github.com/moq-dev/moq/commit/cdff3c8f952b1d6bd2fd40c3f64eb0fd53b97e95) ([moq-dev/moq#5926](https://github.com/moq-dev/moq/pull/5926) as merged) and `main` are found, each rise is attributed to a cause, and the avoidable costs are fixed. A rise that pays for a deliberate feature is accepted with its reason in the [release-perf epic](/quest/m1/release-perf/README.md).
 
 ## Plan
 
