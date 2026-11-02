@@ -32,9 +32,10 @@ permissions:
   contents: read
 
 # Each group has its own ref, so a group never cancels another; a pull request's
-# skipped runs replace their own.
+# skipped runs replace their own. Dispatches all run on main, so each PR head's
+# report has its own group too.
 concurrency:
-  group: queue-${{ github.ref }}
+  group: queue-${{ github.ref }}-${{ inputs.sha }}
   cancel-in-progress: true
 
 jobs:
