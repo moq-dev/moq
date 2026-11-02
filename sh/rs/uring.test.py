@@ -19,11 +19,13 @@ class UringTest(unittest.TestCase):
             just.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SELECT_CALLS"\n')
             just.chmod(0o755)
             metadata = {
+                "workspace_root": "/",
                 "packages": [
                     {
                         "name": name,
                         "id": f"path+file:///rs/{name}#1.0.0",
                         "manifest_path": f"/rs/{name}/Cargo.toml",
+                        "targets": [{"src_path": f"/rs/{name}/src/lib.rs"}],
                         "dependencies": [{"name": dep} for dep in deps],
                     }
                     for name, deps in (
@@ -32,7 +34,7 @@ class UringTest(unittest.TestCase):
                         ("kio", []),
                         ("moq-unrelated", []),
                     )
-                ]
+                ],
             }
             fixture = scratch / "metadata"
             fixture.write_text(json.dumps(metadata))
@@ -44,6 +46,7 @@ class UringTest(unittest.TestCase):
                 os.environ,
                 LOCAL_SUPERVISED="1",
                 PATH=f"{scratch}:{os.environ['PATH']}",
+                BASH_ENV=os.devnull,
                 SELECT_CALLS=str(calls),
                 TEST_METADATA=str(fixture),
             )
@@ -59,7 +62,15 @@ class UringTest(unittest.TestCase):
                 with self.subTest(path=path):
                     changed.write_text(path + "\n")
                     calls.write_text("")
-                    subprocess.run(["bash", "sh/rs/select.sh", "uring", str(changed)], cwd=ROOT, env=env, check=True)
+                    result = subprocess.run(
+                        ["bash", "sh/rs/select.sh", "uring", str(changed)],
+                        cwd=ROOT,
+                        env=env,
+                        check=True,
+                        text=True,
+                        capture_output=True,
+                    )
+                    self.assertEqual(result.stderr, "")
                     self.assertEqual("rs uring" in calls.read_text().splitlines(), passes)
 
 
