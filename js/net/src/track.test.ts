@@ -484,8 +484,9 @@ test("a fractional delay is rounded up before the wire sees it", async () => {
 	const next = producer.subscription.changed();
 	track.update({ delay: { max: Milli(500.25) } });
 	expect((await next)?.delay?.max).toBe(Milli(501));
+	const min = producer.subscription.changed();
 	track.update({ delay: { min: Milli(99.5) } });
-	expect(producer.subscription.peek()?.delay?.min).toBe(Milli(100));
+	expect((await min)?.delay?.min).toBe(Milli(100));
 
 	// The publisher half of the budget lands on the wire through TRACK_INFO, with the same hazard.
 	producer.accept({ maxAge: Milli(1000.5) });

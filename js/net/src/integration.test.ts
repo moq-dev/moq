@@ -213,7 +213,8 @@ test("integration: lite subscription options and updates reach the publisher", a
 	const producer = await accepted;
 	expect(producer.subscription.peek()).toEqual({
 		priority: 3,
-		delay: { min: Milli(0), max: Milli(250) },
+		// The negotiated lite-06 cannot state a minimum.
+		delay: { min: null, max: Milli(250) },
 		order: "descending",
 		groups: { start: { included: 1 }, end: { excluded: 9 } },
 	});
@@ -226,7 +227,7 @@ test("integration: lite subscription options and updates reach the publisher", a
 	});
 	expect(await updated).toEqual({
 		priority: 8,
-		delay: { min: Milli(0), max: Milli(500) },
+		delay: { min: null, max: Milli(500) },
 		order: "descending",
 		groups: { start: { included: 2 }, end: { excluded: 12 } },
 	});

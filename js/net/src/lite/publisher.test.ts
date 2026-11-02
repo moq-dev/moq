@@ -860,7 +860,8 @@ for (const kind of [2, 3]) {
 			test(`lite-07 refuses anchor ${kind} at ${end ? "end" : "start"} in ${update ? "UPDATE" : "SUBSCRIBE"}`, async () => {
 				const version = Version.DRAFT_07;
 				const anchor = end ? [0, kind, 0] : [kind, 0, 0];
-				const bytes = new Uint8Array([8, 128, 0, 0, 1, ...anchor, 0]);
+				// Priority, order, max delay, an unstated min delay, one range, then the wanted group.
+				const bytes = new Uint8Array([9, 128, 0, 0, 0, 1, ...anchor, 0]);
 				const decoded = await SubscribeUpdate.decode(new Reader(undefined, bytes, version), version);
 				const sub = await servedSubscription({ version, ranges: update ? undefined : decoded.ranges });
 				try {

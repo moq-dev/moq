@@ -193,9 +193,9 @@ test("lite-07 carries the span as its only range, exclusive at the end", async (
 });
 
 test("a lite-07 list decodes as the span covering it", async () => {
-	// Priority, order, and max delay as SubscribeUpdate writes them, then the ranges and
-	// an absent wanted group.
-	const head = (await encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0 }))).slice(1, 4);
+	// Priority, order, max delay, and an unstated min delay as SubscribeUpdate writes them,
+	// then the ranges and an absent wanted group.
+	const head = (await encodeMessage(Version.DRAFT_07, new SubscribeUpdate({ priority: 0 }))).slice(1, 5);
 	const update = (ranges: number[]) => {
 		const body = [...head, ...ranges, 0];
 		return SubscribeUpdate.decode(
