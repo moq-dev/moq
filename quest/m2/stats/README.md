@@ -125,6 +125,7 @@ connection view and the dashboard flow.
 - [Preflight](/quest/m2/stats/preflight.md) - a bounded test run over a
   broadcast reports which media layer is broken and why
 - [Client health in use](/quest/m2/stats/health-consumers.md) - a per-connection media counter, consumers of the grade, and re-measured limits
+- [The media test checks browser feedback](/quest/m2/stats/feedback-media-test.md) - a browser publishes feedback and Rust reads it back with `moq export echo`
 
 ## Related
 

@@ -116,6 +116,7 @@ Add a route-health section to the routing concept page.
 - [Metadata subscriptions](/quest/m2/route-health/meta.md) - the current lite wip and the shared model observe frames without payload in Rust and JS
 - [Track route selection](/quest/m2/route-health/selection.md) - share broadcast identity/candidates while tracks choose sources independently
 - [Automatic recovery](/quest/m2/route-health/recovery.md) - epoch-only promotion in endpoints and relays, staying on the working route
+- [Revisit the relay's default QUIC idle timeout](/quest/m2/route-health/idle-timeout.md) - keep or change the 10 s default, with the reason recorded
 
 ## Related
 

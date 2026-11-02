@@ -73,3 +73,4 @@ Public API: none. Wire: none.
 - [moq-tokio's close-drain test survives load](/quest/m0/test-flakes-2/tokio-close-drain.md) - `quic_client_close_drains_finished_track` stops failing land batches with "Unroutable"
 - [@moq/net's close-drain tests survive load](/quest/m0/test-flakes-2/js-close-drain.md) - the lite close-drain cases pass on every full suite run
 - [@moq/net's boundary-sync test survives load](/quest/m0/test-flakes-2/js-boundary-sync.md) - "a version without a boundary syncs" passes under load
+- [moq-c's gated callback test frees nothing early](/quest/m0/test-flakes-2/moq-c-gated-callback.md) - the moq-c tests stop aborting with a use-after-free under load

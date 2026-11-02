@@ -241,3 +241,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [The browser bench keeps its page consoles](/quest/m2/browser-bench-consoles.md) - publisher and consumer page logs in the run directory
 - [moq-quic's long header type is one variant](/quest/m2/quic-long-type.md) - collapse LongType after the 0-RTT removal
 - [One predicate for the lite close wait](/quest/m2/subscriber-fin-fold.md) - fold waits_for_subscriber_fin into has_track_stream
+- [Browsers expose WebTransport receive credit](/quest/m2/browser-receive-credit.md) - condition: the page can tell how much credit an unread stream holds
+- [JS fastest-reader pacing](/quest/m2/js-fastest-reader.md) - `@moq/net` paces upstream groups by the fastest reader, once browsers allow it
+- [fMP4 import at 1-byte chunks is no slower than before](/quest/m2/fmp4-byte-chunk-perf.md) - bisect and fix or accept the ~19% slowdown at 1-byte chunks
+- [The relay bench reports io_uring pool size and RSS](/quest/m2/bench-uring-pool.md) - pool growth regressions show up in normal bench runs
+- [MKV imports ffmpeg's multichannel FLAC](/quest/m2/mkv-flac-channel-mask.md) - a channel-mask-only Vorbis comment is accepted, so default ffmpeg multichannel FLAC needs no remux

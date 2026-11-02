@@ -80,6 +80,8 @@ Public API: expose only health policy/evidence consumers need, mirrored across
 languages if public; settle consequential shape through quest-plan. Wire: uses
 Metadata subscriptions, with no separate health-specific route protocol.
 
+Planned 2026-11-02 (maintainer, follow-up planning after the 2026-11-02 /quest-complete run), from [moq-dev/moq#7096](https://github.com/moq-dev/moq/pull/7096): whether the in-progress group survives a resume depends on whether the upstream cache is warm or cold. Make it one defined behavior and test both cache states.
+
 ## Required
 
 - [Metadata subscriptions](/quest/m2/route-health/meta.md) - progress-only standby and safe promotion
