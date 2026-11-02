@@ -2,12 +2,13 @@
 
 //! An endpoint linked to two CDNs uses its preferred one and fails over to the next.
 //!
-//! A publisher `P` pushes one broadcast, under one epoch, to CDN relays `A` and `B`. A
+//! A publisher `P` pushes one broadcast, under one instance, to CDN relays `A` and `B`. A
 //! subscriber `S` links to both, ranking `A` first with
 //! [`origin::Producer::with_preference`] while pricing `B` cheaper, so only the
 //! preference puts `A` ahead. Losing `A` moves `S` to `B`, and `A` returning moves it
-//! back. Between lite-07 routes with the same epoch each move resumes the subscription.
-//! A moq-transport `B` carries no epoch, so moving onto it restarts the path.
+//! back. Between lite-07 routes, which carry the instance, each move resumes the
+//! subscription. A moq-transport `B` carries none, so `S` mints one for it, and the move
+//! onto it is a restart that ends the subscription rather than stitching onto it.
 
 use crate::support;
 
@@ -163,7 +164,7 @@ impl Topology {
 		let broadcast = publisher.create_broadcast("live").unwrap();
 		let track = broadcast.create_track("video", timed()).unwrap();
 		broadcast
-			.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+			.announce(origin::Route::default().with_instance(moq_net::Instance::random(), 0))
 			.unwrap();
 
 		let pushes = vec![
@@ -268,7 +269,7 @@ fn assert_continuous(seen: &[(u64, Vec<u8>, Option<Timestamp>)], groups: u64) {
 	}
 }
 
-/// Two CDNs under one epoch, `B` over `secondary`: `S` reads through `A` although `B` is
+/// Two CDNs under one instance, `B` over `secondary`: `S` reads through `A` although `B` is
 /// cheaper, resumes on `B` when `A` goes, and moves back once `A` returns, every frame once.
 async fn fails_over_and_back(secondary: &str) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
@@ -287,7 +288,7 @@ async fn fails_over_and_back(secondary: &str) {
 		let update = announced.next().await.expect("announced");
 		assert!(
 			matches!(update, announce::Event::Update(_)) && !via_a(&update),
-			"same epoch over B: {update:?}"
+			"same instance over B: {update:?}"
 		);
 		seen.extend(topology.group_anywhere(&mut rx).await);
 
@@ -313,7 +314,8 @@ async fn preferred_cdn_fails_over_and_back() {
 	fails_over_and_back("moq-lite-07-wip").await;
 }
 
-/// Losing the epoch-carrying route restarts onto the epochless moq-transport route.
+/// A moq-transport `B` carries no instance, so `S` mints one for its route and losing `A`
+/// is a restart onto another stream: the track ends with no frame of `B`'s.
 async fn restarts_across_protocols(secondary: &str) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut topology = Topology::new(secondary.parse().unwrap()).await;
@@ -329,7 +331,7 @@ async fn restarts_across_protocols(secondary: &str) {
 		let update = announced.next().await.expect("announced");
 		assert!(
 			matches!(update, announce::Event::Restart(_)) && !via_a(&update),
-			"epochless route over B: {update:?}"
+			"another instance over B: {update:?}"
 		);
 		topology.group();
 		settle().await;

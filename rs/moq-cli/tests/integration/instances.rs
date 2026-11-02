@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use kio::clock::Instant;
 
-use hang::moq_net::{self, Epoch, Timestamp, announce, origin, track};
+use hang::moq_net::{self, Instance, Timestamp, announce, origin, track};
 use moq_mux::catalog::Stream;
 
 const LITE_07: &str = "moq-lite-07-wip";
@@ -82,8 +82,8 @@ struct Published {
 	media: track::Producer,
 }
 
-fn publish(origin: &origin::Producer, epoch: &Epoch, tag: &str) -> Published {
-	let route = origin::Route::default().with_epoch(epoch.clone());
+fn publish(origin: &origin::Producer, instance: &Instance, tag: &str) -> Published {
+	let route = origin::Route::default().with_instance(instance.clone(), 0);
 	let broadcast = origin.publish("live/catalog.hang", route.clone()).unwrap();
 	let sibling = origin.publish("live/media", route).unwrap();
 	let media = sibling
@@ -98,7 +98,7 @@ fn publish(origin: &origin::Producer, epoch: &Epoch, tag: &str) -> Published {
 		.mutate(|catalog| {
 			let mut audio = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, 2);
 			audio.broadcast = Some(moq_net::path::Relative::new("./media").unwrap());
-			audio.epoch = Some(epoch.clone());
+			audio.instance = Some(instance.clone());
 			catalog.audio.renditions.insert("audio".into(), audio);
 		})
 		.unwrap();
@@ -135,8 +135,7 @@ async fn changed(follow: &mut announce::Consumer) -> bool {
 
 async fn replacement(version: &str) {
 	let relay = relay().await;
-	let (a, b) = (Epoch::mint(), Epoch::mint());
-	assert!(b > a);
+	let (a, b) = (Instance::random(), Instance::random());
 	let first_origin = moq_tokio::origin::spawn();
 	let mut first = publish(&first_origin, &a, "A");
 	let first_client = client(LITE_07).with_publisher(&first_origin);
@@ -170,7 +169,7 @@ async fn replacement(version: &str) {
 	let snapshot = catalog.next().await.unwrap().unwrap();
 	let reference = &snapshot.audio.renditions["audio"];
 	let pinned = old
-		.resolve(reference.broadcast.as_ref(), reference.epoch.as_ref())
+		.resolve(reference.broadcast.as_ref(), reference.instance.as_ref())
 		.await
 		.unwrap();
 	let cold = pinned.track("audio").unwrap();
@@ -207,8 +206,11 @@ async fn replacement(version: &str) {
 		(changed(&mut catalog_follow).await, changed(&mut media_follow).await)
 	})
 	.await;
-	// Only lite-07 carries the epoch, so only it restarts in place.
-	assert_eq!(catalog_restart, version == LITE_07);
+	assert_eq!(
+		catalog_restart,
+		version == LITE_07,
+		"only lite-07 carries the instance, which restarts in place"
+	);
 	assert_eq!(media_restart, catalog_restart);
 	println!(
 		"{version}: relay replacement observed in {:?} of {:?} (publisher already connected)",
@@ -263,9 +265,9 @@ async fn replacement(version: &str) {
 		.unwrap();
 	let snapshot = fresh_catalog.next().await.unwrap().unwrap();
 	let reference = &snapshot.audio.renditions["audio"];
-	assert_eq!(reference.epoch.as_ref(), Some(&b));
+	assert_eq!(reference.instance.as_ref(), Some(&b));
 	let new = fresh
-		.resolve(reference.broadcast.as_ref(), reference.epoch.as_ref())
+		.resolve(reference.broadcast.as_ref(), reference.instance.as_ref())
 		.await
 		.unwrap();
 	assert!(!new.is_clone(&pinned));
