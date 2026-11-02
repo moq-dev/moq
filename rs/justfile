@@ -190,7 +190,9 @@ x11-bench-ci:
     } 2>&1 | tee "$log"
 
 # moq-video's MediaCodec code is `#[cfg(target_os = "android")]`. Needs an NDK,
-# which the dev shell lacks, so android.yml runs it outside Nix. `check` rather
+# which the dev shell lacks, so android.yml runs it outside Nix with the
+# workspace-hack disabled (`cargo hakari disable && cargo update --workspace`).
+# Do the same locally, then restore Cargo.lock and rs/workspace-hack. `check` rather
 # than a denying clippy: the capture plumbing is dead on a target without a
 # capture backend.
 
