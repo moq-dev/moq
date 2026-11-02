@@ -7438,17 +7438,19 @@ impl Cursor {
 	fn poll_heads(&mut self, waiter: &kio::Waiter) {
 		let Some(heads) = &mut self.heads else { return };
 		let mut given_up = Vec::new();
-		heads.fetching.retain(|sequence, fetching| match kio::Task::poll(fetching, waiter) {
-			Poll::Pending => true,
-			Poll::Ready(Ok(group)) => {
-				heads.filled.insert(*sequence, group);
-				false
-			}
-			Poll::Ready(Err(_)) => {
-				given_up.push(*sequence..sequence.saturating_add(1));
-				false
-			}
-		});
+		heads
+			.fetching
+			.retain(|sequence, fetching| match kio::Task::poll(fetching, waiter) {
+				Poll::Pending => true,
+				Poll::Ready(Ok(group)) => {
+					heads.filled.insert(*sequence, group);
+					false
+				}
+				Poll::Ready(Err(_)) => {
+					given_up.push(*sequence..sequence.saturating_add(1));
+					false
+				}
+			});
 		if given_up.is_empty() {
 			return;
 		}
@@ -7622,7 +7624,10 @@ impl Cursor {
 					let sequence = group.sequence;
 					if self.heads.as_ref().is_none_or(|heads| {
 						!heads.fetching.contains_key(&sequence) && !heads.filled.contains_key(&sequence)
-					}) && self.misses.as_ref().is_none_or(|misses| misses.gone(sequence).is_none())
+					}) && self
+						.misses
+						.as_ref()
+						.is_none_or(|misses| misses.gone(sequence).is_none())
 					{
 						self.ask_head(sequence);
 					}
@@ -7630,7 +7635,11 @@ impl Cursor {
 					match self.heads.as_ref().and_then(|heads| heads.filled.get(&sequence)) {
 						Some(head) => head.clone(),
 						// Given up: past it, as past any group no fill can serve.
-						None if self.misses.as_ref().is_some_and(|misses| misses.gone(sequence).is_some()) => {
+						None if self
+							.misses
+							.as_ref()
+							.is_some_and(|misses| misses.gone(sequence).is_some()) =>
+						{
 							floor = sequence.saturating_add(1);
 							continue;
 						}
@@ -17326,8 +17335,7 @@ mod test {
 
 		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
 		live.start_at(1).unwrap();
-		live.write_frame(None, bytes::Bytes::from_static(b"delta"))
-			.unwrap();
+		live.write_frame(None, bytes::Bytes::from_static(b"delta")).unwrap();
 		live.finish().unwrap();
 		framed(&producer, 1, 1).finish().unwrap();
 

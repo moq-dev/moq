@@ -61,15 +61,14 @@ async fn read(sub: &mut moq_net::track::Subscriber) -> Vec<u64> {
 async fn fixture(
 	version: Version,
 	relay: bool,
-) -> (
-	moq_net::broadcast::Consumer,
-	moq_net::track::Producer,
-	impl Sized,
-) {
+) -> (moq_net::broadcast::Consumer, moq_net::track::Producer, impl Sized) {
 	let publisher = produce_origin(1);
 	let broadcast = publisher.create_broadcast("bcast").unwrap();
 	let mut track = broadcast
-		.create_track("video", moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI))
+		.create_track(
+			"video",
+			moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+		)
 		.unwrap();
 	broadcast.announce(Default::default()).unwrap();
 	for sequence in 0..3 {
