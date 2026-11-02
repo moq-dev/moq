@@ -7,7 +7,9 @@ targets run only when something names them:
 - a cargo-fuzz target or a Cargo bench target, named by some reachable run;
 - a `just` recipe that runs tests, reachable from a workflow;
 - a standalone test script (`*.test.py`, `*.test.sh`, `*.browser.ts`, or a
-  `*.test.ts` outside a Bun package that runs `bun test`), reachable from one.
+  `*.test.ts` outside a Bun package that runs `bun test`), reachable from one;
+- a JS bench script under a `bench/` directory that no other source imports
+  or names, so it is an entry point rather than a module, reachable from one.
 
 Reachable means some workflow `run:` step leads to it through `just` recipes,
 their dependencies, and the scripts they name. The walk is static: a `just`
@@ -37,6 +39,9 @@ import tomllib
 import yaml
 
 SCRIPT = re.compile(r"[\w.$/{}-]*[\w-]\.(?:sh|py|ts|mts|js|mjs)\b")
+JS = (".ts", ".mts", ".js", ".mjs")
+# A relative module specifier in a static or dynamic import, or a re-export.
+IMPORT = re.compile(r"""\b(?:from|import)\s*\(?\s*["'](\.\.?/[^"']+)["']""")
 # Commands that run a test suite. Python sources spell them as argument lists,
 # so quotes and commas are dropped before matching.
 RUNNER = re.compile(
@@ -912,10 +917,11 @@ def recipe_line(root: Path, recipe: Recipe) -> str:
     return str(source.relative_to(root))
 
 
-def runs_tests(graph: Graph, recipe: Recipe, found: set[Path]) -> bool:
+def runs_tests(graph: Graph, recipe: Recipe, found: set[Path], benches: set[Path]) -> bool:
     """A recipe runs tests when its body runs a suite, or names a script no workflow reaches
-    that runs one, is a test script, or drives a browser. A wrapper around a reached script,
-    or a bare `bun test` in a directory a reached run already tests, adds no test of its own."""
+    that runs one, is a test script or a bench entry point, or drives a browser. A wrapper
+    around a reached script, or a bare `bun test` in a directory a reached run already tests,
+    adds no test of its own."""
     text = recipe.text
     if any(recipe.cwd.is_relative_to(directory) for directory in found):
         text = re.sub(r"(?m)^\s*bun test\s*$", "", text)
@@ -930,7 +936,7 @@ def runs_tests(graph: Graph, recipe: Recipe, found: set[Path]) -> bool:
                 continue
             seen.add(path)
             relative = str(path.relative_to(graph.root))
-            if is_test_script(relative) or drives_browser(path, relative):
+            if is_test_script(relative) or path in benches or drives_browser(path):
                 return True
             texts.append((path.read_text(errors="replace"), path))
     return False
@@ -940,11 +946,44 @@ def is_test_script(relative: str) -> bool:
     return bool(re.search(r"\.test\.(?:py|sh|ts|js|mjs)$|\.browser\.ts$", relative))
 
 
-def drives_browser(path: Path, relative: str) -> bool:
-    """A script that launches a browser is a check, unless it is a benchmark."""
-    if "/bench/" in f"/{relative}" or path.suffix not in (".ts", ".js", ".mjs"):
+def drives_browser(path: Path) -> bool:
+    """A script that launches a browser is a check."""
+    if path.suffix not in JS:
         return False
     return re.search(r"""from ["']playwright["']""", path.read_text(errors="replace")) is not None
+
+
+def bench_entries(root: Path, graph: Graph) -> set[Path]:
+    """The JS bench scripts no other source imports or names: the ones something runs.
+    A module, or a page a bench bundles, is named by its importer; a test importing the
+    script it tests does not make that script a module."""
+    sources = [
+        path
+        for path in tracked(root, *(f"*{suffix}" for suffix in JS))
+        if not is_test_script(str(path.relative_to(root)))
+    ]
+    named = set()
+    for source in sources:
+        # Block comments go first, since a doc comment may name the script that loads this one.
+        text = re.sub(r"(?s)(?:^|(?<=\s))/\*.*?\*/", "", source.read_text(errors="replace"))
+        named.update(path for path in graph.scripts(text, source.parent, source) if path != source.resolve())
+        for specifier in IMPORT.findall(text):
+            base = (source.parent / specifier).resolve()
+            named.update(
+                path
+                for path in (
+                    base,
+                    *(base.with_name(base.name + suffix) for suffix in JS),
+                    *(base.with_suffix(suffix) for suffix in JS),
+                    *(base / f"index{suffix}" for suffix in JS),
+                )
+                if path.is_file()
+            )
+    return {
+        path.resolve()
+        for path in sources
+        if "/bench/" in f"/{path.relative_to(root)}" and not path.name.endswith(".d.ts") and path.resolve() not in named
+    }
 
 
 def discovered(root: Path, graph: Graph) -> set[Path]:
@@ -1032,11 +1071,12 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
                     orphans.append((f"bench {target.package}::{target.name}", where))
 
     found = discovered(root, graph)
+    benches = bench_entries(root, graph)
 
     # Recipes that run tests.
     recipes = {recipe.path: recipe for module in justfiles.values() for recipe in module.recipes.values()}
     for _, recipe in sorted(recipes.items()):
-        if recipe.path not in graph.reached and runs_tests(graph, recipe, found):
+        if recipe.path not in graph.reached and runs_tests(graph, recipe, found, benches):
             orphans.append((f"recipe {recipe.path}", recipe_line(root, recipe)))
 
     # Standalone test scripts.
@@ -1049,6 +1089,12 @@ def inventory(root: Path) -> tuple[list[tuple[str, str]], list[str]]:
         ):
             continue
         if not graph.reaches(path.resolve()):
+            orphans.append((f"script {relative}", relative))
+
+    # Bench entry points.
+    for path in sorted(benches):
+        if not graph.reaches(path):
+            relative = str(path.relative_to(root))
             orphans.append((f"script {relative}", relative))
     return orphans, errors
 

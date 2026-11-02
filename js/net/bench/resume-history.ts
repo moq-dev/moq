@@ -39,7 +39,7 @@ type Access = "lookup" | "fetch" | "subscribe";
 /** Full collections, each from a fresh task so no frame of the caller keeps a target. */
 async function collect(): Promise<void> {
 	const gc = (globalThis as { gc?: () => void }).gc;
-	if (!gc) throw new Error("resume-history needs a precise collector: run it with bench/browser/micro.ts");
+	if (!gc) throw new Error("resume-history needs a precise collector: run it in Chromium through bench/browser");
 	for (let pass = 0; pass < 3; pass++) {
 		await new Promise<void>((resolve) => setTimeout(resolve, 0));
 		gc();
