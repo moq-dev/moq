@@ -1238,7 +1238,7 @@ mod tests {
 	/// The state an acceptor built outside [`Web::serve`] hands a `tls://` session.
 	#[cfg(all(feature = "websocket", any(unix, windows)))]
 	fn acceptor_state() -> Arc<WebState> {
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(cert.cert.pem().as_bytes()).unwrap();
 		Web::new(
@@ -1265,7 +1265,7 @@ mod tests {
 		}
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let broadcast = cluster.origin.create_broadcast("room").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let track = broadcast
@@ -1358,7 +1358,7 @@ mod tests {
 				} else {
 					auth::Auth::refuse("test")
 				};
-				let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+				let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 				let web = Web::new(auth, cluster, certificates.clone(), Config::default());
 				let state = web.state;
 				let remote = ConnectInfo("127.0.0.1:1234".parse().unwrap());
@@ -1426,7 +1426,7 @@ mod tests {
 			}
 		});
 		let registry = Registry::new(Default::default());
-		let mut cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let mut cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		cluster.refusals = crate::refusals::Refusals::new(&registry);
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
 		let fetched = serve_fetch(
@@ -1495,7 +1495,7 @@ mod tests {
 			}
 			leases
 		});
-		let mut cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let mut cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		cluster.stats = Registry::new(Default::default());
 		let broadcast = cluster.origin.create_broadcast("room").unwrap();
 		broadcast.announce(Default::default()).unwrap();
@@ -1598,7 +1598,7 @@ mod tests {
 		}
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let broadcast = cluster.origin.create_broadcast("room").unwrap();
 		broadcast.announce(Default::default()).unwrap();
 		let track = broadcast
@@ -1656,7 +1656,7 @@ mod tests {
 			}
 			leases
 		});
-		let mut cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let mut cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		cluster.stats = moq_net::stats::Registry::new(Default::default());
 		let state = Web::new(auth, cluster, certificates, Config::default()).state;
 		let peer = || ConnectInfo("127.0.0.1:1234".parse().unwrap());
@@ -2002,7 +2002,7 @@ mod tests {
 		let auth = auth_config
 			.init("test", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 
 		let web = Web::new(auth, cluster, certificates, config).bind().unwrap();
@@ -2053,7 +2053,7 @@ mod tests {
 		config.https.key = vec![key];
 		config.ws = true;
 		let (auth, mut admissions) = crate::auth::Auth::embedded("test");
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 		let web = Web::new(auth, cluster, certificates, config).bind().unwrap();
 		let Addrs {
@@ -2289,7 +2289,7 @@ mod tests {
 			}
 			.init("test", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
-			let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+			let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 			let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 			// No idle deadline, so a stalled connection outlives serving below.
 			let mut web = Web::new(auth, cluster, certificates, config)
@@ -2391,7 +2391,7 @@ mod tests {
 		}
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
 		let web = Web::new(auth, cluster, certificates, config).bind().unwrap();
 		let http = web.addrs().http.unwrap();
@@ -2430,7 +2430,7 @@ mod tests {
 		for (flag, set) in cases {
 			let mut config = Config::default();
 			set(&mut config.https);
-			let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+			let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 			let web = Web::new(crate::auth::Auth::refuse("test"), cluster, certificates.clone(), config);
 			let err = match web.bind() {
 				Ok(_) => panic!("{flag} was ignored"),
@@ -2451,7 +2451,7 @@ mod tests {
 		let auth = auth_config
 			.init("test", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
@@ -2476,7 +2476,7 @@ mod tests {
 		let auth = auth_config
 			.init("test", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
@@ -2513,7 +2513,7 @@ mod tests {
 		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		// Held and never answered: the decider that never decides.
 		let (auth, _admissions) = crate::auth::Auth::embedded("test");
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
@@ -2554,7 +2554,7 @@ mod tests {
 		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
 		let (auth, _admissions) = crate::auth::Auth::embedded("test");
 		let auth = auth.with_verifications(7);
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
@@ -2607,7 +2607,7 @@ mod tests {
 		let auth = auth_config
 			.init("test", &moq_tokio::tls::Connect::default(), false)
 			.unwrap();
-		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(crate::cluster::Options::default()).unwrap();
 		let dir = TempDir::new().unwrap();
 		let (_, cert, _) = make_certs(&dir);
 		let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();

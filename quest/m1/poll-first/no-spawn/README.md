@@ -49,7 +49,6 @@ binding boundary.
 
 ## Required
 
-- [Cluster polls its own work](/quest/m1/poll-first/no-spawn/cluster.md) - `Cluster::new` returns a `Driver` the relay polls, and the dial loop runs as `kio::Tasks` children
 - [Admissions and stats are polled](/quest/m1/poll-first/no-spawn/admissions.md) - HTTP admissions run inside their waiter, and the stats publisher runs in the cluster's driver
 - [moq-ffi spawns only its root](/quest/m1/poll-first/no-spawn/ffi.md) - one runtime-owned driver task holds every `Background` as `kio::Tasks` children
 - [The relay's in-memory tests run on kio's simulator](/quest/m1/poll-first/no-spawn/sim-tests.md) - `rs/moq-relay/tests/integration/connection.rs` runs on the simulator instead of paused tokio
