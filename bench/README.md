@@ -66,8 +66,11 @@ Throughput counts delivered datagrams. Every one must arrive with its sequence
 and payload; the memory transport loses none at these cadences, so a drop fails
 instead of looking cheaper. `SESSION_ALLOCS=1` prints allocations, allocated
 bytes and, where Linux perf counters are readable, user instructions per
-delivered datagram or viewer-group. Every task runs on the bench's one thread,
-whose counts repeat within a fraction of a percent. The relay target runs the same shapes as
+delivered datagram or viewer-group. All three exclude the cache tick. Bytes sum
+requested allocation and reallocation sizes, including growth in place; they
+measure neither live memory nor bytes copied. A multiplexed instruction counter
+fails the run instead of reporting an undercount. Every task runs on the bench's
+one thread. Pin it to one CPU to compare repeated instruction counts. The relay target runs the same shapes as
 `relay_session_delivery_datagram`.
 
 Real QUIC adds congestion control and the sender's datagram queue. This sends

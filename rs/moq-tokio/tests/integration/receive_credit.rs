@@ -106,30 +106,14 @@ async fn setup_through(
 		),
 		None => None,
 	};
-	let dial = shaper.as_ref().map_or(server_addr, |shaper| shaper.addr());
+	let addr = shaper.as_ref().map_or(server_addr, |shaper| shaper.addr());
 	tokio::spawn(async move {
 		let request = server.accept().await.expect("accept");
 		let session = request.with_publisher(&publisher).ok().await.expect("session");
 		let _ = session.closed().await;
 	});
 
-	let mut tls = rustls::ClientConfig::builder()
-		.dangerous()
-		.with_custom_certificate_verifier(Arc::new(AnyCert))
-		.with_no_client_auth();
-	tls.alpn_protocols = vec![version.alpn().as_bytes().to_vec()];
-	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
-	let mut client = driver::client::Config::new(Arc::new(quic));
-	client.transport = transport;
-
-	let endpoint =
-		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
-			.expect("endpoint");
-	let conn = endpoint
-		.connect(&client, dial, "localhost")
-		.expect("connect")
-		.await
-		.expect("handshake");
+	let (endpoint, conn) = dial(version, addr, transport).await;
 
 	let subscriber = moq_tokio::origin::spawn();
 	let session =
@@ -150,6 +134,33 @@ async fn setup_through(
 		_client: client,
 		_endpoint: endpoint,
 	}
+}
+
+/// Dial native QUIC with the selected version and transport settings.
+pub(crate) async fn dial(
+	version: moq_net::Version,
+	addr: std::net::SocketAddr,
+	transport: driver::transport::Config,
+) -> (driver::endpoint::Endpoint, driver::connection::Connection) {
+	let mut tls = rustls::ClientConfig::builder()
+		.dangerous()
+		.with_custom_certificate_verifier(Arc::new(AnyCert))
+		.with_no_client_auth();
+	tls.alpn_protocols = vec![version.alpn().as_bytes().to_vec()];
+	let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
+	let mut client = driver::client::Config::new(Arc::new(quic));
+	client.transport = transport;
+
+	let endpoint =
+		driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+			.expect("endpoint");
+	let conn = endpoint
+		.connect(&client, addr, "localhost")
+		.expect("connect")
+		.await
+		.expect("handshake");
+
+	(endpoint, conn)
 }
 
 /// The shaper's seed: `MOQ_SHAPER_SEED` to replay a run, or a fresh one, printed.
@@ -937,7 +948,7 @@ async fn benchmark_receive_windows() {
 
 /// Accepts any server certificate: the test dials its own self-signed server.
 #[derive(Debug)]
-pub(crate) struct AnyCert;
+struct AnyCert;
 
 impl rustls::client::danger::ServerCertVerifier for AnyCert {
 	fn verify_server_cert(

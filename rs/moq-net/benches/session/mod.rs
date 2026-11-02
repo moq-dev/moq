@@ -279,7 +279,7 @@ struct Counter;
 
 static COUNTING: AtomicBool = AtomicBool::new(false);
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-/// Bytes requested by those allocations: every encode or copy into a fresh buffer shows here.
+/// Cumulative requested allocation and reallocation sizes, not live or copied bytes.
 static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
 
 fn count_allocation(bytes: usize) {
@@ -345,6 +345,8 @@ impl Instructions {
 		}
 		const PERF_TYPE_HARDWARE: u32 = 0;
 		const PERF_COUNT_HW_INSTRUCTIONS: u64 = 1;
+		const PERF_FORMAT_TOTAL_TIME_ENABLED: u64 = 1;
+		const PERF_FORMAT_TOTAL_TIME_RUNNING: u64 = 1 << 1;
 		const EXCLUDE_KERNEL: u64 = 1 << 5;
 		const EXCLUDE_HV: u64 = 1 << 6;
 		let attr = Attr {
@@ -353,7 +355,7 @@ impl Instructions {
 			config: PERF_COUNT_HW_INSTRUCTIONS,
 			sample_period: 0,
 			sample_type: 0,
-			read_format: 0,
+			read_format: PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING,
 			flags: EXCLUDE_KERNEL | EXCLUDE_HV,
 			wakeup_events: 0,
 			bp_type: 0,
@@ -376,16 +378,21 @@ impl Instructions {
 	fn read(&self) -> u64 {
 		use std::os::fd::AsRawFd;
 
-		let mut value = 0u64;
-		// SAFETY: reads one u64 count into `value`, which outlives the call.
-		let read = unsafe { libc::read(self.fd.as_raw_fd(), (&raw mut value).cast(), size_of::<u64>()) };
+		// PERF_FORMAT_GROUP is unset: value, time_enabled, time_running.
+		let mut values = [0u64; 3];
+		// SAFETY: `values` holds the complete read format and outlives the call.
+		let read = unsafe { libc::read(self.fd.as_raw_fd(), values.as_mut_ptr().cast(), size_of_val(&values)) };
 		assert_eq!(
 			read,
-			size_of::<u64>() as isize,
+			size_of_val(&values) as isize,
 			"perf read: {}",
 			std::io::Error::last_os_error()
 		);
-		value
+		assert_eq!(
+			values[1], values[2],
+			"perf instructions were multiplexed and undercounted"
+		);
+		values[0]
 	}
 
 	#[cfg(not(all(target_os = "linux", target_endian = "little")))]
@@ -1046,6 +1053,7 @@ impl<B: Backend> Room<B> {
 	/// number of pools, not with the delivery being measured.
 	async fn measure(&mut self, iters: u64) -> Duration {
 		let mut elapsed = Duration::ZERO;
+		let counting = std::env::var_os("SESSION_ALLOCS").is_some();
 		let report = std::env::var_os("SESSION_EXPIRY_ONLY").is_some();
 		let began = Instant::now();
 		let mut next_report = Duration::from_secs(10);
@@ -1053,7 +1061,13 @@ impl<B: Backend> Room<B> {
 			self.tick();
 			let start = MeasurementClock::start(self.clock);
 			let before = self.instructions.as_ref().map(Instructions::read);
+			if counting {
+				COUNTING.store(true, Ordering::Relaxed);
+			}
 			self.round().await;
+			if counting {
+				COUNTING.store(false, Ordering::Relaxed);
+			}
 			if let (Some(counter), Some(before)) = (&self.instructions, before) {
 				self.retired += counter.read() - before;
 			}
@@ -1484,9 +1498,7 @@ fn allocations<B: Backend>() {
 			room.instructions = Instructions::open();
 			ALLOCATIONS.store(0, Ordering::Relaxed);
 			ALLOCATED.store(0, Ordering::Relaxed);
-			COUNTING.store(true, Ordering::Relaxed);
 			rt.block_on(room.measure(ROUNDS as u64));
-			COUNTING.store(false, Ordering::Relaxed);
 
 			let (units, unit) = if shape.datagrams {
 				(ROUNDS * shape.objects(), "delivered datagram")

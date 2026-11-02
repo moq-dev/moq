@@ -14,7 +14,7 @@ use bytes::Bytes;
 use moq_tokio::moq_net::{self, Timestamp};
 use moq_tokio::quic::{driver, web};
 
-use crate::receive_credit::{AnyCert, rand_seed};
+use crate::receive_credit::{dial, rand_seed};
 
 const TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -87,21 +87,7 @@ struct Viewer {
 
 impl Viewer {
 	async fn connect(name: &'static str, version: moq_net::Version, addr: std::net::SocketAddr) -> Self {
-		let mut tls = rustls::ClientConfig::builder()
-			.dangerous()
-			.with_custom_certificate_verifier(Arc::new(AnyCert))
-			.with_no_client_auth();
-		tls.alpn_protocols = vec![version.alpn().as_bytes().to_vec()];
-		let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
-		let client = driver::client::Config::new(Arc::new(quic));
-		let endpoint =
-			driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
-				.expect("endpoint");
-		let conn = endpoint
-			.connect(&client, addr, "localhost")
-			.expect("connect")
-			.await
-			.expect("handshake");
+		let (endpoint, conn) = dial(version, addr, Default::default()).await;
 
 		let origin = moq_tokio::origin::spawn();
 		let transport =
