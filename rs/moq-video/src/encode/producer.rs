@@ -834,6 +834,11 @@ async fn capture_loop<S: CaptureSource>(
 			}
 		}
 
+		// Frames the camera replaced after the last read, before demand or the stream ended
+		// the loop: no read follows to report them.
+		if let Some(reported) = reported {
+			producer.report_skipped(camera.skipped() - reported);
+		}
 		// Drop the camera (LED off) and encoder before opening another.
 		drop(camera);
 		drop(encoder);
@@ -1388,6 +1393,33 @@ mod tests {
 					assert_eq!(stats.skipped, 1);
 					let ceiling = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap()).resolved_bitrate();
 					assert_eq!(stats.bitrate, Some(ceiling.as_bps()));
+					fixture.finish().await;
+				})
+				.await
+		}
+
+		/// Frames the camera replaced after the last read still count when the last viewer
+		/// leaves before another read.
+		#[tokio::test]
+		async fn stats_report_skips_left_when_the_viewer_leaves() {
+			tokio::task::LocalSet::new()
+				.run_until(async {
+					let fixture = Fixture::start(Duration::from_secs(1), kio::clock::wall()).await;
+					let mut track = fixture.subscribe().await;
+					let camera = fixture.camera();
+					camera.push_at(surface(), Instant::now());
+					read(&mut track).await;
+
+					// The viewer leaves, then the camera replaces a frame before the loop runs again.
+					drop(track);
+					camera.push_at(surface(), Instant::now());
+					camera.push_at(surface(), Instant::now());
+					while !camera.released() {
+						tokio::task::yield_now().await;
+					}
+
+					let stats = fixture.catalog.stats().remove("video").expect("the video rendition");
+					assert_eq!(stats.skipped, 1);
 					fixture.finish().await;
 				})
 				.await
