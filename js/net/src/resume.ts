@@ -3,8 +3,8 @@
  * `rs/moq-net`.
  *
  * A {@link Front} is one broadcast served through one route at a time: the origin re-sources it
- * when another route of the same epoch takes over, since routes with one epoch serve one
- * broadcast and so hold the same groups and frames. A reader of a logical track reads the
+ * when another route of the same instance takes over, since routes with one instance serve one
+ * stream and so hold the same groups and frames. A reader of a logical track reads the
  * serving route's copy directly, through its own subscription: nothing is copied, and with one
  * route it is a passthrough.
  *
@@ -281,8 +281,8 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
 }
 
 /** Take a copy's next group, in sequence or arrival order. */
-function take(copy: Copy, ordered: boolean): Recv {
-	return ordered ? hooks.tryNextGroup(copy.sub) : hooks.tryRecvGroup(copy.sub, false);
+function take(copy: Copy, ordered: boolean, floor?: number): Recv {
+	return ordered ? hooks.tryNextGroup(copy.sub, floor) : hooks.tryRecvGroup(copy.sub, false);
 }
 
 /** The first group past where `copy` was replaced: 0 for one replaced before any group. */
@@ -650,18 +650,21 @@ class Reader implements ResumeSource {
 		// lower group that truly arrives later.
 		const next = this.#lowest(ordered, delivered);
 		if (next) {
-			const recv = take(next, ordered);
+			const recv = take(next, ordered, this.#newest === undefined ? undefined : this.#newest + 1);
 			if (recv.kind === "group") {
 				this.#observe(next, recv.group.sequence);
 				return { kind: "group", group: this.#handOut(next, recv.group) };
 			}
+			// The lowest buffered group keeps its place while its copy waits on a hole.
+			// A newer copy must not pass it and permanently discard it from sequence order.
+			if (ordered && recv.kind === "idle") return recv;
 		}
 		// The serving copy first: it is the one that keeps delivering.
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
 			if (!this.#feeds(copy)) continue;
 			for (;;) {
-				const recv = take(copy, ordered);
+				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1);
 				if (recv.kind === "group") {
 					if (!this.#deliverable(copy, recv.group.sequence, delivered)) {
 						recv.group.close();
@@ -745,7 +748,11 @@ class Reader implements ResumeSource {
 		for (const copy of this.#copies) {
 			if (!this.#feeds(copy)) continue;
 			for (;;) {
-				const sequence = hooks.peekGroup(copy.sub, ordered);
+				const sequence = hooks.peekGroup(
+					copy.sub,
+					ordered,
+					this.#newest === undefined ? undefined : this.#newest + 1,
+				);
 				if (sequence === undefined) break;
 				if (this.#deliverable(copy, sequence, delivered)) {
 					// A tie goes to the newer copy, so the serving one hands out its first group and
@@ -753,7 +760,7 @@ class Reader implements ResumeSource {
 					if (!lowest || sequence <= lowest.sequence) lowest = { copy, sequence };
 					break;
 				}
-				const recv = take(copy, ordered);
+				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1);
 				if (recv.kind !== "group") break;
 				recv.group.close();
 			}
@@ -1515,7 +1522,7 @@ class Recover implements GroupRecover {
  * One broadcast served through one route at a time; see the module docs.
  *
  * Its {@link consumer} is the broadcast handed out: every track read through it follows the
- * front's route. The origin calls {@link serve} as routes of the same epoch take over, and
+ * front's route. The origin calls {@link serve} as routes of the same instance take over, and
  * {@link conclude} once none will: readers then follow the last copy to its end.
  */
 export class Front {

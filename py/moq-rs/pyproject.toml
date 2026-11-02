@@ -28,7 +28,8 @@ classifiers = [
 ]
 # Compatible-release pin: consumers float to newer bindings patches without
 # a wrapper re-release. Shared cuts move the floor to the new minor; raise
-# its patch when the wrapper requires newer FFI API.
+# its patch when the wrapper requires newer FFI API. Floor is 0.5.0: no 0.4.x
+# has the instance, range, and demand API this wrapper calls.
 dependencies = ["moq-ffi ~= 0.5.0"]
 
 [project.urls]

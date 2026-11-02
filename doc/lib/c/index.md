@@ -71,19 +71,19 @@ if (publication < 0)
     return fail(moq_error());
 // Fill tracks on broadcast here; announce on the publication.
 
-char epoch[MOQ_EPOCH_LEN];
-moq_mint_epoch(epoch, sizeof(epoch)); // a fresh epoch per run
 moq_announce_route route;
-memset(&route, 0, sizeof(route));     // zeroed means cost 0 and no epoch
-route.epoch = epoch;
-route.epoch_len = sizeof(epoch);
+memset(&route, 0, sizeof(route));     // zeroed means cost 0 and the minted instance
 if (moq_publication_announce((uint32_t)publication, &route) < 0)
     return fail(moq_error());
 ```
 
-A route carries only a cost and an epoch; relays add the hops. Mint a fresh epoch each
-time the publisher starts, so viewers see a restart (`MOQ_ANNOUNCE_KIND_RESTART`) instead of
-a stalled broadcast. Redundant publishers of the same bytes share one.
+A route carries only a cost and the stream's instance; relays add the hops. Each
+publication mints a fresh instance and keeps it across re-announcing, so a restarted
+publisher is a new stream viewers restart onto (`MOQ_ANNOUNCE_KIND_RESTART`) instead of a
+stalled broadcast. Set `instance` only for a publisher that continues its group sequences
+across restarts, and raise `epoch` on each: readers stitch every route of one instance
+together, so restarting the sequences under an old instance splices unrelated groups into
+their tracks.
 
 Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Publication track names stay separate from codec settings. For simulcast, give each rendition the next one down as the `lower` handle in its `moq_video_encode_options`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
 
@@ -104,6 +104,7 @@ inside. The header is the reference: each function carries a doc comment.
 - **fMP4 import.** `MOQ_CONTAINER_FORMAT_FMP4` splits each fragment into one frame per sample.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `moq_publish_media_cut`: after every frame, or at a segment cadence to align with video. Pass that cadence as `moq_audio_init.hint.group_duration_us`.
 - **Catalog hints.** Give the catalog what the encoder knows instead of having it estimated: `moq_video_init.hint` (coded size, bitrate, frame rate, group duration) and `moq_audio_init.hint` (bitrate, group duration). A supplied bitrate is never re-estimated. `group_duration_us` is the longest span between two group starts: the GOP, or your cut cadence. Leave a field's `has_*` flag false to have it measured. A bitrate or `group_duration_us` flag set with a 0 value returns `MOQ_ERROR_INVALID_CONFIG`.
+- **Discovery.** Announcement captures are always a list of wildcard matches, empty when the filter has no wildcards.
 - **Ending cleanly.** When the input ends, finish every track, then call `moq_publish_catalog_finish()` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `moq_publish_close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close ends with `UNROUTABLE`, which readers take as the publisher leaving, and its handle is released.
 - **Timeline breaks.** On a seek or pause, call `moq_publish_media_discontinuity`, then keep timestamps moving forward and resume video on a keyframe.
 - **Timestamps.** A `moq_timestamp` is exact: `value` units at `scale` units per second, so a 90 kHz tick survives a read and republish. Frames, datagrams, and JSON values point `timestamp` at theirs, NULL on an untimed track and valid as long as the payload. Tracks moq-c creates are timed, so their raw writes need one. JSON and binary writes take one too, converted to their track's milliseconds; NULL stamps the broadcast clock's current time. A zero scale or an out-of-range value fails with `MOQ_ERROR_TIMESTAMP_OVERFLOW`.
