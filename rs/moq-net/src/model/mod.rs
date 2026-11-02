@@ -38,9 +38,6 @@ mod time;
 mod timed;
 mod weak_cache;
 
-#[cfg(test)]
-mod test_tracing;
-
 use request_queue::RequestQueue;
 use weak_cache::{WeakCache, WeakEntry};
 

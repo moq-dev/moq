@@ -162,7 +162,7 @@ See [`CONTRIBUTING.md`](../CONTRIBUTING.md#landing-gate) for requesting a landin
 namespaced per runner OS and architecture. Hosted jobs on `main` write what
 they compile. The merge queue's self-hosted build uses its persistent local store and has no R2
 credentials.
-Release pull request jobs only read (main pull requests run no cloud CI), and
+Pull request jobs only read (main PRs run Check only while ready), and
 fork pull requests, which get no secrets, build cold.
 
 The write key is what enforces that: it lives in a GitHub Environment that
