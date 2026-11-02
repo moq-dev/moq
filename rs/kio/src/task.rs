@@ -210,14 +210,14 @@ impl Polling {
 				POLLING.with(|polling| {
 					polling.open.borrow_mut().pop();
 					let mut held = polling.held.borrow_mut();
-					let mut index = self.start;
-					while index < held.len() {
-						match held[index].0 == self.identity {
-							true => mine.push(held.remove(index).1),
-							false => index += 1,
-						}
-					}
+					mine.extend(
+						held.extract_if(self.start.., |(identity, _)| *identity == self.identity)
+							.map(|(_, shared)| shared),
+					);
 				});
+				// Keep holding O(1), then coalesce the same set's wakes across passes.
+				mine.sort_unstable_by_key(Arc::as_ptr);
+				mine.dedup_by(|a, b| Arc::ptr_eq(a, b));
 				// Outside the borrow: a waker may poll inline and open a batch of its own.
 				for shared in mine {
 					shared.release();
@@ -927,9 +927,14 @@ mod tests {
 			Poll::Pending
 		});
 
-		let waiter = Waiter::noop();
-		assert_eq!(tasks.poll_passes(&waiter, NonZeroUsize::new(4).unwrap()), 4);
+		let wakes = Arc::new(Wakes(AtomicUsize::new(0)));
+		let waiter = Waiter::new(Waker::from(wakes.clone()));
+		let references = Arc::strong_count(&tasks.shared);
+		let ran = waiter.batch(|| tasks.poll_passes(&waiter, NonZeroUsize::new(4).unwrap()));
+		assert_eq!(ran, 4);
 		assert_eq!(polls.load(Ordering::SeqCst), 4, "once per pass");
+		assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "one wake for the work left over");
+		assert_eq!(Arc::strong_count(&tasks.shared), references, "a batch retained a wake");
 	}
 
 	/// A retired occupant's leftover waker firing into a reused slot costs at

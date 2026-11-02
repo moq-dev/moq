@@ -79,25 +79,32 @@ fn request_reply(c: &mut criterion::Criterion) {
 				let id = format!("connections-{connections}/bytes-{bytes}/passes-{passes}");
 				group.throughput(Throughput::Bytes((connections * (64 + bytes)) as u64));
 				let mut reply = vec![0; bytes];
+				let completed = kio::Queue::bounded(1);
 				group.bench_function(id.clone(), |b| {
 					b.iter_custom(|rounds| {
+						let mut running = std::mem::take(&mut streams);
+						let mut answer = std::mem::take(&mut reply);
+						let done = completed.clone();
+						handle.spawn(async move {
+							for _ in 0..rounds {
+								for (send, _) in &mut running {
+									send.write_all(&[0xa5; 64][..]).await.expect("request");
+								}
+								for (_, recv) in &mut running {
+									recv.read_exact(&mut answer).await.expect("reply");
+								}
+							}
+							done.try_push((running, answer)).expect("complete");
+						});
 						let before = handle.metrics().snapshot();
 						let start = Instant::now();
-						worker
-							.block_on(async {
-								for _ in 0..rounds {
-									for (send, _) in &mut streams {
-										send.write_all(&[0xa5; 64][..]).await.expect("request");
-									}
-									for (_, recv) in &mut streams {
-										recv.read_exact(&mut reply).await.expect("reply");
-										assert!(reply.iter().all(|byte| *byte == 0x5a));
-									}
-								}
-							})
-							.expect("worker");
+						(streams, reply) = worker
+							.block_on(kio::wait(|waiter| completed.poll_pop(waiter)))
+							.expect("worker")
+							.expect("measurement");
 						let elapsed = start.elapsed();
 						let after = handle.metrics().snapshot();
+						assert!(reply.iter().all(|byte| *byte == 0x5a));
 						eprintln!(
 							"{id} rounds={rounds} turns={} passes={} enters={} rx_datagrams={}",
 							after.turns - before.turns,

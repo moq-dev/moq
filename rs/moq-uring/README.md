@@ -121,9 +121,11 @@ skip: in the `uring.yml` release gate and the nightly `rs uring` job.
 first spike (recv batching x GRO x GSO, epoll vs io\_uring); see git history
 for their methodology. `echo_quic` is the ablation matrix over the real
 worker: the same QUIC echo with receive batching, GRO, and GSO toggled one
-at a time. `worker_turns` sweeps socket counts and datagrams per burst
-independently to measure drive-loop batching without QUIC. Its smoke cases
-run in the Rust nightly benchmark group.
+at a time. `worker_turns` sweeps sockets against datagrams per burst for UDP,
+and connections against reply bytes and task passes for QUIC request/reply.
+The QUIC client and server run as worker tasks; the root only waits for a
+measurement to finish. Counter deltas stay in the run's log beside the timing
+series in the nightly `rust-shared` group.
 
 ```bash
 just rs bench-udp --sample-size 20 --measurement-time 2 --warm-up-time 1

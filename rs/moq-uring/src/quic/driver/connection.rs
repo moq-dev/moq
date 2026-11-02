@@ -959,11 +959,9 @@ impl Driver {
 			self.trains = 0;
 		}
 		while self.trains < TRAINS_PER_TURN {
-			match self.flush_one(waiter) {
-				Poll::Ready(Ok(())) => self.trains += 1,
-				Poll::Ready(Err(err)) => return Poll::Ready(err),
-				// Backpressure, or nothing left to stage.
-				Poll::Pending => return Poll::Pending,
+			match std::task::ready!(self.flush_one(waiter)) {
+				Ok(()) => self.trains += 1,
+				Err(err) => return Poll::Ready(err),
 			}
 			// The budget is spent: requeue behind the next reap, once per turn.
 			// If moq-quic is drained by then, that poll costs one empty acquire
