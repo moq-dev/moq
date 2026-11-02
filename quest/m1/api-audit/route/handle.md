@@ -70,7 +70,7 @@ JS and the bindings identical.
   be priced. Today `Requests::route()` is always the default and
   `update_route` is crate-private.
 - **Visibility, not unannounced broadcasts.** Callers that fill the catalog
-  first (`moq-cli` hls, rtsp and publish; moq-studio; moq-mux
+  first (`moq-cli` hls, rtsp and publish; moq-mux
   `ts/programs.rs`) or announce after SDP (`moq-rtc/server/whip.rs`) create
   the route hidden and announce it when ready. js/publish's on/off toggle
   becomes withdraw and announce on one route, so viewers continue rather
