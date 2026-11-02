@@ -1,15 +1,16 @@
 /**
- * Wire-level QUIC datagram body for moq-lite-05 (§6.4).
+ * Wire-level QUIC datagram bodies for moq-lite.
  *
  * @module
  */
 import { encodeVarint, Reader } from "../stream.ts";
-import { hasCompression, type Version, wireTimescale } from "./version.ts";
+import { hasCompression, hasPadding, type Version, wireTimescale } from "./version.ts";
 
 /**
  * A QUIC datagram body: `subscribe (i) | sequence (i) | [timestamp (i)] | [inflated (i)] | payload (b)`, with the
  * timestamp present only when the subscription's track carries one (see `wireTimescale`),
  * and the inflated size only on a compressed lite-07 track.
+ * Lite-07 prefixes group datagrams with type 0x0; type 0x1 is discarded padding.
  *
  * The payload runs to the datagram boundary, so unlike a size-prefixed lite message there is no
  * inner length prefix. Mirrors the Rust `lite::Datagram`; the model counterpart is
@@ -50,15 +51,19 @@ export class Datagram {
 		const subscribe = encodeVarint(this.subscribe, version);
 		const sequence = encodeVarint(this.sequence, version);
 		const timestamp = this.timestamp === undefined ? new Uint8Array() : encodeVarint(this.timestamp, version);
+		const type = hasPadding(version) ? encodeVarint(0x0, version) : new Uint8Array();
 
 		const out = new Uint8Array(
-			subscribe.byteLength +
+			type.byteLength +
+				subscribe.byteLength +
 				sequence.byteLength +
 				timestamp.byteLength +
 				inflated.length +
 				this.payload.byteLength,
 		);
 		let offset = 0;
+		out.set(type, offset);
+		offset += type.byteLength;
 		out.set(subscribe, offset);
 		offset += subscribe.byteLength;
 		out.set(sequence, offset);
@@ -72,15 +77,20 @@ export class Datagram {
 	}
 
 	/**
-	 * Decode a datagram body from the raw bytes of one QUIC datagram. `timed` reports whether the
+	 * Decode a group datagram or discard padding with `undefined`. `timed` reports whether the
 	 * track of the given subscribe ID carries a timestamp, which the body itself does not say.
 	 */
 	static async decode(
 		data: Uint8Array,
 		version: Version,
 		framing: (subscribe: bigint) => { timed: boolean; compressed?: boolean },
-	): Promise<Datagram> {
+	): Promise<Datagram | undefined> {
 		const r = new Reader(undefined, data, version);
+		if (hasPadding(version)) {
+			const type = await r.u62();
+			if (type === 1n) return;
+			if (type !== 0n) throw new Error(`unknown datagram type: ${type}`);
+		}
 		const subscribe = await r.u62();
 		const sequence = await r.u53();
 		const { timed, compressed } = framing(subscribe);

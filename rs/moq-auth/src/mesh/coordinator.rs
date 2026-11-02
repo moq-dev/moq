@@ -87,9 +87,9 @@ struct StoredKey {
 	hash: String,
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	tags: Vec<String>,
-	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
+	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	expires: Option<moq_clock::Wall>,
+	expires: Option<kio::clock::Wall>,
 	reusable: bool,
 	#[serde(default)]
 	used: bool,
@@ -110,8 +110,8 @@ pub struct Device {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub tags: Vec<String>,
 	/// When it first enrolled, unix seconds.
-	#[serde_as(as = "moq_clock::serde::UnixSeconds")]
-	pub enrolled: moq_clock::Wall,
+	#[serde_as(as = "kio::clock::serde::UnixSeconds")]
+	pub enrolled: kio::clock::Wall,
 	/// Whether the owner revoked it; its next refresh fails.
 	#[serde(default)]
 	pub revoked: bool,
@@ -128,9 +128,9 @@ pub struct KeyInfo {
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
 	pub tags: Vec<String>,
 	/// When it stops enrolling, unix seconds.
-	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
+	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
 	#[serde(default, skip_serializing_if = "Option::is_none")]
-	pub expires: Option<moq_clock::Wall>,
+	pub expires: Option<kio::clock::Wall>,
 	/// Whether it enrolls more than one device.
 	pub reusable: bool,
 	/// Whether a single-use key has enrolled its device.
@@ -208,7 +208,7 @@ impl Coordinator {
 		// than after an enrollment key is spent.
 		config
 			.key
-			.sign(&claims(EndpointId::from_bytes([0; 32]), moq_clock::wall(), None))?;
+			.sign(&claims(EndpointId::from_bytes([0; 32]), kio::clock::wall(), None))?;
 		Ok(Self {
 			config: Arc::new(config),
 			secret: Arc::new(aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &random(32))),
@@ -223,9 +223,9 @@ impl Coordinator {
 	/// Issue a fresh challenge. It holds no state until a proof uses it, so no number of
 	/// requests can crowd out one a device is still signing.
 	pub fn challenge(&self) -> Challenge {
-		let now = moq_clock::wall();
+		let now = kio::clock::wall();
 		let expires =
-			now.checked_duration_since(moq_clock::Wall::UNIX_EPOCH)
+			now.checked_duration_since(kio::clock::Wall::UNIX_EPOCH)
 				.unwrap_or_default()
 				.as_secs() + CHALLENGE_TTL.as_secs();
 		let mut challenge = expires.to_be_bytes().to_vec();
@@ -234,7 +234,7 @@ impl Coordinator {
 		challenge.extend_from_slice(&tag);
 		Challenge {
 			challenge,
-			expires: moq_clock::Wall::UNIX_EPOCH.saturating_add(Duration::from_secs(expires)),
+			expires: kio::clock::Wall::UNIX_EPOCH.saturating_add(Duration::from_secs(expires)),
 		}
 	}
 
@@ -248,7 +248,7 @@ impl Coordinator {
 			.split_once('.')
 			.ok_or_else(|| ErrorReply::new(ErrorCode::InvalidGrant, "unknown enrollment key"))?;
 		let hash = hex(&sha256(secret.as_bytes()));
-		let now = moq_clock::wall();
+		let now = kio::clock::wall();
 		let key = inner
 			.store
 			.keys
@@ -316,7 +316,7 @@ impl Coordinator {
 			id: id.clone(),
 			hash: hex(&sha256(secret.as_bytes())),
 			tags: new.tags.clone(),
-			expires: new.expires_in.map(|ttl| moq_clock::wall().saturating_add(ttl)),
+			expires: new.expires_in.map(|ttl| kio::clock::wall().saturating_add(ttl)),
 			reusable: new.reusable,
 			used: false,
 			revoked: false,
@@ -413,8 +413,8 @@ impl Coordinator {
 			return Err(invalid("unknown challenge"));
 		}
 		let expires = u64::from_be_bytes(challenge[..8].try_into().expect("8 bytes"));
-		let expires = moq_clock::Wall::UNIX_EPOCH.saturating_add(Duration::from_secs(expires));
-		if expires <= moq_clock::wall() {
+		let expires = kio::clock::Wall::UNIX_EPOCH.saturating_add(Duration::from_secs(expires));
+		if expires <= kio::clock::wall() {
 			return Err(invalid("the challenge expired"));
 		}
 		if !proof.verify(&self.config.url) {
@@ -463,7 +463,7 @@ impl Coordinator {
 				endpoint,
 				name,
 				tags,
-				enrolled: moq_clock::wall(),
+				enrolled: kio::clock::wall(),
 				revoked: false,
 			}),
 		}
@@ -473,13 +473,13 @@ impl Coordinator {
 	/// Sign a token for an enrolled `endpoint` and list the mesh.
 	fn issue(&self, store: &Store, endpoint: EndpointId) -> Reply<Enrollment> {
 		let internal = |err: crate::Error| ErrorReply::new(ErrorCode::ServerError, err.to_string());
-		let now = moq_clock::wall();
+		let now = kio::clock::wall();
 		// `exp` is whole seconds on the wire; truncate so the reply matches the token.
 		let secs = now
-			.checked_duration_since(moq_clock::Wall::UNIX_EPOCH)
+			.checked_duration_since(kio::clock::Wall::UNIX_EPOCH)
 			.unwrap_or_default()
 			.as_secs();
-		let expires = moq_clock::Wall::UNIX_EPOCH.saturating_add(Duration::from_secs(secs) + self.config.token_ttl);
+		let expires = kio::clock::Wall::UNIX_EPOCH.saturating_add(Duration::from_secs(secs) + self.config.token_ttl);
 		let token = self
 			.config
 			.key
@@ -536,7 +536,7 @@ fn refuse_revoked(store: &Store, endpoint: EndpointId) -> Reply<()> {
 }
 
 /// The grant every mesh token carries: publish under its own ID, subscribe to the mesh.
-fn claims(endpoint: EndpointId, issued: moq_clock::Wall, expires: Option<moq_clock::Wall>) -> Claims {
+fn claims(endpoint: EndpointId, issued: kio::clock::Wall, expires: Option<kio::clock::Wall>) -> Claims {
 	Claims::default()
 		.with_publish([endpoint.publish()])
 		.with_subscribe([Pattern::subtree("mesh").expect("a valid path")])
@@ -704,7 +704,7 @@ mod tests {
 			endpoint: EndpointId::from_bytes([byte; 32]),
 			name: name.into(),
 			tags: Vec::new(),
-			enrolled: moq_clock::wall(),
+			enrolled: kio::clock::wall(),
 			revoked: false,
 		};
 		let devices = vec![device(1, "robot"), device(2, "robot-2")];

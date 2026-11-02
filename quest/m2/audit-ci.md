@@ -4,7 +4,7 @@
 
 Every CI workflow and job earns its place: its results reach someone (a gate,
 a Discord alert, or a published report) at a cost proportional to that signal.
-Each one that doesn't is fixed, moved, or deleted. Individual tests stay with
+Each one that doesn't is deleted by default, or else made cheaper or moved. Individual tests stay with
 the [test cost audit](/quest/m2/audit-test-cost.md), and runner and cache
 infrastructure with [CI cost and latency](/quest/m0/ci/README.md).
 
@@ -23,6 +23,12 @@ PR, one commit each, rather than as follow-ups. Only a change that needs a
 maintainer decision (dropping a release target, scope) or is independently
 landable and too large to review alongside the rest becomes a follow-up
 through `/quest-plan`.
+
+Default to removing (decided 2026-11-01, maintainer): whatever doesn't earn its
+cost is deleted inline, and the PR body lists each deletion with its measured
+cost and why it wasn't worth it. Only what earns its keep is refactored to be
+cheaper instead. Removing a public API or a user-facing feature stays a
+follow-up.
 
 This audit owns workflows and jobs, including job-level build cost; the test
 cost audit owns individual tests. Each run tables every workflow in
@@ -60,7 +66,7 @@ verdicts:
   reads a published broadcast` (`remote error: code=0`). Bisected to
   [moq-dev/moq#6348](https://github.com/moq-dev/moq/pull/6348): the harness
   finishes its track before the pre-draft-22 joining FETCH arrives, which
-  [join after a quick finish](/quest/m2/ietf-join-after-finish.md) owns.
+  [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306) fixes on the Rust publisher.
   - Audio quality: two Chromium Opus `wide` rows exceed their `target_ms_p95`
     budget. The [audio jitter target](/quest/m1/audio-jitter-target/README.md)
     owns the budgets.
@@ -83,8 +89,8 @@ verdicts:
   [#6317](https://github.com/moq-dev/moq/pull/6317)). The moq-mux large-enum
   and moq-net minimal-feature lints pass on main `f42b336f0e`.
 - Interop's finite-track tails fail before draft 22 (`Error: old`, a JS
-  `RESET_STREAM`); [join after a quick finish](/quest/m2/ietf-join-after-finish.md)
-  owns them. TS fails T-STD overflow and late audio starts; the TS reliability
+  `RESET_STREAM`); [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306) fixes the Rust publisher's
+  half, and [JS joining FETCH](/quest/m2/ietf-js-joining-fetch.md) owns the JS one. TS fails T-STD overflow and late audio starts; the TS reliability
   quests own them. The relay-log `FAIL` lines in Interop's self-test are
   negative controls, not failures.
 - Infrastructure flakes in the sample: DNS failures installing Nix

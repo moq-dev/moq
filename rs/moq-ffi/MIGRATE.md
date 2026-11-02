@@ -5,6 +5,13 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Decoder outputs take a `MoqDelay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`MoqAudioDecoderOutput` replaces `max_delay` and the playout `delay: Option<Duration>` with `delay: Option<MoqDelay>` and `estimate: bool` (default `true`).
+`MoqVideoDecoderOutput::max_delay` is `delay: Option<MoqDelay>`.
+`MoqDelay { min, max }`: `max` (null for no limit) is the old `max_delay`, and `min` is the playout delay, where a cold join starts. A null `delay` is zero for both.
+A fixed audio playout delay `d` is `delay: MoqDelay { min: d, max }` with `estimate: false`; with `estimate` it floors the estimate instead.
+
 ### Compression moves to the track
 
 The `MoqFlate*` producers and `MoqFlateConfig` are deleted: publish opaque bytes on a `MoqTrackProducer`.

@@ -986,7 +986,7 @@ mod tests {
 		let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
 		spawn_fill(&mut tasks, rung, fill, permit);
 		let wait = std::time::Duration::from_secs(5);
-		let first = moq_clock::timeout(wait, source_fills.requested_fill())
+		let first = kio::clock::timeout(wait, source_fills.requested_fill())
 			.await
 			.expect("group 7 is fetched from the source")
 			.unwrap();
@@ -994,7 +994,7 @@ mod tests {
 
 		reader.update(ascending(8..)).unwrap();
 		assert!(reader.poll_recv_group(&waiter).is_pending());
-		let next = moq_clock::timeout(wait, source_fills.requested_fill())
+		let next = kio::clock::timeout(wait, source_fills.requested_fill())
 			.await
 			.expect("the fill waited behind group 7, which nobody reads")
 			.unwrap();

@@ -50,19 +50,19 @@ impl<'de> DeserializeAs<'de, moq_net::Timestamp> for Millis {
 }
 
 pub(crate) struct Wall;
-fn epoch() -> moq_clock::Wall {
-	moq_clock::Wall::UNIX_EPOCH + Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS)
+fn epoch() -> kio::clock::Wall {
+	kio::clock::Wall::UNIX_EPOCH + Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS)
 }
-impl SerializeAs<moq_clock::Wall> for Wall {
-	fn serialize_as<S: serde::Serializer>(value: &moq_clock::Wall, serializer: S) -> Result<S::Ok, S::Error> {
+impl SerializeAs<kio::clock::Wall> for Wall {
+	fn serialize_as<S: serde::Serializer>(value: &kio::clock::Wall, serializer: S) -> Result<S::Ok, S::Error> {
 		let duration = value
 			.checked_duration_since(epoch())
 			.ok_or_else(|| serde::ser::Error::custom("snapshot wall is before the MoQ epoch"))?;
 		Millis::serialize_as(&duration, serializer)
 	}
 }
-impl<'de> DeserializeAs<'de, moq_clock::Wall> for Wall {
-	fn deserialize_as<D: serde::Deserializer<'de>>(deserializer: D) -> Result<moq_clock::Wall, D::Error> {
+impl<'de> DeserializeAs<'de, kio::clock::Wall> for Wall {
+	fn deserialize_as<D: serde::Deserializer<'de>>(deserializer: D) -> Result<kio::clock::Wall, D::Error> {
 		epoch()
 			.checked_add(Millis::deserialize_as(deserializer)?)
 			.ok_or_else(|| serde::de::Error::custom("snapshot wall clock overflow"))
@@ -90,7 +90,7 @@ mod tests {
 		#[derive(Debug, Serialize, Deserialize)]
 		struct Value {
 			#[serde_as(as = "Wall")]
-			wall: moq_clock::Wall,
+			wall: kio::clock::Wall,
 		}
 		let last_millis = (u64::MAX / 1_000_000) - crate::catalog::MOQ_EPOCH_UNIX_MILLIS;
 		let last = format!(r#"{{"wall":{last_millis}}}"#);

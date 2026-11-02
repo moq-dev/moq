@@ -31,7 +31,7 @@ async fn link(version: Version, from: &origin::Producer, to: &origin::Producer, 
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
 async fn settle() {
-	moq_clock::sleep(Duration::from_millis(500)).await;
+	kio::clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// A worker claiming `claim`, answering each request with an output whose `video` track
@@ -48,7 +48,7 @@ impl Worker {
 		let claim = Rc::new(origin.requests(claim).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
-		drop(moq_clock::sim::spawn(async move {
+		drop(kio::clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let prepared = request.prepare(Epoch::mint()).unwrap();
 				let track = prepared
@@ -75,7 +75,7 @@ impl Worker {
 /// Every announce event already delivered, as `(kind, prefix, predecessor)`.
 async fn drain(announced: &mut announce::Consumer) -> Vec<(&'static str, String, Option<String>)> {
 	let mut events = Vec::new();
-	while let Ok(event) = moq_clock::timeout(Duration::from_secs(1), announced.next()).await {
+	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		events.push(match event.expect("announce ended") {
 			announce::Event::Start(a) => ("start", a.prefix.to_string(), None),
 			announce::Event::Update(a) => ("update", a.prefix.to_string(), None),
@@ -93,7 +93,7 @@ async fn drain(announced: &mut announce::Consumer) -> Vec<(&'static str, String,
 async fn watch(origin: &origin::Producer, path: &str) -> String {
 	let broadcast = origin.consume().request(path, None).await.unwrap();
 	let mut subscription = broadcast.track("video").unwrap().subscribe(None).await.unwrap();
-	let mut group = moq_clock::timeout(Duration::from_secs(10), subscription.recv_group())
+	let mut group = kio::clock::timeout(Duration::from_secs(10), subscription.recv_group())
 		.await
 		.expect("subscription hung")
 		.expect("the first subscription was reset")
@@ -160,9 +160,9 @@ async fn chain(version: &str, claim: &str) {
 macro_rules! chain_tests {
 	($($name:ident: $version:literal, $claim:literal,)*) => {
 		$(
-			#[moq_clock::test]
+			#[kio::test]
 			async fn $name() {
-				moq_clock::timeout(TEST_TIMEOUT, chain($version, $claim))
+				kio::clock::timeout(TEST_TIMEOUT, chain($version, $claim))
 					.await
 					.expect("timed out");
 			}
@@ -180,9 +180,9 @@ chain_tests! {
 /// Two workers claim `pool` on `R`. Whichever answers, `R` cannot tell a reader of the
 /// claim which worker it saw, so the answer is a start, while `R`'s own reader still
 /// keeps reading from the worker it was routed to.
-#[moq_clock::test]
+#[kio::test]
 async fn two_workers_announce_a_start() {
-	moq_clock::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let version: Version = "moq-lite-07-wip".parse().unwrap();
 		let relay = produce_origin(3);
 		let a = Worker::new(1, "pool", "a");
@@ -208,9 +208,9 @@ async fn two_workers_announce_a_start() {
 
 /// A broadcast published at the path without answering a request is no takeover, even
 /// from the worker holding the claim, and a reader through the claim does not inherit it.
-#[moq_clock::test]
+#[kio::test]
 async fn an_unrequested_publish_is_a_start() {
-	moq_clock::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let version: Version = "moq-lite-07-wip".parse().unwrap();
 		let worker = Worker::new(1, "pool", "w");
 		let relay = produce_origin(2);
@@ -230,9 +230,9 @@ async fn an_unrequested_publish_is_a_start() {
 
 /// `W -> R` on lite-07 and `R -> E` on lite-06: the relay keeps its reader through the
 /// takeover and forwards it to the older edge as a start.
-#[moq_clock::test]
+#[kio::test]
 async fn an_older_downstream_gets_a_start() {
-	moq_clock::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let worker = Worker::new(1, "pool", "w");
 		let relay = produce_origin(2);
 		let edge = produce_origin(3);

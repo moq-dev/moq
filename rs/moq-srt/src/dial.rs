@@ -274,14 +274,14 @@ mod tests {
 		// Caller: dial with m=publish, then drop (we only assert connect + routing).
 		let caller = tokio::spawn(async move { Client::new(addr, "cam0").call(Mode::Publish).await });
 
-		let socket = moq_clock::timeout(Duration::from_secs(10), caller)
+		let socket = kio::clock::timeout(Duration::from_secs(10), caller)
 			.await
 			.expect("caller timed out")
 			.expect("caller task")
 			.expect("SRT caller should connect");
 		drop(socket);
 
-		let (resource, is_publish) = moq_clock::timeout(Duration::from_secs(10), server_task)
+		let (resource, is_publish) = kio::clock::timeout(Duration::from_secs(10), server_task)
 			.await
 			.expect("server timed out")
 			.expect("server task");
@@ -315,14 +315,14 @@ mod tests {
 
 		let caller = tokio::spawn(async move { Client::new(addr, "cam0").call(Mode::Request).await });
 
-		let socket = moq_clock::timeout(Duration::from_secs(10), caller)
+		let socket = kio::clock::timeout(Duration::from_secs(10), caller)
 			.await
 			.expect("caller timed out")
 			.expect("caller task")
 			.expect("SRT caller should connect");
 		drop(socket);
 
-		let (resource, is_subscribe) = moq_clock::timeout(Duration::from_secs(10), server_task)
+		let (resource, is_subscribe) = kio::clock::timeout(Duration::from_secs(10), server_task)
 			.await
 			.expect("server timed out")
 			.expect("server task");

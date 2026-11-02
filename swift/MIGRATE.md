@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Decoder outputs take a `Media.Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`Audio.DecoderOutput` replaces `maxDelay` and the playout `delay: TimeInterval?` with `delay: Media.Delay?` and `estimate: Bool = true`.
+`Video.DecoderOutput.maxDelay` is `delay: Media.Delay?`.
+`Media.Delay(min:max:)`: `max` (nil for no limit) is the old `maxDelay`, and `min` is the playout delay, where a cold join starts.
+A fixed audio playout delay `d` is `delay: Media.Delay(min: d, max: ...)` with `estimate: false`.
+
 ### Compression moves to the track
 
 `Flate` is removed: publish opaque bytes on a `TrackProducer`.

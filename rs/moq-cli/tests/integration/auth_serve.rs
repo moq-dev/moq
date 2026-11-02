@@ -32,9 +32,17 @@ async fn stops_on(signal: libc::c_int) {
 	// Signal only once the handler can be installed: before that, the default action
 	// would kill the process whether or not the fix is in.
 	let mut lines = BufReader::new(child.stderr.take().expect("stderr")).lines();
-	moq_clock::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		while let Some(line) = lines.next_line().await.expect("read stderr") {
 			if line.contains("auth server listening") {
+				// The line names the port the OS assigned, not the requested port 0.
+				let port = line
+					.split("127.0.0.1:")
+					.nth(1)
+					.and_then(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+					.and_then(|port| port.parse::<u16>().ok())
+					.unwrap_or_else(|| panic!("no bound address in {line:?}"));
+				assert_ne!(port, 0, "logged the requested port instead of the bound one: {line:?}");
 				return;
 			}
 		}
@@ -47,7 +55,7 @@ async fn stops_on(signal: libc::c_int) {
 	// SAFETY: `kill` has no memory-safety preconditions; the pid is our live child.
 	assert_eq!(unsafe { libc::kill(pid, signal) }, 0, "failed to signal moq");
 
-	let status = moq_clock::timeout(TIMEOUT, child.wait())
+	let status = kio::clock::timeout(TIMEOUT, child.wait())
 		.await
 		.expect("moq ignored the signal")
 		.expect("wait for moq");

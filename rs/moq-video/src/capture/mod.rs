@@ -413,7 +413,7 @@ impl Synthetic {
 	}
 
 	/// Deliver a frame acquired at `captured`.
-	pub(crate) fn push_at(&self, surface: crate::frame::Surface, captured: moq_clock::Instant) {
+	pub(crate) fn push_at(&self, surface: crate::frame::Surface, captured: kio::clock::Instant) {
 		self.chan.push_at(surface, captured);
 	}
 

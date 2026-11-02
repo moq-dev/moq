@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use futures::TryStreamExt;
-use moq_clock::sleep;
+use kio::clock::sleep;
 use moq_net::track::Position;
 use moq_net::{Timescale, Timestamp, broadcast, group, track};
 use object_store::ObjectStoreExt;
@@ -63,7 +63,7 @@ async fn subscribed(track: &track::Producer) {
 }
 
 async fn finished(task: JoinHandle<Result<()>>) {
-	moq_clock::timeout(Duration::from_secs(1000), task)
+	kio::clock::timeout(Duration::from_secs(1000), task)
 		.await
 		.expect("the producer ends with its broadcast")
 		.unwrap()
@@ -831,7 +831,7 @@ async fn a_re_added_track_is_stored_under_its_own_properties() {
 
 	second.finish().unwrap();
 	broadcast.close();
-	let err = moq_clock::timeout(Duration::from_secs(1000), task)
+	let err = kio::clock::timeout(Duration::from_secs(1000), task)
 		.await
 		.unwrap()
 		.unwrap()

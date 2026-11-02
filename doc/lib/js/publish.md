@@ -51,14 +51,16 @@ for a permission, device, or settings change instead of prompting again.
 
 ## Encoding
 
-An enabled encoder encodes whether or not anyone is subscribed, so its recent
-groups wait in the track's cache: a viewer who subscribes late with a
-`maxDelay`, or fetches, reaches back as far as `maxAge` keeps. Pass
-`onDemand: true` to `Publish.Broadcast` to encode every rendition only while
-someone is subscribed instead. That saves the encode while nobody watches, but
-a viewer then starts at the keyframe its arrival forces, with no past to reach.
-Bandwidth is reserved only while someone is subscribed, so an unwatched
-rendition encodes at its configured bitrate.
+Video encodes while enabled, so its recent groups wait in the track's cache for
+a late subscription's `maxDelay` or a fetch. Audio keeps raw PCM while nobody
+listens, then encodes that history ahead of live audio when a subscriber arrives.
+Both retain up to `maxAge`; raw audio without a declared retention keeps at most
+30 seconds (about 11.5 MB for 48 kHz stereo f32). Capture stays open.
+
+Pass `onDemand: false` to `Publish.Broadcast` to encode audio continuously too.
+`onDemand: true` also gates video, which then loses its unsubscribed past.
+Bandwidth reservations still follow subscriptions; unwatched video uses its
+configured bitrate.
 
 The video encoder follows its share of the connection's send-rate estimate, so
 several publishers on one connection do not each target the whole uplink.
@@ -151,9 +153,8 @@ const broadcast = new Publish.Broadcast({
     rotation: capture.out.rotation,
 });
 
-// Each encoder registers a rendition on the broadcast (`broadcast.video(name)`) and
-// encodes while enabled, subscribed or not. Pass `onDemand: true` to the broadcast
-// to encode only while someone is subscribed.
+// Video encodes while enabled. Audio buffers raw PCM until someone subscribes.
+// Pass `onDemand: false` to the broadcast to encode both continuously.
 new Publish.Video.Encoder("video/hd", { broadcast, capture, enabled: true });
 new Publish.Video.Encoder("video/sd", { broadcast, capture, enabled: true, config: { maxScale: 0.25 } });
 const audioSource = new Publish.Signals.Computed((effect) => effect.get(microphone.out.source)?.audio);

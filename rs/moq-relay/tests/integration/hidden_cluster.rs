@@ -51,7 +51,7 @@ fn old_peers_keep_hidden_paths() {
 async fn old_peer_keeps_hidden_paths(version: moq_net::Version) {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-	moq_clock::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let (port, mut server) = listen_tcp(version).await;
 		let peer_origin = moq_tokio::origin::spawn();
 		let mut discovered = peer_origin.consume().with_hidden(true).announced();

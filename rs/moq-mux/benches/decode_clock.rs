@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 #[path = "../src/container/decode.rs"]
 #[allow(

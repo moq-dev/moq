@@ -34,7 +34,7 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 
 /// The next event as `+name`, `-name`, `synced`, `end`, or `error: ..`.
 async fn next(tracks: &mut moq_net::broadcast::Tracks) -> String {
-	match moq_clock::timeout(TIMEOUT, tracks.next())
+	match kio::clock::timeout(TIMEOUT, tracks.next())
 		.await
 		.expect("listing stalled")
 	{
@@ -58,7 +58,7 @@ async fn connect(publisher: &moq_net::origin::Producer, version: &str) -> (moq_n
 }
 
 async fn resolve(origin: &moq_net::origin::Producer, path: &str) -> moq_net::broadcast::Consumer {
-	moq_clock::timeout(TIMEOUT, origin.consume().follow(path, None).unwrap().available())
+	kio::clock::timeout(TIMEOUT, origin.consume().follow(path, None).unwrap().available())
 		.await
 		.expect("announce timeout")
 		.expect("routed")
@@ -80,11 +80,11 @@ fn subscribes(pair: &MockPair) -> usize {
 
 /// Read one frame of the next group, or `None` once the subscription ends.
 async fn read(sub: &mut moq_net::track::Subscriber) -> Option<(u64, Vec<u8>)> {
-	let mut group = moq_clock::timeout(TIMEOUT, sub.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 		.await
 		.expect("group timeout")
 		.ok()??;
-	let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("frame timeout")
 		.ok()??;
@@ -94,7 +94,7 @@ async fn read(sub: &mut moq_net::track::Subscriber) -> Option<(u64, Vec<u8>)> {
 /// SUBSCRIBE_TRACKS goes out only for a listing, since many peers do not answer it:
 /// connecting, an announce, and a reader's SUBSCRIBE send none. Our own publisher refuses
 /// it, which fails only that listing, and the SUBSCRIBE keeps delivering.
-#[moq_clock::test]
+#[kio::test]
 async fn a_listing_of_our_own_peer_fails_alone() {
 	for version in DRAFTS {
 		let publisher = produce_origin(1);
@@ -104,11 +104,11 @@ async fn a_listing_of_our_own_peer_fails_alone() {
 
 		let (subscriber, pair) = connect(&publisher, version).await;
 		let remote = resolve(&subscriber, "bcast").await;
-		let mut sub = moq_clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(None))
+		let mut sub = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
 			.expect("subscribe");
-		moq_clock::timeout(TIMEOUT, support::wanted(video.demand()))
+		kio::clock::timeout(TIMEOUT, support::wanted(video.demand()))
 			.await
 			.expect("never subscribed")
 			.unwrap();

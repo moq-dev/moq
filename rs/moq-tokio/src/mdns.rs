@@ -712,12 +712,12 @@ fn addr_url(addr: SocketAddr) -> Option<Url> {
 /// refusing to start over one of those would be wrong; an error only decides the
 /// outcome if *nothing* announces.
 async fn announced(monitor: &mdns_sd::Receiver<mdns_sd::DaemonEvent>) -> Result<()> {
-	let deadline = moq_clock::now() + ANNOUNCE_TIMEOUT;
+	let deadline = kio::clock::now() + ANNOUNCE_TIMEOUT;
 	// Kept so a total failure reports why rather than just "timed out".
 	let mut failure = None;
 
 	loop {
-		let event = match moq_clock::timeout_at(deadline, monitor.recv_async()).await {
+		let event = match kio::clock::timeout_at(deadline, monitor.recv_async()).await {
 			Ok(Ok(event)) => event,
 			// The daemon died, or nothing announced in time. Either way the mesh is
 			// not live, which is exactly what the caller is gating on.
@@ -1185,7 +1185,7 @@ mod tests {
 				}
 			}
 		};
-		moq_clock::timeout(std::time::Duration::from_secs(30), wait)
+		kio::clock::timeout(std::time::Duration::from_secs(30), wait)
 			.await
 			.unwrap_or_else(|_| panic!("timed out discovering {fingerprint}"))
 	}
@@ -1251,7 +1251,7 @@ mod tests {
 	async fn stopped(monitor: mdns_sd::Receiver<mdns_sd::DaemonEvent>) {
 		// Monitor senders belong to the worker, not the command handle. Their
 		// closure proves the worker released them rather than just accepting Exit.
-		moq_clock::timeout(std::time::Duration::from_secs(5), async {
+		kio::clock::timeout(std::time::Duration::from_secs(5), async {
 			while monitor.recv_async().await.is_ok() {}
 		})
 		.await
@@ -1373,7 +1373,7 @@ mod tests {
 			"exactly one side of the pair dials"
 		);
 
-		let leaked = moq_clock::timeout(std::time::Duration::from_secs(2), async {
+		let leaked = kio::clock::timeout(std::time::Duration::from_secs(2), async {
 			loop {
 				match foreign.recv().await {
 					Some(Event::Found(peer))

@@ -19,7 +19,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 bench = ["moq-net/fuzz"]
 
 [dependencies]
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
 serde = { workspace = true }

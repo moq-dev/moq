@@ -118,7 +118,7 @@ final class QuicConfig {
   /// How long an idle QUIC connection survives before it is dropped.
   final Duration? idleTimeout;
 
-  /// QUIC keep-alive ping interval; zero disables it.
+  /// QUIC keep-alive ping interval; zero uses the default.
   final Duration? keepAlive;
 
   /// UDP generic segmentation offload; null leaves the choice to the backend.
