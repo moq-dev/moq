@@ -122,8 +122,8 @@ pub(super) enum Action {
 	/// Request the path through `route`; feed the outcome back as
 	/// [`Event::Resolved`].
 	Request { route: u64 },
-	/// Drop the driver's handle on a source.
-	Detach { source: u64 },
+	/// Drop the driver's source handle, keeping its pending track queries when `drain` is true.
+	Detach { source: u64, drain: bool },
 	/// Resolve the requesters parked on the front: it has a source.
 	Resolve,
 	/// Ask `source` for its copy of `track`; feed the answer back as
@@ -394,7 +394,7 @@ impl Front {
 		let Some(upstream) = self.upstream.filter(|upstream| upstream.route == route) else {
 			// A source for a request we no longer want: let it go.
 			if let Ok(source) = result {
-				actions.push(Action::Detach { source });
+				actions.push(Action::Detach { source, drain: false });
 			}
 			return;
 		};
@@ -422,7 +422,10 @@ impl Front {
 
 	fn attach(&mut self, source: u64, candidate: Candidate, actions: &mut Vec<Action>) {
 		if let Some((old, _)) = self.serving.take() {
-			actions.push(Action::Detach { source: old });
+			actions.push(Action::Detach {
+				source: old,
+				drain: false,
+			});
 		}
 		// Every copy is from an older source, including one a track still drains from a
 		// source the previous one replaced.
@@ -458,7 +461,7 @@ impl Front {
 		self.excluded.insert(candidate.route);
 		self.serving = None;
 		self.serving_closing = false;
-		actions.push(Action::Detach { source });
+		actions.push(Action::Detach { source, drain: true });
 		self.drain_copies();
 		actions.push(Action::Reselect);
 	}
@@ -856,7 +859,10 @@ mod tests {
 				result: Ok(200),
 			}),
 			&[
-				Action::Detach { source: 100 },
+				Action::Detach {
+					source: 100,
+					drain: false,
+				},
 				Action::Query {
 					track: name("video"),
 					source: 200,
@@ -886,7 +892,10 @@ mod tests {
 				route: 2,
 				result: Ok(200),
 			}),
-			&[Action::Detach { source: 200 }],
+			&[Action::Detach {
+				source: 200,
+				drain: false,
+			}],
 		);
 	}
 
@@ -895,7 +904,13 @@ mod tests {
 		let mut front = serving(remote(1), 100);
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::Reselect],
+			&[
+				Action::Detach {
+					source: 100,
+					drain: true,
+				},
+				Action::Reselect,
+			],
 		);
 		assert_eq!(front.excluded_routes(), &HashSet::from([1]));
 		assert_actions(
@@ -1349,7 +1364,13 @@ mod tests {
 		front.step(Event::Forgotten { track: name("video") });
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::Reselect],
+			&[
+				Action::Detach {
+					source: 100,
+					drain: true,
+				},
+				Action::Reselect,
+			],
 		);
 		assert_actions(front.step(Event::Unheld), &[]);
 		assert_actions(
@@ -1424,7 +1445,10 @@ mod tests {
 				route: 2,
 				result: Ok(200),
 			}),
-			&[Action::Detach { source: 100 }],
+			&[Action::Detach {
+				source: 100,
+				drain: false,
+			}],
 		);
 		let t1 = t0 + LINGER;
 		front.step(Event::Unwanted {
@@ -1573,7 +1597,13 @@ mod tests {
 		let mut front = serving(local(1), 100);
 		assert_actions(
 			front.step(Event::SourceClosed { source: 100 }),
-			&[Action::Detach { source: 100 }, Action::Reselect],
+			&[
+				Action::Detach {
+					source: 100,
+					drain: true,
+				},
+				Action::Reselect,
+			],
 		);
 		assert_actions(
 			front.step(Event::Selected {
@@ -1759,7 +1789,7 @@ mod tests {
 				assert!(splices <= 1);
 				// A Detach names a source the front no longer serves from.
 				for action in &actions {
-					if let Action::Detach { source } = action {
+					if let Action::Detach { source, .. } = action {
 						assert_ne!(next.serving.map(|(s, _)| s), Some(*source));
 					}
 				}
@@ -1807,7 +1837,10 @@ mod tests {
 				result: Ok(300),
 			}),
 			&[
-				Action::Detach { source: 200 },
+				Action::Detach {
+					source: 200,
+					drain: false,
+				},
 				Action::Query {
 					track: name("video"),
 					source: 300,

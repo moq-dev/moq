@@ -4791,6 +4791,54 @@ mod tests {
 		}
 	}
 
+	/// An in-flight TRACK survives withdrawal, like its pipelined SUBSCRIBE, but
+	/// never accepts a replacement instance's info.
+	#[kio::test]
+	async fn an_in_flight_track_info_keeps_its_instance() {
+		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
+			for replace in [false, true] {
+				let session = crate::lite::test_transport::ScriptedSession::new(Vec::new());
+				let subscriber = pipelining(crate::driver::Transport::new(session.clone()), version);
+				let (_waiting, mut run) = subscribing(&subscriber, Subscription::default());
+				let route = kio::Producer::new(());
+				run.serve.route = Some(route.consume());
+				let mut selection = crate::model::TestSelection::new();
+				run.serve.validity = selection.validity();
+				let mut fetch = TrackInfoFetch::new(&run.serve);
+				let waiter = kio::Waiter::noop();
+				assert!(fetch.poll_fetch(&run.serve, true, &waiter).is_pending());
+				drop(route);
+				selection.withdraw();
+				if replace {
+					selection.replace();
+				} else {
+					assert!(
+						fetch.poll_fetch(&run.serve, true, &waiter).is_pending(),
+						"{version}: the request already went out"
+					);
+				}
+
+				let mut info = Vec::new();
+				lite::TrackInfo {
+					refresh: None,
+					priority: 0,
+					max_age: None,
+					timescale: Some(Timescale::MILLI),
+					compress: false,
+				}
+				.encode(&mut crate::coding::Encoder::new(&mut info, version.into()), version)
+				.unwrap();
+				session.push(&info);
+				let result = fetch.poll_fetch(&run.serve, true, &waiter);
+				if replace {
+					assert!(matches!(result, Poll::Ready(Err(Error::Unroutable))), "{version}");
+				} else {
+					assert!(matches!(result, Poll::Ready(Ok(_))), "{version}");
+				}
+			}
+		}
+	}
+
 	/// Accepting the TRACK_INFO sends no SUBSCRIBE_UPDATE, even when the publisher keeps
 	/// groups for less than the subscriber waits: the publisher applies its own max age.
 	#[kio::test]
@@ -8369,7 +8417,10 @@ impl kio::Task for TrackServeRun {
 					}
 					// TRACK opens first: its stream fails fast without credit, where a fetch's
 					// waits for it, so fetches opened ahead could starve their own prerequisite.
-					let fetched = info.poll_fetch(&self.serve, waiter);
+					let subscribed = pipelined
+						.as_ref()
+						.is_some_and(|subscribing| matches!(subscribing.state, PipelinedState::Open(_)));
+					let fetched = info.poll_fetch(&self.serve, subscribed, waiter);
 					let failed = match pipelined {
 						Some(subscribing) => subscribing.poll(waiter),
 						None => Poll::Pending,
@@ -8536,15 +8587,19 @@ impl TrackInfoFetch {
 	fn poll_fetch(
 		&mut self,
 		serve: &TrackServe,
+		subscribed: bool,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<(track::Info, HeldTrack), Error>> {
 		#[every_poll]
-		self.validity.check(waiter)?;
-		// A withdrawn route fails an info still owed. One already delivered stays usable, like
-		// one read before the withdrawal: a SUBSCRIBE sent alongside may already be served.
-		#[every_poll]
-		if !matches!(self.state, TrackInfoState::Read(_)) && withdrawn(serve, waiter) {
-			return Poll::Ready(Err(Error::Unroutable));
+		if subscribed && matches!(self.state, TrackInfoState::Read(..) | TrackInfoState::Properties(..)) {
+			// The request is on the wire: withdrawal leaves it to its answer, just like
+			// the SUBSCRIBE sent alongside it. A replacement still invalidates that answer.
+			self.validity.check_unanswered(waiter)?;
+		} else {
+			self.validity.check(waiter)?;
+			if withdrawn(serve, waiter) {
+				return Poll::Ready(Err(Error::Unroutable));
+			}
 		}
 
 		let mut stream: Stream<Transport, Version> =
@@ -8562,14 +8617,10 @@ impl TrackInfoFetch {
 			if let Poll::Ready(err) = self.closed.poll_closed(waiter) {
 				return Poll::Ready(Err(crate::lite::error::from_transport(err)));
 			}
-			let read = match serve.subscriber.peer_setup.poll_ietf(waiter) {
+			match serve.subscriber.peer_setup.poll_ietf(waiter) {
 				Poll::Ready(ietf) => stream.reader.poll_decode::<lite::TrackInfo>(waiter).map_ok(|info| (ietf, info)),
 				Poll::Pending => Poll::Pending,
-			};
-			if read.is_pending() && withdrawn(serve, waiter) {
-				return Poll::Ready(Err(Error::Unroutable));
 			}
-			read
 		})?;
 
 		// Publisher Max Age rides on the wire, so the local retention
