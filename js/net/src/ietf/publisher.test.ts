@@ -306,7 +306,7 @@ test("TRACK_STATUS finished at once is answered on every draft", async () => {
 		finish();
 		const served = new BroadcastProducer();
 		served.createTrack("video");
-		hooks.acceptRequest(pending, served);
+		pending.serve(served);
 		await task;
 		expect(await wire().u53()).toBe(TrackStatusOk.id);
 
