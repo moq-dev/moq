@@ -632,7 +632,14 @@ impl Auth {
 	}
 
 	/// Admit a session: the lease it holds, carrying the scope the origin applies.
+	///
+	/// A path naming a `.` or `..` segment is refused before the decider sees it. A
+	/// URL transport resolves those away, but an in-band SETUP Path arrives verbatim,
+	/// and `/tenant-a/../tenant-b` would reach the decider spelled under `tenant-a`.
 	pub async fn admit(&self, request: Request) -> Result<Lease, Error> {
+		if navigates(&request.path) {
+			return Err(Error::Request(format!("path {:?} has a dot segment", request.path)));
+		}
 		let path = request.path.clone();
 		let (reply, answer) = oneshot::channel();
 		self.admissions
@@ -653,6 +660,12 @@ impl Auth {
 	pub(crate) fn admit_fixed(&self, path: &str, grant: Grant) -> Lease {
 		Lease::new(path, lease::Consumer::fixed(grant))
 	}
+}
+
+/// Whether `path` has a segment URL resolution reads as `.` or `..`, percent-encoded or not.
+fn navigates(path: &str) -> bool {
+	path.split('/')
+		.any(|segment| matches!(segment.to_ascii_lowercase().replace("%2e", ".").as_str(), "." | ".."))
 }
 
 /// The sessions an embedded [`Auth`] is waiting to admit, in arrival order.
@@ -777,6 +790,41 @@ mod tests {
 		let grant = split.public_grant().unwrap();
 		assert_eq!(grant.subscribe, patterns(&["anon/**"]));
 		assert!(grant.publish.is_empty());
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn admit_refuses_dot_segments_before_the_decider() {
+		let (auth, mut admissions) = Auth::embedded("relay-1");
+		for path in [
+			"/tenant-a/../tenant-b",
+			".",
+			"/..",
+			"/a/./b",
+			"/a/.",
+			"/%2e",
+			"/%2E/room",
+			"/a/.%2e",
+			"/a/%2E./b",
+			"/a/%2e%2E/b",
+		] {
+			let result = auth.admit(auth.request(moq_auth::Transport::Quic, path)).await;
+			assert!(
+				matches!(result, Err(Error::Request(_))),
+				"{path} was not refused as a bad path"
+			);
+			assert!(admissions.0.try_recv().is_err(), "{path} reached the decider");
+		}
+
+		// Names containing dots keep their exact spelling at the admission boundary.
+		for path in ["/a/...", "/.hidden", "/a/..b", "/a/%2e-hidden", "/a/%252e"] {
+			let decide = async {
+				let admission = admissions.next().await.unwrap();
+				assert_eq!(admission.request.path, path);
+				admission.grant(lease::Consumer::fixed(Grant::new(patterns(&["**"]), patterns(&["**"]))));
+			};
+			let (result, ()) = tokio::join!(auth.admit(auth.request(moq_auth::Transport::Quic, path)), decide);
+			assert!(result.is_ok(), "{path} was refused");
+		}
 	}
 
 	/// The public rules are rooted at `/`, like a token with an empty root. Bare `**`

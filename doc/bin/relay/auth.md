@@ -37,7 +37,10 @@ bytes as unpadded base64url), `role` the client declared at SETUP
 `name` (first SAN DNS name, else CN, else the fingerprint; a server cannot tell which), `fingerprint`
 (SHA-256 of the leaf), `expires`, `issuer`. Nothing is parsed on the server's
 behalf: the `jwt` query parameter is a convention of `moq auth serve`, not of
-the relay, and the relay forwards a SETUP token without reading it. An `end` adds `reason`, `duration` in seconds, and `bytes` sent and
+the relay, and the relay forwards a SETUP token without reading it. A path with
+a `.` or `..` segment, percent-encoded or not, is refused before the server is
+asked: a URL transport resolves those away, but a SETUP path arrives verbatim.
+An `end` adds `reason`, `duration` in seconds, and `bytes` sent and
 received.
 
 **Grant.** `publish` and `subscribe` as pattern unions (`foo/**` is a subtree,
@@ -120,7 +123,9 @@ only. HTTPS verifies the URL's hostname with system roots. For a private CA,
 set `auth.root` to PEM paths (or repeat `--auth-root`); these replace system
 trust for auth only and reload for new connections when rotated. Mesh roots,
 fingerprints, insecure mode, and hostname overrides never apply to auth.
-There is no shared secret.
+There is no shared secret. Auth requests never follow redirects, so a redirect
+cannot forward a credential to another destination. Point `--auth-url` at the
+server's final URL; a redirect is reported as an auth-server outage.
 
 **Patterns.** A grant is any pattern union and means exactly what it says:
 `foo/**` is a subtree, a bare `foo` is that one broadcast, `live/*` is every
