@@ -33,6 +33,9 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 		priority: super::priority::from_wire(subscriber_priority),
 		// No Max Age is the publisher's retention alone, whatever it turns out to be.
 		max_delay: None,
+		// SUBSCRIBE_OK names the live edge, which a relay learns only from its upstream's
+		// answer: never from its cache, nor from an edge reported before.
+		feed: true,
 		..Default::default()
 	}
 }

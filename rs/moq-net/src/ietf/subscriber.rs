@@ -756,15 +756,15 @@ fn largest_group(track: &track::Producer, answer: Option<ietf::Location>) -> Opt
 }
 
 /// Whether `subscription` needs a live feed for a copy whose publisher reported its Largest
-/// Object in group `edge`: one of its ranges is open, counts back from the live edge, or
-/// reaches the group the publisher may still be writing. Ranges wholly below it read only
-/// history, which fills serve.
+/// Object in group `edge`: a reader asked for it ([`track::Subscription::feed`]), or one of
+/// its ranges is open, counts back from the live edge, or reaches the group the publisher
+/// may still be writing. Ranges wholly below it read only history, which fills serve.
 fn wants_feed(subscription: &track::Subscription, edge: Option<u64>) -> bool {
 	if subscription.ranges.is_empty() {
 		return false;
 	}
 	let history = subscription.start().is_some() && subscription.end().zip(edge).is_some_and(|(end, edge)| end <= edge);
-	!history
+	subscription.feed || !history
 }
 
 /// A copy with no subscription upstream, kept for fetches and a returning subscriber.
@@ -3585,7 +3585,14 @@ impl Subscriber {
 						&& (poll_headed(&fill, waiter).is_ready()
 							|| largest.is_some_and(|largest| track.poll_past(largest.group, waiter).is_ready()))
 					{
-						track.set_live(largest, None);
+						match largest {
+							// A feed ending before the answer's Largest never shows it, so the
+							// answer alone makes the copy current.
+							Some(largest) if sent_bounds.1.is_some_and(|end| end <= largest.group) => {
+								track.set_live_ahead(largest)
+							}
+							largest => track.set_live(largest, None),
+						}
 						resuming = None;
 					}
 					// The last subscriber left: the upstream subscription goes with it, as on
