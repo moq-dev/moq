@@ -225,8 +225,8 @@ export CRITERION_HOME=$RUN/criterion
 
 checkout_base() {
     # Cargo merges every ancestor's .cargo/config.toml. A nested worktree would
-    # inherit this checkout's settings instead of measuring the base in isolation.
-    WORKTREE=$(mktemp -d "${TMPDIR:-/tmp}/moq-bench-base.XXXXXX")
+    # inherit this checkout's settings unless the caller loads only its own config.
+    WORKTREE=$(mktemp -d "${2:-${TMPDIR:-/tmp}}/moq-bench-base.XXXXXX")
     git worktree add --detach "$WORKTREE" "$1" >/dev/null
 }
 
@@ -858,7 +858,8 @@ run_profiles() {
     fi
 
     if [[ -n $BASE ]]; then
-        checkout_base "$BASE"
+        mkdir -p "$ROOT/.tmp"
+        checkout_base "$BASE" "$ROOT/.tmp"
         mkdir -p "$RUN/base-context"
         (cd "$WORKTREE" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE" --profile)
     fi

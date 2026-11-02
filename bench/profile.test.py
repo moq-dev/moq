@@ -54,6 +54,14 @@ class Instructions(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing"):
             instructions.reduce(self.window, self.stats[1:], self.load)
 
+    def test_identical_cumulative_snapshots_remain_interpolatable(self):
+        self.load.insert(2, dict(self.load[1]))
+        result = instructions.reduce(self.window, self.stats, self.load)
+        self.assertEqual(result["delivered_frames"], 2000)
+        self.load[2]["frames_recv"] += 1
+        with self.assertRaisesRegex(ValueError, "same timestamp"):
+            instructions.reduce(self.window, self.stats, self.load)
+
     def test_cpu_sets_cannot_overlap_or_escape_the_allowed_set(self):
         with patch.object(os, "sched_getaffinity", return_value={0, 1, 2, 3}, create=True):
             for relay, generator in [("0-1", "1-2"), ("4", "0"), ("0", ""), ("0-1", "3-2")]:

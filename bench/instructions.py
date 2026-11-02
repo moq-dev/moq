@@ -207,8 +207,12 @@ def reduce(window, stats, rows):
             if not isinstance(row[key], (int, float)) or not math.isfinite(row[key]) or row[key] < 0:
                 raise ValueError(f"invalid generator counter: {key}")
     for first, last in zip(rows, rows[1:]):
-        if last["timestamp_ms"] <= first["timestamp_ms"] or last["frames_recv"] < first["frames_recv"]:
+        if last["timestamp_ms"] < first["timestamp_ms"] or last["frames_recv"] < first["frames_recv"]:
             raise ValueError("generator counters moved backwards")
+        # Catch-up ticks can observe the same cumulative snapshot at millisecond
+        # resolution. Different counters at that timestamp cannot be interpolated.
+        if last["timestamp_ms"] == first["timestamp_ms"] and last["frames_recv"] != first["frames_recv"]:
+            raise ValueError("conflicting generator counters at the same timestamp")
     start, end = [sum(window[key]) / 2 for key in ("start_ms", "end_ms")]
     if end <= start:
         raise ValueError("counter window did not advance")

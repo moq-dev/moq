@@ -262,6 +262,10 @@ Missing, uncounted, or multiplexed counters and unbracketed delivery fail the ru
 Lost or throttled instruction samples also fail. Inspect the host's sample-rate
 limit and buffers before choosing a larger fixed period for the whole comparison;
 some sample-rate limits throttle on every interrupt, regardless of the period.
+On the profiling host, a 1,000 Hz limit throttled every sample even at a period
+of 10,000,019. Temporarily raising `kernel.perf_event_max_sample_rate` to 100,000
+allowed complete captures. Save and restore the original setting around the
+whole gated run; the driver records the observed limit and changes no sysctls.
 The host sampler lasts fourteen seconds so delivery reports bracket both edges.
 The normal `summary.json` still describes its own final throughput window;
 use `instructions.json` for instruction comparisons.
