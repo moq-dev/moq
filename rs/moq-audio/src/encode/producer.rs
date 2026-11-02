@@ -683,6 +683,7 @@ mod tests {
 	#[tokio::test]
 	#[ignore = "measures real codec CPU; run with just rs bench-playback"]
 	async fn benchmark_raw_audio() {
+		println!("tracks,retention_secs,always_on,idle_ms,catchup_ms");
 		for tracks in [1, 8] {
 			for seconds in [1, 30] {
 				for active in [true, false] {
@@ -723,7 +724,9 @@ mod tests {
 					}
 					let catchup = start.elapsed();
 					println!(
-						"tracks={tracks} retention={seconds}s always_on={active}: idle={idle:?} catchup={catchup:?}"
+						"{tracks},{seconds},{active},{:.3},{:.3}",
+						idle.as_secs_f64() * 1e3,
+						catchup.as_secs_f64() * 1e3
 					);
 					for producer in &mut producers {
 						producer.finish().unwrap();
