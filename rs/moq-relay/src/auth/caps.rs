@@ -88,6 +88,7 @@ pub struct Pacer(Arc<dyn Fn(Caps) + Send + Sync>);
 
 impl Pacer {
 	/// Pace a live connection by calling `apply` with each new set of caps.
+	#[cfg(any(test, feature = "quic", all(target_os = "linux", feature = "_uring")))]
 	pub(crate) fn new(apply: impl Fn(Caps) + Send + Sync + 'static) -> Self {
 		Self(Arc::new(apply))
 	}
