@@ -258,6 +258,12 @@ export interface RequestSlot {
 	retired?: broadcast.Consumer;
 	/** The route a detached slot asked to take over under the same instance, until it answers. */
 	failover?: RouteEntry;
+	/**
+	 * The instance a pinned slot resolves through its own routes, as Rust's lookup does, while
+	 * another instance wins the path. Such a slot is detached from the start: never in the
+	 * table's `requests`, it is shared only by requests pinned to the same instance.
+	 */
+	readonly pin?: Instance.Valid;
 }
 
 /** One path resolution and the instance of the route that can currently serve it. */
@@ -338,6 +344,12 @@ function preferredEntry(
 /** Whether a session received `entry`, so it is never forwarded to a peer. */
 function received(entry: RouteEntry): boolean {
 	return !entry.originated;
+}
+
+/** What a peer cannot be served through: a received route, or one of another instance than it pinned. */
+function unservable(instance: Instance.Valid | undefined): (entry: RouteEntry) => boolean {
+	if (instance === undefined) return received;
+	return (entry) => received(entry) || entry.route.peek().instance !== instance;
 }
 
 function unroutable(): StreamError {
@@ -664,6 +676,10 @@ class OriginState {
 				stack.push(...next.children.values());
 				const slot = requests?.get(next.path);
 				if (slot) for (const absent of [...slot.absent]) absent();
+				// A pinned slot waits detached.
+				for (const other of [...(this.detached.get(next.path) ?? [])]) {
+					for (const absent of [...other.absent]) absent();
+				}
 			}
 		}
 		this.#unsettled.clear();
@@ -797,6 +813,12 @@ class OriginState {
 	reroute(path: Path.Valid, slot: RequestSlot): void {
 		if (this.retained.has(slot)) return;
 		const current = slot.route.peek();
+		// Until it resolves, a pinned slot takes the best route of its instance; then it stays on
+		// that instance, like any detached slot.
+		if (slot.pin !== undefined && !(current?.front && current.source)) {
+			this.pick(path, slot, slot.pin);
+			return;
+		}
 		if (current?.front && current.source) {
 			if (this.detached.get(path)?.has(slot)) {
 				this.failover(path, slot, current.source, current.instance);
@@ -831,8 +853,7 @@ class OriginState {
 		const local = this.local.peek()?.get(path);
 		if (instance !== undefined && local && this.advertisedLocal.peek()?.get(path)?.instance === instance) {
 			slot.failover = undefined;
-			slot.retired?.close();
-			slot.retired = undefined;
+			this.retain(path, slot, undefined);
 			slot.route.set({ front: local, instance, source: local });
 			return;
 		}
@@ -854,9 +875,63 @@ class OriginState {
 			return;
 		}
 		slot.failover = undefined;
-		slot.retired?.close();
-		slot.retired = served;
+		this.retain(path, slot, served);
 		slot.route.set({ front: served, instance, source: entry.identity });
+	}
+
+	/**
+	 * Resolve a pinned slot that has not resolved yet through the best route of `instance` alone,
+	 * as Rust's lookup does, whichever instance wins `path`. Without one it waits, and its handles
+	 * end once discovery syncs.
+	 */
+	pick(path: Path.Valid, slot: RequestSlot, instance: Instance.Valid): void {
+		const skip = (candidate: RouteEntry) => !candidate.server || candidate.route.peek().instance !== instance;
+		const entry = this.bestEntry(path, skip);
+		const local = this.local.peek()?.get(path);
+		if (
+			local &&
+			this.advertisedLocal.peek()?.get(path)?.instance === instance &&
+			this.localWins(path, entry, skip)
+		) {
+			slot.failover = undefined;
+			this.retain(path, slot, undefined);
+			slot.route.set({ front: local, instance, source: local });
+			return;
+		}
+		if (!entry?.server) {
+			slot.failover = undefined;
+			slot.route.set(undefined);
+			return;
+		}
+		const served = entry.server.served.get(path);
+		if (!served || served.closed.peek() !== undefined) {
+			// Held by the slot, so the pending request outlives a forget.
+			slot.failover = entry;
+			entry.server.enqueue(path);
+			slot.route.set({ instance });
+			return;
+		}
+		slot.failover = undefined;
+		this.retain(path, slot, served);
+		slot.route.set({ front: served, instance, source: entry.identity });
+	}
+
+	/**
+	 * Make `front` the session answer `slot` holds, closing the one it held unless the cache or
+	 * another detached slot shares it: a session serves one answer per path, so a pinned slot and
+	 * the path's own requests can take the same one.
+	 */
+	retain(path: Path.Valid, slot: RequestSlot, front: broadcast.Consumer | undefined): void {
+		const previous = slot.retired;
+		slot.retired = front;
+		if (previous && previous !== front) this.closeUnheld(path, previous);
+	}
+
+	/** Close a session answer nothing at `path` holds any more: neither the cache nor a detached slot. */
+	closeUnheld(path: Path.Valid, front: broadcast.Consumer): void {
+		if (this.materialized.get(path)?.front === front) return;
+		for (const slot of this.detached.get(path) ?? []) if (slot.retired === front) return;
+		front.close();
 	}
 
 	/**
@@ -989,8 +1064,7 @@ class OriginState {
 		const detached = this.detached.get(path);
 		if (!detached?.delete(slot)) return;
 		if (detached.size === 0) this.detached.delete(path);
-		slot.retired?.close();
-		slot.retired = undefined;
+		this.retain(path, slot, undefined);
 	}
 
 	/**
@@ -1032,7 +1106,7 @@ class OriginState {
 		const cached = this.materialized.get(path);
 		if (!cached) return;
 		this.materialized.delete(path);
-		cached.front.close();
+		this.closeUnheld(path, cached.front);
 	}
 
 	/** The preferred entry on the most specific route covering `path`, ignoring skipped entries, if any. */
@@ -1112,9 +1186,9 @@ class OriginState {
 
 		const served = entry.server.served.get(path);
 		if (served && served.closed.peek() === undefined) {
-			cached?.front.close();
 			const resolution = { entry, front: served, instance, source: entry.identity };
 			this.materialized.set(path, resolution);
+			if (cached && cached.front !== served) this.closeUnheld(path, cached.front);
 			return resolution;
 		}
 
@@ -1934,8 +2008,33 @@ export class Consumer {
 			return makeRequesting(relative, new Signal<broadcast.Consumer | undefined>(undefined), closed, () => {});
 		}
 
-		let slot = requests.get(path);
-		if (!slot) {
+		// A pin naming another instance than the winner follows that instance's own routes, on a
+		// slot shared only by requests pinned to it, rather than filter the winner afterward.
+		const pin =
+			instance !== undefined && this.#state.instance(path)?.route.instance !== instance ? instance : undefined;
+		let slot =
+			pin === undefined
+				? requests.get(path)
+				: [...(this.#state.detached.get(path) ?? [])].find(
+						(other) => other.pin === pin && !this.#state.retained.has(other),
+					);
+		if (!slot && pin !== undefined) {
+			const created: RequestSlot = {
+				blind: 0,
+				handles: new Set(),
+				absent: new Set(),
+				route: new Signal<Resolution | undefined>(undefined),
+				pin,
+			};
+			slot = created;
+			let detached = this.#state.detached.get(path);
+			if (!detached) {
+				detached = new Set();
+				this.#state.detached.set(path, detached);
+			}
+			detached.add(created);
+			this.#state.pick(path, created, pin);
+		} else if (!slot) {
 			// Seeded through the constructor, so a path the table already routes resolves on the
 			// first read. It must not go through a silent set: that still captures the pre-seed
 			// value as the baseline the next change is compared against, and never flushes to
@@ -2227,9 +2326,12 @@ export class Consumer {
 	 */
 	#local(path: Path.Valid, instance?: Instance.Valid): broadcast.Consumer | undefined {
 		const local = this.#state.local.peek()?.get(path);
-		if (!local || !this.#state.localWins(path, this.#state.bestEntry(path, received), received)) return undefined;
+		if (!local) return undefined;
 		if (instance !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.instance !== instance)
 			return undefined;
+		// Pinned, it competes only with its own instance's routes, whichever instance wins.
+		const skip = unservable(instance);
+		if (!this.#state.localWins(path, this.#state.bestEntry(path, skip), skip)) return undefined;
 		return local;
 	}
 
@@ -2257,16 +2359,16 @@ export class Consumer {
 			// Each pass asks the instance that wins now; an instance change releasing the request starts another.
 			for (;;) {
 				signal?.throwIfAborted();
-				const local = this.#local(path);
-				if (local) {
-					// A peer naming one publisher instance is never handed another.
-					if (instance !== undefined && this.#state.advertisedLocal.peek()?.get(path)?.instance !== instance)
+				// A peer naming one publisher instance takes that instance's own routes, whichever
+				// wins, and is never handed another.
+				const local = this.#local(path, instance);
+				if (local) return local;
+				const entry = this.#state.bestEntry(path, unservable(instance));
+				if (!entry?.server) {
+					if (instance !== undefined && (this.#local(path) || this.#state.bestEntry(path, received)?.server))
 						throw unroutable();
-					return local;
+					return undefined;
 				}
-				const entry = this.#state.bestEntry(path, received);
-				if (!entry?.server) return undefined;
-				if (instance !== undefined && entry.route.peek().instance !== instance) throw unroutable();
 
 				const server = entry.server;
 				const live = server.served.get(path);
@@ -2293,11 +2395,7 @@ export class Consumer {
 					for (;;) {
 						signal?.throwIfAborted();
 						// The route may name another instance by the time its handler answers.
-						if (
-							instance !== undefined &&
-							this.#state.bestEntry(path, received)?.route.peek().instance !== instance
-						)
-							throw unroutable();
+						if (instance !== undefined && entry.route.peek().instance !== instance) throw unroutable();
 						const served = server.served.get(path);
 						if (served && served.closed.peek() === undefined) return served;
 						const rejected = server.rejected.get(path);

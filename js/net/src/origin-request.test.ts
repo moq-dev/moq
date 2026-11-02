@@ -766,3 +766,60 @@ test("a plain instance pin never takes an answer without that instance", () => {
 	detach();
 	origin.close();
 });
+
+// Both instances stay live, and the cheaper one wins the path: a pin follows its own
+// instance's routes, as Rust's lookup does, rather than filter the winner afterward.
+test.each(["request", "follow"] as const)("a %s pinned to a losing instance resolves it", async (method) => {
+	const origin = new Producer();
+	const path = Path.from("room/audio");
+	const pinned = Instance.random();
+	const losing = origin.requestsRoute(path, { instance: pinned, cost: 9n });
+	const winning = origin.requestsRoute(path, { instance: Instance.random(), cost: 1n });
+	const asked = losing.requested();
+	const requested = origin[method](path, { instance: pinned });
+	const pending = (await asked.next()).value;
+	if (!pending) throw new Error("the pinned instance's route was not asked");
+	const source = new BroadcastProducer();
+	hooks.acceptRequest(pending, source.consume());
+	await settle();
+	expect(requested.closed.peek()).toBeUndefined();
+	expect(requested.active.peek()?.instance).toBe(pinned);
+
+	// A second pin shares the answer, and the path's own requests still resolve the winner.
+	const again = origin.request(path, { instance: pinned });
+	expect(again.active.peek()?.instance).toBe(pinned);
+	const plain = origin.request(path);
+	const answer = (await winning.requested().next()).value;
+	if (!answer) throw new Error("the winning route was not asked");
+	const other = new BroadcastProducer();
+	hooks.acceptRequest(answer, other.consume());
+	await settle();
+	expect(plain.active.peek()?.instance).toBe(winning.route.instance);
+
+	requested.close();
+	again.close();
+	await settle();
+	expect(plain.active.peek()?.instance).toBe(winning.route.instance);
+	plain.close();
+	source.close();
+	other.close();
+	losing.close();
+	winning.close();
+	origin.close();
+});
+
+test("a peer's pin is served by a local broadcast that loses the path", async () => {
+	const origin = new Producer();
+	const wire = wireOf(origin.consume());
+	const path = Path.from("room/audio");
+	const publication = origin.createBroadcast(path);
+	const pinned = Instance.random();
+	publication.announce({ instance: pinned, cost: 9n });
+	const winning = origin.requestsRoute(path, { instance: Instance.random(), cost: 1n });
+	expect(wire.local(path)).toBeUndefined();
+	expect(wire.local(path, pinned)).toBeDefined();
+	expect(await wire.demand(path, pinned)).toBeDefined();
+	winning.close();
+	publication.broadcast.close();
+	origin.close();
+});
