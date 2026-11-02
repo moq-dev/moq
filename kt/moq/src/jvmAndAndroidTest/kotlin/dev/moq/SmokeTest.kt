@@ -509,26 +509,27 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = true)
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
-            val producer = SnapshotProducer(broadcast, track, config)
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
-            for (n in 1..4) producer.update(
-                Status(state = "live$n"),
-                timestamp = n.milliseconds.toTimestamp(),
-            )
+            SnapshotProducer(broadcast, track, config).use { producer ->
+                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                for (n in 1..4) producer.update(
+                    Status(state = "live$n"),
+                    timestamp = n.milliseconds.toTimestamp(),
+                )
 
-            // `next` yields every state in order; `latest` skips the buffered third.
-            assertEquals(
-                Timed(Status(state = "live1"), Timestamp(1_000uL, 1_000_000uL)),
-                consumer.next()?.decode<Status>(),
-            )
-            assertEquals(
-                Timed(Status(state = "live2"), Timestamp(2_000uL, 1_000_000uL)),
-                consumer.next()?.decode<Status>(),
-            )
-            assertEquals(
-                Timed(Status(state = "live4"), Timestamp(4_000uL, 1_000_000uL)),
-                consumer.latest()?.decode<Status>(),
-            )
+                // `next` yields every state in order; `latest` skips the buffered third.
+                assertEquals(
+                    Timed(Status(state = "live1"), Timestamp(1_000uL, 1_000_000uL)),
+                    consumer.next()?.decode<Status>(),
+                )
+                assertEquals(
+                    Timed(Status(state = "live2"), Timestamp(2_000uL, 1_000_000uL)),
+                    consumer.next()?.decode<Status>(),
+                )
+                assertEquals(
+                    Timed(Status(state = "live4"), Timestamp(4_000uL, 1_000_000uL)),
+                    consumer.latest()?.decode<Status>(),
+                )
+            }
         }
     }
 
@@ -573,16 +574,17 @@ class SmokeTest {
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            val producer =
-                SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
-            val demand: TrackDemand = producer.demand()
-            assertEquals("status", demand.name())
-            assertEquals(null, demand.wanted())
+            SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config).use {
+                producer ->
+                val demand: TrackDemand = producer.demand()
+                assertEquals("status", demand.name())
+                assertEquals(null, demand.wanted())
 
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
-            while (demand.wantedChanged() == null) {}
-            consumer.cancel()
-            while (demand.wantedChanged() != null) {}
+                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                while (demand.wantedChanged() == null) {}
+                consumer.cancel()
+                while (demand.wantedChanged() != null) {}
+            }
         }
     }
 
@@ -590,17 +592,19 @@ class SmokeTest {
     fun `cancelling a flow collection cancels its native handle`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            val producer =
-                SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
-            val demand: TrackDemand = producer.demand()
-            producer.update(Status(state = "live"))
+            // A demand watcher does not own the writer; keep it alive through collection.
+            SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config).use {
+                producer ->
+                val demand: TrackDemand = producer.demand()
+                producer.update(Status(state = "live"))
 
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
-            while (demand.wantedChanged() == null) {}
-            // `first` cancels the collection, which must release the subscription without an
-            // explicit cancel.
-            assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first().value)
-            while (demand.wantedChanged() != null) {}
+                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                while (demand.wantedChanged() == null) {}
+                // `first` cancels the collection, which must release the subscription without an
+                // explicit cancel.
+                assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first().value)
+                while (demand.wantedChanged() != null) {}
+            }
         }
     }
 
@@ -612,12 +616,16 @@ class SmokeTest {
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            val producer =
-                SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
-            producer.update("""{"state":"raw"}""")
+            SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config).use {
+                producer ->
+                producer.update("""{"state":"raw"}""")
 
-            val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
-            assertEquals(Timed(Status(state = "raw"), null), consumer.valuesAs<Status>().first())
+                val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
+                assertEquals(
+                    Timed(Status(state = "raw"), null),
+                    consumer.valuesAs<Status>().first(),
+                )
+            }
         }
     }
 
