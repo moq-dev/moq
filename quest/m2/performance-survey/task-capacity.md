@@ -48,6 +48,9 @@ chunk must keep its chunk alive or point at nothing. It must also keep
 concurrent wakeups, coalescing, snapshot fairness and the rotation order
 (`concurrent_wakes_are_never_lost`, `wakes_past_64_chunks_run_in_slot_order`).
 
+The io_uring worker now uses `Tasks::poll_passes`, so its bounded wake chains
+repeat that indexed snapshot within one turn.
+
 Follow the [survey's benchmark contract](/quest/m2/performance-survey/README.md):
 measure the baseline before optimizing, retain paired evidence, verify
 equivalent work, schedule coverage nightly, and accept a measured no-win.
