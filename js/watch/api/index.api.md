@@ -80,6 +80,7 @@ export namespace Audio {
 		available: Signals.Signal<Record<string, Hang.Catalog.Audio.AudioConfig>>;
 		catalog: Signals.Signal<Hang.Catalog.Audio | undefined>;
 		config: Signals.Signal<Hang.Catalog.Audio.AudioConfig | undefined>;
+		error: Signals.Signal<Error | undefined>;
 		jitter: Signals.Signal<Clock.Milli | undefined>;
 		track: Signals.Signal<string | undefined>;
 	};
@@ -107,7 +108,7 @@ export type BroadcastInput = {
 	enabled: Signals.Getter<boolean>;
 	follow: Signals.Getter<boolean>;
 	name: Signals.Getter<Net.Path.Valid>;
-	origin: Signals.Getter<Pick<Net.Origin.Consumer, "closed" | "discovery" | "request" | "follow" | "announced"> | undefined>;
+	origin: Signals.Getter<Net.Origin.Reader | undefined>;
 };
 
 export type BroadcastOutput = {
@@ -161,7 +162,7 @@ export type PlayerInput = {
 	enabled: Signals.Getter<boolean>;
 	follow: Signals.Getter<boolean>;
 	name: Signals.Getter<Net.Path.Valid>;
-	origin: BroadcastInput["origin"];
+	origin: Signals.Getter<Net.Origin.Reader | undefined>;
 	paused: Signals.Getter<boolean>;
 	probe: Signals.Getter<Net.Connection.Probe | undefined>;
 	text: {

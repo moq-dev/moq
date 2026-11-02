@@ -91,6 +91,8 @@ axum = { version = "0.8", default-features = false, features = [
 axum-server = "0.8"
 base64 = "0.23"
 bitflags = "2"
+# MSB-first bit reading for codec configs; the version h264-reader builds on.
+bitstream-io = "4.10"
 block2 = "0.6.2"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
@@ -304,6 +306,12 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.sonora-simd]
+opt-level = 3
+
+# Same for the rubato resampler, whose SIMD intrinsics are all of
+# `resample::tests::duration_and_samples_are_invariant_across_partitions_and_epochs`:
+# 0.9 CPU-seconds unoptimized, 0.14 optimized.
+[profile.dev.package.rubato]
 opt-level = 3
 
 # The Go mirror stores native staticlibs in Git, whose per-file limit is 100 MB.

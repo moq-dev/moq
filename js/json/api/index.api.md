@@ -166,6 +166,7 @@ export namespace Window {
 	}
 	export class Producer<T> {
 		constructor(config: Window.ProducerConfig);
+		abort(err: Error): void;
 		cut(): void;
 		finish(): void;
 		get offset(): number;

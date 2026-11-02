@@ -2,7 +2,8 @@
 
 //! A frame crosses an in-memory session as the same allocation it was written as: the
 //! publisher hands the payload to the transport, and the subscriber reads it back,
-//! without a copy on either side.
+//! without a copy on either side. Only a frame of at most 2 KiB is copied, so a small
+//! frame never keeps a larger receive allocation alive.
 
 use crate::support;
 

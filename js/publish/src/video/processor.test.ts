@@ -21,6 +21,7 @@ class FakeWorker {
 	onmessageerror: unknown = null;
 
 	terminated = false;
+	pulls = 0;
 	started?: FakeTrack;
 
 	#timestamp = 5_000_000; // the camera's own epoch, which the rewrite has to erase
@@ -39,6 +40,7 @@ class FakeWorker {
 			return;
 		}
 
+		this.pulls++;
 		this.#emit({
 			type: "frame",
 			frame: new FakeVideoFrame(this.#timestamp) as unknown as VideoFrame,
@@ -107,10 +109,15 @@ test("captures through the worker, transferring a clone", async () => {
 	const track = new FakeTrack();
 	const stream = TrackProcessor(track as unknown as Parameters<typeof TrackProcessor>[0]);
 	const reader = stream.getReader();
+	// Opening the worker retains the device without asking it for a frame.
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+	expect(spawned[0].pulls).toBe(0);
 
 	const first = await reader.read();
 	const second = await reader.read();
 	const after = Nano.toMicro(Nano(now()));
+	for (let i = 0; i < 20; i++) await Promise.resolve();
+	expect(spawned[0].pulls).toBe(2);
 
 	expect(spawned).toHaveLength(1);
 	const worker = spawned[0];
