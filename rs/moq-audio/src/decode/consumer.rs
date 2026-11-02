@@ -200,7 +200,11 @@ impl Consumer {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.audio)
-					.with_delay(options.delay.with_max(options.delay.max.map(|max| max.saturating_add(warmup)))),
+					.with_delay(
+						options
+							.delay
+							.with_max(options.delay.max.map(|max| max.saturating_add(warmup))),
+					),
 			)
 			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
@@ -763,7 +767,10 @@ mod tests {
 			opened = &mut open => panic!("the open finished with no live edge (ok: {})", opened.is_ok()),
 			first = track.subscription_changed() => first.unwrap(),
 		};
-		assert_eq!(first.map(|sub| sub.delay), Some(delay.with_max(Duration::from_millis(600))));
+		assert_eq!(
+			first.map(|sub| sub.delay),
+			Some(delay.with_max(Duration::from_millis(600)))
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
