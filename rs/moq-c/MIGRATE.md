@@ -11,6 +11,10 @@ How to update your code for each breaking change, newest first.
 clock, or a pointer to the edit's capture time, converted to track milliseconds.
 Recompile callers against the regenerated `moq.h`.
 
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`moq_announce_event.has_captures` is removed, changing the C ABI. Read `captures_len` directly: zero means the filter has no wildcards. Rebuild consumers against the regenerated header and matching native library.
+
 ### Media consumers take a `moq_delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
 `moq_consume_video` and `moq_consume_audio` take `const moq_delay *delay` in place of `uint64_t max_delay_us`; NULL is the default.

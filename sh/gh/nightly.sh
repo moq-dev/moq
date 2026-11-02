@@ -83,6 +83,7 @@ case "$1" in
         run just rs bench-feed-fetch
         run just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
         run just rs test -p moq-tokio --release -E 'test(benchmark_receive_windows)' --run-ignored only --success-output immediate
+        run just rs test -p moq-tokio --release -E 'test(benchmark_datagram_delivery)' --run-ignored only --success-output immediate
         run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
         run just rs test -p moq-c -E 'test(benchmark_handles)' --run-ignored only --success-output immediate
         run just rs test -p moq-archive -p moq-mux -p moq-hls --no-fail-fast \
@@ -156,6 +157,7 @@ case "$1" in
         javascript slow-group just js slow-group-bench
         javascript jitter just js jitter-bench
         javascript audio-warmup just js audio-warmup-bench
+        javascript audio-support just js audio-support-bench
         javascript clock just js clock-bench
         ;;
     # The binding benchmark's runners at a token budget, so they keep working at this
