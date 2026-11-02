@@ -65,9 +65,10 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: moq-dev
           repositories: moq
-          # Only the permissions needed to pin and request a landing.
+          # Only the permissions needed to pin and enqueue a landing.
           permission-contents: write
           permission-pull-requests: write
+          permission-merge-queues: write
 
       - name: Request checked landing
         env:
