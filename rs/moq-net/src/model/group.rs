@@ -4265,7 +4265,7 @@ impl Fetch {
 mod test {
 	use super::*;
 	use crate::frame::Frame;
-	use crate::model::test_tracing::count_drop_warnings;
+	use crate::test_tracing::count_drop_warnings;
 	use bytes::Bytes;
 	#[cfg(feature = "async")]
 	use futures::FutureExt;
