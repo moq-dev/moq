@@ -4,4 +4,4 @@ description: Turn active quests into GitHub issues before leaving Quest. Use whe
 ---
 
 Run `quest skill export` and follow its output.
-If `quest` is not installed, follow https://github.com/kixelated/quest/blob/main/SETUP.md first.
+If `quest` is not installed, follow https://github.com/moq-dev/quest/blob/main/SETUP.md first.

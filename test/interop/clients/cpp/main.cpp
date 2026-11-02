@@ -168,8 +168,7 @@ void publish_tone(
 ) {
     const auto started = Clock::now();
     std::vector<uint8_t> data(AUDIO_BATCH_SAMPLES * tones.size() * sizeof(float));
-    uint64_t timestamp_us = 0;
-    size_t phase = 0;
+    uint64_t phase = 0;
     while (!stop.load()) {
         for (size_t i = 0; i < AUDIO_BATCH_SAMPLES; i++) {
             for (size_t c = 0; c < tones.size(); c++) {
@@ -180,11 +179,10 @@ void publish_tone(
                 std::memcpy(&data[(i * tones.size() + c) * sizeof(float)], &sample, sizeof(float));
             }
         }
-        ok(audio->write({timestamp_us, data}), "tone write");
+        ok(audio->write({{phase, AUDIO_RATE}, data}), "tone write");
         phase += AUDIO_BATCH_SAMPLES;
-        timestamp_us += AUDIO_BATCH_US;
         // Pace against the start, so encoding cost doesn't accumulate as drift.
-        std::this_thread::sleep_until(started + std::chrono::microseconds(timestamp_us));
+        std::this_thread::sleep_until(started + std::chrono::microseconds(phase * 1'000'000 / AUDIO_RATE));
     }
 }
 
@@ -295,7 +293,7 @@ void decode_audio(
     }
     moq::AudioDecoderOutput output{};
     output.format = moq::AudioSampleFormat::kF32;
-    output.max_delay = MAX_DELAY;
+    output.delay = moq::Delay{std::chrono::nanoseconds(0), MAX_DELAY};
     auto decoder = until(moq::AudioConsumer::subscribe(consumer, id, audio, output), deadline, "audio consumer");
 
     std::ofstream log(out + ".txt");
@@ -319,7 +317,9 @@ void decode_audio(
         const auto *frame = &variant->frame;
 
         const size_t samples = frame->data.size() / frame_bytes;
-        log << frame->timestamp_us << " " << samples << "\n";
+        // tone.py reads whole microseconds; splitting off the seconds keeps the product in range.
+        const auto &ts = frame->timestamp;
+        log << ts.value / ts.scale * 1'000'000 + ts.value % ts.scale * 1'000'000 / ts.scale << " " << samples << "\n";
         pcm.write(reinterpret_cast<const char *>(frame->data.data()), static_cast<std::streamsize>(frame->data.size()));
         decoded += samples;
     }

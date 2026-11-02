@@ -67,6 +67,8 @@ pub(crate) struct Inner {
 	/// Wakes the demux task to re-check its exit condition.
 	task_waiters: RefCell<kio::WaiterList>,
 	accept_waiters: RefCell<kio::WaiterList>,
+	/// Maps the kernel's receive timestamps, which count on the wall clock, onto `Instant`s.
+	wall: Cell<kio::clock::WallMap>,
 }
 
 /// A QUIC endpoint on one worker socket: accept, dial, or both.
@@ -128,6 +130,7 @@ impl Endpoint {
 			closed: RefCell::new(None),
 			task_waiters: RefCell::new(kio::WaiterList::new()),
 			accept_waiters: RefCell::new(kio::WaiterList::new()),
+			wall: Cell::default(),
 		});
 
 		let task = inner.clone();
@@ -278,14 +281,22 @@ impl Inner {
 		// retry, a refusal), reused across the whole receive.
 		let mut buf = Vec::new();
 
-		// The connections this packet fed; almost always exactly one (a GRO
-		// coalesce is a single source, and ids rarely change mid-burst).
-		let mut fed: Vec<ConnectionHandle> = Vec::new();
+		let mut fed = Fed::default();
 
 		// moq-quic takes each datagram as an owned `BytesMut`: copy the whole
 		// completion out of the receive pool once and split it per datagram.
 		// The last one is taken whole, since a split makes the allocation
 		// shared, which a lone datagram has no use for.
+		let now = self.owner.now();
+		// The clocks read together, since the turn's instant may be well behind the wall clock
+		let read = self.owner.read_clock();
+		let mut wall = self.wall.get();
+		wall.sample(read, kio::clock::Wall::now());
+		self.wall.set(wall);
+		// The kernel's stamp, or the receive's own instant without one. One stamp covers a GRO
+		// coalesce, so only its first datagram reports an arrival.
+		let mut arrival = Some(packet.timestamp().and_then(|at| wall.map(at)).unwrap_or(read));
+
 		let mut payload = BytesMut::from(packet.payload());
 		let stride = packet.stride();
 		while !payload.is_empty() {
@@ -301,8 +312,9 @@ impl Inner {
 				local_ip: dst_ip,
 				ecn,
 				data: segment,
+				arrival: arrival.take(),
 			};
-			let event = self.endpoint.borrow_mut().handle(self.owner.now(), received, &mut buf);
+			let event = self.endpoint.borrow_mut().handle(now, received, &mut buf);
 			match event {
 				Some(DatagramEvent::ConnectionEvent(key, event)) => {
 					let conn = self.conns.borrow().get(&key).cloned();
@@ -310,16 +322,11 @@ impl Inner {
 					// we can feed.
 					if let Some(conn) = conn {
 						conn.conn.borrow_mut().handle_event(event);
-						conn.wire.set_received_bytes(conn.conn.borrow().stats().udp_rx.bytes);
-						if !fed.contains(&key) {
-							fed.push(key);
-						}
+						fed.push(key);
 					}
 				}
 				Some(DatagramEvent::NewConnection(incoming)) => {
-					if let Some(key) = self.greet(incoming, &mut buf)
-						&& !fed.contains(&key)
-					{
+					if let Some(key) = self.greet(incoming, &mut buf) {
 						fed.push(key);
 					}
 				}
@@ -337,6 +344,9 @@ impl Inner {
 		for key in fed {
 			let conn = self.conns.borrow().get(&key).cloned();
 			if let Some(conn) = conn {
+				// Once per receive rather than per datagram: `stats` copies the
+				// whole struct and queries the congestion controller.
+				conn.wire.set_received_bytes(conn.conn.borrow().stats().udp_rx.bytes);
 				conn.kick();
 			}
 		}
@@ -509,5 +519,65 @@ impl Inner {
 			conn.fail(err.clone());
 		}
 		self.accept_waiters.borrow_mut().wake();
+	}
+}
+
+/// The connections one receive fed, each once, in the order first fed.
+///
+/// Almost always exactly one: a GRO coalesce is a single source, and ids
+/// rarely change mid-burst. So the first is held inline, and only a receive
+/// that mixes connections allocates.
+#[derive(Default)]
+struct Fed {
+	first: Option<ConnectionHandle>,
+	rest: Vec<ConnectionHandle>,
+}
+
+impl Fed {
+	fn push(&mut self, key: ConnectionHandle) {
+		match self.first {
+			None => self.first = Some(key),
+			Some(first) if first == key => {}
+			Some(_) if self.rest.contains(&key) => {}
+			Some(_) => self.rest.push(key),
+		}
+	}
+}
+
+impl IntoIterator for Fed {
+	type Item = ConnectionHandle;
+	type IntoIter = std::iter::Chain<std::option::IntoIter<ConnectionHandle>, std::vec::IntoIter<ConnectionHandle>>;
+
+	fn into_iter(self) -> Self::IntoIter {
+		self.first.into_iter().chain(self.rest)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn fed(keys: &[usize]) -> Vec<usize> {
+		let mut fed = Fed::default();
+		for &key in keys {
+			fed.push(ConnectionHandle(key));
+		}
+		fed.into_iter().map(|key| key.0).collect()
+	}
+
+	#[test]
+	fn fed_lists_each_connection_once_in_order() {
+		assert_eq!(fed(&[]), Vec::<usize>::new());
+		assert_eq!(fed(&[3, 3, 3]), [3]);
+		assert_eq!(fed(&[3, 1, 3, 2, 1, 2]), [3, 1, 2]);
+	}
+
+	#[test]
+	fn fed_one_connection_allocates_nothing() {
+		let mut fed = Fed::default();
+		for _ in 0..4 {
+			fed.push(ConnectionHandle(7));
+		}
+		assert_eq!(fed.rest.capacity(), 0);
 	}
 }
