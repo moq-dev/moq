@@ -15,12 +15,12 @@ or nightly run; measured low-value redundancy may be retired.
 Measured 2026-10-13 from the org billing API (Oct 1-13, all moq) and a 1-in-4
 sample of job timings:
 
-| Runner | Minutes | List price |
-|---|---|---|
-| macOS | 33k | $2,066 |
-| ARM Linux | 98k | $492 |
-| Windows | 34k | $344 |
-| x86 Linux | 30k | $178 |
+| Runner    | Minutes | List price |
+| --------- | ------- | ---------- |
+| macOS     | 33k     | $2,066     |
+| ARM Linux | 98k     | $492       |
+| Windows   | 34k     | $344       |
+| x86 Linux | 30k     | $178       |
 
 Public repositories are not billed, but the org is capped at 60 concurrent
 hosted jobs and 5 macOS jobs (Team plan), and that macOS cap is the queue.
@@ -152,7 +152,7 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
-- [Land main through quest land](/quest/m0/ci/land.md) - a host daemon tests small batches of queued PRs once and lands each as its tested squash commit
+- [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - one PR at a time on the self-hosted runner; the host's Codex fixer fixes and re-enqueues every dropped PR
 - [A cache error is a miss](/quest/m0/ci/nix-cache-5xx.md) - a transient `nix.moq.dev` 5xx no longer fails `just ci`
 - [Every io_uring test in the io-uring group](/quest/m0/ci/io-uring-test-group.md) - the parallel tests of one `just ci` stop exhausting the shared `RLIMIT_MEMLOCK`, and a too-low limit fails clearly
 - [Cheap checks skip the queue](/quest/m0/ci/gate-quick.md) - condition: quest ships `quest gate --quick`; then cheap modules wait at most a minute
