@@ -1,13 +1,13 @@
 import { expect, spyOn, test } from "bun:test";
 import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import * as Epoch from "./epoch.ts";
 import { NotFound, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { Route } from "./hop.ts";
 import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
 import { Version as IetfVersion } from "./ietf/version.ts";
+import * as Instance from "./instance.ts";
 import { hooks, MAX_DATAGRAMS } from "./internal.ts";
 import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
@@ -17,7 +17,7 @@ import type * as track from "./track.ts";
 import { unwanted } from "./util/demand.ts";
 import { overrideBroadcastWire, wireOf } from "./wire.ts";
 
-const EPOCH = Epoch.parse("01900000-0000-7000-8000-000000000001");
+const INSTANCE = Instance.parse("01900000-0000-7000-8000-000000000001");
 const path = Path.from("live");
 const enc = new TextEncoder();
 const dec = new TextDecoder();
@@ -37,9 +37,9 @@ async function isPending(promise: Promise<unknown>): Promise<boolean> {
 	return !settled;
 }
 
-/** A stand-in session announcing `path` under the epoch at `cost`, serving `source`. */
+/** A stand-in session announcing `path` under the shared instance at `cost`, serving `source`. */
 function serve(origin: Producer, source: BroadcastProducer, cost: bigint) {
-	const handle = wireOf(origin).receive(path, Route.normalize({ epoch: EPOCH, cost }));
+	const handle = wireOf(origin).receive(path, Route.normalize({ instance: INSTANCE, cost }));
 	void (async () => {
 		for await (const request of handle.requested()) hooks.acceptRequest(request, source.consume());
 	})();
@@ -407,12 +407,12 @@ test("a resumed fork shares an on-demand track request", async () => {
 	expect(await extra).toBeUndefined();
 });
 
-test("a lagging same-epoch replica resumes from one publisher's bytes exactly once", async () => {
+test("a lagging same-instance replica resumes from one publisher's bytes exactly once", async () => {
 	const { clock, installed } = manual();
 	const publisher = new Producer();
 	const originalPublication = publisher.createBroadcast(path);
 	const original = originalPublication.broadcast;
-	originalPublication.announce({ epoch: EPOCH });
+	originalPublication.announce({ instance: INSTANCE });
 	const source = original.createTrack("seq");
 	const origin = new Producer();
 
@@ -550,7 +550,7 @@ test("a lagging same-epoch replica resumes from one publisher's bytes exactly on
 	}
 });
 
-test("a subscription reads on across a same-epoch route swap, each group once", async () => {
+test("a subscription reads on across a same-instance route swap, each group once", async () => {
 	const { a, b, active, request, swap, close } = await setup();
 	const ta = copy(a);
 	const tb = copy(b);
@@ -916,7 +916,7 @@ test("between routes a reader keeps reading the copy it has", async () => {
 	expect(drain(sub)).toEqual([0]);
 
 	// The next route has not answered when the old one is retracted.
-	const next = wireOf(origin).receive(path, Route.normalize({ epoch: EPOCH, cost: 1n }));
+	const next = wireOf(origin).receive(path, Route.normalize({ instance: INSTANCE, cost: 1n }));
 	const asked = next.requested();
 	disposeA();
 	await settle();
@@ -1041,6 +1041,52 @@ test("an ordered reader takes a replaced copy's buffered group before the new co
 	a.close();
 	b.close();
 });
+
+for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
+	test(`an ordered resumed reader keeps an older copy's owed hole until ${resolution}`, async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		hooks.receiveTrack(ta.producer);
+		hooks.receiveTrack(tb.producer);
+		front.serve(a.consume());
+		const ordered = front.consumer
+			.track("seq")
+			.subscribe({ maxDelay: Milli(1000) })
+			.ordered();
+		try {
+			ta.write(4);
+			expect((await ordered.nextGroup())?.sequence).toBe(4);
+			ta.write(6);
+			tb.write(7);
+			hooks.startTrack(tb.producer, { start: 7, requested: 4 });
+			front.serve(b.consume());
+			await settle();
+			const held = ordered.nextGroup();
+			expect(await isPending(held)).toBe(true);
+			if (resolution === "arrival") ta.write(5);
+			if (resolution === "other copy") {
+				tb.write(5);
+				tb.write(6);
+			}
+			if (resolution === "drop") hooks.dropTrackGroups(ta.producer, 5, 6, new StreamError(StreamCode.Old));
+			if (resolution === "budget") await clock.advance(Nano.fromMilli(Milli(1000)));
+			const expected = resolution === "arrival" || resolution === "other copy" ? [5, 6, 7] : [6, 7];
+			expect((await held)?.sequence).toBe(expected[0]);
+			for (const sequence of expected.slice(1)) expect((await ordered.nextGroup())?.sequence).toBe(sequence);
+		} finally {
+			ordered.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+			installed.close();
+		}
+	});
+}
 
 test("a late subscriber's first route is checked against properties an earlier source gave", async () => {
 	const front = new Front();

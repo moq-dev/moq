@@ -165,6 +165,7 @@
       "version": "0.0.0",
       "dependencies": {
         "@moq/net": "workspace:^",
+        "uuid": "^14.0.3",
       },
       "devDependencies": {
         "@moq/clock": "workspace:^",
@@ -273,7 +274,6 @@
         "@moq/signals": "workspace:*",
         "pako": "^3.0.2",
         "sorted-btree": "^2.1.0",
-        "uuid": "^14.0.3",
       },
       "devDependencies": {
         "@types/bun": "^1.4.4",

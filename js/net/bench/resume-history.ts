@@ -20,7 +20,6 @@ import { Manual, Milli, Nano } from "@moq/clock";
 import type { Producer as BroadcastProducer } from "../src/broadcast.ts";
 import { accept } from "../src/connection/accept.ts";
 import { connect } from "../src/connection/connect.ts";
-import * as Epoch from "../src/epoch.ts";
 import { ALPN_06 } from "../src/lite/version.ts";
 import { createMockTransportPair } from "../src/mock.ts";
 import { Producer as OriginProducer } from "../src/origin.ts";
@@ -218,7 +217,7 @@ async function measureOn(clock: Manual, { fronts, names: perRoute, routes, histo
 	const paths = Array.from({ length: fronts }, (_, index) => Path.from(`room/${index}`));
 	const broadcasts: BroadcastProducer[] = paths.map((path) => {
 		const publication = publisher.createBroadcast(path);
-		publication.announce({ epoch: Epoch.mint() });
+		publication.announce();
 		return publication.broadcast;
 	});
 	const payload = new Uint8Array(PAYLOAD).fill(7);

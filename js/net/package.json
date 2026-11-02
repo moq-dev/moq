@@ -26,8 +26,7 @@
 		"@moq/qmux": "workspace:^",
 		"@moq/signals": "workspace:*",
 		"pako": "^3.0.2",
-		"sorted-btree": "^2.1.0",
-		"uuid": "^14.0.3"
+		"sorted-btree": "^2.1.0"
 	},
 	"peerDependencies": {
 		"zod": "^4.5.0"
