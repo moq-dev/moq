@@ -2229,6 +2229,48 @@ mod test {
 		assert!(matches!(reader.poll_finished(&waiter), std::task::Poll::Ready(Ok(_))));
 	}
 
+	/// A producer under a name its owner minted retires its records when it drops, and fails them
+	/// when it aborts, so an owner replacing it holds records only for the live one. Any other
+	/// keeps them, so its name can return with the numbering continued.
+	#[test]
+	fn a_minted_name_retires_its_records_with_its_producer() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = Producer::new(&mut broadcast, Config::default()).unwrap();
+		let info = catalog.track_info(hang::catalog::PRIORITY.video);
+		let wire = || crate::catalog::hang::Container::Legacy(crate::container::Kind::Video);
+		let minted = || {
+			let track = broadcast.unique_track(".vp8", info.clone()).unwrap();
+			catalog.video(track, wire(), None).unwrap().retire_on_drop()
+		};
+
+		for _ in 0..3 {
+			drop(minted());
+			assert_eq!(catalog.hls_tracks(), 0);
+		}
+
+		let producer = minted();
+		let waiter = kio::Waiter::noop();
+		let mut subscribing = broadcast
+			.consume()
+			.track(&hang::hls::default_name(producer.track().name()))
+			.unwrap()
+			.subscribe(None)
+			.into_inner();
+		let std::task::Poll::Ready(Ok(mut reader)) = kio::Task::poll(&mut subscribing, &waiter) else {
+			panic!("the record track is live");
+		};
+		producer.abort(moq_net::Error::Cancel);
+		assert_eq!(catalog.hls_tracks(), 0);
+		assert!(matches!(
+			reader.poll_finished(&waiter),
+			std::task::Poll::Ready(Err(moq_net::Error::Cancel))
+		));
+
+		let track = broadcast.create_track("camera", info.clone()).unwrap();
+		drop(catalog.video(track, wire(), None).unwrap());
+		assert_eq!(catalog.hls_tracks(), 1);
+	}
+
 	#[test]
 	fn a_text_track_neither_records_nor_paces() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();

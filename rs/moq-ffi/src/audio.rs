@@ -133,7 +133,8 @@ pub struct MoqAudioProducerOptions {
 	pub input: MoqAudioEncoderInput,
 	/// The codec settings used to encode that PCM.
 	pub output: MoqAudioEncoderOutput,
-	/// Published track name; `None` derives one from the codec.
+	/// Published track name; `None` derives one from the codec, whose HLS records end with the
+	/// producer since nothing publishes that name again.
 	#[uniffi(default = None)]
 	pub track: Option<String>,
 	/// Session bandwidth allocator; absent reserves no share.
@@ -812,6 +813,52 @@ mod tests {
 				}
 			}
 			assert!(frames > 0);
+		}
+	}
+
+	/// A producer released before its finish fails the HLS records of the name it derived, and the
+	/// catalog forgets them, so republishing holds records only for the live producer.
+	#[tokio::test(start_paused = true)]
+	async fn released_audio_producers_retire_derived_records() {
+		let broadcast = crate::producer::MoqBroadcastProducer::new().unwrap();
+		let catalog = crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+		let reader = broadcast.consume_inner().unwrap();
+		for _ in 0..3 {
+			let audio = MoqAudioProducer::new(
+				&catalog,
+				MoqAudioProducerOptions {
+					input: MoqAudioEncoderInput {
+						format: MoqAudioSampleFormat::F32,
+						sample_rate: 48_000,
+						channels: 1,
+					},
+					output: MoqAudioEncoderOutput {
+						codec: MoqAudioCodec::opus(),
+						sample_rate: None,
+						channels: None,
+						bitrate: None,
+						frame_duration: None,
+					},
+					track: None,
+					bandwidth: None,
+				},
+			)
+			.unwrap();
+			let name = broadcast
+				.with_state(|state| Ok(state.catalog.snapshot().audio.renditions.keys().next().unwrap().clone()))
+				.unwrap();
+			let mut records = reader
+				.track(&hang::hls::default_name(&name))
+				.unwrap()
+				.subscribe(None)
+				.await
+				.unwrap();
+			drop(audio);
+			let ended = tokio::time::timeout(Duration::from_secs(1), records.recv_group()).await;
+			assert!(
+				matches!(ended, Ok(Err(moq_net::Error::Unroutable))),
+				"the released records fail: {ended:?}"
+			);
 		}
 	}
 

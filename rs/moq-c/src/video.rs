@@ -684,10 +684,12 @@ impl Video {
 		encoder: moq_video::encode::Sink,
 		lower: Option<Id>,
 	) -> Result<Id, Error> {
+		// The track name is minted below and never published again, so its records end with it.
 		let reserved = target
 			.catalog
 			.reserve()
-			.with_hls_hint(config.gop.duration(config.framerate));
+			.with_hls_hint(config.gop.duration(config.framerate))
+			.retire_on_drop();
 		let ceiling = video_ceiling(config, &rendition);
 		let (lower, priority) = match lower {
 			Some(lower) => {

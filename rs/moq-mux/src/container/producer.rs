@@ -99,6 +99,10 @@ pub struct Producer<C: Container, R = ()> {
 
 	/// The counters the catalog reports for this track, when it was created through a catalog.
 	sent: Option<std::sync::Arc<crate::stats::Sent>>,
+
+	/// Whether dropping this producer retires its name's HLS records. See
+	/// [`retire_on_drop`](Self::retire_on_drop).
+	retire: bool,
 }
 
 trait Rendition<R>: Send {
@@ -192,6 +196,7 @@ impl<C: Container> Producer<C> {
 			bandwidth: None,
 			rendition: None,
 			sent: None,
+			retire: false,
 		}
 	}
 }
@@ -229,6 +234,7 @@ where
 			bandwidth: None,
 			rendition: Some(Box::new(rendition)),
 			sent: None,
+			retire: false,
 		}
 	}
 
@@ -302,12 +308,13 @@ impl Producer<crate::catalog::hang::Container, hang::catalog::VideoConfig> {
 		}
 		let container = crate::catalog::hang::Container::try_from(&config)?;
 		let hls_hint = self.recorder.as_ref().and_then(|recorder| recorder.declared());
-		let mut next = rendition.fresh(container, self.inner.info().clone(), hls_hint)?;
+		// This producer minted the fresh name, so nothing publishes it again once it drops.
+		let mut next = rendition.fresh(container, self.inner.info().clone(), hls_hint)?.retire_on_drop();
 		next.buffer_duration = self.buffer_duration;
 		next.set(config)?;
 		self.finish()?;
 		// The old name is never published again, so its HLS records end with it. They can only
-		// retire once its recorder is gone.
+		// retire once its recorder is gone; a minted one retired itself on drop.
 		let old = std::mem::replace(self, next);
 		let name = old.name().to_string();
 		drop(old);
@@ -443,6 +450,18 @@ where
 	/// `bandwidth` so it is not confused with the catalog-gate `Reserved`.
 	pub fn with_bandwidth(mut self, allocator: moq_net::bandwidth::Allocator) -> Self {
 		self.bandwidth = Some(crate::catalog::Claim::new(allocator));
+		self
+	}
+
+	/// End this track's HLS records with it, for an owner that minted the track's name and never
+	/// publishes it again.
+	///
+	/// Dropping the producer finishes the records and the catalog forgets them, and an
+	/// [`abort`](Self::abort) fails them with its error, so an owner replacing its producer under
+	/// fresh names holds records only for its live ones. Without this, a dropped track's records
+	/// stay until the catalog closes, so its name can return with their numbering continued.
+	pub fn retire_on_drop(mut self) -> Self {
+		self.retire = true;
 		self
 	}
 
@@ -835,12 +854,35 @@ where
 		if let Some(group) = self.group.take() {
 			let _ = group.abort(err.clone());
 		}
-		let _ = self.inner.abort(err);
+		// Records end the way the media did, not as a complete recording. Otherwise they are left
+		// to the catalog, whose own abort fails them.
+		if self.retire
+			&& let Some(recorder) = self.recorder.take()
+		{
+			recorder.abort(err.clone());
+		}
+		// A clone, since dropping this producer retires its records.
+		let _ = self.inner.clone().abort(err);
 	}
 
 	/// Create a consumer for this track.
 	pub fn consume(&self) -> moq_net::track::Subscriber {
 		self.inner.subscribe(None)
+	}
+}
+
+impl<C: Container, R> Drop for Producer<C, R> {
+	fn drop(&mut self) {
+		if !self.retire {
+			return;
+		}
+		// Records only retire once nothing reports into them.
+		self.recorder = None;
+		if let Some(rendition) = &self.rendition
+			&& let Err(err) = rendition.retire(self.inner.name())
+		{
+			tracing::warn!(%err, track = self.inner.name(), "failed to retire a dropped track's HLS records");
+		}
 	}
 }
 

@@ -108,6 +108,9 @@ impl Producer {
 	/// discover a track an on-demand encoder has not run for yet; because it
 	/// already says what the first keyframe says, that keyframe confirms the
 	/// catalog instead of correcting it.
+	///
+	/// Nothing publishes the derived name again, so dropping the producer also ends the
+	/// track's HLS records, and a caller replacing it holds records only for the live one.
 	pub fn new<E: CatalogExt>(
 		broadcast: moq_net::broadcast::Producer,
 		reserved: moq_mux::catalog::Reserved<E>,
@@ -123,13 +126,15 @@ impl Producer {
 			}
 		};
 		let track = broadcast.unique_track(suffix, reserved.track_info(hang::catalog::PRIORITY.video))?;
-		Self::with_track(track, reserved, rendition)
+		Self::with_track(track, reserved.retire_on_drop(), rendition)
 	}
 
 	/// Publish `rendition` on an existing track, registering it under `reserved`.
 	///
 	/// Use this when the caller owns the track name. [`new`](Self::new) derives a
-	/// unique name from the codec instead.
+	/// unique name from the codec instead. A caller that minted the name itself, and never
+	/// publishes it again, passes a reservation with
+	/// [`retire_on_drop`](moq_mux::catalog::Reserved::retire_on_drop), as `new` does.
 	pub fn with_track<E: CatalogExt>(
 		track: moq_net::track::Producer,
 		reserved: moq_mux::catalog::Reserved<E>,
@@ -500,7 +505,9 @@ impl<E: CatalogExt> Driver<E> {
 			}
 		};
 
-		let mut producer = Producer::with_track(track, catalog.reserve().with_hls_hint(gop), rendition)?;
+		// The name was minted for this run, so the run's end retires its records.
+		let reserved = catalog.reserve().with_hls_hint(gop).retire_on_drop();
+		let mut producer = Producer::with_track(track, reserved, rendition)?;
 		// Capturing from the start, the loop keeps the probe's camera rather than reopening it,
 		// which could mean a second permission prompt or picker. On demand it closes until a viewer.
 		let mut source = Opened {
@@ -996,6 +1003,33 @@ mod tests {
 			"the first keyframe should confirm the advertised rendition, not correct it"
 		);
 		(name, resolved)
+	}
+
+	/// Nothing publishes a name [`Producer::new`] derived again, so replacing the producer ends the
+	/// replaced one's HLS records rather than holding a record track per replacement.
+	#[tokio::test(start_paused = true)]
+	async fn replacing_a_producer_retires_its_records() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let rendition = hang::catalog::VideoConfig::new("avc3.42c01e".parse().unwrap());
+		let publish = || {
+			let reserved = catalog.reserve().with_hls_hint(std::time::Duration::from_secs(2));
+			Producer::new(broadcast.clone(), reserved, rendition.clone()).unwrap()
+		};
+
+		let mut producer = publish();
+		for _ in 0..3 {
+			let mut records = broadcast
+				.consume()
+				.track(&hang::hls::default_name(producer.track().name()))
+				.unwrap()
+				.subscribe(None)
+				.await
+				.unwrap();
+			producer = publish();
+			let ended = tokio::time::timeout(std::time::Duration::from_secs(1), records.recv_group()).await;
+			assert!(matches!(ended, Ok(Ok(None))), "the replaced records end: {ended:?}");
+		}
 	}
 
 	/// The catalog's single video rendition, if it has one yet.

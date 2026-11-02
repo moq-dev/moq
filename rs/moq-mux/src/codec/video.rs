@@ -376,5 +376,7 @@ mod tests {
 		assert_ne!(track.name(), second);
 		assert_eq!(catalog.hls_tracks(), records, "each predecessor's HLS records retire");
 		track.finish().unwrap();
+		drop(track);
+		assert_eq!(catalog.hls_tracks(), records - 1, "the minted successor's records retire with it");
 	}
 }

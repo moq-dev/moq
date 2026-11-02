@@ -778,6 +778,11 @@ impl Recorder {
 		self.live.lock().unwrap().on_declare = Some(Box::new(callback));
 	}
 
+	/// Abort the record track with `err`, for a media track that failed with it.
+	pub fn abort(mut self, err: moq_net::Error) {
+		self.report(|live| live.abort(err));
+	}
+
 	fn report(&mut self, f: impl FnOnce(&mut Live)) {
 		let published = {
 			let mut live = self.live.lock().unwrap();

@@ -146,7 +146,8 @@ pub struct MoqVideoProducerOptions {
 	pub input: MoqVideoEncoderInput,
 	/// The codec settings used to encode those pictures.
 	pub output: MoqVideoEncoderOutput,
-	/// Published track name; `None` derives one from the codec.
+	/// Published track name; `None` derives one from the codec, whose HLS records end with the
+	/// producer since nothing publishes that name again.
 	#[uniffi(default = None)]
 	pub track: Option<String>,
 	/// Session bandwidth allocator; absent keeps the configured bitrate.
@@ -811,15 +812,13 @@ impl MoqVideoProducer {
 		let children = broadcast.with_state(|state| Ok(state.children.clone()))?;
 		let producer = broadcast.with_state(|state| {
 			let info = state.catalog.track_info(priority);
-			let track = match track {
-				Some(name) => state.broadcast.create_track(name, info)?,
-				None => state.broadcast.unique_track(suffix, info)?,
+			let reserved = state.catalog.reserve().with_hls_hint(gop);
+			// Nothing publishes a minted name again, so its records end with the producer.
+			let (track, reserved) = match track {
+				Some(name) => (state.broadcast.create_track(name, info)?, reserved),
+				None => (state.broadcast.unique_track(suffix, info)?, reserved.retire_on_drop()),
 			};
-			Ok(moq_video::encode::Producer::with_track(
-				track,
-				state.catalog.reserve().with_hls_hint(gop),
-				rendition,
-			)?)
+			Ok(moq_video::encode::Producer::with_track(track, reserved, rendition)?)
 		})?;
 
 		let inner = Arc::new(std::sync::Mutex::new(Some(VideoProducer {
@@ -1457,6 +1456,56 @@ mod finish_tests {
 		assert_eq!(keyframes, [0, 3 * 1_001_000 / 30], "keyframes at the start and the cut");
 		assert!(packets.iter().all(|p| !p.data.is_empty()), "an empty access unit");
 		assert!(matches!(encoder.encode(picture(4)), Err(MoqError::Closed)));
+	}
+
+	/// A producer released before its finish fails the HLS records of the name it derived, and the
+	/// catalog forgets them, so republishing holds records only for the live producer.
+	#[tokio::test(start_paused = true)]
+	async fn released_video_producers_retire_derived_records() {
+		let broadcast = crate::producer::MoqBroadcastProducer::new().unwrap();
+		let catalog = crate::media::MoqMediaCatalogProducer::new(broadcast.clone()).unwrap();
+		let reader = broadcast.consume_inner().unwrap();
+		for _ in 0..3 {
+			let video = crate::video::MoqVideoProducer::new(
+				&catalog,
+				crate::video::MoqVideoProducerOptions {
+					input: MoqVideoEncoderInput {
+						format: MoqVideoPixelFormat::Rgba,
+						width: 320,
+						height: 240,
+						framerate: MoqVideoFrameRate {
+							numerator: 30,
+							denominator: 1,
+						},
+					},
+					output: MoqVideoEncoderOutput {
+						codec: MoqVideoCodec::H264,
+						bitrate: None,
+						gop: None,
+						kind: MoqVideoEncoderKind::Software,
+					},
+					track: None,
+					bandwidth: None,
+					lower: None,
+				},
+			)
+			.unwrap();
+			let name = broadcast
+				.with_state(|state| Ok(state.catalog.snapshot().video.renditions.keys().next().unwrap().clone()))
+				.unwrap();
+			let mut records = reader
+				.track(&hang::hls::default_name(&name))
+				.unwrap()
+				.subscribe(None)
+				.await
+				.unwrap();
+			drop(video);
+			let ended = tokio::time::timeout(std::time::Duration::from_secs(1), records.recv_group()).await;
+			assert!(
+				matches!(ended, Ok(Err(moq_net::Error::Unroutable))),
+				"the released records fail: {ended:?}"
+			);
+		}
 	}
 
 	#[tokio::test]

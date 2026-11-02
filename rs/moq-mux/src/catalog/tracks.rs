@@ -413,6 +413,7 @@ fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name:
 pub struct Reserved<E: CatalogExt = ()> {
 	timebase: super::Timebase<E>,
 	hls_hint: Option<std::time::Duration>,
+	retire: bool,
 }
 
 impl<E: CatalogExt> Reserved<E> {
@@ -421,6 +422,7 @@ impl<E: CatalogExt> Reserved<E> {
 		Self {
 			timebase,
 			hls_hint: None,
+			retire: false,
 		}
 	}
 
@@ -428,6 +430,13 @@ impl<E: CatalogExt> Reserved<E> {
 	/// unless [`Config::with_hls`](super::Config::with_hls) disabled HLS records.
 	pub fn with_hls_hint(mut self, duration: impl Into<Option<std::time::Duration>>) -> Self {
 		self.hls_hint = duration.into();
+		self
+	}
+
+	/// [`retire_on_drop`](crate::container::Producer::retire_on_drop) every track published
+	/// through this reservation, for an owner that minted their names.
+	pub fn retire_on_drop(mut self) -> Self {
+		self.retire = true;
 		self
 	}
 
@@ -502,9 +511,14 @@ impl<E: CatalogExt> Reserved<E> {
 		crate::Error: From<C::Error>,
 	{
 		let rendition = self.init(track.name())?;
-		self.timebase
+		let producer = self
+			.timebase
 			.catalog
-			.media(track, container, rendition, config.into(), self.hls_hint)
+			.media(track, container, rendition, config.into(), self.hls_hint)?;
+		Ok(match self.retire {
+			true => producer.retire_on_drop(),
+			false => producer,
+		})
 	}
 
 	/// Resolve a timestamp on the broadcast's shared clock (see [`Producer::timestamp`]).
@@ -531,7 +545,9 @@ impl<E: CatalogExt> Reserved<E> {
 
 impl<E: CatalogExt> Clone for Reserved<E> {
 	fn clone(&self) -> Self {
-		Self::new(self.timebase.clone()).with_hls_hint(self.hls_hint)
+		let mut clone = Self::new(self.timebase.clone()).with_hls_hint(self.hls_hint);
+		clone.retire = self.retire;
+		clone
 	}
 }
 

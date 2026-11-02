@@ -20,7 +20,8 @@ use crate::{Activity, Error, Frame};
 pub struct Options {
 	/// Track name to publish under. `None` derives a unique one from the codec
 	/// (`0.opus`, then `1.opus`, ...), matching how the video side names its
-	/// track. Subscribers find it through the catalog either way.
+	/// track. Subscribers find it through the catalog either way. Nothing publishes a
+	/// derived name again, so dropping the producer also ends that track's HLS records.
 	pub track: Option<String>,
 	/// Codec input and encoded output config.
 	pub config: Config,
@@ -126,23 +127,19 @@ impl Reserved {
 		catalog: moq_mux::catalog::Producer<E>,
 		options: &Options,
 	) -> Result<Self, Error> {
+		// The catalog's info carries the microsecond timescale audio hang frames stamp, so
+		// Lite05 subscribers know what scale to expect and the model layer accepts
+		// Frame::timestamp on append, plus whatever retention the broadcast declared.
+		let info = catalog.track_info(hang::catalog::PRIORITY.audio);
+		let wire = moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio);
 		let track = match &options.track {
-			// The catalog's info carries the microsecond timescale audio hang frames stamp, so
-			// Lite05 subscribers know what scale to expect and the model layer accepts
-			// Frame::timestamp on append, plus whatever retention the broadcast declared.
-			Some(name) => broadcast.create_track(name.clone(), catalog.track_info(hang::catalog::PRIORITY.audio))?,
-			// Mirrors the video side, which derives a unique name from the codec
-			// rather than making every caller invent one.
-			None => broadcast.unique_track(
-				&format!(".{}", options.config.codec),
-				catalog.track_info(hang::catalog::PRIORITY.audio),
-			)?,
+			Some(name) => catalog.audio(broadcast.create_track(name.clone(), info)?, wire, None)?,
+			// Mirrors the video side, which derives a unique name from the codec rather than
+			// making every caller invent one, and retires it with the producer.
+			None => catalog
+				.audio(broadcast.unique_track(&format!(".{}", options.config.codec), info)?, wire, None)?
+				.retire_on_drop(),
 		};
-		let track = catalog.audio(
-			track,
-			moq_mux::container::legacy::Wire(moq_mux::container::Kind::Audio),
-			None,
-		)?;
 
 		Ok(Self { track })
 	}
@@ -597,6 +594,29 @@ mod tests {
 			if let moq_mux::container::Read::Frame { frame, .. } = reader.read().await.unwrap()? {
 				return Some(frame);
 			}
+		}
+	}
+
+	/// Nothing publishes a derived name again, so replacing the producer ends the replaced one's
+	/// HLS records rather than holding a record track per replacement.
+	#[tokio::test(start_paused = true)]
+	async fn replacing_a_producer_retires_its_records() {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let consumer = broadcast.consume();
+		let catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		let options = Options::default();
+
+		let mut producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
+		for _ in 0..3 {
+			let mut records = consumer
+				.track(&hang::hls::default_name(producer.track_name()))
+				.unwrap()
+				.subscribe(None)
+				.await
+				.unwrap();
+			producer = Producer::new(&mut broadcast, catalog.clone(), Input::default(), &options).unwrap();
+			let ended = tokio::time::timeout(Duration::from_secs(1), records.recv_group()).await;
+			assert!(matches!(ended, Ok(Ok(None))), "the replaced records end: {ended:?}");
 		}
 	}
 
