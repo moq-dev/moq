@@ -53,7 +53,7 @@ bounds the backlog: content further behind the live edge is skipped, even when
 the publisher still caches it.
 
 Pick a distinct store prefix for each publisher instance, such as its broadcast
-path and [epoch](/concept/identity). Restarting a recorder on the same instance
+path and [instance](/concept/identity). Restarting a recorder on the same instance
 and prefix resumes after each track's last stored frame, within that max delay:
 an interruption longer than it leaves a gap. A prefix already marked complete
 records nothing. Never append a new publisher run that restarts its
@@ -90,7 +90,7 @@ which can differ from an installed package; use the reference matching your vers
 Create an output broadcast, call `archive::Consumer::open` with the stored
 prefix and that broadcast's producer, then announce its publication and run the
 consumer. Opening creates the stored tracks before the host announces them.
-The host chooses the output path and a fresh epoch, as
+The host chooses the output path and a fresh instance, as
 [`moq import archive`](/bin/cli#archive) does. A relay routes that publication
 like any other broadcast; it does not look in object storage on a cache miss.
 

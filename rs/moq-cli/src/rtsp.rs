@@ -1,4 +1,4 @@
-//! RTSP import: pull an IP camera's session, reconnecting under a fresh epoch per run.
+//! RTSP import: pull an IP camera's session, reconnecting under a fresh instance per run.
 
 use std::time::Duration;
 
@@ -25,7 +25,7 @@ pub struct ImportArgs {
 
 /// Pull `url` into the Origin as `target.name` until a fatal error, reconnecting with backoff.
 ///
-/// Each run is its own broadcast under a fresh epoch, with a fresh catalog starting on a
+/// Each run is its own broadcast under a fresh instance, with a fresh catalog starting on a
 /// keyframe: a new session's RTP time restarts, so it never splices onto the old one.
 pub async fn connect_import(target: ImportTarget, url: Url) -> anyhow::Result<()> {
 	let client = moq_rtsp::Client::new(url.clone())?;
@@ -86,11 +86,11 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 		if updates.next().await?.is_none() {
 			return std::future::pending().await;
 		}
-		let epoch = moq_net::Epoch::mint();
+		let instance = moq_net::Instance::random();
 		broadcast
-			.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+			.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
 			.context("failed to announce broadcast")?;
-		tracing::info!(name = %target.name, %epoch, "publishing RTSP broadcast");
+		tracing::info!(name = %target.name, %instance, "publishing RTSP broadcast");
 		*published = true;
 		std::future::pending::<anyhow::Result<moq_rtsp::End>>().await
 	};
@@ -100,7 +100,7 @@ async fn run(target: &ImportTarget, client: &moq_rtsp::Client, published: &mut b
 		err = announce => err,
 	};
 	// Closed at once even after a clean end: the pull redials and publishes the next run under a
-	// newer epoch, so a run's end is not the content's, and a retained run's finished catalog
+	// new instance, so a run's end is not the content's, and a retained run's finished catalog
 	// would tell readers to stop if the next run dropped.
 	let finished = match &end {
 		Ok(_) => catalog.finish(),
