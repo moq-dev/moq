@@ -723,18 +723,28 @@ impl Mirror {
 impl Subscriber {
 	/// Reserve the lowest next group not in `delivered` across copies, without handing it
 	/// out: in arrival order, or in sequence order for `ordered`.
+	/// Unless it `parks`, a bounded reader ends once its window has nothing left on any copy;
+	/// see [`Reader::exhausted`].
 	pub(super) fn poll_peek_group(
 		&mut self,
 		ordered: bool,
+		parks: bool,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Candidate>>> {
 		let mut reader = self.reader();
 		loop {
-			if let Some(result) = reader.poll_lowest(ordered, delivered, waiter) {
+			if let Some(result) = reader.poll_lowest(ordered, parks, delivered, waiter) {
 				return result;
 			}
 		}
+	}
+
+	/// Whether this reader's bounded window has nothing left for the readers that handed out
+	/// `taken`, the first of which is its own; see [`Reader::exhausted`].
+	pub(super) fn exhausted(&mut self, taken: &[&Delivered], waiter: &kio::Waiter) -> bool {
+		let mut reader = self.reader();
+		!reader.let_go(taken[0], waiter) && reader.exhausted(taken, waiter)
 	}
 
 	/// Hand out the group a [`Self::poll_peek_group`] reserved.
@@ -1433,6 +1443,7 @@ impl Reader {
 	fn poll_lowest(
 		&mut self,
 		ordered: bool,
+		parks: bool,
 		delivered: &Delivered,
 		waiter: &kio::Waiter,
 	) -> Option<Poll<Result<Option<Candidate>>>> {
@@ -1530,11 +1541,40 @@ impl Reader {
 		}
 		let drained = self.bound_at_end();
 		let waits = self.let_go(delivered, waiter);
+		if !parks && !waits && self.exhausted(&[delivered], waiter) {
+			return Some(Poll::Ready(Ok(None)));
+		}
 		match self.poll_end(waiter, |copy| copy.done.clone()) {
 			// The serving copy drained, but a copy it replaced may still deliver a group below
 			// its end: the track ends once that copy has.
 			Some(Poll::Ready(Ok(None))) if drained && waits => Some(Poll::Pending),
 			end => end,
+		}
+	}
+
+	/// Whether a bounded window has nothing left to deliver, once no replaced copy may still
+	/// deliver a group under its bound. The serving copy reads every group of the window from
+	/// its resume point, so its cursor judges those: each was handed out (in any of `taken`, or
+	/// by that copy), dropped, skipped as stale, or given up as unfillable. What lies under its
+	/// resume point was the copies' it replaced, each let go once it had nothing more, and a
+	/// backfill still out is not judged yet. A route between copies has nothing to judge.
+	fn exhausted(&mut self, taken: &[&Delivered], waiter: &kio::Waiter) -> bool {
+		if self.resumed.is_some() {
+			return false;
+		}
+		let window = self.window();
+		if window.is_pending() || window.end().is_none() {
+			return false;
+		}
+		match self.copies.last_mut() {
+			Some(Copy {
+				generation,
+				replaced: false,
+				done: None,
+				sub: Sub::Ready(sub),
+				..
+			}) if Some(*generation) == self.generation => sub.exhausted_for(taken, waiter),
+			_ => false,
 		}
 	}
 

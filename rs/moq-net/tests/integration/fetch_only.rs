@@ -248,10 +248,9 @@ async fn bounded_direct(version: &str) {
 	let remote = resolve(&client).await;
 	let copy = remote.track("video").unwrap();
 	copy.info().await.expect("TRACK_STATUS resolves the track");
-	// A front's bounded read still parks past its end, as each copy's reader does, so this
-	// reads the group and stops there.
 	let mut sub = subscribe_history(&copy).await;
 	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{version}");
+	assert_eq!(next_frames(&mut sub).await, None, "{version}: the read ends");
 	assert!(
 		!subscribed.load(Ordering::SeqCst),
 		"{version}: the bounded read subscribed"

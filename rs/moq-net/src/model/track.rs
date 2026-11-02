@@ -6700,10 +6700,10 @@ impl Cursor {
 	}
 
 	/// Whether a bounded window has nothing left to deliver: every group in its ranges was
-	/// handed out (`taken`), dropped, skipped as stale, or given up as unfillable. An open
-	/// window, or one with a fill still out, always has more, and so does one its cap
-	/// keeps a group out of, since a reader may raise a cap again.
-	fn is_exhausted(&self, taken: &Delivered) -> bool {
+	/// handed out (in any of `taken`), dropped, skipped as stale, or given up as unfillable.
+	/// An open window, or one with a fill still out, always has more, and so does one its
+	/// cap keeps a group out of, since a reader may raise a cap again.
+	fn is_exhausted(&self, taken: &[&Delivered]) -> bool {
 		let Some(end) = self.filter.window.end() else {
 			return false;
 		};
@@ -6737,7 +6737,11 @@ impl Cursor {
 			.take_while(|run| *run.start() < end)
 			.all(|run| {
 				let run = *run.start()..run.end().checked_add(1).map_or(end, |next| next.min(end));
-				taken.gaps(run).into_iter().all(&accounted)
+				let mut gaps = vec![run];
+				for taken in taken {
+					gaps = gaps.into_iter().flat_map(|gap| taken.gaps(gap)).collect();
+				}
+				gaps.into_iter().all(&accounted)
 			})
 	}
 
@@ -7755,8 +7759,8 @@ impl Subscriber {
 	/// was handed out, dropped, skipped as stale, or given up as unfillable, rather than
 	/// waiting for an update to widen them: a reader that wants more keeps a range open. A
 	/// [`Self::with_range`] cap never ends a read, since it may rise again, and a group it
-	/// keeps out stays owed.
-	/// A track an origin serves from whichever of its routes is up still parks there for now.
+	/// keeps out stays owed. A track an origin serves from whichever of its routes is up ends
+	/// the same way, once no route it left may still deliver a group in range.
 	///
 	/// A group one of [`Subscription::ranges`] starts or ends inside reads only the frames
 	/// they cover there. One missing the frames asked for reads [`Error::Lagged`] rather
@@ -7804,7 +7808,7 @@ impl Subscriber {
 					Poll::Pending => {
 						// A read that only skipped since its last hand-out settles its write-offs too.
 						cursor.retire_written_off(&mut self.delivered);
-						if !self.parks && cursor.is_exhausted(&self.delivered) {
+						if !self.parks && cursor.is_exhausted(&[&self.delivered]) {
 							return Poll::Ready(Ok(None));
 						}
 						return Poll::Pending;
@@ -7820,10 +7824,22 @@ impl Subscriber {
 				// A replay advances only this copy's cursor, as an ordinary read would.
 				cursor.take(peeked);
 			},
-			// A front's bounded read parks past its end for now, as each copy's reader does.
 			Inner::Resume(resume, _) => resume
-				.poll_peek_group(ordered, &self.delivered, waiter)
+				.poll_peek_group(ordered, self.parks, &self.delivered, waiter)
 				.map(|res| res.map(|candidate| candidate.map(|candidate| Reserved::Resume(Box::new(candidate))))),
+		}
+	}
+
+	/// Whether this route copy's bounded window has nothing left for the logical readers that
+	/// handed out `logical`: what this copy took itself, wrote off, or gave up counts too.
+	pub(super) fn exhausted_for(&mut self, logical: &[&Delivered], waiter: &kio::Waiter) -> bool {
+		let mut taken = Vec::with_capacity(logical.len() + 1);
+		taken.push(&self.delivered);
+		taken.extend_from_slice(logical);
+		match &mut self.inner {
+			Inner::Plain(cursor) => cursor.is_exhausted(&taken),
+			// A copy that is another front's logical track judges across its own copies.
+			Inner::Resume(resume, _) => resume.exhausted(&taken, waiter),
 		}
 	}
 

@@ -311,8 +311,8 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 			TIMEOUT,
 			kio::wait(|waiter| {
 				assert!(
-					reader.poll_recv_group(waiter).is_pending(),
-					"the narrowed reader has no unread group"
+					matches!(reader.poll_recv_group(waiter), std::task::Poll::Ready(Ok(None))),
+					"the narrowed reader read its range"
 				);
 				loop {
 					if fixture
@@ -519,8 +519,9 @@ async fn draft18_updates_narrow_then_widen() {
 	}
 }
 
-/// Empty ranges retire only demand no other reader holds. A later widening reuses
-/// the copy and joins the new live group, without disturbing a sibling reader.
+/// Empty ranges end the read and retire only demand no other reader holds. A later
+/// widening reuses the copy and joins the new live group, without disturbing a sibling
+/// reader.
 #[kio::test]
 async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 	for version in ["moq-transport-18", "moq-transport-22"] {
@@ -532,7 +533,10 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 			assert_eq!(next(&mut reader).await, Some(5));
 			assert_eq!(next(&mut sibling).await, Some(5));
 			reader.update(live.clone().with_ranges([])).unwrap();
-			assert!(reader.poll_recv_group(&kio::Waiter::noop()).is_pending());
+			assert!(matches!(
+				reader.poll_recv_group(&kio::Waiter::noop()),
+				std::task::Poll::Ready(Ok(None))
+			));
 			let mut group = fixture
 				.track
 				.create_group(moq_net::group::Info { sequence: 6 })
@@ -549,7 +553,10 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 			kio::clock::timeout(
 				TIMEOUT,
 				kio::wait(|waiter| {
-					assert!(reader.poll_recv_group(waiter).is_pending());
+					assert!(matches!(
+						reader.poll_recv_group(waiter),
+						std::task::Poll::Ready(Ok(None))
+					));
 					loop {
 						if fixture.track.subscription().is_none() {
 							return std::task::Poll::Ready(());

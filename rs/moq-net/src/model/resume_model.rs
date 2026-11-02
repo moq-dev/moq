@@ -419,6 +419,11 @@ impl Model {
 				};
 				reader.ranges = range;
 				let _ = reader.control.update(subscription(reader.spec.budget, range));
+				// A read that ended at its range's end reads on once the range widens.
+				if matches!(reader.end, Some(Ok(()))) && !self.instances[reader.instance].ended {
+					reader.end = None;
+					reader.carried.clear();
+				}
 				self.poll(index)?;
 			}
 			Op::Bounds { reader: index, range } => {
@@ -684,12 +689,18 @@ impl Model {
 					);
 				}
 				Poll::Ready(Ok(None)) => {
-					if !instance.ended {
+					// A bounded read ends once its range is read, a local cap holding nothing
+					// back: what lands in it afterwards is not owed.
+					if !instance.ended && reader.ranges.is_none() {
 						return Err(fail(index, "the track ended cleanly though no route declared an end"));
 					}
+					let covers = |group: u64| match instance.ended {
+						true => reader.covers(group),
+						false => reader.ranges.is_some_and(|(start, end)| (start..end).contains(&group)),
+					};
 					// A group landing below the end afterwards is not owed: a reader stops at it.
 					reader.carried = (0..GROUPS)
-						.filter(|group| reader.covers(*group) && instance.live().all(|copy| copy.complete(*group)))
+						.filter(|group| covers(*group) && instance.live().all(|copy| copy.complete(*group)))
 						.collect();
 					reader.end = Some(Ok(()));
 				}
@@ -845,15 +856,25 @@ impl Model {
 		if reader.doomed {
 			return match &reader.end {
 				Some(Err(_)) => Ok(()),
-				Some(Ok(())) if instance.ended => Ok(()),
+				Some(Ok(())) if instance.ended || reader.ranges.is_some() => Ok(()),
 				end => Err(fail(index, format!("outlived its instance's routes: {end:?}"))),
 			};
 		}
 		// What every live route carries in full.
 		let carried = |group: u64| instance.live().all(|copy| copy.complete(group));
+		// A read that ended its range owed every group in it, whatever its cap, but an
+		// ordered one passes what its floor keeps out once it reads past it.
+		let read_range = matches!(reader.end, Some(Ok(()))) && !instance.ended;
+		let covers = |group: u64| match read_range {
+			true => {
+				reader.ranges.is_some_and(|(start, end)| (start..end).contains(&group))
+					&& (!reader.spec.ordered || reader.bounds.is_none_or(|(start, _)| group >= start))
+			}
+			false => reader.covers(group),
+		};
 		let mut owed: Vec<u64> = (0..GROUPS)
 			.filter(|group| reader.floor.is_none_or(|floor| *group > floor))
-			.filter(|group| reader.covers(*group) && carried(*group))
+			.filter(|group| covers(*group) && carried(*group))
 			.collect();
 		if reader.spec.ordered {
 			owed.retain(|group| before.is_none_or(|before| *group > before));
@@ -886,7 +907,7 @@ impl Model {
 		}
 		match (&reader.end, finish && instance.live().next().is_some()) {
 			(None, false) | (Some(Ok(())), true) => {}
-			(Some(Ok(())), false) if instance.ended => {}
+			(Some(Ok(())), false) if instance.ended || reader.ranges.is_some() => {}
 			(end, _) => {
 				let _ = write!(problems, "track end {end:?}; ");
 			}
