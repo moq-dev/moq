@@ -3,7 +3,7 @@
 ## Goal
 
 Wherever an instance becomes a URL or storage path segment (moq-hls's HLS
-URLs and the archive's recording keys, `<path>/@<instance>`), it is
+and DASH URLs and the archive's recording keys, `<path>/@<instance>`), it is
 percent-encoded as one segment and decoded on the way back. A stable
 instance containing `/`, `?`, `%` or `#` round-trips, and one test per
 surface proves it.
