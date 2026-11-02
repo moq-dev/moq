@@ -487,10 +487,10 @@ export const hooks: {
 	 * kept for it, so a resumed reader takes groups the plain way and drops from here.
 	 */
 	tryDrop: (subscriber: Subscriber) => (Recv & { kind: "drop" }) | undefined;
-	/** The sequence {@link tryNextGroup} (`ordered`) or {@link tryRecvGroup} would take next, without taking it. */
-	peekGroup: (subscriber: Subscriber, ordered: boolean) => number | undefined;
+	/** The lowest buffered candidate, which an ordered take may wait below; `floor` passes sequences taken on other copies. */
+	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: number) => number | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
-	tryNextGroup: (subscriber: Subscriber) => Recv;
+	tryNextGroup: (subscriber: Subscriber, floor?: number) => Recv;
 	/** Wake once a subscriber's datagram cursor may read differently; fires at most once. */
 	datagramChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** Take the next datagram in arrival order without waiting. */

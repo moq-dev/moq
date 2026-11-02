@@ -532,6 +532,8 @@ class TrackState {
 	// First timestamps mutate group state rather than track state, so held groups
 	// watch this revision as well as arrivals when enforcing latency after handoff.
 	timelineChanged = new Signal(0);
+	// Frames wake the sequence cursor only while an owed hole holds it.
+	waitingOrdered = false;
 	// Bumped when a wire subscription declares or resolves where its live feed starts, so a
 	// publisher holding its first group for that answer wakes.
 	startChanged = new Signal(0);
@@ -1138,6 +1140,7 @@ export class Producer {
 		if (entry.unverified) hooks.unverifyGroup(dst);
 		entry.mirrors.set(sink, dst);
 		timelineInsert(sink.timeline, dst);
+		void dst.readable().then(() => sink.timelineChanged.update((revision) => revision + 1));
 		sink.latest = Math.max(sink.latest ?? 0, dst.sequence);
 		sink.received.set(Math.max(sink.received.peek(), dst.sequence + 1));
 		sink.groups.mutate((groups) => {
@@ -1381,11 +1384,13 @@ export class Producer {
 		const stop = hooks.groupProgress(group, (total) => {
 			if (total > hooks.groupOffset(group)) this.#advanceObject({ group: group.sequence, frame: total - 1 });
 			// A frame can change an owed hole's reach or drift edge without adding a group.
-			for (const sink of this.#sinks) sink.timelineChanged.update((revision) => revision + 1);
+			for (const sink of this.#sinks)
+				if (sink.waitingOrdered) sink.timelineChanged.update((revision) => revision + 1);
 		});
 		void group.closed.then((closed) => {
 			stop();
-			for (const sink of this.#sinks) sink.timelineChanged.update((revision) => revision + 1);
+			for (const sink of this.#sinks)
+				if (sink.waitingOrdered) sink.timelineChanged.update((revision) => revision + 1);
 			if (closed === null) this.#finishLargest(group.sequence);
 		});
 		// Give held mirrors the new live edge before pruning their timeline entry,
@@ -2208,8 +2213,14 @@ export class Subscriber {
 		};
 		hooks.tryRecvGroup = (subscriber, dispositions) => subscriber.#tryRecvGroup(dispositions);
 		hooks.tryDrop = (subscriber) => subscriber.#tryDrop();
-		hooks.tryNextGroup = (subscriber) => subscriber.#tryNextGroup();
-		hooks.peekGroup = (subscriber, ordered) => subscriber.#peekGroup(ordered);
+		hooks.tryNextGroup = (subscriber, floor) => {
+			subscriber.#nextSequence = Math.max(subscriber.#nextSequence, floor ?? 0);
+			return subscriber.#tryNextGroup();
+		};
+		hooks.peekGroup = (subscriber, ordered, floor) => {
+			if (ordered) subscriber.#nextSequence = Math.max(subscriber.#nextSequence, floor ?? 0);
+			return subscriber.#peekGroup(ordered);
+		};
 		hooks.forgetPastBudget = (subscriber, delivered) => subscriber.#forgetPastBudget(delivered);
 		hooks.unreport = (subscriber, start, end) => {
 			subscriber.#reported = removeRun(subscriber.#reported, start, end);
@@ -2511,6 +2522,7 @@ export class Subscriber {
 			}));
 		}
 		this.#closed = true;
+		this.#state.waitingOrdered = false;
 		// Settle if we're first (the producer may already have); either way drop anything
 		// still buffered. Groups parked at the withRange cap deliberately outlive a clean
 		// producer close, so the subscriber leaving is what must release them: closing
@@ -2719,9 +2731,6 @@ export class Subscriber {
 			this.#state.groups.changed(fn),
 			this.#state.drops.changed(fn),
 			this.#state.startChanged.changed(fn),
-			this.#state.timelineChanged.changed(fn),
-			this.#wall.revision.changed(fn),
-			this.#state.info.changed(fn),
 			this.#cursor.changed(fn),
 			// A widened budget re-offers the groups it skipped as stale.
 			this.#state.update.changed(fn),
@@ -2730,6 +2739,12 @@ export class Subscriber {
 			this.#state.received.changed(fn),
 			this.#state.owed.changed(fn),
 		];
+		if (this.#state.waitingOrdered)
+			dispose.push(
+				this.#state.timelineChanged.changed(fn),
+				this.#wall.revision.changed(fn),
+				this.#state.info.changed(fn),
+			);
 		return () => {
 			for (const close of dispose) close();
 		};
@@ -2841,11 +2856,12 @@ export class Subscriber {
 		const owed = owedGroup(producer, start, end);
 		if (!owed || this.#staleAt(owed.sequence, drift, true)) return false;
 		if (owed.folds !== undefined) this.#wakeAt(owed.folds);
+		this.#state.waitingOrdered = true;
 		return true;
 	}
 
-	// The sequence #tryNextGroup (`ordered`) or #tryRecvGroup would take next: the lowest buffered
-	// group in range, not yet handed out, that the budget spares.
+	// The lowest buffered candidate in range that the budget spares. An ordered take may
+	// still wait on an owed hole below it, so a resumed reader must keep its place.
 	#peekGroup(ordered: boolean): number | undefined {
 		const cursor = this.#cursor.peek();
 		const start = ordered ? Math.max(cursor.start, this.#nextSequence) : cursor.start;
@@ -2854,7 +2870,6 @@ export class Subscriber {
 			if (group.sequence < start) continue;
 			if (cursor.end !== undefined && group.sequence >= cursor.end) return undefined;
 			if (!this.#delivered.has(group.sequence) && !this.#staleAt(group.sequence, drift)) {
-				if (ordered && this.#waitOwed(start, group.sequence, drift)) return undefined;
 				return group.sequence;
 			}
 		}
@@ -2874,6 +2889,7 @@ export class Subscriber {
 	}
 
 	#tryNextBuffered(): Recv {
+		this.#state.waitingOrdered = false;
 		const groups = this.#state.groups.peek();
 		const cursor = this.#cursor.peek();
 		const start = Math.max(cursor.start, this.#nextSequence);
