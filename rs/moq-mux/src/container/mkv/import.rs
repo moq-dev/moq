@@ -16,6 +16,26 @@ use crate::container::producer::Streamed;
 /// Default Matroska TimestampScale: 1 ms (in nanoseconds).
 const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 
+/// The longest DocType or CodecID the importer supports, so a longer one is never read.
+const NAME_LEN: u64 = "V_MPEGH/ISO/HEVC".len() as u64;
+
+/// An `A_FLAC` CodecPrivate holding only STREAMINFO: the `fLaC` marker, the block header, and the
+/// 34-byte body (RFC 9639 §8.2).
+const FLAC_PRIVATE_LEN: u64 = 4 + 4 + 34;
+
+/// The largest OpusHead RFC 7845 §5.1 lays out: 21 bytes plus a 255-channel mapping table.
+const OPUS_HEAD_MAX_LEN: u64 = 21 + 255;
+
+/// The largest av1C whose configOBUs hold a sequence header, then HDR content light and mastering
+/// display metadata. Each OBU spends at most 2 header bytes and an 8-byte `leb128` size, and each
+/// metadata payload at most an 8-byte `leb128` type and a trailing byte.
+const AV1_PRIVATE_MAX_LEN: u64 = 4 + (10 + AV1_SEQUENCE_HEADER_MAX_LEN) + (10 + 8 + 4 + 1) + (10 + 8 + 24 + 1);
+
+/// The largest sequence header payload the AV1 spec's §5.5 syntax allows: 3139 bits with 32
+/// operating points, each with decoder model and display delay parameters, a conforming `uvlc`
+/// tick count (at most 63 bits), and every optional field present, plus a trailing one bit.
+const AV1_SEQUENCE_HEADER_MAX_LEN: u64 = (3139 + 1u64).div_ceil(8);
+
 /// Converts MKV/WebM (Matroska) files into MoQ broadcast streams.
 ///
 /// Supports both batch and streaming/live input. WebM "live mode" (Segment and
@@ -39,6 +59,16 @@ const DEFAULT_TIMESTAMP_SCALE_NS: u64 = 1_000_000;
 /// Laced blocks require a positive TrackEntry DefaultDuration to timestamp each frame.
 ///
 /// Unsupported track roles are skipped; malformed tracks and unsupported codecs fail the import.
+///
+/// ## Decoder configuration
+///
+/// A TrackEntry's `CodecID` must precede its `CodecPrivate`, so the codec decides how much of it
+/// is read before its bytes arrive. Codecs that do not use it skip it as it arrives. The others
+/// read it whole, refusing one larger than its supported configuration at its header:
+/// - FLAC: the `fLaC` marker and STREAMINFO alone, without other metadata blocks;
+/// - Opus: an OpusHead in the RFC 7845 layout, without a later minor version's extra fields;
+/// - AV1: an av1C whose `configOBUs` hold at most a sequence header first, then at most one each
+///   of the HDR content light and mastering display metadata.
 ///
 /// ## One pass
 ///
@@ -362,16 +392,20 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let action = match (parent, header.id) {
 			(None, EBML) => Action::Collect,
 			(None, SEGMENT) => Action::Descend,
-			(Some(EBML), DOC_TYPE) => Action::Read,
+			(Some(EBML), DOC_TYPE) => match header.size {
+				Some(size) if size <= NAME_LEN => Action::Read,
+				size => return Err(Error::UnsupportedDocType(format!("<{} bytes>", size.unwrap_or_default())).into()),
+			},
 			(Some(SEGMENT), INFO | CLUSTER) => Action::Descend,
 			// A second Tracks element would redeclare a published track set.
 			(Some(SEGMENT), TRACKS) if !self.tracks_seen => Action::Descend,
 			(Some(INFO), TIMESTAMP_SCALE) => Action::Read,
 			(Some(TRACKS), TRACK_ENTRY) => Action::Collect,
 			(Some(TRACK_ENTRY), VIDEO | AUDIO) => Action::Collect,
-			(Some(TRACK_ENTRY), TRACK_NUMBER | TRACK_TYPE | CODEC_ID | CODEC_PRIVATE | DEFAULT_DURATION) => {
-				Action::Read
-			}
+			(Some(TRACK_ENTRY), TRACK_NUMBER | TRACK_TYPE | DEFAULT_DURATION) => Action::Read,
+			// A longer CodecID is no supported codec, so it is skipped and recorded in `start`.
+			(Some(TRACK_ENTRY), CODEC_ID) if header.size.is_some_and(|size| size <= NAME_LEN) => Action::Read,
+			(Some(TRACK_ENTRY), CODEC_PRIVATE) => self.codec_private(header)?,
 			(Some(VIDEO), COLOUR | PROJECTION) => Action::Collect,
 			(
 				Some(VIDEO),
@@ -409,6 +443,33 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		Ok(action)
 	}
 
+	/// How the TrackEntry's codec consumes its CodecPrivate: skipped when the codec has no use for
+	/// it, otherwise read whole if it fits the codec's supported configuration.
+	fn codec_private(&self, header: &Header) -> Result<Action> {
+		let codec_id = self
+			.fields
+			.last()
+			.and_then(|fields| {
+				fields.iter().find_map(|field| match field {
+					MatroskaSpec::CodecID(id) => Some(id.as_str()),
+					_ => None,
+				})
+			})
+			.ok_or(Error::CodecPrivateBeforeCodecId)?;
+		let max = match codec_id {
+			"A_FLAC" => FLAC_PRIVATE_LEN,
+			"A_OPUS" => OPUS_HEAD_MAX_LEN,
+			"V_AV1" => AV1_PRIVATE_MAX_LEN,
+			// No bounded configuration is defined for these yet, so they are read whole.
+			"V_MPEG4/ISO/AVC" | "V_MPEGH/ISO/HEVC" | "A_AAC" => u64::MAX,
+			_ => return Ok(Action::Skip),
+		};
+		match header.size {
+			Some(size) if size <= max => Ok(Action::Read),
+			_ => Err(Error::UnsupportedCodecPrivate(codec_id.to_string()).into()),
+		}
+	}
+
 	fn start(&mut self, header: Header) -> Result<()> {
 		let parent = self.reader.parent();
 		match self.action(parent, &header)? {
@@ -441,6 +502,15 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					set(
 						self.fields.last_mut().expect("Projection is collected"),
 						MatroskaSpec::ProjectionPrivate(Vec::new()),
+					)?;
+				}
+				// A skipped track type accepts any codec, so a CodecID too long to support is
+				// recorded by its length and refused only by a track that needs its codec.
+				if parent == Some(id::TRACK_ENTRY) && header.id == id::CODEC_ID {
+					let size = header.size.unwrap_or_default();
+					set(
+						self.fields.last_mut().expect("TrackEntry is collected"),
+						MatroskaSpec::CodecID(format!("<{size} bytes>")),
 					)?;
 				}
 			}
@@ -925,8 +995,11 @@ fn field(id: u32, data: Vec<u8>) -> Result<MatroskaSpec> {
 fn set(fields: &mut Vec<MatroskaSpec>, value: MatroskaSpec) -> Result<()> {
 	let id = value.get_id();
 	match fields.iter_mut().find(|field| field.get_id() == id) {
-		// A track declares one number; a second would make its blocks ambiguous.
-		Some(_) if matches!(value, MatroskaSpec::TrackNumber(_)) => return Err(moq_net::Error::Duplicate.into()),
+		// A track declares one number and one codec: a second number would make its blocks
+		// ambiguous, and a second codec would reinterpret a CodecPrivate read for the first.
+		Some(_) if matches!(value, MatroskaSpec::TrackNumber(_) | MatroskaSpec::CodecID(_)) => {
+			return Err(moq_net::Error::Duplicate.into());
+		}
 		Some(field) => *field = value,
 		None => fields.push(value),
 	}
@@ -1259,7 +1332,18 @@ fn build_audio_config(
 			// The catalog describes the decoder's output: Opus always decodes at 48 kHz, whatever the
 			// informational input rate in the OpusHead or SamplingFrequency claims.
 			let mut config = match codec_private {
-				Some(head) => crate::codec::opus::config(head)?,
+				Some(head) => {
+					let config = crate::codec::opus::config(head)?;
+					// The parse checked the fixed fields, so only the mapping table may follow them.
+					let layout = match head[18] {
+						0 => 19,
+						_ => 21 + usize::from(head[9]),
+					};
+					if head.len() != layout {
+						return Err(Error::UnsupportedCodecPrivate(codec_id.to_string()).into());
+					}
+					config
+				}
 				None => crate::codec::opus::Config::new(48_000, 0).into(),
 			};
 			config.description = codec_private.cloned();
@@ -1361,6 +1445,9 @@ fn build_av1_config(codec_private: Option<&Bytes>) -> Result<VideoConfig> {
 	})?;
 	let mut cursor = Cursor::new(av1c_data.as_ref());
 	let av1c = mp4_atom::Av1c::decode_body(&mut cursor).map_err(|_| Error::InvalidAv1c)?;
+	if !crate::codec::av1::config_obus_supported(&av1c.config_obus) {
+		return Err(Error::UnsupportedCodecPrivate("V_AV1".to_string()).into());
+	}
 
 	let mut description = BytesMut::new();
 	av1c.encode_body(&mut description)?;
@@ -1684,6 +1771,16 @@ mod tests {
 	/// A WebM prefix with an unknown-size Segment, then a Tracks holding one VP9 TrackEntry whose
 	/// last child is `field`'s header, so `size` body bytes of it remain.
 	fn entry_ending_in(field: &[u8], size: u64) -> Vec<u8> {
+		// TrackNumber 1, TrackType 1 (video), CodecID V_VP9.
+		let mut entry = vec![0xd7, 0x81, 0x01, 0x83, 0x81, 0x01, 0x86, 0x85];
+		entry.extend_from_slice(b"V_VP9");
+		entry.extend_from_slice(field);
+		fields_ending_in(entry, size)
+	}
+
+	/// A WebM prefix with an unknown-size Segment, then a Tracks holding one TrackEntry of `entry`,
+	/// whose last child is a header with `size` body bytes remaining.
+	fn fields_ending_in(entry: Vec<u8>, size: u64) -> Vec<u8> {
 		let mut data = Vec::new();
 		{
 			let mut writer = WebmWriter::new(&mut data);
@@ -1700,10 +1797,6 @@ mod tests {
 				.unwrap();
 			writer.flush().unwrap();
 		}
-		// TrackNumber 1, TrackType 1 (video), CodecID V_VP9.
-		let mut entry = vec![0xd7, 0x81, 0x01, 0x83, 0x81, 0x01, 0x86, 0x85];
-		entry.extend_from_slice(b"V_VP9");
-		entry.extend_from_slice(field);
 		let entry_size = entry.len() as u64 + size;
 		let mut tracks = header(&[0xae], entry_size);
 		tracks.extend(entry);
@@ -1765,6 +1858,99 @@ mod tests {
 				),
 			}
 		}
+	}
+
+	/// TrackNumber 1, TrackType `track_type`, then CodecID `codec` unless it is empty.
+	fn track_fields(track_type: u8, codec: &[u8]) -> Vec<u8> {
+		let mut fields = vec![0xd7, 0x81, 0x01, 0x83, 0x81, track_type];
+		if !codec.is_empty() {
+			fields.extend(header(&[0x86], codec.len() as u64));
+			fields.extend_from_slice(codec);
+		}
+		fields
+	}
+
+	#[test]
+	fn leaves_larger_than_supported_are_refused_at_their_header() {
+		const HUGE: u64 = 1 << 30;
+		let ebml = [
+			header(&[0x1a, 0x45, 0xdf, 0xa3], HUGE + 16),
+			header(&[0x42, 0x82], HUGE),
+		]
+		.concat();
+		let private = |track_type, codec: &[u8], size| {
+			fields_ending_in(
+				[track_fields(track_type, codec), header(&[0x63, 0xa2], size)].concat(),
+				size,
+			)
+		};
+		let mut twice = track_fields(1, b"V_VP9");
+		let codec = twice[6..].to_vec();
+		twice.extend(codec);
+		type Refused = fn(&crate::Error) -> bool;
+		let cases: [(Vec<u8>, Refused); 7] = [
+			(ebml, |err| {
+				matches!(err, crate::Error::Mkv(Error::UnsupportedDocType(_)))
+			}),
+			(private(2, b"", HUGE), |err| {
+				matches!(err, crate::Error::Mkv(Error::CodecPrivateBeforeCodecId))
+			}),
+			(private(2, b"A_FLAC", FLAC_PRIVATE_LEN + 1), |err| {
+				matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_)))
+			}),
+			(private(2, b"A_OPUS", OPUS_HEAD_MAX_LEN + 1), |err| {
+				matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_)))
+			}),
+			(private(1, b"V_AV1", AV1_PRIVATE_MAX_LEN + 1), |err| {
+				matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_)))
+			}),
+			(private(1, b"V_AV1", HUGE), |err| {
+				matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_)))
+			}),
+			(fields_ending_in(twice, 0), |err| {
+				matches!(err, crate::Error::Moq(moq_net::Error::Duplicate))
+			}),
+		];
+		for (data, expected) in cases {
+			for chunk in [1, 7, 64] {
+				let (mut import, _catalog, _consumer) = import();
+				let err = data
+					.chunks(chunk)
+					.find_map(|chunk| import.decode(chunk).err())
+					.expect("refused");
+				assert!(expected(&err), "{err:?}");
+				assert!(import.reader.retained() <= 12, "{}", import.reader.retained());
+			}
+		}
+	}
+
+	#[test]
+	fn unused_codec_fields_are_discarded_as_they_arrive() {
+		const SIZE: u64 = 1024 * 1024;
+		// A CodecID longer than any supported one fails only a track that needs its codec.
+		for (track_type, supported) in [(3, true), (1, false)] {
+			let (mut import, _catalog, _consumer) = import();
+			let entry = [track_fields(track_type, b""), header(&[0x86], SIZE)].concat();
+			import.decode(&fields_ending_in(entry, SIZE)).unwrap();
+			let result = feed_unretained(&mut import, SIZE);
+			match supported {
+				true => result.unwrap(),
+				false => assert!(
+					matches!(result, Err(crate::Error::Mkv(Error::UnsupportedVideoCodec(_)))),
+					"{result:?}"
+				),
+			}
+			assert!(import.tracks.is_empty());
+		}
+
+		// VP9 has no use for its CodecPrivate.
+		let (mut import, _catalog, _consumer) = import();
+		import
+			.decode(&entry_ending_in(&header(&[0x63, 0xa2], SIZE), SIZE))
+			.unwrap();
+		feed_unretained(&mut import, SIZE).unwrap();
+		assert_eq!(import.tracks.len(), 1);
+		import.finish().unwrap();
 	}
 
 	#[tokio::test]

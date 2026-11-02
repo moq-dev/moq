@@ -2107,3 +2107,39 @@ fn opus_family_two_is_ambisonic() {
 		}
 	}
 }
+
+/// Opus and AV1 decoder configurations hold only what their supported layout defines.
+#[test]
+fn decoder_config_extras_are_refused() {
+	use MatroskaSpec::*;
+	let mut extended = ambisonic_head(4);
+	extended.push(0);
+	let mut stereo = ambisonic_head(4);
+	stereo.truncate(19);
+	stereo[9] = 2;
+	stereo[18] = 0;
+	stereo.push(0);
+	// An av1C whose configOBUs hold ITU-T T.35 metadata.
+	let t35 = vec![0x81, 0, 0, 0, (5 << 3) | 0x02, 4, 4, 0xb5, 0, 0x3c];
+	let av1 = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![TrackEntry(Master::Full(vec![
+			TrackNumber(1),
+			TrackType(1),
+			CodecID("V_AV1".into()),
+			CodecPrivate(t35),
+		]))])
+		.segment_end()
+		.build();
+	for data in [opus_webm(extended), opus_webm(stereo), av1] {
+		for initial in [false, true] {
+			let result = import_result(&data, initial);
+			assert!(
+				matches!(result, Err(crate::Error::Mkv(super::Error::UnsupportedCodecPrivate(_)))),
+				"{result:?}"
+			);
+		}
+	}
+}

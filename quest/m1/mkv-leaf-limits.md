@@ -21,53 +21,48 @@ are short ASCII strings, and `CodecPrivate` is the decoder config of a
 codec the importer supports: avcC (`V_MPEG4/ISO/AVC`), hvcC
 (`V_MPEGH/ISO/HEVC`), av1C (`V_AV1`), an OpusHead (`A_OPUS`), an AAC
 AudioSpecificConfig (`A_AAC`), or a FLAC header (`A_FLAC`). The FLAC header
-carries every metadata block, so it can hold embedded cover art; size its
-limit for that or refuse such art explicitly. Pick each limit from its spec
-and the largest real decoder config, check them against the MKV fixtures
-for each codec, and return the
-importer's existing error for a refused element. Test each element declared
+carries every metadata block, so it can hold embedded cover art. Pick each
+limit from its spec's supported configuration (decided below), check it
+against the MKV fixtures for each codec, and refuse an element past it. Test each element declared
 past its limit, fed in small chunks.
 
-Research checkpoint 2026-11-02, implementation paused for a supported-feature
-choice in [moq-dev/moq#7629](https://github.com/moq-dev/moq/pull/7629):
+Research checkpoint 2026-11-02 in [moq-dev/moq#7629](https://github.com/moq-dev/moq/pull/7629):
+all three leaves reproduced unbounded (a 1 GiB declaration retained every
+byte fed), and fresh ffmpeg 9.0.2 MKVs for AVC, HEVC, AV1, Opus, AAC, and
+FLAC import in 1-, 7-, and 64-byte chunks. Their sizes are examples, not
+limits.
 
-- Reproduced all three unbounded leaves with a 1 GiB declaration and 4096
-  incoming bytes, split into 1-, 7-, and 64-byte chunks. Reader retention
-  rose from 12 to 4108 bytes in each case instead of refusing the header.
-- Fresh ffmpeg 9.0.2 Matroska fixtures were accepted in those same chunk
-  sizes for AVC, HEVC, AV1, Opus, AAC, and FLAC. Their actual CodecPrivate
-  element sizes were 44, 2478, 16, 19, 5, and 42 bytes respectively. These
-  are measured examples, not maximum accepted configurations. In
-  particular, ffprobe reports FLAC extradata as 34 bytes, excluding the
-  marker and metadata header that make its Matroska element 42 bytes.
-- [AV1 ISOBMFF sections 2.3.3 and 2.3.4](https://aomediacodec.github.io/av1-isobmff/#av1codecconfigurationbox-syntax)
-  define an open-ended configOBUs array. Only the sequence-header count is
-  bounded; arbitrary metadata and padding do not yield a small total-size
-  maximum. The current importer retains all configOBUs in the description.
-- [RFC 9639 sections 6 and 8.1](https://www.rfc-editor.org/rfc/rfc9639.html#section-8.1)
-  allow any number of FLAC metadata blocks, each with a 24-bit body length.
-  A single-block maximum does not bound the complete CodecPrivate, even
-  after refusing pictures. The current importer passes all metadata into
-  the catalog description, while parsing only STREAMINFO.
-- [RFC 7845 section 5.1](https://www.rfc-editor.org/rfc/rfc7845.html#section-5.1)
-  gives the known OpusHead layout (19 bytes, or 21 plus up to 255 channel
-  mappings), but also permits extra fields for compatible minor versions.
-  The current parser accepts minor versions 0 through 15 and the importer
-  retains trailing data. A 276-byte cap would restrict that support.
-- [Matroska ordering](https://www.matroska.org/technical/ordering.html)
-  does not mandate CodecID before CodecPrivate. The current importer
-  resolves the codec at TrackEntry end. A codec-specific refusal at the
-  private-data header therefore also needs a decision about out-of-order
-  entries, rather than guessing the codec from private bytes.
+Decided 2026-11-02 (maintainer, the /quest-complete session):
 
-Decisions still needed: define the supported bounded decoder-config subset
-(including AV1 metadata, FLAC metadata beyond STREAMINFO, and Opus minor
-extensions), or authorize a streaming/canonicalization design instead of
-retaining each original decoder config whole. Also decide whether
-CodecPrivate preceding CodecID is explicitly unsupported. No narrowing of
-these features has been selected, and no production change has been made.
+- Decoder configs: define and document a bounded supported configuration per
+  codec, refusing excluded metadata and extensions at the CodecPrivate header,
+  before their bodies are read. No size picked from sampled fixtures, and no
+  streaming or canonicalizing redesign. Reason: AV1 configOBUs, FLAC metadata
+  chains, and OpusHead minor-version fields have no finite aggregate bound, so
+  only an explicit supported subset bounds them without an arbitrary constant.
+  FLAC is the `fLaC` marker plus STREAMINFO alone (42 bytes). Opus is the RFC
+  7845 layout (19 bytes, or 21 plus the channel mapping), without trailing
+  fields. AV1 is the av1C header plus at most a sequence header, first, and
+  one each of the HDR content light and mastering display metadata that
+  `color` reads, sized from the AV1 syntax maxima.
+- Element order: refuse a CodecPrivate before its CodecID, and a second
+  CodecID. Reason: the codec must pick the supported path before the private
+  bytes are buffered; arbitrary order would need staging or canonicalization.
 
-Public API: none. Wire: none.
+Implemented in #7629: DocType and CodecID are bounded by the longest supported
+value (a longer CodecID is recorded by its length, so skipped track types still
+pass), and codecs that ignore CodecPrivate (VP8, VP9, MP3, unsupported ones)
+skip it as it arrives.
+
+Still open, for the maintainer: AVC, HEVC, and AAC CodecPrivate are still read
+whole without a bound. ffmpeg's libx265 hvcC carries a 2365-byte
+user-data SEI (x265's encoder settings), and hvcC SEI arrays have no finite
+bound, so the decided approach would refuse default x265 output. avcC is
+bounded only by its count fields (about 34 MiB), and an AAC
+AudioSpecificConfig's trailing extensions are unbounded as the parser accepts
+them.
+
+Public API: two `mkv::Error` variants. Wire: none.
 
 ## Related
 
