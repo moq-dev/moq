@@ -588,34 +588,42 @@ fn bench_subscribe(c: &mut Criterion) {
 /// depend on `publishers`.
 fn bench_request(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/request");
-	// A request costs nothing per subscriber, so this sweeps the publisher counts
-	// in `SHAPES` rather than its shapes, whose last two share one.
 	for publishers in [100, 1_000] {
-		let mut fleet = fanout(publishers, 0);
-		// A broadcast above the misses covers them without serving them.
-		let _covering = fleet.producer.publish("room", origin::Route::default()).unwrap();
-		let waiter = kio::Waiter::noop();
-		group.bench_function(BenchmarkId::new("local", publishers), |b| {
-			b.iter(|| {
-				let pending = fleet.consumer.request_broadcast("room/0");
-				// The front's driver resolves the first request; later ones join it.
-				fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
-				pending
-					.now_or_never()
-					.expect("resolves once driven")
-					.expect("local broadcast");
+		for requesters in [1, 8, 32] {
+			let mut fleet = fanout(publishers, 0);
+			// A broadcast above the misses covers them without serving them.
+			let _covering = fleet.producer.publish("room", origin::Route::default()).unwrap();
+			let waiter = kio::Waiter::noop();
+			let shape = format!("{publishers}p_{requesters}r");
+			group.throughput(Throughput::Elements(requesters));
+			group.bench_function(BenchmarkId::new("local", &shape), |b| {
+				b.iter(|| {
+					let pending: Vec<_> = (0..requesters)
+						.map(|_| fleet.consumer.request_broadcast("room/0"))
+						.collect();
+					// The front's driver resolves the first request; later ones join it.
+					fleet.driver.poll(moq_net::time::Instant::now(), &waiter).unwrap();
+					for pending in pending {
+						pending
+							.now_or_never()
+							.expect("resolves once driven")
+							.expect("local broadcast");
+					}
+				});
 			});
-		});
-		group.bench_function(BenchmarkId::new("unroutable", publishers), |b| {
-			b.iter(|| {
-				let result = fleet
-					.consumer
-					.request_broadcast("room/missing")
-					.now_or_never()
-					.expect("fails synchronously");
-				assert!(matches!(result, Err(moq_net::Error::Unroutable)));
+			group.bench_function(BenchmarkId::new("unroutable", &shape), |b| {
+				b.iter(|| {
+					for _ in 0..requesters {
+						let result = fleet
+							.consumer
+							.request_broadcast("room/missing")
+							.now_or_never()
+							.expect("fails synchronously");
+						assert!(matches!(result, Err(moq_net::Error::Unroutable)));
+					}
+				});
 			});
-		});
+		}
 	}
 	group.finish();
 }
@@ -1241,7 +1249,7 @@ fn bench_copy_walk(c: &mut Criterion) {
 
 /// `(readers, retained, routes)` for [`bench_resume_overlap`]: readers of one track,
 /// the groups every route holds, and the routes it swapped through.
-const RESUME_OVERLAP: [(usize, usize, usize); 15] = [
+const RESUME_OVERLAP: [(usize, usize, usize); 17] = [
 	(1, 1, 1),
 	(1, 64, 1),
 	(32, 64, 1),
@@ -1257,6 +1265,8 @@ const RESUME_OVERLAP: [(usize, usize, usize); 15] = [
 	(1, 64, 8),
 	(1, 64, 32),
 	(32, 64, 8),
+	(32, 64, 32),
+	(256, 64, 8),
 ];
 
 /// A track that swapped through its routes while its readers' local cap held every
@@ -1282,7 +1292,10 @@ impl ResumeReader {
 	}
 }
 
-async fn resume_overlap(readers: usize, retained: usize, routes: usize, ordered: bool) -> ResumeOverlap {
+///
+/// With `waiting`, one more route answers last without producing a group, so it has not
+/// bounded the overlapping copies yet.
+async fn resume_overlap(readers: usize, retained: usize, routes: usize, waiting: bool, ordered: bool) -> ResumeOverlap {
 	let (producer, driver) = origin::Producer::new(origin::Config::default());
 	tokio::spawn(moq_net::time::run(driver));
 	let generation = |order: &mut dyn Iterator<Item = usize>| {
@@ -1319,8 +1332,12 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize, ordered:
 		subscribers.push(subscriber);
 	}
 	let waiter = kio::Waiter::noop();
-	for _ in 1..routes {
-		generations.push(generation(&mut (0..retained).rev()));
+	for route in 1..routes + usize::from(waiting) {
+		generations.push(if waiting && route == routes {
+			generation(&mut std::iter::empty())
+		} else {
+			generation(&mut (0..retained).rev())
+		});
 		let (_, latest) = generations.last().unwrap();
 		tokio::time::timeout(COPY_WAIT, latest.demand().used())
 			.await
@@ -1357,8 +1374,16 @@ async fn resume_overlap(readers: usize, retained: usize, routes: usize, ordered:
 fn bench_resume_overlap(c: &mut Criterion) {
 	let mut group = c.benchmark_group("origin/resume_overlap");
 	group.sample_size(10);
-	for (order, ordered) in [("arrival", false), ("sequence", true)] {
+	for (order, ordered, waiting) in [
+		("arrival", false, false),
+		("sequence", true, false),
+		("arrival_waiting", false, true),
+		("sequence_waiting", true, true),
+	] {
 		for (readers, retained, routes) in RESUME_OVERLAP {
+			if waiting && !(readers == 1 && retained == 64 && routes >= 2) {
+				continue;
+			}
 			group.throughput(Throughput::Elements((readers * retained) as u64));
 			group.bench_function(
 				BenchmarkId::new(order, format!("{readers}r_{retained}g_{routes}c")),
@@ -1369,7 +1394,7 @@ fn bench_resume_overlap(c: &mut Criterion) {
 						.unwrap();
 					let waiter = kio::Waiter::noop();
 					b.iter_batched_ref(
-						|| runtime.block_on(resume_overlap(readers, retained, routes, ordered)),
+						|| runtime.block_on(resume_overlap(readers, retained, routes, waiting, ordered)),
 						|rig| {
 							for reader in &mut rig.readers {
 								let mut delivered = 0;
@@ -1384,6 +1409,64 @@ fn bench_resume_overlap(c: &mut Criterion) {
 				},
 			);
 		}
+	}
+	group.finish();
+}
+
+/// `(readers, open)` shapes for [`bench_passthrough`]: readers of one track, and the
+/// groups each holds open at once.
+const PASSTHROUGH: [(usize, usize); 4] = [(1, 1), (1, 64), (100, 1), (100, 64)];
+
+/// One-frame groups read through a front that only ever had one route. Each reader holds
+/// `open` groups at once.
+fn bench_passthrough(c: &mut Criterion) {
+	let mut group = c.benchmark_group("origin/passthrough");
+	for (readers, open) in PASSTHROUGH {
+		group.throughput(Throughput::Elements((readers * open) as u64));
+		group.bench_function(BenchmarkId::from_parameter(format!("{readers}r_{open}g")), |b| {
+			let runtime = tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			let (producer, driver) = origin::Producer::new(origin::Config::default());
+			runtime.spawn(moq_net::time::run(driver));
+			let broadcast = producer.publish("room/live", origin::Route::default()).unwrap();
+			let source = broadcast.create_track("0", timed()).unwrap();
+			let mut subscriptions = runtime.block_on(async {
+				let resolved = producer.consume().request_broadcast("room/live").await.unwrap();
+				let track = resolved.track("0").unwrap();
+				let mut subscriptions = Vec::with_capacity(readers);
+				for _ in 0..readers {
+					subscriptions.push(track.subscribe(None).await.unwrap());
+				}
+				subscriptions
+			});
+			let mut held: Vec<Vec<moq_net::group::Consumer>> = (0..readers).map(|_| Vec::with_capacity(open)).collect();
+
+			b.iter_custom(|iterations| {
+				runtime.block_on(async {
+					let started = std::time::Instant::now();
+					for _ in 0..iterations {
+						// Received as each is written: a reader behind the live edge skips ahead.
+						for _ in 0..open {
+							let mut group = source.append_group().unwrap();
+							group.write_frame(Timestamp::ZERO, b"frame".as_ref()).unwrap();
+							group.finish().unwrap();
+							for (subscription, held) in subscriptions.iter_mut().zip(&mut held) {
+								held.push(subscription.recv_group().await.unwrap().expect("group"));
+							}
+						}
+						for held in &mut held {
+							for group in held.iter_mut() {
+								group.read_frame().await.unwrap().expect("frame");
+							}
+							held.clear();
+						}
+					}
+					started.elapsed()
+				})
+			});
+		});
 	}
 	group.finish();
 }
@@ -1411,6 +1494,7 @@ criterion_group!(
 	bench_relay,
 	bench_parked,
 	bench_copy_walk,
-	bench_resume_overlap
+	bench_resume_overlap,
+	bench_passthrough
 );
 criterion_main!(benches);
