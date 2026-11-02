@@ -15,6 +15,11 @@ Changed 2026-11-02 (maintainer): the studio moved to moq-dev/studio. The
 chain lands here with its own tests and benchmark; the studio's panel and
 scene-file shape follow a pin bump there.
 
+Decided 2026-11-02 (maintainer): the chain runs on the capture producer
+side of [one capture, many consumers](/quest/m1/audio-capture-fanout.md), so
+the bus and a source's own track both carry filtered audio; gain and mute
+stay after the split, in the bus `Strip`.
+
 Prefer maintained crates, such as `nnnoiseless` for RNNoise suppression, over
 hand-rolled DSP. Benchmark the chain per source so its cost per added source
 shows up as a slope. Host plugins out of process, so a crashing or hung plugin
