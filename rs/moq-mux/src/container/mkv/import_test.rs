@@ -2113,7 +2113,6 @@ fn opus_family_two_is_ambisonic() {
 /// with its renditions, finished or not, so the catalog holds only the live generation's state.
 #[test]
 fn repeated_reinit_keeps_flat_state() {
-	// Left open mid-Segment, as a live stream is when its source re-initializes.
 	let data = MkvBuilder::new()
 		.header("webm")
 		.segment_start()
@@ -2130,6 +2129,8 @@ fn repeated_reinit_keeps_flat_state() {
 				simple_block(1, 33, false, b"vp9-p"),
 			]
 		})
+		// The writer sizes the Segment at its end, so it writes nothing of an open one.
+		.segment_end()
 		.build();
 
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
