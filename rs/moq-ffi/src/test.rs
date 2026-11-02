@@ -6312,10 +6312,11 @@ async fn follow_hands_out_a_gap_while_resolving_once() {
 	arrival.close().unwrap();
 }
 
-/// A handle the caller dropped no longer counts as handed out, so the restart that names it
-/// hands it out again rather than leaving the caller with nothing.
+/// Dropping a handed-out handle changes nothing about the path, so the follower hands out
+/// nothing until another instance takes it over. The takeover's restart reached the follower
+/// before its resolution handed the handle out, so no restart is owed.
 #[tokio::test]
-async fn follow_hands_out_a_dropped_takeover_again() {
+async fn follow_waits_for_another_instance_after_a_dropped_takeover() {
 	let origin = MoqOriginProducer::new(MoqOriginConfig::default());
 	let dynamic = serve(&origin, "live");
 	let followed = origin.consume().follow("live".into(), None).unwrap();
@@ -6335,11 +6336,19 @@ async fn follow_hands_out_a_dropped_takeover_again() {
 			.unwrap(),
 	);
 
+	let hold = moq_net::origin::Config::default().update_hold * 2;
+	assert!(
+		kio::clock::timeout(hold, followed.available()).await.is_err(),
+		"the dropped takeover was handed out again"
+	);
+
+	let next = create_announced(&origin, "live");
 	kio::clock::timeout(TIMEOUT, followed.available())
 		.await
-		.expect("the dropped takeover was never handed out again")
+		.expect("the next instance was never handed out")
 		.unwrap();
 	takeover.close().unwrap();
+	next.close().unwrap();
 }
 
 #[tokio::test]
