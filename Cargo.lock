@@ -855,6 +855,7 @@ version = "0.0.1"
 dependencies = [
  "codspeed-criterion-compat",
  "criterion",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -3677,6 +3678,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -4800,6 +4802,7 @@ dependencies = [
  "smallvec",
  "test-env",
  "tokio",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5039,6 +5042,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libmoq"
 version = "0.6.12"
+dependencies = [
+ "workspace-hack",
+]
 
 [[package]]
 name = "libredox"
@@ -5345,6 +5351,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5378,6 +5385,7 @@ dependencies = [
  "tokio",
  "tracing",
  "unsafe-libopus",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5413,6 +5421,7 @@ dependencies = [
  "tracing-test",
  "url",
  "wiremock",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5456,6 +5465,7 @@ dependencies = [
  "toml 1.1.6+spec-1.1.0",
  "tracing",
  "usage-rs",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5477,6 +5487,7 @@ dependencies = [
  "tokio",
  "tracing",
  "usage-rs",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5502,6 +5513,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5517,6 +5529,7 @@ dependencies = [
  "parking_lot",
  "pollster",
  "tracing",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5570,6 +5583,7 @@ dependencies = [
  "usage-rs",
  "vt100",
  "winit",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5582,6 +5596,7 @@ dependencies = [
  "rand_pcg",
  "stats_alloc",
  "tracing",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5598,6 +5613,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -5623,6 +5639,7 @@ dependencies = [
  "tracing",
  "uniffi 0.32.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "url",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5647,6 +5664,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5679,6 +5697,7 @@ dependencies = [
  "tracing",
  "tracing-test",
  "url",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5691,6 +5710,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5709,6 +5729,7 @@ dependencies = [
  "serde_path_to_error",
  "thiserror 2.0.21",
  "tracing",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5718,6 +5739,7 @@ dependencies = [
  "bytes",
  "moq-net",
  "thiserror 2.0.21",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5727,6 +5749,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_with",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5767,11 +5790,15 @@ dependencies = [
  "tracing-test",
  "url",
  "webm-iterable",
+ "workspace-hack",
 ]
 
 [[package]]
 name = "moq-native"
 version = "0.20.0"
+dependencies = [
+ "workspace-hack",
+]
 
 [[package]]
 name = "moq-net"
@@ -5801,6 +5828,7 @@ dependencies = [
  "tracing-test",
  "url",
  "uuid",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5821,6 +5849,7 @@ dependencies = [
  "moq-net",
  "serde_json",
  "tokio",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5830,6 +5859,7 @@ dependencies = [
  "cudarc",
  "libloading 0.9.0",
  "thiserror 2.0.21",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5840,6 +5870,7 @@ dependencies = [
  "moq-pattern 0.1.2",
  "serde",
  "serde_json",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5881,6 +5912,7 @@ dependencies = [
  "tinyvec",
  "tracing",
  "tracing-subscriber",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5950,6 +5982,7 @@ dependencies = [
  "url",
  "usage-rs",
  "web-transport-trait",
+ "workspace-hack",
  "x509-parser",
 ]
 
@@ -5964,6 +5997,7 @@ dependencies = [
  "moq-tokio",
  "thiserror 2.0.21",
  "tokio",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -5987,6 +6021,7 @@ dependencies = [
  "tracing-test",
  "url",
  "uuid",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6013,6 +6048,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "tracing-test",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6033,6 +6069,7 @@ dependencies = [
  "tracing",
  "tracing-test",
  "url",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6055,6 +6092,7 @@ dependencies = [
  "tokio",
  "toml 1.1.6+spec-1.1.0",
  "tracing",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6071,6 +6109,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml 1.1.6+spec-1.1.0",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6088,6 +6127,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "workspace-hack",
  "zeroize",
 ]
 
@@ -6107,6 +6147,7 @@ dependencies = [
  "tracing",
  "tracing-test",
  "windows-sys 0.61.2",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6125,6 +6166,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6142,6 +6184,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6167,6 +6210,7 @@ dependencies = [
  "tracing",
  "url",
  "usage-rs",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6251,6 +6295,7 @@ dependencies = [
  "web-transport-proto",
  "web-transport-trait",
  "webpki-roots 1.0.10",
+ "workspace-hack",
  "x509-parser",
 ]
 
@@ -6271,6 +6316,7 @@ dependencies = [
  "tracing",
  "url",
  "usage-rs",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6305,6 +6351,7 @@ dependencies = [
  "url",
  "web-transport-proto",
  "web-transport-trait",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6313,6 +6360,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
  "libc",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -6379,6 +6427,7 @@ dependencies = [
  "tracing-test",
  "wgpu",
  "windows",
+ "workspace-hack",
  "x11rb 0.14.0",
  "yuv",
  "zune-jpeg",
@@ -8566,6 +8615,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "web-transport-trait",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -10818,6 +10868,9 @@ dependencies = [
 [[package]]
 name = "test-env"
 version = "0.0.1"
+dependencies = [
+ "workspace-hack",
+]
 
 [[package]]
 name = "textwrap"
@@ -11554,6 +11607,7 @@ name = "uniffi-bindgen"
 version = "0.1.0"
 dependencies = [
  "uniffi 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "workspace-hack",
 ]
 
 [[package]]
@@ -13027,6 +13081,193 @@ dependencies = [
  "group",
  "hybrid-array",
  "primefield",
+]
+
+[[package]]
+name = "workspace-hack"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arrayvec",
+ "aws-lc-rs",
+ "aws-lc-sys",
+ "base16ct 1.0.0",
+ "base64 0.23.1",
+ "bitflags 2.13.2",
+ "block2 0.6.2",
+ "bytemuck",
+ "byteorder",
+ "bytes",
+ "camino",
+ "cc",
+ "chrono",
+ "clang-sys",
+ "clap",
+ "clap_builder",
+ "const-oid 0.9.6",
+ "cpal",
+ "crc32fast",
+ "crossbeam-epoch",
+ "crossbeam-utils",
+ "crypto-common 0.1.7",
+ "crypto-common 0.2.2",
+ "ctutils",
+ "cudarc",
+ "data-encoding",
+ "der 0.7.10",
+ "der 0.8.2",
+ "derive_more 2.1.1",
+ "derive_more-impl",
+ "digest 0.10.7",
+ "digest 0.11.3",
+ "dispatch2",
+ "displaydoc",
+ "either",
+ "errno",
+ "event-listener",
+ "event-listener-strategy",
+ "fastrand",
+ "flate2",
+ "flume",
+ "foldhash",
+ "form_urlencoded",
+ "fs-err",
+ "futures-channel",
+ "futures-core",
+ "futures-executor",
+ "futures-io",
+ "futures-lite",
+ "futures-sink",
+ "futures-task",
+ "futures-util",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "getrandom 0.4.3",
+ "half",
+ "hashbrown 0.17.1",
+ "hex",
+ "hmac 0.12.1",
+ "hybrid-array",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "image",
+ "indexmap 2.14.2",
+ "itertools 0.13.0",
+ "lazy_static",
+ "libc",
+ "libspa",
+ "linux-raw-sys 0.12.1",
+ "log",
+ "md-5 0.10.6",
+ "md-5 0.11.0",
+ "memchr",
+ "miniz_oxide 0.8.9",
+ "mio",
+ "nix",
+ "nom 7.1.3",
+ "nom 8.0.0",
+ "num-bigint",
+ "num-complex",
+ "num-integer",
+ "num-iter",
+ "num-traits",
+ "objc2 0.6.5",
+ "objc2-core-audio",
+ "objc2-core-audio-types",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-video",
+ "objc2-foundation 0.3.2",
+ "objc2-metal 0.3.2",
+ "objc2-quartz-core 0.3.2",
+ "object_store",
+ "once_cell",
+ "percent-encoding",
+ "pipewire",
+ "pkcs1",
+ "pkcs8 0.10.2",
+ "pkcs8 0.11.0",
+ "portable-atomic",
+ "postcard",
+ "ppv-lite86",
+ "proc-macro2",
+ "proptest",
+ "quick-xml 0.41.0",
+ "quick-xml 0.42.0",
+ "quote",
+ "rand 0.8.8",
+ "rand 0.9.5",
+ "rand_chacha 0.3.1",
+ "rcgen 0.14.10",
+ "regex",
+ "regex-automata",
+ "regex-syntax",
+ "reqwest",
+ "rustc-hash 1.1.0",
+ "rustix 1.1.5",
+ "rustls",
+ "rustls-pki-types",
+ "rustls-webpki",
+ "security-framework-sys",
+ "semver",
+ "serde",
+ "serde_core",
+ "serde_json",
+ "serde_spanned 1.1.1",
+ "serde_with",
+ "sha2 0.10.9",
+ "sha2 0.11.1",
+ "signature 2.2.0",
+ "signature 3.0.0",
+ "simd-adler32",
+ "simdutf8",
+ "siphasher",
+ "slab",
+ "smallvec",
+ "socket2 0.6.5",
+ "spin 0.10.1",
+ "spin 0.9.9",
+ "spki 0.7.3",
+ "spki 0.8.1",
+ "subtle",
+ "syn 2.0.119",
+ "syn 3.0.6",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "tokio-util",
+ "toml 1.1.6+spec-1.1.0",
+ "toml_datetime 1.1.1+spec-1.1.0",
+ "toml_parser",
+ "tower",
+ "tower-http 0.6.11",
+ "tracing",
+ "tracing-core",
+ "tracing-subscriber",
+ "tungstenite",
+ "typenum",
+ "url",
+ "usage-argv",
+ "usage-rs",
+ "uuid",
+ "wgpu",
+ "wgpu-core",
+ "wgpu-hal",
+ "wgpu-types",
+ "winapi",
+ "windows",
+ "windows-core",
+ "windows-result",
+ "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
+ "winit",
+ "winnow 0.7.15",
+ "winnow 1.0.4",
+ "x509-parser",
+ "zerocopy",
+ "zeroize",
 ]
 
 [[package]]

@@ -58,6 +58,7 @@ serde_json = { workspace = true }
 # dependency feature set.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "test-util", "time"] }
 tracing-test = { workspace = true }
+workspace-hack = { path = "../workspace-hack" }
 
 # Thread and process CPU timing in the session benchmark.
 [target.'cfg(unix)'.dev-dependencies]
