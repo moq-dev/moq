@@ -117,18 +117,10 @@ impl Drop for BroadcastProducer {
 	}
 }
 
-/// `Send + Sync` natively, where any thread may close a broadcast; nothing on single-threaded wasm.
-#[cfg(not(target_family = "wasm"))]
-pub(crate) trait Shared: Send + Sync {}
-#[cfg(not(target_family = "wasm"))]
-impl<T: Send + Sync + ?Sized> Shared for T {}
-#[cfg(target_family = "wasm")]
-pub(crate) trait Shared {}
-#[cfg(target_family = "wasm")]
-impl<T: ?Sized> Shared for T {}
-
 /// A handle publishing tracks on a broadcast, which its broadcast ends on close.
-pub(crate) trait Child: Shared {
+///
+/// `Send + Sync`, since any thread may close a broadcast.
+pub(crate) trait Child: Send + Sync {
 	/// End whatever this handle still publishes with `err`, so later calls fail with `Closed`.
 	///
 	/// A track that already finished ends cleanly instead.
@@ -141,7 +133,7 @@ enum Family {
 		/// Handles that may still publish, ended on close.
 		open: Vec<std::sync::Weak<dyn Child>>,
 		/// Finished producers, kept so a late subscriber still finds their tracks.
-		kept: Vec<Box<dyn kio::MaybeSend>>,
+		kept: Vec<Box<dyn Send>>,
 	},
 	/// The broadcast handle was dropped without a close: each child ends on its own.
 	Released,
@@ -195,8 +187,8 @@ impl Children {
 	}
 
 	/// Keep a finished producer until the broadcast ends, or drop it now if it already has.
-	pub(crate) fn keep(&self, producer: impl kio::MaybeSend + 'static) {
-		let producer: Box<dyn kio::MaybeSend> = Box::new(producer);
+	pub(crate) fn keep(&self, producer: impl Send + 'static) {
+		let producer: Box<dyn Send> = Box::new(producer);
 		if let Family::Open { kept, .. } = &mut *self.0.lock().unwrap() {
 			kept.push(producer);
 		}
@@ -778,12 +770,12 @@ impl MoqTrackProducer {
 
 	/// Write `frame` as a single-frame group.
 	///
-	/// Custom timescales may round the timestamp during conversion. The frame must
+	/// A timestamp at another scale than the track's is converted to it, rounding down. The frame must
 	/// match its track's timedness, otherwise it is refused with
 	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
+		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
 		track.write_frame(timestamp, frame.payload)?;
@@ -797,7 +789,7 @@ impl MoqTrackProducer {
 	/// its timestamp must match the track's timedness.
 	pub fn append_datagram(&self, frame: MoqFrame) -> Result<u64, MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
+		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
 		Ok(track.append_datagram(timestamp, frame.payload)?)
@@ -811,7 +803,7 @@ impl MoqTrackProducer {
 	/// past a [`finish_at`](Self::finish_at) boundary is refused with `Closed`.
 	pub fn insert_datagram(&self, sequence: u64, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
+		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
 		Ok(track.insert_datagram(sequence, timestamp, frame.payload)?)
@@ -894,12 +886,12 @@ impl MoqGroupProducer {
 
 	/// Write `frame` into this group.
 	///
-	/// Custom timescales may round the timestamp during conversion. The frame must
+	/// A timestamp at another scale than the track's is converted to it, rounding down. The frame must
 	/// match its track's timedness, otherwise it is refused with
 	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
+		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
 		let mut guard = self.inner.lock().unwrap();
 		let group = guard.as_mut().ok_or(MoqError::Closed)?;
 		group.write_frame(timestamp, frame.payload)?;

@@ -5,6 +5,7 @@ The wire layer. Generic over the transport and media-agnostic: the relay never i
 - New capabilities are additive SETUP extensions; receivers ignore unknown parameters.
 - Closes never cascade. Aborting a group must not tear down its track, broadcast, or siblings.
 - A route change is never fatal on its own. A subscription stays on the instance it started on while that instance still has a route, even after a newer route wins the path. Once none is left (e.g. the publisher's session closed), it ends with an error, never a clean end, and the app requests the path again. Never stitch it onto another instance. A clean end means only a deliberate publisher finish. Players start, stop, and restart on announcements, never on request errors. See "Publisher epochs" in `doc/concept/moq-lite.md`.
+- Nothing in moq-net is local-only: every field and behaviour in its API survives the wire, so a subscription, announcement, or end means the same through a relay as in-process. A local-only knob belongs in a crate above moq-net (moq-mux, hang).
 - Local and remote paths behave the same: a local close, cancel, or error reaches local readers exactly as the remote equivalent would, never as a cleaner end.
 - The cache is a performance optimization. A relay behaves the same warm or cold: report upstream state (e.g. the largest group), not what the cache happens to hold.
 - A relay never blocks an answer on other nodes finishing something (replay, catch-up, a full announce set). Report what is known now; a rare undercount is acceptable.
@@ -16,6 +17,5 @@ The wire layer. Generic over the transport and media-agnostic: the relay never i
 
 # Testing
 
-- Tests never use tokio or the wall clock. Prefer a plain `#[test]` that polls with explicit instants; async bodies use `#[moq_clock::test]`, whose simulated time jumps only when every task is stalled. tokio is for the benches.
+- Tests never use tokio or the wall clock. Prefer a plain `#[test]` that polls with explicit instants; async bodies use `#[kio::test]`, whose simulated time jumps only when every task is stalled. tokio is for the benches.
 - `just rs fuzz <target>` (one per file in `fuzz/fuzz_targets/`) needs nightly. The target bodies live in `src/fuzz.rs`; `fuzz/regressions/<target>/` replays under `just check`, so commit every crash input there.
-- `just rs loom` model-checks the concurrent handoffs. A hang is a lost wakeup, not a flake.

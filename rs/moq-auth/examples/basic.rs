@@ -17,8 +17,8 @@ fn main() -> anyhow::Result<()> {
 		.with_subject("my-stream-owner")
 		.with_publish(["my-stream/**".parse()?]) // Can publish to demo/my-stream and below
 		.with_subscribe(["**".parse()?]) // Can subscribe to anything under demo/
-		.with_expires(moq_clock::wall() + Duration::from_secs(3600))
-		.with_issued(moq_clock::wall());
+		.with_expires(kio::clock::wall() + Duration::from_secs(3600))
+		.with_issued(kio::clock::wall());
 
 	// Validate the claims (ensures at least one publish or subscribe path).
 	claims.validate()?;

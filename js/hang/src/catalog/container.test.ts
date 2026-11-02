@@ -38,7 +38,7 @@ test("catalog with an unknown container keeps its other renditions", () => {
 	};
 
 	const parsed = RootSchema.parse(catalog);
-	if (!parsed.video || !("renditions" in parsed.video)) throw new Error("missing video section");
+	if (!parsed.video) throw new Error("missing video section");
 
 	const known = parsed.video.renditions.legacy;
 	expect(known?.container.kind).toBe("legacy");

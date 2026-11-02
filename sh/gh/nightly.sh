@@ -123,10 +123,13 @@ case "$1" in
         # The allocation/window/play-buffer tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
         criterion extra --no-fail-fast -p moq-e2ee -p moq-sign -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
-            -p moq-quic --features moq-quic/fuzz \
+            -p moq-quic -p moq-sock --features moq-quic/fuzz \
             --bench protect --bench sign --bench codec --bench table --bench allocations --bench window \
             --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs --bench ts_video \
-            --bench bus --bench parameter_sets --bench sent_packets
+            --bench bus --bench parameter_sets --bench sent_packets --bench demux
+        # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous.
+        # The concurrent cases' latency percentiles stay in the run's stdout.
+        criterion auth --manifest-path rs/moq-auth/Cargo.toml --bench verify
         ;;
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report
@@ -136,11 +139,12 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts requests fills forward reader frames drift ledger varint lite-varint track resume priority subscribe-drop subscribe-tracks refresh observed compression; do
+        for benchmark in broadcasts requests fills forward reader frames drift ledger varint lite-varint track resume priority subscribe-drop refresh observed compression; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
         javascript qmux-record just js qmux-record-bench
+        javascript qmux-datagrams just js qmux-datagrams-bench
         javascript cmaf just js cmaf-bench
         javascript arrivals just js arrivals-bench
         javascript p2p just js p2p-bench

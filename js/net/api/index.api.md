@@ -171,7 +171,6 @@ export namespace Connection {
 	}
 	export interface Extensions {
 		auth?: boolean;
-		epoch?: boolean;
 		solicit?: boolean;
 	}
 	export interface Goaway {
@@ -322,6 +321,7 @@ export namespace Group {
 		get done(): boolean;
 		get frameCount(): number;
 		get isClosed(): boolean;
+		nextFrame(): Promise<Group.FrameConsumer | undefined>;
 		readBool(): Promise<boolean | undefined>;
 		readFrame(): Promise<Group.Frame | undefined>;
 		readFrameSequence(options?: Group.ReadOptions): Promise<{
@@ -341,16 +341,35 @@ export namespace Group {
 		payload: Uint8Array;
 		timestamp?: Time.Timestamp;
 	}
+	export class FrameConsumer {
+		get arrived(): Instant | undefined;
+		readAll(): Promise<Uint8Array>;
+		readChunk(): Promise<Uint8Array | undefined>;
+		readonly sequence: number;
+		readonly size: number;
+		readonly timestamp: Time.Timestamp | undefined;
+	}
+	export interface FrameInfo {
+		size: number;
+		timestamp?: Time.Timestamp;
+	}
+	export class FrameProducer {
+		abort(error: Error): void;
+		finish(): void;
+		get remaining(): number;
+		readonly size: number;
+		readonly timestamp: Time.Timestamp | undefined;
+		write(chunk: Uint8Array): void;
+	}
 	export interface Info {
 		sequence: number;
 	}
-	export const MAX_GROUP_CACHE_BYTES: number;
-	export const MAX_GROUP_FRAMES: 8192;
 	export class Producer {
 		constructor(sequence: number);
 		abort(error: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Group.Consumer;
+		createFrame(info: Group.FrameInfo): Group.FrameProducer;
 		finish(): void;
 		get isClosed(): boolean;
 		readonly sequence: number;

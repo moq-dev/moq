@@ -80,11 +80,11 @@ int32_t moq_publish_container(uint32_t broadcast, const moq_container_init *conf
 int32_t moq_publish_container_write(uint32_t container, const uint8_t *payload, uintptr_t payload_size);
 int32_t moq_publish_container_finish(uint32_t container);
 int32_t moq_publish_media_finish(uint32_t media);
-int32_t moq_publish_media_frame(uint32_t media, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
+int32_t moq_publish_media_frame(uint32_t media, const uint8_t *payload, uintptr_t payload_size, moq_timestamp timestamp);
 int32_t moq_publish_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_track_info *info);
 int32_t moq_publish_track_group(uint32_t track);
-int32_t moq_publish_track_frame(uint32_t track, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
-int32_t moq_publish_group_frame(uint32_t group, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
+int32_t moq_publish_track_frame(uint32_t track, const uint8_t *payload, uintptr_t payload_size, const moq_timestamp *timestamp);
+int32_t moq_publish_group_frame(uint32_t group, const uint8_t *payload, uintptr_t payload_size, const moq_timestamp *timestamp);
 int32_t moq_publish_group_finish(uint32_t group);
 int32_t moq_publish_track_finish(uint32_t track);
 
@@ -124,13 +124,14 @@ int32_t moq_consume_catalog_free(uint32_t catalog);
 int32_t moq_consume_video_config(uint32_t catalog, uint32_t index, moq_video_config *dst);
 int32_t moq_consume_video_enabled(uint32_t catalog, uint32_t index, bool *dst);
 int32_t moq_consume_audio_config(uint32_t catalog, uint32_t index, moq_audio_config *dst);
+int32_t moq_consume_audio_enabled(uint32_t catalog, uint32_t index, bool *dst);
 
 // Consuming: Video
-int32_t moq_consume_video(uint32_t catalog, uint32_t index, uint64_t max_delay_us, moq_status_callback on_frame, void *user_data);
+int32_t moq_consume_video(uint32_t catalog, uint32_t index, const moq_delay *delay, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_video_cancel(uint32_t track);
 
 // Consuming: Audio
-int32_t moq_consume_audio(uint32_t catalog, uint32_t index, uint64_t max_delay_us, moq_status_callback on_frame, void *user_data);
+int32_t moq_consume_audio(uint32_t catalog, uint32_t index, const moq_delay *delay, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_audio_cancel(uint32_t track);
 
 // Consuming: Frames
@@ -143,8 +144,9 @@ int32_t moq_consume_track_frame_free(uint32_t frame);
 int32_t moq_consume_track_cancel(uint32_t track);
 ```
 
-Raw track frames use the same `moq_frame` record as media frames. Use
-`moq_publish_track_frame` or `moq_publish_group_frame` to provide microsecond
-presentation timestamps; `moq_consume_track_frame` returns that timestamp in
-`moq_frame.timestamp_us`. moq-c creates raw tracks with a microsecond
-timescale, matching the C ABI's timestamp units.
+Raw track frames use the same `moq_frame` record as media frames. Timestamps
+are exact `moq_timestamp` records, `value` units at `scale` units per second.
+`moq_publish_track_frame` and `moq_publish_group_frame` convert theirs to the
+track's timescale, a microsecond one unless `moq_track_info.timescale` sets
+another, and `moq_consume_track_frame` points `moq_frame.timestamp` at the
+timestamp read, valid until the frame is freed, or NULL on an untimed track.

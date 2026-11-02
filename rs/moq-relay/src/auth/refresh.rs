@@ -41,7 +41,7 @@ struct Waiting {
 	request: auth::Request,
 	facts: moq_auth::Request,
 	/// When its admission times out, counted from its arrival.
-	deadline: moq_clock::Instant,
+	deadline: kio::clock::Instant,
 }
 
 impl Waiting {
@@ -53,7 +53,7 @@ impl Waiting {
 struct Credential {
 	consumer: lease::Consumer,
 	grant: Grant,
-	expires: Option<moq_clock::Instant>,
+	expires: Option<kio::clock::Instant>,
 	issued: Option<auth::Issued>,
 	initial: bool,
 }
@@ -225,7 +225,7 @@ impl Refresh {
 		self.waiting.push_back(Waiting {
 			request,
 			facts,
-			deadline: moq_clock::now() + super::ATTACH_TIMEOUT,
+			deadline: kio::clock::now() + super::ATTACH_TIMEOUT,
 		});
 		self.dispatch();
 	}
@@ -248,7 +248,7 @@ impl Refresh {
 				facts,
 				deadline,
 			} = waiting;
-			if deadline <= moq_clock::now() {
+			if deadline <= kio::clock::now() {
 				refuse(request, super::timed_out());
 				continue;
 			}
@@ -265,7 +265,7 @@ impl Refresh {
 				let answered = tokio::select! {
 					biased;
 					answered = &mut answer => Some(answered),
-					() = moq_clock::sleep_until(deadline) => None,
+					() = kio::clock::sleep_until(deadline) => None,
 				};
 				let (result, settling) = match answered {
 					Some(answered) => (super::answered_with(answered).map(|(consumer, _)| consumer), None),
@@ -284,7 +284,7 @@ impl Refresh {
 
 	/// Refuse the waiting tokens whose admission timed out before a slot freed.
 	fn expire(&mut self) {
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		while let Some(waiting) = self.waiting.front()
 			&& (waiting.deadline <= now || waiting.withdrawn())
 		{
@@ -316,7 +316,7 @@ impl Refresh {
 				let expiry = self.waiting.front().map(|waiting| waiting.deadline);
 				let expired = async {
 					match expiry {
-						Some(at) => moq_clock::sleep_until(at).await,
+						Some(at) => kio::clock::sleep_until(at).await,
 						None => std::future::pending().await,
 					}
 				};
@@ -425,10 +425,10 @@ impl Refresh {
 }
 
 /// A credential's grant changed, expired, or was revoked by the decider.
-async fn changed(consumer: &mut lease::Consumer, expires: Option<moq_clock::Instant>) -> Change {
+async fn changed(consumer: &mut lease::Consumer, expires: Option<kio::clock::Instant>) -> Change {
 	let expire = async {
 		match expires {
-			Some(at) => moq_clock::sleep_until(at).await,
+			Some(at) => kio::clock::sleep_until(at).await,
 			None => std::future::pending().await,
 		}
 	};
@@ -484,7 +484,6 @@ fn with_jwt(query: Option<&str>, token: &str) -> String {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use futures::FutureExt;
@@ -492,19 +491,23 @@ mod tests {
 
 	fn grant(prefix: &str, seconds: u64) -> Grant {
 		let mut grant = Grant::new(prefix.parse::<moq_auth::Pattern>().unwrap(), moq_auth::Patterns::new());
-		grant.expires = Some(moq_clock::wall() + Duration::from_secs(seconds));
+		grant.expires = Some(kio::clock::wall() + Duration::from_secs(seconds));
 		grant
 	}
 
 	/// Make the test runtime's clock one that only the test moves, wall time included,
 	/// so a grant's life is measured exactly. Call it before anything reads the clock.
-	fn manual() -> moq_clock::Installed {
-		moq_clock::Manual::new().install(&tokio::runtime::Handle::current())
+	fn manual() -> kio::clock::Installed {
+		kio::clock::Manual::new().install(&tokio::runtime::Handle::current())
 	}
 
 	/// Whether `future` is still pending once every task has settled. Paused tokio
 	/// only fires the watchdog when nothing else can run, and never moves the manual clock.
 	async fn settles_pending(future: impl std::future::Future) -> bool {
+		#[expect(
+			clippy::disallowed_methods,
+			reason = "the watchdog runs on paused tokio, beside the installed manual clock"
+		)]
 		tokio::time::timeout(Duration::from_secs(1), future).await.is_err()
 	}
 
@@ -522,11 +525,14 @@ mod tests {
 		};
 		let stream = |io| qmux::transport::Stream::new(io);
 		let (client, server) = tokio::io::duplex(64 * 1024);
-		tokio::try_join!(
+		let ((client, client_driver), (server, server_driver)) = tokio::try_join!(
 			qmux::Session::connect(stream(client), config()),
 			qmux::Session::accept(stream(server), config())
 		)
-		.unwrap()
+		.unwrap();
+		tokio::spawn(client_driver);
+		tokio::spawn(server_driver);
+		(client, server)
 	}
 
 	/// A client session and the server session `lease` was prepared for, before supervision.
@@ -763,7 +769,7 @@ mod tests {
 			client.closed().await;
 			drop(client);
 			// The server's driver releases the stats once its transport has closed.
-			tokio::time::sleep(Duration::from_secs(1)).await;
+			kio::clock::sleep(Duration::from_secs(1)).await;
 			let presence = registry.snapshot().sessions()[0].1;
 			assert_eq!(presence.sessions_ended, 1, "{reason}");
 			for kind in Failure::ALL {
@@ -866,7 +872,7 @@ mod tests {
 
 		let third = present(&client, "third");
 		assert!(
-			tokio::time::timeout(Duration::from_secs(5), admissions.next())
+			kio::clock::timeout(Duration::from_secs(5), admissions.next())
 				.await
 				.is_err(),
 			"a token past the limit reached the decider"
@@ -898,7 +904,7 @@ mod tests {
 		let held = admissions.next().await.unwrap();
 		let waiting = present(&client, "waiting");
 		// Past the ten-second admission timeout, and the retries that follow it.
-		tokio::time::sleep(Duration::from_secs(30)).await;
+		kio::clock::sleep(Duration::from_secs(30)).await;
 		assert!(
 			!waiting.is_finished() && !slow.is_finished(),
 			"a transient refusal ended a token"
@@ -949,7 +955,7 @@ mod tests {
 	/// replacement token granted on `replacement` and its owner's grant expired, so only
 	/// the in-band credential holds it. Returns the owner, which hears how the lease ended.
 	async fn renewed(
-		clock: &moq_clock::Installed,
+		clock: &kio::clock::Installed,
 		replacement: lease::Consumer,
 	) -> (
 		lease::Producer,
@@ -1013,6 +1019,10 @@ mod tests {
 			assert_eq!(owner.closed().await.0, lease::Reason::from("closed"));
 			drop(client);
 			// The server's driver releases the stats once its transport has closed.
+			#[expect(
+				clippy::disallowed_methods,
+				reason = "paused tokio settles the driver, beside the installed manual clock"
+			)]
 			tokio::time::sleep(Duration::from_secs(1)).await;
 			let presence = registry.snapshot().sessions()[0].1;
 			assert_eq!(presence.sessions_ended, 1);
@@ -1198,12 +1208,12 @@ mod tests {
 		let _ = sent.await;
 
 		let withdrawn = present(&client, "withdrawn");
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		withdrawn.abort();
 		let _ = withdrawn.await;
 		let next = present(&client, "next");
 		assert!(
-			tokio::time::timeout(Duration::from_secs(1), admissions.next())
+			kio::clock::timeout(Duration::from_secs(1), admissions.next())
 				.await
 				.is_err(),
 			"withdrawing a sent check released its slot"

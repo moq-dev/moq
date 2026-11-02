@@ -230,7 +230,7 @@ pub enum MoqError {
 
 	// Native codec errors, behind the optional `audio`/`video` features.
 	/// An audio codec operation failed.
-	#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+	#[cfg(feature = "audio")]
 	#[error("{reason}")]
 	Audio {
 		/// A diagnostic message describing the failure.
@@ -238,7 +238,7 @@ pub enum MoqError {
 	},
 
 	/// A video codec operation failed.
-	#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+	#[cfg(feature = "video")]
 	#[error("{reason}")]
 	Video {
 		/// A diagnostic message describing the failure.
@@ -252,7 +252,7 @@ pub enum MoqError {
 		reason: String,
 	},
 
-	/// A timestamp is outside the supported range.
+	/// A timestamp value or scale is outside the supported range, or the scale is zero.
 	#[error("timestamp overflow")]
 	TimeOverflow,
 
@@ -264,7 +264,6 @@ pub enum MoqError {
 	},
 
 	/// An owned native task panicked; cancellation is reported separately.
-	#[cfg(not(target_arch = "wasm32"))]
 	#[error("task: {reason}")]
 	Task {
 		/// A diagnostic message describing the failure.
@@ -491,7 +490,7 @@ impl From<moq_json::Error> for MoqError {
 	}
 }
 
-#[cfg(all(feature = "audio", not(target_arch = "wasm32")))]
+#[cfg(feature = "audio")]
 impl From<moq_audio::Error> for MoqError {
 	fn from(err: moq_audio::Error) -> Self {
 		Self::Audio {
@@ -500,7 +499,7 @@ impl From<moq_audio::Error> for MoqError {
 	}
 }
 
-#[cfg(all(feature = "video", not(target_arch = "wasm32")))]
+#[cfg(feature = "video")]
 impl From<moq_video::Error> for MoqError {
 	fn from(err: moq_video::Error) -> Self {
 		Self::Video {
@@ -537,7 +536,6 @@ from_message! {
 	moq_net::InvalidEpoch => InvalidEpoch,
 }
 
-#[cfg(not(target_arch = "wasm32"))]
 from_message! {
 	tokio::task::JoinError => Task,
 }
@@ -689,6 +687,21 @@ mod tests {
 				assert_eq!(protocol.scope, MoqErrorScope::Stream);
 				assert_eq!(protocol.code, 0x3b);
 				assert_eq!(protocol.kind, MoqProtocolKind::Unauthorized);
+			}
+			other => panic!("expected Protocol, got {other}"),
+		}
+	}
+
+	/// A relay that found its upstream malformed says so, and a binding can tell that
+	/// apart from a relay bug's INTERNAL_ERROR.
+	#[test]
+	fn stream_malformed_track_keeps_its_kind() {
+		let err = MoqError::from(moq_net::Error::from(moq_net::StreamError::MalformedTrack));
+		match err {
+			MoqError::Protocol { details: protocol } => {
+				assert_eq!(protocol.scope, MoqErrorScope::Stream);
+				assert_eq!(protocol.code, 0x12);
+				assert_eq!(protocol.kind, MoqProtocolKind::MalformedTrack);
 			}
 			other => panic!("expected Protocol, got {other}"),
 		}

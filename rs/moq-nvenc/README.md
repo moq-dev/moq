@@ -37,6 +37,43 @@ The `sys` bindings are generated with bindgen from the vendored headers
 (`src/sys/headers/`); see the [upstream repo](https://github.com/ViliamVadocz/nvidia-video-codec-sdk)
 for the generation scripts.
 
+## Upstream
+
+Last checked on 2026-10-31: upstream `master` at
+[`88c2ca67406a5087ac117758d0f375d73441c040`](https://github.com/ViliamVadocz/nvidia-video-codec-sdk/commit/88c2ca67406a5087ac117758d0f375d73441c040)
+(2026-03-31), the base of the vendored `dynamic-loading` branch. Upstream
+has no commits since that baseline and no
+[published security advisories](https://github.com/ViliamVadocz/nvidia-video-codec-sdk/security/advisories),
+so there are no wrapper fixes to port this run.
+
+The vendored encoder header targets NVENC API 12.1. NVIDIA's current
+[Video Codec SDK 13.1 release notes](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.1/read-me/index.html)
+and [13.0 release notes](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.0/read-me/index.html)
+were checked against `moq-video`'s consumers:
+
+- AV1 hierarchical B-frames, UHQ iterative encoding, additional profiles and
+  multiview support do not serve the current low-latency H.264/H.265 NV12
+  encoder. It disables B-frames and keeps the low-latency tuning's default of
+  no lookahead. AV1 encode and Main10 are tracked as separate work.
+- Decode statistics, multiview metadata and sample-app seeking have no current
+  consumer in the live H.264/H.265/AV1 decoder.
+- Application-owned CUDA arrays could remove the decoder's device-to-device
+  copy before NVENC. This is a candidate for a measured optimization, requiring
+  new bindings, surface ownership and synchronization, rather than a small fix.
+  See NVIDIA's
+  [opaque decode output guide](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.1/nvdec-video-decoder-api-prog-guide/index.html).
+- The [removed legacy presets and rate-control modes](https://docs.nvidia.com/video-technologies/video-codec-sdk/13.1/deprecation-notices/index.html)
+  do not affect the encoder's P1/P4/P7 presets with CBR. It does not request
+  byte-based slices or use the deprecated video-source APIs.
+
+No SDK header update is needed for those current consumers. An API 13.1
+upgrade would raise the minimum driver requirement; NVIDIA documents driver
+610 or newer for that SDK. The
+[NVIDIA security bulletins](https://github.com/NVIDIA/product-security/tree/main/2026)
+were also checked: GPU driver fixes belong in the installed driver, which this
+crate loads but does not vendor. No applicable vendored-source security fix
+was identified; updating headers does not update the driver.
+
 ## License
 
 MIT, inherited from upstream. See `LICENSE`.
