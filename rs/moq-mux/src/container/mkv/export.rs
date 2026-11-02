@@ -83,9 +83,9 @@ struct MkvTrack {
 	source: ExportSource,
 	pending: Option<crate::jitter::Arrival<Frame>>,
 	// When the source was subscribed: nothing it delivers reached the export before then.
-	subscribed: moq_clock::Instant,
+	subscribed: kio::clock::Instant,
 	// The latest arrival read from the source, which settles the frames held for their DTS.
-	latest: moq_clock::Instant,
+	latest: kio::clock::Instant,
 	finished: bool,
 	track_number: u64,
 	kind: TrackKind,
@@ -107,8 +107,8 @@ impl MkvTrack {
 			reorder: None,
 			source,
 			pending: None,
-			subscribed: moq_clock::now(),
-			latest: moq_clock::Instant::ZERO,
+			subscribed: kio::clock::now(),
+			latest: kio::clock::Instant::ZERO,
 			finished: false,
 			track_number,
 			kind,
@@ -131,7 +131,7 @@ impl MkvTrack {
 		self.reorder = None;
 		self.source = source.continuing(&self.source);
 		self.finished = false;
-		self.subscribed = moq_clock::now();
+		self.subscribed = kio::clock::now();
 		self.moved = true;
 		Ok(())
 	}
@@ -453,7 +453,7 @@ impl<S: Stream> Export<S> {
 	}
 
 	#[cfg(test)]
-	pub(super) fn next_deadline(&self) -> Option<moq_clock::Instant> {
+	pub(super) fn next_deadline(&self) -> Option<kio::clock::Instant> {
 		self.jitter.next_deadline()
 	}
 
@@ -535,7 +535,7 @@ impl<S: Stream> Export<S> {
 					}
 					crate::jitter::Arrival {
 						arrived,
-						read: moq_clock::now(),
+						read: kio::clock::now(),
 						decode: frame.timestamp.into(),
 						restart: track.source.markers(),
 						sync: track.kind == TrackKind::Audio || frame.keyframe,

@@ -77,7 +77,7 @@ async fn publish(url: url::Url, name: &str) -> Box<dyn std::any::Any> {
 	group
 		.write_frame(moq_net::Timestamp::ZERO, b"hello".as_ref())
 		.expect("write frame");
-	let session = moq_clock::timeout(
+	let session = kio::clock::timeout(
 		TIMEOUT,
 		client()
 			.with_publisher(origin.consume())
@@ -97,7 +97,7 @@ async fn first_broadcast(url: url::Url) -> String {
 	let origin = moq_tokio::origin::spawn();
 	let consumer = origin.consume();
 	let mut announcements = consumer.announced();
-	let _session = moq_clock::timeout(
+	let _session = kio::clock::timeout(
 		TIMEOUT,
 		client()
 			.with_subscriber(origin)
@@ -109,7 +109,7 @@ async fn first_broadcast(url: url::Url) -> String {
 	.expect("subscriber connect timeout")
 	.expect("subscriber connect failed");
 
-	let update = moq_clock::timeout(TIMEOUT, async {
+	let update = kio::clock::timeout(TIMEOUT, async {
 		match announcements.next().await.expect("origin closed") {
 			moq_net::announce::Event::Start(update) => update,
 			other => panic!("expected announce, got {other:?}"),
@@ -126,12 +126,12 @@ async fn first_broadcast(url: url::Url) -> String {
 		.subscribe(None)
 		.await
 		.expect("subscribe");
-	let mut group = moq_clock::timeout(TIMEOUT, track.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, track.recv_group())
 		.await
 		.expect("group timeout")
 		.expect("group failed")
 		.expect("track closed");
-	let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.expect("frame timeout")
 		.expect("frame failed")
@@ -144,7 +144,7 @@ async fn first_broadcast(url: url::Url) -> String {
 /// handshake before the verdict, so an established one has to close right away.
 async fn assert_refused(url: url::Url) {
 	let origin = moq_tokio::origin::spawn();
-	let result = moq_clock::timeout(
+	let result = kio::clock::timeout(
 		TIMEOUT,
 		client()
 			.with_subscriber(origin)
@@ -155,7 +155,7 @@ async fn assert_refused(url: url::Url) {
 	.await
 	.expect("connect timeout");
 	if let Ok(session) = result {
-		let closed = moq_clock::timeout(Duration::from_secs(3), session.closed())
+		let closed = kio::clock::timeout(Duration::from_secs(3), session.closed())
 			.await
 			.unwrap_or_else(|_| panic!("the relay admitted {url}"));
 		assert!(closed.is_err(), "a refused session at {url} closed cleanly");
@@ -211,7 +211,7 @@ async fn http_routes_follow_the_anon_rules() {
 
 	let mut fetch = get("/fetch/anon/bbb/cam/video").await.expect("fetch request");
 	assert_eq!(fetch.status(), 200);
-	let first = moq_clock::timeout(TIMEOUT, fetch.chunk())
+	let first = kio::clock::timeout(TIMEOUT, fetch.chunk())
 		.await
 		.expect("fetch timeout")
 		.expect("fetch body")

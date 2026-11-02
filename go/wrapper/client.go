@@ -99,7 +99,7 @@ type QUICConfig struct {
 	MaxStreams uint64
 	// IdleTimeout is how long an idle connection survives before it is dropped.
 	IdleTimeout *time.Duration
-	// KeepAlive is the keep-alive ping interval. Zero disables it.
+	// KeepAlive is the keep-alive ping interval. Zero uses the default.
 	KeepAlive *time.Duration
 	// GSO toggles UDP generic segmentation offload, which batches sends into one syscall.
 	GSO *bool

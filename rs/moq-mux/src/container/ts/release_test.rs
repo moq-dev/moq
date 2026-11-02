@@ -7,7 +7,7 @@
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use super::oracle::{Admitted, Loss, Object};
 use super::{Passthrough, Release, fixture};
@@ -50,7 +50,7 @@ async fn import(data: &[u8]) -> Imported {
 		.await
 		.unwrap();
 	let mut objects = Vec::new();
-	while let Some(mut group) = moq_clock::timeout(Duration::from_secs(1), track.recv_group())
+	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group())
 		.await
 		.unwrap()
 		.unwrap()
@@ -114,7 +114,7 @@ fn republish_cut(
 		let mut due = Duration::ZERO;
 		for (i, object) in objects.into_iter().enumerate() {
 			due = due.max(at(i, &object));
-			moq_clock::sleep_until(start + due).await;
+			kio::clock::sleep_until(start + due).await;
 			if group.as_ref().map(|(sequence, _)| *sequence) != Some(object.group) {
 				if let Some((sequence, group)) = group.take() {
 					end(sequence, group, &cut);
@@ -165,7 +165,7 @@ impl Drop for Republished {
 /// Every object `release` writes, and when, until it ends or stalls.
 async fn drain(mut release: Release) -> (Vec<(Instant, Frame)>, Release) {
 	let mut released = Vec::new();
-	while let Ok(next) = moq_clock::timeout(STALL, release.next()).await {
+	while let Ok(next) = kio::clock::timeout(STALL, release.next()).await {
 		let Some(frame) = next.expect("release error") else {
 			break;
 		};
@@ -499,9 +499,9 @@ async fn a_backlog_stays_in_the_source_until_due() {
 
 		// The publisher keeps its capture pace while the sink stops polling. Sleeping
 		// on the paused clock lets each publication wake at its own scheduled instant.
-		moq_clock::sleep(RECORDING).await;
+		kio::clock::sleep(RECORDING).await;
 		for (index, object) in objects.iter().enumerate().skip(first + 1) {
-			let output = moq_clock::timeout(STALL, release.next())
+			let output = kio::clock::timeout(STALL, release.next())
 				.await
 				.expect("every arrived object is released")
 				.unwrap()

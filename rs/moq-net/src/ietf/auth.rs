@@ -605,7 +605,7 @@ mod tests {
 	use crate::Pattern;
 
 	#[cfg(feature = "async")]
-	#[moq_clock::test]
+	#[kio::test]
 	async fn auth_refused_without_credit_spends_no_request_id() {
 		for version in [Version::Draft18] {
 			for client in [false, true] {

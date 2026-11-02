@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Milli } from "@moq/clock";
-import { Group, Error as NetError, StreamCode, Time, Track } from "@moq/net";
+import { Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Encoder } from "./encoder.ts";
 import { Producer } from "./producer.ts";
@@ -283,7 +283,7 @@ test("a rejected mutate leaves the value at the last one written", async () => {
 	// Serializes past the group cache limit, so the frame cannot be published.
 	expect(() =>
 		producer.mutate((v) => {
-			v.big = "x".repeat(Group.MAX_GROUP_CACHE_BYTES + 1);
+			v.big = "x".repeat(32 * 1024 * 1024 + 1);
 		}),
 	).toThrow(NetError.FrameTooLarge);
 
@@ -414,7 +414,7 @@ test("a refresh after a rejected update restates the last written value", async 
 	fill(producer);
 
 	// Serializes past the group cache limit, so the frame cannot be published.
-	const oversized = { big: "x".repeat(Group.MAX_GROUP_CACHE_BYTES + 1) };
+	const oversized = { big: "x".repeat(32 * 1024 * 1024 + 1) };
 	expect(() => producer.update({ value: oversized })).toThrow(NetError.FrameTooLarge);
 
 	const joiner = track.subscribe();
@@ -518,7 +518,7 @@ test("a rejected update leaves the previous value readable", async () => {
 	producer.update({ value: { keep: true } });
 
 	// Serializes past the group cache limit, so the frame cannot be published.
-	const oversized = { big: "x".repeat(Group.MAX_GROUP_CACHE_BYTES + 1) };
+	const oversized = { big: "x".repeat(32 * 1024 * 1024 + 1) };
 	expect(() => producer.update({ value: oversized })).toThrow(NetError.FrameTooLarge);
 	producer.finish();
 
@@ -550,6 +550,18 @@ test("a delta that would overflow the snapshot rolls a new one instead", async (
 	// The newest value is readable with no earlier frame to apply it to.
 	const values = await drain(track.subscribe({ maxDelay: REPLAY_LATENCY }));
 	expect(values[values.length - 1]).toEqual({ v: "y".repeat(size) });
+});
+
+test("a delta that would push the snapshot out of the group's tail rolls a new group", () => {
+	const encoder = new Encoder<Value>();
+	// Charged about twice its size, for the compressed slice a track may keep beside it.
+	const big = "x".repeat(16 * 1024 * 1024);
+	let frame = encoder.update({ v: big, n: 0 });
+	expect(frame?.keyframe).toBeTrue();
+	frame?.commit();
+	frame = encoder.update({ v: big, n: 1 });
+	expect(frame?.keyframe).toBeTrue();
+	frame?.commit();
 });
 
 test("a snapshot past the budget is refused", () => {

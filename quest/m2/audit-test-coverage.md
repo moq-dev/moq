@@ -45,7 +45,12 @@ which is expensive on a shared machine.
   binding facades below in minutes. Per-file uncovered line counts mostly
   point at GPU code and generated bindings instead.
 - When sampling `fix` commits for regression tests, count
-  `#[moq_clock::test]` as well as `#[test]` and `#[tokio::test]`.
+  `#[kio::test]` as well as `#[test]` and `#[tokio::test]`.
+- `just gh check` fails on any `#[ignore]` test, fuzz or bench target, test
+  recipe, or standalone test script that no workflow reaches
+  (`sh/gh/test-inventory.py`). The local-only ones are in
+  `sh/gh/test-inventory.allow`, each with its owning quest, so the `#[ignore]`
+  walk starts from that list instead of grepping.
 
 ### m1 baselines
 

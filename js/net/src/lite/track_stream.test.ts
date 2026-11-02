@@ -1,10 +1,10 @@
 // An open Track Stream is interest in the track: the subscriber keeps it open until its
 // SUBSCRIBE is answered, and the publisher keeps the track wanted until the subscriber closes it.
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { Elapsed, Milli, Nano, timeout } from "@moq/clock";
+import { SessionCode } from "../error.ts";
 import { randomHop } from "../hop.ts";
-import { Version as IetfVersion } from "../ietf/version.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -149,6 +149,29 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			origin.close();
 		},
 	);
+
+	test("data after a TRACK request closes the session", async () => {
+		const pair = createMockTransportPair(ALPN_05);
+		const closing = spyOn(pair.server, "close");
+		const origin = new OriginProducer();
+		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
+		const broadcastPublication = origin.createBroadcast(Path.from("room"));
+		const broadcast = broadcastPublication.broadcast;
+		broadcastPublication.announce();
+
+		const client = await Stream.open(pair.client, { version });
+		const server = await Stream.accept(pair.server, version);
+		if (!server) throw new Error("the publisher never accepted the TRACK stream");
+		void publisher.runTrackInfo(new TrackMessage(Path.from("room"), "video"), server);
+
+		await client.writer.u53(0);
+		await expect(client.reader.done()).rejects.toThrow();
+		expect(closing).toHaveBeenCalledWith(expect.objectContaining({ closeCode: SessionCode.ProtocolViolation }));
+
+		publisher.close();
+		broadcast.close();
+		origin.close();
+	});
 
 	test.each(["FIN", "reset"] as const)(
 		"a requester's %s while TRACK_INFO is blocked lets the track go",
@@ -382,10 +405,8 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		origin.close();
 	});
 
-	// Timestamps received over moq-transport may be arrival times, so they never enter moq-lite,
-	// whose receivers check every timestamp: the track is served untimed (milliseconds of send
-	// time before lite-07).
-	test("an unchecked track is served untimed", async () => {
+	// An unchecked track's timestamps go out as received, so TRACK_INFO declares its own scale.
+	test("an unchecked track is served with its timescale", async () => {
 		const pair = createMockTransportPair(ALPN_05);
 		const origin = new OriginProducer();
 		const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
@@ -396,7 +417,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			for (;;) {
 				const request = await wireOf(broadcast).requested();
 				if (!request) return;
-				request.accept({ timescale: Timescale.MICRO, ietf: IetfVersion.DRAFT_22 });
+				request.accept({ timescale: Timescale.MICRO, unchecked: true });
 			}
 		})();
 
@@ -406,7 +427,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		void publisher.runTrackInfo(new TrackMessage(Path.from("room"), "video"), server);
 
 		const info = await TrackInfo.decode(client.reader, version);
-		expect(info.timescale).toBe(version === Version.DRAFT_07 ? undefined : Timescale.MILLI);
+		expect(info.timescale).toBe(Timescale.MICRO);
 
 		client.writer.close();
 		publisher.close();

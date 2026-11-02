@@ -62,12 +62,19 @@ class PerGroupDecodeTimes(unittest.TestCase):
         def stream(index):
             dts, pts = [self.DTS[i] for i in index], [self.PTS[i] for i in index]
             return holes.Stream(
-                {"codec_name": "h264", "time_base": "1/90000"}, dts, pts, [True] * len(pts),
+                {"codec_name": "h264", "time_base": "1/90000"},
+                dts,
+                pts,
+                [True] * len(pts),
                 tuple(Fraction(t, 90_000) for t in (min(pts), max(pts), dts[-1])),
             )
-        with patch.object(holes, "probe", side_effect=[{"0x101": stream(kept)}, {"0x101": stream(range(50))}]), \
-                patch.object(sys, "argv", ["holes.py", "capture.ts", "source.ts"]), \
-                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as exit:
+
+        with (
+            patch.object(holes, "probe", side_effect=[{"0x101": stream(kept)}, {"0x101": stream(range(50))}]),
+            patch.object(sys, "argv", ["holes.py", "capture.ts", "source.ts"]),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(SystemExit) as exit,
+        ):
             holes.main()
         return exit.exception.code
 
@@ -154,12 +161,19 @@ class LegacyTimestamps(unittest.TestCase):
     def grade(self, codec, source, capture):
         def stream(pts):
             return holes.Stream(
-                {"codec_name": codec, "time_base": "1/90000"}, pts, pts, [True] * len(pts),
+                {"codec_name": codec, "time_base": "1/90000"},
+                pts,
+                pts,
+                [True] * len(pts),
                 tuple(Fraction(t, 90_000) for t in (pts[0], pts[-1], pts[-1])),
             )
-        with patch.object(holes, "probe", side_effect=[{"0x101": stream(capture)}, {"0x101": stream(source)}]), \
-                patch.object(sys, "argv", ["holes.py", "capture.ts", "source.ts", "--shed"]), \
-                contextlib.redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as exit:
+
+        with (
+            patch.object(holes, "probe", side_effect=[{"0x101": stream(capture)}, {"0x101": stream(source)}]),
+            patch.object(sys, "argv", ["holes.py", "capture.ts", "source.ts", "--shed"]),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaises(SystemExit) as exit,
+        ):
             holes.main()
         return exit.exception.code
 
@@ -167,8 +181,10 @@ class LegacyTimestamps(unittest.TestCase):
         # Legacy audio keeps its cadence, but its microsecond timestamps return
         # one 90 kHz tick early unless they already land on the microsecond grid.
         for codec, first, step, shift in [
-            ("mp2", 132298, 2160, 1), ("ac3", 132720, 2880, 1),
-            ("mp2", 132300, 2160, 0), ("ac3", 132723, 2880, 0),
+            ("mp2", 132298, 2160, 1),
+            ("ac3", 132720, 2880, 1),
+            ("mp2", 132300, 2160, 0),
+            ("ac3", 132723, 2880, 0),
         ]:
             with self.subTest(codec=codec, first=first):
                 source = [first + i * step for i in range(5)]
@@ -193,16 +209,43 @@ class Probe(unittest.TestCase):
         # probe: probed that far only, its first PES reads as a hole.
         with tempfile.TemporaryDirectory() as tmp:
             path = str(pathlib.Path(tmp, "late.ts"))
-            subprocess.run([
-                "ffmpeg", "-v", "error",
-                "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25:duration=4",
-                "-itsoffset", "3", "-f", "lavfi", "-i", "sine=sample_rate=48000:duration=1",
-                "-map", "0:v", "-map", "1:a", "-c:v", "mpeg2video", "-g", "1", "-q:v", "1",
-                "-c:a", "mp2", "-f", "mpegts", path,
-            ], check=True)
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=size=1280x720:rate=25:duration=4",
+                    "-itsoffset",
+                    "3",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=sample_rate=48000:duration=1",
+                    "-map",
+                    "0:v",
+                    "-map",
+                    "1:a",
+                    "-c:v",
+                    "mpeg2video",
+                    "-g",
+                    "1",
+                    "-q:v",
+                    "1",
+                    "-c:a",
+                    "mp2",
+                    "-f",
+                    "mpegts",
+                    path,
+                ],
+                check=True,
+            )
             streams = holes.probe(path)
         dts = streams["0x101"].dts
         self.assertEqual(holes.holes(dts, holes.step(dts)), [])
+
 
 if __name__ == "__main__":
     unittest.main()

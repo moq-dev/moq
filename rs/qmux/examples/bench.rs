@@ -158,39 +158,47 @@ impl Tls {
 
 async fn accept(transport: Transport, tls: &Tls, socket: TcpStream) -> anyhow::Result<Session> {
 	Ok(match transport {
-		Transport::Tcp => qmux::tcp::accept(socket, qmux::Config::default()).await?,
-		Transport::Tls => qmux::tls::Server::new(tls.server.clone()).accept(socket).await?,
+		Transport::Tcp => spawn(qmux::tcp::accept(socket, qmux::Config::default()).await?),
+		Transport::Tls => spawn(qmux::tls::Server::new(tls.server.clone()).accept(socket).await?),
 		Transport::Ws => {
 			socket.set_nodelay(true)?;
-			qmux::ws::Server::new().accept(socket).await?
+			spawn(qmux::ws::Server::new().accept(socket).await?)
 		}
 		Transport::Wss => {
 			socket.set_nodelay(true)?;
 			let socket = tokio_rustls::TlsAcceptor::from(tls.server.clone())
 				.accept(socket)
 				.await?;
-			qmux::ws::Server::new().accept(socket).await?
+			spawn(qmux::ws::Server::new().accept(socket).await?)
 		}
 	})
 }
 
 async fn connect(transport: Transport, tls: &Tls, addr: SocketAddr) -> anyhow::Result<Session> {
 	Ok(match transport {
-		Transport::Tcp => qmux::tcp::connect(addr, qmux::Config::default()).await?,
-		Transport::Tls => {
+		Transport::Tcp => spawn(qmux::tcp::connect(addr, qmux::Config::default()).await?),
+		Transport::Tls => spawn(
 			qmux::tls::Client::new(tls.client.clone())
 				.connect(addr, "localhost")
-				.await?
-		}
-		Transport::Ws => qmux::ws::Client::new().connect(&format!("ws://{addr}")).await?,
+				.await?,
+		),
+		Transport::Ws => spawn(qmux::ws::Client::new().connect(&format!("ws://{addr}")).await?),
 		Transport::Wss => {
 			let connector = qmux::ws::tokio_tungstenite::Connector::Rustls(tls.client.clone());
-			qmux::ws::Client::new()
-				.with_connector(connector)
-				.connect(&format!("wss://localhost:{}", addr.port()))
-				.await?
+			spawn(
+				qmux::ws::Client::new()
+					.with_connector(connector)
+					.connect(&format!("wss://localhost:{}", addr.port()))
+					.await?,
+			)
 		}
 	})
+}
+
+/// Spawn the session's driver on the bench's runtime, returning the session.
+fn spawn<T: qmux::transport::Transport + Send + 'static>((session, driver): (Session, qmux::Driver<T>)) -> Session {
+	tokio::spawn(driver);
+	session
 }
 
 /// Echo every chunk back on the same stream until the client finishes it.
@@ -258,9 +266,9 @@ async fn measure(
 	}
 
 	// Let every stream open and the allocator settle before the window starts.
-	moq_clock::sleep(duration / 4).await;
-	let (start, cpu, count) = (moq_clock::now(), process_cpu()?, done.load(Ordering::Relaxed));
-	moq_clock::sleep(duration).await;
+	kio::clock::sleep(duration / 4).await;
+	let (start, cpu, count) = (kio::clock::now(), process_cpu()?, done.load(Ordering::Relaxed));
+	kio::clock::sleep(duration).await;
 	let sample = Sample {
 		round_trips: done.load(Ordering::Relaxed) - count,
 		cpu: process_cpu()? - cpu,

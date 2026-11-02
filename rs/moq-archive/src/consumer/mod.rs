@@ -182,7 +182,7 @@ impl<S: ObjectStore> Consumer<S> {
 				let (shared, period) = (self.shared.clone(), self.refresh);
 				refreshing = Some(
 					async move {
-						moq_clock::sleep(period).await;
+						kio::clock::sleep(period).await;
 						refresh(shared, snapshots).await
 					}
 					.boxed(),

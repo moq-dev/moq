@@ -1,0 +1,14 @@
+# Only the clock backend modules (`runtime`, behind `#[expect]`) read a host clock or arm
+# a host timer; everything else goes through the ambient clock.
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "read the ambient clock: kio::clock::now()" },
+    { path = "std::time::Instant::elapsed", reason = "read the ambient clock: kio::clock::Instant::elapsed()" },
+    { path = "std::time::SystemTime::now", reason = "read the ambient clock: kio::clock::wall()" },
+    { path = "std::time::SystemTime::elapsed", reason = "wall time never measures elapsed time" },
+    { path = "std::thread::sleep", reason = "sleep on the ambient clock: kio::clock::sleep()" },
+    { path = "tokio::time::Instant::now", reason = "read the ambient clock: kio::clock::now()" },
+    { path = "tokio::time::sleep", reason = "sleep on the ambient clock: kio::clock::sleep()" },
+    { path = "tokio::time::sleep_until", reason = "sleep on the ambient clock: kio::clock::sleep_until()" },
+    { path = "tokio::time::timeout", reason = "use the ambient clock: kio::clock::timeout()" },
+    { path = "tokio::time::interval", reason = "use the ambient clock: kio::clock::interval()" },
+]

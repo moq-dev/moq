@@ -72,7 +72,7 @@ pub struct Log {
 	closed_at: Arc<Mutex<Option<(usize, usize)>>>,
 	bi_opens: Arc<AtomicUsize>,
 	pub request_attempts: Arc<AtomicUsize>,
-	priorities: Arc<Mutex<Vec<u8>>>,
+	priorities: Arc<Mutex<Vec<i64>>>,
 	/// Hands each send group its id.
 	group_ids: Arc<AtomicUsize>,
 	groups: Arc<Mutex<Vec<(usize, i64)>>>,
@@ -137,7 +137,7 @@ impl Log {
 	/// Every value handed to the transport's `set_priority`, in call order. These are
 	/// trait-contract send orders (higher = transmitted first), recorded so tests can
 	/// verify priority conversions at their protocol boundaries.
-	pub fn priorities(&self) -> Vec<u8> {
+	pub fn priorities(&self) -> Vec<i64> {
 		self.priorities.lock().unwrap().clone()
 	}
 
@@ -342,7 +342,10 @@ impl poll::SendStream for SinkSend {
 			self.log.orders.lock().unwrap().push((self.id, order));
 			return;
 		}
-		let order = u8::try_from(order).expect("moq-net sends u8 send orders outside a group");
+		assert!(
+			(0..=crate::coding::TRACK_INFO_SEND_ORDER).contains(&order),
+			"moq-net sends u8 send orders outside a group, and TRACK_INFO just above them"
+		);
 		self.log.priorities.lock().unwrap().push(order);
 	}
 

@@ -18,7 +18,7 @@ mirror it.
 Non-goals: the route layer's wire messages and federation
 ([Routes and announces](/quest/m1/cluster-routing/routes.md)), lite-07
 takeover ([announce takeover](/quest/m1/announce-takeover.md)), and any
-moq-transport identity ([moq-transport carries no epoch](/quest/m1/ietf-epoch-cut.md)).
+moq-transport identity ([moq-transport carries no epoch](https://github.com/moq-dev/moq/pull/7239)).
 
 ## Plan
 

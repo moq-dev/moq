@@ -203,7 +203,7 @@ async fn public_container_preserves_loc_for_flv() {
 		track,
 		crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 	);
-	let frame = moq_clock::timeout(std::time::Duration::from_secs(1), media.read_frame())
+	let frame = kio::clock::timeout(std::time::Duration::from_secs(1), media.read_frame())
 		.await
 		.unwrap()
 		.unwrap()
@@ -853,7 +853,7 @@ struct Imported {
 	video: String,
 	/// The root clock the catalog advertised.
 	clock: hang::catalog::Clock,
-	arrival: std::ops::RangeInclusive<moq_clock::Wall>,
+	arrival: std::ops::RangeInclusive<kio::clock::Wall>,
 	/// Why a chunk was refused, if one was.
 	refused: Option<crate::Error>,
 }
@@ -866,7 +866,7 @@ async fn import(chunks: &[Vec<u8>]) -> Imported {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut importer = Import::new(broadcast, catalog.reserve());
 
-	let before = moq_clock::wall();
+	let before = kio::clock::wall();
 	let mut after = before;
 	let mut refused = None;
 	for (i, chunk) in chunks.iter().enumerate() {
@@ -875,7 +875,7 @@ async fn import(chunks: &[Vec<u8>]) -> Imported {
 			break;
 		}
 		if i == 0 {
-			after = moq_clock::wall();
+			after = kio::clock::wall();
 		}
 	}
 	importer.finish().unwrap();

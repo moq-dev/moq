@@ -1,7 +1,8 @@
 import { type Epoch, Path } from "@moq/net";
 import { checkBytes, checkU53, encode, pathInfo } from "./derive.ts";
 import { Failure } from "./failure.ts";
-import * as Generation from "./generation.ts";
+import type * as Generation from "./generation.ts";
+import { makeConsumer, makeProducer } from "./generation-internal.ts";
 import { PATH_LEN } from "./limits.ts";
 import { bind, expand } from "./secret.ts";
 
@@ -62,12 +63,12 @@ export class Credential {
 	 * A cloned process image or a copied generation must mint its own.
 	 */
 	produce(): Generation.Producer {
-		return new Generation.Producer(this);
+		return makeProducer(this);
 	}
 
 	/** Bind a discovered epoch as a consume-only generation; throws {@link Failure} `identity` if it is not canonical. */
 	consume(epoch: Epoch.Valid): Generation.Consumer {
-		return new Generation.Consumer(this, epoch);
+		return makeConsumer(this, epoch);
 	}
 }
 

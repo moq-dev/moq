@@ -25,7 +25,7 @@ zeroize = { workspace = true }
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
 hex = { workspace = true }
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 

@@ -208,7 +208,7 @@ export default defineConfig({
 								{ text: "moq-auth", link: "/lib/rs/moq-auth" },
 								{ text: "moq-room", link: "/lib/rs/moq-room" },
 								{ text: "moq-json", link: "/lib/rs/moq-json" },
-								{ text: "moq-clock", link: "/lib/rs/moq-clock" },
+								{ text: "kio", link: "/lib/rs/kio" },
 							],
 						},
 						{

@@ -430,7 +430,7 @@ impl<'a> Decode<'a, Version> for NamespaceUpdate {
 mod tests {
 	use super::*;
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn request_messages_keep_goaway_state_across_response_phases() {
 		use crate::lite::test_transport::ScriptedSession;
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
@@ -452,7 +452,7 @@ mod tests {
 
 	/// A request-stream message counts as its sender counts it: the length and body, not the
 	/// type that selects it, including a GOAWAY read ahead of the response.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn request_stream_messages_count_without_their_type() {
 		use crate::lite::test_transport::ScriptedSession;
 		use crate::stats::{Message, Registry, Tier};
@@ -474,7 +474,7 @@ mod tests {
 		assert_eq!(rx(Message::Other), Some(2));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_goaway_does_not_cancel_a_pending_request() {
 		use crate::lite::test_transport::ScriptedSession;
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {

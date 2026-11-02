@@ -49,7 +49,7 @@ async fn setup(version: &str) -> Setup {
 	options.server_subscribe = Some(subscriber.clone());
 	let pair = connect_mock(options).await;
 
-	let remote = moq_clock::timeout(TIMEOUT, subscriber.consume().follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, subscriber.consume().follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -64,7 +64,7 @@ async fn setup(version: &str) -> Setup {
 
 /// An announcement alone leaves both ends idle. A subscription keeps the end serving it
 /// and the end holding it busy until the reader leaves.
-#[moq_clock::test]
+#[kio::test]
 async fn a_subscription_keeps_both_ends_busy() {
 	for version in [
 		"moq-lite-04",
@@ -88,11 +88,11 @@ async fn a_subscription_keeps_both_ends_busy() {
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"live".as_ref()).unwrap();
 		group.finish().unwrap();
-		let mut sub = moq_clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(None))
+		let mut sub = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
 			.expect("subscribe");
-		let received = moq_clock::timeout(TIMEOUT, sub.recv_group())
+		let received = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("recv timeout")
 			.expect("recv")
@@ -102,17 +102,17 @@ async fn a_subscription_keeps_both_ends_busy() {
 		assert!(!idle(&pair.server), "{version}: idle while holding a subscription");
 
 		drop((received, sub));
-		moq_clock::timeout(TIMEOUT, pair.server.idle())
+		kio::clock::timeout(TIMEOUT, pair.server.idle())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the subscriber stayed busy after the reader left"));
-		moq_clock::timeout(TIMEOUT, pair.client.idle())
+		kio::clock::timeout(TIMEOUT, pair.client.idle())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the publisher stayed busy after the reader left"));
 	}
 }
 
 /// A fetch keeps both ends busy until it ends: here, until the group it reads finishes.
-#[moq_clock::test]
+#[kio::test]
 async fn a_fetch_keeps_both_ends_busy() {
 	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let Setup {
@@ -125,7 +125,7 @@ async fn a_fetch_keeps_both_ends_busy() {
 		let mut writing = track.append_group().unwrap();
 		writing.write_frame(Timestamp::ZERO, b"first".as_ref()).unwrap();
 		let fetching = remote.track("video").unwrap();
-		let fetch = moq_clock::sim::spawn(async move {
+		let fetch = kio::clock::sim::spawn(async move {
 			let mut fetched = fetching.fetch_group(0, None).await?;
 			let mut frames = Vec::new();
 			while let Some(frame) = fetched.read_frame().await? {
@@ -134,22 +134,22 @@ async fn a_fetch_keeps_both_ends_busy() {
 			Ok::<_, moq_net::Error>(frames)
 		});
 		// Simulated: every task runs until the fetch waits on the unfinished group.
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(!idle(&pair.client), "{version}: idle while serving a fetch");
 		assert!(!idle(&pair.server), "{version}: idle while a fetch is in flight");
 
 		writing.write_frame(Timestamp::ZERO, b"last".as_ref()).unwrap();
 		writing.finish().unwrap();
-		let frames = moq_clock::timeout(TIMEOUT, fetch)
+		let frames = kio::clock::timeout(TIMEOUT, fetch)
 			.await
 			.expect("fetch timeout")
 			.expect("fetch task")
 			.expect("fetch");
 		assert_eq!(frames, [&b"first"[..], &b"last"[..]], "{version}");
-		moq_clock::timeout(TIMEOUT, pair.server.idle())
+		kio::clock::timeout(TIMEOUT, pair.server.idle())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the fetching side stayed busy after the fetch"));
-		moq_clock::timeout(TIMEOUT, pair.client.idle())
+		kio::clock::timeout(TIMEOUT, pair.client.idle())
 			.await
 			.unwrap_or_else(|_| panic!("{version}: the serving side stayed busy after the fetch"));
 	}

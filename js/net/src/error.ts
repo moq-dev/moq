@@ -242,10 +242,10 @@ export class FrameTooLarge extends Stream {
 }
 
 /**
- * A write grew the group past its cache budget, so the group is aborted.
+ * A peer could not retain a group and aborted it.
  *
- * Raised locally by a frame write, and decoded from a moq-lite peer's `GROUP_TOO_LARGE`
- * reset. Mirrors the Rust `Error::GroupTooLarge`.
+ * Decoded from a moq-lite peer's `GROUP_TOO_LARGE` reset. Local groups shed their front
+ * instead of aborting when their retained tail exceeds its budget.
  *
  * @public
  */
