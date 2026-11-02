@@ -9,6 +9,15 @@ page, and `moq fetch` through `moq_relay::fetch_group`.
 
 ## Plan
 
+Checkpoint 2026-11-02
+([moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): no remaining
+model, API, or consumer changes implemented. On main `f8c608a24b`,
+`quest gate nix develop --command just rs test -p moq-net -E 'test(bounded)'`
+exited 1 before compilation: mbx could not launch Cargo (`Argument list too
+long (os error 7)`). Resume with working validation; the remaining scope and
+decisions below still apply. No validation bypass or upstream mbx work is part
+of this claim.
+
 Split out of dynamic range requests, which replaced `requested_group` with
 `requested_fill`, by the maintainer on 2026-10-20
 ([moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123)), so each PR
