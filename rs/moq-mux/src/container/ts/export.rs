@@ -106,7 +106,8 @@ fn sanitize_mux_rate(rate: u64) -> Option<u64> {
 /// is re-emitted at video keyframes and periodically for mid-stream tune-in. SI and
 /// whole PES or sections wait until a PCR interval has followed it, since a reader
 /// places them on the program clock and the PMT is what names it.
-/// Returns `None` when the broadcast ends. A publisher that leaves instead fails the
+/// Returns `None` once the catalog ends and its media drains. Finishing only the media
+/// tracks keeps it waiting for catalog updates. A publisher that leaves instead fails the
 /// export with its cause once what was already buffered has gone out on schedule.
 ///
 /// A rendition the catalog moves to another track (a new `track` or `broadcast`) goes on out

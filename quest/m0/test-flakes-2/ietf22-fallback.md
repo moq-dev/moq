@@ -12,7 +12,10 @@ enough evidence to reproduce it deterministically.
 
 Waiting on a recurrence: run `just test media --media-cases replacement
 --media-engines chromium` with `RUST_LOG=moq_net=debug,moq_relay=debug`, and
-read any failure here. Neither failure has a known cause or a reproduction yet.
+read any failure here with its relay and browser logs. Neither failure has a
+known cause or a reproduction yet, so no production or test change is
+justified until one recurs with enough evidence to isolate a deterministic
+cause.
 
 Two failures were seen while landing
 [moq-dev/moq#6548](https://github.com/moq-dev/moq/pull/6548), on a host at
@@ -30,13 +33,18 @@ load average 30 to 70:
   audio stayed stalled past the bound, at the newest run's last timestamp, and
   the session stayed up.
 
-Rechecked 2026-10-27 at
+Baseline: four focused replacement runs with Chromium 156.0.8078.4 and the
+relay debug filter above passed all three protocol versions, two on 2026-10-27
+at
 [767685e1ba](https://github.com/moq-dev/moq/commit/767685e1ba0dabfd921fe8439d7f55ccf65eeedb)
-with Chromium 156.0.8078.4: two focused replacement runs with the relay debug
-filter above passed all three protocol versions. IETF22 replaced in 176 and
-186 ms and fell back in 206 and 209 ms, with audio resumed and the incumbent
-identity preserved. Neither reported failure recurred. These runs provide a
-current baseline, not evidence that either intermittent failure is fixed;
-keep waiting for a recurrence with its relay and browser logs.
+and two on 2026-10-28 at
+[487759f62a](https://github.com/moq-dev/moq/commit/487759f62a9ef39d916fe5b92df06dcff83478ce).
+IETF22 replaced in 176, 186, 191, and 94 ms and fell back in 206, 209, 326,
+and 228 ms, with audio resumed in sync and the incumbent identity preserved.
+In the 2026-10-28 runs, the relay debug log showed one IETF22 viewer
+connection throughout, resubscribing to the incumbent epoch after the fallback
+NAMESPACE and closing only at teardown after grading. Neither failure
+recurred. None of these runs recreated the original host load of 30 to 70, so
+they are a baseline, not evidence that either failure is fixed.
 
 Public API: none expected. Wire: none expected.
