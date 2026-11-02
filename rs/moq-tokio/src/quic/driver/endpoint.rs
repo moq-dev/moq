@@ -106,7 +106,7 @@ impl Endpoint {
 
 	/// [`new`](Self::new), forwarding each packet whose QUIC-LB server ID names another server
 	/// and accepting the packets those servers forward here.
-	#[cfg_attr(not(feature = "quic"), expect(dead_code, reason = "only the QUIC backend forwards"))]
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the QUIC backend forwards"))]
 	pub(crate) fn forwarding(config: Config, socket: impl Into<Socket>, forward: Forward) -> Result<Self, Error> {
 		Self::start(config, socket.into(), Some(forward))
 	}

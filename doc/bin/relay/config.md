@@ -87,32 +87,28 @@ The io\_uring runtime refuses `preferred_v4`, `preferred_v6`, and `lb.id`;
 use the tokio runtime when the listener needs these settings.
 `[listen.lb] nonce` needs an `id` in the same table; unset nonce uses 8.
 The `--listen-quic-lb-id` and `--listen-quic-lb-nonce` flags update that table.
+`unix.allow` needs `unix.bind`.
 
 `[listen.lb.forward]` keeps a connection alive when its packets land on another relay behind
-the same anycast address or load-balanced VIP, after a route change or a rebalance. That relay
-reads the server ID in the packet's connection ID and forwards the packet to the owner's
-forward socket, which processes it as if the client had sent it there. The owner keeps replying
-straight to the client from the shared address its handshake arrived on, so only the
-client-to-server direction takes the extra hop. A browser never leaves that address: Chrome's
-WebTransport ignores the QUIC `preferred_address`. Handshakes are not forwarded, so the front
-end must keep each new flow on one relay until it completes; a split handshake fails and the
-client retries.
+the same anycast address or VIP, after a route change or a rebalance. That relay reads the
+server ID in the connection ID and forwards the packet to the owner's forward socket, which
+handles it as if the client had sent it there and keeps replying from the shared address.
+Handshakes are not forwarded, so the front end must keep each new flow on one relay until it
+completes.
 
-The peers file maps every relay's server ID to its forward `bind`, and may list this relay too,
-so one file can serve the whole cluster:
+The peers file maps each relay's server ID to its forward `bind`, and may list this relay too,
+so one file serves the whole cluster:
 
 ```toml
 "01" = "10.0.0.1:4443"
 "02" = "10.0.0.2:4443"
 ```
 
-A packet for a server ID missing from it is dropped. A forward is accepted only from a listed
-address and under the shared `key` (`openssl rand -hex 32 > forward.key`), since it carries a
-client address the owner takes on trust. A changed file replaces the map; an invalid one is
-logged and the last valid map kept, while an invalid one at startup stops it. Forwarding needs
-`lb.id` and all three settings, and the
-`--listen-quic-lb-forward-bind`, `-key`, and `-peers` flags update that table.
-`unix.allow` needs `unix.bind`.
+A packet for an unlisted server ID is dropped. A forward is accepted only from a listed address
+and under the shared `key` (`openssl rand -hex 32 > forward.key`). A changed file replaces the
+map; an invalid one is logged and the last valid map kept, or stops startup. Forwarding needs
+`lb.id` and all three settings, which the `--listen-quic-lb-forward-bind`, `-key`, and `-peers`
+flags update.
 
 ## \[quic]
 
