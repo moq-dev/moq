@@ -1,11 +1,13 @@
-use std::{sync::atomic::Ordering, task::Poll};
+use std::{
+	sync::{self, Arc, atomic::Ordering},
+	task::Poll,
+};
 
 use crate::{
-	Closed, Counts, State,
+	Closed, Counts,
+	channel::{Channel, Ref},
 	consumer::Consumer,
-	lock::*,
-	producer::{Producer, Ref},
-	sync::Arc,
+	producer::Producer,
 	waiter::*,
 };
 
@@ -18,7 +20,7 @@ use crate::{
 ///
 /// [`upgrade`](Self::upgrade) it back to a [`Producer`] while the channel is still live.
 pub struct Weak<T> {
-	pub(crate) state: WeakLock<State<T>>,
+	pub(crate) state: sync::Weak<Channel<T>>,
 	pub(crate) counts: Arc<Counts>,
 }
 
@@ -29,7 +31,7 @@ impl<T> Weak<T> {
 	/// standalone (channel-less) value doesn't have.
 	pub fn new() -> Self {
 		Self {
-			state: WeakLock::new(),
+			state: sync::Weak::new(),
 			counts: Arc::new(Counts::default()),
 		}
 	}
@@ -53,8 +55,8 @@ impl<T> Weak<T> {
 	/// closed. Counts as neither a producer nor a consumer. `None` once it was dropped.
 	pub fn read<R>(&self, f: impl FnOnce(&T) -> R) -> Option<R> {
 		let state = self.state.upgrade()?;
-		let state = Ref { state: state.lock() };
-		Some(f(&state))
+		let guard = state.read();
+		Some(f(&guard))
 	}
 }
 
@@ -76,7 +78,7 @@ impl<T> Clone for Weak<T> {
 impl<T> std::fmt::Debug for Weak<T> {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("Weak")
-			.field("alive", &self.state.upgrade().is_some())
+			.field("alive", &(self.state.strong_count() > 0))
 			.finish()
 	}
 }
@@ -90,7 +92,7 @@ impl<T> std::fmt::Debug for Weak<T> {
 /// value. Reach for [`Weak`] instead when the handle is stored inside that same state.
 #[derive(Debug)]
 pub struct ProducerWeak<T> {
-	pub(crate) state: Lock<State<T>>,
+	pub(crate) state: Arc<Channel<T>>,
 	pub(crate) counts: Arc<Counts>,
 }
 
@@ -101,8 +103,8 @@ impl<T> ProducerWeak<T> {
 			// Registering under the same lock that guards `closed` is what makes the
 			// returned producer keep the channel open: a concurrent last-producer drop
 			// either closes first (and we bail) or sees our count and doesn't close.
-			let state = self.state.lock();
-			if state.closed {
+			let state = self.state.read();
+			if state.is_closed() {
 				return None;
 			}
 			self.counts.producers.fetch_add(1, Ordering::Relaxed);
@@ -138,31 +140,19 @@ impl<T> ProducerWeak<T> {
 
 	/// Get read-only access to the shared state.
 	pub fn read(&self) -> Ref<'_, T> {
-		Ref {
-			state: self.state.lock(),
-		}
+		self.state.read()
 	}
 
 	/// Returns `true` if the channel has been closed.
 	pub fn is_closed(&self) -> bool {
-		self.state.lock().closed
+		self.state.is_closed()
 	}
 
-	/// Wait until the channel is closed.
-	pub async fn closed(&self) {
-		crate::wait(move |waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll for channel closure, registering the waiter if still open.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	/// Resolves once the channel is closed.
+	#[cfg_attr(feature = "async", kio_macros::wrapper)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
-		let mut state = self.state.lock();
-		if state.closed {
-			return crate::coop::ready(());
-		}
-
-		waiter.register(&mut state.waiters_closed);
-		Poll::Pending
+		self.state.poll_closed(waiter)
 	}
 
 	/// Whether any consumer handle exists right now.
@@ -175,33 +165,14 @@ impl<T> ProducerWeak<T> {
 
 	/// Poll for [`Self::wanted`] to differ from `last`: `Ready(Ok)` with the new value once
 	/// it does, [`Closed`] if the channel closed first, else `Pending`.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_wanted_changed(&self, waiter: &Waiter, last: bool) -> Poll<Result<bool, Closed>> {
-		// Closure is checked first, so a closed channel reports `Closed` from every handle
-		// rather than a consumer count that only dropped because it's dead.
-		let mut state = self.state.lock();
-		if state.closed {
-			return crate::coop::ready(Err(Closed));
-		}
-
-		if self.wanted() != last {
-			return crate::coop::ready(Ok(!last));
-		}
-
-		waiter.register(&mut state.waiters_consumer);
-
-		// Re-check after registration to avoid a TOCTOU race where the count moves
-		// between the initial check and waiter registration.
-		if self.wanted() != last {
-			return crate::coop::ready(Ok(!last));
-		}
-
-		Poll::Pending
+		crate::consumer::poll_wanted_changed(&self.state, &self.counts, waiter, last)
 	}
 
 	/// Returns `true` if both handles share the same underlying state.
 	pub fn same_channel(&self, other: &Self) -> bool {
-		self.state.is_clone(&other.state)
+		Arc::ptr_eq(&self.state, &other.state)
 	}
 }
 
@@ -220,7 +191,7 @@ impl<T> Clone for ProducerWeak<T> {
 /// only mint more [`Consumer`]s, so a read-only handle can never grow write access.
 #[derive(Debug)]
 pub struct ConsumerWeak<T> {
-	pub(crate) state: Lock<State<T>>,
+	pub(crate) state: Arc<Channel<T>>,
 	pub(crate) counts: Arc<Counts>,
 }
 
@@ -232,63 +203,37 @@ impl<T> ConsumerWeak<T> {
 
 	/// Get read-only access to the shared state.
 	pub fn read(&self) -> Ref<'_, T> {
-		Ref {
-			state: self.state.lock(),
-		}
+		self.state.read()
 	}
 
 	/// Poll the shared state with a closure, exactly as [`Consumer::poll`] does.
 	///
 	/// Available here so a watcher can register for changes without joining the
-	/// consumer count, which is what [`Producer::wanted_changed`](crate::Producer::wanted_changed)
+	/// consumer count, which is what [`Producer::poll_wanted_changed`](crate::Producer::poll_wanted_changed)
 	/// keys off.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll<F, R>(&self, waiter: &Waiter, f: F) -> Poll<Result<R, Ref<'_, T>>>
 	where
 		F: FnOnce(&Ref<'_, T>) -> Poll<R>,
 	{
-		let state = self.state.lock();
-		let consumer_state = Ref { state };
-
-		if let Poll::Ready(res) = f(&consumer_state) {
-			return crate::coop::ready(Ok(res));
-		}
-
-		if consumer_state.state.closed {
-			return crate::coop::ready(Err(consumer_state));
-		}
-
-		let mut state = consumer_state.state;
-		waiter.register(&mut state.waiters_value);
-
-		Poll::Pending
+		self.state.poll(waiter, f)
 	}
 
 	/// Returns `true` if the channel has been closed.
 	pub fn is_closed(&self) -> bool {
-		self.state.lock().closed
+		self.state.is_closed()
 	}
 
-	/// Wait until the channel is closed.
-	pub async fn closed(&self) {
-		crate::wait(move |waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll for channel closure, registering the waiter if still open.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	/// Resolves once the channel is closed.
+	#[cfg_attr(feature = "async", kio_macros::wrapper)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_closed(&self, waiter: &Waiter) -> Poll<()> {
-		let mut state = self.state.lock();
-		if state.closed {
-			return crate::coop::ready(());
-		}
-
-		waiter.register(&mut state.waiters_closed);
-		Poll::Pending
+		self.state.poll_closed(waiter)
 	}
 
 	/// Returns `true` if both handles share the same underlying state.
 	pub fn same_channel(&self, other: &Self) -> bool {
-		self.state.is_clone(&other.state)
+		Arc::ptr_eq(&self.state, &other.state)
 	}
 }
 
@@ -301,7 +246,7 @@ impl<T> Clone for ConsumerWeak<T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use super::*;
 

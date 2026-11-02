@@ -23,7 +23,8 @@
 		"@moq/signals": "workspace:^"
 	},
 	"devDependencies": {
-		"@types/bun": "^1.4.3",
+		"@moq/clock": "workspace:^",
+		"@types/bun": "^1.4.4",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.358",
 		"rimraf": "^6.1.3",
 		"typescript": "7.0.2"

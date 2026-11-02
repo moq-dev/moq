@@ -13,9 +13,7 @@ quotes.
 
 A Playwright driver with a local relay, `moq-bench` publishing synthetic
 frames of known size and rate through it, and `moq-cli --p2p` as the native
-hop. Reuse relay/browser fixtures from `test/wasm` or the
-[backend baseline](/test/wasm/README.md#backend-baseline) where useful; their lifetime is
-independent of the selected runtime backend. The NAT rows run the peers behind a network-namespace NAT with a
+hop. The NAT rows run the peers behind a network-namespace NAT with a
 local STUN server, so a reflexive pair is exercised without leaving the host.
 
 Matrix:

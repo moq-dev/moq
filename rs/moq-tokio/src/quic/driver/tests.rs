@@ -22,6 +22,7 @@ use std::{
 use crate::quic::driver::runtime::{AsyncUdpSocket, wrap_udp_socket};
 use crate::quic::driver::{Duration, Instant};
 use bytes::{Buf, Bytes};
+use kio::clock::{sleep, timeout};
 use moq_quic::{
 	ConnectionId, RandomConnectionIdGenerator, Version,
 	crypto::rustls::{QuicClientConfig, QuicServerConfig},
@@ -34,7 +35,6 @@ use rustls::{
 	RootCertStore,
 	pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
 };
-use tokio::time::{sleep, timeout};
 use tokio::{
 	join,
 	runtime::{Builder, Runtime},
@@ -123,6 +123,32 @@ async fn close_endpoint() {
 			panic!("unexpected success");
 		}
 	}
+}
+
+/// A driver panic wakes the handshake it was driving instead of leaving it pending forever.
+///
+/// The waiter panics on the poisoned state, for its owner to isolate (as `Server` does per handshake).
+#[tokio::test]
+async fn driver_panic_fails_connecting() {
+	let _guard = subscribe();
+
+	// Avoid NoRootAnchors error
+	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+	let mut roots = RootCertStore::empty();
+	roots.add(cert.cert.into()).unwrap();
+
+	let endpoint = client_endpoint(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+	endpoint.set_default_client_config(client::Config::with_root_certificates(Arc::new(roots)).unwrap());
+
+	// Nothing answers here, and the dead driver can't time the handshake out.
+	let connecting = endpoint
+		.dial(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 1234), "localhost")
+		.unwrap();
+	connecting.poison();
+
+	// The waiter wakes into the poisoned state and panics there, and dropping it doesn't abort.
+	let woken = timeout(Duration::from_secs(5), crate::panic::isolate(connecting)).await;
+	assert!(matches!(woken, Ok(None)), "the handshake waiter hung");
 }
 
 #[test]
@@ -268,7 +294,7 @@ fn endpoint() -> Endpoint {
 	EndpointFactory::new().endpoint()
 }
 
-/// A dial-only endpoint on `addr`, dual-stack when the platform allows it for an IPv6 `addr`
+/// A dial-only endpoint on `addr`, dual-stack when the platform allows it for an IPv6 wildcard
 fn client_endpoint(addr: SocketAddr) -> Result<Endpoint, endpoint::Error> {
 	Endpoint::new(endpoint::Config::default(), bind(addr)?)
 }
@@ -279,12 +305,7 @@ fn server_endpoint(config: server::Config, addr: SocketAddr) -> Result<Endpoint,
 }
 
 fn bind(addr: SocketAddr) -> io::Result<UdpSocket> {
-	let socket = socket2::Socket::new(socket2::Domain::for_address(addr), socket2::Type::DGRAM, None)?;
-	if addr.is_ipv6() {
-		let _ = socket.set_only_v6(false);
-	}
-	socket.bind(&addr.into())?;
-	Ok(socket.into())
+	moq_sock::bind::udp(moq_sock::bind::Udp::new(addr))
 }
 
 fn endpoint_with_config(transport_config: transport::Config) -> Endpoint {
@@ -309,11 +330,16 @@ impl EndpointFactory {
 		self.endpoint_with_config(transport::Config::default())
 	}
 
-	fn endpoint_with_config(&self, transport_config: transport::Config) -> Endpoint {
+	fn server_config(&self, transport_config: transport::Config) -> server::Config {
 		let key = PrivateKeyDer::Pkcs8(self.cert.signing_key.serialize_der().into());
 		let mut server_config =
 			crate::quic::driver::server::Config::with_single_cert(vec![self.cert.cert.der().clone()], key).unwrap();
-		server_config.transport = transport_config.clone();
+		server_config.transport = transport_config;
+		server_config
+	}
+
+	fn endpoint_with_config(&self, transport_config: transport::Config) -> Endpoint {
+		let server_config = self.server_config(transport_config.clone());
 
 		let mut roots = RootCertStore::empty();
 		roots.add(self.cert.cert.der().clone()).unwrap();
@@ -686,6 +712,34 @@ fn echo_v6() {
 		receive_window: None,
 		stream_receive_window: None,
 	});
+}
+
+/// Windows rejects the IPv4 options the driver sets on a dual-stack socket, so an endpoint on a
+/// specific IPv6 address must be bound v6-only.
+#[tokio::test]
+#[cfg_attr(
+	any(target_os = "solaris", target_os = "illumos"),
+	ignore = "Fails on Solaris and Illumos"
+)]
+async fn specific_v6_addr() {
+	let _guard = subscribe();
+	let addr = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0);
+
+	let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+	let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());
+	let cert = CertificateDer::from(cert.cert);
+	let server_config = server::Config::with_single_cert(vec![cert.clone()], key.into()).unwrap();
+	let server = server_endpoint(server_config, addr).unwrap();
+
+	let mut roots = RootCertStore::empty();
+	roots.add(cert).unwrap();
+	let client = client_endpoint(addr).unwrap();
+	client.set_default_client_config(client::Config::with_root_certificates(Arc::new(roots)).unwrap());
+
+	tokio::join!(
+		async { server.accept().await.unwrap().accept().unwrap().await.unwrap() },
+		async { client.dial(server.local_addr(), "localhost").unwrap().await.unwrap() },
+	);
 }
 
 #[test]
@@ -1321,6 +1375,135 @@ async fn remote_address_follows_migration() {
 
 	server_task.await.unwrap();
 	client_conn.close(0u32.into(), "done");
+}
+
+/// Three servers sit behind one front address. A connection whose handshake reached the first
+/// keeps working while the front sends its packets to the second, then the third: each forwards
+/// them to the first, which replies to the client directly.
+#[tokio::test]
+async fn forwarded_packets_reach_their_owner() {
+	use crate::quic::driver::forward::{Forward, Map, Peers, ServerIdGenerator};
+
+	let _guard = subscribe();
+	let localhost = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+	let factory = EndpointFactory::new();
+	let key = [7; 32];
+
+	let sockets: Vec<UdpSocket> = (0..3).map(|_| UdpSocket::bind(localhost).unwrap()).collect();
+	let peers = Peers::default();
+	let mut map = Map::default();
+	for (id, socket) in (1u8..).zip(&sockets) {
+		map.insert(&[id], socket.local_addr().unwrap());
+	}
+	peers.set(map);
+	let servers: Vec<Endpoint> = (1u8..)
+		.zip(sockets)
+		.map(|(id, socket)| {
+			let mut config = factory.endpoint_config.clone();
+			config.cid_generator = Some(Arc::new(move || Box::new(ServerIdGenerator::new(&[id], 4))));
+			let forward = Forward::new(socket, &[id], peers.clone(), &key, config.max_udp_payload_size).unwrap();
+			Endpoint::forwarding(
+				config.with_server(factory.server_config(transport::Config::default())),
+				UdpSocket::bind(localhost).unwrap(),
+				forward,
+			)
+			.unwrap()
+		})
+		.collect();
+
+	// The front end: the client's packets go to whichever server it names, from one address, and
+	// a reply from any server goes back to the client.
+	let front = tokio::net::UdpSocket::bind(localhost).await.unwrap();
+	let front_addr = front.local_addr().unwrap();
+	let back = tokio::net::UdpSocket::bind(localhost).await.unwrap();
+	let back_addr = back.local_addr().unwrap();
+	let target = Arc::new(Mutex::new(servers[0].local_addr()));
+	let front_task = tokio::spawn({
+		let target = target.clone();
+		async move {
+			let (mut up, mut down) = ([0; 1500], [0; 1500]);
+			let mut client = None;
+			loop {
+				tokio::select! {
+					received = front.recv_from(&mut up) => {
+						let (len, from) = received.unwrap();
+						client = Some(from);
+						let to = *target.lock().unwrap();
+						back.send_to(&up[..len], to).await.unwrap();
+					}
+					received = back.recv_from(&mut down) => {
+						let (len, _) = received.unwrap();
+						front.send_to(&down[..len], client.unwrap()).await.unwrap();
+					}
+				}
+			}
+		}
+	});
+
+	let owner = servers[0].clone();
+	let server_task = tokio::spawn(async move {
+		let conn = owner.accept().await.unwrap().accept().unwrap().await.unwrap();
+		loop {
+			let Ok(stream) = conn.accept_bi().await else { break };
+			// The client's packets keep arriving from the address its handshake took, whichever
+			// server they reached first.
+			assert_eq!(conn.remote_address(), back_addr);
+			echo(stream).await;
+		}
+	});
+
+	let client = factory.endpoint();
+	let conn = client.dial(front_addr, "localhost").unwrap().await.unwrap();
+	for (round, server) in [0, 1, 2, 0].into_iter().enumerate() {
+		*target.lock().unwrap() = servers[server].local_addr();
+		let message = format!("round {round} through server {server}");
+		let (mut send, mut recv) = conn.open_bi(Default::default()).await.unwrap();
+		send.write_all(message.as_bytes()).await.unwrap();
+		let _ = send.finish();
+		let echoed = timeout(Duration::from_secs(10), recv.read_to_end(1024))
+			.await
+			.expect("the owner answered")
+			.unwrap();
+		assert_eq!(echoed, message.as_bytes());
+	}
+	assert_eq!(servers[1].open_connections(), 0);
+	assert_eq!(servers[2].open_connections(), 0);
+
+	conn.close(0u32.into(), "done");
+	server_task.await.unwrap();
+	front_task.abort();
+}
+
+/// Closing a forwarding endpoint frees its forward port with its main one, even while a handle
+/// keeps the endpoint alive, so a listener restarted on the same configuration can bind both.
+#[tokio::test]
+async fn close_releases_the_forward_socket() {
+	use crate::quic::driver::forward::{Forward, Peers};
+
+	let _guard = subscribe();
+	let localhost = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+	let factory = EndpointFactory::new();
+	let forward_socket = UdpSocket::bind(localhost).unwrap();
+	let forward_addr = forward_socket.local_addr().unwrap();
+	let config = factory.endpoint_config.clone();
+	let forward = Forward::new(
+		forward_socket,
+		&[1],
+		Peers::default(),
+		&[7; 32],
+		config.max_udp_payload_size,
+	)
+	.unwrap();
+	let endpoint = Endpoint::forwarding(
+		config.with_server(factory.server_config(transport::Config::default())),
+		UdpSocket::bind(localhost).unwrap(),
+		forward,
+	)
+	.unwrap();
+
+	endpoint.close(0u32.into(), "done").await;
+	UdpSocket::bind(forward_addr).expect("the forward port is free once close returns");
+	drop(endpoint);
 }
 
 /// A send group from another connection panics where it is passed in, without poisoning the
@@ -2350,7 +2533,7 @@ async fn close_during_handshake_does_not_wait_for_silent_peer() {
 	// Let the driver send the Initial.
 	tokio::task::yield_now().await;
 
-	let start = tokio::time::Instant::now();
+	let start = kio::clock::now();
 	client.close(0u32.into(), "closing").await;
 	let elapsed = start.elapsed();
 	assert!(connect.await.is_err());

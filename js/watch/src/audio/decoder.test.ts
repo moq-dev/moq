@@ -159,6 +159,8 @@ let decodeThrows: Error | undefined;
 let deferAudioOutput = false;
 let pendingAudio: (() => void)[] = [];
 let audioInputs: number[] = [];
+let audioConfigs: AudioDecoderConfig[] = [];
+let audioChunks: EncodedAudioChunkInit[] = [];
 
 beforeEach(() => {
 	frameTimestamp = 0;
@@ -168,6 +170,8 @@ beforeEach(() => {
 	deferAudioOutput = false;
 	pendingAudio = [];
 	audioInputs = [];
+	audioConfigs = [];
+	audioChunks = [];
 	contexts = [];
 	worklets = [];
 	moduleLoaded = Promise.resolve();
@@ -182,7 +186,8 @@ beforeEach(() => {
 			codecErrors.push(init.error);
 			codecs++;
 		}
-		configure() {
+		configure(config: AudioDecoderConfig) {
+			audioConfigs.push(config);
 			this.needsKey = true;
 		}
 		reset() {
@@ -206,6 +211,7 @@ beforeEach(() => {
 		readonly timestamp: number;
 		readonly type: EncodedAudioChunkType;
 		constructor(init: EncodedAudioChunkInit) {
+			audioChunks.push(init);
 			this.timestamp = init.timestamp;
 			this.type = init.type;
 		}
@@ -395,6 +401,30 @@ async function play(initial: Delay, buffered = false, cmaf = false) {
 			producer.close();
 		},
 	};
+}
+
+for (const description of [undefined, "1190"]) {
+	it(`passes AAC to WebCodecs as ${description ? "raw" : "ADTS"}`, async () => {
+		const playback = await play(Milli(100));
+		try {
+			playback.restore({ codec: "mp4a.40.2", sampleRate: 48_000, numberOfChannels: 2, description });
+			await microtasks();
+			const config = audioConfigs.at(-1);
+			expect(config?.codec).toBe("mp4a.40.2");
+			expect(config?.description).toEqual(description ? new Uint8Array([0x11, 0x90]) : undefined);
+			const packet = new Uint8Array(
+				description ? [0x01, 0x52, 0xf2] : [0xff, 0xf1, 0x4c, 0x80, 0x01, 0x5f, 0xfc, 0x01, 0x52, 0xf2],
+			);
+			const read = frame();
+			read.frame.payload = packet;
+			playback.push(read);
+			await microtasks();
+			expect(audioChunks.at(-1)?.data).toEqual(packet);
+		} finally {
+			playback.close();
+			await microtasks();
+		}
+	});
 }
 
 for (const cmaf of [false, true]) {

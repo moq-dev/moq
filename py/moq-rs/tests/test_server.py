@@ -82,12 +82,12 @@ async def test_server_client_roundtrip():
                     media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio)
 
                     payload = b"hello over the wire"
-                    media.write_frame(payload, timedelta(microseconds=1_000_000))
+                    media.write_frame(payload, moq.Timestamp(1_000_000, 1_000_000))
 
                     async for frame in media_consumer:
                         assert isinstance(frame, moq.media.MediaFrame)
                         assert frame.payload == payload
-                        assert frame.timestamp // timedelta(microseconds=1) == 1_000_000
+                        assert frame.timestamp == moq.Timestamp(1_000_000, 1_000_000)
                         break
 
                     break

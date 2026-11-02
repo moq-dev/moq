@@ -152,8 +152,8 @@ A new group or datagram raises it at frame 0 before any frame lands, and it can 
 
 A local write whose first frame starts before a lower-sequence group's, or after a higher one's, throws `TimestampMismatch`.
 A group received over moq-lite-07 is checked the same way.
-A track received over moq-lite-05/06 arrives untimed, since its timestamps may be send times: read times from the payload, such as the hang container's, instead of the frame's `timestamp`.
-One received over moq-transport keeps its timestamps unchecked, and a relay serves it to moq-lite untimed.
+A track received over moq-lite-05/06 keeps its timestamps unchecked, since they may be an untimed origin's send times, and so does one received over moq-transport.
+A relay serves both on over every version, where a moq-lite-07 receiver checks them and may refuse a group that rewinds.
 A publisher whose timeline restarts publishes a new broadcast instead.
 
 ### `Auth.Auth` is `Auth.Handle`, and `Auth.Token` is `Auth.Auth` (#5695)

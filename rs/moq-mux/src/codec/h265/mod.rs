@@ -16,7 +16,7 @@ pub use export::*;
 pub use import::*;
 pub use split::*;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 
 use crate::codec::annexb::{InBandCodec, ParameterSets};
 use scuffle_h265::{NALUnitType, SpsNALUnit};
@@ -173,50 +173,23 @@ impl Hvcc {
 	/// Parse an HEVCDecoderConfigurationRecord, sorting the VPS/SPS/PPS NAL units
 	/// by type. The HEVC analogue of [`super::h264::Avcc::parse`].
 	pub fn parse(hvcc: &[u8]) -> Result<Self> {
-		if hvcc.len() < 23 {
-			return Err(Error::HvccTooShort);
-		}
-		let length_size = (hvcc[21] & 0x3) as usize + 1;
-		let num_arrays = hvcc[22] as usize;
+		let record = decode_hvcc(hvcc)?;
 
 		let mut vps = Vec::new();
 		let mut sps = Vec::new();
 		let mut pps = Vec::new();
-		let mut pos: usize = 23;
-
-		for _ in 0..num_arrays {
-			let after_hdr = pos.checked_add(3).ok_or(Error::HvccTruncated)?;
-			if hvcc.len() < after_hdr {
-				return Err(Error::HvccTruncated);
-			}
-			let nal_type = hvcc[pos] & 0x3f;
-			let num_nalus = u16::from_be_bytes([hvcc[pos + 1], hvcc[pos + 2]]) as usize;
-			pos = after_hdr;
-
-			for _ in 0..num_nalus {
-				let after_len = pos.checked_add(2).ok_or(Error::HvccTruncated)?;
-				if hvcc.len() < after_len {
-					return Err(Error::HvccTruncated);
-				}
-				let len = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
-				let after_nal = after_len.checked_add(len).ok_or(Error::HvccTruncated)?;
-				if hvcc.len() < after_nal {
-					return Err(Error::HvccTruncated);
-				}
-				let bytes = Bytes::copy_from_slice(&hvcc[after_len..after_nal]);
-				pos = after_nal;
-
-				match NALUnitType::from(nal_type) {
-					NALUnitType::VpsNut => vps.push(bytes),
-					NALUnitType::SpsNut => sps.push(bytes),
-					NALUnitType::PpsNut => pps.push(bytes),
-					_ => {}
-				}
-			}
+		for array in record.arrays {
+			let list = match NALUnitType::from(array.nal_unit_type) {
+				NALUnitType::VpsNut => &mut vps,
+				NALUnitType::SpsNut => &mut sps,
+				NALUnitType::PpsNut => &mut pps,
+				_ => continue,
+			};
+			list.extend(array.nalus.into_iter().map(Bytes::from));
 		}
 
 		Ok(Self {
-			length_size,
+			length_size: usize::from(record.length_size_minus_one) + 1,
 			vps,
 			sps,
 			pps,
@@ -519,6 +492,7 @@ fn process_nal(
 /// fields are read from the first SPS.
 pub(crate) fn build_hvcc(vps_nals: &[Bytes], sps_nals: &[Bytes], pps_nals: &[Bytes]) -> Result<Bytes> {
 	let first_sps = sps_nals.first().ok_or(Error::MissingSps)?;
+	// mp4-atom truncates the counts and lengths rather than refusing them.
 	for (label, nals) in [("VPS", vps_nals), ("SPS", sps_nals), ("PPS", pps_nals)] {
 		if nals.len() > u16::MAX as usize {
 			return Err(Error::TooManyNals(label, nals.len()));
@@ -531,43 +505,39 @@ pub(crate) fn build_hvcc(vps_nals: &[Bytes], sps_nals: &[Bytes], pps_nals: &[Byt
 	}
 
 	let sps = Sps::parse(first_sps)?.head;
-	let num_temporal_layers = sps.max_sub_layers_minus1 + 1;
+	let arrays = [
+		(NALUnitType::VpsNut, vps_nals),
+		(NALUnitType::SpsNut, sps_nals),
+		(NALUnitType::PpsNut, pps_nals),
+	]
+	.into_iter()
+	.map(|(nal_type, nals)| mp4_atom::HvcCArray {
+		completeness: true,
+		nal_unit_type: nal_type.0,
+		nalus: nals.iter().map(|nal| nal.to_vec()).collect(),
+	})
+	.collect();
 
-	let params_len: usize = vps_nals
-		.iter()
-		.chain(sps_nals)
-		.chain(pps_nals)
-		.map(|n| 2 + n.len())
-		.sum();
-	let mut out = BytesMut::with_capacity(23 + 3 * 3 + params_len);
-	out.put_u8(1); // configurationVersion
-	out.put_u8(((sps.profile_space & 0x3) << 6) | ((sps.tier_flag as u8) << 5) | (sps.profile_idc & 0x1f));
-	out.put_slice(&sps.profile_compatibility_flags);
-	out.put_slice(&sps.constraint_flags);
-	out.put_u8(sps.level_idc);
-	out.put_u16(0xf000); // min_spatial_segmentation_idc unknown
-	out.put_u8(0xfc); // parallelismType mixed
-	out.put_u8(0xfc | (sps.chroma_format_idc & 0x3));
-	out.put_u8(0xf8 | (sps.bit_depth_luma_minus8 & 0x7));
-	out.put_u8(0xf8 | (sps.bit_depth_chroma_minus8 & 0x7));
-	out.put_u16(0); // avgFrameRate unspecified
-	out.put_u8(((num_temporal_layers & 0x7) << 3) | ((sps.temporal_id_nesting_flag as u8) << 2) | 0x3);
-	out.put_u8(3); // numOfArrays (VPS, SPS, PPS)
-
-	for (nal_type, nals) in [
-		(u8::from(NALUnitType::VpsNut), vps_nals),
-		(u8::from(NALUnitType::SpsNut), sps_nals),
-		(u8::from(NALUnitType::PpsNut), pps_nals),
-	] {
-		out.put_u8(0x80 | (nal_type & 0x3f)); // array_completeness = 1
-		out.put_u16(nals.len() as u16); // numNalus
-		for nal in nals {
-			out.put_u16(nal.len() as u16);
-			out.put_slice(nal);
-		}
-	}
-
-	Ok(out.freeze())
+	Ok(encode_hvcc(&mp4_atom::Hvcc {
+		configuration_version: 1,
+		general_profile_space: sps.profile_space,
+		general_tier_flag: sps.tier_flag,
+		general_profile_idc: sps.profile_idc,
+		general_profile_compatibility_flags: sps.profile_compatibility_flags,
+		general_constraint_indicator_flags: sps.constraint_flags,
+		general_level_idc: sps.level_idc,
+		min_spatial_segmentation_idc: 0, // unknown
+		parallelism_type: 0,             // mixed
+		chroma_format_idc: sps.chroma_format_idc,
+		bit_depth_luma_minus8: sps.bit_depth_luma_minus8,
+		bit_depth_chroma_minus8: sps.bit_depth_chroma_minus8,
+		avg_frame_rate: 0, // unspecified
+		constant_frame_rate: 0,
+		num_temporal_layers: sps.max_sub_layers_minus1 + 1,
+		temporal_id_nested: sps.temporal_id_nesting_flag,
+		length_size_minus_one: 3,
+		arrays,
+	}))
 }
 
 /// An hvcC whose parameter sets will arrive in the samples, from a catalog codec
@@ -580,54 +550,53 @@ pub(crate) fn catalog_hvcc(h265: &hang::catalog::H265) -> Option<Bytes> {
 		return None;
 	}
 
-	let mut out = BytesMut::with_capacity(23);
-	out.put_u8(1);
-	let profile = ((h265.profile_space & 0x3) << 6) | (u8::from(h265.tier_flag) << 5) | (h265.profile_idc & 0x1f);
-	out.put_u8(profile);
-	out.put_slice(&h265.profile_compatibility_flags);
-	out.put_slice(&h265.constraint_flags);
-	out.put_u8(h265.level_idc);
-	out.put_u16(0xf000); // min_spatial_segmentation_idc unknown
-	out.put_u8(0xfc); // parallelismType unknown
-	out.put_u8(0xfc | 1); // chroma_format_idc = 1 (4:2:0)
-	out.put_u8(0xf8); // bit_depth_luma_minus8 = 0
-	out.put_u8(0xf8); // bit_depth_chroma_minus8 = 0
-	out.put_u16(0); // avgFrameRate unspecified
-	// constantFrameRate 0, numTemporalLayers 0, temporalIdNested 0, lengthSizeMinusOne 3.
-	// temporalIdNested is ignored while numTemporalLayers is 0.
-	out.put_u8(0x03);
-	out.put_u8(0); // numOfArrays
-	Some(out.freeze())
+	Some(encode_hvcc(&mp4_atom::Hvcc {
+		configuration_version: 1,
+		general_profile_space: h265.profile_space,
+		general_tier_flag: h265.tier_flag,
+		general_profile_idc: h265.profile_idc,
+		general_profile_compatibility_flags: h265.profile_compatibility_flags,
+		general_constraint_indicator_flags: h265.constraint_flags,
+		general_level_idc: h265.level_idc,
+		chroma_format_idc: 1, // 4:2:0
+		// numTemporalLayers 0 leaves temporalIdNested ignored.
+		length_size_minus_one: 3,
+		..Default::default()
+	}))
+}
+
+/// Encode a record whose counts and lengths the caller has already bounded.
+fn encode_hvcc(record: &mp4_atom::Hvcc) -> Bytes {
+	use mp4_atom::Atom;
+	let mut out = BytesMut::new();
+	record
+		.encode_body(&mut out)
+		.expect("mp4-atom masks every hvcC field to its width");
+	out.freeze()
 }
 
 /// Extract the parameter-set NALs (VPS, SPS, PPS in array order) and the NALU
 /// length size from an HEVCDecoderConfigurationRecord. The inverse of
 /// [`build_hvcc`]; used to re-emit out-of-band hvc1 parameter sets as inline
 /// Annex-B (e.g. for MPEG-TS).
-pub(crate) fn hvcc_params(hvcc: &[u8]) -> anyhow::Result<(usize, Vec<Bytes>)> {
-	anyhow::ensure!(hvcc.len() >= 23, "HEVCDecoderConfigurationRecord too short");
-	let length_size = (hvcc[21] & 0x03) as usize + 1;
-	let num_arrays = hvcc[22];
+pub(crate) fn hvcc_params(hvcc: &[u8]) -> Result<(usize, Vec<Bytes>)> {
+	let record = decode_hvcc(hvcc)?;
+	let params = record
+		.arrays
+		.into_iter()
+		.flat_map(|array| array.nalus)
+		.map(Bytes::from)
+		.collect();
+	Ok((usize::from(record.length_size_minus_one) + 1, params))
+}
 
-	let mut params = Vec::new();
-	let mut pos = 23;
-	for _ in 0..num_arrays {
-		// Skip the array_completeness | NAL_unit_type byte.
-		anyhow::ensure!(hvcc.len() >= pos + 3, "truncated hvcC NAL array header");
-		pos += 1;
-		let num_nalus = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]);
-		pos += 2;
-		for _ in 0..num_nalus {
-			anyhow::ensure!(hvcc.len() >= pos + 2, "truncated hvcC NAL length");
-			let len = u16::from_be_bytes([hvcc[pos], hvcc[pos + 1]]) as usize;
-			pos += 2;
-			anyhow::ensure!(hvcc.len() >= pos + len, "hvcC NAL exceeds buffer");
-			params.push(Bytes::copy_from_slice(&hvcc[pos..pos + len]));
-			pos += len;
-		}
+/// Decode an HEVCDecoderConfigurationRecord body with mp4-atom.
+fn decode_hvcc(hvcc: &[u8]) -> Result<mp4_atom::Hvcc> {
+	use mp4_atom::Atom;
+	if hvcc.len() < 23 {
+		return Err(Error::HvccTooShort);
 	}
-
-	Ok((length_size, params))
+	mp4_atom::Hvcc::decode_body(&mut &hvcc[..]).map_err(|_| Error::HvccTruncated)
 }
 
 /// Pack the constraint flags from ITU H.265 V10 §7.3.3 Profile, tier and level syntax.
@@ -719,6 +688,7 @@ pub(crate) mod fixtures {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use bytes::BufMut;
 
 	/// Length-prefix each NAL with a 4-byte big-endian length, the hvc1 wire shape.
 	fn length_prefixed(nals: &[&[u8]]) -> Vec<u8> {

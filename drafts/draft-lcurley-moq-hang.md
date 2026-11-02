@@ -164,6 +164,10 @@ type Catalog = {
   "text": TextSchema | undefined,
   "json": JsonTracks | undefined,
   "binary": BinaryTracks | undefined,
+  "contributions": Record<string, {
+    "broadcast": string,
+    "epoch": string | undefined,
+  }> | undefined,
   // ... any custom fields ...
 }
 ~~~
@@ -176,7 +180,7 @@ For example, a chat entry should name a chat track, not carry individual chat me
 This way catalog updates are rare and a client MAY choose to not subscribe.
 The `json` and `binary` sections ({{data}}) are how a track like that is listed.
 
-This specification defines audio, video, and text media tracks, with optional HLS records ({{hls}}) on video and audio, an optional root `clock` entry ({{clock}}) mapping content time to wall time, the root `version` ({{catalog-version}}), the application data tracks in {{data}}, and optional publisher statistics and solicited viewer feedback ({{media-stats}}).
+This specification defines audio, video, and text media tracks, with optional HLS records ({{hls}}) on video and audio, an optional root `clock` entry ({{clock}}) mapping content time to wall time, the root `version` ({{catalog-version}}), the application data tracks in {{data}}, optional publisher statistics and solicited viewer feedback ({{media-stats}}), and whole broadcasts listed as `contributions` ({{contributions}}).
 
 ## Version {#catalog-version}
 The root `version` field is the oldest draft of this specification that reads the catalog correctly, by draft number: `4` needs a consumer of moq-hang-04 or later.
@@ -192,7 +196,7 @@ This draft needs `version` 4 for:
 - a `track` ({{field-track}}) other than the entry's ID, which an older consumer subscribes to instead;
 - a video `warmup` ({{field-warmup}}) above zero, since an older consumer starts decoding a group at a picture that is not a keyframe.
 
-Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `hls` ({{hls-catalog}}) is ignored when undecodable; `stats` and `echo` ({{media-stats}}) only offer optional tracks; video `reorder` leaves an older consumer inferring decode times from timestamps; `jitter`, `delay`, audio `warmup`, and the data track estimates are hints.
+Every other catalog change in this draft is safe to ignore: `enabled` ({{field-enabled}}) leaves an older consumer selecting a disabled rendition, which plays nothing; `hls` ({{hls-catalog}}) is ignored when undecodable; `stats` and `echo` ({{media-stats}}) only offer optional tracks; `contributions` ({{contributions}}) only offer broadcasts to open on selection; video `reorder` leaves an older consumer inferring decode times from timestamps; `jitter`, `delay`, audio `warmup`, and the data track estimates are hints.
 
 ## Clock {#clock}
 The catalog's root `clock` field is the broadcast's one continuous clock:
@@ -214,6 +218,20 @@ A zero `timescale` is invalid, as is a `wall` outside the JSON-safe integer rang
 The mapping is fixed for the broadcast.
 A discontinuity marker is a delivery event, not a new epoch, and a system-clock adjustment never retimes the mapping.
 
+## Contributions {#contributions}
+The optional root `contributions` map names whole broadcasts, such as each guest feed in a composed room, whose own catalogs describe their renditions.
+Each key is a contribution ID.
+Each entry MUST contain a string `broadcast`, resolved against the catalog's broadcast as in {{field-broadcast}}, and MAY contain an `epoch` as in {{field-epoch}}.
+A consumer MUST reject a catalog with a malformed entry or a reference that escapes above the root.
+
+Listing an entry MUST NOT subscribe to the contribution: a consumer opens its catalog only when it selects the contribution or one of its renditions, so a contribution produced on demand starts only for a viewer that wants it.
+A selected contribution resolves like a rendition's reference, under the same rules for `epoch` and restarts ({{field-epoch}}).
+A contribution produced on demand has no instance until it resolves, so a publisher omits its `epoch` until then.
+
+A contribution's rendition IDs belong to its own catalog and MUST NOT replace IDs in the listing catalog, so the same ID MAY name a contribution, a rendition in the listing catalog, and a rendition in the contribution.
+An unavailable contribution does not invalidate the listing catalog.
+A consumer does not expand a contribution's own `contributions`: each needs a selection of its own.
+
 ## Track Identity {#identity}
 A track name always means the same content, so a catalog update never redefines an audio or video track.
 A track's identity is the fields a consumer cannot change without reinitializing its decoder or demuxer: `codec`, `description`, and `container`, plus `displayAspectWidth`, `displayAspectHeight`, and `interlaced` for video and `sampleRate` and `numberOfChannels` for audio.
@@ -225,6 +243,23 @@ A publisher that changes an identity field MUST publish the media under a new tr
 A rendition MAY keep its ID and name the new track with `track` ({{field-track}}), so a consumer follows the new name rather than reusing a decoder configured for the ID.
 A track name removed from the catalog MUST NOT return with a different identity.
 A consumer MAY configure a decoder once per track from the catalog.
+
+## Malformed Renditions {#malformed}
+A consumer MUST refuse a catalog with a malformed audio or video rendition, or with a `renditions` value that is not an object, rather than play the rest of it.
+A rendition is malformed when it is not an object or a field this document defines has the wrong type or is out of range, unless this document says to treat that field as absent, as it does for `hls` ({{hls}}).
+An unknown field never makes a rendition malformed.
+
+`codedWidth`, `codedHeight`, `displayAspectWidth`, `displayAspectHeight`, `sampleRate`, and `numberOfChannels` are integers from 1 to 2^32 - 1, and `bitrate`, `jitter`, `warmup`, and `delay` are integers from 0 to 2^53 - 1.
+
+A `codec` naming a codec below without its parameters in this form is malformed; any other string is a codec the consumer may not recognize, never a malformed one:
+
+- `avc1.` or `avc3.`, then exactly six hexadecimal digits.
+- `hvc1.` or `hev1.`, then the ISO/IEC 14496-15 fields: an optional profile space `A` to `C` with a decimal profile, hexadecimal compatibility flags of at most 32 bits, `L` or `H` with a decimal level, and up to six hexadecimal constraint bytes. One empty trailing field is tolerated.
+- `vp09.`, then three or eight two-digit decimal fields.
+- `av01.`, then the AV1 codecs parameter: profile 0 to 2, a two-digit level with tier `M` or `H`, a two-digit bit depth, and optionally every one of the monochrome, chroma, colour, and range fields.
+- `mp4a.40.`, then a decimal object type from 0 to 255.
+
+Each decimal or hexadecimal field is one or more digits, without a sign.
 
 ## Video
 A video track contains the necessary information to decode a video stream.
@@ -335,7 +370,7 @@ Its `fov` is the degrees of longitude the picture spans, centred straight ahead:
 `mono`, the default when absent, shows the whole frame to both eyes.
 `left-right` carries the left eye's view in the left half and the right eye's in the right half, and `top-bottom` carries the left eye's view in the top half and the right eye's in the bottom half.
 
-A consumer MUST treat an unrecognized `projection` kind or `stereo` value as absent, and MUST reject a recognized `projection` kind with a malformed field, such as a `fov` out of range.
+A consumer MUST treat an unrecognized `projection` kind or `stereo` value as absent, and a recognized `projection` kind with a malformed field, such as a `fov` out of range, makes the rendition malformed ({{malformed}}).
 Neither field is part of the track's identity.
 
 `interlaced` is true when each decoded picture weaves two fields, as an H.264 stream with `frame_mbs_only_flag` 0 decodes.
@@ -429,7 +464,7 @@ type AudioDecoderConfigExtensions = {
 
 `layout` says what the decoded channels carry; when absent, they follow the codec's own channel order.
 `ambisonic` is full-sphere ambisonics in the AmbiX convention: ACN channel order with SN3D normalization, of the order N for which `numberOfChannels` is (N+1)^2.
-A consumer MUST reject `ambisonic` with fewer than 4 channels or a count that is not a square, and MUST treat an unrecognized `layout` as absent.
+`ambisonic` with fewer than 4 channels or a count that is not a square makes the rendition malformed ({{malformed}}), and a consumer MUST treat an unrecognized `layout` as absent.
 `layout` is not part of the track's identity.
 
 An Opus frame timestamp counts the samples the OpusHead pre-skip trims: a consumer presents each decoded sample the pre-skip, at 48 kHz, earlier than its frame timestamp places it, so the first sample kept plays at the first decoded frame's timestamp.
@@ -437,7 +472,6 @@ An Opus frame timestamp counts the samples the OpusHead pre-skip trims: a consum
 ### PCM {#audio-pcm}
 
 Hang defines the `"pcm"` audio codec for uncompressed samples.
-The `sampleRate` and `numberOfChannels` fields MUST be present and greater than zero.
 The `description` field MUST NOT be present.
 If `bitrate` is present, it MUST equal `sampleRate * numberOfChannels * 32`.
 
@@ -670,7 +704,7 @@ By default a rendition's track lives in the same broadcast that served the catal
 The `broadcast` field overrides that, naming a different broadcast that publishes the track.
 
 The value is a relative path, resolved against the path of the broadcast that served the catalog.
-It is spelled like a path {{moql}}, so a consumer MUST reject a catalog whose reference has a leading, trailing, or doubled `/`, or a `\` before anything but `\` or `/`.
+It is spelled like a path {{moql}}, so a reference with a leading, trailing, or doubled `/`, or a `\` before anything but `\` or `/`, makes the rendition malformed ({{malformed}}).
 It uses relative reference resolution ({{!RFC3986, Section 5.2}}): a non-empty reference replaces the catalog broadcast's last path segment before applying `.` and `..` segments.
 For example, `./source` in a catalog served by `room/transcode` resolves to `room/source`, while `.` resolves to `room`.
 An empty reference resolves to the catalog broadcast itself.
@@ -867,6 +901,7 @@ type Container =
 ~~~
 
 The `kind` field selects the framing; a consumer MUST ignore a rendition whose `kind` it does not recognize.
+A container without a string `kind`, or with a recognized `kind` missing its fields, makes the rendition malformed ({{malformed}}).
 Every container shares the same group rules:
 
 A video group MUST start at a random access point: a keyframe unless the rendition declares `warmup` ({{field-warmup}}), in which case it MAY start at a picture from which decoding converges within that duration.
@@ -909,6 +944,7 @@ Audio publishers do not append per-group duration markers because the codec defi
 Data tracks retain empty payloads as data, without endpoint semantics.
 
 For example, h.264 with no `description` field would be annex.b encoded, while h.264 with a `description` field would be AVCC encoded.
+For AAC (`mp4a.40.*`), each nonempty codec payload MUST be one complete ADTS frame when `description` is absent; with an AudioSpecificConfig in `description`, it MUST be one raw AAC access unit without an ADTS header.
 For a text track, the remainder is the cue in the track's declared `format` (for example a `WEBVTT` segment).
 
 ## cmaf
@@ -926,6 +962,7 @@ A consumer MUST feed `init` to the decoder before the first frame.
 
 ## loc
 Each frame is a Low Overhead Container frame {{!I-D.ietf-moq-loc}}: a property block, carrying the timestamp among other properties, followed by the codec payload.
+The codec payload uses the same framing as {{legacy}}.
 
 For audio and video, consumers accept empty codec payload metadata with the same video-duration and audio-terminal-trimming meanings as the legacy container.
 Data tracks retain empty payloads as data.
@@ -1108,7 +1145,7 @@ the broadcast path, not the payload. This track is distinct from an application'
 `hang/chat.json` snapshot extension.
 
 # Security Considerations
-A rendition's `broadcast` reference ({{field-broadcast}}) resolves against the consumer's root, which is the subtree it is authorized for.
+A rendition's `broadcast` reference ({{field-broadcast}}), like a contribution's ({{contributions}}), resolves against the consumer's root, which is the subtree it is authorized for.
 Clamping a reference that escapes above that root would silently redirect the subscription to an unrelated broadcast, so a consumer rejects the catalog instead.
 
 TODO Security
@@ -1127,16 +1164,19 @@ This document has no IANA actions.
 ## moq-hang-04
 {:numbered="false"}
 
+- Defined AAC payloads without a `description` as ADTS, and payloads with an AudioSpecificConfig as raw AAC.
 - A `broadcast` reference and an echo `path` are spelled like a path: one with an empty segment or a lone `\` refuses the catalog instead of collapsing.
 - Removed `catalog.json.z` and the data track `compression` field: compression is a track property the transport carries ({{compression}}), so each compressed track is one name, and the catalog, `stats` and `echo` snapshots, HLS record tracks, and JSON data tracks SHOULD be compressed.
 - Replaced the root `archive` section and its per-track timelines with an optional, per-rendition `hls` field on video and audio ({{hls}}). Each record is a segment's first `group` and `pts` in milliseconds, with an optional `duration` where zero marks a stop; frame positions, `end`, `keyframe`, `timescale`, `replay`, `replayEpoch`, `store`, and `version` are gone. Each rendition numbers its own segments, and an edge maps a rendition's record `n` to its segment `n`. The record track is named `<track>.hls` and is compressed ({{compression}}).
 - A reader refuses a JSON frame in which an object repeats a member name.
+- A malformed audio or video rendition ({{malformed}}) refuses the catalog: a known codec string without valid parameters, a zero or out-of-range dimension, sample rate, or channel count, a bitrate or duration above 2^53 - 1, or a container without a string `kind`.
 - Added the root `version` ({{catalog-version}}): the oldest draft that reads the catalog, which a consumer refuses when above its own. A `track` other than the entry's ID or a video `warmup` needs 4. Consumers MUST ignore unknown fields.
 - A data track marks a discontinuity with a group of one object with no bytes, since its empty payload is data. An object with no bytes on an audio or video track, or sharing its group, is malformed.
 - Removed the Recording section: the store layout is a moq-archive format, documented with that crate, not part of this draft.
 - Added the optional video `preference` field: a consumer selects automatically among the highest preference it can decode.
 - Added the optional video `reorder` field: the most frames that can precede one in decode order and follow it in presentation, fixed for the track once declared. A consumer that authors decode times derives them from it and the current group alone, refusing deeper reordering; without it, a consumer infers them from timestamps.
 - Added an optional `epoch` beside every rendition and data track `broadcast` reference ({{field-epoch}}). A consumer reads each referenced path from the first broadcast it resolves for a catalog instance; a present `epoch` fails a rendition proven to resolve another instance, and is best effort over a route without an Epoch.
+- Added the optional root `contributions` map ({{contributions}}): whole broadcasts named by a relative `broadcast` and an optional `epoch`, opened only on selection, whose rendition IDs stay their own.
 - Added optional `stats` and `echo` catalog sections, publisher/viewer snapshots keyed by rendition ID, and the `.echo` feedback broadcast convention.
 - An Opus frame timestamp counts the OpusHead pre-skip: a consumer presents each decoded sample the pre-skip earlier than its frame timestamp places it.
 

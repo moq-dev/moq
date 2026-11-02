@@ -28,7 +28,7 @@ async fn finish(order: Order) {
 	let media = media_uri(&app, "live").await;
 	listed(&app, &media, ".2.m4s").await;
 	// Reading, as a recorder does, so the cursor's subscription carries every group across.
-	let first = moq_clock::timeout(TIMEOUT, cursor.next())
+	let first = kio::clock::timeout(TIMEOUT, cursor.next())
 		.await
 		.expect("the first segment")
 		.expect("records")
@@ -47,10 +47,10 @@ async fn finish(order: Order) {
 			publisher.media.finish().expect("finish media");
 			publisher.broadcast.close();
 			// The server stops serving the instance once `End` reaches it.
-			let deadline = moq_clock::now() + TIMEOUT;
+			let deadline = kio::clock::now() + TIMEOUT;
 			while get(&app, &media).await.status() != StatusCode::NOT_FOUND {
-				assert!(moq_clock::now() < deadline, "End never reached the export");
-				moq_clock::sleep(Duration::from_millis(50)).await;
+				assert!(kio::clock::now() < deadline, "End never reached the export");
+				kio::clock::sleep(Duration::from_millis(50)).await;
 			}
 			// `End` alone confirms nothing: the recording stays open until the catalog's EOF.
 			let playlist = rendition.media_playlist(None).expect("live").expect("listed");
@@ -64,7 +64,7 @@ async fn finish(order: Order) {
 	let (read, end) = drain(&mut cursor).await;
 	end.unwrap_or_else(|err| panic!("{order:?}: {err}"));
 	assert_eq!(read, [1, 2, 3, 4], "{order:?}");
-	let again = moq_clock::timeout(TIMEOUT, cursor.next())
+	let again = kio::clock::timeout(TIMEOUT, cursor.next())
 		.await
 		.expect("the cursor stalled");
 	assert!(matches!(again, Ok(None)), "{order:?}: a finished cursor stays finished");

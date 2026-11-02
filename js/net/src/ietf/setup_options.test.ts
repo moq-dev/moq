@@ -18,7 +18,6 @@ test("setup option keys match the registries", () => {
 		MaxAge: 0x915c4n,
 		Auth: 0x40b70n,
 		ActiveCount: 0x40b64n,
-		Epoch: 0x40b68n,
 	});
 });
 

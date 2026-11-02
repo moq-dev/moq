@@ -1,15 +1,11 @@
 use std::{
 	fmt,
 	ops::{Deref, DerefMut},
-	// std, not `crate::sync`: `Wake` takes std's Arc.
-	sync::{Arc, PoisonError},
+	sync::{Arc, Mutex, MutexGuard, PoisonError},
 	task::{Context, Wake, Waker},
 };
 
-use crate::{
-	Waiter, WaiterList,
-	sync::{Mutex, MutexGuard},
-};
+use crate::{Waiter, WaiterList};
 
 /// A [`Context`]-based handle that any number of waiters poll at once.
 ///
@@ -168,7 +164,7 @@ impl<T> fmt::Debug for Bridge<T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests {
 	use std::{
 		sync::atomic::{AtomicUsize, Ordering},

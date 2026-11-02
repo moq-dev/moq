@@ -100,6 +100,14 @@ export async function probe(wanted: { sampleRate: number; width: number; height:
 		"decode opus": await supports(() =>
 			AudioDecoder.isConfigSupported({ codec: "opus", sampleRate: wanted.sampleRate, numberOfChannels: 1 }),
 		),
+		// Observed rather than required: the AAC cases ask for it themselves, since Chromium encodes AAC
+		// only through a platform encoder, which Linux builds lack.
+		"encode mp4a.40.2": await supports(() =>
+			AudioEncoder.isConfigSupported({ codec: "mp4a.40.2", sampleRate: wanted.sampleRate, numberOfChannels: 1 }),
+		),
+		"decode mp4a.40.2": await supports(() =>
+			AudioDecoder.isConfigSupported({ codec: "mp4a.40.2", sampleRate: wanted.sampleRate, numberOfChannels: 1 }),
+		),
 	};
 }
 

@@ -103,13 +103,33 @@ An operation-count probe imported the actual JS `bandwidth.allocate`, counted
 `Allocator.#publish` does. With one tier, 16/64/256 reservations caused
 512/8,192/131,072 reads, exactly 2N². With distinct tiers, 16/64 caused
 6,952/438,944 reads. Nix Bun 1.4.2 was used; no browser speedup is claimed.
-The bandwidth child must retain a reproducible benchmark, including the
-complete allocator and Rust consumers, before selecting a fix.
+[moq-dev/moq#7521](https://github.com/moq-dev/moq/pull/7521) divides once per
+change in both languages. At 64 reservations in one tier, an estimate change across
+every observer fell from 4.5M to 98K instructions and from 901 to 4 allocations in
+Rust, and from 146 to 46 µs in Chromium. The `bandwidth/grants/*` Criterion groups
+and the `bandwidth` JS and browser micro benchmarks run nightly.
+
+[Resume identity history](https://github.com/moq-dev/moq/pull/7514) found, in
+Chromium after cache age-out, that a JS front's first-seen track record kept
+every route that first answered a name reachable: 32 routes of churned names
+left 31 sessions, transports and broadcast handles per front (7.7 MB of JS heap
+for 8 fronts reading 8 names by lookup). Recording the answering source by id
+releases them; the `resume-history` browser fixture now fails on any retired
+route still reachable.
 
 `python3 sh/gh/nightly.test.py NightlyTest.test_every_cargo_bench_target_runs_nightly`
 reproduced the missing `moq-archive/producer` selection. The existing
 [CI audit PR](https://github.com/moq-dev/moq/pull/6266) already fixes it.
 No duplicate quest or workflow edit belongs here.
+
+Cached JS group joins mattered. In Chromium 156, a subscriber joining 2,048
+retained groups ran about 2.1M sort comparator visits and took 12-18 ms; an
+arrival into 8 subscribers' 2,048-group unread backlogs took about 100-113 µs.
+Ordered insertion removed every sort: the same join took 0.5-2 ms and the
+arrival 9-11 µs. Those original timings used a whole-run frozen clock; the
+fixture now expires each shape outside timing so completed tracks cannot
+accumulate through prune timers. The original whole-run GC totals are withdrawn.
+The `js/replay` nightly series and the browser smoke's `replay.json` protect it.
 
 ### Kernel and placement assessment
 
@@ -150,7 +170,7 @@ No duplicate quest or workflow edit belongs here.
   [performance audit](/quest/m2/audit-perf.md) repeats it before later cuts.
 - [Perf](/quest/m2/perf/README.md) owns measured channel contention, relay
   allocations, ingest batching, worker quiescence and runtime selection.
-- The [release audit](/quest/m1/release-audit/README.md) bounded the media
+- The 2026-10-22 release audit bounded the media
   reorder queues in [moq-dev/moq#6453](https://github.com/moq-dev/moq/pull/6453)
   and fixed QMux copying in
   [moq-dev/moq#6381](https://github.com/moq-dev/moq/pull/6381). MKV
@@ -173,23 +193,16 @@ No duplicate quest or workflow edit belongs here.
 
 ## Required
 
-- [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - polling and memory after peak task occupancy subsides
+- [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - memory a task set keeps after peak occupancy subsides
 - [QUIC receive-state reuse](/quest/m2/performance-survey/quic-receive-reuse.md) - reassembly metadata retained by recycled completed streams
 - [Cache metadata](/quest/m2/performance-survey/cache-metadata.md) - bookkeeping capacity after cached groups expire
-- [Cache backing amplification](/quest/m2/performance-survey/cache-backing.md) - small retained samples pinning large shared fragments
-- [Bandwidth grants](/quest/m2/performance-survey/bandwidth-grants.md) - repeated full allocation in Rust and JS
-- [Cached JS group joins](/quest/m2/performance-survey/js-cached-groups.md) - repeated sorting while replaying retained groups
 - [PCM batch processing](/quest/m2/performance-survey/audio-batches.md) - repeated tail movement during encoding and resampling
 - [Fragmented MKV import](/quest/m2/performance-survey/mkv-fragments.md) - accumulated-buffer copies and parser replay
-- [QUIC scheduling churn](/quest/m2/performance-survey/quic-schedule-churn.md) - priority and retirement work across unrelated groups
 - [HLS request fan-out](/quest/m2/performance-survey/hls-serving.md) - repeated fetch, remux and playlist construction per viewer
 - [Buffered browser groups](/quest/m2/performance-survey/hang-buffered.md) - per-frame scans and bulk skip work
 - [Idle browser stats](/quest/m2/performance-survey/browser-idle-stats.md) - local transport polling without active publishing demand
-- [Transport preference history](/quest/m2/performance-survey/transport-history.md) - full URL retention across retired sessions
-- [Resume identity history](/quest/m2/performance-survey/resume-history.md) - historical source graphs held by first-seen track metadata
 - [UDP socket queues](/quest/m2/performance-survey/socket-queues.md) - drop attribution and queue-size tradeoffs across workers and load
 - [Session datagrams](/quest/m2/performance-survey/datagram-delivery.md) - complete per-object delivery across publishers and viewers
-- [JWT verification](/quest/m2/performance-survey/jwt-verification.md) - key loading, lookup, parsing and crypto attribution
 - [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md) - HTTP polling cost versus result size and unrelated routes
 - [Selective session operations](/quest/m2/performance-survey/session-selection.md) - exact-ID lookups and registry lock hold time
 - [Browser media copies](/quest/m2/performance-survey/browser-media-copies.md) - CMAF sample and LOC framing copies versus retention

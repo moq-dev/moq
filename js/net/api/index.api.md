@@ -151,12 +151,17 @@ export namespace Connection {
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;
 	}
+	export interface Drain {
+		readonly timeout?: Milli;
+		readonly uri: string;
+	}
 	export interface Established {
 		abort(): void;
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly auth: Auth.Handle;
 		close(): Promise<void>;
 		closed: Promise<Error | null>;
+		readonly draining: Signals.GetPromise<Connection.Drain>;
 		readonly peerImplementation: Promise<string | undefined>;
 		readonly probe: Signals.Getter<Connection.Probe>;
 		stats(): Promise<Connection.Stats>;
@@ -166,7 +171,6 @@ export namespace Connection {
 	}
 	export interface Extensions {
 		auth?: boolean;
-		epoch?: boolean;
 		solicit?: boolean;
 	}
 	export interface Goaway {
@@ -317,6 +321,7 @@ export namespace Group {
 		get done(): boolean;
 		get frameCount(): number;
 		get isClosed(): boolean;
+		nextFrame(): Promise<Group.FrameConsumer | undefined>;
 		readBool(): Promise<boolean | undefined>;
 		readFrame(): Promise<Group.Frame | undefined>;
 		readFrameSequence(options?: Group.ReadOptions): Promise<{
@@ -336,16 +341,35 @@ export namespace Group {
 		payload: Uint8Array;
 		timestamp?: Time.Timestamp;
 	}
+	export class FrameConsumer {
+		get arrived(): Instant | undefined;
+		readAll(): Promise<Uint8Array>;
+		readChunk(): Promise<Uint8Array | undefined>;
+		readonly sequence: number;
+		readonly size: number;
+		readonly timestamp: Time.Timestamp | undefined;
+	}
+	export interface FrameInfo {
+		size: number;
+		timestamp?: Time.Timestamp;
+	}
+	export class FrameProducer {
+		abort(error: Error): void;
+		finish(): void;
+		get remaining(): number;
+		readonly size: number;
+		readonly timestamp: Time.Timestamp | undefined;
+		write(chunk: Uint8Array): void;
+	}
 	export interface Info {
 		sequence: number;
 	}
-	export const MAX_GROUP_CACHE_BYTES: number;
-	export const MAX_GROUP_FRAMES: 8192;
 	export class Producer {
 		constructor(sequence: number);
 		abort(error: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Group.Consumer;
+		createFrame(info: Group.FrameInfo): Group.FrameProducer;
 		finish(): void;
 		get isClosed(): boolean;
 		readonly sequence: number;
@@ -359,7 +383,7 @@ export namespace Group {
 export const IMPLEMENTATION: string;
 
 export namespace Origin {
-	export class Consumer {
+	export class Consumer implements Origin.Reader {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		get closed(): Signals.GetPromise<Error | null>;
 		get discovery(): Signals.Getter<boolean | undefined>;
@@ -399,6 +423,13 @@ export namespace Origin {
 		get route(): Origin.Route | undefined;
 		unannounce(): void;
 	}
+	export interface Reader {
+		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		readonly closed: Signals.GetPromise<Error | null>;
+		readonly discovery: Signals.Getter<boolean | undefined>;
+		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+	}
 	export class Request {
 		readonly path: Path.Valid;
 		prepare(epoch: Epoch.Valid): Origin.Prepared;
@@ -425,13 +456,8 @@ export namespace Origin {
 		epoch?: Epoch.Valid;
 		hops: Origin.Hop[];
 	}
-	export interface Table {
-		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
-		readonly closed: Signals.GetPromise<Error | null>;
+	export interface Table extends Origin.Reader {
 		createBroadcast(path: Path.Valid): Origin.Publication;
-		readonly discovery: Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
-		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		requests(prefix: Path.Valid): Origin.Requests;
 	}
 	export function isAnonymous(route: Origin.Route): boolean;

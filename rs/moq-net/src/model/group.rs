@@ -19,6 +19,7 @@
 //!
 //! The stream is closed with [Error] when all writers or readers are dropped.
 use super::flate;
+use super::pace::Pace;
 mod content;
 use crate::cache;
 use crate::frame::{self, Cached, FrameBuf, Payload};
@@ -57,6 +58,9 @@ pub(super) const CACHE_OVERHEAD: u64 = (kio::Producer::<GroupState>::HEAP
 	// straight after.
 	+ 2 * size_of::<usize>()
 	+ size_of::<Alive>()
+	// The `Pace` its writer and readers share, behind its own `Arc`.
+	+ 2 * size_of::<usize>()
+	+ size_of::<Pace>()
 	+ kio::log::Writer::<Entry>::HEAP) as u64;
 
 /// A group contains a sequence number because they can arrive out of order.
@@ -143,6 +147,8 @@ pub(super) struct Entry {
 	fields: Option<Arc<super::object::Fields>>,
 	// A compressed group's inflated size of the stored slice; zero on a plain group.
 	inflated: u64,
+	// Where the frame ends on its copy's [`Pace`] scale, set as it enters the log.
+	end: u64,
 }
 
 impl Clone for Entry {
@@ -152,6 +158,7 @@ impl Clone for Entry {
 			frame: self.frame.clone(),
 			fields: self.fields.clone(),
 			inflated: self.inflated,
+			end: self.end,
 		}
 	}
 }
@@ -164,6 +171,7 @@ impl Entry {
 			frame,
 			fields: None,
 			inflated,
+			end: 0,
 		}
 	}
 
@@ -258,6 +266,9 @@ pub(super) struct GroupState {
 	// Whether an adopted head (see [`Handle::adopt_head`]) begins at the group's first
 	// object, for a wire header that arrives after it.
 	adopted: Option<bool>,
+
+	// How far readers got, which each frame entering the log is measured against.
+	pace: Arc<Pace>,
 }
 
 /// The frames a copy of a group holds, from where it starts, which a successor copy of
@@ -652,6 +663,7 @@ impl Inflate {
 						},
 						fields: slice.fields.clone(),
 						inflated: 0,
+						end: slice.end,
 					};
 					let cost = Plain::cost(&entry);
 					self.plain.bill.add(cost);
@@ -871,13 +883,15 @@ impl GroupState {
 		}
 		let base = self.log.base() as usize;
 		if base < end {
-			let (mut charged, mut payload, mut fields) = (0, 0, 0);
+			let (mut charged, mut payload, mut fields, mut shed) = (0, 0, 0, 0);
 			for entry in (base..end).map(|index| self.log.get(index as u64).expect("committed below the end")) {
+				shed = entry.end;
 				charged += self.entry_bytes(entry);
 				payload += entry.frame.payload.len() as u64;
 				fields += entry.fields.as_ref().map_or(0, |fields| fields.heap());
 			}
 			self.forget(payload, fields);
+			self.pace.shed(shed);
 			let heap = kio::log::Writer::<Entry>::HEAP;
 			let before = self.log.heap().max(heap);
 			self.log.evict(end as u64);
@@ -953,8 +967,15 @@ impl GroupState {
 	}
 
 	/// Append a completed frame, returning the slot growth it charged.
-	fn push(&mut self, entry: Entry) -> u64 {
+	///
+	/// The frame's place on the pace scale costs its payload, metadata, and slot, as the
+	/// live tail does, so a paced writer of tiny frames is bounded too.
+	fn push(&mut self, mut entry: Entry) -> u64 {
 		let slots = self.reserve_frame();
+		let metadata = entry.fields.as_ref().map_or(0, |fields| fields.heap());
+		entry.end = self
+			.pace
+			.commit(entry.frame.payload.len() as u64 + metadata + size_of::<Entry>() as u64);
 		self.log.push(entry);
 		slots
 	}
@@ -1062,6 +1083,7 @@ impl GroupState {
 	///
 	/// A compressed group hands a plain reader each frame whole once it completes, as the
 	/// slices to inflate, and a `raw` one the stored slice, streaming one still arriving.
+	/// A frame handed out counts as taken, pacing the writer (see [`Pace`]).
 	fn poll_frame_source(&self, index: usize, raw: bool) -> Poll<Result<Option<Source>>> {
 		self.check_read(index, raw)?;
 		if index < self.held()
@@ -1075,6 +1097,7 @@ impl GroupState {
 			// walk spare a group a consumer is actively draining.
 			self.charge.refresh();
 			if let Some(flate) = self.flate.as_ref().filter(|_| !raw) {
+				self.pace.took(entry.end);
 				return Poll::Ready(Ok(Some(Source::Inflate {
 					job: self.inflate(flate, index, index)?,
 					local: index,
@@ -1083,6 +1106,7 @@ impl GroupState {
 				})));
 			}
 			let (header, source) = entry.read(self.flate.is_some());
+			self.pace.took(entry.end);
 			return Poll::Ready(Ok(Some(Source::Ready(header, source))));
 		}
 		if index == self.committed()
@@ -1091,6 +1115,8 @@ impl GroupState {
 			&& (raw || self.flate.is_none())
 		{
 			self.charge.refresh();
+			// A reader streaming the open frame is at the writer's edge.
+			self.pace.took_committed();
 			let info = frame::Info {
 				size: p.buf.size() as u64,
 				timestamp: p.timestamp,
@@ -1119,7 +1145,14 @@ impl GroupState {
 			(Some(total), Some(err)) if index < total => Poll::Ready(Err(err.clone())),
 			(Some(_), _) => Poll::Ready(Ok(())),
 			(None, Some(err)) => Poll::Ready(Err(err.clone())),
-			(None, None) => Poll::Pending,
+			(None, None) => {
+				// Waiting on frames the writer has yet to commit, wherever the reader skipped
+				// to, so it holds the writer back from none of them.
+				if index >= self.committed() {
+					self.pace.took_committed();
+				}
+				Poll::Pending
+			}
 		}
 	}
 
@@ -1446,6 +1479,8 @@ struct Alive {
 	// A reader of the frame log, cloned into each cursor so it reads frames without the
 	// group lock.
 	log: kio::log::Reader<Entry>,
+	// The `GroupState::pace` cursors report their reads to.
+	pace: Arc<Pace>,
 	// When the group was created here, on the ambient clock; see [`Consumer::arrived`].
 	arrived: crate::time::Instant,
 }
@@ -1558,7 +1593,7 @@ impl Producer {
 		let state = kio::Producer::<GroupState>::default();
 		let charge = cache.charge();
 		let access = charge.access();
-		let log = {
+		let (log, pace) = {
 			let mut state = state.write().ok().expect("a new group is open");
 			if track.compress {
 				state.flate = Some(Box::new(Flate::new(
@@ -1567,7 +1602,7 @@ impl Producer {
 				)));
 			}
 			state.charge = charge;
-			state.log.reader()
+			(state.log.reader(), state.pace.clone())
 		};
 		let alive = Arc::new(Alive {
 			aborted: AtomicBool::new(false),
@@ -1577,6 +1612,7 @@ impl Producer {
 			started: AtomicBool::new(false),
 			access,
 			log,
+			pace,
 			arrived: super::clock::now(),
 		});
 		Self {
@@ -2090,6 +2126,7 @@ impl Producer {
 			frame,
 			fields,
 			inflated,
+			end: 0,
 		};
 		if !owned {
 			state.canonicalize(state.next_index - 1, &mut entry)?;
@@ -2181,6 +2218,52 @@ impl Producer {
 	pub async fn closed(&self) -> Result<()> {
 		kio::wait(|waiter| self.handle.poll_closed(waiter)).await
 	}
+	/// Poll until a reader holds the group and the writer is at most 16 MB past the end of
+	/// the last frame its fastest reader took, so a local writer runs no further ahead than
+	/// the live tail keeps behind that reader.
+	///
+	/// Ready once the group is closed, so the next write surfaces why. A reader that took
+	/// every committed frame is waiting on the writer, so it never holds the writer back,
+	/// and one whose next frame was shed has fallen off the group and is not waited on.
+	/// Writing without waiting never fails: the group sheds its front instead, as it also
+	/// does for a frame larger than the room left, which trims the tail to fit.
+	pub fn poll_ready(&self, waiter: &kio::Waiter) -> Poll<()> {
+		ready!(self.poll_paced(waiter, 0));
+		// A closed group reports `Closed`, which is ready too.
+		self.handle.state.poll_wanted_changed(waiter, false).map(|_| ())
+	}
+
+	/// Wait until a reader holds the group and the writer has room; see [`Self::poll_ready`].
+	pub async fn ready(&self) {
+		kio::wait(|waiter| self.poll_ready(waiter)).await
+	}
+
+	/// Poll until the writer may take more from upstream, `partial` bytes into a frame
+	/// it has not committed: until it is at most [`super::pace::AHEAD`] past the end of the last
+	/// frame its fastest reader took.
+	///
+	/// Ready at once while no reader holds the group, so a group nobody watches keeps
+	/// writing and sheds its front, and once it is closed, so the next write surfaces why.
+	/// A reader that took every committed frame is waiting on the writer, so a frame
+	/// larger than the window never stalls it, and one whose next frame was shed has
+	/// fallen off the group and is not waited on.
+	///
+	/// A session's ingest waits on this; a local writer waits on [`Self::poll_ready`].
+	pub(crate) fn poll_paced(&self, waiter: &kio::Waiter, partial: u64) -> Poll<()> {
+		let pace = &self.handle.alive.pace;
+		if !pace.ahead(partial) {
+			return Poll::Ready(());
+		}
+		// Either wakes the writer: the last reader leaving, or the group closing.
+		if self.handle.poll_unwanted(waiter).is_ready() || self.handle.state.poll_closed(waiter).is_ready() {
+			return Poll::Ready(());
+		}
+		match pace.paced(pace.park(waiter), partial) {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
+		}
+	}
+
 	/// The non-writing observer used by the cache and built-in sessions.
 	// Sessions need an abortable observer while public callers use Demand.
 	pub(crate) fn handle(&self) -> Handle {
@@ -2395,6 +2478,8 @@ impl Handle {
 			if state.canonicalize(index, &mut entry).is_err() {
 				return;
 			}
+			// Below the log, so off this copy's pace scale: taking it reports nothing.
+			entry.end = 0;
 			adopted.push(entry);
 		}
 		// Below the log's first frame, so these never enter it: readers find them here.
@@ -2681,6 +2766,16 @@ impl Handle {
 		}
 	}
 
+	/// Where the group starts in presentation time, accepted unverified or not: what a time
+	/// range counts on a track whose history a local handler serves, where no remote
+	/// publisher wrote it (see [`Self::timestamp`]).
+	pub(super) fn first_timestamp(&self) -> Option<Timestamp> {
+		match self.state.read().timeline {
+			Timeline::Timed { start, .. } => Some(start),
+			_ => None,
+		}
+	}
+
 	/// The start this group lends its neighbors' rewind check: its first frame's timestamp,
 	/// once frame 0 was checked to fit between theirs.
 	pub(super) fn bound(&self) -> Option<Timestamp> {
@@ -2790,7 +2885,7 @@ impl Handle {
 				raw: false,
 				compressed: self.track.compress,
 				cache: self.cache.clone(),
-				access: self.alive.access.clone(),
+				alive: self.alive.clone(),
 				refreshed: self.cache.pool().now(),
 			},
 			// Untagged: a tagged track attaches the egress meter via `with_meter`
@@ -3042,8 +3137,9 @@ impl Prefetch {
 		}
 	}
 
-	/// Buffer `entry` at the end of the batch, with its inflated size if `inflated`.
-	fn push(&mut self, entry: &Entry, inflated: bool) {
+	/// Buffer `entry` at the end of the batch, with its inflated size if `inflated`,
+	/// returning where it ends on the group's pace scale.
+	fn push(&mut self, entry: &Entry, inflated: bool) -> u64 {
 		let at = self.len;
 		let frames = self
 			.frames
@@ -3074,6 +3170,7 @@ impl Prefetch {
 			self.inflated.get_or_insert_default()[at] = entry.inflated;
 		}
 		self.len += 1;
+		entry.end
 	}
 
 	/// Refill with up to `budget` of the completed frames from `index` on, under the
@@ -3110,25 +3207,39 @@ impl Prefetch {
 			Some(flate) if !raw && count > 0 => Some(state.inflate(flate, index, index + count - 1)?),
 			_ => None,
 		};
+		let mut end = 0;
 		for entry in state.entries(index, index + count) {
-			self.push(entry, compressed && raw);
+			end = self.push(entry, compressed && raw);
 		}
+		// The batch is the reader's whatever the group sheds, so it counts as taken.
+		state.pace.took(end);
 		Ok(job)
 	}
 
 	/// Refill with up to `budget` of the completed frames from `index` on, reading the
 	/// log without the group's guard, and return how many. A plain read of a `compressed`
 	/// group inflates under the guard instead, through [`Self::fill`].
-	fn fill_log(&mut self, log: &mut kio::log::Reader<Entry>, index: usize, budget: usize, compressed: bool) -> usize {
+	///
+	/// The batch is the reader's whatever the group sheds, so it reports it taken to `pace`.
+	fn fill_log(
+		&mut self,
+		log: &mut kio::log::Reader<Entry>,
+		pace: &Pace,
+		index: usize,
+		budget: usize,
+		compressed: bool,
+	) -> usize {
 		self.reset(compressed);
 		let mut read = log.read();
+		let mut end = 0;
 		for index in (index as u64..).take(budget.min(Self::CAP)) {
 			// Evicted or not yet committed: the guard resolves which.
 			let Ok(Some(entry)) = read.get(index) else {
 				break;
 			};
-			self.push(entry, compressed);
+			end = self.push(entry, compressed);
 		}
+		pace.took(end);
 		self.len
 	}
 
@@ -3274,9 +3385,10 @@ struct Cursor {
 	// Whether the group is compressed, so a plain read inflates under the state's lock.
 	compressed: bool,
 
-	// Record prefetched reads without entering the group's state on every frame.
+	// Record prefetched reads without entering the group's state on every frame, through
+	// the group's access stamp, and report the frames taken to its pace.
 	cache: Arc<cache::Track>,
-	access: Arc<cache::Access>,
+	alive: Arc<Alive>,
 	refreshed: u64,
 }
 
@@ -3293,7 +3405,7 @@ impl Clone for Cursor {
 			raw: self.raw,
 			compressed: self.compressed,
 			cache: self.cache.clone(),
-			access: self.access.clone(),
+			alive: self.alive.clone(),
 			refreshed: self.refreshed,
 		}
 	}
@@ -3590,13 +3702,6 @@ impl Consumer {
 	/// resumed onto a replacement copy keeps the original group's arrival.
 	pub fn arrived(&self) -> crate::time::Instant {
 		self.arrived
-	}
-
-	/// The timescale a moq-lite hop serves the parent track at (see
-	/// [`track::Info::lite_timescale`]).
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn lite_timescale(&self, ietf: bool) -> Option<Timescale> {
-		self.track.lite_timescale(ietf)
 	}
 
 	/// The draft the parent track's moq-transport publisher spoke, which serialized every
@@ -3900,7 +4005,7 @@ impl Cursor {
 
 	/// Record prefetched reads, updating the eviction rank once per sampled tick.
 	fn refresh_if_stale(&mut self) {
-		self.access.touch();
+		self.alive.access.touch();
 		let tick = self.cache.pool().now();
 		if tick != self.refreshed {
 			self.state.read().charge.refresh();
@@ -3984,13 +4089,10 @@ impl Cursor {
 		// A committed frame comes from the log without the lock, unless a plain read of a
 		// compressed group has to inflate it under the lock.
 		let committed = match !self.compressed || raw {
-			true => self
-				.log
-				.read()
-				.get(index as u64)
-				.ok()
-				.flatten()
-				.map(|entry| entry.read(self.compressed)),
+			true => self.log.read().get(index as u64).ok().flatten().map(|entry| {
+				self.alive.pace.took(entry.end);
+				entry.read(self.compressed)
+			}),
 			false => None,
 		};
 		let (info, source) = match committed {
@@ -4061,7 +4163,12 @@ impl Cursor {
 
 		// The batch is drained: refill it from the log without the lock, unless a plain
 		// read of a compressed group has to inflate under it.
-		if (!self.compressed || self.raw) && self.prefetch.fill_log(&mut self.log, index, budget, self.compressed) > 0 {
+		if (!self.compressed || self.raw)
+			&& self
+				.prefetch
+				.fill_log(&mut self.log, &self.alive.pace, index, budget, self.compressed)
+				> 0
+		{
 			self.refresh_if_stale();
 			let (frames, bytes) = self.prefetch.buffered();
 			stats.frames(frames);
@@ -4158,7 +4265,7 @@ impl Fetch {
 mod test {
 	use super::*;
 	use crate::frame::Frame;
-	use crate::model::test_tracing::count_drop_warnings;
+	use crate::test_tracing::count_drop_warnings;
 	use bytes::Bytes;
 	#[cfg(feature = "async")]
 	use futures::FutureExt;
@@ -4819,6 +4926,7 @@ mod test {
 	/// A head's slots count against the live tail, so a head of empty frames that would
 	/// take the group's slots past it is not adopted.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	fn an_adopted_head_counts_its_slots() {
 		let pool = cache::Pool::unbounded();
 		let cache = cache::Track::new(pool, Default::default(), kio::Weak::new());
@@ -4860,6 +4968,7 @@ mod test {
 					frame: Frame::new(None, Bytes::from_static(b"b")).into(),
 					fields: fields(1),
 					inflated: 0,
+					end: 0,
 				},
 			],
 			compressed: false,
@@ -5033,6 +5142,7 @@ mod test {
 	/// A group grows past its live tail by shedding whole frames from its front: a reader
 	/// that keeps up reads every frame, a late one gets `Evicted`, and nothing aborts.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	#[cfg(feature = "async")]
 	fn a_long_group_sheds_its_front() {
 		let pool = cache::Pool::unbounded();
@@ -5068,6 +5178,7 @@ mod test {
 
 	/// Empty frames still cost their slot, so a group of them sheds its front too.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	fn empty_frames_shed_by_their_slots() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let slot = size_of::<Entry>();
@@ -5084,6 +5195,7 @@ mod test {
 	/// Batches of empty frames count their new slots too, so they shed the front as
 	/// single writes do.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	fn empty_frame_batches_shed_by_their_slots() {
 		let mut producer = Info { sequence: 0 }.produce();
 		let count = 2 * MAX_CACHE_BYTES as usize / size_of::<Entry>();
@@ -5325,6 +5437,7 @@ mod test {
 	/// Frames a cursor already prefetched are its own, so shedding them from the group
 	/// does not make `finished` report the cursor evicted.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	#[cfg(feature = "async")]
 	fn finished_counts_prefetched_frames_as_read() {
 		let mut producer = Info { sequence: 0 }.produce();
@@ -5412,7 +5525,7 @@ mod test {
 	/// a write guard was mutably accessed, so `frame_notify` must mark the guard
 	/// modified; a guard dropped untouched wakes nobody and the reader would
 	/// stall until the frame completed.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn chunk_write_wakes_parked_reader() {
 		let producer = Info { sequence: 0 }.produce();
@@ -5424,11 +5537,11 @@ mod test {
 			})
 			.unwrap();
 		let mut f = consumer.next_frame().await.unwrap().unwrap();
-		let handle = moq_clock::sim::spawn(async move { f.read_chunk().await });
+		let handle = kio::clock::sim::spawn(async move { f.read_chunk().await });
 		// Let the reader park on the empty partial before the chunk lands.
-		moq_clock::sleep(std::time::Duration::from_millis(50)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(50)).await;
 		frame.write(Bytes::from_static(b"foo")).unwrap();
-		let chunk = moq_clock::timeout(std::time::Duration::from_secs(2), handle)
+		let chunk = kio::clock::timeout(std::time::Duration::from_secs(2), handle)
 			.await
 			.expect("parked chunk reader was never woken by the chunk write")
 			.unwrap()
@@ -5438,16 +5551,16 @@ mod test {
 
 	/// Each frame is stamped when its last byte lands, whichever way it is written, and
 	/// readers see that stamp however late they read.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn frames_carry_when_they_landed() {
 		use std::time::Duration;
 
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut producer = Info { sequence: 0 }.produce();
 		producer.write_frame(Timestamp::ZERO, Bytes::from_static(b"a")).unwrap();
 
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		let mut chunked = producer
 			.create_frame(frame::Info {
 				size: 2,
@@ -5455,23 +5568,23 @@ mod test {
 			})
 			.unwrap();
 		chunked.write(Bytes::from_static(b"b")).unwrap();
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		chunked.write(Bytes::from_static(b"c")).unwrap();
 		producer = chunked.finish().unwrap();
 
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		let mut batch = frame::Buffer::<2>::new();
 		batch
 			.push(Frame::new(Timestamp::ZERO, Bytes::from_static(b"d")))
 			.unwrap();
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		batch
 			.push(Frame::new(Timestamp::ZERO, Bytes::from_static(b"e")))
 			.unwrap();
 		producer.write_frames(&mut batch).unwrap();
 		producer.finish().unwrap();
 
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		let mut consumer = producer.consume();
 		let mut arrived = Vec::new();
 		while let Some(frame) = consumer.read_frame().await.unwrap() {
@@ -5482,10 +5595,10 @@ mod test {
 
 	/// A group is stamped when it is created here, and a reader pulling it late from its track
 	/// still sees that stamp.
-	#[moq_clock::test]
+	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn groups_carry_when_they_landed() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut alone = Info { sequence: 0 }.produce();
 		let track = crate::broadcast::Info::new()
 			.produce()
@@ -5494,7 +5607,7 @@ mod test {
 		let mut subscriber = track.subscribe(None);
 		let mut live = track.create_group(Info { sequence: 0 }).unwrap();
 
-		moq_clock::sleep(std::time::Duration::from_secs(1)).await;
+		kio::clock::sleep(std::time::Duration::from_secs(1)).await;
 		assert_eq!(alone.consume().arrived(), start);
 		let group = subscriber.recv_group().await.unwrap().expect("the live group");
 		assert_eq!(group.arrived(), start);
@@ -5526,6 +5639,7 @@ mod test {
 
 	/// An explicit current timestamp is converted to the group's scale.
 	#[test]
+	#[cfg_attr(miri, ignore = "reads the wall clock, which Miri's isolation refuses")]
 	fn create_frame_converts_current_timestamp() {
 		use crate::Timescale;
 
@@ -5920,7 +6034,7 @@ mod test {
 		let payloads: Vec<Bytes> = (0..Prefetch::CAP)
 			.map(|i| match i % 2 {
 				0 => Bytes::from(vec![i as u8; 3]),
-				_ => Bytes::from((0..2 * frame::SEGMENT + 7).map(|b| (b + i) as u8).collect::<Vec<_>>()),
+				_ => Bytes::from(frame::pattern(i, 2 * frame::SEGMENT + 7)),
 			})
 			.collect();
 		for payload in &payloads {
@@ -6000,6 +6114,7 @@ mod test {
 	/// front, and sheds its own front past the tail; a plain or raw reader that starts after
 	/// frame 0 was shed gets `Evicted`.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	#[cfg(feature = "async")]
 	fn a_long_compressed_group_sheds_its_front() {
 		let pool = cache::Pool::unbounded();
@@ -6046,6 +6161,7 @@ mod test {
 	/// A batch of large frames that deflate to almost nothing stays within one tail of
 	/// inflated bytes, and the copy sheds what the reader took past its tail.
 	#[test]
+	#[cfg_attr(miri, ignore = "fills the 32 MiB group tail, past Miri's 15-minute cap")]
 	#[cfg(feature = "async")]
 	fn a_batch_of_large_compressible_frames_stays_in_the_tail() {
 		let pool = cache::Pool::unbounded();

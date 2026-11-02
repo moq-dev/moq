@@ -8,9 +8,10 @@ side in both directions.
 
 ## Plan
 
-Mirror the [Rust surface](/quest/m2/stream/rust.md) and its path layout. Add
+Mirror the [Rust surface](/quest/m2/stream/rust.md) on `@moq/net`'s socket. Add
 the Rust/JS pair to `just test interop`.
 
 ## Required
 
-- [Rust byte streams](/quest/m2/stream/rust.md) - the reference surface and path layout
+- [JS sockets](/quest/m2/socket/js.md) - the socket each stream is a bi track on
+- [Rust byte streams](/quest/m2/stream/rust.md) - the reference surface

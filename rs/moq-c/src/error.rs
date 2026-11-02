@@ -585,4 +585,18 @@ mod tests {
 			super::moq_protocol_kind::MOQ_PROTOCOL_KIND_TOO_MANY_REQUESTS as u32
 		);
 	}
+
+	/// A relay that found its upstream malformed says so, apart from a relay bug's INTERNAL_ERROR.
+	#[test]
+	fn received_malformed_track_keeps_its_kind() {
+		let error = super::Error::Moq(moq_net::StreamError::MalformedTrack.into())
+			.protocol()
+			.expect("a stream code");
+		assert_eq!(error.scope, super::moq_error_scope::MOQ_ERROR_SCOPE_STREAM as u32);
+		assert_eq!(error.code, 0x12);
+		assert_eq!(
+			error.kind,
+			super::moq_protocol_kind::MOQ_PROTOCOL_KIND_MALFORMED_TRACK as u32
+		);
+	}
 }

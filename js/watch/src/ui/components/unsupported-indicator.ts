@@ -20,16 +20,18 @@ export function unsupportedIndicator(parent: Effect, watch: MoqWatch): HTMLEleme
 			return;
 		}
 
-		// Audio speaks for the broadcast only when there is no video to report on.
+		// Audio speaks for the broadcast only when there is no video to report on. The reachability
+		// filter can leave a video section with no renditions, which counts as no video.
 		const video = effect.get(watch.video.source.out.catalog);
-		const kind = video ? "video" : "audio";
-		const source = video ? watch.video.source : watch.audio.source;
+		const hasVideo = Object.keys(video?.renditions ?? {}).length > 0;
+		const kind = hasVideo ? "video" : "audio";
+		const source = hasVideo ? watch.video.source : watch.audio.source;
 		const unsupported = effect.get(source.out.error)?.name === "NotSupportedError";
 		const show = unsupported && (status === "loading" || status === "live");
 		container.style.display = show ? "" : "none";
 		if (!show) return;
 
-		const renditions = (video ?? effect.get(watch.audio.source.out.catalog))?.renditions ?? {};
+		const renditions = (hasVideo ? video : effect.get(watch.audio.source.out.catalog))?.renditions ?? {};
 		const codecs = [...new Set(Object.values(renditions).map((rendition) => rendition.codec))].join(", ");
 		text.textContent = codecs
 			? `This ${kind} codec is not supported by your browser: ${codecs}`

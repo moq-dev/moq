@@ -2,8 +2,9 @@
 
 ## Goal
 
-The slowest, flakiest, and least valuable tests are sped up, fixed, deleted,
-or planned, so the suite costs what it earns. Workflows and jobs belong to the
+The slowest, flakiest, and least valuable tests are deleted by default, and
+the ones that earn their keep are sped up, fixed, or moved to nightly, so the
+suite costs what it earns. Workflows and jobs belong to the
 [CI workflow audit](/quest/m2/audit-ci.md).
 
 ## Plan
@@ -20,11 +21,17 @@ Only a change that needs a maintainer decision (public API, scope) or is
 independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
 
+Default to removing (decided 2026-11-01, maintainer): whatever doesn't earn its
+cost is deleted inline, and the PR body lists each deletion with its measured
+cost and why it wasn't worth it. Only what earns its keep is refactored to be
+cheaper instead. Removing a public API or a user-facing feature stays a
+follow-up.
+
 Rank tests from nextest's lines in a full-selection queue log (`slow-timeout`
 is 60 s under the `ci` profile). Flakes are tracked by hand in their own
 quests, and `retries = 0` is deliberate. A test that sleeps on the wall clock
-should mock time (AGENTS.md). Delete tests whose coverage another test already
-provides. Repeat each local measurement: parallel agents load the host, so a
+should mock time (AGENTS.md). A test whose cost outweighs the regression it
+alone catches is deleted even when nothing else covers it. Repeat each local measurement: parallel agents load the host, so a
 single run can be off by 2x. Pin to the queue VM's 8 CPUs with `taskset -c
 0-7` when timing the whole suite. A test whose time differs between runs by
 about 3 s is waiting out a QUIC draining period, not computing.

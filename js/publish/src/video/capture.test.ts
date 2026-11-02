@@ -1,4 +1,4 @@
-import { expect, mock, spyOn, test } from "bun:test";
+import { expect, mock, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
@@ -9,6 +9,15 @@ mock.module("./capture-worker.ts?worklet", () => ({ default: async () => "blob:f
 const { Capture } = await import("./capture");
 const { Encoder } = await import("./encoder");
 const { Renderer } = await import("../preview");
+
+/** Install a Manual clock reading `ms`, set forward the way a mocked `performance.now()` was. */
+function manualAt(ms: number) {
+	const clock = new Manual();
+	const installed = clock.install();
+	const set = (to: number) => clock.jump(Nano(Nano.fromMilli(Milli(to)) - clock.now()));
+	set(ms);
+	return { set, close: () => installed.close(), [Symbol.dispose]: () => installed.close() };
+}
 
 class Frame {
 	// Every frame built, so a test can assert none is left open.
@@ -64,7 +73,10 @@ test("capture resamples live scale when frame dimensions stay unchanged", async 
 			},
 		},
 	});
+	const consumer = new Effect();
 	try {
+		await settle();
+		capture.out.frames.peek()?.subscribe(consumer);
 		let changed = capture.out.display.changed();
 		controller.enqueue(new Frame() as unknown as VideoFrame);
 		expect(await changed).toMatchObject({ width: 1920, height: 1080, scale: 2 });
@@ -73,6 +85,7 @@ test("capture resamples live scale when frame dimensions stay unchanged", async 
 		controller.enqueue(new Frame() as unknown as VideoFrame);
 		expect(await changed).toMatchObject({ width: 1920, height: 1080, scale: 1 });
 	} finally {
+		consumer.close();
 		capture.close();
 		if (processor) Object.defineProperty(globalThis, "MediaStreamTrackProcessor", processor);
 		else Reflect.deleteProperty(globalThis, "MediaStreamTrackProcessor");
@@ -111,7 +124,10 @@ test("rotation follows the live frames, not the track's settings", async () => {
 	const track = { getSettings: () => ({ width: 1280, height: 720 }) } as unknown as StreamTrack;
 	const orientation = new Signal(90);
 	const capture = new Capture({ source: track, orientation });
+	const consumer = new Effect();
 	try {
+		await settle();
+		capture.out.frames.peek()?.subscribe(consumer);
 		const display = capture.out.display.changed();
 		controller.enqueue(sized(720, 1280));
 		expect(await display).toMatchObject({ width: 720, height: 1280 });
@@ -154,6 +170,7 @@ test("rotation follows the live frames, not the track's settings", async () => {
 		controller.enqueue(sized(1280, 720, 0));
 		expect(await rotation).toBe(0);
 	} finally {
+		consumer.close();
 		capture.close();
 		if (processor) Object.defineProperty(globalThis, "MediaStreamTrackProcessor", processor);
 		else Reflect.deleteProperty(globalThis, "MediaStreamTrackProcessor");
@@ -194,7 +211,7 @@ const open = () => Frame.all.filter((frame) => !frame.closed);
 
 test("a reader attaching to a still source starts with the current picture, stamped now", async () => {
 	using input = frameSource();
-	const clock = spyOn(performance, "now").mockReturnValue(1_000);
+	const clock = manualAt(1_000);
 	const capture = new Capture({ source: input.source });
 	const effect = new Effect();
 
@@ -204,7 +221,7 @@ test("a reader attaching to a still source starts with the current picture, stam
 		await flush();
 
 		// Attach 90s later.
-		clock.mockReturnValue(91_000);
+		clock.set(91_000);
 		const fanout = capture.out.frames.peek();
 		if (!fanout) throw new Error("no fanout");
 		const reader = fanout.subscribe(effect).getReader();
@@ -222,7 +239,7 @@ test("a reader attaching to a still source starts with the current picture, stam
 	} finally {
 		effect.close();
 		capture.close();
-		clock.mockRestore();
+		clock.close();
 	}
 
 	expect(open()).toEqual([]);
@@ -230,9 +247,9 @@ test("a reader attaching to a still source starts with the current picture, stam
 
 test("a reader attaching after another never starts below what that one read", async () => {
 	using input = frameSource();
-	// The capture clock runs 200ms ahead of performance.now(), as it does when the first frame,
+	// The capture clock runs 200ms ahead of the installed clock, as it does when the first frame,
 	// which anchors the capture clock, arrived late.
-	const clock = spyOn(performance, "now").mockReturnValue(1_000);
+	const clock = manualAt(1_000);
 	const capture = new Capture({ source: input.source });
 	const first = new Effect();
 	const second = new Effect();
@@ -249,7 +266,7 @@ test("a reader attaching after another never starts below what that one read", a
 		first.close();
 
 		// A demand gap shorter than the clocks' offset.
-		clock.mockReturnValue(1_050);
+		clock.set(1_050);
 		const after = fanout.subscribe(second).getReader();
 		const resumed = (await after.read()).value as unknown as Frame;
 		expect(resumed.timestamp).toBe(1_250_000);
@@ -257,7 +274,7 @@ test("a reader attaching after another never starts below what that one read", a
 	} finally {
 		second.close();
 		capture.close();
-		clock.mockRestore();
+		clock.close();
 	}
 
 	expect(open()).toEqual([]);
@@ -266,7 +283,7 @@ test("a reader attaching after another never starts below what that one read", a
 test("a reader attaching to a frame held late still starts at now", async () => {
 	using input = frameSource();
 	// The frame reached the fanout 200ms after its stamp, as on a busy main thread.
-	const clock = spyOn(performance, "now").mockReturnValue(1_200);
+	const clock = manualAt(1_200);
 	const capture = new Capture({ source: input.source });
 	const first = new Effect();
 	const second = new Effect();
@@ -280,7 +297,7 @@ test("a reader attaching to a frame held late still starts at now", async () => 
 		(await before.read()).value?.close();
 		first.close();
 
-		clock.mockReturnValue(1_250);
+		clock.set(1_250);
 		const after = fanout.subscribe(second).getReader();
 		const resumed = (await after.read()).value as unknown as Frame;
 		expect(resumed.timestamp).toBe(1_250_000);
@@ -288,7 +305,7 @@ test("a reader attaching to a frame held late still starts at now", async () => 
 	} finally {
 		second.close();
 		capture.close();
-		clock.mockRestore();
+		clock.close();
 	}
 
 	expect(open()).toEqual([]);
@@ -346,11 +363,17 @@ test("the held frame is closed when replaced, when an unread copy is dropped, an
 	using input = frameSource();
 	const capture = new Capture({ source: input.source });
 
+	const watch = new Effect();
+	await settle();
+	const reader = capture.out.frames.peek()?.subscribe(watch).getReader();
 	input.push(1_000);
+	(await reader?.read())?.value?.close();
 	input.push(2_000);
+	(await reader?.read())?.value?.close();
+	watch.close();
 	await flush();
 
-	// Only the newest is held: the source frames reached no reader and the first hold was replaced.
+	// Only the newest is held after the reader leaves.
 	expect(open()).toHaveLength(1);
 
 	// A reader that leaves without reading its copy releases it.
@@ -388,7 +411,7 @@ test("closing the capture releases a copy its reader never read", async () => {
 // https://github.com/moq-dev/moq/issues/4778
 test("an encoder resuming on a still source encodes a keyframe of the current picture, stamped now", async () => {
 	using input = frameSource();
-	const clock = spyOn(performance, "now").mockReturnValue(1_000);
+	const clock = manualAt(1_000);
 
 	const keys: number[] = [];
 	class RecordingVideoEncoder {
@@ -434,7 +457,14 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
 	// No subscriber yet, so the encoder idles while the source sends its only frame.
 	const live = new Signal<Moq.Track.Producer | undefined>(undefined);
-	const rendition = { config: new Signal(undefined), track: live, close: () => {} };
+	const rendition = {
+		slot: new Signal(undefined),
+		config: new Signal(undefined),
+		track: live,
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
+		close: () => {},
+	};
 	const encoder = new Encoder("video", {
 		enabled: true,
 		broadcast: { video: () => rendition, order: new Order() } as never,
@@ -450,7 +480,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 		// Drop the probe's own encode.
 		keys.length = 0;
 
-		clock.mockReturnValue(91_000);
+		clock.set(91_000);
 		live.set(track);
 		await flush();
 
@@ -460,7 +490,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 		capture.close();
 		track.finish();
 		track.close();
-		clock.mockRestore();
+		clock.close();
 		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");
 	}
@@ -541,7 +571,14 @@ test("an encoder torn down while a frame is in flight closes that frame", async 
 	const capture = new Capture({ source: input.source });
 	const track = new Moq.Track.Producer("video").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const live = new Signal<Moq.Track.Producer | undefined>(undefined);
-	const rendition = { config: new Signal(undefined), track: live, close: () => {} };
+	const rendition = {
+		slot: new Signal(undefined),
+		config: new Signal(undefined),
+		track: live,
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
+		close: () => {},
+	};
 	const encoder = new Encoder("video", {
 		enabled: true,
 		broadcast: { video: () => rendition, order: new Order() } as never,
@@ -562,5 +599,89 @@ test("an encoder torn down while a frame is in flight closes that frame", async 
 		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");
 	}
+	expect(open()).toEqual([]);
+});
+
+test("capture parks after its bootstrap and last reader, and cancels while parked", async () => {
+	using _input = frameSource();
+	using _clock = manualAt(0);
+	let pulls = 0;
+	let cancelled = false;
+	let deliver!: (timestamp: number) => void;
+	const frames = new ReadableStream<VideoFrame>(
+		{
+			pull(controller) {
+				pulls++;
+				return new Promise<void>((resolve) => {
+					deliver = (timestamp) => {
+						controller.enqueue(new Frame(undefined, { timestamp }) as unknown as VideoFrame);
+						resolve();
+					};
+				});
+			},
+			cancel() {
+				cancelled = true;
+			},
+		},
+		{ highWaterMark: 0 },
+	);
+	const capture = new Capture({ source: { frames } });
+	const first = new Effect();
+	const second = new Effect();
+	try {
+		await flush();
+		expect(pulls).toBe(1);
+		deliver(1_000);
+		await flush();
+		expect(pulls).toBe(1);
+		expect(open()).toHaveLength(1);
+
+		const fanout = capture.out.frames.peek();
+		if (!fanout) throw new Error("missing fanout");
+		const a = fanout.subscribe(first).getReader();
+		const b = fanout.subscribe(second).getReader();
+		(await a.read()).value?.close();
+		(await b.read()).value?.close();
+		await flush();
+		expect(pulls).toBe(2);
+
+		// One reader leaving does not stop another's capture.
+		first.close();
+		deliver(2_000);
+		(await b.read()).value?.close();
+		await flush();
+		expect(pulls).toBe(3);
+
+		// Stream cancellation and effect teardown must remove demand only once.
+		await b.cancel();
+		second.close();
+		deliver(3_000);
+		await flush();
+		expect(pulls).toBe(3);
+		expect(open()).toHaveLength(1);
+
+		const resumed = new Effect();
+		try {
+			const reader = fanout.subscribe(resumed).getReader();
+			(await reader.read()).value?.close();
+			await flush();
+			expect(pulls).toBe(4);
+			deliver(4_000);
+			(await reader.read()).value?.close();
+			resumed.close();
+			// Settle the read that was already in flight when demand went away.
+			await flush();
+			if (pulls === 5) deliver(5_000);
+			await flush();
+		} finally {
+			resumed.close();
+		}
+	} finally {
+		first.close();
+		second.close();
+		capture.close();
+	}
+	await flush();
+	expect(cancelled).toBe(true);
 	expect(open()).toEqual([]);
 });

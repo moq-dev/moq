@@ -28,6 +28,7 @@ pub struct Stream {
 
 impl Stream {
 	pub(crate) fn new(shared: Shared, id: stream::Id) -> Self {
+		shared.hold();
 		Self {
 			shared,
 			id,
@@ -214,7 +215,13 @@ impl Stream {
 	///
 	/// Cancel-safe.
 	pub async fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
-		poll_fn(|cx| self.parked(cx, Self::wait_received_reset)).await
+		poll_fn(|cx| self.poll_received_reset(cx)).await
+	}
+
+	/// Poll form of [`Self::received_reset`]. It takes no bytes, so a lease in progress is
+	/// left as it was.
+	pub(crate) fn poll_received_reset(&mut self, cx: &Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
+		self.parked(cx, Self::wait_received_reset)
 	}
 
 	fn wait_received_reset(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<VarInt>, Error>> {
@@ -359,12 +366,12 @@ fn fill(chunks: &mut Chunks<'_>, buf: &mut impl BufMut) -> ReadStatus<usize> {
 impl Drop for Stream {
 	fn drop(&mut self) {
 		self.shared.forget_recv(self.id);
-		if self.all_data_read || self.shared.closed().is_some() {
-			return;
+		if !self.all_data_read && self.shared.closed().is_none() {
+			// Fails harmlessly once the stream is gone.
+			let _ = self.shared.conn.borrow_mut().recv_stream(self.id).stop(self.drop_stop);
+			self.shared.kick();
 		}
-		// Fails harmlessly once the stream is gone.
-		let _ = self.shared.conn.borrow_mut().recv_stream(self.id).stop(self.drop_stop);
-		self.shared.kick();
+		self.shared.release();
 	}
 }
 
