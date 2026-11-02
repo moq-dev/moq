@@ -71,7 +71,7 @@ async fn segments_match_their_manifests() {
 
 	let mut config = moq_hls::export::Config::default();
 	config.window = WINDOW;
-	let server = Server::new(pair.subscriber.consume(), config);
+	let server = Server::new(pair.subscriber.consume(), config).expect("server");
 	let app = server.router();
 	let mut seen = Seen::default();
 
@@ -105,10 +105,10 @@ async fn segments_match_their_manifests() {
 	import.finish().expect("finish import");
 	catalog.finish().expect("finish catalog");
 
-	let deadline = moq_clock::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	while seen.poll(&app).await != Polled::Ended {
-		assert!(moq_clock::now() < deadline, "the playlists never ended");
-		moq_clock::sleep(Duration::from_millis(50)).await;
+		assert!(kio::clock::now() < deadline, "the playlists never ended");
+		kio::clock::sleep(Duration::from_millis(50)).await;
 	}
 	let recorded = recorder.finish().await;
 
@@ -118,7 +118,7 @@ async fn segments_match_their_manifests() {
 /// Let everything a chunk produced cross the session: on the paused clock, a sleep ends only once
 /// every task is idle.
 async fn settle() {
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 }
 
 /// Encode the ladder as one transport stream in `dir`.
@@ -219,7 +219,7 @@ struct Recorder {
 
 impl Recorder {
 	async fn start(server: &Server) -> Self {
-		let broadcaster = moq_clock::timeout(TIMEOUT, server.broadcaster("live"))
+		let broadcaster = kio::clock::timeout(TIMEOUT, server.broadcaster("live"))
 			.await
 			.expect("resolve timed out")
 			.expect("announced");
@@ -278,7 +278,7 @@ impl Recorder {
 	/// Wait until each rendition's cursor has recorded the `newest` segment its playlist listed,
 	/// or failed.
 	async fn caught_up(&self, newest: &BTreeMap<&str, u64>) {
-		let deadline = moq_clock::now() + TIMEOUT;
+		let deadline = kio::clock::now() + TIMEOUT;
 		loop {
 			let behind = {
 				let recorded = self.recorded.lock().unwrap();
@@ -297,13 +297,13 @@ impl Recorder {
 			let Some(behind) = behind else {
 				return;
 			};
-			assert!(moq_clock::now() < deadline, "the recording never reached {behind}");
-			moq_clock::sleep(Duration::from_millis(10)).await;
+			assert!(kio::clock::now() < deadline, "the recording never reached {behind}");
+			kio::clock::sleep(Duration::from_millis(10)).await;
 		}
 	}
 
 	async fn finish(self) -> Recorded {
-		moq_clock::timeout(TIMEOUT, self.task)
+		kio::clock::timeout(TIMEOUT, self.task)
 			.await
 			.expect("the recording never ended")
 			.expect("recorder");
@@ -688,7 +688,7 @@ impl Seen {
 /// GET the playlist or manifest at `uri`, or `None` while the export holds the request waiting for
 /// media that only later chunks bring.
 async fn render(app: &axum::Router, uri: &str) -> Option<String> {
-	let response = moq_clock::timeout(HOLD, get(app, uri)).await.ok()?;
+	let response = kio::clock::timeout(HOLD, get(app, uri)).await.ok()?;
 	(response.status() == StatusCode::OK).then(|| String::from_utf8(response.body().to_vec()).expect("utf-8"))
 }
 

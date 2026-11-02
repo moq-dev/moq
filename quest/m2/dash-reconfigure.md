@@ -29,9 +29,8 @@ Choose during implementation by which dash.js and the conformance test
 accept without a reload, and record the choice in the PR. Reuse the
 predecessor window #7436 adds rather than tracking a second one, and update
 `doc/bin/hls.md`. Test that a reconfigure keeps the old segments listed in
-the manifest, and extend the DASH checks of
-[HLS and DASH segment conformance](/quest/m1/hls-conformance.md) if it has
-landed.
+the manifest, and extend the DASH checks of the segment conformance test
+(`rs/moq-hls/tests/integration/conformance.rs`).
 
 Public API: none. Wire: none.
 
