@@ -5,7 +5,7 @@
 An embedder can give a `moq-rtc` WHEP session a bitrate cap, and moq-rtc
 never sends that viewer more media payload than the cap plus a burst,
 retransmits included. The cap counts payload, unlike the
-[QUIC send cap](/quest/m2/rate-quic.md), which counts whole ack-eliciting
+QUIC send cap (`moq_quic::Limits::send_rate`), which counts whole ack-eliciting
 packets, QUIC overhead included. RTP, SRTP, and UDP overhead sits outside
 it: moq-rtc picks the packet sizes, so the overhead per payload byte is
 fixed, and the viewer can't inflate it. This backs moq.pro's
@@ -23,7 +23,7 @@ WHEP enforcement needs it and nobody owned it.
   cap plus burst, skip to the next group, the same whole-group drop
   moq.pro's RTMP play uses. A group that has started is paced through to
   its end even when it, or one of its frames, is larger than the burst, as
-  large frames finish gradually on [QUIC](/quest/m2/rate-quic.md), so an
+  large frames finish gradually on QUIC, so an
   oversized keyframe group still makes progress.
   Dropping individual RTP packets would leave partial frames that corrupt
   the picture and draw NACKs and PLIs nobody can satisfy.

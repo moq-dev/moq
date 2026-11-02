@@ -3330,7 +3330,9 @@ async fn zero_initial_backoff_still_gives_up_on_a_flapping_peer() {
 	let mut client_config = moq_tokio::connect::Config::default();
 	client_config.tls.insecure = Some(true);
 	client_config.backoff.initial = Some((Duration::ZERO).into());
-	client_config.backoff.timeout = Some((Duration::from_millis(500)).into());
+	// Any window catches the bug, since a reset window never runs out; a short one keeps the
+	// redials, each a full handshake, few.
+	client_config.backoff.timeout = Some((Duration::from_millis(100)).into());
 	let client = client_config.init(Default::default()).expect("failed to init client");
 
 	let connection = client.connect(url);

@@ -393,6 +393,12 @@ impl Connection {
 	pub(crate) fn streams_evicted(&self) -> u64 {
 		self.shared.conn.borrow().stats().credit.evicted
 	}
+
+	/// The receive windows now in force: the connection's, and the most one stream holds.
+	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
+		let conn = self.shared.conn.borrow();
+		moq_net::transport::ReceiveWindow::new(conn.receive_window(), conn.stream_receive_window())
+	}
 }
 
 impl Clone for Connection {

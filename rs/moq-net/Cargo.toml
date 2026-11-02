@@ -46,17 +46,20 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
+# Runs the group log's deferred frees before the backing bench reads the live heap.
+crossbeam-epoch = "0.9.21"
 futures = { workspace = true }
 # The tests' executor, with simulated time.
 kio = { path = "../kio", features = ["runtime", "sim"] }
 proptest = { workspace = true }
 serde_json = { workspace = true }
-# The benches run on tokio. test-util (tokio::time::pause/advance) is test-only, so
-# it must not leak into the normal dependency feature set.
-tokio = { workspace = true, features = ["rt", "test-util", "time"] }
-tracing-test = { workspace = true }
+# The benches run on tokio, the session fanout bench across worker threads. test-util
+# (tokio::time::pause/advance) is test-only, so it must not leak into the normal
+# dependency feature set.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "test-util", "time"] }
+workspace-hack = { path = "../workspace-hack" }
 
-# Optional per-thread CPU timing in the session benchmark.
+# Thread and process CPU timing in the session benchmark.
 [target.'cfg(unix)'.dev-dependencies]
 libc = { workspace = true }
 
@@ -124,6 +127,12 @@ required-features = ["fuzz"]
 # Reaches a lite-07 publisher's frame bounds through the hidden `fuzz` module.
 [[bench]]
 name = "ranges"
+harness = false
+required-features = ["fuzz"]
+
+# Receives frames through the private session reader via the hidden `fuzz` module.
+[[bench]]
+name = "backing"
 harness = false
 required-features = ["fuzz"]
 
