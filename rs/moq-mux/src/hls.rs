@@ -377,6 +377,11 @@ pub struct Producer {
 	sink: moq_json::window::Producer<Record>,
 	/// The record track, to abort.
 	track: moq_net::track::Producer,
+	/// What each record is stamped on. A record's own pts can't be the stamp: a keyframe's pts may
+	/// dip below earlier content, and a group may not start before the one it follows.
+	clock: crate::Clock,
+	/// Whether a record was stamped on `clock`, which then can't be swapped for another.
+	stamped: bool,
 }
 
 impl Producer {
@@ -391,12 +396,15 @@ impl Producer {
 			.with_compress(true)
 	}
 
-	/// Publish onto `track`, starting at record zero.
-	pub fn new(track: moq_net::track::Producer) -> Self {
+	/// Publish onto `track`, starting at record zero, stamping each record on `clock`: the
+	/// broadcast's [`Clock`](crate::Clock).
+	pub fn new(track: moq_net::track::Producer, clock: crate::Clock) -> Self {
 		let config = moq_json::window::ProducerConfig::default().with_checkpoint_records(CHECKPOINT_RECORDS);
 		Self {
 			sink: moq_json::window::Producer::new(track.clone(), config),
 			track,
+			clock,
+			stamped: false,
 		}
 	}
 
@@ -410,8 +418,9 @@ impl Producer {
 			});
 		}
 		self.refresh()?;
+		self.stamped = true;
 		self.sink
-			.push(moq_net::Timed::from(record).at(moq_net::Timestamp::now()))
+			.push(moq_net::Timed::from(record).at(self.clock.now()))
 			.map_err(json)
 	}
 
@@ -523,6 +532,8 @@ struct State {
 	/// recorder drops, so a re-enrolled track continues its numbering.
 	tracks: BTreeMap<String, (String, Arc<Mutex<Live>>)>,
 	finished: bool,
+	/// The broadcast clock every record is stamped on.
+	clock: crate::Clock,
 }
 
 /// A broadcast's HLS record tracks, one per enrolled rendition.
@@ -536,14 +547,31 @@ pub(crate) struct Tracks {
 }
 
 impl Tracks {
-	/// Record tracks for tracks of `broadcast`.
-	pub fn new(broadcast: &moq_net::broadcast::Producer) -> Self {
+	/// Record tracks for tracks of `broadcast`, stamped on its `clock`.
+	pub fn new(broadcast: &moq_net::broadcast::Producer, clock: crate::Clock) -> Self {
 		Self {
 			broadcast: broadcast.clone(),
 			state: Arc::new(Mutex::new(State {
 				tracks: BTreeMap::new(),
 				finished: false,
+				clock,
 			})),
+		}
+	}
+
+	/// Stamp later records on `clock`, which the catalog moved to before anything fixed it.
+	///
+	/// A record track that already stamped one keeps its clock: the move may read earlier, and a
+	/// track's timestamps never go back.
+	pub fn retime(&self, clock: &crate::Clock) {
+		let mut state = self.state.lock().unwrap();
+		state.clock = clock.clone();
+		for (_, live) in state.tracks.values() {
+			if let Some(output) = live.lock().unwrap().output.as_mut()
+				&& !output.stamped
+			{
+				output.clock = clock.clone();
+			}
 		}
 	}
 
@@ -584,7 +612,7 @@ impl Tracks {
 				let live = Arc::new(Mutex::new(Live {
 					segmenter: segmenter(0),
 					on_declare: None,
-					output: Some(Producer::new(track)),
+					output: Some(Producer::new(track, state.clock.clone())),
 					recording: true,
 				}));
 				state
@@ -1164,7 +1192,7 @@ mod test {
 	#[tokio::test]
 	async fn renditions_cut_alike_without_sharing_state() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		let mut video = tracks.track("video", hinted()).unwrap();
 		let mut audio = tracks.track("audio", hinted()).unwrap();
 		let mut late = tracks.track("late", hinted()).unwrap();
@@ -1212,7 +1240,7 @@ mod test {
 	#[test]
 	fn an_unhinted_track_is_advertised_once_declared() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		let mut recorder = tracks.track("video", Config::default()).unwrap();
 		recorder.frame(0, ms(0));
 		assert_eq!(tracks.hls("video"), None);
@@ -1226,7 +1254,7 @@ mod test {
 	#[tokio::test]
 	async fn a_rejected_report_fails_the_record_track() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		let mut recorder = tracks.track("video", hinted()).unwrap();
 		let hls = tracks.hls("video").unwrap();
 		let mut consumer = Consumer::subscribe(&broadcast.consume(), &hls).await.unwrap();
@@ -1248,7 +1276,7 @@ mod test {
 	#[tokio::test]
 	async fn re_enrolling_continues_the_numbering() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		let mut recorder = tracks.track("video", hinted()).unwrap();
 		assert!(tracks.track("video", hinted()).is_err(), "its recorder is still alive");
 		recorder.frame(0, ms(0));
@@ -1275,7 +1303,7 @@ mod test {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let media = broadcast.create_track("video", None).unwrap();
 		let demand = media.demand();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		let mut recorder = tracks.track("video", hinted()).unwrap();
 		recorder.lend(&media);
 		assert_eq!(demand.wanted(), None, "nobody reads the records yet");
@@ -1303,7 +1331,7 @@ mod test {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let media = broadcast.create_track("video", None).unwrap();
 		let demand = media.demand();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		let mut recorder = tracks.track("video", hinted()).unwrap();
 		recorder.lend(&media);
 
@@ -1330,14 +1358,14 @@ mod test {
 	fn a_taken_record_track_name_fails_enrollment() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let _taken = broadcast.create_track("video.hls", None).unwrap();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		assert!(tracks.track("video", Config::default()).is_err());
 	}
 
 	#[test]
 	fn enrollment_after_finish_is_refused() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		tracks.finish();
 		assert!(tracks.track("video", Config::default()).is_err());
 	}
