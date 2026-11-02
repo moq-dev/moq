@@ -16,6 +16,9 @@ file runs alone. Three agents hit this on 2026-11-01:
 main), and [moq-dev/moq#7296](https://github.com/moq-dev/moq/pull/7296)'s
 area. One failure fails a whole land batch's `test js`.
 
+#7296 has since landed and reworked these cases (lite-05/06 now wait for the
+subscriber's FIN), so first reproduce the flake on main as it is now.
+
 Look for wall-clock waits, or ordering that depends on the event loop's load,
 and drive them with the manual clock.
 
