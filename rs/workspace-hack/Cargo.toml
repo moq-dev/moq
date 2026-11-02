@@ -27,7 +27,6 @@ publish = false
 anyhow = { version = "1", features = ["backtrace"] }
 aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 aws-lc-sys = { version = "0.46", default-features = false, features = ["prebuilt-nasm"] }
-axum = { version = "0.8", default-features = false, features = ["form", "http1", "json", "matched-path", "original-uri", "query", "tracing", "ws"] }
 base16ct = { version = "1", default-features = false, features = ["alloc"] }
 base64 = { version = "0.23" }
 bitflags = { version = "2", default-features = false, features = ["std"] }
@@ -66,7 +65,6 @@ futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
-getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4" }
 hmac = { version = "0.12", default-features = false, features = ["reset"] }
@@ -86,7 +84,7 @@ num-complex = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
-object_store = { version = "0.14", default-features = false, features = ["aws", "azure", "fs", "gcp"] }
+object_store = { version = "0.14", default-features = false, features = ["aws", "azure-base", "fs", "gcp-base"] }
 once_cell = { version = "1" }
 percent-encoding = { version = "2" }
 pkcs1 = { version = "0.7", default-features = false, features = ["pem", "pkcs8", "std"] }
@@ -112,7 +110,6 @@ serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["preserve_order", "raw_value", "unbounded_depth"] }
 serde_spanned = { version = "1", default-features = false, features = ["serde", "std"] }
 serde_with = { version = "3", features = ["base64", "hex", "json"] }
-sha1 = { version = "0.10" }
 sha2-93f6ce9d446188ac = { package = "sha2", version = "0.10" }
 sha2-a6292c17cd707f01 = { package = "sha2", version = "0.11" }
 signature-7b89eefb6aaa9bf3 = { package = "signature", version = "3", default-features = false, features = ["alloc", "digest", "rand_core"] }
@@ -136,7 +133,6 @@ toml = { version = "1" }
 toml_datetime = { version = "1", features = ["serde"] }
 toml_parser = { version = "1" }
 tower = { version = "0.5", default-features = false, features = ["make", "util"] }
-tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] }
 tungstenite = { version = "0.30", default-features = false, features = ["__rustls-tls", "handshake"] }
@@ -153,7 +149,6 @@ zeroize = { version = "1", features = ["derive"] }
 anyhow = { version = "1", features = ["backtrace"] }
 aws-lc-rs = { version = "1", features = ["prebuilt-nasm"] }
 aws-lc-sys = { version = "0.46", default-features = false, features = ["prebuilt-nasm"] }
-axum = { version = "0.8", default-features = false, features = ["form", "http1", "json", "matched-path", "original-uri", "query", "tracing", "ws"] }
 base16ct = { version = "1", default-features = false, features = ["alloc"] }
 base64 = { version = "0.23" }
 bitflags = { version = "2", default-features = false, features = ["std"] }
@@ -195,7 +190,6 @@ futures-sink = { version = "0.3" }
 futures-task = { version = "0.3", default-features = false, features = ["std"] }
 futures-util = { version = "0.3", features = ["channel", "io", "sink"] }
 getrandom-6f8ce4dd05d13bba = { package = "getrandom", version = "0.2", default-features = false, features = ["std"] }
-getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 hashbrown = { version = "0.17", default-features = false, features = ["default-hasher", "inline-more"] }
 hex = { version = "0.4" }
 hmac = { version = "0.12", default-features = false, features = ["reset"] }
@@ -215,7 +209,7 @@ num-complex = { version = "0.4" }
 num-integer = { version = "0.1", features = ["i128"] }
 num-iter = { version = "0.1", default-features = false, features = ["i128", "std"] }
 num-traits = { version = "0.2", features = ["i128", "libm"] }
-object_store = { version = "0.14", default-features = false, features = ["aws", "azure", "fs", "gcp"] }
+object_store = { version = "0.14", default-features = false, features = ["aws", "azure-base", "fs", "gcp-base"] }
 once_cell = { version = "1" }
 percent-encoding = { version = "2" }
 pkcs1 = { version = "0.7", default-features = false, features = ["pem", "pkcs8", "std"] }
@@ -243,7 +237,6 @@ serde_core = { version = "1", features = ["alloc", "rc"] }
 serde_json = { version = "1", features = ["preserve_order", "raw_value", "unbounded_depth"] }
 serde_spanned = { version = "1", default-features = false, features = ["serde", "std"] }
 serde_with = { version = "3", features = ["base64", "hex", "json"] }
-sha1 = { version = "0.10" }
 sha2-93f6ce9d446188ac = { package = "sha2", version = "0.10" }
 sha2-a6292c17cd707f01 = { package = "sha2", version = "0.11" }
 signature-7b89eefb6aaa9bf3 = { package = "signature", version = "3", default-features = false, features = ["alloc", "digest", "rand_core"] }
@@ -269,7 +262,6 @@ toml = { version = "1" }
 toml_datetime = { version = "1", features = ["serde"] }
 toml_parser = { version = "1" }
 tower = { version = "0.5", default-features = false, features = ["make", "util"] }
-tracing = { version = "0.1" }
 tracing-core = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] }
 tungstenite = { version = "0.30", default-features = false, features = ["__rustls-tls", "handshake"] }
@@ -289,6 +281,7 @@ block2 = { version = "0.6" }
 crossbeam-epoch = { version = "0.9" }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
+getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -313,7 +306,7 @@ spin-93f6ce9d446188ac = { package = "spin", version = "0.10", default-features =
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
-tracing = { version = "0.1", default-features = false, features = ["log"] }
+tracing = { version = "0.1", features = ["log"] }
 wgpu = { version = "30", features = ["fragile-send-sync-non-atomic-wasm", "webgl"] }
 wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "metal", "portable-atomic", "renderdoc", "vulkan", "webgl", "wgsl"] }
 wgpu-hal = { version = "30", default-features = false, features = ["fragile-send-sync-non-atomic-wasm", "metal", "portable-atomic"] }
@@ -327,6 +320,7 @@ block2 = { version = "0.6" }
 crossbeam-epoch = { version = "0.9" }
 dispatch2 = { version = "0.3" }
 errno = { version = "0.3" }
+getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -351,7 +345,7 @@ spin-93f6ce9d446188ac = { package = "spin", version = "0.10", default-features =
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
-tracing = { version = "0.1", default-features = false, features = ["log"] }
+tracing = { version = "0.1", features = ["log"] }
 wgpu = { version = "30", features = ["fragile-send-sync-non-atomic-wasm", "webgl"] }
 wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "metal", "portable-atomic", "renderdoc", "vulkan", "webgl", "wgsl"] }
 wgpu-hal = { version = "30", default-features = false, features = ["fragile-send-sync-non-atomic-wasm", "metal", "portable-atomic"] }
@@ -368,6 +362,7 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 futures-lite = { version = "2" }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -392,7 +387,7 @@ tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
-tracing = { version = "0.1", default-features = false, features = ["log"] }
+tracing = { version = "0.1", features = ["log"] }
 uuid = { version = "1", default-features = false, features = ["serde"] }
 wgpu = { version = "30", features = ["fragile-send-sync-non-atomic-wasm", "webgl"] }
 wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "metal", "portable-atomic", "renderdoc", "vulkan", "webgl", "wgsl"] }
@@ -411,6 +406,7 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 futures-lite = { version = "2" }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -432,7 +428,7 @@ tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
-tracing = { version = "0.1", default-features = false, features = ["log"] }
+tracing = { version = "0.1", features = ["log"] }
 uuid = { version = "1", default-features = false, features = ["serde"] }
 wgpu = { version = "30", features = ["fragile-send-sync-non-atomic-wasm", "webgl"] }
 wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "metal", "portable-atomic", "renderdoc", "vulkan", "webgl", "wgsl"] }
@@ -444,6 +440,7 @@ zerocopy = { version = "0.8", default-features = false, features = ["derive", "s
 [target.x86_64-pc-windows-msvc.dependencies]
 arrayvec = { version = "0.7" }
 crossbeam-epoch = { version = "0.9" }
+getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -453,7 +450,7 @@ spin-93f6ce9d446188ac = { package = "spin", version = "0.10", default-features =
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
-tracing = { version = "0.1", default-features = false, features = ["log"] }
+tracing = { version = "0.1", features = ["log"] }
 wgpu = { version = "30", features = ["fragile-send-sync-non-atomic-wasm", "webgl"] }
 wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "metal", "portable-atomic", "renderdoc", "vulkan", "webgl", "wgsl"] }
 wgpu-hal = { version = "30", default-features = false, features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "portable-atomic", "renderdoc", "vulkan"] }
@@ -470,6 +467,7 @@ zerocopy = { version = "0.8", default-features = false, features = ["derive", "s
 [target.x86_64-pc-windows-msvc.build-dependencies]
 arrayvec = { version = "0.7" }
 crossbeam-epoch = { version = "0.9" }
+getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -479,7 +477,7 @@ spin-93f6ce9d446188ac = { package = "spin", version = "0.10", default-features =
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
-tracing = { version = "0.1", default-features = false, features = ["log"] }
+tracing = { version = "0.1", features = ["log"] }
 wgpu = { version = "30", features = ["fragile-send-sync-non-atomic-wasm", "webgl"] }
 wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "metal", "portable-atomic", "renderdoc", "vulkan", "webgl", "wgsl"] }
 wgpu-hal = { version = "30", default-features = false, features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "portable-atomic", "renderdoc", "vulkan"] }
@@ -502,6 +500,7 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 futures-lite = { version = "2" }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -526,7 +525,7 @@ tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
-tracing = { version = "0.1", default-features = false, features = ["log"] }
+tracing = { version = "0.1", features = ["log"] }
 uuid = { version = "1", default-features = false, features = ["serde"] }
 wgpu = { version = "30", features = ["fragile-send-sync-non-atomic-wasm", "webgl"] }
 wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "metal", "portable-atomic", "renderdoc", "vulkan", "webgl", "wgsl"] }
@@ -545,6 +544,7 @@ event-listener = { version = "5" }
 event-listener-strategy = { version = "0.5" }
 futures-lite = { version = "2" }
 getrandom-468e82937335b1c9 = { package = "getrandom", version = "0.3", default-features = false, features = ["std"] }
+getrandom-9fbad63c4bcf4a8f = { package = "getrandom", version = "0.4", default-features = false, features = ["std", "sys_rng"] }
 half = { version = "2", default-features = false, features = ["num-traits"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12"] }
 hyper-util = { version = "0.1", default-features = false, features = ["client-legacy", "client-proxy"] }
@@ -566,7 +566,7 @@ tokio = { version = "1", default-features = false, features = ["tracing"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
 tower = { version = "0.5", default-features = false, features = ["retry", "timeout"] }
 tower-http = { version = "0.6", default-features = false, features = ["decompression-gzip", "follow-redirect"] }
-tracing = { version = "0.1", default-features = false, features = ["log"] }
+tracing = { version = "0.1", features = ["log"] }
 uuid = { version = "1", default-features = false, features = ["serde"] }
 wgpu = { version = "30", features = ["fragile-send-sync-non-atomic-wasm", "webgl"] }
 wgpu-core = { version = "30", features = ["dx12", "fragile-send-sync-non-atomic-wasm", "gles", "metal", "portable-atomic", "renderdoc", "vulkan", "webgl", "wgsl"] }

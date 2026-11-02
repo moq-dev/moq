@@ -60,12 +60,19 @@ test("self-hosted queue jobs use local caches without R2 credentials", async () 
 		.replaceAll("inputs.secret-access-key", 'inputs["secret-access-key"]')
 		.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
 	const backend = new Function("runner", "inputs", `return (${expression});`);
-	const guard = new Function("runner", "github", `return (${action.runs.steps[0].if});`);
-	for (const name of ["Land", "Check", "Untrusted"]) {
-		for (const ref of ["refs/heads/main", "refs/heads/feature", "refs/pull/1/merge"]) {
-			const github = { workflow: name, ref };
-			expect(guard({ environment: "self-hosted" }, github)).toBe(name !== "Land" || ref !== "refs/heads/main");
-			expect(guard({ environment: "github-hosted" }, github)).toBe(false);
+	// GitHub's expression `startsWith`, so the guard evaluates as written.
+	const startsWith = (value: string, prefix: string) => value.startsWith(prefix);
+	const guard = new Function("runner", "github", "startsWith", `return (${action.runs.steps[0].if});`);
+	const queue = "refs/heads/gh-readonly-queue/main/pr-1-0123456789abcdef0123456789abcdef01234567";
+	const refs = ["refs/heads/main", "refs/heads/feature", "refs/pull/1/merge", queue, "refs/heads/gh-readonly-queue/release/pr-1-0"];
+	for (const name of ["Queue", "Land", "Check", "Untrusted"]) {
+		for (const event of ["merge_group", "pull_request", "push"]) {
+			for (const ref of refs) {
+				const github = { workflow: name, event_name: event, ref };
+				const trusted = name === "Queue" && event === "merge_group" && ref === queue;
+				expect(guard({ environment: "self-hosted" }, github, startsWith)).toBe(!trusted);
+				expect(guard({ environment: "github-hosted" }, github, startsWith)).toBe(false);
+			}
 		}
 	}
 	for (const credentials of [

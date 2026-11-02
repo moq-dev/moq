@@ -5,16 +5,17 @@ version = "0.1.0"
 edition = "2024"
 rust-version.workspace = true
 repository = "https://github.com/moq-dev/moq"
-license = "MIT OR Apache-2.0"
+license = "(MIT OR Apache-2.0) AND BSD-3-Clause"
 
 [features]
-# Test-only `Bbr3Config::probe_rng_seed`, for moq-quic's deterministic transport tests.
+# Test-only `bbr3::Config::probe_rng_seed`, for moq-quic's deterministic transport tests.
 testing = []
 
 [dependencies]
 kio = { workspace = true }
 rand = { workspace = true }
 rand_pcg = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 cpu-time = "1.0.0"

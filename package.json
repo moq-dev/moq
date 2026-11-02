@@ -2,7 +2,7 @@
 	"name": "moq",
 	"version": "0.0.0",
 	"devDependencies": {
-		"@babel/parser": "^8.0.7",
+		"@babel/parser": "^8.0.8",
 		"@biomejs/biome": "^2.6.4",
 		"concurrently": "^10.0.6",
 		"markdown-extensions": "^2.0.0",
@@ -67,7 +67,8 @@
 		"test/receive-credit",
 		"test/video",
 		"test/p2p",
-		"test/qmux"
+		"test/qmux",
+		"test/worklet"
 	],
 	"patchedDependencies": {
 		"typedoc@0.28.20": "patches/typedoc@0.28.20.patch"

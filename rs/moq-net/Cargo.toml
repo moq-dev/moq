@@ -15,10 +15,11 @@ categories = ["multimedia", "network-programming", "web-programming"]
 [features]
 default = ["async"]
 # Runtime-backed helpers and Lite/IETF sessions; explicit-time model drivers stay available.
-async = ["dep:futures", "kio/runtime"]
+async = ["dep:futures", "kio/async", "kio/runtime"]
 
 # Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, frame, and canonical storage benches,
-# and session views of an origin to the viewers bench, through the hidden `fuzz` module. Off by
+# session views of an origin to the viewers bench, and the lite publisher's run loop to the
+# publisher bench, through the hidden `fuzz` module. Off by
 # default and hidden from the docs.
 fuzz = ["async"]
 
@@ -45,18 +46,21 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
+# Runs the group log's deferred frees before the backing bench reads the live heap.
+crossbeam-epoch = "0.9.21"
 futures = { workspace = true }
 # The tests' executor, with simulated time.
 kio = { path = "../kio", features = ["runtime", "sim"] }
 proptest = { workspace = true }
 serde_json = { workspace = true }
-# The benches run on tokio. test-util (tokio::time::pause/advance) is test-only, so
-# it must not leak into the normal dependency feature set.
-tokio = { workspace = true, features = ["rt", "test-util", "time"] }
+# The benches run on tokio, the session fanout bench across worker threads. test-util
+# (tokio::time::pause/advance) is test-only, so it must not leak into the normal
+# dependency feature set.
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "test-util", "time"] }
 tracing-test = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
 
-# Optional per-thread CPU timing in the session benchmark.
+# Thread and process CPU timing in the session benchmark.
 [target.'cfg(unix)'.dev-dependencies]
 libc = { workspace = true }
 
@@ -121,6 +125,12 @@ name = "frame"
 harness = false
 required-features = ["fuzz"]
 
+# Receives frames through the private session reader via the hidden `fuzz` module.
+[[bench]]
+name = "backing"
+harness = false
+required-features = ["fuzz"]
+
 [[bench]]
 name = "group"
 harness = false
@@ -141,6 +151,12 @@ harness = false
 
 [[bench]]
 name = "tail"
+harness = false
+required-features = ["fuzz"]
+
+# Drives the lite publisher's run loop through the hidden `fuzz` module.
+[[bench]]
+name = "publisher"
 harness = false
 required-features = ["fuzz"]
 

@@ -88,12 +88,13 @@ public enum Audio {
             rendition: Media.Audio,
             output: DecoderOutput
         ) async throws -> Consumer {
-            Consumer(try await MoqAudioConsumer.subscribe(
-                broadcast: broadcast.ffi,
-                id: id,
-                catalogAudio: rendition,
-                output: output
-            ))
+            Consumer(
+                try await MoqAudioConsumer.subscribe(
+                    broadcast: broadcast.ffi,
+                    id: id,
+                    catalogAudio: rendition,
+                    output: output
+                ))
         }
 
         /// The next frame, gap, or end, or `nil` once the track ends or is closed.

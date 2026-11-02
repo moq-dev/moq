@@ -4,7 +4,16 @@ import { Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
-import { error, ProtocolViolation, SessionCode, SessionError, StreamCode, unauthorized } from "../error.ts";
+import {
+	error,
+	fromTransport,
+	ProtocolViolation,
+	SessionCode,
+	SessionError,
+	StreamCode,
+	Stream as StreamError,
+	unauthorized,
+} from "../error.ts";
 import { type Hop, HopSchema } from "../hop.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, SessionBroadcast } from "../mock.ts";
@@ -210,6 +219,8 @@ function requestStream(version: IetfVersion) {
 		wire: () => new Reader(undefined, Uint8Array.from(written), version),
 		send: (bytes: Uint8Array) => input.enqueue(bytes),
 		cancel: () => input.error(new Error("request cancelled")),
+		/** FIN the request's side: the requester has nothing more to send. */
+		finish: () => input.close(),
 		/**
 		 * End the request as `version` cancels one: by FIN through draft 18, and by a reset
 		 * after.
@@ -275,6 +286,33 @@ test("TRACK_STATUS is answered on every draft without subscribing", async () => 
 			expect(ok.properties).toEqual(expected);
 			origin.close();
 		}
+	}
+});
+
+// A requester may FIN right after TRACK_STATUS, since nothing can follow it (moxygen does).
+// That only ends its input, so the request is still answered, on draft 18 too.
+test("TRACK_STATUS finished at once is answered on every draft", async () => {
+	for (const version of IETF_VERSIONS) {
+		const pair = createMockTransportPair(ALPNS[version]);
+		const session = new NativeSession(pair.server, version, true);
+		const { pub, origin } = publisher(pair.server, { session });
+		const requests = origin.requestsRoute(Path.from("room")).requested();
+
+		// The FIN arrives while the broadcast still resolves.
+		const { stream, wire, finish } = requestStream(version);
+		const task = pub.runTrackStatusRequest(trackStatus("room"), stream);
+		const pending = (await requests.next()).value;
+		if (!pending) throw new Error("no request for room");
+		finish();
+		const served = new BroadcastProducer();
+		served.createTrack("video");
+		hooks.acceptRequest(pending, served);
+		await task;
+		expect(await wire().u53()).toBe(TrackStatusOk.id);
+
+		await requests.return?.();
+		served.close();
+		origin.close();
 	}
 });
 
@@ -2067,6 +2105,8 @@ test("subscription completion sends PUBLISH_DONE on every supported draft", asyn
 			[new Error("failed"), 0x0],
 			[unauthorized("test"), 0x1],
 			[new SessionError(SessionCode.Expired), 0x1],
+			// So does a malformed upstream: MALFORMED_TRACK, so the subscriber can tell it from a bug here.
+			[new StreamError(StreamCode.MalformedTrack), 0x12],
 		] as const) {
 			const pair = createMockTransportPair(ALPN.DRAFT_18);
 			const session = new NativeSession(pair.server, version, true);
@@ -3598,17 +3638,22 @@ test("a paused SUBSCRIBE ends once its grant is revoked", async () => {
 });
 
 // The track has no max age, so only the pause itself can release a write parked on flow control.
-test("a pause resets a group stream parked on flow control", async () => {
-	const fx = fixture(V22);
+// A group stream whose writes never complete, recording the reason it was reset with.
+function stalledStream() {
 	let writing!: () => void;
 	const parked = new Promise<void>((resolve) => {
 		writing = resolve;
 	});
-	let reset = false;
-	const stalled = new WritableStream<Uint8Array>({
+	const state: { reset?: unknown } = {};
+	let abort!: (reason: unknown) => void;
+	const aborted = new Promise<unknown>((resolve) => {
+		abort = resolve;
+	});
+	const stream = new WritableStream<Uint8Array>({
 		start(controller) {
 			controller.signal.addEventListener("abort", () => {
-				reset = true;
+				state.reset = controller.signal.reason;
+				abort(controller.signal.reason);
 			});
 		},
 		write() {
@@ -3616,6 +3661,13 @@ test("a pause resets a group stream parked on flow control", async () => {
 			return new Promise<void>(() => {});
 		},
 	});
+	return { stream, parked, state, aborted };
+}
+
+// CANCELLED, as the draft asks of a reset the subscriber caused, whichever write it interrupts.
+test("a pause resets a group stream parked on flow control", async () => {
+	const fx = fixture(V22);
+	const { stream: stalled, parked, state } = stalledStream();
 	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const { client } = await runSubscribe(
@@ -3636,8 +3688,45 @@ test("a pause resets a group stream parked on flow control", async () => {
 		await client.writer.u53(SubscribeUpdate.id);
 		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, V22);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
-		expect(reset).toBe(true);
+		expect(state.reset).toBeDefined();
+		expect(fromTransport(state.reset, { version: V22 })).toMatchObject({ code: StreamCode.Cancel });
 	} finally {
+		client.close();
+		track.finish();
+		track.close();
+		fx.close();
+	}
+});
+
+// A range update that excludes a group mid-write resets its stream with CANCELLED too.
+test("draft-22: narrowing resets a group stream parked on flow control", async () => {
+	const fx = fixture(V22);
+	const { stream: stalled, parked, aborted } = stalledStream();
+	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 128,
+			filter: { kind: "nextObject" },
+		}),
+	);
+	const open = track.appendGroup();
+	try {
+		open.writeFrame({ payload: new TextEncoder().encode("parked"), timestamp: Timestamp.now() });
+		await parked;
+		const parameters = new Parameters();
+		parameters.subscriptionFilter = { kind: "absolute", startGroup: 1n, startObject: 0n };
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, V22);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		const reason = await timeout(Nano.fromMilli(Milli(1000)), aborted);
+		expect(fromTransport(reason, { version: V22 })).toMatchObject({ code: StreamCode.Cancel });
+	} finally {
+		open.finish();
 		client.close();
 		track.finish();
 		track.close();

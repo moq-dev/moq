@@ -89,6 +89,68 @@ pub fn machine(args: proc_macro::TokenStream, item: proc_macro::TokenStream) -> 
 }
 
 mod sim_test;
+mod wrapper;
+
+/// Generate the `async fn` that waits on a `poll_*` method.
+///
+/// On `poll_<name>`, it adds `async fn <name>` beside it, `kio::wait`ing on the poll.
+/// The wrapper takes the poll's receiver and arguments, minus the waiter, and returns
+/// what the poll is ready with. It copies the poll's visibility, generics, docs, `cfg`,
+/// and deprecation, then links back to the poll. The poll stays as written, so its
+/// docs describe both forms: what the call is ready with, not how it registers.
+///
+/// ```
+/// use std::task::Poll;
+///
+/// struct Counter {
+///     values: kio::Queue<u64>,
+/// }
+///
+/// impl Counter {
+///     /// The next value at or above `min`, skipping smaller ones.
+///     #[kio::wrapper]
+///     fn poll_at_least(&self, waiter: &kio::Waiter, min: u64) -> Poll<Result<u64, kio::Closed>> {
+///         loop {
+///             match self.values.poll_pop(waiter) {
+///                 Poll::Ready(Ok(value)) if value < min => continue,
+///                 other => return other,
+///             }
+///         }
+///     }
+/// }
+///
+/// # async fn demo(counter: Counter) -> Result<u64, kio::Closed> {
+/// // Generated: `async fn at_least(&self, min: u64) -> Result<u64, kio::Closed>`.
+/// counter.at_least(10).await
+/// # }
+/// ```
+///
+/// A library keeps its wrappers behind its `async` feature, and its poll-only build
+/// free of this macro, with `#[cfg_attr(feature = "async", kio::wrapper)]`.
+///
+/// The poll must:
+///
+/// - Be a method taking `&self` or `&mut self`, not `async`, `const`, `unsafe`, or
+///   `extern`.
+/// - Take exactly one `&Waiter` (any path ending in `Waiter`), in any position.
+/// - Bind every other argument to a plain name (`mut` is dropped). The wrapper passes
+///   each one to every poll unchanged, so it must be `Copy` or a reference; rustc
+///   reports the move from the closure otherwise.
+/// - Return `Poll<T>` (any path ending in `Poll`). The wrapper returns `T`.
+///
+/// Other attributes, such as `#[track_caller]` or `#[inline]`, stay on the poll alone.
+#[proc_macro_attribute]
+pub fn wrapper(args: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+	let method = parse_macro_input!(item as syn::ImplItemFn);
+	// A rejected poll still compiles, so the error is the only one reported.
+	wrapper::expand(args.into(), &method)
+		.unwrap_or_else(|err| {
+			let mut out = method.to_token_stream();
+			out.extend(err.into_compile_error());
+			out
+		})
+		.into()
+}
 
 /// Run an `async fn` test to completion on `kio::clock::sim::run`.
 #[proc_macro_attribute]

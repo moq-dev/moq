@@ -157,7 +157,6 @@ Extractor declaration checks, which analyze only published packages since
 
 - [Peer grants](/quest/m2/p2p/peer-grant.md) - the relay issues a key-bound, asymmetrically signed grant a browser can verify; HS256 keys issue none
 - [Signaling and policy](/quest/m2/p2p/signal.md) - opted-in peers find each other under the prefix, the application picks who to dial, and the roster-size gate decides whether STUN is used
-- [UDP demux](/quest/m2/p2p/udp-demux.md) - one classifier splits QUIC from STUN and WebRTC on the relay's socket and on a native pair's
 - [Native pairs over ICE and QUIC](/quest/m2/p2p/native-quic.md) - two native peers connect through ICE, then `moq-quic` over the nominated path with fingerprints pinned from the offer
 - [moq-cli joins](/quest/m2/p2p/cli.md) - `--p2p` publishes a roster entry, dials native peers over ICE and QUIC, and serves browsers as a transit hop
 - [Peer route policy](/quest/m2/p2p/cost-scopes.md) - application priorities and total cost choose eligible routes, with epoch-aware handover

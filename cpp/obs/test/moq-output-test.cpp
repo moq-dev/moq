@@ -684,7 +684,8 @@ int main()
 
 			// Everything up to the last frame, then the end of the track.
 			bool ended = false;
-			uint64_t last_timestamp = first_frame ? first_frame->frame.timestamp_us : 0;
+			// Reads come back at the track's one scale, so values compare directly.
+			uint64_t last_timestamp = first_frame ? first_frame->frame.timestamp.value : 0;
 			for (;;) {
 				next = media->next();
 				if (next.wait_for(std::chrono::seconds(10)) != std::future_status::ready)
@@ -698,10 +699,10 @@ int main()
 				}
 				CHECK(!std::holds_alternative<moq::MediaRead::kGap>((*result)->get_variant()));
 				if (const auto *frame = std::get_if<moq::MediaRead::kFrame>(&(*result)->get_variant()))
-					last_timestamp = frame->frame.timestamp_us;
+					last_timestamp = frame->frame.timestamp.value;
 			}
 			CHECK(ended);
-			CHECK(first_frame && last_timestamp > first_frame->frame.timestamp_us);
+			CHECK(first_frame && last_timestamp > first_frame->frame.timestamp.value);
 		}
 	}
 	printf("stop drains the session: ok\n");

@@ -582,7 +582,7 @@ test("version lists keep their defaults and explicit false booleans round-trip",
 			await customElements.whenDefined("moq-watch");
 			const watch = document.createElement("moq-watch");
 			const versions = [];
-			for (const value of ["moq-transport-14", " moq-lite-06 , moq-transport-22 ", "", " , ", null]) {
+			for (const value of ["moq-transport-18", " moq-lite-06 , moq-transport-22 ", "", " , ", null]) {
 				if (value === null) watch.removeAttribute("versions");
 				else watch.setAttribute("versions", value);
 				versions.push(watch.versions);
@@ -593,7 +593,7 @@ test("version lists keep their defaults and explicit false booleans round-trip",
 			return { versions, follow };
 		});
 		expect(result).toEqual({
-			versions: [["moq-transport-14"], ["moq-lite-06", "moq-transport-22"], undefined, undefined, undefined],
+			versions: [["moq-transport-18"], ["moq-lite-06", "moq-transport-22"], undefined, undefined, undefined],
 			follow: false,
 		});
 	} finally {
@@ -643,7 +643,7 @@ test("version lists refuse unsupported, duplicate, and empty lists and snapshot 
 						return error instanceof TypeError && element.versions === undefined;
 					}
 				});
-				const list = ["moq-lite-06", "moq-transport-14"];
+				const list = ["moq-lite-06", "moq-transport-18"];
 				element.versions = list;
 				list.push("moq-lite-05");
 				const snapshot = element.versions;
@@ -661,8 +661,8 @@ test("version lists refuse unsupported, duplicate, and empty lists and snapshot 
 				tag: result.tag,
 				markup: [true, true],
 				thrown: [true, true, true],
-				snapshot: ["moq-lite-06", "moq-transport-14"],
-				reflected: "moq-lite-06,moq-transport-14",
+				snapshot: ["moq-lite-06", "moq-transport-18"],
+				reflected: "moq-lite-06,moq-transport-18",
 			});
 	} finally {
 		await browser.close();

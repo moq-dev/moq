@@ -41,7 +41,14 @@ def media(pictures=50):
     """A clip of `pictures` 40 ms apart, each followed by enough null slots for its KLV."""
     out = [
         psi(0, section(0x00, 1, bytes([0, 1, 0xE0 | PMT >> 8, PMT & 0xFF]))),
-        psi(PMT, section(0x02, 1, bytes([0xE0 | VIDEO >> 8, VIDEO & 0xFF, 0xF0, 0, 0x1B, 0xE0 | VIDEO >> 8, VIDEO & 0xFF, 0xF0, 0]))),
+        psi(
+            PMT,
+            section(
+                0x02,
+                1,
+                bytes([0xE0 | VIDEO >> 8, VIDEO & 0xFF, 0xF0, 0, 0x1B, 0xE0 | VIDEO >> 8, VIDEO & 0xFF, 0xF0, 0]),
+            ),
+        ),
     ]
     for k in range(pictures):
         out.append(picture(k, 27_000_000 + k * 40 * 27_000))
@@ -110,15 +117,23 @@ class Klv(unittest.TestCase):
         for pes in self.pes[klv.SYNC_PID]:
             at = pes.at + 9
             value = (klv.clock_value(capture[at : at + 5]) + delta) % klv.PTS_WRAP
-            capture = edit(capture, at, lambda out, at, value=value: out.__setitem__(slice(at, at + 5), klv.clock_field(0x2, value)))
+            capture = edit(
+                capture,
+                at,
+                lambda out, at, value=value: out.__setitem__(slice(at, at + 5), klv.clock_field(0x2, value)),
+            )
         self.assertEqual(klv.grade(self.source, restamp(capture, delta * 300))["shift"], delta)
         # One clock moved apart from the rest.
         at = self.pes[klv.SYNC_PID][7].at + 9
-        self.assertFails("shift", edit(capture, at, lambda out, at: out.__setitem__(slice(at, at + 5), klv.clock_field(0x2, 0))))
+        self.assertFails(
+            "shift", edit(capture, at, lambda out, at: out.__setitem__(slice(at, at + 5), klv.clock_field(0x2, 0)))
+        )
 
     def test_a_dropped_pes_fails(self):
         at = self.pes[klv.SYNC_PID][10].at // klv.SIZE * klv.SIZE
-        self.assertFails("missing", edit(self.source, at, lambda out, at: out.__setitem__(slice(at, at + klv.SIZE), null())))
+        self.assertFails(
+            "missing", edit(self.source, at, lambda out, at: out.__setitem__(slice(at, at + klv.SIZE), null()))
+        )
 
     def test_a_changed_byte_fails(self):
         at = self.pes[klv.ASYNC_PID][1].at + 30

@@ -15,9 +15,11 @@ WORKDIR /src
 
 # rust-toolchain.toml pins the toolchain; rustup installs it on first use.
 # CI runs tests with nextest, one process per test, and some tests rely on that isolation.
+# The version is the one .github/workflows/platform.yml installs; bump them together.
+ARG NEXTEST_VERSION=0.9.146
 RUN rustup show active-toolchain || rustup toolchain install \
     && case "$(uname -m)" in aarch64) nextest=linux-arm ;; *) nextest=linux ;; esac \
-    && curl -LsSf "https://get.nexte.st/latest/$nextest" | tar zxf - -C "$CARGO_HOME/bin" \
+    && curl -LsSf "https://get.nexte.st/$NEXTEST_VERSION/$nextest" | tar zxf - -C "$CARGO_HOME/bin" \
     && cargo nextest --version
 
 ARG CRATES="kio hang moq-auth moq-e2ee moq-hls moq-ice moq-json moq-loc moq-msf moq-mux moq-net moq-pattern moq-quic moq-relay moq-rtc moq-rtmp moq-rtsp moq-sock moq-srt moq-stats moq-tokio moq-uring moq-cli"

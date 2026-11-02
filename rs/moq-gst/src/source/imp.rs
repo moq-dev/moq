@@ -36,17 +36,33 @@ static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 static NEXT_VIDEO_PAD_ID: AtomicU64 = AtomicU64::new(0);
 static NEXT_AUDIO_PAD_ID: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, Default)]
+/// How far a group may trail the live edge before a reader skips it, unless `max-delay` is set.
+const DEFAULT_MAX_DELAY: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone)]
 struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
+	max_delay: Duration,
 	connection: crate::connection::Settings,
+}
+
+impl Default for Settings {
+	fn default() -> Self {
+		Self {
+			url: None,
+			broadcast: None,
+			max_delay: DEFAULT_MAX_DELAY,
+			connection: Default::default(),
+		}
+	}
 }
 
 #[derive(Debug, Clone)]
 struct ResolvedSettings {
 	url: url::Url,
 	broadcast: String,
+	max_delay: Duration,
 	connect: moq_tokio::connect::Config,
 	quic: moq_tokio::quic::Config,
 }
@@ -63,6 +79,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 				.as_ref()
 				.context("broadcast property is required")?
 				.clone(),
+			max_delay: value.max_delay,
 			connect,
 			quic,
 		})
@@ -119,7 +136,9 @@ impl SessionController {
 		let task_connection = connection.clone();
 		let task_element = element.clone();
 		Ok(Self::spawn(client, connection, element, move |shutdown| async move {
-			run_session(&task_connection, origin, settings.broadcast, task_element, shutdown).await
+			Session::new(task_element, shutdown, settings.max_delay)
+				.run(&task_connection, &origin, &settings.broadcast)
+				.await
 		}))
 	}
 
@@ -257,6 +276,14 @@ impl ObjectImpl for MoqSrc {
 					.blurb("The broadcast name to subscribe to")
 					.mutable_ready()
 					.build(),
+				glib::ParamSpecUInt64::builder("max-delay")
+					.nick("Max delay")
+					.blurb("How many milliseconds a group may trail the live edge before it is skipped")
+					.default_value(crate::connection::duration_millis(DEFAULT_MAX_DELAY))
+					// A SUBSCRIBE carries it as a QUIC varint, which can't hold 2^62 or more.
+					.maximum((1 << 62) - 1)
+					.mutable_ready()
+					.build(),
 			]
 			.into_iter()
 			.chain(crate::connection::properties())
@@ -288,6 +315,7 @@ impl ObjectImpl for MoqSrc {
 		match pspec.name() {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
+			"max-delay" => settings.max_delay = Duration::from_millis(value.get().unwrap()),
 			name => settings.connection.set(name, value),
 		}
 	}
@@ -297,6 +325,7 @@ impl ObjectImpl for MoqSrc {
 		match pspec.name() {
 			"url" => settings.url.to_value(),
 			"broadcast" => settings.broadcast.to_value(),
+			"max-delay" => crate::connection::duration_millis(settings.max_delay).to_value(),
 			name => settings.connection.get(name),
 		}
 	}
@@ -740,115 +769,224 @@ impl PadActor {
 	}
 }
 
-async fn run_session(
-	connection: &moq_tokio::Connection,
-	origin: moq_net::origin::Consumer,
-	broadcast: String,
+/// What a session shares with every run, follower, and reader it starts, handed down as one
+/// context rather than argument by argument.
+#[derive(Clone)]
+struct Session {
 	element: glib::WeakRef<super::MoqSrc>,
-	mut shutdown: watch::Receiver<bool>,
-) -> Result<()> {
-	// Stop closes the connection only after the session ends, so the dial races shutdown here.
-	tokio::select! {
-		established = moq_net::kio::wait(|waiter| connection.poll_established(waiter)) => established?,
-		_ = shutdown.changed() => return Ok(()),
-	}
-
-	// A temporary disconnect keeps the origin alive; only a terminal failure closes the loop.
-	let lost = async {
-		match connection.closed().await {
-			Ok(()) => anyhow::anyhow!("connection closed"),
-			Err(err) => anyhow::Error::from(err).context("connection closed"),
-		}
-	};
-	follow_path(&origin, &broadcast, element, shutdown, lost).await
+	/// How far a group may trail the live edge before a reader skips it.
+	max_delay: Duration,
+	/// Outlive every run, so a pipeline linked by name (`s.video_0 ! ...`) keeps flowing across a
+	/// restart.
+	pads: Pads,
+	/// Set by [`SessionController::stop`] before it flushes the pads.
+	shutdown: watch::Receiver<bool>,
 }
 
-/// Follow the path's announcements for the whole session: play on a start, switch to the new
-/// broadcast on a restart, and hold the pads from an end until the next start. Returns once
-/// `shutdown` fires, `lost` resolves, or the origin closes.
-async fn follow_path(
-	origin: &moq_net::origin::Consumer,
-	path: &str,
-	element: glib::WeakRef<super::MoqSrc>,
-	mut shutdown: watch::Receiver<bool>,
-	lost: impl Future<Output = anyhow::Error>,
-) -> Result<()> {
-	use moq_mux::follow::{Event, Instances};
+impl Session {
+	/// A session for `element`, with no pads yet.
+	fn new(element: glib::WeakRef<super::MoqSrc>, shutdown: watch::Receiver<bool>, max_delay: Duration) -> Self {
+		Self {
+			element,
+			max_delay,
+			pads: Pads::default(),
+			shutdown,
+		}
+	}
 
-	let mut follow = Instances::new(origin, path, None)?;
-	let pads = Pads::default();
-	let mut runs = tokio::task::JoinSet::new();
-	// Cancels the latest run.
-	let mut latest: Option<watch::Sender<bool>> = None;
-	let mut lost = std::pin::pin!(lost);
+	/// Wait for the dial, then follow `path` until the connection is lost for good or `shutdown`
+	/// fires.
+	async fn run(
+		&self,
+		connection: &moq_tokio::Connection,
+		origin: &moq_net::origin::Consumer,
+		path: &str,
+	) -> Result<()> {
+		// Stop closes the connection only after the session ends, so the dial races shutdown here.
+		let mut shutdown = self.shutdown.clone();
+		tokio::select! {
+			established = moq_net::kio::wait(|waiter| connection.poll_established(waiter)) => established?,
+			_ = shutdown.changed() => return Ok(()),
+		}
 
-	tracing::info!(%path, "waiting for broadcast to be announced");
-	let result = loop {
-		let broadcast = tokio::select! {
-			_ = shutdown.changed() => break Ok(()),
-			err = &mut lost => break Err(err),
-			event = follow.next() => match event {
-				Ok(Event::Start(broadcast)) => {
-					tracing::info!(%path, epoch = broadcast.info().epoch.as_ref().map(tracing::field::display), "online");
-					Some(broadcast)
+		// A temporary disconnect keeps the origin alive; only a terminal failure closes the loop.
+		let lost = async {
+			match connection.closed().await {
+				Ok(()) => anyhow::anyhow!("connection closed"),
+				Err(err) => anyhow::Error::from(err).context("connection closed"),
+			}
+		};
+		self.follow_path(origin, path, lost).await
+	}
+
+	/// Follow the path's announcements for the whole session: play on a start, switch to the new
+	/// broadcast on a restart, and hold the pads from an end until the next start. Returns once
+	/// `shutdown` fires, `lost` resolves, or the origin closes, after releasing the pads.
+	async fn follow_path(
+		&self,
+		origin: &moq_net::origin::Consumer,
+		path: &str,
+		lost: impl Future<Output = anyhow::Error>,
+	) -> Result<()> {
+		use moq_mux::follow::{Event, Instances};
+
+		let mut follow = Instances::new(origin, path, None)?;
+		let mut shutdown = self.shutdown.clone();
+		let mut runs = tokio::task::JoinSet::new();
+		// Cancels the latest run.
+		let mut latest: Option<watch::Sender<bool>> = None;
+		let mut lost = std::pin::pin!(lost);
+
+		tracing::info!(%path, "waiting for broadcast to be announced");
+		let result = loop {
+			let broadcast = tokio::select! {
+				_ = shutdown.changed() => break Ok(()),
+				err = &mut lost => break Err(err),
+				event = follow.next() => match event {
+					Ok(Event::Start(broadcast)) => {
+						tracing::info!(%path, epoch = broadcast.info().epoch.as_ref().map(tracing::field::display), "online");
+						Some(broadcast)
+					}
+					Ok(Event::End) => {
+						tracing::info!(%path, "offline, holding pads until it returns");
+						None
+					}
+					Err(moq_mux::Error::Moq(moq_net::Error::Closed)) => break Ok(()),
+					Err(err) => break Err(anyhow::Error::from(err).context("broadcast refused")),
+				},
+				joined = runs.join_next(), if !runs.is_empty() => match joined.expect("guarded by is_empty") {
+					Ok(Ok(())) => None,
+					Ok(Err(err)) => break Err(err),
+					Err(err) => break Err(anyhow::Error::from(err).context("run panicked")),
+				},
+			};
+
+			if let Some(broadcast) = broadcast {
+				// Cut over at once: the old run's readers hand their pads back without waiting for their
+				// subscriptions to end.
+				if let Some(cancel) = latest.take() {
+					let _ = cancel.send(true);
 				}
-				Ok(Event::End) => {
-					tracing::info!(%path, "offline, holding pads until it returns");
-					None
-				}
-				Err(moq_mux::Error::Moq(moq_net::Error::Closed)) => break Ok(()),
-				Err(err) => break Err(anyhow::Error::from(err).context("broadcast refused")),
-			},
-			joined = runs.join_next(), if !runs.is_empty() => match joined.expect("guarded by is_empty") {
-				Ok(Ok(())) => None,
-				Ok(Err(err)) => break Err(err),
-				Err(err) => break Err(anyhow::Error::from(err).context("run panicked")),
-			},
+				latest = Some(self.play(&mut runs, moq_mux::Source::new(origin.clone(), broadcast)));
+			}
 		};
 
-		if let Some(broadcast) = broadcast {
-			// Cut over at once: the old run's readers hand their pads back without waiting for their
-			// subscriptions to end.
-			if let Some(cancel) = latest.take() {
-				let _ = cancel.send(true);
-			}
-			latest = Some(play(
-				&mut runs,
-				moq_mux::Source::new(origin.clone(), broadcast),
-				&pads,
-				&element,
-				&shutdown,
-			));
+		if let Some(cancel) = latest.take() {
+			let _ = cancel.send(true);
 		}
-	};
-
-	if let Some(cancel) = latest.take() {
-		let _ = cancel.send(true);
+		while runs.join_next().await.is_some() {}
+		// A stop removes the pads; anything else ends the stream downstream first.
+		let eos = !*shutdown.borrow();
+		self.pads.release(eos).await;
+		result
 	}
-	while runs.join_next().await.is_some() {}
-	// A stop removes the pads; anything else ends the stream downstream first.
-	let eos = !*shutdown.borrow();
-	pads.release(eos).await;
-	result
-}
 
-/// Start the instance handed out by the follower until it ends or is replaced, returning its cancel handle.
-fn play(
-	runs: &mut tokio::task::JoinSet<Result<()>>,
-	source: moq_mux::Source,
-	pads: &Pads,
-	element: &glib::WeakRef<super::MoqSrc>,
-	shutdown: &watch::Receiver<bool>,
-) -> watch::Sender<bool> {
-	let (cancel, mut cancelled) = watch::channel(false);
-	let (pads, task_element, shutdown) = (pads.clone(), element.clone(), shutdown.clone());
-	runs.spawn_on(
-		STREAMING.scope(element.clone(), async move {
-			follow_catalog(source, &pads, task_element, &shutdown, &mut cancelled).await
-		}),
-		RUNTIME.handle(),
-	);
-	cancel
+	/// Start the instance handed out by the follower until it ends or is replaced, returning its
+	/// cancel handle.
+	fn play(&self, runs: &mut tokio::task::JoinSet<Result<()>>, source: moq_mux::Source) -> watch::Sender<bool> {
+		let (cancel, mut cancelled) = watch::channel(false);
+		let session = self.clone();
+		runs.spawn_on(
+			STREAMING.scope(self.element.clone(), async move {
+				session.follow_catalog(source, &mut cancelled).await
+			}),
+			RUNTIME.handle(),
+		);
+		cancel
+	}
+
+	/// Follow one broadcast's catalog, with one [`Follower`] per broadcast its renditions reference.
+	/// Returns once the catalog closes and the last follower drains, or `cancel` fires. The pads stay
+	/// with the session, except those of renditions the catalog retired.
+	async fn follow_catalog(&self, source: moq_mux::Source, cancel: &mut watch::Receiver<bool>) -> Result<()> {
+		let broadcast = source.broadcast();
+		let catalog_track = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?;
+		// A publisher that never answers would otherwise hold the run until it is cancelled.
+		let catalog_track = tokio::select! {
+			track = catalog_track.subscribe(hang::catalog::Catalog::default_subscription()) => match track {
+				Ok(track) => track,
+				Err(err) if source_lost(&err) => {
+					tracing::warn!(%err, "catalog unavailable, holding pads");
+					return Ok(());
+				}
+				Err(err) => return Err(anyhow::Error::from(err).context("catalog refused")),
+			},
+			_ = cancel.changed() => return Ok(()),
+		};
+		let mut catalog_consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
+
+		// Follow the catalog for the whole run and reconcile against every update, rather than
+		// building the renditions once from the first frame. This covers reactive publishers (the
+		// browser via @moq/hang) that announce an empty catalog before their encoder configures, then
+		// add renditions a beat later, as well as renditions appearing, disappearing, or changing
+		// codec/resolution mid-stream.
+		let (stop, stopped) = watch::channel(false);
+		let playback = Playback {
+			session: self.clone(),
+			broadcast: broadcast.clone(),
+			timeline: Arc::default(),
+			stop: stopped,
+		};
+		let mut followers: HashMap<moq_net::Path, Followed> = HashMap::new();
+		// Woken when a follower runs out of renditions, so the run can let it go without waiting for
+		// another catalog update.
+		let emptied = Arc::new(tokio::sync::Notify::new());
+		// The followers, and the retirements of pads the catalog no longer lists.
+		let mut tasks = tokio::task::JoinSet::new();
+		let mut catalog_closed = false;
+		let mut result = Ok(());
+
+		loop {
+			if catalog_closed && tasks.is_empty() {
+				break;
+			}
+
+			tokio::select! {
+				biased;
+				// Ended by a restart, or the session ending.
+				_ = cancel.changed() => break,
+				_ = tasks.join_next(), if !tasks.is_empty() => {}
+				_ = emptied.notified() => followers.retain(|_, follower| !follower.plan.is_closed() && !follower.idle()),
+				// The guard stops us polling a closed catalog track (which would spin the loop
+				// returning None) while the followers drain.
+				next = catalog_consumer.next(), if !catalog_closed => match next {
+					Ok(Some(catalog)) => reconcile(&catalog, &source, &playback, &mut followers, &mut tasks, &emptied, cancel),
+					// Catalog track closed. Don't stop the followers: let each reader reach its natural
+					// end, and just stop reconciling while they drain.
+					//
+					// That includes a reader still resolving its subscription, which is
+					// indistinguishable here from one that has simply not been polled yet: a final
+					// snapshot naming a track the publisher does serve arrives this way, and stopping on
+					// "not live yet" would drop it. Whether a rendition will ever be served is the
+					// publisher's to answer, and ending the broadcast is where it does: every name it
+					// never served resolves with an error, which fails that reader's subscribe and ends
+					// it.
+					Ok(None) => catalog_closed = true,
+					Err(err) if catalog_lost(&err) => {
+						tracing::warn!(%err, "catalog lost, holding pads");
+						catalog_closed = true;
+					}
+					Err(err) => {
+						result = Err(err.into());
+						break;
+					}
+				},
+			}
+
+			if catalog_closed {
+				for (_, follower) in followers.drain() {
+					follower.plan.send_modify(|plan| plan.closed = true);
+				}
+			}
+		}
+
+		// Stop every follower, then wait for each to hand its pads back. On the clean catalog-closed
+		// exit the tasks already drained, so this is a no-op.
+		let _ = stop.send(true);
+		while tasks.join_next().await.is_some() {}
+
+		result
+	}
 }
 
 /// Whether a failure is the source going away (its session closing, or its route going), which
@@ -877,107 +1015,6 @@ fn catalog_lost(err: &moq_mux::Error) -> bool {
 		moq_mux::Error::Moq(err) => source_lost(err),
 		_ => false,
 	}
-}
-
-/// Follow one broadcast's catalog, with one [`Follower`] per broadcast its renditions reference.
-/// Returns once the catalog closes and the last follower drains, or `cancel` fires. The pads stay
-/// with the session, except those of renditions the catalog retired.
-async fn follow_catalog(
-	source: moq_mux::Source,
-	pads: &Pads,
-	element: glib::WeakRef<super::MoqSrc>,
-	shutdown: &watch::Receiver<bool>,
-	cancel: &mut watch::Receiver<bool>,
-) -> Result<()> {
-	let broadcast = source.broadcast();
-	let catalog_track = broadcast.track(hang::catalog::Catalog::DEFAULT_NAME)?;
-	// A publisher that never answers would otherwise hold the run until it is cancelled.
-	let catalog_track = tokio::select! {
-		track = catalog_track.subscribe(hang::catalog::Catalog::default_subscription()) => match track {
-			Ok(track) => track,
-			Err(err) if source_lost(&err) => {
-				tracing::warn!(%err, "catalog unavailable, holding pads");
-				return Ok(());
-			}
-			Err(err) => return Err(anyhow::Error::from(err).context("catalog refused")),
-		},
-		_ = cancel.changed() => return Ok(()),
-	};
-	let mut catalog_consumer = moq_mux::catalog::hang::Consumer::new(catalog_track);
-
-	// Follow the catalog for the whole run and reconcile against every update, rather than
-	// building the renditions once from the first frame. This covers reactive publishers (the
-	// browser via @moq/hang) that announce an empty catalog before their encoder configures, then
-	// add renditions a beat later, as well as renditions appearing, disappearing, or changing
-	// codec/resolution mid-stream.
-	let (stop, stopped) = watch::channel(false);
-	let playback = Playback {
-		element,
-		broadcast: broadcast.clone(),
-		pads: pads.clone(),
-		timeline: Arc::default(),
-		shutdown: shutdown.clone(),
-		stop: stopped,
-	};
-	let mut followers: HashMap<moq_net::Path, Followed> = HashMap::new();
-	// Woken when a follower runs out of renditions, so the run can let it go without waiting for
-	// another catalog update.
-	let emptied = Arc::new(tokio::sync::Notify::new());
-	// The followers, and the retirements of pads the catalog no longer lists.
-	let mut tasks = tokio::task::JoinSet::new();
-	let mut catalog_closed = false;
-	let mut result = Ok(());
-
-	loop {
-		if catalog_closed && tasks.is_empty() {
-			break;
-		}
-
-		tokio::select! {
-			biased;
-			// Ended by a restart, or the session ending.
-			_ = cancel.changed() => break,
-			_ = tasks.join_next(), if !tasks.is_empty() => {}
-			_ = emptied.notified() => followers.retain(|_, follower| !follower.plan.is_closed() && !follower.idle()),
-			// The guard stops us polling a closed catalog track (which would spin the loop
-			// returning None) while the followers drain.
-			next = catalog_consumer.next(), if !catalog_closed => match next {
-				Ok(Some(catalog)) => reconcile(&catalog, &source, &playback, &mut followers, &mut tasks, &emptied, cancel),
-				// Catalog track closed. Don't stop the followers: let each reader reach its natural
-				// end, and just stop reconciling while they drain.
-				//
-				// That includes a reader still resolving its subscription, which is
-				// indistinguishable here from one that has simply not been polled yet: a final
-				// snapshot naming a track the publisher does serve arrives this way, and stopping on
-				// "not live yet" would drop it. Whether a rendition will ever be served is the
-				// publisher's to answer, and ending the broadcast is where it does: every name it
-				// never served resolves with an error, which fails that reader's subscribe and ends
-				// it.
-				Ok(None) => catalog_closed = true,
-				Err(err) if catalog_lost(&err) => {
-					tracing::warn!(%err, "catalog lost, holding pads");
-					catalog_closed = true;
-				}
-				Err(err) => {
-					result = Err(err.into());
-					break;
-				}
-			},
-		}
-
-		if catalog_closed {
-			for (_, follower) in followers.drain() {
-				follower.plan.send_modify(|plan| plan.closed = true);
-			}
-		}
-	}
-
-	// Stop every follower, then wait for each to hand its pads back. On the clean catalog-closed
-	// exit the tasks already drained, so this is a no-op.
-	let _ = stop.send(true);
-	while tasks.join_next().await.is_some() {}
-
-	result
 }
 
 /// Bring the run in line with `catalog`: list its renditions on the pads, retiring the pads of
@@ -1076,7 +1113,7 @@ fn reconcile(
 		.cloned()
 		.chain(disabled.iter().map(|(rendition, _)| rendition.clone()))
 		.collect();
-	playback.pads.list(listed, cancel);
+	playback.session.pads.list(listed, cancel);
 
 	let mut plans: HashMap<moq_net::Path, Plan> = HashMap::new();
 	for (rendition, shape) in desired {
@@ -1138,7 +1175,7 @@ fn reconcile(
 		}
 		.run(instances, plan);
 		tasks.spawn_on(
-			STREAMING.scope(playback.element.clone(), follower_task),
+			STREAMING.scope(playback.session.element.clone(), follower_task),
 			RUNTIME.handle(),
 		);
 		followers.insert(
@@ -1170,18 +1207,15 @@ impl Followed {
 	}
 }
 
-/// What one broadcast run shares with every follower and reader it starts. Pads survive a
-/// broadcast switch; its timing does not.
+/// What one broadcast run shares with every follower and reader it starts. The session survives a
+/// broadcast switch; the run's timing does not.
 #[derive(Clone)]
 struct Playback {
-	element: glib::WeakRef<super::MoqSrc>,
+	session: Session,
 	/// The catalog's broadcast. A sibling outlives its closed catalog until it ends.
 	broadcast: moq_net::broadcast::Consumer,
-	pads: Pads,
 	/// Shared by the catalog's own renditions and the first instance of each sibling.
 	timeline: Arc<Timeline>,
-	/// The session's shutdown, which [`SessionController::stop`] sets before it flushes the pads.
-	shutdown: watch::Receiver<bool>,
 	/// Set once the run ends, stopping every follower.
 	stop: watch::Receiver<bool>,
 }
@@ -1357,7 +1391,7 @@ impl Follower {
 	/// Bring the renditions in line with `wanted`, stopping each one reshaped or gone, and return
 	/// those added or reshaped. [`Self::play`] starts the rest.
 	fn apply(&mut self, mut wanted: HashMap<Rendition, Shape>) -> HashSet<Rendition> {
-		let pads = &self.playback.pads;
+		let pads = &self.playback.session.pads;
 		let mut fresh = HashSet::new();
 		self.renditions
 			.retain(|rendition, entry| match wanted.remove(rendition) {
@@ -1456,7 +1490,7 @@ impl Follower {
 			.map(|(serial, _)| *serial)
 			.chain(self.current.as_ref().map(|current| current.serial))
 			.collect();
-		let pads = &self.playback.pads;
+		let pads = &self.playback.session.pads;
 		self.finished
 			.retain(|rendition, serial| pads.is_listed(rendition) && serials.contains(&serial));
 	}
@@ -1508,7 +1542,7 @@ impl Follower {
 				};
 				let (rendition, id) = (rendition.clone(), self.next_id);
 				self.readers.spawn_on(
-					STREAMING.scope(self.playback.element.clone(), async move {
+					STREAMING.scope(self.playback.session.element.clone(), async move {
 						let exit = reader.run().await;
 						(rendition, id, exit)
 					}),
@@ -1531,7 +1565,7 @@ impl Follower {
 		if entry.draining {
 			self.renditions.remove(&rendition);
 		} else if let Exit::Unlisted = exit
-			&& self.playback.pads.is_listed(&rendition)
+			&& self.playback.session.pads.is_listed(&rendition)
 		{
 			// Delisted and listed again while it went to claim its pad, which the plan coalesced.
 			self.play();
@@ -1588,12 +1622,12 @@ impl Reader {
 			live,
 			mut cancel,
 		} = self;
-		let Playback {
+		let Session {
 			element,
+			max_delay,
 			pads,
 			shutdown,
-			..
-		} = playback;
+		} = playback.session;
 		let (kind, name) = (rendition.0, &rendition.1);
 
 		// An instance that already played this track to its end on the pad would replay its last
@@ -1611,7 +1645,7 @@ impl Reader {
 			subscriber = async {
 				instance
 					.track(&shape.track)?
-					.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+					.subscribe(moq_net::track::Subscription::default().with_max_delay(max_delay))
 					.await
 			} => match subscriber {
 				Ok(subscriber) => subscriber,
@@ -2245,7 +2279,7 @@ mod session_tests {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoCodec, VideoConfig};
 	use tokio::sync::watch;
 
-	use super::{NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, TrackKind, follow_catalog, follow_path};
+	use super::{DEFAULT_MAX_DELAY, NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, Session, SessionController, TrackKind};
 
 	/// The pad-id counters are process-global, so a test reading one has to be the only test
 	/// allocating while it runs. `cargo test` shares a process across tests (nextest doesn't),
@@ -2282,7 +2316,9 @@ mod session_tests {
 			let stopping = shutdown.clone();
 			let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
 			let source = moq_mux::Source::new(origin.consume(), broadcast);
-			follow_catalog(source, &Pads::default(), element, &stopping, &mut shutdown).await
+			Session::new(element, stopping, DEFAULT_MAX_DELAY)
+				.follow_catalog(source, &mut shutdown)
+				.await
 		})
 	}
 
@@ -2315,11 +2351,9 @@ mod session_tests {
 		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let (_stop, stopped) = watch::channel(false);
 		let playback = super::Playback {
-			element: element.downgrade(),
+			session: Session::new(element.downgrade(), stopped.clone(), DEFAULT_MAX_DELAY),
 			broadcast: broadcast.consume(),
-			pads: Pads::default(),
 			timeline: Arc::default(),
-			shutdown: stopped.clone(),
 			stop: stopped.clone(),
 		};
 		let (plan, received) = watch::channel(super::Plan::default());
@@ -2484,8 +2518,14 @@ mod session_tests {
 						let weak = element.downgrade();
 						let pads = pads.clone();
 						let source = moq_mux::Source::new(origin().consume(), broadcast.consume());
-						let task = super::RUNTIME
-							.spawn(async move { follow_catalog(source, &pads, weak, &shutdown, &mut cancelled).await });
+						let session = Session {
+							max_delay: DEFAULT_MAX_DELAY,
+							element: weak,
+							pads,
+							shutdown,
+						};
+						let task =
+							super::RUNTIME.spawn(async move { session.follow_catalog(source, &mut cancelled).await });
 						let first = usize::from(audio_first);
 						let other = 1 - first;
 						let mut write = |index: usize, seconds: u64| {
@@ -2580,8 +2620,11 @@ mod session_tests {
 		let (stopping, shutdown) = watch::channel(false);
 		let consumer = origin.consume();
 		let weak = element.downgrade();
-		let following = super::RUNTIME
-			.spawn(async move { follow_path(&consumer, "room/catalog", weak, shutdown, std::future::pending()).await });
+		let following = super::RUNTIME.spawn(async move {
+			Session::new(weak, shutdown, DEFAULT_MAX_DELAY)
+				.follow_path(&consumer, "room/catalog", std::future::pending())
+				.await
+		});
 		let (path, request) = super::RUNTIME.block_on(async {
 			tokio::select! {
 				request = local.requested_track() => ("catalog", request.unwrap()),
@@ -2689,6 +2732,32 @@ mod session_tests {
 		let session = run(consumer, weak, shutdown_rx);
 
 		await_pad(&element, "video_");
+
+		let _ = shutdown.send(true);
+		super::RUNTIME.block_on(session).unwrap().unwrap();
+	}
+
+	#[test]
+	fn a_rendition_subscribes_with_the_session_max_delay() {
+		let element = element();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut dynamic = broadcast.requests();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		catalog.modify().unwrap().video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+
+		let max_delay = Duration::from_secs(5);
+		let (shutdown, mut cancelled) = watch::channel(false);
+		let weak = element.downgrade();
+		let source = moq_mux::Source::new(origin().consume(), broadcast.consume());
+		let session = super::RUNTIME.spawn(async move {
+			let stopping = cancelled.clone();
+			Session::new(weak, stopping, max_delay)
+				.follow_catalog(source, &mut cancelled)
+				.await
+		});
+
+		let request = await_request(&mut dynamic);
+		assert_eq!(request.subscription().unwrap().max_delay, Some(max_delay));
 
 		let _ = shutdown.send(true);
 		super::RUNTIME.block_on(session).unwrap().unwrap();
@@ -3189,7 +3258,13 @@ mod session_tests {
 			let pads = pads.clone();
 			let weak = element.downgrade();
 			let source = moq_mux::Source::new(origin().consume(), broadcast.consume());
-			super::RUNTIME.spawn(async move { follow_catalog(source, &pads, weak, &shutdown, &mut cancelled).await })
+			let session = Session {
+				max_delay: DEFAULT_MAX_DELAY,
+				element: weak,
+				pads,
+				shutdown,
+			};
+			super::RUNTIME.spawn(async move { session.follow_catalog(source, &mut cancelled).await })
 		};
 		let pad = super::RUNTIME.block_on(adds.recv()).unwrap();
 		assert!(pad.starts_with("video_"), "{pad} was added first");
@@ -3290,6 +3365,7 @@ mod session_tests {
 		ResolvedSettings {
 			url: "https://127.0.0.1:1".parse().unwrap(),
 			broadcast: "test".into(),
+			max_delay: DEFAULT_MAX_DELAY,
 			connect: crate::connection::Settings::default().resolve().unwrap().0,
 			quic: Default::default(),
 		}
@@ -3348,7 +3424,11 @@ mod session_tests {
 			client,
 			connection.clone(),
 			element.downgrade(),
-			move |shutdown| async move { follow_path(&origin, "room", weak, shutdown, std::future::pending()).await },
+			move |shutdown| async move {
+				Session::new(weak, shutdown, DEFAULT_MAX_DELAY)
+					.follow_path(&origin, "room", std::future::pending())
+					.await
+			},
 		);
 		(session, connection)
 	}
@@ -3543,11 +3623,14 @@ mod session_tests {
 		let instance = publisher.broadcast.consume();
 		let reader = super::Reader {
 			playback: super::Playback {
-				element: element.downgrade(),
+				session: Session {
+					max_delay: DEFAULT_MAX_DELAY,
+					element: element.downgrade(),
+					pads,
+					shutdown,
+				},
 				broadcast: instance.clone(),
-				pads,
 				timeline: Arc::default(),
-				shutdown,
 				stop,
 			},
 			rendition,
@@ -3726,8 +3809,11 @@ mod session_tests {
 	) -> (watch::Sender<bool>, tokio::task::JoinHandle<anyhow::Result<()>>) {
 		let (shutdown, stopping) = watch::channel(false);
 		let (origin, weak) = (origin.consume(), element.downgrade());
-		let task = super::RUNTIME
-			.spawn(async move { follow_path(&origin, "room", weak, stopping, std::future::pending()).await });
+		let task = super::RUNTIME.spawn(async move {
+			Session::new(weak, stopping, DEFAULT_MAX_DELAY)
+				.follow_path(&origin, "room", std::future::pending())
+				.await
+		});
 		(shutdown, task)
 	}
 
@@ -4027,8 +4113,11 @@ mod session_tests {
 		let run = {
 			let weak = element.downgrade();
 			let source = moq_mux::Source::new(origin.consume(), room.broadcast.consume());
-			super::RUNTIME
-				.spawn(async move { follow_catalog(source, &Pads::default(), weak, &shutdown, &mut cancelled).await })
+			super::RUNTIME.spawn(async move {
+				Session::new(weak, shutdown, DEFAULT_MAX_DELAY)
+					.follow_catalog(source, &mut cancelled)
+					.await
+			})
 		};
 
 		let mut cam = Publisher::sibling(&origin, Default::default());

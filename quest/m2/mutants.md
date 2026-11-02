@@ -1,4 +1,4 @@
-# [M] Weekly mutation testing on critical modules
+# [S] Weekly mutation testing on critical modules
 
 ## Goal
 
@@ -23,5 +23,9 @@ Decided 2026-10-27 (maintainer):
   first run's survivors: add a test where one is worth killing, or exclude the
   mutant in cargo-mutants' config with the reason (an equivalent mutant, or
   logging only).
+
+`mutants.yml` runs the job: `just rs mutants` over `.cargo/mutants.toml`'s
+scope, in 24 shards. What remains is fixing or annotating the first full run's
+survivors, about 1,800 mutants; a short local sample of 14 saw none.
 
 Public API: none. Wire: none.
