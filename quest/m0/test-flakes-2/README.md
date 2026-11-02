@@ -52,14 +52,17 @@ moq-rtc's session-end test was never load-bound: on the paused clock, dimpl's
 randomly jittered DTLS handshake give-up raced ICE's establishment deadline,
 fixed by [moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379).
 
+moq-relay's auth-trust test was never load-bound either: its fixture left each
+lease's background `end` POST unserved, so a reused port let one steal the next
+trial's accept. Fixed by [moq-dev/moq#7550](https://github.com/moq-dev/moq/pull/7550).
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
-- [moq-relay's auth-trust test survives load](/quest/m0/test-flakes-2/relay-auth-trust.md) - it stops timing out on a busy host
 - [Draft-22 interop with a native publisher](/quest/m0/test-flakes-2/draft22-interop.md) - no "invalid fetch range" or audio gap with a Rust or C++ publisher
-- [The relay fits a Windows stack under every feature set](/quest/m0/test-flakes-2/relay-stack-all-features.md) - the 1 MiB stack test passes under `--all-features` too
 - [moq-tokio's close-drain test survives load](/quest/m0/test-flakes-2/tokio-close-drain.md) - `quic_client_close_drains_finished_track` stops failing land batches with "Unroutable"
 - [@moq/net's close-drain tests survive load](/quest/m0/test-flakes-2/js-close-drain.md) - the lite close-drain cases pass on every full suite run
 - [@moq/net's boundary-sync test survives load](/quest/m0/test-flakes-2/js-boundary-sync.md) - "a version without a boundary syncs" passes under load
+- [A Kotlin cancel test and a JS late-publisher test hold up](/quest/m0/test-flakes-2/kotlin-js-flakes.md) - the Kotlin flow-cancel test stops failing `unroutable` and the IETF blind-handle test passes under load
