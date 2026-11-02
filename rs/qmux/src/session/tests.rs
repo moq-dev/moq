@@ -258,7 +258,10 @@ async fn set_limits_widens_and_refuses_a_rate_cap() {
 	assert!(matches!(server.set_limits(limits), Err(Error::InvalidConfig(_))));
 	limits.send_rate = None;
 	limits.receive_window = std::num::NonZeroU64::new(1024);
-	assert!(matches!(server.set_limits(limits), Err(Error::ReceiveWindowTooSmall(_))));
+	assert!(matches!(
+		server.set_limits(limits),
+		Err(Error::ReceiveWindowTooSmall(_))
+	));
 }
 
 /// A reset seen through a lease frees the stream while the reader still holds it, returning
