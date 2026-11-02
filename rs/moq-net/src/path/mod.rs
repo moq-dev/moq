@@ -303,8 +303,8 @@ impl Path {
 	/// The path as a string, with no leading or trailing slash.
 	pub fn as_str(&self) -> &str {
 		match &self.0 {
-			// SAFETY: `Repr::copy` and `concat` fill `buf[..len]` only from whole `&str`s and an
-			// ASCII `/`, so those bytes are valid UTF-8.
+			// SAFETY: `Repr::copy_bounded` and `concat` fill `buf[..len]` only from whole `&str`s
+			// and an ASCII `/`, so those bytes are valid UTF-8.
 			Repr::Inline { len, buf } => unsafe { std::str::from_utf8_unchecked(&buf[..*len as usize]) },
 			Repr::Static(s) => s,
 			Repr::Shared { buf, start } => &buf[*start as usize..],
@@ -371,13 +371,14 @@ impl Path {
 			buf[a.len() + 1..len].copy_from_slice(b.as_bytes());
 			Ok(Path(Repr::Inline { len: len as u8, buf }))
 		} else {
-			// Sized up front: `format!` guesses low and reallocates.
-			let mut buf = String::with_capacity(len);
+			// Joined on the stack, which `arrayvec` leaves uninitialized, so the shared buffer
+			// is the only allocation: a `String` would be a second, copied again into it.
+			let mut buf = arrayvec::ArrayString::<{ Self::MAX_BYTES }>::new();
 			buf.push_str(a);
 			buf.push('/');
 			buf.push_str(b);
 			Ok(Path(Repr::Shared {
-				buf: buf.into(),
+				buf: buf.as_str().into(),
 				start: 0,
 			}))
 		}

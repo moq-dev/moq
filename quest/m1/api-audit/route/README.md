@@ -176,4 +176,3 @@ stale, including `doc/concept/identity.md`.
 
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's instance, so lite-07 readers keep the first subscribe
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - the wire route layer; instances take over its epochless deletion
-- [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - key identities that a future public-key `instance` could reuse
