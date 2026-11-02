@@ -122,6 +122,9 @@ use one source timeline; omitting it keeps an independent offset. A timebase bel
 its broadcast and does not keep it open. `MediaContainerProducer` takes chunks split
 anywhere, so a raw byte stream needs no other importer.
 `moq::ContainerFormat::kFmp4` splits each fragment into one frame per sample.
+Media times are exact `moq::Timestamp{value, scale}` records, `value` units at `scale` units
+per second, and read back at the track's timescale, so a 90 kHz tick republishes unchanged.
+A raw `moq::Frame` with `std::nullopt` is untimed.
 
 ```cpp
 // Publish encoded frames, or raw pixels with the codec inside the binding.
@@ -130,12 +133,12 @@ anywhere, so a raw byte stream needs no other importer.
 auto publication = ok(session->publish()->create_broadcast("my-stream.hang"));
 auto broadcast = publication->broadcast(); // fill tracks here; announce on the publication
 auto audio = ok(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, {moq::AudioFormat::kOpus, opus_init}));
-ok(audio->write_frame({packet, 20'000}));
+ok(audio->write_frame({packet, moq::Timestamp{960, 48'000}}));   // 20 ms
 
 moq::VideoEncoderOutput output{moq::VideoCodec::kH264, std::nullopt, std::nullopt, moq::VideoEncoderKind::kAuto{}};
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
 auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba, 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
-ok(video->write({0, rgba}));
+ok(video->write({{0, 30'000}, rgba}));
 moq::AnnounceRoute route;
 route.epoch = moq::mint_epoch(); // a fresh epoch per run
 ok(publication->announce(route));
@@ -219,6 +222,8 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 `demand()->wanted()` is the group subscribers want, or `std::nullopt` while nobody subscribes, and `wanted_changed()` waits for it to move: start a new group once it passes your largest. Set `TrackInfo::refresh` to have a joining subscriber ask for a new group once the newest has grown past `refresh` times its first frame.
 
 Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
+
+A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while `demand()->wanted()` is set is an opt-in that saves the encode but leaves nothing from before the first subscriber.
 
 ## Authorization
 
