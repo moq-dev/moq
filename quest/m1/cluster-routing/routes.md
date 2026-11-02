@@ -140,43 +140,45 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   message already in flight on a live session, which delivers the retraction
   next (`collected_incarnation_returns_only_while_its_retraction_is_in_flight`).
   `cluster.id` stops naming a routing identity.
-- Decided 2026-10-14: every identity a connection sends is subject-qualified:
-  filed under `hash(subject, id)` when the connection's publish grant is
-  scoped, and bare when it is unscoped (publish `**` at the root). Its own
-  identity is no exception (2026-10-26): the bare exemption relied on the
-  dropped proof, so an unproven own identity could otherwise claim a
-  victim's. Extend the fixture below to a forger declaring the victim's id as
-  its own, and drop the reference model's `proved` exemption. The hash
-  has its own domain, so it cannot collide with a key-derived identity, and is
-  collision-resistant at the identity width, since the forwarder picks `id`
-  and could otherwise grind another subject's key. The relay that files it
-  translates it back when forwarding a request into that connection. Claims
-  under it are refused outside the grant's scope. Routes are shared by all of
-  an identity's claims, so otherwise a scoped peer forging an identity
-  captures claims outside its namespace and leaves a seqno the real origin
-  cannot pass after the forger leaves
+- Decided 2026-10-14: every identity a scoped connection sends is
+  qualified: filed under a key the receiver derives, rather than its bare
+  id, when the connection's publish grant is scoped, and bare when it is
+  unscoped (publish `**` at the root). Its own identity is no exception
+  (2026-10-26): the bare exemption relied on the dropped proof, so an
+  unproven own identity could otherwise claim a victim's. Extend the fixture
+  below to a forger declaring the victim's id as its own, and drop the
+  reference model's `proved` exemption. The key has its own hash domain, so
+  it cannot collide with a key-derived identity, and is collision-resistant
+  at the identity width, since the forwarder picks `id` and could otherwise
+  grind another peer's key. The relay that files it translates it back when
+  forwarding a request into that connection. Claims under it are refused
+  outside the grant's scope. Routes are shared by all of an identity's
+  claims, so otherwise a scoped peer forging an identity, or declaring a
+  victim's id as its own, captures claims outside its namespace and leaves a
+  seqno the real origin cannot pass after the forger leaves
   (`forged_identity_hijacks_claims_outside_the_forgers_scope`); with it, a
   forger or a misconfigured uplink only affects its own scope. The `peer`
   claim no longer decides transit trust. Legitimate scoped delivery survives
   losing one of two uplinks under one key
   (`scoped_delivery_through_two_uplinks_reaches_one_key`).
-- ✅ Decided 2026-10-15 (maintainer): the qualifier is the grant's credential
-  subject, and the key is named `hash(subject, id)` (previously
-  `hash(scope, id)`); "scope" now means only a grant's pattern union. A
-  publish grant is a union of patterns that refresh and withdrawal change, so
-  neither the whole union nor one matching pattern is a key that survives
-  refresh and that two uplinks share. The subject stays stable across token
-  refresh and is shared by one operator's uplinks; each claim is still checked
-  against the current pattern union. Rejected: the connection root, too
-  coarse since two scoped peers under one root would share keys. Add
-  multi-pattern, overlapping-pattern, and refresh fixtures. Today
-  `moq_auth::Claims` drops `sub` and `moq_net::auth::Grant` holds only
-  patterns and expiry, so the grant gains the verified subject, qualified by
-  its issuer, in Rust and JS. Fail loud: a scoped token without a subject is
-  refused, and so is a token added to a session (refresh or `auth().add`)
-  whose issuer-qualified subject differs from that of the session's current
-  grants. The receiver derives the key from the token it verified, so no wire
-  change.
+- Open: how a scoped peer's routing identities are keyed. The key must
+  survive token refresh, be shared by one operator's two uplinks, and leave
+  a forger unable to capture claims outside its scope; each claim is still
+  checked against the current pattern union. Rejected 2026-10-15: the
+  connection's publish scope (`hash(scope, id)`), since a publish grant is
+  a union of patterns that refresh and withdrawal change, so neither the
+  whole union nor one matching pattern is a key that survives refresh and
+  that two uplinks share; and the connection root, too coarse since two
+  scoped peers under one root would share keys. Dropped 2026-11-02
+  (maintainer): the grant's issuer-qualified credential subject
+  (`hash(subject, id)`, decided 2026-10-15), along with refusing scoped
+  tokens without a subject and tokens whose subject differs from the
+  session's; the implementation is in
+  [moq-dev/moq@453e1ec](https://github.com/moq-dev/moq/commit/453e1ece7c5435ee19541cfc2e9bbe0b6fbc430e).
+  The answer also covers sessions allowed to publish part of the tree with
+  no token (public rules, mTLS certificates, or a third-party auth server).
+  Whatever the key, add multi-pattern, overlapping-pattern, and refresh
+  fixtures. "Scope" means only a grant's pattern union.
 - ✅ Decided 2026-10-15 (maintainer): retract and re-file when a session's
   grant union crosses the scoped boundary in either direction (a `**` token
   added, or its expiry). Every forwarded route the session delivered is
@@ -291,7 +293,7 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   `upstream_ingress_ends_a_request_whose_route_turns_down_only`,
   `dead_uplink_consumes_and_publishes_through_a_lan_peer`). A
   misconfigured uplink that leaks CDN routes back is contained by
-  subject-qualified identities rather than a downstream mark
+  qualified identities rather than a downstream mark
   (`misconfigured_uplink_is_contained_by_qualified_identities`).
 - Decided 2026-10-14: a local per-connection `proxy` preference decides
   whether a connection is sent routes learned from other connections; it is
@@ -322,7 +324,7 @@ loss never reports an END:
   A session sends an origin's announcements in batches, each closed by its
   floors: per region, the revision as of which the stream's announcements
   for that route within the region are complete. A bare identity's region is
-  the stream's interest. A subject-qualified key certifies only within the
+  the stream's interest. A qualified key certifies only within the
   grant scopes it arrived through, and one key can arrive through grants
   whose pattern unions differ, so its view carries one floor per scope.
 - A receiver keeps each session's last view, to apply the next batch, and
@@ -384,7 +386,7 @@ loss never reports an END:
   scope's usable route cannot serve it. A certifier that has not answered yet
   counts as serving, as for a new next hop whose announcements trail its
   route. Closing one of two grants
-  under a subject takes its scope offline at the client
+  under one key takes its scope offline at the client
   (`a_closed_grant_lets_its_scope_go`), and a relay downstream of two scoped
   uplinks shows a lost scope unavailable while the starved relay holds, then
   lets it go once a request recovers a route
@@ -510,7 +512,7 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    which grows with publisher churn times uptime on every relay that saw an
    identity, about 16 bytes each, until a restart; and Babel's source GC
    timer, which assumes stale echoes are gone by then rather than proving it.
-7. Scope coverage under one subject: ✅ per-region floors. ANNOUNCE_FLOOR
+7. Scope coverage under one key: ✅ per-region floors. ANNOUNCE_FLOOR
    names the region it certifies, a suffix of the stream's interest prefix
    (the scope met with the interest), each node tracks which regions each
    feasible neighbour's last view certifies, and a region none certifies
@@ -518,7 +520,7 @@ Decided with the maintainer 2026-10-16, from the handoff proof:
    differ, and without this a scope whose last session closed stays shown,
    available, with no way to learn its withdrawal; a relay forwarding such a
    key also needs one floor per scope on a stream. Rejected: one pattern
-   union per subject, which refuses or re-files a refresh that changes the
+   union per key, which refuses or re-files a refresh that changes the
    union and cannot be checked across relays; and deferring to the
    implementation, which leaves the proof's freshness claim false for scoped
    delivery.
@@ -650,11 +652,6 @@ continues to rank feasible transit routes; report it. This may
 split at start (Rust and draft, then JS), as long as both land in one
 release.
 
-Decided 2026-10-27 (maintainer): [Grant subject](/quest/m1/cluster-routing/grant-subject.md)
-split out of this quest, and this quest builds on it. It carries the
-issuer-qualified subject the scoped keys above are named by, and fixes the
-reference model's `proved` exemption.
-
 Decided 2026-10-27 (maintainer): this quest deletes the epochless instance
 machinery in `rs/moq-net/src/model/origin.rs`: `Instance::Route(generation)`
 and its renewals, `restarted_since`, the held-restart Release for epochless
@@ -684,18 +681,9 @@ revision, stays separate ("keep administrative identity and broadcast epoch
 separate", above).
 
 Decided 2026-10-27 (maintainer), from
-[grant subject](https://github.com/moq-dev/moq/pull/6992): decide what key
-identities are filed under for sessions allowed to publish part of the tree
-with no subject (public rules, mTLS certificates, or a third-party auth
-server), and whether the relay refuses such a grant when the client
-presented a token. Also from
 [moq-dev/moq#6947](https://github.com/moq-dev/moq/pull/6947): in `js/net`'s
 `origin.ts` a detached request stays on its own route instead of following
 the cheapest one; fix it with the route-selection rework here.
-
-## Required
-
-- [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - the issuer-qualified subject scoped identities are filed under
 
 ## Related
 

@@ -47,13 +47,13 @@ Decided with the maintainer, 2026-10-13:
   two identities a third relay cannot recognize as one. Keep administrative
   identity separate; `cluster.id` is removed. Switching between paths
   resumes only across a matching explicit epoch.
-- Every identity a connection sends, its own and those it forwards, is filed
-  under `hash(subject, id)`, keyed by the grant's credential subject, when
-  its publish grant is scoped, and stays bare when it is unscoped. The key is
-  deterministic, so two uplinks of one subject share it across token refresh,
-  and a forger only damages routes inside its own scope. (Decided 2026-10-14;
-  subject decided 2026-10-15; own identities included 2026-10-26, since they
-  are no longer proven.)
+- Every identity a connection sends, its own and those it forwards, is
+  qualified when its publish grant is scoped, and stays bare when it is
+  unscoped, so a forger only damages routes inside its own scope. (Decided
+  2026-10-14; own identities included 2026-10-26, since they are no longer
+  proven.) How a scoped peer's identities are keyed is open in
+  [Routes and announces](/quest/m1/cluster-routing/routes.md): the
+  issuer-qualified subject key was dropped 2026-11-02 (maintainer).
 - Matching explicit epochs authorize resume. Epochless changes retain
   Restart and fresh resolution; neither node identity nor a healthy
   alternate grants permission to splice content.
@@ -91,7 +91,7 @@ with deterministic counterexamples: path-only subscriptions that reselect
 origins at every hop loop and deadlock, so forwarded requests name their
 identity; feasibility makes transit priorities depend on arrival order;
 export keeps one selection with a down-only bit; and scoped forwarding is
-contained by subject-qualified identities.
+contained by qualified identities.
 
 The new routing model and finalized lite-07 belong to the breaking release.
 Existing mesh deployments remain supported; the full edge/core topology
@@ -126,7 +126,6 @@ setup after the capabilities land.
 
 ## Required
 
-- [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - grants carry an issuer-qualified subject, scoped tokens without one are refused, and the routing model drops its `proved` exemption
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
 
