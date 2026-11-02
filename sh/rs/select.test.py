@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+FUZZ_EXCLUDES = " ".join(f"--exclude {crate}-fuzz" for crate in ("moq-net", "moq-quic", "moq-mux", "moq-rtmp"))
 DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
 LINUX = os.uname().sysname == "Linux"
 
@@ -50,7 +51,7 @@ class SelectTest(unittest.TestCase):
                     suffix += " moq-relay/io-uring" if LINUX and action == "test" else ""
                     suffix += " --timings" if github_actions and action == "test" else ""
                     self.assertIn(
-                        f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz{suffix}",
+                        f"rs {action} --workspace {FUZZ_EXCLUDES}{suffix}",
                         self.selected("sh/rs/nextest.sh", action=action, github_actions=github_actions),
                     )
         selected = self.selected("sh/rs/nextest.sh")

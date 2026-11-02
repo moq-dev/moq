@@ -18,9 +18,10 @@ Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-a
 - Keep audio and video payloads unbounded in both: streaming each sample into its frame was decided 2026-10-27, and this quest is about metadata only. An fMP4 text sample is the one payload held whole, because its rewrite needs every byte, so `MAX_HELD_BYTES` covers it; keep that exception. MKV has no counterpart, since it refuses subtitle tracks.
 - Document the policy once, in moq-mux's import docs, and make both importers' bounds `pub const`s as #7232's are.
 
+The `fmp4` and `mkv` fuzz targets (`rs/moq-mux/fuzz`) bound heap work per input byte (`moq_mux::fuzz::run`), so they measure parsed-state amplification under either policy.
+
 Public API: possibly new `pub const` bounds and a shared refusal error in moq-mux. Wire: none.
 
 ## Related
 
-- [Untrusted media parsers have fuzz targets](/quest/m2/media-fuzz.md) - would measure parsed-state amplification under either policy
 - [MKV leaf limits](https://github.com/moq-dev/moq/pull/7468) - planned in that open PR as `quest/m1/security-audit/mkv-leaf-limits.md`: per-element limits on the three MKV fields read whole, in m1. This quest starts from whatever it lands and aligns the two importers' rules, not the limits it picked

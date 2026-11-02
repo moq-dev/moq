@@ -13,4 +13,3 @@ Public API: none. Wire: none.
 ## Required
 
 - [Parse H.264 with maintained crates](/quest/m2/h264-reader.md) - its PR, #7398, moves SPS parsing to h264-reader
-- [Media parsers have fuzz targets](/quest/m2/media-fuzz.md) - its PR, #7313, adds the SPS target and the fuzz-findings epic

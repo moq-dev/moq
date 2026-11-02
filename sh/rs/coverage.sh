@@ -5,7 +5,7 @@ crate=${1:-workspace}
 report=()
 if [[ $crate == workspace ]]; then
     # Fuzz targets require nightly.
-    packages=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz)
+    packages=(--workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz --exclude moq-mux-fuzz --exclude moq-rtmp-fuzz)
 elif [[ $crate =~ ^[a-zA-Z0-9_-]+$ ]]; then
     packages=(-p "$crate")
     report=(-p "$crate")
