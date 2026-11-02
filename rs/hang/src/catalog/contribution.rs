@@ -18,20 +18,20 @@ pub struct Contribution {
 	/// above the root names no broadcast, so the catalog is rejected.
 	pub broadcast: moq_net::path::Relative,
 
-	/// The publisher instance the reference names, with a rendition `epoch`'s meaning: a route
-	/// proving another instance refuses it, and on an epochless route it is best effort. A
-	/// composer leaves it out until the contribution resolves.
+	/// The stream the reference names, with a rendition `instance`'s meaning: a route of another
+	/// instance refuses it, and against one a relay minted it is best effort. A composer leaves it
+	/// out until the contribution resolves.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	#[serde_as(as = "Option<serde_with::DisplayFromStr>")]
-	pub epoch: Option<moq_net::Epoch>,
+	pub instance: Option<moq_net::Instance>,
 }
 
 impl Contribution {
-	/// A contribution at `broadcast`, accepting whichever instance resolves.
+	/// A contribution at `broadcast`, accepting whichever stream resolves.
 	pub fn new(broadcast: impl Into<moq_net::path::Relative>) -> Self {
 		Self {
 			broadcast: broadcast.into(),
-			epoch: None,
+			instance: None,
 		}
 	}
 }

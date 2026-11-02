@@ -86,7 +86,9 @@ async fn decode(
 	let mut log = create("txt")?;
 	let mut pcm = create("pcm")?;
 
-	let rendition = source.resolve(audio.broadcast.as_ref(), audio.epoch.as_ref()).await?;
+	let rendition = source
+		.resolve(audio.broadcast.as_ref(), audio.instance.as_ref())
+		.await?;
 	let mut options = moq_audio::decode::Options::new();
 	options.output.format = moq_audio::Format::F32;
 	// How far the read may fall behind live before it skips. A gap fails the run, which a reader

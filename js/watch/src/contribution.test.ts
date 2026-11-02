@@ -2,14 +2,14 @@ import { expect, it } from "bun:test";
 import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
-import { Epoch, Origin, Path, type Track } from "@moq/net";
+import { Instance, Origin, Path, type Track } from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
 import { Broadcast } from "./broadcast";
 import { Source } from "./video/source";
 
-function publish(origin: Origin.Producer, path: string, epoch?: Epoch.Valid) {
+function publish(origin: Origin.Producer, path: string, instance?: Instance.Valid) {
 	const publication = origin.createBroadcast(Path.from(path));
-	publication.announce({ epoch });
+	publication.announce({ instance });
 	return publication.broadcast;
 }
 
@@ -218,11 +218,11 @@ it("tracks the contribution entry without reopening it on unrelated catalog upda
 	}
 });
 
-it("follows a restarted contributor only for an entry that names no epoch", async () => {
+it("follows a restarted contributor only for an entry that names no instance", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const [oldEpoch, newEpoch] = [Epoch.mint(), Epoch.mint()];
-	const old = publish(origin, "room/extra.hang", oldEpoch);
+	const [oldInstance, newInstance] = [Instance.random(), Instance.random()];
+	const old = publish(origin, "room/extra.hang", oldInstance);
 	const parent = new Broadcast({
 		origin,
 		name: Path.from("room/main.hang"),
@@ -230,7 +230,7 @@ it("follows a restarted contributor only for an entry that names no epoch", asyn
 		catalog: Catalog.RootSchema.parse({
 			contributions: {
 				following: { broadcast: "./extra.hang" },
-				pinned: { broadcast: "./extra.hang", epoch: oldEpoch },
+				pinned: { broadcast: "./extra.hang", instance: oldInstance },
 			},
 		}),
 	});
@@ -239,14 +239,14 @@ it("follows a restarted contributor only for an entry that names no epoch", asyn
 		const following = parent.contribution(owner, "following");
 		const pinned = parent.contribution(owner, "pinned");
 		await settle();
-		expect(following.out.active.peek()?.epoch).toBe(oldEpoch);
-		expect(pinned.out.active.peek()?.epoch).toBe(oldEpoch);
+		expect(following.out.active.peek()?.instance).toBe(oldInstance);
+		expect(pinned.out.active.peek()?.instance).toBe(oldInstance);
 
 		// The announcement is the online signal: the plain entry follows the restart, while the
 		// one naming the old instance goes offline rather than reading the new one.
-		const replacement = publish(origin, "room/extra.hang", newEpoch);
+		const replacement = publish(origin, "room/extra.hang", newInstance);
 		await quietly(settle);
-		expect(following.out.active.peek()?.epoch).toBe(newEpoch);
+		expect(following.out.active.peek()?.instance).toBe(newInstance);
 		expect(pinned.out.active.peek()).toBeUndefined();
 		expect(pinned.out.status.peek()).toBe("offline");
 		replacement.close();
@@ -261,7 +261,7 @@ it("follows a restarted contributor only for an entry that names no epoch", asyn
 it("pins the first instance of a contribution when not following announcements", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const first = publish(origin, "room/extra.hang", Epoch.mint());
+	const first = publish(origin, "room/extra.hang", Instance.random());
 	const parent = new Broadcast({
 		origin,
 		name: Path.from("room/main.hang"),
@@ -277,7 +277,7 @@ it("pins the first instance of a contribution when not following announcements",
 		expect(pinned?.path).toBe(Path.from("room/extra.hang"));
 
 		// A restart ends the pinned instance without moving the child to the new one.
-		const second = publish(origin, "room/extra.hang", Epoch.mint());
+		const second = publish(origin, "room/extra.hang", Instance.random());
 		await settle();
 		expect(child.out.active.peek()).toBeUndefined();
 		expect(child.out.error.peek()).toBeUndefined();
@@ -290,19 +290,20 @@ it("pins the first instance of a contribution when not following announcements",
 	}
 });
 
-it("never reads a contribution proven to be another epoch, but reads an epochless route", async () => {
+it("never reads a contribution of another instance, but reads a minted one", async () => {
 	const origin = new Origin.Producer();
 	publish(origin, "room/main.hang");
-	const served = Epoch.mint();
+	const served = Instance.random();
 	const proven = publish(origin, "room/proven.hang", served);
 	const track = proven.createTrack(Catalog.TRACK);
-	publish(origin, "room/plain.hang");
-	const named = Epoch.mint();
-	const contributions = (epoch: Epoch.Valid) =>
+	// A route over a wire that carries no instance has one its session minted.
+	publish(origin, "room/plain.hang", Instance.minted());
+	const named = Instance.random();
+	const contributions = (instance: Instance.Valid) =>
 		Catalog.RootSchema.parse({
 			contributions: {
-				proven: { broadcast: "./proven.hang", epoch },
-				plain: { broadcast: "./plain.hang", epoch: named },
+				proven: { broadcast: "./proven.hang", instance },
+				plain: { broadcast: "./plain.hang", instance: named },
 			},
 		});
 	const catalog = new Signal(contributions(named));
@@ -322,13 +323,13 @@ it("never reads a contribution proven to be another epoch, but reads an epochles
 		expect(refused.out.error.peek()).toBeUndefined();
 		expect(track.closed.peek()).toBeUndefined();
 		expect(track.demand().wanted.peek()).toBeUndefined();
-		// An epochless route cannot prove its instance, so the epoch cannot refuse it.
+		// A minted instance cannot prove the stream, so the named instance cannot refuse it.
 		expect(accepted.out.active.peek()?.path).toBe(Path.from("room/plain.hang"));
 
-		// A catalog update naming the served epoch admits the instance the request already holds.
+		// A catalog update naming the served instance admits the stream the request already holds.
 		catalog.set(contributions(served));
 		await settle();
-		expect(refused.out.active.peek()?.epoch).toBe(served);
+		expect(refused.out.active.peek()?.instance).toBe(served);
 	} finally {
 		owner.close();
 		parent.close();
@@ -336,17 +337,17 @@ it("never reads a contribution proven to be another epoch, but reads an epochles
 	}
 });
 
-it("shares the parent's resolution, so a new epoch checks the held handle", async () => {
+it("shares the parent's resolution, so a new instance checks the held handle", async () => {
 	const origin = new Origin.Producer();
-	const [served, other] = [Epoch.mint(), Epoch.mint()];
+	const [served, other] = [Instance.random(), Instance.random()];
 	publish(origin, "room/main.hang", served);
 	const extraCatalog = publish(origin, "room/extra.hang", served).createTrack(Catalog.TRACK);
-	const entries = (epoch?: Epoch.Valid) =>
+	const entries = (instance?: Instance.Valid) =>
 		Catalog.RootSchema.parse({
 			contributions: {
-				sibling: { broadcast: "./extra.hang", epoch },
-				self: { broadcast: "./main.hang", epoch },
-				empty: { broadcast: "", epoch },
+				sibling: { broadcast: "./extra.hang", instance },
+				self: { broadcast: "./main.hang", instance },
+				empty: { broadcast: "", instance },
 			},
 		});
 	const catalog = new Signal(entries());
@@ -363,7 +364,7 @@ it("shares the parent's resolution, so a new epoch checks the held handle", asyn
 		const self = parent.contribution(owner, "self");
 		await settle();
 		const held = sibling.out.active.peek();
-		expect(held?.epoch).toBe(served);
+		expect(held?.instance).toBe(served);
 		// A self-reference is the parent's own handle, not a request of its own. An empty one is
 		// too, and is named like the parent, so its own references resolve against the same base.
 		expect(self.out.active.peek()).toBe(parent.out.active.peek());

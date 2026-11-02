@@ -96,7 +96,7 @@ impl<O: Output> Media<O> {
 					};
 					tracing::info!(
 						broadcast = %self.broadcast,
-						epoch = broadcast.info().epoch.as_ref().map(tracing::field::display),
+						instance = broadcast.info().instance.as_ref().map(tracing::field::display),
 						"online"
 					);
 
@@ -255,7 +255,10 @@ impl<O: Output> Media<O> {
 					// A rendition pointing at a broadcast we can't reach is that
 					// rendition's problem, not the catalog's: fall through to the
 					// next one like an unsupported codec does.
-					let rendition = match source.resolve(config.broadcast.as_ref(), config.epoch.as_ref()).await {
+					let rendition = match source
+						.resolve(config.broadcast.as_ref(), config.instance.as_ref())
+						.await
+					{
 						Ok(rendition) => rendition,
 						Err(err) => {
 							tracing::warn!(track = name, %err, "cannot resolve video rendition");
@@ -382,7 +385,10 @@ impl<O: Output> Media<O> {
 					if playback.finished(&reference) {
 						continue;
 					}
-					let rendition = match source.resolve(config.broadcast.as_ref(), config.epoch.as_ref()).await {
+					let rendition = match source
+						.resolve(config.broadcast.as_ref(), config.instance.as_ref())
+						.await
+					{
 						Ok(rendition) => rendition,
 						Err(err) => {
 							tracing::warn!(track = name, %err, "cannot resolve audio rendition");
@@ -1743,10 +1749,9 @@ mod tests {
 		(broadcast, catalog, audio)
 	}
 
-	/// Answer the next request through `claim` with one `audio` rendition, under `route`'s epoch.
+	/// Answer the next request through `claim` with one `audio` rendition, under a fresh instance.
 	async fn answer(
 		claim: &moq_net::origin::Requests,
-		route: &moq_net::origin::Route,
 	) -> (
 		moq_net::origin::Publication,
 		catalog::Producer,
@@ -1756,7 +1761,7 @@ mod tests {
 			.await
 			.expect("the claim is asked")
 			.unwrap();
-		let prepared = request.prepare(route.epoch.clone().expect("an epoch")).unwrap();
+		let prepared = request.prepare().unwrap();
 		let mut broadcast = prepared.broadcast().clone();
 		let catalog = catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 		let audio = rendition(&broadcast, &catalog, "audio");
@@ -1795,7 +1800,7 @@ mod tests {
 		player.abort();
 	}
 
-	/// A restarted publisher announces a fresh epoch while its old run still
+	/// A restarted publisher announces a fresh instance while its old run still
 	/// stands. The restart drops the old broadcast and plays the new one, whose
 	/// timeline starts over, instead of waiting for it to catch up.
 	#[tokio::test]
@@ -1805,14 +1810,12 @@ mod tests {
 		const OLD: f32 = 0.25;
 		const NEW: f32 = 0.5;
 		let origin = moq_tokio::origin::spawn();
-		let epoch = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
-
-		let (_old_broadcast, _old_catalog, mut old) = publish(&origin, epoch());
+		let (_old_broadcast, _old_catalog, mut old) = publish(&origin, Default::default());
 		let recorder = Recorder::default();
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		write(&mut old, 10, OLD).await;
 
-		let (_new_broadcast, _new_catalog, mut new) = publish(&origin, epoch());
+		let (_new_broadcast, _new_catalog, mut new) = publish(&origin, Default::default());
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
@@ -1845,10 +1848,10 @@ mod tests {
 		assert!(recorder.events().iter().any(|event| matches!(event, Event::Failed(_))));
 	}
 
-	/// Without epochs (moq-lite 06), a restart that overlaps the old route still
-	/// replaces it: the newest announcement wins the path.
+	/// A restart that overlaps the old route still replaces it: it is a new instance, and
+	/// the newest announcement at the exact path wins it.
 	#[tokio::test]
-	async fn an_epochless_republish_plays_the_new_broadcast() {
+	async fn an_overlapping_republish_plays_the_new_broadcast() {
 		tokio::time::pause();
 
 		const OLD: f32 = 0.25;
@@ -1861,9 +1864,8 @@ mod tests {
 		write(&mut old, 10, OLD).await;
 
 		let (_new_broadcast, _new_catalog, mut new) = publish(&origin, Default::default());
-		// A restart without an epoch waits out the origin's update hold, since a
-		// withdrawal wave's stale route looks just like one, and the player joins the
-		// new broadcast at its live edge.
+		// Give the player the update hold to see the restart, so it joins the new
+		// broadcast at its live edge.
 		kio::clock::sleep(moq_net::origin::Config::default().update_hold).await;
 		write(&mut new, 10, NEW).await;
 
@@ -1975,8 +1977,8 @@ mod tests {
 		assert_eq!(Track::of(&source, &config, "audio"), absent);
 	}
 
-	/// A covering route of the same epoch that arrives as the exact route goes, both
-	/// before the player looks, is the path served again after a gap. A player with
+	/// A covering route that arrives as the exact route goes, both before the player
+	/// looks, is the path served again after a gap. A player with
 	/// nothing playing plays it.
 	#[tokio::test]
 	async fn a_covering_route_after_a_gap_plays_while_idle() {
@@ -1985,7 +1987,7 @@ mod tests {
 		const OLD: f32 = 0.25;
 		const NEW: f32 = 0.5;
 		let origin = moq_tokio::origin::spawn();
-		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+		let route = moq_net::origin::Route::default();
 
 		let (exact, mut exact_catalog, mut old) = publish(&origin, route.clone());
 		let recorder = Recorder::default();
@@ -1999,7 +2001,7 @@ mod tests {
 
 		let pool = origin.requests("").unwrap();
 		drop(exact);
-		let (served, served_catalog, mut new) = answer(&pool, &route).await;
+		let (served, served_catalog, mut new) = answer(&pool).await;
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
@@ -2012,9 +2014,8 @@ mod tests {
 	}
 
 	/// The exact route goes while the old run still holds its delay, and a covering
-	/// route of the same epoch takes over. Playback reaches the covering route, whether
-	/// the announcements show the gap (a restart) or the origin rides it out (the same
-	/// run carrying on).
+	/// route takes over under another instance. Playback reaches the covering route as
+	/// a restart.
 	#[tokio::test]
 	async fn a_handoff_to_a_covering_route_plays_on_while_draining() {
 		tokio::time::pause();
@@ -2022,7 +2023,7 @@ mod tests {
 		const OLD: f32 = 0.25;
 		const NEW: f32 = 0.5;
 		let origin = moq_tokio::origin::spawn();
-		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+		let route = moq_net::origin::Route::default();
 
 		// One instance, served by the exact route and then answered again behind a covering one.
 		let (exact, exact_catalog, mut old) = publish(&origin, route.clone());
@@ -2035,7 +2036,7 @@ mod tests {
 
 		exact.unannounce();
 		let pool = origin.requests("").unwrap();
-		let (mirror, mirror_catalog, mut copy) = answer(&pool, &route).await;
+		let (mirror, mirror_catalog, mut copy) = answer(&pool).await;
 		for index in 50..60 {
 			copy.write(packet(index, NEW)).unwrap();
 			kio::clock::sleep(PACKET_DURATION).await;
@@ -2057,7 +2058,7 @@ mod tests {
 
 		const SAMPLE: f32 = 0.25;
 		let origin = moq_tokio::origin::spawn();
-		let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+		let route = moq_net::origin::Route::default();
 
 		let (broadcast, _catalog, mut audio) = publish(&origin, route.clone());
 		let recorder = Recorder::default();

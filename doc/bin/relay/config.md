@@ -326,7 +326,7 @@ tls.key = "relay.key"
 goaway.redirect = "same-host"        # How far to trust a draining peer's redirect URI.
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
 extensions.auth = false              # Decline MoQ Auth on outbound moq-transport sessions.
-extensions.solicit = false           # Decline MoQ Solicit.
+extensions.solicit = false           # Decline MoQ Solicit. All default to on, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only
@@ -369,11 +369,11 @@ linger = "5m"                        # Keep an empty group's track listed this l
 Each node publishes its traffic and session counters as MoQ tracks, split by a
 **tier** label from the auth server's grant (`--cluster-tier` for links this
 relay dials and LAN peers it admits), which is what makes billing per customer or per region possible.
-Each run announces under a fresh [epoch](/concept/moq-lite#publisher-epochs),
+Each run announces under a fresh [instance](/concept/moq-lite#publisher-instances),
 so a restart is a new broadcast at the same path. Each group is a
 [track](/concept/stats#group-tracks) of that broadcast, and one returning after
-its linger restarts its counters under a new epoch without an announce. The
-node's totals count everything since its epoch began, so billing reads those;
+its linger restarts its counters under a new run id without an announce. The
+node's totals count everything since its run began, so billing reads those;
 a group's per-path traffic and per-label sessions and HTTP requests are for
 dashboards. Session counters report how close sessions come to the
 per-session limits, past which one is closed with `TOO_MANY_REQUESTS`.

@@ -3,7 +3,6 @@ import { Elapsed, Manual, Milli, Nano, sleep, timeout, yieldNow } from "@moq/clo
 import { Signal } from "@moq/signals";
 import type { Credential, Grant } from "../auth.ts";
 import { Producer as BroadcastProducer } from "../broadcast.ts";
-import * as Epoch from "../epoch.ts";
 import {
 	error,
 	ProtocolViolation,
@@ -14,6 +13,7 @@ import {
 	unauthorized,
 } from "../error.ts";
 import { type Hop, HopSchema } from "../hop.ts";
+import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair, SessionBroadcast } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -1312,16 +1312,16 @@ test("republishing a path clears a refusal without unannouncing first", async ()
 });
 
 /**
- * A new epoch on the same broadcast handle is another publisher instance, so a refusal of
- * the old one does not strand it. Rust gets this from the END and START an epoch change
+ * A new instance on the same broadcast handle is another publisher instance, so a refusal of
+ * the old one does not strand it. Rust gets this from the END and START an instance change
  * delivers.
  */
-test("a new epoch at the same path clears a refusal", async () => {
+test("a new instance at the same path clears a refusal", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const { pub, origin } = publisher(pair.server);
 
 	const broadcast = origin.createBroadcast(Path.from("restarted"));
-	broadcast.announce({ epoch: Epoch.mint() });
+	broadcast.announce({ instance: Instance.random() });
 
 	void pub.runPublishNamespaces();
 
@@ -1331,7 +1331,7 @@ test("a new epoch at the same path clears a refusal", async () => {
 	await declinePublishNamespace(declined, 0n);
 	await sleep(Nano.fromMilli(Milli(SETTLE)));
 
-	broadcast.announce({ ...broadcast.route, epoch: Epoch.mint() });
+	broadcast.announce({ ...broadcast.route, instance: Instance.random() });
 
 	const retried = await nextStream(pair.client);
 	if (!retried) throw new Error("the new instance was never offered");

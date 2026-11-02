@@ -2,7 +2,12 @@ use std::fmt;
 use std::str::FromStr;
 use std::sync::Arc;
 
-/// One publisher instance's identity, the lowercase hyphenated text of a UUIDv7.
+/// One publisher instance's generation epoch, the lowercase hyphenated text of a UUIDv7.
+///
+/// The instance announces it as its route's [`moq_net::Instance`] ([`Self::instance`]), so a
+/// subscriber reads it back from the broadcast it resolved ([`Self::of`]). A wire that carries
+/// no instance hands the subscriber one its relay minted, which is no epoch: the application
+/// supplies the epoch over its own authenticated channel then.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Epoch(Arc<str>);
 
@@ -13,7 +18,7 @@ pub struct Epoch(Arc<str>);
 pub struct InvalidEpoch;
 
 impl Epoch {
-	/// Mint a fresh identity using the wall clock and secure randomness, ordered newest last.
+	/// Mint a fresh epoch using the wall clock and secure randomness, ordered newest last.
 	pub fn mint() -> Self {
 		Self(uuid::Uuid::now_v7().hyphenated().to_string().into())
 	}
@@ -22,21 +27,15 @@ impl Epoch {
 	pub fn as_str(&self) -> &str {
 		&self.0
 	}
-}
 
-impl Epoch {
-	/// The UUID's 16 bytes, as the wire carries them.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn to_bytes(&self) -> [u8; 16] {
-		// Parsing enforces the canonical form, so this cannot fail.
-		uuid::Uuid::parse_str(&self.0).unwrap().into_bytes()
+	/// The route instance that announces this epoch.
+	pub fn instance(&self) -> moq_net::Instance {
+		self.as_str().parse().expect("an epoch is never empty")
 	}
 
-	/// Parse the wire's 16 bytes, refusing anything but a UUIDv7 with the RFC variant.
-	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn from_bytes(bytes: &[u8]) -> Result<Self, InvalidEpoch> {
-		let uuid = uuid::Uuid::from_slice(bytes).map_err(|_| InvalidEpoch)?;
-		uuid.hyphenated().to_string().parse()
+	/// The epoch a resolved broadcast's route announced, if its instance is one.
+	pub fn of(broadcast: &moq_net::broadcast::Consumer) -> Option<Self> {
+		broadcast.info().instance.as_ref()?.as_str().parse().ok()
 	}
 }
 
@@ -84,7 +83,7 @@ mod tests {
 		assert!(Epoch::mint() > epoch);
 	}
 
-	/// Shared with `js/net/src/epoch.test.ts`, so both parse and order alike.
+	/// Shared with `js/e2ee/src/epoch.test.ts`, so both parse and order alike.
 	#[test]
 	fn epoch_vectors() {
 		let vectors: serde_json::Value = serde_json::from_str(include_str!("epoch.json")).unwrap();
@@ -103,13 +102,5 @@ mod tests {
 			.map(|row| row.as_str().unwrap().parse().unwrap())
 			.collect();
 		assert!(ordered.windows(2).all(|pair| pair[0] < pair[1]));
-	}
-
-	#[test]
-	fn bytes_roundtrip_and_refuse_other_versions() {
-		let epoch = Epoch::mint();
-		assert_eq!(Epoch::from_bytes(&epoch.to_bytes()).unwrap(), epoch);
-		assert!(Epoch::from_bytes(uuid::Builder::from_random_bytes([7; 16]).into_uuid().as_bytes()).is_err());
-		assert!(Epoch::from_bytes(&epoch.to_bytes()[..15]).is_err());
 	}
 }

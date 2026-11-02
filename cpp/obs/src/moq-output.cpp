@@ -168,7 +168,8 @@ bool MoQOutput::Start()
 	}
 
 	// Create the broadcast on an origin of our own, then announce it so subscribers
-	// can discover it. Stop() finishes it, so each Start creates a fresh one. Only the
+	// can discover it. Stop() finishes it, so each Start creates a fresh one, under a
+	// fresh instance the broadcast mints and keeps across reconnects. Only the
 	// broadcast is kept: the route outlives the publication until the broadcast closes.
 	LOG_INFO("Publishing broadcast: %s", path.c_str());
 	auto next_origin = moq::OriginProducer::init(moq::OriginConfig{});
@@ -177,9 +178,7 @@ bool MoQOutput::Start()
 		LOG_ERROR("Failed to create broadcast: %s", publication.error().to_string().c_str());
 		return false;
 	}
-	moq::AnnounceRoute route;
-	route.epoch = moq::mint_epoch();
-	if (auto announced = (*publication)->announce(route); !announced) {
+	if (auto announced = (*publication)->announce({}); !announced) {
 		LOG_ERROR("Failed to announce broadcast: %s", announced.error().to_string().c_str());
 		return false;
 	}
@@ -230,7 +229,6 @@ bool MoQOutput::Start()
 	{
 		std::lock_guard<std::mutex> lock(mutex);
 		url = server;
-		epoch = *route.epoch;
 	}
 	{
 		std::lock_guard<std::mutex> lock(media_mutex);
@@ -372,7 +370,6 @@ void MoQOutput::Reset()
 		connected = false;
 		live = false;
 		url.clear();
-		epoch.clear();
 		last_failure_code = MoQError::None;
 		last_failure_reason.clear();
 		token_refusal.clear();
@@ -427,12 +424,6 @@ void MoQOutput::Reset()
 
 	for (auto &[encoder, bitrate] : restore)
 		SetBitrate(encoder, bitrate);
-}
-
-std::string MoQOutput::GetEpoch()
-{
-	std::lock_guard<std::mutex> lock(mutex);
-	return epoch;
 }
 
 bool MoQOutput::TryGetConnectionStats(ConnectionStats *out)

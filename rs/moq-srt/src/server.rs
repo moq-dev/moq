@@ -1011,7 +1011,7 @@ mod tests {
 		egress.abort();
 	}
 
-	/// One publisher instance of `live`: an announced broadcast under its own epoch with one
+	/// One publisher instance of `live`: an announced broadcast under its own instance with one
 	/// Legacy AAC track, for the egress tests.
 	struct Instance {
 		_broadcast: moq_net::origin::Publication,
@@ -1021,7 +1021,7 @@ mod tests {
 
 	impl Instance {
 		fn publish(origin: &moq_net::origin::Producer, track: &str) -> Self {
-			let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
+			let route = moq_net::origin::Route::default();
 			let broadcast = origin.publish("live", route).unwrap();
 			let mut catalog = moq_mux::catalog::Producer::new(
 				&mut broadcast.broadcast().clone(),

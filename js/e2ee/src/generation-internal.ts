@@ -8,9 +8,10 @@
  *
  * @module
  */
-import { Epoch, type Track as NetTrack } from "@moq/net";
+import type { Track as NetTrack } from "@moq/net";
 import type { Credential } from "./credential.ts";
 import { DATAGRAM, GROUP, type Name, pad } from "./derive.ts";
+import * as Epoch from "./epoch.ts";
 import { Failure } from "./failure.ts";
 import type { Keys } from "./internal.ts";
 import { trackKey } from "./key.ts";

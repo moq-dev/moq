@@ -2,10 +2,10 @@
  * A typed failure code from draft-lcurley-moq-sign.
  *
  * - `signature`: a frame is shorter than a signature, or its signature does not verify at its identity.
- * - `epoch`: the broadcast was not resolved through a route that names its publisher epoch.
+ * - `instance`: the broadcast was not resolved through a route that carries its publisher's instance.
  * - `key`: a public key is not 32 bytes, or its text is not 64 lowercase hex characters.
  */
-export type Code = "signature" | "epoch" | "key";
+export type Code = "signature" | "instance" | "key";
 
 /** A profile failure; the message is the {@link Code}. */
 export class Failure extends Error {

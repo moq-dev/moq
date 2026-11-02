@@ -4,7 +4,6 @@ import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import type { AuthSession } from "../auth_session.ts";
 import type { Probe as ProbeStats } from "../connection/stats.ts";
-import * as Epoch from "../epoch.ts";
 import {
 	error,
 	fromTransport,
@@ -18,6 +17,7 @@ import {
 } from "../error.ts";
 import type { Consumer as GroupConsumer } from "../group.ts";
 import { HopSchema, isAnonymous, MAX_HOPS, Route, UNKNOWN_HOP } from "../hop.ts";
+import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
 import { GRACE } from "../ledger.ts";
 import * as Path from "../path.ts";
@@ -338,25 +338,25 @@ test("a lite-07 restart replaces the instance, and the next consume subscribes f
 	const room = Path.from("room");
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
-	const first = Epoch.mint();
+	const first = Instance.random();
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: room, epoch: first, hops: [PUBLISHER_A] },
+			{ status: "active", suffix: room, instance: first, hops: [PUBLISHER_A] },
 			Version.DRAFT_07,
 		),
 	);
-	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { epoch: first } });
+	expect(await announced.next()).toMatchObject({ prefix: room, kind: "start", route: { instance: first } });
 	const held = subscriber.consume(room);
 
-	// Another instance, under a new epoch or none: a restart, and the handle already out stays.
-	for (const epoch of [Epoch.mint(), undefined]) {
+	// Another instance: a restart, and the handle already out stays.
+	for (const instance of [Instance.random(), Instance.random()]) {
 		await send((w) =>
-			encodeAnnounceBroadcast(w, { status: "restart", id: 0n, epoch, hops: [PUBLISHER_B] }, Version.DRAFT_07),
+			encodeAnnounceBroadcast(w, { status: "restart", id: 0n, instance, hops: [PUBLISHER_B] }, Version.DRAFT_07),
 		);
 		const restarted = await announced.next();
 		expect(restarted).toMatchObject({ prefix: room, kind: "restart", route: { hops: [PUBLISHER_B, PEER] } });
-		expect(restarted?.route.epoch).toBe(epoch);
+		expect(restarted?.route.instance).toBe(instance);
 		const fresh = subscriber.consume(room);
 		expect(fresh.closed).not.toBe(held.closed);
 		expect(held.closed.peek()).toBeUndefined();
@@ -380,31 +380,35 @@ test("a lite-07 takeover surfaces as a start beneath its predecessor, or a resta
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
 	await send((w) =>
-		encodeAnnounceBroadcast(w, { status: "active", suffix: pool, hops: [PUBLISHER_A] }, Version.DRAFT_07),
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: pool, instance: Instance.random(), hops: [PUBLISHER_A] },
+			Version.DRAFT_07,
+		),
 	);
 	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start" });
 
 	// Beneath the claim: a start with the next id (1), and the claim stays live.
-	const epoch = Epoch.mint();
+	const instance = Instance.random();
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "takeover", predecessor: 0n, suffix: job, epoch, hops: [PUBLISHER_A] },
+			{ status: "takeover", predecessor: 0n, suffix: job, instance, hops: [PUBLISHER_A] },
 			Version.DRAFT_07,
 		),
 	);
-	expect(await announced.next()).toMatchObject({ prefix: job, kind: "start", route: { epoch } });
+	expect(await announced.next()).toMatchObject({ prefix: job, kind: "start", route: { instance } });
 
 	// At the job's own path: a restart that retires id 1 and assigns id 2.
-	const next = Epoch.mint();
+	const next = Instance.random();
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "takeover", predecessor: 1n, suffix: job, epoch: next, hops: [PUBLISHER_A] },
+			{ status: "takeover", predecessor: 1n, suffix: job, instance: next, hops: [PUBLISHER_A] },
 			Version.DRAFT_07,
 		),
 	);
-	expect(await announced.next()).toMatchObject({ prefix: job, kind: "restart", route: { epoch: next } });
+	expect(await announced.next()).toMatchObject({ prefix: job, kind: "restart", route: { instance: next } });
 
 	await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 2n }, Version.DRAFT_07));
 	expect(await announced.next()).toMatchObject({ prefix: job, kind: "end" });
@@ -428,7 +432,7 @@ test.each([
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("pool"), hops: [PUBLISHER_A] },
+			{ status: "active", suffix: Path.from("pool"), instance: Instance.random(), hops: [PUBLISHER_A] },
 			Version.DRAFT_07,
 		),
 	);
@@ -436,7 +440,13 @@ test.each([
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "takeover", predecessor, suffix: Path.from(suffix), hops: [PUBLISHER_A] },
+			{
+				status: "takeover",
+				predecessor,
+				suffix: Path.from(suffix),
+				instance: Instance.random(),
+				hops: [PUBLISHER_A],
+			},
 			Version.DRAFT_07,
 		),
 	);
@@ -458,12 +468,24 @@ test.each([
 	const job = Path.from("pool/job");
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, version));
-	await send((w) => encodeAnnounceBroadcast(w, { status: "active", suffix: pool, hops: [PUBLISHER_A] }, version));
+	await send((w) =>
+		encodeAnnounceBroadcast(
+			w,
+			{ status: "active", suffix: pool, instance: named(version, "a"), hops: [PUBLISHER_A] },
+			version,
+		),
+	);
 	expect(await announced.next()).toMatchObject({ prefix: pool, kind: "start" });
 	const held = subscriber.consume(job);
 
 	if (version === Version.DRAFT_07) {
-		await send((w) => encodeAnnounceBroadcast(w, { status: "restart", id: 0n, hops: [PUBLISHER_B] }, version));
+		await send((w) =>
+			encodeAnnounceBroadcast(
+				w,
+				{ status: "restart", id: 0n, instance: named(version, "b"), hops: [PUBLISHER_B] },
+				version,
+			),
+		);
 		expect(await announced.next()).toMatchObject({ prefix: pool, kind: "restart" });
 	} else {
 		await send((w) => encodeAnnounceBroadcast(w, { status: "endedId", id: 0n }, version));
@@ -716,7 +738,7 @@ test("an update replaces an announce that was skipped as a reflected loop", asyn
 	subscriber.close();
 });
 
-test("an update keeps the epoch of an announce skipped as a reflected loop", async () => {
+test("an update keeps the instance of an announce skipped as a reflected loop", async () => {
 	const SELF = 1n;
 	const { subscriber, send, settle } = announceHarness(Version.DRAFT_07, SELF);
 	const announced = subscriber.announced();
@@ -724,22 +746,22 @@ test("an update keeps the epoch of an announce skipped as a reflected loop", asy
 
 	await send((w) => new AnnounceOk(PEER, 0).encode(w, Version.DRAFT_07));
 
-	// Skipped: the chain reflects back through us. The epoch still names the instance.
-	const epoch = Epoch.mint();
+	// Skipped: the chain reflects back through us. The instance still names the instance.
+	const instance = Instance.random();
 	await send((w) =>
 		encodeAnnounceBroadcast(
 			w,
-			{ status: "active", suffix: Path.from("room"), epoch, hops: [HopSchema.parse(SELF)] },
+			{ status: "active", suffix: Path.from("room"), instance, hops: [HopSchema.parse(SELF)] },
 			Version.DRAFT_07,
 		),
 	);
 	await settle();
 
-	// An update never carries the epoch, so the attached route takes the one the start named.
+	// An update never carries the instance, so the attached route takes the one the start named.
 	await send((w) => encodeAnnounceBroadcast(w, { status: "update", id: 0n, hops: [PUBLISHER_A] }, Version.DRAFT_07));
 	const started = await announced.next();
 	expect(started).toMatchObject({ prefix: Path.from("room"), kind: "start" });
-	expect(started?.route.epoch).toBe(epoch);
+	expect(started?.route.instance).toBe(instance);
 
 	announced.close();
 	subscriber.close();
@@ -1690,8 +1712,8 @@ test.each(["initial", "track", "fetch", "body"] as const)(
 );
 
 // Serve announcements and metadata on separate mock streams, with no wall-clock wait.
-test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
-	"a retired epochless handle refuses new metadata on %s",
+test.each([Version.DRAFT_05, Version.DRAFT_06])(
+	"a retired handle on a wire without instances refuses new metadata on %s",
 	async (version) => {
 		const { quic, streams, opened } = fakeSession();
 		const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
@@ -1739,32 +1761,14 @@ test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 	},
 );
 
-// A TRACKS request carries no epoch for an epochless route, so it would list the replacement.
-test("a listing of an epochless handle retired while its token waits never reaches the wire", async () => {
-	const { quic, streams, opened } = fakeSession();
-	let release!: () => void;
-	const released = new Promise<void>((resolve) => (release = resolve));
-	const auth = {
-		ready: (_path: Path.Valid, _direction: string, opts?: { signal?: AbortSignal }) =>
-			new Promise<boolean>((resolve, reject) => {
-				void released.then(() => resolve(true));
-				opts?.signal?.addEventListener("abort", () => reject(opts.signal?.reason), { once: true });
-			}),
-	} as unknown as AuthSession;
-	const version = Version.DRAFT_07;
-	const subscriber = new Subscriber(
-		quic,
-		version,
-		HopSchema.parse(1n),
-		undefined,
-		undefined,
-		undefined,
-		undefined,
-		undefined,
-		auth,
-	);
-	const announced = subscriber.announced();
-	await opened(0);
+/** The instance an announcement names on a wire that carries one, `name` on lite-07. */
+function named(version: Version, name: string): Instance.Valid | undefined {
+	return version === Version.DRAFT_07 ? Instance.parse(name) : undefined;
+}
+
+// Announce PUBLISHER_A's `pool` on stream 0, under instance `a` where the wire carries one, and
+// return how to withdraw it and how to announce PUBLISHER_B's, under `b`, in its place.
+async function unpinnedPool(version: Version, streams: FakeStream[], announced: { next(): Promise<unknown> }) {
 	const send = async (encode: (writer: Writer) => Promise<void>) => {
 		const writer = new Writer(
 			new WritableStream<Uint8Array>({
@@ -1777,47 +1781,11 @@ test("a listing of an epochless handle retired while its token waits never reach
 	const path = Path.from("pool");
 	await send((writer) => new AnnounceOk(PEER, 0).encode(writer, version));
 	await send((writer) =>
-		encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_A] }, version),
-	);
-	await announced.next();
-	const held = subscriber.consume(Path.from("pool/job"));
-	const tracks = held.tracks();
-	const event = tracks.next().catch((err: unknown) => err);
-
-	await send((writer) => encodeAnnounceBroadcast(writer, { status: "endedId", id: 0n }, version));
-	await announced.next();
-	await send((writer) =>
-		encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_B] }, version),
-	);
-	await announced.next();
-	release();
-
-	const err = await event;
-	expect(err).toBeInstanceOf(StreamError);
-	expect((err as StreamError).code).toBe(StreamCode.Unroutable);
-	expect(streams.length).toBe(1);
-	tracks.close();
-	held.close();
-	announced.close();
-	subscriber.close();
-});
-
-// Announce PUBLISHER_A's epochless `pool` on stream 0, and return how to withdraw it and how to
-// announce PUBLISHER_B's in its place.
-async function epochlessPool(version: Version, streams: FakeStream[], announced: { next(): Promise<unknown> }) {
-	const send = async (encode: (writer: Writer) => Promise<void>) => {
-		const writer = new Writer(
-			new WritableStream<Uint8Array>({
-				write: (chunk) => streams[0].inbound.enqueue(new Uint8Array(chunk)),
-			}),
+		encodeAnnounceBroadcast(
+			writer,
+			{ status: "active", suffix: path, hops: [PUBLISHER_A], instance: named(version, "a") },
 			version,
-		);
-		await encode(writer);
-	};
-	const path = Path.from("pool");
-	await send((writer) => new AnnounceOk(PEER, 0).encode(writer, version));
-	await send((writer) =>
-		encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_A] }, version),
+		),
 	);
 	await announced.next();
 	const withdraw = async () => {
@@ -1832,7 +1800,11 @@ async function epochlessPool(version: Version, streams: FakeStream[], announced:
 	};
 	const announce = async () => {
 		await send((writer) =>
-			encodeAnnounceBroadcast(writer, { status: "active", suffix: path, hops: [PUBLISHER_B] }, version),
+			encodeAnnounceBroadcast(
+				writer,
+				{ status: "active", suffix: path, hops: [PUBLISHER_B], instance: named(version, "b") },
+				version,
+			),
 		);
 		await announced.next();
 	};
@@ -1851,26 +1823,24 @@ async function respond(stream: FakeStream, version: Version, responses: Subscrib
 	if (fin) stream.inbound.close();
 }
 
-// A SUBSCRIBE without an epoch resolves whichever instance won the path when it arrived, so one
+// A SUBSCRIBE without an instance resolves whichever instance won the path when it arrived, so one
 // unanswered when another instance takes the path is refused, a withdrawal followed by a new
 // announcement included. One answered first stays on its instance, and a withdrawal alone leaves
 // it to its answer, so a track that finished as its broadcast ended still arrives.
 test.each([
 	["unanswered on lite-05 is refused", Version.DRAFT_05, "replaced"],
 	["unanswered on lite-06 is refused", Version.DRAFT_06, "replaced"],
-	["unanswered on lite-07 is refused", Version.DRAFT_07, "replaced"],
-	["answered on lite-07 stays", Version.DRAFT_07, "answered"],
+	["answered on lite-06 stays", Version.DRAFT_06, "answered"],
 	["unanswered on lite-05 finishes", Version.DRAFT_05, "withdrawn"],
 	["unanswered on lite-06 finishes", Version.DRAFT_06, "withdrawn"],
-	["unanswered on lite-07 finishes", Version.DRAFT_07, "withdrawn"],
-] as const)("an epochless SUBSCRIBE %s at a takeover or withdrawal", async (_, version, outcome) => {
+] as const)("an unpinned SUBSCRIBE %s at a takeover or withdrawal", async (_, version, outcome) => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const announced = subscriber.announced();
 	try {
 		await opened(0);
-		const pool = await epochlessPool(version, streams, announced);
+		const pool = await unpinnedPool(version, streams, announced);
 		const held = subscriber.consume(Path.from("pool/job"));
 		const track = held.track("video").subscribe();
 		await answerTrackInfo(await opened(1), version);
@@ -1906,16 +1876,17 @@ test.each([
 });
 
 // A TRACK answered while its SUBSCRIBE still waits for a stream belongs to the subscription, so
-// a withdrawal then closes it rather than leaving it to a create that may never open.
+// a withdrawal then closes it rather than leaving it to a create that may never open. Only a
+// minted instance ends with its route: a named one leaves the request to the peer.
 test("a withdrawal while the subscribe opens closes the answered track", async () => {
-	const version = Version.DRAFT_07;
+	const version = Version.DRAFT_06;
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const { quic, streams, opened } = fakeSession([2]);
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const announced = subscriber.announced();
 	try {
 		await opened(0);
-		const pool = await epochlessPool(version, streams, announced);
+		const pool = await unpinnedPool(version, streams, announced);
 		const held = subscriber.consume(Path.from("pool/job"));
 		const track = held.track("video").subscribe();
 		const info = await opened(1);
@@ -1939,33 +1910,6 @@ test("a withdrawal while the subscribe opens closes the answered track", async (
 		subscriber.close();
 		warn.mockRestore();
 	}
-});
-
-// A TRACKS request without an epoch lists whichever instance won the path when it arrived, so
-// another instance taking the path refuses one still unanswered.
-test("a listing of an epochless handle replaced before its answer is refused", async () => {
-	const version = Version.DRAFT_07;
-	const { quic, streams, opened } = fakeSession();
-	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
-	const announced = subscriber.announced();
-	await opened(0);
-	const pool = await epochlessPool(version, streams, announced);
-	const held = subscriber.consume(Path.from("pool/job"));
-	const tracks = held.tracks();
-	expect(await tracks.next()).toEqual({ kind: "synced" });
-	const event = tracks.next().catch((err: unknown) => err);
-	const listing = await opened(1);
-	await listing.reading;
-
-	await pool.replace();
-	const err = await event;
-	expect(err).toBeInstanceOf(StreamError);
-	expect((err as StreamError).code).toBe(StreamCode.Unroutable);
-	await listing.aborted;
-	tracks.close();
-	held.close();
-	announced.close();
-	subscriber.close();
 });
 
 test("a listing whose readers leave as its token settles never reaches the wire", async () => {
@@ -2053,7 +1997,7 @@ test("retirement preserves an accepted fetch and its coalesced reads", async () 
 
 // Drive discovery and inspect the TRACK request before answering it. Waiting for the
 // reader means the whole request has reached the wire, without a clock-based settle.
-test("consumes resolve the serving prefix and pin its epoch", async () => {
+test("consumes resolve the serving prefix and pin its instance", async () => {
 	const version = Version.DRAFT_07;
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
@@ -2068,8 +2012,8 @@ test("consumes resolve the serving prefix and pin its epoch", async () => {
 	await new AnnounceOk(PEER, 0).encode(peer, version);
 	const pool = Path.from("pool");
 	const job = Path.from("pool/job");
-	const epoch = Epoch.mint();
-	await encodeAnnounceBroadcast(peer, { status: "active", suffix: pool, epoch, hops: [PUBLISHER_A] }, version);
+	const instance = Instance.random();
+	await encodeAnnounceBroadcast(peer, { status: "active", suffix: pool, instance, hops: [PUBLISHER_A] }, version);
 	await announced.next();
 	const held = subscriber.consume(job);
 	const info = held
@@ -2080,10 +2024,15 @@ test("consumes resolve the serving prefix and pin its epoch", async () => {
 	await streams[1].reading;
 	const reader = new Reader(undefined, new Uint8Array(Buffer.concat(streams[1].written)), version);
 	expect(await reader.u53()).toBe(StreamId.Track);
-	expect((await Track.decode(reader, version)).epoch).toBe(epoch);
+	expect((await Track.decode(reader, version)).instance).toBe(instance);
 
-	// No epoch on the more specific source must shadow the covering source's epoch.
-	await encodeAnnounceBroadcast(peer, { status: "active", suffix: job, hops: [PUBLISHER_B] }, version);
+	// The more specific source's instance shadows the covering source's.
+	const other = Instance.random();
+	await encodeAnnounceBroadcast(
+		peer,
+		{ status: "active", suffix: job, instance: other, hops: [PUBLISHER_B] },
+		version,
+	);
 	await announced.next();
 	const fresh = subscriber.consume(job);
 	expect(fresh.closed).not.toBe(held.closed);
@@ -2096,7 +2045,7 @@ test("consumes resolve the serving prefix and pin its epoch", async () => {
 	await streams[2].reading;
 	const freshReader = new Reader(undefined, new Uint8Array(Buffer.concat(streams[2].written)), version);
 	await freshReader.u53();
-	expect((await Track.decode(freshReader, version)).epoch).toBeUndefined();
+	expect((await Track.decode(freshReader, version)).instance).toBe(other);
 
 	await encodeAnnounceBroadcast(peer, { status: "endedId", id: 1n }, version);
 	await announced.next();
@@ -2120,10 +2069,22 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 		await send((w) => new AnnounceOk(PEER, 0).encode(w, version));
 		const pool = Path.from("pool");
 		const job = Path.from("pool/job");
-		await send((w) => encodeAnnounceBroadcast(w, { status: "active", suffix: pool, hops: [PUBLISHER_A] }, version));
+		await send((w) =>
+			encodeAnnounceBroadcast(
+				w,
+				{ status: "active", suffix: pool, instance: named(version, "a"), hops: [PUBLISHER_A] },
+				version,
+			),
+		);
 		await announced.next();
 		const held = subscriber.consume(job);
-		await send((w) => encodeAnnounceBroadcast(w, { status: "active", suffix: job, hops: [PUBLISHER_B] }, version));
+		await send((w) =>
+			encodeAnnounceBroadcast(
+				w,
+				{ status: "active", suffix: job, instance: named(version, "b"), hops: [PUBLISHER_B] },
+				version,
+			),
+		);
 		await announced.next();
 		const fresh = subscriber.consume(job);
 		expect(fresh.closed).not.toBe(held.closed);
@@ -2135,7 +2096,9 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 	},
 );
 
-test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
+// Only a wire without instances: on lite-07 the request pins its instance, which the peer
+// answers for whatever else is selected meanwhile.
+test.each([Version.DRAFT_05, Version.DRAFT_06])(
 	"pending metadata cancels on selection change and a live fallback can request again on %s",
 	async (version) => {
 		const { quic, streams, opened } = fakeSession();
@@ -2151,7 +2114,11 @@ test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 		await new AnnounceOk(PEER, 0).encode(peer, version);
 		const pool = Path.from("pool");
 		const job = Path.from("pool/job");
-		await encodeAnnounceBroadcast(peer, { status: "active", suffix: pool, hops: [PUBLISHER_A] }, version);
+		await encodeAnnounceBroadcast(
+			peer,
+			{ status: "active", suffix: pool, instance: named(version, "a"), hops: [PUBLISHER_A] },
+			version,
+		);
 		await announced.next();
 		const held = subscriber.consume(job);
 		const pending = held
@@ -2160,7 +2127,11 @@ test.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])(
 			.catch((err: unknown) => err);
 		await opened(1);
 		await streams[1].reading;
-		await encodeAnnounceBroadcast(peer, { status: "active", suffix: job, hops: [PUBLISHER_B] }, version);
+		await encodeAnnounceBroadcast(
+			peer,
+			{ status: "active", suffix: job, instance: named(version, "b"), hops: [PUBLISHER_B] },
+			version,
+		);
 		await announced.next();
 		expect(await pending).toBeInstanceOf(Error);
 		await streams[1].aborted;

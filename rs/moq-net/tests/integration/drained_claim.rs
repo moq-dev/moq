@@ -13,7 +13,7 @@ use crate::support;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Epoch, Hop, Timestamp, Version, goaway::Goaway, origin, track};
+use moq_net::{Hop, Timestamp, Version, goaway::Goaway, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -60,7 +60,7 @@ impl Worker {
 		let (handler, served) = (claim.clone(), outputs.clone());
 		drop(kio::clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
-				let prepared = request.prepare(Epoch::mint()).unwrap();
+				let prepared = request.prepare().unwrap();
 				let track = prepared.broadcast().create_track("video", timed()).unwrap();
 				let mut group = track.append_group().unwrap();
 				group.write_frame(Timestamp::ZERO, name.as_bytes().to_vec()).unwrap();

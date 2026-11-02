@@ -163,14 +163,15 @@ typealias Datagram = uniffi.moq.MoqDatagram
 typealias Frame = uniffi.moq.MoqFrame
 
 /**
- * How a broadcast advertises its exact path: its static production cost (lower wins) and the
- * publisher epoch it serves (null when unknown).
+ * How a broadcast advertises its exact path: its static production cost (lower wins), an optional
+ * stable instance (null keeps the one the broadcast minted), and the epoch, which only matters with
+ * a stable instance.
  */
 typealias AnnounceRoute = uniffi.moq.MoqAnnounceRoute
 
 /**
- * An observed path-prefix route: the publisher epoch it serves (null when unknown), relay hop ids
- * (oldest first), and static production and link cost (lower wins).
+ * An observed path-prefix route: the instance of the stream it serves, relay hop ids (oldest
+ * first), and static production and link cost (lower wins).
  */
 typealias Route = uniffi.moq.MoqRoute
 

@@ -29,8 +29,8 @@ fn public(value: &Value) -> PublicKey {
 /// A vector row's identity: its scope, group, frame, and timestamp (timescale 0 when untimed).
 fn identity(row: &Value) -> (Arc<Scope>, u64, u64, Option<moq_net::Timestamp>) {
 	let path = moq_net::Path::new(row["path"].as_str().unwrap()).unwrap();
-	let epoch = row["epoch"].as_str().unwrap().parse().unwrap();
-	let scope = Scope::new(&path, &epoch, row["track"].as_str().unwrap());
+	let instance = row["instance"].as_str().unwrap().parse().unwrap();
+	let scope = Scope::new(&path, &instance, row["track"].as_str().unwrap());
 	let timestamp = match row["timescale"].as_u64().unwrap() {
 		0 => None,
 		scale => Some(moq_net::Timestamp::from_scale(row["timestamp"].as_u64().unwrap(), scale).unwrap()),
@@ -165,7 +165,7 @@ fn subscribe_all() -> moq_net::track::Subscription {
 	moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(60))
 }
 
-/// A signed broadcast published at `path` on its own origin, announced under its epoch.
+/// A signed broadcast published at `path` on its own origin, announced under its instance.
 struct Published {
 	origin: moq_net::origin::Producer,
 	_publication: moq_net::origin::Publication,
@@ -180,7 +180,7 @@ fn publish(key: &SecretKey, path: &str) -> Published {
 	let publication = origin.create_broadcast(&path).unwrap();
 	let signed = broadcast::Producer::new(publication.broadcast().clone(), key.clone(), path.clone());
 	publication
-		.announce(moq_net::origin::Route::default().with_epoch(signed.epoch().clone()))
+		.announce(moq_net::origin::Route::default().with_instance(signed.instance().clone(), 0))
 		.unwrap();
 	Published {
 		origin,
@@ -201,7 +201,7 @@ impl Published {
 	/// A signed track over a net track the test can also write forged frames to.
 	fn track(&self, key: &SecretKey, name: &str) -> (track::Producer, moq_net::track::Producer) {
 		let net = self._publication.broadcast().create_track(name, None).unwrap();
-		let scope = Scope::new(&self.path, self.signed.epoch(), name);
+		let scope = Scope::new(&self.path, self.signed.instance(), name);
 		(
 			track::Producer::new(net.clone(), key.clone(), scope, Arc::default()),
 			net,
@@ -235,7 +235,7 @@ async fn roundtrip_through_an_origin() {
 		)
 		.unwrap();
 	let consumer = published.consume(key.public()).await;
-	assert_eq!(consumer.epoch(), published.signed.epoch());
+	assert_eq!(consumer.instance(), published.signed.instance());
 	let mut track = subscribe(&consumer, "video").await;
 
 	let mut group = video.append_group().unwrap();
@@ -369,9 +369,9 @@ async fn frame_from_an_earlier_instance_is_refused() {
 	group.finish().unwrap();
 	let body = raw_frame(&mut raw).await;
 
-	// A restart mints a new epoch, so the old instance's group 0 does not verify as the new one's.
+	// A restart mints a new instance, so the old instance's group 0 does not verify as the new one's.
 	let new = publish(&key, "mesh/node/ssh");
-	assert_ne!(new.signed.epoch(), old.signed.epoch());
+	assert_ne!(new.signed.instance(), old.signed.instance());
 	let (_new_track, new_net) = new.track(&key, "stream");
 	let consumer = new.consume(key.public()).await;
 	let mut subscribed = subscribe(&consumer, "stream").await;
@@ -411,7 +411,7 @@ fn group_sequence_is_never_signed_twice() {
 		Err(Error::Net(moq_net::Error::Duplicate))
 	));
 
-	// A replacement track continues past its predecessor's sequences under the same epoch.
+	// A replacement track continues past its predecessor's sequences under the same instance.
 	track.abort(moq_net::Error::Cancel).unwrap();
 	let replacement = signed.create_track("stream", None).unwrap();
 	assert!(matches!(
@@ -425,8 +425,8 @@ fn group_sequence_is_never_signed_twice() {
 async fn group_resumed_above_frame_zero_verifies_at_its_index() {
 	let key = SecretKey::generate();
 	let path = moq_net::Path::new("mesh/node/ssh").unwrap();
-	let epoch = moq_net::Epoch::mint();
-	let scope = Scope::new(&path, &epoch, "stream");
+	let instance = moq_net::Instance::random();
+	let scope = Scope::new(&path, &instance, "stream");
 	let broadcast = moq_net::broadcast::Info::new().produce();
 	let track = broadcast.create_track("stream", None).unwrap();
 	let net = track.append_group().unwrap();
@@ -442,11 +442,11 @@ async fn group_resumed_above_frame_zero_verifies_at_its_index() {
 }
 
 #[test]
-fn consumer_without_an_epoch_is_refused() {
+fn consumer_without_an_instance_is_refused() {
 	let inner = moq_net::broadcast::Info::new().produce().consume();
 	let path = moq_net::Path::new("mesh/node/ssh").unwrap();
 	let result = broadcast::Consumer::new(inner, SecretKey::generate().public(), path);
-	assert!(matches!(result, Err(Error::Epoch)));
+	assert!(matches!(result, Err(Error::Instance)));
 }
 
 /// Runs `test/interop/sign.ts` with a JSON argument, returning its JSON stdout.
@@ -473,7 +473,7 @@ fn sign_interop() {
 	aws_lc_rs::rand::fill(seed.as_mut()).unwrap();
 	let key = SecretKey::from_seed(seed.clone());
 	let path = moq_net::Path::new(&format!("mesh/{}/agent", key.public())).unwrap();
-	let epoch = moq_net::Epoch::mint();
+	let instance = moq_net::Instance::random();
 
 	let payloads: [&[u8]; 3] = [b"zero", b"", &[0xff; 300]];
 	let expected: Vec<String> = payloads.iter().map(hex::encode).collect();
@@ -482,7 +482,7 @@ fn sign_interop() {
 	// timed track), delivered at `group` and `delivered`.
 	let sign_group = |group: u64, signed_as: u64, timestamps: Option<([u64; 3], [u64; 3])>| {
 		let track = if timestamps.is_some() { "video" } else { "data" };
-		let scope = Scope::new(&path, &epoch, track);
+		let scope = Scope::new(&path, &instance, track);
 		let frames: Vec<Value> = payloads
 			.iter()
 			.enumerate()
@@ -511,7 +511,7 @@ fn sign_interop() {
 	let output = bun(serde_json::json!({
 		"seed": hex::encode(seed.as_ref()),
 		"path": path.as_str(),
-		"epoch": epoch.as_str(),
+		"instance": instance.as_str(),
 		"rust": [
 			sign_group(7, 7, None),
 			sign_group(8, 7, None),
@@ -528,11 +528,11 @@ fn sign_interop() {
 	assert_eq!(output["verified"][2], serde_json::json!(expected));
 	assert_eq!(output["verified"][3], "signature");
 
-	let js_epoch = output["epoch"].as_str().unwrap().parse().unwrap();
+	let js_instance = output["instance"].as_str().unwrap().parse().unwrap();
 	let groups = output["js"].as_array().unwrap();
 	assert_eq!(groups.len(), 3);
 	for row in groups {
-		let scope = Scope::new(&path, &js_epoch, row["track"].as_str().unwrap());
+		let scope = Scope::new(&path, &js_instance, row["track"].as_str().unwrap());
 		let group = row["group"].as_u64().unwrap();
 		let timestamp = |frame: &Value| {
 			let scale = row["timescale"].as_u64()?;

@@ -660,7 +660,7 @@ async fn an_unmarked_step_keeps_the_export_rendering() {
 
 // A publisher that dies leaves the last video frames it sent held for their DTS, and nothing
 // settles them until frames come again. Where the receiver is not told the source changed (a
-// replacement on a protocol without an epoch, or the other half of a 1+1 pair), those come on the
+// replacement on a protocol under another instance, or the other half of a 1+1 pair), those come on the
 // same timeline after the silence. In the field the held frames then went into a schedule that had
 // already gone past them, and the export ended on a missed decode deadline.
 

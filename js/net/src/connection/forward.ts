@@ -56,7 +56,7 @@ interface Reported {
  * open until the broader one covering it goes, so neither takes the other's routes over
  * before it has synced, which not every version can tell. A route both report is inserted once and
  * driven by its first reporter; if it changes hands anyway (a request failing), it restarts
- * unless one epoch proves both requests saw one instance.
+ * unless one instance proves both requests saw one stream.
  *
  * A peer that refuses overlapping requests gets exclusive discovery instead: a broader request
  * closes the narrower ones beneath it, and the session keeps it off the wire until they have
@@ -143,10 +143,9 @@ export function forwardAnnounced(conn: Established, origin: OriginProducer): voi
 			routes.delete(prefix);
 			existing.handle.close();
 		} else if (driving) {
-			// The next request takes over driving. Without an epoch nothing proves it reports the
-			// instance the handle serves, and the session consumes each request's announcements as
-			// an instance of their own, so the route restarts rather than stitch two together.
-			follow(existing, prefix, next.value, next.value.epoch === undefined);
+			// The next request takes over driving. Without an instance nothing proves it reports
+			// the stream the handle serves, so the route restarts rather than stitch two together.
+			follow(existing, prefix, next.value, next.value.instance === undefined);
 		}
 	};
 

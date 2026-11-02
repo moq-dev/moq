@@ -49,7 +49,7 @@ pub enum End {
 	/// The session's RTP timeline jumped, so its tracks finished before the jump.
 	///
 	/// Its timestamps no longer continue the broadcast's, so the caller finishes the
-	/// broadcast and restarts every session sharing it under a fresh epoch.
+	/// broadcast and restarts every session sharing it under a fresh instance.
 	Jumped,
 }
 
@@ -841,7 +841,7 @@ mod tests {
 
 	/// Two sessions (a camera's SD and HD URLs) publish renditions of one broadcast. When one
 	/// session's timeline jumps, the caller ends the broadcast and restarts both under a fresh
-	/// epoch, each new broadcast with its own catalog.
+	/// instance, each new broadcast with its own catalog.
 	#[tokio::test]
 	async fn two_sessions_restart_together_on_a_jump() {
 		let (origin, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::default());
@@ -857,13 +857,15 @@ mod tests {
 			async move {
 				let mut ends = Vec::new();
 				for _ in 0..2 {
-					let epoch = moq_net::Epoch::mint();
-					let route = moq_net::origin::Route::default().with_epoch(epoch.clone());
+					let instance = moq_net::Instance::random();
+					let route = moq_net::origin::Route::default().with_instance(instance.clone(), 0);
 					let broadcast = origin.publish("camera", route).unwrap();
 					let mut catalog =
 						moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), Default::default())
 							.unwrap();
-					published_tx.send((epoch, broadcast.clone(), catalog.clone())).unwrap();
+					published_tx
+						.send((instance, broadcast.clone(), catalog.clone()))
+						.unwrap();
 					// The first session to return ends the run; dropping the other's pull
 					// finishes its tracks.
 					let end = tokio::select! {
@@ -878,10 +880,10 @@ mod tests {
 			}
 		});
 
-		let mut epochs = Vec::new();
+		let mut instances = Vec::new();
 		for run in 0..2 {
-			let (epoch, broadcast, catalog) = within("the broadcast", published.recv()).await.unwrap();
-			epochs.push(epoch);
+			let (instance, broadcast, catalog) = within("the broadcast", published.recv()).await.unwrap();
+			instances.push(instance);
 			let mut sd_session = within("SD PLAY", sd.accept(500)).await;
 			let mut hd_session = within("HD PLAY", hd.accept(9000)).await;
 			sd_session.video(0, 500, &[fake::H264_IDR]).await;
@@ -908,7 +910,7 @@ mod tests {
 		let ends = within("the caller", caller).await.unwrap();
 		assert_eq!(ends[0], End::Jumped);
 		assert_eq!(ends[1], End::Closed);
-		assert!(epochs[1] > epochs[0], "the restart mints a fresh epoch");
+		assert_ne!(instances[1], instances[0], "the restart mints a fresh instance");
 	}
 
 	/// Credentials come out of the URL, never reach a log, and still authenticate.

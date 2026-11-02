@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.create_broadcast("handover")?;
 	let mut track = broadcast.create_track("video", moq_net::track::Info::default())?;
-	broadcast.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))?;
+	broadcast.announce(moq_net::origin::Route::default())?;
 	let (mut first, first_url) = endpoint(&origin, version).await?;
 	let (mut second, second_url) = endpoint(&origin, version).await?;
 	let script = concat!(

@@ -4,8 +4,8 @@ import { Once } from "@moq/signals";
 import * as Announce from "../announced.ts";
 import { AuthSession } from "../auth_session.ts";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "../broadcast.ts";
-import * as Epoch from "../epoch.ts";
 import { Route } from "../hop.ts";
+import * as Instance from "../instance.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
 import { closeUnwanted } from "../util/announce.ts";
@@ -400,25 +400,25 @@ test("an exclusive session closes every request beneath a broader one before it 
 	origin.close();
 });
 
-const first = Epoch.mint();
-for (const [name, epochs] of [
-	["no epoch", [undefined, undefined]],
-	["one epoch", [first, first]],
-	["another epoch", [first, Epoch.mint()]],
+const first = Instance.random();
+for (const [name, instances] of [
+	["no instance", [undefined, undefined]],
+	["one instance", [first, first]],
+	["another instance", [first, Instance.random()]],
 ] as const) {
-	test(`a route changing hands restarts unless one epoch proves one instance (${name})`, async () => {
+	test(`a route changing hands restarts unless both routes carry one instance (${name})`, async () => {
 		const origin = new OriginProducer();
 		const session = new FakeSession();
 		forwardAnnounced(session.session, origin);
 
 		const narrow = origin.announced(Path.Pattern.subtree(Path.from("a/b")));
 		await settle();
-		start(session.stream("a/b/**"), "a/b/x", { ...Route.default, epoch: epochs[0] });
+		start(session.stream("a/b/**"), "a/b/x", { ...Route.default, instance: instances[0] });
 		await settle();
 		const broad = origin.announced(Path.Pattern.subtree(Path.from("a")));
 		const events = record(broad);
 		await settle();
-		start(session.stream("a/**"), "a/b/x", { ...Route.default, epoch: epochs[1] });
+		start(session.stream("a/**"), "a/b/x", { ...Route.default, instance: instances[1] });
 		await settle();
 		expect(events).toEqual(["start a/b/x"]);
 
@@ -426,7 +426,7 @@ for (const [name, epochs] of [
 		session.stream("a/b/**").close(new Error("reset"));
 		await settle();
 		expect(wireOf(origin).routes(Path.from("a/b/x"))).toBe(true);
-		expect(events).toEqual(name === "one epoch" ? ["start a/b/x"] : ["start a/b/x", "restart a/b/x"]);
+		expect(events).toEqual(name === "one instance" ? ["start a/b/x"] : ["start a/b/x", "restart a/b/x"]);
 
 		narrow.close();
 		broad.close();

@@ -2,7 +2,7 @@ use std::task::{Poll, ready};
 
 use super::WeakEntry;
 use super::origin_impl::{Announce, AnnounceConsumer, AnnounceEvent, Consumer, Requesting};
-use crate::{Epoch, Error, Path, broadcast};
+use crate::{Error, Instance, Path, broadcast};
 
 /// The announcements covering one path, as one broadcast coming online, being replaced, and
 /// going offline. Created by [`Consumer::routes`].
@@ -10,7 +10,7 @@ use crate::{Epoch, Error, Path, broadcast};
 /// Several routes can cover the path at once, such as the path itself and a prefix above it,
 /// and a request resolves through the most specific one, so only that route's events come
 /// through. Another route taking over is a [`Restart`](AnnounceEvent::Restart), unless both
-/// carry the same epoch: those serve the same bytes, so it is an
+/// carry the same instance: those serve one continuous stream, so it is an
 /// [`Update`](AnnounceEvent::Update). One announced as a
 /// [`Takeover`](AnnounceEvent::Takeover) of the serving route continues it, and comes through
 /// as one. Routes beneath the path serve other broadcasts and are ignored.
@@ -65,7 +65,7 @@ impl Follow {
 	/// beneath it) starts on the route serving the path rather than starting and restarting.
 	/// Once something serves it, each change comes through on its own: an end followed by a
 	/// start is a gap that ended any request on the old route, even when both routes carry one
-	/// epoch. A route whose start came after the serving route's last event, with the cursor
+	/// instance. A route whose start came after the serving route's last event, with the cursor
 	/// never running dry in between, may have arrived after its end, so taking over from it is
 	/// reported as that gap.
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Option<AnnounceEvent>> {
@@ -183,7 +183,7 @@ impl Follow {
 				})
 			}
 			(Some((before, _)), Some((after, _))) if before.prefix != after.prefix => {
-				let same = before.route.epoch.is_some() && before.route.epoch == after.route.epoch;
+				let same = before.route.instance == after.route.instance;
 				Some(match same {
 					true => AnnounceEvent::Update(after),
 					false => AnnounceEvent::Restart(after),
@@ -197,29 +197,29 @@ impl Follow {
 	}
 }
 
-/// Each publisher instance serving one path, handed out as it takes over. Created by
+/// Each instance serving one path, handed out as it takes over. Created by
 /// [`Consumer::follow`](crate::origin::Consumer::follow).
 pub struct Following {
 	consumer: Consumer,
 	path: Path,
 	/// The only instance handed out, if pinned.
-	epoch: Option<Epoch>,
+	instance: Option<Instance>,
 	follow: Follow,
 	/// An instance serves the path that was not handed out yet.
 	unseen: bool,
 	/// The resolution in flight, kept across a dropped wait so a retry picks it up.
 	resolving: Option<Requesting>,
-	/// The broadcast handed out last, until the path goes offline. Weak, so it never keeps an
-	/// instance the caller let go of from retiring.
+	/// The broadcast handed out last, until the path goes offline or the broadcast ends. Weak,
+	/// so it never keeps one the caller let go of from retiring.
 	last: Option<broadcast::WeakConsumer>,
 }
 
 impl Following {
-	pub(super) fn new(consumer: Consumer, path: Path, epoch: Option<Epoch>, follow: Follow) -> Self {
+	pub(super) fn new(consumer: Consumer, path: Path, instance: Option<Instance>, follow: Follow) -> Self {
 		Self {
 			consumer,
 			path,
-			epoch,
+			instance,
 			follow,
 			unseen: false,
 			resolving: None,
@@ -227,7 +227,7 @@ impl Following {
 		}
 	}
 
-	/// Wait for the next publisher instance serving the path; see
+	/// Wait for the next instance serving the path; see
 	/// [`Consumer::follow`](crate::origin::Consumer::follow).
 	///
 	/// Returns [`Error::Closed`] once the origin closes, and any other resolution failure
@@ -237,7 +237,7 @@ impl Following {
 		kio::wait(|waiter| self.poll_available(waiter)).await
 	}
 
-	/// Poll for the next publisher instance serving the path, registering `waiter` when there
+	/// Poll for the next instance serving the path, registering `waiter` when there
 	/// is none yet.
 	pub fn poll_available(&mut self, waiter: &kio::Waiter) -> Poll<Result<broadcast::Consumer, Error>> {
 		loop {
@@ -248,13 +248,25 @@ impl Following {
 			if self.settle(waiter)? {
 				self.resolving = None;
 			}
+			// The broadcast handed out ended while the path is still served: its instance's
+			// routes went and another instance's, beneath the same announcement, took the
+			// path over. Whatever serves it now is next.
+			if !self.unseen
+				&& self.follow.serving().is_some()
+				&& self
+					.last
+					.as_ref()
+					.is_some_and(|last| last.consume().poll_closed(waiter).is_ready())
+			{
+				self.unseen = true;
+			}
 			if !self.unseen {
 				return Poll::Pending;
 			}
 
 			let resolving = self
 				.resolving
-				.get_or_insert_with(|| self.consumer.routing(self.path.clone(), self.epoch.clone()));
+				.get_or_insert_with(|| self.consumer.routing(self.path.clone(), self.instance.clone()));
 			let resolved = ready!(kio::Task::poll(resolving, waiter));
 			self.resolving = None;
 			let broadcast = resolved?;
@@ -283,6 +295,15 @@ impl Following {
 	/// Apply one change to the path, returning whether it is one.
 	fn apply(&mut self, event: AnnounceEvent) -> bool {
 		match event {
+			// Another instance taking over leaves a pinned follower's own stream as it was.
+			AnnounceEvent::Restart(announce)
+				if self
+					.instance
+					.as_ref()
+					.is_some_and(|pin| announce.route.instance.as_ref() != Some(pin)) =>
+			{
+				return false;
+			}
 			// A pinned resolution refuses any other instance, waiting until its own serves again.
 			AnnounceEvent::Start(_) | AnnounceEvent::Restart(_) => self.unseen = true,
 			// An end is a gap that ended every request on the old route, so whatever serves the
@@ -306,7 +327,7 @@ mod tests {
 	use super::super::ProduceTest;
 	use super::*;
 	use crate::{
-		Epoch, Error, Hop, Pattern, Patterns,
+		Error, Hop, Instance, Pattern, Patterns,
 		origin::{Cost, Route},
 	};
 
@@ -332,18 +353,18 @@ mod tests {
 		}
 	}
 
-	fn route(epoch: &Epoch) -> Route {
-		Route::default().with_epoch(epoch.clone())
+	fn route(instance: &Instance) -> Route {
+		Route::default().with_instance(instance.clone(), 0)
 	}
 
 	#[kio::test]
 	async fn follow_reports_the_route_serving_the_path() {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().routes("pool/job").unwrap();
-		let epoch = Epoch::mint();
+		let instance = Instance::random();
 
 		// A prefix above the path covers it.
-		let pool = origin.requests_route("pool", route(&epoch), None).unwrap();
+		let pool = origin.requests_route("pool", route(&instance), None).unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		// A route beneath the path serves another broadcast.
@@ -351,7 +372,7 @@ mod tests {
 		quiet(&mut follow).await;
 
 		// The path itself, from the same instance, takes over without a restart.
-		let exact = origin.publish("pool/job", route(&epoch)).unwrap();
+		let exact = origin.publish("pool/job", route(&instance)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
 
 		// The covering prefix no longer serves the path, so its changes are not seen.
@@ -359,7 +380,7 @@ mod tests {
 		quiet(&mut follow).await;
 
 		// Another instance at the path.
-		exact.announce(route(&Epoch::mint())).unwrap();
+		exact.announce(route(&Instance::random())).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 
 		// It goes, so the prefix serves the path again: another instance.
@@ -387,24 +408,24 @@ mod tests {
 	}
 
 	/// A gap with nothing serving the path ends any request on it, so a covering route that
-	/// arrives after it is a start of its own, even under the same epoch.
+	/// arrives after it is a start of its own, even under the same instance.
 	#[kio::test]
-	async fn follow_keeps_a_gap_between_routes_of_one_epoch() {
+	async fn follow_keeps_a_gap_between_routes_of_one_instance() {
 		let origin = Hop::new(1).unwrap().produce();
-		let epoch = Epoch::mint();
-		let exact = origin.publish("pool/job", route(&epoch)).unwrap();
+		let instance = Instance::random();
+		let exact = origin.publish("pool/job", route(&instance)).unwrap();
 		let mut follow = origin.consume().routes("pool/job").unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
 		// Both land before the follower reads again, and the cursor delivers the prefix's start
 		// ahead of the path's end, but the path went unserved in between.
 		drop(exact);
-		let _pool = origin.requests_route("pool", route(&epoch), None).unwrap();
+		let _pool = origin.requests_route("pool", route(&instance), None).unwrap();
 		assert_eq!(followed(&mut follow).await, ("end", "pool/job".into()));
 		assert_eq!(followed(&mut follow).await, ("start", "pool".into()));
 
 		// A prefix standing while the path's route goes takes over in place.
-		let exact = origin.publish("pool/job", route(&epoch)).unwrap();
+		let exact = origin.publish("pool/job", route(&instance)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("update", "pool/job".into()));
 		drop(exact);
 		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
@@ -415,22 +436,22 @@ mod tests {
 	#[kio::test]
 	async fn follow_hands_over_to_a_prefix_that_started_before_the_last_change() {
 		let origin = Hop::new(1).unwrap().produce();
-		let exact = origin.publish("pool/job", route(&Epoch::mint())).unwrap();
+		let exact = origin.publish("pool/job", route(&Instance::random())).unwrap();
 		let mut follow = origin.consume().routes("pool/job").unwrap();
 		assert_eq!(followed(&mut follow).await, ("start", "pool/job".into()));
 
-		let epoch = Epoch::mint();
-		let _pool = origin.requests_route("pool", route(&epoch), None).unwrap();
-		exact.announce(route(&epoch)).unwrap();
+		let instance = Instance::random();
+		let _pool = origin.requests_route("pool", route(&instance), None).unwrap();
+		exact.announce(route(&instance)).unwrap();
 		assert_eq!(followed(&mut follow).await, ("restart", "pool/job".into()));
 
 		drop(exact);
 		assert_eq!(followed(&mut follow).await, ("update", "pool".into()));
 	}
 
-	/// Without an epoch nothing says two routes serve the same bytes.
+	/// Under another instance nothing says two routes serve the same bytes.
 	#[kio::test]
-	async fn follow_restarts_onto_a_more_specific_route_without_an_epoch() {
+	async fn follow_restarts_onto_a_more_specific_route_under_another_instance() {
 		let origin = Hop::new(1).unwrap().produce();
 		let mut follow = origin.consume().routes("pool/job").unwrap();
 
@@ -491,7 +512,7 @@ mod tests {
 		if let Ok(result) = kio::clock::timeout(hold, announced.available()).await {
 			panic!(
 				"expected nothing, got {:?}",
-				result.map(|broadcast| broadcast.info().epoch.clone())
+				result.map(|broadcast| broadcast.info().instance.clone())
 			);
 		}
 	}
@@ -512,31 +533,12 @@ mod tests {
 		let dynamic = origin.requests("live").unwrap();
 		let mut announced = origin.consume().follow("live", None).unwrap();
 
-		// The wait is on the dynamic route's answer when the exact path takes over without an epoch.
+		// The wait is on the dynamic route's answer when the exact path takes over under another instance.
 		let (_takeover, _publish) = futures::join!(available(&mut announced), async {
 			let _unanswered = requested(&dynamic).await;
 			origin.publish("live", Route::default()).unwrap()
 		});
 		none(&mut announced).await;
-	}
-
-	/// The follower holds what it handed out weakly: a takeover the caller let go of retires,
-	/// and the restart the origin held for it hands out a fresh front.
-	#[kio::test]
-	async fn announced_hands_out_a_dropped_takeover_again() {
-		let origin = Hop::new(1).unwrap().produce();
-		let dynamic = origin.requests("live").unwrap();
-		let mut announced = origin.consume().follow("live", None).unwrap();
-
-		let (dropped, _publish) = futures::join!(available(&mut announced), async {
-			let _unanswered = requested(&dynamic).await;
-			origin.publish("live", Route::default()).unwrap()
-		});
-		let front = dropped.weak();
-		drop(dropped);
-		let again = available(&mut announced).await;
-		assert!(front.is_closed(), "the follower kept the dropped front alive");
-		assert!(!again.weak().same_channel(&front));
 	}
 
 	/// The route a wait resolves through leaving, and another instance arriving before it
@@ -558,17 +560,17 @@ mod tests {
 	}
 
 	/// An end is a gap that ended every request on the old route, even when a route above the
-	/// path with the same epoch carries the instance on. So the instance serving the path
+	/// path with the same instance carries the instance on. So the instance serving the path
 	/// afterwards is handed out again, though it is the one the caller still holds.
 	#[kio::test]
 	async fn announced_hands_out_the_instance_again_after_an_end() {
 		let origin = Hop::new(1).unwrap().produce();
-		let epoch = Epoch::mint();
+		let instance = Instance::random();
 		let mut announced = origin.consume().follow("live", None).unwrap();
-		let exact = origin.publish("live", route(&epoch)).unwrap();
+		let exact = origin.publish("live", route(&instance)).unwrap();
 		let first = available(&mut announced).await;
 
-		let dynamic = origin.requests_route("", route(&epoch), None).unwrap();
+		let dynamic = origin.requests_route("", route(&instance), None).unwrap();
 		exact.unannounce();
 		let served = broadcast::Info::new().produce();
 		let (again, ()) = futures::join!(available(&mut announced), async {
@@ -577,37 +579,43 @@ mod tests {
 		assert!(again.is_clone(&first), "the route above did not carry the instance on");
 	}
 
-	/// An announced request that pins an epoch refuses another instance taking over instead of
+	/// An announced request that pins an instance refuses another instance taking over instead of
 	/// following it.
 	#[kio::test]
 	async fn announced_pinned_refuses_another_instance() {
 		let origin = Hop::new(1).unwrap().produce();
-		let epoch = Epoch::mint();
-		let _first = origin.publish("live", route(&epoch)).unwrap();
-		let mut announced = origin.consume().follow("live", epoch.clone()).unwrap();
+		let instance = Instance::random();
+		let _first = origin.publish("live", route(&instance)).unwrap();
+		let mut announced = origin.consume().follow("live", instance.clone()).unwrap();
 		let pinned = available(&mut announced).await;
-		assert_eq!(pinned.info().epoch.as_ref(), Some(&epoch));
+		assert_eq!(pinned.info().instance.as_ref(), Some(&instance));
 
-		let _second = origin.publish("live", route(&Epoch::mint())).unwrap();
+		let _second = origin.publish("live", route(&Instance::random())).unwrap();
 		none(&mut announced).await;
 
 		// Unpinned, the same takeover is followed.
 		let mut unpinned = origin.consume().follow("live", None).unwrap();
 		let current = available(&mut unpinned).await;
-		assert_ne!(current.info().epoch.as_ref(), Some(&epoch));
+		assert_ne!(current.info().instance.as_ref(), Some(&instance));
 	}
 
 	#[kio::test]
 	async fn announced_pinned_hands_out_its_instance_after_a_gap() {
 		let origin = Hop::new(1).unwrap().produce();
-		let epoch = Epoch::mint();
-		let first = origin.publish("live", route(&epoch)).unwrap();
-		let mut announced = origin.consume().follow("live", epoch.clone()).unwrap();
-		assert_eq!(available(&mut announced).await.info().epoch.as_ref(), Some(&epoch));
+		let instance = Instance::random();
+		let first = origin.publish("live", route(&instance)).unwrap();
+		let mut announced = origin.consume().follow("live", instance.clone()).unwrap();
+		assert_eq!(
+			available(&mut announced).await.info().instance.as_ref(),
+			Some(&instance)
+		);
 		first.unannounce();
 		none(&mut announced).await;
-		first.announce(route(&epoch)).unwrap();
-		assert_eq!(available(&mut announced).await.info().epoch.as_ref(), Some(&epoch));
+		first.announce(route(&instance)).unwrap();
+		assert_eq!(
+			available(&mut announced).await.info().instance.as_ref(),
+			Some(&instance)
+		);
 	}
 
 	#[kio::test]
@@ -618,7 +626,7 @@ mod tests {
 		let (result, ()) = futures::join!(
 			kio::clock::timeout(Duration::from_secs(1), announced.available()),
 			async {
-				let prepared = requested(&claim).await.prepare(Epoch::mint()).unwrap();
+				let prepared = requested(&claim).await.prepare().unwrap();
 				drop(prepared);
 			}
 		);

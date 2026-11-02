@@ -36,6 +36,7 @@ mod history_groups;
 mod idle_cancel_refetch;
 mod idle_session;
 mod implementation;
+mod instance;
 mod late_lower_group;
 mod lazy_discovery;
 mod mesh_withdraw;

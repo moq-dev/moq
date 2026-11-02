@@ -2087,14 +2087,14 @@ mod tests {
 	}
 
 	#[test]
-	fn independent_importers_cannot_select_a_shared_epoch() {
-		let epoch = hang::moq_net::Epoch::mint().to_string();
+	fn independent_importers_cannot_select_a_shared_instance() {
+		let instance = hang::moq_net::Instance::random().to_string();
 		let refused = Invocation::try_parse_from([
 			"moq",
 			"--connect",
 			"http://relay/anon",
-			"--epoch",
-			&epoch,
+			"--instance",
+			&instance,
 			"import",
 			"ts",
 		]);

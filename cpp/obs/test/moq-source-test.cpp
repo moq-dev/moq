@@ -1333,7 +1333,7 @@ int main()
 	}
 	report("all-disabled section holds the playing rendition");
 
-	// A rendition's publisher epoch is part of its identity, for the active and the pending
+	// A rendition's stream instance is part of what names it, for the active and the pending
 	// track alike: a sibling publisher restarting behind a stable catalog resubscribes.
 	{
 		TestRelay relay;
@@ -1346,20 +1346,20 @@ int main()
 		{
 			std::lock_guard<std::mutex> lock(ctx->mutex);
 			const auto &conn = ctx->connection;
-			snapshot.video.begin()->second.epoch = "01900000-0000-7000-8000-000000000001";
-			snapshot.audio.begin()->second.epoch = "01900000-0000-7000-8000-000000000001";
+			snapshot.video.begin()->second.instance = "01900000-0000-7000-8000-000000000001";
+			snapshot.audio.begin()->second.instance = "01900000-0000-7000-8000-000000000001";
 			moq_source_subscribe_video(ctx, conn, snapshot);
 			moq_source_subscribe_audio(ctx, conn, snapshot);
 			CHECK(conn->pending_video && conn->pending_audio);
 			const auto pending_video = conn->pending_video;
 			const auto pending_audio = conn->pending_audio;
-			// The same epoch keeps the pending track.
+			// The same instance keeps the pending track.
 			moq_source_subscribe_video(ctx, conn, snapshot);
 			moq_source_subscribe_audio(ctx, conn, snapshot);
 			CHECK(conn->pending_video == pending_video && conn->pending_audio == pending_audio);
-			// Another epoch replaces it.
-			snapshot.video.begin()->second.epoch = "01900000-0000-7000-8000-000000000002";
-			snapshot.audio.begin()->second.epoch = "01900000-0000-7000-8000-000000000002";
+			// Another instance replaces it.
+			snapshot.video.begin()->second.instance = "01900000-0000-7000-8000-000000000002";
+			snapshot.audio.begin()->second.instance = "01900000-0000-7000-8000-000000000002";
 			moq_source_subscribe_video(ctx, conn, snapshot);
 			moq_source_subscribe_audio(ctx, conn, snapshot);
 			CHECK(conn->pending_video && conn->pending_video != pending_video);
@@ -1367,7 +1367,7 @@ int main()
 		}
 		destroySource(source);
 	}
-	report("epoch change resubscribes");
+	report("instance change resubscribes");
 
 	// A new rendition that has not delivered a frame cannot stop the old track.
 	{
@@ -1588,7 +1588,7 @@ int main()
 		if (sibling) {
 			hidden = TestOk(relay.origin->create_broadcast("obs/hidden"), "unannounced sibling");
 			config.broadcast = "./hidden";
-			config.epoch = "01900000-0000-7000-8000-000000000001";
+			config.instance = "obs-test-pinned";
 		}
 		snapshot->video.clear();
 		snapshot->video.emplace("!unavailable", config);
@@ -1608,9 +1608,9 @@ int main()
 			// An unannounced sibling stays pending, without interrupting current playback.
 			const int frames = g_output_frames;
 			CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 3; }));
-			// A different publisher instance is a real resolution failure.
+			// A different stream is a real resolution failure.
 			moq::AnnounceRoute route;
-			route.epoch = "01900000-0000-7000-8000-000000000002";
+			route.instance = "obs-test-other";
 			TestOk(hidden->announce(route), "announce mismatched sibling");
 		}
 		CHECK(WaitFor([] {

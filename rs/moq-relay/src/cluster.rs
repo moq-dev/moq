@@ -2509,7 +2509,7 @@ mod tests {
 		.await
 		.expect("stats broadcast announced within 5s")
 		.expect("stats broadcast resolves");
-		assert!(broadcast.info().epoch.is_some(), "stats announce under an epoch");
+		assert!(broadcast.info().instance.is_some(), "stats announce under an instance");
 
 		// Several publish intervals (1s each by default) after the handle went out
 		// of scope, the task is still running and its broadcast still announced: a

@@ -1607,12 +1607,7 @@ mod supervision_tests {
 		let origin = moq_tokio::origin::spawn();
 		let claim = origin.requests("room").unwrap();
 		let pending = origin.consume().request("room/first", None);
-		let prepared = claim
-			.requested_broadcast()
-			.await
-			.unwrap()
-			.prepare(moq_net::Epoch::mint())
-			.unwrap();
+		let prepared = claim.requested_broadcast().await.unwrap().prepare().unwrap();
 		let mut publish = Publish::default();
 		let first = publish
 			.create((prepared.broadcast().clone(), Default::default()))
@@ -1636,12 +1631,7 @@ mod supervision_tests {
 		publish.unannounce(publication).unwrap();
 
 		let pending = origin.consume().request("room/second", None);
-		let prepared = claim
-			.requested_broadcast()
-			.await
-			.unwrap()
-			.prepare(moq_net::Epoch::mint())
-			.unwrap();
+		let prepared = claim.requested_broadcast().await.unwrap().prepare().unwrap();
 		publish
 			.create((prepared.broadcast().clone(), Default::default()))
 			.unwrap();

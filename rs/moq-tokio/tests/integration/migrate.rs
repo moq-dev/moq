@@ -172,9 +172,9 @@ async fn a_migrated_session_closes_once_nothing_flows() {
 		.expect("the client never connected")
 		.expect("the relay stopped");
 
-	let epoch = || moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
-	publish(&local, "up", epoch());
-	publish(&origin, "down", epoch());
+	// Each broadcast mints an instance the migration carries across sessions.
+	publish(&local, "up", moq_net::origin::Route::default());
+	publish(&origin, "down", moq_net::origin::Route::default());
 	let mut upstream = view(&origin, "up");
 	let mut downstream = view(&local, "down");
 	let (mut up, mut down) = (Vec::new(), Vec::new());

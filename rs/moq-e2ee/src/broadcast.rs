@@ -12,8 +12,9 @@ use crate::{Name, generation, track};
 /// The publishing side of a protected broadcast.
 ///
 /// Wraps the `moq-net` broadcast at [`Credential::path`](crate::Credential::path). Announce that
-/// broadcast with [`generation().epoch()`](generation::Producer::epoch) on its route once the
-/// tracks a subscriber needs first exist.
+/// broadcast with [`generation().epoch()`](generation::Producer::epoch)'s
+/// [`instance`](crate::Epoch::instance) on its route once the tracks a subscriber needs first
+/// exist.
 #[derive(Clone)]
 pub struct Producer {
 	inner: moq_net::broadcast::Producer,

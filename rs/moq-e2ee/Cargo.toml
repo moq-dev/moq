@@ -20,6 +20,7 @@ kio = { workspace = true }
 moq-net = { workspace = true }
 rind = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]

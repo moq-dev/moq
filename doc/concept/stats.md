@@ -113,7 +113,7 @@ source's. `export ts --passthrough` reports it without `mpegts`.
 `hang::health` and `Hang.Health` in `@moq/hang` grade a client from two
 consecutive reports: `publisher` takes a pair of `stats` snapshots, `viewer` a
 pair of `.echo` snapshots. Each report names the broadcast it was read from
-(its path and epoch), which observed every number in it; the caller states the
+(its path and instance), which observed every number in it; the caller states the
 interval between the two and how long ago the newer one arrived. Both
 languages compute the same result from the shared fixtures in
 `rs/hang/fixtures/health.json`.
@@ -127,7 +127,7 @@ listed as `unknown`, and a verdict with nothing graded is `unknown`: a browser
 publisher that knows only its PROBE RTT grades on RTT alone. A report older
 than the stale limit is `unknown` throughout, as is a transport sample whose
 `age` plus the report's exceeds it, and a client with no report has no sample at all. A changed
-path or epoch (`replaced`) or a decreasing counter (`decrease`) is a reset:
+path or instance (`replaced`) or a decreasing counter (`decrease`) is a reset:
 the deltas start over, so only gauges are graded until the next pair.
 Container sections such as `mpegts` are not read.
 
@@ -170,15 +170,13 @@ generate more stats.
   prefix, so a consumer skips any path without `node` where it expects one.
 
 The broadcast stays announced for the producer's life. Each announcement
-carries a fresh [publisher epoch](/concept/moq-lite#publisher-epochs) on its
+carries a fresh [instance](/concept/moq-lite#publisher-instances) on its
 route, so a restarted node is a new broadcast at the same path: it replaces the
-old one, and no relay serves it groups cached under the old epoch. A reader
-treats each epoch as its own set of counters. The epoch rides only moq-lite 07
-announcements; over moq-transport and older moq-lite versions a reader sees the same
-change as an end and a start at the path.
-An aggregating reader pins each node's subscription to its epoch, and when one
-publisher is reached through both kinds of link (with and without an epoch), it
-carries only that path's outgoing counters across the change.
+old one, and no relay serves it groups cached under the old instance. A reader
+treats each instance as its own set of counters. The instance rides moq-lite 07
+announcements; over anything else the receiving session mints one per
+announcement, so a reader sees the same change as an end and a start at the path.
+An aggregating reader pins each node's subscription to its instance.
 
 Every group shares the node's broadcast, so a token scoped to the stats prefix
 reads every group's tracks; scope by group with an aggregating reader instead.
@@ -262,11 +260,11 @@ earlier instance wrote.
 }
 ```
 
-Each tier that recorded anything in the epoch, with its egress (`publisher`)
+Each tier that recorded anything in the node's run, with its egress (`publisher`)
 and ingress (`subscriber`) [Traffic](#traffic) and its [Presence](#presence),
 summed over every broadcast and stats label. Unlike a group's paths and labels,
 an entry that ends stays counted, so the next frame always carries everything
-since the epoch began: a reader that misses frames loses nothing while the
+since the run began: a reader that misses frames loses nothing while the
 node stays announced. Billing reads this track.
 
 ### Group
@@ -285,7 +283,7 @@ node stays announced. Billing reads this track.
 ```
 
 `epoch` is a UUIDv7 minted for each instance of the group's track, and a
-reader keeps each epoch's counters apart, as it does for a broadcast's epochs.
+reader keeps each epoch's counters apart, as it does for a broadcast's instances.
 `tiers` maps each tier the group recorded on since then. Its top-level
 `publisher`, `subscriber`, and `sessions` are the group's [totals](#totals), so
 a totals reader parses them unchanged, and like the node's totals they keep
@@ -313,7 +311,7 @@ anyone holds the track. A track held again starts over.
 
 Wire bytes start at zero on every hold, including the first. Other presence
 fields seed from the root's current live-session counters; they do not recover
-closed roots from before the hold. Node totals keep the full epoch's
+closed roots from before the hold. Node totals keep the full run's
 history. Each recreated track starts a fresh snapshot group numbered by its
 publish interval, past any group of an earlier hold, so relay caches can
 distinguish the two.
@@ -471,13 +469,13 @@ Every counter is a cumulative, monotonic unsigned integer. A rate is the
 difference between two frames divided by the time between them, and a live
 count is started minus ended. A frame never shows ended above started.
 
-A new epoch starts every counter from zero, so a reader summing a node over
-time adds each epoch's counters rather than diffing across them. Within one
-epoch the totals never go down. A group's path or label counter going **down**
+A new instance starts every counter from zero, so a reader summing a node over
+time adds each instance's counters rather than diffing across them. Within one
+instance the totals never go down. A group's path or label counter going **down**
 means the entry was dropped and re-created, and a presence or prefix counter going down
 means the track was held again. Treat it as the start of a fresh segment
-rather than a negative rate. On a route without an epoch (an older relay, or a session older
-than moq-lite 07), a counter going down also means the node restarted.
+rather than a negative rate. On a route whose instance a session minted (an older relay, or
+a session older than moq-lite 07), a counter going down also means the node restarted.
 
 A reader ignores unknown fields, so a newer relay can add counters, and
 defaults a missing field to zero, so it can read an older relay.

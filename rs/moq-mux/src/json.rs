@@ -435,7 +435,7 @@ impl crate::catalog::Entry<'_, JsonConfig> {
 		let track = source
 			.subscribe_track(
 				self.config().broadcast.as_ref(),
-				self.config().epoch.as_ref(),
+				self.config().instance.as_ref(),
 				self.config().track(self.name()),
 			)
 			.await?;

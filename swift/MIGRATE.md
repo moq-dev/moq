@@ -58,12 +58,12 @@ the matching generated bindings and native library.
 
 ### `announce` takes an `AnnounceRoute`
 
-`BroadcastProducer.announce(route:)` takes `AnnounceRoute(cost:epoch:)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
-`Route` is only what announcements report. To re-announce an observed route, copy its `cost` and `epoch`.
+`BroadcastProducer.announce(route:)` takes `AnnounceRoute(cost:instance:epoch:)` instead of a `Route`: the origin builds the hop chain, so `hops` is no longer an input.
+`Route` is only what announcements report. To re-announce an observed route, copy its `cost`, and its `instance` only when forwarding that same stream; leave `instance` unset to keep the one the broadcast minted.
 
 ### A broadcast reference waits for its sibling's announcement (#6254)
 
-Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.resolve(_:epoch:)` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
+Resolving a rendition's `broadcast` reference, through `BroadcastConsumer.resolve(_:)` and the rendition-based subscribes and fetches, now waits for a sibling nothing announces yet instead of failing as unroutable, so a late sibling plays once it is announced.
 Where you skipped such a rendition on that error, bound the call yourself: cancel the task.
 
 ### Media track names belong to the target
@@ -100,11 +100,11 @@ moq-transport and moq-lite-03/04 sessions are unchanged.
 A container import with `ContainerFormat.fmp4` now publishes one Legacy frame per sample instead of one CMAF frame per fragment.
 Pass the new `ContainerFormat.cmaf` to keep publishing CMAF.
 
-### Catalog references carry their epoch
+### Catalog references carry their instance
 
-`Media.Video` and `Media.Audio` gain `epoch`, the publisher instance their `broadcast` reference names.
-`BroadcastConsumer.resolve(_:)` takes the catalog `Media.Rendition` instead of its reference, and reads its `broadcast` and `epoch` from it.
-Resolving, and the rendition-based consumers, throw for a rendition whose broadcast is proven to serve another epoch.
+`Media.Video` and `Media.Audio` gain `instance`, the publisher instance their `broadcast` reference names.
+`BroadcastConsumer.resolve(_:)` takes the catalog `Media.Rendition` instead of its reference, and reads its `broadcast` and `instance` from it.
+Resolving, and the rendition-based consumers, throw for a rendition whose broadcast is proven to serve another instance.
 
 ### Timestamps stop at 2^61 - 1 microseconds (#6168)
 
@@ -120,7 +120,7 @@ Publish a replacement under a new name, and expect a finished track's demand wat
 ### A claim answers by publishing (#5678)
 
 `OriginProducer.dynamic(prefix:)` takes no route, and `OriginDynamic.update(route:)` is gone.
-Replace `request.accept(broadcast:)` with `let prepared = try request.prepare(epoch: mintEpoch())`, fill `prepared.broadcast`, then `try prepared.publish()`, which announces it at the exact path under that epoch and returns its producer.
+Replace `request.accept(broadcast:)` with `let prepared = try request.prepare()`, fill `prepared.broadcast`, then `try prepared.publish()`, which announces it at the exact path under a fresh instance of its own and returns its producer.
 
 ### Anchors can name a time (#6074)
 

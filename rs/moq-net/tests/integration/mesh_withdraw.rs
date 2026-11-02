@@ -217,7 +217,7 @@ const PRODUCTION_LATENCY_MS: &[u64] = &[
 /// withdrawal here costs tens of thousands of announcements.
 #[kio::test]
 async fn partial_mesh_withdraw_retracts_once() {
-	let version: Version = "moq-lite-06".parse().unwrap();
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
 	let nodes: Vec<_> = (1..=34).map(produce_origin).collect();
 	let mut pairs = Vec::new();
 	for (&(a, b), &ms) in PRODUCTION.iter().zip(PRODUCTION_LATENCY_MS) {
@@ -272,7 +272,7 @@ const STALE_PATHS: &[Link] = &[
 /// offers it as a new route after the relay forgot the withdrawal.
 #[kio::test]
 async fn retracted_relay_ignores_a_stale_path() {
-	let version: Version = "moq-lite-06".parse().unwrap();
+	let version: Version = "moq-lite-07-wip".parse().unwrap();
 	let nodes: Vec<_> = (1..=8).map(produce_origin).collect();
 	let mut pairs = Vec::new();
 	for &((a, b), latency) in STALE_PATHS {
@@ -306,9 +306,10 @@ async fn retracted_relay_ignores_a_stale_path() {
 /// too.
 ///
 /// The watching client holds nothing, so it reports every toggle its relay
-/// sends, as a browser's announce stream does. The broadcast has no epoch, so a
-/// relay moving to another path restarts it, which lite-06 sends as a
-/// retraction then an announcement.
+/// sends, as a browser's announce stream does. The relays speak lite-07, which
+/// carries the broadcast's instance, so a relay moving to another path updates it.
+/// Older versions carry none, so every relay mints its own and a move between
+/// neighbors is a restart the update hold does not absorb.
 struct Cluster {
 	_pairs: Vec<MockPair>,
 	publisher: origin::Producer,
@@ -393,11 +394,6 @@ impl Cluster {
 /// retracted, announced, and retracted again. Relay 0 still restarts onto a
 /// stale path after the hold; see [`residual_slow_ring_reannounces`].
 #[kio::test]
-async fn cross_node_close_retracts_once_lite06() {
-	cross_node_close_retracts_once("moq-lite-06").await;
-}
-
-#[kio::test]
 async fn cross_node_close_retracts_once_lite07() {
 	cross_node_close_retracts_once("moq-lite-07-wip").await;
 }
@@ -452,8 +448,8 @@ async fn cross_node_close_without_hold_reannounces() {
 
 /// A ring of six relays with links under 150 ms. Relay 3 hears the withdrawal
 /// from relay 2 at 84 ms, but relay 5's equal-cost copy, the long way round,
-/// stays live until 446 ms. That outlasts the hold, so relay 3 restarts onto
-/// the stale copy and its client sees the broadcast come back.
+/// stays live until 446 ms. That outlasts the hold, so relay 3 moves onto the
+/// stale copy and its client sees the route update before it ends.
 #[kio::test]
 async fn residual_slow_ring_reannounces() {
 	#[rustfmt::skip]
@@ -461,18 +457,17 @@ async fn residual_slow_ring_reannounces() {
 		((0, 1), ms(141)), ((0, 2), ms(55)), ((2, 3), ms(29)), ((1, 4), ms(135)), ((4, 5), ms(148)), ((3, 5), ms(22)),
 	];
 	use Kind::*;
-	let mut cluster = Cluster::new("moq-lite-06", EDGES, origin::Config::default(), 0, 3).await;
+	let mut cluster = Cluster::new("moq-lite-07-wip", EDGES, origin::Config::default(), 0, 3).await;
 	let (broadcast, _) = cluster.publish("room/a").await;
 	let (client, relays) = cluster.close("room/a", broadcast).await;
-	assert_eq!(client, [End, Start, End]);
+	assert_eq!(client, [Update, End]);
 	let relays: Vec<&[Kind]> = relays.iter().map(Vec::as_slice).collect();
-	assert_eq!(relays, [&[End][..], &[End], &[End], &[Restart, End], &[End], &[End]]);
+	assert_eq!(relays, [&[End][..], &[End], &[End], &[Update, End], &[End], &[End]]);
 	assert_capped_withdrawal(EDGES, 0, 3).await;
 }
 
 /// Nine relays, reduced from a seeded random mesh with [`random_mesh`]'s
-/// links. Relays 2 and 8 retract the broadcast and then announce it again: a
-/// revival the quarantine misses.
+/// links. Relays 0, 5, 6, 7 and 8 move onto stale paths before they retract.
 #[kio::test]
 async fn residual_mesh_revives() {
 	#[rustfmt::skip]
@@ -481,23 +476,23 @@ async fn residual_mesh_revives() {
 		((0, 6), ms(121)), ((3, 7), ms(81)), ((0, 2), ms(96)), ((2, 8), ms(93)), ((5, 8), ms(89)),
 	];
 	use Kind::*;
-	let mut cluster = Cluster::new("moq-lite-06", EDGES, origin::Config::default(), 4, 8).await;
+	let mut cluster = Cluster::new("moq-lite-07-wip", EDGES, origin::Config::default(), 4, 8).await;
 	let (broadcast, _) = cluster.publish("room/a").await;
 	let (client, relays) = cluster.close("room/a", broadcast).await;
-	assert_eq!(client, [End, Start, End, Start, End]);
+	assert_eq!(client, [Update, End]);
 	let relays: Vec<&[Kind]> = relays.iter().map(Vec::as_slice).collect();
 	assert_eq!(
 		relays,
 		[
-			&[Restart, End][..],
-			&[End],
-			&[End, Start, End],
+			&[Update, End][..],
 			&[End],
 			&[End],
-			&[Restart, End],
 			&[End],
-			&[Restart, End],
-			&[Restart, End, Start, End],
+			&[End],
+			&[Update, End],
+			&[Update, End],
+			&[Update, End],
+			&[Update, End],
 		]
 	);
 	assert_capped_withdrawal(EDGES, 4, 8).await;
@@ -506,7 +501,7 @@ async fn residual_mesh_revives() {
 async fn assert_capped_withdrawal(edges: &[Link], publisher: usize, watcher: usize) {
 	let mut config = origin::Config::default();
 	config.max_hops = origin::HopLimit::new(diameter(edges) + 2).unwrap();
-	let mut cluster = Cluster::new("moq-lite-06", edges, config, publisher, watcher).await;
+	let mut cluster = Cluster::new("moq-lite-07-wip", edges, config, publisher, watcher).await;
 	let (broadcast, _) = cluster.publish("room/a").await;
 	let (client, relays) = cluster.close("room/a", broadcast).await;
 	assert_eq!(client.last(), Some(&Kind::End));
@@ -563,7 +558,7 @@ fn random_mesh(seed: u64) -> (Vec<Link>, usize) {
 /// today's counts; Routes and announces brings all three to zero.
 #[kio::test]
 async fn residual_random_meshes() {
-	assert_eq!(withdrawal_counts(false).await, (179, 3, 192));
+	assert_eq!(withdrawal_counts(false).await, (231, 3, 290));
 }
 
 /// The same topologies and terminal states with room for the diameter and two
@@ -571,7 +566,7 @@ async fn residual_random_meshes() {
 #[kio::test]
 async fn capped_random_meshes_hunt_less() {
 	let capped = withdrawal_counts(true).await;
-	assert_eq!(capped, (151, 1, 154));
+	assert_eq!(capped, (177, 0, 192));
 }
 
 fn diameter(edges: &[Link]) -> usize {
@@ -610,7 +605,7 @@ async fn withdrawal_counts(capped: bool) -> (usize, usize, usize) {
 		if capped {
 			config.max_hops = origin::HopLimit::new(diameter(&edges) + 2).unwrap();
 		}
-		let mut cluster = Cluster::new("moq-lite-06", &edges, config, publisher, 0).await;
+		let mut cluster = Cluster::new("moq-lite-07-wip", &edges, config, publisher, 0).await;
 		let (broadcast, _) = cluster.publish("room/a").await;
 		let (_, relays) = cluster.close("room/a", broadcast).await;
 		for kinds in relays {

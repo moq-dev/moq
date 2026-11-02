@@ -675,22 +675,20 @@ class SmokeTest {
     }
 
     @Test
-    fun `a new epoch restarts announce consumers`() = runTest {
+    fun `a new instance restarts announce consumers`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             val announced = origin.consume().announced(AnnounceConfig())
-            origin.createBroadcast("epoch").use { publication ->
-                val first = mintEpoch()
-                publication.announce(AnnounceRoute(epoch = first))
+            origin.createBroadcast("instance").use { publication ->
+                publication.announce(AnnounceRoute())
                 val start = assertIs<AnnounceEventStart>(announced.nextRoute())
-                assertEquals(first, start.announce.route.epoch)
+                assertTrue(start.announce.route.instance.isNotEmpty())
 
-                val second = mintEpoch()
-                publication.announce(AnnounceRoute(epoch = second))
+                publication.announce(AnnounceRoute(instance = "camera", epoch = 1uL))
                 val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
-                assertEquals(second, restart.announce.route.epoch)
+                assertEquals("camera", restart.announce.route.instance)
 
-                assertFailsWith<MoqException> {
-                    publication.announce(AnnounceRoute(epoch = "not-an-epoch"))
+                assertFailsWith<MoqException.InvalidInstance> {
+                    publication.announce(AnnounceRoute(instance = ""))
                 }
             }
         }
@@ -719,7 +717,7 @@ class SmokeTest {
                 }
                 val request = dynamic.requestedBroadcast()
                 assertEquals("live/cam", request.path())
-                request.prepare(mintEpoch()).use { prepared ->
+                request.prepare().use { prepared ->
                     prepared.broadcast().use { fill ->
                         prepared.publish().use { publication ->
                             pending.await()

@@ -106,8 +106,8 @@ pub struct Broadcaster {
 		)
 	)]
 	broadcast: moq_net::broadcast::Consumer,
-	/// The publisher instance served, which every URL the master playlist and manifest list
-	/// starts with: its epoch, or an id minted for an epochless instance.
+	/// The stream served, which every URL the master playlist and manifest list starts with:
+	/// its instance, or an id minted for a broadcast that came through no route.
 	instance: Arc<str>,
 	/// The current rendition set, reconciled from the catalog by the watcher task.
 	renditions: renditions::Producer,
@@ -146,8 +146,12 @@ impl Broadcaster {
 	/// [`new`](Self::new) for a caller that already checked the CPU.
 	pub(crate) fn start(source: moq_mux::Source, config: Config) -> (Self, Driver) {
 		let broadcast = source.broadcast();
-		// An epoch names the instance on every edge, so each serves it under the same URLs.
-		let instance = broadcast.info().epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
+		// An instance names the stream on every edge, so each serves it under the same URLs.
+		let instance = broadcast
+			.info()
+			.instance
+			.clone()
+			.unwrap_or_else(moq_net::Instance::random);
 		let (spawner, mut driver) = driver::Spawner::new();
 		let renditions = renditions::Producer::new(config.window, spawner);
 		// The watcher owns its own producer clone; dropping the `Broadcaster` ends it so the
@@ -2781,7 +2785,7 @@ mod tests {
 		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";
 
 		// Publish broadcast "live": a `video0` rendition plus three keyframe groups whose frames
-		// carry `payload`, so the two epochs' media differs byte for byte. The returned handle
+		// carry `payload`, so the two publishers' media differs byte for byte. The returned handle
 		// keeps the publisher alive until it is dropped.
 		fn publish(origin: &moq_net::origin::Producer, payload: &'static [u8]) -> Box<dyn std::any::Any> {
 			let broadcast = origin.create_broadcast("live").expect("publish allowed");
@@ -2826,7 +2830,7 @@ mod tests {
 		);
 
 		// Control: an export started after the takeover does serve the new publisher's media, so
-		// the assertion above is about which epoch a rendition is bound to, not about a broadcast
+		// the assertion above is about which instance a rendition is bound to, not about a broadcast
 		// that happens to be unreadable.
 		let fresh = crate::resolved(&origin, "live").await;
 		let (_renditions, rendition) = export(&fresh, &video_config());
@@ -3093,7 +3097,7 @@ mod tests {
 	}
 
 	// A replacement already present when the export starts is the sibling the request
-	// resolves to: it is served, not treated as a stale epoch.
+	// resolves to: it is served, not treated as a stale instance.
 	#[tokio::test]
 	async fn a_sibling_present_at_export_start_is_served() {
 		const NEW: &[u8] = b"NEWNEWNEWNEWNEWN";

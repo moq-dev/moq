@@ -10,9 +10,9 @@
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type * as broadcast from "./broadcast.ts";
 import type { Drain } from "./connection/goaway.ts";
-import type * as Epoch from "./epoch.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
+import type * as Instance from "./instance.ts";
 import type { Lister, Tracks } from "./listing.ts";
 import type * as origin from "./origin.ts";
 import type * as Path from "./path.ts";
@@ -56,7 +56,15 @@ export interface OriginProducer {
 	accepts(prefix: Path.Valid): boolean;
 	receive(
 		prefix: Path.Valid,
-		route?: Route | { epoch?: Route["epoch"]; hops?: Route["hops"]; cost?: Route["cost"]; auth?: Route["auth"] },
+		route?:
+			| Route
+			| {
+					instance?: Route["instance"];
+					epoch?: Route["epoch"];
+					hops?: Route["hops"];
+					cost?: Route["cost"];
+					auth?: Route["auth"];
+			  },
 	): origin.Requests;
 	attach(discovery: boolean): Dispose;
 	/**
@@ -77,10 +85,10 @@ export interface OriginConsumer {
 	routes(path: Path.Valid): boolean;
 	readonly advertised: Getter<Advertisements | undefined>;
 	/** The announced local broadcast at `path`, when it is the route peers are offered there.
-	 * A request naming an `epoch` only matches a route serving it. */
-	local(path: Path.Valid, epoch?: Epoch.Valid): broadcast.Consumer | undefined;
-	/** Resolve `path` for serving; throws `Unroutable` when the route serves another `epoch`. */
-	demand(path: Path.Valid, epoch?: Epoch.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
+	 * A request naming an `instance` only matches a route serving it. */
+	local(path: Path.Valid, instance?: Instance.Valid): broadcast.Consumer | undefined;
+	/** Resolve `path` for serving; throws `Unroutable` when the route serves another `instance`. */
+	demand(path: Path.Valid, instance?: Instance.Valid, signal?: AbortSignal): Promise<broadcast.Consumer | undefined>;
 }
 
 /** One originated advertisement exposed to the publishing wire. */
@@ -89,20 +97,26 @@ export interface Advertised {
 	readonly route: Route;
 	/** The paths a scoped route may serve beneath its prefix, relative like its key; unset for the whole subtree. */
 	readonly claim?: Path.Patterns;
+	/**
+	 * The prefix the route was advertised at, when a scope's projection merged several covering
+	 * prefixes under one key; unset when the key is its prefix. Supersession compares only routes
+	 * of one prefix.
+	 */
+	readonly prefix?: Path.Valid;
 }
 
-/** What names a publisher instance: an advertisement's identity and epoch. */
-export interface Instance {
+/** What names a stream: an advertisement, and the instance its route serves. */
+export interface Served {
 	readonly identity: object;
-	readonly route: Pick<Route, "epoch">;
+	readonly route: Pick<Route, "instance">;
 }
 
 /**
- * Whether two advertisements serve one publisher instance: the same epoch, or, without one,
- * the same advertisement, since nothing says another serves the same bytes.
+ * Whether two advertisements serve one stream: the same route instance, or, for a route not
+ * yet named one, the same advertisement.
  */
-export function sameInstance(a: Instance, b: Instance): boolean {
-	if (a.route.epoch !== undefined || b.route.epoch !== undefined) return a.route.epoch === b.route.epoch;
+export function sameInstance(a: Served, b: Served): boolean {
+	if (a.route.instance !== undefined || b.route.instance !== undefined) return a.route.instance === b.route.instance;
 	return a.identity === b.identity;
 }
 
