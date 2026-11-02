@@ -135,10 +135,13 @@ must not be added together. All observations were fetched November 1 local
   macOS 218.1, Windows 124.8). November 1: 1,505.7 (ARM 780.1,
   Linux 303.6, macOS 282.1, Windows 139.9). Early failures make these
   lower bounds on a fully successful run, not a performance trend.
-- No hosted merge-queue job exists now. Main PRs skip Check, and
-  `quest land serve` runs `just ci` on the maintainer's host. The prior hosted
-  queue's 5.5-minute median is obsolete; this audit claims no replacement
-  host baseline. Release PRs still run the full Check and Release gate.
+- At the November 1 sample, main PRs skipped Check and `quest land serve`
+  ran `just ci` on the maintainer's host. Since that sample,
+  [moq-dev/moq#7612](https://github.com/moq-dev/moq/pull/7612) replaced it with
+  GitHub's single-PR merge queue on the self-hosted runner. Main PRs skip Check
+  and Queue; the merge group runs `just ci`. The prior hosted queue's
+  5.5-minute median is obsolete; this audit claims no replacement host baseline.
+  Release PRs still run the full Check and Release gate.
 - Removed from `nightly.yml`: audio grouping, shard sweep and relay profile
   measurement jobs. Across all 13 scheduled nights, October 20 to November 1,
   every one succeeded and no caught regression was found. They have no
@@ -161,8 +164,8 @@ The recurring audit and its release prerequisite remain; no successor is made.
 
 ### Every workflow (2026-11-01)
 
-Every checked-in workflow is listed below. `N` costs are its nested jobs in
-November 1 Nightly; `D` costs are the latest completed successful/failed direct
+The 56 workflows checked in at the November 1 audit are listed below, plus
+Queue added afterward. `N` costs are nested jobs in November 1 Nightly; `D` costs are the latest completed successful/failed direct
 run in the fetched page (up to 100 runs since October 20). A reusable wrapper with no direct run is not zero cost:
 its caller pays. Failure dates below are observations, not automatically unique
 regressions. For retained lanes without an attributed regression since October
@@ -183,7 +186,7 @@ release credentials remain under the existing publisher-environment work above.
 | [audio-quality](/.github/workflows/audio-quality.yml) | Keep: deterministic audio replay correctness; real-time quality is in Nightly | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 4.5 |
 | [c](/.github/workflows/c.yml) | Keep: generated C bindings and installed-consumer ABI link | Caller gate / Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 4.5 |
 | [cache](/.github/workflows/cache.yml) | Keep, infrastructure-owned: publishes reusable shells on three hosts | GitHub status; no product regression claim | [D 2026-11-02](https://github.com/moq-dev/moq/actions/runs/41377533846) ARM 1.3, Linux 1.3, macOS 3.5 |
-| [check](/.github/workflows/check.yml) | Keep: release admission; main admission runs locally through quest land | Required Check; module timing summary | No completed direct sample in fetched page |
+| [check](/.github/workflows/check.yml) | Keep: release admission; main admission now runs through Queue | Required Check; module timing summary | No completed direct sample in fetched page |
 | [codspeed](/.github/workflows/codspeed.yml) | Keep: instruction counts separate layout/timing noise; explicit October 28 maintainer decision in bench-ci | CodSpeed dashboard; failure alert | [D 2026-11-02](https://github.com/moq-dev/moq/actions/runs/41368239240) Linux 63.2 |
 | [cpp](/.github/workflows/cpp.yml) | Keep: C++ compiler and ABI consumer builds; not only Rust compilation | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 6.3 |
 | [dependabot](/.github/workflows/dependabot.yml) | Keep: dependency PR policy and maintenance automation | Dependency PR state | [D 2026-11-02](https://github.com/moq-dev/moq/actions/runs/41372931202) Linux 0.6 |
@@ -202,6 +205,7 @@ release credentials remain under the existing publisher-environment work above.
 | [oss-scanner](/.github/workflows/oss-scanner.yml) | Keep: OSS Scanner container builds | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 9.2 |
 | [platform](/.github/workflows/platform.yml) | Keep: macOS/Windows cfg, ABI, Swift and native test boundaries | Nightly/release gate alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 0.2, Windows 18.2, macOS 57.5 |
 | [pullfrog](/.github/workflows/pullfrog.yml) | Keep: explicitly dispatched agent work, no standing regression cost | Calling agent result / GitHub posts | [D 2026-11-02](https://github.com/moq-dev/moq/actions/runs/41378234938) Linux 3.5 |
+| [queue](/.github/workflows/queue.yml) | Keep: exact-tree merge-group admission on the self-hosted runner; added after the audit sample | Required Queue context; build timings artifact | No cost sample in this audit |
 | [quest](/.github/workflows/quest.yml) | Keep: validates direct pushes after quest-tree merges | GitHub Quest status; no Discord | [D 2026-11-02](https://github.com/moq-dev/moq/actions/runs/41378565460) ARM 0.4 |
 | [release-binary](/.github/workflows/release-binary.yml) | Keep: shared target-specific binary packaging | Calling release workflow; not independently triggered | No executed direct sample since October 20; cost belongs to caller |
 | [release-brew](/.github/workflows/release-brew.yml) | Keep: Homebrew publication | Caller gate/alert and release artifacts | [D 2026-10-30](https://github.com/moq-dev/moq/actions/runs/41042504830) Linux 0.3 |
