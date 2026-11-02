@@ -150,12 +150,12 @@ enum Stall {
 	Headers,
 }
 
-/// What a reader saw over a stall: frames read, groups that failed, the largest it
-/// reported if that advanced, and whether its subscription ended.
+/// What a reader saw over a stall: frames read, why each failed group failed, the
+/// largest it reported if that advanced, and whether its subscription ended.
 #[derive(Debug, Default)]
 struct Observed {
 	frames: usize,
-	failed: usize,
+	failed: Vec<Error>,
 	largest: Option<track::Position>,
 	ended: bool,
 }
@@ -167,7 +167,7 @@ fn observe(rx: &mut mpsc::UnboundedReceiver<Delivery>, sub: &mut track::Subscrib
 		match delivery {
 			(_, Ok(_)) => observed.frames += 1,
 			(u64::MAX, Err(_)) => observed.ended = true,
-			(_, Err(_)) => observed.failed += 1,
+			(_, Err(err)) => observed.failed.push(err),
 		}
 	}
 	let waiter = kio::Waiter::noop();
@@ -269,11 +269,16 @@ async fn a_payload_stall_with_live_sessions_is_never_recovered() {
 		match stall {
 			Stall::Upstream | Stall::Downstream => {
 				assert_eq!(e.largest, None, "{stall:?}: E's largest moved");
-				assert_eq!(e.failed, 0, "{stall:?}");
+				assert!(e.failed.is_empty(), "{stall:?}: {:?}", e.failed);
 			}
 			Stall::Headers => {
 				assert_eq!(e.largest.map(|largest| largest.group), Some(newest), "{stall:?}");
-				assert!(e.failed > 0, "{stall:?}: no group was cut");
+				assert!(!e.failed.is_empty(), "{stall:?}: no group was cut");
+				assert!(
+					e.failed.iter().all(|err| matches!(err, Error::Old)),
+					"{stall:?}: a group was cut for something other than age: {:?}",
+					e.failed
+				);
 			}
 		}
 	}
