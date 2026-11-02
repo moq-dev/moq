@@ -22,6 +22,7 @@ function condition(expression: string, event: string, base: string, selected = t
 // including on drafts; neither branch builds again on a close event.
 assert.equal(check.on.merge_group, undefined);
 assert.equal(check.on.pull_request.paths, undefined, "Check must select through the dispatcher");
+assert.equal(check.on.pull_request.branches, undefined, "release PRs must report the required Check");
 for (const action of ["opened", "synchronize", "reopened", "edited", "ready_for_review", "converted_to_draft", "closed"]) {
 	assert.ok(check.on.pull_request.types.includes(action), `${action} must trigger Check or cancel its previous run`);
 	for (const base of ["main", "release", "other"]) {
@@ -34,8 +35,8 @@ for (const action of ["opened", "synchronize", "reopened", "edited", "ready_for_
 		}
 	}
 }
-// Selection and execution share the PR's exact base on main; release runs all.
-assert.equal(condition(check.jobs.check.env.CI_BASE, "pull_request", "main"), "base-sha");
+// Selection and execution share the fetched base on main; release runs all.
+assert.equal(condition(check.jobs.check.env.CI_BASE, "pull_request", "main"), "origin/main");
 assert.equal(condition(check.jobs.check.env.CI_BASE, "pull_request", "release"), "--all");
 // Check runs the whole gate in one job.
 assert.equal(check.jobs.check.env.CHECK_MODULES, undefined);

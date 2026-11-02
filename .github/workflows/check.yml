@@ -10,6 +10,7 @@ on:
     # Closing or returning a main PR to draft cancels its in-flight run.
     # Any edit reruns eligible PRs, including a retarget to main or release:
     # skipping an edit would replace a failed context with a passing one.
+    # Release readiness transitions rerun its required gate for the same reason.
     types: [opened, synchronize, reopened, edited, ready_for_review, converted_to_draft, closed]
 
 # Cancel in-flight runs when a new commit lands on the same PR, or when the PR
@@ -27,7 +28,8 @@ jobs:
     # Backstop a hang instead of holding the runner for the 6-hour default.
     timeout-minutes: 60
     env:
-      CI_BASE: ${{ github.base_ref == 'release' && '--all' || github.event.pull_request.base.sha }}
+      # The fetched branch includes base changes since the PR event's base.sha.
+      CI_BASE: ${{ github.base_ref == 'release' && '--all' || 'origin/main' }}
 
     steps:
       - name: Checkout
