@@ -69,11 +69,27 @@ metadata = {
     "profilers": {tool: command(tool, "--version").splitlines()[0] for tool in ("perf", "jeprof") if shutil.which(tool)}
     if mode == "--profile"
     else None,
-    "workload": None if mode == "--criterion" else {"startup": "2s", "duration": "10s", "report": "500ms"},
+    "workload": None
+    if mode == "--criterion"
+    else {"startup": "2s", "duration": "10s", "report": "500ms", "instructions_duration": "14s"},
 }
 (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
 subprocess.run(
-    ["cargo", "tree", "--locked", "-p", "moq-relay", "-e", "features"],
+    [
+        "cargo",
+        "--config",
+        str(Path.cwd() / ".cargo/config.toml"),
+        "tree",
+        "--manifest-path",
+        str(Path.cwd() / "Cargo.toml"),
+        "--locked",
+        "-p",
+        "moq-relay",
+        "-e",
+        "features",
+    ],
+    # Nested revision checkouts must not inherit the current tree's Cargo config.
+    cwd="/",
     stdout=(out / "features.txt").open("w"),
     check=True,
 )

@@ -88,12 +88,12 @@ case $MODE in
         fi
         PROFILE_WORKERS=${BENCH_PROFILE_WORKERS:-1 4 16}
         if [[ -z $PROFILE_MODES ]]; then
-            printf 'BENCH_PROFILE_MODES must name one or more of: lock cpu heap\n' >&2
+            printf 'BENCH_PROFILE_MODES must name one or more of: lock cpu heap instructions\n' >&2
             exit 1
         fi
         for value in $PROFILE_MODES; do
-            if [[ ! $value =~ ^(lock|cpu|heap)$ ]]; then
-                printf 'unknown profile mode %q; expected lock, cpu, or heap\n' "$value" >&2
+            if [[ ! $value =~ ^(lock|cpu|heap|instructions)$ ]]; then
+                printf 'unknown profile mode %q; expected lock, cpu, heap, or instructions\n' "$value" >&2
                 exit 1
             fi
         done
@@ -225,8 +225,8 @@ export CRITERION_HOME=$RUN/criterion
 
 checkout_base() {
     # Cargo merges every ancestor's .cargo/config.toml. A nested worktree would
-    # inherit this checkout's settings instead of measuring the base in isolation.
-    WORKTREE=$(mktemp -d "${TMPDIR:-/tmp}/moq-bench-base.XXXXXX")
+    # inherit this checkout's settings unless the caller loads only its own config.
+    WORKTREE=$(mktemp -d "${2:-${TMPDIR:-/tmp}}/moq-bench-base.XXXXXX")
     git worktree add --detach "$WORKTREE" "$1" >/dev/null
 }
 
@@ -733,8 +733,10 @@ build_workers() {
     fi
     printf 'Building worker runtimes: %s (%s)\n' "$checkout" "$profile"
     (
-        cd "$checkout"
-        CARGO_TARGET_DIR=$target cargo build --locked --profile "$profile" \
+        # Read just this revision's configuration, even in a nested scratch worktree.
+        cd /
+        CARGO_TARGET_DIR=$target cargo --config "$checkout/.cargo/config.toml" build \
+            --manifest-path "$checkout/Cargo.toml" --locked --profile "$profile" \
             -p moq-relay -p moq-bench --features "$features"
     )
 }
@@ -843,15 +845,25 @@ run_profiles() {
     local mode
     for mode in $PROFILE_MODES; do
         python3 "$ROOT/bench/profile.py" check "$mode"
+        if [[ $mode == instructions ]]; then
+            python3 "$ROOT/bench/instructions.py" check "$PROFILE_WORKERS"
+        fi
     done
     generate_certificate
 
+    if [[ " $PROFILE_MODES " == *' instructions '* ]]; then
+        # Keep each bisect revision's artifacts instead of overwriting one base target.
+        CURRENT_TARGET=$TARGET/revisions/$(git rev-parse HEAD)
+        BASE_TARGET=$TARGET/revisions/$BASE
+    fi
+
     if [[ -n $BASE ]]; then
-        checkout_base "$BASE"
+        mkdir -p "$ROOT/.tmp"
+        checkout_base "$BASE" "$ROOT/.tmp"
         mkdir -p "$RUN/base-context"
         (cd "$WORKTREE" && python3 "$ROOT/bench/metadata.py" "$RUN/base-context" "$BASE" --profile)
     fi
-    local label checkout target
+    local label checkout target round index
     local -a revisions=(current)
     if [[ -n $BASE ]]; then revisions=(base current); fi
     for mode in $PROFILE_MODES; do
@@ -869,8 +881,21 @@ run_profiles() {
             if [[ $PROFILE_RUNTIME == io-uring-workers ]]; then
                 check_uring "$target/profiling"
             fi
-            run_profile "$mode" "$label" "$target/profiling/moq-relay"
+            if [[ $mode != instructions ]]; then
+                run_profile "$mode" "$label" "$target/profiling/moq-relay"
+            fi
         done
+        if [[ $mode == instructions ]]; then
+            # Pair in alternating order rather than measuring every base run before current.
+            for ((round = 1; round <= ROUNDS; round++)); do
+                for ((index = 0; index < ${#revisions[@]}; index++)); do
+                    label=${revisions[$(((index + round - 1) % ${#revisions[@]}))]}
+                    target=$CURRENT_TARGET/profile
+                    if [[ $label == base ]]; then target=$BASE_TARGET/profile; fi
+                    run_profile "$mode" "$label/round-$round" "$target/profiling/moq-relay"
+                done
+            done
+        fi
     done
 }
 
@@ -879,6 +904,8 @@ run_profiles() {
 run_profile() {
     local mode=$1 label=$2 relay=$3
     local workers control profiled
+    local INSTRUCTION_AFFINITY=false
+    if [[ $mode == instructions ]]; then INSTRUCTION_AFFINITY=true; fi
     TRANSPORT=$PROFILE_TRANSPORT
     case $mode in
         lock)
@@ -897,6 +924,9 @@ run_profile() {
                 workers control-fps profiled-fps control-CPU profiled-CPU control-RSS profiled-RSS \
                 before steady teardown churn-MiB/s allocs/s
             ;;
+        instructions)
+            printf '\nInstructions: %s over %s, %s, %s\n' "$PROFILE_WORKLOAD" "$TRANSPORT" "$PROFILE_RUNTIME" "$label"
+            ;;
     esac
     for workers in $PROFILE_WORKERS; do
         run_workload "$label/control-$mode-$workers" "$relay" "$PROFILE_WORKLOAD" "$PROFILE_RUNTIME" "$workers"
@@ -906,6 +936,9 @@ run_profile() {
         control=$RUN/relay/$label/control-$mode-$workers/$PROFILE_WORKLOAD/summary.json
         profiled=$RUN/relay/$label/$mode-$workers/$PROFILE_WORKLOAD
         case $mode in
+            instructions)
+                cat "$profiled/instructions/instructions.json"
+                ;;
             lock)
                 jq -r -s '[
                     .[0].recv_fps, .[1].recv_fps, .[0].cpu_cores, .[1].cpu_cores, (.[2].idle | length),
