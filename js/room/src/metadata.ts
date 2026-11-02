@@ -18,7 +18,7 @@ import * as Moq from "@moq/net";
 import type * as Publish from "@moq/publish";
 import { Effect, type Getter, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type * as Watch from "@moq/watch";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 
 /** Delivery priority for hang metadata tracks: below the catalog, above audio. */
 export const PRIORITY = 90;
