@@ -187,8 +187,8 @@ func (s *Session) Consume() *OriginConsumer {
 }
 
 // Shutdown requests a draining close now; wait for its result with Closed.
-// Explicit moq-lite-07-wip waits for the peer to receive finished tails; older
-// Lite versions (including default lite-06) and IETF wait only for transport ACKs.
+// moq-lite-05 and newer wait for the peer to receive finished tails; older Lite
+// versions and IETF wait only for transport ACKs.
 // Finish or abort live tracks first; the drain times out after one second.
 func (s *Session) Shutdown() {
 	s.inner.Shutdown()

@@ -6,6 +6,10 @@ How to update your code for each breaking change, newest first.
 
 The hand-written crate never published as moq-c: a libmoq 0.6 user applies these entries before moving to the generated API.
 
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`moq_announce_event.has_captures` is removed, changing the C ABI. Read `captures_len` directly: zero means the filter has no wildcards. Rebuild consumers against the regenerated header and matching native library.
+
 ### A subscription without `max_delay_present` has no limit
 
 A `moq_subscription` with `max_delay_present` false sets no subscriber limit, leaving the publisher's max age alone to bound it, instead of moq-net's default of zero.

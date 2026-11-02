@@ -127,6 +127,7 @@ criterion_group!(
 	benches,
 	session::session::<Relay>,
 	session::group_cost::<Relay>,
+	session::datagram::<Relay>,
 	session::fetch_frames::<Relay>,
 	session::fetch_range::<Relay>,
 	session::withdrawal::<Relay>
