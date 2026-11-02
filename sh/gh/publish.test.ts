@@ -18,9 +18,7 @@ type Job = {
 type Workflow = { on: Record<string, unknown>; jobs: Record<string, Job> };
 
 async function read(name: string): Promise<Workflow> {
-	const doc = YAML.parse(await Bun.file(`.github/workflows/${name}.yml`).text()) as Workflow & { true?: unknown };
-	// Bun parses a bare `on:` key as boolean true (YAML 1.1).
-	return { ...doc, on: (doc.on ?? doc.true) as Record<string, unknown> };
+	return YAML.parse(await Bun.file(`.github/workflows/${name}.yml`).text()) as Workflow;
 }
 
 function namesPublish(job: Job): boolean {
