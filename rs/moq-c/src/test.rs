@@ -1043,7 +1043,7 @@ fn audio_enabled_snapshots_preserve_a_held_consumer() {
 	assert!(!unsafe { enabled.assume_init() });
 	let payload = b"resumed-audio";
 	assert_eq!(
-		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), 0) },
+		unsafe { moq_publish_media_frame(media, payload.as_ptr(), payload.len(), micros(0)) },
 		0
 	);
 	let read = id(frames.recv());
