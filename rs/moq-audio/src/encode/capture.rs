@@ -2132,7 +2132,10 @@ mod tests {
 					.consumer
 					.track("audio")
 					.unwrap()
-					.subscribe(moq_net::track::Subscription::default().with_max_delay(RETAIN))
+					.subscribe(
+						moq_net::track::Subscription::default()
+							.with_delay(moq_net::track::Delay::default().with_max(RETAIN)),
+					)
 					.await
 					.unwrap();
 				wait_for(&mut self.publication, Status::Live).await;

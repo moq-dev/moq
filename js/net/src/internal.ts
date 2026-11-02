@@ -17,17 +17,25 @@ import type * as Instance from "./instance.ts";
 import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
-import type { Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
+import type { Delay, Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
 import * as Varint from "./varint.ts";
 import type { Advertised, Advertisements } from "./wire.ts";
 
-/** What a null maxDelay goes out as: the largest value every peer can read, as Rust sends for `None`. */
+/** What a null {@link Delay.max} goes out as: the largest value every peer can read, as Rust sends for `None`. */
 export const NO_MAX_DELAY = Milli(Varint.MAX_U53);
 
-/** A subscription's budget as the wire carries it: null for no limit, omitted for zero. */
-export function maxDelayOf(subscription: Pick<Subscription, "maxDelay">): Milli {
-	if (subscription.maxDelay === null) return NO_MAX_DELAY;
-	return subscription.maxDelay ?? Milli.zero;
+/** A subscription's {@link Delay.max} as the wire carries it: null for no limit, omitted for zero. */
+export function maxDelayOf(subscription: Pick<Subscription, "delay">): Milli {
+	const max = subscription.delay?.max;
+	if (max === null) return NO_MAX_DELAY;
+	return max ?? Milli.zero;
+}
+
+/** A subscription's {@link Delay.min} as the wire carries it: undefined when not stated, omitted for zero. */
+export function minDelayOf(subscription: Pick<Subscription, "delay">): Milli | undefined {
+	const min = subscription.delay?.min;
+	if (min === null) return undefined;
+	return min ?? Milli.zero;
 }
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */

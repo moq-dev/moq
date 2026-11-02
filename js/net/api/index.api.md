@@ -593,6 +593,10 @@ export namespace Track {
 		sequence: number;
 		timestamp?: Time.Timestamp;
 	}
+	export interface Delay {
+		max?: Milli | null;
+		min?: Milli | null;
+	}
 	export class Demand {
 		get closed(): Signals.GetPromise<Error | null>;
 		readonly name: string;
@@ -688,8 +692,8 @@ export namespace Track {
 		default(): Track.Subscription;
 	};
 	export interface Subscription {
+		delay?: Track.Delay;
 		groups?: Track.Groups;
-		maxDelay?: Milli | null;
 		order?: Track.Order;
 		priority?: number;
 	}

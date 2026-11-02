@@ -66,7 +66,7 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 
 	let consumer = e.consume();
 	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
-	let prefs = track::Subscription::default().with_max_delay(budget);
+	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(budget));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 	let m2_e = priced_link(version, &m2, &e, Some(1_000)).await;
 	settle().await;
@@ -205,7 +205,7 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 	async fn subscribe(origin: &origin::Producer) -> track::Subscriber {
 		let consumer = origin.consume();
 		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
-		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(2));
+		let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(2)));
 		remote.track("video").unwrap().subscribe(prefs).await.unwrap()
 	}
 	let mut e_sub = subscribe(&e).await;

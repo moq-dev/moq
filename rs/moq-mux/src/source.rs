@@ -565,7 +565,7 @@ mod tests {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let track = broadcast.create_track("audio", None).unwrap();
 		let preferences = moq_net::track::Subscription::default()
-			.with_max_delay(std::time::Duration::from_secs(3))
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3)))
 			.with_range(5..=10);
 		let first = track.subscribe(preferences.clone());
 		let held = source.control(first.control()).unwrap();

@@ -60,6 +60,7 @@ import {
 	insertDrop,
 	insertRun,
 	MAX_DATAGRAMS,
+	maxDelayOf,
 	type Recv,
 	type RecvDatagram,
 	type Replacement,
@@ -973,7 +974,8 @@ class Reader implements ResumeSource {
 
 	/** The reader's budget: how far behind a group may fall before it is skipped. */
 	#budget(): Milli {
-		return this.#shell.subscription.peek()?.maxDelay ?? Milli.zero;
+		const subscription = this.#shell.subscription.peek();
+		return subscription ? maxDelayOf(subscription) : Milli.zero;
 	}
 
 	/**
@@ -1484,7 +1486,8 @@ class Recover implements GroupRecover {
 				// That route failing too waits for the next one, and a refusal is a verdict only for
 				// a copy that failed, once the serving subscription will not deliver the group either.
 				if (outcome && failed && !routeFailed(outcome.error) && !(serving.sub.closed.peek() instanceof Error)) {
-					const maxDelay = serving.sub.subscription.peek()?.maxDelay ?? Milli.zero;
+					const subscription = serving.sub.subscription.peek();
+					const maxDelay = subscription ? maxDelayOf(subscription) : Milli.zero;
 					const land = { start: this.sequence, end: this.sequence + 1, floor: true, grace: grace(maxDelay) };
 					if (generation === current.generation || !hooks.mayLand(serving.sub, land)) throw outcome.error;
 					landing = new Promise<void>((resolve) => {

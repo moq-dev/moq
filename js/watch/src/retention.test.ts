@@ -91,7 +91,7 @@ test("a long subscription through the player path leaves nothing behind", async 
 		broadcast: broadcast.consume(),
 		track: "audio",
 		priority: 0,
-		maxDelay: sync.out.maxDelay,
+		delay: new Derived([sync.out.delay, sync.out.maxDelay], (min, max) => ({ min, max })),
 	});
 	if (!sub) throw new Error("no subscription");
 	const consumer = new Container.Consumer(sub, {
