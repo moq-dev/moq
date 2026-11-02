@@ -162,12 +162,13 @@ impl ReceiveWindow {
 	}
 }
 
-/// The smallest connection receive window a transport that leases may offer.
+/// The smallest connection receive window a transport that leases may offer: one 1 MiB
+/// storage segment.
 ///
 /// A session keeps each unit it is still assembling leased, and a unit larger than the
-/// window can never complete, so the window has to fit the largest one with its framing:
-/// a legacy announcement set, past any frame segment. A frame returns its credit a
-/// segment at a time, so its size never matters here.
+/// window can never complete, so the window has to fit the largest one with its framing.
+/// A frame returns its credit a segment at a time, so its size never matters here, and a
+/// legacy announcement set is capped to fit the same segment.
 pub const MIN_RECEIVE_WINDOW: u64 = {
 	// A type and a size prefix, each a varint of at most 8 bytes.
 	const PREFIXES: u64 = 16;
@@ -866,12 +867,13 @@ pub mod poll {
 		/// Call this method manually if you want to specify a code yourself.
 		fn stop(&mut self, code: u32);
 
-		/// Poll until the stream fails without reading it: the peer resets it, or the
-		/// connection closes. Pending for good once the peer finished it.
+		/// Poll until the stream fails without reading it: the peer resets it, the receiver
+		/// evicts it to free a stuck window, or the connection closes. Pending for good once the
+		/// peer finished it.
 		///
-		/// A session that stops reading a stream to pace it (see
-		/// [`Session::receive_window`]) watches this instead, so a reset still ends the group
-		/// it carries. It takes no bytes and grants no credit. The default never completes,
+		/// A session that stops reading a stream, to pace it (see [`Session::receive_window`])
+		/// or until a control message says how to read it, watches this instead, so a reset
+		/// still ends the group it carries and an eviction stops the stream. It takes no bytes and grants no credit. The default never completes,
 		/// which suits a transport reporting no receive window, since none of its streams pause.
 		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
 			let _ = waiter;

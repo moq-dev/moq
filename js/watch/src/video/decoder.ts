@@ -1,4 +1,4 @@
-import { type Micro, Milli, Nano } from "@moq/clock";
+import { type Micro, Milli, Nano, type Wall } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
@@ -17,6 +17,7 @@ import {
 } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
 import { base64ToBytes } from "../base64";
+import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import { supportCacheKey } from "../support-probe";
 import type { Sync } from "../sync";
@@ -56,7 +57,25 @@ export interface Stats {
 
 	/** Number of encoded bytes received. */
 	bytesReceived: number;
+
+	/** Frames that arrived after their playout time. */
+	late: number;
+
+	/** Renditions that failed to decode. */
+	errors: number;
+
+	/** Times playback stalled: no new picture for half a second once one had played. */
+	stalls: number;
+
+	/** Total time spent in finished stalls. */
+	stalled: Milli;
+
+	/** The newest received media timestamp and the wall time it arrived. */
+	arrival?: { timestamp: Milli; wall: Wall };
 }
+
+// The running totals before anything is counted.
+const EMPTY: Stats = { frameCount: 0, bytesReceived: 0, late: 0, errors: 0, stalls: 0, stalled: Milli.zero };
 
 /** Signals the decoder derives. */
 export type DecoderOutput = {
@@ -124,6 +143,11 @@ export class Decoder {
 	#selected?: Rendition;
 	#failed?: Failure;
 
+	// What each rendition delivered, for the feedback a viewer reports.
+	#tally = new Tally();
+	// Whether a picture played since the decoder was enabled, so the wait for the first one is no stall.
+	#played = false;
+
 	#clearCurrentFrame(): void {
 		this.#out.frame.update((prev) => {
 			prev?.close();
@@ -175,6 +199,16 @@ export class Decoder {
 		this.#signals.run(this.#runActive.bind(this));
 		this.#signals.run(this.#runDisplay.bind(this));
 		this.#signals.run(this.#runBuffering.bind(this));
+		this.#signals.run(this.#runStalls.bind(this));
+	}
+
+	/**
+	 * What this decoder received and played of each rendition in the catalog of the broadcast at
+	 * `path`, keyed by rendition ID, for the feedback a viewer reports.
+	 * @internal
+	 */
+	feedback(path: Moq.Path.Valid): Record<string, Received> {
+		return this.#tally.report(path);
 	}
 
 	// Read from the full catalog entry, which the decoder config omits, so a rising entry resizes Sync.
@@ -265,6 +299,8 @@ export class Decoder {
 			config: identity.decoder,
 			identity: key,
 			stats: this.#out.stats,
+			tally: this.#tally,
+			key: { path: broadcast.in.name.peek(), id: track },
 			catalog: broadcast.out.catalog,
 			predecessor,
 		});
@@ -337,6 +373,7 @@ export class Decoder {
 			const frame = inner.get(active.frame);
 			if (!frame) return; // A promoted track holds the previous picture until its first frame.
 			if (active.error.peek()) return;
+			this.#played = true;
 			if (this.#selected === active) {
 				this.#failed = undefined;
 				this.#out.error.set(undefined);
@@ -353,6 +390,8 @@ export class Decoder {
 	}
 
 	#recordError(track: Rendition, error: Error): void {
+		this.#tally.count(track.key, { errors: 1 });
+		this.#out.stats.update((stats) => ({ ...(stats ?? EMPTY), errors: (stats?.errors ?? 0) + 1 }));
 		// An outgoing failure must not replace the selected rendition's failure latch.
 		if (track !== this.#selected && this.#selected?.error.peek()) return;
 		this.#failed = {
@@ -400,6 +439,28 @@ export class Decoder {
 		}, Nano.fromMilli(BUFFERING));
 	}
 
+	// Count each stall once a picture has played, and how long it lasted, against the rendition on
+	// screen. A disabled decoder waits for a new picture again: resuming is a startup, not a stall.
+	#runStalls(effect: Effect): void {
+		if (!effect.get(this.in.enabled)) {
+			this.#played = false;
+			return;
+		}
+		if (!effect.get(this.#out.stalled) || !this.#played) return;
+		const active = this.#active.peek();
+		if (!active) return;
+
+		const end = this.#tally.stall(active.key);
+		this.#out.stats.update((stats) => ({ ...(stats ?? EMPTY), stalls: (stats?.stalls ?? 0) + 1 }));
+		effect.cleanup(() => {
+			const duration = end();
+			this.#out.stats.update((stats) => ({
+				...(stats ?? EMPTY),
+				stalled: Milli((stats?.stalled ?? 0) + duration),
+			}));
+		});
+	}
+
 	/** Stop and release everything this holds. */
 	close() {
 		this.#clearCurrentFrame();
@@ -434,6 +495,10 @@ interface DecoderTrackProps {
 
 	// Absent for the max-delay decoder: the bytes arrive once and the min-delay decoder counts them.
 	stats?: Signal<Stats | undefined>;
+	// The rendition's feedback counters, under `key`: its ID in the catalog it was selected from.
+	// Absent for the max-delay decoder, like `stats`.
+	tally?: Tally;
+	key: Key;
 }
 
 class DecoderTrack {
@@ -446,6 +511,8 @@ class DecoderTrack {
 	identity: string;
 	catalog: Getter<Catalog.Root | undefined>;
 	stats?: Signal<Stats | undefined>;
+	tally?: Tally;
+	key: Key;
 	timestamp = new Signal<Milli | undefined>(undefined);
 	frame = new Signal<VideoFrame | undefined>(undefined);
 
@@ -514,6 +581,8 @@ class DecoderTrack {
 		this.identity = props.identity;
 		this.catalog = props.catalog;
 		this.stats = props.stats;
+		this.tally = props.tally;
+		this.key = props.key;
 		this.#warmup = props.warmup ?? getter(Milli.zero);
 		this.#delay = new Derived([this.sync.out.delay, this.sync.out.maxDelay, this.#warmup], (min, max, warmup) => ({
 			min: Milli(min + warmup),
@@ -524,6 +593,31 @@ class DecoderTrack {
 		this.#predecessor = props.predecessor;
 
 		this.#signals.run(this.#run.bind(this));
+	}
+
+	// Count into this rendition's feedback and the decoder's running totals.
+	#count(counts: Partial<Record<Counter, number>>, totals?: (stats: Stats) => Partial<Stats>): void {
+		this.tally?.count(this.key, counts);
+		if (totals) this.stats?.update((current) => ({ ...(current ?? EMPTY), ...totals(current ?? EMPTY) }));
+	}
+
+	// Count a frame read from the track: its bytes even when rejected, and whether an accepted one
+	// arrived too late for playout. Classifies ingress before decoder backpressure changes the
+	// delivery clock. Only the min-delay decoder moves the clock and counts: the other reads the same
+	// frames behind it.
+	#receive(frame: Container.ReceivedFrame, accepted: boolean): void {
+		if (!this.#drives) return;
+		const timestamp = Milli.fromMicro(frame.timestamp as Micro);
+		const late = accepted && this.sync.received(timestamp, frame.arrival);
+		const bytes = frame.payload.byteLength;
+		const arrived = arrivedAt(frame.arrival);
+		this.tally?.arrive(this.key, timestamp, arrived);
+		this.#count({ frames: 1, bytes, late: late ? 1 : 0 }, (stats) => ({
+			frameCount: stats.frameCount + (accepted ? 1 : 0),
+			bytesReceived: stats.bytesReceived + bytes,
+			late: stats.late + (late ? 1 : 0),
+			arrival: { timestamp, wall: arrived },
+		}));
 	}
 
 	// Reorders groups and frames up to the shared max delay. A rendition switch is not a cold start:
@@ -559,6 +653,7 @@ class DecoderTrack {
 					// A cancelled codec must not recreate the poster its track already released. Firefox can
 					// still deliver output after close().
 					if (signal.aborted) return;
+					this.#count({ decoded: 1 });
 					const generation = this.#generation;
 					const group = this.#groups.get(frame.timestamp);
 					// Pictures come out in presentation order, so a chunk at or before this one that
@@ -686,15 +781,8 @@ class DecoderTrack {
 				// resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
 				const accepted = !stale && recovery.accept(frame);
-				this.stats?.update((current) => ({
-					frameCount: (current?.frameCount ?? 0) + (accepted ? 1 : 0),
-					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
-				}));
+				this.#receive(frame, accepted);
 				if (!accepted) continue;
-
-				// Classify ingress before decoder backpressure changes the delivery clock. Only the
-				// min-delay decoder moves the clock: the other reads frames already behind it.
-				if (this.#drives) this.sync.received(Milli.fromMicro(frame.timestamp as Micro), frame.arrival);
 
 				// Track decode buffer: frames sent to decoder but not yet rendered. Only bridge from
 				// the previous frame when no gap or end came between them. Group ids can't answer that:
@@ -768,14 +856,8 @@ class DecoderTrack {
 				// resets this guard. Rejected payloads still count as received bytes.
 				const stale = latest !== undefined && next.group < latest;
 				const accepted = !stale && recovery.accept(frame);
-				this.stats?.update((current) => ({
-					frameCount: (current?.frameCount ?? 0) + (accepted ? 1 : 0),
-					bytesReceived: (current?.bytesReceived ?? 0) + frame.payload.byteLength,
-				}));
+				this.#receive(frame, accepted);
 				if (!accepted) continue;
-
-				// Classify ingress before decoder backpressure changes the delivery clock (see #runLegacy).
-				if (this.#drives) this.sync.received(Milli.fromMicro(frame.timestamp), frame.arrival);
 
 				// Track decode buffer (see #runLegacy: bridge only when no gap or end came between,
 				// never on group adjacency, which proves nothing about the timeline).
@@ -936,8 +1018,9 @@ class DecoderTrack {
 }
 
 /** Constructor properties for {@link Rendition}. */
-interface RenditionProps extends Omit<DecoderTrackProps, "warmup" | "refresh" | "predecessor" | "stats"> {
+interface RenditionProps extends Omit<DecoderTrackProps, "warmup" | "refresh" | "predecessor" | "stats" | "tally"> {
 	stats: Signal<Stats | undefined>;
+	tally: Tally;
 	// The rendition on screen when this one was selected from the same path, whose decoders' arrival
 	// estimates these continue.
 	predecessor?: Rendition;
@@ -961,6 +1044,8 @@ class Rendition {
 	readonly config: DecoderConfig;
 	readonly identity: string;
 	readonly catalog: Getter<Catalog.Root | undefined>;
+	// The rendition's feedback counters' key: its ID in the catalog it was selected from.
+	readonly key: Key;
 
 	// The picture chosen between the two decoders, and its timestamp once it presented on the clock:
 	// undefined while it is only a poster.
@@ -984,6 +1069,7 @@ class Rendition {
 		this.config = props.config;
 		this.identity = props.identity;
 		this.catalog = props.catalog;
+		this.key = props.key;
 
 		// A missing or zero `warmup` keeps one decoder. The budgets follow a changed value without
 		// reopening the max-delay decoder.
@@ -1003,6 +1089,7 @@ class Rendition {
 			const max = new DecoderTrack({
 				...props,
 				stats: undefined,
+				tally: undefined,
 				warmup,
 				refresh: dual,
 				predecessor: predecessor?.max.peek()?.consumer ?? predecessor?.consumer,

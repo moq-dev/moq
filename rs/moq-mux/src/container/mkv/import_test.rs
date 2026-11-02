@@ -2108,3 +2108,119 @@ fn opus_family_two_is_ambisonic() {
 		}
 	}
 }
+
+/// Opus, AV1, and AAC decoder configurations hold only what their supported layout defines.
+#[test]
+fn decoder_config_extras_are_refused() {
+	use MatroskaSpec::*;
+	let mut extended = ambisonic_head(4);
+	extended.push(0);
+	let mut stereo = ambisonic_head(4);
+	stereo.truncate(19);
+	stereo[9] = 2;
+	stereo[18] = 0;
+	stereo.push(0);
+	// An av1C whose configOBUs hold ITU-T T.35 metadata.
+	let t35 = vec![0x81, 0, 0, 0, (5 << 3) | 0x02, 4, 4, 0xb5, 0, 0x3c];
+	let av1 = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![TrackEntry(Master::Full(vec![
+			TrackNumber(1),
+			TrackType(1),
+			CodecID("V_AV1".into()),
+			CodecPrivate(t35),
+		]))])
+		.segment_end()
+		.build();
+	for data in [opus_webm(extended), opus_webm(stereo), av1] {
+		for initial in [false, true] {
+			let result = import_result(&data, initial);
+			assert!(
+				matches!(result, Err(crate::Error::Mkv(super::Error::UnsupportedCodecPrivate(_)))),
+				"{result:?}"
+			);
+		}
+	}
+
+	// An AAC-LC AudioSpecificConfig followed by a byte no field reads.
+	let aac = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![TrackEntry(Master::Full(vec![
+			TrackNumber(1),
+			TrackType(2),
+			CodecID("A_AAC".into()),
+			CodecPrivate(vec![0x12, 0x10, 0x00]),
+		]))])
+		.segment_end()
+		.build();
+	for initial in [false, true] {
+		let result = import_result(&aac, initial);
+		assert!(
+			matches!(
+				result,
+				Err(crate::Error::Aac(crate::codec::aac::Error::TrailingBytes(1)))
+			),
+			"{result:?}"
+		);
+	}
+}
+
+/// A source that re-initializes (a new EBML header, as a restarted encoder sends) replaces its
+/// importer on the same catalog each time. Every dropped generation retires its HLS records along
+/// with its renditions, finished or not, so the catalog holds only the live generation's state.
+#[test]
+fn repeated_reinit_keeps_flat_state() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![
+			track_entry_video_vp9(1, 640, 480),
+			track_entry_audio_opus(2, 48000.0, 2),
+		])
+		.cluster(0, || {
+			vec![
+				simple_block(1, 0, true, b"vp9-key"),
+				simple_block(2, 0, true, b"opus-pkt-0"),
+				simple_block(2, 20, true, b"opus-pkt-1"),
+				simple_block(1, 33, false, b"vp9-p"),
+			]
+		})
+		// The writer sizes the Segment at its end, so it writes nothing of an open one.
+		.segment_end()
+		.build();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	for generation in 0..50 {
+		let label = format!("generation {generation}");
+		let mut mkv = crate::container::mkv::Import::new(broadcast.clone(), catalog.reserve());
+		mkv.decode(&bytes::BytesMut::from(data.as_slice())).unwrap();
+		let snapshot = catalog.snapshot();
+		assert_eq!(snapshot.video.renditions.len(), 1, "{label}");
+		assert_eq!(snapshot.audio.renditions.len(), 1, "{label}");
+		assert_eq!(
+			catalog.hls_tracks(),
+			2,
+			"{label}: only the live generation keeps records"
+		);
+		// A finished generation's records are kept for a re-enrollment until its drop retires them.
+		if generation % 2 == 1 {
+			mkv.finish().unwrap();
+			assert_eq!(catalog.hls_tracks(), 2, "{label}");
+		}
+		drop(mkv);
+		let snapshot = catalog.snapshot();
+		assert!(snapshot.video.renditions.is_empty(), "{label}");
+		assert!(snapshot.audio.renditions.is_empty(), "{label}");
+		assert_eq!(
+			catalog.hls_tracks(),
+			0,
+			"{label}: a replaced generation retires its records"
+		);
+	}
+}

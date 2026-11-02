@@ -1946,7 +1946,9 @@ test("integration: a blind handle picks up a publisher that arrives late", async
 
 	// Nobody publishes the path yet, so a subscribe is how the caller finds out. That kills the
 	// track, not the handle: a consumed broadcast is scoped to the path, not to one publisher.
-	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toThrow();
+	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toMatchObject({
+		code: StreamCode.NotFound,
+	});
 	expect(watched.active.peek()).toBe(blind);
 
 	// So a subscribe made after the publisher finally shows up still works, on the same handle.
@@ -2009,7 +2011,7 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 	if (!blind) throw new Error("expected a blind consumer");
 
 	// Rejects with 404 rather than resetting the whole handle.
-	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toThrow();
+	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toThrow("does_not_exist");
 	expect(watched.active.peek()).toBe(blind);
 
 	const producer = publish(origin, Path.from("later"));

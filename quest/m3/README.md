@@ -73,7 +73,9 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Interop runner withdraws before disconnecting](/quest/m3/interop-runner-approval.md) - condition: a released moq-tokio and @moq/net carry close() withdrawals; then the runner's moq.dev clients switch to close()
 - [Safari ships the WebKit 319818 fix](/quest/m3/webkit-319818.md) - the Safari release the gate admits
 - [Safari WebTransport](/quest/m3/safari-webtransport.md) - WebKit browsers return to WebTransport once WebKit 319818 ships fixed
-- [Studio](/quest/m3/studio/README.md) - a native and wasm streaming studio on moq-scene, moq-video, and moq-audio for creators and teams who rely on OBS today
+- [moq-video in the browser](/quest/m3/video-web.md) - getUserMedia, getDisplayMedia, WebCodecs, and VideoFrame import into wgpu, for moq-dev/studio's web studio
+- [moq-audio in the browser](/quest/m3/audio-web.md) - AudioWorklet capture and playback and WebCodecs Opus and AAC, for the web studio's audio
+- [moq-audio filter chain](/quest/m3/audio-filters.md) - per-source suppression, gate, compressor, limiter, ducking, and plugins, which moq-dev/studio configures
 - [Mesh keys](/quest/m3/mesh-keys.md) - parked: encrypted and HMAC-authenticated mesh broadcasts through a wrapped `.keys` track
 - [A gate host is rented](/quest/m3/ci-host-rented.md) - condition: the maintainer rents a host for the public merge gates
 - [Gate on a rented host](/quest/m3/ci-host.md) - moq, quest, and rust2 gate on one rented box with a warm disk cache instead of the home host

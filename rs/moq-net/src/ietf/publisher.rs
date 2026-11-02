@@ -34,6 +34,9 @@ fn serving_subscription(subscriber_priority: u8) -> Subscription {
 		// No Max Age is the publisher's retention alone, whatever it turns out to be, and
 		// moq-transport has no field for a minimum.
 		delay: crate::track::Delay { min: None, max: None },
+		// SUBSCRIBE_OK names the live edge, which a relay learns only from its upstream's
+		// answer: never from its cache, nor from an edge reported before.
+		feed: true,
 		..Default::default()
 	}
 }

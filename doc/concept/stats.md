@@ -36,7 +36,11 @@ measurement stays explicit, so it remains distinct from unavailable.
 [CLI](/bin/cli#reports-and-feedback), and `moq import --echo-path` solicits
 feedback. An import counts the frames and payload
 bytes it writes to each rendition, and video keyframes; an export counts what
-it reads and records its newest arrival. See the
+it reads and records its newest arrival. In the browser, `<moq-publish stats>`
+and `echo-path` do the same for the [publisher](/lib/js/publish#stats-and-feedback),
+and `<moq-watch echo>` reports what its [player](/lib/js/watch#feedback)
+received, decoded, and played, with only the PROBE round-trip time as its
+transport. See the
 [hang draft](/draft/moq-hang#media-stats) for track framing, field units, and
 the feedback convention.
 

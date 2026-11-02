@@ -38,7 +38,7 @@ async fn spawn_relay(auth: auth::Config) -> (u16, tokio::task::JoinHandle<()>) {
 	let auth = auth
 		.init("test", &moq_tokio::tls::Connect::default(), false)
 		.expect("auth init");
-	let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster init");
+	let cluster = crate::spawn_cluster(cluster::Options::default());
 
 	// Only the certificate handle is used; stream listeners bind lazily.
 	let mut server_config = moq_tokio::listen::Config::default();

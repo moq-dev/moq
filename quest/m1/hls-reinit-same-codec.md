@@ -1,16 +1,20 @@
-# [M] HLS export follows a resolution change under the same codec string
+# [M] HLS export lists a same-codec reconfigure's first group under the new init
 
 ## Goal
 
-When a rendition changes resolution (or any other decoder-affecting field) while keeping its codec string, the HLS and DASH export starts a new init segment and segment tag for it, so every served segment decodes under the init it is listed with, the rendition's first segments are listed, and its recording cursor keeps up.
+When a rendition changes resolution (or any other decoder-affecting field) while keeping its codec string, the first group after the change is listed under the new init and segment tag, whichever of the catalog and the HLS records reaches the export first.
+
+The conformance test in [moq-dev/moq#7387](https://github.com/moq-dev/moq/pull/7387) is the end-to-end regression test: its `video1` same-codec switch must pass.
 
 ## Plan
 
-Found by the conformance test in [moq-dev/moq#7387](https://github.com/moq-dev/moq/pull/7387): after `video1` switches from 320x180 to 480x270 with the same codec string, the export keeps the old segment tag and init. The 480x270 segments are served under the 320x180 init with no in-band parameter sets, so they don't decode, that rendition's first segments are never listed, and its recording cursor fails with `RecordingLagged`. When the codec string also changes, the importer makes a new rendition name and everything passes.
+Found by the conformance test in [moq-dev/moq#7387](https://github.com/moq-dev/moq/pull/7387). The export already replaces the instance on a decoder-identity change (the same fields hang's `same_identity` compares, plus geometry), and since [moq-dev/moq#7436](https://github.com/moq-dev/moq/pull/7436) the playlist keeps the retired instance's segments, under their own init, ahead of the replacement's behind a discontinuity (RFC 8216 6.2.2).
 
-Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run). Treat a change of the rendition's decoder identity (the same fields hang's `same_identity` compares) as a new instance in the export, as a codec-string change already is. Reuse the existing instance-replacement path rather than adding a second one. The conformance test's `video1` case is the regression test; it must pass with the same-codec switch restored.
+What remains is the hand-over race. The catalog and the records are separate tracks, so the new config's first group can reach the old instance's records watcher before the catalog update. The retiring instance claims it, so it is muxed under the old init and the replacement starts one group late.
 
-Public API: none. Wire: none.
+Waiting on a plan: the maintainer decided on 2026-11-02 to remove the catalog's `hls` field (`rs/hang/src/catalog/hls.rs` and the JS zod schema), planned separately. That changes how the export finds a rendition's records, so the hand-over pick is designed after that plan, not with a catalog `start` field, a record track per config, or a marker in each record (all three dropped the same day). Once the removal is planned, add it under `Required` here or fold the pick into it.
+
+Public API: none expected. Wire: decided by the removal plan.
 
 ## Related
 
