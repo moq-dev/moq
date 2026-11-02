@@ -12,17 +12,6 @@
       "negotiated_versions": []
     },
     {
-      "client": "moqlivemock",
-      "relay": "moq-dev-rs",
-      "version": "draft-18",
-      "classification": "at",
-      "mode": "docker",
-      "target": "moq-interop-relay:local",
-      "status": "pass",
-      "exit_code": 0,
-      "negotiated_versions": []
-    },
-    {
       "client": "moqx",
       "relay": "moq-dev-rs",
       "version": "draft-18",
@@ -99,8 +88,8 @@
       "classification": "ahead",
       "mode": "docker",
       "target": "moq-interop-relay:local",
-      "status": "fail",
-      "exit_code": 2,
+      "status": "pass",
+      "exit_code": 0,
       "negotiated_versions": [
         "draft-22"
       ]
@@ -150,6 +139,17 @@
       "negotiated_versions": []
     },
     {
+      "client": "moqlivemock",
+      "relay": "moq-dev-rs",
+      "version": "draft-22",
+      "classification": "ahead",
+      "mode": "docker",
+      "target": "moq-interop-relay:local",
+      "status": "pass",
+      "exit_code": 0,
+      "negotiated_versions": []
+    },
+    {
       "client": "moxygen",
       "relay": "moq-dev-rs",
       "version": "draft-22",
@@ -186,17 +186,6 @@
     },
     {
       "client": "moq-dev-js",
-      "relay": "moqlivemock",
-      "version": "draft-18",
-      "classification": "at",
-      "mode": "docker",
-      "target": "ghcr.io/eyevinn/mlmrel:latest",
-      "status": "fail",
-      "exit_code": 2,
-      "negotiated_versions": []
-    },
-    {
-      "client": "moq-dev-js",
       "relay": "quiche-moq",
       "version": "draft-18",
       "classification": "at",
@@ -241,17 +230,6 @@
     },
     {
       "client": "moq-dev-rs",
-      "relay": "moqlivemock",
-      "version": "draft-18",
-      "classification": "at",
-      "mode": "docker",
-      "target": "ghcr.io/eyevinn/mlmrel:latest",
-      "status": "pass",
-      "exit_code": 0,
-      "negotiated_versions": []
-    },
-    {
-      "client": "moq-dev-rs",
       "relay": "quiche-moq",
       "version": "draft-18",
       "classification": "at",
@@ -306,6 +284,17 @@
       "negotiated_versions": []
     },
     {
+      "client": "moq-dev-js",
+      "relay": "moqlivemock",
+      "version": "draft-22",
+      "classification": "ahead",
+      "mode": "docker",
+      "target": "ghcr.io/eyevinn/mlmrel:latest",
+      "status": "fail",
+      "exit_code": 2,
+      "negotiated_versions": []
+    },
+    {
       "client": "moq-dev-rs",
       "relay": "imquic",
       "version": "draft-22",
@@ -326,8 +315,19 @@
       "status": "pass",
       "exit_code": 0,
       "negotiated_versions": []
+    },
+    {
+      "client": "moq-dev-rs",
+      "relay": "moqlivemock",
+      "version": "draft-22",
+      "classification": "ahead",
+      "mode": "docker",
+      "target": "ghcr.io/eyevinn/mlmrel:latest",
+      "status": "pass",
+      "exit_code": 0,
+      "negotiated_versions": []
     }
   ],
   "target_version": "draft-18",
-  "timestamp": "2026-11-01T16:35:44Z"
+  "timestamp": "2026-11-02T18:11:53Z"
 }
