@@ -1,7 +1,6 @@
-use std::any::Any;
 use std::sync::Arc;
 
-use super::{Ack, Ce, Controller, ControllerFactory, Init, Loss, Packet, Sent};
+use super::{Ack, Ce, Controller, Factory, Init, Loss, Packet, Sent};
 use crate::Instant;
 
 /// No congestion control: a window that never shrinks, and no pacing.
@@ -34,13 +33,9 @@ impl Controller for Unlimited {
     fn clone_box(&self) -> Box<dyn Controller> {
         Box::new(*self)
     }
-
-    fn into_any(self: Box<Self>) -> Box<dyn Any> {
-        self
-    }
 }
 
-impl ControllerFactory for Unlimited {
+impl Factory for Unlimited {
     fn build(self: Arc<Self>, _init: Init) -> Box<dyn Controller> {
         Box::new(*self)
     }

@@ -56,7 +56,7 @@ impl Connecting {
 		endpoint_events: mpsc::UnboundedSender<(ConnectionHandle, EndpointEvent)>,
 		conn_events: mpsc::UnboundedReceiver<ConnectionEvent>,
 		slot: Arc<Slot>,
-		runtime: &tokio::runtime::Handle,
+		runtime: &crate::runtime::Spawner,
 	) -> Self {
 		let (on_handshake_data_send, on_handshake_data_recv) = oneshot::channel();
 		let shared = Shared {
@@ -526,6 +526,13 @@ impl Connection {
 	/// Returns connection statistics
 	pub fn stats(&self) -> Stats {
 		self.0.state.lock().inner.stats()
+	}
+
+	/// The receive windows now in force: the connection's, and the most one stream holds.
+	#[cfg(feature = "net")]
+	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
+		let state = self.0.state.lock();
+		moq_net::transport::ReceiveWindow::new(state.inner.receive_window(), state.inner.stream_receive_window())
 	}
 
 	/// How many send streams the connection still holds state for
