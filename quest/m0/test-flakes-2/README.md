@@ -60,3 +60,6 @@ Public API: none. Wire: none.
 - [moq-relay's auth-trust test survives load](/quest/m0/test-flakes-2/relay-auth-trust.md) - it stops timing out on a busy host
 - [Draft-22 interop with a native publisher](/quest/m0/test-flakes-2/draft22-interop.md) - no "invalid fetch range" or audio gap with a Rust or C++ publisher
 - [The relay fits a Windows stack under every feature set](/quest/m0/test-flakes-2/relay-stack-all-features.md) - the 1 MiB stack test passes under `--all-features` too
+- [moq-tokio's close-drain test survives load](/quest/m0/test-flakes-2/tokio-close-drain.md) - `quic_client_close_drains_finished_track` stops failing land batches with "Unroutable"
+- [@moq/net's close-drain tests survive load](/quest/m0/test-flakes-2/js-close-drain.md) - the lite close-drain cases pass on every full suite run
+- [@moq/net's boundary-sync test survives load](/quest/m0/test-flakes-2/js-boundary-sync.md) - "a version without a boundary syncs" passes under load

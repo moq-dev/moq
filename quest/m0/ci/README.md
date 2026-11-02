@@ -167,3 +167,4 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [The next test-CPU cuts](/quest/m0/ci/test-cost-followups.md) - the slow-test leftovers from #6987, cut at their source
 - [Biome checks every file it can parse](/quest/m0/ci/biome-whole-repo.md) - Biome runs over the whole repository and main is clean under it
 - [mbx launches Cargo with any argument length](/quest/m0/ci/mbx-arg-max.md) - no "Argument list too long" in `sh/rs/select.test.py`'s recipe test
+- [One nextest pin](/quest/m0/ci/nextest-pin.md) - cargo-nextest's version lives in one place
