@@ -56,6 +56,14 @@ moq-relay's auth-trust test was never load-bound either: its fixture left each
 lease's background `end` POST unserved, so a reused port let one steal the next
 trial's accept. Fixed by [moq-dev/moq#7550](https://github.com/moq-dev/moq/pull/7550).
 
+The Kotlin flow-cancel test's `unroutable` was not load-bound: its snapshot
+writer became unreachable, so JVM cleanup aborted the track mid-read. The JS
+IETF blind-handle test's one identified cause was the session-closing reset
+fixed by [moq-dev/moq#6988](https://github.com/moq-dev/moq/pull/6988). A single
+event-loop stall at each of its 124 host tasks passes all 124 at 1.5 seconds;
+at 4.5 seconds 3 runs and at 11 seconds 114 runs hit bun's own 5-second test
+timeout. No run fails on a protocol deadline, so no clock change applies. Both handled in [moq-dev/moq#7622](https://github.com/moq-dev/moq/pull/7622).
+
 Public API: none. Wire: none.
 
 ## Required
@@ -65,4 +73,3 @@ Public API: none. Wire: none.
 - [moq-tokio's close-drain test survives load](/quest/m0/test-flakes-2/tokio-close-drain.md) - `quic_client_close_drains_finished_track` stops failing land batches with "Unroutable"
 - [@moq/net's close-drain tests survive load](/quest/m0/test-flakes-2/js-close-drain.md) - the lite close-drain cases pass on every full suite run
 - [@moq/net's boundary-sync test survives load](/quest/m0/test-flakes-2/js-boundary-sync.md) - "a version without a boundary syncs" passes under load
-- [A Kotlin cancel test and a JS late-publisher test hold up](/quest/m0/test-flakes-2/kotlin-js-flakes.md) - the Kotlin flow-cancel test stops failing `unroutable` and the IETF blind-handle test passes under load
