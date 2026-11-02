@@ -2104,7 +2104,7 @@ mod tests {
 				let mut broadcast = moq_net::broadcast::Info::new().produce();
 				let consumer = broadcast.consume();
 				let config = moq_mux::catalog::Config::default()
-					.with_clock(clock)
+					.with_clock(clock.clone())
 					.with_max_age(RETAIN);
 				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 				let mut options = Capture::default();
