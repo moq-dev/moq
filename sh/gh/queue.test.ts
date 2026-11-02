@@ -46,6 +46,13 @@ assert.equal(await Bun.file(".github/workflows/land.yml").exists(), false, "no w
 // host's runner, read-only and without secrets.
 const queue = await workflow("queue");
 assert.deepEqual(queue.on.merge_group, { types: ["checks_requested"] });
+// A dispatch only reports the skipped context on a PR head, with nothing but `checks: write`.
+assert.ok(queue.on.workflow_dispatch.inputs.sha.required);
+assert.equal(queue.jobs.report.if, "github.event_name == 'workflow_dispatch'");
+assert.deepEqual(queue.jobs.report.permissions, { checks: "write" });
+// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
+assert.equal(queue.concurrency.group, "queue-${{ github.ref }}-${{ inputs.sha }}", "dispatches for different heads must not cancel each other");
+assert.equal(queue.jobs.report.steps.length, 1, "the report job checks nothing out and runs no code from a PR");
 assert.deepEqual(queue.on.pull_request.branches, ["main"]);
 assert.ok(queue.on.pull_request.types.includes("edited"), "retargeting to main must report the context");
 assert.equal(queue.on.pull_request.paths, undefined, "the required context must always report");
@@ -86,9 +93,9 @@ const request = dependabot.jobs["request-landing"];
 const enqueue = request.steps.find((step: { name?: string }) => step.name === "Request checked landing");
 // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
 assert.equal(enqueue.env.PR_HEAD, "${{ github.event.pull_request.head.sha }}");
-assert.ok(enqueue.run.includes('quest merge "$PR_URL" "$hold" --land "$PR_HEAD"'));
-// Requesting a landing only pins the head; the host gate reads the queue itself.
-assert.ok(!enqueue.run.includes("quest land"), "Dependabot must not run the gate's own commands");
+assert.ok(enqueue.run.includes('quest merge "$PR_URL" --land "$PR_HEAD"'));
+// Requesting a landing only enqueues the pinned head; the queue and its watcher do the rest.
+assert.ok(!enqueue.run.includes("quest land"), "Dependabot must not run the land daemons' commands");
 assert.ok(!JSON.stringify(request).includes("gh pr merge"));
 
 // Release PRs report one context for every optional workflow, retargeted PRs included.
