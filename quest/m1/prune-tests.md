@@ -6,7 +6,7 @@ Every test in the merge gate and in nightly is worth its cost. A test whose
 wall time, CPU, or flakiness outweighs the regression it alone catches is
 deleted. A costly test that earns its keep is made cheaper: fast at its
 source, or moved to nightly. CI workflows and jobs belong to
-[Delete the CI jobs that don't earn their cost](/quest/m1/prune-ci.md).
+[CI workflow audit](/quest/m2/audit-ci.md).
 
 ## Plan
 
