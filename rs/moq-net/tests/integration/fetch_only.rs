@@ -350,15 +350,18 @@ struct FetchedCopy {
 	track: moq_net::track::Producer,
 	/// The track through the fresh session, which knows no edge, so its reads SUBSCRIBE.
 	fresh: moq_net::track::Consumer,
+	/// The broadcast through the session that fetched, another reader of the relay's copy.
+	fetched: moq_net::broadcast::Consumer,
 	_held: Vec<Box<dyn std::any::Any>>,
 }
 
-async fn fetched_copy(version: Version) -> FetchedCopy {
+/// The relay speaks `upstream_version` to the publisher and `version` downstream.
+async fn fetched_copy(upstream_version: Version, version: Version) -> FetchedCopy {
 	let publisher = produce_origin(1);
 	let (broadcast, track) = publish_live(&publisher, 3);
 
 	let relay = produce_origin(2);
-	let mut options = MockConnectOptions::new(version);
+	let mut options = MockConnectOptions::new(upstream_version);
 	options.server_publish = Some(publisher.consume());
 	options.client_subscribe = Some(relay.clone());
 	let upstream = connect_mock(options).await;
@@ -386,10 +389,10 @@ async fn fetched_copy(version: Version) -> FetchedCopy {
 	FetchedCopy {
 		track,
 		fresh,
+		fetched,
 		_held: vec![
 			Box::new(downstream),
 			Box::new(client),
-			Box::new(fetched),
 			Box::new(fetching),
 			Box::new(fetcher),
 			Box::new(upstream),
@@ -400,31 +403,43 @@ async fn fetched_copy(version: Version) -> FetchedCopy {
 	}
 }
 
-async fn history_through_fetched_copy(version: Version) {
-	let copy = fetched_copy(version).await;
+async fn history_through_fetched_copy(upstream: Version, version: Version) {
+	let copy = fetched_copy(upstream, version).await;
 	// A front's bounded read parks past its end, so this reads the group and stops there.
 	let mut sub = subscribe_history(&copy.fresh).await;
 	assert!(
 		copy.track.subscription().is_some(),
-		"{version}: answered without subscribing upstream"
+		"{upstream} to {version}: answered without subscribing upstream"
 	);
-	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{version}");
+	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{upstream} to {version}");
+	// The copy still serves its other reader.
+	assert_eq!(
+		fetch(&copy.fetched, 0).await.expect("fetch after the SUBSCRIBE"),
+		frames(0),
+		"{upstream} to {version}"
+	);
 }
 
 /// A history SUBSCRIBE reaching a relay's copy kept after a fetch is answered from the
-/// upstream's SUBSCRIBE_OK, never the edge the fetch learned, and reads its history.
-/// Draft 18 joins only at the live edge, so a bounded read with no edge known is refused
-/// before it is sent.
+/// upstream's SUBSCRIBE_OK, never the edge the fetch learned, and reads its history. A
+/// draft-18 upstream has no bounded join, so the relay joins it live and serves the history
+/// from fills, keeping the copy for its other readers.
 #[kio::test]
 async fn a_relay_answers_a_history_subscribe_on_a_fetched_copy() {
-	let version: Version = "moq-transport-22".parse().unwrap();
-	kio::clock::timeout(TIMEOUT, history_through_fetched_copy(version))
-		.await
-		.expect("timed out");
+	for (upstream, version) in [
+		("moq-transport-22", "moq-transport-22"),
+		("moq-transport-18", "moq-transport-22"),
+		("moq-transport-18", "moq-transport-18"),
+	] {
+		let (upstream, version): (Version, Version) = (upstream.parse().unwrap(), version.parse().unwrap());
+		kio::clock::timeout(TIMEOUT, history_through_fetched_copy(upstream, version))
+			.await
+			.unwrap_or_else(|_| panic!("{upstream} to {version}: timed out"));
+	}
 }
 
 async fn live_through_fetched_copy(version: Version) {
-	let copy = fetched_copy(version).await;
+	let copy = fetched_copy(version, version).await;
 	let mut sub = kio::clock::timeout(TIMEOUT, copy.fresh.subscribe(None))
 		.await
 		.expect("subscribe timed out")
@@ -449,6 +464,8 @@ async fn a_relay_answers_a_live_subscribe_on_a_fetched_copy() {
 
 /// A copy kept after a fetch resumes a bounded subscription that ends at or below the
 /// upstream's new Largest Object, and reads it, though no group past its end arrives.
+/// Draft 22 only: a draft-18 join is live, so these groups come from one fill of the run,
+/// and our publisher answers only a one-group FETCH.
 #[kio::test]
 async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
 	kio::clock::timeout(TIMEOUT, async {
@@ -494,7 +511,8 @@ async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
 
 /// A copy that went idle holding a group resumes a bounded subscription of that group after
 /// the upstream moved on, and still reads it: the feed starts where it asked, not at the
-/// answer's Largest, so the cached group stays below no floor.
+/// answer's Largest, so the cached group stays below no floor. Draft 22 only: a draft-18
+/// join is live, so it starts at the answer's Largest whatever it asked.
 #[kio::test]
 async fn a_resumed_bounded_subscription_keeps_its_cached_start() {
 	kio::clock::timeout(TIMEOUT, async {
