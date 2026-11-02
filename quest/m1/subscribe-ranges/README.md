@@ -68,7 +68,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   Group ID first, from its cache or the Largest Object of a live join
   (decided 2026-10-27).
 - **Time ends** (maintainer, 2026-10-17, for DVR seek in the
-  [archive line](/quest/m1/archive/README.md)). A range end may also be
+  [archive design](/doc/concept/archives.md)). A range end may also be
   `Time(pts)`, in the track's timescale. Whoever holds the track resolves it:
   the cache from its groups' timestamps, or a `track::Requests` handler such as
   an archive consumer. A start resolves to the group containing pts, and an

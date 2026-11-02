@@ -363,9 +363,15 @@ equivalents.
 
 ## Archive
 
+Recording through our publishers and relays needs opt-in `moq-lite-07-wip`
+on every hop for track discovery. Older moq-lite versions cannot list tracks,
+and our moq-transport publishers refuse the listing. The publisher and each
+relay must enable it too; see [Archives](/concept/archives#discover-and-record)
+for how, and for storage and serving limits.
+
 ```bash
 # Record every broadcast announced under `event`
-moq --connect https://relay.example.com/anon --broadcast event export archive s3://recordings
+moq --connect https://relay.example.com/anon --connect-version moq-lite-07-wip --broadcast event export archive s3://recordings
 
 # Replay one recorded broadcast under another name
 moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<epoch>
@@ -410,6 +416,9 @@ moq --connect https://relay.example.com/anon \
     -- export --broadcast event.hang hls --listen 0.0.0.0:8080 \
     -- export --broadcast event.hang archive file:///recordings
 ```
+
+These exporters read the local import through their shared origin, so recording
+here needs no network track discovery.
 
 ## Publisher runs
 
