@@ -123,6 +123,10 @@ pub struct Options {
 	pub socket_stats: Option<qmux::SharedSocketStats>,
 	/// The SETUP deadline, including its reply; unset uses ten seconds, zero disables it.
 	pub timeout: Option<time::Duration>,
+	/// The `[quic]` windows and stream count the session starts with, until
+	/// [`crate::server::Request::with_quic_limits`] widens it. Defaults to the `[quic]`
+	/// defaults, so a server passes its own resolved section.
+	pub quic: crate::quic::Resolved,
 }
 
 impl Options {
@@ -136,6 +140,7 @@ impl Options {
 			identity: None,
 			socket_stats: None,
 			timeout: None,
+			quic: Default::default(),
 		}
 	}
 }
@@ -177,7 +182,7 @@ where
 		let alpn = options.link.alpn.as_deref().unwrap_or_default();
 		let mut upgraded = qmux::ws::Upgraded::new(socket, alpn)
 			.with_keep_alive(qmux::ws::KeepAlive::default())
-			.with_session_config(crate::qmux_default());
+			.with_session_config(crate::qmux_config(&options.quic));
 		if let Some(stats) = &options.socket_stats {
 			upgraded = upgraded.with_socket_stats(stats.clone());
 		}
@@ -609,6 +614,8 @@ pub struct Listener {
 	listener: tokio::net::TcpListener,
 	protocols: Vec<String>,
 	health: crate::accept::Health,
+	/// The settings each accepted qmux session starts with.
+	session: qmux::Config,
 }
 
 impl Listener {
@@ -621,6 +628,7 @@ impl Listener {
 				listener,
 				protocols,
 				health: crate::accept::Health::new("websocket"),
+				session: crate::qmux_default(),
 			})
 		})
 		.await
@@ -643,6 +651,13 @@ impl Listener {
 		}
 		self.protocols = protocols;
 		Ok(self)
+	}
+
+	/// Open each accepted session with `quic`'s windows and stream count, the `[quic]`
+	/// section, rather than its defaults. A [`crate::Server`] applies its own.
+	pub fn with_quic(mut self, quic: &crate::quic::Resolved) -> Self {
+		self.session = crate::qmux_config(quic);
+		self
 	}
 
 	/// The local address the listener is bound to.
@@ -690,6 +705,7 @@ impl Listener {
 		let accepted = Arc::new(Mutex::new(None::<(String, Url)>));
 		let accepted_callback = accepted.clone();
 		let protocols = self.protocols.clone();
+		let session = self.session.clone();
 		#[expect(
 			clippy::result_large_err,
 			reason = "the error type is tungstenite's handshake response, not ours"
@@ -739,7 +755,7 @@ impl Listener {
 				.expect("successful upgrade selected a protocol");
 			let session = qmux::ws::Upgraded::new(websocket, &protocol)
 				.with_keep_alive(qmux::ws::KeepAlive::default())
-				.with_session_config(crate::qmux_default())
+				.with_session_config(session)
 				.accept()
 				.map(crate::spawn_qmux)
 				.map_err(Error::accept)?;
@@ -985,6 +1001,53 @@ mod tests {
 		let (server_name, host) = accepted.await.unwrap();
 		assert_eq!(server_name.as_deref(), expected_sni);
 		assert_eq!(host.as_deref(), Some(expected_host.as_str()));
+	}
+
+	/// A session [`accept`] upgrades, as the relay's own WebSocket listener does, starts at
+	/// the `[quic]` windows its [`Options`] carry rather than the defaults.
+	#[tokio::test]
+	async fn an_upgraded_session_starts_at_the_options_windows() {
+		use tungstenite::protocol::Role;
+		const TIMEOUT: time::Duration = time::Duration::from_secs(10);
+
+		let alpn = supported_subprotocols(moq_net::ALPNS).remove(0);
+		let (server_io, client_io) = tokio::io::duplex(1 << 20);
+		let server_ws =
+			tokio_tungstenite::WebSocketStream::from_raw_socket(server_io, Role::Server, Some(socket_config())).await;
+		let client_ws = tokio_tungstenite::WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
+
+		let mut quic = crate::quic::Config::default();
+		quic.receive_window = Some(moq_net::transport::MIN_RECEIVE_WINDOW * 2);
+		quic.stream_receive_window = Some(256 * 1024);
+		let activity = moq_net::server::Activity::default();
+		let mut options = Options::new(
+			"ws://localhost/".parse().unwrap(),
+			moq_net::Server::new().with_versions(moq_net::Versions::all()),
+			activity.enter().unwrap(),
+		);
+		options.link.alpn = Some(alpn.clone());
+		options.quic = quic.resolve();
+		let server = tokio::spawn(accept(server_ws, options));
+
+		let (session, driver) = qmux::ws::Upgraded::new(client_ws, &alpn).connect().unwrap();
+		tokio::spawn(driver);
+		// Runs until aborted: its driver sends SETUP, and ending it would cancel the request.
+		let client = tokio::spawn(async move {
+			let client = moq_net::Client::new().with_versions(moq_net::Versions::all());
+			let (_session, driver) = client.connect(moq_net::time::Instant::now(), session).await?;
+			moq_net::time::run(driver).await;
+			moq_net::Result::Ok(())
+		});
+
+		let request = kio::clock::timeout(TIMEOUT, server)
+			.await
+			.expect("accept timeout")
+			.expect("accept task")
+			.expect("accept");
+		let window = request.qmux_window();
+		assert_eq!(window.connection, moq_net::transport::MIN_RECEIVE_WINDOW * 2);
+		assert_eq!(window.stream, 256 * 1024);
+		client.abort();
 	}
 
 	#[test]

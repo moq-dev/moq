@@ -256,10 +256,11 @@ pub struct TlsAcceptor {
 impl TlsAcceptor {
 	pub(crate) fn new(
 		config: std::sync::Arc<rustls::ServerConfig>,
+		session: qmux::Config,
 		server: moq_net::Server,
 		timeout: Option<std::time::Duration>,
 	) -> Self {
-		let qmux = qmux::tls::Server::new(config.clone()).with_session_config(crate::qmux_default());
+		let qmux = qmux::tls::Server::new(config.clone()).with_session_config(session);
 		Self {
 			config,
 			qmux,
@@ -327,6 +328,8 @@ pub struct Listener {
 	listener: tokio::net::TcpListener,
 	protocols: Vec<String>,
 	health: crate::accept::Health,
+	/// The settings each accepted qmux session starts with.
+	session: qmux::Config,
 	/// Present when the listener serves TLS; it negotiates the ALPN itself.
 	tls: Option<qmux::tls::Server>,
 }
@@ -340,6 +343,7 @@ impl Listener {
 				listener,
 				protocols: Vec::new(),
 				health: crate::accept::Health::new("tcp"),
+				session: crate::qmux_default(),
 				tls: None,
 			})
 		})
@@ -349,7 +353,16 @@ impl Listener {
 	/// Serve TLS with `config`, whose ALPN list already names each
 	/// `qmux-01.<protocol>` pair to accept.
 	pub(crate) fn with_tls(mut self, config: std::sync::Arc<rustls::ServerConfig>) -> Self {
-		self.tls = Some(qmux::tls::Server::new(config).with_session_config(crate::qmux_default()));
+		self.tls = Some(qmux::tls::Server::new(config).with_session_config(self.session.clone()));
+		self
+	}
+
+	/// Open each accepted session with `quic`'s windows and stream count, the `[quic]`
+	/// section, rather than its defaults. A session admitted with
+	/// [`crate::server::Request::with_quic_limits`] then takes those.
+	pub fn with_quic(mut self, quic: &crate::quic::Resolved) -> Self {
+		self.session = crate::qmux_config(quic);
+		self.tls = self.tls.map(|tls| tls.with_session_config(self.session.clone()));
 		self
 	}
 
@@ -406,7 +419,7 @@ impl Listener {
 	) -> impl Future<Output = Result<(qmux::Session, net::SocketAddr)>> + use<> {
 		let (stream, addr) = self.accept_socket().await;
 		tracing::debug!(%addr, "accepted TCP connection");
-		let mut config = crate::qmux_default();
+		let mut config = self.session.clone();
 		config.version = WIRE_VERSION;
 		config.protocol = qmux::Protocol::Negotiate(self.protocols.clone());
 		let tls = self.tls.clone();

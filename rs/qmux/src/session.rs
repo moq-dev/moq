@@ -824,6 +824,8 @@ impl poll::RecvStream for RecvStream {
 		}
 		let mut state = self.inner.lock();
 		match state.conn.recv_stream(self.id).received_reset() {
+			// Evicted, so its bytes are gone: nothing frees the window until it is stopped.
+			Err(recv::Error::Evicted) => Poll::Ready(Error::Evicted),
 			// Every byte arrived, so nothing is left to reset.
 			Err(_) => Poll::Pending,
 			Ok(Some(code)) => {

@@ -272,6 +272,8 @@ pub(crate) struct Listener {
 	path: PathBuf,
 	protocols: Vec<String>,
 	health: crate::accept::Health,
+	/// The settings each accepted qmux session starts with.
+	session: qmux::Config,
 }
 
 impl Listener {
@@ -299,6 +301,7 @@ impl Listener {
 			path,
 			protocols: Vec::new(),
 			health: crate::accept::Health::new("unix"),
+			session: crate::qmux_default(),
 		})
 	}
 
@@ -309,6 +312,13 @@ impl Listener {
 	/// registering them with a metrics endpoint does so at startup.
 	pub(crate) fn with_accept_health(mut self, health: crate::accept::Health) -> Self {
 		self.health = health;
+		self
+	}
+
+	/// Open each accepted session with `quic`'s windows and stream count, the `[quic]`
+	/// section, rather than its defaults.
+	pub(crate) fn with_quic(mut self, quic: &crate::quic::Resolved) -> Self {
+		self.session = crate::qmux_config(quic);
 		self
 	}
 
@@ -336,7 +346,7 @@ impl Listener {
 	) -> impl Future<Output = Result<(qmux::Session, PeerCred)>> + use<> {
 		let stream = self.accept_socket().await;
 		let allow = allow.cloned();
-		let mut config = crate::qmux_default();
+		let mut config = self.session.clone();
 		config.version = WIRE_VERSION;
 		config.protocol = qmux::Protocol::Negotiate(self.protocols.clone());
 		async move {

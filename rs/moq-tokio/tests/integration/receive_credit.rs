@@ -573,6 +573,114 @@ async fn unidentified_headers_give_way() {
 	assert_eq!(next_frame(&mut sub).await.len(), 4096);
 }
 
+/// A moq-lite-07 varint below 2^28: leading one bits count the extra bytes.
+fn varint(bytes: &mut Vec<u8>, value: u64) {
+	let [_, b, c, d] = u32::try_from(value).unwrap().to_be_bytes();
+	match value {
+		..0x80 => bytes.push(d),
+		..0x4000 => bytes.extend_from_slice(&[0x80 | c, d]),
+		..0x20_0000 => bytes.extend_from_slice(&[0xc0 | b, c, d]),
+		..0x1000_0000 => bytes.extend_from_slice(&(0xe000_0000 | value as u32).to_be_bytes()),
+		_ => panic!("{value} needs a longer varint"),
+	}
+}
+
+/// A moq-lite-07 GROUP stream for subscription `subscribe`, carrying one frame of `size`
+/// bytes timed at zero.
+fn group_stream(subscribe: u64, sequence: u64, size: usize) -> Vec<u8> {
+	let mut header = Vec::new();
+	varint(&mut header, subscribe);
+	varint(&mut header, sequence);
+	// The first frame.
+	varint(&mut header, 0);
+
+	// GROUP, then its size-prefixed header.
+	let mut bytes = vec![0x00];
+	varint(&mut bytes, header.len() as u64);
+	bytes.extend_from_slice(&header);
+	// The zigzag timestamp delta, then the frame's size and payload.
+	varint(&mut bytes, 0);
+	varint(&mut bytes, size as u64);
+	bytes.resize(bytes.len() + size, 5);
+	bytes
+}
+
+/// GROUP streams that beat their subscription's TRACK_INFO wait unread at the lowest
+/// receive priority. When they fill the window, they give way before a more urgent track's
+/// partial frame, the TRACK_INFO still arrives, and the groups that are left are then read.
+#[tokio::test]
+async fn groups_waiting_for_track_info_give_way_first() {
+	let setup = reversed("moq-lite-07-wip").await;
+
+	// Subscription 0: an urgent track's frame, half sent and holding its credit.
+	let (urgent, mut urgent_sub) = setup.subscribe("urgent", 100).await;
+	let mut frame = urgent
+		.append_group()
+		.unwrap()
+		.create_frame(frame::Info {
+			size: (WINDOW / 2) as u64,
+			timestamp: Some(Timestamp::ZERO),
+		})
+		.unwrap();
+	frame.write(vec![1u8; WINDOW / 4]).unwrap();
+	let mut partial = partial_frame(&mut urgent_sub).await;
+	read_partial(&mut partial, WINDOW / 4).await;
+
+	// Subscription 1, sent alongside a TRACK whose TRACK_INFO the publisher holds back.
+	let mut requests = setup.broadcast.requests();
+	let every = Subscription::default()
+		.with_order(moq_net::track::Order::Ascending)
+		.with_range(0..)
+		.with_max_delay(Duration::from_secs(60));
+	let waiting = tokio::spawn({
+		let remote = setup.remote.clone();
+		async move { remote.track("parked").unwrap().subscribe(every).await }
+	});
+	let request = kio::clock::timeout(TIMEOUT, requests.requested_track())
+		.await
+		.expect("TRACK timed out")
+		.expect("TRACK");
+
+	// Its groups, which together with the urgent frame overflow the window: one gives way.
+	let groups = (0..4).map(|sequence| group_stream(1, sequence, WINDOW / 5)).collect();
+	setup.raw(false, groups, 1).await;
+
+	// The urgent frame was kept, and completes as more of the waiting groups give way.
+	frame.write(vec![1u8; WINDOW / 4]).unwrap();
+	read_partial(&mut partial, WINDOW / 4).await;
+	assert!(
+		kio::clock::timeout(TIMEOUT, partial.read_chunk())
+			.await
+			.expect("the urgent frame never ended")
+			.expect("the urgent frame failed")
+			.is_none(),
+		"the urgent frame overran its size"
+	);
+
+	// The TRACK_INFO arrives, and the groups still waiting are read.
+	let _track = request.accept(timed());
+	let mut parked = kio::clock::timeout(TIMEOUT, waiting)
+		.await
+		.expect("subscribe timed out")
+		.expect("subscribe task")
+		.expect("subscribe");
+	loop {
+		let mut group = next_group(&mut parked).await;
+		match kio::clock::timeout(TIMEOUT, group.read_frame())
+			.await
+			.expect("a waiting group never delivered")
+		{
+			Ok(Some(frame)) => {
+				assert_eq!(frame.payload.len(), WINDOW / 5);
+				break;
+			}
+			// Stopped to make room for the urgent frame.
+			Err(moq_net::Error::Evicted) => continue,
+			other => panic!("group {} ended with {other:?}", group.sequence),
+		}
+	}
+}
+
 /// Control requests that never complete fill the window: one is stopped with its stream,
 /// and the session carries on.
 #[tokio::test]

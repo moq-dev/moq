@@ -1284,7 +1284,11 @@ impl Drop for SetupWait {
 
 #[kio::machine(self.state: GroupRecvState)]
 impl GroupRecv {
-	fn new(subscriber: Subscriber, reader: Reader<crate::transport::boxed::RecvStream, Version>) -> Self {
+	fn new(subscriber: Subscriber, mut reader: Reader<crate::transport::boxed::RecvStream, Version>) -> Self {
+		// Until its group opens, the stream may wait unread on the peer's SETUP or its
+		// subscription's TRACK_INFO, so a full window stops it before the stream either
+		// arrives on.
+		reader.set_priority(crate::priority::RECV_PARKED);
 		Self {
 			subscriber,
 			reader,
@@ -1300,7 +1304,8 @@ impl GroupRecv {
 			let Poll::Ready(ietf) = self.subscriber.peer_setup.poll_ietf(waiter) else {
 				let waits = &self.subscriber.setup_waits;
 				self.setup_wait.get_or_insert_with(|| SetupWait::new(waits));
-				return Poll::Pending;
+				// Unread meanwhile, so a reset or an eviction would otherwise go unseen.
+				return self.reader.poll_reset(waiter).map(Err);
 			};
 			self.setup_wait = None;
 			self.reader.poll_decode::<lite::Group>(waiter).map_ok(|hdr| (ietf, hdr))
@@ -1319,15 +1324,18 @@ impl GroupRecv {
 			}
 		};
 		// Closed once the subscription went, which the lookup below reports.
-		let _ = wait!(Accept => match parked {
-			Some((parked, ticket)) => parked
-				.poll(waiter, |parked| match parked.opened.contains_key(ticket) {
-					true => Poll::Ready(()),
-					false => Poll::Pending,
-				})
-				.map(|res| res.is_ok()),
-			None => Poll::Ready(true),
-		});
+		wait!(Accept => match parked {
+			Some((parked, ticket)) => match parked.poll(waiter, |parked| match parked.opened.contains_key(ticket) {
+				true => Poll::Ready(()),
+				false => Poll::Pending,
+			}) {
+				Poll::Ready(_) => Poll::Ready(Ok(())),
+				// Unread meanwhile, so a reset or an eviction would otherwise go unseen, and an
+				// evicted stream holds further eviction off until it is stopped.
+				Poll::Pending => self.reader.poll_reset(waiter).map(Err),
+			},
+			None => Poll::Ready(Ok(())),
+		})?;
 		self.park_wait = None;
 		let (ietf, hdr) = header;
 
@@ -9884,13 +9892,16 @@ impl kio::Task for FetchServeRun {
 					}
 					let FetchRunState::Send {
 						request,
-						stream,
+						mut stream,
 						frame_start,
 						frame_end,
 					} = std::mem::replace(&mut self.state, FetchRunState::Done)
 					else {
 						unreachable!()
 					};
+					// The answer may wait unread on the TRACK_INFO sent alongside, so a full
+					// window stops it before that TRACK_INFO.
+					stream.reader.set_priority(crate::priority::RECV_PARKED);
 					self.state = FetchRunState::Answer {
 						request,
 						stream,
@@ -9900,8 +9911,13 @@ impl kio::Task for FetchServeRun {
 				}
 				FetchRunState::Answer { stream, .. } => {
 					// The answer is framed in the track's units: it stays unread in the stream
-					// until the TRACK_INFO sent alongside lands.
-					let info = match ready!(self.info.poll(waiter)) {
+					// until the TRACK_INFO sent alongside lands, watched meanwhile so a reset or
+					// an eviction still ends it.
+					let info = match self.info.poll(waiter) {
+						Poll::Ready(info) => info,
+						Poll::Pending => Err(ready!(stream.reader.poll_reset(waiter))),
+					};
+					let info = match info {
 						Ok(info) => info,
 						Err(err) => {
 							let FetchRunState::Answer {
@@ -9924,7 +9940,7 @@ impl kio::Task for FetchServeRun {
 					let answered = ready!(stream.reader.poll_has_more(waiter));
 					let FetchRunState::Answer {
 						request,
-						stream,
+						mut stream,
 						frame_start,
 						frame_end,
 					} = std::mem::replace(&mut self.state, FetchRunState::Done)
@@ -9932,6 +9948,12 @@ impl kio::Task for FetchServeRun {
 						unreachable!()
 					};
 					let request = request.expect("request pending");
+					// Read now, so ranked as the group it fills.
+					stream.reader.set_priority(crate::priority::recv_group(
+						request.priority(),
+						self.group,
+						Default::default(),
+					));
 					if let Err(err) = answered {
 						tracing::debug!(track = %self.serve.name, group = self.group, %err, "fetch refused");
 						stream.writer.abort(&err);
