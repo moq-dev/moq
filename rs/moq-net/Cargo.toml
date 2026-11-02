@@ -18,8 +18,9 @@ default = ["async"]
 async = ["dep:futures", "kio/async", "kio/runtime"]
 
 # Exposes the wire codecs to the `fuzz/` harness and the announce, codec, path, varint, frame, and canonical storage benches,
-# session views of an origin to the viewers bench, and a lite-07 publisher's frame bounds to the
-# ranges bench, through the hidden `fuzz` module. Off by default and hidden from the docs.
+# session views of an origin to the viewers bench, the lite publisher's run loop to the
+# publisher bench, and a lite-07 publisher's frame bounds to the ranges bench, through the
+# hidden `fuzz` module. Off by default and hidden from the docs.
 fuzz = ["async"]
 
 [dependencies]
@@ -146,6 +147,12 @@ harness = false
 
 [[bench]]
 name = "tail"
+harness = false
+required-features = ["fuzz"]
+
+# Drives the lite publisher's run loop through the hidden `fuzz` module.
+[[bench]]
+name = "publisher"
 harness = false
 required-features = ["fuzz"]
 

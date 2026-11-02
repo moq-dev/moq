@@ -54,7 +54,6 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from datetime import timedelta
 import moq
 
 
@@ -70,9 +69,9 @@ async def main():
 
         # Write frames
         # Audio has no keyframes, so `cut` is what gives it group boundaries.
-        audio.write_frame(payload, timestamp=timedelta(0))
+        audio.write_frame(payload, timestamp=moq.Timestamp(0, 1_000))
         audio.cut()
-        audio.write_frame(payload, timestamp=timedelta(milliseconds=20))
+        audio.write_frame(payload, timestamp=moq.Timestamp(20, 1_000))
         audio.cut()
 
         # A fresh epoch per run tells viewers a restart is a new broadcast.
@@ -203,7 +202,7 @@ client = moq.Client(
   and do not keep it open.
 - `media.CatalogProducer(broadcast)` owns `set_video_properties`, `set_section`, and
   `remove_section`. It holds the broadcast weakly; writes fail with `Error.Closed` after closing
-  or releasing the broadcast. `.now()` returns its current media time as `timedelta` and fixes
+  or releasing the broadcast. `.now()` returns its current media time as a `Timestamp` and fixes
   the clock for subsequent producers.
 - `await media.CatalogConsumer.subscribe(broadcast)` streams catalog snapshots;
   `await media.catalog(broadcast)` reads one snapshot and releases its subscription.
@@ -217,8 +216,8 @@ client = moq.Client(
   `TrackConsumer.recv_group()` for arrival-order reads, with container media time on each frame
   as it lands.
 
-`media.TrackProducer.write_frame(payload, timestamp)` requires the caller's capture time as
-`timedelta`; returned `media.MediaFrame.timestamp` uses it too. `demand()` owns the track name and
+`media.TrackProducer.write_frame(payload, timestamp)` requires the caller's capture time as a
+`Timestamp`; returned `media.MediaFrame.timestamp` uses it too. `demand()` owns the track name and
 subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()` ends the import.
 
 ### Data
@@ -270,9 +269,10 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
 ### Types
 
 - **`media.Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
-- **`Frame`**. `.payload: bytes`, `.timestamp: timedelta | None`. The unit of every write and every raw read; `None` means untimed when publishing or reading.
-- **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: timedelta`, `.keyframe: bool`. The frame variant of a media read. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
-- **`Datagram`**. `.sequence: int`, `.timestamp: timedelta | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite, or moq-transport.
+- **`Timestamp`**. `.value: int` units at `.scale: int` units per second, exact at any scale such as 90 kHz. `Timestamp.from_timedelta(duration)` is exact at microsecond scale; `.to_timedelta()` rounds down to a whole microsecond. A write with a scale of 0 or past `2**62 - 1`, or a value past `2**61 - 1`, raises `Error.TimeOverflow`.
+- **`Frame`**. `.payload: bytes`, `.timestamp: Timestamp | None`. The unit of every write and every raw read; `None` means untimed when publishing or reading.
+- **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: Timestamp`, `.keyframe: bool`. The frame variant of a media read. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
+- **`Datagram`**. `.sequence: int`, `.timestamp: Timestamp | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite, or moq-transport.
 - **`media.Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.enabled`, `.description`.
 - **`media.Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.enabled`, `.framerate`, `.description`. A false `.enabled` means no frames are coming, so don't select the rendition.
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.

@@ -36,7 +36,10 @@ across the whole project.
   - Independent patches ✅ ("patch versions are not lockstep")
 - Exempt by name, keeping their own versions: `kio`, `kio-macros`, `qmux`,
   and npm `@moq/qmux`, because they are not MoQ-specific. `@moq/signals`
-  joins. Renaming `@moq/qmux` to a non-`@moq` name is a separate follow-up.
+  joins. `@moq/qmux` keeps its name and its own version line (decided
+  2026-11-01): npm refused the unscoped `qmux` as too similar to the
+  unrelated `qm-ux`, and the maintainer chose to keep `@moq/qmux` over a
+  scoped or suffixed name.
   - Join the group
   - Exempt by name ✅ (Rust); npm: exempt `@moq/qmux` only ✅
 - New packages start at `0.0.x`. A `0.0.x` package that a published `0.x.y`

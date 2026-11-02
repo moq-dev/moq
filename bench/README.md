@@ -355,7 +355,7 @@ extra copy of every received stream chunk injected into `@moq/net`, the control
 that shows the suite can see a copy-heavy change), and `base` when a revision is
 given. Each variant resolves `@moq/*` from its own checkout. Variants alternate
 within each round, with the starting variant rotated, after one warmup round
-(`--rounds`, `--warmup`, `--scenarios transport,cmaf,media`).
+(`--rounds`, `--warmup`, `--scenarios transport,cmaf,media,racing`).
 
 - `transport`: a publisher page writes 160 B through 1 MiB frames, a consumer page
   subscribes and reads them all. Connection setup and fixture generation stay
@@ -371,6 +371,23 @@ within each round, with the starting variant rotated, after one warmup round
   window's edges, so decoded-but-unpainted can be off by a frame or two; decoder
   queue depth (mean, and maximum within the window) comes from a thin
   `VideoDecoder` wrapper present in every pass.
+- `racing`: one page dials `Connection.connect` repeatedly, closing each session
+  before the next, to measure what the WebSocket fallback's win history keeps and
+  what it saves. Each URL's reconnects dial in order. From a 16 URL x 4 reconnect
+  x 256 character base, dialed one at a time, the sweep varies one axis at a
+  time: 1 and 128 URLs, 1 and 16 reconnects, 64 and 2048 characters, and a query
+  rotated on every reconnect, as a refreshed token would be. The 128 URL shape
+  dials 8 URLs at once to finish; the browser opens one WebSocket to an address
+  at a time, so only its retention compares. Modes refuse WebTransport so
+  WebSocket wins (`websocket`, and `alternate` with its own fallback URL), leave
+  it open (`webtransport`, and `disabled` without a fallback), or refuse only each
+  URL's first dial and then race twice more with it open (`sticky`). The refusal
+  throws from the page's `WebTransport` constructor, as a blocked network fails,
+  so the WebSocket head start still runs. Each sample reports dial latency per
+  reconnect and the WebSocket win fraction. After the pool's linger and a forced
+  collection, a heap snapshot counts the flat strings still holding the run's URL
+  marker, with their V8 object bytes and characters. A forced arm's winner is
+  checked; an open race's is only reported.
 
 Costs are split by where they run. Main-thread CPU is CDP `TaskDuration` in
 thread ticks; process CPU is each page's renderer (every thread, including
@@ -405,16 +422,20 @@ check sampled bytes, the counted pass checks every byte, and frame counts and an
 order-independent digest must match, so skipped work cannot read as a speedup.
 CMAF output is decoded and checked byte for byte in a separate call after each
 phase's CPU and trace snapshots.
-Crashes, wrong bytes, missing frames, a window that presents nothing, or an
+Crashes, wrong bytes, missing frames, a window that presents nothing, a racing
+dial that fails or a forced racing arm won by the other transport, or an
 unavailable CPU clock fail the run; timing never does. The nightly runs
-`--smoke` and keeps its run directory as the `bench-browser` artifact.
+`--smoke`, whose racing sweep runs every mode and a rotated query at 4 URLs x 2
+reconnects x 64 characters, and keeps its run directory as the `bench-browser`
+artifact.
 
-The in-memory frame, retained-history, and gap ledger paths also run directly in Chromium:
+The in-memory frame, retained-history, gap ledger, and resume-history paths also run directly in Chromium:
 
 ```bash
 nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench drift --out .tmp/drift.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench ledger --out .tmp/ledger.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench resume-history --out .tmp/resume-history.json before=/path/to/main current=. aa=.
 ```
 
 Each variant uses its own workspace source and a persistent page, with one full
@@ -432,7 +453,22 @@ Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
 for mixed millisecond/microsecond timestamps, which exercise exact cross-scale
 comparison.
 
-The browser smoke lane preserves one measured round of all three fixtures, and drift
+`resume-history` moves long-lived logical fronts across lite sessions over the
+in-memory transport, make-before-break as a session draining after GOAWAY does.
+It sweeps fronts, names read per route, and route count, with `stable` names
+(the same ones on every route) against `churn` (new names first answered by each
+route), each read by info lookup, fetch, or subscription and then closed. Once a
+manual clock ages out every cache, full collections from Chromium's exposed `gc`
+let weak references count the retired routes' sessions, transports, broadcast
+handles, and delivered payload buffers still reachable. These counts are exact,
+so any nonzero one fails the run once every sample is written, leaving a retaining
+`before` revision's counts in the JSON. A concluded control must release everything,
+or the fixture fails. `size_bytes` is the JS heap the fronts and their serving
+route hold, from Chromium's precise memory info; `serve_us` (clamped to the
+page's coarse timer) and `read_us` include no setup. Bun's collector scans its
+stack conservatively, so the fixture refuses to run there.
+
+The browser smoke lane preserves one measured round of all four fixtures, and drift
 and ledger also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
@@ -445,6 +481,36 @@ and payload size; CMAF also varies track count. Separate frame and byte rates
 use the same fixtures, with byte rates counting the encoded stream size.
 Fixture generation, publisher setup and destruction stay outside timing.
 The shared Rust benchmark nightly invocation measures both targets in quick mode.
+
+## Auth verification
+
+`moq-auth`'s `verify` target measures what `moq auth serve` spends on one JWT:
+
+```bash
+nix develop --command cargo bench --locked --manifest-path rs/moq-auth/Cargo.toml --bench verify
+```
+
+`decide` runs `Policy::decide` end to end for every supported algorithm against a
+key file, a key directory and a one-key set, rereading and importing the key as the
+server does per request. `stage` times each part alone: the async file read beside a
+blocking one, key and set parsing, header decoding, `kid` lookup, import, and
+verification with a fresh (`verify_cold`) or already used (`verify_warm`) key. `set`
+sweeps the set size (1, 16, 256) against a first, last or missing `kid`; `refuse`
+covers expired, forged, unknown-`kid`, `kid`-less and malformed tokens. `clients`
+runs 1, 16 or 64 concurrent requests on a four-worker runtime against one key, a
+16-key directory or a 16-key set, plus a refusal burst and a key replaced and
+removed by atomic rename during the requests; each prints its per-request
+p50/p95/p99 after the run. `sessions` times a `connect` and `end` while the
+server's session limits count 0, 1024 or 16384 other live sessions. `http` is one
+HS256 or ES256 `connect` as a relay sends it, a `POST /` over loopback TCP, which
+puts the verification in scale.
+
+Validity checks read a manual clock, so every run decides alike. Set
+`VERIFY_FIXTURE` to a directory to reuse its keys and tokens across runs, and
+`VERIFY_CASE` with `VERIFY_ITERATIONS=n` to skip Criterion and run one case exactly
+`n` times, printing its allocations per iteration. Under `perf stat`, the
+instruction difference between `n` and 0 iterations, divided by `n`, is that case's
+deterministic cost on a loaded host. It runs nightly in the `rust-extra` group.
 
 ## Nightly trends
 
