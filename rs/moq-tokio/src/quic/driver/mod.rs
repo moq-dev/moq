@@ -47,6 +47,7 @@
 
 pub mod connection;
 pub mod endpoint;
+pub(crate) mod forward;
 mod incoming;
 mod mutex;
 pub mod recv;

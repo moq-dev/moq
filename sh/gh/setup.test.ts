@@ -16,7 +16,7 @@ const workflow = Bun.YAML.parse(await Bun.file(".github/workflows/check.yml").te
 };
 
 for (const name of ["check"]) {
-	test(`${name} queries before setup and keeps its required check name`, () => {
+	test(`${name} queries before setup and keeps its check name`, () => {
 		const job = workflow.jobs[name];
 		expect(job.name).toBe("Check");
 		const scopeIndex = job.steps.findIndex((step) => step.id === "scope");

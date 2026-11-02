@@ -7,7 +7,7 @@ import { SessionCode, SessionError } from "../error.ts";
 import { createMockTransportPair, type MockTransport, textFrame } from "../mock.ts";
 import { Producer } from "../origin.ts";
 import * as Path from "../path.ts";
-import { Stream, Writer } from "../stream.ts";
+import { acceptBudget, Stream, Writer } from "../stream.ts";
 import { Timescale } from "../time.ts";
 import { wireOf } from "../wire.ts";
 import { Connection, probeLevel } from "./connection.ts";
@@ -101,7 +101,7 @@ test("a lite GOAWAY keeps the session open, and a second one closes it", async (
 
 	try {
 		await sendGoaway(pair.server, "");
-		const drain = await wireOf(connection).goaway;
+		const drain = await connection.draining;
 		expect(drain.uri).toBe("");
 
 		await sleep(Nano.fromMilli(Milli(20)));
@@ -214,14 +214,15 @@ function holdFins(transport: MockTransport, streams: "uni" | "incoming-bidi") {
 	};
 }
 
-// Hand `transport` each incoming unidirectional stream only once its FIN arrived, buffered outside
-// the transport so a session close cannot discard it. QMux keeps a finished stream's unread bytes
-// across a close this way, so the reads still owed land after the close itself.
+// Buffer incoming unidirectional streams outside the transport, independently of when the
+// connection accepts them: its accept budget may yield until after the session closes. QMux
+// keeps a finished stream's unread bytes across a close, so the reads still owed land afterwards.
 function deliverWhole(transport: MockTransport) {
+	const incoming = transport.incomingUnidirectionalStreams;
 	Object.defineProperty(transport, "incomingUnidirectionalStreams", {
-		value: transport.incomingUnidirectionalStreams.pipeThrough(
-			new TransformStream<ReadableStream<Uint8Array>, ReadableStream<Uint8Array>>({
-				transform(stream, controller) {
+		value: new ReadableStream<ReadableStream<Uint8Array>>({
+			async start(controller) {
+				for await (const stream of incoming) {
 					controller.enqueue(
 						new ReadableStream<Uint8Array>({
 							async start(whole) {
@@ -231,9 +232,10 @@ function deliverWhole(transport: MockTransport) {
 							},
 						}),
 					);
-				},
-			}),
-		),
+				}
+				controller.close();
+			},
+		}),
 	});
 }
 
@@ -357,6 +359,8 @@ for (const [alpn, version] of [
 	// SUBSCRIBE FIN it sent first; the closing session reads them.
 	for (const overtaken of hasTrackStream(version) ? ["group"] : ["group", "fin"]) {
 		test(`a peer close drains the overtaken ${overtaken} over ${versionName(version)}`, async () => {
+			// Exercise a close that overtakes acceptance, regardless of the host CPU budget.
+			const yielding = spyOn(acceptBudget, "poll").mockImplementation(() => yieldNow());
 			const pair = createMockTransportPair(alpn);
 			deliverWhole(pair.client);
 			if (overtaken === "fin") finAfterClose(pair.client);
@@ -395,6 +399,7 @@ for (const [alpn, version] of [
 				expect(await group?.readString()).toBeUndefined();
 				expect(await track.nextGroup()).toBeUndefined();
 			} finally {
+				yielding.mockRestore();
 				track.close();
 				remote.close();
 				client.abort();
@@ -835,7 +840,7 @@ for (const [alpn, version] of [
 			await goaway.writer.u53(StreamId.Goaway);
 			await new Goaway("").encode(goaway.writer, version);
 			goaway.writer.close();
-			expect((await wireOf(connection).goaway).uri).toBe("");
+			expect((await connection.draining).uri).toBe("");
 		} finally {
 			connection.abort();
 		}
@@ -902,7 +907,7 @@ for (const violation of ["a partial group", "a group past the declared end"] as 
 					await goaway.writer.u53(StreamId.Goaway);
 					await new Goaway("").encode(goaway.writer, version);
 					goaway.writer.close();
-					expect((await wireOf(connection).goaway).uri).toBe("");
+					expect((await connection.draining).uri).toBe("");
 				} else {
 					expect((await pair.client.closed).closeCode).toBe(SessionCode.ProtocolViolation);
 				}
