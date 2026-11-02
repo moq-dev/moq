@@ -33,6 +33,11 @@ mod session_revalidate;
 mod shutdown_signal;
 mod smoke;
 mod stack;
+#[cfg(any(feature = "_quic", all(target_os = "linux", feature = "_uring")))]
+mod start;
 mod tenant_matrix;
 mod upstream_links;
 mod wire_stats;
+
+#[cfg(any(feature = "_quic", all(target_os = "linux", feature = "_uring")))]
+use moq_relay::Relay;

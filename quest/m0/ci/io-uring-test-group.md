@@ -6,13 +6,13 @@ Every test that opens an io_uring, including the relay's `wire_stats::uring_*`, 
 
 ## Plan
 
-Found by [moq-dev/moq#7535](https://github.com/moq-dev/moq/pull/7535) and [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211): #7535's io_uring tests passed serially but could hit the shared limit in parallel, and #7211's `just ci` failed once in `uring_peer_session_widens_quic_limits` on `RLIMIT_MEMLOCK`.
+The implementation is checkpointed in draft [moq-dev/moq#7593](https://github.com/moq-dev/moq/pull/7593): name-based grouping covers the relay's integration and unit tests, and shared fixture startup preserves worker failures before clients connect. The four-test group limit is unchanged.
 
-Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-afk run): m0, since each such failure fails a whole merge-gate batch.
+Remaining work is validation and local review:
 
-- The group's filter in `.config/nextest.toml` names only `runtime_uring::` and `embed::.*uring` in `moq-relay::integration`. Match every io_uring test instead, for example `test(/uring/)` in that binary plus moq-relay's own unit tests that start ring workers, so a new test joins by its name. Check that the inventory of uring tests (`rg 'fn uring_' rs/moq-relay`) all land in the group with `cargo nextest show-config test-groups`, which lists each group's members; plain `cargo nextest list` shows no group.
-- moq-uring already names the limit on a ring's `ENOMEM` (`rs/moq-uring/src/error.rs`). Check that this error reaches the failing test's output on the relay paths (worker startup, `start_relay`) instead of being wrapped or swallowed; if a test sees only a timeout, surface the startup error there.
-- Keep the group's `max-threads` unless measured otherwise; the limit is shared with other checkouts, which `rs/moq-uring/README.md` documents.
+- Run the full `just ci` successfully, then `/quest-review` and mark the claim PR ready. The current environment fails in Cargo documentation and `sh/rs/test-lints.test.py` with mbx `E2BIG`; the separate [mbx quest](/quest/m0/ci/mbx-arg-max.md) owns that root cause.
+- Preserve the completed inventory check: `cargo nextest show-config test-groups` with `moq-relay/io-uring,moq-relay/qlog` lists all 19 named `uring_*` tests and all three ring-opening relay unit tests in `io-uring`. The pending `bitrate_caps::uring_*` names from [moq-dev/moq#7535](https://github.com/moq-dev/moq/pull/7535) match the same filter.
+- The full relay suite with `io-uring,qlog` passes: 437 tests, 9 ignored. A constrained-memory reproduction previously reported only `relay stopped before becoming ready: channel closed`; the new isolated-process test exercises the real worker startup and verifies `RLIMIT_MEMLOCK`, `ulimit -l`, and `LimitMEMLOCK=` survive the error chain.
 
 Public API: none. Wire: none.
 

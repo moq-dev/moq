@@ -48,7 +48,7 @@ async fn wire_sources(io_uring: bool) {
 	let metrics = format!("http://{}/metrics", relay.internal().addr().unwrap());
 	let registry = relay.cluster().stats.clone();
 	let trigger = relay.shutdown_trigger().clone();
-	let running = tokio::spawn(relay.run());
+	let running = crate::start::start_relay(relay).await.expect("start relay");
 	// Both adapters must expose UDP totals without asking Session::stats(),
 	// which would arm a periodic sampler. Snapshot reads the source directly.
 	for scheme in ["moql", "https"] {
