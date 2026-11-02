@@ -57,6 +57,12 @@ spike assumed no consumer; teleoperation uplinks are one):
 - Docs: inline only. The congestion-control lines in `doc/bin/cli.md` and
   `doc/lib/*` gain the new variant; no new page.
 
+The shared pacer's low-rate correction and BBR3's one-datagram minimum send
+quantum are implemented together in [moq-dev/moq#7606](https://github.com/moq-dev/moq/pull/7606).
+The candidate PRs above were all unmerged when it measured the full probe suite,
+so none had a landed low-rate row to rerun. The bake-off must use the corrected
+pacer: earlier candidate rows below 2 Mbit/s can include up to 2x pacing overshoot.
+
 Remaining work once the candidates finish (this README's own job):
 
 - Run the shared comparison on the uplink presets: queuing delay p50/p95/p99,
