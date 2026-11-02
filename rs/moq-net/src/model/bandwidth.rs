@@ -741,6 +741,8 @@ struct Planned {
 /// One demanded entry in the order it is served.
 #[derive(Copy, Clone)]
 struct Served {
+	/// The index in `Plan::entries`, fixed for this plan's lifetime.
+	entry: usize,
 	want: Want,
 	/// What was left of the estimate before this entry was served.
 	budget: u64,
@@ -808,12 +810,24 @@ impl Plan {
 
 	/// Divide `estimate` among `entries`, which are in registration order.
 	fn divided(estimate: Rate, generation: u64, epoch: u64, entries: Vec<Planned>, waiter: kio::Waiter) -> Self {
+		let mut order: Vec<_> = entries
+			.iter()
+			.enumerate()
+			.filter(|(_, entry)| entry.state == track::DemandState::Active)
+			.map(|(index, entry)| Served {
+				entry: index,
+				want: entry.want,
+				budget: 0,
+			})
+			.collect();
+		// Only a new plan changes this total order; estimate updates just walk it.
+		order.sort_unstable_by_key(|served| served.want.order());
 		let mut plan = Self {
 			estimate,
 			generation,
 			epoch,
 			entries,
-			order: Vec::new(),
+			order,
 			leftover: 0,
 			_waiter: waiter,
 		};
@@ -821,21 +835,9 @@ impl Plan {
 		plan
 	}
 
-	/// Divide `estimate` among the entries already read.
+	/// Divide `estimate` among the entries already read, in their cached serving order.
 	fn divide(&mut self, estimate: Rate) {
 		self.estimate = estimate;
-		self.order.clear();
-		self.order.extend(
-			self.entries
-				.iter()
-				.filter(|entry| entry.state == track::DemandState::Active)
-				.map(|entry| Served {
-					want: entry.want,
-					budget: 0,
-				}),
-		);
-		// The order is total, since ids are unique.
-		self.order.sort_unstable_by_key(|served| served.want.order());
 
 		// Plain bits per second inside: this is where the division actually happens, and
 		// wrapping every intermediate would need arithmetic on `Rate` that no caller wants.
@@ -850,12 +852,7 @@ impl Plan {
 				let grant = served.want.max.as_bps().min(budget / (end - index) as u64);
 				budget -= grant;
 
-				// Ids are registration order, which is the entries' order.
-				let at = self
-					.entries
-					.binary_search_by_key(&served.want.id, |entry| entry.want.id)
-					.expect("every served entry was read");
-				self.entries[at].grant = grant;
+				self.entries[served.entry].grant = grant;
 			}
 			start = end;
 		}
@@ -1180,7 +1177,7 @@ mod tests {
 				.map(|(want, _)| *want)
 				.collect();
 
-			let plan = plan(
+			let mut plan = plan(
 				estimate,
 				entries.iter().map(|(want, active)| {
 					let state = match active {
@@ -1191,21 +1188,25 @@ mod tests {
 				}),
 			);
 
-			for (want, is_active) in &entries {
-				let expected = match is_active {
-					true => sequential(estimate, &active, want.id),
-					false => {
-						let mut rejoined = active.clone();
-						rejoined.push(*want);
-						rejoined.sort_by_key(|want| want.id);
-						sequential(estimate, &rejoined, want.id)
-					}
-				};
-				assert_eq!(
-					plan.grant(want.id),
-					expected,
-					"{want:?} among {entries:?} sharing {estimate:?}"
-				);
+			// A cached order must also serve a new estimate and clear grants when a tier starves.
+			for estimate in [estimate, Rate::ZERO, bps(next(count * 1_600))] {
+				plan.divide(estimate);
+				for (want, is_active) in &entries {
+					let expected = match is_active {
+						true => sequential(estimate, &active, want.id),
+						false => {
+							let mut rejoined = active.clone();
+							rejoined.push(*want);
+							rejoined.sort_by_key(|want| want.id);
+							sequential(estimate, &rejoined, want.id)
+						}
+					};
+					assert_eq!(
+						plan.grant(want.id),
+						expected,
+						"{want:?} among {entries:?} sharing {estimate:?}"
+					);
+				}
 			}
 		}
 	}
