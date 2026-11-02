@@ -27,7 +27,7 @@ and the fallback path.
   drop the longest fingers first. Small meshes come out close to full mesh on
   their own.
 - Forwarding and route choice are [cluster routing](/quest/m1/cluster-routing/README.md)'s:
-  each daemon is already a relay, overlay links are LAN-cost links, and relay
+  each mesh node is already a relay, overlay links are LAN-cost links, and relay
   uplinks stay `upstream` links costed above them. Nothing routes outside the
   shared priority/cost rules.
 - Membership churn recomputes the ring; hold a change briefly so a flapping
@@ -38,11 +38,11 @@ follows the ring (and never exceeds the cap when set); every pair connects
 without crossing the relay; killing a node heals the overlay; splitting the
 segment sends cross-half traffic through the relay and healing restores the
 direct path. Report the link counts and hop counts the test measures.
-Update `doc/bin/cli.md` and the [guide](/quest/m2/mesh/guide.md) if it exists.
+Update `doc/bin/relay/cluster.md` and the [guide](/quest/m2/mesh/guide.md) if it exists.
 
 ## Required
 
-- [Daemon](/quest/m2/mesh/daemon.md) - the relay that dials the overlay
+- [Endpoint API](/quest/m2/mesh/endpoint.md) - the enrolled node identity hints and links are verified against
 
 ## Related
 
