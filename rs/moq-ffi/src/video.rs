@@ -19,6 +19,7 @@ use crate::bandwidth::{MoqAllocator, MoqReservation};
 use crate::consumer::MoqBroadcastConsumer;
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
+use crate::media::MoqTimestamp;
 
 /// A CPU pixel layout: what [`MoqVideoProducer::write`] is fed, and what
 /// [`MoqVideoDecodedFrame::pixels`] converts to.
@@ -188,8 +189,8 @@ impl From<MoqVideoGop> for moq_video::encode::Gop {
 /// that layout.
 #[derive(uniffi::Record)]
 pub struct MoqVideoFrame {
-	/// Presentation timestamp, in microseconds.
-	pub timestamp_us: u64,
+	/// Presentation timestamp.
+	pub timestamp: MoqTimestamp,
 	/// The pixels, in the configured layout.
 	pub data: Vec<u8>,
 }
@@ -197,8 +198,8 @@ pub struct MoqVideoFrame {
 /// One access unit emitted by a codec-only video encoder.
 #[derive(uniffi::Record)]
 pub struct MoqVideoPacket {
-	/// Presentation timestamp in microseconds.
-	pub timestamp_us: u64,
+	/// Presentation timestamp.
+	pub timestamp: MoqTimestamp,
 	/// Encoded access-unit payload.
 	pub data: Vec<u8>,
 	/// Whether the access unit starts from a keyframe.
@@ -209,7 +210,7 @@ fn video_packets(packets: Vec<moq_video::encode::Encoded>) -> Vec<MoqVideoPacket
 	packets
 		.into_iter()
 		.map(|packet| MoqVideoPacket {
-			timestamp_us: packet.timestamp.as_micros() as u64,
+			timestamp: packet.timestamp.into(),
 			data: packet.payload.to_vec(),
 			keyframe: packet.keyframe,
 		})
@@ -259,7 +260,7 @@ impl MoqVideoEncoder {
 			MoqVideoPixelFormat::I420 => moq_video::Surface::I420(moq_video::I420::new(self.size, frame.data)?),
 			MoqVideoPixelFormat::Rgba => moq_video::Surface::rgba(&frame.data, self.size)?,
 		};
-		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(frame.timestamp_us)?);
+		let frame = moq_video::Frame::new(surface, frame.timestamp.try_into()?);
 		let mut guard = self.inner.lock().map_err(|_| panic_error())?;
 		Ok(video_packets(block_on(
 			guard.as_mut().ok_or(MoqError::Closed)?.encode(frame),
@@ -420,7 +421,7 @@ impl VideoProducer {
 		let Some(encoder) = self.encoder.as_mut() else {
 			return Ok(());
 		};
-		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(frame.timestamp_us)?);
+		let frame = moq_video::Frame::new(surface, frame.timestamp.try_into()?);
 		// A backend that pipelines hands back an earlier frame's output, so this is
 		// zero or more access units rather than one per call.
 		let encoded = block_on(encoder.encode(frame))?;
@@ -1043,11 +1044,13 @@ pub struct MoqVideoDecoderOutput {
 	/// dimensions rather than assuming this took. Both dimensions must be even.
 	#[uniffi(default = None)]
 	pub resize: Option<crate::media::MoqDimensions>,
-	/// Upper bound on buffering before skipping a stalled group. Same knob as
-	/// [`MoqAudioDecoderOutput::max_delay`](crate::audio::MoqAudioDecoderOutput::max_delay).
-	/// `None` keeps the moq-mux default of zero (skip aggressively).
+	/// How far behind the live edge to play: where a cold join starts and when a
+	/// stalled group is skipped. Same knob as
+	/// [`MoqAudioDecoderOutput::delay`](crate::audio::MoqAudioDecoderOutput::delay).
+	/// `None` keeps the moq-mux default of zero for both (start at the newest group,
+	/// skip aggressively).
 	#[uniffi(default = None)]
-	pub max_delay: Option<std::time::Duration>,
+	pub delay: Option<crate::media::MoqDelay>,
 	/// Keep each frame in the surface its decoder produced, for
 	/// [`MoqVideoDecodedFrame::surface`]. `false`, the default, downloads every
 	/// frame to CPU memory as it is decoded, so
@@ -1058,6 +1061,10 @@ pub struct MoqVideoDecoderOutput {
 	/// [`MoqError::Unsupported`] elsewhere.
 	#[uniffi(default = false)]
 	pub surface: bool,
+	/// Where to start on a track that already holds groups, or `None` for the oldest. Same
+	/// knob as [`MoqAudioDecoderOutput::start`](crate::audio::MoqAudioDecoderOutput::start).
+	#[uniffi(default = None)]
+	pub start: Option<crate::media::MoqDecodeStart>,
 }
 
 /// A borrowed platform handle to a decoded frame's surface, from
@@ -1090,10 +1097,9 @@ pub struct MoqVideoDecodedFrame {
 
 #[uniffi::export]
 impl MoqVideoDecodedFrame {
-	/// Presentation timestamp, in microseconds.
-	pub fn timestamp_us(&self) -> u64 {
-		// A decoded Timestamp is bounded by a QUIC varint, so its microseconds fit.
-		self.frame.timestamp.as_micros() as u64
+	/// Presentation timestamp.
+	pub fn timestamp(&self) -> MoqTimestamp {
+		self.frame.timestamp.into()
 	}
 
 	/// Frame width in pixels: what the stream decoded to, since `resize` is only
@@ -1157,8 +1163,8 @@ pub enum MoqVideoRead {
 	/// Every picture from before the loss precedes it, and what follows does not continue
 	/// what came before.
 	Gap {
-		/// The furthest presentation point already read, in microseconds.
-		timestamp_us: u64,
+		/// The furthest presentation point already read.
+		timestamp: MoqTimestamp,
 		/// An upper bound on how long until the next picture resumes.
 		duration: std::time::Duration,
 	},
@@ -1167,28 +1173,23 @@ pub enum MoqVideoRead {
 	/// The stopped encoder's last pictures precede it; what follows comes from a fresh
 	/// encoder.
 	End {
-		/// Where the stopped encoder's media stops, in microseconds.
-		end_us: u64,
+		/// Where the stopped encoder's media stops.
+		end: MoqTimestamp,
 	},
 }
 
-impl TryFrom<moq_video::decode::Read> for MoqVideoRead {
-	type Error = MoqError;
-
-	fn try_from(read: moq_video::decode::Read) -> Result<Self, MoqError> {
-		use crate::consumer::timestamp_us;
-		Ok(match read {
+impl From<moq_video::decode::Read> for MoqVideoRead {
+	fn from(read: moq_video::decode::Read) -> Self {
+		match read {
 			moq_video::decode::Read::Frame(frame) => Self::Frame {
 				frame: Arc::new(MoqVideoDecodedFrame { frame }),
 			},
 			moq_video::decode::Read::Gap { timestamp, duration } => Self::Gap {
-				timestamp_us: timestamp_us(timestamp)?,
+				timestamp: timestamp.into(),
 				duration: crate::ffi::duration(duration.into()),
 			},
-			moq_video::decode::Read::End { end } => Self::End {
-				end_us: timestamp_us(end)?,
-			},
-		})
+			moq_video::decode::Read::End { end } => Self::End { end: end.into() },
+		}
 	}
 }
 
@@ -1198,7 +1199,7 @@ struct VideoConsumerInner {
 
 impl VideoConsumerInner {
 	async fn next(&mut self) -> Result<Option<MoqVideoRead>, MoqError> {
-		self.consumer.read().await?.map(MoqVideoRead::try_from).transpose()
+		Ok(self.consumer.read().await?.map(MoqVideoRead::from))
 	}
 }
 
@@ -1305,7 +1306,11 @@ impl MoqVideoConsumer {
 		let resolved = broadcast.resolve_inner(reference.as_deref(), epoch.as_deref()).await?;
 
 		options.decoder.scale_hint = output.resize.map(|size| moq_video::Size::new(size.width, size.height));
-		options.max_delay = output.max_delay.unwrap_or_default();
+		options.delay = output.delay.map(Into::into).unwrap_or_default();
+		options.start = match output.start.unwrap_or_default() {
+			crate::media::MoqDecodeStart::Oldest => moq_video::decode::Start::Oldest,
+			crate::media::MoqDecodeStart::Latest => moq_video::decode::Start::Latest,
+		};
 
 		let consumer = broadcast
 			.driver
@@ -1437,8 +1442,13 @@ mod finish_tests {
 			},
 		)
 		.unwrap();
+		// NTSC frame times, which no microsecond count holds exactly.
+		let ntsc = |i: u64| MoqTimestamp {
+			value: i * 1001,
+			scale: 30_000,
+		};
 		let picture = |i: u64| MoqVideoFrame {
-			timestamp_us: i * 1_001_000 / 30,
+			timestamp: ntsc(i),
 			data: vec![(i * 40) as u8; (width * height * 3 / 2) as usize],
 		};
 
@@ -1452,9 +1462,9 @@ mod finish_tests {
 		packets.extend(encoder.encode(picture(3)).unwrap());
 		packets.extend(encoder.finish().unwrap());
 
-		let keyframes: Vec<u64> = packets.iter().filter(|p| p.keyframe).map(|p| p.timestamp_us).collect();
+		let keyframes: Vec<MoqTimestamp> = packets.iter().filter(|p| p.keyframe).map(|p| p.timestamp).collect();
 		assert_eq!(packets.len(), 4, "one access unit per picture");
-		assert_eq!(keyframes, [0, 3 * 1_001_000 / 30], "keyframes at the start and the cut");
+		assert_eq!(keyframes, [ntsc(0), ntsc(3)], "keyframes at the start and the cut");
 		assert!(packets.iter().all(|p| !p.data.is_empty()), "an empty access unit");
 		assert!(matches!(encoder.encode(picture(4)), Err(MoqError::Closed)));
 	}
@@ -1557,7 +1567,7 @@ mod follow_tests {
 		});
 		assert_eq!(moved, Ok(None));
 
-		let retried = moq_clock::timeout(Duration::from_secs(60), follower.next())
+		let retried = kio::clock::timeout(Duration::from_secs(60), follower.next())
 			.await
 			.expect("the dropped target is asked for again");
 		assert_eq!(retried.unwrap(), Target::Enabled(Rate::from_mbps(2)));
@@ -1572,7 +1582,7 @@ mod follow_tests {
 
 	/// Retune at every target until the follower goes a minute without one.
 	async fn quiet(follower: &mut Follower, ceiling: Rate, mut set: impl FnMut(Rate) -> Result<(), moq_video::Error>) {
-		while let Ok(bitrate) = moq_clock::timeout(Duration::from_secs(60), follower.next()).await {
+		while let Ok(bitrate) = kio::clock::timeout(Duration::from_secs(60), follower.next()).await {
 			rate(follower, ceiling, bitrate.unwrap(), &mut set).unwrap();
 		}
 	}
@@ -1679,7 +1689,10 @@ mod rung_tests {
 
 	fn frame(i: u64) -> MoqVideoFrame {
 		MoqVideoFrame {
-			timestamp_us: i * 33_333,
+			timestamp: MoqTimestamp {
+				value: i * 33_333,
+				scale: 1_000_000,
+			},
 			data: vec![(i * 40) as u8; 320 * 240 * 3 / 2],
 		}
 	}

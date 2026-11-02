@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_mux::container::Read as Encoded;
 use std::time::Duration;
 
@@ -12,6 +12,7 @@ use super::decoder::{Config, Decoder};
 use crate::jitter::{self, Target};
 use crate::resample::{Remix, Resampler};
 use crate::{Activity, Error, Format, Frame, Layout};
+pub use moq_mux::container::Delay;
 
 /// One item of a [`Consumer`] read, in delivery order: decoded PCM, or a break in it.
 ///
@@ -69,24 +70,38 @@ pub struct Output {
 }
 
 /// Subscription, decoder, and output policy for [`Consumer`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct Options {
 	/// Low-level decoder configuration.
 	pub decoder: Config,
 	/// PCM output conversion.
 	pub output: Output,
-	/// How far a group may fall behind the live edge before the subscription skips it.
-	pub max_delay: std::time::Duration,
+	/// How far behind the live edge playback runs.
+	///
+	/// [`Delay::min`] is the playout delay: the jitter buffer a player holds ahead of the
+	/// playhead, reported by [`Consumer::delay`], and where a cold join starts. With
+	/// [`estimate`](Self::estimate) it is a floor under the measured delay instead. A `min`
+	/// beyond the track's retention is refused. [`Delay::max`] is how far a group may fall
+	/// behind the live edge before the subscription skips it; it adds no buffering.
+	pub delay: Delay,
+	/// Measure the playout delay from arrival timing, never below [`Delay::min`] (default:
+	/// `true`). `false` holds exactly `delay.min`.
+	pub estimate: bool,
 	/// Initial cached-group policy.
 	pub start: Start,
-	/// A fixed playout delay, or `None` to estimate it from arrival timing.
-	///
-	/// The jitter buffer a player holds ahead of the playhead, reported by
-	/// [`Consumer::delay`]. Distinct from [`max_delay`](Self::max_delay), which is
-	/// the live-edge skip budget and adds no buffering. A fixed delay beyond the
-	/// track's retention is refused.
-	pub delay: Option<Duration>,
+}
+
+impl Default for Options {
+	fn default() -> Self {
+		Self {
+			decoder: Config::default(),
+			output: Output::default(),
+			delay: Delay::default(),
+			estimate: true,
+			start: Start::default(),
+		}
+	}
 }
 
 impl Options {
@@ -110,9 +125,12 @@ pub struct Consumer {
 	remix: Option<Remix>,
 	options: Options,
 	max_delay: std::time::Duration,
-	/// Prime after a join or loss, never after a declared endpoint.
+	/// Prime after a join or loss, never after a declared endpoint or at the track's
+	/// first packet, which the codec's own delay already primes.
 	warmup: Duration,
 	warmup_pending: bool,
+	/// Whether a packet was read or lost yet, so the track's first packet can be told apart.
+	started: bool,
 	warmup_until: Option<moq_net::Timestamp>,
 	resolved_sample_rate: u32,
 	resolved_layout: Layout,
@@ -181,7 +199,7 @@ impl Consumer {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.audio)
-					.with_max_delay(options.max_delay.saturating_add(warmup)),
+					.with_max_delay(options.delay.max.map(|max| max.saturating_add(warmup))),
 			)
 			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
@@ -197,10 +215,15 @@ impl Consumer {
 		}
 		let track = subscriber;
 		let retention = track.info().max_age;
-		let max_delay = options.max_delay.min(retention.unwrap_or(Duration::MAX));
+		let max_delay = options
+			.delay
+			.max
+			.unwrap_or(Duration::MAX)
+			.min(retention.unwrap_or(Duration::MAX));
 		// Holding more than the publisher keeps would wait on media it has already
 		// discarded, so the caller asked for something impossible.
-		if let (Some(delay), Some(retention)) = (options.delay, retention)
+		let delay = options.delay.min;
+		if let Some(retention) = retention
 			&& delay > retention
 		{
 			return Err(Error::Unsupported(format!(
@@ -211,10 +234,14 @@ impl Consumer {
 		// wire: `moq import fmp4` publishes CMAF. Reading a moof+mdat fragment as a
 		// varint timestamp plus a payload decodes to garbage rather than failing.
 		let container = moq_mux::catalog::hang::Container::try_from(catalog)?;
-		let track = moq_mux::container::Consumer::new(track, container);
+		// The subscription's budget includes the warmup, so the start reaches the playout delay
+		// plus the warmup back, while the container skips at the max delay alone.
+		let track = moq_mux::container::Consumer::new(track, container)
+			.with_warmup(warmup)
+			.with_delay(options.delay);
 
 		Ok(Self {
-			target: Target::new(options.delay, catalog.jitter),
+			target: Target::new(options.delay.min, options.estimate, catalog.jitter),
 			decoder,
 			track,
 			resampler: None,
@@ -224,6 +251,7 @@ impl Consumer {
 			warmup,
 			warmup_pending: !warmup.is_zero(),
 			warmup_until: None,
+			started: false,
 			resolved_sample_rate: sample_rate,
 			resolved_layout: layout,
 			next_start: None,
@@ -256,7 +284,7 @@ impl Consumer {
 	}
 
 	/// The playout delay to hold ahead of the playhead right now: the fixed
-	/// [`Options::delay`], or the estimate from every frame read so far.
+	/// [`Delay::min`], or with [`Options::estimate`] the estimate from every frame read so far.
 	///
 	/// The estimate measures when [`read`](Self::read) hands each packet over, so
 	/// it is only as honest as the caller is prompt: read as soon as the previous
@@ -295,17 +323,22 @@ impl Consumer {
 				return Ok(Some(frame));
 			}
 
-			let mux_frame = match self.track.read().await? {
+			let (mux_frame, track_start) = match self.track.read().await? {
 				Some(Encoded::Frame { group, frame }) => {
+					let first = !std::mem::replace(&mut self.started, true);
 					// A later group after a declared end comes from a fresh encoder; the end's
 					// own group carries the stopped encoder's final packets, trimmed below.
 					if self.end.is_some() && group != self.end_group {
 						self.restart()?;
 					}
-					frame
+					// Nothing precedes group 0, and a group delivers from its frame 0 or not at
+					// all, so reading it first means decoding from the encoder's first packet.
+					// A finished group's end marker may come first; it carries no media.
+					(frame, first && group == 0)
 				}
 				// Behind whatever the resampler held from before the loss.
 				Some(Encoded::Gap { timestamp, duration }) => {
+					self.started = true;
 					self.restart()?;
 					self.warmup_pending = !self.warmup.is_zero();
 					self.ready.push_back(Read::Gap { timestamp, duration });
@@ -360,11 +393,12 @@ impl Consumer {
 			let epoch = *self.epoch.get_or_insert(mux_frame.timestamp);
 			let delay = self.decoder.delay_remaining();
 			let decoded = self.decoder.decode(&mux_frame.payload)?;
-			// Anchored only once a packet decodes: a refused one primed nothing.
-			if self.warmup_pending {
+			// Anchored only once a packet decodes: a refused one primed nothing. The track's
+			// first packet has no history to warm up from: the codec's pre-skip, trimmed by
+			// the decoder, is all the priming its encoder declared.
+			if std::mem::take(&mut self.warmup_pending) && !track_start {
 				let warmup = moq_net::Timestamp::try_from(self.warmup)?.convert(timestamp.scale())?;
 				self.warmup_until = Some(timestamp.checked_add(warmup)?);
-				self.warmup_pending = false;
 			}
 			// Codec delay trimmed off the front is media this packet covered even
 			// though no samples came out, so it still moves the packet after it along.
@@ -796,6 +830,8 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
+		// Joined mid-stream: the track's first packet needs no warmup.
+		producer.seek(1).unwrap();
 		for epoch in 0..2 {
 			if epoch != 0 && declared {
 				producer.discontinuity().unwrap();
@@ -818,7 +854,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: Duration::from_secs(10),
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -935,7 +974,10 @@ mod tests {
 			"audio",
 			Options {
 				start: Start::Latest,
-				max_delay: Duration::from_secs(10),
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -943,6 +985,79 @@ mod tests {
 		.unwrap();
 		let frame = next_frame(&mut consumer).await.unwrap().unwrap();
 		assert_eq!(frame.timestamp.as_micros(), 80_000, "the backlog was replayed");
+	}
+
+	/// A latest join with a warmup loses no group the publisher bursts before its first
+	/// frame decodes. A join that put only the warmup on the wire, widening it once the
+	/// first packet was read, let the publisher skip every group of such a burst a warmup
+	/// behind its newest, a gap no later update recovers.
+	#[tokio::test(start_paused = true)]
+	async fn latest_loses_no_group_the_publisher_bursts_before_its_first_frame() {
+		let publisher = origin(1);
+		let broadcast = publisher.create_broadcast("bcast").unwrap();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		// Joined mid-stream: the track's first packet needs no warmup.
+		producer.seek(1).unwrap();
+		// One 20 ms packet per group.
+		let mut write = |packet: u64| {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_micros(packet * 20_000).unwrap(),
+					duration: None,
+					payload: vec![0; 960 * size_of::<f32>()].into(),
+					keyframe: true,
+				})
+				.unwrap();
+			producer.cut(None).unwrap();
+		};
+		write(0);
+
+		let subscriber = origin(2);
+		let _link = link(&publisher, &subscriber).await;
+		let consumer = subscriber.consume();
+		let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
+
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		catalog.warmup = Some(Duration::from_millis(80));
+		let mut consumer = Consumer::new(
+			&remote,
+			&catalog,
+			"audio",
+			Options {
+				start: Start::Latest,
+				delay: Delay {
+					max: Some(Duration::from_secs(1)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+
+		// Written in one pass, before the publisher's session runs again.
+		for packet in 1..=20 {
+			write(packet);
+		}
+		producer.finish().unwrap();
+
+		let mut stamps = Vec::new();
+		while let Some(read) = consumer.read().await.unwrap() {
+			match read {
+				Read::Frame(frame) => stamps.push(frame.timestamp.as_micros()),
+				Read::Gap { timestamp, duration } => panic!("a gap of {duration:?} after {timestamp:?}"),
+				Read::End { .. } => {}
+			}
+		}
+		let expected: Vec<u128> = (4..=20).map(|packet| packet * 20_000).collect();
+		assert_eq!(stamps, expected, "the burst reached the decoder whole");
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1001,7 +1116,10 @@ mod tests {
 			"audio",
 			Options {
 				start: Start::Latest,
-				max_delay: Duration::from_secs(10),
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1031,6 +1149,8 @@ mod tests {
 			track,
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
 		);
+		// Joined mid-stream: the track's first packet needs no warmup.
+		producer.seek(1).unwrap();
 		producer
 			.write(moq_mux::container::Frame {
 				timestamp: Timestamp::from_micros(1_000_000).unwrap(),
@@ -1045,7 +1165,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: Duration::from_secs(1),
+				delay: Delay {
+					max: Some(Duration::from_secs(1)),
+					..Delay::default()
+				},
 				output: Output {
 					sample_rate: Some(44_100),
 					..Output::default()
@@ -1062,6 +1185,72 @@ mod tests {
 			(first - 0.25).abs() < 0.0001,
 			"the resampler must be converged too: {first}"
 		);
+	}
+
+	/// Decodes a finished track of `packets` 20 ms Opus packets starting at group `group`,
+	/// keeping the encoder's declared warmup, and returns the first frame's stamp and the
+	/// frames decoded.
+	async fn opus_track_output(group: u64, packets: u64) -> (Option<u128>, usize) {
+		let mut encoder = Encoder::new(&EncodeConfig::new(48_000, Layout::Mono)).unwrap();
+		let catalog = encoder.catalog();
+		assert_eq!(catalog.warmup, Some(Duration::from_millis(80)));
+
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut producer = moq_mux::container::Producer::new(
+			track,
+			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
+		);
+		producer.seek(group).unwrap();
+		let pcm = vec![0.25f32; encoder.frame_size()];
+		for packet in 0..packets {
+			producer
+				.write(moq_mux::container::Frame {
+					timestamp: Timestamp::from_scale(packet * encoder.frame_size() as u64, 48_000).unwrap(),
+					duration: None,
+					payload: encoder.encode(&pcm).unwrap().payload,
+					keyframe: true,
+				})
+				.unwrap();
+		}
+		producer.finish().unwrap();
+
+		let mut consumer = Consumer::new(
+			&broadcast.consume(),
+			&catalog,
+			"audio",
+			Options {
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
+				..Options::new()
+			},
+		)
+		.await
+		.unwrap();
+		let (mut first, mut frames) = (None, 0);
+		while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
+			first.get_or_insert(frame.timestamp.as_micros());
+			frames += frame.data.len() / size_of::<f32>();
+		}
+		(first, frames)
+	}
+
+	/// Decoding from the track's first packet drops only the codec's pre-skip: the encoder
+	/// started there, so there is no history to warm up from. A track shorter than the
+	/// warmup still decodes.
+	#[tokio::test(start_paused = true)]
+	async fn the_tracks_first_packet_keeps_all_but_pre_skip() {
+		assert_eq!(opus_track_output(0, 2).await, (Some(0), 2 * 960 - 312));
+	}
+
+	/// A join past the track's first group still drops its warmup after the pre-skip.
+	#[tokio::test(start_paused = true)]
+	async fn a_mid_stream_join_drops_its_warmup() {
+		assert_eq!(opus_track_output(1, 6).await, (Some(80_000), 6 * 960 - 312 - 3_840));
 	}
 
 	/// A refused packet primed nothing, so the window starts at the first one that decodes.
@@ -1098,7 +1287,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: Duration::from_secs(10),
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1131,7 +1323,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: Duration::from_secs(10),
+				delay: Delay {
+					max: Some(Duration::from_secs(10)),
+					..Delay::default()
+				},
 				output: Output {
 					sample_rate: Some(48_000),
 					..Output::default()
@@ -1273,7 +1468,10 @@ mod tests {
 		);
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 		let options = Options {
-			max_delay: Duration::from_secs(1),
+			delay: Delay {
+				max: Some(Duration::from_secs(1)),
+				..Delay::default()
+			},
 			..Options::new()
 		};
 		let mut consumer = Consumer::new(&broadcast.consume(), &catalog, "audio", options)
@@ -1325,7 +1523,10 @@ mod tests {
 					sample_rate: Some(48_000),
 					..Output::default()
 				},
-				max_delay: Duration::from_secs(1),
+				delay: Delay {
+					max: Some(Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1399,7 +1600,10 @@ mod tests {
 					sample_rate: Some(48_000),
 					..Output::default()
 				},
-				max_delay: std::time::Duration::from_secs(1),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1533,7 +1737,10 @@ mod tests {
 					sample_rate: Some(44_100),
 					..Output::default()
 				},
-				max_delay: std::time::Duration::from_secs(1),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1616,7 +1823,10 @@ mod tests {
 					sample_rate: Some(out_rate),
 					..Output::default()
 				},
-				max_delay: std::time::Duration::from_secs(1),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1863,7 +2073,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: std::time::Duration::from_secs(1),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -1951,7 +2164,11 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				delay: case.delay.map(duration),
+				delay: Delay {
+					min: case.delay.map_or(Duration::ZERO, duration),
+					..Delay::default()
+				},
+				estimate: case.delay.is_none(),
 				..Options::new()
 			},
 		)
@@ -2065,7 +2282,11 @@ mod tests {
 		let catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
 
 		let options = |delay| Options {
-			delay: Some(std::time::Duration::from_millis(delay)),
+			delay: Delay {
+				min: std::time::Duration::from_millis(delay),
+				..Delay::default()
+			},
+			estimate: false,
 			..Options::new()
 		};
 		let err = Consumer::new(&subscriber, &catalog, "audio", options(101))
@@ -2094,7 +2315,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: std::time::Duration::from_millis(500),
+				delay: Delay {
+					max: Some(std::time::Duration::from_millis(500)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -2133,7 +2357,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: std::time::Duration::from_secs(1),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -2187,7 +2414,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay: std::time::Duration::from_secs(1),
+				delay: Delay {
+					max: Some(std::time::Duration::from_secs(1)),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)
@@ -2246,7 +2476,10 @@ mod tests {
 			&catalog,
 			"audio",
 			Options {
-				max_delay,
+				delay: Delay {
+					max: Some(max_delay),
+					..Delay::default()
+				},
 				..Options::new()
 			},
 		)

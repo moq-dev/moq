@@ -554,8 +554,7 @@ fn spawn_fill(
 	tasks.spawn(async move {
 		let _permit = permit;
 		let mut last = None;
-		while fill.is_used()
-			&& let Some(sequence) = fill.next()
+		while let Some(sequence) = fill.wanted()
 			&& last != Some(sequence)
 		{
 			last = Some(sequence);
@@ -957,7 +956,6 @@ mod tests {
 	/// A group every reader narrowed past releases the fill's one-at-a-time fetch, so the
 	/// groups the fill still owes are fetched rather than waiting behind it.
 	#[tokio::test(start_paused = true)]
-	#[expect(clippy::disallowed_methods, reason = "tokio's paused clock bounds the waits")]
 	async fn a_group_nobody_reads_releases_its_fill() {
 		use std::task::Poll;
 		let (rung, source, _retire) = idle_rung();
@@ -988,7 +986,7 @@ mod tests {
 		let permit = Arc::new(Semaphore::new(1)).try_acquire_owned().unwrap();
 		spawn_fill(&mut tasks, rung, fill, permit);
 		let wait = std::time::Duration::from_secs(5);
-		let first = tokio::time::timeout(wait, source_fills.requested_fill())
+		let first = kio::clock::timeout(wait, source_fills.requested_fill())
 			.await
 			.expect("group 7 is fetched from the source")
 			.unwrap();
@@ -996,7 +994,7 @@ mod tests {
 
 		reader.update(ascending(8..)).unwrap();
 		assert!(reader.poll_recv_group(&waiter).is_pending());
-		let next = tokio::time::timeout(wait, source_fills.requested_fill())
+		let next = kio::clock::timeout(wait, source_fills.requested_fill())
 			.await
 			.expect("the fill waited behind group 7, which nobody reads")
 			.unwrap();

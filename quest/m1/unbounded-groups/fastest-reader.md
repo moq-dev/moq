@@ -21,7 +21,8 @@ Decided 2026-10-25 (maintainer, mesh planning interview), reopening the
   the publisher or its other readers. Rejected: pacing by the slowest reader
   (TCP fanout semantics), and an opt-in flow-controlled track flag.
 - Propagate with QUIC stream flow control per hop. No new wire messages, so it
-  lands in the m1 cut beside [Front eviction](/quest/m1/unbounded-groups/front-eviction.md).
+  lands in the m1 cut beside front eviction
+  ([moq-dev/moq#6993](https://github.com/moq-dev/moq/pull/6993)).
   Rejected: explicit MoQ-level credit messages.
 - A reader past the window gets no new mechanism: it is an ordinary front
   eviction victim. Tracks without a fill handler, such as
@@ -30,8 +31,8 @@ Decided 2026-10-25 (maintainer, mesh planning interview), reopening the
 
 Decided 2026-10-28 (maintainer, after an audit of the plan):
 
-- One 32 MB budget per group: the live tail that
-  [front eviction](/quest/m1/unbounded-groups/front-eviction.md) holds is
+- One 32 MB budget per group: the live tail that front eviction
+  (`GroupState::trim` in `rs/moq-net/src/model/group.rs`) holds is
   "ahead" (bytes the fastest reader has not read, bounded by pacing) plus
   "behind" (bytes it has read, kept for slower readers). Shedding never
   passes the fastest reader, and the ahead window is at most 16 MB, half
@@ -63,6 +64,14 @@ Decided 2026-10-28 (maintainer, after an audit of the plan):
   (`CloseKind::Evicted`), which could reset the very byte stream pacing keeps
   lossless. Bring the mechanism to the maintainer before coding, and align it
   with the [receive pool](/quest/m2/receive-pool.md).
+- Folded in 2026-11-01 (maintainer, follow-up of
+  [moq-dev/moq#7328](https://github.com/moq-dev/moq/pull/7328)): the same cap
+  covers streams parked waiting for TRACK_INFO. Group data that a SUBSCRIBE
+  sent alongside TRACK, or a FETCH, leaves unread until TRACK_INFO arrives
+  must not use up the connection receive window, or TRACK_INFO itself can't
+  arrive. TRACK_INFO and other control messages always get connection
+  credit, in Rust and JS. Test it: enough parked groups to fill the
+  connection window, with TRACK_INFO still arriving and the groups then read.
 
 Prior art splits the same way (2026-10-28 survey): Varnish streaming, ATS
 read-while-writer, and WHATWG `tee()` fan out at the writer's pace and buffer
@@ -83,7 +92,3 @@ record any regression.
 
 Docs: the moq-lite concept page's congestion section and the relay cache docs
 change inline.
-
-## Required
-
-- [Front eviction](/quest/m1/unbounded-groups/front-eviction.md) - the eviction this pacing bounds

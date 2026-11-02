@@ -10,6 +10,15 @@
 //! Compiled only under `cfg(test)` or the `fuzz` feature, so none of this is part of
 //! the published API. See `fuzz/README.md` for the workflow.
 
+mod ingest;
+mod request;
+
+pub use ingest::ingest;
+pub use request::request;
+
+/// A lite-07 publisher run loop waiting on SUBSCRIBE_START, for the publisher bench.
+pub use crate::lite::CoverageBench;
+
 use bytes::Bytes;
 
 use crate::{
@@ -93,6 +102,8 @@ pub const TARGETS: &[(&str, Target)] = &[
 	("varint", varint),
 	("path", path),
 	("pattern", pattern),
+	("ingest", ingest),
+	("request", request),
 ];
 
 /// The moq-lite versions a target decodes at, selected by the input's first byte.
@@ -107,7 +118,7 @@ const LITE_VERSIONS: &[lite::Version] = &[
 ];
 
 /// The moq-transport drafts a target decodes at, selected by the input's first byte.
-const IETF_VERSIONS: &[ietf::Version] = &[ietf::Version::Draft18, ietf::Version::Draft22];
+const IETF_VERSIONS: &[ietf::Version] = &[ietf::Version::Draft18, ietf::Version::Draft20, ietf::Version::Draft22];
 
 /// How many types [`lite_wire`] dispatches over.
 const LITE_KINDS: u8 = 30;
@@ -221,7 +232,12 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 	let mut any = false;
 	for &negotiated in negotiated {
 		for timescale in [Some(crate::Timescale::MILLI), None] {
-			for ietf in [None, Some(ietf::Version::Draft18), Some(ietf::Version::Draft22)] {
+			for ietf in [
+				None,
+				Some(ietf::Version::Draft18),
+				Some(ietf::Version::Draft20),
+				Some(ietf::Version::Draft22),
+			] {
 				for compressed in [false, true] {
 					let framing = lite::Framing {
 						timescale,
@@ -234,13 +250,17 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 						continue;
 					};
 					any = true;
+					let Some(decoded) = decoded else {
+						continue;
+					};
 
 					let Ok(first) = decoded.encode_bytes(version) else {
 						continue;
 					};
 
 					let echo = lite::Datagram::decode(first, version, negotiated, |_| framing)
-						.expect("could not decode our own encoding");
+						.expect("could not decode our own encoding")
+						.expect("encoded group decoded as padding");
 					assert_eq!(echo, decoded, "datagram did not survive a round trip");
 				}
 			}
@@ -375,7 +395,18 @@ pub fn requests_route(
 	prefix: impl Into<crate::Path>,
 	route: crate::origin::Route,
 ) -> Result<crate::origin::Requests, crate::Error> {
-	origin.requests_route(prefix, route)
+	origin.requests_route(prefix, route, None)
+}
+
+/// Land a claim taking over the peer's `predecessor` claim, as a session lands an
+/// ANNOUNCE_TAKEOVER, for the origin bench.
+pub fn takeover_route(
+	origin: &crate::origin::Producer,
+	prefix: impl Into<crate::Path>,
+	route: crate::origin::Route,
+	predecessor: &crate::origin::Requests,
+) -> Result<crate::origin::Requests, crate::Error> {
+	origin.requests_route(prefix, route, Some(predecessor))
 }
 
 /// Replace a peer claim's route in place, as a session does on a route update.
@@ -730,9 +761,9 @@ where
 	let outer = crate::Version::Ietf(version);
 	if let Ok((message, _)) = T::decode_slice(data, outer) {
 		let parameters = parameters(&message);
-		if ietf::decode_peer_setup(parameters.clone(), version, true).is_ok() {
+		if ietf::decode_peer_setup(parameters, version, true).is_ok() {
 			assert!(
-				ietf::decode_peer_setup(parameters.clone(), version, false).is_ok(),
+				ietf::decode_peer_setup(parameters, version, false).is_ok(),
 				"a server's Setup Options are refused from a client"
 			);
 		}
@@ -853,7 +884,6 @@ impl Default for Messages {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
-				epoch: None,
 			},
 			ietf_ok: ietf::SubscribeOk {
 				track_alias: 5,
@@ -1005,7 +1035,6 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			authorization_token: None,
 			new_group: None,
 			max_age: None,
-			epoch: None,
 		}
 		.encode(w, BENCH_IETF)
 		.unwrap(),
@@ -1347,7 +1376,6 @@ pub fn seeds() -> Vec<Seed> {
 				range_filters: false,
 				fill_timeout: false,
 				properties_wanted: true,
-				epoch: None,
 			};
 			fetch.encode_bytes(*version).ok()
 		}) else {
@@ -1478,7 +1506,44 @@ pub fn seeds() -> Vec<Seed> {
 		});
 	}
 
+	// Length prefixes at and one past each cap, ahead of a body far too short for them, so
+	// the fuzzer starts beside every rejection path instead of searching for its bound: a
+	// moq-lite message's size (0xffff for most, 64 MiB for ANNOUNCE_INIT) and a
+	// moq-transport control message's two-byte length.
+	for (index, version) in LITE_VERSIONS.iter().enumerate() {
+		for kind in 0..LITE_KINDS {
+			for size in limits(&[0xffff, 64 << 20]) {
+				let mut data = vec![index as u8, kind];
+				Encoder::new(&mut data, (*version).into()).varint(size).unwrap();
+				data.extend_from_slice(&[0; 4]);
+				seeds.push(Seed {
+					target: "lite",
+					kind,
+					data,
+				});
+			}
+		}
+	}
+	for index in 0..IETF_VERSIONS.len() as u8 {
+		for kind in 0..IETF_KINDS {
+			seeds.push(Seed {
+				target: "ietf",
+				kind,
+				data: vec![index, kind, 0xff, 0xff, 0, 0, 0, 0],
+			});
+		}
+	}
+
+	seeds.extend(ingest::seeds());
+	seeds.extend(ingest::limit_seeds());
+	seeds.extend(request::seeds());
+
 	seeds
+}
+
+/// Each of `caps`, and one past it.
+pub(crate) fn limits(caps: &[u64]) -> impl Iterator<Item = u64> + '_ {
+	caps.iter().flat_map(|cap| [*cap, cap + 1])
 }
 
 type FrameReader = coding::Reader<crate::transport::poll::Buffered<Chunks>, lite::Version>;
@@ -1609,20 +1674,32 @@ impl crate::transport::Error for NoError {
 }
 
 /// A source-selection watch for the private request-lifetime benchmark.
-pub struct RequestValidity(crate::model::broadcast::RequestValidity);
+pub struct RequestValidity {
+	watch: crate::model::broadcast::RequestValidity,
+	/// Every period [`Self::start`] captured. A pending request holds its route and
+	/// answering leases until it ends, so a replacement closes both without freeing
+	/// either, and the benchmark must not charge it for freeing them.
+	periods: Vec<crate::model::broadcast::RequestValidity>,
+}
 
 impl RequestValidity {
 	/// Watch which instance this route's peer selects for a path.
 	pub fn new(route: &crate::origin::Requests, path: &crate::Path) -> Self {
-		Self(crate::model::broadcast::RequestValidity::for_source(route, path))
+		Self {
+			watch: crate::model::broadcast::RequestValidity::for_source(route, path),
+			periods: Vec::new(),
+		}
 	}
 
-	/// Capture the lifetime of one pending request.
-	pub fn start(&self) -> kio::Consumer<()> {
-		match self.0.start() {
-			crate::model::broadcast::RequestValidity::Period(route, ..) => route,
-			_ => unreachable!("a source watch always captures a route lease"),
-		}
+	/// Capture the lifetime of one pending request, retaining its leases until this drops.
+	pub fn start(&mut self) -> kio::Consumer<()> {
+		let period = self.watch.start();
+		let crate::model::broadcast::RequestValidity::Period(route, ..) = &period else {
+			unreachable!("a source watch always captures a route lease");
+		};
+		let route = route.clone();
+		self.periods.push(period);
+		route
 	}
 }
 
@@ -1687,6 +1764,24 @@ mod tests {
 
 		let missing: Vec<_> = expected.difference(&decoded).collect();
 		assert!(missing.is_empty(), "no seed decodes for {missing:?}");
+	}
+
+	/// The stream seeds are built from our own framing, one per version and protocol, so
+	/// each must decode whole: one that does not leaves its version's path unseeded. Those
+	/// at a cap must not, or they sit beside no rejection path.
+	#[test]
+	fn stream_seeds_decode() {
+		for seed in ingest::seeds().into_iter().chain(request::seeds()) {
+			assert!(
+				target(seed.target)(&seed.data),
+				"{} seed {:x?} does not decode",
+				seed.target,
+				seed.data
+			);
+		}
+		for seed in ingest::limit_seeds() {
+			assert!(!ingest(&seed.data), "ingest seed {:x?} decodes past its cap", seed.data);
+		}
 	}
 
 	/// Replay the crash inputs committed under `fuzz/regressions/`, so a bug the fuzzer

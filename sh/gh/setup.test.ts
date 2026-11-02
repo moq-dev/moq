@@ -47,12 +47,8 @@ for (const name of ["check"]) {
 		}
 	});
 
-	test(`${name} uses the configured runner only for merge groups`, () => {
-		const expression = workflow.jobs[name]["runs-on"].replace(/^\$\{\{\s*|\s*\}\}$/g, "");
-		const runner = new Function("github", "vars", `return (${expression});`);
-		expect(runner({ event_name: "merge_group" }, { MOQ_QUEUE_RUNNER: "moq-queue" })).toBe("moq-queue");
-		expect(runner({ event_name: "merge_group" }, {})).toBe("ubuntu-24.04-arm");
-		expect(runner({ event_name: "pull_request" }, { MOQ_QUEUE_RUNNER: "moq-queue" })).toBe("ubuntu-24.04-arm");
+	test(`${name} keeps release checks on a hosted runner`, () => {
+		expect(workflow.jobs[name]["runs-on"]).toBe("ubuntu-24.04-arm");
 	});
 }
 
@@ -64,10 +60,20 @@ test("self-hosted queue jobs use local caches without R2 credentials", async () 
 		.replaceAll("inputs.secret-access-key", 'inputs["secret-access-key"]')
 		.replace(/^\$\{\{\s*|\s*\}\}$/g, "");
 	const backend = new Function("runner", "inputs", `return (${expression});`);
-	const guard = new Function("runner", "github", `return (${action.runs.steps[0].if});`);
-	for (const event_name of ["merge_group", "pull_request", "pull_request_target", "push", "workflow_dispatch"]) {
-		expect(guard({ environment: "self-hosted" }, { event_name })).toBe(event_name !== "merge_group");
-		expect(guard({ environment: "github-hosted" }, { event_name })).toBe(false);
+	// GitHub's expression `startsWith`, so the guard evaluates as written.
+	const startsWith = (value: string, prefix: string) => value.startsWith(prefix);
+	const guard = new Function("runner", "github", "startsWith", `return (${action.runs.steps[0].if});`);
+	const queue = "refs/heads/gh-readonly-queue/main/pr-1-0123456789abcdef0123456789abcdef01234567";
+	const refs = ["refs/heads/main", "refs/heads/feature", "refs/pull/1/merge", queue, "refs/heads/gh-readonly-queue/release/pr-1-0"];
+	for (const name of ["Queue", "Land", "Check", "Untrusted"]) {
+		for (const event of ["merge_group", "pull_request", "push"]) {
+			for (const ref of refs) {
+				const github = { workflow: name, event_name: event, ref };
+				const trusted = name === "Queue" && event === "merge_group" && ref === queue;
+				expect(guard({ environment: "self-hosted" }, github, startsWith)).toBe(!trusted);
+				expect(guard({ environment: "github-hosted" }, github, startsWith)).toBe(false);
+			}
+		}
 	}
 	for (const credentials of [
 		{ "access-key-id": "key", "secret-access-key": "secret" },

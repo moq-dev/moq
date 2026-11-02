@@ -7,6 +7,8 @@ import MoqFFI
 // instead (see Client.swift, Broadcast.swift, etc.), so MoqFFI's `Moq`-prefixed
 // classes never appear in the public API.
 
+/// An exact media timestamp: `value` units at `scale` units per second.
+public typealias Timestamp = MoqFFI.MoqTimestamp
 /// A payload plus the presentation timestamp it should play at. The unit of
 /// every raw write and raw read.
 public typealias Frame = MoqFFI.MoqFrame
@@ -18,13 +20,14 @@ public typealias AudioEncoderInput = MoqFFI.MoqAudioEncoderInput
 /// The codec-side audio encoder settings: codec, rate, channels,
 /// bitrate, and frame duration.
 public typealias AudioEncoderOutput = MoqFFI.MoqAudioEncoderOutput
-/// What a `VideoConsumer` decodes to: an optional resize, a max delay, and
+/// What a `VideoConsumer` decodes to: an optional resize, a delay, and
 /// whether frames keep the decoder's native surface.
 public typealias VideoDecoderOutput = MoqVideoDecoderOutput
 /// One decoded video frame, owning the decoder's surface until released;
 /// `pixels(format:)` converts it to packed CPU pixels.
 public typealias VideoDecodedFrame = MoqVideoDecodedFrame
-/// The decoded PCM layout, maximum group staleness, and playout delay.
+/// The decoded PCM layout, its delay (playout and group staleness), and whether the
+/// playout delay is estimated.
 public typealias AudioDecoderOutput = MoqFFI.MoqAudioDecoderOutput
 /// A raw PCM sample format, mirroring WebCodecs `AudioData.format`.
 public typealias AudioSampleFormat = MoqFFI.MoqAudioSampleFormat
@@ -56,8 +59,7 @@ public typealias AnnounceRoute = MoqFFI.MoqAnnounceRoute
 /// cost, lower wins.
 public typealias Route = MoqFFI.MoqRoute
 /// A route over a prefix: the origin-relative `prefix`, what each filter
-/// wildcard matched (`captures`, `nil` for a partial overlap), and the `route`
-/// serving it. Resolve a path with `OriginConsumer.request`.
+/// wildcard matched (`captures`), and the `route` serving it. Resolve a path with `OriginConsumer.request`.
 public typealias Announce = MoqFFI.MoqAnnounce
 /// What an `AnnounceConsumer` yields: `.start`, `.update`, `.end`, or
 /// `.restart` (request the path again), each carrying an `Announce`.
@@ -116,14 +118,22 @@ public typealias ProtocolKind = MoqFFI.MoqProtocolKind
 /// A protocol failure: scope, verbatim wire code, kind, and a diagnostic message.
 public typealias ProtocolError = MoqFFI.MoqProtocolError
 
+/// A location within a track: a group sequence and a frame index in it.
+public typealias Position = MoqFFI.MoqPosition
+
 // Nested rather than top-level: a module-level `Range` would shadow `Swift.Range`
 // in every file that imports Moq.
 extension Subscription {
     /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is `nil`.
     public typealias Range = MoqFFI.MoqRange
     /// Where one end of a `Range` falls: `.absolute(group:)`, `.relative(groups:)`
-    /// back from the latest group, or `.time(timestampUs:)` for the group containing it.
+    /// back from the latest group, or `.time(timestamp:)` for the group containing it.
     public typealias Anchor = MoqFFI.MoqAnchor
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder
+
+    /// moq-net's defaults, whose `maxDelay` of 0 skips a superseded group at once. A `nil`
+    /// subscription means the same; copy this one to change a field. A `Subscription(...)`
+    /// must name `maxDelay`, where `nil` sets no subscriber limit.
+    public static var `default`: Subscription { moqSubscriptionDefaults() }
 }

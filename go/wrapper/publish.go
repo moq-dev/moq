@@ -206,21 +206,25 @@ func (t *TrackProducer) CreateGroup(sequence uint64) (*GroupProducer, error) {
 
 // WriteFrame writes frame as a single-frame group.
 func (t *TrackProducer) WriteFrame(frame Frame) error {
-	f, err := frame.ffi()
-	if err != nil {
-		return err
-	}
-	return t.inner.WriteFrame(f)
+	return t.inner.WriteFrame(frame)
 }
 
 // AppendDatagram sends frame as a best-effort datagram and returns the sequence number
 // assigned to it. Payloads are capped at 1200 bytes. There is no stream fallback.
 func (t *TrackProducer) AppendDatagram(frame Frame) (uint64, error) {
-	f, err := frame.ffi()
-	if err != nil {
-		return 0, err
-	}
-	return t.inner.AppendDatagram(f)
+	return t.inner.AppendDatagram(frame)
+}
+
+// InsertDatagram sends frame as a best-effort datagram at an explicit sequence, for a
+// caller that allocates its own. AppendDatagram continues after the largest one.
+func (t *TrackProducer) InsertDatagram(sequence uint64, frame Frame) error {
+	return t.inner.InsertDatagram(sequence, frame)
+}
+
+// Largest reports the newest group or datagram written, at its newest frame, or nil
+// before any.
+func (t *TrackProducer) Largest() (*Position, error) {
+	return t.inner.Largest()
 }
 
 // Abort closes the track with an application error code.
@@ -274,11 +278,7 @@ func (g *GroupProducer) Consume() (*GroupConsumer, error) {
 
 // WriteFrame appends frame to the group.
 func (g *GroupProducer) WriteFrame(frame Frame) error {
-	f, err := frame.ffi()
-	if err != nil {
-		return err
-	}
-	return g.inner.WriteFrame(f)
+	return g.inner.WriteFrame(frame)
 }
 
 // Finish marks the group complete. The handle remains so Abort can still run.
@@ -317,11 +317,11 @@ func (d *TrackRequests) Cancel() {
 
 // Fill is a run of groups readers miss, for a TrackRequests to serve.
 //
-// Accept each group you have and DropGroups the rest; Next names what is still
+// Accept each group you have and DropGroups the rest; Wanted names what is still
 // owed, in the fill's order. Releasing the fill names whatever is left as dropped
 // while a reader still wants it; once nobody does, it is withdrawn, so stop
-// serving it when Unused returns. Stop serving a single group when Unwanted
-// returns for it, and move on to Next.
+// serving it once Wanted is nil. Stop serving a single group when Unwanted
+// returns for it, and move on to Wanted.
 type Fill struct {
 	inner *ffi.MoqFill
 }
@@ -357,9 +357,15 @@ func (f *Fill) Order() Order {
 	return f.inner.Order()
 }
 
-// Next is the next group still owed in the fill's order, or nil once every group is answered.
-func (f *Fill) Next() *uint64 {
-	return f.inner.Next()
+// Wanted is the next group still owed in the fill's order, or nil once every
+// group is answered or no reader waits on the fill.
+func (f *Fill) Wanted() *uint64 {
+	return f.inner.Wanted()
+}
+
+// WantedChanged blocks until Wanted changes and returns it. The first call returns at once.
+func (f *Fill) WantedChanged(ctx context.Context) (*uint64, error) {
+	return f.inner.WantedChanged(ctx)
 }
 
 // Accept inserts group sequence and returns a producer for it. The first group
@@ -375,16 +381,6 @@ func (f *Fill) Accept(sequence uint64) (*GroupProducer, error) {
 // DropGroups names groups start up to the exclusive end as never to be delivered.
 func (f *Fill) DropGroups(start, end uint64) {
 	f.inner.DropGroups(start, end)
-}
-
-// IsUsed reports whether a reader still waits on this fill.
-func (f *Fill) IsUsed() bool {
-	return f.inner.IsUsed()
-}
-
-// Unused blocks until no reader waits on this fill.
-func (f *Fill) Unused(ctx context.Context) error {
-	return f.inner.Unused(ctx)
 }
 
 // IsWanted reports whether a reader still waits for group sequence from this fill:

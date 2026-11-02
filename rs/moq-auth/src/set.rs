@@ -144,7 +144,7 @@ mod tests {
 		texts.iter().map(|text| text.parse().unwrap()).collect()
 	}
 	use crate::Algorithm;
-	use moq_clock::Wall;
+	use kio::clock::Wall;
 	use std::time::Duration;
 
 	fn create_test_claims() -> Claims {
@@ -152,8 +152,8 @@ mod tests {
 			root: "test-path".to_string(),
 			publish: patterns(&["test-pub/**"]),
 			subscribe: patterns(&["test-sub/**"]),
-			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
-			issued: Some(moq_clock::wall()),
+			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
+			issued: Some(kio::clock::wall()),
 			not_before: None,
 		}
 	}
@@ -370,7 +370,7 @@ mod tests {
 		// Use a random-ish name to avoid collisions
 		let filename = format!(
 			"test_keyset_{}.json",
-			moq_clock::wall()
+			kio::clock::wall()
 				.checked_duration_since(Wall::UNIX_EPOCH)
 				.unwrap()
 				.as_nanos()
@@ -392,7 +392,7 @@ mod tests {
 	fn test_file_io_permissions() {
 		use std::os::unix::fs::PermissionsExt;
 
-		let unique = moq_clock::wall()
+		let unique = kio::clock::wall()
 			.checked_duration_since(Wall::UNIX_EPOCH)
 			.unwrap()
 			.as_nanos();

@@ -5,7 +5,7 @@
 // idiomatic Go: context.Context cancellation, Go error returns, and Go 1.23
 // range-over-func iterators (iter.Seq2) for live streams. The raw record,
 // enum, and small object types are re-exported here without the Moq prefix (see types.go),
-// records with timestamps carry time.Duration (see records.go), so
+// media timestamps are exact Timestamp records (see records.go), so
 // most programs never need to import the ffi package directly.
 //
 // A typical full-duplex client wires a single origin as both publish source
@@ -24,8 +24,8 @@
 // owner.
 //
 // What a cancel tears down depends on the call. A one-shot call (a subscribe, a
-// fetch, Request, Resolve, a TrackDemand's WantedChanged, a
-// Fill's Unused, Server.Accept) aborts on its own and leaves the
+// fetch, Request, Resolve, a TrackDemand's or Fill's WantedChanged,
+// Server.Accept) aborts on its own and leaves the
 // object it was made on usable, so the same
 // broadcast, producer, or server takes the next call. A stream read (any Next,
 // RecvGroup, ReadFrame, or the iterators over them) instead cancels the stream

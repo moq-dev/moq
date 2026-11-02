@@ -2,7 +2,7 @@
 
 ## Goal
 
-Growth in release binaries, the FFI library, WASM, and JS bundles since the
+Growth in release binaries, the FFI library, and JS bundles since the
 previous run is explained, fixed, or planned.
 
 ## Plan
@@ -19,142 +19,134 @@ Only a change that needs a maintainer decision (public API, scope) or is
 independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
 
-Completed the m1 run on 2026-10-23 in
-[moq-dev/moq#6541](https://github.com/moq-dev/moq/pull/6541), after transport
-erasure landed. Start the next run with the post-release Shipping sizes history,
-then remeasure the local-only rows below. Do not compare archive bytes to raw
-ELFs, different targets, or symbol-preserving FFI builds to fully stripped ones.
+Decided 2026-10-31 (maintainer): investigate the failing Shipping sizes guard
+before the release cut. The pre-cut investigation below is complete; this
+file now tracks the recurring post-release refresh. Its release-cut blocker
+applies to that refresh, not to the incident investigation.
 
-### Shipping baseline
+After the release ships, compare its first complete Shipping sizes report
+with these baselines. Re-measure the local native profiling rows from
+[the previous audit](https://github.com/moq-dev/moq/pull/6541) using the same
+Rust target, profile, stripping, and toolchain. Never compare an archive to
+an ELF, different targets, or symbol-preserving FFI to fully stripped code.
+Preserve artifact keys and history identity; no guard limit or history reset
+is needed for this investigation.
 
-The first scheduled Nightly after the Linux release-link fix has a successful
-[Shipping sizes job](https://github.com/moq-dev/moq/actions/runs/39779729461/job/119868272494),
-from source `33940b6e336133a64d8601f42833f91708a7fd35` on 2026-10-22.
-Its `nightly-size-history` artifact contains one report, so it establishes a
-baseline, not a growth trend. The overall workflow failed other jobs; the size
-job succeeded. Preserve the existing artifact keys and history identity.
+### Shipping comparison
 
-Selected shipping rows, in bytes:
+The [2026-10-31 Nightly](https://github.com/moq-dev/moq/actions/runs/41204380716)
+measured source `38566f5a84cb07bb756aae43f6dc902f1abacec2`. Its last retained
+comparison was 2026-10-24, source
+`0513c07369357ae0ecd6109d0f6afc61d16b597f`. These are a week's changes,
+not one night's. Native, Python, and Swift counts are the actual uploaded
+consumer artifacts, except the explicitly labeled minimal native libraries.
+JS rows are not uploaded artifacts: `sh/size/collect.sh` builds the packages
+and `sh/size/bundles.ts` measures synthetic first-load consumer bundles of
+them. Compare JS rows only with JS rows measured the same way.
 
-| Artifact | Target | Bytes |
-|---|---|---:|
-| relay release tar.gz | x86_64 Linux | 14,899,418 |
-| CLI release tar.gz | x86_64 Linux | 22,741,534 |
-| moq-c release tar.gz | x86_64 Linux | 17,734,176 |
-| Go FFI staticlib | x86_64 Linux | 76,134,508 |
-| Python wheel | x86_64 Linux | 14,918,122 |
-| Kotlin Android AAR | multi-ABI | 43,550,022 |
-| Kotlin JVM jar | multi-platform | 56,395,891 |
-| Swift xcframework zip | Apple | 52,562,215 |
-| minimal FFI .so | aarch64 Linux | 29,975,280 |
-| minimal FFI .a | aarch64 Linux | 67,817,364 |
+| Shipping artifact, bytes | October 24 | October 31 |
+|---|---:|---:|
+| JS net, first-load gzip | 120,578 | 131,739 |
+| JS hang, first-load gzip | 145,814 | 157,500 |
+| JS watch, first-load gzip | 161,132 | 173,880 |
+| JS watch-ui, first-load gzip | 173,539 | 186,338 |
+| JS publish, first-load gzip | 158,683 | 169,794 |
+| moq-c macOS aarch64 tar.gz | 12,117,666 | 12,802,828 |
+| moq-c Linux aarch64 tar.gz | 14,139,421 | 14,864,395 |
+| moq-c Linux x86_64 tar.gz | 14,484,602 | 15,252,992 |
+| moq-c Windows x86_64 zip | 17,211,584 | 18,080,501 |
+| Python sdist | 7,733,152 | 9,192,166 |
+| Swift generated source tar.gz | 84,457 | 89,070 |
+| Minimal FFI aarch64 Linux .so | 23,783,232 | 24,757,488 |
+| Minimal FFI aarch64 Linux .a | 56,329,042 | 58,158,580 |
 
-These are the uploaded consumer packages, except the explicitly labeled minimal
-FFI builds. The report predates transport erasure. Check the first subsequent
-successful Shipping sizes report for its actual shipping effect; do not infer
-it from a local ELF or the earlier experiment below. Hosted build durations are
-recorded but are not deterministic size or runtime-performance comparisons.
+The new generated-C archive keys start their own series. They do not replace
+the existing C archive measurements. Native minimal builds remain below the
+5% guard. JS raw and Brotli rows grow alongside gzip; the watch CMAF lazy
+chunk stays essentially unchanged at 2,459 bytes gzip.
 
-### Local native and WASM baseline
+### Python source packaging
 
-Source `78e5b329458e5823415e0fe3f43678170b1df57b`, measured on 2026-10-23
-with pinned Rust 1.98.1 / LLVM 22.1.8 and Bun 1.4.2 in Nix. The empty claim
-`d2e15d270fb681b81ac7317329a3b13bab5aa5bb` has the same source tree.
-Native rows target the x86_64-unknown-linux-gnu host; WASM rows target
-wasm32-unknown-unknown. Remeasure on the same targets or start a new baseline.
-The relay, CLI, and FFI rows were each built separately with default features
-using
-`cargo bloat --locked --profile profiling -p PACKAGE --crates -n 0 --message-format json`
-(`--bin moq-relay`, `--bin moq`, or `--lib`). The C archive row uses
-`cargo build` instead, as its Method column says. The profiling profile
-inherits release's fat LTO, one codegen unit, and opt-level 3, retaining line
-tables for attribution. The local linker is rust-lld; shipping Linux builds use
-cargo-zigbuild.
+[moq-dev/moq#6867](https://github.com/moq-dev/moq/pull/6867) included the Rust
+workspace because Cargo resolves disabled optional path dependencies that
+Maturin's enabled dependency graph omits. Keep that correctness fix. It also
+made media test fixtures in other crates reach the source archive.
 
-| Local artifact | Bytes | Method |
-|---|---:|---|
-| relay ELF | 23,930,392 | profiling, objcopy --strip-all |
-| CLI ELF | 45,427,176 | profiling, objcopy --strip-all |
-| FFI .so with UniFFI symbols | 28,039,912 | profiling, objcopy --strip-debug |
-| FFI .so, diagnostic only | 23,770,704 | profiling, objcopy --strip-all |
-| C static archive | 226,828,912 | cargo build --locked --profile profiling -p moq-c; unstripped |
-| moq_bg.wasm | 2,611,008 | just js wasm; wasm-release; wasm-bindgen web |
-| moq_bg.wasm gzip | 885,186 | gzip -n -9 |
+On one local host with Maturin 1.14.1, repacking the same source before and
+after excluding all `test_data` directories reduced the archive from
+9,188,183 to 7,771,007 bytes. The removed mux/video fixture payload is
+3,665,958 uncompressed bytes. Audio fixtures were already excluded. The
+repacked archive is within 5% of the retained 7,733,152-byte baseline.
+Local repack counts differ slightly from hosted archive bytes; use the
+matched local pair to quantify the reduction.
 
-UniFFI requires the regular symbol table. Its 4,269,208-byte difference here
-is metadata, not executable code that bindings can safely discard. The C
-archive also includes profiling debug data; it is not a shipping archive.
+The reduced archive retains every Rust workspace source and optional path
+dependency. A release wheel built from its extracted contents, installed in
+a fresh virtual environment, and imported successfully. Cargo metadata with
+all features also resolves from the extracted archive. Existing Nightly
+source-install coverage exercises the same packaging boundary.
 
-Cargo-bloat's approximate symbol-owner attribution now assigns `moq_net`
-3,522,245 bytes of relay text, 3,576,453 bytes of CLI text, and 3,192,725 bytes
-of FFI text. Total text is 18,919,097 / 36,121,184 / 18,526,958 bytes. The old
-per-transport driver copies are gone. The prior
-[erasure experiment](https://github.com/moq-dev/moq/pull/6176) reported
-31.84 to 22.48 MiB relay, 49.06 to 42.48 MiB CLI, and 27.95 to 21.78 MiB
-fully stripped FFI. Those were earlier revisions, not a matched A/B against
-this run; do not report their difference from this table as new growth.
+### Browser first-load attribution and rejected reduction
 
-WASM was about 861.9 KB gzip at the previous local `7d2a91fe66` baseline.
-Current source adds listing, discovery, resume, range, TRACKS and IETF
-compression behavior while erasing duplicated transport drivers. A diagnostic
-name-preserving wasm-release build attributes roughly 1.73 MB of function
-bodies to names containing `moq_net`, 53 KB to `zlib_rs`, and 44 KB to
-`moq_pattern`. This is approximate current attribution, not a matched byte
-delta: preserving names changes retained exports during wasm-bindgen processing.
-No codec/profile change is justified by these sizes alone.
+`bun sh/size/bundles.ts OUTPUT` against the built packages reproduced every
+October 31 byte count exactly. Attribute only the entry's static import
+closure, not all metafile outputs: IETF session chunks remain lazy.
 
-The scheduled history currently has no WASM row. Keep the local method for
-this run's successor; if adding scheduled WASM coverage, review the artifact-set
-and history transition explicitly rather than silently resetting the existing
-history or treating the missing row as zero.
+The largest added first-load input is `sorted-btree`, 19,371 minified raw
+bytes, from [moq-dev/moq#6869](https://github.com/moq-dev/moq/pull/6869).
+Other net additions include auth session handling (3,902), resume (2,183),
+lite subscribe (1,557), track (1,470), reconnect policy (1,446), and group
+handling (1,437). These contributions are raw module attribution, not
+additive compressed deltas. Hang adds health reporting (4,080 raw bytes);
+watch adds player behavior (3,903). Hashed generated filenames must be
+normalized before comparing the watch/publish metafiles.
 
-### Browser bundles and compression
+A scratch adaptation to `@js-sdsl/ordered-map` 4.4.2 passed all ten ledger
+tests. Its isolated browser module was 10,757 raw / 3,445 gzip bytes, versus
+19,886 / 5,952 for the current tree under the same export harness. That is
+only a candidate dependency comparison, not a measured consumer-bundle delta.
 
-`bun install --frozen-lockfile`, `just js build`, then
-`bun sh/size/bundles.ts OUTPUT` measures real first-load consumer graphs using
-esbuild browser ESM splitting/minification and the reporter's gzip defaults.
-These two columns use the same method, unlike the native shipping/local rows.
+Five alternating warmed Chromium 156.0.8078.4 rounds of the existing ledger
+benchmark measured the following medians at 32,768 sparse arrivals:
 
-| First-load gzip | Scheduled 33940b6e33 | Local 78e5b32945 | Change |
+| Order, ns per arrival | Current | A/A | Candidate |
 |---|---:|---:|---:|
-| net | 114,477 | 120,016 | +5,539 |
-| hang | 139,334 | 145,757 | +6,423 |
-| watch | 155,204 | 161,392 | +6,188 |
-| watch-ui | 167,562 | 173,732 | +6,170 |
-| publish | 152,383 | 158,468 | +6,085 |
-| watch/cmaf, lazy | 4,417 | 4,417 | 0 |
-| watch-ui/cmaf, lazy | 4,417 | 4,417 | 0 |
+| Ascending | 406 | 403 | 592 |
+| Descending | 565 | 562 | 620 |
+| Shuffled | 1,080 | 946 | 1,022 |
+| Rolling expiry | 700 | 677 | 882 |
 
-Metafile input deltas are concentrated in listing (+3,978 raw bytes), the
-pattern index (+3,558), resume (+3,148), lite subscriber (+2,025), publisher
-(+1,221), and tracks (+996). Compressed totals are not additive. Pako's raw
-contribution is unchanged; it is not the source of this interval's increase.
-The existing `js/net/src/ietf/index.test.ts` protects the lazy IETF boundary.
+Keep `sorted-btree`: the candidate slows ascending and rolling paths beyond
+the A/A spread. Do not restore array-backed insertion or full gap scans to
+save bytes; the ordered indexes bound sparse ledger work. No dependency or
+runtime behavior changed in this investigation.
 
-Isolated minified browser ESM exports of the current flate Encoder, Decoder,
-and both cost 8,370 / 10,991 / 14,024 bytes gzip. The combined graph adds
-3,033 bytes over decoder-only, retaining the accepted synchronous encoder cost.
-Track writes and the lazy `Frame.payload` getter consume these codecs
-synchronously. An async browser codec/import would change those contracts;
-this audit makes no such rewrite. The separate native browser codec quests
-own adoption when the synchronous and flush contracts can be met.
+### Native and generated binding attribution
 
-### Next attribution leads
+The actual x86_64 Linux C archive contains a header, one static library, and
+its CMake/pkg-config metadata. The library grew from 58,705,866 to 61,628,112
+bytes; the header from 147,069 to 163,216. There is no duplicate runtime or
+extra build artifact in the package.
 
-The existing catalog quest owns generic catalog/diff serialization duplication:
-current CLI attribution includes 2,637,701 bytes `moq_mux` and 1,606,084 bytes
-`moq_json`. The FFI profile quest owns the open size-versus-throughput choice:
-its size reduction is measured, but its throughput cost still needs a
-benchmark. This audit does not adopt opt-level s or remove symbols. Recheck these leads
-against post-release shipping history before proposing more work. There was no
-new independently justified runtime fix in the m1 run.
+`nm -S -C --defined-only` on the two shipped static libraries attributes the
+largest text-symbol increases to `moq_net` (+335,565 bytes), `moq_mux`
+(+208,475), and `mp4_atom` (+200,070). This is approximate namespace
+attribution, not a compressed-byte decomposition. Cross-crate inlining,
+compiler-generated code, and metadata account for other bytes.
+[moq-dev/moq#7400](https://github.com/moq-dev/moq/pull/7400), merged after
+these measurements, addresses the catalog serialization duplication lead. The [bindings size profile
+quest](/quest/m2/ffi-size-profile.md) requires codec/crypto and FFI throughput
+measurements before adopting opt-level s; no compiler profile was changed.
 
-Check first (added 2026-10-28): when [moq-dev/moq#7132](https://github.com/moq-dev/moq/pull/7132)
-let the Nightly report the generated C archives, it unmasked growth since
-2026-10-24 that no run has explained: every JS bundle grew 6 to 8% (the largest
-single input is `sorted-btree`, +19 KB raw, from
-[moq-dev/moq#6869](https://github.com/moq-dev/moq/pull/6869)), and the Python
-sdist grew 17% (7,733,152 to 9,016,318 bytes).
+The Swift source tarball grows in `Generated.swift`, from 684,643 to 704,105
+bytes. Its new request/publication, token, media-read and decoder-start
+bindings match the changed public API. `Package.swift` only changes the
+xcframework checksum, at the same length; licenses and README are identical.
+No packaging duplication was found.
+
+### WASM
+
+moq's WASM build was removed on 2026-10-31, so there is no WASM row to repeat.
 
 ## Required
 
@@ -162,7 +154,6 @@ sdist grew 17% (7,733,152 to 9,016,318 bytes).
 
 ## Related
 
-- [The catalog publish path compiles once](/quest/m2/catalog-publish-once.md)
 - [FFI size profile](/quest/m2/ffi-size-profile.md)
 - [Native synchronous codecs](/quest/m2/native-compression-sync.md)
 - [Native browser codecs](/quest/m2/native-compression-adopt.md)
