@@ -57,7 +57,7 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 	let broadcast = p.create_broadcast("live").unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast
-		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(origin::Route::default().with_instance(moq_net::Instance::random(), 0))
 		.unwrap();
 	let p_o = link(version, &p, &o).await;
 	let o_m1 = link(version, &o, &m1).await;
@@ -194,7 +194,7 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 	let broadcast = p.create_broadcast("live").unwrap();
 	let track = broadcast.create_track("video", timed()).unwrap();
 	broadcast
-		.announce(origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+		.announce(origin::Route::default().with_instance(moq_net::Instance::random(), 0))
 		.unwrap();
 	let p_o = link(version, &p, &o).await;
 	let o_m1 = link(version, &o, &m1).await;
