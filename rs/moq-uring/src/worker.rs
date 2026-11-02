@@ -1100,13 +1100,25 @@ mod tests {
 		const ROUNDS: usize = 16;
 
 		/// For each round trip, the turns from the request's receive to its reply.
-		fn hand_offs(passes: usize) -> Option<Vec<u64>> {
+		fn hand_offs(passes: usize, busy: bool) -> Option<Vec<u64>> {
 			let mut worker = worker_with(Config {
 				passes: NonZeroUsize::new(passes).unwrap(),
 				..Config::default()
 			})?;
 			let handle = worker.handle();
 			let owner = Owner::new(&handle.shared);
+			let busy_polls = Rc::new(std::cell::Cell::new((0, 0)));
+			if busy {
+				let (owner, polls) = (owner.clone(), busy_polls.clone());
+				handle.spawn(kio::wait(move |waiter: &kio::Waiter| {
+					let (turn, count) = polls.get();
+					let count = if turn == owner.turn() { count + 1 } else { 1 };
+					assert!(count <= passes, "a self-wake ran past the turn's budget");
+					polls.set((owner.turn(), count));
+					waiter.waker().wake_by_ref();
+					Poll::<()>::Pending
+				}));
+			}
 			let udp_config = udp::Config {
 				gro: false,
 				gso: false,
@@ -1163,13 +1175,20 @@ mod tests {
 					}
 				})
 				.expect("worker");
+			if busy {
+				assert_eq!(busy_polls.get().1, passes, "the busy task spent every pass");
+			}
+			drop(worker);
+			assert_eq!(Rc::strong_count(&busy_polls), 1, "a task survived its worker");
 			Some(gaps.take())
 		}
 
-		let Some(two) = hand_offs(2) else { return };
-		assert_eq!(two, [0; ROUNDS], "the reply is staged in its request's turn");
-		let Some(one) = hand_offs(1) else { return };
-		assert_eq!(one, [1; ROUNDS], "a pass per turn spends a turn on the hand-off");
+		for busy in [false, true] {
+			for passes in [1, 2, 4, 8] {
+				let Some(gaps) = hand_offs(passes, busy) else { return };
+				assert_eq!(gaps, [u64::from(passes == 1); ROUNDS], "passes={passes}, busy={busy}");
+			}
+		}
 	}
 
 	#[test]

@@ -1041,7 +1041,9 @@ mod tests {
 			wakes.0.store(0, Ordering::SeqCst);
 
 			let budget = NonZeroUsize::new(budget).unwrap();
+			let references = Arc::strong_count(&tasks.shared);
 			let ran = waiter.batch(|| tasks.poll_passes(&waiter, budget));
+			assert_eq!(Arc::strong_count(&tasks.shared), references, "a batch retained a wake");
 			assert_eq!(ran, budget.get());
 			assert_eq!(b_polls.load(Ordering::SeqCst), 1 + b_ran, "budget {budget}");
 			assert_eq!(wakes.0.load(Ordering::SeqCst), owner_wakes, "budget {budget}");
