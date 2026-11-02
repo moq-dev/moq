@@ -37,7 +37,7 @@ typedef EncoderInput = MoqVideoEncoderInput;
 /// The codec, bitrate, group mode, and backend preference.
 typedef EncoderOutput = MoqVideoEncoderOutput;
 
-/// What a [Consumer] delivers: an optional resize, a max delay, and whether to keep the decoder's surface (macOS and iOS).
+/// What a [Consumer] delivers: an optional resize, a delay, and whether to keep the decoder's surface (macOS and iOS).
 typedef DecoderOutput = MoqVideoDecoderOutput;
 
 /// One raw picture with its presentation timestamp.
@@ -81,30 +81,6 @@ typedef SoftwareEncoder = SoftwareMoqVideoEncoderKind;
 
 /// A specific backend by name, such as `videotoolbox`, `mediafoundation`, or `openh264`.
 typedef NamedEncoder = NamedMoqVideoEncoderKind;
-
-/// Duration view over a raw picture's timestamp.
-extension VideoFrameDuration on MoqVideoFrame {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}
-
-/// Duration view over a decoded picture's timestamp.
-extension VideoDecodedFrameDuration on MoqVideoDecodedFrame {
-  /// Presentation timestamp.
-  Duration get timestamp => Duration(microseconds: timestampUs());
-}
-
-/// Duration view over a gap.
-extension VideoReadGapDuration on GapMoqVideoRead {
-  /// The furthest presentation point already read.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}
-
-/// Duration view over an encoder end.
-extension VideoReadEndDuration on EndMoqVideoRead {
-  /// Where the stopped encoder's media stops.
-  Duration get end => Duration(microseconds: endUs);
-}
 
 /// Input, codec settings, and publication ownership for a producer.
 typedef ProducerOptions = MoqVideoProducerOptions;

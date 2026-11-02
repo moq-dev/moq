@@ -14,6 +14,7 @@ use crate::consumer::MoqBroadcastConsumer;
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
+use crate::media::MoqTimestamp;
 
 /// Raw PCM sample format, mirroring WebCodecs `AudioData.format`.
 ///
@@ -164,21 +165,20 @@ pub struct MoqAudioDecoderOutput {
 	/// the decoder remixes to it.
 	#[uniffi(default = None)]
 	pub channels: Option<u32>,
-	/// Upper bound on buffering before skipping a stalled group. Same
-	/// congestion-control knob as
-	/// [`MoqSubscription::max_delay`](crate::consumer::MoqSubscription::max_delay):
-	/// when a group stalls and a newer group is more than this far ahead,
-	/// the consumer skips. `None` keeps the moq-mux default of zero (skip
-	/// aggressively). Distinct from [`delay`](Self::delay): this one
-	/// bounds how stale a group may be and adds no buffering.
+	/// How far behind the live edge to play. `min` is the playout delay: the
+	/// jitter buffer to hold ahead of the playhead, reported by
+	/// [`MoqAudioConsumer::delay`], and where a cold join starts; with
+	/// [`estimate`](Self::estimate) it floors the measured delay instead. A `min`
+	/// beyond the track's retention is refused. `max` is the congestion-control
+	/// knob [`MoqSubscription::max_delay`](crate::consumer::MoqSubscription::max_delay)
+	/// carries: a stalled group more than this far behind a newer one is skipped,
+	/// with no buffering added. `None` keeps the moq-mux default of zero for both.
 	#[uniffi(default = None)]
-	pub max_delay: Option<Duration>,
-	/// A fixed playout delay, or `None` to estimate it from arrival timing. This
-	/// is the jitter buffer to hold ahead of the playhead, reported by
-	/// [`MoqAudioConsumer::delay`]. A fixed delay beyond the track's retention
-	/// is refused.
-	#[uniffi(default = None)]
-	pub delay: Option<Duration>,
+	pub delay: Option<crate::media::MoqDelay>,
+	/// Measure the playout delay from arrival timing, never below `delay.min`.
+	/// `false` holds exactly `delay.min`.
+	#[uniffi(default = true)]
+	pub estimate: bool,
 	/// Where to start on a track that already holds groups, or `None` for the oldest. A live
 	/// player picks [`Latest`](crate::media::MoqDecodeStart::Latest) so a reopened decoder
 	/// skips the backlog.
@@ -194,8 +194,8 @@ pub struct MoqAudioDecoderOutput {
 /// PCM in the configured `output_format`.
 #[derive(uniffi::Record)]
 pub struct MoqAudioFrame {
-	/// Presentation timestamp of the first sample, in microseconds.
-	pub timestamp_us: u64,
+	/// Presentation timestamp of the first sample.
+	pub timestamp: MoqTimestamp,
 	/// The samples, in the configured PCM layout.
 	pub data: Vec<u8>,
 }
@@ -216,36 +216,31 @@ pub enum MoqAudioRead {
 	/// or a packet's timestamp did not continue the previous one. What follows does not
 	/// continue what came before.
 	Gap {
-		/// The furthest presentation point already read, in microseconds.
-		timestamp_us: u64,
+		/// The furthest presentation point already read.
+		timestamp: MoqTimestamp,
 		/// An upper bound on how long until the next frame resumes.
 		duration: Duration,
 	},
 	/// The publisher stopped its encoder: it paused, switched source, or finished.
 	///
-	/// Frames that follow and start before `end_us` are the stopped encoder's remaining
+	/// Frames that follow and start before `end` are the stopped encoder's remaining
 	/// media; the first frame at or past it comes from a fresh encoder.
 	End {
-		/// Where the stopped encoder's media stops, in microseconds.
-		end_us: u64,
+		/// Where the stopped encoder's media stops.
+		end: MoqTimestamp,
 	},
 }
 
-impl TryFrom<moq_audio::decode::Read> for MoqAudioRead {
-	type Error = MoqError;
-
-	fn try_from(read: moq_audio::decode::Read) -> Result<Self, MoqError> {
-		use crate::consumer::timestamp_us;
-		Ok(match read {
+impl From<moq_audio::decode::Read> for MoqAudioRead {
+	fn from(read: moq_audio::decode::Read) -> Self {
+		match read {
 			moq_audio::decode::Read::Frame(frame) => Self::Frame { frame: frame.into() },
 			moq_audio::decode::Read::Gap { timestamp, duration } => Self::Gap {
-				timestamp_us: timestamp_us(timestamp)?,
+				timestamp: timestamp.into(),
 				duration: crate::ffi::duration(duration.into()),
 			},
-			moq_audio::decode::Read::End { end } => Self::End {
-				end_us: timestamp_us(end)?,
-			},
-		})
+			moq_audio::decode::Read::End { end } => Self::End { end: end.into() },
+		}
 	}
 }
 
@@ -363,11 +358,7 @@ impl MoqAudioEncoder {
 impl From<moq_audio::Frame> for MoqAudioFrame {
 	fn from(f: moq_audio::Frame) -> Self {
 		Self {
-			// The binding surface carries plain microseconds, so flatten the
-			// scaled `Timestamp` here. Saturating rather than erroring: this is a
-			// frame we already decoded, and a u64 overflow needs a timestamp
-			// ~580,000 years out.
-			timestamp_us: u64::try_from(f.timestamp.as_micros()).unwrap_or(u64::MAX),
+			timestamp: f.timestamp.into(),
 			data: f.data.to_vec(),
 		}
 	}
@@ -377,10 +368,7 @@ impl TryFrom<MoqAudioFrame> for moq_audio::Frame {
 	type Error = moq_audio::Error;
 
 	fn try_from(f: MoqAudioFrame) -> Result<Self, Self::Error> {
-		Ok(Self::new(
-			f.data.into(),
-			moq_net::Timestamp::from_micros(f.timestamp_us)?,
-		))
+		Ok(Self::new(f.data.into(), f.timestamp.try_into()?))
 	}
 }
 
@@ -571,7 +559,7 @@ impl ConsumerInner {
 	async fn next(&mut self) -> Result<Option<MoqAudioRead>, MoqError> {
 		let read = self.consumer.read().await;
 		self.delay.store(nanos(self.consumer.delay()), Ordering::Relaxed);
-		read?.map(MoqAudioRead::try_from).transpose()
+		Ok(read?.map(MoqAudioRead::from))
 	}
 }
 
@@ -597,7 +585,8 @@ impl MoqAudioConsumer {
 	}
 
 	/// The playout delay to hold ahead of the playhead: the fixed
-	/// [`MoqAudioDecoderOutput::delay`], or the estimate from every frame read
+	/// [`MoqAudioDecoderOutput::delay`]'s min, or with
+	/// [`MoqAudioDecoderOutput::estimate`] the estimate from every frame read
 	/// so far.
 	///
 	/// The estimate measures when [`Self::next`] returns each frame, so call it
@@ -670,8 +659,8 @@ impl MoqAudioConsumer {
 		config.output.format = output.format.into();
 		config.output.sample_rate = output.sample_rate;
 		config.output.layout = output.channels.map(moq_audio::Layout::from_channels).transpose()?;
-		config.max_delay = output.max_delay.unwrap_or_default();
-		config.delay = output.delay;
+		config.delay = output.delay.map(Into::into).unwrap_or_default();
+		config.estimate = output.estimate;
 		config.start = match output.start.unwrap_or_default() {
 			crate::media::MoqDecodeStart::Oldest => moq_audio::decode::Start::Oldest,
 			crate::media::MoqDecodeStart::Latest => moq_audio::decode::Start::Latest,
@@ -794,7 +783,7 @@ mod tests {
 			// A partial codec frame makes finish publish the final packet and lookahead.
 			audio
 				.write(MoqAudioFrame {
-					timestamp_us: 0,
+					timestamp: MoqTimestamp { value: 0, scale: 1 },
 					data: vec![0.1_f32; 860].into_iter().flat_map(f32::to_ne_bytes).collect(),
 				})
 				.unwrap();

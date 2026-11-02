@@ -99,7 +99,7 @@ catalog snapshots, live media, and one fetched media group. The last two take a 
 (`VideoRendition` or `AudioRendition`: a catalog ID and its config) and follow its broadcast
 and track themselves. `NewGroupConsumer`
 decodes a raw group, such as one from `moq.TrackConsumer.RecvGroup` for arrival-order reads.
-Frames and `Flush` use `time.Duration`; `Demand()` owns track names and subscriber waits.
+Frames carry exact `moq.Timestamp` records; `Demand()` owns track names and subscriber waits.
 
 `BroadcastProducer.Requests()` accepts subscriber-requested tracks. Call
 `TrackRequest.Accept()` for raw tracks, or pass the request as `media.Requested`
@@ -114,7 +114,7 @@ carry every record in order. `NewWindowProducer` / `NewWindowConsumer` carry a s
 of records a reader can join at any point; the catalog has no window mode, so the producer
 takes only the track. Producers accept any `encoding/json` value; consumers return
 `json.RawMessage` so callers choose their own decoded type.
-`Update` / `Append` / `Push` / `Pop` take a final `*time.Duration` on the broadcast clock; nil publishes untimed.
+`Update` / `Append` / `Push` / `Pop` take a final `*moq.Timestamp` on the broadcast clock; nil publishes untimed.
 Raw tracks with a nil timescale are untimed; timed tracks require matching timestamps.
 `media.CatalogProducer.Now()` samples and fixes the catalog clock for explicit local-event stamps.
 Opaque bytes go on a plain `TrackProducer`.
