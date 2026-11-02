@@ -284,6 +284,7 @@ mod tests {
 	/// A paused runtime counting from its own origin anchors on its own clock, not
 	/// on one another runtime advanced.
 	#[test]
+	#[cfg_attr(miri, ignore = "re-runs itself in a fresh process, which Miri cannot spawn")]
 	fn paused_runtimes_own_their_anchors() {
 		// A fresh process keeps other tests from taking the shared origin first.
 		if !test_env::Env::default().set("MOQ_CLOCK_TEST_ORIGIN", "fresh").isolate() {
@@ -316,6 +317,7 @@ mod tests {
 	/// A paused runtime sharing the origin cannot skew the anchor of unpaused
 	/// callers by advancing its clock before the anchor is first taken.
 	#[test]
+	#[cfg_attr(miri, ignore = "reads the wall clock, which Miri's isolation refuses")]
 	fn a_later_paused_runtime_does_not_skew_the_anchor() {
 		let _ = crate::clock::now();
 		// Built after the origin, so it counts from the shared origin.

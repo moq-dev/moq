@@ -495,7 +495,7 @@ mod tests {
 	#[test]
 	fn racing_publishes_and_closes_wake_every_waiter() {
 		const READERS: usize = 4;
-		const STEPS: u32 = 20_000;
+		const STEPS: u32 = if cfg!(miri) { 1_000 } else { 20_000 };
 
 		struct Unpark(std::thread::Thread);
 		impl Wake for Unpark {
