@@ -2108,7 +2108,7 @@ fn opus_family_two_is_ambisonic() {
 	}
 }
 
-/// Opus and AV1 decoder configurations hold only what their supported layout defines.
+/// Opus, AV1, and AAC decoder configurations hold only what their supported layout defines.
 #[test]
 fn decoder_config_extras_are_refused() {
 	use MatroskaSpec::*;
@@ -2141,5 +2141,29 @@ fn decoder_config_extras_are_refused() {
 				"{result:?}"
 			);
 		}
+	}
+
+	// An AAC-LC AudioSpecificConfig followed by a byte no field reads.
+	let aac = MkvBuilder::new()
+		.header("matroska")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![TrackEntry(Master::Full(vec![
+			TrackNumber(1),
+			TrackType(2),
+			CodecID("A_AAC".into()),
+			CodecPrivate(vec![0x12, 0x10, 0x00]),
+		]))])
+		.segment_end()
+		.build();
+	for initial in [false, true] {
+		let result = import_result(&aac, initial);
+		assert!(
+			matches!(
+				result,
+				Err(crate::Error::Aac(crate::codec::aac::Error::TrailingBytes(1)))
+			),
+			"{result:?}"
+		);
 	}
 }

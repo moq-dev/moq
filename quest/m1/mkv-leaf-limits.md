@@ -54,13 +54,23 @@ value (a longer CodecID is recorded by its length, so skipped track types still
 pass), and codecs that ignore CodecPrivate (VP8, VP9, MP3, unsupported ones)
 skip it as it arrives.
 
-Still open, for the maintainer: AVC, HEVC, and AAC CodecPrivate are still read
-whole without a bound. ffmpeg's libx265 hvcC carries a 2365-byte
-user-data SEI (x265's encoder settings), and hvcC SEI arrays have no finite
-bound, so the decided approach would refuse default x265 output. avcC is
-bounded only by its count fields (about 34 MiB), and an AAC
-AudioSpecificConfig's trailing extensions are unbounded as the parser accepts
-them.
+Decided 2026-11-02 (the maintainer had no preference and took the
+recommendation, /quest-complete session), for the codecs the first decision
+left read whole without a bound:
+
+- ✅ (a) Canonicalize. HEVC discards hvcC SEI arrays as they arrive and keeps
+  only the parameter sets, bounded by their id spaces (16 VPS, 16 SPS, 64
+  PPS, each up to 64 KiB). AVC bounds avcC by its count fields. AAC takes the
+  AudioSpecificConfig syntax maximum and refuses unparsed trailing bytes.
+- (b) Treat hvcC SEI like AV1 metadata: keep the HDR SEI types and refuse the
+  rest, which refuses default x265 output.
+- (c) Bound all three by what one catalog frame carries (moq-net's 32 MiB
+  group cache): simple, but loose.
+
+Reason: ffmpeg's libx265 hvcC carries a 2365-byte user-data SEI (x265's
+encoder settings) and hvcC SEI arrays have no finite bound, so refusing them
+would refuse default ffmpeg+x265 MKVs. Canonicalizing keeps every real file
+importing without inventing a constant.
 
 Public API: two `mkv::Error` variants. Wire: none.
 

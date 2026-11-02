@@ -6,6 +6,7 @@
 
 mod ebml;
 mod export;
+mod hvcc;
 mod import;
 
 pub use export::*;

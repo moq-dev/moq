@@ -11,6 +11,7 @@ use webm_iterable::matroska_spec::{Master, MatroskaSpec};
 
 use super::Error;
 use super::ebml::{self, Event, Header, id};
+use super::hvcc::HvccFilter;
 use crate::container::producer::Streamed;
 
 /// Default Matroska TimestampScale: 1 ms (in nanoseconds).
@@ -63,8 +64,13 @@ const AV1_SEQUENCE_HEADER_MAX_LEN: u64 = (3139 + 1u64).div_ceil(8);
 /// ## Decoder configuration
 ///
 /// A TrackEntry's `CodecID` must precede its `CodecPrivate`, so the codec decides how much of it
-/// is read before its bytes arrive. Codecs that do not use it skip it as it arrives. The others
-/// read it whole, refusing one larger than its supported configuration at its header:
+/// is read before its bytes arrive. Codecs that do not use it skip it as it arrives. HEVC
+/// canonicalizes its hvcC as it arrives: the parameter sets are kept, at most one per id (16 VPS,
+/// 16 SPS, and 64 PPS), and SEI and other arrays are discarded unread. The others read it whole,
+/// refusing one larger than its supported configuration at its header:
+/// - AVC: an avcC, at most the 31 SPS, 255 PPS, and 255 SPS extensions its counts allow;
+/// - AAC: an AudioSpecificConfig whose every byte a field reads, with a GASpecificConfig and
+///   optional SBR and PS signaling;
 /// - FLAC: the `fLaC` marker and STREAMINFO alone, without other metadata blocks;
 /// - Opus: an OpusHead in the RFC 7845 layout, without a later minor version's extra fields;
 /// - AV1: an av1C whose `configOBUs` hold at most a sequence header first, then at most one each
@@ -109,6 +115,8 @@ pub struct Import<E: crate::catalog::hang::CatalogExt = ()> {
 	referenced: bool,
 	/// The SimpleBlock or Block streaming in.
 	block: Option<Block>,
+	/// The hvcC CodecPrivate streaming in.
+	hvcc: Option<HvccFilter>,
 	/// A seek waiting for the streaming block to end, since its later frames continue its group.
 	seek: Option<u64>,
 	/// Whether `finish()` ended the input, even if it failed before the input drained.
@@ -230,6 +238,8 @@ enum Action {
 	Read,
 	/// Pass its body through: a block.
 	Stream,
+	/// Canonicalize its body as it arrives: an hvcC CodecPrivate.
+	Filter,
 	/// Discard its body as it arrives.
 	Skip,
 }
@@ -323,6 +333,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 			numbers: HashSet::new(),
 			referenced: false,
 			block: None,
+			hvcc: None,
 			seek: None,
 			finished: false,
 			failed: None,
@@ -459,9 +470,11 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let max = match codec_id {
 			"A_FLAC" => FLAC_PRIVATE_LEN,
 			"A_OPUS" => OPUS_HEAD_MAX_LEN,
+			"A_AAC" => crate::codec::aac::CONFIG_MAX_LEN as u64,
 			"V_AV1" => AV1_PRIVATE_MAX_LEN,
-			// No bounded configuration is defined for these yet, so they are read whole.
-			"V_MPEG4/ISO/AVC" | "V_MPEGH/ISO/HEVC" | "A_AAC" => u64::MAX,
+			"V_MPEG4/ISO/AVC" => crate::codec::h264::AVCC_MAX_LEN as u64,
+			// Its SEI arrays are unbounded, so it is canonicalized as it arrives.
+			"V_MPEGH/ISO/HEVC" => return Ok(Action::Filter),
 			_ => return Ok(Action::Skip),
 		};
 		match header.size {
@@ -490,6 +503,10 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 					grouped,
 					state: BlockState::Header(Vec::new()),
 				});
+			}
+			Action::Filter => {
+				self.reader.stream()?;
+				self.hvcc = Some(HvccFilter::new());
 			}
 			Action::Skip => {
 				self.reader.skip()?;
@@ -571,6 +588,13 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 				}
 			}
 			id::SIMPLE_BLOCK | id::BLOCK => self.block_end()?,
+			id::CODEC_PRIVATE => {
+				let hvcc = self.hvcc.take().expect("only a filtered CodecPrivate is streamed");
+				set(
+					self.fields.last_mut().expect("TrackEntry is collected"),
+					MatroskaSpec::CodecPrivate(hvcc.finish()?),
+				)?;
+			}
 			_ => {}
 		}
 		Ok(())
@@ -677,6 +701,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 
 	/// Feed a chunk of the streaming block's body.
 	fn chunk(&mut self, chunk: &[u8]) -> Result<()> {
+		if let Some(hvcc) = &mut self.hvcc {
+			return hvcc.feed(chunk);
+		}
 		let Some(mut block) = self.block.take() else {
 			return Ok(());
 		};
@@ -1354,8 +1381,7 @@ fn build_audio_config(
 				codec_id: "A_AAC",
 				purpose: "AudioSpecificConfig",
 			})?;
-			let mut cursor = priv_data.clone();
-			let cfg = crate::codec::aac::Config::parse(&mut cursor)?;
+			let cfg = crate::codec::aac::Config::parse_exact(priv_data)?;
 			let mut config = AudioConfig::new(AAC { profile: cfg.profile }, cfg.sample_rate, cfg.channel_count);
 			config.description = Some(priv_data.clone());
 			config
@@ -1888,7 +1914,7 @@ mod tests {
 		let codec = twice[6..].to_vec();
 		twice.extend(codec);
 		type Refused = fn(&crate::Error) -> bool;
-		let cases: [(Vec<u8>, Refused); 7] = [
+		let cases: [(Vec<u8>, Refused); 9] = [
 			(ebml, |err| {
 				matches!(err, crate::Error::Mkv(Error::UnsupportedDocType(_)))
 			}),
@@ -1907,6 +1933,14 @@ mod tests {
 			(private(1, b"V_AV1", HUGE), |err| {
 				matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_)))
 			}),
+			(
+				private(1, b"V_MPEG4/ISO/AVC", crate::codec::h264::AVCC_MAX_LEN as u64 + 1),
+				|err| matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_))),
+			),
+			(
+				private(2, b"A_AAC", crate::codec::aac::CONFIG_MAX_LEN as u64 + 1),
+				|err| matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_))),
+			),
 			(fields_ending_in(twice, 0), |err| {
 				matches!(err, crate::Error::Moq(moq_net::Error::Duplicate))
 			}),
@@ -1920,6 +1954,106 @@ mod tests {
 					.expect("refused");
 				assert!(expected(&err), "{err:?}");
 				assert!(import.reader.retained() <= 12, "{}", import.reader.retained());
+			}
+		}
+	}
+
+	/// An hvcC of the fixtures' parameter sets, and the same record with `arrays` (each its header
+	/// and NAL units) inserted before and after them.
+	fn hvcc_around(arrays: &[Vec<u8>]) -> (Vec<u8>, Vec<u8>) {
+		use crate::codec::h265::fixtures;
+		let canonical = crate::codec::h265::build_hvcc(
+			&[Bytes::from_static(fixtures::VPS)],
+			&[Bytes::from_static(fixtures::SPS_NVENC)],
+			&[Bytes::from_static(fixtures::PPS)],
+		)
+		.unwrap()
+		.to_vec();
+		let mut record = canonical[..23].to_vec();
+		record[22] += 2 * arrays.len() as u8;
+		record.extend(arrays.concat());
+		record.extend_from_slice(&canonical[23..]);
+		record.extend(arrays.concat());
+		(canonical, record)
+	}
+
+	/// An hvcC array of `kind` holding `nalus` NAL units of `len` bytes.
+	fn hvcc_array(kind: u8, nalus: u16, len: u16) -> Vec<u8> {
+		let mut array = vec![kind];
+		array.extend(nalus.to_be_bytes());
+		for _ in 0..nalus {
+			array.extend(len.to_be_bytes());
+			// A NAL unit header of the array's type, then filler.
+			array.extend([kind << 1, 1]);
+			array.resize(array.len() + usize::from(len) - 2, b'a');
+		}
+		array
+	}
+
+	/// A TrackEntry of HEVC video whose CodecPrivate is `hvcc`.
+	fn hevc_entry(hvcc: &[u8]) -> Vec<u8> {
+		let entry = [
+			track_fields(1, b"V_MPEGH/ISO/HEVC"),
+			header(&[0x63, 0xa2], hvcc.len() as u64),
+			hvcc.to_vec(),
+		]
+		.concat();
+		fields_ending_in(entry, 0)
+	}
+
+	#[test]
+	fn hvcc_sei_is_discarded_as_it_arrives() {
+		// Like x265's encoder settings: prefix SEI (39) arrays, here of NAL units at the 64 KiB limit.
+		let sei = hvcc_array(39, 2, u16::MAX);
+		let (canonical, record) = hvcc_around(&[sei.clone(), sei]);
+		let data = hevc_entry(&record);
+		for chunk in [1, 7, 64] {
+			let (mut import, catalog, _consumer) = import();
+			for chunk in data.chunks(chunk) {
+				import.decode(chunk).unwrap();
+				if let Some(hvcc) = &import.hvcc {
+					assert!(import.reader.retained() <= 12, "{}", import.reader.retained());
+					assert!(hvcc.retained() <= 2 * canonical.len(), "{}", hvcc.retained());
+				}
+			}
+			let config = catalog.snapshot().video.renditions.into_values().next().unwrap();
+			assert_eq!(config.description.as_deref(), Some(canonical.as_slice()));
+		}
+	}
+
+	#[test]
+	fn hvcc_past_its_parameter_sets_or_framing_is_refused() {
+		let (_, record) = hvcc_around(&[]);
+		let unsupported = [
+			// One more VPS, SPS, or PPS than there are ids, counted across arrays.
+			hvcc_around(&[hvcc_array(32, 8, 3)]).1,
+			hvcc_around(&[hvcc_array(33, 8, 3)]).1,
+			hvcc_around(&[hvcc_array(34, 32, 3)]).1,
+		];
+		let invalid = [
+			[record.as_slice(), &[0]].concat(),
+			record[..record.len() - 1].to_vec(),
+			record[..22].to_vec(),
+		];
+		for (data, invalid) in unsupported
+			.map(|r| (r, false))
+			.into_iter()
+			.chain(invalid.map(|r| (r, true)))
+		{
+			let data = hevc_entry(&data);
+			for chunk in [1, 7, 64] {
+				let (mut import, _catalog, _consumer) = import();
+				let err = data
+					.chunks(chunk)
+					.find_map(|chunk| import.decode(chunk).err())
+					.expect("refused");
+				match invalid {
+					true => assert!(matches!(err, crate::Error::Mkv(Error::InvalidHvcc)), "{err:?}"),
+					false => assert!(
+						matches!(err, crate::Error::Mkv(Error::UnsupportedCodecPrivate(_))),
+						"{err:?}"
+					),
+				}
 			}
 		}
 	}
