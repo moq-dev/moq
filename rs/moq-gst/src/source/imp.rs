@@ -5462,13 +5462,22 @@ mod session_tests {
 	}
 
 	/// The surround path end to end: `opusenc` 5.1 through moqsink, a relay, moqsrc, and
-	/// `opusdec` decodes six channels, each carrying the tone. The tone sits low enough for the
-	/// LFE channel, which libopus band-limits, to carry it too.
+	/// `opusdec` decodes six channels, each carrying its own tone, so a mapping that drops,
+	/// duplicates, or swaps a channel fails. The LFE tone sits low enough to survive the band
+	/// limit libopus applies to that channel.
 	#[test]
 	fn surround_opus_plays_every_channel_through_a_relay() {
-		const CHANNELS: usize = 6;
-		// Half a second at 48 kHz.
-		const FRAMES: usize = 24_000;
+		const RATE: usize = 48_000;
+		// GStreamer's order for channel-mask 0x3f: FL, FR, FC, LFE, RL, RR. Every tone completes
+		// whole cycles in the analysis window.
+		const TONES: [f64; 6] = [440.0, 660.0, 880.0, 60.0, 1_100.0, 1_320.0];
+		const CHANNELS: usize = TONES.len();
+		const AMPLITUDE: f64 = 8_000.0;
+		// Analyze the last half second of the first second decoded, past the encoder's warm-up.
+		const FRAMES: usize = RATE;
+		const WINDOW: usize = RATE / 2;
+		// 10 ms per pushed buffer.
+		const CHUNK: usize = RATE / 100;
 
 		let _pad_ids = pad_ids();
 		let relay = Relay::new();
@@ -5479,10 +5488,11 @@ mod session_tests {
 				.downcast::<gst::Pipeline>()
 				.unwrap()
 		};
+		// The identity paces the source to the clock, like a live capture.
 		let publisher = launch(format!(
-			"audiotestsrc is-live=true freq=100 \
-			 ! audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels={CHANNELS},channel-mask=(bitmask)0x3f \
-			 ! opusenc ! moqsink url={} broadcast=room",
+			"appsrc name=raw is-live=true format=time block=true \
+			 caps=audio/x-raw,format=S16LE,layout=interleaved,rate={RATE},channels={CHANNELS},channel-mask=(bitmask)0x3f \
+			 ! identity sync=true ! opusenc bitrate=256000 ! moqsink url={} broadcast=room",
 			relay.url
 		));
 		let first = NEXT_AUDIO_PAD_ID.load(Ordering::Relaxed);
@@ -5493,6 +5503,31 @@ mod session_tests {
 		let sink = subscriber.by_name("sink").unwrap();
 		publisher.set_state(gst::State::Playing).unwrap();
 		subscriber.set_state(gst::State::Playing).unwrap();
+
+		// Push tones until the pipeline stops taking buffers.
+		let raw = publisher.by_name("raw").unwrap();
+		let feeder = std::thread::spawn(move || {
+			for chunk in 0u64.. {
+				let start = chunk as usize * CHUNK;
+				let mut data = Vec::with_capacity(CHUNK * CHANNELS * 2);
+				for frame in start..start + CHUNK {
+					let time = frame as f64 / RATE as f64;
+					for tone in TONES {
+						let sample = (AMPLITUDE * (std::f64::consts::TAU * tone * time).sin()) as i16;
+						data.extend_from_slice(&sample.to_le_bytes());
+					}
+				}
+				let mut buffer = gst::Buffer::from_mut_slice(data);
+				{
+					let buffer = buffer.get_mut().unwrap();
+					buffer.set_pts(gst::ClockTime::SECOND.mul_div_floor(start as u64, RATE as u64));
+					buffer.set_duration(gst::ClockTime::SECOND.mul_div_floor(CHUNK as u64, RATE as u64));
+				}
+				if raw.emit_by_name::<gst::FlowReturn>("push-buffer", &[&buffer]) != gst::FlowReturn::Ok {
+					break;
+				}
+			}
+		});
 
 		let errors = || {
 			[&publisher, &subscriber].map(|pipeline| pipeline.bus().unwrap().pop_filtered(&[gst::MessageType::Error]))
@@ -5521,21 +5556,34 @@ mod session_tests {
 		}
 		subscriber.set_state(gst::State::Null).unwrap();
 		publisher.set_state(gst::State::Null).unwrap();
+		feeder.join().unwrap();
 		relay.stop();
 		let errors = errors();
 		assert!(errors.iter().all(Option::is_none), "{errors:?}");
 
-		// audiotestsrc writes the same tone to every channel at 0.8 of full scale, an RMS near
-		// 18,500; a channel the mapping dropped decodes to silence.
-		let frames = (samples.len() / CHANNELS) as f64;
-		for channel in 0..CHANNELS {
-			let energy = samples
-				.iter()
-				.skip(channel)
-				.step_by(CHANNELS)
-				.map(|sample| sample * sample);
-			let rms = (energy.sum::<f64>() / frames).sqrt();
-			assert!(rms > 5_000.0, "channel {channel} decoded an RMS of {rms:.0}");
+		// Each tone's amplitude in a channel, by the Goertzel algorithm.
+		let window = &samples[(FRAMES - WINDOW) * CHANNELS..FRAMES * CHANNELS];
+		let amplitude = |channel: usize, tone: f64| {
+			let coeff = 2.0 * (std::f64::consts::TAU * tone / RATE as f64).cos();
+			let (mut prev, mut prev2) = (0.0, 0.0);
+			for &sample in window.iter().skip(channel).step_by(CHANNELS) {
+				(prev, prev2) = (sample + coeff * prev - prev2, prev);
+			}
+			2.0 * (prev * prev + prev2 * prev2 - coeff * prev * prev2).sqrt() / WINDOW as f64
+		};
+		for (channel, own) in TONES.into_iter().enumerate() {
+			let heard = TONES.map(|tone| amplitude(channel, tone).round());
+			assert!(
+				heard[channel] > AMPLITUDE / 2.0,
+				"channel {channel} lost its {own} Hz tone: {heard:?}"
+			);
+			for (other, &level) in heard.iter().enumerate() {
+				assert!(
+					other == channel || level < AMPLITUDE / 20.0,
+					"channel {channel} carries channel {other}'s {} Hz tone: {heard:?}",
+					TONES[other]
+				);
+			}
 		}
 	}
 }
