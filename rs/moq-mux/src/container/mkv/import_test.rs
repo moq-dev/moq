@@ -2107,3 +2107,59 @@ fn opus_family_two_is_ambisonic() {
 		}
 	}
 }
+
+/// A source that re-initializes (a new EBML header, as a restarted encoder sends) replaces its
+/// importer on the same catalog each time. Every dropped generation retires its HLS records along
+/// with its renditions, finished or not, so the catalog holds only the live generation's state.
+#[test]
+fn repeated_reinit_keeps_flat_state() {
+	let data = MkvBuilder::new()
+		.header("webm")
+		.segment_start()
+		.info(1_000_000)
+		.tracks(vec![
+			track_entry_video_vp9(1, 640, 480),
+			track_entry_audio_opus(2, 48000.0, 2),
+		])
+		.cluster(0, || {
+			vec![
+				simple_block(1, 0, true, b"vp9-key"),
+				simple_block(2, 0, true, b"opus-pkt-0"),
+				simple_block(2, 20, true, b"opus-pkt-1"),
+				simple_block(1, 33, false, b"vp9-p"),
+			]
+		})
+		// The writer sizes the Segment at its end, so it writes nothing of an open one.
+		.segment_end()
+		.build();
+
+	let mut broadcast = moq_net::broadcast::Info::new().produce();
+	let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+	for generation in 0..50 {
+		let label = format!("generation {generation}");
+		let mut mkv = crate::container::mkv::Import::new(broadcast.clone(), catalog.reserve());
+		mkv.decode(&bytes::BytesMut::from(data.as_slice())).unwrap();
+		let snapshot = catalog.snapshot();
+		assert_eq!(snapshot.video.renditions.len(), 1, "{label}");
+		assert_eq!(snapshot.audio.renditions.len(), 1, "{label}");
+		assert_eq!(
+			catalog.hls_tracks(),
+			2,
+			"{label}: only the live generation keeps records"
+		);
+		// A finished generation's records are kept for a re-enrollment until its drop retires them.
+		if generation % 2 == 1 {
+			mkv.finish().unwrap();
+			assert_eq!(catalog.hls_tracks(), 2, "{label}");
+		}
+		drop(mkv);
+		let snapshot = catalog.snapshot();
+		assert!(snapshot.video.renditions.is_empty(), "{label}");
+		assert!(snapshot.audio.renditions.is_empty(), "{label}");
+		assert_eq!(
+			catalog.hls_tracks(),
+			0,
+			"{label}: a replaced generation retires its records"
+		);
+	}
+}
