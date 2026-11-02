@@ -32,7 +32,11 @@ impl Client {
 	/// caller's client identity and roots; `unix://` speaks HTTP over the socket at
 	/// the URL's path. Anything else is refused here rather than at the first session.
 	pub fn new(url: Url, tls: Option<rustls::ClientConfig>) -> crate::Result<Self> {
-		let builder = reqwest::Client::builder().timeout(TIMEOUT);
+		// Every request carries a credential in its body, which a followed 307 or
+		// 308 would resend to wherever it points, so refuse redirects.
+		let builder = reqwest::Client::builder()
+			.timeout(TIMEOUT)
+			.redirect(reqwest::redirect::Policy::none());
 
 		let (builder, url) = match url.scheme() {
 			"http" => {
@@ -87,29 +91,35 @@ trait Post: Clone + Send + Sync + 'static {
 }
 
 impl Post for Client {
-	/// A 2xx carries the grant, a 401 or 403 refuses, and everything else is an
-	/// outage the caller decides about.
+	/// A 2xx carries the grant, a 401 or 403 refuses, and everything else, a redirect
+	/// included, is an outage the caller decides about.
 	async fn post(&self, request: &Request) -> crate::Result<Grant> {
 		let response = self.http.post(self.url.clone()).json(request).send().await?;
 		let status = response.status();
 		if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
 			return Err(Error::Refused);
 		}
-		if !status.is_success() {
-			return Err(Error::Unavailable(format!("auth server answered {status}")));
-		}
+		check(status)?;
 		Ok(response.json().await?)
 	}
 
 	async fn post_end(&self, request: &Request) -> crate::Result<()> {
-		self.http
-			.post(self.url.clone())
-			.json(request)
-			.send()
-			.await?
-			.error_for_status()?;
-		Ok(())
+		let response = self.http.post(self.url.clone()).json(request).send().await?;
+		check(response.status())
 	}
+}
+
+/// Refuse anything but a 2xx, naming a redirect as one, since it is not followed.
+fn check(status: reqwest::StatusCode) -> crate::Result<()> {
+	if status.is_redirection() {
+		return Err(Error::Unavailable(format!(
+			"auth server answered {status}; redirects are not followed"
+		)));
+	}
+	if !status.is_success() {
+		return Err(Error::Unavailable(format!("auth server answered {status}")));
+	}
+	Ok(())
 }
 
 /// Admit a session through `server` and spawn the driver behind its lease.
@@ -471,6 +481,53 @@ mod tests {
 		.await;
 		let err = client(&nothing).connect(request()).await.unwrap_err();
 		assert!(matches!(err, Error::Refused), "{err}");
+	}
+
+	#[tokio::test]
+	async fn redirects_are_refused_without_resending_the_credential() {
+		let foreign = MockServer::start().await;
+		Mock::given(wiremock::matchers::any())
+			.respond_with(ResponseTemplate::new(200).set_body_json(grant(None, None)))
+			.mount(&foreign)
+			.await;
+
+		for status in [307, 308, 301, 302, 303] {
+			let location = format!("{}/foreign", foreign.uri());
+			let auth = server(Log::default(), move |_| {
+				ResponseTemplate::new(status).insert_header("location", location.clone())
+			})
+			.await;
+			let client = client(&auth);
+			for event in [
+				Event::Connect,
+				Event::Revalidate,
+				Event::End {
+					reason: Reason::Dropped,
+					duration: Duration::ZERO,
+					bytes: Bytes::default(),
+				},
+			] {
+				let mut request = request();
+				request.query = Some("jwt=secret".into());
+				request.event = event;
+				let result = if matches!(request.event, Event::End { .. }) {
+					Post::post_end(&client, &request).await
+				} else {
+					Post::post(&client, &request).await.map(|_| ())
+				};
+				assert!(
+					foreign.received_requests().await.unwrap().is_empty(),
+					"{status} forwarded {:?} to the redirect destination",
+					request.event
+				);
+				let err = result.unwrap_err();
+				assert!(
+					matches!(&err, Error::Unavailable(message) if message.contains("redirects are not followed")),
+					"{status}: {err}"
+				);
+			}
+			assert_eq!(auth.received_requests().await.unwrap().len(), 3);
+		}
 	}
 
 	#[tokio::test]
