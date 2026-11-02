@@ -61,7 +61,7 @@ Future<void> throughput(
         final frame = await group.readFrame();
         require(
           frame != null &&
-              frame.timestampUs == n * c.frames + f &&
+              frame.timestamp?.value == n * c.frames + f &&
               frame.payload.length == payload.length &&
               memcmp(frame.payload.address, payload.address, payload.length) ==
                   0,
@@ -79,7 +79,10 @@ Future<void> throughput(
       try {
         for (var f = 0; f < c.frames; f++) {
           group.writeFrame(
-            frame: Frame(payload: payload, timestampUs: n * c.frames + f),
+            frame: Frame(
+              payload: payload,
+              timestamp: Timestamp(value: n * c.frames + f, scale: 1000000),
+            ),
           );
         }
         group.finish();

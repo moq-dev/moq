@@ -11,10 +11,11 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
-use crate::consumer::{MoqTrackConsumer, timestamp_us};
+use crate::consumer::MoqTrackConsumer;
 use crate::demand::MoqTrackDemand;
 use crate::error::MoqError;
 use crate::ffi::Task;
+use crate::media::MoqTimestamp;
 use crate::producer::{Child, MoqBroadcastProducer, MoqTrackProducer};
 
 /// Options for a JSON snapshot producer (lossy latest-value mode).
@@ -171,16 +172,16 @@ impl MoqJsonSnapshotProducer {
 
 	/// Publish a new value, encoded as a snapshot or delta automatically. `value` is a JSON
 	/// document. A no-op if unchanged from the previous update.
-	/// `timestamp_us` is on the broadcast clock; null publishes untimed.
-	#[uniffi::method(default(timestamp_us = None))]
-	pub fn update(&self, value: String, timestamp_us: Option<u64>) -> Result<(), MoqError> {
+	/// `timestamp` is on the broadcast clock; null publishes untimed.
+	#[uniffi::method(default(timestamp = None))]
+	pub fn update(&self, value: String, timestamp: Option<MoqTimestamp>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let value: Value = serde_json::from_str(&value)?;
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
 		producer.update(moq_net::Timed {
 			value: &value,
-			at: timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?,
+			at: timestamp.map(TryInto::try_into).transpose()?,
 		})?;
 		Ok(())
 	}
@@ -206,10 +207,8 @@ impl MoqJsonSnapshotProducer {
 pub struct MoqJsonValue {
 	/// The JSON document.
 	pub value: String,
-	/// The frame's timestamp on the broadcast clock in microseconds, or null when untimed.
-	/// Rounded down to a whole microsecond, so a tick on a track like 90 kHz may not survive a
-	/// read and republish exactly.
-	pub timestamp_us: Option<u64>,
+	/// The frame's timestamp on the broadcast clock, or null when untimed.
+	pub timestamp: Option<MoqTimestamp>,
 }
 
 impl MoqJsonValue {
@@ -217,7 +216,7 @@ impl MoqJsonValue {
 		let Some(timed) = timed else { return Ok(None) };
 		Ok(Some(Self {
 			value: serde_json::to_string(&timed.value)?,
-			timestamp_us: timed.at.map(timestamp_us).transpose()?,
+			timestamp: timed.at.map(Into::into),
 		}))
 	}
 }
@@ -325,16 +324,16 @@ impl MoqJsonStreamProducer {
 	}
 
 	/// Append one record to the log. `value` is a JSON document.
-	/// `timestamp_us` is on the broadcast clock; null publishes untimed.
-	#[uniffi::method(default(timestamp_us = None))]
-	pub fn append(&self, value: String, timestamp_us: Option<u64>) -> Result<(), MoqError> {
+	/// `timestamp` is on the broadcast clock; null publishes untimed.
+	#[uniffi::method(default(timestamp = None))]
+	pub fn append(&self, value: String, timestamp: Option<MoqTimestamp>) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let value: Value = serde_json::from_str(&value)?;
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
 		producer.append(moq_net::Timed {
 			value: &value,
-			at: timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?,
+			at: timestamp.map(TryInto::try_into).transpose()?,
 		})?;
 		Ok(())
 	}
@@ -495,19 +494,19 @@ impl MoqJsonWindowProducer {
 	}
 
 	/// Append one record to the back of the window. `value` is a JSON document.
-	/// `timestamp_us` is on the broadcast clock; null publishes untimed.
-	#[uniffi::method(default(timestamp_us = None))]
-	pub fn push(&self, value: String, timestamp_us: Option<u64>) -> Result<(), MoqError> {
+	/// `timestamp` is on the broadcast clock; null publishes untimed.
+	#[uniffi::method(default(timestamp = None))]
+	pub fn push(&self, value: String, timestamp: Option<MoqTimestamp>) -> Result<(), MoqError> {
 		let value: Value = serde_json::from_str(&value)?;
-		let at = timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
+		let at = timestamp.map(TryInto::try_into).transpose()?;
 		self.edit(|producer| producer.push(moq_net::Timed { value: &value, at }))
 	}
 
 	/// Drop `count` records from the front of the window, clamped to what it holds.
-	/// `timestamp_us` is on the broadcast clock; null publishes untimed.
-	#[uniffi::method(default(timestamp_us = None))]
-	pub fn pop(&self, count: u64, timestamp_us: Option<u64>) -> Result<(), MoqError> {
-		let at = timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
+	/// `timestamp` is on the broadcast clock; null publishes untimed.
+	#[uniffi::method(default(timestamp = None))]
+	pub fn pop(&self, count: u64, timestamp: Option<MoqTimestamp>) -> Result<(), MoqError> {
+		let at = timestamp.map(TryInto::try_into).transpose()?;
 		self.edit(|producer| producer.pop(moq_net::Timed { value: count, at }))
 	}
 
@@ -570,10 +569,10 @@ pub enum MoqJsonWindowEvent {
 pub struct MoqJsonWindowTimed {
 	/// The change to the window.
 	pub event: MoqJsonWindowEvent,
-	/// The frame's timestamp on the broadcast clock in microseconds, or null when untimed.
+	/// The frame's timestamp on the broadcast clock, or null when untimed.
 	/// A record first learned of from a group's restatement (after a join, or while behind)
 	/// carries that frame's time, not its original push time.
-	pub timestamp_us: Option<u64>,
+	pub timestamp: Option<MoqTimestamp>,
 }
 
 impl MoqJsonWindowTimed {
@@ -602,7 +601,7 @@ impl MoqJsonWindowTimed {
 		};
 		Ok(Some(Self {
 			event,
-			timestamp_us: timed.at.map(timestamp_us).transpose()?,
+			timestamp: timed.at.map(Into::into),
 		}))
 	}
 }

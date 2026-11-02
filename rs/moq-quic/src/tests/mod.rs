@@ -1,6 +1,5 @@
 use crate::cid_generator::HashedConnectionIdGenerator;
 use std::{
-	any::Any,
 	collections::{BTreeMap, BTreeSet},
 	convert::TryInto,
 	iter, mem,
@@ -31,7 +30,7 @@ use super::*;
 use crate::{
 	Duration, Instant,
 	cid_generator::{ConnectionIdGenerator, RandomConnectionIdGenerator},
-	congestion::{self, Controller, ControllerFactory, ControllerMetrics},
+	congestion::{self, Controller, Factory, Metrics},
 	connection::{Connection, Error as ConnectionError},
 	crypto::rustls::QuicServerConfig,
 	endpoint::{Accepting, ConnectionHandle, DatagramEvent, Dial, Endpoint, Incoming, Received},
@@ -484,8 +483,8 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
 			None
 		}
 
-		fn metrics(&self) -> ControllerMetrics {
-			ControllerMetrics {
+		fn metrics(&self) -> Metrics {
+			Metrics {
 				congestion_window: WINDOW,
 				bandwidth_estimate: Some(BANDWIDTH_ESTIMATE),
 				..Default::default()
@@ -495,22 +494,18 @@ fn stats_include_congestion_controller_bandwidth_estimate() {
 		fn clone_box(&self) -> Box<dyn Controller> {
 			Box::new(self.clone())
 		}
-
-		fn into_any(self: Box<Self>) -> Box<dyn Any> {
-			self
-		}
 	}
 
-	struct TestControllerFactory;
+	struct TestFactory;
 
-	impl ControllerFactory for TestControllerFactory {
+	impl Factory for TestFactory {
 		fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
 			Box::new(TestController)
 		}
 	}
 
 	let transport = transport::Config {
-		congestion: Arc::new(TestControllerFactory),
+		congestion: Arc::new(TestFactory),
 		..transport::Config::default()
 	};
 	let mut config = client_config();
@@ -2705,7 +2700,6 @@ fn keep_alive_derives_from_a_shorter_peer_idle_timeout() {
 	const PEER: Duration = Duration::from_secs(2);
 	let mut server = server_config();
 	server.transport.idle_timeout = Some(PEER);
-	server.transport.keep_alive = Some(Duration::ZERO);
 	let mut client = client_config();
 	client.transport.idle_timeout = Some(Duration::from_secs(10));
 	let mut pair = Pair::new(Default::default(), server);
@@ -2723,7 +2717,6 @@ fn keep_alive_follows_the_local_idle_timeout() {
 	for local in [Duration::from_secs(10), Duration::from_secs(5)] {
 		let mut server = server_config();
 		server.transport.idle_timeout = Some(Duration::from_secs(30));
-		server.transport.keep_alive = Some(Duration::ZERO);
 		let mut client = client_config();
 		client.transport.idle_timeout = Some(local);
 		let mut pair = Pair::new(Default::default(), server);
@@ -2737,15 +2730,14 @@ fn keep_alive_follows_the_local_idle_timeout() {
 }
 
 /// An explicit keep-alive no shorter than the negotiated idle timeout is capped at the derived
-/// interval, and zero sends none.
+/// interval, and zero uses that same default.
 #[test]
-fn keep_alive_explicit_cap_and_disable() {
+fn keep_alive_explicit_cap_and_default() {
 	let _guard = subscribe();
 	const IDLE: Duration = Duration::from_secs(2);
 	let connect = |keep_alive| {
 		let mut server = server_config();
 		server.transport.idle_timeout = Some(IDLE);
-		server.transport.keep_alive = Some(Duration::ZERO);
 		let mut client = client_config();
 		client.transport.keep_alive = Some(keep_alive);
 		let mut pair = Pair::new(Default::default(), server);
@@ -2757,23 +2749,10 @@ fn keep_alive_explicit_cap_and_disable() {
 	let gaps = idle_keep_alive_gaps(&mut pair, client_ch, server_ch, IDLE);
 	assert!(gaps.iter().all(|&gap| gap * 3 < IDLE), "{gaps:?}");
 
-	let (mut pair, client_ch, _) = connect(Duration::ZERO);
-	let start = pair.time;
-	while !pair.client_conn_mut(client_ch).is_closed() {
-		if !pair.step() {
-			let Some(time) = min_opt(pair.client.next_wakeup(), pair.server.next_wakeup()) else {
-				break;
-			};
-			pair.time = time;
-		}
-	}
-	assert_matches!(
-		pair.client_conn_mut(client_ch).poll(),
-		Some(Event::ConnectionLost {
-			reason: ConnectionError::TimedOut
-		})
-	);
-	assert!(pair.time - start < 2 * IDLE, "{:?}", pair.time - start);
+	let (mut pair, client_ch, server_ch) = connect(Duration::ZERO);
+	let gaps = idle_keep_alive_gaps(&mut pair, client_ch, server_ch, IDLE);
+	assert!(gaps.len() >= 10, "{gaps:?}");
+	assert!(gaps.iter().all(|&gap| gap * 3 < IDLE), "{gaps:?}");
 }
 
 /// A peer advertising the largest idle timeout the wire carries derives a keep-alive too far
@@ -2796,12 +2775,14 @@ fn keep_alive_derived_from_a_huge_peer_idle_timeout() {
 fn keep_alive_interval_derivation() {
 	use transport::keep_alive_interval as interval;
 	let secs = Duration::from_secs;
-	assert_eq!(interval(None, Some(secs(10))), Some(secs(3)));
-	assert_eq!(interval(None, None), None);
-	assert_eq!(interval(Some(Duration::ZERO), Some(secs(10))), None);
-	assert_eq!(interval(Some(secs(5)), Some(secs(10))), Some(secs(5)));
-	assert_eq!(interval(Some(secs(10)), Some(secs(10))), Some(secs(3)));
-	assert_eq!(interval(Some(secs(60)), None), Some(secs(60)));
+	assert_eq!(interval(None, Some(secs(10))), secs(3));
+	assert_eq!(interval(None, None), secs(9));
+	assert_eq!(interval(Some(Duration::ZERO), None), secs(9));
+	assert_eq!(interval(None, Some(Duration::from_nanos(1))), Duration::from_nanos(1));
+	assert_eq!(interval(Some(Duration::ZERO), Some(secs(10))), secs(3));
+	assert_eq!(interval(Some(secs(5)), Some(secs(10))), secs(5));
+	assert_eq!(interval(Some(secs(10)), Some(secs(10))), secs(3));
+	assert_eq!(interval(Some(secs(60)), None), secs(60));
 }
 
 #[test]
@@ -5983,8 +5964,8 @@ impl Controller for PacingOnlyController {
 		self.pacer.pace(now)
 	}
 
-	fn metrics(&self) -> ControllerMetrics {
-		ControllerMetrics {
+	fn metrics(&self) -> Metrics {
+		Metrics {
 			congestion_window: self.window(),
 			pacing_rate: Some(Self::RATE),
 			..Default::default()
@@ -5997,17 +5978,13 @@ impl Controller for PacingOnlyController {
 			pacer: self.pacer.clone(),
 		})
 	}
-
-	fn into_any(self: Box<Self>) -> Box<dyn Any> {
-		self
-	}
 }
 
 struct PacingOnlyConfig {
 	cwnd_limited_reports: Arc<AtomicU64>,
 }
 
-impl ControllerFactory for PacingOnlyConfig {
+impl Factory for PacingOnlyConfig {
 	fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
 		Box::new(PacingOnlyController {
 			cwnd_limited_reports: self.cwnd_limited_reports.clone(),
@@ -6081,13 +6058,9 @@ impl Controller for FixedQuantumController {
 	fn clone_box(&self) -> Box<dyn Controller> {
 		Box::new(self.clone())
 	}
-
-	fn into_any(self: Box<Self>) -> Box<dyn Any> {
-		self
-	}
 }
 
-impl ControllerFactory for FixedQuantumController {
+impl Factory for FixedQuantumController {
 	fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
 		Box::new((*self).clone())
 	}
@@ -6210,8 +6183,8 @@ impl Controller for PacketRecorder {
 		self.pacer.pace(now)
 	}
 
-	fn metrics(&self) -> ControllerMetrics {
-		ControllerMetrics {
+	fn metrics(&self) -> Metrics {
+		Metrics {
 			congestion_window: self.window,
 			pacing_rate: self.pacing_rate,
 			..Default::default()
@@ -6220,10 +6193,6 @@ impl Controller for PacketRecorder {
 
 	fn clone_box(&self) -> Box<dyn Controller> {
 		Box::new(self.clone())
-	}
-
-	fn into_any(self: Box<Self>) -> Box<dyn Any> {
-		self
 	}
 }
 
@@ -6237,7 +6206,7 @@ struct PacketRecorderFactory {
 	pacing_rate: Option<u64>,
 }
 
-impl ControllerFactory for PacketRecorderFactory {
+impl Factory for PacketRecorderFactory {
 	fn build(self: Arc<Self>, _init: congestion::Init) -> Box<dyn Controller> {
 		let log = PacketLog::default();
 		self.logs.lock().unwrap().push(log.clone());
@@ -6854,13 +6823,15 @@ fn bbr_burst_after_long_idle_keeps_learned_bandwidth() {
 
 	let _guard = subscribe();
 	entropy::reseed(SEED);
-	// Only the sender pings. A ping from the receiver would reset the sender's keep-alive timer,
-	// leaving its controller nothing to sample during the idle.
+	// The receiver's interval is longer than the idle measurement, so its pings cannot
+	// reset the sender's keep-alive timer and leave its controller nothing to sample.
 	let mut server = server_config();
-	server.transport.keep_alive = Some(Duration::ZERO);
+	server.transport.idle_timeout = None;
+	server.transport.keep_alive = Some(Duration::from_secs(3600));
 	let mut pair = Pair::new(Default::default(), server);
 	pair.latency = Duration::from_millis(25);
 	let mut client_cfg = client_config();
+	client_cfg.transport.idle_timeout = None;
 	client_cfg.transport.keep_alive = Some(Duration::from_secs(10));
 	let (client_ch, server_ch) = pair.connect_with(client_cfg);
 	pair.to_server.bottleneck = Some(Bottleneck::new(BPS_LIMIT, 100_000, false));
@@ -6948,7 +6919,7 @@ fn upload(
 }
 
 #[test]
-fn default_controller_is_bbr3() {
+fn default_controller_supports_bandwidth_probing() {
 	let factory = transport::Config::default().congestion;
 	let controller = factory.build(congestion::Init {
 		now: Instant::now(),
@@ -6956,5 +6927,6 @@ fn default_controller_is_bbr3() {
 		rtt: Duration::from_millis(333),
 		max_pacing_rate: None,
 	});
-	assert!(controller.into_any().downcast::<congestion::Bbr3>().is_ok());
+	assert!(controller.probes());
+	assert!(controller.metrics().pacing_rate.is_some());
 }

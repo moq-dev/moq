@@ -300,7 +300,8 @@ int g_decoded_width = 320;
 int g_decoded_height = 240;
 std::atomic<int> g_last_decoder_extradata{-1};
 std::atomic<int> g_decoder_opens{0};
-// Only packets from the replacement use this timestamp; the old stream keeps decoding.
+// Only packets from the replacement use this timestamp, in the nanoseconds packets carry; the
+// old stream keeps decoding.
 std::atomic<int> g_candidate_decode{0}; // 2: receive error, 3: needs more input
 std::atomic<int> g_candidate_attempts{0};
 // Holds packets' timestamps for reordering: each packet past the delay releases the
@@ -376,7 +377,7 @@ int avcodec_send_packet(AVCodecContext *ctx, const AVPacket *packet)
 	if (state.ready.size() >= g_decoder_capacity)
 		return AVERROR(EAGAIN);
 	state.last_pts = packet->pts;
-	if (state.last_pts == 1'000'000'000)
+	if (state.last_pts == 1'000'000'000'000)
 		g_candidate_attempts++;
 	state.held.push_back(packet->pts);
 	if (state.held.size() > g_reorder_delay) {
@@ -390,7 +391,7 @@ int avcodec_send_packet(AVCodecContext *ctx, const AVPacket *packet)
 int avcodec_receive_frame(AVCodecContext *ctx, AVFrame *frame)
 {
 	auto &state = *static_cast<DecodeState *>(ctx->opaque);
-	if (state.last_pts == 1'000'000'000) {
+	if (state.last_pts == 1'000'000'000'000) {
 		if (g_candidate_decode == 2)
 			return AVERROR_INVALIDDATA;
 		if (g_candidate_decode == 3)
@@ -570,6 +571,12 @@ void report(const char *name)
 	g_reported = g_failures;
 }
 
+// A timestamp in microseconds, the scale most scenarios write at.
+moq::Timestamp Micros(uint64_t us)
+{
+	return moq::Timestamp{us, 1'000'000};
+}
+
 // A broadcast published on the relay, the way the MoQ output would publish it.
 class Publisher {
 public:
@@ -606,9 +613,9 @@ public:
 	{
 		timestamp_us += 20'000;
 		if (video)
-			TestOk(video->write_frame(moq::Frame{TestH264Keyframe(), timestamp_us}), "write video");
+			TestOk(video->write_frame(moq::Frame{TestH264Keyframe(), Micros(timestamp_us)}), "write video");
 		if (audio) {
-			TestOk(audio->write_frame(moq::Frame{{0xfc, 0xff, 0xfe}, timestamp_us}), "write audio");
+			TestOk(audio->write_frame(moq::Frame{{0xfc, 0xff, 0xfe}, Micros(timestamp_us)}), "write audio");
 			TestOk(audio->cut(), "cut audio");
 		}
 	}
@@ -807,33 +814,41 @@ int main()
 			const auto *state = static_cast<DecodeState *>(held->video_decoder->codec_ctx->opaque);
 			const auto pending = state->held.size();
 			CHECK(pending > 0);
-			const uint64_t end = static_cast<uint64_t>(state->last_pts) + 1'000'000;
+			// The end and tail sit on a 90 kHz grid, which packets carry floored to nanoseconds.
+			const uint64_t end = static_cast<uint64_t>(state->last_pts) * 9 / 100'000 + 90'000;
+			const auto ticks = [](uint64_t value) {
+				return moq::Timestamp{value, 90'000};
+			};
+			const auto nanos = [](uint64_t value) {
+				return value * 100'000 / 9;
+			};
 			auto inject = [&](moq::MediaRead read) {
 				moq_source_on_frame(ctx, conn, held, std::optional<moq::MediaRead>{std::move(read)});
 			};
 			if (gap) {
-				inject(moq::MediaRead{moq::MediaRead::kGap{123456, std::chrono::microseconds(78901)}});
+				inject(moq::MediaRead{
+					moq::MediaRead::kGap{Micros(123456), std::chrono::microseconds(78901)}});
 				CHECK(g_output_frames == frames + static_cast<int>(pending));
 				CHECK(!held->video_decoder->got_keyframe);
 			} else {
-				inject(moq::MediaRead{moq::MediaRead::kEnd{end}});
+				inject(moq::MediaRead{moq::MediaRead::kEnd{ticks(end)}});
 				CHECK(held->video_decoder->got_keyframe);
 				// Non-key tail packets below the endpoint still depend on the old references.
-				inject(moq::MediaRead{
-					moq::MediaRead::kFrame{moq::MediaFrame{TestH264Keyframe(), end - 1, false}}});
-				CHECK(state->last_pts == static_cast<int64_t>(end - 1));
+				inject(moq::MediaRead{moq::MediaRead::kFrame{
+					moq::MediaFrame{TestH264Keyframe(), ticks(end - 1), false}}});
+				CHECK(state->last_pts == static_cast<int64_t>(nanos(end - 1)));
 				if (eof) {
 					moq_source_on_frame(ctx, conn, held, std::optional<moq::MediaRead>{});
 				} else {
 					inject(moq::MediaRead{moq::MediaRead::kFrame{
-						moq::MediaFrame{TestH264Keyframe(), end, true}}});
-					CHECK(state->last_pts == static_cast<int64_t>(end));
+						moq::MediaFrame{TestH264Keyframe(), ticks(end), true}}});
+					CHECK(state->last_pts == static_cast<int64_t>(nanos(end)));
 					CHECK(state->held.size() == 1);
 				}
 				CHECK(g_output_frames == frames + static_cast<int>(pending) + 1);
 				std::lock_guard<std::mutex> output_lock(g_video_mutex);
 				CHECK(std::count(g_video_timestamps.begin(), g_video_timestamps.end(),
-						 (end - 1) * 1000) == 1);
+						 nanos(end - 1)) == 1);
 			}
 			CHECK(conn->video == held);
 		}
@@ -871,7 +886,8 @@ int main()
 		};
 		for (int picture : decode_order) {
 			const auto payload = picture == 0 ? TestH264Keyframe() : delta;
-			TestOk(publisher.video->write_frame(moq::Frame{payload, timestamp_us(picture)}), "write video");
+			TestOk(publisher.video->write_frame(moq::Frame{payload, Micros(timestamp_us(picture))}),
+			       "write video");
 		}
 		TestOk(publisher.video->finish(), "finish video");
 
@@ -894,7 +910,7 @@ int main()
 		const auto timestamp_us = [](int picture) {
 			return 2'000'000 + uint64_t(picture) * 20'000;
 		};
-		g_unconverted_pts = int64_t(timestamp_us(2));
+		g_unconverted_pts = int64_t(timestamp_us(2) * 1000);
 		Publisher publisher(relay, "obs/test", true, false);
 		void *source = createSource();
 		auto *ctx = static_cast<moq_source *>(source);
@@ -908,7 +924,8 @@ int main()
 		std::vector<uint64_t> expected;
 		for (int picture = 0; picture < 6; picture++) {
 			const auto payload = picture == 0 ? TestH264Keyframe() : delta;
-			TestOk(publisher.video->write_frame(moq::Frame{payload, timestamp_us(picture)}), "write video");
+			TestOk(publisher.video->write_frame(moq::Frame{payload, Micros(timestamp_us(picture))}),
+			       "write video");
 			expected.push_back(timestamp_us(picture) * 1000);
 		}
 		// Left unfinished: nothing is held back, and a finish appends an empty end-of-group frame.
@@ -946,7 +963,8 @@ int main()
 		};
 		CHECK(publisher.WriteUntil(pending));
 		// One picture, which the decoder holds until a drain.
-		TestOk(replacement->write_frame(moq::Frame{TestH264Keyframe(), 1'000'000'000}), "replacement frame");
+		TestOk(replacement->write_frame(moq::Frame{TestH264Keyframe(), Micros(1'000'000'000)}),
+		       "replacement frame");
 		TestOk(replacement->finish(), "finish replacement");
 		CHECK(publisher.WriteUntil([&] { return !pending(); }));
 		const int frames = g_output_frames;
@@ -973,7 +991,7 @@ int main()
 		uint64_t samples = 0;
 		CHECK(WaitFor([&] {
 			for (const auto &frame : AAC_FRAMES) {
-				TestOk(aac->write_frame(moq::Frame{frame, 1'000'000 + samples * 1'000'000 / 44'100}),
+				TestOk(aac->write_frame(moq::Frame{frame, moq::Timestamp{44'100 + samples, 44'100}}),
 				       "write aac");
 				samples += 1024;
 			}
@@ -1389,7 +1407,7 @@ int main()
 		const int frames = g_output_frames;
 		CHECK(publisher.WriteUntil([&] { return g_output_frames >= frames + 10; }));
 		CHECK(publisher.WriteUntil([&] {
-			TestOk(replacement->write_frame(moq::Frame{TestH264Keyframe(), 2'000'000}),
+			TestOk(replacement->write_frame(moq::Frame{TestH264Keyframe(), Micros(2'000'000)}),
 			       "replacement frame");
 			return g_last_timestamp == 2'000'000'000;
 		}));
@@ -1417,7 +1435,7 @@ int main()
 		const auto preferring = CatalogPreferring(publisher, "!replacement");
 		DeliverCatalog(ctx, preferring);
 		auto write = [&] {
-			TestOk(replacement->write_frame(moq::Frame{TestH264Keyframe(), 1'000'000'000}),
+			TestOk(replacement->write_frame(moq::Frame{TestH264Keyframe(), Micros(1'000'000'000)}),
 			       "replacement frame");
 		};
 		CHECK(publisher.WriteUntil([&] {
@@ -1482,7 +1500,8 @@ int main()
 			return true;
 		}));
 		CHECK(publisher.WriteUntil([&] {
-			TestOk(replacement->write_frame(moq::Frame{BAD_OPUS, 1'000'000'000}), "replacement frame");
+			TestOk(replacement->write_frame(moq::Frame{BAD_OPUS, Micros(1'000'000'000)}),
+			       "replacement frame");
 			TestOk(replacement->cut(), "replacement audio cut");
 			std::lock_guard<std::mutex> lock(g_candidate_mutex);
 			return g_candidate.failed && candidate.expired();
@@ -1523,7 +1542,7 @@ int main()
 			pending = ctx->connection->pending_audio;
 			return pending && pending->audio_consumer;
 		}));
-		TestOk(publisher.audio->write_frame(moq::Frame{BAD_OPUS, 900'000'000}), "malformed frame");
+		TestOk(publisher.audio->write_frame(moq::Frame{BAD_OPUS, Micros(900'000'000)}), "malformed frame");
 		TestOk(publisher.audio->cut(), "malformed cut");
 		CHECK(WaitFor([&] {
 			std::lock_guard<std::mutex> lock(ctx->mutex);
@@ -1536,7 +1555,7 @@ int main()
 		pending.reset();
 		uint64_t timestamp_us = 1'000'000'000;
 		CHECK(WaitFor([&] {
-			TestOk(replacement->write_frame(moq::Frame{{0xfc, 0xff, 0xfe}, timestamp_us}),
+			TestOk(replacement->write_frame(moq::Frame{{0xfc, 0xff, 0xfe}, Micros(timestamp_us)}),
 			       "replacement frame");
 			TestOk(replacement->cut(), "replacement audio cut");
 			timestamp_us += 20'000;
@@ -1563,7 +1582,7 @@ int main()
 			CHECK(active != nullptr);
 			obs_source_audio audio = {};
 			moq::expected<std::optional<moq::AudioRead>> misaligned(
-				moq::AudioRead::kFrame{moq::AudioFrame{1, {0, 0, 0}}});
+				moq::AudioRead::kFrame{moq::AudioFrame{Micros(1), {0, 0, 0}}});
 			CHECK(!moq_source_on_audio_read(ctx, conn, active, misaligned, audio));
 			CHECK(!conn->audio);
 		}

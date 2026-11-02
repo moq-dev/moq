@@ -49,3 +49,14 @@ First run, check these first:
   [`d1f766f4`](https://github.com/mozilla/uniffi-rs/commit/d1f766f4) (Kotlin
   Throwable handling), and [`f903c36c`](https://github.com/mozilla/uniffi-rs/commit/f903c36c)
   (Python prefers the running event loop).
+
+Fork CI, added 2026-11-01 (maintainer, follow-up planning after the
+2026-11-01 /quest-afk run): kixelated/uniffi-dart's `Testing`
+(`.github/workflows/tests.yml`) and `Test Downstream`
+(`.github/workflows/test-downstream.yml`) workflows failed in all 14 of their
+runs among the fork's 30 most recent PR runs that day, while `Nix` passed, so
+a red check on a fork PR, including a vendor sync's own, says nothing. In `Testing`, `Test Suite (stable)`
+failed at `Run cargo nextest` while nightly passed and 1.91 was cancelled.
+Fix them, or drop them where the fork's `Nix` job and moq's own binding
+checks already cover what they test, and record which in the fork's README.
+Keep the fork's CI read-only, as `quest guide`'s Reviews section requires.

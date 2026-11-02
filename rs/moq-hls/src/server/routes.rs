@@ -344,7 +344,9 @@ mod tests {
 		let (_catalog, _registration, _track, mut media) =
 			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
 
-		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
+		let app = Server::new(origin.consume(), crate::export::Config::default())
+			.unwrap()
+			.router();
 		assert_eq!(status(&app, "/live/master.m3u8").await, StatusCode::NOT_FOUND);
 
 		write_three_gops(&mut media);
@@ -363,7 +365,9 @@ mod tests {
 			publish_video(&mut broadcast.broadcast().clone(), inline, timed());
 		write_three_gops(&mut media);
 
-		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
+		let app = Server::new(origin.consume(), crate::export::Config::default())
+			.unwrap()
+			.router();
 		let response = oneshot(app, "/live/manifest.mpd").await;
 		assert_eq!(response.status(), StatusCode::OK);
 		let body = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
@@ -413,7 +417,7 @@ mod tests {
 				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
 			)
 			.unwrap();
-		let app = Server::new(restricted, Default::default()).router();
+		let app = Server::new(restricted, Default::default()).unwrap().router();
 		let start = kio::clock::now();
 		let response = oneshot(app, "/room/live/manifest.mpd").await;
 		assert!(start.elapsed() < READY_TIMEOUT, "waited {:?}", start.elapsed());
@@ -436,7 +440,9 @@ mod tests {
 			publish_video(&mut old.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut old_media);
 
-		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
+		let app = Server::new(origin.consume(), crate::export::Config::default())
+			.unwrap()
+			.router();
 		let old_playlist = format!("/live/@{RUN}/video/video0/media.m3u8");
 		let old_segment = format!("/live/@{RUN}/video/video0/seg/53e0aafd.0.m4s");
 		wait_listed(&app, "/live/master.m3u8", &format!("@{RUN}/video/video0/media.m3u8")).await;
@@ -470,6 +476,94 @@ mod tests {
 		assert_eq!(status(&app, &new_playlist).await, StatusCode::OK);
 	}
 
+	/// A replaced instance's recording ends at the segments it listed before the takeover, even
+	/// while its publisher keeps sending, and the replacement records at once without waiting
+	/// on that drain.
+	#[tokio::test(start_paused = true)]
+	async fn a_replaced_recording_ends_at_what_it_listed() {
+		let origin = moq_tokio::origin::spawn();
+		let old = origin.create_broadcast("live").expect("publish");
+		old.announce(run()).expect("announce");
+		let (_old_catalog, _, _old_track, mut old_media) =
+			publish_video(&mut old.broadcast().clone(), video_config(), timed());
+		// Keyframes at 0, 2, and 4 s list segments 0 and 1; the third waits for its successor.
+		write_three_gops(&mut old_media);
+
+		let server = Server::new(origin.consume(), crate::export::Config::default()).unwrap();
+		let app = server.router();
+		let old_playlist = format!("/live/@{RUN}/video/video0/media.m3u8");
+		wait_listed(&app, &old_playlist, "seg/53e0aafd.1.m4s").await;
+		let replaced = server.broadcaster("live").await.expect("announced");
+		let mut old_renditions = replaced.renditions();
+		let old_rendition = replaced.rendition(Kind::Video, "video0").expect("listed");
+		// Held, not read, until the replacement has recorded.
+		let mut old_segments = old_rendition.segments();
+
+		let next = moq_net::Epoch::mint();
+		let new = origin.create_broadcast("live").expect("publish");
+		new.announce(moq_net::origin::Route::default().with_epoch(next.clone()))
+			.expect("announce");
+		let (_new_catalog, _, _new_track, mut new_media) =
+			publish_video(&mut new.broadcast().clone(), video_config(), timed());
+		write_three_gops(&mut new_media);
+
+		let deadline = kio::clock::now() + TIMEOUT;
+		let successor = loop {
+			let current = server.broadcaster("live").await.expect("announced");
+			if current.instance().as_ref() == next.as_str() {
+				break current;
+			}
+			assert!(kio::clock::now() < deadline, "the replacement was never served");
+			kio::clock::sleep(Duration::from_millis(50)).await;
+		};
+		let mut renditions = successor.renditions();
+		let rendition = loop {
+			match kio::clock::timeout(TIMEOUT, renditions.next()).await {
+				Ok(Ok(Some(crate::export::renditions::Event::Added(rendition)))) => break rendition,
+				Ok(Ok(Some(_))) => continue,
+				_ => panic!("the replacement listed no rendition"),
+			}
+		};
+		let mut segments = rendition.segments();
+		let first = kio::clock::timeout(TIMEOUT, segments.next())
+			.await
+			.expect("the replacement waited on the old drain")
+			.unwrap()
+			.expect("the replacement recorded");
+		assert_eq!(first.segment, 0);
+
+		// The old publisher keeps going: these would list segments 2 and 3.
+		old_media.write(vp8_frame(6_000_000, true)).unwrap();
+		old_media.write(vp8_frame(8_000_000, true)).unwrap();
+		old_media.write(vp8_frame(10_000_000, true)).unwrap();
+		kio::clock::sleep(Duration::from_secs(1)).await;
+
+		let mut recorded = Vec::new();
+		while let Some(segment) = kio::clock::timeout(TIMEOUT, old_segments.next())
+			.await
+			.expect("the replaced recording never ended")
+			.unwrap()
+		{
+			assert!(segment.media.is_some(), "listed media drains");
+			recorded.push(segment.segment);
+		}
+		assert_eq!(recorded, [0, 1], "exactly what was listed before the takeover");
+		let playlist = old_rendition.media_playlist(None).unwrap().expect("listed");
+		assert!(playlist.contains("#EXT-X-ENDLIST"), "{playlist}");
+		assert!(!playlist.contains("seg/53e0aafd.2.m4s"), "{playlist}");
+
+		let mut added = 0;
+		while let Some(event) = kio::clock::timeout(TIMEOUT, old_renditions.next())
+			.await
+			.expect("the replaced rendition set never ended")
+			.unwrap()
+		{
+			added += matches!(event, crate::export::renditions::Event::Added(_)) as usize;
+		}
+		assert_eq!(added, 1);
+		assert!(!replaced.is_closed(), "its publisher is still sending");
+	}
+
 	/// Failed records answer every listing with an uncacheable error rather than ending it as a
 	/// complete recording.
 	#[tokio::test(start_paused = true)]
@@ -488,13 +582,15 @@ mod tests {
 			})
 			.unwrap();
 		let track = broadcast.create_track(name, moq_mux::hls::Producer::info()).unwrap();
-		let mut records = moq_mux::hls::Producer::new(track.clone());
+		let mut records = moq_mux::hls::Producer::new(track.clone(), moq_mux::Clock::new());
 		for sequence in 0..4 {
 			let record = hang::hls::Record::new(sequence, sequence, sequence * 2_000);
 			records.push(&record).unwrap();
 		}
 
-		let app = Server::new(origin.consume(), crate::export::Config::default()).router();
+		let app = Server::new(origin.consume(), crate::export::Config::default())
+			.unwrap()
+			.router();
 		wait_listed(&app, &format!("/live/@{RUN}/video/video0/media.m3u8"), ".2.m4s").await;
 		assert_eq!(status(&app, "/live/manifest.mpd").await, StatusCode::OK);
 
@@ -528,7 +624,7 @@ mod tests {
 			publish_video(&mut broadcast.broadcast().clone(), video_config(), timed());
 		write_three_gops(&mut media);
 
-		let server = Server::new(origin.consume(), crate::export::Config::default());
+		let server = Server::new(origin.consume(), crate::export::Config::default()).unwrap();
 		let app = server.router();
 		wait_listed(
 			&app,
@@ -626,7 +722,7 @@ mod tests {
 			.map(|path| path.parse::<moq_net::Pattern>().unwrap())
 			.collect();
 		let restricted = origin.consume().scope("", &patterns).unwrap();
-		let server = Server::new(restricted, Default::default());
+		let server = Server::new(restricted, Default::default()).unwrap();
 		let broadcaster = server.broadcaster("room/live").await.unwrap();
 		broadcaster.ready().await;
 		let tag = |name| broadcaster.rendition(Kind::Video, name).unwrap().tag().to_string();
@@ -694,7 +790,7 @@ mod tests {
 				&moq_net::Patterns::from("room/live".parse::<moq_net::Pattern>().unwrap()),
 			)
 			.unwrap();
-		let all_denied = Server::new(only_catalog, Default::default());
+		let all_denied = Server::new(only_catalog, Default::default()).unwrap();
 		all_denied.broadcaster("room/live").await.unwrap().ready().await;
 		assert_eq!(
 			oneshot(all_denied.router(), denied_uri).await.status(),

@@ -18,6 +18,7 @@ import * as Moq from "@moq/net";
 import type * as Publish from "@moq/publish";
 import { Effect, type Getter, type Readonlys, readonlys, Signal } from "@moq/signals";
 import type * as Watch from "@moq/watch";
+import * as z from "@zod/mini";
 
 /** Delivery priority for hang metadata tracks: below the catalog, above audio. */
 export const PRIORITY = 90;
@@ -53,6 +54,28 @@ export type Preview = {
 	chat?: boolean;
 	typing?: boolean;
 };
+
+// A remote publisher's values are untrusted, so a consumer validates each against these. Keep them
+// in step with the types above, which stay spelled out for the API docs.
+const UserSchema: z.ZodMiniType<User> = z.object({
+	id: z.optional(z.string()),
+	name: z.optional(z.string()),
+	avatar: z.optional(z.string()),
+	color: z.optional(z.string()),
+});
+
+const PreviewSchema: z.ZodMiniType<Preview> = z.object({
+	audio: z.optional(z.boolean()),
+	video: z.optional(z.boolean()),
+	screen: z.optional(z.boolean()),
+	name: z.optional(z.string()),
+	avatar: z.optional(z.string()),
+	chat: z.optional(z.boolean()),
+	typing: z.optional(z.boolean()),
+});
+
+// `hang/preview.json` wraps the presence in `info`.
+const PreviewTrackSchema = z.object({ info: z.optional(PreviewSchema) });
 
 /** Points a `hang` catalog section at a track. */
 export type TrackRef = {
@@ -209,7 +232,7 @@ export function consume(broadcast: Watch.Broadcast): Consumed {
 		if (!active || !hang) return;
 
 		if (hang.user) {
-			subscribeJson<User>(active, hang.user.track, effect, (value) => {
+			subscribeJson(active, hang.user.track, UserSchema, effect, (value) => {
 				user.id.set(value.id);
 				user.name.set(value.name);
 				user.avatar.set(value.avatar);
@@ -218,7 +241,7 @@ export function consume(broadcast: Watch.Broadcast): Consumed {
 		}
 
 		if (hang.preview) {
-			subscribeJson<{ info?: Preview }>(active, hang.preview.track, effect, (value) => {
+			subscribeJson(active, hang.preview.track, PreviewTrackSchema, effect, (value) => {
 				preview.set(value.info ?? {});
 			});
 		}
@@ -231,19 +254,34 @@ export function consume(broadcast: Watch.Broadcast): Consumed {
 	};
 }
 
+/**
+ * Feed each value on `name` that matches `schema` to `update`.
+ *
+ * A value that does not match is refused with a warning and the last valid one stays, so a
+ * malformed publish neither reaches the UI nor ends the subscription.
+ */
 function subscribeJson<T>(
 	broadcast: Moq.Broadcast.Consumer,
 	name: string,
+	schema: z.ZodMiniType<T>,
 	effect: Effect,
 	update: (value: T) => void,
 ): void {
 	const track = broadcast.track(name).subscribe({ ...Moq.Track.Subscription.default(), priority: PRIORITY });
 	effect.cleanup(() => track.close());
 
-	const consumer = new Json.Snapshot.Consumer<T>({ track });
+	const consumer = new Json.Snapshot.Consumer<T>({ track, schema });
 	effect.spawn(async () => {
 		for (;;) {
-			const state = await effect.race(consumer.latest());
+			let state: Moq.Timed<T> | undefined;
+			try {
+				state = await effect.race(consumer.latest());
+			} catch (err) {
+				// The value was decoded and only failed the schema, so the next frame still applies.
+				if (!(err instanceof z.core.$ZodError)) throw err;
+				console.warn(`refused invalid ${name}:`, err);
+				continue;
+			}
 			if (state === undefined) break;
 			update(state.value);
 		}
