@@ -2780,7 +2780,7 @@ async fn an_import_shifts_onto_an_explicit_clock() {
 	let mut broadcast = moq_net::broadcast::Info::new().produce();
 	let consumer = broadcast.consume();
 	let clock = crate::Clock::new();
-	let config = crate::catalog::Config::default().with_clock(clock);
+	let config = crate::catalog::Config::default().with_clock(clock.clone());
 	let catalog = crate::catalog::Producer::new(&mut broadcast, config).unwrap();
 
 	let mut fmp4 = crate::container::fmp4::Import::new(broadcast, catalog.reserve());

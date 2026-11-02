@@ -22,8 +22,8 @@ use super::delivered::Delivered;
 use super::skipped::Skipped;
 use crate::ledger::{self, Ledger};
 
+use super::subscription::{Accounted, Containing, Held, Holdings, Resolved, Window, later};
 pub use super::subscription::{Anchor, Order, Position, Range, Subscription};
-use super::subscription::{Containing, Held, Holdings, Resolved, Window, later};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 mod demand;
@@ -7854,7 +7854,7 @@ impl Subscriber {
 	/// A publisher that accounts for each group it serves or drops learns from it that a
 	/// bounded subscription has nothing more to deliver.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn covered(&mut self, from: u64, accounted: &rangemap::RangeSet<u64>) -> bool {
+	pub(crate) fn covered(&mut self, from: u64, accounted: &impl Accounted) -> bool {
 		let bounds = self.bounds();
 		let from = from.max(bounds.start);
 		match &mut self.inner {
@@ -13692,13 +13692,14 @@ mod test {
 		assert!(done.is_none(), "missing groups below the boundary are not an error");
 	}
 
-	/// A finished track ends a sequence reader with nothing left in its range, as it ends
-	/// an arrival reader: whether the range ends at the cursor or the rest was given up.
+	/// A finished track ends both readers with nothing left in range, whether the range
+	/// ends at the cursor or the rest was given up.
 	#[test]
-	fn ordered_ends_once_a_finished_track_leaves_nothing_in_range() {
+	fn readers_end_once_a_finished_track_leaves_nothing_in_range() {
 		for given_up in [false, true] {
 			let producer = track_producer("test", Info::timed());
 			let end = if given_up { 4 } else { 3 };
+			let mut arrival = producer.subscribe(replay().with_range(0..end));
 			let mut ordered = producer.subscribe(replay().with_range(0..end)).ordered();
 			if given_up {
 				producer.drop_groups(3..4, StreamError::DeliveryTimeout);
@@ -13712,10 +13713,18 @@ mod test {
 					panic!("group {sequence}, given_up={given_up}")
 				};
 				assert_eq!(group.sequence, sequence);
+				let Poll::Ready(Ok(Some(group))) = arrival.poll_recv_group(&kio::Waiter::noop()) else {
+					panic!("arrival group {sequence}, given_up={given_up}")
+				};
+				assert_eq!(group.sequence, sequence);
 			}
 			assert!(
 				matches!(ordered.poll_next_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
 				"given_up={given_up}"
+			);
+			assert!(
+				matches!(arrival.poll_recv_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
+				"arrival, given_up={given_up}"
 			);
 		}
 	}
