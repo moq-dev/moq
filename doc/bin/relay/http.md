@@ -92,7 +92,8 @@ histograms show whether syscalls carry useful work. Compare turns and
 queue-pressure enters with throughput: flushing deferred work can remove
 empty busy turns, so enters/turn alone does not grade efficiency. The
 histograms include empty enters. A dead worker shows stuck zeros rather than
-disappearing.
+disappearing. The `*_pool_bytes` gauges are the UDP buffer memory each worker
+holds; pools grow under load and keep their high-water size.
 
 ### GET /sessions
 

@@ -271,10 +271,12 @@ fn should_grow(rx: &Rx, multishot: bool) -> bool {
 ///
 /// Only the `RxBuf` structs move; [`Packet`] and the provided ring both point
 /// at the `Box<[u8]>` allocations, which stay put.
-fn grow_rx(rx: &mut Rx, config: &Config) -> bool {
+fn grow_rx(rx: &mut Rx, config: &Config, metrics: &Counters) -> bool {
 	let Some(target) = grown(rx.bufs.len(), config.rx_buffers_max) else {
 		return false;
 	};
+	let added = usize::from(target) - rx.bufs.len();
+	metrics.rx_pool_bytes.add((added * config.rx_buffer_len) as u64);
 	while rx.bufs.len() < usize::from(target) {
 		let bid = rx.bufs.len() as u16;
 		rx.bufs.push(RxBuf {
@@ -301,10 +303,12 @@ fn grow_rx(rx: &mut Rx, config: &Config) -> bool {
 ///
 /// The payload allocations are stable across the `Vec` growth, which is what
 /// lets an in-flight send keep a raw pointer into one.
-fn grow_tx(tx: &mut Tx, config: &Config) -> bool {
+fn grow_tx(tx: &mut Tx, config: &Config, metrics: &Counters) -> bool {
 	let Some(target) = grown(tx.bufs.len(), config.tx_buffers_max) else {
 		return false;
 	};
+	let added = usize::from(target) - tx.bufs.len();
+	metrics.tx_pool_bytes.add((added * config.tx_buffer_len) as u64);
 	while tx.bufs.len() < usize::from(target) {
 		tx.free.push(tx.bufs.len() as u16);
 		tx.bufs.push(TxSlot::new(config.tx_buffer_len));
@@ -478,7 +482,11 @@ impl SockShared {
 	/// A packet released its buffer slice.
 	fn release_rx(self: &Rc<Self>, bid: u16) {
 		let mut rx = self.rx.borrow_mut();
-		rx.bufs[bid as usize].outstanding -= 1;
+		let buf = &mut rx.bufs[bid as usize];
+		buf.outstanding -= 1;
+		if buf.outstanding == 0 {
+			self.metrics.rx_pool_in_use_bytes.sub(self.config.rx_buffer_len as u64);
+		}
 		if !recycle_if_idle(&mut rx, bid) {
 			return;
 		}
@@ -497,6 +505,7 @@ impl SockShared {
 		debug_assert_eq!(slot.in_flight, 0);
 		slot.data = data;
 		tx.free.push(id);
+		self.metrics.tx_pool_in_use_bytes.sub(self.config.tx_buffer_len as u64);
 		tx.stalled = false;
 		tx.waiters.wake();
 	}
@@ -512,6 +521,7 @@ impl SockShared {
 		slot.in_flight -= 1;
 		if slot.in_flight == 0 {
 			tx.free.push(id);
+			self.metrics.tx_pool_in_use_bytes.sub(self.config.tx_buffer_len as u64);
 			tx.stalled = false;
 			tx.waiters.wake();
 		}
@@ -568,6 +578,22 @@ impl SockShared {
 
 impl Drop for SockShared {
 	fn drop(&mut self) {
+		// Take this socket's pools back out of the worker's gauges. Nothing
+		// borrows a buffer any more, except packets still queued unread.
+		let rx = self.rx.borrow();
+		let rx_len = self.config.rx_buffer_len as u64;
+		let rx_in_use = rx.bufs.iter().filter(|buf| buf.outstanding > 0).count() as u64;
+		self.metrics.rx_pool_bytes.sub(rx.bufs.len() as u64 * rx_len);
+		self.metrics.rx_pool_in_use_bytes.sub(rx_in_use * rx_len);
+		drop(rx);
+		let tx = self.tx.borrow();
+		let tx_len = self.config.tx_buffer_len as u64;
+		self.metrics.tx_pool_bytes.sub(tx.bufs.len() as u64 * tx_len);
+		self.metrics
+			.tx_pool_in_use_bytes
+			.sub((tx.bufs.len() - tx.free.len()) as u64 * tx_len);
+		drop(tx);
+
 		// Every op referencing our buffers has completed (ops own an `Rc` of
 		// us), so the kernel is done; give the buffer group id back.
 		if self.rx.borrow().ring.is_some()
@@ -711,6 +737,15 @@ impl Socket {
 			error: None,
 		};
 
+		// The socket's drop subtracts its pools, whichever way it ends.
+		shared
+			.metrics
+			.rx_pool_bytes
+			.add(u64::from(rx_count) * config.rx_buffer_len as u64);
+		shared
+			.metrics
+			.tx_pool_bytes
+			.add(u64::from(tx_count) * config.tx_buffer_len as u64);
 		let sock = Rc::new(SockShared {
 			io,
 			owner: Owner::new(shared),
@@ -826,14 +861,15 @@ impl Socket {
 		if tx.free.is_empty() {
 			// Starved: every buffer is in flight, so the socket needs a deeper
 			// send window than it has. Grow rather than serialize behind it.
-			grow_tx(&mut tx, &self.shared.config);
+			grow_tx(&mut tx, &self.shared.config, &self.shared.metrics);
 		}
 		if let Some(id) = tx.free.pop() {
+			let cap = self.shared.config.tx_buffer_len;
+			self.shared.metrics.tx_pool_in_use_bytes.add(cap as u64);
 			let mut data = std::mem::take(&mut tx.bufs[id as usize].data);
 			data.clear();
 			// A checkout is a `Vec` its holder may have shrunk or regrown before
 			// dropping it; every checkout holds exactly one pool-sized train.
-			let cap = self.shared.config.tx_buffer_len;
 			if data.capacity() != cap {
 				data = Vec::with_capacity(cap);
 			}
@@ -990,15 +1026,16 @@ impl TxBuf {
 			_ => return Err(Shared::gone_error()),
 		};
 
-		// A GSO train is one `sendmsg` the kernel caps at 64 segments. Without
+		// A GSO train is one `sendmsg`, so one header, that the kernel caps at
+		// 64 segments; a rejected train's resend sizes the rest itself. Without
 		// GSO every segment is its own `sendmsg`, so the ring is the limit
 		// instead: staging more than the submission queue holds makes `push`
 		// submit inline and go round again without reaping a single
 		// completion, which starves the worker and overflows the queue.
 		let segments = len.div_ceil(segment);
-		let limit = match self.sock.gso.get() {
-			true => MAX_GSO_SEGMENTS,
-			false => shared.ring.borrow().params().sq_entries() as usize,
+		let (limit, staged) = match self.sock.gso.get() {
+			true => (MAX_GSO_SEGMENTS, 1),
+			false => (shared.ring.borrow().params().sq_entries() as usize, segments),
 		};
 		if segments > limit {
 			return Err(io::Error::new(
@@ -1015,8 +1052,8 @@ impl TxBuf {
 			// The slot keeps the payload while the kernel reads it. Moving the
 			// `Vec` leaves its heap allocation where it is.
 			slot.data = std::mem::take(&mut self.data);
-			if slot.headers.len() < segments {
-				slot.headers.resize_with(segments, SendHdr::zeroed);
+			if slot.headers.len() < staged {
+				slot.headers.resize_with(staged, SendHdr::zeroed);
 			}
 			// SAFETY: the slot is checked out, so it cannot be sent from again
 			// (and its payload and headers cannot change) until every send
@@ -1306,7 +1343,7 @@ pub(crate) fn arm_recv(shared: &Rc<Shared>, sock: &Rc<SockShared>) {
 	// released and dropping every datagram until then.
 	if should_grow(&rx, sock.config.multishot) {
 		rx.starved = false;
-		grow_rx(&mut rx, &sock.config);
+		grow_rx(&mut rx, &sock.config, &sock.metrics);
 	}
 
 	let entry = if sock.config.multishot {
@@ -1434,7 +1471,11 @@ pub(crate) fn on_recv(
 				.rx_datagrams
 				.add(queued.len.div_ceil(queued.stride.max(1)) as u64);
 			let mut rx = sock.rx.borrow_mut();
-			rx.bufs[queued.bid as usize].outstanding += 1;
+			let buf = &mut rx.bufs[queued.bid as usize];
+			if buf.outstanding == 0 {
+				sock.metrics.rx_pool_in_use_bytes.add(sock.config.rx_buffer_len as u64);
+			}
+			buf.outstanding += 1;
 			rx.queue.push_back(queued);
 			rx.waiters.wake();
 		}
@@ -1992,7 +2033,7 @@ mod tests {
 	fn a_recycled_buffer_does_not_mask_a_recorded_starvation() {
 		let config = Config::default();
 		let mut rx = empty_rx();
-		grow_rx(&mut rx, &config);
+		grow_rx(&mut rx, &config, &Counters::default());
 		assert!(!should_grow(&rx, true), "a buffer is in the ring");
 
 		rx.starved = true;
@@ -2009,14 +2050,113 @@ mod tests {
 			..Default::default()
 		};
 		let mut rx = empty_rx();
+		let metrics = std::sync::Arc::new(Counters::default());
 
 		for expected in [1u16, 2, 4, 8, 16, 32, 40] {
-			assert!(grow_rx(&mut rx, &config), "growth stopped short of {expected}");
+			assert!(grow_rx(&mut rx, &config, &metrics), "growth stopped short of {expected}");
 			assert_eq!(rx.bufs.len(), usize::from(expected));
 			// Every buffer reaches the kernel exactly once.
 			assert_eq!(rx.ring.as_ref().expect("ring").tail, expected);
 		}
-		assert!(!grow_rx(&mut rx, &config), "grew past the ceiling");
+		assert!(!grow_rx(&mut rx, &config, &metrics), "grew past the ceiling");
+		assert_eq!(
+			crate::metrics::Metrics::from_counters(metrics).snapshot().rx_pool_bytes,
+			40 * config.rx_buffer_len as u64,
+			"the gauge holds every buffer once"
+		);
+	}
+
+	/// The pool gauges sum every live socket on the worker: each adds its
+	/// starting pools and its growth, counts the buffers it lends out, and
+	/// takes all of it back when it drops, unread packets included.
+	#[test]
+	fn pool_gauges_sum_live_sockets() {
+		let mut worker = match crate::Worker::new(crate::Config::default()) {
+			Ok(worker) => worker,
+			Err(Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
+				eprintln!("skipping io_uring socket test: {reason}");
+				return;
+			}
+			Err(err) => panic!("worker setup failed: {err}"),
+		};
+		let handle = worker.handle();
+		let config = Config::default();
+		let rx_len = config.rx_buffer_len as u64;
+		let tx_len = config.tx_buffer_len as u64;
+		let bind = || UdpSocket::bind("127.0.0.1:0").expect("bind");
+		let a = handle.udp(bind(), config.clone()).expect("socket a");
+		let b = handle.udp(bind(), config.clone()).expect("socket b");
+		let peer = UdpSocket::bind("127.0.0.1:0").expect("peer");
+		let snapshot = || handle.metrics().snapshot();
+
+		let start = snapshot();
+		assert_eq!(start.rx_pool_bytes, 2 * u64::from(INITIAL_RX_BUFFERS) * rx_len);
+		assert_eq!(start.tx_pool_bytes, 2 * u64::from(INITIAL_TX_BUFFERS) * tx_len);
+		assert_eq!((start.rx_pool_in_use_bytes, start.tx_pool_in_use_bytes), (0, 0));
+
+		worker
+			.block_on(async {
+				// Wait for a gauge to reach `want`, while the worker reaps completions.
+				let handle = &handle;
+				let settle = |read: fn(&crate::metrics::Snapshot) -> u64, want: u64| async move {
+					for _ in 0..1000 {
+						if read(&handle.metrics().snapshot()) == want {
+							return;
+						}
+						crate::Timer::after(handle, std::time::Duration::from_millis(1))
+							.wait()
+							.await;
+					}
+					panic!("gauge stuck at {} instead of {want}", read(&handle.metrics().snapshot()));
+				};
+
+				// One more send buffer than `a` starts with doubles its pool.
+				let mut held = Vec::new();
+				for _ in 0..=INITIAL_TX_BUFFERS {
+					held.push(a.acquire().await.expect("send buffer"));
+				}
+				let grown = snapshot();
+				assert_eq!(grown.tx_pool_bytes, 3 * u64::from(INITIAL_TX_BUFFERS) * tx_len);
+				assert_eq!(grown.tx_pool_in_use_bytes, held.len() as u64 * tx_len);
+				// Sent or dropped unsent, a buffer stops counting once it is back.
+				let mut sent = held.pop().expect("held");
+				sent.extend_from_slice(b"sent");
+				sent.send(Transmit::new(peer.local_addr().expect("peer addr"), 4))
+					.expect("staged");
+				drop(held);
+				settle(|snap| snap.tx_pool_in_use_bytes, 0).await;
+
+				// A packet holds its buffer until dropped.
+				peer.send_to(b"held", b.local_addr().expect("addr")).expect("send");
+				let packet = b.recv().await.expect("packet");
+				assert_eq!(snapshot().rx_pool_in_use_bytes, rx_len);
+				drop(packet);
+				assert_eq!(snapshot().rx_pool_in_use_bytes, 0);
+
+				// Dropping `a` takes back its grown pools and nothing of `b`'s.
+				let gone = a.downgrade();
+				drop(a);
+				settle(|snap| snap.tx_pool_bytes, u64::from(INITIAL_TX_BUFFERS) * tx_len).await;
+				assert!(gone.upgrade().is_none());
+				assert_eq!(snapshot().rx_pool_bytes, u64::from(INITIAL_RX_BUFFERS) * rx_len);
+
+				// Including a buffer whose packet was queued but never read.
+				peer.send_to(b"unread", b.local_addr().expect("addr")).expect("send");
+				settle(|snap| snap.rx_pool_in_use_bytes, rx_len).await;
+				drop(b);
+				settle(|snap| snap.rx_pool_bytes, 0).await;
+			})
+			.expect("worker");
+		let end = snapshot();
+		assert_eq!(
+			(
+				end.rx_pool_bytes,
+				end.rx_pool_in_use_bytes,
+				end.tx_pool_bytes,
+				end.tx_pool_in_use_bytes
+			),
+			(0, 0, 0, 0)
+		);
 	}
 
 	/// Every errno is either loss, a destination, the socket, or teardown, and only the errors

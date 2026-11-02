@@ -734,8 +734,8 @@ fn render_accepts(out: &mut String, listeners: &[moq_tokio::accept::Health]) {
 	}
 }
 
-/// The io_uring runtime's per-worker counters, one `worker` label per bound
-/// worker.
+/// The io_uring runtime's per-worker counters and gauges, one `worker` label
+/// per bound worker.
 ///
 /// These describe the runtime rather than the traffic: how well the receive
 /// pool, the batching mechanisms, and the ring itself are holding up on each
@@ -748,7 +748,8 @@ fn render_accepts(out: &mut String, listeners: &[moq_tokio::accept::Health]) {
 /// The ratios are what to watch, not the raw counts: `rx_datagrams / rx_receives`
 /// is the GRO coalescing actually achieved, `tx_datagrams / tx_sends` the GSO
 /// batching, and datagrams over `enters` the syscall amortization the runtime
-/// exists for.
+/// exists for. The pool gauges are the buffer memory each worker holds, which
+/// stays at its high-water mark after a burst.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 fn render_uring(out: &mut String, workers: &[UringWorker]) {
 	use std::fmt::Write as _;
@@ -860,6 +861,28 @@ fn render_uring(out: &mut String, workers: &[UringWorker]) {
 		"gauge",
 		"Timers currently in a worker's heap.",
 		|snap| snap.timers_active(),
+	);
+
+	let mut gauge = |name, help, field| series(name, "gauge", help, field);
+	gauge(
+		"moq_relay_uring_rx_pool_bytes",
+		"Receive buffer bytes a worker's sockets have allocated; pools grow under load and never shrink.",
+		|snap| snap.rx_pool_bytes,
+	);
+	gauge(
+		"moq_relay_uring_rx_pool_in_use_bytes",
+		"Receive buffer bytes holding a packet the relay has not consumed yet.",
+		|snap| snap.rx_pool_in_use_bytes,
+	);
+	gauge(
+		"moq_relay_uring_tx_pool_bytes",
+		"Send buffer bytes a worker's sockets have allocated; pools grow under load and never shrink.",
+		|snap| snap.tx_pool_bytes,
+	);
+	gauge(
+		"moq_relay_uring_tx_pool_in_use_bytes",
+		"Send buffer bytes being filled or in flight to the kernel.",
+		|snap| snap.tx_pool_in_use_bytes,
 	);
 
 	for (suffix, help, field) in [
@@ -1058,8 +1081,8 @@ mod tests {
 			&internal.uring,
 		);
 
-		// Every counter the module documents, for every worker, plus the derived
-		// gauge. A name that drifts out of the renderer silently deletes a
+		// Every counter the module documents, for every worker, plus the
+		// gauges. A name that drifts out of the renderer silently deletes a
 		// dashboard, so the list is spelled out rather than derived from it.
 		let counters = [
 			"rx_datagrams",
@@ -1102,8 +1125,20 @@ mod tests {
 				assert!(body.contains(&format!("{name}_sum{{worker=\"{worker}\"}} 0")));
 			}
 		}
-		assert!(body.contains("# TYPE moq_relay_uring_timers_active gauge"));
-		assert!(body.contains("moq_relay_uring_timers_active{worker=\"1\"} 0"));
+		for gauge in [
+			"timers_active",
+			"rx_pool_bytes",
+			"rx_pool_in_use_bytes",
+			"tx_pool_bytes",
+			"tx_pool_in_use_bytes",
+		] {
+			let name = format!("moq_relay_uring_{gauge}");
+			assert!(body.contains(&format!("# TYPE {name} gauge")), "missing type for {name}");
+			for worker in 0..2 {
+				let line = format!("{name}{{worker=\"{worker}\"}} 0");
+				assert!(body.contains(&line), "missing {line} in:\n{body}");
+			}
+		}
 	}
 
 	/// A relay with no io_uring workers publishes no worker series at all,
