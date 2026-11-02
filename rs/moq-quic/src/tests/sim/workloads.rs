@@ -78,7 +78,7 @@ impl Transfer {
 			_ => self.len,
 		};
 		while self.written < target {
-			match stream.write(&mut &payload(key, self.written..target)[..]) {
+			match stream.write(&mut payload(key, self.written..target)) {
 				Ok(written) => self.written += written,
 				Err(send::Error::Blocked) => return Ok(()),
 				Err(send::Error::Stopped(code)) if matches!(self.end, End::Stop) => {
@@ -309,7 +309,7 @@ fn conn(pair: &mut Pair, handles: [ConnectionHandle; 2], side: usize) -> &mut Co
 }
 
 fn datagram(side: usize, index: usize) -> Vec<u8> {
-	let mut data = payload(side, 0..256);
+	let mut data = payload(side, 0..256).to_vec();
 	data[..4].copy_from_slice(&(index as u32).to_le_bytes());
 	data
 }

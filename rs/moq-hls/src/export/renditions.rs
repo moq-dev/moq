@@ -91,6 +91,9 @@ struct Feed {
 	baseline: Option<u64>,
 	/// The catalog failed; late-created renditions start failed.
 	failed: Option<crate::Error>,
+	/// Another publisher run replaced this one, so every window ended where it was (see
+	/// [`Producer::cut`]) and no later failure reaches them.
+	cut: bool,
 	/// The estimated wall-clock time of `pts` 0, anchored when the first segment was listed
 	/// (assuming it had just ended). The DASH manifest's `availabilityStartTime` falls back to
 	/// this when the catalog declares no `clock`; set once so reloads see a stable presentation,
@@ -146,6 +149,7 @@ impl Producer {
 					discontinuities: Discontinuities::default(),
 					baseline: None,
 					failed: None,
+					cut: false,
 					anchor: None,
 					generation: None,
 					window,
@@ -249,16 +253,39 @@ impl Producer {
 
 	/// Record the catalog's end before closing its change stream. A failed catalog fails every
 	/// rendition, so none reads as finished.
+	///
+	/// The first end wins. The set stays locked while the windows fail, so a racing
+	/// [`cut`](Self::cut) lands wholly before (and the failure is dropped) or after (and the
+	/// failed windows keep their failure).
 	pub fn finish(&self, result: crate::Result<()>) {
+		let Ok(mut state) = self.state.write() else {
+			return;
+		};
+		if state.finished.is_some() {
+			return;
+		}
 		if let Err(err) = &result {
 			self.fanout.fail(crate::Error::CatalogFailed {
 				source: Box::new(err.clone()),
 			});
 		}
+		state.finished = Some(result);
+		drop(state);
+		self.close();
+	}
+
+	/// End the rendition set and every window at what is listed now, because another publisher
+	/// run replaced this one, which may go on publishing. A cursor drains the listed segments and
+	/// then ends as after a clean finish; one already failed keeps its failure.
+	///
+	/// Closes the set first: that waits out a [`sync`](Self::sync) in flight, so no rendition
+	/// joins after its siblings were cut.
+	pub fn cut(&self) {
 		if let Ok(mut state) = self.state.write() {
-			state.finished = Some(result);
+			state.finished.get_or_insert(Ok(()));
 		}
 		self.close();
+		self.fanout.cut();
 	}
 
 	/// Close the channel, signalling consumers that no more renditions will appear.
@@ -302,10 +329,10 @@ impl Fanout {
 	/// Replacing a generation drops what was listed under it and the inits built from it: those
 	/// belong to the run it named. The first one only labels the run already flowing, so an
 	/// embedder that supplies it right after construction loses nothing to a race with the first
-	/// records.
+	/// records. A cut set keeps its generation, so its ended playlists keep their URLs.
 	pub fn set_generation(&self, generation: Option<Arc<str>>) {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		if feed.generation == generation {
+		if feed.generation == generation || feed.cut {
 			return;
 		}
 		let restart = feed.generation.is_some();
@@ -327,10 +354,23 @@ impl Fanout {
 		});
 	}
 
+	/// End every window, including those only a cursor still holds (see [`Producer::cut`]).
+	fn cut(&self) {
+		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
+		feed.cut = true;
+		feed.targets.retain(|target| {
+			let Some(rendition) = target.upgrade() else {
+				return false;
+			};
+			rendition.cut();
+			true
+		});
+	}
+
 	/// Fail every window with `err`, so no playlist reads as finished.
 	fn fail(&self, err: crate::Error) {
 		let mut feed = self.feed.write().unwrap_or_else(|_| unreachable!("fanout is open"));
-		if feed.failed.is_some() {
+		if feed.failed.is_some() || feed.cut {
 			return;
 		}
 		feed.failed = Some(err.clone());
@@ -754,5 +794,24 @@ mod tests {
 			Err(crate::Error::CatalogFailed { source }) if matches!(*source, crate::Error::NoVariants)
 		));
 		assert!(producer.failure().is_some());
+	}
+
+	// A cut ends the set before it cuts the windows. A catalog failure landing in that gap must
+	// not fail the windows the cut keeps, nor leave the set and its windows disagreeing.
+	#[tokio::test]
+	async fn a_failure_racing_a_cut_is_dropped() {
+		tokio::time::pause();
+		let producer = Producer::spawned(Duration::from_secs(30));
+		let mut cursor = producer.subscribe();
+		// The first half of `cut`: the set ends cleanly while its windows are not cut yet.
+		if let Ok(mut state) = producer.state.write() {
+			state.finished = Some(Ok(()));
+		}
+		producer.close();
+		producer.finish(Err(crate::Error::NoVariants));
+		assert!(producer.failure().is_none(), "the failure reached the windows");
+		producer.cut();
+		assert!(cursor.next().await.unwrap().is_none());
+		assert!(producer.failure().is_none());
 	}
 }

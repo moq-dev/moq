@@ -19,7 +19,9 @@ x86\_64) and desktop JVM (Linux x86\_64/aarch64, macOS arm64, Windows x64).
 Publish JSON tracks with `TrackInfo(compress = true)`; a `dev.moq.json` consumer reads one with no option of its own.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 `dev.moq.json` consumers' `values()` emits `Value` (`value`, `timestamp`) and `valuesAs<T>()` emits `Timed<T>`;
-a snapshot consumer yields each state in order, and `latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
+a snapshot consumer yields each state in order, and `latest()` skips to the newest.
+A `Timestamp(value, scale)` is exact and reads back at the track's timescale, so a 90 kHz tick republishes unchanged.
+`Duration.toTimestamp()` is exact at nanosecond scale; `Timestamp.toDuration()` rounds down to a whole nanosecond.
 Raw tracks with a `null` timescale are untimed on both publish and receive.
 `MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
@@ -74,7 +76,7 @@ Moq.connect("https://relay.example.com").use { moq ->
     val publication = moq.createBroadcast("my-stream.hang")
     val broadcast = publication.broadcast()
     val audio = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusInit))
-    audio.writeFrame(Frame(payload = packet, timestampUs = 20_000u))
+    audio.writeFrame(Frame(payload = packet, timestamp = Timestamp(960u, 48_000u)))
     audio.cut() // audio has no keyframes, so this is what gives it groups
 
     val video = dev.moq.video.Producer(
@@ -82,7 +84,7 @@ Moq.connect("https://relay.example.com").use { moq ->
         dev.moq.video.ProducerOptions(input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 1280u, height = 720u, framerate = dev.moq.video.FrameRate(30000u, 1001u)),
         output = VideoEncoderOutput(codec = VideoCodec.H264, bitrate = null, gop = null, kind = autoEncoder), track = "camera"),
     )
-    video.write(VideoFrame(timestampUs = pts, data = rgba))
+    video.write(VideoFrame(timestamp = pts, data = rgba))
     publication.announce(AnnounceRoute(epoch = mintEpoch())) // a fresh epoch per run
     audio.finish()
     video.finish()
@@ -113,7 +115,7 @@ shows which module holds each.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
 - **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 - **Subscription defaults.** `Subscription.default()` returns moq-net's defaults, whose zero `maxDelay` skips a superseded group at once; passing no subscription means the same. `copy` it to change a field; building a `Subscription(...)` must name `maxDelay`, where null sets no subscriber limit.
-- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
+- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one.
 
 ## Runtime
 

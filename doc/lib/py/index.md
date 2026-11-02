@@ -22,13 +22,14 @@ source timeline; omitting it keeps an independent offset. A timebase belongs to 
 broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
 so a raw byte stream needs no other importer.
 `ContainerFormat.FMP4` splits each fragment into one frame per sample.
-`MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
+Media timestamps are exact `moq.Timestamp(value, scale)` records, so a 90 kHz tick survives a read and republish.
+`Timestamp.from_timedelta` is exact; `.to_timedelta()` rounds down to a whole microsecond.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
-and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowPush`, `WindowPop`, or `WindowSkip`. Read timestamps are rounded down to a whole microsecond.
+and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowPush`, `WindowPop`, or `WindowSkip`.
 Raw tracks with a `None` timescale are untimed on both publish and receive.
 `TrackInfo(compress=True)` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
-The JSON producers' `update` / `append` accept `timestamp=timedelta(...)` (`None` for untimed).
+The JSON producers' `update` / `append` accept `timestamp=moq.Timestamp(...)` (`None` for untimed).
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -129,7 +130,7 @@ shows which module holds each.
 - **Errors.** Read diagnostic payloads from `reason` and structured protocol failures from `details`.
 - **Disabled renditions.** A rendition with `enabled: false` has no frames coming until its publisher re-enables it. Select an enabled rendition from the latest catalog before opening a decoder. Keep one already playing while every rendition of its kind is disabled: the convenience decoders accept a disabled configuration, and a re-enable, such as an unmute, then plays without a resubscribe. Among the video renditions you can decode, prefer the highest `preference`; `0` is the default and `-1` marks a compatibility transcode.
 - **Subscription defaults.** `moq.Subscription.default()` returns moq-net's defaults, whose zero `max_delay` skips a superseded group at once; passing no subscription means the same. A bare `moq.Subscription()` has the same defaults; an explicit `max_delay=None` sets no subscriber limit.
-- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected.
+- **Track demand.** Obtain a dynamic track request’s `demand()` before accepting it to watch subscribers through the handoff to its producer. The watch does not keep the track alive and ends when the track closes or the request is rejected. A producer publishes everything you write, subscribed or not, so a late subscriber can fetch the recent past. Capturing only while a producer's `demand()` reports a subscriber is an opt-in that saves the encode but leaves nothing from before the first one.
 
 ## Runtime
 
