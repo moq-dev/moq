@@ -29,5 +29,5 @@ Public API: moq-c gains each m1 binding feature. Wire: none.
 
 ## Required
 
-- [API gaps](/quest/m1/c/api-gaps.md) - caller timestamps for JSON windows and disabling pre-encoded simulcast rungs
+- [API gaps](/quest/m1/c/api-gaps.md) - disabling pre-encoded simulcast rungs after the shared importer support lands
 - [Every consumer cancels while pending](/quest/m1/c/consumer-cancel.md) - catalog, raw, datagram, and media consumers end cleanly on cancel before their subscription is accepted

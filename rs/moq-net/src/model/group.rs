@@ -1368,7 +1368,10 @@ impl Drop for GroupState {
 /// A track is all timed or all untimed, so a frame must match it: a timed frame on an
 /// untimed track, or an untimed one on a timed track, is [`Error::TimestampMismatch`],
 /// as is a timestamp the track's scale can't hold.
-pub(super) fn on_track(timestamp: Option<Timestamp>, timescale: Option<Timescale>) -> Result<Option<Timestamp>> {
+///
+/// A writer that changes state before its frame reaches [`Producer::write_frame`], such as
+/// publishing a group for it, checks with this first so a refused timestamp changes nothing.
+pub fn on_track(timestamp: Option<Timestamp>, timescale: Option<Timescale>) -> Result<Option<Timestamp>> {
 	match (timestamp, timescale) {
 		(Some(timestamp), Some(timescale)) => Ok(Some(
 			timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?,
