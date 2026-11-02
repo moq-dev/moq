@@ -1,66 +1,53 @@
 package moq
 
 import (
+	"fmt"
 	"math"
+	"math/bits"
 	"time"
 
 	ffi "moq.dev/moq-ffi/moq"
 	"moq.dev/moq/internal/bridge"
 )
 
-// moq-ffi spells media timestamps as integer microseconds. These records mirror
-// the generated ones with time.Duration timestamps and convert at the boundary.
+// Timestamp is an exact media time: Value units at Scale units per second, with Value
+// at most 2^61 - 1 and Scale non-zero and at most 2^62 - 1. A read carries the track's
+// scale, so a tick such as 90 kHz survives a read and republish exactly.
+type Timestamp = ffi.MoqTimestamp
 
-// fromMicros saturates past time.Duration's ~292 years rather than wrapping to
-// a negative duration.
-func fromMicros(us uint64) time.Duration {
-	if us > uint64(math.MaxInt64/int64(time.Microsecond)) {
-		return time.Duration(math.MaxInt64)
+// TimestampFromDuration converts d exactly, at nanosecond scale, refusing a negative d.
+func TimestampFromDuration(d time.Duration) (Timestamp, error) {
+	if d < 0 {
+		return Timestamp{}, fmt.Errorf("negative timestamp: %v", d)
 	}
-	return time.Duration(us) * time.Microsecond
+	return Timestamp{Value: uint64(d), Scale: uint64(time.Second)}, nil
 }
 
-func optFromMicros(us *uint64) *time.Duration {
-	if us == nil {
-		return nil
+// TimestampToDuration converts t to a time.Duration, rounded down to a whole
+// nanosecond, saturating past time.Duration's ~292 years. It panics on a zero
+// Scale, which no read returns.
+func TimestampToDuration(t Timestamp) time.Duration {
+	if t.Scale == 0 {
+		panic("moq: timestamp with a zero scale")
 	}
-	d := fromMicros(*us)
-	return &d
+	hi, lo := bits.Mul64(t.Value, uint64(time.Second))
+	if hi >= t.Scale {
+		return time.Duration(math.MaxInt64)
+	}
+	ns, _ := bits.Div64(hi, lo, t.Scale)
+	if ns > math.MaxInt64 {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(ns)
 }
 
 // Frame is a raw track frame: a payload and its presentation timestamp.
 // Timestamp is nil on an untimed track, on both publish and receive.
-type Frame struct {
-	Payload   []byte
-	Timestamp *time.Duration
-}
-
-func (f Frame) ffi() (ffi.MoqFrame, error) {
-	us, err := bridge.OptionalDuration(f.Timestamp, "timestamp")
-	return ffi.MoqFrame{Payload: f.Payload, TimestampUs: us}, err
-}
-
-func frameFromFFI(f *ffi.MoqFrame) *Frame {
-	if f == nil {
-		return nil
-	}
-	return &Frame{Payload: f.Payload, Timestamp: optFromMicros(f.TimestampUs)}
-}
+type Frame = ffi.MoqFrame
 
 // Datagram is a best-effort track datagram as received: sequence number, timestamp
 // (nil from an untimed track), and payload.
-type Datagram struct {
-	Sequence  uint64
-	Timestamp *time.Duration
-	Payload   []byte
-}
-
-func datagramFromFFI(d *ffi.MoqDatagram) *Datagram {
-	if d == nil {
-		return nil
-	}
-	return &Datagram{Sequence: d.Sequence, Timestamp: optFromMicros(d.TimestampUs), Payload: d.Payload}
-}
+type Datagram = ffi.MoqDatagram
 
 // Subscription holds subscriber-side delivery preferences: priority, the max delay
 // a non-latest group may fall behind before it is skipped (zero skips at once, nil

@@ -51,7 +51,10 @@ lint *args:
     cargo fmt --all --check
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --no-deps "$@"
     cargo shear
-    cargo sort --workspace --check --no-format
+    # The workspace-hack's table order is `cargo hakari`'s, which `cargo sort` disagrees with.
+    cargo sort --check --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
+    cargo hakari generate --diff
+    python3 sh/rs/hakari.py
 
 # Auto-fix clippy/format/shear/sort.
 [positional-arguments]
@@ -59,7 +62,8 @@ fix *args:
     bash sh/local.sh cargo clippy --locked --fix --allow-staged --allow-dirty --all-targets "$@"
     cargo fmt --all
     cargo shear --fix
-    cargo sort --workspace --no-format
+    cargo hakari generate
+    cargo sort --no-format . $(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name != "workspace-hack") | .manifest_path | rtrimstr("/Cargo.toml")')
 
 # Like `check`, but only the crates in a changed-file list plus their dependents.
 check-changed $LIST:
@@ -186,7 +190,9 @@ x11-bench-ci:
     } 2>&1 | tee "$log"
 
 # moq-video's MediaCodec code is `#[cfg(target_os = "android")]`. Needs an NDK,
-# which the dev shell lacks, so android.yml runs it outside Nix. `check` rather
+# which the dev shell lacks, so android.yml runs it outside Nix with the
+# workspace-hack disabled (`cargo hakari disable && cargo update --workspace`).
+# Do the same locally, then restore Cargo.lock and rs/workspace-hack. `check` rather
 # than a denying clippy: the capture plumbing is dead on a target without a
 # capture backend.
 
@@ -212,9 +218,14 @@ relay-minimal:
 c-tests:
     sh/rs/c-tests.sh
 
+# The workspace-hack would supply third-party features a crate forgets to
+# declare, so CI runs this after `cargo hakari disable && cargo update
+# --workspace`; do the same locally, then `git checkout Cargo.lock rs/workspace-hack`.
+
 # Compile the full feature matrix, including isolated combinations and their tests.
 features:
     just rs net-features --all
+    just rs coroutines
     just rs quic-features --all
     just rs tokio-features --all
     just rs media-features --all
@@ -226,6 +237,8 @@ features:
     just rs test -p moq-cli --no-default-features --features capture,pipewire,websocket -E 'test(capture_window)'
     bash sh/local.sh cargo check --locked -p moq-bench --no-default-features
     bash sh/local.sh cargo check --locked -p moq-boy --no-default-features
+    # Alone, since the workspace's `kio/sim` dev-dependencies would unify `kio/async` back in.
+    bash sh/local.sh cargo check --locked --manifest-path rs/moq-auth/Cargo.toml --lib --all-features
     bash sh/local.sh cargo check --locked -p moq-hls -p moq-rtmp -p moq-rtc --no-default-features --all-targets
     bash sh/local.sh cargo clippy --locked --workspace {{ no_fuzz }} --all-targets --all-features -- -D warnings
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked --workspace {{ no_fuzz }} --all-features --no-deps
@@ -235,6 +248,13 @@ features:
 [positional-arguments]
 net-features *args:
     bash sh/rs/net-features.sh "$@"
+
+# Prove the poll-only library builds compile no coroutines and document cleanly.
+# moq-net allows the async fns still waiting on a poll conversion.
+coroutines:
+    bash sh/rs/coroutines.sh kio -- --no-default-features --features macros,runtime,manual,serde
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p kio --no-deps --no-default-features --features macros,runtime,manual,serde
+    bash sh/rs/coroutines.sh moq-net --allow until --allow run_front --allow serve_front -- --no-default-features
 
 # Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
 [positional-arguments]
@@ -291,6 +311,14 @@ play *args:
 [positional-arguments]
 doctest *args:
     bash sh/local.sh cargo test --locked --doc "$@"
+
+# Needs nightly with the miri component; executes only in Nightly. See sh/rs/miri.sh
+# for what runs and why it splits in two.
+
+# Run kio's and moq-net's hand-written in-memory unsafe under Miri.
+[positional-arguments]
+miri *args:
+    bash sh/rs/miri.sh "$@"
 
 # Run the moq-quic simulation's random workloads from a fresh seed, printing the settings that replay it, then the bandwidth probe's acceptance suite and the receive-timestamps comparison.
 quic-sim:
@@ -374,6 +402,12 @@ fuzz target *args:
 # Report native workspace or one crate's coverage under target/coverage/<crate>.
 coverage crate="workspace":
     bash sh/rs/coverage.sh '{{ crate }}'
+
+# Fail on mutants of .cargo/mutants.toml's scope that no test catches, under
+# target/mutants. Arguments pass to cargo-mutants: `just rs mutants --shard 0/8`.
+[positional-arguments]
+mutants *args:
+    bash sh/rs/mutants.sh "$@"
 
 # Build the default workspace members.
 build:

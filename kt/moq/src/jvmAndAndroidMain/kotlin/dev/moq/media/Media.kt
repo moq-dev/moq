@@ -3,8 +3,6 @@ package dev.moq.media
 import dev.moq.Frame
 import dev.moq.MoqJson
 import dev.moq.pull
-import kotlin.time.Duration
-import kotlin.time.Duration.Companion.microseconds
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.serializer
 import uniffi.moq.MoqException
@@ -158,10 +156,6 @@ suspend fun catalog(broadcast: dev.moq.BroadcastConsumer): Catalog {
 /** Stream of decoded frames from one finite media group. */
 fun GroupConsumer.frames(): Flow<MediaFrame> = pull({ cancel() }) { next() }
 
-/** Presentation timestamp of a container-decoded frame. */
-val MediaFrame.timestamp: Duration
-    get() = timestampUs.toLong().microseconds
-
 /**
  * Set an application catalog section from a serializable value, encoded with [MoqJson].
  *
@@ -171,11 +165,3 @@ val MediaFrame.timestamp: Duration
 inline fun <reified T> CatalogProducer.setSection(name: String, value: T) {
     setSection(name, MoqJson.encodeToString(serializer<T>(), value))
 }
-
-/** The furthest presentation point already read. */
-val ReadGap.timestamp: Duration
-    get() = timestampUs.toLong().microseconds
-
-/** Where the stopped encoder's media stops. */
-val ReadEnd.end: Duration
-    get() = endUs.toLong().microseconds

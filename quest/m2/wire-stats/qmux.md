@@ -21,13 +21,9 @@ beside the field.
   pursued; this lands in-tree after qmux moves.
 - The transport pushes its counters: the stats tick never polls a session,
   and there is no per-connection timer. `TCP_INFO` is read on demand, so
-  decide how qmux's I/O path refreshes the `Wire` (for example, after each
-  socket write batch) without a syscall per write, in place of the
-  qmux record bytes `qmux::Session::wire` counts today, including the relay's
-  `SocketStats` wiring (`rs/moq-relay/src/web.rs`).
+  decide how qmux's `Driver` (`rs/qmux/src/driver.rs`), which sets the `Wire`
+  after each round of reading and writing, refreshes it without a syscall per
+  write, in place of the qmux record bytes `qmux::Session::wire` counts today,
+  including the relay's `SocketStats` wiring (`rs/moq-relay/src/web.rs`).
 - Test: a loopback WebSocket session's `sent_bytes` covers at least the
   payload it wrote.
-
-## Required
-
-- [qmux drives its own socket](/quest/m2/perf/stream/driver.md) - replaces qmux's read/write path, so the counters go on the new driver once (decided 2026-10-22, maintainer)

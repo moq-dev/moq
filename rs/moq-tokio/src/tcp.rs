@@ -206,6 +206,7 @@ pub(crate) async fn connect_tls(
 			client
 				.connect(addr, &name)
 				.await
+				.map(crate::spawn_qmux)
 				.map_err(|err| Error::Connect(crate::error::message(err)))
 		}
 	})
@@ -227,6 +228,7 @@ async fn connect_addrs(
 			config.protocol = qmux::Protocol::Negotiate(protocols);
 			qmux::tcp::connect(addr, config)
 				.await
+				.map(crate::spawn_qmux)
 				.map_err(|err| Error::Connect(crate::error::message(err)))
 		}
 	})
@@ -306,6 +308,7 @@ impl TlsAcceptor {
 				self.qmux
 					.accept_established(stream, stats)
 					.await
+					.map(crate::spawn_qmux)
 					.map_err(|err| Error::Accept(crate::error::message(err)))
 			};
 			let session = crate::server::within(deadline, handshake).await?;
@@ -406,8 +409,8 @@ impl Listener {
 		let tls = self.tls.clone();
 		async move {
 			let session = match tls {
-				Some(tls) => tls.accept(stream).await,
-				None => qmux::tcp::accept(stream, config).await,
+				Some(tls) => tls.accept(stream).await.map(crate::spawn_qmux),
+				None => qmux::tcp::accept(stream, config).await.map(crate::spawn_qmux),
 			}
 			.map_err(|err| Error::Accept(crate::error::message(err)))?;
 			Ok((session, addr))

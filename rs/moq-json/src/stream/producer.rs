@@ -101,6 +101,14 @@ impl<T: Serialize> Producer<T> {
 	}
 }
 
+#[cfg(test)]
+impl<T> Producer<T> {
+	/// Shrink the frame limit to a size a test can reach.
+	pub(super) fn set_max_frame_bytes(&self, bytes: u64) {
+		self.inner.lock().unwrap().encoder.max_frame_bytes = bytes;
+	}
+}
+
 /// Shared publishing state behind [`Producer`]'s `Arc<Mutex>`.
 ///
 /// The track and the encoder are separate fields so a [`Pending`](super::Pending) record (which

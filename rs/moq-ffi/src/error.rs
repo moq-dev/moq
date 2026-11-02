@@ -252,7 +252,7 @@ pub enum MoqError {
 		reason: String,
 	},
 
-	/// A timestamp is outside the supported range.
+	/// A timestamp value or scale is outside the supported range, or the scale is zero.
 	#[error("timestamp overflow")]
 	TimeOverflow,
 
