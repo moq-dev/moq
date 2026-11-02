@@ -4572,8 +4572,9 @@ impl Subscriber {
 		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 	) -> Result<(), Error> {
 		let group: ietf::GroupHeader = stream.decode().await?;
-		// Ranked as the least urgent subscription until its alias resolves.
-		stream.set_priority(crate::priority::recv_group(i8::MIN, group.group_id, Default::default()));
+		// Parked below every other stream until its alias resolves, so a full window stops it
+		// before the SUBSCRIBE_OK or PUBLISH it waits on.
+		stream.set_priority(crate::priority::RECV_PARKED);
 
 		if group.sub_group_id != 0 {
 			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, dropping stream");
@@ -4583,7 +4584,15 @@ impl Subscriber {
 		// SUBSCRIBE_OK or PUBLISH can be reordered behind this stream. Hold only the
 		// subgroup header while waiting so the data stream cannot consume flow control.
 		let aliases = self.state.lock().aliases.consume();
-		let request_id = match resolve_track_alias(&self.runtime, aliases, group.track_alias).await {
+		let mut resolving = std::pin::pin!(resolve_track_alias(&self.runtime, aliases, group.track_alias));
+		// Unread meanwhile, so a reset or an eviction would otherwise go unseen, and an evicted
+		// stream holds further eviction off until it is stopped.
+		let resolved = kio::wait(|waiter| match waiter.poll_future(resolving.as_mut()) {
+			Poll::Ready(resolved) => Poll::Ready(Ok(resolved)),
+			Poll::Pending => stream.poll_reset(waiter).map(Err),
+		})
+		.await?;
+		let request_id = match resolved {
 			Ok(request_id) => request_id,
 			// Ours: we cancelled the subscription and the publisher has not stopped yet.
 			Err(err @ Error::Cancel) => {

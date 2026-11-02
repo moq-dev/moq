@@ -2180,6 +2180,8 @@ async fn stuck_window_evicts_the_lower_priority() {
 		})),
 	);
 	assert_eq!(leased, (Err(recv::Error::Evicted), Ok(WINDOW)));
+	// A reader waiting for a reset instead of reading learns of it too.
+	assert_eq!(low.received_reset().await, Err(recv::Error::Evicted));
 
 	// The peer hears of the eviction once the stream is stopped. Drain the survivor to FIN
 	// instead of dropping unread data, which would stop that stream too.
