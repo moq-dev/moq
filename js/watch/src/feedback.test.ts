@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano, wall } from "@moq/clock";
+import { Manual, Milli, Nano, now, Wall, wall } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Path } from "@moq/net";
-import { Tally } from "./feedback";
+import { arrivedAt, Tally } from "./feedback";
 
 const live = { path: Path.from("room/live.hang"), id: "video" };
 
@@ -35,10 +35,22 @@ test("a stall reports its time so far and adds its duration once it ends", async
 
 test("an arrival pairs the media timestamp with milliseconds since the MoQ epoch", () => {
 	const tally = new Tally();
-	tally.arrive(live, Milli(1234.9));
-	const arrival = tally.report(live.path).video.arrival;
-	expect(arrival?.timestamp).toBe(1234);
-	expect(arrival?.wall).toBeCloseTo(wall() - Catalog.MOQ_EPOCH_UNIX_MILLIS, -3);
+	tally.arrive(live, Milli(1234.9), Wall(Catalog.MOQ_EPOCH_UNIX_MILLIS + 5000.7));
+	expect(tally.report(live.path).video.arrival as unknown).toEqual({ timestamp: 1234, wall: 5000 });
+});
+
+test("an arrival's wall time is when the frame came off the transport, not when it was read", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	try {
+		await clock.advance(Nano.fromMilli(Milli(1000)));
+		const arrival = Nano.toMilli(Nano(now()));
+		const before = wall();
+		await clock.advance(Nano.fromMilli(Milli(300)));
+		expect(arrivedAt(arrival)).toBe(before);
+	} finally {
+		installed.close();
+	}
 });
 
 test("keeps the most recent few catalog broadcasts", () => {

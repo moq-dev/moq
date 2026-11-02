@@ -111,7 +111,7 @@ function parseEcho(value: string | null): string | undefined {
 	try {
 		return checkName(value);
 	} catch {
-		throw invalidAttribute("echo", value, "one path segment not starting with `.`");
+		throw invalidAttribute("echo", value, "one path segment not starting with `.`, any `\\` doubled");
 	}
 }
 

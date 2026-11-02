@@ -1,4 +1,4 @@
-import { Instant, type Milli, Nano, now, wall } from "@moq/clock";
+import { Instant, type Milli, Nano, now, Wall, wall } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import type * as Moq from "@moq/net";
 
@@ -72,9 +72,9 @@ export class Tally {
 		}
 	}
 
-	/** Record a received frame at media `timestamp`, arriving now. */
-	arrive(key: Key, timestamp: Milli): void {
-		const at = Math.floor(wall() - Catalog.MOQ_EPOCH_UNIX_MILLIS);
+	/** Record a received frame at media `timestamp`, arriving at wall time `arrived`. */
+	arrive(key: Key, timestamp: Milli, arrived: Wall): void {
+		const at = Math.floor(arrived - Catalog.MOQ_EPOCH_UNIX_MILLIS);
 		// A clock before the MoQ epoch has no wire encoding, so such an arrival is never recorded.
 		if (at < 0 || timestamp < 0) return;
 		this.#entry(key).received.arrival = { timestamp: Math.floor(timestamp), wall: at };
@@ -109,6 +109,14 @@ export class Tally {
 		}
 		return report;
 	}
+}
+
+/**
+ * The wall time of a frame's monotonic ingress time, as a received frame records it before
+ * reordering or decoder backpressure, so a frame read late still reports when it arrived.
+ */
+export function arrivedAt(arrival: Milli): Wall {
+	return Wall(wall() - Math.max(0, Nano.toMilli(Nano(now())) - arrival));
 }
 
 // Milliseconds since `start`.

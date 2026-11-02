@@ -37,6 +37,7 @@ export type EchoProps = Inputs<EchoInput> & {
 /**
  * Refuse an echo name that is not one visible path segment: empty, containing `/`, a dot segment
  * or glob, or starting with `.`, which would hide the feedback from discovery. Matches the Rust CLI.
+ * A `\` must escape another `\` in the published name, as in any path.
  */
 export function checkName(name: string): string {
 	if (name === "" || name.includes("/") || name === "." || name === ".." || name === "*" || name === "**") {
@@ -44,6 +45,11 @@ export function checkName(name: string): string {
 	}
 	if (name.startsWith(".")) {
 		throw new Error(`echo name ${JSON.stringify(name)} starts with \`.\`, which hides its feedback from discovery`);
+	}
+	try {
+		Moq.Path.from(`${name}${Schema.SUFFIX}`);
+	} catch (err) {
+		throw new Error(`echo name ${JSON.stringify(name)} is not a valid path segment`, { cause: err });
 	}
 	return name;
 }

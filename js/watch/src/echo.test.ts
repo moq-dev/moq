@@ -55,8 +55,11 @@ async function read(origin: Origin.Producer, path: string, clock: Manual): Promi
 }
 
 test("refuses a name that is not one visible path segment", () => {
-	for (const name of ["", "a/b", ".", "..", "*", "**", ".hidden"]) expect(() => checkName(name)).toThrow();
+	for (const name of ["", "a/b", ".", "..", "*", "**", ".hidden", "a\\b", "alice\\"]) {
+		expect(() => checkName(name)).toThrow();
+	}
 	expect(checkName("alice")).toBe("alice");
+	expect(checkName("a\\\\b")).toBe("a\\\\b");
 });
 
 test("publishes feedback where the catalog solicits it and follows the solicitation", async () => {

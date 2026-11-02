@@ -1,4 +1,4 @@
-import { type Micro, Milli, Nano, type Wall, wall } from "@moq/clock";
+import { type Micro, Milli, Nano, type Wall } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
@@ -17,7 +17,7 @@ import {
 } from "@moq/signals";
 import { rotateVideoDimensions } from "@moq/video";
 import { base64ToBytes } from "../base64";
-import { type Counter, type Key, type Received, Tally } from "../feedback";
+import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import { supportCacheKey } from "../support-probe";
 import type { Sync } from "../sync";
@@ -601,12 +601,13 @@ class DecoderTrack {
 		const timestamp = Milli.fromMicro(frame.timestamp as Micro);
 		const late = accepted && this.sync.received(timestamp, frame.arrival);
 		const bytes = frame.payload.byteLength;
-		this.tally?.arrive(this.key, timestamp);
+		const arrived = arrivedAt(frame.arrival);
+		this.tally?.arrive(this.key, timestamp, arrived);
 		this.#count({ frames: 1, bytes, late: late ? 1 : 0 }, (stats) => ({
 			frameCount: stats.frameCount + (accepted ? 1 : 0),
 			bytesReceived: stats.bytesReceived + bytes,
 			late: stats.late + (late ? 1 : 0),
-			arrival: { timestamp, wall: wall() },
+			arrival: { timestamp, wall: arrived },
 		}));
 	}
 

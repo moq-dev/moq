@@ -1,4 +1,4 @@
-import { Micro, Milli, type Second, type Wall, wall } from "@moq/clock";
+import { Micro, Milli, type Second, type Wall } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Container from "@moq/hang/container";
 import * as Util from "@moq/hang/util";
@@ -16,7 +16,7 @@ import {
 import { Producer as ArrivalProducer, type Arrivals, gap } from "../arrivals";
 import { hostedAssets } from "../assets";
 import { base64ToBytes } from "../base64";
-import { type Counter, type Key, type Received, Tally } from "../feedback";
+import { arrivedAt, type Counter, type Key, type Received, Tally } from "../feedback";
 import { type Failure, failureMoved, nextMedia, subscribeMedia } from "../media";
 import type { Sync } from "../sync";
 import { AudioBuffer } from "./buffer";
@@ -261,11 +261,12 @@ export class Decoder {
 	// Count a received frame and whether it arrived too late for playout.
 	#receive(key: Key, frame: Container.ReceivedFrame, timestamp: Milli, late: boolean): void {
 		const bytes = frame.payload.byteLength;
-		this.#tally.arrive(key, timestamp);
+		const arrived = arrivedAt(frame.arrival);
+		this.#tally.arrive(key, timestamp, arrived);
 		this.#count(key, { frames: 1, bytes, late: late ? 1 : 0 }, (stats) => ({
 			bytesReceived: stats.bytesReceived + bytes,
 			late: stats.late + (late ? 1 : 0),
-			arrival: { timestamp, wall: wall() },
+			arrival: { timestamp, wall: arrived },
 		}));
 	}
 
