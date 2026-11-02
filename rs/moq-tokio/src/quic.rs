@@ -20,6 +20,8 @@ mod backend;
 pub use backend::Error;
 #[cfg(feature = "quic")]
 pub(crate) use backend::{Client, Closer, Options, Server, accept};
+#[cfg(feature = "quic")]
+pub mod demux;
 #[cfg(feature = "driver")]
 pub mod driver;
 

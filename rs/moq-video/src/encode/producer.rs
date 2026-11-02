@@ -1147,7 +1147,7 @@ mod tests {
 				let mut broadcast = moq_net::broadcast::Info::new().produce();
 				let consumer = broadcast.consume();
 				let config = moq_mux::catalog::Config::default()
-					.with_clock(clock)
+					.with_clock(clock.clone())
 					.with_max_age(RETAIN);
 				let catalog = moq_mux::catalog::Producer::new(&mut broadcast, config).unwrap();
 				let track = broadcast
@@ -1169,6 +1169,7 @@ mod tests {
 				let (opens, rx) = tokio::sync::mpsc::unbounded_channel();
 				let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
 				// Local: a capture stream is `!Send` on macOS, so each test runs on a `LocalSet`.
+				let capturing = clock.clone();
 				let task = tokio::task::spawn_local(async move {
 					let mut source = Opens(rx);
 					// Each subscription opens the camera, so a fixture can idle and restart it.
@@ -1178,7 +1179,7 @@ mod tests {
 						..Capture::default()
 					};
 					tokio::select! {
-						res = capture_loop(&mut producer, &mut source, &options, &clock) => res?,
+						res = capture_loop(&mut producer, &mut source, &options, &capturing) => res?,
 						_ = stopped => {}
 					}
 					producer.finish()

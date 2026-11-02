@@ -95,12 +95,10 @@ async fn opus_roundtrip(case: Case) {
 		.await
 		.unwrap();
 	producer.finish().unwrap();
-	let warmup = rendition.warmup.unwrap_or_default();
-	let skipped = (warmup.as_nanos() * case.rate as u128 / 1_000_000_000) as usize;
+	// Decoded from the track's first packet, so only the codec's pre-skip is dropped.
 	let mut pcm = Vec::new();
 	while let Some(frame) = next_frame(&mut consumer).await.unwrap() {
-		let expected =
-			123_000 + warmup.as_micros() + pcm.len() as u128 / channels as u128 * 1_000_000 / case.rate as u128;
+		let expected = 123_000 + pcm.len() as u128 / channels as u128 * 1_000_000 / case.rate as u128;
 		// Microsecond stamping rounds each chunk independently.
 		assert!(
 			frame.timestamp.as_micros().abs_diff(expected) <= 1,
@@ -111,12 +109,12 @@ async fn opus_roundtrip(case: Case) {
 	}
 	assert_eq!(
 		pcm.len(),
-		(expected_frames - skipped) * channels as usize,
+		expected_frames * channels as usize,
 		"pre-skip, resampling and final padding preserve duration"
 	);
 	for step in 0..2 {
-		let start = (step * expected_frames / 2).max(skipped) - skipped;
-		let end = (step + 1) * expected_frames / 2 - skipped;
+		let start = step * expected_frames / 2;
+		let end = (step + 1) * expected_frames / 2;
 		let half = &pcm[start * channels as usize..end * channels as usize];
 		for channel in 0..channels as usize {
 			let samples: Vec<f32> = half.iter().skip(channel).step_by(channels as usize).copied().collect();

@@ -9,6 +9,22 @@ private func nextRoute(_ announced: AnnounceConsumer) async throws -> AnnounceEv
     return try XCTUnwrap(next, "announce stream ended")
 }
 
+/// A timestamp in microseconds.
+private func micros(_ value: UInt64) -> Timestamp {
+    Timestamp(value: value, scale: 1_000_000)
+}
+
+/// Assert `body` throws `MoqError.TimeOverflow`.
+private func assertTimeOverflow<T>(
+    _ body: @autoclosure () throws -> T, file: StaticString = #filePath, line: UInt = #line
+) {
+    XCTAssertThrowsError(try body(), file: file, line: line) { error in
+        guard case MoqError.TimeOverflow = error else {
+            return XCTFail("expected TimeOverflow, got \(error)", file: file, line: line)
+        }
+    }
+}
+
 final class SmokeTests: XCTestCase {
     func testDefaultSubscriptionSkipsSupersededGroupsAtOnce() {
         XCTAssertEqual(Subscription.default.maxDelay, 0)
@@ -50,7 +66,7 @@ final class SmokeTests: XCTestCase {
         let track = try broadcast.publishTrack(name: "backlog", info: TrackInfo(timescale: 1_000_000))
         for ms: UInt64 in 0..<3 {
             let group = try track.appendGroup()
-            try group.writeFrame(Data("x".utf8), timestampUs: ms * 1_000)
+            try group.writeFrame(Data("x".utf8), timestamp: micros(ms * 1_000))
             try group.finish()
         }
         let consumer = try track.consume(
@@ -365,7 +381,7 @@ final class SmokeTests: XCTestCase {
         let broadcast = try BroadcastProducer()
         let track = try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000))
         let group = try track.appendGroup()
-        try group.writeFrame(Data("cached".utf8), timestampUs: 0)
+        try group.writeFrame(Data("cached".utf8), timestamp: micros(0))
         try group.finish()
 
         let consumer = try broadcast.consume()
@@ -395,16 +411,16 @@ final class SmokeTests: XCTestCase {
             track: try await broadcast.consume().subscribeTrack(name: "status"))
 
         for viewers in 1...4 {
-            try producer.update(Status(state: "live", viewers: viewers), timestampUs: UInt64(viewers) * 1000)
+            try producer.update(Status(state: "live", viewers: viewers), timestamp: micros(UInt64(viewers) * 1000))
         }
 
         // `next` yields every state in order; `latest` skips the buffered third.
         let first = try await consumer.next()
-        XCTAssertEqual(first, Json.Timed(value: Status(state: "live", viewers: 1), timestampUs: 1000))
+        XCTAssertEqual(first, Json.Timed(value: Status(state: "live", viewers: 1), timestamp: micros(1000)))
         let second = try await consumer.next()
-        XCTAssertEqual(second, Json.Timed(value: Status(state: "live", viewers: 2), timestampUs: 2000))
+        XCTAssertEqual(second, Json.Timed(value: Status(state: "live", viewers: 2), timestamp: micros(2000)))
         let latest = try await consumer.latest()
-        XCTAssertEqual(latest, Json.Timed(value: Status(state: "live", viewers: 4), timestampUs: 4000))
+        XCTAssertEqual(latest, Json.Timed(value: Status(state: "live", viewers: 4), timestamp: micros(4000)))
 
         consumer.cancel()
         try producer.finish()
@@ -425,7 +441,7 @@ final class SmokeTests: XCTestCase {
         for n in 0..<3 {
             try producer.append(Event(n: n))
             let record = try await consumer.next()
-            XCTAssertEqual(record, Json.Timed(value: Event(n: n), timestampUs: nil))
+            XCTAssertEqual(record, Json.Timed(value: Event(n: n), timestamp: nil))
         }
 
         consumer.cancel()
@@ -445,23 +461,24 @@ final class SmokeTests: XCTestCase {
             track: try await broadcast.consume().subscribeTrack(name: "log"))
 
         for n in 0..<3 {
-            try producer.push(Event(n: n), timestampUs: UInt64(n) * 1000)
+            try producer.push(Event(n: n), timestamp: micros(UInt64(n) * 1000))
         }
-        try producer.pop(2, timestampUs: 3000)
+        try producer.pop(2, timestamp: micros(3000))
 
         for n in 0..<3 {
             let event = try await consumer.next()
             XCTAssertEqual(
-                event, Json.Timed(value: .push(index: UInt64(n), value: Event(n: n)), timestampUs: UInt64(n) * 1000))
+                event,
+                Json.Timed(value: .push(index: UInt64(n), value: Event(n: n)), timestamp: micros(UInt64(n) * 1000)))
         }
         let pop = try await consumer.next()
-        XCTAssertEqual(pop, Json.Timed(value: .pop(0..<2), timestampUs: 3000))
+        XCTAssertEqual(pop, Json.Timed(value: .pop(0..<2), timestamp: micros(3000)))
 
         // The cut's new group restates record 2, which this reader already has.
         try producer.cut()
-        try producer.push(Event(n: 3), timestampUs: 4000)
+        try producer.push(Event(n: 3), timestamp: micros(4000))
         let pushed = try await consumer.next()
-        XCTAssertEqual(pushed, Json.Timed(value: .push(index: 3, value: Event(n: 3)), timestampUs: 4000))
+        XCTAssertEqual(pushed, Json.Timed(value: .push(index: 3, value: Event(n: 3)), timestamp: micros(4000)))
 
         try producer.finish()
         let end = try await consumer.next()
@@ -505,7 +522,7 @@ final class SmokeTests: XCTestCase {
         let received = try await consumer.readFrame()
         let frame = try XCTUnwrap(received)
         XCTAssertEqual(frame.payload, Data("payload".utf8))
-        XCTAssertNil(frame.timestampUs)
+        XCTAssertNil(frame.timestamp)
         XCTAssertNil(consumer.info().timescale)
         try track.finish()
         try broadcast.close()
@@ -517,24 +534,83 @@ final class SmokeTests: XCTestCase {
         let consumer = try track.consume()
 
         let payload = Data("ready".utf8)
-        try track.writeFrame(payload, timestampUs: 12_345)
+        try track.writeFrame(payload, timestamp: micros(12_345))
 
         let frame = try await consumer.readFrame()
         XCTAssertEqual(frame?.payload, payload)
-        XCTAssertEqual(frame?.timestampUs, 12_345)
+        XCTAssertEqual(frame?.timestamp, micros(12_345))
 
         let group = try track.appendGroup()
         let groupConsumer = try group.consume()
         let groupPayload = Data("group".utf8)
-        try group.writeFrame(groupPayload, timestampUs: 23_456)
+        try group.writeFrame(groupPayload, timestamp: micros(23_456))
         try group.finish()
 
         let groupFrame = try await groupConsumer.readFrame()
         XCTAssertEqual(groupFrame?.payload, groupPayload)
-        XCTAssertEqual(groupFrame?.timestampUs, 23_456)
+        XCTAssertEqual(groupFrame?.timestamp, micros(23_456))
 
         try track.finish()
         try broadcast.close()
+    }
+
+    func testTimestampsAreExact() async throws {
+        let broadcast = try BroadcastProducer()
+        let track = try broadcast.publishTrack(name: "video", info: TrackInfo(timescale: 90_000))
+        let consumer = try track.consume()
+
+        // A present zero stays present, and one 90 kHz tick reads back as itself rather than
+        // the 11 µs it floors to.
+        for value: UInt64 in [0, 1] {
+            let timestamp = Timestamp(value: value, scale: 90_000)
+            try track.writeFrame(Data("frame".utf8), timestamp: timestamp)
+            let frame = try await consumer.readFrame()
+            XCTAssertEqual(frame?.timestamp, timestamp)
+        }
+
+        for invalid in [
+            Timestamp(value: 0, scale: 0),
+            Timestamp(value: 0, scale: 1 << 62),
+            Timestamp(value: 1 << 61, scale: 90_000),
+        ] {
+            assertTimeOverflow(try track.writeFrame(Data("frame".utf8), timestamp: invalid))
+        }
+
+        try track.finish()
+        try broadcast.close()
+    }
+
+    @available(macOS 13, iOS 16, *)
+    func testTimestampDurations() throws {
+        // Exact at the finest power-of-ten scale whose value fits.
+        let atto: UInt64 = 1_000_000_000_000_000_000
+        XCTAssertEqual(try Timestamp(.zero), Timestamp(value: 0, scale: atto))
+        XCTAssertEqual(try Timestamp(.milliseconds(20)), Timestamp(value: atto / 50, scale: atto))
+        XCTAssertEqual(try Timestamp(.seconds(3_600)), Timestamp(value: 3_600 * (atto / 10_000), scale: atto / 10_000))
+        XCTAssertEqual(try Timestamp(.seconds((1 << 61) - 1)), Timestamp(value: (1 << 61) - 1, scale: 1))
+        assertTimeOverflow(try Timestamp(.seconds(1 << 61)))
+        assertTimeOverflow(try Timestamp(.seconds(-1)))
+        // Three seconds of attoseconds passes 2^61, and the attosecond doesn't survive a coarser scale.
+        assertTimeOverflow(try Timestamp(.seconds(3) + Duration(secondsComponent: 0, attosecondsComponent: 1)))
+
+        // Back down to a whole attosecond: a 90 kHz tick is 11_111_111_111_111.1 as, 2/3 s ends in
+        // ...6.6 as, and half an attosecond is 0.
+        let tick = Duration(secondsComponent: 0, attosecondsComponent: 11_111_111_111_111)
+        XCTAssertEqual(try Timestamp(value: 1, scale: 90_000).duration, tick)
+        let twoThirds = Duration(secondsComponent: 0, attosecondsComponent: 666_666_666_666_666_666)
+        XCTAssertEqual(try Timestamp(value: 2, scale: 3).duration, twoThirds)
+        XCTAssertEqual(try Timestamp(value: 1, scale: 2 * atto).duration, .zero)
+        XCTAssertEqual(try micros(1_500_000).duration, .milliseconds(1_500))
+        XCTAssertEqual(try Timestamp(.seconds(3_600)).duration, .seconds(3_600))
+
+        // A record outside what a write accepts is refused rather than converted.
+        for invalid in [
+            Timestamp(value: 0, scale: 0),
+            Timestamp(value: 0, scale: 1 << 62),
+            Timestamp(value: 1 << 61, scale: 90_000),
+        ] {
+            assertTimeOverflow(try invalid.duration)
+        }
     }
 
     func testReadFrameSkipsEmptyThenPopulatedGroups() async throws {
@@ -544,11 +620,11 @@ final class SmokeTests: XCTestCase {
 
         try track.appendGroup().finish()
         try track.appendGroup().finish()
-        try track.writeFrame(Data("populated".utf8), timestampUs: 2_000)
+        try track.writeFrame(Data("populated".utf8), timestamp: micros(2_000))
 
         let frame = try await consumer.readFrame()
         XCTAssertEqual(frame?.payload, Data("populated".utf8))
-        XCTAssertEqual(frame?.timestampUs, 2_000)
+        XCTAssertEqual(frame?.timestamp, micros(2_000))
 
         try track.finish()
         try broadcast.close()
@@ -582,7 +658,7 @@ final class SmokeTests: XCTestCase {
             track: "fine"
         )
         // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
-        try fine.write(AudioFrame(timestampUs: 0, data: Data(count: 120 * 4)))
+        try fine.write(AudioFrame(timestamp: micros(0), data: Data(count: 120 * 4)))
         try fine.finish()
 
         XCTAssertThrowsError(
@@ -634,7 +710,7 @@ final class SmokeTests: XCTestCase {
 
         // Two 20 ms Opus frames of silence at 48 kHz mono.
         for i in 0..<2 {
-            try audio.write(AudioFrame(timestampUs: UInt64(i) * 20_000, data: Data(count: 960 * 4)))
+            try audio.write(AudioFrame(timestamp: micros(UInt64(i) * 20_000), data: Data(count: 960 * 4)))
         }
         let fixedFrame = try await fixed.next()
         XCTAssertNotNil(fixedFrame)
@@ -669,7 +745,7 @@ final class SmokeTests: XCTestCase {
         let rgba = Data(repeating: 0x80, count: 320 * 240 * 4)
         try video.cut()
         for i in 0..<10 {
-            try video.write(VideoFrame(timestampUs: UInt64(i) * 33_333, data: rgba))
+            try video.write(VideoFrame(timestamp: micros(UInt64(i) * 33_333), data: rgba))
         }
 
         let consumer = try await origin.consume().request(path: "video-decode-frame")
@@ -683,7 +759,7 @@ final class SmokeTests: XCTestCase {
 
         // Keep the encoder fed so the decoder sees frames after it joined.
         for i in 10..<40 {
-            try video.write(VideoFrame(timestampUs: UInt64(i) * 33_333, data: rgba))
+            try video.write(VideoFrame(timestamp: micros(UInt64(i) * 33_333), data: rgba))
         }
 
         let next = try await decoder.next()
@@ -706,7 +782,7 @@ final class SmokeTests: XCTestCase {
     func testEncodeAudioWithOpusObject() throws {
         // The config retains the codec, so releasing either first must still encode.
         let input = AudioEncoderInput(format: .f32, sampleRate: 48_000, channels: 1)
-        let silence = AudioFrame(timestampUs: 0, data: Data(count: 960 * 4))
+        let silence = AudioFrame(timestamp: micros(0), data: Data(count: 960 * 4))
 
         // Release the codec before encoding: `output` retains it.
         do {
