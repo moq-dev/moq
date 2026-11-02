@@ -368,6 +368,7 @@ impl Relay {
 			.with_extensions(server_extensions)
 			.with_implementation(implementation)
 			.with_timeout(handshake_timeout)
+			.with_quic(&config.quic)
 			.with_sessions(sessions.clone())
 			.with_tls_acceptor(server.tls_acceptor());
 		#[cfg(feature = "acme")]

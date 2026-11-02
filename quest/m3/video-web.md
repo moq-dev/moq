@@ -2,9 +2,8 @@
 
 ## Goal
 
-The first `/studio` page in demo/web: the wasm studio shows camera and screen
-sources on one canvas and publishes its video to a relay. That page is the
-consumer, so it lands in the same PR as moq-video's browser backends:
+moq-video runs in the browser for the
+[web studio](https://github.com/moq-dev/studio/blob/main/quest/m0/web.md) in moq-dev/studio:
 - **Capture:** getUserMedia for cameras and getDisplayMedia for screens,
   producing `Frame`s backed by WebCodecs `VideoFrame`s.
 - **Codecs:** encode and decode through WebCodecs for whichever of H.264,
@@ -17,7 +16,15 @@ browser media muxing. A CI `cargo check` for wasm32 keeps them building. moq
 removed its WASM support on 2026-10-31, so this quest restores the wasm32
 target; confirm the web studio still wants it before starting.
 
+A test in a headless browser proves capture from a fake device, an encode and
+decode round trip, and the import, so this lands without the studio page.
+
 ## Plan
+
+Changed 2026-11-02 (maintainer): the studio moved to moq-dev/studio. This
+was planned to land in the same PR as the first studio page; it now lands
+here first with its own browser test, and the studio's page follows a pin
+bump.
 
 - **Asynchronous seams:** the encode and decode seams become asynchronous.
   Today the backend's `encode` and `flush` return their packets

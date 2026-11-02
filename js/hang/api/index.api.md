@@ -13,6 +13,7 @@ import { ZodMiniPipe } from "@zod/mini";
 import { ZodMiniRecord } from "@zod/mini";
 import { ZodMiniString } from "@zod/mini";
 import { ZodMiniTransform } from "@zod/mini";
+import { ZodMiniType } from "@zod/mini";
 import { infer } from "@zod/mini";
 
 export * as Catalog from "@moq/hang/catalog";
@@ -159,6 +160,18 @@ export namespace Health {
 export * as Hls from "@moq/hang/hls";
 
 export * as Net from "@moq/net";
+
+export namespace Report {
+	export const INTERVAL: 1000;
+	export const PRIORITY: -128;
+	export class Writer<T> {
+		constructor(broadcast: Net.Broadcast.Producer, name: string, schema?: ZodMiniType<T>);
+		finish(): void;
+		readonly track: Net.Track.Producer;
+		update(value: T): void;
+		get wanted(): boolean;
+	}
+}
 
 export * as Signals from "@moq/signals";
 
