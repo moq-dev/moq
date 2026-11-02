@@ -43,7 +43,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Benchmark sources](/quest/m2/bench-sources.md) - every measuring nightly benchmark feeds the regression table, and none is a smoke run
 - [Poll-native async](/quest/m2/ffi-poll-migrate.md) - moq-ffi's pure-kio async exports poll their state directly instead of going through `ffi::Task`
 - [QoS](/quest/m2/qos/README.md) - the relay's egress `lag` histogram and `dropped` counters on the stats totals and prefix tracks
-- [Lazy retained HLS instances](/quest/m2/hls-lazy-instances.md) - a replaced HLS instance starts its watchers only when a request reaches it
 - [HLS and DASH browser playback](/quest/m2/hls-player-test.md) - hls.js and dash.js play, reload, switch, and survive reconfiguration nightly
 - [The DASH manifest keeps segments across a reconfigure](/quest/m2/dash-reconfigure.md) - a same-codec reconfigure keeps the old instance's segments listed in DASH, as HLS does
 - [Re-init retires timelines](/quest/m2/reinit-retire.md) - fMP4 and MKV re-inits retire the old timeline, so import state stays bounded
