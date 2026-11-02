@@ -1927,9 +1927,6 @@ test.each([Ietf.ALPN.DRAFT_18, Ietf.ALPN.DRAFT_22])(
 );
 
 test("integration: a blind handle picks up a publisher that arrives late", async () => {
-	// This tests publisher arrival, so host scheduling must not spend the wire setup budget.
-	const installed = new Manual().install();
-	onTestFinished(() => installed.close());
 	withoutDiscovery();
 	const pair = createMockTransportPair(Lite.ALPN_06);
 	const origin = new OriginProducer();
@@ -1997,9 +1994,6 @@ test("integration: a blind handle goes offline when the session dies", async () 
 // The handle and the consume-cache eviction are protocol-agnostic, but their implementations
 // are not: each subscriber resolves announcements its own way. These mirror the lite cases.
 test("integration: ietf blind handle picks up a publisher that arrives late", async () => {
-	// This tests publisher arrival, so host scheduling must not spend the wire setup budget.
-	const installed = new Manual().install();
-	onTestFinished(() => installed.close());
 	withoutDiscovery();
 	const pair = createMockTransportPair(Ietf.ALPN.DRAFT_18);
 	const origin = new OriginProducer();
