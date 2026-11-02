@@ -186,7 +186,7 @@ per-frame CPU growth since #5926.
 - [Audit retention defaults](/quest/m1/max-age-defaults.md) - every max-age default listed, with a proposed finite default for the maintainer
 - [JS ordered reads wait only on owed groups](/quest/m1/js-ordered-owed.md) - @moq/net matches Rust's owed-group wait
 - [Binding announcements always carry captures](/quest/m1/ffi-required-captures.md) - moq-ffi and its generated bindings make `captures` a required list, as #7266 always sets it
-- [HLS export hands a rendition over at a same-codec config change](/quest/m1/hls-reinit-same-codec.md) - a resolution change under the same codec string keeps the playlist and lists the first new group under the new init
+- [HLS export lists a same-codec reconfigure's first group under the new init](/quest/m1/hls-reinit-same-codec.md) - the hand-over pick, whichever of the catalog and the records arrives first, after the catalog `hls` removal is planned
 - [fMP4 decode times keep increasing](/quest/m1/fmp4-bframe-decode-time.md) - fragments shorter than a GOP of B-frame video never step `tfdt` backwards
 - [A truncated MKV ends its tracks at finish](/quest/m1/mkv-truncated-finish.md) - `finish()` refusing truncated input still ends the tracks, so subscribers stop waiting
 - [moq-quic deletes its remaining 0-RTT code](/quest/m1/quic-zero-rtt-leftovers.md) - only the code that drops a 0-RTT packet remains, with a test

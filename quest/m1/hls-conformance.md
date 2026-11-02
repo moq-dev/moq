@@ -35,7 +35,7 @@ with both checks intact.
 
 ## Required
 
-- [HLS export hands a rendition over at a same-codec config change](/quest/m1/hls-reinit-same-codec.md) - the conformance test's same-codec switch fails until it lands
+- [HLS export lists a same-codec reconfigure's first group under the new init](/quest/m1/hls-reinit-same-codec.md) - the conformance test's same-codec switch fails until it lands
 
 ## Related
 
