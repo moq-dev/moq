@@ -20,10 +20,15 @@ function broadcast(renditions: Record<string, Catalog.AudioConfig>) {
 	return { catalog, broadcast: { out: { catalog } } as unknown as Broadcast };
 }
 
-// Wait on the probe's causal boundary, rather than a timer or a guessed number of ticks.
+// Wait out the probe, then a tick for the effects its result wakes. A probe served wholly from
+// the cache sets and clears `pending` in one run, which notifies nothing, so start with a tick
+// that lets the rerun happen rather than waiting on a change that may never come.
 async function settled(source: Source): Promise<void> {
-	if (!source.pending.peek()) await source.pending.changed();
-	while (source.pending.peek()) await source.pending.changed();
+	await yieldNow();
+	while (source.pending.peek()) {
+		await source.pending.changed();
+		await yieldNow();
+	}
 }
 
 test("a rejected rendition probe preserves its supported siblings", async () => {
@@ -191,6 +196,116 @@ test("holds on a broadcast whose renditions match the previous one", async () =>
 		await settled(source);
 		expect(source.out.track.peek()).toBe("mic");
 		expect(source.out.config.peek()?.enabled).toBe(false);
+	} finally {
+		source.close();
+	}
+});
+
+async function quietly(fn: () => Promise<void>): Promise<void> {
+	const warn = console.warn;
+	console.warn = () => {};
+	try {
+		await fn();
+	} finally {
+		console.warn = warn;
+	}
+}
+
+test("reports NotSupportedError when no rendition is supported", () =>
+	quietly(async () => {
+		const state = broadcast({ mic: config("opus") });
+		const source = new Source({ broadcast: state.broadcast, supported: async () => false });
+		try {
+			await settled(source);
+			expect(source.out.error.peek()?.name).toBe("NotSupportedError");
+			expect(source.out.available.peek()).toEqual({});
+
+			state.catalog.set({ audio: { renditions: {} } });
+			await settled(source);
+			expect(source.out.error.peek()).toBeUndefined();
+		} finally {
+			source.close();
+		}
+	}));
+
+test("a rejecting probe alone is unsupported", () =>
+	quietly(async () => {
+		const source = new Source({
+			broadcast: broadcast({ mic: config("opus") }).broadcast,
+			supported: async () => {
+				throw new TypeError("probe failed");
+			},
+		});
+		try {
+			await settled(source);
+			expect(source.out.error.peek()?.name).toBe("NotSupportedError");
+			expect(source.out.track.peek()).toBeUndefined();
+		} finally {
+			source.close();
+		}
+	}));
+
+test("does not wedge the effect when a support probe never settles", async () => {
+	const supported = new Signal<(config: Catalog.AudioConfig) => Promise<boolean>>(() => new Promise(() => {}));
+	const source = new Source({ broadcast: broadcast({ mic: config("opus") }).broadcast, supported });
+	try {
+		if (!source.pending.peek()) await source.pending.changed();
+		expect(source.out.available.peek()).toEqual({});
+		expect(source.out.error.peek()).toBeUndefined();
+
+		// Swapping the probe reruns the effect, which has to tear the parked one down first.
+		supported.set(async () => true);
+		await settled(source);
+		expect(source.out.track.peek()).toBe("mic");
+	} finally {
+		source.close();
+	}
+});
+
+test("a catalog replaced while its probe is pending publishes only the replacement", async () => {
+	const probes = new Map<string, (supported: boolean) => void>();
+	const state = broadcast({ old: config("opus") });
+	const source = new Source({
+		broadcast: state.broadcast,
+		supported: (c) => new Promise((resolve) => probes.set(c.codec, resolve)),
+	});
+	try {
+		if (!source.pending.peek()) await source.pending.changed();
+		const old = probes.get("opus");
+		expect(old).toBeDefined();
+
+		state.catalog.set({ audio: { renditions: { next: config("mp4a.40.2") } } });
+		while (!probes.has("mp4a.40.2")) await yieldNow();
+
+		// The torn-down probe settles late; its result must not land.
+		old?.(true);
+		probes.get("mp4a.40.2")?.(true);
+		await settled(source);
+		expect(Object.keys(source.out.available.peek())).toEqual(["next"]);
+		expect(source.out.track.peek()).toBe("next");
+	} finally {
+		source.close();
+	}
+});
+
+test("serves unchanged configs from the cache when the catalog changes", async () => {
+	const state = broadcast({ mic: config("opus") });
+	const probed: string[] = [];
+	const source = new Source({
+		broadcast: state.broadcast,
+		supported: async (c) => {
+			probed.push(c.codec);
+			return true;
+		},
+	});
+	try {
+		await settled(source);
+		expect(probed).toEqual(["opus"]);
+
+		state.catalog.set({ audio: { renditions: { mic: config("opus"), backup: config("mp4a.40.2") } } });
+		await settled(source);
+		expect(probed).toEqual(["opus", "mp4a.40.2"]);
+		expect(Object.keys(source.out.available.peek())).toEqual(["mic", "backup"]);
 	} finally {
 		source.close();
 	}

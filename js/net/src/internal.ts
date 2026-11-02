@@ -453,6 +453,11 @@ export const hooks: {
 	 * so it names no object; assigned by `track.ts`.
 	 */
 	reportedGroup: (producer: Producer, group: number) => void;
+	/**
+	 * How long a session's tail waits for a late group: the subscribers' max delay, bounded by
+	 * the track's max age; assigned by `track.ts`.
+	 */
+	tailGrace: (producer: Producer) => Milli;
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => number | undefined;
 	/**
@@ -669,6 +674,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	reportedGroup: () => {
+		throw new Error("track.ts not loaded");
+	},
+	tailGrace: () => {
 		throw new Error("track.ts not loaded");
 	},
 	latestSequence: () => {

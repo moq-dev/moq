@@ -106,7 +106,10 @@ class FfiBench {
                                     frame.payload.contentEquals(payload),
                                     "corrupt frame $f of round $n",
                                 )
-                                assertEquals((n * case.frames + f).toULong(), frame.timestampUs)
+                                assertEquals(
+                                    Timestamp((n * case.frames + f).toULong(), 1_000_000uL),
+                                    frame.timestamp,
+                                )
                             }
                         }
                     }
@@ -117,7 +120,8 @@ class FfiBench {
                             group.writeFrame(
                                 Frame(
                                     payload = payload,
-                                    timestampUs = (n * case.frames + f).toULong(),
+                                    timestamp =
+                                        Timestamp((n * case.frames + f).toULong(), 1_000_000uL),
                                 )
                             )
                         }

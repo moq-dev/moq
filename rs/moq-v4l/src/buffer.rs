@@ -13,7 +13,7 @@ pub enum Type {
     VideoCapture        = 1,
     VideoOutput         = 2,
     VideoOverlay        = 3,
-    VbiCaputre          = 4,
+    VbiCapture          = 4,
     VbiOutput           = 5,
     SlicedVbiCapture    = 6,
     SlicedVbiOutput     = 7,
@@ -81,7 +81,7 @@ impl Default for Flags {
 
 impl From<u32> for Flags {
 	fn from(flags: u32) -> Self {
-		Self::from_bits_truncate(flags)
+		Self::from_bits_retain(flags)
 	}
 }
 

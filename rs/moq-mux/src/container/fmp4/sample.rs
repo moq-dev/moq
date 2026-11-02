@@ -79,6 +79,7 @@ pub(crate) struct Resolver {
 	data_start: usize,
 	len: usize,
 	claimed: Claimed,
+	forward: Option<std::collections::HashMap<u32, usize>>,
 }
 
 /// A sample whose byte range and duration have been validated.
@@ -94,7 +95,13 @@ impl Resolver {
 			data_start,
 			len,
 			claimed: Claimed::default(),
+			forward: None,
 		}
+	}
+
+	// A sequential track writer cannot retain an earlier byte range for a later frame.
+	pub fn streaming(&mut self) {
+		self.forward = Some(Default::default());
 	}
 
 	/// Walk samples without allocating from the untrusted sample count.
@@ -147,6 +154,13 @@ impl Resolver {
 				}
 				let range = offset..end;
 				self.claimed.take(range.clone())?;
+				if let Some(forward) = &mut self.forward {
+					let previous = forward.entry(traf.tfhd.track_id).or_default();
+					if range.start < *previous {
+						return Err(super::Error::BackwardsDataOffset);
+					}
+					*previous = range.end;
+				}
 				if sample.duration.is_none() && remaining > 1 {
 					return Err(super::Error::MissingSampleDuration);
 				}

@@ -9,7 +9,6 @@ use std::time::Duration;
 use bytes::Bytes;
 use hang::catalog::{AudioConfig, Clock, Hls, Reference, VideoConfig};
 use moq_mux::container::fmp4::Muxer;
-use sha2::{Digest, Sha256};
 
 use super::driver::Owner;
 use super::playlist::{Segment, Snapshot};
@@ -84,7 +83,10 @@ struct Init {
 impl Init {
 	fn new(bytes: Bytes) -> Self {
 		// 64 bits: the URL only has to tell apart the inits one rendition name ever carries.
-		let hash = Sha256::digest(&bytes)[..8].iter().map(|b| format!("{b:02x}")).collect();
+		let hash = rind::digest::digest(&rind::digest::SHA256, &bytes).as_ref()[..8]
+			.iter()
+			.map(|b| format!("{b:02x}"))
+			.collect();
 		Self { bytes, hash }
 	}
 }
@@ -662,6 +664,14 @@ impl Rendition {
 	/// Mark this rendition's window ended (its records finished, or it left the catalog).
 	pub(crate) fn end(&self) {
 		self.live.end();
+	}
+
+	/// End the window at the segments listed now, because another publisher run replaced this
+	/// one, and stop following its records: what the replaced run lists later is never listed.
+	pub(crate) fn cut(&self) {
+		let watcher = self.watcher.lock().expect("watcher lock poisoned").take();
+		drop(watcher);
+		self.live.cut();
 	}
 
 	/// Fail this rendition's window with `err`.
