@@ -3604,7 +3604,8 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 /// unchanged from the previous update.
 ///
 /// `timestamp` is when the value was captured, converted to the track's millisecond timescale;
-/// NULL stamps the broadcast clock's current time.
+/// NULL stamps the broadcast clock's current time. A timestamp too large for milliseconds fails
+/// with `MOQ_ERROR_MOQ` and publishes nothing.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -3663,7 +3664,8 @@ pub unsafe extern "C" fn moq_publish_json_stream(broadcast: u32, name: *const c_
 /// Append one record to a JSON stream track. `value` is a UTF-8 JSON document.
 ///
 /// `timestamp` is when the value was captured, converted to the track's millisecond timescale;
-/// NULL stamps the broadcast clock's current time.
+/// NULL stamps the broadcast clock's current time. A timestamp too large for milliseconds fails
+/// with `MOQ_ERROR_MOQ` and publishes nothing.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -3737,7 +3739,8 @@ pub unsafe extern "C" fn moq_publish_json_window(
 /// Append one record to the back of a JSON window. `value` is a UTF-8 JSON document.
 ///
 /// `timestamp` is when the edit occurred, converted to the track's millisecond timescale;
-/// NULL stamps the broadcast clock's current time.
+/// NULL stamps the broadcast clock's current time. A timestamp too large for milliseconds fails
+/// with `MOQ_ERROR_MOQ` and publishes nothing.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -3763,7 +3766,8 @@ pub unsafe extern "C" fn moq_publish_json_window_push(
 /// Drop `count` records from the front of a JSON window, clamped to what it holds.
 ///
 /// `timestamp` is when the edit occurred, converted to the track's millisecond timescale;
-/// NULL stamps the broadcast clock's current time.
+/// NULL stamps the broadcast clock's current time. A timestamp too large for milliseconds fails
+/// with `MOQ_ERROR_MOQ` and publishes nothing.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

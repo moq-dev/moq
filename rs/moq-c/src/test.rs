@@ -2827,10 +2827,19 @@ fn json_window_caller_timestamps() {
 	let consumer = window_consume(consume, name, &event_cb);
 	let value = br#"{"n":1}"#;
 	let invalid = moq_timestamp { value: 1, scale: 0 };
+	// Valid, but too large once converted to the track's milliseconds.
+	let unconvertible = moq_timestamp {
+		value: (1 << 61) - 1,
+		scale: 1,
+	};
 
 	assert_eq!(
 		unsafe { moq_publish_json_window_push(producer, value.as_ptr().cast(), value.len(), &invalid) },
 		MOQ_ERROR_TIMESTAMP_OVERFLOW
+	);
+	assert_eq!(
+		unsafe { moq_publish_json_window_push(producer, value.as_ptr().cast(), value.len(), &unconvertible) },
+		MOQ_ERROR_MOQ
 	);
 	for timestamp in [
 		micros(0),
@@ -2847,6 +2856,10 @@ fn json_window_caller_timestamps() {
 	assert_eq!(
 		unsafe { moq_publish_json_window_pop(producer, 1, &invalid) },
 		MOQ_ERROR_TIMESTAMP_OVERFLOW
+	);
+	assert_eq!(
+		unsafe { moq_publish_json_window_pop(producer, 1, &unconvertible) },
+		MOQ_ERROR_MOQ
 	);
 	assert_eq!(
 		unsafe { moq_publish_json_window_pop(producer, 1, &micros(2_500_999)) },
