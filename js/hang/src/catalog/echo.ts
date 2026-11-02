@@ -1,4 +1,4 @@
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { RelativeBroadcastSchema } from "./path";
 
 /** The relative prefix under which viewers may publish feedback. */

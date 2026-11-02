@@ -23,7 +23,7 @@ Decided 2026-11-01 (maintainer):
   is a follow-up through `/quest-plan`.
 
 Dependencies belong to
-[Remove the dependencies that don't earn their weight](/quest/m1/prune-deps.md).
+[the dependency audit](/quest/m2/audit-deps.md).
 This quest covers our own crates and code: monomorphization (`cargo
 llvm-lines`), proc macros, build scripts, and crates or features that every
 build compiles but few users need. Start from the m2 audit's baselines and

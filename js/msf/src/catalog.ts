@@ -1,6 +1,6 @@
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 
 /** Zod schema for a track's wire packaging. Accepts known values or any future string. */
 export const PackagingSchema = z.union([

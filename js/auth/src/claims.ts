@@ -5,7 +5,7 @@
  */
 
 import { Pattern, Patterns } from "@moq/pattern";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import * as Path from "./path.ts";
 import { decodeGrants } from "./wire.ts";
 

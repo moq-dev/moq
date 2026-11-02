@@ -1,6 +1,6 @@
 import { wall } from "@moq/clock";
-import * as z from "@zod/mini";
 import * as jose from "jose";
+import * as z from "zod/mini";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
 import { type Claims, ClaimsSchema, ScopeSchema, scopeAllows } from "./claims.ts";
 import * as Path from "./path.ts";

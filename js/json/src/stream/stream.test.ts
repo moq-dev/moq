@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { Milli } from "@moq/clock";
 import { StreamCode, Time, Track } from "@moq/net";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { Consumer, Producer, Rolled } from "./index.ts";
 
 type Rec = { n: number };

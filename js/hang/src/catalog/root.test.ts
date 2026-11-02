@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { u53 } from "./integers.ts";
 import type { ReferenceEpoch, RelativeBroadcast } from "./path.ts";
 import { checkRenditions, DuplicateRendition, encode, RootSchema, UnsupportedVersion, VERSION } from "./root.ts";

@@ -5,7 +5,7 @@
  */
 
 import type { Path } from "@moq/net";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { u53Schema } from "./catalog/integers";
 import { measurementSchema } from "./snapshot";
 import { TransportSchema } from "./stats";

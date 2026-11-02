@@ -1,5 +1,5 @@
 import { Epoch, Path } from "@moq/net";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 
 function isRelative(text: string): boolean {
 	try {

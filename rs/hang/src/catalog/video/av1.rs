@@ -79,53 +79,53 @@ impl std::fmt::Display for AV1 {
 	}
 }
 
-static AV1_REGEX: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-	regex::Regex::new(
-		&r"
-		^av01
-		\.(?<profile>[0-2])
-		\.(?<level>[0-9]{2})(?<tier>[MH])
-		\.(?<bitdepth>[0-9]{2})
-		(?<extra>
-			\.(?<mono>[01])
-			\.(?<chroma_subsampling_x>[01])(?<chroma_subsampling_y>[01])(?<chroma_sample_position>[0-3])
-			\.(?<color>[0-9]{2})
-			\.(?<transfer>[0-9]{2})
-			\.(?<matrix>[0-9]{2})
-			\.(?<full>[01])
-		)?
-		$"
-		.replace(['\n', ' ', '\t'], ""),
-	)
-	.unwrap()
-});
-
 impl std::str::FromStr for AV1 {
 	type Err = Error;
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
-		let captures = AV1_REGEX.captures(s).ok_or(Error::InvalidCodec)?;
+		fn number(field: Option<&str>, width: usize, max: u8) -> Result<u8, Error> {
+			let field = field.filter(|field| field.len() == width).ok_or(Error::InvalidCodec)?;
+			let value = crate::catalog::codec_number(field, 10)?;
+			if value > max {
+				return Err(Error::InvalidCodec);
+			}
+			Ok(value)
+		}
 
+		let mut fields = s.strip_prefix("av01.").ok_or(Error::InvalidCodec)?.split('.');
+		let profile = number(fields.next(), 1, 2)?;
+		let [tens @ b'0'..=b'9', ones @ b'0'..=b'9', tier @ (b'M' | b'H')] =
+			fields.next().ok_or(Error::InvalidCodec)?.as_bytes()
+		else {
+			return Err(Error::InvalidCodec);
+		};
 		let mut av1 = AV1 {
-			profile: u8::from_str(&captures["profile"])?,
-			level: u8::from_str(&captures["level"])?,
-			tier: captures["tier"].chars().next().unwrap(),
-			bitdepth: u8::from_str(&captures["bitdepth"])?,
+			profile,
+			level: (tens - b'0') * 10 + (ones - b'0'),
+			tier: char::from(*tier),
+			bitdepth: number(fields.next(), 2, 99)?,
 			..Default::default()
 		};
 
-		if captures.name("extra").is_none() {
+		let Some(mono) = fields.next() else {
 			return Ok(av1);
+		};
+		av1.mono_chrome = number(Some(mono), 1, 1)? == 1;
+		let [x @ b'0'..=b'1', y @ b'0'..=b'1', position @ b'0'..=b'3'] =
+			fields.next().ok_or(Error::InvalidCodec)?.as_bytes()
+		else {
+			return Err(Error::InvalidCodec);
+		};
+		av1.chroma_subsampling_x = *x == b'1';
+		av1.chroma_subsampling_y = *y == b'1';
+		av1.chroma_sample_position = position - b'0';
+		av1.color_primaries = number(fields.next(), 2, 99)?;
+		av1.transfer_characteristics = number(fields.next(), 2, 99)?;
+		av1.matrix_coefficients = number(fields.next(), 2, 99)?;
+		av1.full_range = number(fields.next(), 1, 1)? == 1;
+		if fields.next().is_some() {
+			return Err(Error::InvalidCodec);
 		}
-
-		av1.mono_chrome = &captures["mono"] == "1";
-		av1.chroma_subsampling_x = &captures["chroma_subsampling_x"] == "1";
-		av1.chroma_subsampling_y = &captures["chroma_subsampling_y"] == "1";
-		av1.chroma_sample_position = u8::from_str(&captures["chroma_sample_position"])?;
-		av1.color_primaries = u8::from_str(&captures["color"])?;
-		av1.transfer_characteristics = u8::from_str(&captures["transfer"])?;
-		av1.matrix_coefficients = u8::from_str(&captures["matrix"])?;
-		av1.full_range = &captures["full"] == "1";
 
 		Ok(av1)
 	}
@@ -223,6 +223,25 @@ mod test {
 			let json = serde_json::to_string(&config).unwrap();
 			let output: VideoConfig = serde_json::from_str(&json).unwrap();
 			assert_eq!(output, config);
+		}
+	}
+
+	#[test]
+	fn field_boundaries() {
+		for encoded in [
+			"av01.0.04M.08.",
+			"av01.0.04M.08.0.110",
+			"av01.0.04M.08.0.110.01.01.01.0.extra",
+			"av01.0.04M.08.2.110.01.01.01.0",
+			"av01.0.04M.08.0.210.01.01.01.0",
+			"av01.0.04M.08.0.114.01.01.01.0",
+			"av01.0.04M.08.0.110.01.01.01.2",
+			"av01.0.04M.+8",
+			"av01.0.04M.٠٨",
+			"av01.0.04M.08\n",
+			"av01.0.04M.08.0.110.1.01.01.0",
+		] {
+			assert!(AV1::from_str(encoded).is_err(), "{encoded:?}");
 		}
 	}
 

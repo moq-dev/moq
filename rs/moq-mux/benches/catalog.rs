@@ -273,10 +273,25 @@ fn bench_write_order(c: &mut Criterion) {
 	group.finish();
 }
 
+fn bench_av1_codec(c: &mut Criterion) {
+	let mut group = c.benchmark_group("catalog_av1_codec");
+	for (name, codec) in [
+		("short", "av01.0.01M.08"),
+		("full", "av01.0.04M.10.0.112.09.16.09.0"),
+		("partial", "av01.0.04M.08.0.110"),
+	] {
+		group.bench_function(name, |b| {
+			b.iter(|| black_box(black_box(codec).parse::<hang::catalog::AV1>()))
+		});
+	}
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_estimate_fanout,
 	bench_unresolved_teardown,
-	bench_write_order
+	bench_write_order,
+	bench_av1_codec
 );
 criterion_main!(benches);

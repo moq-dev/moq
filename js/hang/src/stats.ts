@@ -3,7 +3,7 @@
  * Missing counters mean zero; parsing preserves omission.
  * @module
  */
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { u53Schema } from "./catalog/integers";
 import { measurementSchema } from "./snapshot";
 /** Transport gauges and cumulative loss counters known to the observer. */

@@ -1,7 +1,7 @@
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
 import { Path, Track } from "@moq/net";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { AudioSchema } from "./audio";
 import { BinarySchema } from "./binary";
 import { ClockSchema } from "./clock";
