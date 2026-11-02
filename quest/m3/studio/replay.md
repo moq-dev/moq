@@ -14,15 +14,17 @@ relay's cache, addressed by presentation time through subscription ranges
 (`doc/concept/moq-lite.md`). A replay plays from those rather than a RAM-only
 frame buffer like OBS's. Retention past the relay cache is the archive's job.
 
-Sources and the program encode only while subscribed
-([source tracks](/quest/m3/studio/compose/sources.md)), so a track nobody
-watched has no groups to replay. Arming replay for a source or the program
-is a local subscriber holding a retention window, so that track keeps
-encoding with no external subscriber, and its encode cost shows like any
-other subscriber's. An unarmed track replays only what was encoded, and the
-gaps show rather than being skipped. Acceptance covers the case where every
-viewer composes sources themselves and nothing outside the studio subscribes
-to the program.
+Sources and the program encode whatever the subscriber demand (decided
+2026-10-28, from [#7101](https://github.com/moq-dev/moq/issues/7101); see
+[source tracks](/quest/m3/studio/compose/sources.md)), so a track nobody
+watched still holds its recent groups, as far back as its `max_age`. Replay
+needs no arming and no local subscriber. A studio started with `--on-demand`
+encodes the program only while someone watches, so the program has no past
+from before its first viewer to replay (decided ✅ 2026-11-01, maintainer, on
+[moq-dev/moq#7554](https://github.com/moq-dev/moq/pull/7554)). A stretch where a source was offline
+or removed replays as a gap rather than being skipped. Acceptance covers the
+case where every viewer composes sources themselves and nothing outside the
+studio subscribes to the program.
 Replay published to viewers is a new source in the scene, so it composes like
 any other.
 

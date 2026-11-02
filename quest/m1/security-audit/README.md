@@ -1,4 +1,4 @@
-# 2026-10-27 security audit: pre-cut findings
+# [M] 2026-10-27 security audit: pre-cut findings
 
 ## Goal
 
@@ -52,8 +52,3 @@ Dropped, with reasons:
   (a random epoch is copied by a fork too) were wrong; the children use
   better ones.
 
-## Required
-
-- [fMP4 import streams mdat](/quest/m1/security-audit/fmp4-stream-mdat.md) - a box header declaring a huge size cannot pin importer memory across segments
-- [Browser input checks](/quest/m1/security-audit/js-input.md) - room metadata is schema-validated and the http:// fingerprint fetch is aborted and length-checked
-- [CI tool pins](/quest/m1/security-audit/ci-pins.md) - binding generators are pinned by commit in one place, and the remaining unpinned installs and broad token grants are fixed

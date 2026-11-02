@@ -41,6 +41,11 @@ and `Instant::from_std()` convert at a third-party API that takes
 `std::time::Instant`, through the runtime clock's origin. That is exact on a
 running clock, and keeps only durations on paused tokio or the simulator.
 
+`kio::clock::Clock::current()` captures the ambient clock, and the handle keeps
+reading that clock from any thread or runtime. Stamp with it when one timeline
+is shared by calls that may come from different contexts. A moq-mux broadcast
+does this: it stamps every track on the clock it was created under.
+
 ## Caller-driven code
 
 A state machine polled as `poll(now, waiter)` never reads a clock. It owns a
@@ -82,6 +87,12 @@ second timeout takes no real time. A run where every task is parked and no
 timer is armed panics as a deadlock instead of hanging. `sim::advance()` and
 `sim::step_wall()` move time by hand, and `sim::attach(&deadlines)` keeps a
 `Deadlines` queue in step until it drops.
+
+Draw jitter and other randomness from `kio::clock::rng()`. Inside the simulator
+it comes from one seed per run, picked at random or set with `MOQ_SIM_SEED`. A
+run that panics prints its seed, so rerunning the test with `MOQ_SIM_SEED` set to
+that seed replays it bit-exact. Outside the simulator `rng()` is rand's thread
+generator.
 
 ## Driving a tokio runtime by hand
 

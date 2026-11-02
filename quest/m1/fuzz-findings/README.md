@@ -29,16 +29,15 @@ the bug on its own side and the bug is reported upstream (decided
 (scuffle-expgolomb). Posting anything further on those repos still needs the
 maintainer's approval.
 
+[moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234) replaced
+webm-iterable's block parsing with moq-mux's own block-header reader, which
+fixed the MKV block-header panic; its input is
+`rs/moq-mux/fuzz/regressions/mkv/short-block-header`.
+
 ## Required
 
 - [moq-mux on a fixed mp4-atom](/quest/m1/fuzz-findings/mp4-atom-bump.md) - waiting on a 0.17.x release containing kixelated/mp4-atom#264, then moq-mux bumps to it and commits the `sgpd` and `iref` regressions
-- [MKV block headers never panic](/quest/m1/fuzz-findings/mkv-block-header.md) - a short SimpleBlock or Block is an import error, not a webm-iterable index panic
 - [TS step scan stays ordered](/quest/m1/fuzz-findings/ts-step-scan.md) - the step detector's look-ahead never subtracts past its start
 - [SPS fields cannot overflow](/quest/m1/fuzz-findings/sps-overflow.md) - hostile H.264 and H.265 SPS crop and size fields are refused instead of wrapping
 - [mp4-atom iloc is bounded](/quest/m1/fuzz-findings/mp4-atom-iloc.md) - zero-size `iloc` extents cannot allocate megabytes from a few bytes
 - [A catalog update reuses its encoder](/quest/m1/fuzz-findings/catalog-encoder.md) - republishing a compressed catalog or HLS group stops allocating a fresh DEFLATE encoder (about 200 KB) each time
-
-## Related
-
-- [MKV import streams blocks](/quest/m1/security-audit/mkv-stream-blocks.md) - also reads the MKV block header beside ebml-iterable
-- [fMP4 import streams mdat](/quest/m1/security-audit/fmp4-stream-mdat.md) - the same importers' memory bounds

@@ -206,31 +206,19 @@ func (t *TrackProducer) CreateGroup(sequence uint64) (*GroupProducer, error) {
 
 // WriteFrame writes frame as a single-frame group.
 func (t *TrackProducer) WriteFrame(frame Frame) error {
-	f, err := frame.ffi()
-	if err != nil {
-		return err
-	}
-	return t.inner.WriteFrame(f)
+	return t.inner.WriteFrame(frame)
 }
 
 // AppendDatagram sends frame as a best-effort datagram and returns the sequence number
 // assigned to it. Payloads are capped at 1200 bytes. There is no stream fallback.
 func (t *TrackProducer) AppendDatagram(frame Frame) (uint64, error) {
-	f, err := frame.ffi()
-	if err != nil {
-		return 0, err
-	}
-	return t.inner.AppendDatagram(f)
+	return t.inner.AppendDatagram(frame)
 }
 
 // InsertDatagram sends frame as a best-effort datagram at an explicit sequence, for a
 // caller that allocates its own. AppendDatagram continues after the largest one.
 func (t *TrackProducer) InsertDatagram(sequence uint64, frame Frame) error {
-	f, err := frame.ffi()
-	if err != nil {
-		return err
-	}
-	return t.inner.InsertDatagram(sequence, f)
+	return t.inner.InsertDatagram(sequence, frame)
 }
 
 // Largest reports the newest group or datagram written, at its newest frame, or nil
@@ -290,11 +278,7 @@ func (g *GroupProducer) Consume() (*GroupConsumer, error) {
 
 // WriteFrame appends frame to the group.
 func (g *GroupProducer) WriteFrame(frame Frame) error {
-	f, err := frame.ffi()
-	if err != nil {
-		return err
-	}
-	return g.inner.WriteFrame(f)
+	return g.inner.WriteFrame(frame)
 }
 
 // Finish marks the group complete. The handle remains so Abort can still run.

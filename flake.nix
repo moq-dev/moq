@@ -32,7 +32,7 @@
     # The quest CLI, which also serves the quest guide and skills the stubs in
     # .claude/skills call. Bump the rev to upgrade them.
     quest = {
-      url = "github:moq-dev/quest/b1f0c40e6733d2799ba35f47b88c2456b2bfc1b6";
+      url = "github:moq-dev/quest/7a191e6197c691f477b4c55edba34cc425c3e77c";
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.flake-utils.follows = "flake-utils";
     };
@@ -158,6 +158,8 @@
             cargo-semver-checks
             cargo-deny
             cargo-bloat
+            # Weekly mutation testing of the security-critical modules (`just rs mutants`).
+            cargo-mutants
             cargo-nextest
             cargo-codspeed
             # Source-based test coverage (`just rs coverage`).
@@ -326,8 +328,9 @@
         # targets (v0.10.0-kixelated.1+v0.32.0 -> uniffi 0.32), and it only
         # understands metadata emitted by that uniffi, so it moves with the `uniffi`
         # dependency in rs/moq-ffi/Cargo.toml. Five other places name the same
-        # generator version and must be bumped together: the repo and revision
-        # in release-ffi.yml, and the `cargo install` line in
+        # generator version and must be bumped together: the commit the tag
+        # peels to in .github/actions/uniffi-bindgen, which CI jobs outside
+        # the dev shell build, and the `cargo install` line in
         # rs/moq-ffi/build.sh, go/ffi/README.md, sh/go/check.sh, and
         # sh/go/stage.sh.
         #
@@ -411,10 +414,10 @@
         # Like uniffi-bindgen-go, the tag pairs the generator's version with the
         # uniffi release it reads, so it moves with the `uniffi` dependency in
         # rs/moq-ffi/Cargo.toml. The other places name the same tag and must be
-        # bumped together: the `cargo install` lines in rs/moq-ffi/build.sh,
-        # cpp/moq/README.md, .github/workflows/{c,cpp}.yml,
-        # .github/workflows/platform.yml, .github/workflows/release-{c,cpp}.yml,
-        # and .github/workflows/release-shared-ffi.yml.
+        # bumped together: the commit the tag peels to in
+        # .github/actions/uniffi-bindgen, which CI jobs outside the dev shell
+        # (Windows among them) build, and the `cargo install` lines in
+        # rs/moq-ffi/build.sh and cpp/moq/README.md.
         #
         # This points at a fork of LiveKit's async branch (livekit/uniffi-bindgen-cpp
         # PR #1): neither LiveKit nor NordSecurity has a uniffi 0.32 generator,

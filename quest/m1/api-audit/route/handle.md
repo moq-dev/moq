@@ -90,7 +90,7 @@ JS and the bindings identical.
     `moq_broadcast_prepared_*`, `moq_publication_*` and `moq_mint_epoch`.
   - The py, kt, swift, dart and go wrappers.
 
-  [moq-c's API gaps](/quest/m1/c/api-gaps.md) error-code fix applies to
+  moq-c's API gaps error-code fix applies to
   whichever functions remain.
 - **Callers.** Migrate every caller: about 25 crates use `create_broadcast`
   or `publish`, about 19 set an epoch, plus `@moq/publish`, moq-boy, carla
@@ -113,5 +113,4 @@ wrappers. Wire: none.
 
 ## Related
 
-- [The player takes any read-side origin](/quest/m1/api-audit/resolve/watch-origin.md) - also retypes JS `Table`
 - No constructible internal handles - the same JS hygiene rule
