@@ -1105,7 +1105,8 @@ class OriginState {
  *
  * What a shared connection lends out. {@link Producer} implements it, so code that is
  * handed an origin rather than owning one should accept this type: closing the origin
- * stays the owner's alone, and a borrower cannot express it.
+ * stays the owner's alone, and a borrower cannot express it. A borrower that only reads
+ * should accept just the {@link Consumer} members it needs, so `producer.consume()` fits too.
  *
  * @public
  */

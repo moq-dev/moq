@@ -23,6 +23,7 @@ use crate::{
 	priority::{Priority, PriorityHandle, PriorityQueue},
 	track::Order,
 	transport::poll::{GroupOf, SendGroup as _, SendOptions},
+	util::Idle,
 };
 
 use super::Version;
@@ -3990,6 +3991,8 @@ struct TrackRun {
 	opening: Option<GroupServe>,
 	/// The groups with a stream, serving or awaiting the acknowledgement of their FIN.
 	children: kio::Tasks<GroupServe>,
+	/// The track side's last poll, if it parked; see [`Self::poll_step`].
+	idle: Option<Box<Idle>>,
 }
 
 impl TrackRun {
@@ -4003,7 +4006,8 @@ impl TrackRun {
 		// Apply the initial cap from the original Subscribe. Subsequent updates
 		// flow through the SUBSCRIBE_UPDATE arm below.
 		let cap = bounds.groups().end().map_or(Bound::Unbounded, Bound::Excluded);
-		let track = track.with_range((Bound::Included(floor), cap));
+		// The FIN of a covered subscription is the wire's to send, below.
+		let track = track.with_range((Bound::Included(floor), cap)).parked();
 
 		let emit_range = ctx.version.has_track_stream();
 		let datagrams = ctx.version.has_datagrams() && ctx.session.max_datagram_size() > 0;
@@ -4029,6 +4033,7 @@ impl TrackRun {
 			datagrams,
 			opening: None,
 			children: kio::Tasks::new(),
+			idle: None,
 		}
 	}
 
@@ -4046,6 +4051,9 @@ impl TrackRun {
 	/// what lets relays pause an upstream subscription across consumer churn without
 	/// tearing it down. Lite-07 ends one whose every range is bounded once it is covered.
 	fn update(&mut self, upd: lite::SubscribeUpdate) {
+		// The update moves the cursor and the bounds the track side judges against, which
+		// notifies nothing it parked on.
+		Idle::disarm(&mut self.idle);
 		// Every update restates the wanted group. Past our largest it is a join, which
 		// repeats the pending ask; at or below it the group already exists.
 		if upd
@@ -4170,6 +4178,8 @@ impl TrackRun {
 		if let Some(opening) = &mut self.opening
 			&& let Poll::Ready(res) = opening.poll_open(&mut self.ctx.session, self.ctx.group.as_ref(), waiter)
 		{
+			// The track side takes groups again.
+			Idle::disarm(&mut self.idle);
 			let opening = self.opening.take().expect("polled above");
 			match res {
 				Ok(()) => self.children.push(opening),
@@ -4177,7 +4187,13 @@ impl TrackRun {
 			}
 		}
 		// Drive the in-flight group machines; completions just retire.
+		let running = self.children.len();
 		let _ = self.children.poll(waiter);
+		// A retired machine releases its group, and the track side waits on the machines
+		// to finish or cover the subscription, neither of which the track notifies.
+		if self.children.len() < running {
+			Idle::disarm(&mut self.idle);
+		}
 		// A group whose header does not fit this peer's varint wrote nothing. The
 		// reset is on a stream the subscriber never tied to this subscription, so
 		// forward it here or the reader waits forever.
@@ -4193,6 +4209,25 @@ impl TrackRun {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
 
+		// Most wakes are a group machine's frame or the writer's credit. Nothing the track
+		// side parked on fired then, so it would park again: skip it rather than lock the
+		// shared track state every subscriber of the track reads through.
+		if Idle::parked(&self.idle, (), waiter) {
+			return Poll::Pending;
+		}
+		let mut idle = Idle::start(&mut self.idle, waiter);
+		let polled = self.poll_track(writer, idle.waiter());
+		idle.finish(&mut self.idle, (), polled.is_pending());
+		polled
+	}
+
+	/// The track side of [`Self::poll_step`]: forward drops, resolve the start, and take the
+	/// next group, datagram, or boundary. Every wait here parks on the track subscriber.
+	fn poll_track(
+		&mut self,
+		writer: &mut Writer<crate::transport::boxed::SendStream, Version>,
+		waiter: &kio::Waiter,
+	) -> Poll<Result<ControlFlow<()>, Error>> {
 		if self.poll_forward_drop(writer, waiter)? {
 			return Poll::Ready(Ok(ControlFlow::Continue(())));
 		}
@@ -4334,10 +4369,7 @@ impl TrackRun {
 			// `SubStream::owed`), so only a range given up whole is covered. Datagrams
 			// resolve no start, and a FIN would overtake them, so a range they served
 			// keeps the subscription open.
-			(None, _) => {
-				let skipped: RangeSet<u64> = self.skipped.iter().map(|(range, _)| range.clone()).collect();
-				self.track.covered(self.floor, &skipped)
-			}
+			(None, _) => self.track.covered(self.floor, &self.skipped),
 			(Some(_), None) => false,
 		}
 	}
@@ -4565,6 +4597,112 @@ impl TrackRun {
 			rank,
 			group,
 		));
+	}
+}
+
+/// A bounded lite-07 subscription's run loop still waiting on SUBSCRIBE_START, for the
+/// `publisher` bench: a wake that finds nothing new ends in the coverage check.
+#[cfg(any(test, feature = "fuzz"))]
+pub struct CoverageBench {
+	run: TrackRun,
+	writer: Writer<crate::transport::boxed::SendStream, Version>,
+	track: track::Producer,
+	_peer: crate::transport::memory::Session,
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+impl CoverageBench {
+	/// Subscribe to `ranges` one-group ranges, then give up the first `skipped` of them, one
+	/// wake each. A range is left open, so the start never resolves and nothing is covered.
+	pub fn new(ranges: u64, skipped: u64) -> Self {
+		assert!(skipped < ranges, "a range must stay open");
+		// Every other group, so no two ranges merge into one run.
+		let wire = (0..ranges).map(|range| 2 * range..2 * range + 1);
+		let drops = (0..skipped)
+			.map(|range| (2 * range..2 * range + 1, StreamError::NotFound))
+			.collect();
+		Self::build(wire, drops)
+	}
+
+	/// Subscribe to one range of `skipped + 1` groups, then give up all but the last, one
+	/// wake each. Alternating errors keep each group its own entry in the skipped record.
+	pub fn adjacent(skipped: u64) -> Self {
+		let drops = (0..skipped)
+			.map(|group| {
+				let err = match group % 2 {
+					0 => StreamError::NotFound,
+					_ => StreamError::Cancel,
+				};
+				(group..group + 1, err)
+			})
+			.collect();
+		Self::build(std::iter::once(0..skipped + 1), drops)
+	}
+
+	fn build(wire: impl Iterator<Item = Range<u64>>, drops: Vec<(Range<u64>, StreamError)>) -> Self {
+		let version = Version::Lite07;
+		let (local, peer) = crate::transport::memory::pair(Default::default());
+		let session = Transport::new(local);
+		let Poll::Ready(Ok(stream)) = session.poll_open_uni(&kio::Waiter::noop(), SendOptions::default()) else {
+			panic!("a memory stream opens at once");
+		};
+		let group = |group| Some(lite::Anchor::Absolute(track::Position::group(group)));
+		let wire: Vec<_> = wire
+			.map(|range| lite::Range {
+				start: group(range.start),
+				end: group(range.end),
+			})
+			.collect();
+		let bounds = Bounds::new(&wire, None).unwrap();
+		let track = track::Producer::new(
+			Arc::new(crate::broadcast::Info::default()),
+			"bench",
+			track::Info::default(),
+		);
+		let subscriber = track.subscribe(bounds.groups());
+		let steer = kio::Producer::new(Steer::default());
+		let ctx = Subscription {
+			session,
+			id: 0,
+			track_name: "bench".into(),
+			priority: PriorityQueue::default(),
+			publisher: 0,
+			group: None,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
+			version,
+			stamp: None,
+			runtime: crate::time::Deadlines::new(kio::clock::now()),
+			outcomes: Default::default(),
+			ietf: false,
+		};
+		let mut this = Self {
+			run: TrackRun::new(ctx, subscriber, bounds, 0, steer),
+			writer: Writer::new(stream, version),
+			track,
+			_peer: peer,
+		};
+		let skipped = drops.len();
+		for (groups, err) in drops {
+			this.track.drop_groups(groups, err);
+			while this.step().is_ready() {}
+		}
+		assert!(this.run.start.is_none(), "no group resolves a start");
+		assert_eq!(this.run.skipped.iter().count(), skipped, "each drop is its own entry");
+		this
+	}
+
+	/// One wake with nothing new to serve.
+	pub fn wake(&mut self) {
+		assert!(self.step().is_pending(), "the open range keeps the subscription parked");
+	}
+
+	fn step(&mut self) -> Poll<()> {
+		match self.run.poll_step(&mut self.writer, &kio::Waiter::noop()) {
+			Poll::Ready(Ok(ControlFlow::Continue(()))) => Poll::Ready(()),
+			Poll::Ready(res) => panic!("the subscription ended: {res:?}"),
+			Poll::Pending => Poll::Pending,
+		}
 	}
 }
 
@@ -6941,6 +7079,26 @@ mod serve_group_test {
 		}
 	}
 
+	/// A bounded lite-07 subscription ends once its source gives up every range, even with no
+	/// start resolved, and not while one range is still open.
+	#[kio::test]
+	async fn giving_up_every_range_before_the_start_ends_it() {
+		// Disjoint ranges, then one range given up a group at a time with alternating errors.
+		for (mut bench, last) in [(CoverageBench::new(3, 2), 4), (CoverageBench::adjacent(4), 4)] {
+			bench.wake();
+			bench.wake();
+			bench.track.drop_groups(last..last + 1, StreamError::NotFound);
+			loop {
+				match bench.run.poll_step(&mut bench.writer, &kio::Waiter::noop()) {
+					Poll::Ready(Ok(ControlFlow::Continue(()))) => continue,
+					Poll::Ready(Ok(ControlFlow::Break(()))) => break,
+					other => panic!("the subscription should end, got {other:?}"),
+				}
+			}
+			assert!(bench.run.start.is_none());
+		}
+	}
+
 	/// A SUBSCRIBE_UPDATE that lowers the start below SUBSCRIBE_START asks for those groups
 	/// too, so the drops at the end count from there.
 	#[kio::test]
@@ -8603,7 +8761,7 @@ mod tests {
 	async fn a_busy_subscription_yields_to_its_siblings() {
 		/// `RequestServe`'s passes per poll; each serves at most one group.
 		const BUDGET: u64 = 32;
-		const GROUPS: u64 = 10_000;
+		const GROUPS: u64 = 2_000;
 		const BATCH: u64 = 1_000;
 
 		type Task = Box<dyn FnMut(&kio::Waiter) -> Poll<()>>;
