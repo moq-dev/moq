@@ -21,7 +21,7 @@ const GRACE: Duration = Duration::from_secs(30);
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ExportArgs {
 	/// Where to record: `file:///dir`, `s3://bucket/prefix`, `gs://bucket/prefix`, or `az://container/prefix`.
-	/// Each broadcast records under `<broadcast>/@<epoch>` beneath it.
+	/// Each broadcast records under `<broadcast>/@<instance>` beneath it.
 	pub store: Url,
 
 	/// Keep only this much recent content (a DVR), deleting older objects. Unset keeps everything.
@@ -38,7 +38,7 @@ pub struct ExportArgs {
 #[derive(usage_rs::Args, Clone)]
 #[usage(unknown_flags = "error", args_override_self = false)]
 pub struct ImportArgs {
-	/// One recorded broadcast: the `<broadcast>/@<epoch>` key prefix `export archive` wrote.
+	/// One recorded broadcast: the `<broadcast>/@<instance>` key prefix `export archive` wrote.
 	pub store: Url,
 
 	/// How often a recording still growing is checked for new objects and tracks. Defaults to 1s.
@@ -46,14 +46,14 @@ pub struct ImportArgs {
 	pub refresh: Option<moq_tokio::cli::Duration>,
 }
 
-/// One publisher instance being recorded: its path, and its epoch when its route has one.
-type Instance = (moq_net::Path, Option<moq_net::Epoch>);
+/// One stream being recorded: its path, and its route's instance.
+type Instance = (moq_net::Path, moq_net::Instance);
 
-/// Record every broadcast announced at or under `prefix` into `args.store`, each publisher
-/// instance under `<path>/@<epoch>`, until the announcements end.
+/// Record every broadcast announced at or under `prefix` into `args.store`, each stream under
+/// `<path>/@<instance>`, until the announcements end.
 ///
-/// A route without an epoch names no instance, so each one it announces records under an epoch
-/// minted here: a restarted export never resumes it, and never stitches two instances together.
+/// A wire that carries no instance has its relay mint one per announcement, so each one records
+/// under a key of its own: a restarted export never stitches two streams together.
 pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: ExportArgs) -> anyhow::Result<()> {
 	let dvr = match (args.retention, args.retention_grace) {
 		(Some(window), grace) => Some(moq_archive::producer::Dvr::new(
@@ -81,14 +81,17 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 		let instance = tokio::select! {
 			event = announced.next() => {
 				let announce = match event.context("announcements ended")? {
-					// Another publisher instance, or the same one announced again.
+					// Another instance, or the same one announced again.
 					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) | moq_net::announce::Event::Takeover { announce, .. } => announce,
 					_ => continue,
 				};
 				if !announce.prefix.has_prefix(&prefix) {
 					continue;
 				}
-				let instance: Instance = (announce.prefix, announce.route.epoch);
+				let Some(instance) = announce.route.instance else {
+					continue;
+				};
+				let instance: Instance = (announce.prefix, instance);
 				if !running.start(&instance) {
 					continue;
 				}
@@ -107,7 +110,7 @@ pub async fn export(origin: moq_net::origin::Consumer, prefix: String, args: Exp
 		let store = moq_archive::Store::new(store.clone(), key);
 		// Requested now, so an announcement resolves the instance serving it when read, not
 		// whichever one serves by the time its task runs.
-		let request = origin.request(&instance.0, instance.1.clone());
+		let request = origin.request(&instance.0, Some(instance.1.clone()));
 		recordings.spawn(record(request, instance, store, config.clone(), claims.clone()));
 	}
 }
@@ -153,18 +156,14 @@ impl Drop for Claim {
 	}
 }
 
-/// The epoch-pinned instances recording, so each records under its key once at a time, and again
-/// when it was announced anew meanwhile.
+/// The streams recording, so each records under its key once at a time, and again when it was
+/// announced anew meanwhile.
 #[derive(Default)]
 struct Running(HashMap<Instance, bool>);
 
 impl Running {
-	/// Whether to record `instance` now that it was announced. An epochless one is a new instance
-	/// each time, under a fresh key.
+	/// Whether to record `instance` now that it was announced.
 	fn start(&mut self, instance: &Instance) -> bool {
-		if instance.1.is_none() {
-			return true;
-		}
 		match self.0.get_mut(instance) {
 			Some(again) => {
 				*again = true;
@@ -218,12 +217,11 @@ async fn record(
 	(instance, result)
 }
 
-/// The key prefix one instance records under: its path's segments, then `@<epoch>`.
+/// The key prefix one stream records under: its path's segments, then `@<instance>`.
 ///
 /// A path segment's key never starts with `@`, since a leading one is percent-encoded like `%`
-/// always is, so no instance's prefix lies inside another's, whatever paths a publisher picks.
-fn key(root: &Path, (path, epoch): &Instance) -> anyhow::Result<Path> {
-	let epoch = epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
+/// always is, so no stream's prefix lies inside another's, whatever paths a publisher picks.
+fn key(root: &Path, (path, instance): &Instance) -> anyhow::Result<Path> {
 	let mut key = root.clone();
 	for segment in path.as_str().split('/').filter(|segment| !segment.is_empty()) {
 		let part = PathPart::from(segment);
@@ -232,11 +230,11 @@ fn key(root: &Path, (path, epoch): &Instance) -> anyhow::Result<Path> {
 			None => key.join(part),
 		};
 	}
-	let epoch = format!("@{epoch}");
-	Ok(key.join(PathPart::parse(&epoch).context("an epoch is one key segment")?))
+	// Percent-encoded like any segment, so an instance holding a delimiter stays one segment.
+	Ok(key.join(PathPart::from(format!("@{instance}").as_str())))
 }
 
-/// Republish the recording at `args.store` as the broadcast `name`, announced under `epoch`.
+/// Republish the recording at `args.store` as the broadcast `name`, announced under `instance`.
 ///
 /// Every stored track is served with its original groups: each live from its newest stored
 /// group, and history on request. A recording still growing is followed until its producer
@@ -245,7 +243,7 @@ pub async fn import(
 	origin: moq_net::origin::Producer,
 	name: String,
 	args: ImportArgs,
-	epoch: moq_net::Epoch,
+	instance: moq_net::Instance,
 ) -> anyhow::Result<()> {
 	let store = open(&args.store)?;
 	let mut config = moq_archive::consumer::Config::default();
@@ -257,7 +255,7 @@ pub async fn import(
 		.await
 		.with_context(|| format!("no readable recording at {}", args.store))?;
 	broadcast
-		.announce(moq_net::origin::Route::default().with_epoch(epoch))
+		.announce(moq_net::origin::Route::default().with_instance(instance, 0))
 		.context("failed to announce broadcast")?;
 
 	tracing::info!(%name, store = %args.store, "replaying");
@@ -336,7 +334,7 @@ mod tests {
 	}
 
 	/// `export archive` records each broadcast announced under its prefix into its own
-	/// `<path>/@<epoch>`, and leaves out what is announced elsewhere.
+	/// `<path>/@<instance>`, and leaves out what is announced elsewhere.
 	#[tokio::test]
 	async fn each_broadcast_records_under_its_own_key_prefix() {
 		let dir = tempfile::tempdir().unwrap();
@@ -353,7 +351,7 @@ mod tests {
 		let info = track::Info::default()
 			.with_timescale(Timescale::MILLI)
 			.with_max_age(Duration::from_secs(3600));
-		let mut epochs = Vec::new();
+		let mut instances = Vec::new();
 		let mut broadcasts = Vec::new();
 		for path in ["live/a", "live/b", "other"] {
 			let broadcast = origin.create_broadcast(path).unwrap();
@@ -361,11 +359,11 @@ mod tests {
 			let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
 			group.write_frame(Timestamp::from_millis(0).unwrap(), path).unwrap();
 			group.finish().unwrap();
-			let epoch = moq_net::Epoch::mint();
+			let instance = moq_net::Instance::random();
 			broadcast
-				.announce(moq_net::origin::Route::default().with_epoch(epoch.clone()))
+				.announce(moq_net::origin::Route::default().with_instance(instance.clone(), 0))
 				.unwrap();
-			epochs.push(epoch);
+			instances.push(instance);
 			broadcasts.push((broadcast, track));
 		}
 
@@ -379,8 +377,8 @@ mod tests {
 			broadcast.close();
 		}
 		let complete = [
-			format!("live/a/@{}/.end", epochs[0]),
-			format!("live/b/@{}/.end", epochs[1]),
+			format!("live/a/@{}/.end", instances[0]),
+			format!("live/b/@{}/.end", instances[1]),
 		];
 		kio::clock::timeout(Duration::from_secs(10), async {
 			while !complete.iter().all(|end| dir.path().join(end).exists()) {
@@ -392,13 +390,13 @@ mod tests {
 		recording.abort();
 
 		let files = files(dir.path());
-		for (path, epoch) in [("live/a", &epochs[0]), ("live/b", &epochs[1])] {
+		for (path, instance) in [("live/a", &instances[0]), ("live/b", &instances[1])] {
 			for file in [".end", "video/.info", "video/end"] {
-				assert!(files.contains(&format!("{path}/@{epoch}/{file}")), "{files:?}");
+				assert!(files.contains(&format!("{path}/@{instance}/{file}")), "{files:?}");
 			}
 			assert!(
 				files.contains(&format!(
-					"{path}/@{epoch}/video/0000000000000000000-0000000000000000000-0000000000000000000"
+					"{path}/@{instance}/video/0000000000000000000-0000000000000000000-0000000000000000000"
 				)),
 				"{files:?}"
 			);
@@ -407,7 +405,7 @@ mod tests {
 	}
 
 	/// `import archive` republishes a recording `export archive` wrote under the given name and
-	/// epoch, serving its stored groups.
+	/// instance, serving its stored groups.
 	#[tokio::test]
 	async fn an_exported_broadcast_imports() {
 		let dir = tempfile::tempdir().unwrap();
@@ -441,14 +439,14 @@ mod tests {
 			store: url,
 			refresh: None,
 		};
-		let epoch = moq_net::Epoch::mint();
-		let _import = tokio::spawn(import(origin.clone(), "replay".into(), args, epoch.clone()));
+		let instance = moq_net::Instance::random();
+		let _import = tokio::spawn(import(origin.clone(), "replay".into(), args, instance.clone()));
 		let mut announced = origin.consume().announced();
 		kio::clock::timeout(Duration::from_secs(10), async {
 			loop {
 				if let Some(moq_net::announce::Event::Start(announce)) = announced.next().await {
 					assert_eq!(announce.prefix.as_str(), "replay");
-					assert_eq!(announce.route.epoch, Some(epoch.clone()));
+					assert_eq!(announce.route.instance, Some(instance.clone()));
 					break;
 				}
 			}
@@ -462,17 +460,12 @@ mod tests {
 		assert_eq!(&frame.payload[..], b"frame 0");
 	}
 
-	/// An epochless route announced again while its last recording drains is a new recording, and
-	/// an epoch-pinned one records again once its recording ends.
+	/// A stream announced again while its last recording drains records again once that
+	/// recording ends.
 	#[test]
 	fn a_re_announced_instance_is_recorded() {
 		let mut running = Running::default();
-		let epochless = (moq_net::Path::from_static("live/a"), None);
-		assert!(running.start(&epochless));
-		assert!(running.start(&epochless));
-		assert!(!running.done(&epochless));
-
-		let pinned = (moq_net::Path::from_static("live/b"), Some(moq_net::Epoch::mint()));
+		let pinned = (moq_net::Path::from_static("live/b"), moq_net::Instance::random());
 		assert!(running.start(&pinned));
 		assert!(!running.start(&pinned));
 		assert!(running.done(&pinned));
@@ -500,50 +493,46 @@ mod tests {
 		assert!(claims.0.lock().unwrap().is_empty());
 	}
 
-	/// A route without an epoch records under one minted per instance, so two instances never
-	/// share a key prefix.
+	/// A stream records under its instance, which stays one key segment even when it holds a
+	/// delimiter.
 	#[test]
-	fn an_epochless_instance_gets_a_fresh_key() {
-		let instance = (moq_net::Path::from_static("live/a"), None);
-		let first = key(&Path::from("rec"), &instance).unwrap();
-		let second = key(&Path::from("rec"), &instance).unwrap();
-		assert_ne!(first, second);
-		assert!(first.as_ref().starts_with("rec/live/a/"), "{first}");
-
-		let epoch = moq_net::Epoch::mint();
-		let pinned = (moq_net::Path::from_static("live/a"), Some(epoch.clone()));
+	fn an_instance_keys_one_segment() {
+		let instance = moq_net::Instance::random();
+		let pinned = (moq_net::Path::from_static("live/a"), instance.clone());
 		assert_eq!(
 			key(&Path::from("rec"), &pinned).unwrap().as_ref(),
-			format!("rec/live/a/@{epoch}")
+			format!("rec/live/a/@{instance}")
 		);
+		let slashed = (moq_net::Path::from_static("live/a"), "a/b".parse().unwrap());
+		assert_eq!(key(&Path::from("rec"), &slashed).unwrap().parts().count(), 4);
 	}
 
 	/// A path segment's key never starts with `@`, so a path that spells out another instance's
 	/// key prefix records beside it, never inside it.
 	#[test]
 	fn keys_are_prefix_free() {
-		let epoch = moq_net::Epoch::mint();
+		let instance = moq_net::Instance::random();
 		let victim = key(
 			&Path::from("rec"),
-			&(moq_net::Path::from_static("live/a"), Some(epoch.clone())),
+			&(moq_net::Path::from_static("live/a"), instance.clone()),
 		)
 		.unwrap();
-		let hostile = format!("live/a/@{epoch}");
+		let hostile = format!("live/a/@{instance}");
 		let nested = key(
 			&Path::from("rec"),
-			&(moq_net::Path::new(&hostile).unwrap(), Some(moq_net::Epoch::mint())),
+			&(moq_net::Path::new(&hostile).unwrap(), moq_net::Instance::random()),
 		)
 		.unwrap();
 		assert!(nested.prefix_match(&victim).is_none(), "{nested} is under {victim}");
 		assert!(
-			nested.as_ref().starts_with(&format!("rec/live/a/%40{epoch}/@")),
+			nested.as_ref().starts_with(&format!("rec/live/a/%40{instance}/@")),
 			"{nested}"
 		);
 
 		// `%` is escaped too, so an escaped-looking segment keys apart from the `@` one.
 		let literal = key(
 			&Path::from("rec"),
-			&(moq_net::Path::new(&format!("live/a/%40{epoch}")).unwrap(), Some(epoch)),
+			&(moq_net::Path::new(&format!("live/a/%40{instance}")).unwrap(), instance),
 		)
 		.unwrap();
 		assert!(literal.as_ref().starts_with("rec/live/a/%2540"), "{literal}");

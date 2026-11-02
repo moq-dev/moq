@@ -1163,7 +1163,7 @@ class FfiConverterMoqJsonWindowTimed {
 class MoqAudio {
   final String? label;
   final String? broadcast;
-  final String? epoch;
+  final String? instance;
   final String? track;
   final String codec;
   final Uint8List? description;
@@ -1176,7 +1176,7 @@ class MoqAudio {
   MoqAudio({
     this.label = null,
     this.broadcast = null,
-    this.epoch = null,
+    this.instance = null,
     this.track = null,
     required this.codec,
     this.description,
@@ -1206,11 +1206,11 @@ class FfiConverterMoqAudio {
     );
     final broadcast = broadcast_lifted.value;
     new_offset += broadcast_lifted.bytesRead;
-    final epoch_lifted = FfiConverterOptionalString.read(
+    final instance_lifted = FfiConverterOptionalString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final epoch = epoch_lifted.value;
-    new_offset += epoch_lifted.bytesRead;
+    final instance = instance_lifted.value;
+    new_offset += instance_lifted.bytesRead;
     final track_lifted = FfiConverterOptionalString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -1260,7 +1260,7 @@ class FfiConverterMoqAudio {
       MoqAudio(
         label: label,
         broadcast: broadcast,
-        epoch: epoch,
+        instance: instance,
         track: track,
         codec: codec,
         description: description,
@@ -1279,7 +1279,7 @@ class FfiConverterMoqAudio {
     final total_length =
         FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalString.allocationSize(value.broadcast) +
-        FfiConverterOptionalString.allocationSize(value.epoch) +
+        FfiConverterOptionalString.allocationSize(value.instance) +
         FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterString.allocationSize(value.codec) +
         FfiConverterOptionalUint8List.allocationSize(value.description) +
@@ -1306,7 +1306,7 @@ class FfiConverterMoqAudio {
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalString.write(
-      value.epoch,
+      value.instance,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalString.write(
@@ -1351,7 +1351,7 @@ class FfiConverterMoqAudio {
   static int allocationSize(MoqAudio value) {
     return FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalString.allocationSize(value.broadcast) +
-        FfiConverterOptionalString.allocationSize(value.epoch) +
+        FfiConverterOptionalString.allocationSize(value.instance) +
         FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterString.allocationSize(value.codec) +
         FfiConverterOptionalUint8List.allocationSize(value.description) +
@@ -2159,7 +2159,7 @@ class FfiConverterMoqTimestamp {
 class MoqVideo {
   final String? label;
   final String? broadcast;
-  final String? epoch;
+  final String? instance;
   final String? track;
   final String codec;
   final Uint8List? description;
@@ -2173,7 +2173,7 @@ class MoqVideo {
   MoqVideo({
     this.label = null,
     this.broadcast = null,
-    this.epoch = null,
+    this.instance = null,
     this.track = null,
     required this.codec,
     this.description,
@@ -2204,11 +2204,11 @@ class FfiConverterMoqVideo {
     );
     final broadcast = broadcast_lifted.value;
     new_offset += broadcast_lifted.bytesRead;
-    final epoch_lifted = FfiConverterOptionalString.read(
+    final instance_lifted = FfiConverterOptionalString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final epoch = epoch_lifted.value;
-    new_offset += epoch_lifted.bytesRead;
+    final instance = instance_lifted.value;
+    new_offset += instance_lifted.bytesRead;
     final track_lifted = FfiConverterOptionalString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -2263,7 +2263,7 @@ class FfiConverterMoqVideo {
       MoqVideo(
         label: label,
         broadcast: broadcast,
-        epoch: epoch,
+        instance: instance,
         track: track,
         codec: codec,
         description: description,
@@ -2283,7 +2283,7 @@ class FfiConverterMoqVideo {
     final total_length =
         FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalString.allocationSize(value.broadcast) +
-        FfiConverterOptionalString.allocationSize(value.epoch) +
+        FfiConverterOptionalString.allocationSize(value.instance) +
         FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterString.allocationSize(value.codec) +
         FfiConverterOptionalUint8List.allocationSize(value.description) +
@@ -2311,7 +2311,7 @@ class FfiConverterMoqVideo {
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalString.write(
-      value.epoch,
+      value.instance,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalString.write(
@@ -2360,7 +2360,7 @@ class FfiConverterMoqVideo {
   static int allocationSize(MoqVideo value) {
     return FfiConverterOptionalString.allocationSize(value.label) +
         FfiConverterOptionalString.allocationSize(value.broadcast) +
-        FfiConverterOptionalString.allocationSize(value.epoch) +
+        FfiConverterOptionalString.allocationSize(value.instance) +
         FfiConverterOptionalString.allocationSize(value.track) +
         FfiConverterString.allocationSize(value.codec) +
         FfiConverterOptionalUint8List.allocationSize(value.description) +
@@ -2647,9 +2647,13 @@ class FfiConverterMoqVideoProperties {
 
 class MoqAnnounce {
   final String prefix;
-  final List<String>? captures;
+  final List<String> captures;
   final MoqRoute route;
-  MoqAnnounce({required this.prefix, this.captures, required this.route});
+  MoqAnnounce({
+    required this.prefix,
+    required this.captures,
+    required this.route,
+  });
 }
 
 class FfiConverterMoqAnnounce {
@@ -2664,7 +2668,7 @@ class FfiConverterMoqAnnounce {
     );
     final prefix = prefix_lifted.value;
     new_offset += prefix_lifted.bytesRead;
-    final captures_lifted = FfiConverterOptionalSequenceString.read(
+    final captures_lifted = FfiConverterSequenceString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final captures = captures_lifted.value;
@@ -2683,7 +2687,7 @@ class FfiConverterMoqAnnounce {
   static RustBuffer lower(MoqAnnounce value) {
     final total_length =
         FfiConverterString.allocationSize(value.prefix) +
-        FfiConverterOptionalSequenceString.allocationSize(value.captures) +
+        FfiConverterSequenceString.allocationSize(value.captures) +
         FfiConverterMoqRoute.allocationSize(value.route) +
         0;
     final buf = Uint8List(total_length);
@@ -2697,7 +2701,7 @@ class FfiConverterMoqAnnounce {
       value.prefix,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalSequenceString.write(
+    new_offset += FfiConverterSequenceString.write(
       value.captures,
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -2710,7 +2714,7 @@ class FfiConverterMoqAnnounce {
 
   static int allocationSize(MoqAnnounce value) {
     return FfiConverterString.allocationSize(value.prefix) +
-        FfiConverterOptionalSequenceString.allocationSize(value.captures) +
+        FfiConverterSequenceString.allocationSize(value.captures) +
         FfiConverterMoqRoute.allocationSize(value.route) +
         0;
   }
@@ -2793,8 +2797,9 @@ class FfiConverterMoqAnnounceConfig {
 
 class MoqAnnounceRoute {
   final int cost;
-  final String? epoch;
-  MoqAnnounceRoute({this.cost = 0, this.epoch = null});
+  final String? instance;
+  final int epoch;
+  MoqAnnounceRoute({this.cost = 0, this.instance = null, this.epoch = 0});
 }
 
 class FfiConverterMoqAnnounceRoute {
@@ -2809,13 +2814,18 @@ class FfiConverterMoqAnnounceRoute {
     );
     final cost = cost_lifted.value;
     new_offset += cost_lifted.bytesRead;
-    final epoch_lifted = FfiConverterOptionalString.read(
+    final instance_lifted = FfiConverterOptionalString.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final instance = instance_lifted.value;
+    new_offset += instance_lifted.bytesRead;
+    final epoch_lifted = FfiConverterUInt64.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final epoch = epoch_lifted.value;
     new_offset += epoch_lifted.bytesRead;
     return LiftRetVal(
-      MoqAnnounceRoute(cost: cost, epoch: epoch),
+      MoqAnnounceRoute(cost: cost, instance: instance, epoch: epoch),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -2823,7 +2833,8 @@ class FfiConverterMoqAnnounceRoute {
   static RustBuffer lower(MoqAnnounceRoute value) {
     final total_length =
         FfiConverterUInt64.allocationSize(value.cost) +
-        FfiConverterOptionalString.allocationSize(value.epoch) +
+        FfiConverterOptionalString.allocationSize(value.instance) +
+        FfiConverterUInt64.allocationSize(value.epoch) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -2837,6 +2848,10 @@ class FfiConverterMoqAnnounceRoute {
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalString.write(
+      value.instance,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterUInt64.write(
       value.epoch,
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -2845,7 +2860,8 @@ class FfiConverterMoqAnnounceRoute {
 
   static int allocationSize(MoqAnnounceRoute value) {
     return FfiConverterUInt64.allocationSize(value.cost) +
-        FfiConverterOptionalString.allocationSize(value.epoch) +
+        FfiConverterOptionalString.allocationSize(value.instance) +
+        FfiConverterUInt64.allocationSize(value.epoch) +
         0;
   }
 }
@@ -2900,12 +2916,12 @@ class MoqRoute {
   final List<int> hops;
   final int cost;
   final bool anonymous;
-  final String? epoch;
+  final String instance;
   MoqRoute({
     required this.hops,
     required this.cost,
     required this.anonymous,
-    this.epoch,
+    required this.instance,
   });
 }
 
@@ -2931,13 +2947,18 @@ class FfiConverterMoqRoute {
     );
     final anonymous = anonymous_lifted.value;
     new_offset += anonymous_lifted.bytesRead;
-    final epoch_lifted = FfiConverterOptionalString.read(
+    final instance_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final epoch = epoch_lifted.value;
-    new_offset += epoch_lifted.bytesRead;
+    final instance = instance_lifted.value;
+    new_offset += instance_lifted.bytesRead;
     return LiftRetVal(
-      MoqRoute(hops: hops, cost: cost, anonymous: anonymous, epoch: epoch),
+      MoqRoute(
+        hops: hops,
+        cost: cost,
+        anonymous: anonymous,
+        instance: instance,
+      ),
       new_offset - buf.offsetInBytes,
     );
   }
@@ -2947,7 +2968,7 @@ class FfiConverterMoqRoute {
         FfiConverterSequenceUInt64.allocationSize(value.hops) +
         FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterBool.allocationSize(value.anonymous) +
-        FfiConverterOptionalString.allocationSize(value.epoch) +
+        FfiConverterString.allocationSize(value.instance) +
         0;
     final buf = Uint8List(total_length);
     write(value, buf);
@@ -2968,8 +2989,8 @@ class FfiConverterMoqRoute {
       value.anonymous,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalString.write(
-      value.epoch,
+    new_offset += FfiConverterString.write(
+      value.instance,
       Uint8List.view(buf.buffer, new_offset),
     );
     return new_offset - buf.offsetInBytes;
@@ -2979,7 +3000,7 @@ class FfiConverterMoqRoute {
     return FfiConverterSequenceUInt64.allocationSize(value.hops) +
         FfiConverterUInt64.allocationSize(value.cost) +
         FfiConverterBool.allocationSize(value.anonymous) +
-        FfiConverterOptionalString.allocationSize(value.epoch) +
+        FfiConverterString.allocationSize(value.instance) +
         0;
   }
 }
@@ -5521,7 +5542,7 @@ class FfiConverterMoqException {
           lifted.bytesRead - subview.offsetInBytes + 4,
         );
       case 29:
-        final lifted = InvalidEpochMoqException.read(subview);
+        final lifted = InvalidInstanceMoqException.read(subview);
         return LiftRetVal<MoqException>(
           lifted.value,
           lifted.bytesRead - subview.offsetInBytes + 4,
@@ -6525,18 +6546,18 @@ class InvalidPatternMoqException extends MoqException {
   }
 }
 
-class InvalidEpochMoqException extends MoqException {
+class InvalidInstanceMoqException extends MoqException {
   final String reason;
-  InvalidEpochMoqException(String this.reason);
-  InvalidEpochMoqException._(String this.reason);
-  static LiftRetVal<InvalidEpochMoqException> read(Uint8List buf) {
+  InvalidInstanceMoqException(String this.reason);
+  InvalidInstanceMoqException._(String this.reason);
+  static LiftRetVal<InvalidInstanceMoqException> read(Uint8List buf) {
     int new_offset = buf.offsetInBytes;
     final reason_lifted = FfiConverterString.read(
       Uint8List.view(buf.buffer, new_offset),
     );
     final reason = reason_lifted.value;
     new_offset += reason_lifted.bytesRead;
-    return LiftRetVal(InvalidEpochMoqException._(reason), new_offset);
+    return LiftRetVal(InvalidInstanceMoqException._(reason), new_offset);
   }
 
   @override
@@ -11984,7 +12005,7 @@ class FfiConverterMoqBroadcastPrepared {
 
 abstract class MoqBroadcastRequestInterface {
   String path();
-  MoqBroadcastPrepared prepare({required String epoch});
+  MoqBroadcastPrepared prepare();
   void reject({required int errorCode});
 }
 
@@ -12032,11 +12053,10 @@ class MoqBroadcastRequest implements MoqBroadcastRequestInterface {
     );
   }
 
-  MoqBroadcastPrepared prepare({required String epoch}) {
+  MoqBroadcastPrepared prepare() {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqbroadcastrequest_prepare(
         uniffiClonePointer(),
-        FfiConverterString.lower(epoch),
         status,
       ),
       FfiConverterMoqBroadcastPrepared.lift,
@@ -12169,10 +12189,10 @@ class FfiConverterMoqFollowing {
 
 abstract class MoqOriginConsumerInterface {
   MoqAnnounceConsumer announced({required MoqAnnounceConfig config});
-  MoqFollowing follow({required String path, String? epoch = null});
+  MoqFollowing follow({required String path, String? instance = null});
   UniffiRustFuture<MoqBroadcastConsumer> request({
     required String path,
-    String? epoch = null,
+    String? instance = null,
   });
 }
 
@@ -12221,12 +12241,12 @@ class MoqOriginConsumer implements MoqOriginConsumerInterface {
     );
   }
 
-  MoqFollowing follow({required String path, String? epoch = null}) {
+  MoqFollowing follow({required String path, String? instance = null}) {
     return rustCallWithLifter(
       (status) => uniffi_moq_ffi_fn_method_moqoriginconsumer_follow(
         uniffiClonePointer(),
         FfiConverterString.lower(path),
-        FfiConverterOptionalString.lower(epoch),
+        FfiConverterOptionalString.lower(instance),
         status,
       ),
       FfiConverterMoqFollowing.lift,
@@ -12236,13 +12256,13 @@ class MoqOriginConsumer implements MoqOriginConsumerInterface {
 
   UniffiRustFuture<MoqBroadcastConsumer> request({
     required String path,
-    String? epoch = null,
+    String? instance = null,
   }) {
     return uniffiRustCallAsync(
       () => uniffi_moq_ffi_fn_method_moqoriginconsumer_request(
         uniffiClonePointer(),
         FfiConverterString.lower(path),
-        FfiConverterOptionalString.lower(epoch),
+        FfiConverterOptionalString.lower(instance),
       ),
       ffi_moq_ffi_rust_future_poll_u64,
       ffi_moq_ffi_rust_future_complete_u64,
@@ -16831,53 +16851,6 @@ class FfiConverterOptionalSequenceMoqRange {
   }
 }
 
-class FfiConverterOptionalSequenceString {
-  static List<String>? lift(RustBuffer buf) {
-    return FfiConverterOptionalSequenceString.read(buf.asUint8List()).value;
-  }
-
-  static LiftRetVal<List<String>?> read(Uint8List buf) {
-    if (ByteData.view(buf.buffer, buf.offsetInBytes).getInt8(0) == 0) {
-      return LiftRetVal(null, 1);
-    }
-    final result = FfiConverterSequenceString.read(
-      Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
-    );
-    return LiftRetVal<List<String>?>(result.value, result.bytesRead + 1);
-  }
-
-  static int allocationSize([List<String>? value]) {
-    if (value == null) {
-      return 1;
-    }
-    return FfiConverterSequenceString.allocationSize(value) + 1;
-  }
-
-  static RustBuffer lower(List<String>? value) {
-    if (value == null) {
-      return toRustBuffer(Uint8List.fromList([0]));
-    }
-    final buf = Uint8List(
-      FfiConverterOptionalSequenceString.allocationSize(value),
-    );
-    FfiConverterOptionalSequenceString.write(value, buf);
-    return toRustBuffer(buf);
-  }
-
-  static int write(List<String>? value, Uint8List buf) {
-    if (value == null) {
-      buf[0] = 0;
-      return 1;
-    }
-    buf[0] = 1;
-    return FfiConverterSequenceString.write(
-          value,
-          Uint8List.view(buf.buffer, buf.offsetInBytes + 1),
-        ) +
-        1;
-  }
-}
-
 class FfiConverterOptionalString {
   static String? lift(RustBuffer buf) {
     return FfiConverterOptionalString.read(buf.asUint8List()).value;
@@ -17436,14 +17409,6 @@ void moqLogLevel({required String level}) {
       status,
     );
   }, moqExceptionErrorHandler);
-}
-
-String moqMintEpoch() {
-  return rustCallWithLifter(
-    (status) => uniffi_moq_ffi_fn_func_moq_mint_epoch(status),
-    FfiConverterString.lift,
-    null,
-  );
 }
 
 MoqClientConfig moqClientDefaults() {
@@ -18820,12 +18785,11 @@ external RustBuffer uniffi_moq_ffi_fn_method_moqbroadcastrequest_path(
   Pointer<RustCallStatus> uniffiStatus,
 );
 
-@Native<
-  Pointer<Void> Function(Pointer<Void>, RustBuffer, Pointer<RustCallStatus>)
->(assetId: _uniffiAssetId)
+@Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
+  assetId: _uniffiAssetId,
+)
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqbroadcastrequest_prepare(
   Pointer<Void> ptr,
-  RustBuffer epoch,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -18903,7 +18867,7 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqoriginconsumer_announced(
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqoriginconsumer_follow(
   Pointer<Void> ptr,
   RustBuffer path,
-  RustBuffer epoch,
+  RustBuffer instance,
   Pointer<RustCallStatus> uniffiStatus,
 );
 
@@ -18913,7 +18877,7 @@ external Pointer<Void> uniffi_moq_ffi_fn_method_moqoriginconsumer_follow(
 external Pointer<Void> uniffi_moq_ffi_fn_method_moqoriginconsumer_request(
   Pointer<Void> ptr,
   RustBuffer path,
-  RustBuffer epoch,
+  RustBuffer instance,
 );
 
 @Native<Pointer<Void> Function(Pointer<Void>, Pointer<RustCallStatus>)>(
@@ -20074,11 +20038,6 @@ external void uniffi_moq_ffi_fn_func_moq_log_level(
 );
 
 @Native<RustBuffer Function(Pointer<RustCallStatus>)>(assetId: _uniffiAssetId)
-external RustBuffer uniffi_moq_ffi_fn_func_moq_mint_epoch(
-  Pointer<RustCallStatus> uniffiStatus,
-);
-
-@Native<RustBuffer Function(Pointer<RustCallStatus>)>(assetId: _uniffiAssetId)
 external RustBuffer uniffi_moq_ffi_fn_func_moq_client_defaults(
   Pointer<RustCallStatus> uniffiStatus,
 );
@@ -20422,9 +20381,6 @@ external int uniffi_moq_ffi_checksum_func_moq_subscription_defaults();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_func_moq_log_level();
-
-@Native<Uint16 Function()>(assetId: _uniffiAssetId)
-external int uniffi_moq_ffi_checksum_func_moq_mint_epoch();
 
 @Native<Uint16 Function()>(assetId: _uniffiAssetId)
 external int uniffi_moq_ffi_checksum_func_moq_client_defaults();
@@ -21124,9 +21080,6 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_func_moq_log_level() != 24625) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_func_moq_mint_epoch() != 34550) {
-    throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
-  }
   if (uniffi_moq_ffi_checksum_func_moq_client_defaults() != 15294) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
@@ -21210,7 +21163,7 @@ void _checkApiChecksums() {
       18633) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_resolve() != 56822) {
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_resolve() != 972) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastconsumer_subscribe_track() !=
@@ -21420,7 +21373,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_path() != 6534) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_prepare() != 14120) {
+  if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_prepare() != 45877) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqbroadcastrequest_reject() != 9727) {
@@ -21435,10 +21388,10 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_announced() != 35661) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_follow() != 6409) {
+  if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_follow() != 34533) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_request() != 26056) {
+  if (uniffi_moq_ffi_checksum_method_moqoriginconsumer_request() != 40910) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqoriginproducer_consume() != 52357) {
@@ -21662,7 +21615,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqsession_recv_bandwidth() != 46568) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqsession_shutdown() != 32451) {
+  if (uniffi_moq_ffi_checksum_method_moqsession_shutdown() != 2073) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqsession_state() != 32292) {
@@ -21801,7 +21754,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediatrackconsumer_subscribe() !=
-      55638) {
+      21132) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediatrackproducer_audio() !=

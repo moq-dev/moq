@@ -42,7 +42,6 @@ slab = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
-uuid = { workspace = true }
 
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }

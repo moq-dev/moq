@@ -996,6 +996,11 @@ fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std
 			|snap| snap.turns,
 		),
 		(
+			"moq_relay_uring_passes",
+			"Worker passes over its woken tasks; over turns, the passes a turn takes to settle.",
+			|snap| snap.passes,
+		),
+		(
 			"moq_relay_uring_sq_full_enters",
 			"io_uring_enter calls forced by a full submission queue.",
 			|snap| snap.sq_full_enters,
@@ -1470,6 +1475,7 @@ mod tests {
 			"completions",
 			"enters",
 			"turns",
+			"passes",
 			"sq_full_enters",
 			"parks",
 			"wakes",
@@ -2124,6 +2130,7 @@ gauge moq_relay_draining_sessions{} 0
 # TYPE moq_relay_uring_cqes_per_enter histogram
 # TYPE moq_relay_uring_enters_total counter
 # TYPE moq_relay_uring_parks_total counter
+# TYPE moq_relay_uring_passes_total counter
 # TYPE moq_relay_uring_rx_datagrams_total counter
 # TYPE moq_relay_uring_rx_enobufs_total counter
 # TYPE moq_relay_uring_rx_exhausted_total counter
@@ -2143,6 +2150,7 @@ gauge moq_relay_draining_sessions{} 0
 counter moq_relay_uring_completions_total{worker="0"} 0
 counter moq_relay_uring_enters_total{worker="0"} 0
 counter moq_relay_uring_parks_total{worker="0"} 0
+counter moq_relay_uring_passes_total{worker="0"} 0
 counter moq_relay_uring_rx_datagrams_total{worker="0"} 0
 counter moq_relay_uring_rx_enobufs_total{worker="0"} 0
 counter moq_relay_uring_rx_exhausted_total{worker="0"} 0

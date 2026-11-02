@@ -356,8 +356,10 @@ impl AnnounceWriter {
 		let msg = match announced {
 			Announced::Start(suffix, hops) => {
 				let (_, suffix, hops) = self.encoder.start(suffix.clone(), hops.clone());
+				// A fixed instance, so the bytes stay pinned and match what `js/net` writes.
 				lite::AnnounceBroadcast::Active {
-					epoch: None,
+					instance: self.version.has_instance().then(|| "a".parse().unwrap()),
+					epoch: 0,
 					suffix,
 					hops,
 					cost: Default::default(),
@@ -627,7 +629,7 @@ impl LiteSample {
 			.unwrap(),
 			Self::Subscribe => lite::Subscribe {
 				order: crate::track::Order::Descending,
-				epoch: None,
+				instance: None,
 				id: 3,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -832,7 +834,7 @@ impl Default for Messages {
 		Self {
 			lite_subscribe: lite::Subscribe {
 				order: crate::track::Order::Descending,
-				epoch: None,
+				instance: None,
 				id: 7,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -1011,7 +1013,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 		false => lite::Subscribe {
 			id: 0,
 			broadcast: broadcast.clone(),
-			epoch: None,
+			instance: None,
 			track: track.into(),
 			priority: 0,
 			max_delay: std::time::Duration::ZERO,
@@ -1556,10 +1558,47 @@ type FrameReader = coding::Reader<crate::transport::poll::Buffered<Chunks>, lite
 /// every declared size when the first byte lands and `Some(0)` grows every buffer with
 /// the bytes received.
 pub struct FrameRecv {
-	streams: Vec<Option<(FrameReader, frame::Producer)>>,
+	streams: Vec<Option<Stream>>,
+	chunk: usize,
 	// Keeps the groups' track alive.
 	_track: track::Producer,
 	_broadcast: broadcast::Producer,
+}
+
+struct Stream {
+	reader: FrameReader,
+	frame: frame::Producer,
+	readers: Vec<FrameRead>,
+}
+
+/// A subscriber reading a stream's frame while it arrives, as a relay forwards it.
+///
+/// It keeps every chunk until the run ends, as a send queue would, so the chunks it read
+/// before the frame's buffer grew still hold the buffer they were cut from.
+struct FrameRead {
+	group: group::Consumer,
+	frame: Option<frame::Consumer>,
+	held: Vec<Bytes>,
+}
+
+impl FrameRead {
+	/// Read every chunk published so far, returning how many.
+	fn read(&mut self, waiter: &kio::Waiter) -> usize {
+		let frame = match &mut self.frame {
+			Some(frame) => frame,
+			None => match self.group.poll_next_frame(waiter) {
+				std::task::Poll::Ready(res) => self.frame.insert(res.unwrap().expect("the frame is in flight")),
+				std::task::Poll::Pending => return 0,
+			},
+		};
+		let mut reads = 0;
+		while let std::task::Poll::Ready(chunk) = frame.poll_read_chunk(waiter) {
+			let Some(chunk) = chunk.unwrap() else { break };
+			self.held.push(chunk);
+			reads += 1;
+		}
+		reads
+	}
 }
 
 impl FrameRecv {
@@ -1592,36 +1631,63 @@ impl FrameRecv {
 					chunk,
 					ready: true,
 				};
-				Some((
-					coding::Reader::new(crate::transport::poll::Buffered::new(stream), lite::Version::Lite05),
+				Some(Stream {
+					reader: coding::Reader::new(crate::transport::poll::Buffered::new(stream), lite::Version::Lite05),
 					frame,
-				))
+					readers: Vec::new(),
+				})
 			})
 			.collect();
 
 		Self {
 			streams,
+			chunk,
 			_track: track,
 			_broadcast: broadcast,
 		}
 	}
 
-	/// Receive every frame, round-robin a chunk at a time, then drop them.
-	pub fn run(mut self) {
+	/// Add `readers` subscribers to each stream, reading its frame after every chunk it
+	/// receives.
+	pub fn with_readers(mut self, readers: usize) -> Self {
+		for stream in self.streams.iter_mut().flatten() {
+			let size = stream.frame.size as usize;
+			// A read ends at the bytes published or its segment's end, whichever is first.
+			let reads = size.div_ceil(self.chunk) + size.div_ceil(frame::SEGMENT);
+			stream.readers = (0..readers)
+				.map(|_| FrameRead {
+					group: stream.frame.group().consume(),
+					frame: None,
+					held: Vec::with_capacity(reads),
+				})
+				.collect();
+		}
+		self
+	}
+
+	/// Receive every frame, round-robin a chunk at a time, then drop them. Returns the
+	/// chunks the readers read.
+	pub fn run(mut self) -> usize {
 		let waiter = &kio::Waiter::noop();
 		let mut open = self.streams.len();
+		let mut reads = 0;
 		while open > 0 {
 			for slot in &mut self.streams {
-				let Some((reader, frame)) = slot else { continue };
-				if let std::task::Poll::Ready(res) = reader.poll_read_frame(waiter, frame) {
+				let Some(stream) = slot else { continue };
+				let received = stream.reader.poll_read_frame(waiter, &mut stream.frame);
+				for reader in &mut stream.readers {
+					reads += reader.read(waiter);
+				}
+				if let std::task::Poll::Ready(res) = received {
 					res.unwrap();
-					let (_, frame) = slot.take().unwrap();
-					let mut group = frame.finish().unwrap();
+					let stream = slot.take().unwrap();
+					let mut group = stream.frame.finish().unwrap();
 					group.finish().unwrap();
 					open -= 1;
 				}
 			}
 		}
+		reads
 	}
 }
 

@@ -225,12 +225,11 @@ impl Version {
 		self.resolves_start() && !self.has_media_time() && !self.has_fetch_max_delay()
 	}
 
-	/// Whether subscription completion waits for the subscriber's FIN.
+	/// Whether subscription completion waits for the subscriber's FIN, which it sends once
+	/// its tail accounting settles. SUBSCRIBE_END says which groups are owed, so that is
+	/// prompt from lite-05; before it, only the subscriber's grace settles the tail.
 	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
+		self.has_track_stream()
 	}
 
 	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older
@@ -290,11 +289,10 @@ impl Version {
 		)
 	}
 
-	/// Whether announcements and track requests carry the publisher epoch, the
-	/// identity that says two routes serve the same bytes. Added in lite-07.
-	/// Older versions carry nothing, so a received route has no epoch and is
-	/// never resumed through another route.
-	pub fn has_epoch(self) -> bool {
+	/// Whether announcements carry their instance and epoch, and track requests the
+	/// instance they pin. Added in lite-07. Older versions carry nothing, so the
+	/// receiving session mints an instance for each announcement.
+	pub fn has_instance(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
