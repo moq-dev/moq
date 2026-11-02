@@ -1,11 +1,11 @@
-[page] Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4001450us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4001011us. Timeout:4s num_undecryptable_packets: 0 {}).
 [page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4001839us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4001791us. Timeout:4s num_undecryptable_packets: 0 {}).
 [page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002713us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4001490us. Timeout:4s num_undecryptable_packets: 0 {}).
 [page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002435us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4002729us. Timeout:4s num_undecryptable_packets: 0 {}).
 [page] connection error: AggregateError: All promises were rejected
-[page] Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4001437us. Timeout:4s num_undecryptable_packets: 0 {}).
+[page] Failed to establish a connection to https://quichemoq.dev/: net::ERR_QUIC_PROTOCOL_ERROR.QUIC_NETWORK_IDLE_TIMEOUT (No recent network activity after 4001216us. Timeout:4s num_undecryptable_packets: 0 {}).
 [page] connection error: AggregateError: All promises were rejected
-decoded 0 frames from smoke-rust-4729-12483.hang (vite)
+decoded 0 frames from smoke-rust-4864-31591.hang (vite)
