@@ -3,7 +3,10 @@
 ## Goal
 
 The work in flight now: a passing Nightly, fixes for the `release` line, the
-quest merge driver, local reviews, CI cost and latency, and test flakes.
+quest merge driver, local reviews, CI cost and latency, test flakes, and
+replacing the catalog's HLS records with a declared segment grid. That last
+one is a breaking catalog and API change, pulled ahead of m1's other planned
+format changes; it lands on `main` and ships with the next cut.
 
 ## Plan
 
@@ -17,6 +20,10 @@ Routing: Wildcard landed in #4403, so a service claims the prefix it could
 serve instead of enumerating broadcasts. Serving the relay's ingested-only
 view (`origin::Consumer::local()`) to localhost workers belongs to moq.pro's
 edge, which embeds moq-relay; it moved there on 2026-09-28.
+
+The [HLS grid](/quest/m0/hls-media-grid.md) quest is the one breaking change
+here (maintainer, 2026-11-02): it moved out of m1's time-addressing chain,
+since cutting segments from first-frame pts waits on nothing in m1.
 
 ## Required
 
