@@ -3638,28 +3638,22 @@ impl Subscriber {
 						_ => false,
 					};
 					let ranges = if bounds != sent_bounds {
-						let mut join = if Filter::is_draft20(self.version) {
-							match subscribe_join(bounds.0, bounds.1, self.version) {
-								Ok(join) => join,
-								Err(err) => return Poll::Ready(End::Invalid(err)),
-							}
-						} else {
-							Join {
-								filter: match bounds {
-									(None | Some(0), None) => Filter::Unfiltered,
-									(start, end) => Filter::Absolute {
-										start: ietf::Location {
-											group: start.unwrap_or(0),
-											object: 0,
-										},
-										end: end
-											.and_then(|end| end.checked_sub(1))
-											.map(|group| ietf::EndLocation { group, object: None }),
+						// Widen from the requested group bounds, not a fresh Next Object edge:
+						// that would cut the unread tail of a group already in flight.
+						let mut join = Join {
+							filter: match bounds {
+								(None | Some(0), None) => Filter::Unfiltered,
+								(start, end) => Filter::Absolute {
+									start: ietf::Location {
+										group: start.unwrap_or(0),
+										object: 0,
 									},
+									end: end
+										.and_then(|end| end.checked_sub(1))
+										.map(|group| ietf::EndLocation { group, object: None }),
 								},
-								fill: None,
-								fetch: false,
-							}
+							},
+							..Default::default()
 						};
 						if widened && Filter::is_draft20(self.version) {
 							join.fill = Some(ietf::Fill {
@@ -3670,8 +3664,6 @@ impl Subscriber {
 								group_order: Some(GroupOrder::Ascending),
 								range_filters: false,
 							});
-						} else {
-							join.fill = None;
 						}
 						Some(join)
 					} else {
@@ -16605,6 +16597,44 @@ mod new_group_tests {
 		assert!(msg.fill.is_some(), "the widening superseded the unidentified fill");
 		assert!(matches!(*fill.read(), Fill::Done), "the old request was retired");
 		relay.serving.abort();
+	}
+
+	/// Widening to an open start must retain the objects already being streamed. Next
+	/// Object would snapshot a later edge and cut that stream before its tail arrives.
+	#[kio::test]
+	async fn widening_to_an_open_start_does_not_rejoin_at_the_next_object() {
+		for end in [None, Some(7)] {
+			let (mut relay, mut first) = relay().await;
+			let (mut stream, _) = relay.accept().await;
+			accept(&mut stream, false, 5).await;
+
+			first.update(track::Subscription::default().with_range(6..)).unwrap();
+			let _ = read(&mut stream).await;
+			answer(&mut stream).await;
+
+			let wanted = track::Subscription::default();
+			let wanted = match end {
+				Some(end) => wanted.with_range(..end),
+				None => wanted,
+			};
+			first.update(wanted).unwrap();
+			let (id, body) = read(&mut stream).await;
+			assert_eq!(id, ietf::SubscribeUpdate::ID);
+			let msg = ietf::SubscribeUpdate::decode_msg(&mut body.decoder(VERSION), VERSION).unwrap();
+			let expected = match end {
+				None => ietf::Filter::Unfiltered,
+				Some(end) => ietf::Filter::Absolute {
+					start: ietf::Location { group: 0, object: 0 },
+					end: Some(ietf::EndLocation {
+						group: end - 1,
+						object: None,
+					}),
+				},
+			};
+			assert_eq!(msg.filter, Some(expected));
+			assert_eq!(msg.fill.unwrap().filter, Some(ietf::Filter::Relative(1)));
+			relay.serving.abort();
+		}
 	}
 
 	/// Delayed headers, including one already waiting for REQUEST_OK, belong to the
