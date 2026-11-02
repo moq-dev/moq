@@ -16,17 +16,18 @@
 //! groups have a `_cpu` suffix. Cache-clock advancement remains outside both clocks.
 //! `session_delivery_group_cost` sweeps publishers and viewers independently for SUBSCRIBE
 //! and FETCH; its constrained cases release held streams only after a real blocked write.
-//! A one-relay FETCH fixture asserts one upstream FETCH per run during setup: one group on
-//! moq-lite, a whole burst on moq-transport.
-//! `session_delivery_fetch_range` FETCHes a burst of missing groups at once, swept over its
-//! length, so a relay fills each run with one moq-transport FETCH.
+//! A one-relay FETCH fixture asserts one upstream FETCH per group during setup.
+//! `session_delivery_fetch_range` FETCHes missing groups independently, swept over burst length.
 //! `session_range_updates` widens established draft-22 subscriptions over a fresh cached
-//! burst, swept over burst length and concurrent requests. Narrowing and writing the
-//! next burst happen outside timing; the update and every filled group count.
+//! burst's largest group, swept over burst length and concurrent requests. Narrowing and
+//! writing the next burst happen outside timing; the update and largest-group fill count.
 //! `session_delivery_credit` grants a viewer one uni stream at a time, swept over its
 //! subscriptions and the backlog each holds, so every group waits for a stream grant. A
 //! publisher that parks state per backlogged group pays for it on each grant, which shows
 //! as a slope over the backlog.
+//! `session_delivery_prefixes` holds silent broadcasts open on one viewer session beside the
+//! one it watches, against a fixed route table. Each is an announce request the session
+//! keeps, so a per-group cost that grows with them shows as a slope over `follow`.
 //! `SESSION_EXPIRY_ONLY=1` uses the standalone 30s-expiry pool and reports groups
 //! written plus charged cache bytes every 10s during long profiling runs. Each round
 //! advances the cache clock by a second, so the expiry window spans 30 rounds.
@@ -47,7 +48,13 @@
 //! holds others open, swept over sessions and requests held per session, so a slope
 //! here is per-request bookkeeping growing with the sessions or the requests.
 //!
-//! Everything runs on one current-thread runtime, so the only work measured is
+//! `session_fanout_threads` serves one broadcast's one-frame groups through one relay to 64
+//! viewers on multi-threaded runtimes, timed in process CPU. Each group wakes every
+//! subscription's serve task at once, so a read path that makes them take one shared lock
+//! many times pays for it in lock waits and wakes across workers: the `workers=16` rows
+//! climb above the `workers=1` ones.
+//!
+//! Everything else runs on one current-thread runtime, so the only work measured is
 //! protocol and relay work, never scheduling across threads.
 //!
 //! Run with `cargo bench -p moq-net --features fuzz --bench session`.
@@ -121,6 +128,9 @@ struct Shape {
 	viewers: usize,
 	/// Broadcasts each viewer subscribes to.
 	watch: usize,
+	/// Further broadcasts each viewer watches the announcements of without subscribing,
+	/// each keeping one more announce request open on its session.
+	follow: usize,
 	/// Payload bytes per frame.
 	frame: usize,
 	/// Frames in a complete group.
@@ -138,8 +148,7 @@ struct Shape {
 	credit: Option<usize>,
 	/// Publish compressed groups and exercise negotiated versus plain fallback egress.
 	compress: bool,
-	/// Read each group via a fresh FETCH rather than a live subscription, a burst's groups
-	/// at once so the relays can fill them as one run.
+	/// Read each group via a fresh FETCH rather than a live subscription.
 	fetch: bool,
 }
 
@@ -152,6 +161,7 @@ impl Shape {
 		broadcasts: 1,
 		viewers: 16,
 		watch: 1,
+		follow: 0,
 		frame: 64,
 		group_frames: FRAMES,
 		paced: false,
@@ -188,6 +198,9 @@ impl Shape {
 		// 100-character title limit, which truncates and renumbers it.
 		if let Some(credit) = self.credit {
 			return format!("{version}/watch={}/burst={}/credit={credit}", self.watch, self.burst);
+		}
+		if self.follow > 0 {
+			return format!("{version}/broadcasts={}/follow={}", self.broadcasts, self.follow);
 		}
 		if self.fetch && self.burst > 1 {
 			return format!(
@@ -276,40 +289,64 @@ fn runtime() -> tokio::runtime::Runtime {
 		.unwrap()
 }
 
-/// One round's clock; the CPU variant excludes scheduling delays from other processes.
+/// A multi-threaded runtime with `workers` threads, for the scenarios timed in process CPU.
+fn threaded(workers: usize) -> tokio::runtime::Runtime {
+	tokio::runtime::Builder::new_multi_thread()
+		.worker_threads(workers)
+		.enable_time()
+		.build()
+		.unwrap()
+}
+
+/// What a round is timed in.
+#[derive(Clone, Copy)]
+enum Clock {
+	Wall,
+	/// This thread's CPU time, excluding scheduling delays from other processes.
+	Thread,
+	/// Every thread's CPU time, for a multi-threaded runtime: lock waits and wakes across
+	/// its workers count too.
+	Process,
+}
+
+/// One round's clock.
 enum MeasurementClock {
 	Wall(Instant),
 	#[cfg(unix)]
-	Cpu(Duration),
+	Cpu(libc::clockid_t, Duration),
 }
 
 impl MeasurementClock {
-	fn start(cpu: bool) -> Self {
-		if cpu {
-			#[cfg(unix)]
-			return Self::Cpu(Self::cpu());
-			#[cfg(not(unix))]
-			panic!("SESSION_CPU requires Unix thread CPU clocks");
+	fn start(clock: Clock) -> Self {
+		#[cfg(unix)]
+		let id = match clock {
+			Clock::Wall => return Self::Wall(Instant::now()),
+			Clock::Thread => libc::CLOCK_THREAD_CPUTIME_ID,
+			Clock::Process => libc::CLOCK_PROCESS_CPUTIME_ID,
+		};
+		#[cfg(unix)]
+		return Self::Cpu(id, Self::cpu(id));
+		#[cfg(not(unix))]
+		match clock {
+			Clock::Wall => Self::Wall(Instant::now()),
+			_ => panic!("CPU-timed rounds require Unix CPU clocks"),
 		}
-		Self::Wall(Instant::now())
 	}
 
 	fn elapsed(self) -> Duration {
 		match self {
 			Self::Wall(start) => start.elapsed(),
 			#[cfg(unix)]
-			Self::Cpu(start) => Self::cpu()
-				.checked_sub(start)
-				.expect("thread CPU clock moved backwards"),
+			Self::Cpu(id, start) => Self::cpu(id).checked_sub(start).expect("CPU clock moved backwards"),
 		}
 	}
 
 	#[cfg(unix)]
-	fn cpu() -> Duration {
+	fn cpu(id: libc::clockid_t) -> Duration {
 		let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
 		// SAFETY: `time` is a valid, initialized output pointer for this supported clock.
-		let result = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) };
-		assert_eq!(result, 0, "thread CPU clock: {}", std::io::Error::last_os_error());
+		let result = unsafe { libc::clock_gettime(id, &mut time) };
+		assert_eq!(result, 0, "CPU clock: {}", std::io::Error::last_os_error());
 		Duration::new(
 			u64::try_from(time.tv_sec).unwrap(),
 			u32::try_from(time.tv_nsec).unwrap(),
@@ -414,6 +451,8 @@ struct Cluster<B: Backend> {
 	version: Version,
 	window: usize,
 	credit: Option<usize>,
+	/// Whether each viewer asks its relay about everything, rather than only what it reads.
+	discovers_all: bool,
 	relays: Vec<B::Relay>,
 	/// One track per broadcast, indexed like [`path`].
 	tracks: Vec<track::Producer>,
@@ -431,6 +470,8 @@ impl<B: Backend> Cluster<B> {
 			version: version.parse().unwrap(),
 			window: shape.window,
 			credit: shape.credit,
+			// Asking about everything would cover every followed broadcast with one request.
+			discovers_all: shape.follow == 0,
 			relays: Vec::new(),
 			tracks: Vec::new(),
 			_broadcasts: Vec::new(),
@@ -506,12 +547,14 @@ impl<B: Backend> Cluster<B> {
 		// Draft 22, the one IETF version here, keeps its SETUP stream open beside the groups.
 		options.transport.max_concurrent_uni_streams =
 			self.credit.map(|credit| credit + usize::from(!self.version.is_lite()));
+		options.client_discovers_all = self.discovers_all;
 		// Hidden included, as the dash's `.stats/` scope sees its subtree.
 		options.server_publish = Some(B::origin(&self.relays[relay]).consume().with_hidden(true));
 		options.client_subscribe = Some(origin.clone());
 		let pair = B::connect(options, &self.relays[relay], hidden).await;
 
 		Viewer {
+			following: Vec::new(),
 			subscribers: Vec::new(),
 			fetches: Vec::new(),
 			blocked: 0,
@@ -523,6 +566,8 @@ impl<B: Backend> Cluster<B> {
 }
 
 struct Viewer {
+	/// Announcements watched without a subscription, one announce request each.
+	following: Vec<moq_net::announce::Consumer>,
 	subscribers: Vec<track::Subscriber>,
 	fetches: Vec<(usize, track::Consumer)>,
 	blocked: usize,
@@ -532,6 +577,19 @@ struct Viewer {
 }
 
 impl Viewer {
+	/// Watch the announcements under `path` until it is announced, subscribing to nothing.
+	async fn follow(&mut self, path: &str) {
+		let mut announced = self
+			.origin
+			.consume()
+			.scope(path, &moq_net::Patterns::from(moq_net::Pattern::all()))
+			.unwrap()
+			.announced();
+		let event = announced.next().await.expect("announced");
+		assert!(matches!(event, moq_net::announce::Event::Start(_)), "{event:?}");
+		self.following.push(announced);
+	}
+
 	/// Resolve `path` and subscribe to each of its `tracks`.
 	async fn watch(&mut self, path: &str, tracks: &[impl AsRef<str>], subscription: Option<track::Subscription>) {
 		let broadcast = self
@@ -572,14 +630,14 @@ struct Room<B: Backend> {
 	/// The group each viewer's subscriber is reading, when paced, flattened in viewer order.
 	reading: Vec<Option<group::Consumer>>,
 	cache_now: moq_net::time::Instant,
-	cpu: bool,
+	clock: Clock,
 }
 
 impl<B: Backend> Room<B> {
 	async fn new(version: &str, shape: Shape) -> Self {
 		assert!(
-			shape.watch <= shape.total(),
-			"a viewer can't watch more broadcasts than exist"
+			shape.watch + shape.follow <= shape.total(),
+			"a viewer can't watch or follow more broadcasts than exist"
 		);
 		assert!(!shape.paced || shape.burst == 1, "a paced round writes one frame");
 		assert!(!shape.fetch || !shape.paced, "fetch rounds read finished groups");
@@ -589,16 +647,16 @@ impl<B: Backend> Room<B> {
 		// spread over the broadcasts before any doubles up.
 		let mut viewers = Vec::new();
 		let mut watched = vec![false; shape.total()];
-		for viewer in 0..shape.viewers {
+		for viewer_index in 0..shape.viewers {
 			let broadcasts: Vec<_> = (0..shape.watch)
-				.map(|k| (viewer * shape.watch + k) % shape.total())
+				.map(|k| (viewer_index * shape.watch + k) % shape.total())
 				.collect();
 			for &broadcast in &broadcasts {
 				watched[broadcast] = true;
 			}
 			// Offset by one so a viewer lands on a different relay than the
 			// publisher it watches whenever there is more than one.
-			let mut viewer = cluster.join((viewer + 1) % shape.relays, false).await;
+			let mut viewer = cluster.join((viewer_index + 1) % shape.relays, false).await;
 			for broadcast in broadcasts {
 				if shape.fetch {
 					let source = viewer
@@ -613,6 +671,12 @@ impl<B: Backend> Room<B> {
 				} else {
 					viewer.watch(&path(broadcast), &[TRACK], shape.subscription()).await;
 				}
+			}
+			// The followed broadcasts sit just past the watched window, so they stay silent.
+			for k in 0..shape.follow {
+				viewer
+					.follow(&path((viewer_index * shape.watch + shape.watch + k) % shape.total()))
+					.await;
 			}
 			viewers.push(viewer);
 		}
@@ -633,7 +697,10 @@ impl<B: Backend> Room<B> {
 			writing: Vec::new(),
 			reading: Vec::new(),
 			cache_now: moq_net::time::Instant::now(),
-			cpu: std::env::var_os("SESSION_CPU").is_some(),
+			clock: match std::env::var_os("SESSION_CPU") {
+				Some(_) => Clock::Thread,
+				None => Clock::Wall,
+			},
 		};
 		room.writing.resize_with(room.watched.len(), || None);
 		room.reading.resize_with(shape.viewers * shape.watch, || None);
@@ -677,12 +744,8 @@ impl<B: Backend> Room<B> {
 			);
 		}
 		if shape.fetch && shape.relays == 1 {
-			// A lite FETCH (stream type 3) names one group; a moq-transport FETCH (type 0x16)
-			// a whole run. Both types encode in one byte.
-			let (kind, run) = match room.cluster.version.is_lite() {
-				true => (3, 1),
-				false => (0x16, shape.burst),
-			};
+			// Both FETCH types encode in one byte and every request names one group.
+			let kind = if room.cluster.version.is_lite() { 3 } else { 0x16 };
 			let upstream_fetches = room
 				.cluster
 				._pairs
@@ -695,7 +758,7 @@ impl<B: Backend> Room<B> {
 						.count()
 				})
 				.sum::<usize>();
-			assert_eq!(upstream_fetches, room.groups / run, "one upstream FETCH per run");
+			assert_eq!(upstream_fetches, room.groups, "one upstream FETCH per group");
 		}
 		room
 	}
@@ -737,7 +800,7 @@ impl<B: Backend> Room<B> {
 			}
 		}
 		let mut bytes = 0;
-		// A fetching viewer asks for a burst's groups at once; a subscription reads them
+		// A fetching viewer asks for each group independently; a subscription reads them
 		// round-robin, so no subscription's backlog waits on another's being read.
 		let passes = if self.shape.fetch { 1 } else { self.shape.burst };
 		let burst = self.shape.burst as u64;
@@ -748,15 +811,6 @@ impl<B: Backend> Room<B> {
 					let mut bytes = 0;
 					for (broadcast, track) in &viewer.fetches {
 						let newest = newest[*broadcast];
-						// A burst is one span, as a downstream range FETCH asks for it.
-						let _filled = match burst {
-							1 => None,
-							_ => Some(
-								moq_net::fuzz::fill_groups(track, newest + 1 - burst..newest + 1)
-									.await
-									.unwrap(),
-							),
-						};
 						for sequence in newest + 1 - burst..=newest {
 							let mut group = track.fetch_group(sequence, None).await.unwrap();
 							while let Some(frame) = group.read_frame().await.unwrap() {
@@ -827,7 +881,7 @@ impl<B: Backend> Room<B> {
 		let mut next_report = Duration::from_secs(10);
 		for _ in 0..iters {
 			self.tick();
-			let start = MeasurementClock::start(self.cpu);
+			let start = MeasurementClock::start(self.clock);
 			self.round().await;
 			elapsed += start.elapsed();
 			if report && began.elapsed() >= next_report {
@@ -908,7 +962,7 @@ pub(crate) fn fetch_frames<B: Backend>(c: &mut Criterion) {
 	delivery::<B>(c, "fetch_frames", shapes);
 }
 
-/// Missing runs FETCHed at once across independent publishers, viewers, and run lengths.
+/// Independent one-group FETCHes across publishers, viewers, and burst lengths.
 pub(crate) fn fetch_range<B: Backend>(c: &mut Criterion) {
 	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
 		return;
@@ -927,7 +981,7 @@ pub(crate) fn fetch_range<B: Backend>(c: &mut Criterion) {
 	delivery::<B>(c, "fetch_range", shapes);
 }
 
-/// Range updates and their fill streams, over groups per fill and concurrent requests.
+/// Largest-group fills, over cached backlog and concurrent requests.
 pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 	if std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some() {
 		return;
@@ -937,7 +991,7 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 	group.sample_size(10);
 	for span in [2u64, 16] {
 		for requests in [1usize, 16] {
-			group.throughput(Throughput::Elements(span * requests as u64));
+			group.throughput(Throughput::Elements(requests as u64));
 			group.bench_function(BenchmarkId::new(format!("groups_{span}"), requests), |b| {
 				let (mut cluster, mut viewers) = rt.block_on(async {
 					let mut cluster = Cluster::<B>::new(
@@ -996,10 +1050,14 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							let started = Instant::now();
 							for viewer in &mut viewers {
 								viewer.subscribers[0]
-									.update(track::Subscription::default().with_range(next..).with_max_delay(None))
+									.update(
+										track::Subscription::default()
+											.with_range(future - 1..)
+											.with_max_delay(None),
+									)
 									.unwrap();
 							}
-							for _ in 0..span {
+							for _ in 0..1 {
 								for viewer in &mut viewers {
 									assert_eq!(read_group(&mut viewer.subscribers[0]).await, payload.len());
 								}
@@ -1384,10 +1442,46 @@ impl IdleRoom {
 	async fn measure(&self, iters: u64) -> Duration {
 		let start = Instant::now();
 		for _ in 0..iters {
-			moq_clock::sleep(Duration::from_secs(1)).await;
+			kio::clock::sleep(Duration::from_secs(1)).await;
 		}
 		start.elapsed()
 	}
+}
+
+/// One relay serving one broadcast's one-frame groups to 64 viewers, as the relay load
+/// harness's `fanout` workload does, on multi-threaded runtimes timed in process CPU; see
+/// the module docs.
+pub(crate) fn fanout_threads<B: Backend>(c: &mut Criterion) {
+	// Process CPU is read through a Unix clock.
+	if !cfg!(unix) || std::env::var_os("SESSION_ALLOCS").is_some() || std::env::var_os("SESSION_EXPIRY_ONLY").is_some()
+	{
+		return;
+	}
+	let shape = Shape {
+		publishers: 1,
+		viewers: 64,
+		frame: 400,
+		group_frames: 1,
+		..Shape::BASE
+	};
+	let mut group = c.benchmark_group(format!("{}session_fanout_threads", B::PREFIX));
+	// Groups delivered per round: one to each viewer.
+	group.throughput(Throughput::Elements(shape.viewers as u64));
+	for workers in [1, 16] {
+		let rt = threaded(workers);
+		for version in ["moq-lite-06", "moq-lite-07-wip"] {
+			let mut room = None;
+			group.bench_function(format!("{version}/workers={workers}"), |b| {
+				let room = room.get_or_insert_with(|| {
+					let mut room = rt.block_on(Room::<B>::new(version, shape));
+					room.clock = Clock::Process;
+					room
+				});
+				b.iter_custom(|iters| rt.block_on(room.measure(iters)))
+			});
+		}
+	}
+	group.finish();
 }
 
 pub(crate) fn idle(c: &mut Criterion) {
@@ -1443,7 +1537,7 @@ pub(crate) fn withdrawal<B: Backend>(c: &mut Criterion) {
 										.unwrap()
 								})
 								.collect();
-							while moq_clock::timeout(Duration::from_secs(1), announced.next())
+							while kio::clock::timeout(Duration::from_secs(1), announced.next())
 								.await
 								.is_ok()
 							{}
@@ -1451,7 +1545,7 @@ pub(crate) fn withdrawal<B: Backend>(c: &mut Criterion) {
 							drop(live);
 							let mut retracted = 0;
 							while let Ok(Some(event)) =
-								moq_clock::timeout(Duration::from_secs(1), announced.next()).await
+								kio::clock::timeout(Duration::from_secs(1), announced.next()).await
 							{
 								assert!(matches!(event, moq_net::announce::Event::End(_)), "{event:?}");
 								retracted += 1;
@@ -1533,6 +1627,20 @@ pub(crate) fn session<B: Backend>(c: &mut Criterion) {
 			publishers: 1,
 			broadcasts: 256,
 			watch,
+			..base
+		}),
+	);
+	// One viewer session holding many silent broadcasts open beside the one it watches:
+	// each is an announce request on the session, against a fixed route table. A wake
+	// for the watched group should not cost a poll per held request.
+	delivery::<B>(
+		c,
+		"prefixes",
+		[1, 64, 1024].map(|follow| Shape {
+			publishers: 1,
+			broadcasts: 1025,
+			viewers: 1,
+			follow,
 			..base
 		}),
 	);

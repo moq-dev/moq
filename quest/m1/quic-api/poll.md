@@ -1,4 +1,4 @@
-# [S] The QUIC drivers' waits poll
+# [M] The QUIC drivers' waits poll
 
 ## Goal
 
@@ -56,6 +56,25 @@ that now). The `Connecting` handshake, `Endpoint::wait_idle`, and
 until a caller needs one. Report the public API:
 new poll methods on `Connection`, `send::Stream` and `Endpoint`, with the
 async forms unchanged.
+
+Added 2026-11-01 (maintainer, follow-up planning after the 2026-11-01
+/quest-afk run), from [moq-dev/moq#7490](https://github.com/moq-dev/moq/pull/7490),
+which finishes [waits](/quest/m1/quic-api/waits.md):
+
+- **Remove `ShouldTransmit`.** Once moq-quic wakes the transmit waiter itself,
+  the `ShouldTransmit` that `Chunks::finalize` and the send lease methods
+  (`lease`, `poll_lease`, `restore`, `release` in
+  `rs/moq-quic/src/connection/streams/lease.rs`) return is ignored by every
+  consumer. Drop it from moq-quic's public API and its callers, as part of
+  this reshape, since moq-quic is unreleased.
+- **Test moq-tokio's close while the socket is blocked.** moq-tokio's driver
+  skips `poll_transmit` while the socket holds output back, so a local close
+  could not re-arm the closing period's timer; #7490's round 1 fixed it by
+  also parking the driver on the non-consuming `poll_closed`. No driver test
+  has a socket that holds sends back, so nothing covers it.
+  Add one (a test socket whose sends return `WouldBlock` until released) and
+  a test that a close behind it is still bounded, mirroring qmux's
+  `a_close_behind_a_stalled_peer_is_bounded`.
 
 ## Required
 

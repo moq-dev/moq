@@ -1,9 +1,9 @@
 import { expect, spyOn, test } from "bun:test";
-import { type Micro, Milli, Nano, now } from "@moq/clock";
+import { type Micro, Milli, Nano, now, yieldNow } from "@moq/clock";
 import { Container } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Time } from "@moq/net";
-import { Effect, Signal } from "@moq/signals";
+import { Derived, Effect, Signal } from "@moq/signals";
 import { nextMedia, subscribeMedia } from "./media";
 import { Sync } from "./sync";
 
@@ -60,7 +60,7 @@ async function pendingListeners(run: () => Promise<void>): Promise<number> {
 test("waits on a stable clock leave nothing behind", async () => {
 	const sync = new Sync({ delay: Milli(10) });
 	// Let the delay effect run before anchoring.
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	sync.received(Nano.toMilli(Nano(now())));
 
 	const wait = async () => {
@@ -94,7 +94,10 @@ test("a long subscription through the player path leaves nothing behind", async 
 		maxDelay: sync.out.maxDelay,
 	});
 	if (!sub) throw new Error("no subscription");
-	const consumer = new Container.Consumer(sub, { format, maxDelay: sync.out.maxDelay });
+	const consumer = new Container.Consumer(sub, {
+		format,
+		delay: new Derived([sync.out.maxDelay], (max) => ({ max })),
+	});
 
 	// Presentations overlap, as a decoder's outputs do, so the clock's sleeps are shared.
 	const presenting = new Set<Promise<unknown>>();

@@ -174,7 +174,7 @@ impl Driver {
 	pub async fn run(self) {
 		let status = self.status.clone();
 		let result = tokio::select! {
-			_ = status.unused() => return,
+			_ = status.wanted_changed(true) => return,
 			result = self.produce() => result,
 		};
 		let status = match result {

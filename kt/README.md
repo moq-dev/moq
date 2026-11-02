@@ -31,17 +31,19 @@ import kotlinx.coroutines.flow.collect
 // connect() wires up an internal origin and returns a live connection.
 Moq.connect("https://relay.example.com").use { moq ->
     moq.announced(AnnounceConfig(prefix = "demos/", filter = "*/camera")).updates().collect { event ->
-        // A restart is a new publisher run at the same path: request it again.
+        // A restart is a new publisher run at the same path: request it again. A takeover
+        // continues what an earlier route served, like a start.
         val announce = when (event) {
             is AnnounceEventStart -> event.announce
             is AnnounceEventRestart -> event.announce
+            is AnnounceEventTakeover -> event.announce
             else -> return@collect // Update or End
         }
         // Prefix stays origin-relative; captures reports what * matched.
         println("got broadcast ${announce.prefix}")
         println("captures ${announce.captures}")
 
-        val catalog = dev.moq.media.catalog(moq.requestBroadcast(announce.prefix))
+        val catalog = dev.moq.media.catalog(moq.request(announce.prefix))
         println("catalog: $catalog")
     }
 }
@@ -58,9 +60,9 @@ The `dev.moq` package is intentionally thin: Kotlin has extension functions, so 
 - **Flow extensions** (`Flows.kt`): `updates()`, `groups()`, and `frames()` turn the pull-based consumers into coroutine `Flow`s with cancellation wired through.
 - **Media** (`dev.moq.media`): catalog, importers, and container consumers, with `catalog(broadcast)` for a one-shot catalog read and `frames()` for container-decoded media.
 - **Fetched media**: `dev.moq.media.GroupConsumer.fetch(...).frames()` streams the decoded frames of one retained group, then completes. `dev.moq.media.GroupConsumer(group, container)` decodes a raw group instead, such as one from `recvGroup()` for arrival-order reads.
-- **Timestamp extensions** (`Durations.kt`): the FFI carries media timestamps as microsecond integers, so `frame.timestamp` and its siblings read back as a `kotlin.time.Duration`. Durations such as `stats.rtt` are already `java.time.Duration`.
+- **Timestamp conversions** (`Timestamp.kt`): media timestamps are exact `Timestamp(value, scale)` records. `Duration.toTimestamp()` builds one exactly at nanosecond scale, and `Timestamp.toDuration()` reads one back as a `kotlin.time.Duration`, rounded down to a whole nanosecond. Durations such as `stats.rtt` are already `java.time.Duration`.
 - **`logLevel(...)`**: configures native Rust tracing without importing the raw bindings package.
-- **Raw datagrams**: `TrackProducer.appendDatagram(Frame(payload, timestampUs))` sends one best-effort frame and returns its sequence; `TrackConsumer.recvDatagram()` and `datagrams()` receive them. Payloads are capped at 1200 bytes, require a datagram-capable transport plus lite-05 or newer moq-lite or moq-transport, and have no stream fallback.
+- **Raw datagrams**: `TrackProducer.appendDatagram(Frame(payload, timestamp))` sends one best-effort frame and returns its sequence, and `insertDatagram(sequence, frame)` takes the caller's own; `TrackConsumer.recvDatagram()` and `datagrams()` receive them. Payloads are capped at 1200 bytes, require a datagram-capable transport plus lite-05 or newer moq-lite or moq-transport, and have no stream fallback.
 - **`MoqException.isShutdown`** (`Errors.kt`): true for the graceful `Cancelled`/`Closed` cases.
 
 ## Versioning
@@ -95,7 +97,7 @@ kt/
   moq/
     build.gradle.kts        Pure-Kotlin wrapper; coordinates dev.moq:moq
     src/
-      jvmAndAndroidMain/kotlin/dev/moq/ Wrapper sources (Moq, Server, Aliases, Flows, Durations, Errors)
+      jvmAndAndroidMain/kotlin/dev/moq/ Wrapper sources (Moq, Server, Aliases, Flows, Timestamp, Errors)
       jvmAndAndroidTest/                Facade smoke test
 ```
 

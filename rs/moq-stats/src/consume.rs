@@ -164,7 +164,8 @@ mod tests {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
@@ -179,11 +180,11 @@ mod tests {
 
 	fn test_producer() -> (Producer, origin::Producer) {
 		let origin = produce_origin();
-		let producer = Producer::new(
+		let producer = crate::produce::spawned(Producer::new(
 			produce::Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::from_static("sjc")),
-		);
+		));
 		(producer, origin)
 	}
 

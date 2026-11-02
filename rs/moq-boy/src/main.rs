@@ -25,7 +25,7 @@
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Decoder outputs take a `Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`audio.DecoderOutput` replaces `maxDelay` and the playout `delay: Duration?` with `delay: media.Delay?` and `estimate: bool = true`.
+`video.DecoderOutput.maxDelay` is `delay: media.Delay?`.
+`Delay(min: ..., max: ...)`: `max` (null for no limit) is the old `maxDelay`, and `min` is the playout delay, where a cold join starts.
+A fixed audio playout delay `d` is `delay: Delay(min: d, max: ...)` with `estimate: false`.
+
 ### Compression moves to the track
 
 `package:moq/flate.dart` is removed: publish opaque bytes on a `TrackProducer`.
@@ -31,7 +38,7 @@ Their handles `OriginDynamic`, `BroadcastDynamic`, and `TrackDynamic` are `Origi
 
 The records carry durations as `Duration` fields instead of `*Us` microsecond integers, so the duration extension getters are gone: read `backoff.initial`, `stats.rtt`, `grant.expires`, `info.maxAge`, `fill.maxDelay()`, and `consumer.delay()` directly.
 `audio.EncoderOutput.frameDuration` is nullable: pass null where you passed `frameDurationUs: 0` for the codec's own frame.
-`Subscription.maxDelay` has no default, so a `MoqSubscription()` that omits it gets no staleness limit instead of moq-net's 0: pass `Duration.zero` for the old default.
+`Subscription.maxDelay` defaults to null, so a `Subscription()` that omits it gets no staleness limit instead of moq-net's 0: start from `defaultSubscription()`, or pass `maxDelay: Duration.zero`, for the old default.
 A negative `Duration` throws `ArgumentError` wherever it crosses into the native library.
 
 ### Connection state

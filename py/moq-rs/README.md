@@ -29,11 +29,12 @@ import moq
 async def main():
     async with moq.connect("https://cdn.moq.dev/anon") as client:
         async for event in client.announced():
-            # A restart is a new publisher run at the same path: request it again.
-            if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart)):
+            # A restart is a new publisher run at the same path: request it again. A
+            # takeover continues what an earlier route served, like a start.
+            if not isinstance(event, (moq.AnnounceEventStart, moq.AnnounceEventRestart, moq.AnnounceEventTakeover)):
                 continue  # AnnounceEventUpdate or AnnounceEventEnd
             # A route covers a prefix and carries no broadcast, so resolve the path.
-            broadcast = await client.request_broadcast(event.announce.prefix)
+            broadcast = await client.request(event.announce.prefix)
             catalog = await moq.media.catalog(broadcast)
 
             for id, audio in catalog.audio.items():
@@ -53,7 +54,6 @@ asyncio.run(main())
 
 ```python
 import asyncio
-from datetime import timedelta
 import moq
 
 
@@ -69,9 +69,9 @@ async def main():
 
         # Write frames
         # Audio has no keyframes, so `cut` is what gives it group boundaries.
-        audio.write_frame(payload, timestamp=timedelta(0))
+        audio.write_frame(payload, timestamp=moq.Timestamp(0, 1_000))
         audio.cut()
-        audio.write_frame(payload, timestamp=timedelta(milliseconds=20))
+        audio.write_frame(payload, timestamp=moq.Timestamp(20, 1_000))
         audio.cut()
 
         # A fresh epoch per run tells viewers a restart is a new broadcast.
@@ -142,7 +142,7 @@ client = moq.Client(
     - `fingerprints`. Hex SHA-256 fingerprint(s) to pin the peer's certificate to, the native equivalent of `serverCertificateHashes`. Accepts the values a server reports via `cert_fingerprints()`, so you can trust a self-signed certificate without `insecure=True`.
     - `cert`, `key`. Paired PEM certificate chain and private key paths for mTLS.
     - `host_name`. Verify the certificate against this name (SNI) instead of the URL's host.
-  - `quic=QuicConfig(...)`. QUIC tuning: `max_streams` raises the peer's inbound stream cap; `idle_timeout`, `keep_alive` (`timedelta(0)` disables pings), `gso`, `mtu_discovery`, `congestion_control` (a `CongestionControl`), and `qlog` (a trace directory when `qlog_supported()`). `keylog=True` writes TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` the client refuses to build.
+  - `quic=QuicConfig(...)`. QUIC tuning: `max_streams` raises the peer's inbound stream cap; `idle_timeout`, `keep_alive` (`timedelta(0)` uses the default), `gso`, `mtu_discovery`, `congestion_control` (a `CongestionControl`), and `qlog` (a trace directory when `qlog_supported()`). `keylog=True` writes TLS session secrets to the file `SSLKEYLOGFILE` names, for decrypting a capture; without `SSLKEYLOGFILE` the client refuses to build.
   - `websocket=WebSocketConfig(...)`. The fallback raced against QUIC: `enabled=False` turns it off, and `delay` is QUIC's head start.
   - `once`, `backoff`. Redial with a `Backoff` when the transport drops; `once=True` dials once.
   - `.session`. The connecting or connected `Session` (or `None` before entering / after exit).
@@ -183,6 +183,8 @@ client = moq.Client(
   - `.finish_at(final_sequence)` declares the first group that will never be produced while leaving lower groups writable.
   - `.abort(error_code)` terminates the track or group with an application error.
   - `.append_datagram(payload, timestamp=None) -> sequence` (`TrackProducer`) sends a best-effort datagram. Payloads are capped at 1200 bytes and there is no stream fallback.
+  - `.insert_datagram(sequence, payload, timestamp=None)` (`TrackProducer`) sends one at the caller's own sequence.
+  - `.largest() -> Position | None` (`TrackProducer`) reports the newest group or datagram written, at its newest frame.
 
 ### Media
 
@@ -200,7 +202,7 @@ client = moq.Client(
   and do not keep it open.
 - `media.CatalogProducer(broadcast)` owns `set_video_properties`, `set_section`, and
   `remove_section`. It holds the broadcast weakly; writes fail with `Error.Closed` after closing
-  or releasing the broadcast. `.now()` returns its current media time as `timedelta` and fixes
+  or releasing the broadcast. `.now()` returns its current media time as a `Timestamp` and fixes
   the clock for subsequent producers.
 - `await media.CatalogConsumer.subscribe(broadcast)` streams catalog snapshots;
   `await media.catalog(broadcast)` reads one snapshot and releases its subscription.
@@ -214,8 +216,8 @@ client = moq.Client(
   `TrackConsumer.recv_group()` for arrival-order reads, with container media time on each frame
   as it lands.
 
-`media.TrackProducer.write_frame(payload, timestamp)` requires the caller's capture time as
-`timedelta`; returned `media.MediaFrame.timestamp` uses it too. `demand()` owns the track name and
+`media.TrackProducer.write_frame(payload, timestamp)` requires the caller's capture time as a
+`Timestamp`; returned `media.MediaFrame.timestamp` uses it too. `demand()` owns the track name and
 subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()` ends the import.
 
 ### Data
@@ -245,7 +247,7 @@ same either way. Opaque bytes go on a plain `TrackProducer`.
 - **`GroupConsumer`**. Async iterator of raw `Frame`s.
   - `.read_frame() -> Frame | None` returns a raw frame with optional capture time.
 
-Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `AnnouncedBroadcast`) and the dynamic sources (`OriginRequests`, `BroadcastRequests`, `TrackRequests`).
+Every handle whose cleanup is `cancel()` is an async context manager, so exiting `async with` releases it: the consumers (`media.CatalogConsumer`, `media.TrackConsumer`, `media.GroupConsumer`, `TrackConsumer`, `audio.Consumer`, `video.Consumer`, `GroupConsumer`, `json.SnapshotConsumer`, `json.StreamConsumer`, `json.WindowConsumer`, `AnnounceConsumer`, `Following`) and the dynamic sources (`OriginRequests`, `BroadcastRequests`, `TrackRequests`).
 
 ### Origin (advanced)
 
@@ -260,16 +262,17 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - `await .requested_broadcast() → BroadcastRequest`. Call `.prepare(mint_epoch())`, fill its `.broadcast`, then `.publish() → Publication` to serve it under a new epoch, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
-  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, or `AnnounceEventRestart`, each carrying an `Announce` whose `.route.epoch` names the publisher run; on a restart, request the path again); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches
-  - `.announced_broadcast(path) → AnnouncedBroadcast` (awaitable, waits until something serves the path)
-  - `.request_broadcast(path) → BroadcastConsumer` (awaitable; owns discovery and resolves one instance, or raises once synced without a route)
+  - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, or `AnnounceEventTakeover`, each carrying an `Announce` whose `.route.epoch` names the publisher run; on a restart, request the path again; a takeover continues what the route at `.predecessor` served); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` reports wildcard matches
+  - `.follow(path, epoch=None) → Following` (awaitable, waits until something serves the path, then each instance that takes over; an `epoch` follows only that instance)
+  - `.request(path, epoch=None) → BroadcastConsumer` (awaitable; owns discovery and resolves one instance, or raises once synced without a route; an `epoch` refuses any other instance)
 
 ### Types
 
 - **`media.Catalog`**. `.audio: dict[str, Audio]`, `.video: dict[str, Video]`, `.display`, `.rotation`, `.flip`.
-- **`Frame`**. `.payload: bytes`, `.timestamp: timedelta | None`. The unit of every write and every raw read; `None` means untimed when publishing or reading.
-- **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: timedelta`, `.keyframe: bool`. The frame variant of a media read. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
-- **`Datagram`**. `.sequence: int`, `.timestamp: timedelta | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite, or moq-transport.
+- **`Timestamp`**. `.value: int` units at `.scale: int` units per second, exact at any scale such as 90 kHz. `Timestamp.from_timedelta(duration)` is exact at microsecond scale; `.to_timedelta()` rounds down to a whole microsecond. A write with a scale of 0 or past `2**62 - 1`, or a value past `2**61 - 1`, raises `Error.TimeOverflow`.
+- **`Frame`**. `.payload: bytes`, `.timestamp: Timestamp | None`. The unit of every write and every raw read; `None` means untimed when publishing or reading.
+- **`media.MediaFrame`**. `.payload: bytes`, `.timestamp: Timestamp`, `.keyframe: bool`. The frame variant of a media read. `keyframe` marks a group start or video keyframe; for audio it is true only at a group start.
+- **`Datagram`**. `.sequence: int`, `.timestamp: Timestamp | None`, `.payload: bytes`. Delivered only on datagram-capable transports with lite-05 or newer moq-lite, or moq-transport.
 - **`media.Audio`**. `.codec`, `.sample_rate`, `.channel_count`, `.bitrate`, `.enabled`, `.description`.
 - **`media.Video`**. `.codec`, `.coded: Dimensions`, `.display_aspect`, `.bitrate`, `.enabled`, `.framerate`, `.description`. A false `.enabled` means no frames are coming, so don't select the rendition.
 - **`Subscription`**. Subscriber delivery preferences: priority, staleness, and optional group range.

@@ -32,10 +32,11 @@ export function run(effect: Effect, announcing: Signal<boolean>, props: Props): 
 	effect.run((effect) => {
 		const mode = effect.get(props.mode);
 		const source = effect.get(props.source);
-		const video = effect.get(props.video.source) !== undefined;
-		const audio = effect.get(props.audio.source) !== undefined;
 		const videoEnabled = effect.get(props.video.enabled);
 		const audioEnabled = effect.get(props.audio.enabled);
+		// A muted or hidden track keeps capturing but publishes nothing, so it counts as absent.
+		const video = videoEnabled && effect.get(props.video.source) !== undefined;
+		const audio = audioEnabled && effect.get(props.audio.source) !== undefined;
 
 		// A camera captures video and audio as one publication, so it waits for every enabled track and
 		// denying either permission can't advertise a partial broadcast.
@@ -44,9 +45,7 @@ export function run(effect: Effect, announcing: Signal<boolean>, props: Props): 
 		const live = (video || audio) && ready;
 		const active = source !== undefined && (camera || live);
 
-		const settled =
-			(!videoEnabled || !video || !!effect.get(props.video.settled)) &&
-			(!audioEnabled || !audio || !!effect.get(props.audio.settled));
+		const settled = (!video || !!effect.get(props.video.settled)) && (!audio || !!effect.get(props.audio.settled));
 
 		const announced =
 			mode === "always" || (mode === "source" && active && (latched === source || (live && settled)));

@@ -30,6 +30,8 @@ pub(crate) mod priority;
 mod probe;
 #[cfg(feature = "async")]
 mod publisher;
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub use publisher::CoverageBench;
 #[cfg(feature = "async")]
 mod replay;
 #[cfg(feature = "async")]
@@ -65,6 +67,9 @@ pub use stream::*;
 pub use subscribe::*;
 #[cfg(feature = "async")]
 use subscriber::*;
+// The fuzz harness drives a group stream's ingest directly.
+#[cfg(all(feature = "async", any(test, feature = "fuzz")))]
+pub(crate) use subscriber::FrameIngest;
 pub use track::*;
 pub use tracks::*;
 pub use version::Version;

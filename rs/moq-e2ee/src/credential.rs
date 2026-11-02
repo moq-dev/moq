@@ -3,13 +3,13 @@
 use std::fmt;
 use std::sync::Arc;
 
-use aws_lc_rs::hkdf::{self, HKDF_SHA256};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bytes::Bytes;
+use rind::hkdf;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::generation;
 use crate::limits::{PATH_LABEL, PATH_LEN, PROFILE, SECRET_LEN, check_bytes, check_u53};
 use moq_net::Epoch;
@@ -50,16 +50,18 @@ impl fmt::Debug for Credential {
 }
 
 impl Credential {
-	/// Check the bounds and extract the HKDF PRK.
+	/// Check the CPU and bounds, then extract the HKDF PRK.
 	///
 	/// # Errors
 	///
-	/// [`Error::Identity`](crate::Error::Identity) if `context` exceeds 65535 bytes or `kid` exceeds `2^53-1`.
+	/// [`Error::Unsupported`] if this CPU lacks a feature the crypto needs.
+	/// [`Error::Identity`] if `context` exceeds 65535 bytes or `kid` exceeds `2^53-1`.
 	pub fn new(config: Config) -> Result<Self> {
+		rind::cpu::check().map_err(|missing| Error::Unsupported(missing.to_string()))?;
 		check_bytes(config.context.len())?;
 		check_u53(config.kid)?;
 		let secret = Secret(config.secret);
-		let prk = hkdf::Salt::new(HKDF_SHA256, PROFILE.as_bytes()).extract(&secret.0);
+		let prk = hkdf::Salt::new(&hkdf::HKDF_SHA256, PROFILE.as_bytes()).extract(&secret.0);
 		Ok(Self(Arc::new(Inner {
 			context: config.context,
 			kid: config.kid,
@@ -82,7 +84,7 @@ impl Credential {
 	///
 	/// # Errors
 	///
-	/// [`Error::Identity`](crate::Error::Identity) if `semantic` exceeds 65535 bytes.
+	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes.
 	pub fn path(&self, semantic: &str) -> Result<moq_net::Path> {
 		let material: [u8; PATH_LEN] = self.expand(&self.path_info(semantic)?);
 		// A fixed-length encoding, far under the path limit.
@@ -90,6 +92,10 @@ impl Credential {
 	}
 
 	/// Mint a fresh epoch and a producing generation whose clones share track claims.
+	///
+	/// The generation belongs to this publisher instance alone. A cloned process image (a
+	/// `fork` without `exec`, a restored snapshot or checkpoint) copies its epoch and nonce
+	/// counters, so each copy must mint its own before it encrypts.
 	pub fn produce(&self) -> generation::Producer {
 		generation::Producer::new(self.clone(), Epoch::mint())
 	}
@@ -111,29 +117,28 @@ impl Credential {
 	/// HKDF-Expand `N` bytes of output for `info`.
 	pub(crate) fn expand<const N: usize>(&self, info: &[u8]) -> [u8; N] {
 		const { assert!(N <= 255 * 32, "HKDF-SHA-256 output limit") };
-		let info = [info];
-		let okm = self.0.prk.expand(&info, Len(N)).expect("HKDF length within the limit");
 		let mut out = [0u8; N];
-		okm.fill(&mut out).expect("HKDF fills its own length");
+		self.0
+			.prk
+			.expand(&[info], N)
+			.fill(&mut out)
+			.expect("HKDF length within the limit");
 		out
+	}
+
+	/// HKDF-Expand `info` into the key `algorithm` names.
+	pub(crate) fn derive<A: hkdf::KeyType, K: for<'a> From<hkdf::Okm<'a, A>>>(&self, info: &[u8], algorithm: A) -> K {
+		self.0.prk.expand(&[info], algorithm).into()
 	}
 
 	#[cfg(test)]
 	pub(crate) fn prk_bytes(&self) -> [u8; 32] {
-		use aws_lc_rs::hmac;
-		let key = hmac::Key::new(hmac::HMAC_SHA256, PROFILE.as_bytes());
+		use rind::hmac;
+		let key = hmac::Key::new(&hmac::HMAC_SHA256, PROFILE.as_bytes());
 		let tag = hmac::sign(&key, &self.0._secret.0);
 		let mut out = [0u8; 32];
 		out.copy_from_slice(tag.as_ref());
 		out
-	}
-}
-
-struct Len(usize);
-
-impl hkdf::KeyType for Len {
-	fn len(&self) -> usize {
-		self.0
 	}
 }
 

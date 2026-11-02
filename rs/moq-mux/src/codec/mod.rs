@@ -20,6 +20,7 @@ pub(crate) mod legacy;
 pub(crate) mod mp2;
 pub mod mp3;
 pub mod opus;
+pub(crate) mod spatial;
 pub(crate) mod video;
 pub mod vp8;
 pub mod vp9;

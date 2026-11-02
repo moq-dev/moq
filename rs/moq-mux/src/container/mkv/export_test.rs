@@ -158,7 +158,7 @@ async fn export_header_roundtrip_vp9_opus() {
 	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream);
 
 	// First `next()` should give us the header (EBML + Segment-start + Info + Tracks).
-	let header = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+	let header = kio::clock::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out")
 		.expect("exporter result")
@@ -385,7 +385,7 @@ async fn export_header_roundtrip_mp3() {
 		.expect("catalog consumer");
 	let mut exporter = crate::container::mkv::Export::new(crate::source::announced(&consumer).await, catalog_stream);
 
-	let header = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+	let header = kio::clock::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out")
 		.expect("exporter result")
@@ -466,7 +466,7 @@ async fn export_waits_for_catalog_before_header() {
 
 	// next() must remain pending (timing out), not surface a "no catalog
 	// snapshot" error from a vacuously-ready empty track set.
-	let result = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next()).await;
+	let result = kio::clock::timeout(std::time::Duration::from_secs(1), exporter.next()).await;
 	assert!(
 		result.is_err(),
 		"exporter should stay pending before any rendition arrives, got {result:?}"
@@ -499,7 +499,7 @@ async fn export_derives_video_geometry_before_header() {
 	live.track.finish().unwrap();
 
 	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
-	let header = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+	let header = kio::clock::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out")
 		.expect("exporter result")
@@ -544,14 +544,14 @@ async fn export_emits_blocks_for_each_frame() {
 
 	let mut importer = Some(importer);
 	for _ in 0..32 {
-		let next = tokio::time::timeout(std::time::Duration::from_millis(100), exporter.next()).await;
+		let next = kio::clock::timeout(std::time::Duration::from_millis(100), exporter.next()).await;
 		match next {
 			Ok(Ok(Some(chunk))) => exported.extend_from_slice(&chunk),
 			Ok(Ok(None)) => break,
 			Ok(Err(e)) => panic!("exporter error: {e}"),
 			Err(_) => {
 				if let Some(deadline) = exporter.next_deadline() {
-					tokio::time::advance(deadline.saturating_duration_since(moq_clock::now())).await;
+					tokio::time::advance(deadline.saturating_duration_since(kio::clock::now())).await;
 				} else {
 					importer = None;
 				}
@@ -619,7 +619,7 @@ async fn export_rejects_cmaf_track() {
 	});
 
 	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
-	let result = tokio::time::timeout(std::time::Duration::from_secs(1), exporter.next())
+	let result = kio::clock::timeout(std::time::Duration::from_secs(1), exporter.next())
 		.await
 		.expect("exporter timed out");
 
@@ -649,7 +649,7 @@ async fn export_avc3_source_synthesizes_avcc_and_length_prefixes() {
 
 	let mut live = Some(live);
 	for _ in 0..32 {
-		let next = tokio::time::timeout(std::time::Duration::from_millis(100), exporter.next()).await;
+		let next = kio::clock::timeout(std::time::Duration::from_millis(100), exporter.next()).await;
 		match next {
 			Ok(Ok(Some(chunk))) => exported.extend_from_slice(&chunk),
 			Ok(Ok(None)) => break,
@@ -787,14 +787,14 @@ async fn export_fragment_duration_batches_blocks() {
 
 	let mut importer = Some(importer);
 	for _ in 0..32 {
-		let next = tokio::time::timeout(std::time::Duration::from_millis(100), exporter.next()).await;
+		let next = kio::clock::timeout(std::time::Duration::from_millis(100), exporter.next()).await;
 		match next {
 			Ok(Ok(Some(chunk))) => exported.extend_from_slice(&chunk),
 			Ok(Ok(None)) => break,
 			Ok(Err(e)) => panic!("exporter error: {e}"),
 			Err(_) => {
 				if let Some(deadline) = exporter.next_deadline() {
-					tokio::time::advance(deadline.saturating_duration_since(moq_clock::now())).await;
+					tokio::time::advance(deadline.saturating_duration_since(kio::clock::now())).await;
 				} else {
 					importer = None;
 				}
@@ -843,7 +843,7 @@ async fn reconfigured_zero_duration_drains_open_cluster() {
 	// Default per-GOP clustering: both frames land in one open cluster.
 	let mut exporter = crate::container::mkv::Export::new(live.source().await, live.catalog_stream().await);
 	let header = chunk_now(&mut exporter).await;
-	tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next())
+	kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next())
 		.await
 		.expect_err("the GOP cluster must stay open while the producer is live");
 
@@ -862,7 +862,7 @@ async fn reconfigured_zero_duration_drains_open_cluster() {
 
 /// The next chunk, required to be ready without another frame arriving.
 async fn chunk_now(exporter: &mut crate::container::mkv::Export<crate::catalog::Consumer>) -> Bytes {
-	tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next())
+	kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next())
 		.await
 		.expect("waited for a successor frame")
 		.expect("exporter failed")
@@ -872,7 +872,7 @@ async fn chunk_now(exporter: &mut crate::container::mkv::Export<crate::catalog::
 /// Every chunk the exporter can produce without waiting for more input, or its error.
 async fn drain_now(exporter: &mut crate::container::mkv::Export<crate::catalog::Consumer>) -> crate::Result<Vec<u8>> {
 	let mut out = Vec::new();
-	while let Ok(next) = tokio::time::timeout(std::time::Duration::from_millis(1), exporter.next()).await {
+	while let Ok(next) = kio::clock::timeout(std::time::Duration::from_millis(1), exporter.next()).await {
 		match next? {
 			Some(chunk) => out.extend_from_slice(&chunk),
 			None => break,
@@ -1127,7 +1127,7 @@ async fn configured_delay_holds_live_frames() {
 	assert!(export.next().await.unwrap().is_some(), "container header");
 	live.track.write(raw_frame(0, &[0xde, 0xad], true)).unwrap();
 	assert!(
-		tokio::time::timeout(std::time::Duration::from_millis(1), export.next())
+		kio::clock::timeout(std::time::Duration::from_millis(1), export.next())
 			.await
 			.is_err(),
 		"the release delay must hold a live frame instead of emitting on arrival"
@@ -1147,7 +1147,7 @@ async fn delay_drops_late_frames_and_drains_the_final_frame() {
 		.with_delay(delay)
 		.with_fragment_duration(std::time::Duration::ZERO);
 	export.next().await.unwrap().unwrap();
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	live.track.write(raw_frame(0, b"first", true)).unwrap();
 	let first = export.next().await.unwrap().unwrap();
 	assert!(first.windows(5).any(|part| part == b"first"));

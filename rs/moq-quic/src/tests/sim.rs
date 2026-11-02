@@ -266,11 +266,10 @@ impl Peer {
 			};
 			let mut stream = conn.send_stream(id);
 			while sending.written < sending.spec.len {
-				let end = sending.spec.len.min(sending.written + 65_536);
-				let data = payload(index, sending.written..end);
-				match stream.write(&data) {
+				let end = sending.spec.len.min(sending.written + PAYLOAD_MAX);
+				match stream.write(&mut payload(index, sending.written..end)) {
 					Ok(written) => sending.written += written,
-					Err(WriteError::Blocked) => break,
+					Err(send::Error::Blocked) => break,
 					Err(error) => panic!("writing stream {index}: {error}"),
 				}
 			}
@@ -318,7 +317,7 @@ impl Peer {
 						let end = receiving.read + chunk.bytes.len();
 						prop_assert!(end <= len, "stream {index} ran past its {len} bytes");
 						prop_assert!(
-							chunk.bytes == payload(index, receiving.read..end),
+							is_payload(index, receiving.read, &chunk.bytes),
 							"stream {index} corrupted at {}",
 							receiving.read
 						);
@@ -331,7 +330,7 @@ impl Peer {
 						receiving.done = Some(now);
 						break;
 					}
-					Err(ReadError::Blocked) => break,
+					Err(recv::Error::Blocked) => break,
 					Err(error) => panic!("reading stream {index}: {error}"),
 				}
 			}
@@ -373,9 +372,27 @@ impl Peer {
 	}
 }
 
+/// The longest range `payload` serves
+const PAYLOAD_MAX: usize = 65_536;
+
 /// The bytes at `range` of stream `index`, distinct per stream and offset
-fn payload(index: usize, range: ops::Range<usize>) -> Vec<u8> {
-	range.map(|i| (i % 251) as u8 ^ (index as u8)).collect()
+///
+/// Each stream reads one cycle of prime length from its own rotation, so streams fewer than 251
+/// apart differ at every offset. Slicing a shared buffer keeps the per-step writes and checks from
+/// dominating the simulation.
+fn payload(index: usize, range: ops::Range<usize>) -> &'static [u8] {
+	static CYCLE: std::sync::LazyLock<Vec<u8>> =
+		std::sync::LazyLock::new(|| (0..251 + PAYLOAD_MAX).map(|i| (i % 251) as u8).collect());
+	let start = (index + range.start) % 251;
+	&CYCLE[start..][..range.len()]
+}
+
+/// Whether `bytes` are stream `index`'s payload from `offset`, however long the chunk
+fn is_payload(index: usize, offset: usize, bytes: &[u8]) -> bool {
+	bytes.chunks(PAYLOAD_MAX).enumerate().all(|(i, piece)| {
+		let start = offset + i * PAYLOAD_MAX;
+		piece == payload(index, start..start + piece.len())
+	})
 }
 
 fn run(case: &Case) -> Result<Outcome, TestCaseError> {
@@ -392,13 +409,15 @@ fn run(case: &Case) -> Result<Outcome, TestCaseError> {
 	server_config.transport = transport.clone();
 	let mut pair = Pair::new(Default::default(), server_config);
 	pair.latency = case.latency;
-	pair.to_server = case.to_server.clone();
-	pair.to_client = case.to_client.clone();
-	let start = pair.time;
 
 	let mut client_config = client_config();
 	client_config.transport = transport;
 	let (client_ch, server_ch) = pair.connect_with(client_config);
+
+	// Workloads start connected; deterministic handshake tests own flight loss.
+	pair.to_server = case.to_server.clone();
+	pair.to_client = case.to_client.clone();
+	let start = pair.time;
 
 	let sends = |from_client: bool| {
 		case.streams

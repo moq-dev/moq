@@ -151,6 +151,7 @@ impl Endpoint {
 			local_ip,
 			ecn,
 			data,
+			arrival,
 		} = received;
 		// Partially decode packet or short-circuit if unable
 		let datagram_len = data.len();
@@ -161,6 +162,7 @@ impl Endpoint {
 		) {
 			Ok((first_decode, remaining)) => DatagramConnectionEvent {
 				now,
+				arrival,
 				remote,
 				ecn,
 				first_decode,
@@ -817,7 +819,7 @@ impl Endpoint {
 		let payload = TokenPayload::Retry {
 			address: incoming.addresses.remote,
 			orig_dst_cid: incoming.packet.header.dst_cid,
-			issued: moq_clock::wall(),
+			issued: kio::clock::wall(),
 		};
 		let token = Token::new(payload, &mut self.rng).encode(&*server_config.token_key);
 
@@ -1023,6 +1025,20 @@ impl Endpoint {
 	/// Number of connections that are currently open
 	pub fn open_connections(&self) -> usize {
 		self.connections.len()
+	}
+
+	/// Whether `datagram` from `remote` ends in the stateless reset token a connection's peer
+	/// issued, so [`handle`](Self::handle) would route it to that connection
+	///
+	/// A stateless reset carries a random connection ID, so a caller that routes datagrams by
+	/// connection ID before handing them over checks this first.
+	pub fn is_stateless_reset(&self, remote: SocketAddr, datagram: &[u8]) -> bool {
+		datagram.len().checked_sub(RESET_TOKEN_SIZE).is_some_and(|start| {
+			self.index
+				.connection_reset_tokens
+				.get(remote, &datagram[start..])
+				.is_some()
+		})
 	}
 
 	/// Counter for the number of bytes currently used
@@ -1241,6 +1257,9 @@ pub struct Received {
 	pub ecn: Option<EcnCodepoint>,
 	/// The datagram's payload, which may hold several coalesced QUIC packets
 	pub data: BytesMut,
+	/// When the datagram arrived, as precisely as the socket knows, or `None` to report no
+	/// receive timestamp for it to a peer that asks for them
+	pub arrival: Option<Instant>,
 }
 
 /// An outgoing connection for [`Endpoint::connect`]

@@ -5,15 +5,19 @@ if [[ "${GITHUB_ACTIONS:-}" != true && "${LOCAL_SUPERVISED:-}" != 1 ]]; then
     exec bash "$(dirname "$0")/../local.sh" bash "$0" "$@"
 fi
 
-# Local smoke check for the Swift wrapper. Builds moq-ffi for the host
-# macOS target, lays out a local XCFramework, and runs `swift test`.
+# Local smoke check for the Swift wrapper. Checks formatting
+# (sh/swift/format.sh), then builds moq-ffi for the host macOS target, lays
+# out a local XCFramework, and runs `swift test`.
 #
-# Skipped on hosts without `swift` (Linux dev environments) or without
-# `cargo`. Intended for `just swift check`.
+# The build and tests are skipped on hosts without `swift` (Linux dev
+# environments) or without `cargo`. Intended for `just swift check`.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SWIFT_DIR="$(cd "$SCRIPT_DIR/../../swift" && pwd)"
 WORKSPACE_DIR="$(cd "$SWIFT_DIR/.." && pwd)"
+
+# Formatting needs only swift-format, so it runs before the skips below.
+bash "$SCRIPT_DIR/format.sh" --check
 
 if ! command -v swift >/dev/null 2>&1; then
     echo "swift check: no swift toolchain on PATH, skipping" >&2

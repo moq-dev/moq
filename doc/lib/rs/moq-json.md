@@ -34,10 +34,11 @@ continues after them.
 Upgrading from an older release: see moq-json's
 [MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-json/MIGRATE.md).
 
-A stream rides one group, so the whole log shares moq-net's group budget:
-32 MiB of payload and 8192 records. An append that might not fit is refused
-before anything is written and leaves the log intact. Once the budget is spent,
-start a new track.
+A stream rides one group, which grows for the track's life. The cache keeps its
+newest 32 MiB, less under memory pressure, and sheds older records, so a reader
+that falls further behind, or joins once the first record was shed, fails with
+`Evicted`. A record over 32 MiB is refused with `FrameTooLarge` and leaves the log
+intact.
 
 The TypeScript twin is [`@moq/json`](/lib/js/json). API:
 [docs.rs/moq-json](https://docs.rs/moq-json).

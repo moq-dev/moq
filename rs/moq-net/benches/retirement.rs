@@ -30,7 +30,7 @@ fn retirement(c: &mut Criterion) {
 								for (i, route) in routes.iter().enumerate() {
 									for reader in 0..if i == 0 { consumers } else { 1 } {
 										if selected {
-											let watch = RequestValidity::new(
+											let mut watch = RequestValidity::new(
 												route,
 												&Path::new(&format!("route/{i}/jobs/{reader}")).unwrap(),
 											);

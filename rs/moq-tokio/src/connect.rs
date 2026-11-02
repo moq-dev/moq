@@ -87,7 +87,13 @@ impl Addr {
 	}
 
 	/// The same peer and addresses, requested at `url`.
-	#[cfg(feature = "_transport")]
+	#[cfg(any(
+		feature = "quic",
+		feature = "iroh",
+		feature = "websocket",
+		feature = "tcp",
+		feature = "uds"
+	))]
 	pub(crate) fn with_url(&self, url: Url) -> Self {
 		Self {
 			url,
@@ -216,6 +222,7 @@ pub(crate) struct Legacy {
 			"moq-lite-06",
 			"moq-lite-07-wip",
 			"moq-transport-18",
+			"moq-transport-20",
 			"moq-transport-22"
 		),
 		hide = true
@@ -617,6 +624,7 @@ pub struct Config {
 			"moq-lite-06",
 			"moq-lite-07-wip",
 			"moq-transport-18",
+			"moq-transport-20",
 			"moq-transport-22"
 		)
 	)]

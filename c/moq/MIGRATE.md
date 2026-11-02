@@ -6,6 +6,11 @@ How to update your code for each breaking change, newest first.
 
 The hand-written crate never published as moq-c: a libmoq 0.6 user applies these entries before moving to the generated API.
 
+### A subscription without `max_delay_present` has no limit
+
+A `moq_subscription` with `max_delay_present` false sets no subscriber limit, leaving the publisher's max age alone to bound it, instead of moq-net's default of zero.
+Start from `moq_subscription_defaults()`, or set `max_delay_present`, where you relied on a zeroed struct; a NULL pointer still means the defaults.
+
 ### Paths with an empty segment are refused ([#6648](https://github.com/moq-dev/moq/pull/6648))
 
 `moq_origin_create_broadcast`, `moq_origin_requests`, `moq_origin_announced_broadcast`, and `moq_origin_request` return an error for a path with a leading, trailing, or doubled `/` instead of collapsing it. Pass the canonical path, such as `room/cam`. The generated API refuses the same paths.

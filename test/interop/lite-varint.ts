@@ -13,6 +13,7 @@ const input: {
 	varints: number[];
 	setup: number[];
 	datagram: number[];
+	padding: number[];
 	untimedDatagram: number[];
 	trackInfo: number[];
 	group: number[];
@@ -65,14 +66,30 @@ const setup = await Setup.decode(reader(input.setup), version);
 const setupBytes = await write((w) => setup.encode(w, version));
 
 const datagram = await Datagram.decode(Uint8Array.from(input.datagram), version, () => ({ timed: true }));
+assert(datagram);
 const datagramBytes = [...datagram.encode(version)];
 
 // Only lite-07 can carry an untimed track; lite-06 stamps it, so it has no untimed bytes.
 const untimed = version === Version.DRAFT_07;
 
+let padding: number[] = [];
+if (version === Version.DRAFT_07) {
+	assert.equal(
+		await Datagram.decode(Uint8Array.from(input.padding), version, () => {
+			throw new Error("padding must not look up a subscription");
+		}),
+		undefined,
+	);
+	padding = await write(async (w) => {
+		await w.u53(1);
+		await w.write(new Uint8Array(1199).fill(0xff));
+	});
+}
+
 let untimedDatagramBytes: number[] = [];
 if (untimed) {
 	const datagram = await Datagram.decode(Uint8Array.from(input.untimedDatagram), version, () => ({ timed: false }));
+	assert(datagram);
 	assert.equal(datagram.timestamp, undefined);
 	untimedDatagramBytes = [...datagram.encode(version)];
 } else {
@@ -92,6 +109,8 @@ for (;;) {
 	const frame = await g.decodeMaybe(decode);
 	if (!frame) break;
 	if (!frame.timestamp) throw new Error("a lite-05+ frame decoded without its timestamp");
+	// The fixture's frames fit one segment, so each payload decodes with its header.
+	if (!frame.payload) throw new Error("a fixture frame streamed past its header");
 	frames.push({ timestamp: BigInt(frame.timestamp.value), payload: frame.payload });
 }
 const zigzag = (d: bigint) => (d << 1n) ^ (d >> 63n);
@@ -116,6 +135,7 @@ if (untimed) {
 		const frame = await u.decodeMaybe(frameDecoder({ scale: 0 }));
 		if (!frame) break;
 		assert.equal(frame.timestamp, undefined);
+		if (!frame.payload) throw new Error("a fixture frame streamed past its header");
 		untimedFrames.push(frame.payload);
 	}
 	untimedGroupBytes = await write(async (w) => {
@@ -133,6 +153,7 @@ console.log(
 		varints,
 		setup: setupBytes,
 		datagram: datagramBytes,
+		padding,
 		untimedDatagram: untimedDatagramBytes,
 		trackInfo: trackInfoBytes,
 		group: groupBytes,
