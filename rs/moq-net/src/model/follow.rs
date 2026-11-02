@@ -1,7 +1,7 @@
 use std::task::{Poll, ready};
 
 use super::WeakEntry;
-use super::origin_impl::{Announce, AnnounceConsumer, AnnounceEvent, Consumer, Requesting};
+use super::origin_impl::{Announce, AnnounceConsumer, AnnounceEvent, Consumer, Moved, Requesting};
 use crate::{Error, Instance, Path, broadcast};
 
 /// The announcements covering one path, as one broadcast coming online, being replaced, and
@@ -212,6 +212,12 @@ pub struct Following {
 	/// The broadcast handed out last, until the path goes offline or the broadcast ends. Weak,
 	/// so it never keeps one the caller let go of from retiring.
 	last: Option<broadcast::WeakConsumer>,
+	/// Once the broadcast handed out last closed, waits for its instance to stop serving the
+	/// path.
+	moved: Option<Moved>,
+	/// A change resolved to the broadcast handed out last while it was still open, so it counts
+	/// as delivered only until that broadcast closes.
+	absorbed: bool,
 }
 
 impl Following {
@@ -224,6 +230,8 @@ impl Following {
 			unseen: false,
 			resolving: None,
 			last: None,
+			moved: None,
+			absorbed: false,
 		}
 	}
 
@@ -249,16 +257,31 @@ impl Following {
 				self.resolving = None;
 			}
 			// The broadcast handed out ended while the path is still served: its instance's
-			// routes went and another instance's, beneath the same announcement, took the
-			// path over. Whatever serves it now is next.
+			// routes may have gone, and another instance's, beneath the same announcement,
+			// taken the path over. It also ends once the caller lets go of it, so only its
+			// instance no longer serving the path makes whatever serves it now next, unless a
+			// change it absorbed is owed.
 			if !self.unseen
 				&& self.follow.serving().is_some()
-				&& self
-					.last
-					.as_ref()
-					.is_some_and(|last| last.consume().poll_closed(waiter).is_ready())
+				&& let Some(last) = self.last.as_ref().map(broadcast::WeakConsumer::consume)
+				&& last.poll_closed(waiter).is_ready()
 			{
-				self.unseen = true;
+				let moved = match &last.info().instance {
+					_ if self.absorbed => true,
+					Some(instance) => self
+						.moved
+						.get_or_insert_with(|| {
+							self.consumer
+								.moved(self.path.clone(), instance.clone(), self.instance.is_some())
+						})
+						.poll(waiter)
+						.is_ready(),
+					None => true,
+				};
+				if moved {
+					self.moved = None;
+					self.unseen = true;
+				}
 			}
 			if !self.unseen {
 				return Poll::Pending;
@@ -274,11 +297,15 @@ impl Following {
 
 			// Resolving can run ahead of the follower: a takeover resolves at once while the
 			// origin holds its restart, and that restart then names the instance handed out.
+			// The caller freeing it before reading the restart is owed it again.
 			let weak = broadcast.weak();
 			if self.last.as_ref().is_some_and(|last| last.same_channel(&weak)) {
+				self.absorbed = true;
 				continue;
 			}
 			self.last = Some(weak);
+			self.moved = None;
+			self.absorbed = false;
 			return Poll::Ready(Ok(broadcast));
 		}
 	}
@@ -311,6 +338,8 @@ impl Following {
 			AnnounceEvent::End(_) => {
 				self.unseen = false;
 				self.last = None;
+				self.moved = None;
+				self.absorbed = false;
 			}
 			// The same instance over another route, which its subscriptions ride out, or one
 			// continuing what was handed out.

@@ -5521,6 +5521,27 @@ impl OriginState {
 		self.routes.best_route(path, horizon, excluded, only)
 	}
 
+	/// Whether `instance` still serves `path` as a request would resolve it now: the winning
+	/// route carries it or took it over, or, for a request `pinned` to it, a route of its own
+	/// remains. The rule [`Consumer::lookup`] resolves by.
+	fn still_serves(&self, path: &Path, horizon: Horizon, instance: &Instance, pinned: bool) -> bool {
+		let Some(best) = self.best_route(path, horizon, &HashSet::new(), |_| true) else {
+			return false;
+		};
+		if best.instance == *instance
+			|| best
+				.takeover
+				.as_ref()
+				.is_some_and(|takeover| takeover.instance == *instance)
+		{
+			return true;
+		}
+		pinned
+			&& self
+				.best_route(path, horizon, &HashSet::new(), |entry| entry.instance == *instance)
+				.is_some()
+	}
+
 	/// The covering served route `server` answers through, taken over by a route at
 	/// `prefix` now: `None` unless it is live and its scope authorizes `prefix`.
 	fn takeover(&self, prefix: &Path, server: &kio::Shared<ServeState>) -> Option<Takeover> {
@@ -6214,6 +6235,57 @@ impl kio::Task for Requesting {
 	}
 }
 
+/// Waits for an instance to stop serving a path, watching the routes covering it. Unlike
+/// the broadcast a request resolved, which also closes once its last holder lets it go, this
+/// ends only when the routes move to another instance or away. Created by [`Consumer::moved`].
+pub(super) struct Moved {
+	consumer: Consumer,
+	path: Path,
+	instance: Instance,
+	pinned: bool,
+	// The covering routes, watched since the generation the last check saw.
+	watch: Option<(Watch, u64)>,
+}
+
+impl Moved {
+	/// Ready once `instance` no longer serves the path, or the origin closed.
+	pub(super) fn poll(&mut self, waiter: &kio::Waiter) -> Poll<()> {
+		loop {
+			if let Some((watch, seen)) = &self.watch {
+				ready!(watch.poll_changed(waiter, *seen));
+			}
+			let named = match self.consumer.root.join(&self.path) {
+				Ok(named) if self.consumer.scope.permits(&named) => named,
+				_ => return Poll::Ready(()),
+			};
+			let Some(absolute) = self.consumer.scope.resolve(&named) else {
+				return Poll::Ready(());
+			};
+			let mut state = self.consumer.shared.lock();
+			if state.closed {
+				return Poll::Ready(());
+			}
+			// Read the generation under the lock that decides, so a change after it bumps
+			// the watch and the next pass checks again. Filling an empty slot drops no watch,
+			// whose drop takes this lock.
+			match &mut self.watch {
+				Some((watch, seen)) => *seen = watch.seen(),
+				None => {
+					let watch = state.watch(&self.consumer.shared, &absolute);
+					let seen = watch.seen();
+					self.watch = Some((watch, seen));
+				}
+			}
+			let horizon = self.consumer.horizon.effective(&state.routes, &absolute);
+			let serves = state.still_serves(&absolute, horizon, &self.instance, self.pinned);
+			drop(state);
+			if !serves {
+				return Poll::Ready(());
+			}
+		}
+	}
+}
+
 /// Derive a read view from a handle.
 ///
 /// Lets APIs accept either a producer or a consumer (e.g.
@@ -6658,6 +6730,18 @@ impl Consumer {
 		let mut request = self.routing(Path::empty(), None);
 		request.request = Some(Lookup::failed(err));
 		request
+	}
+
+	/// Wait for `instance` to stop serving `path`, as a request `pinned` to it or not would
+	/// resolve it; see [`Moved`].
+	pub(super) fn moved(&self, path: Path, instance: Instance, pinned: bool) -> Moved {
+		Moved {
+			consumer: self.clone(),
+			path,
+			instance,
+			pinned,
+			watch: None,
+		}
 	}
 
 	/// Resolve a routed instance, returning a selected handler's refusal directly.
@@ -11993,6 +12077,58 @@ mod tests {
 		let second = second.unwrap();
 		assert_eq!(second.info().instance, Some("b".parse().unwrap()));
 		assert!(!second.is_clone(&first));
+	}
+
+	/// Letting go of the broadcast `follow` handed out retires it, which is no change to
+	/// the path: the follower neither asks its host again nor hands the same instance out
+	/// again. Its instance withdrawing later still hands out the next one.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_follower_dropping_its_broadcast_waits_for_another_instance() {
+		let producer = origin(1).produce();
+		let consumer = producer.consume();
+		let host = |name: &str, hop| {
+			producer
+				.requests_route(
+					"pool",
+					Route::default()
+						.with_instance(name.parse().unwrap(), 0)
+						.with_hops(hops(&[hop])),
+					None,
+				)
+				.unwrap()
+		};
+		// Pinned in `spread_hash_matches_js`: `a` wins `pool/job-0`.
+		let a = host("a", 10);
+		let b = host("b", 11);
+
+		let mut follow = consumer.follow("pool/job-0", None).unwrap();
+		let (first, ()) = futures::join!(follow.available(), async {
+			queued(&a).await.accept(broadcast::Info::new().produce());
+		});
+		let first = first.unwrap();
+		let weak = first.weak();
+		drop(first);
+		settle(|| weak.consume().poll_closed(&kio::Waiter::noop()).is_ready()).await;
+
+		for _ in 0..3 {
+			kio::clock::sleep(Duration::from_secs(20)).await;
+			assert!(
+				follow.poll_available(&kio::Waiter::noop()).is_pending(),
+				"the same instance handed out again"
+			);
+			kio::clock::sim::yield_now().await;
+			assert!(
+				a.poll_requested_broadcast(&kio::Waiter::noop()).is_pending(),
+				"the host asked again"
+			);
+		}
+
+		drop(a);
+		let (second, ()) = futures::join!(follow.available(), async {
+			queued(&b).await.accept(broadcast::Info::new().produce());
+		});
+		assert_eq!(second.unwrap().info().instance, Some("b".parse().unwrap()));
 	}
 
 	/// Write one single-frame group and read it back through `subscription`.
