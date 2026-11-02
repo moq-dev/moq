@@ -5,7 +5,7 @@
 Endpoints and relays detect stalled delivery on an actively demanded track by
 comparing it with a next-best route observing group/frame progress without
 payload. The shared routing model automatically resumes through a working
-alternate and returns to a recovered preferred route. This applies only to
+alternate and keeps the track there until that route fails. This applies only to
 broadcasts with an explicit matching epoch: epochless broadcasts cannot resume
 and keep their existing Restart behavior.
 
@@ -14,8 +14,12 @@ and keep their existing Restart behavior.
 Decided with the maintainer, 2026-10-13:
 
 - Ranked in m2, after clustering stability, federation, and P2P. Health
-  design must first reproduce a stall that transport failure and ordinary
-  reconnect do not recover, or the line is abandoned.
+  design had to reproduce a stall that transport failure and ordinary
+  reconnect do not recover, or the line would be abandoned. It did
+  ([moq-dev/moq#7096](https://github.com/moq-dev/moq/pull/7096)):
+  `rs/moq-net/tests/integration/route_health.rs` pins a silent kill that loses
+  about `detection - max_delay` of media, and a payload stall on live sessions
+  that is never recovered while `largest()` keeps pace.
 - A route that dies without a close counts as such a stall until the QUIC
   idle timeout fires (decided 2026-10-20, from
   [#6062](https://github.com/moq-dev/moq/issues/6062)): a killed relay
@@ -28,7 +32,7 @@ Decided with the maintainer, 2026-10-13:
   wins only when routes otherwise match. Stalled delivery is addressed by
   evidence, not a general newest-connection preference.
 - Observe at most one eligible same-epoch standby at a time per demanded
-  track, initially the next-best route, aggregating downstream readers. If
+  track, the next-best route, aggregating downstream readers. If
   active and standby provide insufficient evidence, bounded exploration must
   reach other eligible candidates; a shared failure must not hide a working
   third route. Silence alone still does not establish failure. Metadata watchers
@@ -51,18 +55,44 @@ Decided with the maintainer, 2026-10-13:
 - Automatically let a stalled preferred route yield to a healthy lower-ranked
   eligible route. Relative metadata progress is evidence to test a replacement,
   not proof it can deliver the needed media. Brief payload overlap is allowed
-  during promotion and recovery verification; steady standby carries no payload.
-- Automatically return to the preferred route after useful media delivery
-  demonstrates recovery. Metadata alone does not requalify it. Establish
-  evidence and anti-oscillation rules from controlled failures, not an arbitrary
-  delay or a blanket transport reconnect. Preserve ordinary transport failures.
+  while verifying a promotion; steady standby carries no payload.
+- Never automatically return to a demoted preferred route (decided
+  2026-11-02, reversing the 2026-10-13 decision to return after useful media
+  demonstrated recovery). The track stays on the working route until that
+  route fails, by transport failure or by the same stall evidence. Payload
+  trials that let a recovered route win the track back, with uncapped or
+  capped doubling backoff, were rejected: the track is already being
+  delivered, and a return would trade a working route for one that just
+  failed, at the cost of overlap, possible oscillation, and a backoff
+  schedule. Preserve ordinary transport failures.
 - No health standby, automatic resume, or recovery promotion for epochless
   broadcasts, even when the path, node, or connection looks unchanged.
 
+Decided with the maintainer, 2026-11-02, from the measured stalls:
+
+- Evidence: the standby is a `Subscription.meta: true` subscription on the
+  existing SUBSCRIBE; "SUBSCRIBE_META" was shorthand, not a new message.
+  Switch when the active's delivered media timestamp lags the standby's
+  reported timestamp by more than the reader's max delay, while the reader
+  demands. That budget is what the reader already accepts losing, so a
+  standby that is normally a little faster never overrides application
+  priority, and no per-route baseline or fraction constant is needed. A
+  reader without a max delay uses a fixed 2s. Never compare `largest()`
+  values, and never count source silence or a reader that stopped reading.
+- Exploration: when neither active nor standby shows progress for the
+  reader's max delay (or the same 2s), the standby slot moves to the next
+  eligible candidate, doubling the wait per move. One constant drives both
+  the switch and exploration; it replaces falling back to the publisher's
+  max age.
+- Standby choice: the next-best route. Exploration already bounds the cost of
+  an upstream it shares with the active, so preferring the candidate with
+  the fewest shared hops was rejected as extra machinery.
+
 The epic's remaining work is end-to-end validation across a multi-hop relay
 network and alternate sessions representing CDN/direct paths: stalled video moves while healthy audio remains,
-control advances while payload stalls, the recovered primary resumes without
-oscillation, and both quiet routes stay unknown rather than falsely failing.
+control advances while payload stalls, a recovered preferred route does not
+take the track back while the working route delivers, and both quiet routes
+stay unknown rather than falsely failing.
 Test epochless exclusion, an active/standby shared bottleneck with a healthy
 third route, simultaneous relay decisions,
 loss/reordering, cancelled demand, and stale/replayed progress. Wire these into
@@ -70,15 +100,15 @@ CI. Report actual media overlap, control traffic, wakes, switches, and memory
 across tracks, candidate connections, and downstream readers. Extend the
 [P2P harness](/quest/m2/p2p/harness.md) with real browser/native cases:
 metadata-only standby, stalled payload with advancing control, same-epoch
-promotion with bounded overlap, verified failback, and epochless exclusion.
+promotion with bounded overlap, no failback while the working route
+delivers, and epochless exclusion.
 Add a route-health section to the routing concept page.
 
 ## Required
 
-- [Health design](/quest/m2/route-health/design.md) - prove useful progress, aggregation, switching evidence, and bounded recovery
 - [Metadata subscriptions](/quest/m2/route-health/meta.md) - the current lite wip and the shared model observe frames without payload in Rust and JS
 - [Track route selection](/quest/m2/route-health/selection.md) - share broadcast identity/candidates while tracks choose sources independently
-- [Automatic recovery](/quest/m2/route-health/recovery.md) - epoch-only promotion and evidence-based failback in endpoints and relays
+- [Automatic recovery](/quest/m2/route-health/recovery.md) - epoch-only promotion in endpoints and relays, staying on the working route
 
 ## Related
 
