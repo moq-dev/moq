@@ -258,15 +258,15 @@ pub struct Snapshot {
 	pub timers_cancelled: u64,
 	/// Gauge: receive buffer bytes allocated across the worker's live
 	/// sockets. Pools grow under load and never shrink, so this holds the
-	/// high-water mark. Reserved rather than resident: a page counts toward
-	/// RSS only once a receive has written to it.
+	/// high-water mark. Mostly reserved rather than resident: RSS grows by
+	/// the pages receives have written.
 	pub rx_pool_bytes: u64,
 	/// Gauge: the part of `rx_pool_bytes` in buffers holding a packet the
 	/// application has not dropped yet, unavailable to the kernel.
 	pub rx_pool_in_use_bytes: u64,
 	/// Gauge: send buffer bytes allocated across the worker's live sockets,
-	/// growing like `rx_pool_bytes`. Reserved rather than resident: a page
-	/// counts toward RSS only once a send has written to it.
+	/// growing like `rx_pool_bytes`. Mostly reserved rather than resident:
+	/// RSS grows by the pages sends have written.
 	pub tx_pool_bytes: u64,
 	/// Gauge: the part of `tx_pool_bytes` in buffers being filled or in
 	/// flight to the kernel.

@@ -2107,7 +2107,10 @@ mod tests {
 		let metrics = std::sync::Arc::new(Counters::default());
 
 		for expected in [1u16, 2, 4, 8, 16, 32, 40] {
-			assert!(grow_rx(&mut rx, &config, &metrics), "growth stopped short of {expected}");
+			assert!(
+				grow_rx(&mut rx, &config, &metrics),
+				"growth stopped short of {expected}"
+			);
 			assert_eq!(rx.bufs.len(), usize::from(expected));
 			// Every buffer reaches the kernel exactly once.
 			assert_eq!(rx.ring.as_ref().expect("ring").tail, expected);
@@ -2161,7 +2164,10 @@ mod tests {
 							.wait()
 							.await;
 					}
-					panic!("gauge stuck at {} instead of {want}", read(&handle.metrics().snapshot()));
+					panic!(
+						"gauge stuck at {} instead of {want}",
+						read(&handle.metrics().snapshot())
+					);
 				};
 
 				// One more send buffer than `a` starts with doubles its pool.

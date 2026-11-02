@@ -923,8 +923,9 @@ fn encode_accepts(encoder: &mut DescriptorEncoder, listeners: &[moq_tokio::accep
 /// The ratios are what to watch, not the raw counts: `rx_datagrams / rx_receives`
 /// is the GRO coalescing actually achieved, `tx_datagrams / tx_sends` the GSO
 /// batching, and datagrams over `enters` the syscall amortization the runtime
-/// exists for. The pool gauges are the buffer memory each worker holds, which
-/// stays at its high-water mark after a burst.
+/// exists for. The pool gauges are the buffer space each worker has allocated,
+/// which stays at its high-water mark after a burst; only the pages datagrams
+/// have touched count toward RSS.
 #[cfg(all(target_os = "linux", feature = "_uring"))]
 fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std::fmt::Result {
 	use moq_uring::metrics::Snapshot;
@@ -1038,7 +1039,7 @@ fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std
 	for (name, help, field) in [
 		(
 			"moq_relay_uring_rx_pool_bytes",
-			"Receive buffer bytes a worker's sockets have allocated; pools grow under load and never shrink.",
+			"Receive buffer bytes a worker's sockets have allocated; pools grow under load and never shrink; reserved, not resident.",
 			(|snap: &Snapshot| snap.rx_pool_bytes) as fn(&Snapshot) -> u64,
 		),
 		(
@@ -1048,7 +1049,7 @@ fn encode_uring(encoder: &mut DescriptorEncoder, workers: &[UringWorker]) -> std
 		),
 		(
 			"moq_relay_uring_tx_pool_bytes",
-			"Send buffer bytes a worker's sockets have allocated; pools grow under load and never shrink.",
+			"Send buffer bytes a worker's sockets have allocated; pools grow under load and never shrink; reserved, not resident.",
 			|snap| snap.tx_pool_bytes,
 		),
 		(
@@ -1534,7 +1535,10 @@ mod tests {
 			"tx_pool_in_use_bytes",
 		] {
 			let name = format!("moq_relay_uring_{gauge}");
-			assert!(body.contains(&format!("# TYPE {name} gauge")), "missing type for {name}");
+			assert!(
+				body.contains(&format!("# TYPE {name} gauge")),
+				"missing type for {name}"
+			);
 			for worker in 0..2 {
 				let line = format!("{name}{{worker=\"{worker}\"}} 0");
 				assert!(body.contains(&line), "missing {line} in:\n{body}");
