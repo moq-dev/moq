@@ -161,10 +161,13 @@ interface SubscribeEntry {
 /**
  * The instance a session minted for each path a peer advertises without one (every version
  * before lite-07), shared by its announce streams: a peer serves one broadcast at a path at a
- * time, so the path advertised on two streams at once is one stream. Once every advertisement
- * of it is gone, the next one is a new stream with a fresh instance.
+ * time, so the path advertised on two streams at once is one stream. The peer ending it on any
+ * stream retires its instance, so the next advertisement is a new stream with a fresh one, even
+ * while a lagging stream still holds the old: holders alone cannot tell a replacement from
+ * continuity. A stream closing only lets go of it. Mirrors `Minted` in rs/moq-net.
+ * @internal
  */
-class Minted {
+export class Minted {
 	#paths = new Map<Path.Valid, { instance: Instance.Valid; holders: number }>();
 
 	acquire(path: Path.Valid): Instance.Valid {
@@ -177,18 +180,15 @@ class Minted {
 		return entry.instance;
 	}
 
-	/** The instance a holder already acquired. */
-	get(path: Path.Valid): Instance.Valid {
+	/**
+	 * Let go of `instance`, retiring it if the peer `ended` its advertisement. A no-op once
+	 * another stream's end retired it.
+	 */
+	release(path: Path.Valid, instance: Instance.Valid, ended: boolean) {
 		const entry = this.#paths.get(path);
-		if (!entry) throw new Error(`no instance minted for ${path}`);
-		return entry.instance;
-	}
-
-	release(path: Path.Valid) {
-		const entry = this.#paths.get(path);
-		if (!entry) return;
+		if (entry?.instance !== instance) return;
 		entry.holders -= 1;
-		if (entry.holders === 0) this.#paths.delete(path);
+		if (ended || entry.holders === 0) this.#paths.delete(path);
 	}
 }
 
@@ -380,14 +380,21 @@ export class Subscriber {
 		const advertised = new SlotMap<Path.Valid, Advertisement>(this.#announces);
 		// The paths this stream holds a session-minted instance for: a version before lite-07
 		// names none, so each advertisement stands for one stream until it ends.
-		const minted = new Set<Path.Valid>();
+		const minted = new Map<Path.Valid, Instance.Valid>();
 		const mint = (path: Path.Valid): Instance.Valid => {
-			if (minted.has(path)) return this.#minted.get(path);
-			minted.add(path);
-			return this.#minted.acquire(path);
+			let instance = minted.get(path);
+			if (instance === undefined) {
+				instance = this.#minted.acquire(path);
+				minted.set(path, instance);
+			}
+			return instance;
 		};
+		// The peer ended the advertisement, which retires its instance.
 		const unmint = (path: Path.Valid) => {
-			if (minted.delete(path)) this.#minted.release(path);
+			const instance = minted.get(path);
+			if (instance === undefined) return;
+			minted.delete(path);
+			this.#minted.release(path, instance, true);
 		};
 
 		let stopDrain: Dispose | undefined;
@@ -737,7 +744,8 @@ export class Subscriber {
 			// Release only this interest's routes. Existing consumers remain pinned.
 			for (const path of advertised.keys()) this.#consumes.withdraw(path, announced);
 			advertised.clear();
-			for (const path of minted) this.#minted.release(path);
+			// The stream closing ends none of its advertisements, which another may still carry.
+			for (const [path, instance] of minted) this.#minted.release(path, instance, false);
 			minted.clear();
 			stopDrain?.();
 		}

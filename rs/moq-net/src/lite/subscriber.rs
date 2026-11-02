@@ -99,8 +99,10 @@ pub(super) struct Subscriber {
 
 /// The instance a session minted for each path a peer advertises without one (every
 /// version before lite-07), shared by its announce streams: a peer serves one broadcast at
-/// a path at a time, so the path advertised on two streams at once is one stream. Once
-/// every advertisement of it is gone, the next one is a new stream with a fresh instance.
+/// a path at a time, so the path advertised on two streams at once is one stream. The peer
+/// ending it on any stream retires its instance, so the next advertisement is a new stream
+/// with a fresh one, even while a lagging stream still holds the old: holders alone cannot
+/// tell a replacement from continuity. A stream closing only lets go of it.
 #[derive(Clone, Default)]
 struct Minted(Lock<HashMap<Path, (crate::Instance, usize)>>);
 
@@ -114,13 +116,19 @@ impl Minted {
 		instance.clone()
 	}
 
-	fn release(&self, path: &Path) {
+	/// Let go of `instance`, retiring it if the peer `ended` its advertisement. A no-op once
+	/// another stream's end retired it.
+	fn release(&self, path: &Path, instance: &crate::Instance, ended: bool) {
 		let mut minted = self.0.lock();
-		if let Some((_, holders)) = minted.get_mut(path) {
-			*holders -= 1;
-			if *holders == 0 {
-				minted.remove(path);
-			}
+		let Some((current, holders)) = minted.get_mut(path) else {
+			return;
+		};
+		if current != instance {
+			return;
+		}
+		*holders -= 1;
+		if ended || *holders == 0 {
+			minted.remove(path);
 		}
 	}
 }
@@ -6001,6 +6009,40 @@ mod tests {
 		);
 	}
 
+	/// Announce streams overlapping at a path share the instance minted for it, but a
+	/// replacement delivered on both, interleaved, is a new stream on each: holder counts
+	/// alone would hand it the old instance, splicing the two.
+	#[test]
+	fn an_interleaved_replacement_mints_a_fresh_instance() {
+		let slots = crate::session::Slots::default();
+		let minted = Minted::default();
+		let mut first = Announced::new(slots.clone(), minted.clone());
+		let mut second = Announced::new(slots, minted.clone());
+		let path = Path::from_static("room/host");
+		let instance = |announced: &Announced| announced.instance(&path).unwrap().0;
+
+		first.reserve(path.clone(), None).unwrap();
+		second.reserve(path.clone(), None).unwrap();
+		let old = instance(&first);
+		assert!(old.is_minted());
+		assert_eq!(instance(&second), old, "one advertisement on two streams is one stream");
+
+		// END1, START1, END2, START2.
+		first.withdraw(&path);
+		first.reserve(path.clone(), None).unwrap();
+		let new = instance(&first);
+		assert_ne!(new, old, "the replacement inherited the old instance");
+		second.withdraw(&path);
+		second.reserve(path.clone(), None).unwrap();
+		assert_eq!(instance(&second), new, "both streams carry the replacement as one stream");
+
+		// A stream closing ends nothing: the other's advertisement keeps its instance.
+		drop(first);
+		let mut third = Announced::new(Default::default(), minted);
+		third.reserve(path.clone(), None).unwrap();
+		assert_eq!(instance(&third), new);
+	}
+
 	/// A serve pass polls only the routes whose request queue woke. The driver runs a
 	/// pass on every wake, which is once per group the session carries, so polling
 	/// every announced route there made each group cost the whole announce set.
@@ -7453,9 +7495,10 @@ impl Default for Announced {
 
 impl Drop for Announced {
 	fn drop(&mut self) {
-		for (path, (_, minted)) in std::mem::take(&mut self.instances) {
+		// The stream closing ends none of its advertisements, which another may still carry.
+		for (path, ((instance, _), minted)) in std::mem::take(&mut self.instances) {
 			if minted {
-				self.minted.release(&path);
+				self.minted.release(&path, &instance, false);
 			}
 		}
 	}
@@ -7553,7 +7596,7 @@ impl Announced {
 			Some(instance) => (instance, false),
 			None => ((self.minted.acquire(&path), 0), true),
 		};
-		self.forget(&path);
+		self.forget(&path, false);
 		self.instances.insert(path.clone(), instance);
 		self.routes.insert(path, Held::Declined);
 		Ok(())
@@ -7566,16 +7609,17 @@ impl Announced {
 
 	/// Record the instance and epoch a restart of the live advertisement at `path` names.
 	fn restart(&mut self, path: &Path, instance: Option<(crate::Instance, u64)>) {
-		self.forget(path);
+		self.forget(path, true);
 		if let Some(instance) = instance {
 			self.instances.insert(path.clone(), (instance, false));
 		}
 	}
 
-	/// Drop the instance recorded for `path`, releasing it if the session minted it.
-	fn forget(&mut self, path: &Path) {
-		if let Some((_, true)) = self.instances.remove(path) {
-			self.minted.release(path);
+	/// Drop the instance recorded for `path`, releasing it if the session minted it, and
+	/// retiring it if the peer `ended` the advertisement.
+	fn forget(&mut self, path: &Path, ended: bool) {
+		if let Some(((instance, _), true)) = self.instances.remove(path) {
+			self.minted.release(path, &instance, ended);
 		}
 	}
 
@@ -7589,7 +7633,7 @@ impl Announced {
 	/// Retire this session's advertisement without invalidating another live
 	/// session from the same peer. Dropping its sources closes their requests.
 	fn withdraw(&mut self, path: &Path) {
-		self.forget(path);
+		self.forget(path, true);
 		let Some(held) = self.routes.remove(path) else {
 			return;
 		};

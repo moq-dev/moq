@@ -38,7 +38,7 @@ import {
 	type SubscribeResponse,
 	SubscribeStart,
 } from "./subscribe.ts";
-import { SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
+import { Minted, SUBSCRIBE_SETUP_TIMEOUT_MS, Subscriber } from "./subscriber.ts";
 import { Track, TrackInfo } from "./track.ts";
 import { Version, versionName } from "./version.ts";
 
@@ -2919,4 +2919,26 @@ test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while 
 		subscriber.close();
 		installed.close();
 	}
+});
+
+// Announce streams overlapping at a path share the instance minted for it, but a replacement
+// delivered on both, interleaved, is a new stream on each: holder counts alone would hand it
+// the old instance, splicing the two.
+test("an interleaved replacement mints a fresh instance", () => {
+	const minted = new Minted();
+	const path = Path.from("room/host");
+	const old = minted.acquire(path);
+	expect(Instance.isMinted(old)).toBe(true);
+	expect(minted.acquire(path)).toBe(old);
+
+	// END1, START1, END2, START2.
+	minted.release(path, old, true);
+	const replacement = minted.acquire(path);
+	expect(replacement).not.toBe(old);
+	minted.release(path, old, true);
+	expect(minted.acquire(path)).toBe(replacement);
+
+	// A stream closing ends nothing: the other's advertisement keeps its instance.
+	minted.release(path, replacement, false);
+	expect(minted.acquire(path)).toBe(replacement);
 });
