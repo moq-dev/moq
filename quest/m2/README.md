@@ -67,7 +67,6 @@ lite-07; bitrate enforcement is not part of this release.
 
 - [OBS native codecs](/quest/m2/obs-moq-video/README.md) - replace FFmpeg video and audio decoding with moq-video and moq-audio, deliver GPU frames, and use native audio/video encoders
 - [MoQ in obs-studio](/quest/m2/obs-studio/README.md) - a native MoQ output and service merged into obs-studio, once its maintainers agree; the plugin carries it until then
-- [CMake qlog option for OBS](/quest/m2/obs-qlog.md) - an OBS build can opt into qlog trace capture through moq-ffi's `qlog` feature
 - [AudioToolbox decode](/quest/m2/audio-decode-audiotoolbox.md) - macOS and iOS decode HE-AAC, multichannel AAC, and what else the framework offers
 - [AudioToolbox encode](/quest/m2/audio-encode-audiotoolbox.md) - macOS and iOS encode AAC-LC
 - [moqsrc surround Opus](/quest/m2/moqsrc-opus-surround.md) - moqsrc sets the Opus mapping caps, so opusdec plays 3 to 8 channels
