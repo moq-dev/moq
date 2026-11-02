@@ -2589,7 +2589,9 @@ mod tests {
 
 	/// An upgraded WebSocket reads no more than one qmux record at a time: a frame
 	/// declaring more is refused at its header, before SETUP and without buffering it,
-	/// even with no timeout to end the wait. Real sockets, so this runs on the wall clock.
+	/// even with no timeout to end the wait. The socket is the listener's own, reclaimed from
+	/// under hyper rather than read through its boxed IO. Real sockets, so this runs on the
+	/// wall clock.
 	#[cfg(feature = "websocket")]
 	#[tokio::test]
 	async fn a_websocket_frame_past_one_record_is_refused_at_its_header() {
@@ -2648,6 +2650,11 @@ mod tests {
 			.await
 			.expect("the socket waited to buffer a frame larger than a record")
 			.ok();
+		// The refusal came from the socket built after the downcast, so it already ran.
+		assert!(
+			crate::websocket::RECLAIMED.load(std::sync::atomic::Ordering::Relaxed) > 0,
+			"the upgrade fell back to hyper's boxed IO"
+		);
 
 		serving.abort();
 	}

@@ -70,7 +70,8 @@ http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "r
 humantime = { workspace = true }
 # Reclaims the socket under a WebSocket upgrade.
 hyper = { workspace = true, optional = true }
-hyper-util = { workspace = true }
+# `server-auto` reclaims the socket from under the auto builder `axum_server` serves with.
+hyper-util = { workspace = true, features = ["server-auto"] }
 kio = { workspace = true, features = ["runtime", "serde"] }
 moq-auth = { workspace = true, features = ["client"] }
 moq-net = { workspace = true }

@@ -137,18 +137,28 @@ fn socket_config() -> tungstenite::protocol::WebSocketConfig {
 		.max_frame_size(Some(max))
 }
 
+/// How many upgrades reclaimed the listener's socket, so a test can tell the direct path ran.
+#[cfg(test)]
+pub(crate) static RECLAIMED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Reclaim the socket from under hyper's upgrade and serve a MoQ session on it.
 ///
 /// The relay's web listener hands hyper a classified plain or TLS stream, which comes back whole with
 /// whatever hyper read past the request, so qmux polls the socket directly rather than through
-/// hyper's boxed IO. A router served by another HTTP server keeps that IO.
+/// hyper's boxed IO. `axum_server` serves it with hyper-util's auto builder, which wraps the stream
+/// in a private rewind type, so only hyper-util's own downcast can see through it. A router served
+/// by another HTTP server keeps the boxed IO.
 async fn serve_upgraded(
 	upgraded: hyper::upgrade::Upgraded,
 	options: moq_tokio::websocket::Options,
 	state: Arc<WebState>,
 ) {
-	match upgraded.downcast::<TokioIo<Io<Stream>>>() {
-		Ok(parts) => serve_socket(parts.io.into_inner().into_inner(), parts.read_buf, options, state).await,
+	match hyper_util::server::conn::auto::upgrade::downcast::<TokioIo<Io<Stream>>>(upgraded) {
+		Ok(parts) => {
+			#[cfg(test)]
+			RECLAIMED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+			serve_socket(parts.io.into_inner().into_inner(), parts.read_buf, options, state).await
+		}
 		Err(upgraded) => serve_socket(TokioIo::new(upgraded), Bytes::new(), options, state).await,
 	}
 }
