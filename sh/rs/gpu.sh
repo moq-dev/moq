@@ -53,7 +53,10 @@ for vendor in "${!vendors[@]}"; do
                 just rs test -p moq-video --features render,openh264 --lib --run-ignored only \
                 -E 'test(=render::export::vulkan::tests::vulkan_export_round_trips) | test(/^render::export::tests::(choosing_passes_over|a_named_encoder)_/)'
             if [[ "$vendor" == 0x8086 ]]; then
-                just rs test -p moq-video --no-default-features --features vaapi --lib --run-ignored only \
+                va=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#libva.out)
+                media=$(nix build --inputs-from . --no-link --print-out-paths nixpkgs#intel-media-driver)
+                LD_LIBRARY_PATH="$va/lib" LIBVA_DRIVERS_PATH="$media/lib/dri" LIBVA_DRIVER_NAME=iHD \
+                    just rs test -p moq-video --no-default-features --features vaapi --lib --run-ignored only \
                     -E 'test(=encode::backend::vaapi::hardware_tests::vaapi_1080p_ladder_stays_on_the_gpu)'
             fi
             echo "GPU $vendor: Vulkan driver verified"

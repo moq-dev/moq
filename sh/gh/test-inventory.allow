@@ -6,6 +6,7 @@
 ignore moq-carla-bridge::gpu_video_reaches_the_worker /quest/m2/carla-bridge.md
 recipe carla::bridge-gpu /quest/m2/carla-bridge.md
 recipe rs::gpu /quest/m2/gpu-ci.md
+ignore moq-video::encode::backend::vaapi::hardware_tests::vaapi_1080p_ladder_stays_on_the_gpu /quest/m2/video-vaapi.md
 ignore moq-video::frame::vulkan::tests::vulkan_gpu_device /quest/m2/gpu-ci.md
 ignore moq-video::frame::vulkan::tests::vulkan_cuda_slot_reuse_and_teardown /quest/m2/gpu-ci.md
 ignore moq-video::frame::cuda::tests::vulkan_cuda_auto_external_encode /quest/m2/gpu-ci.md
