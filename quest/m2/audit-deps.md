@@ -109,6 +109,20 @@ names at several versions (91 extra), counting distinct resolved versions
 per name. This is a new snapshot, not a like-for-like attribution of growth
 since 2026-10-20.
 
+Most duplicates still come from upstream ecosystem transitions: RustCrypto's
+older generation through rsa/jsonwebtoken/STUN/SRT; retina's h264-reader 0.8
+and bitstream-io 2; srt-tokio's older rand/socket2/derive_more; rustls-acme's
+rcgen 0.13 and web client; winit's older platform stack; and libspa's
+system-deps 7 beside GStreamer's 9. moq-vaapi still holds bindgen 0.70,
+libloading 0.8 and thiserror 1; mp4-atom also holds thiserror 1. Do not treat
+all 117 extras as locally removable without checking those consumers.
+
+Bun's same-major duplicates can persist until a parent re-resolves. For a
+transitive-only security bump, edit the lock entry's version and integrity
+and verify with `bun install --frozen-lockfile`, preserving unaffected
+resolutions. Re-check the current package-manager capabilities before
+attempting broader deduplication.
+
 Removed inline, with no dependency upgrades:
 
 - `rimraf` from all 19 JS package build scripts: use `rm -rf dist`, supported
@@ -189,6 +203,8 @@ standalone build, not incremental workspace savings.
   not a helper. The [Opus backend](/quest/m2/audio-opus-backend.md) comparison
   still owns whether a different backend is better; deleting Opus is a
   user-facing feature decision.
+- `moq-gst` keeps its Rust 1.92 floor for GStreamer 0.25, above the
+  workspace's 1.91 library floor. Do not normalize that manifest to 1.91.
 - The QUIC/UDP, RTMP, V4L2, NVIDIA, VA-API, UniFFI and LibAV forks all have
   current transport, gateway, device, binding or codec consumers. Their
   removal would drop behavior or recreate nontrivial platform code;
