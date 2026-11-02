@@ -1,6 +1,5 @@
 import { Milli } from "@moq/clock";
-import * as Epoch from "../epoch.ts";
-import { ProtocolViolation, reason } from "../error.ts";
+import { ProtocolViolation } from "../error.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
 import * as Filter from "./filter.ts";
@@ -44,8 +43,6 @@ const MSG_PARAM_FILL_PARAMETERS = 0x23n;
 const MSG_PARAM_HOP_PATH = 0x40b57n;
 /// ACTIVE_COUNT, from the MoQ Active Count extension.
 const MSG_PARAM_ACTIVE_COUNT = 0x40b66n;
-/// EPOCH, from the MoQ Epoch extension: a UUIDv7's 16 bytes. See `epoch.ts`.
-const MSG_PARAM_EPOCH = 0x40b69n;
 
 /** Which control message the parameter block belongs to. Omitted keeps the unfiltered decode. */
 type ControlMessage =
@@ -54,8 +51,6 @@ type ControlMessage =
 	| "subscribe-update"
 	| "subscribe-namespace"
 	| "subscribe-tracks"
-	| "tracks-update"
-	| "publish-ok"
 	| "publish"
 	| "publish-namespace"
 	| "fetch"
@@ -82,7 +77,6 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 	const fill = id === MSG_PARAM_FILL_PARAMETERS && from20;
 	const include = id === MSG_PARAM_INCLUDE_PROPERTIES && from20;
 	const newGroup = id === MSG_PARAM_NEW_GROUP_REQUEST;
-	const epoch = id === MSG_PARAM_EPOCH;
 
 	switch (message) {
 		case "subscribe-tracks":
@@ -102,13 +96,6 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 						newGroup ||
 						include))
 			);
-		case "tracks-update":
-			return auth || id === 0x34n || forward || priority || filter || fill || range || trackRange || newGroup;
-		case "publish-ok":
-			return (
-				expires ||
-				(!from20 && (forward || priority || filter || order || objectTimeout || subgroupTimeout || newGroup))
-			);
 		case "subscribe":
 			return (
 				id === MSG_PARAM_MAX_AGE ||
@@ -123,8 +110,7 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				fill ||
 				range ||
 				newGroup ||
-				include ||
-				epoch
+				include
 			);
 		case "subscribe-ok":
 			return expires || largest;
@@ -160,24 +146,15 @@ function allows(message: ControlMessage, version: IetfVersion, id: bigint): bool
 				(order && from20)
 			);
 		case "publish-namespace":
-			return auth || id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST || epoch;
+			return auth || id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST;
 		case "fetch":
-			return (
-				auth ||
-				id === MSG_PARAM_FILL_TIMEOUT ||
-				priority ||
-				(filter && from20) ||
-				order ||
-				range ||
-				include ||
-				epoch
-			);
+			return auth || id === MSG_PARAM_FILL_TIMEOUT || priority || (filter && from20) || order || range || include;
 		case "fetch-ok":
 			return false;
 		case "request-ok":
 			return expires || largest || id === MSG_PARAM_ACTIVE_COUNT;
 		case "namespace":
-			return id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST || epoch;
+			return id === MSG_PARAM_HOP_PATH || id === MSG_PARAM_ROUTE_COST;
 	}
 }
 
@@ -227,7 +204,6 @@ function getMessageParamKind(id: bigint): MessageParamKind {
 		case MSG_PARAM_AUTHORIZATION_TOKEN:
 		case MSG_PARAM_FILL_PARAMETERS:
 		case MSG_PARAM_HOP_PATH:
-		case MSG_PARAM_EPOCH:
 			return "bytes";
 		default:
 			if (MSG_PARAM_REPEATABLE.includes(id)) return "bytes";
@@ -448,17 +424,6 @@ export class Parameters {
 		this.vars.set(MSG_PARAM_ROUTE_COST, v);
 	}
 
-	/** EPOCH (MoQ Epoch): the publisher instance an advertisement or request names. */
-	get epoch(): Epoch.Valid | undefined {
-		const value = this.bytes.get(MSG_PARAM_EPOCH);
-		return value === undefined ? undefined : Epoch.fromBytes(value);
-	}
-
-	set epoch(v: Epoch.Valid | undefined) {
-		if (v === undefined) this.bytes.delete(MSG_PARAM_EPOCH);
-		else this.bytes.set(MSG_PARAM_EPOCH, Epoch.toBytes(v));
-	}
-
 	/** Encode the block. */
 	async encode(w: Writer, version: IetfVersion) {
 		const filter = this.#filter;
@@ -604,14 +569,6 @@ export class Parameters {
 				case "bytes": {
 					const size = await r.u53();
 					const value = await r.read(size);
-					// Anything but a UUIDv7's 16 bytes is malformed, so refuse it here rather than on first read.
-					if (id === MSG_PARAM_EPOCH) {
-						try {
-							Epoch.fromBytes(value);
-						} catch (err) {
-							throw new ProtocolViolation(`malformed EPOCH: ${reason(err)}`, { cause: err });
-						}
-					}
 					params.bytes.set(id, value);
 					break;
 				}

@@ -12,9 +12,10 @@ consumer, so it lands in the same PR as moq-video's browser backends:
 - **GPU import:** a `VideoFrame` becomes a wgpu texture with no CPU readback.
 
 `hang` and `moq-mux` also build for `wasm32-unknown-unknown`. Their tokio
-`fs` feature and file IO sit behind a native-only cfg, which
-`rs/moq-wasm/Cargo.toml` names as the prerequisite for browser media muxing.
-A CI `cargo check` for wasm32 keeps them building.
+`fs` feature and file IO sit behind a native-only cfg, the prerequisite for
+browser media muxing. A CI `cargo check` for wasm32 keeps them building. moq
+removed its WASM support on 2026-10-31, so this quest restores the wasm32
+target; confirm the web studio still wants it before starting.
 
 ## Plan
 
@@ -34,4 +35,4 @@ A CI `cargo check` for wasm32 keeps them building.
 
 ## Required
 
-- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md) - web-async gone and the browser clock read directly, with no runtime to spawn on
+- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md) - library work polled by its owner, with no runtime to spawn on

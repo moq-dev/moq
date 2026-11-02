@@ -57,7 +57,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	let remote = consumer.request("live", None).await.unwrap();
 	let subscription = track::Subscription::default().with_max_delay(budget);
 	let mut reader = remote.track("audio").unwrap().subscribe(subscription).await.unwrap();
-	moq_clock::timeout(TIMEOUT, subscribed(&source)).await.unwrap();
+	kio::clock::timeout(TIMEOUT, subscribed(&source)).await.unwrap();
 
 	*gate.write().ok().unwrap() = false;
 	for sequence in 0..GROUPS {
@@ -66,14 +66,14 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 			.write_frame(Timestamp::from_millis(sequence * 1000).unwrap(), &b"x"[..])
 			.unwrap();
 		group.finish().unwrap();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 	}
 	source.finish().unwrap();
 	*gate.write().ok().unwrap() = true;
 
 	// Read until the track ends, so a skipped group can't be one that merely arrived late.
 	let mut got = BTreeSet::new();
-	while let Some(mut group) = moq_clock::timeout(TIMEOUT, reader.recv_group())
+	while let Some(mut group) = kio::clock::timeout(TIMEOUT, reader.recv_group())
 		.await
 		.unwrap_or_else(|_| panic!("{version}: the track never finished"))
 		.unwrap()
@@ -89,7 +89,7 @@ async fn stalled_read(version: Version, budget: Duration) -> BTreeSet<u64> {
 	got
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_stalled_reader_keeps_every_group_its_budget_covers() {
 	for version in VERSIONS {
 		let version: Version = version.parse().unwrap();
@@ -100,7 +100,7 @@ async fn a_stalled_reader_keeps_every_group_its_budget_covers() {
 
 /// The stall backs up the relay: with a budget shorter than it, the groups that waited for
 /// credit past the budget are skipped. Group 0 took the one free credit as the stall began.
-#[moq_clock::test]
+#[kio::test]
 async fn a_budget_shorter_than_the_stall_skips_what_waited_past_it() {
 	for version in VERSIONS {
 		let version: Version = version.parse().unwrap();

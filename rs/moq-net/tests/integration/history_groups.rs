@@ -71,12 +71,12 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 	let pair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
-	let reader = moq_clock::sim::spawn(async move {
+	let reader = kio::clock::sim::spawn(async move {
 		let subscription = Subscription::default().with_max_delay(FOREVER).with_range(0..);
 		let mut sub = remote
 			.track("history")
@@ -88,14 +88,14 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 		// Group 6 never ends, so read until every frame arrived or nothing more does.
 		let mut got = Vec::new();
 		while got.iter().map(|(_, frames)| frames).sum::<usize>() < 5 {
-			let Ok(next) = moq_clock::timeout(TIMEOUT, sub.recv_group()).await else {
+			let Ok(next) = kio::clock::timeout(TIMEOUT, sub.recv_group()).await else {
 				break;
 			};
 			let Some(mut group) = next.expect("recv_group") else {
 				break;
 			};
 			let mut frames = 0;
-			while let Ok(frame) = moq_clock::timeout(TIMEOUT, group.read_frame()).await {
+			while let Ok(frame) = kio::clock::timeout(TIMEOUT, group.read_frame()).await {
 				match frame.expect("read_frame") {
 					Some(_) => frames += 1,
 					None => break,
@@ -107,13 +107,13 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 		got
 	});
 
-	moq_clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
+	kio::clock::timeout(TIMEOUT, crate::support::wanted(track.demand()))
 		.await
 		.expect("no subscriber appeared")
 		.unwrap();
 	// Simulated time advances only once every task is idle, so this settles the
 	// subscription before the groups exist.
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 
 	// The hop the publisher's group streams cross first: into the relay, when there is one.
 	let first_hop = upstream
@@ -135,11 +135,11 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 
 	if newest_first {
 		// Paused time advances only once every task is idle: both streams are open.
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		first_hop.release_unis_reversed();
 	}
 
-	let got = moq_clock::timeout(TIMEOUT * 3, reader)
+	let got = kio::clock::timeout(TIMEOUT * 3, reader)
 		.await
 		.expect("reader hung")
 		.expect("reader panicked");
@@ -156,7 +156,7 @@ async fn round(version: &str, relay: bool, newest_first: bool) -> Vec<(u64, usiz
 	got
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_fresh_subscriber_receives_the_finished_older_group() {
 	let mut failures = Vec::new();
 	for version in VERSIONS {
@@ -192,7 +192,7 @@ async fn read_history(sub: &mut moq_net::track::Subscriber) {
 	assert_eq!(sequences, [5, 6]);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_late_subscriber_receives_the_relays_cached_history() {
 	// Older drafts canonicalize group 0 to the live edge instead of replay.
 	let version: Version = "moq-lite-07-wip".parse().unwrap();
@@ -219,7 +219,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
 	let subscription = Subscription::default().with_max_delay(FOREVER).with_range(0..);
 	let first_subscription = subscription.clone();
-	let first_reader = moq_clock::sim::spawn(async move {
+	let first_reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("history")
 			.unwrap()
@@ -241,9 +241,9 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 		live.write_frame(Timestamp::now(), &b"live"[..]).unwrap();
 	}
 	// Both streams open before paused time advances; 10ms stays below linger.
-	moq_clock::sleep(Duration::from_millis(10)).await;
+	kio::clock::sleep(Duration::from_millis(10)).await;
 	upstream.server_transport.release_unis_reversed();
-	let first_sub = moq_clock::timeout(TIMEOUT, first_reader)
+	let first_sub = kio::clock::timeout(TIMEOUT, first_reader)
 		.await
 		.expect("first subscriber history")
 		.unwrap();
@@ -255,7 +255,7 @@ async fn a_late_subscriber_receives_the_relays_cached_history() {
 	let consumer = late.consume();
 	let remote = consumer.follow("bcast", None).unwrap().available().await.unwrap();
 	let mut late_sub = remote.track("history").unwrap().subscribe(subscription).await.unwrap();
-	moq_clock::timeout(TIMEOUT, read_history(&mut late_sub))
+	kio::clock::timeout(TIMEOUT, read_history(&mut late_sub))
 		.await
 		.unwrap_or_else(|_| panic!("{version}: late subscriber history"));
 	drop((first_sub, late_sub, first_pair, late_pair, upstream, live));

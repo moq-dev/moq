@@ -11,13 +11,13 @@ use moq_mux::catalog::{self, Stream};
 use moq_mux::follow::{Event as FollowEvent, Instances};
 // The ambient clock, which follows tokio's paused clock when a test drives the
 // playout clock itself.
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use super::args::Args;
 use super::output::{Output, Sink, Speaker};
 use super::playback::{Kind, Playback, Track, joined};
 use super::timeline::{AudioTimeline, Presentation, Role, Transition, fit, timestamp};
-use super::video::Video;
+use super::video::{Refresh, Video};
 use super::window::Event;
 
 /// What a frame that starts a new decoded timeline crossed.
@@ -266,7 +266,8 @@ impl<O: Output> Media<O> {
 					// Nothing older than the playhead is worth presenting, so the delay
 					// doubles as the staleness budget on the wire.
 					let max_delay = self.args.video_max_delay(&snapshot.audio);
-					let opened = async {
+					// A decoder and its subscription, starting `lookback` groups before the live edge.
+					let open = async |delay: moq_mux::container::Delay, lookback: u64| {
 						// The window's renderer refuses a GPU surface it cannot import, so
 						// the decoder downloads those instead, all of them on a device
 						// that imports none.
@@ -278,7 +279,7 @@ impl<O: Output> Media<O> {
 							.subscribe(
 								moq_net::track::Subscription::default()
 									.with_priority(hang::catalog::PRIORITY.video)
-									.with_max_delay(max_delay),
+									.with_max_delay(delay.max),
 							)
 							.await?;
 						// Start at the live edge without asking the shared publisher
@@ -286,15 +287,55 @@ impl<O: Output> Media<O> {
 						// once the feed is live, so wait for it rather than read the backlog of
 						// a warm copy still waiting on its source; the wait ends with the track.
 						if let Some(largest) = subscriber.largest().await {
-							subscriber = subscriber.with_range(largest.group..);
+							subscriber = subscriber.with_range(largest.group.saturating_sub(lookback)..);
 						}
 						let format = catalog::hang::Container::try_from(config)?;
-						Ok::<_, anyhow::Error>((moq_mux::container::Consumer::new(subscriber, format), decoder))
+						// The playout delay is the target latency; the floor above bounds how far
+						// back the start can wait, but the consumer still learns both bounds.
+						let track = moq_mux::container::Consumer::new(subscriber, format).with_delay(delay);
+						Ok::<_, anyhow::Error>((track, decoder))
+					};
+					let opened = async {
+						let delay = moq_mux::container::Delay {
+							min: self.args.video_delay(),
+							max: Some(max_delay),
+						};
+						let (track, decoder) = open(delay, 0).await?;
+						// An intra-refresh rendition also runs a decoder with one more sweep
+						// of budget, joining a group earlier so its pictures stay clean, as
+						// `moq_video::decode::Consumer` does. Both share one upstream request.
+						let warmup = config.warmup.unwrap_or_default();
+						let refresh = if warmup.is_zero() {
+							None
+						} else {
+							// The min-delay decoder's delay plus one sweep, as in
+							// `moq_video::decode::Consumer`.
+							let delay = moq_mux::container::Delay {
+								min: delay.min.saturating_add(warmup),
+								max: Some(max_delay.saturating_add(warmup)),
+							};
+							let (track, decoder) = open(delay, 1).await?;
+							let interval = config
+								.framerate
+								.filter(|rate| rate.is_finite() && *rate > 0.0)
+								.and_then(|rate| Duration::try_from_secs_f64(rate.recip()).ok());
+							Some(Refresh {
+								track,
+								decoder,
+								interval,
+							})
+						};
+						Ok::<_, anyhow::Error>((track, decoder, refresh))
 					}
 					.await;
 					match opened {
-						Ok((track, decoder)) => {
-							tracing::info!(track = name, decoder = decoder.name(), "playing video rendition");
+						Ok((track, decoder, refresh)) => {
+							tracing::info!(
+								track = name,
+								decoder = decoder.name(),
+								refresh = refresh.is_some(),
+								"playing video rendition"
+							);
 							let video = Video {
 								presentation: self.presentation.clone(),
 								frames: self.video.clone(),
@@ -319,7 +360,7 @@ impl<O: Output> Media<O> {
 										Ok(()) = retired => {}
 									}
 								};
-								let result = until_stopped(video.run(track, decoder), stopped).await;
+								let result = until_stopped(video.run(track, decoder, refresh), stopped).await;
 								(Kind::Video, result.map(|(finished, _)| (finished, None)))
 							});
 							playback.started(Kind::Video, reference);
@@ -355,8 +396,11 @@ impl<O: Output> Media<O> {
 					// asked for, so a smaller budget would skip a group the playhead could
 					// still have reached, and would size the hole fill below to a playhead
 					// that does not exist.
-					decode.max_delay = self.args.max_delay().max(AUDIO_BUFFER_MIN);
-					decode.delay = self.args.fixed_delay();
+					decode.delay = moq_audio::decode::Delay {
+						min: self.args.fixed_delay().unwrap_or_default(),
+						max: Some(self.args.max_delay().max(AUDIO_BUFFER_MIN)),
+					};
+					decode.estimate = self.args.fixed_delay().is_none();
 					// The sink and the frame-duration math below both assume f32,
 					// so ask for it rather than inheriting the decoder default.
 					decode.output.format = moq_audio::Format::F32;
@@ -672,7 +716,7 @@ async fn play_audio<O: Output>(
 								.due(role.map(frame.timestamp)?)
 								.and_then(|at| at.checked_sub(first));
 							if let Some(at) = at {
-								moq_clock::sleep_until(at).await;
+								kio::clock::sleep_until(at).await;
 							}
 							ended = false;
 							// An end this frame did not cross ends the timeline it resumes.
@@ -745,7 +789,7 @@ async fn play_audio<O: Output>(
 					.due(mapped)
 					.and_then(|at| at.checked_sub(lead(delay, &frame)));
 				if let Some(at) = at {
-					moq_clock::sleep_until(at).await;
+					kio::clock::sleep_until(at).await;
 				}
 			}
 
@@ -809,11 +853,10 @@ async fn play_audio<O: Output>(
 async fn drain(sink: impl Sink) {
 	// The estimated target moves, so the depth the sink was opened with says
 	// nothing about what it holds now: read it at retirement instead.
-	let _ = moq_clock::timeout(sink.buffered() + AUDIO_DRAIN_GRACE, sink.finish()).await;
+	let _ = kio::clock::timeout(sink.buffered() + AUDIO_DRAIN_GRACE, sink.finish()).await;
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use bytes::Bytes;
 	use hang::catalog::{AudioCodec, AudioConfig};
@@ -863,8 +906,11 @@ mod tests {
 			.unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
-		options.delay = Some(delay);
-		options.max_delay = delay;
+		options.delay = moq_audio::decode::Delay {
+			min: delay,
+			max: Some(delay),
+		};
+		options.estimate = false;
 		options.output.format = moq_audio::Format::F32;
 		let consumer = moq_audio::decode::Consumer::new(
 			&broadcast.consume(),
@@ -966,8 +1012,11 @@ mod tests {
 		let mut audio = moq_mux::container::Producer::new(audio, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut video = moq_mux::container::Producer::new(video, Container::Legacy(moq_mux::container::Kind::Video));
 		let mut options = moq_audio::decode::Options::new();
-		options.delay = Some(delay);
-		options.max_delay = delay;
+		options.delay = moq_audio::decode::Delay {
+			min: delay,
+			max: Some(delay),
+		};
+		options.estimate = false;
 		options.output.format = moq_audio::Format::F32;
 		let consumer = moq_audio::decode::Consumer::new(
 			&broadcast.consume(),
@@ -1001,6 +1050,7 @@ mod tests {
 		let video_task = tokio::spawn(video_play.run(
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
 			Buffered(Vec::new()),
+			None,
 		));
 		let picture = |index: u64, keyframe: bool| moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_millis(index * 20).unwrap(),
@@ -1013,7 +1063,7 @@ mod tests {
 			pcm.keyframe = index == 0;
 			audio.write(pcm).unwrap();
 			video.write(picture(index, index == 0)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			kio::clock::sleep(PACKET_DURATION).await;
 		}
 		if audio_end {
 			audio.discontinuity().unwrap();
@@ -1121,8 +1171,11 @@ mod tests {
 			.unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
-		options.delay = Some(delay);
-		options.max_delay = delay;
+		options.delay = moq_audio::decode::Delay {
+			min: delay,
+			max: Some(delay),
+		};
+		options.estimate = false;
 		options.output.format = moq_audio::Format::F32;
 		options.output.sample_rate = Some(SAMPLE_RATE);
 		let consumer = moq_audio::decode::Consumer::new(
@@ -1204,8 +1257,11 @@ mod tests {
 		producer.discontinuity().unwrap();
 		// Joins at the end marker: the stopped encoder's media is already behind it.
 		let mut options = moq_audio::decode::Options::new();
-		options.delay = Some(delay);
-		options.max_delay = delay;
+		options.delay = moq_audio::decode::Delay {
+			min: delay,
+			max: Some(delay),
+		};
+		options.estimate = false;
 		options.start = moq_audio::decode::Start::Latest;
 		options.output.format = moq_audio::Format::F32;
 		let consumer = moq_audio::decode::Consumer::new(
@@ -1256,8 +1312,11 @@ mod tests {
 			.unwrap();
 		let mut producer = moq_mux::container::Producer::new(track, Container::Legacy(moq_mux::container::Kind::Audio));
 		let mut options = moq_audio::decode::Options::new();
-		options.delay = Some(delay);
-		options.max_delay = delay;
+		options.delay = moq_audio::decode::Delay {
+			min: delay,
+			max: Some(delay),
+		};
+		options.estimate = false;
 		options.output.format = moq_audio::Format::F32;
 		let consumer = moq_audio::decode::Consumer::new(
 			&broadcast.consume(),
@@ -1286,7 +1345,7 @@ mod tests {
 		});
 		for index in 0..5 {
 			producer.write(packet(index, 0.25)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			kio::clock::sleep(PACKET_DURATION).await;
 		}
 		// Video declares an end two seconds out, holding the audio replacement back.
 		let video = Role::new(presentation.clone(), Kind::Video);
@@ -1296,7 +1355,7 @@ mod tests {
 		const REPLACEMENT: u64 = 100;
 		for index in 0..REPLACEMENT {
 			producer.write(packet(5 + index, 0.5)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			kio::clock::sleep(PACKET_DURATION).await;
 		}
 		producer.finish().unwrap();
 		task.await.unwrap();
@@ -1349,6 +1408,7 @@ mod tests {
 		let video_task = tokio::spawn(video_play.run(
 			moq_mux::container::Consumer::new(subscriber, Container::Legacy(moq_mux::container::Kind::Video)),
 			Passthrough,
+			None,
 		));
 		let picture = |millis: u64, keyframe: bool| moq_mux::container::Frame {
 			timestamp: moq_net::Timestamp::from_millis(millis).unwrap(),
@@ -1358,7 +1418,7 @@ mod tests {
 		};
 		for index in 0..3 {
 			video.write(picture(index * 20, index == 0)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			kio::clock::sleep(PACKET_DURATION).await;
 		}
 		video.discontinuity().unwrap();
 		// A burst longer than the age budget evicts this replacement's only keyframe.
@@ -1456,7 +1516,7 @@ mod tests {
 		for index in 10..40 {
 			high.write(packet(index, 0.25)).unwrap();
 			low.write(packet(index, 0.5)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			kio::clock::sleep(PACKET_DURATION).await;
 		}
 		low.finish().unwrap();
 		catalog.finish().unwrap();
@@ -1492,13 +1552,13 @@ mod tests {
 		// Half a second muted, with the timeline running on through it.
 		let demand = audio.demand();
 		for _ in 0..25 {
-			tokio::time::sleep(PACKET_DURATION).await;
+			kio::clock::sleep(PACKET_DURATION).await;
 			assert!(demand.wanted().is_some(), "the mute unsubscribed");
 		}
 		enable(true);
 		for index in 35..60 {
 			audio.write(packet(index, 0.5)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			kio::clock::sleep(PACKET_DURATION).await;
 		}
 
 		settle(player, &recorder).await;
@@ -1536,7 +1596,7 @@ mod tests {
 		while index < 50 {
 			old.write(packet(index, OLD)).unwrap();
 			index += 1;
-			moq_clock::sleep_until(start + PACKET_DURATION * index as u32).await;
+			kio::clock::sleep_until(start + PACKET_DURATION * index as u32).await;
 		}
 
 		// The replacement joins the catalog, then the old track finishes.
@@ -1547,7 +1607,7 @@ mod tests {
 		drop(old);
 
 		while index < 100 {
-			moq_clock::sleep_until(start + PACKET_DURATION * index as u32).await;
+			kio::clock::sleep_until(start + PACKET_DURATION * index as u32).await;
 			new.write(packet(index, NEW)).unwrap();
 			index += 1;
 		}
@@ -1632,7 +1692,7 @@ mod tests {
 				_ => a.write(packet(index, BACK)).unwrap(),
 			}
 			index += 1;
-			moq_clock::sleep_until(start + PACKET_DURATION * index as u32).await;
+			kio::clock::sleep_until(start + PACKET_DURATION * index as u32).await;
 		}
 
 		settle(player, &recorder).await;
@@ -1692,7 +1752,7 @@ mod tests {
 		catalog::Producer,
 		moq_mux::container::Producer<Container, AudioConfig>,
 	) {
-		let request = tokio::time::timeout(Duration::from_secs(5), claim.requested_broadcast())
+		let request = kio::clock::timeout(Duration::from_secs(5), claim.requested_broadcast())
 			.await
 			.expect("the claim is asked")
 			.unwrap();
@@ -1707,7 +1767,7 @@ mod tests {
 	async fn write(audio: &mut moq_mux::container::Producer<Container, AudioConfig>, count: u64, sample: f32) {
 		for index in 0..count {
 			audio.write(packet(index, sample)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			kio::clock::sleep(PACKET_DURATION).await;
 		}
 	}
 
@@ -1723,7 +1783,7 @@ mod tests {
 	/// ends on its own: give it long enough to play out what it was handed, then
 	/// stop it.
 	async fn settle(player: tokio::task::JoinHandle<()>, recorder: &Recorder) {
-		tokio::time::sleep(Duration::from_secs(5)).await;
+		kio::clock::sleep(Duration::from_secs(5)).await;
 		for event in recorder.events() {
 			match event {
 				Event::Failed(err) => panic!("playback failed: {err}"),
@@ -1778,7 +1838,7 @@ mod tests {
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		let request = handler.requested_broadcast().await.unwrap();
 		request.reject(moq_net::Error::NotFound);
-		tokio::time::timeout(Duration::from_secs(1), player)
+		kio::clock::timeout(Duration::from_secs(1), player)
 			.await
 			.expect("a refusal held the player")
 			.unwrap();
@@ -1804,7 +1864,7 @@ mod tests {
 		// A restart without an epoch waits out the origin's update hold, since a
 		// withdrawal wave's stale route looks just like one, and the player joins the
 		// new broadcast at its live edge.
-		tokio::time::sleep(moq_net::origin::Config::default().update_hold).await;
+		kio::clock::sleep(moq_net::origin::Config::default().update_hold).await;
 		write(&mut new, 10, NEW).await;
 
 		settle(player, &recorder).await;
@@ -1839,7 +1899,7 @@ mod tests {
 		drop((old_broadcast, old_catalog, old));
 
 		// Offline for longer than any timeout the player might give up on.
-		tokio::time::sleep(Duration::from_secs(60)).await;
+		kio::clock::sleep(Duration::from_secs(60)).await;
 		assert!(!player.is_finished(), "the player stopped following the path");
 
 		let (_new_broadcast, _new_catalog, mut new) = publish(&origin, Default::default());
@@ -1935,7 +1995,7 @@ mod tests {
 		exact_catalog.finish().unwrap();
 		drop((exact_catalog, old));
 		// The broadcast ends while its route stands, so the player goes idle.
-		tokio::time::sleep(Duration::from_secs(60)).await;
+		kio::clock::sleep(Duration::from_secs(60)).await;
 
 		let pool = origin.requests("").unwrap();
 		drop(exact);
@@ -1970,7 +2030,7 @@ mod tests {
 		let player = tokio::spawn(media(&origin, Duration::from_millis(500), recorder.clone()).run());
 		for index in 0..50 {
 			old.write(packet(index, OLD)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			kio::clock::sleep(PACKET_DURATION).await;
 		}
 
 		exact.unannounce();
@@ -1978,7 +2038,7 @@ mod tests {
 		let (mirror, mirror_catalog, mut copy) = answer(&pool, &route).await;
 		for index in 50..60 {
 			copy.write(packet(index, NEW)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			kio::clock::sleep(PACKET_DURATION).await;
 		}
 
 		settle(player, &recorder).await;
@@ -2007,7 +2067,7 @@ mod tests {
 				broadcast.announce(route.clone().with_cost(5)).unwrap();
 			}
 			audio.write(packet(index, SAMPLE)).unwrap();
-			tokio::time::sleep(PACKET_DURATION).await;
+			kio::clock::sleep(PACKET_DURATION).await;
 		}
 
 		settle(player, &recorder).await;
@@ -2029,7 +2089,7 @@ mod tests {
 		let player = tokio::spawn(media(&origin, Duration::from_millis(50), recorder.clone()).run());
 		let mut audio = rendition(&broadcast, &catalog, "audio");
 		audio.write(packet(0, 0.25)).unwrap();
-		tokio::time::sleep(PACKET_DURATION).await;
+		kio::clock::sleep(PACKET_DURATION).await;
 		audio.finish().unwrap();
 		drop(audio);
 		catalog.finish().unwrap();
@@ -2054,7 +2114,7 @@ mod tests {
 		let start = Instant::now();
 		for index in 0..COUNT {
 			let ready = ((index + 1) * PACKET).div_ceil(BLOCK) * BLOCK;
-			moq_clock::sleep_until(start + Duration::from_secs_f64(ready as f64 / SAMPLE_RATE as f64)).await;
+			kio::clock::sleep_until(start + Duration::from_secs_f64(ready as f64 / SAMPLE_RATE as f64)).await;
 			audio.write(packet(index, 0.25)).unwrap();
 		}
 		settle(player, &recorder).await;
@@ -2104,7 +2164,7 @@ mod tests {
 		});
 		let mut options = moq_video::decode::Options::new();
 		options.decoder.kind = moq_video::decode::Kind::Software;
-		options.max_delay = delay;
+		options.delay.max = Some(delay);
 		let decoder = moq_video::decode::Sink::open(&catalog, &options.decoder).await.unwrap();
 		let subscriber = broadcast
 			.consume()
@@ -2126,7 +2186,7 @@ mod tests {
 				output: recorder.clone(),
 				max_delay: delay,
 			}
-			.run(track, decoder),
+			.run(track, decoder, None),
 		);
 		loop {
 			tokio::task::yield_now().await;

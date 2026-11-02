@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_video::render::{Renderer, wgpu};
 
 use crate::Error;

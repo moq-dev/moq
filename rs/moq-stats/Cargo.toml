@@ -19,15 +19,15 @@ categories = ["multimedia", "network-programming", "web-programming"]
 bench = ["moq-net/fuzz"]
 
 [dependencies]
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
-web-async = { workspace = true }
 
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }

@@ -112,7 +112,7 @@ async fn idle_video_bridges_do_not_gate_audio_catalog() {
 	)
 	.expect("push opus");
 
-	let snapshot = tokio::time::timeout(std::time::Duration::from_millis(1), updates.next())
+	let snapshot = kio::clock::timeout(std::time::Duration::from_millis(1), updates.next())
 		.await
 		.expect("idle video must not gate active audio")
 		.expect("catalog update")

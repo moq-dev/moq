@@ -1,0 +1,23 @@
+error: #[kio::wrapper] needs a `&Waiter` argument
+ --> tests/ui/wrapper_waiter.rs:8:14
+  |
+8 |     fn poll_none(&self) -> Poll<()> {
+  |                 ^^^^^^^
+
+error: #[kio::wrapper] needs exactly one `&Waiter` argument
+  --> tests/ui/wrapper_waiter.rs:13:43
+   |
+13 |     fn poll_two(&self, _a: &kio::Waiter, _b: &kio::Waiter) -> Poll<()> {
+   |                                              ^^^^^^^^^^^^
+
+error: the first `&Waiter` is here
+  --> tests/ui/wrapper_waiter.rs:13:25
+   |
+13 |     fn poll_two(&self, _a: &kio::Waiter, _b: &kio::Waiter) -> Poll<()> {
+   |                            ^^^^^^^^^^^^
+
+error: #[kio::wrapper] needs the waiter as `&Waiter`, not `&mut Waiter`
+  --> tests/ui/wrapper_waiter.rs:18:34
+   |
+18 |     fn poll_mutable(&self, _waiter: &mut kio::Waiter) -> Poll<()> {
+   |                                     ^^^^^^^^^^^^^^^^

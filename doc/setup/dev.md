@@ -18,7 +18,7 @@ match CI. `just check` and `just fix` refuse to run outside it; set
 | `just fix` | Format and lint the packages this branch changed, and regenerate their committed JS API reports (`js/*/api/`). |
 | `just check` | Compile, lint, and test the same scope. |
 | `just ci` | Run the batched landing gate locally, strictly. PRs into `main` get no other CI, so run it before every push. |
-| `just gate` | `just ci` over every package, as nightly and release PRs run it, split into the isolated feature shapes (`just gate rs_shapes`) and the rest (`just gate -rs_shapes`). |
+| `just gate` | `just ci` over every package, as nightly and release PRs run it. `just gate rs` runs only the named module. |
 | `just fix --all`, `just check --all` | The same, over every package. |
 | `just api-diff` | Diff every published API against its last release, the JS reports against ones rendered from `origin/release`. PRs into `release` run it; `--deny` fails a backport on any break. |
 | `just pub bbb <url>` | Publish Big Buck Bunny (also `tos`, `clock`, `gst`, `hls`). |

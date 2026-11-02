@@ -44,6 +44,9 @@ pub struct Video {
 	/// A map of track name to rendition configuration.
 	/// This is not an array in order for it to work with JSON Merge Patch.
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
+	///
+	/// A malformed rendition refuses the whole catalog when decoding.
+	#[serde(deserialize_with = "crate::catalog::deserialize_renditions")]
 	pub renditions: BTreeMap<String, VideoConfig>,
 
 	/// Render the video at this size in pixels.
@@ -227,7 +230,7 @@ pub struct VideoConfig {
 	#[serde_as(as = "Option<Hex>")]
 	pub description: Option<Bytes>,
 
-	/// The largest encoded width/height the track carries, fixed for its name.
+	/// The largest encoded width/height the track carries, fixed for its name, never zero.
 	///
 	/// The picture resizes in band at a keyframe below these ceilings, unless the
 	/// `description` pins it. Absent means unknown; a publisher may fill it once.
@@ -236,17 +239,12 @@ pub struct VideoConfig {
 	pub coded_height: Option<u32>,
 
 	/// The aspect ratio the whole picture is displayed at, as WebCodecs'
-	/// `VideoDecoderConfig.displayAspectWidth` / `displayAspectHeight`.
+	/// `VideoDecoderConfig.displayAspectWidth` / `displayAspectHeight`, never zero.
 	///
 	/// Absent means the decoded picture's own shape. A publisher with non-square
 	/// samples sets the picture's aspect here, never the sample aspect.
-	///
-	/// The `displayRatio*` aliases decode catalogs from publishers predating the
-	/// rename to `displayAspect*`; the current name is what we emit.
-	#[serde(alias = "displayRatioWidth")]
 	pub display_aspect_width: Option<u32>,
 	/// The height counterpart of `display_aspect_width`.
-	#[serde(alias = "displayRatioHeight")]
 	pub display_aspect_height: Option<u32>,
 
 	/// The colour the decoded pixels carry, so a renderer need not guess or reparse the bitstream.
@@ -274,8 +272,9 @@ pub struct VideoConfig {
 	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
 	pub interlaced: bool,
 
-	/// The maximum bitrate of the video track, if known.
+	/// The maximum bitrate of the video track, if known, at most 2^53 - 1.
 	#[serde(default)]
+	#[serde_as(as = "Option<crate::snapshot::Number>")]
 	pub bitrate: Option<u64>,
 
 	/// Whether this rendition may be selected. When false, no frames are coming and a consumer
@@ -413,6 +412,25 @@ impl VideoConfig {
 	}
 }
 
+impl crate::catalog::Rendition for VideoConfig {
+	fn check(&self) -> crate::Result<()> {
+		for (field, value) in [
+			("codedWidth", self.coded_width),
+			("codedHeight", self.coded_height),
+			("displayAspectWidth", self.display_aspect_width),
+			("displayAspectHeight", self.display_aspect_height),
+		] {
+			if value == Some(0) {
+				return Err(crate::Error::Zero(field));
+			}
+		}
+		if let Some(projection) = &self.projection {
+			projection.check()?;
+		}
+		Ok(())
+	}
+}
+
 fn is_zero(value: &i32) -> bool {
 	*value == 0
 }
@@ -527,20 +545,6 @@ mod test {
 		assert_eq!(encoded["displayAspectHeight"], 3);
 		assert!(encoded.get("displayRatioWidth").is_none());
 		assert!(encoded.get("displayRatioHeight").is_none());
-	}
-
-	#[test]
-	fn decodes_legacy_display_ratio_keys() {
-		// A catalog serialized by a pre-0.20 publisher used displayRatio*; the
-		// alias keeps the aspect ratio from being silently dropped.
-		let json = serde_json::json!({
-			"codec": "avc1.640028",
-			"displayRatioWidth": 16,
-			"displayRatioHeight": 9,
-		});
-		let config: VideoConfig = serde_json::from_value(json).expect("failed to decode legacy keys");
-		assert_eq!(config.display_aspect_width, Some(16));
-		assert_eq!(config.display_aspect_height, Some(9));
 	}
 
 	#[test]

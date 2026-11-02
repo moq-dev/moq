@@ -51,6 +51,14 @@ test("the publish controls start idle and drive source, mute, and visibility", a
 		const source = (name: string) =>
 			page.getByRole("tabpanel", { name: "Source" }).getByRole("button", { name, exact: true });
 		await source("Camera").click();
+		// Wait for real capture so the clicks below cannot race the live layout change.
+		await page.waitForFunction(() => {
+			const publish = document.querySelector<MoqPublish>("moq-publish");
+			return !!publish?.sources.video.peek()?.out.source.peek();
+		});
+		expect(await page.locator("moq-publish video, moq-publish canvas").count()).toBe(0);
+		const player = await page.locator("moq-publish-ui .player").boundingBox();
+		expect(player?.height).toBeGreaterThan(0);
 		expect(await state(page)).toEqual({ source: "camera", muted: false, invisible: false });
 		expect(await page.locator("moq-publish").getAttribute("source")).toBe("camera");
 
@@ -77,6 +85,93 @@ test("the publish controls start idle and drive source, mute, and visibility", a
 		await server.close();
 	}
 }, 30_000);
+
+test.each(["video", "canvas"] as const)(
+	"publish controls follow a %s preview's rendered size",
+	async (tag) => {
+		const server = await createServer({
+			configFile: false,
+			root: `${import.meta.dir}/publish-ui`,
+			plugins: [worklet()],
+			server: { host: "127.0.0.1", port: 0 },
+		});
+		await server.listen();
+		const browser = await launch(["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"]);
+		try {
+			const page = await browser.newPage({ viewport: { width: 960, height: 720 } });
+			await page.goto(server.resolvedUrls?.local[0] ?? "");
+			await page.getByRole("button", { name: "Settings", exact: true }).click();
+			await page
+				.getByRole("tabpanel", { name: "Source" })
+				.getByRole("button", { name: "Camera", exact: true })
+				.click();
+			await page.waitForFunction(() => {
+				const publish = document.querySelector<MoqPublish>("moq-publish");
+				return !!publish?.sources.video.peek()?.out.source.peek();
+			});
+			await page.evaluate((tag) => {
+				const publish = document.querySelector<MoqPublish>("moq-publish");
+				if (!publish) throw new Error("missing publish element");
+				publish.backend = "2d";
+				const preview = document.createElement(tag);
+				preview.style.width = "100%";
+				preview.style.height = "auto";
+				if (preview instanceof HTMLVideoElement) {
+					preview.autoplay = true;
+					preview.muted = true;
+				}
+				publish.append(preview);
+			}, tag);
+			// Both preview types must size the box before we hide and remove them.
+			await page.waitForFunction((tag) => {
+				const publish = document.querySelector<MoqPublish>("moq-publish");
+				const preview = publish?.querySelector(tag);
+				const player = publish?.parentElement?.shadowRoot?.querySelector(".player");
+				const display = publish?.video.in.capture.peek()?.out.display.peek();
+				return (
+					preview &&
+					player &&
+					(preview instanceof HTMLVideoElement
+						? preview.videoWidth > 0
+						: display && preview.width === display.width && preview.height === display.height) &&
+					Math.abs(player.getBoundingClientRect().height - preview.getBoundingClientRect().height) < 0.5
+				);
+			}, tag);
+			const player = page.locator("moq-publish-ui .player");
+			const visible = await player.boundingBox();
+			expect(visible?.height).toBeGreaterThan(0);
+			const empty = (expected: boolean) =>
+				page.waitForFunction(
+					(expected) =>
+						!!document.querySelector("moq-publish-ui")?.shadowRoot?.querySelector(".player--empty") ===
+						expected,
+					expected,
+				);
+			const preview = page.locator(`moq-publish ${tag}`);
+			await preview.evaluate((preview) => {
+				(preview as HTMLElement).style.display = "none";
+			});
+			await empty(true);
+			expect((await player.boundingBox())?.height).toBeCloseTo(visible?.height ?? 0, 0);
+			// Removing a visible preview must also fall back to the reserved size.
+			await preview.evaluate((preview) => {
+				(preview as HTMLElement).style.display = "";
+			});
+			await empty(false);
+			await preview.evaluate((preview) => preview.remove());
+			await empty(true);
+			expect(await page.locator("moq-publish video, moq-publish canvas").count()).toBe(0);
+			expect((await player.boundingBox())?.height).toBeCloseTo(visible?.height ?? 0, 0);
+			await page.getByRole("button", { name: "Hide video", exact: true }).click();
+			await page.getByRole("button", { name: "Mute microphone", exact: true }).click();
+			expect(await state(page)).toEqual({ source: "camera", muted: true, invisible: true });
+		} finally {
+			await browser.close();
+			await server.close();
+		}
+	},
+	30_000,
+);
 
 test("a selected camera stays announced while real capture is reopening", async () => {
 	const server = await createServer({

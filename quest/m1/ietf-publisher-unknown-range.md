@@ -20,10 +20,12 @@ than only an eviction. `NotFound` and `Old` map to `0x10C`. Decide in the PR
 whether `Unsupported` and `NotFetchable` mean "unknown" too, or need their own
 handling, and record the reason.
 
-Decided 2026-10-28 (maintainer): it starts after the quests below land,
-since each edits the same publisher. Rust FETCH parity, also listed then,
-landed in [moq-dev/moq#6999](https://github.com/moq-dev/moq/pull/6999). A
-third was IETF fill timeout, which
+Decided 2026-10-28 (maintainer): it starts after the open quests that edit
+the same publisher land. Those have landed: Rust FETCH parity in
+[moq-dev/moq#6999](https://github.com/moq-dev/moq/pull/6999), and the
+SUBSCRIBE properties opt-out in
+[moq-dev/moq#7085](https://github.com/moq-dev/moq/pull/7085). A third was
+IETF fill timeout, which
 [moq-dev/moq#7194](https://github.com/moq-dev/moq/pull/7194) dropped for
 [one group](https://github.com/moq-dev/moq/pull/7204), which edited the same
 paths and has landed. A FETCH or fill now lists at most one group, so this
@@ -33,7 +35,3 @@ Tests: a listed group evicted before it is written, for FETCH on drafts 18
 and 22 and for a draft-22 fill, each failing before the fix. Run `just test interop --all` if the framing order changes.
 
 Public API: none. Wire: none; the marker exists in both drafts.
-
-## Required
-
-- [SUBSCRIBE honors the properties opt-out](/quest/m1/subscribe-timestamps.md) - edits the same publisher

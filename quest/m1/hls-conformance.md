@@ -36,7 +36,6 @@ with both checks intact.
 ## Required
 
 - [HLS export hands a rendition over at a same-codec config change](/quest/m1/hls-reinit-same-codec.md) - the conformance test's same-codec switch fails until it lands
-- [The last AAC segment advertises its full duration](/quest/m1/hls-final-aac-segment.md) - the conformance test's audio check fails until it lands
 
 ## Related
 

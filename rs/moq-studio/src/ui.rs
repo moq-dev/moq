@@ -224,7 +224,7 @@ impl Panels {
 				state.compositor.cut();
 			}
 			if ui.button(format!("Fade ({} ms)", fade.as_millis())).clicked() {
-				state.compositor.fade(fade, moq_clock::Instant::now());
+				state.compositor.fade(fade, kio::clock::Instant::now());
 			}
 			ui.label(format!(
 				"Program: {}",
@@ -505,8 +505,10 @@ impl Panels {
 					ui.label("Viewers");
 					ui.label(if stats.watched.load(Ordering::Relaxed) {
 						"watching"
-					} else {
+					} else if output.on_demand {
 						"none; not encoding"
+					} else {
+						"none"
 					});
 					ui.end_row();
 				}

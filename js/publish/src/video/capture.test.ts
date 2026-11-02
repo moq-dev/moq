@@ -1,4 +1,4 @@
-import { expect, mock, spyOn, test } from "bun:test";
+import { expect, mock, test } from "bun:test";
 import { Manual, Milli, Nano } from "@moq/clock";
 import * as Moq from "@moq/net";
 import { Effect, Signal } from "@moq/signals";
@@ -9,6 +9,15 @@ mock.module("./capture-worker.ts?worklet", () => ({ default: async () => "blob:f
 const { Capture } = await import("./capture");
 const { Encoder } = await import("./encoder");
 const { Renderer } = await import("../preview");
+
+/** Install a Manual clock reading `ms`, set forward the way a mocked `performance.now()` was. */
+function manualAt(ms: number) {
+	const clock = new Manual();
+	const installed = clock.install();
+	const set = (to: number) => clock.jump(Nano(Nano.fromMilli(Milli(to)) - clock.now()));
+	set(ms);
+	return { set, close: () => installed.close(), [Symbol.dispose]: () => installed.close() };
+}
 
 class Frame {
 	// Every frame built, so a test can assert none is left open.
@@ -194,7 +203,7 @@ const open = () => Frame.all.filter((frame) => !frame.closed);
 
 test("a reader attaching to a still source starts with the current picture, stamped now", async () => {
 	using input = frameSource();
-	const clock = spyOn(performance, "now").mockReturnValue(1_000);
+	const clock = manualAt(1_000);
 	const capture = new Capture({ source: input.source });
 	const effect = new Effect();
 
@@ -204,7 +213,7 @@ test("a reader attaching to a still source starts with the current picture, stam
 		await flush();
 
 		// Attach 90s later.
-		clock.mockReturnValue(91_000);
+		clock.set(91_000);
 		const fanout = capture.out.frames.peek();
 		if (!fanout) throw new Error("no fanout");
 		const reader = fanout.subscribe(effect).getReader();
@@ -222,7 +231,7 @@ test("a reader attaching to a still source starts with the current picture, stam
 	} finally {
 		effect.close();
 		capture.close();
-		clock.mockRestore();
+		clock.close();
 	}
 
 	expect(open()).toEqual([]);
@@ -230,9 +239,9 @@ test("a reader attaching to a still source starts with the current picture, stam
 
 test("a reader attaching after another never starts below what that one read", async () => {
 	using input = frameSource();
-	// The capture clock runs 200ms ahead of performance.now(), as it does when the first frame,
+	// The capture clock runs 200ms ahead of the installed clock, as it does when the first frame,
 	// which anchors the capture clock, arrived late.
-	const clock = spyOn(performance, "now").mockReturnValue(1_000);
+	const clock = manualAt(1_000);
 	const capture = new Capture({ source: input.source });
 	const first = new Effect();
 	const second = new Effect();
@@ -249,7 +258,7 @@ test("a reader attaching after another never starts below what that one read", a
 		first.close();
 
 		// A demand gap shorter than the clocks' offset.
-		clock.mockReturnValue(1_050);
+		clock.set(1_050);
 		const after = fanout.subscribe(second).getReader();
 		const resumed = (await after.read()).value as unknown as Frame;
 		expect(resumed.timestamp).toBe(1_250_000);
@@ -257,7 +266,7 @@ test("a reader attaching after another never starts below what that one read", a
 	} finally {
 		second.close();
 		capture.close();
-		clock.mockRestore();
+		clock.close();
 	}
 
 	expect(open()).toEqual([]);
@@ -266,7 +275,7 @@ test("a reader attaching after another never starts below what that one read", a
 test("a reader attaching to a frame held late still starts at now", async () => {
 	using input = frameSource();
 	// The frame reached the fanout 200ms after its stamp, as on a busy main thread.
-	const clock = spyOn(performance, "now").mockReturnValue(1_200);
+	const clock = manualAt(1_200);
 	const capture = new Capture({ source: input.source });
 	const first = new Effect();
 	const second = new Effect();
@@ -280,7 +289,7 @@ test("a reader attaching to a frame held late still starts at now", async () => 
 		(await before.read()).value?.close();
 		first.close();
 
-		clock.mockReturnValue(1_250);
+		clock.set(1_250);
 		const after = fanout.subscribe(second).getReader();
 		const resumed = (await after.read()).value as unknown as Frame;
 		expect(resumed.timestamp).toBe(1_250_000);
@@ -288,7 +297,7 @@ test("a reader attaching to a frame held late still starts at now", async () => 
 	} finally {
 		second.close();
 		capture.close();
-		clock.mockRestore();
+		clock.close();
 	}
 
 	expect(open()).toEqual([]);
@@ -388,7 +397,7 @@ test("closing the capture releases a copy its reader never read", async () => {
 // https://github.com/moq-dev/moq/issues/4778
 test("an encoder resuming on a still source encodes a keyframe of the current picture, stamped now", async () => {
 	using input = frameSource();
-	const clock = spyOn(performance, "now").mockReturnValue(1_000);
+	const clock = manualAt(1_000);
 
 	const keys: number[] = [];
 	class RecordingVideoEncoder {
@@ -450,7 +459,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 		// Drop the probe's own encode.
 		keys.length = 0;
 
-		clock.mockReturnValue(91_000);
+		clock.set(91_000);
 		live.set(track);
 		await flush();
 
@@ -460,7 +469,7 @@ test("an encoder resuming on a still source encodes a keyframe of the current pi
 		capture.close();
 		track.finish();
 		track.close();
-		clock.mockRestore();
+		clock.close();
 		if (original) Object.defineProperty(globalThis, "VideoEncoder", original);
 		else Reflect.deleteProperty(globalThis, "VideoEncoder");
 	}

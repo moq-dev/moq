@@ -318,7 +318,7 @@ pub enum Error {
 impl Error {
 	/// The error for a rendition whose container this build does not recognize.
 	pub(crate) fn unsupported_container(container: &hang::catalog::UnknownContainer) -> Self {
-		Self::UnsupportedContainer(container.kind().unwrap_or("<missing>").to_string())
+		Self::UnsupportedContainer(container.kind().to_string())
 	}
 
 	/// The reason a track this error aborts gives its subscribers. Only a transport error has a

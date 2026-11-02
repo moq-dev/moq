@@ -28,8 +28,8 @@ and its trait-versus-bridge comparison:
 - **Generics, not `dyn`.** Static dispatch keeps the frame hot path free of
   vtable calls, and moq-net's own types are the default type parameter, so
   plaintext callers keep their source and pay nothing. The traits carry no
-  `Send` bounds that wasm can't meet (see `rs/AGENTS.md`); a native caller
-  that spawns adds the bound at its spawn site.
+  `Send` bounds beyond moq-net's own; a caller that spawns adds the bound at its
+  spawn site.
 - **Mirror moq-net's current API exactly.** The trait methods are the
   methods writers and readers call today, with the same names, arguments,
   and errors: `create_track`, `reserve_track`, `requests`, `demand`,

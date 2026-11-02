@@ -20,17 +20,19 @@
 
 use std::{
 	alloc::{self, Layout},
+	cell::UnsafeCell,
 	fmt,
 	mem::{MaybeUninit, offset_of},
 	panic::{RefUnwindSafe, UnwindSafe},
 	ptr::{self, NonNull},
-	sync::atomic::Ordering,
+	sync::{
+		Arc,
+		atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering, fence},
+	},
 };
 
 use crossbeam_epoch as epoch;
 use smallvec::SmallVec;
-
-use crate::sync::{Arc, AtomicPtr, AtomicU64, AtomicUsize, UnsafeCell, fence};
 
 /// Slots in the first segment: one, since many logs never hold more.
 const FIRST_SEGMENT: usize = 1;
@@ -69,10 +71,6 @@ struct Segment<T> {
 	owners: AtomicUsize,
 	/// The segment after this one, set before anything is written into it.
 	next: AtomicPtr<Segment<T>>,
-	/// Read by every reader access and written by the free, so loom flags a reader that
-	/// reaches a segment the collector may have freed.
-	#[cfg(loom)]
-	alive: UnsafeCell<()>,
 	slots: [Slot<T>; 0],
 }
 
@@ -106,8 +104,6 @@ impl<T> Segment<T> {
 				taken: AtomicUsize::new(0),
 				owners: AtomicUsize::new(1),
 				next: AtomicPtr::new(ptr::null_mut()),
-				#[cfg(loom)]
-				alive: UnsafeCell::new(()),
 				slots: [],
 			});
 			for at in 0..capacity {
@@ -137,10 +133,7 @@ impl<T> Segment<T> {
 	/// `segment` stays live for `'a`.
 	unsafe fn header<'a>(segment: NonNull<Self>) -> &'a Self {
 		// SAFETY: live, per the caller.
-		let header = unsafe { segment.as_ref() };
-		#[cfg(loom)]
-		header.alive.with(|_| ());
-		header
+		unsafe { segment.as_ref() }
 	}
 
 	/// The written entry at `index`.
@@ -153,8 +146,7 @@ impl<T> Segment<T> {
 		// SAFETY: per the caller, the slot is in bounds, written, and never written again.
 		unsafe {
 			let at = (index - Self::header(segment).start) as usize;
-			let value = (*Self::slot(segment, at)).with(|slot| slot);
-			(*value).assume_init_ref()
+			(*(*Self::slot(segment, at)).get()).assume_init_ref()
 		}
 	}
 
@@ -167,7 +159,7 @@ impl<T> Segment<T> {
 	unsafe fn drop_entries(segment: NonNull<Self>, range: std::ops::Range<usize>) {
 		for at in range {
 			// SAFETY: written and unreachable, per the caller.
-			unsafe { (*Self::slot(segment, at)).with_mut(|value| (*value).assume_init_drop()) };
+			unsafe { (*(*Self::slot(segment, at)).get()).assume_init_drop() };
 		}
 	}
 
@@ -205,23 +197,11 @@ impl<T> Segment<T> {
 			return;
 		}
 		fence(Ordering::Acquire);
+		// The header holds only atomics and the slots `MaybeUninit`s whose entries are
+		// already dropped, so nothing needs dropping before the free.
+		let capacity = header.capacity;
 		// SAFETY: the last owner, so nothing else uses the segment.
-		unsafe {
-			#[cfg(loom)]
-			header.alive.with_mut(|_| ());
-			let capacity = header.capacity;
-			for at in 0..capacity {
-				let slot = Self::slot(segment, at).cast_mut();
-				// A write access even to an empty slot, so loom flags any read racing it.
-				(*slot).with_mut(|_| ());
-				ptr::drop_in_place(slot);
-			}
-			ptr::drop_in_place(segment.as_ptr());
-			// Loom's cells are dropped above, so a racing access fails the model; the
-			// memory stays mapped so that failure is a report rather than a crash.
-			#[cfg(not(loom))]
-			alloc::dealloc(segment.as_ptr().cast(), Self::layout(capacity));
-		}
+		unsafe { alloc::dealloc(segment.as_ptr().cast(), Self::layout(capacity)) };
 	}
 }
 
@@ -354,7 +334,7 @@ impl<T: Send + Sync + 'static> Writer<T> {
 		let at = (end - header.start) as usize;
 		// SAFETY: slot `at` is in bounds and past `filled`, so no reader reads it until the
 		// stores below publish it, and nothing wrote it before.
-		unsafe { (*Segment::slot(tail, at)).with_mut(|slot| (*slot).write(value)) };
+		unsafe { (*(*Segment::slot(tail, at)).get()).write(value) };
 		// Release so a reader, or the free, that sees the count sees the slot.
 		header.filled.store(at + 1, Ordering::Release);
 		self.shared.end.store(end + 1, Ordering::Release);
@@ -652,7 +632,7 @@ impl<T> Read<'_, T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod test {
 	use std::sync::{Arc as StdArc, Mutex};
 

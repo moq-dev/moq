@@ -63,14 +63,18 @@ phase is a 206 s build of moq-net's dependents and a 110 s run of 9,049 tests.
 What remains for a moq-net edit, largest first:
 
 - The test build recompiles every dependent after a moq-net edit. Candidates
-  are the epic's [thin generics](/quest/m0/ci/btree-keys.md) and
-  [hakari](/quest/m0/ci/hakari.md) levers, or running the rs lint beside the
+  are the epic's [hakari](/quest/m0/ci/hakari.md) lever (the BTree thin-generics
+  lever was measured at about 30 ms of CPU per build and dropped), or running the rs lint beside the
   test build in a second target directory, which trades CPU for wall time
   against the epic's CPU measure. Decided 2026-10-30 (user): defer that
   parallel lint; measure it after the slow-tests and hakari quests land.
 - The test run is the [slow tests](/quest/m0/ci/slow-tests.md) quest's.
-- The lint's remaining 230 s: net-features (62 s), the dev loom compile,
-  `cargo doc`, and the wasm and io_uring clippy passes.
+- The lint's remaining 230 s: the dev loom compile and `cargo doc`. Decided
+  2026-10-31 (maintainer, see the [epic](/quest/m0/ci/README.md)): the gate
+  drops the loom compile, the Send-depth check (now its own Nightly job), the
+  feature shapes, and the feature contracts (net-features's 62 s among them),
+  and tests the relay's io_uring runtime in the one test build instead of a
+  separate clippy pass.
 - Measure the other routes the same way: a moq-ffi edit, which selects every
   binding's lane under `CHECK_JOBS=3`, and a JS-only edit.
 - `just test` has no root recipe: bare `just test` lists the cross-language
@@ -86,4 +90,4 @@ What remains for a moq-net edit, largest first:
 
 - [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the largest test-time lever
 - [Unify dependency features](/quest/m0/ci/hakari.md) - cache hits across feature shapes
-- [Land main through quest land](/quest/m0/ci/land.md) - the queue gate that keeps checks moved out of the local gate
+- [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - the queue gate that keeps checks moved out of the local gate

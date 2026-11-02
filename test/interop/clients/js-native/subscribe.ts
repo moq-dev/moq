@@ -119,7 +119,10 @@ function containerFormat(config: Catalog.VideoConfig | Catalog.AudioConfig, kind
 
 async function video(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.VideoConfig): Promise<number> {
 	const sub = bc.track(name).subscribe({ priority: 0, maxDelay: MAX_DELAY });
-	const consumer = new Container.Consumer(sub, { format: containerFormat(config, "video"), maxDelay: MAX_DELAY });
+	const consumer = new Container.Consumer(sub, {
+		format: containerFormat(config, "video"),
+		delay: { max: MAX_DELAY },
+	});
 	try {
 		for (;;) {
 			const next = await consumer.next();
@@ -185,7 +188,7 @@ async function audio(bc: Moq.Broadcast.Consumer, name: string, config: Catalog.A
 	const sub = bc.track(name).subscribe({ priority: Catalog.PRIORITY.audio, maxDelay: AUDIO_MAX_DELAY });
 	const consumer = new Container.Consumer(sub, {
 		format: containerFormat(config, "audio"),
-		maxDelay: AUDIO_MAX_DELAY,
+		delay: { max: AUDIO_MAX_DELAY },
 	});
 	const feed = (async () => {
 		// The consumer also hands back the backlog the relay served behind the live edge, older

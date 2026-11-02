@@ -1,4 +1,4 @@
-# [L] Per-stream deadlines
+# [L] Per-stream and per-datagram deadlines
 
 ## Goal
 
@@ -10,7 +10,9 @@ still unacknowledged and there is time for an acknowledgment and one
 retransmission to land, the sender asks for an immediate ACK and probes early
 instead of waiting a full PTO. moq-net sets the deadline per group stream from
 the subscription's `max_delay` and the group's expiry, so no MoQ wire
-change is needed.
+change is needed. Datagrams get the same: a queued datagram past its
+deadline is dropped from the send buffer instead of sent late, so a
+congested viewer receives fresh datagrams rather than seconds-old ones.
 
 ## Plan
 
@@ -20,11 +22,11 @@ Implement in `moq-quic`.
   exactly as today.
 - On loss detection, before queueing a retransmission for a stream with a
   deadline, estimate the arrival instant as now plus the forward one-way
-  delay. Start with `min_rtt / 2`, corrected by the peer's reported ACK delay;
-  the [receive-timestamps spike](/quest/m2/quic-realtime/receive-ts.md) measures whether
-  receive-time differences can improve that estimate, accounting for clock
-  offset, drift, and uncertainty. They do not alone measure absolute one-way
-  delay. If the estimate is past the deadline,
+  delay. Start with `min_rtt / 2`, corrected by the peer's reported ACK delay.
+  Measure whether receive-time differences (`moq_congestion::Acked::received`,
+  from the [realtime epic](/quest/m2/quic-realtime/README.md)) improve that
+  estimate, accounting for clock offset, drift, and uncertainty. They do not
+  alone measure absolute one-way delay. If the estimate is past the deadline,
   reset the stream with a dedicated error code and drop its retransmit ranges,
   including bytes already lost, so flow control is returned in one step.
 - Proactive tail-loss probe: when the newest in-flight packet carries deadline
@@ -44,6 +46,37 @@ Implement in `moq-quic`.
   existing group-expired code on the MoQ wire, so a viewer sees the same
   signal it sees for a relay-side expiry today.
 
+Datagrams. Decided 2026-11-01 (maintainer, follow-up planning after the
+2026-11-01 /quest-afk run), from
+[moq-dev/moq#7517](https://github.com/moq-dev/moq/pull/7517)'s datagram
+delivery bench: behind a 2 Mbit/s bottleneck fed 4 Mbit/s, about 25% of
+datagrams were lost and the survivors' p99 was about 8.2 s (p50 about 50 ms)
+on lite-06, lite-07-wip, and moq-transport-22 alike. Congestion control kept
+the shaper's queue from overflowing; the sender's 1 MiB QUIC datagram buffer
+absorbed the overload and dropped only on overflow, and nothing expired a
+datagram by age. Of #7517's options (a send deadline, a smaller send buffer,
+or oldest-first within a subscription), the deadline was picked, because it
+uses the delay budget the subscriber already stated instead of a buffer size
+or ordering that suits only some rates.
+
+- moq-quic: a datagram carries an optional deadline, and the send path
+  drops a queued datagram whose deadline has passed (counted, and reported
+  in the connection's stats) before building a packet with it. A datagram
+  without one behaves as today. The same estimate of forward delay applies:
+  drop one that can't arrive before its deadline.
+- moq-net: the datagram writer sets the deadline from the subscription's
+  max delay (`Delay::max` once [subscription delay](/quest/m1/subscription-delay.md)
+  renames it), through the same `transport::poll` seam as the stream
+  deadline; a backend without it sends as today.
+- Keep newest-first within a subscription; with stale datagrams expiring,
+  it no longer starves the fresh ones.
+- Re-run #7517's `datagram_delivery` bench: p99 behind the bottleneck stays
+  within the subscription's max delay, and the loopback viewer is unchanged.
+  Percentiles are over delivered datagrams, so also report offered,
+  delivered, and expired counts separately, and check that datagrams
+  delivered within the max delay don't fall below today's: the deadline may
+  drop only what would have arrived too late anyway.
+
 Measure on bufferbloat: a rate below the media bitrate behind a deep but
 finite queue whose overflow demonstrably drops packets, with competing
 loss-based traffic if needed to fill it. Random loss may prove recovery
@@ -59,6 +92,4 @@ reset moq-net already sends.
 
 ## Related
 
-- [QUIC receive-timestamps spike](/quest/m2/quic-realtime/receive-ts.md) - measures whether
-  receive-time differences improve an explicit delay estimator over half-RTT
 - [ACK hook](/quest/m2/quic-ack-hook.md) - the same pattern for a moq-net method backed by `moq-quic`

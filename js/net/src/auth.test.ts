@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
+import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
 import type { Getter } from "@moq/signals";
 import { Duplicate, type Grant, Handle, type Issued, type Request, type Requests, Unsupported } from "./auth.ts";
 import { accept as acceptSession, connect as connectSession, type Established } from "./connection/index.ts";
@@ -391,7 +391,7 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		void transport.closed.then(() => {
 			closed = true;
 		});
-		await new Promise((resolve) => setTimeout(resolve, 10));
+		await sleep(Nano.fromMilli(Milli(10)));
 		expect(closed).toBe(false);
 
 		announced.close();

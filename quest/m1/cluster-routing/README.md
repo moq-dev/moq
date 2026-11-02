@@ -75,7 +75,7 @@ Decided with the maintainer, 2026-10-13:
   sent routes learned from other connections. Relays default on;
   applications choose per P2P connection (on for redundancy, off for
   conference offload). Browser tabs stay off until the
-  [Rust-to-TypeScript](/quest/m2/rs2ts/README.md) port. Applications
+  [Rust-to-TypeScript](/quest/m2/rs2ts-js.md) port. Applications
   explicitly select P2P connections; discovery does not dial everyone.
 - Each CDN broadcast enters a local network once by configuration: local
   peers outrank a backup uplink, and origin aggregation joins the rest.

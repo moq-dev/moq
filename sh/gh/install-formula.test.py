@@ -2,9 +2,9 @@
 
 import importlib.util
 import json
-from pathlib import Path
 import tempfile
 import unittest
+from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("install_formula", Path(__file__).with_name("install-formula.py"))
 module = importlib.util.module_from_spec(spec)
@@ -30,9 +30,13 @@ class InstallFormulaTest(unittest.TestCase):
             self.assertNotIn("moq-relay", json.loads((tap / "formula_renames.json").read_text()))
             module.install("moq-relay", rendered, tap)
             module.install("moq-cli", rendered, tap)
-            self.assertEqual(json.loads((tap / "formula_renames.json").read_text()), {
-                "prior": "unrelated", "moq-cli": "moq",
-            })
+            self.assertEqual(
+                json.loads((tap / "formula_renames.json").read_text()),
+                {
+                    "prior": "unrelated",
+                    "moq-cli": "moq",
+                },
+            )
             self.assertEqual((tap / "README.md").read_text(), "brew install moq-dev/tap/moq moq-dev/tap/moq-relay\n")
             self.assertEqual((formulas / "moq-relay.rb").read_text(), "new")
 

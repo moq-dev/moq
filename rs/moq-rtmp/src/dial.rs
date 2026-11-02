@@ -88,7 +88,7 @@ impl Client<TcpStream> {
 	/// For `rtmps://` or any other transport, establish the stream yourself and use
 	/// [`with_stream`](Self::with_stream) instead.
 	pub async fn connect(addr: SocketAddr, app: &str) -> Result<Self> {
-		moq_clock::timeout(crate::server::REQUEST_TIMEOUT, async {
+		kio::clock::timeout(crate::server::REQUEST_TIMEOUT, async {
 			let stream = TcpStream::connect(addr).await?;
 			crate::server::configure_socket(&stream, addr);
 			// Advertise a tcUrl derived from the dial target: several ingest servers
@@ -107,7 +107,7 @@ impl<S: Stream> Client<S> {
 	/// The bring-your-own-transport entry point: establish the connection (and, for
 	/// `rtmps://`, the TLS handshake) yourself, then hand the stream here.
 	pub async fn with_stream(stream: S, app: &str) -> Result<Self> {
-		moq_clock::timeout(
+		kio::clock::timeout(
 			crate::server::REQUEST_TIMEOUT,
 			Self::with_stream_config(stream, app, None),
 		)
@@ -116,7 +116,7 @@ impl<S: Stream> Client<S> {
 	}
 
 	async fn with_stream_config(mut stream: S, app: &str, tc_url: Option<String>) -> Result<Self> {
-		let remaining = moq_clock::timeout(crate::server::HANDSHAKE_TIMEOUT, client_handshake(&mut stream))
+		let remaining = kio::clock::timeout(crate::server::HANDSHAKE_TIMEOUT, client_handshake(&mut stream))
 			.await
 			.map_err(|_| anyhow::anyhow!("RTMP handshake timed out"))??;
 
@@ -149,8 +149,11 @@ impl<S: Stream> Client<S> {
 					ClientSessionResult::RaisedEvent(ClientSessionEvent::ConnectionRequestAccepted) => {
 						break 'connect;
 					}
-					ClientSessionResult::RaisedEvent(ClientSessionEvent::ConnectionRequestRejected { description }) => {
-						return Err(anyhow::anyhow!("rtmp connect rejected: {description}").into());
+					ClientSessionResult::RaisedEvent(ClientSessionEvent::ConnectionRequestRejected {
+						code,
+						description,
+					}) => {
+						return Err(anyhow::anyhow!("rtmp connect rejected: {code}: {description}").into());
 					}
 					ClientSessionResult::RaisedEvent(_) | ClientSessionResult::UnhandleableMessageReceived(_) => {}
 				}
@@ -391,7 +394,7 @@ impl<S: Stream> Client<S> {
 		loop {
 			let n = tokio::select! {
 				result = self.stream.read(&mut buffer) => result?,
-				_ = moq_clock::sleep_until(publisher.media_deadline) => anyhow::bail!("remote sent no RTMP media before timeout"),
+				_ = kio::clock::sleep_until(publisher.media_deadline) => anyhow::bail!("remote sent no RTMP media before timeout"),
 			};
 			if n == 0 {
 				return Ok(false);
@@ -417,7 +420,7 @@ impl<S: Stream> Client<S> {
 		for result in results {
 			match result {
 				ClientSessionResult::OutboundResponse(packet) => {
-					moq_clock::timeout_at(publisher.media_deadline, self.stream.write_all(&packet.bytes))
+					kio::clock::timeout_at(publisher.media_deadline, self.stream.write_all(&packet.bytes))
 						.await
 						.map_err(|_| {
 							anyhow::anyhow!("remote blocked RTMP control output before the media deadline")
@@ -453,7 +456,7 @@ impl<S: Stream> Client<S> {
 	/// Pump the session until the publish/play request is accepted, writing any
 	/// outbound packets and failing on an explicit rejection.
 	async fn await_event(&mut self, direction: Direction) -> Result<()> {
-		moq_clock::timeout(crate::server::REQUEST_TIMEOUT, async {
+		kio::clock::timeout(crate::server::REQUEST_TIMEOUT, async {
 			let mut buffer = [0u8; READ_BUFFER];
 			loop {
 				while let Some(result) = self.work.pop_front() {
@@ -468,8 +471,15 @@ impl<S: Stream> Client<S> {
 								ClientSessionEvent::StreamMetadataReceived { .. }
 								| ClientSessionEvent::UnhandleableAmf0Data { .. },
 							) => self.metadata.record(),
-							// A refused publish/play arrives as an onStatus *failure* code, not a
-							// Rejected event; surface it instead of hanging until the peer closes.
+							// A refused publish/play arrives as an `_error`, or as an onStatus
+							// *failure* code; surface it instead of hanging until the peer closes.
+							(Direction::Publish, ClientSessionEvent::PublishRequestRejected { code, description })
+							| (Direction::Play, ClientSessionEvent::PlaybackRequestRejected { code, description }) => {
+								return Err(anyhow::anyhow!(
+									"rtmp {direction} rejected by remote: {code}: {description}"
+								)
+								.into());
+							}
 							// Benign progress codes (e.g. NetStream.Play.Reset, which precedes
 							// .Start) come through here too, so only fail on error codes.
 							(_, ClientSessionEvent::UnhandleableOnStatusCode { code }) if is_status_failure(&code) => {
@@ -581,7 +591,7 @@ struct Publisher {
 	broadcast: moq_net::origin::Publication,
 	// This pull's publisher instance, so pulling again replaces it rather than resuming into it.
 	epoch: moq_net::Epoch,
-	media_deadline: moq_clock::Instant,
+	media_deadline: kio::clock::Instant,
 }
 
 impl Publisher {
@@ -600,13 +610,13 @@ impl Publisher {
 			importer,
 			catalog,
 			epoch,
-			media_deadline: moq_clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT,
+			media_deadline: kio::clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT,
 			broadcast: handle,
 		})
 	}
 
 	fn push(&mut self, tag_type: u8, timestamp: u32, body: &Bytes) -> anyhow::Result<()> {
-		self.media_deadline = moq_clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT;
+		self.media_deadline = kio::clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT;
 		flv::import(&mut self.importer, tag_type, timestamp, body)
 	}
 
@@ -638,11 +648,6 @@ impl Publisher {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use std::time::Duration;
 
@@ -651,7 +656,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn client_handshakes_and_requests_have_finite_budgets() {
 		let (stream, _peer) = tokio::io::duplex(4096);
-		let start = moq_clock::Instant::now();
+		let start = kio::clock::Instant::now();
 		assert!(Client::with_stream(stream, "live").await.is_err());
 		assert_eq!(start.elapsed(), crate::server::HANDSHAKE_TIMEOUT);
 
@@ -669,7 +674,7 @@ mod tests {
 				linger: Duration::ZERO,
 				metadata: Default::default(),
 			};
-			let start = moq_clock::Instant::now();
+			let start = kio::clock::Instant::now();
 			assert!(client.await_event(direction).await.is_err());
 			assert_eq!(start.elapsed(), crate::server::REQUEST_TIMEOUT);
 			let origin = moq_tokio::origin::spawn();
@@ -678,7 +683,7 @@ mod tests {
 				let (packet, _) = client.session.send_ping_request().unwrap();
 				client.work.push_back(ClientSessionResult::OutboundResponse(packet));
 			}
-			let start = moq_clock::Instant::now();
+			let start = kio::clock::Instant::now();
 			let mut pull = Box::pin(client.pull_media(&mut publisher));
 			assert!(futures::poll!(pull.as_mut()).is_pending());
 			tokio::time::advance(crate::server::PUBLISH_IDLE_TIMEOUT).await;
@@ -819,7 +824,7 @@ mod tests {
 			let mut listed = copy.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 			assert!(listed.recv_group().await.unwrap().is_some());
 
-			let start = tokio::time::Instant::now();
+			let start = kio::clock::now();
 			catalog.finish().unwrap();
 			broadcast.close();
 			drop(importer);
@@ -832,6 +837,44 @@ mod tests {
 			lingering.await.unwrap();
 			assert_eq!(start.elapsed(), linger, "push={push}");
 			assert!(copy.is_closed());
+		}
+	}
+
+	/// A server that answers the publish or play with `_error` fails the client with
+	/// that error's code and description, not with the server closing afterwards.
+	#[tokio::test(start_paused = true)]
+	async fn a_rejected_request_reports_its_code_and_description() {
+		let peer = "127.0.0.1:1935".parse().unwrap();
+		for push in [true, false] {
+			let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+			let server = tokio::spawn(async move {
+				match accept_stream(server_io, peer).await.unwrap().unwrap() {
+					Request::Publish(publish) => publish.reject("no ingest here").await.unwrap(),
+					Request::Play(play) => play.reject("no ingest here").await.unwrap(),
+				}
+			});
+
+			let upstream = moq_tokio::origin::spawn();
+			let client = Client::with_stream(client_io, "live").await.unwrap();
+			let err = match push {
+				true => {
+					let (_broadcast, _catalog, _importer) = source(&upstream);
+					client.publish("cam0", exported(upstream.consume()).await).await
+				}
+				false => {
+					client
+						.pull("cam0", &upstream, moq_net::Path::from_static("live/cam0"))
+						.await
+				}
+			}
+			.unwrap_err()
+			.to_string();
+			let expected = match push {
+				true => "rtmp publish rejected by remote: NetStream.Publish.Denied: no ingest here",
+				false => "rtmp play rejected by remote: NetStream.Play.Failed: no ingest here",
+			};
+			assert!(err.ends_with(expected), "push={push}: {err}");
+			server.await.unwrap();
 		}
 	}
 
@@ -911,7 +954,7 @@ mod tests {
 		let epoch = moq_net::Epoch::mint();
 		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&epoch)).unwrap();
 		let (_new, _new_catalog) = publish(&upstream, &epoch, NEW_IDR);
-		tokio::time::timeout(Duration::from_secs(5), instances.next())
+		kio::clock::timeout(Duration::from_secs(5), instances.next())
 			.await
 			.expect("the new publisher takes over")
 			.unwrap();
@@ -1002,7 +1045,7 @@ mod tests {
 			.await
 			.expect("subscribe catalog")
 			.ordered();
-		let mut group = tokio::time::timeout(Duration::from_secs(5), catalog_track.next_group())
+		let mut group = kio::clock::timeout(Duration::from_secs(5), catalog_track.next_group())
 			.await
 			.expect("catalog read timed out")
 			.expect("catalog read")

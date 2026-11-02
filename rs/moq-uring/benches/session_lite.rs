@@ -16,6 +16,7 @@ mod support;
 #[cfg(all(target_os = "linux", feature = "quic"))]
 #[expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "benchmarks measure themselves on the host clock"
 )]
 mod linux {

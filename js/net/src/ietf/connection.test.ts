@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { offered } from "../connection/extensions.ts";
 import { exchangeSetup } from "../connection/handshake.ts";
-import { SessionCode, StreamCode, StreamError } from "../error.ts";
+import { SessionCode } from "../error.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
 import * as Path from "../path.ts";
@@ -119,37 +119,42 @@ for (const [version, alpn] of [
 	}
 }
 
-/** A cancelled listing leaves the session usable for a new listing of the same prefix. */
-test("SUBSCRIBE_TRACKS accepts an empty origin", async () => {
-	const version = Version.DRAFT_22;
-	const pair = createMockTransportPair(ALPN.DRAFT_22);
-	const control = await Stream.open(pair.server, { version });
-	const connection = new Connection({
-		url: new URL("https://example.com"),
-		quic: pair.server,
-		control,
-		version,
-		client: false,
-	});
+/** We list no tracks by PUBLISH: each SUBSCRIBE_TRACKS gets NOT_SUPPORTED, and the session stays usable. */
+for (const [version, alpn] of [
+	[Version.DRAFT_18, ALPN.DRAFT_18],
+	[Version.DRAFT_20, ALPN.DRAFT_20],
+	[Version.DRAFT_22, ALPN.DRAFT_22],
+] as const) {
+	test(`SUBSCRIBE_TRACKS is refused on its own stream on ${alpn}`, async () => {
+		const pair = createMockTransportPair(alpn);
+		const control = await Stream.open(pair.server, { version });
+		const connection = new Connection({
+			url: new URL("https://example.com"),
+			quic: pair.server,
+			control,
+			version,
+			client: false,
+		});
 
-	try {
-		// A disjoint second listing proves the first left the session usable.
-		for (let i = 0; i < 2; i++) {
-			const stream = await Stream.open(pair.client, { version });
-			await stream.writer.u62(BigInt(SUBSCRIBE_TRACKS_ID));
-			await Message.encode(stream.writer, async (writer) => {
-				await writer.u62(BigInt(i * 2));
-				await Namespace.encode(writer, Path.from(`prefix-${i}`));
-				await writer.u53(0);
-			});
-			expect(await stream.reader.u53()).toBe(RequestOk.id);
-			await RequestOk.decode(stream.reader, version);
-			stream.abort(new StreamError(StreamCode.Cancel));
+		try {
+			// A second listing of the same prefix is refused the same way, each spending its Request ID.
+			for (let i = 0; i < 2; i++) {
+				const stream = await Stream.open(pair.client, { version });
+				await stream.writer.u62(BigInt(SUBSCRIBE_TRACKS_ID));
+				await Message.encode(stream.writer, async (writer) => {
+					await writer.u62(BigInt(i * 2));
+					await Namespace.encode(writer, Path.from("prefix"));
+					await writer.u53(0);
+				});
+				expect(await stream.reader.u53()).toBe(RequestError.id);
+				expect((await RequestError.decode(stream.reader, version)).errorCode).toBe(0x3);
+				expect(await stream.reader.done()).toBe(true);
+			}
+		} finally {
+			connection.abort();
 		}
-	} finally {
-		connection.abort();
-	}
-});
+	});
+}
 
 /** A SUBSCRIBE_NAMESPACE always asks for namespaces, so it gets the ones we publish. */
 test("SUBSCRIBE_NAMESPACE gets the published namespaces", async () => {

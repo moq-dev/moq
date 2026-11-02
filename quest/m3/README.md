@@ -19,11 +19,13 @@ m4's upstream waits in here and moved m2 work with no consumer.
 
 ## Required
 
+- [Mesh over ICE](/quest/m3/mesh-ice.md) - mesh nodes on different networks connect directly through the P2P line's ICE pairs, once a mesh user needs it
 - [Video validation hardware is on hand](/quest/m3/video-hardware-access.md) - the machines the validation runs on, including a Raspberry Pi 4/5 for embedded presenting
 - [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were never run on real machines, including PipeWire on KDE, the camera portal, and a Pi
 - [An Ada NVIDIA GPU is available](/quest/m3/ada-gpu.md) - the hardware AV1 NVENC is verified on
 - [NVENC AV1](/quest/m3/nvenc-av1.md) - AV1 encode through NVENC, once an Ada-generation GPU is available
 - [#2147](/quest/m3/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - NVIDIA Main10 encode, once a 10-bit source exists in the pipeline
+- [NVDEC and NVENC share CUDA arrays](/quest/m3/nvenc-cuda-arrays.md) - SDK 13.1 application-owned CUDA arrays drop the per-frame device copy, on driver 610+
 - [Embedded video](/quest/m3/video-embedded.md) - verify a Pi 4/5 presents through the existing Vulkan and CPU paths, adding EGL import only if that fails
 - [Multi-plane PipeWire cameras](/quest/m3/pipewire-camera-planes.md) - I420 and NV12 cameras that deliver one memory block per plane capture
 - [Video codec coverage](/quest/m3/video-codec-coverage.md) - prioritize remaining native AV1 and portable decoder gaps once a consumer asks
