@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Echo as Schema } from "@moq/hang";
 import type * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
@@ -10,7 +10,7 @@ import { checkName, Echo } from "./echo";
 import type { Received } from "./feedback";
 
 const flush = async (): Promise<void> => {
-	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+	for (let i = 0; i < 5; i++) await yieldNow();
 };
 
 // A watched broadcast whose catalog the test sets directly.

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Manual, Milli, Nano, wall } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Path } from "@moq/net";
 import { Tally } from "./feedback";
@@ -38,7 +38,7 @@ test("an arrival pairs the media timestamp with milliseconds since the MoQ epoch
 	tally.arrive(live, Milli(1234.9));
 	const arrival = tally.report(live.path).video.arrival;
 	expect(arrival?.timestamp).toBe(1234);
-	expect(arrival?.wall).toBeCloseTo(Date.now() - Catalog.MOQ_EPOCH_UNIX_MILLIS, -3);
+	expect(arrival?.wall).toBeCloseTo(wall() - Catalog.MOQ_EPOCH_UNIX_MILLIS, -3);
 });
 
 test("keeps the most recent few catalog broadcasts", () => {
