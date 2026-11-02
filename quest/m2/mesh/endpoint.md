@@ -29,7 +29,7 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
 - The secret key comes from `moq_sign::SecretKey::load_or_generate`.
 - A mesh daemon (Kixel's, outside this repository, decided 2026-11-02) is
   built on this API, so a process either embeds an `Endpoint` or talks to a
-  local mesh node's relay.
+  local [mesh relay node](/quest/m2/mesh/node.md).
 - Write a short porting note into the [guide](/quest/m2/mesh/guide.md).
 
 ## Required

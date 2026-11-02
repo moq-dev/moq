@@ -30,4 +30,5 @@ another key is rejected by a subscriber.
 
 ## Required
 
-- [Endpoint API](/quest/m2/mesh/endpoint.md) - the node whose links the track describes
+- [Endpoint API](/quest/m2/mesh/endpoint.md) - the application node whose links the track describes
+- [Mesh relay node](/quest/m2/mesh/node.md) - the relay node whose links the track describes

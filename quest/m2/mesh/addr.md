@@ -27,7 +27,7 @@ fingerprint; admit the peer only after it proves its own enrollment, as LAN
 peers do. Amend that sentence of the docs with the mesh exception.
 
 - Settle the track name and schema and record them here; keep it separate
-  from `.status` so a node can read hints without the UI's payload.
+  from `.status` so a node can read hints without the status track's payload.
 - Publish every non-loopback interface address, public ones included: a host
   with a public address is directly dialable from anywhere, with no punching.
   A private address that collides with an unrelated host on another network
@@ -45,4 +45,4 @@ if it exists.
 
 ## Required
 
-- [Endpoint API](/quest/m2/mesh/endpoint.md) - the enrolled node identity hints and links are verified against
+- [Mesh relay node](/quest/m2/mesh/node.md) - the enrolled relay node that publishes and dials the hints

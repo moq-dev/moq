@@ -2,13 +2,14 @@
 
 ## Goal
 
-A mesh node keeps direct links to about log N of its directly reachable peers
+A mesh relay node keeps direct links to about log N of its directly reachable peers
 instead of all of them, chosen deterministically so every node computes the
 same overlay from the member list, and forwards for the rest. Any two nodes in
 a reachable group reach each other through the overlay in about log N hops,
 a departed node's links heal, an optional per-node degree cap bounds a
 constrained robot's links, and traffic crosses the relay uplink, which every
-node keeps, when the overlay partitions.
+relay node keeps, when the overlay partitions. An application embedding
+`Endpoint` reaches the overlay through a relay node.
 
 ## Plan
 
@@ -27,7 +28,7 @@ and the fallback path.
   drop the longest fingers first. Small meshes come out close to full mesh on
   their own.
 - Forwarding and route choice are [cluster routing](/quest/m1/cluster-routing/README.md)'s:
-  each mesh node is already a relay, overlay links are LAN-cost links, and relay
+  overlay links join relay nodes as LAN-cost links, and relay
   uplinks stay `upstream` links costed above them. Nothing routes outside the
   shared priority/cost rules.
 - Membership churn recomputes the ring; hold a change briefly so a flapping
@@ -42,7 +43,7 @@ Update `doc/bin/relay/cluster.md` and the [guide](/quest/m2/mesh/guide.md) if it
 
 ## Required
 
-- [Endpoint API](/quest/m2/mesh/endpoint.md) - the enrolled node identity hints and links are verified against
+- [Mesh relay node](/quest/m2/mesh/node.md) - the enrolled relay node that dials the overlay
 
 ## Related
 

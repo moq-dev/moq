@@ -82,7 +82,7 @@ Decided 2026-10-31 with the maintainer (moq.pro's mesh planning interview):
 - `.status` carries each link's RTT, and an application embedding `Endpoint`
   publishes it too ([status track](/quest/m2/mesh/status.md)).
 
-This epic owns the end-to-end test: three relay nodes with the mesh enabled,
+This epic owns the end-to-end test: three [mesh relay nodes](/quest/m2/mesh/node.md),
 two in network namespaces sharing a LAN segment and a third behind a relay
 only, enrolled through `moq auth`; an `Endpoint` on each dials the others'
 services, taking the LAN path between the first two and the relay path to
@@ -93,6 +93,7 @@ the third, and survives a relay restart.
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - a local relay dials its relays and prefers LAN peers
 - [Byte streams](/quest/m2/stream/README.md) - lossless TCP-level streams over MoQ
 - [Endpoint API](/quest/m2/mesh/endpoint.md) - an iroh-shaped `Endpoint` that connects to an endpoint ID and service and accepts byte streams
+- [Mesh relay node](/quest/m2/mesh/node.md) - a relay node enrolls into a mesh, dials its relays, and admits only enrolled LAN peers
 - [Address hints](/quest/m2/mesh/addr.md) - nodes publish their addresses on mesh tracks and dial each other directly where mDNS cannot find them
 - [Sparse overlay](/quest/m2/mesh/overlay.md) - each node keeps about log N deterministic direct links, forwards for the rest, and falls back to relays across a partition
 - [Status track](/quest/m2/mesh/status.md) - a signed `.status` track per node with its links and per-link RTTs
