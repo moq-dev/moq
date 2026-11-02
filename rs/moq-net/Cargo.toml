@@ -57,7 +57,6 @@ serde_json = { workspace = true }
 # (tokio::time::pause/advance) is test-only, so it must not leak into the normal
 # dependency feature set.
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "test-util", "time"] }
-tracing-test = { workspace = true }
 workspace-hack = { path = "../workspace-hack" }
 
 # Thread and process CPU timing in the session benchmark.
