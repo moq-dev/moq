@@ -17,7 +17,7 @@ mod support;
 fn request_reply(c: &mut criterion::Criterion) {
 	use std::{net::UdpSocket, num::NonZeroUsize, time::Instant};
 
-	use criterion::{BenchmarkId, Throughput};
+	use criterion::Throughput;
 	use moq_uring::{Config, Worker, quic, udp};
 
 	const ALPN: &str = "worker-turns";
@@ -76,10 +76,10 @@ fn request_reply(c: &mut criterion::Criterion) {
 						(streams, held)
 					})
 					.expect("worker");
-				let id = BenchmarkId::new(format!("connections-{connections}/bytes-{bytes}"), passes);
+				let id = format!("connections-{connections}/bytes-{bytes}/passes-{passes}");
 				group.throughput(Throughput::Bytes((connections * (64 + bytes)) as u64));
 				let mut reply = vec![0; bytes];
-				group.bench_function(&id, |b| {
+				group.bench_function(id.clone(), |b| {
 					b.iter_custom(|rounds| {
 						let before = handle.metrics().snapshot();
 						let start = Instant::now();
