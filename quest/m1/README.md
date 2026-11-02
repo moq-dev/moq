@@ -135,7 +135,8 @@ per-frame CPU growth since #5926.
 - [Address groups by timestamp](/quest/m1/time-addressing/README.md) - group start timestamps replace sequence numbers in the moq-net API and lite-07 wire, while old subscribers, old publishers, and published JS clients keep working
 - [Pre-cut audit findings](/quest/m1/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
 - [Vendored code has every upstream fix it needs](/quest/m1/vendor-sync/README.md) - quinn, libv4l-rs, nvidia-video-codec-sdk, rust-media-libs, cros-codecs, and UniFFI generator fixes are ported or planned, once per release cycle
-- [Security audit findings](/quest/m1/security-audit/README.md) - fix the verified relay, importer, moq-c, browser, and CI findings of the 2026-10-27 external security audit
+- [fMP4 refusals keep framing](/quest/m1/fmp4-refusal-framing.md) - a box refused at its header stops dropping the rest of its call's input, and the interleaved import benchmark is re-measured
+- [MKV leaf element limits](/quest/m1/mkv-leaf-limits.md) - `CodecID`, `DocType`, and `CodecPrivate` are refused past per-element size limits instead of read whole
 - [Delete the tests that don't earn their cost](/quest/m1/prune-tests.md) - an off-cycle test cost sweep deletes tests whose cost outweighs their signal and makes the rest cheaper
 - [Remove the dependencies that don't earn their weight](/quest/m1/prune-deps.md) - Rust, JS, and vendored dependencies that are trivial, duplicated, or serve features not worth keeping are removed
 - [Remove what dominates build time](/quest/m1/prune-build-time.md) - the crates, features, and code that cost the most build time are removed or made cheaper
@@ -178,6 +179,7 @@ per-frame CPU growth since #5926.
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [The shared pacer holds its rate under 2 Mbit/s](/quest/m1/pacer-low-rate.md) - a rate-paced controller stops sending up to twice its pacing rate at low rates, landed with a BBR3 retune that keeps the probe budgets
+- [A reconfigure keeps the published jitter and delay floor](/quest/m1/catalog-jitter-floor.md) - `Rendition::set` floors unsupplied jitter and delay at the catalog's values, so a same-codec reconfigure after a jitter rise no longer aborts TS import
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
 - [Legacy lite close drain](/quest/m1/lite-legacy-close-drain.md) - a lite-01..06 graceful close never cuts a final group the subscriber has not read
@@ -187,9 +189,7 @@ per-frame CPU growth since #5926.
 - [JS ordered reads wait only on owed groups](/quest/m1/js-ordered-owed.md) - @moq/net matches Rust's owed-group wait
 - [Binding announcements always carry captures](/quest/m1/ffi-required-captures.md) - moq-ffi and its generated bindings make `captures` a required list, as #7266 always sets it
 - [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - a decoder-identity change under the same codec string starts a new init and segment tag
-- [A JS reader finishes after a clean close](/quest/m1/js-close-range-finish.md) - a range ending below the cache delivers what's held and then ends
 - [fMP4 decode times keep increasing](/quest/m1/fmp4-bframe-decode-time.md) - fragments shorter than a GOP of B-frame video never step `tfdt` backwards
-- [A truncated MKV ends its tracks at finish](/quest/m1/mkv-truncated-finish.md) - `finish()` refusing truncated input still ends the tracks, so subscribers stop waiting
 - [moq-quic deletes its remaining 0-RTT code](/quest/m1/quic-zero-rtt-leftovers.md) - only the code that drops a 0-RTT packet remains, with a test
 - [Gate the no-em-dash rule](/quest/m1/em-dash-gate.md) - `just check` fails on an em dash in any tracked text file
 - [Every package shares one minor version](/quest/m1/shared-version.md) - a recipe sets every published package to one minor at the cut (next: 0.22.0), and `just check` enforces it and the `0.0.x` rule for experiments

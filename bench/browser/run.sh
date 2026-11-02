@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Real-browser transport and media benchmarks against a temporary relay.
 #
-#     bench/browser/run.sh [BASE] [--smoke] [--rounds N] [--scenarios transport,cmaf,media]
+#     bench/browser/run.sh [BASE] [--smoke] [--rounds N] [--scenarios transport,cmaf,media,racing]
 #
 # Variants, each bundled from the same page sources:
 #   current  this checkout, the reference
