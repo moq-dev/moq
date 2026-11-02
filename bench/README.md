@@ -432,13 +432,14 @@ unavailable CPU clock fail the run; timing never does. The nightly runs
 reconnects x 64 characters, and keeps its run directory as the `bench-browser`
 artifact.
 
-The in-memory frame, retained-history, gap ledger, cached-group replay, and
-resume-history paths also run directly in Chromium:
+The in-memory frame, retained-history, gap ledger, bandwidth allocation, cached-group
+replay, and resume-history paths also run directly in Chromium:
 
 ```bash
 nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench drift --out .tmp/drift.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench ledger --out .tmp/ledger.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench bandwidth --out .tmp/bandwidth.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench replay --out .tmp/replay.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench resume-history --out .tmp/resume-history.json before=/path/to/main current=. aa=.
 ```
@@ -454,7 +455,13 @@ against every checkout, sweeping retained groups, publishers, and readers. Repla
 and group setup stay outside drift timing; each parked read checks its live
 payload. `ledger` uses one fixture against every checkout's internal ledger, sweeping
 ascending, descending, shuffled, and rolling-expiration arrivals over the retained
-gap count. It includes each arrival's expiration and coverage checks.
+gap count. It includes each arrival's expiration and coverage checks. `bandwidth`
+uses one fixture against every checkout's allocator, sweeping connections,
+reservations, priority tiers, idle reservations and observers. It times an estimate
+change, a demand change and a ceiling change until the allocator republishes, and a
+peek of every reservation, checking every grant against a reference division. Its
+Rust counterpart is `cargo bench -p moq-net --features fuzz --bench bandwidth`, whose
+`BANDWIDTH_COUNTS=<iterations>` mode prints allocations and wakes per operation.
 The drift sweep includes untimed controls and timed groups with decode-order
 B-frames, independently varying publisher and reader counts and retained history.
 Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
@@ -489,8 +496,8 @@ route hold, from Chromium's precise memory info; `serve_us` and
 `read_us` include no setup. Bun's collector scans its
 stack conservatively, so the fixture refuses to run there.
 
-The browser smoke lane preserves one measured round of all five fixtures, and drift,
-ledger and replay also run in the nightly JS benchmark leg. Timing is
+The browser smoke lane preserves one measured round of all six fixtures, and drift,
+ledger, bandwidth and replay also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
 ## Pattern and container coverage

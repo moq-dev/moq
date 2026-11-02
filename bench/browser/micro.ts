@@ -16,7 +16,14 @@ const { values, positionals } = parseArgs({
 });
 const benchmark = values.bench;
 // The rows each benchmark prints per run.
-const ROWS: Record<string, number> = { frames: 26, drift: 36, ledger: 12, replay: 72, "resume-history": 72 };
+const ROWS: Record<string, number> = {
+	frames: 26,
+	drift: 36,
+	ledger: 12,
+	bandwidth: 44,
+	replay: 72,
+	"resume-history": 72,
+};
 if (!Object.hasOwn(ROWS, benchmark)) throw new Error(`--bench must be one of ${Object.keys(ROWS).join(", ")}`);
 const rounds = Number(values.rounds);
 if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("--rounds must be a positive integer");
@@ -48,7 +55,7 @@ for (const [name, root] of roots) {
 							: undefined,
 					);
 					build.onLoad(
-						{ filter: /\/bench\/(frames|drift|ledger|replay|resume-history)\.ts$/ },
+						{ filter: /\/bench\/(frames|drift|ledger|bandwidth|replay|resume-history)\.ts$/ },
 						async ({ path }) => {
 							const source = await Bun.file(path).text();
 							if (benchmark !== "frames")

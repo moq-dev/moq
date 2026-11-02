@@ -8999,7 +8999,7 @@ impl Subscriber {
 mod test {
 	use super::*;
 	use crate::frame;
-	use crate::model::test_tracing::count_drop_warnings;
+	use crate::test_tracing::count_drop_warnings;
 	use std::time::Duration;
 
 	/// Mint a track for tests with a default parent broadcast, since tracks are
