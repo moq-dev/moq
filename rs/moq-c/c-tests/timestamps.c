@@ -102,7 +102,7 @@ int main(void) {
     }
     CHECK(moq_publish_track_frame((uint32_t)track, payload, sizeof(payload), NULL) == MOQ_ERROR_MOQ);
 
-    CHECK(moq_origin_request((uint32_t)origin, path, strlen(path), on_broadcast, &c) > 0);
+    CHECK(moq_origin_request((uint32_t)origin, path, strlen(path), NULL, 0, on_broadcast, &c) > 0);
     WAIT_FOR(&c, c.broadcast);
     int32_t frames = moq_consume_track((uint32_t)c.broadcast, "ticks", 5, NULL, on_frame, &c);
     CHECK(frames > 0);

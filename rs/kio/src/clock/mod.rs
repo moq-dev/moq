@@ -13,6 +13,8 @@
 //!   simulator inside `sim::run`, and a [`Deadlines`] queue on a thread that
 //!   [entered](Deadlines::enter) it, which is how a runtime that reads the host
 //!   clock itself (an io_uring worker) becomes a backend.
+//! - [`Clock::current`] captures the ambient clock, so stamps taken through it
+//!   keep one timeline whichever thread or runtime takes them.
 //!
 //! The `runtime` feature arms timers on tokio's clock. Without it, reads fall back
 //! to std, and waiting on the host clock panics.
@@ -32,6 +34,7 @@
 //! The `serde` feature adds `serde::UnixSeconds`, matching existing integer
 //! Unix-second JSON encodings for wall times.
 
+mod captured;
 mod deadline;
 #[cfg(feature = "manual")]
 mod installed;
@@ -46,6 +49,7 @@ pub mod sim;
 mod timer;
 mod wall;
 
+pub use captured::Clock;
 pub use deadline::{Deadline, Deadlines, Entered};
 #[cfg(feature = "manual")]
 pub use installed::Installed;
