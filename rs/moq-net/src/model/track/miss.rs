@@ -881,7 +881,7 @@ impl Misses {
 		}
 	}
 
-	fn give_up(&mut self, groups: ops::Range<u64>, given_up: &mut GivenUp) {
+	pub(super) fn give_up(&mut self, groups: ops::Range<u64>, given_up: &mut GivenUp) {
 		if groups.is_empty() {
 			return;
 		}
