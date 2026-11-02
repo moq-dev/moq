@@ -5,6 +5,10 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`MoqAnnounce.captures` is `Vec<String>` instead of `Option<Vec<String>>`. Remove optional checks and pass an empty list when constructing an announcement for a filter without wildcards. Regenerate bindings and rebuild the matching native library together.
+
 ### Decoder outputs take a `MoqDelay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
 `MoqAudioDecoderOutput` replaces `max_delay` and the playout `delay: Option<Duration>` with `delay: Option<MoqDelay>` and `estimate: bool` (default `true`).

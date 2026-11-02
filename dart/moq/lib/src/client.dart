@@ -266,9 +266,8 @@ final class Moq {
 
   /// Drain within one second, then stop the client.
   ///
-  /// Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
-  /// Lite versions, including the default lite-06, wait only for transport ACKs.
-  /// IETF also waits for transport ACKs.
+  /// `moq-lite-05` and newer wait for the peer to receive finished tails; older
+  /// Lite versions and IETF wait only for transport ACKs.
   Future<void> close() async {
     try {
       session.shutdown();

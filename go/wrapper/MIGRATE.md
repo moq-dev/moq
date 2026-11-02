@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`Announce.Captures` is `[]string` instead of `*[]string`. Remove pointer checks and dereferences; an empty slice means the filter has no wildcards. Regenerate bindings and rebuild with the matching native library.
+
 ### Decoder outputs take a `media.Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
 `audio.DecoderOutput` replaces `MaxDelay` and the playout `Delay *time.Duration` with `Delay *media.Delay` and `Estimate *bool` (nil estimates).

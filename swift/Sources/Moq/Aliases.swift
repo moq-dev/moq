@@ -59,7 +59,8 @@ public typealias AnnounceRoute = MoqFFI.MoqAnnounceRoute
 /// hop ids (oldest first), and its static production and link cost, lower wins.
 public typealias Route = MoqFFI.MoqRoute
 /// A route over a prefix: the origin-relative `prefix`, what each filter
-/// wildcard matched (`captures`), and the `route` serving it. Resolve a path with `OriginConsumer.request`.
+/// wildcard matched (`captures`, a required list, empty without wildcards), and the `route` serving it.
+/// Resolve a path with `OriginConsumer.request`.
 public typealias Announce = MoqFFI.MoqAnnounce
 /// What an `AnnounceConsumer` yields: `.start`, `.update`, `.end`, or
 /// `.restart` (request the path again), each carrying an `Announce`.

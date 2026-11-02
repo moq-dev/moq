@@ -17,7 +17,7 @@ Precedence is CLI, then env, then file, then defaults.
 ```toml
 [listen]
 bind = "[::]:443"                    # QUIC (UDP), as --listen. Omit for a stream-only relay.
-version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all.
+version = ["moq-lite-05"]            # Restrict accepted versions. Omit for all but moq-lite-07-wip.
 timeout = "10s"                      # Handshake deadline. "0" waits forever.
 implementation = "edge/1"            # SETUP name for the relay. Omit for moq-relay/<v> moq-net-rs/<v>, "" to send none.
 
