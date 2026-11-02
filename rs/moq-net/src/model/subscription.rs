@@ -5,8 +5,10 @@ use std::{
 
 use crate::Timestamp;
 
+mod runs;
 mod window;
-pub(super) use window::{Containing, Held, Holdings, Resolved, Unheld, Window, later};
+pub(super) use runs::{Layered, Runs};
+pub(super) use window::{Containing, Held, Holdings, Resolved, Seen, Unheld, Window, later};
 
 /// Subscriber-side preferences for receiving a track.
 ///

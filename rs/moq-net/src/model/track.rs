@@ -23,7 +23,7 @@ use super::skipped::Skipped;
 use crate::ledger::{self, Ledger};
 
 pub use super::subscription::{Anchor, Order, Position, Range, Subscription};
-use super::subscription::{Containing, Held, Holdings, Resolved, Window, later};
+use super::subscription::{Containing, Held, Holdings, Layered, Resolved, Runs, Seen, Window, later};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 mod demand;
@@ -501,6 +501,10 @@ pub(crate) struct TrackState {
 	// Bumped on every insert into `drops`, so a cursor rescans it only after a change.
 	drops_revision: u64,
 	drops_changes: ledger::Changes,
+	// How many copies the cache took in that the live feed didn't deliver: fetched backfill,
+	// and fetched heads joining a live group, which may give it a start. Neither is in the
+	// arrival ledger, so a time end parked on a gap looks again.
+	fetched: u64,
 	// Every reader's eviction inbox. Its own lock, so a reader registers through the read
 	// guard it judges under.
 	inboxes: Mutex<miss::Inboxes>,
@@ -845,6 +849,22 @@ impl Holdings for TrackState {
 
 	fn complete(&self) -> bool {
 		self.sealed || self.abort.is_some()
+	}
+
+	fn changes(&self, seen: &mut Seen) -> Option<Vec<ops::Range<u64>>> {
+		let global = [
+			self.start_sequence.map_or(0, |start| start.saturating_add(1)),
+			u64::from(self.complete()),
+			self.fetched,
+		];
+		let (ledger, drops) = (self.arrivals.changes(), &self.drops_changes);
+		let changed = (seen.global == Some(global))
+			.then(|| ledger.since(seen.runs[0]).chain(drops.since(seen.runs[1])).collect());
+		*seen = Seen {
+			runs: [ledger.revision(), drops.revision()],
+			global: Some(global),
+		};
+		changed
 	}
 }
 
@@ -1445,34 +1465,66 @@ impl TrackState {
 				let end = end.map_or(Bound::Unbounded, Bound::Excluded);
 				scan(&mut self.live((Bound::Included(from), end)))
 			}
-			Servable::Runs(runs) => {
-				// What is left to search, shrinking from the end the search starts at.
-				let (mut lo, mut hi) = (from, u64::MAX);
-				while lo <= hi {
-					let mut left = runs.overlapping(lo..=hi);
-					let run = match rev {
-						true => left.next_back(),
-						false => left.next(),
-					}?;
-					let (start, end) = ((*run.start()).max(lo), (*run.end()).min(hi));
-					// The cache from the run on, toward the far end: one lookup either finds
-					// the run's groups or the next cached group past a run holding none.
-					let leap = match rev {
-						true => leap(self.live(lo..=end).rev(), start..=end, &mut f),
-						false => leap(self.live(start..=hi), start..=end, &mut f),
-					};
-					match leap {
-						Leap::Found(found) => return Some(found),
-						Leap::Empty => return None,
-						Leap::Past(sequence) if rev => hi = sequence,
-						Leap::Past(sequence) => lo = sequence,
-						Leap::Exhausted if rev => hi = start.checked_sub(1)?,
-						Leap::Exhausted => lo = end.checked_add(1)?,
-					}
+			Servable::Runs(several) => {
+				let hi = match several.cap {
+					Some(cap) => cap.checked_sub(1)?,
+					None => u64::MAX,
+				};
+				if from > hi {
+					return None;
 				}
-				None
+				let groups = &several.groups;
+				// The fixed runs through the reader's index of the live groups among them, then
+				// the walks' few runs layered over them, short of what the index found.
+				let fixed = several.live.find(self, groups.fixed(), from, hi, rev, &mut f);
+				// Nothing lies past a find at the far end, so only the find answers.
+				let short = match (&fixed, rev) {
+					(None, _) => Some((from, hi)),
+					(Some((found, _)), true) => found.checked_add(1).map(|lo| (lo, hi)),
+					(Some((found, _)), false) => found.checked_sub(1).map(|hi| (from, hi)),
+				};
+				let layered = short
+					.filter(|(lo, hi)| lo <= hi)
+					.and_then(|(lo, hi)| self.leapfrog(groups.layer(), lo, hi, rev, &mut f));
+				layered.or(fixed.map(|(_, found)| found))
 			}
 		}
+	}
+
+	/// [`Self::find_servable`] over `runs` within `lo..=hi`: several runs leapfrog the live
+	/// groups, so a run holding none costs one lookup rather than a walk over every run past
+	/// it.
+	fn leapfrog<'a, R>(
+		&'a self,
+		runs: &Runs,
+		mut lo: u64,
+		mut hi: u64,
+		rev: bool,
+		f: &mut impl FnMut(&'a Slot) -> Option<R>,
+	) -> Option<R> {
+		// What is left to search, shrinking from the end the search starts at.
+		while lo <= hi {
+			let run = match rev {
+				true => runs.last(lo, hi),
+				false => runs.first(lo, hi),
+			}?;
+			let (start, end) = ((*run.start()).max(lo), (*run.end()).min(hi));
+			// The cache from the run on, toward the far end: one lookup either finds the run's
+			// groups or the next cached group past a run holding none.
+			let leap = match rev {
+				true => leap(self.live(lo..=end).rev(), start..=end, f),
+				false => leap(self.live(start..=hi), start..=end, f),
+			};
+			match leap {
+				Leap::Found(found) => return Some(found),
+				Leap::Empty => return None,
+				Leap::Past(sequence) if rev => hi = sequence,
+				Leap::Past(sequence) => lo = sequence,
+				Leap::Exhausted if rev => hi = start.checked_sub(1)?,
+				Leap::Exhausted => lo = end.checked_add(1)?,
+			}
+		}
+		None
 	}
 
 	/// Whether `sequence` still holds the servable incarnation `stamp`.
@@ -2146,6 +2198,9 @@ impl TrackState {
 		}
 
 		self.advance(sequence, visible);
+		if !visible {
+			self.fetched += 1;
+		}
 		// A publisher may re-create a group it cut; the sequence is no longer given up.
 		if visible
 			&& self.drops.contains_key(&sequence)
@@ -2979,6 +3034,8 @@ impl TrackState {
 				if let Some(head) = slot.head.replace(Box::new(group.handle())) {
 					self.detach(&head);
 				}
+				// A head holding frame 0 gives a group received past it a start.
+				self.fetched += 1;
 			}
 			// Invisible to arrival-order subscribers: fetched on demand, not produced
 			// live by the publisher.
@@ -5961,9 +6018,70 @@ struct Edge {
 	servable: Servable,
 }
 
-/// The groups `window` covers from `from`, below the exclusive `cap`.
-fn admitted(window: &Window, from: u64, cap: Option<u64>) -> RangeInclusiveSet<u64> {
-	below(window.runs(from), cap)
+/// What a cursor's arrival walk reads: its window from the floor, below the cap. Holds the
+/// window's groups as they are layered, so taking it again after a time end moves costs
+/// the walks' runs, not every run of the window.
+#[derive(Clone, Default)]
+struct Admitted {
+	/// The window's groups, `None` while a relative anchor waits and every group is in it.
+	groups: Option<Layered>,
+	floor: u64,
+	cap: Option<u64>,
+}
+
+impl Admitted {
+	fn new(window: &Window, floor: u64, cap: Option<u64>) -> Self {
+		Self {
+			groups: window.groups().cloned(),
+			floor,
+			cap,
+		}
+	}
+
+	/// The last group admitted, `None` for none.
+	fn last(&self) -> Option<u64> {
+		match self.cap {
+			Some(cap) => cap.checked_sub(1).filter(|last| *last >= self.floor),
+			None => Some(u64::MAX),
+		}
+	}
+
+	/// The admitted runs reaching into `run`, clipped to it, lowest first.
+	fn overlapping(&self, run: ops::RangeInclusive<u64>) -> Vec<ops::RangeInclusive<u64>> {
+		let Some(last) = self.last() else {
+			return Vec::new();
+		};
+		let (lo, hi) = ((*run.start()).max(self.floor), (*run.end()).min(last));
+		if lo > hi {
+			return Vec::new();
+		}
+		match &self.groups {
+			None => std::iter::once(lo..=hi).collect(),
+			Some(groups) => groups
+				.runs(lo)
+				.take_while(|run| *run.start() <= hi)
+				.map(|run| *run.start()..=(*run.end()).min(hi))
+				.collect(),
+		}
+	}
+
+	/// Every admitted run, lowest first.
+	fn runs(&self) -> Vec<ops::RangeInclusive<u64>> {
+		self.overlapping(0..=u64::MAX)
+	}
+
+	/// What this admits and `old` doesn't within `lo..=hi`, when the two differ only in the
+	/// window's walks: `None` otherwise.
+	fn gained(&self, old: &Self, lo: u64, hi: u64) -> Option<Vec<ops::RangeInclusive<u64>>> {
+		let (groups, old_groups) = (self.groups.as_ref()?, old.groups.as_ref()?);
+		if (self.floor, self.cap) != (old.floor, old.cap) || !groups.shares_fixed(old_groups) {
+			return None;
+		}
+		let Some(last) = self.last() else {
+			return Some(Vec::new());
+		};
+		groups.gained(old_groups, lo.max(self.floor), hi.min(last))
+	}
 }
 
 /// `runs`, lowest first, below the exclusive `cap`.
@@ -6056,8 +6174,148 @@ enum Servable {
 	/// case, kept as cheap to copy and look up as a cap. Its start still bounds a group
 	/// handed out before the run moved above it, which is judged against the run.
 	Run { start: u64, end: Option<u64> },
-	/// Disjoint runs, lowest first.
-	Runs(Arc<RangeInclusiveSet<u64>>),
+	/// Several runs, as the window holds them.
+	Runs(Arc<Several>),
+}
+
+/// A servable window of several runs: the window's groups as it layers them, below the
+/// exclusive `cap`, with the reader's index of the live groups inside its fixed runs.
+///
+/// Built again whenever the window or cap moves, which a time end does on each group, so it
+/// shares the fixed runs and their index, and copies only the walks' runs.
+struct Several {
+	groups: Layered,
+	cap: Option<u64>,
+	live: Arc<Live>,
+}
+
+impl PartialEq for Several {
+	fn eq(&self, other: &Self) -> bool {
+		self.groups == other.groups && self.cap == other.cap
+	}
+}
+
+/// A reader's index of the live feed's cached groups inside its window's fixed runs, so a
+/// search costs the live groups it passes, never the runs between them: thousands of runs
+/// in the gaps of a sparsely numbered feed would otherwise each cost a lookup.
+///
+/// Taken in from the arrival order, which every live group enters once, on the reader's own
+/// search: each arrival costs it one lookup in the fixed runs. A slot that leaves or is
+/// replaced leaves its entry stale, dropped when a search meets it or once stale entries
+/// could outnumber the live groups.
+#[derive(Default)]
+struct Live(Mutex<Indexed>);
+
+#[derive(Default)]
+struct Indexed {
+	/// How far into the arrival order this has taken in, as an absolute index.
+	taken: usize,
+	/// The stamp of each live group inside the fixed runs, by sequence, as it arrived.
+	groups: BTreeMap<u64, u32>,
+	/// How many groups the last prune kept, so a prune runs once entries double past it.
+	kept: usize,
+}
+
+/// How many index entries a search takes per lock: the search answers with the lock
+/// released, since the answer reads each group's own state.
+const LIVE_BATCH: usize = 16;
+
+impl Indexed {
+	/// Take in what arrived since the last call.
+	fn catch_up(&mut self, state: &TrackState, fixed: &Runs) {
+		let skip = self.taken.saturating_sub(state.offset).min(state.arrival.len());
+		for (sequence, stamp) in state.arrival.range(skip..) {
+			if fixed.contains(*sequence) {
+				self.groups.insert(*sequence, *stamp);
+			}
+		}
+		self.taken = state.offset + state.arrival.len();
+		// Only entries whose group left can outnumber the live groups.
+		if self.groups.len() > 2 * self.kept.max(state.visible.len()).max(LIVE_BATCH) {
+			self.groups
+				.retain(|sequence, stamp| current(state, *sequence, *stamp).is_some());
+			self.kept = self.groups.len();
+		}
+	}
+}
+
+/// The live slot at `sequence`, if it is still the incarnation stamped `stamp`.
+fn current(state: &TrackState, sequence: u64, stamp: u32) -> Option<&Slot> {
+	state
+		.lookup
+		.get(&sequence)
+		.filter(|slot| slot.stamp == stamp && slot.visible)
+}
+
+impl Live {
+	/// The first live group inside `fixed`, within `lo..=hi`, for which `f` answers, lowest
+	/// first or, with `rev`, highest first, with its sequence.
+	fn find<'a, R>(
+		&self,
+		state: &'a TrackState,
+		fixed: &Runs,
+		mut lo: u64,
+		mut hi: u64,
+		rev: bool,
+		f: &mut impl FnMut(&'a Slot) -> Option<R>,
+	) -> Option<(u64, R)> {
+		let mut caught_up = false;
+		loop {
+			if lo > hi {
+				return None;
+			}
+			let mut batch = [(0, 0); LIVE_BATCH];
+			let taken = {
+				let mut indexed = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+				if !caught_up {
+					indexed.catch_up(state, fixed);
+					caught_up = true;
+				}
+				let entries = indexed
+					.groups
+					.range(lo..=hi)
+					.map(|(&sequence, &stamp)| (sequence, stamp));
+				let mut taken = 0;
+				let mut put = |entry| {
+					batch[taken] = entry;
+					taken += 1;
+				};
+				match rev {
+					true => entries.rev().take(LIVE_BATCH).for_each(&mut put),
+					false => entries.take(LIVE_BATCH).for_each(&mut put),
+				}
+				taken
+			};
+			let batch = &batch[..taken];
+			let mut stale = Vec::new();
+			let mut found = None;
+			for &(sequence, stamp) in batch {
+				match current(state, sequence, stamp) {
+					Some(slot) => {
+						if let Some(answer) = f(slot) {
+							found = Some((sequence, answer));
+							break;
+						}
+					}
+					None => stale.push(sequence),
+				}
+			}
+			if !stale.is_empty() {
+				let mut indexed = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+				for sequence in stale {
+					indexed.groups.remove(&sequence);
+				}
+			}
+			if found.is_some() || taken < LIVE_BATCH {
+				return found;
+			}
+			let &(last, _) = batch.last().expect("a full batch");
+			match rev {
+				true => hi = last.checked_sub(1)?,
+				false => lo = last.checked_add(1)?,
+			}
+		}
+	}
 }
 
 impl Servable {
@@ -6071,27 +6329,47 @@ impl Servable {
 	fn contains(&self, sequence: u64) -> bool {
 		match self {
 			Self::Run { start, end } => sequence >= *start && end.is_none_or(|end| sequence < end),
-			Self::Runs(runs) => runs.contains(&sequence),
+			Self::Runs(several) => several.cap.is_none_or(|cap| sequence < cap) && several.groups.contains(sequence),
 		}
 	}
 
-	/// The groups in `runs`, disjoint and lowest first. Only several runs allocate: every
+	/// The groups `window` reads. `previous`, what the same reader was served before, lends
+	/// its index of the live groups when the fixed runs are the same.
+	fn of(window: &Window, previous: &Self) -> Self {
+		match window.groups() {
+			None => Self::ALL,
+			Some(groups) => Self::layered(groups.clone(), None, previous),
+		}
+	}
+
+	/// The groups in `groups` below the exclusive `cap`. Only several runs allocate: every
 	/// subscriber resolves one, so the common single run stays off the heap.
-	fn new(runs: impl Iterator<Item = ops::RangeInclusive<u64>>) -> Self {
-		let mut runs = runs.peekable();
-		let Some(first) = runs.next() else {
+	fn layered(groups: Layered, cap: Option<u64>, previous: &Self) -> Self {
+		let last = match cap {
+			Some(cap) => match cap.checked_sub(1) {
+				Some(last) => last,
+				None => return Self::NONE,
+			},
+			None => u64::MAX,
+		};
+		let (first, more) = {
+			let mut runs = groups.runs(0).take_while(|run| *run.start() <= last);
+			(runs.next(), runs.next().is_some())
+		};
+		let Some(first) = first else {
 			return Self::NONE;
 		};
-		if runs.peek().is_none() {
+		if !more {
 			return Self::Run {
 				start: *first.start(),
-				end: first.end().checked_add(1),
+				end: (*first.end()).min(last).checked_add(1),
 			};
 		}
-		let mut set = RangeInclusiveSet::new();
-		set.insert(first);
-		set.extend(runs);
-		Self::Runs(Arc::new(set))
+		let live = match previous {
+			Self::Runs(several) if several.groups.shares_fixed(&groups) => several.live.clone(),
+			_ => Arc::default(),
+		};
+		Self::Runs(Arc::new(Several { groups, cap, live }))
 	}
 
 	/// These groups below the exclusive `cap`.
@@ -6110,15 +6388,9 @@ impl Servable {
 					false => Self::NONE,
 				}
 			}
-			Self::Runs(runs) => {
-				let Some(last) = cap.checked_sub(1) else {
-					return Self::NONE;
-				};
-				Self::new(
-					runs.iter()
-						.take_while(|run| *run.start() <= last)
-						.map(|run| *run.start()..=(*run.end()).min(last)),
-				)
+			Self::Runs(several) => {
+				let cap = several.cap.map_or(cap, |own| own.min(cap));
+				Self::layered(several.groups.clone(), Some(cap), self)
 			}
 		}
 	}
@@ -6338,7 +6610,7 @@ struct Filter {
 	refused: Option<Error>,
 	/// What the arrival walk reads: the window from the floor, below the cap. The walk
 	/// passes a group outside it holding nothing, so widening it re-scans the cache.
-	admitted: RangeInclusiveSet<u64>,
+	admitted: Admitted,
 	/// The floor, [`Self::revision`], and cap [`Self::admitted`] was taken at.
 	admitted_at: Option<(u64, u64, Option<u64>)>,
 	/// The spans a widening newly covers, from the ranges, the floor, the cap, or the
@@ -6384,13 +6656,13 @@ impl Cursor {
 				resolved: ranges_revision,
 				revision: 0,
 				refused,
-				admitted: RangeInclusiveSet::new(),
+				admitted: Admitted::default(),
 				admitted_at: None,
 				owed: RangeInclusiveSet::new(),
 			};
 			(filter, state.datagram_offset + start, state.cache.clone())
 		};
-		let published = Published::new(Servable::new(filter.window.runs(0)), filter.resolved, None);
+		let published = Published::new(Servable::of(&filter.window, &Servable::NONE), filter.resolved, None);
 		Self {
 			state,
 			cache,
@@ -6462,7 +6734,7 @@ impl Cursor {
 	fn update_servable(&mut self) {
 		// A moved window or cap notifies nothing this cursor parked on.
 		idle::Idle::disarm(&mut self.idle);
-		let runs = Servable::new(self.filter.window.runs(0));
+		let runs = Servable::of(&self.filter.window, &self.published.read().runs);
 		let (revision, cap) = (self.filter.resolved, self.end_sequence);
 		self.servable = runs.below(cap);
 		let next = |current: &Published| {
@@ -6557,24 +6829,26 @@ impl Cursor {
 		super::subscription::before_end(sequence, self.end_sequence) && self.filter.window.contains(sequence)
 	}
 
-	/// The window from `from`, below the exclusive `cap`.
-	fn admitted(&self, from: u64, cap: Option<u64>) -> RangeInclusiveSet<u64> {
-		admitted(&self.filter.window, from, cap)
-	}
-
-	/// [`Filter::owed`] as of now: what was owed and what the walk newly reads since
-	/// [`Filter::admitted`] was taken, both cut to `admitted`.
-	fn owed(&self, admitted: &RangeInclusiveSet<u64>) -> RangeInclusiveSet<u64> {
+	/// [`Filter::owed`] as of `admitted`: what was owed and what the walk newly reads since
+	/// [`Filter::admitted`] was taken, both cut to `admitted`. Costs every run of both.
+	fn owed(&self, admitted: &Admitted) -> RangeInclusiveSet<u64> {
 		// Nothing is owed before the walk first reads: it starts at the oldest arrival.
 		if self.filter.admitted_at.is_none() {
 			return RangeInclusiveSet::new();
 		}
 		let mut owed = RangeInclusiveSet::new();
-		for run in admitted.iter() {
-			for gap in self.filter.admitted.gaps(run) {
-				owed.insert(gap);
+		for run in admitted.runs() {
+			let mut from = Some(*run.start());
+			for held in self.filter.admitted.overlapping(run.clone()) {
+				if let Some(gap) = from.filter(|from| from < held.start()) {
+					owed.insert(gap..=*held.start() - 1);
+				}
+				from = held.end().checked_add(1);
 			}
-			for span in self.filter.owed.overlapping(run) {
+			if let Some(gap) = from.filter(|from| from <= run.end()) {
+				owed.insert(gap..=*run.end());
+			}
+			for span in self.filter.owed.overlapping(&run) {
 				owed.insert((*span.start()).max(*run.start())..=(*span.end()).min(*run.end()));
 			}
 		}
@@ -6583,14 +6857,54 @@ impl Cursor {
 
 	/// Take in a move of the floor, the ranges, or the cap: whatever it newly admits is
 	/// owed. Costs the ranges, never the cache, and only when one moved.
+	///
+	/// A time end whose cap moves on each group moves only the walks' runs layered over the
+	/// window's fixed ones, so that costs those runs: what they gain is owed only where the
+	/// cache holds a group now, the only place a scan finds one, and what they lose is cut
+	/// only from what is owed.
 	fn admit(&mut self) {
 		let at = (self.floor(), self.filter.revision, self.end_sequence);
 		if self.filter.admitted_at == Some(at) {
 			return;
 		}
 		// The arrival walk reads the window from the floor.
-		let admitted = self.admitted(self.floor(), self.end_sequence);
-		self.filter.owed = self.owed(&admitted);
+		let admitted = Admitted::new(&self.filter.window, self.floor(), self.end_sequence);
+		let moved = self.filter.admitted_at.and_then(|_| {
+			let cached = {
+				let state = self.state.read();
+				state
+					.lookup
+					.first_key_value()
+					.map(|(first, _)| *first)
+					.zip(state.lookup.last_key_value().map(|(last, _)| *last))
+			};
+			let gained = match cached {
+				Some((first, last)) => admitted.gained(&self.filter.admitted, first, last)?,
+				None => admitted.gained(&self.filter.admitted, 1, 0)?,
+			};
+			let owed = self
+				.filter
+				.owed
+				.first()
+				.map(|run| *run.start())
+				.zip(self.filter.owed.last().map(|run| *run.end()));
+			let lost = match owed {
+				Some((first, last)) => self.filter.admitted.gained(&admitted, first, last)?,
+				None => Vec::new(),
+			};
+			Some((gained, lost))
+		});
+		match moved {
+			Some((gained, lost)) => {
+				for run in lost {
+					self.filter.owed.remove(run);
+				}
+				for run in gained {
+					self.filter.owed.insert(run);
+				}
+			}
+			None => self.filter.owed = self.owed(&admitted),
+		}
 		self.filter.admitted = admitted;
 		self.filter.admitted_at = Some(at);
 	}
@@ -6678,13 +6992,7 @@ impl Cursor {
 					drops.pending.remove(range);
 				}
 			}
-			let admitted: Vec<_> = self
-				.filter
-				.admitted
-				.overlapping(&run)
-				.map(|admitted| (*admitted.start()).max(*run.start())..=(*admitted.end()).min(*run.end()))
-				.collect();
-			for owed in admitted {
+			for owed in self.filter.admitted.overlapping(run.clone()) {
 				self.filter.owed.insert(owed);
 			}
 		}
@@ -6860,12 +7168,15 @@ impl Cursor {
 		let fills = self.state.read().fills.clone();
 		let misses = self.misses.get_or_insert_with(Box::default);
 		let mut given_up = Vec::new();
-		misses.retain((from, revision, cap), || below(window.missable(from), cap));
+		misses.retain((from, revision, cap), window.missable_groups(), || {
+			below(window.missable(from), cap)
+		});
 		let asks = {
 			let state = self.state.read();
 			misses.judge(
 				&state,
 				(from, revision, cap),
+				window.missable_groups(),
 				window.named(),
 				|span| {
 					let end = cap.map_or(*span.end(), |cap| (*span.end()).min(cap.saturating_sub(1)));
@@ -7278,7 +7589,7 @@ impl Republish {
 			return;
 		};
 		drop(state);
-		let runs = Servable::new(window.runs(0));
+		let runs = Servable::of(&window, &Servable::NONE);
 		if let Ok(mut current) = published.write()
 			&& current.revision < revision
 		{
@@ -7610,7 +7921,7 @@ impl Subscriber {
 		};
 		// What a widening owes, the walk has yet to take in, or lifting the local cap would:
 		// a group past it is unread, not gone.
-		let owed = cursor.owed(&cursor.admitted(cursor.floor(), None));
+		let owed = cursor.owed(&Admitted::new(&cursor.filter.window, cursor.floor(), None));
 		let last = unread.end.map(|end| end.checked_sub(1));
 		let owed = || {
 			owed.iter().any(|run| {
@@ -13127,6 +13438,97 @@ mod test {
 		}
 	}
 
+	/// A search over a layered servable window, through the reader's index of the live
+	/// groups and the layer's runs, finds what a scan of every live group would, in either
+	/// direction, as groups arrive, start, abort, leave the cache, or arrive again between
+	/// searches that keep the same index.
+	#[test]
+	fn layered_searches_match_a_scan_of_every_live_group() {
+		// A small deterministic generator, so a failure replays.
+		let seed = std::cell::Cell::new(0x2545_f491_4f6c_dd1d_u64);
+		let next = |bound: u64| {
+			let mut x = seed.get();
+			x ^= x << 13;
+			x ^= x >> 7;
+			x ^= x << 17;
+			seed.set(x);
+			x % bound
+		};
+		const SEQUENCES: u64 = 40;
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		for round in 0..300 {
+			let producer = track_producer("test", Info::timed());
+			let runs = |count: u64| -> Runs {
+				Runs::new((0..next(count + 1)).map(|_| {
+					let start = next(SEQUENCES);
+					start..=start + next(5)
+				}))
+			};
+			let fixed = Arc::new(runs(8));
+			let mut groups = Vec::new();
+			let mut servable = Servable::NONE;
+			for step in 0..30 {
+				let sequence = next(SEQUENCES);
+				match next(6) {
+					0 | 1 => {
+						if let Ok(mut group) = producer.create_group(group::Info { sequence }) {
+							if next(3) > 0 {
+								group
+									.write_frame(at(sequence * 10), bytes::Bytes::from_static(b"x"))
+									.unwrap();
+							}
+							groups.push(group);
+						}
+					}
+					2 => {
+						if let Some(index) = groups.iter().position(|group| group.sequence == sequence) {
+							let _ = groups.swap_remove(index).abort(Error::Cancel);
+						}
+					}
+					3 => {
+						let _ = producer.modify().unwrap().uncache(sequence);
+					}
+					_ => {}
+				}
+				// Now and then the window's walks move, keeping the fixed runs and their index.
+				if step == 0 || next(4) == 0 {
+					let cap = (next(4) == 0).then(|| next(SEQUENCES + 2));
+					let layered = Layered::new(fixed.clone(), runs(2));
+					servable = Servable::layered(layered, cap, &servable);
+				}
+				let state = producer.state.read();
+				let shown = |slot: &Slot| slot.is_shown().then_some(slot.group.sequence);
+				for from in [0, next(SEQUENCES), next(SEQUENCES)] {
+					for rev in [false, true] {
+						let scan = state.live(from..).filter(|(sequence, _)| servable.contains(**sequence));
+						let expected = match rev {
+							true => scan.map(|(_, slot)| slot).rev().find_map(shown),
+							false => scan.map(|(_, slot)| slot).find_map(shown),
+						};
+						let found = state.find_servable(&servable, from, rev, shown);
+						let shape = match &servable {
+							Servable::Run { start, end } => format!("run {start}..{end:?}"),
+							Servable::Runs(several) => format!(
+								"{:?} under {:?} below {:?}",
+								several.groups.fixed(),
+								several.groups.layer(),
+								several.cap
+							),
+						};
+						let cached: Vec<_> = state
+							.live(..)
+							.map(|(sequence, slot)| (*sequence, slot.is_shown()))
+							.collect();
+						assert_eq!(
+							found, expected,
+							"round {round} step {step} from {from}, rev {rev}: {shape}, cached {cached:?}"
+						);
+					}
+				}
+			}
+		}
+	}
+
 	/// Capping a servable window in place keeps exactly the groups the set of its runs
 	/// keeps below the cap, so the single run stays off the heap without moving a bound.
 	#[test]
@@ -13151,22 +13553,50 @@ mod test {
 			Some(13),
 			Some(u64::MAX),
 		];
+		let points = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, u64::MAX - 1, u64::MAX];
 		for bounds in windows {
 			let runs = || bounds.iter().map(|&(first, last)| first..=last);
-			let servable = Servable::new(runs());
-			if let [(first, last)] = bounds {
-				assert!(
-					servable
-						== Servable::Run {
-							start: *first,
-							end: last.checked_add(1)
-						},
-					"{bounds:?}"
-				);
-			}
-			for cap in caps {
-				let expected = Servable::new(below(runs(), cap).into_iter());
-				assert!(servable.below(cap) == expected, "{bounds:?} below {cap:?}");
+			// The runs fixed, and again split between fixed runs and a layer over them.
+			let layered = [
+				Layered::new(Arc::new(Runs::new(runs())), Runs::default()),
+				Layered::new(Arc::new(Runs::new(runs().skip(1))), Runs::new(runs().take(1))),
+			];
+			for groups in layered {
+				let servable = Servable::layered(groups, None, &Servable::NONE);
+				if let [(first, last)] = bounds {
+					assert!(
+						servable
+							== Servable::Run {
+								start: *first,
+								end: last.checked_add(1)
+							},
+						"{bounds:?}"
+					);
+				}
+				for cap in caps {
+					let expected = below(runs(), cap);
+					let capped = servable.below(cap);
+					for point in points {
+						assert_eq!(
+							capped.contains(point),
+							expected.contains(&point),
+							"{bounds:?} below {cap:?} at {point}"
+						);
+					}
+					// One run below the cap stays off the heap.
+					if let Some(run) = expected.iter().next()
+						&& expected.len() == 1
+					{
+						assert!(
+							capped
+								== Servable::Run {
+									start: *run.start(),
+									end: run.end().checked_add(1)
+								},
+							"{bounds:?} below {cap:?}"
+						);
+					}
+				}
 			}
 		}
 	}
@@ -20777,6 +21207,96 @@ mod test {
 		assert_eq!(drain(&mut late), vec![4]);
 	}
 
+	/// A time end whose cap moves beside fixed ranges owes, of every cached group, exactly
+	/// what was owed and is still admitted, and what is newly admitted: what the walks' runs
+	/// gain is taken in by their runs alone, and must still owe each cached group it reaches.
+	#[test]
+	fn a_moving_time_cap_owes_what_it_newly_admits() {
+		let seed = std::cell::Cell::new(0x2545_f491_4f6c_dd1d_u64);
+		let next = |bound: u64| {
+			let mut x = seed.get();
+			x ^= x << 13;
+			x ^= x >> 7;
+			x ^= x << 17;
+			seed.set(x);
+			x % bound
+		};
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		const SEQUENCES: u64 = 40;
+		let mut owed = 0;
+		for round in 0..150 {
+			let producer = track_producer("test", Info::timed());
+			// One time end, and fixed ranges around and above where the feed starts.
+			let ranges = std::iter::once(Range {
+				start: Anchor::Time(at(next(100))),
+				end: Some(Anchor::Time(at(200 + next(400)))),
+			})
+			.chain((0..1 + next(6)).map(|_| {
+				let start = next(SEQUENCES);
+				Range::groups(start..start + 1 + next(3))
+			}));
+			let mut subscriber = producer.subscribe(Subscription::default().with_ranges(ranges));
+			let mut groups = Vec::new();
+			for step in 0..30 {
+				let sequence = next(SEQUENCES);
+				match next(4) {
+					0 | 1 => {
+						if let Ok(mut group) = producer.create_group(group::Info { sequence }) {
+							if next(2) == 0 {
+								group
+									.write_frame(at(sequence * 20), bytes::Bytes::from_static(b"x"))
+									.unwrap();
+							}
+							groups.push(group);
+						}
+					}
+					2 => {
+						if let Some(group) = groups.iter_mut().find(|group| group.sequence == sequence)
+							&& group.handle().timestamp().is_none()
+						{
+							let _ = group.write_frame(at(sequence * 20), bytes::Bytes::from_static(b"x"));
+						}
+					}
+					_ => {
+						// Read now and then, so the walk passes groups and owes them again.
+						let _ = subscriber.poll_recv_group(&kio::Waiter::noop());
+					}
+				}
+				let Inner::Plain(cursor) = &mut subscriber.inner else {
+					unreachable!("a local subscriber reads its own cursor");
+				};
+				cursor.sync();
+				let (before, was, primed) = (
+					cursor.filter.admitted.runs(),
+					cursor.filter.owed.clone(),
+					cursor.filter.admitted_at.is_some(),
+				);
+				cursor.admit();
+				let now = cursor.filter.admitted.runs();
+				let held =
+					|runs: &[ops::RangeInclusive<u64>], sequence: u64| runs.iter().any(|run| run.contains(&sequence));
+				let cached: Vec<u64> = cursor.state.read().lookup.keys().copied().collect();
+				for sequence in cached {
+					let expected =
+						primed && held(&now, sequence) && (was.contains(&sequence) || !held(&before, sequence));
+					assert_eq!(
+						cursor.filter.owed.contains(&sequence),
+						expected,
+						"round {round} step {step}: group {sequence}, admitted {before:?} then {now:?}, owed {was:?}"
+					);
+					owed += usize::from(expected);
+				}
+				for run in cursor.filter.owed.iter() {
+					assert!(
+						cursor.filter.admitted.overlapping(run.clone()) == vec![run.clone()],
+						"round {round} step {step}: owed {run:?} beyond {now:?}"
+					);
+				}
+			}
+		}
+		assert!(owed > 100, "only {owed} groups owed");
+	}
+
 	/// A narrow reader under an open aggregate passes the groups outside its range holding
 	/// nothing for them, however many arrive, and widening its ranges still serves the
 	/// ones the cache holds in the new span, newest first and once each.
@@ -20798,7 +21318,7 @@ mod test {
 			unreachable!()
 		};
 		assert!(cursor.filter.owed.is_empty(), "nothing owed for excluded groups");
-		assert_eq!(cursor.filter.admitted.iter().count(), 1, "only the range is kept");
+		assert_eq!(cursor.filter.admitted.runs().len(), 1, "only the range is kept");
 
 		narrow
 			.update(replay().with_ranges([Range::groups(0..2), Range::groups(5..8)]))
