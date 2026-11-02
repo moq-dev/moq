@@ -73,7 +73,21 @@ metadata = {
 }
 (out / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
 subprocess.run(
-    ["cargo", "tree", "--locked", "-p", "moq-relay", "-e", "features"],
+    [
+        "cargo",
+        "--config",
+        str(Path.cwd() / ".cargo/config.toml"),
+        "tree",
+        "--manifest-path",
+        str(Path.cwd() / "Cargo.toml"),
+        "--locked",
+        "-p",
+        "moq-relay",
+        "-e",
+        "features",
+    ],
+    # Nested revision checkouts must not inherit the current tree's Cargo config.
+    cwd="/",
     stdout=(out / "features.txt").open("w"),
     check=True,
 )

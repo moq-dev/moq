@@ -152,7 +152,11 @@ start_relay() {
         log=$directory/relay-$attempt.log
         relay_config "$config" "$port" "$runtime" "$workers"
 
-        env "${environment[@]}" "$relay" "$config" >"$log" 2>&1 &
+        local -a affinity=()
+        if [[ ${INSTRUCTION_AFFINITY:-false} == true ]]; then
+            affinity=(taskset -c "$BENCH_RELAY_CPUS")
+        fi
+        env "${environment[@]}" "${affinity[@]}" "$relay" "$config" >"$log" 2>&1 &
         RELAY_PID=$!
 
         for _ in {1..100}; do
@@ -296,16 +300,27 @@ run_workload() {
     if [[ $(uname -s) == Linux ]]; then
         # The sampler owns the measurement lifetime. The generator runs until
         # interrupted after sampling, so its normal exit cannot race /proc reads.
-        "${load[@]}" >"$directory/load.log" 2>&1 &
+        local -a affinity=()
+        if [[ ${INSTRUCTION_AFFINITY:-false} == true ]]; then
+            affinity=(taskset -c "$BENCH_GENERATOR_CPUS")
+        fi
+        "${affinity[@]}" "${load[@]}" >"$directory/load.log" 2>&1 &
         LOAD_PID=$!
         generator_pid=$LOAD_PID
+        local duration=10s
+        if [[ $PROFILE == instructions ]]; then duration=14s; fi
         "$HOST_BIN" --pid "$relay_pid" --pid "$generator_pid" --threads \
-            --interval 500ms --duration 10s --output "$host" \
+            --interval 500ms --duration "$duration" --output "$host" \
             >"$directory/host.log" 2>&1 &
         HOST_PID=$!
         # The second half of the host window, matching the summary's throughput window.
         # Its own process group, so cleanup also stops perf and its workload.
         case $PROFILE in
+            instructions)
+                setsid python3 "$ROOT/bench/instructions.py" capture "$relay_pid" "$profile" \
+                    --delay 7 --duration 5 >"$directory/profile.log" 2>&1 &
+                PROFILE_PID=$!
+                ;;
             lock | cpu)
                 setsid python3 "$ROOT/bench/profile.py" "$PROFILE" "$relay_pid" "$profile" --delay 5 --duration 5 \
                     >"$directory/profile.log" 2>&1 &
@@ -348,6 +363,9 @@ run_workload() {
             --settled "http://127.0.0.1:$((RELAY_PORT + 1))/sessions"
     fi
     stop_relay
+    if [[ $PROFILE == instructions ]]; then
+        python3 "$ROOT/bench/instructions.py" report "$profile" "$stats"
+    fi
     if [[ $PROFILE == heap ]]; then
         python3 "$ROOT/bench/profile.py" heap "$relay" "$profile"
     fi

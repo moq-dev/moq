@@ -234,6 +234,45 @@ keeps `kernel.perf_event_paranoid=-1`. Profile there only while it is quiet,
 with no other agents running and load near zero, since other work on the
 host shows up as lock waits and CPU the relay did not cause.
 
+### Instructions
+
+Count instructions and cycles (user and kernel) per delivered frame, with
+fixed-period instruction stacks for source attribution:
+
+```bash
+BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 BENCH_RUNTIME_ROUNDS=5 \
+  BENCH_INSTRUCTION_PERIOD=10000019 \
+  nix develop --command just bench-profile instructions chat 4 io-uring-workers cdff3c8f95
+BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 \
+  nix develop --command just bench-profile instructions video 4 tokio-workers cdff3c8f95
+```
+
+Choose disjoint allowed CPU sets, with at least one relay CPU per worker.
+Hybrid CPUs require performance cores, and count their `cpu_core` events.
+The relay and generator keep these affinities in both the control and measured
+runs. Builds stay in separate targets per revision. Base/current pairs alternate
+order across `BENCH_RUNTIME_ROUNDS` (default 3); the current generator drives both.
+
+After seven seconds of warmup, acknowledged perf enable/disable commands bound
+five seconds of relay counters. `instructions/instructions.json` records both
+acknowledgement brackets, their uncertainty, and the delivered frames linearly
+interpolated between the generator's surrounding 500 ms reports at those same
+boundaries. This is a sampled delivery estimate, not exact frame accounting.
+Missing, uncounted, or multiplexed counters and unbracketed delivery fail the run.
+Lost or throttled instruction samples also fail; choose a larger fixed period
+for the whole comparison when the host's sample-rate limit requires it.
+The host sampler lasts fourteen seconds so delivery reports bracket both edges.
+The normal `summary.json` still describes its own final throughput window;
+use `instructions.json` for instruction comparisons.
+
+`BENCH_INSTRUCTION_PERIOD` defaults to 1,000,003 retired instructions per sample.
+The fixed-period recording encloses the counter window; `instructions.folded`
+weights each stack by that period. `perf.data`, raw `stat.json`, `perf.log`,
+thread names, CPU sets, and delivery reports remain with the evidence. Both
+counters and samples cover only the relay. Compare equivalent delivery and loss,
+and retain controls to expose sampling overhead. Instructions reduce frequency
+and scheduling noise; pinning does not remove interference from other host work.
+
 ### Heap
 
 The heap mode builds the relay with `moq-relay/jemalloc` (the other modes keep
