@@ -113,5 +113,4 @@ wrappers. Wire: none.
 
 ## Related
 
-- [The player takes any read-side origin](/quest/m1/api-audit/resolve/watch-origin.md) - also retypes JS `Table`
 - No constructible internal handles - the same JS hygiene rule
