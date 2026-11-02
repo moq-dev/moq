@@ -259,8 +259,9 @@ acknowledgement brackets, their uncertainty, and the delivered frames linearly
 interpolated between the generator's surrounding 500 ms reports at those same
 boundaries. This is a sampled delivery estimate, not exact frame accounting.
 Missing, uncounted, or multiplexed counters and unbracketed delivery fail the run.
-Lost or throttled instruction samples also fail; choose a larger fixed period
-for the whole comparison when the host's sample-rate limit requires it.
+Lost or throttled instruction samples also fail. Inspect the host's sample-rate
+limit and buffers before choosing a larger fixed period for the whole comparison;
+some sample-rate limits throttle on every interrupt, regardless of the period.
 The host sampler lasts fourteen seconds so delivery reports bracket both edges.
 The normal `summary.json` still describes its own final throughput window;
 use `instructions.json` for instruction comparisons.

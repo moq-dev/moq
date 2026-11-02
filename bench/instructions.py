@@ -179,6 +179,7 @@ def capture(pid, directory, delay, duration):
                 end_ms=end,
                 threads=names,
                 events=counters,
+                sample_rate_limit=int(Path("/proc/sys/kernel/perf_event_max_sample_rate").read_text()),
             ),
             indent=2,
         )
@@ -274,13 +275,18 @@ def validate_data(path):
     if not size or end > len(data):
         raise ValueError("incomplete perf.data recording")
     while offset < end:
+        if end - offset < 8:
+            raise ValueError("incomplete perf.data record header")
         kind, _, size = struct.unpack_from("<IHH", data, offset)
         if size < 8 or offset + size > end:
             raise ValueError("invalid perf.data record")
         # perf_event_header types: LOST, THROTTLE, LOST_SAMPLES. perf script's
         # --show-lost-events omits THROTTLE, which would bias fixed-period attribution.
         if kind in (2, 5, 13):
-            raise ValueError(f"perf lost or throttled samples (record type {kind}); increase BENCH_INSTRUCTION_PERIOD")
+            raise ValueError(
+                f"perf lost or throttled samples (record type {kind}); inspect the host's "
+                "kernel.perf_event_max_sample_rate and capture buffers before choosing a fixed period"
+            )
         offset += size
 
 

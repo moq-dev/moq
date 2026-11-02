@@ -55,7 +55,7 @@ class Instructions(unittest.TestCase):
             instructions.reduce(self.window, self.stats[1:], self.load)
 
     def test_cpu_sets_cannot_overlap_or_escape_the_allowed_set(self):
-        with patch.object(os, "sched_getaffinity", return_value={0, 1, 2, 3}):
+        with patch.object(os, "sched_getaffinity", return_value={0, 1, 2, 3}, create=True):
             for relay, generator in [("0-1", "1-2"), ("4", "0"), ("0", ""), ("0-1", "3-2")]:
                 with (
                     self.subTest(relay=relay, generator=generator),
