@@ -393,6 +393,16 @@ void main() {
     expect(() => catalog.finish(), throwsA(isA<ClosedMoqException>()));
   });
 
+  test('a broadcast consumer\'s closed() resolves once it closes', () async {
+    final broadcast = BroadcastProducer();
+    var resolved = false;
+    final closed = broadcast.consume().closed().then((_) => resolved = true);
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(resolved, isFalse, reason: 'resolved while the broadcast is live');
+    broadcast.close();
+    await closed.timeout(timeout);
+  });
+
   test('timestamps round-trip exactly at the track scale', () async {
     final broadcast = BroadcastProducer();
     final track = broadcast.publishTrack(
