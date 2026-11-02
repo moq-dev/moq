@@ -20,8 +20,6 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 
 ## Required
 
-- [Claim the npm name `qmux`](/quest/m0/qmux-npm-claim.md) - a maintainer publishes a placeholder `qmux` with a `moq-dev/moq` trusted publisher before somebody else takes the name
-- [`js/qmux` publishes as npm `qmux`](/quest/m0/qmux-npm-rename.md) - `@moq/qmux` is renamed so the cut publishes the JS QMux library under the Rust crate's name
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
 - [Release credential leaks](/quest/m0/security-audit/README.md) - tokens stay out of logs and outbound HTTP clients verify their peer, on `main` and `release`
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
