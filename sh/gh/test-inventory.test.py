@@ -278,7 +278,9 @@ class InventoryTest(unittest.TestCase):
 
     def test_a_js_bench_entry_point_needs_a_caller(self):
         # Nightly's shape: a loop's literal names reach a recipe parameter through a helper's "$@".
-        self.write("sh/nightly.sh", """
+        self.write(
+            "sh/nightly.sh",
+            """
             #!/usr/bin/env bash
             javascript() {
                 local label=$1
@@ -289,8 +291,11 @@ class InventoryTest(unittest.TestCase):
                 javascript "$benchmark" just js bench "$benchmark"
             done
             javascript page just js page-bench
-        """)
-        self.write("js/justfile", """
+        """,
+        )
+        self.write(
+            "js/justfile",
+            """
             bench name:
                 bun net/bench/{{ name }}.ts
 
@@ -299,7 +304,8 @@ class InventoryTest(unittest.TestCase):
 
             gc-bench:
                 bun net/bench/gc.ts
-        """)
+        """,
+        )
         self.write("justfile", JUSTFILE.replace("    mod rs\n", "    mod js\n    mod rs\n") + "        sh/nightly.sh\n")
         # A module, imported with or without its extension, and a page a bench bundles are not
         # entry points; a doc comment naming its loader, or a test importing it, changes nothing.
@@ -309,8 +315,11 @@ class InventoryTest(unittest.TestCase):
         self.write("js/net/bench/forward.ts", 'import { sweep } from "./sweep.ts";\n')
         self.write("js/net/bench/forward.test.ts", 'await import("./forward");\n')
         self.write("js/net/bench/gc.ts", "")
-        self.write("js/watch/bench/page.ts", 'import { chromium } from "playwright";\n'
-                   'await Bun.build({ entrypoints: [`${import.meta.dir}/page-entry.ts`] });\n')
+        self.write(
+            "js/watch/bench/page.ts",
+            'import { chromium } from "playwright";\n'
+            "await Bun.build({ entrypoints: [`${import.meta.dir}/page-entry.ts`] });\n",
+        )
         self.write("js/watch/bench/page-entry.ts", "")
         orphans = self.orphans()
         self.assertIn("script js/net/bench/forward.ts", orphans)
@@ -323,8 +332,10 @@ class InventoryTest(unittest.TestCase):
 
         # Dropping a name from the loop, or the browser bench's call, orphans its script.
         nightly = (self.root / "sh/nightly.sh").read_text()
-        self.write("sh/nightly.sh", nightly.replace("in fills;", "in forward;")
-                   .replace("javascript page just js page-bench\n", ""))
+        self.write(
+            "sh/nightly.sh",
+            nightly.replace("in fills;", "in forward;").replace("javascript page just js page-bench\n", ""),
+        )
         orphans = self.orphans()
         self.assertIn("script js/net/bench/fills.ts", orphans)
         self.assertNotIn("script js/net/bench/forward.ts", orphans)

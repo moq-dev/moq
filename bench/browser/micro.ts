@@ -14,8 +14,16 @@ const { values, positionals } = parseArgs({
 	},
 });
 const benchmark = values.bench;
-const expectedRows = ({ frames: 26, drift: 36, ledger: 12, "resume-history": 72 } as Record<string, number>)[benchmark];
-if (expectedRows === undefined) throw new Error("--bench must be frames, drift, ledger, or resume-history");
+// Each entry is named in full, so sh/gh/test-inventory.py sees this harness run it.
+const benchmarks: Record<string, { entry: string; rows: number }> = {
+	frames: { entry: "js/net/bench/frames.ts", rows: 26 },
+	drift: { entry: "js/net/bench/drift.ts", rows: 36 },
+	ledger: { entry: "js/net/bench/ledger.ts", rows: 12 },
+	"resume-history": { entry: "js/net/bench/resume-history.ts", rows: 72 },
+};
+const selected = Object.hasOwn(benchmarks, benchmark) ? benchmarks[benchmark] : undefined;
+if (!selected) throw new Error(`--bench must be one of: ${Object.keys(benchmarks).join(", ")}`);
+const expectedRows = selected.rows;
 const rounds = Number(values.rounds);
 if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("--rounds must be a positive integer");
 const roots = new Map<string, string>();
@@ -27,10 +35,8 @@ for (const argument of positionals.length ? positionals : ["current=.", "aa=."])
 }
 const scripts = new Map<string, string>();
 for (const [name, root] of roots) {
-	const entry =
-		benchmark === "frames"
-			? resolve(root, "js/net/bench/frames.ts")
-			: resolve(import.meta.dir, `../../js/net/bench/${benchmark}.ts`);
+	// Only frames is bundled from each variant; the rest import each variant's `../src/` below.
+	const entry = resolve(benchmark === "frames" ? root : resolve(import.meta.dir, "../.."), selected.entry);
 	const result = await Bun.build({
 		entrypoints: [entry],
 		target: "browser",

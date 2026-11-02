@@ -957,8 +957,11 @@ def bench_entries(root: Path, graph: Graph) -> set[Path]:
     """The JS bench scripts no other source imports or names: the ones something runs.
     A module, or a page a bench bundles, is named by its importer; a test importing the
     script it tests does not make that script a module."""
-    sources = [path for path in tracked(root, *(f"*{suffix}" for suffix in JS))
-               if not is_test_script(str(path.relative_to(root)))]
+    sources = [
+        path
+        for path in tracked(root, *(f"*{suffix}" for suffix in JS))
+        if not is_test_script(str(path.relative_to(root)))
+    ]
     named = set()
     for source in sources:
         # Block comments go first, since a doc comment may name the script that loads this one.
@@ -966,12 +969,21 @@ def bench_entries(root: Path, graph: Graph) -> set[Path]:
         named.update(path for path in graph.scripts(text, source.parent, source) if path != source.resolve())
         for specifier in IMPORT.findall(text):
             base = (source.parent / specifier).resolve()
-            named.update(path for path in (base, *(base.with_name(base.name + suffix) for suffix in JS),
-                                           *(base.with_suffix(suffix) for suffix in JS),
-                                           *(base / f"index{suffix}" for suffix in JS)) if path.is_file())
-    return {path.resolve() for path in sources
-            if "/bench/" in f"/{path.relative_to(root)}" and not path.name.endswith(".d.ts")
-            and path.resolve() not in named}
+            named.update(
+                path
+                for path in (
+                    base,
+                    *(base.with_name(base.name + suffix) for suffix in JS),
+                    *(base.with_suffix(suffix) for suffix in JS),
+                    *(base / f"index{suffix}" for suffix in JS),
+                )
+                if path.is_file()
+            )
+    return {
+        path.resolve()
+        for path in sources
+        if "/bench/" in f"/{path.relative_to(root)}" and not path.name.endswith(".d.ts") and path.resolve() not in named
+    }
 
 
 def discovered(root: Path, graph: Graph) -> set[Path]:
