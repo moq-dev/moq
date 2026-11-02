@@ -944,7 +944,7 @@ async fn read_payloads(sub: &mut moq_net::track::Subscriber, count: usize) -> Ve
 /// The client connects to two servers announcing the same route. The preferred
 /// (cheaper) route serves the track; when that session dies, the broadcast
 /// re-splices through the standby at a group boundary, without the path ever
-/// being retracted: both routes carry the same epoch over lite-07, so they serve
+/// being retracted: both routes carry the same instance over lite-07, so they serve
 /// the same bytes and the subscription rides the failover.
 #[tokio::test]
 async fn broadcast_route_migration() {
@@ -952,7 +952,7 @@ async fn broadcast_route_migration() {
 
 	let publisher = Hop::new(0x42).unwrap();
 	// Replicas of one publisher instance, and the only version that carries it.
-	let epoch = moq_net::Epoch::mint();
+	let instance = moq_net::Instance::random();
 	let lite_07: moq_net::Version = "moq-lite-07-wip".parse().unwrap();
 
 	// ── publisher A: the preferred route (cheaper) ──────────────────
@@ -963,7 +963,7 @@ async fn broadcast_route_migration() {
 	broadcast_a
 		.announce(
 			moq_net::origin::Route::default()
-				.with_epoch(epoch.clone())
+				.with_instance(instance.clone(), 0)
 				.with_hops(hops_a)
 				.with_cost(1),
 		)
@@ -988,7 +988,7 @@ async fn broadcast_route_migration() {
 	broadcast_b
 		.announce(
 			moq_net::origin::Route::default()
-				.with_epoch(epoch.clone())
+				.with_instance(instance.clone(), 0)
 				.with_hops(hops_b)
 				.with_cost(2),
 		)

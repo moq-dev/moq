@@ -1,6 +1,6 @@
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{Epoch, Hop, Hops, Path, coding::*, origin::Cost};
+use crate::{Hop, Hops, Instance, Path, coding::*, origin::Cost};
 
 use super::{
 	Message, Version,
@@ -13,7 +13,7 @@ use super::{
 const ANNOUNCE_START: u64 = 0;
 const ANNOUNCE_END: u64 = 1;
 const ANNOUNCE_UPDATE: u64 = 2;
-// lite-07: another publisher instance replaces the advertisement.
+// lite-07: the advertisement serves another instance, or a newer epoch of its own.
 const ANNOUNCE_RESTART: u64 = 3;
 const SYNCED: u64 = 4;
 // lite-07: a new advertisement continues what a live one served beneath its prefix.
@@ -49,12 +49,13 @@ pub fn update_supported(version: Version) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AnnounceBroadcast {
 	/// ANNOUNCE_START (lite-06) / active (older): a broadcast is now available.
-	/// Carries the path suffix, the hop chain, and (lite-06+) the static route
-	/// cost, and assigns the next announce id. The epoch (lite-07+) changes only
-	/// with a `Restart`.
+	/// Carries the path suffix, (lite-07+) the instance and epoch it serves, the hop
+	/// chain, and (lite-06+) the static route cost, and assigns the next announce id.
+	/// The instance and epoch change only with a `Restart`.
 	Active {
 		suffix: PathRef,
-		epoch: Option<Epoch>,
+		instance: Option<Instance>,
+		epoch: u64,
 		hops: HopsRef,
 		cost: Cost,
 	},
@@ -67,12 +68,14 @@ pub enum AnnounceBroadcast {
 	/// with this id (e.g. a new hop chain after a relay failover, or a route whose cost
 	/// moved). The id stays live.
 	Update { id: u64, hops: HopsRef, cost: Cost },
-	/// ANNOUNCE_RESTART (lite-07+): another publisher instance replaces the announcement
-	/// with this id, under the epoch given (or none). Whatever the receiver resolved
-	/// under its prefix is the old instance. The id stays live.
+	/// ANNOUNCE_RESTART (lite-07+): the announcement with this id now serves the
+	/// instance and epoch given. Another instance is another stream, so whatever the
+	/// receiver resolved under its prefix is stale; a higher epoch of the same one
+	/// continues it. The id stays live.
 	Restart {
 		id: u64,
-		epoch: Option<Epoch>,
+		instance: Option<Instance>,
+		epoch: u64,
 		hops: HopsRef,
 		cost: Cost,
 	},
@@ -82,7 +85,8 @@ pub enum AnnounceBroadcast {
 	Takeover {
 		predecessor: u64,
 		suffix: PathRef,
-		epoch: Option<Epoch>,
+		instance: Option<Instance>,
+		epoch: u64,
 		hops: HopsRef,
 		cost: Cost,
 	},
@@ -251,12 +255,13 @@ impl Encode<Version> for AnnounceBroadcast {
 			match self {
 				Self::Active {
 					suffix,
+					instance,
 					epoch,
 					hops,
 					cost,
 				} => {
 					suffix.encode(w, version)?;
-					super::epoch::encode_epoch(w, version, epoch.as_ref())?;
+					super::instance::encode_route(w, version, instance.as_ref(), *epoch)?;
 					hops.encode(w, version)?;
 					cost.encode(w, version)?;
 				}
@@ -266,22 +271,29 @@ impl Encode<Version> for AnnounceBroadcast {
 					hops.encode(w, version)?;
 					cost.encode(w, version)?;
 				}
-				Self::Restart { id, epoch, hops, cost } => {
+				Self::Restart {
+					id,
+					instance,
+					epoch,
+					hops,
+					cost,
+				} => {
 					w.varint(*id)?;
-					super::epoch::encode_epoch(w, version, epoch.as_ref())?;
+					super::instance::encode_route(w, version, instance.as_ref(), *epoch)?;
 					hops.encode(w, version)?;
 					cost.encode(w, version)?;
 				}
 				Self::Takeover {
 					predecessor,
 					suffix,
+					instance,
 					epoch,
 					hops,
 					cost,
 				} => {
 					w.varint(*predecessor)?;
 					suffix.encode(w, version)?;
-					super::epoch::encode_epoch(w, version, epoch.as_ref())?;
+					super::instance::encode_route(w, version, instance.as_ref(), *epoch)?;
 					hops.encode(w, version)?;
 					cost.encode(w, version)?;
 				}
@@ -342,12 +354,17 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 			let mut body = buf.sub(size)?;
 			let msg = (|| {
 				Ok(match typ {
-					ANNOUNCE_START => Self::Active {
-						suffix: PathRef::decode(&mut body, version)?,
-						epoch: super::epoch::decode_epoch(&mut body, version)?,
-						hops: HopsRef::decode(&mut body, version)?,
-						cost: Cost::decode(&mut body, version)?,
-					},
+					ANNOUNCE_START => {
+						let suffix = PathRef::decode(&mut body, version)?;
+						let (instance, epoch) = super::instance::decode_route(&mut body, version)?;
+						Self::Active {
+							suffix,
+							instance,
+							epoch,
+							hops: HopsRef::decode(&mut body, version)?,
+							cost: Cost::decode(&mut body, version)?,
+						}
+					}
 					SYNCED if version.has_synced() => Self::Synced,
 					ANNOUNCE_END => Self::EndedId { id: body.varint()? },
 					ANNOUNCE_UPDATE => Self::Update {
@@ -355,19 +372,30 @@ impl<'a> Decode<'a, Version> for AnnounceBroadcast {
 						hops: HopsRef::decode(&mut body, version)?,
 						cost: Cost::decode(&mut body, version)?,
 					},
-					ANNOUNCE_RESTART if version.has_announce_restart() => Self::Restart {
-						id: body.varint()?,
-						epoch: super::epoch::decode_epoch(&mut body, version)?,
-						hops: HopsRef::decode(&mut body, version)?,
-						cost: Cost::decode(&mut body, version)?,
-					},
-					ANNOUNCE_TAKEOVER if version.has_announce_takeover() => Self::Takeover {
-						predecessor: body.varint()?,
-						suffix: PathRef::decode(&mut body, version)?,
-						epoch: super::epoch::decode_epoch(&mut body, version)?,
-						hops: HopsRef::decode(&mut body, version)?,
-						cost: Cost::decode(&mut body, version)?,
-					},
+					ANNOUNCE_RESTART if version.has_announce_restart() => {
+						let id = body.varint()?;
+						let (instance, epoch) = super::instance::decode_route(&mut body, version)?;
+						Self::Restart {
+							id,
+							instance,
+							epoch,
+							hops: HopsRef::decode(&mut body, version)?,
+							cost: Cost::decode(&mut body, version)?,
+						}
+					}
+					ANNOUNCE_TAKEOVER if version.has_announce_takeover() => {
+						let predecessor = body.varint()?;
+						let suffix = PathRef::decode(&mut body, version)?;
+						let (instance, epoch) = super::instance::decode_route(&mut body, version)?;
+						Self::Takeover {
+							predecessor,
+							suffix,
+							instance,
+							epoch,
+							hops: HopsRef::decode(&mut body, version)?,
+							cost: Cost::decode(&mut body, version)?,
+						}
+					}
 					// Unknown types are skipped by length so an earlier Lite06 build
 					// negotiating the same ALPN does not kill the announce stream.
 					_ => {
@@ -418,7 +446,8 @@ impl AnnounceBroadcast {
 		Ok(match status {
 			AnnounceStatus::Active => Self::Active {
 				suffix: PathRef::literal(suffix),
-				epoch: None,
+				instance: None,
+				epoch: 0,
 				hops: HopsRef::literal(hops),
 				cost: Cost::UNKNOWN,
 			},
@@ -430,7 +459,8 @@ impl AnnounceBroadcast {
 			// invalid value there.
 			AnnounceStatus::Update if update_supported(version) => Self::Active {
 				suffix: PathRef::literal(suffix),
-				epoch: None,
+				instance: None,
+				epoch: 0,
 				hops: HopsRef::literal(hops),
 				cost: Cost::UNKNOWN,
 			},
@@ -701,7 +731,8 @@ mod tests {
 		// Encode a normal Active, then flip its status byte (1 -> 2).
 		let mut buf = Vec::new();
 		AnnounceBroadcast::Active {
-			epoch: None,
+			instance: None,
+			epoch: 0,
 			suffix: PathRef::literal(Path::from_static("foo/bar")),
 			hops: HopsRef::default(),
 			cost: Cost::default(),
@@ -792,7 +823,8 @@ mod tests {
 		let mut hops = Hops::new();
 		hops.push(Hop::new(7).unwrap()).unwrap();
 		let msg = AnnounceBroadcast::Active {
-			epoch: None,
+			instance: None,
+			epoch: 0,
 			suffix: PathRef::literal(Path::from_static("room/cam")),
 			hops: HopsRef::literal(hops.clone()),
 			cost: Cost::UNKNOWN,
@@ -815,7 +847,8 @@ mod tests {
 		let cost = Cost::new(12);
 
 		let active = AnnounceBroadcast::Active {
-			epoch: None,
+			instance: None,
+			epoch: 0,
 			suffix: PathRef::literal(Path::from_static("room/cam")),
 			hops: HopsRef::literal(hops.clone()),
 			cost,
@@ -841,7 +874,8 @@ mod tests {
 		let cost = Cost::new(12);
 
 		let active = AnnounceBroadcast::Active {
-			epoch: None,
+			instance: Some("a".parse().unwrap()),
+			epoch: 5,
 			suffix: PathRef {
 				base: 2,
 				keep: 3,
@@ -867,10 +901,11 @@ mod tests {
 		};
 		assert_eq!(broadcast_round_trip(&update, Version::Lite07), update);
 
-		for epoch in [None, Some(Epoch::mint())] {
+		for epoch in [0, 9] {
 			let restart = AnnounceBroadcast::Restart {
 				id: 3,
-				epoch: epoch.clone(),
+				instance: Some(Instance::random()),
+				epoch,
 				hops: HopsRef {
 					base: 4,
 					literal: hops.clone(),
@@ -887,6 +922,7 @@ mod tests {
 					keep: 1,
 					rest: Path::from_static("p"),
 				},
+				instance: Some(Instance::random()),
 				epoch,
 				hops: HopsRef {
 					base: 1,
@@ -905,7 +941,8 @@ mod tests {
 		let takeover = AnnounceBroadcast::Takeover {
 			predecessor: 0,
 			suffix: PathRef::literal(Path::from_static("p")),
-			epoch: Some(Epoch::mint()),
+			instance: Some(Instance::random()),
+			epoch: 0,
 			hops: HopsRef::default(),
 			cost: Cost::default(),
 		};
@@ -924,7 +961,8 @@ mod tests {
 	fn announce_restart_needs_lite07() {
 		let restart = AnnounceBroadcast::Restart {
 			id: 1,
-			epoch: None,
+			instance: Some("a".parse().unwrap()),
+			epoch: 0,
 			hops: HopsRef::default(),
 			cost: Cost::default(),
 		};
@@ -957,8 +995,8 @@ mod tests {
 	#[test]
 	fn a_keep_without_a_base_is_rejected() {
 		for (path_keep, hop_keep) in [(1u8, 0u8), (0, 1)] {
-			// Path base, path keep, empty rest, no epoch, hop base, no hops, hop keep, cost.
-			let body = [0, path_keep, 0, 0, 0, 0, hop_keep, 0, 0];
+			// Path base, path keep, empty rest, instance "a", epoch, hop base, no hops, hop keep, cost.
+			let body = [0, path_keep, 0, 1, b'a', 0, 0, 0, hop_keep, 0];
 			let mut buf = vec![ANNOUNCE_START as u8, body.len() as u8];
 			buf.extend_from_slice(&body);
 			assert!(matches!(
@@ -972,7 +1010,8 @@ mod tests {
 	#[test]
 	fn a_base_needs_lite07() {
 		let msg = AnnounceBroadcast::Active {
-			epoch: None,
+			instance: None,
+			epoch: 0,
 			suffix: PathRef {
 				base: 1,
 				keep: 1,
@@ -1025,7 +1064,8 @@ mod tests {
 	#[test]
 	fn route_cost_is_dropped_before_lite06() {
 		let msg = AnnounceBroadcast::Active {
-			epoch: None,
+			instance: None,
+			epoch: 0,
 			suffix: PathRef::literal(Path::from_static("room/cam")),
 			hops: HopsRef::default(),
 			cost: Cost::new(9),
@@ -1034,7 +1074,8 @@ mod tests {
 		assert_eq!(
 			got,
 			AnnounceBroadcast::Active {
-				epoch: None,
+				instance: None,
+				epoch: 0,
 				suffix: PathRef::literal(Path::from_static("room/cam")),
 				hops: HopsRef::default(),
 				cost: Cost::UNKNOWN,
