@@ -77,7 +77,7 @@ verdicts:
   owns it. [moq-dev/moq#7592](https://github.com/moq-dev/moq/pull/7592) already
   verifies that the old paired-base Cargo alias blocker is past.
 - Latest scheduled [Interop](https://github.com/moq-dev/moq/actions/runs/41317901057)
-  costs 48.3 Linux minutes and fails buffering, a catalog assertion, and the
+  costs 48.2 Linux minutes and fails buffering, a catalog assertion, and the
   removed `moq-transport-14` version. [moq-dev/moq#7553](https://github.com/moq-dev/moq/pull/7553)
   owns the join-test version matrix. The relay-log self-test's empty, timeout
   and pinned-round `FAIL` messages are intentional negative controls.
@@ -159,7 +159,7 @@ The recurring audit and its release prerequisite remain; no successor is made.
 
 Every checked-in workflow is listed below. `N` costs are its nested jobs in
 November 1 Nightly; `D` costs are the latest completed successful/failed direct
-run since October 20. A reusable wrapper with no direct run is not zero cost:
+run in the fetched page (up to 100 runs since October 20). A reusable wrapper with no direct run is not zero cost:
 its caller pays. Failure dates below are observations, not automatically unique
 regressions. For retained lanes without an attributed regression since October
 20, the signal column states the distinct boundary that earns their cost.
@@ -179,55 +179,55 @@ release credentials remain under the existing publisher-environment work above.
 | [audio-quality](/.github/workflows/audio-quality.yml) | Keep: deterministic audio replay correctness; real-time quality is in Nightly | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 4.5 |
 | [c](/.github/workflows/c.yml) | Keep: generated C bindings and installed-consumer ABI link | Caller gate / Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 4.5 |
 | [cache](/.github/workflows/cache.yml) | Keep, infrastructure-owned: publishes reusable shells on three hosts | GitHub status; no product regression claim | [D 2026-11-02](https://github.com/moq-dev/moq/actions/runs/41377533846) ARM 1.3, Linux 1.3, macOS 3.5 |
-| [check](/.github/workflows/check.yml) | Keep: release admission; main admission runs locally through quest land | Required Check; module timing summary | No completed direct sample since October 20 |
+| [check](/.github/workflows/check.yml) | Keep: release admission; main admission runs locally through quest land | Required Check; module timing summary | No completed direct sample in fetched page |
 | [codspeed](/.github/workflows/codspeed.yml) | Keep: instruction counts separate layout/timing noise; explicit October 28 maintainer decision in bench-ci | CodSpeed dashboard; failure alert | [D 2026-11-02](https://github.com/moq-dev/moq/actions/runs/41368239240) Linux 63.2 |
-| [cpp](/.github/workflows/cpp.yml) | Keep: c++ compiler and ABI consumer builds; not only Rust compilation | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 6.3 |
+| [cpp](/.github/workflows/cpp.yml) | Keep: C++ compiler and ABI consumer builds; not only Rust compilation | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 6.3 |
 | [dependabot](/.github/workflows/dependabot.yml) | Keep: dependency PR policy and maintenance automation | Dependency PR state | [D 2026-11-02](https://github.com/moq-dev/moq/actions/runs/41372931202) Linux 0.6 |
 | [docker](/.github/workflows/docker.yml) | Keep: container image build and multi-architecture publication | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 13.1, Linux 15.8 |
 | [features](/.github/workflows/features.yml) | Keep: feature isolation and missing dependency gates | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 53.1 |
 | [ietf-conformance](/.github/workflows/ietf-conformance.yml) | Keep: pinned third-party Moxygen protocol behavior | Nightly failure alert; reports are diagnostics | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 29.8 |
 | [interop](/.github/workflows/interop.yml) | Keep: cross-language protocol/media behavior | Discord and Pages interop report | [D 2026-11-01](https://github.com/moq-dev/moq/actions/runs/41317901057) Linux 48.2 |
-| [moq-c](/.github/workflows/moq-c.yml) | Keep: c ABI packaging, fixtures and consumer links | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 10.4, Linux 12.2, Windows 14.9, macOS 23.7 |
-| [moq-cli](/.github/workflows/moq-cli.yml) | Keep: cLI release archives and target-specific links | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 11.5, Linux 12.4, Windows 21.1, macOS 38.1 |
-| [moq-gst](/.github/workflows/moq-gst.yml) | Keep: gStreamer plugin packaging and dynamic links | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 12.2, Linux 15.6, macOS 21.7 |
+| [moq-c](/.github/workflows/moq-c.yml) | Keep: C ABI packaging, fixtures and consumer links | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 10.4, Linux 12.2, Windows 14.9, macOS 23.7 |
+| [moq-cli](/.github/workflows/moq-cli.yml) | Keep: CLI release archives and target-specific links | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 11.5, Linux 12.4, Windows 21.1, macOS 38.1 |
+| [moq-gst](/.github/workflows/moq-gst.yml) | Keep: GStreamer plugin packaging and dynamic links | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 12.2, Linux 15.6, macOS 21.7 |
 | [moq-relay](/.github/workflows/moq-relay.yml) | Keep: relay release archives and target-specific links | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 6.6, Linux 7.5, Windows 12.0, macOS 15.0 |
 | [moq-sh](/.github/workflows/moq-sh.yml) | Keep: installer publication, fixtures and installed artifact smoke | Published repository/installer and alert | No executed direct sample since October 20; cost belongs to caller |
-| [mutants](/.github/workflows/mutants.yml) | Keep: security/grant/resume/expiry test sensitivity, distinct from rerunning tests; newly added, no scheduled sample yet | Survivors in summary and failure alert | No completed direct sample since October 20 |
+| [mutants](/.github/workflows/mutants.yml) | Keep: security/grant/resume/expiry test sensitivity, distinct from rerunning tests; newly added, no scheduled sample yet | Survivors in summary and failure alert | No completed direct sample in fetched page |
 | [nightly](/.github/workflows/nightly.yml) | Delete three log-only relay measurement jobs; keep diff-independent coverage below | Discord, Pages, job summaries | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 780.1, Linux 303.6, Windows 139.9, macOS 282.1 |
-| [obs](/.github/workflows/obs.yml) | Keep: oBS consumer build and plugin packaging | Caller gate and Nightly alert | [D 2026-10-25](https://github.com/moq-dev/moq/actions/runs/40211940636) ARM 20.4, Windows 12.2, macOS 10.6 |
-| [oss-scanner](/.github/workflows/oss-scanner.yml) | Keep: oSS Scanner container builds | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 9.2 |
+| [obs](/.github/workflows/obs.yml) | Keep: OBS consumer build and plugin packaging | Caller gate and Nightly alert | [D 2026-10-25](https://github.com/moq-dev/moq/actions/runs/40211940636) ARM 20.4, Windows 12.2, macOS 10.6 |
+| [oss-scanner](/.github/workflows/oss-scanner.yml) | Keep: OSS Scanner container builds | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 9.2 |
 | [platform](/.github/workflows/platform.yml) | Keep: macOS/Windows cfg, ABI, Swift and native test boundaries | Nightly/release gate alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 0.2, Windows 18.2, macOS 57.5 |
 | [pullfrog](/.github/workflows/pullfrog.yml) | Keep: explicitly dispatched agent work, no standing regression cost | Calling agent result / GitHub posts | [D 2026-11-02](https://github.com/moq-dev/moq/actions/runs/41378234938) Linux 3.5 |
 | [quest](/.github/workflows/quest.yml) | Keep: validates direct pushes after quest-tree merges | GitHub Quest status; no Discord | [D 2026-11-02](https://github.com/moq-dev/moq/actions/runs/41378565460) ARM 0.4 |
 | [release-binary](/.github/workflows/release-binary.yml) | Keep: shared target-specific binary packaging | Calling release workflow; not independently triggered | No executed direct sample since October 20; cost belongs to caller |
-| [release-brew](/.github/workflows/release-brew.yml) | Keep: homebrew publication | Caller gate/alert and release artifacts | [D 2026-10-30](https://github.com/moq-dev/moq/actions/runs/41042504830) Linux 0.3 |
+| [release-brew](/.github/workflows/release-brew.yml) | Keep: Homebrew publication | Caller gate/alert and release artifacts | [D 2026-10-30](https://github.com/moq-dev/moq/actions/runs/41042504830) Linux 0.3 |
 | [release-c](/.github/workflows/release-c.yml) | Keep: generated C package and installed consumers over validated native inputs | Caller gate / alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 3.0, Linux 2.6, Windows 7.5, macOS 4.6 |
-| [release-cpp](/.github/workflows/release-cpp.yml) | Keep: c++ release artifacts and consumers | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 3.3, Linux 3.8, Windows 12.5, macOS 9.1 |
-| [release-dart-ffi](/.github/workflows/release-dart-ffi.yml) | Keep: dart native FFI artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 41.2, Windows 17.3, macOS 57.7 |
-| [release-dart](/.github/workflows/release-dart.yml) | Keep: dart package publication | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 0.4 |
+| [release-cpp](/.github/workflows/release-cpp.yml) | Keep: C++ release artifacts and consumers | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 3.3, Linux 3.8, Windows 12.5, macOS 9.1 |
+| [release-dart-ffi](/.github/workflows/release-dart-ffi.yml) | Keep: Dart native FFI artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 41.2, Windows 17.3, macOS 57.7 |
+| [release-dart](/.github/workflows/release-dart.yml) | Keep: Dart package publication | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 0.4 |
 | [release-ffi](/.github/workflows/release-ffi.yml) | Keep: shared FFI target builder | Calling release workflow; not independently triggered | No executed direct sample since October 20; cost belongs to caller |
 | [release-gate](/.github/workflows/release-gate.yml) | Keep: complete release PR admission, including callable platform lanes | Caller gate/alert and release artifacts | [D 2026-11-02](https://github.com/moq-dev/moq/actions/runs/41376436029) ARM 0.2, Windows 6.5, macOS 4.4 |
-| [release-go-ffi](/.github/workflows/release-go-ffi.yml) | Keep: go native FFI artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 1.0 |
-| [release-go](/.github/workflows/release-go.yml) | Keep: go wrapper publication | Caller gate/alert and release artifacts | [D 2026-10-31](https://github.com/moq-dev/moq/actions/runs/41182420464) Linux 1.4 |
+| [release-go-ffi](/.github/workflows/release-go-ffi.yml) | Keep: Go native FFI artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 1.0 |
+| [release-go](/.github/workflows/release-go.yml) | Keep: Go wrapper publication | Caller gate/alert and release artifacts | [D 2026-10-31](https://github.com/moq-dev/moq/actions/runs/41182420464) Linux 1.4 |
 | [release-js](/.github/workflows/release-js.yml) | Keep: npm/JSR packages and exports | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 6.0 |
-| [release-kt-ffi](/.github/workflows/release-kt-ffi.yml) | Keep: kotlin native FFI artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 1.7 |
-| [release-kt-lib](/.github/workflows/release-kt-lib.yml) | Keep: kotlin wrapper artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 11.1 |
-| [release-nix](/.github/workflows/release-nix.yml) | Keep: nix release evaluation/publication | Caller gate/alert and release artifacts | No completed direct sample since October 20 |
-| [release-py-ffi](/.github/workflows/release-py-ffi.yml) | Keep: python native wheels | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 11.2, Linux 19.5, Windows 13.8, macOS 8.9 |
-| [release-py](/.github/workflows/release-py.yml) | Keep: python wrapper package | Caller gate/alert and release artifacts | [D 2026-10-31](https://github.com/moq-dev/moq/actions/runs/41182392402) Linux 17.6 |
-| [release-rs](/.github/workflows/release-rs.yml) | Keep: rust package release policy | Caller gate/alert and release artifacts | [D 2026-10-31](https://github.com/moq-dev/moq/actions/runs/41182420560) Linux 22.4 |
+| [release-kt-ffi](/.github/workflows/release-kt-ffi.yml) | Keep: Kotlin native FFI artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 1.7 |
+| [release-kt-lib](/.github/workflows/release-kt-lib.yml) | Keep: Kotlin wrapper artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 11.1 |
+| [release-nix](/.github/workflows/release-nix.yml) | Keep: Nix release evaluation/publication | Caller gate/alert and release artifacts | No completed direct sample in fetched page |
+| [release-py-ffi](/.github/workflows/release-py-ffi.yml) | Keep: Python native wheels | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 11.2, Linux 19.5, Windows 13.8, macOS 8.9 |
+| [release-py](/.github/workflows/release-py.yml) | Keep: Python wrapper package | Caller gate/alert and release artifacts | [D 2026-10-31](https://github.com/moq-dev/moq/actions/runs/41182392402) Linux 17.6 |
+| [release-rs](/.github/workflows/release-rs.yml) | Keep: Rust package release policy | Caller gate/alert and release artifacts | [D 2026-10-31](https://github.com/moq-dev/moq/actions/runs/41182420560) Linux 22.4 |
 | [release-shared-ffi](/.github/workflows/release-shared-ffi.yml) | Keep: one native build per shared target; packages consume these outputs | Caller gate / alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 3.7, Linux 74.6, Windows 22.5, macOS 44.9 |
-| [release-swift-ffi](/.github/workflows/release-swift-ffi.yml) | Keep: swift native FFI artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 0.2, macOS 1.0 |
-| [release-swift-lib](/.github/workflows/release-swift-lib.yml) | Keep: swift wrapper publication | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 0.3, macOS 0.9 |
+| [release-swift-ffi](/.github/workflows/release-swift-ffi.yml) | Keep: Swift native FFI artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 0.2, macOS 1.0 |
+| [release-swift-lib](/.github/workflows/release-swift-lib.yml) | Keep: Swift wrapper publication | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 0.3, macOS 0.9 |
 | [release-winget](/.github/workflows/release-winget.yml) | Keep: winget manifests and publication | Caller gate/alert and release artifacts | [D 2026-10-30](https://github.com/moq-dev/moq/actions/runs/41041265123) Windows 0.4 |
-| [rpm-repo](/.github/workflows/rpm-repo.yml) | Keep: rPM repository metadata/signatures/publication | Published repository/installer and alert | [D 2026-10-30](https://github.com/moq-dev/moq/actions/runs/41042495150) Linux 2.4 |
+| [rpm-repo](/.github/workflows/rpm-repo.yml) | Keep: RPM repository metadata/signatures/publication | Published repository/installer and alert | [D 2026-10-30](https://github.com/moq-dev/moq/actions/runs/41042495150) Linux 2.4 |
 | [runner-vm](/.github/workflows/runner-vm.yml) | Keep: persistent runner VM configuration and boot/image checks | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 7.1 |
 | [smoke-toolchain](/.github/workflows/smoke-toolchain.yml) | Keep: coupled smoke tooling and Playwright update validation | Update PR and scheduled failure alert | [D 2026-10-26](https://github.com/moq-dev/moq/actions/runs/40353286871) Linux 1.3 |
 | [smoke](/.github/workflows/smoke.yml) | Keep: published distribution and external-relay behavior | Discord and Pages relay report | [D 2026-11-01](https://github.com/moq-dev/moq/actions/runs/41325786483) Linux 55.6 |
-| [ts](/.github/workflows/ts.yml) | Keep: tS container compliance and round-trip media integrity | Scheduled failure alert and release gate | [D 2026-11-01](https://github.com/moq-dev/moq/actions/runs/41317281352) Linux 42.0 |
+| [ts](/.github/workflows/ts.yml) | Keep: TS container compliance and round-trip media integrity | Scheduled failure alert and release gate | [D 2026-11-01](https://github.com/moq-dev/moq/actions/runs/41317281352) Linux 42.0 |
 | [uring](/.github/workflows/uring.yml) | Keep: io_uring compile and runtime/kernel contract | Caller gate and Nightly alert | [D 2026-10-20](https://github.com/moq-dev/moq/actions/runs/39372116327) ARM 7.7 |
 | [video](/.github/workflows/video.yml) | Keep: browser video renderer behavior | Scheduled failure alert and release gate | [D 2026-11-01](https://github.com/moq-dev/moq/actions/runs/41318496744) Linux 7.8 |
-| [x11](/.github/workflows/x11.yml) | Keep: sHM and GetImage native capture paths | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 6.2 |
+| [x11](/.github/workflows/x11.yml) | Keep: SHM and GetImage native capture paths | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 6.2 |
 
 ### Every job of November 1 scheduled Nightly
 
