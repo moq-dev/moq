@@ -15,8 +15,7 @@ use tracing::Level;
 #[expect(non_camel_case_types, reason = "C ABI type names match moq.h")]
 #[derive(Clone, Copy, Debug)]
 pub enum moq_container_kind {
-	/// A QUIC varint timestamp prefix followed by the raw codec payload.
-	/// Timestamps are in microseconds.
+	/// A QUIC varint timestamp prefix in microseconds followed by the raw codec payload.
 	MOQ_CONTAINER_KIND_LEGACY = 0,
 	/// Fragmented MP4: each frame is a complete moof+mdat fragment, described by
 	/// the init segment in `moq_container::init`.
@@ -503,6 +502,37 @@ pub struct moq_json_snapshot_config {
 	pub deltas: bool,
 }
 
+/// An exact media timestamp: `value` units at `scale` units per second.
+///
+/// Reads carry the scale the publisher wrote, so a tick such as 90 kHz survives a read and
+/// republish exactly. A write with a zero scale, a scale above `2^62 - 1`, or a value above
+/// `2^61 - 1` fails with `MOQ_ERROR_TIMESTAMP_OVERFLOW`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct moq_timestamp {
+	/// The time in `scale` units, at most `2^61 - 1`.
+	pub value: u64,
+	/// Units per second, non-zero and at most `2^62 - 1`.
+	pub scale: u64,
+}
+
+impl From<moq_net::Timestamp> for moq_timestamp {
+	fn from(timestamp: moq_net::Timestamp) -> Self {
+		Self {
+			value: timestamp.value(),
+			scale: timestamp.scale().as_u64(),
+		}
+	}
+}
+
+impl TryFrom<moq_timestamp> for moq_net::Timestamp {
+	type Error = moq_net::TimeOverflow;
+
+	fn try_from(timestamp: moq_timestamp) -> Result<Self, Self::Error> {
+		Self::from_scale(timestamp.value, timestamp.scale)
+	}
+}
+
 /// Options for a JSON window producer (a sliding run of records).
 #[repr(C)]
 pub struct moq_json_window_config {
@@ -520,13 +550,9 @@ pub struct moq_json_value {
 	/// The length in bytes of `json`.
 	pub json_len: usize,
 
-	/// The timestamp of the frame that carried the value in microseconds, or 0 when
-	/// `timestamp_present` is false. Rounded down to a whole microsecond, so a tick on a track
-	/// like 90 kHz may not survive a read and republish exactly.
-	pub timestamp_us: u64,
-
-	/// Whether the frame carries a timestamp. A value read from an untimed track does not.
-	pub timestamp_present: bool,
+	/// The timestamp of the frame that carried the value, or NULL on an untimed track.
+	/// Valid as long as `json`.
+	pub timestamp: *const moq_timestamp,
 }
 
 /// Which change a [moq_json_window_event] reports.
@@ -562,13 +588,10 @@ pub struct moq_json_window_event {
 	/// The length in bytes of `json`.
 	pub json_len: usize,
 
-	/// The timestamp of the frame that carried the change in microseconds, or 0 when
-	/// `timestamp_present` is false. A record first learned of from a group's restatement (after
-	/// a join, or while behind) carries that frame's time, not its original push time.
-	pub timestamp_us: u64,
-
-	/// Whether the frame carries a timestamp. A change read from an untimed track does not.
-	pub timestamp_present: bool,
+	/// The timestamp of the frame that carried the change, or NULL on an untimed track. Valid
+	/// until the event is freed. A record first learned of from a group's restatement (after a
+	/// join, or while behind) carries that frame's time, not its original push time.
+	pub timestamp: *const moq_timestamp,
 }
 
 /// Information about a frame of media.
@@ -579,13 +602,9 @@ pub struct moq_frame {
 	/// The length in bytes of `payload`.
 	pub payload_size: usize,
 
-	/// The presentation timestamp of the frame in microseconds, or 0 when
-	/// `timestamp_present` is false.
-	pub timestamp_us: u64,
-
-	/// Whether the frame carries a timestamp. Media frames always do; a raw frame read
-	/// from an untimed track does not.
-	pub timestamp_present: bool,
+	/// The presentation timestamp of the frame, or NULL on an untimed track. Media frames
+	/// always have one. Valid as long as `payload`.
+	pub timestamp: *const moq_timestamp,
 
 	/// Whether this frame opens a group or is a video keyframe; audio is true only at a group start.
 	pub keyframe: bool,
@@ -600,9 +619,9 @@ pub struct moq_media_read {
 	pub frame: moq_frame,
 	/// Lost media for a gap read; what follows does not continue it.
 	pub gap: crate::moq_decode_gap,
-	/// Where a stopped encoder's media stops, in microseconds. Following frames before
-	/// this point are its remaining media; the first at or past it comes from a fresh encoder.
-	pub end_us: u64,
+	/// Where a stopped encoder's media stops. Following frames before this point are its
+	/// remaining media; the first at or past it comes from a fresh encoder.
+	pub end: moq_timestamp,
 }
 
 /// A best-effort raw track datagram delivered via [moq_consume_datagrams].
@@ -613,12 +632,9 @@ pub struct moq_datagram {
 	/// The length in bytes of `payload`.
 	pub payload_size: usize,
 
-	/// The presentation timestamp of the datagram in microseconds, or 0 when
-	/// `timestamp_present` is false.
-	pub timestamp_us: u64,
-
-	/// Whether the datagram carries a timestamp. One read from an untimed track does not.
-	pub timestamp_present: bool,
+	/// The presentation timestamp of the datagram, or NULL on an untimed track. Valid as
+	/// long as `payload`.
+	pub timestamp: *const moq_timestamp,
 
 	/// Per-track sequence number, drawn from the same namespace as groups.
 	pub sequence: u64,
@@ -642,8 +658,7 @@ pub struct moq_track_info {
 
 	/// Per-frame timescale in ticks per second.
 	pub timescale: u64,
-	/// Whether `timescale` is set. When false, the default microsecond timescale
-	/// applies, matching the `timestamp_us` units used everywhere else in this ABI.
+	/// Whether `timescale` is set. When false, a microsecond timescale applies.
 	pub timescale_present: bool,
 
 	/// A joining subscriber asks for a new group once the newest group's bytes after its
@@ -661,8 +676,7 @@ impl TryFrom<&moq_track_info> for moq_net::track::Info {
 	type Error = Error;
 
 	fn try_from(info: &moq_track_info) -> Result<Self, Self::Error> {
-		// Raw tracks default to a microsecond timescale, matching the C ABI's
-		// timestamp_us units. An explicit timescale below overrides it.
+		// Raw tracks default to a microsecond timescale; an explicit one below overrides it.
 		let mut out = moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MICRO)
 			.with_priority(info.priority);
@@ -788,8 +802,8 @@ pub struct moq_anchor {
 	/// The group, or with `MOQ_ANCHOR_RELATIVE` how many groups before the latest one
 	/// (0 is the latest, and an offset past the first group clamps to it).
 	pub group: u64,
-	/// The presentation time in microseconds, read only with `MOQ_ANCHOR_TIME`.
-	pub timestamp_us: u64,
+	/// The presentation time, read only with `MOQ_ANCHOR_TIME`.
+	pub timestamp: moq_timestamp,
 }
 
 /// How a [moq_anchor] names its position.
@@ -820,9 +834,7 @@ fn parse_anchor(anchor: &moq_anchor) -> Result<moq_net::track::Anchor, Error> {
 	Ok(match anchor.kind {
 		v if v == moq_anchor_kind::MOQ_ANCHOR_ABSOLUTE as u32 => moq_net::track::Anchor::Absolute(anchor.group),
 		v if v == moq_anchor_kind::MOQ_ANCHOR_RELATIVE as u32 => moq_net::track::Anchor::Relative(anchor.group),
-		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => {
-			moq_net::track::Anchor::Time(moq_net::Timestamp::from_micros(anchor.timestamp_us)?)
-		}
+		v if v == moq_anchor_kind::MOQ_ANCHOR_TIME as u32 => moq_net::track::Anchor::Time(anchor.timestamp.try_into()?),
 		_ => return Err(Error::InvalidCode),
 	})
 }
@@ -948,10 +960,7 @@ unsafe fn parse_announce_route(route: *const moq_announce_route) -> Result<moq_n
 		return Ok(moq_net::origin::Route::default());
 	};
 	let mut out = moq_net::origin::Route::default().with_cost(moq_net::origin::Cost::new(route.cost));
-	if let Some(epoch) = unsafe { ffi::parse_str_optional(route.epoch, route.epoch_len)? } {
-		let epoch = epoch
-			.parse()
-			.map_err(|_| Error::InvalidConfig(format!("epoch {epoch:?} is not canonical UUIDv7 text")))?;
+	if let Some(epoch) = unsafe { parse_epoch(route.epoch, route.epoch_len)? } {
 		out = out.with_epoch(epoch);
 	}
 	Ok(out)
@@ -2116,6 +2125,7 @@ pub unsafe extern "C" fn moq_broadcast_request_path(request: u32, dst: *mut moq_
 /// Consumes the request handle, writes the new broadcast handle to `broadcast`
 /// (which cannot announce itself; only [moq_broadcast_prepared_publish] does),
 /// and returns a positive prepared-answer handle or a negative error.
+/// A malformed epoch returns `MOQ_ERROR_INVALID_CONFIG` without consuming the request.
 ///
 /// # Safety
 /// - `epoch` must point at `epoch_len` readable bytes containing a UUIDv7 epoch.
@@ -2129,9 +2139,7 @@ pub unsafe extern "C" fn moq_broadcast_request_prepare(
 ) -> i32 {
 	ffi::enter(move || {
 		let request = ffi::parse_id(request)?;
-		let epoch = unsafe { ffi::parse_str(epoch, epoch_len)? }
-			.parse()
-			.map_err(|_| Error::InvalidCode)?;
+		let epoch = epoch_from_str(unsafe { ffi::parse_str(epoch, epoch_len)? })?;
 		let broadcast_out = unsafe { broadcast.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let mut state = State::lock();
 		let (pending, driver) = state.origin.broadcast_request_take(request)?;
@@ -2306,7 +2314,7 @@ pub extern "C" fn moq_origin_announced_cancel(announced: u32) -> i32 {
 /// announced, like a remote one.
 ///
 /// `epoch` is the UUIDv7 text of the only publisher instance to follow, or NULL (or empty) to
-/// follow every instance. A pinned follow never delivers another instance taking over, and
+/// follow every instance. Malformed epoch text returns `MOQ_ERROR_INVALID_CONFIG`. A pinned follow never delivers another instance taking over, and
 /// delivers its own instance again if it returns after an end.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once announced, and again with a
@@ -2369,6 +2377,7 @@ pub extern "C" fn moq_origin_follow_cancel(task: u32) -> i32 {
 ///
 /// `epoch` is the UUIDv7 text of the only publisher instance to accept, or NULL (or empty) for
 /// any instance. A request pinned to an instance that does not serve the path is unroutable.
+/// Malformed epoch text returns `MOQ_ERROR_INVALID_CONFIG`.
 ///
 /// `on_broadcast` is invoked with a positive broadcast handle once served, then exactly once more
 /// with a terminal code: `0` (finished, including after [moq_origin_request_cancel]) or a negative
@@ -2421,8 +2430,16 @@ pub extern "C" fn moq_origin_request_cancel(task: u32) -> i32 {
 /// - `epoch` may be NULL, or must point at `epoch_len` readable bytes.
 unsafe fn parse_epoch(epoch: *const c_char, epoch_len: usize) -> Result<Option<moq_net::Epoch>, Error> {
 	unsafe { ffi::parse_str_optional(epoch, epoch_len)? }
-		.map(|epoch| epoch.parse().map_err(|_| Error::InvalidCode))
+		.map(epoch_from_str)
 		.transpose()
+}
+
+/// Parse canonical UUIDv7 epoch text, refusing anything else as `MOQ_ERROR_INVALID_CONFIG`
+/// at every API that takes an epoch.
+fn epoch_from_str(epoch: &str) -> Result<moq_net::Epoch, Error> {
+	epoch
+		.parse()
+		.map_err(|_| Error::InvalidConfig(format!("epoch {epoch:?} is not canonical UUIDv7 text")))
 }
 
 /// Close an origin and clean up its resources.
@@ -2444,7 +2461,7 @@ pub extern "C" fn moq_origin_close(origin: u32) -> i32 {
 /// Announcing again re-prices the route in place, or restarts it under a new epoch. A
 /// NULL `route` uses the default (cost 0, no epoch). Until announced, the broadcast is
 /// invisible and unroutable for local consumers and peers alike. Fails once the
-/// broadcast closed, or when `epoch` is not UUIDv7 text.
+/// broadcast closed, or with `MOQ_ERROR_INVALID_CONFIG` when `epoch` is not UUIDv7 text.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -2666,7 +2683,11 @@ pub extern "C" fn moq_publish_media_finish(export: u32) -> i32 {
 	})
 }
 
-/// Watch whether a media track has subscribers, so an encoder runs only while someone watches.
+/// Watch whether a media track has subscribers.
+///
+/// A track publishes whatever you write, subscribed or not, so a late subscriber can fetch
+/// the recent past. Running an encoder only while someone watches is an opt-in: it saves
+/// the encode, but leaves nothing from before the first subscriber.
 ///
 /// `on_demand` fires right away with the current [moq_demand] state, again on every
 /// change, including a move of the wanted group that [moq_publish_demand_wanted] reads,
@@ -2796,7 +2817,6 @@ pub extern "C" fn moq_publish_container_finish(container: u32) -> i32 {
 /// Write data to a track.
 ///
 /// The encoding of `data` depends on the track `format`.
-/// The timestamp is in microseconds.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -2807,13 +2827,12 @@ pub unsafe extern "C" fn moq_publish_media_frame(
 	media: u32,
 	payload: *const u8,
 	payload_size: usize,
-	timestamp_us: u64,
+	timestamp: moq_timestamp,
 ) -> i32 {
 	ffi::enter(move || {
 		let media = ffi::parse_id(media)?;
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
-		let timestamp = hang::container::Timestamp::from_micros(timestamp_us)?;
-		State::lock().publish.media_frame(media, payload, timestamp)
+		State::lock().publish.media_frame(media, payload, timestamp.try_into()?)
 	})
 }
 
@@ -3117,31 +3136,33 @@ pub extern "C" fn moq_publish_track_group_at(track: u32, sequence: u64) -> i32 {
 /// Write a single-frame group to a raw track with a timestamp.
 ///
 /// Convenience for the common one-frame-per-group pattern. Equivalent to
-/// appending a group, writing one frame, and finishing it.
-/// The timestamp is in microseconds.
+/// appending a group, writing one frame, and finishing it. The timestamp is
+/// converted to the track's timescale; NULL writes an untimed frame, which only
+/// an untimed track accepts.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
+/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_track_frame(
 	track: u32,
 	payload: *const u8,
 	payload_size: usize,
-	timestamp_us: u64,
+	timestamp: *const moq_timestamp,
 ) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
-		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
 		State::lock().publish.track_frame(track, timestamp, payload)
 	})
 }
 
 /// Send a best-effort datagram on a raw track created by [moq_publish_track].
 ///
-/// Takes `payload` then `timestamp_us`, matching [moq_publish_track_frame]. The payload must
+/// Takes `payload` then `timestamp`, matching [moq_publish_track_frame]. The payload must
 /// be at most 1200 bytes. On success the datagram's per-track sequence number (shared with the
 /// group namespace) is written to `out_sequence` when it is non-NULL. Datagrams are
 /// delivered only on transports and wire versions with a datagram channel; there is no
@@ -3151,19 +3172,21 @@ pub unsafe extern "C" fn moq_publish_track_frame(
 ///
 /// # Safety
 /// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
+/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
 /// - `out_sequence` must be NULL or a valid pointer to a `uint64_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_track_datagram(
 	track: u32,
 	payload: *const u8,
 	payload_size: usize,
-	timestamp_us: u64,
+	timestamp: *const moq_timestamp,
 	out_sequence: *mut u64,
 ) -> i32 {
 	ffi::enter(move || {
 		let track = ffi::parse_id(track)?;
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
-		let sequence = State::lock().publish.track_datagram(track, timestamp_us, payload)?;
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		let sequence = State::lock().publish.track_datagram(track, timestamp, payload)?;
 		if let Some(out) = unsafe { out_sequence.as_mut() } {
 			*out = sequence;
 		}
@@ -3508,23 +3531,25 @@ pub extern "C" fn moq_group_request_free(request: u32) -> i32 {
 
 /// Write a frame into a raw group created by [moq_publish_track_group].
 ///
-/// The timestamp is in microseconds.
+/// The timestamp is converted to the track's timescale; NULL writes an untimed
+/// frame, which only an untimed track accepts.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure that payload is a valid pointer to payload_size bytes of data.
+/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn moq_publish_group_frame(
 	group: u32,
 	payload: *const u8,
 	payload_size: usize,
-	timestamp_us: u64,
+	timestamp: *const moq_timestamp,
 ) -> i32 {
 	ffi::enter(move || {
 		let group = ffi::parse_id(group)?;
 		let payload = unsafe { ffi::parse_slice(payload, payload_size)? };
-		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
 		State::lock().publish.group_frame(group, timestamp, payload)
 	})
 }
@@ -3581,17 +3606,27 @@ pub unsafe extern "C" fn moq_publish_json_snapshot(
 /// Publish a new value to a JSON snapshot track. `value` is a UTF-8 JSON document. A no-op if
 /// unchanged from the previous update.
 ///
+/// `timestamp` is when the value was captured, converted to the track's millisecond timescale;
+/// NULL stamps the broadcast clock's current time.
+///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure `value` is a valid pointer to `value_len` bytes.
+/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_json_snapshot_update(json: u32, value: *const c_char, value_len: usize) -> i32 {
+pub unsafe extern "C" fn moq_publish_json_snapshot_update(
+	json: u32,
+	value: *const c_char,
+	value_len: usize,
+	timestamp: *const moq_timestamp,
+) -> i32 {
 	ffi::enter(move || {
 		let json = ffi::parse_id(json)?;
 		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
 		let value = serde_json::from_slice(value)?;
-		State::lock().publish.json_snapshot_update(json, value)
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		State::lock().publish.json_snapshot_update(json, value, timestamp)
 	})
 }
 
@@ -3630,17 +3665,27 @@ pub unsafe extern "C" fn moq_publish_json_stream(broadcast: u32, name: *const c_
 
 /// Append one record to a JSON stream track. `value` is a UTF-8 JSON document.
 ///
+/// `timestamp` is when the value was captured, converted to the track's millisecond timescale;
+/// NULL stamps the broadcast clock's current time.
+///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure `value` is a valid pointer to `value_len` bytes.
+/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_json_stream_append(stream: u32, value: *const c_char, value_len: usize) -> i32 {
+pub unsafe extern "C" fn moq_publish_json_stream_append(
+	stream: u32,
+	value: *const c_char,
+	value_len: usize,
+	timestamp: *const moq_timestamp,
+) -> i32 {
 	ffi::enter(move || {
 		let stream = ffi::parse_id(stream)?;
 		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
 		let value = serde_json::from_slice(value)?;
-		State::lock().publish.json_stream_append(stream, value)
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		State::lock().publish.json_stream_append(stream, value, timestamp)
 	})
 }
 
@@ -3886,6 +3931,30 @@ pub unsafe extern "C" fn moq_consume_audio_config(catalog: u32, index: u32, dst:
 	})
 }
 
+/// Query whether the publisher is serving an audio rendition.
+///
+/// False means no frames are coming until it re-enables. Pick an enabled rendition, but keep one
+/// already playing while every audio rendition is disabled, so a re-enable plays without a
+/// resubscribe. A catalog that omits the optional field reads as true.
+///
+/// Returns zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - The caller must ensure that `dst` points to properly aligned, writable storage for a `bool`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn moq_consume_audio_enabled(catalog: u32, index: u32, dst: *mut bool) -> i32 {
+	ffi::enter(move || {
+		let catalog = ffi::parse_id(catalog)?;
+		if dst.is_null() {
+			return Err(Error::InvalidPointer);
+		}
+
+		let enabled = State::lock().consume.audio_enabled(catalog, index as usize)?;
+		unsafe { dst.write(enabled) };
+		Ok(())
+	})
+}
+
 /// Number of untyped application catalog sections in a catalog snapshot.
 ///
 /// These are the top-level catalog keys beyond `video`/`audio`, carried through
@@ -4048,7 +4117,7 @@ pub extern "C" fn moq_consume_audio_cancel(track: u32) -> i32 {
 }
 
 /// Read an encoded media frame, gap, or encoder end delivered by a media callback.
-/// Payload pointers borrow the read until [`moq_consume_read_free`].
+/// Payload and timestamp pointers borrow the read until [`moq_consume_read_free`].
 ///
 /// # Safety
 /// - `dst` must point to a writable [`moq_media_read`].
@@ -4146,10 +4215,9 @@ pub unsafe extern "C" fn moq_consume_track_update(track: u32, subscription: *con
 /// Read a raw frame's payload delivered via the [moq_consume_track] callback.
 ///
 /// Fills `dst.payload` / `dst.payload_size`; the pointer is valid until the
-/// frame is released with [moq_consume_track_frame_free]. `dst.timestamp_us` is the
-/// frame presentation timestamp in microseconds, when `dst.timestamp_present` says it
-/// has one. `dst.keyframe` is reported as
-/// false because raw tracks do not parse codec metadata.
+/// frame is released with [moq_consume_track_frame_free], and so is `dst.timestamp`,
+/// NULL on an untimed track. `dst.keyframe` is reported as false because raw tracks
+/// do not parse codec metadata.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -4225,8 +4293,8 @@ pub unsafe extern "C" fn moq_consume_datagrams(
 /// Read a datagram delivered via the [moq_consume_datagrams] callback.
 ///
 /// Fills `dst.payload` / `dst.payload_size` (valid until the datagram is released with
-/// [moq_consume_datagram_free]), plus `dst.timestamp_us` (when `dst.timestamp_present`)
-/// and `dst.sequence`.
+/// [moq_consume_datagram_free]), plus `dst.timestamp` (NULL on an untimed track, and valid
+/// as long as the payload) and `dst.sequence`.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -4382,8 +4450,8 @@ pub extern "C" fn moq_consume_json_window_event_free(event: u32) -> i32 {
 
 /// Read a JSON value delivered via a [moq_consume_json_snapshot] or [moq_consume_json_stream] callback.
 ///
-/// Fills `dst.json` / `dst.json_len` and the frame timestamp; the pointer is valid until the value is released with
-/// [moq_consume_json_value_free].
+/// Fills `dst.json` / `dst.json_len` and the frame timestamp; both pointers are valid until the value is released
+/// with [moq_consume_json_value_free].
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///

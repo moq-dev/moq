@@ -43,7 +43,7 @@ _quic = []
 # congestion-control testing. Covers the io_uring workers too, so one feature
 # means one thing whichever runtime is serving.
 qlog = ["moq-tokio/qlog", "moq-uring?/qlog"]
-websocket = ["moq-tokio/websocket", "dep:qmux", "axum/ws"]
+websocket = ["moq-tokio/websocket", "dep:qmux", "dep:hyper"]
 # Unix-domain-socket stream listener (`--server-unix-bind`), unix-only. In the
 # default set; drop via --no-default-features on platforms without Unix sockets.
 uds = ["moq-tokio/uds"]
@@ -68,7 +68,10 @@ http-body = "1.0.1"
 # reqwest-middleware 0.4, while this line matches reqwest 0.13 below.
 http-cache-reqwest = { version = "1.0.0-alpha.6", features = ["manager-moka", "reqwest-middleware", "url-standard"], default-features = false }
 humantime = { workspace = true }
-hyper-util = { workspace = true }
+# Reclaims the socket under a WebSocket upgrade.
+hyper = { workspace = true, optional = true }
+# `server-auto` reclaims the socket from under the auto builder `axum_server` serves with.
+hyper-util = { workspace = true, features = ["server-auto"] }
 kio = { workspace = true, features = ["runtime", "serde"] }
 moq-auth = { workspace = true, features = ["client"] }
 moq-net = { workspace = true }
@@ -76,6 +79,8 @@ moq-net = { workspace = true }
 moq-quic = { workspace = true }
 moq-stats = { workspace = true }
 moq-tokio = { workspace = true, default-features = false, features = ["aws-lc-rs", "watch", "tcp"] }
+# The /metrics text encoder; the protobuf features stay off.
+prometheus-client = "0.25.1"
 qmux = { workspace = true, features = ["ws"], optional = true }
 rand = { workspace = true }
 reqwest = { workspace = true, features = ["rustls"] }

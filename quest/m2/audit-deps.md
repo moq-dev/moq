@@ -144,9 +144,9 @@ locks have none. Most duplicates are ecosystem transitions owned upstream:
 
 ### Hand-rolled code
 
-Planned: [relay metrics](/quest/m2/relay-prometheus-client.md); moq-mux's avcC and
-hvcC records go through mp4-atom. Reviewed and kept,
-each small or cold: about eleven `(d * 2).min(max)` backoff loops (moq-tokio
+moq-mux's avcC and hvcC records go through mp4-atom, its H.264 SPS through
+h264-reader, and relay metrics now render through prometheus-client. Reviewed
+and kept, each small or cold: about eleven `(d * 2).min(max)` backoff loops (moq-tokio
 already has a `Backoff` that moq-relay's cluster loop could reuse), per-byte
 hex formatting in moq-auth and moq-hls, the STUN token bucket, the JS
 deep-equal pair, and duplicated WebVTT stamps and `jwt=` lookups.

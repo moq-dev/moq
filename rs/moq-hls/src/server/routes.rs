@@ -582,7 +582,7 @@ mod tests {
 			})
 			.unwrap();
 		let track = broadcast.create_track(name, moq_mux::hls::Producer::info()).unwrap();
-		let mut records = moq_mux::hls::Producer::new(track.clone());
+		let mut records = moq_mux::hls::Producer::new(track.clone(), moq_mux::Clock::new());
 		for sequence in 0..4 {
 			let record = hang::hls::Record::new(sequence, sequence, sequence * 2_000);
 			records.push(&record).unwrap();
