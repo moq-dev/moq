@@ -32,9 +32,11 @@ Use [`moq-json`](https://docs.rs/moq-json) snapshot mode for replaceable state. 
 starts a group with a full value and carries changes as deltas. A reader can skip
 to a newer group and reconstruct the current value. Stream mode puts an ordered
 log in one group; it reports a broken or rolled stream instead of silently
-presenting a gap as a complete log. That group is bounded (8,192 records), and
-appends are refused once it fills, so a long-running operator opens a new command
-track, for example one per control session. These are framing choices, not a universal
+presenting a gap as a complete log. In Rust that group grows for the track's
+life, but the cache keeps only its newest 32 MiB, so a reader that falls further
+behind or joins late fails with `Evicted`; `@moq/json` still bounds it at 8,192
+records. Either way, open a new command track per control session rather than
+replaying one forever. These are framing choices, not a universal
 'reliable' switch on the session.
 
 Transport delivery is not command execution. An application that needs to know

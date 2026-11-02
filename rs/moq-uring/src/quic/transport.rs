@@ -33,8 +33,9 @@ pub struct Config {
 	/// Which congestion controller to run.
 	pub congestion: Congestion,
 	/// How often to send an ack-eliciting packet on an otherwise idle
-	/// connection, or `None` (the default) to send none and let the idle
-	/// timeout decide.
+	/// connection, `None` (the default) to derive it from the negotiated idle
+	/// timeout, or zero to send none and let the idle timeout decide. See
+	/// [`moq_quic::transport::Config::keep_alive`].
 	pub keep_alive: Option<std::time::Duration>,
 	/// Probe for a path MTU above the 1200-byte floor every QUIC path carries,
 	/// off by default. A probe the path drops costs only itself, and a path

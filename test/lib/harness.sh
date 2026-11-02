@@ -130,7 +130,7 @@ harness_valid_port() {
 # Reserve a port for this run, held until it exits, and set HARNESS_PORT.
 #
 # `harness_port <label> [wanted]`. With `wanted` that exact port is taken or the
-# call fails, which is what an explicit INTEROP_PORT/WASM_PORT asks for; without it
+# call fails, which is what an explicit INTEROP_PORT asks for; without it
 # the search walks up from HARNESS_PORT_BASE.
 #
 # The answer lands in a variable rather than on stdout because `$(harness_port)`

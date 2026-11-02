@@ -23,6 +23,9 @@ test("parse rejects a path with no kind or no identity", () => {
 	expect(parse(p("alice/chat"))).toBeUndefined();
 	expect(parse(p("camera"))).toBeUndefined();
 	expect(parse(p(""))).toBeUndefined();
+	// A peer's escaped `/` is not the separator before a kind.
+	expect(parse(p("alice\\/camera"))).toBeUndefined();
+	expect(parse(p("a\\/b/camera"))).toEqual({ identity: p("a\\/b"), kind: "camera" });
 });
 
 test("kindFromSegment and isKind", () => {

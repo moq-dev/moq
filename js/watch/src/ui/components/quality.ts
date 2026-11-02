@@ -1,8 +1,8 @@
 import type { Catalog } from "@moq/hang";
 import type { Effect } from "@moq/signals";
 import * as DOM from "@moq/signals/dom";
+import { formatBitrate } from "@moq/ui";
 import type MoqWatch from "../../element";
-import { formatBitrate } from "../format";
 import { check, icon } from "../icons";
 
 function resolution(config: Catalog.VideoConfig): string | undefined {

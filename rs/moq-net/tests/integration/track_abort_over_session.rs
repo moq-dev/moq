@@ -47,7 +47,7 @@ async fn after_abort(version: &str, hops: u32) {
 	track.abort(moq_net::Error::Cancel).unwrap();
 	drop(open);
 	assert!(
-		moq_clock::timeout(Duration::from_secs(2), group.read_frame())
+		kio::clock::timeout(Duration::from_secs(2), group.read_frame())
 			.await
 			.expect("group-only read hung")
 			.is_err()
@@ -56,7 +56,7 @@ async fn after_abort(version: &str, hops: u32) {
 
 macro_rules! abort_test {
 	($name:ident, $version:literal, $hops:literal) => {
-		#[moq_clock::test]
+		#[kio::test]
 		async fn $name() {
 			after_abort($version, $hops).await;
 		}
@@ -94,7 +94,7 @@ async fn recreate(finish: bool) {
 	next.write_frame(Timestamp::from_millis(1).unwrap(), b"next".as_ref())
 		.unwrap();
 	drop(open);
-	let result = moq_clock::timeout(Duration::from_secs(2), async {
+	let result = kio::clock::timeout(Duration::from_secs(2), async {
 		if finish {
 			group.finished().await.map(|_| ())
 		} else {
@@ -108,12 +108,12 @@ async fn recreate(finish: bool) {
 	assert_eq!(next.sequence, 3);
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn recreated_track_skips_old_group() {
 	recreate(false).await;
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn recreated_track_finishes_old_group() {
 	recreate(true).await;
 }

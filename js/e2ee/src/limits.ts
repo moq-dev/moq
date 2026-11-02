@@ -52,16 +52,16 @@ export const MAX_GROUPED_PAYLOAD = 32 * 1024 * 1024;
 /** Largest plaintext a grouped frame can carry: 32 MiB minus the tag. */
 export const MAX_GROUPED_PLAINTEXT = MAX_GROUPED_PAYLOAD - TAG_LEN;
 
-/** moq-lite datagram body cap, including Subscribe ID, Group Sequence, and Timestamp. */
+/** moq-lite datagram body cap, including Type, Subscribe ID, Group Sequence, and Timestamp. */
 export const MAX_DATAGRAM_BODY = 1200;
 
-/** Widest moq-lite datagram header: three 8-byte QUIC varints. */
-export const MAX_DATAGRAM_HEADER = 24;
+/** Widest moq-lite datagram header: lite-07's one-byte Type and three 9-byte leading-ones varints. */
+export const MAX_DATAGRAM_HEADER = 28;
 
 /** Largest protected datagram payload: the body cap minus the widest header. */
 export const MAX_DATAGRAM_PAYLOAD = MAX_DATAGRAM_BODY - MAX_DATAGRAM_HEADER;
 
-/** Largest plaintext a datagram can carry: 1160 bytes. */
+/** Largest plaintext a datagram can carry: 1156 bytes. */
 export const MAX_DATAGRAM_PLAINTEXT = MAX_DATAGRAM_PAYLOAD - TAG_LEN;
 
 /** Datagram duplicate suppression window, in sequences below the greatest opened. */

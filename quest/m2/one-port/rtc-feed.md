@@ -60,6 +60,16 @@ demux routes that tuple to WebRTC before any SRT test (see the
 released when its session ends or ICE moves to another pair: either an
 unpin message or idle expiry in the flow table, as SRT's pins have.
 
+The demux side has landed: `moq_tokio::quic::demux::WebRtc` (from
+`Demux::webrtc`, or `moq_relay::Relay::webrtc` for an embedded relay) yields
+ICE checks and responses, DTLS, and RTP as `Datagram`s whose `remote` is already in
+`moq_ice::canonical` form, sends a `Transmit` from the shared port (mapping an
+IPv4 destination for an AF_INET6 socket), and pins a remote with `pin`, which
+returns a guard that releases the pin on drop. So the fed `Socket` takes a
+`WebRtc` rather than the channels in the sketch, and the mux holds a `Pin` per
+selected pair, dropped when its session ends or ICE moves. A feed's `recv`
+returns `None` once the listener is gone.
+
 Things to watch: the server config is `Clone` today and a receiver is not, so
 the fed socket may belong in the server's constructor rather than the
 config. The fed mux has nothing to bind lazily, and a dropped feed should
@@ -69,7 +79,3 @@ Tests: a fed mux completes ICE and DTLS with a client through an in-memory
 `Transmit`, reports the selected tuple on `pinned`, and releases it when the
 session closes. A fed dual-stack socket serves an IPv4 peer. The existing
 bound tests keep passing.
-
-## Required
-
-- [UDP demux](/quest/m2/p2p/udp-demux.md) - the WebRTC hook and flow table this feeds from and pins into

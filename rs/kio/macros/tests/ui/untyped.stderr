@@ -1,0 +1,5 @@
+error: `label` lives across `wait!(B => ..)`, so it is stored in `MState::B`: give it a type, `let label: Type`
+  --> tests/ui/untyped.rs:17:7
+   |
+17 |         let label = format!("m-{a}");
+   |             ^^^^^

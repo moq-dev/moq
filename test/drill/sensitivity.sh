@@ -164,7 +164,7 @@ for patch in "$MUTATIONS"/*.patch; do
     echo "=== $name -> $drill"
 
     if [[ $APPLY_ONLY -eq 1 ]]; then
-        if ! patch -p1 -d "$WORKSPACE" --dry-run --batch --forward --silent <"$patch"; then
+        if ! patch -p1 -d "$WORKSPACE" --dry-run --batch --forward --silent --fuzz=0 <"$patch"; then
             echo "  FAIL: '$name' does not apply to this tree" >&2
             failed=$((failed + 1))
         fi
@@ -190,7 +190,7 @@ for patch in "$MUTATIONS"/*.patch; do
     snapshot "$dir"
     # The snapshot is a plain directory with no repository metadata of its own,
     # and it stays that way: nothing here can reach the developer's checkout.
-    if ! patch -p1 -d "$dir" --batch --forward --silent <"$patch"; then
+    if ! patch -p1 -d "$dir" --batch --forward --silent --fuzz=0 <"$patch"; then
         echo "  FAIL: '$name' does not apply to this tree" >&2
         failed=$((failed + 1))
         cleanup

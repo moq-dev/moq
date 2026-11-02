@@ -28,7 +28,3 @@ into CI; a manual run on a headset browser proves playback.
 
 Public API: possibly a `<moq-watch>` attribute to enter or disable immersive
 playback. Wire: none.
-
-## Related
-
-- [moq-mux importers fill the VR fields](/quest/m2/mux-vr-fields.md) - native sources that carry these fields

@@ -12,7 +12,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use carla_bridge::Bridge;
 use carla_bridge::protocol::{self, Event, Frame, Rendition, Request};
@@ -249,6 +249,11 @@ impl Latency {
 
 /// Render frame `number` on `camera` and receive its packet for every
 /// rendition in `renditions`, returning which were keyframes.
+#[expect(
+    clippy::disallowed_methods,
+    clippy::disallowed_types,
+    reason = "measures real GPU encode latency on the host clock"
+)]
 fn step(
     camera: &mut Camera,
     worker: &mut Worker,
@@ -260,7 +265,7 @@ fn step(
     until("an idle slot", || {
         camera.render(rgb, number, number * STEP_US)
     });
-    let submitted = Instant::now();
+    let submitted = std::time::Instant::now();
     let keyframes = renditions
         .iter()
         .map(|&rendition| worker.frame(rendition, number, rgb).keyframe)

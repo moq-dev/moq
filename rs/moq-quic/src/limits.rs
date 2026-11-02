@@ -4,10 +4,11 @@ use thiserror::Error;
 
 use crate::{MAX_STREAM_COUNT, VarInt};
 
-/// Flow-control windows and stream counts, at construction in
+/// Flow-control windows, stream counts, and bitrate caps, at construction in
 /// [`transport::Config::limits`](crate::transport::Config::limits) or on a live connection through
 /// [`Connection::set_limits`](crate::connection::Connection::set_limits), such as a relay widening
-/// them once it knows the peer is another relay
+/// them once it knows the peer is another relay, or capping its bitrate once it knows the peer's
+/// grant
 ///
 /// Each limit is `None` to take the default at construction, or to leave it as it is on a live
 /// connection. Each is non-zero because zero streams or a zero window credits nothing and wedges
@@ -28,6 +29,27 @@ pub struct Limits {
 	pub stream_receive_window: Option<NonZeroU64>,
 	/// Cap on unacknowledged outgoing data, in bytes
 	pub send_window: Option<NonZeroU64>,
+	/// Cap on what the peer sends, held by pacing its connection credit
+	///
+	/// Stream data and datagram payload both count. Credit already granted cannot be withdrawn,
+	/// so a lowered cap is reached once the peer spends it, and a datagram past the cap is dropped.
+	/// A cap set at construction counts the initial window as credit already granted. A QMux
+	/// connection ignores it.
+	pub receive_rate: Option<Rate>,
+	/// Cap on what this side sends, counting every ack-eliciting packet, retransmissions and loss
+	/// probes included
+	///
+	/// Set at construction, it counts the handshake too. A QMux connection ignores it.
+	pub send_rate: Option<Rate>,
+}
+
+/// A bitrate cap in one direction of a connection, averaged with one second of it as a burst
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rate {
+	/// No cap
+	Unlimited,
+	/// At most this many bytes per second
+	BytesPerSecond(NonZeroU64),
 }
 
 impl Limits {
@@ -73,6 +95,7 @@ mod tests {
 			receive_window: NonZeroU64::new(receive_window),
 			stream_receive_window: NonZeroU64::new(receive_window),
 			send_window: NonZeroU64::new(send_window),
+			..Limits::default()
 		}
 	}
 

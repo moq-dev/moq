@@ -1,6 +1,6 @@
 //! A tokio QUIC peer echoing through the io_uring WebTransport server.
 
-#![cfg(all(target_os = "linux", feature = "quic"))]
+#![cfg(feature = "quic")]
 
 use crate::support;
 
@@ -84,7 +84,7 @@ fn echo_tokio_peer() {
 				.await
 				.expect("connect");
 			let (mut send, mut recv) = session.open_bi(Default::default()).await.expect("open stream");
-			send.write_all(&payload).await.expect("write");
+			send.write_all(&payload[..]).await.expect("write");
 			send.finish().expect("finish");
 			let echoed = recv.read_to_end(PAYLOAD + 1).await.expect("read");
 			done_tx.send(()).expect("notify server");

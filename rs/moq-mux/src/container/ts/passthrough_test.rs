@@ -36,10 +36,11 @@ struct Imported {
 impl Imported {
 	/// Every object's packets, concatenated in order.
 	fn bytes(&self) -> Vec<u8> {
-		self.objects
-			.iter()
-			.flat_map(|object| object.payload.iter().copied())
-			.collect()
+		let mut bytes = Vec::new();
+		for object in &self.objects {
+			bytes.extend_from_slice(&object.payload);
+		}
+		bytes
 	}
 
 	fn section(&self) -> &hang::catalog::M2ts {
@@ -91,7 +92,7 @@ async fn import_onto(
 		.await?;
 	let mut objects = Vec::new();
 	let mut markers = Vec::new();
-	while let Some(mut group) = tokio::time::timeout(Duration::from_secs(1), track.recv_group()).await?? {
+	while let Some(mut group) = kio::clock::timeout(Duration::from_secs(1), track.recv_group()).await?? {
 		while let Some(frame) = group.read_frame().await? {
 			if frame.payload.is_empty() {
 				markers.push(group.sequence);

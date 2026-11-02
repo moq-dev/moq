@@ -13,6 +13,12 @@ type BroadcastConsumer struct {
 	inner *ffi.MoqBroadcastConsumer
 }
 
+// Closed blocks until the broadcast ends: its publisher closed it, or every producer
+// left. Cancelling ctx stops waiting.
+func (b *BroadcastConsumer) Closed(ctx context.Context) error {
+	return b.inner.Closed(ctx)
+}
+
 // SubscribeTrack subscribes to a track, receiving arbitrary byte payloads.
 // subscription tunes delivery priority, group range, and staleness; pass nil for defaults.
 func (b *BroadcastConsumer) SubscribeTrack(
@@ -86,8 +92,7 @@ func (g *GroupConsumer) Sequence() uint64 {
 
 // ReadFrame returns the next raw frame, or (nil, nil) when the group ends.
 func (g *GroupConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
-	frame, err := bridge.Call(ctx, g.inner.Cancel, g.inner.ReadFrame)
-	return frameFromFFI(frame), err
+	return bridge.Call(ctx, g.inner.Cancel, g.inner.ReadFrame)
 }
 
 // All ranges over raw frames until the group ends or the loop breaks.
@@ -141,15 +146,13 @@ func (t *TrackConsumer) group(ctx context.Context, next func(context.Context) (*
 // Cancelling the context cancels this consumer, not just this call: see
 // package docs.
 func (t *TrackConsumer) ReadFrame(ctx context.Context) (*Frame, error) {
-	frame, err := bridge.Call(ctx, t.inner.Cancel, t.inner.ReadFrame)
-	return frameFromFFI(frame), err
+	return bridge.Call(ctx, t.inner.Cancel, t.inner.ReadFrame)
 }
 
 // RecvDatagram returns the next best-effort datagram in arrival order, or
 // (nil, nil) when the track ends.
 func (t *TrackConsumer) RecvDatagram(ctx context.Context) (*Datagram, error) {
-	datagram, err := bridge.Call(ctx, t.inner.Cancel, t.inner.RecvDatagram)
-	return datagramFromFFI(datagram), err
+	return bridge.Call(ctx, t.inner.Cancel, t.inner.RecvDatagram)
 }
 
 // Info returns the publisher-side track properties learned during subscription.
@@ -195,9 +198,9 @@ type VideoDecodedFrame struct {
 	inner *ffi.MoqVideoDecodedFrame
 }
 
-// TimestampUs is the presentation timestamp in microseconds.
-func (f *VideoDecodedFrame) TimestampUs() uint64 {
-	return f.inner.TimestampUs()
+// Timestamp is the presentation timestamp.
+func (f *VideoDecodedFrame) Timestamp() Timestamp {
+	return f.inner.Timestamp()
 }
 
 // Width is the decoded width in pixels.
