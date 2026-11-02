@@ -23,7 +23,3 @@ application, not a network peer.
 
 Public API: none expected; the bindings may document that replacing a
 producer ends its records. Wire: none.
-
-## Related
-
-- [Re-init retires timelines](/quest/m2/reinit-retire.md) - the same bound for fMP4 and MKV re-inits

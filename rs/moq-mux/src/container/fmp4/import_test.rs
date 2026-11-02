@@ -471,6 +471,39 @@ fn dropping_import_retires_catalog_renditions() {
 	assert!(snapshot.audio.renditions.is_empty());
 }
 
+/// A source that re-initializes (an HLS rendition switching `EXT-X-MAP`) replaces its importer on
+/// the same catalog each time. Every dropped generation retires its HLS records along with its
+/// renditions, finished or not, so the catalog holds only the live generation's state.
+#[test]
+fn repeated_reinit_keeps_flat_state() {
+	// The init segment and its complete fragments; the fixture ends on a truncated one.
+	let data = &include_bytes!("test_data/bbb.mp4")[..2035];
+	for passthrough in [false, true] {
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
+		for generation in 0..50 {
+			let label = format!("passthrough={passthrough} generation={generation}");
+			let mut fmp4 =
+				crate::container::fmp4::Import::new(broadcast.clone(), catalog.reserve()).with_passthrough(passthrough);
+			fmp4.decode(&bytes::BytesMut::from(data)).unwrap();
+			let snapshot = catalog.snapshot();
+			assert_eq!(snapshot.video.renditions.len(), 1, "{label}");
+			assert_eq!(snapshot.audio.renditions.len(), 1, "{label}");
+			assert_eq!(catalog.hls_tracks(), 2, "{label}: only the live generation keeps records");
+			// A finished generation's records are kept for a re-enrollment until its drop retires them.
+			if generation % 2 == 1 {
+				fmp4.finish().unwrap();
+				assert_eq!(catalog.hls_tracks(), 2, "{label}");
+			}
+			drop(fmp4);
+			let snapshot = catalog.snapshot();
+			assert!(snapshot.video.renditions.is_empty(), "{label}");
+			assert!(snapshot.audio.renditions.is_empty(), "{label}");
+			assert_eq!(catalog.hls_tracks(), 0, "{label}: a replaced generation retires its records");
+		}
+	}
+}
+
 #[test]
 fn select_video_only() {
 	use crate::select::{Broadcast, Video};
