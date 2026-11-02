@@ -17,6 +17,11 @@ on:
     types: [opened, synchronize, reopened, edited]
   merge_group:
     types: [checks_requested]
+  # Reports the skipped context on a branch's head without a pull_request
+  # event. A PR whose test merge commit predates this workflow gets no
+  # pull_request run from it (GitHub runs PR workflows from that commit), so
+  # `gh workflow run queue.yml --ref <branch>` gives it the context.
+  workflow_dispatch:
 
 permissions:
   contents: read
