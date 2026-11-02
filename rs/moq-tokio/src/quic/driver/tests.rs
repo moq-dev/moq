@@ -1474,6 +1474,38 @@ async fn forwarded_packets_reach_their_owner() {
 	front_task.abort();
 }
 
+/// Closing a forwarding endpoint frees its forward port with its main one, even while a handle
+/// keeps the endpoint alive, so a listener restarted on the same configuration can bind both.
+#[tokio::test]
+async fn close_releases_the_forward_socket() {
+	use crate::quic::driver::forward::{Forward, Peers};
+
+	let _guard = subscribe();
+	let localhost = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
+	let factory = EndpointFactory::new();
+	let forward_socket = UdpSocket::bind(localhost).unwrap();
+	let forward_addr = forward_socket.local_addr().unwrap();
+	let config = factory.endpoint_config.clone();
+	let forward = Forward::new(
+		forward_socket,
+		&[1],
+		Peers::default(),
+		&[7; 32],
+		config.max_udp_payload_size,
+	)
+	.unwrap();
+	let endpoint = Endpoint::forwarding(
+		config.with_server(factory.server_config(transport::Config::default())),
+		UdpSocket::bind(localhost).unwrap(),
+		forward,
+	)
+	.unwrap();
+
+	endpoint.close(0u32.into(), "done").await;
+	UdpSocket::bind(forward_addr).expect("the forward port is free once close returns");
+	drop(endpoint);
+}
+
 /// A send group from another connection panics where it is passed in, without poisoning the
 /// connection's lock: a poisoned lock panics again in every handle's drop, aborting the process.
 #[tokio::test]

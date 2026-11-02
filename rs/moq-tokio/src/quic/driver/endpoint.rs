@@ -243,8 +243,11 @@ impl Endpoint {
 		async move {
 			endpoint.wait_all_draining().await;
 			endpoint.inner.slot.release();
+			let state = &mut *endpoint.inner.state.lock().unwrap();
 			// A rebind keeps the old socket until traffic arrives on the new one.
-			endpoint.inner.state.lock().unwrap().prev_socket = None;
+			state.prev_socket = None;
+			// Nothing reaches the endpoint to forward once its socket is gone.
+			state.forward = None;
 		}
 	}
 
@@ -394,6 +397,7 @@ impl Drop for EndpointDriver {
 		self.0.slot.release();
 		let endpoint = &mut *self.0.state.lock().unwrap();
 		endpoint.prev_socket = None;
+		endpoint.forward = None;
 		endpoint.driver_lost = true;
 		self.0.shared.incoming.notify_waiters();
 		// Drop all outgoing channels, signaling the termination of the endpoint to the associated
