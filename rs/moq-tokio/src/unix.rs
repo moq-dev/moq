@@ -250,6 +250,7 @@ pub(crate) async fn connect(url: Url, protocols: &[&str]) -> Result<qmux::Sessio
 	config.protocol = qmux::Protocol::Negotiate(protocols.iter().map(|p| (*p).to_owned()).collect());
 	qmux::uds::connect(path, config)
 		.await
+		.map(crate::spawn_qmux)
 		.map_err(|err| Error::Connect(crate::error::message(err)))
 }
 
@@ -361,6 +362,7 @@ impl Listener {
 			}
 			let session = qmux::uds::accept(stream, config)
 				.await
+				.map(crate::spawn_qmux)
 				.map_err(|err| Error::Accept(crate::error::message(err)))?;
 			Ok((session, cred))
 		}
