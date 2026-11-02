@@ -1,5 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
-import { Manual, Milli, Nano, sleep } from "@moq/clock";
+import { Manual, Milli, Nano, sleep, yieldNow } from "@moq/clock";
 import { ConnectTimeout, SessionCode, SessionError } from "../error.ts";
 import * as Ietf from "../ietf/index.ts";
 import { ClientSetup, ServerSetup } from "../lite/compat.ts";
@@ -20,7 +20,7 @@ const SECRET = "super-secret-jwt";
 const authUrl = new URL(`https://example.com/test?jwt=${SECRET}#frag`);
 
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 }
 
 const CONSOLE_METHODS = ["debug", "info", "log", "warn", "error"] as const;
@@ -115,6 +115,138 @@ test("a raw QUIC URL dials WebTransport over https", async () => {
 	}
 
 	expect(dialed).toBe("https://example.com:4443/anon?jwt=x");
+});
+
+// Serve `/certificate.sha256` from `respond`, recording when a request's client goes away.
+function fingerprintServer(respond: (request: Request) => Response | Promise<Response>) {
+	let requests = 0;
+	let aborted = 0;
+	const server = Bun.serve({
+		port: 0,
+		fetch(request) {
+			requests++;
+			request.signal.addEventListener("abort", () => aborted++, { once: true });
+			return respond(request);
+		},
+	});
+	return {
+		url: new URL(`http://127.0.0.1:${server.port}/anon`),
+		requests: () => requests,
+		aborted: () => aborted,
+		stop: () => server.stop(true),
+	};
+}
+
+// Wait, bounded, for `ready` to hold; a real socket needs more than a microtask turn.
+async function until(ready: () => boolean) {
+	for (let i = 0; i < 200 && !ready(); i++) await sleep(Nano.fromMilli(Milli(5)));
+}
+
+test("an http:// URL pins the fetched fingerprint and dials https", async () => {
+	const fingerprint = "ab".repeat(32);
+	const server = fingerprintServer(() => new Response(fingerprint));
+	const pair = createMockTransportPair(ALPN_06);
+	const original = globalThis.WebTransport;
+	let dialed: string | undefined;
+	let hashes: WebTransportHash[] | undefined;
+
+	function StubWebTransport(this: unknown, target: string | URL, options: WebTransportOptions) {
+		dialed = target.toString();
+		hashes = options.serverCertificateHashes;
+		return pair.client;
+	}
+	globalThis.WebTransport = StubWebTransport as unknown as typeof WebTransport;
+
+	try {
+		const connection = await connect(server.url, { websocket: { enabled: false } });
+		connection.abort();
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop();
+	}
+
+	expect(dialed).toBe(`https://127.0.0.1:${server.url.port}/anon`);
+	expect(hashes?.map((hash) => [hash.algorithm, [...(hash.value as Uint8Array)]])).toEqual([
+		["sha-256", Array(32).fill(0xab)],
+	]);
+});
+
+test("an http:// fingerprint longer than a SHA-256 is refused without reading the rest", async () => {
+	// A chunked body with no Content-Length that never ends: only a bounded read can refuse it.
+	const chunk = new TextEncoder().encode("a".repeat(1024));
+	const server = fingerprintServer(
+		() =>
+			new Response(
+				new ReadableStream({
+					pull(controller) {
+						controller.enqueue(chunk);
+					},
+				}),
+			),
+	);
+	const original = globalThis.WebTransport;
+	let dials = 0;
+	function CountingWebTransport(this: unknown): never {
+		dials++;
+		throw new Error("unexpected dial");
+	}
+	globalThis.WebTransport = CountingWebTransport as unknown as typeof WebTransport;
+
+	try {
+		await expect(connect(server.url, { websocket: { enabled: false } })).rejects.toThrow(
+			"fingerprint is longer than 64 hex characters",
+		);
+		expect(dials).toBe(0);
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop();
+	}
+});
+
+test("an http:// fingerprint of the wrong length or status is refused", async () => {
+	const original = globalThis.WebTransport;
+	globalThis.WebTransport = function Unused(this: unknown): never {
+		throw new Error("unexpected dial");
+	} as unknown as typeof WebTransport;
+
+	const short = fingerprintServer(() => new Response("ab".repeat(31)));
+	const missing = fingerprintServer(() => new Response("no certificate\n", { status: 404 }));
+	try {
+		await expect(connect(short.url, { websocket: { enabled: false } })).rejects.toThrow(
+			"fingerprint is 62 characters, expected 64 hex characters",
+		);
+		await expect(connect(missing.url, { websocket: { enabled: false } })).rejects.toThrow(
+			"fingerprint fetch failed: HTTP 404",
+		);
+	} finally {
+		globalThis.WebTransport = original;
+		short.stop();
+		missing.stop();
+	}
+});
+
+test("aborting connect aborts a pending http:// fingerprint fetch", async () => {
+	// Answer nothing, so only the abort ends the request.
+	const server = fingerprintServer(() => new Promise<Response>(() => {}));
+	const original = globalThis.WebTransport;
+	globalThis.WebTransport = function Unused(this: unknown): never {
+		throw new Error("unexpected dial");
+	} as unknown as typeof WebTransport;
+
+	const controller = new AbortController();
+	try {
+		const pending = connect(server.url, { websocket: { enabled: false }, signal: controller.signal });
+		await until(() => server.requests() > 0);
+		expect(server.requests()).toBe(1);
+
+		controller.abort(new Error("stop"));
+		await expect(pending).rejects.toThrow("stop");
+		await until(() => server.aborted() > 0);
+		expect(server.aborted()).toBe(1);
+	} finally {
+		globalThis.WebTransport = original;
+		server.stop();
+	}
 });
 
 test("a failed connect names why the transport failed", async () => {

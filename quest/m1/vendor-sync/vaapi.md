@@ -52,3 +52,12 @@ Remaining this cycle: merge the ported fix,
 `moq-vaapi` release to crates.io, then bump moq's workspace `moq-vaapi = "0.1.0"`
 and lockfile to it and run the affected checks. Public API and wire formats are
 unchanged; applications regain control of their release log level.
+
+CI, added 2026-11-01 (maintainer, follow-up planning after the 2026-11-01
+/quest-afk run): moq-dev/vaapi's only workflow, `.github/workflows/check.yml`,
+sets `id-token: write` at the workflow level and runs on `pull_request`, so
+every PR's check job can mint an OIDC token without a protected environment.
+CI on pull requests must stay read-only. Remove it, leaving
+`contents: read`; if a step needs OIDC (`magic-nix-cache-action` is the likely one), confirm
+it still works without it, and otherwise move that step to a job limited to
+`main` behind a protected environment.

@@ -65,7 +65,7 @@ async def _publish_tone(audio: moq.audio.Producer, tones: list[int]) -> None:
         ]
         audio.write(
             moq.audio.Frame(
-                timestamp=timedelta(microseconds=timestamp_us), data=struct.pack(f"<{len(samples)}f", *samples)
+                timestamp=moq.Timestamp(timestamp_us, 1_000_000), data=struct.pack(f"<{len(samples)}f", *samples)
             )
         )
         phase += AUDIO_BATCH_SAMPLES
@@ -82,6 +82,7 @@ async def _print_grant(client: moq.Client, timeout: float) -> None:
     """Wait for the relay's grant and print it, in the Rust client's `auth granted` shape."""
     session = client.session
     assert session is not None
+
     async def first() -> moq.Grant:
         async with session.grants() as grants:
             async for grant in grants:
@@ -235,8 +236,9 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
             async for group in live:
                 async with group:
                     async for frame in group:
-                        if seen or frame.payload != b"session-alive" or frame.timestamp is not None:
-                            raise RuntimeError("unexpected session health payload or timestamp")
+                        # Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+                        if seen or frame.payload != b"session-alive":
+                            raise RuntimeError("unexpected session health payload")
                         seen = True
             if not seen:
                 raise RuntimeError("missing session health payload")
@@ -255,7 +257,12 @@ async def _decode_audio(
     """
     out = f"{out}.{audio.codec.split('.')[0]}"
     decoder = await moq.audio.Consumer.subscribe(
-        consumer, id, audio, moq.audio.DecoderOutput(format=moq.audio.SampleFormat.F32, max_delay=MAX_DELAY)
+        consumer,
+        id,
+        audio,
+        moq.audio.DecoderOutput(
+            format=moq.audio.SampleFormat.F32, delay=moq.media.Delay(min=timedelta(0), max=MAX_DELAY)
+        ),
     )
     frame_bytes = 4 * audio.channel_count
     decoded = 0
@@ -268,7 +275,7 @@ async def _decode_audio(
             if isinstance(frame, moq.audio.End):
                 raise RuntimeError("audio track ended early")
             samples = len(frame.data) // frame_bytes
-            log.write(f"{frame.timestamp // timedelta(microseconds=1)} {samples}\n")
+            log.write(f"{frame.timestamp.to_timedelta() // timedelta(microseconds=1)} {samples}\n")
             pcm.write(frame.data)
             decoded += samples
             if decoded * 1000 >= audio_ms * audio.sample_rate:

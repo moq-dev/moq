@@ -7,8 +7,7 @@ generator moq uses (Kotlin, Swift, Python, Go, Dart, C++, and C) comes from
 [moq-dev/rust2](https://github.com/moq-dev/rust2) through one pinned flake
 input. `rs/uniffi-bindgen`, `nix/uniffi-dart-*`, and the per-generator pins are
 deleted, and the three `kixelated/uniffi-*` generator forks are archived.
-The browser's TypeScript, generated through ubrn's `wasm2` flavour, still
-generates against the fork. Generated bindings are unchanged by the switch
+Generated bindings are unchanged by the switch
 itself, except C's type names and the one record rename the C name rule
 undoes.
 
@@ -18,10 +17,7 @@ Decided with the maintainer on 2026-10-13, after a review of how moq uses
 UniFFI:
 
 - **Base**: UniFFI. [The BoltFFI spike](https://github.com/moq-dev/rust2/blob/main/bench/ffi/README.md#boltffi-comparison)
-  recommended it. Decided later in #5838 (2026-10-17, maintainer):
-  UniFFI-generated moq-ffi serves the browser too, through ubrn's `wasm2`
-  flavour (chosen over BoltFFI and hand-written moq-wasm), so one binding
-  surface serves every language.
+  recommended it.
 - **Why fork**: every UniFFI minor release breaks external generators (0.31
   changed `module_path`, 0.32 changed the metadata encoding without bumping
   the contract version, and `main` removes the old library-mode API). No
@@ -71,12 +67,6 @@ which publishes `rust2-uniffi`, `rust2-uniffi-core`, `rust2-uniffi-macros`, and
   Delete `rs/uniffi-bindgen`, the "five places" comments in `flake.nix`, and the
   `nix/uniffi-dart-*` lockfile and patch. The `sh/{kt,swift,dart,cpp}`
   packaging scripts stay: they package moq.
-- **Browser TypeScript**: ubrn's `wasm2` generator is upstream and reads
-  UniFFI metadata, which the fork may change. Either show upstream ubrn still
-  generates from the renamed crates, or carry ubrn's TypeScript generator in
-  rust2 with the others, as [ubrn 0.32](/quest/m2/rs2ts/ubrn-032.md) already
-  plans if ubrn has not moved. Include the TypeScript in the regenerated
-  bindings diff.
 - Negative durations (2026-10-25, maintainer): the Dart negative-duration
   patch moq carries goes upstream into the fork's Dart generator, and the Go
   generator stops panicking on a negative `time.Duration` (the Go wrapper
@@ -98,7 +88,6 @@ none.
 ## Related
 
 - [UniFFI generator forks are current](/quest/m1/vendor-sync/uniffi.md) - keeps the forks this replaces synced with upstream until the switch; its fixes must reach rust2's fork
-- [ubrn generates UniFFI 0.32 TypeScript](/quest/m2/rs2ts/ubrn-032.md) - the browser generator this switch must keep working
 - [Payload bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md) - the first patch the fork carries
 - [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md) - a Kotlin generator patch the fork carries
 - [Foreign poll for hot reads](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-poll-protocol.md) - a generated poll protocol the fork carries; dropping a future at cancel is optional here, since no moq quest waits on it

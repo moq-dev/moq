@@ -10,14 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - MP4 and Matroska import fill a video rendition's `projection` and `stereo` from Spherical Video V2's `sv3d`/`st3d` boxes and Matroska's `Projection`/`StereoMode`, and Opus channel mapping family 2 (raw Opus, Matroska, and other OpusHead sources) imports with `layout: "ambisonic"`. What the catalog cannot describe is refused with `fmp4::Error::UnsupportedSpatial`, `mkv::Error::UnsupportedSpatial`, or `opus::Error::UnsupportedChannelCount`: a cubemap or mesh projection, a nonzero pose, uncentred or vertically cropped equirectangular bounds, a stereo packing other than mono, left-right, or top-bottom with the left eye first, and family 2 at zeroth order or with RFC 8486's non-diegetic stereo pair.
+- fMP4 carries surround Opus: a `dOps` channel mapping table (family 1, 2, or 255) imports into the OpusHead description, and an exported `dOps` writes the description's table back instead of refusing it with `opus::Error::UnsupportedMappingFamily`. Family 3, whose OpusHead carries a demixing matrix rather than a table, is still refused both ways.
 
 ### Changed
 
 - [**breaking**] Declare per-track archive durations from GOP hints or the first completed record.
-- [**breaking**] Update the re-exported `mp4_atom` to 0.17, whose `Trun.entries` is now `Trun.samples`: a run without per-sample fields decodes as a count, so a moof of field-less runs no longer materializes an entry per sample before import refuses it. Read entries with `trun.samples.iter()` and build them with `samples: entries.into()`. `TrunEntry::cts` widens to `i64` (a version 0 offset is unsigned), `EsDescriptor` gains its optional fields, and `Dref.urls` becomes typed `entries`. `Dops` gains `channel_mapping: Option<OpusChannelMapping>` (`None` for family 0); the fMP4 importer still refuses a nonzero family.
+- [**breaking**] Update the re-exported `mp4_atom` to 0.17, whose `Trun.entries` is now `Trun.samples`: a run without per-sample fields decodes as a count, so a moof of field-less runs no longer materializes an entry per sample before import refuses it. Read entries with `trun.samples.iter()` and build them with `samples: entries.into()`. `TrunEntry::cts` widens to `i64` (a version 0 offset is unsigned), `EsDescriptor` gains its optional fields, and `Dref.urls` becomes typed `entries`. `Dops` gains `channel_mapping: Option<OpusChannelMapping>` (`None` for family 0).
 
 ### Fixed
 
+- `container::Consumer` no longer plays a backlog that landed before its first read from the oldest group: until the first item, the start moves past each group whose first frame trails the newest content by more than the max delay plus the warmup, as `@moq/hang`'s consumer does, keeping the group covering the live edge less `Delay::min` and the warmup. A join starts at the same group in Rust and the browser. Once reading begins, only a blocking group is skipped, as before.
 - fMP4 import applies each track's edit list to its frame timestamps and drops the samples before the edit, such as AAC priming, along with the video samples decoding from a dropped sync sample, and a passthrough init no longer carries the `edts`. A consumer that offsets AAC priming itself must stop, or it shifts the track twice. An edit list it can't reduce to one shift (several media edits, or a rate other than 1) is refused with `Error::UnsupportedEditList`.
 
 ## [0.10.11](https://github.com/moq-dev/moq/compare/moq-mux-v0.10.10...moq-mux-v0.10.11) - 2026-10-05

@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import { Instant, Milli, Nano, now, yieldNow } from "@moq/clock";
 import * as Lite from "../lite/index.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as TrackProducer } from "../track.ts";
@@ -12,14 +13,14 @@ function accept(transport: WebTransport, url: URL, props: Omit<AcceptProps, "tra
 }
 
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 }
 
 async function waitUntil(pred: () => boolean, ms = 1000): Promise<void> {
-	const deadline = Date.now() + ms;
+	const deadline = Instant.add(now(), Nano.fromMilli(Milli(ms)));
 	for (;;) {
 		if (pred()) return;
-		if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+		if (now() > deadline) throw new Error("timed out waiting for condition");
 		await settle();
 	}
 }

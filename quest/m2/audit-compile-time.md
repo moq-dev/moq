@@ -3,7 +3,8 @@
 ## Goal
 
 The crates, dependencies, and code that dominate build time are known, with
-recorded baselines, and the worst are fixed or planned.
+recorded baselines, and the worst are removed, refactored to build cheaper, or
+planned.
 
 ## Plan
 
@@ -18,6 +19,12 @@ recurrence. Fixes land in the run's PR, one commit each, rather than as follow-u
 Only a change that needs a maintainer decision (public API, scope) or is
 independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
+
+Default to removing (decided 2026-11-01, maintainer): whatever doesn't earn its
+cost is deleted inline, and the PR body lists each deletion with its measured
+cost and why it wasn't worth it. Only what earns its keep is refactored to be
+cheaper instead. Removing a public API or a user-facing feature stays a
+follow-up.
 
 Scope: this audit owns per-crate build cost in one build (dev, release, and
 incremental). The [CI workflow audit](/quest/m2/audit-ci.md) owns job-level CI
@@ -117,8 +124,10 @@ instantiating the whole map.
   deserializer are inherent to TOML config. moq-rtmp, moq-srt and moq-rtc
   entry points generic over `impl Into<Path>` instantiate their async bodies in
   the `moq` bin (20,327 lines with drop glue, 1.8%); a non-generic inner
-  function would move them, but adds code for little. The catalog JSON diff instantiated
-  per crate is [catalog publish once](/quest/m2/catalog-publish-once.md).
+  function would move them, but adds code for little. The catalog JSON diff
+  no longer instantiates per crate since
+  [moq-dev/moq#7400](https://github.com/moq-dev/moq/pull/7400): the encoder
+  diffs `serde_json`'s bytes, compiled once in `moq-json`.
 - Not run this time: `-Z time-passes` on the `moq` unit (m0: fat LTO 74%,
   LLVM passes 23%); the release share did not move enough to warrant it.
 

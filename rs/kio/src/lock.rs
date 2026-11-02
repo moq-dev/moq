@@ -1,18 +1,13 @@
 use std::{
 	fmt,
 	ops::{Deref, DerefMut},
-	// std, not `crate::sync`: [`WeakLock`] needs `Arc::downgrade`, which loom's Arc
-	// doesn't have. Loom still models the `Mutex` inside, which is the part that
-	// orders every handle against every other.
-	sync::{Arc, PoisonError, Weak},
+	sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
-
-use crate::sync::{Mutex, MutexGuard};
 
 /// A cloneable mutex wrapper backed by `Arc<Mutex<T>>`.
 ///
-/// Every kio channel keeps its state in one of these, with its [`WaiterList`]s inside,
-/// so a state change and the wake it owes are decided under a single lock.
+/// [`Queue`](crate::Queue) keeps its state in one of these, with its [`WaiterList`]s
+/// inside, so a state change and the wake it owes are decided under a single lock.
 ///
 /// Poisoning is ignored: a panic while the lock is held must not cascade into every other
 /// handle sharing this state, or into a double panic (and an abort) from a `Drop` that locks it.
@@ -34,12 +29,12 @@ pub struct Lock<T> {
 	inner: Arc<Mutex<T>>,
 }
 
-// SAFETY: std and loom's Mutex<T> are Send + Sync when T: Send, so this is
+// SAFETY: Mutex<T> is Send + Sync when T: Send, so this is
 // exactly Arc<Mutex<T>>'s derived bound. Stopping here keeps recursive channel
 // graphs from expanding the same Arc/Mutex proof at every level.
 unsafe impl<T: Send> Send for Lock<T> {}
 
-// SAFETY: Arc<Mutex<T>> has the same T: Send bound for Sync, with either mutex.
+// SAFETY: Arc<Mutex<T>> has the same T: Send bound for Sync.
 unsafe impl<T: Send> Sync for Lock<T> {}
 
 impl<T> Lock<T> {
@@ -60,47 +55,6 @@ impl<T> Lock<T> {
 	/// Whether both handles point at the same state.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		Arc::ptr_eq(&self.inner, &other.inner)
-	}
-
-	/// Create a handle that doesn't own the value, so it can be stored inside the
-	/// value itself without leaking the allocation.
-	pub(crate) fn downgrade(&self) -> WeakLock<T> {
-		WeakLock {
-			inner: Arc::downgrade(&self.inner),
-		}
-	}
-}
-
-/// A [`Lock`] that doesn't own its value, backed by `Weak<Mutex<T>>`.
-pub(crate) struct WeakLock<T> {
-	inner: Weak<Mutex<T>>,
-}
-
-impl<T> WeakLock<T> {
-	/// A handle that never upgrades, for a placeholder before a value exists.
-	pub(crate) fn new() -> Self {
-		Self { inner: Weak::new() }
-	}
-
-	/// Recover the owning [`Lock`], or `None` once the value has been dropped.
-	pub(crate) fn upgrade(&self) -> Option<Lock<T>> {
-		Some(Lock {
-			inner: self.inner.upgrade()?,
-		})
-	}
-}
-
-impl<T> Clone for WeakLock<T> {
-	fn clone(&self) -> Self {
-		Self {
-			inner: self.inner.clone(),
-		}
-	}
-}
-
-impl<T> fmt::Debug for WeakLock<T> {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.debug_tuple("WeakLock").finish()
 	}
 }
 
@@ -152,13 +106,7 @@ impl<T> DerefMut for LockGuard<'_, T> {
 	}
 }
 
-impl<T> Default for WeakLock<T> {
-	fn default() -> Self {
-		Self::new()
-	}
-}
-
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 
