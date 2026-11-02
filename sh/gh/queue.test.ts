@@ -46,6 +46,8 @@ assert.equal(await Bun.file(".github/workflows/land.yml").exists(), false, "no w
 // host's runner, read-only and without secrets.
 const queue = await workflow("queue");
 assert.deepEqual(queue.on.merge_group, { types: ["checks_requested"] });
+// A dispatch only reports the skipped context on a branch head.
+assert.ok("workflow_dispatch" in queue.on);
 assert.deepEqual(queue.on.pull_request.branches, ["main"]);
 assert.ok(queue.on.pull_request.types.includes("edited"), "retargeting to main must report the context");
 assert.equal(queue.on.pull_request.paths, undefined, "the required context must always report");
