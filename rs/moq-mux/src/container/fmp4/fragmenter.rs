@@ -171,15 +171,10 @@ impl Fragmenter {
 				super::Kind::Audio
 			},
 		};
-		let ticks = frame
-			.duration
-			.map(|duration| super::trun_duration(duration, self.timescale))
-			.transpose()?
-			.unwrap_or(0);
 		// Advance by the value the trun stores, so the next tfdt continues exactly what
 		// this fragment claimed.
-		let next_dts = dts.checked_add(u64::from(ticks)).ok_or(super::Error::PtsOverflow)?;
-		let data = super::encode_at(info, dts, std::slice::from_ref(&frame))?;
+		let (data, next_dts) = super::encode_at(info, dts, std::slice::from_ref(&frame))?;
+		let ticks = next_dts - dts;
 		self.sequence = self.sequence.wrapping_add(1);
 		self.dts = Some(next_dts);
 
@@ -190,7 +185,7 @@ impl Fragmenter {
 			independent: !self.is_video || frame.keyframe,
 			// Describe the exact duration written into trun, including its timescale
 			// quantization, so playlist metadata and media advance by the same amount.
-			duration: Duration::from_secs_f64(f64::from(ticks) / self.timescale.as_u64() as f64),
+			duration: Duration::from_secs_f64(ticks as f64 / self.timescale.as_u64() as f64),
 		})
 	}
 
