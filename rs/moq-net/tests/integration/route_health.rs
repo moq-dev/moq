@@ -13,7 +13,7 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use futures::channel::mpsc;
-use moq_net::{Error, Timestamp, Version, origin, track};
+use moq_net::{Error, StreamError, Timestamp, Version, origin, track};
 
 const TEST_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -275,7 +275,10 @@ async fn a_payload_stall_with_live_sessions_is_never_recovered() {
 				assert_eq!(e.largest.map(|largest| largest.group), Some(newest), "{stall:?}");
 				assert!(!e.failed.is_empty(), "{stall:?}: no group was cut");
 				assert!(
-					e.failed.iter().all(|err| matches!(err, Error::Old)),
+					// `E` cuts a group itself, or `M1` resets it with the same reason.
+					e.failed
+						.iter()
+						.all(|err| matches!(err, Error::Old | Error::Stream(StreamError::Old))),
 					"{stall:?}: a group was cut for something other than age: {:?}",
 					e.failed
 				);

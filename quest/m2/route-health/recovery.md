@@ -16,7 +16,9 @@ Observe the next-best eligible same-epoch candidate with a `meta: true`
 subscription, shared across downstream readers. While the reader demands the
 track, switch when the active's delivered media timestamp lags the standby's
 reported timestamp by more than the reader's max delay, or a fixed 2s for a
-reader without one. Compare payload the active actually delivered against
+reader without one. Until the active delivers its first frame, measure it
+from the standby-reported timestamp of the first frame the reader still
+needs. Compare payload the active actually delivered against
 timestamps the standby reported, never `largest()` values. Neither source
 silence nor a reader that stopped reading or applies backpressure establishes
 a route failure. At a relay the reader is the aggregated subscription, so
@@ -29,7 +31,8 @@ instead leave the others' budget in force.
 Exploration: while demand is outstanding and neither active nor standby
 shows progress for that same budget, move the standby slot to the next
 eligible candidate, doubling the wait per move until real progress resets
-it. A healthy third candidate stays discoverable behind an upstream the
+it. With every candidate quiet, the slot keeps cycling at that doubling wait
+and nothing fails: the track stays on the active. A healthy third candidate stays discoverable behind an upstream the
 active and standby share, while only one steady standby is observed at a
 time. Without demand nothing explores.
 
@@ -60,11 +63,13 @@ resumes through the standby; detection under the reader's max delay loses no
 group.
 
 Mock-time tests cover a preferred route whose metadata advances but media
-remains blocked, failed promotion, a standby that is normally faster by less
+remains blocked, an active route that never delivers its first frame,
+failed promotion, a standby that is normally faster by less
 than the budget and so never takes the track, a recovered preferred route
 that does not win the track back until the working route fails, a reader
 without a max delay using the 2s default, a shared active/standby failure
-with a healthy third route, bounded exploration when every candidate is quiet,
+with a healthy third route, every candidate quiet (one standby at a time,
+doubling waits, no route or track failed),
 a quiet publisher, receiver backpressure, stale or replayed reports, an epoch
 change, multi-hop simultaneous failover, and no
 standby for epochless broadcasts. Run through Rust/JS interop and existing CI.

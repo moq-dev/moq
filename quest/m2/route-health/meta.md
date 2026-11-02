@@ -29,10 +29,14 @@ metadata. Metadata-only state never satisfies a media reader, fills a cache
 as a complete frame, or advances a resume cursor.
 
 Aggregation, settled 2026-11-02: a relay pulls payload upstream only for
-payload demand, and serves metadata from a payload copy it already holds.
-Only payload demand creates a health standby, so metadata observers never
-branch further. Each downstream metadata subscriber still receives no
-payload. When only metadata demand remains, release full upstream demand.
+payload demand. Metadata-only demand still travels upstream as a live
+`meta: true` subscription, so group and frame headers keep arriving after
+any payload copy the relay holds is exhausted; while such a copy is live,
+the relay serves metadata from it. Only payload demand creates a health
+standby, so metadata observers never branch further. Each downstream
+metadata subscriber still receives no payload. When only metadata demand
+remains, demote the upstream subscription to metadata with an update: drop
+the payload demand and keep the metadata demand.
 Remove all observation demand when the last reader leaves. Preserve ranges,
 priority, drop/end semantics, and retention without one global scan per
 update.
@@ -45,7 +49,9 @@ fetching and discarding media. Explicitly report unsupported mode; ordinary
 media and epochless Restart continue unchanged. An IETF counterpart is not
 required for this lite feature.
 
-Tests: metadata-only multi-hop traffic has no media payload; mixed demand;
+Tests: metadata-only multi-hop traffic has no media payload; a relay whose
+last payload reader leaves keeps forwarding live headers to its metadata
+readers; mixed demand;
 promotion/demotion during an open group; empty frames; late old-mode frames;
 resume at a metadata-observed position; cancellation; refusal on unsupported
 versions. Sweep tracks, readers, and relay depth for bytes, wakes and memory.

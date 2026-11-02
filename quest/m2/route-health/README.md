@@ -77,13 +77,20 @@ Decided with the maintainer, 2026-11-02, from the measured stalls:
   demands. That budget is what the reader already accepts losing, so a
   standby that is normally a little faster never overrides application
   priority, and no per-route baseline or fraction constant is needed. A
-  reader without a max delay uses a fixed 2s. Never compare `largest()`
-  values, and never count source silence or a reader that stopped reading.
+  reader without a max delay uses a fixed 2s. Until the active delivers its
+  first frame, its delivered timestamp is that of the first frame the reader
+  still needs, as the standby reported it, so a route that never delivers is
+  caught on the same budget. Never compare `largest()` values, and never
+  count source silence or a reader that stopped reading.
 - Exploration: when neither active nor standby shows progress for the
   reader's max delay (or the same 2s), the standby slot moves to the next
-  eligible candidate, doubling the wait per move. One constant drives both
-  the switch and exploration; it replaces falling back to the publisher's
-  max age.
+  eligible candidate, doubling the wait per move. That bounds exploration:
+  one standby at a time, and moves that slow down geometrically. With every
+  candidate quiet, the slot keeps cycling through the eligible candidates at
+  the doubling wait and fails nothing, since silence is not failure; the
+  track stays on the active until real progress resets the wait or demand
+  ends. One constant drives both the switch and exploration; it replaces
+  falling back to the publisher's max age.
 - Standby choice: the next-best route. Exploration already bounds the cost of
   an upstream it shares with the active, so preferring the candidate with
   the fewest shared hops was rejected as extra machinery.
