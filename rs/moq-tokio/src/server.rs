@@ -1828,7 +1828,7 @@ impl Request {
 	/// `ok` opens `receive_window`, or `[quic] receive_window` when it is unset, after the
 	/// other limits, so a `receive_rate` set here paces the opened window. A qmux session
 	/// starts at the `[quic]` defaults and takes the windows and stream count set here; it
-	/// never paces, so `ok` refuses a rate on one.
+	/// never paces, so `ok` refuses a rate cap on one.
 	#[cfg(feature = "_transport")]
 	pub fn with_quic_limits(mut self, limits: moq_quic::Limits) -> Result<Self, moq_quic::LimitsError> {
 		limits.validate()?;

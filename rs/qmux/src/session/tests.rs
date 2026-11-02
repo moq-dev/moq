@@ -242,6 +242,50 @@ async fn partial_messages_evict_the_lowest_priority_stream() {
 	}
 }
 
+/// A running session widens its windows, and refuses a rate cap it could never pace, while an
+/// explicit "no cap" is fine.
+#[tokio::test(start_paused = true)]
+async fn set_limits_widens_and_refuses_a_rate_cap() {
+	let (_client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
+	let mut limits = moq_quic::Limits::default();
+	limits.receive_window = std::num::NonZeroU64::new(16 << 20);
+	limits.receive_rate = Some(moq_quic::Rate::Unlimited);
+	limits.send_rate = Some(moq_quic::Rate::Unlimited);
+	server.set_limits(limits).expect("unlimited rates");
+	assert_eq!(poll::Session::receive_window(&server).unwrap().connection, 16 << 20);
+
+	limits.send_rate = Some(moq_quic::Rate::BytesPerSecond(std::num::NonZeroU64::new(1000).unwrap()));
+	assert!(matches!(server.set_limits(limits), Err(Error::InvalidConfig(_))));
+	limits.send_rate = None;
+	limits.receive_window = std::num::NonZeroU64::new(1024);
+	assert!(matches!(server.set_limits(limits), Err(Error::ReceiveWindowTooSmall(_))));
+}
+
+/// A reset seen through a lease frees the stream while the reader still holds it, returning
+/// its stream credit and the connection credit its partial message withheld.
+#[tokio::test(start_paused = true)]
+async fn a_reset_seen_by_a_lease_frees_the_stream() {
+	let mut server = config(Version::QMux02);
+	server.limits.max_streams = std::num::NonZeroU64::new(1);
+	let (client, server) = pair(config(Version::QMux02), server).await;
+
+	let mut first = client.open_uni(SendOptions::default()).await.unwrap();
+	write_all(&mut first, payload(1000, 0)).await;
+	let mut recv = server.accept_uni().await.unwrap();
+	assert_eq!(lease(&mut recv, 1000).await.unwrap(), 1000, "a partial message, leased");
+	first.reset(3);
+	let err = lease(&mut recv, 2000).await.expect_err("reset");
+	assert!(matches!(err, Error::StreamReset(3)), "{err}");
+
+	// Still holding `recv`, the peer gets its stream back.
+	let opening = client.open_uni(SendOptions::default());
+	kio::clock::timeout(Duration::from_secs(1), opening)
+		.await
+		.expect("credit returned on the reset")
+		.unwrap();
+	drop(recv);
+}
+
 /// A stream the session stops reading still sees a reset, without reading a byte.
 #[tokio::test(start_paused = true)]
 async fn a_reset_reaches_an_unread_stream() {

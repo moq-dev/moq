@@ -9,7 +9,7 @@ How to update your code for each breaking change, newest first.
 `quic::DEFAULT_RECEIVE_WINDOW` is 4 MiB, `DEFAULT_STREAM_RECEIVE_WINDOW` 1 MiB, and `DEFAULT_SEND_WINDOW` 4 MiB, down from 128 MiB, 4 MiB, and 16 MiB. `Error::ReceiveWindowTooSmall` now refuses only a `receive_window` below 1 MiB.
 Set `[quic]` windows explicitly to keep the old behavior, such as for a path whose bandwidth-delay product exceeds them.
 Every qmux session (WebSocket, `tcp://`, `tls://`, `unix://`, WebRTC) starts at the `[quic]` windows and stream count, which a client's `[quic]` overrides, and leases receive credit, so a stream can now fail as evicted.
-`server::Request::with_quic_limits` also widens a qmux session at `ok()`; one refusing them, such as a rate, which qmux cannot pace, fails `ok()` with the new `Error::QmuxLimits`.
+`server::Request::with_quic_limits` also widens a qmux session at `ok()`; one refusing them, such as a rate cap, which qmux cannot pace, fails `ok()` with the new `Error::QmuxLimits`.
 
 ### `listen::LoadBalancer` has a `forward` field ([#7539](https://github.com/moq-dev/moq/pull/7539))
 

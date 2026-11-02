@@ -284,13 +284,15 @@ impl Session {
 	/// Change the windows and stream counts `limits` sets, leaving the others as they are, such
 	/// as to widen a session once its peer is known.
 	///
-	/// Refuses, changing nothing, a rate (QMux never paces), a receive window below moq-net's
-	/// [`MIN_RECEIVE_WINDOW`](net::MIN_RECEIVE_WINDOW), and limits a peer would refuse. A window
-	/// only grows at once: credit already granted cannot be taken back.
+	/// Refuses, changing nothing, a rate cap (QMux never paces, so only
+	/// [`Rate::Unlimited`](moq_quic::Rate::Unlimited) is accepted), a receive window below
+	/// moq-net's [`MIN_RECEIVE_WINDOW`](net::MIN_RECEIVE_WINDOW), and limits a peer would
+	/// refuse. A window only grows at once: credit already granted cannot be taken back.
 	pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), Error> {
 		crate::config::check_limits(&limits)?;
-		if limits.receive_rate.is_some() || limits.send_rate.is_some() {
-			return Err(Error::InvalidConfig("qmux does not pace, so it takes no rate"));
+		let capped = |rate: Option<moq_quic::Rate>| matches!(rate, Some(moq_quic::Rate::BytesPerSecond(_)));
+		if capped(limits.receive_rate) || capped(limits.send_rate) {
+			return Err(Error::InvalidConfig("qmux does not pace, so it takes no rate cap"));
 		}
 		let mut state = self.inner.lock();
 		state.conn.set_limits(limits)?;
@@ -766,6 +768,11 @@ impl RecvStream {
 				Poll::Pending
 			}
 			Err(recv::Error::Reset(code)) => {
+				// Observing the reset frees the stream and the credit its lease withheld; only
+				// then may later calls skip it.
+				let _ = state.conn.recv_stream(self.id).received_reset();
+				state.readable.remove(&self.id);
+				state.driver.wake();
 				self.reset = Some(code.into_inner());
 				Poll::Ready(Err(Error::StreamReset(code.into_inner())))
 			}
