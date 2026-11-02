@@ -585,21 +585,19 @@ impl SockShared {
 
 impl Drop for SockShared {
 	fn drop(&mut self) {
-		// Take this socket's pools back out of the worker's gauges. Nothing
-		// borrows a buffer any more, except packets still queued unread.
-		let rx = self.rx.borrow();
+		// Take this socket's pools back out of the worker's gauges. Packets
+		// and send leases own an `Rc` of us, so the only buffers still lent
+		// out are those of packets queued unread.
+		let rx = self.rx.get_mut();
 		let rx_len = self.config.rx_buffer_len as u64;
 		let rx_in_use = rx.bufs.iter().filter(|buf| buf.outstanding > 0).count() as u64;
 		self.metrics.rx_pool_bytes.sub(rx.bufs.len() as u64 * rx_len);
 		self.metrics.rx_pool_in_use_bytes.sub(rx_in_use * rx_len);
-		drop(rx);
-		let tx = self.tx.borrow();
-		let tx_len = self.config.tx_buffer_len as u64;
-		self.metrics.tx_pool_bytes.sub(tx.bufs.len() as u64 * tx_len);
+		let tx = self.tx.get_mut();
+		debug_assert_eq!(tx.free.len(), tx.bufs.len(), "a send lease outlived its socket");
 		self.metrics
-			.tx_pool_in_use_bytes
-			.sub((tx.bufs.len() - tx.free.len()) as u64 * tx_len);
-		drop(tx);
+			.tx_pool_bytes
+			.sub(tx.bufs.len() as u64 * self.config.tx_buffer_len as u64);
 
 		// Every op referencing our buffers has completed (ops own an `Rc` of
 		// us), so the kernel is done; give the buffer group id back once it
