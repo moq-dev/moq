@@ -44,10 +44,9 @@ forbid_crate() {
     fi
 }
 
-# Minimal shapes and the off-default VPX backend always compile and test. The
-# other positive paths already compile in default, capture, and play checks;
-# isolate them when their feature owner changes, and exhaustively in Nightly.
-# Dependency absence contracts stay on every affected PR, including transitive edits.
+# Minimal shapes and the off-default VPX backend always compile and test, and
+# the dependency absence contracts always run. --all, which `just rs features`
+# passes, also compiles each positive path in isolation.
 check -p moq-video --no-default-features
 minimal=$(tree -p moq-video --no-default-features)
 for crate in openh264 openh264-sys2 wgpu cpal; do

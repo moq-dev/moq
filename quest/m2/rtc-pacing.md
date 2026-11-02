@@ -4,10 +4,11 @@
 
 An embedder can give a `moq-rtc` WHEP session a bitrate cap, and moq-rtc
 never sends that viewer more media payload than the cap plus a burst,
-retransmits included. The cap counts payload, like the
-[QUIC caps](/quest/m2/rate-quic.md). RTP, SRTP, and UDP overhead sits
-outside it: moq-rtc picks the packet sizes, so the overhead per payload
-byte is fixed, and the viewer can't inflate it. This backs moq.pro's
+retransmits included. The cap counts payload, unlike the
+QUIC send cap (`moq_quic::Limits::send_rate`), which counts whole ack-eliciting
+packets, QUIC overhead included. RTP, SRTP, and UDP overhead sits outside
+it: moq-rtc picks the packet sizes, so the overhead per payload byte is
+fixed, and the viewer can't inflate it. This backs moq.pro's
 egress caps.
 
 ## Plan
@@ -22,7 +23,7 @@ WHEP enforcement needs it and nobody owned it.
   cap plus burst, skip to the next group, the same whole-group drop
   moq.pro's RTMP play uses. A group that has started is paced through to
   its end even when it, or one of its frames, is larger than the burst, as
-  large frames finish gradually on [QUIC](/quest/m2/rate-quic.md), so an
+  large frames finish gradually on QUIC, so an
   oversized keyframe group still makes progress.
   Dropping individual RTP packets would leave partial frames that corrupt
   the picture and draw NACKs and PLIs nobody can satisfy.
@@ -30,8 +31,11 @@ WHEP enforcement needs it and nobody owned it.
   and a resend with no credit left is skipped, so faking loss only spends the
   credit the viewer's next group would have used. str0m fulfils NACKs from
   its video send buffer (`rs/moq-rtc/src/session.rs`), so charging needs a
-  hook on that path: find one in str0m 0.24's API, or propose one upstream
-  to str0m with the maintainer's approval.
+  hook on that path. Decided 2026-10-30 (maintainer): add it to the vendored str0m
+  ([WebRTC epic](/quest/m2/webrtc/README.md)) rather than upstream.
+- Decided 2026-10-30 (maintainer): the pacer is moq-congestion's, made public and
+  extended with payload credit here, so moq-quic and moq-webrtc share one
+  pacer; the vendored str0m's leaky pacer is deleted.
 - A per-session rate handle sets the cap and accepts live updates. The pacer
   counts media; the docs advise headroom for RTP overhead.
 - Tests: a capped viewer never receives more than cap plus burst, including
@@ -40,9 +44,15 @@ WHEP enforcement needs it and nobody owned it.
   caps, each NACKing every packet for several burst windows, stay under
   their own cap plus burst.
 
-Public API: a rate handle on moq-rtc's WHEP server. Wire: none.
+Public API: a rate handle on moq-rtc's WHEP server. Decided 2026-10-30
+(maintainer): `whep::accept` takes the same shape as `whip::accept`, a
+`whep::Request` struct with `Request::with_rate(rate::Limit)`, replacing
+its argument list rather than adding a fifth argument. Wire: none.
+
+## Required
+
+- [Vendor and trim the stack](/quest/m2/webrtc/vendor.md) - the vendored str0m this adds the NACK hook to
 
 ## Related
 
-- [moq-rtc REMB and TIAS](/quest/m2/rtc-remb-tias.md) - the WHIP half of the same caps
 - [SRT rate handle](/quest/m2/srt-rate-handle.md) - the same pacing and retransmit charging on SRT

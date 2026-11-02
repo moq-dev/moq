@@ -34,12 +34,12 @@ delivers a group that arrives below the cursor as a late backfill; Rust
 - Don't infer a relative start from the reported largest location: a
   frameless newest group counts when a relative end resolves but not in
   `largest()`, sparse moq-transport groups break the arithmetic, and a later
-  coalesced largest isn't this request's resolution. SUBSCRIBE_OK's `Group`
-  isn't it either, since the lite draft lets a group between the requested
-  start and it arrive later. Lite-07 SUBSCRIBE_OK carries the resolved start
-  for a relative range start (decided 2026-10-22 in
-  [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md)); settle the moq-transport equivalent or keep today's first-arrival cursor
-  there.
+  coalesced largest isn't this request's resolution. Lite-07 SUBSCRIBE_OK's
+  `Range Start` carries where each range's delivery starts, from which its
+  groups are owed (`lite::SubscribeStart::starts`, 0 on the wire for a range
+  with none); the Rust copy only takes the lowest today, so carry each to the
+  reader. Settle the moq-transport equivalent or keep today's first-arrival
+  cursor there.
 - The cursor is range-aware, not just floored: with disjoint ranges it skips
   straight across an unrequested gap (group 1, then 10 onward) instead of
   waiting for the latency budget, since no SUBSCRIBE_DROP is owed there.
@@ -53,15 +53,13 @@ delivers a group that arrives below the cursor as a late backfill; Rust
   `Sync`) and adjust them; one that wants every group reads an arrival-order
   API instead.
 
-Decided 2026-10-27 (maintainer): this waits only on Lite-07 ranges (the
-resolved start in SUBSCRIBE_OK) and JS ranges, not the whole
+Decided 2026-10-27 (maintainer): this waits only on the resolved start in
+SUBSCRIBE_OK, now landed, and JS ranges, not the whole
 [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) epic.
 
 Public API: no type change; the ordered read changes in Rust and JS (the
-floor comes from reported bounds, and JS drops backfill). Wire: the resolved
-start on lite-07 SUBSCRIBE_OK, through Lite-07 ranges.
+floor comes from reported bounds, and JS drops backfill). Wire: none.
 
 ## Required
 
-- [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - lite-07 SUBSCRIBE_OK carries the resolved start the Rust floor comes from
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - the JS reader's requested ranges set its floor

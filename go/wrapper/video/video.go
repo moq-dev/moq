@@ -7,7 +7,6 @@ import (
 	"iter"
 	"time"
 
-
 	"moq.dev/moq"
 	ffi "moq.dev/moq-ffi/moq"
 	"moq.dev/moq/internal/bridge"
@@ -39,36 +38,37 @@ type Gop = ffi.MoqVideoGop
 func Keyframe(interval uint32) Gop { return ffi.MoqVideoGopKeyframe{Interval: interval} }
 
 // Frame is one raw picture with its presentation timestamp.
-type Frame struct {
-	Timestamp time.Duration
-	Data      []byte
-}
-
-func (f Frame) ffi() (ffi.MoqVideoFrame, error) {
-	us, err := bridge.Duration(f.Timestamp, "video timestamp")
-	return ffi.MoqVideoFrame{TimestampUs: us, Data: f.Data}, err
-}
+type Frame = ffi.MoqVideoFrame
 
 // Packet is one encoded access unit from an Encoder.
-type Packet struct {
-	Timestamp time.Duration
-	Data      []byte
-	Keyframe  bool
-}
+type Packet = ffi.MoqVideoPacket
 
-func packet(raw ffi.MoqVideoPacket) Packet {
-	return Packet{Timestamp: time.Duration(raw.TimestampUs) * time.Microsecond, Data: raw.Data, Keyframe: raw.Keyframe}
-}
-
-// DecoderOutput configures an optional resize, a max delay, and whether frames keep the decoder's surface (macOS only).
+// DecoderOutput configures an optional resize, a delay, whether frames keep the decoder's surface (macOS only), and where to start.
 type DecoderOutput struct {
-	Resize   *media.Dimensions
-	MaxDelay *time.Duration
-	Surface  bool
+	Resize *media.Dimensions
+	// Delay.Min is the playout delay, where a cold join starts; Delay.Max is how far a stalled
+	// group may fall behind before it is skipped. nil is zero for both.
+	Delay   *media.Delay
+	Surface bool
+	// Start is where to begin on a track that already holds groups; zero is media.DecodeStartOldest.
+	// A live player sets media.DecodeStartLatest so a reopened decoder skips the cached backlog.
+	Start media.DecodeStart
 }
 
 func (o DecoderOutput) ffi() (ffi.MoqVideoDecoderOutput, error) {
-	return ffi.MoqVideoDecoderOutput{Resize: o.Resize, MaxDelay: o.MaxDelay, Surface: o.Surface}, bridge.NonNegative(o.MaxDelay, "video max delay")
+	// Go's zero value is the native null: the oldest group.
+	var start *media.DecodeStart
+	if o.Start != 0 {
+		start = &o.Start
+	}
+	out := ffi.MoqVideoDecoderOutput{Resize: o.Resize, Delay: o.Delay, Surface: o.Surface, Start: start}
+	if o.Delay == nil {
+		return out, nil
+	}
+	if err := bridge.NonNegative(&o.Delay.Min, "video min delay"); err != nil {
+		return out, err
+	}
+	return out, bridge.NonNegative(o.Delay.Max, "video max delay")
 }
 
 // Producer encodes raw pictures and publishes them as a track in a broadcast's catalog.
@@ -119,11 +119,7 @@ func (p *Producer) Demand() (*moq.TrackDemand, error) {
 
 // Write encodes and publishes one raw picture in the configured input layout.
 func (p *Producer) Write(value Frame) error {
-	raw, err := value.ffi()
-	if err != nil {
-		return err
-	}
-	return p.inner.Write(raw)
+	return p.inner.Write(value)
 }
 
 // Cut starts a new group at the next written picture.
@@ -156,22 +152,9 @@ func NewEncoder(input EncoderInput, output EncoderOutput) (*Encoder, error) {
 	return &Encoder{inner}, nil
 }
 
-func packets(raw []ffi.MoqVideoPacket) []Packet {
-	out := make([]Packet, len(raw))
-	for i := range raw {
-		out[i] = packet(raw[i])
-	}
-	return out
-}
-
 // Encode encodes one picture, returning any access units now available.
 func (e *Encoder) Encode(value Frame) ([]Packet, error) {
-	raw, err := value.ffi()
-	if err != nil {
-		return nil, err
-	}
-	result, err := e.inner.Encode(raw)
-	return packets(result), err
+	return e.inner.Encode(value)
 }
 
 // Cut forces the next encoded picture to start a new group.
@@ -181,10 +164,10 @@ func (e *Encoder) Cut() error { return e.inner.Cut() }
 func (e *Encoder) SetBitrate(value uint64) error { return e.inner.SetBitrate(value) }
 
 // Flush drains buffered access units and keeps the encoder open.
-func (e *Encoder) Flush() ([]Packet, error) { raw, err := e.inner.Flush(); return packets(raw), err }
+func (e *Encoder) Flush() ([]Packet, error) { return e.inner.Flush() }
 
 // Finish drains and closes the encoder.
-func (e *Encoder) Finish() ([]Packet, error) { raw, err := e.inner.Finish(); return packets(raw), err }
+func (e *Encoder) Finish() ([]Packet, error) { return e.inner.Finish() }
 
 // Consumer subscribes to a video rendition and yields decoded frames.
 type Consumer struct{ inner *ffi.MoqVideoConsumer }
@@ -215,7 +198,7 @@ type ReadFrame struct {
 // loss precedes it, and what follows does not continue it.
 type ReadGap struct {
 	// Timestamp is the furthest presentation point already read.
-	Timestamp time.Duration
+	Timestamp moq.Timestamp
 	// Duration is an upper bound on how long until the next picture resumes.
 	Duration time.Duration
 }
@@ -225,7 +208,7 @@ type ReadGap struct {
 // fresh encoder.
 type ReadEnd struct {
 	// End is where the stopped encoder's media stops.
-	End time.Duration
+	End moq.Timestamp
 }
 
 func (ReadFrame) read() {}
@@ -253,9 +236,9 @@ func (d *Consumer) Next(ctx context.Context) (Read, error) {
 	case ffi.MoqVideoReadFrame:
 		return ReadFrame{Frame: bridge.VideoDecodedFrame(read.Frame).(*moq.VideoDecodedFrame)}, nil
 	case ffi.MoqVideoReadGap:
-		return ReadGap{Timestamp: time.Duration(read.TimestampUs) * time.Microsecond, Duration: read.Duration}, nil
+		return ReadGap{Timestamp: read.Timestamp, Duration: read.Duration}, nil
 	case ffi.MoqVideoReadEnd:
-		return ReadEnd{End: time.Duration(read.EndUs) * time.Microsecond}, nil
+		return ReadEnd{End: read.End}, nil
 	}
 	return nil, fmt.Errorf("unknown video read: %T", *raw)
 }

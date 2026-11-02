@@ -8,6 +8,14 @@
 //!
 //! Needs the host NVIDIA driver on the loader path, as `just carla bridge-gpu`
 //! arranges.
+#![cfg_attr(
+    target_os = "linux",
+    expect(
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        reason = "the stand-in paces real GPU renders at 30 fps on a thread with no runtime"
+    )
+)]
 
 #[cfg(target_os = "linux")]
 #[path = "../tests/standin/mod.rs"]

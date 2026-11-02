@@ -76,12 +76,12 @@ async fn main() -> anyhow::Result<()> {
 	let _ = session.closed().await;
 	write(&mut track, 2)?;
 	ensure!(
-		output.next_line().await?.as_deref() == Some("goaway resumed"),
-		"JS subscription did not resume"
+		output.next_line().await?.as_deref() == Some("goaway restarted"),
+		"JS subscription did not restart"
 	);
 	ensure!(child.wait().await?.success(), "JS client failed");
 	replacement.abort(moq_net::Error::Cancel);
 	let _ = replacement.closed().await;
-	eprintln!("goaway redirect resumed {version}");
+	eprintln!("goaway redirect restarted {version}");
 	Ok(())
 }

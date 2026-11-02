@@ -30,7 +30,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use bytes::Bytes;
 use moq_net::Timestamp;
@@ -628,7 +628,7 @@ impl<E: catalog::Catalog> Capture<E> {
 	/// the host clock ([`DEBOUNCE`]), and a first snapshot is never delayed. `force`
 	/// overrides the debounce, for end of stream.
 	pub fn flush(&mut self, pts: Timestamp, force: bool) -> anyhow::Result<()> {
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		for (key, entry) in self.entries.iter_mut() {
 			entry.expire(self.now);
 			if !entry.dirty {
@@ -774,7 +774,7 @@ mod tests {
 	use super::*;
 	use crate::container::ts::fixture::{Flags, Mux};
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn program_clock_places_and_retires_si_without_media_pts() {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let catalog = crate::catalog::Producer::new(
@@ -859,7 +859,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn incomplete_generations_expire_on_their_table_intervals() {
 		let (mut capture, _) = capture();
 		let mut input = Input::new(&mut capture);
@@ -897,7 +897,7 @@ mod tests {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn pending_renewal_replaces_its_deadline_without_renewing_other_versions() {
 		let (mut capture, _) = capture();
 		let mut input = Input::new(&mut capture);
@@ -921,7 +921,7 @@ mod tests {
 		assert!(capture.entries[&(0x11, 0x42)].pending.is_empty());
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn retirement_publishes_reduced_and_empty_snapshots_without_host_debounce() {
 		let (mut capture, catalog) = capture();
 		let mut input = Input::new(&mut capture);
@@ -967,13 +967,13 @@ mod tests {
 		assert_eq!(catalog.snapshot().ext.mpegts.si[&0x10][&0x40].track, name);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn host_time_and_new_si_at_one_input_position_do_not_age_si() {
 		let (mut capture, _) = capture();
 		let input = Input::new(&mut capture);
 		input.section(&mut capture, 0x12, section(0x4e, 0, 0, 0));
 		capture.flush(Timestamp::ZERO, false).unwrap();
-		moq_clock::sleep(Duration::from_secs(60)).await;
+		kio::clock::sleep(Duration::from_secs(60)).await;
 		for id in 1..1024 {
 			input.section(&mut capture, 0x12, section(0x4e, id, 0, 1));
 		}
@@ -1032,7 +1032,7 @@ mod tests {
 		assert_eq!(at(&clock, count), Some(4_000));
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn fresh_si_ages_out_while_the_pcr_stalls() {
 		for silent in [false, true] {
 			let (mut capture, _) = capture();
@@ -1058,7 +1058,7 @@ mod tests {
 		}
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn short_form_repetitions_replace_their_deadline_and_latest_value() {
 		let (mut capture, _) = capture();
 		let mut input = Input::new(&mut capture);

@@ -10,12 +10,14 @@ TypeScript interface is preserved where practical.
 ## Plan
 
 Decided 2026-10-12: WASM is transitional and JS-only is the final goal.
+Decided 2026-10-31 (maintainer): moq's WASM support is removed, since nobody
+used it and it is being replaced, so no production WASM backend precedes this.
 The evaluation scopes this quest for the chosen backend and adds any required
 research or implementation blockers before it becomes executable. Rejecting
 wasm2js does not automatically select Charon or abandon the JS-only goal.
 
-Reuse the production WASM and retained handwritten baselines for a complete
-browser comparison before adoption. Present measured size, startup, CPU,
+Compare against the handwritten `@moq/net` in a complete browser workload
+before adoption. Present measured size, startup, CPU,
 memory, and usability tradeoffs for the maintainer to accept; preserve wire
 and correctness. Run the browser suite and `just test interop --all` in CI.
 Ensure shipped output loads without WebAssembly and preserves full-width
@@ -26,10 +28,8 @@ Normal JS contributors and consumers should not need that toolchain. Update
 existing API docs and package READMEs for loading, deployment, and regeneration;
 any necessary public API break is proposed separately and migrates consumers.
 
-Retire obsolete runtime loaders, package paths, and CI only after JS-only
-parity and adoption. Preserve the Rust binding crate, WASM build tools, or
-WASM comparison baseline wherever generation or tests still need them;
-wasm2js may still require WASM at build time. Preserve shared browser tests.
+Retire the handwritten implementation only after JS-only parity and adoption.
+Preserve shared browser tests.
 
 Public API: `@moq/net` remains; enumerate any approved changes and obsolete
 unpublished package removals. Wire: none.

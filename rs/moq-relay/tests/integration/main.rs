@@ -6,13 +6,9 @@
 //! the drills.
 //! Relay fixtures opt out of process signals with `with_signals(false)`: only
 //! `shutdown_signal` owns those signals, which reach every listener in this process.
-#![expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 
 mod auth_lifetime;
+mod bitrate_caps;
 mod cluster_close;
 mod cluster_drain;
 mod cluster_idle;
@@ -38,5 +34,6 @@ mod session_revalidate;
 mod shutdown_signal;
 mod smoke;
 mod stack;
+mod tenant_matrix;
 mod upstream_links;
 mod wire_stats;
