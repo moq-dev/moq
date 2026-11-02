@@ -112,6 +112,16 @@ verdicts:
   ([moq-dev/moq#7594](https://github.com/moq-dev/moq/pull/7594)) and the runner-image
   `/proc/self/uid_map` denial already reproduced on main. Neither justifies
   bypassing the launcher, skipping a selected module, or claiming a full pass.
+- Still deferred to the maintainer since m0: fold capture and play test
+  builds into the main test build (about 75 s per core Rust queue entry in
+  the earlier sample) or move both to Nightly. Keep both builds until decided.
+- Recheck the previously unowned October 22 Windows-only
+  `reconnect::a_protocol_violation_ends_reconnect` failure. The test remains;
+  neither the November 1 relay-stack failure nor a merged fix proves it recovered.
+- Keep operational lessons from the earlier audit: count infrastructure flakes
+  across nights before acting, and make failure uploads wait for their producing
+  step and run directory. Pages redeploys need the stale `github-pages` artifact
+  removed first; Nightly now does that through `just gh pages-clean`.
 - Keep release target/artifact removal as a maintainer decision. Shared
   default-feature FFI builds already feed Go/Kotlin/Swift/C/C++; Dart has a
   different target set and packaging contract. Do not count their matching
@@ -159,7 +169,8 @@ must not be added together. All observations were fetched November 1 local
 
 The November 1 removed jobs total 55.5 runner-minutes (25.9 ARM, 29.6 Linux),
 not a measured reduction in Nightly wall time. The 13-night total is 747.2
-runner-minutes. This is the only workflow changed in this off-cycle run.
+runner-minutes; totals are calculated before rounding individual rows.
+This is the only workflow changed in [moq-dev/moq#7603](https://github.com/moq-dev/moq/pull/7603).
 The recurring audit and its release prerequisite remain; no successor is made.
 
 ### Every workflow (2026-11-01)
@@ -244,7 +255,7 @@ job's failure is delivered through the parent Nightly alert; `Pages` and
 `summary` add successful-result visibility. Package/build rows are kept for
 their workflow's distinct target/ABI/package contract above, not because each
 successful target has demonstrated a regression. Skipped jobs cost zero and
-are not extra nightly work. `Delete` is the decision applied by this PR;
+are not extra nightly work. `Delete` is the decision applied by [moq-dev/moq#7603](https://github.com/moq-dev/moq/pull/7603);
 all other rows are retained, with exceptions/owners stated below and above.
 
 | Job | Runner minutes | Result | Signal / visibility verdict |
