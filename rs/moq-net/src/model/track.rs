@@ -45,6 +45,7 @@ use std::{
 	sync::Arc,
 	sync::OnceLock,
 	sync::PoisonError,
+	sync::Weak,
 	sync::atomic::{AtomicBool, Ordering},
 	task::{Poll, ready},
 	time::Duration,
@@ -6207,17 +6208,21 @@ impl PartialEq for Several {
 /// search: each arrival costs it one lookup in the fixed runs. A slot that leaves or is
 /// replaced leaves its entry stale, dropped when a search meets it or once stale entries
 /// could outnumber the live groups.
+///
+/// One index per track searched: a group's expiry that moved to a replacement copy (see
+/// [`GroupExpiry::for_track`]) searches its reader's servable on that copy's track, whose
+/// arrival order and stamps are its own.
 #[derive(Default)]
-struct Live(Mutex<Indexed>);
+struct Live(Mutex<Vec<Indexed>>);
 
-#[derive(Default)]
 struct Indexed {
+	/// The track indexed, by its cache account. Held weakly, so a track that went away
+	/// leaves an entry another track's can't be mistaken for.
+	track: Weak<cache::Track>,
 	/// How far into the arrival order this has taken in, as an absolute index.
 	taken: usize,
 	/// The stamp of each live group inside the fixed runs, by sequence, as it arrived.
 	groups: BTreeMap<u64, u32>,
-	/// How many groups the last prune kept, so a prune runs once entries double past it.
-	kept: usize,
 }
 
 /// How many index entries a search takes per lock: the search answers with the lock
@@ -6225,6 +6230,11 @@ struct Indexed {
 const LIVE_BATCH: usize = 16;
 
 impl Indexed {
+	/// Whether this indexes `state`'s track.
+	fn indexes(&self, state: &TrackState) -> bool {
+		std::ptr::eq(self.track.as_ptr(), Arc::as_ptr(&state.cache))
+	}
+
 	/// Take in what arrived since the last call.
 	fn catch_up(&mut self, state: &TrackState, fixed: &Runs) {
 		let skip = self.taken.saturating_sub(state.offset).min(state.arrival.len());
@@ -6234,11 +6244,11 @@ impl Indexed {
 			}
 		}
 		self.taken = state.offset + state.arrival.len();
-		// Only entries whose group left can outnumber the live groups.
-		if self.groups.len() > 2 * self.kept.max(state.visible.len()).max(LIVE_BATCH) {
+		// A live entry is a visible slot, so past twice their count most entries are stale,
+		// and a prune costs each entry it drops one lookup.
+		if self.groups.len() > 2 * state.visible.len().max(LIVE_BATCH) {
 			self.groups
 				.retain(|sequence, stamp| current(state, *sequence, *stamp).is_some());
-			self.kept = self.groups.len();
 		}
 	}
 }
@@ -6252,6 +6262,24 @@ fn current(state: &TrackState, sequence: u64, stamp: u32) -> Option<&Slot> {
 }
 
 impl Live {
+	/// The index of `state`'s track among `indexes`, made on its first search. Indexes of
+	/// tracks that went away are dropped then.
+	fn index<'a>(indexes: &'a mut Vec<Indexed>, state: &TrackState) -> &'a mut Indexed {
+		let position = match indexes.iter().position(|indexed| indexed.indexes(state)) {
+			Some(position) => position,
+			None => {
+				indexes.retain(|indexed| indexed.track.strong_count() > 0);
+				indexes.push(Indexed {
+					track: Arc::downgrade(&state.cache),
+					taken: 0,
+					groups: BTreeMap::new(),
+				});
+				indexes.len() - 1
+			}
+		};
+		&mut indexes[position]
+	}
+
 	/// The first live group inside `fixed`, within `lo..=hi`, for which `f` answers, lowest
 	/// first or, with `rev`, highest first, with its sequence.
 	fn find<'a, R>(
@@ -6270,7 +6298,8 @@ impl Live {
 			}
 			let mut batch = [(0, 0); LIVE_BATCH];
 			let taken = {
-				let mut indexed = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+				let mut indexes = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+				let indexed = Self::index(&mut indexes, state);
 				if !caught_up {
 					indexed.catch_up(state, fixed);
 					caught_up = true;
@@ -6305,7 +6334,8 @@ impl Live {
 				}
 			}
 			if !stale.is_empty() {
-				let mut indexed = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+				let mut indexes = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+				let indexed = Self::index(&mut indexes, state);
 				for sequence in stale {
 					indexed.groups.remove(&sequence);
 				}
@@ -13464,7 +13494,8 @@ mod test {
 	/// A search over a layered servable window, through the reader's index of the live
 	/// groups and the layer's runs, finds what a scan of every live group would, in either
 	/// direction, as groups arrive, start, abort, leave the cache, or arrive again between
-	/// searches that keep the same index.
+	/// searches that keep the same index. Each window is searched on two tracks, as a
+	/// group's expiry that moved to a replacement copy searches its reader's.
 	#[test]
 	fn layered_searches_match_a_scan_of_every_live_group() {
 		// A small deterministic generator, so a failure replays.
@@ -13480,7 +13511,10 @@ mod test {
 		const SEQUENCES: u64 = 40;
 		let at = |millis| Timestamp::from_millis(millis).unwrap();
 		for round in 0..300 {
-			let producer = track_producer("test", Info::timed());
+			let producers = [
+				track_producer("test", Info::timed()),
+				track_producer("copy", Info::timed()),
+			];
 			let runs = |count: u64| -> Runs {
 				Runs::new((0..next(count + 1)).map(|_| {
 					let start = next(SEQUENCES);
@@ -13488,10 +13522,12 @@ mod test {
 				}))
 			};
 			let fixed = Arc::new(runs(8));
-			let mut groups = Vec::new();
+			let mut groups = [Vec::new(), Vec::new()];
 			let mut servable = Servable::NONE;
 			for step in 0..30 {
 				let sequence = next(SEQUENCES);
+				let track = next(2) as usize;
+				let (producer, groups) = (&producers[track], &mut groups[track]);
 				match next(6) {
 					0 | 1 => {
 						if let Ok(mut group) = producer.create_group(group::Info { sequence }) {
@@ -13519,37 +13555,86 @@ mod test {
 					let layered = Layered::new(fixed.clone(), runs(2));
 					servable = Servable::layered(layered, cap, &servable);
 				}
-				let state = producer.state.read();
-				let shown = |slot: &Slot| slot.is_shown().then_some(slot.group.sequence);
-				for from in [0, next(SEQUENCES), next(SEQUENCES)] {
-					for rev in [false, true] {
-						let scan = state.live(from..).filter(|(sequence, _)| servable.contains(**sequence));
-						let expected = match rev {
-							true => scan.map(|(_, slot)| slot).rev().find_map(shown),
-							false => scan.map(|(_, slot)| slot).find_map(shown),
-						};
-						let found = state.find_servable(&servable, from, rev, shown);
-						let shape = match &servable {
-							Servable::Run { start, end } => format!("run {start}..{end:?}"),
-							Servable::Runs(several) => format!(
-								"{:?} under {:?} below {:?}",
-								several.groups.fixed(),
-								several.groups.layer(),
-								several.cap
-							),
-						};
-						let cached: Vec<_> = state
-							.live(..)
-							.map(|(sequence, slot)| (*sequence, slot.is_shown()))
-							.collect();
-						assert_eq!(
-							found, expected,
-							"round {round} step {step} from {from}, rev {rev}: {shape}, cached {cached:?}"
-						);
+				for (track, producer) in producers.iter().enumerate() {
+					let state = producer.state.read();
+					let shown = |slot: &Slot| slot.is_shown().then_some(slot.group.sequence);
+					for from in [0, next(SEQUENCES), next(SEQUENCES)] {
+						for rev in [false, true] {
+							let scan = state.live(from..).filter(|(sequence, _)| servable.contains(**sequence));
+							let expected = match rev {
+								true => scan.map(|(_, slot)| slot).rev().find_map(shown),
+								false => scan.map(|(_, slot)| slot).find_map(shown),
+							};
+							let found = state.find_servable(&servable, from, rev, shown);
+							let shape = match &servable {
+								Servable::Run { start, end } => format!("run {start}..{end:?}"),
+								Servable::Runs(several) => format!(
+									"{:?} under {:?} below {:?}",
+									several.groups.fixed(),
+									several.groups.layer(),
+									several.cap
+								),
+							};
+							let cached: Vec<_> = state
+								.live(..)
+								.map(|(sequence, slot)| (*sequence, slot.is_shown()))
+								.collect();
+							assert_eq!(
+								found, expected,
+								"round {round} step {step} track {track} from {from}, rev {rev}: {shape}, cached {cached:?}"
+							);
+						}
 					}
 				}
 			}
 		}
+	}
+
+	/// Once churn leaves the index holding more entries than the cache, a cache that then
+	/// shrinks to its newest group still lets the index shrink, though every search answers
+	/// at the newest entry and never meets the stale ones.
+	#[test]
+	fn the_live_index_shrinks_with_the_cache() {
+		let producer = track_producer("test", Info::timed());
+		let groups: Vec<_> = (0..100)
+			.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
+			.collect();
+		let fixed = Arc::new(Runs::new([0..=999, 1001..=u64::MAX]));
+		let servable = Servable::layered(Layered::new(fixed, Runs::default()), None, &Servable::NONE);
+		let Servable::Runs(several) = &servable else {
+			panic!("several runs");
+		};
+		let entries = || -> usize {
+			let indexes = several.live.0.lock().unwrap();
+			indexes.iter().map(|indexed| indexed.groups.len()).sum()
+		};
+		let newest = |slot: &Slot| Some(slot.group.sequence);
+		assert_eq!(
+			producer.state.read().find_servable(&servable, 0, true, newest),
+			Some(99)
+		);
+		assert_eq!(entries(), 100);
+
+		// Most of the cache leaves, so a prune keeps only the groups still cached.
+		for sequence in 0..60 {
+			producer.modify().unwrap().uncache(sequence).unwrap();
+		}
+		assert_eq!(
+			producer.state.read().find_servable(&servable, 0, true, newest),
+			Some(99)
+		);
+		assert_eq!(entries(), 40);
+
+		// Then all but the newest leaves.
+		for sequence in 60..99 {
+			producer.modify().unwrap().uncache(sequence).unwrap();
+		}
+		assert_eq!(
+			producer.state.read().find_servable(&servable, 0, true, newest),
+			Some(99)
+		);
+		assert_eq!(entries(), 1, "the stale entries are pruned");
+		drop(groups);
 	}
 
 	/// Capping a servable window in place keeps exactly the groups the set of its runs
