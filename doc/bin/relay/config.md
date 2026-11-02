@@ -24,6 +24,15 @@ implementation = "edge/1"            # SETUP name for the relay. Omit for moq-re
 [listen.reset]
 secret = "/etc/moq/reset.key"        # File holding 64 hex chars. Omit for a random key.
 
+[listen.lb]                          # QUIC-LB: name this relay in its connection IDs.
+id = "01"                            # Server ID, hex. The same length on every relay.
+nonce = 8                            # Random bytes after it. Default.
+
+[listen.lb.forward]                  # Forward packets that land on the wrong relay to their owner.
+bind = "10.0.0.1:4443"               # This relay's forward socket, a specific IP its peers list.
+key = "/etc/moq/forward.key"         # File holding 64 hex chars, the same on every relay.
+peers = "/etc/moq/peers.toml"        # Server ID to forward socket. Reloaded on change.
+
 [listen.tls]
 cert = "cert.pem"                    # Certificate chain and key. Reloaded on change.
 key = "key.pem"
@@ -54,6 +63,13 @@ alike. A client that advertises its own name (moq-lite-05+ or any moq-transport 
 reaches the [auth server](/bin/relay/auth#the-contract) with it as `implementation`,
 which is where to count client versions; older clients arrive without one.
 
+`bind` is the relay's one UDP port. Beside QUIC it carries WebRTC media for an
+[embedder](/bin/relay/#embed) that takes it; otherwise that traffic is dropped,
+as are STUN Binding queries ([`[stun]`](#stun) has its own port) and anything
+else. `/metrics` counts the drops in `moq_relay_demux_dropped_total` by `reason`:
+`unclaimed` (WebRTC with no embedder), `overflow`, `stun`, and `unknown`. Not
+with `runtime.io_uring`, which serves QUIC alone.
+
 `reset.secret` lets a relay restarted on the same address reset its
 predecessor's QUIC connections, so clients reconnect at once instead of
 waiting out the idle timeout. Keep it secret, and give it to one relay
@@ -72,6 +88,27 @@ use the tokio runtime when the listener needs these settings.
 `[listen.lb] nonce` needs an `id` in the same table; unset nonce uses 8.
 The `--listen-quic-lb-id` and `--listen-quic-lb-nonce` flags update that table.
 `unix.allow` needs `unix.bind`.
+
+`[listen.lb.forward]` keeps a connection alive when its packets land on another relay behind
+the same anycast address or VIP, after a route change or a rebalance. That relay reads the
+server ID in the connection ID and forwards the packet to the owner's forward socket, which
+handles it as if the client had sent it there and keeps replying from the shared address.
+Handshakes are not forwarded, so the front end must keep each new flow on one relay until it
+completes.
+
+The peers file maps each relay's server ID to its forward `bind`, and may list this relay too,
+so one file serves the whole cluster:
+
+```toml
+"01" = "10.0.0.1:4443"
+"02" = "10.0.0.2:4443"
+```
+
+A packet for an unlisted server ID is dropped. A forward is accepted only from a listed address
+and under the shared `key` (`openssl rand -hex 32 > forward.key`). A changed file replaces the
+map; an invalid one is logged and the last valid map kept, or stops startup. Forwarding needs
+`lb.id` and all three settings, which the `--listen-quic-lb-forward-bind`, `-key`, and `-peers`
+flags update.
 
 ## \[quic]
 
@@ -353,6 +390,15 @@ sheds its oldest frames instead. Whatever the capacity, a group holds at most it
 newest 32 MB. A reader of a track's newest group that reaches a shed frame asks
 for a new group on tracks that opt into refresh. Any other reader of a shed
 frame sees `Evicted`.
+
+While a group has readers, the relay receives at most 16 MB of it past the
+fastest one, then stops reading its stream until that reader catches up, so
+flow control slows the upstream hop and the publisher. A slower reader is never
+waited on: one that trails the fastest by more than the rest of the 32 MB
+reaches a shed frame. A group nobody reads keeps arriving and shedding.
+A stopped stream keeps its receive credit, so the relay stops reading at most as
+many streams per connection as fit in half of `quic.receive_window`; past that,
+groups keep arriving and shedding as if unpaced.
 
 ## \[stats]
 

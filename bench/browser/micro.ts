@@ -16,7 +16,7 @@ const { values, positionals } = parseArgs({
 });
 const benchmark = values.bench;
 // The rows each benchmark prints per run.
-const ROWS: Record<string, number> = { frames: 26, drift: 36, ledger: 12, replay: 72 };
+const ROWS: Record<string, number> = { frames: 26, drift: 36, ledger: 12, replay: 72, "resume-history": 72 };
 if (!Object.hasOwn(ROWS, benchmark)) throw new Error(`--bench must be one of ${Object.keys(ROWS).join(", ")}`);
 const rounds = Number(values.rounds);
 if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("--rounds must be a positive integer");
@@ -41,11 +41,13 @@ for (const [name, root] of roots) {
 			{
 				name: "repeat-microbenchmark",
 				setup(build) {
-					// The ledger is internal, so select it explicitly instead of a package export.
-					build.onResolve({ filter: /^\.\.\/src\/ledger\.ts$/ }, () => ({
-						path: resolve(root, "js/net/src/ledger.ts"),
-					}));
-					build.onLoad({ filter: /\/bench\/(frames|drift|ledger|replay)\.ts$/ }, async ({ path }) => {
+					// Internal modules have no package export, so select each variant's own explicitly.
+					build.onResolve({ filter: /^\.\.\/src\// }, ({ path, importer }) =>
+						importer.endsWith(`/js/net/bench/${benchmark}.ts`)
+							? { path: resolve(root, "js/net/bench", path) }
+							: undefined,
+					);
+					build.onLoad({ filter: /\/bench\/(frames|drift|ledger|replay|resume-history)\.ts$/ }, async ({ path }) => {
 						const source = await Bun.file(path).text();
 						if (benchmark !== "frames")
 							return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
@@ -88,7 +90,12 @@ const server = Bun.serve({
 		});
 	},
 });
-const browser = await chromium.launch({ headless: true, executablePath: process.env.BROWSER_BIN });
+const browser = await chromium.launch({
+	headless: true,
+	executablePath: process.env.BROWSER_BIN,
+	// Retention is counted after full collections the page asks for, against an unrounded heap size.
+	args: benchmark === "resume-history" ? ["--js-flags=--expose-gc", "--enable-precise-memory-info"] : [],
+});
 const samples: { round: number; variant: string; rows: string[] }[] = [];
 // Main-thread GC across one whole run per variant, from a traced pass after the timed rounds.
 const gc: Record<string, ReturnType<typeof collections>> = {};
@@ -151,6 +158,22 @@ try {
 		gc[variant] = collections(events, rendererPid(events, page.url()));
 		await save();
 		console.log(`traced ${variant}`);
+	}
+	// Reachability is exact here, so a retired route still reachable fails the run, once every
+	// variant's samples are written for comparison.
+	if (benchmark === "resume-history") {
+		const retaining = samples.filter(({ rows }) =>
+			rows.some((row) =>
+				row
+					.split(",")
+					.slice(5, 9)
+					.some((retired) => retired !== "0"),
+			),
+		);
+		if (retaining.length)
+			throw new Error(
+				`retired routes stayed reachable: ${[...new Set(retaining.map((s) => s.variant))].join(", ")}`,
+			);
 	}
 } finally {
 	await browser.close();
