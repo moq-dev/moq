@@ -290,22 +290,26 @@ async fn initial_mixed_ranges_keep_the_absolute_history() {
 async fn draft22_updates_both_bounds_across_cached_groups() {
 	for relay in [false, true] {
 		let mut fixture = range_fixture(relay).await;
+		// Reaching the live group 5, so the copy subscribes: history alone is fetched.
 		let initial = Subscription::default()
-			.with_range(2..4)
+			.with_ranges([Range::groups(2..4), Range::groups(5..6)])
 			.with_max_delay(None)
 			.with_order(moq_net::track::Order::Ascending);
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
-		let mut seen = [next(&mut reader).await.unwrap(), next(&mut reader).await.unwrap()];
+		let mut seen = Vec::new();
+		for _ in 0..3 {
+			seen.push(next(&mut reader).await.unwrap());
+		}
 		seen.sort_unstable();
-		assert_eq!(seen, [2, 3]);
+		assert_eq!(seen, [2, 3, 5]);
 		reader.update(initial.clone().with_range(0..6)).unwrap();
 		let mut got = Vec::new();
-		for _ in 0..4 {
+		for _ in 0..3 {
 			let seen = next(&mut reader).await;
 			got.push(seen.expect("a widened group never arrived"));
 		}
 		got.sort_unstable();
-		assert_eq!(got, [0, 1, 4, 5], "relay={relay}");
+		assert_eq!(got, [0, 1, 4], "relay={relay}");
 		reader.update(initial.clone().with_range(4..5)).unwrap();
 		kio::clock::timeout(
 			TIMEOUT,
@@ -348,14 +352,18 @@ async fn draft22_updates_both_bounds_across_cached_groups() {
 async fn draft22_resolves_cached_time_ends() {
 	for relay in [false, true] {
 		let mut fixture = range_fixture(relay).await;
+		// Reaching the live group 5, so the copy subscribes: history alone is fetched.
 		let initial = Subscription::default()
-			.with_range(2..4)
+			.with_ranges([Range::groups(2..4), Range::groups(5..6)])
 			.with_max_delay(None)
 			.with_order(moq_net::track::Order::Ascending);
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
-		let mut seen = [next(&mut reader).await.unwrap(), next(&mut reader).await.unwrap()];
+		let mut seen = Vec::new();
+		for _ in 0..3 {
+			seen.push(next(&mut reader).await.unwrap());
+		}
 		seen.sort_unstable();
-		assert_eq!(seen, [2, 3]);
+		assert_eq!(seen, [2, 3, 5]);
 		let unknown = initial.clone().with_ranges([Range {
 			start: moq_net::track::Anchor::Absolute(0),
 			end: Some(moq_net::track::Anchor::Time(Timestamp::from_millis(10_000).unwrap())),

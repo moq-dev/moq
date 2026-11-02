@@ -44,6 +44,7 @@ mod model;
 mod multi_cdn;
 mod partial_group;
 mod quiet_catalog;
+mod range_read;
 mod range_anchors;
 mod received_rewind;
 mod rejoin;

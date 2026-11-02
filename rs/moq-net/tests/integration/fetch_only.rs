@@ -247,7 +247,6 @@ async fn bounded_direct(version: &str) {
 
 	let remote = resolve(&client).await;
 	let copy = remote.track("video").unwrap();
-	copy.info().await.expect("TRACK_STATUS resolves the track");
 	let mut sub = subscribe_history(&copy).await;
 	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{version}");
 	assert_eq!(next_frames(&mut sub).await, None, "{version}: the read ends");
@@ -259,8 +258,9 @@ async fn bounded_direct(version: &str) {
 	drop((sub, copy, remote, pair, broadcast, client, publisher));
 }
 
-/// A copy the session holds no subscription for is unfed: a bounded read of the history
-/// below the publisher's Largest Object fetches its holes at once, never subscribing.
+/// A bounded read learns the track from TRACK_STATUS, and of the history below the
+/// publisher's Largest Object, which a finished track's SUBSCRIBE would refuse, fetches its
+/// holes at once, never subscribing.
 #[kio::test]
 async fn a_bounded_read_of_history_fetches_without_subscribing() {
 	let mut failures = Vec::new();
