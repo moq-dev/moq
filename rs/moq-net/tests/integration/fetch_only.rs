@@ -404,13 +404,19 @@ async fn fetched_copy(upstream_version: Version, version: Version) -> FetchedCop
 
 async fn history_through_fetched_copy(upstream: Version, version: Version) {
 	let copy = fetched_copy(upstream, version).await;
-	// A front's bounded read parks past its end, so this reads the group and stops there.
+	// The fresh session asks TRACK_STATUS first, which the relay answers without an edge,
+	// so the read SUBSCRIBEs once that answer arrives, after `subscribe` returns.
 	let mut sub = subscribe_history(&copy.fresh).await;
+	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{upstream} to {version}");
+	assert_eq!(
+		next_frames(&mut sub).await,
+		None,
+		"{upstream} to {version}: the read ends"
+	);
 	assert!(
 		copy.track.subscription().is_some(),
 		"{upstream} to {version}: answered without subscribing upstream"
 	);
-	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{upstream} to {version}");
 	// The copy still serves its other reader.
 	assert_eq!(
 		fetch(&copy.fetched, 0).await.expect("fetch after the SUBSCRIBE"),
