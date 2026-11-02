@@ -777,6 +777,34 @@ impl MockSession {
 		}
 	}
 
+	/// Deliver only the oldest held bidi stream, and keep holding the rest.
+	pub fn release_oldest_bidi(&self) {
+		let link = &self.side.out;
+		link.settle();
+		let mut held = link.held_bi.lock().unwrap();
+		let held = held.as_mut().expect("not holding");
+		if !held.is_empty() {
+			let _ = link.ready_bi.try_push(held.remove(0));
+		}
+	}
+
+	/// Deliver the held bidi streams newest first, and stop holding.
+	pub fn release_bidis_reversed(&self) {
+		let link = &self.side.out;
+		link.settle();
+		for stream in link
+			.held_bi
+			.lock()
+			.unwrap()
+			.take()
+			.unwrap_or_default()
+			.into_iter()
+			.rev()
+		{
+			let _ = link.ready_bi.try_push(stream);
+		}
+	}
+
 	/// Park every uni stream this side opens from now on, like a peer that has granted
 	/// no more stream credit.
 	pub fn withhold_unis(&self) {

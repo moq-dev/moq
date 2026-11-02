@@ -1013,8 +1013,11 @@ mod tests {
 		tokio::time::advance(ago).await;
 		let clock = moq_mux::Clock::at(moq_net::time::Instant::now() - ago, kio::clock::wall() - ago).unwrap();
 		let mut input = moq_net::broadcast::Info::default().produce();
-		let source =
-			moq_mux::catalog::Producer::new(&mut input, moq_mux::catalog::Config::default().with_clock(clock)).unwrap();
+		let source = moq_mux::catalog::Producer::new(
+			&mut input,
+			moq_mux::catalog::Config::default().with_clock(clock.clone()),
+		)
+		.unwrap();
 
 		let mut output = moq_net::broadcast::Info::default().produce();
 		let mut derived = moq_mux::catalog::Producer::new(&mut output, moq_mux::catalog::Config::default()).unwrap();

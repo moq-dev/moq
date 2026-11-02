@@ -12,9 +12,9 @@ backports to `release`.
 An external AI audit at
 [651c30fee9](https://github.com/moq-dev/moq/commit/651c30fee9) reported 8
 Medium and 28 Low findings. Every claim was re-checked against source before
-planning; the pre-cut remainder is the
-[m1 epic](/quest/m1/security-audit/README.md), whose README records what was
-dropped and why.
+planning. The completed pre-cut epic's
+[triage record](https://github.com/moq-dev/moq/blob/e3bd4b288e01f0c2e7fbe1e6a362d6f3d58057c8/quest/m1/security-audit/README.md)
+preserves the maintainer's dropped findings and external owners.
 
 Decided 2026-10-27 (maintainer): these two land in m0 because `release`
 carries the same bugs. Each quest owns its own backport PR rather than a

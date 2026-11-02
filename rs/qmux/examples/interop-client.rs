@@ -81,11 +81,12 @@ async fn main() -> anyhow::Result<()> {
 		.context("usage: interop-client <url> <qmux-00|qmux-01|qmux-02>")?;
 	let version = parse_version(&raw_version)?;
 
-	let session = qmux::ws::Client::new()
+	let (session, driver) = qmux::ws::Client::new()
 		.with_protocol(PROTOCOL, &[version])
 		.require_protocol()
 		.connect(&url)
 		.await?;
+	tokio::spawn(driver);
 
 	run(session, version).await
 }

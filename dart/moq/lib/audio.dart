@@ -28,7 +28,7 @@ typedef ReadFrame = FrameMoqAudioRead;
 /// Media after what was already read was lost; what follows does not continue it.
 typedef ReadGap = GapMoqAudioRead;
 
-/// The publisher stopped its encoder; frames starting before `endUs` are its remaining media.
+/// The publisher stopped its encoder; frames starting before `end` are its remaining media.
 typedef ReadEnd = EndMoqAudioRead;
 
 /// The PCM layout written to a [Producer].
@@ -54,24 +54,6 @@ typedef Codec = MoqAudioCodec;
 
 /// A raw PCM sample layout.
 typedef SampleFormat = MoqAudioSampleFormat;
-
-/// Duration view over a PCM frame's timestamp.
-extension AudioFrameDuration on MoqAudioFrame {
-  /// Presentation timestamp of the first sample.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}
-
-/// Duration view over a gap.
-extension AudioReadGapDuration on GapMoqAudioRead {
-  /// The furthest presentation point already read.
-  Duration get timestamp => Duration(microseconds: timestampUs);
-}
-
-/// Duration view over an encoder end.
-extension AudioReadEndDuration on EndMoqAudioRead {
-  /// Where the stopped encoder's media stops.
-  Duration get end => Duration(microseconds: endUs);
-}
 
 /// Input, codec settings, and publication ownership for a producer.
 typedef ProducerOptions = MoqAudioProducerOptions;
