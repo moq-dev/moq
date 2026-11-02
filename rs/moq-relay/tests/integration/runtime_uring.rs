@@ -415,9 +415,10 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 	// drain open even after the first session leaves, without an unrelated peer.
 	let arriving = tokio::spawn(connect(client, url));
 	let pending = admissions.next().await.expect("pending admission");
+	// The relay fixes its deadline inside `start`, so these bracket it: what is
+	// left of each bounds what the relay tells the arrival from below and above.
+	let earliest = kio::clock::now() + DRAIN;
 	trigger.start();
-	// No earlier than the relay's own deadline, so what is left of it bounds
-	// what the relay tells the arrival.
 	let deadline = kio::clock::now() + DRAIN;
 	let draining = established.draining().expect("connected");
 	let goaway = kio::clock::timeout(TIMEOUT, moq_net::kio::wait(|waiter| draining.poll(waiter)))
@@ -438,9 +439,11 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 		.expect("a one-shot session leaves cleanly on GOAWAY");
 
 	if ietf {
-		// Admit the arrival well into the window, so what is left of it is
-		// distinguishable from a fresh one.
-		kio::clock::sleep(DRAIN / 2).await;
+		// Admit the arrival halfway into the window, so what is left of it is
+		// distinguishable from a fresh one. Measured from the deadline, not from
+		// the first session leaving, so a slow close cannot push the admission
+		// past the deadline (where the relay rejects it).
+		kio::clock::sleep_until(deadline - DRAIN / 2).await;
 	}
 	let (_arrival_lease, arrival_consumer) = moq_auth::lease::Producer::new(moq_auth::Grant::new(all(), all()));
 	let granted = kio::clock::now();
@@ -463,6 +466,13 @@ async fn drain_on_the_trigger(version: Option<moq_net::Version>) {
 		assert!(
 			timeout <= left,
 			"{label}: an arrival mid-drain got {timeout:?}, past the {left:?} left of the window"
+		);
+		// Nor less: the relay read its clock no later than now, and the wire
+		// rounds up, so the remaining window is a floor.
+		let least = earliest.saturating_duration_since(kio::clock::now());
+		assert!(
+			timeout >= least,
+			"{label}: an arrival mid-drain got {timeout:?}, short of the {least:?} left of the window"
 		);
 	}
 	kio::clock::timeout(TIMEOUT, arrival.closed())
