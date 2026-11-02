@@ -66,9 +66,10 @@ start, consumers.md swaps the first-frame pts for the group start.
   `moq import capture`, whose audio has been on demand since
   [moq-dev/moq#7238](https://github.com/moq-dev/moq/pull/7238)) starts capture
   and gets a playlist with both renditions.
-- Convert the HLS recorder (`rs/moq-cli/src/hls/record.rs`) and the archive
-  docs that describe records. Update the hang draft and the HLS, CLI, and
-  archive docs this makes stale.
+- Convert the HLS recorder (`rs/moq-cli/src/hls/record.rs`). Update the hang
+  draft and the HLS, CLI, and archive docs this makes stale, including
+  `doc/concept/archives.md`, whose HLS paragraph says a recording needs its
+  `hls` record tracks.
 
 Public API: breaking. `hang::hls` and the per-rendition `hls` field are
 deleted, `clock` moves to `media.clock`, and `moq_mux::hls` shrinks to
