@@ -15,7 +15,7 @@ Planned 2026-10-31 (`/quest-plan`, maintainer), a follow-up reported by the
 Minted identities (`~` plus random bits) are URL-safe, so only a stable
 identity set by a publisher can break these paths today. Reuse the
 percent-encoding the archive already applies to track names (see
-[archives](/quest/m1/archive/README.md)) rather than adding a second
+[archives](/doc/concept/archives.md#what-the-store-holds)) rather than adding a second
 scheme. List any other surface that embeds an identity, found with
 `git grep`, in the PR.
 

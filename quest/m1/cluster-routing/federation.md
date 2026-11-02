@@ -16,10 +16,16 @@ connection protocol. Do not require an inbound connection to the local relay.
 
 Use authenticated, namespace-scoped admission: the CDN scopes the local
 relay's connection to a path prefix, and identities it sends, its own and its
-local publishers', are filed under `hash(subject, id)`, keyed by the grant's
-credential subject, so a forger or a misconfigured
-uplink only affects its own scope (decided 2026-10-14; see
-[Routes and announces](/quest/m1/cluster-routing/routes.md)). A scoped
+local publishers', are qualified, so a forger or a misconfigured uplink only
+affects its own scope (decided 2026-10-14; see
+[Routes and announces](/quest/m1/cluster-routing/routes.md)). Open: how
+those identities are keyed, owned by routes. Without a key, a scoped forger
+declaring a victim's id captures claims outside its scope
+(`forged_identity_hijacks_claims_outside_the_forgers_scope`). The scope
+itself (`hash(scope, id)`) was rejected 2026-10-15, and the grant's
+issuer-qualified subject (`hash(subject, id)`) was dropped 2026-11-02
+(maintainer). The key must survive token refresh and be shared by the local
+relay's two uplinks. A scoped
 connection cannot forward an already qualified identity, so nested scoped
 federation is out: a relay behind the local relay connects unscoped. The local relay
 marks its CDN links `upstream`, so CDN relays never shortcut through the
@@ -50,17 +56,12 @@ Update `doc/bin/relay/cluster.md` (`proxy`, `upstream`, and the
 one-copy-per-broadcast priority recipe) and affected auth/config examples in
 the same PR; the combined concept/setup guide follows separately.
 
-Decided 2026-10-27 (maintainer): this requires
-[Grant subject](/quest/m1/cluster-routing/grant-subject.md) directly, since
-scoped admission keys on it.
-
 Public API: report any peer configuration or admission change. Wire: use the
 proven lite-07 routing contract; any additional change requires draft and
 Rust/JS parity. Run `just check`, `just test interop --all`, and `just drafts check`.
 
 ## Required
 
-- [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - the issuer-qualified subject the local relay's identities are filed under
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - identity, scoped claims, reachability, and export policy
 
 ## Related

@@ -3,7 +3,10 @@
 ## Goal
 
 The work in flight now: a passing Nightly, fixes for the `release` line, the
-quest merge driver, local reviews, CI cost and latency, and test flakes.
+quest merge driver, local reviews, CI cost and latency, test flakes, and
+replacing the catalog's HLS records with a declared segment grid. That last
+one is a breaking catalog and API change, pulled ahead of m1's other planned
+format changes; it lands on `main` and ships with the next cut.
 
 ## Plan
 
@@ -18,6 +21,10 @@ serve instead of enumerating broadcasts. Serving the relay's ingested-only
 view (`origin::Consumer::local()`) to localhost workers belongs to moq.pro's
 edge, which embeds moq-relay; it moved there on 2026-09-28.
 
+The [HLS grid](/quest/m0/hls-media-grid.md) quest is the one breaking change
+here (maintainer, 2026-11-02): it moved out of m1's time-addressing chain,
+since cutting segments from first-frame pts waits on nothing in m1.
+
 ## Required
 
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
@@ -30,3 +37,4 @@ edge, which embeds moq-relay; it moved there on 2026-09-28.
 - [CI cost and latency](/quest/m0/ci/README.md) - cloud CI runs only in a batched merge gate as one `just ci` pass per batch, expensive checks run nightly and gate `release`, caches move to R2, and runners are chosen last
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one fails a whole batch
 - [Backport the dot-segment and auth-redirect refusals](/quest/m0/backport-release-hardening.md) - `release`'s relay refuses dot-segment paths and its auth client refuses redirects
+- [HLS export on a declared grid](/quest/m0/hls-media-grid.md) - the catalog's `hls` field and record tracks go away, and the export numbers segments on `media.join.interval` from media tracks
