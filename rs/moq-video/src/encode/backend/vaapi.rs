@@ -624,7 +624,7 @@ mod hardware_tests {
 			"decode downloaded pixels"
 		);
 
-		for size in [Size::new(1280, 720), Size::new(854, 480), Size::new(640, 360)] {
+		for size in [Size::new(1280, 720), Size::new(852, 480), Size::new(640, 360)] {
 			let mut config = Config::new(size.width, size.height, FrameRate::new(30, 1).unwrap());
 			config.color = frames[0].surface.color();
 			let mut encoder = Vaapi::new(&config).expect("rung encoder");
