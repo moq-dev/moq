@@ -27,19 +27,11 @@ export interface Key {
 const MAX_BROADCASTS = 4;
 
 /**
- * The most rendition IDs a tally keeps per catalog broadcast, and a feedback report keeps of its
- * departed reporters, so a catalog that keeps renaming its renditions cannot grow either, or each
- * report, without bound. Matches the Rust registry's limit. The oldest makes way; one still counting
- * into it starts over, which a reader treats as a reset.
+ * The most rendition IDs a tally keeps per catalog broadcast, so a catalog that keeps renaming its
+ * renditions cannot grow it, or each report, without bound. Matches the Rust registry's limit. The
+ * oldest makes way; one still counting into it starts over, which a reader treats as a reset.
  */
-export const MAX_RENDITIONS = 1024;
-
-/** Drop the oldest entries of `renditions` beyond {@link MAX_RENDITIONS}, in insertion order. */
-export function bound(renditions: Record<string, Received>): Record<string, Received> {
-	const ids = Object.keys(renditions);
-	if (ids.length <= MAX_RENDITIONS) return renditions;
-	return Object.fromEntries(ids.slice(ids.length - MAX_RENDITIONS).map((id) => [id, renditions[id]]));
-}
+const MAX_RENDITIONS = 1024;
 
 type Entry = { received: Received; stalling?: Instant };
 

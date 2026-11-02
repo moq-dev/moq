@@ -18,20 +18,9 @@ function watched(origin: Origin.Producer, name: string, catalog: Signal<Catalog.
 	return new Broadcast({ origin, name: Path.from(name), follow: false, catalogFormat: "manual", catalog });
 }
 
-// A decoder that reports `received` for the catalog at `path`, and nothing for any other. Its first
-// report, the baseline a reporter joins with, is empty, so everything after counts.
+// A decoder that reports `received` for the catalog at `path`, and nothing for any other.
 function source(path: string, received: Record<string, Received>) {
-	let started = false;
-	return {
-		feedback: (base: Path.Valid) => {
-			if (base !== path) return {};
-			if (!started) {
-				started = true;
-				return {};
-			}
-			return received;
-		},
-	};
+	return { feedback: (base: Path.Valid) => (base === path ? received : {}) };
 }
 
 // The feedback broadcasts announced on `origin`, by path.
@@ -117,7 +106,7 @@ test("publishes feedback where the catalog solicits it and follows the solicitat
 	}
 });
 
-test("reporters resolving one feedback path share its broadcast and add their counts", async () => {
+test("a second reporter at a feedback path in use publishes nothing until it is free", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const origin = new Origin.Producer();
@@ -125,34 +114,39 @@ test("reporters resolving one feedback path share its broadcast and add their co
 	const catalog = new Signal<Catalog.Root | undefined>({ echo: { path: "viewers" } } as Catalog.Root);
 	const first = watched(origin, "room/live.hang", catalog);
 	const second = watched(origin, "room/live.hang", catalog);
-	const reporters = [first, second].map(
-		(broadcast, n) =>
-			new Echo({
-				broadcast,
-				origin,
-				name: "alice",
-				sources: [
-					source("room/live.hang", { video: { frames: n + 1, arrival: { timestamp: n, wall: 100 + n } } }),
-				],
-			}),
-	);
+	const enabled = new Signal(true);
+	const reporters = [
+		new Echo({ broadcast: first, origin, name: "alice", sources: [source("room/live.hang", { video: { frames: 1 } })] }),
+		new Echo({
+			broadcast: second,
+			origin,
+			enabled,
+			name: "alice",
+			sources: [source("room/live.hang", { video: { frames: 10 } })],
+		}),
+	];
 	try {
 		await flush();
 		expect([...paths]).toEqual(["room/viewers/alice.echo"]);
+		// Only the first reporter's own counts, never a sum.
 		expect((await read(origin, "room/viewers/alice.echo", clock)) as unknown).toEqual({
-			renditions: { video: { frames: 3, arrival: { timestamp: 1, wall: 101 } } },
+			renditions: { video: { frames: 1 } },
 		});
 
-		// One leaving keeps its counts in the report, which stays cumulative.
-		reporters[1].close();
+		// The refused one leaving changes nothing.
+		enabled.set(false);
 		await flush();
 		expect([...paths]).toEqual(["room/viewers/alice.echo"]);
-		expect((await read(origin, "room/viewers/alice.echo", clock))?.renditions?.video.frames as unknown).toBe(3);
+		expect((await read(origin, "room/viewers/alice.echo", clock))?.renditions?.video.frames as unknown).toBe(1);
 
-		// The last one leaving retracts it.
+		// The holder leaving retracts it and frees the path for a reporter that asks again.
 		reporters[0].close();
 		await flush();
 		expect([...paths]).toEqual([]);
+		enabled.set(true);
+		await flush();
+		expect([...paths]).toEqual(["room/viewers/alice.echo"]);
+		expect((await read(origin, "room/viewers/alice.echo", clock))?.renditions?.video.frames as unknown).toBe(10);
 	} finally {
 		for (const reporter of reporters) reporter.close();
 		first.close();
@@ -185,76 +179,6 @@ test("a reporter for another catalog at a path in use publishes nothing", async 
 		for (const reporter of reporters) reporter.close();
 		a.close();
 		b.close();
-		origin.close();
-		installed.close();
-	}
-});
-
-test("a reporter that leaves and returns is counted once", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const origin = new Origin.Producer();
-	const catalog = new Signal<Catalog.Root | undefined>({ echo: { path: "viewers" } } as Catalog.Root);
-	const broadcast = watched(origin, "room/live.hang", catalog);
-	const enabled = new Signal(true);
-	const staying = new Echo({
-		broadcast,
-		origin,
-		name: "alice",
-		sources: [source("room/live.hang", { video: { frames: 1 } })],
-	});
-	const returning = new Echo({
-		broadcast,
-		origin,
-		enabled,
-		name: "alice",
-		sources: [source("room/live.hang", { video: { frames: 10 } })],
-	});
-	try {
-		await flush();
-		enabled.set(false);
-		await flush();
-		// The departed reporter's final counts stay in the report.
-		expect((await read(origin, "room/viewers/alice.echo", clock))?.renditions?.video.frames as unknown).toBe(11);
-
-		enabled.set(true);
-		await flush();
-		expect((await read(origin, "room/viewers/alice.echo", clock))?.renditions?.video.frames as unknown).toBe(11);
-	} finally {
-		staying.close();
-		returning.close();
-		broadcast.close();
-		origin.close();
-		installed.close();
-	}
-});
-
-test("departed reporters' rendition IDs stay bounded", async () => {
-	const clock = new Manual();
-	const installed = clock.install();
-	const origin = new Origin.Producer();
-	const catalog = new Signal<Catalog.Root | undefined>({ echo: { path: "viewers" } } as Catalog.Root);
-	const broadcast = watched(origin, "room/live.hang", catalog);
-	const staying = new Echo({ broadcast, origin, name: "alice", sources: [source("room/live.hang", {})] });
-	try {
-		await flush();
-		for (let n = 0; n <= 1024; n++) {
-			const leaving = new Echo({
-				broadcast,
-				origin,
-				name: "alice",
-				sources: [source("room/live.hang", { [`r${n}`]: { frames: 1 } })],
-			});
-			await flush();
-			leaving.close();
-		}
-		await flush();
-		const renditions = (await read(origin, "room/viewers/alice.echo", clock))?.renditions ?? {};
-		expect(Object.keys(renditions)).toHaveLength(1024);
-		expect(renditions.r0).toBeUndefined();
-	} finally {
-		staying.close();
-		broadcast.close();
 		origin.close();
 		installed.close();
 	}

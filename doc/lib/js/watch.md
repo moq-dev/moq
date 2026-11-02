@@ -78,12 +78,12 @@ that path against the broadcast and publishes `alice.echo` there, with one
 under its catalog ID: frames, bytes, decoded, late, decode errors, stalls and
 stalled time, audio underruns, and the newest arrival, plus the PROBE
 round-trip time. It writes about once a second while someone subscribes, and
-follows the catalog: a removed or moved section retracts the broadcast. Players
-on one connection watching the same catalog under one name share it and add
-their counts. A feedback broadcast belongs to one catalog, so a player watching
-another catalog that solicits the same path under the same name publishes
-nothing and warns; give each catalog's player its own name. The decoders' `out.stats` and the stats panel read the same
-counters. The token must allow publishing under the echo path.
+follows the catalog: a removed or moved section retracts the broadcast. Each
+player publishes its own broadcast, reporting only what it counted, so a second
+player on one connection that resolves the same feedback path, for any catalog,
+publishes nothing and warns; give each player its own name. The decoders'
+`out.stats` and the stats panel read the same counters. The token must allow
+publishing under the echo path.
 
 ## Binding from a framework
 
