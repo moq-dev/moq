@@ -501,9 +501,10 @@ pub(crate) struct TrackState {
 	// Bumped on every insert into `drops`, so a cursor rescans it only after a change.
 	drops_revision: u64,
 	drops_changes: ledger::Changes,
-	// How many groups the cache took in that the live feed didn't deliver: fetched backfill,
-	// held but never in the arrival ledger, so a time end parked on a gap looks again.
-	backfilled: u64,
+	// How many copies the cache took in that the live feed didn't deliver: fetched backfill,
+	// and fetched heads joining a live group, which may give it a start. Neither is in the
+	// arrival ledger, so a time end parked on a gap looks again.
+	fetched: u64,
 	// Every reader's eviction inbox. Its own lock, so a reader registers through the read
 	// guard it judges under.
 	inboxes: Mutex<miss::Inboxes>,
@@ -854,7 +855,7 @@ impl Holdings for TrackState {
 		let global = [
 			self.start_sequence.map_or(0, |start| start.saturating_add(1)),
 			u64::from(self.complete()),
-			self.backfilled,
+			self.fetched,
 		];
 		let (ledger, drops) = (self.arrivals.changes(), &self.drops_changes);
 		let changed = (seen.global == Some(global))
@@ -2198,7 +2199,7 @@ impl TrackState {
 
 		self.advance(sequence, visible);
 		if !visible {
-			self.backfilled += 1;
+			self.fetched += 1;
 		}
 		// A publisher may re-create a group it cut; the sequence is no longer given up.
 		if visible
@@ -3033,6 +3034,8 @@ impl TrackState {
 				if let Some(head) = slot.head.replace(Box::new(group.handle())) {
 					self.detach(&head);
 				}
+				// A head holding frame 0 gives a group received past it a start.
+				self.fetched += 1;
 			}
 			// Invisible to arrival-order subscribers: fetched on demand, not produced
 			// live by the publisher.

@@ -54,8 +54,9 @@ pub(in crate::model) trait Holdings {
 
 	/// The runs of sequences whose arrivals or drops changed since `seen`, which this then
 	/// moves on to now, or `None` once anything else a parked walk reads may have changed
-	/// (see [`Window::parked`]): the declared start, completion, or a group the live feed
-	/// never delivered. `None` by default, which wakes every parked walk.
+	/// (see [`Window::parked`]): the declared start, completion, or a copy the live feed
+	/// never delivered, which may hold a group or give one a start. `None` by default, which
+	/// wakes every parked walk.
 	fn changes(&self, seen: &mut Seen) -> Option<Vec<ops::Range<u64>>> {
 		let _ = seen;
 		None
@@ -1159,6 +1160,9 @@ mod tests {
 		gone: Vec<ops::Range<u64>>,
 		complete: bool,
 		asked: Cell<usize>,
+		/// How many fetched copies gave a group held past its frame 0 a start, which a
+		/// track counts rather than logs.
+		fetched: Cell<u64>,
 		/// Every change so far, oldest first, and what was last logged: the held sequences
 		/// and how many runs were given up.
 		log: std::cell::RefCell<(Vec<ops::Range<u64>>, BTreeSet<u64>, usize)>,
@@ -1234,7 +1238,7 @@ mod tests {
 			*gone = self.gone.len();
 			let from = usize::try_from(seen.runs[0]).unwrap();
 			let changed = log[from..].to_vec();
-			let global = [u64::from(self.complete), 0, 0];
+			let global = [u64::from(self.complete), self.fetched.get(), 0];
 			let primed = seen.global == Some(global);
 			*seen = Seen {
 				runs: [log.len() as u64, 0],
@@ -1584,11 +1588,17 @@ mod tests {
 							groups.held.insert(sequence, started);
 						}
 					}
-					4 => {
-						if groups.held.get(&sequence).is_none_or(|held| *held == Held::Pending) {
+					4 => match groups.held.get(&sequence) {
+						None | Some(Held::Pending) => {
 							groups.held.insert(sequence, Held::Never);
 						}
-					}
+						// A fetched head gives a group held past its frame 0 a start.
+						Some(Held::Never) if next(2) == 0 => {
+							groups.held.insert(sequence, started);
+							groups.fetched.set(groups.fetched.get() + 1);
+						}
+						_ => {}
+					},
 					_ => {
 						let end = sequence + 1 + next(3);
 						if groups.held.range(sequence..end).next().is_none() {
