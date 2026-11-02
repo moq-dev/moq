@@ -826,7 +826,7 @@ async fn follow_path(
 			err = &mut lost => break Err(err),
 			event = follow.next() => match event {
 				Ok(Event::Start(broadcast)) => {
-					tracing::info!(%path, instance = broadcast.info().instance.as_ref().map(tracing::field::display), "online");
+					tracing::info!(%path, instance = ?broadcast.info().instance, "online");
 					Some(broadcast)
 				}
 				Ok(Event::End) => {

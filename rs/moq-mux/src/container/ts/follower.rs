@@ -334,7 +334,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 		self.failed = None;
 		tracing::info!(
 			path = %self.path,
-			instance = self.export.instance().map(tracing::field::display),
+			instance = ?self.export.instance(),
 			"exporting broadcast"
 		);
 		Ok(())

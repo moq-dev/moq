@@ -96,7 +96,7 @@ impl<O: Output> Media<O> {
 					};
 					tracing::info!(
 						broadcast = %self.broadcast,
-						instance = broadcast.info().instance.as_ref().map(tracing::field::display),
+						instance = ?broadcast.info().instance,
 						"online"
 					);
 
