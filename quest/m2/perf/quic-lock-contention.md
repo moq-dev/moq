@@ -48,8 +48,13 @@ Levers, only where the profile shows a cost:
   and only on evidence.
 
 The maintainer wants the connection state free of runtime borrow checks
-altogether (2026-10-25); [borrow-free state](/quest/m2/perf/quic-borrow-free.md)
-designs that, and this profile is its baseline.
+altogether (2026-10-25). The borrow-free mechanism report
+([moq-dev/moq#7531](https://github.com/moq-dev/moq/pull/7531)) measured the
+designs on one core: the `Mutex` costs 1.1 to 3.5% over context passing, and a
+driver-owned channel (this quest's staging queue in full) costs about 4.5k
+instructions per stream plus about 320 per extra write. Adopting a design, or
+keeping the lock, is decided separately; this profile is the contended baseline
+that decision weighs.
 
 A measured no-win is a valid outcome. Report public API and wire impact; the
 staging queue and batch dispatch should need none.
@@ -61,6 +66,5 @@ staging queue and batch dispatch should need none.
 
 ## Related
 
-- [Borrow-free state](/quest/m2/perf/quic-borrow-free.md) - the lock-free designs this profile is the baseline for
 - [Relay egress profile](/quest/m2/quic-egress-profile.md) - the transmit side of the same path
 - [Relay allocations](/quest/m2/perf/relay-allocs.md) - the allocation profile of the same workload

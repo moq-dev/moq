@@ -19,4 +19,4 @@ Public API: none (CLI behavior only). Wire: none.
 
 ## Related
 
-- [An interrupted mp4 recording keeps its last fragment](/quest/m2/mp4-sigint-flush.md) - the other half of recording durability
+- [An interrupted mp4 recording keeps its last fragment](/doc/bin/cli.md#export) - the other half of recording durability
