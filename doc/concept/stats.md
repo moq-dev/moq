@@ -146,8 +146,9 @@ A viewer's loss counters describe its own uplink, so they are reported but not
 graded. Loss and headroom divide the connection's transport counters by the
 report's own media, so they hold when the broadcast is the only one its
 connection publishes. The transport limits were measured on one paced TS feed
-through a shaped link over five-second intervals; no CLI reporter emits
-`skipped`, `late`, `errors`, or `stalled`, so their limits are not measured.
+through a shaped link over five-second intervals. Only `import capture`
+emits `skipped`, and no CLI reporter emits `late`, `errors`, or `stalled`, so
+those limits are not measured.
 
 A publisher whose link falls below its media rate sends no report at all,
 since its report track sits below every media track. Its health goes stale
@@ -173,9 +174,8 @@ The broadcast stays announced for the producer's life. Each announcement
 carries a fresh [publisher epoch](/concept/moq-lite#publisher-epochs) on its
 route, so a restarted node is a new broadcast at the same path: it replaces the
 old one, and no relay serves it groups cached under the old epoch. A reader
-treats each epoch as its own set of counters. The epoch rides moq-lite 07
-announcements, and moq-transport with the
-[epoch extension](/draft/moq-epoch); over anything else a reader sees the same
+treats each epoch as its own set of counters. The epoch rides only moq-lite 07
+announcements; over moq-transport and older moq-lite versions a reader sees the same
 change as an end and a start at the path.
 An aggregating reader pins each node's subscription to its epoch, and when one
 publisher is reached through both kinds of link (with and without an epoch), it
@@ -210,16 +210,15 @@ depth 0) carrying all of the group's tiers, both directions, and its sessions,
 so a reader holds one subscription per group.
 
 A reader discovers the live groups from the broadcast's track listing (TRACKS
-in moq-lite 07, `SUBSCRIBE_TRACKS` in moq-transport draft 18 and later). At
-depth 0 the one group's track is listed for the producer's life. At depth 1 or
-more, a group's track is listed from its first entry until it has lingered
-empty (five minutes by default), then unlisted and ended. A group that returns
-within the linger keeps its track and epoch, and its totals continue. The
-node's announcement never changes, so group churn costs no announce traffic
-across a cluster. Over a hop that cannot carry a listing (moq-lite 06 and
-older, or moq-transport before draft 18) the listing is empty or refused; a
-reader that knows a group's name can still subscribe to it while it is listed,
-and is refused otherwise.
+in moq-lite 07). At depth 0 the one group's track is listed for the producer's
+life. At depth 1 or more, a group's track is listed from its first entry until
+it has lingered empty (five minutes by default), then unlisted and ended. A
+group that returns within the linger keeps its track and epoch, and its totals
+continue. The node's announcement never changes, so group churn costs no
+announce traffic across a cluster. Over a hop that cannot carry a listing
+(moq-lite 06 and older, or moq-transport, whose `SUBSCRIBE_TRACKS` our relay
+refuses) the listing is empty or refused; a reader that knows a group's name
+can still subscribe to it while it is listed, and is refused otherwise.
 
 A group that returns after its linger is a new instance of its track: its
 frames carry a new `epoch` and count from zero, and its group numbers, which

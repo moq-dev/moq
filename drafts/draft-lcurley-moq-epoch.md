@@ -88,7 +88,7 @@ EPOCH Parameter {
 A UUIDv7 ({{RFC9562}} Section 5.7) in network byte order.
 A receiver MUST close the session with a PROTOCOL_VIOLATION when the value is not exactly 16 bytes, or not a UUID with version 7 and the variant of {{RFC9562}}.
 
-EPOCH may appear in PUBLISH_NAMESPACE, NAMESPACE, SUBSCRIBE, TRACK_STATUS, and a FETCH that names its track (a Standalone FETCH, or one with a filter).
+EPOCH may appear in PUBLISH_NAMESPACE, NAMESPACE, PUBLISH, SUBSCRIBE, TRACK_STATUS, and a FETCH that names its track (a Standalone FETCH, or one with a filter).
 NAMESPACE carries it in the parameter block defined by {{cluster}}, which a session that negotiated this extension appends to every NAMESPACE; when both extensions are negotiated the one block holds the parameters of both.
 A receiver MUST close the session with a PROTOCOL_VIOLATION on an EPOCH in a joining FETCH, which is served by the subscription it joins, or in REQUEST_UPDATE.
 
@@ -109,6 +109,7 @@ An advertisement without EPOCH names no instance, so nothing says another advert
 
 A publisher includes the EPOCH of the instance it serves in each advertisement to a peer that negotiated this extension.
 A relay forwards the EPOCH it received unchanged, and MUST NOT include one for an advertisement that arrived without one.
+A PUBLISH to such a peer carries the EPOCH of the instance whose track it publishes; a relay forwards it as it does an advertisement's, and a PUBLISH without one names no instance.
 
 An advertisement's EPOCH is fixed for as long as it stands, and an update never changes it.
 An endpoint replacing one instance with another, both named by an EPOCH, advertises the new instance before it withdraws the old, so the namespace is never absent in between:
@@ -179,9 +180,9 @@ This document requests one registration in the "MOQT Setup Options" registry ({{
 
 This document requests one registration in the "MOQT Message Parameters" registry ({{moqt}} Section 15.7).
 
-| Value   | Name  | Carried In                                               | Reference     |
-|:--------|:------|:---------------------------------------------------------|:--------------|
-| 0x40B69 | EPOCH | PUBLISH_NAMESPACE, NAMESPACE, SUBSCRIBE, FETCH, TRACK_STATUS | This Document |
+| Value   | Name  | Carried In                                                            | Reference     |
+|:--------|:------|:----------------------------------------------------------------------|:--------------|
+| 0x40B69 | EPOCH | PUBLISH_NAMESPACE, NAMESPACE, PUBLISH, SUBSCRIBE, FETCH, TRACK_STATUS | This Document |
 
 The Setup Option is even, so its value is a bare varint; the parameter is odd, so its value is a length-prefixed byte string.
 
@@ -192,7 +193,7 @@ The Setup Option is even, so its value is a bare varint; the parameter is odd, s
 
 ## moq-epoch-00
 - The EPOCH Setup Option (0x40B68) negotiates the extension on draft-18 and later.
-- The EPOCH parameter (0x40B69), a UUIDv7, names the publisher instance on PUBLISH_NAMESPACE, NAMESPACE, SUBSCRIBE, TRACK_STATUS, and a FETCH that names its track.
+- The EPOCH parameter (0x40B69), a UUIDv7, names the publisher instance on PUBLISH_NAMESPACE, NAMESPACE, PUBLISH, SUBSCRIBE, TRACK_STATUS, and a FETCH that names its track.
 - An advertisement's EPOCH is fixed. Another instance named by an EPOCH is advertised before the old one is withdrawn, so the namespace is never absent; one gaining or losing an EPOCH is withdrawn and advertised again.
 - A request that carries EPOCH is served only by that instance, and refused as a namespace that does not exist otherwise.
 

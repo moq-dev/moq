@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `listen::LoadBalancer` has a `forward` field ([#7539](https://github.com/moq-dev/moq/pull/7539))
+
+`listen::LoadBalancer` gained `forward: listen::Forward`, the `[listen.lb.forward]` settings that forward QUIC packets to the server their connection ID names.
+The struct is not `#[non_exhaustive]`, so add `..Default::default()` to a `LoadBalancer { id, nonce }` literal, which leaves forwarding off.
+An exhaustive destructure, such as a QUIC runtime mapping the resolved listener settings, must name `forward`: honor it, or ignore it with `forward: _` only where `lb.id` is already refused.
+
+### `tls://` listeners verify client certificates ([#7358](https://github.com/moq-dev/moq/pull/7358))
+
+A `listen.tcp.tls` listener serves the listen policy's client-certificate verifier, so `--listen-tls-root` and pinned `tls.peers` apply to it as they do to QUIC, and a stream-only server with that listener accepts them instead of returning `Error::MtlsUnsupported`.
+Its `Request::peer_identity`, `server_name`, and `authority` report the client chain and SNI, which were always `None`.
+Under pinned peers, a `tls://` client must present a pinned certificate, as on QUIC.
+
 ### `Connection::allocator` ([#6751](https://github.com/moq-dev/moq/pull/6751))
 
 `Connection::bandwidth()` is `Connection::allocator()`, mirroring `moq_net::Session::allocator()`.
@@ -138,13 +150,13 @@ Set `load_balancer`, or `lb_id` alone (nonce 8), or `lb_id` with `lb_nonce`.
 
 ### Settings no listener reads stop startup (#5006)
 
-A stream-only listener (TCP or Unix, no QUIC bind) refuses the QUIC-only `preferred_v4` / `preferred_v6`, `lb_id`, pinned `tls.peers`, and a TLS cert, key, or `generate` unless `tcp.tls` serves it.
+A stream-only listener (TCP or Unix, no QUIC bind) refuses the QUIC-only `preferred_v4` / `preferred_v6` and `lb_id`, and a TLS cert, key, or `generate` unless `tcp.tls` serves it.
 `unix.allow_*` needs `unix.bind`.
 Each used to be ignored: drop it, or add the listener it configures.
 
-### A client CA needs a QUIC listener
+### A client CA needs a QUIC or `tls://` listener
 
-A stream-only listener with `listen.tls.root` returns `Error::MtlsUnsupported` instead of silently verifying nothing.
+A stream-only listener with `listen.tls.root` or pinned `tls.peers` returns `Error::MtlsUnsupported` unless `tcp.tls` verifies them, instead of silently verifying nothing.
 
 ### `Transport` names WebTransport
 

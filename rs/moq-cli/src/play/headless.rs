@@ -133,7 +133,7 @@ mod tests {
 			metrics: None,
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
-				no_video: true,
+				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()
 			},
 		};
@@ -156,7 +156,7 @@ mod tests {
 			metrics: Some(path.clone()),
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
-				no_video: true,
+				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()
 			},
 		};
@@ -182,7 +182,7 @@ mod tests {
 			metrics: None,
 			delay: super::super::args::Delay::Auto,
 			select: crate::subscribe::SelectArgs {
-				no_video: true,
+				video: Some(crate::subscribe::Mode::Off),
 				..Default::default()
 			},
 		};

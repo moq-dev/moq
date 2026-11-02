@@ -28,5 +28,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [Group expiry contention](/quest/m2/perf/kio-channel-contention/group-expiry.md) - the track lock on the same read path
 - [Resume as producer replacement](/quest/m2/resume-redesign.md) - deletes this path entirely

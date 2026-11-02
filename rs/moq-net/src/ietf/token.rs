@@ -115,10 +115,8 @@ pub(super) async fn reject(
 	version: Version,
 ) -> Result<(), Error> {
 	let reason = reason(&err);
-	super::request_stream::write_error(&mut stream.writer, kind, &Error::Decode(err), reason, version).await?;
-	// The peer dropping the stream once it has the rejection is a normal end.
-	let _ = stream.writer.close().await;
-	Ok(())
+	super::request_stream::buffer_error(&mut stream.writer, kind, &Error::Decode(err), reason, version)?;
+	super::request_stream::deliver(&mut stream.writer).await
 }
 
 /// Encode `token` by value.
@@ -201,7 +199,7 @@ mod tests {
 		));
 	}
 
-	const VERSIONS: [Version; 2] = [Version::Draft18, Version::Draft22];
+	const VERSIONS: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 	fn token() -> Token {
 		// A kind past one varint byte and a value that is not text, so neither is mistaken

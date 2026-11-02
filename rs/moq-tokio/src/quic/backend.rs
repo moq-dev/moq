@@ -70,10 +70,10 @@ fn apply_qlog(transport: &mut driver::transport::Config, quic: &Resolved, role: 
 }
 
 /// The controller factory for a congestion control family. moq-quic's BBR is v3.
-fn congestion_factory(family: CongestionControl) -> Arc<dyn moq_congestion::ControllerFactory + Send + Sync> {
+fn congestion_factory(family: CongestionControl) -> Arc<dyn moq_congestion::Factory + Send + Sync> {
 	match family {
-		CongestionControl::Loss => Arc::new(moq_congestion::CubicConfig::default()),
-		CongestionControl::Delay => Arc::new(moq_congestion::Bbr3Config::default()),
+		CongestionControl::Loss => Arc::new(moq_congestion::cubic::Config::default()),
+		CongestionControl::Delay => Arc::new(moq_congestion::bbr3::Config::default()),
 		CongestionControl::None => Arc::new(moq_congestion::Unlimited),
 	}
 }
@@ -239,6 +239,27 @@ pub enum Error {
 	/// The flow-control limits are ones a peer would refuse, so none were applied.
 	#[error("invalid quic limits: {0}")]
 	Limits(#[from] moq_quic::LimitsError),
+
+	/// The QUIC-LB forward socket failed to bind.
+	#[error("failed to bind the QUIC-LB forward socket")]
+	BindForward(#[source] std::io::Error),
+
+	/// The QUIC-LB forward key file could not be read or does not hold 64 hexadecimal characters.
+	#[error("invalid QUIC-LB forward key")]
+	ForwardKey(#[source] crate::secret::Error),
+
+	/// The QUIC-LB peers file could not be read, or names a peer this server cannot forward to.
+	#[error("invalid QUIC-LB peers file {}: {reason}", path.display())]
+	ForwardPeers {
+		/// The peers file.
+		path: std::path::PathBuf,
+		/// What is wrong with it.
+		reason: String,
+	},
+
+	/// The QUIC-LB peers file could not be watched for changes.
+	#[error("failed to watch the QUIC-LB peers file: {0}")]
+	WatchPeers(String),
 }
 
 impl crate::failover::Aggregate for Error {
@@ -553,7 +574,12 @@ fn proto_status(err: &web::proto::ConnectError) -> Option<u16> {
 
 pub(crate) struct Server {
 	pub quic: driver::endpoint::Endpoint,
+	/// The configured receive window, opened once a session is admitted: until then a
+	/// connection holds [`moq_net::transport::SETUP_RECEIVE_WINDOW`].
+	pub window: Option<std::num::NonZeroU64>,
 	tls: crate::tls::Serve,
+	/// Reloads the QUIC-LB peers for as long as the server runs.
+	_peers: Option<notify::RecommendedWatcher>,
 }
 
 pub(crate) struct Options {
@@ -561,6 +587,7 @@ pub(crate) struct Options {
 	pub quic: crate::quic::Config,
 	pub member: Option<listen::Socket>,
 	pub tls: crate::tls::Serve,
+	pub demux: super::demux::Demux,
 }
 
 impl Server {
@@ -570,9 +597,12 @@ impl Server {
 			quic,
 			member,
 			tls: served,
+			demux,
 		} = options;
 		let quic = quic.resolve();
-		let transport = transport(&quic, "server")?;
+		let mut transport = transport(&quic, "server")?;
+		let window = transport.limits.receive_window;
+		transport.limits.receive_window = std::num::NonZeroU64::new(moq_net::transport::SETUP_RECEIVE_WINDOW);
 		let keylog = quic
 			.keylog
 			.as_deref()
@@ -612,6 +642,9 @@ impl Server {
 		let load_balancer = config.load_balancer();
 
 		let mut endpoint_config = driver::endpoint::Config::default().with_server(server);
+		// The demux, and the shard steering filter, tell QUIC from the WebRTC media
+		// path by the fixed bit, so peers must never be invited to clear it.
+		endpoint_config.grease_quic_bit = false;
 		// It also keys the default connection ID generator. The ones below validate a
 		// predecessor's IDs without it.
 		if let Some(secret) = &config.reset.secret {
@@ -619,13 +652,12 @@ impl Server {
 			endpoint_config.reset_secret = Some(*secret.as_bytes());
 		}
 
+		let mut forward = None;
 		// Configure connection ID generator with server ID if provided
 		if let Some(shard) = member.as_ref().map(listen::Socket::shard) {
 			if load_balancer.is_some() {
 				return Err(Error::ShardWithQuicLb);
 			}
-			// The steering filter recognizes short headers by their fixed bit.
-			endpoint_config.grease_quic_bit = false;
 			tracing::debug!(
 				index = shard.index(),
 				count = shard.count(),
@@ -653,8 +685,15 @@ impl Server {
 				nonce_len,
 				"using QUIC-LB compatible connection ID generation"
 			);
+			if let Some(config) = &load_balancer.forward {
+				forward = Some(Forwarding::start(
+					config,
+					&server_id,
+					endpoint_config.max_udp_payload_size,
+				)?);
+			}
 			endpoint_config.cid_generator = Some(Arc::new(move || {
-				Box::new(ServerIdGenerator::new(server_id.clone(), nonce_len))
+				Box::new(driver::forward::ServerIdGenerator::new(&server_id.0, nonce_len))
 			}));
 		}
 
@@ -665,9 +704,24 @@ impl Server {
 			None => crate::bind::udp(crate::bind::Udp::new(listen)).map_err(Error::BindSocket)?,
 		};
 
-		let quic = driver::endpoint::Endpoint::new(endpoint_config, socket).map_err(Error::CreateEndpoint)?;
+		let socket = driver::wrap_udp_socket(socket).map_err(|err| Error::CreateEndpoint(err.into()))?;
+		let socket = demux.wrap(socket);
+		let (quic, peers) = match forward {
+			Some(Forwarding { forward, watcher }) => (
+				driver::endpoint::Endpoint::forwarding(endpoint_config, socket, forward),
+				Some(watcher),
+			),
+			None => (driver::endpoint::Endpoint::new(endpoint_config, socket), None),
+		};
+		let quic = quic.map_err(Error::CreateEndpoint)?;
+		demux.attach(&quic);
 
-		Ok(Self { quic, tls: served })
+		Ok(Self {
+			quic,
+			window,
+			tls: served,
+			_peers: peers,
+		})
 	}
 
 	pub fn accept(&self) -> impl std::future::Future<Output = Option<driver::endpoint::Incoming>> + '_ {
@@ -811,42 +865,76 @@ pub(crate) async fn accept(
 	}
 }
 
-// ── ServerIdGenerator ───────────────────────────────────────────────
+// ── Forwarding ──────────────────────────────────────────────────────
 
-struct ServerIdGenerator {
-	server_id: ServerId,
-	nonce_len: usize,
+/// A forward socket, and the watcher that keeps its peers current.
+struct Forwarding {
+	forward: driver::forward::Forward,
+	watcher: notify::RecommendedWatcher,
 }
 
-impl ServerIdGenerator {
-	fn new(server_id: ServerId, nonce_len: usize) -> Self {
-		Self { server_id, nonce_len }
+impl Forwarding {
+	fn start(config: &crate::quic::Forward, id: &ServerId, max_udp_payload_size: u16) -> Result<Self> {
+		let key = crate::secret::Secret::read(&config.key).map_err(Error::ForwardKey)?;
+		let peers = driver::forward::Peers::default();
+		peers.set(read_peers(&config.peers, id, config.bind)?);
+
+		let reload = peers.clone();
+		let (path, own, bind) = (config.peers.clone(), id.clone(), config.bind);
+		let watcher = crate::watch::callback(std::slice::from_ref(&config.peers), move || {
+			match read_peers(&path, &own, bind) {
+				Ok(map) => {
+					reload.set(map);
+					tracing::info!(path = %path.display(), "reloaded QUIC-LB peers");
+				}
+				Err(err) => tracing::warn!(%err, "failed to reload QUIC-LB peers; retaining the previous ones"),
+			}
+		})
+		.map_err(|err| Error::WatchPeers(err.to_string()))?;
+
+		let socket = std::net::UdpSocket::bind(config.bind).map_err(Error::BindForward)?;
+		let forward = driver::forward::Forward::new(socket, &id.0, peers, key.as_bytes(), max_udp_payload_size)
+			.map_err(Error::BindForward)?;
+		tracing::info!(bind = %config.bind, "forwarding QUIC-LB packets");
+		Ok(Self { forward, watcher })
 	}
 }
 
-impl driver::ConnectionIdGenerator for ServerIdGenerator {
-	fn generate_cid(&mut self) -> driver::ConnectionId {
-		use rand::RngExt;
-		let cid_len = self.cid_len();
-		let mut cid = Vec::with_capacity(cid_len);
-		// First byte has "self-encoded length" of server ID + nonce
-		cid.push((cid_len - 1) as u8);
-		cid.extend(self.server_id.0.iter());
-		cid.extend(rand::rng().random_iter::<u8>().take(self.nonce_len));
-		driver::ConnectionId::new(cid.as_slice())
-	}
+/// Read the peers file, skipping this server's own entry.
+///
+/// Refuses the whole file for one bad entry, so a typo cannot quietly strand that server's
+/// clients: a server ID of another length, which this server's connection IDs could not carry,
+/// or an address it cannot send to or accept from.
+fn read_peers(path: &std::path::Path, own: &ServerId, bind: net::SocketAddr) -> Result<driver::forward::Map> {
+	let invalid = |reason: String| Error::ForwardPeers {
+		path: path.to_owned(),
+		reason,
+	};
+	let text = std::fs::read_to_string(path).map_err(|err| invalid(err.to_string()))?;
+	let peers: std::collections::HashMap<ServerId, net::SocketAddr> =
+		toml::from_str(&text).map_err(|err| invalid(err.to_string()))?;
 
-	fn cid_len(&self) -> usize {
-		1 + self.server_id.len() + self.nonce_len
+	let mut map = driver::forward::Map::default();
+	for (id, addr) in peers {
+		if id.len() != own.len() {
+			return Err(invalid(format!(
+				"{id:?} is not {} bytes like this server's ID",
+				own.len()
+			)));
+		}
+		if addr.ip().is_unspecified() || addr.is_ipv4() != bind.is_ipv4() {
+			return Err(invalid(format!(
+				"{id:?} has an address {bind} cannot forward to: {addr}"
+			)));
+		}
+		if id != *own {
+			map.insert(&id.0, addr);
+		}
 	}
-
-	fn cid_lifetime(&self) -> Option<Duration> {
-		None
-	}
+	Ok(map)
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use url::Url;
@@ -891,13 +979,111 @@ mod tests {
 		let client = Client::new(&config, &crate::quic::Config::default()).expect("client init");
 		let url: Url = format!("http://127.0.0.1:{port}/").parse().unwrap();
 		let versions = moq_net::Versions::default();
-		let result = tokio::time::timeout(Duration::from_secs(5), client.connect(&tls, url.into(), &versions))
+		let result = kio::clock::timeout(Duration::from_secs(5), client.connect(&tls, url.into(), &versions))
 			.await
 			.expect("dial timed out");
 		assert!(
 			matches!(result, Err(Error::FingerprintStatus(404))),
 			"the fetch should reach the server"
 		);
+	}
+
+	/// QUIC and the WebRTC media path share the listening port: a QUIC session
+	/// connects while a WebRTC peer's ICE check, DTLS, and RTP reach the feed and
+	/// its reply leaves from the same port, and a public STUN query is dropped.
+	/// The feed lives as long as the listener, without a clone of its demux kept.
+	#[tokio::test]
+	async fn one_port_serves_quic_and_webrtc() {
+		let demux = crate::quic::demux::Demux::default();
+		let feed = demux.webrtc();
+		let counters = demux.counters().clone();
+		let quic = crate::quic::Config::default();
+		let config = listen::Config {
+			bind: Some("[::]:0".parse().unwrap()),
+			tls: crate::tls::Listen {
+				generate: vec!["localhost".into()],
+				..Default::default()
+			},
+			..Default::default()
+		};
+		let tls = config.tls.load().unwrap();
+		let server = Server::new(Options {
+			config,
+			quic: quic.clone(),
+			member: None,
+			tls,
+			demux,
+		})
+		.expect("server init");
+		let port = server.local_addr().port();
+		let addr = net::SocketAddr::from((net::Ipv4Addr::LOCALHOST, port));
+
+		let peer = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+		let check: &[u8] = &[
+			0x00, 0x01, 0x00, 0x08, 0x21, 0x12, 0xa4, 0x42, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 0x00, 0x06, 0x00,
+			0x03, b'a', b':', b'b', 0,
+		];
+		let query = &check[..20];
+		let query = [&[0x00, 0x01, 0x00, 0x00][..], &query[4..]].concat();
+		let sent: [&[u8]; 3] = [check, &[0x16, 0xfe, 0xfd, 1], &[0x80, 0x00, 0, 1]];
+		peer.send_to(&query, addr).await.unwrap();
+		for datagram in sent {
+			peer.send_to(datagram, addr).await.unwrap();
+		}
+
+		let mut tls_config = crate::tls::Connect::default();
+		tls_config.fingerprint = server.certificates().fingerprints();
+		let config = connect::Config {
+			bind: Some("127.0.0.1:0".parse().unwrap()),
+			tls: tls_config,
+			..Default::default()
+		};
+		let tls = config.tls.build().expect("tls config");
+		let client = Client::new(&config, &quic).expect("client init");
+		let url: Url = format!("moqt://localhost:{port}/test").parse().unwrap();
+		let versions = moq_net::Versions::default();
+		let dial = client.connect(&tls, url.into(), &versions);
+		let accept = async {
+			let incoming = server.accept().await.expect("incoming connection");
+			super::accept(incoming, versions.alpns()).await
+		};
+		let webrtc = async {
+			let mut received = Vec::new();
+			for _ in sent {
+				let datagram = feed.recv().await.expect("feed open");
+				assert_eq!(datagram.remote, peer.local_addr().unwrap());
+				received.push(datagram.data.to_vec());
+			}
+			feed.send(&moq_sock::udp::Transmit {
+				destination: peer.local_addr().unwrap(),
+				ecn: None,
+				contents: b"reply",
+				segment_size: None,
+				src_ip: None,
+			})
+			.await
+			.unwrap();
+			let mut buf = [0; 16];
+			let (len, from) = peer.recv_from(&mut buf).await.unwrap();
+			(received, buf[..len].to_vec(), from.port())
+		};
+		let (session, received) = kio::clock::timeout(Duration::from_secs(5), async {
+			let (session, received) = tokio::join!(async { tokio::try_join!(dial, accept) }, webrtc);
+			(session, received)
+		})
+		.await
+		.expect("timed out");
+		session.expect("QUIC beside WebRTC");
+
+		let (received, reply, from) = received;
+		assert_eq!(received, sent.map(<[u8]>::to_vec));
+		assert_eq!(reply, b"reply");
+		assert_eq!(from, port);
+		assert_eq!(counters.get(crate::quic::demux::Discard::Stun), 1);
+
+		server.shutdown().await;
+		let end = kio::clock::timeout(Duration::from_secs(5), feed.recv()).await;
+		assert!(end.expect("the feed outlived the listener").is_none());
 	}
 
 	async fn pinned_connection(bind: &str, host_name: Option<&str>) {
@@ -916,6 +1102,7 @@ mod tests {
 			quic: quic.clone(),
 			member: None,
 			tls,
+			demux: Default::default(),
 		})
 		.expect("server init");
 		let addr = server.local_addr();
@@ -937,7 +1124,7 @@ mod tests {
 			let incoming = server.accept().await.expect("incoming connection");
 			super::accept(incoming, versions.alpns()).await
 		};
-		let result = tokio::time::timeout(Duration::from_secs(5), async { tokio::try_join!(dial, accept) })
+		let result = kio::clock::timeout(Duration::from_secs(5), async { tokio::try_join!(dial, accept) })
 			.await
 			.expect("handshake timed out");
 		let (_client, _server) = result.expect("pinned connection failed");
@@ -972,25 +1159,27 @@ mod tests {
 		assert_eq!(limits.send_window.unwrap().get(), crate::quic::DEFAULT_SEND_WINDOW);
 	}
 
-	/// Build a controller from each family's factory and downcast it to the
-	/// concrete moq-quic implementation it must map to.
+	/// Each family supplies its advertised congestion behavior.
 	#[test]
 	fn congestion_factory_maps_each_family() {
 		let init = moq_congestion::Init {
-			now: moq_clock::Instant::now(),
+			now: kio::clock::Instant::now(),
 			mtu: 1200,
 			rtt: std::time::Duration::from_millis(333),
 			max_pacing_rate: None,
 		};
 
 		let loss = congestion_factory(CongestionControl::Loss).build(init);
-		assert!(loss.into_any().downcast::<moq_congestion::Cubic>().is_ok());
+		assert!(loss.metrics().ssthresh.is_some());
+		assert!(!loss.probes());
 
 		let delay = congestion_factory(CongestionControl::Delay).build(init);
-		assert!(delay.into_any().downcast::<moq_congestion::Bbr3>().is_ok());
+		assert!(delay.probes());
+		assert!(delay.metrics().pacing_rate.is_some());
 
 		let none = congestion_factory(CongestionControl::None).build(init);
-		assert!(none.into_any().downcast::<moq_congestion::Unlimited>().is_ok());
+		assert_eq!(none.window(), u64::MAX);
+		assert!(!none.probes());
 	}
 
 	/// Loopback regression test: with the knob unset, live QUIC connections must run
@@ -1015,6 +1204,7 @@ mod tests {
 			quic: quic.clone(),
 			member: None,
 			tls,
+			demux: Default::default(),
 		})
 		.expect("server init");
 		let addr = server.local_addr();
@@ -1022,7 +1212,7 @@ mod tests {
 		let accepted = tokio::spawn(async move {
 			let incoming = server.accept().await.expect("no incoming connection");
 			let conn = incoming.accept().expect("accept").await.expect("handshake");
-			is_bbr3(&conn)
+			conn.congestion_state().probes()
 		});
 
 		// tls::Connect has a private field, so it can't be built with a struct literal.
@@ -1042,31 +1232,52 @@ mod tests {
 
 		// Bound the whole connect + accept + assert flow so a handshake
 		// regression fails fast instead of stalling CI.
-		tokio::time::timeout(Duration::from_secs(5), async move {
+		kio::clock::timeout(Duration::from_secs(5), async move {
 			let session = client
 				.connect(&tls, url.into(), &moq_net::Versions::default())
 				.await
 				.expect("connect failed");
 
 			// web::Session derefs to the driver connection.
-			assert!(is_bbr3(&session), "client connection is not running BBRv3");
+			assert!(session.congestion_state().probes(), "client controller cannot probe");
 			// BBRv3 can probe, so moq-net gets a target to write.
 			#[cfg(feature = "net")]
 			assert!(session.probe().is_some(), "BBRv3 connection has no probe target");
 			assert!(
 				accepted.await.expect("server task panicked"),
-				"server connection is not running BBRv3"
+				"server controller cannot probe"
 			);
 		})
 		.await
 		.expect("test timed out");
 	}
 
-	/// Whether a live connection is running BBRv3.
-	fn is_bbr3(conn: &driver::connection::Connection) -> bool {
-		conn.congestion_state()
-			.into_any()
-			.downcast::<moq_congestion::Bbr3>()
-			.is_ok()
+	/// The peers file skips this server's own entry, so every server can share it, and refuses
+	/// the whole file for one entry this server could not forward to.
+	#[test]
+	fn peers_file_is_shared_and_refused_whole() {
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("peers.toml");
+		let own: ServerId = "01".parse().unwrap();
+		let bind: net::SocketAddr = "10.0.0.1:4443".parse().unwrap();
+		let read = |body: &str| {
+			std::fs::write(&path, body).unwrap();
+			read_peers(&path, &own, bind)
+		};
+
+		let map = read("\"01\" = \"10.0.0.1:4443\"\n\"02\" = \"10.0.0.2:4443\"\n").unwrap();
+		let expected: std::collections::HashMap<Box<[u8]>, net::SocketAddr> =
+			[(Box::from(&[2u8][..]), "10.0.0.2:4443".parse().unwrap())].into();
+		assert_eq!(map.peers(), &expected);
+
+		for (body, needle) in [
+			("\"0203\" = \"10.0.0.2:4443\"\n", "not 1 bytes"),
+			("\"02\" = \"[2001:db8::2]:4443\"\n", "cannot forward to"),
+			("\"02\" = \"0.0.0.0:4443\"\n", "cannot forward to"),
+			("\"zz\" = \"10.0.0.2:4443\"\n", "Invalid character"),
+		] {
+			let err = read(body).expect_err(body).to_string();
+			assert!(err.contains(needle), "{body}: {err}");
+		}
 	}
 }

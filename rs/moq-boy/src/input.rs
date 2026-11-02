@@ -69,9 +69,12 @@ pub async fn handle_viewers(
 	let mut readers: std::collections::HashMap<String, tokio::task::AbortHandle> = Default::default();
 	loop {
 		let (update, active, restart) = match announced.next().await {
-			Some(moq_net::announce::Event::Start(update) | moq_net::announce::Event::Update(update)) => {
-				(update, true, false)
-			}
+			// A takeover continues what was read through its predecessor.
+			Some(
+				moq_net::announce::Event::Start(update)
+				| moq_net::announce::Event::Update(update)
+				| moq_net::announce::Event::Takeover { announce: update, .. },
+			) => (update, true, false),
 			// The viewer restarted: read the new broadcast instead of the old one.
 			Some(moq_net::announce::Event::Restart(update)) => (update, true, true),
 			Some(moq_net::announce::Event::End(update)) => (update, false, false),
@@ -168,7 +171,6 @@ async fn handle_viewer_commands(
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use std::time::Duration;
 
@@ -207,7 +209,7 @@ mod tests {
 		tokio::spawn(async move { handle_viewers(&consumer, &tx).await });
 
 		let (_viewer, track) = viewer(&origin);
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		send(&track, "not json");
 		send(&track, r#"{"type":"explode"}"#);
 		send(&track, r#"{"type":"buttons","buttons":["turbo"]}"#);
@@ -243,25 +245,25 @@ mod tests {
 		tokio::spawn(async move { handle_viewers(&consumer, &tx).await });
 
 		let (old, old_track) = viewer(&origin);
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		send(&old_track, r#"{"type":"reset"}"#);
 		assert!(matches!(rx.recv().await, Some(Command::Reset)));
 
 		old.unannounce();
 		assert!(matches!(rx.recv().await, Some(Command::ViewerLeft { .. })));
 		let (_new, new_track) = viewer(&origin);
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 
 		// The old track is still live: anything it says now comes from a stale reader.
 		send(&old_track, r#"{"type":"reset"}"#);
 		drop(old_track);
 		drop(old);
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 
 		send(&new_track, r#"{"type":"buttons","buttons":[]}"#);
 		let next = rx.recv().await;
 		assert!(matches!(next, Some(Command::Buttons { .. })), "{next:?}");
-		tokio::time::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(rx.try_recv().is_err(), "the old reader is still running");
 	}
 }

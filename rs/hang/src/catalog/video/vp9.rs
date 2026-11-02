@@ -59,12 +59,16 @@ impl std::str::FromStr for VP9 {
 	type Err = Error;
 
 	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		// Every field is two decimal digits.
 		let parts = s
 			.strip_prefix("vp09.")
 			.ok_or(Error::InvalidCodec)?
 			.split('.')
-			.map(u8::from_str)
-			.collect::<Result<Vec<_>, _>>()?;
+			.map(|field| match field.len() {
+				2 => crate::catalog::codec_number(field, 10),
+				_ => Err(Error::InvalidCodec),
+			})
+			.collect::<Result<Vec<u8>, _>>()?;
 
 		if parts.len() < 3 {
 			return Err(Error::InvalidCodec);

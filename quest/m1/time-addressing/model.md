@@ -106,7 +106,8 @@ Rust half of every consumer the API change breaks to compile;
 [consumers](/quest/m1/time-addressing/consumers.md) and
 [bindings](/quest/m1/time-addressing/bindings.md) own the behavior changes.
 Test the legacy mapping both ways on every wire, with the
-[resume model](/quest/m1/resume-model-test.md) as the oracle for resume.
+resume model (`rs/moq-net/src/model/resume_model.rs`,
+`js/net/src/resume.model.test.ts`) as the oracle for resume.
 The PR's Impact section says how to migrate.
 
 Public API: breaking. `group::Info`, `create_group`, `append_group`,
@@ -119,9 +120,4 @@ Wire: no format change; legacy and lite-07-wip group IDs become start ticks.
 - [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - the one-range reads this rework moves onto times
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the range ends and drops this rework moves onto times
 - [Delete the old start bookkeeping](/quest/m1/subscribe-ranges/start-bookkeeping.md) - the lite cursor state lives in the model before the cut rekeys it
-- [Lite-05/06 timestamps pass through](/quest/m1/lite-timestamps-through.md) - lite-05/06 tracks stay timed, so their ingest keeps real starts
 - [Drop set](/quest/m1/drop-set.md) - its dropped and expired runs convert mechanically from sequences to starts
-
-## Related
-
-- [Resume checked against a model](/quest/m1/resume-model-test.md) - its reference model is the oracle for resume after the cut

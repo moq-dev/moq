@@ -36,6 +36,11 @@ export function decoderConfig(config: Catalog.AudioConfig): DecoderConfig {
 	};
 }
 
+/** Return a stable cache key for the fields used by the decoder support probe. */
+export function decoderConfigKey(config: Catalog.AudioConfig): string {
+	return JSON.stringify(decoderConfig(config));
+}
+
 /** Reduce a rendition config to the fields that require a replacement subscription. */
 export function playbackIdentity(config: Catalog.AudioConfig): PlaybackIdentity {
 	return {

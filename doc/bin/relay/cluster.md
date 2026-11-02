@@ -38,10 +38,9 @@ publishes under a new epoch, which replaces the old broadcast instead of
 resuming it; the RTMP, SRT, and WHIP ingests mint one per connection. Epochs
 order by creation time, so a reconnect to a different gateway assumes the two
 gateways' clocks roughly agree. Seamless failover needs a publisher that
-announces an epoch and, on every link the route crosses, moq-lite 07 or
-moq-transport with the [epoch extension](/draft/moq-epoch). A route
-without an epoch, including every route on moq-lite 06 and older or a
-moq-transport link without the extension, keeps its subscriptions until it goes or a track fails
+announces an epoch and, on every link the route crosses, moq-lite 07. A route
+without an epoch, including every route on moq-lite 06 and older or
+moq-transport, keeps its subscriptions until it goes or a track fails
 upstream, and any other route winning it is announced as a restart. Viewers
 re-request on a restart, and a relay drops its copy of the old instance,
 including every path beneath a prefix claim when one of them moves to another
@@ -134,9 +133,11 @@ topology check; whatever generates the peer list applies the layout's rules.
 A link inside a region is rarely congested, so it can skip QUIC: a `tls://`
 peer URL dials qmux over TLS on TCP, verified with the same `connect.tls`
 settings as any other dial. The accepting relay serves it from its TCP
-listener with TLS on. That listener asks for no client certificate, so a peer
-on it authenticates with a token (`cluster.token`, `token`, or `?jwt=`), not
-mTLS.
+listener with TLS on, or from its HTTPS listener, which serves `tls://` with
+the listen certificate. Both apply the same client-certificate policy as the
+QUIC listener, so a peer on them authenticates with its `connect.tls`
+certificate against `listen.tls.root`, or with a token (`cluster.token`,
+`token`, or `?jwt=`).
 
 ```toml
 # core.toml
@@ -245,6 +246,10 @@ paths (or repeat `--cluster-api-tls-root`); these replace system trust
 for API fetches only. Malformed roots fail startup, and files reload for new
 connections when rotated.
 
+Remote API URLs must use HTTPS; plaintext HTTP is accepted only for loopback
+hosts. Redirects are refused: configure the final API URL, since its peer list
+decides which relays receive the cluster token.
+
 ## Identity
 
 Each relay has a Hop ID: the value it adds to a route's hop list for loop
@@ -260,8 +265,8 @@ A peer that crashes or drops off the network sends no goodbye, so a relay only
 learns it is gone when the link goes quiet for [`quic.idle_timeout`](/bin/relay/config#quic)
 (10s by default). Until then its routes stay in place and subscribes through
 them go nowhere. Lower it to fail over faster; raise it if a lossy long-haul
-link drops while the peer is still alive, and keep `quic.keep_alive` well under
-it.
+link drops while the peer is still alive. The keep-alive derives from it, so
+leave `quic.keep_alive` unset.
 
 QUIC uses the smaller of the two endpoints' idle timeouts
 ([RFC 9000 section 10.1](https://www.rfc-editor.org/rfc/rfc9000#section-10.1)),

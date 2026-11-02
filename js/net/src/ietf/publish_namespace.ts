@@ -1,4 +1,3 @@
-import type * as Epoch from "../epoch.ts";
 import { ProtocolViolation, reason, SessionError, StreamError } from "../error.ts";
 import type * as Path from "../path.ts";
 import type { Reader, Writer } from "../stream.ts";
@@ -16,31 +15,26 @@ import type { IetfVersion } from "./version.ts";
 export interface Negotiated {
 	/** MoQ Cluster: every advertisement carries HOP_PATH, and may carry ROUTE_COST. */
 	cluster: boolean;
-	/** MoQ Epoch: an advertisement may carry EPOCH. */
-	epoch: boolean;
 }
 
-/** A session that negotiated neither advertisement extension. */
-export const NEGOTIATED_NONE: Negotiated = { cluster: false, epoch: false };
+/** A session without the advertisement extension. */
+export const NEGOTIATED_NONE: Negotiated = { cluster: false };
 
 /** Whether NAMESPACE takes the extended form, with a Parameters field. */
 export function extended(negotiated: Negotiated): boolean {
-	return negotiated.cluster || negotiated.epoch;
+	return negotiated.cluster;
 }
 
 /** The extension parameters one advertisement carries. */
 export interface AdvertParams {
 	/** The MoQ Cluster parameters (see {@link Cluster}), set exactly on a session that negotiated it. */
 	cluster?: Cluster.Advert;
-	/** The MoQ Epoch parameter: the publisher instance the route serves, if it names one. */
-	epoch?: Epoch.Valid;
 }
 
 /** Write an advertisement's extension parameters into a fresh block. */
 export function advertIntoParams(advert: AdvertParams): Parameters {
 	const params = new Parameters();
 	if (advert.cluster) Cluster.intoParams(advert.cluster, params);
-	params.epoch = advert.epoch;
 	return params;
 }
 
@@ -48,9 +42,8 @@ export function advertIntoParams(advert: AdvertParams): Parameters {
  * Read an advertisement's Parameters field, checked against the list of the message that
  * carries it (PUBLISH_NAMESPACE also allows a token), expecting what the session negotiated.
  *
- * Every way this fails is one to close the session over: a block that does not parse, a
- * negotiated cluster session that omits HOP_PATH, or an EPOCH on a session that did not
- * negotiate MoQ Epoch. A request token's own refusal keeps its type.
+ * A malformed block or a negotiated cluster session omitting HOP_PATH closes the
+ * session. A request token's own refusal keeps its type.
  */
 export async function decodeAdvert(
 	r: Reader,
@@ -67,10 +60,7 @@ export async function decodeAdvert(
 		throw new ProtocolViolation(reason(err), { cause: err });
 	}
 
-	const epoch = params.epoch;
-	// An unknown parameter to a session that never offered the extension.
-	if (epoch !== undefined && !negotiated.epoch) throw new ProtocolViolation("EPOCH without MoQ Epoch");
-	return { cluster: negotiated.cluster ? Cluster.fromParams(params) : undefined, epoch };
+	return { cluster: negotiated.cluster ? Cluster.fromParams(params) : undefined };
 }
 
 export class PublishNamespace {
@@ -191,8 +181,6 @@ export class PublishNamespaceUpdate {
 	static async #decode(r: Reader, version: IetfVersion): Promise<PublishNamespaceUpdate> {
 		const requestId = await r.u62();
 		const params = await Parameters.decode(r, version, "publish-namespace");
-		// An epoch is fixed for the life of an advertisement, so no update carries one.
-		if (params.epoch !== undefined) throw new ProtocolViolation("EPOCH on a PUBLISH_NAMESPACE update");
 		return new PublishNamespaceUpdate({ requestId, update: Cluster.updateFromParams(params) });
 	}
 }

@@ -32,8 +32,8 @@ limits (`rs/moq-relay/src/limits.rs`) bound each session, not a tenant's
 total across sessions.
 
 Decided 2026-10-28 (maintainer): measure first, then propose. Waits for
-[unbounded groups](/quest/m1/unbounded-groups/README.md), which makes the pool
-the only memory bound and lets front eviction shed a live latest group, so
+[unbounded groups](/quest/m1/unbounded-groups/README.md), which bounds each
+group copy at a 32 MB tail and lets front eviction shed a live latest group, so
 the measurement runs against the final eviction rules. Show with a test
 whether a heavy tenant (many sessions and tracks, or a stopped publisher)
 evicts a light tenant's recently read groups or holds more than an even share
@@ -41,20 +41,18 @@ under a set capacity. If it does, bring options with a recommendation, such
 as per-tenant accounts in the pool with debt charged to the tenant over its
 share, before building.
 
-Open, for the design: what keys a tenant. Candidates are the grant root,
-which exists today, and the issuer-qualified subject from
-[grant subject](/quest/m1/cluster-routing/grant-subject.md). Pick the same key
-as [broadcast fairness](/quest/m2/broadcast-fairness.md)'s tenant keying.
+Open, for the design: what keys a tenant, such as the grant root, which
+exists today. Pick the same key as
+[broadcast fairness](/quest/m2/broadcast-fairness.md)'s tenant keying.
 
 Public API: likely a relay cache setting if per-tenant shares need a knob.
 Wire: none.
 
 ## Required
 
-- [Unbounded groups](/quest/m1/unbounded-groups/README.md) - the pool alone bounds memory and front eviction can shed a live latest group
+- [Unbounded groups](/quest/m1/unbounded-groups/README.md) - each group copy holds a 32 MB tail and front eviction can shed a live latest group
 
 ## Related
 
 - [Broadcast fairness](/quest/m2/broadcast-fairness.md) - the same tenant fair share on cluster links
 - [Receive pool](/quest/m2/receive-pool.md) - one per-worker budget covering receive credit and the cache
-- [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - a candidate tenant key

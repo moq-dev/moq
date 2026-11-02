@@ -48,7 +48,9 @@ async fn wire_sources(io_uring: bool) {
 	let metrics = format!("http://{}/metrics", relay.internal().addr().unwrap());
 	let registry = relay.cluster().stats.clone();
 	let trigger = relay.shutdown_trigger().clone();
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 	// Both adapters must expose UDP totals without asking Session::stats(),
 	// which would arm a periodic sampler. Snapshot reads the source directly.
 	for scheme in ["moql", "https"] {
@@ -57,11 +59,11 @@ async fn wire_sources(io_uring: bool) {
 		client.bind = Some("127.0.0.1:0".parse().unwrap());
 		let client = client.init(Default::default()).unwrap();
 		let url: url::Url = format!("{scheme}://{addr}/wire").parse().unwrap();
-		let connection = tokio::time::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
+		let connection = kio::clock::timeout(TIMEOUT, client.with_reconnect(false).connect(url).established())
 			.await
 			.unwrap()
 			.unwrap();
-		let before = tokio::time::timeout(TIMEOUT, async {
+		let before = kio::clock::timeout(TIMEOUT, async {
 			loop {
 				let row = presence(&registry);
 				if row.active() == 1
@@ -106,7 +108,7 @@ async fn wire_sources(io_uring: bool) {
 			assert!(total > 0, "{scheme}: {body}");
 		}
 		drop(connection);
-		let after = tokio::time::timeout(TIMEOUT, async {
+		let after = kio::clock::timeout(TIMEOUT, async {
 			loop {
 				let row = presence(&registry);
 				if row.active() == 0 {
@@ -121,7 +123,7 @@ async fn wire_sources(io_uring: bool) {
 		assert_eq!(presence(&registry), after, "a closed source is unregistered");
 	}
 	trigger.start();
-	tokio::time::timeout(TIMEOUT, running).await.unwrap().unwrap().unwrap();
+	kio::clock::timeout(TIMEOUT, running).await.unwrap().unwrap().unwrap();
 }
 
 #[tokio::test]

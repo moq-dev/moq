@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Milli, yieldNow } from "@moq/clock";
 import { Container } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Effect, Once, Signal } from "@moq/signals";
 import { nextMedia, subscribeMedia } from "./media";
 
-const flush = () => new Promise((resolve) => setTimeout(resolve, 0));
+const flush = () => yieldNow();
 
 test("media max delay is present on the initial subscription and later updates", async () => {
 	let initial: Moq.Track.Subscription | undefined;

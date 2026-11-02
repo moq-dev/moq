@@ -67,6 +67,8 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 
 	/// Skip to the newest buffered state and its timestamp, or wait for a new one.
+	///
+	/// See [`Self::poll_latest`] for how a nonzero `max_delay` delays it.
 	pub async fn latest(&mut self) -> Result<Option<moq_net::Timed<T>>>
 	where
 		T: Unpin,
@@ -78,6 +80,11 @@ impl<T: DeserializeOwned> Consumer<T> {
 	///
 	/// Frames inside the newest group are still decoded in order. What this skips is gone;
 	/// a subsequent `next` resumes after it. An untimed frame keeps `at: None`.
+	///
+	/// It reads groups in order, so on a received track with a nonzero `max_delay` it first
+	/// waits for a lower group the subscription still owes, up to that budget, and with no
+	/// limit until the gap resolves, even when a newer group is buffered. A reader that only
+	/// wants the newest state keeps the default zero budget.
 	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
 		self.poll_read(waiter, true)
 	}

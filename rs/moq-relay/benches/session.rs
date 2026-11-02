@@ -47,8 +47,8 @@ impl Backend for Relay {
 		let mut stats = stats::Config::default();
 		stats.enabled = true;
 		stats.node = Some(id.to_string());
-		let producer = stats.build(cluster.origin.clone()).unwrap();
-		let cluster = cluster.with_stats(producer);
+		let (producer, publisher) = stats.build(cluster.origin.clone()).unwrap();
+		let cluster = cluster.with_stats(producer, publisher);
 
 		let (auth, mut admissions) = auth::Auth::embedded(format!("bench-{id}"));
 		let decider = tokio::spawn(async move {
@@ -127,6 +127,7 @@ criterion_group!(
 	benches,
 	session::session::<Relay>,
 	session::group_cost::<Relay>,
+	session::datagram::<Relay>,
 	session::fetch_frames::<Relay>,
 	session::fetch_range::<Relay>,
 	session::withdrawal::<Relay>

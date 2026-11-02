@@ -464,7 +464,7 @@ impl Microphone {
 
 		// Await the first buffer to surface a permission failure (or dead device)
 		// as an error rather than a silent hang in the capture loop.
-		let pending = match moq_clock::timeout(FIRST_BUFFER_TIMEOUT, reader.read()).await {
+		let pending = match kio::clock::timeout(FIRST_BUFFER_TIMEOUT, reader.read()).await {
 			Ok(Ok(Some(samples))) => samples,
 			Ok(Ok(None)) => {
 				return Err(Failure::retry(Error::Capture(format!(

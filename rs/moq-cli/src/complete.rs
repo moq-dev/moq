@@ -20,8 +20,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use anyhow::Context;
-use moq_clock::Instant;
-use moq_clock::timeout_at;
+use kio::clock::Instant;
+use kio::clock::timeout_at;
 #[cfg(feature = "capture")]
 use usage_rs::complete::{Candidate, CompleteCtx, CompletionFuture};
 use usage_rs::complete::{CompletionOverlay, CompletionRequest, Shell, render};

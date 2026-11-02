@@ -1101,23 +1101,21 @@ class OriginState {
 }
 
 /**
- * A non-owning handle on an origin: publish into it and read it, without its lifecycle.
+ * The read side of an origin, borrowed: resolve broadcasts by path and watch what is
+ * available, without publishing into it or owning its lifecycle.
  *
- * What a shared connection lends out. {@link Producer} implements it, so code that is
- * handed an origin rather than owning one should accept this type: closing the origin
- * stays the owner's alone, and a borrower cannot express it.
+ * Code that only reads an origin should accept this type. {@link Consumer} implements it
+ * and {@link Table} extends it, so `producer.consume()`, a borrowed table, and a structural
+ * equivalent all fit.
  *
  * @public
  */
-export interface Table {
-	/** Settles once the origin closes; see {@link Producer.closed}. */
+export interface Reader {
+	/** Settles once the origin closes; see {@link Consumer.closed}. */
 	readonly closed: GetPromise<Error | null>;
 
 	/** Whether every attached session announces into the table; see {@link Consumer.discovery}. */
 	readonly discovery: Getter<boolean | undefined>;
-
-	/** Create an unannounced broadcast at `path`; see {@link Producer.createBroadcast}. */
-	createBroadcast(path: Path.Valid): Publication;
 
 	/** Resolve one publisher instance at `path`; see {@link Consumer.request}. */
 	request(path: Path.Valid, options?: RequestOptions): Requesting;
@@ -1127,6 +1125,21 @@ export interface Table {
 
 	/** The available broadcasts under `scope`, as a live stream; see {@link Consumer.announced}. */
 	announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+}
+
+/**
+ * A non-owning handle on an origin: publish into it and read it, without its lifecycle.
+ *
+ * What a shared connection lends out. {@link Producer} implements it, so code that is
+ * handed an origin rather than owning one should accept this type: closing the origin
+ * stays the owner's alone, and a borrower cannot express it. A borrower that only reads
+ * should accept {@link Reader} instead, so `producer.consume()` fits too.
+ *
+ * @public
+ */
+export interface Table extends Reader {
+	/** Create an unannounced broadcast at `path`; see {@link Producer.createBroadcast}. */
+	createBroadcast(path: Path.Valid): Publication;
 
 	/** Advertise a prefix and serve requests under it; see {@link Producer.requests}. */
 	requests(prefix: Path.Valid): Requests;
@@ -1678,7 +1691,7 @@ export class Requesting {
  *
  * @public
  */
-export class Consumer {
+export class Consumer implements Reader {
 	#state: OriginState;
 	#scope: Scope;
 
@@ -2034,9 +2047,10 @@ export class Consumer {
 	 * The announced routes matching `scope`, as a live stream: every currently advertised
 	 * route arrives first as `start`, then changes as they happen.
 	 * Any pattern is accepted. A local broadcast appears once it announces, exactly as a
-	 * peer sees it. A dynamic or received route announces the prefix it covers when its
-	 * subtree overlaps the scope. The stream ends when the origin closes or the consumer is
-	 * closed. Hidden routes are left out unless `options.hidden` opts in (see {@link Announce.Options}).
+	 * peer sees it. Only routes whose literal name matches the scope are listed, unless
+	 * `options.covering` also asks for every dynamic or received route whose subtree
+	 * overlaps it. The stream ends when the origin closes or the consumer is closed. Hidden
+	 * routes are left out unless `options.hidden` opts in (see {@link Announce.Options}).
 	 * While open, it watches the scope's literal head: a `consume` session asks its peer for
 	 * announcements there.
 	 */
@@ -2044,7 +2058,7 @@ export class Consumer {
 		const producer = new announce.Producer();
 		const patterns = this.#scope.patterns(scope);
 		void producer.closed.then(this.#state.watch([...patterns].map(scopeHead)));
-		void this.#runAnnounced(producer, patterns, options?.hidden ?? false);
+		void this.#runAnnounced(producer, patterns, options?.hidden ?? false, options?.covering ?? false);
 		const consumer = producer.consume();
 		// The last reader leaving ends the stream and its watch.
 		closeUnwanted(producer);
@@ -2052,9 +2066,9 @@ export class Consumer {
 	}
 
 	/** The routes visible to one announcement watcher. */
-	#listed(patterns: Path.Patterns, hidden: boolean): Map<Path.Valid, Presented> {
+	#listed(patterns: Path.Patterns, hidden: boolean, covering: boolean): Map<Path.Valid, Presented> {
 		const next = new Map<Path.Valid, Presented>();
-		const covering = new CoveringRoot(this.#scope.root);
+		const rooted = new CoveringRoot(this.#scope.root);
 		const scopes = [...patterns]
 			.sort((a, b) => Path.compareSpecificity(b.specificity(), a.specificity()))
 			.map((pattern) => ({ pattern, head: scopeHead(pattern) }));
@@ -2065,6 +2079,7 @@ export class Consumer {
 			for (const candidate of candidates) {
 				scope = scopes.find(
 					({ pattern, head }) =>
+						(covering || pattern.matches(path)) &&
 						(candidate.exact ? pattern.matches(path) : advertOverlaps(candidate, path, pattern)) &&
 						(hidden || !hiddenBelow(head, path)),
 				);
@@ -2074,7 +2089,7 @@ export class Consumer {
 				}
 			}
 			if (!entry || !scope) continue;
-			const relative = covering.relative(path);
+			const relative = rooted.relative(path);
 			if (relative === undefined) continue;
 			next.set(relative, {
 				identity: entry.identity,
@@ -2085,7 +2100,12 @@ export class Consumer {
 		return next;
 	}
 
-	async #runAnnounced(producer: announce.Producer, patterns: Path.Patterns, hidden: boolean): Promise<void> {
+	async #runAnnounced(
+		producer: announce.Producer,
+		patterns: Path.Patterns,
+		hidden: boolean,
+		covering: boolean,
+	): Promise<void> {
 		// Keyed by the presented path (from the origin, not the scope), valued by identity
 		// plus route. Diffing the instance rather than mere presence means a republish emits a
 		// restart; a re-price of the same instance emits an update.
@@ -2098,7 +2118,7 @@ export class Consumer {
 				const routes = this.#state.routes.peek();
 				if (local === undefined && advertisedLocal === undefined && routes === undefined) break;
 
-				const next = this.#listed(patterns, hidden);
+				const next = this.#listed(patterns, hidden, covering);
 
 				for (const [path, snap] of active) {
 					if (!next.has(path))

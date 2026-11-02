@@ -1,0 +1,11 @@
+error[E0106]: missing lifetime specifier
+  --> tests/ui/hidden_borrow.rs:17:28
+   |
+17 |         let label: std::cell::Ref<u64> = self.cell.borrow();
+   |                                  ^ expected named lifetime parameter
+   |
+help: consider introducing a named lifetime parameter
+   |
+17 ~         let label: std::cell::Ref<'a, u64> = self.cell.borrow();
+18 ~         let b: u64 = wait!(B<'a> => self.values.poll_pop(waiter))?;
+   |

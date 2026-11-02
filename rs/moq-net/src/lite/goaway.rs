@@ -7,9 +7,16 @@ use super::{Message, Version};
 /// Sent to gracefully shut down a session and optionally redirect to a new URI.
 ///
 /// Lite04+ only.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Goaway<'a> {
 	pub uri: Cow<'a, str>,
+}
+
+impl std::fmt::Debug for Goaway<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		// The redirect carries whatever credentials the peer needs to dial it.
+		f.debug_struct("Goaway").field("uri_len", &self.uri.len()).finish()
+	}
 }
 
 impl<'a> Message<'a> for Goaway<'a> {

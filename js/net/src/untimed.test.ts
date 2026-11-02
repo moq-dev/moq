@@ -1,5 +1,6 @@
-// A track keeps its timedness end to end: no receive path fills in arrival time, and a
-// wire that can't declare a timeline delivers frames untimed. Mirrors rs/moq-net/tests/integration/untimed.rs.
+// A track keeps its timedness end to end: no receive path fills in arrival time, a wire that
+// can't declare a timeline delivers frames untimed, and lite-05/06, which can't declare an
+// untimed one, deliver its send times. Mirrors rs/moq-net/tests/integration/untimed.rs.
 import { expect, test } from "bun:test";
 import { type Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
 import { accept, connect } from "./connection/index.ts";
@@ -19,18 +20,20 @@ interface Wire {
 	name: string;
 	protocol: string;
 	version?: number;
-	/** Whether a timed track arrives timed. Lite-05/06 receivers drop timestamps, which may be send times. */
+	/** Whether a timed track arrives timed. */
 	declares: boolean;
+	/** Whether an untimed track arrives timed in milliseconds with its send times, as on lite-05/06. */
+	sends: boolean;
 }
 
 const WIRES: Wire[] = [
-	{ name: "lite-01", protocol: "", version: Lite.Version.DRAFT_01, declares: false },
-	{ name: "lite-03", protocol: Lite.ALPN_03, declares: false },
-	{ name: "lite-04", protocol: Lite.ALPN_04, declares: false },
-	{ name: "lite-05", protocol: Lite.ALPN_05, declares: false },
-	{ name: "lite-06", protocol: Lite.ALPN_06, declares: false },
-	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true },
-	{ name: "ietf-22", protocol: Ietf.ALPN.DRAFT_22, declares: true },
+	{ name: "lite-01", protocol: "", version: Lite.Version.DRAFT_01, declares: false, sends: false },
+	{ name: "lite-03", protocol: Lite.ALPN_03, declares: false, sends: false },
+	{ name: "lite-04", protocol: Lite.ALPN_04, declares: false, sends: false },
+	{ name: "lite-05", protocol: Lite.ALPN_05, declares: true, sends: true },
+	{ name: "lite-06", protocol: Lite.ALPN_06, declares: true, sends: true },
+	{ name: "lite-07-wip", protocol: Lite.ALPN_07_WIP, declares: true, sends: false },
+	{ name: "ietf-22", protocol: Ietf.ALPN.DRAFT_22, declares: true, sends: false },
 ];
 
 /** Serve one group of `timestamps` on a track with `timescale`, and read it back over `wire`. */
@@ -155,11 +158,11 @@ test("a forwarded untimed track stays untimed", async () => {
 });
 
 for (const wire of WIRES) {
-	test(`${wire.name}: an untimed track arrives untimed`, async () => {
+	test(`${wire.name}: an untimed track arrives ${wire.sends ? "with its send times" : "untimed"}`, async () => {
 		const { info, frames } = await roundTrip(wire, undefined, [undefined, undefined]);
 		expect(frames.map((frame) => frame.payload[0])).toEqual([0, 1]);
-		expect(info.timescale).toBeUndefined();
-		for (const frame of frames) expect(frame.timestamp).toBeUndefined();
+		expect(info.timescale).toBe(wire.sends ? Timescale.MILLI : undefined);
+		for (const frame of frames) expect(frame.timestamp !== undefined).toBe(wire.sends);
 	});
 
 	test(`${wire.name}: a timed track keeps its timestamps only where the wire delivers them`, async () => {
@@ -181,7 +184,7 @@ for (const wire of WIRES) {
 }
 
 for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name === "lite-07-wip")) {
-	test(`${wire.name}: an untimed datagram arrives untimed`, async () => {
+	test(`${wire.name}: an untimed datagram arrives ${wire.sends ? "with its send time" : "untimed"}`, async () => {
 		const pair = createMockTransportPair(wire.protocol);
 		const origin = new OriginProducer();
 		const [client, server] = await Promise.all([
@@ -205,7 +208,7 @@ for (const wire of WIRES.filter((wire) => wire.name === "lite-06" || wire.name =
 		const datagram = await subscriber.recvDatagram();
 
 		expect(datagram?.payload).toEqual(new Uint8Array([7]));
-		expect(datagram?.timestamp).toBeUndefined();
+		expect(datagram?.timestamp !== undefined).toBe(wire.sends);
 
 		broadcast.close();
 		subscriber.close();
