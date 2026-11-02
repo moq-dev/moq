@@ -11,7 +11,3 @@ Follow-up of [moq-dev/moq#7396](https://github.com/moq-dev/moq/pull/7396), which
 Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run). Reuse #7396's path: the publisher picks the PUBLISH_DONE code from the same error-to-code mapping that resets the track's streams, and the subscriber reads it back as the peer's stream code. Cover drafts 18 and 22, both bindings, and JS, each test failing without its fix.
 
 Public API: none. Wire: existing registered codes only.
-
-## Required
-
-- [A malformed track says so downstream](/quest/m2/malformed-track-status.md) - its PR, #7396, adds the PUBLISH_DONE code path this extends

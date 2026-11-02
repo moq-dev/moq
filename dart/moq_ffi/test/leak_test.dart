@@ -85,7 +85,12 @@ void main() {
       );
       final consumer = track.consume(subscription: null);
       final producer = track.appendGroup();
-      producer.writeFrame(frame: MoqFrame(payload: payload, timestampUs: 0));
+      producer.writeFrame(
+        frame: MoqFrame(
+          payload: payload,
+          timestamp: MoqTimestamp(value: 0, scale: 1000000),
+        ),
+      );
       producer.finish();
       final group = await consumer.nextGroup();
       final frame = await group!.readFrame();
