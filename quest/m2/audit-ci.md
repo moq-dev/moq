@@ -64,7 +64,7 @@ verdicts:
   These are reasons to keep the lanes, not reasons to disable their tests.
 - Eight moq-net fuzz targets (announce, ietf, lite, pattern, ingest, varint,
   request and path) failed to build with Rust E0391 while computing async drop
-  for `model::bandwidth::Consumer`; they did not run fuzzing. The five other
+  for `model::bandwidth::Consumer`; they did not run fuzzing. The six other
   fuzz jobs ran, including the QUIC corruption above. Do not count a build
   failure as eight independent fuzz findings.
 - Other November 1 failures: Rust audit reports RUSTSEC-2026-0173; binding
@@ -173,9 +173,9 @@ release credentials remain under the existing publisher-environment work above.
 | Workflow | Unique signal / verdict | Result visibility | Sample runner-minutes |
 | --- | --- | --- | --- |
 | [alert](/.github/workflows/alert.yml) | Keep: delivers failures; coverage/delivery fixtures exercise the contract | Discord; coverage gate | [D 2026-11-01](https://github.com/moq-dev/moq/actions/runs/41322009598) Linux 0.1 |
-| [android](/.github/workflows/android.yml) | Keep: android cross-compilation and packaging beyond the native gate | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 3.4 |
+| [android](/.github/workflows/android.yml) | Keep: Android cross-compilation and packaging beyond the native gate | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 3.4 |
 | [api-diff](/.github/workflows/api-diff.yml) | Keep: release backport API compatibility, distinct from compilation | Release gate, summary/report | No executed direct sample since October 20; cost belongs to caller |
-| [apt-repo](/.github/workflows/apt-repo.yml) | Keep: aPT repository metadata, signatures and publication | Published repository/installer and alert | [D 2026-10-30](https://github.com/moq-dev/moq/actions/runs/41042492573) Linux 1.7 |
+| [apt-repo](/.github/workflows/apt-repo.yml) | Keep: APT repository metadata, signatures and publication | Published repository/installer and alert | [D 2026-10-30](https://github.com/moq-dev/moq/actions/runs/41042492573) Linux 1.7 |
 | [audio-quality](/.github/workflows/audio-quality.yml) | Keep: deterministic audio replay correctness; real-time quality is in Nightly | Caller gate and Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 4.5 |
 | [c](/.github/workflows/c.yml) | Keep: generated C bindings and installed-consumer ABI link | Caller gate / Nightly alert | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 4.5 |
 | [cache](/.github/workflows/cache.yml) | Keep, infrastructure-owned: publishes reusable shells on three hosts | GitHub status; no product regression claim | [D 2026-11-02](https://github.com/moq-dev/moq/actions/runs/41377533846) ARM 1.3, Linux 1.3, macOS 3.5 |
@@ -216,7 +216,7 @@ release credentials remain under the existing publisher-environment work above.
 | [release-py-ffi](/.github/workflows/release-py-ffi.yml) | Keep: Python native wheels | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 11.2, Linux 19.5, Windows 13.8, macOS 8.9 |
 | [release-py](/.github/workflows/release-py.yml) | Keep: Python wrapper package | Caller gate/alert and release artifacts | [D 2026-10-31](https://github.com/moq-dev/moq/actions/runs/41182392402) Linux 17.6 |
 | [release-rs](/.github/workflows/release-rs.yml) | Keep: Rust package release policy | Caller gate/alert and release artifacts | [D 2026-10-31](https://github.com/moq-dev/moq/actions/runs/41182420560) Linux 22.4 |
-| [release-shared-ffi](/.github/workflows/release-shared-ffi.yml) | Keep: one native build per shared target; packages consume these outputs | Caller gate / alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 3.7, Linux 74.6, Windows 22.5, macOS 44.9 |
+| [release-shared-ffi](/.github/workflows/release-shared-ffi.yml) | Keep: one native build per shared target; packages consume these outputs | Caller gate / alert and release artifacts | [N caller total](https://github.com/moq-dev/moq/actions/runs/41313466339) ARM 3.7, Linux 74.6, Windows 22.5, macOS 44.9 (includes nested Go/Kotlin/Swift packagers above) |
 | [release-swift-ffi](/.github/workflows/release-swift-ffi.yml) | Keep: Swift native FFI artifacts | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 0.2, macOS 1.0 |
 | [release-swift-lib](/.github/workflows/release-swift-lib.yml) | Keep: Swift wrapper publication | Caller gate/alert and release artifacts | [N](https://github.com/moq-dev/moq/actions/runs/41313466339) Linux 0.3, macOS 0.9 |
 | [release-winget](/.github/workflows/release-winget.yml) | Keep: winget manifests and publication | Caller gate/alert and release artifacts | [D 2026-10-30](https://github.com/moq-dev/moq/actions/runs/41041265123) Windows 0.4 |
