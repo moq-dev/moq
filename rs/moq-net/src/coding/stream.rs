@@ -19,6 +19,11 @@ use crate::coding::{Reader, StreamCodes, Writer};
 /// round-robin share: a packet or two, which is all it needs.
 const CONTROL_SEND_ORDER: u8 = u8::MAX;
 
+/// The send order a TRACK_INFO answer goes at: ahead of every group stream, unlike other
+/// control. A subscriber that sent its SUBSCRIBE alongside the TRACK holds the groups that
+/// beat the info unread, so the info is all that stands between it and them.
+pub(crate) const TRACK_INFO_SEND_ORDER: i64 = CONTROL_SEND_ORDER as i64 + 1;
+
 /// A [Writer] and [Reader] pair for a single stream.
 pub struct Stream<S: crate::transport::poll::Session, V> {
 	pub writer: Writer<S::SendStream, V>,
@@ -166,7 +171,7 @@ mod tests {
 	/// starves it: quinn schedules strictly by priority and round-robins only
 	/// within a level, so a rank-0 group with bytes pending is enough to keep
 	/// the scheduler from ever reaching the transport's default of 0.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn open_prioritises_the_stream() {
 		let gate = kio::Producer::new(true);
 		let mut session = SinkSession::gated_bi(gate.consume());
@@ -176,7 +181,7 @@ mod tests {
 
 		assert_eq!(
 			log.priorities(),
-			vec![CONTROL_SEND_ORDER],
+			vec![i64::from(CONTROL_SEND_ORDER)],
 			"a control stream left at the transport default loses to every group",
 		);
 	}
@@ -184,7 +189,7 @@ mod tests {
 	/// The accepted half answers on the stream it was handed (track info, subscribe
 	/// responses), so it needs the same order as one we opened. A fix that only
 	/// covered `open` would leave every reply behind the media.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn accept_prioritises_the_stream() {
 		let gate = kio::Producer::new(true);
 		let mut session = SinkSession::accepted_bi(gate.consume());
@@ -194,7 +199,7 @@ mod tests {
 
 		assert_eq!(
 			log.priorities(),
-			vec![CONTROL_SEND_ORDER],
+			vec![i64::from(CONTROL_SEND_ORDER)],
 			"an accepted control stream left at the transport default loses to every group",
 		);
 	}

@@ -67,6 +67,8 @@ pub(crate) struct Inner {
 	/// Wakes the demux task to re-check its exit condition.
 	task_waiters: RefCell<kio::WaiterList>,
 	accept_waiters: RefCell<kio::WaiterList>,
+	/// Maps the kernel's receive timestamps, which count on the wall clock, onto `Instant`s.
+	wall: Cell<kio::clock::WallMap>,
 }
 
 /// A QUIC endpoint on one worker socket: accept, dial, or both.
@@ -128,6 +130,7 @@ impl Endpoint {
 			closed: RefCell::new(None),
 			task_waiters: RefCell::new(kio::WaiterList::new()),
 			accept_waiters: RefCell::new(kio::WaiterList::new()),
+			wall: Cell::default(),
 		});
 
 		let task = inner.clone();
@@ -284,6 +287,16 @@ impl Inner {
 		// completion out of the receive pool once and split it per datagram.
 		// The last one is taken whole, since a split makes the allocation
 		// shared, which a lone datagram has no use for.
+		let now = self.owner.now();
+		// The clocks read together, since the turn's instant may be well behind the wall clock
+		let read = self.owner.read_clock();
+		let mut wall = self.wall.get();
+		wall.sample(read, kio::clock::Wall::now());
+		self.wall.set(wall);
+		// The kernel's stamp, or the receive's own instant without one. One stamp covers a GRO
+		// coalesce, so only its first datagram reports an arrival.
+		let mut arrival = Some(packet.timestamp().and_then(|at| wall.map(at)).unwrap_or(read));
+
 		let mut payload = BytesMut::from(packet.payload());
 		let stride = packet.stride();
 		while !payload.is_empty() {
@@ -299,8 +312,9 @@ impl Inner {
 				local_ip: dst_ip,
 				ecn,
 				data: segment,
+				arrival: arrival.take(),
 			};
-			let event = self.endpoint.borrow_mut().handle(self.owner.now(), received, &mut buf);
+			let event = self.endpoint.borrow_mut().handle(now, received, &mut buf);
 			match event {
 				Some(DatagramEvent::ConnectionEvent(key, event)) => {
 					let conn = self.conns.borrow().get(&key).cloned();

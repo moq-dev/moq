@@ -12,7 +12,7 @@ use std::task::Poll;
 use std::time::Duration;
 
 use bytes::{Buf, Bytes};
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::transport::{self as net, Address, poll};
 use moq_quic::stream::{Dir, Id as StreamId};
 use moq_quic::{
@@ -188,7 +188,7 @@ impl Inner {
 		// Register first: a handle mutating the connection after this sweep re-polls us.
 		waiter.register(&mut state.driver);
 		loop {
-			let now = moq_clock::now();
+			let now = kio::clock::now();
 			if state.conn.poll_timeout().is_some_and(|at| now >= at) {
 				state.conn.handle_timeout(now);
 			}
@@ -226,7 +226,7 @@ impl Inner {
 			state.conn.set_backpressured(true);
 		}
 		loop {
-			let now = moq_clock::now();
+			let now = kio::clock::now();
 			if state.conn.is_closed() && timer.closing.is_none() {
 				timer.closing = Some(now + CLOSE_TIMEOUT);
 			}
@@ -277,7 +277,7 @@ impl Inner {
 /// The writer's timers.
 #[derive(Default)]
 struct Timer {
-	sleep: Option<moq_clock::Sleep>,
+	sleep: Option<kio::clock::Sleep>,
 	/// When a closing session gives up on delivering its close frame.
 	closing: Option<Instant>,
 	/// The current write is stalled on the transport.
@@ -290,7 +290,7 @@ impl Timer {
 		let Some(deadline) = deadline else {
 			return false;
 		};
-		if moq_clock::now() >= deadline {
+		if kio::clock::now() >= deadline {
 			return true;
 		}
 		let sleep = match &mut self.sleep {
@@ -300,7 +300,7 @@ impl Timer {
 				}
 				sleep
 			}
-			None => self.sleep.insert(moq_clock::sleep_until(deadline)),
+			None => self.sleep.insert(kio::clock::sleep_until(deadline)),
 		};
 		waiter.poll_future(Pin::new(sleep)).is_ready()
 	}
@@ -358,12 +358,12 @@ async fn run_writer<W: Writer>(inner: Arc<Inner>, mut writer: W, reader: tokio::
 	if result.is_ok() {
 		let bound = timer
 			.closing
-			.map_or(CLOSE_TIMEOUT, |at| at.saturating_duration_since(moq_clock::now()));
+			.map_or(CLOSE_TIMEOUT, |at| at.saturating_duration_since(kio::clock::now()));
 		let close = async {
 			let _ = reader.await;
 			writer.close().await
 		};
-		let _ = moq_clock::timeout(bound, close).await;
+		let _ = kio::clock::timeout(bound, close).await;
 	}
 	inner.writer_done(result);
 }
@@ -383,7 +383,7 @@ async fn run_reader<R: Reader>(inner: Arc<Inner>, mut reader: R) {
 			Ok(record) => {
 				state.received_bytes += record.len() as u64;
 				inner.wire.set_received_bytes(state.received_bytes);
-				state.conn.handle_record(record, moq_clock::now());
+				state.conn.handle_record(record, kio::clock::now());
 			}
 			Err(Error::FrameTooLarge) => state.conn.handle_oversized(),
 			Err(Error::FlowControlError) => state.conn.handle_violation(violation(
@@ -459,7 +459,7 @@ impl Session {
 	/// Start a session over the transport without waiting for the handshake, for callers
 	/// that resolved the protocol out of band (the WebSocket subprotocol, say).
 	pub(crate) fn new<T: Transport>(transport: T, side: Side, config: Config) -> Result<Self, Error> {
-		let conn = mux::Connection::new(config.to_mux()?, side, moq_clock::now());
+		let conn = mux::Connection::new(config.to_mux()?, side, kio::clock::now());
 		let inner = Arc::new(Inner {
 			state: Mutex::new(State {
 				conn,

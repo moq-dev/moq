@@ -88,7 +88,7 @@ impl Client<TcpStream> {
 	/// For `rtmps://` or any other transport, establish the stream yourself and use
 	/// [`with_stream`](Self::with_stream) instead.
 	pub async fn connect(addr: SocketAddr, app: &str) -> Result<Self> {
-		moq_clock::timeout(crate::server::REQUEST_TIMEOUT, async {
+		kio::clock::timeout(crate::server::REQUEST_TIMEOUT, async {
 			let stream = TcpStream::connect(addr).await?;
 			crate::server::configure_socket(&stream, addr);
 			// Advertise a tcUrl derived from the dial target: several ingest servers
@@ -107,7 +107,7 @@ impl<S: Stream> Client<S> {
 	/// The bring-your-own-transport entry point: establish the connection (and, for
 	/// `rtmps://`, the TLS handshake) yourself, then hand the stream here.
 	pub async fn with_stream(stream: S, app: &str) -> Result<Self> {
-		moq_clock::timeout(
+		kio::clock::timeout(
 			crate::server::REQUEST_TIMEOUT,
 			Self::with_stream_config(stream, app, None),
 		)
@@ -116,7 +116,7 @@ impl<S: Stream> Client<S> {
 	}
 
 	async fn with_stream_config(mut stream: S, app: &str, tc_url: Option<String>) -> Result<Self> {
-		let remaining = moq_clock::timeout(crate::server::HANDSHAKE_TIMEOUT, client_handshake(&mut stream))
+		let remaining = kio::clock::timeout(crate::server::HANDSHAKE_TIMEOUT, client_handshake(&mut stream))
 			.await
 			.map_err(|_| anyhow::anyhow!("RTMP handshake timed out"))??;
 
@@ -394,7 +394,7 @@ impl<S: Stream> Client<S> {
 		loop {
 			let n = tokio::select! {
 				result = self.stream.read(&mut buffer) => result?,
-				_ = moq_clock::sleep_until(publisher.media_deadline) => anyhow::bail!("remote sent no RTMP media before timeout"),
+				_ = kio::clock::sleep_until(publisher.media_deadline) => anyhow::bail!("remote sent no RTMP media before timeout"),
 			};
 			if n == 0 {
 				return Ok(false);
@@ -420,7 +420,7 @@ impl<S: Stream> Client<S> {
 		for result in results {
 			match result {
 				ClientSessionResult::OutboundResponse(packet) => {
-					moq_clock::timeout_at(publisher.media_deadline, self.stream.write_all(&packet.bytes))
+					kio::clock::timeout_at(publisher.media_deadline, self.stream.write_all(&packet.bytes))
 						.await
 						.map_err(|_| {
 							anyhow::anyhow!("remote blocked RTMP control output before the media deadline")
@@ -456,7 +456,7 @@ impl<S: Stream> Client<S> {
 	/// Pump the session until the publish/play request is accepted, writing any
 	/// outbound packets and failing on an explicit rejection.
 	async fn await_event(&mut self, direction: Direction) -> Result<()> {
-		moq_clock::timeout(crate::server::REQUEST_TIMEOUT, async {
+		kio::clock::timeout(crate::server::REQUEST_TIMEOUT, async {
 			let mut buffer = [0u8; READ_BUFFER];
 			loop {
 				while let Some(result) = self.work.pop_front() {
@@ -591,7 +591,7 @@ struct Publisher {
 	broadcast: moq_net::origin::Publication,
 	// This pull's publisher instance, so pulling again replaces it rather than resuming into it.
 	epoch: moq_net::Epoch,
-	media_deadline: moq_clock::Instant,
+	media_deadline: kio::clock::Instant,
 }
 
 impl Publisher {
@@ -610,13 +610,13 @@ impl Publisher {
 			importer,
 			catalog,
 			epoch,
-			media_deadline: moq_clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT,
+			media_deadline: kio::clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT,
 			broadcast: handle,
 		})
 	}
 
 	fn push(&mut self, tag_type: u8, timestamp: u32, body: &Bytes) -> anyhow::Result<()> {
-		self.media_deadline = moq_clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT;
+		self.media_deadline = kio::clock::Instant::now() + crate::server::PUBLISH_IDLE_TIMEOUT;
 		flv::import(&mut self.importer, tag_type, timestamp, body)
 	}
 
@@ -656,7 +656,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn client_handshakes_and_requests_have_finite_budgets() {
 		let (stream, _peer) = tokio::io::duplex(4096);
-		let start = moq_clock::Instant::now();
+		let start = kio::clock::Instant::now();
 		assert!(Client::with_stream(stream, "live").await.is_err());
 		assert_eq!(start.elapsed(), crate::server::HANDSHAKE_TIMEOUT);
 
@@ -674,7 +674,7 @@ mod tests {
 				linger: Duration::ZERO,
 				metadata: Default::default(),
 			};
-			let start = moq_clock::Instant::now();
+			let start = kio::clock::Instant::now();
 			assert!(client.await_event(direction).await.is_err());
 			assert_eq!(start.elapsed(), crate::server::REQUEST_TIMEOUT);
 			let origin = moq_tokio::origin::spawn();
@@ -683,7 +683,7 @@ mod tests {
 				let (packet, _) = client.session.send_ping_request().unwrap();
 				client.work.push_back(ClientSessionResult::OutboundResponse(packet));
 			}
-			let start = moq_clock::Instant::now();
+			let start = kio::clock::Instant::now();
 			let mut pull = Box::pin(client.pull_media(&mut publisher));
 			assert!(futures::poll!(pull.as_mut()).is_pending());
 			tokio::time::advance(crate::server::PUBLISH_IDLE_TIMEOUT).await;
@@ -824,7 +824,7 @@ mod tests {
 			let mut listed = copy.track("catalog.json").unwrap().subscribe(None).await.unwrap();
 			assert!(listed.recv_group().await.unwrap().is_some());
 
-			let start = moq_clock::now();
+			let start = kio::clock::now();
 			catalog.finish().unwrap();
 			broadcast.close();
 			drop(importer);
@@ -954,7 +954,7 @@ mod tests {
 		let epoch = moq_net::Epoch::mint();
 		let mut instances = moq_mux::follow::Instances::new(&upstream.consume(), "live/cam0", Some(&epoch)).unwrap();
 		let (_new, _new_catalog) = publish(&upstream, &epoch, NEW_IDR);
-		moq_clock::timeout(Duration::from_secs(5), instances.next())
+		kio::clock::timeout(Duration::from_secs(5), instances.next())
 			.await
 			.expect("the new publisher takes over")
 			.unwrap();
@@ -1045,7 +1045,7 @@ mod tests {
 			.await
 			.expect("subscribe catalog")
 			.ordered();
-		let mut group = moq_clock::timeout(Duration::from_secs(5), catalog_track.next_group())
+		let mut group = kio::clock::timeout(Duration::from_secs(5), catalog_track.next_group())
 			.await
 			.expect("catalog read timed out")
 			.expect("catalog read")
