@@ -24,3 +24,10 @@ found it and kept its two direct bounded-resume tests on draft 22 only.
   [moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)); a refused run
   must come back as dropped, not hang.
 - Enable the draft-18 cases of #7631's bounded-resume tests as the regression.
+- A relay loses a group on a history SUBSCRIBE (folded in 2026-11-02,
+  maintainer, from [moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)):
+  with the `fetched_copy` fixture in `fetch_only` on draft-22, where the relay
+  already fetched and cached group 2, a fresh session's `1..3` read gets only
+  group 2. The relay asks upstream for groups 1 to 2 and upstream sends only
+  group 2, so group 1 is lost silently (`main` hangs instead). Group 1 must
+  arrive or come back as dropped. The `1..2` case #7631 tests is fine.
