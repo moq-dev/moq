@@ -418,17 +418,17 @@ impl Broadcaster {
 		self.renditions.video_init().await;
 	}
 
-	/// Resolve once the broadcast has something listable (its first complete segment, or
-	/// already-ended records). Renditions start their segments together, so the first
-	/// rendition's readiness stands in for the broadcast's. Bounding the wait is the caller's
-	/// policy.
+	/// Resolve once the broadcast has something the DASH manifest lists (its first complete
+	/// segment, or already-ended records); a reconfigured rendition's predecessor's segments
+	/// don't count. Renditions start their segments together, so the first rendition's readiness
+	/// stands in for the broadcast's. Bounding the wait is the caller's policy.
 	#[cfg_attr(
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
-	pub(crate) async fn playable(&self) {
+	pub(crate) async fn represented(&self) {
 		if let Some(rendition) = self.renditions.snapshot().into_iter().next() {
-			rendition.playable().await;
+			rendition.represented().await;
 		}
 	}
 
@@ -2414,7 +2414,7 @@ mod tests {
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
-		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.playable()).await;
+		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.represented()).await;
 
 		// A clean finish stops the open segment and ends the records.
 		media.finish().unwrap();
@@ -4054,10 +4054,7 @@ mod tests {
 			.expect("the playlist renders without the replacement's media")
 			.unwrap()
 			.expect("the predecessor's segments are playable");
-		assert_eq!(
-			new.media_playlist(None).unwrap().as_deref(),
-			Some(rendered.as_str())
-		);
+		assert_eq!(new.media_playlist(None).unwrap().as_deref(), Some(rendered.as_str()));
 		let maps: Vec<_> = rendered.lines().filter(|line| line.starts_with("#EXT-X-MAP")).collect();
 		assert_eq!(maps, [map.as_str()], "{rendered}");
 		assert!(rendered.contains(&format!("seg/{}.1.m4s", old.tag())), "{rendered}");
@@ -4077,6 +4074,46 @@ mod tests {
 			Some(rendered.as_str()),
 			"its own init is built"
 		);
+	}
+
+	// The DASH manifest lists only the current instance's segments, so its readiness waits for the
+	// replacement's own first segment, even while the HLS playlist serves the predecessor's.
+	#[tokio::test(start_paused = true)]
+	async fn dash_readiness_waits_for_the_replacements_own_segment() {
+		let mut test = Records::with(&["video0"], &[]);
+		let (_, mut records) = test.publish("video0");
+		let _media = test.media("video0", 5);
+		for sequence in 0..3 {
+			records.push(&gop(sequence)).unwrap();
+		}
+		test.listed("video0", 1).await;
+		resize(&mut test, 1280);
+		let new = test.rendition("video0");
+		kio::clock::timeout(Duration::from_secs(1), new.playable())
+			.await
+			.expect("the playlist lists the predecessor's segments");
+		assert!(
+			kio::clock::timeout(Duration::from_secs(1), new.represented())
+				.await
+				.is_err(),
+			"the replacement lists nothing of its own yet"
+		);
+		assert!(
+			kio::clock::timeout(Duration::from_secs(1), test.renditions.video_init())
+				.await
+				.is_err(),
+			"no manifest lists the replacement yet"
+		);
+
+		records.push(&gop(3)).unwrap();
+		records.push(&gop(4)).unwrap();
+		test.listed("video0", 3).await;
+		kio::clock::timeout(Duration::from_secs(1), new.represented())
+			.await
+			.expect("the replacement lists its own segment");
+		kio::clock::timeout(Duration::from_secs(1), test.renditions.video_init())
+			.await
+			.expect("a manifest lists the replacement");
 	}
 
 	/// Reconfigure `video0` to `width`.

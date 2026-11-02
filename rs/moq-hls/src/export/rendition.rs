@@ -822,6 +822,23 @@ impl Rendition {
 		Poll::Pending
 	}
 
+	/// Resolve once the DASH [representation](Self::representation) lists a segment or this
+	/// rendition fails, as [`playable`](Self::playable) does for the media playlist.
+	pub(crate) async fn represented(&self) {
+		kio::wait(|waiter| self.poll_represented(waiter)).await;
+	}
+
+	/// Poll until this instance lists a segment of its own (or its records ended), its media is
+	/// denied, or its window failed. Unlike [`poll_playable`](Self::poll_playable), a
+	/// predecessor's segments don't count: the DASH manifest lists none of them.
+	pub(crate) fn poll_represented(&self, waiter: &kio::Waiter) -> Poll<()> {
+		self.poll_media(waiter);
+		if self.media.refusal().is_some() {
+			return Poll::Ready(());
+		}
+		self.live.poll_listed(waiter)
+	}
+
 	/// End the window if the bound sibling ended, registering `waiter` to wake when it does, and
 	/// return the binding this rendition's media is fetched through now.
 	pub(crate) fn poll_media(&self, waiter: &kio::Waiter) -> Arc<moq_mux::Binding> {

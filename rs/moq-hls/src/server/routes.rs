@@ -90,7 +90,7 @@ async fn manifest(server: &Server, broadcast: &str, query: Option<&str>) -> Resp
 	}
 	// A manifest whose renditions are all empty confuses players; give the broadcast a moment
 	// to index its first complete segment before answering.
-	let _ = kio::clock::timeout(READY_TIMEOUT, broadcaster.playable()).await;
+	let _ = kio::clock::timeout(READY_TIMEOUT, broadcaster.represented()).await;
 	// Each representation names its init by hash, which an inline codec only learns from media.
 	// A player keeps the adaptation sets of the first manifest it loads, so wait for one video
 	// init rather than every init: a stuck rendition never holds a sibling that can play.
