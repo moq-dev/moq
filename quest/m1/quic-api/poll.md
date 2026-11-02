@@ -11,7 +11,9 @@ and moq-uring's driver have public `poll_*` forms taking `&self,
 `send::Stream::poll_acked`, which [poll_acked](/quest/m2/quic-ack-hook.md)
 adds, takes the same shape. The async methods are thin `kio::wait` wrappers,
 and `send::Finished` implements `Future` over its `poll_closed`, resolving
-when every byte is acknowledged or the peer stops the stream, and saying which.
+as `stopped()` does today: `Ok(None)` once every byte is acknowledged or after
+a local reset, `Ok(Some(code))` if the peer stopped it first, and `Err` if the
+connection is lost.
 moq-tokio's WebTransport `SendStream` needs the poll form, not just the
 `Future`: once finished, it answers moq-net's waiter-based `poll_closed` and
 still reports the peer's stop code. No `tokio::sync::Notify` is left
