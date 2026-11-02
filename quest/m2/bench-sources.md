@@ -23,8 +23,7 @@ don't already emit one.
 - Check each JS bench reports a measurement before recording it.
 - Nightly size history (today a 45-day artifact) is a natural extra series
   if it fits cheaply.
-- The relay load benches (`bench-audio`, `bench-profile`) and the
-  audio-quality job's benchmarks can join later through the same input
+- The audio-quality job's benchmarks can join later through the same input
   format.
 - The paired nightly comparison publishes beside the table from the same
   `gh-pages` branch (`bench/paired.json`); a new Rust source joins it through
