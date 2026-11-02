@@ -405,6 +405,52 @@ impl Connection {
 		}
 	}
 
+	/// The connection-wide receive window now in force; see [`Limits::receive_window`]
+	pub fn receive_window(&self) -> u64 {
+		self.streams.receive_window()
+	}
+
+	/// The most receive credit one stream may hold: the largest per-stream window ever in force,
+	/// since credit already granted outlives a shrink; see [`Limits::stream_receive_window`]
+	pub fn stream_receive_window(&self) -> u64 {
+		self.streams.peak_stream_receive_window()
+	}
+
+	/// Receive flow control as the receiver sees it, evictions included
+	pub fn credit_stats(&self) -> super::CreditStats {
+		self.streams.credit_stats()
+	}
+
+	/// Change the windows and stream counts `limits` sets, leaving the others as they are
+	///
+	/// Errors, changing nothing, on limits [`Limits::validate`] refuses. QMux never paces, so
+	/// the rates are ignored.
+	pub fn set_limits(&mut self, limits: Limits) -> Result<(), crate::LimitsError> {
+		limits.validate()?;
+		if let Some(window) = limits.receive_window
+			&& self
+				.streams
+				.set_receive_window(VarInt::from_u64(window.get()).expect("validated"))
+		{
+			self.pending.max_data = true;
+		}
+		if let Some(window) = limits.stream_receive_window {
+			self.streams.set_stream_receive_window(window.get());
+		}
+		if let Some(window) = limits.send_window {
+			self.streams.set_send_window(window.get());
+		}
+		if let Some(streams) = limits.max_streams {
+			let streams = VarInt::from_u64(streams.get()).expect("validated");
+			for dir in [Dir::Bi, Dir::Uni] {
+				self.streams.set_max_concurrent(dir, streams);
+			}
+			// A lower limit can make a credit update once deemed insignificant significant.
+			self.streams.queue_max_stream_id(&mut self.pending);
+		}
+		Ok(())
+	}
+
 	/// The receive half of stream `id`
 	pub fn recv_stream(&mut self, id: crate::StreamId) -> recv::Stream<'_> {
 		recv::Stream {

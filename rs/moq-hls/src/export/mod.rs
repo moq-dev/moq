@@ -422,17 +422,17 @@ impl Broadcaster {
 		self.renditions.video_init().await;
 	}
 
-	/// Resolve once the broadcast has something listable (its first complete segment, or
-	/// already-ended records). Renditions start their segments together, so the first
-	/// rendition's readiness stands in for the broadcast's. Bounding the wait is the caller's
-	/// policy.
+	/// Resolve once the broadcast has something the DASH manifest lists (its first complete
+	/// segment, or already-ended records); a reconfigured rendition's predecessor's segments
+	/// don't count. Renditions start their segments together, so the first rendition's readiness
+	/// stands in for the broadcast's. Bounding the wait is the caller's policy.
 	#[cfg_attr(
 		not(feature = "server"),
 		allow(dead_code, reason = "only the `server` feature uses it")
 	)]
-	pub(crate) async fn playable(&self) {
+	pub(crate) async fn represented(&self) {
 		if let Some(rendition) = self.renditions.snapshot().into_iter().next() {
-			rendition.playable().await;
+			rendition.represented().await;
 		}
 	}
 
@@ -1659,8 +1659,9 @@ mod tests {
 		listed_in_manifest(&broadcaster).await;
 	}
 
-	// A reconfigure that changes the init bytes changes the init URL, and the old URL stops
-	// resolving, so a cache can never hand a player the previous init under the new one.
+	// A reconfigure that changes the init bytes changes the init URL, so a cache can never hand a
+	// player the previous init under the new one. The old URL keeps naming the old bytes while the
+	// playlist still lists the segments muxed under them.
 	#[tokio::test]
 	async fn a_reconfigure_versions_the_init_url() {
 		let origin = produce_origin();
@@ -1702,10 +1703,20 @@ mod tests {
 		let new_init = new.latest_init().await.unwrap().expect("init segment");
 		let _ = kio::clock::timeout(Duration::from_secs(5), new.playable()).await;
 		let new_playlist = new.media_playlist(None).unwrap().expect("playable");
-		let new_hash = init_hash(&new_playlist);
+		let maps: Vec<_> = new_playlist
+			.split("#EXT-X-MAP:URI=\"init.")
+			.skip(1)
+			.map(|rest| rest.split_once(".mp4").unwrap().0)
+			.collect();
+		let new_hash = *maps.last().unwrap();
 		assert_ne!(new_hash, old_hash, "different init bytes get a different URL");
+		assert_eq!(maps, [old_hash.as_str(), new_hash], "{new_playlist}");
 		assert_eq!(new.init(new_hash).await.unwrap(), Some(new_init));
-		assert!(new.init(&old_hash).await.unwrap().is_none());
+		assert_eq!(
+			new.init(&old_hash).await.unwrap(),
+			old.latest_init().await.unwrap(),
+			"the predecessor's segments still listed map its init"
+		);
 	}
 
 	// Background work ends with its owners, not with the publisher: once a reconfigure replaced
@@ -2407,7 +2418,7 @@ mod tests {
 
 		let broadcaster = Broadcaster::spawned(crate::resolved(&origin, "live").await, Config::default());
 		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.ready()).await;
-		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.playable()).await;
+		let _ = kio::clock::timeout(Duration::from_secs(5), broadcaster.represented()).await;
 
 		// A clean finish stops the open segment and ends the records.
 		media.finish().unwrap();
@@ -3940,11 +3951,245 @@ mod tests {
 					panic!("the replacement is reported");
 				};
 				// The replacement muxes the same records differently, so it lists them under its
-				// own URLs, and only those its predecessor didn't.
+				// own URLs, and only those its predecessor didn't. The playlist keeps the
+				// predecessor's behind a discontinuity, each under its own init.
 				assert_ne!(new.tag(), rendition.tag(), "one URL never names two muxes");
 				records.push(&gop(3)).unwrap();
-				assert_eq!(numbers(&test.listed("video0", 2).await), [2]);
+				let snapshot = test.listed("video0", 2).await;
+				assert_eq!(numbers(&snapshot), [0, 1, 2]);
+				let tags: Vec<_> = snapshot.segments.iter().map(|s| s.tag.as_str()).collect();
+				assert_eq!(tags, [rendition.tag(), rendition.tag(), new.tag()]);
+				let breaks: Vec<_> = snapshot.segments.iter().map(|s| s.discontinuity).collect();
+				assert_eq!(breaks, [false, false, true]);
+				let maps: Vec<_> = snapshot.segments.iter().map(|s| s.map.is_some()).collect();
+				assert_eq!(maps, [true, true, false], "only the predecessor's map their own init");
 			}
+		}
+	}
+
+	// A reconfigured rendition's playlist URI keeps serving its predecessor's segments, under their
+	// own URLs, until the window slides past them (RFC 8216 6.2.2), then releases the predecessor.
+	#[tokio::test(start_paused = true)]
+	async fn a_reconfigure_keeps_serving_its_predecessors_segments() {
+		let mut test = Records::with(&["video0"], &[]);
+		let (_, mut records) = test.publish("video0");
+		let _media = test.media("video0", 24);
+		for sequence in 0..3 {
+			records.push(&gop(sequence)).unwrap();
+		}
+		test.listed("video0", 1).await;
+		let old = test.rendition("video0");
+		test.catalog.video.renditions.get_mut("video0").unwrap().coded_width = Some(1280);
+		test.sync();
+		let new = test.rendition("video0");
+		assert!(!Arc::ptr_eq(&old, &new), "the reconfigure replaces the rendition");
+		assert_eq!(
+			numbers(&new.snapshot()),
+			[0, 1],
+			"nothing the predecessor listed is dropped"
+		);
+		let id = |tag: &str, segment| segments::Id {
+			generation: None,
+			tag: tag.to_string(),
+			at: segments::At::Sequence(segment),
+		};
+		assert!(new.segment(&id(old.tag(), 0)).await.unwrap().is_some());
+
+		// The predecessor lists the segment it was waiting on, then the replacement its own.
+		records.push(&gop(3)).unwrap();
+		records.push(&gop(4)).unwrap();
+		let snapshot = test.listed("video0", 3).await;
+		assert_eq!(numbers(&snapshot), [0, 1, 2, 3]);
+		let breaks: Vec<_> = snapshot.segments.iter().map(|s| s.discontinuity).collect();
+		assert_eq!(breaks, [false, false, false, true]);
+		assert!(new.segment(&id(old.tag(), 2)).await.unwrap().is_some());
+		assert!(new.segment(&id(new.tag(), 3)).await.unwrap().is_some());
+		assert!(
+			new.segment(&id(new.tag(), 2)).await.unwrap().is_none(),
+			"one URL never names two muxes"
+		);
+
+		// Once the window slides past the predecessor's segments, nothing holds it.
+		for sequence in 5..24 {
+			records.push(&gop(sequence)).unwrap();
+		}
+		let snapshot = test.listed("video0", 22).await;
+		assert!(snapshot.segments.iter().all(|s| s.segment > 3 && s.map.is_none()));
+		assert_eq!(
+			snapshot.discontinuity_sequence, 1,
+			"the slid-out break is still counted"
+		);
+		assert_eq!(Arc::strong_count(&old), 1, "the replacement released its predecessor");
+		assert!(new.segment(&id(old.tag(), 2)).await.unwrap().is_none());
+	}
+
+	// An inline-codec replacement builds its init only from a segment of its own, so until it lists
+	// one, its playlist is the predecessor's segments under the predecessor's init.
+	#[tokio::test(start_paused = true)]
+	async fn an_inherited_playlist_needs_no_init_of_its_own() {
+		let mut test = Records::with(&["video0"], &[]);
+		let (_, mut records) = test.publish("video0");
+		let _media = test.media("video0", 4);
+		for sequence in 0..3 {
+			records.push(&gop(sequence)).unwrap();
+		}
+		test.listed("video0", 1).await;
+		let old = test.rendition("video0");
+		let rendered = kio::clock::timeout(Duration::from_secs(5), old.playlist(None))
+			.await
+			.expect("the playlist renders")
+			.unwrap()
+			.expect("playable");
+		let map = rendered
+			.lines()
+			.find(|line| line.starts_with("#EXT-X-MAP"))
+			.expect("a map")
+			.to_string();
+		// The new config leaves its geometry to the keyframes, so only its media builds its init.
+		let config = test.catalog.video.renditions.get_mut("video0").unwrap();
+		config.coded_width = None;
+		config.coded_height = None;
+		test.sync();
+		let new = test.rendition("video0");
+		assert!(!Arc::ptr_eq(&old, &new), "the reconfigure replaces the rendition");
+
+		let rendered = kio::clock::timeout(Duration::from_secs(5), new.playlist(None))
+			.await
+			.expect("the playlist renders without the replacement's media")
+			.unwrap()
+			.expect("the predecessor's segments are playable");
+		assert_eq!(new.media_playlist(None).unwrap().as_deref(), Some(rendered.as_str()));
+		let maps: Vec<_> = rendered.lines().filter(|line| line.starts_with("#EXT-X-MAP")).collect();
+		assert_eq!(maps, [map.as_str()], "{rendered}");
+		assert!(rendered.contains(&format!("seg/{}.1.m4s", old.tag())), "{rendered}");
+
+		// Its own first segment needs its own init, which the playlist builds before listing it.
+		records.push(&gop(3)).unwrap();
+		records.push(&gop(4)).unwrap();
+		test.listed("video0", 3).await;
+		let rendered = kio::clock::timeout(Duration::from_secs(5), new.playlist(None))
+			.await
+			.expect("the playlist renders")
+			.unwrap()
+			.expect("playable");
+		assert!(rendered.contains(&format!("seg/{}.3.m4s", new.tag())), "{rendered}");
+		assert_eq!(
+			new.media_playlist(None).unwrap().as_deref(),
+			Some(rendered.as_str()),
+			"its own init is built"
+		);
+	}
+
+	// The DASH manifest lists only the current instance's segments, so its readiness waits for the
+	// replacement's own first segment, even while the HLS playlist serves the predecessor's.
+	#[tokio::test(start_paused = true)]
+	async fn dash_readiness_waits_for_the_replacements_own_segment() {
+		let mut test = Records::with(&["video0"], &[]);
+		let (_, mut records) = test.publish("video0");
+		let _media = test.media("video0", 5);
+		for sequence in 0..3 {
+			records.push(&gop(sequence)).unwrap();
+		}
+		test.listed("video0", 1).await;
+		resize(&mut test, 1280);
+		let new = test.rendition("video0");
+		kio::clock::timeout(Duration::from_secs(1), new.playable())
+			.await
+			.expect("the playlist lists the predecessor's segments");
+		assert!(
+			kio::clock::timeout(Duration::from_secs(1), new.represented())
+				.await
+				.is_err(),
+			"the replacement lists nothing of its own yet"
+		);
+		assert!(
+			kio::clock::timeout(Duration::from_secs(1), test.renditions.video_init())
+				.await
+				.is_err(),
+			"no manifest lists the replacement yet"
+		);
+
+		records.push(&gop(3)).unwrap();
+		records.push(&gop(4)).unwrap();
+		test.listed("video0", 3).await;
+		kio::clock::timeout(Duration::from_secs(1), new.represented())
+			.await
+			.expect("the replacement lists its own segment");
+		kio::clock::timeout(Duration::from_secs(1), test.renditions.video_init())
+			.await
+			.expect("a manifest lists the replacement");
+	}
+
+	/// Reconfigure `video0` to `width`.
+	fn resize(test: &mut Records, width: u32) {
+		test.catalog.video.renditions.get_mut("video0").unwrap().coded_width = Some(width);
+		test.sync();
+	}
+
+	// A predecessor still waiting on its first segment keeps it, whenever the playlist renders.
+	#[tokio::test(start_paused = true)]
+	async fn a_predecessors_pending_first_segment_is_kept() {
+		let mut test = Records::with(&["video0"], &[]);
+		let (_, mut records) = test.publish("video0");
+		let _media = test.media("video0", 4);
+		records.push(&gop(0)).unwrap();
+		kio::clock::sleep(Duration::from_millis(100)).await;
+		resize(&mut test, 1280);
+		assert!(test.rendition("video0").snapshot().segments.is_empty());
+		records.push(&gop(1)).unwrap();
+		records.push(&gop(2)).unwrap();
+		assert_eq!(numbers(&test.listed("video0", 1).await), [0, 1]);
+	}
+
+	// Reconfigures that list nothing keep only the instance that does, however many there are.
+	#[tokio::test(start_paused = true)]
+	async fn reconfigures_listing_nothing_hold_nothing() {
+		let mut test = Records::with(&["video0"], &[]);
+		let (_, mut records) = test.publish("video0");
+		let _media = test.media("video0", 2);
+		records.push(&gop(0)).unwrap();
+		records.push(&gop(1)).unwrap();
+		test.listed("video0", 0).await;
+		for width in 1..=8 {
+			resize(&mut test, width);
+			kio::clock::sleep(Duration::from_millis(10)).await;
+		}
+		assert_eq!(numbers(&test.rendition("video0").snapshot()), [0]);
+		assert!(test.renditions.targets() <= 3, "{} targets", test.renditions.targets());
+	}
+
+	// A config that returns while its earlier instance's segments are still listed gets its tag
+	// back, and each segment URL still reaches the instance that lists it.
+	#[tokio::test(start_paused = true)]
+	async fn a_returning_config_serves_both_instances_segments() {
+		let mut test = Records::with(&["video0"], &[]);
+		let (_, mut records) = test.publish("video0");
+		let _media = test.media("video0", 8);
+		for sequence in 0..3 {
+			records.push(&gop(sequence)).unwrap();
+		}
+		test.listed("video0", 1).await;
+		let first = test.rendition("video0");
+		resize(&mut test, 1280);
+		records.push(&gop(3)).unwrap();
+		records.push(&gop(4)).unwrap();
+		test.listed("video0", 3).await;
+		resize(&mut test, 320);
+		let returned = test.rendition("video0");
+		assert_eq!(returned.tag(), first.tag(), "the same config muxes the same way");
+		records.push(&gop(5)).unwrap();
+		records.push(&gop(6)).unwrap();
+		assert_eq!(numbers(&test.listed("video0", 5).await), [0, 1, 2, 3, 4, 5]);
+		let id = |segment| segments::Id {
+			generation: None,
+			tag: first.tag().to_string(),
+			at: segments::At::Sequence(segment),
+		};
+		for segment in [0, 2, 5] {
+			assert!(
+				returned.segment(&id(segment)).await.unwrap().is_some(),
+				"segment {segment}"
+			);
 		}
 	}
 
