@@ -178,7 +178,7 @@ async fn first_fetch(version: &str, relays: u64, rtt: Duration) -> Duration {
 async fn the_first_fetch_takes_one_round_trip_per_hop() {
 	const RTT: Duration = Duration::from_millis(100);
 	for version in VERSIONS {
-		for relays in [0, 1] {
+		for relays in [0, 1, 2] {
 			let elapsed = first_fetch(version, relays, RTT).await;
 			let hops = u32::try_from(relays + 1).unwrap();
 			assert!(elapsed <= RTT * hops, "{version}, {relays} relays: {elapsed:?}");
