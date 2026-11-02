@@ -151,6 +151,7 @@ try {
 	}
 	// Traced apart from the timed rounds, so tracing overhead never enters a timing.
 	for (const [variant, page] of pages) {
+		if (benchmark !== "replay" && benchmark !== "resume-history") continue;
 		await browser.startTracing(page, { categories: GC_CATEGORIES });
 		let buffer: Buffer | undefined;
 		try {

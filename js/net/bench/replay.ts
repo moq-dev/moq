@@ -1,5 +1,5 @@
 /** Sweep cached-group replay to joining subscribers, and arrivals into unread backlogs. */
-import { Manual } from "@moq/clock";
+import { Manual, Milli, Nano } from "@moq/clock";
 import { Track } from "@moq/net";
 
 type Order = "monotonic" | "reverse" | "mixed";
@@ -78,24 +78,41 @@ type Operations = (op: (fn: () => void) => void) => void;
 // replay all of them, or APPENDS more arrivals into that many unread backlogs; reverse and mixed
 // appends land inside the backlog. `measure` runs the operations. Every subscriber then drains,
 // so skipped or reordered work fails the run.
-function shape(kind: Kind, groups: number, order: Order, subscribers: number, measure: (ops: Operations) => void) {
+async function shape(
+	kind: Kind,
+	groups: number,
+	order: Order,
+	subscribers: number,
+	measure: (ops: Operations) => void,
+) {
+	// Freeze cache age during the operation, then expire this shape before starting another.
+	const clock = new Manual();
+	const installed = clock.install();
 	const total = kind === "join" ? groups : groups + APPENDS;
 	const sequences = arrivals(total, order);
 	const track = new Track.Producer(kind).accept();
 	const readers: Track.Subscriber[] = [];
-	if (kind === "append") for (let i = 0; i < subscribers; i++) readers.push(track.subscribe(SUBSCRIPTION));
-	for (const sequence of sequences.slice(0, groups)) publish(track, sequence);
-	measure((op) => {
-		if (kind === "join") {
-			for (let i = 0; i < subscribers; i++) op(() => readers.push(track.subscribe(SUBSCRIPTION)));
-		} else {
-			for (const sequence of sequences.slice(groups)) op(() => publish(track, sequence));
+	try {
+		if (kind === "append") for (let i = 0; i < subscribers; i++) readers.push(track.subscribe(SUBSCRIPTION));
+		for (const sequence of sequences.slice(0, groups)) publish(track, sequence);
+		measure((op) => {
+			if (kind === "join") {
+				for (let i = 0; i < subscribers; i++) op(() => readers.push(track.subscribe(SUBSCRIPTION)));
+			} else {
+				for (const sequence of sequences.slice(groups)) op(() => publish(track, sequence));
+			}
+		});
+		for (const reader of readers) drain(reader, total);
+	} finally {
+		for (const reader of readers) reader.close();
+		track.finish();
+		track.close();
+		try {
+			await clock.advance(Nano.fromMilli(Milli(60_000)));
+		} finally {
+			installed.close();
 		}
-	});
-	for (const reader of readers) drain(reader, total);
-	for (const reader of readers) reader.close();
-	track.finish();
-	track.close();
+	}
 }
 
 const median = (values: number[]) => values.sort((a, b) => a - b)[values.length >> 1];
@@ -107,56 +124,48 @@ const median = (values: number[]) => values.sort((a, b) => a - b)[values.length 
  * the timings as series. `max_us` is the slowest single operation, which held the event loop that
  * long. Timings are the median of REPS runs.
  */
-export function run(): void {
-	// Cache retention follows this clock, which never advances, so nothing ages out mid-row.
-	const installed = new Manual().install();
-	try {
-		const shapes: [Kind, number, Order, number][] = [];
-		for (const groups of [64, 512, 2048])
-			for (const order of ORDERS)
-				for (const subscribers of [1, 8])
-					for (const kind of ["join", "append"] as const) shapes.push([kind, groups, order, subscribers]);
+export async function run(): Promise<void> {
+	const shapes: [Kind, number, Order, number][] = [];
+	for (const groups of [64, 512, 2048])
+		for (const order of ORDERS)
+			for (const subscribers of [1, 8])
+				for (const kind of ["join", "append"] as const) shapes.push([kind, groups, order, subscribers]);
 
-		console.log("groups,kind,order,subscribers,sorts,sorted_elements,compares");
-		for (const [kind, groups, order, subscribers] of shapes) {
-			let counts: Counts | undefined;
-			shape(kind, groups, order, subscribers, (ops) => {
-				counts = counted(() => ops((op) => op()));
-			});
-			if (!counts) throw new Error("shape was not counted");
-			console.log(
-				`${groups},${kind},${order},${subscribers},${counts.sorts},${counts.elements},${counts.compares}`,
-			);
-		}
+	console.log("groups,kind,order,subscribers,sorts,sorted_elements,compares");
+	for (const [kind, groups, order, subscribers] of shapes) {
+		let counts: Counts | undefined;
+		await shape(kind, groups, order, subscribers, (ops) => {
+			counts = counted(() => ops((op) => op()));
+		});
+		if (!counts) throw new Error("shape was not counted");
+		console.log(`${groups},${kind},${order},${subscribers},${counts.sorts},${counts.elements},${counts.compares}`);
+	}
 
-		console.log("groups,kind,order,subscribers,us_per_op,max_us");
-		for (const [kind, groups, order, subscribers] of shapes) {
-			const perOp: number[] = [];
-			const slowest: number[] = [];
-			for (let rep = 0; rep < REPS; rep++) {
-				let count = 0;
-				let max = 0;
-				let elapsed = 0;
-				shape(kind, groups, order, subscribers, (ops) => {
-					const start = performance.now();
-					ops((op) => {
-						const begin = performance.now();
-						op();
-						max = Math.max(max, performance.now() - begin);
-						count++;
-					});
-					elapsed = performance.now() - start;
+	console.log("groups,kind,order,subscribers,us_per_op,max_us");
+	for (const [kind, groups, order, subscribers] of shapes) {
+		const perOp: number[] = [];
+		const slowest: number[] = [];
+		for (let rep = 0; rep < REPS; rep++) {
+			let count = 0;
+			let max = 0;
+			let elapsed = 0;
+			await shape(kind, groups, order, subscribers, (ops) => {
+				const start = performance.now();
+				ops((op) => {
+					const begin = performance.now();
+					op();
+					max = Math.max(max, performance.now() - begin);
+					count++;
 				});
-				perOp.push((elapsed * 1000) / count);
-				slowest.push(max * 1000);
-			}
-			console.log(
-				`${groups},${kind},${order},${subscribers},${median(perOp).toFixed(1)},${median(slowest).toFixed(0)}`,
-			);
+				elapsed = performance.now() - start;
+			});
+			perOp.push((elapsed * 1000) / count);
+			slowest.push(max * 1000);
 		}
-	} finally {
-		installed.close();
+		console.log(
+			`${groups},${kind},${order},${subscribers},${median(perOp).toFixed(1)},${median(slowest).toFixed(0)}`,
+		);
 	}
 }
 
-if (import.meta.main) run();
+if (import.meta.main) await run();

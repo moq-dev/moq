@@ -446,9 +446,9 @@ nix develop --command bun bench/browser/micro.ts --bench resume-history --out .t
 Each variant uses its own workspace source and a persistent, cross-origin isolated
 page, so `performance.now()` resolves 5 µs rather than 100 µs, with one full
 warmup before three alternating measured rounds. `aa` must bundle identically to
-`current`. The JSON preserves every CSV sample and the browser version, plus each
-variant's main-thread GC count, pause and reclaimed heap and the rows from one
-traced run after the timed rounds. `frames`
+`current`. The JSON preserves every CSV sample and the browser version. Replay
+and resume-history also record each variant's main-thread GC count, pause and
+reclaimed heap and the rows from one traced run after the timed rounds. `frames`
 runs the checkout's existing `js/net/bench/frames.ts`; `drift` uses the same fixture
 against every checkout, sweeping retained groups, publishers, and readers. Replay
 and group setup stay outside drift timing; each parked read checks its live
@@ -469,7 +469,9 @@ backlog for reverse and shuffled orders. `max_us` is the slowest single operatio
 the longest the event loop was held. An untimed pass first prints each shape's
 `Array.prototype.sort` calls, elements and comparator visits, ahead of the timing
 header so the nightly report keeps only timings as series. Every subscriber then
-drains, requiring each sequence once, ascending, with its payload.
+drains, requiring each sequence once, ascending, with its payload. Each shape then
+closes its readers and track and advances its own manual clock past cache expiry,
+outside timing, so completed shapes cannot accumulate through prune timers.
 
 `resume-history` moves long-lived logical fronts across lite sessions over the
 in-memory transport, make-before-break as a session draining after GOAWAY does.
