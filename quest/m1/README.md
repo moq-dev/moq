@@ -179,7 +179,6 @@ per-frame CPU growth since #5926.
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
-- [Probe scenario seeds randomize the media's start](/quest/m1/sim-media-offset.md) - each seed draws its own media start offset against the handshake and competitor, so probe budgets are not judged against one shared timing alignment
 - [The shared pacer holds its rate under 2 Mbit/s](/quest/m1/pacer-low-rate.md) - a rate-paced controller stops sending up to twice its pacing rate at low rates, landed with a BBR3 retune that keeps the probe budgets
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
