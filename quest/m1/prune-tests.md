@@ -25,10 +25,22 @@ Decided 2026-11-01 (maintainer):
   catches a wrong call. Removing a public API or a user-facing feature is a
   follow-up through `/quest-plan`.
 
-Start from the m2 audit's baselines and measurement pitfalls. Rank tests by
-the slot time they take in a full-selection queue run and in Nightly, and
-check Nightly's failure history for flakes. For each expensive test, name the
-regression it alone would catch. If you can't, delete it. Watch for the same
-behavior tested at several layers, such as a unit test, a session test, and
-an end-to-end test of one property, and for tests that pin an old bug rather
-than an edge case (AGENTS.md). A kept test still runs in CI, at least nightly.
+Audit implementation is checkpointed in
+[moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600): removed the
+redundant paced CLI silent-video report test and its private TS suppressor
+(6.932/6.948 hosted seconds; 7.763/7.152 local seconds). Mid-import and
+late-join reports, stdin-EOF cases, and hostile-input cache bounds remain.
+The recurring m2 audit has the refreshed baseline and ownership list in place;
+no successor was created.
+
+The kept import/report workspace selection passes after the cut (98 tests).
+The standard `quest gate just ci` stops in Cargo documentation on mbx
+`E2BIG`, without a launcher or environment bypass. Remaining: pass that gate
+and complete `/quest-review` on the committed head before finishing this quest. The unchanged full Rust
+selection exposed the known `quic_client_close_drains_finished_track`
+`Unroutable` flake, already tracked by
+[moq-dev/moq#7590](https://github.com/moq-dev/moq/pull/7590). CLI-only test
+builds also fail on the existing unused `listener::Io` re-export; workspace
+feature unification hides it. Do not remove either test or weaken checks to
+clear those failures. The mbx environment defect remains owned by
+[moq-dev/moq#7594](https://github.com/moq-dev/moq/pull/7594).
