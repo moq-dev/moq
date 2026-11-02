@@ -50,7 +50,7 @@ else
 
     # These files hold the map and the recipes that call it, and match no
     # module, so a change to them would otherwise validate none of it.
-    if grep -qE '^(justfile|sh/(dispatch|changed)\.sh|sh/local\.(sh|ts))$' "$changed"; then
+    if grep -qE '^(justfile|sh/(dispatch|changed|kvm)\.sh|sh/local\.(sh|ts))$' "$changed"; then
         echo "$action: root orchestration changed; running everything." >&2
         all=1
     fi

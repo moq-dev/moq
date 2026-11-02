@@ -125,9 +125,12 @@ class QueryTests(unittest.TestCase):
                 (self.repo / path).unlink()
 
     def test_orchestration_and_all_select_work(self):
-        self.expect(True, base="--all")
+        self.expect(True, base="--all", rust=True)
         self.change("justfile")
-        self.expect(True)
+        self.expect(True, rust=True)
+        (self.repo / "justfile").unlink()
+        self.change("sh/kvm.sh")
+        self.expect(True, rust=True)
 
     def test_working_tree_changes_and_deletions_count(self):
         self.change("rs/moq-net/src/lib.rs")
