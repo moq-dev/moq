@@ -165,7 +165,6 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the slowest 1% of tests take under half their 289 CPU-seconds, with coverage kept
 - [Release credentials off main](/quest/m0/ci/publish-release-only.md) - `publish` admits only `release` and release tags once its `workflow_run` publishers run on their tag
 - [The queue host keeps the queue's disk](/quest/m0/ci/queue-host-disk.md) - agent sessions can't starve the queue runner of disk, and a crashed runner restarts
-- [The next test-CPU cuts](/quest/m0/ci/test-cost-followups.md) - the slow-test leftovers from #6987, cut at their source
 - [Biome checks every file it can parse](/quest/m0/ci/biome-whole-repo.md) - Biome runs over the whole repository and main is clean under it
 - [Dispatcher tool changes run the dispatcher tests](/quest/m0/ci/dispatch-selection-gaps.md) - a tool-list change runs `sh/dispatch-query.test.py` in CI, and `sh/rs/uring.test.py` stops printing jq errors
 - [dispatch.sh's tests pass without KVM](/quest/m0/ci/dispatch-test-kvm.md) - `sh/dispatch-query.test.py` fakes the KVM probe instead of failing 20 tests on hosts without `/dev/kvm`
