@@ -162,29 +162,42 @@ as it reads, leaves with its removal
 ([moq-dev/moq#7345](https://github.com/moq-dev/moq/pull/7345)); until then its
 ingest never pauses.
 
+Decided 2026-11-02 (maintainer, settling the open items of
+[moq-dev/moq#7624](https://github.com/moq-dev/moq/pull/7624)):
+
+- Peer windows stay at 16 MiB receive and send in `[limits.peer.quic]`, with
+  the 1 MiB stream window from `[quic]`. Rejected: 32 MiB, and a separate
+  per-stream peer window.
+- The client `send_window` is 4 MiB, matching its receive window. Rejected:
+  keeping 16 MiB.
+- A GROUP stream waiting unread for its TRACK_INFO reserves nothing from the
+  paused budget: it waits at the lowest receive priority, so a full window
+  evicts it before control streams, and TRACK_INFO still gets credit. This
+  replaces the 2026-11-01 wording that the paused cap covers such streams.
+  Rejected: stopping it once the budget is full.
+- Every qmux session a server accepts takes the configured `[quic]` windows,
+  including the relay's own WebSocket listener. Rejected: leaving them at the
+  defaults until admission.
+- Split: this PR lands the windows, the floor, qmux leases, sized readiness,
+  TRACK_INFO priority, and the accept paths, and the rest stays here.
+  Rejected: finishing everything in one PR.
+
 Landed in [moq-dev/moq#7624](https://github.com/moq-dev/moq/pull/7624):
 sized local readiness; the one-segment floor; 4 MiB, 1 MiB, and 4 MiB client
 receive, stream, and send windows in moq-tokio, moq-uring, and qmux; 16 MiB
 cluster peer windows; native qmux leases with eviction, window reporting, and
-`poll_reset`; qmux sessions starting at the `[quic]` windows and widening to
-`[limits.peer.quic]` for peers; and a Bun sender exhausting a qmux receiver
-over WebSocket (`just test receive-credit`). At the client defaults a session
-pauses two group streams (half the window, a stream window each), and a peer
-link eight; past that, groups read and shed as before pacing.
+`poll_reset`; qmux sessions starting at the server's `[quic]` windows on every
+accept path and widening to `[limits.peer.quic]` for peers; and a Bun sender
+exhausting a qmux receiver over WebSocket (`just test receive-credit`). At the
+client defaults a session pauses two group streams (half the window, a stream
+window each), and a peer link eight; past that, groups read and shed as
+before pacing. The same PR ranks streams waiting on TRACK_INFO (lite GROUP
+streams and FETCH answers, and ietf data streams waiting on their alias)
+below every other stream, and they watch `poll_reset`, which now reports an
+eviction, so an evicted stream is stopped and eviction resumes.
 
 What remains:
 
-- Control credit for streams parked on TRACK_INFO. Group data a SUBSCRIBE
-  sent alongside TRACK, or a FETCH, leaves unread until TRACK_INFO arrives
-  must not use up the connection window, or TRACK_INFO itself can't arrive;
-  TRACK_INFO and other control messages always get connection credit. Today
-  a parked stream holds credit outside the paused budget, and only eviction
-  on a leasing transport frees it. The open choice is what a parked stream
-  does once the budget is full: stop it (the group is shed whole, and a burst
-  of subscriptions loses first groups past two per client session), or park
-  it unreserved at the lowest receive priority, so a stuck window evicts it
-  before control streams. Test it: enough parked groups to fill the
-  connection window, with TRACK_INFO still arriving and the groups then read.
 - A two-relay chain test with memory measured near the window.
 - Per-session retained bytes and throughput across many qmux sessions at the
   chosen window, in the

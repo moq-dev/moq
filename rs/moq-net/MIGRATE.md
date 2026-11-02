@@ -14,6 +14,11 @@ They wait until that frame fits within 16 MB of the fastest reader, so a large f
 lite-01/02 `ANNOUNCE_INIT` is capped at 1 MiB less its 16 bytes of prefixes, down from 64 MiB, on both ends: an origin whose initial set exceeds it fails the announce request, and a peer that sends one is refused. Serve such an origin over lite-03 or later, which announces one broadcast per message.
 `transport::MIN_RECEIVE_WINDOW` is now one 1 MiB segment, so a leasing transport may offer a connection window that small.
 
+### `poll_reset` reports an eviction ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`transport::poll::RecvStream::poll_reset` also completes once the receiver evicts the stream to free a stuck window.
+A leasing transport must report the eviction there: a paused group stream, and one waiting unread for its TRACK_INFO, is watched only through it, and an evicted stream whose reader holds leased bytes keeps further eviction off until it is stopped.
+
 ### A bounded subscription ends once its ranges are read
 
 When every one of a subscription's `ranges` has an end, `track::Subscriber::recv_group` and `track::Ordered::next_group` return `None` once each group in them was handed out, dropped, skipped as stale, or given up as unfillable, instead of waiting for an update to widen the ranges.

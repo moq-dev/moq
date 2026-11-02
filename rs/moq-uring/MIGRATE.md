@@ -7,6 +7,7 @@ How to update your code for each breaking change, newest first.
 ### Smaller default windows ([#7624](https://github.com/moq-dev/moq/pull/7624))
 
 `quic::transport::Config::default()` takes a 4 MiB connection window, a 1 MiB stream window, and 4 MiB of unacknowledged outgoing data, down from 128 MiB, 4 MiB, and 16 MiB, matching moq-tokio's `[quic]` defaults. Set `limits` explicitly to keep the old windows.
+`quic::driver::recv::Stream::received_reset`, and so `quic::web::RecvStream::poll_reset`, fail with `Error::Evicted` for a stream evicted to free a stuck window.
 
 ### QUIC early data is disabled
 
