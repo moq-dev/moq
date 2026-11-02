@@ -12,9 +12,13 @@ Found by the conformance test in [moq-dev/moq#7387](https://github.com/moq-dev/m
 
 What remains is the hand-over race. The catalog and the records are separate tracks, so the new config's first group can reach the old instance's records watcher before the catalog update. The retiring instance claims it, so it is muxed under the old init and the replacement starts one group late.
 
-Waiting on a plan: the maintainer decided on 2026-11-02 to remove the catalog's `hls` field (`rs/hang/src/catalog/hls.rs` and the JS zod schema), planned separately. That changes how the export finds a rendition's records, so the hand-over pick is designed after that plan, not with a catalog `start` field, a record track per config, or a marker in each record (all three dropped the same day). Once the removal is planned, add it under `Required` here or fold the pick into it.
+The maintainer decided on 2026-11-02 to remove the catalog's `hls` field (`rs/hang/src/catalog/hls.rs` and the JS zod schema); that removal is now [HLS export on a declared grid](/quest/m0/hls-media-grid.md). It changes how the export finds a rendition's records, so the hand-over pick is designed after it lands, not with a catalog `start` field, a record track per config, or a marker in each record (all three dropped the same day).
 
 Public API: none expected. Wire: decided by the removal plan.
+
+## Required
+
+- [HLS export on a declared grid](/quest/m0/hls-media-grid.md) - the catalog's `hls` field and record tracks go away first
 
 ## Related
 

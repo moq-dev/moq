@@ -17,8 +17,8 @@ The paced hops include qmux sessions (WebSocket, `tcp://`, `tls://`,
 messages are bounded by the session's receive window and the lowest-priority
 holder is evicted when it is stuck, as on native QUIC. The per-session memory
 a peer can make us hold is one deliberate, documented number across native
-QUIC and qmux. The browser keeps reading unpaced until WebTransport offers a
-real receive-credit contract.
+QUIC and qmux. The browser and JS keep reading unpaced; their pacing is
+[JS fastest-reader pacing](/quest/m2/js-fastest-reader.md), in m2.
 
 ## Plan
 
@@ -208,5 +208,13 @@ What remains:
   added. The cursor's report is one relaxed load per frame or batch, and a
   `fetch_max` only for the fastest reader. On the busy host that landed it,
   runs swung by up to 50% either way between repeats.
-- JS parity, once the browser offers a receive-credit contract. The JS qmux
-  receiver could pace today but follows the browser.
+- A relay-level test that the operator's `[quic]` windows reach WebSocket
+  sessions end to end through the relay's own `serve_ws` path. Today it is
+  covered only at `websocket::accept` level, because an accepted session's
+  window is not visible outside moq-tokio.
+
+Decided 2026-11-02 (maintainer, follow-up planning after the 2026-11-02
+/quest-complete run): JS parity moves to
+[JS fastest-reader pacing](/quest/m2/js-fastest-reader.md) in m2, which waits
+on [browser receive credit](/quest/m2/browser-receive-credit.md), so the m1
+cut does not wait on browsers.
