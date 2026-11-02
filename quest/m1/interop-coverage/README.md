@@ -44,7 +44,6 @@ coverage on `main` at `3ab6cbf81d`.
 
 ## Required
 
-- [Draft-18 TRACK_STATUS FIN](/quest/m1/interop-coverage/draft18-status-fin.md) - a draft-18 TRACK_STATUS followed at once by a FIN is answered, so moqx-forwarded status requests reach moq-dev publishers
 - [JS subscribers FETCH](/quest/m1/interop-coverage/js-ietf-fetch.md) - `@moq/net` fetches past groups over moq-transport, and joins the CLI FETCH round
 
 ## Related

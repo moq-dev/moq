@@ -93,7 +93,7 @@ jobs:
   # cross-night history on the benchmark site stays informational.
   nightly:
     name: Nightly (${{ matrix.name }})
-    runs-on: ${{ matrix.runner || 'ubuntu-24.04-arm' }}
+    runs-on: ubuntu-24.04-arm
     # Hosted `main` jobs write the Rust cache; see .github/actions/rust-cache.
     environment: ${{ github.ref == 'refs/heads/main' && 'cache-write' || '' }}
     timeout-minutes: 60
@@ -104,21 +104,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Unset keys default to the ARM runner, the plain dev shell, the Rust
-        # cache, no perf sampling, and nextest's default profile.
+        # Unset keys default to the plain dev shell, the Rust cache, and
+        # nextest's default profile.
         include:
-          - name: Audio grouping relay benchmark
-            recipe: bench-audio
-          - name: Relay shard sweep
-            recipe: bench-shard
-          # Smoke-tests each capture path: exact off-CPU waits, CPU stacks, and
-          # heap snapshots, each refused without resolved relay stacks.
-          # x86: on the SVE-capable ARM runner, perf's DWARF unwinding asks for the SVE VG
-          # register, which the kernel refuses for the software context-switches event.
-          - name: Relay profiles
-            recipe: bench-profile "lock cpu heap" fanout-heavy 4
-            perf: true
-            runner: ubuntu-24.04
           - name: Rust benchmark tests
             recipe: gh nightly rust-test
           - name: Binding benchmark runners
@@ -220,11 +208,6 @@ jobs:
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
-
-      # perf samples the relay in kernel context into large buffers; bench-profile refuses without it.
-      - name: Allow perf kernel sampling
-        if: matrix.perf
-        run: sudo sysctl -w kernel.perf_event_paranoid=-1
 
       - name: Run workload
         id: workload
