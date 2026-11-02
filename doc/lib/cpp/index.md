@@ -56,6 +56,9 @@ Rust core, so a program links one of the two, never both.
 
 ## Example
 
+Announcement captures are a required vector of wildcard matches, empty when
+the filter has no wildcards.
+
 Every fallible call returns `moq::expected`, and nothing throws. The samples
 unwrap results with this helper, which stops the program on an error; a real
 app branches on the error instead (see [Errors](#errors)).
