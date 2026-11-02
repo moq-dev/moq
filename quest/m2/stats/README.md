@@ -68,6 +68,15 @@ kind.
   before the viewer read the catalog; one broadcast per catalog removes the
   collisions, the race, and the cap with less code, and needs no JS track
   request API.
+- **One feedback writer per name** (2026-11-02, maintainer). Each player
+  publishes its own `.echo` broadcast with only its own counts. A second
+  player on the same connection that resolves the same feedback path, for
+  the same catalog or another, publishes nothing and warns until the first
+  one leaves; the application gives each player its own name. Reason: sharing one broadcast between
+  players needed a departed sum, a per-player ledger, and join-time baselines
+  to keep the counters cumulative, and four review rounds of
+  [moq-dev/moq#7222](https://github.com/moq-dev/moq/pull/7222) each found
+  another edge case in them.
 - **Trust is the token prefix** (2026-09-29). Whoever the application's
   tokens let publish under the echo path may report, and no report is
   authenticated beyond that.

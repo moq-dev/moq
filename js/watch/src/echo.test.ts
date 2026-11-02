@@ -106,7 +106,7 @@ test("publishes feedback where the catalog solicits it and follows the solicitat
 	}
 });
 
-test("a second reporter at a feedback path in use publishes nothing until it is free", async () => {
+test("a second reporter at a feedback path in use publishes nothing until the holder leaves", async () => {
 	const clock = new Manual();
 	const installed = clock.install();
 	const origin = new Origin.Producer();
@@ -116,7 +116,12 @@ test("a second reporter at a feedback path in use publishes nothing until it is 
 	const second = watched(origin, "room/live.hang", catalog);
 	const enabled = new Signal(true);
 	const reporters = [
-		new Echo({ broadcast: first, origin, name: "alice", sources: [source("room/live.hang", { video: { frames: 1 } })] }),
+		new Echo({
+			broadcast: first,
+			origin,
+			name: "alice",
+			sources: [source("room/live.hang", { video: { frames: 1 } })],
+		}),
 		new Echo({
 			broadcast: second,
 			origin,
@@ -139,11 +144,10 @@ test("a second reporter at a feedback path in use publishes nothing until it is 
 		expect([...paths]).toEqual(["room/viewers/alice.echo"]);
 		expect((await read(origin, "room/viewers/alice.echo", clock))?.renditions?.video.frames as unknown).toBe(1);
 
-		// The holder leaving retracts it and frees the path for a reporter that asks again.
-		reporters[0].close();
-		await flush();
-		expect([...paths]).toEqual([]);
+		// The holder leaving frees the path for a waiting reporter, which takes it over.
 		enabled.set(true);
+		await flush();
+		reporters[0].close();
 		await flush();
 		expect([...paths]).toEqual(["room/viewers/alice.echo"]);
 		expect((await read(origin, "room/viewers/alice.echo", clock))?.renditions?.video.frames as unknown).toBe(10);

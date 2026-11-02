@@ -1,7 +1,7 @@
 import { Milli, Nano } from "@moq/clock";
 import { Report, Echo as Schema } from "@moq/hang";
 import * as Moq from "@moq/net";
-import { Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
+import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import type { Broadcast } from "./broadcast";
 import type { Received } from "./feedback";
 
@@ -59,8 +59,8 @@ export function checkName(name: string): string {
  *
  * Each reporter publishes its own broadcast, so a report is only ever its own decoders' counts. A
  * second broadcast at a path would replace the first, so a reporter that resolves a feedback path
- * another reporter on the same origin already publishes publishes nothing and warns: give it
- * another name.
+ * another reporter on the same origin already publishes publishes nothing and warns until that one
+ * releases it: give it another name.
  */
 export class Echo {
 	/** The wired inputs, read-only. */
@@ -101,13 +101,18 @@ export class Echo {
 			if (!current) return;
 			const { origin, path, base } = current;
 
-			let paths = claimed.get(origin);
-			if (!paths) {
-				paths = new Set();
-				claimed.set(origin, paths);
+			let claims = claimed.get(origin);
+			if (!claims) {
+				claims = { paths: new Set(), released: new Signal(0) };
+				claimed.set(origin, claims);
 			}
-			if (paths.has(path)) {
-				console.warn("feedback path already in use on this connection; give this player another echo name", path);
+			if (claims.paths.has(path)) {
+				// Try again whenever a reporter on this origin releases its path.
+				effect.get(claims.released);
+				console.warn(
+					"feedback path already in use on this connection; give this player another echo name",
+					path,
+				);
 				return;
 			}
 
@@ -126,11 +131,14 @@ export class Echo {
 			}
 			const published = broadcast;
 
-			const claim = paths;
-			claim.add(path);
+			const claim = claims;
+			claim.paths.add(path);
 			const write = () => writer.update(this.#report(base) as Schema.Snapshot);
 			// Teardown runs last in, first out: write the final counts, then retract and release the path.
-			effect.cleanup(() => claim.delete(path));
+			effect.cleanup(() => {
+				claim.paths.delete(path);
+				claim.released.update((n) => n + 1);
+			});
 			effect.cleanup(() => published.close());
 			effect.cleanup(() => writer.finish());
 			effect.cleanup(write);
@@ -158,5 +166,6 @@ export class Echo {
 	}
 }
 
-// The feedback paths published on each origin, so a second reporter never replaces the first's broadcast.
-const claimed = new WeakMap<Moq.Origin.Table, Set<Moq.Path.Valid>>();
+// The feedback paths published on each origin, so a second reporter never replaces the first's
+// broadcast, and a count of releases, so a refused reporter tries again once one frees.
+const claimed = new WeakMap<Moq.Origin.Table, { paths: Set<Moq.Path.Valid>; released: Signal<number> }>();

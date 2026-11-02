@@ -97,7 +97,8 @@ round-trip time. It writes about once a second while someone subscribes, and
 follows the catalog: a removed or moved section retracts the broadcast. Each
 player publishes its own broadcast, reporting only what it counted, so a second
 player on one connection that resolves the same feedback path, for any catalog,
-publishes nothing and warns; give each player its own name. The decoders'
+publishes nothing and warns until the first one leaves; give each player its own
+name. The decoders'
 `out.stats` and the stats panel read the same counters. The token must allow
 publishing under the echo path.
 

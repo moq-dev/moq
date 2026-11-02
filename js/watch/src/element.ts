@@ -634,8 +634,8 @@ export default class MoqWatch extends HTMLElement {
 	 * no feedback. Once the watched catalog solicits feedback with an `echo` section, the element
 	 * publishes `<name>.echo` under its path, reporting what each rendition received and played.
 	 * Each element publishes its own: a second element on one connection that resolves the same
-	 * feedback path publishes nothing and warns, so give each its own name. One visible path segment:
-	 * a `/` or a leading `.` is refused.
+	 * feedback path publishes nothing and warns until the first one leaves, so give each its own
+	 * name. One visible path segment: a `/` or a leading `.` is refused.
 	 */
 	get echo(): string | undefined {
 		return this.#echo.peek();
