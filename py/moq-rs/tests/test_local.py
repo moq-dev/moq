@@ -809,7 +809,7 @@ async def test_dynamic_serves_held_content_without_an_exact_route():
         request.serve(source)
     broadcast = await requesting
     reader = await broadcast.subscribe_track("status")
-    track.write_frame(b"held", timedelta(microseconds=1))
+    track.write_frame(b"held", moq.Timestamp(1, 1_000_000))
     frame = await reader.read_frame()
     assert frame is not None and frame.payload == b"held"
     track.finish()
