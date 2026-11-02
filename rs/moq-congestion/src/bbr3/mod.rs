@@ -1549,7 +1549,9 @@ impl Bbr3 {
         // C.pacing_rate is in bytes/sec, so multiplying by 1ms is dividing by 1000.
         let mut quantum = (self.pacing_rate / 1000.0) as u64;
         quantum = Ord::min(quantum, HIGH_PACE_MAX_QUANTUM);
-        quantum = Ord::max(quantum, 2 * self.smss);
+        // One datagram is enough at low rates. A two-datagram floor forces packet pairs
+        // even when earning that pair takes longer than the RTT.
+        quantum = Ord::max(quantum, self.smss);
         self.send_quantum = quantum;
     }
 
@@ -7178,14 +7180,14 @@ mod test {
     /// as the transport does until after the ACK callbacks.
     #[test]
     fn first_rtt_recalibrates_startup_pacing() {
-        for rtt_ns in [10 * MS, MS / 5] {
+        for rtt_ns in [MS / 5, 10 * MS, 100 * MS, 1000 * MS] {
             let mut sim = scripted();
             sim.round(0, 1, rtt_ns);
             assert_eq!(sim.bbr.pacing_rate, startup_rate(rtt_ns));
             let quantum = (sim.bbr.pacing_rate / 1000.0) as u64;
             assert_eq!(
                 sim.bbr.send_quantum,
-                quantum.clamp(2400, HIGH_PACE_MAX_QUANTUM)
+                quantum.clamp(1200, HIGH_PACE_MAX_QUANTUM)
             );
         }
     }
