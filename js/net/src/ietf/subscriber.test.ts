@@ -1260,9 +1260,9 @@ test.each([
 		new Reader(undefined, encodeObjects([0]), version),
 	);
 
-	const ordered = track.ordered();
-	for (const sequence of expected) expect((await ordered.nextGroup())?.sequence).toBe(sequence);
-	ordered.close();
+	// This tests stream framing, independent of gaps below these groups. An ordered
+	// subscription with this budget would wait for the unreceived groups 0..2.
+	for (const sequence of expected) expect((await track.recvGroup())?.sequence).toBe(sequence);
 	track.close();
 });
 
@@ -1482,7 +1482,7 @@ test("an object datagram is a datagram group", async () => {
 	track.close();
 });
 
-test("a more specific epochless announcement replaces the consumed source", async () => {
+test("a more specific unnamed announcement replaces the consumed source", async () => {
 	const pair = createMockTransportPair(ALPN.DRAFT_18);
 	const subscriber = new Subscriber({ session: new NativeSession(pair.server, VERSION, true) });
 	const announced = subscriber.announced();

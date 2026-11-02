@@ -97,6 +97,11 @@ harness = false
 required-features = ["fuzz"]
 
 [[bench]]
+name = "receive_bursts"
+harness = false
+required-features = ["fuzz"]
+
+[[bench]]
 name = "endpoint"
 harness = false
 required-features = ["fuzz"]

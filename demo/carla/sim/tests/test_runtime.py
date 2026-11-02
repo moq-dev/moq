@@ -365,23 +365,21 @@ def test_stuck_watchdog_leaves_a_held_or_estopped_truck_alone(monkeypatch: pytes
     asyncio.run(scenario())
 
 
-def test_session_announces_with_the_run_epoch_after_populating_tracks() -> None:
+def test_session_announces_after_populating_tracks() -> None:
     """The player lists trucks from announcements, and a broadcast starts
-    unadvertised, so a session that never announces is invisible. The route
-    carries the run's epoch so a restarted worker reads as a restart."""
+    unadvertised, so a session that never announces is invisible."""
     calls: list[object] = []
     publication = SimpleNamespace(
         broadcast=SimpleNamespace(
             publish_track=lambda name, info=None: calls.append(name) or SimpleNamespace(demand=SimpleNamespace)
         ),
-        announce=lambda route: calls.append(route),
+        announce=lambda: calls.append("announce"),
     )
-    route = SimpleNamespace(epoch="0190b2a4-0000-7000-8000-000000000000")
 
     # The video tracks were advertised when the bridge stream opened.
-    runtime.TruckSession(SimpleNamespace(name="truck1"), publication, SimpleNamespace(), None, None, FakeClock(), route)
+    runtime.TruckSession(SimpleNamespace(name="truck1"), publication, SimpleNamespace(), None, None, FakeClock())
 
-    assert calls == ["status", route]
+    assert calls == ["status", "announce"]
 
 
 def test_a_driver_keeps_the_world_stepping_with_nobody_watching() -> None:
