@@ -31,4 +31,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Land main through quest land](/quest/m0/ci/land.md) - the structural baseline, replacing concurrent queue entries
+- [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - the structural baseline, replacing concurrent queue entries

@@ -51,7 +51,7 @@ use crate::time::Instant;
 use crate::{Error, Result, StreamError, group, stats, track};
 
 use super::delivered::Delivered;
-use super::subscription::{Anchor, Position, Resolved, Subscription, Unheld, Window};
+use super::subscription::{Accounted, Anchor, Position, Resolved, Subscription, Unheld, Window};
 use crate::ledger;
 
 /// What the front says about a logical track: the copy to read now, and how it ended.
@@ -75,6 +75,17 @@ struct Route {
 	spliced: Option<u64>,
 	/// The id the next stage takes.
 	next_stage: u64,
+}
+
+impl Route {
+	/// Ready once the route moved past `generation`, or the track ended. Reads only the
+	/// route and `generation`, so a [`kio::Watch`] may skip it while neither changed.
+	fn moved_past(&self, generation: u64) -> Poll<()> {
+		match self.generation != generation || self.phase.terminal() {
+			true => Poll::Ready(()),
+			false => Poll::Pending,
+		}
+	}
 }
 
 #[derive(Default)]
@@ -405,15 +416,15 @@ impl Consumer {
 
 	/// Poll for the route state to move past `generation`, or the track to end.
 	fn poll_changed(&self, generation: u64, waiter: &kio::Waiter) -> Poll<()> {
-		match self.state.poll(waiter, |route| {
-			match route.generation != generation || route.phase.terminal() {
-				true => Poll::Ready(()),
-				false => Poll::Pending,
-			}
-		}) {
-			Poll::Pending => Poll::Pending,
-			Poll::Ready(_) => Poll::Ready(()),
-		}
+		self.state
+			.poll(waiter, |route| route.moved_past(generation))
+			.map(|_| ())
+	}
+
+	/// A watch on the route, for a caller that re-polls [`Route::moved_past`] against a
+	/// generation it moves only once that is ready.
+	fn watch(&self) -> kio::Watch<Route> {
+		kio::Watch::new(self.state.clone())
 	}
 
 	/// How the logical track ended: `None` while the front may still replace its copy,
@@ -786,7 +797,7 @@ impl Subscriber {
 
 	/// Whether `accounted` holds every group the reader's bounded ranges name from `from`
 	/// up to `cap`; see [`track::Subscriber::covered`].
-	pub(super) fn covered(&self, from: u64, cap: Option<u64>, accounted: &RangeSet<u64>) -> bool {
+	pub(super) fn covered(&self, from: u64, cap: Option<u64>, accounted: &impl Accounted) -> bool {
 		let mut reader = self.reader();
 		reader.window();
 		reader.window.covered_by(from, cap, accounted)
@@ -1372,7 +1383,7 @@ impl Reader {
 			sequence,
 			reader: Some(self.this.clone()),
 			max_delay: None,
-			route: self.route.clone(),
+			route: self.route.watch(),
 			generation: copy.generation,
 			copy: copy.track.clone(),
 			handoff,
@@ -1907,7 +1918,10 @@ pub(super) struct Recover {
 	/// A fetch's own age budget, asked of each route and judged while waiting on one.
 	/// `None` leaves the publisher's retention alone; unused for a reader.
 	max_delay: Option<std::time::Duration>,
-	route: Consumer,
+	/// The route, watched for [`Self::wants`]: every read of the group that parks asks it
+	/// whether the route moved past [`Self::generation`]. Moving that generation any other
+	/// way resets the watch, or a read would skip the move.
+	route: kio::Watch<Route>,
 	/// The route generation of the copy being read, and that copy.
 	generation: u64,
 	copy: track::Consumer,
@@ -1960,10 +1974,14 @@ impl Recover {
 		if err.is_some_and(|err| self.undelivered(err)) {
 			return true;
 		}
-		while self.route.poll_changed(self.generation, waiter).is_ready() {
+		while self
+			.route
+			.poll(waiter, |route| route.moved_past(self.generation))
+			.is_ready()
+		{
 			// A route that returned serves the copy being read again, which the reader reuses.
 			// Closed routes stay ready forever, so they end the wait like a conclusion.
-			let route = self.route.state.read();
+			let route = self.route.consumer().read();
 			if route.phase.terminal() || !route.copy.as_ref().is_some_and(|copy| copy.same_channel(&self.copy)) {
 				return true;
 			}
@@ -2009,7 +2027,7 @@ impl Recover {
 		}
 		loop {
 			let (generation, serving, end, terminal) = {
-				let route = self.route.state.read();
+				let route = self.route.consumer().read();
 				(
 					route.generation,
 					route.copy.clone(),
@@ -2017,8 +2035,14 @@ impl Recover {
 					route.phase.terminal(),
 				)
 			};
-			// Registered before looking, so a route change from here on wakes the reader.
-			if self.route.poll_changed(generation, waiter).is_ready() && !terminal {
+			// Registered before looking, so a route change from here on wakes the reader. Not
+			// through the watch: `generation` is the one just read, not `self.generation`.
+			let moved = self
+				.route
+				.consumer()
+				.poll(waiter, |route| route.moved_past(generation))
+				.is_ready();
+			if moved && !terminal {
 				continue;
 			}
 			if let Some(Err(err)) = &end {
@@ -2195,6 +2219,8 @@ impl Recover {
 	/// Commit the replacement only once the caller has acquired its cursor or frame.
 	pub(super) fn adopt(&mut self, replacement: &Replacement) {
 		self.generation = replacement.generation;
+		// The generation moved without `wants` seeing it ready, so it judges the new one.
+		self.route.reset();
 		self.copy = replacement.copy.clone();
 		self.handoff = replacement.group.handoff();
 		// A later switch must keep this copy subscribed while the recovered group
@@ -2378,7 +2404,7 @@ impl kio::Task for Fetching {
 						sequence: self.sequence,
 						reader: None,
 						max_delay: self.options.options.max_delay,
-						route: self.route.clone(),
+						route: self.route.watch(),
 						generation,
 						copy: serving.clone(),
 						handoff,

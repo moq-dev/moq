@@ -9,7 +9,7 @@ val opusInit: ByteArray
     get() = TODO()
 val packet: ByteArray
     get() = TODO()
-val pts: ULong
+val pts: dev.moq.Timestamp
     get() = TODO()
 val rgba: ByteArray
     get() = TODO()

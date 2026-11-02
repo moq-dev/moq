@@ -22,8 +22,8 @@ use super::delivered::Delivered;
 use super::skipped::Skipped;
 use crate::ledger::{self, Ledger};
 
+use super::subscription::{Accounted, Containing, Held, Holdings, Resolved, Window, later};
 pub use super::subscription::{Anchor, Order, Position, Range, Subscription};
-use super::subscription::{Containing, Held, Holdings, Resolved, Window, later};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 mod demand;
@@ -5740,6 +5740,10 @@ pub(super) struct Unread<'a> {
 }
 
 /// How a [`Subscriber`] reads: its track's own cache, or a front's routes.
+#[expect(
+	clippy::large_enum_variant,
+	reason = "the plain cursor is the hot path, so it stays inline and the front's reader is boxed"
+)]
 enum Inner {
 	Plain(Cursor),
 	/// A front's logical track, read straight from its routes' copies; see
@@ -6195,6 +6199,9 @@ struct Cursor {
 	/// The group read that last parked, answered again without the walk until something
 	/// it parked on fires, once it first parks.
 	idle: Option<Box<idle::Idle>>,
+	/// [`Self::state`] for [`Self::poll_finished`], which a publisher re-polls on every
+	/// wake: one the track has not changed since skips the lock. Made on the first poll.
+	finished: Option<Box<kio::Watch<TrackState>>>,
 }
 
 /// A group a cursor found but has not moved past; see [`Cursor::take`].
@@ -6410,6 +6417,7 @@ impl Cursor {
 			drops: None,
 			misses: None,
 			idle: None,
+			finished: None,
 		}
 	}
 
@@ -6706,6 +6714,21 @@ impl Cursor {
 		Poll::Ready(match ready!(polled) {
 			Ok(res) => res,
 			// We try to clone abort just in case the function forgot to check for terminal state.
+			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		})
+	}
+
+	/// Poll for the track's declared end, or the error it was cut short with.
+	///
+	/// Through a [`kio::Watch`]: the end and the abort are plain fields of the track, so an
+	/// unchanged version proves the answer unchanged. [`Self::poll`]'s tail watch is no loss
+	/// here: a pending answer means no end, and the tail only waits once one is declared.
+	fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
+		let watch = self
+			.finished
+			.get_or_insert_with(|| Box::new(kio::Watch::new(self.state.clone())));
+		Poll::Ready(match ready!(watch.poll(waiter, |state| state.poll_finished())) {
+			Ok(res) => res,
 			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
 		})
 	}
@@ -7831,7 +7854,7 @@ impl Subscriber {
 	/// A publisher that accounts for each group it serves or drops learns from it that a
 	/// bounded subscription has nothing more to deliver.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn covered(&mut self, from: u64, accounted: &rangemap::RangeSet<u64>) -> bool {
+	pub(crate) fn covered(&mut self, from: u64, accounted: &impl Accounted) -> bool {
 		let bounds = self.bounds();
 		let from = from.max(bounds.start);
 		match &mut self.inner {
@@ -7916,7 +7939,7 @@ impl Subscriber {
 	/// Poll for the track's declared exclusive end, without blocking.
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.poll(waiter, |state| state.poll_finished()),
+			Inner::Plain(cursor) => cursor.poll_finished(waiter),
 			Inner::Resume(resume, _) => resume.poll_finished(waiter),
 		}
 	}
@@ -13669,13 +13692,14 @@ mod test {
 		assert!(done.is_none(), "missing groups below the boundary are not an error");
 	}
 
-	/// A finished track ends a sequence reader with nothing left in its range, as it ends
-	/// an arrival reader: whether the range ends at the cursor or the rest was given up.
+	/// A finished track ends both readers with nothing left in range, whether the range
+	/// ends at the cursor or the rest was given up.
 	#[test]
-	fn ordered_ends_once_a_finished_track_leaves_nothing_in_range() {
+	fn readers_end_once_a_finished_track_leaves_nothing_in_range() {
 		for given_up in [false, true] {
 			let producer = track_producer("test", Info::timed());
 			let end = if given_up { 4 } else { 3 };
+			let mut arrival = producer.subscribe(replay().with_range(0..end));
 			let mut ordered = producer.subscribe(replay().with_range(0..end)).ordered();
 			if given_up {
 				producer.drop_groups(3..4, StreamError::DeliveryTimeout);
@@ -13689,10 +13713,18 @@ mod test {
 					panic!("group {sequence}, given_up={given_up}")
 				};
 				assert_eq!(group.sequence, sequence);
+				let Poll::Ready(Ok(Some(group))) = arrival.poll_recv_group(&kio::Waiter::noop()) else {
+					panic!("arrival group {sequence}, given_up={given_up}")
+				};
+				assert_eq!(group.sequence, sequence);
 			}
 			assert!(
 				matches!(ordered.poll_next_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
 				"given_up={given_up}"
+			);
+			assert!(
+				matches!(arrival.poll_recv_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
+				"arrival, given_up={given_up}"
 			);
 		}
 	}
