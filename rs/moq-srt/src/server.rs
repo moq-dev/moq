@@ -597,7 +597,7 @@ pub(crate) async fn serve_subscribe(
 	};
 
 	let Some(mut subscriber) = subscriber else {
-		tracing::warn!(%path, "SRT subscribe for an unroutable broadcast");
+		tracing::debug!(%path, "SRT subscribe for an unroutable broadcast");
 		return Ok(());
 	};
 
@@ -688,13 +688,7 @@ fn parse_stream_id(stream_id: Option<&StreamId>) -> Option<(String, ConnectionMo
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
-	use std::time::Instant as StdInstant;
 
 	use super::*;
 	use bytes::Bytes;
@@ -755,13 +749,16 @@ mod tests {
 		const MESSAGES: usize = 128;
 		for sequence in 0..MESSAGES {
 			sender
-				.send((StdInstant::now(), Bytes::copy_from_slice(&sequence.to_be_bytes())))
+				.send((
+					kio::clock::now().into_std(),
+					Bytes::copy_from_slice(&sequence.to_be_bytes()),
+				))
 				.await
 				.unwrap();
 		}
 
 		for sequence in 0..MESSAGES {
-			let (_, payload) = tokio::time::timeout(Duration::from_secs(3), receiver.next())
+			let (_, payload) = kio::clock::timeout(Duration::from_secs(3), receiver.next())
 				.await
 				.expect("SRT sender stalled after its small default buffer overflowed")
 				.expect("SRT sender closed before the burst finished")
@@ -929,6 +926,7 @@ mod tests {
 		{
 			let mut guard = catalog.modify().unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
+			config.description = Some(Bytes::from_static(&[0x11, 0x90]));
 			config.container = hang::catalog::Container::Legacy;
 			guard.audio.renditions.insert(track.name().to_string(), config);
 		}
@@ -972,7 +970,7 @@ mod tests {
 		// so the marker lands a real wall-clock distance after the first packet.
 		write(&mut producer, 30, OFFSET);
 		let mut received = Vec::new();
-		let first = tokio::time::timeout(Duration::from_secs(10), receiver.next())
+		let first = kio::clock::timeout(Duration::from_secs(10), receiver.next())
 			.await
 			.expect("the first payload never arrived")
 			.expect("the SRT egress closed early")
@@ -986,7 +984,7 @@ mod tests {
 		// Drain until the muxer flags the break, which it does exactly once, on the new
 		// generation's leading clock packet.
 		let boundary = loop {
-			let payload = tokio::time::timeout(Duration::from_secs(10), receiver.next())
+			let payload = kio::clock::timeout(Duration::from_secs(10), receiver.next())
 				.await
 				.expect("the resumed generation never arrived")
 				.expect("the SRT egress closed before the marker")
@@ -1035,6 +1033,7 @@ mod tests {
 				.create_track(track, hang::container::track_info(hang::catalog::PRIORITY.audio))
 				.unwrap();
 			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
+			config.description = Some(Bytes::from_static(&[0x11, 0x90]));
 			config.container = hang::catalog::Container::Legacy;
 			catalog
 				.modify()
@@ -1134,7 +1133,7 @@ mod tests {
 		let (mut receiver, egress) = egress(&origin, Duration::from_secs(10), true).await;
 
 		old.write(30, 600_000_000);
-		let first = tokio::time::timeout(Duration::from_secs(10), receiver.next())
+		let first = kio::clock::timeout(Duration::from_secs(10), receiver.next())
 			.await
 			.expect("the first payload never arrived")
 			.expect("the SRT egress closed early")
@@ -1144,7 +1143,7 @@ mod tests {
 		// The replacement starts its own timeline over while the old instance stays up.
 		let mut new = Instance::publish(&origin, "new.aac");
 		new.write(30, 0);
-		tokio::time::timeout(Duration::from_secs(10), async {
+		kio::clock::timeout(Duration::from_secs(10), async {
 			loop {
 				let (_, payload) = receiver
 					.next()
@@ -1174,15 +1173,15 @@ mod tests {
 		let (mut receiver, egress) = egress(&origin, FOLLOW, false).await;
 
 		live.write(5, 0);
-		tokio::time::timeout(Duration::from_secs(10), receiver.next())
+		kio::clock::timeout(Duration::from_secs(10), receiver.next())
 			.await
 			.expect("the first payload never arrived")
 			.expect("the SRT egress closed early")
 			.unwrap();
-		let ended = tokio::time::Instant::now();
+		let ended = kio::clock::now();
 		live.finish();
 
-		tokio::time::timeout(Duration::from_secs(10), async {
+		kio::clock::timeout(Duration::from_secs(10), async {
 			while let Some(payload) = receiver.next().await {
 				payload.unwrap();
 			}
@@ -1203,19 +1202,19 @@ mod tests {
 		let (mut receiver, egress) = egress(&origin, Duration::from_secs(600), false).await;
 
 		live.write(5, 0);
-		tokio::time::timeout(Duration::from_secs(10), receiver.next())
+		kio::clock::timeout(Duration::from_secs(10), receiver.next())
 			.await
 			.expect("the first payload never arrived")
 			.expect("the SRT egress closed early")
 			.unwrap();
 		live.finish();
 		// Take everything the broadcast sent, so the egress is following when the caller goes.
-		while let Ok(Some(payload)) = tokio::time::timeout(Duration::from_secs(2), receiver.next()).await {
+		while let Ok(Some(payload)) = kio::clock::timeout(Duration::from_secs(2), receiver.next()).await {
 			payload.unwrap();
 		}
 		receiver.close().await.unwrap();
 
-		tokio::time::timeout(Duration::from_secs(10), egress)
+		kio::clock::timeout(Duration::from_secs(10), egress)
 			.await
 			.expect("the egress outlived its caller")
 			.unwrap()

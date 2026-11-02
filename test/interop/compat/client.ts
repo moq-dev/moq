@@ -18,6 +18,12 @@ import { connect } from "./transport";
 type FrameMicros = Parameters<typeof Container.Legacy.encodeFrame>[1];
 type TimestampMicros = Parameters<typeof Moq.Time.Timestamp.fromMicros>[0];
 
+// Group completion was renamed after @moq/net 0.4.7. Select the installed API
+// once before connecting, so the same client can publish with either package.
+const groupMethods = Moq.Group.Producer.prototype as { finish?: () => void; close?: () => void };
+const finishGroup = groupMethods.finish ?? groupMethods.close;
+if (!finishGroup) throw new Error("group producer has no clean completion method");
+
 /** A catalog section's first rendition, with its name. */
 function first<T>(section: { renditions: Record<string, T> } | undefined): [string, T] | undefined {
 	return Object.entries(section?.renditions ?? {})[0];
@@ -319,7 +325,7 @@ if (command === "sign") {
 		payload: new TextEncoder().encode("compat-fetch"),
 		timestamp: Moq.Time.Timestamp.fromMicros(1 as TimestampMicros),
 	});
-	group.finish();
+	finishGroup.call(group);
 	await connection.closed;
 } else if (command === "subscribe") {
 	// The flags of the interop subscriber this stands in for.

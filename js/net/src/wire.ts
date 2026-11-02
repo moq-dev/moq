@@ -9,7 +9,6 @@
  */
 import type { Dispose, GetPromise, Getter } from "@moq/signals";
 import type * as broadcast from "./broadcast.ts";
-import type { Drain } from "./connection/goaway.ts";
 import type * as Epoch from "./epoch.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
@@ -115,8 +114,6 @@ export type Advertisements = ReadonlyMap<Path.Valid, readonly Advertised[]>;
 /** The protocol-facing operations behind an established session. */
 export interface Established {
 	consume(path: Path.Valid): broadcast.Consumer;
-	/** Settles with the peer's GOAWAY; the session keeps serving until it closes. */
-	readonly goaway: GetPromise<Drain>;
 	/**
 	 * Whether the peer refuses an announce request overlapping one it still holds, so
 	 * discovery never holds two where one covers the other.

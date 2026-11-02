@@ -1,7 +1,7 @@
 name: Quest
 
 # Validates the quest tree on every branch that carries one. check.yml already
-# runs `quest check` in the merge queue and on release PRs, but a direct push (a
+# runs `quest check` on ready main PRs and on release PRs, but a direct push (a
 # merge to `main` or `release`, or `main` merged into a questline) is nobody's pull
 # request, so a broken tree could land there unseen.
 #
@@ -32,7 +32,7 @@ concurrency:
 
 jobs:
   check:
-    # Not `Check`: that is check.yml's required status, and a second job with
+    # Not `Check`: that is check.yml's status, and a second job with
     # the same name would make it ambiguous on a head that runs both.
     name: Quest
     runs-on: ubuntu-24.04-arm

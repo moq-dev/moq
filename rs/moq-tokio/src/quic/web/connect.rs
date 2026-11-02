@@ -4,6 +4,18 @@ use web_transport_proto::{ConnectRequest, ConnectResponse, VarInt};
 
 use thiserror::Error;
 
+/// CONNECT headers can carry credentials under any name, so log only routing metadata.
+struct Request<'a>(&'a ConnectRequest);
+
+impl std::fmt::Debug for Request<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("ConnectRequest")
+			.field("url", &crate::RedactedUrl::new(&self.0.url))
+			.field("protocols", &self.0.protocols)
+			.finish()
+	}
+}
+
 #[derive(Error, Debug, Clone)]
 #[non_exhaustive]
 pub enum ConnectError {
@@ -17,10 +29,10 @@ pub enum ConnectError {
 	ConnectionError(#[from] crate::quic::driver::connection::Error),
 
 	#[error("read error")]
-	ReadError(#[from] crate::quic::driver::ReadError),
+	ReadError(#[from] crate::quic::driver::recv::Error),
 
 	#[error("write error")]
-	WriteError(#[from] crate::quic::driver::WriteError),
+	WriteError(#[from] crate::quic::driver::send::Error),
 
 	#[error("http error status: {0}")]
 	ErrorStatus(http::StatusCode),
@@ -35,8 +47,8 @@ pub struct Connecting {
 	pub request: ConnectRequest,
 
 	// A reference to the send/recv stream, so we don't close it until dropped.
-	pub(crate) send: crate::quic::driver::SendStream,
-	pub(crate) recv: crate::quic::driver::RecvStream,
+	pub(crate) send: crate::quic::driver::send::Stream,
+	pub(crate) recv: crate::quic::driver::recv::Stream,
 }
 
 impl Connecting {
@@ -46,7 +58,7 @@ impl Connecting {
 		let (send, mut recv) = conn.accept_bi().await?;
 
 		let request = web_transport_proto::ConnectRequest::read(&mut recv).await?;
-		tracing::debug!(?request, "received CONNECT request");
+		tracing::debug!(request = ?Request(&request), "received CONNECT request");
 
 		// The request was successfully decoded, so we can send a response.
 		Ok(Self { request, send, recv })
@@ -75,8 +87,8 @@ impl Connecting {
 	}
 
 	pub async fn reject(self, status: http::StatusCode) -> Result<(), ConnectError> {
-		let mut connect = self.respond(status).await?;
-		connect.send.finish().ok();
+		let connect = self.respond(status).await?;
+		connect.send.finish();
 		Ok(())
 	}
 }
@@ -97,8 +109,8 @@ pub struct Connected {
 	pub response: ConnectResponse,
 
 	// A reference to the send/recv stream, so we don't close it until dropped.
-	pub(crate) send: crate::quic::driver::SendStream,
-	pub(crate) recv: crate::quic::driver::RecvStream,
+	pub(crate) send: crate::quic::driver::send::Stream,
+	pub(crate) recv: crate::quic::driver::recv::Stream,
 }
 
 impl Connected {
@@ -115,7 +127,7 @@ impl Connected {
 		// Create a new stream that will be used to send the CONNECT frame.
 		let (mut send, mut recv) = conn.open_bi(Default::default()).await?;
 
-		tracing::debug!(?request, "sending CONNECT request");
+		tracing::debug!(request = ?Request(&request), "sending CONNECT request");
 		request.write(&mut send).await?;
 
 		let response = web_transport_proto::ConnectResponse::read(&mut recv).await?;

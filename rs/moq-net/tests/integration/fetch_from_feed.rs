@@ -46,7 +46,7 @@ async fn relay(version: &str) -> Relay {
 	let pair = connect_mock(options).await;
 
 	let consumer = client.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -62,22 +62,22 @@ async fn relay(version: &str) -> Relay {
 /// The error a fetch of `sequence` fails with.
 async fn fetch_err(relay: &Relay, sequence: u64) -> moq_net::Error {
 	let fetching = relay.remote.track("video").unwrap().fetch_group(sequence, None);
-	match moq_clock::timeout(TIMEOUT, fetching).await.expect("fetch timed out") {
+	match kio::clock::timeout(TIMEOUT, fetching).await.expect("fetch timed out") {
 		Ok(_) => panic!("group {sequence} was served"),
 		Err(err) => err,
 	}
 }
 
 /// The groups a recorder fetches as the live subscription delivers them are served.
-#[moq_clock::test]
+#[kio::test]
 async fn a_fetch_is_served_from_the_live_feed() {
 	for version in VERSIONS {
 		let mut relay = relay(version).await;
-		let mut subscriber = moq_clock::timeout(TIMEOUT, relay.remote.track("video").unwrap().subscribe(None))
+		let mut subscriber = kio::clock::timeout(TIMEOUT, relay.remote.track("video").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
 			.expect("subscribe");
-		let first = moq_clock::timeout(TIMEOUT, subscriber.recv_group())
+		let first = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()
@@ -88,17 +88,17 @@ async fn a_fetch_is_served_from_the_live_feed() {
 		let next = first + 1;
 		let mut fetching = relay.remote.track("video").unwrap().fetch_group(next, None);
 		assert!(
-			moq_clock::timeout(Duration::from_millis(100), &mut fetching)
+			kio::clock::timeout(Duration::from_millis(100), &mut fetching)
 				.await
 				.is_err(),
 			"{version}: answered before the group exists"
 		);
 		relay.track.write_frame(None, &b"1"[..]).unwrap();
-		let mut group = moq_clock::timeout(TIMEOUT, fetching)
+		let mut group = kio::clock::timeout(TIMEOUT, fetching)
 			.await
 			.expect("fetch timed out")
 			.unwrap_or_else(|err| panic!("{version}: {err}"));
-		let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.expect("read timed out");
 		assert_eq!(&frame.unwrap().expect("a frame").payload[..], b"1", "{version}");
@@ -108,7 +108,7 @@ async fn a_fetch_is_served_from_the_live_feed() {
 /// A fetch that reaches the relay alongside the subscription that will carry it, as a
 /// recorder starting on an uncached group sends them, waits for that feed. The relay
 /// already serves the track, with no feed, for an earlier fetch.
-#[moq_clock::test]
+#[kio::test]
 async fn a_fetch_waits_for_a_feed_opened_with_it() {
 	for version in VERSIONS {
 		let mut relay = relay(version).await;
@@ -118,17 +118,17 @@ async fn a_fetch_waits_for_a_feed_opened_with_it() {
 		let track = relay.remote.track("video").unwrap();
 		let subscribing = track.subscribe(None);
 		let fetching = track.fetch_group(1, None);
-		let _subscriber = moq_clock::timeout(TIMEOUT, subscribing)
+		let _subscriber = kio::clock::timeout(TIMEOUT, subscribing)
 			.await
 			.expect("subscribe timeout")
 			.expect("subscribe");
 
 		relay.track.write_frame(None, &b"1"[..]).unwrap();
-		let mut group = moq_clock::timeout(TIMEOUT, fetching)
+		let mut group = kio::clock::timeout(TIMEOUT, fetching)
 			.await
 			.expect("fetch timed out")
 			.unwrap_or_else(|err| panic!("{version}: {err}"));
-		let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 			.await
 			.expect("read timed out");
 		assert_eq!(&frame.unwrap().expect("a frame").payload[..], b"1", "{version}");
@@ -137,7 +137,7 @@ async fn a_fetch_waits_for_a_feed_opened_with_it() {
 
 /// A group with no feed at all, or one the feed went past, is a miss rather than a version
 /// error.
-#[moq_clock::test]
+#[kio::test]
 async fn an_unfed_fetch_is_a_miss() {
 	for version in VERSIONS {
 		let mut relay = relay(version).await;
@@ -149,11 +149,11 @@ async fn an_unfed_fetch_is_a_miss() {
 		let mut skipped = relay.track.create_group(moq_net::group::Info { sequence: 3 }).unwrap();
 		skipped.write_frame(None, &b"3"[..]).unwrap();
 		skipped.finish().unwrap();
-		let mut subscriber = moq_clock::timeout(TIMEOUT, relay.remote.track("video").unwrap().subscribe(None))
+		let mut subscriber = kio::clock::timeout(TIMEOUT, relay.remote.track("video").unwrap().subscribe(None))
 			.await
 			.expect("subscribe timeout")
 			.expect("subscribe");
-		let first = moq_clock::timeout(TIMEOUT, subscriber.recv_group())
+		let first = kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()

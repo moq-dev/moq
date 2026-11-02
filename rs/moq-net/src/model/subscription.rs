@@ -6,6 +6,7 @@ use std::{
 use crate::Timestamp;
 
 mod window;
+pub(crate) use window::Accounted;
 pub(super) use window::{Containing, Held, Holdings, Resolved, Unheld, Window, later};
 
 /// Subscriber-side preferences for receiving a track.
@@ -28,7 +29,8 @@ pub struct Subscription {
 	/// giving up. This never *adds* delay, since the bound is only reached once newer data
 	/// is already that far ahead. `None` is the publisher's
 	/// [`Info::max_age`](crate::track::Info::max_age) alone, what a reader reaching back
-	/// for history wants.
+	/// for history wants. Read in order, `None` waits at a missing group until it resolves;
+	/// see [`track::Ordered`](crate::track::Ordered) for where that can block.
 	///
 	/// This is the `Subscriber Max Age` on the wire, and it is stored here verbatim so
 	/// what was asked for stays readable. Encoded as milliseconds in a QUIC varint, so
@@ -121,8 +123,9 @@ pub enum Order {
 /// it answers, never from the groups an ended feed left in its cache.
 ///
 /// Over moq-lite-07, a copy resolves them from the reported live edge and media time.
-/// A Rust moq-transport copy accepts anchors its cache can already resolve, translating
-/// them to group bounds upstream; an unknown time end is refused. Older moq-lite versions
+/// A Rust moq-transport copy resolves a relative anchor from the Largest Object its live
+/// join reports, and accepts time anchors its cache can already resolve, translating both
+/// to group bounds upstream; any other time anchor is refused. Older moq-lite versions
 /// accept absolute anchors but refuse time anchors and relative anchors other
 /// than [`Range::live`] and [`Range::oldest`] with [`Error::Unsupported`](crate::Error::Unsupported)
 /// rather than guess from a partial copy.
@@ -135,8 +138,11 @@ pub enum Anchor {
 	/// The group containing this presentation time: the newest one starting at or before it.
 	///
 	/// Resolved from the starts of the groups the serving hop holds. When none starts at
-	/// or before it, a start reaches back to the oldest group, and while no group has
-	/// started at all it waits like `Relative(0)`. An end settles once a group starting
+	/// or before it, a hop whose [`Requests`](crate::track::Requests) handler serves its
+	/// history looks the start up there (see [`Fill::time`](crate::track::Fill::time)),
+	/// reading nothing until it answers; otherwise, or when the handler can't tell, a start
+	/// reaches back to the oldest group. While no group has started at all it waits like
+	/// `Relative(0)`. An end settles once a group starting
 	/// after it is known and every sequence below that one is accounted for (started,
 	/// dropped, or never to start). Until then reads stop at the first held group that
 	/// may still start, so at the live edge at most that one group past the end is read

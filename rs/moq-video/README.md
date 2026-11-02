@@ -235,7 +235,9 @@ backend, or Linux without DMA-BUF import). `capture::Config::output` makes the s
 for captured frames. `decode::Config::scale_hint` asks a decoder with a hardware scaler
 (NVDEC) to emit that size; it is a hint, so check `Frame::size` and use
 `Frame::resize` for the exact size. `decode::Consumer` takes `decode::Options`,
-which pairs that config with the subscription's `start` and `max_delay`.
+which pairs that config with the subscription's `start` and `delay`: a
+`decode::Delay` whose `min` is your playout delay, where a cold join starts, and
+whose `max` is how far behind the live edge a stalled group may fall.
 
 Common feature sets:
 

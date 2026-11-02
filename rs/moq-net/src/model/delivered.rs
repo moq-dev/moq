@@ -55,6 +55,33 @@ impl Delivered {
 		true
 	}
 
+	/// Record every sequence in `groups` as handed out, joining the runs it touches.
+	pub fn insert_run(&mut self, groups: std::ops::Range<u64>) {
+		let Some(mut last) = groups.end.checked_sub(1).filter(|_| !groups.is_empty()) else {
+			return;
+		};
+		let mut first = groups.start;
+		// A run ending at or just below the first sequence joins it.
+		if let Some((&start, &end)) = self.runs.range(..=first).next_back()
+			&& end.checked_add(1).is_none_or(|after| after >= first)
+		{
+			first = start;
+			last = last.max(end);
+		}
+		// So does every run starting inside it or just past it.
+		let joined: Vec<u64> = self
+			.runs
+			.range(first..=last.saturating_add(1))
+			.map(|(&start, _)| start)
+			.collect();
+		for start in joined {
+			if let Some(end) = self.runs.remove(&start) {
+				last = last.max(end);
+			}
+		}
+		self.runs.insert(first, last);
+	}
+
 	/// The parts of `groups` not handed out, in order.
 	pub fn gaps(&self, groups: std::ops::Range<u64>) -> Vec<std::ops::Range<u64>> {
 		let mut gaps = Vec::new();
@@ -158,6 +185,24 @@ mod test {
 		assert_eq!(delivered.floor(), Some(0), "a run above a gap is not the prefix");
 		assert!(delivered.covers(4..9) && delivered.covers(9..9));
 		assert!(!delivered.covers(3..5) && !delivered.covers(8..10));
+	}
+
+	#[test]
+	fn insert_run_joins_every_run_it_touches() {
+		let mut delivered = Delivered::default();
+		for sequence in [2, 5, 6, 9, 14] {
+			delivered.insert(sequence);
+		}
+		delivered.insert_run(3..5);
+		assert_eq!(runs(&delivered), [(2, 6), (9, 9), (14, 14)], "adjacent on both sides");
+		delivered.insert_run(8..13);
+		assert_eq!(runs(&delivered), [(2, 6), (8, 12), (14, 14)], "a run inside it");
+		delivered.insert_run(4..15);
+		assert_eq!(runs(&delivered), [(2, 14)], "overlapping several");
+		delivered.insert_run(7..7);
+		assert_eq!(runs(&delivered), [(2, 14)], "an empty run");
+		delivered.insert_run(u64::MAX - 1..u64::MAX);
+		assert!(delivered.contains(u64::MAX - 1) && !delivered.contains(u64::MAX));
 	}
 
 	#[test]

@@ -24,7 +24,7 @@ use crate::rml::messages::{RtmpMessage, UserControlEventType};
 use crate::rml::sessions::StreamMetadata;
 use crate::rml::time::RtmpTimestamp;
 use bytes::Bytes;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::collections::HashMap;
 use std::mem;
 
@@ -607,44 +607,25 @@ impl ClientSession {
 		}
 	}
 
-	fn handle_amf0_command_failed_result(
-		&mut self,
-		transaction_id: f64,
-		mut additional_args: Values<'_>,
-	) -> ClientResult {
-		let outstanding_transaction = match self.outstanding_transactions.remove(&(transaction_id as u32)) {
-			Some(transaction) => transaction,
-			None => {
-				let event = ClientSessionEvent::UnknownTransactionResultReceived { transaction_id };
-
-				return Ok(vec![ClientSessionResult::RaisedEvent(event)]);
+	fn handle_amf0_command_failed_result(&mut self, transaction_id: f64, additional_args: Values<'_>) -> ClientResult {
+		let (code, description) = status_code_and_description(additional_args);
+		let event = match self.outstanding_transactions.remove(&(transaction_id as u32)) {
+			Some(OutstandingTransaction::ConnectionRequested { app_name: _ }) => {
+				ClientSessionEvent::ConnectionRequestRejected { code, description }
 			}
-		};
-
-		match outstanding_transaction {
-			OutstandingTransaction::ConnectionRequested { app_name: _ } => {
-				let description = if additional_args.len() > 0 {
-					if let Value::Object(properties) = additional_args.next().unwrap() {
-						if let Some(Value::Utf8String(value)) = properties.get("description") {
-							value.to_owned()
-						} else {
-							"".to_string()
-						}
-					} else {
-						"".to_string()
-					}
-				} else {
-					"".to_string()
-				};
-
-				let event = ClientSessionEvent::ConnectionRequestRejected { description };
-				Ok(vec![ClientSessionResult::RaisedEvent(event)])
-			}
-
-			OutstandingTransaction::CreateStream { purpose: _ } => {
+			Some(OutstandingTransaction::CreateStream { purpose: _ }) => {
 				return Err(ClientSessionError::CreateStreamFailed);
 			}
-		}
+			// `publish` and `play` carry transaction 0 and have no outstanding transaction,
+			// so their `_error` is matched by the request we're waiting on.
+			None => match self.current_state {
+				ClientState::PublishRequested => ClientSessionEvent::PublishRequestRejected { code, description },
+				ClientState::PlayRequested => ClientSessionEvent::PlaybackRequestRejected { code, description },
+				_ => ClientSessionEvent::UnknownTransactionResultReceived { transaction_id },
+			},
+		};
+
+		Ok(vec![ClientSessionResult::RaisedEvent(event)])
 	}
 
 	fn handle_amf0_command_success_result(
@@ -883,18 +864,30 @@ impl ClientSession {
 	}
 }
 
+/// The `code` and `description` of the status object an `_error` carries, empty when absent.
+fn status_code_and_description(mut arguments: Values<'_>) -> (String, String) {
+	let Some(Value::Object(properties)) = arguments.next() else {
+		return Default::default();
+	};
+	let field = |name| match properties.get(name) {
+		Some(Value::Utf8String(value)) => value.to_string(),
+		_ => String::new(),
+	};
+	(field("code"), field("description"))
+}
+
 #[cfg(test)]
 mod clock_tests {
 	use super::*;
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn session_epoch_uses_the_timer_clock() {
 		let (session, _) = ClientSession::new(ClientSessionConfig::new()).unwrap();
-		moq_clock::sleep(std::time::Duration::from_millis(12_345)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(12_345)).await;
 		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
-		moq_clock::sim::step_wall(moq_clock::Wall::UNIX_EPOCH);
+		kio::clock::sim::step_wall(kio::clock::Wall::UNIX_EPOCH);
 		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
-		moq_clock::sleep(std::time::Duration::from_millis(1 << 32)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(1 << 32)).await;
 		assert_eq!(session.get_epoch(), RtmpTimestamp::new(12_345));
 	}
 }

@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use io_uring::{EnterFlags, IoUring, opcode, types};
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use crate::clock::{Clock, Wait};
 use crate::metrics::Metrics;
@@ -97,7 +97,9 @@ impl Clone for Config {
 /// cannot finish. It runs no tasks, though, so work a task has merely been
 /// asked for is not performed: a QUIC close is queued on its connection and
 /// framed by the driver task, so keep driving until the close is published
-/// rather than stopping the worker on the call that asked for it.
+/// rather than stopping the worker on the call that asked for it. Its tasks are
+/// dropped instead, so a socket, endpoint, connection, or stream handle that
+/// outlives it fails rather than pending.
 pub struct Worker {
 	shared: Rc<Shared>,
 	tasks: kio::Tasks<Task>,
@@ -110,7 +112,7 @@ pub struct Worker {
 	/// parked wakes the worker to re-park for it.
 	owner: kio::Waiter,
 	/// A manual clock's wake for the next deadline; the host clock needs none.
-	alarm: Option<moq_clock::Sleep>,
+	alarm: Option<kio::clock::Sleep>,
 }
 
 impl Worker {
@@ -153,7 +155,7 @@ impl Worker {
 		}
 
 		let clock = Clock::new();
-		let deadlines = moq_clock::Deadlines::new(clock.now());
+		let deadlines = kio::clock::Deadlines::new(clock.now());
 		let unpark = Unpark::new(metrics.clone());
 		// A wake CQE can join a larger batch after warmup. Reserve the kernel's
 		// actual queue size so copying those completions does not allocate.
@@ -169,9 +171,12 @@ impl Worker {
 				spawns: RefCell::new(Vec::new()),
 				unpark,
 				metrics,
-				next_bgid: std::cell::Cell::new(0),
+				bgids: RefCell::default(),
+				failed: std::cell::Cell::new(None),
 				stopped: std::cell::Cell::new(false),
 				spill: RefCell::new(std::collections::VecDeque::new()),
+				#[cfg(test)]
+				enter_faults: RefCell::default(),
 			}),
 			tasks: kio::Tasks::new(),
 			park: kio::Park::default(),
@@ -195,8 +200,8 @@ impl Worker {
 	/// is fatal to the worker.
 	///
 	/// While it runs, the worker's clock is the thread's ambient
-	/// [`moq_clock`] clock: [`moq_clock::now`] reads the instant the current
-	/// turn sampled, and [`moq_clock::sleep`] arms this worker's timers.
+	/// [`kio::clock`] clock: [`kio::clock::now`] reads the instant the current
+	/// turn sampled, and [`kio::clock::sleep`] arms this worker's timers.
 	pub fn block_on<F: Future>(&mut self, future: F) -> Result<F::Output, Error> {
 		let mut future = std::pin::pin!(future);
 		let waker = self.shared.unpark.waker();
@@ -211,6 +216,11 @@ impl Worker {
 			for task in spawns {
 				self.tasks.push(task);
 			}
+			// A failure recorded between calls (or as the last call's future
+			// resolved) surfaces before a ready future can return past it.
+			if let Some(err) = self.shared.failed.take() {
+				return Err(err.into());
+			}
 
 			let cx = Context::from_waker(&waker);
 			let waiter = self.park.hold(&cx);
@@ -221,6 +231,9 @@ impl Worker {
 			// registered for the next push.
 			let _ = self.tasks.poll(waiter);
 
+			if let Some(err) = self.shared.failed.take() {
+				return Err(err.into());
+			}
 			self.pump()?;
 			self.maybe_park()?;
 		}
@@ -519,7 +532,7 @@ impl Worker {
 /// current instant until this drops.
 struct Turn {
 	shared: Rc<Shared>,
-	_ambient: moq_clock::Entered,
+	_ambient: kio::clock::Entered,
 }
 
 impl Turn {
@@ -570,6 +583,13 @@ impl Drop for Worker {
 			tracing::error!("failed to queue one or more io_uring teardown cancellations");
 		}
 		self.drain_teardown(deadline);
+		// Drop every task here, including those spawned since the last turn,
+		// which a surviving handle would otherwise keep alive. A QUIC driver
+		// fails its connection as it drops, waking whatever its handles have
+		// parked.
+		let spawns = std::mem::take(&mut *self.shared.spawns.borrow_mut());
+		drop(spawns);
+		self.tasks = kio::Tasks::new();
 	}
 }
 
@@ -654,7 +674,7 @@ pub(crate) struct Owner {
 	/// the driver that owns it is torn down by the same drop that would need
 	/// it.
 	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
-	deadlines: moq_clock::Deadlines,
+	deadlines: kio::clock::Deadlines,
 	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
 	metrics: std::sync::Arc<crate::metrics::Counters>,
 }
@@ -674,6 +694,15 @@ impl Owner {
 		self.shared
 			.upgrade()
 			.map_or_else(|| self.deadlines.now(), |shared| shared.now())
+	}
+
+	/// The worker's clock read now, mid-turn, rather than the turn's instant: for pairing with a
+	/// wall clock read at the same moment.
+	#[cfg_attr(not(feature = "quic"), allow(dead_code, reason = "only the `quic` feature uses it"))]
+	pub fn read_clock(&self) -> Instant {
+		self.shared
+			.upgrade()
+			.map_or_else(|| self.deadlines.now(), |shared| shared.clock.now())
 	}
 
 	/// The worker's core while it is still allocated, torn down or not.
@@ -786,9 +815,9 @@ mod tests {
 	}
 
 	/// A worker on a manual clock, which only `advance` moves.
-	fn manual() -> Option<(Worker, moq_clock::Installed)> {
+	fn manual() -> Option<(Worker, kio::clock::Installed)> {
 		let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
-		let clock = moq_clock::Manual::new().install(runtime.handle());
+		let clock = kio::clock::Manual::new().install(runtime.handle());
 		let _entered = runtime.enter();
 		Some((worker()?, clock))
 	}
@@ -1011,11 +1040,11 @@ mod tests {
 		let handle = worker.handle();
 		let at = worker
 			.block_on(async move {
-				let at = moq_clock::now() + Duration::from_millis(50);
+				let at = kio::clock::now() + Duration::from_millis(50);
 				let mut timer = handle.timer();
 				timer.set(Some(at));
 				timer.wait().await;
-				assert!(moq_clock::now() >= at, "fired before the turn reached it");
+				assert!(kio::clock::now() >= at, "fired before the turn reached it");
 				at
 			})
 			.unwrap();
@@ -1042,8 +1071,8 @@ mod tests {
 		});
 		let woke = worker
 			.block_on(async move {
-				moq_clock::sleep(Duration::from_secs(5)).await;
-				moq_clock::now()
+				kio::clock::sleep(Duration::from_secs(5)).await;
+				kio::clock::now()
 			})
 			.unwrap();
 		advancer.join().unwrap();
@@ -1058,14 +1087,14 @@ mod tests {
 		let handle = worker.handle();
 		let (now, timed_out) = worker
 			.block_on(async move {
-				let now = moq_clock::now();
+				let now = kio::clock::now();
 				// Due at once, so this needs no advance.
-				let timed_out = moq_clock::timeout(Duration::ZERO, std::future::pending::<()>()).await;
+				let timed_out = kio::clock::timeout(Duration::ZERO, std::future::pending::<()>()).await;
 				assert_eq!(handle.now(), now);
 				(now, timed_out.is_err())
 			})
 			.unwrap();
-		assert_eq!(now, moq_clock::Instant::ZERO + Duration::from_secs(1));
+		assert_eq!(now, kio::clock::Instant::ZERO + Duration::from_secs(1));
 		assert!(timed_out);
 	}
 
@@ -1076,7 +1105,7 @@ mod tests {
 		let Some((mut worker, clock)) = manual() else { return };
 		clock.advance(Duration::from_secs(5));
 		let (wall, origin) = worker
-			.block_on(async { (moq_clock::wall(), moq_clock::origin()) })
+			.block_on(async { (kio::clock::wall(), kio::clock::origin()) })
 			.unwrap();
 		assert_eq!(wall, clock.wall(), "the worker read the host's wall time");
 		assert_eq!(origin.0, clock.now());
@@ -1176,7 +1205,7 @@ mod tests {
 			result: 0,
 			flags: 0,
 		};
-		let before = moq_clock::Instant::ZERO;
+		let before = kio::clock::Instant::ZERO;
 		let deadline = before + Duration::from_millis(1);
 		let mut now = [before, deadline].into_iter();
 
@@ -1763,7 +1792,7 @@ mod tests {
 	fn metrics_count_an_unpolled_expiry_as_fired() {
 		let metrics = Metrics::default();
 		let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
-		let clock = moq_clock::Manual::new().install(runtime.handle());
+		let clock = kio::clock::Manual::new().install(runtime.handle());
 		let _entered = runtime.enter();
 		let Some(mut worker) = worker_with(Config {
 			metrics: metrics.clone(),

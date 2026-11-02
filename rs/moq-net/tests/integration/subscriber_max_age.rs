@@ -15,7 +15,7 @@ fn origin(hop: u64) -> origin::Producer {
 }
 
 async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
-	moq_clock::timeout(Duration::from_secs(5), async {
+	kio::clock::timeout(Duration::from_secs(5), async {
 		loop {
 			if track
 				.subscription()
@@ -30,7 +30,7 @@ async fn budget(track: &mut track::Producer, millis: u64, version: Version) {
 	.unwrap_or_else(|_| panic!("{version}: wanted {millis}ms, publisher has {:?}", track.subscription()));
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 	for draft in [18, 22] {
 		let version: Version = format!("moq-transport-{draft}").parse().unwrap();
@@ -65,7 +65,7 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 		drop(tolerant);
 		budget(&mut source, 10, version).await;
 		// A quiet catalog survives far longer than the budget because it has no successor.
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(snapshot.sequence, 0, "{version}");
 		assert_eq!(
 			snapshot.read_frame().await.unwrap().unwrap().payload,

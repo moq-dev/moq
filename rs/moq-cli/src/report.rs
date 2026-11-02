@@ -198,7 +198,7 @@ impl Stats {
 
 	/// Write a snapshot every interval, for as long as the import runs beside it.
 	pub async fn run(&mut self) -> Infallible {
-		let mut interval = moq_clock::interval(INTERVAL);
+		let mut interval = kio::clock::interval(INTERVAL);
 		loop {
 			interval.tick().await;
 			self.write();
@@ -298,7 +298,7 @@ impl Echo {
 				None
 			}
 		};
-		let mut interval = moq_clock::interval(INTERVAL);
+		let mut interval = kio::clock::interval(INTERVAL);
 		loop {
 			tokio::select! {
 				update = next(&mut catalog) => match update {
@@ -489,7 +489,7 @@ async fn write_echo(
 				let event = event.context("announcements ended")?;
 				let (announce, active) = match event {
 					// A restart is another publisher instance, which a reader still on the old one never sees.
-					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) => {
+					moq_net::announce::Event::Start(announce) | moq_net::announce::Event::Restart(announce) | moq_net::announce::Event::Takeover { announce, .. } => {
 						(announce, true)
 					}
 					moq_net::announce::Event::End(announce) => (announce, false),
@@ -539,7 +539,7 @@ impl Readers {
 		};
 		let id = reader.id();
 		self.drains.spawn(async move {
-			moq_clock::sleep(DRAIN).await;
+			kio::clock::sleep(DRAIN).await;
 			(path, id)
 		});
 	}
@@ -590,7 +590,6 @@ async fn read_echo(origin: moq_net::origin::Consumer, path: moq_net::Path, lines
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use tokio::io::{AsyncBufReadExt, BufReader};
@@ -646,9 +645,9 @@ mod tests {
 		assert!(line.contains(r#""n":1"#), "{line}");
 
 		broadcast.unannounce();
-		tokio::time::sleep(DRAIN * 2).await;
+		kio::clock::sleep(DRAIN * 2).await;
 		feedback.update(&serde_json::json!({ "n": 2 })).unwrap();
-		let late = tokio::time::timeout(Duration::from_secs(1), lines.next_line()).await;
+		let late = kio::clock::timeout(Duration::from_secs(1), lines.next_line()).await;
 		assert!(late.is_err(), "a drained reader wrote {late:?}");
 	}
 
@@ -686,7 +685,7 @@ mod tests {
 		tokio::spawn(write_echo(origin.consume(), ".viewers".to_string(), out));
 
 		feedback.update(&serde_json::json!({ "n": 1 })).unwrap();
-		let line = tokio::time::timeout(Duration::from_secs(5), lines.next_line()).await;
+		let line = kio::clock::timeout(Duration::from_secs(5), lines.next_line()).await;
 		let line = line.expect("no feedback read").unwrap().unwrap();
 		assert!(line.contains(r#""n":1"#), "{line}");
 	}
@@ -694,5 +693,4 @@ mod tests {
 
 #[cfg(test)]
 #[path = "report/echo_test.rs"]
-#[expect(clippy::disallowed_methods, reason = "tests control the clock directly")]
 mod echo_test;

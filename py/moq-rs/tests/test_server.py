@@ -74,7 +74,7 @@ async def test_server_client_roundtrip():
                 async for announcement in routes(client.announced()):
                     assert announcement.prefix == "hello"
 
-                    broadcast_consumer = await client.request_broadcast(announcement.prefix)
+                    broadcast_consumer = await client.request(announcement.prefix)
                     catalog = await moq.media.catalog(broadcast_consumer)
                     track_name, audio = next(iter(catalog.audio.items()))
                     assert audio.codec == "opus"
@@ -82,12 +82,12 @@ async def test_server_client_roundtrip():
                     media_consumer = await moq.media.TrackConsumer.subscribe(broadcast_consumer, track_name, audio)
 
                     payload = b"hello over the wire"
-                    media.write_frame(payload, timedelta(microseconds=1_000_000))
+                    media.write_frame(payload, moq.Timestamp(1_000_000, 1_000_000))
 
                     async for frame in media_consumer:
                         assert isinstance(frame, moq.media.MediaFrame)
                         assert frame.payload == payload
-                        assert frame.timestamp // timedelta(microseconds=1) == 1_000_000
+                        assert frame.timestamp == moq.Timestamp(1_000_000, 1_000_000)
                         break
 
                     break
@@ -535,7 +535,7 @@ async def test_client_context_keeps_the_body_error():
                     async for announcement in routes(consume.announced()):
                         assert announcement.prefix == "live"
                         break
-                    consumer = await asyncio.wait_for(consume.request_broadcast("live"), timeout=5.0)
+                    consumer = await asyncio.wait_for(consume.request("live"), timeout=5.0)
                     reader = await asyncio.wait_for(consumer.subscribe_track("data"), timeout=5.0)
                     reading.append(asyncio.create_task(drain(reader)))
                     demand = track.demand()

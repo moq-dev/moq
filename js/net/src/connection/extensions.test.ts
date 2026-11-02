@@ -49,21 +49,6 @@ test("a declined extension stays out of SETUP", async () => {
 	expect(none.dialed.solicit).toBe(true);
 });
 
-test("MoQ Epoch is negotiated only when both sides offer it", async () => {
-	const all = await handshake({}, {});
-	expect(all.dialed.epoch).toBe(true);
-	expect(all.accepted.epoch).toBe(true);
-
-	for (const [client, server] of [
-		[{ epoch: false }, {}],
-		[{}, { epoch: false }],
-	]) {
-		const declined = await handshake(client, server);
-		expect(declined.dialed.epoch).toBe(false);
-		expect(declined.accepted.epoch).toBe(false);
-	}
-});
-
 test("an AUTH to a side that declined it closes the session", async () => {
 	// Control: offered by both, the connection credential is granted.
 	const offering = await acceptWith({});

@@ -128,7 +128,7 @@ mod tests {
 
 	/// The next change a follower reports, which must arrive within the origin's update hold.
 	async fn followed(follow: &mut Instances) -> Option<moq_net::broadcast::Consumer> {
-		let next = tokio::time::timeout(std::time::Duration::from_secs(1), follow.next())
+		let next = kio::clock::timeout(std::time::Duration::from_secs(1), follow.next())
 			.await
 			.expect("no change")
 			.expect("the follow failed");
@@ -140,7 +140,7 @@ mod tests {
 
 	/// The follower stays quiet past the origin's update hold.
 	async fn quiet(follow: &mut Instances) {
-		if tokio::time::timeout(std::time::Duration::from_secs(1), follow.next())
+		if kio::clock::timeout(std::time::Duration::from_secs(1), follow.next())
 			.await
 			.is_ok()
 		{

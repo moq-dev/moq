@@ -721,7 +721,7 @@ mod test {
 			.unwrap();
 		let mut producer = Producer::<Value>::new(track.clone(), cfg(false));
 		producer.update(&json!({ "a": 1 })).unwrap();
-		track.finish_at(moq_net::track::Position::group(2)).unwrap();
+		track.finish_at(moq_net::track::Position::group(2), None).unwrap();
 
 		producer.modify(None).unwrap()["a"] = json!(2);
 		assert!(matches!(
