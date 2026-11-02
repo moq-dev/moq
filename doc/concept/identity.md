@@ -87,8 +87,11 @@ order, and so does every relay deciding what to advertise.
 Instances and epochs travel only over moq-lite 07 (`moq-lite-07-wip`,
 opt-in). Older moq-lite versions and moq-transport carry neither, so the
 receiving session mints an instance for each announcement it receives, with
-epoch 0. A minted instance starts with `~`. It names the announcement, not the
-publisher's stream, so:
+epoch 0. A minted instance starts with `~`, so a publisher naming a stable
+instance should not start it with `~`: nothing refuses one, since a relay
+forwarding a route keeps the instance it received, but every node then treats
+it as minted. A minted instance names the announcement, not the publisher's
+stream, so:
 
 - An announcement ending and starting again, such as a job re-announced on one
   session, is a new stream, never spliced to its predecessor.

@@ -106,6 +106,9 @@ export interface Route {
 	 * Set one only for a publisher that continues its group sequences across restarts and
 	 * raises {@link epoch} on each: readers stitch every route of one instance together, so
 	 * restarting the sequences under an old instance splices unrelated groups into their tracks.
+	 * Do not start a named instance with `~`: that marks one a relay minted (see
+	 * {@link Instance.isMinted}), which signing refuses to bind and a catalog's instance check
+	 * skips. The mark is not refused, since a relay forwarding a route keeps the one it received.
 	 */
 	instance?: Instance.Valid;
 	/**
