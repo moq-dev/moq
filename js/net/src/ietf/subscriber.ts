@@ -1205,7 +1205,7 @@ export class Subscriber {
 			trackName: request.name,
 			// Read now, since a subscriber can join while the stream opened. Updates follow it.
 			subscriberPriority: toWire(request.priority),
-			maxAge: this.#maxAge ? (request.subscription.maxDelay ?? 0) : undefined,
+			maxAge: this.#maxAge ? maxDelayOf(request.subscription) : undefined,
 			// Fixed for the subscription's life: no REQUEST_UPDATE parameter carries it.
 			groupOrder: request.subscription.order,
 			// Joins at the current group, from its first object: the subscription delivers the

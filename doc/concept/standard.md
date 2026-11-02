@@ -113,7 +113,7 @@ choices. They follow the product model.
   `DUPLICATE_SUBSCRIPTION`.
 
 - **Subscriber max age is negotiated.** The [Timestamp extension](/draft/moq-timestamp)
-  carries a subscriber's `max_delay` in `SUBSCRIBE` and `REQUEST_UPDATE` only
+  carries a subscriber's `delay.max` in `SUBSCRIBE` and `REQUEST_UPDATE` only
   when the peer advertises support. Superseded groups expire against media time
   and the hop's clock; the newest group, including a quiet catalog, survives any
   budget. Relays forward their most tolerant subscriber's budget. Without the

@@ -31,7 +31,7 @@ async function session(protocol: string) {
 	broadcastPublication.announce();
 	const video = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const remote = wireOf(client).consume(Path.from("test"));
-	const reader = remote.track("video").subscribe({ maxDelay: MAX_DELAY }).ordered();
+	const reader = remote.track("video").subscribe({ delay: { max: MAX_DELAY }}).ordered();
 
 	return {
 		video,

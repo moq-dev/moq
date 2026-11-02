@@ -312,7 +312,7 @@ impl Reader {
 }
 
 fn subscription(budget: Budget, range: Option<(u64, u64)>) -> track::Subscription {
-	let subscription = track::Subscription::default().with_max_delay(budget.duration());
+	let subscription = track::Subscription::default().with_delay(track::Delay::default().with_max(budget.duration()));
 	match range {
 		Some((start, end)) => subscription.with_range(start..end),
 		None => subscription,

@@ -3411,7 +3411,7 @@ test("REQUEST_UPDATE applies priority and preserves it when omitted", async () =
 		await RequestOk.decode(client.reader, fx.version);
 		expect(track.subscription.peek()?.priority).toBe(117);
 		// Only the priority changes; retention and the group range survive.
-		expect(track.subscription.peek()?.maxDelay).toBe(before?.maxDelay);
+		expect(track.subscription.peek()?.delay?.max).toBe(before?.delay?.max);
 		expect(track.subscription.peek()?.groups).toEqual(before?.groups);
 		await client.writer.write(new Uint8Array([0x02, 0, 2, 4, 0]));
 		expect(await client.reader.u53()).toBe(RequestOk.id);
@@ -4407,19 +4407,19 @@ test("subscriber max age and REQUEST_UPDATE preserve omitted preferences", async
 		}),
 	);
 	try {
-		expect(track.subscription.peek()?.maxDelay).toBe(Milli(250));
+		expect(track.subscription.peek()?.delay?.max).toBe(Milli(250));
 		const parameters = new Parameters();
 		parameters.maxAge = 900;
 		await client.writer.u53(SubscribeUpdate.id);
 		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, fx.version);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.maxDelay).toBe(Milli(900));
+		expect(track.subscription.peek()?.delay?.max).toBe(Milli(900));
 		await client.writer.u53(SubscribeUpdate.id);
 		await new SubscribeUpdate({ requestId: 4n }).encode(client.writer, fx.version);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
 		await RequestOk.decode(client.reader, fx.version);
-		expect(track.subscription.peek()?.maxDelay).toBe(Milli(900));
+		expect(track.subscription.peek()?.delay?.max).toBe(Milli(900));
 	} finally {
 		client.close();
 		track.finish();

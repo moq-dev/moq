@@ -113,7 +113,7 @@ async function read(front: Front, tracks: string[], access: Access, payloads: We
 			await track.info();
 			continue;
 		}
-		const subscriber = access === "subscribe" ? track.subscribe({ maxDelay: MAX_DELAY }) : undefined;
+		const subscriber = access === "subscribe" ? track.subscribe({ delay: { max: MAX_DELAY }}) : undefined;
 		const group = subscriber ? await subscriber.recvGroup() : await track.fetchGroup(0);
 		const frame = await group?.readFrame();
 		group?.close();

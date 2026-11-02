@@ -4,6 +4,23 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Subscription::max_delay` is `delay: track::Delay` ([#7597](https://github.com/moq-dev/moq/pull/7597))
+
+`track::Subscription` carries a `track::Delay { min, max }` in place of `max_delay`, and `with_max_delay(d)` is `with_delay(Delay)`.
+`Delay::max` is the old `max_delay`, unchanged. `Delay::min` is the subscriber's target latency, or `None` when a peer whose wire cannot carry it (moq-lite before 07, moq-transport) left it unstated. Both default to `Some(Duration::ZERO)`.
+moq-lite-07 SUBSCRIBE and SUBSCRIBE_UPDATE carry `min`, and a track's aggregate subscription takes the smallest stated one.
+
+```rust
+// Before
+Subscription::default().with_max_delay(d);
+subscription.max_delay;
+// After
+Subscription::default().with_delay(Delay::default().with_max(d));
+subscription.delay.max;
+```
+
+`group::Fetch::max_delay` is unchanged.
+
 ### `broadcast::Demand` reads like `track::Demand`
 
 Replace `is_used()` with `wanted()`, and `used()`, `unused()`, `poll_used`, and `poll_unused` with a loop over `wanted_changed()` (or `poll_wanted_changed`), which returns the new value each time it changes and errors once the broadcast closes.

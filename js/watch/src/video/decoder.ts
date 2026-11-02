@@ -507,7 +507,7 @@ class DecoderTrack {
 			broadcast: this.broadcast,
 			track: this.name,
 			priority: Catalog.PRIORITY.video,
-			maxDelay: this.sync.out.maxDelay,
+			delay: new Derived([this.sync.out.delay, this.sync.out.maxDelay], (min, max) => ({ min, max })),
 		});
 		if (!sub) return;
 

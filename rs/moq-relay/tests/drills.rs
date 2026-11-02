@@ -1451,7 +1451,7 @@ async fn subscriber_max_age_skips_bufferbloat(version: &str) {
 	let mut groups = remote
 		.track(TRACK)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_millis(100)))
+		.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100))))
 		.await
 		.unwrap();
 	let mut warmup = groups.recv_group().await.unwrap().unwrap();

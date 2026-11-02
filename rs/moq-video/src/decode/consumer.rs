@@ -13,7 +13,7 @@ use super::select::{Lane, Next, Selector};
 use super::sink::Sink;
 use crate::Error;
 use crate::Frame;
-pub use moq_mux::container::Delay;
+pub use moq_net::track::Delay;
 
 /// One item of a [`Consumer`] read, in delivery order: a decoded picture, or a break
 /// between them.
@@ -181,7 +181,7 @@ impl Consumer {
 			// so this decoder starts at a recovery point a whole sweep before the
 			// min-delay one.
 			let delay = Delay {
-				min: options.delay.min.saturating_add(warmup),
+				min: Some(options.delay.min.unwrap_or_default().saturating_add(warmup)),
 				max: options.delay.max.map(|max| max.saturating_add(warmup)),
 			};
 			Some(Reader::open(broadcast, catalog, &name, &options, delay, 1).await?)
@@ -319,7 +319,7 @@ impl Reader {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.video)
-					.with_max_delay(delay.max),
+					.with_delay(moq_net::track::Delay::default().with_max(delay.max)),
 			)
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement

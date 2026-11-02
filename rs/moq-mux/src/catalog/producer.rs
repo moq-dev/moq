@@ -2383,7 +2383,7 @@ mod test {
 				"video0",
 				"video0.hls",
 			] {
-				let all = moq_net::track::Subscription::default().with_max_delay(None);
+				let all = moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(None));
 				let track = consumer.track(name).unwrap().subscribe(all).await.unwrap();
 				readers.push((name, track.ordered()));
 			}

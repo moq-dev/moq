@@ -1237,7 +1237,7 @@ test.each([
 	[VERSION, true, [3, 4]],
 ])("draft %s with FIRST_OBJECT=%s: a header-only stream delivers %p", async (version, firstObject, expected) => {
 	// A budget, so the empty group outlives its successor's arrival.
-	const { subscriber, track } = await subscribeTrack({ version, subscription: { maxDelay: Milli(60_000) } });
+	const { subscriber, track } = await subscribeTrack({ version, subscription: { delay: { max: Milli(60_000) } } });
 
 	await subscriber.handleGroup(
 		new GroupMessage({
@@ -1735,7 +1735,7 @@ for (const negotiated of [false, true]) {
 		const track = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ maxDelay: Milli(250) });
+			.subscribe({ delay: { max: Milli(250) }});
 		const peer = await nextStream(pair.client);
 		if (!peer) throw new Error("no subscribe stream");
 		expect(await peer.reader.u53()).toBe(Subscribe.id);
@@ -1745,7 +1745,7 @@ for (const negotiated of [false, true]) {
 		await new SubscribeOk({ trackAlias: ALIAS }).encode(peer.writer, VERSION);
 		await track.info();
 		// The aggregate can change before SUBSCRIBE_OK: the first update must catch it.
-		const tolerant = track.fork({ maxDelay: Milli(900), priority: 9 });
+		const tolerant = track.fork({ delay: { max: Milli(900) }, priority: 9 });
 		expect(await peer.reader.u53()).toBe(SubscribeUpdate.id);
 		const update = await SubscribeUpdate.decode(peer.reader, VERSION);
 		expect(update.parameters.maxAge).toBe(negotiated ? 900 : undefined);

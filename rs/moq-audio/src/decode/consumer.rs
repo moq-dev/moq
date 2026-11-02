@@ -12,7 +12,7 @@ use super::decoder::{Config, Decoder};
 use crate::jitter::{self, Target};
 use crate::resample::{Remix, Resampler};
 use crate::{Activity, Error, Format, Frame, Layout};
-pub use moq_mux::container::Delay;
+pub use moq_net::track::Delay;
 
 /// One item of a [`Consumer`] read, in delivery order: decoded PCM, or a break in it.
 ///
@@ -199,7 +199,7 @@ impl Consumer {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.audio)
-					.with_max_delay(options.delay.max.map(|max| max.saturating_add(warmup))),
+					.with_delay(moq_net::track::Delay::default().with_max(options.delay.max.map(|max| max.saturating_add(warmup)))),
 			)
 			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
@@ -222,7 +222,7 @@ impl Consumer {
 			.min(retention.unwrap_or(Duration::MAX));
 		// Holding more than the publisher keeps would wait on media it has already
 		// discarded, so the caller asked for something impossible.
-		let delay = options.delay.min;
+		let delay = options.delay.min.unwrap_or_default();
 		if let Some(retention) = retention
 			&& delay > retention
 		{
@@ -241,7 +241,7 @@ impl Consumer {
 			.with_delay(options.delay);
 
 		Ok(Self {
-			target: Target::new(options.delay.min, options.estimate, catalog.jitter),
+			target: Target::new(delay, options.estimate, catalog.jitter),
 			decoder,
 			track,
 			resampler: None,
@@ -955,7 +955,7 @@ mod tests {
 
 		// A first reader warms the relay's copy with every group.
 		{
-			let subscription = moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10));
+			let subscription = moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 			let mut warm = remote.track("audio").unwrap().subscribe(subscription).await.unwrap();
 			let mut groups = 0;
 			while groups < 4 {
@@ -1126,7 +1126,7 @@ mod tests {
 		.await
 		.unwrap();
 		assert_eq!(
-			track.subscription().unwrap().max_delay,
+			track.subscription().unwrap().delay.max,
 			Some(Duration::from_millis(10_080))
 		);
 
@@ -2165,7 +2165,7 @@ mod tests {
 			"audio",
 			Options {
 				delay: Delay {
-					min: case.delay.map_or(Duration::ZERO, duration),
+					min: Some(case.delay.map_or(Duration::ZERO, duration)),
 					..Delay::default()
 				},
 				estimate: case.delay.is_none(),
@@ -2283,7 +2283,7 @@ mod tests {
 
 		let options = |delay| Options {
 			delay: Delay {
-				min: std::time::Duration::from_millis(delay),
+				min: Some(std::time::Duration::from_millis(delay)),
 				..Delay::default()
 			},
 			estimate: false,
@@ -2485,7 +2485,7 @@ mod tests {
 		)
 		.await
 		.unwrap();
-		assert_eq!(observed.subscription().unwrap().max_delay, Some(max_delay));
+		assert_eq!(observed.subscription().unwrap().delay.max, Some(max_delay));
 
 		let samples = [0.25f32, -0.5, 0.75, -1.0];
 		let payload: Vec<u8> = samples.iter().flat_map(|sample| sample.to_le_bytes()).collect();

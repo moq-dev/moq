@@ -171,7 +171,7 @@ async fn every_backend_matches_independent_reference() {
 		let (_source, broadcast, name, config) = import(vector);
 		let track = broadcast.track(&name).unwrap();
 		let track = track
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))))
 			.await
 			.unwrap();
 		let wire = moq_mux::catalog::hang::Container::try_from(&config).unwrap();

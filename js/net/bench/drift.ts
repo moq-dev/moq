@@ -13,7 +13,7 @@ export async function run(): Promise<void> {
 	try {
 		// The same reordered-PTS verdict runs here in Chromium before timing any work.
 		const check = new Track.Producer("reordered").accept({ timescale: Time.Timescale.MILLI });
-		const reader = check.subscribe({ maxDelay: Milli(80) });
+		const reader = check.subscribe({ delay: { max: Milli(80) }});
 		try {
 			for (const timestamps of [[0], [100], [150, 200, 160]]) {
 				const group = check.appendGroup();
@@ -54,9 +54,9 @@ export async function run(): Promise<void> {
 								}
 								const subscribers = Array.from({ length: readers }, () =>
 									track.subscribe({
-										maxDelay: Milli(
+										delay: { max: Milli(
 											(retained + Math.ceil((iterations + warmup) / offsets.length) + 1) * 100,
-										),
+										) },
 									}),
 								);
 								// Drain replay through the normal ordered cursor while retaining its timeline.

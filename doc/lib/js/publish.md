@@ -52,7 +52,7 @@ for a permission, device, or settings change instead of prompting again.
 ## Encoding
 
 Video encodes while enabled, so its recent groups wait in the track's cache for
-a late subscription's `maxDelay` or a fetch. Audio keeps raw PCM while nobody
+a late subscription's `delay.max` or a fetch. Audio keeps raw PCM while nobody
 listens, then encodes that history ahead of live audio when a subscriber arrives.
 Both retain up to `maxAge`; raw audio without a declared retention keeps at most
 30 seconds (about 11.5 MB for 48 kHz stereo f32). Capture stays open.

@@ -21,7 +21,7 @@ pub struct MoqDimensions {
 	pub height: u32,
 }
 
-/// How far behind the live edge a decoder plays, the counterpart of `moq_mux::container::Delay`.
+/// How far behind the live edge a decoder plays, the counterpart of `moq_net::track::Delay`.
 #[derive(Clone, Copy, Debug, uniffi::Record)]
 pub struct MoqDelay {
 	/// The target latency: the playout or jitter-buffer delay held behind the live edge, and
@@ -33,10 +33,10 @@ pub struct MoqDelay {
 	pub max: Option<std::time::Duration>,
 }
 
-impl From<MoqDelay> for moq_mux::container::Delay {
+impl From<MoqDelay> for moq_net::track::Delay {
 	fn from(delay: MoqDelay) -> Self {
 		Self {
-			min: delay.min,
+			min: Some(delay.min),
 			max: delay.max,
 		}
 	}
@@ -1920,7 +1920,7 @@ mod timebase_tests {
 				let track = consumer
 					.track(&name)
 					.unwrap()
-					.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(30)))
+					.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))))
 					.await
 					.unwrap();
 				readers.push(moq_mux::container::Consumer::new(track, container));

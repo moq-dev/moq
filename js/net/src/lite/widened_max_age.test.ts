@@ -45,10 +45,10 @@ test("a widened maxDelay re-offers what the publisher skipped below the start", 
 	]);
 	const remote = wireOf(client).consume(Path.from("room"));
 	// Group 5 ends at 6s, a full 3s behind the 9s edge.
-	const reader = remote.track("video").subscribe({ maxDelay: Milli(2500) });
+	const reader = remote.track("video").subscribe({ delay: { max: Milli(2500) }});
 	expect(await received(reader, 4)).toEqual([6, 7, 8, 9]);
 
-	reader.update({ maxDelay: Milli(6500) });
+	reader.update({ delay: { max: Milli(6500) }});
 	expect(await received(reader, 4)).toEqual([2, 3, 4, 5]);
 	// Ending the track flushes anything else the publisher would send: nothing, not even a repeat.
 	producer.finish();

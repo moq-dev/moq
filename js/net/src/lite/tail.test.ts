@@ -57,7 +57,7 @@ function groupStream(subscriber: Subscriber, sequence: number) {
 async function subscribed(version: Version, maxDelay = GRACE, groups?: Groups) {
 	const pair = createMockTransportPair(ALPN_05);
 	const subscriber = new Subscriber(pair.client, version, randomHop());
-	const reader = subscriber.consume(Path.from("room")).track("video").subscribe({ maxDelay, groups });
+	const reader = subscriber.consume(Path.from("room")).track("video").subscribe({ delay: { max: maxDelay }, groups });
 
 	const info = await Stream.accept(pair.server, version);
 	if (!info) throw new Error("the subscriber never asked for TRACK_INFO");
@@ -187,7 +187,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const sub = await subscribed(version);
 			subscriber = sub.subscriber;
 			const { reader, respond, fin } = sub;
-			const ordered = reader.fork({ maxDelay: GRACE }).ordered();
+			const ordered = reader.fork({ delay: { max: GRACE }}).ordered();
 			await respond({ start: new SubscribeStart([0]) });
 			const group = groupStream(subscriber, 1);
 			group.write("1.0");
@@ -354,7 +354,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const lower = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ maxDelay, groups: { start: { included: 1 } } });
+			.subscribe({ delay: { max: maxDelay }, groups: { start: { included: 1 } } });
 		await respond({ end: new SubscribeEnd(4) });
 		await fin();
 		// Long enough for a subscription that owed nothing more to have ended.

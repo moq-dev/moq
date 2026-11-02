@@ -57,7 +57,7 @@ pub fn moq_subscription_defaults() -> MoqSubscription {
 	let defaults = moq_net::track::Subscription::default();
 	MoqSubscription {
 		priority: defaults.priority,
-		max_delay: defaults.max_delay,
+		max_delay: defaults.delay.max,
 		ranges: None,
 		order: None,
 	}
@@ -175,7 +175,7 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 	fn try_from(s: MoqSubscription) -> Result<Self, MoqError> {
 		let mut subscription = moq_net::track::Subscription::default()
 			.with_priority(s.priority)
-			.with_max_delay(s.max_delay);
+			.with_delay(moq_net::track::Delay::default().with_max(s.max_delay));
 		if let Some(ranges) = s.ranges {
 			subscription = subscription.with_ranges(
 				ranges

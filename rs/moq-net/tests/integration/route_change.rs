@@ -124,7 +124,7 @@ impl Topology {
 
 		let consumer = subscriber.consume();
 		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
-		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
+		let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
 		let topology = Self {
@@ -524,7 +524,7 @@ async fn lagging_route_dies(version: Version) {
 	async fn subscribe(origin: &origin::Producer) -> track::Subscriber {
 		let consumer = origin.consume();
 		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
-		let preferences = track::Subscription::default().with_max_delay(Duration::from_secs(60));
+		let preferences = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		remote.track("video").unwrap().subscribe(preferences).await.unwrap()
 	}
 	fn write(group: &mut moq_net::group::Producer, sequence: u64, frame: u64) {
@@ -640,7 +640,7 @@ async fn undetected_outage(budget: Duration) -> BTreeMap<u64, Vec<String>> {
 
 	let consumer = e.consume();
 	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
-	let prefs = track::Subscription::default().with_max_delay(budget);
+	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(budget));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 	let m2_e = priced_link(version, &m2, &e, Some(1_000)).await;
 	settle().await;
@@ -785,7 +785,7 @@ async fn redundant_pair_fails_over(version: &str, loss: Loss) {
 
 	let consumer = subscriber.consume();
 	let remote = consumer.request("live", None).await.unwrap();
-	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
+	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
 	let mut expected = Vec::new();
@@ -894,7 +894,7 @@ async fn replaced_behind_a_relay(version: &str, epoch: Option<moq_net::Epoch>, r
 
 	let consumer = downstream.consume();
 	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
-	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
+	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
 	let mut dead = None;
@@ -1013,7 +1013,7 @@ async fn compression_changes_behind_a_relay(compress: bool) {
 
 	let consumer = downstream.consume();
 	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
-	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
+	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 
 	let mut dead = None;
@@ -1107,7 +1107,7 @@ async fn producer_replaced(version: &str) {
 
 	let consumer = subscriber.consume();
 	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
-	let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
+	let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 	let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 	let mut rx = read(sub);
 

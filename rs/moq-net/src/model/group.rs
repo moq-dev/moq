@@ -3513,7 +3513,7 @@ impl Consumer {
 	///
 	/// A publisher still writing the group polls this while it waits on its own transport,
 	/// which the group's reads cannot see: once the subscription's
-	/// [`max_delay`](crate::track::Subscription::max_delay) expires the group, it abandons
+	/// [`Delay::max`](crate::track::Delay::max) expires the group, it abandons
 	/// the stream, even with every frame already read off. It abandons it too once
 	/// [`Self::poll_finished`] fails. Stays `true` once set.
 	#[cfg(any(feature = "async", test))]
@@ -4617,7 +4617,7 @@ mod test {
 		let broadcast = super::super::broadcast::Producer::new(Default::default());
 		let track = broadcast.create_track("parked", track::Info::timed()).unwrap();
 		let mut subscriber =
-			track.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(3600)));
+			track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))));
 		let groups: Vec<_> = (0..3)
 			.map(|sequence| {
 				let mut group = track.create_group(Info { sequence }).unwrap();

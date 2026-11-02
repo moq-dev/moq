@@ -14,7 +14,7 @@ function setup(delay = BUDGET, warmup = 0, min = delay, max: number | null = del
 	const flush = () => clock.advance(Nano.zero);
 	const track = new Track.Producer("video");
 	// A null max delay sets no subscriber limit; an omitted one is zero.
-	const consumer = new Consumer(track.subscribe({ maxDelay: max === null ? null : Milli(max + warmup) }), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: max === null ? null : Milli(max + warmup) }}), {
 		format: new Format("video"),
 		delay: { min: Milli(min), max: max === null ? null : Milli(max) },
 		warmup: Milli(warmup),

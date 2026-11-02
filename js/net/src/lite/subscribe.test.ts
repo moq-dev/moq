@@ -389,6 +389,22 @@ test.each([Version.DRAFT_03, Version.DRAFT_05, Version.DRAFT_06])(
 	},
 );
 
+test("min delay survives lite-07 and decodes as not stated on legacy wires", async () => {
+	for (const version of [Version.DRAFT_03, Version.DRAFT_06, Version.DRAFT_07]) {
+		for (const minDelay of [undefined, 0, 250, Number.MAX_SAFE_INTEGER]) {
+			const expected = version === Version.DRAFT_07 ? minDelay : undefined;
+			const props = { id: 1n, broadcast: Path.from("room"), track: "video", priority: 3, minDelay };
+			const subscribe = await encodeMessage(version, new Subscribe(props));
+			const got = await Subscribe.decode(new Reader(undefined, subscribe, version), version);
+			expect(got.minDelay).toBe(expected);
+
+			const update = await encodeMessage(version, new SubscribeUpdate({ priority: 3, minDelay }));
+			const decoded = await SubscribeUpdate.decode(new Reader(undefined, update, version), version);
+			expect(decoded.minDelay).toBe(expected);
+		}
+	}
+});
+
 test("wanted group survives lite-07 and disappears on legacy wires", async () => {
 	for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 		for (const wantedGroup of [undefined, 0, 3, Number.MAX_SAFE_INTEGER]) {

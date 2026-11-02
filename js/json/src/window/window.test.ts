@@ -212,7 +212,7 @@ test("compressed round-trip across rolls", async () => {
 
 // The frame count and first-frame timestamp of each group in a finished track.
 async function groups(track: Track.Producer): Promise<[number, number | undefined][]> {
-	const ordered = track.subscribe({ maxDelay: Milli(30_000) }).ordered();
+	const ordered = track.subscribe({ delay: { max: Milli(30_000) }}).ordered();
 	const out: [number, number | undefined][] = [];
 	for (let group = await ordered.nextGroup(); group; group = await ordered.nextGroup()) {
 		const first = await group.readFrame();

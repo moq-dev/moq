@@ -22,7 +22,7 @@ import {
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { groupBounds, hiddenBelow, hooks, maxDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import { groupBounds, hiddenBelow, hooks, maxDelayOf, minDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { receiveFrame } from "../payload.ts";
@@ -70,6 +70,7 @@ import {
 	hasDatagrams,
 	hasFetchMaxDelay,
 	hasMediaTime,
+	hasMinDelay,
 	hasOrder,
 	hasProbeRtt,
 	hasRanges,
@@ -935,6 +936,7 @@ export class Subscriber {
 			priority: subscription.priority ?? 0,
 			order: subscription.order,
 			maxDelay: maxDelayOf(subscription),
+			minDelay: minDelayOf(subscription),
 			startGroup: subscription.groups?.start === undefined ? undefined : bounds.start,
 			endGroup: inclusiveGroupEnd(bounds.end),
 		});
@@ -1666,7 +1668,7 @@ export class Subscriber {
 		let lastSent: track.Subscription = {
 			priority: msg.priority,
 			order: msg.order,
-			maxDelay: Milli(msg.maxDelay),
+			delay: { max: Milli(msg.maxDelay), min: msg.minDelay === undefined ? null : Milli(msg.minDelay) },
 			groups: {
 				start: msg.startGroup === undefined ? undefined : { included: msg.startGroup },
 				end: msg.endGroup === undefined ? undefined : { excluded: exclusiveGroupEnd(msg.endGroup) ?? 0 },
@@ -1710,12 +1712,13 @@ export class Subscriber {
 			}
 
 			// Round-trip the other Subscribe parameters so the publisher doesn't
-			// interpret SUBSCRIBE_UPDATE as a reset of ordered/maxDelay/etc.
+			// interpret SUBSCRIBE_UPDATE as a reset of ordered/delay/etc.
 			const update = new SubscribeUpdate({
 				wantedGroup: refresh ?? sentWanted,
 				priority: current.priority ?? 0,
 				order: current.order,
 				maxDelay: maxDelayOf(current),
+				minDelay: minDelayOf(current),
 				startGroup: current.groups?.start === undefined ? undefined : bounds.start,
 				endGroup: inclusiveGroupEnd(bounds.end),
 			});
@@ -1747,7 +1750,9 @@ export class Subscriber {
 		return (
 			(a.priority ?? 0) === (b.priority ?? 0) &&
 			sameOrder &&
-			(a.maxDelay ?? 0) === (b.maxDelay ?? 0) &&
+			maxDelayOf(a) === maxDelayOf(b) &&
+			// A wire without `Subscriber Min Age` cannot carry a change to it.
+			(!hasMinDelay(this.version) || minDelayOf(a) === minDelayOf(b)) &&
 			sameStart &&
 			ag.start === bg.start &&
 			ag.end === bg.end

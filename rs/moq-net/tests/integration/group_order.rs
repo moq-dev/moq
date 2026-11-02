@@ -7,6 +7,7 @@
 //! the hop into the subscriber and releases them by send order, the way a congested
 //! sender would transmit them.
 
+use moq_net::track::Delay;
 use crate::support;
 
 use std::time::Duration;
@@ -54,7 +55,7 @@ fn read_arrivals(origin: moq_net::origin::Producer, order: Order) -> kio::clock:
 			.await
 			.expect("broadcast resolves");
 		let subscription = Subscription::default()
-			.with_max_delay(FOREVER)
+			.with_delay(Delay::default().with_max(FOREVER))
 			.with_range(0..)
 			.with_order(order);
 		let mut sub = remote

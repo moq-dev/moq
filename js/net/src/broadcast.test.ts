@@ -318,19 +318,19 @@ test("a request exposes the aggregate subscription options", async () => {
 
 	consumer.track("video").subscribe({
 		priority: 3,
-		maxDelay: Milli(100),
+		delay: { max: Milli(100) },
 		groups: { start: { included: 10 }, end: { excluded: 20 } },
 	});
 	consumer.track("video").subscribe({
 		priority: 7,
-		maxDelay: Milli(250),
+		delay: { max: Milli(250) },
 		groups: { start: { included: 0 }, end: { excluded: 30 } },
 	});
 
 	const request = await pendingRequest(consumer);
 	expect(request?.subscription).toEqual({
 		priority: 7,
-		maxDelay: Milli(250),
+		delay: { min: Milli.zero, max: Milli(250) },
 		order: "descending",
 		groups: { start: { included: 0 }, end: { excluded: 30 } },
 	});
@@ -442,11 +442,11 @@ test("two subscribers to one inserted track each get a full copy", async () => {
 
 	const a = broadcast
 		.track("video")
-		.subscribe({ maxDelay: Milli(5000) })
+		.subscribe({ delay: { max: Milli(5000) }})
 		.ordered();
 	const b = broadcast
 		.track("video")
-		.subscribe({ maxDelay: Milli(5000) })
+		.subscribe({ delay: { max: Milli(5000) }})
 		.ordered();
 
 	producer.writeFrame(textFrame("hello"));
@@ -478,7 +478,7 @@ test("a read throws Evicted at a shed front, then resyncs to the next group", as
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const sub = broadcast
 		.track("video")
-		.subscribe({ maxDelay: Milli(5000) })
+		.subscribe({ delay: { max: Milli(5000) }})
 		.ordered();
 
 	// Group 0 sheds its front without aborting the writer.
@@ -557,7 +557,7 @@ test("a finished track is still served from its cache", async () => {
 	const late = broadcast
 		.consume()
 		.track("track1")
-		.subscribe({ maxDelay: Milli(5000) })
+		.subscribe({ delay: { max: Milli(5000) }})
 		.ordered();
 	expect(await late.readString()).toBe("last");
 	expect(await late.nextGroup()).toBeUndefined();

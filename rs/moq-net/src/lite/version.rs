@@ -182,6 +182,15 @@ impl Version {
 		)
 	}
 
+	/// Whether SUBSCRIBE and SUBSCRIBE_UPDATE carry the subscriber's optional
+	/// `Subscriber Min Age`. Added in lite-07; an earlier subscription decodes it as not stated.
+	pub(crate) fn has_min_delay(self) -> bool {
+		!matches!(
+			self,
+			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
+		)
+	}
+
 	/// Whether FETCH carries the subscriber's optional max delay. Added in lite-07; an
 	/// earlier fetch is bounded by the publisher's retention alone.
 	pub(crate) fn has_fetch_max_delay(self) -> bool {

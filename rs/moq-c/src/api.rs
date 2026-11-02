@@ -728,10 +728,10 @@ pub struct moq_delay {
 	pub max_unlimited: bool,
 }
 
-impl From<moq_delay> for moq_mux::container::Delay {
+impl From<moq_delay> for moq_net::track::Delay {
 	fn from(delay: moq_delay) -> Self {
 		Self {
-			min: std::time::Duration::from_micros(delay.min_us),
+			min: Some(std::time::Duration::from_micros(delay.min_us)),
 			max: (!delay.max_unlimited).then(|| std::time::Duration::from_micros(delay.max_us)),
 		}
 	}
@@ -741,7 +741,7 @@ impl From<moq_delay> for moq_mux::container::Delay {
 ///
 /// # Safety
 /// - `delay` must be null or point to a valid [moq_delay].
-pub(crate) unsafe fn parse_delay(delay: *const moq_delay) -> moq_mux::container::Delay {
+pub(crate) unsafe fn parse_delay(delay: *const moq_delay) -> moq_net::track::Delay {
 	unsafe { delay.as_ref() }.copied().unwrap_or_default().into()
 }
 
@@ -853,7 +853,7 @@ pub(crate) unsafe fn parse_subscription(
 		.with_priority(subscription.priority)
 		.with_order(order);
 	let max_delay = std::time::Duration::from_micros(subscription.max_delay_us);
-	out = out.with_max_delay(subscription.max_delay_present.then_some(max_delay));
+	out = out.with_delay(moq_net::track::Delay::default().with_max(subscription.max_delay_present.then_some(max_delay)));
 	if !subscription.ranges.is_null() {
 		let ranges = unsafe { std::slice::from_raw_parts(subscription.ranges, subscription.ranges_len) };
 		let ranges = ranges
@@ -1323,8 +1323,8 @@ pub extern "C" fn moq_subscription_defaults() -> moq_subscription {
 	};
 	moq_subscription {
 		priority: defaults.priority,
-		max_delay_us: defaults.max_delay.map(micros).unwrap_or_default(),
-		max_delay_present: defaults.max_delay.is_some(),
+		max_delay_us: defaults.delay.max.map(micros).unwrap_or_default(),
+		max_delay_present: defaults.delay.max.is_some(),
 		ranges: std::ptr::null(),
 		ranges_len: 0,
 		order: order as u32,

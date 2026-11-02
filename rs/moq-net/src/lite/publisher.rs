@@ -2229,7 +2229,10 @@ impl SubscribeServe {
 	) -> Self {
 		let subscription = crate::track::Subscription {
 			priority: msg.priority,
-			max_delay: serving_max_delay(shared.version, msg.max_delay),
+			delay: track::Delay {
+				min: msg.min_delay,
+				max: serving_max_delay(shared.version, msg.max_delay),
+			},
 			order: msg.order,
 			..bounds.groups()
 		};
@@ -2481,7 +2484,7 @@ mod test {
 		// What run_subscribe hands the model for a peer that sent no budget at all.
 		let served = |version| {
 			producer.subscribe(
-				track::Subscription::default().with_max_delay(serving_max_delay(version, std::time::Duration::ZERO)),
+				track::Subscription::default().with_delay(track::Delay::default().with_max(serving_max_delay(version, std::time::Duration::ZERO))),
 			)
 		};
 		let drain = |subscriber: &mut track::Subscriber| {
@@ -2506,13 +2509,13 @@ mod test {
 		// Lite03-05 declare a budget, but their drafts define it as a staleness tolerance
 		// and an absent start as the latest group, so they are pinned all the same.
 		let tolerant =
-			producer.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(5)));
+			producer.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(5))));
 		let mut tolerant = tolerant.with_range(cursor_floor(Version::Lite05, None, producer.latest_sequence())..);
 		assert_eq!(drain(&mut tolerant), vec![2]);
 
 		// On lite-06 the declared budget is what resolves the start, so it stands.
 		let declared =
-			producer.subscribe(track::Subscription::default().with_max_delay(std::time::Duration::from_secs(5)));
+			producer.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(5))));
 		let mut declared = declared.with_range(cursor_floor(Version::Lite06, None, producer.latest_sequence())..);
 		assert_eq!(drain(&mut declared), vec![0, 1, 2]);
 	}
@@ -2563,7 +2566,7 @@ mod test {
 		let mut subscriber = producer.subscribe(
 			track::Subscription::default()
 				.with_start(0)
-				.with_max_delay(std::time::Duration::from_secs(60)),
+				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(60))),
 		);
 
 		let write = |producer: &mut track::Producer, sequence: u64| {
@@ -2690,7 +2693,7 @@ mod test {
 		use futures::FutureExt;
 
 		let mut producer = track_producer("test");
-		let mut subscriber = producer.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(5)));
+		let mut subscriber = producer.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(5))));
 
 		producer
 			.create_group(group::Info { sequence: 2 })
@@ -4084,7 +4087,10 @@ impl TrackRun {
 		let (start, end) = (groups.start(), groups.end());
 		let _ = self.track.update(crate::track::Subscription {
 			priority: upd.priority,
-			max_delay: serving_max_delay(self.ctx.version, upd.max_delay),
+			delay: crate::track::Delay {
+				min: upd.min_delay,
+				max: serving_max_delay(self.ctx.version, upd.max_delay),
+			},
 			order: upd.order,
 			..groups
 		});
@@ -5600,7 +5606,7 @@ mod serve_group_test {
 					);
 					// Nothing goes stale, so only the credit bounds what is held.
 					let subscriber =
-						track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+						track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))));
 					let (run, writer, _) = lite_run(Version::Lite07, session.clone(), subscriber);
 					(track, run, writer)
 				})
@@ -5636,7 +5642,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let subscriber = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::gated_open_uni(gate.consume()), subscriber);
 
 		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
@@ -5673,7 +5679,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(1)));
+		let subscriber = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(1))));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::gated_open_uni(gate.consume()), subscriber);
 		for sequence in 0..10 {
 			write_group(&mut track, sequence, sequence * 1000);
@@ -5978,6 +5984,7 @@ mod serve_group_test {
 			wanted_group,
 			priority: 0,
 			max_delay: Duration::ZERO,
+			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 			order: Order::Descending,
 		};
@@ -6014,7 +6021,7 @@ mod serve_group_test {
 			crate::track::Info::timed(),
 		);
 		// Old groups stay worth sending, so both are in flight at once.
-		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let subscriber = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))));
 		let session = SinkSession::new(Log::default()).with_groups().with_unacked_fin();
 		let log = session.log.clone();
 		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
@@ -6040,6 +6047,7 @@ mod serve_group_test {
 			order: Order::Ascending,
 			priority: 7,
 			max_delay: Duration::ZERO,
+			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 		});
 		{
@@ -6099,7 +6107,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let subscriber = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))));
 		let session = SinkSession::new(Log::default())
 			.with_groups()
 			.with_datagrams(1200)
@@ -6139,7 +6147,7 @@ mod serve_group_test {
 				"test",
 				crate::track::Info::timed(),
 			);
-			let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+			let subscriber = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))));
 			let session = SinkSession::new(Log::default()).with_groups().with_datagrams(1200);
 			let log = session.log.clone();
 			let (mut run, mut writer, _) = lite_run(Version::Lite07, session.clone(), subscriber);
@@ -6150,6 +6158,7 @@ mod serve_group_test {
 				order: Order::Descending,
 				priority: 0,
 				max_delay: Duration::from_secs(3600),
+				min_delay: None,
 				ranges: vec![lite::Range::span(Some(5), 2, Some(7), Some(3))],
 			});
 
@@ -6294,7 +6303,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let subscriber = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))));
 		let session = SinkSession::new(Log::default()).with_groups().with_datagrams(1200);
 		let log = session.log.clone();
 		let (mut run, mut writer, _) = lite_run(Version::Lite06, session.clone(), subscriber);
@@ -6313,6 +6322,7 @@ mod serve_group_test {
 			order: Order::Ascending,
 			priority: 3,
 			max_delay: Duration::from_secs(3600),
+			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 		});
 		let second = track
@@ -6345,7 +6355,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(3600)));
+		let subscriber = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))));
 		let log = Log::default();
 		let (mut run, mut writer, _) = lite07_run(SinkSession::new(log.clone()).with_unacked_fin(), subscriber);
 
@@ -6406,7 +6416,7 @@ mod serve_group_test {
 		let at = |millis| Anchor::Time(Timestamp::from_millis(millis).unwrap());
 		let subscriber = track.subscribe(
 			track::Subscription::default()
-				.with_max_delay(Duration::from_secs(3600))
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(3600)))
 				.with_ranges([
 					Range {
 						start: Anchor::Relative(1),
@@ -6528,7 +6538,7 @@ mod serve_group_test {
 				crate::track::Info::timed(),
 			);
 			let subscriber =
-				track.subscribe(track::Subscription::default().with_max_delay(Duration::from_millis(1500)));
+				track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_millis(1500))));
 			let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 			write_group(&mut track, 0, 0);
 			while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -6544,6 +6554,7 @@ mod serve_group_test {
 				wanted_group: None,
 				priority: 0,
 				max_delay: Duration::from_secs(10),
+				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 				order: Order::Descending,
 			});
@@ -6683,7 +6694,7 @@ mod serve_group_test {
 		);
 		let subscription = track::Subscription::default()
 			.with_start(5)
-			.with_max_delay(Duration::from_secs(60));
+			.with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		let subscriber = track.subscribe(subscription);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 5, 5);
@@ -6699,6 +6710,7 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
+			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 		});
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -6739,7 +6751,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
+		let subscriber = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60))));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 0, 0);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -6773,7 +6785,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(1)));
+		let subscriber = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(1))));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 0, 0);
 		write_group(&mut track, 2, 2);
@@ -6803,7 +6815,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
+		let subscriber = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60))));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 0, 0);
 		while run.poll_step(&mut writer, &kio::Waiter::noop()).is_ready() {}
@@ -6837,7 +6849,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(60)));
+		let subscriber = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60))));
 		let mut group = track.create_group(group::Info { sequence: u64::MAX }).unwrap();
 		group.start_at(1).unwrap();
 		group.write_frame(Timestamp::ZERO, b"x".as_slice()).unwrap();
@@ -6915,7 +6927,7 @@ mod serve_group_test {
 							.subscribe(
 								track::Subscription::default()
 									.with_range(0..)
-									.with_max_delay(Duration::from_secs(60)),
+									.with_delay(track::Delay::default().with_max(Duration::from_secs(60))),
 							)
 							.await
 							.unwrap(),
@@ -7076,7 +7088,7 @@ mod serve_group_test {
 		);
 		let subscription = track::Subscription::default()
 			.with_start(5)
-			.with_max_delay(Duration::from_secs(60));
+			.with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		let subscriber = track.subscribe(subscription);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 2, 2);
@@ -7094,6 +7106,7 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
+			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 		});
 		{
@@ -7119,7 +7132,7 @@ mod serve_group_test {
 		);
 		let subscription = track::Subscription::default()
 			.with_start(5)
-			.with_max_delay(Duration::from_secs(1));
+			.with_delay(track::Delay::default().with_max(Duration::from_secs(1)));
 		let subscriber = track.subscribe(subscription);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 5, 0);
@@ -7134,6 +7147,7 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(1),
+			min_delay: None,
 			ranges: vec![lite::Range::span(Some(0), 0, None, None)],
 		});
 		{
@@ -7165,7 +7179,7 @@ mod serve_group_test {
 		);
 		let subscription = track::Subscription::default()
 			.with_start(0)
-			.with_max_delay(Duration::from_secs(1));
+			.with_delay(track::Delay::default().with_max(Duration::from_secs(1)));
 		let subscriber = track.subscribe(subscription);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 0, 0);
@@ -7179,6 +7193,7 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(1),
+			min_delay: None,
 			ranges: vec![lite::Range::span(Some(start_group), 0, None, None)],
 		};
 		run.update(update(5));
@@ -7210,7 +7225,7 @@ mod serve_group_test {
 		);
 		let subscription = track::Subscription::default()
 			.with_start(0)
-			.with_max_delay(Duration::from_secs(10));
+			.with_delay(track::Delay::default().with_max(Duration::from_secs(10)));
 		let subscriber = track.subscribe(subscription);
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		write_group(&mut track, 0, 0);
@@ -7223,6 +7238,7 @@ mod serve_group_test {
 			order: crate::track::Order::Ascending,
 			priority: 0,
 			max_delay: Duration::from_secs(10),
+			min_delay: None,
 			ranges: vec![lite::Range::span(Some(start_group), 0, None, None)],
 		};
 		run.update(update(5));
@@ -7251,7 +7267,7 @@ mod serve_group_test {
 		let subscriber = track.subscribe(
 			track::Subscription::default()
 				.with_start(0)
-				.with_max_delay(Duration::from_secs(60)),
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(60))),
 		);
 		let (mut run, mut writer, _log) = lite_run(Version::Lite05, SinkSession::new(Log::default()), subscriber);
 		let mut settle = |run: &mut TrackRun| {
@@ -7268,6 +7284,7 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
+			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 		});
 		write_group(&mut track, 5, 5);
@@ -7289,7 +7306,7 @@ mod serve_group_test {
 		let subscriber = track.subscribe(
 			track::Subscription::default()
 				.with_start(5)
-				.with_max_delay(Duration::from_secs(60)),
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(60))),
 		);
 		let (mut run, mut writer, _log) = lite_run(Version::Lite05, SinkSession::new(Log::default()), subscriber);
 		run.update(lite::SubscribeUpdate {
@@ -7297,6 +7314,7 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(60),
+			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 		});
 
@@ -7320,7 +7338,7 @@ mod serve_group_test {
 			"test",
 			crate::track::Info::timed(),
 		);
-		let subscriber = track.subscribe(track::Subscription::default().with_max_delay(Duration::from_secs(1)));
+		let subscriber = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(1))));
 		let (mut run, mut writer, log) = lite_run(version, SinkSession::new(Log::default()), subscriber);
 		{
 			let mut run = std::pin::pin!(kio::wait(|waiter| run.poll(&mut writer, waiter)));
@@ -7354,7 +7372,7 @@ mod serve_group_test {
 			track.request_start(Some(0)).unwrap();
 			let subscription = track::Subscription::default()
 				.with_start(start_group)
-				.with_max_delay(Duration::from_secs(30));
+				.with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
 			let subscriber = track.subscribe(subscription);
 
 			let session = ScriptedSession::new(Vec::new());
@@ -7431,6 +7449,7 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(30),
+			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 		});
 		relay.settle();
@@ -7460,6 +7479,7 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(30),
+			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 		});
 		relay.settle();
@@ -7486,6 +7506,7 @@ mod serve_group_test {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::ZERO,
+			min_delay: None,
 			ranges: vec![lite::Range::span(Some(7), 0, None, None)],
 		};
 		relay.run.update(update);
@@ -8281,6 +8302,7 @@ mod tests {
 						track: "video".into(),
 						priority: 0,
 						max_delay: Duration::ZERO,
+						min_delay: None,
 						ranges: vec![lite::Range::span(None, 0, None, None)],
 					};
 					leave_request::<SubscribeServe>(version, &subscribe, wait, close).await;
@@ -8340,6 +8362,7 @@ mod tests {
 				track: "video".into(),
 				priority: 0,
 				max_delay: Duration::ZERO,
+				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 			}
 			.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
@@ -8555,6 +8578,7 @@ mod tests {
 			track: "video".into(),
 			priority: 1,
 			max_delay: Duration::ZERO,
+			min_delay: None,
 			// A relay asks from its cached group, so the SUBSCRIBE is not a live-edge join.
 			ranges: vec![lite::Range::span(Some(1), 0, None, None)],
 		}
@@ -8578,6 +8602,7 @@ mod tests {
 			order: crate::track::Order::Descending,
 			priority,
 			max_delay: Duration::ZERO,
+			min_delay: None,
 			ranges: vec![lite::Range::span(Some(1), 0, None, None)],
 		};
 		session.push(&update(Some(2), 3).encode_bytes(version).unwrap());
@@ -8636,6 +8661,7 @@ mod tests {
 			order: crate::track::Order::Descending,
 			priority: 0,
 			max_delay: Duration::from_secs(3600),
+			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 		}
 	}
@@ -8674,6 +8700,7 @@ mod tests {
 			track: "video".into(),
 			priority: 0,
 			max_delay: Duration::from_secs(3600),
+			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 		}
 		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
@@ -9094,6 +9121,7 @@ mod tests {
 				track: "video".into(),
 				priority: 0,
 				max_delay: Duration::ZERO,
+				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 			};
 			let session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
@@ -9205,6 +9233,7 @@ mod tests {
 				track: "video".into(),
 				priority: 0,
 				max_delay: Duration::ZERO,
+				min_delay: None,
 				ranges: vec![lite::Range::span(None, 0, None, None)],
 			};
 			let session = ScriptedSession::new(request.encode_bytes(version).unwrap().to_vec());
@@ -9342,6 +9371,7 @@ mod tests {
 			track: track.into(),
 			priority,
 			max_delay: Duration::ZERO,
+			min_delay: None,
 			ranges: vec![lite::Range::span(None, 0, None, None)],
 		};
 		let mut script = Vec::new();

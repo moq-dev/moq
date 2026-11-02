@@ -12633,7 +12633,7 @@ mod stitch_tests {
 			.subscribe(Some(
 				track::Subscription::default()
 					.with_order(crate::track::Order::Ascending)
-					.with_max_delay(None),
+					.with_delay(track::Delay::default().with_max(None)),
 			))
 			.with_range(..);
 		let mut fill = h.stream().await;
@@ -14782,7 +14782,7 @@ mod stitch_tests {
 						track::Subscription::default()
 							.with_range(SEQUENCE..last + 1)
 							.with_order(crate::track::Order::Ascending)
-							.with_max_delay(None),
+							.with_delay(track::Delay::default().with_max(None)),
 					))
 					.await
 					.unwrap();
@@ -14870,7 +14870,7 @@ mod stitch_tests {
 					track::Subscription::default()
 						.with_range(3..7)
 						.with_order(crate::track::Order::Ascending)
-						.with_max_delay(None),
+						.with_delay(track::Delay::default().with_max(None)),
 				))
 				.await
 				.unwrap();

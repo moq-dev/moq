@@ -41,7 +41,7 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 			.available()
 			.await
 			.unwrap();
-		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(30));
+		let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)));
 		let mut subscribers = Vec::new();
 		for i in 0..tracks.len() {
 			let track = remote.track(&format!("{i}")).unwrap();

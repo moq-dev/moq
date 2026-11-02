@@ -15,7 +15,7 @@ afterEach(() => installed.close());
 
 function setup() {
 	const track = new Track.Producer("rewind");
-	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) }}), {
 		format: new Format("video"),
 		delay: { max: Milli(30_000) },
 	});

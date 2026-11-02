@@ -61,7 +61,7 @@ async function subscribed(largest?: number) {
 	const reader = subscriber
 		.consume(Path.from("room"))
 		.track("video")
-		.subscribe({ maxDelay: Milli(60_000) });
+		.subscribe({ delay: { max: Milli(60_000) }});
 
 	const peer = await Stream.accept(pair.client, VERSION);
 	if (!peer) throw new Error("the subscriber never opened a subscribe stream");

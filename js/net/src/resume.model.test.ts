@@ -310,7 +310,7 @@ function groups(range: Range): track.Groups {
 }
 
 function subscription(budget: Budget, range: Range): track.Subscription {
-	return { maxDelay: budget === "hour" ? HOUR : SHORT, groups: range ? groups(range) : undefined };
+	return { delay: { max: budget === "hour" ? HOUR : SHORT }, groups: range ? groups(range) : undefined };
 }
 
 function max(values: Iterable<number>): number | undefined {

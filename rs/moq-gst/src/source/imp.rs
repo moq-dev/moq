@@ -1645,7 +1645,7 @@ impl Reader {
 			subscriber = async {
 				instance
 					.track(&shape.track)?
-					.subscribe(moq_net::track::Subscription::default().with_max_delay(max_delay))
+					.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(max_delay)))
 					.await
 			} => match subscriber {
 				Ok(subscriber) => subscriber,

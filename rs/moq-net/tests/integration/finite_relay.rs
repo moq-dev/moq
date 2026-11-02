@@ -8,6 +8,7 @@
 //! last until those groups drain: a relay cancels its upstream subscription once nobody
 //! subscribes, and the publisher then resets every group still on the wire.
 
+use moq_net::track::Delay;
 use crate::support;
 
 use std::time::Duration;
@@ -83,7 +84,7 @@ async fn round(name: &str, arrival: Arrival) -> (Vec<u64>, Result<(), moq_net::E
 
 	let (mut heads, mut opened) = futures::channel::mpsc::unbounded();
 	let reader = kio::clock::sim::spawn(async move {
-		let subscription = Subscription::default().with_max_delay(MAX_DELAY).with_range(0..);
+		let subscription = Subscription::default().with_delay(Delay::default().with_max(MAX_DELAY)).with_range(0..);
 		let mut sub = remote
 			.track("tail")
 			.unwrap()

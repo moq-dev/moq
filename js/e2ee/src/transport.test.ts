@@ -77,7 +77,7 @@ for (const [name, protocol, routed, timed] of transports) {
 		expect(remote.epoch).toBe(routed ? generation.epoch : undefined);
 		const epoch = remote.epoch ?? generation.epoch;
 		const consumer = await new Protected.Consumer(remote, cred.consume(epoch)).subscribe("video", {
-			maxDelay: Milli(60_000),
+			delay: { max: Milli(60_000) },
 		});
 
 		const received = await consumer.recvGroup();
@@ -133,7 +133,7 @@ for (const [name, protocol] of [
 		const remote = await active(subscriber, path);
 		const consumer = await new Protected.Consumer(remote, cred.consume(remote.epoch ?? generation.epoch)).subscribe(
 			"audio",
-			{ maxDelay: Milli(60_000) },
+			{ delay: { max: Milli(60_000) } },
 		);
 		expect(decoder.decode((await (await consumer.recvGroup())?.readFrame())?.plaintext)).toBe("init");
 

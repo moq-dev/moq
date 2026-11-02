@@ -784,7 +784,7 @@ async fn measure(cell: Cell, profile: Option<moq_shaper::Profile>, bytes: usize)
 		let name = index.to_string();
 		let track = setup.broadcast.create_track(name.as_str(), timed()).unwrap();
 		// Groups in flight fall behind the live edge, so a zero budget would skip them.
-		let subscription = Subscription::default().with_max_delay(TIMEOUT);
+		let subscription = Subscription::default().with_delay(Delay::default().with_max(TIMEOUT));
 		let sub = kio::clock::timeout(TIMEOUT, setup.remote.track(&name).unwrap().subscribe(subscription))
 			.await
 			.expect("subscribe timeout")

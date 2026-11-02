@@ -3,14 +3,14 @@
 import { Milli } from "@moq/clock";
 import { Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
-import { Consumer, type Delay } from "../src/container/consumer.ts";
+import { Consumer } from "../src/container/consumer.ts";
 import { Format } from "../src/container/legacy.ts";
 
 console.log("groups,warnings,bytes,catchup_ms");
 for (const count of [1, 16, 256, 1024]) {
 	const track = new Track.Producer("tone");
-	const delay = new Signal<Delay>({ max: Milli(30_000) });
-	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
+	const delay = new Signal<Track.Delay>({ max: Milli(30_000) });
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) }}), {
 		format: new Format("data"),
 		delay,
 	});

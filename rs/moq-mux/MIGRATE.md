@@ -4,12 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
-### A `Delay` sets where a consumer starts ([#7311](https://github.com/moq-dev/moq/pull/7311))
+### A `Delay` sets where a consumer starts ([#7311](https://github.com/moq-dev/moq/pull/7311), [#7597](https://github.com/moq-dev/moq/pull/7597))
 
 `container::Consumer::set_max_delay(Duration)` is `set_delay(Delay)`, and `with_delay(Delay)` is its builder.
-`container::Delay { min, max }` defaults to zero for both: `max` (`None` for no limit) is the max delay that `set_max_delay` took, and the subscription still carries it.
-`min` is the playout delay. An unfloored consumer starts at the group covering the live edge less `min` plus any `with_warmup`, waiting for it when the newest group arrives first. Before the first read, a backlog that already landed starts at the first group whose first frame is within the max delay, plus the warmup, of the newest content, keeping the group covering the live edge less `min` and the warmup.
-Replace `consumer.set_max_delay(d)` with `consumer.set_delay(Delay { max: Some(d), ..Delay::default() })`, and set `min` to your playout delay. Call `with_warmup` before `with_delay`.
+`moq_net::track::Delay { min, max }` defaults to zero for both: `max` (`None` for no limit) is the max delay that `set_max_delay` took. `set_delay` puts the whole delay on the subscription, and `Consumer::new` inherits it from there.
+`min` is the playout delay, and a consumer reads an unstated (`None`) one as zero. An unfloored consumer starts at the group covering the live edge less `min` plus any `with_warmup`, waiting for it when the newest group arrives first. Before the first read, a backlog that already landed starts at the first group whose first frame is within the max delay, plus the warmup, of the newest content, keeping the group covering the live edge less `min` and the warmup.
+Replace `consumer.set_max_delay(d)` with `consumer.set_delay(Delay::default().with_max(d))`, and set `min` to your playout delay. Call `with_warmup` before `with_delay`.
 
 ### Compression moves to the track
 

@@ -139,7 +139,7 @@ async fn subscribe(broadcast: &broadcast::Producer, track: &str) -> track::Order
 	let subscription = Subscription::default()
 		.with_range(0..)
 		.with_order(Order::Ascending)
-		.with_max_delay(None);
+		.with_delay(Delay::default().with_max(None));
 	track.subscribe(subscription).await.unwrap().ordered()
 }
 
@@ -305,7 +305,7 @@ async fn a_narrowed_read_skips_the_group_it_left() {
 	let gate = mock.stall_gets("rec/video/");
 	let ascending = |groups| {
 		Subscription::default()
-			.with_max_delay(None)
+			.with_delay(Delay::default().with_max(None))
 			.with_range(groups)
 			.with_order(Order::Ascending)
 	};
@@ -622,7 +622,7 @@ async fn groups_and_datagrams_keep_their_forms() {
 	let subscription = Subscription::default()
 		.with_range(0..)
 		.with_order(Order::Ascending)
-		.with_max_delay(None);
+		.with_delay(Delay::default().with_max(None));
 	let mut reader = track.subscribe(subscription).await.unwrap();
 
 	archive

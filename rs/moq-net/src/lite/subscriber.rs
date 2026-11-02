@@ -2326,6 +2326,7 @@ impl kio::Task for SourceServe {
 mod tests {
 	use super::*;
 	use crate::Timescale;
+	use crate::track::Delay;
 	use crate::coding::{Decode, Encode};
 	use crate::lite::test_transport::{Sent, SinkSession};
 	use crate::model::ProduceTest;
@@ -2353,6 +2354,7 @@ mod tests {
 				.unwrap(),
 			id: 0,
 			max_delay: Duration::ZERO,
+			min_delay: None,
 			start: None,
 			priority: 0,
 			requested: None,
@@ -2528,6 +2530,7 @@ mod tests {
 					.unwrap(),
 				id: 0,
 				max_delay: Duration::ZERO,
+				min_delay: None,
 				start: Some(floor),
 				priority: 0,
 				requested: Some(floor),
@@ -2757,7 +2760,7 @@ mod tests {
 		let mut reader = track.subscribe(
 			Subscription::default()
 				.with_range(0..)
-				.with_max_delay(Duration::from_secs(30)),
+				.with_delay(Delay::default().with_max(Duration::from_secs(30))),
 		);
 		track.start_at(WIDE).unwrap();
 		arrive(&track, &tail, WIDE, start);
@@ -2984,6 +2987,7 @@ mod tests {
 			stream,
 			id: 0,
 			max_delay: Duration::ZERO,
+			min_delay: None,
 			start: Some(2),
 			priority: 0,
 			requested: Some(2),
@@ -3698,7 +3702,7 @@ mod tests {
 			assert!(track.is_live(), "header first: {header_first}");
 
 			let subscription = crate::track::Subscription::default()
-				.with_max_delay(std::time::Duration::from_secs(10))
+				.with_delay(crate::track::Delay::default().with_max(std::time::Duration::from_secs(10)))
 				.with_range(0..);
 			let mut reader = track.subscribe(subscription);
 			let mut sequences = Vec::new();
@@ -4798,7 +4802,7 @@ mod tests {
 			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![info, Vec::new()]);
 			let subscriber = pipelining(crate::driver::Transport::new(session.clone()), version);
 			let wait = Duration::from_secs(10);
-			let (waiting, mut run) = subscribing(&subscriber, Subscription::default().with_max_delay(wait));
+			let (waiting, mut run) = subscribing(&subscriber, Subscription::default().with_delay(Delay::default().with_max(wait)));
 			for _ in 0..4 {
 				let _ = kio::Task::poll(&mut run, &kio::Waiter::noop());
 			}
@@ -4875,7 +4879,7 @@ mod tests {
 		let every = Subscription::default()
 			.with_order(crate::track::Order::Ascending)
 			.with_start(0)
-			.with_max_delay(Duration::from_secs(60));
+			.with_delay(Delay::default().with_max(Duration::from_secs(60)));
 		let mut consumer = track.consume().subscribe(every).await.unwrap();
 		let framing = lite::Framing::new(track.info(), version);
 		subscriber.subscribes.lock().get_mut(&0).unwrap().accept(
@@ -7267,6 +7271,7 @@ struct SubStream {
 	/// Original SUBSCRIBE params, echoed in every SUBSCRIBE_UPDATE; refreshed as the
 	/// downstream aggregate changes.
 	max_delay: Duration,
+	min_delay: Option<Duration>,
 	/// The lowest absolute start among the ranges, or `None` when one counts back from
 	/// the latest group: the floor below which nothing is asked for.
 	start: Option<u64>,
@@ -7740,7 +7745,8 @@ impl TrackServe {
 						let start_moved = active.start != subscription.start();
 						active.priority = subscription.priority;
 						active.order = subscription.order;
-						active.max_delay = wire_max_delay(subscription.max_delay);
+						active.max_delay = wire_max_delay(subscription.delay.max);
+						active.min_delay = subscription.delay.min;
 						// A lowered floor owes groups nobody asked for until now, in the session's
 						// tail as well as in the track's arrivals, which its start declaration
 						// restarts.
@@ -8015,7 +8021,7 @@ enum Begin {
 	Establish(Establish),
 }
 
-/// The `Subscriber Max Age` a SUBSCRIBE carries for `max_delay`: `None` is the publisher's
+/// The `Subscriber Max Age` a SUBSCRIBE carries for [`Delay::max`](crate::track::Delay::max): `None` is the publisher's
 /// max age alone, which the largest value every peer can read leaves to its clamp.
 fn wire_max_delay(max_delay: Option<std::time::Duration>) -> std::time::Duration {
 	max_delay.unwrap_or(std::time::Duration::from_millis(super::MAX_SAFE_DELAY_MS))
@@ -8028,6 +8034,7 @@ fn buffer_update(active: &mut SubStream) -> Result<(), Error> {
 		wanted_group: active.wanted,
 		priority: active.priority,
 		max_delay: active.max_delay,
+		min_delay: active.min_delay,
 		ranges: active.ranges.clone(),
 		order: active.order,
 	})
@@ -8069,7 +8076,8 @@ impl Establish {
 			broadcast: self.serve.path.clone(),
 			track: self.serve.name.as_str().into(),
 			priority: self.subscription.priority,
-			max_delay: wire_max_delay(self.subscription.max_delay),
+			max_delay: wire_max_delay(self.subscription.delay.max),
+			min_delay: self.subscription.delay.min,
 			ranges: self.ranges.clone(),
 			order: self.subscription.order,
 		};
@@ -8112,7 +8120,8 @@ impl Establish {
 			unanswered: (!answered).then(|| self.validity.clone()),
 			stream,
 			id: self.id,
-			max_delay: wire_max_delay(self.subscription.max_delay),
+			max_delay: wire_max_delay(self.subscription.delay.max),
+			min_delay: self.subscription.delay.min,
 			start: self.subscription.start(),
 			ranges: self.ranges.clone(),
 			priority: self.subscription.priority,

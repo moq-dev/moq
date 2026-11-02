@@ -111,7 +111,7 @@ async fn play(consumer: moq_net::origin::Consumer, announce: moq_net::announce::
 		.subscribe(
 			moq_net::track::Subscription::default()
 				.with_priority(1)
-				.with_max_delay(latency),
+				.with_delay(moq_net::track::Delay::default().with_max(latency)),
 		)
 		.await?;
 	let mut ordered =

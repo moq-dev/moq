@@ -175,7 +175,7 @@ Within one instance, recovery is about which groups are still worth having.
 - **Publisher max age bounds retention; reader max delay bounds interest.** A
   track's `max_age` (`maxAge` in JavaScript, `--max-age` on `moq import`) is the
   longest any hop keeps a non-latest group for late joiners, fetches, and
-  recovery; a relay may evict sooner. A reader's `max_delay` (`maxDelay`) is how long a non-latest group
+  recovery; a relay may evict sooner. A reader's `delay.max` is how long a non-latest group
   stays worth delivering to that reader. It can tighten retention, never relax
   it. Both age a group from its successor's arrival and never expire the newest
   group. Not every wire carries a reader's max delay on every request; see

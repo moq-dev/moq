@@ -1555,7 +1555,7 @@ pub(crate) mod tests {
 		let mut track = consumer
 			.track(&m2ts.track)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE))
+			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)))
 			.await
 			.unwrap();
 		let mut output = Vec::new();
@@ -1727,7 +1727,7 @@ pub(crate) mod tests {
 				}))
 			};
 			let recording =
-				read(start(moq_net::track::Subscription::default().with_max_delay(RECORDING_MAX_AGE)).await);
+				read(start(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE))).await);
 			// All at once: the track ends while the relay is still pulling the older groups.
 			decoder.decode_chunk(&second).unwrap();
 			decoder.finish().unwrap();
@@ -1774,7 +1774,7 @@ pub(crate) mod tests {
 			// has the groups behind it to read.
 			if version.starts_with("moq-lite") {
 				let late =
-					read(start(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(10))).await)
+					read(start(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)))).await)
 						.await
 						.unwrap()
 						.expect("the late read ends with the track");

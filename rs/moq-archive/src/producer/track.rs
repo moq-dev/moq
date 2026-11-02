@@ -171,7 +171,7 @@ impl<S: ObjectStore> Track<S> {
 		// backlog a smaller budget skipped is not sent again. The wait for a gap is narrowed below.
 		let subscription = Subscription::default()
 			.with_order(Order::Ascending)
-			.with_max_delay(config.max_delay)
+			.with_delay(Delay::default().with_max(config.max_delay))
 			.with_ranges([range]);
 
 		let subscribed = match self.shared.broadcast.track(&self.name) {
