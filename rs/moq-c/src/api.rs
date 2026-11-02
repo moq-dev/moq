@@ -3739,28 +3739,45 @@ pub unsafe extern "C" fn moq_publish_json_window(
 
 /// Append one record to the back of a JSON window. `value` is a UTF-8 JSON document.
 ///
+/// `timestamp` is when the edit occurred, converted to the track's millisecond timescale;
+/// NULL stamps the broadcast clock's current time.
+///
 /// Returns a zero on success, or a negative code on failure.
 ///
 /// # Safety
 /// - The caller must ensure `value` is a valid pointer to `value_len` bytes.
+/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn moq_publish_json_window_push(window: u32, value: *const c_char, value_len: usize) -> i32 {
+pub unsafe extern "C" fn moq_publish_json_window_push(
+	window: u32,
+	value: *const c_char,
+	value_len: usize,
+	timestamp: *const moq_timestamp,
+) -> i32 {
 	ffi::enter(move || {
 		let window = ffi::parse_id(window)?;
 		let value = unsafe { ffi::parse_slice(value.cast::<u8>(), value_len)? };
 		let value = serde_json::from_slice(value)?;
-		State::lock().publish.json_window_push(window, value)
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		State::lock().publish.json_window_push(window, value, timestamp)
 	})
 }
 
 /// Drop `count` records from the front of a JSON window, clamped to what it holds.
 ///
+/// `timestamp` is when the edit occurred, converted to the track's millisecond timescale;
+/// NULL stamps the broadcast clock's current time.
+///
 /// Returns a zero on success, or a negative code on failure.
+///
+/// # Safety
+/// - `timestamp` must be NULL or a valid pointer to a [moq_timestamp].
 #[unsafe(no_mangle)]
-pub extern "C" fn moq_publish_json_window_pop(window: u32, count: u64) -> i32 {
+pub unsafe extern "C" fn moq_publish_json_window_pop(window: u32, count: u64, timestamp: *const moq_timestamp) -> i32 {
 	ffi::enter(move || {
 		let window = ffi::parse_id(window)?;
-		State::lock().publish.json_window_pop(window, count)
+		let timestamp = unsafe { ffi::parse_timestamp(timestamp)? };
+		State::lock().publish.json_window_pop(window, count, timestamp)
 	})
 }
 
