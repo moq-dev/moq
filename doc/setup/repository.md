@@ -23,6 +23,7 @@ wrap the Rust core. [Layers](/lib/layers) maps the binding namespaces.
 | Relay routing, clustering, HTTP, configuration | [`rs/moq-relay`](https://github.com/moq-dev/moq/tree/main/rs/moq-relay) | [Relay](/bin/relay/) |
 | Authorization and path permissions | [`rs/moq-auth`](https://github.com/moq-dev/moq/tree/main/rs/moq-auth), [`js/auth`](https://github.com/moq-dev/moq/tree/main/js/auth) | [Authentication](/bin/relay/auth) |
 | Media catalogs and frame containers | [`rs/hang`](https://github.com/moq-dev/moq/tree/main/rs/hang), [`js/hang`](https://github.com/moq-dev/moq/tree/main/js/hang) | [hang](/concept/hang) |
+| Recording broadcasts and serving stored tracks | [`rs/moq-archive`](https://github.com/moq-dev/moq/tree/main/rs/moq-archive), [`rs/moq-cli/src/archive.rs`](https://github.com/moq-dev/moq/blob/main/rs/moq-cli/src/archive.rs) | [Archives](/concept/archives) |
 | Importing and exporting media formats | [`rs/moq-mux`](https://github.com/moq-dev/moq/tree/main/rs/moq-mux) | [Muxing](/lib/rs/moq-mux) |
 | Browser capture, playback, and controls | [`js/publish`](https://github.com/moq-dev/moq/tree/main/js/publish), [`js/watch`](https://github.com/moq-dev/moq/tree/main/js/watch), [`js/video`](https://github.com/moq-dev/moq/tree/main/js/video), [`js/ui`](https://github.com/moq-dev/moq/tree/main/js/ui) | [TypeScript](/lib/js/) |
 | Browser reactive state and cleanup | [`js/signals`](https://github.com/moq-dev/moq/tree/main/js/signals) | [Signals](/lib/js/signals) |
