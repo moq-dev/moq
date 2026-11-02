@@ -6,14 +6,14 @@ The `release` branch's relay refuses connection paths with `.` or `..` segments 
 
 ## Plan
 
-Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run).
+Decided 2026-10-30 (maintainer, follow-up planning after the /quest-afk run): combine these backports into one later patch release, with versions chosen by a human.
 
-- **Dot segments:** [moq-dev/moq#7366](https://github.com/moq-dev/moq/pull/7366) makes `Auth::admit` in `rs/moq-relay/src/auth.rs` refuse any path segment that is `.` or `..`, percent-encoded or not. Before it, a raw-QUIC SETUP path like `/tenant-a/../tenant-b?jwt=b` reached the auth server unresolved. Port it once #7366 merges.
-- **Auth redirects:** on `release`, `rs/moq-auth/src/client.rs:35` builds the client without a redirect policy, so reqwest follows up to 10 redirects and re-sends the credential's JSON body on a 307/308. Main refuses since [moq-dev/moq#6384](https://github.com/moq-dev/moq/pull/6384) (`redirect::Policy::none()`, plus an error naming the redirect). Found by the agent on [moq-dev/moq#7298](https://github.com/moq-dev/moq/pull/7298), which fixes the cluster client but not this one.
-- Hand-port rather than cherry-pick where `release` lacks main's structure, as [moq-dev/moq#7389](https://github.com/moq-dev/moq/pull/7389) did, with a regression test for each on `release`.
-- Version bumps stay with a human: several backports combine into one patch release, so this PR bumps nothing.
+- The main prerequisite [moq-dev/moq#7366](https://github.com/moq-dev/moq/pull/7366) merged on 2026-11-01. The hand-port of its dot-segment refusal and [moq-dev/moq#6384](https://github.com/moq-dev/moq/pull/6384)'s auth-client redirect refusal is [moq-dev/moq#7599](https://github.com/moq-dev/moq/pull/7599), targeting `release`.
+- That backport remains draft: full local CI and the io_uring compile cannot launch Cargo because of the existing mbx `E2BIG` defect tracked in [moq-dev/moq#7594](https://github.com/moq-dev/moq/pull/7594). Resume those checks after the infrastructure fix. The selected Rust package checks, all 588 selected tests, API compatibility checks, and other-vendor security review pass; the code PR records the evidence.
+- Once validated and approved, land the code PR on `release` and include it in the planned combined patch release. No versions, tags, publication, deployment, or merges were authorized for this implementation task.
+- Keep this main checkpoint draft until that patch publishes, then delete the quest and its milestone link, following [moq-dev/moq#7381](https://github.com/moq-dev/moq/pull/7381). The earlier [moq-dev/moq#7389](https://github.com/moq-dev/moq/pull/7389) backport is already merged and remains a separate scope.
 
-Public API: none. Wire: none.
+Public API: none. Wire format: none; the backport changes admission and auth HTTP refusal behavior.
 
 ## Related
 
