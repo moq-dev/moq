@@ -282,7 +282,9 @@ impl<O: Output> Media<O> {
 							.subscribe(
 								moq_net::track::Subscription::default()
 									.with_priority(hang::catalog::PRIORITY.video)
-									.with_delay(moq_net::track::Delay::default().with_max(delay.max)),
+									// The whole delay from the first request, so a cold join never
+									// states a zero minimum before the container's update.
+									.with_delay(delay),
 							)
 							.await?;
 						// Start at the live edge without asking the shared publisher
@@ -293,8 +295,7 @@ impl<O: Output> Media<O> {
 							subscriber = subscriber.with_range(largest.group.saturating_sub(lookback)..);
 						}
 						let format = catalog::hang::Container::try_from(config)?;
-						// The playout delay is the target latency; the floor above bounds how far
-						// back the start can wait, but the consumer still learns both bounds.
+						// The playout delay is the target latency, and the max how late a group may be.
 						let track = moq_mux::container::Consumer::new(subscriber, format).with_delay(delay);
 						Ok::<_, anyhow::Error>((track, decoder))
 					};
