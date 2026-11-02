@@ -1,4 +1,4 @@
-# Broadcast archives
+# [S] Broadcast archives
 
 ## Goal
 
@@ -32,8 +32,8 @@ archive (per-track `.timeline.z` records named by the catalog's root
   `broadcast.Consumer.tracks()` in JS).
   Over moq-transport, Rust learns an IETF peer's tracks with a FORWARD=0
   SUBSCRIBE_TRACKS whose held PUBLISHes resume for data. Our publishers
-  refuse a peer's SUBSCRIBE_TRACKS
-  ([decided 2026-10-28](/quest/m1/ietf-tracks-refuse.md)), so an archive
+  refuse a peer's SUBSCRIBE_TRACKS (decided 2026-10-28,
+  [moq-dev/moq#7236](https://github.com/moq-dev/moq/pull/7236)), so an archive
   reading through a moq-transport hop of ours gets no listing. Rejected:
   SUBSCRIBE_ALL, whose relay had to merge pushed feeds into pulled copies
   ([moq-dev/moq#5931](https://github.com/moq-dev/moq/pull/5931)). The archive
@@ -83,10 +83,6 @@ This README owns a new doc page, "Archives", under `doc/concept/`, written
 once the children land: what ANNOUNCE and TRACKS discover, the store layout (linking
 the moq-archive rustdoc that specifies it), and serving a stored broadcast
 from a host. Each child fixes the stale docs it touches.
-
-## Required
-
-- [Fixed HLS target duration](/quest/m1/archive/hls-target.md) - one `EXT-X-TARGETDURATION` for the run, from the declared `hls` duration; an overrun is listed with a warning
 
 ## Related
 

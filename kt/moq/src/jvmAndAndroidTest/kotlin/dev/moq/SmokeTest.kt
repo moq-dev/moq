@@ -1,21 +1,9 @@
 package dev.moq
 
-import dev.moq.media.*
 import dev.moq.audio.Consumer as AudioConsumer
-import dev.moq.audio.ReadFrame as AudioReadFrame
 import dev.moq.audio.Producer as AudioProducer
 import dev.moq.audio.ProducerOptions as AudioProducerOptions
-import dev.moq.video.Consumer as VideoConsumer
-import dev.moq.video.ReadFrame as VideoReadFrame
-import dev.moq.video.Producer as VideoProducer
-import dev.moq.video.ProducerOptions as VideoProducerOptions
-import dev.moq.video.FrameRate as VideoFrameRate
-
-import kotlinx.coroutines.async
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.toList
-import kotlinx.coroutines.test.runTest
+import dev.moq.audio.ReadFrame as AudioReadFrame
 import dev.moq.json.SnapshotConfig
 import dev.moq.json.SnapshotConsumer
 import dev.moq.json.SnapshotProducer
@@ -28,11 +16,14 @@ import dev.moq.json.WindowProducer
 import dev.moq.json.decode
 import dev.moq.json.events
 import dev.moq.json.push
-import dev.moq.json.timestamp
 import dev.moq.json.update
 import dev.moq.json.valuesAs
-import kotlinx.serialization.Serializable
-import uniffi.moq.MoqException
+import dev.moq.media.*
+import dev.moq.video.Consumer as VideoConsumer
+import dev.moq.video.FrameRate as VideoFrameRate
+import dev.moq.video.Producer as VideoProducer
+import dev.moq.video.ProducerOptions as VideoProducerOptions
+import dev.moq.video.ReadFrame as VideoReadFrame
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -41,28 +32,37 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.nanoseconds
+import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.test.runTest
+import kotlinx.serialization.Serializable
+import uniffi.moq.MoqException
 
-@Serializable
-private data class Status(val state: String)
+@Serializable private data class Status(val state: String)
 
 /** The next announce event. */
 private suspend fun AnnounceConsumer.nextRoute(): AnnounceEvent =
     checkNotNull(next()) { "announce stream ended" }
 
 private fun opusHead(): ByteArray =
-    "OpusHead".encodeToByteArray() + byteArrayOf(
-        1,
-        2,
-        0,
-        0,
-        0x80.toByte(),
-        0xbb.toByte(),
-        0,
-        0,
-        0,
-        0,
-        0,
-    )
+    "OpusHead".encodeToByteArray() +
+        byteArrayOf(
+            1,
+            2,
+            0,
+            0,
+            0x80.toByte(),
+            0xbb.toByte(),
+            0,
+            0,
+            0,
+            0,
+            0,
+        )
 
 class SmokeTest {
     @Test
@@ -80,7 +80,10 @@ class SmokeTest {
             BroadcastProducer().use { other ->
                 Timebase(owner).use { timebase ->
                     assertFailsWith<MoqException.Codec> {
-                        ContainerProducer(other, ContainerInit(ContainerFormat.FMP4, byteArrayOf(), timebase))
+                        ContainerProducer(
+                            other,
+                            ContainerInit(ContainerFormat.FMP4, byteArrayOf(), timebase),
+                        )
                     }
                     owner.end()
                     assertFailsWith<MoqException.Closed> { Timebase(owner) }
@@ -110,19 +113,23 @@ class SmokeTest {
     }
 
     /**
-     * Exercises the [Moq.connect] facade end to end without a network: a bogus
-     * dial failure reaches the returned session through [Session.closed]. Also proves
-     * the native lib loads through the transitive `moq-ffi` dependency.
-     * One-shot mode, since the default reconnect would retry the dial with
-     * backoff instead of failing.
+     * Exercises the [Moq.connect] facade end to end without a network: a bogus dial failure reaches
+     * the returned session through [Session.closed]. Also proves the native lib loads through the
+     * transitive `moq-ffi` dependency. One-shot mode, since the default reconnect would retry the
+     * dial with backoff instead of failing.
      */
     @Test
     fun `connect fails fast and surfaces a MoqException`() = runTest {
-        val ex = assertFailsWith<MoqException> {
-            Moq.connect("https://localhost:0/test", ClientConfig(tls = ClientTls(insecure = true), once = true)).use { moq ->
-                moq.session.closed()
+        val ex =
+            assertFailsWith<MoqException> {
+                Moq.connect(
+                        "https://localhost:0/test",
+                        ClientConfig(tls = ClientTls(insecure = true), once = true),
+                    )
+                    .use { moq ->
+                        moq.session.closed()
+                    }
             }
-        }
         assertTrue(
             ex.isShutdown || ex is MoqException.Connect || ex is MoqException.Url,
             "expected shutdown/connect/url error, got: $ex",
@@ -130,21 +137,23 @@ class SmokeTest {
     }
 
     /**
-     * The WebSocket fallback knobs reach the native client: a QUIC-only dial with
-     * no head start still fails fast, and an invalid value is refused up front
-     * as a config error rather than at the dial.
+     * The WebSocket fallback knobs reach the native client: a QUIC-only dial with no head start
+     * still fails fast, and an invalid value is refused up front as a config error rather than at
+     * the dial.
      */
     @Test
     fun `connect accepts the websocket fallback knobs`() = runTest {
         assertFailsWith<MoqException> {
             Moq.connect(
-                "https://localhost:0/test",
-                ClientConfig(
-                    tls = ClientTls(insecure = true),
-                    once = true,
-                    websocket = WebSocketConfig(enabled = false, delay = java.time.Duration.ZERO),
-                ),
-            ).use { moq -> moq.session.closed() }
+                    "https://localhost:0/test",
+                    ClientConfig(
+                        tls = ClientTls(insecure = true),
+                        once = true,
+                        websocket =
+                            WebSocketConfig(enabled = false, delay = java.time.Duration.ZERO),
+                    ),
+                )
+                .use { moq -> moq.session.closed() }
         }
         assertFailsWith<MoqException.Config> {
             Moq.connect("https://localhost:0/test", ClientConfig(versions = listOf("moq-lite-99")))
@@ -167,9 +176,9 @@ class SmokeTest {
     }
 
     /**
-     * The `dev.moq` typealiases resolve to the FFI objects, and the wrapper
-     * extensions apply to them. Constructing through an alias is enough to
-     * confirm both at compile time + lib load at runtime.
+     * The `dev.moq` typealiases resolve to the FFI objects, and the wrapper extensions apply to
+     * them. Constructing through an alias is enough to confirm both at compile time + lib load at
+     * runtime.
      */
     @Test
     fun `origin alias constructs and consumes`() = runTest {
@@ -181,26 +190,29 @@ class SmokeTest {
 
     @Test
     fun `all public ffi records and handles have aliases`() {
-        val hint: VideoHint = VideoHint(
-            coded = Dimensions(1920u, 1080u),
-            bitrate = 4_000_000uL,
-            framerate = 60.0,
-            optimizeForLatency = true,
-        )
+        val hint: VideoHint =
+            VideoHint(
+                coded = Dimensions(1920u, 1080u),
+                bitrate = 4_000_000uL,
+                framerate = 60.0,
+                optimizeForLatency = true,
+            )
         val snapshot: SnapshotConfig = SnapshotConfig(deltas = true)
         val properties: VideoProperties = VideoProperties(rotation = 315.0)
-        val backoff: Backoff = Backoff(
-            initial = java.time.Duration.ofMillis(500),
-            multiplier = 2u,
-            max = java.time.Duration.ofSeconds(10),
-            timeout = java.time.Duration.ZERO,
-        )
-        val client: ClientConfig = ClientConfig(
-            tls = ClientTls(insecure = true),
-            quic = QuicConfig(maxStreams = 4096uL),
-            websocket = WebSocketConfig(enabled = false),
-            backoff = backoff,
-        )
+        val backoff: Backoff =
+            Backoff(
+                initial = java.time.Duration.ofMillis(500),
+                multiplier = 2u,
+                max = java.time.Duration.ofSeconds(10),
+                timeout = java.time.Duration.ZERO,
+            )
+        val client: ClientConfig =
+            ClientConfig(
+                tls = ClientTls(insecure = true),
+                quic = QuicConfig(maxStreams = 4096uL),
+                websocket = WebSocketConfig(enabled = false),
+                backoff = backoff,
+            )
         val server: ServerConfig = ServerConfig(tls = ServerTls(generate = listOf("localhost")))
         assertEquals(4096uL, client.quic.maxStreams)
         assertEquals(listOf("localhost"), server.tls.generate)
@@ -262,18 +274,32 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val track = broadcast.publishTrack("events", TrackInfo(timescale = 1_000_000uL))
             val group = track.appendGroup()
-            group.writeFrame(Frame(payload = "cached".encodeToByteArray(), timestampUs = 0uL))
+            group.writeFrame(
+                Frame(
+                    payload = "cached".encodeToByteArray(),
+                    timestamp = Timestamp(0uL, 1_000_000uL),
+                )
+            )
             group.finish()
 
-            val fetched = broadcast.consume().fetchGroup(
-                "events",
-                0uL,
-                FetchGroupOptions(priority = 3),
-            )
+            val fetched =
+                broadcast
+                    .consume()
+                    .fetchGroup(
+                        "events",
+                        0uL,
+                        FetchGroupOptions(priority = 3),
+                    )
             assertEquals(0uL, fetched.sequence())
             assertEquals("cached", fetched.readFrame()?.payload?.decodeToString())
             assertNull(fetched.readFrame())
         }
+    }
+
+    @Test
+    fun `a default subscription skips superseded groups at once`() {
+        assertEquals(java.time.Duration.ZERO, Subscription.default().maxDelay)
+        assertNull(Subscription(maxDelay = null).maxDelay)
     }
 
     @Test
@@ -282,16 +308,19 @@ class SmokeTest {
             val track = broadcast.publishTrack("backlog", TrackInfo(timescale = 1_000_000uL))
             for (ms in 0uL until 3uL) {
                 val group = track.appendGroup()
-                group.writeFrame(Frame(payload = "x".encodeToByteArray(), timestampUs = ms * 1_000uL))
+                group.writeFrame(
+                    Frame(payload = "x".encodeToByteArray(), timestamp = Timestamp(ms, 1_000uL))
+                )
                 group.finish()
             }
-            val consumer = track.consume(
-                Subscription(
-                    maxDelay = java.time.Duration.ofSeconds(10),
-                    ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
-                    order = Order.ASCENDING,
-                ),
-            )
+            val consumer =
+                track.consume(
+                    Subscription(
+                        maxDelay = java.time.Duration.ofSeconds(10),
+                        ranges = listOf(Range(start = AnchorRelative(groups = 2uL))),
+                        order = Order.ASCENDING,
+                    )
+                )
             val sequences = List(3) { checkNotNull(consumer.recvGroup()).sequence() }
             assertEquals(listOf(0uL, 1uL, 2uL), sequences)
         }
@@ -304,10 +333,15 @@ class SmokeTest {
             val consumer = track.consume(null)
             track.appendGroup().finish()
             track.appendGroup().finish()
-            track.writeFrame(Frame(payload = "populated".encodeToByteArray(), timestampUs = 2_000uL))
+            track.writeFrame(
+                Frame(
+                    payload = "populated".encodeToByteArray(),
+                    timestamp = 2.milliseconds.toTimestamp(),
+                )
+            )
             val frame = consumer.readFrame()
             assertEquals("populated", frame?.payload?.decodeToString())
-            assertEquals(2_000uL, frame?.timestampUs)
+            assertEquals(Timestamp(2_000uL, 1_000_000uL), frame?.timestamp)
         }
     }
 
@@ -319,7 +353,7 @@ class SmokeTest {
             track.writeFrame(Frame(payload = "payload".encodeToByteArray()))
             val frame = consumer.readFrame()
             assertEquals("payload", frame?.payload?.decodeToString())
-            assertNull(frame?.timestampUs)
+            assertNull(frame?.timestamp)
             assertNull(consumer.info().timescale)
             track.finish()
         }
@@ -341,15 +375,33 @@ class SmokeTest {
     @Test
     fun `media group helper streams fetched frames`() = runTest {
         BroadcastProducer().use { broadcast ->
-            val media = dev.moq.media.TrackProducer.audio(broadcast, Named(null), AudioInit(format = AudioFormat.OPUS, data = opusHead()))
+            val media =
+                dev.moq.media.TrackProducer.audio(
+                    broadcast,
+                    Named(null),
+                    AudioInit(format = AudioFormat.OPUS, data = opusHead()),
+                )
             val consumer = broadcast.consume()
             val (name, audio) = catalog(consumer).audio.entries.single()
 
-            media.writeFrame(Frame(payload = "opus frame".encodeToByteArray(), timestampUs = 5_000_000uL))
+            media.writeFrame(
+                Frame(
+                    payload = "opus frame".encodeToByteArray(),
+                    timestamp = 5.seconds.toTimestamp(),
+                )
+            )
 
             // Fetch while the track is still published: finishing the media producer
             // unpublishes it, and the fetch would then miss with NotFound.
-            val fetched = dev.moq.media.GroupConsumer.fetch(consumer, dev.moq.media.GroupConfig(rendition = dev.moq.media.AudioRendition(name, audio), sequence = 0uL, options = FetchGroupOptions(priority = 3)))
+            val fetched =
+                dev.moq.media.GroupConsumer.fetch(
+                    consumer,
+                    dev.moq.media.GroupConfig(
+                        rendition = dev.moq.media.AudioRendition(name, audio),
+                        sequence = 0uL,
+                        options = FetchGroupOptions(priority = 3),
+                    ),
+                )
 
             // Close the group so the fetched stream terminates instead of waiting for more.
             media.finish()
@@ -360,30 +412,84 @@ class SmokeTest {
                 assertEquals(1, frames.size)
                 val frame = frames.single()
                 assertEquals("opus frame", frame.payload.decodeToString())
-                assertEquals(5_000_000uL, frame.timestampUs)
+                assertEquals(5.seconds, frame.timestamp.toDuration())
             }
         }
     }
 
     /** The typed JSON helpers round-trip a `@Serializable` value. */
     /**
-     * Video has the same Flow audio does. Decoding real frames needs an encoder
-     * backend, so this pins the extension's shape; the decode itself is covered
-     * by the interop test (`just test interop`).
+     * Video has the same Flow audio does. Decoding real frames needs an encoder backend, so this
+     * pins the extension's shape; the decode itself is covered by the interop test (`just test
+     * interop`).
      */
     @Test
     fun `video consumer exposes a reads flow like audio does`() {
-        val video: (dev.moq.video.Consumer) -> Flow<dev.moq.video.Read> = dev.moq.video.Consumer::reads
-        val audio: (dev.moq.audio.Consumer) -> Flow<dev.moq.audio.Read> = dev.moq.audio.Consumer::reads
+        val video: (dev.moq.video.Consumer) -> Flow<dev.moq.video.Read> =
+            dev.moq.video.Consumer::reads
+        val audio: (dev.moq.audio.Consumer) -> Flow<dev.moq.audio.Read> =
+            dev.moq.audio.Consumer::reads
 
         assertNotNull(video)
         assertNotNull(audio)
     }
 
-    /** Microsecond timestamps read back as a Duration. */
+    /** A 90 kHz tick, a present zero, and an untimed frame survive a write and read exactly. */
     @Test
-    fun `microsecond timestamps read back as durations`() {
-        assertEquals(20.milliseconds, Frame(payload = ByteArray(0), timestampUs = 20_000uL).timestamp)
+    fun `timestamps round-trip exactly`() = runTest {
+        for (timestamp in listOf(Timestamp(1uL, 90_000uL), Timestamp(0uL, 90_000uL), null)) {
+            BroadcastProducer().use { broadcast ->
+                // A timed track refuses an untimed frame, so null goes to an untimed one.
+                val track =
+                    broadcast.publishTrack(
+                        "ticks",
+                        timestamp?.let { TrackInfo(timescale = 90_000uL) },
+                    )
+                val consumer = track.consume(null)
+                track.writeFrame(Frame(payload = ByteArray(0), timestamp = timestamp))
+                assertEquals(timestamp, consumer.readFrame()?.timestamp)
+            }
+        }
+    }
+
+    /** A zero scale, a scale past 2^62 - 1, and a value past 2^61 - 1 are refused at the write. */
+    @Test
+    fun `out of range timestamps are refused`() {
+        BroadcastProducer().use { broadcast ->
+            val track = broadcast.publishTrack("ticks", TrackInfo(timescale = 90_000uL))
+            for (timestamp in
+                listOf(
+                    Timestamp(1uL, 0uL),
+                    Timestamp(1uL, 1uL shl 62),
+                    Timestamp(1uL shl 61, 90_000uL),
+                )) {
+                assertFailsWith<MoqException.TimeOverflow> {
+                    track.writeFrame(Frame(payload = ByteArray(0), timestamp = timestamp))
+                }
+            }
+        }
+    }
+
+    /**
+     * From a duration is exact at nanosecond scale; to a duration rounds down to a whole
+     * nanosecond.
+     */
+    @Test
+    fun `timestamps convert to and from durations`() {
+        assertEquals(Timestamp(20_000_000uL, 1_000_000_000uL), 20.milliseconds.toTimestamp())
+        assertFailsWith<IllegalArgumentException> { (-1).nanoseconds.toTimestamp() }
+        assertEquals(11_111.nanoseconds, Timestamp(1uL, 90_000uL).toDuration())
+        assertEquals(666_666_666.nanoseconds, Timestamp(2uL, 3uL).toDuration())
+        assertEquals(0.nanoseconds, Timestamp(1uL, 2_000_000_000uL).toDuration())
+        // The sub-second remainder times a billion overflows 64 bits at the largest scale, and the
+        // result is just under half a second.
+        assertEquals(
+            499_999_999.nanoseconds,
+            Timestamp((1uL shl 61) - 1uL, (1uL shl 62) - 1uL).toDuration(),
+        )
+        assertFailsWith<IllegalArgumentException> {
+            Timestamp((1uL shl 61) - 1uL, 1uL).toDuration()
+        }
         assertNull(AudioEncoderOutput(codec = AudioCodec.opus()).frameDuration)
     }
 
@@ -394,12 +500,24 @@ class SmokeTest {
             val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000_000uL))
             val producer = SnapshotProducer(broadcast, track, config)
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
-            for (n in 1..4) producer.update(Status(state = "live$n"), timestampUs = n.toULong() * 1_000uL)
+            for (n in 1..4) producer.update(
+                Status(state = "live$n"),
+                timestamp = n.milliseconds.toTimestamp(),
+            )
 
             // `next` yields every state in order; `latest` skips the buffered third.
-            assertEquals(Timed(Status(state = "live1"), 1.milliseconds), consumer.next()?.decode<Status>())
-            assertEquals(Timed(Status(state = "live2"), 2.milliseconds), consumer.next()?.decode<Status>())
-            assertEquals(Timed(Status(state = "live4"), 4.milliseconds), consumer.latest()?.decode<Status>())
+            assertEquals(
+                Timed(Status(state = "live1"), Timestamp(1_000uL, 1_000_000uL)),
+                consumer.next()?.decode<Status>(),
+            )
+            assertEquals(
+                Timed(Status(state = "live2"), Timestamp(2_000uL, 1_000_000uL)),
+                consumer.next()?.decode<Status>(),
+            )
+            assertEquals(
+                Timed(Status(state = "live4"), Timestamp(4_000uL, 1_000_000uL)),
+                consumer.latest()?.decode<Status>(),
+            )
         }
     }
 
@@ -407,26 +525,30 @@ class SmokeTest {
     fun `json window yields pushes and pops in order`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = WindowConfig()
-            val track = broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL, compress = true))
+            val track =
+                broadcast.publishTrack("log", TrackInfo(timescale = 1_000_000uL, compress = true))
             val producer = WindowProducer(track, config)
             val consumer = WindowConsumer(broadcast.consume().subscribeTrack("log", null))
-            for (n in 1..3) producer.push(Status(state = "live$n"), timestampUs = n.toULong() * 1_000uL)
-            producer.pop(2uL, 4_000uL)
+            for (n in 1..3) producer.push(
+                Status(state = "live$n"),
+                timestamp = Timestamp(n.toULong(), 1_000uL),
+            )
+            producer.pop(2uL, Timestamp(4uL, 1_000uL))
 
             for (n in 0..2) {
                 val timed = checkNotNull(consumer.next())
                 val push = assertIs<WindowEventPush>(timed.event)
                 assertEquals(n.toULong(), push.index)
                 assertEquals(Status(state = "live${n + 1}"), push.decode<Status>())
-                assertEquals((n + 1).milliseconds, timed.timestamp)
+                assertEquals((n + 1).milliseconds, timed.timestamp?.toDuration())
             }
             val pop = checkNotNull(consumer.next())
             assertEquals(WindowEventPop(0uL, 2uL), pop.event)
-            assertEquals(4.milliseconds, pop.timestamp)
+            assertEquals(4.milliseconds, pop.timestamp?.toDuration())
 
             // The cut's new group restates record 2, which this reader already has.
             producer.cut()
-            producer.push(Status(state = "live4"), timestampUs = 5_000uL)
+            producer.push(Status(state = "live4"), timestamp = 5.milliseconds.toTimestamp())
             producer.finish()
             val events = consumer.events().toList()
             assertEquals(1, events.size)
@@ -440,7 +562,8 @@ class SmokeTest {
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
+            val producer =
+                SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             assertEquals("status", demand.name())
             assertEquals(null, demand.wanted())
@@ -456,28 +579,30 @@ class SmokeTest {
     fun `cancelling a flow collection cancels its native handle`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
+            val producer =
+                SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             val demand: TrackDemand = producer.demand()
             producer.update(Status(state = "live"))
 
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
             while (demand.wantedChanged() == null) {}
-            // `first` cancels the collection, which must release the subscription without an explicit cancel.
+            // `first` cancels the collection, which must release the subscription without an
+            // explicit cancel.
             assertEquals(Status(state = "live"), consumer.valuesAs<Status>().first().value)
             while (demand.wantedChanged() != null) {}
         }
     }
 
     /**
-     * A pre-encoded `String` must reach the wire untouched: the member overload
-     * wins over the reified extension, which would otherwise double-encode it
-     * into a JSON string literal.
+     * A pre-encoded `String` must reach the wire untouched: the member overload wins over the
+     * reified extension, which would otherwise double-encode it into a JSON string literal.
      */
     @Test
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            val producer = SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
+            val producer =
+                SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config)
             producer.update("""{"state":"raw"}""")
 
             val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
@@ -487,42 +612,66 @@ class SmokeTest {
 
     @Test
     fun `server listens, publishes, and streams requests`() = runTest {
-        Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
-            assertTrue(server.localAddr.startsWith("127.0.0.1:"), "bound: ${server.localAddr}")
+        Server.listen(
+                ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))
+            )
+            .use { server ->
+                assertTrue(server.localAddr.startsWith("127.0.0.1:"), "bound: ${server.localAddr}")
 
-            val fingerprints = server.certFingerprints()
-            assertEquals(1, fingerprints.size)
-            assertEquals(64, fingerprints[0].length)
+                val fingerprints = server.certFingerprints()
+                assertEquals(1, fingerprints.size)
+                assertEquals(64, fingerprints[0].length)
 
-            server.createBroadcast("live").use { publication ->
-                publication.announce(AnnounceRoute())
-                publication.unannounce()
+                server.createBroadcast("live").use { publication ->
+                    publication.announce(AnnounceRoute())
+                    publication.unannounce()
+                }
             }
-        }
     }
 
     @Test
     fun `sessions advertise the wrapper ahead of moq-ffi`() = runTest {
-        Server.listen(ServerConfig(bind = "127.0.0.1:0", versions = listOf("moq-lite-07-wip"), tls = ServerTls(generate = listOf("localhost")))).use { server ->
-            Moq.connect("https://${server.localAddr}", ClientConfig(versions = listOf("moq-lite-07-wip"), tls = ClientTls(insecure = true))).use {
-                server.requests().first().use { request ->
-                    val advertised = request.peerImplementation()
-                    assertTrue(advertised?.startsWith("moq-kt/") == true, "advertised: $advertised")
-                }
+        Server.listen(
+                ServerConfig(
+                    bind = "127.0.0.1:0",
+                    versions = listOf("moq-lite-07-wip"),
+                    tls = ServerTls(generate = listOf("localhost")),
+                )
+            )
+            .use { server ->
+                Moq.connect(
+                        "https://${server.localAddr}",
+                        ClientConfig(
+                            versions = listOf("moq-lite-07-wip"),
+                            tls = ClientTls(insecure = true),
+                        ),
+                    )
+                    .use {
+                        server.requests().first().use { request ->
+                            val advertised = request.peerImplementation()
+                            assertTrue(
+                                advertised?.startsWith("moq-kt/") == true,
+                                "advertised: $advertised",
+                            )
+                        }
+                    }
             }
-        }
     }
 
     @Test
     fun `closing a server releases its port`() = runTest {
-        val first = Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost"))))
+        val first =
+            Server.listen(
+                ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))
+            )
         val addr = first.localAddr
         first.close()
 
         // No retry: close() released the listening socket before returning.
-        Server.listen(ServerConfig(bind = addr, tls = ServerTls(generate = listOf("localhost")))).use { rebound ->
-            assertEquals(addr, rebound.localAddr)
-        }
+        Server.listen(ServerConfig(bind = addr, tls = ServerTls(generate = listOf("localhost"))))
+            .use { rebound ->
+                assertEquals(addr, rebound.localAddr)
+            }
     }
 
     @Test
@@ -531,7 +680,7 @@ class SmokeTest {
             origin.createBroadcast("live").use { publication ->
                 publication.broadcast().use { it.publishTrack("events", null) }
                 val consumer = origin.consume()
-                assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
+                assertFailsWith<MoqException> { consumer.request("live") }
 
                 publication.announce(AnnounceRoute())
                 val announced = consumer.announced(AnnounceConfig())
@@ -541,11 +690,11 @@ class SmokeTest {
                 publication.unannounce()
                 val retracted = assertIs<AnnounceEventEnd>(announced.nextRoute())
                 assertEquals("live", retracted.announce.prefix)
-                assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
+                assertFailsWith<MoqException> { consumer.request("live") }
 
                 publication.announce(AnnounceRoute())
                 assertIs<AnnounceEventStart>(announced.nextRoute())
-                consumer.requestBroadcast("live")
+                consumer.request("live")
             }
         }
     }
@@ -559,11 +708,11 @@ class SmokeTest {
             publication.broadcast().use { broadcast ->
                 publication.use { it.announce(AnnounceRoute()) }
                 assertIs<AnnounceEventStart>(announced.nextRoute())
-                consumer.requestBroadcast("live")
+                consumer.request("live")
 
                 broadcast.end()
                 assertIs<AnnounceEventEnd>(announced.nextRoute())
-                assertFailsWith<MoqException> { consumer.requestBroadcast("live") }
+                assertFailsWith<MoqException> { consumer.request("live") }
             }
         }
     }
@@ -579,7 +728,7 @@ class SmokeTest {
                     replacement.announce(AnnounceRoute())
                     assertFailsWith<MoqException.Closed> { stale.announce(AnnounceRoute()) }
                     assertFailsWith<MoqException.Closed> { stale.unannounce() }
-                    origin.consume().requestBroadcast("live")
+                    origin.consume().request("live")
                     replacement.broadcast().use { it.end() }
                 }
             }
@@ -601,7 +750,9 @@ class SmokeTest {
                 val restart = assertIs<AnnounceEventRestart>(announced.nextRoute())
                 assertEquals(second, restart.announce.route.epoch)
 
-                assertFailsWith<MoqException> { publication.announce(AnnounceRoute(epoch = "not-an-epoch")) }
+                assertFailsWith<MoqException> {
+                    publication.announce(AnnounceRoute(epoch = "not-an-epoch"))
+                }
             }
         }
     }
@@ -609,7 +760,8 @@ class SmokeTest {
     @Test
     fun `announced pattern reports captures`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
-            val announced = origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
+            val announced =
+                origin.consume().announced(AnnounceConfig(prefix = "room", filter = "*/chat"))
             origin.createBroadcast("room/alice/chat").use { publication ->
                 publication.announce(AnnounceRoute())
                 val update = assertIs<AnnounceEventStart>(announced.nextRoute())
@@ -624,7 +776,7 @@ class SmokeTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.requests("live").use { dynamic ->
                 val pending = async {
-                    origin.consume().requestBroadcast("live/cam")
+                    origin.consume().request("live/cam")
                 }
                 val request = dynamic.requestedBroadcast()
                 assertEquals("live/cam", request.path())
@@ -632,7 +784,8 @@ class SmokeTest {
                     prepared.broadcast().use { fill ->
                         prepared.publish().use { publication ->
                             pending.await()
-                            // The publication fills the broadcast it prepared: ending one ends the other.
+                            // The publication fills the broadcast it prepared: ending one ends the
+                            // other.
                             publication.broadcast().use { it.end() }
                             assertFailsWith<MoqException.Closed> { fill.publishTrack("late", null) }
                         }
@@ -655,25 +808,31 @@ class SmokeTest {
     }
 
     /**
-     * Opus' 2.5 ms frame reaches the encoder, and a duration outside the Opus
-     * set is refused rather than silently rounded.
+     * Opus' 2.5 ms frame reaches the encoder, and a duration outside the Opus set is refused rather
+     * than silently rounded.
      */
     @Test
     fun `encode audio honors the opus frame duration set`() {
-        val input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u)
+        val input =
+            AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u)
 
         BroadcastProducer().use { broadcast ->
             val catalog = CatalogProducer(broadcast)
-            val fine = AudioProducer(
-                catalog,
-                AudioProducerOptions(
-                    input = input,
-                    output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDuration = java.time.Duration.ofNanos(2_500_000)),
-                    track = "fine",
-                ),
-            )
+            val fine =
+                AudioProducer(
+                    catalog,
+                    AudioProducerOptions(
+                        input = input,
+                        output =
+                            AudioEncoderOutput(
+                                codec = AudioCodec.opus(),
+                                frameDuration = java.time.Duration.ofNanos(2_500_000),
+                            ),
+                        track = "fine",
+                    ),
+                )
             // 2.5 ms of silence at 48 kHz mono f32: exactly one encoded frame.
-            fine.write(AudioFrame(timestampUs = 0uL, data = ByteArray(120 * 4)))
+            fine.write(AudioFrame(timestamp = Timestamp(0uL, 48_000uL), data = ByteArray(120 * 4)))
             fine.finish()
 
             assertFailsWith<MoqException.Audio> {
@@ -681,7 +840,11 @@ class SmokeTest {
                     catalog,
                     AudioProducerOptions(
                         input = input,
-                        output = AudioEncoderOutput(codec = AudioCodec.opus(),  frameDuration = java.time.Duration.ofMillis(2)),
+                        output =
+                            AudioEncoderOutput(
+                                codec = AudioCodec.opus(),
+                                frameDuration = java.time.Duration.ofMillis(2),
+                            ),
                         track = "coarse",
                     ),
                 )
@@ -690,86 +853,139 @@ class SmokeTest {
     }
 
     /**
-     * Both sides read the grant their peer gave them, and a peer that verifies no tokens
-     * of its own refuses another one as unsupported.
+     * Both sides read the grant their peer gave them, and a peer that verifies no tokens of its own
+     * refuses another one as unsupported.
      */
     @Test
     fun `session auth reads the grant`() = runTest {
         val version = listOf("moq-lite-07-wip")
         Server.listen(
-            ServerConfig(bind = "127.0.0.1:0", versions = version, tls = ServerTls(generate = listOf("localhost"))),
-        ).use { server ->
-            // Not requests().first(): ending that collection cancels the server.
-            val accepted = async { server.server.accept()!!.accept() }
-            val moq = Moq.connect(
-                "https://${server.localAddr}",
-                ClientConfig(bind = "127.0.0.1:0", versions = version, tls = ClientTls(insecure = true), once = true),
+                ServerConfig(
+                    bind = "127.0.0.1:0",
+                    versions = version,
+                    tls = ServerTls(generate = listOf("localhost")),
+                )
             )
-            moq.use {
-                val everything = Grant(publish = listOf("**"), subscribe = listOf("**"), expires = null)
-                assertEquals(everything, moq.grants().updates().first { it != null })
-                val session = accepted.await()
-                assertEquals(everything, session.grants().updates().first { it != null })
-                assertNull(everything.expires)
-                assertNull(session.tokens(), "an accepted session presents no tokens")
+            .use { server ->
+                // Not requests().first(): ending that collection cancels the server.
+                val accepted = async { server.server.accept()!!.accept() }
+                val moq =
+                    Moq.connect(
+                        "https://${server.localAddr}",
+                        ClientConfig(
+                            bind = "127.0.0.1:0",
+                            versions = version,
+                            tls = ClientTls(insecure = true),
+                            once = true,
+                        ),
+                    )
+                moq.use {
+                    val everything =
+                        Grant(publish = listOf("**"), subscribe = listOf("**"), expires = null)
+                    assertEquals(everything, moq.grants().updates().first { it != null })
+                    val session = accepted.await()
+                    assertEquals(everything, session.grants().updates().first { it != null })
+                    assertNull(everything.expires)
+                    assertNull(session.tokens(), "an accepted session presents no tokens")
 
-                moq.tokens().set(listOf("extra"))
-                assertFailsWith<MoqException.Unsupported> { moq.tokens().answered() }
-                assertEquals(everything, moq.grants().grant())
-                session.cancel(0u)
+                    moq.tokens().set(listOf("extra"))
+                    assertFailsWith<MoqException.Unsupported> { moq.tokens().answered() }
+                    assertEquals(everything, moq.grants().grant())
+                    session.cancel(0u)
+                }
             }
-        }
     }
 
     /** The returned Session owns its pending dial even after Client cancellation. */
     @Test
     fun `session owns and cancels its first dial`() = runTest {
-        Server.listen(ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))).use { server ->
-            val client = Client(ClientConfig(bind = "127.0.0.1:0", tls = ClientTls(insecure = true), once = true))
-            val session = client.connect("https://${server.localAddr}")
-            client.cancel()
-            assertEquals(0uL, session.state().connects)
-            session.cancel(0u)
-            session.closed()
-            assertEquals(ConnectionPhase.CLOSED, session.state().phase)
-        }
+        Server.listen(
+                ServerConfig(bind = "127.0.0.1:0", tls = ServerTls(generate = listOf("localhost")))
+            )
+            .use { server ->
+                val client =
+                    Client(
+                        ClientConfig(
+                            bind = "127.0.0.1:0",
+                            tls = ClientTls(insecure = true),
+                            once = true,
+                        )
+                    )
+                val session = client.connect("https://${server.localAddr}")
+                client.cancel()
+                assertEquals(0uL, session.state().connects)
+                session.cancel(0u)
+                session.closed()
+                assertEquals(ConnectionPhase.CLOSED, session.state().phase)
+            }
     }
 
-    /** A fixed playout delay is reported back as is, and an estimated one moves as frames are read. */
+    /**
+     * A fixed playout delay is reported back as is, and an estimated one moves as frames are read.
+     */
     @Test
     fun `audio consumer reports its playout delay`() = runTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.createBroadcast("audio-delay").use { publication ->
                 publication.broadcast().use { broadcast ->
-                    val audio = AudioProducer(
-                        CatalogProducer(broadcast),
-                        AudioProducerOptions(
-                            input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u),
-                            output = AudioEncoderOutput(codec = AudioCodec.opus(), ),
-                            track = "mic",
-                        ),
-                    )
+                    val audio =
+                        AudioProducer(
+                            CatalogProducer(broadcast),
+                            AudioProducerOptions(
+                                input =
+                                    AudioEncoderInput(
+                                        format = AudioSampleFormat.F32,
+                                        sampleRate = 48_000u,
+                                        channels = 1u,
+                                    ),
+                                output = AudioEncoderOutput(codec = AudioCodec.opus()),
+                                track = "mic",
+                            ),
+                        )
                     publication.announce(AnnounceRoute())
 
-                    val consumer = origin.consume().requestBroadcast("audio-delay")
+                    val consumer = origin.consume().request("audio-delay")
                     val catalog = CatalogConsumer.subscribe(consumer).next()!!
                     val rendition = catalog.audio["mic"]!!
 
-                    val fixedOutput = AudioDecoderOutput(format = AudioSampleFormat.F32, delay = java.time.Duration.ofMillis(80))
+                    val fixedOutput =
+                        AudioDecoderOutput(
+                            format = AudioSampleFormat.F32,
+                            delay =
+                                Delay(
+                                    min = java.time.Duration.ofMillis(80),
+                                    max = java.time.Duration.ZERO,
+                                ),
+                            estimate = false,
+                        )
                     val fixed = AudioConsumer.subscribe(consumer, "mic", rendition, fixedOutput)
-                    val estimated = AudioConsumer.subscribe(consumer, "mic", rendition, AudioDecoderOutput(format = AudioSampleFormat.F32))
+                    val estimated =
+                        AudioConsumer.subscribe(
+                            consumer,
+                            "mic",
+                            rendition,
+                            AudioDecoderOutput(format = AudioSampleFormat.F32),
+                        )
                     assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
                     val initial = estimated.delay()
 
                     // Two 20 ms Opus frames of silence at 48 kHz mono.
                     for (i in 0 until 2) {
-                        audio.write(AudioFrame(timestampUs = i.toULong() * 20_000uL, data = ByteArray(960 * 4)))
+                        audio.write(
+                            AudioFrame(
+                                timestamp = Timestamp(i.toULong() * 960uL, 48_000uL),
+                                data = ByteArray(960 * 4),
+                            )
+                        )
                     }
                     assertIs<AudioReadFrame>(fixed.next())
                     assertIs<AudioReadFrame>(estimated.next())
 
                     assertEquals(java.time.Duration.ofMillis(80), fixed.delay())
-                    assertTrue(estimated.delay() != initial, "the estimate should move as frames are read")
+                    assertTrue(
+                        estimated.delay() != initial,
+                        "the estimate should move as frames are read",
+                    )
 
                     fixed.cancel()
                     estimated.cancel()
@@ -784,33 +1000,49 @@ class SmokeTest {
         OriginProducer(OriginConfig()).use { origin ->
             origin.createBroadcast("video-decode-frame").use { publication ->
                 publication.broadcast().use { broadcast ->
-                    val video = VideoProducer(
-                        CatalogProducer(broadcast),
-                        VideoProducerOptions(
-                            input = VideoEncoderInput(format = VideoPixelFormat.RGBA, width = 320u, height = 240u, framerate = VideoFrameRate(30000u, 1001u)),
-                            output = VideoEncoderOutput(codec = VideoCodec.H264,  kind = softwareEncoder),
-                            track = "camera",
-                            bandwidth = null,
-                        ),
-                    )
+                    val video =
+                        VideoProducer(
+                            CatalogProducer(broadcast),
+                            VideoProducerOptions(
+                                input =
+                                    VideoEncoderInput(
+                                        format = VideoPixelFormat.RGBA,
+                                        width = 320u,
+                                        height = 240u,
+                                        framerate = VideoFrameRate(30000u, 1001u),
+                                    ),
+                                output =
+                                    VideoEncoderOutput(
+                                        codec = VideoCodec.H264,
+                                        kind = softwareEncoder,
+                                    ),
+                                track = "camera",
+                                bandwidth = null,
+                            ),
+                        )
                     publication.announce(AnnounceRoute())
 
                     // Seed the track so a subscriber joining below lands on encoded media.
                     val rgba = ByteArray(320 * 240 * 4) { 0x80.toByte() }
                     video.cut()
                     for (i in 0 until 10) {
-                        video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
+                        video.write(
+                            VideoFrame(timestamp = Timestamp(i.toULong(), 30uL), data = rgba)
+                        )
                     }
 
-                    val consumer = origin.consume().requestBroadcast("video-decode-frame")
+                    val consumer = origin.consume().request("video-decode-frame")
                     val catalog = CatalogConsumer.subscribe(consumer).next()!!
                     val rendition = catalog.video["camera"]!!
 
-                    val decoder = VideoConsumer.subscribe(consumer, "camera", rendition, VideoDecoderOutput())
+                    val decoder =
+                        VideoConsumer.subscribe(consumer, "camera", rendition, VideoDecoderOutput())
 
                     // Keep the encoder fed so the decoder sees frames after it joined.
                     for (i in 10 until 40) {
-                        video.write(VideoFrame(timestampUs = i.toULong() * 33_333uL, data = rgba))
+                        video.write(
+                            VideoFrame(timestamp = Timestamp(i.toULong(), 30uL), data = rgba)
+                        )
                     }
 
                     assertIs<VideoReadFrame>(decoder.next()).frame.use { frame ->
@@ -819,11 +1051,21 @@ class SmokeTest {
                         decoder.cancel()
 
                         val planar = frame.pixels(VideoPixelFormat.I420)
-                        assertEquals(frame.width().toInt() * frame.height().toInt() * 3 / 2, planar.size)
+                        assertEquals(
+                            frame.width().toInt() * frame.height().toInt() * 3 / 2,
+                            planar.size,
+                        )
 
                         val packed = frame.pixels(VideoPixelFormat.RGBA)
-                        assertEquals(frame.width().toInt() * frame.height().toInt() * 4, packed.size)
-                        assertTrue(packed.indices.filter { it % 4 == 3 }.all { packed[it] == 0xFF.toByte() })
+                        assertEquals(
+                            frame.width().toInt() * frame.height().toInt() * 4,
+                            packed.size,
+                        )
+                        assertTrue(
+                            packed.indices
+                                .filter { it % 4 == 3 }
+                                .all { packed[it] == 0xFF.toByte() }
+                        )
                     }
 
                     video.finish()
@@ -834,8 +1076,9 @@ class SmokeTest {
 
     @Test
     fun `encode audio with opus object`() {
-        val input = AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u)
-        val silence = AudioFrame(timestampUs = 0uL, data = ByteArray(960 * 4))
+        val input =
+            AudioEncoderInput(format = AudioSampleFormat.F32, sampleRate = 48_000u, channels = 1u)
+        val silence = AudioFrame(timestamp = Timestamp(0uL, 48_000uL), data = ByteArray(960 * 4))
 
         // The producer retains the codec, so releasing the codec and the
         // config in either order must still encode.
@@ -843,14 +1086,15 @@ class SmokeTest {
             BroadcastProducer().use { broadcast ->
                 val codec = AudioCodec.opus()
                 val output = AudioEncoderOutput(codec = codec)
-                val producer = AudioProducer(
-                    CatalogProducer(broadcast),
-                    AudioProducerOptions(
-                        input = input,
-                        output = output,
-                        track = "mic",
-                    ),
-                )
+                val producer =
+                    AudioProducer(
+                        CatalogProducer(broadcast),
+                        AudioProducerOptions(
+                            input = input,
+                            output = output,
+                            track = "mic",
+                        ),
+                    )
                 if (codecFirst) {
                     codec.close()
                 } else {

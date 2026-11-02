@@ -1,7 +1,7 @@
 name: Quest
 
 # Validates the quest tree on every branch that carries one. check.yml already
-# runs `quest check` in the merge queue and on release PRs, but a direct push (a
+# runs `quest check` in the landing gate and on release PRs, but a direct push (a
 # merge to `main` or `release`, or `main` merged into a questline) is nobody's pull
 # request, so a broken tree could land there unseen.
 #

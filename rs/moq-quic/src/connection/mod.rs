@@ -7,6 +7,7 @@ use std::{
 	fmt, io, mem,
 	net::{IpAddr, SocketAddr},
 	sync::Arc,
+	task::Poll,
 };
 
 use bytes::{Bytes, BytesMut};
@@ -17,7 +18,7 @@ use thiserror::Error;
 use tracing::{debug, error, trace, trace_span, warn};
 
 use crate::{
-	Dir, Duration, Frame, Instant, Limits, LimitsError, MAX_CID_SIZE, MAX_STREAM_COUNT, MIN_INITIAL_SIZE, Side,
+	Dir, Duration, Frame, Instant, Limits, LimitsError, MAX_CID_SIZE, MAX_STREAM_COUNT, MIN_INITIAL_SIZE, Rate, Side,
 	StreamId, TIMER_GRANULARITY, TokenStore, Transmit, TransportError, TransportErrorCode, VarInt, Version,
 	cid_queue::CidQueue,
 	coding::BufMutExt,
@@ -43,7 +44,6 @@ mod ack_frequency;
 use ack_frequency::AckFrequencyState;
 
 mod assembler;
-pub use assembler::Chunk;
 
 mod bandwidth_probe;
 use bandwidth_probe::BandwidthProbe;
@@ -53,7 +53,7 @@ use cid_state::CidState;
 
 mod datagrams;
 use datagrams::DatagramState;
-pub use datagrams::{Datagrams, SendDatagramError};
+pub use datagrams::Datagrams;
 
 mod mtud;
 #[cfg(feature = "mux")]
@@ -72,7 +72,11 @@ use paths::{PathData, PathResponses};
 pub(crate) mod qlog;
 use qlog::QlogSink;
 
+mod rate;
+
 mod send_buffer;
+
+mod receive_timestamps;
 
 mod sent_packets;
 #[cfg(feature = "fuzz")]
@@ -101,12 +105,11 @@ pub use stats::{CreditStats, FrameStats, PathStats, Stats, UdpStats};
 
 mod streams;
 pub(crate) use streams::StreamsState;
-pub use streams::{
-	Chunks, ClosedStream, FinishError, LeaseError, Leased, ReadError, ReadableError, RecvStream, SendGroup, SendGroups,
-	SendOptions, SendStream, ShouldTransmit, StreamEvent, Streams, WriteError, Written,
-};
+pub use streams::{ShouldTransmit, StreamEvent, Streams, recv, send};
 
 mod timer;
+
+pub(crate) mod waits;
 use crate::congestion::{self, Controller};
 use timer::{Timer, TimerTable};
 
@@ -123,8 +126,8 @@ use timer::{Timer, TimerTable};
 /// - B. Handlers for incoming events from the network or system, named `handle_*`.
 /// - C. State machine mutators, for incoming commands from the application. For convenience we
 ///   refer to this as "performing I/O" below, however as per the design of this library none of the
-///   functions actually perform system-level I/O. For example, [`read`](RecvStream::read) and
-///   [`write`](SendStream::write), but also things like [`reset`](SendStream::reset).
+///   functions actually perform system-level I/O. For example, [`read`](recv::Stream::read) and
+///   [`write`](send::Stream::write), but also things like [`reset`](send::Stream::reset).
 /// - D. Polling functions for outgoing events or actions for the caller to
 ///   take, named `poll_*`.
 ///
@@ -209,6 +212,8 @@ pub struct Connection {
 	permit_idle_reset: bool,
 	/// Negotiated idle timeout
 	idle_timeout: Option<Duration>,
+	/// Keep-alive interval, derived from [`Self::idle_timeout`] unless configured
+	keep_alive: Option<Duration>,
 	/// The time we send next bundled ACK
 	///
 	/// The goal is to wait long enough for the peer to acknowledge our previous
@@ -262,8 +267,14 @@ pub struct Connection {
 	app_limited: bool,
 	/// Reused to hand the congestion controller the packets an ACK acknowledged
 	acked: Vec<congestion::Acked>,
+	/// When received 1-RTT packets arrived, kept while the peer asks for receive timestamps
+	receive_timestamps: Option<receive_timestamps::Log>,
+	/// When the datagram being handled arrived, if the socket knows
+	arrival: Option<Instant>,
 	/// Resends in-flight data to probe for bandwidth while `app_limited`
 	bandwidth_probe: BandwidthProbe,
+	/// Holds sending to a cap below whatever the congestion controller allows
+	send_rate: Option<rate::Bucket>,
 
 	streams: StreamsState,
 	/// Surplus remote CIDs for future use on new paths
@@ -355,6 +366,8 @@ impl Connection {
 				None | Some(VarInt(0)) => None,
 				Some(dur) => Some(Duration::from_millis(dur.0)),
 			},
+			// Armed only once established, after the peer's parameters set it.
+			keep_alive: None,
 			timers: TimerTable::default(),
 			authentication_failures: 0,
 			early_1rtt: Vec::new(),
@@ -378,7 +391,10 @@ impl Connection {
 			probe_when_heard: false,
 
 			app_limited: false,
+			send_rate: None,
 			acked: Vec::new(),
+			receive_timestamps: None,
+			arrival: None,
 			bandwidth_probe: BandwidthProbe::new(&config, now),
 			receiving_ecn: false,
 
@@ -397,6 +413,13 @@ impl Connection {
 			stats: Stats::default(),
 			version,
 		};
+		// The caps take the live path, so the initial window counts as credit already granted.
+		let rates = Limits {
+			receive_rate: this.config.limits.receive_rate,
+			send_rate: this.config.limits.send_rate,
+			..Limits::default()
+		};
+		this.set_limits(rates).expect("rate caps are always valid");
 		if path_validated {
 			this.on_path_validated();
 		}
@@ -416,7 +439,34 @@ impl Connection {
 	/// - a call was made to `handle_timeout`
 	#[must_use]
 	pub fn poll_timeout(&self) -> Option<Instant> {
-		self.timers.next_timeout()
+		let credit = match self.state.is_closed() {
+			true => None,
+			false => self.streams.receive_rate_deadline(),
+		};
+		match (self.timers.next_timeout(), credit) {
+			(Some(timer), Some(credit)) => Some(timer.min(credit)),
+			(timer, credit) => timer.or(credit),
+		}
+	}
+
+	/// Wait for the handshake to complete
+	///
+	/// Ready once it did, even if the connection was lost since, or with the reason the
+	/// connection was lost first.
+	pub fn poll_connected(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.streams.waits.poll_connected(waiter)
+	}
+
+	/// Wait for the handshake to be confirmed, as [`poll_connected`](Self::poll_connected) does
+	pub fn poll_handshake_confirmed(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.streams.waits.poll_confirmed(waiter)
+	}
+
+	/// Wait for the connection to be lost, returning why
+	///
+	/// A local [`close()`](Self::close) reports [`Error::LocallyClosed`].
+	pub fn poll_closed(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		self.streams.waits.poll_closed(waiter)
 	}
 
 	/// Returns application-facing events
@@ -458,17 +508,17 @@ impl Connection {
 
 	/// Provide control over the send groups that schedule outgoing streams
 	#[must_use]
-	pub fn send_groups(&mut self) -> SendGroups<'_> {
-		SendGroups {
+	pub fn send_groups(&mut self) -> send::Groups<'_> {
+		send::Groups {
 			state: &mut self.streams,
 		}
 	}
 
 	/// Provide control over streams
 	#[must_use]
-	pub fn recv_stream(&mut self, id: StreamId) -> RecvStream<'_> {
+	pub fn recv_stream(&mut self, id: StreamId) -> recv::Stream<'_> {
 		assert!(id.dir() == Dir::Bi || id.initiator() != self.side.side());
-		RecvStream {
+		recv::Stream {
 			id,
 			state: &mut self.streams,
 			pending: &mut self.spaces[SpaceId::Data].pending,
@@ -477,9 +527,9 @@ impl Connection {
 
 	/// Provide control over streams
 	#[must_use]
-	pub fn send_stream(&mut self, id: StreamId) -> SendStream<'_> {
+	pub fn send_stream(&mut self, id: StreamId) -> send::Stream<'_> {
 		assert!(id.dir() == Dir::Bi || id.initiator() == self.side.side());
-		SendStream {
+		send::Stream {
 			id,
 			state: &mut self.streams,
 			pending: &mut self.spaces[SpaceId::Data].pending,
@@ -597,6 +647,12 @@ impl Connection {
 		// Set only when the congestion window itself was full. This is the spec's
 		// `C.is_cwnd_limited`, which a pacing delay must not stand in for.
 		let mut cwnd_blocked = false;
+		// Set once the bandwidth probe sent a duplicate or held one back, which it only does once
+		// the application ran dry
+		let mut probe_filled = false;
+		// Set when the send rate cap held a send back: a local policy, not the path, so the
+		// controller hears it as application-limited.
+		let mut rate_blocked = false;
 
 		// Iterate over all spaces and find data to send
 		let mut space_idx = 0;
@@ -634,9 +690,13 @@ impl Connection {
 							self.timers.set(Timer::Pacing, until);
 						}
 						send_blocked = true;
+						probe_filled = true;
 						false
 					}
-					bandwidth_probe::Ready::Send => true,
+					bandwidth_probe::Ready::Send => {
+						probe_filled = true;
+						true
+					}
 				};
 			if (can_send.is_empty() && !bandwidth_probe && (!close || self.spaces[space_id].crypto.is_none()))
 				|| (finish_first && space_id == SpaceId::Initial)
@@ -717,6 +777,21 @@ impl Connection {
 						trace!("blocked by pacing");
 						break;
 					}
+				}
+
+				// Loss probes are held to the send rate cap too: it refills with time, unlike the
+				// congestion window, so a probe only waits, and a peer faking loss cannot draw
+				// probes past the cap.
+				if ack_eliciting
+					&& !close && let Some(delay) = self
+					.send_rate
+					.as_mut()
+					.and_then(|cap| cap.delay(now, segment_size as u64 + untracked_bytes))
+				{
+					self.timers.set(Timer::Pacing, delay);
+					rate_blocked = true;
+					trace!("blocked by the send rate cap");
+					break;
 				}
 
 				// Finish current packet
@@ -884,6 +959,7 @@ impl Connection {
 					Self::try_populate_acks(
 						now,
 						self.receiving_ecn,
+						None,
 						&mut SentFrames::default(),
 						&mut self.spaces[space_id],
 						buf,
@@ -992,6 +1068,7 @@ impl Connection {
 				builder.exact_number,
 				bandwidth_probe,
 			);
+			debug_assert!(buf.len() <= builder.max_size, "frames overflowed the packet");
 
 			// ACK-only packets should only be sent when explicitly allowed. If we write them due to
 			// any other reason, there is a bug which leads to one component announcing write
@@ -1046,9 +1123,12 @@ impl Connection {
 		// Exhausting the packet spaces also catches a partial poll that drains the source.
 		// A full local send buffer prevents writes from reaching this queue; it is a sender
 		// limit, not evidence that the application has no more data.
-		self.app_limited = space_idx == spaces.len() && !send_blocked && !self.streams.send_window_full();
+		self.app_limited =
+			rate_blocked || (space_idx == spaces.len() && !send_blocked && !self.streams.send_window_full());
 		if self.app_limited {
 			self.path.congestion.on_app_limited(self.path.in_flight.bytes);
+		} else if probe_filled {
+			self.path.congestion.on_probe_filled(self.path.in_flight.bytes);
 		}
 
 		if cwnd_blocked {
@@ -1208,6 +1288,7 @@ impl Connection {
 		match event.0 {
 			Datagram(DatagramConnectionEvent {
 				now,
+				arrival,
 				remote,
 				ecn,
 				first_decode,
@@ -1227,6 +1308,8 @@ impl Connection {
 				self.stats.udp_rx.bytes += first_decode.len() as u64;
 				let data_len = first_decode.len();
 
+				// Coalesced packets share the datagram's arrival
+				self.arrival = arrival;
 				self.handle_decode(now, remote, ecn, first_decode);
 				// The current `path` might have changed inside `handle_decode`,
 				// since the packet could have triggered a migration. Make sure
@@ -1238,6 +1321,7 @@ impl Connection {
 					self.stats.udp_rx.bytes += data.len() as u64;
 					self.handle_coalesced(now, remote, ecn, data);
 				}
+				self.arrival = None;
 
 				self.qlog
 					.emit_recovery_metrics(self.pto_count, &mut self.path, now, self.orig_rem_cid);
@@ -1272,6 +1356,15 @@ impl Connection {
 	/// `Instant` that was output by `poll_timeout`; however spurious extra calls will simply
 	/// no-op and therefore are safe.
 	pub fn handle_timeout(&mut self, now: Instant) {
+		if !self.state.is_closed()
+			&& self
+				.streams
+				.receive_rate_deadline()
+				.is_some_and(|deadline| deadline <= now)
+			&& self.streams.grant_receive_rate(now).should_transmit()
+		{
+			self.spaces[SpaceId::Data].pending.max_data = true;
+		}
 		for &timer in &Timer::VALUES {
 			if !self.timers.is_expired(timer, now) {
 				continue;
@@ -1339,7 +1432,7 @@ impl Connection {
 	///
 	/// This does not ensure delivery of outstanding data. It is the application's responsibility to
 	/// call this only when all important communications have been completed, e.g. by calling
-	/// [`SendStream::finish`] on outstanding streams and waiting for the corresponding
+	/// [`send::Stream::finish`] on outstanding streams and waiting for the corresponding
 	/// [`StreamEvent::Finished`] event.
 	///
 	/// If [`Streams::send_streams`] returns 0, all outstanding stream data has been
@@ -1351,7 +1444,7 @@ impl Connection {
 	/// [`StreamEvent::Finished`]: crate::StreamEvent::Finished
 	pub fn close(&mut self, now: Instant, error_code: VarInt, reason: String) {
 		if !self.state.is_closed() {
-			self.error = Some(Error::LocallyClosed {
+			self.lose(Error::LocallyClosed {
 				code: error_code,
 				reason: reason.clone(),
 			});
@@ -1406,9 +1499,10 @@ impl Connection {
 		stats
 	}
 
-	/// The bytes leased from receive stream `id` with [`RecvStream::lease()`], if it has a lease
-	pub fn leased(&self, id: StreamId) -> Option<&Leased> {
-		self.streams.leased(id)
+	/// The streams with a waiter entry, to prove the map stays bounded
+	#[cfg(test)]
+	pub(crate) fn waiting_streams(&self) -> usize {
+		self.streams.waits.stream_entries()
 	}
 
 	/// Assert that the receive lease books balance, for the fuzz target.
@@ -1501,7 +1595,7 @@ impl Connection {
 	/// A congestion controller stops raising its estimate once the application sends less than
 	/// the path carries. While the controller probes for bandwidth below this target, the sender
 	/// fills the inflight it allows
-	/// ([`probe_inflight`](crate::congestion::ControllerMetrics::probe_inflight)) with duplicates
+	/// ([`probe_inflight`](crate::congestion::Metrics::probe_inflight)) with duplicates
 	/// of STREAM data still in flight, sending no more than the target in all, so the probe
 	/// measures the path. Duplicates count against congestion control, as
 	/// [`PathStats::sent_bandwidth_probe_bytes`]. A reset stream's data is never sent again. An
@@ -1573,11 +1667,24 @@ impl Connection {
 	/// Errors, changing nothing, on limits [`Limits::validate`] refuses.
 	pub fn set_limits(&mut self, limits: Limits) -> Result<(), LimitsError> {
 		limits.validate()?;
+		// The cap first, so a window opened with it is paced rather than granted at once.
+		if let Some(rate) = limits.receive_rate
+			&& self.streams.set_receive_rate(rate).should_transmit()
+		{
+			self.spaces[SpaceId::Data].pending.max_data = true;
+		}
 		if let Some(window) = limits.receive_window {
 			self.set_receive_window(VarInt::from_u64(window.get()).expect("validated"));
 		}
 		if let Some(window) = limits.stream_receive_window {
 			self.streams.set_stream_receive_window(window.get());
+		}
+		if let Some(rate) = limits.send_rate {
+			match (rate, &mut self.send_rate) {
+				(Rate::Unlimited, bucket) => *bucket = None,
+				(Rate::BytesPerSecond(rate), Some(bucket)) => bucket.set_rate(rate),
+				(Rate::BytesPerSecond(rate), bucket @ None) => *bucket = Some(rate::Bucket::new(rate)),
+			}
 		}
 		if let Some(window) = limits.send_window {
 			self.set_send_window(window.get());
@@ -1594,6 +1701,18 @@ impl Connection {
 		if ack.largest >= self.spaces[space].next_packet_number {
 			return Err(TransportError::PROTOCOL_VIOLATION("unsent packet acked"));
 		}
+		// Receive times by packet number, in microseconds since the peer's basis, as we advertise
+		// no exponent
+		let mut received = Vec::new();
+		if let Some(timestamps) = ack.receive_timestamps() {
+			let max = self.config.receive_timestamps.map_or(0, |max| max.get() as usize);
+			received.extend(timestamps.take(max + 1));
+			if received.len() > max {
+				return Err(TransportError::PROTOCOL_VIOLATION("too many receive timestamps"));
+			}
+			received.sort_unstable_by_key(|&(packet, _)| packet);
+		}
+
 		// Whether the largest acknowledged packet is new, and whether we still know when it was
 		// sent. A forgotten ACK-only packet, or one declared lost, has no send time, so it yields
 		// no RTT sample.
@@ -1653,7 +1772,11 @@ impl Connection {
 				// Notify ack frequency that a packet was acked, because it might contain an ACK_FREQUENCY frame
 				self.ack_frequency.on_acked(packet);
 
-				acked.extend(self.on_packet_acked(info));
+				let received = received
+					.binary_search_by_key(&packet, |&(packet, _)| packet)
+					.ok()
+					.map(|i| Duration::from_micros(received[i].1));
+				acked.extend(self.on_packet_acked(info, received));
 			}
 		}
 
@@ -1783,7 +1906,7 @@ impl Connection {
 	///
 	/// Not timing-aware, so it's safe to call this for inferred acks, such as arise from
 	/// high-latency handshakes.
-	fn on_packet_acked(&mut self, info: SentPacket) -> Option<congestion::Acked> {
+	fn on_packet_acked(&mut self, info: SentPacket, received: Option<Duration>) -> Option<congestion::Acked> {
 		self.remove_in_flight(&info);
 		// Only pass ACKs to the congestion controller if we are not validating the current
 		// path, so as to ignore any ACKs from older paths still coming in. A packet from another
@@ -1795,6 +1918,7 @@ impl Connection {
 				sent: info.time_sent,
 				bytes: info.size,
 				packet,
+				received,
 			});
 
 		// Update state for confirmed delivery of frames
@@ -2155,6 +2279,11 @@ impl Connection {
 		}
 		let space = &mut self.spaces[space_id];
 		space.pending_acks.insert_one(packet, now);
+		if space_id == SpaceId::Data
+			&& let (Some(log), Some(arrival)) = (&mut self.receive_timestamps, self.arrival)
+		{
+			log.received(packet, arrival, usize::from(self.path.current_mtu()));
+		}
 		if packet >= space.rx_packet {
 			space.rx_packet = packet;
 			// Update outgoing spin bit, inverting iff we're the client
@@ -2179,11 +2308,16 @@ impl Connection {
 	}
 
 	fn reset_keep_alive(&mut self, now: Instant) {
-		let interval = match self.config.keep_alive {
+		let interval = match self.keep_alive {
 			Some(x) if self.state.is_established() => x,
 			_ => return,
 		};
-		self.timers.set(Timer::KeepAlive, now + interval);
+		// A peer may advertise an idle timeout whose derived interval is too far out to represent;
+		// that keep-alive never fires.
+		match now.checked_add(interval) {
+			Some(deadline) => self.timers.set(Timer::KeepAlive, deadline),
+			None => self.timers.stop(Timer::KeepAlive),
+		}
 	}
 
 	fn reset_cid_retirement(&mut self) {
@@ -2565,7 +2699,7 @@ impl Connection {
 			// Preserve the original close reason once the connection has closed.
 			self.state = State::Drained;
 		} else if let Err(conn_err) = result {
-			self.error = Some(conn_err.clone());
+			self.lose(conn_err.clone());
 			self.state = match conn_err {
 				Error::ApplicationClosed(reason) => State::closed(reason),
 				Error::ConnectionClosed(reason) => State::closed(reason),
@@ -2696,7 +2830,7 @@ impl Connection {
 
 				let space = &mut self.spaces[SpaceId::Initial];
 				if let Some(info) = space.sent_packets.remove(0)
-					&& let Some(acked) = self.on_packet_acked(info)
+					&& let Some(acked) = self.on_packet_acked(info, None)
 				{
 					self.path.congestion.on_ack(congestion::Ack {
 						now,
@@ -2775,10 +2909,12 @@ impl Connection {
 					self.spaces[SpaceId::Data].pending.handshake_done = true;
 					self.discard_space(now, SpaceId::Handshake);
 					self.events.push_back(Event::HandshakeConfirmed);
+					self.streams.waits.confirmed();
 					trace!("handshake confirmed");
 				}
 
 				self.events.push_back(Event::Connected);
+				self.streams.waits.connected();
 				self.state = State::Established;
 				// Swap the handshake idle timeout for the negotiated one.
 				self.reset_idle_timeout(now, SpaceId::Data);
@@ -2865,14 +3001,14 @@ impl Connection {
 				Frame::Crypto(frame) => {
 					self.read_crypto(packet.header.space(), &frame, payload_len)?;
 				}
-				Frame::Ack(ack) => {
+				Frame::Ack(ack) if ack.timestamps.is_none() => {
 					self.on_ack_received(now, packet.header.space(), ack)?;
 				}
 				// Per RFC 9000 §12.4 Table 3, only a CONNECTION_CLOSE frame of type 0x1c may
 				// appear in Initial or Handshake packets. An application close (0x1d) falls
 				// through to the catch-all arm below.
 				Frame::Close(reason @ Close::Connection(_)) => {
-					self.error = Some(reason.into());
+					self.lose(reason.into());
 					self.state = State::Draining;
 					return Ok(());
 				}
@@ -2903,6 +3039,11 @@ impl Connection {
 		packet: Packet,
 	) -> Result<(), TransportError> {
 		let payload = packet.payload.freeze();
+		// Earned before anything this packet carries is charged against the cap, and granted now:
+		// the refill retires the credit deadline, so a later timeout would not grant it.
+		if self.streams.grant_receive_rate(now).should_transmit() {
+			self.spaces[SpaceId::Data].pending.max_data = true;
+		}
 		let mut is_probing_packet = true;
 		let mut close = None;
 		let payload_len = payload.len();
@@ -2952,6 +3093,12 @@ impl Connection {
 					}
 				}
 				Frame::Ack(ack) => {
+					// Only 1-RTT packets carry receive timestamps, and only to a peer that asked
+					if ack.timestamps.is_some()
+						&& (!packet.header.is_short() || self.config.receive_timestamps.is_none())
+					{
+						return Err(TransportError::PROTOCOL_VIOLATION("unexpected receive timestamps"));
+					}
 					self.on_ack_received(now, SpaceId::Data, ack)?;
 				}
 				Frame::Padding | Frame::Ping => {}
@@ -3112,11 +3259,16 @@ impl Connection {
 					{
 						return Err(TransportError::PROTOCOL_VIOLATION("oversized datagram"));
 					}
+					if !self.streams.admit_datagram(datagram.data.len()) {
+						debug!("dropping datagram past the receive rate cap");
+						continue;
+					}
 					if self
 						.datagrams
 						.received(datagram, &self.config.datagram.receive_buffer)?
 					{
 						self.events.push_back(Event::DatagramReceived);
+						self.streams.waits.wake_datagram();
 					}
 				}
 				Frame::AckFrequency(ack_frequency) => {
@@ -3152,6 +3304,7 @@ impl Connection {
 						self.discard_space(now, SpaceId::Handshake);
 					}
 					self.events.push_back(Event::HandshakeConfirmed);
+					self.streams.waits.confirmed();
 					trace!("handshake confirmed");
 				}
 			}
@@ -3175,7 +3328,7 @@ impl Connection {
 		self.streams.queue_max_stream_id(pending);
 
 		if let Some(reason) = close {
-			self.error = Some(reason.into());
+			self.lose(reason.into());
 			self.state = State::Draining;
 			self.close = true;
 		}
@@ -3320,20 +3473,7 @@ impl Connection {
 			self.stats.frame_tx.immediate_ack += 1;
 		}
 
-		// ACK
-		if space.pending_acks.can_send() {
-			Self::try_populate_acks(
-				now,
-				self.receiving_ecn,
-				&mut sent,
-				space,
-				buf,
-				&mut self.stats,
-				max_size,
-			);
-		}
-
-		// ACK_FREQUENCY
+		// ACK_FREQUENCY, ahead of the ACK, whose receive timestamps fill the space left
 		if mem::replace(&mut space.pending.ack_frequency, false) {
 			let sequence_number = self.ack_frequency.next_sequence_number();
 
@@ -3362,6 +3502,23 @@ impl Connection {
 				.congestion
 				.on_ack_frequency_update(config.ack_eliciting_threshold.into_inner(), max_ack_delay);
 			self.stats.frame_tx.ack_frequency += 1;
+		}
+
+		// Only 1-RTT ACKs carry receive timestamps, and the Data space sends no 0-RTT ACK
+		let mut timestamps = self.receive_timestamps.as_mut().filter(|_| space_id == SpaceId::Data);
+
+		// ACK
+		if space.pending_acks.can_send() {
+			Self::try_populate_acks(
+				now,
+				self.receiving_ecn,
+				timestamps.as_deref_mut(),
+				&mut sent,
+				space,
+				buf,
+				&mut self.stats,
+				max_size,
+			);
 		}
 
 		// PATH_CHALLENGE
@@ -3486,7 +3643,7 @@ impl Connection {
 			let token = Token::new(
 				TokenPayload::Validation {
 					ip: remote_addr.ip(),
-					issued: moq_clock::wall(),
+					issued: kio::clock::wall(),
 				},
 				&mut self.rng,
 			);
@@ -3541,6 +3698,7 @@ impl Connection {
 			Self::try_populate_acks(
 				now,
 				self.receiving_ecn,
+				timestamps,
 				&mut sent,
 				space,
 				buf,
@@ -3559,9 +3717,14 @@ impl Connection {
 	///
 	/// This method assumes ACKs are pending, and should only be called if
 	/// `!PendingAcks::ranges().is_empty()` returns `true`.
+	#[expect(
+		clippy::too_many_arguments,
+		reason = "an associated function, so a caller can lend it disjoint fields of the connection"
+	)]
 	fn try_populate_acks(
 		now: Instant,
 		receiving_ecn: bool,
+		timestamps: Option<&mut receive_timestamps::Log>,
 		sent: &mut SentFrames,
 		space: &mut PacketSpace,
 		buf: &mut Vec<u8>,
@@ -3581,7 +3744,15 @@ impl Connection {
 		trace!("ACK {:?}, Delay = {}us", space.pending_acks.ranges(), delay_micros);
 
 		let no_acks_len = buf.len();
-		frame::Ack::encode(delay as _, space.pending_acks.ranges(), ecn, buf);
+		let ranges = space.pending_acks.ranges();
+		// Timestamps fill the space left after the ranges, rather than a packet of their own
+		let timestamps = timestamps.filter(|log| log.any(ranges));
+		frame::Ack::encode(delay as _, ranges, ecn, timestamps.is_some(), buf);
+		if let Some(log) = timestamps
+			&& let Some(space) = max_size.checked_sub(buf.len())
+		{
+			log.encode(ranges, space, buf);
+		}
 		if buf.len() > max_size {
 			// The ACK frame is too large. Remove it.
 			buf.truncate(no_acks_len);
@@ -3620,7 +3791,14 @@ impl Connection {
 	fn set_peer_params(&mut self, params: TransportParameters) {
 		self.streams.set_params(&params);
 		self.idle_timeout = negotiate_max_idle_timeout(self.config.max_idle_timeout(), Some(params.max_idle_timeout));
-		trace!("negotiated max idle timeout {:?}", self.idle_timeout);
+		self.keep_alive = Some(transport::keep_alive_interval(
+			self.config.keep_alive,
+			self.idle_timeout,
+		));
+		trace!(
+			"negotiated max idle timeout {:?}, keep-alive {:?}",
+			self.idle_timeout, self.keep_alive
+		);
 		if let Some(info) = params.preferred_address {
 			self.rem_cids
 				.insert(NewConnectionId {
@@ -3632,6 +3810,13 @@ impl Connection {
 				.expect("preferred address CID is the first received, and hence is guaranteed to be legal");
 		}
 		self.ack_frequency.peer_max_ack_delay = get_max_ack_delay(&params);
+		// A timestamp costs at least a byte, so the MTU bounds how many one ACK can carry
+		self.receive_timestamps = (params.max_receive_timestamps_per_ack.0 != 0).then(|| {
+			receive_timestamps::Log::new(
+				params.max_receive_timestamps_per_ack.0,
+				params.receive_timestamps_exponent.0,
+			)
+		});
 		self.peer_params = params;
 		self.path.mtud.on_peer_max_udp_payload_size_received(
 			u16::try_from(self.peer_params.max_udp_payload_size.into_inner()).unwrap_or(u16::MAX),
@@ -3783,9 +3968,18 @@ impl Connection {
 		self.path.congestion.window().saturating_sub(self.path.in_flight.bytes)
 	}
 
+	/// When the receive rate cap next grants credit
+	#[cfg(test)]
+	pub(crate) fn receive_rate_deadline(&self) -> Option<Instant> {
+		self.streams.receive_rate_deadline()
+	}
+
 	/// Whether no timers but keepalive, idle, rtt, pushnewcid, and key discard are running
 	#[cfg(test)]
 	pub(crate) fn is_idle(&self) -> bool {
+		if self.streams.receive_rate_deadline().is_some() {
+			return false;
+		}
 		Timer::VALUES
 			.iter()
 			.filter(|&&t| !matches!(t, Timer::KeepAlive | Timer::PushNewCid | Timer::KeyDiscard))
@@ -3855,10 +4049,18 @@ impl Connection {
 		}
 	}
 
+	/// Record why the connection was lost, failing every wait once it drains what it can
+	///
+	/// [`Self::poll`] reports it once as [`Event::ConnectionLost`].
+	fn lose(&mut self, reason: Error) {
+		self.streams.waits.lose(reason.clone());
+		self.error = Some(reason);
+	}
+
 	/// Terminate the connection instantly, without sending a close packet
 	fn kill(&mut self, reason: Error) {
 		self.close_common();
-		self.error = Some(reason);
+		self.lose(reason);
 		self.state = State::Drained;
 		self.report_draining();
 		self.endpoint_events.push_back(EndpointEventInner::Drained);

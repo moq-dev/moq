@@ -19,7 +19,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use crate::{Event, Grant, Key, KeyId, KeySet, Permissions, Request, Token};
 
@@ -147,7 +147,7 @@ pub enum Denial {
 	#[error("the token is invalid: {0}")]
 	InvalidToken(String),
 	/// The token's root does not overlap the dialed path.
-	#[error("the token root `{root}` does not overlap the dialed path `{path}`")]
+	#[error("the token root {root:?} does not overlap the dialed path {path:?}")]
 	RootMismatch {
 		/// The token's root.
 		root: String,
@@ -155,7 +155,7 @@ pub enum Denial {
 		path: String,
 	},
 	/// Nothing is granted at the dialed path.
-	#[error("nothing is granted at `{path}`")]
+	#[error("nothing is granted at {path:?}")]
 	NoAccess {
 		/// The dialed path.
 		path: String,
@@ -262,7 +262,7 @@ impl Policy {
 		let mut grant = Grant::new(permissions.publish, permissions.subscribe);
 		grant.expires = match (expires, self.expires) {
 			(Some(expires), _) => Some(expires),
-			(None, Some(bound)) => Some(moq_clock::wall().checked_add(bound).ok_or(Denial::ExpiresOutOfRange)?),
+			(None, Some(bound)) => Some(kio::clock::wall().checked_add(bound).ok_or(Denial::ExpiresOutOfRange)?),
 			(None, None) => None,
 		};
 		grant.revalidate = self.revalidate;
@@ -303,7 +303,7 @@ impl Policy {
 			crate::Error::Key(crate::KeyError::KeyNotFound(_)) => Denial::UnknownKey,
 			other => Denial::InvalidToken(other.to_string()),
 		})?;
-		crate::key::validate_times(&claims, moq_clock::wall()).map_err(|err| match err {
+		crate::key::validate_times(&claims, kio::clock::wall()).map_err(|err| match err {
 			crate::Error::TokenExpired => Denial::Expired {
 				root: claims.root.clone(),
 			},
@@ -455,6 +455,7 @@ fn hash(token: &str) -> u64 {
 pub struct Server {
 	policy: Arc<Policy>,
 	sessions: Arc<Mutex<Sessions>>,
+	mesh: Option<crate::mesh::Coordinator>,
 }
 
 impl Server {
@@ -470,7 +471,7 @@ impl Server {
 		}
 		if policy
 			.expires
-			.is_some_and(|bound| moq_clock::wall().checked_add(bound).is_none())
+			.is_some_and(|bound| kio::clock::wall().checked_add(bound).is_none())
 		{
 			return Err(crate::Error::ExpiresOutOfRange);
 		}
@@ -481,7 +482,15 @@ impl Server {
 		Ok(Self {
 			policy: Arc::new(policy),
 			sessions: Default::default(),
+			mesh: None,
 		})
+	}
+
+	/// Also answer the mesh owner's API under `/mesh` with `coordinator`. Like `POST /`,
+	/// it has no authentication of its own.
+	pub fn with_mesh(mut self, coordinator: crate::mesh::Coordinator) -> Self {
+		self.mesh = Some(coordinator);
+		self
 	}
 
 	/// The cadence the session table ages out by, or `None` when no limit needs a table.
@@ -520,9 +529,14 @@ impl Server {
 		}
 	}
 
-	/// The router: `POST /` reading a [`Request`] and writing a [`Grant`].
+	/// The router: `POST /` reading a [`Request`] and writing a [`Grant`], plus the mesh
+	/// owner's API when [`with_mesh`](Self::with_mesh) set one.
 	pub fn router(&self) -> Router {
-		Router::new().route("/", post(handle)).with_state(self.clone())
+		let router = Router::new().route("/", post(handle)).with_state(self.clone());
+		match &self.mesh {
+			Some(mesh) => router.merge(mesh.admin_router()),
+			None => router,
+		}
 	}
 
 	/// Serve on a TCP listener until the task is dropped.
@@ -544,7 +558,7 @@ async fn handle(State(server): State<Server>, Json(request): Json<Request>) -> R
 		// The reason rides in the body, so an operator reading the relay's log knows
 		// which rule refused without the server saying anything to the client.
 		Err(denial) => {
-			tracing::debug!(id = %request.id, path = %request.path, %denial, "refused");
+			tracing::debug!(id = ?request.id, path = ?request.path, ?denial, "refused");
 			(StatusCode::FORBIDDEN, Json(denial.body(server.policy.tier.clone()))).into_response()
 		}
 	}
@@ -570,7 +584,61 @@ mod tests {
 		request
 	}
 
-	#[moq_clock::test]
+	#[tokio::test(start_paused = true)]
+	#[tracing_test::traced_test]
+	async fn refusal_fields_are_escaped_and_credentials_are_redacted() {
+		let secret = "credential-that-must-not-be-logged";
+		let mut facts = with_token(request("/room\nforged-record\r\x1b[31m"), secret);
+		facts.id = "id\nforged-id".into();
+		facts.token = Some(Token {
+			kind: Token::OUT_OF_BAND,
+			value: secret.as_bytes().to_vec(),
+		});
+		tracing::trace!(request = ?facts, "admission diagnostics");
+		let response = handle(State(Server::new(Policy::default()).unwrap()), Json(facts)).await;
+		assert_eq!(response.status(), StatusCode::FORBIDDEN);
+		assert!(logs_contain("refused"));
+		assert!(!logs_contain(secret));
+		let decimal = format!("{:?}", secret.as_bytes());
+		assert!(!logs_contain(&decimal[1..decimal.len() - 1]));
+		assert!(!logs_contain("\nforged-record"));
+		assert!(!logs_contain("\nforged-id"));
+
+		let (dir, key) = key_dir();
+		let root = "root\nforged-root\r\x1b[31m";
+		let jwt = sign(&key, root, &["**"], &[], None);
+		let policy = Policy {
+			keys: Some(Keys::Dir(dir.path().into())),
+			..Default::default()
+		};
+		let response = handle(
+			State(Server::new(policy).unwrap()),
+			Json(with_token(request("/elsewhere"), &jwt)),
+		)
+		.await;
+		assert_eq!(response.status(), StatusCode::FORBIDDEN);
+		assert!(logs_contain("RootMismatch"));
+		assert!(!logs_contain(&jwt));
+		assert!(!logs_contain("\nforged-root"));
+		for err in [
+			Denial::RootMismatch {
+				root: root.into(),
+				path: "path\nforged-path".into(),
+			}
+			.to_string(),
+			Denial::NoAccess {
+				root: None,
+				path: "path\nforged-path".into(),
+			}
+			.to_string(),
+			crate::Error::RootMismatch("path\nforged-path".into()).to_string(),
+			crate::Error::NoAccess("path\nforged-path".into()).to_string(),
+		] {
+			assert!(!err.contains('\n'));
+		}
+	}
+
+	#[kio::test]
 	async fn default_expiry_uses_the_ambient_wall() {
 		let policy = Policy {
 			public: rules(&["**"], &[]),
@@ -578,7 +646,7 @@ mod tests {
 			..Default::default()
 		};
 		let grant = policy.decide(&request("/demo")).await.unwrap();
-		assert_eq!(grant.expires, Some(moq_clock::wall() + Duration::from_secs(30)));
+		assert_eq!(grant.expires, Some(kio::clock::wall() + Duration::from_secs(30)));
 	}
 
 	fn with_token(mut request: Request, jwt: &str) -> Request {
@@ -586,7 +654,7 @@ mod tests {
 		request
 	}
 
-	fn with_peer(mut request: Request, expires: Option<moq_clock::Wall>) -> Request {
+	fn with_peer(mut request: Request, expires: Option<kio::clock::Wall>) -> Request {
 		request.tls = Some(Peer {
 			name: "edge0".into(),
 			fingerprint: "ab".repeat(32),
@@ -604,7 +672,7 @@ mod tests {
 		(dir, key)
 	}
 
-	fn sign(key: &Key, root: &str, publish: &[&str], subscribe: &[&str], expires: Option<moq_clock::Wall>) -> String {
+	fn sign(key: &Key, root: &str, publish: &[&str], subscribe: &[&str], expires: Option<kio::clock::Wall>) -> String {
 		let claims = Claims::default()
 			.with_root(root)
 			.with_publish(patterns(publish))
@@ -648,12 +716,12 @@ mod tests {
 			..Default::default()
 		};
 		// `exp` is whole seconds on the wire.
-		let secs = moq_clock::wall()
-			.checked_duration_since(moq_clock::Wall::UNIX_EPOCH)
+		let secs = kio::clock::wall()
+			.checked_duration_since(kio::clock::Wall::UNIX_EPOCH)
 			.unwrap()
 			.as_secs()
 			+ 600;
-		let exp = moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(secs);
+		let exp = kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(secs);
 		let jwt = sign(&key, "demo/room", &["alice/**"], &["**"], Some(exp));
 
 		let grant = policy.decide(&with_token(request("/demo/room/"), &jwt)).await.unwrap();
@@ -674,11 +742,11 @@ mod tests {
 			..Default::default()
 		};
 		let jwt = sign(&key, "demo", &["**"], &[], None);
-		let before = moq_clock::wall();
+		let before = kio::clock::wall();
 		let grant = policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap();
 		let expires = grant.expires.unwrap();
 		assert!(expires >= before + Duration::from_secs(3600));
-		assert!(expires <= moq_clock::wall() + Duration::from_secs(3600));
+		assert!(expires <= kio::clock::wall() + Duration::from_secs(3600));
 	}
 
 	#[tokio::test]
@@ -716,7 +784,7 @@ mod tests {
 			"demo",
 			&["**"],
 			&[],
-			Some(moq_clock::wall() - Duration::from_secs(1)),
+			Some(kio::clock::wall() - Duration::from_secs(1)),
 		);
 		let err = policy.decide(&with_token(request("/demo"), &jwt)).await.unwrap_err();
 		assert!(matches!(err, Denial::Expired { .. }), "{err}");
@@ -983,7 +1051,7 @@ mod tests {
 			mtls: rules(&["**"], &["**"]),
 			..Default::default()
 		};
-		let not_after = moq_clock::wall() + Duration::from_secs(86400 * 30);
+		let not_after = kio::clock::wall() + Duration::from_secs(86400 * 30);
 		let grant = policy.decide(&with_peer(request("/"), Some(not_after))).await.unwrap();
 		assert_eq!(grant.publish, patterns(&["**"]));
 		assert_eq!(grant.expires, Some(not_after));
@@ -1298,7 +1366,7 @@ mod tests {
 			"demo",
 			&["**"],
 			&[],
-			Some(moq_clock::wall() + Duration::from_secs(60)),
+			Some(kio::clock::wall() + Duration::from_secs(60)),
 		);
 		let mut same_host = with_token(request("/demo"), &other);
 		same_host.remote = Some("[::ffff:203.0.113.9]:9".parse().unwrap());
@@ -1324,7 +1392,7 @@ mod tests {
 			..limited()
 		})
 		.unwrap();
-		let exp = Some(moq_clock::wall() + Duration::from_secs(60));
+		let exp = Some(kio::clock::wall() + Duration::from_secs(60));
 		let a = sign(&key, "demo", &["**"], &[], None);
 		let b = sign(&key, "demo", &["**"], &[], exp);
 		let c = sign(
@@ -1332,7 +1400,7 @@ mod tests {
 			"demo",
 			&["**"],
 			&[],
-			Some(moq_clock::wall() + Duration::from_secs(61)),
+			Some(kio::clock::wall() + Duration::from_secs(61)),
 		);
 
 		let mut first = with_token(request("/demo"), &a);
@@ -1388,7 +1456,7 @@ mod tests {
 		use crate::refusal::Reason;
 		let (dir, key) = key_dir();
 		let stranger = Key::generate(Algorithm::HS256, key.kid.clone()).unwrap();
-		let expired = Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1));
+		let expired = Some(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1));
 		for tier in [None, Some("edge")] {
 			let (client, _) = serve(Policy {
 				keys: Some(Keys::Dir(dir.path().into())),
@@ -1458,7 +1526,7 @@ mod tests {
 			"attacker",
 			&["**"],
 			&[],
-			Some(moq_clock::Wall::UNIX_EPOCH + Duration::from_secs(1)),
+			Some(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(1)),
 		);
 		let Error::Refused(refusal) = client
 			.connect(with_token(request("/attacker"), &token))

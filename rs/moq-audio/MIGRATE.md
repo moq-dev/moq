@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `decode::Options` takes a `Delay` and `estimate` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`decode::Options::max_delay: Duration` and the playout `delay: Option<Duration>` are one `delay: decode::Delay` (`moq_mux::container::Delay`) plus `estimate: bool`.
+`delay.max` is the old `max_delay`, and `delay.min` is the playout delay, where a cold join starts.
+A fixed `delay: Some(d)` is `delay.min = d` with `estimate: false`. The default `None` (estimate from arrivals) is `estimate: true`, which now never goes below `delay.min`.
+
 ### `Level` is at the crate root
 
 `encode::Level` is `moq_audio::Level`, since the program bus's meters report it too.

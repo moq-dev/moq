@@ -34,6 +34,7 @@ use subscribe::{Subscribe, SubscribeArgs};
 use anyhow::Context;
 use moq_relay::shutdown::Signals;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "jemalloc")]
 #[global_allocator]
@@ -245,7 +246,8 @@ fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio:
 	}
 	tasks.spawn(async move {
 		let mut sessions = JoinSet::new();
-		while let Some(request) = listener.accept().await {
+		loop {
+			let request = listener.accept().await.context("the MoQ listener stopped accepting")?;
 			while sessions.try_join_next().is_some() {}
 			let serving = serving.clone();
 			sessions.spawn(async move {
@@ -272,7 +274,6 @@ fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio:
 				}
 			});
 		}
-		anyhow::bail!("the MoQ listener stopped accepting")
 	});
 }
 
@@ -280,6 +281,41 @@ fn spawn_serve(tasks: &mut JoinSet<anyhow::Result<()>>, mut listener: moq_tokio:
 struct Shutdown {
 	trigger: moq_relay::shutdown::Trigger,
 	observer: moq_relay::shutdown::Observer,
+}
+
+/// The recordings, which finish their files on shutdown instead of being dropped with the
+/// other stages.
+#[derive(Default)]
+struct Recordings {
+	/// Cancelled to tell every recording to finish its file.
+	finish: CancellationToken,
+	tasks: JoinSet<anyhow::Result<()>>,
+}
+
+impl Recordings {
+	/// Finish every recording and wait for them, or `None` when a signal cuts that short and
+	/// leaves the unfinished files fragmented.
+	async fn finish(&mut self, signals: &mut Signals) -> Option<anyhow::Result<()>> {
+		self.finish.cancel();
+		if !self.tasks.is_empty() {
+			tracing::info!("finishing recordings (signal again to exit immediately)");
+		}
+		let mut result = Ok(());
+		loop {
+			tokio::select! {
+				biased;
+				() = signals.recv() => {
+					tracing::warn!("second shutdown signal; leaving recordings unfinished");
+					self.tasks.abort_all();
+					return None;
+				}
+				joined = self.tasks.join_next() => match joined {
+					Some(joined) => result = result.and(joined.map_err(anyhow::Error::from).and_then(|ended| ended)),
+					None => return Some(result),
+				},
+			}
+		}
+	}
 }
 
 /// Keep all stages and listener tasks alive while admitted sessions drain, the way
@@ -303,7 +339,11 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn run() -> anyhow::Result<()> {
-	moq_tokio::crypto::install_default().expect("failed to install default crypto provider");
+	// The transport, reqwest, axum-server, and object_store all read rustls's process default.
+	// A CPU rind cannot run on fails here, naming the feature it lacks.
+	rind_rustls::default_provider()?
+		.install_default()
+		.map_err(|_| anyhow::anyhow!("a rustls crypto provider is already installed"))?;
 
 	let mut cli = Invocation::parse().await;
 	cli.log.init()?;
@@ -544,6 +584,7 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 	// The stdin/capture pipelines run on this thread instead of the JoinSet: the
 	// platform capture stream is not Send, so their futures cannot be spawned.
 	let mut locals: Vec<Publish> = Vec::new();
+	let mut recordings = Recordings::default();
 
 	// Before anything listens: a client can count its session established as soon
 	// as the listener is up, and a signal then must drain it, not kill the process.
@@ -611,17 +652,19 @@ async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Res
 						claim("stdout", &mut stdout, &name)?;
 					}
 					let monitor = connection.as_ref().map(moq_tokio::Connection::monitor);
-					spawn_export(&origin, export, name, monitor, &mut tasks)?;
+					spawn_export(&origin, export, name, monitor, &mut tasks, &mut recordings)?;
 				}
 				other => unreachable!("`{}` is not a stage", other.name()),
 			}
 		}
 
 		if locals.is_empty() {
-			drive(&mut tasks, signals, shutdown).await
+			drive(&mut tasks, &mut recordings, signals, shutdown).await
 		} else {
 			supervise(&local, locals.into_iter().map(Publish::run), &mut tasks);
-			local.run_until(drive(&mut tasks, signals, shutdown)).await
+			local
+				.run_until(drive(&mut tasks, &mut recordings, signals, shutdown))
+				.await
 		}
 	}
 	.await;
@@ -751,8 +794,7 @@ fn spawn_import(
 			let name = require_broadcast(name, "import ts --program all")?;
 			Publish::ts_programs(origin.clone(), moq_net::Path::new(&name)?, config)
 		} else {
-			let broadcast = origin.create_broadcast(&name).context("failed to create broadcast")?;
-			Publish::from_publication(broadcast, &format, config)?
+			Publish::stdin(origin, &name, &format, config)?
 		}
 		.with_linger(linger);
 		publish.announce(epoch)?;
@@ -821,13 +863,15 @@ fn spawn_import(
 }
 
 /// Route the shared Origin OUT to one stage's sink, filling it from the MoQ network.
-/// `connection` supplies an `--echo` report's transport measurements.
+/// `connection` supplies an `--echo` report's transport measurements. A recording to a file
+/// joins `recordings`, the rest `tasks`.
 fn spawn_export(
 	origin: &moq_net::origin::Producer,
 	export: Export,
 	name: String,
 	connection: Option<moq_tokio::connection::Monitor>,
 	tasks: &mut JoinSet<anyhow::Result<()>>,
+	recordings: &mut Recordings,
 ) -> anyhow::Result<()> {
 	if let ExportSink::Rtc(rtc) = &export.sink
 		&& rtc.connect.is_some()
@@ -835,15 +879,20 @@ fn spawn_export(
 		reject_listener_cors(&rtc.cors, "export rtc")?;
 	}
 
-	if let Some(stdout) = export.sink.stdout() {
+	if let Some(container) = export.sink.container() {
+		let (tasks, finish) = match container.output {
+			Some(_) => (&mut recordings.tasks, recordings.finish.clone()),
+			None => (tasks, CancellationToken::new()),
+		};
 		let args = SubscribeArgs {
-			format: stdout.format,
-			max_delay: stdout.max_delay,
-			follow: stdout.follow,
-			stitch: stdout.stitch,
-			fragment_duration: stdout.fragment_duration,
-			mux_rate: stdout.mux_rate,
-			passthrough: stdout.passthrough,
+			format: container.format,
+			max_delay: container.max_delay,
+			follow: container.follow,
+			stitch: container.stitch,
+			fragment_duration: container.fragment_duration,
+			mux_rate: container.mux_rate,
+			passthrough: container.passthrough,
+			output: container.output,
 			catalog: export.catalog_format,
 			select: export.select,
 		};
@@ -853,7 +902,7 @@ fn spawn_export(
 			name,
 			connection,
 		});
-		tasks.spawn(async move { run_stdout(consumer, name, args, echo).await });
+		tasks.spawn(async move { run_container(consumer, name, args, echo, finish).await });
 	} else {
 		match export.sink {
 			ExportSink::Hls(args) => {
@@ -903,33 +952,34 @@ fn spawn_export(
 			ExportSink::Echo => {
 				tasks.spawn(report::print_echo(origin.consume(), name));
 			}
-			_ => unreachable!("container formats are handled by stdout_format above"),
+			_ => unreachable!("container formats are handled by container() above"),
 		}
 	}
 
 	Ok(())
 }
 
-/// Subscribe to `name` from the Origin and write it to stdout, publishing feedback beside it
-/// where the catalog solicits it when `echo` is set.
-async fn run_stdout(
+/// Subscribe to `name` from the Origin and write it to stdout or record it, publishing feedback
+/// beside it where the catalog solicits it when `echo` is set. A recording returns once
+/// `finish` is cancelled, after finishing its file.
+async fn run_container(
 	consumer: moq_net::origin::Consumer,
 	name: String,
 	args: SubscribeArgs,
 	echo: Option<report::EchoTarget>,
+	finish: CancellationToken,
 ) -> anyhow::Result<()> {
 	let catalog = args.catalog_format(&name);
 
-	// Confirm the broadcast is reachable and wait for it to be announced; `Subscribe` then
-	// resolves it, and any sibling broadcast a rendition's `broadcast` field references
-	// (e.g. "./source") through the same origin.
-	consumer
-		.follow(name.as_str(), None)?
-		.available()
-		.await
-		.with_context(|| format!("failed to resolve broadcast `{name}`"))?;
+	// Wait for the broadcast to be announced; the export resolves any sibling broadcast a
+	// rendition's `broadcast` field references (e.g. "./source") through the same origin.
+	let mut follow = consumer.follow(name.as_str(), None)?;
+	let broadcast = tokio::select! {
+		broadcast = follow.available() => broadcast.with_context(|| format!("failed to resolve broadcast `{name}`"))?,
+		() = finish.cancelled() => return Ok(()),
+	};
 
-	let subscribe = Subscribe::new(consumer, &name, catalog, args).await?;
+	let subscribe = Subscribe::new(moq_mux::Source::new(consumer, broadcast), catalog, args).with_finish(finish);
 	let Some(echo) = echo else {
 		return subscribe.run().await;
 	};
@@ -945,29 +995,46 @@ async fn run_stdout(
 
 /// Run until an endpoint ends, keeping all tasks alive while a signalled listener drains.
 ///
-/// The tasks are left for the caller to shut down once the MoQ side is detached.
+/// Either way the recordings finish their files before this returns. The tasks are left for
+/// the caller to shut down once the MoQ side is detached.
 async fn drive(
 	tasks: &mut JoinSet<anyhow::Result<()>>,
+	recordings: &mut Recordings,
 	mut signals: Signals,
 	shutdown: Option<Shutdown>,
 ) -> anyhow::Result<()> {
-	loop {
+	let result = loop {
+		if tasks.is_empty() && recordings.tasks.is_empty() {
+			break Ok(());
+		}
 		tokio::select! {
 			biased;
 			() = signals.recv() => {
 				moq::stop();
+				// Before the drain, so a second signal cutting the drain short can't cost a
+				// recording its index.
+				let Some(finished) = recordings.finish(&mut signals).await else {
+					return Ok(());
+				};
 				if let Some(shutdown) = shutdown {
 					drain(shutdown, &mut signals).await;
 				}
-				break Ok(());
+				return finished;
 			}
-			result = tasks.join_next() => match result {
-				Some(Ok(result)) => break result,
-				Some(Err(err)) if err.is_cancelled() => continue,
-				Some(Err(err)) => break Err(err.into()),
-				None => break Ok(()),
+			Some(result) = tasks.join_next() => match result {
+				Ok(result) => break result,
+				Err(err) if err.is_cancelled() => continue,
+				Err(err) => break Err(err.into()),
+			},
+			Some(result) = recordings.tasks.join_next() => {
+				break result.map_err(anyhow::Error::from).and_then(|ended| ended);
 			}
 		}
+	};
+	// The process is ending, so the other recordings finish their files too.
+	match recordings.finish(&mut signals).await {
+		Some(finished) => result.and(finished),
+		None => result,
 	}
 }
 
@@ -1000,7 +1067,6 @@ fn reject_listener_cors(cors: &crate::web::Cors, endpoint: &str) -> anyhow::Resu
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::future::Future;
@@ -1047,11 +1113,70 @@ mod tests {
 			trigger,
 			observer: observer.clone(),
 		};
-		let driving = tokio::spawn(async move { drive(&mut tasks, signals, Some(shutdown)).await });
+		let driving =
+			tokio::spawn(async move { drive(&mut tasks, &mut Recordings::default(), signals, Some(shutdown)).await });
 		observer.started().await;
 		assert!(!driving.is_finished(), "drain ended under an established session");
 		drop(session);
 		driving.await.unwrap().unwrap();
+	}
+
+	/// A recording that sets `finished` once told to finish.
+	fn recording(recordings: &mut Recordings) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+		let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+		let finish = recordings.finish.clone();
+		let done = finished.clone();
+		recordings.tasks.spawn(async move {
+			finish.cancelled().await;
+			done.store(true, std::sync::atomic::Ordering::SeqCst);
+			Ok(())
+		});
+		finished
+	}
+
+	/// The first signal finishes every recording's file before the process exits.
+	#[cfg(unix)]
+	#[tokio::test(start_paused = true)]
+	async fn a_signal_finishes_recordings() {
+		let _signals = SIGNALS.lock().await;
+		let signals = Signals::new().unwrap();
+		let mut recordings = Recordings::default();
+		let first = recording(&mut recordings);
+		let second = recording(&mut recordings);
+		let mut tasks = JoinSet::new();
+		tasks.spawn(std::future::pending());
+		// SAFETY: raise has no memory-safety preconditions.
+		assert_eq!(unsafe { libc::raise(libc::SIGINT) }, 0);
+		drive(&mut tasks, &mut recordings, signals, None).await.unwrap();
+		assert!(first.load(std::sync::atomic::Ordering::SeqCst));
+		assert!(second.load(std::sync::atomic::Ordering::SeqCst));
+	}
+
+	/// Another stage ending the process still lets the recordings finish.
+	#[tokio::test(start_paused = true)]
+	async fn an_ending_stage_finishes_recordings() {
+		let _signals = SIGNALS.lock().await;
+		let mut recordings = Recordings::default();
+		let finished = recording(&mut recordings);
+		let mut tasks = JoinSet::new();
+		tasks.spawn(async { Ok(()) });
+		drive(&mut tasks, &mut recordings, Signals::new().unwrap(), None)
+			.await
+			.unwrap();
+		assert!(finished.load(std::sync::atomic::Ordering::SeqCst));
+	}
+
+	/// A second signal exits at once, leaving a recording that is still finishing as it is.
+	#[cfg(unix)]
+	#[tokio::test(start_paused = true)]
+	async fn a_second_signal_leaves_recordings_unfinished() {
+		let _signals = SIGNALS.lock().await;
+		let mut signals = Signals::new().unwrap();
+		let mut recordings = Recordings::default();
+		recordings.tasks.spawn(std::future::pending());
+		// SAFETY: raise has no memory-safety preconditions.
+		assert_eq!(unsafe { libc::raise(libc::SIGTERM) }, 0);
+		assert!(recordings.finish(&mut signals).await.is_none());
 	}
 
 	#[tokio::test(start_paused = true)]
@@ -1121,12 +1246,12 @@ mod tests {
 		});
 		let server = accepting.await.unwrap();
 		tokio::spawn(moq_relay::supervise(server, lease.unwrap(), observer.serve(), None));
-		tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(1)).await;
 		reading.store(false, Ordering::Relaxed);
 
 		let mut signals = Signals::new().unwrap();
 		let shutdown = Shutdown { trigger, observer };
-		tokio::time::timeout(window * 2, drain(shutdown, &mut signals))
+		kio::clock::timeout(window * 2, drain(shutdown, &mut signals))
 			.await
 			.expect("a stalled session held the drain past its deadline");
 		let (reason, _) = producer
@@ -1229,7 +1354,7 @@ mod tests {
 			);
 			tokio::time::advance(Duration::from_secs(1)).await;
 			tokio::time::resume();
-			let error = tokio::time::timeout(TIMEOUT, listening.connection.closed())
+			let error = kio::clock::timeout(TIMEOUT, listening.connection.closed())
 				.await
 				.unwrap()
 				.unwrap_err();
@@ -1260,12 +1385,12 @@ mod tests {
 					moq_auth::Pattern::all(),
 				)));
 				tokio::time::resume();
-				let connection = tokio::time::timeout(TIMEOUT, listening.connection.clone().established())
+				let connection = kio::clock::timeout(TIMEOUT, listening.connection.clone().established())
 					.await
 					.unwrap()
 					.unwrap();
 				// Media proves the CLI admitted the session, even on a transport that establishes early.
-				let payload = tokio::time::timeout(TIMEOUT, async {
+				let payload = kio::clock::timeout(TIMEOUT, async {
 					let broadcast = listening
 						.consumer
 						.follow("probe", None)
@@ -1309,7 +1434,12 @@ mod tests {
 		supervise(&local, pipelines, &mut tasks);
 
 		let err = local
-			.run_until(drive(&mut tasks, Signals::new().unwrap(), None))
+			.run_until(drive(
+				&mut tasks,
+				&mut Recordings::default(),
+				Signals::new().unwrap(),
+				None,
+			))
 			.await
 			.unwrap_err();
 		assert!(err.to_string().contains("pipeline panicked"), "{err}");
@@ -1326,7 +1456,12 @@ mod tests {
 		supervise(&local, pipelines, &mut tasks);
 
 		local
-			.run_until(drive(&mut tasks, Signals::new().unwrap(), None))
+			.run_until(drive(
+				&mut tasks,
+				&mut Recordings::default(),
+				Signals::new().unwrap(),
+				None,
+			))
 			.await
 			.unwrap();
 	}
@@ -1513,7 +1648,7 @@ mod tests {
 		}
 
 		assert!(
-			tokio::time::timeout(std::time::Duration::from_millis(50), tasks.join_next())
+			kio::clock::timeout(std::time::Duration::from_millis(50), tasks.join_next())
 				.await
 				.is_err(),
 			"the server task should still be accepting connections"
@@ -1609,7 +1744,15 @@ mod tests {
 		};
 		let origin = moq_tokio::origin::spawn();
 		let mut tasks = JoinSet::new();
-		spawn_export(&origin, export, String::new(), None, &mut tasks).expect("the root is a broadcast");
+		spawn_export(
+			&origin,
+			export,
+			String::new(),
+			None,
+			&mut tasks,
+			&mut Recordings::default(),
+		)
+		.expect("the root is a broadcast");
 		tasks.abort_all();
 	}
 }

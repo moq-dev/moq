@@ -19,11 +19,13 @@ m4's upstream waits in here and moved m2 work with no consumer.
 
 ## Required
 
+- [Mesh over ICE](/quest/m3/mesh-ice.md) - mesh nodes on different networks connect directly through the P2P line's ICE pairs, once a mesh user needs it
 - [Video validation hardware is on hand](/quest/m3/video-hardware-access.md) - the machines the validation runs on, including a Raspberry Pi 4/5 for embedded presenting
 - [Video hardware validation](/quest/m3/video-hardware.md) - run the encode, capture, and zero-copy paths that were never run on real machines, including PipeWire on KDE, the camera portal, and a Pi
 - [An Ada NVIDIA GPU is available](/quest/m3/ada-gpu.md) - the hardware AV1 NVENC is verified on
 - [NVENC AV1](/quest/m3/nvenc-av1.md) - AV1 encode through NVENC, once an Ada-generation GPU is available
 - [#2147](/quest/m3/2147-moq-video-10-bit-hevc-and-av1-support-in-the-nvidia-codec.md) - NVIDIA Main10 encode, once a 10-bit source exists in the pipeline
+- [NVDEC and NVENC share CUDA arrays](/quest/m3/nvenc-cuda-arrays.md) - SDK 13.1 application-owned CUDA arrays drop the per-frame device copy, on driver 610+
 - [Embedded video](/quest/m3/video-embedded.md) - verify a Pi 4/5 presents through the existing Vulkan and CPU paths, adding EGL import only if that fails
 - [Multi-plane PipeWire cameras](/quest/m3/pipewire-camera-planes.md) - I420 and NV12 cameras that deliver one memory block per plane capture
 - [Video codec coverage](/quest/m3/video-codec-coverage.md) - prioritize remaining native AV1 and portable decoder gaps once a consumer asks
@@ -35,7 +37,8 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [L4S on the backbone](/quest/m3/quic-ecn.md) - an ECT(1) option in `moq-quic`, an `ecn` config knob, and a dualpi2 measurement, if the ECN measurement says marks survive
 - [Careful resume on reconnect](/quest/m3/quic-careful-resume.md) - a Rust redial starts at the previous connection's rate
 - [Cut-through](/quest/m3/cut-through/README.md) - a bufferbloat bench decides whether a relay should forward bytes behind a QUIC stream hole; the build is re-planned if it says go
-- [Middle eviction](/quest/m3/middle-eviction.md) - a group too large to keep whole keeps its head for joiners and its tail for live readers, evicting between; speculative, after front eviction
+- [Byte streams in moq-ffi](/quest/m3/ffi-stream.md) - Swift and Kotlin dial and accept byte streams, for moq.pro's T3 Code mobile client
+- [E2EE in moq-ffi](/quest/m3/ffi-e2ee.md) - Swift and Kotlin publish and consume protected broadcasts, for the same client
 - [Unreal prototype](/quest/m3/unreal.md) - a UE5 module on the C++ package with exceptions disabled, rendering a subscribed broadcast to a texture
 - [vcpkg registry](/quest/m3/cpp-vcpkg.md) - a registry we own serves the prebuilt package to `vcpkg` manifests, once a consumer asks
 - [Conan remote](/quest/m3/cpp-conan.md) - a remote we own serves the same tarball to `conan install`
@@ -76,3 +79,5 @@ m4's upstream waits in here and moved m2 work with no consumer.
 - [Gate on a rented host](/quest/m3/ci-host.md) - moq, quest, and rust2 gate on one rented box with a warm disk cache instead of the home host
 - [rust2-ts reaches moq-net's model](/quest/m3/rs2ts-model-ready.md) - rust2's translator is ready to translate the model
 - [Keep moq-net's model in rust2-ts's subset](/quest/m3/rs2ts-model-subset.md) - safe twins for the model's internal `unsafe`, `dyn Expiry` as an enum, once rust2-ts reaches the model
+- [Wait for a stable bun lint](/quest/m3/bun-lint-release.md) - condition: `bun lint` ships in a stable Bun that nixpkgs carries
+- [Evaluate bun fmt and bun lint](/quest/m3/bun-lint.md) - a measured decision on replacing Biome

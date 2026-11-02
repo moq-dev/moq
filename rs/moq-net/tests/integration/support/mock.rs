@@ -204,7 +204,7 @@ impl MockSendStream {
 			&& size > 0
 		{
 			if let Some(types) = self.first_byte.take() {
-				types.lock().unwrap().push(first.expect("non-empty write"));
+				types.lock().push(first.expect("non-empty write"));
 			}
 			self.line.arrivals.lock().unwrap().push_back(self.conn.arrival());
 		}
@@ -361,8 +361,8 @@ impl MockChunks {
 			if self.landing != Some(arrival) {
 				self.landing = Some(arrival);
 				let waker = waiter.waker().clone();
-				drop(moq_clock::sim::spawn(async move {
-					moq_clock::sleep_until(arrival).await;
+				drop(kio::clock::sim::spawn(async move {
+					kio::clock::sleep_until(arrival).await;
 					waker.wake();
 				}));
 			}
@@ -386,8 +386,8 @@ impl MockChunks {
 			poll::RecvStream::stop(&mut inner, code);
 			return;
 		}
-		drop(moq_clock::sim::spawn(async move {
-			moq_clock::sleep(latency).await;
+		drop(kio::clock::sim::spawn(async move {
+			kio::clock::sleep(latency).await;
 			poll::RecvStream::stop(&mut inner, code);
 		}));
 	}
@@ -427,7 +427,7 @@ impl Drop for MockChunks {
 type Resets = Arc<Mutex<Vec<u32>>>;
 
 /// The first byte of each bidi stream one side has opened.
-type StreamTypes = Arc<Mutex<Vec<u8>>>;
+type StreamTypes = Arc<kio::Shared<Vec<u8>>>;
 
 /// One side's knobs.
 struct Side {
@@ -777,6 +777,34 @@ impl MockSession {
 		}
 	}
 
+	/// Deliver only the oldest held bidi stream, and keep holding the rest.
+	pub fn release_oldest_bidi(&self) {
+		let link = &self.side.out;
+		link.settle();
+		let mut held = link.held_bi.lock().unwrap();
+		let held = held.as_mut().expect("not holding");
+		if !held.is_empty() {
+			let _ = link.ready_bi.try_push(held.remove(0));
+		}
+	}
+
+	/// Deliver the held bidi streams newest first, and stop holding.
+	pub fn release_bidis_reversed(&self) {
+		let link = &self.side.out;
+		link.settle();
+		for stream in link
+			.held_bi
+			.lock()
+			.unwrap()
+			.take()
+			.unwrap_or_default()
+			.into_iter()
+			.rev()
+		{
+			let _ = link.ready_bi.try_push(stream);
+		}
+	}
+
 	/// Park every uni stream this side opens from now on, like a peer that has granted
 	/// no more stream credit.
 	pub fn withhold_unis(&self) {
@@ -832,7 +860,21 @@ impl MockSession {
 	/// The first byte, the stream type, of every bidi stream this side has written to,
 	/// in the order each was first written.
 	pub fn bidi_types(&self) -> Vec<u8> {
-		self.side.bidi_types.lock().unwrap().clone()
+		self.side.bidi_types.read().clone()
+	}
+
+	/// Wait for `count` streams of `kind` to reach the wire.
+	pub async fn bidi_count(&self, kind: u8, count: usize) {
+		kio::wait(|waiter| {
+			self.side.bidi_types.poll(waiter, |types| {
+				if types.iter().filter(|&&byte| byte == kind).count() >= count {
+					Poll::Ready(())
+				} else {
+					Poll::Pending
+				}
+			})
+		})
+		.await;
 	}
 
 	/// Every code this side has reset a stream with, in order.

@@ -14,7 +14,7 @@ ignored = ["tokio"]
 
 [dev-dependencies]
 futures = { workspace = true }
-moq-clock = { path = "../moq-clock", default-features = false, features = ["sim"] }
+kio = { path = "../kio", features = ["sim"] }
 moq-json = { path = "../moq-json" }
 moq-net = { path = "../moq-net", features = ["fuzz"] }
 serde_json = { workspace = true }

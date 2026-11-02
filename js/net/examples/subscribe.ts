@@ -8,13 +8,13 @@ async function main() {
 	// Keep one publisher instance; wait.ts shows following publisher restarts.
 	const broadcast = origin.request(Moq.Path.from("my-broadcast"));
 
-	// Subscribe to a specific track (with priority 0)
+	// Subscribe to a specific track (with the default subscription)
 	let active = broadcast.active.peek();
 	while (!active) {
 		await broadcast.active.changed();
 		active = broadcast.active.peek();
 	}
-	const track = active.track("chat").subscribe({ priority: 0 });
+	const track = active.track("chat").subscribe();
 
 	// Read data as it arrives
 	for (;;) {

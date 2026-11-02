@@ -346,6 +346,19 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 			.map_err(|err| version.transport_error(err))
 	}
 
+	/// Poll until the stream finishes, discarding everything on it. Reading rather than
+	/// stopping returns credit as each chunk arrives, so a peer probing for bandwidth gets
+	/// the throughput it measures, yet a peer keeping chunks ready never holds the task.
+	pub(crate) fn poll_discard(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		let mut budget = kio::coop::Budget::new(32);
+		loop {
+			ready!(budget.poll_yield(waiter));
+			if ready!(self.poll_read_chunk(waiter, usize::MAX))?.is_none() {
+				return Poll::Ready(Ok(()));
+			}
+		}
+	}
+
 	/// Fill a frame's payload from the stream, returning `Pending` once it would block.
 	///
 	/// The payload reaches the frame as it arrives, but keeps its receive credit until the

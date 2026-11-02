@@ -63,9 +63,6 @@ Extractor declaration checks, which analyze only published packages since
 
 ## Required
 
-- [Undeclared track names](/quest/m2/e2ee/undeclared-names.md) - an encrypted
-  broadcast's `requests()` serves names nobody created or reserved, under
-  semantic names, in Rust
 - [JS undeclared track names](/quest/m2/e2ee/js-undeclared-names.md) -
   `@moq/net` exposes a broadcast request handler and `@moq/e2ee` serves
   undeclared names through it
@@ -82,7 +79,6 @@ Extractor declaration checks, which analyze only published packages since
 - [Cross-language encrypted proof](/quest/m2/e2ee/interop.md) - browser
   TypeScript and native Rust exchange encrypted media both ways, with relays
   forwarding and metering blind
-- [Cloned publisher processes](/quest/m2/e2ee/cloned-process.md) - the draft and docs say a cloned process mints its own generation, and a CryptoKey caller owns the 32-byte rule
 
 ## Closes
 

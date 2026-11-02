@@ -1,10 +1,10 @@
 //! The poll transport interface owned by `moq-net`.
 //!
 //! Implement these traits for a transport, or wrap a backend at the application
-//! boundary. `moq-tokio`, `moq-wasm`, and `moq-uring` provide their own adapters, and
+//! boundary. `moq-tokio` and `moq-uring` provide their own adapters, and
 //! [`memory`] links two peers in one process.
 //! The async helpers only drive the required poll methods. Sessions take a
-//! [`poll::Boxable`] transport, which adds native thread bounds; wrap a thread-local
+//! [`poll::Boxable`] transport, which adds thread bounds; wrap a thread-local
 //! transport in a type that checks the thread on use (`moq-uring` has one).
 
 use std::time::Duration;
@@ -12,34 +12,6 @@ use std::time::Duration;
 #[cfg(feature = "async")]
 pub(crate) mod boxed;
 pub mod memory;
-
-/// A trait that is Send on native targets and empty on WASM.
-#[cfg(not(target_family = "wasm"))]
-pub trait MaybeSend: Send {}
-
-/// A trait that is Sync on native targets and empty on WASM.
-#[cfg(not(target_family = "wasm"))]
-pub trait MaybeSync: Sync {}
-
-#[cfg(not(target_family = "wasm"))]
-impl<T: Send> MaybeSend for T {}
-
-#[cfg(not(target_family = "wasm"))]
-impl<T: Sync> MaybeSync for T {}
-
-/// A trait that is Send on native targets and empty on WASM.
-#[cfg(target_family = "wasm")]
-pub trait MaybeSend {}
-
-/// A trait that is Sync on native targets and empty on WASM.
-#[cfg(target_family = "wasm")]
-pub trait MaybeSync {}
-
-#[cfg(target_family = "wasm")]
-impl<T> MaybeSend for T {}
-
-#[cfg(target_family = "wasm")]
-impl<T> MaybeSync for T {}
 
 /// Where a session's request target travels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -199,7 +171,7 @@ pub enum CloseKind {
 /// A transport failure with optional session and stream application codes.
 ///
 /// Session codes and stream codes belong to separate registries.
-pub trait Error: std::error::Error + MaybeSend + MaybeSync + 'static {
+pub trait Error: std::error::Error + Send + Sync + 'static {
 	/// The typed transport condition, independent of application close codes.
 	fn close_kind(&self) -> CloseKind {
 		CloseKind::Transport
@@ -223,7 +195,7 @@ pub mod poll {
 
 	use std::collections::VecDeque;
 
-	use super::{Error, MaybeSend, MaybeSync, Metrics, Untracked};
+	use super::{Error, Metrics, Untracked};
 	use bytes::{Buf, Bytes, BytesMut};
 
 	/// A transport session, shared by reference between the tasks that use it.
@@ -566,26 +538,18 @@ pub mod poll {
 	}
 
 	/// A transport that the async client and server can box:
-	/// the session, its streams, send groups, and errors are thread-safe on native.
+	/// the session, its streams, send groups, and errors are thread-safe.
 	/// Implemented automatically.
 	///
 	/// Boxing is what compiles the session code once per binary rather than once per
 	/// transport.
 	pub trait Boxable:
-		Session<
-			SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
-			RecvStream: MaybeSend + MaybeSync,
-		> + MaybeSend
-		+ MaybeSync
+		Session<SendStream: Send + Sync + SendStream<Group: Send + Sync>, RecvStream: Send + Sync> + Send + Sync
 	{
 	}
 
 	impl<S> Boxable for S where
-		S: Session<
-				SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
-				RecvStream: MaybeSend + MaybeSync,
-			> + MaybeSend
-			+ MaybeSync
+		S: Session<SendStream: Send + Sync + SendStream<Group: Send + Sync>, RecvStream: Send + Sync> + Send + Sync
 	{
 	}
 

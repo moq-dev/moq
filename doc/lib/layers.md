@@ -65,8 +65,7 @@ and `GroupConsumer`.
 JSON tracks as a latest value with merge-patch deltas, an append log, or a
 sliding window of records: `SnapshotProducer`, `SnapshotConsumer`,
 `StreamProducer`, `StreamConsumer`, `WindowProducer`, and `WindowConsumer`.
-The catalog has no window mode, so a window track is not advertised there, and
-the C API has no window yet.
+The catalog has no window mode, so a window track is not advertised there.
 
 | Language | Module | Example |
 | --- | --- | --- |

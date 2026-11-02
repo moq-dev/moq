@@ -5,10 +5,10 @@
 
 use std::collections::{BTreeMap, VecDeque};
 use std::pin::Pin;
-use std::task::Poll;
+use std::task::{Poll, ready};
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::track::{Position, Subscriber};
 use moq_net::{Datagram, group};
 
@@ -35,9 +35,11 @@ pub(super) struct Ordered {
 	/// and the ones handed out behind it go once it does, so this holds at most what arrived
 	/// within a max delay. The oldest dates the gap, so a later, lower arrival never extends it.
 	arrivals: VecDeque<(u64, Instant)>,
-	timer: Option<Pin<Box<moq_clock::Sleep>>>,
+	timer: Option<Pin<Box<kio::clock::Sleep>>>,
 	groups_done: bool,
 	datagrams_done: bool,
+	/// The first error a channel ended with: an end declared with an error, or an abort.
+	error: Option<moq_net::Error>,
 }
 
 impl Ordered {
@@ -54,24 +56,33 @@ impl Ordered {
 			timer: None,
 			groups_done: false,
 			datagrams_done: false,
+			error: None,
 		}
 	}
 
 	/// Take every arrival so far, registering `waiter` for the next.
 	pub(super) fn poll_arrivals(&mut self, waiter: &kio::Waiter) {
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		while !self.groups_done {
 			match self.subscriber.poll_recv_group(waiter) {
 				Poll::Ready(Ok(Some(group))) => self.arrive(group.sequence, Item::Group(Box::new(group)), now),
 				// How the track ended is read from `poll_finished`.
-				Poll::Ready(_) => self.groups_done = true,
+				Poll::Ready(Ok(None)) => self.groups_done = true,
+				Poll::Ready(Err(err)) => {
+					self.error.get_or_insert(err);
+					self.groups_done = true;
+				}
 				Poll::Pending => break,
 			}
 		}
 		while !self.datagrams_done {
 			match self.subscriber.poll_recv_datagram(waiter) {
 				Poll::Ready(Ok(Some(datagram))) => self.arrive(datagram.sequence, Item::Datagram(datagram), now),
-				Poll::Ready(_) => self.datagrams_done = true,
+				Poll::Ready(Ok(None)) => self.datagrams_done = true,
+				Poll::Ready(Err(err)) => {
+					self.error.get_or_insert(err);
+					self.datagrams_done = true;
+				}
 				Poll::Pending => break,
 			}
 		}
@@ -113,10 +124,10 @@ impl Ordered {
 				// The oldest arrival still pending is when this gap was first seen.
 				let (_, since) = self.arrivals.front().expect("a pending sequence arrived");
 				let deadline = *since + self.max_delay;
-				if moq_clock::now() < deadline {
+				if kio::clock::now() < deadline {
 					let timer = self
 						.timer
-						.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(deadline)));
+						.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(deadline)));
 					timer.as_mut().reset(deadline);
 					if waiter.poll_future(timer.as_mut()).is_pending() {
 						return Poll::Pending;
@@ -141,9 +152,14 @@ impl Ordered {
 		}
 	}
 
-	/// How the track ended, once it has.
+	/// How the track ended, once it has: the error a channel ended with, which an end declared
+	/// with an error reads as while keeping its history, or else its declared end.
 	pub(super) fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<moq_net::Result<Position>> {
-		self.subscriber.poll_finished(waiter)
+		let end = ready!(self.subscriber.poll_finished(waiter))?;
+		Poll::Ready(match self.error.clone() {
+			Some(err) => Err(err),
+			None => Ok(end),
+		})
 	}
 }
 
@@ -203,9 +219,9 @@ mod tests {
 
 		group(&track, 4);
 		assert_eq!(next(&mut ordered), None);
-		moq_clock::sleep(MAX_DELAY - Duration::from_millis(1)).await;
+		kio::clock::sleep(MAX_DELAY - Duration::from_millis(1)).await;
 		assert_eq!(next(&mut ordered), None);
-		moq_clock::sleep(Duration::from_millis(1)).await;
+		kio::clock::sleep(Duration::from_millis(1)).await;
 		assert_eq!(next(&mut ordered), Some(4));
 
 		// Too late for its turn.
@@ -223,10 +239,10 @@ mod tests {
 
 		group(&track, 10);
 		assert_eq!(next(&mut ordered), None);
-		moq_clock::sleep(MAX_DELAY - Duration::from_millis(1)).await;
+		kio::clock::sleep(MAX_DELAY - Duration::from_millis(1)).await;
 		group(&track, 9);
 		assert_eq!(next(&mut ordered), None);
-		moq_clock::sleep(Duration::from_millis(1)).await;
+		kio::clock::sleep(Duration::from_millis(1)).await;
 		assert_eq!(next(&mut ordered), Some(9));
 		assert_eq!(next(&mut ordered), Some(10));
 	}

@@ -169,7 +169,7 @@ where
 	crate::runtime::scope(async move {
 		let timeout = options.timeout.unwrap_or(crate::listen::DEFAULT_TIMEOUT);
 		let deadline = (!timeout.is_zero())
-			.then(|| moq_clock::now().checked_add(timeout))
+			.then(|| kio::clock::now().checked_add(timeout))
 			.flatten();
 		// A vanished peer sends no FIN. Ping and timeout bound the same stale-session
 		// lifetime that QUIC's idle timeout bounds on the native path.
@@ -181,7 +181,7 @@ where
 		if let Some(stats) = &options.socket_stats {
 			upgraded = upgraded.with_socket_stats(stats.clone());
 		}
-		let session = upgraded.accept().map_err(Error::accept)?;
+		let session = crate::spawn_qmux(upgraded.accept().map_err(Error::accept)?);
 		crate::server::accept_websocket(session, options, deadline).await
 	})
 	.await
@@ -413,7 +413,7 @@ pub(crate) async fn connect(
 	// TODO if let chain
 	match resolved.delay {
 		delay if !delay.is_zero() && !WEBSOCKET_WON.lock().unwrap().contains(&key) => {
-			moq_clock::sleep(delay).await;
+			kio::clock::sleep(delay).await;
 			tracing::debug!(peer = %crate::connect::Endpoint(&url), delay_ms = %delay.as_millis(), "QUIC not yet connected, attempting WebSocket fallback");
 		}
 		_ => {}
@@ -462,6 +462,7 @@ pub(crate) async fn connect(
 				.with_session_config(crate::qmux_config())
 				.connect(url.as_str())
 				.await
+				.map(crate::spawn_qmux)
 				.map_err(Error::connect)?
 		}
 	};
@@ -523,6 +524,7 @@ async fn connect_tls_override(
 		.with_keep_alive(qmux::ws::KeepAlive::default())
 		.with_session_config(crate::qmux_config())
 		.connect()
+		.map(crate::spawn_qmux)
 		.map_err(Error::connect)
 }
 
@@ -531,7 +533,7 @@ async fn connect_tls_override(
 /// moq-transport-18 and newer require qmux-01, so we never pair them with qmux-00.
 /// This mirrors the policy in `js/net`'s `connect.ts`. Every other ALPN returns
 /// `&[]`, which qmux expands to every draft it knows about.
-const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-22"];
+const QMUX01_ONLY_ALPNS: &[&str] = &["moqt-18", "moqt-20", "moqt-22"];
 
 fn qmux_versions_for(alpn: &str) -> &'static [qmux::Version] {
 	if QMUX01_ONLY_ALPNS.contains(&alpn) {
@@ -736,6 +738,7 @@ impl Listener {
 				.with_keep_alive(qmux::ws::KeepAlive::default())
 				.with_session_config(crate::qmux_config())
 				.accept()
+				.map(crate::spawn_qmux)
 				.map_err(Error::accept)?;
 			Ok((session, url, Accepted { remote: addr, protocol }))
 		}
@@ -757,7 +760,7 @@ impl Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						moq_clock::sleep(delay).await;
+						kio::clock::sleep(delay).await;
 					}
 				}
 			}
@@ -978,7 +981,7 @@ mod tests {
 	fn moqt_18_and_newer_pin_to_qmux01() {
 		// The literals in `qmux_versions_for` must stay the IETF draft ALPNs;
 		// otherwise the pin silently stops matching.
-		let drafts: Vec<_> = [0xff000012, 0xff000016]
+		let drafts: Vec<_> = [0xff000012, 0xff000014, 0xff000016]
 			.into_iter()
 			.map(|code| moq_net::Version::from_code(code).unwrap().alpn())
 			.collect();
@@ -1083,7 +1086,7 @@ mod timeout_tests {
 			let peer =
 				tokio_tungstenite::WebSocketStream::from_raw_socket(peer, tungstenite::protocol::Role::Client, None)
 					.await;
-			let peer = qmux::ws::Upgraded::new(peer, ALPN).connect().unwrap();
+			let peer = crate::spawn_qmux(qmux::ws::Upgraded::new(peer, ALPN).connect().unwrap());
 			let mut accept = Box::pin(accept(server, options));
 			assert!(accept.as_mut().now_or_never().is_none());
 			let _stream = moq_net::kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))

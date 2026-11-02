@@ -13,7 +13,7 @@ import { Derived, Effect, Signal } from "@moq/signals";
 import type * as Audio from "./audio";
 import { type Broadcast, CATALOG_FORMATS, type CatalogFormat } from "./broadcast";
 import { formatDuration, parseDuration } from "./duration";
-import { checkName } from "./echo";
+import { checkName, Echo } from "./echo";
 import { Player } from "./player";
 import type { Delay, Sync } from "./sync";
 import type * as Text from "./text";
@@ -250,7 +250,6 @@ export default class MoqWatch extends HTMLElement {
 			follow: this.#follow,
 			catalogFormat: this.#catalogFormat,
 			catalog: this.#catalog,
-			echo: this.#echo,
 			...this.controls,
 			video: {
 				...this.controls.video,
@@ -269,6 +268,17 @@ export default class MoqWatch extends HTMLElement {
 			text: { ...this.controls.text, container: this.#captionsOverlay },
 		});
 		this.signals.cleanup(() => this.player.close());
+
+		// Owned here rather than by the player, which only reads its origin: feedback publishes into it.
+		const echo = new Echo({
+			broadcast: this.player.broadcast,
+			origin: this.connection.origin,
+			enabled: this.#enabled,
+			name: this.#echo,
+			probe: this.connection.probe,
+			sources: [this.player.video, this.player.audio],
+		});
+		this.signals.cleanup(() => echo.close());
 		this.broadcast = this.player.broadcast;
 		this.video = this.player.video;
 		this.audio = this.player.audio;

@@ -31,7 +31,3 @@ moq-mux's parser instead. `bitstream-io` is already in the lock through
 
 The existing codec tests and catalog fixtures are the regression gate. No
 public API or wire change.
-
-## Related
-
-- [avcC and hvcC through mp4-atom](/quest/m2/mp4-atom-config.md) - the other hand-written codec config in moq-mux

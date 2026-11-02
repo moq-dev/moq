@@ -5,7 +5,7 @@
 //! into a rate sample.
 //! <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-4.1>
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::time::Duration;
 
 use crate::{Ack, Sent};

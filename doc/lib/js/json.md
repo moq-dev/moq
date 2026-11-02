@@ -36,14 +36,15 @@ for await (const { value, at } of consumer) {
 
 `next()` buffers every state it has not yielded and skips a group once the
 subscription's `maxDelay` proves it stale. The budget counts media time and
-wall time, or wall time alone for an untimed track. The default of zero keeps
-only the newest group, so subscribe with a `maxDelay` covering how far the
-playhead trails the live edge. Use `latest()` to skip straight to the head.
+wall time, or wall time alone for an untimed track. The default subscription's
+zero keeps only the newest group, so subscribe with a `maxDelay` covering how
+far the playhead trails the live edge. Use `latest()` to skip straight to the head.
 
-A stream rides one group, so the whole log shares `@moq/net`'s group budget:
-32 MiB of payload and 8192 records. An append that might not fit is refused
-before anything is written and leaves the log intact. Once the budget is spent,
-start a new track. Any other failed append aborts the track, so readers see
-the error rather than a log that looks complete.
+A stream rides one group with no record-count or cumulative byte limit. The
+group retains a 32 MiB tail; a reader that falls behind gets `Evicted` rather
+than a truncated log. Each record must still fit the 32 MiB whole-frame limit.
+An oversized record is refused before writing, so the log stays writable.
+Other failed appends abort the track so readers see the error instead of a
+log that looks complete.
 
 The Rust twin is [`moq-json`](/lib/rs/moq-json).

@@ -3,6 +3,7 @@
 ## Reporting a Vulnerability
 
 Report vulnerabilities privately through [GitHub's private vulnerability reporting](https://github.com/moq-dev/moq/security/advisories/new).
+Alternatively, email <security@moq.dev>.
 Please don't open a public issue, PR, or Discord thread for a suspected vulnerability.
 
 Include the affected package and version, how to reproduce it, and the impact you expect.

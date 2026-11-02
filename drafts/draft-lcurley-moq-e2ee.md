@@ -149,6 +149,8 @@ A relay that presents a wrong epoch causes authentication failure; a relay that 
 Neither can cause a nonce to repeat, because only the publisher instance chooses the epoch it encrypts under.
 
 A restart or replacement of a publisher is a new instance and mints a new epoch.
+So is a cloned process image, such as a `fork` without `exec`, a restored VM snapshot or process checkpoint, or a producing generation prepared once and copied to two processes: each copy MUST mint its own generation before it encrypts.
+A clone copies the epoch and the per-track counters verbatim, so two copies that both encrypt would protect different plaintext under the same key and nonce, and nothing on the wire lets a receiver or relay detect it.
 Transport sequence numbers therefore restart freely without any coordination between instances.
 An ended instance stays readable only for as long as relays or archives retain it under its epoch; once a newer epoch wins the shared path, subscribers resolve the newer one.
 
@@ -271,8 +273,8 @@ Protected payload length is plaintext length plus `Nt`.
 A publisher MUST refuse plaintext that would make the protected payload exceed the transport payload limit for that object (`oversize`), before it touches the network.
 
 The interoperable grouped-frame payload cap matching current moq-net implementations is 32 MiB, so grouped plaintext MUST be at most `32 MiB - 16` bytes.
-moq-lite datagram bodies MUST remain at most 1200 bytes including Subscribe ID, Group Sequence, and Timestamp ({{moql}} Section "Datagrams").
-Those three varints are at most 24 bytes, so datagram plaintext MUST be at most `1200 - 24 - 16 = 1160` bytes; a publisher cannot observe the Subscribe ID each hop will encode and MUST NOT budget for a smaller header.
+moq-lite datagram bodies MUST remain at most 1200 bytes including Type, Subscribe ID, Group Sequence, and Timestamp ({{moql}} Section "Datagrams").
+The Type is one byte and each of those three varints at most 9 bytes, so datagram plaintext MUST be at most `1200 - 28 - 16 = 1156` bytes; a publisher cannot observe the Subscribe ID each hop will encode and MUST NOT budget for a smaller header.
 
 ## Catalogs
 A catalog is a track like any other: published under the physical name derived from its semantic name, with each snapshot or delta protected at its own group and frame identity.

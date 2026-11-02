@@ -1,4 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
@@ -26,7 +27,7 @@ function origin(paths: string[]): Origin.Producer {
 function broadcast(name: string, paths: string[] = [name]): { source: Broadcast; owner: Origin.Producer } {
 	const owner = origin(paths);
 	const source = new Broadcast({
-		origin: owner,
+		origin: owner.consume(),
 		name: Path.from(name),
 		enabled: true,
 		follow: false,
@@ -56,7 +57,7 @@ function withoutWarnings<T>(fn: () => T): T {
 }
 
 const settle = async (): Promise<void> => {
-	for (let i = 0; i < 5; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+	for (let i = 0; i < 5; i++) await yieldNow();
 };
 
 const videoRenditions = (source: Broadcast): string[] =>
