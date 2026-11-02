@@ -7846,7 +7846,7 @@ mod tests {
 		assert_eq!(scoped.consume().forwardable().horizon.max_hops, HopLimit::new(6));
 	}
 	#[cfg(feature = "async")]
-	use crate::model::test_tracing::count_drop_warnings;
+	use crate::test_tracing::count_drop_warnings;
 	use futures::FutureExt;
 	use std::sync::atomic::AtomicBool;
 

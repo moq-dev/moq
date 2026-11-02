@@ -27,8 +27,9 @@ Decided 2026-10-25 (maintainer): iroh-shaped, not drop-in compatible; tickets,
   `PublicKey` parsed from the path it subscribes to: the listener's
   `mesh/<id>/` for a dialer, and the `.dial/<id>` segment for a listener.
 - The secret key comes from `moq_sign::SecretKey::load_or_generate`.
-- The [daemon](/quest/m2/mesh/daemon.md) is built on this API, so a process
-  either embeds an `Endpoint` or talks to the local daemon's relay.
+- A mesh daemon (Kixel's, outside this repository, decided 2026-11-02) is
+  built on this API, so a process either embeds an `Endpoint` or talks to a
+  local [mesh relay node](/quest/m2/mesh/node.md).
 - Write a short porting note into the [guide](/quest/m2/mesh/guide.md).
 
 ## Required

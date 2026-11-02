@@ -16,6 +16,7 @@ mod hls;
 mod moq;
 mod play;
 mod publish;
+mod repair;
 mod report;
 mod rtc;
 mod rtmp;
@@ -364,6 +365,10 @@ async fn run() -> anyhow::Result<()> {
 			Command::Completion(completion) => {
 				cli.reject("completion")?;
 				return completion.run();
+			}
+			Command::Repair(repair) => {
+				cli.reject("repair")?;
+				return repair.run().await;
 			}
 			#[cfg(feature = "capture")]
 			Command::Devices => {

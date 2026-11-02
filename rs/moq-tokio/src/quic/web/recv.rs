@@ -2,7 +2,7 @@ use std::{
 	io,
 	pin::Pin,
 	sync::Arc,
-	task::{Context, Poll},
+	task::{Context, Poll, ready},
 };
 
 use bytes::{BufMut, Bytes};
@@ -42,6 +42,20 @@ impl RecvStream {
 		match &mut self.inner {
 			Some(inner) => inner.poll_lease(cx, want).map_err(|e| map_error(close, e)),
 			None => Poll::Ready(Err(ReadError::ClosedStream)),
+		}
+	}
+
+	/// Poll until the peer resets the stream or the session closes, without reading it; pending
+	/// for good once every byte arrived. See [`recv::Stream::received_reset`].
+	pub fn poll_reset(&mut self, cx: &mut Context<'_>) -> Poll<ReadError> {
+		let close = &self.close;
+		let Some(inner) = &mut self.inner else {
+			return Poll::Ready(ReadError::ClosedStream);
+		};
+		match ready!(inner.poll_received_reset(cx)) {
+			Ok(None) => Poll::Pending,
+			Ok(Some(code)) => Poll::Ready(map_error(close, recv::Error::Reset(code))),
+			Err(err) => Poll::Ready(map_error(close, err)),
 		}
 	}
 
