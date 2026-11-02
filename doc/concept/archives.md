@@ -14,8 +14,8 @@ is needed to record or serve one.
 
 Use [`moq export archive` and `moq import archive`](/bin/cli#archive) for a
 ready-made host, or embed the Rust
-[`Producer`](https://docs.rs/moq-archive/latest/moq_archive/struct.Producer.html) and
-[`Consumer`](https://docs.rs/moq-archive/latest/moq_archive/struct.Consumer.html).
+[`Producer`](https://github.com/moq-dev/moq/blob/main/rs/moq-archive/src/producer/mod.rs) and
+[`Consumer`](https://github.com/moq-dev/moq/blob/main/rs/moq-archive/src/consumer/mod.rs).
 The host owns broadcast discovery, storage credentials, recording prefixes,
 retention policy, and the paths where recordings are published.
 
@@ -70,9 +70,10 @@ payloads, and the distinction between groups and datagrams survive storage.
 With DVR pruning enabled, old superseded objects are deleted after the retention
 window and grace; the newest object of each track stays.
 
-See the [moq-archive rustdoc layout](https://docs.rs/moq-archive/latest/moq_archive/#layout)
-for the format. For this checkout's layout and recording behavior, start at
-[`rs/moq-archive`](https://github.com/moq-dev/moq/tree/main/rs/moq-archive).
+The [moq-archive rustdoc](https://docs.rs/moq-archive) specifies the format for
+the published version. This page follows the
+[layout documented in current source](https://github.com/moq-dev/moq/blob/main/rs/moq-archive/src/lib.rs#L8),
+which can differ from an installed package; use the reference matching your version.
 
 ## Serve from a host
 
