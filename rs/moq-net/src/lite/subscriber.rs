@@ -290,6 +290,28 @@ impl TrackEntry {
 		opened
 	}
 
+	/// Withdraw the parked stream `ticket`, which failed before taking its group: a group the
+	/// accept already opened for it ends with `err` rather than waiting for a writer.
+	fn withdraw(&mut self, ticket: u64, err: &Error) {
+		let Some(parked) = &self.parked else {
+			return;
+		};
+		let (opened, done) = match parked.write() {
+			Ok(mut state) => {
+				state.waiting.retain(|(waiting, _)| *waiting != ticket);
+				let opened = state.opened.remove(&ticket);
+				(opened, state.opened.is_empty() && state.waiting.is_empty())
+			}
+			Err(_) => return,
+		};
+		if let Some(Ok(opened)) = opened {
+			let _ = opened.group.abort(err.clone());
+		}
+		if done {
+			self.parked = None;
+		}
+	}
+
 	/// Open the group of a stream whose header is `hdr` in the copy.
 	fn open(&mut self, hdr: &lite::Group, version: Version, now: crate::time::Instant) -> Result<Opened, Error> {
 		let Some(Accepted { producer, framing }) = &mut self.copy else {
@@ -1324,7 +1346,7 @@ impl GroupRecv {
 			}
 		};
 		// Closed once the subscription went, which the lookup below reports.
-		wait!(Accept => match parked {
+		let accepted: Result<(), Error> = wait!(Accept => match parked {
 			Some((parked, ticket)) => match parked.poll(waiter, |parked| match parked.opened.contains_key(ticket) {
 				true => Poll::Ready(()),
 				false => Poll::Pending,
@@ -1335,9 +1357,15 @@ impl GroupRecv {
 				Poll::Pending => self.reader.poll_reset(waiter).map(Err),
 			},
 			None => Poll::Ready(Ok(())),
-		})?;
+		});
 		self.park_wait = None;
 		let (ietf, hdr) = header;
+		if let (Err(err), Some((_, ticket))) = (&accepted, &parked)
+			&& let Some(entry) = self.subscriber.subscribes.lock().get_mut(&hdr.subscribe)
+		{
+			entry.withdraw(*ticket, err);
+		}
+		accepted?;
 
 		let opened = {
 			let mut subs = self.subscriber.subscribes.lock();
@@ -4971,6 +4999,67 @@ mod tests {
 			subscriber.subscribes.lock().get(&0).unwrap().parked.is_none(),
 			"released once every stream took its group"
 		);
+	}
+
+	/// A parked stream that fails before taking its group withdraws it: the accept opens none
+	/// for it, or the group it opened ends with the stream's error, and the rest still open.
+	#[kio::test]
+	async fn a_failed_parked_stream_withdraws_its_group() {
+		let version = Version::Lite07;
+		let header = |sequence| lite::Group {
+			subscribe: 0,
+			sequence,
+			frame_start: 0,
+		};
+		let mut entry = TrackEntry::new(None, Default::default());
+		let (_early_wait, early) = entry.park(&header(1));
+		let (_late_wait, late) = entry.park(&header(2));
+		let (_kept_wait, kept) = entry.park(&header(3));
+		entry.withdraw(early, &Error::Cancel);
+
+		let track = crate::track::Producer::new(
+			Arc::new(crate::broadcast::Info::default()),
+			"video",
+			crate::track::Info::default().with_timescale(Timescale::MILLI),
+		);
+		let every = Subscription::default()
+			.with_order(crate::track::Order::Ascending)
+			.with_start(0)
+			.with_max_delay(Duration::from_secs(60));
+		let mut consumer = track.consume().subscribe(every).await.unwrap();
+		let framing = lite::Framing::new(track.info(), version);
+		entry.accept(
+			Accepted {
+				producer: track.clone(),
+				framing,
+			},
+			version,
+			crate::time::sim().now(),
+		);
+		let mut opened: Vec<u64> = match entry.parked.as_ref().unwrap().write() {
+			Ok(state) => state.opened.keys().copied().collect(),
+			Err(_) => panic!("the entry holds the parked streams"),
+		};
+		opened.sort_unstable();
+		assert_eq!(opened, [late, kept], "nothing opened for the withdrawn header");
+
+		entry.withdraw(late, &Error::Evicted);
+		let opened = match entry.parked.as_ref().unwrap().write() {
+			Ok(state) => state.opened.keys().copied().collect::<Vec<_>>(),
+			Err(_) => panic!("the entry holds the parked streams"),
+		};
+		assert_eq!(opened, [kept], "the withdrawn group is gone");
+		let Opened { mut group, .. } = entry.unpark(kept).expect("the kept group");
+		group.finish().unwrap();
+		track.finish().unwrap();
+		// Only the kept group reaches the subscriber: the withdrawn one ended, so nothing
+		// waits on it.
+		let mut sequences = Vec::new();
+		while let Some(group) = consumer.recv_group().await.unwrap() {
+			sequences.push(group.sequence);
+		}
+		assert_eq!(sequences, [3]);
+		assert!(entry.parked.is_none(), "released once the last stream took its group");
 	}
 
 	/// TRACK opens its stream before the fetches sent alongside it: TRACK fails fast without
