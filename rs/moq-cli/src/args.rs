@@ -556,10 +556,10 @@ impl MoqSide {
 		found
 	}
 
-	/// The cluster this process publishes and subscribes on. Built once; the
-	/// origin is its origin, whose Hop ID is random per run unless `--cluster-id`
-	/// names the node.
-	pub fn cluster(&self) -> anyhow::Result<moq_relay::cluster::Cluster> {
+	/// The cluster this process publishes and subscribes on, with the driver that
+	/// must run for as long as it serves. Built once; the origin is its origin, whose
+	/// Hop ID is random per run unless `--cluster-id` names the node.
+	pub fn cluster(&self) -> anyhow::Result<(moq_relay::cluster::Cluster, moq_relay::cluster::Driver)> {
 		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))
 	}
 

@@ -163,9 +163,8 @@ async fn cluster_continues_a_group_split_by_goaway_inner() {
 
 	let mut cluster_config = cluster::Config::default();
 	cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
-	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
-		.expect("cluster init")
-		.with_connect(client_config, Default::default());
+	let cluster =
+		crate::spawn_cluster(cluster::Options::new(cluster_config)).with_connect(client_config, Default::default());
 	let started = cluster.clone().start().await.expect("cluster start");
 	let cluster_run = tokio::spawn(started.run());
 
@@ -304,9 +303,8 @@ async fn cluster_migrates_on_upstream_goaway_inner() {
 
 		let mut cluster_config = cluster::Config::default();
 		cluster_config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{port_a}/"))];
-		let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
-			.expect("cluster init")
-			.with_connect(client_config, Default::default());
+		let cluster =
+			crate::spawn_cluster(cluster::Options::new(cluster_config)).with_connect(client_config, Default::default());
 
 		let started = cluster.clone().start().await.expect("cluster start");
 		let cluster_run = tokio::spawn(started.run());
@@ -426,9 +424,8 @@ async fn spawn_relay_with_upstream(
 	// Only lite-07 carries the epoch that lets a failover resume the subscription.
 	client_config.version = vec![LITE_07.parse().unwrap()];
 
-	let cluster = cluster::Cluster::new(cluster::Options::new(cluster_config))
-		.expect("cluster init")
-		.with_connect(client_config, Default::default());
+	let cluster =
+		crate::spawn_cluster(cluster::Options::new(cluster_config)).with_connect(client_config, Default::default());
 
 	let started = cluster.clone().start().await.expect("cluster start");
 	let handle = tokio::spawn(async move {

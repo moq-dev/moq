@@ -499,7 +499,7 @@ async fn spawn_moq(
 	};
 
 	let (started, shutdown) = spawn_server(tasks, moq, &cluster, net, directions).await?;
-	// Even standalone: it is what reports a panic in the origin driver.
+	// Even standalone: it is what reports a panic in a critical task.
 	tasks.spawn(async move { started.run().await });
 
 	let mut bandwidth = moq_net::bandwidth::Allocator::unlimited();
@@ -557,9 +557,10 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 	// Before anything dials: a codec we can't decode is a blank window otherwise.
 	args.validate()?;
 
-	let cluster = moq.cluster()?;
+	let (cluster, driver) = moq.cluster()?;
 	let name = moq.broadcast.clone().unwrap_or_default();
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
+	tasks.spawn(driver.run());
 
 	let directions = Directions {
 		consume: true,
@@ -584,8 +585,9 @@ async fn run_play(moq: MoqSide, args: play::Args, net: Net) -> anyhow::Result<()
 /// and the first endpoint to finish ends the process. A shutdown signal keeps
 /// accepted sessions serving through the configured drain window.
 async fn run_stages(moq: MoqSide, stages: Vec<Command>, net: Net) -> anyhow::Result<()> {
-	let cluster = moq.cluster()?;
+	let (cluster, driver) = moq.cluster()?;
 	let mut tasks: JoinSet<anyhow::Result<()>> = JoinSet::new();
+	tasks.spawn(driver.run());
 	// The stdin/capture pipelines run on this thread instead of the JoinSet: the
 	// platform capture stream is not Send, so their futures cannot be spawned.
 	let mut locals: Vec<Publish> = Vec::new();
@@ -1298,7 +1300,8 @@ mod tests {
 				.unwrap();
 				let listener = cli.moq.server_config().init_streams().unwrap().listen().await.unwrap();
 				let addr = listener.tcp_local_addr().unwrap();
-				let cluster = moq_relay::cluster::Cluster::new(Default::default()).unwrap();
+				let (cluster, driver) = moq_relay::cluster::Cluster::new(Default::default()).unwrap();
+				tokio::spawn(driver.run());
 				let broadcast = cluster.origin.create_broadcast("probe").unwrap();
 				broadcast.announce(Default::default()).unwrap();
 				let info = moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI);
@@ -1565,7 +1568,8 @@ mod tests {
 			"ts",
 		])
 		.expect("parse");
-		let cluster = invocation.moq.cluster().expect("create cluster");
+		let (cluster, driver) = invocation.moq.cluster().expect("create cluster");
+		tokio::spawn(driver.run());
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
 			#[cfg(feature = "iroh")]
@@ -1589,7 +1593,8 @@ mod tests {
 	async fn a_listener_without_auth_stops_startup() {
 		let invocation = Invocation::try_parse_from(["moq", "--listen-tcp-bind", "127.0.0.1:0", "import", "ts"])
 			.expect("parse TCP-only invocation");
-		let cluster = invocation.moq.cluster().expect("create cluster");
+		let (cluster, driver) = invocation.moq.cluster().expect("create cluster");
+		tokio::spawn(driver.run());
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
 			#[cfg(feature = "iroh")]
@@ -1629,7 +1634,8 @@ mod tests {
 			"ts",
 		])
 		.expect("parse TCP-only invocation");
-		let cluster = invocation.moq.cluster().expect("create cluster");
+		let (cluster, driver) = invocation.moq.cluster().expect("create cluster");
+		tokio::spawn(driver.run());
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
 			#[cfg(feature = "iroh")]
@@ -1670,7 +1676,8 @@ mod tests {
 			Invocation::try_parse_from(["moq", "--cluster-api-url", "https://api.example/peers", "import", "ts"])
 				.expect("parse");
 		assert!(invocation.moq.validate().is_ok());
-		let cluster = invocation.moq.cluster().expect("cluster");
+		let (cluster, driver) = invocation.moq.cluster().expect("cluster");
+		tokio::spawn(driver.run());
 		let err = cluster
 			.clone()
 			.start()
@@ -1707,7 +1714,8 @@ mod tests {
 		])
 		.expect("parse");
 		invocation.moq.validate().expect("validate");
-		let cluster = invocation.moq.cluster().expect("cluster");
+		let (cluster, driver) = invocation.moq.cluster().expect("cluster");
+		tokio::spawn(driver.run());
 		let net = Net {
 			quic: invocation.moq.quic.clone(),
 			#[cfg(feature = "iroh")]

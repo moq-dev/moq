@@ -102,9 +102,7 @@ async fn node(id: u64, connect: Vec<Peer>) -> Node {
 	let mut config = cluster::Config::default();
 	config.id = Some(id);
 	config.connect = connect;
-	let cluster = cluster::Cluster::new(cluster::Options::new(config))
-		.expect("cluster init")
-		.with_connect(client, Default::default());
+	let cluster = crate::spawn_cluster(cluster::Options::new(config)).with_connect(client, Default::default());
 
 	let (auth, mut admissions) = auth::Auth::embedded(format!("node-{id}"));
 	tasks.spawn(async move {

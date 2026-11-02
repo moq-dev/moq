@@ -201,6 +201,11 @@ async fn governor(pool: cache::PoolWeak, capacity: Option<u64>, headroom: u64) {
 
 #[cfg(test)]
 mod tests {
+	use std::sync::{
+		Arc,
+		atomic::{AtomicUsize, Ordering},
+	};
+
 	use super::*;
 
 	#[test]
@@ -253,8 +258,7 @@ mod tests {
 		}
 	}
 
-	/// Spawned tasks currently alive in this test's runtime. The governor is the
-	/// only thing these tests spawn, so a delta of one is the governor.
+	/// Spawned tasks currently alive in this test's runtime.
 	fn spawned() -> usize {
 		tokio::runtime::Handle::current().metrics().num_alive_tasks()
 	}
@@ -269,21 +273,36 @@ mod tests {
 
 	/// The prefix of [`crate::Relay::load`] that owns the cache: resolve it, then
 	/// hand it to a cluster whose construction can still fail.
-	fn attach(cache: &Config, cluster: crate::cluster::Config) -> anyhow::Result<crate::cluster::Cluster> {
+	fn attach(
+		cache: &Config,
+		cluster: crate::cluster::Config,
+	) -> anyhow::Result<(crate::cluster::Cluster, crate::cluster::Driver)> {
 		let cache = cache.init()?;
 		crate::cluster::Cluster::new(crate::cluster::Options::new(cluster).with_cache(cache))
 	}
 
-	/// The governor runs as a critical task: its panic stops the cluster's
-	/// [`run`](crate::cluster::Started::run) rather than leaving the budget fixed.
+	/// Drive `driver` on its own task, reporting how many of its tasks still run.
+	fn drive(mut driver: crate::cluster::Driver) -> Arc<AtomicUsize> {
+		let running = Arc::new(AtomicUsize::new(driver.len()));
+		let report = running.clone();
+		tokio::spawn(moq_net::kio::wait(move |waiter| {
+			let poll = driver.poll(waiter);
+			report.store(driver.len(), Ordering::SeqCst);
+			poll
+		}));
+		running
+	}
+
+	/// The governor runs in the cluster's driver: its panic fails the driver, which
+	/// stops [`Relay::run`](crate::Relay::run), rather than leaving the budget fixed.
 	#[tokio::test(start_paused = true)]
-	async fn governor_panic_stops_the_cluster() {
+	async fn governor_panic_fails_the_driver() {
 		let mut cache = governed().init().unwrap();
 		cache.governor = Some(async { panic!("injected") }.boxed());
-		let cluster = crate::cluster::Cluster::new(crate::cluster::Options::default().with_cache(cache)).unwrap();
+		let (_cluster, driver) =
+			crate::cluster::Cluster::new(crate::cluster::Options::default().with_cache(cache)).unwrap();
 
-		let started = cluster.start().await.unwrap();
-		let err = started.run().await.expect_err("the cluster kept running");
+		let err = driver.run().await.expect_err("the driver kept running");
 		assert_eq!(err.to_string(), "cache governor panicked: injected");
 	}
 
@@ -328,53 +347,48 @@ mod tests {
 		assert_eq!(spawned(), before, "a failed setup should not strand the governor");
 	}
 
-	/// Tasks a cluster spawns on its own (its origin driver), measured rather than
-	/// assumed so the governor's task can be told apart from them.
-	async fn cluster_tasks() -> usize {
-		let before = spawned();
-		let cluster = attach(&Config::default(), crate::cluster::Config::default()).unwrap();
-		settle().await;
-		let own = spawned() - before;
-		drop(cluster);
-		settle().await;
-		own
-	}
-
+	/// The governor and the origin driver both run until the last cluster handle drops.
 	#[tokio::test(start_paused = true)]
 	async fn last_owner_drop_stops_governor() {
-		let own = cluster_tasks().await;
-		let before = spawned();
-		let cluster = attach(&governed(), crate::cluster::Config::default()).unwrap();
+		let (cluster, driver) = attach(&governed(), crate::cluster::Config::default()).unwrap();
+		let running = drive(driver);
 
 		settle().await;
 		assert_eq!(
-			spawned(),
-			before + own + 1,
+			running.load(Ordering::SeqCst),
+			2,
 			"the cluster should keep the governor running"
 		);
 
 		drop(cluster);
 		settle().await;
-		assert_eq!(spawned(), before, "the last cluster handle should stop the governor");
+		assert_eq!(
+			running.load(Ordering::SeqCst),
+			0,
+			"the last cluster handle should stop the governor"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
 	async fn extra_cluster_handle_keeps_governor() {
-		let own = cluster_tasks().await;
-		let before = spawned();
-		let cluster = attach(&governed(), crate::cluster::Config::default()).unwrap();
+		let (cluster, driver) = attach(&governed(), crate::cluster::Config::default()).unwrap();
+		let running = drive(driver);
 		let session = cluster.clone();
 
 		drop(cluster);
 		settle().await;
 		assert_eq!(
-			spawned(),
-			before + own + 1,
+			running.load(Ordering::SeqCst),
+			2,
 			"a surviving cluster clone keeps the governor"
 		);
 
 		drop(session);
 		settle().await;
-		assert_eq!(spawned(), before, "the last cluster handle should stop the governor");
+		assert_eq!(
+			running.load(Ordering::SeqCst),
+			0,
+			"the last cluster handle should stop the governor"
+		);
 	}
 }
