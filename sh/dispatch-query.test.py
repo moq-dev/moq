@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from test_env import dispatch_env
 
@@ -29,13 +30,14 @@ class QueryTests(unittest.TestCase):
         (self.repo / "sh/kvm.sh").write_text("#!/bin/sh\nexit 0\n")
         self.bin = self.root / "bin"
         self.bin.mkdir()
-        for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
+        for command in ("bash", "git", "sort", "mktemp", "rm", "grep", "cat", "sed", "tr", "xargs", "sleep"):
             (self.bin / command).symlink_to(shutil.which(command))
         self.env = dispatch_env(
             LOCAL_SUPERVISED="1",
             PATH=str(self.bin),
             GIT_CONFIG_NOSYSTEM="1",
             GIT_CONFIG_GLOBAL=os.devnull,
+            BASH_ENV=os.devnull,
             CI_STRICT="1",
         )
         self.git("init", "-q", "-b", "main")
@@ -229,6 +231,7 @@ class QueryTests(unittest.TestCase):
             "quest",
             "nix",
             "c++",
+            "cc",
             "clang-format",
             "cmake",
             "dart",
@@ -262,7 +265,6 @@ class QueryTests(unittest.TestCase):
         nix.chmod(0o755)
         self.env.update(IN_MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
-        self.env["PATH"] = f"{self.bin}:{os.environ['PATH']}"
         for script in ("markdown.sh", "shell.sh", "large-files.sh"):
             path = self.repo / "sh" / script
             path.write_text("#!/bin/sh\nexit 0\n")
@@ -275,6 +277,25 @@ class QueryTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
+
+    def test_ci_requires_its_tool_stubs_even_when_the_host_has_them(self):
+        host = self.root / "host"
+        host.mkdir()
+        tool = host / "zizmor"
+        tool.write_text("#!/bin/sh\nexit 0\n")
+        tool.chmod(0o755)
+        with patch.dict(os.environ, PATH=str(host)):
+            self.stub_ci()
+        (self.bin / "zizmor").unlink()
+        result = subprocess.run(
+            ["bash", "sh/dispatch.sh", "ci", "origin/main"],
+            cwd=self.repo,
+            env=self.env,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("these tools are missing: zizmor", result.stderr)
 
     def test_failure_keeps_running_lanes_and_starts_remaining_modules(self):
         # The failed lane finishes before go releases the two parked lanes.
