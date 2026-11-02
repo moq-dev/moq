@@ -1065,8 +1065,9 @@ mod tests {
 	#[test]
 	#[should_panic(expected = "longer than")]
 	fn test_from_static_too_long() {
-		let literal: &'static str = Box::leak("a".repeat(Path::MAX_BYTES + 1).into_boxed_str());
-		Path::from_static(literal);
+		// A static rather than a leaked string, which Miri would report.
+		static LITERAL: [u8; Path::MAX_BYTES + 1] = [b'a'; Path::MAX_BYTES + 1];
+		Path::from_static(std::str::from_utf8(&LITERAL).unwrap());
 	}
 
 	#[test]

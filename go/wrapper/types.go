@@ -19,7 +19,7 @@ type (
 	AudioEncoderOutput = ffi.MoqAudioEncoderOutput
 	// AudioSampleFormat is a raw PCM sample layout, mirroring WebCodecs AudioData.format.
 	AudioSampleFormat = ffi.MoqAudioSampleFormat
-	// AudioFrame is one audio frame: PCM payload plus a presentation timestamp in microseconds.
+	// AudioFrame is one audio frame: PCM payload plus a presentation Timestamp.
 	AudioFrame = ffi.MoqAudioFrame
 	// ConnectionPhase is a connection lifecycle transition reported by Session.State.
 	ConnectionPhase = ffi.MoqConnectionPhase
@@ -66,7 +66,7 @@ type (
 	AnchorAbsolute = ffi.MoqAnchorAbsolute
 	// AnchorRelative is the group Groups before the latest one, clamped to group 0: 0 is the latest.
 	AnchorRelative = ffi.MoqAnchorRelative
-	// AnchorTime is the group containing TimestampUs, a presentation time in microseconds.
+	// AnchorTime is the group containing a presentation Timestamp.
 	AnchorTime = ffi.MoqAnchorTime
 	// Order is which of a subscription's pending groups the publisher sends first.
 	Order = ffi.MoqOrder
@@ -86,7 +86,7 @@ type (
 	VideoEncoderInput = ffi.MoqVideoEncoderInput
 	// VideoEncoderOutput configures the video codec, bitrate, keyframe interval, and backend preference.
 	VideoEncoderOutput = ffi.MoqVideoEncoderOutput
-	// VideoFrame is one raw video frame: pixels in the configured layout plus a presentation timestamp in microseconds.
+	// VideoFrame is one raw video frame: pixels in the configured layout plus a presentation Timestamp.
 	VideoFrame = ffi.MoqVideoFrame
 	// VideoEncoderKind selects the encoder implementation. Build one with
 	// AutoEncoder, HardwareEncoder, SoftwareEncoder, or NamedEncoder.

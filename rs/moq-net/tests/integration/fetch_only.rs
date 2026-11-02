@@ -204,3 +204,119 @@ async fn a_relay_fetches_without_subscribing_upstream() {
 	}
 	assert!(failures.is_empty(), "failed: {failures:?}");
 }
+
+/// Subscribe to group 1 alone: history below the Largest Object a publisher of
+/// [`publish_finished`] reports. Our moq-transport publishers answer only a one-group FETCH.
+async fn subscribe_history(track: &moq_net::track::Consumer) -> moq_net::track::Subscriber {
+	let subscription = moq_net::track::Subscription::default()
+		.with_order(moq_net::track::Order::Ascending)
+		.with_range(1..2);
+	kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
+		.await
+		.expect("subscribe timed out")
+		.expect("subscribe")
+}
+
+/// The next group `sub` hands out, read whole.
+async fn next_frames(sub: &mut moq_net::track::Subscriber) -> Option<Vec<Vec<u8>>> {
+	let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
+		.await
+		.expect("recv timed out")
+		.expect("recv group")?;
+	let mut frames = Vec::new();
+	while let Some(frame) = kio::clock::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("read timed out")
+		.expect("read frame")
+	{
+		frames.push(frame.payload.to_vec());
+	}
+	Some(frames)
+}
+
+async fn bounded_direct(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let (broadcast, subscribed) = publish_finished(&publisher);
+
+	let client = produce_origin(2);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(client.clone());
+	let pair = connect_mock(options).await;
+
+	let remote = resolve(&client).await;
+	let copy = remote.track("video").unwrap();
+	copy.info().await.expect("TRACK_STATUS resolves the track");
+	// A front's bounded read still parks past its end, as each copy's reader does, so this
+	// reads the group and stops there.
+	let mut sub = subscribe_history(&copy).await;
+	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{version}");
+	assert!(
+		!subscribed.load(Ordering::SeqCst),
+		"{version}: the bounded read subscribed"
+	);
+
+	drop((sub, copy, remote, pair, broadcast, client, publisher));
+}
+
+/// A copy the session holds no subscription for is unfed: a bounded read of the history
+/// below the publisher's Largest Object fetches its holes at once, never subscribing.
+#[kio::test]
+async fn a_bounded_read_of_history_fetches_without_subscribing() {
+	let mut failures = Vec::new();
+	for version in VERSIONS {
+		if kio::clock::sim::spawn(bounded_direct(version)).await.is_err() {
+			failures.push(*version);
+		}
+	}
+	assert!(failures.is_empty(), "failed: {failures:?}");
+}
+
+async fn bounded_relayed(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let (broadcast, subscribed) = publish_finished(&publisher);
+
+	let relay = produce_origin(2);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(relay.clone());
+	let upstream = connect_mock(options).await;
+
+	let client = produce_origin(3);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(relay.consume());
+	options.client_subscribe = Some(client.clone());
+	let downstream = connect_mock(options).await;
+
+	// A fetch leaves the relay holding a copy no subscription feeds.
+	let remote = resolve(&client).await;
+	assert_eq!(fetch(&remote, 2).await.expect("fetch"), frames(2), "{version}");
+
+	let copy = remote.track("video").unwrap();
+	let mut sub = subscribe_history(&copy).await;
+	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{version}");
+	assert_eq!(next_frames(&mut sub).await, None, "{version}: the read ends");
+	assert!(
+		!subscribed.load(Ordering::SeqCst),
+		"{version}: the relay subscribed upstream"
+	);
+
+	drop((
+		sub, copy, remote, downstream, upstream, broadcast, client, relay, publisher,
+	));
+}
+
+/// A relay serves a bounded subscription to its fetch-only copy from the fills it asks
+/// upstream, never subscribing upstream.
+#[kio::test]
+async fn a_relay_serves_a_bounded_read_of_history_without_subscribing_upstream() {
+	let mut failures = Vec::new();
+	for version in VERSIONS {
+		if kio::clock::sim::spawn(bounded_relayed(version)).await.is_err() {
+			failures.push(*version);
+		}
+	}
+	assert!(failures.is_empty(), "failed: {failures:?}");
+}

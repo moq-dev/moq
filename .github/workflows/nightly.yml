@@ -369,6 +369,11 @@ jobs:
         # virtual camera, a module load no pull request job should make.
         # `js worklet-matrix` loads `?worklet` output through the bundlers pinned in test/worklet.
         recipe: ["gate", "rs doctest --workspace", "rs send-depth", "test drill-sensitivity", "rs uring", "test drain", "test json-properties", "test resume-model", "rs quic-sim", "test drill impaired", "rs cli-export", "rs quic-stress", "rs audio-devices", "rs multicast", "rs render-sw", "test qmux", "rs v4l2", "js worklet-matrix"]
+        include:
+          # Miri interprets kio's and moq-net's in-memory unsafe; too slow for the merge gate.
+          - recipe: rs miri
+            nightly: true
+            components: miri
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -380,6 +385,12 @@ jobs:
         with:
           access-key-id: ${{ secrets.MBX_R2_ACCESS_KEY_ID }}
           secret-access-key: ${{ secrets.MBX_R2_SECRET_ACCESS_KEY }}
+      - name: Install nightly Rust
+        if: matrix.nightly
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          toolchain: nightly
+          components: ${{ matrix.components }}
       - name: Add a second IPv6 loopback address
         if: matrix.recipe == 'rs uring'
         # moq-uring's local address test reaches a wildcard socket on it.

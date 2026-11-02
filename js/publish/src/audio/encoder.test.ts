@@ -291,6 +291,7 @@ async function setup(order = new Order(), codec?: Codec, groupDuration?: Milli) 
 	};
 
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
 		close: () => {

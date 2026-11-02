@@ -111,6 +111,7 @@ hex = "0.4"
 hmac = "0.13"
 humantime = "2.3"
 humantime-serde = "1.1.1"
+hyper = "1.11"
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 # Interface addresses for WebRTC host candidates (moq-tokio's `webrtc` feature).
 if-addrs = "0.15"
@@ -303,6 +304,12 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.sonora-simd]
+opt-level = 3
+
+# Same for the rubato resampler, whose SIMD intrinsics are all of
+# `resample::tests::duration_and_samples_are_invariant_across_partitions_and_epochs`:
+# 0.9 CPU-seconds unoptimized, 0.14 optimized.
+[profile.dev.package.rubato]
 opt-level = 3
 
 # The Go mirror stores native staticlibs in Git, whose per-file limit is 100 MB.
