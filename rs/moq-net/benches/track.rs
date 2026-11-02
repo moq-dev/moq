@@ -114,6 +114,10 @@
 //! group filled must cost each reader the same, so a walk over the ranges, the groups of each
 //! fill, or the audience shows up as a slope.
 //!
+//! `track_fill_refusal` refuses a wide fill one group at a time, swept over the number of
+//! refusals and readers. Each reader consumes each refusal before the next, so the cost per
+//! refusal must not grow with the history of answers.
+//!
 //! Run with `cargo bench -p moq-net --bench track`.
 
 #![expect(
@@ -2074,6 +2078,98 @@ fn bench_range_filling(c: &mut Criterion) {
 	group.finish();
 }
 
+/// A shared fill refused newest first, with each reader taking each answer as it arrives.
+struct RefusedFill {
+	_broadcast: broadcast::Producer,
+	_track: track::Producer,
+	_dynamic: track::Requests,
+	fill: track::Fill,
+	readers: Vec<track::Subscriber>,
+}
+
+impl RefusedFill {
+	const START: u64 = 1 << 40;
+
+	fn new(readers: usize) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let mut track = broadcast.create_track("bench", timed()).unwrap();
+		let dynamic = track.requests();
+		track.start_at(Self::START).unwrap();
+		let mut group = track.create_group(group::Info { sequence: Self::START }).unwrap();
+		group.write_frame(Timestamp::ZERO, Bytes::from_static(b"x")).unwrap();
+		group.finish().unwrap();
+		let waiter = kio::Waiter::noop();
+		let readers = (0..readers)
+			.map(|_| {
+				let mut reader = track.subscribe(
+					track::Subscription::default()
+						.with_range(0..)
+						.with_max_delay(AGED_BUDGET),
+				);
+				let Poll::Ready(Ok(Some(group))) = reader.poll_recv_group(&waiter) else {
+					panic!("the live group is cached");
+				};
+				assert_eq!(group.sequence, Self::START);
+				assert!(reader.poll_recv_group(&waiter).is_pending());
+				reader
+			})
+			.collect();
+		let Poll::Ready(Ok(fill)) = dynamic.poll_requested_fill(&waiter) else {
+			panic!("the miss below the start is asked");
+		};
+		assert!(
+			dynamic.poll_requested_fill(&waiter).is_pending(),
+			"readers share the fill"
+		);
+		Self {
+			_broadcast: broadcast,
+			_track: track,
+			_dynamic: dynamic,
+			fill,
+			readers,
+		}
+	}
+
+	fn run(&mut self, refusals: u64) {
+		let waiter = kio::Waiter::noop();
+		for refused in 1..=refusals {
+			let sequence = self.fill.wanted().unwrap();
+			self.fill.drop_groups(sequence..sequence + 1);
+			for reader in &mut self.readers {
+				assert!(reader.poll_recv_group(&waiter).is_pending());
+			}
+			assert_eq!(self.fill.wanted(), Some(Self::START - refused - 1));
+		}
+	}
+}
+
+fn bench_fill_refusal(c: &mut Criterion) {
+	let mut group = c.benchmark_group("track_fill_refusal");
+	group.sample_size(10);
+	for readers in [1usize, 8, 64] {
+		for refusals in [16u64, 256, 4096] {
+			group.throughput(Throughput::Elements(refusals * readers as u64));
+			group.bench_function(BenchmarkId::new(format!("{readers}r"), refusals), |b| {
+				b.iter_batched_ref(
+					|| RefusedFill::new(readers),
+					|fill| fill.run(refusals),
+					BatchSize::PerIteration,
+				);
+			});
+		}
+	}
+	// Keep the long single-reader history that exposes even a cheap per-refusal copy.
+	group.throughput(Throughput::Elements(100_000));
+	group.bench_function("1r/100000", |b| {
+		b.iter_batched_ref(
+			|| RefusedFill::new(1),
+			|fill| fill.run(100_000),
+			BatchSize::PerIteration,
+		);
+	});
+	group.finish();
+}
+
 criterion_group!(
 	benches,
 	bench_range_widening,
@@ -2106,6 +2202,7 @@ criterion_group!(
 	bench_empty_run,
 	bench_time_end,
 	bench_fill,
-	bench_range_filling
+	bench_range_filling,
+	bench_fill_refusal
 );
 criterion_main!(benches);
