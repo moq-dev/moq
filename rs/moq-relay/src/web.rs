@@ -14,17 +14,14 @@ use axum::{
 	response::{Html, IntoResponse, Response},
 	routing::get,
 };
-use axum_server::{
-	accept::{Accept, DefaultAcceptor},
-	tls_rustls::{RustlsAcceptor, RustlsConfig},
-};
+use axum_server::{accept::Accept, tls_rustls::RustlsConfig};
 use bytes::Bytes;
 use futures::{FutureExt, future::BoxFuture};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_rustls::server::TlsStream;
 use tower_service::Service;
 
 use crate::{auth, cluster};
+
+pub mod rtmp;
 
 /// Configuration for the HTTP/HTTPS web server.
 #[derive(usage_rs::Args, Clone, Debug, serde::Deserialize, serde::Serialize)]
@@ -161,19 +158,11 @@ pub(crate) struct WebState {
 	pub(crate) cluster: cluster::Cluster,
 	/// TLS certificate information served at `/certificate.sha256`.
 	pub(crate) certificates: moq_tokio::tls::Certificates,
-	/// Relay-wide shutdown broadcast; WebSocket sessions drain with a GOAWAY
-	/// when it fires. Defaults to a handle that never fires.
-	#[cfg_attr(
-		not(feature = "websocket"),
-		allow(dead_code, reason = "only the `websocket` feature uses it")
-	)]
+	/// Relay-wide shutdown broadcast; WebSocket and `tls://` sessions drain with a
+	/// GOAWAY when it fires. Defaults to a handle that never fires.
 	pub(crate) shutdown: crate::shutdown::Observer,
-	/// Live sessions on this node, so a WebSocket session is listed and nudged
-	/// like a QUIC one.
-	#[cfg_attr(
-		not(feature = "websocket"),
-		allow(dead_code, reason = "only the `websocket` feature uses it")
-	)]
+	/// Live sessions on this node, so a WebSocket or `tls://` session is listed and
+	/// nudged like a QUIC one.
 	pub(crate) sessions: crate::session::Registry,
 	/// How long a connection may sit with no complete request in flight (TLS
 	/// handshake and partial headers included), and a WebSocket wait for its MoQ
@@ -209,6 +198,9 @@ pub struct Web {
 	https_tls: Option<RustlsConfig>,
 	/// The ACME certificate resolver HTTPS serves instead of `https.cert`/`https.key`.
 	acme: Option<Arc<dyn rustls::server::ResolvesServerCert>>,
+	rtmp: rtmp::Handoff,
+	/// Serves `tls://` on the HTTPS listener, when the relay has a listen identity.
+	tls_stream: Option<moq_tokio::tcp::TlsAcceptor>,
 	addrs: Addrs,
 }
 
@@ -241,6 +233,8 @@ impl Web {
 			https_listener: None,
 			https_tls: None,
 			acme: None,
+			rtmp: rtmp::Handoff::default(),
+			tls_stream: None,
 			addrs: Addrs::default(),
 		}
 	}
@@ -296,6 +290,29 @@ impl Web {
 	#[cfg(feature = "acme")]
 	pub(crate) fn https_listener(&self) -> Option<&net::TcpListener> {
 		self.https_listener.as_ref()
+	}
+
+	/// Take the RTMP and RTMPS connections the HTTP and HTTPS listeners classify.
+	///
+	/// RTMP opens with a byte no HTTP request or TLS ClientHello starts with, and an
+	/// RTMPS client negotiates no ALPN, so both share the web ports. Until this is
+	/// called, or once the returned consumer is dropped, they are logged and closed.
+	/// A later call replaces the earlier consumer.
+	pub fn rtmp(&mut self) -> rtmp::Incoming {
+		let (handoff, incoming) = rtmp::Handoff::new();
+		self.rtmp = handoff;
+		incoming
+	}
+
+	/// Serve `tls://` on the HTTPS listener with `acceptor`, usually
+	/// [`moq_tokio::Server::tls_acceptor`].
+	///
+	/// A ClientHello that offers one of its moq ALPNs finishes with the listen TLS
+	/// identity and becomes a MoQ session. Every other connection keeps
+	/// `https.cert`, so browsers and RTMPS clients are unaffected.
+	pub fn with_tls_acceptor(mut self, acceptor: Option<moq_tokio::tcp::TlsAcceptor>) -> Self {
+		self.tls_stream = acceptor;
+		self
 	}
 
 	/// The actual bound addresses after [`bind`](Self::bind) or [`crate::Relay::load`].
@@ -456,6 +473,8 @@ impl Web {
 			https_listener,
 			https_tls,
 			acme,
+			rtmp,
+			tls_stream,
 			..
 		} = self.bind()?;
 		let app = app
@@ -463,6 +482,9 @@ impl Web {
 			.layer(axum::middleware::from_fn(get_cors))
 			.into_make_service_with_connect_info::<net::SocketAddr>();
 		let ws = config.resolved_ws();
+		// Connections still classifying outlive this future, and must not keep the
+		// RTMP consumer waiting once it returns.
+		let _rtmp = rtmp.close_on_drop();
 		// Each request is admitted on its own, so a connection may have as many in flight
 		// as a session may have credentials verifying; the client queues the rest.
 		let streams = u32::try_from(state.auth.verifications()).unwrap_or(u32::MAX);
@@ -475,7 +497,7 @@ impl Web {
 					timeout: state.timeout,
 					activity: Some(state.shutdown.activity.clone()),
 				},
-				WebAcceptor::plain(ws),
+				WebAcceptor::plain(ws, rtmp.clone(), state.clone()),
 			)?;
 			server.http_builder().http2().max_concurrent_streams(streams);
 			Some(server.serve(app.clone()))
@@ -504,7 +526,15 @@ impl Web {
 					timeout: state.timeout,
 					activity: Some(state.shutdown.activity.clone()),
 				},
-				WebAcceptor::tls(rustls_config, ws),
+				WebAcceptor::tls(
+					crate::listener::Tls {
+						http: rustls_config,
+						qmux: tls_stream,
+					},
+					ws,
+					rtmp,
+					state.clone(),
+				),
 			)?;
 			server.http_builder().http2().max_concurrent_streams(streams);
 			Some(server.serve(app))
@@ -685,152 +715,127 @@ pub(crate) struct ServerName(pub(crate) String);
 
 /// Accepts a connection on a public web listener.
 ///
-/// Captures the socket, then hands the stream to `inner`: [`DefaultAcceptor`] for
-/// `http://`, or [`RustlsAcceptor`] for `https://`, which also gives the connection
-/// a peer certificate to report. Both listeners wrap this same acceptor, so the
-/// capture cannot reach one and miss the other.
+/// Classifies the connection (terminating TLS on `https://`), hands RTMP to
+/// [`rtmp::Incoming`], serves `tls://`, and captures the socket of an HTTP one.
+/// Both listeners wrap this same acceptor, so the capture cannot reach one and
+/// miss the other.
 #[derive(Clone)]
-struct WebAcceptor<A> {
-	inner: A,
+struct WebAcceptor {
+	/// Present on `https://`, which also gives the connection a peer certificate to report.
+	tls: Option<crate::listener::Tls>,
 	/// Whether a WebSocket route exists to use the handle. The capture holds a
 	/// duplicated descriptor for the life of the connection, so doing it when
 	/// nothing can read it would cost every API, HLS, and health-check connection a
 	/// second descriptor for nothing.
 	ws: bool,
+	rtmp: rtmp::Handoff,
+	/// What a `tls://` session runs against.
+	state: Arc<WebState>,
 }
 
-impl WebAcceptor<DefaultAcceptor> {
+impl WebAcceptor {
 	/// Accepts plain HTTP, which has no handshake of its own to run.
-	fn plain(ws: bool) -> Self {
+	fn plain(ws: bool, rtmp: rtmp::Handoff, state: Arc<WebState>) -> Self {
 		Self {
-			inner: DefaultAcceptor::new(),
+			tls: None,
 			ws,
+			rtmp,
+			state,
 		}
 	}
-}
 
-impl WebAcceptor<RustlsAcceptor<DefaultAcceptor>> {
 	/// Accepts HTTPS, running the TLS handshake and surfacing a verified peer
 	/// certificate as [`MtlsPeer`].
 	///
 	/// When no client CA is configured the inner verifier is `NoClientAuth` and
 	/// `peer_certificates()` always returns None, so the marker never appears.
-	fn tls(config: RustlsConfig, ws: bool) -> Self {
+	fn tls(tls: crate::listener::Tls, ws: bool, rtmp: rtmp::Handoff, state: Arc<WebState>) -> Self {
 		Self {
-			inner: RustlsAcceptor::new(config),
+			tls: Some(tls),
 			ws,
+			rtmp,
+			state,
 		}
 	}
-}
 
-/// HTTP protocol and peer metadata available after a connection finishes TLS.
-///
-/// Which streams can present a client certificate is a property of the stream type,
-/// not of the acceptor: only rustls has one to report, and a plain TCP connection
-/// never does.
-trait HttpStream {
-	/// The marker for this connection's verified peer certificate.
-	fn mtls_peer(&self) -> Option<MtlsPeer>;
-	/// The SNI that selected the certificate, when the connection carried TLS.
-	fn server_name(&self) -> Option<&str> {
-		None
-	}
-	fn admission(&self) -> Option<crate::listener::Admission> {
-		None
-	}
-	fn is_http2(&self) -> bool {
-		false
-	}
-	/// Whether this connection is an ACME TLS-ALPN-01 validation, which carries no HTTP.
-	fn acme_challenge(&self) -> bool {
-		false
-	}
-}
-
-impl HttpStream for tokio::net::TcpStream {
-	fn mtls_peer(&self) -> Option<MtlsPeer> {
-		None
-	}
-}
-
-impl HttpStream for crate::listener::Accepted {
-	fn mtls_peer(&self) -> Option<MtlsPeer> {
-		None
-	}
-	fn admission(&self) -> Option<crate::listener::Admission> {
-		self.admission.clone()
-	}
-}
-
-impl<I: HttpStream> HttpStream for TlsStream<I> {
-	fn admission(&self) -> Option<crate::listener::Admission> {
-		self.get_ref().0.admission()
-	}
-	fn is_http2(&self) -> bool {
-		self.get_ref().1.alpn_protocol() == Some(b"h2")
-	}
-	fn acme_challenge(&self) -> bool {
-		self.get_ref().1.alpn_protocol() == Some(b"acme-tls/1")
-	}
-	fn server_name(&self) -> Option<&str> {
-		self.get_ref().1.server_name()
-	}
-	fn mtls_peer(&self) -> Option<MtlsPeer> {
-		self.get_ref()
-			.1
-			.peer_certificates()
-			.filter(|certs| !certs.is_empty())
-			.map(|certs| MtlsPeer(moq_tokio::tls::PeerIdentity::from_chain(certs.to_vec())))
+	/// Run a `tls://` connection as a MoQ session on its own task, past the idle
+	/// deadline that bounds this acceptor.
+	fn serve_qmux(&self, stream: Box<tokio_rustls::server::TlsStream<crate::listener::Accepted>>) {
+		let Some(acceptor) = self.tls.as_ref().and_then(|tls| tls.qmux.clone()) else {
+			return;
+		};
+		let state = self.state.clone();
+		// The admission carries into the session, as a WebSocket upgrade's does.
+		let Some(active) = stream
+			.get_ref()
+			.0
+			.admission
+			.clone()
+			.and_then(|admission| admission.take())
+			.or_else(|| state.shutdown.activity.enter())
+		else {
+			return;
+		};
+		tokio::spawn(async move {
+			let Some(request) = state.shutdown.until_deadline(acceptor.accept(*stream, active)).await else {
+				return;
+			};
+			let request = match request {
+				Ok(request) => request,
+				Err(err) => {
+					tracing::debug!(%err, "failed to accept tls:// on the HTTPS listener");
+					return;
+				}
+			};
+			crate::connection::Connection::new(request, state.cluster.clone(), state.auth.clone())
+				.with_id(state.cluster.next_connection_id())
+				.with_shutdown(state.shutdown.clone())
+				.with_sessions(state.sessions.clone())
+				.run()
+				.await;
+		});
 	}
 }
 
-/// The connection [`WebAcceptor`] is handed: a byte stream, plus a descriptor to
-/// read socket statistics from on platforms that expose them.
-///
-/// The stream owns the accepted TCP socket, so the extra bound narrows nothing;
-/// it exists because a `cfg` can't be written on a `where` clause directly.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-pub(crate) trait AcceptStream: AsyncRead + AsyncWrite + Unpin + Send + std::os::fd::AsFd + 'static {}
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-impl<T: AsyncRead + AsyncWrite + Unpin + Send + std::os::fd::AsFd + 'static> AcceptStream for T {}
-
-/// As above, where kernel TCP statistics are unavailable.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) trait AcceptStream: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> AcceptStream for T {}
-
-impl<I, S, A> Accept<I, S> for WebAcceptor<A>
-where
-	I: AcceptStream,
-	S: Send + 'static,
-	A: Accept<I, S>,
-	A::Stream: HttpStream + Send + 'static,
-	A::Service: Send + 'static,
-	A::Future: Send + 'static,
-{
-	type Stream = A::Stream;
-	type Service = SetConnectionExtensions<A::Service>;
+impl<S: Send + 'static> Accept<crate::listener::Accepted, S> for WebAcceptor {
+	type Stream = crate::listener::Stream;
+	type Service = SetConnectionExtensions<S>;
 	type Future = BoxFuture<'static, std::io::Result<(Self::Stream, Self::Service)>>;
 
-	fn accept(&self, stream: I, service: S) -> Self::Future {
-		// Read the socket here, while it is still a plain `TcpStream`. Once TLS and
-		// then hyper's upgrade have wrapped it there is no descriptor left to find.
-		let socket = self.ws.then(|| socket_stats(&stream)).flatten();
-		let inner = self.inner.accept(stream, service);
+	fn accept(&self, stream: crate::listener::Accepted, service: S) -> Self::Future {
+		let this = self.clone();
 		async move {
-			let (stream, service) = inner.await?;
-			if stream.acme_challenge() {
+			let stream = match crate::listener::classify(stream, this.tls.as_ref()).await? {
+				crate::listener::Classified::Http(stream) => stream,
+				crate::listener::Classified::Rtmp(stream) => {
+					this.rtmp.send(stream).await;
+					return Err(std::io::Error::other("handed off an RTMP connection"));
+				}
+				crate::listener::Classified::Qmux(stream) => {
+					this.serve_qmux(stream);
+					return Err(std::io::Error::other("handed off a tls:// connection"));
+				}
+			};
+			let tls = stream.tls();
+			if tls.is_some_and(|tls| tls.alpn_protocol() == Some(b"acme-tls/1")) {
 				// The validator checked the certificate during the handshake; RFC 8737 has the server close.
 				return Err(std::io::Error::other("answered an ACME TLS-ALPN-01 challenge"));
 			}
-			let peer = stream.mtls_peer();
-			let server_name = stream.server_name().map(|name| ServerName(name.to_owned()));
+			let peer = tls
+				.and_then(|tls| tls.peer_certificates())
+				.filter(|certs| !certs.is_empty())
+				.map(|certs| MtlsPeer(moq_tokio::tls::PeerIdentity::from_chain(certs.to_vec())));
+			let server_name = tls
+				.and_then(|tls| tls.server_name())
+				.map(|name| ServerName(name.to_owned()));
 			let admission = stream.admission();
-			if stream.is_http2() {
+			if tls.is_some_and(|tls| tls.alpn_protocol() == Some(b"h2")) {
 				// Extended CONNECT is not enabled, so h2 cannot become a WebSocket.
 				drop(admission.as_ref().and_then(crate::listener::Admission::take));
 			}
+			// Read the socket now: once hyper's upgrade has wrapped the stream there is
+			// no descriptor left to find.
+			let socket = this.ws.then(|| socket_stats(stream.tcp())).flatten();
 			Ok((
 				stream,
 				SetConnectionExtensions {
@@ -849,14 +854,14 @@ where
 /// The kernel's view of `stream`, when this platform exposes one and there is a
 /// qmux session that could use it.
 #[cfg(all(any(target_os = "linux", target_os = "macos"), feature = "websocket"))]
-fn socket_stats<I: AcceptStream>(stream: &I) -> Option<SocketStats> {
+fn socket_stats(stream: &tokio::net::TcpStream) -> Option<SocketStats> {
 	qmux::TcpStats::new(stream)
 		.ok()
 		.map(|s| SocketStats(std::sync::Arc::new(s)))
 }
 
 #[cfg(not(all(any(target_os = "linux", target_os = "macos"), feature = "websocket")))]
-fn socket_stats<I: AcceptStream>(_stream: &I) -> Option<SocketStats> {
+fn socket_stats(_stream: &tokio::net::TcpStream) -> Option<SocketStats> {
 	None
 }
 
@@ -1229,9 +1234,25 @@ impl IntoResponse for ServeGroup {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The state an acceptor built outside [`Web::serve`] hands a `tls://` session.
+	#[cfg(all(feature = "websocket", any(unix, windows)))]
+	fn acceptor_state() -> Arc<WebState> {
+		let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+		let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+		let certificates = moq_tokio::tls::Certificates::from_pem(cert.cert.pem().as_bytes()).unwrap();
+		Web::new(
+			crate::auth::Auth::refuse("test"),
+			cluster,
+			certificates,
+			Config::default(),
+		)
+		.state
+	}
 	use rcgen::{CertificateParams, KeyPair};
 	use std::io::Write;
 	use tempfile::TempDir;
+	use tokio::io::{AsyncRead, AsyncWrite};
 
 	#[tokio::test(start_paused = true)]
 	async fn authenticated_http_responses_are_private_and_cannot_be_sniffed() {
@@ -1838,9 +1859,13 @@ mod tests {
 		let addr = listener.local_addr().unwrap();
 		let connecting = tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await.unwrap() });
 		let (accepted, _) = listener.accept().await.unwrap();
-		let _client = connecting.await.unwrap();
+		let mut client = connecting.await.unwrap();
+		// The acceptor waits for a first byte to classify the connection.
+		tokio::io::AsyncWriteExt::write_all(&mut client, b"GET").await.unwrap();
 
-		let (stream, mut service) = Accept::<_, EchoSocket>::accept(&WebAcceptor::plain(true), accepted, EchoSocket)
+		let acceptor = WebAcceptor::plain(true, rtmp::Handoff::default(), acceptor_state());
+		let accepted = crate::listener::Accepted::new(accepted);
+		let (stream, mut service) = Accept::<_, EchoSocket>::accept(&acceptor, accepted, EchoSocket)
 			.await
 			.unwrap();
 
@@ -1883,11 +1908,12 @@ mod tests {
 		let addr = listener.local_addr().unwrap();
 		let connecting = tokio::spawn(async move { tokio::net::TcpStream::connect(addr).await.unwrap() });
 		let (accepted, _) = listener.accept().await.unwrap();
-		let _client = connecting.await.unwrap();
+		let mut client = connecting.await.unwrap();
+		tokio::io::AsyncWriteExt::write_all(&mut client, b"GET").await.unwrap();
 
-		let (stream, service) = Accept::<_, ()>::accept(&WebAcceptor::plain(false), accepted, ())
-			.await
-			.unwrap();
+		let acceptor = WebAcceptor::plain(false, rtmp::Handoff::default(), acceptor_state());
+		let accepted = crate::listener::Accepted::new(accepted);
+		let (stream, service) = Accept::<_, ()>::accept(&acceptor, accepted, ()).await.unwrap();
 
 		assert!(
 			service.socket.is_none(),
@@ -2086,6 +2112,267 @@ mod tests {
 			drop(client.await.expect("the WebSocket session connects"));
 		}
 
+		serving.abort();
+	}
+
+	/// A `tls://` dial to the HTTPS port lands a MoQ session served with the listen
+	/// identity rather than `https.cert`, while the port keeps serving HTTPS.
+	#[cfg(feature = "quic")]
+	#[tokio::test]
+	async fn https_listener_serves_tls_qmux() {
+		use rustls::pki_types::{CertificateDer, pem::PemObject};
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let dir = TempDir::new().unwrap();
+		let (ca, cert, key) = make_certs(&dir);
+		let mut config = crate::Config::default();
+		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.listen.tls.generate = vec!["localhost".into()];
+		config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
+		config.web.https.cert = vec![cert];
+		config.web.https.key = vec![key];
+		config.auth.public = vec![moq_auth::Pattern::all()];
+		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let https = relay.web_addrs().https.unwrap();
+		let ready = relay.ready();
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+		ready.wait().await.unwrap();
+
+		let url: url::Url = format!("tls://localhost:{}/room", https.port()).parse().unwrap();
+		let dial = |tls: moq_tokio::tls::Connect| {
+			let mut config = moq_tokio::connect::Config::default();
+			config.tls = tls;
+			let connection = config
+				.init(Default::default())
+				.unwrap()
+				.with_reconnect(false)
+				.connect(url.clone());
+			kio::clock::timeout(std::time::Duration::from_secs(10), connection.established())
+		};
+		let mut https_ca = moq_tokio::tls::Connect::default();
+		https_ca.root = vec![ca.clone()];
+		https_ca.system_roots = Some(false);
+		let refused = dial(https_ca).await.expect("the dial with the HTTPS CA timed out");
+		assert!(refused.is_err(), "tls:// was served with https.cert");
+		let mut insecure = moq_tokio::tls::Connect::default();
+		insecure.insecure = Some(true);
+		let _session = dial(insecure)
+			.await
+			.expect("the tls:// dial timed out")
+			.expect("tls:// did not land a MoQ session");
+
+		let mut roots = rustls::RootCertStore::empty();
+		for cert in CertificateDer::pem_slice_iter(&std::fs::read(&ca).unwrap()) {
+			roots.add(cert.unwrap()).unwrap();
+		}
+		let mut client = rustls::ClientConfig::builder()
+			.with_root_certificates(roots)
+			.with_no_client_auth();
+		client.alpn_protocols = vec![b"http/1.1".to_vec()];
+		let tcp = tokio::net::TcpStream::connect(https).await.unwrap();
+		let mut client = tokio_rustls::TlsConnector::from(Arc::new(client))
+			.connect("localhost".try_into().unwrap(), tcp)
+			.await
+			.expect("HTTPS still serves https.cert");
+		client
+			.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+			.await
+			.unwrap();
+		let mut response = String::new();
+		let _ = client.read_to_string(&mut response).await;
+		assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+		trigger.start();
+		running.await.unwrap().unwrap();
+	}
+
+	/// `tls://` on the HTTPS port applies the listen client-certificate policy, as the
+	/// `listen.tcp` `tls://` listener does: under pinned peers a dial without a pinned
+	/// certificate is refused. HTTPS on the same port is never asked for one.
+	#[cfg(feature = "quic")]
+	#[tokio::test]
+	async fn https_listener_verifies_tls_qmux_client_certificates() {
+		use rustls::pki_types::{CertificateDer, pem::PemObject};
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let dir = TempDir::new().unwrap();
+		let (ca, cert, key) = make_certs(&dir);
+		let mut config = crate::Config::default();
+		config.listen.bind = Some("127.0.0.1:0".parse().unwrap());
+		config.listen.tls.generate = vec!["localhost".into()];
+		config.listen.tls.peers = Some(moq_tokio::tls::Peers::new());
+		config.web.https.listen = Some("127.0.0.1:0".parse().unwrap());
+		config.web.https.cert = vec![cert];
+		config.web.https.key = vec![key];
+		config.auth.public = vec![moq_auth::Pattern::all()];
+		let relay = crate::Relay::load(config).await.unwrap().with_signals(false);
+		let https = relay.web_addrs().https.unwrap();
+		let ready = relay.ready();
+		let trigger = relay.shutdown_trigger().clone();
+		let running = tokio::spawn(relay.run());
+		ready.wait().await.unwrap();
+
+		let url: url::Url = format!("tls://localhost:{}/room", https.port()).parse().unwrap();
+		let mut config = moq_tokio::connect::Config::default();
+		config.tls.insecure = Some(true);
+		let connection = config
+			.init(Default::default())
+			.unwrap()
+			.with_reconnect(false)
+			.connect(url);
+		let refused = kio::clock::timeout(std::time::Duration::from_secs(10), connection.established())
+			.await
+			.expect("the tls:// dial timed out");
+		assert!(refused.is_err(), "tls:// accepted a dial without a pinned certificate");
+
+		let mut roots = rustls::RootCertStore::empty();
+		for cert in CertificateDer::pem_slice_iter(&std::fs::read(&ca).unwrap()) {
+			roots.add(cert.unwrap()).unwrap();
+		}
+		let mut client = rustls::ClientConfig::builder()
+			.with_root_certificates(roots)
+			.with_no_client_auth();
+		client.alpn_protocols = vec![b"http/1.1".to_vec()];
+		let tcp = tokio::net::TcpStream::connect(https).await.unwrap();
+		let mut client = tokio_rustls::TlsConnector::from(Arc::new(client))
+			.connect("localhost".try_into().unwrap(), tcp)
+			.await
+			.expect("HTTPS asked for a client certificate");
+		client
+			.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+			.await
+			.unwrap();
+		let mut response = String::new();
+		let _ = client.read_to_string(&mut response).await;
+		assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+		trigger.start();
+		running.await.unwrap().unwrap();
+	}
+
+	/// Each web listener splits its connections by their first bytes: HTTP reaches the
+	/// router, while plaintext RTMP and RTMPS (TLS with no ALPN) reach the RTMP
+	/// consumer with the classifying byte intact, until serving stops. Untaken, RTMP
+	/// is closed.
+	#[tokio::test]
+	async fn web_listeners_hand_rtmp_to_its_consumer() {
+		use rustls::pki_types::{CertificateDer, pem::PemObject};
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		trait Io: AsyncRead + AsyncWrite + Unpin + Send + 'static {}
+		impl<T: AsyncRead + AsyncWrite + Unpin + Send + 'static> Io for T {}
+
+		let dir = TempDir::new().unwrap();
+		let (ca, cert, key) = make_certs(&dir);
+		let mut roots = rustls::RootCertStore::empty();
+		for cert in CertificateDer::pem_slice_iter(&std::fs::read(&ca).unwrap()) {
+			roots.add(cert.unwrap()).unwrap();
+		}
+		let connector = |alpn: &[&[u8]]| {
+			let mut config = rustls::ClientConfig::builder()
+				.with_root_certificates(roots.clone())
+				.with_no_client_auth();
+			config.alpn_protocols = alpn.iter().map(|alpn| alpn.to_vec()).collect();
+			tokio_rustls::TlsConnector::from(Arc::new(config))
+		};
+
+		let serve = |rtmp: bool| {
+			let mut config = Config::default();
+			config.http.listen = Some("127.0.0.1:0".parse().unwrap());
+			config.https.listen = Some("127.0.0.1:0".parse().unwrap());
+			config.https.cert = vec![cert.clone()];
+			config.https.key = vec![key.clone()];
+			let auth = crate::auth::Config {
+				public_subscribe: vec![moq_auth::Pattern::all()],
+				..Default::default()
+			}
+			.init("test", &moq_tokio::tls::Connect::default(), false)
+			.unwrap();
+			let cluster = cluster::Cluster::new(crate::cluster::Options::default()).unwrap();
+			let certificates = moq_tokio::tls::Certificates::from_pem(&std::fs::read(&cert).unwrap()).unwrap();
+			// No idle deadline, so a stalled connection outlives serving below.
+			let mut web = Web::new(auth, cluster, certificates, config)
+				.with_timeout(None)
+				.bind()
+				.unwrap();
+			let incoming = rtmp.then(|| web.rtmp());
+			let Addrs {
+				http: Some(http),
+				https: Some(https),
+			} = web.addrs()
+			else {
+				panic!("both listeners are configured");
+			};
+			let routes = web.routes();
+			(tokio::spawn(web.serve(routes)), http, https, incoming)
+		};
+		let connect = async |addr: net::SocketAddr, alpn: Option<&[&[u8]]>| -> Box<dyn Io> {
+			let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+			match alpn {
+				None => Box::new(tcp) as Box<dyn Io>,
+				Some(alpn) => Box::new(
+					connector(alpn)
+						.connect("localhost".try_into().unwrap(), tcp)
+						.await
+						.expect("TLS handshake"),
+				),
+			}
+		};
+
+		let (serving, http, https, incoming) = serve(true);
+		let mut incoming = incoming.unwrap();
+		for (addr, alpn) in [(http, None), (https, None), (https, Some(&[][..]))] {
+			let mut client = connect(addr, alpn).await;
+			client.write_all(&[3, 1, 2, 3]).await.unwrap();
+			let mut rtmp = kio::clock::timeout(std::time::Duration::from_secs(10), incoming.accept())
+				.await
+				.expect("RTMP reached its consumer")
+				.unwrap();
+			assert_eq!(
+				rtmp.tcp().local_addr().unwrap(),
+				addr,
+				"the accepted socket stays reachable"
+			);
+			let mut c0 = [0u8; 4];
+			rtmp.read_exact(&mut c0).await.unwrap();
+			assert_eq!(c0, [3, 1, 2, 3], "addr={addr} tls={}", alpn.is_some());
+		}
+		// Silent, so it stays classifying; the requests below are accepted after it.
+		let _stalled = tokio::net::TcpStream::connect(http).await.unwrap();
+		for (addr, alpn) in [
+			(http, None),
+			(https, Some(&[b"http/1.1".as_slice()][..])),
+			(https, Some(&[][..])),
+		] {
+			let mut client = connect(addr, alpn).await;
+			client
+				.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+				.await
+				.unwrap();
+			let mut response = String::new();
+			let _ = client.read_to_string(&mut response).await;
+			assert!(
+				response.starts_with("HTTP/1.1 200"),
+				"addr={addr} alpn={alpn:?}: {response}"
+			);
+		}
+		// The connection still classifying does not keep the consumer open past serving.
+		serving.abort();
+		let _ = serving.await;
+		let ended = kio::clock::timeout(std::time::Duration::from_secs(10), incoming.accept()).await;
+		assert!(matches!(ended, Ok(None)), "the consumer ends with serving");
+
+		let (serving, http, https, _) = serve(false);
+		for (addr, alpn) in [(http, None), (https, Some(&[][..]))] {
+			let mut client = connect(addr, alpn).await;
+			client.write_all(&[3]).await.unwrap();
+			let mut rest = Vec::new();
+			let read = kio::clock::timeout(std::time::Duration::from_secs(10), client.read_to_end(&mut rest))
+				.await
+				.expect("an unserved RTMP connection is closed");
+			assert!(rest.is_empty(), "{read:?}");
+		}
 		serving.abort();
 	}
 
@@ -2302,7 +2589,9 @@ mod tests {
 
 	/// An upgraded WebSocket reads no more than one qmux record at a time: a frame
 	/// declaring more is refused at its header, before SETUP and without buffering it,
-	/// even with no timeout to end the wait. Real sockets, so this runs on the wall clock.
+	/// even with no timeout to end the wait. The socket is the listener's own, reclaimed from
+	/// under hyper rather than read through its boxed IO. Real sockets, so this runs on the
+	/// wall clock.
 	#[cfg(feature = "websocket")]
 	#[tokio::test]
 	async fn a_websocket_frame_past_one_record_is_refused_at_its_header() {
@@ -2361,6 +2650,11 @@ mod tests {
 			.await
 			.expect("the socket waited to buffer a frame larger than a record")
 			.ok();
+		// The refusal came from the socket built after the downcast, so it already ran.
+		assert!(
+			crate::websocket::RECLAIMED.load(std::sync::atomic::Ordering::Relaxed) > 0,
+			"the upgrade fell back to hyper's boxed IO"
+		);
 
 		serving.abort();
 	}
@@ -2548,9 +2842,10 @@ mod tests {
 				None,
 			)
 			.await;
-			let transport = qmux::ws::Upgraded::new(socket, "qmux-01.moq-lite-06")
+			let (transport, driver) = qmux::ws::Upgraded::new(socket, "qmux-01.moq-lite-06")
 				.connect()
 				.unwrap();
+			tokio::spawn(driver);
 			let origin = moq_tokio::origin::spawn();
 			let (session, driver) = moq_net::Client::new()
 				.with_versions("moq-lite-06".parse::<moq_net::Version>().unwrap().into())
@@ -2645,7 +2940,11 @@ mod tests {
 					.await
 					.unwrap();
 			assert!(activity.close().now_or_never().is_none(), "TLS was not counted");
-			let acceptor = WebAcceptor::tls(RustlsConfig::from_config(tls), false);
+			let tls = crate::listener::Tls {
+				http: RustlsConfig::from_config(tls),
+				qmux: None,
+			};
+			let acceptor = WebAcceptor::tls(tls, false, rtmp::Handoff::default(), acceptor_state());
 			let ((stream, _service), _client) = socket_step(async {
 				tokio::try_join!(
 					acceptor.accept(accepted, ()),
@@ -2654,7 +2953,7 @@ mod tests {
 			})
 			.await
 			.unwrap();
-			assert!(stream.is_http2());
+			assert_eq!(stream.tls().unwrap().alpn_protocol(), Some(&b"h2"[..]));
 			assert!(
 				activity.close().now_or_never().is_some(),
 				"h2 awaited request headers before releasing its admission"

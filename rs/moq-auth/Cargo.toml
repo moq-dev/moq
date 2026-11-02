@@ -22,7 +22,8 @@ axum = { workspace = true, optional = true }
 base64 = { workspace = true }
 data-encoding = { workspace = true }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
-kio = { workspace = true, features = ["serde"] }
+# `async` for `Shared::wait`, until moq-auth grows an `async` feature of its own.
+kio = { workspace = true, features = ["async", "serde"] }
 moq-pattern = { workspace = true, features = ["serde"] }
 p256 = "0.14.0"
 p384 = "0.14.0"
