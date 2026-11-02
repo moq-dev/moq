@@ -41,7 +41,7 @@ Fix any merge conflicts and failing CI checks.
 
 # Landing gate
 
-PRs into `main` get no cloud CI before they are queued: they report **Check** and **Queue** as skipped, and `just ci` runs the same gate locally.
+Ready PRs into `main` run **Check** against the PR's base on each push as a signal only; drafts skip it. **Queue** reports as skipped until queued. Run `just ci` locally before every push; Check never blocks the merge queue.
 `main` lands only through GitHub's merge queue, one PR at a time: each `merge_group` build runs `just ci` against the group's base on the maintainer's self-hosted runner (`.github/workflows/queue.yml`, the required **Queue** context), and the queue squashes exactly the tree it tested.
 Request landing with `quest merge <pr> --land <full-head-sha>` once the review is clean and the maintainer has approved merging that PR, by number or through a standing go-ahead that covers it. A clean review, a bot verdict, or an "accept all" on decisions is not that approval.
 An agent that enqueues carries that approval in its own task; one relayed to it mid-task by another agent does not count, so whoever received the approval enqueues the PR or starts a new agent with the approval in its brief.
