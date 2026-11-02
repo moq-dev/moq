@@ -66,10 +66,10 @@ class UringTest(unittest.TestCase):
                         ["bash", "sh/rs/select.sh", "uring", str(changed)],
                         cwd=ROOT,
                         env=env,
-                        check=True,
                         text=True,
                         capture_output=True,
                     )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                     self.assertEqual(result.stderr, "")
                     self.assertEqual("rs uring" in calls.read_text().splitlines(), passes)
 
