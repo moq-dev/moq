@@ -28,7 +28,7 @@ default-filter = "not kind(bench)"
 # hosted CI's locked-memory limit and uses the host's hard limit locally.
 # Several invocations still share that user-wide budget; see rs/moq-uring/README.md.
 [[profile.default.overrides]]
-filter = "package(moq-uring) | (binary_id(moq-relay::integration) & (test(/^runtime_uring::/) | test(/^embed::.*uring/)))"
+filter = "package(moq-uring) | (package(moq-relay) & test(/uring/))"
 test-group = "io-uring"
 
 # The vivid tests share one capture node, and a second process configuring its

@@ -126,7 +126,7 @@ async fn uring_workers_serve_webtransport_and_raw_quic() {
 
 	// The stock loop serves everything: the uring workers own QUIC, the shared
 	// runtime owns auth and supervision.
-	let running = tokio::spawn(relay.run());
+	let running = crate::start::start_relay(relay).await.expect("start relay");
 
 	// A WebTransport publisher (https, the browser path)...
 	let wt_url: url::Url = format!("https://127.0.0.1:{port}/uring").parse().expect("parse url");
@@ -231,7 +231,7 @@ async fn uring_workers_serve_every_configured_version() {
 		.expect("load relay")
 		.with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
-	let running = tokio::spawn(relay.run());
+	let running = crate::start::start_relay(relay).await.expect("start relay");
 
 	let origin = moq_tokio::origin::spawn();
 	let broadcast = origin.create_broadcast("test").expect("create broadcast");
@@ -317,7 +317,7 @@ async fn uring_workers_report_link_facts() {
 	let local = relay.addr().expect("bound address");
 	let port = local.port();
 	let sessions = relay.sessions().clone();
-	let running = tokio::spawn(relay.run());
+	let running = crate::start::start_relay(relay).await.expect("start relay");
 
 	let mut connections = Vec::new();
 	for scheme in ["moql", "https"] {
@@ -380,7 +380,7 @@ async fn uring_workers_drain_on_the_trigger() {
 	let port = relay.addr().expect("workers bound an address").port();
 	let trigger = relay.shutdown_trigger().clone();
 	let mut admissions = relay.admissions().expect("embedded admission");
-	let running = tokio::spawn(relay.run());
+	let running = crate::start::start_relay(relay).await.expect("start relay");
 
 	// One-shot (see `client`), so a session leaves on its GOAWAY rather than
 	// migrating, and closing cleanly shows it was one.
@@ -474,7 +474,7 @@ async fn workers_publish_their_rotated_certificate_fingerprint() {
 		let addr = listener.local_addr().expect("local addr");
 		let routes = relay.web().routes();
 		let serving = tokio::spawn(async move { axum::serve(listener, routes).await });
-		let running = tokio::spawn(relay.run());
+		let running = crate::start::start_relay(relay).await.expect("start relay");
 		let result = kio::clock::timeout(TIMEOUT, async {
 			for rotated in [false, true] {
 				if rotated {
@@ -543,7 +543,7 @@ async fn workers_share_a_generated_identity() {
 		let addr = listener.local_addr().unwrap();
 		let routes = relay.web().routes();
 		let serving = tokio::spawn(async move { axum::serve(listener, routes).await });
-		let running = tokio::spawn(relay.run());
+		let running = crate::start::start_relay(relay).await.expect("start relay");
 		let fingerprint = http_get(addr, "/certificate.sha256").await;
 		let mut dial = moq_tokio::connect::Config::default();
 		dial.tls.fingerprint = vec![fingerprint];
@@ -585,7 +585,7 @@ async fn an_mtls_client_authenticates_without_a_token() {
 
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
-	let running = tokio::spawn(relay.run());
+	let running = crate::start::start_relay(relay).await.expect("start relay");
 
 	let client = || {
 		let mut dial = moq_tokio::connect::Config::default();
@@ -677,7 +677,7 @@ async fn uring_workers_write_qlog_traces() {
 	config.quic.qlog = Some(traces.clone());
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
-	let running = tokio::spawn(relay.run());
+	let running = crate::start::start_relay(relay).await.expect("start relay");
 
 	// A real session, so a trace covers a handshake and application data
 	// rather than a connection that only ever exchanged Initials.
@@ -763,7 +763,7 @@ async fn uring_refusals_reach_metrics() {
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let port = relay.addr().expect("workers bound an address").port();
 	let internal = relay.internal().addr().expect("internal listener bound");
-	let running = tokio::spawn(relay.run());
+	let running = crate::start::start_relay(relay).await.expect("start relay");
 
 	// `/rooms` is outside the public rules. A client may finish connecting before
 	// the verdict lands, so a session that closes promptly counts as refused.
@@ -872,7 +872,7 @@ async fn uring_forwards_the_setup_token() {
 			admission.grant(moq_auth::lease::Consumer::fixed(moq_auth::Grant::new(all.clone(), all)));
 		}
 	});
-	let running = tokio::spawn(relay.run());
+	let running = crate::start::start_relay(relay).await.expect("start relay");
 	let mut config = moq_tokio::connect::Config::default();
 	config.tls.insecure = Some(true);
 	let tls = config.tls.build().unwrap();
@@ -963,7 +963,7 @@ async fn uring_auth_reports_distinct_quic_and_webtransport() {
 		}
 		leases
 	});
-	let running = tokio::spawn(relay.run());
+	let running = crate::start::start_relay(relay).await.expect("start relay");
 	let mut connections = Vec::new();
 	for scheme in ["moql", "https"] {
 		let url = format!("{scheme}://127.0.0.1:{port}/transport").parse().unwrap();
@@ -996,7 +996,7 @@ async fn uring_workers_offer_the_configured_extensions() {
 		let mut relay = Relay::load(config).await.unwrap().with_signals(false);
 		let port = relay.addr().unwrap().port();
 		let mut admissions = relay.admissions().expect("embedded auth");
-		let running = tokio::spawn(relay.run());
+		let running = crate::start::start_relay(relay).await.expect("start relay");
 
 		let mut dial = moq_tokio::connect::Config::default();
 		dial.tls.insecure = Some(true);
@@ -1073,7 +1073,7 @@ fn uring_workers_bound_stalled_handshakes() {
 		let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 		let port = relay.addr().expect("workers bound an address").port();
 		let addr = SocketAddr::from(([127, 0, 0, 1], port));
-		let running = tokio::spawn(relay.run());
+		let running = crate::start::start_relay(relay).await.expect("start relay");
 
 		let mut config = moq_tokio::connect::Config::default();
 		config.tls.insecure = Some(true);
@@ -1198,7 +1198,7 @@ async fn uring_sessions_log_their_close_under_a_connection_span() {
 		.with_signals(false);
 	let port = relay.addr().unwrap().port();
 	let trigger = relay.shutdown_trigger().clone();
-	let running = tokio::spawn(relay.run());
+	let running = crate::start::start_relay(relay).await.expect("start relay");
 	let mut connections = Vec::new();
 	for (id, scheme) in ["moql", "https"].into_iter().enumerate() {
 		let url = format!("{scheme}://127.0.0.1:{port}/logs").parse().unwrap();
@@ -1238,5 +1238,46 @@ async fn uring_sessions_log_their_close_under_a_connection_span() {
 				"missing conn {id}: {text}"
 			);
 		}
+	}
+}
+
+/// A ring refused at worker startup preserves the actionable error through the
+/// same fixture startup path used by the session tests.
+#[tokio::test]
+async fn uring_startup_reports_the_memlock_limit() {
+	// Resource limits belong to the process, so isolate even under libtest.
+	if !test_env::Env::default().set("MOQ_TEST_MEMLOCK", "0").isolate() {
+		return;
+	}
+	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+	if !supported() {
+		return;
+	}
+	let dir = tempfile::tempdir().expect("tempdir");
+	let (cert, key) = certificate(dir.path());
+	let relay = Relay::load(uring_config(&cert, &key))
+		.await
+		.expect("load relay")
+		.with_signals(false);
+	let mut limit = libc::rlimit {
+		rlim_cur: 0,
+		rlim_max: 0,
+	};
+	// SAFETY: valid out-pointer in an isolated test process.
+	assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_MEMLOCK, &mut limit) }, 0);
+	limit.rlim_cur = 0;
+	// SAFETY: valid limit in an isolated test process.
+	assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &limit) }, 0);
+	let error = crate::start::start_relay(relay)
+		.await
+		.expect_err("a worker needs locked memory");
+	let message = format!("{error:#}");
+	for expected in [
+		"io_uring worker 0 failed to start",
+		"RLIMIT_MEMLOCK",
+		"ulimit -l",
+		"LimitMEMLOCK=",
+	] {
+		assert!(message.contains(expected), "{message}");
 	}
 }
