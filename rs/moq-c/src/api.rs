@@ -853,7 +853,8 @@ pub(crate) unsafe fn parse_subscription(
 		.with_priority(subscription.priority)
 		.with_order(order);
 	let max_delay = std::time::Duration::from_micros(subscription.max_delay_us);
-	out = out.with_delay(moq_net::track::Delay::default().with_max(subscription.max_delay_present.then_some(max_delay)));
+	out =
+		out.with_delay(moq_net::track::Delay::default().with_max(subscription.max_delay_present.then_some(max_delay)));
 	if !subscription.ranges.is_null() {
 		let ranges = unsafe { std::slice::from_raw_parts(subscription.ranges, subscription.ranges_len) };
 		let ranges = ranges

@@ -752,7 +752,7 @@ mod tests {
 
 		let subscription = published.subscription().expect("the consumer subscribed");
 		assert_eq!(
-			subscription.max_delay,
+			subscription.delay.max,
 			Some(max_delay),
 			"the age budget did not reach the publisher"
 		);
@@ -1222,7 +1222,7 @@ mod tests {
 		)
 		.await;
 		assert_eq!(
-			published.subscription().and_then(|sub| sub.max_delay),
+			published.subscription().and_then(|sub| sub.delay.max),
 			Some(WARMUP),
 			"the two subscriptions did not share one request at the larger budget"
 		);
@@ -1427,7 +1427,7 @@ mod tests {
 			.await
 			.unwrap();
 			assert!(matches!(consumer.lanes[Lane::Max as usize], Slot::Closed));
-			assert_eq!(track.subscription().and_then(|sub| sub.max_delay), Some(max_delay));
+			assert_eq!(track.subscription().and_then(|sub| sub.delay.max), Some(max_delay));
 		}
 	}
 

@@ -316,7 +316,8 @@ mod tests {
 		chat.push(moq_net::Timed::from(&"second".to_owned()).at(at(1))).unwrap();
 
 		// A delay budget long enough that the backlog is still worth delivering.
-		let subscription = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)));
+		let subscription =
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)));
 		let mut late = Subscriber::new(remote.track(TRACK).unwrap().subscribe(subscription).await.unwrap());
 		assert_eq!(
 			late.recv().await.unwrap().map(|e| (e.value, e.at)),

@@ -199,7 +199,10 @@ impl Consumer {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.audio)
-					.with_delay(moq_net::track::Delay::default().with_max(options.delay.max.map(|max| max.saturating_add(warmup)))),
+					.with_delay(
+						moq_net::track::Delay::default()
+							.with_max(options.delay.max.map(|max| max.saturating_add(warmup))),
+					),
 			)
 			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
@@ -955,7 +958,8 @@ mod tests {
 
 		// A first reader warms the relay's copy with every group.
 		{
-			let subscription = moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
+			let subscription = moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10)));
 			let mut warm = remote.track("audio").unwrap().subscribe(subscription).await.unwrap();
 			let mut groups = 0;
 			while groups < 4 {

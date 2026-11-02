@@ -1311,8 +1311,10 @@ impl SiTrack {
 				Ok((broadcast, name)) => match broadcast.track(&name) {
 					Ok(track) => SiState::Subscribing(
 						track.subscribe(
-							self.source
-								.subscription(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(self.max_age))),
+							self.source.subscription(
+								moq_net::track::Subscription::default()
+									.with_delay(moq_net::track::Delay::default().with_max(self.max_age)),
+							),
 						),
 					),
 					Err(err) => {

@@ -238,7 +238,8 @@ async fn read_until(
 	consumer: &moq_net::broadcast::Consumer,
 	name: &str,
 ) -> (Vec<crate::container::Frame>, Result<bool, String>) {
-	let subscription = moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+	let subscription = moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
 	let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 	let mut reader = crate::container::Consumer::new(
 		track,

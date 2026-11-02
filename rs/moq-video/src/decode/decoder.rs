@@ -682,7 +682,10 @@ mod tests {
 		let track = subscriber
 			.track(name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30))))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(30))),
+			)
 			.await
 			.unwrap();
 		let mut track =

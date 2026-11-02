@@ -124,7 +124,8 @@ impl Topology {
 
 		let consumer = subscriber.consume();
 		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
-		let prefs = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
+		let prefs =
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		let sub = remote.track("video").unwrap().subscribe(prefs).await.unwrap();
 
 		let topology = Self {
@@ -524,7 +525,8 @@ async fn lagging_route_dies(version: Version) {
 	async fn subscribe(origin: &origin::Producer) -> track::Subscriber {
 		let consumer = origin.consume();
 		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
-		let preferences = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
+		let preferences =
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(60)));
 		remote.track("video").unwrap().subscribe(preferences).await.unwrap()
 	}
 	fn write(group: &mut moq_net::group::Producer, sequence: u64, frame: u64) {

@@ -10,7 +10,7 @@ for (const count of [1, 16, 256]) {
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 		const track = new Track.Producer("tone");
 		const delay = new Signal<Track.Delay>({ max: Milli(30_000) });
-		const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) }}), {
+		const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
 			format: new Format("data"),
 			delay,
 		});
@@ -59,7 +59,7 @@ for (const open of [true, false]) {
 	test(`a buffered backlog starts within the budget (sixth group ${open ? "open" : "finished"})`, async () => {
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 		const track = new Track.Producer("backlog");
-		const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) }}), {
+		const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
 			format: new Format("data"),
 			delay: { max: Milli(1500) },
 		});
@@ -99,7 +99,7 @@ for (const open of [true, false]) {
 test("a backlog start waits on a successor without frames", async () => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const track = new Track.Producer("backlog");
-	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) }}), {
+	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
 		format: new Format("data"),
 		delay: { max: Milli(1500) },
 	});

@@ -1006,7 +1006,9 @@ mod tests {
 			.unwrap();
 		let subscriber = video
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let mut audio = moq_mux::container::Producer::new(audio, Container::Legacy(moq_mux::container::Kind::Audio));
@@ -1394,7 +1396,10 @@ mod tests {
 		// The network keeps every group; only the player's age budget evicts.
 		let subscriber = video
 			.consume()
-			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(10))),
+			)
 			.await
 			.unwrap();
 		let mut video = moq_mux::container::Producer::new(video, Container::Legacy(moq_mux::container::Kind::Video));
@@ -2170,7 +2175,9 @@ mod tests {
 			.consume()
 			.track("video")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)))
+			.subscribe(
+				moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(delay)),
+			)
 			.await
 			.unwrap();
 		let track = moq_mux::container::Consumer::new(subscriber, Container::try_from(&catalog).unwrap());

@@ -4,8 +4,8 @@
 //! group below the end, then the error, and so does one subscribing after the first ended.
 //! Before lite-07 the end has nowhere to carry its error, so the subscription resets with it.
 
-use moq_net::track::Delay;
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 

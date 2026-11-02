@@ -8,7 +8,7 @@ How to update your code for each breaking change, newest first.
 
 `Track.Subscription` carries a `delay: Track.Delay` (`{ min?: Milli | null; max?: Milli | null }`) in place of `maxDelay`, which is now refused at runtime.
 Replace `maxDelay: d` with `delay: { max: d }`. `max` keeps `maxDelay`'s meaning, and an omitted field is zero.
-`min` is the subscriber's target latency; `null` means not stated, which only a peer on moq-lite before 07 or moq-transport sends. moq-lite-07 SUBSCRIBE and SUBSCRIBE_UPDATE carry it, and a track's aggregate takes the smallest stated one.
+`min` is the subscriber's target latency; `null` means not stated, which only a peer on moq-lite before 07 or moq-transport sends. moq-lite-07 SUBSCRIBE and SUBSCRIBE\_UPDATE carry it, and a track's aggregate takes the smallest stated one.
 `FetchGroupOptions.maxDelay` is unchanged.
 
 ### `maxDelay: null` sets no subscriber limit ([#7403](https://github.com/moq-dev/moq/pull/7403))

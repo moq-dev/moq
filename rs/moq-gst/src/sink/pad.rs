@@ -1621,7 +1621,10 @@ mod tests {
 		let mut track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
 			.await
 			.unwrap();
 		for index in 0..17 {
@@ -2012,7 +2015,10 @@ mod tests {
 			.consume()
 			.track("audiolevels")
 			.expect("the opaque track is published")
-			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(1))))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(1))),
+			)
 			.await
 			.expect("subscribe to the opaque track")
 			.ordered();

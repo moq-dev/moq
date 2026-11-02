@@ -8,8 +8,8 @@
 //! moq-transport one does, and serves the timestamps on over every version. A lite-07
 //! receiver checks them, so it refuses that out-of-order group.
 
-use moq_net::track::Delay;
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -77,7 +77,9 @@ async fn relay(
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
-	let subscription = Subscription::default().with_delay(Delay::default().with_max(BUDGET)).with_range(0..);
+	let subscription = Subscription::default()
+		.with_delay(Delay::default().with_max(BUDGET))
+		.with_range(0..);
 	let reader = kio::clock::sim::spawn(async move {
 		let mut sub = remote
 			.track("data")

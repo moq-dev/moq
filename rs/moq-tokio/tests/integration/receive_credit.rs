@@ -15,7 +15,10 @@
 use std::{process::Stdio, sync::Arc, time::Duration};
 
 use bytes::Bytes;
-use moq_tokio::moq_net::{self, Timestamp, frame, track::Subscription};
+use moq_tokio::moq_net::{
+	self, Timestamp, frame,
+	track::{Delay, Subscription},
+};
 use moq_tokio::quic::{driver, web};
 use tokio::io::AsyncWriteExt;
 

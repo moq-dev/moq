@@ -5372,7 +5372,10 @@ pub(super) mod test {
 		let track = consumer
 			.track(&name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			)
 			.await
 			.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
@@ -6073,7 +6076,10 @@ pub(super) mod test {
 		let track = consumer
 			.track(&name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			)
 			.await
 			.unwrap();
 		let mut reader = crate::container::Consumer::new(
@@ -7075,7 +7081,10 @@ pub(super) mod test {
 		let track = consumer
 			.track(hang::catalog::Catalog::DEFAULT_NAME)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			)
 			.await
 			.unwrap();
 		let mut reader = crate::container::Consumer::new(
@@ -7469,7 +7478,10 @@ pub(super) mod test {
 		let track = consumer
 			.track(&name)
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+			)
 			.await
 			.unwrap();
 		let mut reader = Consumer::new(track, Container::Legacy(crate::container::Kind::Data));
@@ -7762,7 +7774,8 @@ pub(super) mod test {
 		// A generous max delay: the default of zero would shed every non-latest group, the
 		// declared breaks among them, and the subscribe start is resolved from it too, so
 		// it has to reach back past a 30 s leap to the first frame.
-		let subscription = moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(3600)));
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
@@ -9009,7 +9022,8 @@ pub(super) mod test {
 		name: &str,
 		kind: crate::container::Kind,
 	) -> Vec<crate::container::Frame> {
-		let subscription = moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
 		let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 		let mut reader = crate::container::Consumer::new(track, crate::catalog::hang::Container::Legacy(kind));
 		let mut frames = Vec::new();
@@ -9845,7 +9859,8 @@ pub(super) mod test {
 
 		// Each group as published, its empty end marker included.
 		let name = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
-		let subscription = moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
 		let mut track = consumer.track(&name).unwrap().subscribe(subscription).await.unwrap();
 		let mut groups = Vec::new();
 		while let Some(mut group) = track.recv_group().await.unwrap() {
@@ -10977,7 +10992,10 @@ pub(super) mod test {
 			let track = consumer
 				.track(&name)
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(RECORDING_MAX_AGE)),
+				)
 				.await
 				.unwrap();
 			let mut reader = crate::container::Consumer::new(

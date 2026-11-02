@@ -73,7 +73,8 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	let consumer = moq_e2ee::broadcast::Consumer::new(remote, cred.consume(epoch))
 		.subscribe(
 			track,
-			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
 		)
 		.unwrap()
 		.await

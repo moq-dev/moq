@@ -1204,7 +1204,8 @@ async fn rejoin_skips_a_stale_warm_cache(version: &str) {
 		.await
 		.expect("request timeout")
 		.expect("broadcast resolves");
-	let budget = moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100)));
+	let budget = moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_millis(100)));
 	async fn recv(sub: &mut moq_net::track::Subscriber, version: &str) -> u64 {
 		kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await

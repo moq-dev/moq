@@ -2326,10 +2326,10 @@ impl kio::Task for SourceServe {
 mod tests {
 	use super::*;
 	use crate::Timescale;
-	use crate::track::Delay;
 	use crate::coding::{Decode, Encode};
 	use crate::lite::test_transport::{Sent, SinkSession};
 	use crate::model::ProduceTest;
+	use crate::track::Delay;
 	use futures::FutureExt;
 
 	const VERSION: Version = Version::Lite05;
@@ -4802,7 +4802,10 @@ mod tests {
 			let session = crate::lite::test_transport::ScriptedSession::per_stream(vec![info, Vec::new()]);
 			let subscriber = pipelining(crate::driver::Transport::new(session.clone()), version);
 			let wait = Duration::from_secs(10);
-			let (waiting, mut run) = subscribing(&subscriber, Subscription::default().with_delay(Delay::default().with_max(wait)));
+			let (waiting, mut run) = subscribing(
+				&subscriber,
+				Subscription::default().with_delay(Delay::default().with_max(wait)),
+			);
 			for _ in 0..4 {
 				let _ = kio::Task::poll(&mut run, &kio::Waiter::noop());
 			}

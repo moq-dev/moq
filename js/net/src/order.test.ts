@@ -292,7 +292,9 @@ test("a shared track aggregates descending and serves each subscriber in its own
 	await aggregate(video, (order) => order === "ascending");
 
 	const descendingRemote = wireOf(descending.client).consume(Path.from("test"));
-	const descendingTrack = descendingRemote.track("video").subscribe({ delay: { max: MAX_DELAY }, order: "descending" });
+	const descendingTrack = descendingRemote
+		.track("video")
+		.subscribe({ delay: { max: MAX_DELAY }, order: "descending" });
 	await aggregate(video, (order) => order === "descending");
 
 	// One at a time, so each session opens its streams in sequence order.

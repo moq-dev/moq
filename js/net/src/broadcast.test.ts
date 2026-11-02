@@ -442,11 +442,11 @@ test("two subscribers to one inserted track each get a full copy", async () => {
 
 	const a = broadcast
 		.track("video")
-		.subscribe({ delay: { max: Milli(5000) }})
+		.subscribe({ delay: { max: Milli(5000) } })
 		.ordered();
 	const b = broadcast
 		.track("video")
-		.subscribe({ delay: { max: Milli(5000) }})
+		.subscribe({ delay: { max: Milli(5000) } })
 		.ordered();
 
 	producer.writeFrame(textFrame("hello"));
@@ -478,7 +478,7 @@ test("a read throws Evicted at a shed front, then resyncs to the next group", as
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const sub = broadcast
 		.track("video")
-		.subscribe({ delay: { max: Milli(5000) }})
+		.subscribe({ delay: { max: Milli(5000) } })
 		.ordered();
 
 	// Group 0 sheds its front without aborting the writer.
@@ -557,7 +557,7 @@ test("a finished track is still served from its cache", async () => {
 	const late = broadcast
 		.consume()
 		.track("track1")
-		.subscribe({ delay: { max: Milli(5000) }})
+		.subscribe({ delay: { max: Milli(5000) } })
 		.ordered();
 	expect(await late.readString()).toBe("last");
 	expect(await late.nextGroup()).toBeUndefined();

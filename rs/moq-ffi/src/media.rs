@@ -1920,7 +1920,10 @@ mod timebase_tests {
 				let track = consumer
 					.track(&name)
 					.unwrap()
-					.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))))
+					.subscribe(
+						moq_net::track::Subscription::default()
+							.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(30))),
+					)
 					.await
 					.unwrap();
 				readers.push(moq_mux::container::Consumer::new(track, container));

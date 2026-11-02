@@ -7,8 +7,8 @@
 //! is dropped. Lite-06 and later encode a floor of group 0 as 0, which is the only
 //! spelling of both an omitted floor and group 0; the draft says that 0 is group 0.
 
-use moq_net::track::Delay;
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -240,7 +240,9 @@ async fn merged(version: &str) -> (Vec<(u64, usize)>, Vec<(u64, usize)>) {
 	let subscribe = |range: Range| {
 		let track = remote.track("late").unwrap();
 		async move {
-			let subscription = Subscription::default().with_delay(Delay::default().with_max(BUDGET)).with_ranges([range]);
+			let subscription = Subscription::default()
+				.with_delay(Delay::default().with_max(BUDGET))
+				.with_ranges([range]);
 			kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
 				.await
 				.expect("subscribe timeout")

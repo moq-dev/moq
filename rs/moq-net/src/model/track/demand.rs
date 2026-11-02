@@ -320,7 +320,9 @@ mod tests {
 			let next = Subscription {
 				priority: rng.random_range(0..8),
 				delay: Delay {
-					min: rng.random_bool(0.75).then(|| Duration::from_millis(rng.random_range(0..8))),
+					min: rng
+						.random_bool(0.75)
+						.then(|| Duration::from_millis(rng.random_range(0..8))),
 					max: Some(Duration::from_millis(rng.random_range(0..8))),
 				},
 				ranges,

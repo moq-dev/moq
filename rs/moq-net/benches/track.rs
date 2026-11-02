@@ -439,7 +439,9 @@ impl Aged {
 		let tracks = (0..tracks)
 			.map(|i| {
 				let track = broadcast.create_track(format!("bench{i}"), None).unwrap();
-				let mut sub = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(AGED_BUDGET)));
+				let mut sub = track.subscribe(
+					track::Subscription::default().with_delay(track::Delay::default().with_max(AGED_BUDGET)),
+				);
 				let mut held = track.append_group().unwrap();
 				held.write_frame(None, Bytes::from_static(b"x")).unwrap();
 				for _ in 1..groups.max(2) {
@@ -1098,7 +1100,8 @@ fn bench_datagram_subscriber_join(c: &mut Criterion) {
 						(broadcast, track)
 					},
 					|(broadcast, track)| {
-						let preferences = track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_millis(5)));
+						let preferences = track::Subscription::default()
+							.with_delay(track::Delay::default().with_max(Duration::from_millis(5)));
 						let viewers: Vec<_> = (0..join).map(|_| track.subscribe(preferences.clone())).collect();
 						(broadcast, track, viewers)
 					},
@@ -1209,7 +1212,8 @@ fn bench_parked_read(c: &mut Criterion) {
 						.checked_mul(MICROS_PER_GROUP)
 						.unwrap(),
 				);
-				let mut sub = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(max_delay)));
+				let mut sub = track
+					.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(max_delay)));
 				let mut micros = 0;
 				let mut open = Vec::with_capacity(parked);
 				let queue = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1282,7 +1286,9 @@ impl Sparse {
 	fn new(info: track::Info, gaps: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", info.clone()).unwrap();
-		let sub = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))));
+		let sub = track.subscribe(
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
+		);
 		let mut sparse = Self {
 			_broadcast: broadcast,
 			track,
@@ -1386,7 +1392,8 @@ impl Idle {
 		let waiter = kio::Waiter::noop();
 		let (mut recv, mut next) = (Vec::new(), Vec::new());
 		for _ in 0..readers {
-			let reader = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(AGED_BUDGET)));
+			let reader = track
+				.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(AGED_BUDGET)));
 			if ordered {
 				let mut reader = reader.ordered();
 				assert!(matches!(reader.poll_next_group(&waiter), Poll::Ready(Ok(Some(_)))));
@@ -1446,7 +1453,10 @@ impl Expiring {
 		let mut sparse = Sparse::new(track::Info::default(), 0);
 		sparse
 			.sub
-			.update(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_millis(gaps))))
+			.update(
+				track::Subscription::default()
+					.with_delay(track::Delay::default().with_max(Duration::from_millis(gaps))),
+			)
 			.unwrap();
 		let pool = sparse._broadcast.info().pool.clone();
 		// Supply time ahead of the host clock, so only these steps age the gaps even
@@ -1512,7 +1522,9 @@ impl GapFlush {
 	fn new(gaps: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", timed()).unwrap();
-		let mut sub = track.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))));
+		let mut sub = track.subscribe(
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(3600))),
+		);
 		let mut hand_out = |sequence: u64, millis: u64| {
 			let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
 			group

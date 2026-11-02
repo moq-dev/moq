@@ -170,7 +170,9 @@ impl Shape {
 	/// What each viewer subscribes with: a burst is a backlog, which the default
 	/// subscription writes off as late.
 	fn subscription(&self) -> Option<track::Subscription> {
-		(self.burst > 1).then(|| track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30))))
+		(self.burst > 1).then(|| {
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(30)))
+		})
 	}
 
 	fn total(&self) -> usize {
@@ -976,7 +978,11 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							.watch(
 								&path(0),
 								&[TRACK],
-								Some(track::Subscription::default().with_range(span..).with_delay(track::Delay::default().with_max(None))),
+								Some(
+									track::Subscription::default()
+										.with_range(span..)
+										.with_delay(track::Delay::default().with_max(None)),
+								),
 							)
 							.await;
 						viewers.push(viewer);
@@ -992,7 +998,11 @@ pub(crate) fn range_updates<B: Backend>(c: &mut Criterion) {
 							let future = next + span;
 							for viewer in &mut viewers {
 								viewer.subscribers[0]
-									.update(track::Subscription::default().with_range(future..).with_delay(track::Delay::default().with_max(None)))
+									.update(
+										track::Subscription::default()
+											.with_range(future..)
+											.with_delay(track::Delay::default().with_max(None)),
+									)
 									.unwrap();
 							}
 							kio::wait(|waiter| {

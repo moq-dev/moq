@@ -2757,7 +2757,7 @@ mod session_tests {
 		});
 
 		let request = await_request(&mut dynamic);
-		assert_eq!(request.subscription().unwrap().max_delay, Some(max_delay));
+		assert_eq!(request.subscription().unwrap().delay.max, Some(max_delay));
 
 		let _ = shutdown.send(true);
 		super::RUNTIME.block_on(session).unwrap().unwrap();

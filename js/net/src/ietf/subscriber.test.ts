@@ -1735,7 +1735,7 @@ for (const negotiated of [false, true]) {
 		const track = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ delay: { max: Milli(250) }});
+			.subscribe({ delay: { max: Milli(250) } });
 		const peer = await nextStream(pair.client);
 		if (!peer) throw new Error("no subscribe stream");
 		expect(await peer.reader.u53()).toBe(Subscribe.id);

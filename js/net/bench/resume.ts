@@ -150,7 +150,7 @@ async function measureFlaps(readers: number, flaps: number): Promise<number> {
 	});
 	front.serve(handles[0]);
 	const subscribers = Array.from({ length: readers }, () =>
-		front.consumer.track("seq").subscribe({ delay: { max: Milli(3_600_000) }}),
+		front.consumer.track("seq").subscribe({ delay: { max: Milli(3_600_000) } }),
 	);
 	const held = subscribers.map((subscriber) => {
 		const group = subscriber.tryRecvGroup();
@@ -247,7 +247,7 @@ async function measureDatagrams(readers: number, retained: number): Promise<numb
 	const producer = broadcast.createTrack("seq");
 	front.serve(broadcast.consume());
 	const subscribers = Array.from({ length: readers }, () =>
-		front.consumer.track("seq").subscribe({ delay: { max: Milli(3_600_000) }}),
+		front.consumer.track("seq").subscribe({ delay: { max: Milli(3_600_000) } }),
 	);
 	const deliver = (sequence: number) => {
 		producer.insertDatagram(sequence, undefined, payload);

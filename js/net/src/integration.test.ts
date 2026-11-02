@@ -256,13 +256,13 @@ test.each([Ietf.ALPN.DRAFT_22])("integration: %s carries the subscriber max age 
 	})();
 
 	const remote = wireOf(client).consume(Path.from("test"));
-	const subscriber = remote.track("video").subscribe({ delay: { max: Milli(250) }});
+	const subscriber = remote.track("video").subscribe({ delay: { max: Milli(250) } });
 	const producer = await accepted;
 	// Without the negotiated parameter the publisher keeps its whole backlog instead.
 	expect(producer.subscription.peek()?.delay?.max).toBe(Milli(250));
 
 	const updated = producer.subscription.changed();
-	subscriber.update({ delay: { max: Milli(500) }});
+	subscriber.update({ delay: { max: Milli(500) } });
 	expect((await updated)?.delay?.max).toBe(Milli(500));
 
 	subscriber.close();
@@ -304,7 +304,9 @@ test("integration: lite carries a fractional delay as a whole millisecond", asyn
 	const remote = wireOf(client).consume(Path.from("test"));
 	// A varint cannot encode 38.75, so an unrounded value fails the SUBSCRIBE outright and
 	// nothing resubscribes. The publisher must see the budget rounded up instead.
-	const subscriber = remote.track("video").subscribe({ delay: { max: Milli(38.75) }, groups: { start: { included: 1 } } });
+	const subscriber = remote
+		.track("video")
+		.subscribe({ delay: { max: Milli(38.75) }, groups: { start: { included: 1 } } });
 
 	// A failed subscribe never reaches the publisher, so race its closure to report the
 	// encode error rather than block until the suite times out.

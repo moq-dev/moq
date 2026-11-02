@@ -767,7 +767,10 @@ mod tests {
 		let track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
 			.await
 			.unwrap();
 		let mut reader =
@@ -952,7 +955,10 @@ mod tests {
 		let track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+			)
 			.await
 			.unwrap();
 		let mut reader =
@@ -1185,7 +1191,10 @@ mod tests {
 			consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				)
 				.await
 				.unwrap(),
 			moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio),
@@ -1468,7 +1477,10 @@ mod tests {
 			let mut track = consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				)
 				.await
 				.unwrap();
 
@@ -1510,7 +1522,10 @@ mod tests {
 			let mut track = consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				)
 				.await
 				.unwrap();
 			for index in 0..packets * 2 {
@@ -1619,7 +1634,10 @@ mod tests {
 			let track = consumer
 				.track("audio")
 				.unwrap()
-				.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))))
+				.subscribe(
+					moq_net::track::Subscription::default()
+						.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+				)
 				.await
 				.unwrap();
 			let mut reader = moq_mux::container::Consumer::new(
@@ -1670,7 +1688,10 @@ mod tests {
 		let track = consumer
 			.track("audio")
 			.unwrap()
-			.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))))
+			.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+			)
 			.await
 			.unwrap();
 		let mut reader =

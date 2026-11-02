@@ -53,7 +53,9 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 		let consumer = viewer.consume();
 		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 		let cache = remote.track("catalog").unwrap();
-		let prefs = |millis| track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_millis(millis)));
+		let prefs = |millis| {
+			track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_millis(millis)))
+		};
 		let mut short = cache.subscribe(prefs(250)).await.unwrap();
 		budget(&mut source, 250, version).await;
 		let tolerant = cache.subscribe(prefs(2000)).await.unwrap();
@@ -77,7 +79,10 @@ async fn relay_forwards_the_most_tolerant_subscriber_max_age() {
 async fn min_delay(track: &mut track::Producer, min: Option<Duration>) {
 	kio::clock::timeout(Duration::from_secs(5), async {
 		loop {
-			if track.subscription().is_some_and(|subscription| subscription.delay.min == min) {
+			if track
+				.subscription()
+				.is_some_and(|subscription| subscription.delay.min == min)
+			{
 				return;
 			}
 			track.subscription_changed().await.unwrap();
@@ -102,7 +107,10 @@ async fn relay_forwards_the_smallest_stated_min_delay() {
 	let _legacy = peer(lite06, &relay, &legacy).await;
 	let broadcast = publisher.create_broadcast("live").unwrap();
 	let mut source = broadcast
-		.create_track("catalog", track::Info::default().with_timescale(moq_net::Timescale::MILLI))
+		.create_track(
+			"catalog",
+			track::Info::default().with_timescale(moq_net::Timescale::MILLI),
+		)
 		.unwrap();
 	let mut group = source.append_group().unwrap();
 	group.write_frame(Timestamp::ZERO, b"catalog").unwrap();
@@ -112,7 +120,13 @@ async fn relay_forwards_the_smallest_stated_min_delay() {
 	let cache = |origin: &origin::Producer| {
 		let origin = origin.clone();
 		async move {
-			let remote = origin.consume().follow("live", None).unwrap().available().await.unwrap();
+			let remote = origin
+				.consume()
+				.follow("live", None)
+				.unwrap()
+				.available()
+				.await
+				.unwrap();
 			remote.track("catalog").unwrap()
 		}
 	};

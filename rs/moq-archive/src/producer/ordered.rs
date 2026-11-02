@@ -165,7 +165,7 @@ impl Ordered {
 
 #[cfg(test)]
 mod tests {
-	use moq_net::track::{Order, Range, Subscription};
+	use moq_net::track::{Delay, Order, Range, Subscription};
 	use moq_net::{broadcast, track};
 
 	use super::*;

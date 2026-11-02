@@ -13,8 +13,8 @@
 //! acknowledged on arrival, as QUIC does, so its close can drain before the relay reads
 //! them.
 
-use moq_net::track::Delay;
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -121,7 +121,9 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 
 	let mut readers = Vec::new();
 	for (index, track) in tracks.iter().enumerate() {
-		let subscription = Subscription::default().with_delay(Delay::default().with_max(MAX_DELAY)).with_range(0..);
+		let subscription = Subscription::default()
+			.with_delay(Delay::default().with_max(MAX_DELAY))
+			.with_range(0..);
 		let sub = remote.track(&format!("track{index}")).unwrap().subscribe(subscription);
 		let sub = kio::clock::timeout(TIMEOUT, sub)
 			.await

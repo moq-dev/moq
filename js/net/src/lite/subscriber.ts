@@ -22,7 +22,16 @@ import {
 } from "../error.ts";
 import * as netGroup from "../group.ts";
 import { Cost, type Hop, MAX_HOPS, type Route, routesEqual, UNKNOWN_HOP } from "../hop.ts";
-import { groupBounds, hiddenBelow, hooks, maxDelayOf, minDelayOf, scopeCaptures, scopeHead, scopeOverlaps } from "../internal.ts";
+import {
+	groupBounds,
+	hiddenBelow,
+	hooks,
+	maxDelayOf,
+	minDelayOf,
+	scopeCaptures,
+	scopeHead,
+	scopeOverlaps,
+} from "../internal.ts";
 import type { Lister } from "../listing.ts";
 import * as Path from "../path.ts";
 import { receiveFrame } from "../payload.ts";

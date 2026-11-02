@@ -114,7 +114,8 @@ impl Imported {
 	/// Every frame on the track carrying `pid`.
 	async fn frames(&self, pid: u16) -> Vec<crate::container::Frame> {
 		let (name, _) = self.entry(pid).expect("a track on the PID");
-		let subscription = moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
+		let subscription = moq_net::track::Subscription::default()
+			.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(3600)));
 		let track = self
 			.consumer
 			.track(&name)

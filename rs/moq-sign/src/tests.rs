@@ -162,7 +162,8 @@ async fn settle() {
 }
 
 fn subscribe_all() -> moq_net::track::Subscription {
-	moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60)))
+	moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60)))
 }
 
 /// A signed broadcast published at `path` on its own origin, announced under its epoch.

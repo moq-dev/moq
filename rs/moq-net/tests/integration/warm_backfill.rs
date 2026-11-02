@@ -40,7 +40,11 @@ async fn subscribe(relay: &origin::Producer) -> track::Subscriber {
 	remote
 		.track("video")
 		.unwrap()
-		.subscribe(Subscription::default().with_delay(Delay::default().with_max(BUDGET)).with_range(0..))
+		.subscribe(
+			Subscription::default()
+				.with_delay(Delay::default().with_max(BUDGET))
+				.with_range(0..),
+		)
 		.await
 		.unwrap()
 }

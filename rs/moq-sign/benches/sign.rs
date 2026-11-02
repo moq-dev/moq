@@ -40,7 +40,8 @@ async fn roundtrip(
 		.unwrap();
 	let inner = origin.consume().request(&path, None).await.unwrap();
 	let consumer = broadcast::Consumer::new(inner, key.public(), path).unwrap();
-	let subscription = moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60)));
+	let subscription = moq_net::track::Subscription::default()
+		.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60)));
 	let consumer = consumer.subscribe("stream", subscription).unwrap().await.unwrap();
 	(track, consumer, publication)
 }

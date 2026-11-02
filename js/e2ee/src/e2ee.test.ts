@@ -40,7 +40,7 @@ function netTrack(name: string, timed = true): NetTrack.Producer {
 }
 
 function subscribe(net: NetTrack.Producer): NetTrack.Subscriber {
-	return net.subscribe({ delay: { max: Milli(60_000) }});
+	return net.subscribe({ delay: { max: Milli(60_000) } });
 }
 
 interface Pair {

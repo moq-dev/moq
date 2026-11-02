@@ -1158,7 +1158,10 @@ mod read_tests {
 			.unwrap();
 		let format = || moq_mux::catalog::hang::Container::Legacy(moq_mux::container::Kind::Audio);
 		let consumer = moq_mux::container::Consumer::new(
-			track.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::ZERO))),
+			track.subscribe(
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::ZERO)),
+			),
 			format(),
 		);
 		let timestamp = |us| moq_net::Timestamp::from_micros(us).unwrap();

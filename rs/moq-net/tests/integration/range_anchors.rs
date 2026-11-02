@@ -6,8 +6,8 @@
 //! Largest Object its live join reports. A copy received over any other wire refuses the
 //! anchor instead of resolving it against the part of the track it happens to hold.
 
-use moq_net::track::Delay;
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 

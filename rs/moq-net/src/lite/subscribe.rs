@@ -132,12 +132,9 @@ impl<'a> Message<'a> for Subscribe<'a> {
 		let priority = super::priority::from_wire(r.u8()?);
 
 		let (order, max_delay, min_delay, ranges) = match version {
-			Version::Lite01 | Version::Lite02 => (
-				Order::Descending,
-				std::time::Duration::ZERO,
-				None,
-				vec![Range::OLDEST],
-			),
+			Version::Lite01 | Version::Lite02 => {
+				(Order::Descending, std::time::Duration::ZERO, None, vec![Range::OLDEST])
+			}
 			_ => {
 				let order = decode_order(r, version)?;
 				let max_delay = std::time::Duration::from_millis(r.varint()?);
@@ -1371,7 +1368,11 @@ mod test {
 	/// zero apart from not stated; an earlier wire drops it, so it decodes as not stated.
 	#[test]
 	fn min_delay_roundtrips_only_on_lite07() {
-		let stated = [None, Some(std::time::Duration::ZERO), Some(std::time::Duration::from_millis(250))];
+		let stated = [
+			None,
+			Some(std::time::Duration::ZERO),
+			Some(std::time::Duration::from_millis(250)),
+		];
 		for version in [Version::Lite03, Version::Lite06, Version::Lite07] {
 			for min_delay in stated {
 				let expected = if version.has_min_delay() { min_delay } else { None };

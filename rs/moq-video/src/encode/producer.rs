@@ -898,7 +898,9 @@ mod tests {
 				catalog.track_info(hang::catalog::PRIORITY.video).with_max_age(replay),
 			)
 			.unwrap();
-		let consumer = track.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(replay)));
+		let consumer = track.subscribe(
+			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(replay)),
+		);
 
 		let mut config = Config::new(320, 240, crate::FrameRate::new(30, 1).unwrap());
 		config.kind = encoder::Kind::Software;
@@ -1206,7 +1208,10 @@ mod tests {
 					.consumer
 					.track(name)
 					.unwrap()
-					.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RETAIN)))
+					.subscribe(
+						moq_net::track::Subscription::default()
+							.with_delay(moq_net::track::Delay::default().with_max(RETAIN)),
+					)
 					.await
 					.unwrap();
 				moq_mux::container::Consumer::new(track, container)
@@ -1809,7 +1814,10 @@ mod tests {
 				let mut subscriber = consumer
 					.track(&name)
 					.unwrap()
-					.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5))))
+					.subscribe(
+						moq_net::track::Subscription::default()
+							.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(5))),
+					)
 					.await
 					.unwrap();
 				for sequence in 0..2 {

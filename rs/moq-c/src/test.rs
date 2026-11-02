@@ -6312,7 +6312,7 @@ fn subscription_defaults_are_moq_net_defaults() {
 
 	let zeroed: moq_subscription = unsafe { std::mem::zeroed() };
 	let zeroed = unsafe { crate::api::parse_subscription(&zeroed) }.unwrap();
-	assert_eq!(zeroed.max_delay, None);
+	assert_eq!(zeroed.delay.max, None);
 }
 
 /// `moq_client_defaults` has to agree with what a zeroed struct actually dials,

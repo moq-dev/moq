@@ -3,8 +3,8 @@
 //! Subscribers asking for different ranges of one track share a single upstream
 //! subscription, and each still gets the groups its own range asks for.
 
-use moq_net::track::Delay;
 use crate::support;
+use moq_net::track::Delay;
 
 use std::time::Duration;
 
@@ -429,7 +429,9 @@ async fn draft22_can_widen_while_the_current_group_is_quiet() {
 		);
 		let mut history = subscribe(
 			&fixture.remote,
-			Subscription::default().with_range(0..2).with_delay(Delay::default().with_max(None)),
+			Subscription::default()
+				.with_range(0..2)
+				.with_delay(Delay::default().with_max(None)),
 		)
 		.await;
 		let mut got = [next(&mut history).await.unwrap(), next(&mut history).await.unwrap()];
@@ -453,7 +455,9 @@ async fn draft18_updates_narrow_then_widen() {
 	let version = "moq-transport-18";
 	for relay in [false, true] {
 		let mut fixture = range_fixture_version(version, relay).await;
-		let initial = Subscription::default().with_range(5..).with_delay(Delay::default().with_max(None));
+		let initial = Subscription::default()
+			.with_range(5..)
+			.with_delay(Delay::default().with_max(None));
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		let mut seen = Vec::new();
 		for _ in 0..1 {
@@ -582,7 +586,9 @@ async fn empty_ranges_retire_the_wire_and_can_widen_again() {
 async fn draft22_cold_widening_finishes_the_largest_group() {
 	for relay in [false, true] {
 		let mut fixture = range_fixture_history("moq-transport-22", relay, 0).await;
-		let initial = Subscription::default().with_range(2..).with_delay(Delay::default().with_max(None));
+		let initial = Subscription::default()
+			.with_range(2..)
+			.with_delay(Delay::default().with_max(None));
 		let mut reader = subscribe(&fixture.remote, initial.clone()).await;
 		for start in [0, 1, 2] {
 			let future = start + 1;

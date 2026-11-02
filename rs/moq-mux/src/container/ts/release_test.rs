@@ -46,7 +46,9 @@ async fn import(data: &[u8]) -> Imported {
 	let mut track = consumer
 		.track(&name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING)))
+		.subscribe(
+			moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(RECORDING)),
+		)
 		.await
 		.unwrap();
 	let mut objects = Vec::new();

@@ -49,7 +49,7 @@ Decided in the 2026-10-14 planning interview:
 - Each decoder opens its own subscription through `subscribeMedia`
   (`js/watch/src/media.ts`); a `Container.Consumer` consumes its subscriber.
   `js/net` dedups the two into one upstream request with the larger
-  `maxDelay` (`combineSubscriptions`, `js/net/src/track.ts`), so live groups
+  `delay.max` (`combineSubscriptions`, `js/net/src/track.ts`), so live groups
   arrive once. The second decoder's only extra transfer is the earlier group it
   joins on, up to one refresh group per cold join or gap.
 - The max-delay decoder reads groups oldest first. Subscriptions default to

@@ -2369,7 +2369,9 @@ export class Publisher {
 
 		const broadcast = await this.#resolve(named.trackNamespace, signal);
 		const priority = fromWire(msg.subscriberPriority);
-		const cache = broadcast.track(named.trackName).subscribe({ priority, delay: { max: Milli(Varint.MAX_U53), min: null } });
+		const cache = broadcast
+			.track(named.trackName)
+			.subscribe({ priority, delay: { max: Milli(Varint.MAX_U53), min: null } });
 		let answer: FetchAnswer | undefined;
 		try {
 			const info = await untilAborted(cache.info(), signal);

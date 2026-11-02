@@ -132,7 +132,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 
 	const sync = new Sync({ delay: options.delay });
 	const track = new Track.Producer("audio");
-	const consumer = new Container.Consumer(track.subscribe({ delay: { max: WIRE_MAX_DELAY }}), {
+	const consumer = new Container.Consumer(track.subscribe({ delay: { max: WIRE_MAX_DELAY } }), {
 		format: new Container.Legacy.Format("audio"),
 		delay: new Derived([sync.out.delay, sync.out.maxDelay], (min, max) => ({ min, max })),
 	});
