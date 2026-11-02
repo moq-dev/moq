@@ -369,9 +369,15 @@ equivalents.
 
 ## Archive
 
+Recording through our publishers and relays needs opt-in `moq-lite-07-wip`
+on every hop for track discovery. Older moq-lite versions cannot list tracks,
+and our moq-transport publishers refuse the listing. The publisher and each
+relay must enable it too; see [Archives](/concept/archives#discover-and-record)
+for how, and for storage and serving limits.
+
 ```bash
 # Record every broadcast announced under `event`
-moq --connect https://relay.example.com/anon --broadcast event export archive s3://recordings
+moq --connect https://relay.example.com/anon --connect-version moq-lite-07-wip --broadcast event export archive s3://recordings
 
 # Replay one recorded broadcast under another name
 moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<epoch>
@@ -416,6 +422,9 @@ moq --connect https://relay.example.com/anon \
     -- export --broadcast event.hang hls --listen 0.0.0.0:8080 \
     -- export --broadcast event.hang archive file:///recordings
 ```
+
+These exporters read the local import through their shared origin, so recording
+here needs no network track discovery.
 
 ## Publisher runs
 
@@ -526,11 +535,15 @@ continuity error, and the rest carry on. It takes neither `--follow`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
 
-A stdout export ends with the broadcast. A publisher that leaves still gets
-what the export buffered of it out on schedule first. `export ts --follow 10s`
-then waits that long for the same publisher instance to come back, and carries
-on with the same stream. A return that refuses its catalog keeps it waiting
-for the next announcement; if the follow runs out first, it exits 1 with that
+A stdout export ends when its catalog ends and its media has drained, so
+finishing only the media tracks leaves it waiting for catalog updates.
+`export ts --passthrough` instead ends with its track, once the packets it
+buffered are out, even while the catalog stays open; only a catalog that ends
+without naming the track ends it first. A publisher that leaves still gets what
+the export buffered of it out on schedule first. `export ts --follow 10s` then
+waits that long for the same publisher instance to come back, and carries on
+with the same stream. A return that refuses its catalog keeps it waiting for the
+next announcement; if the follow runs out first, it exits 1 with that
 refusal. One that goes before serving, such as one still routed through a dead
 session, is no return. A replacement (a restarted publisher, under a new
 [epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
