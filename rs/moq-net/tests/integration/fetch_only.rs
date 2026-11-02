@@ -491,3 +491,55 @@ async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
 	.await
 	.expect("timed out");
 }
+
+/// A copy that went idle holding a group resumes a bounded subscription of that group after
+/// the upstream moved on, and still reads it: the feed starts where it asked, not at the
+/// answer's Largest, so the cached group stays below no floor.
+#[kio::test]
+async fn a_resumed_bounded_subscription_keeps_its_cached_start() {
+	kio::clock::timeout(TIMEOUT, async {
+		let version: Version = "moq-transport-22".parse().unwrap();
+		let publisher = produce_origin(1);
+		let (broadcast, track) = publish_live(&publisher, 1);
+
+		let client = produce_origin(2);
+		let mut options = MockConnectOptions::new(version);
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(client.clone());
+		let pair = connect_mock(options).await;
+
+		// A live read caches group 0, then leaves, so the copy goes idle holding it.
+		let remote = resolve(&client).await;
+		let copy = remote.track("video").unwrap();
+		let mut live = kio::clock::timeout(TIMEOUT, copy.subscribe(None))
+			.await
+			.expect("subscribe timed out")
+			.expect("subscribe");
+		assert_eq!(next_frames(&mut live).await, Some(frames(0)));
+		drop(live);
+		let mut watch = track.clone();
+		while watch.subscription().is_some() {
+			kio::clock::timeout(TIMEOUT, watch.subscription_changed())
+				.await
+				.expect("unsubscribe timed out")
+				.unwrap();
+		}
+		for sequence in 1..4 {
+			write_group(&track, sequence);
+		}
+
+		// Past the edge the live read learned, so it subscribes; the answer names group 3.
+		let subscription = moq_net::track::Subscription::default()
+			.with_max_delay(None)
+			.with_range(0..1);
+		let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
+			.await
+			.expect("subscribe timed out")
+			.expect("subscribe");
+		assert_eq!(next_frames(&mut sub).await, Some(frames(0)));
+
+		drop((sub, copy, remote, pair, track, broadcast, client, publisher));
+	})
+	.await
+	.expect("timed out");
+}

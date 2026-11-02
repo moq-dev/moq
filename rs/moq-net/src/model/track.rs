@@ -2853,8 +2853,8 @@ impl TrackState {
 	/// bounded subscription of history: the cache can never show that group, so the answer
 	/// alone makes it current, and relative starts count back from that group.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	fn set_live_ahead(&mut self, largest: Position) {
-		self.answered(Some(largest), None, false);
+	fn set_live_ahead(&mut self, largest: Position, start: Option<u64>) {
+		self.answered(Some(largest), start, false);
 	}
 
 	/// The route answered with `largest`. With `reaches`, its feed reaches that group, so
@@ -3705,9 +3705,9 @@ impl Producer {
 	/// bounded subscription of history: readers resume at once, counting relative starts
 	/// back from `largest`'s group. A no-op unless idle.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
-	pub(crate) fn set_live_ahead(&mut self, largest: Position) {
+	pub(crate) fn set_live_ahead(&mut self, largest: Position, start: Option<u64>) {
 		if let Ok(mut state) = self.modify() {
-			state.set_live_ahead(largest);
+			state.set_live_ahead(largest, start);
 		}
 	}
 

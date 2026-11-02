@@ -3585,13 +3585,16 @@ impl Subscriber {
 						&& (poll_headed(&fill, waiter).is_ready()
 							|| largest.is_some_and(|largest| track.poll_past(largest.group, waiter).is_ready()))
 					{
+						// An absolute feed starts where it asked, whatever the answer's Largest; a
+						// live join's starts there.
+						let from = sent_bounds.0.filter(|_| !live);
 						match largest {
 							// A feed ending before the answer's Largest never shows it, so the
 							// answer alone makes the copy current.
 							Some(largest) if sent_bounds.1.is_some_and(|end| end <= largest.group) => {
-								track.set_live_ahead(largest)
+								track.set_live_ahead(largest, from)
 							}
-							largest => track.set_live(largest, None),
+							largest => track.set_live(largest, from),
 						}
 						resuming = None;
 					}
