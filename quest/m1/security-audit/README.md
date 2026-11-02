@@ -1,4 +1,4 @@
-# 2026-10-27 security audit: pre-cut findings
+# [M] 2026-10-27 security audit: pre-cut findings
 
 ## Goal
 
@@ -51,6 +51,4 @@ Dropped, with reasons:
 - The audit's own fixes for MUX-3 (would break large MKV imports) and E2EE-A
   (a random epoch is copied by a fork too) were wrong; the children use
   better ones.
-
-## Required
 
