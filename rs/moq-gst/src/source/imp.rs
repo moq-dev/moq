@@ -36,17 +36,33 @@ static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
 static NEXT_VIDEO_PAD_ID: AtomicU64 = AtomicU64::new(0);
 static NEXT_AUDIO_PAD_ID: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Clone, Default)]
+/// How far a group may trail the live edge before a reader skips it, unless `max-delay` is set.
+const DEFAULT_MAX_DELAY: Duration = Duration::from_secs(1);
+
+#[derive(Debug, Clone)]
 struct Settings {
 	url: Option<String>,
 	broadcast: Option<String>,
+	max_delay: Duration,
 	connection: crate::connection::Settings,
+}
+
+impl Default for Settings {
+	fn default() -> Self {
+		Self {
+			url: None,
+			broadcast: None,
+			max_delay: DEFAULT_MAX_DELAY,
+			connection: Default::default(),
+		}
+	}
 }
 
 #[derive(Debug, Clone)]
 struct ResolvedSettings {
 	url: url::Url,
 	broadcast: String,
+	max_delay: Duration,
 	connect: moq_tokio::connect::Config,
 	quic: moq_tokio::quic::Config,
 }
@@ -63,6 +79,7 @@ impl TryFrom<Settings> for ResolvedSettings {
 				.as_ref()
 				.context("broadcast property is required")?
 				.clone(),
+			max_delay: value.max_delay,
 			connect,
 			quic,
 		})
@@ -119,7 +136,7 @@ impl SessionController {
 		let task_connection = connection.clone();
 		let task_element = element.clone();
 		Ok(Self::spawn(client, connection, element, move |shutdown| async move {
-			Session::new(task_element, shutdown)
+			Session::new(task_element, shutdown, settings.max_delay)
 				.run(&task_connection, &origin, &settings.broadcast)
 				.await
 		}))
@@ -259,6 +276,14 @@ impl ObjectImpl for MoqSrc {
 					.blurb("The broadcast name to subscribe to")
 					.mutable_ready()
 					.build(),
+				glib::ParamSpecUInt64::builder("max-delay")
+					.nick("Max delay")
+					.blurb("How many milliseconds a group may trail the live edge before it is skipped")
+					.default_value(crate::connection::duration_millis(DEFAULT_MAX_DELAY))
+					// A SUBSCRIBE carries it as a QUIC varint, which can't hold 2^62 or more.
+					.maximum((1 << 62) - 1)
+					.mutable_ready()
+					.build(),
 			]
 			.into_iter()
 			.chain(crate::connection::properties())
@@ -290,6 +315,7 @@ impl ObjectImpl for MoqSrc {
 		match pspec.name() {
 			"url" => settings.url = value.get().unwrap(),
 			"broadcast" => settings.broadcast = value.get().unwrap(),
+			"max-delay" => settings.max_delay = Duration::from_millis(value.get().unwrap()),
 			name => settings.connection.set(name, value),
 		}
 	}
@@ -299,6 +325,7 @@ impl ObjectImpl for MoqSrc {
 		match pspec.name() {
 			"url" => settings.url.to_value(),
 			"broadcast" => settings.broadcast.to_value(),
+			"max-delay" => crate::connection::duration_millis(settings.max_delay).to_value(),
 			name => settings.connection.get(name),
 		}
 	}
@@ -747,6 +774,8 @@ impl PadActor {
 #[derive(Clone)]
 struct Session {
 	element: glib::WeakRef<super::MoqSrc>,
+	/// How far a group may trail the live edge before a reader skips it.
+	max_delay: Duration,
 	/// Outlive every run, so a pipeline linked by name (`s.video_0 ! ...`) keeps flowing across a
 	/// restart.
 	pads: Pads,
@@ -756,9 +785,10 @@ struct Session {
 
 impl Session {
 	/// A session for `element`, with no pads yet.
-	fn new(element: glib::WeakRef<super::MoqSrc>, shutdown: watch::Receiver<bool>) -> Self {
+	fn new(element: glib::WeakRef<super::MoqSrc>, shutdown: watch::Receiver<bool>, max_delay: Duration) -> Self {
 		Self {
 			element,
+			max_delay,
 			pads: Pads::default(),
 			shutdown,
 		}
@@ -1594,6 +1624,7 @@ impl Reader {
 		} = self;
 		let Session {
 			element,
+			max_delay,
 			pads,
 			shutdown,
 		} = playback.session;
@@ -1614,7 +1645,7 @@ impl Reader {
 			subscriber = async {
 				instance
 					.track(&shape.track)?
-					.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+					.subscribe(moq_net::track::Subscription::default().with_max_delay(max_delay))
 					.await
 			} => match subscriber {
 				Ok(subscriber) => subscriber,
@@ -2248,7 +2279,7 @@ mod session_tests {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoCodec, VideoConfig};
 	use tokio::sync::watch;
 
-	use super::{NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, Session, SessionController, TrackKind};
+	use super::{DEFAULT_MAX_DELAY, NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, Session, SessionController, TrackKind};
 
 	/// The pad-id counters are process-global, so a test reading one has to be the only test
 	/// allocating while it runs. `cargo test` shares a process across tests (nextest doesn't),
@@ -2285,7 +2316,7 @@ mod session_tests {
 			let stopping = shutdown.clone();
 			let (origin, _driver) = moq_net::origin::Producer::new(Default::default());
 			let source = moq_mux::Source::new(origin.consume(), broadcast);
-			Session::new(element, stopping)
+			Session::new(element, stopping, DEFAULT_MAX_DELAY)
 				.follow_catalog(source, &mut shutdown)
 				.await
 		})
@@ -2320,7 +2351,7 @@ mod session_tests {
 		let source = moq_mux::Source::new(origin.consume(), broadcast.consume());
 		let (_stop, stopped) = watch::channel(false);
 		let playback = super::Playback {
-			session: Session::new(element.downgrade(), stopped.clone()),
+			session: Session::new(element.downgrade(), stopped.clone(), DEFAULT_MAX_DELAY),
 			broadcast: broadcast.consume(),
 			timeline: Arc::default(),
 			stop: stopped.clone(),
@@ -2488,6 +2519,7 @@ mod session_tests {
 						let pads = pads.clone();
 						let source = moq_mux::Source::new(origin().consume(), broadcast.consume());
 						let session = Session {
+							max_delay: DEFAULT_MAX_DELAY,
 							element: weak,
 							pads,
 							shutdown,
@@ -2589,7 +2621,7 @@ mod session_tests {
 		let consumer = origin.consume();
 		let weak = element.downgrade();
 		let following = super::RUNTIME.spawn(async move {
-			Session::new(weak, shutdown)
+			Session::new(weak, shutdown, DEFAULT_MAX_DELAY)
 				.follow_path(&consumer, "room/catalog", std::future::pending())
 				.await
 		});
@@ -2700,6 +2732,32 @@ mod session_tests {
 		let session = run(consumer, weak, shutdown_rx);
 
 		await_pad(&element, "video_");
+
+		let _ = shutdown.send(true);
+		super::RUNTIME.block_on(session).unwrap().unwrap();
+	}
+
+	#[test]
+	fn a_rendition_subscribes_with_the_session_max_delay() {
+		let element = element();
+		let mut broadcast = moq_net::broadcast::Info::new().produce();
+		let mut dynamic = broadcast.requests();
+		let mut catalog = moq_mux::catalog::Producer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+		catalog.modify().unwrap().video.renditions = BTreeMap::from([("video".to_string(), video_rendition())]);
+
+		let max_delay = Duration::from_secs(5);
+		let (shutdown, mut cancelled) = watch::channel(false);
+		let weak = element.downgrade();
+		let source = moq_mux::Source::new(origin().consume(), broadcast.consume());
+		let session = super::RUNTIME.spawn(async move {
+			let stopping = cancelled.clone();
+			Session::new(weak, stopping, max_delay)
+				.follow_catalog(source, &mut cancelled)
+				.await
+		});
+
+		let request = await_request(&mut dynamic);
+		assert_eq!(request.subscription().unwrap().max_delay, Some(max_delay));
 
 		let _ = shutdown.send(true);
 		super::RUNTIME.block_on(session).unwrap().unwrap();
@@ -3201,6 +3259,7 @@ mod session_tests {
 			let weak = element.downgrade();
 			let source = moq_mux::Source::new(origin().consume(), broadcast.consume());
 			let session = Session {
+				max_delay: DEFAULT_MAX_DELAY,
 				element: weak,
 				pads,
 				shutdown,
@@ -3306,6 +3365,7 @@ mod session_tests {
 		ResolvedSettings {
 			url: "https://127.0.0.1:1".parse().unwrap(),
 			broadcast: "test".into(),
+			max_delay: DEFAULT_MAX_DELAY,
 			connect: crate::connection::Settings::default().resolve().unwrap().0,
 			quic: Default::default(),
 		}
@@ -3365,7 +3425,7 @@ mod session_tests {
 			connection.clone(),
 			element.downgrade(),
 			move |shutdown| async move {
-				Session::new(weak, shutdown)
+				Session::new(weak, shutdown, DEFAULT_MAX_DELAY)
 					.follow_path(&origin, "room", std::future::pending())
 					.await
 			},
@@ -3564,6 +3624,7 @@ mod session_tests {
 		let reader = super::Reader {
 			playback: super::Playback {
 				session: Session {
+					max_delay: DEFAULT_MAX_DELAY,
 					element: element.downgrade(),
 					pads,
 					shutdown,
@@ -3749,7 +3810,7 @@ mod session_tests {
 		let (shutdown, stopping) = watch::channel(false);
 		let (origin, weak) = (origin.consume(), element.downgrade());
 		let task = super::RUNTIME.spawn(async move {
-			Session::new(weak, stopping)
+			Session::new(weak, stopping, DEFAULT_MAX_DELAY)
 				.follow_path(&origin, "room", std::future::pending())
 				.await
 		});
@@ -4053,7 +4114,7 @@ mod session_tests {
 			let weak = element.downgrade();
 			let source = moq_mux::Source::new(origin.consume(), room.broadcast.consume());
 			super::RUNTIME.spawn(async move {
-				Session::new(weak, shutdown)
+				Session::new(weak, shutdown, DEFAULT_MAX_DELAY)
 					.follow_catalog(source, &mut cancelled)
 					.await
 			})
