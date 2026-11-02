@@ -193,6 +193,12 @@ android *args:
     bash sh/local.sh cargo ndk -t arm64-v8a --platform 26 -o target/android-jni build-ffi "$@"
     nm -D --undefined-only target/android-jni/arm64-v8a/libmoq_ffi.so | grep -q __android_log_
 
+# Run moq-video's ignored MediaCodec tests on the Android device or emulator adb
+# reaches. Needs an NDK, like `android`; android.yml runs it on an emulator.
+[positional-arguments]
+android-test *args:
+    sh/rs/android-test.sh "$@"
+
 # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a wasm32
 # build sees the code. Not to be confused with `just js wasm`, which builds the
 # shippable `@moq/wasm` package. `moq-mux` and `moq-ffi` share the invocation

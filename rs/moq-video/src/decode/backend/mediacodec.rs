@@ -536,11 +536,11 @@ fn reader_err(what: &str, error: MediaError) -> Error {
 mod tests {
 	use super::*;
 
-	/// The hardware round trip: encode a picture with the MediaCodec encoder and
+	/// The round trip: encode a picture with the MediaCodec encoder and
 	/// decode it back, which is the only way to see that the surface output path
 	/// produces a frame at all.
 	#[test]
-	#[ignore = "needs an Android device with MediaCodec H.264 hardware"]
+	#[ignore = "needs an Android device or emulator: just rs android-test"]
 	fn decodes_what_the_encoder_produced() {
 		use crate::encode::{Config as EncodeConfig, Kind as EncodeKind};
 
