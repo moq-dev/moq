@@ -3702,9 +3702,9 @@ mod tests {
 		assert_eq!(frame.timestamp, ts(5_000_000));
 	}
 
-	/// The min delay stays on the consumer: the subscription carries the max delay plus the warmup.
+	/// The subscription carries the min delay as is and the max delay plus the warmup.
 	#[tokio::test]
-	async fn the_min_delay_never_reaches_the_subscription() {
+	async fn the_subscription_carries_the_min_delay_and_the_warmed_max_delay() {
 		let mut track = track_producer("test", hang::container::track_info(hang::catalog::PRIORITY.video));
 		let consumer = reach_consumer(
 			&mut track,
@@ -3713,6 +3713,7 @@ mod tests {
 			Duration::from_millis(300),
 		);
 		let subscription = consumer.track.as_ref().unwrap().subscription();
+		assert_eq!(subscription.delay.min, Some(Duration::from_secs(2)));
 		assert_eq!(subscription.delay.max, Some(Duration::from_millis(500)));
 		assert_eq!(consumer.max_delay, Duration::from_millis(200));
 	}

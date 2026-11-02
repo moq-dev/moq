@@ -606,7 +606,6 @@ export class SubscribeOk {
 	}: {
 		priority?: number;
 		maxDelay?: number;
-		minDelay?: number;
 		startGroup?: number;
 		endGroup?: number;
 	}) {

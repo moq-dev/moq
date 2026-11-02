@@ -31,7 +31,7 @@ public enum Media {
     public typealias Dimensions = MoqFFI.MoqDimensions
     /// How far behind the live edge a decoder plays: `min` is the playout delay and where a
     /// cold join starts, and `max`, nil for no limit, is how far a stalled group may fall
-    /// behind before it is skipped. `min` stays on the consumer; a `min` past `max` starts at `max`.
+    /// behind before it is skipped. The subscription carries both; a `min` past `max` starts at `max`.
     public typealias Delay = MoqFFI.MoqDelay
     /// Where an audio or video decoder starts on a track that already holds
     /// groups: `.latest` for a live player.

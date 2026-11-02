@@ -716,8 +716,8 @@ pub enum moq_demand {
 #[derive(Clone, Copy, Default)]
 pub struct moq_delay {
 	/// The target latency in microseconds: the playout or jitter-buffer delay held behind
-	/// the live edge, and where a cold join starts. It stays on the consumer and never
-	/// reaches the subscription. A `min_us` past the max starts at the max, since the
+	/// the live edge, and where a cold join starts. The subscription carries it too, which
+	/// moq-lite-07 sends upstream. A `min_us` past the max starts at the max, since the
 	/// publisher serves nothing older.
 	pub min_us: u64,
 	/// How far a group may fall behind the live edge before it is skipped, in
