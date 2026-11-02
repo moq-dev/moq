@@ -251,3 +251,9 @@ lite-07; bitrate enforcement is not part of this release.
 - [moq-video's Apple Sink encodes on its own thread](/quest/m2/apple-sink-thread.md) - macOS and iOS ladders never encode on a tokio worker
 - [The test inventory sees JS bench scripts](/quest/m2/js-bench-inventory.md) - JS bench entry points are resolved by the inventory gate
 - [/fetch answers from the announce sync](/quest/m2/fetch-synced.md) - a missing broadcast gets a 404 once announcements are synced, not after 30 s
+- [moq auth sign mints capped tokens](/quest/m2/auth-sign-caps.md) - CLI flags for the bitrate caps
+- [QUIC-LB forwarding reads the cluster's peers and reports its counts](/quest/m2/quic-lb-forward-extras.md) - a cluster-API peer map and forward counters
+- [An audio-only broadcast that can't play hides its play button](/quest/m2/audio-only-play.md) - center-play follows the audio-only rule
+- [The browser bench keeps its page consoles](/quest/m2/browser-bench-consoles.md) - publisher and consumer page logs in the run directory
+- [moq-quic's long header type is one variant](/quest/m2/quic-long-type.md) - collapse LongType after the 0-RTT removal
+- [One predicate for the lite close wait](/quest/m2/subscriber-fin-fold.md) - fold waits_for_subscriber_fin into has_track_stream

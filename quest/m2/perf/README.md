@@ -100,3 +100,6 @@ revisions on the same host and worker count, and profiles with
 - [Lite request allocations](/quest/m2/perf/lite-request-allocs.md) - `Path::concat` allocates once and the lite request handler keeps one track-name copy
 - [Lock-free single-delivery writes](/quest/m2/perf/single-delivery-write.md) - a frame with one delivery writes without a lock, recovering #6922's remaining FETCH cost
 - [Small hot-path waste](/quest/m2/perf/hot-path-waste.md) - one track-name copy per lite subscription, no full-history `#drift` walk, and one header buffer per JS object
+- [Track-state reads skip when nothing changed](/quest/m2/perf/cursor-version-skip.md) - `Cursor::sync`, `probe` and `GroupExpiry` skip unchanged reads, then group reads move onto a Watch
+- [An idle TS export with a delay costs what one without does](/quest/m2/perf/ts-idle-jitter.md) - the jitter scan and memcmp stop leading the idle poll
+- [Fanout takes the route lock less](/quest/m2/perf/route-lock.md) - fewer than 41 route-lock acquisitions per fanout round
