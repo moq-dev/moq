@@ -1105,12 +1105,12 @@ fn regressions() {
 		// fill can complete reads them and ends with the track.
 		Case {
 			ops: vec![
-				Op::Up { epoch: 0, slot: 1 },
+				Op::Up { instance: 0, slot: 1 },
 				Op::Join {
 					reader: 1,
 					spec: spec(false, Budget::Hour, None, false),
 				},
-				Op::Up { epoch: 0, slot: 2 },
+				Op::Up { instance: 0, slot: 2 },
 				Op::Join {
 					reader: 0,
 					spec: spec(true, Budget::Hour, None, false),
@@ -1120,7 +1120,7 @@ fn regressions() {
 					range: Some((8, 11)),
 				},
 				Op::Write {
-					epoch: 0,
+					instance: 0,
 					slot: 1,
 					group: Some(8),
 					frames: 1,
@@ -1137,12 +1137,12 @@ fn regressions() {
 					spec: spec(false, Budget::Hour, None, false),
 				},
 				Op::Write {
-					epoch: 0,
+					instance: 0,
 					slot: 0,
 					group: Some(6),
 					frames: 1,
 				},
-				Op::Up { epoch: 0, slot: 1 },
+				Op::Up { instance: 0, slot: 1 },
 				Op::Ranges {
 					reader: 1,
 					range: Some((0, 8)),
