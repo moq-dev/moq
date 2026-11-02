@@ -129,7 +129,7 @@ export class Echo {
 				broadcast = publication.broadcast;
 				writer = new Report.Writer(broadcast, Schema.TRACK, Schema.SnapshotSchema);
 				// A fresh instance, so a reader sees a replaced feedback broadcast as a restart.
-				publication.announce({ epoch: Moq.Epoch.mint() });
+				publication.announce();
 			} catch (err) {
 				broadcast?.close();
 				console.warn("failed to publish feedback", path, err);
