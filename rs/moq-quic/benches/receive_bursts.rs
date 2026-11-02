@@ -15,10 +15,10 @@
 //! stream of the burst. The CPU columns time the server; the allocation counts include the
 //! clients', which a receive change leaves alone. `teardown_b` is what the case leaks.
 //!
-//! Criterion then times the server's side of a burst on a connection that already recycled the
-//! previous one, so both reuse and regrowth show.
+//! Criterion then times the server's side of a burst on a connection that already freed the
+//! previous one's streams, so the cost of allocating fresh receive state for each stream shows.
 //!
-//! Run with `cargo bench -p moq-quic --features fuzz --bench receive_reuse`.
+//! Run with `cargo bench -p moq-quic --features fuzz --bench receive_bursts`.
 
 use std::{
 	alloc::{GlobalAlloc, Layout, System},
@@ -121,7 +121,7 @@ impl Mode {
 }
 
 /// Opens `streams` streams of `packets` packets on every client, finishes them, and runs until
-/// the server's application has read or stopped them all, so their receive state is recycled.
+/// the server's application has read or stopped them all, so their receive state is freed.
 ///
 /// Returns the heap the process held with the burst at its peak.
 fn burst(pair: &mut Pair, mode: Mode, streams: usize, packets: usize) -> isize {
@@ -224,7 +224,7 @@ fn finish(pair: &mut Pair, streams: usize) {
 	pair.drive_until(|pair| pair.server.received.finished >= target);
 }
 
-/// Lets the exchange go quiet, checking every burst stream's receive state was recycled.
+/// Lets the exchange go quiet, checking every burst stream's receive state was freed.
 fn settle(pair: &mut Pair) {
 	pair.settle();
 	for conn in pair.server.conns.values_mut() {
@@ -304,9 +304,9 @@ fn table() {
 	}
 }
 
-/// The server's side of a burst on one connection that recycled the previous burst's streams.
-fn bench_reuse(c: &mut Criterion<ThreadCpu>) {
-	let mut group = c.benchmark_group("receive_reuse");
+/// The server's side of a burst on one connection that freed the previous burst's streams.
+fn bench_bursts(c: &mut Criterion<ThreadCpu>) {
+	let mut group = c.benchmark_group("receive_bursts");
 	for mode in Mode::ALL {
 		for streams in [16, 256] {
 			for packets in [16, 256] {
@@ -343,7 +343,7 @@ fn bench_reuse(c: &mut Criterion<ThreadCpu>) {
 criterion_group! {
 	name = benches;
 	config = common::config();
-	targets = bench_reuse
+	targets = bench_bursts
 }
 
 fn main() {
