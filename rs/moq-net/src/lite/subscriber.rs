@@ -6034,7 +6034,11 @@ mod tests {
 		assert_ne!(new, old, "the replacement inherited the old instance");
 		second.withdraw(&path);
 		second.reserve(path.clone(), None).unwrap();
-		assert_eq!(instance(&second), new, "both streams carry the replacement as one stream");
+		assert_eq!(
+			instance(&second),
+			new,
+			"both streams carry the replacement as one stream"
+		);
 
 		// A stream closing ends nothing: the other's advertisement keeps its instance.
 		drop(first);

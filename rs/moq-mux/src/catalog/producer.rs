@@ -1397,7 +1397,11 @@ fn to_msf_media<E: CatalogExt>(catalog: &hang::Catalog, base: &moq_net::Path) ->
 		let name = config.track(id);
 		if let Some(instance) = config.instance() {
 			// MSF has nowhere to name an instance, so its readers take whichever resolves first.
-			tracing::warn!(rendition = id, ?instance, "MSF cannot carry a reference instance; advertising without it");
+			tracing::warn!(
+				rendition = id,
+				?instance,
+				"MSF cannot carry a reference instance; advertising without it"
+			);
 		}
 		let namespace = match config.broadcast().filter(|rel| !rel.is_empty()) {
 			None => None,
