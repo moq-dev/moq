@@ -1,0 +1,35 @@
+name: Install a uniffi binding generator
+description: Build the pinned uniffi-bindgen-cpp or uniffi-bindgen-go for jobs outside the nix dev shell, which already provides both.
+
+inputs:
+  generator:
+    description: "`cpp` for uniffi-bindgen-cpp (which also renders C) or `go` for uniffi-bindgen-go."
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The one CI pin for each generator. A tag can be moved and `--locked` pins
+    # only the dependencies, so each pin is the commit its flake.nix tag peels
+    # to: `git ls-remote <repo> 'refs/tags/<tag>^{}'`. Bump it with the tag in
+    # flake.nix; see the comments there.
+    - name: Install uniffi-bindgen-${{ inputs.generator }}
+      shell: bash
+      env:
+        GENERATOR: ${{ inputs.generator }}
+      run: |
+        case "$GENERATOR" in
+          cpp)
+            repo=https://github.com/kixelated/uniffi-bindgen-cpp
+            rev=a5a1ac411772b3f589859edf50aef7bc7538100b # v0.11.0-kixelated.7+v0.32.2
+            ;;
+          go)
+            repo=https://github.com/kixelated/uniffi-bindgen-go
+            rev=374a887fea3cde238ac3c5646dbd2963de7a6a83 # v0.10.0-kixelated.1+v0.32.0
+            ;;
+          *)
+            echo "::error::unknown uniffi generator: $GENERATOR"
+            exit 1
+            ;;
+        esac
+        cargo install --locked "uniffi-bindgen-$GENERATOR" --git "$repo" --rev "$rev"

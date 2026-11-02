@@ -60,3 +60,4 @@ Public API: none. Wire: none.
 - [moq-relay's auth-trust test survives load](/quest/m0/test-flakes-2/relay-auth-trust.md) - it stops timing out on a busy host
 - [Draft-22 interop with a native publisher](/quest/m0/test-flakes-2/draft22-interop.md) - no "invalid fetch range" or audio gap with a Rust or C++ publisher
 - [A Kotlin cancel test and a JS late-publisher test hold up](/quest/m0/test-flakes-2/kotlin-js-flakes.md) - the Kotlin flow-cancel test stops failing `unroutable` and the IETF blind-handle test passes under load
+- [The relay fits a Windows stack under every feature set](/quest/m0/test-flakes-2/relay-stack-all-features.md) - the 1 MiB stack test passes under `--all-features` too
