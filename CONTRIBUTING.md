@@ -138,5 +138,6 @@ Each package's version lives in one place:
 - **Python**: `py/moq-rs/pyproject.toml`, plus the matching `moq-rs` entry in the root `uv.lock`; `py/moq-ffi` follows the `moq-ffi-v*` tag and Rust crate.
 - **Swift**: `swift/VERSION`. **Kotlin**: `moq.version` in `kt/gradle.properties`. **Dart**: `version` in `dart/moq/pubspec.yaml`. Their FFI counterparts track the Rust crate.
 - **Go**: `go/wrapper/VERSION` holds a human-owned `MAJOR.MINOR` line; CI derives the independent patch; the shared cut sets the minor. Leave the placeholder FFI version in `go.mod` alone.
+- **C**: `c/moq/VERSION`, human-owned; a `c-v<version>` tag releases it.
 - **C++**: `cpp/moq/VERSION`, human-owned; a `cpp-v<version>` tag releases it.
 - **OBS**: `cpp/obs/VERSION`, human-owned; each C++ release also cuts `obs-moq-v<version>`, and refuses one whose version already names an earlier release.

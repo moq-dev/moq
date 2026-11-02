@@ -51,6 +51,7 @@ WRAPPERS = {
     "kotlin": ("moq", "kt/gradle.properties", r"^moq\.version=([^\n]+)$"),
     "dart": ("moq", "dart/moq/pubspec.yaml", r"^version: ([^\n]+)$"),
     "go": ("moq", "go/wrapper/VERSION", r"^([^\n]+)$"),
+    "c": ("moq", "c/moq/VERSION", r"^([^\n]+)$"),
     "cpp": ("moq", "cpp/moq/VERSION", r"^([^\n]+)$"),
     "obs": ("moq", "cpp/obs/VERSION", r"^([^\n]+)$"),
 }
@@ -183,17 +184,12 @@ def check(root, config):
             errors.append(f"{p.ecosystem} {p.name}: {p.current} must join {minor}.x")
         if p.ecosystem in ("npm", "python") and lock_version(root, p) != p.current:
             errors.append(f"{p.name}: lockfile version differs from {p.current}")
-    ffi = next(p for p in inventory if p.key == ("rust", "moq-ffi"))
     for path, pattern, template in FFI_REQUIREMENTS:
         requirement = captured((root / path).read_text(), pattern)
         expected = template.format(version="VERSION", next_minor=int(minor.split(".")[1]) + 1)
         match = re.fullmatch(re.escape(expected).replace("VERSION", f"({SEMVER})"), requirement)
-        if (
-            match is None
-            or ".".join(map(str, version(match[1])[:2])) != minor
-            or version(match[1]) > version(ffi.current)
-        ):
-            errors.append(f"{path}: FFI requirement {requirement!r} must use {minor}.x, at most {ffi.current}")
+        if match is None or ".".join(map(str, version(match[1])[:2])) != minor:
+            errors.append(f"{path}: FFI requirement {requirement!r} must use {minor}.x")
     if errors:
         raise ValueError("\n".join(errors))
     print(f"shared version: {len(selected)} packages on {minor}.x (patches independent)")

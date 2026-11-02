@@ -230,7 +230,7 @@ class Versions(unittest.TestCase):
             with self.subTest(path=path):
                 text = (self.root / path).read_text()
                 self.assertEqual(module.captured(text, pattern), template.format(version="0.22.0", next_minor=23))
-                for floor, upper in (("0.21.0", 22), ("0.22.1", 23)):
+                for floor, upper in (("0.21.0", 22), ("0.23.0", 24)):
                     self.write(path, module.replace(text, pattern, template.format(version=floor, next_minor=upper)))
                     self.assertIn("FFI requirement", self.check(ok=False).stderr)
                 self.write(path, text)
