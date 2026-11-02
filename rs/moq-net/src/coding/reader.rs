@@ -40,6 +40,17 @@ pub struct Reader<S: RecvStream, V> {
 /// enough that an ordinary burst is still one wake.
 const WAKE_BUDGET: usize = 64 * 1024;
 
+/// The largest frame [`Reader::poll_read_frame`] copies out of a chunk holding all of it,
+/// rather than caching the chunk as it arrived.
+///
+/// A transport hands over slices of its receive allocations: a QUIC datagram, or a whole
+/// receive batch of them. A frame that arrives in one such slice and is cached as-is keeps
+/// that allocation alive, the other frames' bytes included, while the cache bills only the
+/// frame. This covers a QUIC datagram's stream payload (about 1.45 KB at the default
+/// `max_udp_payload_size`), not a jumbo path's, so a larger frame from the in-memory
+/// transport still crosses as the publisher's allocation.
+const COPY_WHOLE: usize = 2 * 1024;
+
 /// The largest [`Reader::scratch`] kept between decodes; one past this is freed.
 const SCRATCH_KEEP: usize = 64 * 1024;
 
@@ -399,14 +410,22 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 
 			// One chunk per lease: a lease may hold the transport's lock, so the frame is
 			// written, and its consumers woken, only once the lease is gone. A chunk holding
-			// the rest of the frame is taken whole, so a frame delivered in one piece keeps
-			// its allocation; any other stops where the segment being written seals.
+			// the rest of the frame is taken whole, so a large frame delivered in one piece
+			// keeps its allocation, and one of at most [`COPY_WHOLE`] is copied out of it;
+			// any other stops where the segment being written seals.
 			let remaining = frame.remaining();
 			let take = match lease.chunk().len() >= remaining {
 				true => remaining,
 				false => lease.chunk().len().min(frame.unsealed()),
 			};
-			let chunk = lease.copy_to_bytes(take);
+			let chunk = match take as u64 == frame.size && take <= COPY_WHOLE {
+				true => {
+					let chunk = Bytes::copy_from_slice(&lease.chunk()[..take]);
+					lease.advance(take);
+					chunk
+				}
+				false => lease.copy_to_bytes(take),
+			};
 			let complete = chunk.len() == remaining;
 			let ended = lease.is_fin() && !lease.has_remaining();
 			if complete || chunk.len() == frame.unsealed() {
@@ -885,6 +904,36 @@ mod tests {
 			reader.poll_read_frame(waiter, &mut frame),
 			Poll::Ready(Err(Error::WrongSize))
 		));
+	}
+
+	/// A frame that arrives whole in a larger chunk, as in a datagram it shares with other
+	/// frames, is copied out of it when it is at most [`COPY_WHOLE`], so caching it does not
+	/// keep the rest of the receive allocation alive. A larger one is cached as the chunk.
+	#[test]
+	fn a_small_whole_frame_is_copied_out_of_its_chunk() {
+		let datagram: &'static [u8] = vec![7u8; 2 * COPY_WHOLE + 2].leak();
+		for size in [1, COPY_WHOLE, COPY_WHOLE + 1] {
+			let (mut frame, mut payload, waiter, _wakes) = parked_frame(size);
+			let mut reader = queue(&[datagram], crate::lite::Version::Lite05);
+			let noop = &kio::Waiter::noop();
+			assert!(matches!(reader.poll_read_frame(noop, &mut frame), Poll::Ready(Ok(()))));
+			let _group = frame.finish().unwrap();
+			let Poll::Ready(Ok(Some(chunk))) = payload.poll_read_chunk(&waiter) else {
+				panic!("the committed frame has no payload");
+			};
+			assert_eq!(chunk, datagram[..size], "size={size}");
+			assert_eq!(
+				chunk.as_ptr() == datagram.as_ptr(),
+				size > COPY_WHOLE,
+				"size={size}: copied {}",
+				size <= COPY_WHOLE
+			);
+			assert_eq!(
+				leased(&mut reader),
+				datagram.len() - size,
+				"size={size}: the rest stays leased"
+			);
+		}
 	}
 
 	/// A consumer parked on the group cannot run until this task yields, so a burst of

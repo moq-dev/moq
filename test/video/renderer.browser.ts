@@ -120,14 +120,10 @@ test("<moq-publish> swaps its canvas when the GPU is lost and keeps previewing t
 	}
 }, 60_000);
 
-test("invalid player and publisher attributes fall back without browser errors", async () => {
+test("invalid player and publisher attributes keep the last valid value and suspend media until corrected", async () => {
 	const page = await open();
 	const errors: string[] = [];
-	const warnings: string[] = [];
 	page.on("pageerror", (error) => errors.push(error.message));
-	page.on("console", (message) => {
-		if (message.type() === "warning") warnings.push(message.text());
-	});
 	try {
 		const report = await page.evaluate(async () => {
 			const watch = document.createElement("moq-watch");
@@ -135,6 +131,8 @@ test("invalid player and publisher attributes fall back without browser errors",
 			watch.setAttribute("visible", "always");
 			watch.setAttribute("paused", "");
 			document.body.append(watch, publish);
+			const enabled = () => [watch.connection.enabled.peek(), publish.connection.enabled.peek()];
+			const before = enabled();
 			for (const element of [watch, publish]) {
 				element.setAttribute("url", "https://example.invalid/");
 				element.setAttribute("url", "http://[");
@@ -142,15 +140,27 @@ test("invalid player and publisher attributes fall back without browser errors",
 			watch.setAttribute("volume", "0.75");
 			watch.setAttribute("volume", "foo");
 			await Promise.resolve();
-			const result = { watch: watch.url, publish: publish.url, volume: watch.volume };
+			const kept = { watch: watch.url?.href, publish: publish.url?.href, volume: watch.volume };
+			const suspended = enabled();
+			// The watch element resumes only once every invalid attribute is corrected.
+			for (const element of [watch, publish]) element.setAttribute("url", "https://example.invalid/");
+			const partial = enabled();
+			watch.setAttribute("volume", "0.25");
+			const corrected = enabled();
 			watch.remove();
 			publish.remove();
-			return result;
+			return { before, kept, suspended, partial, corrected };
 		});
-		expect(report).toEqual({ watch: undefined, publish: undefined, volume: 0.5 });
-		expect(errors).toEqual([]);
-		expect(warnings.filter((message) => message.includes("invalid url="))).toHaveLength(2);
-		expect(warnings.filter((message) => message.includes("invalid volume="))).toHaveLength(1);
+		expect(report).toEqual({
+			before: [true, true],
+			kept: { watch: "https://example.invalid/", publish: "https://example.invalid/", volume: 0.75 },
+			suspended: [false, false],
+			partial: [false, true],
+			corrected: [true, true],
+		});
+		expect(errors.filter((message) => message.includes('invalid url="http://["'))).toHaveLength(2);
+		expect(errors.filter((message) => message.includes('invalid volume="foo"'))).toHaveLength(1);
+		expect(errors).toHaveLength(3);
 	} finally {
 		await page.close();
 	}

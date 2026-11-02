@@ -238,6 +238,7 @@ fn window_codec_property_matches_every_readers_logical_window() {
 	let mut runner = TestRunner::new(Config {
 		cases,
 		rng_seed: RngSeed::Fixed(u64::from(seed)),
+		rng_algorithm: proptest::test_runner::RngAlgorithm::XorShift,
 		failure_persistence: None,
 		..Default::default()
 	});

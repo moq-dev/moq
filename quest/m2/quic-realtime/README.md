@@ -91,7 +91,7 @@ Remaining work once the candidates finish (this README's own job):
 - Delete the losing candidates' code.
 - Decide who asks for receive timestamps. The spike added
   `transport::Config::receive_timestamps`, off by default, and the maintainer
-  kept it on 2026-10-30. The winner decides whether its `ControllerFactory`
+  kept it on 2026-10-30. The winner decides whether its `Factory`
   turns them on instead, so only `Realtime` sessions pay the ACK bytes.
 - Wire the winner's moq-shaper run into the nightly so a regression in
   queuing delay shows up.
@@ -105,7 +105,6 @@ owns that feedback.
 
 ## Required
 
-- [GCC candidate](/quest/m2/quic-realtime/gcc.md) - libwebrtc's GoogCC vendored into `moq-congestion` and refreshed to current WebRTC
 - [BBR3 delay bound](/quest/m2/quic-realtime/bbr-delay-bound.md) - BBR3 with inflight capped when the forward delay gradient shows queue growth
 - [SCReAMv2 candidate](/quest/m2/quic-realtime/scream.md) - the RFC 8298bis delay path ported to `moq-congestion`
 - [io_uring runs an application's controller](/quest/m2/quic-realtime/uring-controller.md) - moq-uring takes a controller factory, so the winner installs the same way on both runtimes

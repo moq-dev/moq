@@ -786,6 +786,12 @@ impl Fill {
 		outcome.refused.iter().count() + outcome.accepted.iter().count()
 	}
 
+	/// The runs answered so far, even once their readers consumed the answers.
+	#[cfg(all(test, feature = "async"))]
+	pub(super) fn resolved_runs(&self) -> Vec<ops::Range<u64>> {
+		self.inner.result.read().resolved.iter().cloned().collect()
+	}
+
 	/// The next group still owed in the fill's order: a reader still reads it, and it was
 	/// neither answered nor delivered live since it was asked. `None` once none is owed or
 	/// no reader waits on the fill, so stop serving it.
