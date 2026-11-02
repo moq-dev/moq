@@ -321,7 +321,7 @@ export class Game {
 			Moq.Path.from(this.#viewerPrefix, this.sessionId, viewerId),
 		);
 		const viewerBroadcast = viewerBroadcastPublication.broadcast;
-		viewerBroadcastPublication.announce({ epoch: Moq.Epoch.mint() });
+		viewerBroadcastPublication.announce();
 		effect.cleanup(() => {
 			viewerBroadcast.close();
 			this.viewerId.set(undefined);

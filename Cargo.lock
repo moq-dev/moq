@@ -5608,6 +5608,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
+ "uuid",
  "workspace-hack",
  "zeroize",
 ]
@@ -5821,7 +5822,6 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "uuid",
  "workspace-hack",
 ]
 
@@ -6178,6 +6178,7 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "uuid",
  "workspace-hack",
 ]
 
@@ -11584,23 +11585,23 @@ dependencies = [
 [[package]]
 name = "uniffi"
 version = "0.32.2"
-source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#35209f3f87051b940f68138fe685ed3ecfb02038"
 dependencies = [
  "anyhow",
  "camino",
  "cargo_metadata",
  "clap",
- "uniffi_bindgen 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
- "uniffi_core 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
- "uniffi_macros 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
- "uniffi_pipeline 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi_bindgen 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
+ "uniffi_core 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
+ "uniffi_macros 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
+ "uniffi_pipeline 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
 ]
 
 [[package]]
 name = "uniffi-bindgen"
 version = "0.1.0"
 dependencies = [
- "uniffi 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
  "workspace-hack",
 ]
 
@@ -11633,7 +11634,7 @@ dependencies = [
 [[package]]
 name = "uniffi_bindgen"
 version = "0.32.2"
-source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#35209f3f87051b940f68138fe685ed3ecfb02038"
 dependencies = [
  "anyhow",
  "askama",
@@ -11649,10 +11650,10 @@ dependencies = [
  "tempfile",
  "textwrap",
  "toml 1.1.6+spec-1.1.0",
- "uniffi_internal_macros 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
- "uniffi_meta 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
- "uniffi_pipeline 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
- "uniffi_udl 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi_internal_macros 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
+ "uniffi_meta 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
+ "uniffi_pipeline 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
+ "uniffi_udl 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
 ]
 
 [[package]]
@@ -11670,7 +11671,7 @@ dependencies = [
 [[package]]
 name = "uniffi_core"
 version = "0.32.2"
-source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#35209f3f87051b940f68138fe685ed3ecfb02038"
 dependencies = [
  "anyhow",
  "bytes",
@@ -11694,7 +11695,7 @@ dependencies = [
 [[package]]
 name = "uniffi_internal_macros"
 version = "0.32.2"
-source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#35209f3f87051b940f68138fe685ed3ecfb02038"
 dependencies = [
  "anyhow",
  "indexmap 2.14.2",
@@ -11723,7 +11724,7 @@ dependencies = [
 [[package]]
 name = "uniffi_macros"
 version = "0.32.2"
-source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#35209f3f87051b940f68138fe685ed3ecfb02038"
 dependencies = [
  "camino",
  "fs-err",
@@ -11733,7 +11734,7 @@ dependencies = [
  "serde",
  "syn 2.0.119",
  "toml 1.1.6+spec-1.1.0",
- "uniffi_meta 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi_meta 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
 ]
 
 [[package]]
@@ -11751,12 +11752,12 @@ dependencies = [
 [[package]]
 name = "uniffi_meta"
 version = "0.32.2"
-source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#35209f3f87051b940f68138fe685ed3ecfb02038"
 dependencies = [
  "anyhow",
  "siphasher",
- "uniffi_internal_macros 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
- "uniffi_pipeline 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi_internal_macros 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
+ "uniffi_pipeline 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
 ]
 
 [[package]]
@@ -11775,13 +11776,13 @@ dependencies = [
 [[package]]
 name = "uniffi_pipeline"
 version = "0.32.2"
-source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#35209f3f87051b940f68138fe685ed3ecfb02038"
 dependencies = [
  "anyhow",
  "heck",
  "indexmap 2.14.2",
  "tempfile",
- "uniffi_internal_macros 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi_internal_macros 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
 ]
 
 [[package]]
@@ -11799,12 +11800,12 @@ dependencies = [
 [[package]]
 name = "uniffi_udl"
 version = "0.32.2"
-source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#35209f3f87051b940f68138fe685ed3ecfb02038"
 dependencies = [
  "anyhow",
  "textwrap",
- "uniffi_meta 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
- "weedle2 5.0.0 (git+https://github.com/kixelated/uniffi-rs?rev=88d835d)",
+ "uniffi_meta 0.32.2 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
+ "weedle2 5.0.0 (git+https://github.com/kixelated/uniffi-rs?rev=35209f3)",
 ]
 
 [[package]]
@@ -12358,7 +12359,7 @@ dependencies = [
 [[package]]
 name = "weedle2"
 version = "5.0.0"
-source = "git+https://github.com/kixelated/uniffi-rs?rev=88d835d#88d835d66abc6357b0bcd290b4c2adb35096cd10"
+source = "git+https://github.com/kixelated/uniffi-rs?rev=35209f3#35209f3f87051b940f68138fe685ed3ecfb02038"
 dependencies = [
  "nom 7.1.3",
 ]

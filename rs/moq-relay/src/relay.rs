@@ -20,6 +20,8 @@
 //! Calling `load` means a new step arrives with the update, and a reshaped API
 //! is a compile error.
 
+use std::task::Poll;
+
 use anyhow::Context;
 use axum::Router;
 
@@ -87,6 +89,9 @@ pub struct Relay {
 	/// config named a source; `run` refuses to start while this is still held.
 	admissions: Option<Admissions>,
 	cluster: cluster::Cluster,
+	/// The cluster's origin and cache work, polled for as long as [`Self::run`]
+	/// runs. `None` only once `run` took it.
+	driver: Option<cluster::Driver>,
 	stats: moq_stats::Producer,
 	internal: internal::Internal,
 	web: web::Web,
@@ -129,9 +134,11 @@ impl Relay {
 	/// auth, and build the cluster with its cache and stats attached.
 	///
 	/// This performs the side effects of starting up (binding every socket,
-	/// reading key material, spawning the cache governor), so a returned `Relay`
-	/// reports its ephemeral ports and a taken port fails here; no session is
-	/// admitted until [`Self::run`] drives it.
+	/// reading key material), so a returned `Relay` reports its ephemeral ports and
+	/// a taken port fails here. Nothing runs yet: the cluster's
+	/// [`Driver`](crate::cluster::Driver), which holds the origin's lifecycle work and
+	/// the cache governor, is only stored, and no session is admitted until
+	/// [`Self::run`] drives both.
 	pub async fn load(config: Config) -> anyhow::Result<Self> {
 		// Keep the large debug state machine off the embedder's main-thread stack.
 		Box::pin(Self::load_inner(config)).await
@@ -339,7 +346,8 @@ impl Relay {
 		let mut cluster_options = cluster::Options::new(config.cluster).with_cache(cache);
 		cluster_options.session = config.limits.client;
 		cluster_options.peer = config.limits.peer;
-		let cluster = cluster::Cluster::new(cluster_options)?
+		let (cluster, driver) = cluster::Cluster::new(cluster_options)?;
+		let cluster = cluster
 			.with_connect(config.connect.clone(), config.quic.clone())
 			.with_advertise(advertise);
 		#[cfg(feature = "iroh")]
@@ -413,6 +421,7 @@ impl Relay {
 			auth,
 			admissions,
 			cluster,
+			driver: Some(driver),
 			stats,
 			internal,
 			web,
@@ -603,11 +612,26 @@ impl Relay {
 	///
 	/// This is also the embedding loop. Extra routes go on via [`Self::with_web`]
 	/// / [`Self::with_internal`] before calling this; cloned handles outlive it.
-	pub async fn run(self) -> anyhow::Result<()> {
+	pub async fn run(mut self) -> anyhow::Result<()> {
 		// Held past `run_inner`, so a waiter sees the failure before the close.
 		let ready = self.ready.clone();
+		// Polled beside everything `run_inner` does, startup and teardown included. A
+		// panic is reported like any critical task's, so the cluster's `run` returns
+		// it and `run_inner` still tears down on the way out.
+		let mut driver = self.driver.take().expect("only run takes the driver");
+		let critical = self.cluster.critical.clone();
+		let driving = kio::wait(move |waiter| {
+			if let Poll::Ready(Err(err)) = driver.poll(waiter) {
+				critical.fail(err);
+			}
+			Poll::<std::convert::Infallible>::Pending
+		});
 		// Serving branches must not inflate the caller's stack frame.
-		let result = Box::pin(self.run_inner()).await;
+		let result = tokio::select! {
+			biased;
+			result = Box::pin(self.run_inner()) => result,
+			never = driving => match never {},
+		};
 		if let Err(err) = &result {
 			ready.send_if_modified(|startup| {
 				let starting = matches!(startup, Startup::Starting);
@@ -1088,6 +1112,20 @@ mod tests {
 
 		let err = relay.run().await.expect_err("the relay kept running");
 		assert_eq!(err.root_cause().to_string(), "injected task panicked: injected");
+	}
+
+	/// A panic in the cluster's driver, which `run` polls rather than spawns, ends
+	/// `run` with that panic the same way.
+	#[tokio::test]
+	async fn a_cluster_driver_panic_stops_the_relay() {
+		let mut config = crate::Config::default();
+		config.listen.tcp.bind = Some("127.0.0.1:0".parse().unwrap());
+		let mut relay = super::Relay::load(config).await.unwrap().with_signals(false);
+		let _admissions = relay.admissions().unwrap();
+		relay.driver.as_mut().expect("driver").inject_panic("origin driver");
+
+		let err = relay.run().await.expect_err("the relay kept running");
+		assert_eq!(err.root_cause().to_string(), "origin driver panicked: injected");
 	}
 
 	#[cfg(not(feature = "_quic"))]

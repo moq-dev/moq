@@ -20,7 +20,10 @@ Decided 2026-11-01 (maintainer, on
 waits for [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md)'s miss
 judging (a miss with no feed frontier, and holes below where a live feed
 started) and its cached backfill rule. Without them a range fill is a
-functional regression from FETCH, which answers a miss at once.
+functional regression from FETCH, which answers a miss at once. Both landed
+in [moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545) on
+2026-11-02, so this quest is unblocked. Fetch as a range's remaining work,
+such as the explicit end signal, doesn't block it.
 
 ### Range fill through the subscription
 
@@ -40,7 +43,7 @@ The first attempt
 ([moq-dev/moq#7487](https://github.com/moq-dev/moq/pull/7487), WIP commit
 [b7f573d](https://github.com/moq-dev/moq/commit/b7f573d755ae53e6f2bdb94cc480ae47fd6ba254)) built this in
 `rs/moq-net/src/lite/subscriber.rs` and was moved back out until the
-requirement lands. Reuse its design:
+requirement landed. Reuse its design:
 
 - A `RangeFills` set holds each fill and asks for its next owed run
   (`Fill::next_run`), added as an absolute bounded range after the demand's
@@ -65,7 +68,7 @@ requirement lands. Reuse its design:
 Its integration tests (`range_fill.rs`: a miss subscribes and sends no FETCH,
 a miss rides the live subscription then retires its range, a group the
 publisher never had becomes a miss after the grace, a cut group is filled
-whole) passed. These failed, and must pass once the requirement lands:
+whole) passed. These failed, and must pass on #7545's miss judging:
 
 - On-demand `requests()` tracks with no live feed, such as moq-archive's, never
   ask a fill and park (`untimed::a_fetched_untimed_frame_arrives_untimed`,
@@ -106,6 +109,16 @@ Open questions the attempt raised, each with the attempt's recommendation:
   since the failing fill is a recovery fill, and rerun the test. The
   alternatives fill under the demand's budget, refusing older groups as Old,
   or add a per-range budget to the wire.
+- **A range added after SUBSCRIBE_OK has no reported start.** SUBSCRIBE_OK's
+  Range Starts are positional and sent once, yet the subscriber judges a
+  bounded range complete from them, on a stream that stays open for later
+  updates. So a Relative or Time range a SUBSCRIBE_UPDATE adds never learns
+  where it started. Raised by the closed Range ID prototype
+  ([moq-dev/moq#7207](https://github.com/moq-dev/moq/pull/7207)), whose
+  recommendation was to decide here whether ranges get implicit IDs so a later
+  message can report a start. SUBSCRIBE_UPDATE keeps restating the whole list
+  either way: each range is a few bytes, and restating stays stateless. If IDs
+  are adopted, #7207 is the reference encoding.
 - `auth::lite_07_narrowing_resets_a_fetch_in_flight` read `Stream(Cancel)`
   instead of `Unauthorized`/`Unroutable` when the grant narrowed mid-group;
   the refusal must carry the grant's error.
@@ -113,17 +126,13 @@ Open questions the attempt raised, each with the attempt's recommendation:
 The Rust copy sends a relative or time end as open, since nothing names a
 resolved end and it resolves the end itself (`wire_ranges`), so only absolute
 bounded ranges complete upstream. A hole on a live track counts as dropped
-only once the feed gives up on it, past the arrivals grace, until Fetch as a
-range judges such a miss sooner.
+once the feed gives up on it, past the arrival grace (#7545's bounded wait,
+`TrackState::miss_grace`).
 
 Update `drafts/draft-lcurley-moq-lite.md` with each wire change here,
 including that a subscriber fills missing groups through its ranges. Run
 `just drafts check` and `just test interop --all`, and the `moq-net-tests`
 `restart::retired_fetch_lite07` and `moq-relay` suites.
-
-## Required
-
-- [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - its miss judging and cached backfill rule, which a range fill needs to answer a miss as FETCH does
 
 ## Related
 

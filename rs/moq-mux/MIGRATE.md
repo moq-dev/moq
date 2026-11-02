@@ -114,11 +114,11 @@ Call `.with_passthrough(true)` to keep publishing CMAF.
 Read the frame yourself and hand it over: `while let Some(frame) = group.read_frame().await? { for media in container.decode(frame)? { .. } }`.
 An implementation drops its `group.poll_read_frame` call and its `None` end-of-group case, and decodes the frame it is given.
 
-### `Source` resolution takes the reference's epoch (#5699)
+### `Source` resolution takes the reference's instance (#5699)
 
-`Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional epoch after `rel`.
-Pass `config.epoch.as_ref()` (or `Reference::epoch`), or `None` to accept the first instance resolved as before.
-A broadcast proven to serve another epoch fails with the new `Error::EpochMismatch`; over a route without an epoch the check is best effort.
+`Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional instance after `rel`.
+Pass `config.instance.as_ref()` (or `Reference::instance`), or `None` to accept the first instance resolved as before.
+A broadcast proven to serve another instance fails with the new `Error::InstanceMismatch`; against an instance a session minted the check is best effort.
 
 ### `ts::stats::Export`'s release counters move into `release` (#5849)
 

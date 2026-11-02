@@ -50,7 +50,10 @@ metadata library and links its static library without compiling Rust. Without
 an explicit directory, a release pin in `cpp/moq/FFI_VERSION` selects the default
 input; `just cpp package` fetches it with the checked-in SHA-256 hashes and fails
 if it cannot verify it. Direct CMake builds and `just cpp check` build the
-current checkout unless given an explicit native directory. The package is
+current checkout unless given an explicit native directory. A source build
+with `-DMOQ_FFI_QLOG=ON` adds moq-ffi's `qlog` feature, so
+`moq::qlog_supported()` reports true and `QuicConfig::qlog` writes traces; it builds
+in its own cargo target directory, and a prebuilt input refuses it. The package is
 `moq-cpp`. It and the C package, `moq-c`, each link in their own copy of the
 Rust core, so a program links one of the two, never both.
 
@@ -142,9 +145,7 @@ moq::VideoEncoderOutput output{moq::VideoCodec::kH264, std::nullopt, std::nullop
 auto catalog = ok(moq::MediaCatalogProducer::init(broadcast));
 auto video = ok(moq::VideoProducer::init(catalog, {{moq::VideoPixelFormat::kRgba, 1280, 720, {30000, 1001}}, output, "camera", nullptr}));
 ok(video->write({{0, 30'000}, rgba}));
-moq::AnnounceRoute route;
-route.epoch = moq::mint_epoch(); // a fresh epoch per run
-ok(publication->announce(route));
+ok(publication->announce({})); // each broadcast mints a fresh instance
 ok(broadcast->close());    // keep the producer alive while publishing, then close explicitly
 ```
 
