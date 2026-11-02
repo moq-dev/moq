@@ -119,7 +119,7 @@ export interface ConnectionProps {
  *
  * A relay's GOAWAY migrates rather than drops: the replacement dials at once while the old
  * session finishes its groups, and the handle and its origin carry across. A redirect the
- * {@link ConnectionProps.goaway} policy refuses stops the loop like an auth rejection does.
+ * `goaway` policy refuses stops the loop like an auth rejection does.
  *
  * Options the pool cannot honor (transport options, delay, timeout, goaway, tokens, a pinned
  * certificate, caller-owned origins) use a private loop. An explicit `share: true`
@@ -227,7 +227,7 @@ export class Connection {
 	#signals: Effect;
 
 	/**
-	 * Take a handle on the connection for {@link ConnectionProps.url}.
+	 * Take a handle on the connection for the `url` option.
 	 *
 	 * Dials immediately when a URL is given and `enabled` is not false; otherwise waits for
 	 * the signals to say go. The handle owns nothing but its own share: {@link close}
@@ -390,35 +390,35 @@ export class Connection {
 
 /** Types on {@link Connection}: the handle is the class, these are its associated types. */
 export namespace Connection {
-	/** Options for {@link Connection}. */
+	/** Options for {@link Connection}. @reexport */
 	export type Props = ConnectionProps;
-	/** Options for {@link Connection.connect}. */
+	/** Options for {@link Connection.connect}. @reexport */
 	export type ConnectProps = ConnectPropsType;
-	/** Options for {@link Connection.accept}. */
+	/** Options for {@link Connection.accept}. @reexport */
 	export type AcceptProps = AcceptPropsType;
-	/** Backoff settings for a private reconnect loop. */
+	/** Backoff settings for a private reconnect loop. @reexport */
 	export type Backoff = ReloadDelay;
-	/** How a connection reacts to the relay's GOAWAY. */
+	/** How a connection reacts to the relay's GOAWAY. @reexport */
 	export type Goaway = GoawayProps;
-	/** What to do with the URI a relay names in its GOAWAY. */
+	/** What to do with the URI a relay names in its GOAWAY. @reexport */
 	export type Redirect = RedirectType;
-	/** Current state of a {@link Connection}. */
+	/** Current state of a {@link Connection}. @reexport */
 	export type Status = ReloadStatus;
-	/** The current connection's PROBE estimates. */
+	/** The current connection's PROBE estimates. @reexport */
 	export type Probe = ProbeType;
-	/** A point-in-time snapshot of the transport's counters. */
+	/** A point-in-time snapshot of the transport's counters. @reexport */
 	export type Stats = StatsType;
-	/** The wire transport a session runs over. */
+	/** The wire transport a session runs over. @reexport */
 	export type Transport = TransportType;
-	/** Tuning for the WebSocket fallback. */
+	/** Tuning for the WebSocket fallback. @reexport */
 	export type WebSocketProps = WebSocketPropsType;
-	/** WebTransport options, including friendlier certificate pinning. */
+	/** WebTransport options, including friendlier certificate pinning. @reexport */
 	export type WebTransportProps = WebTransportPropsType;
-	/** A server certificate hash used to pin a self-signed server. */
+	/** A server certificate hash used to pin a self-signed server. @reexport */
 	export type CertificateHash = CertificateHashType;
-	/** An established one-shot session. */
+	/** An established one-shot session. @reexport */
 	export type Established = EstablishedType;
-	/** The moq-transport extensions a one-shot session offers. */
+	/** The moq-transport extensions a one-shot session offers. @reexport */
 	export type Extensions = ExtensionsType;
 }
 

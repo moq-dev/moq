@@ -17,10 +17,10 @@ match CI. `just check` and `just fix` refuse to run outside it; set
 | `just ci-select` | Report whether CI and Rust build setup are needed, without running checks. |
 | `just fix` | Format and lint the packages this branch changed, and regenerate their committed JS API reports (`js/*/api/`). |
 | `just check` | Compile, lint, and test the same scope. |
-| `just ci` | Run the merge queue's gate locally, strictly. PRs into `main` get no other CI, so run it before every push. |
-| `just gate` | `just ci` over every package, as nightly and release PRs run it. |
+| `just ci` | Run the batched landing gate locally, strictly. PRs into `main` get no other CI, so run it before every push. |
+| `just gate` | `just ci` over every package, as nightly and release PRs run it. `just gate rs` runs only the named module. |
 | `just fix --all`, `just check --all` | The same, over every package. |
-| `just api-diff` | Diff every published API against its last release, the JS reports against `origin/release`'s. PRs into `release` run it; `--deny` fails a backport on any break. |
+| `just api-diff` | Diff every published API against its last release, the JS reports against ones rendered from `origin/release`. PRs into `release` run it; `--deny` fails a backport on any break. |
 | `just pub bbb <url>` | Publish Big Buck Bunny (also `tos`, `clock`, `gst`, `hls`). |
 | `just sub gst bbb <url>` | Play a broadcast through GStreamer. |
 | `just relay` | Run a local relay on its own. |
@@ -80,6 +80,9 @@ bun run --cwd doc check     # type-check, test, and build, including dead-link c
 `just check` includes the documentation build when the site changes. The build
 also generates the [markdown pages and agent index](/setup/agent#reading-the-docs).
 Edit protocol sources in `drafts/`; `doc/draft/` is generated from them.
+The [JS API reference](/lib/js/api/) is generated from the packages' TSDoc; the dev
+server reuses the last one until a package changes, or always with
+`MOQ_API_REFERENCE=regenerate`.
 Package API documentation stays beside the source. If you change a binding's
 code sample, its language check compiles the sample too.
 
@@ -122,7 +125,7 @@ just fix
 just ci
 ```
 
-`just ci` runs the merge queue gate for the selected scope. See
+`just ci` runs the batched landing gate for the selected scope. See
 [Checks and tests](#checks-and-tests) for targeted checks while iterating.
 
 See [CONTRIBUTING.md](https://github.com/moq-dev/moq/blob/main/CONTRIBUTING.md)

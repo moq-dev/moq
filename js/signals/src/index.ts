@@ -49,7 +49,7 @@ export interface Setter<T> {
 
 /**
  * The read side of a {@link Once}: observe it reactively ({@link Getter}, `undefined` while
- * pending) or await it ({@link PromiseLike}, resolves with the settled value, immediately if it
+ * pending) or await it (a `PromiseLike` that resolves with the settled value, immediately if it
  * already settled). Expose this to callers so they can peek/observe/await but not settle it.
  */
 export interface GetPromise<T> extends Getter<T | undefined>, PromiseLike<T> {}

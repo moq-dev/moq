@@ -1,8 +1,8 @@
 //! The ladder a transcoder publishes for one source, and the rungs serving it.
 //!
 //! The ladder is sized against the source picture, so it has to follow it.
-//! `moq_video::encode::publish_capture` opens its source twice by design (once
-//! to probe the mode, once when the first subscriber arrives), and a window
+//! An on-demand `moq_video::encode::publish_capture` opens its source twice
+//! (once to probe the mode, once when the first subscriber arrives), and a window
 //! capture derives its geometry from the window on every open, so the picture a
 //! ladder was resolved against is routinely not the one the source ends up
 //! carrying. A reconnecting publisher and a renegotiated screen share do the

@@ -28,9 +28,10 @@ pub mod fmp4;
 pub mod legacy;
 pub mod loc;
 pub mod mkv;
+pub mod mp4;
 pub mod ts;
 
-pub use consumer::Consumer;
+pub use consumer::{Consumer, DEFAULT_MAX_BUFFER, Delay};
 pub use group::GroupConsumer;
 pub use producer::Producer;
 pub(crate) use source::{ExportSource, Resume};

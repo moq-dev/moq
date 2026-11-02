@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Diff every published package's public API against its last release: Rust
 # crates through cargo-semver-checks against crates.io, `@moq/*` packages
-# through their committed API Extractor reports against `release`'s (or
-# API_DIFF_BASE's), and the FFI interfaces (`moq.h` and moq-ffi's UniFFI
+# through their committed API reports against ones rendered from the source of
+# `release` (or API_DIFF_BASE), and the FFI interfaces (`moq.h` and moq-ffi's UniFFI
 # surface) as headers against the released archives. Writes
 # target/api-diff/report.md and prints it.
 #
@@ -202,30 +202,38 @@ rust() {
     done
 }
 
-# Each published `@moq/*` package's committed API Extractor reports against the
-# base branch's. The build checks the reports against the code on every PR, so
-# neither side is rebuilt here.
+# Each published `@moq/*` package's committed API reports against reports this
+# checkout's renderer (js/common/api.ts) draws from the base branch's source, so
+# a change to the renderer never reads as a change to the API. `just check`
+# checks the committed reports against the code on every PR.
 js() {
     git rev-parse --verify --quiet "$base^{commit}" >/dev/null || {
         echo "api-diff: $base does not exist; fetch it or set API_DIFF_BASE" >&2
         exit 1
     }
     local manifest dir name version file entry surface
+    # The renderer imports TypeDoc from this checkout's install, which a fresh runner lacks. The
+    # install scripts build assets, such as @moq/libav, that neither checkout needs here.
+    bun install --frozen-lockfile --ignore-scripts >&2
+    # Not local: the trap runs after a failure has unwound this function's locals.
+    checkout=$out/js/checkout
+    git worktree add --detach "$checkout" "$base" >&2
+    trap 'git worktree remove --force "$checkout"' EXIT
+    (cd "$checkout" && bun install --frozen-lockfile --ignore-scripts) >&2
+    bun js/common/api.ts baseline "$checkout" "$out/js/baseline"
+    git worktree remove --force "$checkout"
+    trap - EXIT
     for manifest in js/*/package.json; do
         jq -e .scripts.release "$manifest" >/dev/null || continue
         dir=${manifest%/package.json}
         name=$(jq -r .name "$manifest")
         version=$(git show "$base:$manifest" 2>/dev/null | jq -r .version) || version=-
-        mkdir -p "$out/js/$name"
-        while read -r file; do
-            git show "$base:$dir/api/$file" >"$out/js/$name/$file"
-        done < <(git ls-tree --name-only "$base" "$dir/api/" | sed 's|.*/||')
         while read -r file; do
             entry=${file%.api.md}
             surface=$name/$entry
             [[ "$entry" != index ]] || surface=$name
-            compare "$surface" "$version" "$out/js/$name/$file" "$dir/api/$file"
-        done < <(find "$out/js/$name" "$dir/api" -name '*.api.md' -printf '%f\n' 2>/dev/null | sort -u)
+            compare "$surface" "$version" "$out/js/baseline/$name/$file" "$dir/api/$file"
+        done < <(find "$out/js/baseline/$name" "$dir/api" -name '*.api.md' -printf '%f\n' 2>/dev/null | sort -u)
     done
 }
 

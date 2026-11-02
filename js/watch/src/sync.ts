@@ -17,8 +17,8 @@ import {
  * late their frames arrive (see doc/concept/audio-jitter.md). A `Milli` fixes the delay at
  * exactly that number and disables adaptation.
  *
- * `"instant"` drops the buffer and the pacing together: nothing is held, and {@link Sync.wait}
- * returns without sleeping, so a frame presents as soon as it exists. It also overrides
+ * `"instant"` drops the buffer and the pacing together: nothing is held, and the wait before
+ * presenting a frame never sleeps, so it presents as soon as it exists. It also overrides
  * {@link SyncInput.buffer}, since holding a lookahead would contradict holding nothing. Audio is
  * off: a ring with no depth underruns, so the audio decoder unsubscribes and flushes its ring.
  */

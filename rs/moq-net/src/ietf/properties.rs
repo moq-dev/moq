@@ -490,7 +490,7 @@ mod tests {
 
 	#[test]
 	fn publisher_priority_is_bounded_to_a_byte() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut buf = Vec::new();
 			Encoder::new(&mut buf, version.into()).varint(0x0eu64).unwrap();
 			Encoder::new(&mut buf, version.into()).varint(256u64).unwrap();
@@ -593,8 +593,10 @@ mod tests {
 	}
 
 	fn round_trip(version: Version, block: &[u8]) -> (Properties, Vec<u8>) {
-		let properties = crate::coding::decode_buf(&mut Bytes::copy_from_slice(block), version, Properties::decode)
-			.unwrap_or_else(|err| panic!("{version}: {err}"));
+		let properties = crate::coding::decode_buf(&mut Bytes::copy_from_slice(block), version, |r, v| {
+			Properties::decode(r, v)
+		})
+		.unwrap_or_else(|err| panic!("{version}: {err}"));
 		let mut buf = Vec::new();
 		properties
 			.encode(&mut Encoder::new(&mut buf, version.into()), version)

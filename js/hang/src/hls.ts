@@ -1,7 +1,7 @@
 /**
  * HLS segment records: where each of a rendition's HLS segments starts.
  *
- * A rendition opts in with its catalog `hls` field, which names a track carrying one
+ * A rendition advertises them with its catalog `hls` field, which names a track carrying one
  * {@link Record} per segment. A segment starts at a group boundary, so a record is the segment's
  * first group and pts. It runs to the next record: it holds every group up to the next record's
  * `group` and lasts until the next record's `pts`, unless it carries an explicit `duration`. A

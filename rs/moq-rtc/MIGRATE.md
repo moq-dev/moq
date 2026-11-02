@@ -6,7 +6,7 @@ How to update your code for each breaking change, newest first.
 
 ### `moq_net::Path` has no lifetime
 
-`Client::publish` and `client::whip::dial` take `impl TryInto<moq_net::Path, Error: Into<moq_net::Error>>`, so `&str`, `String`, and `&Path` still work. `server::{whip, whep}::accept` take `impl Into<moq_net::Path>`: pass a `Path`, from `moq_net::Path::new(s)?` or `moq_net::Path::from_static`. See moq-net's migration for the rest.
+`server::{whip, whep}::accept` take `impl Into<moq_net::Path>`: pass a `Path`, from `moq_net::Path::new(s)?` or `moq_net::Path::from_static`. See moq-net's migration for the rest.
 
 ### Client calls run the session
 

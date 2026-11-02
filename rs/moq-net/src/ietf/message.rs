@@ -19,17 +19,17 @@ pub(super) fn control(id: u64) -> crate::stats::Message {
 /// A trait for IETF messages that are automatically size-prefixed during encoding/decoding.
 ///
 /// IETF messages use a u16 size prefix and have a message type ID for control stream dispatch.
-pub trait Message: Sized + std::fmt::Debug {
+pub trait Message<'a>: Sized + std::fmt::Debug {
 	const ID: u64;
 
 	/// Encode this message body (without size prefix).
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError>;
 
 	/// Decode a message body (without size prefix).
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError>;
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError>;
 }
 
-impl<T: Message> Encode<Version> for T {
+impl<'a, T: Message<'a>> Encode<Version> for T {
 	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		tracing::trace!(?self, "encoding");
 		let prefix = w.prefix_u16();
@@ -46,8 +46,8 @@ impl<T: Message> Encode<Version> for T {
 #[derive(Clone, Debug)]
 pub struct Body(pub bytes::Bytes);
 
-impl Decode<Version> for Body {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for Body {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let size = r.u16()? as usize;
 		Ok(Self(bytes::Bytes::copy_from_slice(r.slice(size)?)))
 	}
@@ -60,7 +60,7 @@ impl Body {
 	}
 
 	/// Decode the whole body as `M`, which must fill it exactly.
-	pub fn message<M: Message>(&self, version: Version) -> Result<M, DecodeError> {
+	pub fn message<'a, M: Message<'a>>(&'a self, version: Version) -> Result<M, DecodeError> {
 		let mut data = self.decoder(version);
 		// The body is complete, so running short inside it is malformed, not a wait for more.
 		let msg = M::decode_msg(&mut data, version).map_err(DecodeError::complete)?;
@@ -71,8 +71,8 @@ impl Body {
 	}
 }
 
-impl<T: Message> Decode<Version> for T {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a, T: Message<'a>> Decode<'a, Version> for T {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let size = r.u16()? as usize;
 		let mut body = r.sub(size)?;
 

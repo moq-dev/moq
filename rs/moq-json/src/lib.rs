@@ -29,23 +29,6 @@ pub mod window;
 
 pub use crate::diff::{Diff, diff};
 
-/// How a JSON track compresses its frames.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum Compression {
-	/// Uncompressed JSON frames.
-	#[default]
-	None,
-
-	/// Group-scoped raw DEFLATE, sync-flushed at each frame boundary.
-	Deflate,
-}
-
-impl Compression {
-	pub(crate) const fn is_deflate(self) -> bool {
-		matches!(self, Self::Deflate)
-	}
-}
-
 /// Errors produced while publishing or consuming JSON.
 #[derive(thiserror::Error, Debug, Clone)]
 #[non_exhaustive]
@@ -60,25 +43,12 @@ pub enum Error {
 	#[error("json: {0}")]
 	Json(String),
 
-	/// A compressed frame could not be decoded (malformed, truncated, or oversized).
-	#[error(transparent)]
-	Flate(#[from] moq_flate::Error),
-
 	/// A merge patch arrived with no snapshot to apply it to.
 	///
 	/// Every group opens with a full snapshot, so this means frames reached
 	/// [`snapshot::Decoder`] out of order, or a group's first frame was routed as a delta.
 	#[error("delta before snapshot")]
 	MissingSnapshot,
-
-	/// A compressed [`stream`] frame was encoded but never written, so the shared DEFLATE window is
-	/// ahead of what the consumer holds and nothing later in this group can be decoded.
-	///
-	/// Unlike [`snapshot`], a stream has no keyframe to resynchronize on, so the encoder refuses to
-	/// continue rather than emit frames that cannot be read. Recover by rolling a new group and
-	/// calling [`stream::Encoder::reset`].
-	#[error("compression desynchronized: a frame was encoded but never written")]
-	Desync,
 
 	/// A [`stream`] track carried a second group, which a lossless log cannot do.
 	///

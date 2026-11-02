@@ -137,8 +137,8 @@ impl Encode<Version> for ObjectDatagram {
 	}
 }
 
-impl Decode<Version> for ObjectDatagram {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for ObjectDatagram {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let kind = r.varint()?;
 		if !Self::valid(kind) {
 			return Err(DecodeError::InvalidValue);
@@ -201,7 +201,7 @@ mod tests {
 		Ok(datagram)
 	}
 
-	const ALL: [Version; 2] = [Version::Draft18, Version::Draft22];
+	const ALL: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 	fn single(priority: Option<u8>) -> ObjectDatagram {
 		ObjectDatagram {

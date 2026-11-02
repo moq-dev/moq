@@ -21,7 +21,7 @@ pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
 	/// Adapt one of the backend's receive streams, freshly accepted or opened.
 	fn recv(stream: super::RecvStream<Self::RecvStream>) -> Self::Recv;
 
-	/// Open a request; iroh cannot inspect upstream noq credit and keeps waiting.
+	/// Open a request, waiting for stream credit like any open unless the backend can inspect it.
 	fn open_request(&self) -> impl std::future::Future<Output = super::RequestResult<Self>> + Send {
 		async { self.open_bi().await.map(Some) }
 	}

@@ -1,44 +1,42 @@
-# [M] The fill path is linear in range count and span
+# [M] A subscription's range count cannot multiply per-poll cost
 
 ## Goal
 
-`track_range_filling` (`rs/moq-net/benches/track.rs`) holds roughly flat
-groups/s as range count and span grow. The model's cost per group no longer
-grows with the number of ranges in a subscription, or that number is bounded
-by the design (flow control or an owned budget), not by a refusal constant. A
-benchmark sweeps range count and subscriber count, so a slope shows up.
+The model's cost per poll no longer grows with the number of ranges in a
+subscription, or that number is bounded by the design (flow control or an
+owned budget), not by a refusal constant. A benchmark sweeps range count for
+each path below, so a slope shows up.
 
 ## Plan
 
-Measured in [moq-dev/moq#6722](https://github.com/moq-dev/moq/pull/6722): 234K
-groups/s at 1 range × 1 span falls to 1.9K at 256 ranges × 64 span. Each poll's
-drift edge (`live_edge`) and each candidate's successor search
-(`arrival`/`successor`) walk `lookup` across all of a reader's runs, and a
-filled group is never marked shown, so every scan passes it again.
-`Misses::retain` also rescans every filled group per poll.
+The fill path itself went linear in
+[moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995):
+`track_range_filling` holds flat over 1 to 256 ranges, any span, and up to 64
+readers sharing the fills, and the serving path's window end and coverage
+checks stopped walking every range. Four walks still grow with range count.
+A lite-07 SUBSCRIBE fits about 32K ranges in its 64 KiB message, so a hostile
+peer can multiply each by that.
 
-The range count is hostile input too
-([moq-dev/moq#6715](https://github.com/moq-dev/moq/pull/6715)): lite-07
-SUBSCRIBE carries a list of ranges, a peer can send as many as fit in one
-message, and the model's per-group cost grows with that count, so a hostile
-peer can multiply the CPU a relay spends on every group of a track.
-
-- Measure first: extend `rs/moq-net/benches/track.rs` with ranges ×
-  subscribers beside `track_range_filling`'s ranges × span.
-- Prefer merging overlapping or adjacent ranges at decode, and a lookup that
-  touches only the ranges around a group.
-- Include `track::Subscriber::covered`, which the lite-07 publisher runs on
-  each idle wake of a bounded subscription and walks every range.
-
-Decided 2026-10-27 (maintainer):
-
-- The range count cost quest folds in here, since both fix the same walk.
-- Re-baseline `track_range_filling` on current `main` before optimizing:
-  [moq-dev/moq#6921](https://github.com/moq-dev/moq/pull/6921) changed how
-  sparse misses are judged after the numbers above.
-
-[FETCH as a range](/quest/m1/subscribe-ranges/fetch-range.md) waits on this
-(maintainer, 2026-10-25, on #6722), since one-range reads would put every
-past read on this path.
+- **Time anchors.** While any time end is unsettled, `Window::settle` advances
+  every span on each cursor sync, and `Window::watch_starts` and
+  `Window::speculative` walk every span on each park. A peer naming many time
+  ends past the live edge keeps them unsettled. Timed datagram admission
+  (`Window::admits_datagram`) walks every range per datagram. Index the
+  unsettled ends by the sequence each waits on, so a settle advances only the
+  ends new groups reach, and split datagram admission by anchor kind into
+  sorted lookups.
+- **Outstanding fills.** While fills are out, each probe runs
+  `Misses::expire` over every wanted run and `Misses::resolve` collects the
+  joins over every wanted run, so a reader whose fills never answer pays
+  O(wanted runs) per live group. Expire by deadline as `Deferred` does, and
+  resolve only the joins whose outcome changed.
+- **Sparse live numbering.** `TrackState::find_servable` leapfrogs runs and
+  live groups, so on a track with sparse live sequences (moq-transport), a
+  reader with ranges in the gaps costs O(min(ranges, gaps)) per search.
+- **Lite-07 frame bounds.** The lite-07 publisher's `Frames::start` and
+  `Frames::end` (`rs/moq-net/src/lite/publisher.rs`) scan every decoded
+  range per served group and per datagram. Key them by group. This is the
+  2026-10-27 security audit's NET-1, folded in here (maintainer,
+  2026-10-27).
 
 Public API: none expected. Wire: none expected.

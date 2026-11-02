@@ -22,13 +22,6 @@ sits one track priority below it, drains its encoder while disabled, and
 reopens on a keyframe; `moq_encode_video` takes the same `lower` handle in
 its `moq_video_encode_options`.
 
-Depends on BBR3 aging its estimate: the grant this rule reads can stay high
-for 20 s or more after the path drops, since `update_max_bw` in
-`rs/moq-congestion/src/bbr3/mod.rs` never ages an app-limited `max_bw`
-(measured in [moq-dev/moq#6635](https://github.com/moq-dev/moq/pull/6635)),
-so a rung keeps sending into a narrowed path until it does. A separate quest
-fixes that; the shaped-uplink proof needs it to disable on time.
-
 - OBS: each OBS video encoder is its own rendition (`video_tracks` in
   `cpp/obs/src/moq-output.cpp`) publishing pre-encoded packets through a
   media track, and `MoQRate` (`cpp/obs/src/moq-rate.h`) mirrors
@@ -39,15 +32,13 @@ fixes that; the shaped-uplink proof needs it to disable on time.
   encoder or force a keyframe per rung mid-stream, so decide between dropping
   packets while disabled and resuming at the next natural keyframe, or
   restarting the encoder.
-- Shaped uplink: `moq-shaper` never steps its rate limit (queued datagrams
-  would reorder), so a run whose bottleneck opens back up needs either a
-  rate step the shaper can apply without reordering, or a second shaper the
-  first retargets to. Run it nightly with an `#[ignore]` test and a recipe in
-  `rs/justfile`, beside `quic-sim`.
+- Shaped uplink: a `moq-shaper` profile whose rate steps down and back up
+  (like the `cellular-step` built-in) opens the bottleneck back up mid-run.
+  Run it nightly with an `#[ignore]` test and a recipe in `rs/justfile`,
+  beside `quic-sim`.
 
 ## Related
 
 - [JS rung disable](/quest/m2/probe/rung-disable-js.md) - the same rule in `js/publish`, probing with padding
 - [Ladder controller](/quest/m3/ladder/controller.md) - the same rung disable for generated transcode ladders
-- [OBS multitrack](/quest/m2/obs-multitrack.md) - OBS's native multitrack encoders as the renditions this disables
 - [Viewer up-switch](/quest/m2/probe/viewer-upswitch.md) - the viewer side of moving between renditions as capacity changes

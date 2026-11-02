@@ -13,8 +13,6 @@ afterEach(() => {
 	else process.env.MOQ_API_REPORT = previousMode;
 });
 
-const summary = "/**\n * A package summary.\n * @module\n */\n";
-
 function fixture(files: Record<string, string>, manifest: Record<string, unknown> = {}): string {
 	const directory = mkdtempSync(join(tmpdir(), "moq-api-test-"));
 	directories.push(directory);
@@ -35,25 +33,72 @@ function fixture(files: Record<string, string>, manifest: Record<string, unknown
 	return directory;
 }
 
-test("a documented declaration produces a report", () => {
+/** The declarations in a report, without its heading and fence. */
+function report(directory: string, file = "index.api.md"): string {
+	return (
+		readFileSync(join(directory, "api", file), "utf8")
+			.split("```ts\n")[1]
+			?.split("```")[0] ?? ""
+	);
+}
+
+// A dependency named `dep`, installed beside the package and declared by it.
+const dep = {
+	"node_modules/dep/package.json": JSON.stringify({
+		name: "dep",
+		version: "0.0.0",
+		exports: { ".": { types: "./index.d.ts" } },
+	}),
+	"node_modules/dep/index.d.ts": "/** A value. */\nexport interface Value {\n\tvalue: string;\n}\n",
+};
+
+test("a report spells each declaration as TypeScript, one member per line", async () => {
 	const directory = fixture({
-		"dist/index.d.ts": `${summary}/** Read a value. */\nexport declare function read(): string;\n`,
+		"dist/index.d.ts": `/** Make a value. */
+export declare const Value: ((text: string) => Value) & {
+	readonly zero: Value;
+};
+/** A value. */
+export type Value = string | (() => string)[];
+/** Reads values. */
+export declare class Reader<T extends Value = Value> {
+	/** Read one. */
+	read(options?: { signal?: AbortSignal }): Promise<T>;
+	/** Start reading. */
+	constructor(source: Value);
+	/** How many were read. */
+	get count(): number;
+	/** Read each, in turn. */
+	[Symbol.asyncIterator](): AsyncIterator<T>;
+}
+declare const _default: Reader;
+export default _default;
+`,
 	});
-	checkReports(directory);
-	expect(readFileSync(join(directory, "api/index.api.md"), "utf8")).toContain("export function read(): string;");
+	await checkReports(directory);
+	expect(report(directory)).toBe(`export class Reader<T extends Value = Value> {
+	constructor(source: Value);
+	[Symbol.asyncIterator](): AsyncIterator<T>;
+	get count(): number;
+	read(options?: {
+		signal?: AbortSignal;
+	}): Promise<T>;
+}
+
+export const Value: ((text: string) => Value) & {
+	readonly zero: Value;
+};
+
+export type Value = string | (() => string)[];
+
+declare const _default: Reader;
+export default _default;
+`);
 });
 
-test("a declaration needs a summary", () => {
-	// The module summary would document a declaration directly after it.
+test("a signature cannot depend on a declaration no entrypoint exports", async () => {
 	const directory = fixture({
-		"dist/index.d.ts": `${summary}/** Write a value. */\nexport declare function write(): void;\nexport declare function read(): string;\n`,
-	});
-	expect(() => checkReports(directory)).toThrow("API Extractor failed");
-});
-
-test("a signature cannot depend on a declaration no entrypoint exports", () => {
-	const directory = fixture({
-		"dist/index.d.ts": `${summary}export { read } from "./access";\n`,
+		"dist/index.d.ts": `export { read } from "./access";\n`,
 		"dist/access.d.ts": `/** Input to a read. */
 export interface AccessInput {
 	/** The path to read. */
@@ -63,42 +108,261 @@ export interface AccessInput {
 export declare function read(input: AccessInput): string;
 `,
 	});
-	expect(() => checkReports(directory)).toThrow("API Extractor failed");
+	await expect(checkReports(directory)).rejects.toThrow("AccessInput, used by read, is not exported");
 });
 
-test("a signature may use a declaration another entrypoint exports, or one it renames", () => {
+test("a signature may use a declaration another entrypoint exports, or an alias re-exports", async () => {
 	const directory = fixture(
 		{
-			"dist/index.d.ts": `${summary}export { type AccessInput } from "./access";\n`,
-			"dist/access.d.ts": `/** Input to a read. */
+			"dist/index.d.ts": `export { type AccessInput } from "./access";\n`,
+			"dist/access.d.ts": `/** Options for a read. */
+interface Options {
+	/** Whether to wait. */
+	wait: boolean;
+}
+/** Options for a read. @reexport */
+export type ReadOptions = Options;
+/** Input to a read. */
 export interface AccessInput {
 	/** The path to read. */
 	path: string;
 }
-/** Parse an input. */
-declare function parse(text: string): AccessInput;
 /** Reads values. */
 export declare class Reader {
 	/** Read a value. */
-	read(input: AccessInput): string;
-	/** Parse an input. */
-	static parse: typeof parse;
+	read(input: AccessInput, options: Options): string;
+	/** Read a value without waiting. */
+	peek(options: ReadOptions): string;
 }
 `,
-			"dist/reader.d.ts": `${summary}export { Reader } from "./access";\n`,
+			"dist/reader.d.ts": `export { Reader, type ReadOptions } from "./access";\n`,
 		},
 		{ exports: { ".": { types: "./index.d.ts" }, "./reader": { types: "./reader.d.ts" } } },
 	);
-	checkReports(directory);
-	expect(readFileSync(join(directory, "api/reader.api.md"), "utf8")).toContain("static parse: typeof parse;");
+	await checkReports(directory);
+	expect(report(directory, "reader.api.md")).toBe(`import { AccessInput } from "@moq/example";
+
+export interface ReadOptions {
+	wait: boolean;
+}
+
+export class Reader {
+	constructor();
+	peek(options: ReadOptions): string;
+	read(input: AccessInput, options: ReadOptions): string;
+}
+`);
 });
 
-test("a declaration resolves types from declared dependencies only", () => {
+test("another package's declarations are reported as the re-export that brings them", async () => {
+	const directory = fixture(
+		{
+			...dep,
+			"dist/index.d.ts": `export * as Dep from "dep";\nexport { type Value as Thing } from "dep";\n`,
+		},
+		{ dependencies: { dep: "^0.0.0" } },
+	);
+	await checkReports(directory);
+	expect(report(directory)).toBe(`export * as Dep from "dep";
+
+export { Value as Thing } from "dep";
+`);
+});
+
+test("a reference names its declaration by where its package exports it", async () => {
+	const directory = fixture(
+		{
+			"node_modules/dep/package.json": JSON.stringify({
+				name: "dep",
+				version: "0.0.0",
+				exports: { ".": { types: "./index.d.ts" } },
+			}),
+			"node_modules/dep/index.d.ts": `export * as Audio from "./audio";\nexport * as Video from "./video";\n`,
+			"node_modules/dep/audio.d.ts": "export interface Decoder {\n\trate: number;\n}\n",
+			"node_modules/dep/video.d.ts": "export interface Decoder {\n\tframe: number;\n}\n",
+			"dist/index.d.ts": `import type { Audio as A, Video } from "dep";
+/** An audio track. */
+export interface Audio {
+	/** Decodes it. */
+	decoder: A.Decoder;
+}
+/** A member. */
+export interface Member {
+	/** Its audio. */
+	audio: A.Decoder;
+	/** Its video. */
+	video: Video.Decoder;
+}
+`,
+		},
+		{ dependencies: { dep: "^0.0.0" } },
+	);
+	await checkReports(directory);
+	// \`Audio\` is declared here too, so the other one cannot be imported by that name.
+	expect(report(directory)).toBe(`import { Video } from "dep";
+
+export interface Audio {
+	decoder: import("dep").Audio.Decoder;
+}
+
+export interface Member {
+	audio: import("dep").Audio.Decoder;
+	video: Video.Decoder;
+}
+`);
+});
+
+test("a type is reported as written, not as the checker restates it", async () => {
+	const directory = fixture({
+		"dist/index.d.ts": `/** Reads every value. */
+export declare function all<S extends readonly unknown[]>(values: [...S]): { [K in keyof S]: S[K] | undefined };
+/** A value and its fallback. */
+export interface Pair<T> {
+	/** Both, in order. */
+	both: [...T[], T];
+}
+/** Pairs of strings, as the compiler writes an inferred type. */
+export declare const strings: import("./index").Pair<string>[];
+`,
+	});
+	await checkReports(directory);
+	expect(report(directory)).toBe(`export interface Pair<T> {
+	both: [...T[], T];
+}
+
+export function all<S extends readonly unknown[]>(values: [...S]): { [K in keyof S]: S[K] | undefined };
+
+export const strings: Pair<string>[];
+`);
+});
+
+test("an interface reports its own index signatures, not inherited ones", async () => {
+	const directory = fixture({
+		"dist/index.d.ts": `/** A nested list. */
+export interface List extends Array<string | List> {}
+/** Counts by name. */
+export interface Counts {
+	/** One count. */
+	[name: string]: number;
+}
+`,
+	});
+	await checkReports(directory);
+	expect(report(directory)).toBe(`export interface Counts {
+	[name: string]: number;
+}
+
+export interface List extends Array<string | List> {}
+`);
+});
+
+test("a deeply nested type is reported in full", async () => {
+	const depth = 12;
+	const type = `${"{ a: ".repeat(depth)}number${" }".repeat(depth)}`;
+	const directory = fixture({ "dist/index.d.ts": `/** A nested value. */\nexport declare const nested: ${type};\n` });
+	await checkReports(directory);
+	expect(report(directory)).toContain(`${"\t".repeat(depth)}a: number;`);
+});
+
+test("a reference is spelled so it resolves where it is written", async () => {
+	const directory = fixture({
+		"dist/hop.d.ts": `/** A cost. */
+export type Cost = bigint;
+/** Costs. */
+export declare const Cost: { zero: bigint };
+`,
+		"dist/rendition.d.ts": `/** A rendition. */
+export declare class Rendition<T> {
+	/** Its value. */
+	value: T;
+}
+`,
+		"dist/session.d.ts": `/** A session. */
+export default class {
+	/** Accept one. */
+	static accept(cost: Cost): Session;
+}
+import type { Cost } from "./hop";
+import type Session from "./session";
+`,
+		"dist/shape.d.ts": `/** A shape. */
+export interface Shape {
+	/** Its area. */
+	area: number;
+}
+`,
+		"dist/index.d.ts": `import { Rendition as Base } from "./rendition";
+import Session from "./session";
+import { Shape as Outer } from "./shape";
+export type { Cost } from "./hop";
+export { Rendition } from "./rendition";
+export { Shape } from "./shape";
+export default Session;
+/** Audio. */
+export declare namespace Audio {
+	/** An audio rendition. */
+	type Rendition = Base<string>;
+	/** Audio, which is no namespace to hide this one. */
+	type Audio = File[];
+	/** An audio file. */
+	interface File {
+		/** The global one. */
+		file: globalThis.File;
+	}
+	/** An audio shape. */
+	class Shape implements Outer {
+		/** Its area. */
+		area: number;
+	}
+	/** A name the alias for the outer shape must not take. */
+	interface Shape_1 {
+		/** Another member. */
+		different: string;
+	}
+}
+`,
+	});
+	await checkReports(directory);
+	expect(report(directory)).toBe(`import { Shape as Shape_2 } from "@moq/example";
+
+export namespace Audio {
+	export type Audio = Audio.File[];
+	export interface File {
+		file: globalThis.File;
+	}
+	export type Rendition = import("@moq/example").Rendition<string>;
+	export class Shape implements Shape_2 {
+		constructor();
+		area: number;
+	}
+	export interface Shape_1 {
+		different: string;
+	}
+}
+
+export type Cost = bigint;
+
+export class Rendition<T> {
+	constructor();
+	value: T;
+}
+
+export interface Shape {
+	area: number;
+}
+
+export default class {
+	constructor();
+	static accept(cost: Cost): import("@moq/example").default;
+}
+`);
+});
+
+test("a declaration resolves types from declared dependencies only", async () => {
 	const files = {
-		"node_modules/dep/package.json": JSON.stringify({ name: "dep", version: "0.0.0", types: "./index.d.ts" }),
-		"node_modules/dep/index.d.ts": "export interface Value {\n\tvalue: string;\n}\n",
-		"dist/index.d.ts": `${summary}import type { Value } from "dep";\n/** Read a value. */\nexport declare function read(): Value;\n`,
+		...dep,
+		"dist/index.d.ts": `import type { Value } from "dep";\n/** Read a value. */\nexport declare function read(): Value;\n`,
 	};
-	checkReports(fixture(files, { dependencies: { dep: "^0.0.0" } }));
-	expect(() => checkReports(fixture(files))).toThrow("API Extractor failed");
+	await checkReports(fixture(files, { dependencies: { dep: "^0.0.0" } }));
+	await expect(checkReports(fixture(files))).rejects.toThrow("Cannot find module 'dep'");
 });

@@ -127,9 +127,14 @@ impl Quic {
 	/// Refuses limits QUIC cannot advertise, as `[quic]` does, so the accept and
 	/// dial paths never disagree about them.
 	pub(crate) fn validate(&self) -> anyhow::Result<()> {
-		let mut quic = moq_tokio::quic::Config::default();
-		self.dial(&mut quic);
-		quic.validate().context("invalid [limits.peer.quic]")
+		self.limits().validate().context("invalid [limits.peer.quic]")?;
+		// Incomplete messages hold connection credit until they are complete.
+		let min = moq_net::transport::MIN_RECEIVE_WINDOW;
+		anyhow::ensure!(
+			self.receive_window.get() >= min,
+			"invalid [limits.peer.quic]: receive_window must be at least {min} bytes to fit the largest message"
+		);
+		Ok(())
 	}
 
 	/// Apply these limits to the `[quic]` section a peer link is dialed with.
@@ -140,7 +145,6 @@ impl Quic {
 	}
 
 	/// The limits an accepted peer connection widens to, as either QUIC runtime takes them.
-	#[cfg(any(feature = "quic", all(target_os = "linux", feature = "_uring")))]
 	pub(crate) fn limits(&self) -> moq_quic::Limits {
 		let mut limits = moq_quic::Limits::default();
 		limits.max_streams = Some(self.max_streams);

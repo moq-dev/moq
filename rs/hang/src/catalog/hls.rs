@@ -6,7 +6,7 @@ use super::millis::MillisCeil;
 
 /// A rendition's HLS segment records, which exist only for HLS compatibility.
 ///
-/// Opt-in, and only on video and audio renditions. Each rendition numbers its own segments. A
+/// Optional, and only on video and audio renditions. Each rendition numbers its own segments. A
 /// rendition without it is not HLS-renderable. See the [`hls`](crate::hls) module for the
 /// records.
 #[serde_with::serde_as]

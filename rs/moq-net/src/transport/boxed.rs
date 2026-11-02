@@ -6,25 +6,29 @@
 //! awaits them. Each transport only instantiates the thin forwarding impls below.
 
 use std::any::Any;
-use std::task::{Context, Poll};
+use std::task::Poll;
 
 use bytes::{Buf, Bytes};
 
 use super::poll::{self, SendOptions};
-use super::{Address, CloseKind, MaybeSend, MaybeSync, Probe, Wire};
+use super::{Address, CloseKind, Probe, Wire};
 
-/// A boxed [`poll::Boxable`] session.
+/// A boxed [`poll::Boxable`] session, shared by every task that uses it.
+#[derive(Clone)]
 pub(crate) struct Session {
-	inner: Box<dyn ErasedSession>,
+	inner: std::sync::Arc<dyn ErasedSession>,
 	/// Shared by every clone, so whichever task closes the transport first says why.
 	closing: std::sync::Arc<crate::session::Closing>,
+	/// Shared by every clone, so each task counts the subscriptions and fetches it carries.
+	work: crate::session::Work,
 }
 
 impl Session {
 	pub(crate) fn new<S: poll::Boxable>(session: S) -> Self {
 		Self {
-			inner: Box::new(session),
+			inner: std::sync::Arc::new(session),
 			closing: Default::default(),
+			work: Default::default(),
 		}
 	}
 
@@ -33,19 +37,15 @@ impl Session {
 		&self.closing
 	}
 
+	/// The subscriptions and fetches the session's tasks carry over this transport.
+	pub(crate) fn work(&self) -> &crate::session::Work {
+		&self.work
+	}
+
 	/// Close with `code` over `cause`, this side's reason for ending the session.
-	pub(crate) fn abort(&mut self, cause: &crate::Error, code: u32, reason: &str) {
+	pub(crate) fn abort(&self, cause: &crate::Error, code: u32, reason: &str) {
 		self.closing.sent(code, Some(cause));
 		self.inner.close(code, reason);
-	}
-}
-
-impl Clone for Session {
-	fn clone(&self) -> Self {
-		Self {
-			inner: self.inner.clone_box(),
-			closing: self.closing.clone(),
-		}
 	}
 }
 
@@ -106,7 +106,7 @@ pub(crate) struct SendStream(Box<dyn ErasedSend>);
 impl SendStream {
 	/// Box a stream, keeping its own send-group type behind the boundary.
 	#[cfg(test)]
-	pub(crate) fn new(stream: impl poll::SendStream<Group: MaybeSend + MaybeSync> + MaybeSend + MaybeSync) -> Self {
+	pub(crate) fn new(stream: impl poll::SendStream<Group: Send + Sync> + Send + Sync) -> Self {
 		Self(Box::new(stream))
 	}
 }
@@ -116,7 +116,7 @@ pub(crate) struct RecvStream(Box<dyn ErasedRecv>);
 
 impl RecvStream {
 	#[cfg(test)]
-	pub(crate) fn new(stream: impl poll::RecvStream + MaybeSend + MaybeSync) -> Self {
+	pub(crate) fn new(stream: impl poll::RecvStream + Send + Sync) -> Self {
 		Self(Box::new(stream))
 	}
 }
@@ -174,62 +174,57 @@ impl super::Metrics for Metrics {
 	}
 }
 
-trait ErasedSession: MaybeSend + MaybeSync {
-	fn clone_box(&self) -> Box<dyn ErasedSession>;
-	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<RecvStream, Error>>;
-	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<(SendStream, RecvStream), Error>>;
-	fn poll_open_uni(
-		&mut self,
-		cx: &mut Context<'_>,
-		options: SendOptions<'_, Group>,
-	) -> Poll<Result<SendStream, Error>>;
+trait ErasedSession: Send + Sync {
+	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<RecvStream, Error>>;
+	fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(SendStream, RecvStream), Error>>;
+	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>>;
 	fn poll_open_bi(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>>;
 	fn poll_open_request(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>>;
-	fn send_group(&mut self, priority: i64) -> Option<Group>;
-	fn send_datagram(&mut self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error>;
-	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Error>>;
+	fn send_group(&self, priority: i64) -> Option<Group>;
+	fn send_datagram(&self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error>;
+	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>>;
 	fn max_datagram_size(&self) -> usize;
 	fn protocol(&self) -> Option<&str>;
 	fn address(&self) -> Address;
-	fn close(&mut self, code: u32, reason: &str);
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error>;
+	fn close(&self, code: u32, reason: &str);
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error>;
 	fn metrics(&self) -> Metrics;
 	fn wire(&self) -> Option<Wire>;
 	fn probe(&self) -> Option<Probe>;
 }
 
-trait ErasedGroup: MaybeSend + MaybeSync {
+trait ErasedGroup: Send + Sync {
 	fn clone_box(&self) -> Box<dyn ErasedGroup>;
 	fn set_priority(&mut self, priority: i64);
 	fn as_any(&self) -> &dyn Any;
 }
 
-trait ErasedSend: MaybeSend + MaybeSync {
-	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Error>>;
-	fn poll_write_buf(&mut self, cx: &mut Context<'_>, buf: &mut dyn Buf) -> Poll<Result<usize, Error>>;
+trait ErasedSend: Send + Sync {
+	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>>;
+	fn poll_write_buf(&mut self, waiter: &kio::Waiter, buf: &mut dyn Buf) -> Poll<Result<usize, Error>>;
 	fn set_priority(&mut self, priority: i64);
 	fn set_group(&mut self, group: &Group);
 	fn finish(&mut self) -> Result<(), Error>;
 	fn reset(&mut self, code: u32);
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>>;
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>>;
 }
 
-trait ErasedRecv: MaybeSend + MaybeSync {
-	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Lease<'_>, Error>>;
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>>;
+trait ErasedRecv: Send + Sync {
+	fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Lease<'_>, Error>>;
+	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Error>>;
 	fn set_priority(&mut self, priority: i64);
 	fn stop(&mut self, code: u32);
 }
 
-// Not `MaybeSend`: a lease may hold its transport's lock, and never outlives a poll.
+// Not `Send`: a lease may hold its transport's lock, and never outlives a poll.
 trait ErasedLease: Buf {
 	fn chunks(&self) -> Box<dyn Iterator<Item = &[u8]> + '_>;
 	fn is_fin(&self) -> bool;
@@ -257,55 +252,47 @@ fn bi<S: poll::Boxable>((send, recv): poll::BiStreams<S>) -> (SendStream, RecvSt
 }
 
 impl<S: poll::Boxable> ErasedSession for S {
-	fn clone_box(&self) -> Box<dyn ErasedSession> {
-		Box::new(self.clone())
-	}
-
-	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<RecvStream, Error>> {
-		poll::Session::poll_accept_uni(self, cx)
+	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<RecvStream, Error>> {
+		poll::Session::poll_accept_uni(self, waiter)
 			.map(|res| res.map(|recv| RecvStream(Box::new(recv))).map_err(Error::new))
 	}
 
-	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		poll::Session::poll_accept_bi(self, cx).map(|res| res.map(bi::<S>).map_err(Error::new))
+	fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(SendStream, RecvStream), Error>> {
+		poll::Session::poll_accept_bi(self, waiter).map(|res| res.map(bi::<S>).map_err(Error::new))
 	}
 
-	fn poll_open_uni(
-		&mut self,
-		cx: &mut Context<'_>,
-		options: SendOptions<'_, Group>,
-	) -> Poll<Result<SendStream, Error>> {
-		poll::Session::poll_open_uni(self, cx, unbox(options))
+	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>> {
+		poll::Session::poll_open_uni(self, waiter, unbox(options))
 			.map(|res| res.map(|send| SendStream(Box::new(send))).map_err(Error::new))
 	}
 
 	fn poll_open_bi(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		poll::Session::poll_open_bi(self, cx, unbox(options)).map(|res| res.map(bi::<S>).map_err(Error::new))
+		poll::Session::poll_open_bi(self, waiter, unbox(options)).map(|res| res.map(bi::<S>).map_err(Error::new))
 	}
 
 	fn poll_open_request(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
-		poll::Session::poll_open_request(self, cx, unbox(options))
+		poll::Session::poll_open_request(self, waiter, unbox(options))
 			.map(|res| res.map(|streams| streams.map(bi::<S>)).map_err(Error::new))
 	}
 
-	fn send_group(&mut self, priority: i64) -> Option<Group> {
+	fn send_group(&self, priority: i64) -> Option<Group> {
 		poll::Session::send_group(self, priority).map(|group| Group(Box::new(group)))
 	}
 
-	fn send_datagram(&mut self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error> {
+	fn send_datagram(&self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error> {
 		poll::Session::send_datagram(self, payload, unbox::<GroupOf<S>>(options)).map_err(Error::new)
 	}
 
-	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Error>> {
-		poll::Session::poll_recv_datagram(self, cx).map_err(Error::new)
+	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+		poll::Session::poll_recv_datagram(self, waiter).map_err(Error::new)
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -320,12 +307,12 @@ impl<S: poll::Boxable> ErasedSession for S {
 		poll::Session::address(self)
 	}
 
-	fn close(&mut self, code: u32, reason: &str) {
+	fn close(&self, code: u32, reason: &str) {
 		poll::Session::close(self, code, reason)
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
-		poll::Session::poll_closed(self, cx).map(Error::new)
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		poll::Session::poll_closed(self, waiter).map(Error::new)
 	}
 
 	fn metrics(&self) -> Metrics {
@@ -341,7 +328,7 @@ impl<S: poll::Boxable> ErasedSession for S {
 	}
 }
 
-impl<G: poll::SendGroup + MaybeSend + MaybeSync> ErasedGroup for G {
+impl<G: poll::SendGroup + Send + Sync> ErasedGroup for G {
 	fn clone_box(&self) -> Box<dyn ErasedGroup> {
 		Box::new(self.clone())
 	}
@@ -355,14 +342,14 @@ impl<G: poll::SendGroup + MaybeSend + MaybeSync> ErasedGroup for G {
 	}
 }
 
-impl<T: poll::SendStream<Group: MaybeSend + MaybeSync> + MaybeSend + MaybeSync> ErasedSend for T {
-	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Error>> {
-		poll::SendStream::poll_write(self, cx, buf).map_err(Error::new)
+impl<T: poll::SendStream<Group: Send + Sync> + Send + Sync> ErasedSend for T {
+	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
+		poll::SendStream::poll_write(self, waiter, buf).map_err(Error::new)
 	}
 
-	fn poll_write_buf(&mut self, cx: &mut Context<'_>, mut buf: &mut dyn Buf) -> Poll<Result<usize, Error>> {
+	fn poll_write_buf(&mut self, waiter: &kio::Waiter, mut buf: &mut dyn Buf) -> Poll<Result<usize, Error>> {
 		// `&mut dyn Buf` forwards `copy_to_bytes`, so a `Bytes` source stays zero-copy.
-		poll::SendStream::poll_write_buf(self, cx, &mut buf).map_err(Error::new)
+		poll::SendStream::poll_write_buf(self, waiter, &mut buf).map_err(Error::new)
 	}
 
 	fn set_priority(&mut self, priority: i64) {
@@ -386,20 +373,20 @@ impl<T: poll::SendStream<Group: MaybeSend + MaybeSync> + MaybeSend + MaybeSync> 
 		poll::SendStream::reset(self, code)
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-		poll::SendStream::poll_closed(self, cx).map_err(Error::new)
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		poll::SendStream::poll_closed(self, waiter).map_err(Error::new)
 	}
 }
 
-impl<T: poll::RecvStream + MaybeSend + MaybeSync> ErasedRecv for T {
-	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Lease<'_>, Error>> {
-		poll::RecvStream::poll_lease(self, cx, want)
+impl<T: poll::RecvStream + Send + Sync> ErasedRecv for T {
+	fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Lease<'_>, Error>> {
+		poll::RecvStream::poll_lease(self, waiter, want)
 			.map(|res| res.map(|lease| Lease(Box::new(lease))).map_err(Error::new))
 	}
 
 	// Forwarded rather than left to the provided method, so reading a chunk never boxes a lease.
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
-		poll::RecvStream::poll_read_chunk(self, cx, max).map_err(Error::new)
+	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
+		poll::RecvStream::poll_read_chunk(self, waiter, max).map_err(Error::new)
 	}
 
 	fn set_priority(&mut self, priority: i64) {
@@ -430,48 +417,44 @@ impl poll::Session for Session {
 	type RecvStream = RecvStream;
 	type Error = Error;
 
-	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<RecvStream, Error>> {
-		self.inner.poll_accept_uni(cx)
+	fn poll_accept_uni(&self, waiter: &kio::Waiter) -> Poll<Result<RecvStream, Error>> {
+		self.inner.poll_accept_uni(waiter)
 	}
 
-	fn poll_accept_bi(&mut self, cx: &mut Context<'_>) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		self.inner.poll_accept_bi(cx)
+	fn poll_accept_bi(&self, waiter: &kio::Waiter) -> Poll<Result<(SendStream, RecvStream), Error>> {
+		self.inner.poll_accept_bi(waiter)
 	}
 
-	fn poll_open_uni(
-		&mut self,
-		cx: &mut Context<'_>,
-		options: SendOptions<'_, Group>,
-	) -> Poll<Result<SendStream, Error>> {
-		self.inner.poll_open_uni(cx, options)
+	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>> {
+		self.inner.poll_open_uni(waiter, options)
 	}
 
 	fn poll_open_bi(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		self.inner.poll_open_bi(cx, options)
+		self.inner.poll_open_bi(waiter, options)
 	}
 
 	fn poll_open_request(
-		&mut self,
-		cx: &mut Context<'_>,
+		&self,
+		waiter: &kio::Waiter,
 		options: SendOptions<'_, Group>,
 	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
-		self.inner.poll_open_request(cx, options)
+		self.inner.poll_open_request(waiter, options)
 	}
 
-	fn send_group(&mut self, priority: i64) -> Option<Group> {
+	fn send_group(&self, priority: i64) -> Option<Group> {
 		self.inner.send_group(priority)
 	}
 
-	fn send_datagram(&mut self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error> {
+	fn send_datagram(&self, payload: Bytes, options: SendOptions<'_, Group>) -> Result<(), Error> {
 		self.inner.send_datagram(payload, options)
 	}
 
-	fn poll_recv_datagram(&mut self, cx: &mut Context<'_>) -> Poll<Result<Bytes, Error>> {
-		self.inner.poll_recv_datagram(cx)
+	fn poll_recv_datagram(&self, waiter: &kio::Waiter) -> Poll<Result<Bytes, Error>> {
+		self.inner.poll_recv_datagram(waiter)
 	}
 
 	fn max_datagram_size(&self) -> usize {
@@ -486,13 +469,13 @@ impl poll::Session for Session {
 		self.inner.address()
 	}
 
-	fn close(&mut self, code: u32, reason: &str) {
+	fn close(&self, code: u32, reason: &str) {
 		self.closing.sent(code, None);
 		self.inner.close(code, reason)
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
-		self.inner.poll_closed(cx)
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Error> {
+		self.inner.poll_closed(waiter)
 	}
 
 	fn metrics(&self) -> impl super::Metrics {
@@ -512,12 +495,12 @@ impl poll::SendStream for SendStream {
 	type Error = Error;
 	type Group = Group;
 
-	fn poll_write(&mut self, cx: &mut Context<'_>, buf: &[u8]) -> Poll<Result<usize, Error>> {
-		self.0.poll_write(cx, buf)
+	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Error>> {
+		self.0.poll_write(waiter, buf)
 	}
 
-	fn poll_write_buf<B: Buf>(&mut self, cx: &mut Context<'_>, buf: &mut B) -> Poll<Result<usize, Error>> {
-		self.0.poll_write_buf(cx, buf)
+	fn poll_write_buf<B: Buf>(&mut self, waiter: &kio::Waiter, buf: &mut B) -> Poll<Result<usize, Error>> {
+		self.0.poll_write_buf(waiter, buf)
 	}
 
 	fn set_priority(&mut self, priority: i64) {
@@ -536,8 +519,8 @@ impl poll::SendStream for SendStream {
 		self.0.reset(code)
 	}
 
-	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
-		self.0.poll_closed(cx)
+	fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<Result<(), Error>> {
+		self.0.poll_closed(waiter)
 	}
 }
 
@@ -545,12 +528,12 @@ impl poll::RecvStream for RecvStream {
 	type Error = Error;
 	type Lease<'a> = Lease<'a>;
 
-	fn poll_lease(&mut self, cx: &mut Context<'_>, want: usize) -> Poll<Result<Lease<'_>, Error>> {
-		self.0.poll_lease(cx, want)
+	fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Lease<'_>, Error>> {
+		self.0.poll_lease(waiter, want)
 	}
 
-	fn poll_read_chunk(&mut self, cx: &mut Context<'_>, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
-		self.0.poll_read_chunk(cx, max)
+	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
+		self.0.poll_read_chunk(waiter, max)
 	}
 
 	fn set_priority(&mut self, priority: i64) {

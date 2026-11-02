@@ -6,6 +6,7 @@ description: Answer a relay and mint its JWTs in TypeScript
 # @moq/auth
 
 [![npm](https://img.shields.io/npm/v/@moq/auth)](https://www.npmjs.com/package/@moq/auth)
+[![API](https://img.shields.io/badge/API-reference-blue)](/lib/js/api/auth)
 
 The TypeScript twin of [`moq-auth`](/lib/rs/moq-auth). `RequestSchema` and
 `GrantSchema` validate what [moq-relay](/bin/relay/auth) POSTs per session and

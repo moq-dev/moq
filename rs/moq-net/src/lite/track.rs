@@ -23,16 +23,27 @@ pub struct Track<'a> {
 	pub track: Cow<'a, str>,
 }
 
-impl Message for Track<'_> {
+impl Track<'_> {
+	/// Copy the borrowed track name, so the request outlives the bytes it came from.
+	pub fn into_owned(self) -> Track<'static> {
+		Track {
+			broadcast: self.broadcast,
+			epoch: self.epoch,
+			track: Cow::Owned(self.track.into_owned()),
+		}
+	}
+}
+
+impl<'a> Message<'a> for Track<'a> {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::TrackInfo);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
 
 		let broadcast = Path::decode(r, version)?;
 		let epoch = super::epoch::decode_epoch(r, version)?;
-		let track = Cow::Owned(r.string()?);
+		let track = Cow::Borrowed(r.str()?);
 
 		Ok(Self {
 			broadcast,
@@ -79,13 +90,12 @@ pub struct TrackInfo {
 
 impl TrackInfo {
 	/// The TRACK_INFO a publisher serves for `info` on `version`.
-	pub(crate) fn serve(info: &crate::track::Info, version: Version, ietf: bool) -> Self {
+	pub(crate) fn serve(info: &crate::track::Info, version: Version) -> Self {
 		Self {
 			refresh: info.refresh,
 			priority: info.priority,
 			max_age: info.max_age,
-			// Only an extension peer knows the original publisher may stamp arrival times.
-			timescale: info.lite_timescale(ietf),
+			timescale: info.timescale,
 			// An older peer is served the frames inflated.
 			compress: info.compress && version.has_compression(),
 		}
@@ -122,8 +132,8 @@ pub(crate) struct Framing {
 }
 
 impl Framing {
-	/// How `version` frames a track accepted as `info`. Lite05/06 stamp every frame, so a
-	/// track received untimed there still has timestamps to read past.
+	/// How `version` frames a track accepted as `info`. Lite05/06 stamp every frame, an
+	/// untimed track's with its send time in milliseconds.
 	pub fn new(info: &crate::track::Info, version: Version) -> Self {
 		Self {
 			timescale: version.wire_timescale(info.timescale),
@@ -133,9 +143,9 @@ impl Framing {
 	}
 }
 
-impl Message for TrackInfo {
+impl<'a> Message<'a> for TrackInfo {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::TrackInfo);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_track_stream() {
 			return Err(DecodeError::Version);
 		}
@@ -230,7 +240,7 @@ mod test {
 		info.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		let mut slice = buf.as_slice();
-		crate::coding::decode_buf(&mut slice, version, TrackInfo::decode_msg).unwrap()
+		crate::coding::decode_buf(&mut slice, version, |r, v| TrackInfo::decode_msg(r, v)).unwrap()
 	}
 
 	#[test]
@@ -319,7 +329,7 @@ mod test {
 	#[test]
 	fn track_info_defaults_match_cross_language_wire_bytes() {
 		// The default track is untimed, which lite-05 declares as milliseconds.
-		let info = TrackInfo::serve(&crate::track::Info::default(), Version::Lite05, false);
+		let info = TrackInfo::serve(&crate::track::Info::default(), Version::Lite05);
 		let mut buf = Vec::new();
 		info.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
@@ -394,7 +404,7 @@ mod test {
 		*buf.last_mut().unwrap() = 2;
 		let mut slice = buf.as_slice();
 		assert!(matches!(
-			crate::coding::decode_buf(&mut slice, Version::Lite07, TrackInfo::decode_msg),
+			crate::coding::decode_buf(&mut slice, Version::Lite07, |r, v| TrackInfo::decode_msg(r, v)),
 			Err(DecodeError::InvalidValue)
 		));
 	}
@@ -490,7 +500,7 @@ mod test {
 		msg.encode_msg(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
 		let mut slice = buf.as_slice();
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, Track::decode_msg).unwrap();
+		let got = crate::coding::decode_from(&mut slice, Version::Lite05, Track::decode_msg).unwrap();
 		assert_eq!(got.broadcast, Path::from_static("room"));
 		assert_eq!(got.track, "video");
 	}

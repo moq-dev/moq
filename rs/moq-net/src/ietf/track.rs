@@ -25,11 +25,21 @@ pub struct TrackStatus<'a> {
 	/// Whether the requester wants Track Properties on the answer (INCLUDE_PROPERTIES,
 	/// draft-22).
 	pub properties_wanted: bool,
-	/// The publisher instance the requester expects (MoQ Epoch).
-	pub epoch: Option<crate::Epoch>,
 }
 
-impl Message for TrackStatus<'_> {
+impl TrackStatus<'_> {
+	/// Copy the borrowed track name, so the request outlives the bytes it came from.
+	pub fn into_owned(self) -> TrackStatus<'static> {
+		TrackStatus {
+			request_id: self.request_id,
+			track_namespace: self.track_namespace,
+			track_name: Cow::Owned(self.track_name.into_owned()),
+			properties_wanted: self.properties_wanted,
+		}
+	}
+}
+
+impl<'a> Message<'a> for TrackStatus<'a> {
 	const ID: u64 = 0x0d;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -38,11 +48,9 @@ impl Message for TrackStatus<'_> {
 
 		// Only the opt-out is worth bytes, and an older peer would read the
 		// parameter as unknown, which is a protocol violation.
-		let include_properties = (!self.properties_wanted && Filter::is_draft22(version)).then_some(false);
-		let epoch = self.epoch.clone();
+		let include_properties = (!self.properties_wanted && Filter::is_draft20(version)).then_some(false);
 		encode_params!(w, version,
 			0x35 => include_properties,
-			super::epoch::EPOCH_PARAM => epoch,
 		);
 		Ok(())
 	}
@@ -50,14 +58,13 @@ impl Message for TrackStatus<'_> {
 	/// Every draft defines TRACK_STATUS as identical to SUBSCRIBE, so it decodes as one and
 	/// keeps what names the track and shapes the answer. The rest goes unread: there is no
 	/// subscription for it to configure.
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let subscribe = Subscribe::decode_msg(r, version)?;
 		Ok(Self {
 			request_id: subscribe.request_id,
 			track_namespace: subscribe.track_namespace,
 			track_name: subscribe.track_name,
 			properties_wanted: subscribe.properties_wanted,
-			epoch: subscribe.epoch,
 		})
 	}
 }
@@ -73,7 +80,7 @@ pub struct TrackStatusOk {
 	pub properties: Properties,
 }
 
-impl Message for TrackStatusOk {
+impl<'a> Message<'a> for TrackStatusOk {
 	/// REQUEST_OK.
 	const ID: u64 = 0x07;
 
@@ -88,7 +95,7 @@ impl Message for TrackStatusOk {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		// Read as SUBSCRIBE_OK's are: EXPIRES is ignored.
 		decode_params!(r, version,
 			0x08 => _expires: Option<u64>,
@@ -116,8 +123,8 @@ impl Encode<Version> for TrackStatusCode {
 	}
 }
 
-impl Decode<Version> for TrackStatusCode {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for TrackStatusCode {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		Self::try_from(r.varint()?).map_err(|_| DecodeError::InvalidValue)
 	}
 }
@@ -127,7 +134,7 @@ mod tests {
 	use super::*;
 	use crate::ietf::GroupOrder;
 
-	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+	fn encode_message<'m, M: Message<'m>>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
@@ -141,9 +148,9 @@ mod tests {
 		assert!(decode_message::<TrackStatusOk>(&[0x01, 0x22, 0x01], Version::Draft18).is_err());
 	}
 
-	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
-		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
+	fn decode_message<'m, M: Message<'m>>(bytes: &'m [u8], version: Version) -> Result<M, DecodeError> {
+		let mut buf = bytes;
+		crate::coding::decode_from(&mut buf, version, |r, v| M::decode_msg(r, v))
 	}
 
 	#[test]
@@ -153,7 +160,6 @@ mod tests {
 			track_namespace: Path::from_static("test/ns"),
 			track_name: "video".into(),
 			properties_wanted: true,
-			epoch: None,
 		};
 
 		let encoded = encode_message(&msg, Version::Draft18);
@@ -164,7 +170,7 @@ mod tests {
 		assert_eq!(decoded.track_name, "video");
 	}
 
-	const ALL: [Version; 2] = [Version::Draft18, Version::Draft22];
+	const ALL: [Version; 3] = [Version::Draft18, Version::Draft20, Version::Draft22];
 
 	/// INCLUDE_PROPERTIES only exists from draft-22, so the opt-out is dropped before it,
 	/// and the default (1) is never written.
@@ -177,11 +183,11 @@ mod tests {
 					track_namespace: Path::from_static("ns"),
 					track_name: "video".into(),
 					properties_wanted: wanted,
-					epoch: None,
 				};
-				let decoded: TrackStatus = decode_message(&encode_message(&msg, version), version)
-					.unwrap_or_else(|e| panic!("{version}: {e}"));
-				let expected = wanted || !Filter::is_draft22(version);
+				let wire = encode_message(&msg, version);
+
+				let decoded: TrackStatus = decode_message(&wire, version).unwrap_or_else(|e| panic!("{version}: {e}"));
+				let expected = wanted || !Filter::is_draft20(version);
 				assert_eq!(decoded.properties_wanted, expected, "{version} wanted={wanted}");
 			}
 		}

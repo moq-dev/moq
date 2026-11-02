@@ -1,11 +1,11 @@
 //! IETF moq-transport publish namespace messages
 
-use crate::{Epoch, Path, coding::*, ietf::RequestId};
+use super::cluster;
+use crate::{Path, coding::*, ietf::RequestId};
 
 use super::Message;
 use super::namespace::{decode_namespace, encode_namespace};
 use super::token::RequestToken;
-use super::{cluster, epoch};
 
 use super::Version;
 
@@ -15,14 +15,12 @@ use super::Version;
 pub struct Negotiated {
 	/// MoQ Cluster: every advertisement carries HOP_PATH, and may carry ROUTE_COST.
 	pub cluster: bool,
-	/// MoQ Epoch: an advertisement may carry EPOCH.
-	pub epoch: bool,
 }
 
 impl Negotiated {
 	/// Whether NAMESPACE takes the extended form, with a Parameters field.
 	pub fn extended(&self) -> bool {
-		self.cluster || self.epoch
+		self.cluster
 	}
 }
 
@@ -32,10 +30,6 @@ pub struct AdvertParams {
 	/// The MoQ Cluster parameters (see [`cluster`]). `Some` exactly on a session that
 	/// negotiated the extension.
 	pub cluster: Option<cluster::Advert>,
-
-	/// The MoQ Epoch parameter: the publisher instance the route serves, if it names one.
-	/// Only on a session that negotiated the extension.
-	pub epoch: Option<Epoch>,
 }
 
 /// PublishNamespace message (0x06)
@@ -69,11 +63,9 @@ impl PublishNamespace {
 			0x03 => authorization_token: Vec<super::token::RequestToken>,
 			cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 			cluster::ROUTE_COST => cost: Option<u64>,
-			epoch::EPOCH_PARAM => epoch: Option<Epoch> where negotiated.epoch,
 		);
 		let params = AdvertParams {
 			cluster: cluster_params(negotiated.cluster, hops, cost)?,
-			epoch,
 		};
 		// Last, so a malformed field closes the session before a token refusal.
 		let authorization_token = super::token::single(authorization_token)?;
@@ -87,7 +79,7 @@ impl PublishNamespace {
 	}
 }
 
-impl Message for PublishNamespace {
+impl<'a> Message<'a> for PublishNamespace {
 	const ID: u64 = 0x06;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -104,12 +96,11 @@ impl Message for PublishNamespace {
 			0x03 => self.authorization_token.clone(),
 			cluster::HOP_PATH => hops,
 			cluster::ROUTE_COST => cost,
-			epoch::EPOCH_PARAM => self.params.epoch.clone(),
 		);
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		Self::decode_body(r, version, Negotiated::default())
 	}
 }
@@ -172,7 +163,7 @@ impl PublishNamespaceUpdate {
 	}
 }
 
-impl Message for PublishNamespaceUpdate {
+impl<'a> Message<'a> for PublishNamespaceUpdate {
 	const ID: u64 = 0x02;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -185,7 +176,7 @@ impl Message for PublishNamespaceUpdate {
 		Ok(())
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let request_id = RequestId::decode(r, version)?;
 		decode_params!(r, version,
 			0x03 => authorization_token: Vec<super::token::RequestToken>,
@@ -218,7 +209,6 @@ pub(super) fn encode_advert_params(
 	encode_params!(w, version,
 		cluster::HOP_PATH => hops,
 		cluster::ROUTE_COST => cost,
-		epoch::EPOCH_PARAM => params.epoch.clone(),
 	);
 	Ok(())
 }
@@ -232,12 +222,10 @@ pub(super) fn decode_advert_params(
 	decode_params!(r, version,
 		cluster::HOP_PATH => hops: Option<cluster::HopPath>,
 		cluster::ROUTE_COST => cost: Option<u64>,
-		epoch::EPOCH_PARAM => epoch: Option<Epoch> where negotiated.epoch,
 	);
 
 	Ok(AdvertParams {
 		cluster: cluster_params(negotiated.cluster, hops, cost)?,
-		epoch,
 	})
 }
 
@@ -245,16 +233,16 @@ pub(super) fn decode_advert_params(
 mod tests {
 	use super::*;
 
-	fn encode_message<M: Message>(msg: &M, version: Version) -> Vec<u8> {
+	fn encode_message<'m, M: Message<'m>>(msg: &M, version: Version) -> Vec<u8> {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		buf.to_vec()
 	}
 
-	fn decode_message<M: Message>(bytes: &[u8], version: Version) -> Result<M, DecodeError> {
-		let mut buf = bytes::Bytes::from(bytes.to_vec());
-		crate::coding::decode_buf(&mut buf, version, M::decode_msg)
+	fn decode_message<'m, M: Message<'m>>(bytes: &'m [u8], version: Version) -> Result<M, DecodeError> {
+		let mut buf = bytes;
+		crate::coding::decode_from(&mut buf, version, |r, v| M::decode_msg(r, v))
 	}
 
 	#[test]
@@ -310,7 +298,7 @@ mod tests {
 		assert_eq!(msg.hops, None, "an unchanged path is omitted");
 		assert_eq!(msg.cost, Some(0), "a cost of 0 is sent explicitly");
 
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let encoded = encode_message(&msg, version);
 			let decoded: PublishNamespaceUpdate = decode_message(&encoded, version).unwrap();
 			assert_eq!(decoded, msg, "{version}");

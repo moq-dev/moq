@@ -15,23 +15,22 @@ mod jitter;
 /// Every track sends a frame a second as it decodes, for as many two-second steering steps as
 /// fill the rate window with `floors`, each step measuring every track heard.
 async fn steer(tracks: u16, floors: u64) -> u64 {
-	let start = moq_clock::now();
+	let start = kio::clock::now();
 	let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
 	buffer.expect(1..=tracks);
 	let waiter = kio::Waiter::noop();
 	for second in 0..floors * 2 {
 		let at = start + Duration::from_secs(second);
-		tokio::time::advance(at.saturating_duration_since(moq_clock::now())).await;
+		tokio::time::advance(at.saturating_duration_since(kio::clock::now())).await;
 		for track in 1..=tracks {
 			let arrival = jitter::Arrival {
 				arrived: at,
 				read: at,
 				decode: Timestamp::from_millis(second * 1_000).unwrap().into(),
 				restart: 0,
-				skip: 0,
-				cut: 0,
 				sync: true,
 				leading: false,
+				bytes: 0,
 				item: (),
 			};
 			buffer.push(track, arrival).unwrap();
@@ -77,7 +76,7 @@ fn acquisition(c: &mut Criterion) {
 			group.bench_function(BenchmarkId::new(tracks.to_string(), frames), |b| {
 				b.iter(|| {
 					runtime.block_on(async {
-						let start = moq_clock::now();
+						let start = kio::clock::now();
 						let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
 						buffer.expect(1..=tracks);
 						for track in 1..=tracks {
@@ -90,10 +89,9 @@ fn acquisition(c: &mut Criterion) {
 											read: start,
 											decode: Timestamp::from_millis(frame * 20).unwrap().into(),
 											restart: 0,
-											skip: 0,
-											cut: 0,
 											sync: frame % 15 == 0,
 											leading: false,
+											bytes: 0,
 											item: (),
 										},
 									)
@@ -125,7 +123,7 @@ fn handoff(c: &mut Criterion) {
 			group.bench_function(BenchmarkId::new(tracks.to_string(), frames), |b| {
 				b.iter(|| {
 					runtime.block_on(async {
-						let start = moq_clock::now();
+						let start = kio::clock::now();
 						let mut buffer = jitter::Buffer::new(Duration::from_millis(500));
 						buffer.expect(1..=tracks);
 						for instance in 0..2 {
@@ -148,10 +146,9 @@ fn handoff(c: &mut Criterion) {
 												.unwrap()
 												.into(),
 												restart: 0,
-												skip: 0,
-												cut: 0,
 												sync: frame % 15 == 0,
 												leading: false,
+												bytes: 0,
 												item: (),
 											},
 										)
@@ -173,5 +170,59 @@ fn handoff(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, steering, acquisition, handoff);
+/// Admission reads one time window, independent of the backlog still held by each source.
+fn admission(c: &mut Criterion) {
+	let runtime = tokio::runtime::Builder::new_current_thread()
+		.enable_time()
+		.start_paused(true)
+		.build()
+		.unwrap();
+	let mut group = c.benchmark_group("jitter_admission");
+	group.measurement_time(Duration::from_secs(1));
+	group.warm_up_time(Duration::from_millis(200));
+	group.sample_size(10);
+	for tracks in [1u16, 4, 16, 64] {
+		for backlog in [64u64, 256, 1_024] {
+			group.bench_function(BenchmarkId::new(tracks.to_string(), backlog), |b| {
+				b.iter(|| {
+					runtime.block_on(async {
+						let start = kio::clock::now();
+						let delay = Duration::from_millis(500);
+						let mut buffer = jitter::Buffer::new(delay);
+						buffer.expect(1..=tracks);
+						let frame = |decode| jitter::Arrival {
+							arrived: start,
+							read: kio::clock::now(),
+							decode: Timestamp::from_millis(decode).unwrap().into(),
+							restart: 0,
+							sync: true,
+							leading: false,
+							bytes: 0,
+							item: (),
+						};
+						for track in 1..=tracks {
+							buffer.push(track, frame(0)).unwrap();
+						}
+						tokio::time::advance(delay).await;
+						while buffer.poll_next(&kio::Waiter::noop()).is_ready() {}
+						let mut read = 0;
+						for track in 1..=tracks {
+							for next in 1..=backlog {
+								if buffer.full(&track, &kio::Waiter::noop()) {
+									break;
+								}
+								buffer.push(track, frame(next * 20)).unwrap();
+								read += 1;
+							}
+						}
+						std::hint::black_box(read)
+					})
+				});
+			});
+		}
+	}
+	group.finish();
+}
+
+criterion_group!(benches, steering, acquisition, handoff, admission);
 criterion_main!(benches);

@@ -38,14 +38,23 @@ pub fn into_setup(params: &mut super::Parameters) {
 }
 
 /// AUTH: the first message on an Auth request stream, presenting a token.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Auth {
 	pub request_id: RequestId,
 	/// Empty presents the credential the connection already carried.
 	pub token: Bytes,
 }
 
-impl Message for Auth {
+impl std::fmt::Debug for Auth {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("Auth")
+			.field("request_id", &self.request_id)
+			.field("token_len", &self.token.len())
+			.finish()
+	}
+}
+
+impl<'a> Message<'a> for Auth {
 	const ID: u64 = 0x40B61;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -53,7 +62,7 @@ impl Message for Auth {
 		w.bytes(&self.token)
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		Ok(Self {
 			request_id: RequestId::decode(r, version)?,
 			token: Bytes::copy_from_slice(r.bytes()?),
@@ -75,7 +84,7 @@ pub struct AuthOk {
 /// Largest millisecond count every implementation carries losslessly.
 const MAX_EXPIRES_MS: u64 = (1 << 53) - 1;
 
-impl Message for AuthOk {
+impl<'a> Message<'a> for AuthOk {
 	const ID: u64 = 0x40B62;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
@@ -90,7 +99,7 @@ impl Message for AuthOk {
 		w.varint(expires)
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let publish = Patterns::decode(r, version)?;
 		let subscribe = Patterns::decode(r, version)?;
 		let expires = match r.varint()? {
@@ -118,7 +127,7 @@ pub struct AuthError {
 /// length prefix alone.
 const MAX_REASON: usize = 8192;
 
-impl Message for AuthError {
+impl<'a> Message<'a> for AuthError {
 	const ID: u64 = 0x40B63;
 
 	fn encode_msg(&self, w: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
@@ -129,7 +138,7 @@ impl Message for AuthError {
 		w.string(&self.reason)
 	}
 
-	fn decode_msg(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		let code = r.varint()?;
 		if code > u32::MAX as u64 {
 			return Err(DecodeError::InvalidValue);
@@ -180,10 +189,8 @@ pub(super) async fn refuse_going_away(mut stream: Stream<Transport, Version>) ->
 		code: GOING_AWAY,
 		reason: "going away".to_string(),
 	};
-	stream.writer.encode_message(&reply).await?;
-	// A peer dropping the response after reading the refusal is a normal end.
-	let _ = stream.writer.close().await;
-	Ok(())
+	stream.writer.buffer_message(AuthError::ID, &reply)?;
+	super::request_stream::deliver(&mut stream.writer).await
 }
 
 /// What the peer's connection credential earns by default: publishing what our
@@ -330,6 +337,7 @@ impl Present {
 		}
 
 		let mut messages = super::request_stream::Messages::new(self.session.clone(), self.control.client());
+		let mut budget = kio::coop::Budget::new(32);
 		loop {
 			enum Next {
 				Withdrawn,
@@ -380,6 +388,9 @@ impl Present {
 							expires,
 						},
 					);
+					// Each grant recomputes the session's permits, so a peer streaming them
+					// must not hold the session's other tasks.
+					kio::wait(|waiter| budget.poll_yield(waiter)).await;
 				}
 				AuthError::ID => {
 					let refused: AuthError = match decode_reply(&body, self.version) {
@@ -403,7 +414,7 @@ impl Present {
 }
 
 /// Decode a reply that must fill its whole body, as every framed message does.
-fn decode_reply<T: Message>(body: &super::Body, version: Version) -> Result<T, Error> {
+fn decode_reply<'m, T: Message<'m>>(body: &'m super::Body, version: Version) -> Result<T, Error> {
 	let mut data = body.decoder(version);
 	let msg = T::decode_msg(&mut data, version)?;
 	if !data.is_empty() {
@@ -497,7 +508,7 @@ impl Serve {
 struct Unexpected;
 
 #[cfg(feature = "async")]
-impl crate::coding::Decode<Version> for Unexpected {
+impl<'a> crate::coding::Decode<'a, Version> for Unexpected {
 	fn decode(r: &mut crate::coding::Decoder<'_>, _: Version) -> Result<Self, crate::coding::DecodeError> {
 		Err(crate::coding::DecodeError::InvalidMessage(r.varint()?))
 	}
@@ -521,9 +532,8 @@ async fn serve_issue(
 
 	loop {
 		let next = kio::wait(|waiter| {
-			let mut cx = std::task::Context::from_waker(waiter.waker());
 			if let Poll::Ready(res) = goaways
-				.poll_next::<Unexpected, _>(&mut stream.reader, &mut cx)
+				.poll_next::<Unexpected, _>(&mut stream.reader, waiter)
 				.map(|res| res.map(|_| ()))
 			{
 				return Poll::Ready(Next::Withdrawn(res));
@@ -595,7 +605,7 @@ mod tests {
 	use crate::Pattern;
 
 	#[cfg(feature = "async")]
-	#[moq_clock::test]
+	#[kio::test]
 	async fn auth_refused_without_credit_spends_no_request_id() {
 		for version in [Version::Draft18] {
 			for client in [false, true] {
@@ -627,13 +637,13 @@ mod tests {
 		texts.iter().map(|text| Pattern::try_from(*text).unwrap()).collect()
 	}
 
-	fn encode_msg<T: Message>(msg: &T, version: Version) -> Result<Vec<u8>, EncodeError> {
+	fn encode_msg<'m, T: Message<'m>>(msg: &T, version: Version) -> Result<Vec<u8>, EncodeError> {
 		let mut buf = Vec::new();
 		msg.encode_msg(&mut Encoder::new(&mut buf, version.into()), version)?;
 		Ok(buf)
 	}
 
-	fn round_trip<T: Message + PartialEq>(msg: &T) -> T {
+	fn round_trip<T: for<'m> Message<'m> + PartialEq>(msg: &T) -> T {
 		let buf = encode_msg(msg, VERSION).unwrap();
 		let mut r = Decoder::new(&buf, VERSION.into());
 		let got = T::decode_msg(&mut r, VERSION).unwrap();
@@ -644,7 +654,7 @@ mod tests {
 	/// Every draft that negotiates the extension round-trips the option.
 	#[test]
 	fn setup_option_round_trips_on_supported_drafts() {
-		for version in [Version::Draft18, Version::Draft22] {
+		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {
 			let mut params = super::super::Parameters::default();
 			assert_eq!(from_setup(&params), None);
 			into_setup(&mut params);

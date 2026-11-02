@@ -1,11 +1,11 @@
-# [XS] moq-transport 18 and 22 only
+# [XS] moq-transport 18, 20, and 22 only
 
 ## Goal
 
-`moq-net` and `@moq/net` speak moq-transport drafts 18 and 22 and no
-others. Drafts 14 to 17 and 19 to 21 are deleted from the wire code, tests,
+`moq-net` and `@moq/net` speak moq-transport drafts 18, 20, and 22 and no
+others. Drafts 14 to 17, 19, and 21 are deleted from the wire code, tests,
 fuzzing, interop lanes, and docs, and our `moq-dev-rs` and `moq-dev-js`
-entries in the interop runner registry declare only 18 and 22.
+entries in the interop runner registry declare only 18, 20, and 22.
 
 Out of scope: moq-lite versions. moq-lite-01/02 still negotiate over
 `moql` with the CLIENT_SETUP/SERVER_SETUP codec, which stays.
@@ -57,18 +57,30 @@ the other breaks before the cut. Drafts 14 to 17
 ([moq-dev/moq#6753](https://github.com/moq-dev/moq/pull/6753)) and 19 to 21
 ([moq-dev/moq#6754](https://github.com/moq-dev/moq/pull/6754)) are gone.
 
-The registry change is open as
-[englishm/moq-interop-runner#178](https://github.com/englishm/moq-interop-runner/pull/178),
-narrowing the `moq-dev-rs` and `moq-dev-js` entries in `implementations.json`
-to drafts 18 and 22 and updating their stale notes. The maintainer approved
-posting there on 2026-10-24. Schema validation and the registry's dry-run
-matrix checks pass; no image or endpoint was changed.
+Decided 2026-10-28 (maintainer): draft 20 came back
+([moq-dev/moq#7190](https://github.com/moq-dev/moq/pull/7190)), so the public
+relay dashboard lists more than two moq-transport drafts. It costs only
+draft-20's field-count LOCATION_FILTER codec and its SUBSCRIBE_TRACKS
+parameters; every other gate is shared with draft 22, whose changes since 20
+are editorial (draft-22 appendix A.1 and A.2). Drafts 19 and 21 stay dropped:
+19 splits most gates between 18 and 22, and 21 differs from 20 only by its
+ALPN.
 
-Remaining condition: that PR merges and the runner's default registry names
-only drafts 18 and 22 for both entries. Check its state and the default
-branch's `implementations.json`, then delete this quest. The maintainer
-requested PR production without merges on 2026-10-27, so the external PR
-stays open and this quest remains.
+[englishm/moq-interop-runner#178](https://github.com/englishm/moq-interop-runner/pull/178)
+merged on 2026-10-28, before draft 20 returned on 2026-10-31. On 2026-11-02
+the runner's default `implementations.json` declares only drafts 18 and 22
+for `moq-dev-rs` and `moq-dev-js`, and both notes call those the versions
+main retains.
+
+This README's remaining work waits on a release that carries draft 20. None
+did on 2026-11-02: the newest were `moq-tokio` 0.19.31, `@moq/net` 0.4.7,
+and `moq-relay` v0.17.10, all published before 2026-10-31. The
+runner's clients pin `moq-tokio` 0.19.28 (`builds/moq-dev-rs/Cargo.toml`)
+and `@moq/net` 0.4.7 (`builds/moq-dev-js/package.json`), and its relay
+adapter wraps `docker.io/moqdev/moq-relay`. Once later versions are
+published, open a PR on `englishm/moq-interop-runner` that bumps both client
+pins and their lockfiles, adds `draft-20` to both entries, and refreshes
+their notes. The maintainer approved posting there on 2026-10-24.
 
 ## Related
 

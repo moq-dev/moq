@@ -152,8 +152,8 @@ export interface Permissions {
  * Throws when the two don't overlap, and when they do but every pattern falls outside
  * `path`.
  *
- * This is authorization only. Verify the signature first with {@link verify}, which is
- * where expiry is enforced.
+ * This is authorization only. Verify the signature first with {@link Key.verify} or
+ * {@link KeySet.verify}, which is where expiry is enforced.
  *
  * @public
  */

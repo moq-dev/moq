@@ -22,7 +22,7 @@ pub(super) fn decode_size(r: &mut Decoder<'_>, max: usize) -> Result<usize, Deco
 /// A trait for lite messages that are automatically size-prefixed during encoding/decoding.
 ///
 /// Lite messages use a varint size prefix.
-pub trait Message: Sized + std::fmt::Debug {
+pub trait Message<'a>: Sized + std::fmt::Debug {
 	/// The control metric class, or none for media headers.
 	const CONTROL: Option<crate::stats::Message> = None;
 	/// The largest body this receiver accepts for this message.
@@ -32,10 +32,10 @@ pub trait Message: Sized + std::fmt::Debug {
 	fn encode_msg(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError>;
 
 	/// Decode a message body (without size prefix).
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError>;
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError>;
 }
 
-impl<T: Message> Encode<Version> for T {
+impl<'a, T: Message<'a>> Encode<Version> for T {
 	fn encode(&self, w: &mut Encoder<'_>, version: Version) -> Result<(), EncodeError> {
 		tracing::trace!(?self, "encoding");
 		let prefix = w.prefix_varint();
@@ -51,17 +51,17 @@ impl<T: Message> Encode<Version> for T {
 	}
 }
 
-impl<T: Message> Decode<Version> for T {
-	fn decode(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a, T: Message<'a>> Decode<'a, Version> for T {
+	fn decode(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		decode_with(r, |body| T::decode_msg(body, version))
 	}
 }
 
 /// Decode a size-prefixed `T`, reading its body with `decode` in place of
 /// [`Message::decode_msg`], for a body whose bounds come from the session.
-pub(super) fn decode_with<T: Message>(
-	r: &mut Decoder<'_>,
-	decode: impl FnOnce(&mut Decoder<'_>) -> Result<T, DecodeError>,
+pub(super) fn decode_with<'a, T: Message<'a>>(
+	r: &mut Decoder<'a>,
+	decode: impl FnOnce(&mut Decoder<'a>) -> Result<T, DecodeError>,
 ) -> Result<T, DecodeError> {
 	let size = decode_size(r, T::MAX_SIZE)?;
 	let mut body = r.sub(size)?;
@@ -91,7 +91,7 @@ mod tests {
 	#[derive(Debug)]
 	struct Empty;
 
-	impl Message for Empty {
+	impl Message<'_> for Empty {
 		fn encode_msg(&self, _: &mut Encoder<'_>, _: Version) -> Result<(), EncodeError> {
 			Ok(())
 		}

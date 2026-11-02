@@ -16,6 +16,8 @@ const ANNOUNCE_UPDATE: u64 = 2;
 // lite-07: another publisher instance replaces the advertisement.
 const ANNOUNCE_RESTART: u64 = 3;
 const SYNCED: u64 = 4;
+// lite-07: a new advertisement continues what a live one served beneath its prefix.
+const ANNOUNCE_TAKEOVER: u64 = 5;
 
 /// Whether the negotiated version can update a live advertisement's metadata. On lite-05 an
 /// update travels as a duplicate ANNOUNCE (a second `active` for an already-announced path); on
@@ -33,9 +35,10 @@ pub fn update_supported(version: Version) -> bool {
 /// An announcement on the Announce Stream, advertising or retracting a broadcast.
 ///
 /// On lite-06+ these are independently-typed messages (`ANNOUNCE_START`,
-/// `ANNOUNCE_END`, `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART`), each
+/// `ANNOUNCE_END`, `ANNOUNCE_UPDATE`, and on lite-07 `ANNOUNCE_RESTART` and
+/// `ANNOUNCE_TAKEOVER`), each
 /// framed as `Type | Length | Body` like the subscribe stream's responses. Each
-/// `Active` (ANNOUNCE_START) implicitly assigns the next announce id (a
+/// `Active` (ANNOUNCE_START) or `Takeover` implicitly assigns the next announce id (a
 /// per-stream ordinal starting at 0); the others reference that id instead of
 /// repeating the path. Older versions send a single `ANNOUNCE_BROADCAST`
 /// message that retracts by path (`Ended`).
@@ -69,6 +72,16 @@ pub enum AnnounceBroadcast {
 	/// under its prefix is the old instance. The id stays live.
 	Restart {
 		id: u64,
+		epoch: Option<Epoch>,
+		hops: HopsRef,
+		cost: Cost,
+	},
+	/// ANNOUNCE_TAKEOVER (lite-07+): an `Active` that continues what the live
+	/// announcement `predecessor` served beneath this one's path. It assigns the next
+	/// announce id; one at the predecessor's own path retires the predecessor.
+	Takeover {
+		predecessor: u64,
+		suffix: PathRef,
 		epoch: Option<Epoch>,
 		hops: HopsRef,
 		cost: Cost,
@@ -112,8 +125,8 @@ impl Encode<Version> for PathRef {
 	}
 }
 
-impl Decode<Version> for PathRef {
-	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for PathRef {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_announce_compression() {
 			return Ok(Self::literal(Path::decode(buf, version)?));
 		}
@@ -164,8 +177,8 @@ impl Encode<Version> for HopsRef {
 	}
 }
 
-impl Decode<Version> for HopsRef {
-	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for HopsRef {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_announce_compression() {
 			return Ok(Self::literal(Hops::decode(buf, version)?));
 		}
@@ -193,8 +206,8 @@ impl Encode<Version> for Cost {
 	}
 }
 
-impl Decode<Version> for Cost {
-	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for Cost {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_route_cost() {
 			return Ok(Cost::UNKNOWN);
 		}
@@ -224,6 +237,9 @@ impl Encode<Version> for AnnounceBroadcast {
 				Self::Restart { .. } if version.has_announce_restart() => ANNOUNCE_RESTART,
 				// Older versions send an end and a start instead.
 				Self::Restart { .. } => return Err(EncodeError::Version),
+				Self::Takeover { .. } if version.has_announce_takeover() => ANNOUNCE_TAKEOVER,
+				// Older versions send a start instead.
+				Self::Takeover { .. } => return Err(EncodeError::Version),
 				// The pre-lite-06 path-form retraction has no place on lite-06.
 				Self::Ended { .. } => return Err(EncodeError::Version),
 				// Decode-only: an unknown type is never sent.
@@ -252,6 +268,19 @@ impl Encode<Version> for AnnounceBroadcast {
 				}
 				Self::Restart { id, epoch, hops, cost } => {
 					w.varint(*id)?;
+					super::epoch::encode_epoch(w, version, epoch.as_ref())?;
+					hops.encode(w, version)?;
+					cost.encode(w, version)?;
+				}
+				Self::Takeover {
+					predecessor,
+					suffix,
+					epoch,
+					hops,
+					cost,
+				} => {
+					w.varint(*predecessor)?;
+					suffix.encode(w, version)?;
 					super::epoch::encode_epoch(w, version, epoch.as_ref())?;
 					hops.encode(w, version)?;
 					cost.encode(w, version)?;
@@ -286,7 +315,12 @@ impl Encode<Version> for AnnounceBroadcast {
 				encode_hops(w, version, hops)?;
 			}
 			// The id-referencing forms only exist on lite-06+.
-			Self::EndedId { .. } | Self::Update { .. } | Self::Restart { .. } | Self::Skipped | Self::Synced => {
+			Self::EndedId { .. }
+			| Self::Update { .. }
+			| Self::Restart { .. }
+			| Self::Takeover { .. }
+			| Self::Skipped
+			| Self::Synced => {
 				return Err(EncodeError::Version);
 			}
 		}
@@ -298,8 +332,8 @@ impl Encode<Version> for AnnounceBroadcast {
 	}
 }
 
-impl Decode<Version> for AnnounceBroadcast {
-	fn decode(buf: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for AnnounceBroadcast {
+	fn decode(buf: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		buf.control = Some(crate::stats::Message::Announce);
 		if version.has_announce_id() {
 			// Lite06+: outer type, then a size-prefixed body decoded within its bounds.
@@ -323,6 +357,13 @@ impl Decode<Version> for AnnounceBroadcast {
 					},
 					ANNOUNCE_RESTART if version.has_announce_restart() => Self::Restart {
 						id: body.varint()?,
+						epoch: super::epoch::decode_epoch(&mut body, version)?,
+						hops: HopsRef::decode(&mut body, version)?,
+						cost: Cost::decode(&mut body, version)?,
+					},
+					ANNOUNCE_TAKEOVER if version.has_announce_takeover() => Self::Takeover {
+						predecessor: body.varint()?,
+						suffix: PathRef::decode(&mut body, version)?,
 						epoch: super::epoch::decode_epoch(&mut body, version)?,
 						hops: HopsRef::decode(&mut body, version)?,
 						cost: Cost::decode(&mut body, version)?,
@@ -426,9 +467,9 @@ pub struct AnnounceRequest {
 	pub hidden: bool,
 }
 
-impl Message for AnnounceRequest {
+impl<'a> Message<'a> for AnnounceRequest {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Announce);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		let prefix = Path::decode(r, version)?;
 		let exclude_hop = match version.has_exclude_hop() {
 			true => Hop::decode(r, version)?,
@@ -470,8 +511,8 @@ enum AnnounceStatus {
 	Update = 2,
 }
 
-impl Decode<Version> for AnnounceStatus {
-	fn decode(r: &mut Decoder<'_>, _: Version) -> Result<Self, DecodeError> {
+impl<'a> Decode<'a, Version> for AnnounceStatus {
+	fn decode(r: &mut Decoder<'a>, _: Version) -> Result<Self, DecodeError> {
 		r.control = Some(crate::stats::Message::Announce);
 		let status = r.u8()?;
 		status.try_into().map_err(|_| DecodeError::InvalidValue)
@@ -528,12 +569,12 @@ impl AnnounceInit {
 	}
 }
 
-impl Message for AnnounceInit {
+impl<'a> Message<'a> for AnnounceInit {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Announce);
 	// Published lite01/02 carry the whole initial set in one message.
 	const MAX_SIZE: usize = 64 * 1024 * 1024;
 
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		Self::decode_suffixes(r, version, usize::MAX)
 	}
 
@@ -567,9 +608,9 @@ pub struct AnnounceOk {
 	pub active: u64,
 }
 
-impl Message for AnnounceOk {
+impl<'a> Message<'a> for AnnounceOk {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Announce);
-	fn decode_msg(r: &mut Decoder<'_>, version: Version) -> Result<Self, DecodeError> {
+	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		if !version.has_announce_ok() {
 			return Err(DecodeError::Version);
 		}
@@ -685,7 +726,7 @@ mod tests {
 	fn decodes_explicit_restart_status_as_active_on_lite05() {
 		let version = Version::Lite05;
 		let mut slice = encode_forged_restart(version);
-		let decoded = crate::coding::decode_buf(&mut slice, version, AnnounceBroadcast::decode)
+		let decoded = crate::coding::decode_buf(&mut slice, version, |r, v| AnnounceBroadcast::decode(r, v))
 			.expect("explicit restart must decode");
 		assert!(!slice.has_remaining(), "trailing bytes after decode");
 		assert!(
@@ -701,7 +742,7 @@ mod tests {
 		let mut slice = encode_forged_restart(version);
 		assert!(
 			matches!(
-				crate::coding::decode_buf(&mut slice, version, AnnounceBroadcast::decode),
+				crate::coding::decode_buf(&mut slice, version, |r, v| AnnounceBroadcast::decode(r, v)),
 				Err(DecodeError::InvalidValue)
 			),
 			"restart status must be rejected before lite-05"
@@ -713,7 +754,7 @@ mod tests {
 		msg.encode(&mut Encoder::new(&mut buf, Version::Lite05.into()), Version::Lite05)
 			.unwrap();
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, AnnounceOk::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| AnnounceOk::decode(r, v)).unwrap();
 		assert!(slice.is_empty(), "trailing bytes after decode");
 		got
 	}
@@ -741,7 +782,7 @@ mod tests {
 		msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, version, AnnounceBroadcast::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, version, |r, v| AnnounceBroadcast::decode(r, v)).unwrap();
 		assert!(slice.is_empty(), "trailing bytes after decode");
 		got
 	}
@@ -829,7 +870,7 @@ mod tests {
 		for epoch in [None, Some(Epoch::mint())] {
 			let restart = AnnounceBroadcast::Restart {
 				id: 3,
-				epoch,
+				epoch: epoch.clone(),
 				hops: HopsRef {
 					base: 4,
 					literal: hops.clone(),
@@ -838,7 +879,43 @@ mod tests {
 				cost,
 			};
 			assert_eq!(broadcast_round_trip(&restart, Version::Lite07), restart);
+
+			let takeover = AnnounceBroadcast::Takeover {
+				predecessor: 2,
+				suffix: PathRef {
+					base: 1,
+					keep: 1,
+					rest: Path::from_static("p"),
+				},
+				epoch,
+				hops: HopsRef {
+					base: 1,
+					literal: hops.clone(),
+					keep: 1,
+				},
+				cost,
+			};
+			assert_eq!(broadcast_round_trip(&takeover, Version::Lite07), takeover);
 		}
+	}
+
+	// Only lite-07 carries ANNOUNCE_TAKEOVER: older versions send a start instead.
+	#[test]
+	fn announce_takeover_needs_lite07() {
+		let takeover = AnnounceBroadcast::Takeover {
+			predecessor: 0,
+			suffix: PathRef::literal(Path::from_static("p")),
+			epoch: Some(Epoch::mint()),
+			hops: HopsRef::default(),
+			cost: Cost::default(),
+		};
+		assert!(matches!(
+			takeover.encode(
+				&mut Encoder::new(&mut Vec::new(), Version::Lite06.into()),
+				Version::Lite06
+			),
+			Err(EncodeError::Version)
+		));
 	}
 
 	// Only lite-07 carries ANNOUNCE_RESTART: older versions send an end and a start, and an
@@ -868,7 +945,10 @@ mod tests {
 		encoder.varint(1).unwrap();
 		encoder.varint(1).unwrap();
 		assert_eq!(
-			crate::coding::decode_buf(&mut &legacy[..], Version::Lite06, AnnounceBroadcast::decode).unwrap(),
+			crate::coding::decode_buf(&mut &legacy[..], Version::Lite06, |r, v| AnnounceBroadcast::decode(
+				r, v
+			))
+			.unwrap(),
 			AnnounceBroadcast::Skipped
 		);
 	}
@@ -882,7 +962,7 @@ mod tests {
 			let mut buf = vec![ANNOUNCE_START as u8, body.len() as u8];
 			buf.extend_from_slice(&body);
 			assert!(matches!(
-				crate::coding::decode_buf(&mut &buf[..], Version::Lite07, AnnounceBroadcast::decode),
+				crate::coding::decode_buf(&mut &buf[..], Version::Lite07, |r, v| AnnounceBroadcast::decode(r, v)),
 				Err(DecodeError::InvalidValue)
 			));
 		}
@@ -996,7 +1076,7 @@ mod tests {
 		buf.extend_from_slice(&body);
 
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite06, AnnounceBroadcast::decode)
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite06, |r, v| AnnounceBroadcast::decode(r, v))
 			.expect("unknown type must not kill the stream");
 		assert!(slice.is_empty());
 		assert_eq!(got, AnnounceBroadcast::Skipped);
@@ -1017,7 +1097,7 @@ mod tests {
 		msg.encode(&mut Encoder::new(&mut buf, version.into()), version)
 			.unwrap();
 		let mut slice = &buf[..];
-		let got = crate::coding::decode_buf(&mut slice, version, AnnounceRequest::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, version, |r, v| AnnounceRequest::decode(r, v)).unwrap();
 		assert!(slice.is_empty(), "trailing bytes after decode");
 		AnnounceRequest {
 			prefix: got.prefix.clone(),
@@ -1053,7 +1133,9 @@ mod tests {
 			.varint(body.len() as u64)
 			.unwrap();
 		buf.extend_from_slice(&body);
-		assert!(crate::coding::decode_buf(&mut &buf[..], Version::Lite07, AnnounceRequest::decode).is_err());
+		assert!(
+			crate::coding::decode_buf(&mut &buf[..], Version::Lite07, |r, v| AnnounceRequest::decode(r, v)).is_err()
+		);
 	}
 
 	// Lite04/05 carry the subscriber's origin id so the publisher can skip reflected
@@ -1121,7 +1203,7 @@ mod tests {
 		// size(1 byte) | origin varint(1 byte = 0x01) | active varint(1 byte)
 		patched[1] = 0x00;
 		let mut slice = &patched[..];
-		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, AnnounceOk::decode).unwrap();
+		let got = crate::coding::decode_buf(&mut slice, Version::Lite05, |r, v| AnnounceOk::decode(r, v)).unwrap();
 		assert_eq!(got.origin.id(), 0);
 		assert_eq!(got.active, 0);
 	}

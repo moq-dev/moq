@@ -17,6 +17,7 @@ categories = ["network-programming"]
 fast-apple-datapath = []
 
 [dependencies]
+arc-swap = "1.9"
 core_affinity = "0.8"
 libc = { workspace = true }
 socket2 = { version = "0.6", features = ["all"] }
@@ -30,8 +31,16 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 cfg_aliases = "0.2"
 
 [dev-dependencies]
+criterion = { package = "bench-harness", path = "../bench-harness" }
 rand = "0.10"
 tracing-test = "0.2"
+
+[target.'cfg(target_vendor = "apple")'.dev-dependencies]
+nix = { workspace = true }
+
+[[bench]]
+name = "demux"
+harness = false
 
 [lints]
 workspace = true

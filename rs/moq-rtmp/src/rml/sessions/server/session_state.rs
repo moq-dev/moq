@@ -2,4 +2,5 @@
 pub enum SessionState {
 	Started,
 	Connected,
+	Completed,
 }

@@ -59,7 +59,7 @@ pub trait Sealed: Sized {
 
 	/// The QUIC connection under the request, to widen a peer's limits before SETUP OK.
 	#[cfg(feature = "quic")]
-	fn quic(&self) -> Option<&moq_tokio::quic::driver::Connection> {
+	fn quic(&self) -> Option<&moq_tokio::quic::driver::connection::Connection> {
 		None
 	}
 
@@ -103,7 +103,7 @@ impl Sealed for moq_tokio::server::Request {
 	}
 
 	#[cfg(feature = "quic")]
-	fn quic(&self) -> Option<&moq_tokio::quic::driver::Connection> {
+	fn quic(&self) -> Option<&moq_tokio::quic::driver::connection::Connection> {
 		moq_tokio::server::Request::quic(self)
 	}
 

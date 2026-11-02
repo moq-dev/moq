@@ -67,9 +67,17 @@ pub struct Export<S: Stream> {
 	max_delay: Duration,
 	fragment_duration: Option<Duration>,
 
-	/// Every track by rendition name. Before the init a rendition that leaves the catalog
-	/// is dropped; after it, the track stays so a returning rendition reuses its id.
+	/// The tracks being read, by rendition name. Before the init a rendition that leaves the
+	/// catalog is dropped; after it, the track moves to `departed` once written out.
 	tracks: HashMap<String, Fmp4Track>,
+
+	/// Renditions that left the catalog after the init, kept out of the polled set so one
+	/// returning reuses its track. A late rendition that wrote nothing is dropped instead,
+	/// so a publisher cycling names holds only what it recorded.
+	departed: HashMap<String, Fmp4Track>,
+
+	/// The first track id the init segment does not declare.
+	first_late_id: u32,
 
 	/// Fragments cut before the init segment, written right after it in the order they
 	/// were cut.
@@ -77,6 +85,10 @@ pub struct Export<S: Stream> {
 
 	/// Set after the init segment has been emitted, which fixes the track set.
 	init_emitted: bool,
+
+	/// Keep a rendition that joins after the init segment instead of failing, for a writer
+	/// that declares it elsewhere. Its fragments carry a track id the init never declared.
+	late: bool,
 
 	/// The `tkhd.track_id` the next new rendition gets.
 	next_track_id: u32,
@@ -481,8 +493,11 @@ impl<S: Stream> Export<S> {
 			max_delay: Duration::ZERO,
 			fragment_duration: None,
 			tracks: HashMap::new(),
+			departed: HashMap::new(),
+			first_late_id: u32::MAX,
 			queued: VecDeque::new(),
 			init_emitted: false,
+			late: false,
 			next_track_id: 1,
 			sequence_number: 1,
 		}
@@ -514,6 +529,28 @@ impl<S: Stream> Export<S> {
 	pub fn with_fragment_duration(mut self, duration: impl Into<Option<Duration>>) -> Self {
 		self.fragment_duration = duration.into();
 		self
+	}
+
+	/// Keep renditions that join after the init segment, whose fragments then carry track
+	/// ids the init does not declare. See [`declaration`](Self::declaration).
+	pub(crate) fn with_late_tracks(mut self) -> Self {
+		self.late = true;
+		self
+	}
+
+	/// The `trak` and `trex` declaring `track_id`, once the track could be described.
+	pub(crate) fn declaration(&self, track_id: u32) -> Option<(&mp4_atom::Trak, &mp4_atom::Trex)> {
+		self.declarations()
+			.find(|(id, _, _)| *id == track_id)
+			.map(|(_, trak, trex)| (trak, trex))
+	}
+
+	/// Every track id with its `trak` and `trex`, the tracks being read first.
+	pub(crate) fn declarations(&self) -> impl Iterator<Item = (u32, &mp4_atom::Trak, &mp4_atom::Trex)> {
+		self.tracks.values().chain(self.departed.values()).filter_map(|track| {
+			let declaration = track.declaration.as_ref()?;
+			Some((track.track_id, &declaration.trak, &declaration.trex))
+		})
 	}
 
 	/// Get the next byte chunk.
@@ -626,6 +663,7 @@ impl<S: Stream> Export<S> {
 				if self.init_ready() {
 					let init = self.build_init()?;
 					self.init_emitted = true;
+					self.first_late_id = self.next_track_id;
 					return Poll::Ready(Ok(Some(Chunk::Init(init))));
 				}
 				if self.catalog.is_none() && self.tracks.values().all(|t| t.finished) {
@@ -827,6 +865,11 @@ impl<S: Stream> Export<S> {
 			if active.contains(&name) {
 				continue;
 			}
+			if !self.tracks.contains_key(&name)
+				&& let Some(track) = self.departed.remove(&name)
+			{
+				self.tracks.insert(name.clone(), track);
+			}
 			let moved = self
 				.tracks
 				.get(&name)
@@ -864,7 +907,7 @@ impl<S: Stream> Export<S> {
 					let Some(source) = config.subscribe(&self.source, &name, self.max_delay)? else {
 						continue;
 					};
-					if self.init_emitted {
+					if self.init_emitted && !self.late {
 						return Err(Error::TrackAdded(name).into());
 					}
 					let mut track = Fmp4Track::new(source, config, self.next_track_id)?;
@@ -886,6 +929,15 @@ impl<S: Stream> Export<S> {
 					track.resume = Some(source.resume());
 					track.finished = true;
 					track.described = false;
+				}
+			}
+			// A departed track still holding media waits for the next catalog to move.
+			let drained = self
+				.tracks
+				.extract_if(|_, track| track.source.is_none() && track.pending.is_none() && track.buffer.is_empty());
+			for (name, track) in drained {
+				if track.written.is_some() || track.track_id < self.first_late_id {
+					self.departed.insert(name, track);
 				}
 			}
 		} else {
@@ -947,10 +999,9 @@ pub(crate) fn extract_init(
 			mp4_atom::Any::Moov(moov) => {
 				for mut trak in moov.trak {
 					trak.tkhd.track_id = track_id;
-					// Drop the source edit list. CMAF carries timing via tfdt +
-					// composition offsets, so an edit list is redundant here, and a
-					// browser applying an empty-edit media_time would shift the track
-					// off the others (a black screen in Media Source Extensions).
+					// Import already applied the source edit to Hang timestamps. Drop
+					// it here; encode_init restores only Opus priming's inverse mapping
+					// after the output track timescales have been settled.
 					trak.edts = None;
 					// tkhd.duration is in the *movie* timescale, and the merged moov
 					// picks its own (the first trak's media scale), so whatever the
@@ -1476,9 +1527,8 @@ mod tests {
 		);
 	}
 
-	// A source init whose trak carries an edit list must come out of extract_init with
-	// the edit list dropped: CMAF carries timing via tfdt + composition offsets, and a
-	// browser applying an edit list shifts the track off the others (a black screen).
+	// Import already applied the source edit to Hang timestamps. Export must discard it
+	// before encode_init rebuilds any codec-specific presentation shift.
 	#[test]
 	fn extract_init_strips_edit_lists() {
 		use mp4_atom::Encode;
@@ -1504,7 +1554,7 @@ mod tests {
 		extract_init(&Bytes::from(init), 1, &mut ftyp, &mut traks, &mut trexs).unwrap();
 
 		assert_eq!(traks.len(), 1);
-		assert!(traks[0].edts.is_none(), "CMAF init must not carry an edit list");
+		assert!(traks[0].edts.is_none(), "the source edit must not be applied twice");
 	}
 
 	// tkhd.duration is in the movie timescale, which the merged moov replaces with its own. A

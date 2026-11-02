@@ -66,7 +66,7 @@ impl Fixture {
 				.expect("failed to listen");
 			let port = listener.local_addr().expect("no quic addr").port();
 			tokio::spawn(async move {
-				while let Some(request) = listener.accept().await {
+				while let Ok(request) = listener.accept().await {
 					tokio::spawn(async move {
 						let _session = request.ok().await;
 						std::future::pending::<()>().await;
@@ -81,7 +81,7 @@ impl Fixture {
 
 /// Connect, crash the server and restart it on the same port, then report how the
 /// client's connection ended once it next sent something.
-fn restart(reset_secret: bool) -> Result<driver::ConnectionError, tokio::time::error::Elapsed> {
+fn restart(reset_secret: bool) -> Result<driver::connection::Error, kio::clock::Elapsed> {
 	let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 	let fixture = Fixture::new();
 	let client = tokio::runtime::Builder::new_current_thread()
@@ -100,10 +100,12 @@ fn restart(reset_secret: bool) -> Result<driver::ConnectionError, tokio::time::e
 		tls.alpn_protocols = vec![b"moq-lite-06".to_vec()];
 		let quic = driver::crypto::rustls::QuicClientConfig::try_from(tls).expect("quic config");
 
-		let endpoint = driver::Endpoint::client("127.0.0.1:0".parse().unwrap()).expect("endpoint");
+		let endpoint =
+			driver::endpoint::Endpoint::new(Default::default(), std::net::UdpSocket::bind("127.0.0.1:0").unwrap())
+				.expect("endpoint");
 		let conn = endpoint
-			.connect_with(
-				driver::ClientConfig::new(Arc::new(quic)),
+			.connect(
+				&driver::client::Config::new(Arc::new(quic)),
 				([127, 0, 0, 1], port).into(),
 				"localhost",
 			)
@@ -118,18 +120,18 @@ fn restart(reset_secret: bool) -> Result<driver::ConnectionError, tokio::time::e
 
 	client.block_on(async {
 		let mut send = conn.open_uni(Default::default()).await.expect("open");
-		send.write_all(&[0; 64]).await.expect("write");
-		send.finish().expect("finish");
+		send.write_all(&[0; 64][..]).await.expect("write");
+		send.finish();
 		// Far below the client's 30s idle timeout, and ample for a loopback round
 		// trip; the keyless arm waits all of it.
-		tokio::time::timeout(Duration::from_secs(1), conn.closed()).await
+		kio::clock::timeout(Duration::from_secs(1), conn.closed()).await
 	})
 }
 
 #[test]
 fn a_restarted_server_resets_its_predecessors_connections() {
 	let closed = restart(true);
-	assert!(matches!(closed, Ok(driver::ConnectionError::Reset)), "{closed:?}");
+	assert!(matches!(closed, Ok(driver::connection::Error::Reset)), "{closed:?}");
 }
 
 /// The control: a random key per process drops the old connection IDs as invalid,

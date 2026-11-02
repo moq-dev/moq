@@ -130,14 +130,17 @@ impl Live {
 	}
 
 	/// End the feed as the archive recorded.
-	pub fn end(&mut self, end: End, track: &str) -> Result<()> {
+	pub fn end(&mut self, end: End) -> Result<()> {
 		self.close()?;
 		match end {
 			End::Finish(at) => {
-				self.producer.finish_at(Position {
-					group: at.group,
-					frame: at.frame,
-				})?;
+				self.producer.finish_at(
+					Position {
+						group: at.group,
+						frame: at.frame,
+					},
+					None,
+				)?;
 				// An empty group stores no object, yet the end only settles once the live edge
 				// reaches it. The sequence just below the end replays as the empty group a
 				// source most often ended with, and any before it as dropped.
@@ -151,10 +154,10 @@ impl Live {
 				}
 			}
 			End::Error(code) => {
-				// An abort would refuse every later reader the stored history, so the track
-				// ends cleanly after its newest stored sequence instead.
-				tracing::warn!(track, code, "archived track ended with an error");
-				self.producer.finish()?;
+				// After the newest stored sequence, keeping the history an abort would refuse.
+				let err = moq_net::StreamError::from_code(code).into();
+				self.producer
+					.finish_at(Position::group(self.next.unwrap_or(0)), Some(err))?;
 			}
 		}
 		Ok(())
@@ -165,8 +168,7 @@ impl Live {
 /// answered or nobody waits on it.
 pub(super) async fn serve<S: ObjectStore>(shared: Arc<Shared<S>>, index: Arc<Mutex<Index>>, fill: Fill) {
 	let mut last = None;
-	while fill.is_used()
-		&& let Some(sequence) = fill.next()
+	while let Some(sequence) = fill.wanted()
 		&& last != Some(sequence)
 	{
 		last = Some(sequence);

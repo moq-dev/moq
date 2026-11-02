@@ -55,6 +55,15 @@ export interface Options {
 	 * list everything. Subscribing to a hidden path by name works either way.
 	 */
 	hidden?: boolean;
+
+	/**
+	 * Also report every route that could serve a path in scope, not just those whose literal
+	 * name matches it. A route is a prefix serving everything beneath it, so a scope listing
+	 * `.chat` names at any depth still reports a route at `room`, which can serve
+	 * `room/lobby.chat`. Code that routes or forwards needs these; listing broadcasts does
+	 * not. Requests resolve through covering routes either way.
+	 */
+	covering?: boolean;
 }
 
 /** Reactive backing state shared by announcement producers and consumers. */
@@ -166,8 +175,7 @@ let makeConsumer: (state: AnnounceState) => Consumer;
 /**
  * The read side of an announcement stream.
  *
- * Created internally: obtain one from {@link Producer.consume} or the connection's
- * `announced(scope)`.
+ * Created internally: obtain one from an origin or the connection's `announced(scope)`.
  *
  * @public
  */
@@ -182,7 +190,7 @@ export class Consumer {
 		state.wanted.set(true);
 	}
 
-	/** Settles once the stream closes; see {@link Producer.closed}. */
+	/** Settles once the stream closes: `null` on a clean close, or the abort {@link Error}. */
 	get closed(): GetPromise<Error | null> {
 		return this.#state.closed;
 	}
@@ -237,7 +245,7 @@ export class Consumer {
 
 	/**
 	 * Release this handle, like dropping a Rust handle: other consumers keep reading, and the
-	 * producer sees the stream no longer {@link Producer.wanted} once the last one closes.
+	 * producer sees the stream as no longer wanted once the last one closes.
 	 * Idempotent.
 	 */
 	close() {

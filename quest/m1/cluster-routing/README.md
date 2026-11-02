@@ -75,7 +75,7 @@ Decided with the maintainer, 2026-10-13:
   sent routes learned from other connections. Relays default on;
   applications choose per P2P connection (on for redundancy, off for
   conference offload). Browser tabs stay off until the
-  [Rust-to-TypeScript](/quest/m2/rs2ts/README.md) port. Applications
+  [Rust-to-TypeScript](/quest/m2/rs2ts-js.md) port. Applications
   explicitly select P2P connections; discovery does not dial everyone.
 - Each CDN broadcast enters a local network once by configuration: local
   peers outrank a backup uplink, and origin aggregation joins the rest.
@@ -127,7 +127,6 @@ setup after the capabilities land.
 ## Required
 
 - [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - grants carry an issuer-qualified subject, scoped tokens without one are refused, and the routing model drops its `proved` exemption
-- [Route epochs](/quest/m1/cluster-routing/route-epochs.md) - every route has an epoch, deleting the epochless instance machinery
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - implement the proven route layer with Rust/JS parity and tiered-cluster acceptance
 - [Outbound federation](/quest/m1/cluster-routing/federation.md) - an outbound-only local relay exchanges authorized broadcasts with the CDN and survives partition/healing
 

@@ -53,6 +53,7 @@ allow = [
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
     "CC0-1.0",
     "CDLA-Permissive-2.0", # webpki-roots cert bundle
     "ISC",
@@ -64,7 +65,7 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
-exceptions = []
+exceptions = [{ name = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] }]
 
 [bans]
 multiple-versions = "warn"

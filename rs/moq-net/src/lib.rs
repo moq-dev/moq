@@ -75,6 +75,13 @@
 //! instant.
 
 #![warn(missing_docs)]
+#![cfg_attr(
+	test,
+	allow(
+		clippy::redundant_closure,
+		reason = "`Decode`'s buffer lifetime is a trait parameter, so `T::decode` names one lifetime, and only a closure passes where a test helper takes any"
+	)
+)]
 
 // Sessions hand out the auth, GOAWAY, and SETUP handles, so without `async` they are
 // unobtainable and stay private to the model and wire code that still uses them.
@@ -116,7 +123,6 @@ pub mod setup;
 #[cfg(not(feature = "async"))]
 #[allow(dead_code, unused_imports, reason = "async-only")]
 mod setup;
-mod sync;
 #[cfg(feature = "async")]
 mod tail;
 #[cfg(all(test, feature = "async"))]

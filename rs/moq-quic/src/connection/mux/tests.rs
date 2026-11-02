@@ -1,7 +1,7 @@
 use bytes::{BufMut, Bytes};
 
 use super::*;
-use crate::{ReadError, StreamId, TransportErrorCode, coding::BufMutExt, frame::FrameType};
+use crate::{StreamId, TransportErrorCode, coding::BufMutExt, frame::FrameType, recv, send};
 
 /// Two connections joined by an in-memory transport, on a clock the test advances
 struct Pair {
@@ -75,7 +75,7 @@ fn read_all(conn: &mut Connection, id: StreamId) -> (Vec<u8>, bool) {
 				fin = true;
 				break;
 			}
-			Err(ReadError::Blocked) => break,
+			Err(recv::Error::Blocked) => break,
 			Err(err) => panic!("read failed: {err}"),
 		}
 	}
@@ -105,11 +105,11 @@ fn handshake() {
 fn streams_carry_data_and_fin() {
 	for &version in Version::ALL {
 		let mut pair = Pair::new(config(version));
-		let id = pair.client.streams().open(Dir::Bi, SendOptions::default()).unwrap();
+		let id = pair.client.streams().open(Dir::Bi, send::Options::default()).unwrap();
 		let payload = vec![7u8; 100_000];
 		let mut sent = 0;
 		while sent < payload.len() {
-			sent += pair.client.send_stream(id).write(&payload[sent..]).unwrap();
+			sent += pair.client.send_stream(id).write(&mut &payload[sent..]).unwrap();
 			pair.drive();
 		}
 		pair.client.send_stream(id).finish().unwrap();
@@ -140,16 +140,16 @@ fn streams_carry_data_and_fin() {
 #[test]
 fn credit_returns_for_unread_and_stopped_streams() {
 	let mut cfg = config(Version::QMux02);
-	cfg.receive_window = VarInt::from_u32(64 << 10);
-	cfg.stream_receive_window = VarInt::from_u32(32 << 10);
+	cfg.limits.receive_window = NonZeroU64::new(64 << 10);
+	cfg.limits.stream_receive_window = NonZeroU64::new(32 << 10);
 	let mut pair = Pair::new(cfg);
 	let chunk = vec![1u8; 16 << 10];
 
 	// Far more than the connection window, a stream at a time
 	for round in 0..64 {
-		let id = pair.client.streams().open(Dir::Uni, SendOptions::default()).unwrap();
+		let id = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
 		assert_eq!(
-			pair.client.send_stream(id).write(&chunk).unwrap(),
+			pair.client.send_stream(id).write(&mut &chunk[..]).unwrap(),
 			chunk.len(),
 			"round {round}"
 		);
@@ -160,7 +160,7 @@ fn credit_returns_for_unread_and_stopped_streams() {
 			// Stopped before the rest arrives, which then arrives anyway
 			0 => {
 				pair.server.recv_stream(accepted).stop(VarInt::from_u32(1)).unwrap();
-				let _ = pair.client.send_stream(id).write(&chunk);
+				let _ = pair.client.send_stream(id).write(&mut &chunk[..]);
 			}
 			// Read to the end
 			_ => {
@@ -180,20 +180,23 @@ fn credit_returns_for_unread_and_stopped_streams() {
 #[test]
 fn close_delivers_application_close() {
 	let mut pair = Pair::new(config(Version::QMux02));
-	pair.client.close(VarInt::from_u32(42), Bytes::from_static(b"bye"));
+	pair.client.close(VarInt::from_u32(42), "bye".to_string());
 	// The first close wins
-	pair.client.close(VarInt::from_u32(7), Bytes::new());
+	pair.client.close(VarInt::from_u32(7), String::new());
 	assert!(!pair.client.is_drained());
 	pair.drive();
 	assert!(pair.client.is_drained());
 	match lost(&mut pair.server) {
 		Some(ConnectionError::ApplicationClosed(close)) => {
 			assert_eq!(close.error_code, VarInt::from_u32(42));
-			assert_eq!(&close.reason[..], b"bye");
+			assert_eq!(close.reason, "bye");
 		}
 		other => panic!("unexpected {other:?}"),
 	}
-	assert!(matches!(lost(&mut pair.client), Some(ConnectionError::LocallyClosed)));
+	assert!(matches!(
+		lost(&mut pair.client),
+		Some(ConnectionError::LocallyClosed { code, reason }) if code == VarInt::from_u32(42) && reason == "bye"
+	));
 }
 
 /// A record carrying the peer's parameters, then `frame`
@@ -276,6 +279,18 @@ fn rejects_empty_records() {
 }
 
 #[test]
+fn draft00_counts_each_padding_byte_as_a_frame() {
+	let mut pair = Pair::new(config(Version::QMux00));
+	pair.server.handle_record(Bytes::from_static(&[0x00]), pair.now);
+	assert!(!pair.server.is_closed());
+	pair.server.handle_record(Bytes::from_static(&[0x00, 0x00]), pair.now);
+	assert_eq!(
+		transport_error(&mut pair.server).code,
+		TransportErrorCode::FRAME_ENCODING_ERROR
+	);
+}
+
+#[test]
 fn draft00_rejects_qx_ping() {
 	for ty in [0x348c67529ef8c7bd_u64, 0x348c67529ef8c7be] {
 		let mut pair = Pair::new(config(Version::QMux00));
@@ -324,8 +339,8 @@ fn records_stay_under_the_stream_ceiling() {
 	let mut cfg = config(Version::QMux02);
 	cfg.max_record_size = VarInt::from_u32(1 << 20);
 	let mut pair = Pair::new(cfg);
-	let id = pair.client.streams().open(Dir::Uni, SendOptions::default()).unwrap();
-	pair.client.send_stream(id).write(&[0; 100_000]).unwrap();
+	let id = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+	pair.client.send_stream(id).write(&mut &[0; 100_000][..]).unwrap();
 	while let Some(record) = pair.client.poll_transmit(pair.now) {
 		assert!(record.len() <= MAX_RECORD_BUDGET);
 		pair.server.handle_record(record, pair.now);
@@ -340,8 +355,8 @@ fn draft00_sends_one_length_prefixed_frame_per_message() {
 	while let Some(frame) = server.poll_transmit(now) {
 		client.handle_record(frame, now);
 	}
-	let id = client.streams().open(Dir::Uni, SendOptions::default()).unwrap();
-	client.send_stream(id).write(&[3; 40_000]).unwrap();
+	let id = client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+	client.send_stream(id).write(&mut &[3; 40_000][..]).unwrap();
 	client.send_stream(id).finish().unwrap();
 	let mut messages = 0;
 	while let Some(message) = client.poll_transmit(now) {
@@ -411,10 +426,12 @@ fn stream_offsets_follow_the_transport_order() {
 #[test]
 fn reset_stream_at_delivers_the_prefix() {
 	let mut pair = Pair::new(config(Version::QMux02));
-	let id = pair.client.streams().open(Dir::Uni, SendOptions::default()).unwrap();
-	pair.client.send_stream(id).write(b"header").unwrap();
-	pair.client.send_stream(id).write(b"payload").unwrap();
-	pair.client.send_stream(id).reset_at(6, VarInt::from_u32(9)).unwrap();
+	let id = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+	pair.client.send_stream(id).write(&mut &b"header"[..]).unwrap();
+	pair.client.send_stream(id).write(&mut &b"payload"[..]).unwrap();
+	let mut stream = pair.client.send_stream(id);
+	let at = stream.offset().rewind(6);
+	stream.reset_at(at, VarInt::from_u32(9)).unwrap();
 	pair.drive();
 
 	let accepted = pair.server.streams().accept(Dir::Uni).unwrap();
@@ -430,7 +447,7 @@ fn reset_stream_at_delivers_the_prefix() {
 	};
 	let _ = chunks.finalize();
 	assert!(data.starts_with(b"header"), "{data:?} {err:?}");
-	assert_eq!(err, ReadError::Reset(VarInt::from_u32(9)));
+	assert_eq!(err, recv::Error::Reset(VarInt::from_u32(9)));
 }
 
 #[test]
@@ -457,7 +474,7 @@ fn datagrams() {
 	assert!(max > 16_000);
 	pair.client
 		.datagrams()
-		.send(Bytes::from_static(b"hello"), SendOptions::default())
+		.send(Bytes::from_static(b"hello"), send::Options::default())
 		.unwrap();
 	pair.drive();
 	assert!(
@@ -472,8 +489,8 @@ fn datagrams() {
 	assert_eq!(
 		pair.client
 			.datagrams()
-			.send(Bytes::from_static(b"hello"), SendOptions::default()),
-		Err(SendDatagramError::Disabled)
+			.send(Bytes::from_static(b"hello"), send::Options::default()),
+		Err(send::Error::Unsupported)
 	);
 }
 
@@ -501,7 +518,7 @@ fn datagram_limits_count_the_encoded_frame() {
 	assert_eq!(pair.client.datagrams().max_size(), Some(1197));
 	pair.client
 		.datagrams()
-		.send(vec![7; 1197].into(), SendOptions::default())
+		.send(Bytes::from(vec![7; 1197]), send::Options::default())
 		.unwrap();
 	pair.drive();
 	assert_eq!(pair.server.datagrams().recv().unwrap().len(), 1197);
@@ -514,7 +531,7 @@ fn datagram_limits_count_the_encoded_frame() {
 	assert!(
 		pair.client
 			.datagrams()
-			.send(Bytes::new(), SendOptions::default())
+			.send(Bytes::new(), send::Options::default())
 			.is_err()
 	);
 }
@@ -605,7 +622,7 @@ fn handshake_timeout() {
 	let mut server = Connection::new(config(Version::QMux02), Side::Server, now);
 	let deadline = server.poll_timeout().unwrap();
 	server.handle_timeout(deadline);
-	assert!(matches!(lost(&mut server), Some(ConnectionError::TimedOut)));
+	assert!(matches!(lost(&mut server), Some(ConnectionError::HandshakeTimeout)));
 }
 
 #[test]
@@ -664,17 +681,17 @@ fn golden_records() {
 			record.iter().map(|b| format!("{b:02x}")).collect::<String>()
 		};
 
-		let id = pair.client.streams().open(Dir::Uni, SendOptions::default()).unwrap();
-		pair.client.send_stream(id).write(b"hi").unwrap();
+		let id = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+		pair.client.send_stream(id).write(&mut &b"hi"[..]).unwrap();
 		pair.client.send_stream(id).finish().unwrap();
 		let stream = record(&mut pair.client, pair.now);
 
-		let id = pair.client.streams().open(Dir::Uni, SendOptions::default()).unwrap();
-		pair.client.send_stream(id).write(b"x").unwrap();
+		let id = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+		pair.client.send_stream(id).write(&mut &b"x"[..]).unwrap();
 		pair.client.send_stream(id).reset(VarInt::from_u32(5)).unwrap();
 		let reset = record(&mut pair.client, pair.now);
 
-		pair.client.close(VarInt::from_u32(42), Bytes::from_static(b"bye"));
+		pair.client.close(VarInt::from_u32(42), "bye".to_string());
 		let close = record(&mut pair.client, pair.now);
 
 		// STREAM(OFF=0, LEN, FIN) id 2 "hi"; RESET_STREAM id 6 code 5 final size 1;
@@ -708,9 +725,9 @@ fn stream_order(pair: &mut Pair) -> Vec<(u64, usize)> {
 }
 
 /// Open a client uni stream with `options` and queue `len` bytes and a FIN on it
-fn queue(pair: &mut Pair, options: SendOptions<'_>, len: usize) -> u64 {
+fn queue(pair: &mut Pair, options: send::Options<'_>, len: usize) -> u64 {
 	let id = pair.client.streams().open(Dir::Uni, options).unwrap();
-	assert_eq!(pair.client.send_stream(id).write(&vec![0; len]).unwrap(), len);
+	assert_eq!(pair.client.send_stream(id).write(&mut &vec![0; len][..]).unwrap(), len);
 	pair.client.send_stream(id).finish().unwrap();
 	u64::from(id)
 }
@@ -721,7 +738,7 @@ fn records_follow_strict_priority() {
 	let mut pair = Pair::new(config(Version::QMux02));
 	let low = queue(
 		&mut pair,
-		SendOptions {
+		send::Options {
 			group: None,
 			priority: 0,
 		},
@@ -729,7 +746,7 @@ fn records_follow_strict_priority() {
 	);
 	let high = queue(
 		&mut pair,
-		SendOptions {
+		send::Options {
 			group: None,
 			priority: 1,
 		},
@@ -742,8 +759,8 @@ fn records_follow_strict_priority() {
 #[test]
 fn records_share_equal_priority() {
 	let mut pair = Pair::new(config(Version::QMux02));
-	let a = queue(&mut pair, SendOptions::default(), 30_000);
-	let b = queue(&mut pair, SendOptions::default(), 30_000);
+	let a = queue(&mut pair, send::Options::default(), 30_000);
+	let b = queue(&mut pair, send::Options::default(), 30_000);
 	let order = stream_order(&mut pair);
 	assert!(order.len() >= 4, "{order:?}");
 	for (id, _) in &order {
@@ -763,7 +780,7 @@ fn records_order_send_groups() {
 	let high = pair.client.send_groups().open(1);
 	let in_low = queue(
 		&mut pair,
-		SendOptions {
+		send::Options {
 			group: Some(&low),
 			priority: 0,
 		},
@@ -771,13 +788,13 @@ fn records_order_send_groups() {
 	);
 	let in_high = queue(
 		&mut pair,
-		SendOptions {
+		send::Options {
 			group: Some(&high),
 			priority: 0,
 		},
 		20_000,
 	);
-	let ungrouped = queue(&mut pair, SendOptions::default(), 20_000);
+	let ungrouped = queue(&mut pair, send::Options::default(), 20_000);
 	assert_eq!(
 		stream_order(&mut pair),
 		[(ungrouped, 20_000), (in_high, 20_000), (in_low, 20_000)]
@@ -786,7 +803,7 @@ fn records_order_send_groups() {
 	// Raising a group's priority reorders what it has left to send.
 	let first = queue(
 		&mut pair,
-		SendOptions {
+		send::Options {
 			group: Some(&high),
 			priority: 0,
 		},
@@ -794,7 +811,7 @@ fn records_order_send_groups() {
 	);
 	let second = queue(
 		&mut pair,
-		SendOptions {
+		send::Options {
 			group: Some(&low),
 			priority: 0,
 		},
@@ -802,4 +819,50 @@ fn records_order_send_groups() {
 	);
 	pair.client.send_groups().set_priority(&low, 2);
 	assert_eq!(stream_order(&mut pair), [(second, 20_000), (first, 20_000)]);
+}
+
+/// The waits work over QMux as over QUIC: arrivals wake them, and a close wakes them to drain
+/// what arrived and then fail
+#[test]
+fn waits_drain_then_fail() {
+	use std::task::Poll;
+
+	use crate::connection::waits::Counter;
+
+	let mut pair = Pair::new(config(Version::QMux02));
+	let (accept, closed) = (Counter::new(), Counter::new());
+	assert_eq!(pair.server.poll_connected(&accept), Poll::Ready(Ok(())));
+	assert!(pair.server.streams().poll_accept(&accept, Dir::Uni).is_pending());
+	assert!(pair.server.poll_closed(&closed).is_pending());
+
+	let id = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+	pair.client.send_stream(id).write(&mut &b"a"[..]).unwrap();
+	pair.drive();
+	assert_eq!(accept.wakes(), 1);
+
+	pair.client.close(VarInt::from_u32(42), "bye".to_string());
+	pair.drive();
+	assert_eq!(closed.wakes(), 1);
+	let reason = match pair.server.poll_closed(&closed) {
+		Poll::Ready(reason) => reason,
+		Poll::Pending => panic!("still open"),
+	};
+	assert_eq!(
+		pair.server.streams().poll_accept(&accept, Dir::Uni),
+		Poll::Ready(Ok(id))
+	);
+	assert_eq!(
+		pair.server.streams().poll_accept(&accept, Dir::Uni),
+		Poll::Ready(Err(reason))
+	);
+	let mut recv = pair.server.recv_stream(id);
+	let mut chunks = recv.read().unwrap();
+	assert!(matches!(
+		chunks.poll_next(&accept, usize::MAX),
+		Poll::Ready(Ok(Some(_)))
+	));
+	assert_eq!(
+		chunks.poll_next(&accept, usize::MAX),
+		Poll::Ready(Err(recv::Error::ConnectionLost))
+	);
 }

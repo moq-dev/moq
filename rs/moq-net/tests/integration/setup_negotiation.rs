@@ -45,7 +45,7 @@ async fn dial(
 	)
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn every_lite_version_negotiates_in_setup() {
 	for name in [
 		"moq-lite-07-wip",
@@ -66,11 +66,11 @@ async fn every_lite_version_negotiates_in_setup() {
 			assert_eq!(session.version(), version, "{name}");
 		}
 		// The session runs on the selected version, not on the SETUP stream.
-		downstream.consume().routed("room").await.expect(name);
+		crate::support::announced(&downstream.consume(), "room").await;
 	}
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn disjoint_versions_are_refused() {
 	let (upstream, downstream) = (origin(), origin());
 	let (client, server) = dial(

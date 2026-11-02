@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Validate each Worker's lockfile and deploy bundle without publishing or
-# credentials.
+# Validate each Worker's lockfile and deploy bundle, and run its tests, without
+# publishing or credentials.
 #
 # These Workers have lockfiles outside the Bun workspace, so `just js check`
 # never installs or builds them. Every tracked lockfile but the workspace's is
@@ -18,6 +18,10 @@ for lock in $(git ls-files '*bun.lock'); do
         bun install --frozen-lockfile
         if [[ -f wrangler.jsonc ]]; then
             bun run deploy --dry-run
+        fi
+        tests=(src/*.test.ts)
+        if [[ -e "${tests[0]}" ]]; then
+            bun test
         fi
     )
 done

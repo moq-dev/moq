@@ -7,8 +7,12 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
-use moq_clock::{Instant, Sleep};
+use kio::clock::{Instant, Sleep};
 use moq_net::Timestamp;
+
+/// What each track may hold before its reader is held back, as the container consumer's max
+/// buffer: the most one group may cache.
+pub(crate) const MAX_BYTES: usize = moq_net::group::MAX_CACHE_BYTES as usize;
 
 /// One active publisher and at most one independently acquiring replacement.
 /// Ordinary timeline jumps stay entirely inside each existing clock engine.
@@ -59,6 +63,12 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		self
 	}
 
+	#[cfg(test)]
+	pub fn with_max_bytes(mut self, bytes: usize) -> Self {
+		self.active = self.active.with_max_bytes(bytes);
+		self
+	}
+
 	fn pending(&self) -> Option<&Pending<K, T>> {
 		match self.handoff.as_deref() {
 			Some(Handoff::Pending(pending)) => Some(pending),
@@ -77,6 +87,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		debug_assert!(self.handoff.is_none());
 		let mut engine = Engine::new(self.active.delay);
 		engine.replay = self.active.replay;
+		engine.max_bytes = self.active.max_bytes;
 		engine.expect(expect);
 		self.handoff = Some(Box::new(Handoff::Pending(Pending {
 			keys: keys.into_iter().collect(),
@@ -123,11 +134,11 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 		self.writing(&key).push(key, arrival)
 	}
-	pub fn full<Q: Ord + ?Sized>(&self, key: &Q) -> bool
+	pub fn full<Q: Ord + ?Sized>(&mut self, key: &Q, waiter: &kio::Waiter) -> bool
 	where
 		K: Borrow<Q>,
 	{
-		self.pending().is_some_and(|pending| pending.held.contains_key(key)) || self.reading(key).full(key)
+		self.pending().is_some_and(|pending| pending.held.contains_key(key)) || self.writing(key).full(key, waiter)
 	}
 	pub fn holds<Q: Ord + ?Sized>(&self, key: &Q) -> bool
 	where
@@ -149,9 +160,6 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		K: Borrow<Q>,
 	{
 		self.writing(key).lose(key, ahead);
-	}
-	pub fn cut(&mut self, key: &K, cut: u64) {
-		self.writing(key).cut(key, cut);
 	}
 	pub fn discard(&mut self, ready: &Ready<K, T>) {
 		if let Some(Handoff::Committed(committed)) = self.handoff.as_deref_mut()
@@ -202,11 +210,23 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 	}
 
-	/// The new program is emittable. Keep all old deadlines and queues until adoption.
+	/// The new program is emittable. The old program's queued tail is dropped: the switch
+	/// already breaks the program, and draining the tail first would add it to the latency
+	/// of every later frame. Old clocks are kept until adoption for what already went out.
 	pub fn commit(&mut self, ready: Ready<K, T>) -> Result<(), moq_net::TimeOverflow> {
-		// Nothing more of the old publisher is read, and only the incoming engine is polled from
-		// here, so a timeline restart it is still acquiring anchors on what it holds now.
+		// Nothing more of the old publisher is read, so a timeline restart it is still
+		// acquiring is settled now, then dropped with the rest of its tail.
 		self.active.acquired();
+		for track in self.active.tracks.values_mut() {
+			let cut = std::mem::take(&mut track.queue).len() as u64;
+			track.bytes = 0;
+			// A cancel resumes the old publisher, whose next frames may reference the cut ones.
+			track.waiting |= cut > 0;
+			match track.started {
+				true => self.active.dropped += cut,
+				false => self.active.trimmed += cut,
+			}
+		}
 		let Handoff::Pending(Pending {
 			keys,
 			mut engine,
@@ -221,20 +241,23 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			// The issued start is owned by the caller even while it waits on the old tail.
 			track
 				.queue
-				.push_front((ready.generation, ready.decode, ready.deadline, ready.item));
+				.push_front((ready.generation, ready.decode, ready.deadline, ready.item, ready.bytes));
+			track.bytes += ready.bytes;
 		}
 		let first = engine
 			.tracks
 			.values()
 			.flat_map(|track| &track.queue)
-			.map(|(_, _, at, _)| *at)
+			.map(|(_, _, at, ..)| *at)
 			.min();
+		// Only what already went out bounds the new program, so output stays in order while
+		// the new program keeps the delay its own clock acquired.
 		let shift = self
 			.active
-			.horizon
+			.released
 			.zip(first)
 			.map_or(Duration::ZERO, |(old, new)| old.saturating_duration_since(new));
-		tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "commit-clock", now = ?moq_clock::now(), old_horizon = ?self.active.horizon, new_first = ?first, ?shift, old_clock = ?self.active.clock.map(|clock| (clock.anchor, clock.base, clock.generation)), new_clock = ?engine.clock.map(|clock| (clock.anchor, clock.base, clock.generation)));
+		tracing::debug!(target: "moq_mux::container::ts::handoff", phase = "commit-clock", now = ?kio::clock::now(), old_released = ?self.active.released, new_first = ?first, ?shift, old_clock = ?self.active.clock.map(|clock| (clock.anchor, clock.base, clock.generation)), new_clock = ?engine.clock.map(|clock| (clock.anchor, clock.base, clock.generation)));
 		let offset = self.active.clock.map_or(0, |clock| clock.generation + 1);
 		for clock in [&mut engine.clock, &mut engine.previous].into_iter().flatten() {
 			clock.anchor = clock.anchor.checked_add(shift).ok_or(moq_net::TimeOverflow)?;
@@ -242,7 +265,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 		}
 		for track in engine.tracks.values_mut() {
 			track.generation += offset;
-			for (generation, _, at, _) in &mut track.queue {
+			for (generation, _, at, ..) in &mut track.queue {
 				*generation += offset;
 				*at = at.checked_add(shift).ok_or(moq_net::TimeOverflow)?;
 			}
@@ -254,7 +277,7 @@ impl<K: Ord + Clone, T> Buffer<K, T> {
 			.horizon
 			.map(|horizon| horizon.checked_add(shift).ok_or(moq_net::TimeOverflow))
 			.transpose()?
-			.max(self.active.horizon);
+			.max(self.active.released);
 		engine.tracks.append(&mut self.active.tracks);
 		let old = std::mem::replace(&mut self.active, engine);
 		self.handoff = Some(Box::new(Handoff::Committed(Committed { keys, old })));
@@ -365,18 +388,23 @@ pub(crate) struct Arrival<T> {
 	pub decode: Decode,
 	/// How many times the source had restarted its timeline when the frame was read.
 	pub restart: u64,
-	/// How many times the source's playhead had jumped (a skipped group, or a restart)
-	/// when the frame was read.
-	pub skip: u64,
-	/// How many times the source had lost the rest of a group it had begun delivering when the
-	/// frame was read: the skips that cut a group short.
-	pub cut: u64,
 	/// Whether the frame decodes without the track's earlier frames.
 	pub sync: bool,
 	/// Whether it presents before the track's last sync frame, so it also references frames
 	/// before that one: an open GOP's leading picture.
 	pub leading: bool,
+	/// Its payload's size, and what its key holds on the heap, as an acquisition keeps a key per
+	/// frame. Against its track's byte budget ([`Engine::full`]) it is charged with the frame's
+	/// own footprint, so empty frames cost something too.
+	pub bytes: usize,
 	pub item: T,
+}
+
+impl<T> Arrival<T> {
+	/// What it holds against its track's byte budget: its payload and its own footprint.
+	fn cost(&self) -> usize {
+		self.bytes + std::mem::size_of::<Self>()
+	}
 }
 
 /// A frame [`Buffer::poll_next`] let go.
@@ -390,6 +418,7 @@ pub(crate) struct Ready<K, T> {
 	deadline: Instant,
 	/// Whether it is the first frame of its track to go out.
 	pub first: bool,
+	bytes: usize,
 }
 
 /// What [`Buffer::push`] did with a frame.
@@ -421,11 +450,12 @@ pub(crate) enum Push {
 /// anchoring on its first frame would carry that lag for the whole run. What the anchor
 /// makes due before the acquisition ended is dropped instead.
 ///
-/// A track starts on a whole group. Until a frame of it has gone out, a loss (a frame
-/// dropped here, or the rest of a group its source cut short) takes everything the track
-/// holds with it, and the track starts at its next sync frame, so a joiner whose start group
-/// was cut short starts at the next group rather than on the cut-off start. Whole groups
-/// missing after one that ended take nothing.
+/// A track starts on a sync frame. Until a frame of it has gone out, a frame dropped here
+/// takes everything the track holds with it, and the track starts at its next sync frame.
+/// The rest of a group its source cut short takes nothing: what the track holds of it
+/// starts on its sync frame and decodes, and the hole after it is shed like any later one. A
+/// path narrower than the media cuts every group, so waiting for a whole one could leave
+/// the output dark for the whole run.
 /// What goes before a track's first frame out is [`Buffer::trimmed`], not lost; what drops
 /// after it is [`Buffer::dropped`].
 ///
@@ -433,14 +463,16 @@ pub(crate) enum Push {
 /// late are dropped like any other. A source that restarts its timeline (a declared
 /// marker) has moved it, so once frames have gone out the restart opens a new generation,
 /// whose clock is acquired the same way, though never ahead of a deadline already given
-/// out. So does a skip after which a frame would be held more than a delay past everything
-/// queued, beyond how far ahead of the others its track is sent: its timeline jumped ahead,
-/// as when the skipped groups held a marker the publisher shed. How far ahead of its decode
-/// time the source sends each track belongs to its mux and survives a restart, so the new
-/// clock does not wait to hear from a track the previous one measured: it is anchored late
-/// enough that the track sent latest keeps the delay when it gets there. A track that has
-/// not reached the restart stays on the previous generation while its frames land there and
-/// go out before the new generation's first frame; one that would follow it drops as late.
+/// out. So does a step with no marker at all, as a changeover between two encoders whose clocks
+/// disagree, or skipped groups that held a marker the publisher shed, once the delay cannot
+/// absorb it: read as drift it would fail [`Buffer::push`], and steering on it would let the
+/// step's span of decode time slew the drift in one go. A smaller one is a move in latency.
+/// How far ahead of its decode time the source sends each track belongs to its mux and
+/// survives a restart, so the new clock does not wait to hear from a track the previous one
+/// measured: it is anchored late enough that the track sent latest keeps the delay when it
+/// gets there. A track that has not reached the restart stays on the previous generation
+/// while its frames land there and go out before the new generation's first frame; one that
+/// would follow it drops as late.
 /// One crossing the same restart joins the new generation when the frame lands on its
 /// clock, neither late nor held more than a delay past everything queued, and opens another
 /// otherwise. Before anything has gone out there is nothing to keep in step with, so a
@@ -488,13 +520,15 @@ pub(crate) struct Engine<K, T> {
 	/// The next generation's frames, held while its clock is acquired.
 	acquire: Option<Acquire<K, T>>,
 	tracks: BTreeMap<K, Track<T>>,
+	/// What each track may hold, queued or acquiring, before its reader is held back.
+	max_bytes: usize,
 	/// The latest deadline given out.
 	horizon: Option<Instant>,
 	/// The tracks an acquisition waits to hear from, bounded, so that it anchors on whichever
 	/// of them is sent latest against its decode time.
 	expect: BTreeSet<K>,
-	/// Whether a frame has gone out since the clock started.
-	released: bool,
+	/// The latest deadline of a frame gone out.
+	released: Option<Instant>,
 	/// What the clock is steered on, since it last started.
 	steer: Steer<K>,
 	/// How much more slack each track had than the track sent latest, in seconds, in the last
@@ -559,10 +593,10 @@ struct Acquire<K, T> {
 	/// Its tracks, and whether each is partway through a group, so its next sync frame
 	/// starts the next one.
 	tracks: BTreeMap<K, bool>,
+	/// What each track holds of its frames.
+	bytes: BTreeMap<K, usize>,
 	/// A track crossed a group boundary while these frames were being read.
 	grouped: bool,
-	/// Each track's cut count reported by [`Buffer::cut`] while these frames were held.
-	cuts: BTreeMap<K, u64>,
 }
 
 impl<K: Ord, T> Acquire<K, T> {
@@ -570,6 +604,13 @@ impl<K: Ord, T> Acquire<K, T> {
 	/// decode time) is that track's slack less its queueing, and of those, the one with the least
 	/// slack, so the track sent latest against its decode time still has the delay.
 	fn fresh(&self) -> (&K, &Arrival<T>) {
+		self.freshest()
+			.into_iter()
+			.max_by_key(|(_, frame)| since(self.since, frame.read) - frame.decode.as_nanos())
+			.expect("an acquisition holds a frame")
+	}
+
+	fn freshest(&self) -> BTreeMap<&K, &Arrival<T>> {
 		let behind = |frame: &Arrival<T>| since(self.since, frame.read) - frame.decode.as_nanos();
 		let mut freshest: BTreeMap<&K, &Arrival<T>> = BTreeMap::new();
 		for (key, frame) in &self.frames {
@@ -579,9 +620,6 @@ impl<K: Ord, T> Acquire<K, T> {
 			}
 		}
 		freshest
-			.into_iter()
-			.max_by_key(|(_, frame)| behind(frame))
-			.expect("an acquisition holds a frame")
 	}
 
 	/// When it ends: once a frame that could still go out on time falls due on the freshest
@@ -686,12 +724,16 @@ struct Floor<K> {
 }
 
 struct Track<T> {
-	/// Frames in arrival order, each with its generation, decode time and deadline.
-	queue: VecDeque<(u64, Decode, Instant, T)>,
-	/// The source's restart, skip and cut counters at the last frame.
+	/// Frames in arrival order, each with its generation, decode time, deadline and bytes.
+	queue: VecDeque<(u64, Decode, Instant, T, usize)>,
+	/// Wake the reader when its future tail enters the admission window.
+	read_timer: Option<Pin<Box<Sleep>>>,
+	/// What its queued frames hold against the byte budget.
+	bytes: usize,
+	/// The source's restart counter at the last frame, when it decodes, and when it arrived.
 	restart: u64,
-	skip: u64,
-	cut: u64,
+	decode: Decode,
+	arrived: Instant,
 	/// The generation of the last frame.
 	generation: u64,
 	/// Frames are dropped until the next sync frame.
@@ -703,19 +745,6 @@ struct Track<T> {
 	started: bool,
 }
 
-impl<T> Track<T> {
-	/// Take the source's cut count. The rest of a group cut since will never arrive, so until a
-	/// frame of the track has gone out, what it holds goes too. Returns how many frames that was.
-	fn cut(&mut self, cut: u64) -> u64 {
-		let lost = match cut != self.cut && !self.started {
-			true => std::mem::take(&mut self.queue).len() as u64,
-			false => 0,
-		};
-		self.cut = cut;
-		lost
-	}
-}
-
 impl<K: Ord + Clone, T> Engine<K, T> {
 	pub fn new(delay: Duration) -> Self {
 		Self {
@@ -725,9 +754,10 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			previous: None,
 			acquire: None,
 			tracks: BTreeMap::new(),
+			max_bytes: MAX_BYTES,
 			horizon: None,
 			expect: BTreeSet::new(),
-			released: false,
+			released: None,
 			steer: Steer::default(),
 			leads: BTreeMap::new(),
 			timer: None,
@@ -758,6 +788,13 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 		self
 	}
 
+	/// Hold back each track's reader once it holds `bytes`.
+	#[cfg(test)]
+	pub fn with_max_bytes(mut self, bytes: usize) -> Self {
+		self.max_bytes = bytes;
+		self
+	}
+
 	/// Whether each clock anchors on its first frame ([`Self::replay`]).
 	pub fn replaying(&self) -> bool {
 		self.replay
@@ -772,7 +809,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			.is_some_and(|acquire| acquire.tracks.contains_key(&key));
 		let Some(clock) = self
 			.clock
-			.filter(|_| !held && !(self.released && self.jumps(&key, &arrival)))
+			.filter(|_| !held && !(self.released.is_some() && self.jumps(&key, &arrival)))
 		else {
 			self.hold(key, arrival);
 			return Ok(Push::Queued);
@@ -796,7 +833,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			let generation = track.generation;
 			return Ok(self.queue(key, arrival, generation, None, false));
 		}
-		if self.released && !self.delay.is_zero() {
+		if self.released.is_some() && !self.delay.is_zero() {
 			self.steer(&key, deadline, &arrival)?;
 		}
 		Ok(self.queue(key, arrival, clock.generation, deadline, false))
@@ -824,15 +861,29 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			.values()
 			.flat_map(|track| &track.queue)
 			.filter(|(queued, ..)| *queued == generation)
-			.map(|(_, _, deadline, _)| *deadline)
+			.map(|(_, _, deadline, ..)| *deadline)
 			.min()
 	}
 
 	/// Whether a frame moves its track off the clock: a restart, unless the track is crossing
 	/// one another track already opened a generation for and the frame lands on its clock, or
-	/// a frame held past [`Self::bound`] after a skip, or while a generation is acquired. The
-	/// latter is a track reaching the new timeline without a marker of its own, which belongs
-	/// to that generation, not far ahead on the old clock.
+	/// a step in its timeline with no marker that the delay cannot absorb. A track reaching the
+	/// new timeline without a marker of its own makes such a step, and so does one whose skipped
+	/// groups held a marker the publisher shed: either belongs to a new generation, not far
+	/// ahead on the old clock.
+	///
+	/// An unmarked step is told apart from drift and queueing by size, not by a skip: after a
+	/// stall drains the queue, a frame that is merely less queued than the one the clock
+	/// anchored on is held past [`Self::bound`] too, and a new generation for it would cost the
+	/// output a discontinuity. Forward, a frame is held
+	/// past [`Self::bound`] and reached us more than a delay earlier against its decode time
+	/// than its track's last: no clock within [`MAX_DRIFT`] moves it that far in the time
+	/// between them, and frames reach us in the order they are sent, so neither a backlog
+	/// draining nor a track whose frames are sparse does. Back, a frame decodes before its
+	/// track's last and is late: a stall only delays what comes next. It is a step on the
+	/// clock's own generation, since a track still on an earlier one is on that timeline.
+	/// Held for the next generation, the frame never steers the old clock. Without a delay
+	/// nothing is held or late, so a step costs nothing there.
 	fn jumps(&self, key: &K, arrival: &Arrival<T>) -> bool {
 		let (Some(clock), Some(track)) = (self.clock, self.tracks.get(key)) else {
 			return false;
@@ -840,9 +891,14 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 		let deadline = self.deadline(&clock, arrival.decode);
 		let restarted = track.restart != arrival.restart
 			&& (track.generation == clock.generation || !self.lands(key, deadline, arrival.arrived));
-		let leapt = (track.skip != arrival.skip || self.acquire.is_some())
-			&& deadline.is_some_and(|deadline| deadline > self.bound(key, arrival.arrived));
-		restarted || leapt
+		let held = deadline.is_some_and(|deadline| deadline > self.bound(key, arrival.arrived));
+		let unmarked = !self.delay.is_zero() && track.generation == clock.generation;
+		let elapsed = arrival.decode.as_nanos() - track.decode.as_nanos();
+		let ahead = elapsed - since(track.arrived, arrival.arrived);
+		let drift = (elapsed.abs() as f64 * MAX_DRIFT) as i128;
+		let forward = held && ahead > self.delay.as_nanos() as i128 + drift;
+		let back = elapsed < 0 && deadline.is_none_or(|deadline| deadline < arrival.arrived);
+		restarted || (unmarked && (forward || back))
 	}
 
 	/// Hold a frame for the generation being acquired, starting one if none is, and anchor it
@@ -855,12 +911,13 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			since: arrival.read,
 			frames: Vec::new(),
 			tracks: BTreeMap::new(),
+			bytes: BTreeMap::new(),
 			grouped: false,
-			cuts: BTreeMap::new(),
 		});
 		let mid = acquire.tracks.entry(key.clone()).or_default();
 		acquire.grouped |= arrival.sync && *mid;
 		*mid |= !arrival.sync;
+		*acquire.bytes.entry(key.clone()).or_default() += arrival.cost();
 		acquire.frames.push((key, arrival));
 		// A live fill must read every track's available frames before choosing the clock.
 		// Otherwise the first track crossing a group boundary anchors on a partial backlog.
@@ -907,14 +964,18 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 		{
 			clock.anchor += horizon - kept;
 		}
+		// Admission needs each track's lead before the first steering window completes.
+		for (key, frame) in acquire.freshest() {
+			if let Some(deadline) = self.deadline(&clock, frame.decode) {
+				let lead = since(frame.read, deadline) as f64 / 1e9 - self.delay.as_secs_f64();
+				self.leads.entry(key.clone()).or_insert_with(|| VecDeque::from([lead]));
+			}
+		}
 		self.previous = self.clock.replace(clock);
 		self.steer = Steer::default();
 		for (key, frame) in acquire.frames {
 			let (deadline, stale) = self.judge(&clock, &frame, acquiring);
 			self.queue(key, frame, clock.generation, deadline, stale);
-		}
-		for (key, cut) in acquire.cuts {
-			self.cut(&key, cut);
 		}
 	}
 
@@ -930,26 +991,27 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 
 	/// Queue a frame on `generation` due at `deadline`, unless it is `stale` or cannot make it.
 	///
-	/// Until a frame of the track has gone out, a loss (a frame dropped here, or the rest of a
-	/// group its source cut short) takes everything the track holds with it, so its output starts on a
-	/// whole group at its next sync frame rather than on a group's cut-off start.
+	/// Until a frame of the track has gone out, a frame dropped here takes everything the track
+	/// holds with it, so its output starts at its next sync frame rather than ahead of a hole.
 	fn queue(&mut self, key: K, arrival: Arrival<T>, generation: u64, deadline: Option<Instant>, stale: bool) -> Push {
 		if let Some(deadline) = deadline.filter(|_| !stale && !self.delay.is_zero()) {
 			self.spare(arrival.read, since(arrival.arrived, deadline) as f64 / 1e9);
 		}
 		let track = self.tracks.entry(key).or_insert_with(|| Track {
 			queue: VecDeque::new(),
+			read_timer: None,
+			bytes: 0,
 			restart: arrival.restart,
-			skip: arrival.skip,
-			cut: arrival.cut,
+			decode: arrival.decode,
+			arrived: arrival.arrived,
 			generation,
 			waiting: false,
 			resumed: false,
 			started: false,
 		});
-		self.trimmed += track.cut(arrival.cut);
 		track.restart = arrival.restart;
-		track.skip = arrival.skip;
+		track.decode = arrival.decode;
+		track.arrived = arrival.arrived;
 		track.generation = generation;
 		let push = match deadline {
 			_ if stale => {
@@ -963,9 +1025,11 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 					track.resumed = track.waiting;
 				}
 				track.waiting = false;
+				let cost = arrival.cost();
+				track.bytes += cost;
 				track
 					.queue
-					.push_back((generation, arrival.decode, deadline, arrival.item));
+					.push_back((generation, arrival.decode, deadline, arrival.item, cost));
 				self.horizon = self.horizon.max(Some(deadline));
 				Push::Queued
 			}
@@ -983,6 +1047,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			_ => {
 				self.trimmed += 1 + track.queue.len() as u64;
 				track.queue.clear();
+				track.bytes = 0;
 			}
 		}
 		push
@@ -1185,7 +1250,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			.iter()
 			.filter(|(key, _)| held.is_none_or(|held| !held.contains_key(*key)))
 			.filter_map(|(key, track)| {
-				let (generation, decode, deadline, _) = track.queue.front()?;
+				let (generation, decode, deadline, ..) = track.queue.front()?;
 				Some(((*generation, decode.as_nanos(), key), *deadline))
 			})
 			.min_by(|a, b| a.0.cmp(&b.0))
@@ -1253,7 +1318,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 
 	fn poll_available(&mut self, waiter: &kio::Waiter, held: Option<&BTreeMap<K, Ready<K, T>>>) -> Poll<Ready<K, T>> {
 		loop {
-			let now = moq_clock::now();
+			let now = kio::clock::now();
 			let acquired = self.acquired_by();
 			if acquired.is_some_and(|end| now >= end) {
 				self.acquired();
@@ -1266,9 +1331,10 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 				&& (self.delay.is_zero() || now >= *deadline)
 			{
 				let track = self.tracks.get_mut(key).expect("the front's track");
-				let (generation, decode, deadline, item) = track.queue.pop_front().expect("the front frame");
+				let (generation, decode, deadline, item, bytes) = track.queue.pop_front().expect("the front frame");
+				track.bytes -= bytes;
 				let first = !std::mem::replace(&mut track.started, true);
-				self.released = true;
+				self.released = self.released.max(Some(deadline));
 				// A previous-generation frame queued now would go out after this one.
 				if self.clock.is_some_and(|clock| clock.generation == generation) {
 					self.previous = None;
@@ -1280,35 +1346,22 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 					decode,
 					deadline,
 					first,
+					bytes,
 				});
 			}
 			let Some(wake) = front.map(|(deadline, _)| deadline).into_iter().chain(acquired).min() else {
 				self.timer = None;
 				return Poll::Pending;
 			};
-			let timer = self.timer.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(wake)));
+			let timer = self
+				.timer
+				.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(wake)));
 			if timer.deadline() != wake {
 				timer.as_mut().reset(wake);
 			}
 			if waiter.poll_future(timer.as_mut()).is_pending() {
 				return Poll::Pending;
 			}
-		}
-	}
-
-	/// The source lost the rest of the group `key` was in, its `cut`th such loss
-	/// ([`Arrival::cut`]), known before the track's next frame: what a track that has not
-	/// started holds goes with it now, rather than once that frame arrives, which may be after
-	/// the cut-off start was due.
-	pub fn cut(&mut self, key: &K, cut: u64) {
-		if let Some(acquire) = &mut self.acquire
-			&& acquire.tracks.contains_key(key)
-		{
-			acquire.cuts.insert(key.clone(), cut);
-			return;
-		}
-		if let Some(track) = self.tracks.get_mut(key) {
-			self.trimmed += track.cut(cut);
 		}
 	}
 
@@ -1342,7 +1395,7 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 	where
 		K: Borrow<Q>,
 	{
-		let (_, _, _, item) = self.tracks.get(key)?.queue.front()?;
+		let (_, _, _, item, _) = self.tracks.get(key)?.queue.front()?;
 		Some(item)
 	}
 
@@ -1386,16 +1439,48 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 			.min()
 	}
 
-	/// Whether `key` has a frame waiting that is already due (any frame, without a delay), so
-	/// reading more of it now would only queue what the output cannot take yet.
-	pub fn full<Q: Ord + ?Sized>(&self, key: &Q) -> bool
+	/// Whether `key` has output due, holds its byte budget, or its newest queued frame is
+	/// beyond the delay and its measured lead, so reading more would move future backlog out of
+	/// the source. Frames held for a clock still being acquired count against the budget too:
+	/// there is no clock yet to judge them by time.
+	pub fn full<Q: Ord + ?Sized>(&mut self, key: &Q, waiter: &kio::Waiter) -> bool
 	where
 		K: Borrow<Q>,
 	{
-		self.tracks
-			.get(key)
-			.and_then(|track| track.queue.front())
-			.is_some_and(|(_, _, deadline, _)| self.delay.is_zero() || *deadline <= moq_clock::now())
+		let acquiring = self
+			.acquire
+			.as_ref()
+			.and_then(|acquire| acquire.bytes.get(key))
+			.copied()
+			.unwrap_or(0);
+		if acquiring >= self.max_bytes {
+			return true;
+		}
+		let Some((stored, track)) = self.tracks.get_key_value(key) else {
+			return false;
+		};
+		let Some((_, _, first, ..)) = track.queue.front() else {
+			return false;
+		};
+		let now = kio::clock::now();
+		if self.delay.is_zero() || *first <= now || acquiring + track.bytes >= self.max_bytes {
+			return true;
+		}
+		let lead = Duration::from_secs_f64(self.lead(stored).unwrap_or(0.0).max(0.0));
+		let (_, _, last, ..) = track.queue.back().expect("the first frame is queued");
+		let reopen = last.checked_sub(self.delay + lead).unwrap_or(now);
+		let track = self.tracks.get_mut(key).expect("the queued track");
+		if reopen <= now {
+			track.read_timer = None;
+			return false;
+		}
+		let timer = track
+			.read_timer
+			.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(reopen)));
+		if timer.deadline() != reopen {
+			timer.as_mut().reset(reopen);
+		}
+		waiter.poll_future(timer.as_mut()).is_pending()
 	}
 
 	/// How many frames are waiting.
@@ -1417,8 +1502,8 @@ impl<K: Ord + Clone, T> Engine<K, T> {
 		self.dropped
 	}
 
-	/// How many frames were dropped before their track's first went out, so it starts on a whole
-	/// group: what a joiner is handed older than the delay, and a start group a loss cut short.
+	/// How many frames were dropped before their track's first went out, so it starts on a sync
+	/// frame: what a joiner is handed older than the delay, and what it held with them.
 	pub fn trimmed(&self) -> u64 {
 		self.trimmed
 	}
@@ -1503,9 +1588,9 @@ mod tests {
 	const DELAY: Duration = Duration::from_millis(100);
 
 	/// A pending publisher cannot clobber active expected tracks or automatic clock jumps.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn pending_keys_and_active_timeline_jumps_use_independent_clocks() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let delay = Duration::from_millis(500);
 		let mut buffer = Buffer::new(delay).replay();
 		buffer.expect([0u16]);
@@ -1516,14 +1601,14 @@ mod tests {
 		buffer.expect_pending([1, 3], [1, 3]);
 		buffer.push(2, arrival(start, 0, "A2")).unwrap();
 		buffer.push(3, arrival(start, 10_000, "B3")).unwrap();
-		moq_clock::sleep(delay).await;
+		kio::clock::sleep(delay).await;
 		assert_eq!(due(&mut buffer), ["A0", "A2"]);
 		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
 			panic!("B ready");
 		};
 		assert_eq!((first.item, first.generation), ("B1", 0));
 		buffer.hold_pending(first);
-		assert!(buffer.full(&1));
+		assert!(buffer.full(&1, &kio::Waiter::noop()));
 		let Poll::Ready(next) = buffer.poll_pending(&kio::Waiter::noop()) else {
 			panic!("B3 ready");
 		};
@@ -1533,27 +1618,27 @@ mod tests {
 				0,
 				Arrival {
 					restart: 1,
-					..arrival(moq_clock::now(), 0, "A restart")
+					..arrival(kio::clock::now(), 0, "A restart")
 				},
 			)
 			.unwrap();
-		buffer.push(3, arrival(moq_clock::now(), 10_020, "B next")).unwrap();
-		moq_clock::sleep(Duration::from_millis(20)).await;
+		buffer.push(3, arrival(kio::clock::now(), 10_020, "B next")).unwrap();
+		kio::clock::sleep(Duration::from_millis(20)).await;
 		let Poll::Ready(next) = buffer.poll_pending(&kio::Waiter::noop()) else {
 			panic!("B clock kept its deadline");
 		};
 		assert_eq!((next.item, next.generation), ("B next", 0));
-		moq_clock::sleep(delay - Duration::from_millis(20)).await;
+		kio::clock::sleep(delay - Duration::from_millis(20)).await;
 		let Poll::Ready(next) = buffer.poll_next(&kio::Waiter::noop()) else {
 			panic!("A restart ready");
 		};
 		assert_eq!((next.item, next.generation), ("A restart", 1));
 	}
 
-	/// A caller can hold B's first issued item, cancel before adoption, and resume A.
-	#[moq_clock::test]
-	async fn cancelling_an_issued_replacement_keeps_the_active_clock_and_queue() {
-		let start = moq_clock::now();
+	/// A caller can hold B's first issued item, cancel before adoption, and resume A on its clock.
+	#[kio::test]
+	async fn cancelling_an_issued_replacement_keeps_the_active_clock() {
+		let start = kio::clock::now();
 		let delay = Duration::from_millis(500);
 		let mut buffer = Buffer::new(delay).replay();
 		buffer.push(0u16, arrival(start, 0, "A0")).unwrap();
@@ -1563,31 +1648,28 @@ mod tests {
 		buffer.push(1, arrival(start, 10_000, "B")).unwrap();
 		buffer.lose(&1, true);
 		buffer.lose(&1, true);
-		moq_clock::sleep(delay).await;
+		kio::clock::sleep(delay).await;
 		assert_eq!(due(&mut buffer), ["A0"]);
 		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
 			panic!("B ready");
 		};
 		buffer.commit(first).unwrap();
-		assert_eq!(buffer.reporting().dropped(), 1);
-		moq_clock::sleep(Duration::from_millis(100)).await;
-		let Poll::Ready(tail) = buffer.poll_next(&kio::Waiter::noop()) else {
-			panic!("A tail retained");
-		};
-		assert_eq!(tail.item, "A tail");
+		// The commit drops A's tail.
+		assert_eq!(buffer.reporting().dropped(), 2);
+		kio::clock::sleep(Duration::from_millis(100)).await;
 		let Poll::Ready(held) = buffer.poll_next(&kio::Waiter::noop()) else {
 			panic!("B issued");
 		};
 		assert_eq!(held.item, "B");
 		buffer.cancel();
-		assert_eq!(buffer.reporting().dropped(), 1);
+		assert_eq!(buffer.reporting().dropped(), 2);
 		assert_eq!(buffer.at(0, ms(200)), Some(start + delay + Duration::from_millis(200)));
-		buffer.push(0, arrival(moq_clock::now(), 200, "A resumed")).unwrap();
+		buffer.push(0, arrival(kio::clock::now(), 200, "A resumed")).unwrap();
 		buffer.start([2], [2]);
-		buffer.push(2, arrival(moq_clock::now(), 20_000, "C")).unwrap();
-		moq_clock::sleep(Duration::from_millis(100)).await;
+		buffer.push(2, arrival(kio::clock::now(), 20_000, "C")).unwrap();
+		kio::clock::sleep(Duration::from_millis(100)).await;
 		assert_eq!(due(&mut buffer), ["A resumed"]);
-		moq_clock::sleep(Duration::from_millis(400)).await;
+		kio::clock::sleep(Duration::from_millis(400)).await;
 		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
 			panic!("C ready");
 		};
@@ -1600,60 +1682,164 @@ mod tests {
 		assert_eq!(buffer.reporting().dropped(), 0);
 	}
 
-	/// A restart the old publisher is still acquiring at commit goes out before the replacement.
-	#[moq_clock::test]
-	async fn a_commit_drains_the_old_publishers_acquiring_restart() {
-		let start = moq_clock::now();
+	/// A cancel after commit resumes the old publisher at its next sync frame, since the frames
+	/// after its cut tail may reference it.
+	#[kio::test]
+	async fn a_cancelled_commit_resumes_the_old_publisher_at_a_sync_frame() {
+		let start = kio::clock::now();
+		let delay = Duration::from_millis(500);
+		let mut buffer = Buffer::new(delay).replay();
+		buffer.push(0u16, arrival(start, 0, "A0")).unwrap();
+		buffer.push(0, arrival(start, 100, "A tail")).unwrap();
+		buffer.start([1], [1]);
+		buffer.push(1, arrival(start, 10_000, "B")).unwrap();
+		kio::clock::sleep(delay).await;
+		assert_eq!(due(&mut buffer), ["A0"]);
+		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
+			panic!("B ready");
+		};
+		buffer.commit(first).unwrap();
+		buffer.cancel();
+		assert_eq!(buffer.reporting().dropped(), 1);
+		let delta = Arrival {
+			sync: false,
+			..arrival(kio::clock::now(), 200, "A delta")
+		};
+		assert_eq!(buffer.push(0, delta).unwrap(), Push::Waiting);
+		assert_eq!(buffer.reporting().dropped(), 2);
+		let key = arrival(kio::clock::now(), 300, "A key");
+		assert_eq!(buffer.push(0, key).unwrap(), Push::Queued);
+		kio::clock::sleep(delay).await;
+		assert_eq!(due(&mut buffer), ["A key"]);
+	}
+
+	/// A restart the old publisher is still acquiring at commit is dropped with the old tail.
+	#[kio::test]
+	async fn a_commit_drops_the_old_publishers_acquiring_restart() {
+		let start = kio::clock::now();
 		let delay = Duration::from_millis(500);
 		let mut buffer = Buffer::new(delay);
 		buffer.push(0u16, arrival(start, 0, "A0")).unwrap();
-		moq_clock::sleep(delay).await;
+		kio::clock::sleep(delay).await;
 		assert_eq!(released(&mut buffer), [("A0", 0)]);
 		buffer.start([1], [1]);
-		buffer.push(1, arrival(moq_clock::now(), 10_000, "B")).unwrap();
-		moq_clock::sleep(Duration::from_millis(10)).await;
+		buffer.push(1, arrival(kio::clock::now(), 10_000, "B")).unwrap();
+		kio::clock::sleep(Duration::from_millis(10)).await;
 		buffer
-			.push(0, after(1, arrival(moq_clock::now(), 5_000, "A restart")))
+			.push(0, after(1, arrival(kio::clock::now(), 5_000, "A restart")))
 			.unwrap();
-		moq_clock::sleep(delay - Duration::from_millis(10)).await;
+		kio::clock::sleep(delay - Duration::from_millis(10)).await;
 		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
 			panic!("B ready");
 		};
 		// A's acquisition has 10 ms left to run, so only the commit can settle it.
 		buffer.commit(first).unwrap();
-		moq_clock::sleep(Duration::from_millis(10)).await;
-		assert_eq!(released(&mut buffer), [("A restart", 1), ("B", 2)]);
+		assert_eq!(released(&mut buffer), [("B", 2)]);
+		assert_eq!(buffer.reporting().dropped(), 1);
 	}
 
-	#[moq_clock::test]
+	/// A replacement shifted behind what already went out fails past the clock's range.
+	#[kio::test]
 	async fn a_handoff_past_the_clock_range_returns_overflow() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY).replay();
-		buffer.push(0u16, arrival(start, 0, "A")).unwrap();
+		// A's clock runs a millisecond behind B's, so B shifts behind A's last frame out.
+		buffer
+			.push(0u16, arrival(start + Duration::from_millis(1), 0, "A"))
+			.unwrap();
+		buffer.start([1], [1]);
+		buffer.push(1, arrival(start, 0, "B first")).unwrap();
 		let last = Instant::ZERO.checked_add(Duration::from_nanos(u64::MAX)).unwrap();
 		let decode = Decode::from_nanos((last - start - DELAY).as_nanos() as i128);
 		buffer
 			.push(
-				0,
+				1,
 				Arrival {
 					decode,
-					..arrival(start, 0, "A last")
+					..arrival(start, 0, "B last")
 				},
 			)
 			.unwrap();
-		buffer.start([1], [1]);
-		buffer.push(1, arrival(start, 0, "B first")).unwrap();
-		buffer.push(1, arrival(start, 1, "B after last")).unwrap();
-		moq_clock::sleep(DELAY).await;
+		kio::clock::sleep(DELAY + Duration::from_millis(1)).await;
+		assert_eq!(due(&mut buffer), ["A"]);
 		let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) else {
 			panic!("B ready");
 		};
 		assert_eq!(buffer.commit(first), Err(moq_net::TimeOverflow));
 	}
 
-	#[moq_clock::test]
+	/// Each switch goes out at the delay its replacement's clock acquired, not after the old
+	/// program's tail, so latency does not build up switch after switch, and every frame
+	/// after a switch is the replacement's.
+	#[kio::test]
+	async fn repeated_switches_keep_the_delay() {
+		const TICK: Duration = Duration::from_millis(100);
+		let start = kio::clock::now();
+		let delay = Duration::from_millis(500);
+		let mut buffer = Buffer::<u16, Instant>::new(delay).replay();
+		// Publisher `key` stamps each frame `key * 100 s` past the time it sends it.
+		let push = |buffer: &mut Buffer<u16, Instant>, key: u16| {
+			let now = kio::clock::now();
+			let frame = Arrival {
+				arrived: now,
+				read: now,
+				decode: ms(u64::from(key) * 100_000 + (now - start).as_millis() as u64).into(),
+				restart: 0,
+				sync: true,
+				leading: false,
+				bytes: 0,
+				item: now,
+			};
+			assert_eq!(buffer.push(key, frame).unwrap(), Push::Queued);
+		};
+		// Every frame due now goes out the delay after it arrived, in generation order, and
+		// all from `key`.
+		let drain = |buffer: &mut Buffer<u16, Instant>, key: u16, generation: &mut u64| {
+			let mut count = 0;
+			while let Poll::Ready(ready) = buffer.poll_next(&kio::Waiter::noop()) {
+				assert_eq!(ready.track, key, "an old frame after the switch");
+				assert_eq!(kio::clock::now() - ready.item, delay);
+				assert!(ready.generation >= *generation);
+				*generation = ready.generation;
+				count += 1;
+			}
+			count
+		};
+		let mut generation = 0;
+		for _ in 0..20 {
+			push(&mut buffer, 0);
+			drain(&mut buffer, 0, &mut generation);
+			kio::clock::sleep(TICK).await;
+		}
+		for key in 1..4u16 {
+			buffer.start([key], [key]);
+			let first = loop {
+				push(&mut buffer, key - 1);
+				push(&mut buffer, key);
+				drain(&mut buffer, key - 1, &mut generation);
+				if let Poll::Ready(first) = buffer.poll_pending(&kio::Waiter::noop()) {
+					break first;
+				}
+				kio::clock::sleep(TICK).await;
+			};
+			let dropped = buffer.reporting().dropped();
+			buffer.commit(first).unwrap();
+			// The old tail still queued, the delay's worth read since the frame due now, is cut.
+			assert_eq!(buffer.reporting().dropped() - dropped, 5);
+			assert_eq!(drain(&mut buffer, key, &mut generation), 1);
+			buffer.adopted();
+			for _ in 0..20 {
+				kio::clock::sleep(TICK).await;
+				push(&mut buffer, key);
+				drain(&mut buffer, key, &mut generation);
+			}
+		}
+		assert_eq!(generation, 3);
+	}
+
+	#[kio::test]
 	async fn decode_before_zero_keeps_its_deadline_and_media_order() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY).replay();
 		buffer.push(2, arrival(start, 0, "audio")).unwrap();
 		let before_zero = Decode::from_nanos(-22_223);
@@ -1671,13 +1857,13 @@ mod tests {
 			Some(start + DELAY - Duration::from_nanos(22_223))
 		);
 		assert_eq!(buffer.at(0, ms(0)), Some(start + DELAY));
-		moq_clock::sleep(DELAY).await;
+		kio::clock::sleep(DELAY).await;
 		assert_eq!(due(&mut buffer), ["video", "audio"]);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn moving_media_zero_preserves_acquisition_and_deadlines() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut negative = Buffer::new(DELAY);
 		let mut positive = Buffer::new(DELAY);
 		for buffer in [&mut negative, &mut positive] {
@@ -1696,7 +1882,7 @@ mod tests {
 					.unwrap();
 			}
 		}
-		moq_clock::sleep(DELAY).await;
+		kio::clock::sleep(DELAY).await;
 		assert_eq!(due(&mut negative), due(&mut positive));
 		for nanos in [-22_223, -11_112, 0, 11_111] {
 			assert_eq!(
@@ -1732,21 +1918,16 @@ mod tests {
 			read: arrived,
 			decode: ms(decode).into(),
 			restart: 0,
-			skip: 0,
-			cut: 0,
 			sync: true,
 			leading: false,
+			bytes: 0,
 			item,
 		}
 	}
 
 	/// The same frame, read after its source restarted its timeline `restart` times.
 	fn after(restart: u64, arrival: Arrival<&'static str>) -> Arrival<&'static str> {
-		Arrival {
-			restart,
-			skip: restart,
-			..arrival
-		}
+		Arrival { restart, ..arrival }
 	}
 
 	/// Every frame due by now, in order, with its generation.
@@ -1768,7 +1949,7 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn acquisition_observes_every_tracks_available_frames() {
 		for order in [[1, 2], [2, 1]] {
-			let start = moq_clock::now();
+			let start = kio::clock::now();
 			let mut buffer = Buffer::new(Duration::from_millis(500));
 			buffer.expect([1, 2]);
 			// The held first frames reach the jitter buffer before the rest of the fill.
@@ -1781,7 +1962,7 @@ mod tests {
 				let end = if track == 1 { 1_200 } else { 800 };
 				for decode in (40..=end).step_by(40) {
 					assert!(
-						!buffer.full(&track),
+						!buffer.full(&track, &kio::Waiter::noop()),
 						"the fill must observe the whole backlog: {order:?}"
 					);
 					buffer
@@ -1808,7 +1989,7 @@ mod tests {
 
 	#[tokio::test(start_paused = true)]
 	async fn releases_at_the_delay_in_decode_order() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY).replay();
 		assert_eq!(buffer.push(1, arrival(start, 0, "v0")).unwrap(), Push::Queued);
 		assert_eq!(buffer.push(1, arrival(start, 40, "v40")).unwrap(), Push::Queued);
@@ -1873,7 +2054,7 @@ mod tests {
 	/// its deadline, emit the same order.
 	#[tokio::test(start_paused = true)]
 	async fn arrival_skew_does_not_change_the_order() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let (mut early, mut late) = (Buffer::new(DELAY).replay(), Buffer::new(DELAY).replay());
 		let frames = [
 			(1, 0, "v0"),
@@ -1905,7 +2086,7 @@ mod tests {
 	/// dropped a frame waits for its next sync frame.
 	#[tokio::test(start_paused = true)]
 	async fn late_frames_are_dropped_until_a_sync_frame() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY).replay();
 		buffer.push(1, arrival(start, 0, "v0")).unwrap();
 		buffer.push(2, arrival(start, 0, "a0")).unwrap();
@@ -1975,7 +2156,7 @@ mod tests {
 	/// A restart before anything went out keeps the clock, so the tracks stay on one.
 	#[tokio::test(start_paused = true)]
 	async fn a_skip_before_the_first_release_keeps_one_clock() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY).replay();
 		// The video's first group is stale and anchors the clock; the audio is live.
 		buffer.push(1, arrival(start, 0, "v0")).unwrap();
@@ -2003,7 +2184,7 @@ mod tests {
 	/// runs on it, whether or not that track saw the restart.
 	#[tokio::test(start_paused = true)]
 	async fn every_track_joins_a_new_generation_at_its_next_frame() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY).replay();
 		buffer.push(1, arrival(start, 0, "v0")).unwrap();
 		buffer.push(2, arrival(start, 0, "a0")).unwrap();
@@ -2013,7 +2194,7 @@ mod tests {
 
 		// The publisher resumes a second later with its timeline five seconds on.
 		let resume = start + Duration::from_secs(1);
-		tokio::time::advance(resume - moq_clock::now()).await;
+		tokio::time::advance(resume - kio::clock::now()).await;
 		assert_eq!(
 			buffer.push(1, after(1, arrival(resume, 5_000, "v5000"))).unwrap(),
 			Push::Queued
@@ -2039,7 +2220,7 @@ mod tests {
 	/// clock anchors on it, the track sent latest, so it keeps the delay.
 	#[tokio::test(start_paused = true)]
 	async fn a_track_without_the_restart_joins_the_acquisition() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY);
 		buffer.expect([1, 2]);
 		buffer.push(1, arrival(start, 0, "v0")).unwrap();
@@ -2050,19 +2231,19 @@ mod tests {
 		// The publisher resumes a second later with its timeline five seconds on, and sends
 		// the audio further behind the video than the delay.
 		let resume = start + Duration::from_secs(1);
-		tokio::time::advance(resume - moq_clock::now()).await;
+		tokio::time::advance(resume - kio::clock::now()).await;
 		assert_eq!(
 			buffer.push(1, after(1, arrival(resume, 5_000, "v5000"))).unwrap(),
 			Push::Queued
 		);
 		let lag = resume + DELAY + Duration::from_millis(50);
-		tokio::time::advance(lag - moq_clock::now()).await;
+		tokio::time::advance(lag - kio::clock::now()).await;
 		assert_eq!(buffer.push(2, arrival(lag, 5_000, "a5000")).unwrap(), Push::Queued);
 		tokio::time::advance(Duration::from_millis(20)).await;
-		let next = moq_clock::now();
+		let next = kio::clock::now();
 		assert_eq!(buffer.push(2, arrival(next, 5_020, "a5020")).unwrap(), Push::Queued);
 
-		tokio::time::advance(lag + DELAY - moq_clock::now()).await;
+		tokio::time::advance(lag + DELAY - kio::clock::now()).await;
 		assert_eq!(released(&mut buffer), [("v5000", 1), ("a5000", 1)]);
 		tokio::time::advance(Duration::from_millis(20)).await;
 		assert_eq!(released(&mut buffer), [("a5020", 1)]);
@@ -2074,7 +2255,7 @@ mod tests {
 	/// timeline 15 seconds on: each released frame's generation, and how many were dropped.
 	async fn cross(steps: u64, tail: u64) -> (Vec<u64>, u64) {
 		const LAG: u64 = 300;
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY);
 		buffer.expect([1, 2]);
 
@@ -2097,7 +2278,7 @@ mod tests {
 		let mut out = Vec::new();
 		for (read, key, restart, decode) in frames {
 			let at = start + Duration::from_millis(read);
-			tokio::time::advance(at - moq_clock::now()).await;
+			tokio::time::advance(at - kio::clock::now()).await;
 			out.extend(released(&mut buffer).into_iter().map(|(_, generation)| generation));
 			buffer.push(key, after(restart, arrival(at, decode, "frame"))).unwrap();
 		}
@@ -2135,7 +2316,7 @@ mod tests {
 	/// neither clock, so it drops as late without steering, and the track's next frame on the
 	/// new timeline still joins it.
 	async fn stray(to: u64) {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY);
 		buffer.expect([1]);
 		buffer.push(1, arrival(start, 10_000, "v")).unwrap();
@@ -2144,12 +2325,12 @@ mod tests {
 		assert_eq!(due(&mut buffer), ["v", "d"]);
 
 		let resume = start + Duration::from_secs(1);
-		tokio::time::advance(resume - moq_clock::now()).await;
+		tokio::time::advance(resume - kio::clock::now()).await;
 		buffer.push(1, after(1, arrival(resume, to, "v'"))).unwrap();
 		tokio::time::advance(DELAY).await;
 		assert_eq!(released(&mut buffer), [("v'", 1)]);
 
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		assert_eq!(buffer.push(2, arrival(now, 10_040, "d")).unwrap(), Push::Late);
 		assert!(buffer.is_empty(), "the old frame was queued on the new clock");
 		assert!(buffer.steer.floor.is_none(), "the old frame was steered on");
@@ -2172,7 +2353,7 @@ mod tests {
 	/// dropped, and the next on-time frame goes out on the same generation.
 	#[tokio::test(start_paused = true)]
 	async fn a_skip_keeps_the_clock() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY);
 		buffer.push(1, arrival(start, 0, "a0")).unwrap();
 		tokio::time::advance(DELAY).await;
@@ -2180,36 +2361,49 @@ mod tests {
 
 		// Group 1 is skipped: frames from 100 ms on arrive after a 250 ms stall.
 		let stalled = start + Duration::from_millis(350);
-		tokio::time::advance(stalled - moq_clock::now()).await;
-		let skipped = |decode, item| Arrival {
-			skip: 1,
-			..arrival(stalled, decode, item)
-		};
-		assert_eq!(buffer.push(1, skipped(200, "a200")).unwrap(), Push::Late);
-		assert_eq!(buffer.push(1, skipped(300, "a300")).unwrap(), Push::Queued);
+		tokio::time::advance(stalled - kio::clock::now()).await;
+		assert_eq!(buffer.push(1, arrival(stalled, 200, "a200")).unwrap(), Push::Late);
+		assert_eq!(buffer.push(1, arrival(stalled, 300, "a300")).unwrap(), Push::Queued);
 		tokio::time::advance(Duration::from_millis(100)).await;
 		assert_eq!(released(&mut buffer), [("a300", 0)]);
 	}
 
-	/// A skip after which a frame would be held more than a delay past everything queued
-	/// followed a timeline that leapt ahead, as when the skipped groups held a marker the
-	/// publisher shed, so it opens a generation.
+	/// A skip after which a frame is due more than a delay further ahead of its arrival than
+	/// its track's last followed a timeline that leapt ahead, as when the skipped groups held a
+	/// marker the publisher shed, so it opens a generation.
 	#[tokio::test(start_paused = true)]
 	async fn a_skip_that_leaps_ahead_opens_a_generation() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY);
 		buffer.push(1, arrival(start, 0, "a0")).unwrap();
 		tokio::time::advance(DELAY).await;
 		assert_eq!(due(&mut buffer), ["a0"]);
 
-		let now = moq_clock::now();
-		let leapt = Arrival {
-			skip: 1,
-			..arrival(now, 5_000, "a5000")
-		};
-		assert_eq!(buffer.push(1, leapt).unwrap(), Push::Queued);
+		let now = kio::clock::now();
+		assert_eq!(buffer.push(1, arrival(now, 5_000, "a5000")).unwrap(), Push::Queued);
 		tokio::time::advance(DELAY).await;
 		assert_eq!(released(&mut buffer), [("a5000", 1)]);
+	}
+
+	/// A skip after which a frame arrives a little fresher than the frame the clock anchored on,
+	/// with nothing queued, keeps the clock: the timeline did not move, and a new generation
+	/// would cost the output a discontinuity.
+	#[tokio::test(start_paused = true)]
+	async fn a_fresher_frame_after_a_skip_keeps_the_clock() {
+		let start = kio::clock::now();
+		let mut buffer = Buffer::new(DELAY);
+		buffer.expect([1]);
+		buffer.push(1, arrival(start, 0, "a0")).unwrap();
+		tokio::time::advance(DELAY).await;
+		assert_eq!(released(&mut buffer), [("a0", 0)]);
+
+		// A second on, past a skipped group, the next frame is 20 ms less queued than the first.
+		let resume = start + Duration::from_secs(1);
+		tokio::time::advance(resume - kio::clock::now()).await;
+		assert_eq!(buffer.push(1, arrival(resume, 1_020, "a1020")).unwrap(), Push::Queued);
+		tokio::time::advance(Duration::from_secs(1)).await;
+		assert_eq!(released(&mut buffer), [("a1020", 0)]);
+		assert_eq!(buffer.dropped(), 0);
 	}
 
 	/// A track sent ahead of the others is held its lead past the delay. Once a skip of its own
@@ -2217,23 +2411,22 @@ mod tests {
 	#[tokio::test(start_paused = true)]
 	async fn a_track_sent_ahead_resuming_after_a_skip_keeps_the_clock() {
 		const LEAD: u64 = 300;
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY);
 		buffer.expect([1, 2]);
 		let mut out = Vec::new();
 		for at in (0..12_000).step_by(40) {
-			tokio::time::advance(start + Duration::from_millis(at) - moq_clock::now()).await;
-			let now = moq_clock::now();
+			tokio::time::advance(start + Duration::from_millis(at) - kio::clock::now()).await;
+			let now = kio::clock::now();
 			assert_eq!(buffer.push(1, arrival(now, at, "v")).unwrap(), Push::Queued);
 			// Track 2 is sent LEAD ahead, and skips a second of its own.
 			let decode = at + LEAD;
 			if !(8_000..9_000).contains(&decode) {
-				let skip = u64::from(decode >= 9_000);
-				let frame = Arrival {
-					skip,
-					..arrival(now, decode, "a")
-				};
-				assert_eq!(buffer.push(2, frame).unwrap(), Push::Queued, "at {at} ms");
+				assert_eq!(
+					buffer.push(2, arrival(now, decode, "a")).unwrap(),
+					Push::Queued,
+					"at {at} ms"
+				);
 			}
 			out.extend(released(&mut buffer));
 		}
@@ -2245,45 +2438,11 @@ mod tests {
 		assert_eq!(buffer.dropped(), 0);
 	}
 
-	/// A cut the source reports before the track's next frame takes the start group it left
-	/// short then, whether the clock is still being acquired or the group is queued, though the
-	/// next group arrives only after that start was due.
-	#[tokio::test(start_paused = true)]
-	async fn a_cut_reported_before_the_next_group_drops_the_start_group() {
-		for replay in [false, true] {
-			let mut buffer = Buffer::new(DELAY);
-			if replay {
-				buffer = buffer.replay();
-			}
-			let video = |decode, sync, cut, item| Arrival {
-				sync,
-				skip: cut,
-				cut,
-				..arrival(moq_clock::now(), decode, item)
-			};
-			buffer.push(1, video(0, true, 0, "v0")).unwrap();
-			tokio::time::advance(Duration::from_millis(40)).await;
-			buffer.push(1, video(40, false, 0, "v40")).unwrap();
-			tokio::time::advance(Duration::from_millis(20)).await;
-			buffer.cut(&1, 1);
-			tokio::time::advance(DELAY).await;
-			assert_eq!(
-				due(&mut buffer),
-				Vec::<&str>::new(),
-				"replay {replay}: the cut-off start went out"
-			);
-			buffer.push(1, video(160, true, 1, "v160")).unwrap();
-			tokio::time::advance(2 * DELAY).await;
-			assert_eq!(due(&mut buffer), ["v160"], "replay {replay}");
-			assert_eq!((buffer.dropped(), buffer.trimmed()), (0, 2), "replay {replay}");
-		}
-	}
-
 	/// Every frame of a generation goes out before the next generation's, even one the new
 	/// clock puts earlier.
 	#[tokio::test(start_paused = true)]
 	async fn generations_go_out_in_turn() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY).replay();
 		buffer.push(1, arrival(start, 0, "v0")).unwrap();
 		buffer.push(1, arrival(start, 40, "v40")).unwrap();
@@ -2292,7 +2451,7 @@ mod tests {
 		assert_eq!(due(&mut buffer), ["v0"]);
 
 		// A backlog across a jump in the timeline, read in one go.
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		buffer.push(1, after(1, arrival(now, 5_000, "v5000"))).unwrap();
 		buffer.push(2, arrival(now, 4_900, "a4900")).unwrap();
 		buffer.push(2, arrival(now, 5_020, "a5020")).unwrap();
@@ -2330,8 +2489,8 @@ mod tests {
 	/// fails.
 	async fn drift(ppm: f64, hours: f64, settled: f64, queueing: impl Fn(f64) -> Duration) -> Run {
 		let delay = Duration::from_millis(500);
-		let start = moq_clock::now();
-		let clock = moq_clock::Deadlines::new(start);
+		let start = kio::clock::now();
+		let clock = kio::clock::Deadlines::new(start);
 		let _entered = clock.enter();
 		let mut buffer = Buffer::new(delay);
 		let mut run = Run {
@@ -2365,10 +2524,9 @@ mod tests {
 				read: arrived,
 				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap().into(),
 				restart: 0,
-				skip: 0,
-				cut: 0,
 				sync: true,
 				leading: false,
+				bytes: 0,
 				item: "v",
 			};
 			let held = buffer
@@ -2520,8 +2678,8 @@ mod tests {
 	/// clock reaching us at `arrive(track, sent)`, or with the frame of its track before it if
 	/// that is later, or never if `None`, in the order they reach us, until a push fails.
 	async fn feed(shape: &Shape, ppm: f64, secs: f64, arrive: impl Fn(u16, f64) -> Option<f64>) -> Fed {
-		let start = moq_clock::now();
-		let clock = moq_clock::Deadlines::new(start);
+		let start = kio::clock::now();
+		let clock = kio::clock::Deadlines::new(start);
 		let _entered = clock.enter();
 		let mut buffer = Buffer::new(shape.delay);
 		let mut frames = Vec::new();
@@ -2553,10 +2711,9 @@ mod tests {
 				read: arrived,
 				decode: Timestamp::from_micros(decode.as_micros() as u64).unwrap().into(),
 				restart: 0,
-				skip: 0,
-				cut: 0,
 				sync: true,
 				leading: false,
+				bytes: 0,
 				item: "v",
 			};
 			match buffer.push(track, frame) {
@@ -2645,6 +2802,103 @@ mod tests {
 				assert!(fed.err.is_none(), "{length} s stall at {at} s: {:?}", fed.err);
 				assert!(fed.dropped > 0, "{length} s stall at {at} s: nothing dropped");
 				assert_eq!(fed.last, Some(Push::Queued), "{length} s stall at {at} s");
+			}
+		}
+	}
+
+	/// What [`unmarked`] saw.
+	struct Stepped {
+		err: Option<anyhow::Error>,
+		dropped: u64,
+		/// Each frame's generation, in the order they went out.
+		out: Vec<u64>,
+		/// The clock's drift just before the step, and at the end.
+		before: f64,
+		after: f64,
+	}
+
+	/// Feed `secs` of 10 fps frames of `shape`'s tracks through its buffer from a source on our
+	/// clock, each sent as it decodes with a few ms of jitter that changes every steering step,
+	/// whose timeline steps by `step` seconds at `at` s with no restart marker.
+	async fn unmarked(shape: &Shape, at: f64, step: f64, secs: f64) -> Stepped {
+		// Where the timeline starts, so a step back stays on it.
+		const BASE: f64 = 20_000.0;
+		let start = kio::clock::now();
+		let clock = kio::clock::Deadlines::new(start);
+		let _entered = clock.enter();
+		let mut buffer = Buffer::new(shape.delay);
+		buffer.expect(shape.tracks.iter().copied());
+		let mut stepped = Stepped {
+			err: None,
+			dropped: 0,
+			out: Vec::new(),
+			before: 0.0,
+			after: 0.0,
+		};
+		for k in 0..(secs * 10.0) as u64 {
+			let sent = k as f64 / 10.0;
+			let jitter = ((k / 20) * 3) % 5;
+			let arrived = start + Duration::from_secs_f64(sent + jitter as f64 * 0.002);
+			clock.advance(arrived.max(clock.now()));
+			if sent < at {
+				stepped.before = buffer.clock.map_or(0.0, |clock| clock.drift);
+			}
+			let decode = BASE + sent + if sent >= at { step } else { 0.0 };
+			for &track in shape.tracks {
+				let frame = Arrival {
+					arrived,
+					read: arrived,
+					decode: Timestamp::from_micros((decode * 1e6).round() as u64).unwrap().into(),
+					restart: 0,
+					sync: true,
+					leading: false,
+					bytes: 0,
+					item: "v",
+				};
+				if let Err(err) = buffer.push(track, frame) {
+					stepped.err = Some(err);
+					return stepped;
+				}
+			}
+			stepped
+				.out
+				.extend(released(&mut buffer).into_iter().map(|(_, generation)| generation));
+		}
+		stepped.dropped = buffer.dropped();
+		stepped.after = buffer.clock.map_or(0.0, |clock| clock.drift);
+		stepped
+	}
+
+	/// A timeline that steps with no marker, as a changeover between two encoders whose clocks
+	/// started hours apart, by more than the delay absorbs, either way, before the rate window
+	/// fills or once it has, re-acquires the clock instead of reading the step as drift: one
+	/// new generation, nothing dropped, every frame out, and the step never swings the drift
+	/// further than the slew limit allows over the time that passed.
+	#[tokio::test(start_paused = true)]
+	async fn an_unmarked_step_reacquires_the_clock() {
+		for at in [30.0, 1_200.0] {
+			for step in [16_844.5, -16_844.5, 2.0, -2.0] {
+				let secs = at + 60.0;
+				let run = unmarked(&PAIR, at, step, secs).await;
+				let case = format!("{step:+} s step at {at} s");
+				assert!(run.err.is_none(), "{case}: {:?}", run.err);
+				assert_eq!(run.dropped, 0, "{case}");
+				assert!(run.out.is_sorted(), "{case}: a generation went out after the next");
+				assert_eq!(run.out.last(), Some(&1), "{case}: no single new generation");
+				// What is still held at the end goes out within a delay.
+				let held = (PAIR.delay.as_secs_f64() * 10.0).ceil() as usize + 1;
+				let pushed = (secs * 10.0) as usize * PAIR.tracks.len();
+				assert!(
+					run.out.len() + held * PAIR.tracks.len() >= pushed,
+					"{case}: {} of {pushed} went out",
+					run.out.len()
+				);
+				let swing = (run.after - run.before).abs();
+				assert!(
+					swing <= MAX_SLEW * (secs - at) * (1.0 + 1e-9),
+					"{case}: the drift swung {} ppm",
+					swing * 1e6
+				);
 			}
 		}
 	}
@@ -2758,7 +3012,7 @@ mod tests {
 	/// goes out a delay after it arrived.
 	#[tokio::test(start_paused = true)]
 	async fn a_joiner_anchors_on_its_freshest_frame() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY);
 		let video = |arrived, decode, sync, item| Arrival {
 			sync,
@@ -2784,36 +3038,30 @@ mod tests {
 		assert_eq!(buffer.trimmed(), 6);
 	}
 
-	/// A start group its source cuts short before anything of it went out is dropped whole,
-	/// so the track starts on the next group rather than on the cut-off start. Whole groups
-	/// missing after one that ended take nothing with them.
+	/// A start group its source cuts short before anything of it went out still goes out, from
+	/// its sync frame, ahead of the hole: a path narrower than the media cuts every group, so a
+	/// track waiting for a whole one might never start. Nothing is trimmed.
 	#[tokio::test(start_paused = true)]
-	async fn a_start_group_cut_by_a_gap_is_dropped_whole() {
-		let start = Instant::now();
-		let mut buffer = Buffer::new(DELAY).replay();
-		let video = |decode, sync, skip, cut, item| Arrival {
-			sync,
-			skip,
-			cut,
-			..arrival(start, decode, item)
-		};
-		buffer.push(1, video(0, true, 0, 0, "v0")).unwrap();
-		buffer.push(1, video(40, false, 0, 0, "v40")).unwrap();
-		// The rest of the group never arrives: the source cuts it short.
-		assert_eq!(buffer.push(1, video(120, true, 1, 1, "v120")).unwrap(), Push::Queued);
-		buffer.push(1, video(160, false, 1, 1, "v160")).unwrap();
-		// A whole group is missing after that one ended.
-		assert_eq!(buffer.push(1, video(280, true, 2, 1, "v280")).unwrap(), Push::Queued);
-		tokio::time::advance(Duration::from_secs(1)).await;
-		assert_eq!(due(&mut buffer), ["v120", "v160", "v280"]);
-		assert_eq!((buffer.dropped(), buffer.trimmed()), (0, 2));
-
-		// Once a frame went out, a cut is a loss in the output, and the rest still goes out.
-		buffer.push(1, video(320, false, 2, 1, "v320")).unwrap();
-		buffer.push(1, video(400, true, 3, 2, "v400")).unwrap();
-		tokio::time::advance(Duration::from_secs(1)).await;
-		assert_eq!(due(&mut buffer), ["v320", "v400"]);
-		assert_eq!((buffer.dropped(), buffer.trimmed()), (0, 2));
+	async fn a_start_group_cut_short_goes_out() {
+		for replay in [false, true] {
+			let mut buffer = Buffer::new(DELAY);
+			if replay {
+				buffer = buffer.replay();
+			}
+			let video = |decode, sync, item| Arrival {
+				sync,
+				..arrival(kio::clock::now(), decode, item)
+			};
+			buffer.push(1, video(0, true, "v0")).unwrap();
+			tokio::time::advance(Duration::from_millis(40)).await;
+			buffer.push(1, video(40, false, "v40")).unwrap();
+			// The rest of the group never arrives: the source cuts it short.
+			tokio::time::advance(Duration::from_millis(80)).await;
+			buffer.push(1, video(120, true, "v120")).unwrap();
+			tokio::time::advance(2 * DELAY).await;
+			assert_eq!(due(&mut buffer), ["v0", "v40", "v120"], "replay {replay}");
+			assert_eq!((buffer.dropped(), buffer.trimmed()), (0, 0), "replay {replay}");
+		}
 	}
 
 	/// The keyframe a joiner holds while the export starts is read early and passes, while the
@@ -2843,7 +3091,7 @@ mod tests {
 	/// keep the delay: anchored on the video, every audio frame would be late.
 	#[tokio::test(start_paused = true)]
 	async fn a_joiner_anchors_on_the_track_sent_latest() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY);
 		buffer.expect([1, 2]);
 		// Video is sent 300 ms ahead of its decode time, audio as it decodes.
@@ -2855,6 +3103,10 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(100)).await;
 		assert_eq!(due(&mut buffer), ["a20"], "the audio keeps the delay");
 		assert_eq!(buffer.next_deadline(), Some(start + Duration::from_millis(400)));
+		assert!(
+			!buffer.full(&1, &kio::Waiter::noop()),
+			"acquisition measures the video lead before steering starts"
+		);
 		assert_eq!(buffer.dropped(), 0);
 	}
 
@@ -2862,7 +3114,7 @@ mod tests {
 	/// the one sent latest, but two delays at most.
 	#[tokio::test(start_paused = true)]
 	async fn the_acquisition_waits_two_delays_at_most_for_a_silent_track() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY);
 		buffer.expect([1, 2]);
 		buffer.push(1, arrival(start, 0, "v0")).unwrap();
@@ -2876,7 +3128,7 @@ mod tests {
 	/// moment each was read.
 	#[tokio::test(start_paused = true)]
 	async fn a_steering_step_does_not_reorder_a_tie() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let order = |first: (u16, &'static str), second: (u16, &'static str)| {
 			let mut buffer = Buffer::new(DELAY).replay();
 			buffer.push(1, arrival(start, 0, "v0")).unwrap();
@@ -2896,7 +3148,7 @@ mod tests {
 	/// acquisition ends when the first of them falls due rather than drop it.
 	#[tokio::test(start_paused = true)]
 	async fn the_acquisition_ends_before_a_held_frame_is_due() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY);
 		// Joined 60 ms into a group: its keyframe is due 40 ms from now.
 		let key = Arrival {
@@ -2922,7 +3174,7 @@ mod tests {
 	/// frame behind the clock still goes out.
 	#[tokio::test(start_paused = true)]
 	async fn zero_delay_releases_on_arrival() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(Duration::ZERO);
 		buffer.push(1, arrival(start, 0, "v0")).unwrap();
 		buffer.push(1, arrival(start, 40, "v40")).unwrap();
@@ -2935,23 +3187,160 @@ mod tests {
 		assert_eq!(buffer.dropped(), 0);
 	}
 
-	/// A track is full once a frame of it is due, or holds any frame without a delay, so its
-	/// reader leaves the rest in the source.
+	/// Due output and a future tail each stop reads, while another track and a measured lead
+	/// keep their own admission windows.
 	#[tokio::test(start_paused = true)]
-	async fn a_track_is_full_once_a_frame_is_due() {
-		let start = moq_clock::now();
+	async fn admission_respects_due_output_the_future_tail_and_each_tracks_lead() {
+		let start = kio::clock::now();
 		let mut buffer = Buffer::new(DELAY).replay();
-		assert!(!buffer.full(&1));
+		assert!(!buffer.full(&1, &kio::Waiter::noop()));
 		buffer.push(1, arrival(start, 0, "v0")).unwrap();
-		assert!(!buffer.full(&1), "a frame not yet due leaves room to read ahead");
+		assert!(
+			!buffer.full(&1, &kio::Waiter::noop()),
+			"a frame inside the delay leaves room to read ahead"
+		);
+		buffer.push(1, arrival(start, 1, "v1")).unwrap();
+		assert!(
+			buffer.full(&1, &kio::Waiter::noop()),
+			"the tail is beyond the delay though the front is not due"
+		);
+		assert!(
+			!buffer.full(&2, &kio::Waiter::noop()),
+			"the future tail only stops its own track"
+		);
+		buffer.leads.insert(1, VecDeque::from([0.2]));
+		assert!(
+			!buffer.full(&1, &kio::Waiter::noop()),
+			"a track sent ahead keeps its measured lead"
+		);
+		buffer.push(1, arrival(start, 201, "v201")).unwrap();
+		assert!(
+			buffer.full(&1, &kio::Waiter::noop()),
+			"the tail is beyond the delay and lead"
+		);
 		tokio::time::advance(DELAY).await;
-		assert!(buffer.full(&1));
-		assert!(!buffer.full(&2), "another track's due frame does not stop this one");
+		assert!(buffer.full(&1, &kio::Waiter::noop()));
+		assert!(
+			!buffer.full(&2, &kio::Waiter::noop()),
+			"another track's due frame does not stop this one"
+		);
 		assert_eq!(due(&mut buffer), ["v0"]);
-		assert!(!buffer.full(&1));
+		assert!(
+			!buffer.full(&1, &kio::Waiter::noop()),
+			"time advancing opens room in the admission window"
+		);
 
 		let mut buffer = Buffer::new(Duration::ZERO);
 		buffer.push(1, arrival(start, 0, "v0")).unwrap();
-		assert!(buffer.full(&1));
+		assert!(buffer.full(&1, &kio::Waiter::noop()));
+	}
+
+	/// A fast track must leave its future backlog in the source beside a real-time track.
+	#[tokio::test(start_paused = true)]
+	async fn admission_bounds_a_fast_track_beside_an_honest_track() {
+		let start = kio::clock::now();
+		let delay = Duration::from_millis(500);
+		let mut buffer = Buffer::new(delay).replay();
+		let mut next = [0, 0];
+		let mut peak = 0;
+		for step in 0..6_000 {
+			let at = start + Duration::from_millis(step * 20);
+			tokio::time::advance(at.saturating_duration_since(kio::clock::now())).await;
+			for (key, speed) in [(0, 1), (1, 3)] {
+				while next[key] <= step * 20 * speed && !buffer.full(&(key as u16), &kio::Waiter::noop()) {
+					buffer.push(key as u16, arrival(at, next[key], "frame")).unwrap();
+					next[key] += 20;
+				}
+			}
+			peak = peak.max(buffer.len());
+			due(&mut buffer);
+		}
+		assert!(
+			peak <= 54,
+			"a 500 ms window at 20 ms/frame plus one lookahead per track: {peak}"
+		);
+	}
+	/// A sparse future frame reopens input before the frame itself is due.
+	#[kio::test]
+	async fn admission_wakes_when_a_future_tail_enters_the_window() {
+		let start = kio::clock::now();
+		let delay = Duration::from_millis(500);
+		let mut buffer = Buffer::new(delay).replay();
+		buffer.push(1, arrival(start, 0, "first")).unwrap();
+		buffer.push(1, arrival(start, 1_500, "future")).unwrap();
+		kio::clock::sleep(delay).await;
+		assert_eq!(due(&mut buffer), ["first"]);
+		let reopened = kio::wait(|waiter| {
+			loop {
+				if !buffer.full(&1, waiter) {
+					return Poll::Ready(kio::clock::now());
+				}
+				if buffer.poll_next(waiter).is_pending() {
+					return Poll::Pending;
+				}
+			}
+		})
+		.await;
+		assert_eq!(reopened, start + Duration::from_millis(1_500));
+	}
+
+	/// A frame of `bytes` against the byte budget.
+	fn sized(arrived: Instant, decode: u64, bytes: usize) -> Arrival<&'static str> {
+		Arrival {
+			bytes,
+			..arrival(arrived, decode, "frame")
+		}
+	}
+
+	/// Without a clock there is no time to judge a frame by, so the byte budget alone bounds what
+	/// an acquisition copies out of the source's backlog.
+	#[kio::test]
+	async fn admission_bounds_the_backlog_while_acquiring_a_clock() {
+		let start = kio::clock::now();
+		for payload in [1_000, 0] {
+			let mut buffer = Buffer::new(Duration::from_millis(500)).with_max_bytes(10_000);
+			for frame in 0..1_024 {
+				if buffer.full(&1, &kio::Waiter::noop()) {
+					break;
+				}
+				buffer.push(1, sized(start, frame * 20, payload)).unwrap();
+			}
+			let cost = payload + std::mem::size_of::<Arrival<&str>>();
+			assert_eq!(
+				buffer.len(),
+				10_000usize.div_ceil(cost),
+				"an acquisition of {payload} byte frames holds its byte budget"
+			);
+			assert!(!buffer.full(&2, &kio::Waiter::noop()), "the budget is per track");
+		}
+	}
+
+	/// Frames sharing one timestamp all fall within the time window, so the byte budget holds the
+	/// dense track back in its source while the honest track beside it keeps playing.
+	#[tokio::test(start_paused = true)]
+	async fn admission_bounds_a_dense_track_beside_an_honest_track() {
+		let start = kio::clock::now();
+		let delay = Duration::from_millis(500);
+		let mut buffer = Buffer::new(delay).replay().with_max_bytes(10_000);
+		let mut honest = 0;
+		let mut peak = 0;
+		for step in 0..500u64 {
+			let at = start + Duration::from_millis(step * 20);
+			tokio::time::advance(at.saturating_duration_since(kio::clock::now())).await;
+			while honest <= step * 20 && !buffer.full(&0, &kio::Waiter::noop()) {
+				buffer.push(0, sized(at, honest, 100)).unwrap();
+				honest += 20;
+			}
+			// The dense track stamps every frame it has with the current time: without the budget
+			// this reads forever.
+			while !buffer.full(&1, &kio::Waiter::noop()) {
+				buffer.push(1, sized(at, step * 20, 1_000)).unwrap();
+			}
+			peak = peak.max(buffer.tracks.get(&1).map_or(0, |track| track.bytes));
+			due(&mut buffer);
+		}
+		let cost = 1_000 + std::mem::size_of::<Arrival<&str>>();
+		assert!(peak < 10_000 + cost, "the dense track holds its byte budget: {peak}");
+		assert!(honest >= 9_000, "the honest track still read in real time: {honest}");
 	}
 }

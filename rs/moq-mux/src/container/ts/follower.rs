@@ -5,16 +5,13 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use super::{Export, catalog};
 use crate::container::Frame;
 use crate::follow::{Event, Instances};
 
-#[cfg(not(target_family = "wasm"))]
 type Subscribing<E> = Pin<Box<dyn Future<Output = crate::Result<crate::catalog::Consumer<E>>> + Send>>;
-#[cfg(target_family = "wasm")]
-type Subscribing<E> = Pin<Box<dyn Future<Output = crate::Result<crate::catalog::Consumer<E>>>>>;
 
 /// What the instances say serves the exported path.
 enum Serving {
@@ -99,7 +96,7 @@ pub struct Follower<E: catalog::Catalog = ()> {
 	refused: bool,
 	follow: Duration,
 	stitch: bool,
-	timer: Option<Pin<Box<moq_clock::Sleep>>>,
+	timer: Option<Pin<Box<kio::clock::Sleep>>>,
 }
 
 impl<E: catalog::Catalog + 'static> Follower<E> {
@@ -201,6 +198,10 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 							return Poll::Pending;
 						}
 					};
+					// Ending abandons the catalog switch; a return of this instance reuses its source.
+					if switching.is_some() {
+						self.export.source().priority(0)?;
+					}
 					// Nor did one whose catalog ended before its first snapshot.
 					if let Some(missing) = awaiting {
 						self.state = self.withdrawn(missing);
@@ -209,7 +210,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 					self.following(&end);
 					self.state = State::Settling {
 						end,
-						deadline: moq_clock::now() + self.follow,
+						deadline: kio::clock::now() + self.follow,
 					};
 				}
 				State::Settling { end, deadline } => {
@@ -283,12 +284,15 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 	/// export carried on into it.
 	///
 	/// The old instance keeps playing until the replacement's catalog is subscribed, however long
-	/// that takes, and a replacement that goes first is no switch.
+	/// that takes, and a replacement that goes first is no switch. The old program's track
+	/// subscriptions yield priority while acquiring the replacement.
 	fn poll_switch(&mut self, waiter: &kio::Waiter, switching: &mut Option<Subscription<E>>) -> crate::Result<bool> {
 		let target = match &self.serving {
 			Serving::Other(target) if self.stitch && !self.refused => target,
 			_ => {
-				*switching = None;
+				if switching.take().is_some() {
+					self.export.source().priority(0)?;
+				}
 				return Ok(false);
 			}
 		};
@@ -297,6 +301,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 			.is_some_and(|switching| switching.target.is_clone(target))
 		{
 			tracing::info!(path = %self.path, "broadcast replaced, switching the program to the new instance");
+			self.export.source().priority(-1)?;
 			*switching = Some(self.subscribe(target.clone()));
 		}
 		let subscription = switching.as_mut().expect("just set");
@@ -311,6 +316,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 				tracing::warn!(path = %self.path, %err, "replacement went before its catalog subscribed");
 				*switching = None;
 				self.refused = true;
+				self.export.source().priority(0)?;
 				Ok(false)
 			}
 			// The replacement would not serve, so the switch fails loud.
@@ -384,7 +390,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 				end: Err(
 					anyhow::anyhow!("replacement broadcast `{}` ended before serving its catalog", self.path).into(),
 				),
-				deadline: moq_clock::now() + self.follow,
+				deadline: kio::clock::now() + self.follow,
 			},
 		}
 	}
@@ -415,10 +421,10 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 
 	/// Whether `at` has come, registering `waiter` to wake then if not.
 	fn elapsed(&mut self, waiter: &kio::Waiter, at: Instant) -> bool {
-		if moq_clock::now() >= at {
+		if kio::clock::now() >= at {
 			return true;
 		}
-		let timer = self.timer.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(at)));
+		let timer = self.timer.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(at)));
 		if timer.deadline() != at {
 			timer.as_mut().reset(at);
 		}

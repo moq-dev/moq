@@ -484,7 +484,8 @@ mod tests {
 				.encode(&mut Encoder::new(&mut buf, VERSION.into()), VERSION)
 				.unwrap();
 			let mut bytes = bytes::Bytes::from(buf);
-			let decoded = crate::coding::decode_buf(&mut bytes, VERSION, super::super::Parameters::decode).unwrap();
+			let decoded =
+				crate::coding::decode_buf(&mut bytes, VERSION, |r, v| super::super::Parameters::decode(r, v)).unwrap();
 
 			let peer = peer_from_setup(&decoded).unwrap();
 			assert_eq!(peer.hop, Some(self_hop));
@@ -526,7 +527,8 @@ mod tests {
 			.encode(&mut Encoder::new(&mut buf, VERSION.into()), VERSION)
 			.unwrap();
 		let mut bytes = bytes::Bytes::from(buf);
-		let decoded = crate::coding::decode_buf(&mut bytes, VERSION, super::super::Parameters::decode).unwrap();
+		let decoded =
+			crate::coding::decode_buf(&mut bytes, VERSION, |r, v| super::super::Parameters::decode(r, v)).unwrap();
 
 		let peer = peer_from_setup(&decoded).unwrap();
 		assert!(!peer.negotiated());

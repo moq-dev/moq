@@ -1,4 +1,5 @@
 import { expect, mock, test } from "bun:test";
+import { Nano, now, origin } from "@moq/clock";
 import type { FromWorker, ToWorker } from "./capture-worker.ts";
 
 // Whether the fake worker claims a native MediaStreamTrackProcessor, how much its source clock
@@ -8,7 +9,7 @@ let supported = true;
 let loadFails = false;
 let advance = 1000;
 // Added to each frame's arrival time, so a test can space arrivals apart by more than the clock
-// resolution rather than relying on performance.now() ticking between microtasks.
+// resolution rather than relying on the clock ticking between microtasks.
 let arrivalStep = 0;
 const spawned: FakeWorker[] = [];
 
@@ -24,7 +25,7 @@ class FakeWorker {
 
 	#timestamp = 5_000_000; // the camera's own epoch, which the rewrite has to erase
 	#frames = 0;
-	#at = performance.now(); // frozen, so arrivals only move by arrivalStep
+	#at = Nano.toMilli(Nano(now())); // frozen, so arrivals only move by arrivalStep
 
 	constructor() {
 		spawned.push(this);
@@ -41,7 +42,7 @@ class FakeWorker {
 		this.#emit({
 			type: "frame",
 			frame: new FakeVideoFrame(this.#timestamp) as unknown as VideoFrame,
-			at: performance.timeOrigin + this.#at + this.#frames * arrivalStep,
+			at: origin() + this.#at + this.#frames * arrivalStep,
 		});
 		this.#timestamp += advance;
 		this.#frames += 1;
@@ -101,7 +102,7 @@ test("captures through the worker, transferring a clone", async () => {
 	spawned.length = 0;
 
 	// Bracket the whole call, which spawns the worker.
-	const before = performance.now() * 1000;
+	const before = Nano.toMicro(Nano(now()));
 
 	const track = new FakeTrack();
 	const stream = TrackProcessor(track as unknown as Parameters<typeof TrackProcessor>[0]);
@@ -109,7 +110,7 @@ test("captures through the worker, transferring a clone", async () => {
 
 	const first = await reader.read();
 	const second = await reader.read();
-	const after = performance.now() * 1000;
+	const after = Nano.toMicro(Nano(now()));
 
 	expect(spawned).toHaveLength(1);
 	const worker = spawned[0];

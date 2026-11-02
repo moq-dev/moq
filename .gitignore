@@ -52,6 +52,8 @@ node_modules
 
 # VitePress pages generated from drafts/ by doc/.vitepress/drafts.ts
 /doc/draft/
+# The JS API reference generated from TSDoc by doc/.vitepress/api/
+/doc/lib/js/api/
 
 # We're using bun
 package-lock.json

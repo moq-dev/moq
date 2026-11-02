@@ -12,7 +12,7 @@ use moq_transport::message::RequestErrorCode;
 use moq_transport::{
     coding::TrackNamespace,
     serve::{Datagram, ServeError, Track, TrackReader, TrackReaderMode, Tracks},
-    session::{Publisher, SessionError, Subscriber},
+    session::{transport::Session, Publisher, SessionError, Subscriber},
 };
 use url::Url;
 
@@ -157,7 +157,7 @@ async fn run() -> anyhow::Result<Outcome> {
 
 async fn publish(
     args: Args,
-    session: web_transport::Session,
+    session: Session,
     transport: moq_transport::session::Transport,
 ) -> anyhow::Result<()> {
     let (session, mut publisher) = Publisher::connect(session, transport)
@@ -220,6 +220,8 @@ async fn publish_datagrams(
             group_id: sequence,
             object_id: 0,
             priority: 127,
+            status: moq_transport::data::ObjectStatus::NormalObject,
+            end_of_group: true,
             payload: payload(sequence, object_size),
             extension_headers: Default::default(),
         })?;
@@ -231,7 +233,7 @@ async fn publish_datagrams(
 async fn subscribe(
     args: Args,
     objects: usize,
-    session: web_transport::Session,
+    session: Session,
     transport: moq_transport::session::Transport,
 ) -> anyhow::Result<()> {
     let (session, mut subscriber) = Subscriber::connect(session, transport)
@@ -258,14 +260,17 @@ async fn subscribe(
 
 async fn probe(
     args: Args,
-    session: web_transport::Session,
+    session: Session,
     transport: moq_transport::session::Transport,
 ) -> anyhow::Result<Outcome> {
     let (session, mut subscriber) = Subscriber::connect(session, transport)
         .await
         .context("probe SETUP failed")?;
     let namespace = TrackNamespace::from_utf8_path(&args.namespace);
-    let (track_writer, _) = Track::new(namespace, args.track).produce();
+    // Hold the reader until the probe ends. Without one, moq-rs cannot close
+    // the track on REQUEST_ERROR, so a not-found rejection surfaces as `done`
+    // and the readiness race fails instead of retrying.
+    let (track_writer, _track_reader) = Track::new(namespace, args.track).produce();
     let accept_namespaces = accept_namespaces(subscriber.clone());
 
     tokio::select! {

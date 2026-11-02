@@ -3,6 +3,9 @@
 //! ISO 14496-3 AudioSpecificConfig parse and encode lives in [`Config`].
 //! [`Import`] publishes raw AAC frames (not ADTS) to a moq broadcast.
 
+/// ADTS framing for AAC packets without an AudioSpecificConfig.
+pub mod adts;
+
 mod import;
 
 pub use import::*;
@@ -61,6 +64,10 @@ pub enum Error {
 	/// The program config element declares zero channels.
 	#[error("program config element declares no channels")]
 	ProgramConfigEmpty,
+
+	/// Raw AAC publication needs an AudioSpecificConfig in the catalog.
+	#[error("raw AAC publication requires an AudioSpecificConfig description")]
+	MissingDescription,
 }
 
 /// A result using this module's error type.

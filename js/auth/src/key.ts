@@ -3,6 +3,7 @@ import * as z from "@zod/mini";
 import * as jose from "jose";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
 import { type Claims, ClaimsSchema, ScopeSchema, scopeAllows } from "./claims.ts";
+import * as Path from "./path.ts";
 import { encodeGrants } from "./wire.ts";
 
 /**
@@ -192,6 +193,10 @@ function parse(jwk: string): Key {
  *
  * `iat` is written only when the claims carry one, so an unset field stays off the
  * wire rather than being stamped with the current time.
+ *
+ * Throws on a root spelled with an empty segment, a `\` escaping anything but `\` or
+ * `/`, or more than 4096 bytes. Verifying stays lenient on the empty segments, so tokens
+ * minted before stay valid.
  */
 async function sign(key: Key, claims: z.input<typeof ClaimsSchema>): Promise<string> {
 	ensureOperationSupported(key, "sign");
@@ -204,6 +209,7 @@ async function sign(key: Key, claims: z.input<typeof ClaimsSchema>): Promise<str
 	} catch (error) {
 		throw new Error(`Invalid claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}
+	Path.validate(parsed.root);
 	ensureClaimsWithinScope(key, parsed);
 
 	const joseKey = await importJoseKey(key);

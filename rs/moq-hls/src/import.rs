@@ -210,6 +210,12 @@ impl Fetcher {
 			}
 		});
 
+		// reqwest reads rustls's process default and panics without one, so install rind's
+		// unless the host already chose a provider.
+		let _ = rind_rustls::default_provider()
+			.map_err(Error::unsupported_cpu)?
+			.install_default();
+
 		let client = Client::builder()
 			.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
 			// Bound playlist/segment fetches so a stuck request can't wedge `run()`.
@@ -427,9 +433,9 @@ impl TrackState {
 
 	/// Give up on this rendition's current importer generation after repeated failures.
 	///
-	/// Dropping the importer closes its recorders and retires its catalog entries, so players
-	/// stop selecting a rendition that no longer advances; a later successful step rebuilds it
-	/// from the init segment.
+	/// Dropping the importer ends its tracks and retires their catalog entries and HLS records, so
+	/// players stop selecting a rendition that no longer advances; a later successful step rebuilds
+	/// it from the init segment.
 	fn evict(&mut self) {
 		self.importer = None;
 		self.map = None;
@@ -694,6 +700,8 @@ pub struct Import {
 
 impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
+	///
+	/// Installs rind's rustls provider as the process default unless one already is.
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let fetcher = Fetcher::new(&cfg)?;
 		Ok(Self {
@@ -742,7 +750,7 @@ impl Import {
 	/// amount of waiting changes either.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut delay = STEP_RETRY_MIN;
-		let mut deadline = moq_clock::now() + STEP_RETRY_BUDGET;
+		let mut deadline = kio::clock::now() + STEP_RETRY_BUDGET;
 
 		loop {
 			// A step where *nothing* ingested while a rendition was failing is a failed pass wearing
@@ -766,7 +774,7 @@ impl Import {
 				Ok(outcome) => {
 					// The source is alive, so the earlier failures no longer describe it.
 					delay = STEP_RETRY_MIN;
-					deadline = moq_clock::now() + STEP_RETRY_BUDGET;
+					deadline = kio::clock::now() + STEP_RETRY_BUDGET;
 					outcome
 				}
 				Err(err @ Error::ResourceRefused) => return Err(err),
@@ -778,7 +786,7 @@ impl Import {
 				// The source rewound its timestamps, which no later pass can import.
 				Err(err @ Error::Rewind { .. }) => return Err(err),
 				Err(err) => {
-					let now = moq_clock::now();
+					let now = kio::clock::now();
 					if now >= deadline {
 						return Err(err);
 					}
@@ -787,10 +795,10 @@ impl Import {
 					// Jittered so a fleet of importers pointed at one origin doesn't retry in
 					// lockstep, and never past the deadline the budget promised.
 					let wait = delay
-						.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)
+						.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0)
 						.min(deadline - now);
 					delay = (delay * 2).min(STEP_RETRY_MAX);
-					moq_clock::sleep(wait).await;
+					kio::clock::sleep(wait).await;
 					continue;
 				}
 			};
@@ -807,7 +815,7 @@ impl Import {
 				"HLS import step complete"
 			);
 
-			moq_clock::sleep(delay).await;
+			kio::clock::sleep(delay).await;
 		}
 	}
 
@@ -1187,7 +1195,6 @@ fn moq_sequence(discontinuity_sequence: u64, media_sequence: u64) -> Result<u64>
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::path::{Path, PathBuf};
@@ -1973,7 +1980,7 @@ mod tests {
 		assert!(import.video[0].importer.is_none(), "nothing was imported");
 		assert!(catalog.snapshot().video.renditions.is_empty());
 
-		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+		let run = kio::clock::timeout(Duration::from_secs(5), import.run())
 			.await
 			.expect("a settled refusal skips the retry budget");
 		assert!(matches!(run, Err(Error::PlaylistEnded)));
@@ -2000,7 +2007,7 @@ mod tests {
 		let cfg = Config::new(Url::from_file_path(dir.join("master.m3u8")).unwrap());
 		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
 
-		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+		let run = kio::clock::timeout(Duration::from_secs(5), import.run())
 			.await
 			.expect("the ended rendition ends the import");
 		assert!(matches!(run, Err(Error::PlaylistEnded)), "{run:?}");
@@ -2033,7 +2040,7 @@ mod tests {
 
 		let (_, ended) = recording(4, true);
 		std::fs::write(dir.join("media.m3u8"), ended).unwrap();
-		tokio::time::timeout(Duration::from_secs(10), import.run())
+		kio::clock::timeout(Duration::from_secs(10), import.run())
 			.await
 			.expect("an ended playlist ends the import")
 			.unwrap();
@@ -2207,6 +2214,20 @@ mod tests {
 		old_groups: Vec<(u64, u128)>,
 		terminal: Option<moq_net::Error>,
 		new_groups: Vec<(u64, u128)>,
+		/// The first generation's HLS record track has ended.
+		old_records_ended: bool,
+	}
+
+	/// Whether `subscriber` has ended, after draining the groups it already holds.
+	fn ended(subscriber: &mut moq_net::track::Ordered) -> bool {
+		loop {
+			match subscriber.poll_next_group(&kio::Waiter::noop()) {
+				Poll::Ready(Ok(Some(_))) => continue,
+				Poll::Ready(Ok(None)) => return true,
+				Poll::Pending => return false,
+				Poll::Ready(Err(error)) => panic!("the record track failed: {error:?}"),
+			}
+		}
 	}
 
 	/// A one-track fMP4 muxer for synthesized VP8 video or Opus audio.
@@ -2287,6 +2308,13 @@ mod tests {
 			.await
 			.unwrap()
 			.ordered();
+		let mut old_records = consumer
+			.track(&hang::hls::default_name(&before_name))
+			.unwrap()
+			.subscribe(replay.clone())
+			.await
+			.unwrap()
+			.ordered();
 		let after = format!(
 			"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:1,\n0.m4s\n{tags}#EXTINF:1,\n1.m4s\n"
 		);
@@ -2294,6 +2322,7 @@ mod tests {
 		let result = track.consume_segments(&local, &after, &base).await;
 		let after_name = name(&catalog.snapshot());
 		let (old_groups, terminal) = group_stamps(&mut old);
+		let old_records_ended = ended(&mut old_records);
 		let new_groups = if before_name != after_name {
 			let mut new = consumer
 				.track(&after_name)
@@ -2316,6 +2345,7 @@ mod tests {
 			old_groups,
 			terminal,
 			new_groups,
+			old_records_ended,
 		}
 	}
 
@@ -2404,7 +2434,7 @@ mod tests {
 			"audio",
 			"#EXTINF:1,\naudio0.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\naudio1.m4s\n",
 		);
-		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+		let run = kio::clock::timeout(Duration::from_secs(5), import.run())
 			.await
 			.expect("a rewind is not retried");
 		assert!(
@@ -2426,6 +2456,7 @@ mod tests {
 					case.result.unwrap();
 					assert!(case.terminal.is_none(), "{terminal:?}", terminal = case.terminal);
 					assert_ne!(case.before, case.after);
+					assert!(case.old_records_ended, "the replaced generation retires its records");
 					assert_eq!(case.old_groups, [(0, 5_000_000)]);
 					assert_eq!(case.new_groups, [(moq_sequence(1, 1).unwrap(), u128::from(after_us))]);
 				}
@@ -2439,8 +2470,8 @@ mod tests {
 		let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
 		let wait = std::time::Duration::from_millis(100);
 		let mut out = Vec::new();
-		while let Ok(Ok(Some(mut group))) = tokio::time::timeout(wait, track.recv_group()).await {
-			while let Ok(Ok(Some(frame))) = tokio::time::timeout(wait, group.read_frame()).await {
+		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(wait, track.recv_group()).await {
+			while let Ok(Ok(Some(frame))) = kio::clock::timeout(wait, group.read_frame()).await {
 				out.push(frame.timestamp.unwrap().as_micros());
 			}
 		}
@@ -2490,7 +2521,7 @@ mod tests {
 		let before = published(&consumer, &catalog).await;
 
 		// Let the clock run on, so a fresh offset could not land back on the source's timestamps.
-		tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(50)).await;
 		let mut second = sink.importer(&select_muxed());
 		second.decode(&init).unwrap();
 		drop(first);

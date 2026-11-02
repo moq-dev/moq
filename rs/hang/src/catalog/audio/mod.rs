@@ -34,6 +34,9 @@ pub struct Audio {
 	/// A map of track name to rendition configuration.
 	/// This is not an array so it will work with JSON Merge Patch.
 	/// We use a BTreeMap so keys are sorted alphabetically for *some* deterministic behavior.
+	///
+	/// A malformed rendition refuses the whole catalog when decoding.
+	#[serde(deserialize_with = "crate::catalog::deserialize_renditions")]
 	pub renditions: BTreeMap<String, AudioConfig>,
 }
 
@@ -132,10 +135,10 @@ pub struct AudioConfig {
 	#[serde_as(as = "DisplayFromStr")]
 	pub codec: AudioCodec,
 
-	/// The sample rate of the audio in Hz.
+	/// The sample rate of the audio in Hz, never zero.
 	pub sample_rate: u32,
 
-	/// The number of channels in the audio.
+	/// The number of channels in the audio, never zero.
 	#[serde(rename = "numberOfChannels")]
 	pub channel_count: u32,
 
@@ -146,12 +149,14 @@ pub struct AudioConfig {
 	#[serde_as(as = "Option<DisplayFromStr>")]
 	pub layout: Option<AudioLayout>,
 
-	/// The maximum bitrate of the audio track in bits per second.
+	/// The maximum bitrate of the audio track in bits per second, at most 2^53 - 1.
 	#[serde(default)]
+	#[serde_as(as = "Option<crate::snapshot::Number>")]
 	pub bitrate: Option<u64>,
 
 	/// Whether this rendition may be selected. When false, no frames are coming and a consumer
-	/// must not select it. Only written when false.
+	/// should not select it, though one may keep it selected while no enabled alternative exists.
+	/// Only written when false.
 	#[serde(
 		default = "crate::catalog::enabled_default",
 		skip_serializing_if = "crate::catalog::enabled_skip"
@@ -234,6 +239,36 @@ impl AudioConfig {
 			delay: None,
 			hls: None,
 		}
+	}
+
+	/// Whether `other` keeps this config's track identity: the fields a consumer cannot change
+	/// without reinitializing its decoder or demuxer (`codec`, `description`, `container`,
+	/// `sample_rate`, and `channel_count`).
+	///
+	/// A track name always means the same content, so a publisher that changes any of them
+	/// publishes under a new name; every other field may update in place. See the draft's
+	/// [Track Identity](https://github.com/moq-dev/moq/blob/main/drafts/draft-lcurley-moq-hang.md#identity).
+	pub fn same_identity(&self, other: &Self) -> bool {
+		self.codec == other.codec
+			&& self.description == other.description
+			&& self.container == other.container
+			&& self.sample_rate == other.sample_rate
+			&& self.channel_count == other.channel_count
+	}
+}
+
+impl crate::catalog::Rendition for AudioConfig {
+	fn check(&self) -> crate::Result<()> {
+		if self.sample_rate == 0 {
+			return Err(crate::Error::Zero("sampleRate"));
+		}
+		if self.channel_count == 0 {
+			return Err(crate::Error::Zero("numberOfChannels"));
+		}
+		if let Some(layout) = &self.layout {
+			layout.check(self.channel_count)?;
+		}
+		Ok(())
 	}
 }
 

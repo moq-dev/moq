@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `decode::Options::max_delay` is `delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
+
+`decode::Options::max_delay: Duration` is `delay: decode::Delay` (`moq_mux::container::Delay`).
+Replace `max_delay: d` with `delay: Delay { min: playout, max: Some(d) }`: `min` is your playout delay, where a cold join starts, and `max` (`None` for no limit) is the old max delay.
+
+### A capture reopened onto a new identity publishes a new track ([#7110](https://github.com/moq-dev/moq/pull/7110))
+
+When a reopened camera or encoder emits a different codec string than the probed rendition, such as a higher level for a larger mode, `encode::Producer` publishes under the next free `<name>/<n>` and finishes the old track.
+`Producer::demand` follows the current track, so read it again after `publish` rather than holding the first one.
+
 ### The renderer refuses GPU frames it cannot import (#6806)
 
 `render::Renderer::render` no longer downloads a GPU surface it cannot import; it returns an error naming the cause and the fix.

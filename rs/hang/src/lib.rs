@@ -6,7 +6,7 @@
 //!
 //! - **Catalog**: A JSON track containing codec info and track metadata, updated live as tracks change.
 //! - **Tracks**: Audio or video, supporting one or more renditions.
-//! - **HLS records**: An opt-in JSON track per rendition marking each of its HLS segments' first group
+//! - **HLS records**: An optional JSON track per rendition marking each of its HLS segments' first group
 //!   and pts, so an edge can render playlists without downloading media. Advertised by the rendition's `hls` field.
 //!
 //! Each track specifies a container format:
@@ -35,7 +35,7 @@ pub mod catalog;
 /// The container is the contents of each media track.
 pub mod container;
 
-/// HLS segment records, opt-in per rendition.
+/// HLS segment records, optional per rendition.
 pub mod hls;
 
 /// Export the moq-net version we use.

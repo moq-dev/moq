@@ -35,7 +35,8 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   permission to stitch. A concrete serving-route change without an epoch
   remains Restart even when the origin node is unchanged; only a matching
   explicit epoch or the separately proven Takeover operation preserves an
-  instance. Test a same-origin next-hop change with no epoch.
+  instance (superseded 2026-10-30: a shared `identity` preserves it, per
+  [Identity and epoch](/quest/m1/api-audit/route/identity.md)). Test a same-origin next-hop change with no epoch.
   ANNOUNCE_UPDATE re-prices it and ANNOUNCE_END withdraws this origin's claim
   while the route stays up. A wildcard claim is capability, not an inventory
   of broadcasts; another origin may still serve the same epoch. An announce
@@ -63,7 +64,10 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
   counts as the echo.
   The hop list leaves lite-07, and with it the
   `Hop Base`/`Hop Keep` compression; `cluster.max_hops` then stops applying
-  to lite-07.
+  to lite-07. Most of the 62% saving measured in
+  [moq-dev/moq#4196](https://github.com/moq-dev/moq/pull/4196) came from hop
+  chains, so rerun its announce bench on path-less ANNOUNCE and drop
+  `Path Base`/`Path Keep` too unless it still pays for its rules.
 
   ```text
   ROUTE_START  node=0x7a3f seqno=41 metric=12   -> route 0
@@ -236,8 +240,9 @@ The handoff contract below, decided 2026-10-16, settles claim freshness:
 - Claim freshness follows the handoff contract below, independently of the
   requested path's forwarding choice.
 - Only the first hop selects the origin. It keeps `route_order`'s shape over
-  the origin nodes announcing the path: longest prefix, newest epoch, the
-  link's priority (`origin::Producer::with_preference`), seed plus route
+  the origin nodes announcing the path: longest prefix, newest epoch (within
+  one identity only, per [Identity and epoch](/quest/m1/api-audit/route/identity.md),
+  decided 2026-10-30), the link's priority (`origin::Producer::with_preference`), seed plus route
   metric, then a rendezvous hash of the path and the identity, and the newest
   connection only for an otherwise identical route. The hash drops the hop
   chain, which differs per node, so every node agrees on a pool member
@@ -645,18 +650,52 @@ continues to rank feasible transit routes; report it. This may
 split at start (Rust and draft, then JS), as long as both land in one
 release.
 
-Decided 2026-10-27 (maintainer): two ready quests split out of this one,
-and this quest builds on both. [Grant subject](/quest/m1/cluster-routing/grant-subject.md)
-carries the issuer-qualified subject the scoped keys above are named by, and
-fixes the reference model's `proved` exemption.
-[Route epochs](/quest/m1/cluster-routing/route-epochs.md) mints an epoch for
-every route, the 2026-10-24 pre-cut audit's proposal, now decided, so
-`Instance` collapses to `Epoch` before the route layer lands.
+Decided 2026-10-27 (maintainer): [Grant subject](/quest/m1/cluster-routing/grant-subject.md)
+split out of this quest, and this quest builds on it. It carries the
+issuer-qualified subject the scoped keys above are named by, and fixes the
+reference model's `proved` exemption.
+
+Decided 2026-10-27 (maintainer): this quest deletes the epochless instance
+machinery in `rs/moq-net/src/model/origin.rs`: `Instance::Route(generation)`
+and its renewals, `restarted_since`, the held-restart Release for epochless
+routes, and Selection retirement, leaving Follow's same-epoch
+Update/Restart split as the only takeover rule. Once each origin is its own
+ANNOUNCE and the first hop pins the request to its identity, the first hop's
+route is the instance, so the per-hop renewal has nothing left to protect.
+An epochless change of serving route stays a Restart, including the
+same-origin next-hop change in the wire sketch above, and the routing
+contract's epochless fixtures keep passing. Minting an epoch for every route
+instead was tried and rejected
+([moq-dev/moq#6948](https://github.com/moq-dev/moq/pull/6948)): each relay
+mints at its own time, so mint order outranks cost, preference, and the
+local-broadcast tie and relays disagree on a pool path's winner, while
+ranking a minted epoch last keeps the renewal it was meant to delete.
+
+Moved 2026-10-30 (maintainer, the [route epic](/quest/m1/api-audit/route/README.md)):
+[Identity and epoch](/quest/m1/api-audit/route/identity.md) now deletes that
+epochless machinery, so this quest no longer does. A session mints
+an `identity` (the session ID plus the announcement's ID) for any route that
+arrives without one, and newest-wins compares epochs only within one
+identity, so mint order no longer outranks cost or preference. The rest of
+the 2026-10-27 decision stands. The broadcast epoch fields here become that
+publisher identity and its per-identity epoch, in place of the UUIDv7
+epoch. The route layer's own origin-node identity, with its seqno and
+revision, stays separate ("keep administrative identity and broadcast epoch
+separate", above).
+
+Decided 2026-10-27 (maintainer), from
+[grant subject](https://github.com/moq-dev/moq/pull/6992): decide what key
+identities are filed under for sessions allowed to publish part of the tree
+with no subject (public rules, mTLS certificates, or a third-party auth
+server), and whether the relay refuses such a grant when the client
+presented a token. Also from
+[moq-dev/moq#6947](https://github.com/moq-dev/moq/pull/6947): in `js/net`'s
+`origin.ts` a detached request stays on its own route instead of following
+the cheapest one; fix it with the route-selection rework here.
 
 ## Required
 
 - [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - the issuer-qualified subject scoped identities are filed under
-- [Route epochs](/quest/m1/cluster-routing/route-epochs.md) - every route has an epoch, so the epochless instance machinery is gone
 
 ## Related
 

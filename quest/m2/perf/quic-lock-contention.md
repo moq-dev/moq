@@ -26,11 +26,17 @@ since the async-to-poll adapter and leases that hold the lock both go first.
   an unbounded channel to its connection's task, with a wake per packet
   (`driver/endpoint.rs`, the receive loop), and endpoint events flow back the
   same way. Count channel sends, wakes, and cross-thread hand-offs per packet.
+  The channel is unbounded, and stream credit does not bound encrypted
+  datagrams waiting before the connection task processes them. Measure its
+  depth and bytes when a peer's ingress outruns its connection task (lock
+  wait included). If it grows, bound it by design at the packet boundary
+  (batch dispatch, or backpressure into the socket read) rather than with a
+  queue cap that drops (2026-10-27 audit, maintainer).
 
 Levers, only where the profile shows a cost:
 
 - A per-stream staging queue: a write hands its owned `Bytes` (the `Buf`
-  API from [streams](/quest/m1/quic-api/streams.md)) to the stream, bounded
+  API from [moq-dev/moq#6950](https://github.com/moq-dev/moq/pull/6950)) to the stream, bounded
   by the stream's flow-control window so backpressure is unchanged, and the
   connection task moves it into moq-quic under its own lock.
 - Dispatch a whole GRO batch per connection in one message, coordinated
@@ -51,7 +57,6 @@ staging queue and batch dispatch should need none.
 ## Required
 
 - [Native WebTransport](/quest/m1/quic-api/native-web.md) - removes the adapter's per-operation boxing, which would otherwise dominate the profile
-- [Streams](/quest/m1/quic-api/streams.md) - owned writes and lock-free leases
 - [Waits](/quest/m1/quic-api/waits.md) - moves the waiter tables under the lock this profiles
 
 ## Related

@@ -15,7 +15,7 @@
 		".": "./src/index.ts"
 	},
 	"scripts": {
-		"build": "rimraf dist && tsc -b tsconfig.build.json && bun ../common/package.ts",
+		"build": "rimraf dist && tsc -b tsconfig.build.json && bun ../common/package.ts && tsc --project test-dts/tsconfig.json",
 		"check": "tsc --noEmit && tsc --noEmit --project bench/tsconfig.json",
 		"test": "bun test --only-failures"
 	},
@@ -23,9 +23,8 @@
 		"@moq/net": "workspace:^"
 	},
 	"devDependencies": {
-		"@microsoft/api-extractor": "7.59.4",
 		"@moq/clock": "workspace:^",
-		"@types/bun": "^1.4.3",
+		"@types/bun": "^1.4.4",
 		"rimraf": "^6.1.3",
 		"typescript": "7.0.2"
 	}

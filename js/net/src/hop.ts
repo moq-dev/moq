@@ -21,7 +21,7 @@ import { isLeadingOnes, type StreamVersion } from "./stream.ts";
  *
  * The {@link HopSchema} validates any incoming value and brands it so the type system
  * enforces "only validated ids flow into hop chains." Internal code that synthesizes one
- * (e.g. {@link randomHop}) uses `HopSchema.parse(...)` to brand a raw bigint.
+ * (e.g. `randomHop`) uses `HopSchema.parse(...)` to brand a raw bigint.
  */
 export const HopSchema = z
 	.bigint()
@@ -132,6 +132,7 @@ export const Route = {
 		return {
 			epoch: route.epoch,
 			hops: route.hops ? [...route.hops] : [],
+			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 			cost: cost > max ? max : cost,
 			auth: route.auth,
 		};
@@ -142,7 +143,7 @@ export const Route = {
  * Whether this route passed through an anonymous hop (id 0) at any depth.
  *
  * An empty chain is a local announcement, not the anonymous mark. Ingress fills a
- * received empty list with {@link UNKNOWN_HOP} before yielding it.
+ * received empty list with the anonymous hop before yielding it.
  */
 export function isAnonymous(route: Route): boolean {
 	return route.hops.includes(UNKNOWN_HOP);

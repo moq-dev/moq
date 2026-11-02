@@ -8,7 +8,6 @@ from moq_ffi import MoqError as Error
 from . import audio as audio
 
 # Layer namespaces stay out of __all__; json would shadow the stdlib module.
-from . import flate as flate
 from . import json as json
 from . import video as video
 from .client import Client, CongestionControl, connect, qlog_supported, versions
@@ -18,17 +17,19 @@ from .log import log_level
 from .origin import (
     Announce,
     AnnounceConsumer,
-    AnnouncedBroadcast,
     AnnounceEvent,
     AnnounceEventEnd,
     AnnounceEventRestart,
     AnnounceEventStart,
+    AnnounceEventTakeover,
     AnnounceEventUpdate,
     BroadcastPrepared,
     BroadcastRequest,
+    Following,
     OriginConsumer,
     OriginProducer,
     OriginRequests,
+    Publication,
 )
 from .publish import (
     BroadcastProducer,
@@ -64,12 +65,14 @@ from .types import (
     Frame,
     Grant,
     Order,
+    Position,
     ProtocolError,
     ProtocolKind,
     QuicConfig,
     Range,
     Route,
     Subscription,
+    Timestamp,
     TrackInfo,
     VideoCodec,
     VideoDecodedFrame,
@@ -85,10 +88,10 @@ __all__ = [
     "Anchor",
     "Announce",
     "AnnounceConsumer",
-    "AnnouncedBroadcast",
     "AnnounceEvent",
     "AnnounceEventEnd",
     "AnnounceEventRestart",
+    "AnnounceEventTakeover",
     "AnnounceEventStart",
     "AnnounceEventUpdate",
     "AnnounceRoute",
@@ -117,6 +120,7 @@ __all__ = [
     "QuicConfig",
     "FetchGroupOptions",
     "Fill",
+    "Following",
     "Grant",
     "GrantConsumer",
     "GroupConsumer",
@@ -125,6 +129,8 @@ __all__ = [
     "OriginRequests",
     "OriginProducer",
     "Order",
+    "Position",
+    "Publication",
     "Range",
     "Request",
     "Reservation",
@@ -132,6 +138,7 @@ __all__ = [
     "Server",
     "Session",
     "Subscription",
+    "Timestamp",
     "Tokens",
     "TrackConsumer",
     "TrackDemand",

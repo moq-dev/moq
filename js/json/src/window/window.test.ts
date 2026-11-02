@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
-import { Group, Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
+import { Milli, yieldNow } from "@moq/clock";
+import { Error as NetError, StreamCode, Time, type Timed, Track } from "@moq/net";
 import { Consumer } from "./consumer.ts";
 import { Decoder, Encoder, type Event, Producer, type Span } from "./index.ts";
 
@@ -19,10 +19,11 @@ class Live {
 	events: Event<Rec>[] = [];
 	#next?: Promise<Timed<Event<Rec>> | undefined>;
 
-	constructor(config: { ops?: boolean; compression?: boolean; checkpointRecords?: number } = {}) {
-		const track = new Track.Producer("test");
-		this.producer = new Producer<Rec>({ track, ...config });
-		this.consumer = new Consumer<Rec>({ track: track.subscribe(), compression: config.compression });
+	constructor(config: { ops?: boolean; compress?: boolean; checkpointRecords?: number } = {}) {
+		const { compress, ...producer } = config;
+		const track = new Track.Producer("test").accept({ compress });
+		this.producer = new Producer<Rec>({ track, ...producer });
+		this.consumer = new Consumer<Rec>({ track: track.subscribe() });
 	}
 
 	async push(n: number): Promise<void> {
@@ -41,10 +42,7 @@ class Live {
 		for (;;) {
 			const idle = Symbol("idle");
 			this.#next ??= this.consumer.next();
-			const event = await Promise.race([
-				this.#next,
-				new Promise<typeof idle>((resolve) => setTimeout(() => resolve(idle), 0)),
-			]);
+			const event = await Promise.race([this.#next, yieldNow().then((): typeof idle => idle)]);
 			if (event === idle || event === undefined) return;
 			this.#next = undefined;
 			this.events.push(event.value);
@@ -201,14 +199,14 @@ test("rolling is invisible to the consumer", async () => {
 });
 
 test("compressed round-trip across rolls", async () => {
-	const live = new Live({ compression: true });
+	const live = new Live({ compress: true });
 	for (let n = 0; n < 40; n++) {
 		await live.push(n);
 		if (n >= 10) await live.pop(1);
 		if (n % 7 === 6) live.producer.cut();
 	}
 
-	// Every roll opens a fresh window; every record still arrives exactly once, in order.
+	// Every roll opens a fresh group; every record still arrives exactly once, in order.
 	expect(pushed(await live.finish())).toEqual(Array.from({ length: 40 }, (_, n) => n));
 });
 
@@ -497,8 +495,9 @@ test("pop counts are nonnegative safe integers", () => {
 
 test("an op that would evict the header rolls first", () => {
 	const encoder = new Encoder<string>({ ops: true });
-	const first = "a".repeat(16 * 1024 * 1024);
-	const next = "b".repeat(15 * 1024 * 1024);
+	// Charged about twice their size, for the compressed slice a track may keep beside each.
+	const first = "a".repeat(8 * 1024 * 1024);
+	const next = "b".repeat(7 * 1024 * 1024);
 
 	let frame = encoder.push(first);
 	expect(frame.keyframe).toBeTrue();
@@ -519,19 +518,15 @@ test("an op that would evict the header rolls first", () => {
 	frame.commit();
 });
 
-// Compression doesn't lift the limit: a reader inflates the header whole, so one past the group budget
-// is refused however small it deflates.
-for (const compression of [false, true]) {
-	test(`a header larger than the group cache is rejected (compression=${compression})`, () => {
-		const encoder = new Encoder<string>({ compression });
+test("a header larger than the group cache is rejected", () => {
+	const encoder = new Encoder<string>();
 
-		expect(() => encoder.push("x".repeat(Group.MAX_GROUP_CACHE_BYTES))).toThrow("group cache limit");
-		expect(encoder.window).toEqual([]);
+	expect(() => encoder.push("x".repeat(32 * 1024 * 1024))).toThrow("group cache limit");
+	expect(encoder.window).toEqual([]);
 
-		const frame = encoder.push("ok");
-		expect(frame.keyframe).toBeTrue();
-	});
-}
+	const frame = encoder.push("ok");
+	expect(frame.keyframe).toBeTrue();
+});
 
 test("an uncommitted edit leaves the window unchanged", () => {
 	const encoder = new Encoder<number>();

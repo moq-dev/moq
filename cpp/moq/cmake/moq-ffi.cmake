@@ -7,8 +7,8 @@
 # cargo setting (target-dir, build.target) can move them from where the packages look.
 
 if(CMAKE_SCRIPT_MODE_FILE)
-    set(_args build --locked --package moq-ffi --features openh264
-        --message-format=json-render-diagnostics)
+    # The shared default build (.cargo/config.toml), which the prebuilt input matches.
+    set(_args build-ffi --message-format=json-render-diagnostics)
     if(RELEASE)
         list(APPEND _args --release)
     endif()

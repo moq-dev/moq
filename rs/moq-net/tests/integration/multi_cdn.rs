@@ -7,8 +7,7 @@
 //! [`origin::Producer::with_preference`] while pricing `B` cheaper, so only the
 //! preference puts `A` ahead. Losing `A` moves `S` to `B`, and `A` returning moves it
 //! back. Between lite-07 routes with the same epoch each move resumes the subscription.
-//! A moq-transport `B` with the MoQ Epoch extension carries the epoch, but its copy's
-//! track info records the draft, so the move onto it is refused.
+//! A moq-transport `B` carries no epoch, so moving onto it restarts the path.
 
 use crate::support;
 
@@ -39,7 +38,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 
 /// Let every task settle. Time is paused, so this returns once the runtime is idle.
 async fn settle() {
-	moq_clock::sleep(Duration::from_millis(500)).await;
+	kio::clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// `P` pushes everything it publishes to `cdn`.
@@ -84,7 +83,7 @@ type Delivery = (u64, moq_net::Result<(Option<Timestamp>, Vec<u8>)>);
 /// Read every group in full, reporting each frame as it arrives.
 fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 	let (tx, rx) = mpsc::unbounded();
-	moq_clock::sim::spawn(async move {
+	kio::clock::sim::spawn(async move {
 		loop {
 			let mut group = match sub.recv_group().await {
 				Ok(Some(group)) => group,
@@ -118,7 +117,7 @@ fn read(mut sub: track::Subscriber) -> mpsc::UnboundedReceiver<Delivery> {
 
 /// The next frame the reader reports, failing on an error or a hang.
 async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timestamp>, Vec<u8>) {
-	let (group, frame) = moq_clock::timeout(Duration::from_secs(10), rx.next())
+	let (group, frame) = kio::clock::timeout(Duration::from_secs(10), rx.next())
 		.await
 		.expect("reader hung")
 		.expect("reader ended");
@@ -129,7 +128,10 @@ async fn next(rx: &mut mpsc::UnboundedReceiver<Delivery>) -> (u64, Option<Timest
 /// Whether the route passes through the preferred CDN.
 fn via_a(announce: &announce::Event) -> bool {
 	let route = match announce {
-		announce::Event::Start(a) | announce::Event::Update(a) | announce::Event::Restart(a) => &a.route,
+		announce::Event::Start(a)
+		| announce::Event::Update(a)
+		| announce::Event::Restart(a)
+		| announce::Event::Takeover { announce: a, .. } => &a.route,
 		announce::Event::End(_) => return false,
 	};
 	route.hops.iter().any(|hop| *hop == Hop::new(A).unwrap())
@@ -187,7 +189,7 @@ impl Topology {
 	}
 
 	async fn subscribe(&self) -> mpsc::UnboundedReceiver<Delivery> {
-		let remote = self.subscriber.consume().request_broadcast("live", None).await.unwrap();
+		let remote = self.subscriber.consume().request("live", None).await.unwrap();
 		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(60));
 		read(remote.track("video").unwrap().subscribe(prefs).await.unwrap())
 	}
@@ -269,7 +271,7 @@ fn assert_continuous(seen: &[(u64, Vec<u8>, Option<Timestamp>)], groups: u64) {
 /// Two CDNs under one epoch, `B` over `secondary`: `S` reads through `A` although `B` is
 /// cheaper, resumes on `B` when `A` goes, and moves back once `A` returns, every frame once.
 async fn fails_over_and_back(secondary: &str) {
-	moq_clock::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut topology = Topology::new(secondary.parse().unwrap()).await;
 		let mut announced = topology.subscriber.consume().announced();
 		let start = announced.next().await.expect("announced");
@@ -306,17 +308,14 @@ async fn fails_over_and_back(secondary: &str) {
 	.expect("timed out");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn preferred_cdn_fails_over_and_back() {
 	fails_over_and_back("moq-lite-07-wip").await;
 }
 
-/// A moq-transport `B` with the MoQ Epoch extension carries `P`'s epoch, so losing `A` is
-/// an update, not a restart. Its copy's track info differs from `A`'s, recording the draft
-/// it crossed, and one epoch means identical content: `S` refuses the copy, so the track
-/// ends with no frame of `B`'s.
-async fn refused_across_protocols(secondary: &str) {
-	moq_clock::timeout(TEST_TIMEOUT, async {
+/// Losing the epoch-carrying route restarts onto the epochless moq-transport route.
+async fn restarts_across_protocols(secondary: &str) {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut topology = Topology::new(secondary.parse().unwrap()).await;
 		let mut announced = topology.subscriber.consume().announced();
 		let start = announced.next().await.expect("announced");
@@ -329,29 +328,36 @@ async fn refused_across_protocols(secondary: &str) {
 		topology.lose_a().await;
 		let update = announced.next().await.expect("announced");
 		assert!(
-			matches!(update, announce::Event::Update(_)) && !via_a(&update),
-			"same epoch over B: {update:?}"
+			matches!(update, announce::Event::Restart(_)) && !via_a(&update),
+			"epochless route over B: {update:?}"
 		);
 		topology.group();
 		settle().await;
 		let rest: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 		assert!(
-			matches!(rest.as_slice(), [(u64::MAX, Err(Error::Unsupported))]),
-			"the track did not end with the refusal: {rest:?}"
+			matches!(
+				rest.as_slice(),
+				[(u64::MAX, Err(Error::Session(moq_net::SessionError::Cancel)))]
+			),
+			"the old route did not end its track: {rest:?}"
 		);
+		let mut fresh = topology.subscribe().await;
+		let (sequence, _, bytes) = next(&mut fresh).await;
+		assert_eq!(sequence, 1, "the fresh subscription joins the current group");
+		assert_eq!(bytes, payload(1, 0));
 		drop((topology.publisher, topology.cdn_b));
 	})
 	.await
 	.expect("timed out");
 }
 
-#[moq_clock::test]
-async fn transport_secondary_is_refused() {
-	refused_across_protocols("moq-transport-22").await;
+#[kio::test]
+async fn transport_secondary_restarts() {
+	restarts_across_protocols("moq-transport-22").await;
 }
 
-/// The same over the first draft that can carry the epoch.
-#[moq_clock::test]
-async fn transport_17_secondary_is_refused() {
-	refused_across_protocols("moq-transport-18").await;
+/// The same over the oldest supported moq-transport draft.
+#[kio::test]
+async fn transport_18_secondary_restarts() {
+	restarts_across_protocols("moq-transport-18").await;
 }
