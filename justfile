@@ -102,9 +102,11 @@ check $BASE="":
 # land gate also sets CHECK_FAIL_FAST=1, so a failing batch stops at its first
 # failed module.
 
-# Run the landing worker's Linux gate over the branch diff against BASE.
+# Run the landing worker's Linux gate over the branch diff against BASE. The land
+# gate's rerun of a failed check names its failed modules in QUEST_LAND_RERUN, one
+# per line, and runs only those.
 ci $BASE="":
-    CI_STRICT=1 NEXTEST_PROFILE=ci sh/dispatch.sh ci "$BASE"
+    CI_STRICT=1 NEXTEST_PROFILE=ci CHECK_MODULES="${CHECK_MODULES:-$(printf '%s' "${QUEST_LAND_RERUN:-}" | tr '\n' ' ')}" sh/dispatch.sh ci "$BASE"
 
 # Run the queue's Linux gate over every package: `just gate [MODULE|-MODULE]...`
 # runs only the named modules, or skips each `-` one (see CHECK_MODULES).

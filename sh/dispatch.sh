@@ -575,6 +575,13 @@ if ((${#failed[@]})); then
         while IFS= read -r phase; do
             if github; then echo "::error::$action: $phase failed"; else echo "$action: $phase failed" >&2; fi
         done <<<"${failed_phases:-${members[$name]# }}"
+        # The host land gate reruns a failed check once before blaming a PR, repeating only the
+        # modules named here (moq-dev/quest#375); `just ci` reads them back from QUEST_LAND_RERUN.
+        if [[ -n "$failed_phases" ]]; then
+            while IFS= read -r phase; do echo "quest-land-failed: ${phase##* }"; done <<<"$failed_phases"
+        else
+            for module in ${members[$name]}; do echo "quest-land-failed: $module"; done
+        fi
     done
     exit "$failed_status"
 fi
