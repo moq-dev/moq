@@ -6,6 +6,7 @@ use std::{
 use crate::Timestamp;
 
 mod window;
+pub(crate) use window::Accounted;
 pub(super) use window::{Containing, Held, Holdings, Resolved, Unheld, Window, later};
 
 /// Subscriber-side preferences for receiving a track.
