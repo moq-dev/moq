@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`Announce.captures` is `List<String>` instead of `List<String>?`. Remove null checks and pass `captures = emptyList()` when constructing an announcement for a filter without wildcards. Rebuild with the matching generated bindings and native library.
+
 ### Decoder outputs take a `Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
 `audio.DecoderOutput` replaces `maxDelay` and the playout `delay: Duration?` with `delay: media.Delay?` and `estimate: Boolean = true`.

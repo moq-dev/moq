@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`Announce.captures` is `[String]` instead of `[String]?`. Remove optional checks and pass `captures: []` when constructing an announcement for a filter without wildcards. Rebuild with the matching MoqFFI package and native library.
+
 ### Decoder outputs take a `Media.Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
 `Audio.DecoderOutput` replaces `maxDelay` and the playout `delay: TimeInterval?` with `delay: Media.Delay?` and `estimate: Bool = true`.
