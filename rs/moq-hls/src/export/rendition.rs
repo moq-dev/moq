@@ -1145,9 +1145,12 @@ impl Rendition {
 	pub async fn init(&self, hash: &str) -> Result<Option<Bytes>> {
 		// A predecessor's segments still listed map its init, which was built before any playlist
 		// listed them (see `media_playlist`), so it is served without building this instance's.
+		// Only the instance supplying the bytes is authorized: a denied one leaves them to this
+		// instance, which may have the same config.
 		for rendition in self.lineage() {
-			rendition.authorize()?;
-			if let Some(init) = rendition.built_init(&rendition.run()).filter(|init| init.hash == hash) {
+			if let Some(init) = rendition.built_init(&rendition.run()).filter(|init| init.hash == hash)
+				&& rendition.authorize().is_ok()
+			{
 				return Ok(Some(init.bytes.clone()));
 			}
 		}
