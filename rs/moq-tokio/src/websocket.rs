@@ -971,9 +971,16 @@ mod tests {
 			url.into()
 		};
 		let expected_host = format!("{url_host}:{}", addr.port());
-		let session = connect(&config, &client_tls, tls_name, target, moq_net::ALPNS, &crate::qmux_default())
-			.await
-			.unwrap();
+		let session = connect(
+			&config,
+			&client_tls,
+			tls_name,
+			target,
+			moq_net::ALPNS,
+			&crate::qmux_default(),
+		)
+		.await
+		.unwrap();
 		drop(session);
 		let (server_name, host) = accepted.await.unwrap();
 		assert_eq!(server_name.as_deref(), expected_sni);

@@ -252,7 +252,10 @@ async fn a_reset_reaches_an_unread_stream() {
 		let mut recv = server.accept_uni().await.unwrap();
 
 		let mut reset = std::pin::pin!(kio::wait(|waiter| recv.poll_reset(waiter)));
-		assert!(futures_poll_once(&mut reset).await.is_none(), "{version:?}: no reset yet");
+		assert!(
+			futures_poll_once(&mut reset).await.is_none(),
+			"{version:?}: no reset yet"
+		);
 		send.reset(7);
 		let err = reset.await;
 		assert!(matches!(err, Error::StreamReset(7)), "{version:?}: {err}");

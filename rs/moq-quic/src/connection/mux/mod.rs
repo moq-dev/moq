@@ -428,7 +428,9 @@ impl Connection {
 	pub fn set_limits(&mut self, limits: Limits) -> Result<(), crate::LimitsError> {
 		limits.validate()?;
 		if let Some(window) = limits.receive_window
-			&& self.streams.set_receive_window(VarInt::from_u64(window.get()).expect("validated"))
+			&& self
+				.streams
+				.set_receive_window(VarInt::from_u64(window.get()).expect("validated"))
 		{
 			self.pending.max_data = true;
 		}

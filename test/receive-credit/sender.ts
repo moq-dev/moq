@@ -46,9 +46,10 @@ const session = await Moq.Connection.connect({
 	url: new URL(address),
 	publish: origin.consume(),
 	versions: [version],
-	// Each run tests one receiver, so only its transport may connect.
+	// Each run tests one receiver, so only its transport may connect. Without WebTransport
+	// installed, the WebSocket fallback dials at once.
 	...(websocket
-		? { websocket: { delay: 0 } }
+		? {}
 		: {
 				webtransport: { serverCertificate: await Bun.file(certificate).text() },
 				websocket: { enabled: false },

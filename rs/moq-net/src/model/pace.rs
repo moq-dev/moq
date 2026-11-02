@@ -336,7 +336,11 @@ mod tests {
 		for _ in 0..8 {
 			group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
 		}
-		assert_eq!(group.poll_ready(&waiter, &info(MB)), Poll::Ready(()), "a small frame fits");
+		assert_eq!(
+			group.poll_ready(&waiter, &info(MB)),
+			Poll::Ready(()),
+			"a small frame fits"
+		);
 		assert_eq!(
 			group.poll_ready(&waiter, &info(8 * MB)),
 			Poll::Pending,

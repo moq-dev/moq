@@ -642,7 +642,12 @@ mod tests {
 		let candidates = crate::resolve::Candidates::fixed([blackhole, addr]);
 		let session = kio::clock::timeout(
 			Duration::from_secs(5),
-			connect_addrs(candidates, &["moq-test"], &crate::qmux_default(), Duration::from_millis(50)),
+			connect_addrs(
+				candidates,
+				&["moq-test"],
+				&crate::qmux_default(),
+				Duration::from_millis(50),
+			),
 		)
 		.await
 		.expect("failover timed out")

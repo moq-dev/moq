@@ -164,7 +164,10 @@ mod tests {
 				.unwrap();
 			super::super::AnnounceInit::decode_slice(&wire, Version::Lite02).unwrap_err()
 		};
-		assert!(matches!(decode(max), DecodeError::Short), "within the cap waits for the body");
+		assert!(
+			matches!(decode(max), DecodeError::Short),
+			"within the cap waits for the body"
+		);
 		assert!(
 			matches!(decode(max + 1), DecodeError::MessageTooLarge { .. }),
 			"past the cap is refused"

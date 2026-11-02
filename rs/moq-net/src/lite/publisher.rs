@@ -7808,7 +7808,11 @@ mod tests {
 		// Each suffix costs its length plus a varint prefix, so these overflow the cap.
 		let name = "x".repeat(500);
 		let _broadcasts: Vec<_> = (0..max / 500 + 1)
-			.map(|i| origin.announce(format!("{name}{i}"), crate::origin::Route::default()).unwrap())
+			.map(|i| {
+				origin
+					.announce(format!("{name}{i}"), crate::origin::Route::default())
+					.unwrap()
+			})
 			.collect();
 
 		let gate = kio::Producer::new(true);

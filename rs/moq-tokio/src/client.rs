@@ -463,8 +463,7 @@ impl Client {
 		// QUIC, which can't speak it. Use only on a trusted network.
 		#[cfg(feature = "tcp")]
 		if url.scheme() == "tcp" {
-			let session =
-				crate::tcp::connect(
+			let session = crate::tcp::connect(
 				url,
 				&self.versions.alpns(),
 				&self.qmux,
@@ -558,16 +557,15 @@ impl Client {
 	#[cfg(feature = "websocket")]
 	async fn connect_websocket(&self, moq: &moq_net::Client, addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		let alpns = self.versions.alpns();
-		let session =
-			crate::websocket::connect(
-				&self.websocket,
-				&self.tls,
-				self.tls_host_name.as_deref(),
-				addr,
-				&alpns,
-				&self.qmux,
-			)
-			.await?;
+		let session = crate::websocket::connect(
+			&self.websocket,
+			&self.tls,
+			self.tls_host_name.as_deref(),
+			addr,
+			&alpns,
+			&self.qmux,
+		)
+		.await?;
 		let session = connect_session(moq, session).await?;
 		Ok(Dialed::new(session, crate::Transport::WebSocket))
 	}
@@ -605,7 +603,7 @@ impl Client {
 				&ws_session,
 			)
 			.await
-				.map(|res| res.map_err(Error::from))
+			.map(|res| res.map_err(Error::from))
 		};
 
 		match race_transport_connect(&url, quic, websocket).await? {

@@ -176,7 +176,9 @@ pub(crate) fn check_limits(limits: &Limits) -> Result<(), crate::Error> {
 	if let Some(window) = limits.receive_window
 		&& window.get() < moq_net::transport::MIN_RECEIVE_WINDOW
 	{
-		return Err(crate::Error::ReceiveWindowTooSmall(moq_net::transport::MIN_RECEIVE_WINDOW));
+		return Err(crate::Error::ReceiveWindowTooSmall(
+			moq_net::transport::MIN_RECEIVE_WINDOW,
+		));
 	}
 	Ok(())
 }
