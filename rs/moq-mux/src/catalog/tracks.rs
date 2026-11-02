@@ -664,8 +664,8 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 			if supplied.delay.is_none() {
 				resolved.delay = resolved.delay.max(published.delay);
 			}
+			Self::check_decrease(&published, &resolved)?;
 		}
-		self.check_decrease(&resolved)?;
 		config.set_estimate(resolved.clone());
 		{
 			let mut guard = self.catalog.modify()?;
@@ -768,11 +768,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 	}
 
 	/// Refuse a config that lowers the jitter or delay already advertised to subscribers.
-	fn check_decrease(&self, next: &Estimate) -> crate::Result<()> {
-		if !self.present {
-			return Ok(());
-		}
-		let previous = self.config()?.estimate();
+	fn check_decrease(previous: &Estimate, next: &Estimate) -> crate::Result<()> {
 		if next.jitter < previous.jitter {
 			return Err(crate::Error::JitterDecreased);
 		}
@@ -818,7 +814,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		if !self.present {
 			return Err(crate::Error::NotPublished);
 		}
-		self.check_decrease(&config.estimate())?;
+		Self::check_decrease(&self.config()?.estimate(), &config.estimate())?;
 		let mut guard = self.catalog.modify()?;
 		let mut next = (*guard).clone();
 		config.insert(&mut next, &self.name);
