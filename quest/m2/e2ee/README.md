@@ -86,5 +86,4 @@ Extractor declaration checks, which analyze only published packages since
 
 ## Related
 
-- [archive](/quest/m1/archive/README.md) - protected broadcasts are deliberately outside recording and replay formats
 - [Wrapper traits over moq-net](/quest/m2/net-wrap/README.md) - the traits the e2ee wrappers implement, so every writer and reader takes an encrypted broadcast
