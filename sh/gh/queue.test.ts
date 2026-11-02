@@ -50,6 +50,8 @@ assert.deepEqual(queue.on.merge_group, { types: ["checks_requested"] });
 assert.ok(queue.on.workflow_dispatch.inputs.sha.required);
 assert.equal(queue.jobs.report.if, "github.event_name == 'workflow_dispatch'");
 assert.deepEqual(queue.jobs.report.permissions, { checks: "write" });
+// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
+assert.equal(queue.concurrency.group, "queue-${{ github.ref }}-${{ inputs.sha }}", "dispatches for different heads must not cancel each other");
 assert.equal(queue.jobs.report.steps.length, 1, "the report job checks nothing out and runs no code from a PR");
 assert.deepEqual(queue.on.pull_request.branches, ["main"]);
 assert.ok(queue.on.pull_request.types.includes("edited"), "retargeting to main must report the context");
