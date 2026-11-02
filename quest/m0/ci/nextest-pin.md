@@ -3,8 +3,9 @@
 ## Goal
 
 The cargo-nextest version is pinned in one place. Today it's written three
-times: `platform.yml`'s Windows and macOS jobs, and
-`.oss-scanner/Dockerfile`, all at 0.9.146.
+times, all at 0.9.146: `platform.yml`'s Windows and macOS jobs
+(`tool: nextest@0.9.146`), and `.oss-scanner/Dockerfile`'s `NEXTEST_VERSION`
+build arg.
 
 ## Plan
 
