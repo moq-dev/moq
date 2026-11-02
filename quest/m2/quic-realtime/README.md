@@ -59,9 +59,14 @@ spike assumed no consumer; teleoperation uplinks are one):
 
 The shared pacer's low-rate correction and BBR3's one-datagram minimum send
 quantum are implemented together in [moq-dev/moq#7606](https://github.com/moq-dev/moq/pull/7606).
-The candidate PRs above were all unmerged when it measured the full probe suite,
-so none had a landed low-rate row to rerun. The bake-off must use the corrected
-pacer: earlier candidate rows below 2 Mbit/s can include up to 2x pacing overshoot.
+GCC ([moq-dev/moq#7546](https://github.com/moq-dev/moq/pull/7546)) landed first,
+so #7606 reran its in-tree row, `rises_to_target_under_gcc` (1 Mbit/s start, a
+3 Mbit/s path opening to 12 Mbit/s), on all 8 seeds. The correction left it
+unchanged: 1 late frame probing and baseline, the same p99, and the target
+reached 5 s (1x) and 9 s (2x) after the path opened on every seed. The bake-off
+must use the corrected pacer: earlier candidate rows below 2 Mbit/s, including
+GCC's out-of-tree `tests::realtime` rows in #7546, can include up to 2x pacing
+overshoot.
 
 Remaining work once the candidates finish (this README's own job):
 
