@@ -8,7 +8,7 @@ repository = "https://github.com/moq-dev/moq"
 license = "MIT OR Apache-2.0"
 
 [features]
-# Test-only `Bbr3Config::probe_rng_seed`, for moq-quic's deterministic transport tests.
+# Test-only `bbr3::Config::probe_rng_seed`, for moq-quic's deterministic transport tests.
 testing = []
 
 [dependencies]
