@@ -1,5 +1,5 @@
 //! A session admitted as a cluster peer widens its QUIC limits before SETUP OK,
-//! while a viewer keeps the `--quic-*` ones, on the tokio listener and the
+//! while a viewer opens to the `--quic-*` ones, on the tokio listener and the
 //! io_uring workers alike.
 #![cfg(feature = "quic")]
 
@@ -128,7 +128,9 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 		}
 		leases
 	});
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	let peer = probe(port, true).await;
 	assert_eq!(peer.streams, PROBE, "a peer opens past the viewer stream limit");
@@ -140,7 +142,8 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 		"a viewer keeps the stream limit, opened {}",
 		viewer.streams
 	);
-	assert_eq!(viewer.max_data, 0, "a viewer's receive window is unchanged");
+	// Both start with only the SETUP window, which admission opens for a viewer too.
+	assert!(viewer.max_data > 0, "a viewer's receive window opens once admitted");
 
 	let _leases = deciding.await.expect("decider");
 	running.abort();

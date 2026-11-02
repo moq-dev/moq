@@ -42,9 +42,10 @@ must not starve the socket.
   Decided in the 2026-09-30 audit: the egress requeue quest merged here, since
   both budgets need the same sweep.
 - Add `passes` per turn to the metrics beside `turns`.
-- [Task capacity](/quest/m2/performance-survey/task-capacity.md) also
-  reshapes the `Tasks::poll` wake-word snapshot. Whichever of the two lands
-  second rebases its benchmark on the other.
+- `Tasks::poll` now snapshots through a wake index
+  ([moq-dev/moq#7513](https://github.com/moq-dev/moq/pull/7513)), so each
+  re-snapshot costs the woken words, not the set's capacity. Baseline the pass
+  budget on that, using the `tasks_capacity_*` groups in kio's `tasks` bench.
 - Ingress fairness: a pass budget does not bound work inside one poll.
   The endpoint's `Inner::poll_run` calls `poll_recv` until `Pending`, so one
   poll drains every queued receive completion, and `Endpoint::demux` drains
