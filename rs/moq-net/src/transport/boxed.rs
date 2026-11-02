@@ -19,6 +19,8 @@ pub(crate) struct Session {
 	inner: std::sync::Arc<dyn ErasedSession>,
 	/// Shared by every clone, so whichever task closes the transport first says why.
 	closing: std::sync::Arc<crate::session::Closing>,
+	/// Shared by every clone, so each task counts the subscriptions and fetches it carries.
+	work: crate::session::Work,
 }
 
 impl Session {
@@ -26,12 +28,18 @@ impl Session {
 		Self {
 			inner: std::sync::Arc::new(session),
 			closing: Default::default(),
+			work: Default::default(),
 		}
 	}
 
 	/// How this side closed the transport.
 	pub(crate) fn closing(&self) -> &std::sync::Arc<crate::session::Closing> {
 		&self.closing
+	}
+
+	/// The subscriptions and fetches the session's tasks carry over this transport.
+	pub(crate) fn work(&self) -> &crate::session::Work {
+		&self.work
 	}
 
 	/// Close with `code` over `cause`, this side's reason for ending the session.

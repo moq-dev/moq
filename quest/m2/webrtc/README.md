@@ -8,7 +8,7 @@ Non-goals: TURN; DTLS 1.3; replacing a vendored layer before there's a reason to
 
 ## Plan
 
-Decided 2026-10-30 with the maintainer (planning interview), after the str0m workarounds piled up: one `b=` line per SDP media section ([moq-dev/moq#7373](https://github.com/moq-dev/moq/pull/7373)), DTLS retransmits running out before ICE connects ([moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379)), no hook to charge or serve NACK resends ([rtc-pacing](/quest/m2/rtc-pacing.md)), and `std::time::Instant` in a moq-clock workspace. No upstream reports were approved; vendoring replaces them.
+Decided 2026-10-30 with the maintainer (planning interview), after the str0m workarounds piled up: one `b=` line per SDP media section ([moq-dev/moq#7373](https://github.com/moq-dev/moq/pull/7373)), DTLS retransmits running out before ICE connects ([moq-dev/moq#7379](https://github.com/moq-dev/moq/pull/7379)), no hook to charge or serve NACK resends ([rtc-pacing](/quest/m2/rtc-pacing.md)), and `std::time::Instant` in a `kio::clock` workspace. No upstream reports were approved; vendoring replaces them.
 
 - **Vendor, then replace.** Copy the upstream crates in, trim them, and fix them in-tree. Replacing a layer with our own (SDP, RTP/RTCP, SRTP, SCTP) is a later child once a concrete need appears; none is planned yet.
 - **One crate.** `moq-ice` merges into it, since its only users are `moq-rtc` and moq-tokio's data-channel transport. moq-tokio's `webrtc` feature moves into `moq-webrtc` as well, which breaks the cycle (`moq-webrtc` depends on moq-tokio; moq-tokio would otherwise need ICE and SCTP). The vendored crates become private modules, not separate published crates, keeping their MIT/Apache-2.0 notices (str0m's `packet/` carries webrtc-rs's Apache notice).
@@ -24,7 +24,7 @@ Decided 2026-10-30 with the maintainer (planning interview), after the str0m wor
 - [Vendor and trim the stack](/quest/m2/webrtc/vendor.md) - str0m, dimpl, `is`, and sctp-proto live in moq-webrtc with unused code removed
 - [Several bandwidth lines per media section](/quest/m2/webrtc/sdp-bandwidth.md) - answers carry both `b=TIAS` and `b=AS` without splicing
 - [DTLS waits for ICE](/quest/m2/webrtc/dtls-after-ice.md) - DTLS flights start once ICE nominates a pair, so a late ICE path can't exhaust them
-- [The stack takes moq-clock time](/quest/m2/webrtc/clock.md) - the vendored code takes `moq_clock::Instant`, so sim tests drive it directly
+- [The stack takes kio clock time](/quest/m2/webrtc/clock.md) - the vendored code takes `kio::clock::Instant`, so sim tests drive it directly
 
 ## Related
 

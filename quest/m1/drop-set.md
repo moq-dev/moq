@@ -15,8 +15,9 @@ narrower budget is served after a widening, as a cold relay would.
 ## Plan
 
 Decided 2026-10-27 (maintainer): this runs after
-[Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md), since both edit
-`given_up` in `rs/moq-net/src/model/track/miss.rs`, and before
+[Range count cost](/quest/m1/subscribe-ranges/fill-linear.md), since both edit
+`given_up` in `rs/moq-net/src/model/track/miss.rs` (made a `Required` entry
+2026-10-30, in [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995)), and before
 [Rust groups by start](/quest/m1/time-addressing/model.md), which requires it
 because runs keyed by group sequence convert mechanically to starts.
 
@@ -171,8 +172,8 @@ window as the groups they sit between, and expiry applies the same
 fold-or-`TooFarBehind` rule as a Rust eviction. A run sits between cached
 sequences, so there are at most about one per cached sequence (alternating
 drop and arrival), and JS run state grows no faster than the JS cache
-itself. The JS byte bound for both is
-[JS unbounded groups](/quest/m1/unbounded-groups/js.md).
+itself. The JS byte bound for both is the 32 MiB group tail that
+[moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) landed.
 
 Only a final run folds into a cursor's floor: a delivered run, a run
 skipped at the track's max age bound (no widening reaches past it), or a
@@ -303,7 +304,10 @@ a cancelled fetch below a track's end still holds the end open until the cache
 expiry scan removes it, so how fast a subscription ends depends on expiry
 timing. Settle it here, where cancelled and expired runs get a reason.
 
+## Required
+
+- [Range count cost](/quest/m1/subscribe-ranges/fill-linear.md) - the remaining range-count walks stop growing per poll; both edit `miss.rs`
+
 ## Related
 
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - fills the cache miss an evicted run leaves
-- [JS unbounded groups](/quest/m1/unbounded-groups/js.md) - the JS byte bound for groups and the runs between them; not required, since JS runs never outgrow the JS cache

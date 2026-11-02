@@ -57,9 +57,17 @@ Decided in the 2026-10-14 planning interview:
   newest group in `Container.Consumer` first, and `DecoderTrack` then drops
   the earlier group as stale. That would leave the max-delay decoder starting
   mid-sweep. Its consumer must wait for the lower group within its budget
-  before emitting a newer one, through the opt-in in
-  [join earlier group](/quest/m2/intra-refresh/join-earlier-group.md), which
-  fixes it at the source for Rust and `js/hang` alike.
+  before emitting a newer one. ✅ Decided 2026-10-30 (maintainer): a
+  `Container.Consumer` takes `delay: { min, max }` (ms) and starts at the
+  group covering the live edge less `min` (the playout delay) plus its
+  `warmup` prop (the catalog's name and units), waiting for it under that
+  reach. `max` (`null` for no limit) only bounds lateness and never moves the
+  start; a `min` past `max` starts at `max`. All default to zero, which
+  starts at the newest group at once. This decoder passes the playout delay
+  plus the catalog `warmup` as `min`, and the shared max delay plus the
+  `warmup` as `max`, so its start reaches the earlier group without the
+  `warmup` prop, as Rust's max-delay decoder does
+  ([moq-dev/moq#7311](https://github.com/moq-dev/moq/pull/7311)).
 - H.264 recovery-point frames sent as `key` chunks pass Chromium's WebCodecs
   keyframe check (`ParseH264KeyFrame` accepts `is_sei_recovery_point`; WPT
   `videoDecoder-h264-sei`). Chromium rejects a non-IRAP H.265 frame sent as
@@ -79,10 +87,6 @@ Decided in the 2026-10-14 planning interview:
 - Measure the cost of always running two decoders: CPU, decoder memory, and
   dropped frames for one versus two decoders on a 1080p rendition, in a
   browser, recorded in the PR.
-
-## Required
-
-- [Join earlier group](/quest/m2/intra-refresh/join-earlier-group.md) - the `js/hang` opt-in the max-delay decoder joins with
 
 ## Related
 

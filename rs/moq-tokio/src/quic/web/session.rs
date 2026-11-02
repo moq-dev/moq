@@ -150,7 +150,7 @@ impl Session {
 
 		// Run a background task to read capsules from the CONNECT recv stream.
 		let conn2 = this.conn.clone();
-		crate::runtime::spawn(Self::run_recv(conn2, connect.recv, close));
+		crate::runtime::detach(crate::panic::isolate(Self::run_recv(conn2, connect.recv, close)));
 
 		this
 	}
@@ -450,9 +450,9 @@ impl Session {
 				// control and QPACK streams before the capsule is delivered, which a
 				// browser treats as a connection error, losing the code and reason.
 				let session = self.clone();
-				crate::runtime::spawn(async move {
+				crate::runtime::detach(crate::panic::isolate(async move {
 					session.close_with_capsule(send, capsule, code, timeout).await;
-				});
+				}));
 			}
 		} else {
 			// Raw QUIC mode: no capsule needed.
@@ -513,7 +513,7 @@ impl Session {
 		}
 
 		// Wait for the peer to close the CONNECT stream after receiving the capsule.
-		if moq_clock::timeout(timeout, self.conn.closed()).await.is_err() {
+		if kio::clock::timeout(timeout, self.conn.closed()).await.is_err() {
 			tracing::debug!("timeout waiting for peer to close; force-closing connection");
 			self.conn.close(http3_code, "");
 		}
@@ -1447,7 +1447,7 @@ mod tests {
 			)
 		};
 		// Without the header the server never surfaces the streams, so bound the wait.
-		let (uni, bi) = moq_clock::timeout(Duration::from_secs(10), read).await.unwrap();
+		let (uni, bi) = kio::clock::timeout(Duration::from_secs(10), read).await.unwrap();
 		assert!(matches!(uni, crate::quic::web::ReadError::Reset(7)), "{uni:?}");
 		assert!(matches!(bi, crate::quic::web::ReadError::Reset(8)), "{bi:?}");
 	}
@@ -1485,7 +1485,7 @@ mod tests {
 			(uni, client_bi.read_chunk(usize::MAX).await)
 		};
 		// Without the header the server never surfaces the stream, so bound the wait.
-		let (uni, bi) = moq_clock::timeout(Duration::from_secs(10), read).await.unwrap();
+		let (uni, bi) = kio::clock::timeout(Duration::from_secs(10), read).await.unwrap();
 		assert!(matches!(uni, Err(crate::quic::web::ReadError::Reset(0))), "{uni:?}");
 		assert!(matches!(bi, Err(crate::quic::web::ReadError::Reset(0))), "{bi:?}");
 	}
@@ -1520,7 +1520,7 @@ mod tests {
 				}
 			}
 		};
-		let (uni, bi) = moq_clock::timeout(Duration::from_secs(10), async {
+		let (uni, bi) = kio::clock::timeout(Duration::from_secs(10), async {
 			tokio::join!(stopped(uni), stopped(bi))
 		})
 		.await

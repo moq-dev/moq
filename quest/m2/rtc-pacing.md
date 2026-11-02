@@ -44,7 +44,10 @@ WHEP enforcement needs it and nobody owned it.
   caps, each NACKing every packet for several burst windows, stay under
   their own cap plus burst.
 
-Public API: a rate handle on moq-rtc's WHEP server. Wire: none.
+Public API: a rate handle on moq-rtc's WHEP server. Decided 2026-10-30
+(maintainer): `whep::accept` takes the same shape as `whip::accept`, a
+`whep::Request` struct with `Request::with_rate(rate::Limit)`, replacing
+its argument list rather than adding a fifth argument. Wire: none.
 
 ## Required
 
@@ -52,5 +55,4 @@ Public API: a rate handle on moq-rtc's WHEP server. Wire: none.
 
 ## Related
 
-- [moq-rtc REMB and TIAS](/quest/m2/rtc-remb-tias.md) - the WHIP half of the same caps
 - [SRT rate handle](/quest/m2/srt-rate-handle.md) - the same pacing and retransmit charging on SRT

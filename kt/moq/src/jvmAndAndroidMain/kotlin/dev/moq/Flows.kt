@@ -9,19 +9,17 @@ import kotlinx.coroutines.flow.onCompletion
 import uniffi.moq.MoqException
 
 /**
- * Stream of reads: decoded audio frames in the layout declared by the
- * [AudioDecoderOutput] the consumer was created with, and the gaps and encoder
- * ends between them.
+ * Stream of reads: decoded audio frames in the layout declared by the [AudioDecoderOutput] the
+ * consumer was created with, and the gaps and encoder ends between them.
  */
 fun dev.moq.audio.Consumer.reads(): Flow<dev.moq.audio.Read> = pull({ cancel() }) { next() }
 
 /**
- * Stream of reads: decoded video frames, and the gaps and encoder ends between
- * them. Each frame owns the decoder's surface: close it (or `use` it) when done,
- * since held frames stall the decoder.
+ * Stream of reads: decoded video frames, and the gaps and encoder ends between them. Each frame
+ * owns the decoder's surface: close it (or `use` it) when done, since held frames stall the
+ * decoder.
  */
 fun dev.moq.video.Consumer.reads(): Flow<dev.moq.video.Read> = pull({ cancel() }) { next() }
-
 
 /** Stream of encoded media frames, gaps, and encoder ends in delivery order. */
 fun dev.moq.media.TrackConsumer.reads(): Flow<dev.moq.media.Read> = pull({ cancel() }) { next() }
@@ -43,13 +41,15 @@ fun TrackConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
 fun TrackConsumer.datagrams(): Flow<Datagram> = pull({ cancel() }) { recvDatagram() }
 
 /** Stream of tracks requested by subscribers. */
-fun BroadcastRequests.requestedTracks(): Flow<TrackRequest> = pull({ cancel() }) { requestedTrack() }
+fun BroadcastRequests.requestedTracks(): Flow<TrackRequest> =
+    pull({ cancel() }) { requestedTrack() }
 
 /** Stream of the fills readers of one track need. */
 fun TrackRequests.requestedFills(): Flow<Fill> = pull({ cancel() }) { requestedFill() }
 
 /** Stream of broadcasts requested by consumers. */
-fun OriginRequests.requestedBroadcasts(): Flow<BroadcastRequest> = pull({ cancel() }) { requestedBroadcast() }
+fun OriginRequests.requestedBroadcasts(): Flow<BroadcastRequest> =
+    pull({ cancel() }) { requestedBroadcast() }
 
 /** Stream of timestamped raw frames within a group. */
 fun GroupConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
@@ -62,25 +62,28 @@ fun GroupConsumer.frames(): Flow<Frame> = pull({ cancel() }) { readFrame() }
 fun AnnounceConsumer.updates(): Flow<AnnounceEvent> = pull { next() }.onCompletion { cancel() }
 
 /**
- * The session's grant, as `grants().updates()`: the current one, then each change, null
- * while there is none.
+ * The session's grant, as `grants().updates()`: the current one, then each change, null while there
+ * is none.
  *
- * Collect it once: the consumer is cancelled when collection ends, however it ends.
- * Completes when the session shuts down, and throws its close reason otherwise.
+ * Collect it once: the consumer is cancelled when collection ends, however it ends. Completes when
+ * the session shuts down, and throws its close reason otherwise.
  */
-fun GrantConsumer.updates(): Flow<Grant?> = flow {
-    emit(grant())
-    while (true) {
-        currentCoroutineContext().ensureActive()
-        val grant = try {
-            changed()
-        } catch (e: MoqException) {
-            if (e.isShutdown) break
-            throw e
+fun GrantConsumer.updates(): Flow<Grant?> =
+    flow {
+            emit(grant())
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val grant =
+                    try {
+                        changed()
+                    } catch (e: MoqException) {
+                        if (e.isShutdown) break
+                        throw e
+                    }
+                emit(grant)
+            }
         }
-        emit(grant)
-    }
-}.onCompletion { cancel() }
+        .onCompletion { cancel() }
 
 /** Emits [next] until it returns null, checking for cancellation before each pull. */
 private fun <T : Any> pull(next: suspend () -> T?): Flow<T> = flow {
@@ -91,8 +94,8 @@ private fun <T : Any> pull(next: suspend () -> T?): Flow<T> = flow {
 }
 
 /**
- * [pull], calling [cancel] when the collector is cancelled so the native
- * handle wakes a pending [next] and releases the stream.
+ * [pull], calling [cancel] when the collector is cancelled so the native handle wakes a pending
+ * [next] and releases the stream.
  */
 internal fun <T : Any> pull(cancel: () -> Unit, next: suspend () -> T?): Flow<T> =
     pull(next).onCompletion { cause -> if (cause is CancellationException) cancel() }

@@ -95,10 +95,10 @@ pub struct Request {
 /// Closes a connection whose handshake was abandoned, disarmed once the peer
 /// has an answer.
 ///
-/// Dropping a [`Connection`] does not close QUIC: the endpoint keeps it, its
-/// routes, and its driver task until the driver sees a terminal state, and the
-/// backlog stopped counting it at accept. The peer picks the path it asks for
-/// and the subprotocols it offers, so it decides which of [`Request::respond`]'s
+/// Dropping every handle would close QUIC with code 0, which is no HTTP/3
+/// error, and any handle the caller still holds would keep the connection open
+/// with no answer coming. The peer picks the path it asks for and the
+/// subprotocols it offers, so it decides which of [`Request::respond`]'s
 /// early returns the server takes; a guard covers every way out rather than
 /// each one remembering.
 struct Guard {
@@ -428,10 +428,10 @@ struct State {
 ///
 /// [`Request::respond`] builds the web
 /// flavor; [`Session::raw`] wraps a raw-QUIC [`Connection`] with the layering
-/// disabled. Clones share the session; dropping the last closes the connection.
+/// disabled. Clones share the session, which closes with code 0 once its last
+/// clone and stream are gone.
 pub struct Session {
-	// Capsule tasks retain Web/Connection, but only public session handles own this.
-	handles: Rc<()>,
+	handles: Rc<Handles>,
 	conn: Connection,
 	web: Option<Rc<Web>>,
 	/// What [`protocol`](web_transport_trait::poll::Session::protocol)
@@ -485,7 +485,7 @@ impl Session {
 	pub fn raw(conn: Connection) -> Self {
 		let protocol = conn.protocol().map(str::to_owned);
 		Self {
-			handles: Rc::new(()),
+			handles: Handles::new(&conn, None),
 			conn,
 			web: None,
 			protocol,
@@ -559,7 +559,7 @@ impl Session {
 			.spawn(async move { read_capsules(capsules, capsule_conn, recv).await });
 
 		Self {
-			handles: Rc::new(()),
+			handles: Handles::new(&conn, Some(&web)),
 			conn,
 			web: Some(web),
 			protocol,
@@ -590,14 +590,6 @@ impl Clone for Session {
 	}
 }
 
-impl Drop for Session {
-	fn drop(&mut self) {
-		if Rc::strong_count(&self.handles) == 1 {
-			web_transport_trait::poll::Session::close(self, 0, "dropped");
-		}
-	}
-}
-
 impl std::fmt::Debug for Session {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("Session")
@@ -616,9 +608,12 @@ impl Session {
 			let Some((send, recv)) = self.conn.open_request().map_err(|err| self.map_err(err))? else {
 				return Poll::Ready(Ok(None));
 			};
-			let web = self.web.is_some();
 			let header = self.web.as_ref().map(|web| web.header_bi.clone()).unwrap_or_default();
-			self.opening_bi = Some((SendStream::new(send, web), RecvStream::new(recv, web), header));
+			self.opening_bi = Some((
+				SendStream::new(send, &self.handles),
+				RecvStream::new(recv, &self.handles),
+				header,
+			));
 		}
 		web_transport_trait::poll::Session::poll_open_bi(self, cx).map_ok(Some)
 	}
@@ -632,12 +627,12 @@ impl web_transport_trait::poll::Session for Session {
 	fn poll_accept_uni(&mut self, cx: &mut Context<'_>) -> Poll<Result<Self::RecvStream, Self::Error>> {
 		let Some(web) = self.web.clone() else {
 			let inner = ready!(self.conn.poll_accept_uni(cx))?;
-			return Poll::Ready(Ok(RecvStream::new(inner, false)));
+			return Poll::Ready(Ok(RecvStream::new(inner, &self.handles)));
 		};
 
 		loop {
 			if let Some(inner) = web.state.borrow_mut().ready_uni.pop_front() {
-				return Poll::Ready(Ok(RecvStream::new(inner, true)));
+				return Poll::Ready(Ok(RecvStream::new(inner, &self.handles)));
 			}
 
 			// Adopt every new arrival, then try to classify the pending set.
@@ -670,12 +665,18 @@ impl web_transport_trait::poll::Session for Session {
 	) -> Poll<Result<(Self::SendStream, Self::RecvStream), Self::Error>> {
 		let Some(web) = self.web.clone() else {
 			let (send, recv) = ready!(self.conn.poll_accept_bi(cx))?;
-			return Poll::Ready(Ok((SendStream::new(send, false), RecvStream::new(recv, false))));
+			return Poll::Ready(Ok((
+				SendStream::new(send, &self.handles),
+				RecvStream::new(recv, &self.handles),
+			)));
 		};
 
 		loop {
 			if let Some((send, recv)) = web.state.borrow_mut().ready_bi.pop_front() {
-				return Poll::Ready(Ok((SendStream::new(send, true), RecvStream::new(recv, true))));
+				return Poll::Ready(Ok((
+					SendStream::new(send, &self.handles),
+					RecvStream::new(recv, &self.handles),
+				)));
 			}
 
 			loop {
@@ -696,7 +697,7 @@ impl web_transport_trait::poll::Session for Session {
 		if self.opening_uni.is_none() {
 			let inner = ready!(self.conn.poll_open_uni(cx, Default::default())).map_err(|err| self.map_err(err))?;
 			let header = self.web.as_ref().map(|web| web.header_uni.clone()).unwrap_or_default();
-			self.opening_uni = Some((SendStream::new(inner, self.web.is_some()), header));
+			self.opening_uni = Some((SendStream::new(inner, &self.handles), header));
 		}
 		let (send, header) = self.opening_uni.as_mut().expect("opening");
 		let result = ready!(send.poll_header(cx, header));
@@ -711,9 +712,12 @@ impl web_transport_trait::poll::Session for Session {
 		if self.opening_bi.is_none() {
 			let (send, recv) =
 				ready!(self.conn.poll_open_bi(cx, Default::default())).map_err(|err| self.map_err(err))?;
-			let web = self.web.is_some();
 			let header = self.web.as_ref().map(|web| web.header_bi.clone()).unwrap_or_default();
-			self.opening_bi = Some((SendStream::new(send, web), RecvStream::new(recv, web), header));
+			self.opening_bi = Some((
+				SendStream::new(send, &self.handles),
+				RecvStream::new(recv, &self.handles),
+				header,
+			));
 		}
 		let (send, _, header) = self.opening_bi.as_mut().expect("opening");
 		let result = ready!(send.poll_header(cx, header));
@@ -760,89 +764,7 @@ impl web_transport_trait::poll::Session for Session {
 	}
 
 	fn close(&mut self, code: u32, reason: &str) {
-		let Some(web) = &self.web else {
-			return self.conn.close_code(u64::from(code), reason);
-		};
-
-		{
-			let mut closed = web.closed.borrow_mut();
-			if closed.is_some() {
-				return;
-			}
-			*closed = Some(Error::App {
-				code: u64::from(code),
-				reason: reason.to_string(),
-			});
-		}
-
-		let connect_send = web.state.borrow_mut().connect_send.take();
-		let http3 = proto::error_to_http3(code);
-		let Some(send) = connect_send else {
-			self.conn.close_code(http3, reason);
-			return;
-		};
-
-		// The capsule is what carries the code and reason to a browser
-		// (`WebTransport.closed`); the connection close alone would lose the
-		// reason and squash the code through the H3 mapping.
-		let capsule = proto::Capsule::CloseWebTransportSession {
-			code,
-			reason: reason.to_string(),
-		};
-		let mut payload = Vec::new();
-		capsule.encode(&mut payload);
-		let mut frame = Vec::new();
-		encode_varint(FRAME_DATA, &mut frame);
-		encode_varint(payload.len() as u64, &mut frame);
-		frame.extend_from_slice(&payload);
-
-		// Finish the capsule and then give the peer a moment to act on it,
-		// closing either way once the grace period is up. The write goes in
-		// the task rather than here because flow control can take it in
-		// pieces, and abandoning a partial frame would leave the browser with
-		// neither the code nor the reason.
-		let mut deadline = self.conn.owner().after(CLOSE_GRACE);
-		let reason = reason.to_string();
-		let mut conn = self.conn.clone();
-		// The caller may drop every handle right after this, so the task holds
-		// the H3 control and QPACK streams itself: RFC 9114 makes closing one a
-		// connection error, which a browser reports instead of the capsule.
-		let web = web.clone();
-		self.conn.owner().spawn(async move {
-			let mut frame = Bytes::from(frame);
-			// Taken to finish once the frame is all written, and kept until the close.
-			let mut send = Some(send);
-			let mut finished = None;
-			kio::wait(|waiter| {
-				let cx = waiter.context();
-
-				// Stop writing once the connection is gone; the deadline is the
-				// only other thing that ends this.
-				if conn.poll_closed(&cx).is_ready() {
-					return Poll::Ready(());
-				}
-				if let Some(stream) = &mut send {
-					while frame.has_remaining() {
-						match stream.poll_write(&cx, &mut frame) {
-							Poll::Ready(Ok(_)) => {}
-							// The stream is unusable, so the connection close below
-							// is all the peer is going to get.
-							Poll::Ready(Err(_)) => return Poll::Ready(()),
-							Poll::Pending => break,
-						}
-					}
-					if !frame.has_remaining() {
-						finished = send.take().map(send::Stream::finish);
-					}
-				}
-
-				deadline.poll(waiter)
-			})
-			.await;
-			conn.close_code(http3, &reason);
-			// Only now, so the critical streams end with the connection.
-			drop((web, finished));
-		});
+		close(&self.conn, self.web.as_ref(), code, reason);
 	}
 
 	fn poll_closed(&mut self, cx: &mut Context<'_>) -> Poll<Self::Error> {
@@ -863,6 +785,122 @@ impl web_transport_trait::poll::Session for Session {
 	}
 }
 
+/// Close the session: in web mode with a `CloseWebTransportSession` capsule
+/// ahead of the connection close, which carries the code and reason to a
+/// browser.
+fn close(conn: &Connection, web: Option<&Rc<Web>>, code: u32, reason: &str) {
+	let Some(web) = web else {
+		return conn.close_code(u64::from(code), reason);
+	};
+
+	{
+		let mut closed = web.closed.borrow_mut();
+		if closed.is_some() {
+			return;
+		}
+		*closed = Some(Error::App {
+			code: u64::from(code),
+			reason: reason.to_string(),
+		});
+	}
+
+	let connect_send = web.state.borrow_mut().connect_send.take();
+	let http3 = proto::error_to_http3(code);
+	let Some(send) = connect_send else {
+		conn.close_code(http3, reason);
+		return;
+	};
+
+	// The capsule is what carries the code and reason to a browser
+	// (`WebTransport.closed`); the connection close alone would lose the
+	// reason and squash the code through the H3 mapping.
+	let capsule = proto::Capsule::CloseWebTransportSession {
+		code,
+		reason: reason.to_string(),
+	};
+	let mut payload = Vec::new();
+	capsule.encode(&mut payload);
+	let mut frame = Vec::new();
+	encode_varint(FRAME_DATA, &mut frame);
+	encode_varint(payload.len() as u64, &mut frame);
+	frame.extend_from_slice(&payload);
+
+	// Finish the capsule and then give the peer a moment to act on it,
+	// closing either way once the grace period is up. The write goes in
+	// the task rather than here because flow control can take it in
+	// pieces, and abandoning a partial frame would leave the browser with
+	// neither the code nor the reason.
+	let mut deadline = conn.owner().after(CLOSE_GRACE);
+	let reason = reason.to_string();
+	let owner = conn.owner().clone();
+	let mut conn = conn.clone();
+	// The caller may drop every handle right after this, so the task holds
+	// the H3 control and QPACK streams itself: RFC 9114 makes closing one a
+	// connection error, which a browser reports instead of the capsule.
+	let web = web.clone();
+	owner.spawn(async move {
+		let mut frame = Bytes::from(frame);
+		// Taken to finish once the frame is all written, and kept until the close.
+		let mut send = Some(send);
+		let mut finished = None;
+		kio::wait(|waiter| {
+			let cx = waiter.context();
+
+			// Stop writing once the connection is gone; the deadline is the
+			// only other thing that ends this.
+			if conn.poll_closed(&cx).is_ready() {
+				return Poll::Ready(());
+			}
+			if let Some(stream) = &mut send {
+				while frame.has_remaining() {
+					match stream.poll_write(&cx, &mut frame) {
+						Poll::Ready(Ok(_)) => {}
+						// The stream is unusable, so the connection close below
+						// is all the peer is going to get.
+						Poll::Ready(Err(_)) => return Poll::Ready(()),
+						Poll::Pending => break,
+					}
+				}
+				if !frame.has_remaining() {
+					finished = send.take().map(send::Stream::finish);
+				}
+			}
+
+			deadline.poll(waiter)
+		})
+		.await;
+		conn.close_code(http3, &reason);
+		// Only now, so the critical streams end with the connection.
+		drop((web, finished));
+	});
+}
+
+/// What every session clone and stream it handed out shares: the last to drop
+/// closes the session.
+///
+/// Background tasks (the capsule reader, a graceful close) hold the connection
+/// and its HTTP/3 streams but never this, so they cannot keep a session nobody
+/// can use open.
+struct Handles {
+	conn: Connection,
+	web: Option<Rc<Web>>,
+}
+
+impl Handles {
+	fn new(conn: &Connection, web: Option<&Rc<Web>>) -> Rc<Self> {
+		Rc::new(Self {
+			conn: conn.clone(),
+			web: web.cloned(),
+		})
+	}
+}
+
+impl Drop for Handles {
+	fn drop(&mut self) {
+		close(&self.conn, self.web.as_ref(), 0, "dropped");
+	}
+}
+
 /// An outgoing stream, WebTransport-framed when its session is.
 ///
 /// A web stream we opened is handed out with its header already written, so a
@@ -874,6 +912,8 @@ pub struct SendStream {
 	/// to deliver.
 	header: Option<send::Offset>,
 	web: bool,
+	/// Last, so the stream's own reset goes out before a close it triggers.
+	_session: Rc<Handles>,
 }
 
 /// Where the stream is, since `web_transport_trait` finishes and resets through `&mut self`.
@@ -885,7 +925,8 @@ enum SendState {
 }
 
 impl SendStream {
-	fn new(mut inner: send::Stream, web: bool) -> Self {
+	fn new(mut inner: send::Stream, session: &Rc<Handles>) -> Self {
+		let web = session.web.is_some();
 		// The driver's raw 0 reads to a browser as an HTTP/3 stream error rather than the
 		// WebTransport cancellation that dropping a stream means. moq cancels subscriptions by
 		// dropping, so this is the ordinary path.
@@ -896,6 +937,7 @@ impl SendStream {
 			state: SendState::Open(inner),
 			header: None,
 			web,
+			_session: session.clone(),
 		}
 	}
 
@@ -1044,10 +1086,13 @@ pub struct RecvStream {
 	/// `web_transport_trait` stops through `&mut self`.
 	inner: Option<recv::Stream>,
 	web: bool,
+	/// Last, so the stream's own stop goes out before a close it triggers.
+	_session: Rc<Handles>,
 }
 
 impl RecvStream {
-	fn new(mut inner: recv::Stream, web: bool) -> Self {
+	fn new(mut inner: recv::Stream, session: &Rc<Handles>) -> Self {
+		let web = session.web.is_some();
 		// Same as the send side: the driver stops with a raw 0.
 		if web {
 			inner.set_drop_stop(http3_code(proto::error_to_http3(0)));
@@ -1055,6 +1100,7 @@ impl RecvStream {
 		Self {
 			inner: Some(inner),
 			web,
+			_session: session.clone(),
 		}
 	}
 

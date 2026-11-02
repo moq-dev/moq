@@ -25,7 +25,7 @@ fn measure(flight: usize, batch: usize, mode: Mode) -> (Duration, usize) {
     let steady = !matches!(mode, Mode::Drain);
     let base = Instant::now();
     let region = Region::new(ALLOCATOR);
-    let config = Bbr3Config {
+    let config = Config {
         probe_rng_seed: Some([7; 16]),
         ..Default::default()
     };
@@ -77,6 +77,7 @@ fn measure(flight: usize, batch: usize, mode: Mode) -> (Duration, usize) {
             sent: base,
             bytes: PACKET,
             packet,
+            received: None,
         }));
         bbr.on_ack(Ack {
             now,

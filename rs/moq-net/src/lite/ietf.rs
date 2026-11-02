@@ -979,13 +979,13 @@ pub(crate) async fn test_hop(
 		.with_publisher(upstream.consume());
 	let (client, server) = futures::join!(
 		async {
-			let (session, driver) = dial.connect(moq_clock::now(), client).await.unwrap();
-			drop(moq_clock::sim::spawn(crate::time::run(driver)));
+			let (session, driver) = dial.connect(kio::clock::now(), client).await.unwrap();
+			drop(kio::clock::sim::spawn(crate::time::run(driver)));
 			session
 		},
 		async {
-			let (session, driver) = serve.accept(moq_clock::now(), server).await.unwrap();
-			drop(moq_clock::sim::spawn(crate::time::run(driver)));
+			let (session, driver) = serve.accept(kio::clock::now(), server).await.unwrap();
+			drop(kio::clock::sim::spawn(crate::time::run(driver)));
 			session
 		},
 	);
@@ -1064,19 +1064,19 @@ mod hop_tests {
 	}
 
 	async fn next(group: &mut group::Consumer) -> Option<frame::Object> {
-		moq_clock::timeout(TIMEOUT, kio::wait(|waiter| group.poll_read_object(waiter)))
+		kio::clock::timeout(TIMEOUT, kio::wait(|waiter| group.poll_read_object(waiter)))
 			.await
 			.expect("no frame")
 			.unwrap()
 	}
 
 	async fn subscribe(origin: &crate::origin::Producer) -> (track::Consumer, track::Subscriber) {
-		let broadcast = moq_clock::timeout(TIMEOUT, origin.consume().request("room", None))
+		let broadcast = kio::clock::timeout(TIMEOUT, origin.consume().request("room", None))
 			.await
 			.expect("no broadcast")
 			.unwrap();
 		let track = broadcast.track("video").unwrap();
-		let subscriber = moq_clock::timeout(TIMEOUT, track.subscribe(None))
+		let subscriber = kio::clock::timeout(TIMEOUT, track.subscribe(None))
 			.await
 			.expect("no subscription")
 			.unwrap();
@@ -1084,7 +1084,7 @@ mod hop_tests {
 	}
 
 	async fn recv(subscriber: &mut track::Subscriber) -> group::Consumer {
-		moq_clock::timeout(TIMEOUT, subscriber.recv_group())
+		kio::clock::timeout(TIMEOUT, subscriber.recv_group())
 			.await
 			.expect("no group")
 			.unwrap()
@@ -1095,7 +1095,7 @@ mod hop_tests {
 	/// Object IDs, properties, and END_OF_GROUP position, and its track's properties.
 	/// A side that does not offer the extension gets the plain frames alone. The track info
 	/// moq-transport egress restates as Track Properties crosses either way.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn relayed_state_crosses_while_the_group_is_open() {
 		for offer in [[true, true], [true, false], [false, true]] {
 			let negotiated = offer == [true, true];
@@ -1138,7 +1138,7 @@ mod hop_tests {
 			// The upstream group is still open.
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(&frame.payload.contiguous(0)[..], b"a");
-			assert_eq!(frame.timestamp, negotiated.then(|| ts(0)));
+			assert_eq!(frame.timestamp, Some(ts(0)));
 			match negotiated {
 				true => {
 					assert_eq!(fields(&frame), Some((first.id, first.properties.clone())), "{offer:?}");
@@ -1174,15 +1174,10 @@ mod hop_tests {
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(&frame.payload.contiguous(0)[..], b"b");
 			assert!(next(&mut received).await.is_none());
-			let info = moq_clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
+			let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 			assert_eq!(
 				(info.max_age, info.timescale, info.priority, info.refresh),
-				(
-					Some(Duration::from_secs(7)),
-					negotiated.then_some(Timescale::MILLI),
-					9,
-					Some(0)
-				),
+				(Some(Duration::from_secs(7)), Some(Timescale::MILLI), 9, Some(0)),
 				"{offer:?}"
 			);
 			match negotiated {
@@ -1216,11 +1211,11 @@ mod hop_tests {
 		let _track = broadcast.create_track("video", info).unwrap();
 
 		let (downstream, _sessions) = test_hop(&upstream, "room", [true, true]).await;
-		let broadcast = moq_clock::timeout(TIMEOUT, downstream.consume().request("room", None))
+		let broadcast = kio::clock::timeout(TIMEOUT, downstream.consume().request("room", None))
 			.await
 			.expect("no broadcast")
 			.unwrap();
-		moq_clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
+		kio::clock::timeout(TIMEOUT, broadcast.track("video").unwrap().subscribe(None))
 			.await
 			.expect("no answer")
 			.map(drop)
@@ -1229,7 +1224,7 @@ mod hop_tests {
 	/// A track with a Mandatory Track Property, mutable or sealed, is refused across the hop
 	/// as moq-transport ingress refuses it: one we do not understand is neither processed
 	/// nor forwarded.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn mandatory_track_properties_are_refused() {
 		let mut sealed = Vec::new();
 		let e = &mut Encoder::new(&mut sealed, crate::ietf::Version::Draft22.into());
@@ -1252,7 +1247,7 @@ mod hop_tests {
 
 	/// A sealed TIMESCALE that contradicts TRACK_INFO is refused across the hop: the relay
 	/// times frames by TRACK_INFO, while egress would forward the sealed one.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_sealed_property_must_match_track_info() {
 		for (timescale, ok) in [(1000, true), (900, false), (0, false)] {
 			let mut sealed = Vec::new();
@@ -1273,7 +1268,7 @@ mod hop_tests {
 
 	/// A sealed DYNAMIC_GROUPS must match the refresh TRACK_INFO carries across the hop,
 	/// which moq-transport egress restates as DYNAMIC_GROUPS.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn a_sealed_dynamic_groups_must_match_track_info() {
 		for (refresh, value, ok) in [
 			(Some(0), 1, true),
@@ -1304,7 +1299,7 @@ mod hop_tests {
 
 	/// A relay forwards only as many Track Properties as leave room for the ones it
 	/// restates from TRACK_INFO, so one more is refused across the hop.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn forwarded_track_properties_leave_room_for_track_info() {
 		let max = crate::ietf::properties::MAX_FORWARDED;
 		for (count, ok) in [(max, true), (max + 1, false)] {
@@ -1318,7 +1313,7 @@ mod hop_tests {
 
 	/// Groups and datagrams from a moq-lite publisher cross a negotiated hop as plain as
 	/// they left: no relay state appears on the way, nor a moq-transport draft.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn plain_media_crosses_unchanged() {
 		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
@@ -1327,7 +1322,7 @@ mod hop_tests {
 			.unwrap();
 		let (downstream, sessions) = test_hop(&upstream, "room", [true, true]).await;
 		let (copy, mut subscriber) = subscribe(&downstream).await;
-		let info = moq_clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
+		let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 		assert!(info.properties.is_none());
 
 		let mut group = track.append_group().unwrap();
@@ -1351,7 +1346,7 @@ mod hop_tests {
 		assert!(received.end_object().is_none());
 
 		track.insert_datagram(7, ts(9), b"datagram".to_vec()).unwrap();
-		let datagram = moq_clock::timeout(TIMEOUT, kio::wait(|waiter| subscriber.poll_recv_wire_datagram(waiter)))
+		let datagram = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| subscriber.poll_recv_wire_datagram(waiter)))
 			.await
 			.expect("no datagram")
 			.unwrap()
@@ -1364,7 +1359,7 @@ mod hop_tests {
 
 	/// Only a negotiated hop can preserve several datagram Object IDs. A late or lost
 	/// object 0 never lets another object's payload pose as the whole group.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn datagram_objects_cross_only_an_identifying_hop() {
 		for offer in [[false, false], [false, true], [true, false], [true, true]] {
 			for objects in [&[0, 1, 2][..], &[1, 2, 0], &[1, 2]] {
@@ -1438,10 +1433,10 @@ mod hop_tests {
 		}
 	}
 
-	/// Provenance keeps IETF times unchecked after a hop, while a peer declining the
-	/// extension gets no timeline. SUBSCRIBE, FETCH, and datagrams must agree with TRACK_INFO,
-	/// while a listing stays untimed.
-	#[moq_clock::test]
+	/// Every hop carries IETF times, and provenance keeps them unchecked after a hop that
+	/// negotiated the extension. A peer declining it checks them like native moq-lite, as a
+	/// listing's copy does. SUBSCRIBE, FETCH, and datagrams must agree with TRACK_INFO.
+	#[kio::test]
 	async fn ietf_timestamps_keep_their_provenance_across_a_hop() {
 		for offer in [[true, true], [true, false], [false, true]] {
 			let negotiated = offer == [true, true];
@@ -1457,20 +1452,23 @@ mod hop_tests {
 			head.finish().unwrap();
 			let (downstream, sessions) = test_hop(&upstream, "room", offer).await;
 			let broadcast = downstream.consume().request("room", None).await.unwrap();
-			// A listing cannot carry the provenance, so it lists the track untimed even when
-			// negotiated: a relay re-listing it would otherwise advertise it as native lite.
+			// A listing carries no provenance, so it lists the track as native lite.
 			let mut tracks = broadcast.tracks().unwrap();
 			let listed = loop {
-				match moq_clock::timeout(TIMEOUT, tracks.next()).await.unwrap().unwrap() {
+				match kio::clock::timeout(TIMEOUT, tracks.next()).await.unwrap().unwrap() {
 					Some(crate::broadcast::TracksEvent::Added { name, info }) if &*name == "video" => break info,
 					Some(_) => continue,
 					None => panic!("listing ended before the track"),
 				}
 			};
-			assert_eq!((listed.timescale, listed.ietf()), (None, None), "{offer:?}");
+			assert_eq!(
+				(listed.timescale, listed.ietf()),
+				(Some(Timescale::MILLI), None),
+				"{offer:?}"
+			);
 			let copy = broadcast.track("video").unwrap();
-			let info = moq_clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
-			assert_eq!(info.timescale, negotiated.then_some(Timescale::MILLI), "{offer:?}");
+			let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
+			assert_eq!(info.timescale, Some(Timescale::MILLI), "{offer:?}");
 			assert_eq!(
 				info.ietf(),
 				negotiated.then_some(crate::ietf::Version::Draft22),
@@ -1478,35 +1476,38 @@ mod hop_tests {
 			);
 			// Before any subscription, this must fetch the head over the hop, rather
 			// than reading an already subscribed copy's cache.
-			let mut fetched = moq_clock::timeout(TIMEOUT, copy.fetch_group(0, None))
+			let mut fetched = kio::clock::timeout(TIMEOUT, copy.fetch_group(0, None))
 				.await
 				.unwrap()
 				.unwrap();
-			assert_eq!(next(&mut fetched).await.unwrap().timestamp, negotiated.then(|| ts(100)));
+			assert_eq!(next(&mut fetched).await.unwrap().timestamp, Some(ts(100)));
 			assert!(next(&mut fetched).await.is_none());
 			let mut subscriber =
-				moq_clock::timeout(TIMEOUT, copy.subscribe(track::Subscription::default().with_start(1)))
+				kio::clock::timeout(TIMEOUT, copy.subscribe(track::Subscription::default().with_start(1)))
 					.await
 					.unwrap()
 					.unwrap();
 			// A peer may have stamped arrival times. The second group's rewind must not
-			// acquire native moq-lite checks merely because it crossed a relay hop.
+			// acquire native moq-lite checks merely because it crossed a negotiated hop;
+			// without the extension, the copy is checked, so it advances instead.
+			let start = if negotiated { ts(50) } else { ts(150) };
 			let mut group = track.create_group(1u64.into()).unwrap();
-			group.write_frame(ts(50), b"frame".to_vec()).unwrap();
+			group.write_frame(start, b"frame".to_vec()).unwrap();
 			group.finish().unwrap();
 			let mut received = recv(&mut subscriber).await;
 			assert_eq!(received.sequence, 1);
 			let frame = next(&mut received).await.unwrap();
-			assert_eq!(frame.timestamp, negotiated.then(|| ts(50)), "{offer:?}");
+			assert_eq!(frame.timestamp, Some(start), "{offer:?}");
 			assert_eq!(&frame.payload.contiguous(0)[..], b"frame");
 			assert!(next(&mut received).await.is_none());
-			track.insert_datagram(2, ts(25), b"datagram".to_vec()).unwrap();
-			let datagram = moq_clock::timeout(TIMEOUT, kio::wait(|waiter| subscriber.poll_recv_wire_datagram(waiter)))
+			let time = if negotiated { ts(25) } else { ts(200) };
+			track.insert_datagram(2, time, b"datagram".to_vec()).unwrap();
+			let datagram = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| subscriber.poll_recv_wire_datagram(waiter)))
 				.await
 				.unwrap()
 				.unwrap()
 				.unwrap();
-			assert_eq!(datagram.timestamp, negotiated.then(|| ts(25)), "{offer:?}");
+			assert_eq!(datagram.timestamp, Some(time), "{offer:?}");
 			assert_eq!(&datagram.payload[..], b"datagram");
 			drop(sessions);
 		}
@@ -1514,7 +1515,7 @@ mod hop_tests {
 
 	/// A compressed track crosses a negotiated hop as stored: each frame's Inflated Size
 	/// follows its Object Record, and a datagram's follows its Datagram State.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn compressed_media_crosses_a_negotiated_hop() {
 		let upstream = crate::origin::Config::new(crate::Hop::new(2).unwrap()).produce();
 		let broadcast = upstream.publish("room", crate::origin::Route::default()).unwrap();
@@ -1543,7 +1544,7 @@ mod hop_tests {
 		assert!(next(&mut received).await.is_none());
 
 		track.insert_datagram(7, ts(9), payload(3)).unwrap();
-		let datagram = moq_clock::timeout(
+		let datagram = kio::clock::timeout(
 			TIMEOUT,
 			kio::wait(|waiter| subscriber.poll_recv_stored_datagram(waiter)),
 		)

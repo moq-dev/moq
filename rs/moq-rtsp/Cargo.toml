@@ -22,7 +22,7 @@ test-support = ["dep:base64", "dep:tokio", "tokio/io-util", "tokio/macros", "tok
 base64 = { workspace = true, optional = true }
 futures = { workspace = true }
 hang = { workspace = true }
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 # Only for `RedactedUrl`, so the session URL logs without its query.
@@ -38,7 +38,7 @@ url = { workspace = true }
 [dev-dependencies]
 base64 = { workspace = true }
 # A clock only the stall tests move, so a loaded runner never fires a deadline early.
-moq-clock = { path = "../moq-clock", features = ["manual"] }
+kio = { path = "../kio", features = ["manual"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 tracing-test = { workspace = true }
 

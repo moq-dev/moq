@@ -327,6 +327,11 @@ impl Join {
 		pending.result.weak().same_channel(&self.attempt)
 	}
 
+	/// The part of the fill the reader still reads.
+	pub(super) fn held(&self) -> &RangeSet<u64> {
+		&self.held
+	}
+
 	/// Whether the reader holds none of the fill any more.
 	pub(super) fn is_empty(&self) -> bool {
 		self.held.is_empty()
@@ -843,6 +848,14 @@ impl Fill {
 		}
 		self.prev = Some(wanted);
 		Poll::Ready(wanted)
+	}
+
+	/// Refuse every group still owed with `err`, which says nothing about whether the source
+	/// has them, so nothing is recorded dropped.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn refuse(&self, err: Error) {
+		let unresolved = self.inner.unresolved(self.inner.start.group..self.inner.end);
+		self.inner.refuse(&unresolved, err, self.max_delay());
 	}
 
 	/// The next run of groups still owed, in the fill's order: [`Self::wanted`]'s group,

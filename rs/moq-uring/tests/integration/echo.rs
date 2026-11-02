@@ -1,6 +1,6 @@
 //! A tokio QUIC peer echoing through the io_uring WebTransport server.
 
-#![cfg(all(target_os = "linux", feature = "quic"))]
+#![cfg(feature = "quic")]
 
 use crate::support;
 

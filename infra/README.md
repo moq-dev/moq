@@ -10,7 +10,6 @@ infrastructure.
 | `infra/moq-sh` | `moq.sh`     |                 | The `moq` installer script              |
 | `infra/mbx` |                 | `mbx-moq-dev`   | Private Rust build cache for CI         |
 | `infra/nix` | `nix.moq.dev`   | `nix-moq-dev`, `nix-ci-moq-dev` | Nix binary cache        |
-| `infra/token` | `token.moq.dev` |               | Scoped moq-bot tokens for CI, by OIDC   |
 
 Each worker is a standalone bun package with a `wrangler.jsonc` and a
 small TypeScript handler. The apt and rpm workers proxy GETs out of the R2
@@ -30,7 +29,6 @@ just infra apt deploy
 just infra rpm deploy
 just infra moq-sh deploy
 just infra nix deploy
-just infra token deploy
 ```
 
 Each recipe runs `bun install` and `bun wrangler deploy`. The
@@ -45,35 +43,6 @@ So the first deploy, and any change to the custom domain, runs by hand under a
 maintainer's `wrangler login`. Whether Editor alone passes wrangler's
 custom-domain check on every deploy is unproven until the first `release`
 run; [the deploy quest](../quest/m2/release/moq-sh-deploy.md) tracks it.
-
-## The token broker
-
-`token.moq.dev` holds the moq-bot key so that no repository has to. A workflow
-job with `id-token: write` asks GitHub for an ID token with audience
-`token.moq.dev` and POSTs it to a policy's path. The worker verifies GitHub's
-signature and issues a one-hour installation token, scoped to the calling
-repository, only when the job runs that repository's policy workflow on
-`main` in the moq-dev organization. A pushed branch, a pull request, a tag,
-every other workflow, and a reusable workflow the policy workflow calls are
-refused.
-
-| Path | Workflow | Permissions |
-| --- | --- | --- |
-| `/land` | `.github/workflows/land.yml` | `contents`, `workflows`: write |
-
-A repository opts in by adding the workflow; moq-bot is installed on every
-moq-dev repository. Only main's copy of the workflow counts, and only the
-gate or a ruleset bypass changes `main`, so the job that requests the ID
-token must never run pull request code. The first deploy, and any key
-rotation, run by hand:
-
-```bash
-just infra token deploy
-just infra token secret ~/Downloads/moq-bot.<date>.private-key.pem
-```
-
-`secret` converts GitHub's PKCS#1 key to the PKCS#8 that WebCrypto imports
-and pipes it straight to `wrangler secret put`.
 
 ## Write credentials
 
@@ -94,8 +63,8 @@ names the Environment, and a branch that is not on the list fails to start it.
 
 `main` is on the `publish` list for `workflow_run`, schedule, and dispatch jobs,
 which run there, until [those publishers run on their tag](../quest/m0/ci/publish-release-only.md).
-A job that needs only the moq-bot key, such as Dependabot's, names `bot`; the land gate holds no key
-and gets its token from [the token broker](#the-token-broker). A job that also runs dry on other refs names the Environment
+A job that needs only the moq-bot key, such as Dependabot's, names `bot`; the land gate runs on the
+maintainer's host, outside Actions. A job that also runs dry on other refs names the Environment
 only when it publishes, as in `environment: ${{ github.ref_type == 'tag' &&
 'publish' || '' }}`. Read-only secrets, such as the mbx read key, stay at the
 repository level.
@@ -173,37 +142,16 @@ After this, every release that publishes a `.deb` or `.rpm` (one of the
 triggers `apt-repo.yml` / `rpm-repo.yml`, which downloads the assets,
 regenerates the repository metadata, signs it, and uploads the diff.
 
-## Bootstrapping the landing gate
+## The landing gate
 
-`land.yml` separates queue resolution, the self-hosted build, and a hosted
-push. The worker receives only a read credential and local compiler caches;
-the hosted push reconstructs the tested chain with Quest from `main`.
-
-A maintainer coordinates the cutover. The land job gets its moq-bot token
-from [the token broker](#the-token-broker), so it reads no secret. The
-workflow cannot replace GitHub's queue until its ruleset is installed with it:
-
-1. Deploy the token broker, and delete the organization's `APP_CLIENT_ID` and
-   `APP_PRIVATE_KEY` and this repository's `APP_ID` and `APP_PRIVATE_KEY`, so
-   only the `bot` and `publish` Environments hold the key. Any branch's
-   workflow can read the others.
-2. Add moq-bot to the main ruleset's bypass actors, retain the administrator
-   bypass, remove the `merge_queue` rule, and replace `Check` with required
-   context `quest land`, pinned to an app that never reports it on PR heads.
-   Keep the deletion and non-fast-forward protections. Other required
-   checks or review rules must be ones the pinned Quest engine supports.
-3. Install the workflow source and ruleset in a coordinated maintenance
-   window. A queued PR that removes its own `merge_group` handler cannot
-   supply the old queue's required check; changing the ruleset first also
-   stops the old queue. Confirm the exact installation path before starting
-   that window. This setup does not dispatch a gate or request any landing.
-
-`MOQ_QUEUE_RUNNER` keeps selecting the existing self-hosted worker. After
-cutover, request landing with the pinned-head command in
-[`CONTRIBUTING.md`](../CONTRIBUTING.md). A new push invalidates that request.
-The Land run links any ejection reason on the PR; failures do not retry a
-batch. Measure a busy day's throughput and queue latency before declaring
-the migration complete.
+PRs land through `quest land serve`, a daemon on the maintainer's NixOS host
+([kixelated/nixos](https://github.com/kixelated/nixos), `modules/quest-land.nix`),
+not a workflow. It holds moq-bot's key there, checks each batch with
+`just ci "$BASE"` in an isolated container with the former queue runner's
+caches and `/dev/kvm`, and lands each PR through GitHub's squash merge. The
+main ruleset requires the `quest land` check pinned to moq-bot, which never
+reports it, so only the gate (or the administrator bypass) lands on `main`.
+See [`CONTRIBUTING.md`](../CONTRIBUTING.md#landing-gate) for requesting a landing.
 
 ## Bootstrapping the Rust build cache
 
