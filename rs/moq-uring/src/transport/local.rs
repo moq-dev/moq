@@ -119,6 +119,10 @@ impl<S: poll::Session> poll::Session for Local<S> {
 	fn probe(&self) -> Option<moq::Probe> {
 		self.0.probe()
 	}
+
+	fn receive_window(&self) -> Option<moq::ReceiveWindow> {
+		self.0.receive_window()
+	}
 }
 
 impl<T: poll::SendStream> poll::SendStream for Local<T> {
@@ -171,6 +175,10 @@ impl<T: poll::RecvStream> poll::RecvStream for Local<T> {
 
 	fn stop(&mut self, code: u32) {
 		self.0.stop(code)
+	}
+
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+		self.0.poll_reset(waiter)
 	}
 
 	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Self::Error>> {

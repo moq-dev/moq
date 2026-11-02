@@ -173,7 +173,9 @@ running. It does not retry on demand or bandwidth changes, and enable cycles
 that keep the same capture do not retry. A new capture source (such as the
 track a camera or microphone reopens after a device swap), changed encoder settings, or
 a replacement encoder recovers it. Recovery keeps the catalog ID and uses a
-fresh `track` name.
+fresh `track` name. A new network broadcast (a rename or a `maxAge` change)
+also starts the encoder over, under the catalog ID, with its advertised
+maxima reset.
 
 ## Strict CSP
 

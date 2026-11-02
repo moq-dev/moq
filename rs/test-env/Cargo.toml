@@ -10,3 +10,6 @@ edition = "2024"
 rust-version.workspace = true
 
 publish = false
+
+[dev-dependencies]
+workspace-hack = { path = "../workspace-hack" }
