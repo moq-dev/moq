@@ -22,13 +22,14 @@ source timeline; omitting it keeps an independent offset. A timebase belongs to 
 broadcast and does not keep it open. `ContainerProducer` takes chunks split anywhere,
 so a raw byte stream needs no other importer.
 `ContainerFormat.FMP4` splits each fragment into one frame per sample.
-`MediaFrame.timestamp`, media writes, and `flush` use `datetime.timedelta`.
+Media timestamps are exact `moq.Timestamp(value, scale)` records, so a 90 kHz tick survives a read and republish.
+`Timestamp.from_timedelta` is exact; `.to_timedelta()` rounds down to a whole microsecond.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yields each state in order,
-and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowPush`, `WindowPop`, or `WindowSkip`. Read timestamps are rounded down to a whole microsecond.
+and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowPush`, `WindowPop`, or `WindowSkip`.
 Raw tracks with a `None` timescale are untimed on both publish and receive.
 `TrackInfo(compress=True)` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
-The JSON producers' `update` / `append` accept `timestamp=timedelta(...)` (`None` for untimed).
+The JSON producers' `update` / `append` accept `timestamp=moq.Timestamp(...)` (`None` for untimed).
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.

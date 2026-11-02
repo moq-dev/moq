@@ -16,7 +16,6 @@ import (
 	stdjson "encoding/json"
 	"fmt"
 	"iter"
-	"time"
 
 	"moq.dev/moq"
 	ffi "moq.dev/moq-ffi/moq"
@@ -70,16 +69,12 @@ func NewSnapshotProducer(broadcast *moq.BroadcastProducer, track *moq.TrackProdu
 
 // Update publishes value at timestamp on the broadcast clock; nil is untimed.
 // It is a no-op when unchanged.
-func (p *SnapshotProducer) Update(value any, timestamp *time.Duration) error {
+func (p *SnapshotProducer) Update(value any, timestamp *moq.Timestamp) error {
 	encoded, err := stdjson.Marshal(value)
 	if err != nil {
 		return err
 	}
-	at, err := bridge.OptionalDuration(timestamp, "timestamp")
-	if err != nil {
-		return err
-	}
-	return p.inner.Update(string(encoded), at)
+	return p.inner.Update(string(encoded), timestamp)
 }
 
 // Demand returns a watch-only handle to whether the track has subscribers.
@@ -113,16 +108,12 @@ func NewStreamProducer(broadcast *moq.BroadcastProducer, track *moq.TrackProduce
 }
 
 // Append adds one JSON record at timestamp on the broadcast clock; nil is untimed.
-func (p *StreamProducer) Append(value any, timestamp *time.Duration) error {
+func (p *StreamProducer) Append(value any, timestamp *moq.Timestamp) error {
 	encoded, err := stdjson.Marshal(value)
 	if err != nil {
 		return err
 	}
-	at, err := bridge.OptionalDuration(timestamp, "timestamp")
-	if err != nil {
-		return err
-	}
-	return p.inner.Append(string(encoded), at)
+	return p.inner.Append(string(encoded), timestamp)
 }
 
 // Demand returns a watch-only handle to whether the track has subscribers.
@@ -143,22 +134,15 @@ func (p *StreamProducer) Finish() error {
 type Timed struct {
 	// Value is the JSON document.
 	Value stdjson.RawMessage
-	// Timestamp is on the broadcast clock, or nil on an untimed track. It is rounded down
-	// to a whole microsecond, so a tick on a track like 90 kHz may not survive a read and
-	// republish exactly.
-	Timestamp *time.Duration
+	// Timestamp is on the broadcast clock, or nil on an untimed track.
+	Timestamp *moq.Timestamp
 }
 
 func timed(value *ffi.MoqJsonValue) *Timed {
 	if value == nil {
 		return nil
 	}
-	out := &Timed{Value: stdjson.RawMessage(value.Value)}
-	if value.TimestampUs != nil {
-		at := time.Duration(*value.TimestampUs) * time.Microsecond
-		out.Timestamp = &at
-	}
-	return out
+	return &Timed{Value: stdjson.RawMessage(value.Value), Timestamp: value.Timestamp}
 }
 
 // SnapshotConsumer receives each reconstructed JSON state.
@@ -255,26 +239,18 @@ func NewWindowProducer(track *moq.TrackProducer, options WindowOptions) (*Window
 }
 
 // Push appends one JSON record at timestamp on the broadcast clock; nil is untimed.
-func (p *WindowProducer) Push(value any, timestamp *time.Duration) error {
+func (p *WindowProducer) Push(value any, timestamp *moq.Timestamp) error {
 	encoded, err := stdjson.Marshal(value)
 	if err != nil {
 		return err
 	}
-	at, err := bridge.OptionalDuration(timestamp, "timestamp")
-	if err != nil {
-		return err
-	}
-	return p.inner.Push(string(encoded), at)
+	return p.inner.Push(string(encoded), timestamp)
 }
 
 // Pop drops count records from the front of the window, clamped to what it holds,
 // at timestamp on the broadcast clock; nil is untimed.
-func (p *WindowProducer) Pop(count uint64, timestamp *time.Duration) error {
-	at, err := bridge.OptionalDuration(timestamp, "timestamp")
-	if err != nil {
-		return err
-	}
-	return p.inner.Pop(count, at)
+func (p *WindowProducer) Pop(count uint64, timestamp *moq.Timestamp) error {
+	return p.inner.Pop(count, timestamp)
 }
 
 // Cut closes the open group, so the next edit opens one restating the retained
@@ -340,14 +316,14 @@ type TimedWindowEvent struct {
 	// Timestamp is on the broadcast clock, or nil on an untimed track. A record
 	// first learned of from a group's restatement carries that frame's time, not
 	// its original push time.
-	Timestamp *time.Duration
+	Timestamp *moq.Timestamp
 }
 
 func timedWindowEvent(value *ffi.MoqJsonWindowTimed) (*TimedWindowEvent, error) {
 	if value == nil {
 		return nil, nil
 	}
-	out := &TimedWindowEvent{}
+	out := &TimedWindowEvent{Timestamp: value.Timestamp}
 	switch event := value.Event.(type) {
 	case ffi.MoqJsonWindowEventPush:
 		out.Event = WindowPush{Index: event.Index, Value: stdjson.RawMessage(event.Value)}
@@ -357,10 +333,6 @@ func timedWindowEvent(value *ffi.MoqJsonWindowTimed) (*TimedWindowEvent, error) 
 		out.Event = WindowSkip{Start: event.Start, End: event.End}
 	default:
 		return nil, fmt.Errorf("unknown window event: %T", event)
-	}
-	if value.TimestampUs != nil {
-		at := time.Duration(*value.TimestampUs) * time.Microsecond
-		out.Timestamp = &at
 	}
 	return out, nil
 }
