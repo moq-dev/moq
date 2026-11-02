@@ -571,8 +571,9 @@ impl Connection {
 		}
 		// What the record keeps allocated while a stream holds a slice of it, which bounds how
 		// much memory the peer's buffered data pins. A transport may slice records out of a
-		// shared read buffer of up to `MAX_FRAME_SIZE`, so count at least that much.
-		let allocation = size.max(MAX_FRAME_SIZE);
+		// shared read buffer of `MAX_FRAME_SIZE`, grown to fit the largest record allowed, so
+		// count at least that much.
+		let allocation = size.max(MAX_FRAME_SIZE).max(limit as usize);
 
 		let mut frames = 0;
 		loop {
