@@ -22970,7 +22970,11 @@ mod test {
 		let (producer, _pool) = pooled_producer(1 << 40);
 		let dynamic = producer.requests();
 		producer.create_group(10u64.into()).unwrap().finish().unwrap();
-		let mut reader = producer.subscribe(Subscription::default().with_delay(crate::track::Delay::default().with_max(None)).with_range(5..6));
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_delay(crate::track::Delay::default().with_max(None))
+				.with_range(5..6),
+		);
 		assert_eq!(read_now(&mut reader, false), None, "group 5 may still arrive");
 		assert!(dynamic.requested_fill_group().now_or_never().is_none());
 		elapse(&producer, ledger::GRACE);
@@ -22987,7 +22991,11 @@ mod test {
 		// With no fill handler, the hole is given up once the grace passed.
 		let (producer, _pool) = pooled_producer(1 << 40);
 		producer.create_group(10u64.into()).unwrap().finish().unwrap();
-		let mut reader = producer.subscribe(Subscription::default().with_delay(crate::track::Delay::default().with_max(None)).with_range(5..6));
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_delay(crate::track::Delay::default().with_max(None))
+				.with_range(5..6),
+		);
 		assert_eq!(read_now(&mut reader, false), None);
 		elapse(&producer, ledger::GRACE);
 		assert_eq!(read_now(&mut reader, false), Some(None));
@@ -23007,7 +23015,11 @@ mod test {
 			let dynamic = producer.requests();
 			producer.start_at(10).unwrap();
 			producer.create_group(10u64.into()).unwrap().finish().unwrap();
-			let mut reader = producer.subscribe(Subscription::default().with_delay(crate::track::Delay::default().with_max(None)).with_range(5..6));
+			let mut reader = producer.subscribe(
+				Subscription::default()
+					.with_delay(crate::track::Delay::default().with_max(None))
+					.with_range(5..6),
+			);
 			assert_eq!(read_now(&mut reader, false), None, "received: {received}");
 			let fill = dynamic
 				.requested_fill_group()
@@ -23152,7 +23164,11 @@ mod test {
 		let (mut producer, _pool) = pooled_producer(1 << 40);
 		producer.start_at(10).unwrap();
 		producer.create_group(10u64.into()).unwrap().finish().unwrap();
-		let mut reader = producer.subscribe(Subscription::default().with_delay(crate::track::Delay::default().with_max(None)).with_range(5..6));
+		let mut reader = producer.subscribe(
+			Subscription::default()
+				.with_delay(crate::track::Delay::default().with_max(None))
+				.with_range(5..6),
+		);
 		let (flag, waiter) = Flag::waiter();
 		assert!(reader.poll_group(false, &waiter).is_pending());
 		flag.take();

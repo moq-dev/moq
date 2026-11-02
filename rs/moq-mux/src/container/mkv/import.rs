@@ -1840,8 +1840,8 @@ mod tests {
 				assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
 				let snapshot = catalog.snapshot();
 				let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
-				let subscription =
-					moq_net::track::Subscription::default().with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(1)));
+				let subscription = moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(std::time::Duration::from_secs(1)));
 				let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
 				let mut reader =
 					crate::container::Consumer::new(track, crate::catalog::hang::Container::try_from(config).unwrap());
