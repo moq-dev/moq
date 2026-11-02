@@ -120,8 +120,8 @@ connection view and the dashboard flow.
 
 ## Required
 
-- [Rust reporters](/quest/m2/stats/rust.md) - the player, encoders, and
-  gateways publish stats and feedback, as the CLI remuxes do
+- [Rust reporters](/quest/m2/stats/rust.md) - the player and gateways
+  publish stats and feedback, as the CLI remuxes and capture do
 - [Preflight](/quest/m2/stats/preflight.md) - a bounded test run over a
   broadcast reports which media layer is broken and why
 - [Client health in use](/quest/m2/stats/health-consumers.md) - a per-connection media counter, consumers of the grade, and re-measured limits

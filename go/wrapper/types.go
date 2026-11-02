@@ -39,7 +39,8 @@ type (
 	Route = ffi.MoqRoute
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (Captures), and the Route serving it. It carries no broadcast;
-	// resolve a path with [OriginConsumer.Request].
+	// resolve a path with [OriginConsumer.Request]. Captures is a required slice,
+	// empty when the filter has no wildcards.
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
 	// AnnounceEventUpdate, AnnounceEventEnd, AnnounceEventRestart, or AnnounceEventTakeover.
