@@ -577,10 +577,10 @@ async fn unidentified_headers_give_way() {
 fn varint(bytes: &mut Vec<u8>, value: u64) {
 	let [_, b, c, d] = u32::try_from(value).unwrap().to_be_bytes();
 	match value {
-		..0x80 => bytes.push(d),
-		..0x4000 => bytes.extend_from_slice(&[0x80 | c, d]),
-		..0x20_0000 => bytes.extend_from_slice(&[0xc0 | b, c, d]),
-		..0x1000_0000 => bytes.extend_from_slice(&(0xe000_0000 | value as u32).to_be_bytes()),
+		0..0x80 => bytes.push(d),
+		0x80..0x4000 => bytes.extend_from_slice(&[0x80 | c, d]),
+		0x4000..0x20_0000 => bytes.extend_from_slice(&[0xc0 | b, c, d]),
+		0x20_0000..0x1000_0000 => bytes.extend_from_slice(&(0xe000_0000 | value as u32).to_be_bytes()),
 		_ => panic!("{value} needs a longer varint"),
 	}
 }

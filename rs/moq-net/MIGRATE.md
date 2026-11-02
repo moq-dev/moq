@@ -17,7 +17,7 @@ lite-01/02 `ANNOUNCE_INIT` is capped at 1 MiB less its 16 bytes of prefixes, dow
 ### `poll_reset` reports an eviction ([#7624](https://github.com/moq-dev/moq/pull/7624))
 
 `transport::poll::RecvStream::poll_reset` also completes once the receiver evicts the stream to free a stuck window.
-A leasing transport must report the eviction there: a paused group stream, and one waiting unread for its TRACK_INFO, is watched only through it, and an evicted stream whose reader holds leased bytes keeps further eviction off until it is stopped.
+A leasing transport must report the eviction there: a paused group stream, and one waiting unread for its TRACK\_INFO, is watched only through it, and an evicted stream whose reader holds leased bytes keeps further eviction off until it is stopped.
 
 ### A bounded subscription ends once its ranges are read
 

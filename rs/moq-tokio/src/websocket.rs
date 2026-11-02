@@ -1016,9 +1016,11 @@ mod tests {
 			tokio_tungstenite::WebSocketStream::from_raw_socket(server_io, Role::Server, Some(socket_config())).await;
 		let client_ws = tokio_tungstenite::WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
 
-		let mut quic = crate::quic::Config::default();
-		quic.receive_window = Some(moq_net::transport::MIN_RECEIVE_WINDOW * 2);
-		quic.stream_receive_window = Some(256 * 1024);
+		let quic = crate::quic::Config {
+			receive_window: Some(moq_net::transport::MIN_RECEIVE_WINDOW * 2),
+			stream_receive_window: Some(256 * 1024),
+			..Default::default()
+		};
 		let activity = moq_net::server::Activity::default();
 		let mut options = Options::new(
 			"ws://localhost/".parse().unwrap(),

@@ -161,7 +161,7 @@ assembles, one 1 MiB segment, so a smaller value, here or in
 `[limits.peer.quic]`, is refused at startup. When incomplete messages fill the
 window, the relay cancels the least urgent stream: the lowest subscription
 priority, then the group its subscription would deliver last. A group still
-waiting for its track's TRACK_INFO goes first, so that control message always
+waiting for its track's TRACK\_INFO goes first, so that control message always
 gets through. WebSocket and TCP sessions cancel the same way; the relay accepts
 them at these windows too and widens peers to `[limits.peer.quic]`, and links
 it dials take these settings.
