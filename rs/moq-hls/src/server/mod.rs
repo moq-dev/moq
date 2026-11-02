@@ -16,7 +16,9 @@
 //! for an epochless instance. A publisher that restarts gets its own URLs, so a playlist URL
 //! never resets its media sequence. A replaced instance keeps serving its URLs while its
 //! broadcast stays open, so a player already on it keeps playing until its publisher goes,
-//! then reloads the master to reach the replacement.
+//! then reloads the master to reach the replacement. A replaced instance watches its catalog
+//! and records only while requests reach it: once a playlist window passes without one, it
+//! stops, and the next request starts over under the same URLs.
 //!
 //! `{kind}` is `video` or `audio`, so a video and an audio rendition that share a
 //! name address distinct resources. The two `seg/` forms name the same bytes: HLS
@@ -102,46 +104,47 @@ struct Followed {
 
 struct Instances {
 	/// The instance the master playlist and manifest list: the latest to take over.
-	current: Arc<Broadcaster>,
+	current: Arc<Instance>,
 	/// Every instance a listed URL still names, the current one included. A replaced instance
 	/// stays until its broadcast closes, so a player already on it keeps playing.
-	by_id: HashMap<Arc<str>, Arc<Broadcaster>>,
+	by_id: HashMap<Arc<str>, Arc<Instance>>,
 }
 
 impl Followed {
-	fn new(current: Arc<Broadcaster>) -> Self {
-		let by_id = HashMap::from([(current.instance().clone(), current.clone())]);
+	fn new(current: Arc<Instance>) -> Self {
+		let by_id = HashMap::from([(current.id.clone(), current.clone())]);
 		Self {
 			instances: Mutex::new(Instances { current, by_id }),
 			task: Mutex::new(None),
 		}
 	}
 
-	fn current(&self) -> Arc<Broadcaster> {
+	fn current(&self) -> Arc<Instance> {
 		self.instances.lock().unwrap().current.clone()
 	}
 
-	fn instance(&self, id: &str) -> Option<Arc<Broadcaster>> {
+	fn instance(&self, id: &str) -> Option<Arc<Instance>> {
 		self.instances.lock().unwrap().by_id.get(id).cloned()
 	}
 
-	/// List `broadcaster` from now on. An instance returning after a gap keeps its epoch, and so
-	/// its id, which then names the new broadcaster.
-	fn start(&self, broadcaster: Arc<Broadcaster>) {
+	/// List `instance` from now on, retaining the one it replaces. An instance returning after a
+	/// gap keeps its epoch, and so its id, which then names the new instance.
+	fn start(&self, instance: Arc<Instance>) {
 		let mut instances = self.instances.lock().unwrap();
-		instances
-			.by_id
-			.insert(broadcaster.instance().clone(), broadcaster.clone());
-		instances.current = broadcaster;
+		instances.by_id.insert(instance.id.clone(), instance.clone());
+		std::mem::replace(&mut instances.current, instance).retire();
 	}
 
 	/// Keep serving every instance of `replaced` still open, unless this one lists its id.
 	fn adopt(&self, replaced: &Followed) {
 		let replaced = replaced.instances.lock().unwrap();
 		let mut instances = self.instances.lock().unwrap();
-		for (id, broadcaster) in &replaced.by_id {
-			if !broadcaster.is_closed() {
-				instances.by_id.entry(id.clone()).or_insert_with(|| broadcaster.clone());
+		for (id, instance) in &replaced.by_id {
+			if !instance.is_closed() {
+				instances.by_id.entry(id.clone()).or_insert_with(|| {
+					instance.retire();
+					instance.clone()
+				});
 			}
 		}
 	}
@@ -151,7 +154,7 @@ impl Followed {
 		let mut instances = self.instances.lock().unwrap();
 		instances
 			.by_id
-			.retain(|_, broadcaster| broadcaster.poll_closed(waiter).is_pending());
+			.retain(|_, instance| instance.broadcast.poll_closed(waiter).is_pending());
 	}
 }
 
@@ -159,6 +162,117 @@ impl Drop for Followed {
 	fn drop(&mut self) {
 		if let Some(task) = self.task.lock().unwrap().take() {
 			task.abort();
+		}
+	}
+}
+
+/// One publisher instance, which the URLs under `@{id}` name.
+///
+/// The current instance keeps its [`Broadcaster`], and so its catalog and record watchers, while
+/// it is listed. A replaced one is retained only for players already on it, so it watches only
+/// while read: a request starts a broadcaster, which stops once no request has reached it for a
+/// playlist window, and the next request starts another under the same URLs.
+struct Instance {
+	id: Arc<str>,
+	/// What every broadcaster for this instance reads, so a rebuilt one binds the same sibling
+	/// broadcasts its predecessor's rows were listed against.
+	source: moq_mux::Source,
+	broadcast: moq_net::broadcast::Consumer,
+	config: Config,
+	watch: Mutex<Watch>,
+}
+
+#[derive(Default)]
+struct Watch {
+	/// Serving this instance: held while it is current, then until its reads go idle.
+	broadcaster: Option<Arc<Broadcaster>>,
+	/// The latest read since the instance was replaced, or `None` while it is current.
+	read: Option<moq_clock::Instant>,
+	/// Releases the broadcaster once reads go idle; running only while a replaced instance is
+	/// watched.
+	release: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Instance {
+	/// The instance `source`'s broadcast serves, watched from now on as the current one.
+	fn current(source: moq_mux::Source, config: Config) -> Arc<Self> {
+		let broadcaster = Broadcaster::new(source.clone(), config.clone());
+		Arc::new(Self {
+			id: broadcaster.instance().clone(),
+			broadcast: source.broadcast(),
+			source,
+			config,
+			watch: Mutex::new(Watch {
+				broadcaster: Some(broadcaster),
+				..Default::default()
+			}),
+		})
+	}
+
+	fn is_closed(&self) -> bool {
+		self.broadcast.is_closed()
+	}
+
+	/// The broadcaster serving this instance, started if it was idle, and kept a while longer if
+	/// it is a replaced one.
+	fn broadcaster(self: &Arc<Self>) -> Arc<Broadcaster> {
+		let mut watch = self.watch.lock().unwrap();
+		let broadcaster = watch
+			.broadcaster
+			.get_or_insert_with(|| Broadcaster::with_instance(self.source.clone(), self.config.clone(), self.id.clone()))
+			.clone();
+		if watch.read.is_some() {
+			self.read(&mut watch);
+		}
+		broadcaster
+	}
+
+	/// Stop holding the broadcaster for listing, and keep it only while read. A player already on
+	/// this instance reads it again within a window, so its broadcaster carries on warm.
+	fn retire(self: &Arc<Self>) {
+		let mut watch = self.watch.lock().unwrap();
+		if watch.read.is_none() {
+			self.read(&mut watch);
+		}
+	}
+
+	/// Note a read now, and release the broadcaster once reads go idle.
+	fn read(self: &Arc<Self>, watch: &mut Watch) {
+		watch.read = Some(moq_clock::now());
+		if watch.release.is_none() && watch.broadcaster.is_some() {
+			watch.release = Some(tokio::spawn(release_idle(Arc::downgrade(self), self.config.window)));
+		}
+	}
+}
+
+impl Drop for Instance {
+	fn drop(&mut self) {
+		if let Some(release) = self.watch.get_mut().unwrap().release.take() {
+			release.abort();
+		}
+	}
+}
+
+/// Drop `instance`'s broadcaster once nothing has read it for `idle`, stopping its watchers unless
+/// a response still holds it. Holds the instance weakly, so it never keeps it retained.
+async fn release_idle(instance: Weak<Instance>, idle: Duration) {
+	loop {
+		let deadline = {
+			let Some(instance) = instance.upgrade() else { return };
+			let watch = instance.watch.lock().unwrap();
+			let Some(read) = watch.read else { return };
+			read + idle
+		};
+		moq_clock::sleep_until(deadline).await;
+
+		let Some(instance) = instance.upgrade() else { return };
+		let mut watch = instance.watch.lock().unwrap();
+		if watch.read.is_some_and(|read| read + idle <= moq_clock::now()) {
+			watch.release = None;
+			let broadcaster = watch.broadcaster.take();
+			drop(watch);
+			drop(broadcaster);
+			return;
 		}
 	}
 }
@@ -187,13 +301,13 @@ impl Server {
 	/// instance that takes over. Returns `None` if the broadcast is not announced once the
 	/// origin has synced with the relay.
 	pub async fn broadcaster(&self, name: &str) -> Option<Arc<Broadcaster>> {
-		Some(self.followed(name).await?.current())
+		Some(self.followed(name).await?.current().broadcaster())
 	}
 
 	/// The [`Broadcaster`] for the publisher instance `id` of `name`, until its broadcast
-	/// closes.
+	/// closes. A replaced instance starts watching again if it was idle.
 	pub(crate) async fn instance(&self, name: &str, id: &str) -> Option<Arc<Broadcaster>> {
-		self.followed(name).await?.instance(id)
+		Some(self.followed(name).await?.instance(id)?.broadcaster())
 	}
 
 	/// Follow `name` from the instance serving it now, unless it is followed already.
@@ -252,10 +366,10 @@ impl Server {
 }
 
 impl Inner {
-	/// A broadcaster serving the instance `broadcast`.
-	fn serve(&self, broadcast: moq_net::broadcast::Consumer) -> Arc<Broadcaster> {
+	/// The instance `broadcast`, watched as the current one.
+	fn serve(&self, broadcast: moq_net::broadcast::Consumer) -> Arc<Instance> {
 		let source = moq_mux::Source::new(self.origin.consume(), broadcast);
-		Broadcaster::new(source, self.config.clone())
+		Instance::current(source, self.config.clone())
 	}
 }
 
@@ -426,23 +540,23 @@ mod tests {
 		assert_eq!(start.elapsed(), Duration::ZERO);
 	}
 
-	async fn closed_broadcaster() -> Arc<Broadcaster> {
+	async fn closed_instance() -> Arc<Instance> {
 		let origin = produce_origin();
 		let producer = origin.create_broadcast("gone").expect("publish allowed");
 		producer.announce(Default::default()).expect("publish allowed");
 		settle().await;
-		let broadcaster = Broadcaster::new(crate::resolved(&origin, "gone").await, Config::default());
-		// Close the publisher so the resolved broadcast (and the broadcaster) reports closed.
+		let instance = Instance::current(crate::resolved(&origin, "gone").await, Config::default());
+		// Close the publisher so the resolved broadcast (and the instance) reports closed.
 		producer.close();
 		settle().await;
-		broadcaster
+		instance
 	}
 
 	#[tokio::test]
 	async fn broadcaster_replaces_finished_cached_instance() {
 		let origin = produce_origin();
 		let server = Server::new(origin.consume(), Config::default());
-		let stale = closed_broadcaster().await;
+		let stale = closed_instance().await;
 
 		server
 			.inner
@@ -456,7 +570,7 @@ mod tests {
 
 		let fresh = server.broadcaster("live").await.expect("broadcast announced");
 
-		assert!(!Arc::ptr_eq(&stale, &fresh));
+		assert!(!Arc::ptr_eq(&stale.broadcaster(), &fresh));
 		assert!(server.inner.broadcasts.lock().unwrap().contains_key("live"));
 	}
 
@@ -564,11 +678,11 @@ mod tests {
 			.publish("live", moq_net::origin::Route::default())
 			.expect("publish allowed");
 		settle().await;
-		let open = Broadcaster::new(crate::resolved(&origin, "live").await, Config::default());
+		let open = Instance::current(crate::resolved(&origin, "live").await, Config::default());
 
 		// The follower has not yet seen the takeover instance close.
 		let followed = Followed::new(open.clone());
-		followed.start(closed_broadcaster().await);
+		followed.start(closed_instance().await);
 		server
 			.inner
 			.broadcasts
@@ -578,10 +692,84 @@ mod tests {
 
 		let current = server.broadcaster("live").await.expect("broadcast announced");
 		assert!(!current.is_closed());
-		let kept = server.instance("live", open.instance()).await;
+		let kept = server.instance("live", &open.id).await;
 		assert!(
-			kept.is_some_and(|kept| Arc::ptr_eq(&kept, &open)),
+			kept.is_some_and(|kept| Arc::ptr_eq(&kept, &open.broadcaster())),
 			"the open instance lost its URLs"
 		);
+	}
+
+	/// Whether a replaced `instance` holds a broadcaster, and so its watchers. It runs the task
+	/// that releases one exactly while it does.
+	fn watching(instance: &Instance) -> bool {
+		let watch = instance.watch.lock().unwrap();
+		assert_eq!(watch.broadcaster.is_some(), watch.release.is_some());
+		watch.broadcaster.is_some()
+	}
+
+	/// A replaced instance watches only while read: its warm broadcaster stops once a window
+	/// passes without a request, a later request starts another under the same id, which reads
+	/// keep going, and which stops again once they stop.
+	#[tokio::test(start_paused = true)]
+	async fn a_replaced_instance_watches_only_while_read() {
+		let origin = produce_origin();
+		let config = Config::default();
+		let server = Server::new(origin.consume(), config.clone());
+		let (old_epoch, new_epoch) = (moq_net::Epoch::mint(), moq_net::Epoch::mint());
+		let route = |epoch: &moq_net::Epoch| moq_net::origin::Route::default().with_epoch(epoch.clone());
+
+		let _old = origin.publish("live", route(&old_epoch)).expect("publish allowed");
+		settle().await;
+		let first = Arc::downgrade(&server.broadcaster("live").await.expect("broadcast announced"));
+		let _new = origin.publish("live", route(&new_epoch)).expect("publish allowed");
+		eventually(async || {
+			let current = server.broadcaster("live").await.expect("broadcast announced");
+			current.instance().as_ref() == new_epoch.as_str()
+		})
+		.await;
+		let followed = server.followed("live").await.expect("followed");
+		let old = followed.instance(old_epoch.as_str()).expect("the old instance is retained");
+		assert!(watching(&old), "a player on the replaced instance keeps it warm");
+
+		moq_clock::sleep(config.window).await;
+		settle().await;
+		assert!(!watching(&old), "an unread replaced instance holds no watchers");
+		assert_eq!(first.strong_count(), 0, "its broadcaster is gone");
+
+		let restarted = server.instance("live", old_epoch.as_str()).await.expect("still served");
+		assert_eq!(restarted.instance().as_ref(), old_epoch.as_str());
+		assert!(watching(&old), "a request restarts it");
+		let restarted = Arc::downgrade(&restarted);
+		for _ in 0..4 {
+			moq_clock::sleep(config.window / 2).await;
+			let read = server.instance("live", old_epoch.as_str()).await.expect("still served");
+			assert!(
+				Arc::ptr_eq(&read, &restarted.upgrade().expect("held")),
+				"reads keep the one broadcaster"
+			);
+		}
+
+		moq_clock::sleep(config.window).await;
+		settle().await;
+		assert!(!watching(&old), "it stops again once its readers go idle");
+		assert_eq!(restarted.strong_count(), 0);
+	}
+
+	/// A rebuilt broadcaster keeps the id an epochless instance's URLs were listed under.
+	#[tokio::test(start_paused = true)]
+	async fn an_epochless_instance_restarts_under_its_id() {
+		let origin = produce_origin();
+		let _publication = origin
+			.publish("live", moq_net::origin::Route::default())
+			.expect("publish allowed");
+		settle().await;
+		let config = Config::default();
+		let instance = Instance::current(crate::resolved(&origin, "live").await, config.clone());
+		instance.retire();
+		moq_clock::sleep(config.window).await;
+		settle().await;
+		assert!(!watching(&instance));
+
+		assert_eq!(instance.broadcaster().instance(), &instance.id);
 	}
 }

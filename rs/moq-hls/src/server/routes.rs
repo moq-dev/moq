@@ -465,6 +465,12 @@ mod tests {
 		assert_eq!(status(&app, &old_playlist).await, StatusCode::OK);
 		assert_eq!(status(&app, &old_segment).await, StatusCode::OK);
 
+		// Unread for a window, the old instance stops watching, and the next request restarts it
+		// under the same URLs.
+		tokio::time::sleep(crate::export::Config::default().window).await;
+		wait_listed(&app, &old_playlist, "seg/53e0aafd.0.m4s").await;
+		assert_eq!(status(&app, &old_segment).await, StatusCode::OK);
+
 		drop((old_catalog, old_track, old_media, old));
 		let deadline = tokio::time::Instant::now() + TIMEOUT;
 		while status(&app, &old_playlist).await != StatusCode::NOT_FOUND {

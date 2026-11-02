@@ -111,13 +111,19 @@ pub struct Broadcaster {
 impl Broadcaster {
 	/// Start tracking the renditions of `source`'s catalog broadcast.
 	pub fn new(source: moq_mux::Source, config: Config) -> Arc<Self> {
-		let broadcast = source.broadcast();
 		// An epoch names the instance on every edge, so each serves it under the same URLs.
-		let instance = broadcast.info().epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
+		let instance = source.broadcast().info().epoch.clone().unwrap_or_else(moq_net::Epoch::mint);
+		Self::with_instance(source, config, Arc::from(instance.as_str()))
+	}
+
+	/// [`new`](Self::new), listing every URL under `instance`, so a broadcaster rebuilt for an
+	/// epochless instance keeps the id its URLs were listed under.
+	pub(crate) fn with_instance(source: moq_mux::Source, config: Config, instance: Arc<str>) -> Arc<Self> {
+		let broadcast = source.broadcast();
 		let renditions = renditions::Producer::new(config.window);
 		let broadcaster = Arc::new(Self {
 			broadcast,
-			instance: Arc::from(instance.as_str()),
+			instance,
 			renditions: renditions.clone(),
 			watcher: Mutex::new(None),
 		});
