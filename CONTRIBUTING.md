@@ -129,8 +129,9 @@ mismatched npm/Python lock entries, and stale bindings requirements.
 
 The nonpublishing fixture in `sh/version.test.py` verifies that release-plz's
 `update` engine, also used by `release-pr`, preserves a manually set unpublished
-minor despite breaking commits. Run it when changing release-plz. No publish,
-tag, or release workflow runs as part of `just version`.
+minor despite breaking commits. `just gh test` runs it on every check, so a
+release-plz upgrade that breaks the cut fails before it lands. No publish, tag,
+or release workflow runs as part of `just version`.
 
 Each package's version lives in one place:
 
