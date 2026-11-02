@@ -39,5 +39,5 @@ Public API: none expected. Wire: none.
 
 ## Related
 
-- [MKV leaf element limits](/quest/m1/security-audit/mkv-leaf-limits.md) - the other leftover of the importer streaming work
+- [MKV leaf element limits](/quest/m1/mkv-leaf-limits.md) - the other leftover of the importer streaming work
 - [Media fuzz](/quest/m2/media-fuzz.md) - would catch a dropped-input bug like the refused-box one
