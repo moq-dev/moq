@@ -11,7 +11,7 @@ The moq-net half is done: the `ingest` and `request` targets cover the increment
 Decided 2026-10-22 from the security audit, with the maintainer:
 
 - Add a target for `moq-sock`'s cmsg walk (`cmsg::Iter` and `ControlMetadata::decode` in `rs/moq-sock/src/udp/unix.rs`) and for `moq-uring`'s `RecvMeta::parse` (`rs/moq-uring/src/udp.rs`). Both walks must stop at a malformed length and keep what came before it: build well-formed control messages from the input, append a malformed header and arbitrary bytes, and assert the walk reads the same metadata as the well-formed prefix, and the metadata a reference model expects from it.
-- Add a Miri job for the crates whose unsafe is reachable from a peer.
+- Add the crates whose unsafe is reachable from a peer to `just rs miri` (`sh/rs/miri.sh`), which Nightly already runs for `kio` and `moq-net`.
 - Wire every target and the Miri run into the nightly gate, and keep the merge-gate replay of committed regressions.
 
 The point is the invariant, not the coverage number: a target that only checks for a panic would miss the bugs this audit is about.
@@ -21,7 +21,7 @@ Each crate follows moq-net's shape (`rs/moq-net/fuzz/README.md`): the target bod
 Ordering:
 
 - `moq-sock`'s `CMsg::decode` still reads `size_of::<T>()` past a short message (only a `debug_assert_eq!` checks it), which [Bound cmsg payload reads](https://github.com/moq-dev/moq/pull/7394) fixes. A moq-sock target landing first would fail nightly on that known overread, so land it after, or with, that fix. The moq-uring target has no such dependency.
-- [In-memory unsafe under Miri](/quest/m2/miri-memory.md) shares one `just rs miri` recipe and nightly job with this quest: whichever lands first creates it, and the other adds its crates.
+- `just rs miri` and its nightly job already exist ([moq-dev/moq#7315](https://github.com/moq-dev/moq/pull/7315)); this quest adds its crates to them.
 
 Public API: none. Wire: none.
 
@@ -29,5 +29,4 @@ Public API: none. Wire: none.
 
 - [CI cost and latency](/quest/m0/ci/README.md) - where the nightly budget lives
 - [Bound cmsg payload reads](https://github.com/moq-dev/moq/pull/7394) - fixes the moq-sock overread a cmsg target would hit
-- [In-memory unsafe under Miri](/quest/m2/miri-memory.md) - shares the Miri recipe and nightly job
 - [Untrusted media parsers have fuzz targets](/quest/m2/media-fuzz.md) - the media parser targets beside these
