@@ -136,7 +136,7 @@ Removed inline, with no dependency upgrades:
   stack remains needed by other tools or the existing override resolution;
   no transitive-package saving is claimed. Preserve those lock entries:
   regeneration rehoists unrelated packages and drops existing safe pins.
-- `@zod/mini` from five runtime and two peer declarations: its JS and type
+- `@zod/mini` from six runtime and two peer declarations: its JS and type
   entrypoints only re-export `zod/mini`. Use that existing dependency
   directly, keeping every package's `zod` declaration. The wrapper costs
   5,615 installed bytes and no exclusive transitive packages. Validate the
