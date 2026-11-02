@@ -12,6 +12,7 @@ Every qmux session (WebSocket, `tcp://`, `tls://`, `unix://`, WebRTC) starts at 
 A `Server` applies its `[quic]` to every qmux listener and to `tls_acceptor`. `websocket::accept` reads it from the new `websocket::Options::quic`, which defaults to the `[quic]` defaults, so set it to your config's `quic.resolve()`; `tcp::Listener::with_quic` and `websocket::Listener::with_quic` set it on a listener built outside a `Server`.
 `server::Request::with_quic_limits` also widens a qmux session at `ok()`, except a WebRTC session's receive window, which sizes its read queue; one refusing them, such as a rate cap, which qmux cannot pace, fails `ok()` with the new `Error::QmuxLimits`.
 `quic::driver::recv::Stream::received_reset`, and so `quic::web::RecvStream::poll_reset`, fail with `Evicted` for a stream evicted to free a stuck window.
+`quic::web::RecvStream::received_reset` now fails with a `ReadError`, `ReadError::SessionError` for what was its `SessionError` or `ReadError::Evicted`, rather than panicking on an eviction.
 
 ### `listen::LoadBalancer` has a `forward` field ([#7539](https://github.com/moq-dev/moq/pull/7539))
 

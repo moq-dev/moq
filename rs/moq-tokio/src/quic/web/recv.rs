@@ -8,7 +8,7 @@ use std::{
 use bytes::{BufMut, Bytes};
 
 use crate::quic::driver::recv;
-use crate::quic::web::{CloseReason, ReadError, SessionError};
+use crate::quic::web::{CloseReason, ReadError};
 
 /// A stream that can be used to receive bytes. See [`crate::quic::driver::recv::Stream`].
 ///
@@ -103,21 +103,19 @@ impl RecvStream {
 	/// Block until the stream has been reset and return the error code. See
 	/// [`recv::Stream::received_reset`].
 	///
-	/// Returns the stream's reset code or its session error.
-	pub async fn received_reset(&mut self) -> Result<Option<u32>, SessionError> {
+	/// Returns the stream's reset code, or fails with its session error or
+	/// [`ReadError::Evicted`] once the receiver evicted it to free a stuck window.
+	pub async fn received_reset(&mut self) -> Result<Option<u32>, ReadError> {
 		let Some(inner) = &mut self.inner else {
 			return Ok(None);
 		};
 		match inner.received_reset().await {
 			Ok(None) => Ok(None),
 			Ok(Some(code)) => match self.close.session_gone(code) {
-				Some(err) => Err(err),
+				Some(err) => Err(ReadError::SessionError(err)),
 				None => Ok(self.close.decode_stream_code(code)),
 			},
-			Err(err) => match map_error(&self.close, err) {
-				ReadError::SessionError(err) => Err(err),
-				err => unreachable!("only the connection fails a reset wait: {err}"),
-			},
+			Err(err) => Err(map_error(&self.close, err)),
 		}
 	}
 
