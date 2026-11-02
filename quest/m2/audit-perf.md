@@ -174,8 +174,10 @@ follow-up quest. The m1 run added none of these:
    `Unlimited`; sweep controller x flight x loss x streams.
 6. [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md)
    owns HTTP snapshot/rendering costs across routes and pollers.
-7. [JWT verification](/quest/m2/performance-survey/jwt-verification.md) owns
-   key-source I/O, import, lookup, parsing and crypto attribution.
+7. JWT verification is covered: `moq-auth`'s `verify` bench runs nightly in
+   `rust-extra` (see [bench/README.md](/bench/README.md#auth-verification)).
+   Signature verification dominated every asymmetric algorithm; nothing
+   was changed. Track its `decide`, `set` and `sessions` series here.
 8. MPEG-TS import with real repeated media (the CLI bench mostly skips null
    padding), and MKV, FLV, H.265, AV1 importers.
 9. JS watch audio ring buffer and publish `Fanout` (lower impact). Include

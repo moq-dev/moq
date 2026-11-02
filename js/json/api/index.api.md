@@ -94,7 +94,6 @@ export namespace Stream {
 	export class Encoder<T> {
 		constructor(config?: Stream.Config<T>);
 		encode(value: T): Stream.Pending;
-		reset(): void;
 	}
 	export interface Pending {
 		commit(): void;

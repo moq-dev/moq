@@ -119,7 +119,9 @@ fn serving_max_delay(version: Version, requested: Duration) -> Option<Duration> 
 /// must not read as a request to replay the whole cache on join.
 ///
 /// `latest` is the newest group when the SUBSCRIBE arrived, not once the subscription
-/// resolved: anything written in between is newer, so it is delivered.
+/// resolved: anything written in between is newer, so it is delivered. On lite-05, a
+/// SUBSCRIBE sent alongside its TRACK can arrive before the track resolves, when no group
+/// is known yet: the newest once it resolves stands in, as it would for one sent after.
 fn cursor_floor(version: Version, start_group: Option<u64>, latest: Option<u64>) -> u64 {
 	if version.resolves_start() || start_group.is_some() {
 		return 0;
@@ -224,7 +226,11 @@ impl Publisher {
 
 		let _ = self.children.poll(waiter);
 
-		loop {
+		// MAX_STREAMS credit alone lets one poll accept thousands of streams, so a peer
+		// opening them at once must not hold the session's other tasks. A yield has woken
+		// the task, and this always ends Pending, so the children below still run.
+		let mut budget = kio::coop::Budget::new(32);
+		while budget.poll_yield(waiter).is_ready() {
 			match Stream::poll_accept(&self.accept, self.shared.version, waiter) {
 				Poll::Ready(Ok(stream)) => {
 					let stream = stream.with_stats(self.shared.origin.stats());
@@ -1903,8 +1909,10 @@ impl Request for TrackInfoServe {
 		let info = ready!(self.querying.poll_ok(waiter))?;
 		crate::ietf::flate::egress(&info, shared.version.has_compression())?;
 
+		// Ahead of the track's groups, which a subscriber holds unread until it lands.
+		writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
 		// TRACK_INFO only flows on Lite05+ (the encode errors otherwise).
-		writer.buffer(&lite::TrackInfo::serve(&info, shared.version, ietf))?;
+		writer.buffer(&lite::TrackInfo::serve(&info, shared.version))?;
 		if ietf {
 			writer.buffer(&lite::ietf::TrackProperties(info.properties.clone()))?;
 		}
@@ -1964,9 +1972,7 @@ impl Request for TracksServe {
 		let event = match ready!(self.tracks.poll_next(waiter))? {
 			Some(crate::broadcast::TracksEvent::Added { name, info }) => lite::TracksEvent::Added {
 				name: name.to_string().into(),
-				// Untimed even to an extension peer: TRACKS_ADD has no TRACK_PROPERTIES to
-				// carry the unchecked provenance, so a relay would re-list it as native lite.
-				info: lite::TrackInfo::serve(&info, shared.version, false),
+				info: lite::TrackInfo::serve(&info, shared.version),
 			},
 			Some(crate::broadcast::TracksEvent::Removed { name }) => lite::TracksEvent::Removed {
 				name: name.to_string().into(),
@@ -2076,7 +2082,6 @@ impl Request for SubscribeServe {
 		loop {
 			match self {
 				Self::Query { querying, .. } => {
-					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
 					let info = ready!(querying.poll_ok(waiter))?;
 					let Self::Query {
 						msg,
@@ -2094,7 +2099,7 @@ impl Request for SubscribeServe {
 					else {
 						unreachable!()
 					};
-					let bounds = Bounds::new(&msg.ranges, info.lite_timescale(ietf))?;
+					let bounds = Bounds::new(&msg.ranges, info.timescale)?;
 					*self = Self::subscribe(shared, *msg, bounds, &track, latest, update);
 				}
 				Self::Confirm { subscribing, .. } => {
@@ -2121,7 +2126,7 @@ impl Request for SubscribeServe {
 					// `None` omits the per-frame timestamp prefix: an untimed track on
 					// Lite07+, or any track before Lite05 (whose frames still carry
 					// timestamps in the model, just not on this wire).
-					let stamp = Stamp::new(shared.version, track.info().lite_timescale(ietf));
+					let stamp = Stamp::new(shared.version, track.info().timescale);
 
 					// Lite05+ accepts implicitly: no SUBSCRIBE_OK, the immutable properties
 					// live in TRACK_INFO, and the resolved range arrives as
@@ -2166,6 +2171,10 @@ impl Request for SubscribeServe {
 						ietf,
 					};
 
+					let latest = match shared.version.has_track_stream() {
+						true => latest.or_else(|| track.latest_sequence()),
+						false => latest,
+					};
 					let floor = cursor_floor(shared.version, bounds.groups().start(), latest);
 					let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
 					if let Some(update) = update {
@@ -2335,7 +2344,7 @@ impl Request for FetchServe {
 					let mut group = group.with_end(msg.end_frame.and_then(|end| end.checked_add(1)));
 
 					// Matches the timescale TRACK_INFO declared for the track.
-					let stamp = Stamp::new(shared.version, group.lite_timescale(ietf));
+					let stamp = Stamp::new(shared.version, group.timescale());
 					// And its compression, which a lite-07 peer receives as stored.
 					if shared.version.has_compression() {
 						group = group.compressed();
@@ -3448,13 +3457,12 @@ struct Stamp {
 	/// The wire timescale TRACK_INFO declared (see [`Version::wire_timescale`]).
 	timescale: crate::Timescale,
 	/// Whether each frame's own timestamp goes out. Lite05/06 cannot encode an untimed
-	/// track, so one served untimed carries its send time instead, unchecked ones included.
+	/// track, so an untimed one carries its send time instead.
 	timed: bool,
 }
 
 impl Stamp {
-	/// How `version` stamps a track served at `timescale` (see
-	/// [`track::Info::lite_timescale`]), or `None` when it carries no timestamps.
+	/// How `version` stamps a track with `timescale`, or `None` when it carries no timestamps.
 	fn new(version: Version, timescale: Option<crate::Timescale>) -> Option<Self> {
 		Some(Self {
 			timescale: version.wire_timescale(timescale)?,
@@ -4326,10 +4334,7 @@ impl TrackRun {
 			// `SubStream::owed`), so only a range given up whole is covered. Datagrams
 			// resolve no start, and a FIN would overtake them, so a range they served
 			// keeps the subscription open.
-			(None, _) => {
-				let skipped: RangeSet<u64> = self.skipped.iter().map(|(range, _)| range.clone()).collect();
-				self.track.covered(self.floor, &skipped)
-			}
+			(None, _) => self.track.covered(self.floor, &self.skipped),
 			(Some(_), None) => false,
 		}
 	}
@@ -4557,6 +4562,112 @@ impl TrackRun {
 			rank,
 			group,
 		));
+	}
+}
+
+/// A bounded lite-07 subscription's run loop still waiting on SUBSCRIBE_START, for the
+/// `publisher` bench: a wake that finds nothing new ends in the coverage check.
+#[cfg(any(test, feature = "fuzz"))]
+pub struct CoverageBench {
+	run: TrackRun,
+	writer: Writer<crate::transport::boxed::SendStream, Version>,
+	track: track::Producer,
+	_peer: crate::transport::memory::Session,
+}
+
+#[cfg(any(test, feature = "fuzz"))]
+impl CoverageBench {
+	/// Subscribe to `ranges` one-group ranges, then give up the first `skipped` of them, one
+	/// wake each. A range is left open, so the start never resolves and nothing is covered.
+	pub fn new(ranges: u64, skipped: u64) -> Self {
+		assert!(skipped < ranges, "a range must stay open");
+		// Every other group, so no two ranges merge into one run.
+		let wire = (0..ranges).map(|range| 2 * range..2 * range + 1);
+		let drops = (0..skipped)
+			.map(|range| (2 * range..2 * range + 1, StreamError::NotFound))
+			.collect();
+		Self::build(wire, drops)
+	}
+
+	/// Subscribe to one range of `skipped + 1` groups, then give up all but the last, one
+	/// wake each. Alternating errors keep each group its own entry in the skipped record.
+	pub fn adjacent(skipped: u64) -> Self {
+		let drops = (0..skipped)
+			.map(|group| {
+				let err = match group % 2 {
+					0 => StreamError::NotFound,
+					_ => StreamError::Cancel,
+				};
+				(group..group + 1, err)
+			})
+			.collect();
+		Self::build(std::iter::once(0..skipped + 1), drops)
+	}
+
+	fn build(wire: impl Iterator<Item = Range<u64>>, drops: Vec<(Range<u64>, StreamError)>) -> Self {
+		let version = Version::Lite07;
+		let (local, peer) = crate::transport::memory::pair(Default::default());
+		let session = Transport::new(local);
+		let Poll::Ready(Ok(stream)) = session.poll_open_uni(&kio::Waiter::noop(), SendOptions::default()) else {
+			panic!("a memory stream opens at once");
+		};
+		let group = |group| Some(lite::Anchor::Absolute(track::Position::group(group)));
+		let wire: Vec<_> = wire
+			.map(|range| lite::Range {
+				start: group(range.start),
+				end: group(range.end),
+			})
+			.collect();
+		let bounds = Bounds::new(&wire, None).unwrap();
+		let track = track::Producer::new(
+			Arc::new(crate::broadcast::Info::default()),
+			"bench",
+			track::Info::default(),
+		);
+		let subscriber = track.subscribe(bounds.groups());
+		let steer = kio::Producer::new(Steer::default());
+		let ctx = Subscription {
+			session,
+			id: 0,
+			track_name: "bench".into(),
+			priority: PriorityQueue::default(),
+			publisher: 0,
+			group: None,
+			steer: steer.consume(),
+			steer_seen: Steer::default(),
+			version,
+			stamp: None,
+			runtime: crate::time::Deadlines::new(kio::clock::now()),
+			outcomes: Default::default(),
+			ietf: false,
+		};
+		let mut this = Self {
+			run: TrackRun::new(ctx, subscriber, bounds, 0, steer),
+			writer: Writer::new(stream, version),
+			track,
+			_peer: peer,
+		};
+		let skipped = drops.len();
+		for (groups, err) in drops {
+			this.track.drop_groups(groups, err);
+			while this.step().is_ready() {}
+		}
+		assert!(this.run.start.is_none(), "no group resolves a start");
+		assert_eq!(this.run.skipped.iter().count(), skipped, "each drop is its own entry");
+		this
+	}
+
+	/// One wake with nothing new to serve.
+	pub fn wake(&mut self) {
+		assert!(self.step().is_pending(), "the open range keeps the subscription parked");
+	}
+
+	fn step(&mut self) -> Poll<()> {
+		match self.run.poll_step(&mut self.writer, &kio::Waiter::noop()) {
+			Poll::Ready(Ok(ControlFlow::Continue(()))) => Poll::Ready(()),
+			Poll::Ready(res) => panic!("the subscription ended: {res:?}"),
+			Poll::Pending => Poll::Pending,
+		}
 	}
 }
 
@@ -5177,29 +5288,25 @@ mod serve_group_test {
 		}
 	}
 
-	/// A track served untimed to lite-05/06 carries its send time, never its frames' own
-	/// timestamps: those of an unchecked track may be moq-transport arrival times.
+	/// Lite-05/06 cannot encode an untimed track, so one carries its send time there and
+	/// nothing on lite-07, while a timed track carries its own timestamps on every version.
 	#[kio::test]
-	async fn an_unchecked_track_goes_out_with_send_times() {
+	async fn only_an_untimed_track_goes_out_with_send_times() {
 		let runtime = crate::time::sim();
 		let stamped = Timestamp::from_millis(36_000_000).unwrap();
 		let sent = Timestamp::from(runtime.now()).value();
-		let checked = track::Info::timed();
-		let unchecked = track::Info {
-			properties: Some(std::sync::Arc::new(crate::model::object::TrackProperties {
-				version: crate::ietf::Version::Draft22,
-				values: Vec::new(),
-			})),
-			..track::Info::timed()
-		};
 
-		let stamp = Stamp::new(Version::Lite06, checked.lite_timescale(false)).unwrap();
-		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), stamped.value());
-		let stamp = Stamp::new(Version::Lite06, unchecked.lite_timescale(false)).unwrap();
-		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), sent);
-		assert!(Stamp::new(Version::Lite07, unchecked.lite_timescale(false)).is_none());
-		let stamp = Stamp::new(Version::Lite07, unchecked.lite_timescale(true)).unwrap();
-		assert_eq!(stamp.wire(Some(stamped), &runtime).unwrap(), stamped.value());
+		for version in [Version::Lite06, Version::Lite07] {
+			let stamp = Stamp::new(version, Some(crate::Timescale::MILLI)).unwrap();
+			assert_eq!(
+				stamp.wire(Some(stamped), &runtime).unwrap(),
+				stamped.value(),
+				"{version}"
+			);
+		}
+		let stamp = Stamp::new(Version::Lite06, None).unwrap();
+		assert_eq!(stamp.wire(None, &runtime).unwrap(), sent);
+		assert!(Stamp::new(Version::Lite07, None).is_none());
 	}
 
 	#[kio::test]
@@ -6937,6 +7044,26 @@ mod serve_group_test {
 		}
 	}
 
+	/// A bounded lite-07 subscription ends once its source gives up every range, even with no
+	/// start resolved, and not while one range is still open.
+	#[kio::test]
+	async fn giving_up_every_range_before_the_start_ends_it() {
+		// Disjoint ranges, then one range given up a group at a time with alternating errors.
+		for (mut bench, last) in [(CoverageBench::new(3, 2), 4), (CoverageBench::adjacent(4), 4)] {
+			bench.wake();
+			bench.wake();
+			bench.track.drop_groups(last..last + 1, StreamError::NotFound);
+			loop {
+				match bench.run.poll_step(&mut bench.writer, &kio::Waiter::noop()) {
+					Poll::Ready(Ok(ControlFlow::Continue(()))) => continue,
+					Poll::Ready(Ok(ControlFlow::Break(()))) => break,
+					other => panic!("the subscription should end, got {other:?}"),
+				}
+			}
+			assert!(bench.run.start.is_none());
+		}
+	}
+
 	/// A SUBSCRIBE_UPDATE that lowers the start below SUBSCRIBE_START asks for those groups
 	/// too, so the drops at the end count from there.
 	#[kio::test]
@@ -7712,6 +7839,41 @@ mod tests {
 		out
 	}
 
+	/// A peer opening control streams at once gets a budget of them accepted per poll,
+	/// leaving the rest for later so the session's other tasks run in between.
+	#[kio::test]
+	async fn a_flood_of_control_streams_yields() {
+		use crate::transport::poll::Session as _;
+
+		let (local, peer) = crate::transport::memory::pair(Default::default());
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let mut publisher = Publisher::new(PublisherConfig {
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(local.clone()),
+			origin: Hop::random().produce().consume(),
+			version: Version::Lite07,
+			peer_setup: crate::lite::PeerSetup::new(false, crate::transport::Address::Setup),
+			goaway,
+			peer_hop: None,
+			auth: crate::auth::Link::new(false),
+			peer_grant: Default::default(),
+			client: false,
+			subscriptions: Default::default(),
+			estimate: kio::Producer::default().weak(),
+		});
+		// Held open and empty, so each accepted stream waits on its type.
+		let mut opened = Vec::new();
+		for _ in 0..1024 {
+			opened.push(peer.open_bi(Default::default()).await.unwrap());
+		}
+
+		assert!(publisher.poll(&kio::Waiter::noop()).is_pending());
+		assert!(
+			local.poll_accept_bi(&kio::Waiter::noop()).is_ready(),
+			"one poll accepted every stream"
+		);
+	}
+
 	/// Build the poll-based PROBE server around a stream opened by the test peer,
 	/// following `estimate` as it would the supervisor's.
 	fn probe_server(
@@ -8202,6 +8364,59 @@ mod tests {
 				"{version:?}: the request was not refused"
 			);
 		}
+	}
+
+	/// TRACK_INFO goes out ahead of every group stream, the most urgent included: a subscriber
+	/// that sent its SUBSCRIBE alongside holds the groups that beat it unread.
+	#[kio::test]
+	async fn track_info_outranks_the_track_groups() {
+		let version = Version::Lite07;
+		let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
+		let broadcast = origin.create_broadcast("room").unwrap();
+		let _track = broadcast.create_track("video", crate::track::Info::timed()).unwrap();
+		broadcast.announce(Default::default()).unwrap();
+		let peer_setup = crate::lite::PeerSetup::new(false, crate::transport::Address::Setup);
+		peer_setup.set(crate::lite::Setup::default());
+		let (_, goaway) = crate::goaway::Handle::new(true);
+		let publisher = Publisher::new(PublisherConfig {
+			estimate: kio::Producer::default().weak(),
+			runtime: crate::time::sim(),
+			session: crate::driver::Transport::new(ScriptedSession::new(Vec::new())),
+			origin: origin.consume(),
+			version,
+			peer_setup,
+			goaway,
+			peer_hop: None,
+			subscriptions: Default::default(),
+			auth: crate::auth::Link::new(false),
+			peer_grant: Default::default(),
+			client: false,
+		});
+
+		let mut script = Vec::new();
+		lite::Track {
+			epoch: None,
+			broadcast: crate::Path::from_static("room"),
+			track: "video".into(),
+		}
+		.encode(&mut crate::coding::Encoder::new(&mut script, version.into()), version)
+		.unwrap();
+		let session = ScriptedSession::new(script);
+		let (send, recv) = kio::wait(|waiter| {
+			<ScriptedSession as crate::transport::poll::Session>::poll_open_bi(&session, waiter, Default::default())
+		})
+		.await
+		.unwrap();
+		let stream = Stream::<Transport, Version> {
+			writer: Writer::new(crate::transport::boxed::SendStream::new(send), version),
+			reader: crate::coding::Reader::new(crate::transport::boxed::RecvStream::new(recv), version),
+		};
+		let mut serve = RequestServe::<TrackInfoServe>::new(publisher.shared.clone(), stream);
+		assert!(!drive(&mut serve).await, "the TRACK stream is held");
+
+		let top = i64::from(PriorityHandle::send_order_of(0));
+		assert_eq!(session.log.priorities(), [crate::coding::TRACK_INFO_SEND_ORDER]);
+		assert!(crate::coding::TRACK_INFO_SEND_ORDER > top);
 	}
 
 	/// An answered TRACK stream holds its track until the requester closes its side, by

@@ -26,7 +26,7 @@ Use this checkout's source and docs for repository work; published API reference
 - Land the ideal implementation now rather than a partial one plus follow-ups; split off only work that is independently landable. If the ideal is out of reach, propose a course change, even abandoning the PR.
 - Be adversarial: attack your own approach, reports, reviews, and other PRs as hard as anyone else's, and argue for the best approach over the first one that works.
 - When a decision is the maintainer's (API shape, naming, scope) or you are unsure, ask with an interactive prompt of 2-3 options and a recommendation.
-- Every test runs in CI, at least nightly. The merge gate holds only fast, high-signal tests: make a slow test fast at its source, or move it to nightly.
+- Every test runs in CI, at least nightly. The merge gate holds only fast, high-signal tests: delete a slow test that doesn't earn its cost, otherwise make it fast at its source or move it to nightly.
 - Never add or change a rule in an `AGENTS.md`, `CONTRIBUTING.md`, or skill without being prompted, and read `PROMPTING.md` first. A fact your own change made stale is fixed inline like any other doc.
 - No em dashes.
 - Match the existing conventions, patterns, and naming when possible.
@@ -37,14 +37,13 @@ Use this checkout's source and docs for repository work; published API reference
 
 # Guidelines
 
-- Prefer a maintained crate over hand-rolling non-core functionality.
 - Anything that fans out (N publishers, M subscribers, routes, sessions) gets a benchmark swept over both axes, so a cost that grows with the table instead of the touched path shows up as a slope.
 - New dependencies should use the newest, stable version.
 - Do not bump package versions unless asked. Releases are cut separately.
 - Comments should explain the non-obvious why, and never the history.
 - Inline simple helpers.
-- Every change needs a consumer that uses it now or is planned, and is worth its cost.
-- Deleting code is better than adding code.
+- Everything must be worth its weight: code, dependencies (vendored ones too), tests, CI jobs, and build time. Default to removing what doesn't earn its cost; otherwise refactor it to be cheaper to maintain or run. Every change needs a consumer that uses it now or is planned.
+- Prefer fewer dependencies: take a maintained crate only for nontrivial non-core functionality.
 - Record out-of-scope follow-ups as quests, never GitHub issues, and prompt the user about starting them when finished.
 - Prefer the net simpler result: reuse what exists, or narrow the scope, when that makes the implementation or API simpler overall. Say what was dropped.
 - Say it once, in the fewest words that hold up.
@@ -59,7 +58,7 @@ The API is the most important thing to get right.
 A bad shape costs a breaking change in every language, and the surface is huge.
 
 - Report the public API and wire impact of every change, in the PR description and whenever asked.
-- A breaking change marks its title with `!` and its Impact bullet says how to migrate. Only the release cut writes `MIGRATE.md` sections; leave existing Unreleased notes for that cut to consume.
+- A breaking change marks its title with `!` and its Impact bullet says how to migrate. Feature PRs add their migration notes under `## Unreleased`; only the release cut writes version sections.
 - Keep things private until a current or planned consumer needs them. Scrutinize every new exported item.
 - Never add `foo_with_x`, `foo_checked`, or a compatibility shim. Make the breaking change to `foo` instead.
 - Let the type system make misuse unrepresentable

@@ -12,7 +12,7 @@ test.each([0, 100])("a sequence hole before a paused data marker expires at %sms
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay: Milli(budget),
+		delay: { max: Milli(budget) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -57,7 +57,7 @@ test("a filled hole cancels its timer and the next hole gets a fresh budget", as
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay: Milli(100),
+		delay: { max: Milli(100) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -108,7 +108,7 @@ test("the holes a stalled source left behind share one budget", async () => {
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay: Milli(100),
+		delay: { max: Milli(100) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -149,7 +149,7 @@ test("a hole is late from the earliest arrival past it", async () => {
 	const track = new Track.Producer("data");
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay: Milli(100),
+		delay: { max: Milli(100) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {
@@ -207,7 +207,7 @@ test("a hole in a drained backlog is late from the earliest arrival past it, not
 	// Joined now, the backlog drains in sequence order: group 3 before group 5, which landed first.
 	const consumer = new Consumer(track.subscribe({ maxDelay: Milli(30_000) }), {
 		format: new Format("data"),
-		maxDelay: Milli(500),
+		delay: { max: Milli(500) },
 	});
 	const results: Read[] = [];
 	const reading = (async () => {

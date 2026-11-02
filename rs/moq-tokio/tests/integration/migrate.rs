@@ -47,7 +47,7 @@ async fn relay(
 	let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
 	let origin = origin.clone();
 	tokio::spawn(async move {
-		while let Some(request) = server.accept().await {
+		while let Ok(request) = server.accept().await {
 			let request = request.with_publisher(&origin).with_subscriber(origin.clone());
 			if let Ok(session) = request.ok().await {
 				let _ = accepted.send(session);

@@ -36,5 +36,3 @@ ignore moq-video::frame::tests::d3d11_resize_matches_cpu /quest/m3/video-hardwar
 ignore moq-video::render::export::dx12::tests::exports_an_nv12_texture /quest/m3/video-hardware.md
 ignore moq-video::render::export::dx12::tests::media_foundation_encodes_the_export_in_place /quest/m3/video-hardware.md
 
-# Waiting on pinned bundlers before it can run nightly.
-recipe js::worklet-matrix /quest/m2/browser-test-gaps.md

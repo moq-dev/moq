@@ -215,30 +215,32 @@ impl UdpSocketState {
 			// [header (len)][data][padding(len + sizeof(data))] -> [header][data][padding]
 			match (cmsg.cmsg_level, cmsg.cmsg_type) {
 				(WinSock::IPPROTO_IP, WinSock::IP_PKTINFO) => {
-					let pktinfo = unsafe { cmsg.decode::<WinSock::IN_PKTINFO>() };
-					// Addr is stored in big endian format
-					let ip4 = Ipv4Addr::from(u32::from_be(unsafe { pktinfo.ipi_addr.S_un.S_addr }));
-					dst_ip = Some(ip4.into());
-					interface_index = Some(pktinfo.ipi_ifindex);
+					if let Some(pktinfo) = unsafe { cmsg.decode::<WinSock::IN_PKTINFO>() } {
+						// Addr is stored in big endian format
+						let ip4 = Ipv4Addr::from(u32::from_be(unsafe { pktinfo.ipi_addr.S_un.S_addr }));
+						dst_ip = Some(ip4.into());
+						interface_index = Some(pktinfo.ipi_ifindex);
+					}
 				}
 				(WinSock::IPPROTO_IPV6, WinSock::IPV6_PKTINFO) => {
-					let pktinfo = unsafe { cmsg.decode::<WinSock::IN6_PKTINFO>() };
-					// Addr is stored in big endian format
-					dst_ip = Some(IpAddr::from(unsafe { pktinfo.ipi6_addr.u.Byte }));
-					interface_index = Some(pktinfo.ipi6_ifindex);
+					if let Some(pktinfo) = unsafe { cmsg.decode::<WinSock::IN6_PKTINFO>() } {
+						// Addr is stored in big endian format
+						dst_ip = Some(IpAddr::from(unsafe { pktinfo.ipi6_addr.u.Byte }));
+						interface_index = Some(pktinfo.ipi6_ifindex);
+					}
 				}
-				(WinSock::IPPROTO_IP, WinSock::IP_ECN) => {
-					// ECN is a C integer https://learn.microsoft.com/en-us/windows/win32/winsock/winsock-ecn
-					ecn_bits = unsafe { cmsg.decode::<c_int>() };
-				}
-				(WinSock::IPPROTO_IPV6, WinSock::IPV6_ECN) => {
-					// ECN is a C integer https://learn.microsoft.com/en-us/windows/win32/winsock/winsock-ecn
-					ecn_bits = unsafe { cmsg.decode::<c_int>() };
+				// ECN is a C integer https://learn.microsoft.com/en-us/windows/win32/winsock/winsock-ecn
+				(WinSock::IPPROTO_IP, WinSock::IP_ECN) | (WinSock::IPPROTO_IPV6, WinSock::IPV6_ECN) => {
+					if let Some(bits) = unsafe { cmsg.decode::<c_int>() } {
+						ecn_bits = bits;
+					}
 				}
 				(WinSock::IPPROTO_UDP, UDP_COALESCED_INFO) => {
 					// Has type u32 (aka DWORD) per
 					// https://learn.microsoft.com/en-us/windows/win32/winsock/ipproto-udp-socket-options
-					stride = unsafe { cmsg.decode::<u32>() };
+					if let Some(segment) = unsafe { cmsg.decode::<u32>() } {
+						stride = segment;
+					}
 				}
 				_ => {}
 			}

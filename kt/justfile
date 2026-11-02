@@ -16,6 +16,10 @@ default:
 check:
     bash ../sh/kt/check.sh
 
+# Format the handwritten Kotlin with ktfmt (kotlinlang style).
+fix:
+    bash ../sh/kt/format.sh
+
 # Regenerate the checked-in uniffi bindings and host native library without
 # compiling or testing. For environments that intentionally lack Gradle.
 generate:

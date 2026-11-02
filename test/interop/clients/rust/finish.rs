@@ -169,10 +169,8 @@ async fn main() -> anyhow::Result<()> {
 			let mut track = health.track("live")?.subscribe(None).await?;
 			let mut group = track.recv_group().await?.context("no health group")?;
 			let frame = group.read_frame().await?.context("no health frame")?;
-			ensure!(
-				frame.payload.as_ref() == b"session-alive" && frame.timestamp.is_none(),
-				"health payload or timestamp"
-			);
+			// Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+			ensure!(frame.payload.as_ref() == b"session-alive", "health payload");
 			ensure!(
 				group.read_frame().await?.is_none() && track.recv_group().await?.is_none(),
 				"health EOF"

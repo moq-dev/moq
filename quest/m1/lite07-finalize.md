@@ -114,6 +114,7 @@ timestamp bound in [#6168](https://github.com/moq-dev/moq/pull/6168).
 - [Lite-07 by start](/quest/m1/time-addressing/lite07.md) - lite-07 carries group starts, previous-start links, GROUP_END, and time bounds instead of sequence numbers
 - [@moq/net by start](/quest/m1/time-addressing/js.md) - JS speaks the same lite-07 wire
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - the job's route inherits the claim's identity, with no new wire message
+- [Subscriptions take a Delay { min, max }](/quest/m1/subscription-delay.md) - lite-07 SUBSCRIBE carries the delay's min as well as its max
 
 ## Related
 
