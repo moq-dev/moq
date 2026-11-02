@@ -690,20 +690,28 @@ impl<K: Ord> Steer<K> {
 	where
 		K: 'a,
 	{
-		let fits: Vec<(f64, f64)> = heard
+		let fits: Vec<_> = heard
 			.filter_map(|key| self.tracks.get(key))
 			.filter(|series| 2 * series.len() >= self.phase.len())
 			.filter_map(|series| {
 				let (slope, at) = envelope(series, now)?;
-				Some((depth(series, slope, at, now), slope))
+				Some((series, slope, at))
 			})
 			.collect();
-		let best = fits.iter().map(|&(depth, _)| depth).fold(f64::INFINITY, f64::min);
-		let steadiest = fits
-			.iter()
-			.filter(|&&(depth, _)| depth - best <= FIT)
-			.map(|&(_, slope)| slope)
-			.min_by(|a, b| a.abs().total_cmp(&b.abs()));
+		// A depth only chooses between tracks, and sorting for it is most of a step's work.
+		let steadiest = match fits[..] {
+			[(_, slope, _)] => Some(slope),
+			_ => {
+				let depths: Vec<(f64, f64)> = (fits.iter())
+					.map(|&(series, slope, at)| (depth(series, slope, at, now), slope))
+					.collect();
+				let best = depths.iter().map(|&(depth, _)| depth).fold(f64::INFINITY, f64::min);
+				(depths.iter())
+					.filter(|&&(depth, _)| depth - best <= FIT)
+					.map(|&(_, slope)| slope)
+					.min_by(|a, b| a.abs().total_cmp(&b.abs()))
+			}
+		};
 		let rate = match steadiest {
 			Some(rate) => rate,
 			None => envelope(&self.phase, now)?.0,
@@ -1945,6 +1953,11 @@ mod tests {
 		released(buffer).into_iter().map(|(item, _)| item).collect()
 	}
 
+	/// Let go of every frame due by now.
+	fn drain(buffer: &mut Buffer<u16, &'static str>, waiter: &kio::Waiter) {
+		while buffer.poll_next(waiter).is_ready() {}
+	}
+
 	/// A fill reads each track's available backlog before acquisition selects a clock.
 	#[tokio::test(start_paused = true)]
 	async fn acquisition_observes_every_tracks_available_frames() {
@@ -2507,6 +2520,7 @@ mod tests {
 		};
 		let mut last: Option<(f64, Decode)> = None;
 		let mut stepped = false;
+		let waiter = kio::Waiter::noop();
 		for k in 0..(hours * 3_600.0 * 2.0) as u64 {
 			let decode = Duration::from_millis(k * 500);
 			let hour = decode.as_secs_f64() / 3_600.0;
@@ -2547,7 +2561,7 @@ mod tests {
 				let slack = since(arrived, deadline) as f64 / 1e9;
 				run.worst = run.worst.max((slack - delay.as_secs_f64()).abs());
 			}
-			due(&mut buffer);
+			drain(&mut buffer, &waiter);
 
 			let Some(clock) = buffer.clock else {
 				continue;
@@ -2703,6 +2717,7 @@ mod tests {
 			out_of_tolerance: 0,
 			rates: Vec::new(),
 		};
+		let waiter = kio::Waiter::noop();
 		for (sent, track, decode) in frames {
 			let arrived = start + Duration::from_secs_f64(sent);
 			clock.advance(arrived.max(clock.now()));
@@ -2726,7 +2741,7 @@ mod tests {
 			if let Some(rate) = buffer.drift() {
 				fed.rates.push((decode.as_secs_f64(), rate));
 			}
-			due(&mut buffer);
+			drain(&mut buffer, &waiter);
 		}
 		fed.dropped = buffer.dropped();
 		fed.drift = buffer.drift();

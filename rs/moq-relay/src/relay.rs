@@ -70,7 +70,8 @@ impl Ready {
 /// ```
 pub struct Relay {
 	ready: tokio::sync::watch::Sender<bool>,
-	config: Config,
+	// Keep the inspection snapshot out of every future that moves a Relay.
+	config: Box<Config>,
 	server: moq_tokio::Listener,
 	auth: auth::Auth,
 	/// The sessions the embedder decides, until it takes them. `None` when the
@@ -144,7 +145,7 @@ impl Relay {
 		// Every TLS listener serves the ACME certificate, so install it before any is built.
 		#[cfg(feature = "acme")]
 		let acme = config.acme.init(&config.listen.tls, &config.web.https)?;
-		let resolved_config = config.clone();
+		let resolved_config = Box::new(config.clone());
 		let drain_timeout = config.drain_timeout();
 		// The name this relay reports in every auth request: the stats node label,
 		// else the cluster node URL, else nothing.
@@ -905,12 +906,26 @@ async fn serve_listening(
 ) -> anyhow::Result<()> {
 	loop {
 		let request = listener.accept().await?;
-		let conn = Connection::new(request, cluster.clone(), auth.clone())
-			.with_id(cluster.next_connection_id())
-			.with_shutdown(shutdown.clone())
-			.with_sessions(sessions.clone());
-		tokio::spawn(conn.run());
+		spawn_connection(request, &cluster, &auth, &shutdown, &sessions);
 	}
+}
+
+/// Spawn the [`Connection`] task for one accepted `request`.
+///
+/// Its own frame, so the session future built on the stack before `spawn` moves it
+/// to the heap stays out of the accept loop's frame, which every accept stacks on.
+fn spawn_connection(
+	request: moq_tokio::server::Request,
+	cluster: &cluster::Cluster,
+	auth: &auth::Auth,
+	shutdown: &shutdown::Observer,
+	sessions: &crate::session::Registry,
+) {
+	let conn = Connection::new(request, cluster.clone(), auth.clone())
+		.with_id(cluster.next_connection_id())
+		.with_shutdown(shutdown.clone())
+		.with_sessions(sessions.clone());
+	tokio::spawn(conn.run());
 }
 
 #[cfg(test)]
