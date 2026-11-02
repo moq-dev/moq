@@ -7700,6 +7700,7 @@ impl Cursor {
 	/// [`Self::poll_peek_recv`] once synced, judging against `drift`.
 	fn poll_recv_with(&mut self, mut drift: Drift, waiter: &kio::Waiter) -> Poll<Result<Option<Peeked>>> {
 		self.poll_heads(waiter);
+		self.expire_heads(&drift, waiter);
 		loop {
 			// Re-offer what a widening newly covers ahead of the arrival walk, in the
 			// subscription's order: it is the oldest thing still owed. A group the walk has
@@ -7724,6 +7725,7 @@ impl Cursor {
 					if polled.is_pending() && self.watch_time(waiter) {
 						self.admit();
 						drift = ready!(self.poll_drift(&self.servable, waiter))?;
+						self.expire_heads(&drift, waiter);
 						continue;
 					}
 					let Some((producer, found_index)) = ready!(polled)? else {
@@ -7765,22 +7767,7 @@ impl Cursor {
 			// poll walks a whole backlog off rather than handing it out group by group.
 			if ready!(self.poll_stale(&consumer, &drift, waiter))? {
 				self.advance_arrival(consumer.sequence, taken);
-				self.stale.add(consumer.content());
-				if let Some(drops) = &mut self.drops
-					&& let Some(end) = consumer.sequence.checked_add(1)
-				{
-					drops.pending.insert(consumer.sequence..end, StreamError::Old);
-				}
-				match drift.bounded {
-					// A re-offered group stale at the bound is final.
-					true => self.skipped.remove(consumer.sequence),
-					false => self.skip(consumer.sequence, drift.budget),
-				}
-				// Whatever the window is now: narrowed to a bounded one later, it accounts for
-				// this group by it, even once the group left the cache.
-				if let Some(end) = consumer.sequence.checked_add(1) {
-					self.filter.written_off.insert(consumer.sequence..end);
-				}
+				self.write_off_stale(consumer.sequence, consumer.content(), &drift);
 				continue;
 			}
 			if self.lacks_head(&consumer) {
@@ -7792,6 +7779,27 @@ impl Cursor {
 				group: consumer,
 				arrival: Some(taken),
 			})));
+		}
+	}
+
+	/// Write off group `sequence`, which the drift budget gave up on, as dropped `Old`:
+	/// skipped for a wider budget to offer again, unless the budget is at its bound.
+	fn write_off_stale(&mut self, sequence: u64, content: stats::Content, drift: &Drift) {
+		self.stale.add(content);
+		if let Some(drops) = &mut self.drops
+			&& let Some(end) = sequence.checked_add(1)
+		{
+			drops.pending.insert(sequence..end, StreamError::Old);
+		}
+		match drift.bounded {
+			// A re-offered group stale at the bound is final.
+			true => self.skipped.remove(sequence),
+			false => self.skip(sequence, drift.budget),
+		}
+		// Whatever the window is now: narrowed to a bounded one later, it accounts for this
+		// group by it, even once the group left the cache.
+		if let Some(end) = sequence.checked_add(1) {
+			self.filter.written_off.insert(sequence..end);
 		}
 	}
 
@@ -7871,6 +7879,40 @@ impl Cursor {
 			});
 		self.heads = Some(heads);
 		self.give_up_heads(given_up);
+	}
+
+	/// Write off the heads still asked whose group went stale within this cursor's window,
+	/// so a bounded read never waits on a fill for a group it would not hand out. The cursor
+	/// judges what it hands out, so a head fill does not ([`Fetching::unjudged`]).
+	fn expire_heads(&mut self, drift: &Drift, waiter: &kio::Waiter) {
+		let Some(heads) = &self.heads else { return };
+		if heads.fetching.is_empty() {
+			return;
+		}
+		let asked: Vec<u64> = heads.fetching.keys().copied().collect();
+		let servable = self.servable.clone();
+		let Poll::Ready(Ok(stale)) = self.poll(waiter, |state| {
+			let stale: Vec<(u64, stats::Content)> = asked
+				.iter()
+				.filter_map(|&sequence| {
+					let slot = state.lookup.get(&sequence)?;
+					// Parked first, so a group landing above while this judges wakes it.
+					let _ = state.cache.wakes().watch_landing(sequence, waiter);
+					state
+						.poll_drifted(sequence, &servable, drift.budget, None, waiter)
+						.then(|| (sequence, slot.group.consume().content()))
+				})
+				.collect();
+			Poll::Ready(Ok(stale))
+		}) else {
+			return;
+		};
+		for (sequence, content) in stale {
+			if let Some(heads) = &mut self.heads {
+				heads.fetching.remove(&sequence);
+			}
+			self.write_off_stale(sequence, content, drift);
+		}
 	}
 
 	/// Give up the groups whose head no fill can serve, as a refused miss is.
@@ -17959,6 +18001,44 @@ mod test {
 		}
 		head.finish().unwrap();
 		assert_eq!(reading.await.unwrap(), (Some(0), true));
+	}
+
+	/// A head still asked when a newer group in the reader's window supersedes it is
+	/// written off, so the bounded read ends without waiting on the fill.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_head_still_asked_goes_stale_within_the_window() {
+		let producer = track_producer("test", Info::timed());
+		let dynamic = producer.requests();
+
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+			.unwrap();
+		live.finish().unwrap();
+
+		let mut sub = producer.subscribe(Subscription::default().with_range(0..2));
+		assert!(sub.recv_group().now_or_never().is_none(), "the head is still asked");
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+		assert_eq!(request.sequence(), 0);
+
+		let mut newer = producer.create_group(group::Info { sequence: 1 }).unwrap();
+		newer
+			.write_frame(Timestamp::from_millis(1).unwrap(), bytes::Bytes::from_static(b"x"))
+			.unwrap();
+		newer.finish().unwrap();
+		let group = kio::clock::timeout(std::time::Duration::from_secs(1), sub.recv_group())
+			.await
+			.expect("group 1 timed out")
+			.unwrap()
+			.expect("group 1");
+		assert_eq!(group.sequence, 1);
+		let end = kio::clock::timeout(std::time::Duration::from_secs(1), sub.recv_group())
+			.await
+			.expect("the read never ended")
+			.unwrap();
+		assert!(end.is_none(), "the read ends with group 0 written off");
+		drop(request);
 	}
 
 	/// A head answered after the reader's ranges moved off its group is not handed out.
