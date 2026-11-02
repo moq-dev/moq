@@ -119,4 +119,3 @@ fields change; released versions are unchanged.
 ## Related
 
 - [Routes and announces](/quest/m1/cluster-routing/routes.md) - its ANNOUNCE_START layout overlaps; whichever lands second rebases
-- [Grant subject](/quest/m1/cluster-routing/grant-subject.md) - a later public-key `identity` could reuse its key identities

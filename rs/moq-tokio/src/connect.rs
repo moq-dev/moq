@@ -606,7 +606,8 @@ pub struct Config {
 
 	/// Restrict the client to specific MoQ protocol version(s).
 	///
-	/// By default, the client offers all supported versions and lets the server choose.
+	/// By default, the client offers every supported version except the opt-in `moq-lite-07-wip`
+	/// and lets the server choose.
 	/// Use this to force a specific version, e.g. `--connect-version moq-lite-02`.
 	/// Can be specified multiple times to offer a subset of versions.
 	#[serde(default, skip_serializing_if = "Vec::is_empty")]
