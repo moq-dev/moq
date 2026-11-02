@@ -780,9 +780,8 @@
   "limitations": [
     "Shared host; one cold observation per profile. Unit durations overlap and are not CPU attribution.",
     "Release measurement uses default features, not the shipping OpenH264 FFI build.",
-    "MBX_DISABLE is only for compilation measurement. The normal mux test command failed with E2BIG before compilation.",
-    "No production patch is retained; incomplete candidate release rebuilds were stopped and excluded.",
-    "The normal gate fails in both benchmark-selection fixtures with mbx E2BIG. The mbx incremental measurement and other-vendor local review remain unfinished."
+    "MBX_DISABLE is only for the controlled compilation measurements; mbx_incremental runs through mbx.",
+    "No production patch is retained; incomplete candidate release rebuilds were stopped and excluded."
   ],
   "reader_candidate": {
     "retained": false,
@@ -10891,5 +10890,614 @@
       ]
     },
     "decision": "Keep fat LTO. Thin shortened the final unit but not the whole build in this run; runtime evidence is noisy and does not establish a win."
+  },
+  "mbx_incremental": {
+    "mbx": "1.25.0",
+    "environment": {
+      "CARGO_BUILD_JOBS": "2",
+      "PATH": "deduplicated as in moq-dev/moq#7594 (10,769 bytes)"
+    },
+    "edit": "append one comment line to rs/moq-net/src/lib.rs; edits 1 to 3 accumulate, restore reverts the file",
+    "command": "perf stat --no-scale -x, -e instructions:u,task-clock cargo build --locked --timings",
+    "order": [
+      "catchup",
+      "noop",
+      "edit1",
+      "edit2",
+      "edit3",
+      "restore"
+    ],
+    "variants": {
+      "mbx": "the normal mbx Cargo shim, its shared cache and learned incremental state",
+      "plain": "MBX_DISABLE=1 CARGO_INCREMENTAL=0 in a private target directory"
+    },
+    "samples": {
+      "mbx-catchup": {
+        "wall_s": 150.94,
+        "instructions_u_core": 540319052527,
+        "instructions_u_atom": 443532770626,
+        "task_clock_ms": 205450.92,
+        "load_1m_before_after": [
+          23.23,
+          53.6
+        ],
+        "instructions_u_g": 983.85,
+        "compiled_units": 669,
+        "mbx_cache": "682 hits, 98 misses, 46 not looked up, 7 bypassed; 0 B downloaded, 0 B uploaded, 1.2 GiB stored locally",
+        "unit_seconds": 298.24,
+        "bin_unit_seconds": 42.5
+      },
+      "mbx-noop": {
+        "wall_s": 0.91,
+        "instructions_u_core": 3469454191,
+        "instructions_u_atom": 1266874130,
+        "task_clock_ms": 668.32,
+        "load_1m_before_after": [
+          53.6,
+          53.6
+        ],
+        "instructions_u_g": 4.74,
+        "compiled_units": 0
+      },
+      "mbx-edit1": {
+        "wall_s": 63.38,
+        "instructions_u_core": 322063489609,
+        "instructions_u_atom": 215750625827,
+        "task_clock_ms": 110178.38,
+        "load_1m_before_after": [
+          53.6,
+          35.05
+        ],
+        "instructions_u_g": 537.81,
+        "compiled_units": 26,
+        "mbx_cache": "0 hits, 1 misses, 27 not looked up, 28 incremental; 0 B downloaded, 0 B uploaded, 0 B stored locally",
+        "unit_seconds": 114.3,
+        "bin_unit_seconds": 27.32,
+        "top_units": [
+          {
+            "name": "moq-net",
+            "target": "",
+            "seconds": 18.47
+          },
+          {
+            "name": "moq-mux",
+            "target": "",
+            "seconds": 14.83
+          },
+          {
+            "name": "moq-cli",
+            "target": "moq \"bin\"",
+            "seconds": 13.39
+          },
+          {
+            "name": "moq-tokio",
+            "target": "",
+            "seconds": 11.64
+          },
+          {
+            "name": "moq-relay",
+            "target": "",
+            "seconds": 9.81
+          },
+          {
+            "name": "moq-video",
+            "target": "",
+            "seconds": 7.9
+          },
+          {
+            "name": "moq-studio",
+            "target": "moq-studio \"bin\"",
+            "seconds": 4.3
+          },
+          {
+            "name": "moq-relay",
+            "target": "moq-relay \"bin\"",
+            "seconds": 4.2
+          },
+          {
+            "name": "moq-bench",
+            "target": "moq-bench \"bin\"",
+            "seconds": 3.58
+          },
+          {
+            "name": "qmux",
+            "target": "",
+            "seconds": 3.26
+          }
+        ]
+      },
+      "mbx-edit2": {
+        "wall_s": 14.34,
+        "instructions_u_core": 71288881340,
+        "instructions_u_atom": 27666689204,
+        "task_clock_ms": 26171.14,
+        "load_1m_before_after": [
+          35.05,
+          32.86
+        ],
+        "instructions_u_g": 98.96,
+        "compiled_units": 26,
+        "mbx_cache": "0 hits, 0 misses, 27 not looked up, 28 incremental; 0 B downloaded, 0 B uploaded, 0 B stored locally",
+        "unit_seconds": 24.97,
+        "bin_unit_seconds": 13.3,
+        "top_units": [
+          {
+            "name": "moq-cli",
+            "target": "moq \"bin\"",
+            "seconds": 4.22
+          },
+          {
+            "name": "moq-studio",
+            "target": "moq-studio \"bin\"",
+            "seconds": 3.11
+          },
+          {
+            "name": "moq-net",
+            "target": "",
+            "seconds": 2.22
+          },
+          {
+            "name": "moq-bench",
+            "target": "moq-bench \"bin\"",
+            "seconds": 2.13
+          },
+          {
+            "name": "moq-relay",
+            "target": "moq-relay \"bin\"",
+            "seconds": 2.11
+          },
+          {
+            "name": "moq-bench",
+            "target": "moq-bench-host \"bin\"",
+            "seconds": 1.73
+          },
+          {
+            "name": "moq-mux",
+            "target": "",
+            "seconds": 1.52
+          },
+          {
+            "name": "moq-tokio",
+            "target": "",
+            "seconds": 1.46
+          },
+          {
+            "name": "moq-relay",
+            "target": "",
+            "seconds": 1.27
+          },
+          {
+            "name": "moq-video",
+            "target": "",
+            "seconds": 0.67
+          }
+        ]
+      },
+      "mbx-edit3": {
+        "wall_s": 13.33,
+        "instructions_u_core": 71392856754,
+        "instructions_u_atom": 27591000602,
+        "task_clock_ms": 25086.7,
+        "load_1m_before_after": [
+          32.86,
+          30.1
+        ],
+        "instructions_u_g": 98.98,
+        "compiled_units": 26,
+        "mbx_cache": "0 hits, 0 misses, 27 not looked up, 28 incremental; 0 B downloaded, 0 B uploaded, 0 B stored locally",
+        "unit_seconds": 23.44,
+        "bin_unit_seconds": 11.43,
+        "top_units": [
+          {
+            "name": "moq-cli",
+            "target": "moq \"bin\"",
+            "seconds": 3.64
+          },
+          {
+            "name": "moq-studio",
+            "target": "moq-studio \"bin\"",
+            "seconds": 2.73
+          },
+          {
+            "name": "moq-net",
+            "target": "",
+            "seconds": 2.43
+          },
+          {
+            "name": "moq-relay",
+            "target": "moq-relay \"bin\"",
+            "seconds": 1.92
+          },
+          {
+            "name": "moq-bench",
+            "target": "moq-bench \"bin\"",
+            "seconds": 1.73
+          },
+          {
+            "name": "moq-mux",
+            "target": "",
+            "seconds": 1.61
+          },
+          {
+            "name": "moq-tokio",
+            "target": "",
+            "seconds": 1.51
+          },
+          {
+            "name": "moq-bench",
+            "target": "moq-bench-host \"bin\"",
+            "seconds": 1.41
+          },
+          {
+            "name": "moq-relay",
+            "target": "",
+            "seconds": 1.3
+          },
+          {
+            "name": "moq-video",
+            "target": "",
+            "seconds": 0.68
+          }
+        ]
+      },
+      "mbx-restore": {
+        "wall_s": 12.41,
+        "instructions_u_core": 75748023981,
+        "instructions_u_atom": 23239999831,
+        "task_clock_ms": 24389.6,
+        "load_1m_before_after": [
+          30.1,
+          26.04
+        ],
+        "instructions_u_g": 98.99,
+        "compiled_units": 26,
+        "mbx_cache": "0 hits, 0 misses, 27 not looked up, 28 incremental; 0 B downloaded, 0 B uploaded, 0 B stored locally",
+        "unit_seconds": 22.01,
+        "bin_unit_seconds": 10.78,
+        "top_units": [
+          {
+            "name": "moq-cli",
+            "target": "moq \"bin\"",
+            "seconds": 3.55
+          },
+          {
+            "name": "moq-studio",
+            "target": "moq-studio \"bin\"",
+            "seconds": 2.48
+          },
+          {
+            "name": "moq-net",
+            "target": "",
+            "seconds": 2.19
+          },
+          {
+            "name": "moq-relay",
+            "target": "moq-relay \"bin\"",
+            "seconds": 1.73
+          },
+          {
+            "name": "moq-bench",
+            "target": "moq-bench \"bin\"",
+            "seconds": 1.66
+          },
+          {
+            "name": "moq-mux",
+            "target": "",
+            "seconds": 1.49
+          },
+          {
+            "name": "moq-tokio",
+            "target": "",
+            "seconds": 1.45
+          },
+          {
+            "name": "moq-bench",
+            "target": "moq-bench-host \"bin\"",
+            "seconds": 1.36
+          },
+          {
+            "name": "moq-relay",
+            "target": "",
+            "seconds": 1.3
+          },
+          {
+            "name": "moq-video",
+            "target": "",
+            "seconds": 0.62
+          }
+        ]
+      },
+      "plain-catchup": {
+        "wall_s": 285.79,
+        "instructions_u_core": 1501498508471,
+        "instructions_u_atom": 1126136220972,
+        "task_clock_ms": 499902.62,
+        "load_1m_before_after": [
+          26.04,
+          22.84
+        ],
+        "instructions_u_g": 2627.63,
+        "compiled_units": 669,
+        "unit_seconds": 569.6,
+        "bin_unit_seconds": 23.4
+      },
+      "plain-noop": {
+        "wall_s": 0.73,
+        "instructions_u_core": 2357988560,
+        "instructions_u_atom": 775465863,
+        "task_clock_ms": 501.89,
+        "load_1m_before_after": [
+          22.84,
+          22.84
+        ],
+        "instructions_u_g": 3.13,
+        "compiled_units": 0
+      },
+      "plain-edit1": {
+        "wall_s": 60.79,
+        "instructions_u_core": 268621666735,
+        "instructions_u_atom": 181421914784,
+        "task_clock_ms": 91835.91,
+        "load_1m_before_after": [
+          22.84,
+          36.78
+        ],
+        "instructions_u_g": 450.04,
+        "compiled_units": 26,
+        "unit_seconds": 107.88,
+        "bin_unit_seconds": 22.85,
+        "top_units": [
+          {
+            "name": "moq-net",
+            "target": "",
+            "seconds": 22.75
+          },
+          {
+            "name": "moq-mux",
+            "target": "",
+            "seconds": 16.62
+          },
+          {
+            "name": "moq-tokio",
+            "target": "",
+            "seconds": 12.1
+          },
+          {
+            "name": "moq-cli",
+            "target": "moq \"bin\"",
+            "seconds": 10.81
+          },
+          {
+            "name": "moq-relay",
+            "target": "",
+            "seconds": 8.5
+          },
+          {
+            "name": "moq-video",
+            "target": "",
+            "seconds": 6.69
+          },
+          {
+            "name": "moq-studio",
+            "target": "moq-studio \"bin\"",
+            "seconds": 4.52
+          },
+          {
+            "name": "moq-relay",
+            "target": "moq-relay \"bin\"",
+            "seconds": 3.71
+          },
+          {
+            "name": "hang",
+            "target": "",
+            "seconds": 2.45
+          },
+          {
+            "name": "moq-bench",
+            "target": "moq-bench \"bin\"",
+            "seconds": 2.41
+          }
+        ]
+      },
+      "plain-edit2": {
+        "wall_s": 50.19,
+        "instructions_u_core": 314057673562,
+        "instructions_u_atom": 135974088741,
+        "task_clock_ms": 80575.53,
+        "load_1m_before_after": [
+          36.78,
+          31.11
+        ],
+        "instructions_u_g": 450.03,
+        "compiled_units": 26,
+        "unit_seconds": 85.02,
+        "bin_unit_seconds": 22.34,
+        "top_units": [
+          {
+            "name": "moq-net",
+            "target": "",
+            "seconds": 17.96
+          },
+          {
+            "name": "moq-cli",
+            "target": "moq \"bin\"",
+            "seconds": 10.63
+          },
+          {
+            "name": "moq-mux",
+            "target": "",
+            "seconds": 10.27
+          },
+          {
+            "name": "moq-relay",
+            "target": "",
+            "seconds": 7.76
+          },
+          {
+            "name": "moq-tokio",
+            "target": "",
+            "seconds": 6.84
+          },
+          {
+            "name": "moq-video",
+            "target": "",
+            "seconds": 5.7
+          },
+          {
+            "name": "moq-studio",
+            "target": "moq-studio \"bin\"",
+            "seconds": 4.3
+          },
+          {
+            "name": "moq-relay",
+            "target": "moq-relay \"bin\"",
+            "seconds": 3.41
+          },
+          {
+            "name": "moq-bench",
+            "target": "moq-bench \"bin\"",
+            "seconds": 2.64
+          },
+          {
+            "name": "hang",
+            "target": "",
+            "seconds": 2.08
+          }
+        ]
+      },
+      "plain-edit3": {
+        "wall_s": 38.87,
+        "instructions_u_core": 353337334140,
+        "instructions_u_atom": 96717033544,
+        "task_clock_ms": 70644.65,
+        "load_1m_before_after": [
+          31.11,
+          20.2
+        ],
+        "instructions_u_g": 450.05,
+        "compiled_units": 26,
+        "unit_seconds": 68.96,
+        "bin_unit_seconds": 20.03,
+        "top_units": [
+          {
+            "name": "moq-net",
+            "target": "",
+            "seconds": 11.86
+          },
+          {
+            "name": "moq-cli",
+            "target": "moq \"bin\"",
+            "seconds": 9.8
+          },
+          {
+            "name": "moq-mux",
+            "target": "",
+            "seconds": 7.86
+          },
+          {
+            "name": "moq-relay",
+            "target": "",
+            "seconds": 6.55
+          },
+          {
+            "name": "moq-tokio",
+            "target": "",
+            "seconds": 6.01
+          },
+          {
+            "name": "moq-video",
+            "target": "",
+            "seconds": 4.46
+          },
+          {
+            "name": "moq-studio",
+            "target": "moq-studio \"bin\"",
+            "seconds": 3.35
+          },
+          {
+            "name": "moq-relay",
+            "target": "moq-relay \"bin\"",
+            "seconds": 3.28
+          },
+          {
+            "name": "moq-bench",
+            "target": "moq-bench \"bin\"",
+            "seconds": 2.31
+          },
+          {
+            "name": "moq-hls",
+            "target": "",
+            "seconds": 1.65
+          }
+        ]
+      },
+      "plain-restore": {
+        "wall_s": 61.91,
+        "instructions_u_core": 287278425627,
+        "instructions_u_atom": 162740496416,
+        "task_clock_ms": 93339.4,
+        "load_1m_before_after": [
+          20.2,
+          35.92
+        ],
+        "instructions_u_g": 450.02,
+        "compiled_units": 26,
+        "unit_seconds": 108.41,
+        "bin_unit_seconds": 40.24,
+        "top_units": [
+          {
+            "name": "moq-cli",
+            "target": "moq \"bin\"",
+            "seconds": 19.3
+          },
+          {
+            "name": "moq-net",
+            "target": "",
+            "seconds": 18.67
+          },
+          {
+            "name": "moq-relay",
+            "target": "",
+            "seconds": 9.96
+          },
+          {
+            "name": "moq-mux",
+            "target": "",
+            "seconds": 9.39
+          },
+          {
+            "name": "moq-studio",
+            "target": "moq-studio \"bin\"",
+            "seconds": 8.52
+          },
+          {
+            "name": "moq-tokio",
+            "target": "",
+            "seconds": 7.08
+          },
+          {
+            "name": "moq-video",
+            "target": "",
+            "seconds": 6.12
+          },
+          {
+            "name": "moq-bench",
+            "target": "moq-bench \"bin\"",
+            "seconds": 4.83
+          },
+          {
+            "name": "moq-relay",
+            "target": "moq-relay \"bin\"",
+            "seconds": 4.11
+          },
+          {
+            "name": "moq-bench",
+            "target": "moq-bench-host \"bin\"",
+            "seconds": 3.48
+          }
+        ]
+      }
+    },
+    "conclusion": "After the first edit, mbx rebuilds the 26 dependent units in 99 G instructions against plain Cargo 450 G (-78%). The first edit costs 538 G while mbx records incremental state. Final binary units are about half of the warm mbx edit."
   }
 }

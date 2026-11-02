@@ -67,29 +67,31 @@ What to check first:
   no flake or dependency changes were made alongside the concurrent work.
 - Measure edits through mbx, which enables learned incremental compilation;
   a plain Cargo rebuild with the host's `incremental = false` is a different
-  experiment. [moq-dev/moq#7594](https://github.com/moq-dev/moq/pull/7594)
-  tracks mbx's E2BIG failure. Preserve that failure when validating; disabling
-  the wrapper for a controlled compilation measurement is not a gate pass.
-  On the hybrid host, use `perf stat --no-scale` and sum the unscaled core
+  experiment. Repeat the edit: the first one after a catch-up build records
+  incremental state and costs more than plain Cargo. In a warm edit the final
+  binaries, not the edited libraries, are about half the unit time, so look
+  there first (see below).
+- Nested dev shells used to duplicate PATH until mbx failed with E2BIG;
+  [moq-dev/moq#7594](https://github.com/moq-dev/moq/pull/7594) deduplicates
+  it in the shell hook. If E2BIG returns, check PATH's length first.
+- On the hybrid host, use `perf stat --no-scale` and sum the unscaled core
   counters. Scaled counts can overcount by up to 2x.
 
-### Off-cycle checkpoint (2026-11-01)
+### Off-cycle run (2026-11-01)
 
 Base: [21d6da9fc1](https://github.com/moq-dev/moq/commit/21d6da9fc108b48373a961f34e43c3fcd38b0146).
-The one-off [build-time removal quest](/quest/m1/prune-build-time.md) has not
-finished: local validation cannot launch Cargo through mbx (E2BIG), and the
-mbx incremental probe and local review remain open. The shipping-profile
-LTO comparison is complete below.
-No production change is retained at this checkpoint. The recurring audit's
-schedule is unchanged and no successor is created.
+A one-off removal run ahead of the m1 cut, by
+[moq-dev/moq#7602](https://github.com/moq-dev/moq/pull/7602). It found nothing
+worth removing and retained no production or profile change. The recurring
+audit's schedule is unchanged and no successor is created.
 
 [Measurements and rejected candidate patches](/.github/compile-time-audit.json)
 record the source, commands, top IR rows, Cargo unit durations, and raw perf
 counters. Rust 1.98.1 and cargo-llvm-lines 0.4.48, Linux x86_64, Intel Core
 Ultra 7 270K Plus (24 logical CPUs), shared host. Measurements use private
 `.tmp/` targets, two Cargo jobs, `MBX_DISABLE=1`, and no incremental
-compilation. The host overrides dev debug info to false. These are controlled
-compilation measurements, not passing runs of the repository's gate.
+compilation, except the mbx edit probe. The host overrides dev debug info to
+false.
 
 | Target, default features, dev | LLVM lines | Copies |
 | --- | ---: | ---: |
@@ -200,16 +202,34 @@ profile edit is retained. The old thin-LTO open item is measured here;
 the transport IR inventory and stale subtitle candidate are also resolved.
 `cargo-llvm-lines` is still not in the pinned shell.
 
-#### Remaining work
+#### Incremental edit through mbx
 
-- Measure a real edit through mbx after
-  [moq-dev/moq#7594](https://github.com/moq-dev/moq/pull/7594) is resolved.
-  The controlled whole-crate rebuilds above do not measure learned
-  incremental compilation or cross-job CI cache reuse.
-- Run the repository's checks and the other-vendor local review without
-  bypassing E2BIG or the runner-image user-namespace denial. The targeted
-  `just rs test -p moq-mux --lib` attempt failed in mbx before compilation;
-  cargo-llvm-lines compiled the test harness but ran no tests.
+Same source after the cold builds above. Default members, `cargo build
+--locked --timings` under `perf stat --no-scale`, two jobs, mbx 1.25.0, PATH
+deduplicated as in [moq-dev/moq#7594](https://github.com/moq-dev/moq/pull/7594).
+Each edit appends one comment line to `rs/moq-net/src/lib.rs` after a
+catch-up and a no-op build; restore reverts the file. Plain Cargo repeats
+the sequence with `MBX_DISABLE=1` in a private target. Every edit rebuilds
+the same 26 dependent units.
+
+| Edit | mbx instructions | mbx CPU | mbx wall | Plain instructions | Plain CPU | Plain wall |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 537.8 G | 110.2 s | 63.4 s | 450.0 G | 91.8 s | 60.8 s |
+| 2 | 99.0 G | 26.2 s | 14.3 s | 450.0 G | 80.6 s | 50.2 s |
+| 3 | 99.0 G | 25.1 s | 13.3 s | 450.1 G | 70.6 s | 38.9 s |
+| restore | 99.0 G | 24.4 s | 12.4 s | 450.0 G | 93.3 s | 61.9 s |
+
+Instructions are deterministic to 0.1%; CPU and wall vary with host load
+(one-minute load 20 to 54). Once mbx has incremental state for the edited
+crates, an edit costs 78% fewer instructions than plain Cargo. The first
+edit costs 20% more while it records that state.
+
+In the warm mbx edits, the five final binary units take 49 to 53% of unit
+time: `moq` 3.5 to 4.2 s, `moq-studio` 2.5 to 3.1 s, `moq-bench`'s two bins
+3.0 to 3.9 s together, and `moq-relay` 1.7 to 2.1 s. moq-net itself is 2.2
+to 2.4 s. moq-bench and moq-studio are default members, but CI and `just`
+select packages or pass `--workspace`, so trimming default members would only
+shorten a bare root `cargo build`. Nothing here is removed.
 
 ### Historical baselines (m1 run, 2026-10-23)
 
