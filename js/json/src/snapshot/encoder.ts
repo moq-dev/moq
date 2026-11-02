@@ -1,5 +1,5 @@
 import { Error as NetError } from "@moq/net";
-import type * as z from "@zod/mini";
+import type * as z from "zod/mini";
 import { deepEqual, diff } from "../diff.ts";
 import { MAX_FRAME_BYTES, TAIL_BYTES, tailCharge } from "../limits.ts";
 

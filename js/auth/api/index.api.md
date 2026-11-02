@@ -3,26 +3,26 @@
 ```ts
 import { $strict } from "zod/v4/core";
 import { $strip } from "zod/v4/core";
-import { ZodMiniArray } from "@zod/mini";
-import { ZodMiniBoolean } from "@zod/mini";
-import { ZodMiniCatch } from "@zod/mini";
-import { ZodMiniDefault } from "@zod/mini";
-import { ZodMiniDiscriminatedUnion } from "@zod/mini";
-import { ZodMiniEnum } from "@zod/mini";
-import { ZodMiniInt } from "@zod/mini";
-import { ZodMiniLiteral } from "@zod/mini";
-import { ZodMiniNever } from "@zod/mini";
-import { ZodMiniNumber } from "@zod/mini";
-import { ZodMiniObject } from "@zod/mini";
-import { ZodMiniOptional } from "@zod/mini";
-import { ZodMiniPipe } from "@zod/mini";
-import { ZodMiniRecord } from "@zod/mini";
-import { ZodMiniString } from "@zod/mini";
-import { ZodMiniTransform } from "@zod/mini";
-import { ZodMiniUnion } from "@zod/mini";
-import { ZodMiniUnknown } from "@zod/mini";
-import { infer } from "@zod/mini";
-import { output } from "@zod/mini";
+import { ZodMiniArray } from "zod/mini";
+import { ZodMiniBoolean } from "zod/mini";
+import { ZodMiniCatch } from "zod/mini";
+import { ZodMiniDefault } from "zod/mini";
+import { ZodMiniDiscriminatedUnion } from "zod/mini";
+import { ZodMiniEnum } from "zod/mini";
+import { ZodMiniInt } from "zod/mini";
+import { ZodMiniLiteral } from "zod/mini";
+import { ZodMiniNever } from "zod/mini";
+import { ZodMiniNumber } from "zod/mini";
+import { ZodMiniObject } from "zod/mini";
+import { ZodMiniOptional } from "zod/mini";
+import { ZodMiniPipe } from "zod/mini";
+import { ZodMiniRecord } from "zod/mini";
+import { ZodMiniString } from "zod/mini";
+import { ZodMiniTransform } from "zod/mini";
+import { ZodMiniUnion } from "zod/mini";
+import { ZodMiniUnknown } from "zod/mini";
+import { infer } from "zod/mini";
+import { output } from "zod/mini";
 
 export type Algorithm = infer<typeof AlgorithmSchema>;
 

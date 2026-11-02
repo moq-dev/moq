@@ -16,7 +16,7 @@
 import type { Micro } from "@moq/clock";
 import * as Json from "@moq/json";
 import type * as Moq from "@moq/net";
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import type * as Catalog from "./catalog";
 import { u53Schema } from "./catalog";
 

@@ -24,7 +24,6 @@
 		"@moq/signals": "workspace:^"
 	},
 	"peerDependencies": {
-		"@zod/mini": "^4.5.0",
 		"zod": "^4.5.0"
 	},
 	"devDependencies": {

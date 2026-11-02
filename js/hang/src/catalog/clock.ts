@@ -1,4 +1,4 @@
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { u53Schema } from "./integers";
 
 /** The moq epoch (2020-01-01T00:00:00Z) in Unix-epoch milliseconds. */
