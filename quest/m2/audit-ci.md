@@ -85,6 +85,10 @@ verdicts:
   Linux minutes. [Video](https://github.com/moq-dev/moq/actions/runs/41318496744)
   fails an assertion in 7.8 Linux minutes; malformed attribute diagnostics
   before it are expected test inputs. These tests stay with their owners.
+- The earlier finite-track failures before draft 22 (`Error: old`, a JS
+  `RESET_STREAM`) retain their split ownership: [moq-dev/moq#7306](https://github.com/moq-dev/moq/pull/7306)
+  fixes the Rust publisher, including the removed WASM harness's quick-finish
+  case; [JS joining FETCH](/quest/m2/ietf-js-joining-fetch.md) owns the JS half.
 - Visibility gaps retained with existing owners: Rust benchmark tests and
   shipping sizes are measured but not on Pages yet;
   [moq-dev/moq#7510](https://github.com/moq-dev/moq/pull/7510) publishes both.

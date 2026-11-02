@@ -181,10 +181,9 @@ No duplicate quest or workflow edit belongs here.
 
 ## Required
 
-- [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - polling and memory after peak task occupancy subsides
+- [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - memory a task set keeps after peak occupancy subsides
 - [QUIC receive-state reuse](/quest/m2/performance-survey/quic-receive-reuse.md) - reassembly metadata retained by recycled completed streams
 - [Cache metadata](/quest/m2/performance-survey/cache-metadata.md) - bookkeeping capacity after cached groups expire
-- [Cache backing amplification](/quest/m2/performance-survey/cache-backing.md) - small retained samples pinning large shared fragments
 - [Bandwidth grants](/quest/m2/performance-survey/bandwidth-grants.md) - repeated full allocation in Rust and JS
 - [Cached JS group joins](/quest/m2/performance-survey/js-cached-groups.md) - repeated sorting while replaying retained groups
 - [PCM batch processing](/quest/m2/performance-survey/audio-batches.md) - repeated tail movement during encoding and resampling
@@ -192,7 +191,6 @@ No duplicate quest or workflow edit belongs here.
 - [HLS request fan-out](/quest/m2/performance-survey/hls-serving.md) - repeated fetch, remux and playlist construction per viewer
 - [Buffered browser groups](/quest/m2/performance-survey/hang-buffered.md) - per-frame scans and bulk skip work
 - [Idle browser stats](/quest/m2/performance-survey/browser-idle-stats.md) - local transport polling without active publishing demand
-- [Transport preference history](/quest/m2/performance-survey/transport-history.md) - full URL retention across retired sessions
 - [UDP socket queues](/quest/m2/performance-survey/socket-queues.md) - drop attribution and queue-size tradeoffs across workers and load
 - [Session datagrams](/quest/m2/performance-survey/datagram-delivery.md) - complete per-object delivery across publishers and viewers
 - [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md) - HTTP polling cost versus result size and unrelated routes

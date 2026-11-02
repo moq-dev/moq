@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { GrantSchema, RefusalSchema, RequestSchema, TokenSchema } from "./contract.ts";
+import { encodeGrant, GrantSchema, RefusalSchema, RequestSchema, TokenSchema } from "./contract.ts";
 
 // The fixtures below are what the Rust `moq_auth::Request` and `Grant` serialize to,
 // so a server written against these schemas reads what a relay sends.
@@ -123,6 +123,14 @@ test("a grant round trips and is validated", () => {
 	expect(() => GrantSchema.parse({ publish: ["**"], expires: 4102444800.5 })).toThrow();
 	expect(() => GrantSchema.parse({ publish: ["a/**/b/**"] })).toThrow();
 	expect(() => GrantSchema.parse({ publish: ["**"], label: "project/*" })).toThrow(/invalid path/);
+});
+
+test("a capped grant answers with its cap nested in the role", () => {
+	const grant = GrantSchema.parse({ publish: { path: ["alice/**"], rate: 8_000_000 }, subscribe: ["**"] });
+	expect(grant).toMatchObject({ publish: ["alice/**"], publish_rate: 8_000_000, subscribe: ["**"] });
+	expect(encodeGrant(grant)).toEqual({ publish: { path: ["alice/**"], rate: 8_000_000 }, subscribe: ["**"] });
+	// A cap alone names nothing.
+	expect(() => encodeGrant({ publish_rate: 8000 })).toThrow(/name something/);
 });
 
 test("a tier a metrics label would escape is refused", () => {

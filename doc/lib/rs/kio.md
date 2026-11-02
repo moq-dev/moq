@@ -41,6 +41,11 @@ and `Instant::from_std()` convert at a third-party API that takes
 `std::time::Instant`, through the runtime clock's origin. That is exact on a
 running clock, and keeps only durations on paused tokio or the simulator.
 
+`kio::clock::Clock::current()` captures the ambient clock, and the handle keeps
+reading that clock from any thread or runtime. Stamp with it when one timeline
+is shared by calls that may come from different contexts. A moq-mux broadcast
+does this: it stamps every track on the clock it was created under.
+
 ## Caller-driven code
 
 A state machine polled as `poll(now, waiter)` never reads a clock. It owns a

@@ -215,22 +215,27 @@ impl Declared {
 	}
 }
 
-/// The producer's `clock` under a root `clock` of `advertised`: re-based on a changed mapping while
-/// nothing has `anchored` the clock, and refused once something has. Clearing it is always refused.
-fn adopt(clock: crate::Clock, anchored: bool, advertised: Option<hang::catalog::Clock>) -> crate::Result<crate::Clock> {
+/// The producer's `clock` re-based on a root `clock` of `advertised`, or `None` when that is the
+/// mapping it already has. A changed mapping is adopted while nothing has `anchored` the clock and
+/// refused once something has. Clearing it is always refused.
+fn adopt(
+	clock: &crate::Clock,
+	anchored: bool,
+	advertised: Option<hang::catalog::Clock>,
+) -> crate::Result<Option<crate::Clock>> {
 	if advertised == clock.wall() {
-		return Ok(clock);
+		return Ok(None);
 	}
 	let refuse = |why: &str| crate::Error::UnmappableTimestamp(format!("root clock {advertised:?} {why}"));
 	let wall = crate::Clock::exact(advertised.ok_or_else(|| refuse("clears the producer's clock"))?)?;
 	// The same mapping in other units needs no host time, which may be unset or behind PTS zero.
 	if Some(wall) == clock.wall() {
-		return Ok(clock);
+		return Ok(None);
 	}
 	if anchored {
 		return Err(refuse("changes the producer's clock after it was fixed"));
 	}
-	crate::Clock::adopted(wall)
+	Ok(Some(clock.adopted(wall)?))
 }
 
 /// Take the shared state, ignoring a poisoned lock.
@@ -325,15 +330,18 @@ impl<E: CatalogExt> Outputs<E> {
 		std::borrow::Cow::Owned(catalog)
 	}
 
-	/// Emit the catalog to hang and MSF. Neither writes a catalog identical to its last.
-	fn emit(&mut self, catalog: &Catalog<E>, msf: &mut Msf<E>) -> crate::Result<()> {
+	/// Emit the catalog to hang and MSF, stamped now on `clock`. Neither writes a catalog identical
+	/// to its last.
+	fn emit(&mut self, catalog: &Catalog<E>, msf: &mut Msf<E>, clock: &crate::Clock) -> crate::Result<()> {
 		let catalog = self.advertise(catalog);
 		let catalog = catalog.as_ref();
 		// Every consumer refuses a catalog that fails this, so refuse it before it reaches one.
 		catalog.check_renditions()?;
+		// The media timeline, so the catalog in effect at a media timestamp is the one stamped at or
+		// before it, whichever thread or runtime publishes.
+		let at = clock.now();
 		// One snapshot per group while deltas are disabled.
-		self.hang
-			.update(moq_net::Timed::from(catalog).at(moq_net::Timestamp::now()))?;
+		self.hang.update(moq_net::Timed::from(catalog).at(at))?;
 
 		// `abort` below is what keeps the tracks consistent if this fails after the hang track was
 		// updated.
@@ -341,7 +349,7 @@ impl<E: CatalogExt> Outputs<E> {
 			return Ok(());
 		};
 		let mut group = self.msf_track.append_group()?;
-		group.write_frame(moq_net::Timestamp::now(), msf)?;
+		group.write_frame(at, msf)?;
 		group.finish()?;
 
 		Ok(())
@@ -517,10 +525,11 @@ impl<E: CatalogExt> Producer<E> {
 		// Resolved before any track exists, so a refused seed leaves the broadcast untouched.
 		let anchored = config.clock.is_some();
 		let mut catalog = config.catalog;
+		// An unseeded catalog runs on the configured clock, or a fresh one.
+		let clock = config.clock.unwrap_or_default();
 		let clock = match catalog.clock {
-			// An unseeded catalog runs on the configured clock, or a fresh one.
-			None => config.clock.unwrap_or_default(),
-			seeded => adopt(config.clock.unwrap_or_default(), anchored, seeded)?,
+			None => clock,
+			seeded => adopt(&clock, anchored, seeded)?.unwrap_or(clock),
 		};
 		catalog.clock = clock.wall();
 
@@ -537,7 +546,10 @@ impl<E: CatalogExt> Producer<E> {
 		let json_config = moq_json::snapshot::Config::default().with_deltas(false);
 		let hang = moq_json::snapshot::Producer::new(hang_track.clone(), json_config);
 
-		let hls = config.hls.as_ref().map(|_| crate::hls::Tracks::new(broadcast));
+		let hls = config
+			.hls
+			.as_ref()
+			.map(|_| crate::hls::Tracks::new(broadcast, clock.clone()));
 
 		Ok(Self {
 			outputs: Outputs {
@@ -650,18 +662,18 @@ impl<E: CatalogExt> Producer<E> {
 	/// The broadcast's shared clock: the timeline producers stamp against and the wall mapping
 	/// advertised at the catalog root.
 	///
-	/// Copies share the timeline, so handing them to concurrent producers keeps every track on
+	/// Clones share the timeline, so handing them to concurrent producers keeps every track on
 	/// one clock. Taking the clock fixes it: an importer whose first frame arrives later shifts its
-	/// timestamps onto this clock rather than moving it, so a copy never goes stale.
+	/// timestamps onto this clock rather than moving it, so a clone never goes stale.
 	pub fn clock(&self) -> crate::Clock {
 		let mut state = take(&self.current);
 		state.anchored = true;
-		state.clock
+		state.clock.clone()
 	}
 
 	/// The clock as it stands, without fixing it: for readers that follow it on every use.
 	pub(super) fn current_clock(&self) -> crate::Clock {
-		take(&self.current).clock
+		take(&self.current).clock.clone()
 	}
 
 	/// The config `name` holds in `C`'s section, cloned without copying the rest of the catalog.
@@ -694,7 +706,7 @@ impl<E: CatalogExt> Producer<E> {
 		}
 
 		let offset = if guard.state.anchored {
-			let clock = guard.state.clock;
+			let clock = &guard.state.clock;
 			let at = match wall {
 				Some(wall) => clock.reading(wall)?,
 				None => clock.now().as_micros() as i128,
@@ -702,17 +714,19 @@ impl<E: CatalogExt> Producer<E> {
 			super::Offset::from_micros(at - pts.as_micros() as i128)?
 		} else {
 			let since = std::time::Duration::from_micros(u64::try_from(pts.as_micros()).unwrap_or(u64::MAX));
+			// Moved, not replaced: it keeps reading the clock the broadcast was created under.
 			let clock = match wall {
-				Some(wall) => crate::Clock::placed(since, wall)?,
-				None => crate::Clock::arrival(since)?,
+				Some(wall) => guard.state.clock.placed(since, wall)?,
+				None => guard.state.clock.arrival(since)?,
 			};
-			guard.state.clock = clock;
+			let advertised = clock.wall();
+			guard.retime(clock);
 			guard.state.anchored = true;
 			match wall {
 				// A placement can precede every track. It stages no publish, so the catalog first
 				// goes out listing them rather than carrying a clock alone.
-				Some(_) => guard.state.catalog.clock = clock.wall(),
-				None => guard.clock = clock.wall(),
+				Some(_) => guard.state.catalog.clock = advertised,
+				None => guard.clock = advertised,
 			}
 			super::Offset::default()
 		};
@@ -882,7 +896,7 @@ impl<E: CatalogExt> Producer<E> {
 		state.estimates.fold();
 		// Emitted under the lock, as a guard's publish is, since the MSF state belongs to it.
 		let state = &mut *state;
-		if let Err(err) = self.outputs.emit(&state.catalog, &mut state.msf) {
+		if let Err(err) = self.outputs.emit(&state.catalog, &mut state.msf, &state.clock) {
 			tracing::error!(%err, "failed to publish the catalog, aborting its tracks");
 			self.outputs.abort(&err);
 			state.closed = Some(err);
@@ -1032,7 +1046,7 @@ impl<E: CatalogExt> Producer<E> {
 				return;
 			}
 			let state = &mut *state;
-			if let Err(err) = outputs.emit(&state.catalog, &mut state.msf) {
+			if let Err(err) = outputs.emit(&state.catalog, &mut state.msf, &state.clock) {
 				tracing::error!(%err, "failed to publish an HLS declaration, aborting catalog tracks");
 				outputs.abort(&err);
 				state.closed = Some(err);
@@ -1189,6 +1203,14 @@ impl<E: CatalogExt> Guard<'_, E> {
 		self.publish()
 	}
 
+	/// Move the producer onto `clock`, a re-basing of the one it has, before anything fixed it.
+	fn retime(&mut self, clock: crate::Clock) {
+		if let Some(hls) = &self.outputs.hls {
+			hls.retime(&clock);
+		}
+		self.state.clock = clock;
+	}
+
 	/// Publish a mutated catalog once, clearing the flag so it isn't published again.
 	fn publish(&mut self) -> crate::Result<()> {
 		if !self.updated {
@@ -1197,16 +1219,12 @@ impl<E: CatalogExt> Guard<'_, E> {
 		self.updated = false;
 
 		// The root `clock` is the producer's clock: never advertise one it disagrees with.
-		match adopt(self.state.clock, self.state.anchored, self.state.catalog.clock) {
-			Ok(clock) => {
-				self.state.clock = clock;
-				self.state.catalog.clock = clock.wall();
-			}
-			Err(err) => {
-				self.state.catalog.clock = self.state.clock.wall();
-				return Err(err);
-			}
+		let adopted = adopt(&self.state.clock, self.state.anchored, self.state.catalog.clock);
+		if let Ok(Some(clock)) = &adopted {
+			self.retime(clock.clone());
 		}
+		self.state.catalog.clock = self.state.clock.wall();
+		adopted?;
 
 		{
 			// Withhold every emit while still buffering the initial reserved set, or until a reserved
@@ -1227,7 +1245,7 @@ impl<E: CatalogExt> Guard<'_, E> {
 
 		// Folded only once it is on the wire, so a failed emit leaves the estimate held.
 		let state = &mut *self.state;
-		self.outputs.emit(&state.catalog, &mut state.msf)?;
+		self.outputs.emit(&state.catalog, &mut state.msf, &state.clock)?;
 		self.state.estimates.fold();
 		Ok(())
 	}
@@ -2285,8 +2303,16 @@ mod test {
 		let front = origin.create_broadcast("robot/front.hang").unwrap();
 		let rear = origin.create_broadcast("robot/rear.hang").unwrap();
 		let catalogs = [
-			Producer::new(&mut front.broadcast().clone(), Config::default().with_clock(clock)).unwrap(),
-			Producer::new(&mut rear.broadcast().clone(), Config::default().with_clock(clock)).unwrap(),
+			Producer::new(
+				&mut front.broadcast().clone(),
+				Config::default().with_clock(clock.clone()),
+			)
+			.unwrap(),
+			Producer::new(
+				&mut rear.broadcast().clone(),
+				Config::default().with_clock(clock.clone()),
+			)
+			.unwrap(),
 		];
 		let mut broadcasts = [front, rear];
 		for (catalog, broadcast) in catalogs.iter().zip(&mut broadcasts) {
@@ -2324,8 +2350,107 @@ mod test {
 		}
 	}
 
+	/// A broadcast built under one clock and written from others, a paused runtime a minute behind
+	/// it and a plain thread on the host's, stamps every track on the clock it was built under, so
+	/// none of them goes back: media, both catalogs, and the HLS records.
+	#[test]
+	fn a_broadcast_written_from_two_clock_contexts_never_rewinds() {
+		use hang::catalog::{JsonConfig, Mode};
+		use std::time::Duration;
+
+		let paused = || {
+			tokio::runtime::Builder::new_current_thread()
+				.enable_time()
+				.start_paused(true)
+				.build()
+				.unwrap()
+		};
+		let (home, away) = (paused(), paused());
+		let mut broadcast = moq_net::broadcast::Info::default().produce();
+		let (mut catalog, mut video, readers) = home.block_on(async {
+			tokio::time::advance(Duration::from_secs(60)).await;
+			let catalog = Producer::new(
+				&mut broadcast,
+				Config::default().with_max_age(Duration::from_secs(3600)),
+			)
+			.unwrap();
+			let video = video0(&mut broadcast, &catalog, &[]);
+			let consumer = broadcast.consume();
+			let mut readers = Vec::new();
+			for name in [
+				hang::Catalog::DEFAULT_NAME,
+				moq_msf::DEFAULT_NAME,
+				"video0",
+				"video0.hls",
+			] {
+				let all = moq_net::track::Subscription::default().with_max_delay(None);
+				let track = consumer.track(name).unwrap().subscribe(all).await.unwrap();
+				readers.push((name, track.ordered()));
+			}
+			(catalog, video, readers)
+		});
+
+		// One keyframe group, so one HLS segment, and one catalog change, so one hang catalog group.
+		let write = |catalog: &mut Producer, video: &mut crate::container::Producer<_, VideoConfig>, n: u64| {
+			let timestamp = catalog.timestamp(None).unwrap();
+			video
+				.write(crate::container::Frame {
+					timestamp,
+					duration: None,
+					payload: Bytes::from_static(b"keyframe"),
+					keyframe: true,
+				})
+				.unwrap();
+			catalog
+				.mutate(|catalog| {
+					catalog
+						.json
+						.tracks
+						.insert(format!("json{n}"), JsonConfig::new(Mode::Snapshot));
+				})
+				.unwrap();
+		};
+		for n in 0..4 {
+			// Only the clock the broadcast was built under moves it.
+			home.block_on(tokio::time::advance(Duration::from_secs(4)));
+			match n % 2 {
+				0 => away.block_on(async { write(&mut catalog, &mut video, n) }),
+				_ => std::thread::scope(|scope| {
+					scope.spawn(|| write(&mut catalog, &mut video, n));
+				}),
+			}
+		}
+		away.block_on(async {
+			video.finish().unwrap();
+			catalog.finish().unwrap();
+		});
+
+		home.block_on(async {
+			for (name, mut track) in readers {
+				let (mut stamps, mut starts) = (Vec::new(), Vec::<u128>::new());
+				while let Some(mut group) = track.next_group().await.unwrap() {
+					let first = stamps.len();
+					while let Some(frame) = group.read_frame().await.unwrap() {
+						stamps.push(frame.timestamp.unwrap().as_micros());
+					}
+					starts.extend(stamps.get(first).copied());
+				}
+				assert!(stamps.is_sorted(), "{name} went back: {stamps:?}");
+				// The clock read ten seconds when built, and only `home` advanced it, to 26.
+				let timeline = 10_000_000..=26_000_000;
+				assert!(
+					stamps.iter().all(|stamp| timeline.contains(stamp)),
+					"{name}: {stamps:?}"
+				);
+				if name == "video0" {
+					assert_eq!(starts, [14, 18, 22, 26].map(|secs| secs * 1_000_000), "{name}");
+				}
+			}
+		});
+	}
+
 	/// How far `pts` lands from `clock`'s reading now, which is zero for a frame live on arrival.
-	fn lateness(clock: crate::Clock, pts: moq_net::Timestamp) -> std::time::Duration {
+	fn lateness(clock: &crate::Clock, pts: moq_net::Timestamp) -> std::time::Duration {
 		let now = clock.now().as_micros();
 		std::time::Duration::from_micros(now.abs_diff(pts.as_micros()) as u64)
 	}
@@ -2350,7 +2475,7 @@ mod test {
 		let first = moq_net::Timestamp::from_micros(3_600_000_000).unwrap();
 		let shifted = catalog.timebase().shift(first).unwrap();
 		assert!(
-			lateness(catalog.clock(), shifted) < Duration::from_secs(1),
+			lateness(&catalog.clock(), shifted) < Duration::from_secs(1),
 			"{shifted:?}"
 		);
 		assert_eq!(catalog.snapshot().clock.map(|clock| clock.wall), advertised);
@@ -2388,7 +2513,7 @@ mod test {
 			.timebase()
 			.shift(moq_net::Timestamp::from_micros(0).unwrap())
 			.unwrap();
-		assert!(lateness(clock, other) < Duration::from_secs(1), "{other:?}");
+		assert!(lateness(&clock, other) < Duration::from_secs(1), "{other:?}");
 		assert_eq!(
 			catalog.clock().wall(),
 			clock.wall(),
@@ -2409,7 +2534,7 @@ mod test {
 			.unwrap();
 		assert_eq!(catalog.clock().wall(), clock.wall());
 		assert!(
-			lateness(clock, shifted) < std::time::Duration::from_secs(1),
+			lateness(&clock, shifted) < std::time::Duration::from_secs(1),
 			"{shifted:?}"
 		);
 	}
@@ -2567,7 +2692,7 @@ mod test {
 		let fixed = crate::Clock::at(kio::clock::now(), zero).unwrap();
 		seed.clock = Some(an_hour_ago(moq_net::Timescale::MILLI));
 		crate::clock::fake_host_wall(kio::clock::Wall::UNIX_EPOCH + Duration::from_secs(86_400));
-		let config = Config::default().with_catalog(seed.clone()).with_clock(fixed);
+		let config = Config::default().with_catalog(seed.clone()).with_clock(fixed.clone());
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let mut catalog = Producer::new(&mut broadcast, config).unwrap();
 		assert_eq!(catalog.clock(), fixed);
