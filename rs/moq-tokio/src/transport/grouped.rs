@@ -42,6 +42,12 @@ pub trait Grouped: web_transport_trait::Session<SendStream: GroupedSend> {
 		None
 	}
 
+	/// The receive windows now in force, or `None` when the backend cannot say; see
+	/// [`poll::Session::receive_window`](moq_net::transport::poll::Session::receive_window).
+	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
+		None
+	}
+
 	/// Open a send group at `priority`, or `None` when the backend has none.
 	fn send_group(&self, priority: i64) -> Option<<Self::SendStream as GroupedSend>::Group> {
 		let _ = priority;

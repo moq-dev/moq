@@ -4,7 +4,10 @@ use std::{
 	net::{IpAddr, Ipv4Addr},
 	os::windows::io::AsRawSocket,
 	ptr,
-	sync::atomic::{AtomicUsize, Ordering},
+	sync::{
+		Once,
+		atomic::{AtomicUsize, Ordering},
+	},
 };
 
 use libc::{c_int, c_uint};
@@ -13,7 +16,7 @@ use windows_sys::Win32::Networking::WinSock;
 use crate::udp::{
 	EcnCodepoint, RecvMeta, Transmit, UdpSockRef,
 	cmsg::{self, CMsgHdr},
-	log::debug,
+	log::{debug, warn},
 };
 
 /// QUIC-friendly UDP socket for Windows
@@ -181,16 +184,24 @@ impl UdpSocketState {
 		};
 
 		let mut len = 0;
-		unsafe {
-			let rc = (self.wsa_recvmsg)(
+		let rc = unsafe {
+			(self.wsa_recvmsg)(
 				socket.0.as_raw_socket() as usize,
 				&mut wsa_msg,
 				&mut len,
 				ptr::null_mut(),
 				None,
-			);
-			if rc == -1 {
-				return Err(io::Error::last_os_error());
+			)
+		};
+		if rc == -1 {
+			let err = io::Error::last_os_error();
+			// Winsock fails the call with `WSAEMSGSIZE` when either the payload or the control data
+			// was truncated, and sets `MSG_TRUNC` / `MSG_CTRUNC` to say which. Only truncated
+			// control data is recoverable: the whole datagram arrived, so keep it below.
+			// https://learn.microsoft.com/en-us/windows/win32/api/ws2def/ns-ws2def-wsamsg#remarks
+			let truncated = wsa_msg.dwFlags & (WinSock::MSG_TRUNC | WinSock::MSG_CTRUNC);
+			if err.raw_os_error() != Some(WinSock::WSAEMSGSIZE) || truncated != WinSock::MSG_CTRUNC {
+				return Err(err);
 			}
 		}
 
@@ -202,6 +213,15 @@ impl UdpSocketState {
 			})?;
 			addr.as_socket()
 		};
+
+		// `MSG_CTRUNC` keeps the datagram with the metadata that fit: losing metadata beats losing
+		// the packet. The iterator below stays within the `Control.len` Winsock returned.
+		if wsa_msg.dwFlags & WinSock::MSG_CTRUNC != 0 {
+			static CTRUNC: Once = Once::new();
+			CTRUNC.call_once(|| {
+				warn!("control messages truncated to {CMSG_LEN} bytes; some receive metadata is lost");
+			});
+		}
 
 		// Decode control messages (PKTINFO and ECN)
 		let mut ecn_bits = 0;
