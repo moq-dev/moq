@@ -119,6 +119,7 @@ export default defineConfig({
 						{ text: "moq-lite", link: "/concept/moq-lite" },
 						{ text: "Identity and recovery", link: "/concept/identity" },
 						{ text: "hang", link: "/concept/hang" },
+						{ text: "Archives", link: "/concept/archives" },
 						{ text: "Audio jitter", link: "/concept/audio-jitter" },
 						{ text: "Compressed tracks", link: "/concept/compression" },
 						{ text: "Stats", link: "/concept/stats" },
