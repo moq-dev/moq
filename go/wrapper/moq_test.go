@@ -1626,13 +1626,13 @@ func TestAnnouncedPatternCaptures(t *testing.T) {
 	if update.Prefix != "room/alice/chat" {
 		t.Fatalf("update = %+v, want room/alice/chat", update)
 	}
-	if update.Captures == nil || len(*update.Captures) != 1 || (*update.Captures)[0] != "alice" {
+	if len(update.Captures) != 1 || update.Captures[0] != "alice" {
 		t.Fatalf("captures = %v, want [alice]", update.Captures)
 	}
 }
 
 // An exact filter with no wildcards still reports a full match: captures is
-// empty but not nil.
+// empty.
 func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
@@ -1657,8 +1657,8 @@ func TestAnnouncedExactFilterCapturesEmpty(t *testing.T) {
 	if update.Prefix != "room/alice/chat" {
 		t.Fatalf("update = %+v, want room/alice/chat", update)
 	}
-	if update.Captures == nil || len(*update.Captures) != 0 {
-		t.Fatalf("captures = %#v, want a non-nil empty slice", update.Captures)
+	if len(update.Captures) != 0 {
+		t.Fatalf("captures = %#v, want an empty slice", update.Captures)
 	}
 }
 
