@@ -33,9 +33,14 @@ deduplicating and upgrading dependencies.
 
 What to check first:
 
-- Keep fat LTO under the measured shipping-profile comparison below. A
-  faster final link alone did not make the whole build cheaper. Revisit if
-  the dependency graph or shipping profile changes substantially.
+- Fat LTO is kept, but the shipping-profile comparison below no longer
+  favors it on build cost. From equally cold targets thin cut the whole
+  build's wall by 12.5% at about equal CPU, and the archive has shrunk since
+  m0, which was the maintainer's 2026-10-20 condition for revisiting. What
+  still holds fat is the runtime cost (m0 measured 1.6 to 2.1% more session
+  instructions; this run's runtime check is noise) and release builds staying
+  off the PR gate. Compare fat and thin only from fresh targets: a target
+  the default release build already filled times most fat units at 0 s.
 - Rerun the six-target IR inventory and the cold dev/release timings below.
   Attribute a large row to a current consumer before changing its types or
   splitting a crate. The off-cycle run rejected its reader-consolidation
@@ -172,22 +177,29 @@ candidates were stopped and are excluded from the results.
 Same unchanged source and the same 474 package/target/feature units, two
 jobs, `cargo build-ffi --release --timings`, then the same command with
 `CARGO_PROFILE_RELEASE_LTO=thin`. The alias enables OpenH264, as the shipped
-FFI does. Each profile builds into the private measurement target with mbx
-disabled. The set of timed units is identical, so the smaller final unit
-must be read alongside its dependencies, not as the build's total saving.
+FFI does. Each profile builds cold into its own fresh private target with mbx
+disabled, fat first (rerun 2026-11-02 at the same base). The set of timed
+units is identical.
 
 | Metric | Fat | Thin |
 | --- | ---: | ---: |
-| Whole command wall | 270.39 s | 321.67 s |
-| Whole command process-tree CPU | 390.19 s | 547.74 s |
-| Sum of unit durations | 402.46 s | 539.86 s |
-| Final moq-ffi unit | 135.70 s | 88.04 s |
-| `libmoq_ffi.a` | 65,447,812 bytes (62.4 MiB) | 74,914,524 bytes (71.4 MiB) |
+| Whole command wall | 465.48 s | 407.12 s |
+| Whole command process-tree CPU | 653.42 s | 664.28 s |
+| Sum of unit durations | 751.52 s | 676.49 s |
+| Final moq-ffi unit | 162.63 s | 114.87 s |
+| `libmoq_ffi.a` | 65,447,812 bytes (62.4 MiB) | 74,914,352 bytes (71.4 MiB) |
 
-Thin cuts the final unit's wall by 35.1%, but did not speed up the whole
-build in this run. Both archives fit the existing 100 MB per-file ceiling.
-These are single observations on a shared host, not a general CPU regression
-estimate or a cross-job cache measurement.
+Thin cuts the final unit's wall by 29.4% and the whole command's by 12.5%,
+at 1.7% more CPU, and grows the archive by 14.5%. Both archives fit the
+existing 100 MB per-file ceiling. These are single observations on a shared
+host, not a general CPU regression estimate or a cross-job cache
+measurement.
+
+A first comparison built fat into the target the default-feature release
+build had already filled: 300 of its 474 units were fresh and timed at 0 s,
+while thin's profile change rebuilt them (202.16 s), so its whole-command
+totals favored fat by comparing unequal work. The JSON keeps its summary
+under `superseded`.
 
 Runtime check: build the existing `moq-net` session bench once with each
 profile, then run fat/thin/thin/fat with `SESSION_CPU=1`, filtering
@@ -200,9 +212,10 @@ median max/min ratio is 1.020 and the largest is 1.966. Host variation is
 substantial, so this does not prove a 3.4% runtime regression. It establishes
 no runtime win that would justify reversing the retained fat-LTO choice.
 
-Decision made in this run: keep fat LTO, consistent with the maintainer's
-2026-10-20 choice. The archive is smaller now, but changing the profile still
-needs an overall build benefit worth its runtime and size tradeoffs. No
+Decision made in this run: keep fat LTO, the maintainer's 2026-10-20
+choice. Its archive condition is now met and thin is cheaper in wall time,
+but release builds are still off the PR gate, so the saving lands only on
+the release workflows, while any runtime cost lands on every user. No
 profile edit is retained. The old thin-LTO open item is measured here;
 the transport IR inventory and stale subtitle candidate are also resolved.
 `cargo-llvm-lines` is still not in the pinned shell.
