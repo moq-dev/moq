@@ -1,7 +1,7 @@
 //! Serve a front's logical track straight from its routes' copies.
 //!
 //! A front serves each track through one route at a time and switches when that route
-//! dies, withdraws, or is beaten by another with the same epoch. Routes with one epoch
+//! dies, withdraws, or is beaten by another with the same instance. Routes with one instance
 //! serve one broadcast, so every route's copy of a track holds the same groups and frames. A reader of the logical
 //! track therefore reads the serving route's copy directly, through its own
 //! [`Subscriber`]: nothing is copied, and with one route it is a passthrough.
@@ -552,10 +552,13 @@ impl Copy {
 		if let Sub::Pending(pending) = &self.sub {
 			let sub = ready!(pending.poll_ok(waiter))?;
 			// An anchor the wire kept may resolve below where the reader got to.
-			let sub = sub.with_range((
-				Bound::Included(self.start(groups.0)),
-				groups.1.map_or(Bound::Unbounded, Bound::Excluded),
-			));
+			// The routes judge where the reader ends, not each copy.
+			let sub = sub
+				.with_range((
+					Bound::Included(self.start(groups.0)),
+					groups.1.map_or(Bound::Unbounded, Bound::Excluded),
+				))
+				.parked();
 			self.sub = Sub::Ready(Box::new(sub));
 		}
 		let Sub::Ready(sub) = &mut self.sub else { unreachable!() };
@@ -1211,10 +1214,7 @@ impl Reader {
 					_ => None,
 				},
 				None => match &mut copy.sub {
-					Sub::Ready(sub) => match sub.poll_finished(&kio::Waiter::noop()) {
-						Poll::Ready(Ok(end)) => Some(end),
-						_ => None,
-					},
+					Sub::Ready(sub) => sub.declared_end(),
 					Sub::Pending(_) => copy.track.declared_end(),
 				},
 			};
@@ -1279,11 +1279,17 @@ impl Reader {
 		self.learn_end(None);
 		self.window();
 		self.out.retain(|(_, out)| out.strong_count() > 0);
+		// Only a replaced copy is judged against the edge, which costs the serving track's
+		// lock: a reader following one route never pays it.
+		let edge = match self.copies.iter().any(|copy| copy.replaced) {
+			true => self.copies.last().and_then(|copy| copy.track.latest_sequence()),
+			false => None,
+		};
 		let reader = Retain {
 			groups: self.groups,
 			window: &self.window,
 			groups_read: self.groups_read,
-			edge: self.copies.last().and_then(|copy| copy.track.latest_sequence()),
+			edge,
 			mirrored: &self.mirrored,
 			delivered,
 			out: &self.out,

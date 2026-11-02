@@ -204,3 +204,360 @@ async fn a_relay_fetches_without_subscribing_upstream() {
 	}
 	assert!(failures.is_empty(), "failed: {failures:?}");
 }
+
+/// Subscribe to group 1 alone: history below the Largest Object a publisher of
+/// [`publish_finished`] reports. Our moq-transport publishers answer only a one-group FETCH.
+async fn subscribe_history(track: &moq_net::track::Consumer) -> moq_net::track::Subscriber {
+	let subscription = moq_net::track::Subscription::default()
+		.with_order(moq_net::track::Order::Ascending)
+		.with_range(1..2);
+	kio::clock::timeout(TIMEOUT, track.subscribe(subscription))
+		.await
+		.expect("subscribe timed out")
+		.expect("subscribe")
+}
+
+/// The next group `sub` hands out, read whole.
+async fn next_frames(sub: &mut moq_net::track::Subscriber) -> Option<Vec<Vec<u8>>> {
+	let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
+		.await
+		.expect("recv timed out")
+		.expect("recv group")?;
+	let mut frames = Vec::new();
+	while let Some(frame) = kio::clock::timeout(TIMEOUT, group.read_frame())
+		.await
+		.expect("read timed out")
+		.expect("read frame")
+	{
+		frames.push(frame.payload.to_vec());
+	}
+	Some(frames)
+}
+
+async fn bounded_direct(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let (broadcast, subscribed) = publish_finished(&publisher);
+
+	let client = produce_origin(2);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(client.clone());
+	let pair = connect_mock(options).await;
+
+	let remote = resolve(&client).await;
+	let copy = remote.track("video").unwrap();
+	copy.info().await.expect("TRACK_STATUS resolves the track");
+	// A front's bounded read still parks past its end, as each copy's reader does, so this
+	// reads the group and stops there.
+	let mut sub = subscribe_history(&copy).await;
+	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{version}");
+	assert!(
+		!subscribed.load(Ordering::SeqCst),
+		"{version}: the bounded read subscribed"
+	);
+
+	drop((sub, copy, remote, pair, broadcast, client, publisher));
+}
+
+/// A copy the session holds no subscription for is unfed: a bounded read of the history
+/// below the publisher's Largest Object fetches its holes at once, never subscribing.
+#[kio::test]
+async fn a_bounded_read_of_history_fetches_without_subscribing() {
+	let mut failures = Vec::new();
+	for version in VERSIONS {
+		if kio::clock::sim::spawn(bounded_direct(version)).await.is_err() {
+			failures.push(*version);
+		}
+	}
+	assert!(failures.is_empty(), "failed: {failures:?}");
+}
+
+async fn bounded_relayed(version: &str) {
+	let version: Version = version.parse().unwrap();
+	let publisher = produce_origin(1);
+	let (broadcast, subscribed) = publish_finished(&publisher);
+
+	let relay = produce_origin(2);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(relay.clone());
+	let upstream = connect_mock(options).await;
+
+	let client = produce_origin(3);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(relay.consume());
+	options.client_subscribe = Some(client.clone());
+	let downstream = connect_mock(options).await;
+
+	// A fetch leaves the relay holding a copy no subscription feeds.
+	let remote = resolve(&client).await;
+	assert_eq!(fetch(&remote, 2).await.expect("fetch"), frames(2), "{version}");
+
+	let copy = remote.track("video").unwrap();
+	let mut sub = subscribe_history(&copy).await;
+	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{version}");
+	assert_eq!(next_frames(&mut sub).await, None, "{version}: the read ends");
+	assert!(
+		!subscribed.load(Ordering::SeqCst),
+		"{version}: the relay subscribed upstream"
+	);
+
+	drop((
+		sub, copy, remote, downstream, upstream, broadcast, client, relay, publisher,
+	));
+}
+
+/// A relay serves a bounded subscription to its fetch-only copy from the fills it asks
+/// upstream, never subscribing upstream.
+#[kio::test]
+async fn a_relay_serves_a_bounded_read_of_history_without_subscribing_upstream() {
+	let mut failures = Vec::new();
+	for version in VERSIONS {
+		if kio::clock::sim::spawn(bounded_relayed(version)).await.is_err() {
+			failures.push(*version);
+		}
+	}
+	assert!(failures.is_empty(), "failed: {failures:?}");
+}
+
+/// Write group `sequence` of [`frames`] to a live track.
+fn write_group(track: &moq_net::track::Producer, sequence: u64) {
+	let mut group = track.create_group(moq_net::group::Info { sequence }).unwrap();
+	for frame in frames(sequence) {
+		group.write_frame(Timestamp::ZERO, frame).unwrap();
+	}
+	group.finish().unwrap();
+}
+
+/// Publish a live track of groups `0..groups`, which the publisher keeps writing.
+fn publish_live(
+	origin: &moq_net::origin::Producer,
+	groups: u64,
+) -> (moq_net::origin::Publication, moq_net::track::Producer) {
+	let broadcast = origin.create_broadcast("bcast").unwrap();
+	let track = broadcast.create_track("video", timed()).unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	for sequence in 0..groups {
+		write_group(&track, sequence);
+	}
+	(broadcast, track)
+}
+
+/// A relay of a live track holding a copy a fetch left unfed, and a fresh session to it.
+struct FetchedCopy {
+	/// The publisher's track, which has since moved past the edge the fetch learned.
+	track: moq_net::track::Producer,
+	/// The track through the fresh session, which knows no edge, so its reads SUBSCRIBE.
+	fresh: moq_net::track::Consumer,
+	/// The broadcast through the session that fetched, another reader of the relay's copy.
+	fetched: moq_net::broadcast::Consumer,
+	_held: Vec<Box<dyn std::any::Any>>,
+}
+
+/// The relay speaks `upstream_version` to the publisher and `version` downstream.
+async fn fetched_copy(upstream_version: Version, version: Version) -> FetchedCopy {
+	let publisher = produce_origin(1);
+	let (broadcast, track) = publish_live(&publisher, 3);
+
+	let relay = produce_origin(2);
+	let mut options = MockConnectOptions::new(upstream_version);
+	options.server_publish = Some(publisher.consume());
+	options.client_subscribe = Some(relay.clone());
+	let upstream = connect_mock(options).await;
+
+	// The fetch learns Largest Object (2, 1) from TRACK_STATUS, and subscribes nowhere.
+	let fetcher = produce_origin(3);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(relay.consume());
+	options.client_subscribe = Some(fetcher.clone());
+	let fetching = connect_mock(options).await;
+	let fetched = resolve(&fetcher).await;
+	assert_eq!(fetch(&fetched, 2).await.expect("fetch"), frames(2), "{version}");
+	assert!(track.subscription().is_none(), "{version}: the fetch subscribed");
+
+	// The edge moves on, so an answer from the earlier report would be stale.
+	write_group(&track, 3);
+
+	let client = produce_origin(3);
+	let mut options = MockConnectOptions::new(version);
+	options.server_publish = Some(relay.consume());
+	options.client_subscribe = Some(client.clone());
+	let downstream = connect_mock(options).await;
+	let fresh = resolve(&client).await.track("video").unwrap();
+
+	FetchedCopy {
+		track,
+		fresh,
+		fetched,
+		_held: vec![
+			Box::new(downstream),
+			Box::new(client),
+			Box::new(fetching),
+			Box::new(fetcher),
+			Box::new(upstream),
+			Box::new(relay),
+			Box::new(broadcast),
+			Box::new(publisher),
+		],
+	}
+}
+
+async fn history_through_fetched_copy(upstream: Version, version: Version) {
+	let copy = fetched_copy(upstream, version).await;
+	// A front's bounded read parks past its end, so this reads the group and stops there.
+	let mut sub = subscribe_history(&copy.fresh).await;
+	assert!(
+		copy.track.subscription().is_some(),
+		"{upstream} to {version}: answered without subscribing upstream"
+	);
+	assert_eq!(next_frames(&mut sub).await, Some(frames(1)), "{upstream} to {version}");
+	// The copy still serves its other reader.
+	assert_eq!(
+		fetch(&copy.fetched, 0).await.expect("fetch after the SUBSCRIBE"),
+		frames(0),
+		"{upstream} to {version}"
+	);
+}
+
+/// A history SUBSCRIBE reaching a relay's copy kept after a fetch is answered from the
+/// upstream's SUBSCRIBE_OK, never the edge the fetch learned, and reads its history. A
+/// draft-18 upstream has no bounded join, so the relay joins it live and serves the history
+/// from fills, keeping the copy for its other readers.
+#[kio::test]
+async fn a_relay_answers_a_history_subscribe_on_a_fetched_copy() {
+	for (upstream, version) in [
+		("moq-transport-22", "moq-transport-22"),
+		("moq-transport-18", "moq-transport-22"),
+		("moq-transport-18", "moq-transport-18"),
+	] {
+		let (upstream, version): (Version, Version) = (upstream.parse().unwrap(), version.parse().unwrap());
+		kio::clock::timeout(TIMEOUT, history_through_fetched_copy(upstream, version))
+			.await
+			.unwrap_or_else(|_| panic!("{upstream} to {version}: timed out"));
+	}
+}
+
+async fn live_through_fetched_copy(version: Version) {
+	let copy = fetched_copy(version, version).await;
+	let mut sub = kio::clock::timeout(TIMEOUT, copy.fresh.subscribe(None))
+		.await
+		.expect("subscribe timed out")
+		.expect("subscribe");
+	// The live join starts at the upstream's current group, not the one the fetch reported.
+	assert_eq!(next_frames(&mut sub).await, Some(frames(3)), "{version}");
+	write_group(&copy.track, 4);
+	assert_eq!(next_frames(&mut sub).await, Some(frames(4)), "{version}");
+}
+
+/// A live SUBSCRIBE reaching a relay's copy kept after a fetch joins at the upstream's
+/// current edge.
+#[kio::test]
+async fn a_relay_answers_a_live_subscribe_on_a_fetched_copy() {
+	for version in VERSIONS {
+		let version: Version = version.parse().unwrap();
+		kio::clock::timeout(TIMEOUT, live_through_fetched_copy(version))
+			.await
+			.unwrap_or_else(|_| panic!("{version}: timed out"));
+	}
+}
+
+/// A copy kept after a fetch resumes a bounded subscription that ends at or below the
+/// upstream's new Largest Object, and reads it, though no group past its end arrives.
+/// Draft 22 only: a draft-18 join is live, so these groups come from one fill of the run,
+/// and our publisher answers only a one-group FETCH.
+#[kio::test]
+async fn a_resumed_bounded_subscription_reads_below_the_answered_edge() {
+	kio::clock::timeout(TIMEOUT, async {
+		let version: Version = "moq-transport-22".parse().unwrap();
+		let publisher = produce_origin(1);
+		let (broadcast, track) = publish_live(&publisher, 2);
+
+		let client = produce_origin(2);
+		let mut options = MockConnectOptions::new(version);
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(client.clone());
+		let pair = connect_mock(options).await;
+
+		// The fetch learns Largest Object (1, 1), and leaves the copy unfed.
+		let remote = resolve(&client).await;
+		assert_eq!(fetch(&remote, 0).await.expect("fetch"), frames(0));
+		for sequence in 2..4 {
+			write_group(&track, sequence);
+		}
+
+		// Past the reported edge, so it subscribes; the answer names group 3, which the
+		// bounded feed never delivers.
+		let copy = remote.track("video").unwrap();
+		let subscription = moq_net::track::Subscription::default()
+			.with_order(moq_net::track::Order::Ascending)
+			.with_max_delay(None)
+			.with_range(1..3);
+		let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
+			.await
+			.expect("subscribe timed out")
+			.expect("subscribe");
+		// Read in arrival order, whichever group lands first.
+		let mut read = vec![next_frames(&mut sub).await, next_frames(&mut sub).await];
+		read.sort();
+		assert_eq!(read, [Some(frames(1)), Some(frames(2))]);
+		assert!(track.subscription().is_some(), "the read never subscribed");
+
+		drop((sub, copy, remote, pair, track, broadcast, client, publisher));
+	})
+	.await
+	.expect("timed out");
+}
+
+/// A copy that went idle holding a group resumes a bounded subscription of that group after
+/// the upstream moved on, and still reads it: the feed starts where it asked, not at the
+/// answer's Largest, so the cached group stays below no floor. Draft 22 only: a draft-18
+/// join is live, so it starts at the answer's Largest whatever it asked.
+#[kio::test]
+async fn a_resumed_bounded_subscription_keeps_its_cached_start() {
+	kio::clock::timeout(TIMEOUT, async {
+		let version: Version = "moq-transport-22".parse().unwrap();
+		let publisher = produce_origin(1);
+		let (broadcast, track) = publish_live(&publisher, 1);
+
+		let client = produce_origin(2);
+		let mut options = MockConnectOptions::new(version);
+		options.server_publish = Some(publisher.consume());
+		options.client_subscribe = Some(client.clone());
+		let pair = connect_mock(options).await;
+
+		// A live read caches group 0, then leaves, so the copy goes idle holding it.
+		let remote = resolve(&client).await;
+		let copy = remote.track("video").unwrap();
+		let mut live = kio::clock::timeout(TIMEOUT, copy.subscribe(None))
+			.await
+			.expect("subscribe timed out")
+			.expect("subscribe");
+		assert_eq!(next_frames(&mut live).await, Some(frames(0)));
+		drop(live);
+		let mut watch = track.clone();
+		while watch.subscription().is_some() {
+			kio::clock::timeout(TIMEOUT, watch.subscription_changed())
+				.await
+				.expect("unsubscribe timed out")
+				.unwrap();
+		}
+		for sequence in 1..4 {
+			write_group(&track, sequence);
+		}
+
+		// Past the edge the live read learned, so it subscribes; the answer names group 3.
+		let subscription = moq_net::track::Subscription::default()
+			.with_max_delay(None)
+			.with_range(0..1);
+		let mut sub = kio::clock::timeout(TIMEOUT, copy.subscribe(subscription))
+			.await
+			.expect("subscribe timed out")
+			.expect("subscribe");
+		assert_eq!(next_frames(&mut sub).await, Some(frames(0)));
+
+		drop((sub, copy, remote, pair, track, broadcast, client, publisher));
+	})
+	.await
+	.expect("timed out");
+}
