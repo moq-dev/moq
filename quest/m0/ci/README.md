@@ -3,7 +3,7 @@
 ## Goal
 
 Pull requests are validated locally with `just ci` and get their cloud verdict
-from the [batched gate](/quest/m0/ci/land.md) without waiting behind the
+from the [merge queue](/quest/m0/ci/land.md) without waiting behind the
 hosted runner limits, and every job spends its minutes on the work its diff
 selected rather than on setup, cold caches, or repeated builds. Concurrent local agents share
 expensive-command capacity, and retained tests earn their cost through useful
@@ -152,20 +152,15 @@ The historical samples locate candidates; they are not controlled benchmarks.
 ## Required
 
 - [Read-only pull-request CI](/quest/m0/ci/read-only-secrets.md) - write secrets and publisher identities reach only protected branches and tags, never a pushed branch
-- [Check on ready PRs](/quest/m0/ci/pr-check.md) - Check runs again on non-draft main PRs as a signal for `/quest-merge` and the land fixer, never as a gate
 - [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - one PR at a time on the self-hosted runner; the host's Codex fixer fixes and re-enqueues every dropped PR
 - [A cache error is a miss](/quest/m0/ci/nix-cache-5xx.md) - a transient `nix.moq.dev` 5xx no longer fails `just ci`
-- [Every io_uring test in the io-uring group](/quest/m0/ci/io-uring-test-group.md) - the parallel tests of one `just ci` stop exhausting the shared `RLIMIT_MEMLOCK`, and a too-low limit fails clearly
 - [Cheap checks skip the queue](/quest/m0/ci/gate-quick.md) - condition: quest ships `quest gate --quick`; then cheap modules wait at most a minute
 - [Gate each diff in under five minutes](/quest/m0/ci/five-minutes.md) - `just check` and `just test` each finish within a worker's 5-minute prompt cache, admission wait included
 - [Measure the parallel frontend](/quest/m0/ci/nightly-levers.md) - a pinned nightly's parallel frontend, adopted only if the numbers beat its risks; Cranelift is ruled out
 - [Verify the R2 Rust cache](/quest/m0/ci/mbx-r2-verify.md) - confirm the hosted Nightly jobs reuse the previous Nightly, then measure restore time and expiry
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm releases use `nix.moq.dev`, check its bucket sizes, and retire Cachix
-- [Unify dependency features](/quest/m0/ci/hakari.md) - a cargo-hakari workspace-hack so every job compiles each dependency alike and mbx hits across jobs
-- [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the slowest 1% of tests take under half their 289 CPU-seconds, with coverage kept
+- [Unify dependency features](/quest/m0/ci/hakari.md) - align the FFI builds' features and record the hosted platform jobs' hits once the workspace-hack lands
 - [Release credentials off main](/quest/m0/ci/publish-release-only.md) - `publish` admits only `release` and release tags once its `workflow_run` publishers run on their tag
 - [The queue host keeps the queue's disk](/quest/m0/ci/queue-host-disk.md) - agent sessions can't starve the queue runner of disk, and a crashed runner restarts
-- [The next test-CPU cuts](/quest/m0/ci/test-cost-followups.md) - the slow-test leftovers from #6987, cut at their source
 - [Biome checks every file it can parse](/quest/m0/ci/biome-whole-repo.md) - Biome runs over the whole repository and main is clean under it
 - [dispatch.sh's tests pass without KVM](/quest/m0/ci/dispatch-test-kvm.md) - `sh/dispatch-query.test.py` fakes the KVM probe instead of failing 20 tests on hosts without `/dev/kvm`
-- [mbx launches Cargo with any argument length](/quest/m0/ci/mbx-arg-max.md) - no "Argument list too long" in `sh/rs/select.test.py`'s recipe test
