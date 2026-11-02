@@ -4032,7 +4032,7 @@ mod tests {
 		let (_, mut records) = test.publish("video0");
 		let _media = test.media("video0", 4);
 		records.push(&gop(0)).unwrap();
-		tokio::time::sleep(Duration::from_millis(100)).await;
+		kio::clock::sleep(Duration::from_millis(100)).await;
 		resize(&mut test, 1280);
 		assert!(test.rendition("video0").snapshot().segments.is_empty());
 		records.push(&gop(1)).unwrap();
@@ -4051,7 +4051,7 @@ mod tests {
 		test.listed("video0", 0).await;
 		for width in 1..=8 {
 			resize(&mut test, width);
-			tokio::time::sleep(Duration::from_millis(10)).await;
+			kio::clock::sleep(Duration::from_millis(10)).await;
 		}
 		assert_eq!(numbers(&test.rendition("video0").snapshot()), [0]);
 		assert!(test.renditions.targets() <= 3, "{} targets", test.renditions.targets());
