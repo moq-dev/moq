@@ -17,11 +17,16 @@ on:
     types: [opened, synchronize, reopened, edited]
   merge_group:
     types: [checks_requested]
-  # Reports the skipped context on a branch's head without a pull_request
-  # event. A PR whose test merge commit predates this workflow gets no
-  # pull_request run from it (GitHub runs PR workflows from that commit), so
-  # `gh workflow run queue.yml --ref <branch>` gives it the context.
+  # Reports the skipped context on a PR's head without a pull_request event.
+  # A PR whose test merge commit predates this workflow gets no pull_request
+  # run from it (GitHub runs PR workflows from that commit, and a dispatch reads
+  # the workflow from the ref it runs on), so
+  # `gh workflow run queue.yml -f sha=<head>` on main reports it there.
   workflow_dispatch:
+    inputs:
+      sha:
+        description: The PR head commit to report the skipped Queue context on.
+        required: true
 
 permissions:
   contents: read
@@ -74,3 +79,23 @@ jobs:
           path: target/cargo-timings/cargo-timing-*.html
           if-no-files-found: ignore
           retention-days: 14
+
+  # The merge queue still builds every group with the job above; this only
+  # satisfies the PR-side requirement, as a pull_request run's skipped job does.
+  report:
+    name: Report Queue
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      checks: write
+    steps:
+      - name: Report the skipped Queue context
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be a full commit SHA" >&2; exit 1; }
+          gh api "repos/$REPO/check-runs" -f name=Queue -f head_sha="$SHA" -f status=completed -f conclusion=skipped \
+            -f 'output[title]=Queue' -f 'output[summary]=Skipped on the pull request; the merge queue builds the group.' --silent
