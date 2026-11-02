@@ -3,6 +3,8 @@ import { yieldNow } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
 import { Signal } from "@moq/signals";
 import type { Broadcast } from "../broadcast";
+import { supportCacheKey } from "../support-probe";
+import { decoderConfigKey } from "./config";
 import { Source } from "./source";
 
 function config(codec: string, fields: Record<string, unknown> = {}): Catalog.AudioConfig {
@@ -306,6 +308,40 @@ test("serves unchanged configs from the cache when the catalog changes", async (
 		await settled(source);
 		expect(probed).toEqual(["opus", "mp4a.40.2"]);
 		expect(Object.keys(source.out.available.peek())).toEqual(["mic", "backup"]);
+	} finally {
+		source.close();
+	}
+});
+
+test("mute and unmute reuse the decoder support verdict and publish the new metadata", async () => {
+	const initial = config("opus");
+	const state = broadcast({ mic: initial });
+	let probes = 0;
+	const supported = Object.assign(
+		async () => {
+			probes++;
+			return true;
+		},
+		{ [supportCacheKey]: decoderConfigKey },
+	);
+	const source = new Source({ broadcast: state.broadcast, supported });
+	try {
+		await settled(source);
+		for (const enabled of [false, true, false, true]) {
+			state.catalog.set({
+				audio: { renditions: { mic: config("opus", { enabled, jitter: 20, bitrate: 96_000 }) } },
+			});
+			await settled(source);
+			expect(source.out.available.peek().mic.enabled).toBe(enabled);
+			expect(source.out.track.peek()).toBe("mic");
+			expect(source.out.config.peek()?.enabled).toBe(enabled);
+			expect(probes).toBe(1);
+		}
+
+		// A field the decoder depends on still invalidates the verdict.
+		state.catalog.set({ audio: { renditions: { mic: config("opus", { sampleRate: 44100 }) } } });
+		await settled(source);
+		expect(probes).toBe(2);
 	} finally {
 		source.close();
 	}
