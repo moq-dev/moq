@@ -302,8 +302,8 @@ impl Consumer {
 }
 
 impl Reader {
-	/// Subscribe with `delay`'s max, starting `lookback` groups before the live
-	/// edge when the caller asked for [`Start::Latest`].
+	/// Subscribe with `delay`, starting `lookback` groups before the live edge
+	/// when the caller asked for [`Start::Latest`].
 	async fn open(
 		broadcast: &moq_net::broadcast::Consumer,
 		catalog: &VideoConfig,
@@ -319,7 +319,9 @@ impl Reader {
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.video)
-					.with_delay(moq_net::track::Delay::default().with_max(delay.max)),
+					// The whole delay from the first request, as the container keeps it, so the
+					// publisher never sees a stated zero min before the container's update.
+					.with_delay(delay),
 			)
 			.await?;
 		// A decoder often opens on a track that is already cached: a replacement
@@ -1400,6 +1402,39 @@ mod tests {
 		assert_eq!(shown, [0, 1, 2, 3, 4, 5]);
 		assert!(consumer.next_frame().await.unwrap().is_none());
 		assert!(consumer.lanes.iter().all(|slot| matches!(slot, Slot::Closed)));
+	}
+
+	/// The first request already states the min delay: a latest start waits for the live edge
+	/// with its subscription open, before the container could update it.
+	#[tokio::test]
+	async fn the_first_subscription_states_the_min_delay() {
+		let (broadcast, mut track) = live_track();
+		let delay = Delay {
+			min: Some(std::time::Duration::from_millis(300)),
+			max: Some(std::time::Duration::from_millis(500)),
+		};
+		let consume = broadcast.consume();
+		let catalog = warmup_catalog(None);
+		let mut open = Box::pin(Consumer::new(
+			&consume,
+			&catalog,
+			"video",
+			Options {
+				decoder: Config {
+					kind: Kind::Named(probe::IMMEDIATE_NAME.into()),
+					..Config::new()
+				},
+				start: Start::Latest,
+				delay,
+			},
+		));
+		// The open waits for the live edge with its subscription open, so the first aggregate
+		// the publisher sees is the request itself.
+		let first = tokio::select! {
+			opened = &mut open => panic!("the open finished with no live edge (ok: {})", opened.is_ok()),
+			first = track.subscription_changed() => first.unwrap(),
+		};
+		assert_eq!(first.map(|sub| sub.delay), Some(delay));
 	}
 
 	/// A rendition without `warmup` opens one subscription and one decoder.

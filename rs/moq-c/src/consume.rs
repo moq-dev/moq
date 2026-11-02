@@ -526,7 +526,9 @@ impl Consume {
 							.subscribe(
 								moq_net::track::Subscription::default()
 									.with_priority(C::PRIORITY)
-									.with_delay(moq_net::track::Delay::default().with_max(delay.max)),
+									// The whole delay, as the container keeps it, so the first request
+									// already states the min.
+									.with_delay(delay),
 							)
 							.await?;
 						let track = moq_mux::container::Consumer::new(track, container).with_delay(delay);

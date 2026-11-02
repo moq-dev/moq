@@ -193,16 +193,14 @@ impl Consumer {
 		let name = name.into();
 		let warmup = catalog.warmup.unwrap_or_default();
 		let track = broadcast.track(hang::catalog::Reference::track(catalog, &name))?;
-		// The whole budget from the start: the transport enforces it too, so a narrower one
-		// while joining would drop the groups queued behind a reader slow to take its first.
+		// The whole delay from the start, as the container keeps it: the transport enforces the
+		// max too, so a narrower one while joining would drop the groups queued behind a reader
+		// slow to take its first, and the publisher should never see a stated zero min first.
 		let mut subscriber = track
 			.subscribe(
 				moq_net::track::Subscription::default()
 					.with_priority(hang::catalog::PRIORITY.audio)
-					.with_delay(
-						moq_net::track::Delay::default()
-							.with_max(options.delay.max.map(|max| max.saturating_add(warmup))),
-					),
+					.with_delay(options.delay.with_max(options.delay.max.map(|max| max.saturating_add(warmup)))),
 			)
 			.await?;
 		// Latest skips cached history; a warmup is primed by trimming the newest group's
@@ -732,6 +730,41 @@ mod tests {
 	use super::*;
 	use crate::encode::{Config as EncodeConfig, Encoder, Input, Options as EncodeOptions, Producer};
 	use crate::{Format, Layout};
+
+	/// The first request already states the min delay, and the max plus the warmup: a latest
+	/// start waits for the live edge with its subscription open, before the container could
+	/// update it.
+	#[tokio::test]
+	async fn the_first_subscription_states_the_min_delay() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let mut track = broadcast
+			.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
+			.unwrap();
+		let mut catalog = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Pcm, 48_000, 1);
+		catalog.warmup = Some(Duration::from_millis(100));
+		let delay = moq_net::track::Delay {
+			min: Some(Duration::from_millis(300)),
+			max: Some(Duration::from_millis(500)),
+		};
+		let consume = broadcast.consume();
+		let mut open = Box::pin(Consumer::new(
+			&consume,
+			&catalog,
+			"audio",
+			Options {
+				start: Start::Latest,
+				delay,
+				..Default::default()
+			},
+		));
+		// The open waits for the live edge with its subscription open, so the first aggregate
+		// the publisher sees is the request itself.
+		let first = tokio::select! {
+			opened = &mut open => panic!("the open finished with no live edge (ok: {})", opened.is_ok()),
+			first = track.subscription_changed() => first.unwrap(),
+		};
+		assert_eq!(first.map(|sub| sub.delay), Some(delay.with_max(Duration::from_millis(600))));
+	}
 
 	#[tokio::test(start_paused = true)]
 	async fn conversion_waits_for_decoded_samples() {
