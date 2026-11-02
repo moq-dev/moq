@@ -7382,8 +7382,7 @@ impl Cursor {
 			}
 			if self.lacks_head(&consumer) {
 				self.advance_arrival(consumer.sequence, taken);
-				self.ask_head(consumer.sequence);
-				self.poll_heads(waiter);
+				self.ask_head(consumer.sequence, waiter);
 				continue;
 			}
 			return Poll::Ready(Ok(Some(Peeked {
@@ -7418,8 +7417,9 @@ impl Cursor {
 		self.filter.window.end().is_some() && group.first_frame() > 0
 	}
 
-	/// Ask a fill for the head of `sequence`, as a fetch from frame 0 would.
-	fn ask_head(&mut self, sequence: u64) {
+	/// Ask a fill for the head of `sequence`, as a fetch from frame 0 would, taking in an
+	/// answer already at hand.
+	fn ask_head(&mut self, sequence: u64, waiter: &kio::Waiter) {
 		let asking = self.subscription.read().clone();
 		let request = FetchOptions {
 			options: group::Fetch {
@@ -7429,14 +7429,27 @@ impl Cursor {
 			},
 			end: None,
 		};
-		let fetching = Fetching::cached_or_queued(self.state.clone(), sequence, request, stats::Scope::default());
-		self.heads.get_or_insert_default().fetching.insert(sequence, fetching);
+		let mut fetching = Fetching::cached_or_queued(self.state.clone(), sequence, request, stats::Scope::default());
+		let heads = self.heads.get_or_insert_default();
+		match kio::Task::poll(&mut fetching, waiter) {
+			Poll::Pending => {
+				heads.fetching.insert(sequence, fetching);
+			}
+			Poll::Ready(Ok(group)) => {
+				heads.filled.insert(sequence, group);
+			}
+			Poll::Ready(Err(_)) => self.give_up_heads(std::iter::once(sequence..sequence.saturating_add(1))),
+		}
 	}
 
-	/// Take in the heads answered, parking `waiter` on those still out. A head no fill can
-	/// serve gives its group up, as a refused miss is.
+	/// Take in the heads answered, parking `waiter` on those still out, once per read. A
+	/// head the reader's bounds no longer admit is let go: a widening offers its group again.
 	fn poll_heads(&mut self, waiter: &kio::Waiter) {
-		let Some(heads) = &mut self.heads else { return };
+		let Some(mut heads) = self.heads.take() else { return };
+		let floor = self.floor();
+		let admitted = |sequence: &u64| *sequence >= floor && self.admits(*sequence);
+		heads.fetching.retain(|sequence, _| admitted(sequence));
+		heads.filled.retain(|sequence, _| admitted(sequence));
 		let mut given_up = Vec::new();
 		heads
 			.fetching
@@ -7451,7 +7464,14 @@ impl Cursor {
 					false
 				}
 			});
-		if given_up.is_empty() {
+		self.heads = Some(heads);
+		self.give_up_heads(given_up);
+	}
+
+	/// Give up the groups whose head no fill can serve, as a refused miss is.
+	fn give_up_heads(&mut self, given_up: impl IntoIterator<Item = ops::Range<u64>>) {
+		let mut given_up = given_up.into_iter().peekable();
+		if given_up.peek().is_none() {
 			return;
 		}
 		let misses = self.misses.get_or_insert_with(Box::default);
@@ -7553,6 +7573,7 @@ impl Cursor {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<Option<Peeked>>> {
 		let end = self.end_sequence;
+		self.poll_heads(waiter);
 		// Where the gap below the candidate starts: groups stepped over as stale are cached.
 		let mut from = floor;
 		let group = loop {
@@ -7629,9 +7650,8 @@ impl Cursor {
 						.as_ref()
 						.is_none_or(|misses| misses.gone(sequence).is_none())
 					{
-						self.ask_head(sequence);
+						self.ask_head(sequence, waiter);
 					}
-					self.poll_heads(waiter);
 					match self.heads.as_ref().and_then(|heads| heads.filled.get(&sequence)) {
 						Some(head) => head.clone(),
 						// Given up: past it, as past any group no fill can serve.
@@ -17323,6 +17343,35 @@ mod test {
 		let (frames, ended) = reading.await.unwrap();
 		assert_eq!(frames, [&b"snapshot"[..], b"delta"]);
 		assert!(ended, "the read ends with its range");
+	}
+
+	/// A head answered after the reader's ranges moved off its group is not handed out.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_head_answered_outside_the_ranges_is_not_handed_out() {
+		let producer = track_producer("test", Info::default());
+		let dynamic = producer.requests();
+
+		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+		live.start_at(1).unwrap();
+		live.write_frame(None, bytes::Bytes::from_static(b"delta")).unwrap();
+		live.finish().unwrap();
+		framed(&producer, 1, 1).finish().unwrap();
+
+		let mut sub = producer.subscribe(replay().with_range(0..2));
+		let group = sub.recv_group().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(group.sequence, 1);
+		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+		assert_eq!(request.sequence(), 0);
+
+		sub.update(replay().with_range(1..2)).unwrap();
+		let mut head = request.accept(Info::default()).unwrap();
+		head.write_frame(None, bytes::Bytes::from_static(b"snapshot")).unwrap();
+		head.finish().unwrap();
+		assert!(
+			matches!(sub.recv_group().now_or_never(), Some(Ok(None))),
+			"the narrowed read ends without group 0"
+		);
 	}
 
 	/// An ordered bounded read whose head no fill serves gives that group up and reads on,
