@@ -2063,6 +2063,34 @@ test("withRange with an excluded end of 0 is the empty range and does not ride a
 	expect((await empty.recvGroup())?.sequence).toBe(2);
 });
 
+// Completion depends on unread groups inside the range, even when the cache holds more.
+for (const ordered of [false, true]) {
+	for (const end of [0, 3, 4]) {
+		test(`a clean close finishes a capped ${ordered ? "ordered" : "arrival"} reader at ${end}`, () => {
+			const producer = new TrackProducer("test");
+			const subscriber = producer.subscribe({ maxDelay: null }).withRange({ end: { excluded: end } });
+			if (ordered) subscriber.ordered();
+			const read = () => (ordered ? hooks.tryNextGroup(subscriber) : hooks.tryRecvGroup(subscriber, false));
+			for (const sequence of [0, 2, 4]) producer.createGroup(sequence).finish();
+			producer.finish();
+			producer.close();
+
+			for (const sequence of [0, 2].filter((sequence) => sequence < end)) {
+				expect(read()).toMatchObject({ kind: "group", group: { sequence } });
+			}
+			expect(read()).toEqual({ kind: "done" });
+
+			// Ending a read preserves the cache for a later widened range.
+			subscriber.withRange({});
+			for (const sequence of [0, 2, 4].filter((sequence) => sequence >= end)) {
+				expect(read()).toMatchObject({ kind: "group", group: { sequence } });
+			}
+			expect(read()).toEqual({ kind: "done" });
+			subscriber.close();
+		});
+	}
+}
+
 test("withRange caps the live edge used by the latency budget", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
 	const track = producer.subscribe();
@@ -2078,7 +2106,7 @@ test("withRange caps the live edge used by the latency budget", async () => {
 });
 
 // The frame helpers ride the group cursor, so its bounds apply to them too: a group
-// above the cap parks (surviving a clean close) until the cap admits it.
+// above the cap stays cached across a clean close until the cap admits it.
 test("withRange caps frame-level reads like the group cursor", async () => {
 	const producer = new TrackProducer("test").accept({ timescale: Timescale.MILLI, maxAge: Milli(5000) });
 	const track = producer.subscribe({ maxDelay: Milli(5000) }).ordered();
@@ -2091,14 +2119,10 @@ test("withRange caps frame-level reads like the group cursor", async () => {
 
 	expect((await track.readFrame())?.group).toBe(0);
 
-	// Group 1 parks above the cap; a clean close must not resolve it as finished.
-	const parked = track.readFrame();
-	const timeout = sleep(Nano.fromMilli(Milli(10))).then(() => "pending" as const);
-	expect(await Promise.race([parked, timeout])).toBe("pending");
-
-	// Raising the cap releases the parked group, frames intact.
+	// The current range is finished; widening it still offers the cached frames.
+	expect(await track.readFrame()).toBeUndefined();
 	track.withRange({ end: { excluded: 2 } });
-	expect((await parked)?.group).toBe(1);
+	expect((await track.readFrame())?.group).toBe(1);
 	expect(await track.readFrame()).toBeUndefined();
 });
 
@@ -2140,8 +2164,7 @@ test("recvGroup serves a late arrival after a newer group", async () => {
 	expect(await track.recvGroup()).toBeUndefined();
 });
 
-// recvGroup honors the withRange cap by parking, like nextGroup: beyond-cap groups are
-// held, not dropped, and a raised cap re-offers them, even after a clean close.
+// Both cursors retain beyond-cap groups for widening, even after a clean close.
 test("withRange parks recvGroup beyond the cap and a raised cap re-offers", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ maxDelay: Milli(5000) });
@@ -2155,15 +2178,13 @@ test("withRange parks recvGroup beyond the cap and a raised cap re-offers", asyn
 	const pending = track.recvGroup();
 	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
 
-	// A clean close keeps the parked group claimable: the cap may still rise.
+	// A clean close ends the pending read without discarding the cached group.
 	producer.finish();
 	producer.close();
-	expect(await Promise.race([pending, sleep(Nano.fromMilli(Milli(10))).then(() => "parked" as const)])).toBe(
-		"parked",
-	);
+	expect(await pending).toBeUndefined();
 
 	track.withRange({});
-	expect((await pending)?.sequence).toBe(2);
+	expect((await track.recvGroup())?.sequence).toBe(2);
 	expect(await track.recvGroup()).toBeUndefined();
 });
 
@@ -2236,23 +2257,25 @@ test("createGroup rejects a duplicate live sequence", async () => {
 	expect(await got?.readString()).toBe("retry");
 });
 
-// A group parked at the cap outlives a clean producer close on purpose, so the
-// subscriber leaving is what must release it: close() drops the parked group and
-// settles the pending read instead of leaving it hanging forever.
-test("closing the subscriber releases a recvGroup parked after a clean close", async () => {
+// A beyond-cap group outlives a clean close for a later widening, so the subscriber
+// leaving is what releases it: widening after close() finds nothing.
+test("closing the subscriber releases a group retained across a clean close", async () => {
 	const producer = new TrackProducer("test");
-	const track = producer.subscribe();
+	const track = producer.subscribe({ maxDelay: Milli(5000) });
 
 	track.withRange({ end: { excluded: 1 } });
-	producer.createGroup(1);
+	producer.createGroup(1).finish();
 
 	const pending = track.recvGroup();
 	expect(await Promise.race([pending, Promise.resolve("pending")])).toBe("pending");
 
 	producer.finish();
 	producer.close();
-	track.close();
 	expect(await pending).toBeUndefined();
+
+	track.close();
+	track.withRange({});
+	expect(await track.recvGroup()).toBeUndefined();
 });
 
 // Same, but with the producer still live: the first close() must also clear the
@@ -2334,9 +2357,7 @@ test("nextGroup returns undefined when track closes", async () => {
 	expect(await track.nextGroup()).toBeUndefined();
 });
 
-// Close doesn't erase buffered frames: a group parked above the cap stays readable, so
-// nextGroup must keep waiting for a cap raise rather than fake an end-of-track and lose
-// the data (mirrors the Rust subscriber). Only a drained closed track reports finished.
+// A clean close ends a pending ordered read without erasing beyond-cap frames.
 test("a closed track still delivers a group parked above the cap once the cap is raised", async () => {
 	const producer = new TrackProducer("test");
 	const track = producer.subscribe({ maxDelay: Milli(5000) }).ordered();
@@ -2351,16 +2372,15 @@ test("a closed track still delivers a group parked above the cap once the cap is
 	expect((await track.nextGroup())?.sequence).toBe(0);
 	expect((await track.nextGroup())?.sequence).toBe(1);
 
-	// Group 2 parks above the cap; a clean close must not resolve it as finished.
+	// Group 2 parks while open; a clean close completes the current range.
 	const parked = track.nextGroup();
 	producer.finish();
 	producer.close();
-	const timeout = sleep(Nano.fromMilli(Milli(10))).then(() => "pending" as const);
-	expect(await Promise.race([parked, timeout])).toBe("pending");
+	expect(await parked).toBeUndefined();
 
 	// Raising the cap after close releases the buffered group, frames intact.
 	track.withRange({ end: { excluded: 3 } });
-	const released = await parked;
+	const released = await track.nextGroup();
 	expect(released?.sequence).toBe(2);
 	expect(await released?.readString()).toBe("frame-2");
 

@@ -355,7 +355,7 @@ extra copy of every received stream chunk injected into `@moq/net`, the control
 that shows the suite can see a copy-heavy change), and `base` when a revision is
 given. Each variant resolves `@moq/*` from its own checkout. Variants alternate
 within each round, with the starting variant rotated, after one warmup round
-(`--rounds`, `--warmup`, `--scenarios transport,cmaf,media`).
+(`--rounds`, `--warmup`, `--scenarios transport,cmaf,media,racing`).
 
 - `transport`: a publisher page writes 160 B through 1 MiB frames, a consumer page
   subscribes and reads them all. Connection setup and fixture generation stay
@@ -371,6 +371,23 @@ within each round, with the starting variant rotated, after one warmup round
   window's edges, so decoded-but-unpainted can be off by a frame or two; decoder
   queue depth (mean, and maximum within the window) comes from a thin
   `VideoDecoder` wrapper present in every pass.
+- `racing`: one page dials `Connection.connect` repeatedly, closing each session
+  before the next, to measure what the WebSocket fallback's win history keeps and
+  what it saves. Each URL's reconnects dial in order. From a 16 URL x 4 reconnect
+  x 256 character base, dialed one at a time, the sweep varies one axis at a
+  time: 1 and 128 URLs, 1 and 16 reconnects, 64 and 2048 characters, and a query
+  rotated on every reconnect, as a refreshed token would be. The 128 URL shape
+  dials 8 URLs at once to finish; the browser opens one WebSocket to an address
+  at a time, so only its retention compares. Modes refuse WebTransport so
+  WebSocket wins (`websocket`, and `alternate` with its own fallback URL), leave
+  it open (`webtransport`, and `disabled` without a fallback), or refuse only each
+  URL's first dial and then race twice more with it open (`sticky`). The refusal
+  throws from the page's `WebTransport` constructor, as a blocked network fails,
+  so the WebSocket head start still runs. Each sample reports dial latency per
+  reconnect and the WebSocket win fraction. After the pool's linger and a forced
+  collection, a heap snapshot counts the flat strings still holding the run's URL
+  marker, with their V8 object bytes and characters. A forced arm's winner is
+  checked; an open race's is only reported.
 
 Costs are split by where they run. Main-thread CPU is CDP `TaskDuration` in
 thread ticks; process CPU is each page's renderer (every thread, including
@@ -405,9 +422,12 @@ check sampled bytes, the counted pass checks every byte, and frame counts and an
 order-independent digest must match, so skipped work cannot read as a speedup.
 CMAF output is decoded and checked byte for byte in a separate call after each
 phase's CPU and trace snapshots.
-Crashes, wrong bytes, missing frames, a window that presents nothing, or an
+Crashes, wrong bytes, missing frames, a window that presents nothing, a racing
+dial that fails or a forced racing arm won by the other transport, or an
 unavailable CPU clock fail the run; timing never does. The nightly runs
-`--smoke` and keeps its run directory as the `bench-browser` artifact.
+`--smoke`, whose racing sweep runs every mode and a rotated query at 4 URLs x 2
+reconnects x 64 characters, and keeps its run directory as the `bench-browser`
+artifact.
 
 The in-memory frame, retained-history, gap ledger, and resume-history paths also run directly in Chromium:
 
