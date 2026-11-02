@@ -2099,6 +2099,46 @@ mod tests {
 		assert!(import.video[0].importer.is_none(), "the dead rendition is retired");
 	}
 
+	/// A decode refusal poisons that importer even if the source later fixes its segment.
+	/// HLS recovers by retiring the generation and importing the live window under fresh names.
+	#[tokio::test]
+	async fn a_refused_segment_recovers_through_a_new_importer() {
+		for passthrough in [false, true] {
+			let dir = temp_dir();
+			write_synth(&dir, &synth(true), "video", &[5_000_000, 7_000_000]);
+			let playlist =
+				"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"videoinit.mp4\"\n#EXTINF:1,\nvideo0.m4s\n";
+			std::fs::write(dir.join("media.m3u8"), playlist).unwrap();
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let mut cfg = Config::new(Url::from_file_path(dir.join("media.m3u8")).unwrap());
+			cfg.passthrough = passthrough;
+			let mut import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
+			import.init().await.unwrap();
+			let previous = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+
+			let segment = std::fs::read(dir.join("video1.m4s")).unwrap();
+			// An mdat without a moof is refused at its header.
+			std::fs::write(dir.join("video1.m4s"), b"\0\0\0\x0cmdatdata").unwrap();
+			std::fs::write(dir.join("media.m3u8"), format!("{playlist}#EXTINF:1,\nvideo1.m4s\n")).unwrap();
+			for failures in 1..=MAX_RENDITION_FAILURES {
+				let step = import.step(OnError::Warn).await.unwrap();
+				assert!(step.failed.is_some());
+				assert_eq!(import.video[0].importer.is_none(), failures == MAX_RENDITION_FAILURES);
+				// Fixing the bytes cannot clear the first decode refusal on the same importer.
+				std::fs::write(dir.join("video1.m4s"), &segment).unwrap();
+			}
+			let step = import.step(OnError::Warn).await.unwrap();
+			assert!(step.failed.is_none());
+			assert_eq!(step.wrote_segments, 2);
+			let snapshot = catalog.snapshot();
+			assert_eq!(snapshot.video.renditions.len(), 1);
+			assert_ne!(*snapshot.video.renditions.keys().next().unwrap(), previous);
+			import.finish().unwrap();
+			std::fs::remove_dir_all(dir).unwrap();
+		}
+	}
+
 	/// An ended rendition is never fetched again, so losing its playlist while its siblings
 	/// are still running cannot evict the finished rendition.
 	#[tokio::test]

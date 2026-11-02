@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### fMP4 decode errors are terminal
+
+After `container::fmp4::Import::decode` fails, every later decode returns that error without reading input, including through `import::Container`.
+Replace the importer to resume instead of feeding it another box or segment. `finish()` still ends the tracks with the accepted media and does not reset the error.
+HLS already replaces importers when the init map changes or a failing rendition is evicted.
+
 ### A `Delay` sets where a consumer starts ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
 `container::Consumer::set_max_delay(Duration)` is `set_delay(Delay)`, and `with_delay(Delay)` is its builder.
