@@ -577,11 +577,7 @@ impl StreamsState {
 				break;
 			};
 			pending.max_stream_data.remove(&id);
-			let Some(rs) = self
-				.recv
-				.get_mut(&id)
-				.and_then(|s| s.as_deref_mut())
-			else {
+			let Some(rs) = self.recv.get_mut(&id).and_then(|s| s.as_deref_mut()) else {
 				continue;
 			};
 			if !rs.can_send_flow_control() {
