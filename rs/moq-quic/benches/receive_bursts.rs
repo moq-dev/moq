@@ -9,10 +9,10 @@
 //!
 //! The table, printed first, reads a counting allocator, so its heap columns are what the
 //! application owns rather than the pages the allocator keeps resident, which the process-wide
-//! `rss_kib` shows. `peak_kib` is the whole process at the burst's peak. The `server_` columns
-//! are what dropping the server's connections frees: when new, when quiet after one burst, and
-//! when quiet after the resume and a repeat burst. `kept_b` is what quiet holds over new, per
-//! stream of the burst. The CPU columns time the server; the allocation counts include the
+//! `rss_kib` shows. `peak_kib` is the whole process's heap high-water mark during the burst. The
+//! `server_` columns are what dropping the server's connections frees: when new, when quiet after
+//! one burst, and when quiet after the resume and a repeat burst. `kept_b` is what quiet holds over
+//! new, per stream of the burst. The CPU columns time the server; the allocation counts include the
 //! clients', which a receive change leaves alone. `teardown_b` is what the case leaks.
 //!
 //! Criterion then times the server's side of a burst on a connection that already freed the
@@ -51,6 +51,8 @@ struct Counter;
 
 /// Bytes allocated and not yet freed.
 static LIVE: AtomicIsize = AtomicIsize::new(0);
+/// The most `LIVE` has reached since [`reset_peak`].
+static PEAK: AtomicIsize = AtomicIsize::new(0);
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
 #[global_allocator]
@@ -60,19 +62,19 @@ static ALLOCATOR: Counter = Counter;
 unsafe impl GlobalAlloc for Counter {
 	unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
 		ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed);
+		grow(layout.size() as isize);
 		unsafe { System.alloc(layout) }
 	}
 
 	unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
 		ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		LIVE.fetch_add(layout.size() as isize, Ordering::Relaxed);
+		grow(layout.size() as isize);
 		unsafe { System.alloc_zeroed(layout) }
 	}
 
 	unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
 		ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-		LIVE.fetch_add(new_size as isize - layout.size() as isize, Ordering::Relaxed);
+		grow(new_size as isize - layout.size() as isize);
 		unsafe { System.realloc(ptr, layout, new_size) }
 	}
 
@@ -82,8 +84,17 @@ unsafe impl GlobalAlloc for Counter {
 	}
 }
 
+fn grow(bytes: isize) {
+	let live = LIVE.fetch_add(bytes, Ordering::Relaxed) + bytes;
+	PEAK.fetch_max(live, Ordering::Relaxed);
+}
+
 fn live() -> isize {
 	LIVE.load(Ordering::Relaxed)
+}
+
+fn reset_peak() {
+	PEAK.store(live(), Ordering::Relaxed);
 }
 
 fn allocations() -> usize {
@@ -123,19 +134,17 @@ impl Mode {
 /// Opens `streams` streams of `packets` packets on every client, finishes them, and runs until
 /// the server's application has read or stopped them all, so their receive state is freed.
 ///
-/// Returns the heap the process held with the burst at its peak.
+/// Returns the most heap the process held during the burst.
 fn burst(pair: &mut Pair, mode: Mode, streams: usize, packets: usize) -> isize {
+	reset_peak();
 	pair.lose_every = (mode == Mode::Loss).then_some(8);
 	pair.server.sink = match mode {
 		Mode::Loss => Sink::Read,
 		Mode::Ordered | Mode::Cancel => Sink::Ignore,
 	};
 	open(pair, streams, packets);
-	let peak = match mode {
-		Mode::Loss => {
-			finish(pair, streams);
-			live()
-		}
+	match mode {
+		Mode::Loss => finish(pair, streams),
 		Mode::Ordered | Mode::Cancel => {
 			// Every byte has arrived once the clients forget their acknowledged streams.
 			pair.drive_until(|pair| {
@@ -143,7 +152,6 @@ fn burst(pair: &mut Pair, mode: Mode, streams: usize, packets: usize) -> isize {
 					.iter_mut()
 					.all(|client| client.conn().streams().send_streams() == 0)
 			});
-			let peak = live();
 			let start = cpu_time::ThreadTime::now();
 			for conn in pair.server.conns.values_mut() {
 				while let Some(id) = conn.streams().accept(Dir::Uni) {
@@ -165,9 +173,9 @@ fn burst(pair: &mut Pair, mode: Mode, streams: usize, packets: usize) -> isize {
 				}
 			}
 			pair.server.busy += start.elapsed();
-			peak
 		}
-	};
+	}
+	let peak = PEAK.load(Ordering::Relaxed);
 	settle(pair);
 	peak
 }
@@ -213,7 +221,10 @@ fn open(pair: &mut Pair, streams: usize, packets: usize) {
 	}
 	for (client, ids) in ids.iter().enumerate() {
 		for &id in ids {
-			pair.clients[client].conn().send_stream(id).finish().unwrap();
+			// Released, or each finished stream's end would stay on the client for the run.
+			let mut stream = pair.clients[client].conn().send_stream(id);
+			stream.finish().unwrap();
+			stream.release();
 		}
 	}
 }
