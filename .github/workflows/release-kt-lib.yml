@@ -16,8 +16,10 @@ name: Release Kotlin lib
 #
 # Those bindings come from this checkout, so a push is deferred while rs/moq-ffi
 # has changes since its release tag: the wrapper could call FFI API that no
-# published moq-ffi has. The FFI coordinator re-triggers this workflow after
-# its Kotlin publisher succeeds, then publishes from that tag's commit.
+# published moq-ffi has. The FFI coordinator (release-shared-ffi.yml) calls
+# this workflow after its Kotlin publisher succeeds, then publishes from that
+# tag's commit. The call runs as the tag, which the `publish` Environment
+# admits, rather than as `main` under workflow_run.
 
 on:
   push:
@@ -35,77 +37,21 @@ on:
   # dispatch on `release` publishes.
   workflow_dispatch:
   # A called run inherits its caller's event, which can be a dispatch on
-  # `release`, so the caller says it is a dry-run rather than the event.
+  # `release`, so the caller says it is a dry-run rather than the event. The
+  # FFI coordinator's call on a `moq-ffi-v*` tag is the only non-dry call.
   workflow_call:
     inputs:
       dry-run:
         description: "Publish to Maven Local and check the POMs, as a PR does"
         type: boolean
         default: true
-  # Publishes only a protected release tag at the run's commit; see
-  # "Require a release tag at the run's commit".
-  workflow_run: # zizmor: ignore[dangerous-triggers]
-    workflows: ["Release FFI", "Release Kotlin FFI"]
-    types:
-      - completed
 
 permissions:
   contents: read
 
 jobs:
-  ffi-release:
-    name: Check FFI publisher
-    runs-on: ubuntu-latest
-    # workflow_run is privileged. Preserve the owner, same-repo, push and tag
-    # gates before reading the trusted upstream checkout or allowing wrapper
-    # publication.
-    if: >-
-      github.event_name != 'workflow_run' ||
-      (github.repository_owner == 'moq-dev' &&
-       (github.event.workflow_run.name == 'Release FFI' || github.event.workflow_run.conclusion == 'success') &&
-       github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_repository.full_name == github.repository &&
-       startsWith(github.event.workflow_run.head_branch, 'moq-ffi-v'))
-    permissions:
-      contents: read
-      actions: read
-    outputs:
-      ready: ${{ steps.publisher.outputs.ready }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      # head_branch names a branch as readily as a tag, and anyone who can push
-      # may name a branch and a workflow after a release. Only a tag the
-      # `release tags` ruleset protects, at the run's commit, is a release.
-      - name: Require a release tag at the run's commit
-        if: github.event_name == 'workflow_run'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.workflow_run.head_branch }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
-        run: |
-          commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$TAG" --jq .sha)
-          if [[ "$commit" != "$SHA" ]]; then
-            echo "::error::$TAG is not a release tag at $SHA"
-            exit 1
-          fi
-      - uses: ./.github/actions/just
-      - name: Check independent publisher
-        id: publisher
-        env:
-          GH_TOKEN: ${{ github.token }}
-          UPSTREAM_NAME: ${{ github.event.workflow_run.name }}
-          UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
-          UPSTREAM_RUN_STARTED_AT: ${{ github.event.workflow_run.run_started_at }}
-        run: just gh ffi completed kotlin
-
   check-version:
     name: Check version
-    needs: [ffi-release]
-    if: needs.ffi-release.outputs.ready == 'true'
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -114,7 +60,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           # Tags, for the unreleased FFI check.
           fetch-depth: 0
           persist-credentials: false
@@ -133,22 +78,20 @@ jobs:
 
       - name: Resolve FFI version
         id: ffi
-        env:
-          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
-          if [[ "$GITHUB_EVENT_NAME" == "workflow_run" ]]; then
-            VERSION="${HEAD_BRANCH#moq-ffi-v}"
+          if [[ "$GITHUB_REF" == refs/tags/moq-ffi-v* ]]; then
+            VERSION="${GITHUB_REF_NAME#moq-ffi-v}"
           else
             VERSION=$(grep '^version' rs/moq-ffi/Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      # workflow_run verifies the Kotlin FFI publisher, so its tag is
-      # published. PRs run it too, so the dry-run shows whether merging would
-      # publish.
+      # On an FFI tag the coordinator calls this only after its Kotlin
+      # publisher succeeded, so the tag is published. PRs run it too, so the
+      # dry-run shows whether merging would publish.
       - name: Check for unreleased FFI changes
         id: ffi-diff
-        if: github.event_name != 'workflow_run'
+        if: "!startsWith(github.ref, 'refs/tags/moq-ffi-v')"
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
         run: just gh release ffi-unreleased "$FFI_VERSION"
@@ -163,7 +106,7 @@ jobs:
       # wrapper's POM range resolves to an older moq-ffi without them.
       - name: Check bindings publication
         id: bindings
-        if: github.event_name != 'workflow_run' && steps.wrapper.outputs.exists != 'true' && steps.ffi-diff.outputs.unreleased != 'true'
+        if: "!startsWith(github.ref, 'refs/tags/moq-ffi-v') && steps.wrapper.outputs.exists != 'true' && steps.ffi-diff.outputs.unreleased != 'true'"
         env:
           FFI_VERSION: ${{ steps.ffi.outputs.version }}
         run: just gh release maven-exists dev.moq moq-ffi "$FFI_VERSION"
@@ -182,7 +125,7 @@ jobs:
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
           elif [[ "$FFI_UNRELEASED" == "true" ]]; then
             echo "should_publish=false" >> "$GITHUB_OUTPUT"
-          elif [[ "$GITHUB_EVENT_NAME" == "workflow_run" || "$BINDINGS_EXISTS" == "true" ]]; then
+          elif [[ "$GITHUB_REF" == refs/tags/moq-ffi-v* || "$BINDINGS_EXISTS" == "true" ]]; then
             echo "dev.moq:moq:${VERSION} not published yet; moq-ffi ${FFI_VERSION} available; will publish."
             echo "should_publish=true" >> "$GITHUB_OUTPUT"
           else
@@ -192,8 +135,7 @@ jobs:
 
   publish:
     name: Publish wrapper
-    # Directly on ffi-release: its gate is what makes the head_sha checkout trusted.
-    needs: [ffi-release, check-version]
+    needs: [check-version]
     # PRs and nightly always run (dry-run). Pushes publish only when the version is new.
     if: >-
       github.event_name == 'pull_request' || inputs.dry-run ||
@@ -210,7 +152,7 @@ jobs:
       cancel-in-progress: ${{ github.event_name == 'pull_request' || inputs.dry-run == true }}
     runs-on: ubuntu-latest
     # Maven and signing credentials live in the `publish` Environment, which
-    # only protected refs can deploy to. A dry-run needs no secrets.
+    # only release refs can deploy to. A dry-run needs no secrets.
     environment: ${{ github.event_name != 'pull_request' && !inputs.dry-run && 'publish' || '' }}
     env:
       # Picked up by com.vanniktech.maven.publish via Gradle project properties.
@@ -224,7 +166,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           persist-credentials: false
 
       - uses: ./.github/actions/just

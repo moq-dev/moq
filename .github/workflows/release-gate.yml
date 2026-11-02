@@ -463,7 +463,6 @@ jobs:
     uses: ./.github/workflows/release-kt-lib.yml
     permissions:
       contents: read
-      actions: read
 
   release-swift-lib:
     name: Release Swift Lib

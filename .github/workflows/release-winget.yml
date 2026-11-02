@@ -3,44 +3,39 @@ name: release-winget
 # Submits/updates the winget manifest for a CLI after its release workflow
 # publishes the GitHub Release (with the Windows .zip assets). The release is
 # created by the default GITHUB_TOKEN, which can't trigger a `release` event,
-# so this triggers on workflow_run like release-brew.yml.
+# so sh/gh/trigger-repo-publish.sh dispatches this on the release tag. The run
+# is the tag, which the `publish` Environment admits, rather than `main` as a
+# workflow_run would be. It stays independent of the tag's own run, so a failed
+# submission blocks neither release-brew nor any other publisher.
 #
-# workflow_dispatch runs the same logic as a dry run: it resolves the winget
-# identifier and verifies the Windows .zip asset exists on the release, then
-# stops without opening a winget-pkgs PR. Use it to sanity-check a tag before
-# (or instead of) a real submission. winget-releaser itself has no dry-run
-# flag, hence the separate path.
+# A dispatch on a branch is a dry run instead: it resolves the winget
+# identifier and verifies the Windows .zip asset exists on the `tag` input's
+# release, then stops without opening a winget-pkgs PR. Use it to sanity-check
+# a tag before (or instead of) a real submission. winget-releaser itself has no
+# dry-run flag, hence the separate path.
 #
 # One-time bootstrap (winget-pkgs only lets you UPDATE an existing package):
 #   1. A maintainer lands the first manifest once via `wingetcreate new` (or a
 #      manual PR) for each PackageIdentifier below.
-#   2. Set the WINGET_TOKEN repo secret: a classic PAT with `public_repo`
-#      scope, owned by an account that has forked microsoft/winget-pkgs. By
-#      default the fork is looked up under the token owner.
+#   2. Set the WINGET_TOKEN secret in the `publish` Environment: a classic PAT
+#      with `public_repo` scope, owned by an account that has forked
+#      microsoft/winget-pkgs. By default the fork is looked up under the token
+#      owner.
 # After that every release is hands-off. Until the secret exists the real
 # submit is a clean no-op (the dry run still works without it).
 
 on:
-  # Publishes only a protected release tag at the run's commit; see
-  # "Require a release tag at the run's commit".
-  workflow_run: # zizmor: ignore[dangerous-triggers]
-    workflows:
-      - moq-cli
-      - moq-relay
-    types:
-      - completed
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to dry-run (e.g. moq-cli-v0.7.31)"
-        required: true
+        description: "Release tag to dry-run from a branch (e.g. moq-cli-v0.7.31); a dispatch on a tag submits that tag"
+        required: false
         type: string
 
 concurrency:
-  # Key on the release tag, not github.ref (which is the default branch on
-  # workflow_run), so different packages submit in parallel and only repeat
-  # runs of the same tag serialize.
-  group: ${{ github.workflow }}-${{ github.event.workflow_run.head_branch || inputs.tag }}
+  # Key on the release tag, so different packages submit in parallel and only
+  # repeat runs of the same tag serialize.
+  group: ${{ github.workflow }}-${{ github.ref_type == 'tag' && github.ref_name || inputs.tag }}
   cancel-in-progress: false
 
 permissions:
@@ -54,52 +49,27 @@ env:
 jobs:
   publish:
     name: Submit winget manifest
-    # workflow_run: only after a successful tag push in this repository, of a
-    # tag the `release tags` ruleset protects; a fork PR can rename a workflow
-    # and its branch to match. workflow_dispatch: always (an explicit dry run).
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (github.event.workflow_run.conclusion == 'success' &&
-       github.event.workflow_run.event == 'push' &&
-       github.event.workflow_run.head_repository.full_name == github.repository &&
-       (startsWith(github.event.workflow_run.head_branch, 'moq-relay-v') ||
-        startsWith(github.event.workflow_run.head_branch, 'moq-cli-v')))
     runs-on: windows-latest
-    # WINGET_TOKEN lives in the `publish` Environment, which only protected refs
+    # WINGET_TOKEN lives in the `publish` Environment, which only release refs
     # can deploy to. A dry run needs no token, so it can run from any branch.
-    environment: ${{ github.event_name == 'workflow_run' && 'publish' || '' }}
+    environment: ${{ github.ref_type == 'tag' && 'publish' || '' }}
 
     steps:
-      # head_branch names a branch as readily as a tag, and anyone who can push
-      # may name a branch and a workflow after a release. Only a tag the
-      # `release tags` ruleset protects, at the run's commit, is a release.
-      - name: Require a release tag at the run's commit
-        if: github.event_name == 'workflow_run'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.event.workflow_run.head_branch }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
-        run: |
-          commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$TAG" --jq .sha)
-          if [[ "$commit" != "$SHA" ]]; then
-            echo "::error::$TAG is not a release tag at $SHA"
-            exit 1
-          fi
-
       - name: Resolve mode and tag
         id: mode
         shell: bash
         env:
           DISPATCH_TAG: ${{ inputs.tag }}
-          RUN_TAG: ${{ github.event.workflow_run.head_branch }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          elif [[ -n "$DISPATCH_TAG" ]]; then
             echo "dry_run=true" >> "$GITHUB_OUTPUT"
             echo "tag=$DISPATCH_TAG" >> "$GITHUB_OUTPUT"
           else
-            echo "dry_run=false" >> "$GITHUB_OUTPUT"
-            echo "tag=$RUN_TAG" >> "$GITHUB_OUTPUT"
+            echo "::error::Dispatch on a release tag to submit it, or name a tag to dry-run."
+            exit 1
           fi
 
       - name: Parse crate and version

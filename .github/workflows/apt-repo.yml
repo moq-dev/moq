@@ -2,7 +2,7 @@ name: apt-repo
 
 # Mirrors .deb artifacts attached to a release into the apt.moq.dev repo.
 # Invoked via workflow_dispatch from each per-binary release workflow's
-# final job (gh workflow run apt-repo.yml -f tag=...), or manually.
+# final job (gh workflow run apt-repo.yml --ref release -f tag=...), or manually.
 #
 # Note: we do NOT trigger on release:published because releases created
 # with the default GITHUB_TOKEN don't cascade to other workflows. The
@@ -28,8 +28,8 @@ jobs:
   publish:
     name: Publish to apt.moq.dev
     runs-on: ubuntu-22.04
-    # Write credentials live in the `publish` Environment, which only protected
-    # refs can deploy to, so dispatch this from `main`.
+    # Write credentials live in the `publish` Environment, which only release
+    # refs can deploy to, so dispatch this on `release` (any tag ingests there).
     environment: publish
 
     steps:

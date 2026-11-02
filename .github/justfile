@@ -53,7 +53,7 @@ test:
     python3 sh/gh/install-formula.test.py
     sh/gh/release.test.sh
     python3 sh/gh/ffi.test.py
-    bun test sh/gh/ffi.test.ts sh/gh/cpp.test.ts
+    bun test sh/gh/ffi.test.ts sh/gh/cpp.test.ts sh/gh/publish.test.ts
     python3 sh/rs/package-rename.test.py
     python3 sh/dart/build.test.py
     python3 sh/rs/select.test.py
