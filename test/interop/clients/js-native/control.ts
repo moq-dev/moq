@@ -20,7 +20,7 @@ const quic = new Qmux(new URL(address), {
 	requireProtocol: true,
 });
 await quic.ready;
-const extensions = offered({ auth: false, epoch: false, solicit: false });
+const extensions = offered({ auth: false, solicit: false });
 await exchangeSetup(quic, version, "interop-control", { client: true, extensions });
 
 const session = new NativeSession(quic, version, true);

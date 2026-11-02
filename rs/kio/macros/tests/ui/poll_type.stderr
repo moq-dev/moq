@@ -1,0 +1,15 @@
+error[E0061]: this method takes 1 argument but 0 arguments were supplied
+  --> tests/ui/poll_type.rs:16:39
+   |
+16 |         let a: u64 = wait!(A => self.values.poll_pop())?;
+   |                                             ^^^^^^^^-- argument #1 of type `&Waiter` is missing
+   |
+note: method defined here
+  --> $WORKSPACE/rs/kio/src/queue.rs
+   |
+   |     pub fn poll_pop(&self, waiter: &Waiter) -> Poll<Result<T, Closed>> {
+   |            ^^^^^^^^
+help: provide the argument
+   |
+16 |         let a: u64 = wait!(A => self.values.poll_pop(/* &Waiter */))?;
+   |                                                      +++++++++++++

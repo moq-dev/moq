@@ -39,13 +39,13 @@ const MOQT_22: &str = "moq-transport-22";
 macro_rules! cases {
 	($($case:ident),* $(,)?) => {
 		mod lite_07 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_07).await })*
+			$(#[kio::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
 		mod moqt_18 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_18).await })*
+			$(#[kio::test] async fn $case() { super::$case(super::MOQT_18).await })*
 		}
 		mod moqt_22 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_22).await })*
+			$(#[kio::test] async fn $case() { super::$case(super::MOQT_22).await })*
 		}
 	};
 }
@@ -81,23 +81,23 @@ cases!(
 );
 
 /// moq-transport's AUTH_ERROR carries no code that may pass, so only lite retries.
-#[moq_clock::test]
+#[kio::test]
 async fn lite_07_presents_a_transiently_refused_token_again() {
 	a_transient_refusal_is_presented_again(LITE_07).await
 }
 
 /// moq-transport's u16 message size is the one a test can overflow quickly.
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_18_a_grant_too_large_for_one_message_is_unsupported() {
 	a_grant_too_large_for_one_message_is_unsupported(MOQT_18).await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_a_grant_too_large_for_one_message_is_unsupported() {
 	a_grant_too_large_for_one_message_is_unsupported(MOQT_22).await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn lite_06_has_no_grant() {
 	older_versions_have_no_grant(LITE_06).await
 }
@@ -105,7 +105,7 @@ async fn lite_06_has_no_grant() {
 /// The control for the lite versions without AUTH: on the same barrier, lite-07 has
 /// opened an Auth Stream on each side, which is what makes its absence on them mean
 /// something.
-#[moq_clock::test]
+#[kio::test]
 async fn lite_07_opens_an_auth_stream_per_side() {
 	within(async {
 		let (pair, _broadcast) = connect_announced(LITE_07).await;
@@ -121,22 +121,22 @@ async fn lite_07_opens_an_auth_stream_per_side() {
 	.expect("timed out");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn lite_05_has_no_grant() {
 	older_versions_have_no_grant("moq-lite-05").await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_route_auth_renews_its_announce() {
 	a_route_auth_renews_its_announce(MOQT_22).await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_route_auth_survives_a_reconnect() {
 	a_route_auth_survives_a_reconnect(MOQT_22).await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
 	within(async {
 		let (mut pair, client_origin, _server_origin) = connect_route_auth(MOQT_22).await;
@@ -153,7 +153,7 @@ async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
 		drop(first);
 		let (token, _again) = tokens.next().await.expect("offered again after the cancel");
 		assert_eq!(token, b"first");
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		let (second, _) = pair.client.auth().add("second").await.expect("kept for requests");
 		broadcast.announce(origin::Route::default().with_auth(second)).unwrap();
 		let (token, _second) = tokens.next().await.expect("announced again");
@@ -164,7 +164,7 @@ async fn moqt_22_renewing_a_cancelled_announce_keeps_the_session() {
 	.expect("timed out");
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_a_cancelled_renewal_keeps_the_session() {
 	within(async {
 		let (mut pair, client_origin, _server_origin) = connect_route_auth(MOQT_22).await;
@@ -180,9 +180,9 @@ async fn moqt_22_a_cancelled_renewal_keeps_the_session() {
 
 		let (second, _) = pair.client.auth().add("second").await.expect("kept for requests");
 		broadcast.announce(origin::Route::default().with_auth(second)).unwrap();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		drop(first);
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(pair.client_transport.close_reason(), None);
 	})
 	.await
@@ -192,7 +192,7 @@ async fn moqt_22_a_cancelled_renewal_keeps_the_session() {
 /// An acceptor that accepts a renewal and drops the grant it replaces in one step keeps the
 /// announcement: the old grant ending is not the request ending once its replacement is in.
 /// The replacement then holds it, so an update that stops covering it ends it.
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 	within(async {
 		let (mut pair, client_origin, server_origin) = connect_route_auth(MOQT_22).await;
@@ -214,7 +214,7 @@ async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 		let second = renewal.accept(Grant::all());
 		drop(first);
 
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(
 			futures::FutureExt::now_or_never(second.closed()).is_none(),
 			"the request ended with the grant its renewal replaced"
@@ -230,7 +230,7 @@ async fn moqt_22_dropping_the_old_grant_with_its_renewal_keeps_the_announce() {
 
 /// A route auth the peer revokes on its AUTH stream is no longer carried, so its request is
 /// made again without it, even while another token keeps the session's grant unchanged.
-#[moq_clock::test]
+#[kio::test]
 async fn moqt_22_a_revoked_route_auth_remakes_its_announce() {
 	within(async {
 		let client_origin = produce_origin(2);
@@ -401,7 +401,8 @@ async fn wait_announced(origin: &origin::Consumer, path: &str, active: bool) {
 	let apply = |live: &mut std::collections::HashSet<String>, event: moq_net::announce::Event| match event {
 		moq_net::announce::Event::Start(update)
 		| moq_net::announce::Event::Update(update)
-		| moq_net::announce::Event::Restart(update) => {
+		| moq_net::announce::Event::Restart(update)
+		| moq_net::announce::Event::Takeover { announce: update, .. } => {
 			live.insert(update.prefix.to_string());
 		}
 		moq_net::announce::Event::End(update) => {
@@ -448,7 +449,7 @@ struct Pair {
 	/// The SETUP token the server's handshake read.
 	setup_token: Option<moq_net::setup::Token>,
 	/// Aborting it drops the server's driver without letting it finish.
-	server_driver: moq_clock::sim::JoinHandle<Error>,
+	server_driver: kio::clock::sim::JoinHandle<Error>,
 }
 
 async fn connect(opts: Options) -> Pair {
@@ -504,7 +505,7 @@ async fn connect(opts: Options) -> Pair {
 		// Taken before the session starts, the way a relay verifying tokens would.
 		let requests = opts.server_requests.then(|| handshake.requests());
 		let (session, mut driver) = handshake.ok().await.expect("server accept");
-		let driver = moq_clock::sim::spawn(moq_clock::drive(move |now, waiter| {
+		let driver = kio::clock::sim::spawn(kio::clock::drive(move |now, waiter| {
 			moq_net::time::Driver::poll(&mut driver, now, waiter)
 		}));
 		(session, requests, setup_token, driver)
@@ -529,7 +530,7 @@ fn serve(
 	answer: impl Fn(&[u8]) -> Option<Grant> + 'static,
 ) -> futures::channel::mpsc::UnboundedReceiver<(Vec<u8>, auth::Issued)> {
 	let (tx, rx) = futures::channel::mpsc::unbounded();
-	moq_clock::sim::spawn(async move {
+	kio::clock::sim::spawn(async move {
 		let mut unanswered = Vec::new();
 		while let Some(request) = requests.next().await {
 			let token = request.token().to_vec();
@@ -544,8 +545,8 @@ fn serve(
 	rx
 }
 
-fn within<F: std::future::Future>(f: F) -> impl std::future::Future<Output = Result<F::Output, moq_clock::Elapsed>> {
-	moq_clock::timeout(TEST_TIMEOUT, f)
+fn within<F: std::future::Future>(f: F) -> impl std::future::Future<Output = Result<F::Output, kio::clock::Elapsed>> {
+	kio::clock::timeout(TEST_TIMEOUT, f)
 }
 
 /// Each side's default grant is what the other side's origin handles allow:
@@ -671,11 +672,11 @@ async fn an_unanswered_token_holds_the_check(version: &'static str) {
 		let _setup = requests.next().await.unwrap().accept(grant(&["baz"], &[]));
 		assert_eq!(granted(&pair.client).await, grant(&["baz"], &[]));
 		let auth = pair.client.auth();
-		let pending = moq_clock::sim::spawn(async move { auth.add("new").await });
+		let pending = kio::clock::sim::spawn(async move { auth.add("new").await });
 		let unanswered = requests.next().await.unwrap();
 		let broadcast = publisher.create_broadcast("foo/bar").unwrap();
 		broadcast.announce(Default::default()).unwrap();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		use futures::FutureExt;
 		assert!(
 			pair.server.closed().now_or_never().is_none(),
@@ -713,13 +714,13 @@ async fn a_broadcast_withdrawn_while_its_token_waits_is_not_refused(version: &'s
 		let _setup = requests.next().await.unwrap().accept(grant(&["baz"], &[]));
 		assert_eq!(granted(&pair.client).await, grant(&["baz"], &[]));
 		let auth = pair.client.auth();
-		let pending = moq_clock::sim::spawn(async move { auth.add("new").await });
+		let pending = kio::clock::sim::spawn(async move { auth.add("new").await });
 		let unanswered = requests.next().await.unwrap();
 		let withdrawn = publisher.create_broadcast("foo/bar").unwrap();
 		withdrawn.announce(Default::default()).unwrap();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		withdrawn.unannounce();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		let _issued = unanswered.accept(grant(&["other"], &[]));
 		let _token = pending.await.unwrap().unwrap();
 		assert_eq!(granted(&pair.client).await, grant(&["baz", "other"], &[]));
@@ -861,7 +862,7 @@ async fn a_refused_token_reports_the_code(version: &'static str) {
 		})
 		.await;
 		let mut requests = pair.requests.take().unwrap();
-		moq_clock::sim::spawn(async move {
+		kio::clock::sim::spawn(async move {
 			while let Some(request) = requests.next().await {
 				match request.token().is_empty() {
 					true => {
@@ -896,7 +897,7 @@ async fn a_refused_setup_token_grants_nothing(version: &'static str) {
 		})
 		.await;
 		let mut requests = pair.requests.take().unwrap();
-		moq_clock::sim::spawn(async move {
+		kio::clock::sim::spawn(async move {
 			while let Some(request) = requests.next().await {
 				request.reject(SessionError::Unauthorized, "bad credential");
 			}
@@ -936,7 +937,7 @@ async fn the_setup_token_is_the_connection_credential(version: &'static str) {
 
 /// A lite version without the Token parameter carries none, so the caller's URL query
 /// has to.
-#[moq_clock::test]
+#[kio::test]
 async fn lite_06_sends_no_setup_token() {
 	within(async {
 		let pair = connect(Options {
@@ -966,9 +967,9 @@ async fn dropping_the_requests_refuses_queued_tokens(version: &'static str) {
 		let first = requests.next().await.expect("setup token");
 		drop(first.accept(Grant::default()));
 		let auth = pair.client.auth();
-		let pending = moq_clock::sim::spawn(async move { auth.add("queued").await.map(drop) });
+		let pending = kio::clock::sim::spawn(async move { auth.add("queued").await.map(drop) });
 		// Give the second token time to reach the queue before dropping it.
-		moq_clock::sleep(Duration::from_millis(50)).await;
+		kio::clock::sleep(Duration::from_millis(50)).await;
 		drop(requests);
 
 		let err = pending.await.unwrap().expect_err("refused");
@@ -1478,7 +1479,7 @@ async fn nothing_outside_the_grant_reaches_the_peer(version: &'static str) {
 		// Hold the answer, so the peer's discovery request is in long before the grant.
 		let mut requests = pair.requests.take().unwrap();
 		let setup = requests.next().await.expect("setup token");
-		let leaked = moq_clock::timeout(
+		let leaked = kio::clock::timeout(
 			Duration::from_millis(100),
 			wait_announced(&relay.consume(), "foo/bar", true),
 		)
@@ -1536,16 +1537,16 @@ async fn a_broadcast_received_from_the_peer_is_not_ours_to_check(version: &'stat
 macro_rules! limit_cases {
 	($($case:ident),* $(,)?) => {
 		mod limit_lite_05 {
-			$(#[moq_clock::test] async fn $case() { super::$case("moq-lite-05").await })*
+			$(#[kio::test] async fn $case() { super::$case("moq-lite-05").await })*
 		}
 		mod limit_lite_06 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_06).await })*
+			$(#[kio::test] async fn $case() { super::$case(super::LITE_06).await })*
 		}
 		mod limit_lite_07 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::LITE_07).await })*
+			$(#[kio::test] async fn $case() { super::$case(super::LITE_07).await })*
 		}
 		mod limit_moqt_18 {
-			$(#[moq_clock::test] async fn $case() { super::$case(super::MOQT_18).await })*
+			$(#[kio::test] async fn $case() { super::$case(super::MOQT_18).await })*
 		}
 	};
 }
@@ -1557,17 +1558,17 @@ limit_cases!(
 	a_widening_brings_back_what_the_peer_published,
 );
 
-#[moq_clock::test]
+#[kio::test]
 async fn lite_05_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight("moq-lite-05").await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn lite_06_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight(LITE_06).await
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn lite_07_narrowing_resets_a_fetch_in_flight() {
 	a_narrowing_resets_a_fetch_in_flight(LITE_07).await
 }
@@ -1935,7 +1936,7 @@ async fn a_widening_brings_back_what_the_peer_published(version: &'static str) {
 async fn a_shared_handle_presents_its_token_on_every_session(version: &'static str) {
 	within(async {
 		let handle = auth::Handle::new();
-		let added = moq_clock::sim::spawn({
+		let added = kio::clock::sim::spawn({
 			let handle = handle.clone();
 			async move { handle.add("token").await }
 		});
@@ -2010,7 +2011,7 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 		};
 		let mut first = connect(options()).await;
 		let mut first_requests = first.requests.take().unwrap();
-		let added = moq_clock::sim::spawn({
+		let added = kio::clock::sim::spawn({
 			let handle = handle.clone();
 			async move { handle.add("token").await }
 		});
@@ -2045,13 +2046,13 @@ async fn a_handle_backs_one_active_session(version: &'static str) {
 		let _second_issued = presented(&mut second_tokens).await;
 		let _token = added.await.expect("joined").expect("granted on the second session");
 
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(
 			unanswered.closed().now_or_never().is_none(),
 			"the draining session withdrew its unanswered token"
 		);
 		let first_grant = unanswered.accept(Grant::all());
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(
 			first_grant.closed().now_or_never().is_none(),
 			"the draining session dropped its late grant"
@@ -2093,7 +2094,7 @@ async fn a_token_queued_before_our_goaway_rides_only_the_successor(version: &'st
 		let mut adding = Box::pin(handle.add("late"));
 		assert!(adding.as_mut().now_or_never().is_none());
 		first.client.drain().send(moq_net::goaway::Goaway::new()).unwrap();
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert!(
 			first_tokens.next().now_or_never().is_none(),
 			"the draining session presented a new token"
@@ -2127,7 +2128,7 @@ async fn a_transient_refusal_is_presented_again(version: &'static str) {
 		.await;
 		let mut requests = pair.requests.take().unwrap();
 		let (tx, mut issued) = futures::channel::mpsc::unbounded();
-		moq_clock::sim::spawn(async move {
+		kio::clock::sim::spawn(async move {
 			let mut refused = false;
 			while let Some(request) = requests.next().await {
 				if request.token().is_empty() || refused {

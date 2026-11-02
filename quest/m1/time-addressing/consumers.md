@@ -55,9 +55,9 @@ state again).
 - **A segment with no groups is `EXT-X-GAP`**, so numbering never skips
   across a pause or an overrun. A group overrunning the interval is listed
   at its first line, so its `EXTINF` understates the media; document the
-  deviation beside
-  [fixed target duration](/quest/m1/archive/hls-target.md)'s overrun rule,
-  whose target then comes from the interval.
+  deviation beside the fixed target duration's overrun rule (in
+  `rs/moq-hls/src/export/rendition.rs`), whose target then comes from the
+  interval.
 - **The target duration is the interval** (maintainer, 2026-10-28). A
   segment can run up to twice the interval even without an overrun, since
   the group containing a line can start up to one interval before it;
@@ -80,7 +80,11 @@ Added 2026-10-27 (maintainer, from an external release-to-main audit): an
 HLS exporter today requests the record tracks, but on-demand capture starts
 from media-track demand, so an HLS-only viewer never starts it. Once the
 export reads media tracks directly, prove that an HLS-only viewer of an
-on-demand publisher starts capture and gets a playlist.
+on-demand publisher starts capture and gets a playlist. Since
+[moq-dev/moq#7238](https://github.com/moq-dev/moq/pull/7238), Rust capture
+audio is on demand by default (raw PCM kept until subscribed), so until then
+an HLS-only viewer of a default `moq import capture` gets no audio rendition
+without `--audio on`.
 
 Public API: breaking where a consumer exposes group numbers (CLI
 `--group`, archive keys), `hang::hls` and the per-rendition `hls` field are

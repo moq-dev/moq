@@ -7,7 +7,7 @@
 //! memory. It is the only Linux backend for `Source::Display`, so a display
 //! that X11 cannot reach is refused rather than handed to the portal.
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::os::fd::AsRawFd;
 use std::ptr::NonNull;
 use std::sync::Arc;

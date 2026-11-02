@@ -46,8 +46,8 @@ writable (`rs/moq-json/src/stream/mod.rs`). It never rolls its one group;
 when its budget is spent the publisher opens a new track. A link drop or
 reconnect loses what was in flight.
 Those caps hold until [Unbounded groups](/quest/m1/unbounded-groups/README.md)
-lands; after it, a lagging reader refills a shed part of the group or sees
-`Evicted`.
+lands; after it, a lagging reader boards a flight if the publisher serves
+replay, and otherwise refreshes or sees `Evicted`.
 So the contract is ordered, gap-free delivery for a live reader within one
 bounded log, and recovery after a reconnect belongs to the application
 protocol. That is an acceptable division for MAVLink, whose mission, parameter

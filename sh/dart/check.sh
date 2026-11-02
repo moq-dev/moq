@@ -106,6 +106,9 @@ dart format --output=none --set-exit-if-changed \
 
 publish_dir="$generated/publish"
 mkdir -p "$publish_dir"
+# Isolate Pub's file discovery from the checkout's ignores when TMPDIR is
+# inside .tmp. Untracked copies also avoid the dirty-tree publish check.
+git init --quiet "$publish_dir"
 for package in moq_ffi moq; do
     cp -R "$DART_DIR/$package" "$publish_dir/$package"
     rm -rf "$publish_dir/$package/.dart_tool" "$publish_dir/$package/build"
@@ -138,8 +141,7 @@ if [[ -n "$(find "$DART_DIR/../target/$host/debug" -maxdepth 1 -name '*moq_ffi.*
     exit 1
 fi
 
-# Pub rejects dry runs from a dirty Git tree. Validate copies outside the
-# checkout so this pre-commit check exercises package contents, not Git state.
+# Validate staged copies so this pre-commit check exercises package contents.
 for package in moq_ffi moq; do
     (
         cd "$publish_dir/$package"

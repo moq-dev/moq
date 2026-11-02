@@ -1,10 +1,10 @@
 //! The poll transport interface owned by `moq-net`.
 //!
 //! Implement these traits for a transport, or wrap a backend at the application
-//! boundary. `moq-tokio`, `moq-wasm`, and `moq-uring` provide their own adapters, and
+//! boundary. `moq-tokio` and `moq-uring` provide their own adapters, and
 //! [`memory`] links two peers in one process.
 //! The async helpers only drive the required poll methods. Sessions take a
-//! [`poll::Boxable`] transport, which adds native thread bounds; wrap a thread-local
+//! [`poll::Boxable`] transport, which adds thread bounds; wrap a thread-local
 //! transport in a type that checks the thread on use (`moq-uring` has one).
 
 use std::time::Duration;
@@ -12,34 +12,6 @@ use std::time::Duration;
 #[cfg(feature = "async")]
 pub(crate) mod boxed;
 pub mod memory;
-
-/// A trait that is Send on native targets and empty on WASM.
-#[cfg(not(target_family = "wasm"))]
-pub trait MaybeSend: Send {}
-
-/// A trait that is Sync on native targets and empty on WASM.
-#[cfg(not(target_family = "wasm"))]
-pub trait MaybeSync: Sync {}
-
-#[cfg(not(target_family = "wasm"))]
-impl<T: Send> MaybeSend for T {}
-
-#[cfg(not(target_family = "wasm"))]
-impl<T: Sync> MaybeSync for T {}
-
-/// A trait that is Send on native targets and empty on WASM.
-#[cfg(target_family = "wasm")]
-pub trait MaybeSend {}
-
-/// A trait that is Sync on native targets and empty on WASM.
-#[cfg(target_family = "wasm")]
-pub trait MaybeSync {}
-
-#[cfg(target_family = "wasm")]
-impl<T> MaybeSend for T {}
-
-#[cfg(target_family = "wasm")]
-impl<T> MaybeSync for T {}
 
 /// Where a session's request target travels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,6 +138,30 @@ pub trait Metrics {
 struct Untracked;
 impl Metrics for Untracked {}
 
+/// The receive credit a transport grants its peer, which bounds what a stream the session
+/// stops reading still holds.
+///
+/// A session's ingest stops reading a group's stream while the group's fastest reader is far
+/// behind, so flow control pushes back to the publisher. Such a paused stream keeps up to
+/// `stream` bytes counted against the shared `connection` window, so the session pauses only
+/// as many streams as fit in half of it; the rest keep reading. See
+/// [`poll::Session::receive_window`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ReceiveWindow {
+	/// The connection-wide receive window, in bytes, or [`u64::MAX`] when streams share none.
+	pub connection: u64,
+	/// The most receive credit one stream may hold, in bytes.
+	pub stream: u64,
+}
+
+impl ReceiveWindow {
+	/// A connection-wide window of `connection` bytes, of which one stream holds at most `stream`.
+	pub fn new(connection: u64, stream: u64) -> Self {
+		Self { connection, stream }
+	}
+}
+
 /// The smallest connection receive window a transport that leases may offer.
 ///
 /// A session keeps each unit it is still assembling leased, and a unit larger than the
@@ -178,6 +174,20 @@ pub const MIN_RECEIVE_WINDOW: u64 = {
 	let message = <crate::lite::AnnounceInit as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
 	let segment = crate::frame::SEGMENT as u64;
 	if message > segment { message } else { segment }
+};
+
+/// The connection receive window a server offers before it admits the session.
+///
+/// It fits the SETUP and one in-band AUTH, each with its framing, which is all a client
+/// sends before the reply. Credit cannot be withdrawn, so a session that started with
+/// its full window could bank it and spend it after a lower window or a bitrate cap
+/// arrives; the server opens the full window only once it admits the session.
+pub const SETUP_RECEIVE_WINDOW: u64 = {
+	// A type and a size prefix, each a varint of at most 8 bytes.
+	const PREFIXES: u64 = 16;
+	let setup = crate::setup::MAX_SETUP_SIZE as u64 + PREFIXES;
+	let auth = <crate::lite::Auth as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
+	setup + auth
 };
 
 /// The typed transport condition when no application code was received.
@@ -199,7 +209,7 @@ pub enum CloseKind {
 /// A transport failure with optional session and stream application codes.
 ///
 /// Session codes and stream codes belong to separate registries.
-pub trait Error: std::error::Error + MaybeSend + MaybeSync + 'static {
+pub trait Error: std::error::Error + Send + Sync + 'static {
 	/// The typed transport condition, independent of application close codes.
 	fn close_kind(&self) -> CloseKind {
 		CloseKind::Transport
@@ -223,7 +233,7 @@ pub mod poll {
 
 	use std::collections::VecDeque;
 
-	use super::{Error, MaybeSend, MaybeSync, Metrics, Untracked};
+	use super::{Error, Metrics, Untracked};
 	use bytes::{Buf, Bytes, BytesMut};
 
 	/// A transport session, shared by reference between the tasks that use it.
@@ -352,6 +362,16 @@ pub mod poll {
 		/// The session sets the target; see [`super::Probe`]. Without a sender nothing probes,
 		/// so the congestion estimate stops rising while the connection is app-limited.
 		fn probe(&self) -> Option<super::Probe> {
+			None
+		}
+
+		/// Return the receive windows now in force, or `None` when the transport cannot say.
+		///
+		/// Read whenever the session considers pausing a stream, so a window changed on a live
+		/// connection is followed. Without one, the session cannot bound the credit a paused
+		/// stream holds, so it never pauses one: ingest reads every stream as it arrives and
+		/// sheds what its readers fall behind on.
+		fn receive_window(&self) -> Option<super::ReceiveWindow> {
 			None
 		}
 
@@ -563,29 +583,25 @@ pub mod poll {
 		fn probe(&self) -> Option<super::Probe> {
 			(**self).probe()
 		}
+
+		fn receive_window(&self) -> Option<super::ReceiveWindow> {
+			(**self).receive_window()
+		}
 	}
 
 	/// A transport that the async client and server can box:
-	/// the session, its streams, send groups, and errors are thread-safe on native.
+	/// the session, its streams, send groups, and errors are thread-safe.
 	/// Implemented automatically.
 	///
 	/// Boxing is what compiles the session code once per binary rather than once per
 	/// transport.
 	pub trait Boxable:
-		Session<
-			SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
-			RecvStream: MaybeSend + MaybeSync,
-		> + MaybeSend
-		+ MaybeSync
+		Session<SendStream: Send + Sync + SendStream<Group: Send + Sync>, RecvStream: Send + Sync> + Send + Sync
 	{
 	}
 
 	impl<S> Boxable for S where
-		S: Session<
-				SendStream: MaybeSend + MaybeSync + SendStream<Group: MaybeSend + MaybeSync>,
-				RecvStream: MaybeSend + MaybeSync,
-			> + MaybeSend
-			+ MaybeSync
+		S: Session<SendStream: Send + Sync + SendStream<Group: Send + Sync>, RecvStream: Send + Sync> + Send + Sync
 	{
 	}
 
@@ -850,6 +866,18 @@ pub mod poll {
 		/// Call this method manually if you want to specify a code yourself.
 		fn stop(&mut self, code: u32);
 
+		/// Poll until the stream fails without reading it: the peer resets it, or the
+		/// connection closes. Pending for good once the peer finished it.
+		///
+		/// A session that stops reading a stream to pace it (see
+		/// [`Session::receive_window`]) watches this instead, so a reset still ends the group
+		/// it carries. It takes no bytes and grants no credit. The default never completes,
+		/// which suits a transport reporting no receive window, since none of its streams pause.
+		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+			let _ = waiter;
+			Poll::Pending
+		}
+
 		/// Poll for the next chunk, up to `max` bytes, or `None` once the peer finished the
 		/// stream. Its credit returns as it is read.
 		///
@@ -927,6 +955,12 @@ pub mod poll {
 		/// An implementation MUST also do this on Drop: [`Buffered`] forwards an explicit stop
 		/// but leaves the drop to the wrapped stream.
 		fn stop(&mut self, code: u32);
+
+		/// Poll until the stream fails without reading it. See [`RecvStream::poll_reset`].
+		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Self::Error> {
+			let _ = waiter;
+			Poll::Pending
+		}
 	}
 
 	/// Leases over a transport that cannot keep bytes unconsumed, buffering what it reads.
@@ -996,6 +1030,14 @@ pub mod poll {
 			self.chunks.clear();
 			self.len = 0;
 			self.inner.stop(code);
+		}
+
+		fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<S::Error> {
+			// Every byte arrived, so nothing is left to reset.
+			match self.fin {
+				true => Poll::Pending,
+				false => self.inner.poll_reset(waiter),
+			}
 		}
 	}
 

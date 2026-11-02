@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 import * as Announce from "./announced.ts";
 import type { Producer as BroadcastProducer } from "./broadcast.ts";
 import { Route } from "./hop.ts";
@@ -104,7 +105,7 @@ test("aborting rejects next", async () => {
 });
 
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 }
 
 test("an origin handle resolves a local publish with no session attached", async () => {
@@ -159,7 +160,7 @@ test("the local route wins over a blind request on a no-discovery origin", async
 	origin.close();
 });
 
-const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const tick = () => yieldNow();
 const start = (prefix: string): Announce.Event => ({
 	prefix: p(prefix),
 	captures: undefined,

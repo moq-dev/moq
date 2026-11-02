@@ -5,24 +5,34 @@
  */
 import { type Instant, now } from "@moq/clock";
 import { type Dispose, type GetPromise, type Getter, Once, race, Signal } from "@moq/signals";
-import {
-	FrameTooLarge,
-	GroupTooLarge,
-	ProtocolViolation,
-	StreamCode,
-	StreamError,
-	TimestampMismatch,
-	TooFarBehind,
-} from "./error.ts";
-import { Compression, stored } from "./flate/group.ts";
+import { FrameTooLarge, ProtocolViolation, StreamCode, StreamError, TimestampMismatch, TooFarBehind } from "./error.ts";
+import { Compression, encodable, stored } from "./flate/group.ts";
 import { type Expiry, type GroupRecover, hooks, type ReadGroupFrame, type Replacement } from "./internal.ts";
+import { Queue } from "./queue.ts";
 import type { Timestamp } from "./time.ts";
+import { MAX_FRAME_BYTES, SEGMENT_BYTES } from "./util/limits.ts";
 
-/** Maximum bytes of frames in a group. A write that would exceed this aborts with {@link GroupTooLarge}. */
-export const MAX_GROUP_CACHE_BYTES = 32 * 1024 * 1024;
+// A live tail budget, including a conservative charge for each frame's object and queue slot.
+const TAIL_BYTES = 32 * 1024 * 1024;
+const FRAME_BYTES = 256;
 
-/** Maximum number of frames in a group. 8192 is the largest legal group; the 8193rd write is {@link GroupTooLarge}. */
-export const MAX_GROUP_FRAMES = 8192;
+function frameBytes(frame: Frame): number {
+	if (frame instanceof Chunked) return FRAME_BYTES + frame.retained;
+	const slice = stored(frame);
+	return FRAME_BYTES + (slice ? slice.payload.length + slice.inflated : frame.payload.byteLength);
+}
+
+// The payload size, without joining a chunked frame's segments.
+function payloadBytes(frame: Frame): number {
+	if (frame instanceof Chunked) return frame.size;
+	return stored(frame)?.payload.length ?? frame.payload.byteLength;
+}
+
+const EMPTY = new Uint8Array(0);
+
+function evicted(): Error {
+	return new StreamError(StreamCode.Evicted, { message: "group front was evicted" });
+}
 
 /**
  * A frame buffered in a group: its presentation {@link Timestamp}, if any, and payload bytes.
@@ -49,6 +59,124 @@ export interface Frame {
 	arrived?: Instant;
 }
 
+/**
+ * A frame's header, declared before its payload, as Rust's `frame::Info`.
+ *
+ * @public
+ */
+export interface FrameInfo {
+	/** The payload size in bytes, which the writes must add up to exactly. */
+	size: number;
+	/** Presentation timestamp, present exactly when the track has a timescale (see {@link Frame.timestamp}). */
+	timestamp?: Timestamp;
+}
+
+// A frame written in pieces, shared by its group and every mirror. Written whole, it stays the
+// writer's one buffer; otherwise it is one buffer within a segment, or a chain of
+// `SEGMENT_BYTES` segments, each allocated by its first byte. Sealed segments shed from the
+// front under the group's tail budget, so a reader that falls behind inside it is `Evicted`.
+class Chunked implements Frame {
+	readonly size: number;
+	readonly timestamp: Timestamp | undefined;
+	arrived?: Instant;
+	// Bytes written so far, which a streaming reader waits on.
+	readonly written = new Signal(0);
+	// Settled once every byte is written (`null`), or with the failure that cut the frame short.
+	readonly done = new Once<Error | null>();
+	// The frame offset of the first retained segment.
+	base = 0;
+	// Allocated bytes across the retained segments.
+	retained = 0;
+	#segments = new Queue<Uint8Array>();
+	// Whether one write carried the whole frame, which is then a single buffer of any size.
+	#whole = false;
+
+	constructor(info: FrameInfo) {
+		this.size = info.size;
+		this.timestamp = info.timestamp;
+	}
+
+	// Append `chunk`, returning the bytes newly allocated for it.
+	write(chunk: Uint8Array): number {
+		let at = this.written.peek();
+		if (at === 0 && chunk.byteLength === this.size) {
+			this.#whole = true;
+			this.#segments.push(chunk);
+			this.retained += chunk.byteLength;
+			this.written.set(this.size);
+			return chunk.byteLength;
+		}
+		let allocated = 0;
+		let offset = 0;
+		while (offset < chunk.byteLength) {
+			// The open segment ends at the next segment boundary, or the frame's end.
+			if (at % SEGMENT_BYTES === 0) {
+				const segment = new Uint8Array(Math.min(SEGMENT_BYTES, this.size - at));
+				this.#segments.push(segment);
+				this.retained += segment.byteLength;
+				allocated += segment.byteLength;
+			}
+			const segment = this.#segments.last as Uint8Array;
+			const start = at % SEGMENT_BYTES;
+			const n = Math.min(chunk.byteLength - offset, segment.byteLength - start);
+			segment.set(chunk.subarray(offset, offset + n), start);
+			offset += n;
+			at += n;
+		}
+		this.written.set(at);
+		return allocated;
+	}
+
+	// The written bytes from frame offset `at` to the end of its segment, as a view.
+	chunk(at: number): Uint8Array {
+		const written = this.written.peek();
+		if (this.#whole) {
+			const whole = this.#segments.first as Uint8Array;
+			return at === 0 ? whole : whole.subarray(at, written);
+		}
+		const index = Math.floor(at / SEGMENT_BYTES);
+		const segment = this.#segments.at(index - this.base / SEGMENT_BYTES) as Uint8Array;
+		const start = index * SEGMENT_BYTES;
+		return segment.subarray(at - start, Math.min(segment.byteLength, written - start));
+	}
+
+	// Drop the oldest sealed segment, returning its bytes, or 0 when only the newest is left.
+	shed(): number {
+		if (this.#segments.length <= 1) return 0;
+		const segment = this.#segments.shift() as Uint8Array;
+		this.base += segment.byteLength;
+		this.retained -= segment.byteLength;
+		return segment.byteLength;
+	}
+
+	// Release every segment once the group lets go of the frame.
+	release(): void {
+		this.#segments = new Queue();
+		this.base = this.size;
+		this.retained = 0;
+	}
+
+	get payload(): Uint8Array {
+		const done = this.done.peek();
+		if (done instanceof Error) throw done;
+		if (done === undefined) throw new Error("frame is still being written");
+		if (this.base > 0) throw evicted();
+		if (this.#segments.length === 1) return this.chunk(0);
+		const out = new Uint8Array(this.size);
+		let offset = 0;
+		for (const segment of this.#segments) {
+			out.set(segment, offset);
+			offset += segment.byteLength;
+		}
+		return out;
+	}
+}
+
+// Whether a frame's head was shed, so it can no longer be read from its start.
+function headShed(frame: Frame | undefined): boolean {
+	return frame instanceof Chunked && frame.base > 0;
+}
+
 /** Options for a sequence-aware frame read. */
 export interface ReadOptions {
 	/**
@@ -69,7 +197,7 @@ export interface Info {
 /** Reactive backing state shared by the group producer and one consumer. */
 class GroupState {
 	readonly sequence: number;
-	frames = new Signal<Frame[]>([]);
+	frames = new Signal(new Queue<Frame>());
 	closed = new Once<Error | null>();
 	total = new Signal<number>(0); // The total number of frames in the group thus far
 
@@ -100,6 +228,7 @@ class GroupState {
 	// Called with the frame count on every write, synchronously: a track's largest must not
 	// trail a write that already returned, as a batched `total` notification would.
 	progress = new Set<(total: number) => void>();
+	shedRead?: () => void;
 
 	constructor(sequence: number) {
 		this.sequence = sequence;
@@ -134,7 +263,6 @@ function appendFrame(state: GroupState, frame: Frame) {
 	state.timestamp ??= frame.timestamp;
 	if (frame.timestamp === undefined) state.latest = undefined;
 	else if (state.latest === undefined || state.latest.isBefore(frame.timestamp)) state.latest = frame.timestamp;
-	state.cacheBytes += stored(frame)?.payload.length ?? frame.payload.byteLength;
 	state.frames.mutate((frames) => {
 		frames.push(frame);
 	});
@@ -143,7 +271,7 @@ function appendFrame(state: GroupState, frame: Frame) {
 	for (const fn of state.progress) fn(state.total.peek());
 }
 
-let makeDemand: (sequence: number, used: Getter<boolean>, state: GroupState) => Demand;
+let makeDemand: (sequence: number, wanted: Getter<boolean>, state: GroupState) => Demand;
 
 /**
  * A watch-only view of a group's mirror readers, including coalesced fetches.
@@ -153,32 +281,22 @@ let makeDemand: (sequence: number, used: Getter<boolean>, state: GroupState) => 
 export class Demand {
 	/** The group sequence this handle watches. */
 	readonly sequence: number;
-	#used: Getter<boolean>;
+	#wanted: Getter<boolean>;
 	#state: GroupState;
 
-	private constructor(sequence: number, used: Getter<boolean>, state: GroupState) {
+	private constructor(sequence: number, wanted: Getter<boolean>, state: GroupState) {
 		this.sequence = sequence;
-		this.#used = used;
+		this.#wanted = wanted;
 		this.#state = state;
 	}
 
 	static {
-		makeDemand = (sequence, used, state) => new Demand(sequence, used, state);
+		makeDemand = (sequence, wanted, state) => new Demand(sequence, wanted, state);
 	}
 
 	/** Whether any mirror reader is attached. */
-	get used(): Getter<boolean> {
-		return this.#used;
-	}
-
-	/** Wait until all mirror readers leave. Throws once the group closes: its abort error, or a clean-close error. */
-	async unused(): Promise<void> {
-		for (;;) {
-			const closed = this.#state.closed.peek();
-			if (closed !== undefined) throw closed ?? new Error("group is closed");
-			if (!this.#used.peek()) return;
-			await Signal.race(this.#used, this.#state.closed);
-		}
+	get wanted(): Getter<boolean> {
+		return this.#wanted;
 	}
 
 	/** The group's clean close or abort error. */
@@ -199,10 +317,10 @@ export class Producer {
 	#state: GroupState;
 	#mirrors?: Set<GroupState>;
 
-	// Whether any mirror reader is attached (see {@link Demand.used}). Fetch coalescing watches it to
+	// Whether any mirror reader is attached (see {@link Demand.wanted}). Fetch coalescing watches it to
 	// cancel an abandoned download; a group can stay open indefinitely (a catalog or JSON stream),
 	// so this is what stops a reader-less fetch instead of the stream ending on its own.
-	#used = new Signal<boolean>(false);
+	#wanted = new Signal<boolean>(false);
 	#demand: Demand;
 
 	// Exclusive cap on the frame count, set when the track ends inside this group: a write
@@ -213,6 +331,9 @@ export class Producer {
 	// not from its creation, so a group still being filled is never reclaimed.
 	#activity = now();
 
+	// The frame being written in pieces, if any; no other frame is written until it ends.
+	#open?: FrameProducer;
+
 	// The tracks this group joined before its first frame, each checking that frame's
 	// timestamp against its neighbors' starts.
 	#admits?: ((start: Timestamp) => () => void)[];
@@ -220,7 +341,7 @@ export class Producer {
 	constructor(sequence: number) {
 		this.#state = new GroupState(sequence);
 		this.sequence = sequence;
-		this.#demand = makeDemand(sequence, this.#used, this.#state);
+		this.#demand = makeDemand(sequence, this.#wanted, this.#state);
 	}
 
 	static {
@@ -230,19 +351,25 @@ export class Producer {
 			if (state.compressed !== undefined)
 				throw new ProtocolViolation("group compression disagrees with its track");
 			if (compressed && state.start !== 0) throw new ProtocolViolation("compressed group lacks its prefix");
+			if (compressed && Array.from(state.frames.peek()).some((frame) => frame instanceof Chunked))
+				throw new ProtocolViolation("compressed group holds a streamed frame");
+			// A frame written before the track chose compression is encoded and sent whole too.
+			if (compressed && Array.from(state.frames.peek()).some((frame) => !encodable(frame.payload.byteLength)))
+				throw new FrameTooLarge();
 			state.compressed = compressed;
 			if (!compressed) return;
 			const flate = new Compression();
+			flate.failed = (error) => group.abort(error);
 			state.flate = flate;
-			const frames = state.frames.peek().map((frame) => flate.push(frame));
-			state.frames.set(frames);
-			state.cacheBytes = flate.stored;
-			if (flate.stored > MAX_GROUP_CACHE_BYTES) group.#overflow();
+			const frames = Array.from(state.frames.peek(), (frame) => flate.push(frame));
+			state.frames.set(new Queue(frames));
+			state.cacheBytes = frames.reduce((bytes, frame) => bytes + frameBytes(frame), 0);
 			for (const mirror of group.#mirrors ?? []) {
-				mirror.frames.set(frames.slice(mirror.start - state.start));
+				mirror.frames.set(new Queue(frames.slice(mirror.start - state.start)));
 				mirror.flate = flate;
 				mirror.compressed = true;
 			}
+			group.#trim();
 			if (state.closed.peek() !== undefined) flate.finish();
 		};
 		hooks.groupOffset = (group) => group.#state.offset;
@@ -278,11 +405,14 @@ export class Producer {
 		};
 		hooks.overRefresh = (group, ratio) => {
 			const state = group.#state;
-			const first = state.frames.peek()[0];
-			// Without its first frame the cache cannot measure the group, so it asks for nothing.
-			if (state.start !== 0 || first === undefined) return false;
-			const head = stored(first)?.payload.length ?? first.payload.byteLength;
-			return state.cacheBytes - head > head * ratio;
+			if (state.offset !== 0) return false;
+			const first = state.frames.peek().first;
+			// A shed front, whole frames or the first frame's head, cannot be replayed.
+			if (state.start > 0 || headShed(first)) return true;
+			if (first === undefined) return false;
+			const head = payloadBytes(first);
+			const bytes = state.flate?.stored ?? state.cacheBytes - state.frames.peek().length * FRAME_BYTES;
+			return bytes - head > head * ratio;
 		};
 		hooks.limitGroup = (group, frames) => {
 			// A closed group takes no more frames, but one already past the cap still
@@ -332,14 +462,21 @@ export class Producer {
 		dst.compressed = this.#state.compressed;
 		// A track restamps its own mirror with when the group joined it.
 		dst.arrived = this.#state.arrived;
-		for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
-		dst.start = this.#state.start;
+		if (this.#state.start === this.#state.offset && !headShed(this.#state.frames.peek().first)) {
+			for (const frame of this.#state.frames.peek()) appendFrame(dst, frame);
+		} else {
+			dst.flate = undefined;
+			const closed = this.#state.closed.peek();
+			dst.closed.set(closed instanceof Error ? closed : evicted());
+		}
+		dst.start = dst.closed.peek() instanceof Error ? this.#state.offset : this.#state.start;
 		dst.offset = this.#state.offset;
 		// The replay only covers what is still buffered, so the count has to come from the
 		// source: it is what names a frame's absolute sequence, and what a publisher reads
 		// to resolve the live edge.
 		dst.total.set(this.#state.total.peek());
 
+		if (dst.closed.peek() !== undefined) return makeConsumer(dst);
 		const closed = this.#state.closed.peek();
 		if (closed !== undefined) {
 			dst.closed.set(closed);
@@ -348,14 +485,14 @@ export class Producer {
 
 		this.#mirrors ??= new Set();
 		this.#mirrors.add(dst);
-		this.#used.set(true);
+		this.#wanted.set(true);
 
 		// Track this mirror's close eagerly (not just lazily on the next write) so demand drops the
 		// moment the last reader leaves, letting an abandoned fetch cancel even with no more frames.
 		const dispose = dst.closed.subscribe((c) => {
 			if (c === undefined) return;
 			this.#mirrors?.delete(dst);
-			this.#used.set((this.#mirrors?.size ?? 0) > 0);
+			this.#wanted.set((this.#mirrors?.size ?? 0) > 0);
 			dispose();
 		});
 
@@ -376,17 +513,92 @@ export class Producer {
 		this.#writeFrame(frame);
 	}
 
+	/**
+	 * Start a frame of `info.size` bytes, written in pieces, as Rust's `create_frame`.
+	 *
+	 * Readers can stream it as it is written (see {@link Consumer.nextFrame}), so a frame
+	 * of any size is held only within the group's retained tail. No other frame can be
+	 * written until this one finishes.
+	 */
+	createFrame(info: FrameInfo): FrameProducer {
+		const { size, timestamp } = info;
+		if (!Number.isSafeInteger(size) || size < 0) throw new RangeError("invalid frame size");
+		const frame = { payload: EMPTY, timestamp };
+		if (this.#state.flate) {
+			// A compressed frame is encoded whole once written, as `writeFrame` does.
+			if (!encodable(size)) throw new FrameTooLarge();
+			this.#admit(frame);
+			const payload = new Uint8Array(size);
+			let written = 0;
+			const open = makeFrameProducer(info, {
+				written: () => written,
+				write: (chunk) => {
+					if (this.#open !== open) throw new Error("group is closed");
+					payload.set(chunk, written);
+					written += chunk.byteLength;
+				},
+				finish: () => {
+					if (this.#open !== open) throw new Error("group is closed");
+					this.#open = undefined;
+					this.#writeFrame({ payload, timestamp });
+				},
+				abort: (error) => this.abort(error),
+			});
+			this.#open = open;
+			return open;
+		}
+
+		const commits = this.#admit(frame);
+		const entry = new Chunked(info);
+		this.#append(entry, now(), commits);
+		const open = makeFrameProducer(info, {
+			written: () => entry.written.peek(),
+			write: (chunk) => {
+				if (this.#open !== open) throw new Error("group is closed");
+				this.#activity = now();
+				this.#state.cacheBytes += entry.write(chunk);
+				this.#trim();
+			},
+			finish: () => {
+				if (this.#open !== open) throw new Error("group is closed");
+				this.#open = undefined;
+				entry.arrived = now();
+				this.#activity = entry.arrived;
+				entry.done.set(null);
+				// Wake whole-frame readers waiting for it to complete.
+				this.#state.frames.mutate(() => {});
+				for (const mirror of this.#mirrors ?? []) mirror.frames.mutate(() => {});
+			},
+			abort: (error) => this.abort(error),
+		});
+		this.#open = open;
+		return open;
+	}
+
 	#writeFrame(frame: Frame, inflated?: number) {
-		// Closed first: a write after a clean close at the cap would otherwise take the
-		// overflow path, wipe committed frames, and leave readers with an empty success.
-		if (this.#state.closed.peek() !== undefined) throw new Error("group is closed");
-		// A frame past the cache cap would make the group exceed its budget by itself, so
-		// accepting it would report success for a write nothing can ever read. Rust rejects
-		// it up front with `Error::FrameTooLarge`; do the same rather than silently dropping it.
-		if (frame.payload.byteLength > MAX_GROUP_CACHE_BYTES || (inflated ?? 0) > MAX_GROUP_CACHE_BYTES)
+		// A plain frame written whole is the writer's own buffer, at any size. A compressed one
+		// is sent whole, so its slice must fit: a received one as declared, a local one encoded.
+		const size = frame.payload.byteLength;
+		if (this.#state.flate && (inflated === undefined ? !encodable(size) : size > MAX_FRAME_BYTES))
 			throw new FrameTooLarge();
+		if ((inflated ?? 0) > MAX_FRAME_BYTES) throw new FrameTooLarge();
+		const commits = this.#admit(frame);
 		if (inflated !== undefined && (!this.#state.flate || !Number.isSafeInteger(inflated) || inflated < 0))
 			throw new ProtocolViolation("unexpected inflated frame size");
+
+		const arrived = now();
+		frame = new Landed(frame, arrived);
+		if (this.#state.flate) {
+			frame = this.#state.flate.push(frame, inflated);
+		}
+		this.#append(frame, arrived, commits);
+	}
+
+	// Check that the next frame may be written, returning what records its admission.
+	#admit(frame: Frame): (() => void)[] | undefined {
+		// Refuse further writes before inspecting or changing committed content.
+		if (this.#state.closed.peek() !== undefined) throw new Error("group is closed");
+		if (this.#open) throw new Error("a frame is still being written");
 		if (this.#state.total.peek() === Number.MAX_SAFE_INTEGER)
 			throw new ProtocolViolation("group frame index exceeds the safe integer range");
 		checkTimed(this.#state.timed, frame);
@@ -395,30 +607,16 @@ export class Producer {
 		}
 		// Frame 0 must fit between its neighbors in every track it joined, checked before
 		// any of them records it, so a refusal leaves the group and its tracks as they were.
-		let commits: (() => void)[] | undefined;
 		if (this.#admits && frame.timestamp !== undefined && this.#state.total.peek() === 0) {
 			const start = frame.timestamp;
-			commits = this.#admits.map((admit) => admit(start));
+			return this.#admits.map((admit) => admit(start));
 		}
-		if (
-			this.#state.total.peek() - this.#state.offset >= MAX_GROUP_FRAMES ||
-			((!this.#state.flate || inflated !== undefined) &&
-				this.#state.cacheBytes + frame.payload.byteLength > MAX_GROUP_CACHE_BYTES) ||
-			(this.#state.flate?.declared ?? this.#state.cacheBytes) + (inflated ?? frame.payload.length) >
-				MAX_GROUP_CACHE_BYTES
-		) {
-			this.#overflow();
-		}
+		return undefined;
+	}
 
-		const arrived = now();
-		frame = new Landed(frame, arrived);
-		if (this.#state.flate) {
-			frame = this.#state.flate.push(frame, inflated);
-			if (this.#state.flate.stored > MAX_GROUP_CACHE_BYTES) {
-				this.#overflow();
-			}
-		}
+	#append(frame: Frame, arrived: Instant, commits: (() => void)[] | undefined) {
 		this.#activity = arrived;
+		this.#state.cacheBytes += frameBytes(frame);
 		appendFrame(this.#state, frame);
 		if (commits) {
 			this.#admits = undefined;
@@ -431,19 +629,45 @@ export class Producer {
 				else appendFrame(mirror, frame);
 			}
 		}
+		this.#trim();
 	}
 
-	#overflow(): never {
-		const error = new GroupTooLarge();
-		this.#state.frames.set([]);
-		this.#state.cacheBytes = 0;
-		this.#state.flate?.abort(error);
-		for (const mirror of this.#mirrors ?? []) {
-			mirror.frames.set([]);
-			mirror.cacheBytes = 0;
+	#trim(): void {
+		const state = this.#state;
+		const frames = state.frames.peek();
+		const start = state.start;
+		let shed = false;
+		while (state.cacheBytes > TAIL_BYTES) {
+			const front = frames.first;
+			if (!front) break;
+			// A chunked front frame sheds its sealed segments first, keeping only its newest.
+			const freed = front instanceof Chunked ? front.shed() : 0;
+			if (freed > 0) {
+				state.cacheBytes -= freed;
+				shed = true;
+				continue;
+			}
+			// The newest frame stays readable: its writer holds it whole anyway.
+			if (frames.length === 1) break;
+			frames.shift();
+			state.cacheBytes -= frameBytes(front);
+			if (front instanceof Chunked) front.release();
+			state.start++;
 		}
-		this.abort(error);
-		throw error;
+		if (state.start === start && !shed) return;
+		state.flate?.shed(state.start);
+		const lost = headShed(frames.first);
+		for (const mirror of this.#mirrors ?? []) {
+			// A mirror that has not taken the front frame can no longer read it from its start.
+			if (mirror.closed.peek() !== undefined) continue;
+			if (mirror.start > state.start || (mirror.start === state.start && !lost)) continue;
+			mirror.frames.set(new Queue());
+			mirror.cacheBytes = 0;
+			mirror.flate = undefined;
+			mirror.closed.set(evicted());
+			this.#mirrors?.delete(mirror);
+		}
+		this.#wanted.set((this.#mirrors?.size ?? 0) > 0);
 	}
 
 	/** True once the group has been closed. */
@@ -466,6 +690,13 @@ export class Producer {
 
 	#end(outcome: Error | null) {
 		if (this.#state.closed.peek() !== undefined) return;
+		// A frame cut short leaves the group incomplete, so even a clean end fails it.
+		if (this.#open) {
+			this.#open = undefined;
+			outcome ??= new Error("group finished while a frame was being written");
+			const last = this.#state.frames.peek().last;
+			if (last instanceof Chunked && last.done.peek() === undefined) last.done.set(outcome);
+		}
 		this.#state.flate?.finish();
 		this.#state.closed.set(outcome);
 
@@ -475,6 +706,173 @@ export class Producer {
 			}
 			this.#mirrors.clear();
 		}
+	}
+}
+
+// What a frame producer drives in its group.
+interface FrameOps {
+	written(): number;
+	write(chunk: Uint8Array): void;
+	finish(): void;
+	abort(error: Error): void;
+}
+
+let makeFrameProducer: (info: FrameInfo, ops: FrameOps) => FrameProducer;
+
+/**
+ * Writes one frame's payload in pieces, as Rust's `frame::Producer`. Obtain one from
+ * {@link Producer.createFrame}.
+ *
+ * The writes must add up to the declared size exactly, and {@link finish} commits the frame.
+ * Its group takes no other frame until then; ending the group first fails the frame.
+ *
+ * @public
+ */
+export class FrameProducer {
+	/** The declared payload size in bytes. */
+	readonly size: number;
+	/** The frame's presentation timestamp, if its track is timed. */
+	readonly timestamp: Timestamp | undefined;
+	#ops: FrameOps;
+	#done = false;
+
+	private constructor(info: FrameInfo, ops: FrameOps) {
+		this.size = info.size;
+		this.timestamp = info.timestamp;
+		this.#ops = ops;
+	}
+
+	static {
+		makeFrameProducer = (info, ops) => new FrameProducer(info, ops);
+	}
+
+	/** Bytes still needed to complete the frame. */
+	get remaining(): number {
+		return this.size - this.#ops.written();
+	}
+
+	/** Append `chunk`, waking readers streaming the frame. The bytes are copied unless one write carries the whole frame. */
+	write(chunk: Uint8Array): void {
+		if (this.#done) throw new Error("frame is closed");
+		if (chunk.byteLength > this.remaining) throw new RangeError("write exceeds the frame's declared size");
+		if (chunk.byteLength > 0) this.#ops.write(chunk);
+	}
+
+	/** Commit the frame once every declared byte is written. */
+	finish(): void {
+		if (this.#done) throw new Error("frame is closed");
+		if (this.remaining !== 0) throw new RangeError(`frame is ${this.remaining} bytes short of its declared size`);
+		this.#done = true;
+		this.#ops.finish();
+	}
+
+	/** Fail the frame and its group with `error`. A no-op once the frame finished or aborted. */
+	abort(error: Error): void {
+		if (this.#done) return;
+		this.#done = true;
+		this.#ops.abort(error);
+	}
+}
+
+let makeFrameConsumer: (sequence: number, frame: Frame) => FrameConsumer;
+// The next chunk without waiting: `undefined` at the end, or `WAIT` until the next write.
+let pollChunk: (consumer: FrameConsumer) => Uint8Array | undefined | typeof WAIT;
+// What a waiting chunk read waits on.
+let chunkChanged: (consumer: FrameConsumer) => Getter<unknown>[];
+const WAIT: unique symbol = Symbol("wait");
+
+// Parts read in order, joined into one buffer, copied only when there is more than one.
+function joined(parts: Uint8Array[], size: number): Uint8Array {
+	if (parts.length === 1) return parts[0];
+	const out = new Uint8Array(size);
+	let at = 0;
+	for (const part of parts) {
+		out.set(part, at);
+		at += part.byteLength;
+	}
+	return out;
+}
+
+/**
+ * Reads one frame's payload as it arrives, as Rust's `frame::Consumer`. Obtain one from
+ * {@link Consumer.nextFrame}.
+ *
+ * Chunks are read-only views shared with other readers. A frame larger than its group's
+ * retained tail sheds its oldest segments while it is written, so a reader that falls that
+ * far behind fails with a `StreamError` of code `Evicted`.
+ *
+ * @public
+ */
+export class FrameConsumer {
+	/** The frame's sequence number within its group. */
+	readonly sequence: number;
+	/** The payload size in bytes. */
+	readonly size: number;
+	/** The frame's presentation timestamp, if its track is timed. */
+	readonly timestamp: Timestamp | undefined;
+	#frame: Frame;
+	#offset = 0;
+
+	private constructor(sequence: number, frame: Frame) {
+		this.sequence = sequence;
+		this.#frame = frame;
+		this.size = payloadBytes(frame);
+		this.timestamp = frame.timestamp;
+	}
+
+	static {
+		makeFrameConsumer = (sequence, frame) => new FrameConsumer(sequence, frame);
+		pollChunk = (consumer) => consumer.#poll();
+		chunkChanged = (consumer) => {
+			const frame = consumer.#frame;
+			return frame instanceof Chunked ? [frame.written, frame.done] : [];
+		};
+	}
+
+	/** When the frame's last byte landed in this node's group; `undefined` until then. */
+	get arrived(): Instant | undefined {
+		return this.#frame.arrived;
+	}
+
+	#poll(): Uint8Array | undefined | typeof WAIT {
+		const frame = this.#frame;
+		if (!(frame instanceof Chunked)) {
+			if (this.#offset >= this.size) return undefined;
+			this.#offset = this.size;
+			return frame.payload;
+		}
+		const done = frame.done.peek();
+		if (done instanceof Error) throw done;
+		if (this.#offset < frame.base) throw evicted();
+		if (this.#offset < frame.written.peek()) {
+			const chunk = frame.chunk(this.#offset);
+			this.#offset += chunk.byteLength;
+			return chunk;
+		}
+		return done === null ? undefined : WAIT;
+	}
+
+	/** The next chunk of the payload, waiting for it to be written; `undefined` once every byte is read. */
+	async readChunk(): Promise<Uint8Array | undefined> {
+		for (;;) {
+			const chunk = this.#poll();
+			if (chunk !== WAIT) return chunk;
+			await Signal.race(...chunkChanged(this));
+		}
+	}
+
+	/**
+	 * The rest of the payload in one buffer, copied only when it spans chunks. It grows as
+	 * bytes arrive, so a declared size is never allocated ahead of them.
+	 */
+	async readAll(): Promise<Uint8Array> {
+		const parts: Uint8Array[] = [];
+		let size = 0;
+		for (let chunk = await this.readChunk(); chunk; chunk = await this.readChunk()) {
+			parts.push(chunk);
+			size += chunk.byteLength;
+		}
+		return parts.length === 0 ? EMPTY : joined(parts, size);
 	}
 }
 
@@ -666,6 +1064,8 @@ export class Consumer {
 	readonly sequence: number;
 
 	#state: GroupState;
+	// The copy it was mirrored from, which that copy's cache evicts.
+	readonly #mirrored: GroupState;
 	#expiry?: Expiry;
 	// Carries the group across its logical track's route changes; see `resume.ts`.
 	#recover?: GroupRecover;
@@ -682,9 +1082,13 @@ export class Consumer {
 	#released = false;
 	// The arrival of the copy first read, kept once a replacement copy is adopted.
 	#arrived?: Instant;
+	// The last frame handed out to stream before it completed. Cut short, it is lost, so no
+	// other copy can continue the group past it.
+	#streamed?: Chunked;
 
 	private constructor(state: GroupState) {
 		this.#state = state;
+		this.#mirrored = state;
 		this.sequence = state.sequence;
 	}
 
@@ -740,12 +1144,19 @@ export class Consumer {
 
 	// Whether a failure of the copy being read may still be continued from another route.
 	#recovers(failed: Error): boolean {
-		return !this.#terminal && this.#recover?.wants(failed) === true;
+		return !this.#terminal && !this.#torn() && this.#recover?.wants(failed) === true;
+	}
+
+	// Whether a frame handed out to stream was cut short.
+	#torn(): boolean {
+		const done = this.#streamed?.done.peek();
+		return done !== undefined && done !== null;
 	}
 
 	static {
 		makeConsumer = (state) => new Consumer(state);
 		hooks.releaseGroupReader = (group, abort) => group.#release(abort);
+		hooks.readsMirrored = (group) => group.#state === group.#mirrored;
 		hooks.groupTimestamp = (group) =>
 			group.#state.unverified || group.#state.offset !== 0 ? undefined : group.#state.timestamp;
 		hooks.groupLatest = (group) => (group.#state.unverified ? undefined : group.#state.latest);
@@ -776,9 +1187,10 @@ export class Consumer {
 			if (group.#closed?.peek() instanceof Error && group.#verdict.peek() === undefined)
 				group.#closed = undefined;
 		};
-		hooks.readGroupFrame = (group, compressed) => group.#readFrame(0, compressed);
-		hooks.evictGroup = (group) => {
-			group.#evict();
+		hooks.readGroupFrame = (group, compressed, from = 0) => group.#readFrame(from, compressed, true);
+		hooks.evictGroup = (group) => group.#evict();
+		hooks.onShedRead = (group, notify) => {
+			group.#state.shedRead = notify;
 		};
 	}
 
@@ -801,7 +1213,9 @@ export class Consumer {
 		return true;
 	}
 
-	#evict() {
+	#evict(): boolean {
+		// A group read on from another copy is that copy's to reclaim.
+		if (this.#state !== this.#mirrored) return false;
 		const frames = this.#bufferedFrames();
 		if (frames.length > 0) {
 			// Unread content is going away either way. If the budget had already given up
@@ -818,7 +1232,10 @@ export class Consumer {
 		}
 		this.#state.cacheBytes = 0;
 		this.#state.flate = undefined;
-		this.#state.frames.set([]);
+		this.#state.frames.set(new Queue());
+		// A failed copy holds nothing more to reclaim, and its recovery may still continue the group.
+		const closed = this.#state.closed.peek();
+		return !(closed instanceof Error && this.#recovers(closed));
 	}
 
 	// The next change a parked read waits for.
@@ -834,7 +1251,7 @@ export class Consumer {
 	// again; throws the error that ends the group once nothing can continue it.
 	async #resume(failed: Error | undefined): Promise<boolean> {
 		const recover = this.#recover;
-		if (!recover?.wants(failed)) return false;
+		if (this.#torn() || !recover?.wants(failed)) return false;
 		// A stall's attempt learns nothing of a failure since: ask again with it.
 		if (failed && this.#attempt && !this.#attempt.failed) this.#abandon();
 		let attempt = this.#attempt;
@@ -914,7 +1331,7 @@ export class Consumer {
 
 	// The unread frames. Every look at the buffer goes through here, so readiness, reads and
 	// `done` agree on what is left.
-	#bufferedFrames(): Frame[] {
+	#bufferedFrames(): Queue<Frame> {
 		const frames = this.#state.frames.peek();
 		// A resumed copy repeats the frames an earlier one already delivered.
 		while (this.#state.start < this.#skip && frames.length > 0) {
@@ -924,10 +1341,36 @@ export class Consumer {
 		return frames;
 	}
 
-	#readBufferedFrame(compressed = false): ReadGroupFrame | undefined {
+	// Whether the next frame can be read whole without waiting.
+	#ready(): boolean {
+		const front = this.#bufferedFrames().first;
+		return front !== undefined && !(front instanceof Chunked && front.done.peek() === undefined);
+	}
+
+	// Take the next frame whole, or as chunks when it is a chunked frame `streaming` reads, or
+	// one still being written that a `collect` read gathers itself. A plain whole read leaves an
+	// incomplete frame buffered.
+	#readBufferedFrame(compressed = false, take: "whole" | "collect" | "stream" = "whole"): ReadGroupFrame | undefined {
 		const frames = this.#bufferedFrames();
-		const buffered = frames.shift();
-		if (!buffered) return undefined;
+		const closed = this.#state.closed.peek();
+		if (closed instanceof StreamError && closed.code === StreamCode.Evicted) {
+			const notify = this.#state.shedRead;
+			this.#state.shedRead = undefined;
+			notify?.();
+		}
+		const front = frames.first;
+		if (!front) return undefined;
+		if (front instanceof Chunked) {
+			if (take === "stream" || (take === "collect" && front.done.peek() === undefined)) {
+				frames.shift();
+				const sequence = this.#state.start++;
+				this.#streamed = front;
+				this.#closed?.refresh();
+				return { sequence, frame: front, chunks: makeFrameConsumer(sequence, front) };
+			}
+			if (front.done.peek() === undefined) return undefined;
+		}
+		const buffered = frames.shift() as Frame;
 
 		const slice = compressed ? stored(buffered) : undefined;
 		let frame: Frame;
@@ -1004,7 +1447,7 @@ export class Consumer {
 				this.#abandon();
 				return;
 			}
-			if (this.#bufferedFrames().length > 0) return;
+			if (this.#ready()) return;
 			const closed = this.#state.closed.peek();
 			if (closed instanceof Error && (await this.#resume(closed))) continue;
 			if (closed !== undefined) {
@@ -1039,16 +1482,32 @@ export class Consumer {
 		return { sequence: read.sequence, ...read.frame };
 	}
 
-	async #readFrame(from: number, compressed = false): Promise<ReadGroupFrame | undefined> {
+	/**
+	 * Reads the next frame as it arrives, as Rust's `next_frame`: resolves once its header is
+	 * buffered, without waiting for its payload. Use it for a frame too large to hold whole.
+	 */
+	async nextFrame(): Promise<FrameConsumer | undefined> {
+		const read = await this.#readFrame(0, false, true);
+		if (!read) return undefined;
+		return read.chunks ?? makeFrameConsumer(read.sequence, read.frame);
+	}
+
+	async #readFrame(from: number, compressed = false, streaming = false): Promise<ReadGroupFrame | undefined> {
 		for (;;) {
 			if (this.#terminal) {
 				this.#abandon();
 				throw this.#terminal;
 			}
 
-			const read = this.#readBufferedFrame(compressed);
+			// A whole read streams a frame still being written into its own buffer, rather
+			// than waiting for it whole while the group sheds its head.
+			const read = this.#readBufferedFrame(compressed, streaming ? "stream" : "collect");
 			if (read) {
-				if (read.sequence < from) continue;
+				if (read.sequence < from) {
+					if (read.chunks) this.#streamed = undefined;
+					continue;
+				}
+				if (read.chunks && !streaming) return this.#join(read.sequence, read.chunks);
 				return read;
 			}
 
@@ -1074,6 +1533,40 @@ export class Consumer {
 				continue;
 			}
 			await this.#changed();
+		}
+	}
+
+	// Read a streamed frame whole. Losing any of it ends this reader, since the frame is gone.
+	async #join(sequence: number, chunks: FrameConsumer): Promise<ReadGroupFrame | undefined> {
+		const parts: Uint8Array[] = [];
+		let size = 0;
+		try {
+			for (;;) {
+				if (this.#terminal) throw this.#terminal;
+				const chunk = pollChunk(chunks);
+				if (chunk === undefined) break;
+				if (chunk !== WAIT) {
+					parts.push(chunk);
+					size += chunk.byteLength;
+					continue;
+				}
+				// A released reader stops waiting on a frame its producer may never finish.
+				if (this.#released) {
+					const closed = this.#state.closed.peek();
+					if (closed instanceof Error) throw closed;
+					return undefined;
+				}
+				// A frame stalled partway is the stall the drift budget bounds, as an empty group is.
+				if (this.#expire()) continue;
+				await Signal.race(...chunkChanged(chunks), this.#state.closed, ...(this.#expiry?.changed ?? []));
+			}
+			const payload = parts.length === 0 ? EMPTY : joined(parts, size);
+			return { sequence, frame: { payload, timestamp: chunks.timestamp, arrived: chunks.arrived } };
+		} catch (error) {
+			this.#terminal ??= error instanceof Error ? error : new Error(String(error));
+			if (this.#verdict.peek() === undefined) this.#verdict.set(this.#terminal);
+			this.#closed?.refresh();
+			throw this.#terminal;
 		}
 	}
 

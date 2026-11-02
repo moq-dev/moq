@@ -1,11 +1,11 @@
-# [XS] moq-transport 18 and 22 only
+# [XS] moq-transport 18, 20, and 22 only
 
 ## Goal
 
-`moq-net` and `@moq/net` speak moq-transport drafts 18 and 22 and no
-others. Drafts 14 to 17 and 19 to 21 are deleted from the wire code, tests,
+`moq-net` and `@moq/net` speak moq-transport drafts 18, 20, and 22 and no
+others. Drafts 14 to 17, 19, and 21 are deleted from the wire code, tests,
 fuzzing, interop lanes, and docs, and our `moq-dev-rs` and `moq-dev-js`
-entries in the interop runner registry declare only 18 and 22.
+entries in the interop runner registry declare only 18, 20, and 22.
 
 Out of scope: moq-lite versions. moq-lite-01/02 still negotiate over
 `moql` with the CLIENT_SETUP/SERVER_SETUP codec, which stays.
@@ -57,9 +57,16 @@ the other breaks before the cut. Drafts 14 to 17
 ([moq-dev/moq#6753](https://github.com/moq-dev/moq/pull/6753)) and 19 to 21
 ([moq-dev/moq#6754](https://github.com/moq-dev/moq/pull/6754)) are gone.
 
+Decided 2026-10-28 (maintainer): draft 20 came back, so the public relay
+dashboard lists more than two moq-transport drafts. It costs only draft-20's
+field-count LOCATION_FILTER codec and its SUBSCRIBE_TRACKS parameters; every
+other gate is shared with draft 22, whose changes since 20 are editorial
+(draft-22 appendix A.1 and A.2). Drafts 19 and 21 stay dropped: 19 splits
+most gates between 18 and 22, and 21 differs from 20 only by its ALPN.
+
 This README's remaining work: open a PR on
 `englishm/moq-interop-runner` narrowing the `moq-dev-rs` and `moq-dev-js`
-entries in `implementations.json` to drafts 18 and 22. The maintainer
+entries in `implementations.json` to drafts 18, 20, and 22. The maintainer
 approved posting there on 2026-10-24.
 
 ## Related

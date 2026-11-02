@@ -48,11 +48,17 @@ datagram compresses alone, with a fresh window.
 ## Cost on the relay
 
 A relay never compresses. It stores a compressed group as received, forwards
-those bytes to sessions that carry the flag, and inflates the group once, on
+those bytes to sessions that carry the flag, and inflates the group once, from
 the first plain read. Every later plain reader of that group, on any session
 and any version, shares that copy, so a thousand moq-lite 06 viewers cost one
 inflate. The copy counts against the relay's [cache](/bin/relay/config#cache)
 like the stored bytes and is dropped with its group.
+
+A long compressed group sheds its oldest frames like a plain one. Once a plain
+read started the inflated copy, the relay inflates each stored frame before
+shedding it, so plain readers carry on past the shed front, and the copy sheds
+its own oldest frames past 32 MB. A plain reader that arrives after the first
+frame was shed, before any plain read started, sees `Evicted`.
 
 Each compressed frame declares its inflated size, which meets the same group
 and cache limits as a plain frame's before any inflate starts. Output that

@@ -41,8 +41,11 @@ import (
 
 const readChunk = 64 * 1024
 
-// media.TrackConsumer max delay: how much reordering the jitter buffer tolerates.
-const maxDelay = time.Second
+// How far a read may fall behind live before it skips. A gap fails the run, which a reader skipping
+// behind live would cause itself: the matrix starts every subscriber at once, and a runtime starved
+// by the others can fall a second behind. That is this reader's speed, not the delivery under test.
+// A track's max-age caps it, so interop.sh's Rust publisher keeps its media at least this long.
+const maxDelay = 5 * time.Second
 
 // finishLinger is how long a finished publisher stays up for the late readers.
 const finishLinger = 10 * time.Second
@@ -70,7 +73,6 @@ func publishTone(ctx context.Context, audio *moqaudio.Producer, tones []float64)
 	defer ticker.Stop()
 
 	data := make([]byte, audioBatchSamples*len(tones)*4)
-	timestampUs := uint64(0)
 	phase := 0
 	for {
 		select {
@@ -84,12 +86,12 @@ func publishTone(ctx context.Context, audio *moqaudio.Producer, tones []float64)
 				binary.LittleEndian.PutUint32(data[(i*len(tones)+c)*4:], math.Float32bits(float32(sample)))
 			}
 		}
-		if err := audio.Write(moqaudio.Frame{Timestamp: time.Duration(timestampUs) * time.Microsecond, Data: data}); err != nil {
+		// Stamped on the sample clock, so every batch time is exact.
+		if err := audio.Write(moqaudio.Frame{Timestamp: moq.Timestamp{Value: uint64(phase), Scale: audioRate}, Data: data}); err != nil {
 			fmt.Fprintf(os.Stderr, "tone: %v\n", err)
 			return
 		}
 		phase += audioBatchSamples
-		timestampUs += audioBatchUs
 	}
 }
 
@@ -306,7 +308,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 		return err
 	}
 	defer announcements.Cancel()
-	announced, err := client.AnnouncedBroadcast(broadcast)
+	announced, err := client.Follow(broadcast, nil)
 	if err != nil {
 		return err
 	}
@@ -403,7 +405,7 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 			break
 		}
 	}
-	healthAnnounced, err := client.AnnouncedBroadcast(broadcast + ".health")
+	healthAnnounced, err := client.Follow(broadcast + ".health", nil)
 	if err != nil {
 		return err
 	}
@@ -429,8 +431,9 @@ func finishSubscribe(ctx context.Context, client *moq.Client, broadcast string, 
 	if err != nil {
 		return err
 	}
-	if frame == nil || string(frame.Payload) != "session-alive" || frame.Timestamp != nil {
-		return errors.New("unexpected session health payload or timestamp")
+	// Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
+	if frame == nil || string(frame.Payload) != "session-alive" {
+		return errors.New("unexpected session health payload")
 	}
 	frame, err = group.ReadFrame(ctx)
 	if err != nil {
@@ -461,8 +464,8 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 	codec, _, _ := strings.Cut(rendition.Codec, ".")
 	out += "." + codec
 	decoder, err := moqaudio.Subscribe(ctx, consumer, id, rendition, moqaudio.DecoderOutput{
-		Format:   moq.AudioSampleFormatF32,
-		MaxDelay: durationPtr(maxDelay),
+		Format: moq.AudioSampleFormatF32,
+		Delay:  &moqmedia.Delay{Max: durationPtr(maxDelay)},
 	})
 	if err != nil {
 		return err
@@ -500,7 +503,7 @@ func decodeAudio(ctx context.Context, consumer *moq.BroadcastConsumer, id string
 		}
 		samples := len(frame.Data) / frameBytes
 
-		fmt.Fprintf(log, "%d %d\n", frame.Timestamp.Microseconds(), samples)
+		fmt.Fprintf(log, "%d %d\n", moq.TimestampToDuration(frame.Timestamp).Microseconds(), samples)
 		if _, err := pcm.Write(frame.Data); err != nil {
 			return err
 		}
@@ -534,7 +537,7 @@ func subscribe(ctx context.Context, url, broadcast string, opts dialOptions, tim
 		return finishSubscribe(readCtx, client, broadcast, frames)
 	}
 
-	announced, err := client.AnnouncedBroadcast(broadcast)
+	announced, err := client.Follow(broadcast, nil)
 	if err != nil {
 		return err
 	}

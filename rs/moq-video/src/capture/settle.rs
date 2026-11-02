@@ -8,7 +8,7 @@
 //! again. So hold instead: once the geometry moves, stop capturing but keep
 //! polling, and only end once it has stayed put.
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::time::Duration;
 
 /// How long a new geometry has to hold still before the stream ends.

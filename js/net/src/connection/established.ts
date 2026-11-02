@@ -1,7 +1,8 @@
-import type { Getter } from "@moq/signals";
+import type { GetPromise, Getter } from "@moq/signals";
 import type * as announce from "../announce.ts";
 import type * as Auth from "../auth.ts";
 import type * as Path from "../path.ts";
+import type { Drain } from "./goaway.ts";
 import type { Probe, Stats } from "./stats.ts";
 import type { Transport } from "./transport.ts";
 
@@ -52,7 +53,8 @@ export interface Established {
 	 * Subscribe to broadcast announcements matching `scope`, any pattern (`foo/**`
 	 * for a subtree, `room/* /chat` for each room's chat, default `**`). Paths are
 	 * relative to the session; captures report what the scope's wildcards stood for.
-	 * Hidden routes are left out unless `options.hidden` opts in. A peer without
+	 * Only routes whose literal name matches are reported unless `options.covering`
+	 * opts in, and hidden routes unless `options.hidden` does. A peer without
 	 * discovery refuses or resets the stream.
 	 */
 	announced(scope?: Path.Pattern, options?: announce.Options): announce.Consumer;
@@ -75,6 +77,16 @@ export interface Established {
 
 	/** End the session immediately without waiting for delivery. */
 	abort(): void;
+
+	/**
+	 * Settles with the peer's GOAWAY, its request that this session move elsewhere. The session
+	 * keeps serving until it closes, and a one-shot session never moves on its own, so answer it
+	 * by connecting again and closing this one. Stays pending if the session closes without one.
+	 *
+	 * The URI is peer-controlled: apply a redirect policy you trust before dialing it or presenting
+	 * tokens to it, as the reconnecting `Connection` does with `goaway.redirect`.
+	 */
+	readonly draining: GetPromise<Drain>;
 
 	/**
 	 * Resolves when the session closes: `null` for a clean close, an `Error.Session` when the

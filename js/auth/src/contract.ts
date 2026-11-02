@@ -9,7 +9,7 @@
 
 import { Pattern } from "@moq/pattern";
 import * as z from "@zod/mini";
-import { PatternListSchema } from "./claims.ts";
+import { decodeRoles, encodeRoles, WireRoleSchema } from "./wire.ts";
 
 const PathSchema = z.string().check(
 	z.refine(
@@ -166,34 +166,41 @@ export type Request = z.infer<typeof RequestSchema>;
  * A 2xx carrying one of these admits; anything else refuses. A grant that names
  * nothing is a refusal too, and one that asks to be revalidated must say when it
  * expires, so an outage always has a bound the server chose.
+ *
+ * A role may be `{"path": [...], "rate": bps}`, which parses into `publish_rate` or
+ * `subscribe_rate` beside the patterns. Answer with {@link encodeGrant}, which writes a
+ * cap back into its role; a bare `publish_rate` field is ignored by the relay.
  */
 export const GrantSchema = z
-	.object({
-		/** Patterns the session may publish, relative to the root. */
-		publish: z.optional(PatternListSchema),
-		/** Patterns the session may subscribe to, relative to the root. */
-		subscribe: z.optional(PatternListSchema),
-		/** The path the patterns are relative to, replacing the dialed one. Absent means the dialed path. */
-		root: z.optional(z.string()),
-		/** Subtrees read from elsewhere: each path, relative to the root, resolves at the absolute path it maps to. Read-only. */
-		mounts: z.optional(z.record(z.string(), z.string())),
-		/** When the session closes, as whole unix seconds. */
-		expires: z.optional(z.int()),
-		/** How long until the relay asks again, in whole seconds. Zero would be a tight loop. */
-		revalidate: z.optional(z.int().check(z.positive())),
-		/** The stats tier this session's traffic is bucketed under: `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`. */
-		tier: z.optional(TierSchema),
-		/** The literal path this session's stats record under, independent of its root. Absent records under the empty label. */
-		label: z.optional(PathSchema),
-		/**
-		 * The session is a cluster peer (another relay): what it announces entered the cluster elsewhere,
-		 * and it discovers hidden routes without asking, for peers that predate the opt-in.
-		 * A client certificate alone is not.
-		 */
-		peer: z.optional(z.boolean()),
-		/** The peer is upstream: the relay never offers it a route learned from another upstream. Requires `peer`. */
-		upstream: z.optional(z.boolean()),
-	})
+	.pipe(
+		z.object({
+			/** Patterns the session may publish, relative to the root, optionally with a bitrate cap. */
+			publish: z.optional(WireRoleSchema),
+			/** Patterns the session may subscribe to, relative to the root, optionally with a bitrate cap. */
+			subscribe: z.optional(WireRoleSchema),
+			/** The path the patterns are relative to, replacing the dialed one. Absent means the dialed path. */
+			root: z.optional(z.string()),
+			/** Subtrees read from elsewhere: each path, relative to the root, resolves at the absolute path it maps to. Read-only. */
+			mounts: z.optional(z.record(z.string(), z.string())),
+			/** When the session closes, as whole unix seconds. */
+			expires: z.optional(z.int()),
+			/** How long until the relay asks again, in whole seconds. Zero would be a tight loop. */
+			revalidate: z.optional(z.int().check(z.positive())),
+			/** The stats tier this session's traffic is bucketed under: `/`-joined segments of ASCII letters, digits, `.`, `_`, and `-`. */
+			tier: z.optional(TierSchema),
+			/** The literal path this session's stats record under, independent of its root. Absent records under the empty label. */
+			label: z.optional(PathSchema),
+			/**
+			 * The session is a cluster peer (another relay): what it announces entered the cluster elsewhere,
+			 * and it discovers hidden routes without asking, for peers that predate the opt-in.
+			 * A client certificate alone is not.
+			 */
+			peer: z.optional(z.boolean()),
+			/** The peer is upstream: the relay never offers it a route learned from another upstream. Requires `peer`. */
+			upstream: z.optional(z.boolean()),
+		}),
+		z.transform(decodeRoles),
+	)
 	.check(
 		z.refine((grant) => (grant.publish?.length ?? 0) > 0 || (grant.subscribe?.length ?? 0) > 0, {
 			message: "a grant must name something",
@@ -207,6 +214,17 @@ export const GrantSchema = z
 	);
 /** A value parsed by {@link GrantSchema}. */
 export type Grant = z.infer<typeof GrantSchema>;
+
+/**
+ * The JSON an auth server answers with for `grant`, writing each capped role as
+ * `{"path": [...], "rate": bps}`. Throws on a grant {@link GrantSchema} would refuse.
+ */
+export function encodeGrant(grant: Grant): z.input<typeof GrantSchema> {
+	const { publish, publish_rate, subscribe, subscribe_rate, ...rest } = grant;
+	const wire = { ...encodeRoles({ publish, publish_rate, subscribe, subscribe_rate }), ...rest };
+	GrantSchema.parse(wire);
+	return wire;
+}
 
 /** The reason and verified attribution an auth server returns with HTTP 403. */
 export const RefusalSchema = z.object({

@@ -13,7 +13,7 @@ test("audio-only sampling holds probe demand until its final RTT sample", async 
 	const installed = clock.install();
 	const network = new Observed<{ rtt: Milli } | undefined>(undefined);
 	const producer = new Effect((effect) => {
-		if (effect.get(network.used)) effect.set(network, { rtt: Milli(12) }, undefined);
+		if (effect.get(network.wanted)) effect.set(network, { rtt: Milli(12) }, undefined);
 	});
 	const empty = new Signal(undefined);
 	const watch = {
@@ -33,7 +33,7 @@ test("audio-only sampling holds probe demand until its final RTT sample", async 
 		expect(measurement.drain().map((sample) => sample.rtt)).toEqual([12]);
 		await measurement.finish();
 		expect(measurement.drain().at(-1)?.rtt).toBe(12);
-		expect(network.used.peek()).toBe(false);
+		expect(network.wanted.peek()).toBe(false);
 		await clock.advance(Nano.fromMilli(Milli(500)));
 		expect(measurement.drain()).toEqual([]);
 	} finally {

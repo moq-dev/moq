@@ -92,7 +92,7 @@ the Linux dispatcher to run every module.
   broadly. Neither is evidence that the Linux merge queue always rebuilds all
   packages for a CI-file edit.
 - Add `.cargo/` to the Linux Rust and flake scopes and to Rust's shared-input
-  rule. Cargo target settings affect all crates, including the WASM pass. Before
+  rule. Cargo target settings affect all crates. Before
   this fix, both `.cargo/config.toml` and the legacy `.cargo/config` selected no
   Rust build or tests. The existing platform query already recognized this edge.
   Regression tests cover pre-setup selection, actual dispatch, and crate selection.

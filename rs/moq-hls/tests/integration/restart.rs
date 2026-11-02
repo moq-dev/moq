@@ -48,7 +48,7 @@ async fn takeover(version: &str, case: Case) {
 		assert_old(&app, uri).await;
 	}
 	// Read as a recorder does. A cached segment can return while the live feed is still opening.
-	let first = moq_clock::timeout(TIMEOUT, cursor.next())
+	let first = kio::clock::timeout(TIMEOUT, cursor.next())
 		.await
 		.expect("the first segment")
 		.expect("records")
@@ -60,7 +60,7 @@ async fn takeover(version: &str, case: Case) {
 	));
 	match case {
 		// Paused, the clock only moves once every task is idle, so the feed has its answer.
-		Case::Answered => moq_clock::sleep(Duration::from_millis(500)).await,
+		Case::Answered => kio::clock::sleep(Duration::from_millis(500)).await,
 		Case::FinishedFirst => old.finish(),
 		Case::Unanswered | Case::UnansweredUnfinished => {}
 	}
@@ -68,14 +68,14 @@ async fn takeover(version: &str, case: Case) {
 	// The new instance numbers its groups and segments from zero again.
 	let route = moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint());
 	let mut new = Publisher::new(&pair.publisher, "live", route);
-	let deadline = moq_clock::now() + TIMEOUT;
+	let deadline = kio::clock::now() + TIMEOUT;
 	let current = loop {
 		let current = server.broadcaster("live").await.expect("announced");
-		if !std::sync::Arc::ptr_eq(&current, &replaced) {
+		if !current.is_clone(&replaced) {
 			break current;
 		}
-		assert!(moq_clock::now() < deadline, "the new instance never took over");
-		moq_clock::sleep(Duration::from_millis(50)).await;
+		assert!(kio::clock::now() < deadline, "the new instance never took over");
+		kio::clock::sleep(Duration::from_millis(50)).await;
 	};
 	current.set_generation(Some("run-2")).expect("generation");
 	new.write(0, 13, NEW);
@@ -164,7 +164,7 @@ async fn finished_first() {
 async fn drain_old(cursor: &mut segments::Consumer) -> (Vec<u64>, moq_hls::Result<()>) {
 	let mut read = Vec::new();
 	loop {
-		let next = moq_clock::timeout(TIMEOUT, cursor.next())
+		let next = kio::clock::timeout(TIMEOUT, cursor.next())
 			.await
 			.expect("the replaced run's cursor stalled");
 		let segment = match next {

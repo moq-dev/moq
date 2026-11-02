@@ -4,6 +4,18 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `Broadcaster::new` returns a cloneable handle and its `Driver`
+
+`Broadcaster::new(source, config)` returns `(Broadcaster, Driver)` instead of `Arc<Broadcaster>`.
+`Broadcaster` is a cheap handle: clone it instead of an `Arc`, and compare two with `is_clone` instead of `Arc::ptr_eq`.
+The export no longer spawns its background work: run the driver wherever you run tasks, for example `tokio::spawn(driver.run())`, or poll it with `Driver::poll`.
+Nothing is watched until it runs.
+
+```rust
+let (broadcaster, driver) = moq_hls::export::Broadcaster::new(source, config);
+tokio::spawn(driver.run());
+```
+
 ### Renditions list their own HLS records
 
 Each rendition reads the records its catalog `hls` field names, and segment `n` is its record `n`; a rendition without `hls` gets no playlist.

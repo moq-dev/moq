@@ -146,7 +146,7 @@ fn duplicate_packet_is_discarded() {
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, s).write(MSG).unwrap();
+	pair.client_send(client_ch, s).write(&mut &MSG[..]).unwrap();
 	pair.drive_client();
 	assert_eq!(pair.server.inbound.len(), 1);
 	let duplicate = pair.server.inbound[0].clone();
@@ -159,7 +159,7 @@ fn duplicate_packet_is_discarded() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_eq!(chunks.next(usize::MAX).unwrap().unwrap().bytes, MSG);
-	assert_eq!(chunks.next(usize::MAX), Err(ReadError::Blocked));
+	assert_eq!(chunks.next(usize::MAX), Err(recv::Error::Blocked));
 	let _ = chunks.finalize();
 }
 
@@ -316,7 +316,7 @@ fn path_validation_failure_reverts() {
 		.client_streams(client_ch)
 		.open(Dir::Uni, Default::default())
 		.unwrap();
-	pair.client_send(client_ch, s).write(MSG).unwrap();
+	pair.client_send(client_ch, s).write(&mut &MSG[..]).unwrap();
 	pair.drive();
 	assert_eq!(pair.server_streams(server_ch).accept(Dir::Uni), Some(s));
 }

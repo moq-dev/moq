@@ -132,6 +132,7 @@ export const Route = {
 		return {
 			epoch: route.epoch,
 			hops: route.hops ? [...route.hops] : [],
+			// biome-ignore lint/complexity/useMathMinMax: bigint operands; Math.min/max throw on bigint.
 			cost: cost > max ? max : cost,
 			auth: route.auth,
 		};
