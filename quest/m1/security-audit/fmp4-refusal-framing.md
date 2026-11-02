@@ -4,9 +4,10 @@
 
 A box the fMP4 importer refuses at its header no longer leaves a caller
 feeding arbitrary chunks out of frame. Either the importer reads the rest of
-that decode call's input past the refused box, so the caller keeps framing
-as a box-aligned caller does, or the refusal is terminal and every later
-call fails, so no input is silently dropped mid-stream. The 4-track
+that decode call's input past the refused box, so later calls stay
+correctly framed whatever chunk boundaries the caller picks, or the refusal
+is terminal and every later call fails, so no input is silently dropped
+mid-stream. The 4-track
 interleaved import benchmark is no slower than before the streaming change,
 or the cost is measured and accepted.
 
@@ -26,8 +27,8 @@ original open/commit bullet is done, and this quest keeps the other two
   callers (HLS ingest feeds one segment per call) but loses framing for
   arbitrary chunking. Either continue past the refused box, or make a
   refusal terminal for the importer as the MKV importer's is. Choose during
-  implementation, by which keeps the importer's state simpler and what HLS
-  ingest needs, and record the choice in the PR.
+  implementation the option that keeps the importer's state simpler while
+  meeting HLS ingest's needs, and record the choice in the PR.
 - **Benchmark.** #7232 measured a possible ~25% slowdown in the 4-track
   16-run whole-input `cmaf-interleaved-import` case, in a noisy run where the
   4-track cases swung ±40% between runs of one source. Re-measure it with the

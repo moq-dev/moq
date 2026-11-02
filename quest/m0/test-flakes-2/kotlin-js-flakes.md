@@ -13,7 +13,7 @@ Decided 2026-10-31 (maintainer, the /quest-complete requeue session):
 root-cause both in one quest, since each is small and they surfaced
 together in that session's merge runs.
 
-- **Kotlin.** `kt/moq/src/jvmAndAndroidTest/kotlin/dev/moq/SmokeTest.kt:518`.
+- **Kotlin.** `kt/moq/src/jvmAndAndroidTest/kotlin/dev/moq/SmokeTest.kt:579`.
   An `unroutable` answer means no route served the path when the request
   resolved. A request made before the publisher's route reached the origin
   returns it, and so does one made after that route was withdrawn or the
