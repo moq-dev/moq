@@ -194,7 +194,6 @@ The `js/replay` nightly series and the browser smoke's `replay.json` protect it.
 ## Required
 
 - [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - memory a task set keeps after peak occupancy subsides
-- [QUIC receive-state reuse](/quest/m2/performance-survey/quic-receive-reuse.md) - reassembly metadata retained by recycled completed streams
 - [Cache metadata](/quest/m2/performance-survey/cache-metadata.md) - bookkeeping capacity after cached groups expire
 - [PCM batch processing](/quest/m2/performance-survey/audio-batches.md) - repeated tail movement during encoding and resampling
 - [Fragmented MKV import](/quest/m2/performance-survey/mkv-fragments.md) - accumulated-buffer copies and parser replay

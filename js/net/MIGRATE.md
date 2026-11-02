@@ -57,7 +57,7 @@ Closing `publication.broadcast` still retracts and ends the broadcast. Keeping o
 const publication = origin.createBroadcast(path);
 const broadcast = publication.broadcast;
 broadcast.createTrack("data");
-publication.announce({ epoch: Epoch.mint() });
+publication.announce();
 ```
 
 ### `Varint.sizeLeadingOnes` is gone
@@ -100,8 +100,8 @@ Treat a rejected group read as the loss of that group and keep reading the track
 
 ### A claim answers by publishing (#5678)
 
-`Origin.Producer.dynamic(prefix)` takes no route: an application claim has no epoch, cost, or hops.
-Answer each `Origin.Request` with `using prepared = request.prepare(epoch)` (a fresh `Epoch.mint()` per output run), fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under that epoch and returns its publication handle.
+`Origin.Producer.dynamic(prefix)` takes no route: an application claim has no instance, cost, or hops.
+Answer each `Origin.Request` with `using prepared = request.prepare()`, fill `prepared.broadcast`, then `prepared.publish()`, which announces the broadcast at the exact path under a fresh instance of its own and returns its publication handle.
 Only `publish` announces it: `prepared.broadcast` has no announcement methods.
 `Prepared.reject(err)` is replaced by idempotent `close()` and `[Symbol.dispose]()`; either refuses the unpublished answer as `Unroutable` and closes its broadcast. Closing that broadcast also refuses the request. `using` handles normal scope exit and exceptions; after `publish()`, disposal leaves the returned publication and its fill producer live.
 Use `request.reject(err)` to refuse before preparing. A retained, unclosed `Prepared` keeps its request pending; garbage collection provides no prompt cleanup guarantee.
@@ -178,7 +178,7 @@ Import them from `@moq/clock`, which throws on negative or non-finite values.
 ### Announced requests follow restarts, and `broadcasts()` is gone
 
 An unpinned `request(path, { announced: true })` stays open across publisher instances: its `active` moves to each new instance's broadcast and clears between them, instead of ending with `Unroutable`.
-Read `active` reactively and close the request when done, or pass `epoch` to keep the old single-instance behavior.
+Read `active` reactively and close the request when done, or pass `instance` to keep the old single-instance behavior.
 `Origin.Producer` and `Origin.Consumer` drop `broadcasts(scope)`; iterate `announced(scope)` instead.
 
 ```ts
@@ -201,11 +201,11 @@ Drop the option.
 Replace `Announce.isActive` with a check on `event.kind`: skip `"end"`, and treat `"start"` and `"restart"` as active.
 A `"restart"` means another publisher instance now serves the prefix: request the path again.
 
-### Routes carry the publisher epoch (#4942)
+### Routes carry an instance and a per-instance epoch (#4942, [#7489](https://github.com/moq-dev/moq/pull/7489))
 
-`Path.joinEpoch` and `Path.splitEpoch` are gone.
-Set the epoch on the route with `announce({ epoch })` and read `Route.epoch`; pin a request to one instance with `RequestOptions.epoch`.
-Nothing mints an epoch by default.
+Every route carries an `Instance`: non-empty text naming one continuous run of group numbers at its path. Every broadcast mints a random one and keeps it across re-announcing, so most publishers set nothing.
+A publisher that continues its group sequences across restarts may name a stable one with `announce({ instance, epoch })`, raising `epoch` on each run.
+Read `Route.instance` and `Broadcast.Consumer.instance`; pin a request or follow to one with `request(path, { instance })`.
 
 ### Publishing never invents a timestamp (#5070)
 
