@@ -370,16 +370,16 @@ int main(void)
 	moq_frame frame = moq_frame_default();
 	frame.payload.data = hello;
 	frame.payload.len = sizeof(hello);
-	frame.timestamp_us.has_value = true;
-	frame.timestamp_us.value = 1000;
+	moq_timestamp timestamp = {1000, 1000000};
+	frame.timestamp = &timestamp;
 	ok(moq_track_producer_write_frame(track, &frame), "write_frame");
 	moq_frame *received = await(&reading, "read_frame");
 	moq_task_free(task);
 	CHECK(received);
 	CHECK(received->payload.len == sizeof(hello));
 	CHECK(memcmp(received->payload.data, hello, sizeof(hello)) == 0);
-	/* Lite-07 carries both the Implementation parameter and frame timestamps. */
-	CHECK(received->timestamp_us.has_value && received->timestamp_us.value == 1000);
+	/* Lite-07 carries both the Implementation parameter and frame timestamps, at any scale. */
+	CHECK(received->timestamp && received->timestamp->value * 1000000 == 1000 * received->timestamp->scale);
 	moq_frame_free(received);
 	CHECK(!cancelled.done);
 
