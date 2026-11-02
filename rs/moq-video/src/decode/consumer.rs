@@ -1390,8 +1390,9 @@ mod tests {
 		group(&mut track, 1, &[4, 5]).finish().unwrap();
 		track.finish().unwrap();
 
-		// A budget that keeps every cached group, so both decoders read them all.
-		let mut consumer = dual(&broadcast, Start::Oldest, WARMUP, probe::BUFFERED_NAME).await;
+		// A budget past the whole 5 s backlog, so the start keeps every cached group and both
+		// decoders read them all.
+		let mut consumer = dual(&broadcast, Start::Oldest, 2 * WARMUP, probe::BUFFERED_NAME).await;
 		let mut shown = Vec::new();
 		while let Some(frame) = consumer.next_frame().await.unwrap() {
 			shown.push(u64::try_from(frame.timestamp.as_micros()).unwrap() / SECOND);

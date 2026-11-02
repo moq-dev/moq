@@ -12,7 +12,7 @@ use crate::ffi::OnStatus;
 use crate::task::Task;
 use crate::{
 	Error, Id, NonZeroSlab, State, moq_audio_config, moq_datagram, moq_frame, moq_json_value, moq_json_window_event,
-	moq_json_window_kind, moq_section, moq_string, moq_video_config, moq_video_properties,
+	moq_json_window_kind, moq_section, moq_string, moq_timestamp, moq_video_config, moq_video_properties,
 };
 
 struct ConsumeCatalog {
@@ -146,43 +146,47 @@ enum RawStep<T> {
 	Stop,
 }
 
-/// A raw frame, datagram, or JSON value timestamp in microseconds, `None` when untimed.
-fn timestamp_us(timestamp: Option<moq_net::Timestamp>) -> Result<Option<u64>, Error> {
-	timestamp
-		.map(|timestamp| timestamp.as_micros().try_into())
-		.transpose()
-		.map_err(|_| Error::TimestampOverflow(moq_net::TimeOverflow))
+/// A buffered read plus the timestamp C borrows through a pointer, `None` when untimed.
+///
+/// Boxed because the slab moves its entries as it grows, and the pointer must stay valid
+/// until the read is freed.
+struct Timed<T> {
+	item: T,
+	timestamp: Option<Box<moq_timestamp>>,
 }
 
-/// A JSON value pre-serialized to a string, with its frame timestamp.
-struct JsonValue {
-	json: String,
-	timestamp_us: Option<u64>,
-}
+impl<T> Timed<T> {
+	fn new(item: T, timestamp: Option<moq_net::Timestamp>) -> Self {
+		Self {
+			item,
+			timestamp: timestamp.map(|timestamp| Box::new(timestamp.into())),
+		}
+	}
 
-impl JsonValue {
-	fn new(value: moq_net::Timed<serde_json::Value>) -> Result<Self, Error> {
-		Ok(Self {
-			json: serde_json::to_string(&value.value)?,
-			timestamp_us: timestamp_us(value.at)?,
-		})
+	/// The timestamp pointer handed to C, NULL when untimed.
+	fn timestamp(&self) -> *const moq_timestamp {
+		self.timestamp.as_deref().map_or(std::ptr::null(), std::ptr::from_ref)
 	}
 }
 
-/// A JSON window event, its record pre-serialized to a string, with its frame timestamp.
+/// A JSON value pre-serialized to a string, with its frame timestamp.
+fn json_value(value: moq_net::Timed<serde_json::Value>) -> Result<Timed<String>, Error> {
+	Ok(Timed::new(serde_json::to_string(&value.value)?, value.at))
+}
+
+/// A JSON window event, its record pre-serialized to a string.
 struct JsonWindowEvent {
 	kind: moq_json_window_kind,
 	range: std::ops::Range<u64>,
 	/// The pushed record, `None` for a pop or skip.
 	json: Option<String>,
-	timestamp_us: Option<u64>,
 }
 
 impl JsonWindowEvent {
-	fn new(event: moq_net::Timed<moq_json::window::Event<serde_json::Value>>) -> Result<Self, Error> {
+	/// Pre-serialize an event, keeping its frame timestamp.
+	fn new(event: moq_net::Timed<moq_json::window::Event<serde_json::Value>>) -> Result<Timed<Self>, Error> {
 		use moq_json::window::Event;
 
-		let timestamp_us = timestamp_us(event.at)?;
 		let (kind, range, json) = match event.value {
 			Event::Push { index, value } => (
 				moq_json_window_kind::MOQ_JSON_WINDOW_KIND_PUSH,
@@ -193,12 +197,7 @@ impl JsonWindowEvent {
 			Event::Skip(range) => (moq_json_window_kind::MOQ_JSON_WINDOW_KIND_SKIP, range, None),
 			event => return Err(Error::Json(format!("unsupported window event: {event:?}"))),
 		};
-		Ok(Self {
-			kind,
-			range,
-			json,
-			timestamp_us,
-		})
+		Ok(Timed::new(Self { kind, range, json }, event.at))
 	}
 }
 
@@ -217,28 +216,28 @@ pub struct Consume {
 	track_task: NonZeroSlab<Task>,
 
 	/// Buffered frames ready for consumption.
-	reads: NonZeroSlab<Read<moq_mux::container::Frame>>,
+	reads: NonZeroSlab<Read<Timed<moq_mux::container::Frame>>>,
 
 	/// Raw track consumer tasks (no media/container framing).
 	raw_task: NonZeroSlab<RawTaskEntry>,
 
 	/// Buffered raw frames ready for consumption.
-	raw_frame: NonZeroSlab<moq_net::frame::Frame>,
+	raw_frame: NonZeroSlab<Timed<bytes::Bytes>>,
 
 	/// Raw track datagram consumer tasks (best-effort, parallel to `raw_task`).
 	datagram_task: NonZeroSlab<Task>,
 
 	/// Buffered datagrams ready for consumption.
-	datagram: NonZeroSlab<moq_net::Datagram>,
+	datagram: NonZeroSlab<Timed<moq_net::Datagram>>,
 
 	/// JSON consumer tasks (snapshot, stream, and window share this slab).
 	json_task: NonZeroSlab<Task>,
 
 	/// Buffered JSON values ready for consumption.
-	json_value: NonZeroSlab<JsonValue>,
+	json_value: NonZeroSlab<Timed<String>>,
 
 	/// Buffered JSON window events ready for consumption.
-	json_window_event: NonZeroSlab<JsonWindowEvent>,
+	json_window_event: NonZeroSlab<Timed<JsonWindowEvent>>,
 }
 
 impl Consume {
@@ -549,9 +548,12 @@ impl Consume {
 				biased;
 				_ = &mut close => return Ok(()),
 				read = track.read() => match read? {
-					Some(moq_mux::container::Read::Frame { frame, .. }) => Read::Frame(frame),
+					Some(moq_mux::container::Read::Frame { frame, .. }) => {
+						let timestamp = frame.timestamp;
+						Read::Frame(Timed::new(frame, Some(timestamp)))
+					}
 					Some(moq_mux::container::Read::Gap { timestamp, duration }) => Read::gap(timestamp, duration)?,
-					Some(moq_mux::container::Read::End { end, .. }) => Read::end(end)?,
+					Some(moq_mux::container::Read::End { end, .. }) => Read::end(end),
 					None => return Ok(()),
 				},
 			};
@@ -569,29 +571,22 @@ impl Consume {
 	/// Read the tagged media item; payload pointers borrow it until [`Self::read_free`].
 	pub fn read(&self, id: Id, dst: &mut crate::moq_media_read) -> Result<(), Error> {
 		let read = self.reads.get(id).ok_or(Error::FrameNotFound)?;
-		let (kind, gap, end_us) = read.info();
+		let (kind, gap, end) = read.info();
 		let frame = match read {
 			Read::Frame(f) => moq_frame {
-				payload: f.payload.as_ptr(),
-				payload_size: f.payload.len(),
-				timestamp_us: f.timestamp.as_micros().try_into().map_err(|_| moq_net::TimeOverflow)?,
-				timestamp_present: true,
-				keyframe: f.keyframe,
+				payload: f.item.payload.as_ptr(),
+				payload_size: f.item.payload.len(),
+				timestamp: f.timestamp(),
+				keyframe: f.item.keyframe,
 			},
 			_ => moq_frame {
 				payload: std::ptr::null(),
 				payload_size: 0,
-				timestamp_us: 0,
-				timestamp_present: false,
+				timestamp: std::ptr::null(),
 				keyframe: false,
 			},
 		};
-		*dst = crate::moq_media_read {
-			kind,
-			frame,
-			gap,
-			end_us,
-		};
+		*dst = crate::moq_media_read { kind, frame, gap, end };
 
 		Ok(())
 	}
@@ -729,6 +724,7 @@ impl Consume {
 				};
 
 				// Hold the lock only to buffer the read; release it before the callback.
+				let frame = Timed::new(frame.payload, frame.timestamp);
 				let frame_id = State::lock().consume.raw_frame.insert(frame)?;
 				callback.call(Ok(frame_id));
 			}
@@ -761,13 +757,11 @@ impl Consume {
 	/// frame is released with [`Self::raw_frame_close`].
 	pub fn raw_frame(&self, frame: Id, dst: &mut moq_frame) -> Result<(), Error> {
 		let frame = self.raw_frame.get(frame).ok_or(Error::FrameNotFound)?;
-		let timestamp_us = timestamp_us(frame.timestamp)?;
 
 		*dst = moq_frame {
-			payload: frame.payload.as_ptr(),
-			payload_size: frame.payload.len(),
-			timestamp_us: timestamp_us.unwrap_or_default(),
-			timestamp_present: timestamp_us.is_some(),
+			payload: frame.item.as_ptr(),
+			payload_size: frame.item.len(),
+			timestamp: frame.timestamp(),
 			keyframe: false,
 		};
 
@@ -826,7 +820,8 @@ impl Consume {
 			};
 
 			// Hold the lock only to buffer the datagram; release it before the callback.
-			let id = State::lock().consume.datagram.insert(datagram)?;
+			let timestamp = datagram.timestamp;
+			let id = State::lock().consume.datagram.insert(Timed::new(datagram, timestamp))?;
 			callback.call(Ok(id));
 		}
 	}
@@ -840,14 +835,11 @@ impl Consume {
 	pub fn datagram(&self, datagram: Id, dst: &mut moq_datagram) -> Result<(), Error> {
 		let value = self.datagram.get(datagram).ok_or(Error::FrameNotFound)?;
 
-		let timestamp_us = timestamp_us(value.timestamp)?;
-
 		*dst = moq_datagram {
-			payload: value.payload.as_ptr(),
-			payload_size: value.payload.len(),
-			timestamp_us: timestamp_us.unwrap_or_default(),
-			timestamp_present: timestamp_us.is_some(),
-			sequence: value.sequence,
+			payload: value.item.payload.as_ptr(),
+			payload_size: value.item.payload.len(),
+			timestamp: value.timestamp(),
+			sequence: value.item.sequence,
 		};
 
 		Ok(())
@@ -926,7 +918,7 @@ impl Consume {
 
 			// Serialize before locking, hold the lock only to buffer the value, and release it
 			// before the callback.
-			let value = JsonValue::new(value)?;
+			let value = json_value(value)?;
 			let value_id = State::lock().consume.json_value.insert(value)?;
 			callback.call(Ok(value_id));
 		}
@@ -980,7 +972,7 @@ impl Consume {
 				},
 			};
 
-			let value = JsonValue::new(value)?;
+			let value = json_value(value)?;
 			let value_id = State::lock().consume.json_value.insert(value)?;
 			callback.call(Ok(value_id));
 		}
@@ -1052,10 +1044,9 @@ impl Consume {
 		let value = self.json_value.get(value).ok_or(Error::FrameNotFound)?;
 
 		*dst = moq_json_value {
-			json: value.json.as_ptr() as *const c_char,
-			json_len: value.json.len(),
-			timestamp_us: value.timestamp_us.unwrap_or_default(),
-			timestamp_present: value.timestamp_us.is_some(),
+			json: value.item.as_ptr() as *const c_char,
+			json_len: value.item.len(),
+			timestamp: value.timestamp(),
 		};
 
 		Ok(())
@@ -1071,19 +1062,18 @@ impl Consume {
 	/// until the event is released with [`Self::json_window_event_close`].
 	pub fn json_window_event(&self, event: Id, dst: &mut moq_json_window_event) -> Result<(), Error> {
 		let event = self.json_window_event.get(event).ok_or(Error::FrameNotFound)?;
-		let (json, json_len) = match &event.json {
+		let (json, json_len) = match &event.item.json {
 			Some(json) => (json.as_ptr() as *const c_char, json.len()),
 			None => (std::ptr::null(), 0),
 		};
 
 		*dst = moq_json_window_event {
-			kind: event.kind,
-			start: event.range.start,
-			end: event.range.end,
+			kind: event.item.kind,
+			start: event.item.range.start,
+			end: event.item.range.end,
 			json,
 			json_len,
-			timestamp_us: event.timestamp_us.unwrap_or_default(),
-			timestamp_present: event.timestamp_us.is_some(),
+			timestamp: event.timestamp(),
 		};
 
 		Ok(())
@@ -1202,6 +1192,10 @@ mod read_tests {
 		track.finish().unwrap();
 		run.await.unwrap();
 		assert_eq!(ids.len(), 3);
+		let micros = |value| moq_timestamp {
+			value,
+			scale: 1_000_000,
+		};
 		let mut read = std::mem::MaybeUninit::<crate::moq_media_read>::uninit();
 		for (index, id) in ids.into_iter().enumerate() {
 			assert!(id > 0);
@@ -1214,20 +1208,20 @@ mod read_tests {
 						unsafe { std::slice::from_raw_parts(read.frame.payload, read.frame.payload_size) },
 						b"encoded"
 					);
-					assert_eq!(read.frame.timestamp_us, 10_000);
-					assert!(read.frame.timestamp_present && read.frame.keyframe);
+					assert_eq!(unsafe { *read.frame.timestamp }, micros(10_000));
+					assert!(read.frame.keyframe);
 					assert_eq!(read.gap.duration_us, 0);
-					assert_eq!(read.end_us, 0);
+					assert_eq!(read.end, moq_timestamp::default());
 				}
 				1 => {
 					assert_eq!(read.kind, crate::moq_decode_read_kind::MOQ_DECODE_READ_GAP);
-					assert_eq!((read.gap.timestamp_us, read.gap.duration_us), (10_000, 10_000));
-					assert!(read.frame.payload.is_null());
-					assert_eq!(read.end_us, 0);
+					assert_eq!((read.gap.timestamp, read.gap.duration_us), (micros(10_000), 10_000));
+					assert!(read.frame.payload.is_null() && read.frame.timestamp.is_null());
+					assert_eq!(read.end, moq_timestamp::default());
 				}
 				2 => {
 					assert_eq!(read.kind, crate::moq_decode_read_kind::MOQ_DECODE_READ_END);
-					assert_eq!(read.end_us, 20_000);
+					assert_eq!(read.end, micros(20_000));
 					assert!(read.frame.payload.is_null());
 					assert_eq!(read.gap.duration_us, 0);
 				}
