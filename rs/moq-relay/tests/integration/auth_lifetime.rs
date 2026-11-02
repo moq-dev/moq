@@ -456,19 +456,23 @@ async fn forwards_the_setup_token() {
 		let params = [&[0x03, encoded.len() as u8][..], &encoded].concat();
 		let setup = [&[0xaf, 0x00][..], &(params.len() as u16).to_be_bytes(), &params].concat();
 		let session = if websocket {
-			qmux::ws::Client::new()
+			let (session, driver) = qmux::ws::Client::new()
 				.with_protocol("moqt-18", &[qmux::Version::QMux01])
 				.connect(&format!("ws://127.0.0.1:{port}/room?source=setup"))
 				.await
-				.expect("connect WebSocket")
+				.expect("connect WebSocket");
+			tokio::spawn(driver);
+			session
 		} else {
-			qmux::tcp::connect(("127.0.0.1", port), {
+			let (session, driver) = qmux::tcp::connect(("127.0.0.1", port), {
 				let mut config = qmux::Config::new(qmux::Version::QMux01);
 				config.protocol = qmux::Protocol::Negotiate(vec!["moqt-18".into()]);
 				config
 			})
 			.await
-			.expect("connect TCP")
+			.expect("connect TCP");
+			tokio::spawn(driver);
+			session
 		};
 		let mut send = session
 			.open_uni(Default::default())
@@ -1917,11 +1921,12 @@ async fn websocket_refusal_is_in_band() {
 		let script = Script::new(grant(Duration::from_secs(3600)));
 		script.on_connect(answer);
 		let (port, relay) = spawn_ws_relay(build_auth(script.spawn().await)).await;
-		let session = qmux::ws::Client::new()
+		let (session, driver) = qmux::ws::Client::new()
 			.with_protocol("moq-lite-06", &[qmux::Version::QMux01])
 			.connect(&format!("ws://127.0.0.1:{port}/room"))
 			.await
 			.expect("policy refusal must not reject the browser-opaque HTTP upgrade");
+		tokio::spawn(driver);
 		let mut send = session.open_uni(Default::default()).await.expect("open SETUP");
 		write_all(&mut send, &[1, 1, 0]).await;
 		send.finish().expect("finish SETUP");

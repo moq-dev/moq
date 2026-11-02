@@ -17,10 +17,13 @@ slices for iOS 16+, the iOS Simulator, and macOS 12.3+.
 `.named(name:)` or `.requested(request)` target. `Media.CatalogProducer(broadcast:)`
 updates catalog properties and sections without keeping the broadcast open.
 Its writes fail after closing or releasing the broadcast.
+Media timestamps are exact `Timestamp` records, `value` units at `scale` units per second, carried at the track's timescale
+(a write at another scale rounds down to it). On macOS 13+ and iOS, `try Timestamp(duration)` converts a `Duration` exactly,
+and `try timestamp.duration` rounds down to a whole attosecond.
 Publish JSON tracks with `TrackInfo(compress: true)`; a `Json` consumer reads one with no option of its own.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
-`Json` consumers yield `Json.Timed` (`value`, `timestampUs`); a snapshot consumer yields each state in order,
-and `latest()` skips to the newest. Read timestamps are rounded down to a whole microsecond.
+`Json` consumers yield `Json.Timed` (`value`, `timestamp`); a snapshot consumer yields each state in order,
+and `latest()` skips to the newest.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
 `MoqTrackInfo.compress` on a raw track sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
@@ -73,7 +76,7 @@ for try await event in try session.consume.announced(prefix: "live/", filter: "*
 let publication = try session.publish.createBroadcast(path: "my-stream.hang")
 let broadcast = publication.broadcast
 let audio = try Media.TrackProducer.audio(broadcast: broadcast, initData: Media.AudioInit(format: .opus, data: opusInit))
-try audio.writeFrame(packet, timestampUs: 20_000)
+try audio.writeFrame(packet, timestamp: Timestamp(value: 20, scale: 1_000))
 try audio.cut() // audio has no keyframes, so this is what gives it groups
 
 let video = try Video.Producer(
@@ -82,7 +85,7 @@ let video = try Video.Producer(
     output: VideoEncoderOutput(codec: .h264, kind: .auto),
     track: "camera"
 )
-try video.write(VideoFrame(timestampUs: pts, data: rgba))
+try video.write(VideoFrame(timestamp: pts, data: rgba))
 try publication.announce(route: AnnounceRoute(epoch: mintEpoch())) // a fresh epoch per run
 try audio.finish()
 try video.finish()
