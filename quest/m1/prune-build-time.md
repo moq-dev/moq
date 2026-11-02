@@ -22,8 +22,8 @@ Decided 2026-11-01 (maintainer):
   measured build-time effect. Removing a public API or a user-facing feature
   is a follow-up through `/quest-plan`.
 
-Dependencies belong to
-[Dependency audit](/quest/m2/audit-deps.md).
+Dependency removals belong to the
+[dependency audit](/quest/m2/audit-deps.md).
 This quest covers our own crates and code: monomorphization (`cargo
 llvm-lines`), proc macros, build scripts, and crates or features that every
 build compiles but few users need. Start from the m2 audit's baselines and
@@ -41,12 +41,21 @@ leaves the expensive decoder variants needed by mp4-atom itself, and grows
 the test-profile IR when extended to the metadata reader. Rebuild CPU and
 instructions do not improve beyond noise.
 
-Remaining: measure fat versus thin LTO in the shipping OpenH264 FFI build,
-including archive size and runtime cost, and decide whether the retained fat
-profile still earns its cost. The default-feature archive is now 62 MiB,
-but that is not a shipping-profile comparison. Whole owned crates, the kio
-macros, platform alias scripts, configuration parsers, and binding generators
-still have current consumers; no public feature removal is proposed.
+The shipping OpenH264 FFI comparison is complete: fat/thin archives are
+62.4/71.4 MiB and final units 135.7/88.0 s, but whole-command CPU is
+390.19/547.74 s for the same 474 package/target/feature units. The 72-case
+session CPU comparison is noisy (thin/fat geometric mean 1.034). Keep fat
+LTO: the final-unit saving did not make the whole build cheaper, and no
+runtime win justifies changing the recorded choice. This is measured, not
+an unimplemented optimization proposal.
+
+Owned crates, kio macros, platform aliases, config parsers, and binding
+generators still have current consumers. No public feature removal is
+proposed, and no production or profile change is retained.
+
+Remaining: resolve validation, measure a real mbx incremental edit, and
+complete local review before deleting this quest and its links. The recurring
+audit already has this run's baselines and rejected candidates.
 
 Validation is blocked: `just rs test -p moq-mux --lib` cannot launch Cargo
 through mbx (E2BIG), tracked by

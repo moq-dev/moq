@@ -33,14 +33,14 @@ deduplicating and upgrading dependencies.
 
 What to check first:
 
-- Finish the shipping-profile fat/thin LTO comparison below. Keep fat LTO
-  under the maintainer's 2026-10-20 decision until a measured replacement
-  earns the runtime and archive tradeoff.
+- Keep fat LTO under the measured shipping-profile comparison below. A
+  faster final link alone did not make the whole build cheaper. Revisit if
+  the dependency graph or shipping profile changes substantially.
 - Rerun the six-target IR inventory and the cold dev/release timings below.
   Attribute a large row to a current consumer before changing its types or
-  splitting a crate. The off-cycle run rejected its reader-consolidation candidate; it found no
-  unused whole crate or feature that could be removed without changing a
-  public feature.
+  splitting a crate. The off-cycle run rejected its reader-consolidation
+  candidate; it found no unused whole crate or feature that could be removed
+  without changing a public feature.
 - Keep feature-unification and cross-job cache work with
   [moq-dev/moq#6985](https://github.com/moq-dev/moq/pull/6985), and test work
   with [moq-dev/moq#6987](https://github.com/moq-dev/moq/pull/6987) and the
@@ -78,7 +78,8 @@ What to check first:
 Base: [21d6da9fc1](https://github.com/moq-dev/moq/commit/21d6da9fc108b48373a961f34e43c3fcd38b0146).
 The one-off [build-time removal quest](/quest/m1/prune-build-time.md) has not
 finished: local validation cannot launch Cargo through mbx (E2BIG), and the
-shipping-profile thin-LTO comparison and mbx incremental probe remain open.
+mbx incremental probe and local review remain open. The shipping-profile
+LTO comparison is complete below.
 No production change is retained at this checkpoint. The recurring audit's
 schedule is unchanged and no successor is created.
 
@@ -159,13 +160,48 @@ JSON. Instructions are flat and CPU times overlap; no speedup is established.
 Both reader edits were dropped. Incomplete release rebuilds of the rejected
 candidates were stopped and are excluded from the results.
 
+#### Shipping-profile LTO comparison
+
+Same unchanged source and the same 474 package/target/feature units, two
+jobs, `cargo build-ffi --release --timings`, then the same command with
+`CARGO_PROFILE_RELEASE_LTO=thin`. The alias enables OpenH264, as the shipped
+FFI does. Each profile builds into the private measurement target with mbx
+disabled. The set of timed units is identical, so the smaller final unit
+must be read alongside its dependencies, not as the build's total saving.
+
+| Metric | Fat | Thin |
+| --- | ---: | ---: |
+| Whole command wall | 270.39 s | 321.67 s |
+| Whole command process-tree CPU | 390.19 s | 547.74 s |
+| Sum of unit durations | 402.46 s | 539.86 s |
+| Final moq-ffi unit | 135.70 s | 88.04 s |
+| `libmoq_ffi.a` | 65,447,812 bytes (62.4 MiB) | 74,914,524 bytes (71.4 MiB) |
+
+Thin cuts the final unit's wall by 35.1%, but did not speed up the whole
+build in this run. Both archives fit the existing 100 MB per-file ceiling.
+These are single observations on a shared host, not a general CPU regression
+estimate or a cross-job cache measurement.
+
+Runtime check: build the existing `moq-net` session bench once with each
+profile, then run fat/thin/thin/fat with `SESSION_CPU=1`, filtering
+`session_delivery_group_cost`, 0.1 s warm-up, 0.2 s requested measurement,
+and ten samples per case. All 72 cases complete; they sweep publishers and
+viewers independently across SUBSCRIBE/FETCH and the supported protocols.
+The geometric mean of each case's mean thin CPU divided by mean fat CPU is
+1.034; individual ratios range from 0.747 to 1.403. The repeated fat runs'
+median max/min ratio is 1.020 and the largest is 1.966. Host variation is
+substantial, so this does not prove a 3.4% runtime regression. It establishes
+no runtime win that would justify reversing the retained fat-LTO choice.
+
+Decision made in this run: keep fat LTO, consistent with the maintainer's
+2026-10-20 choice. The archive is smaller now, but changing the profile still
+needs an overall build benefit worth its runtime and size tradeoffs. No
+profile edit is retained. The old thin-LTO open item is measured here;
+the transport IR inventory and stale subtitle candidate are also resolved.
+`cargo-llvm-lines` is still not in the pinned shell.
+
 #### Remaining work
 
-- Compare fat and thin LTO using `cargo build-ffi --release` (the shipping
-  OpenH264 feature set), measure archive bytes and runtime cost, and apply
-  the maintainer's recorded fat-LTO decision. The prior default-feature
-  archive shrinking to 62 MiB is reason to revisit, not proof for changing
-  the shipping profile. This comparison was not completed here.
 - Measure a real edit through mbx after
   [moq-dev/moq#7594](https://github.com/moq-dev/moq/pull/7594) is resolved.
   The controlled whole-crate rebuilds above do not measure learned
