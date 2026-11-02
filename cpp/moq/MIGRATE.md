@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
+
+`moq::Announce.captures` is `std::vector<std::string>` instead of an optional vector. Remove optional checks and dereferences; an empty vector means the filter has no wildcards. Regenerate bindings and rebuild with the matching native library.
+
 ### Decoder outputs take a `moq::Delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
 `moq::AudioDecoderOutput` replaces `max_delay` and the playout `delay` with `std::optional<moq::Delay> delay` and `bool estimate = true`.
