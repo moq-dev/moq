@@ -9,11 +9,9 @@ packages = ["moq"]
 [project]
 name = "moq-rs"
 # Distribution is `moq-rs` (the `moq` name is taken on PyPI); the import name
-# stays `moq`. Versioned independently of the moq-ffi crate: bump this by hand
-# in a PR. On merge to release, release-py.yml publishes to PyPI if this version
-# isn't already there (no tag needed; the registry is the gate).
-# Starts at 0.3.0 to open a new line above the old lockstep 0.2.x releases that
-# bundled the bindings.
+# stays `moq`. Shared cuts set the minor; patches are independent of moq-ffi.
+# On merge to release, release-py.yml publishes this version if it is not on
+# PyPI yet (no tag needed; the registry is the gate).
 version = "0.6.0"
 description = "Media over QUIC: real-time pub/sub with built-in caching, fan-out, and prioritization, with a Pythonic API. Import as `moq`."
 readme = "README.md"
@@ -28,10 +26,9 @@ classifiers = [
     "Topic :: Multimedia :: Sound/Audio",
     "Topic :: Multimedia :: Video",
 ]
-# Compatible-release pin: floats to the latest 0.5.x moq-ffi patch without a
-# wrapper re-release. A moq-ffi minor bump (0.6) is the only thing that forces
-# bumping this constraint. Floor is 0.5.0: no 0.4.x has the epoch, range, and
-# demand API this wrapper calls.
+# Compatible-release pin: consumers float to newer bindings patches without
+# a wrapper re-release. Shared cuts move the floor to the new minor; raise
+# its patch when the wrapper requires newer FFI API.
 dependencies = ["moq-ffi ~= 0.5.0"]
 
 [project.urls]
