@@ -23,6 +23,7 @@ from .types import (
     Frame,
     Position,
     Subscription,
+    Timestamp,
     TrackInfo,
 )
 
@@ -47,7 +48,7 @@ class GroupProducer:
 
         return GroupConsumer(self._inner.consume())
 
-    def write_frame(self, payload: bytes, timestamp: timedelta | None = None) -> None:
+    def write_frame(self, payload: bytes, timestamp: Timestamp | None = None) -> None:
         """Write a frame with its presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
@@ -117,11 +118,11 @@ class TrackProducer:
         """Create a group with an explicit sequence number."""
         return GroupProducer(self._inner.create_group(sequence))
 
-    def write_frame(self, payload: bytes, timestamp: timedelta | None = None) -> None:
+    def write_frame(self, payload: bytes, timestamp: Timestamp | None = None) -> None:
         """Write a single-frame group with its presentation timestamp."""
         self._inner.write_frame(Frame(payload, timestamp)._ffi())
 
-    def append_datagram(self, payload: bytes, timestamp: timedelta | None = None) -> int:
+    def append_datagram(self, payload: bytes, timestamp: Timestamp | None = None) -> int:
         """Send a best-effort datagram and return its sequence number.
 
         Payloads are capped at 1200 bytes. Datagram delivery requires a datagram-capable
@@ -129,7 +130,7 @@ class TrackProducer:
         """
         return self._inner.append_datagram(Frame(payload, timestamp)._ffi())
 
-    def insert_datagram(self, sequence: int, payload: bytes, timestamp: timedelta | None = None) -> None:
+    def insert_datagram(self, sequence: int, payload: bytes, timestamp: Timestamp | None = None) -> None:
         """Send a best-effort datagram at an explicit sequence number.
 
         For a caller that allocates its own sequences; :meth:`append_datagram`

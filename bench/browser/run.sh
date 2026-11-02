@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Real-browser transport and media benchmarks against a temporary relay.
 #
-#     bench/browser/run.sh [BASE] [--smoke] [--rounds N] [--scenarios transport,cmaf,media]
+#     bench/browser/run.sh [BASE] [--smoke] [--rounds N] [--scenarios transport,cmaf,media,racing]
 #
 # Variants, each bundled from the same page sources:
 #   current  this checkout, the reference
@@ -88,7 +88,7 @@ bun install --frozen-lockfile
 
 cd "$HERE"
 # The in-memory paths share Chromium installation and artifact retention with this lane.
-for benchmark in frames drift ledger; do
+for benchmark in frames drift ledger resume-history; do
     bun micro.ts --bench "$benchmark" --rounds 1 --out "$HARNESS_RUN/$benchmark.json" \
         current="$WORKSPACE" aa="$WORKSPACE"
 done
