@@ -31,6 +31,7 @@ concurrency:
 
 env:
   CARGO_NDK_VERSION: 4.1.2
+  CARGO_HAKARI_VERSION: 0.9.39
 
 jobs:
   android:
@@ -57,6 +58,14 @@ jobs:
 
       - name: Install cargo-ndk
         run: cargo install --locked "cargo-ndk@$CARGO_NDK_VERSION"
+
+      # The host dev-dependencies in the workspace-hack need the Nix shell's
+      # native libraries, which this cross-build deliberately runs without.
+      - name: Disable the workspace-hack
+        run: |
+          cargo install --locked "cargo-hakari@$CARGO_HAKARI_VERSION"
+          cargo hakari disable
+          cargo update --workspace
 
       - name: Check
         run: just rs android
