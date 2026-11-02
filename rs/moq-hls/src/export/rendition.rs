@@ -841,8 +841,8 @@ impl Rendition {
 	/// A denied referenced broadcast propagates the underlying authorization error; it is
 	/// not missing media. The HTTP server answers it with 403 and no-store.
 	///
-	/// The playlist names its init segment by a hash of the bytes, so it is also `None` until
-	/// the init is known. An inline-parameter-set codec (no catalog `description`) only learns
+	/// The playlist names each init segment by a hash of the bytes, so it is also `None` until
+	/// the init of every listed segment is known. An inline-parameter-set codec (no catalog `description`) only learns
 	/// it from media: await [`init`](Self::init) first.
 	///
 	/// `query` is an optional query string (without the leading `?`, e.g. `jwt=<token>`)
@@ -854,19 +854,24 @@ impl Rendition {
 		// Read the run before the rows (see `restart`).
 		let run = self.run();
 		let snapshot = self.snapshot_as(run.generation.clone())?;
-		let Some(init) = self.built_init(&run) else {
-			return Ok(None);
-		};
-		// The snapshot released every predecessor it no longer lists; each left maps its own init.
-		if self
-			.lineage()
-			.iter()
-			.any(|rendition| rendition.built_init(&rendition.run()).is_none())
-		{
+		if snapshot.segments.is_empty() && !snapshot.finished {
 			return Ok(None);
 		}
-		let playable = !snapshot.segments.is_empty() || snapshot.finished;
-		Ok(playable.then(|| super::render_media(&snapshot, &init.hash, query)))
+		// A predecessor's segment maps its own init, `""` while that is not built.
+		if snapshot.segments.iter().any(|s| s.map.as_deref() == Some("")) {
+			return Ok(None);
+		}
+		// Nothing maps this instance's init until it lists a segment of its own, and an inline
+		// codec builds it only from that segment.
+		let mapped = snapshot.segments.is_empty() || snapshot.segments.iter().any(|s| s.map.is_none());
+		let init = match mapped {
+			true => match self.built_init(&run) {
+				Some(init) => init.hash.clone(),
+				None => return Ok(None),
+			},
+			false => String::new(),
+		};
+		Ok(Some(super::render_media(&snapshot, &init, query)))
 	}
 
 	/// Wait until the media playlist is servable, then render it: at least one segment is
@@ -883,16 +888,28 @@ impl Rendition {
 		self.playable().await;
 		// Failed records may never supply the keyframe an inline init waits for.
 		self.check()?;
-		// An inline-codec init needs a keyframe group fetched first. Building it caches, so the
-		// player's follow-up GET of the init is free.
-		if self.load_init().await?.is_none() {
-			return Ok(None);
-		}
-		// The predecessors' segments still listed map their own inits.
-		for rendition in self.lineage() {
+		// Build the inits the listed segments map. An inline-codec init needs a keyframe group
+		// fetched first. Building it caches, so the player's follow-up GET of the init is free.
+		let own = self.live.window().segments;
+		let mut inherited = self.inherited(&own);
+		inherited.dedup_by(|(a, _), (b, _)| Arc::ptr_eq(a, b));
+		for (rendition, _) in &inherited {
 			if rendition.load_init().await?.is_none() {
 				return Ok(None);
 			}
+		}
+		// This instance's own init is mapped only once it lists a segment (see `media_playlist`).
+		let mapped = !own.is_empty() || inherited.is_empty();
+		if mapped && self.load_init().await?.is_none() {
+			return Ok(None);
+		}
+		let rendered = self.media_playlist(query)?;
+		if rendered.is_some() || mapped {
+			return Ok(rendered);
+		}
+		// It listed its first segment meanwhile.
+		if self.load_init().await?.is_none() {
+			return Ok(None);
 		}
 		self.media_playlist(query)
 	}

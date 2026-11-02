@@ -4019,6 +4019,66 @@ mod tests {
 		assert!(new.segment(&id(old.tag(), 2)).await.unwrap().is_none());
 	}
 
+	// An inline-codec replacement builds its init only from a segment of its own, so until it lists
+	// one, its playlist is the predecessor's segments under the predecessor's init.
+	#[tokio::test(start_paused = true)]
+	async fn an_inherited_playlist_needs_no_init_of_its_own() {
+		let mut test = Records::with(&["video0"], &[]);
+		let (_, mut records) = test.publish("video0");
+		let _media = test.media("video0", 4);
+		for sequence in 0..3 {
+			records.push(&gop(sequence)).unwrap();
+		}
+		test.listed("video0", 1).await;
+		let old = test.rendition("video0");
+		let rendered = kio::clock::timeout(Duration::from_secs(5), old.playlist(None))
+			.await
+			.expect("the playlist renders")
+			.unwrap()
+			.expect("playable");
+		let map = rendered
+			.lines()
+			.find(|line| line.starts_with("#EXT-X-MAP"))
+			.expect("a map")
+			.to_string();
+		// The new config leaves its geometry to the keyframes, so only its media builds its init.
+		let config = test.catalog.video.renditions.get_mut("video0").unwrap();
+		config.coded_width = None;
+		config.coded_height = None;
+		test.sync();
+		let new = test.rendition("video0");
+		assert!(!Arc::ptr_eq(&old, &new), "the reconfigure replaces the rendition");
+
+		let rendered = kio::clock::timeout(Duration::from_secs(5), new.playlist(None))
+			.await
+			.expect("the playlist renders without the replacement's media")
+			.unwrap()
+			.expect("the predecessor's segments are playable");
+		assert_eq!(
+			new.media_playlist(None).unwrap().as_deref(),
+			Some(rendered.as_str())
+		);
+		let maps: Vec<_> = rendered.lines().filter(|line| line.starts_with("#EXT-X-MAP")).collect();
+		assert_eq!(maps, [map.as_str()], "{rendered}");
+		assert!(rendered.contains(&format!("seg/{}.1.m4s", old.tag())), "{rendered}");
+
+		// Its own first segment needs its own init, which the playlist builds before listing it.
+		records.push(&gop(3)).unwrap();
+		records.push(&gop(4)).unwrap();
+		test.listed("video0", 3).await;
+		let rendered = kio::clock::timeout(Duration::from_secs(5), new.playlist(None))
+			.await
+			.expect("the playlist renders")
+			.unwrap()
+			.expect("playable");
+		assert!(rendered.contains(&format!("seg/{}.3.m4s", new.tag())), "{rendered}");
+		assert_eq!(
+			new.media_playlist(None).unwrap().as_deref(),
+			Some(rendered.as_str()),
+			"its own init is built"
+		);
+	}
+
 	/// Reconfigure `video0` to `width`.
 	fn resize(test: &mut Records, width: u32) {
 		test.catalog.video.renditions.get_mut("video0").unwrap().coded_width = Some(width);
