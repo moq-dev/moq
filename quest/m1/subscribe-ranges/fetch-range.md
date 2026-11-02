@@ -9,15 +9,6 @@ page, and `moq fetch` through `moq_relay::fetch_group`.
 
 ## Plan
 
-Checkpoint 2026-11-02
-([moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)): no remaining
-model, API, or consumer changes implemented. On main `f8c608a24b`,
-`quest gate nix develop --command just rs test -p moq-net -E 'test(bounded)'`
-exited 1 before compilation: mbx could not launch Cargo (`Argument list too
-long (os error 7)`). Resume with working validation; the remaining scope and
-decisions below still apply. No validation bypass or upstream mbx work is part
-of this claim.
-
 Split out of dynamic range requests, which replaced `requested_group` with
 `requested_fill`, by the maintainer on 2026-10-20
 ([moq-dev/moq#6123](https://github.com/moq-dev/moq/pull/6123)), so each PR
@@ -27,34 +18,29 @@ the questions decided below and landed only the `track_range_filling` benchmark.
 The second attempt ([moq-dev/moq#7545](https://github.com/moq-dev/moq/pull/7545))
 landed the bounded-read end on a plain cursor, the parking wire publishers,
 the cached-backfill rule, the bounded miss grace, and the unfed moq-transport
-copy; what remains is below.
+copy. The third ([moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625))
+landed the end of a front's bounded read, the head fill, and the first bounded
+moq-transport request; what remains is the API removal, its consumers, and the
+legacy demand questions below.
 
-- **Ending a bounded read** (decided 2026-10-20). `recv_group` returns `None`
-  once every sequence in a bounded window is delivered, dropped, stale, or
-  unfillable. Landed for a track's own cache: a `with_range` cap never ends a
-  read, since it may rise again. A front's logical track (a routed track,
-  `model/resume.rs`) still parks, because each copy's reader parks and the
-  routes judge the end. Its `Delivered` counts what is no longer owed as
-  handed out (`track::Subscriber::skip_ordered`), so it cannot account for the
-  window alone, and `resume_model` asserts a reader never ends before a route
-  declares an end, which ending there has to change. `Ok(None)` before any group arrives is a miss, which the
-  moq-ffi fetch wrapper reports as `NotFound`; after one, it is the range's
-  end. A one-range read surfaces no `NotFetchable` or `Old` result, and a
+- **Ending a bounded read** (decided 2026-10-20; landed). `recv_group` returns
+  `None` once every sequence in a bounded window is delivered, dropped, stale, or
+  unfillable, on a track's own cache and on a front's logical track alike: the
+  serving copy's cursor judges the window from its resume point, a replaced or
+  backfill copy that may still deliver keeps the read open, and so does a group
+  in range the local floor or cap keeps out. A `with_range` cap never ends a
+  read. Still to do with the API: `Ok(None)` before any group arrives is a miss,
+  which the moq-ffi fetch wrapper reports as `NotFound`; after one, it is the
+  range's end. A one-range read surfaces no `NotFetchable` or `Old` result, and a
   peer's reset with either names the group dropped. Every fetch boundary
   already treats `NotFetchable` as not found (relay HTTP 404, hls
   `is_cache_miss`, moq-ffi `map_fetch_error`, moq-c `NOT_FOUND`); a fetched
-  `Old` becomes a miss too, where relay HTTP answers 500 and moq-c reports
-  `OLD` today. Both stay as wire stream errors, and `Old` still aborts a cut
-  group mid-read. The Impact bullet says how to migrate each affected package.
-- A one-range subscription for a cached live group missing the frames its
-  range starts at needs a head fill. Frame bounds
-  ([moq-dev/moq#6129](https://github.com/moq-dev/moq/pull/6129)) hand such a
-  group out positioned at the asked frame, so reading the missing head returns
-  `Error::Lagged` rather than the group being skipped (maintainer,
-  2026-10-20). Only `fetch_group` requests a head fill today, so the one-range
-  read has to request it instead of letting `Lagged` reach the caller.
-  `fill::Ask` already carries a start frame, so the miss judge can count a
-  headless slot as a hole for a bounded window.
+  `Old` becomes a miss too, where moq-c reports `OLD` today. Both stay as wire
+  stream errors, and `Old` still aborts a cut group mid-read. The Impact bullet
+  says how to migrate each affected package.
+- **A bounded read fills a missing head** (landed). A bounded window hands out a
+  cached live group missing its first frames only once a fill answered it from
+  frame 0, as `fetch_group` asks, and gives the group up when none can.
 - **Wire publishers keep parking** (landed). Every wire publisher reads its
   subscription through `track::Subscriber::parked`: the IETF publisher and
   lite publishers before lite-07 keep parking on a bounded downstream
@@ -177,14 +163,35 @@ copy; what remains is below.
   is one range FETCH on moq-transport, and per-group FETCH is lite-only, until
   [lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) land. A bounded
   upstream SUBSCRIBE accounted by SUBSCRIBE_START and SUBSCRIBE_DROP was
-  rejected: it works on lite-05 and later only. Landed for a lingering
-  moq-transport copy whose subscription lies wholly below the reported Largest
-  Object (the unfed copy above). Still to do: a first request with a bounded
-  subscription, which SUBSCRIBEs before any TRACK_STATUS names an edge; a
-  subscription only partly below the edge; and lite before lite-07. A
-  subscription to a copy no SUBSCRIBE accepts waits for the track's info
-  today, so this also needs a one-range read to resolve from the info its fill
-  installs.
+  rejected: it works on lite-05 and later only. Landed for moq-transport: a
+  copy no SUBSCRIBE feeds (the unfed copy above), and a first request whose
+  ranges all have an absolute start and end, which asks TRACK_STATUS first and
+  subscribes only once a range reaches the reported Largest Object.
+  `range_read.rs` reads history and a range across the live edge on every
+  wire, direct and relayed; draft-18 refuses the latter, having no bounded
+  SUBSCRIBE (`subscribe_join`). Open, found migrating the moq-net integration
+  tests onto one-range reads ([moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)):
+  - Lite before lite-07 tells no live edge without a SUBSCRIBE, so a one-range
+    read of history there SUBSCRIBEs where `fetch_group` FETCHes:
+    `fetch_pipeline` (the FETCH sent with TRACK), `fetch_fanout`,
+    `fetch_cancel`, and `catalog_handover`'s fetch cases assert the FETCH.
+  - A moq-transport read of the group at the reported Largest Object reaches
+    "the group the publisher may still be writing" (`wants_feed`), so it
+    subscribes: draft-18 refuses that, and a finished track's SUBSCRIBE is
+    refused (`fetch_only`, `compress::ietf_fetch_keeps_the_stored_form`). The
+    relay's `fetch_group(None)` reads exactly that group.
+  - Our moq-transport publishers answer only a one-group FETCH, so a run of
+    missing history groups read from one of them is refused and named dropped
+    (`subscribe_ranges`'s draft-22 cases now open with a range reaching the
+    Largest Object), until [hole markers](/quest/m2/ietf-hole-marker.md).
+  - Fetch-only behavior to carry over or drop: a fetch keeps both sessions busy
+    (`session_idle`), a session close cancels a pending fetch from either side
+    (`subscription_end_integrity`), a pre-lite-05 fetch is served from a feed
+    opened with it and an unfed fetch is a miss (`fetch_from_feed`), an
+    abandoned fetch reaches the publisher and a refetch within the linger stays
+    on the relay (`fetch_cancel`), an untimed fetched frame arrives untimed
+    (`untimed`), and a fetched datagram is `NotFetchable` (`datagram`, now a
+    miss by the rule above).
 - **The fill path goes linear first** (maintainer, 2026-10-25). One-range
   reads put every past read on the fill path, which `track_range_filling`
   measured as superlinear in range count and span. It is flat since
