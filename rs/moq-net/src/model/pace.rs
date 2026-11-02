@@ -160,6 +160,13 @@ mod tests {
 		group
 	}
 
+	fn info(size: usize) -> frame::Info {
+		frame::Info {
+			size: size as u64,
+			timestamp: None,
+		}
+	}
+
 	fn read(reader: &mut group::Consumer) {
 		let Poll::Ready(Ok(Some(_))) = reader.poll_read_frame(&kio::Waiter::noop()) else {
 			panic!("a committed frame is ready");
@@ -290,24 +297,59 @@ mod tests {
 	#[test]
 	fn a_local_writer_waits_for_a_reader_and_room() {
 		let (flag, waiter) = flag();
+		let small = info(0);
 		let mut group = group::Info { sequence: 0 }.produce_untimed();
-		assert_eq!(group.poll_ready(&waiter), Poll::Pending, "nobody reads yet");
+		assert_eq!(group.poll_ready(&waiter, &small), Poll::Pending, "nobody reads yet");
 		let mut reader = group.consume();
 		assert!(flag.woken(), "a reader arriving wakes the writer");
-		assert_eq!(group.poll_ready(&waiter), Poll::Ready(()));
+		assert_eq!(group.poll_ready(&waiter, &small), Poll::Ready(()));
 
 		for _ in 0..17 {
 			group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
 		}
-		assert_eq!(group.poll_ready(&waiter), Poll::Pending, "past the window");
+		assert_eq!(group.poll_ready(&waiter, &small), Poll::Pending, "past the window");
 		read(&mut reader);
 		assert!(flag.woken(), "the reader's read wakes the writer");
-		assert_eq!(group.poll_ready(&waiter), Poll::Ready(()));
+		assert_eq!(group.poll_ready(&waiter, &small), Poll::Ready(()));
 
 		drop(reader);
-		assert_eq!(group.poll_ready(&waiter), Poll::Pending, "the reader left");
+		assert_eq!(group.poll_ready(&waiter, &small), Poll::Pending, "the reader left");
 		group.handle().abort(Error::Cancel).unwrap();
-		assert_eq!(group.poll_ready(&waiter), Poll::Ready(()), "a closed group never waits");
+		assert_eq!(
+			group.poll_ready(&waiter, &small),
+			Poll::Ready(()),
+			"a closed group never waits"
+		);
+	}
+
+	/// A local writer waits until its next frame fits in the room left, not just until some
+	/// room is left, so a large frame never sheds what the fastest reader has yet to take.
+	/// A reader at the edge is waiting on the writer, so a frame larger than the whole window
+	/// still goes ahead.
+	#[test]
+	fn a_local_writer_waits_for_room_for_its_frame() {
+		let (_flag, waiter) = flag();
+		let mut group = group::Info { sequence: 0 }.produce_untimed();
+		let mut reader = group.consume();
+		group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
+		read(&mut reader);
+		for _ in 0..8 {
+			group.write_frame(None, Bytes::from(vec![0u8; MB])).unwrap();
+		}
+		assert_eq!(group.poll_ready(&waiter, &info(MB)), Poll::Ready(()), "a small frame fits");
+		assert_eq!(
+			group.poll_ready(&waiter, &info(8 * MB)),
+			Poll::Pending,
+			"a frame larger than the room left waits"
+		);
+		for _ in 0..8 {
+			read(&mut reader);
+		}
+		assert_eq!(
+			group.poll_ready(&waiter, &info(20 * MB)),
+			Poll::Ready(()),
+			"a reader that took every frame never stalls a frame larger than the window"
+		);
 	}
 
 	/// A reader that took every committed frame is waiting on the writer, so a frame

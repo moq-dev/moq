@@ -732,7 +732,7 @@ async fn javascript_partial_frame_gives_way_tokio() {
 }
 
 /// moq-tokio's default connection receive window.
-const STOCK_WINDOW: u64 = 128 << 20;
+const STOCK_WINDOW: u64 = moq_tokio::quic::DEFAULT_RECEIVE_WINDOW;
 /// Bytes each loopback benchmark run delivers.
 const BENCH_BYTES: usize = 256 << 20;
 /// The benchmark's bottleneck, and the bytes a run delivers through it.

@@ -571,8 +571,11 @@ impl AnnounceInit {
 
 impl<'a> Message<'a> for AnnounceInit {
 	const CONTROL: Option<crate::stats::Message> = Some(crate::stats::Message::Announce);
-	// Published lite01/02 carry the whole initial set in one message.
-	const MAX_SIZE: usize = 64 * 1024 * 1024;
+	// Published lite01/02 carry the whole initial set in one message. Capped so it fits one
+	// storage segment with its type and size prefixes (a varint of at most 8 bytes each), which
+	// keeps the smallest receive window a leasing transport may offer at one segment. A larger
+	// set is refused on both ends rather than raising every session's window for it.
+	const MAX_SIZE: usize = crate::frame::SEGMENT - 16;
 
 	fn decode_msg(r: &mut Decoder<'a>, version: Version) -> Result<Self, DecodeError> {
 		Self::decode_suffixes(r, version, usize::MAX)

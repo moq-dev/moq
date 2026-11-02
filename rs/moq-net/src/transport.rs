@@ -162,12 +162,13 @@ impl ReceiveWindow {
 	}
 }
 
-/// The smallest connection receive window a transport that leases may offer.
+/// The smallest connection receive window a transport that leases may offer: one 1 MiB
+/// storage segment.
 ///
 /// A session keeps each unit it is still assembling leased, and a unit larger than the
-/// window can never complete, so the window has to fit the largest one with its framing:
-/// a legacy announcement set, past any frame segment. A frame returns its credit a
-/// segment at a time, so its size never matters here.
+/// window can never complete, so the window has to fit the largest one with its framing.
+/// A frame returns its credit a segment at a time, so its size never matters here, and a
+/// legacy announcement set is capped to fit the same segment.
 pub const MIN_RECEIVE_WINDOW: u64 = {
 	// A type and a size prefix, each a varint of at most 8 bytes.
 	const PREFIXES: u64 = 16;

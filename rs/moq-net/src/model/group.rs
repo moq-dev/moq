@@ -2218,24 +2218,24 @@ impl Producer {
 	pub async fn closed(&self) -> Result<()> {
 		kio::wait(|waiter| self.handle.poll_closed(waiter)).await
 	}
-	/// Poll until a reader holds the group and the writer is at most 16 MB past the end of
-	/// the last frame its fastest reader took, so a local writer runs no further ahead than
-	/// the live tail keeps behind that reader.
+	/// Poll until a reader holds the group and the next frame, described by `frame`, fits
+	/// within 16 MB past the end of the last frame its fastest reader took, so a local writer
+	/// runs no further ahead than the live tail keeps behind that reader.
 	///
 	/// Ready once the group is closed, so the next write surfaces why. A reader that took
-	/// every committed frame is waiting on the writer, so it never holds the writer back,
-	/// and one whose next frame was shed has fallen off the group and is not waited on.
-	/// Writing without waiting never fails: the group sheds its front instead, as it also
-	/// does for a frame larger than the room left, which trims the tail to fit.
-	pub fn poll_ready(&self, waiter: &kio::Waiter) -> Poll<()> {
-		ready!(self.poll_paced(waiter, 0));
+	/// every committed frame is waiting on the writer, so it never holds the writer back, even
+	/// for a frame larger than the window, and one whose next frame was shed has fallen off
+	/// the group and is not waited on. Writing without waiting never fails: the group sheds
+	/// its front instead.
+	pub fn poll_ready(&self, waiter: &kio::Waiter, frame: &frame::Info) -> Poll<()> {
+		ready!(self.poll_paced(waiter, frame.size));
 		// A closed group reports `Closed`, which is ready too.
 		self.handle.state.poll_wanted_changed(waiter, false).map(|_| ())
 	}
 
-	/// Wait until a reader holds the group and the writer has room; see [`Self::poll_ready`].
-	pub async fn ready(&self) {
-		kio::wait(|waiter| self.poll_ready(waiter)).await
+	/// Wait until a reader holds the group and `frame` fits; see [`Self::poll_ready`].
+	pub async fn ready(&self, frame: &frame::Info) {
+		kio::wait(|waiter| self.poll_ready(waiter, frame)).await
 	}
 
 	/// Poll until the writer may take more from upstream, `partial` bytes into a frame
