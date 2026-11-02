@@ -325,7 +325,7 @@ impl Live {
 			.write(Frame {
 				timestamp: Timestamp::from_micros((index * AUDIO_US).strict_add_signed(self.offset)).unwrap(),
 				duration: None,
-				payload: Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8)),
+				payload: audio_payload(index),
 				keyframe: index.is_multiple_of(AUDIO_GROUP),
 			})
 			.unwrap();
@@ -499,6 +499,8 @@ async fn end_waits_for_catalog_and_media() {
 			leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count(),
 			expected
 		);
+		let audio: Vec<Bytes> = (0..live.audio_index).map(audio_payload).collect();
+		assert_eq!(aac_frames(&leg), audio, "catalog_first {catalog_first}: audio drained");
 		if catalog_first {
 			live.finish_media();
 		} else {
@@ -514,6 +516,11 @@ async fn end_waits_for_catalog_and_media() {
 		assert_eq!(
 			leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count(),
 			expected
+		);
+		assert_eq!(
+			aac_frames(&leg),
+			audio,
+			"catalog_first {catalog_first}: no audio after EOF"
 		);
 	}
 }
@@ -1231,6 +1238,45 @@ async fn live_audio_shares_its_pes() {
 			assert!(matches!(frames, 12 | 7), "lag {lag}: a PES carried {frames} frames");
 		}
 	}
+}
+
+/// The raw AAC of the fixture's audio frame `index`.
+fn audio_payload(index: u64) -> Bytes {
+	Bytes::from_iter((0..180u16).map(|i| (i ^ index as u16) as u8))
+}
+
+/// Each AAC frame a leg rendered, in output order, with its ADTS header removed.
+fn aac_frames(leg: &Leg) -> Vec<Bytes> {
+	let bytes: Vec<u8> = leg
+		.out
+		.iter()
+		.flat_map(|(_, frame)| frame.payload.iter().copied())
+		.collect();
+	let mut reader = TsPacketReader::new(Cursor::new(bytes));
+	let mut pes: Vec<Vec<u8>> = Vec::new();
+	while let Some(packet) = reader.read_ts_packet().unwrap() {
+		if packet.header.pid.as_u16() != AUDIO_PID {
+			continue;
+		}
+		match packet.payload {
+			Some(TsPayload::PesStart(start)) => pes.push(start.data.to_vec()),
+			Some(TsPayload::PesContinuation(rest)) => {
+				pes.last_mut().expect("a PES start first").extend_from_slice(&rest)
+			}
+			_ => {}
+		}
+	}
+	let mut frames = Vec::new();
+	for data in &pes {
+		// One PES carries several frames.
+		let mut data = &data[..];
+		while !data.is_empty() {
+			let header = super::adts::Header::parse(data).unwrap();
+			frames.push(Bytes::copy_from_slice(&data[header.header_len..header.frame_len]));
+			data = &data[header.frame_len..];
+		}
+	}
+	frames
 }
 
 /// Each video frame's DTS (else PTS) by its PTS, in 90 kHz ticks, as a leg rendered it.

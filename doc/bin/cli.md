@@ -521,12 +521,15 @@ continuity error, and the rest carry on. It takes neither `--follow`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
 
-A stdout export ends when its catalog ends and its media has drained. A publisher
-that leaves still gets what the export buffered of it out on schedule first.
-`export ts --follow 10s` then waits that long for the same publisher instance to
-come back, and carries
-on with the same stream. A return that refuses its catalog keeps it waiting
-for the next announcement; if the follow runs out first, it exits 1 with that
+A stdout export ends when its catalog ends and its media has drained, so
+finishing only the media tracks leaves it waiting for catalog updates.
+`export ts --passthrough` instead ends with its track, once the packets it
+buffered are out, even while the catalog stays open; only a catalog that ends
+without naming the track ends it first. A publisher that leaves still gets what
+the export buffered of it out on schedule first. `export ts --follow 10s` then
+waits that long for the same publisher instance to come back, and carries on
+with the same stream. A return that refuses its catalog keeps it waiting for the
+next announcement; if the follow runs out first, it exits 1 with that
 refusal. One that goes before serving, such as one still routed through a dead
 session, is no return. A replacement (a restarted publisher, under a new
 [epoch](/concept/moq-lite#publisher-epochs)) exits 1 unless `--stitch` follows
