@@ -168,7 +168,6 @@ async fn embed_and_stop(mut config: Config) {
 	// are cloned before `run` consumes the relay.
 	let origin = relay.cluster().origin.clone();
 	let trigger = relay.shutdown_trigger().clone();
-	let ready = relay.ready();
 	let web = relay
 		.web()
 		.routes()
@@ -178,6 +177,7 @@ async fn embed_and_stop(mut config: Config) {
 			axum::routing::post(|| async { ([("access-control-allow-origin", "https://trusted.example")], "private") }),
 		)
 		.route("/plain-post", axum::routing::post(|| async { "plain" }));
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.with_web(web).run());
 	ready.wait().await.expect("relay ready");
 	assert!(!running.is_finished(), "the relay stopped while serving");
@@ -503,9 +503,9 @@ async fn embedded_listener_health_reaches_metrics() {
 	config.drain_timeout = Some((Duration::ZERO).into());
 	let relay = Relay::load(config).await.expect("load relay").with_signals(false);
 	let internal = relay.internal().addr().expect("internal listener bound");
-	let ready = relay.ready();
 	let trigger = relay.shutdown_trigger().clone();
 	let health = moq_tokio::accept::Health::new("embedded");
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.with_listeners([health]).run());
 	ready.wait().await.expect("relay ready");
 	let body = reqwest::get(format!("http://{internal}/metrics"))
