@@ -7895,12 +7895,22 @@ impl Cursor {
 			let stale: Vec<(u64, stats::Content)> = asked
 				.iter()
 				.filter_map(|&sequence| {
-					let slot = state.lookup.get(&sequence)?;
 					// Parked first, so a group landing above while this judges wakes it.
 					let _ = state.cache.wakes().watch_landing(sequence, waiter);
+					// Judged whether or not the cache still holds the headless copy: an evicted
+					// one goes stale all the same, and counts as a group of unknown size.
 					state
 						.poll_drifted(sequence, &servable, drift.budget, None, waiter)
-						.then(|| (sequence, slot.group.consume().content()))
+						.then(|| {
+							let content = match state.lookup.get(&sequence) {
+								Some(slot) => slot.group.consume().content(),
+								None => stats::Content {
+									groups: 1,
+									..Default::default()
+								},
+							};
+							(sequence, content)
+						})
 				})
 				.collect();
 			Poll::Ready(Ok(stale))
@@ -18004,41 +18014,47 @@ mod test {
 	}
 
 	/// A head still asked when a newer group in the reader's window supersedes it is
-	/// written off, so the bounded read ends without waiting on the fill.
+	/// written off, so the bounded read ends without waiting on the fill, whether or not the
+	/// cache still holds the headless copy.
 	#[kio::test]
 	#[cfg(feature = "async")]
 	async fn a_head_still_asked_goes_stale_within_the_window() {
-		let producer = track_producer("test", Info::timed());
-		let dynamic = producer.requests();
+		for evict in [false, true] {
+			let producer = track_producer("test", Info::timed());
+			let dynamic = producer.requests();
 
-		let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
-		live.start_at(1).unwrap();
-		live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
-			.unwrap();
-		live.finish().unwrap();
+			let mut live = producer.create_group(group::Info { sequence: 0 }).unwrap();
+			live.start_at(1).unwrap();
+			live.write_frame(Timestamp::ZERO, bytes::Bytes::from_static(b"delta"))
+				.unwrap();
+			live.finish().unwrap();
 
-		let mut sub = producer.subscribe(Subscription::default().with_range(0..2));
-		assert!(sub.recv_group().now_or_never().is_none(), "the head is still asked");
-		let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
-		assert_eq!(request.sequence(), 0);
+			let mut sub = producer.subscribe(Subscription::default().with_range(0..2));
+			assert!(sub.recv_group().now_or_never().is_none(), "the head is still asked");
+			let request = dynamic.requested_fill_group().now_or_never().unwrap().unwrap();
+			assert_eq!(request.sequence(), 0);
 
-		let mut newer = producer.create_group(group::Info { sequence: 1 }).unwrap();
-		newer
-			.write_frame(Timestamp::from_millis(1).unwrap(), bytes::Bytes::from_static(b"x"))
-			.unwrap();
-		newer.finish().unwrap();
-		let group = kio::clock::timeout(std::time::Duration::from_secs(1), sub.recv_group())
-			.await
-			.expect("group 1 timed out")
-			.unwrap()
-			.expect("group 1");
-		assert_eq!(group.sequence, 1);
-		let end = kio::clock::timeout(std::time::Duration::from_secs(1), sub.recv_group())
-			.await
-			.expect("the read never ended")
-			.unwrap();
-		assert!(end.is_none(), "the read ends with group 0 written off");
-		drop(request);
+			let mut newer = producer.create_group(group::Info { sequence: 1 }).unwrap();
+			newer
+				.write_frame(Timestamp::from_millis(1).unwrap(), bytes::Bytes::from_static(b"x"))
+				.unwrap();
+			newer.finish().unwrap();
+			if evict {
+				producer.modify().unwrap().evict_group(0, Error::Evicted);
+			}
+			let group = kio::clock::timeout(std::time::Duration::from_secs(1), sub.recv_group())
+				.await
+				.expect("group 1 timed out")
+				.unwrap()
+				.expect("group 1");
+			assert_eq!(group.sequence, 1, "evict={evict}");
+			let end = kio::clock::timeout(std::time::Duration::from_secs(1), sub.recv_group())
+				.await
+				.unwrap_or_else(|_| panic!("evict={evict}: the read never ended"))
+				.unwrap();
+			assert!(end.is_none(), "evict={evict}: the read ends with group 0 written off");
+			drop(request);
+		}
 	}
 
 	/// A head answered after the reader's ranges moved off its group is not handed out.
