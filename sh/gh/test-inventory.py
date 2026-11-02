@@ -526,7 +526,7 @@ def matrix_values(job) -> dict[str, list[str]]:
 
 
 def workflow_steps(root: Path) -> list[tuple[str, str, Path]]:
-    """Every `run:` step under .github and its directory, with `${{ matrix.* }}` expanded to the job's values."""
+    """Every command a step runs under .github and its directory, with `${{ matrix.* }}` expanded to the job's values."""
     entries = []
     for path in sorted([*root.glob(".github/workflows/*.y*ml"), *root.glob(".github/actions/*/action.y*ml")]):
         document = yaml.safe_load(path.read_text()) or {}
@@ -538,8 +538,10 @@ def workflow_steps(root: Path) -> list[tuple[str, str, Path]]:
             matrix = matrix_values(job)
             directory = ((job.get("defaults") or {}).get("run") or {}).get("working-directory", defaults)
             for step in job.get("steps") or []:
-                # An action that runs a command takes it as `with: run:`, like CodSpeed's.
-                run = step.get("run") or (step.get("with") or {}).get("run")
+                # An action that runs a command takes it as `with: run:`, like
+                # CodSpeed's, or `with: script:`, like android-emulator-runner's.
+                inputs = step.get("with") or {}
+                run = step.get("run") or inputs.get("run") or inputs.get("script")
                 if not isinstance(run, str):
                     continue
                 cwd = (root / step.get("working-directory", directory)).resolve()
@@ -708,6 +710,11 @@ def selection(words: list[str], manifests: dict[Path, str], cwd: Path) -> Select
     # Parse from the last `just` or `cargo`, so a wrapper's own options stay out.
     heads = [position for position, word in enumerate(words) if word in ("just", "cargo")]
     words = words[heads[-1] :] if heads else words
+    # `cargo ndk` takes its own options ahead of the cargo subcommand it wraps.
+    if words[:2] == ["cargo", "ndk"]:
+        wrapped = next((position for position, word in enumerate(words) if word in ("test", "nextest", "bench")), None)
+        if wrapped is not None:
+            words = ["cargo", *words[wrapped:]]
     index = 0
     while index < len(words):
         word = words[index]

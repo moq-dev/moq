@@ -187,6 +187,35 @@ class InventoryTest(unittest.TestCase):
         self.assertNotIn("recipe rs::sweep", orphans)
         self.assertNotIn("ignore media::probe::long_sweep", orphans)
 
+    def test_an_action_script_input_is_a_caller(self):
+        # android-emulator-runner runs its `script:` input as shell, once the emulator is up.
+        self.write(
+            ".github/workflows/emulator.yml",
+            """
+            on: workflow_call
+            jobs:
+              emulator:
+                runs-on: ubuntu-latest
+                steps:
+                  - uses: reactivecircus/android-emulator-runner@v2
+                    with:
+                      api-level: 34
+                      script: just rs sweep
+        """,
+        )
+        orphans = self.orphans()
+        self.assertNotIn("recipe rs::sweep", orphans)
+        self.assertNotIn("ignore media::probe::long_sweep", orphans)
+
+    def test_cargo_ndk_options_are_not_test_filters(self):
+        caller = "just rs test -p media --lib --run-ignored only -E 'test(/^gpu::tests::(renders|exports)$/)'"
+        ndk = 'cargo ndk -t "$abi" --platform 26 test -p media --lib -- --ignored gpu::tests::renders'
+        self.write("justfile", JUSTFILE.replace(caller, ndk))
+        orphans = self.orphans()
+        self.assertNotIn("ignore media::gpu::tests::renders", orphans)
+        # Neither `26` nor the wrapped `test` subcommand is a filter that selects it.
+        self.assertIn("ignore media::gpu::tests::exports", orphans)
+
     def test_workers_are_tested_by_their_lockfile(self):
         self.write("infra/worker/bun.lock", "")
         self.write("infra/worker/src/policy.test.ts", "")
