@@ -22,6 +22,14 @@ if(MOQ_LOCAL AND EXISTS "${MOQ_LOCAL}/cpp/moq/CMakeLists.txt")
   set(_moq_local_build TRUE)
 endif()
 
+# Off by default, like moq-ffi's feature. The release archive and a prebuilt MOQ_FFI_DIR carry
+# default features only, so refuse here, before the OBS dependencies download, rather than
+# silently building without it.
+option(MOQ_FFI_QLOG "Build moq-ffi with qlog, which shows the qlog directory setting" OFF)
+if(MOQ_FFI_QLOG AND (NOT _moq_local_build OR MOQ_FFI_DIR))
+  message(FATAL_ERROR "MOQ_FFI_QLOG requires the in-tree build: set MOQ_LOCAL and clear MOQ_FFI_DIR")
+endif()
+
 if(_moq_local_build)
   file(STRINGS "${MOQ_LOCAL}/cpp/moq/VERSION" _moq_link_version LIMIT_COUNT 1)
   if(NOT _moq_link_version MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
