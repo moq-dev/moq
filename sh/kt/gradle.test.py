@@ -56,7 +56,8 @@ class GradleTest(unittest.TestCase):
             'with open(os.environ["GRADLE_CALLS"], "a") as output:\n'
             "    output.write(json.dumps({\n"
             '        "executable": sys.argv[0], "args": sys.argv[1:],\n'
-            '        "runner_keys": [key for key in os.environ if key.startswith(("ACTIONS_", "GITHUB_", "RUNNER_"))],\n'
+            '        "runner_keys": [key for key in os.environ\n'
+            '                        if key.startswith(("ACTIONS_", "GITHUB_", "RUNNER_"))],\n'
             '    }) + "\\n")\n'
             'sys.exit(int(os.environ.get("GRADLE_STATUS", "0")))\n'
         )
