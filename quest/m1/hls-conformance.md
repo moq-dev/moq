@@ -24,9 +24,11 @@ coverage. Decided with the maintainer on 2026-10-24:
 - Cover a sliding window that evicts segments, a GOP that overruns the
   declared duration, a mid-run reconfiguration (new rendition instance), and a
   recording through the segment cursors.
-- Cover an unaligned ladder, renditions whose keyframes and segment numbers
-  differ: every segment is listed and fetched (no `EXT-X-GAP`), and the DASH
-  manifest omits `segmentAlignment`.
+- Cover an unaligned ladder, renditions whose keyframes differ: every
+  segment is listed and fetched (no `EXT-X-GAP`), and the DASH manifest
+  omits `segmentAlignment`. Since the grid replaced records (2026-11-02),
+  every rendition shares the grid's segment numbers while its segment
+  boundaries follow its own keyframes; the test checks both.
 - Runs nightly; move any part fast enough into the merge gate.
 
 Public API: none. Wire: none.

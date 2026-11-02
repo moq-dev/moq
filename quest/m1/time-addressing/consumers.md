@@ -42,6 +42,6 @@ discontinuity marker groups.
 
 ## Required
 
-- [HLS export on a declared grid](/quest/m0/hls-media-grid.md) - the grid and record removal this moves onto group starts
+- [HLS export on a declared grid](/quest/m0/hls-media-grid.md) - supplies the grid and removes the records; this quest only swaps its first-frame pts placement for group starts
 - [Rust groups by start](/quest/m1/time-addressing/model.md) - the Rust API these consume
 - [@moq/net by start](/quest/m1/time-addressing/js.md) - the JS API these consume
