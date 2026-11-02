@@ -68,11 +68,12 @@ Baselines:
 
 Remaining:
 
-- **Workflow.** A `merge_group` workflow runs `just ci` against the group's
-  base on `runs-on: [self-hosted, moq-queue]`, read-only, with no secrets.
-- **Ruleset.** `main` requires that check and the merge queue (squash, build
-  concurrency 1, merge limit 1), drops the unreported `quest land`
-  requirement, and keeps only the administrator bypass.
+- **Ruleset.** `main` requires the `Queue` context, which
+  `.github/workflows/queue.yml` reports from its `merge_group` build on
+  `[self-hosted, moq-queue]` (skipped on pull requests, so a PR can enter
+  the queue), and the merge queue (squash, build concurrency 1, merge limit
+  1). It drops the unreported `quest land` requirement and keeps only the
+  administrator bypass.
 - **Host.** The host config stops serving moq from `quest land`
   (`services.quest-land.repositories.moq.enable = false`) at the cutover,
   while the watcher and fixer keep serving moq.
