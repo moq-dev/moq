@@ -105,7 +105,6 @@ owns that feedback.
 
 ## Required
 
-- [GCC candidate](/quest/m2/quic-realtime/gcc.md) - libwebrtc's GoogCC vendored into `moq-congestion` and refreshed to current WebRTC
 - [BBR3 delay bound](/quest/m2/quic-realtime/bbr-delay-bound.md) - BBR3 with inflight capped when the forward delay gradient shows queue growth
 - [SCReAMv2 candidate](/quest/m2/quic-realtime/scream.md) - the RFC 8298bis delay path ported to `moq-congestion`
 - [io_uring runs an application's controller](/quest/m2/quic-realtime/uring-controller.md) - moq-uring takes a controller factory, so the winner installs the same way on both runtimes

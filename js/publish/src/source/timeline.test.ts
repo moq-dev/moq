@@ -50,4 +50,14 @@ describe("Timeline", () => {
 	test("loops on a usable duration", () => {
 		expect(new Timeline(ZERO, 10).loops).toBe(true);
 	});
+
+	test("maps a wall clock time back to its pass and file timestamp", () => {
+		const timeline = new Timeline(ZERO, 10);
+
+		expect(timeline.position(micro(500_000))).toEqual({ timestamp: micro(0), loop: 0 });
+		expect(timeline.position(micro(3_500_000))).toEqual({ timestamp: micro(2_500_000), loop: 0 });
+		expect(timeline.position(micro(26_000_000))).toEqual({ timestamp: micro(5_000_000), loop: 2 });
+		expect(timeline.position(timeline.at(micro(4_000_000), 3))).toEqual({ timestamp: micro(4_000_000), loop: 3 });
+		expect(new Timeline(ZERO, 0).position(micro(26_000_000))).toEqual({ timestamp: micro(25_000_000), loop: 0 });
+	});
 });
