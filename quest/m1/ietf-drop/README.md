@@ -72,15 +72,28 @@ the runner's default `implementations.json` declares only drafts 18 and 22
 for `moq-dev-rs` and `moq-dev-js`, and both notes call those the versions
 main retains.
 
-This README's remaining work waits on a release that carries draft 20. None
-did on 2026-11-02: the newest were `moq-tokio` 0.19.31, `@moq/net` 0.4.7,
-and `moq-relay` v0.17.10, all published before 2026-10-31. The
-runner's clients pin `moq-tokio` 0.19.28 (`builds/moq-dev-rs/Cargo.toml`)
-and `@moq/net` 0.4.7 (`builds/moq-dev-js/package.json`), and its relay
-adapter wraps `docker.io/moqdev/moq-relay`. Once later versions are
-published, open a PR on `englishm/moq-interop-runner` that bumps both client
-pins and their lockfiles, adds `draft-20` to both entries, and refreshes
-their notes. The maintainer approved posting there on 2026-10-24.
+The published releases already speak draft 20, so registering it needs no
+new release. They are cut from the `release` branch, which never took the
+drops ([moq-dev/moq#6753](https://github.com/moq-dev/moq/pull/6753) and
+[moq-dev/moq#6754](https://github.com/moq-dev/moq/pull/6754) are on `main`
+only). Every artifact the runner uses advertises `moqt-20`, checked
+2026-11-02:
+
+- `moq-dev-rs` client: `builds/moq-dev-rs/Cargo.lock` resolves `moq-tokio`
+  0.19.28 and `moq-net` 0.3.15, whose tagged `rs/moq-net/src/version.rs`
+  defines `ALPN_20`. The client parses `MOQ_CLIENT_VERSION` with
+  `moq_net::Version`'s `FromStr`, so no client code changes.
+- `moq-dev-js` client: the published `@moq/net` 0.4.7 tarball offers
+  `Ietf.ALPN.DRAFT_20` in `connection/connect.js`.
+- Relay: the adapter wraps `docker.io/moqdev/moq-relay:latest`, the same
+  digest as `0.17.10`, built from `moq-relay-v0.17.10`.
+
+This README's remaining work: open a PR on `englishm/moq-interop-runner`
+that adds `draft-20` to the `moq-dev-rs` and `moq-dev-js` entries in
+`implementations.json`, rewrites both notes (they call 18 and 22 the only
+versions main retains), and fixes the two moq-dev rows in its `README.md`
+table, which still say drafts 14-17. No pin bump is needed. The maintainer
+approved posting there on 2026-10-24.
 
 ## Related
 
