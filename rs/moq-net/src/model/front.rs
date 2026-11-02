@@ -9,14 +9,14 @@
 //! sources, the tracks, the clock) and executes the actions; see
 //! `origin::run_front`.
 //!
-//! The driver only offers a front routes that serve its broadcast: those with the
-//! epoch it first resolved, whose tracks resume where they stopped, or its first
-//! route alone when that had no epoch, since nothing says another serves the
-//! same bytes. Even that route can answer a re-request with another instance, so
-//! without an epoch a track whose copy fails ends with the error instead of
-//! re-splicing. Another instance winning the path leaves the front alone: its
-//! readers stay until they leave or its routes go, and new requests get a fresh
-//! front for the winner.
+//! The driver only offers a front routes that serve its broadcast: those of the
+//! instance it first resolved, at its newest epoch, whose tracks resume where they
+//! stopped since the instance promises one continuous sequence space. An instance a
+//! session minted, for a wire that carries none, promises nothing past its route:
+//! that route can answer a re-request with another stream, so a track whose copy
+//! fails there ends with the error instead of re-splicing. Another
+//! instance winning the path leaves the front alone: its readers stay until they
+//! leave or its routes go, and new requests get a fresh front for the winner.
 //!
 //! A front nothing needs retires: once every track is forgotten (after the linger,
 //! so a returning reader still finds the cache) and no consumer holds its broadcast,
@@ -35,15 +35,16 @@ use std::{
 use crate::{Error, time::Instant, track};
 
 /// A route the table selected for the front: the entry id, whether it is a
-/// broadcast published on this origin, and whether it carries an epoch.
+/// broadcast published on this origin, and whether its instance was carried rather
+/// than minted by a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Candidate {
 	pub route: u64,
 	pub local: bool,
 	/// Whether a track whose copy failed may be asked for again through the route:
-	/// the epoch says the answer is the same broadcast. Without one, the route could
-	/// answer with whatever instance now wins upstream.
-	pub epoch: bool,
+	/// a carried instance says the answer is the same stream. A minted one names the
+	/// announcement, and the route could answer with whatever stream now wins upstream.
+	pub carried: bool,
 }
 
 /// Why an upstream request through a route did not produce a source.
@@ -494,8 +495,8 @@ impl Front {
 			return;
 		}
 		let verdict = match result {
-			// A same-epoch copy claims identical content, so any difference in
-			// its metadata is refused rather than reinterpreted.
+			// A copy of the same instance claims identical content, so any difference
+			// in its metadata is refused rather than reinterpreted.
 			Ok(info) => match self.info.get(&name) {
 				Some(expected) if *expected != info => Err(Error::Unsupported),
 				Some(_) => Ok(()),
@@ -563,12 +564,12 @@ impl Front {
 			Err(err)
 				if delivered
 					&& super::resume::route_failed(&err)
-					&& self.serving.is_some_and(|(_, candidate)| candidate.epoch) =>
+					&& self.serving.is_some_and(|(_, candidate)| candidate.carried) =>
 			{
 				track.state = TrackState::Idle;
 				self.redispatch(name, actions);
 			}
-			// A content verdict survives every copy. Without an epoch, even a route
+			// A content verdict survives every copy. Under a minted instance, even a route
 			// failure cannot be retried against the same content.
 			Err(err) if delivered => {
 				track.state = TrackState::Idle;
@@ -717,7 +718,7 @@ mod tests {
 		Candidate {
 			route,
 			local: false,
-			epoch: true,
+			carried: true,
 		}
 	}
 
@@ -725,7 +726,7 @@ mod tests {
 		Candidate {
 			route,
 			local: true,
-			epoch: true,
+			carried: true,
 		}
 	}
 
@@ -1090,7 +1091,7 @@ mod tests {
 	}
 
 	#[test]
-	fn an_epoch_copy_verdict_aborts_without_querying_again() {
+	fn a_copy_verdict_aborts_without_querying_again() {
 		for candidate in [remote(1), local(1)] {
 			for err in [
 				Error::from(crate::StreamError::FrameTooLarge),
@@ -1118,16 +1119,16 @@ mod tests {
 		}
 	}
 
-	/// Without an epoch a re-request could reach another instance, so the track ends
+	/// Under a minted instance a re-request could reach another stream, so the track ends
 	/// with the error instead, whether the route is a peer's or a local broadcast.
 	#[test]
-	fn a_copy_dying_without_an_epoch_ends_the_track() {
+	fn a_copy_dying_under_a_minted_instance_ends_the_track() {
 		for (local, closing) in [(false, false), (false, true), (true, false)] {
 			let mut front = serving(
 				Candidate {
 					route: 1,
 					local,
-					epoch: false,
+					carried: false,
 				},
 				100,
 			);
@@ -1184,7 +1185,7 @@ mod tests {
 
 	#[test]
 	fn incompatible_copy_is_refused() {
-		// A same-epoch copy claims identical content, so every field counts, `refresh` too.
+		// A copy of the same instance claims identical content, so every field counts, `refresh` too.
 		let differing = [
 			track::Info {
 				max_age: Some(Duration::from_secs(1)),
