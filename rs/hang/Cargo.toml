@@ -18,7 +18,6 @@ hex = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
-regex = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_with = { workspace = true, features = ["base64"] }
