@@ -514,11 +514,14 @@ mod tests {
 		};
 		let stream = |io| qmux::transport::Stream::new(io);
 		let (client, server) = tokio::io::duplex(64 * 1024);
-		tokio::try_join!(
+		let ((client, client_driver), (server, server_driver)) = tokio::try_join!(
 			qmux::Session::connect(stream(client), config()),
 			qmux::Session::accept(stream(server), config())
 		)
-		.unwrap()
+		.unwrap();
+		tokio::spawn(client_driver);
+		tokio::spawn(server_driver);
+		(client, server)
 	}
 
 	/// A client session and the server session `lease` was prepared for, before supervision.

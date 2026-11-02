@@ -162,6 +162,9 @@ typealias Datagram = uniffi.moq.MoqDatagram
 /** A payload plus the timestamp it should be presented at. */
 typealias Frame = uniffi.moq.MoqFrame
 
+/** An exact media timestamp: `value` units at `scale` units per second. */
+typealias Timestamp = uniffi.moq.MoqTimestamp
+
 /**
  * How a broadcast advertises its exact path: its static production cost (lower wins), an optional
  * stable instance (null keeps the one the broadcast minted), and the epoch, which only matters with
@@ -201,7 +204,7 @@ typealias AnchorAbsolute = uniffi.moq.MoqAnchor.Absolute
 /** The group `groups` before the latest one, clamped to group 0: 0 is the latest. */
 typealias AnchorRelative = uniffi.moq.MoqAnchor.Relative
 
-/** The group containing `timestampUs`, a presentation time in microseconds. */
+/** The group containing `timestamp`, a presentation time. */
 typealias AnchorTime = uniffi.moq.MoqAnchor.Time
 
 /** Which pending group the publisher sends first: `ASCENDING` or `DESCENDING`. */

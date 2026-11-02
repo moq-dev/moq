@@ -834,22 +834,24 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// Finish all tracks, flushing current groups.
 	///
 	/// Input that ends inside an element other than an unknown-size Segment or Cluster is refused as
-	/// truncated.
+	/// truncated, but the tracks still end with what was accepted.
 	pub fn finish(&mut self) -> Result<()> {
 		self.finished = true;
-		if self.failed.is_none()
-			&& let Err(err) = self.drain_eof()
-		{
+		let mut result = match self.failed {
+			None => self.drain_eof(),
+			Some(_) => Ok(()),
+		};
+		if let Err(err) = &result {
 			// A frame cut short fails its group with the reason, rather than waiting for the rest.
 			self.abort_block(err.reason());
-			return Err(err);
 		}
 		// No frame follows to anchor the clock, so publish the declared track set now.
 		self.initial_reservation = None;
 		for track in self.tracks.values_mut() {
-			track.track.finish()?;
+			// Finish every track even on refusal, keeping the first error.
+			result = result.and(track.track.finish());
 		}
-		Ok(())
+		result
 	}
 
 	/// Abort all tracks with `err` instead of finishing, so subscribers see the real
@@ -1801,17 +1803,87 @@ mod tests {
 		import.finish().unwrap();
 	}
 
-	#[tokio::test]
+	#[tokio::test(start_paused = true)]
 	async fn truncation_fails_the_frame_cut_short() {
+		use futures::FutureExt;
+
 		let (mut import, catalog, consumer) = import();
 		import.decode(&live(vec![entry(1, 1, "V_VP9")])).unwrap();
 		import.decode(&simple_block(1, 1024)).unwrap();
 		import.decode(&[4; 512]).unwrap();
 		let mut frame = first_frame(&catalog, &consumer).await;
-		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+		let err = import.finish().unwrap_err();
+		assert!(matches!(err, crate::Error::Mkv(Error::Truncated)));
 		// The importer is still owned, and the frame fails rather than waiting on it.
-		let read = kio::clock::timeout(WAIT, frame.read_all()).await.unwrap();
-		assert!(read.is_err(), "a truncated frame must not read as complete: {read:?}");
+		let read = frame.read_all().now_or_never().expect("the cut-short frame must fail");
+		assert!(matches!(
+			read,
+			Err(moq_net::Error::Stream(moq_net::StreamError::Internal))
+		));
+		drop(import);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn truncated_finish_ends_tracks_with_accepted_content() {
+		use futures::FutureExt;
+
+		let data = include_bytes!("test_data/opus.webm");
+		// The last packet is followed by 10 bytes of BlockGroup metadata: cut inside its payload,
+		// or inside the metadata after all six packets were accepted.
+		for (missing, expected) in [(11, 5), (1, 6)] {
+			let data = &data[..data.len() - missing];
+			for chunk in [1, 7, 64, data.len()] {
+				let (mut import, catalog, consumer) = import();
+				for piece in data.chunks(chunk) {
+					import.decode(piece).unwrap();
+				}
+				assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+				let snapshot = catalog.snapshot();
+				let (name, config) = snapshot.audio.renditions.iter().next().unwrap();
+				let subscription =
+					moq_net::track::Subscription::default().with_max_delay(std::time::Duration::from_secs(1));
+				let track = consumer.track(name).unwrap().subscribe(subscription).await.unwrap();
+				let mut reader =
+					crate::container::Consumer::new(track, crate::catalog::hang::Container::try_from(config).unwrap());
+				let mut frames = 0;
+				while reader
+					.read_frame()
+					.now_or_never()
+					.expect("finish must end the track while the importer is held")
+					.unwrap()
+					.is_some()
+				{
+					frames += 1;
+				}
+				assert_eq!(frames, expected, "chunk {chunk}");
+				drop(import);
+			}
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn truncated_finish_publishes_and_ends_empty_tracks() {
+		let (mut import, catalog, consumer) = import();
+		let mut clocks = crate::container::test_util::Clocks::subscribe(&consumer).await;
+		import
+			.decode(&live(vec![entry(1, 1, "V_VP9"), entry(2, 1, "V_VP8")]))
+			.unwrap();
+		import.decode(&[0xec, 0x81]).unwrap();
+		assert!(clocks.drain().is_empty(), "no block has anchored the catalog yet");
+		assert!(matches!(import.finish(), Err(crate::Error::Mkv(Error::Truncated))));
+		assert!(
+			!clocks.drain().is_empty(),
+			"finish must release the initial catalog reservation"
+		);
+		let snapshot = catalog.snapshot();
+		assert_eq!(snapshot.video.renditions.len(), 2);
+		for name in snapshot.video.renditions.keys() {
+			let mut track = consumer.track(name).unwrap().subscribe(None).await.unwrap();
+			assert!(matches!(
+				track.poll_recv_group(&kio::Waiter::noop()),
+				std::task::Poll::Ready(Ok(None))
+			));
+		}
 		drop(import);
 	}
 

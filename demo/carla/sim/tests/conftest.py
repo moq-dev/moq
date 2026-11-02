@@ -64,6 +64,7 @@ moq.AnnounceEventStart = AnnounceEventStart
 moq.AnnounceEventUpdate = AnnounceEventUpdate
 moq.AnnounceEventEnd = AnnounceEventEnd
 moq.AnnounceEventRestart = AnnounceEventRestart
+moq.Timestamp = lambda value, scale: SimpleNamespace(value=value, scale=scale)
 moq.TrackInfo = lambda **kwargs: SimpleNamespace(**kwargs)
 
 moq_json = ModuleType("moq.json")
