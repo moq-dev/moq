@@ -135,7 +135,6 @@ per-frame CPU growth since #5926.
 - [Address groups by timestamp](/quest/m1/time-addressing/README.md) - group start timestamps replace sequence numbers in the moq-net API and lite-07 wire, while old subscribers, old publishers, and published JS clients keep working
 - [Pre-cut audit findings](/quest/m1/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
 - [Vendored code has every upstream fix it needs](/quest/m1/vendor-sync/README.md) - quinn, libv4l-rs, nvidia-video-codec-sdk, rust-media-libs, cros-codecs, and UniFFI generator fixes are ported or planned, once per release cycle
-- [MKV leaf element limits](/quest/m1/mkv-leaf-limits.md) - `CodecID`, `DocType`, and `CodecPrivate` are refused past per-element size limits instead of read whole
 - [Mesh dials recover from a stuck flow](/quest/m1/mesh-fresh-port.md) - a relay redials a failing cluster peer from a fresh UDP port, so one dropped 5-tuple can't strand a link
 - [Remove the dependencies that don't earn their weight](/quest/m1/prune-deps.md) - Rust, JS, and vendored dependencies that are trivial, duplicated, or serve features not worth keeping are removed
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters

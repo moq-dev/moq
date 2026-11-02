@@ -401,6 +401,11 @@ pub struct Avcc {
 	pub coded_height: Option<u32>,
 }
 
+/// The largest AVCDecoderConfigurationRecord its count fields allow (ISO/IEC 14496-15 §5.3.3.1.2):
+/// 6 fixed bytes, up to 31 SPS, a count byte, up to 255 PPS, then the High-profile extension's 4
+/// bytes and up to 255 SPS extensions, each parameter set a `u16` length and up to 64 KiB.
+pub(crate) const AVCC_MAX_LEN: usize = 6 + 1 + 4 + (31 + 255 + 255) * (2 + u16::MAX as usize);
+
 impl Avcc {
 	/// Parse an AVCDecoderConfigurationRecord buffer.
 	pub fn parse(avcc: &[u8]) -> Result<Self> {
