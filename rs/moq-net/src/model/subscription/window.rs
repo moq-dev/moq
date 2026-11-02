@@ -4,7 +4,11 @@
 //! what arrives, not what one subscriber asked for. A [`Window`] is the per-subscriber
 //! side: resolved at the hop serving the subscriber, it filters that subscriber's reads.
 
-use std::{collections::BTreeSet, ops, sync::Arc};
+use std::{
+	collections::{BTreeMap, BTreeSet},
+	ops,
+	sync::Arc,
+};
 
 use rangemap::RangeInclusiveSet;
 
@@ -49,6 +53,24 @@ pub(in crate::model) trait Holdings {
 	/// Whether nothing more can arrive or start here, so a time end has nothing to wait
 	/// on and is left uncapped.
 	fn complete(&self) -> bool;
+
+	/// The runs of sequences whose arrivals or drops changed since `seen`, which this then
+	/// moves on to now, or `None` once anything else a parked walk reads may have changed
+	/// (see [`Window::parked`]): the declared start, completion, or a group the live feed
+	/// never delivered. `None` by default, which wakes every parked walk.
+	fn changes(&self, seen: &mut Seen) -> Option<Vec<ops::Range<u64>>> {
+		let _ = seen;
+		None
+	}
+}
+
+/// How far a [`Window`] has taken in its [`Holdings::changes`], in whatever marks the
+/// holdings keep: the revisions of the indexes reporting changed runs, and what they report
+/// no runs for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::model) struct Seen {
+	pub runs: [u64; 2],
+	pub global: Option<[u64; 3]>,
 }
 
 /// Where a presentation time falls among the groups a hop holds.
@@ -123,6 +145,14 @@ pub(in crate::model) struct Window {
 	spans: Vec<Span>,
 	/// The unsettled time ends, grouped by walk.
 	walks: Vec<Walk>,
+	/// The walks waiting out a gap below the group their ends fall before, which move only
+	/// once a sequence from the gap up to that group arrives or is given up, so a settle
+	/// wakes only the walks its [`Holdings::changes`] reach. Ends left in different gaps of
+	/// a sparse feed never merge, so walking each of them on every settle would cost the
+	/// ranges. Keyed by where each [`Parked`] starts.
+	parked: BTreeMap<u64, Parked>,
+	/// How far the parked walks have taken in the holdings' changes.
+	seen: Seen,
 	/// The groups the spans cover, an unsettled time end through its cap: every settled span
 	/// in the fixed runs, shared with what reads them, and one run per walk layered over
 	/// them, so a walk that moves rebuilds only the layer.
@@ -143,6 +173,15 @@ pub(in crate::model) struct Window {
 	all_named: bool,
 	/// The ranges' bounds on a datagram, indexed for [`Self::admits_datagram`].
 	admission: Admission,
+}
+
+/// Parked walks whose waits overlap, so a change reaching any of them wakes them all: the
+/// parked groups are disjoint, each found by one search.
+#[derive(Debug)]
+struct Parked {
+	/// The exclusive end of what they wait on, from the key it is parked under.
+	end: u64,
+	walks: Vec<Walk>,
 }
 
 /// One non-empty range, resolved.
@@ -441,6 +480,30 @@ impl Walk {
 		(Some(self.low..=last), missable)
 	}
 
+	/// What this walk waits on, if it can park: settling stopped at a gap that may still
+	/// arrive, below the group its ends fall before, holding from above `known` up to that
+	/// group only groups below the gap that never start.
+	///
+	/// Until a sequence there arrives or is given up, the walk reads the same answers. One
+	/// arriving late, even into a run given up, is in the holdings' changes, so the walk
+	/// wakes then. Costs the groups held there, which never start.
+	fn waits(&self, holdings: &impl Holdings) -> Option<ops::Range<u64>> {
+		let (gap, after, from) = (self.trail.accounted, self.trail.after?, self.trail.unknown()?);
+		if gap >= after || holdings.complete() || holdings.gone(gap).is_some() {
+			return None;
+		}
+		let mut at = from;
+		while let Some((sequence, held)) = holdings.next_held(at)
+			&& sequence < after
+		{
+			if sequence >= gap || held != Held::Never {
+				return None;
+			}
+			at = sequence + 1;
+		}
+		Some(from..after)
+	}
+
 	/// Take on `other`'s ends, its trail being this one's. Both runs end where the trails
 	/// put them, so the merged runs start at the lower of each.
 	fn merge(&mut self, mut other: Walk) {
@@ -463,6 +526,8 @@ impl Window {
 			ranges: ranges.to_vec(),
 			spans: Vec::new(),
 			walks: Vec::new(),
+			parked: BTreeMap::new(),
+			seen: Seen::default(),
 			groups: Layered::default(),
 			missable: Layered::default(),
 			pending: false,
@@ -497,7 +562,7 @@ impl Window {
 			let _ = self.place(latest, holdings);
 			return !self.pending;
 		}
-		if self.walks.is_empty() {
+		if self.walks.is_empty() && self.parked.is_empty() {
 			return false;
 		}
 		let moved = self.walk(holdings);
@@ -512,6 +577,7 @@ impl Window {
 	fn walk(&mut self, holdings: &impl Holdings) -> bool {
 		let mut moved = false;
 		let mut walks = std::mem::take(&mut self.walks);
+		self.wake(holdings, &mut walks);
 		for walk in &mut walks {
 			walk.was = walk.trail.limit;
 		}
@@ -535,7 +601,10 @@ impl Window {
 				None => {
 					moved |= walk.trail.limit != walk.was;
 					walk.fix();
-					kept.push(walk);
+					match walk.waits(holdings) {
+						Some(waits) => self.park(waits, walk),
+						None => kept.push(walk),
+					}
 				}
 			}
 		}
@@ -561,14 +630,86 @@ impl Window {
 		moved
 	}
 
+	/// Move into `walks` the parked walks a change since the last settle reaches: all of
+	/// them once the holdings can't say which.
+	fn wake(&mut self, holdings: &impl Holdings, walks: &mut Vec<Walk>) {
+		if self.parked.is_empty() {
+			// Kept current, so the first walk to park wakes only on what changes after it.
+			let _ = holdings.changes(&mut self.seen);
+			return;
+		}
+		let Some(changed) = holdings.changes(&mut self.seen) else {
+			walks.extend(
+				std::mem::take(&mut self.parked)
+					.into_values()
+					.flat_map(|parked| parked.walks),
+			);
+			return;
+		};
+		for run in changed {
+			for (_, parked) in self.overlapping(run) {
+				walks.extend(parked.walks);
+			}
+		}
+	}
+
+	/// Park `walk`, waiting on `waits`, with every parked walk whose wait overlaps it.
+	fn park(&mut self, waits: ops::Range<u64>, walk: Walk) {
+		let mut parked = Parked {
+			end: waits.end,
+			walks: vec![walk],
+		};
+		let mut start = waits.start;
+		for overlapping in self.overlapping(waits.clone()) {
+			start = start.min(overlapping.0);
+			parked.end = parked.end.max(overlapping.1.end);
+			parked.walks.extend(overlapping.1.walks);
+		}
+		self.parked.insert(start, parked);
+	}
+
+	/// Take out the parked walks whose waits overlap `run`.
+	fn overlapping(&mut self, run: ops::Range<u64>) -> Vec<(u64, Parked)> {
+		if run.is_empty() {
+			return Vec::new();
+		}
+		// They are disjoint: the one holding the run's start, then each starting inside it.
+		let below = self
+			.parked
+			.range(..=run.start)
+			.next_back()
+			.filter(|(_, parked)| parked.end > run.start)
+			.map(|(start, _)| *start);
+		let inside = self
+			.parked
+			.range(run.start.saturating_add(1)..run.end)
+			.map(|(start, _)| *start);
+		let starts: Vec<u64> = below.into_iter().chain(inside).collect();
+		starts
+			.into_iter()
+			.filter_map(|start| self.parked.remove(&start).map(|parked| (start, parked)))
+			.collect()
+	}
+
+	/// Every unsettled walk, parked or not.
+	fn every_walk(&self) -> impl Iterator<Item = &Walk> + '_ {
+		self.walks
+			.iter()
+			.chain(self.parked.values().flat_map(|parked| parked.walks.iter()))
+	}
+
 	/// The groups an unsettled time end reads on speculation, which may start past it: a
 	/// read parked on the cap wakes when one of them starts.
+	///
+	/// A parked walk waits on a group arriving, never one starting, and an arrival changes
+	/// the track a read parks on anyway, so only the walks not parked count, here and in
+	/// [`Self::watch_starts`].
 	pub fn speculative(&self) -> impl Iterator<Item = u64> + '_ {
 		self.walks.iter().filter_map(|walk| walk.trail.speculative)
 	}
 
-	/// The lowest sequence whose start could still move an unsettled time end, `None`
-	/// without one or once the last sequence is in range.
+	/// The lowest sequence whose start could still move an unsettled time end not parked,
+	/// `None` without one or once the last sequence is in range.
 	pub fn watch_starts(&self) -> Option<u64> {
 		self.walks.iter().filter_map(|walk| walk.trail.unknown()).min()
 	}
@@ -741,6 +882,7 @@ impl Window {
 		}
 		self.spans.clear();
 		self.walks.clear();
+		self.parked.clear();
 		let (mut fixed, mut fixed_missable) = (RangeInclusiveSet::new(), RangeInclusiveSet::new());
 		self.pending = false;
 		// The time ends that start alike walk alike, until a group starts between them.
@@ -810,8 +952,8 @@ impl Window {
 	/// them. Costs the walks, never the fixed runs.
 	fn rebuild(&mut self) {
 		self.covered = None;
-		self.settled = !self.pending && self.walks.is_empty();
-		let (groups, missable): (Vec<_>, Vec<_>) = self.walks.iter().map(Walk::runs).unzip();
+		self.settled = !self.pending && self.walks.is_empty() && self.parked.is_empty();
+		let (groups, missable): (Vec<_>, Vec<_>) = self.every_walk().map(Walk::runs).unzip();
 		self.groups.set_layer(Runs::new(groups.into_iter().flatten()));
 		self.missable.set_layer(Runs::new(missable.into_iter().flatten()));
 	}
@@ -990,12 +1132,18 @@ mod tests {
 
 	/// A hop's groups by sequence, the runs that can no longer arrive, and how many held
 	/// groups and starts a walk asked about.
+	///
+	/// Reports changes as a track does: a group arriving and a run given up, never a group
+	/// starting or ending empty, which its ledger never sees.
 	#[derive(Default)]
 	struct Groups {
 		held: std::collections::BTreeMap<u64, Held>,
 		gone: Vec<ops::Range<u64>>,
 		complete: bool,
 		asked: Cell<usize>,
+		/// Every change so far, oldest first, and what was last logged: the held sequences
+		/// and how many runs were given up.
+		log: std::cell::RefCell<(Vec<ops::Range<u64>>, BTreeSet<u64>, usize)>,
 	}
 
 	impl Groups {
@@ -1056,6 +1204,25 @@ mod tests {
 
 		fn complete(&self) -> bool {
 			self.complete
+		}
+
+		fn changes(&self, seen: &mut Seen) -> Option<Vec<ops::Range<u64>>> {
+			let mut log = self.log.borrow_mut();
+			let (log, held, gone) = &mut *log;
+			let arrived = self.held.keys().filter(|sequence| !held.contains(sequence));
+			log.extend(arrived.map(|sequence| *sequence..sequence.saturating_add(1)));
+			log.extend(self.gone[*gone..].iter().cloned());
+			*held = self.held.keys().copied().collect();
+			*gone = self.gone.len();
+			let from = usize::try_from(seen.runs[0]).unwrap();
+			let changed = log[from..].to_vec();
+			let global = [u64::from(self.complete), 0, 0];
+			let primed = seen.global == Some(global);
+			*seen = Seen {
+				runs: [log.len() as u64, 0],
+				global: Some(global),
+			};
+			primed.then_some(changed)
 		}
 	}
 

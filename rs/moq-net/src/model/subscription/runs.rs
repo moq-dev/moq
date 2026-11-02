@@ -83,28 +83,33 @@ impl Runs {
 	}
 }
 
-/// A set of groups held as shared fixed runs with a few runs layered over them, which may
+/// A set of groups held as shared fixed runs with a layer of runs over them, which may
 /// overlap them or each other.
 ///
 /// Each query answers from both by searches, never by visiting the fixed runs a layered run
 /// covers, so a layer that moves costs its own runs, however many fixed ones lie under it.
+/// Both are shared, so a copy costs nothing until the layer moves.
 #[derive(Clone, Debug, Default)]
 pub(in crate::model) struct Layered {
 	fixed: Arc<Runs>,
-	layer: Runs,
+	layer: Arc<Runs>,
 }
 
 impl PartialEq for Layered {
-	/// Equal as held: the same fixed runs, compared by reference first, and the same layer.
-	/// The same groups split differently between the two compare unequal.
+	/// Equal as held: the same fixed runs and layer, each compared by reference first. The
+	/// same groups split differently between the two compare unequal.
 	fn eq(&self, other: &Self) -> bool {
-		(Arc::ptr_eq(&self.fixed, &other.fixed) || self.fixed == other.fixed) && self.layer == other.layer
+		let same = |a: &Arc<Runs>, b: &Arc<Runs>| Arc::ptr_eq(a, b) || a == b;
+		same(&self.fixed, &other.fixed) && same(&self.layer, &other.layer)
 	}
 }
 
 impl Layered {
 	pub fn new(fixed: Arc<Runs>, layer: Runs) -> Self {
-		Self { fixed, layer }
+		Self {
+			fixed,
+			layer: Arc::new(layer),
+		}
 	}
 
 	pub fn fixed(&self) -> &Arc<Runs> {
@@ -122,7 +127,7 @@ impl Layered {
 	}
 
 	pub fn set_layer(&mut self, layer: Runs) {
-		self.layer = layer;
+		self.layer = Arc::new(layer);
 	}
 
 	/// Whether both hold the same fixed runs, so they differ only in their layers.
@@ -146,7 +151,7 @@ impl Layered {
 		// the other set, so a layered run over many fixed ones costs a search, not a walk.
 		let mut end = start;
 		loop {
-			let grown = [&*self.fixed, &self.layer]
+			let grown = [&*self.fixed, &*self.layer]
 				.into_iter()
 				.filter_map(|runs| runs.first(end, end.saturating_add(1)))
 				.map(|run| *run.end())
@@ -168,7 +173,7 @@ impl Layered {
 		let end = ends.into_iter().flatten().map(|run| (*run.end()).min(hi)).max()?;
 		let mut start = end;
 		loop {
-			let grown = [&*self.fixed, &self.layer]
+			let grown = [&*self.fixed, &*self.layer]
 				.into_iter()
 				.filter_map(|runs| runs.last(start.saturating_sub(1), start))
 				.map(|run| *run.start())

@@ -16,6 +16,9 @@
 //! - `ranges_sparse`: a feed numbered sparsely, as a moq-transport publisher may, with the
 //!   reader's ranges in the gaps between its groups. A group lands past them, and the reader
 //!   polls with nothing in range.
+//! - `ranges_time_gaps`: time ranges each ending between two groups of a sparsely numbered
+//!   feed, so each end waits on the missing sequences of a gap of its own. A group lands past
+//!   them, and the reader polls with nothing in range.
 //! - `ranges_datagram`: timed ranges none of which admits the datagram that lands, so the
 //!   reader judges it against all of them.
 //! - `ranges_frames`: a lite-07 publisher's frame bounds, each range starting and ending
@@ -230,6 +233,48 @@ impl Sparse {
 	}
 }
 
+/// One reader whose time ends wait in the gaps of a sparsely numbered feed; see
+/// `ranges_time_gaps`.
+pub(crate) struct TimeGaps {
+	_broadcast: broadcast::Producer,
+	track: track::Producer,
+	reader: track::Subscriber,
+	next: u64,
+}
+
+impl TimeGaps {
+	pub(crate) fn new(ranges: u64) -> Self {
+		let broadcast = broadcast::Info::default().produce();
+		let track = broadcast.create_track("bench", timed()).unwrap();
+		// The feed's groups at every multiple of the stride, ten milliseconds apart, and each
+		// range from just after one starts until halfway to the next: it ends before the next
+		// group, but the sequences between may still arrive inside it.
+		for i in 0..=ranges {
+			land(&track, i * STRIDE, i * 10);
+		}
+		let subscription = track::Subscription::default()
+			.with_max_delay(BUDGET)
+			.with_ranges((0..ranges).map(|i| track::Range {
+				start: track::Anchor::Time(millis(i * 10 + 1)),
+				end: Some(track::Anchor::Time(millis(i * 10 + 5))),
+			}));
+		let mut reader = track.subscribe(subscription);
+		assert_eq!(drain(&mut reader), ranges as usize, "each range's own group");
+		Self {
+			_broadcast: broadcast,
+			track,
+			reader,
+			next: ranges + 1,
+		}
+	}
+
+	pub(crate) fn step(&mut self) {
+		land(&self.track, self.next * STRIDE, self.next * 10);
+		self.next += 1;
+		assert_eq!(drain(&mut self.reader), 0, "nothing lands in range");
+	}
+}
+
 /// One reader judging datagrams no range admits; see `ranges_datagram`.
 pub(crate) struct Datagrams {
 	_broadcast: broadcast::Producer,
@@ -327,6 +372,10 @@ fn bench_sparse(c: &mut Criterion) {
 	sweep(c, "ranges_sparse", Sparse::new, Sparse::step);
 }
 
+fn bench_time_gaps(c: &mut Criterion) {
+	sweep(c, "ranges_time_gaps", TimeGaps::new, TimeGaps::step);
+}
+
 fn bench_datagram(c: &mut Criterion) {
 	sweep(c, "ranges_datagram", Datagrams::new, Datagrams::step);
 }
@@ -341,6 +390,7 @@ criterion_group!(
 	bench_time_cap,
 	bench_fills_out,
 	bench_sparse,
+	bench_time_gaps,
 	bench_datagram,
 	bench_frames
 );

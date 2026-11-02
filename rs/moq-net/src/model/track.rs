@@ -23,7 +23,7 @@ use super::skipped::Skipped;
 use crate::ledger::{self, Ledger};
 
 pub use super::subscription::{Anchor, Order, Position, Range, Subscription};
-use super::subscription::{Containing, Held, Holdings, Layered, Resolved, Runs, Window, later};
+use super::subscription::{Containing, Held, Holdings, Layered, Resolved, Runs, Seen, Window, later};
 use rangemap::{RangeInclusiveSet, RangeMap, RangeSet};
 
 mod demand;
@@ -501,6 +501,9 @@ pub(crate) struct TrackState {
 	// Bumped on every insert into `drops`, so a cursor rescans it only after a change.
 	drops_revision: u64,
 	drops_changes: ledger::Changes,
+	// How many groups the cache took in that the live feed didn't deliver: fetched backfill,
+	// held but never in the arrival ledger, so a time end parked on a gap looks again.
+	backfilled: u64,
 	// Every reader's eviction inbox. Its own lock, so a reader registers through the read
 	// guard it judges under.
 	inboxes: Mutex<miss::Inboxes>,
@@ -845,6 +848,22 @@ impl Holdings for TrackState {
 
 	fn complete(&self) -> bool {
 		self.sealed || self.abort.is_some()
+	}
+
+	fn changes(&self, seen: &mut Seen) -> Option<Vec<ops::Range<u64>>> {
+		let global = [
+			self.start_sequence.map_or(0, |start| start.saturating_add(1)),
+			u64::from(self.complete()),
+			self.backfilled,
+		];
+		let (ledger, drops) = (self.arrivals.changes(), &self.drops_changes);
+		let changed = (seen.global == Some(global))
+			.then(|| ledger.since(seen.runs[0]).chain(drops.since(seen.runs[1])).collect());
+		*seen = Seen {
+			runs: [ledger.revision(), drops.revision()],
+			global: Some(global),
+		};
+		changed
 	}
 }
 
@@ -1457,14 +1476,15 @@ impl TrackState {
 				// The fixed runs through the reader's index of the live groups among them, then
 				// the walks' few runs layered over them, short of what the index found.
 				let fixed = several.live.find(self, groups.fixed(), from, hi, rev, &mut f);
-				let (lo, hi) = match (&fixed, rev) {
-					(None, _) => (from, hi),
-					(Some((found, _)), true) => (found.checked_add(1)?, hi),
-					(Some((found, _)), false) => (from, found.checked_sub(1)?),
+				// Nothing lies past a find at the far end, so only the find answers.
+				let short = match (&fixed, rev) {
+					(None, _) => Some((from, hi)),
+					(Some((found, _)), true) => found.checked_add(1).map(|lo| (lo, hi)),
+					(Some((found, _)), false) => found.checked_sub(1).map(|hi| (from, hi)),
 				};
-				let layered = (lo <= hi)
-					.then(|| self.leapfrog(groups.layer(), lo, hi, rev, &mut f))
-					.flatten();
+				let layered = short
+					.filter(|(lo, hi)| lo <= hi)
+					.and_then(|(lo, hi)| self.leapfrog(groups.layer(), lo, hi, rev, &mut f));
 				layered.or(fixed.map(|(_, found)| found))
 			}
 		}
@@ -2177,6 +2197,9 @@ impl TrackState {
 		}
 
 		self.advance(sequence, visible);
+		if !visible {
+			self.backfilled += 1;
+		}
 		// A publisher may re-create a group it cut; the sequence is no longer given up.
 		if visible
 			&& self.drops.contains_key(&sequence)
@@ -13409,6 +13432,97 @@ mod test {
 			assert!(published(&subscriber) == expected, "{order}");
 			let _ = subscriber.poll_recv_group(&kio::Waiter::noop());
 			assert!(published(&subscriber) == expected, "{order}, once the cursor syncs");
+		}
+	}
+
+	/// A search over a layered servable window, through the reader's index of the live
+	/// groups and the layer's runs, finds what a scan of every live group would, in either
+	/// direction, as groups arrive, start, abort, leave the cache, or arrive again between
+	/// searches that keep the same index.
+	#[test]
+	fn layered_searches_match_a_scan_of_every_live_group() {
+		// A small deterministic generator, so a failure replays.
+		let seed = std::cell::Cell::new(0x2545_f491_4f6c_dd1d_u64);
+		let next = |bound: u64| {
+			let mut x = seed.get();
+			x ^= x << 13;
+			x ^= x >> 7;
+			x ^= x << 17;
+			seed.set(x);
+			x % bound
+		};
+		const SEQUENCES: u64 = 40;
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		for round in 0..300 {
+			let producer = track_producer("test", Info::timed());
+			let runs = |count: u64| -> Runs {
+				Runs::new((0..next(count + 1)).map(|_| {
+					let start = next(SEQUENCES);
+					start..=start + next(5)
+				}))
+			};
+			let fixed = Arc::new(runs(8));
+			let mut groups = Vec::new();
+			let mut servable = Servable::NONE;
+			for step in 0..30 {
+				let sequence = next(SEQUENCES);
+				match next(6) {
+					0 | 1 => {
+						if let Ok(mut group) = producer.create_group(group::Info { sequence }) {
+							if next(3) > 0 {
+								group
+									.write_frame(at(sequence * 10), bytes::Bytes::from_static(b"x"))
+									.unwrap();
+							}
+							groups.push(group);
+						}
+					}
+					2 => {
+						if let Some(index) = groups.iter().position(|group| group.sequence == sequence) {
+							let _ = groups.swap_remove(index).abort(Error::Cancel);
+						}
+					}
+					3 => {
+						let _ = producer.modify().unwrap().uncache(sequence);
+					}
+					_ => {}
+				}
+				// Now and then the window's walks move, keeping the fixed runs and their index.
+				if step == 0 || next(4) == 0 {
+					let cap = (next(4) == 0).then(|| next(SEQUENCES + 2));
+					let layered = Layered::new(fixed.clone(), runs(2));
+					servable = Servable::layered(layered, cap, &servable);
+				}
+				let state = producer.state.read();
+				let shown = |slot: &Slot| slot.is_shown().then_some(slot.group.sequence);
+				for from in [0, next(SEQUENCES), next(SEQUENCES)] {
+					for rev in [false, true] {
+						let scan = state.live(from..).filter(|(sequence, _)| servable.contains(**sequence));
+						let expected = match rev {
+							true => scan.map(|(_, slot)| slot).rev().find_map(shown),
+							false => scan.map(|(_, slot)| slot).find_map(shown),
+						};
+						let found = state.find_servable(&servable, from, rev, shown);
+						let shape = match &servable {
+							Servable::Run { start, end } => format!("run {start}..{end:?}"),
+							Servable::Runs(several) => format!(
+								"{:?} under {:?} below {:?}",
+								several.groups.fixed(),
+								several.groups.layer(),
+								several.cap
+							),
+						};
+						let cached: Vec<_> = state
+							.live(..)
+							.map(|(sequence, slot)| (*sequence, slot.is_shown()))
+							.collect();
+						assert_eq!(
+							found, expected,
+							"round {round} step {step} from {from}, rev {rev}: {shape}, cached {cached:?}"
+						);
+					}
+				}
+			}
 		}
 	}
 
