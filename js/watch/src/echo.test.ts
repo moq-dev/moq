@@ -18,9 +18,20 @@ function watched(origin: Origin.Producer, name: string, catalog: Signal<Catalog.
 	return new Broadcast({ origin, name: Path.from(name), follow: false, catalogFormat: "manual", catalog });
 }
 
-// A decoder that reports `received` for the catalog at `path`, and nothing for any other.
+// A decoder that reports `received` for the catalog at `path`, and nothing for any other. Its first
+// report, the baseline a reporter joins with, is empty, so everything after counts.
 function source(path: string, received: Record<string, Received>) {
-	return { feedback: (base: Path.Valid) => (base === path ? received : {}) };
+	let started = false;
+	return {
+		feedback: (base: Path.Valid) => {
+			if (base !== path) return {};
+			if (!started) {
+				started = true;
+				return {};
+			}
+			return received;
+		},
+	};
 }
 
 // The feedback broadcasts announced on `origin`, by path.

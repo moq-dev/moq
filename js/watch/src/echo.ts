@@ -58,9 +58,9 @@ export function checkName(name: string): string {
  * removed section, or a changed path, retracts the broadcast it replaces.
  *
  * Reporters on one origin that resolve the same feedback path for the same catalog share one
- * broadcast and add their counts, since a second broadcast at a path would replace the first. A
- * feedback broadcast belongs to one soliciting catalog, so a reporter for another catalog that
- * resolves a path already in use publishes nothing and warns: give it another name.
+ * broadcast, since a second broadcast at a path would replace the first, and add what each counted
+ * since it joined. A feedback broadcast belongs to one soliciting catalog, so a reporter for another
+ * catalog that resolves a path already in use publishes nothing and warns: give it another name.
  */
 export class Echo {
 	/** The wired inputs, read-only. */
@@ -142,13 +142,10 @@ class Shared {
 	readonly #path: Moq.Path.Valid;
 	readonly #broadcast: Moq.Broadcast.Producer;
 	readonly #writer: Report.Writer<Schema.Snapshot>;
-	// Each reporter's counts, keyed by its owner.
+	// What each reporter counted since it joined, keyed by its owner.
 	readonly #reporters = new Map<object, () => Snapshot>();
-	// The final counts of the owners that left, summed, so the counters stay cumulative without them.
+	// What the reporters that left counted, summed, so the counters stay cumulative without them.
 	#departed: Snapshot = { renditions: {} };
-	// Each departed owner's share of #departed. Its counts are cumulative, so a returning owner takes
-	// its share back out and reports it again itself. Weak, so a departed owner is not retained.
-	readonly #shares = new WeakMap<object, Snapshot>();
 	#signals = new Effect();
 
 	/** Whether anyone reads the feedback, which is when it is written. */
@@ -200,21 +197,20 @@ class Shared {
 		this.#signals.interval(() => this.#write(), Nano.fromMilli(Milli(Report.INTERVAL)));
 	}
 
-	/** Add `owner`'s counts to the feedback, returning the function that removes them. */
+	/**
+	 * Add what `owner` counts from now on to the feedback, returning the function that removes it.
+	 * Its reporter's counters are cumulative, so only what they add after joining is reported: a
+	 * returning owner's earlier counts are already among the departed ones.
+	 */
 	join(owner: object, reporter: () => Snapshot): () => void {
-		const share = this.#shares.get(owner);
-		if (share) {
-			this.#shares.delete(owner);
-			this.#departed = subtract(this.#departed, share);
-		}
-		this.#reporters.set(owner, reporter);
+		const baseline = reporter().renditions;
+		const counts = () => since(reporter(), baseline);
+		this.#reporters.set(owner, counts);
 		return () => {
-			if (this.#reporters.get(owner) !== reporter) return;
+			if (this.#reporters.get(owner) !== counts) return;
 			this.#reporters.delete(owner);
-			const final: Snapshot = { renditions: reporter().renditions };
-			this.#shares.set(owner, final);
 			// Bounded like a tally, so departures that each read fresh rendition IDs cannot grow it.
-			const departed = merge(this.#departed, final);
+			const departed = merge(this.#departed, { renditions: counts().renditions });
 			this.#departed = { renditions: bound(departed.renditions) };
 			// Deferred, so a reporter's rerun reuses the broadcast rather than replacing it.
 			queueMicrotask(() => {
@@ -260,19 +256,21 @@ function merge(a: Snapshot, b: Snapshot): Snapshot {
 	return transport ? { transport, renditions } : { renditions };
 }
 
-// Take a departed reporter's counters back out of `a`. The newest arrival stays, since it is a gauge.
-function subtract(a: Snapshot, b: Snapshot): Snapshot {
-	const renditions: Record<string, Received> = { ...a.renditions };
-	for (const [id, received] of Object.entries(b.renditions)) {
-		const rest: Received = { ...renditions[id] };
+// What `current` counted since `baseline`. A counter below its baseline started over, such as an
+// entry the tally dropped, so it counts from zero. The newest arrival and the transport are gauges.
+function since(current: Snapshot, baseline: Record<string, Received>): Snapshot {
+	const renditions: Record<string, Received> = {};
+	for (const [id, received] of Object.entries(current.renditions)) {
+		const added: Received = {};
 		for (const [counter, n] of Object.entries(received)) {
 			if (counter === "arrival") continue;
 			const key = counter as Exclude<keyof Received, "arrival">;
-			const left = (rest[key] ?? 0) - (n as number);
-			if (left > 0) rest[key] = left;
-			else delete rest[key];
+			const base = baseline[id]?.[key] ?? 0;
+			const delta = (n as number) >= base ? (n as number) - base : (n as number);
+			if (delta > 0) added[key] = delta;
 		}
-		renditions[id] = rest;
+		if (received.arrival) added.arrival = received.arrival;
+		if (Object.keys(added).length > 0) renditions[id] = added;
 	}
-	return { ...a, renditions };
+	return current.transport ? { transport: current.transport, renditions } : { renditions };
 }
