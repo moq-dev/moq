@@ -182,7 +182,7 @@ broadcast, and producers advertise it in the catalog.
 ## Data types
 
 These records, enums, and objects are re-exported from the native `moq_ffi` bindings; the
-wrapper groups them under `moq` and `moq.media`, with owned duration records at the boundary. Their fields are defined on the
+wrapper groups them under `moq` and `moq.media`, with owned duration and timestamp records at the boundary. Their fields are defined on the
 Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
 
 ```{eval-rst}
@@ -194,6 +194,7 @@ Rust side ([`moq-ffi`](https://crates.io/crates/moq-ffi)).
 
    media.Catalog
    media.Container
+   Timestamp
    Frame
    media.MediaFrame
    Datagram

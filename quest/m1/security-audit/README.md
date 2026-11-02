@@ -54,4 +54,3 @@ Dropped, with reasons:
 
 ## Required
 
-- [CI tool pins](/quest/m1/security-audit/ci-pins.md) - binding generators are pinned by commit in one place, and the remaining unpinned installs and broad token grants are fixed
