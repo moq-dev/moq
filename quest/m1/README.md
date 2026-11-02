@@ -178,6 +178,7 @@ per-frame CPU growth since #5926.
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
 - [The shared pacer holds its rate under 2 Mbit/s](/quest/m1/pacer-low-rate.md) - a rate-paced controller stops sending up to twice its pacing rate at low rates, landed with a BBR3 retune that keeps the probe budgets
+- [A reconfigure keeps the published jitter and delay floor](/quest/m1/catalog-jitter-floor.md) - `Rendition::set` floors unsupplied jitter and delay at the catalog's values, so a same-codec reconfigure after a jitter rise no longer aborts TS import
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
 - [Legacy lite close drain](/quest/m1/lite-legacy-close-drain.md) - a lite-01..06 graceful close never cuts a final group the subscriber has not read

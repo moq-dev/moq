@@ -1,4 +1,4 @@
-# [M] 2026-10-27 security audit: pre-cut findings
+# 2026-10-27 security audit: pre-cut findings
 
 ## Goal
 
@@ -52,3 +52,7 @@ Dropped, with reasons:
   (a random epoch is copied by a fork too) were wrong; the children use
   better ones.
 
+## Required
+
+- [fMP4 refusals keep framing](/quest/m1/security-audit/fmp4-refusal-framing.md) - a box refused at its header stops dropping the rest of its call's input, and the interleaved import benchmark is re-measured
+- [MKV leaf element limits](/quest/m1/security-audit/mkv-leaf-limits.md) - `CodecID`, `DocType`, and `CodecPrivate` are refused past per-element size limits instead of read whole
