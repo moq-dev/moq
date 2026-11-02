@@ -212,7 +212,7 @@ pub(crate) struct Rate {
 /// Burst intervals trade distributing datagrams over time against waking the connection up more
 /// often than user-space timer accuracy can service; overshooting one by more than 25% loses the
 /// tokens for the extra elapsed time.
-fn rate_capacity(pacing_rate: u64, mtu: u16) -> u64 {
+pub(crate) fn rate_capacity(pacing_rate: u64, mtu: u16) -> u64 {
     let mtu = u64::from(mtu);
     let bytes_in =
         |interval: Duration| ((pacing_rate as u128 * interval.as_nanos()) / 1_000_000_000) as u64;

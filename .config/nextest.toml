@@ -27,8 +27,9 @@ default-filter = "not kind(bench)"
 # rings; integration workers keep production geometry. sh/rs/nextest.sh raises
 # hosted CI's locked-memory limit and uses the host's hard limit locally.
 # Several invocations still share that user-wide budget; see rs/moq-uring/README.md.
+# A relay test joins by naming `uring` as a whole module or word, not "during".
 [[profile.default.overrides]]
-filter = "package(moq-uring) | (binary_id(moq-relay::integration) & (test(/^runtime_uring::/) | test(/^embed::.*uring/)))"
+filter = "package(moq-uring) | (package(moq-relay) & test(/(^|[:_])uring([:_]|$)/))"
 test-group = "io-uring"
 
 # The vivid tests share one capture node, and a second process configuring its

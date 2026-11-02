@@ -137,7 +137,9 @@ impl Encode {
 		match self.video {
 			Video::H264(x264) => args.extend(["-c:v", "libx264", "-x264-params", x264, "-profile:v", "high"]),
 			Video::H265(params) => {
-				x265 = format!("{params}:log-level=error");
+				// x265 sizes its own thread pools by the host's cores, ignoring `-threads`, which makes
+				// the encode both costlier and different from one host to the next.
+				x265 = format!("{params}:pools=none:frame-threads=1:log-level=error");
 				args.extend(["-c:v", "libx265", "-x265-params", &x265]);
 			}
 			Video::Mpeg2 => args.extend([
@@ -700,19 +702,14 @@ impl Ledger {
 struct Run {
 	ledgers: Vec<Ledger>,
 	frames: Vec<Frame>,
+	/// The frames' payloads, concatenated.
+	ts: Vec<u8>,
 	stats: stats::Export,
 	/// The stats after each output frame, and when, from the republisher's start.
 	samples: Vec<(Duration, stats::Export)>,
 }
 
 impl Run {
-	fn ts(&self) -> Vec<u8> {
-		self.frames
-			.iter()
-			.flat_map(|frame| frame.payload.iter().copied())
-			.collect()
-	}
-
 	fn ledger(&self, video: bool) -> &Ledger {
 		self.ledgers.iter().find(|ledger| ledger.video == video).unwrap()
 	}
@@ -960,15 +957,20 @@ async fn run(recording: &Recording, arm: &Arm) -> Run {
 		samples.push((start.elapsed(), export.stats()));
 	}
 	publisher.abort();
+	let mut ts = Vec::new();
+	for frame in &frames {
+		ts.extend_from_slice(&frame.payload);
+	}
 	let mut run = Run {
 		ledgers,
 		frames,
+		ts,
 		stats: export.stats(),
 		samples,
 	};
 
 	// Match each PES, and each ADTS frame of an audio PES, to the unit it carries.
-	let mut reader = PesPacketReader::new(TsPacketReader::new(std::io::Cursor::new(run.ts())));
+	let mut reader = PesPacketReader::new(TsPacketReader::new(std::io::Cursor::new(&run.ts)));
 	while let Some(pes) = reader.read_pes_packet().unwrap() {
 		let video = pes.header.stream_id.is_video();
 		assert!(video || pes.header.stream_id.is_audio(), "only audio and video go out");
@@ -1196,7 +1198,8 @@ fn decoder(video_only: bool) -> Vec<&'static str> {
 	if !video_only {
 		args.extend(["-map", "0:a:0", "-c:a", "pcm_s16le"]);
 	}
-	args.extend(["-f", "framemd5", "pipe:1"]);
+	// A fast hash: MD5 over every raw picture costs about as much as the decode.
+	args.extend(["-f", "framehash", "-hash", "murmur3", "pipe:1"]);
 	args
 }
 
@@ -1215,7 +1218,7 @@ fn parse(output: &[u8], video_only: bool) -> Result<Decoded, String> {
 		}
 		let fields: Vec<&str> = line.split(',').map(str::trim).collect();
 		let [index, _dts, pts, duration, _size, hash] = fields[..] else {
-			panic!("framemd5 line {line}");
+			panic!("framehash line {line}");
 		};
 		match index {
 			"0" => {
@@ -1364,7 +1367,7 @@ impl Evidence {
 		};
 		let dir = std::path::Path::new(&root).join("ts-recovery").join(name);
 		std::fs::create_dir_all(&dir).unwrap();
-		std::fs::write(dir.join("export.ts"), run.ts()).unwrap();
+		std::fs::write(dir.join("export.ts"), &run.ts).unwrap();
 		std::fs::write(dir.join("ledgers.txt"), format!("{:#?}", run.ledgers)).unwrap();
 		std::fs::write(dir.join("stats.txt"), format!("{:#?}", run.stats)).unwrap();
 		Self(Some(dir))
@@ -1397,7 +1400,7 @@ async fn recover(arm: Arm) -> Run {
 		run.stats.release
 	);
 	assert!(assert_on_time(&run.frames) > 200, "too little output to judge");
-	assert_continuous(&run.ts());
+	assert_continuous(&run.ts);
 	assert_eq!(
 		count_discontinuity(&run.frames),
 		profile.breaks(),
@@ -1406,12 +1409,12 @@ async fn recover(arm: Arm) -> Run {
 
 	let reference = Reference::new(profile, run.ledger(true));
 	let pids = (run.pid(Class::Video), run.pid(Class::Audio));
-	for (i, (ts, emitted)) in segments(&run.ts(), run.ledger(true), pids).unwrap().iter().enumerate() {
+	for (i, (ts, emitted)) in segments(&run.ts, run.ledger(true), pids).unwrap().iter().enumerate() {
 		let output = decode(ts, true).unwrap_or_else(|err| panic!("segment {i}: {err}"));
 		(reference.compare(&output, emitted)).unwrap_or_else(|err| panic!("segment {i}: {err}"));
 	}
 	if profile != Profile::Open {
-		let output = decode(&run.ts(), false).unwrap();
+		let output = decode(&run.ts, false).unwrap();
 		let video = run.ledger(true);
 		let emitted: Vec<&Unit> = video.units.iter().filter(|unit| unit.output).collect();
 		reference.compare(&output, &emitted).unwrap();
@@ -1927,7 +1930,7 @@ async fn the_graders_fail_what_they_should() {
 	assert!(err.contains("gaps reported"), "{err}");
 
 	// The output less the tables ahead of the keyframe it resumes at.
-	let ts = run.ts();
+	let ts = &run.ts;
 	let pid = run.pid(Class::Video);
 	let pids = (pid, run.pid(Class::Audio));
 	let packets = ts.as_chunks::<188>().0;
@@ -1941,7 +1944,7 @@ async fn the_graders_fail_what_they_should() {
 		.filter(|&(at, packet)| !((tables..resume).contains(&at) && payload(packet).0 == 0))
 		.flat_map(|(_, packet)| packet.iter().copied())
 		.collect();
-	segments(&ts, &run.ledgers[video], pids).unwrap();
+	segments(ts, &run.ledgers[video], pids).unwrap();
 	let err = segments(&stripped, &run.ledgers[video], pids).unwrap_err();
 	assert!(err.contains("no PAT"), "{err}");
 

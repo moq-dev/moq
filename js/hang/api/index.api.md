@@ -5,8 +5,6 @@ import { $ZodBranded } from "zod/v4/core";
 import { $brand } from "@zod/mini";
 import { $loose } from "zod/v4/core";
 import { $strip } from "zod/v4/core";
-import { Micro } from "@moq/clock";
-import { Window } from "@moq/json";
 import { ZodMiniNullable } from "@zod/mini";
 import { ZodMiniNumber } from "@zod/mini";
 import { ZodMiniObject } from "@zod/mini";
@@ -158,35 +156,7 @@ export namespace Health {
 	export function viewer(sample: Health.Sample<Echo.Snapshot>, thresholds?: Health.Thresholds): Health.Health;
 }
 
-export namespace Hls {
-	export class Consumer implements AsyncIterable<Hls.Event> {
-		[Symbol.asyncIterator](): AsyncIterator<Hls.Event>;
-		close(): void;
-		next(): Promise<Hls.Event | undefined>;
-		static subscribe(broadcast: Net.Broadcast.Consumer, hls: import("@moq/hang/catalog").Hls): Hls.Consumer;
-	}
-	export type Entry = Omit<Hls.Record, "pts" | "duration"> & {
-		duration?: Micro;
-		pts: Micro;
-	};
-	export type Event = {
-		push: {
-			entry: Hls.Entry;
-			index: number;
-		};
-	} | {
-		pop: Window.Span;
-	} | {
-		skip: Window.Span;
-	};
-	export interface Record {
-		duration?: number;
-		group: number;
-		pts: number;
-		sequence: number;
-	}
-	export const SUFFIX: ".hls";
-}
+export * as Hls from "@moq/hang/hls";
 
 export * as Net from "@moq/net";
 
