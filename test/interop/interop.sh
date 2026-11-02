@@ -932,15 +932,14 @@ source "$INTEROP_DIR/relay-log.sh"
 
 # ── tokens ──────────────────────────────────────────────────────────────────
 # Print the relay URL carrying a fresh token; the arguments are `moq auth sign`'s
-# (`--publish P`, `--subscribe S`). A scoped publisher must be named, so every token is.
-# Compat runs anonymous, so it prints the bare URL.
+# (`--publish P`, `--subscribe S`). Compat runs anonymous, so it prints the bare URL.
 token_url() {
     if [[ "$COMPAT" -eq 1 ]]; then
         printf '%s' "$URL"
         return
     fi
     local token
-    token=$("$MOQ" auth sign --key "$KEY" --subject interop "$@")
+    token=$("$MOQ" auth sign --key "$KEY" "$@")
     printf '%s/?jwt=%s' "$URL" "$token"
 }
 

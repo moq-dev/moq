@@ -32,7 +32,6 @@ mod path;
 mod peer;
 mod request;
 mod set;
-mod subject;
 mod wire;
 
 pub mod lease;
@@ -58,4 +57,3 @@ pub use moq_pattern::{InvalidPattern, Pattern, Patterns, Segment, Specificity};
 pub use peer::*;
 pub use request::*;
 pub use set::*;
-pub use subject::Subject;

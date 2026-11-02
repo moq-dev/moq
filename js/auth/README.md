@@ -66,7 +66,6 @@ const key = Key.parse(keyString); // See generate example above
 // Create claims
 const claims: Claims = {
   root: "demo",
-  sub: "bbb-owner", // Who it is for: required to publish anything but `**` at the root
   publish: ["bbb/**"], // `demo/bbb` and everything beneath it
   subscribe: ["**"], // Any broadcast under `demo/`
   exp: Math.floor(Date.now() / 1000) + 3600, // 1 hour from now (in seconds)
@@ -82,7 +81,6 @@ Or you can sign as a CLI
 ```bash
 moq-auth sign --key "root.jwk" \
   --root "rooms/meeting-123" \
-  --subject "alice" \
   --subscribe "**" \
   --publish "alice/**" \
   --expires 1703980800 > "alice.jwt"

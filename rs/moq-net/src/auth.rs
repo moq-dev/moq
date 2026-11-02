@@ -92,20 +92,6 @@ pub struct Grant {
 	pub subscribe: Patterns,
 	/// When the grant lapses, or `None` for never.
 	pub expires: Option<Instant>,
-	/// Who the peer's credential was issued to, as the acceptor verified it, or `None` when it
-	/// names nobody. Every grant a session issues names the same subject, if any: a token whose
-	/// subject differs is refused. Never sent, so a grant the peer gave this side has none.
-	pub subject: Option<Subject>,
-}
-
-/// Who a credential was issued to: its subject, qualified by the issuer that named it, so two
-/// issuers' subjects never collide.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Subject {
-	/// Who issued the credential, or `None` when it names no issuer.
-	pub issuer: Option<String>,
-	/// Who the credential was issued to, unique within its issuer.
-	pub name: String,
 }
 
 impl Grant {
@@ -115,35 +101,25 @@ impl Grant {
 			publish: crate::Pattern::all().into(),
 			subscribe: crate::Pattern::all().into(),
 			expires: None,
-			subject: None,
 		}
 	}
 
 	/// The paths any of `grants` allows, lapsing at the earliest expiry, which is when
 	/// the union next shrinks. Reduced once, so it costs about the grants' total size.
-	/// The grants share a subject, if any name one.
 	fn union<'a>(grants: impl IntoIterator<Item = &'a Self>) -> Self {
 		let mut publish = Vec::new();
 		let mut subscribe = Vec::new();
 		let mut expires = None;
-		let mut subject = None;
 		for grant in grants {
 			publish.extend(grant.publish.iter().cloned());
 			subscribe.extend(grant.subscribe.iter().cloned());
 			expires = earliest(expires, grant.expires);
-			subject = subject.or_else(|| grant.subject.clone());
 		}
 		Self {
 			publish: publish.into_iter().collect(),
 			subscribe: subscribe.into_iter().collect(),
 			expires,
-			subject,
 		}
-	}
-
-	/// Whether this grant names a subject other than `subject`, when both name one.
-	fn conflicts(&self, subject: Option<&Subject>) -> bool {
-		matches!((&self.subject, subject), (Some(ours), Some(theirs)) if ours != theirs)
 	}
 
 	/// The paths both grants allow, lapsing at the earlier expiry.
@@ -160,7 +136,6 @@ impl Grant {
 			publish: both(&self.publish, &other.publish),
 			subscribe: both(&self.subscribe, &other.subscribe),
 			expires: earliest(self.expires, other.expires),
-			subject: self.subject.clone().or_else(|| other.subject.clone()),
 		}
 	}
 }
@@ -402,16 +377,6 @@ impl Attached {
 			self.union = Some(union);
 			self.epoch += 1;
 		}
-	}
-
-	/// Whether `grant` names a subject other than the limit's or that of a grant issued to
-	/// any token but `except`.
-	fn conflicts(&self, limit: Option<&Grant>, except: Option<u64>, grant: &Grant) -> bool {
-		limit.is_some_and(|limit| grant.conflicts(limit.subject.as_ref()))
-			|| self
-				.issued
-				.iter()
-				.any(|(id, issued)| Some(*id) != except && grant.conflicts(issued.subject.as_ref()))
 	}
 
 	/// Re-derive the scope from the handle's limit and the issued grants.
@@ -704,29 +669,17 @@ impl Handle {
 	/// told the grant, within what the origin handles allow, `expires` included. An
 	/// application answering tokens through `server::Handshake::requests` updates its own
 	/// [`Issued`] grants.
-	///
-	/// Fails with [`Error::Unauthorized`], changing nothing, when the grant names a subject
-	/// other than one already issued to the peer's tokens on a live session: the connection's
-	/// credential keeps its subject.
-	pub fn authorize(&self, grant: &Grant) -> Result<()> {
+	pub fn authorize(&self, grant: &Grant) {
 		let mut guard = self.state.lock();
 		let state = &mut *guard;
 		if state.limit.as_ref() == Some(grant) {
-			return Ok(());
-		}
-		if state
-			.links
-			.values()
-			.any(|link| link.closed.is_none() && link.conflicts(None, None, grant))
-		{
-			return Err(Error::Unauthorized);
+			return;
 		}
 		state.limit = Some(grant.clone());
 		for link in state.links.values_mut() {
 			link.epoch += 1;
 			link.rescope(state.limit.as_ref());
 		}
-		Ok(())
 	}
 
 	/// End the handle with `err`: every token ends, its sessions stop presenting them, and
@@ -1213,21 +1166,16 @@ impl Link {
 	}
 
 	/// Record the grant an application issued to the peer's AUTH token `id`, or forget it with
-	/// `None`, resizing the scope. A grant naming a subject other than the session's is
-	/// forgotten instead, returning `false`.
-	fn issue(&self, id: u64, grant: Option<Grant>) -> bool {
+	/// `None`, resizing the scope.
+	fn issue(&self, id: u64, grant: Option<Grant>) {
 		self.with_state(|state, link| {
-			let limit = state.limit.as_ref();
 			let link = attached(&mut state.links, link);
-			let grant = grant.filter(|grant| !link.conflicts(limit, Some(id), grant));
-			let issued = grant.is_some();
 			match grant {
 				Some(grant) => link.issued.insert(id, grant),
 				None => link.issued.remove(&id),
 			};
-			link.rescope(limit);
-			issued
-		})
+			link.rescope(state.limit.as_ref());
+		});
 	}
 
 	/// The union once it changed since `epoch` last saw it, advancing `epoch`. It
@@ -1715,23 +1663,11 @@ pub(crate) struct Issue {
 impl Issue {
 	/// Push a reply, keeping the session's scope in step with the grant an AUTH token holds.
 	/// Called under the issue's lock, so a withdrawal recorded under it is never undone.
-	///
-	/// A grant naming a subject other than the session's is refused instead, ending the token.
-	fn reply(&mut self, mut reply: Reply) {
+	fn reply(&mut self, reply: Reply) {
 		if let Some((handle, id)) = &self.scoped {
 			match &reply {
-				Reply::Grant(grant) if self.peer.is_none() => {
-					if !handle.issue(*id, Some(grant.clone())) {
-						reply = Reply::Refuse {
-							code: SessionError::Unauthorized,
-							reason: "subject differs from the session's".to_string(),
-						};
-						self.done = true;
-					}
-				}
-				_ => {
-					handle.issue(*id, None);
-				}
+				Reply::Grant(grant) if self.peer.is_none() => handle.issue(*id, Some(grant.clone())),
+				_ => handle.issue(*id, None),
 			}
 		}
 		self.outbox.push_back(reply);
@@ -2688,7 +2624,7 @@ mod tests {
 	#[test]
 	fn an_auth_ok_is_queued_after_its_scope_widens() {
 		let handle = Link::new(true);
-		handle.handle().authorize(&Grant::default()).unwrap();
+		handle.handle().authorize(&Grant::default());
 		let serving = Serving::new(handle.clone());
 		let request = Request::new(Bytes::from_static(b"token"), serving.issue.clone());
 		let _issued = request.accept(Grant::all());
@@ -2759,7 +2695,6 @@ mod tests {
 			publish: patterns(publish),
 			subscribe: patterns(subscribe),
 			expires: None,
-			subject: None,
 		}
 	}
 
@@ -2770,22 +2705,19 @@ mod tests {
 		let handle = Link::new(false);
 		assert!(handle.allows(Direction::Publish, "room/alice/audio"));
 
-		handle
-			.handle()
-			.authorize(&grant(&["room/bob"], &["room/alice"]))
-			.unwrap();
+		handle.handle().authorize(&grant(&["room/bob"], &["room/alice"]));
 		// What we send is what the peer may subscribe to, and the other way around.
 		assert!(handle.allows(Direction::Publish, "room/alice/audio"));
 		assert!(!handle.allows(Direction::Publish, "room/bob/cam"));
 		assert!(handle.allows(Direction::Subscribe, "room/bob/cam"));
 		assert!(!handle.allows(Direction::Subscribe, "room/alice/audio"));
 
-		handle.handle().authorize(&grant(&[""], &["room/alice/video"])).unwrap();
+		handle.handle().authorize(&grant(&[""], &["room/alice/video"]));
 		assert!(!handle.allows(Direction::Publish, "room/alice/audio"));
 		assert!(handle.allows(Direction::Publish, "room/alice/video"));
 		assert!(handle.allows(Direction::Subscribe, "other"));
 
-		handle.handle().authorize(&Grant::all()).unwrap();
+		handle.handle().authorize(&Grant::all());
 		assert!(handle.allows(Direction::Publish, "room/alice/audio"));
 		assert!(handle.allows(Direction::Subscribe, "other"));
 	}
@@ -2799,7 +2731,7 @@ mod tests {
 		assert!(!handle.allows(Direction::Subscribe, "room/bob/cam"));
 		assert!(handle.within_limit(Direction::Subscribe, "room/bob/cam"));
 
-		handle.handle().authorize(&grant(&["room/alice"], &[])).unwrap();
+		handle.handle().authorize(&grant(&["room/alice"], &[]));
 		assert!(!handle.within_limit(Direction::Subscribe, "room/bob/cam"));
 		assert!(handle.within_limit(Direction::Subscribe, "room/alice/cam"));
 		drop(token);
@@ -2816,15 +2748,15 @@ mod tests {
 		assert_eq!(default.poll(&waiter), Poll::Ready(grant(&["room"], &["room"])));
 		assert!(default.poll(&waiter).is_pending());
 
-		handle.handle().authorize(&grant(&["room"], &["room/alice"])).unwrap();
+		handle.handle().authorize(&grant(&["room"], &["room/alice"]));
 		assert_eq!(default.poll(&waiter), Poll::Ready(grant(&["room"], &["room/alice"])));
 
 		// Wider again, but never past what the origin handles allow.
-		handle.handle().authorize(&Grant::all()).unwrap();
+		handle.handle().authorize(&Grant::all());
 		assert_eq!(default.poll(&waiter), Poll::Ready(grant(&["room"], &["room"])));
 
 		// A limit that leaves the grant as it is: nothing to tell the peer.
-		handle.handle().authorize(&grant(&[""], &[""])).unwrap();
+		handle.handle().authorize(&grant(&[""], &[""]));
 		assert!(default.poll(&waiter).is_pending());
 	}
 
@@ -3353,7 +3285,6 @@ mod request_token_tests {
 			publish: Patterns::new(),
 			subscribe: crate::Pattern::subtree(prefix).unwrap().into(),
 			expires: None,
-			subject: None,
 		}
 	}
 
@@ -3364,7 +3295,7 @@ mod request_token_tests {
 	async fn the_scope_is_session_tokens_only() {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		handle.handle().authorize(&subscribe_only("room/alice")).unwrap();
+		handle.handle().authorize(&subscribe_only("room/alice"));
 		assert!(!handle.allows(Direction::Publish, "room/bob"));
 
 		// A token on a request admits that request, and nothing else.
@@ -3410,7 +3341,7 @@ mod request_token_tests {
 	async fn an_ended_auth_grant_leaves_the_scope() {
 		let handle = Link::new(true);
 		let mut requests = handle.handle().requests();
-		handle.handle().authorize(&Grant::default()).unwrap();
+		handle.handle().authorize(&Grant::default());
 		for revoke in [true, false] {
 			let serving = Serving::new(handle.clone());
 			requests
@@ -3447,7 +3378,6 @@ mod request_token_tests {
 			publish: Patterns::new(),
 			subscribe: crate::Pattern::all().into(),
 			expires: runtime.now().checked_add(Duration::from_secs(secs)),
-			subject: None,
 		}
 	}
 
@@ -3715,13 +3645,11 @@ mod request_token_tests {
 			publish: Patterns::new(),
 			subscribe: crate::Pattern::all().into(),
 			expires: None,
-			subject: None,
 		};
 		let write_only = Grant {
 			publish: crate::Pattern::all().into(),
 			subscribe: Patterns::new(),
 			expires: None,
-			subject: None,
 		};
 		assert!(RequestKind::Subscribe.covers(&read_only, "room"));
 		assert!(!RequestKind::Subscribe.covers(&write_only, "room"));
@@ -3737,13 +3665,11 @@ mod request_token_tests {
 			publish: crate::Pattern::literal("room").unwrap().into(),
 			subscribe: Patterns::new(),
 			expires: None,
-			subject: None,
 		};
 		let subtree = Grant {
 			publish: crate::Pattern::subtree("room").unwrap().into(),
 			subscribe: Patterns::new(),
 			expires: None,
-			subject: None,
 		};
 		assert!(!RequestKind::PublishNamespace.covers(&exact, "room"));
 		assert!(RequestKind::PublishNamespace.covers(&subtree, "room"));
@@ -3754,7 +3680,6 @@ mod request_token_tests {
 			publish: Patterns::new(),
 			subscribe: crate::Pattern::literal("room").unwrap().into(),
 			expires: None,
-			subject: None,
 		};
 		assert!(RequestKind::Subscribe.covers(&read, "room"));
 	}

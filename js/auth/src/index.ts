@@ -25,4 +25,3 @@ export * from "./claims.ts";
 export * from "./contract.ts";
 export * from "./key.ts";
 export * from "./set.ts";
-export * from "./subject.ts";

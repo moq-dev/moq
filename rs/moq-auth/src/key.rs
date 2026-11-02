@@ -785,8 +785,6 @@ mod tests {
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
-			issuer: None,
-			subject: None,
 		}
 	}
 
@@ -985,10 +983,7 @@ mod tests {
 			);
 		}
 
-		let legacy = sign_raw(
-			&key,
-			serde_json::json!({"root": "/room/", "publish": ["**"], "sub": "alice"}),
-		);
+		let legacy = sign_raw(&key, serde_json::json!({"root": "/room/", "publish": ["**"]}));
 		assert_eq!(
 			key.verify(&legacy).unwrap().authorize("room").unwrap().publish,
 			patterns(&["**"])
@@ -1069,8 +1064,6 @@ mod tests {
 			expires: None,
 			issued: None,
 			not_before: None,
-			issuer: None,
-			subject: None,
 		};
 
 		let result = key.sign(&invalid_claims);
@@ -1249,8 +1242,6 @@ mod tests {
 			expires: None,
 			issued: None,
 			not_before: None,
-			issuer: None,
-			subject: None,
 		};
 		let token = key.sign(&claims).unwrap();
 
@@ -1271,8 +1262,6 @@ mod tests {
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
-			issuer: Some("https://auth.example".to_string()),
-			subject: Some("alice".to_string()),
 		};
 
 		let token = key.sign(&original_claims).unwrap();
@@ -1281,7 +1270,6 @@ mod tests {
 		assert_eq!(verified_claims.root, original_claims.root);
 		assert_eq!(verified_claims.publish, original_claims.publish);
 		assert_eq!(verified_claims.subscribe, original_claims.subscribe);
-		assert_eq!(verified_claims.qualified(), original_claims.qualified());
 	}
 
 	#[test]

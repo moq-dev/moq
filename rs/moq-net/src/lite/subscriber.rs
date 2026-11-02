@@ -5070,7 +5070,7 @@ mod tests {
 	#[kio::test]
 	async fn a_listing_outside_the_scope_is_refused() {
 		let auth = crate::auth::Link::new(false);
-		auth.handle().authorize(&crate::auth::Grant::default()).unwrap();
+		auth.handle().authorize(&crate::auth::Grant::default());
 		let open = kio::Producer::new(true);
 		let session = SinkSession::gated_bi(open.consume());
 		let (mut serve, consumer, _route) = listed_source(session.clone(), auth, Default::default());
@@ -5098,7 +5098,7 @@ mod tests {
 			Some(Ok(Some(crate::broadcast::TracksEvent::Synced)))
 		));
 
-		auth.handle().authorize(&crate::auth::Grant::default()).unwrap();
+		auth.handle().authorize(&crate::auth::Grant::default());
 		assert!(kio::Task::poll(&mut serve, &kio::Waiter::noop()).is_pending());
 		assert!(matches!(tracks.next().now_or_never(), Some(Err(Error::Unauthorized))));
 		assert_eq!(session.log.resets(), vec![crate::StreamError::Unauthorized.to_code()]);
@@ -5275,7 +5275,7 @@ mod tests {
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_pending());
 		assert_eq!(session.log.bi_opens(), 1, "the SUBSCRIBE stream is open");
 
-		auth.handle().authorize(&crate::auth::Grant::default()).unwrap();
+		auth.handle().authorize(&crate::auth::Grant::default());
 		assert!(kio::Task::poll(&mut running, &kio::Waiter::noop()).is_ready());
 
 		let unauthorized = crate::StreamError::Unauthorized.to_code();
@@ -6643,14 +6643,11 @@ mod tests {
 		let mut cursor = consumer.announced();
 		cursor.expect_next_active("room/host").await;
 
-		auth.handle()
-			.authorize(&crate::auth::Grant {
-				publish: Default::default(),
-				subscribe: [crate::Pattern::subtree("other").unwrap()].into_iter().collect(),
-				expires: None,
-				subject: None,
-			})
-			.unwrap();
+		auth.handle().authorize(&crate::auth::Grant {
+			publish: Default::default(),
+			subscribe: [crate::Pattern::subtree("other").unwrap()].into_iter().collect(),
+			expires: None,
+		});
 		announced.restart(&path, None);
 		let attached = subscriber
 			.restart_announce(

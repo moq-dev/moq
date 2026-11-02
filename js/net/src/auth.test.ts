@@ -297,45 +297,6 @@ describe.each([Lite.ALPN_07_WIP, Ietf.ALPN.DRAFT_22])("%s", (protocol) => {
 		}
 	});
 
-	test("a token naming another subject is refused, new or updated", async () => {
-		const { client, server } = await connect({ publish: new OriginProducer(), protocol });
-		const requests = server.auth.requests();
-		const named = (name: string, publish: string): Grant => ({
-			...grant([publish], []),
-			subject: { issuer: "https://auth.example", name },
-		});
-		const answers: Record<string, Grant> = {
-			"": named("alice", "a"),
-			alice: named("alice", "b"),
-			bob: named("bob", "c"),
-			anonymous: grant(["d"], []),
-		};
-		const issued = new Map<string, Issued>();
-		const answering = (async () => {
-			for (;;) {
-				const request = await requests.next();
-				if (!request) break;
-				const token = new TextDecoder().decode(request.token);
-				issued.set(token, request.accept(answers[token]));
-			}
-		})();
-		try {
-			await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a")) === true);
-			await expect(client.auth.add("bob")).rejects.toBeInstanceOf(SessionError);
-			await client.auth.add("alice");
-			const anonymous = await client.auth.add("anonymous");
-			await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a", "b", "d")) === true);
-
-			issued.get("anonymous")?.update(named("bob", "d"));
-			expect(await anonymous.closed).toBeInstanceOf(SessionError);
-			await waitFor(client.auth.grant, (g) => g?.publish.equals(patterns("a", "b")) === true);
-		} finally {
-			client.abort();
-			server.abort();
-			await answering;
-		}
-	});
-
 	test("an out-of-scope broadcast closes the session and names the path", async () => {
 		const origin = new OriginProducer();
 		const { client, server, transport } = await connect({ publish: origin, protocol });

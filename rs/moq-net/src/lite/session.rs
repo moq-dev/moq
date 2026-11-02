@@ -257,7 +257,6 @@ pub fn start(config: Config) -> Result<SessionStart, Error> {
 		publish: subscribe.as_ref().map(|origin| origin.allowed()).unwrap_or_default(),
 		subscribe: publish.as_ref().map(|origin| origin.allowed()).unwrap_or_default(),
 		expires: None,
-		subject: None,
 	};
 
 	// Always run both loops so inbound control (Subscribe/Announce/Probe/Goaway)
@@ -696,7 +695,6 @@ impl PresentToken {
 									publish: ok.publish,
 									subscribe: ok.subscribe,
 									expires,
-									subject: None,
 								},
 							);
 							// Each grant recomputes the session's permits, so a peer streaming

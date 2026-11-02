@@ -100,10 +100,6 @@ pub enum Error {
 	#[error("token grants no access to path {0:?}")]
 	NoAccess(String),
 
-	/// The token may publish only part of the tree but names no subject (`sub`) to file its routes under.
-	#[error("token publishes a scoped grant without a subject")]
-	MissingSubject,
-
 	/// The key scope allows neither publish nor subscribe.
 	#[error("no publish or subscribe allowed; key scope is useless")]
 	UselessScope,

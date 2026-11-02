@@ -155,8 +155,6 @@ mod tests {
 			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
 			issued: Some(kio::clock::wall()),
 			not_before: None,
-			issuer: None,
-			subject: None,
 		}
 	}
 

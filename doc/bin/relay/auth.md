@@ -128,8 +128,8 @@ and use its `moq auth` subcommand.
 # Asymmetric: the relay only needs public.jwk.
 moq auth generate --algorithm ES256 --out private.jwk --public public.jwk
 
-# Let alice publish under rooms/123/alice and subscribe to anything in rooms/123.
-moq auth sign --key private.jwk --root rooms/123 --subject alice --publish 'alice/**' --subscribe '**' --expires "$(( $(date +%s) + 3600 ))" > alice.jwt
+# Let the bearer publish under rooms/123/alice and subscribe to anything in rooms/123.
+moq auth sign --key private.jwk --root rooms/123 --publish 'alice/**' --subscribe '**' --expires "$(( $(date +%s) + 3600 ))" > alice.jwt
 
 moq auth verify --key public.jwk --in alice.jwt
 ```
@@ -156,11 +156,6 @@ tokens; a query carrying two `jwt` parameters is refused. HMAC, RSA, ECDSA, and 
 key can itself be **scoped** at generation (`--root`, `--publish`,
 `--subscribe`), after which it can never sign a broader token.
 
-A token names who it was issued to with `--subject` (`sub`), qualified by
-`--issuer` (`iss`) when several issuers share a relay. `moq auth serve` refuses a
-token without a subject that may publish only part of the tree: anything but
-`**` dialed at the root. A subscribe-only token needs none.
-
 ### In-band renewal
 
 On moq-lite-07-wip or moq-transport draft-18 and later with MoQ Auth negotiated,
@@ -178,8 +173,7 @@ Older versions refuse in-band tokens.
 Each accepted token adds its publish and subscribe patterns to the session's
 union, within its admitted root and SETUP role. A publish-only connection cannot
 become a subscriber. A replacement must retain the root, mounts, and routing
-classification, and every token on a session must name the same subject, if
-any: one naming another is refused. Dropping a token handle, expiry, or refusal at revalidation
+classification. Dropping a token handle, expiry, or refusal at revalidation
 removes that token's grant: streams that lose permission reset, and other grants
 keep the connection alive. A refused new token leaves existing grants alone.
 The grant reports its real expiry so the client can renew in time.

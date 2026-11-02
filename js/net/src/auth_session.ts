@@ -1,6 +1,6 @@
 import { Instant, Milli, Nano, now, sleep, wall, yieldNow } from "@moq/clock";
 import { type Dispose, type Getter, Once, race, Signal } from "@moq/signals";
-import type { Credential, Grant, Issued, Request, Requests, Subject } from "./auth.ts";
+import type { Credential, Grant, Issued, Request, Requests } from "./auth.ts";
 import { closeReason, error, ProtocolViolation, SessionCode, SessionError, StreamCode, StreamError } from "./error.ts";
 import * as Path from "./path.ts";
 import type { Reader, Stream, Writer } from "./stream.ts";
@@ -26,19 +26,10 @@ export async function decodePatterns(r: Reader): Promise<Path.Patterns> {
 	return new Path.Patterns(patterns);
 }
 
-/** Whether two grants allow the same paths, lapse together, and name the same subject. */
+/** Whether two grants allow the same paths and lapse together. */
 function grantsEqual(a: Grant | undefined, b: Grant | undefined): boolean {
 	if (a === undefined || b === undefined) return a === b;
-	return (
-		a.publish.equals(b.publish) &&
-		a.subscribe.equals(b.subscribe) &&
-		a.expires === b.expires &&
-		subjectsEqual(a.subject, b.subject)
-	);
-}
-
-function subjectsEqual(a: Subject | undefined, b: Subject | undefined): boolean {
-	return a?.issuer === b?.issuer && a?.name === b?.name;
+	return a.publish.equals(b.publish) && a.subscribe.equals(b.subscribe) && a.expires === b.expires;
 }
 
 /** The session or peer carries no AUTH exchange, or takes no tokens in band. */
@@ -114,28 +105,18 @@ export interface AuthWire {
 	unsupported(stream: Stream, reason: string): Promise<void>;
 }
 
-/**
- * The paths any of `grants` allows. Reduced once, so it costs about the grants' total size.
- * The grants share a subject, if any name one.
- */
+/** The paths any of `grants` allows. Reduced once, so it costs about the grants' total size. */
 function union(grants: Iterable<Grant>): Grant {
 	const publish: Path.Pattern[] = [];
 	const subscribe: Path.Pattern[] = [];
 	let expires: number | undefined;
-	let subject: Subject | undefined;
 	for (const grant of grants) {
 		for (const pattern of grant.publish) publish.push(pattern);
 		for (const pattern of grant.subscribe) subscribe.push(pattern);
 		// The earliest expiry is when the union next shrinks.
 		if (grant.expires !== undefined) expires = Math.min(expires ?? grant.expires, grant.expires);
-		subject ??= grant.subject;
 	}
-	return {
-		publish: new Path.Patterns(publish),
-		subscribe: new Path.Patterns(subscribe),
-		expires,
-		...(subject && { subject }),
-	};
+	return { publish: new Path.Patterns(publish), subscribe: new Path.Patterns(subscribe), expires };
 }
 
 // The transport closed under the stream, which ends the whole session rather than one token.
@@ -456,19 +437,14 @@ class PeerRequest implements Request {
 class IssuedGrant implements Issued {
 	ended = false;
 	readonly closed: Promise<Error | null>;
-	/** The subject the current grant names, if any. */
-	subject?: Subject;
 	#stream: Stream;
 	#wire: AuthWire;
-	// Every grant the session holds for the peer's tokens, which must name one subject.
-	#issued: Set<IssuedGrant>;
 	#writes = Promise.resolve();
 	#done = false;
 
-	constructor(stream: Stream, wire: AuthWire, issued: Set<IssuedGrant>) {
+	constructor(stream: Stream, wire: AuthWire) {
 		this.#stream = stream;
 		this.#wire = wire;
-		this.#issued = issued;
 		// The presenter withdraws by closing or cancelling its side.
 		this.closed = wire
 			.withdrawn(stream)
@@ -489,23 +465,12 @@ class IssuedGrant implements Issued {
 			// reply that fails to encode.
 			if (!(err instanceof Unsupported)) console.warn("auth reply not sent", err);
 			this.#done = true;
-			this.#issued.delete(this);
 			return this.#wire.unsupported(this.#stream, error(err).message).catch(() => void 0);
 		});
 	}
 
 	update(grant: Grant): void {
 		if (this.#done) return;
-		const subject = grant.subject;
-		if (
-			subject &&
-			[...this.#issued].some((other) => other !== this && other.subject && !subjectsEqual(other.subject, subject))
-		) {
-			this.revoke(SessionCode.Unauthorized, "subject differs from the session's");
-			return;
-		}
-		this.subject = subject;
-		this.#issued.add(this);
 		const expires = grant.expires === undefined ? undefined : grant.expires - wall();
 		this.#write(() =>
 			this.#wire.grant(this.#stream, { publish: grant.publish, subscribe: grant.subscribe, expires }),
@@ -521,7 +486,6 @@ class IssuedGrant implements Issued {
 	close(): void {
 		if (this.#done) return;
 		this.#done = true;
-		this.#issued.delete(this);
 		this.#writes = this.#writes.then(() => this.#stream.writer.close());
 	}
 }
@@ -611,8 +575,6 @@ export class AuthSession {
 	// The peer replied to some token, so the union is known even when empty.
 	#replied = false;
 	#presented = new Set<Presented>();
-	// The grants this side issued to the peer's tokens.
-	#issued = new Set<IssuedGrant>();
 	// The handle's tokens as this session presents them, so a request carries only those.
 	#byToken = new Map<Token, Presented>();
 	#setupPending = new Signal(0);
@@ -812,7 +774,7 @@ export class AuthSession {
 		await this.#decided;
 		const acceptor = this.#state.decide();
 
-		const issued = new IssuedGrant(stream, wire, this.#issued);
+		const issued = new IssuedGrant(stream, wire);
 		if (acceptor) {
 			const request = new PeerRequest(token, issued);
 			acceptor.push(request);

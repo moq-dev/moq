@@ -58,24 +58,22 @@ export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
 	exp: ZodMiniOptional<ZodMiniInt>;
 	get: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniString<string>, ZodMiniArray<ZodMiniString<string>>]>>;
 	iat: ZodMiniOptional<ZodMiniInt>;
-	iss: ZodMiniOptional<ZodMiniString<string>>;
+	iss: ZodMiniOptional<ZodMiniUnknown>;
 	jti: ZodMiniOptional<ZodMiniUnknown>;
 	nbf: ZodMiniOptional<ZodMiniInt>;
 	publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 	put: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniString<string>, ZodMiniArray<ZodMiniString<string>>]>>;
 	root: ZodMiniDefault<ZodMiniString<string>>;
-	sub: ZodMiniOptional<ZodMiniString<string>>;
+	sub: ZodMiniOptional<ZodMiniUnknown>;
 	subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 }, $strict>, ZodMiniTransform<Omit<{
 	exp?: number | undefined;
 	get?: string | string[] | undefined;
 	iat?: number | undefined;
-	iss?: string | undefined;
 	nbf?: number | undefined;
 	publish?: string[] | undefined;
 	put?: string | string[] | undefined;
 	root: string;
-	sub?: string | undefined;
 	subscribe?: string[] | undefined;
 }, "get" | "put"> & {
 	publish?: string[];
@@ -84,13 +82,13 @@ export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
 	exp?: number | undefined;
 	get?: string | string[] | undefined;
 	iat?: number | undefined;
-	iss?: string | undefined;
+	iss?: unknown;
 	jti?: unknown;
 	nbf?: number | undefined;
 	publish?: string[] | undefined;
 	put?: string | string[] | undefined;
 	root: string;
-	sub?: string | undefined;
+	sub?: unknown;
 	subscribe?: string[] | undefined;
 }>>;
 
@@ -104,10 +102,6 @@ export const GrantSchema: ZodMiniObject<{
 	publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 	revalidate: ZodMiniOptional<ZodMiniInt>;
 	root: ZodMiniOptional<ZodMiniString<string>>;
-	subject: ZodMiniOptional<ZodMiniObject<{
-		issuer: ZodMiniOptional<ZodMiniString<string>>;
-		name: ZodMiniString<string>;
-	}, $strip>>;
 	subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
 	tier: ZodMiniOptional<ZodMiniString<string>>;
 	upstream: ZodMiniOptional<ZodMiniBoolean<boolean>>;
@@ -123,13 +117,13 @@ export const Key: {
 		exp?: number;
 		get?: string | string[];
 		iat?: number;
-		iss?: string;
+		iss?: unknown;
 		jti?: unknown;
 		nbf?: number;
 		publish?: string[];
 		put?: string | string[];
 		root?: string;
-		sub?: string;
+		sub?: unknown;
 		subscribe?: string[];
 	}) => Promise<string>;
 	verify: (key: PublicKey | SymmetricKey, token: string) => Promise<Claims>;
@@ -351,13 +345,13 @@ export const KeySet: {
 		exp?: number;
 		get?: string | string[];
 		iat?: number;
-		iss?: string;
+		iss?: unknown;
 		jti?: unknown;
 		nbf?: number;
 		publish?: string[];
 		put?: string | string[];
 		root?: string;
-		sub?: string;
+		sub?: unknown;
 		subscribe?: string[];
 	}) => Promise<string>;
 	verify: (set: KeySet, token: string) => Promise<Claims>;
@@ -777,13 +771,6 @@ export { Segment } from "@moq/pattern";
 
 export { Specificity } from "@moq/pattern";
 
-export type Subject = infer<typeof SubjectSchema>;
-
-export const SubjectSchema: ZodMiniObject<{
-	issuer: ZodMiniOptional<ZodMiniString<string>>;
-	name: ZodMiniString<string>;
-}, $strip>;
-
 export type SymmetricKey = Extract<Key, {
 	kty: "oct";
 }>;
@@ -816,8 +803,6 @@ export function authorize(claims: Claims, path: string): Permissions;
 export { compareSpecificity } from "@moq/pattern";
 
 export function patterns(texts: readonly string[] | undefined): Patterns;
-
-export function qualified(claims: Claims): Subject | undefined;
 
 export function scopeAllows(scope: Scope, claims: Claims): boolean;
 ```

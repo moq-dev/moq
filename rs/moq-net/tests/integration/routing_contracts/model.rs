@@ -533,9 +533,9 @@ pub struct Retained {
 
 #[derive(Default)]
 struct State {
-	/// The identity this node originates as its own, if any.
-	own: Option<Id>,
-	/// Identities this node serves itself, with their seqnos: its own one,
+	/// The identity this node's sessions prove, if it originates one.
+	proven: Option<Id>,
+	/// Identities this node serves itself, with their seqnos: its proven one,
 	/// plus any it forges.
 	origins: BTreeMap<Id, Seqno>,
 	/// Whether this node advertises identities it does not serve.
@@ -682,6 +682,9 @@ pub struct Net {
 	nodes: Vec<State>,
 	links: BTreeMap<(Node, Node), Link>,
 	up: BTreeSet<(Node, Node)>,
+	/// `(node, peer)`: the identity `node` proved on its session to `peer`. A
+	/// session proves one key, once.
+	proved: BTreeMap<(Node, Node), Id>,
 	/// `(at, peer)`: `peer` sent `at` a GOAWAY on their current session.
 	draining: BTreeSet<(Node, Node)>,
 	queues: BTreeMap<(Node, Node), VecDeque<Msg>>,
@@ -709,6 +712,7 @@ impl Net {
 				.collect(),
 			links: BTreeMap::new(),
 			up: BTreeSet::new(),
+			proved: BTreeMap::new(),
 			draining: BTreeSet::new(),
 			queues: BTreeMap::new(),
 			acks: BTreeMap::new(),
@@ -751,6 +755,11 @@ impl Net {
 	pub fn connect(&mut self, a: Node, b: Node) {
 		assert!(self.links.contains_key(&(a, b)), "unknown link {a}-{b}");
 		self.up.insert(Self::pair(a, b));
+		for (x, y) in [(a, b), (b, a)] {
+			if let Some(id) = self.nodes[x].proven {
+				self.proved.insert((x, y), id);
+			}
+		}
 		self.advertise(a);
 		self.advertise(b);
 	}
@@ -765,6 +774,7 @@ impl Net {
 		for (x, y) in [(a, b), (b, a)] {
 			self.queues.remove(&(x, y));
 			self.acks.remove(&(x, y));
+			self.proved.remove(&(x, y));
 			self.held.remove(&(x, y));
 			self.draining.remove(&(y, x));
 			let state = &mut self.nodes[y];
@@ -821,12 +831,16 @@ impl Net {
 		})
 	}
 
-	/// `node` starts originating `id` at seqno `seqno` as its own identity. Nothing
-	/// proves it, so a receiver files it like any identity the node forwards.
+	/// `node` starts originating `id` at seqno `seqno`, proving it on every session.
 	pub fn originate(&mut self, node: Node, id: Id, seqno: Seqno) {
 		assert_eq!(id & QUALIFIED, 0, "a key-derived identity is never qualified");
+		let peers: Vec<Node> = self.peers(node).collect();
+		for peer in peers {
+			let proved = *self.proved.entry((node, peer)).or_insert(id);
+			assert_eq!(proved, id, "node {node}'s session to {peer} already proved another key");
+		}
 		let state = &mut self.nodes[node];
-		state.own = Some(id);
+		state.proven = Some(id);
 		state.origins.insert(id, seqno);
 		state.views.insert(
 			id,
@@ -838,7 +852,7 @@ impl Net {
 		self.advertise(node);
 	}
 
-	/// `node` advertises `id` as if forwarding it, without originating it.
+	/// `node` advertises `id` as if forwarding it, without proving it.
 	pub fn forge(&mut self, node: Node, id: Id, seqno: Seqno) {
 		self.nodes[node].origins.insert(id, seqno);
 		self.advertise(node);
@@ -847,7 +861,7 @@ impl Net {
 	/// The origin advances its seqno.
 	pub fn bump(&mut self, node: Node) {
 		let state = &mut self.nodes[node];
-		let id = state.own.expect("not an origin");
+		let id = state.proven.expect("not an origin");
 		let seqno = state.origins.get_mut(&id).unwrap();
 		if *seqno + 1 == VARINT_MAX {
 			return self.rotate(node);
@@ -858,15 +872,16 @@ impl Net {
 
 	/// The origin at `node` retires its identity for a fresh one and announces
 	/// its claims again there: what it does instead of advancing a seqno or a
-	/// revision to [`VARINT_MAX`]. Every session closes and reopens, so every
-	/// node lets the old identity go.
+	/// revision to [`VARINT_MAX`]. A session proves one key once, so every
+	/// session closes and reopens to prove the new one, and every node lets the
+	/// old identity go.
 	fn rotate(&mut self, node: Node) {
 		let peers: Vec<Node> = self.peers(node).collect();
 		for &peer in &peers {
 			self.disconnect(node, peer);
 		}
 		let state = &mut self.nodes[node];
-		let old = state.own.expect("not an origin");
+		let old = state.proven.expect("not an origin");
 		state.origins.remove(&old);
 		let claims = state.views.remove(&old).map(|view| view.items).unwrap_or_default();
 		self.originate(node, fnv("rotate", &[old]) & !QUALIFIED, 0);
@@ -881,13 +896,13 @@ impl Net {
 	/// Jump the origin's revision to `rev`, as a long-lived origin's claim
 	/// changes reach it.
 	pub fn age(&mut self, node: Node, rev: Rev) {
-		let id = self.own(node);
+		let id = self.proven(node);
 		self.nodes[node].views.get_mut(&id).unwrap().floors.insert("", rev);
 	}
 
-	/// The identity `node` originates as its own.
-	pub fn own(&self, node: Node) -> Id {
-		self.nodes[node].own.expect("not an origin")
+	/// The identity `node` proves.
+	pub fn proven(&self, node: Node) -> Id {
+		self.nodes[node].proven.expect("not an origin")
 	}
 
 	/// The prefix `node` watches.
@@ -898,7 +913,7 @@ impl Net {
 	/// The origin's current seqno.
 	pub fn seqno(&self, node: Node) -> Seqno {
 		let state = &self.nodes[node];
-		state.origins[&state.own.expect("not an origin")]
+		state.origins[&state.proven.expect("not an origin")]
 	}
 
 	/// The origin at `node` starts or updates a claim, advancing its revision.
@@ -912,7 +927,7 @@ impl Net {
 	}
 
 	fn change(&mut self, node: Node, claim: &'static str, attrs: Option<(Metric, Option<u32>)>) {
-		let id = self.nodes[node].own.expect("not an origin");
+		let id = self.nodes[node].proven.expect("not an origin");
 		let view = self.nodes[node].views.get_mut(&id).unwrap();
 		let rev = view.floors[""] + 1;
 		if rev == VARINT_MAX {
@@ -1155,7 +1170,7 @@ impl Net {
 	/// The key `at` files `id` under when `from` names it, or `None` when refused.
 	fn key(&self, at: Node, from: Node, id: Id) -> Option<Id> {
 		match self.links[&(at, from)].grant {
-			Some(grant) => {
+			Some(grant) if self.proved.get(&(from, at)) != Some(&id) => {
 				if id & QUALIFIED != 0 && !self.cfg.requalify {
 					return None;
 				}
@@ -1263,7 +1278,7 @@ impl Net {
 		if let Some(own) = state.origins.get_mut(&id) {
 			// Only the origin advances its seqno to answer.
 			if seqno == VARINT_MAX {
-				assert_eq!(state.own, Some(id), "a forged identity ran out of seqnos");
+				assert_eq!(state.proven, Some(id), "a forged identity ran out of seqnos");
 				self.rotate(at);
 			} else {
 				*own = (*own).max(seqno);

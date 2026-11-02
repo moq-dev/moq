@@ -18,7 +18,6 @@ fn main() -> anyhow::Result<()> {
 	// Sign a token with the private key.
 	let claims = moq_auth::Claims::default()
 		.with_root("rooms/meeting-123")
-		.with_subject("alice")
 		.with_publish(["alice/**".parse()?])
 		.with_subscribe(["**".parse()?])
 		.with_expires(kio::clock::wall() + Duration::from_secs(3600))
