@@ -23,7 +23,7 @@ proc-macro2 = "1"
 quote = "1"
 # syn 2, not 3: moq-net's graph already builds syn 2 with `full` and `visit-mut`
 # (thiserror, tracing), so the macro adds no syn build of its own there.
-syn = { version = "2", features = ["full", "visit-mut"] }
+syn = { version = "3", features = ["full", "visit-mut"] }
 
 [dev-dependencies]
 kio = { path = "..", features = ["macros"] }
