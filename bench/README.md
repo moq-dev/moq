@@ -63,7 +63,8 @@ nix develop --command just bench-audio
 
 This sweeps room connections (16, 32) and subscriptions per connection (2, 8)
 independently, plus one publisher serving 64 and 200 subscribers. It uses the
-normal relay sampler and runs nightly. Each shape reports delivered frames,
+normal relay sampler. Run it locally when changing grouping or relay load;
+its measurements are not a nightly series. Each shape reports delivered frames,
 p99 latency, relay CPU and RSS; the group-size suffix is the number of frames
 after the keyframe (0, 4, 9), so each group carries 1, 5 or 10 frames. These
 synthetic payloads measure group overhead; they do not measure codec loss
@@ -152,7 +153,8 @@ Zero shards is the shared runtime with one Tokio thread per usable CPU; any
 other count is that many unpinned Tokio workers. The table reports CPU per
 connection, so a steering, dispatch, or per-shard cost that grows with either
 axis reads as a slope. Linux only, since nothing else steers a reuseport
-group. It runs nightly.
+group. Run the sweep locally when changing relay sharding; its measurements
+are not a nightly series.
 
 Profile the relay under a workload, in one or more capture modes: `lock`
 (worker std mutex waits by stack), `cpu` (CPU stacks of every relay thread),
@@ -166,7 +168,8 @@ nix develop --command just bench-profile cpu chat 4 io-uring-workers origin/main
 nix develop --command just bench-profile cpu chat 4 tokio-workers "" ws
 ```
 
-This builds the relay with `[profile.profiling]` and frame pointers, then runs
+This is an on-demand diagnostic, with captures kept in the local run directory.
+It builds the relay with `[profile.profiling]` and frame pointers, then runs
 the workload over the selected transport (`quic` by default, or `ws`, `wss`,
 `tcp`, or `tls`) on the selected runtime (`tokio-workers` by default, or
 `io-uring-workers`) at each count twice per mode: an unprofiled control, then a
