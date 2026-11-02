@@ -1924,6 +1924,61 @@ mod tests {
 		}
 	}
 
+	/// Every surround layout reaches opusdec as its family 1 mapping, RFC 7845's Vorbis order.
+	#[test]
+	fn surround_opus_caps_carry_the_family_1_mapping() {
+		gst::init().unwrap();
+		let layouts: [(u8, u8, &[u8]); 6] = [
+			(2, 1, &[0, 2, 1]),
+			(2, 2, &[0, 1, 2, 3]),
+			(3, 2, &[0, 4, 1, 2, 3]),
+			(4, 2, &[0, 4, 1, 2, 3, 5]),
+			(4, 3, &[0, 4, 1, 2, 3, 5, 6]),
+			(5, 3, &[0, 6, 1, 2, 3, 4, 5, 7]),
+		];
+		for (streams, coupled, table) in layouts {
+			let channels = table.len() as u32;
+			let mut head = moq_mux::codec::opus::Config::new(48_000, channels).with_pre_skip(312);
+			head.mapping = Some(
+				moq_mux::codec::opus::Mapping::new(moq_mux::codec::opus::mapping::Config {
+					family: 1,
+					streams,
+					coupled,
+					table,
+				})
+				.unwrap(),
+			);
+			let description = head.encode().unwrap();
+			let mut config = hang::catalog::AudioConfig::new(hang::catalog::AudioCodec::Opus, 48_000, channels);
+			config.description = Some(description.clone());
+			let caps = super::audio_caps(&config).unwrap();
+			let structure = caps.structure(0).unwrap();
+			assert_eq!(structure.get::<i32>("channels").unwrap(), channels as i32);
+			assert_eq!(structure.get::<i32>("channel-mapping-family").unwrap(), 1);
+			assert_eq!(structure.get::<i32>("stream-count").unwrap(), i32::from(streams));
+			assert_eq!(structure.get::<i32>("coupled-count").unwrap(), i32::from(coupled));
+			let mapping: Vec<i32> = structure
+				.get::<gst::Array>("channel-mapping")
+				.unwrap()
+				.iter()
+				.map(|entry| entry.get::<i32>().unwrap())
+				.collect();
+			assert_eq!(
+				mapping,
+				table.iter().map(|&c| i32::from(c)).collect::<Vec<_>>(),
+				"{channels} channels"
+			);
+			let head: gst::Buffer = structure
+				.get::<gst::Array>("streamheader")
+				.unwrap()
+				.first()
+				.unwrap()
+				.get()
+				.unwrap();
+			assert_eq!(head.map_readable().unwrap().as_slice(), description.as_ref());
+		}
+	}
+
 	/// opusdec only clips what a buffer's meta asks, one packet at a time, and stamps what's left
 	/// at the packet's pts, so the pre-skip spreads over as many packets as it spans and every
 	/// packet moves to where its first kept sample plays.
@@ -2021,7 +2076,10 @@ mod session_tests {
 	use hang::catalog::{AudioCodec, AudioConfig, Container, H264, VideoCodec, VideoConfig};
 	use tokio::sync::watch;
 
-	use super::{NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, TrackKind, follow_catalog, follow_path};
+	use super::{
+		NEXT_AUDIO_PAD_ID, NEXT_VIDEO_PAD_ID, Pads, ResolvedSettings, SessionController, TrackKind, follow_catalog,
+		follow_path,
+	};
 
 	/// The pad-id counters are process-global, so a test reading one has to be the only test
 	/// allocating while it runs. `cargo test` shares a process across tests (nextest doesn't),
@@ -4584,15 +4642,20 @@ mod session_tests {
 		}
 	}
 
-	/// `moqsrc` playing `room` from `url`, its first video pad linked by name to a synced sink
-	/// that drops anything more than 100ms late.
-	fn pipeline(url: &url::Url) -> (gst::Pipeline, gst::Element) {
+	/// Makes both elements available to pipeline descriptions.
+	fn register() {
 		static REGISTER: std::sync::Once = std::sync::Once::new();
 		gst::init().unwrap();
 		REGISTER.call_once(|| {
 			gst::Element::register(None, "moqsrc", gst::Rank::NONE, super::super::MoqSrc::static_type()).unwrap();
+			gst::Element::register(None, "moqsink", gst::Rank::NONE, crate::sink::MoqSink::static_type()).unwrap();
 		});
+	}
 
+	/// `moqsrc` playing `room` from `url`, its first video pad linked by name to a synced sink
+	/// that drops anything more than 100ms late.
+	fn pipeline(url: &url::Url) -> (gst::Pipeline, gst::Element) {
+		register();
 		let first = NEXT_VIDEO_PAD_ID.load(Ordering::Relaxed);
 		let pipeline = gst::parse::launch(&format!(
 			"moqsrc name=src url={url} broadcast=room \
@@ -4939,5 +5002,83 @@ mod session_tests {
 		let mut new = Publisher::new(&relay.origin, Default::default(), video_rendition());
 		rendered(&sink, &mut new, 2);
 		assert_played_cleanly(pipeline);
+	}
+
+	/// The surround path end to end: `opusenc` 5.1 through moqsink, a relay, moqsrc, and
+	/// `opusdec` decodes six channels, each carrying the tone. The tone sits low enough for the
+	/// LFE channel, which libopus band-limits, to carry it too.
+	#[test]
+	fn surround_opus_plays_every_channel_through_a_relay() {
+		const CHANNELS: usize = 6;
+		// Half a second at 48 kHz.
+		const FRAMES: usize = 24_000;
+
+		let _pad_ids = pad_ids();
+		let relay = Relay::new();
+		register();
+		let launch = |description: String| {
+			gst::parse::launch(&description)
+				.unwrap()
+				.downcast::<gst::Pipeline>()
+				.unwrap()
+		};
+		let publisher = launch(format!(
+			"audiotestsrc is-live=true freq=100 \
+			 ! audio/x-raw,format=S16LE,layout=interleaved,rate=48000,channels={CHANNELS},channel-mask=(bitmask)0x3f \
+			 ! opusenc ! moqsink url={} broadcast=room",
+			relay.url
+		));
+		let first = NEXT_AUDIO_PAD_ID.load(Ordering::Relaxed);
+		let subscriber = launch(format!(
+			"moqsrc name=src url={} broadcast=room src.audio_{first} ! opusdec ! appsink name=sink sync=false",
+			relay.url
+		));
+		let sink = subscriber.by_name("sink").unwrap();
+		publisher.set_state(gst::State::Playing).unwrap();
+		subscriber.set_state(gst::State::Playing).unwrap();
+
+		let errors = || {
+			[&publisher, &subscriber].map(|pipeline| pipeline.bus().unwrap().pop_filtered(&[gst::MessageType::Error]))
+		};
+		let deadline = std::time::Instant::now() + Duration::from_secs(30);
+		let mut samples = Vec::new();
+		while samples.len() < FRAMES * CHANNELS {
+			assert!(
+				std::time::Instant::now() < deadline,
+				"{} of {FRAMES} frames decoded; errors: {:?}",
+				samples.len() / CHANNELS,
+				errors()
+			);
+			let Some(sample) = sink.emit_by_name::<Option<gst::Sample>>("try-pull-sample", &[&100_000_000u64]) else {
+				continue;
+			};
+			let info = gst_audio::AudioInfo::from_caps(sample.caps().unwrap()).unwrap();
+			assert_eq!(info.channels() as usize, CHANNELS, "opusdec decoded {info:?}");
+			assert_eq!(info.format(), gst_audio::AudioFormat::S16le);
+			let buffer = sample.buffer().unwrap().map_readable().unwrap();
+			samples.extend(
+				buffer
+					.chunks_exact(2)
+					.map(|sample| f64::from(i16::from_le_bytes([sample[0], sample[1]]))),
+			);
+		}
+		subscriber.set_state(gst::State::Null).unwrap();
+		publisher.set_state(gst::State::Null).unwrap();
+		relay.stop();
+		let errors = errors();
+		assert!(errors.iter().all(Option::is_none), "{errors:?}");
+
+		// audiotestsrc writes the same tone to every channel at 0.8 of full scale, an RMS near
+		// 18,500; a channel the mapping dropped decodes to silence.
+		let frames = (samples.len() / CHANNELS) as f64;
+		for channel in 0..CHANNELS {
+			let energy = samples
+				.iter()
+				.skip(channel)
+				.step_by(CHANNELS)
+				.map(|sample| sample * sample);
+			let rms = (energy.sum::<f64>() / frames).sqrt();
+			assert!(rms > 5_000.0, "channel {channel} decoded an RMS of {rms:.0}");
+		}
 	}
 }
