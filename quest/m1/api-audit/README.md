@@ -10,7 +10,7 @@ to migrate.
 
 Non-goals: redesigning surfaces that already have their own quest
 ([subscribe ranges](/quest/m1/subscribe-ranges/README.md),
-[archives](/quest/m1/archive/README.md),
+[archives](/doc/concept/archives.md),
 [compressed tracks](/doc/concept/compression.md),
 [A/V clock](/quest/m1/av-clock.md)), and inherited debt that a later quest
 already reshapes.
