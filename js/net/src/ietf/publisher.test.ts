@@ -6,6 +6,7 @@ import { Producer as BroadcastProducer } from "../broadcast.ts";
 import * as Epoch from "../epoch.ts";
 import {
 	error,
+	fromTransport,
 	ProtocolViolation,
 	SessionCode,
 	SessionError,
@@ -3608,17 +3609,22 @@ test("a paused SUBSCRIBE ends once its grant is revoked", async () => {
 });
 
 // The track has no max age, so only the pause itself can release a write parked on flow control.
-test("a pause resets a group stream parked on flow control", async () => {
-	const fx = fixture(V22);
+// A group stream whose writes never complete, recording the reason it was reset with.
+function stalledStream() {
 	let writing!: () => void;
 	const parked = new Promise<void>((resolve) => {
 		writing = resolve;
 	});
-	let reset = false;
-	const stalled = new WritableStream<Uint8Array>({
+	const state: { reset?: unknown } = {};
+	let abort!: (reason: unknown) => void;
+	const aborted = new Promise<unknown>((resolve) => {
+		abort = resolve;
+	});
+	const stream = new WritableStream<Uint8Array>({
 		start(controller) {
 			controller.signal.addEventListener("abort", () => {
-				reset = true;
+				state.reset = controller.signal.reason;
+				abort(controller.signal.reason);
 			});
 		},
 		write() {
@@ -3626,6 +3632,13 @@ test("a pause resets a group stream parked on flow control", async () => {
 			return new Promise<void>(() => {});
 		},
 	});
+	return { stream, parked, state, aborted };
+}
+
+// CANCELLED, as the draft asks of a reset the subscriber caused, whichever write it interrupts.
+test("a pause resets a group stream parked on flow control", async () => {
+	const fx = fixture(V22);
+	const { stream: stalled, parked, state } = stalledStream();
 	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const { client } = await runSubscribe(
@@ -3646,8 +3659,45 @@ test("a pause resets a group stream parked on flow control", async () => {
 		await client.writer.u53(SubscribeUpdate.id);
 		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, V22);
 		expect(await client.reader.u53()).toBe(RequestOk.id);
-		expect(reset).toBe(true);
+		expect(state.reset).toBeDefined();
+		expect(fromTransport(state.reset, { version: V22 })).toMatchObject({ code: StreamCode.Cancel });
 	} finally {
+		client.close();
+		track.finish();
+		track.close();
+		fx.close();
+	}
+});
+
+// A range update that excludes a group mid-write resets its stream with CANCELLED too.
+test("draft-22: narrowing resets a group stream parked on flow control", async () => {
+	const fx = fixture(V22);
+	const { stream: stalled, parked, aborted } = stalledStream();
+	spyOn(fx.pair.server, "createUnidirectionalStream").mockImplementationOnce(async () => stalled);
+	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
+	const { client } = await runSubscribe(
+		fx,
+		new Subscribe({
+			requestId: 0n,
+			trackNamespace: Path.from("test"),
+			trackName: "video",
+			subscriberPriority: 128,
+			filter: { kind: "nextObject" },
+		}),
+	);
+	const open = track.appendGroup();
+	try {
+		open.writeFrame({ payload: new TextEncoder().encode("parked"), timestamp: Timestamp.now() });
+		await parked;
+		const parameters = new Parameters();
+		parameters.subscriptionFilter = { kind: "absolute", startGroup: 1n, startObject: 0n };
+		await client.writer.u53(SubscribeUpdate.id);
+		await new SubscribeUpdate({ requestId: 2n, parameters }).encode(client.writer, V22);
+		expect(await client.reader.u53()).toBe(RequestOk.id);
+		const reason = await timeout(Nano.fromMilli(Milli(1000)), aborted);
+		expect(fromTransport(reason, { version: V22 })).toMatchObject({ code: StreamCode.Cancel });
+	} finally {
+		open.finish();
 		client.close();
 		track.finish();
 		track.close();

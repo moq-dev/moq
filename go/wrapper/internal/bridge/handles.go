@@ -38,20 +38,8 @@ var BroadcastConsumer func(any) *ffi.MoqBroadcastConsumer
 // TrackRequest returns the handle behind a *moq.TrackRequest.
 var TrackRequest func(any) *ffi.MoqTrackRequest
 
-// Frame converts a moq.Frame to the generated record.
-var Frame func(any) (ffi.MoqFrame, error)
-
 // Subscription converts a *moq.Subscription to the generated record.
 var Subscription func(any) (*ffi.MoqSubscription, error)
-
-// Duration converts d to microseconds, refusing a negative duration rather
-// than letting it wrap when cast to uint64.
-func Duration(d time.Duration, name string) (uint64, error) {
-	if d < 0 {
-		return 0, fmt.Errorf("negative %s: %v", name, d)
-	}
-	return uint64(d.Microseconds()), nil
-}
 
 // NonNegative refuses a negative duration, which the generated converter
 // would panic on rather than return an error.
@@ -68,16 +56,4 @@ func Rendition(rendition ffi.MoqRendition) error {
 		return NonNegative(audio.Config.Jitter, "jitter")
 	}
 	return nil
-}
-
-// OptionalDuration converts a caller's time to microseconds, preserving absence.
-func OptionalDuration(value *time.Duration, name string) (*uint64, error) {
-	if value == nil {
-		return nil, nil
-	}
-	us, err := Duration(*value, name)
-	if err != nil {
-		return nil, err
-	}
-	return &us, nil
 }

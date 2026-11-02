@@ -4,7 +4,7 @@
 
 Every CI workflow and job earns its place: its results reach someone (a gate,
 a Discord alert, or a published report) at a cost proportional to that signal.
-Each one that doesn't is fixed, moved, or deleted. Individual tests stay with
+Each one that doesn't is deleted by default, or else made cheaper or moved. Individual tests stay with
 the [test cost audit](/quest/m2/audit-test-cost.md), and runner and cache
 infrastructure with [CI cost and latency](/quest/m0/ci/README.md).
 
@@ -23,6 +23,12 @@ PR, one commit each, rather than as follow-ups. Only a change that needs a
 maintainer decision (dropping a release target, scope) or is independently
 landable and too large to review alongside the rest becomes a follow-up
 through `/quest-plan`.
+
+Default to removing (decided 2026-11-01, maintainer): whatever doesn't earn its
+cost is deleted inline, and the PR body lists each deletion with its measured
+cost and why it wasn't worth it. Only what earns its keep is refactored to be
+cheaper instead. Removing a public API or a user-facing feature stays a
+follow-up.
 
 This audit owns workflows and jobs, including job-level build cost; the test
 cost audit owns individual tests. Each run tables every workflow in

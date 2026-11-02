@@ -117,6 +117,7 @@ jobs:
               - "cpp/moq/cmake/moq-ffi.cmake"
               - "Cargo.lock"
               - ".github/workflows/c.yml"
+              - ".github/actions/uniffi-bindgen/**"
             cpp:
               - "cpp/moq/**"
               - "cpp/justfile"
@@ -128,6 +129,7 @@ jobs:
               - "doc/lib/samples.sh"
               - "Cargo.lock"
               - ".github/workflows/cpp.yml"
+              - ".github/actions/uniffi-bindgen/**"
             # A backported change to the interop harness itself; nightly covers main.
             interop:
               - "test/lib/**"
@@ -200,6 +202,8 @@ jobs:
               - "sh/go/publish-ffi.sh"
               - "rs/moq-ffi/build.sh"
               - ".cargo/config.toml"
+              # release-ffi.yml installs the Go generator through this action.
+              - ".github/actions/uniffi-bindgen/**"
             release-js:
               - "js/**"
               - ".github/workflows/release-js.yml"
@@ -394,7 +398,6 @@ jobs:
     secrets: inherit
     permissions:
       contents: read
-      id-token: write
 
   uring:
     name: io_uring

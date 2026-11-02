@@ -770,12 +770,12 @@ impl MoqTrackProducer {
 
 	/// Write `frame` as a single-frame group.
 	///
-	/// Custom timescales may round the timestamp during conversion. The frame must
+	/// A timestamp at another scale than the track's is converted to it, rounding down. The frame must
 	/// match its track's timedness, otherwise it is refused with
 	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
+		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
 		track.write_frame(timestamp, frame.payload)?;
@@ -789,7 +789,7 @@ impl MoqTrackProducer {
 	/// its timestamp must match the track's timedness.
 	pub fn append_datagram(&self, frame: MoqFrame) -> Result<u64, MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
+		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
 		Ok(track.append_datagram(timestamp, frame.payload)?)
@@ -803,7 +803,7 @@ impl MoqTrackProducer {
 	/// past a [`finish_at`](Self::finish_at) boundary is refused with `Closed`.
 	pub fn insert_datagram(&self, sequence: u64, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
+		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
 		let mut guard = self.inner.lock().unwrap();
 		let track = guard.as_mut().ok_or(MoqError::Closed)?;
 		Ok(track.insert_datagram(sequence, timestamp, frame.payload)?)
@@ -886,12 +886,12 @@ impl MoqGroupProducer {
 
 	/// Write `frame` into this group.
 	///
-	/// Custom timescales may round the timestamp during conversion. The frame must
+	/// A timestamp at another scale than the track's is converted to it, rounding down. The frame must
 	/// match its track's timedness, otherwise it is refused with
 	/// [`MoqProtocolKind::TimestampMismatch`](crate::error::MoqProtocolKind::TimestampMismatch).
 	pub fn write_frame(&self, frame: MoqFrame) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
-		let timestamp = frame.timestamp_us.map(moq_net::Timestamp::from_micros).transpose()?;
+		let timestamp = frame.timestamp.map(TryInto::try_into).transpose()?;
 		let mut guard = self.inner.lock().unwrap();
 		let group = guard.as_mut().ok_or(MoqError::Closed)?;
 		group.write_frame(timestamp, frame.payload)?;

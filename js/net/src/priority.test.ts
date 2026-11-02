@@ -155,3 +155,41 @@ test.each(["ascending", "descending"] as const)("a fill outranks its group's liv
 	priority.remove(other);
 	broadcast.close();
 });
+
+// Every stream sits at the count of streams strictly ahead of it, the same count `rank` gives
+// a stream about to open there, so identical starts share a position and the next one skips
+// past both. Covers duplicates, fills within one group, and removals in both orders.
+test.each(["ascending", "descending"] as const)("re-ranking matches rank for every stream in %s order", (order) => {
+	const { priority, open, streams, broadcast } = ranking({ priority: 7, order });
+	const starts: [number, number][] = [
+		[5, 0],
+		[3, 0],
+		[5, 0],
+		[5, 4],
+		[9, 0],
+		[3, 2],
+		[1, 0],
+		[9, 0],
+	];
+	const writers = starts.map(([sequence, object]) => {
+		const writer = open();
+		priority.add(writer, sequence, object);
+		return writer;
+	});
+	const check = (live: number[]) => {
+		for (const i of live) expect(streams[i].sendOrder).toBe(priority.rank(starts[i][0], starts[i][1]));
+	};
+	const live = starts.map((_, i) => i);
+	check(live);
+	// Identical starts tie, and the next start counts both of them.
+	const lowest = order === "ascending" ? 6 : 4;
+	expect(streams[lowest].sendOrder).toBe(sendOrder({ priority: 7, position: 0 }));
+	for (const i of [2, 4, 0]) {
+		priority.remove(writers[i]);
+		live.splice(live.indexOf(i), 1);
+		check(live);
+	}
+	priority.close();
+	for (const i of live) priority.remove(writers[i]);
+	broadcast.close();
+});
