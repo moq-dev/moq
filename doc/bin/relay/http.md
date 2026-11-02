@@ -50,9 +50,9 @@ rather than forward the caller's `Host`.
 
 ### GET /metrics
 
-Prometheus text: payload bytes, frames, groups, announces, subscriptions, and
-viewers split by `tier` and `role`; requests and sessions by `tier`; and
-accept-loop counters per TCP listener. Payload counters accumulate for the
+OpenMetrics text, which Prometheus scrapes natively: payload bytes, frames,
+groups, announces, subscriptions, and viewers split by `tier` and `role`;
+requests and sessions by `tier`; and accept-loop counters per TCP listener. Payload counters accumulate for the
 node's lifetime and leave out the stats feed's own traffic. Every counter fed by
 sessions and requests, through the wire and control bytes below, counts only
 while [stats](/bin/relay/config#stats) are enabled. Host CPU and memory belong
@@ -91,8 +91,8 @@ A few worth alerting on:
   [shutdown drain](/bin/relay/config#shutdown) that have not left yet.
 - `moq_relay_panics_total`: bugs that closed one session instead of the
   relay. Each logs an error with the message and the session's span. A panic
-  in a task every session depends on (the origin, the cache governor, the
-  certificate reload) exits the relay instead.
+  in a long-lived task (the origin, the cache governor, the certificate reload,
+  the stats publisher) exits the relay instead.
 
 With `--runtime-io-uring`, each QUIC worker also reports `moq_relay_uring_*`
 counters under a `worker` label. Datagrams per enter and the SQE/CQE

@@ -70,7 +70,7 @@ func TestTracks(t *testing.T) {
 	}
 	defer snapshotConsumer.Cancel()
 	for viewers := 1; viewers <= 4; viewers++ {
-		at := time.Duration(viewers) * time.Millisecond
+		at := moq.Timestamp{Value: uint64(viewers) * 1000, Scale: scale}
 		if err := snapshot.Update(map[string]any{"viewers": viewers}, &at); err != nil {
 			t.Fatal(err)
 		}
@@ -89,7 +89,7 @@ func TestTracks(t *testing.T) {
 		if decoded["viewers"] != float64(viewers) {
 			t.Fatalf("snapshot = %s, want viewers %d", value.Value, viewers)
 		}
-		if want := time.Duration(viewers) * time.Millisecond; value.Timestamp == nil || *value.Timestamp != want {
+		if want := (moq.Timestamp{Value: uint64(viewers) * 1000, Scale: scale}); value.Timestamp == nil || *value.Timestamp != want {
 			t.Fatalf("timestamp = %v, want %v", value.Timestamp, want)
 		}
 	}
@@ -149,9 +149,8 @@ func TestWindow(t *testing.T) {
 	}
 	defer windowConsumer.Cancel()
 
-	ms := func(n int) *time.Duration {
-		at := time.Duration(n) * time.Millisecond
-		return &at
+	ms := func(n int) *moq.Timestamp {
+		return &moq.Timestamp{Value: uint64(n) * 1000, Scale: scale}
 	}
 	for n := range 3 {
 		if err := window.Push(map[string]any{"n": n}, ms(n)); err != nil {
