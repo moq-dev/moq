@@ -526,7 +526,7 @@ def matrix_values(job) -> dict[str, list[str]]:
 
 
 def workflow_steps(root: Path) -> list[tuple[str, str, Path]]:
-    """Every command a step runs under .github and its directory, with `${{ matrix.* }}` expanded to the job's values."""
+    """Every command a step runs under .github and its directory, with `${{ matrix.* }}` expanded per job."""
     entries = []
     for path in sorted([*root.glob(".github/workflows/*.y*ml"), *root.glob(".github/actions/*/action.y*ml")]):
         document = yaml.safe_load(path.read_text()) or {}
