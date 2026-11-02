@@ -1061,7 +1061,7 @@ mod tests {
 				let track = broadcast
 					.create_track(hang::hls::default_name(name), moq_mux::hls::Producer::info())
 					.unwrap();
-				(track.clone(), moq_mux::hls::Producer::new(track))
+				(track.clone(), moq_mux::hls::Producer::new(track, moq_mux::Clock::new()))
 			})
 			.collect();
 		for sequence in 0..4 {
@@ -1279,7 +1279,7 @@ mod tests {
 			let track = broadcast
 				.create_track(hang::hls::default_name(name), moq_mux::hls::Producer::info())
 				.unwrap();
-			moq_mux::hls::Producer::new(track)
+			moq_mux::hls::Producer::new(track, moq_mux::Clock::new())
 		});
 		(origin, broadcast, catalog, records)
 	}
@@ -1414,7 +1414,7 @@ mod tests {
 			let track = broadcast
 				.create_track(hang::hls::default_name(name), moq_mux::hls::Producer::info())
 				.unwrap();
-			(track.clone(), moq_mux::hls::Producer::new(track))
+			(track.clone(), moq_mux::hls::Producer::new(track, moq_mux::Clock::new()))
 		});
 		for sequence in 0..4 {
 			video0.push(&gop(sequence)).unwrap();
@@ -2154,6 +2154,7 @@ mod tests {
 			broadcast
 				.create_track(hang::hls::default_name("video0"), moq_mux::hls::Producer::info())
 				.unwrap(),
+			moq_mux::Clock::new(),
 		);
 		let media = Records::write_media(&broadcast, "video0", 3);
 		for sequence in 0..3 {
@@ -2603,7 +2604,7 @@ mod tests {
 		let track = broadcast
 			.create_track(hang::hls::default_name("video0"), moq_mux::hls::Producer::info())
 			.unwrap();
-		(track.clone(), moq_mux::hls::Producer::new(track))
+		(track.clone(), moq_mux::hls::Producer::new(track, moq_mux::Clock::new()))
 	}
 
 	/// Write three keyframes of `payload` into `broadcast`'s `video0` track, 2s apart from
@@ -3438,7 +3439,7 @@ mod tests {
 				.broadcast
 				.create_track(hang::hls::default_name(track), moq_mux::hls::Producer::info())
 				.unwrap();
-			(track.clone(), moq_mux::hls::Producer::new(track))
+			(track.clone(), moq_mux::hls::Producer::new(track, moq_mux::Clock::new()))
 		}
 
 		/// Publish `name`'s media: one keyframe group per [`gop`] record `0..groups`, so a cursor
@@ -3651,7 +3652,7 @@ mod tests {
 			let track = broadcast
 				.create_track(hang::hls::default_name(name), moq_mux::hls::Producer::info())
 				.unwrap();
-			(track.clone(), moq_mux::hls::Producer::new(track))
+			(track.clone(), moq_mux::hls::Producer::new(track, moq_mux::Clock::new()))
 		};
 		let (_video0_track, mut video0) = publish("video0");
 		let (video1_track, mut video1) = publish("video1");
