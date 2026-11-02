@@ -169,21 +169,42 @@ legacy demand questions below.
   subscribes only once a range reaches the reported Largest Object.
   `range_read.rs` reads history and a range across the live edge on every
   wire, direct and relayed; draft-18 refuses the latter, having no bounded
-  SUBSCRIBE (`subscribe_join`). Open, found migrating the moq-net integration
-  tests onto one-range reads ([moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)):
-  - Lite before lite-07 tells no live edge without a SUBSCRIBE, so a one-range
-    read of history there SUBSCRIBEs where `fetch_group` FETCHes:
-    `fetch_pipeline` (the FETCH sent with TRACK), `fetch_fanout`,
-    `fetch_cancel`, and `catalog_handover`'s fetch cases assert the FETCH.
-  - A moq-transport read of the group at the reported Largest Object reaches
-    "the group the publisher may still be writing" (`wants_feed`), so it
-    subscribes: draft-18 refuses that, and a finished track's SUBSCRIBE is
-    refused (`fetch_only`, `compress::ietf_fetch_keeps_the_stored_form`). The
-    relay's `fetch_group(None)` reads exactly that group.
-  - Our moq-transport publishers answer only a one-group FETCH, so a run of
+  SUBSCRIBE (`subscribe_join`). Found migrating the moq-net integration tests
+  onto one-range reads, and settled by the maintainer on 2026-11-02
+  ([moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)):
+  - **Scope.** ✅ Keep going in one PR: remove the public `fetch_group` and
+    migrate its callers, finishing this quest. Alternative: land the bounded
+    read changes first and remove the API in a later PR.
+  - **Past-group reads on lite-05/06.** Lite before lite-07 tells no live edge
+    without a SUBSCRIBE, so a one-range read of history there SUBSCRIBEs where
+    `fetch_group` FETCHes: `fetch_pipeline` (the FETCH sent with TRACK),
+    `fetch_fanout`, `fetch_cancel`, and `catalog_handover`'s fetch cases
+    assert the FETCH.
+    - ✅ (a) Accept the bounded SUBSCRIBE before lite-07 and rewrite those four
+      tests.
+    - (b) Serve a fully bounded absolute subscription fetch-only before
+      lite-07, keeping today's wire behavior, though a range past the live
+      edge ends short.
+  - **Newest group on moq-transport.** A read of the group at the reported
+    Largest Object reaches "the group the publisher may still be writing"
+    (`wants_feed`), so it subscribes. Draft-18 refuses that, and so does a
+    finished track (`fetch_only`, `compress::ietf_fetch_keeps_the_stored_form`).
+    The relay's newest-group read (`moq_relay::fetch_group(None)`) reads
+    exactly that group.
+    - ✅ Read it as live with a SUBSCRIBE, with no special-case fallback, and
+      accept the draft-18 and finished-track refusals. "Whatever the simplest
+      option is, prob subscribe. I hate the IETF fetch/subscribe logic and we
+      should not agonize over making it correct."
+    - FETCH it.
+    - SUBSCRIBE while the track is live, FETCH once it ended.
+  - **Multi-group history between our moq-transport nodes.** Our
+    moq-transport publishers answer only a one-group FETCH, so a run of
     missing history groups read from one of them is refused and named dropped
-    (`subscribe_ranges`'s draft-22 cases now open with a range reaching the
-    Largest Object), until [hole markers](/quest/m2/ietf-hole-marker.md).
+    (`subscribe_ranges`'s draft-22 cases open with a range reaching the
+    Largest Object).
+    - ✅ Accept the refusal until [hole markers](/quest/m2/ietf-hole-marker.md)
+      let our publishers answer a range.
+    - Answer a multi-group FETCH now.
   - Fetch-only behavior to carry over or drop: a fetch keeps both sessions busy
     (`session_idle`), a session close cancels a pending fetch from either side
     (`subscription_end_integrity`), a pre-lite-05 fetch is served from a feed
@@ -192,6 +213,37 @@ legacy demand questions below.
     on the relay (`fetch_cancel`), an untimed fetched frame arrives untimed
     (`untimed`), and a fetched datagram is `NotFetchable` (`datagram`, now a
     miss by the rule above).
+- **Blockers found removing the API** (2026-11-02, on
+  [moq-dev/moq#7625](https://github.com/moq-dev/moq/pull/7625)). Making
+  `track::Consumer::fetch_group` crate-private, which the wire publishers
+  still serve a FETCH through, and moving the relay, hls, and transcode onto
+  one-range reads surfaced three gaps:
+  - **Sequential one-range reads stall on lite-07.** On one session, a
+    one-range read after an earlier one on the same track can time out,
+    direct or relayed. Reading groups 1 then 2 stalls on 2, and 2, 1, 0 stalls
+    on 0, even after the copy's linger expires. Lite-06 and moq-transport pass.
+    It hangs hls's `a_live_fmp4_import_serves_segments_over_lite07`, which reads
+    a segment's groups one by one. To reproduce: in `range_read.rs`'s fixture
+    on lite-07, read `one_range(1..2)`, drop it, then read `one_range(2..3)`.
+  - **A local track asks no fill without a told edge.** A one-range read on a
+    local track asks its `Requests` handler for a missing group only below a
+    start the publisher declared (`track::Producer::start_at`). Writing a
+    newer group is not enough (`late_lower_group`). `fetch_group` asked at once.
+    So in-process reads of on-demand groups hang: moq-c group requests and
+    moq-ffi fills (`track_dynamic_serves_a_fetch_miss`,
+    `track_request_dynamic_survives_accept`, `fill_goes_unwanted_*`), and
+    transcode's rung, which reads its source and serves its output that way
+    (`a_group_nobody_reads_releases_its_fill`,
+    `retirement_waits_for_an_unclaimed_fetch`). moq-archive already declares
+    its edge, but moq-c and moq-ffi expose no `start_at`.
+  - **A group past the live edge waits.** A one-range read of a group the
+    live track has not reached yet waits for it, where `fetch_group`'s FETCH
+    was refused at once. `moq fetch --group 99` and the relay's
+    `/fetch?group=99` time out (HTTP 504 after 30 s) instead of answering 404.
+  - Keep the subscription open while its group is read. Dropping the
+    `track::Subscriber` after `recv_group` stalls a group still being written
+    on every wire, so each boundary that hands a group out (relay HTTP,
+    moq-ffi, hls, transcode) keeps the subscriber with it.
 - **The fill path goes linear first** (maintainer, 2026-10-25). One-range
   reads put every past read on the fill path, which `track_range_filling`
   measured as superlinear in range count and span. It is flat since
