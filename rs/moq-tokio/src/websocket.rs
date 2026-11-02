@@ -144,7 +144,7 @@ impl Options {
 ///
 /// Cap the socket at this before upgrading it, so a peer cannot make it buffer more.
 pub fn max_message_size() -> usize {
-	qmux::ws::max_message_size(&crate::qmux_config())
+	qmux::ws::max_message_size(&crate::qmux_default())
 }
 
 /// A socket config capped at [`max_message_size`], for the sockets upgraded here.
@@ -177,7 +177,7 @@ where
 		let alpn = options.link.alpn.as_deref().unwrap_or_default();
 		let mut upgraded = qmux::ws::Upgraded::new(socket, alpn)
 			.with_keep_alive(qmux::ws::KeepAlive::default())
-			.with_session_config(crate::qmux_config());
+			.with_session_config(crate::qmux_default());
 		if let Some(stats) = &options.socket_stats {
 			upgraded = upgraded.with_socket_stats(stats.clone());
 		}
@@ -347,6 +347,7 @@ pub(crate) async fn race_handle(
 	tls_host_name: Option<&str>,
 	addr: crate::connect::Addr,
 	alpns: &[&str],
+	session: &qmux::Config,
 ) -> Option<Result<qmux::Session>> {
 	if !config.resolve().enabled {
 		return None;
@@ -360,7 +361,7 @@ pub(crate) async fn race_handle(
 		_ => return None,
 	}
 
-	let res = connect(config, tls, tls_host_name, addr, alpns).await;
+	let res = connect(config, tls, tls_host_name, addr, alpns, session).await;
 	if let Err(err) = &res {
 		tracing::warn!(%err, "WebSocket connection failed");
 	}
@@ -373,6 +374,7 @@ pub(crate) async fn connect(
 	tls_host_name: Option<&str>,
 	addr: crate::connect::Addr,
 	alpns: &[&str],
+	session: &qmux::Config,
 ) -> Result<qmux::Session> {
 	let mut url = addr.url().clone();
 	let resolved = config.resolve();
@@ -437,7 +439,7 @@ pub(crate) async fn connect(
 				async move {
 					let stream = tokio::net::TcpStream::connect(addr).await?;
 					stream.set_nodelay(true)?;
-					connect_tls_override(tls, name, url, stream, alpns).await
+					connect_tls_override(tls, name, url, stream, alpns, session).await
 				}
 			})
 			.await?
@@ -459,7 +461,7 @@ pub(crate) async fn connect(
 				.with_protocols(alpns.iter().map(|&a| (a, qmux_versions_for(a))))
 				.with_connector(connector)
 				.with_keep_alive(qmux::ws::KeepAlive::default()) // 5s ping / 30s deadline; TCP backs off retransmits too far for QUIC's 10s
-				.with_session_config(crate::qmux_config())
+				.with_session_config(session.clone())
 				.connect(url.as_str())
 				.await
 				.map(crate::spawn_qmux)
@@ -480,6 +482,7 @@ async fn connect_tls_override(
 	url: &Url,
 	stream: tokio::net::TcpStream,
 	alpns: &[&str],
+	session: &qmux::Config,
 ) -> Result<qmux::Session> {
 	let original_request = url
 		.as_str()
@@ -522,7 +525,7 @@ async fn connect_tls_override(
 		.and_then(|value| value.to_str().ok());
 	qmux::ws::Upgraded::new(websocket, negotiated.unwrap_or_default())
 		.with_keep_alive(qmux::ws::KeepAlive::default())
-		.with_session_config(crate::qmux_config())
+		.with_session_config(session.clone())
 		.connect()
 		.map(crate::spawn_qmux)
 		.map_err(Error::connect)
@@ -736,7 +739,7 @@ impl Listener {
 				.expect("successful upgrade selected a protocol");
 			let session = qmux::ws::Upgraded::new(websocket, &protocol)
 				.with_keep_alive(qmux::ws::KeepAlive::default())
-				.with_session_config(crate::qmux_config())
+				.with_session_config(crate::qmux_default())
 				.accept()
 				.map(crate::spawn_qmux)
 				.map_err(Error::accept)?;
@@ -968,7 +971,7 @@ mod tests {
 			url.into()
 		};
 		let expected_host = format!("{url_host}:{}", addr.port());
-		let session = connect(&config, &client_tls, tls_name, target, moq_net::ALPNS)
+		let session = connect(&config, &client_tls, tls_name, target, moq_net::ALPNS, &crate::qmux_default())
 			.await
 			.unwrap();
 		drop(session);

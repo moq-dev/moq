@@ -790,7 +790,7 @@ impl Server {
 							let (request, deadline) = accept_request(&setup.server, session, deadline).await?;
 							// Only WebTransport carries a request URL; raw QUIC puts the path in the SETUP.
 							let transport = match url { Some(_) => Transport::WebTransport, None => Transport::Quic };
-							Ok(Request { transport, url, identity, authority, link, handshake: Box::new(request), quic, window, quic_limits: Default::default(), deadline, active })
+							Ok(Request { transport, url, identity, authority, link, handshake: Box::new(request), quic, window, quic_limits: Default::default(), #[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))] qmux: None, deadline, active })
 						}.boxed()).boxed());
 					}
 				}
@@ -824,8 +824,10 @@ impl Server {
 								quic: None,
 								#[cfg(feature = "quic")]
 								window: None,
-								#[cfg(feature = "quic")]
+								#[cfg(feature = "_transport")]
 								quic_limits: Default::default(),
+								#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+								qmux: None,
 								deadline,
 								active,
 							})
@@ -989,6 +991,7 @@ impl Listener {
 			};
 			let (session, protocol) = within(deadline, handshake).await?;
 
+			let qmux = session.clone();
 			let (request, deadline) = accept_request(&server.moq, session, deadline).await?;
 			Ok(Request {
 				transport: Transport::WebRtc,
@@ -1004,8 +1007,10 @@ impl Listener {
 				quic: None,
 				#[cfg(feature = "quic")]
 				window: None,
-				#[cfg(feature = "quic")]
+				#[cfg(feature = "_transport")]
 				quic_limits: Default::default(),
+				#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+				qmux: Some(qmux),
 				deadline,
 				active,
 			})
@@ -1140,6 +1145,7 @@ pub(crate) async fn accept_websocket(
 	options: crate::websocket::Options,
 	deadline: Option<kio::clock::Instant>,
 ) -> crate::Result<Request> {
+	let qmux = session.clone();
 	let (request, deadline) = accept_request(&options.server, session, deadline).await?;
 	let authority = options.url.host_str().filter(|h| !h.is_empty()).map(str::to_owned);
 	Ok(Request {
@@ -1153,8 +1159,10 @@ pub(crate) async fn accept_websocket(
 		quic: None,
 		#[cfg(feature = "quic")]
 		window: None,
-		#[cfg(feature = "quic")]
+		#[cfg(feature = "_transport")]
 		quic_limits: Default::default(),
+		#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+		qmux: Some(qmux),
 		deadline,
 		active: options.active,
 	})
@@ -1674,6 +1682,7 @@ pub(crate) async fn accept_stream(
 		deadline,
 		active,
 	} = incoming;
+	let qmux = session.clone();
 	let (request, deadline) = accept_request(server, session, deadline).await?;
 	Ok(Request {
 		transport,
@@ -1686,8 +1695,10 @@ pub(crate) async fn accept_stream(
 		quic: None,
 		#[cfg(feature = "quic")]
 		window: None,
-		#[cfg(feature = "quic")]
+		#[cfg(feature = "_transport")]
 		quic_limits: Default::default(),
+		#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+		qmux: Some(qmux),
 		deadline,
 		active,
 	})
@@ -1752,9 +1763,13 @@ pub struct Request {
 	/// The receive window [`Request::ok`] opens unless [`Request::with_quic_limits`] names one.
 	#[cfg(feature = "quic")]
 	window: Option<std::num::NonZeroU64>,
-	/// What [`Request::ok`] applies to the QUIC connection before answering SETUP.
-	#[cfg(feature = "quic")]
+	/// What [`Request::ok`] applies to the QUIC connection or qmux session before answering SETUP.
+	#[cfg(feature = "_transport")]
 	quic_limits: moq_quic::Limits,
+	/// The session under a WebSocket, `tcp://`, `tls://`, `unix://`, or WebRTC request, which
+	/// [`Request::ok`] widens to [`Request::with_quic_limits`].
+	#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+	qmux: Option<qmux::Session>,
 	/// What remains of the handshake deadline, which also bounds [`Request::ok`].
 	deadline: Option<Deadline>,
 }
@@ -1807,12 +1822,14 @@ impl Request {
 	}
 
 	/// Set the QUIC limits [`Self::ok`] applies before answering SETUP, replacing any set
-	/// before. Ignored on a transport moq-quic does not drive.
+	/// before. Ignored on iroh, which moq-quic does not drive.
 	///
-	/// Until then the connection holds only [`moq_net::transport::SETUP_RECEIVE_WINDOW`];
+	/// Until then a QUIC connection holds only [`moq_net::transport::SETUP_RECEIVE_WINDOW`];
 	/// `ok` opens `receive_window`, or `[quic] receive_window` when it is unset, after the
-	/// other limits, so a `receive_rate` set here paces the opened window.
-	#[cfg(feature = "quic")]
+	/// other limits, so a `receive_rate` set here paces the opened window. A qmux session
+	/// starts at the `[quic]` defaults and takes the windows and stream count set here; it
+	/// never paces, so `ok` refuses a rate on one.
+	#[cfg(feature = "_transport")]
 	pub fn with_quic_limits(mut self, limits: moq_quic::Limits) -> Result<Self, moq_quic::LimitsError> {
 		limits.validate()?;
 		self.quic_limits = limits;
@@ -1845,6 +1862,13 @@ impl Request {
 			limits.receive_window = limits.receive_window.or(self.window);
 			quic.set_limits(limits)
 				.expect("validated by with_quic_limits and the config");
+		}
+		#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+		if let Some(qmux) = &self.qmux
+			&& let Err(err) = qmux.set_limits(self.quic_limits)
+		{
+			self.handshake.close(moq_net::SessionError::Internal.into());
+			return Err(crate::Error::QmuxLimits(crate::error::message(err)));
 		}
 		let Request {
 			handshake,
@@ -2683,8 +2707,10 @@ mod tests {
 			quic: None,
 			#[cfg(feature = "quic")]
 			window: None,
-			#[cfg(feature = "quic")]
+			#[cfg(feature = "_transport")]
 			quic_limits: Default::default(),
+			#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+			qmux: None,
 			deadline,
 		}
 		.with_stats(

@@ -242,10 +242,10 @@ pub(crate) struct PeerCred {
 ///
 /// The path is taken from the URL path, so use a triple slash for an absolute
 /// path: `unix:///run/moq/internal.sock`.
-pub(crate) async fn connect(url: Url, protocols: &[&str]) -> Result<qmux::Session> {
+pub(crate) async fn connect(url: Url, protocols: &[&str], session: &qmux::Config) -> Result<qmux::Session> {
 	let path = socket_path(&url).ok_or(Error::MissingPath)?;
 	tracing::debug!(peer = %crate::connect::Endpoint(&url), "connecting via Unix socket");
-	let mut config = crate::qmux_config();
+	let mut config = session.clone();
 	config.version = WIRE_VERSION;
 	config.protocol = qmux::Protocol::Negotiate(protocols.iter().map(|p| (*p).to_owned()).collect());
 	qmux::uds::connect(path, config)
@@ -336,7 +336,7 @@ impl Listener {
 	) -> impl Future<Output = Result<(qmux::Session, PeerCred)>> + use<> {
 		let stream = self.accept_socket().await;
 		let allow = allow.cloned();
-		let mut config = crate::qmux_config();
+		let mut config = crate::qmux_default();
 		config.version = WIRE_VERSION;
 		config.protocol = qmux::Protocol::Negotiate(self.protocols.clone());
 		async move {

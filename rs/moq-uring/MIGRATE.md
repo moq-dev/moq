@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Smaller default windows ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`quic::transport::Config::default()` takes a 4 MiB connection window, a 1 MiB stream window, and 4 MiB of unacknowledged outgoing data, down from 128 MiB, 4 MiB, and 16 MiB, matching moq-tokio's `[quic]` defaults. Set `limits` explicitly to keep the old windows.
+
 ### QUIC early data is disabled
 
 The shared moq-quic core no longer sends or accepts early data, including with caller-supplied rustls server configs.
