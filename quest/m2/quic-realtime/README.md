@@ -119,7 +119,6 @@ owns that feedback.
 
 ## Related
 
-- [The shared pacer holds its rate under 2 Mbit/s](/quest/m1/pacer-low-rate.md) - every candidate paces through it, so its fix shifts their low-rate rows
 - [Per-stream and per-datagram deadlines](/quest/m2/quic-deadline.md) - also consumes the forward-delay estimate
 - [BBR media study](/quest/m2/quic-bbr-study.md) - BBR3 behavior under media, the baseline here
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - decides whether SCReAMv2's L4S path is worth porting
