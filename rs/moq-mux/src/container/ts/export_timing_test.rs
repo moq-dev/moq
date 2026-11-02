@@ -376,7 +376,7 @@ impl Live {
 			let now = kio::clock::now();
 			for leg in legs.iter_mut() {
 				if leg.wake().is_some_and(|wake| wake <= now) {
-					leg.poll();
+					assert!(!leg.poll(), "export ended while the broadcast is live");
 					if !leg.every.is_zero() {
 						while leg.next_poll <= now {
 							leg.next_poll += leg.every;
@@ -432,7 +432,7 @@ impl Leg {
 	/// nothing woke finds nothing new.
 	fn poll_now(&mut self) {
 		if self.every.is_zero() && self.woken.0.load(Ordering::Relaxed) {
-			self.poll();
+			assert!(!self.poll(), "export ended while the broadcast is live");
 		}
 	}
 
@@ -473,23 +473,36 @@ async fn end_waits_for_catalog_and_media() {
 		let mut live = Live::new(1.0, 0).await;
 		let mut leg = live.join(Duration::ZERO).await;
 		live.run(2 * GOP, &mut [&mut leg], |_| false);
-		if catalog_first {
+		let expected = if catalog_first {
 			live.catalog.finish().unwrap();
-			assert!(!leg.poll(), "an ended catalog must not discard live media");
-		}
-		live.finish_media();
-		if !catalog_first {
-			loop {
-				assert!(!leg.poll(), "finished media must not end an open catalog");
-				let Some(deadline) = leg.export.next_due() else {
-					break;
-				};
-				live.clock.advance(deadline.max(live.clock.now()));
-			}
-			assert_eq!(
-				leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count(),
-				2 * GOP as usize
+			// Catalog EOF fixes the layout, but the named tracks can still publish media.
+			live.run(3 * GOP, &mut [&mut leg], |_| false);
+			// Close the groups so their tails flush, leaving both tracks open for more.
+			live.group.take().unwrap().finish().unwrap();
+			live.audio.cut(None).unwrap();
+			3 * GOP as usize
+		} else {
+			live.finish_media();
+			2 * GOP as usize
+		};
+		loop {
+			assert!(
+				!leg.poll(),
+				"EOF before both catalog and media finish: catalog_first {catalog_first}"
 			);
+			let Some(deadline) = leg.export.next_due() else {
+				break;
+			};
+			live.clock.advance(deadline.max(live.clock.now()));
+		}
+		assert_eq!(
+			leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count(),
+			expected
+		);
+		if catalog_first {
+			live.finish_media();
+		} else {
+			assert!(!leg.woken.0.load(Ordering::Relaxed), "the exporter is parked");
 			live.catalog.finish().unwrap();
 			assert!(
 				leg.woken.0.load(Ordering::Relaxed),
@@ -500,7 +513,7 @@ async fn end_waits_for_catalog_and_media() {
 		assert_eq!(leg.export.dropped(), 0);
 		assert_eq!(
 			leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count(),
-			2 * GOP as usize
+			expected
 		);
 	}
 }
