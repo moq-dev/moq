@@ -473,6 +473,7 @@ pub struct Bbr3 {
     prev_probe_too_high: bool,
     undo_prev_probe_too_high: bool,
     prev_probe_precautionary: bool,
+    undo_prev_probe_precautionary: bool,
     /// equivalent to BBR.loss_round_delivered: C.delivered during the first loss of the round
     loss_round_delivered: u64,
     /// equivalent to BBR.loss_in_round: flag set to true when loss occurs during the round
@@ -655,6 +656,7 @@ impl Bbr3 {
             prev_probe_too_high: false,
             undo_prev_probe_too_high: false,
             prev_probe_precautionary: false,
+            undo_prev_probe_precautionary: false,
             loss_events_in_round: 0,
             recovery_start_time: None,
             recovery_start_round: 0,
@@ -1036,8 +1038,10 @@ impl Bbr3 {
             {
                 self.advance_max_bw_filter(now);
             }
+            // A precautionary stop waits for this one round of feedback, and no later.
+            let precautionary = std::mem::take(&mut self.prev_probe_precautionary);
             if let BbrState::ProbeBw(_) = self.state
-                && self.prev_probe_precautionary
+                && precautionary
                 && !self.prev_probe_too_high
             {
                 self.start_probe_bw_refill();
@@ -1677,6 +1681,7 @@ impl Bbr3 {
         };
         self.undo_state = None;
         self.undo_prev_probe_too_high = self.prev_probe_too_high;
+        self.undo_prev_probe_precautionary = self.prev_probe_precautionary;
         self.undo_bw_shortterm = self.bw_shortterm;
         self.undo_inflight_shortterm = self.inflight_shortterm;
         self.undo_inflight_longterm = self.inflight_longterm;
@@ -1917,7 +1922,11 @@ impl Controller for Bbr3 {
         self.loss_in_round = false;
         self.reset_full_bw();
         self.prev_probe_too_high = self.undo_prev_probe_too_high;
-        self.prev_probe_precautionary = false;
+        // A precautionary stop still waiting for its feedback round waits again; once that
+        // round has passed, the spurious loss cost the early refill for good.
+        self.prev_probe_precautionary = self.undo_prev_probe_precautionary
+            && self.state == BbrState::ProbeBw(ProbeBwSubstate::Down)
+            && self.ack_phase == AckPhase::ProbeStopping;
         self.bw_shortterm = [self.bw_shortterm, self.undo_bw_shortterm]
             .iter()
             .copied()
@@ -8248,5 +8257,39 @@ mod test {
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Refill));
         sim.round(t_probe + 25 * MS, 5, 10 * MS);
         assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Up));
+    }
+
+    /// A loss in a precautionary stop's feedback round, later declared spurious, still lets the
+    /// clean feedback start the next refill early.
+    #[test]
+    fn spurious_loss_keeps_the_precautionary_refill() {
+        let mut sim = probing_up();
+        sim.lose(15 * MS, 10);
+        let risky_inflight = sim.bbr.inflight_longterm;
+        sim.ack(20 * MS, 11..20, false);
+        let wait_ns = sim.bbr.bw_probe_wait.as_nanos() as u64 + 30 * MS;
+        sim.bbr.probe_rtt_min_stamp = Some(sim.at(wait_ns));
+        sim.round(wait_ns, 5, 10 * MS);
+        sim.round(wait_ns + 10 * MS, 5, 10 * MS);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Up));
+        let t_probe = wait_ns + 20 * MS;
+        let first = sim.pn;
+        sim.send(t_probe, risky_inflight.div_ceil(sim.mss));
+        sim.ack(t_probe + 10 * MS, first..first + 1, false);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Down));
+        assert!(sim.bbr.prev_probe_precautionary);
+
+        sim.lose(t_probe + 11 * MS, first + 1);
+        assert!(
+            !sim.bbr.prev_probe_precautionary,
+            "the loss reads as too high"
+        );
+        sim.bbr.on_spurious_loss();
+        assert!(sim.bbr.prev_probe_precautionary);
+        assert!(!sim.bbr.prev_probe_too_high);
+
+        sim.ack(t_probe + 12 * MS, first + 2..sim.pn, false);
+        sim.round(t_probe + 15 * MS, 5, 10 * MS);
+        assert_eq!(sim.bbr.state, BbrState::ProbeBw(ProbeBwSubstate::Refill));
     }
 }

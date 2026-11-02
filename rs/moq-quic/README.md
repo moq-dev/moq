@@ -34,6 +34,10 @@ Checked through quinn `main` at [`2c575013`](https://github.com/quinn-rs/quinn/c
 
 The fork never merges upstream, and takes the workspace's formatting and names, so upstream patches no longer apply.
 Upstream fixes are ported by hand, together with their regression tests.
+A fix missing from this list is often already held, because the fork reworked the same code (`stop` under `RESET_STREAM_AT`, the stale-accept check under `handshake_timeout`, socket setup in `moq_sock::bind`), so check the fork's code before porting.
+A fix to quinn's `Endpoint::client` or `server` lands in `moq_sock::bind`, which the driver's test helpers bind through.
+Most of `0.11.x` backports `main`, so compare its commits by subject.
+Each sync also checks [quinn#2481](https://github.com/quinn-rs/quinn/pull/2481), the BBR3 PR moq-congestion carries, for fixes to port, and records the PR commit checked in the BBR3 entries below.
 
 quinn-udp, from the same commit, is the `udp` module of [moq-sock](../moq-sock/README.md), with its tests in `tests/udp`.
 Its benchmark is not carried (moq-uring's `udp_tokio` covers it), and the module logs through `tracing` only, so quinn-udp's `log` feature and no-op logger are dropped.
