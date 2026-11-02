@@ -1,5 +1,5 @@
 import { Milli, Nano } from "@moq/clock";
-import { Effect, type Getter, Once, Signal } from "@moq/signals";
+import { Effect, type GetPromise, type Getter, Once, Signal } from "@moq/signals";
 import type * as announce from "../announced.ts";
 import type * as Auth from "../auth.ts";
 import { AuthSession } from "../auth_session.ts";
@@ -232,7 +232,6 @@ export class Connection implements Established {
 		if (!hasSetupStream(version)) this.#peerImplementation.resolve(undefined);
 		registerWire(this, {
 			consume: (path) => this.#subscriber.consume(path),
-			goaway: this.#goaway,
 			exclusive: false,
 			auth: this.#auth,
 		});
@@ -513,6 +512,11 @@ export class Connection implements Established {
 	/** Snapshot the transport's counters; see {@link Established.stats}. */
 	async stats(): Promise<Stats> {
 		return transportStats(this.#quic);
+	}
+
+	/** Settles with the peer's GOAWAY; see {@link Established.draining}. */
+	get draining(): GetPromise<Drain> {
+		return this.#goaway;
 	}
 
 	/** Resolves when the session closes, decoding the peer's close code; see {@link Established.closed}. */
