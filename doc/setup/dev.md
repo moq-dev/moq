@@ -17,7 +17,7 @@ match CI. `just check` and `just fix` refuse to run outside it; set
 | `just ci-select` | Report whether CI and Rust build setup are needed, without running checks. |
 | `just fix` | Format and lint the packages this branch changed, and regenerate their committed JS API reports (`js/*/api/`). |
 | `just check` | Compile, lint, and test the same scope. |
-| `just ci` | Run the merge queue's gate locally, strictly. PRs into `main` get no other CI before the queue, so run it before every push. |
+| `just ci` | Run the merge queue's gate locally, strictly, before every push. Ready PRs into `main` also run Check as a signal; only the queue gates landing. |
 | `just gate` | `just ci` over every package, as nightly and release PRs run it. `just gate rs` runs only the named module. |
 | `just fix --all`, `just check --all` | The same, over every package. |
 | `just api-diff` | Diff every published API against its last release, the JS reports against ones rendered from `origin/release`. PRs into `release` run it; `--deny` fails a backport on any break. |
