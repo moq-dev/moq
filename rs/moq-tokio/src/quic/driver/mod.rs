@@ -66,8 +66,8 @@ pub use moq_quic::{
 	VarInt, VarIntBoundsExceeded, Version, client, crypto, server, stream, transport,
 };
 
-#[cfg(all(test, feature = "quic"))]
-pub(crate) use crate::quic::driver::runtime::wrap_udp_socket;
+#[cfg(feature = "quic")]
+pub(crate) use crate::quic::driver::runtime::{Slot, wrap_udp_socket};
 
 #[cfg(test)]
 mod tests;

@@ -24,7 +24,7 @@ fn timed() -> moq_net::track::Info {
 }
 
 /// Whether this kernel can run the io_uring workers at all.
-fn supported() -> bool {
+pub(crate) fn supported() -> bool {
 	match moq_uring::Worker::new(Default::default()) {
 		Ok(_) => true,
 		Err(moq_uring::Error::Unsupported(reason)) if std::env::var_os("CI_STRICT").is_none() => {
