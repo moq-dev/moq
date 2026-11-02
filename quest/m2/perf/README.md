@@ -89,7 +89,6 @@ revisions on the same host and worker count, and profiles with
 - [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md) - a measured verdict on the tokio driver's connection-wide mutex and per-packet endpoint-to-connection hop, with levers built only on evidence
 - [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
-- [Streaming frame read owners](/quest/m2/perf/frame-read-owners.md) - readers of a frame still arriving share one byte owner per publication instead of allocating one each per read
 - [kio waiter costs](/quest/m2/perf/kio-waiter-costs.md) - long-lived waiters stop being rebuilt every poll, IETF fetch keeps one close watch per stream, and a short `kio::log` costs less
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux
 - [io_uring buffer pool memory](/quest/m2/perf/uring-pool-memory.md) - measure reserved versus resident pool memory before any shrink policy
