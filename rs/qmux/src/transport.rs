@@ -14,6 +14,20 @@ use crate::{Config, Error};
 /// The driver polls receiving and sending from one task, so a write blocked on the
 /// transport never stalls reads, and the session sheds unreliable datagrams rather than
 /// buffering them behind a stalled transport.
+///
+/// # Wakeups
+///
+/// The driver polls a method again only after the `waiter` it passed was woken, so each
+/// `poll_*` method must arrange that wakeup before it returns [`Poll::Pending`], as a future
+/// does with its [`Context`](std::task::Context): poll the I/O underneath through
+/// [`waiter.context()`](kio::Waiter::context), or register `waiter` on whatever will wake it.
+/// A `Pending` without that wakeup stalls the session.
+///
+/// [`poll_recv`](Self::poll_recv) gets a waiter of its own, and the driver polls it only
+/// after that waiter is woken. [`poll_flush`](Self::poll_flush) runs only after a step
+/// that received or queued a record, or whose last flush did not finish. So a transport that
+/// writes on its own, such as a keep-alive Ping or a Pong reply, queues it from `poll_recv`
+/// (waking that waiter from its timer), and the flush that follows sends it.
 pub trait Transport {
 	/// Bind the session's framing, before the first poll.
 	fn bind(&mut self, _config: &Config) {}
@@ -31,8 +45,9 @@ pub trait Transport {
 
 	/// Write out everything queued.
 	///
-	/// The driver polls this after every batch, and while idle, so a transport can piggyback
-	/// its own control messages, such as a WebSocket Pong.
+	/// The driver polls this after a step that received or queued a record, or whose last
+	/// flush did not finish, so it also sends control messages the transport queued while
+	/// receiving, such as a WebSocket Pong.
 	fn poll_flush(&mut self, waiter: &kio::Waiter) -> Poll<Result<(), Error>>;
 
 	/// Flush and gracefully close the transport. A byte stream also drains the peer until it
