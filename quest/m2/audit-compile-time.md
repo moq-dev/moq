@@ -41,9 +41,14 @@ What to check first:
   splitting a crate. The off-cycle run rejected its reader-consolidation
   candidate; it found no unused whole crate or feature that could be removed
   without changing a public feature.
-- Keep feature-unification and cross-job cache work with
-  [moq-dev/moq#6985](https://github.com/moq-dev/moq/pull/6985), and test work
-  with [moq-dev/moq#6987](https://github.com/moq-dev/moq/pull/6987) and the
+- The cargo-hakari workspace-hack
+  ([moq-dev/moq#6985](https://github.com/moq-dev/moq/pull/6985)) landed after
+  the off-cycle run's base, so the baselines below predate it. As a
+  dev-dependency it unifies features only in builds that include
+  dev-dependencies (tests, lint, benches), such as the mux test-profile IR
+  count. Treat a shift in those rows across it as the hack's, not the code's.
+  Keep feature-unification and cross-job cache work with the
+  [hakari quest](/quest/m0/ci/hakari.md), and test work with the
   [test cost audit](/quest/m2/audit-test-cost.md). Dependency and manifest
   removal belongs to the [dependency audit](/quest/m2/audit-deps.md).
 - Transport-session duplication is fixed by
