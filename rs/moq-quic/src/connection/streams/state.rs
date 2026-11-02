@@ -4097,10 +4097,19 @@ mod tests {
 		assert_eq!(client.credit_stats().leased, 2 * WINDOW, "taken credit stays held");
 		assert!(matches!(wait(&mut client, ids[0], 1), Err(recv::Error::Blocked)));
 		assert_eq!(client.credit_stats().evicted, 1, "waits for the stop");
+		// A reader watching for a reset instead of reading learns of it too.
+		assert_eq!(
+			recv(&mut client, &mut pending, ids[1]).received_reset(),
+			Err(recv::Error::Evicted)
+		);
 		assert_eq!(wait(&mut client, ids[1], 1), Err(recv::Error::Evicted));
 
 		// The stop pays the debt alone, so eviction resumes with the other stream.
 		let _ = stop(&mut client, ids[1], 0);
+		assert_eq!(
+			recv(&mut client, &mut pending, ids[1]).received_reset(),
+			Err(recv::Error::Closed)
+		);
 		assert_eq!(client.local_max_data, max_data);
 		assert_eq!(client.credit_stats().evicted, 2);
 		assert_eq!(readable(&mut client), [ids[0]]);

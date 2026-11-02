@@ -10,9 +10,9 @@ package versions, and the release-triggered publication jobs complete.
 Follow CONTRIBUTING.md's release procedure: merge release into main first,
 then main into release using merge commits. Confirm the maintainer's cut
 instruction before executing it. Right after merging release into main, set
-every eligible package to the next shared minor with the recipe from
-[one minor version](/quest/m1/shared-version.md) (`0.22.0` for this cut, then
-one minor up per cut), including packages that did not change. Rust
+every eligible package with `just version 0.22.0` for this cut, then one
+minor up per cut, following [Versions](/CONTRIBUTING.md#versions), including
+packages that did not change. Rust
 publication remains owned by release-plz. This supersedes keeping `moq-rs` at
 its unpublished 0.6.0 (decided 2026-11-01). Run candidate
 compatibility, draft, package, and all-language interop checks, and verify

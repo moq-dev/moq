@@ -223,7 +223,8 @@ impl Stream {
 	/// Yields `Some` with the reset error code when the stream is reset by the peer. Yields `None`
 	/// when the stream was [`finish()`](crate::quic::driver::send::Stream::finish)ed by the peer
 	/// and all data has been received, after which it is no longer meaningful for the stream to
-	/// be reset.
+	/// be reset. Fails with [`Error::Evicted`] once the stream was evicted to free a stuck receive
+	/// window, until it is stopped.
 	///
 	/// This operation is cancel-safe.
 	pub async fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
@@ -240,6 +241,8 @@ impl Stream {
 		}
 
 		match conn.inner.recv_stream(self.id).received_reset() {
+			// Evicted, so its bytes are gone: nothing frees the window until it is stopped.
+			Err(moq_quic::recv::Error::Evicted) => Poll::Ready(Err(Error::Evicted)),
 			Err(_) => Poll::Ready(Ok(None)),
 			Ok(Some(error_code)) => {
 				// Stream state has just now been freed, so the connection may need to issue new

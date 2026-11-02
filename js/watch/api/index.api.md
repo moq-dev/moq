@@ -85,7 +85,15 @@ export namespace Audio {
 		track: Signals.Signal<string | undefined>;
 	};
 	export interface Stats {
+		arrival?: {
+			timestamp: Clock.Milli;
+			wall: Clock.Wall;
+		};
 		bytesReceived: number;
+		errors: number;
+		late: number;
+		stalled: Clock.Milli;
+		stalls: number;
 		underruns: number;
 	}
 	export type Supported = (config: Hang.Catalog.Audio.AudioConfig) => Promise<boolean>;
@@ -311,8 +319,16 @@ export namespace Video {
 		track: Signals.Signal<string | undefined>;
 	};
 	export interface Stats {
+		arrival?: {
+			timestamp: Clock.Milli;
+			wall: Clock.Wall;
+		};
 		bytesReceived: number;
+		errors: number;
 		frameCount: number;
+		late: number;
+		stalled: Clock.Milli;
+		stalls: number;
 	}
 	export type Supported = (config: Hang.Catalog.Video.VideoConfig) => Promise<boolean>;
 	export type Target = {

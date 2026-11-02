@@ -113,7 +113,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [A parked read of a resumed group reads its budget without re-syncing](/quest/m2/recover-budget.md) - measure, then drop the per-frame reader sync
 - [Transcode rungs scale off the runtime and keep bounded state](/quest/m2/transcode-rungs.md) - resize on encoder threads, memoize rungs by shape, one writer per rung track
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
-- [qmux receive leases](/quest/m2/qmux-receive-lease.md) - WebSocket, TCP, and WebRTC sessions bound incomplete messages by their receive window, at a per-session cost the maintainer picks
 - [WebSocket caps](/quest/m2/rate-websocket.md) - paced reads and writes over bounded socket buffers hold WebSocket to the same caps
 - [Publishers learn their cap](/quest/m2/rate-grant.md) - the AUTH grant carries the caps and publishers clamp their encoder to them
 - [moq-rtc pacing](/quest/m2/rtc-pacing.md) - a capped WHEP viewer never receives more than its cap plus burst, NACK resends included
@@ -155,7 +154,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [#2848](/quest/m2/2848-follow-the-bandwidth-grant-in-moq-audio-instead-of.md) - the Opus producer follows its bandwidth grant through the settled `moq_mux::rate::Control`
 - [NVENC buffer pool](/quest/m2/nvenc-pool.md) - NVENC reuses input and output buffers instead of allocating per frame, if a benchmark shows it wins
 - [Direct3D11 render import](/quest/m2/render-d3d11.md) - Windows presents without downloading every frame to system memory
-- [Media Foundation encodes on the texture's adapter](/quest/m2/mf-encode-adapter.md) - Windows machines with two GPUs keep the studio's program on the GPU route into a hardware encoder
+- [Media Foundation encodes on the texture's adapter](/quest/m2/mf-encode-adapter.md) - Windows machines with two GPUs keep an exported texture on the GPU route into a hardware encoder
 - [Intra-refresh GOPs](/quest/m2/intra-refresh/README.md) - video with periodic intra refresh imports and plays back cleanly with one group per sweep and a catalog `warmup`
 - [#2819](/quest/m2/2819-moq-video-carry-pipewire-dma-bufs-safely-into-the-vulkan.md) - moq-video: validate PipeWire DMA-BUFs into the Vulkan renderer on hardware
 - [#3115](/quest/m2/3115-moqsink-the-publication-has-no-generation-so-a-flush.md) - moqsink: a flushing restart after EOS opens a new publication generation
@@ -242,3 +241,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [The browser bench keeps its page consoles](/quest/m2/browser-bench-consoles.md) - publisher and consumer page logs in the run directory
 - [moq-quic's long header type is one variant](/quest/m2/quic-long-type.md) - collapse LongType after the 0-RTT removal
 - [One predicate for the lite close wait](/quest/m2/subscriber-fin-fold.md) - fold waits_for_subscriber_fin into has_track_stream
+- [Browsers expose WebTransport receive credit](/quest/m2/browser-receive-credit.md) - condition: the page can tell how much credit an unread stream holds
+- [JS fastest-reader pacing](/quest/m2/js-fastest-reader.md) - `@moq/net` paces upstream groups by the fastest reader, once browsers allow it
+- [fMP4 import at 1-byte chunks is no slower than before](/quest/m2/fmp4-byte-chunk-perf.md) - bisect and fix or accept the ~19% slowdown at 1-byte chunks
+- [The relay bench reports io_uring pool size and RSS](/quest/m2/bench-uring-pool.md) - pool growth regressions show up in normal bench runs
+- [MKV imports ffmpeg's multichannel FLAC](/quest/m2/mkv-flac-channel-mask.md) - a channel-mask-only Vorbis comment is accepted, so default ffmpeg multichannel FLAC needs no remux

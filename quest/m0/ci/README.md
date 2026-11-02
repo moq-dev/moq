@@ -161,6 +161,8 @@ The historical samples locate candidates; they are not controlled benchmarks.
 - [Verify the Nix cache](/quest/m0/ci/nix-cache-verify.md) - confirm releases use `nix.moq.dev`, check its bucket sizes, and retire Cachix
 - [Unify dependency features](/quest/m0/ci/hakari.md) - align the FFI builds' features and record the hosted platform jobs' hits once the workspace-hack lands
 - [Release credentials off main](/quest/m0/ci/publish-release-only.md) - `publish` admits only `release` and release tags once its `workflow_run` publishers run on their tag
+- [Binary release publishers run on their tag](/quest/m0/ci/release-tag-publishers.md) - brew, Go and Swift releases stop running through `workflow_run` on main
 - [The queue host keeps the queue's disk](/quest/m0/ci/queue-host-disk.md) - agent sessions can't starve the queue runner of disk, and a crashed runner restarts
 - [Biome checks every file it can parse](/quest/m0/ci/biome-whole-repo.md) - Biome runs over the whole repository and main is clean under it
 - [One nextest pin](/quest/m0/ci/nextest-pin.md) - cargo-nextest's version lives in one place
+- [The flake lane skips hosts that can't map user namespaces](/quest/m0/ci/userns-uid-map.md) - `check flake` skips instead of failing where `/proc/self/uid_map` is unwritable

@@ -5,6 +5,14 @@ Rolling a cluster across a release also follows the [upgrade guide](https://moq.
 
 ## Unreleased
 
+### Smaller default receive windows ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`[quic]` defaults to a 4 MiB `receive_window`, a 1 MiB `stream_receive_window`, and a 4 MiB `send_window`, down from 128 MiB, 4 MiB, and 16 MiB, and the smallest `receive_window` accepted here or in `[limits.peer.quic]` is 1 MiB instead of about 64 MiB.
+`[limits.peer.quic]` defaults to a 16 MiB `receive_window` and `send_window`, down from 640 MiB. Set the old values to keep them: a link that must carry more than about 450 Mbps at a 250 ms RTT needs a larger window.
+WebSocket, `tcp://`, `tls://`, and `unix://` sessions take the `[quic]` windows and stream count instead of qmux's own 1 MiB and 256 KiB, cancel the least urgent stream when incomplete messages fill the window as QUIC does, and peers over them widen to `[limits.peer.quic]`.
+An embedder that builds `web::Web` itself passes the relay's `[quic]` with `Web::with_quic`; without it, WebSocket sessions start at the `[quic]` defaults until admitted.
+A lite-01/02 peer whose initial announcement set exceeds 1 MiB is refused; it needs lite-03 or later.
+
 ### `Cluster::new` returns a driver to poll ([#7626](https://github.com/moq-dev/moq/pull/7626))
 
 `Cluster::new` no longer spawns the origin's lifecycle work or the cache governor; it returns `(Cluster, Driver)`, and nothing runs until the driver is polled.
