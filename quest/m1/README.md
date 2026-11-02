@@ -148,6 +148,11 @@ per-frame CPU growth since #5926.
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
 - [Subscriptions take a Delay { min, max }](/quest/m1/subscription-delay.md) - one Delay type across every subscription API, and omitted max means 0 in every binding
+- [A step back smaller than the delay keeps the TS export](/quest/m1/ts-small-step-back.md) - audio restarts instead of regressing; video stays within its declared depth
+- [A replaced copy's grace wakes its reader](/quest/m1/grace-deadline.md) - the grace arms a deadline, so a clean end is on time
+- [moq-boy's status loop stops on an errored track](/quest/m1/moq-boy-status-loop.md) - only schema errors are caught
+- [JS tests and docs say what keeps a group cached](/quest/m1/js-cache-window.md) - none assume maxAge is retention
+- [release carries the fanout-threads bench](/quest/m1/release-fanout-bench.md) - a bench-only port of session_fanout_threads for the pre-cut pairing
 - [Finalize moq-lite-07](/quest/m1/lite07-finalize.md) - when the maintainer cuts it, lite-07 negotiates as `moq-lite-07` and the next release ships it
 - [Moxygen pin bump](/quest/m1/moxygen-pin-bump.md) - waiting on moxygen#264, then the TRACK_STATUS patch is dropped
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
