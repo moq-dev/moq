@@ -1,0 +1,5 @@
+error: #[kio::wrapper] needs a borrowed receiver, `&self` or `&mut self`
+ --> tests/ui/wrapper_owned_receiver.rs:8:14
+  |
+8 |     fn poll_pop(self, waiter: &kio::Waiter) -> Poll<Result<u8, kio::Closed>> {
+  |                 ^^^^

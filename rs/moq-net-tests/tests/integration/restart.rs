@@ -342,13 +342,12 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	assert!(same.is_clone(&stale), "{version}: a re-price replaced the broadcast");
 	assert_eq!(claim.answered(), 1, "{version}: a re-price asked the handler again");
 
-	// Another epoch, or none, is another instance downstream. lite-07 restarts it in place,
-	// and so does moq-transport (MoQ Epoch) between two epochs: the new instance is
-	// advertised before the old is withdrawn, so the path is never absent.
-	let lite = |name: &str| version == name.parse().unwrap();
-	let in_place = lite("moq-lite-07-wip") || !lite("moq-lite-06") && from.is_some() && to.is_some();
+	// Another epoch, or none, is another instance downstream. Only lite-07 restarts it in
+	// place: the new instance is advertised before the old is withdrawn, so the path is
+	// never absent.
+	let lite07 = version == "moq-lite-07-wip".parse().unwrap();
 	claim.update_epoch(to.clone());
-	expect_replaced(version, &mut announced, "live", in_place).await;
+	expect_replaced(version, &mut announced, "live", lite07).await;
 
 	// The subscription already open stays on the old answer.
 	claim.write(0, "old:2");
@@ -358,11 +357,9 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	let (fresh, mut subscription) = subscribe(&viewer, "live/cam").await;
 	assert!(!fresh.is_clone(&stale), "{version}: joined the old instance's copy");
 	assert_eq!(claim.answered(), 2, "{version}: the old answer was served again");
-	// Every wire here but lite-06 carries the epoch: lite-07, and moq-transport with the
-	// MoQ Epoch extension.
-	if version != "moq-lite-06".parse().unwrap() {
-		assert_eq!(fresh.info().epoch, to, "{version}: resolved under the old epoch");
-	}
+	// Only lite-07 carries the epoch; the other wires resolve an epochless instance.
+	let epoch = if lite07 { to } else { None };
+	assert_eq!(fresh.info().epoch, epoch, "{version}: resolved under the old epoch");
 	claim.write(1, "new:0");
 	assert_eq!(read(&mut subscription).await, "new:0", "{version}");
 
@@ -793,7 +790,8 @@ async fn priority_update(version: &str, relayed: bool, switch: bool) {
 			.unwrap()
 	});
 	if switch {
-		let in_place = version != "moq-lite-06".parse().unwrap();
+		// Only lite-07 carries the epoch, so only it restarts in place.
+		let in_place = version == "moq-lite-07-wip".parse().unwrap();
 		expect_replaced(version, &mut announced, "live", in_place).await;
 	}
 

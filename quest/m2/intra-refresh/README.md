@@ -49,7 +49,6 @@ make these presentation guarantees true even when sweep lengths change.
 
 ## Required
 
-- [Join earlier group](/quest/m2/intra-refresh/join-earlier-group.md) - max-delay decoders, native and browser, start a group before the live edge even when the live edge arrives first
 - [Dual decoder](/quest/m2/intra-refresh/dual-decoder.md) - js/watch runs a min-delay and a max-delay decoder and shows the max-delay picture whenever it has caught up
 - [Plan: recovery boundaries](/quest/m2/intra-refresh/plan-boundary.md) - settle publication ordering for a later, longer sweep
 - [Consumer warmup](/quest/m2/intra-refresh/consumer-warmup.md) - the transcoder decodes the groups covering `warmup` as history before each group, except at a true IDR

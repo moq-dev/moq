@@ -107,6 +107,7 @@ fn oversized_retry_token() {
 				local_ip: None,
 				ecn: None,
 				data: BytesMut::from(&retry[..]),
+				arrival: None,
 			},
 			&mut buf,
 		) else {

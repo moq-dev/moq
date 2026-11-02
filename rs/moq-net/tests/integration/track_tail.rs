@@ -46,7 +46,12 @@ enum Late {
 	Delivered,
 	/// They never arrive, like a stream reset before its header.
 	Lost,
+	/// The publisher's session dies before they arrive.
+	Killed,
 }
+
+/// The error the publisher's session dies with.
+const DEATH: moq_net::SessionError = moq_net::SessionError::App(7);
 
 fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	let (producer, driver) = moq_net::origin::Producer::new(moq_net::origin::Config::new(Hop::new(hop).unwrap()));
@@ -172,6 +177,7 @@ async fn round(version: &str, late: Late, final_sequence: u64, max_delay: Option
 	match late {
 		Late::Delivered => pair.server_transport.release_unis(),
 		Late::Lost => pair.server_transport.drop_unis(),
+		Late::Killed => pair.server.abort(moq_net::Error::Session(DEATH)),
 	}
 
 	let (frames, err, ended) = kio::clock::timeout(TIMEOUT, reader)
@@ -238,6 +244,26 @@ async fn a_lost_group_ends_the_track_after_the_grace() {
 	}
 }
 
+/// A session that dies with the tail still owed cuts the track off, even though the publisher
+/// ended it: a clean end would pass the missing group off as never sent. Lite-03 declares no
+/// end, so nothing there says a group is owed.
+#[kio::test]
+async fn a_session_death_before_the_tail_aborts_the_track() {
+	for version in ["moq-lite-05", "moq-lite-07-wip"] {
+		let outcome = round(version, Late::Killed, 1, None).await;
+		assert!(
+			outcome.frames.is_empty(),
+			"{version}: got {} frame(s)",
+			outcome.frames.len()
+		);
+		assert!(
+			matches!(&outcome.err, Some(moq_net::Error::Session(code)) if *code == DEATH),
+			"{version}: ended with {:?}",
+			outcome.err
+		);
+	}
+}
+
 /// Skipped sequences have no stream, so lite-05+ publishers name them with SUBSCRIBE_DROP.
 #[kio::test]
 async fn skipped_groups_end_without_the_grace() {
@@ -260,6 +286,63 @@ async fn lite07_empty_track_ends_without_the_grace() {
 	assert!(outcome.err.is_none());
 	assert!(outcome.frames.is_empty());
 	assert!(outcome.elapsed < GRACE / 10, "ended after {:?}", outcome.elapsed);
+}
+
+/// Before draft 22, a group written before SUBSCRIBE_OK sits below its Largest Object, so
+/// its head arrives on the joining FETCH sent once SUBSCRIBE_OK lands. A track that ends as
+/// the subscription starts has ended it by the time that FETCH reaches the publisher, an RTT
+/// later, and still ends cleanly with the head.
+#[kio::test]
+async fn draft18_a_join_reaching_a_finished_track_keeps_its_head() {
+	const RTT: Duration = Duration::from_millis(100);
+
+	let Pair {
+		pair,
+		track,
+		remote,
+		_keep,
+	} = connect("moq-transport-18").await;
+	pair.client_transport.set_latency(RTT / 2);
+	let mut group = track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
+	group.finish().unwrap();
+
+	let reader = kio::clock::sim::spawn(async move {
+		let mut sub = remote
+			.track("video")
+			.unwrap()
+			.subscribe(moq_net::track::Subscription::default().with_range(0..))
+			.await
+			.expect("subscribe");
+		let mut frames = Vec::new();
+		let err = loop {
+			let mut group = match sub.recv_group().await {
+				Ok(Some(group)) => group,
+				Ok(None) => break None,
+				Err(err) => break Some(err),
+			};
+			while let Some(frame) = group.read_frame().await.expect("group failed") {
+				frames.push(frame.payload.to_vec());
+			}
+		};
+		(frames, err)
+	});
+
+	kio::clock::timeout(TIMEOUT, support::harness::subscribed(&track))
+		.await
+		.expect("no subscriber appeared");
+	// Kept alive, as a publisher draining its session does: a finished track whose producer
+	// is gone lets its cache reclaim the head, and that FETCH is refused.
+	track.finish().unwrap();
+	let _track = track;
+
+	let (frames, err) = kio::clock::timeout(TIMEOUT, reader)
+		.await
+		.expect("the subscription never ended")
+		.expect("reader panicked");
+	assert!(err.is_none(), "{err:?}");
+	assert_eq!(frames, [PAYLOAD], "the head was lost");
+	drop((pair, _keep));
 }
 
 /// IETF drafts with a joining FETCH (18) and with subscription fills (22).

@@ -1138,7 +1138,7 @@ mod hop_tests {
 			// The upstream group is still open.
 			let frame = next(&mut received).await.unwrap();
 			assert_eq!(&frame.payload.contiguous(0)[..], b"a");
-			assert_eq!(frame.timestamp, negotiated.then(|| ts(0)));
+			assert_eq!(frame.timestamp, Some(ts(0)));
 			match negotiated {
 				true => {
 					assert_eq!(fields(&frame), Some((first.id, first.properties.clone())), "{offer:?}");
@@ -1177,12 +1177,7 @@ mod hop_tests {
 			let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
 			assert_eq!(
 				(info.max_age, info.timescale, info.priority, info.refresh),
-				(
-					Some(Duration::from_secs(7)),
-					negotiated.then_some(Timescale::MILLI),
-					9,
-					Some(0)
-				),
+				(Some(Duration::from_secs(7)), Some(Timescale::MILLI), 9, Some(0)),
 				"{offer:?}"
 			);
 			match negotiated {
@@ -1438,9 +1433,9 @@ mod hop_tests {
 		}
 	}
 
-	/// Provenance keeps IETF times unchecked after a hop, while a peer declining the
-	/// extension gets no timeline. SUBSCRIBE, FETCH, and datagrams must agree with TRACK_INFO,
-	/// while a listing stays untimed.
+	/// Every hop carries IETF times, and provenance keeps them unchecked after a hop that
+	/// negotiated the extension. A peer declining it checks them like native moq-lite, as a
+	/// listing's copy does. SUBSCRIBE, FETCH, and datagrams must agree with TRACK_INFO.
 	#[kio::test]
 	async fn ietf_timestamps_keep_their_provenance_across_a_hop() {
 		for offer in [[true, true], [true, false], [false, true]] {
@@ -1457,8 +1452,7 @@ mod hop_tests {
 			head.finish().unwrap();
 			let (downstream, sessions) = test_hop(&upstream, "room", offer).await;
 			let broadcast = downstream.consume().request("room", None).await.unwrap();
-			// A listing cannot carry the provenance, so it lists the track untimed even when
-			// negotiated: a relay re-listing it would otherwise advertise it as native lite.
+			// A listing carries no provenance, so it lists the track as native lite.
 			let mut tracks = broadcast.tracks().unwrap();
 			let listed = loop {
 				match kio::clock::timeout(TIMEOUT, tracks.next()).await.unwrap().unwrap() {
@@ -1467,10 +1461,14 @@ mod hop_tests {
 					None => panic!("listing ended before the track"),
 				}
 			};
-			assert_eq!((listed.timescale, listed.ietf()), (None, None), "{offer:?}");
+			assert_eq!(
+				(listed.timescale, listed.ietf()),
+				(Some(Timescale::MILLI), None),
+				"{offer:?}"
+			);
 			let copy = broadcast.track("video").unwrap();
 			let info = kio::clock::timeout(TIMEOUT, copy.info()).await.unwrap().unwrap();
-			assert_eq!(info.timescale, negotiated.then_some(Timescale::MILLI), "{offer:?}");
+			assert_eq!(info.timescale, Some(Timescale::MILLI), "{offer:?}");
 			assert_eq!(
 				info.ietf(),
 				negotiated.then_some(crate::ietf::Version::Draft22),
@@ -1482,7 +1480,7 @@ mod hop_tests {
 				.await
 				.unwrap()
 				.unwrap();
-			assert_eq!(next(&mut fetched).await.unwrap().timestamp, negotiated.then(|| ts(100)));
+			assert_eq!(next(&mut fetched).await.unwrap().timestamp, Some(ts(100)));
 			assert!(next(&mut fetched).await.is_none());
 			let mut subscriber =
 				kio::clock::timeout(TIMEOUT, copy.subscribe(track::Subscription::default().with_start(1)))
@@ -1490,23 +1488,26 @@ mod hop_tests {
 					.unwrap()
 					.unwrap();
 			// A peer may have stamped arrival times. The second group's rewind must not
-			// acquire native moq-lite checks merely because it crossed a relay hop.
+			// acquire native moq-lite checks merely because it crossed a negotiated hop;
+			// without the extension, the copy is checked, so it advances instead.
+			let start = if negotiated { ts(50) } else { ts(150) };
 			let mut group = track.create_group(1u64.into()).unwrap();
-			group.write_frame(ts(50), b"frame".to_vec()).unwrap();
+			group.write_frame(start, b"frame".to_vec()).unwrap();
 			group.finish().unwrap();
 			let mut received = recv(&mut subscriber).await;
 			assert_eq!(received.sequence, 1);
 			let frame = next(&mut received).await.unwrap();
-			assert_eq!(frame.timestamp, negotiated.then(|| ts(50)), "{offer:?}");
+			assert_eq!(frame.timestamp, Some(start), "{offer:?}");
 			assert_eq!(&frame.payload.contiguous(0)[..], b"frame");
 			assert!(next(&mut received).await.is_none());
-			track.insert_datagram(2, ts(25), b"datagram".to_vec()).unwrap();
+			let time = if negotiated { ts(25) } else { ts(200) };
+			track.insert_datagram(2, time, b"datagram".to_vec()).unwrap();
 			let datagram = kio::clock::timeout(TIMEOUT, kio::wait(|waiter| subscriber.poll_recv_wire_datagram(waiter)))
 				.await
 				.unwrap()
 				.unwrap()
 				.unwrap();
-			assert_eq!(datagram.timestamp, negotiated.then(|| ts(25)), "{offer:?}");
+			assert_eq!(datagram.timestamp, Some(time), "{offer:?}");
 			assert_eq!(&datagram.payload[..], b"datagram");
 			drop(sessions);
 		}

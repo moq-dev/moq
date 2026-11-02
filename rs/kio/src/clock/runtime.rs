@@ -73,6 +73,18 @@ fn real_now() -> Instant {
 	Instant::from_origin(LEAD + std::time::Instant::now().saturating_duration_since(origin.into_std()))
 }
 
+/// The host clock every unpaused runtime and plain thread shares, whichever runtime reads it.
+#[cfg(feature = "runtime")]
+pub(crate) fn host_now() -> Instant {
+	real_now()
+}
+
+/// Without the runtime there are no paused runtimes, so the clock is the host's.
+#[cfg(not(feature = "runtime"))]
+pub(crate) fn host_now() -> Instant {
+	now()
+}
+
 /// The std instant the runtime clock counts from, as [`read`] picks it.
 #[cfg(feature = "runtime")]
 fn std_base() -> std::time::Instant {
@@ -273,6 +285,11 @@ mod tests {
 	/// on one another runtime advanced.
 	#[test]
 	fn paused_runtimes_own_their_anchors() {
+		// A fresh process keeps other tests from taking the shared origin first.
+		if !test_env::Env::default().set("MOQ_CLOCK_TEST_ORIGIN", "fresh").isolate() {
+			return;
+		}
+		assert!(super::ORIGIN.get().is_none());
 		let paused = || {
 			tokio::runtime::Builder::new_current_thread()
 				.enable_time()
@@ -280,17 +297,17 @@ mod tests {
 				.build()
 				.unwrap()
 		};
-		// Built before anything reads the clock, so in a fresh process each counts
-		// from its own origin.
+		// Built before the shared origin, so each counts from its own origin.
 		let first = paused();
 		let second = paused();
 		let _ = crate::clock::now();
 		first.block_on(async {
-			let _ = crate::clock::now();
+			assert_eq!(crate::clock::now(), crate::clock::Instant::from_origin(super::LEAD));
 			tokio::time::advance(Duration::from_secs(60)).await;
 			let _ = crate::clock::origin();
 		});
 		second.block_on(async {
+			assert_eq!(crate::clock::now(), crate::clock::Instant::from_origin(super::LEAD));
 			let (instant, _) = crate::clock::origin();
 			assert_eq!(instant, crate::clock::now());
 		});

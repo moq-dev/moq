@@ -15,6 +15,10 @@ check *args:
     python3 {{ quote(justfile_directory() / "sh/cpp/ffi.test.py") }}
     {{ quote(justfile_directory() / "sh/cpp/check.sh") }} "$@"
 
+# Format the handwritten C++ with clang-format (cpp/obs/.clang-format).
+fix:
+    bash ../sh/clang-format.sh cpp/moq
+
 # Run the in-process binding benchmark with the release library.
 bench:
     bash ../sh/cpp/bench.sh

@@ -54,11 +54,14 @@ env:
 jobs:
   publish:
     name: Submit winget manifest
-    # workflow_run: only after a successful release of a tag the `release tags`
-    # ruleset protects. workflow_dispatch: always (it's an explicit dry run).
+    # workflow_run: only after a successful tag push in this repository, of a
+    # tag the `release tags` ruleset protects; a fork PR can rename a workflow
+    # and its branch to match. workflow_dispatch: always (an explicit dry run).
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_repository.full_name == github.repository &&
        (startsWith(github.event.workflow_run.head_branch, 'moq-relay-v') ||
         startsWith(github.event.workflow_run.head_branch, 'moq-cli-v')))
     runs-on: windows-latest

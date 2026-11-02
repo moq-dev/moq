@@ -19,7 +19,8 @@ predecessor fields in moq-ffi and the C ABI, and the takeover text in the
 lite draft and the concept docs. No wire message or public event replaces it.
 
 Non-goals: moq-transport, which keeps the cold-start reset
-([moq-transport carries no epoch](/quest/m1/ietf-epoch-cut.md), and an
+(moq-transport carries no epoch (decided 2026-10-28, removed in
+[moq-dev/moq#7239](https://github.com/moq-dev/moq/pull/7239)), and an
 edge mints a new identity for each announcement,
 [Identity and epoch](/quest/m1/api-audit/route/identity.md)).
 

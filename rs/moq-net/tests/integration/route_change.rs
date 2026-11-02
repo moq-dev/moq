@@ -8,8 +8,7 @@
 //! every frame exactly once, in order, whether the route changes between groups or
 //! in the middle of one, and however it changes.
 //!
-//! moq-transport carries the epoch with the MoQ Epoch extension, so it behaves the
-//! same. Older lite versions cannot carry the epoch, so `R` cannot tell the
+//! moq-transport and older lite versions carry no epoch, so `R` cannot tell the
 //! two routes serve the same bytes: its subscription stays on its route and ends with
 //! it, while a better route restarts the path for new requests.
 //!
@@ -304,7 +303,6 @@ async fn route_flaps(version: &str) {
 	let triggers = [Trigger::BetterRoute, Trigger::BetterRouteDies, Trigger::Disconnect];
 	let mut expected = Vec::new();
 	let mut seen = Vec::new();
-	// Keep every recovery within the largest group's head, which our IETF publishers serve.
 	let mut group = topology.track.append_group().unwrap();
 	for frame in 0..FRAMES * (triggers.len() as u64 + 1) {
 		if frame % FRAMES == FRAMES / 2
@@ -466,8 +464,6 @@ macro_rules! route_change_tests {
 
 route_change_tests! {
 	lite_07: "moq-lite-07-wip",
-	ietf_18: "moq-transport-18",
-	ietf_22: "moq-transport-22",
 }
 
 macro_rules! pinned_tests {
@@ -506,6 +502,8 @@ macro_rules! pinned_tests {
 }
 
 pinned_tests! {
+	ietf_18: "moq-transport-18",
+	ietf_22: "moq-transport-22",
 	lite_06: "moq-lite-06",
 	lite_05: "moq-lite-05",
 	lite_04: "moq-lite-04",
@@ -604,16 +602,6 @@ async fn lagging_route_dies(version: Version) {
 #[kio::test]
 async fn lite_resumes_after_a_lagging_route_dies() {
 	lagging_route_dies("moq-lite-07-wip".parse().unwrap()).await;
-}
-
-#[kio::test]
-async fn ietf_17_resumes_after_a_lagging_route_dies() {
-	lagging_route_dies("moq-transport-18".parse().unwrap()).await;
-}
-
-#[kio::test]
-async fn ietf_22_resumes_after_a_lagging_route_dies() {
-	lagging_route_dies("moq-transport-22".parse().unwrap()).await;
 }
 
 /// `P` publishes through the relay `O`, which `M1` and `M2` both pull from, and `E`
@@ -745,7 +733,6 @@ macro_rules! route_flap_tests {
 
 route_flap_tests! {
 	flaps_lite_07: "moq-lite-07-wip",
-	flaps_ietf_22: "moq-transport-22",
 }
 
 /// How the incumbent of a redundant pair goes away.

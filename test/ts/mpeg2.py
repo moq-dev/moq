@@ -25,22 +25,32 @@ import holes
 
 def codecs(path):
     """The codec of each audio and video stream FFmpeg finds."""
-    report = json.loads(subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", str(path)],
-        check=True, capture_output=True, text=True,
-    ).stdout)
-    return sorted((s["codec_type"], s["codec_name"]) for s in report["streams"] if s["codec_type"] in ("audio", "video"))
+    report = json.loads(
+        subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,codec_name", "-of", "json", str(path)],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
+    return sorted(
+        (s["codec_type"], s["codec_name"]) for s in report["streams"] if s["codec_type"] in ("audio", "video")
+    )
 
 
 def pictures(path):
     """The MD5 of each decoded picture, and FFmpeg's decode errors."""
     result = subprocess.run(
         ["ffmpeg", "-v", "error", "-i", str(path), "-map", "0:v:0", "-f", "framemd5", "-"],
-        capture_output=True, text=True, check=False,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     if result.returncode:
         raise SystemExit(f"error: ffmpeg could not decode {path}: {result.stderr.strip()}")
-    digests = [line.rsplit(",", 1)[1].strip() for line in result.stdout.splitlines() if line and not line.startswith("#")]
+    digests = [
+        line.rsplit(",", 1)[1].strip() for line in result.stdout.splitlines() if line and not line.startswith("#")
+    ]
     return digests, [line for line in result.stderr.splitlines() if line.strip()]
 
 
@@ -87,8 +97,10 @@ def main():
     parser.add_argument("--rate", type=int, default=25, help="pictures per second in the source")
     args = parser.parse_args()
     report = grade(args.source, args.capture, args.gop, args.rate)
-    print(f"MPEG-2 video: {report['pictures']} of {report['source']} pictures decoded as the source's, "
-          f"from picture {report['first']} ({report['joined']} joined pictures skipped)")
+    print(
+        f"MPEG-2 video: {report['pictures']} of {report['source']} pictures decoded as the source's, "
+        f"from picture {report['first']} ({report['joined']} joined pictures skipped)"
+    )
     return 0
 
 
