@@ -35,13 +35,16 @@ const url = new URL("https://localhost/resume-history");
 type History = "stable" | "churn";
 type Access = "lookup" | "fetch" | "subscribe";
 
-/** Full collections, each from a fresh task so no frame of the caller keeps a target. */
+/** Full collections with no stack heap pointers, so dead stack slots cannot pin a target. */
 async function collect(): Promise<void> {
-	const gc = (globalThis as { gc?: () => void }).gc;
+	const gc = (globalThis as { gc?: (options: { type: "major"; execution: "async" }) => Promise<void> }).gc;
 	if (!gc) throw new Error("resume-history needs a precise collector: run it with bench/browser/micro.ts");
 	for (let pass = 0; pass < 3; pass++) {
-		await new Promise<void>((resolve) => setTimeout(resolve, 0));
-		gc();
+		// V8's synchronous gc scans the embedder stack conservatively even from a fresh task.
+		// Async gc runs with StackState::kNoHeapPointers, including while tracing is enabled.
+		const collected = gc({ type: "major", execution: "async" });
+		if (!(collected instanceof Promise)) throw new Error("resume-history needs Chromium's asynchronous gc");
+		await collected;
 	}
 }
 

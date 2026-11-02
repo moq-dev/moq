@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `listen::LoadBalancer` has a `forward` field ([#7539](https://github.com/moq-dev/moq/pull/7539))
+
+`listen::LoadBalancer` gained `forward: listen::Forward`, the `[listen.lb.forward]` settings that forward QUIC packets to the server their connection ID names.
+The struct is not `#[non_exhaustive]`, so add `..Default::default()` to a `LoadBalancer { id, nonce }` literal, which leaves forwarding off.
+An exhaustive destructure, such as a QUIC runtime mapping the resolved listener settings, must name `forward`: honor it, or ignore it with `forward: _` only where `lb.id` is already refused.
+
 ### `tls://` listeners verify client certificates ([#7358](https://github.com/moq-dev/moq/pull/7358))
 
 A `listen.tcp.tls` listener serves the listen policy's client-certificate verifier, so `--listen-tls-root` and pinned `tls.peers` apply to it as they do to QUIC, and a stream-only server with that listener accepts them instead of returning `Error::MtlsUnsupported`.

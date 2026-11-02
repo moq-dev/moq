@@ -162,7 +162,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 
 		if (inject && goawayBytes) await inject.inject(goawayBytes);
 		else await sendLiteGoaway(pair.server);
-		await wireOf(client).goaway;
+		await client.draining;
 
 		const update = await announced.next();
 		expect(update?.kind).toBe("update");
@@ -333,7 +333,7 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 
 		if (inject && goawayBytes) await inject.inject(goawayBytes);
 		else await sendLiteGoaway(pair.server);
-		await wireOf(client).goaway;
+		await client.draining;
 
 		routes = consume.announced();
 		expect((await routes.next())?.kind).toBe("start");
