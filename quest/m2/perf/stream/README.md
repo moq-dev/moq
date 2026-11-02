@@ -88,6 +88,23 @@ What that says, layer by layer:
   costs a send and a read, and 14-16% of relay `chat`. That is the ring's
   target.
 
+The driver, measured 2026-11-01 on the same host, oversubscribed throughout (load
+17-34 on 24 cores), so CPU time per message swung 2-3x between rounds. The qmux
+micro-bench therefore records user-space instructions per message, pinned to one
+E-core under `perf stat`, differencing a 0.25 s and a 5 s run to cancel setup.
+Against the base, every case runs fewer: tcp 13-18%, tls 6-14%, ws 17-21%, and wss
+1-13%, the smaller numbers at 16000 B where TLS dominates. Syscalls per message
+(strace, 16 sessions, 1024 B) stayed at about 2.55 on every transport.
+Instructions undercount tungstenite's zero-fill (`rep stos` is one instruction),
+so the [codec](/quest/m2/perf/stream/codec.md) gate must re-profile CPU time. Two
+paired relay runs (`chat` and `fanout` on `ws`, `wss`, `tcp`, `tls`) were
+inconclusive: the QUIC control, untouched by the driver, moved -8% to +25%, and
+most cases changed sign between runs. Only `tls` `fanout` rose in all six pairs
+(+7% to +44%). Re-measured the same day with three more interleaved runs of six
+pairs each (`tls` only, load 9-17), that rise was noise: CPU per delivered
+frame moved by a median of -16%, +1%, and -8% per run, 11 of 18 pairs fell, and
+pairs ranged from -41% to +106%, while the QUIC control ranged from -12% to +41%.
+
 Decisions (2026-10-22), each with its reason:
 
 - **Measure, then decide.** The bench lands first, and every quest records a
@@ -128,7 +145,6 @@ Decided 2026-10-31 (maintainer), in
 
 ## Required
 
-- [Driver](/quest/m2/perf/stream/driver.md) - a qmux session is one caller-spawned task polling the socket it owns, with no split, pump, channel, or per-record allocation
 - [Ring TCP ablation](/quest/m2/perf/stream/ablation.md) - measured ring TCP against tokio TCP under the qmux workload picks the mechanisms the port uses
 - [Ring TCP](/quest/m2/perf/stream/ring.md) - moq-uring serves TCP, and hyper (therefore axum) runs on it
 - [Relay listeners on the workers](/quest/m2/perf/stream/relay.md) - the relay's WebSocket, qmux TCP, and HTTP listeners run on the io_uring workers

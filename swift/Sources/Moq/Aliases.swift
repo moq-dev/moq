@@ -7,6 +7,8 @@ import MoqFFI
 // instead (see Client.swift, Broadcast.swift, etc.), so MoqFFI's `Moq`-prefixed
 // classes never appear in the public API.
 
+/// An exact media timestamp: `value` units at `scale` units per second.
+public typealias Timestamp = MoqFFI.MoqTimestamp
 /// A payload plus the presentation timestamp it should play at. The unit of
 /// every raw write and raw read.
 public typealias Frame = MoqFFI.MoqFrame
@@ -125,7 +127,7 @@ extension Subscription {
     /// A span of a track to deliver: from `start` up to `end`, or onward when `end` is `nil`.
     public typealias Range = MoqFFI.MoqRange
     /// Where one end of a `Range` falls: `.absolute(group:)`, `.relative(groups:)`
-    /// back from the latest group, or `.time(timestampUs:)` for the group containing it.
+    /// back from the latest group, or `.time(timestamp:)` for the group containing it.
     public typealias Anchor = MoqFFI.MoqAnchor
     /// Which pending group the publisher sends first: `.ascending` or `.descending`.
     public typealias Order = MoqFFI.MoqOrder

@@ -3,7 +3,7 @@ name: Check
 permissions:
   contents: read
 
-# Main PRs report Check as skipped; Land tests their combined prefix.
+# Main PRs report Check as skipped; the merge queue tests each one (queue.yml).
 # Release PRs run the same gate over every package.
 on:
   pull_request:

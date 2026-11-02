@@ -10,16 +10,11 @@ use crate::ffi::{Background, Guard, Task};
 use crate::media::*;
 use crate::producer::MoqTrackInfo;
 
-pub(crate) fn timestamp_us(timestamp: moq_net::Timestamp) -> Result<u64, MoqError> {
-	timestamp.as_micros().try_into().map_err(|_| MoqError::TimeOverflow)
-}
-
-fn raw_frame(frame: moq_net::frame::Frame) -> Result<MoqFrame, MoqError> {
-	let timestamp_us = frame.timestamp.map(timestamp_us).transpose()?;
-	Ok(MoqFrame {
+fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
+	MoqFrame {
 		payload: frame.payload.to_vec(),
-		timestamp_us,
-	})
+		timestamp: frame.timestamp.map(Into::into),
+	}
 }
 
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
@@ -96,8 +91,8 @@ pub enum MoqAnchor {
 	},
 	/// The group containing this presentation time. An untimed track refuses it.
 	Time {
-		/// The presentation time in microseconds.
-		timestamp_us: u64,
+		/// The presentation time.
+		timestamp: MoqTimestamp,
 	},
 }
 
@@ -118,9 +113,7 @@ impl TryFrom<MoqAnchor> for moq_net::track::Anchor {
 		Ok(match anchor {
 			MoqAnchor::Absolute { group } => Self::Absolute(group),
 			MoqAnchor::Relative { groups } => Self::Relative(groups),
-			MoqAnchor::Time { timestamp_us } => {
-				Self::Time(moq_net::Timestamp::from_micros(timestamp_us).map_err(|_| MoqError::TimeOverflow)?)
-			}
+			MoqAnchor::Time { timestamp } => Self::Time(timestamp.try_into()?),
 		})
 	}
 }
@@ -521,7 +514,7 @@ impl TrackInner {
 		};
 		Poll::Ready(Ok(Some(MoqDatagram {
 			sequence: datagram.sequence,
-			timestamp_us: datagram.timestamp.map(timestamp_us).transpose()?,
+			timestamp: datagram.timestamp.map(Into::into),
 			payload: datagram.payload.to_vec(),
 		})))
 	}
@@ -567,7 +560,7 @@ impl TrackShared {
 				return Ok(None);
 			}
 			if let Some(frame) = kio::wait(|waiter| self.poll(|inner| inner.poll_pending_frame(waiter))).await? {
-				return Ok(Some(raw_frame(frame)?));
+				return Ok(Some(raw_frame(frame)));
 			}
 		}
 	}
@@ -769,7 +762,7 @@ struct GroupInner {
 
 impl GroupInner {
 	async fn read_frame(&mut self) -> Result<Option<MoqFrame>, MoqError> {
-		self.group.read_frame().await?.map(raw_frame).transpose()
+		Ok(self.group.read_frame().await?.map(raw_frame))
 	}
 }
 
