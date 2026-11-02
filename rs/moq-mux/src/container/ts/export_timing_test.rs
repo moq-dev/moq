@@ -129,6 +129,7 @@ impl Live {
 			)
 			.unwrap();
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog
 			.modify()

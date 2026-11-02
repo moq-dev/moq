@@ -1,12 +1,12 @@
 """The inventory names every opt-in test target no workflow reaches, and only those."""
 
 import importlib.util
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
+from pathlib import Path
 
 spec = importlib.util.spec_from_file_location("test_inventory", Path(__file__).with_name("test-inventory.py"))
 module = importlib.util.module_from_spec(spec)
@@ -30,25 +30,25 @@ CRATE = {
         #[cfg(test)]
         #[path = "probe_test.rs"]
         #[expect(
-        	clippy::unwrap_used,
-        	reason = "tests"
+        \tclippy::unwrap_used,
+        \treason = "tests"
         )]
         mod probe;
     """,
     "rs/media/src/gpu.rs": """
         #[cfg(test)]
         mod tests {
-        	#[test]
-        	#[ignore = "needs a GPU"]
-        	fn renders() {}
+        \t#[test]
+        \t#[ignore = "needs a GPU"]
+        \tfn renders() {}
 
-        	#[test]
-        	#[ignore = "needs a GPU"]
-        	#[expect(
-        		clippy::unwrap_used,
-        		reason = "a multi-line attribute between the ignore and the fn"
-        	)]
-        	fn exports() {}
+        \t#[test]
+        \t#[ignore = "needs a GPU"]
+        \t#[expect(
+        \t\tclippy::unwrap_used,
+        \t\treason = "a multi-line attribute between the ignore and the fn"
+        \t)]
+        \tfn exports() {}
         }
     """,
     "rs/media/src/probe_test.rs": """
@@ -151,21 +151,27 @@ class InventoryTest(unittest.TestCase):
         return dict(orphans)
 
     def run_main(self) -> subprocess.CompletedProcess:
-        return subprocess.run(["python3", str(Path(module.__file__)), "--root", str(self.root)],
-                              capture_output=True, text=True)
+        return subprocess.run(
+            ["python3", str(Path(module.__file__)), "--root", str(self.root)], capture_output=True, text=True
+        )
 
     def test_reports_each_orphan_with_where_it_was_found(self):
-        self.assertEqual(self.orphans(), {
-            "ignore media::probe::long_sweep": "rs/media/src/probe_test.rs:2",
-            "ignore media::plays": "rs/media/tests/device.rs:2",
-            "bench media::encode": "rs/media/Cargo.toml",
-            "fuzz media-fuzz::header": "rs/media/fuzz/Cargo.toml",
-            "recipe rs::sweep": "rs/justfile:11",
-            "script sh/b.test.py": "sh/b.test.py",
-        })
+        self.assertEqual(
+            self.orphans(),
+            {
+                "ignore media::probe::long_sweep": "rs/media/src/probe_test.rs:2",
+                "ignore media::plays": "rs/media/tests/device.rs:2",
+                "bench media::encode": "rs/media/Cargo.toml",
+                "fuzz media-fuzz::header": "rs/media/fuzz/Cargo.toml",
+                "recipe rs::sweep": "rs/justfile:11",
+                "script sh/b.test.py": "sh/b.test.py",
+            },
+        )
 
     def test_a_reached_recipe_covers_its_selection(self):
-        self.write(".github/workflows/nightly.yml", """
+        self.write(
+            ".github/workflows/nightly.yml",
+            """
             on: schedule
             jobs:
               sweep:
@@ -175,7 +181,8 @@ class InventoryTest(unittest.TestCase):
                     working-directory: rs
                 steps:
                   - run: just sweep
-        """)
+        """,
+        )
         orphans = self.orphans()
         self.assertNotIn("recipe rs::sweep", orphans)
         self.assertNotIn("ignore media::probe::long_sweep", orphans)
@@ -206,7 +213,9 @@ class InventoryTest(unittest.TestCase):
         self.assertNotIn("ignore media::gpu::tests::renders", self.orphans())
 
     def test_a_dispatcher_runs_only_the_branch_its_caller_selects(self):
-        self.write("sh/group.sh", """
+        self.write(
+            "sh/group.sh",
+            """
             #!/usr/bin/env bash
             case "${1:-}" in
                 # The sweep needs its own branch.
@@ -216,17 +225,22 @@ class InventoryTest(unittest.TestCase):
                 quick) echo quick ;;
                 *) exit 2 ;;
             esac
-        """)
+        """,
+        )
         # A test that runs the script under stubs selects no branch.
         self.write("sh/group.test.py", 'SCRIPT = "sh/group.sh"\n')
-        self.write("justfile", JUSTFILE.replace("gate:", "gate: groups") + """
+        self.write(
+            "justfile",
+            JUSTFILE.replace("gate:", "gate: groups")
+            + """
     group name:
         sh/group.sh {{ quote(name) }}
 
     groups:
         python3 sh/group.test.py
         just group quick
-""")
+""",
+        )
         orphans = self.orphans()
         self.assertIn("recipe rs::sweep", orphans)
         self.assertIn("ignore media::probe::long_sweep", orphans)

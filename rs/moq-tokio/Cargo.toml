@@ -47,13 +47,18 @@ mdns = ["dep:mdns-sd", "dep:hmac", "dep:sha2", "dep:subtle"]
 jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-ctl"]
 websocket = ["_transport", "dep:qmux", "watch", "dep:dns-lookup"]
 # Qmux over TCP: plaintext `tcp://`, and `tls://` once a crypto provider is on. Server-side and client-side.
-tcp = ["_transport", "dep:qmux", "dep:dns-lookup"]
+tcp = ["_transport", "dep:qmux", "dep:dns-lookup", "dep:tokio-rustls"]
 # Unix-domain-socket qmux transport (`unix://`), unix-only. Adds peer-credential
 # inspection on accept. Pulls in `tcp` (shares qmux's stream transport).
 uds = ["tcp", "qmux/uds"]
 # Native WebRTC data channels over str0m, with a full ICE agent (the `webrtc` module).
 webrtc = ["_transport", "dep:qmux", "dep:moq-ice", "dep:str0m", "dep:if-addrs", "dep:mdns-sd"]
 ring = ["_certs", "rustls/ring", "rcgen/ring", "moq-quic?/ring"]
+# Inside `kio::clock::sim::run`, detached tasks spawn on kio's deterministic simulator,
+# and with `driver`, `quic::driver::sim` carries datagrams over seeded, impaired
+# `moq_quic::sim::Link`s with no sockets. Turns on no transport of its own. Hidden from the
+# docs. Meant for dev-dependencies, so production builds never compile it.
+sim = ["kio/sim", "moq-quic?/sim"]
 
 [dependencies]
 bytes = "1"
@@ -101,6 +106,8 @@ tikv-jemalloc-ctl = { version = "0.7", optional = true }
 tikv-jemallocator = { version = "0.7", features = ["profiling", "unprefixed_malloc_on_supported_platforms"], optional = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
+# The TLS stream `tcp::TlsAcceptor` accepts from a listener sharing its port.
+tokio-rustls = { workspace = true, optional = true }
 tokio-util = { workspace = true, features = ["io"], optional = true }
 toml = { workspace = true }
 tracing = "0.1"
@@ -133,8 +140,13 @@ chrono = "0.4"
 # be driven with synthetic daemon events.
 flume = "0.12"
 kio = { path = "../kio", features = ["sim"] }
+# The simulator tests seed BBR3's probe phases.
+moq-congestion = { path = "../moq-congestion", features = ["testing"] }
 # A bufferbloated path for the receive-credit tests and benchmark.
 moq-shaper = { path = "../moq-shaper" }
+# The tests run QUIC sessions on the simulator. Only `sim`, so a test build keeps the
+# features it was asked for.
+moq-tokio = { path = ".", default-features = false, features = ["sim"] }
 rcgen = { workspace = true, features = ["pem", "aws_lc_rs"] }
 # rustls without a provider, as iroh builds it, so the default test build covers an
 # `http://` dial's certificate fetch with no process default installed.

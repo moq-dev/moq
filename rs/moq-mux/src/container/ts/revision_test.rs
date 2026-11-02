@@ -635,6 +635,7 @@ fn aac_track(
 		.unwrap();
 	let name = track.name().to_string();
 	let mut config = hang::catalog::AudioConfig::new(hang::catalog::AAC { profile: 2 }, 48_000, 2);
+	config.description = Some(bytes::Bytes::from_static(&[0x11, 0x90]));
 	config.container = hang::catalog::Container::Legacy;
 	let mut guard = catalog.modify().unwrap();
 	guard.audio.renditions.insert(name.clone(), config);

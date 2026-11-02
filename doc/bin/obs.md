@@ -110,7 +110,8 @@ otherwise pass to `moq` on the command line: pinning a protocol version, the
 local bind address and connect timing, trusting a self-signed relay or private
 CA, reconnect pacing, QUIC tuning (congestion control, idle timeout,
 keep-alive, segmentation offload, MTU discovery, and qlog traces when the build
-supports them), and the WebSocket fallback race. A rejected value stops the
+supports them), and the WebSocket fallback race. A keep-alive interval of 0
+uses the negotiated idle timeout to choose how often to ping. A rejected value stops the
 stream with the reason in the log rather than silently using a default.
 To decrypt a packet capture, turn on **TLS key log** here or in a MoQ Source's
 properties and start OBS with `SSLKEYLOGFILE` naming the file; the variable

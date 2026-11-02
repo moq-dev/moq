@@ -48,8 +48,8 @@ exclude = [
     "**/moq_ffi/_uniffi/**",
     "**/__pycache__/**",
     { path = "**/target/**", format = "sdist" },
-    # Native codec conformance corpora are only read by Rust tests.
-    { path = "**/moq-audio/src/decode/test_data/**", format = "sdist" },
+    # Media fixtures are only read by Rust tests, not source installs.
+    { path = "**/test_data/**", format = "sdist" },
 ]
 
 # Listed explicitly (not `py/*`) so build output like py/dist isn't mistaken

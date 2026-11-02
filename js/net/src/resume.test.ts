@@ -7,6 +7,7 @@ import { type Consumer as GroupConsumer, Producer as GroupProducer } from "./gro
 import { Route } from "./hop.ts";
 import type { Session as IetfSession } from "./ietf/session.ts";
 import { Subscriber as IetfSubscriber } from "./ietf/subscriber.ts";
+import { Version as IetfVersion } from "./ietf/version.ts";
 import { hooks, MAX_DATAGRAMS } from "./internal.ts";
 import type { Lister } from "./listing.ts";
 import { Producer } from "./origin.ts";
@@ -640,19 +641,43 @@ test("a group no route continues is given up once a newer one supersedes it", as
 	close();
 });
 
-test("a replacement claiming different track properties is refused once the old copy runs out", async () => {
-	const { a, b, swap, active, close } = await setup();
-	const old = a.createTrack("seq", { priority: 1 });
-	b.createTrack("seq", { priority: 2 });
-	const sub = active.track("seq").subscribe();
-	expect((await sub.info()).priority).toBe(1);
-	await swap();
-	expect(sub.closed.peek()).toBeUndefined();
+// Moq-transport provenance is content, like Rust's `properties`: a copy over another draft differs.
+for (const [name, before, after] of [
+	["track properties", { priority: 1 }, { priority: 2 }],
+	["moq-transport provenance", { ietf: IetfVersion.DRAFT_22 }, {}],
+] as const) {
+	test(`a replacement claiming different ${name} is refused once the old copy runs out`, async () => {
+		const { a, b, swap, active, close } = await setup();
+		const old = a.createTrack("seq", before);
+		b.createTrack("seq", after);
+		const sub = active.track("seq").subscribe();
+		expect(await sub.info()).toMatchObject(before);
+		await swap();
+		expect(sub.closed.peek()).toBeUndefined();
 
-	// The old copy failing with its route is what ends the track.
+		// The old copy failing with its route is what ends the track.
+		old.abort(new StreamError(StreamCode.SessionClosed));
+		await settle();
+		expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
+
+		sub.close();
+		close();
+	});
+}
+
+// `unchecked` records how a copy arrived (lite-05/06), so it splices beside a lite-07 copy.
+test("a replacement differing only in unchecked takes over", async () => {
+	const { a, b, swap, active, close } = await setup();
+	const old = a.createTrack("seq", { unchecked: true });
+	const tb = copy(b);
+	const sub = active.track("seq").subscribe();
+	await sub.info();
+	await swap();
+	tb.write(0);
 	old.abort(new StreamError(StreamCode.SessionClosed));
 	await settle();
-	expect(() => sub.tryRecvGroup()).toThrow("changed its properties");
+	expect(sub.closed.peek()).toBeUndefined();
+	expect(drain(sub)).toEqual([0]);
 
 	sub.close();
 	close();

@@ -33,5 +33,6 @@ mod session_revalidate;
 mod shutdown_signal;
 mod smoke;
 mod stack;
+mod tenant_matrix;
 mod upstream_links;
 mod wire_stats;

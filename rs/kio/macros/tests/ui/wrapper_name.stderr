@@ -1,0 +1,5 @@
+error: #[kio::wrapper] needs a `poll_<name>` method
+ --> tests/ui/wrapper_name.rs:8:5
+  |
+8 |     fn pop(&self, waiter: &kio::Waiter) -> Poll<Result<u8, kio::Closed>> {
+  |        ^^^

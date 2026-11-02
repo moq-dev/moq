@@ -2,9 +2,9 @@
 """Update smoke's Nix toolchain and its matching npm Playwright pin together."""
 
 import json
-from pathlib import Path
 import re
 import subprocess
+from pathlib import Path
 
 
 def main():

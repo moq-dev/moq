@@ -62,8 +62,8 @@ async fn largest_quic_sequence_reaches_the_subscriber() {
 			assert_eq!(got.sequence, sequence, "{alpn}");
 			let frame = got.read_frame().await.unwrap().unwrap();
 			assert_eq!(frame.payload, b"ladder".as_ref());
-			// Lite-02 carries no timestamps, and a lite-06 subscriber drops them.
-			let timed = alpn == "moq-transport-22";
+			// Lite-02 carries no timestamps.
+			let timed = alpn != "moq-lite-02";
 			assert_eq!(frame.timestamp, timed.then_some(timestamp), "{alpn}");
 		}
 	}
@@ -270,9 +270,10 @@ async fn the_setup_path_reaches_the_decider_and_roots_the_grant() {
 #[tokio::test(start_paused = true)]
 async fn stats_count_admitted_and_refused_sessions() {
 	let cluster = memory::cluster();
-	let publisher = moq_stats::Producer::new(moq_stats::produce::Config::new().with_origin(cluster.origin.clone()));
-	let registry = publisher.registry().clone();
-	let cluster = cluster.with_stats(publisher);
+	let (producer, publisher) =
+		moq_stats::Producer::new(moq_stats::produce::Config::new().with_origin(cluster.origin.clone()));
+	let registry = producer.registry().clone();
+	let cluster = cluster.with_stats(producer, publisher);
 	let presence = || {
 		registry
 			.snapshot()

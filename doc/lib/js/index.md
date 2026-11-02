@@ -25,7 +25,7 @@ small examples. The [API reference](/lib/js/api/) covers every package; source l
 | [@moq/watch](/lib/js/watch) | Subscribe, decode, and render. `<moq-watch>` plus an optional UI overlay. |
 | [@moq/video](/lib/js/video) | Draw video frames into a canvas through WebGPU or Canvas2D. Used by `@moq/watch` and `@moq/publish`. |
 | [@moq/publish](/lib/js/publish) | Capture, encode, and publish. `<moq-publish>` plus an optional UI overlay. |
-| [@moq/ui](/lib/js/api/ui) | Presentation components shared by the watch and publish overlays: control buttons, a stats graph, and the support banner. |
+| [@moq/ui](/lib/js/api/ui) | Presentation components shared by the watch and publish overlays: control buttons, fullscreen, stats cards and graphs, and the support banner. |
 | [@moq/room](/lib/js/room) | Headless rooms: announce-derived roster, local publish, remote watch, and a chat track. |
 | [@moq/auth](/lib/js/auth) | Validate a relay's request, build its grant, and mint and verify relay JWTs. |
 | [@moq/clock](/lib/js/clock) | Logical monotonic time, wall time, and deterministic timers. |

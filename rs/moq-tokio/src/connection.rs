@@ -1650,7 +1650,7 @@ fn timeout_error(timeout: Duration, last_error: Option<&Error>) -> Error {
 
 /// Jitter the next delay and cap it at the retry window. `None` means the window is exhausted.
 fn retry_wait(delay: Duration, retry_start: kio::clock::Instant, timeout: Duration) -> Option<Duration> {
-	let wait = delay.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0);
+	let wait = delay.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0);
 	if timeout.is_zero() {
 		return Some(wait);
 	}
@@ -2747,7 +2747,7 @@ mod tests {
 	async fn dial_any_walks_past_the_dead_addresses() {
 		let client = client();
 		let (mut server, live) = live().await;
-		tokio::spawn(async move { while server.accept().await.is_some() {} });
+		tokio::spawn(async move { while server.accept().await.is_ok() {} });
 
 		let dead_a = dead().await;
 		let dead_b = dead().await;
@@ -3249,7 +3249,7 @@ mod tests {
 		let server_addr = server.local_addr().unwrap();
 		let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
 		tokio::spawn(async move {
-			while let Some(request) = server.accept().await {
+			while let Ok(request) = server.accept().await {
 				let transport = request.transport();
 				if let Ok(session) = request.ok().await {
 					let _ = accepted.send((transport, session));
@@ -3324,7 +3324,7 @@ mod tests {
 
 		let (accepted, sessions) = tokio::sync::mpsc::unbounded_channel();
 		let task = tokio::spawn(async move {
-			while let Some(request) = server.accept().await {
+			while let Ok(request) = server.accept().await {
 				if let Ok(session) = request.with_publisher(&origin).ok().await {
 					let _ = accepted.send(session);
 				}
@@ -3550,6 +3550,7 @@ mod tests {
 			qmux::Session::accept(stream(server), config())
 		)
 		.unwrap();
+		let (client, server) = (crate::spawn_qmux(client), crate::spawn_qmux(server));
 		let now = moq_net::time::Instant::now();
 		let client = async {
 			let (session, driver) = moq_net::Client::new()
@@ -3638,6 +3639,7 @@ mod tests {
 					qmux::Session::accept(qmux::transport::Stream::new(server), config())
 				)
 				.unwrap();
+				let (client, server) = (crate::spawn_qmux(client), crate::spawn_qmux(server));
 				let now = moq_net::time::Instant::now();
 				let moq = moq_net::Client::new()
 					.with_versions(versions.clone())

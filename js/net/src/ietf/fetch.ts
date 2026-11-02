@@ -1,5 +1,4 @@
 import type { Milli } from "@moq/clock";
-import type * as Epoch from "../epoch.ts";
 import type * as Path from "../path.ts";
 import { type Reader, Writer } from "../stream.ts";
 import type { Order } from "../track.ts";
@@ -102,9 +101,6 @@ export class Fetch {
 	/** Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES, draft-22). */
 	propertiesWanted: boolean;
 
-	/** The publisher instance the requester expects (EPOCH, MoQ Epoch), never on a joining fetch. */
-	epoch?: Epoch.Valid;
-
 	constructor({
 		requestId,
 		type,
@@ -113,7 +109,6 @@ export class Fetch {
 		rangeFilters = false,
 		fillTimeout,
 		propertiesWanted = true,
-		epoch,
 	}: {
 		requestId: bigint;
 		type: FetchType;
@@ -122,7 +117,6 @@ export class Fetch {
 		rangeFilters?: boolean;
 		fillTimeout?: Milli;
 		propertiesWanted?: boolean;
-		epoch?: Epoch.Valid;
 	}) {
 		this.requestId = requestId;
 		this.type = type;
@@ -131,7 +125,6 @@ export class Fetch {
 		this.rangeFilters = rangeFilters;
 		this.fillTimeout = fillTimeout;
 		this.propertiesWanted = propertiesWanted;
-		this.epoch = epoch;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -141,7 +134,6 @@ export class Fetch {
 		params.subscriberPriority = this.subscriberPriority;
 		if (this.groupOrder !== undefined)
 			params.groupOrder = this.groupOrder === "ascending" ? GroupOrder.Ascending : GroupOrder.Descending;
-		params.epoch = this.epoch;
 		params.fillTimeout = this.fillTimeout;
 
 		const type = this.type;
@@ -224,11 +216,6 @@ export class Fetch {
 		if (params.trackPropertyFilter) {
 			throw new Error("TRACK_PROPERTY_FILTER is not allowed on FETCH");
 		}
-		// A joining FETCH is served by its subscription's instance, so naming one is malformed.
-		const epoch = params.epoch;
-		if (epoch !== undefined && (type.kind === "relativeJoining" || type.kind === "absoluteJoining")) {
-			throw new Error("EPOCH is not allowed on a joining FETCH");
-		}
 		// An absent LOCATION_FILTER fetches the whole track.
 		if (type.kind === "filtered") type.filter = params.subscriptionFilter ?? { kind: "unfiltered" };
 
@@ -243,7 +230,6 @@ export class Fetch {
 			fillTimeout: params.fillTimeout,
 			// Defaults to 1, so an absent parameter means the requester wants them.
 			propertiesWanted: params.includeProperties ?? true,
-			epoch,
 		});
 	}
 }

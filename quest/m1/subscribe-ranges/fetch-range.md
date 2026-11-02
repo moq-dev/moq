@@ -83,10 +83,5 @@ the questions decided below and landed only the `track_range_filling` benchmark.
   rejected: it works on lite-05 and later only.
 - **The fill path goes linear first** (maintainer, 2026-10-25). One-range
   reads put every past read on the fill path, which `track_range_filling`
-  measures as superlinear in range count and span: at span 64, 215K groups/s
-  over 1 range, 69K over 16, and 1.9K over 256, so this quest waits on the
-  linear fill path.
-
-## Required
-
-- [Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md) - filling stays flat as range count and span grow
+  measured as superlinear in range count and span. It is flat since
+  [moq-dev/moq#6995](https://github.com/moq-dev/moq/pull/6995).

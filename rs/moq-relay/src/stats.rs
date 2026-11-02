@@ -111,14 +111,15 @@ impl Config {
 		self.linger.map(Into::into)
 	}
 
-	/// Build a [`moq_stats::Producer`] from this config, publishing on `origin`.
+	/// Build a [`moq_stats::Producer`] and its [`moq_stats::Publisher`] from this
+	/// config, publishing on `origin`.
 	///
 	/// Returns a no-op producer when [`Self::enabled`] is false, so the relay can
-	/// attach the result unconditionally. Hand it to
-	/// [`Cluster::with_stats`](crate::cluster::Cluster::with_stats), which takes over both
-	/// the registry and keeping the publish task alive (the task stops when the
+	/// attach the result unconditionally. Hand both to
+	/// [`Cluster::with_stats`](crate::cluster::Cluster::with_stats), which takes over
+	/// the registry, running the publisher, and keeping it alive (it stops when the
 	/// last clone of the producer drops). Fails on a zero interval.
-	pub fn build(&self, origin: origin::Producer) -> anyhow::Result<moq_stats::Producer> {
+	pub fn build(&self, origin: origin::Producer) -> anyhow::Result<(moq_stats::Producer, moq_stats::Publisher)> {
 		if !self.enabled {
 			return Ok(moq_stats::Producer::new(moq_stats::produce::Config::new()));
 		}

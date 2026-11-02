@@ -25,8 +25,8 @@ pub(crate) struct Tail {
 	streams: u64,
 	// Streams whose header arrived and that are still being read.
 	active: u64,
-	// The publisher ended the subscription, so the track is over even if the session
-	// dies before the tail settles.
+	// The publisher's FIN ended the track, its only end before lite-05, so a session that
+	// dies before the tail settles declares that end before aborting.
 	ended: bool,
 }
 
@@ -47,12 +47,12 @@ impl Tail {
 		}
 	}
 
-	/// Record that the publisher ended the subscription.
+	/// Record that the publisher's FIN ended the track.
 	pub fn end(&mut self) {
 		self.ended = true;
 	}
 
-	/// Whether the publisher ended the subscription.
+	/// Whether the publisher's FIN ended the track.
 	pub fn is_ended(&self) -> bool {
 		self.ended
 	}
@@ -90,6 +90,11 @@ impl Tail {
 	#[cfg(test)]
 	pub fn folds_at(&self, group: u64) -> Option<Instant> {
 		self.ledger.folds_at(group, self.ledger.grace())
+	}
+
+	/// Whether a data stream whose header arrived is still being read.
+	pub fn is_reading(&self) -> bool {
+		self.active > 0
 	}
 
 	/// Data streams received, whether they finished or were reset.

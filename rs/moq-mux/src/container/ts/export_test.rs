@@ -170,6 +170,7 @@ async fn custom_selected_catalog_drives_export_and_follow() {
 				.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.audio))
 				.unwrap();
 			let mut config = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+			config.description = Some(Bytes::from_static(&[0x11, 0x90]));
 			config.container = Container::Legacy;
 			snapshot.audio.renditions.insert(name.into(), config);
 			let mut producer = Producer::new(track, HangContainer::Legacy(Kind::Data));
@@ -295,6 +296,7 @@ async fn export_aac_roundtrip() {
 	let name = track.name().to_string();
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog.modify().unwrap().audio.renditions.insert(name.clone(), cfg);
 	}
@@ -376,6 +378,7 @@ async fn export_skips_a_disabled_rendition() {
 			)
 			.unwrap();
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		cfg.enabled = enabled;
 		catalog
@@ -439,6 +442,7 @@ async fn export_packs_aac_frames_up_to_their_buffer() {
 	let name = track.name().to_string();
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog.modify().unwrap().audio.renditions.insert(name.clone(), cfg);
 	}
@@ -592,6 +596,7 @@ async fn export_lead_audio() -> BytesMut {
 		.unwrap();
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog
 			.modify()
@@ -1114,6 +1119,7 @@ async fn export_resumes_whole_mpeg2_video_at_a_sequence_header() {
 	)
 	.unwrap();
 	let mut aac = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+	aac.description = Some(Bytes::from_static(&[0x11, 0x90]));
 	aac.container = Container::Legacy;
 	let track = broadcast
 		.create_track("audio", hang::container::track_info(hang::catalog::PRIORITY.audio))
@@ -1490,6 +1496,7 @@ async fn export_pcr_wraps_below_zero_at_start() {
 		.unwrap();
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog
 			.modify()
@@ -2835,12 +2842,10 @@ async fn aac_explicit_sbr_exports_its_lc_core() {
 	}
 }
 
-/// Without a description, the catalog is all ADTS has to label a track with. A channel count no
-/// channelConfiguration names is refused rather than written as stereo, and HE-AAC, whose core
-/// rate and layout only a description names, is refused rather than masked to AAC Main.
+/// A description-less catalog selects ADTS, so raw AAC is refused before it can be mislabeled.
 #[tokio::test(start_paused = true)]
-async fn aac_export_refuses_what_adts_cannot_label() {
-	for (profile, channel_count, refusal) in [(2, 7, "7 channels"), (5, 2, "audioObjectType 5")] {
+async fn description_less_aac_refuses_raw_payloads() {
+	for (profile, channel_count, refusal) in [(2, 7, "ADTS header truncated"), (5, 2, "ADTS header truncated")] {
 		let mut broadcast = moq_net::broadcast::Info::new().produce();
 		let consumer = broadcast.consume();
 		let mut catalog = crate::catalog::Producer::new(&mut broadcast, crate::catalog::Config::default()).unwrap();
@@ -3967,6 +3972,7 @@ async fn export_rejects_si_pid_on_the_pmt() {
 	let name = track.name().to_string();
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		let mut guard = catalog.modify().unwrap();
 		guard.audio.renditions.insert(name, cfg);
@@ -4024,6 +4030,7 @@ async fn export_rejects_si_pid_on_an_elementary_stream() {
 	let name = track.name().to_string();
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		let mut guard = catalog.modify().unwrap();
 		guard.audio.renditions.insert(name.clone(), cfg);
@@ -4121,6 +4128,7 @@ async fn discontinuity_re_emits_tables_and_resumes_the_clock() {
 	{
 		let mut guard = catalog.modify().unwrap();
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		guard.audio.renditions.insert(name, cfg);
 	}
@@ -4318,6 +4326,8 @@ async fn discontinuity_flags_the_break_once_across_tracks() {
 		guard.video.renditions.insert(video_track.name().to_string(), video);
 
 		let mut audio = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+
+		audio.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		audio.container = Container::Legacy;
 		guard.audio.renditions.insert(audio_track.name().to_string(), audio);
 	}
@@ -5644,6 +5654,7 @@ async fn export_twice(with_video: bool) -> (Vec<Frame>, Vec<Frame>) {
 			)
 			.unwrap();
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog
 			.modify()
@@ -5859,6 +5870,7 @@ impl Interleave {
 			)
 			.unwrap();
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog
 			.modify()
@@ -7671,6 +7683,7 @@ async fn export_refuses_an_absurd_catalog_mux_rate() {
 	let name = track.name().to_string();
 	catalog.modify().unwrap().audio.renditions.insert(name.clone(), {
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		cfg
 	});
@@ -7726,6 +7739,7 @@ async fn export_pcr_is_its_byte_position_at_the_rate() {
 	let name = track.name().to_string();
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog.modify().unwrap().audio.renditions.insert(name.clone(), cfg);
 	}
@@ -7831,6 +7845,7 @@ impl Reordered {
 			)
 			.unwrap();
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog
 			.modify()
@@ -8239,6 +8254,7 @@ async fn a_skipped_group_keeps_the_clock() {
 		.unwrap();
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog
 			.modify()
@@ -8303,6 +8319,7 @@ async fn a_timeline_restarting_at_zero_fails_the_export() {
 		.unwrap();
 	{
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog
 			.modify()
@@ -8404,6 +8421,7 @@ fn aac_rendition<E: crate::catalog::hang::CatalogExt>(
 		.create_track(name, hang::container::track_info(hang::catalog::PRIORITY.audio))
 		.unwrap();
 	let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+	cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 	cfg.container = Container::Legacy;
 	catalog.modify().unwrap().audio.renditions.insert(name.to_string(), cfg);
 	Producer::new(track, HangContainer::Legacy(crate::container::Kind::Data))
@@ -8587,6 +8605,7 @@ async fn a_rendition_moved_to_another_aac_configuration_fails() {
 		let config = guard.audio.renditions.get_mut("main").unwrap();
 		config.track = Some("next".to_string());
 		config.sample_rate = 44_100;
+		config.description = Some(Bytes::from_static(&[0x12, 0x10]));
 	}
 	write_aac(&mut next, 200);
 	let err = kio::clock::timeout(DRAIN, async {
@@ -9368,7 +9387,7 @@ async fn large_pmt(streams: u16, mux_rate: Option<u64>) -> usize {
 			.unwrap()
 			.audio
 			.renditions
-			.insert(name.clone(), AudioConfig::new(AAC { profile: 2 }, 48_000, 2));
+			.insert(name.clone(), crate::codec::aac::config(&[0x11, 0x90]).unwrap());
 		let mut entry = tscat::Track::new(0x1001 + index);
 		entry.descriptors = vec![tscat::Descriptor {
 			tag: 0x0a,
@@ -10757,6 +10776,8 @@ async fn export_placed(placed: Placed) -> crate::Result<Vec<Frame>> {
 	}
 
 	let mut aac = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+
+	aac.description = Some(Bytes::from_static(&[0x11, 0x90]));
 	aac.container = Container::Legacy;
 	let track = broadcast
 		.create_track(

@@ -6,8 +6,6 @@
 //!
 //! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
-#![cfg(target_os = "linux")]
-
 use std::net::UdpSocket;
 
 use moq_uring::{Config, Error, Worker, udp};

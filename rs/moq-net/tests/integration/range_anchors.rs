@@ -120,14 +120,11 @@ fn anchored() -> [(Range, Vec<u64>); 6] {
 #[kio::test]
 async fn each_wire_refuses_only_the_anchors_it_drops() {
 	for version in std::iter::once(None).chain(VERSIONS.iter().copied().map(Some)) {
-		// Lite-07 reports the largest and media time and asks for everything the budget
-		// allows, so its copy resolves every anchor where it is held.
+		// Lite-07 reports the largest and asks for everything the budget allows, so its copy
+		// resolves every anchor where it is held.
 		let carried = matches!(version, None | Some("moq-lite-07-wip"));
 		// A wire without timestamps refuses a time anchor for that first.
-		let timed = !matches!(
-			version,
-			Some("moq-lite-03" | "moq-lite-04" | "moq-lite-05" | "moq-lite-06")
-		);
+		let timed = !matches!(version, Some("moq-lite-03" | "moq-lite-04"));
 		for (range, held) in anchored() {
 			let mut result = read(version, range).await;
 			let time = matches!(range.start, Anchor::Time(_)) || matches!(range.end, Some(Anchor::Time(_)));

@@ -51,7 +51,7 @@ async fn serve() -> Server {
 	let port = listener.local_addr().expect("no quic addr").port();
 
 	tokio::spawn(async move {
-		while let Some(request) = listener.accept().await {
+		while let Ok(request) = listener.accept().await {
 			tokio::spawn(async move {
 				let _session = request.ok().await;
 				std::future::pending::<()>().await;
