@@ -680,7 +680,12 @@ impl TrackState {
 				rendition: self.label.clone(),
 				source: err,
 			},
-			err => err.into(),
+			err => {
+				// A decode error is terminal. Retire this generation now instead of fetching
+				// another segment for an importer that cannot read it.
+				self.evict();
+				err.into()
+			}
 		})?;
 
 		self.media_range = range;
@@ -2099,8 +2104,8 @@ mod tests {
 		assert!(import.video[0].importer.is_none(), "the dead rendition is retired");
 	}
 
-	/// A decode refusal poisons that importer even if the source later fixes its segment.
-	/// HLS recovers by retiring the generation and importing the live window under fresh names.
+	/// A decode refusal retires its importer at once. HLS can import a repaired source on the
+	/// next pass under fresh track names, without spending the transient fetch retry budget.
 	#[tokio::test]
 	async fn a_refused_segment_recovers_through_a_new_importer() {
 		for passthrough in [false, true] {
@@ -2121,13 +2126,10 @@ mod tests {
 			// An mdat without a moof is refused at its header.
 			std::fs::write(dir.join("video1.m4s"), b"\0\0\0\x0cmdatdata").unwrap();
 			std::fs::write(dir.join("media.m3u8"), format!("{playlist}#EXTINF:1,\nvideo1.m4s\n")).unwrap();
-			for failures in 1..=MAX_RENDITION_FAILURES {
-				let step = import.step(OnError::Warn).await.unwrap();
-				assert!(step.failed.is_some());
-				assert_eq!(import.video[0].importer.is_none(), failures == MAX_RENDITION_FAILURES);
-				// Fixing the bytes cannot clear the first decode refusal on the same importer.
-				std::fs::write(dir.join("video1.m4s"), &segment).unwrap();
-			}
+			let step = import.step(OnError::Warn).await.unwrap();
+			assert!(step.failed.is_some());
+			assert!(import.video[0].importer.is_none());
+			std::fs::write(dir.join("video1.m4s"), &segment).unwrap();
 			let step = import.step(OnError::Warn).await.unwrap();
 			assert!(step.failed.is_none());
 			assert_eq!(step.wrote_segments, 2);

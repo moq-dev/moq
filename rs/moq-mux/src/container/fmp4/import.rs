@@ -306,6 +306,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// it follows the same segmentation as video. A passthrough video track rolls there as well,
 	/// while an unwrapped one opens a group at each sync sample.
 	pub fn cut(&mut self) -> Result<()> {
+		if let Some(err) = &self.failed {
+			return Err(err.clone());
+		}
 		self.pending_cut = true;
 		Ok(())
 	}
@@ -353,7 +356,8 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// [`MAX_FRAGMENT_SAMPLES`](super::MAX_FRAGMENT_SAMPLES) samples, is refused before it is
 	/// held.
 	///
-	/// A decode error is terminal: later calls return the same error without reading input.
+	/// A decode error is terminal: later decodes, cuts, seeks and discontinuities return the same
+	/// error without reading input or changing the tracks.
 	/// The refusing call may leave bytes unread, so even box-aligned callers must replace the
 	/// importer to resume. [`finish`](Self::finish) still ends the tracks with what was accepted.
 	pub fn decode(&mut self, data: &[u8]) -> Result<()> {
@@ -363,7 +367,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 		let result = self.drain(data);
 		if let Err(err) = &result {
 			if let Some(Body::Media(mut mdat)) = self.body.take() {
-				mdat.abort(err.reason());
+				mdat.abort(moq_net::Error::MalformedTrack);
 			}
 			self.buffer = BytesMut::new();
 			self.moof = None;
@@ -459,7 +463,7 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 						*remaining -= count;
 					}
 					if let Err(err) = written {
-						mdat.abort(err.reason());
+						mdat.abort(moq_net::Error::MalformedTrack);
 						return Err(err);
 					}
 					let published = mdat.chunks.is_empty();
@@ -1762,6 +1766,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// A fragment whose samples are still arriving owns its groups until its last sample, so the
 	/// seek waits for it to finish publishing.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
+		if let Some(err) = &self.failed {
+			return Err(err.clone());
+		}
 		if self.publishing() {
 			self.deferred.seek = Some(sequence);
 			return Ok(());
@@ -1794,6 +1801,9 @@ impl<E: crate::catalog::hang::CatalogExt> Import<E> {
 	/// rewinds, before publishing any of it. Like [`seek`](Self::seek), it waits for a fragment
 	/// still arriving to finish publishing.
 	pub fn discontinuity(&mut self) -> Result<()> {
+		if let Some(err) = &self.failed {
+			return Err(err.clone());
+		}
 		if self.publishing() {
 			self.deferred.discontinuity = true;
 			return Ok(());
@@ -2002,6 +2012,9 @@ mod tests {
 				first,
 				"split: {split}"
 			);
+			assert_eq!(import.cut().unwrap_err().to_string(), first);
+			assert_eq!(import.seek(100).unwrap_err().to_string(), first);
+			assert_eq!(import.discontinuity().unwrap_err().to_string(), first);
 			import.finish().unwrap();
 			assert_eq!(import.decode(&[]).unwrap_err().to_string(), first);
 			assert_eq!(

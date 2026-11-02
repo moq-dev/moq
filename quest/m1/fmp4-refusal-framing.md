@@ -9,10 +9,12 @@ The quiet-host comparison remains outstanding.
 ## Plan
 
 The framing part is implemented in this checkpoint: a decode error is terminal,
-and every later decode returns the first error without reading input. This
+and later decodes and controls return the first error without reading input or
+changing tracks. This
 removes recovery/skip state instead of draining arbitrary input after an error.
-`finish()` still ends accepted tracks without resetting the error. HLS replaces
-importers on init-map changes or rendition eviction, while CLI chunked input
+`finish()` still ends accepted tracks without resetting the error. HLS retires
+a refused importer immediately and replaces it on the next pass, while transient
+fetch failures keep their retry budget. CLI chunked input
 propagates a decode error and aborts. MKV leaf limits remain independent.
 
 The original decision (maintainer, 2026-10-31, /quest-complete requeue) allowed
@@ -39,13 +41,14 @@ and [moq-dev/moq#7468](https://github.com/moq-dev/moq/pull/7468#issuecomment-655
   timings, not an isolated attribution to streaming or acceptance of the cost.
 - Re-run the paired comparison on a quiet host, then fix a confirmed regression
   or ask the maintainer to accept the measured cost.
-- The full `just ci` attempt also hit mbx `Argument list too long (os error 7)`
-  in Rustdoc and the Clippy-gate test. The existing fix belongs to
-  [moq-dev/moq#7594](https://github.com/moq-dev/moq/pull/7594); no launcher
-  bypass or upstream mbx change is part of this checkpoint. Re-run that gate
-  once its owner restores the environment.
+- Inherited-environment `just ci` hit mbx `Argument list too long (os error 7)`
+  in Rustdoc and the Clippy-gate test. The authorized clean-shell command,
+  `quest gate nix develop --ignore-environment --keep HOME --keep USER --keep PATH --command just ci origin/main`,
+  passed all selected checks while retaining mbx. No launcher bypass or upstream
+  mbx change is part of this checkpoint.
 
-Public API: decode errors are now terminal, including through `import::Container`;
+Public API: decode errors are now terminal for decoding and controls, including
+through `import::Container`;
 replace the importer to resume. Signatures and wire formats are unchanged.
 
 ## Related
