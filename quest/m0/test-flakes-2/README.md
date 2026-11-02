@@ -59,10 +59,10 @@ trial's accept. Fixed by [moq-dev/moq#7550](https://github.com/moq-dev/moq/pull/
 The Kotlin flow-cancel test's `unroutable` was not load-bound: its snapshot
 writer became unreachable, so JVM cleanup aborted the track mid-read. The JS
 IETF blind-handle test's one identified cause was the session-closing reset
-fixed by [moq-dev/moq#6988](https://github.com/moq-dev/moq/pull/6988). Single
-event-loop stalls at every host task (1.5, 4.5, and 11 seconds) fail it only
-through bun's own 5-second test timeout, never a protocol deadline, so no clock
-change applies. Both handled in [moq-dev/moq#7622](https://github.com/moq-dev/moq/pull/7622).
+fixed by [moq-dev/moq#6988](https://github.com/moq-dev/moq/pull/6988). A single
+event-loop stall at each of its 124 host tasks passes all 124 at 1.5 seconds;
+at 4.5 seconds 3 runs and at 11 seconds 114 runs hit bun's own 5-second test
+timeout. No run fails on a protocol deadline, so no clock change applies. Both handled in [moq-dev/moq#7622](https://github.com/moq-dev/moq/pull/7622).
 
 Public API: none. Wire: none.
 
