@@ -10,8 +10,6 @@ use std::{
 	sync::Arc,
 };
 
-use rangemap::RangeInclusiveSet;
-
 use super::{Anchor, Layered, Range, Runs};
 use crate::{Error, Result, Timestamp};
 
@@ -154,11 +152,18 @@ pub(in crate::model) struct Window {
 	/// How far the parked walks have taken in the holdings' changes.
 	seen: Seen,
 	/// The groups the spans cover, an unsettled time end through its cap: every settled span
-	/// in the fixed runs, shared with what reads them, and one run per walk layered over
-	/// them, so a walk that moves rebuilds only the layer.
+	/// and parked walk in the fixed runs, shared with what reads them, and one run per walk
+	/// not parked layered over them, so a walk that moves rebuilds only the layer.
 	groups: Layered,
 	/// The part of `groups` a miss may ask for, layered the same way: see [`Self::missable`].
 	missable: Layered,
+	/// The groups resolved for good: the spans with a settled end, which the fixed runs hold
+	/// with the parked walks' runs.
+	resolved: Runs,
+	resolved_missable: Runs,
+	/// The fixed runs no longer hold the settled spans and parked walks: rebuilt once the
+	/// settle under way is done, which a settle or a walk parking or waking does.
+	stale: bool,
 	/// A relative anchor waits on a first group, so nothing is filtered yet.
 	pending: bool,
 	/// Nothing is left to resolve: see [`Self::is_settled`]. Kept so a read checks it once
@@ -530,6 +535,9 @@ impl Window {
 			seen: Seen::default(),
 			groups: Layered::default(),
 			missable: Layered::default(),
+			resolved: Runs::default(),
+			resolved_missable: Runs::default(),
+			stale: false,
 			pending: false,
 			settled: false,
 			covered: None,
@@ -566,7 +574,7 @@ impl Window {
 			return false;
 		}
 		let moved = self.walk(holdings);
-		if moved {
+		if moved || self.stale {
 			self.rebuild();
 		}
 		moved
@@ -582,17 +590,17 @@ impl Window {
 			walk.was = walk.trail.limit;
 		}
 		let mut kept = Vec::with_capacity(walks.len());
-		// What settles joins the fixed runs, which readers share: copied once per settle.
-		let (mut groups, mut missable) = (Vec::new(), Vec::new());
 		while let Some(mut walk) = walks.pop() {
 			match walk.advance(holdings, &mut walks) {
 				Some(end) => {
-					moved = true;
+					// What settles joins the fixed runs, which readers share: copied once per
+					// settle under way, since a settle is once per end.
+					(moved, self.stale) = (true, true);
 					if walk.low < end {
-						groups.push(walk.low..=end - 1);
+						self.resolved.insert(walk.low..=end - 1);
 					}
 					if walk.low_reach < end {
-						missable.push(walk.low_reach..=end - 1);
+						self.resolved_missable.insert(walk.low_reach..=end - 1);
 					}
 					for ending in walk.ends {
 						self.spans[ending.span].end = End::Before(end);
@@ -606,18 +614,6 @@ impl Window {
 						None => kept.push(walk),
 					}
 				}
-			}
-		}
-		if !groups.is_empty() {
-			let fixed = self.groups.fixed_mut();
-			for run in groups {
-				fixed.insert(run);
-			}
-		}
-		if !missable.is_empty() {
-			let fixed = self.missable.fixed_mut();
-			for run in missable {
-				fixed.insert(run);
 			}
 		}
 		kept.sort_unstable_by_key(|walk| walk.trail);
@@ -638,23 +634,28 @@ impl Window {
 			let _ = holdings.changes(&mut self.seen);
 			return;
 		}
-		let Some(changed) = holdings.changes(&mut self.seen) else {
-			walks.extend(
+		let woke = walks.len();
+		match holdings.changes(&mut self.seen) {
+			None => walks.extend(
 				std::mem::take(&mut self.parked)
 					.into_values()
 					.flat_map(|parked| parked.walks),
-			);
-			return;
-		};
-		for run in changed {
-			for (_, parked) in self.overlapping(run) {
-				walks.extend(parked.walks);
+			),
+			Some(changed) => {
+				for run in changed {
+					for (_, parked) in self.overlapping(run) {
+						walks.extend(parked.walks);
+					}
+				}
 			}
 		}
+		// The fixed runs held those it woke.
+		self.stale |= walks.len() > woke;
 	}
 
 	/// Park `walk`, waiting on `waits`, with every parked walk whose wait overlaps it.
 	fn park(&mut self, waits: ops::Range<u64>, walk: Walk) {
+		self.stale = true;
 		let mut parked = Parked {
 			end: waits.end,
 			walks: vec![walk],
@@ -689,13 +690,6 @@ impl Window {
 			.into_iter()
 			.filter_map(|start| self.parked.remove(&start).map(|parked| (start, parked)))
 			.collect()
-	}
-
-	/// Every unsettled walk, parked or not.
-	fn every_walk(&self) -> impl Iterator<Item = &Walk> + '_ {
-		self.walks
-			.iter()
-			.chain(self.parked.values().flat_map(|parked| parked.walks.iter()))
 	}
 
 	/// The groups an unsettled time end reads on speculation, which may start past it: a
@@ -883,7 +877,7 @@ impl Window {
 		self.spans.clear();
 		self.walks.clear();
 		self.parked.clear();
-		let (mut fixed, mut fixed_missable) = (RangeInclusiveSet::new(), RangeInclusiveSet::new());
+		let (mut fixed, mut fixed_missable) = (Vec::new(), Vec::new());
 		self.pending = false;
 		// The time ends that start alike walk alike, until a group starts between them.
 		let mut walks = std::collections::BTreeMap::<(u64, u64), BTreeSet<Ending>>::new();
@@ -911,9 +905,9 @@ impl Window {
 			if let Some(last) = limit.map_or(Some(u64::MAX), |end| end.checked_sub(1))
 				&& last >= start
 			{
-				fixed.insert(start..=last);
+				fixed.push(start..=last);
 				if reach <= last {
-					fixed_missable.insert(reach..=last);
+					fixed_missable.push(reach..=last);
 				}
 			}
 			self.spans.push(Span {
@@ -931,8 +925,11 @@ impl Window {
 			.map(|span| span.start)
 			.min();
 		self.all_named = self.spans.iter().all(|span| span.floored);
-		self.groups = Layered::new(Arc::new(Runs::new(fixed)), Runs::default());
-		self.missable = Layered::new(Arc::new(Runs::new(fixed_missable)), Runs::default());
+		self.resolved = Runs::new(fixed);
+		self.resolved_missable = Runs::new(fixed_missable);
+		self.groups = Layered::new(Arc::new(self.resolved.clone()), Runs::default());
+		self.missable = Layered::new(Arc::new(self.resolved_missable.clone()), Runs::default());
+		self.stale = false;
 		self.walks = walks
 			.into_iter()
 			.map(|((start, reach), ends)| Walk {
@@ -948,14 +945,33 @@ impl Window {
 		Ok(())
 	}
 
-	/// The groups in range: the fixed ones, and the run each walk reads now layered over
-	/// them. Costs the walks, never the fixed runs.
+	/// The groups in range: the fixed ones, and the run each walk not parked reads now
+	/// layered over them. Costs those walks, and the fixed runs only once a settle or a walk
+	/// parking or waking changed them.
 	fn rebuild(&mut self) {
 		self.covered = None;
 		self.settled = !self.pending && self.walks.is_empty() && self.parked.is_empty();
-		let (groups, missable): (Vec<_>, Vec<_>) = self.every_walk().map(Walk::runs).unzip();
+		let (groups, missable): (Vec<_>, Vec<_>) = self.walks.iter().map(Walk::runs).unzip();
 		self.groups.set_layer(Runs::new(groups.into_iter().flatten()));
 		self.missable.set_layer(Runs::new(missable.into_iter().flatten()));
+		if std::mem::take(&mut self.stale) {
+			let parked = || {
+				self.parked
+					.values()
+					.flat_map(|parked| parked.walks.iter())
+					.map(Walk::runs)
+			};
+			let groups = self
+				.resolved
+				.iter()
+				.cloned()
+				.chain(parked().filter_map(|(groups, _)| groups));
+			let missable =
+				(self.resolved_missable.iter().cloned()).chain(parked().filter_map(|(_, missable)| missable));
+			let (groups, missable) = (Runs::new(groups), Runs::new(missable));
+			self.groups.set_fixed(groups);
+			self.missable.set_fixed(missable);
+		}
 	}
 }
 
@@ -1123,6 +1139,8 @@ fn end(anchor: Option<Anchor>, latest: Option<u64>) -> Option<End> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	use rangemap::RangeInclusiveSet;
 
 	use std::cell::Cell;
 

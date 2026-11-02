@@ -6053,7 +6053,7 @@ impl Admitted {
 			return Vec::new();
 		}
 		match &self.groups {
-			None => vec![lo..=hi],
+			None => std::iter::once(lo..=hi).collect(),
 			Some(groups) => groups
 				.runs(lo)
 				.take_while(|run| *run.start() <= hi)
@@ -21202,6 +21202,96 @@ mod test {
 		assert_eq!(drain(&mut late), vec![3, 2]);
 		append_at(&mut producer, 4000);
 		assert_eq!(drain(&mut late), vec![4]);
+	}
+
+	/// A time end whose cap moves beside fixed ranges owes, of every cached group, exactly
+	/// what was owed and is still admitted, and what is newly admitted: what the walks' runs
+	/// gain is taken in by their runs alone, and must still owe each cached group it reaches.
+	#[test]
+	fn a_moving_time_cap_owes_what_it_newly_admits() {
+		let seed = std::cell::Cell::new(0x2545_f491_4f6c_dd1d_u64);
+		let next = |bound: u64| {
+			let mut x = seed.get();
+			x ^= x << 13;
+			x ^= x >> 7;
+			x ^= x << 17;
+			seed.set(x);
+			x % bound
+		};
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		const SEQUENCES: u64 = 40;
+		let mut owed = 0;
+		for round in 0..150 {
+			let producer = track_producer("test", Info::timed());
+			// One time end, and fixed ranges around and above where the feed starts.
+			let ranges = std::iter::once(Range {
+				start: Anchor::Time(at(next(100))),
+				end: Some(Anchor::Time(at(200 + next(400)))),
+			})
+			.chain((0..1 + next(6)).map(|_| {
+				let start = next(SEQUENCES);
+				Range::groups(start..start + 1 + next(3))
+			}));
+			let mut subscriber = producer.subscribe(Subscription::default().with_ranges(ranges));
+			let mut groups = Vec::new();
+			for step in 0..30 {
+				let sequence = next(SEQUENCES);
+				match next(4) {
+					0 | 1 => {
+						if let Ok(mut group) = producer.create_group(group::Info { sequence }) {
+							if next(2) == 0 {
+								group
+									.write_frame(at(sequence * 20), bytes::Bytes::from_static(b"x"))
+									.unwrap();
+							}
+							groups.push(group);
+						}
+					}
+					2 => {
+						if let Some(group) = groups.iter_mut().find(|group| group.sequence == sequence)
+							&& group.handle().timestamp().is_none()
+						{
+							let _ = group.write_frame(at(sequence * 20), bytes::Bytes::from_static(b"x"));
+						}
+					}
+					_ => {
+						// Read now and then, so the walk passes groups and owes them again.
+						let _ = subscriber.poll_recv_group(&kio::Waiter::noop());
+					}
+				}
+				let Inner::Plain(cursor) = &mut subscriber.inner else {
+					unreachable!("a local subscriber reads its own cursor");
+				};
+				cursor.sync();
+				let (before, was, primed) = (
+					cursor.filter.admitted.runs(),
+					cursor.filter.owed.clone(),
+					cursor.filter.admitted_at.is_some(),
+				);
+				cursor.admit();
+				let now = cursor.filter.admitted.runs();
+				let held =
+					|runs: &[ops::RangeInclusive<u64>], sequence: u64| runs.iter().any(|run| run.contains(&sequence));
+				let cached: Vec<u64> = cursor.state.read().lookup.keys().copied().collect();
+				for sequence in cached {
+					let expected =
+						primed && held(&now, sequence) && (was.contains(&sequence) || !held(&before, sequence));
+					assert_eq!(
+						cursor.filter.owed.contains(&sequence),
+						expected,
+						"round {round} step {step}: group {sequence}, admitted {before:?} then {now:?}, owed {was:?}"
+					);
+					owed += usize::from(expected);
+				}
+				for run in cursor.filter.owed.iter() {
+					assert!(
+						cursor.filter.admitted.overlapping(run.clone()) == vec![run.clone()],
+						"round {round} step {step}: owed {run:?} beyond {now:?}"
+					);
+				}
+			}
+		}
+		assert!(owed > 100, "only {owed} groups owed");
 	}
 
 	/// A narrow reader under an open aggregate passes the groups outside its range holding

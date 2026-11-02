@@ -17,8 +17,8 @@
 //!   reader's ranges in the gaps between its groups. A group lands past them, and the reader
 //!   polls with nothing in range.
 //! - `ranges_time_gaps`: time ranges each ending between two groups of a sparsely numbered
-//!   feed, so each end waits on the missing sequences of a gap of its own. A group lands past
-//!   them, and the reader polls with nothing in range.
+//!   history, so each end waits on the missing sequences of a gap of its own, beside one time
+//!   end past the live edge whose cap moves twice per group, as in `ranges_time_cap`.
 //! - `ranges_datagram`: timed ranges none of which admits the datagram that lands, so the
 //!   reader judges it against all of them.
 //! - `ranges_frames`: a lite-07 publisher's frame bounds, each range starting and ending
@@ -239,6 +239,8 @@ pub(crate) struct TimeGaps {
 	_broadcast: broadcast::Producer,
 	track: track::Producer,
 	reader: track::Subscriber,
+	/// Where the live feed went on from the history.
+	live: u64,
 	next: u64,
 }
 
@@ -246,32 +248,47 @@ impl TimeGaps {
 	pub(crate) fn new(ranges: u64) -> Self {
 		let broadcast = broadcast::Info::default().produce();
 		let track = broadcast.create_track("bench", timed()).unwrap();
-		// The feed's groups at every multiple of the stride, ten milliseconds apart, and each
-		// range from just after one starts until halfway to the next: it ends before the next
-		// group, but the sequences between may still arrive inside it.
+		// The history's groups at every multiple of the stride, ten milliseconds apart, and
+		// each range from just after one starts until halfway to the next: it ends before the
+		// next group, but the sequences between may still arrive inside it. The live feed goes
+		// on from the last, one sequence and millisecond at a time, read by a range from there.
 		for i in 0..=ranges {
 			land(&track, i * STRIDE, i * 10);
 		}
-		let subscription = track::Subscription::default()
-			.with_max_delay(BUDGET)
-			.with_ranges((0..ranges).map(|i| track::Range {
-				start: track::Anchor::Time(millis(i * 10 + 1)),
-				end: Some(track::Anchor::Time(millis(i * 10 + 5))),
-			}));
+		let live = track::Range {
+			start: track::Anchor::Time(millis(ranges * 10)),
+			end: Some(track::Anchor::Time(millis(LIVE))),
+		};
+		let subscription = track::Subscription::default().with_max_delay(BUDGET).with_ranges(
+			(0..ranges)
+				.map(|i| track::Range {
+					start: track::Anchor::Time(millis(i * 10 + 1)),
+					end: Some(track::Anchor::Time(millis(i * 10 + 5))),
+				})
+				.chain([live]),
+		);
 		let mut reader = track.subscribe(subscription);
-		assert_eq!(drain(&mut reader), ranges as usize, "each range's own group");
+		let groups = usize::try_from(ranges).unwrap() + 1;
+		assert_eq!(drain(&mut reader), groups, "each range's own group, and the live edge");
 		Self {
 			_broadcast: broadcast,
 			track,
 			reader,
-			next: ranges + 1,
+			live: ranges * STRIDE,
+			next: ranges * STRIDE + 1,
 		}
 	}
 
 	pub(crate) fn step(&mut self) {
-		land(&self.track, self.next * STRIDE, self.next * 10);
+		// Each a millisecond after the last, from where the history ended.
+		let at = self.next - self.live + self.live / STRIDE * 10;
+		let mut group = self.track.create_group(group::Info { sequence: self.next }).unwrap();
+		let mut handed = drain(&mut self.reader);
+		group.write_frame(millis(at), Bytes::from_static(b"x")).unwrap();
+		group.finish().unwrap();
+		handed += drain(&mut self.reader);
 		self.next += 1;
-		assert_eq!(drain(&mut self.reader), 0, "nothing lands in range");
+		assert_eq!(handed, 1, "the live group is in range");
 	}
 }
 

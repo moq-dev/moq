@@ -25,14 +25,6 @@ impl Runs {
 		Self(set.into_iter().collect())
 	}
 
-	pub fn is_empty(&self) -> bool {
-		self.0.is_empty()
-	}
-
-	pub fn len(&self) -> usize {
-		self.0.len()
-	}
-
 	pub fn iter(&self) -> std::slice::Iter<'_, RangeInclusive<u64>> {
 		self.0.iter()
 	}
@@ -120,10 +112,12 @@ impl Layered {
 		&self.layer
 	}
 
-	/// The fixed runs to change, copied first if another set still shares them, so that set
-	/// keeps what it held and no longer shares them.
-	pub fn fixed_mut(&mut self) -> &mut Runs {
-		Arc::make_mut(&mut self.fixed)
+	/// Hold `fixed` under the layer from now on. The runs already held stay shared when they
+	/// are the same, so what shares them still differs from this only in the layer.
+	pub fn set_fixed(&mut self, fixed: Runs) {
+		if *self.fixed != fixed {
+			self.fixed = Arc::new(fixed);
+		}
 	}
 
 	pub fn set_layer(&mut self, layer: Runs) {
@@ -133,10 +127,6 @@ impl Layered {
 	/// Whether both hold the same fixed runs, so they differ only in their layers.
 	pub fn shares_fixed(&self, other: &Self) -> bool {
 		Arc::ptr_eq(&self.fixed, &other.fixed)
-	}
-
-	pub fn is_empty(&self) -> bool {
-		self.fixed.is_empty() && self.layer.is_empty()
 	}
 
 	pub fn contains(&self, sequence: u64) -> bool {
@@ -233,9 +223,9 @@ impl Layered {
 }
 
 /// The parts of `run` that `runs` doesn't hold, lowest first.
-pub(in crate::model) fn minus(run: RangeInclusive<u64>, runs: &Runs) -> impl Iterator<Item = RangeInclusive<u64>> + '_ {
+fn minus(run: RangeInclusive<u64>, runs: &Runs) -> impl Iterator<Item = RangeInclusive<u64>> + '_ {
 	let (lo, hi) = (*run.start(), *run.end());
-	let mut from = Some(lo).filter(|_| lo <= hi);
+	let mut from = (lo <= hi).then_some(lo);
 	let mut inside = runs.within(lo, hi).peekable();
 	std::iter::from_fn(move || {
 		loop {
@@ -327,7 +317,7 @@ mod tests {
 					assert_eq!(layered.first(lo, hi), first, "{} first in {lo}..={hi}", context());
 					let last = union
 						.overlapping(lo..=hi)
-						.last()
+						.next_back()
 						.map(|run| *run.start()..=(*run.end()).min(hi));
 					assert_eq!(layered.last(lo, hi), last, "{} last in {lo}..={hi}", context());
 				}
@@ -382,10 +372,10 @@ mod tests {
 			let found: Vec<u64> = minus(run.clone(), &runs).flatten().collect();
 			assert_eq!(found, expected, "{run:?} minus {runs:?}");
 		}
-		assert!(minus(0..=u64::MAX, &Runs::new([0..=u64::MAX])).next().is_none());
-		assert_eq!(
-			minus(5..=u64::MAX, &Runs::new([0..=9])).collect::<Vec<_>>(),
-			vec![10..=u64::MAX]
-		);
+		let whole = Runs::new(std::iter::once(0..=u64::MAX));
+		assert!(minus(0..=u64::MAX, &whole).next().is_none());
+		let low = Runs::new(std::iter::once(0..=9));
+		let above: Vec<_> = minus(5..=u64::MAX, &low).collect();
+		assert_eq!((above.len(), above.first()), (1, Some(&(10..=u64::MAX))));
 	}
 }

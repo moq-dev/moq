@@ -907,14 +907,7 @@ impl Misses {
 	/// feed has after a stretch shares its successors, so one check judges all of them:
 	/// thousands of runs a fill still owes below the live edge cost one, not one each.
 	pub fn expire(&mut self, state: &TrackState, drift: &Drift, given_up: &mut GivenUp, waiter: &kio::Waiter) {
-		let (mut stale, mut arrived) = (RangeSet::new(), RangeSet::new());
-		let servable = &drift.edge.servable;
-		let mut next = self.wanted.iter().next().map(|run| run.start);
-		while let Some(from) = next {
-			let bound = state.arrival(from, servable).map(|slot| slot.group.sequence);
-			let drifted = state.poll_drifted(from, servable, drift.budget, None, waiter);
-			next = self.stretches(state, from, bound, drifted, &mut stale, &mut arrived);
-		}
+		let (stale, arrived) = self.expired(state, drift, waiter);
 		if stale.is_empty() && arrived.is_empty() {
 			return;
 		}
@@ -929,6 +922,19 @@ impl Misses {
 		for run in stale.iter() {
 			self.give_up(run.clone(), given_up);
 		}
+	}
+
+	/// What [`Self::expire`] gives up as stale, and what arrived live, parking `waiter`.
+	fn expired(&self, state: &TrackState, drift: &Drift, waiter: &kio::Waiter) -> (RangeSet<u64>, RangeSet<u64>) {
+		let (mut stale, mut arrived) = (RangeSet::new(), RangeSet::new());
+		let servable = &drift.edge.servable;
+		let mut next = self.wanted.iter().next().map(|run| run.start);
+		while let Some(from) = next {
+			let bound = state.arrival(from, servable).map(|slot| slot.group.sequence);
+			let drifted = state.poll_drifted(from, servable, drift.budget, None, waiter);
+			next = self.stretches(state, from, bound, drifted, &mut stale, &mut arrived);
+		}
+		(stale, arrived)
 	}
 
 	/// Visit the stretches of the wanted runs starting at `from` and below `bound`, all judged
@@ -1670,6 +1676,330 @@ mod tests {
 			misses.deferred.deadline(),
 			Some(opened + wider),
 			"timed by the new grace"
+		);
+	}
+
+	/// Judging the stretches a fill still owes by their shared successor gives up exactly
+	/// what judging each stretch alone would, as groups arrive, start, abort, or leave the
+	/// cache in any order, on either clock, against a window of one run or several.
+	#[test]
+	fn expiring_by_successor_matches_each_stretch_judged_alone() {
+		use super::super::super::subscription::{Layered, Runs};
+		use crate::Timestamp;
+
+		/// The old judgement: each stretch between the live groups cached in a wanted run, by
+		/// its own start.
+		fn each(misses: &Misses, state: &TrackState, drift: &Drift) -> (RangeSet<u64>, RangeSet<u64>) {
+			let waiter = kio::Waiter::noop();
+			let (mut stale, mut arrived) = (RangeSet::new(), RangeSet::new());
+			for run in misses.wanted.iter() {
+				let mut from = run.start;
+				let cached = state
+					.lookup
+					.range(run.clone())
+					.filter(|(_, slot)| slot.is_walked())
+					.map(|(&sequence, _)| sequence);
+				for at in cached.chain(std::iter::once(run.end)) {
+					if from < at && state.poll_drifted(from, &drift.edge.servable, drift.budget, None, &waiter) {
+						stale.insert(from..at);
+					}
+					if at < run.end {
+						arrived.insert(at..at + 1);
+					}
+					from = at.saturating_add(1);
+				}
+			}
+			(stale, arrived)
+		}
+
+		let seed = std::cell::Cell::new(0x2545_f491_4f6c_dd1d_u64);
+		let next = |bound: u64| {
+			let mut x = seed.get();
+			x ^= x << 13;
+			x ^= x >> 7;
+			x ^= x << 17;
+			seed.set(x);
+			x % bound
+		};
+		const SEQUENCES: u64 = 32;
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let mut judged = 0;
+		for round in 0..400 {
+			let broadcast = crate::broadcast::Info::default().produce();
+			let track = broadcast
+				.create_track(
+					"expire",
+					crate::track::Info::default().with_timescale(crate::Timescale::MILLI),
+				)
+				.unwrap();
+			let mut groups = Vec::new();
+			let budget = Duration::from_millis(50 + next(200));
+			let runs = |count: u64| {
+				Runs::new((0..1 + next(count)).map(|_| {
+					let start = next(SEQUENCES);
+					start..=start + next(6)
+				}))
+			};
+			let servable = match next(3) {
+				0 => Servable::ALL,
+				1 => Servable::Run {
+					start: next(8),
+					end: Some(SEQUENCES - next(8)),
+				},
+				_ => Servable::layered(
+					Layered::new(Arc::new(runs(6)), runs(2)),
+					(next(3) == 0).then(|| next(SEQUENCES + 2)),
+					&Servable::NONE,
+				),
+			};
+			let mut misses = Misses::default();
+			for _ in 0..1 + next(6) {
+				let start = next(SEQUENCES);
+				misses.wanted.insert(start..start + 1 + next(6));
+			}
+			for step in 0..12 {
+				let sequence = next(SEQUENCES);
+				match next(6) {
+					0..=2 => {
+						if let Ok(mut group) = track.create_group(crate::group::Info { sequence }) {
+							if next(4) > 0 {
+								group
+									.write_frame(at(sequence * 20), bytes::Bytes::from_static(b"x"))
+									.unwrap();
+							}
+							groups.push(group);
+						}
+					}
+					3 => {
+						if let Some(index) = groups.iter().position(|group| group.sequence == sequence) {
+							let _ = groups.swap_remove(index).abort(Error::Cancel);
+						}
+					}
+					4 => {
+						let _ = track.modify().unwrap().uncache(sequence);
+					}
+					_ => broadcast.info().pool.step(Duration::from_millis(next(120))),
+				}
+				let state = track.state.read();
+				let drift = Drift {
+					budget,
+					bounded: false,
+					edge: state.drift_edge(&servable),
+				};
+				let expected = each(&misses, &state, &drift);
+				let found = misses.expired(&state, &drift, &kio::Waiter::noop());
+				judged += expected.0.iter().count();
+				assert_eq!(
+					(
+						found.0.iter().cloned().collect::<Vec<_>>(),
+						found.1.iter().cloned().collect::<Vec<_>>()
+					),
+					(
+						expected.0.iter().cloned().collect::<Vec<_>>(),
+						expected.1.iter().cloned().collect::<Vec<_>>()
+					),
+					"round {round} step {step}: wanted {:?}",
+					misses.wanted.iter().collect::<Vec<_>>()
+				);
+			}
+		}
+		assert!(judged > 100, "only {judged} stale runs judged");
+	}
+
+	/// A window whose time ends move only their runs over the same fixed runs is followed by
+	/// what those runs moved over, and ends up judging and holding exactly what judging the
+	/// whole window again would: the second reader below is handed an unshared copy of the
+	/// same fixed runs on each move, so it always judges the window whole.
+	#[kio::test]
+	async fn a_moved_layer_is_judged_as_the_whole_window_would_be() {
+		use super::super::super::subscription::{Layered, Runs};
+
+		let seed = std::cell::Cell::new(0x2545_f491_4f6c_dd1d_u64);
+		let next = |bound: u64| {
+			let mut x = seed.get();
+			x ^= x << 13;
+			x ^= x >> 7;
+			x ^= x << 17;
+			seed.set(x);
+			x % bound
+		};
+		const SEQUENCES: u64 = 40;
+		let runs = |count: u64| {
+			Runs::new((0..next(count + 1)).map(|_| {
+				let start = next(SEQUENCES);
+				start..=start + next(5)
+			}))
+		};
+		let snapshot = |misses: &Misses| {
+			let sets = [
+				&misses.wanted,
+				&misses.judged,
+				&misses.refused,
+				&misses.given_up,
+				&misses.refilled,
+			]
+			.map(|set| set.iter().cloned().collect::<Vec<_>>());
+			let deferred: Vec<_> = misses.deferred.overlapping(0..u64::MAX).collect();
+			let filled: Vec<_> = misses.filled.iter().copied().collect();
+			(sets, deferred, filled, misses.joins.len())
+		};
+		let mut asked = 0;
+		for round in 0..150 {
+			let broadcast = crate::broadcast::Info::default().produce();
+			let mut track = broadcast.create_track("moved", crate::track::Info::default()).unwrap();
+			let budget = Duration::from_secs(5);
+			let _reader = track.subscribe(Subscription::default().with_max_delay(budget));
+			// A feed with holes, some of them under where it starts.
+			for sequence in 0..SEQUENCES {
+				if next(3) > 0 {
+					track
+						.create_group(crate::group::Info { sequence })
+						.unwrap()
+						.finish()
+						.unwrap();
+				}
+			}
+			if next(2) == 0 {
+				track.start_at(next(SEQUENCES / 2)).unwrap();
+			}
+			let fills = track.state.read().fills.clone();
+			fills.lock().add_handler();
+			let fixed = Arc::new(runs(6));
+			let cap = (next(3) == 0).then(|| next(SEQUENCES + 4));
+			let asking = Asking {
+				priority: 0,
+				max_delay: Some(budget),
+				order: Order::Ascending,
+			};
+			let (mut moved, mut whole) = (Misses::default(), Misses::default());
+			let (mut given_moved, mut given_whole) = (Vec::new(), Vec::new());
+			for revision in 0..8 {
+				let layer = runs(3);
+				let shared = Layered::new(fixed.clone(), layer.clone());
+				let unshared = Layered::new(Arc::new((*fixed).clone()), layer);
+				let key = (0, revision, cap);
+				for (misses, view, given_up) in [
+					(&mut moved, &shared, &mut given_moved),
+					(&mut whole, &unshared, &mut given_whole),
+				] {
+					let target = |span: RangeInclusive<u64>| -> RangeInclusiveSet<u64> {
+						let end = cap.map_or(*span.end(), |cap| (*span.end()).min(cap.saturating_sub(1)));
+						if cap == Some(0) || *span.start() > end {
+							return RangeInclusiveSet::new();
+						}
+						view.runs(*span.start())
+							.take_while(|run| *run.start() <= end)
+							.map(|run| *run.start()..=(*run.end()).min(end))
+							.collect()
+					};
+					misses.retain(key, Some(view), || target(0..=u64::MAX - 1));
+					let state = track.state.read();
+					let drift = Drift {
+						budget,
+						bounded: false,
+						edge: state.drift_edge(&Servable::ALL),
+					};
+					let asks = misses.judge(
+						&state,
+						key,
+						Some(view),
+						None,
+						target,
+						&Delivered::default(),
+						&drift,
+						given_up,
+						&kio::Waiter::noop(),
+					);
+					drop(state);
+					asked += asks.iter().count();
+					misses.ask(&track.state.consume(), &fills, &asks, &asking, given_up);
+				}
+				assert_eq!(
+					snapshot(&moved),
+					snapshot(&whole),
+					"round {round} revision {revision}: {fixed:?} under {:?}",
+					shared_layer(&moved)
+				);
+				assert_eq!(given_moved, given_whole, "round {round} revision {revision}");
+			}
+		}
+		assert!(asked > 100, "only {asked} runs asked");
+
+		fn shared_layer(misses: &Misses) -> Option<Runs> {
+			misses.view.as_ref().map(|view| view.layer().clone())
+		}
+	}
+
+	/// A reader waiting on many fills looks only at the ones that answered, yet each still
+	/// wakes it, and wakes the task that read it last: a reader read by another task since
+	/// parked learns of the answer too.
+	#[kio::test]
+	async fn an_answered_fill_wakes_the_task_that_read_last() {
+		use std::sync::atomic::{AtomicUsize, Ordering};
+
+		#[derive(Default)]
+		struct Count(AtomicUsize);
+		impl Wake for Count {
+			fn wake(self: Arc<Self>) {
+				self.0.fetch_add(1, Ordering::Relaxed);
+			}
+		}
+
+		let broadcast = crate::broadcast::Info::default().produce();
+		let mut track = broadcast.create_track("fills", crate::track::Info::default()).unwrap();
+		let requests = track.requests();
+		track.start_at(8).unwrap();
+		track
+			.create_group(crate::group::Info { sequence: 8 })
+			.unwrap()
+			.finish()
+			.unwrap();
+		// Four groups below where the feed starts, each a fill of its own.
+		let ranges = [0..1, 2..3, 4..5, 6..7].map(crate::track::Range::groups);
+		let mut reader = track.subscribe(
+			Subscription::default()
+				.with_max_delay(Duration::from_secs(60))
+				.with_ranges(ranges.into_iter().chain([crate::track::Range::groups(8..)])),
+		);
+		let (first, second) = (Arc::new(Count::default()), Arc::new(Count::default()));
+		let waiter = |count: &Arc<Count>| kio::Waiter::new(Waker::from(count.clone()));
+		let first_waiter = waiter(&first);
+		while let Poll::Ready(Ok(Some(_))) = reader.poll_recv_group(&first_waiter) {}
+		let second_waiter = waiter(&second);
+		assert!(reader.poll_recv_group(&second_waiter).is_pending());
+		let super::super::Inner::Plain(cursor) = &reader.inner else {
+			unreachable!("a local subscriber reads its own cursor");
+		};
+		let misses = cursor.misses.as_ref().expect("the reader asked fills");
+		assert_eq!(misses.joins.len(), 4, "one join per fill");
+		assert!(
+			misses.answered.keys.lock().unwrap().is_empty(),
+			"every join was looked at once and parked"
+		);
+
+		// One fill answers: only its join is looked at again, and the later task wakes.
+		let fill = std::future::poll_fn(|cx| requests.poll_requested_fill(&kio::Waiter::new(cx.waker().clone())))
+			.await
+			.unwrap();
+		let woken = second.0.load(Ordering::Relaxed);
+		fill.drop_groups(fill.start().group..fill.end());
+		assert!(
+			second.0.load(Ordering::Relaxed) > woken,
+			"the task that read last wakes"
+		);
+		let super::super::Inner::Plain(cursor) = &reader.inner else {
+			unreachable!("a local subscriber reads its own cursor");
+		};
+		let answered = cursor.misses.as_ref().unwrap().answered.keys.lock().unwrap().len();
+		assert_eq!(answered, 1, "only the join that answered is looked at again");
+		let _ = reader.poll_recv_group(&second_waiter);
+		let super::super::Inner::Plain(cursor) = &reader.inner else {
+			unreachable!("a local subscriber reads its own cursor");
+		};
+		assert_eq!(
+			cursor.misses.as_ref().unwrap().joins.len(),
+			3,
+			"the answered fill's join is gone"
 		);
 	}
 
