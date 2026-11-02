@@ -176,7 +176,6 @@ per-frame CPU growth since #5926.
 - [A follower is told when the serving instance's route leaves](/quest/m1/instance-leave-restart.md) - wire-level tests pin the restart a follower gets when the serving instance's route is withdrawn or dies while another instance's remains
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
 - [Authored tracks default to a 30 s max-age](/quest/m1/max-age-defaults.md) - raw and media tracks advertise 30 s unless their author chooses otherwise, with explicit unlimited in every binding
-- [JS ordered reads wait only on owed groups](/quest/m1/js-ordered-owed.md) - @moq/net matches Rust's owed-group wait
 - [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - a decoder-identity change under the same codec string starts a new init and segment tag
 - [moq-quic deletes its remaining 0-RTT code](/quest/m1/quic-zero-rtt-leftovers.md) - only the code that drops a 0-RTT packet remains, with a test
 - [Gate the no-em-dash rule](/quest/m1/em-dash-gate.md) - `just check` fails on an em dash in any tracked text file

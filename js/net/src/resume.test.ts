@@ -1042,6 +1042,52 @@ test("an ordered reader takes a replaced copy's buffered group before the new co
 	b.close();
 });
 
+for (const resolution of ["arrival", "drop", "other copy", "budget"] as const) {
+	test(`an ordered resumed reader keeps an older copy's owed hole until ${resolution}`, async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const front = new Front();
+		const a = new BroadcastProducer();
+		const b = new BroadcastProducer();
+		const ta = copy(a);
+		const tb = copy(b);
+		hooks.receiveTrack(ta.producer);
+		hooks.receiveTrack(tb.producer);
+		front.serve(a.consume());
+		const ordered = front.consumer
+			.track("seq")
+			.subscribe({ maxDelay: Milli(1000) })
+			.ordered();
+		try {
+			ta.write(4);
+			expect((await ordered.nextGroup())?.sequence).toBe(4);
+			ta.write(6);
+			tb.write(7);
+			hooks.startTrack(tb.producer, { start: 7, requested: 4 });
+			front.serve(b.consume());
+			await settle();
+			const held = ordered.nextGroup();
+			expect(await isPending(held)).toBe(true);
+			if (resolution === "arrival") ta.write(5);
+			if (resolution === "other copy") {
+				tb.write(5);
+				tb.write(6);
+			}
+			if (resolution === "drop") hooks.dropTrackGroups(ta.producer, 5, 6, new StreamError(StreamCode.Old));
+			if (resolution === "budget") await clock.advance(Nano.fromMilli(Milli(1000)));
+			const expected = resolution === "arrival" || resolution === "other copy" ? [5, 6, 7] : [6, 7];
+			expect((await held)?.sequence).toBe(expected[0]);
+			for (const sequence of expected.slice(1)) expect((await ordered.nextGroup())?.sequence).toBe(sequence);
+		} finally {
+			ordered.close();
+			front.consumer.close();
+			a.close();
+			b.close();
+			installed.close();
+		}
+	});
+}
+
 test("a late subscriber's first route is checked against properties an earlier source gave", async () => {
 	const front = new Front();
 	const a = new BroadcastProducer();

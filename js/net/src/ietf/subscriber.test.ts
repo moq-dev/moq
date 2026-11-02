@@ -1260,9 +1260,9 @@ test.each([
 		new Reader(undefined, encodeObjects([0]), version),
 	);
 
-	const ordered = track.ordered();
-	for (const sequence of expected) expect((await ordered.nextGroup())?.sequence).toBe(sequence);
-	ordered.close();
+	// This tests stream framing, independent of gaps below these groups. An ordered
+	// subscription with this budget would wait for the unreceived groups 0..2.
+	for (const sequence of expected) expect((await track.recvGroup())?.sequence).toBe(sequence);
 	track.close();
 });
 
