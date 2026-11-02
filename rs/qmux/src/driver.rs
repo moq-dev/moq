@@ -282,12 +282,11 @@ impl<T: Transport> Run<T> {
 				gathered += record.len();
 				self.outbound.push_back(record);
 			}
-		} else {
-			// The transport wakes us once it has room. A close, local or not, starts the close
-			// bound meanwhile; wait for it with `poll_closed` rather than `poll_transmit`, which
-			// would take the records the transport has no room for.
-			let _ = state.conn.poll_closed(waiter);
 		}
+		// A close, local or not, starts the close bound, even while the transport holds this
+		// batch or an earlier one back. `poll_transmit` would take records the transport has no
+		// room for, so wait for the close with `poll_closed`; the transport wakes us for room.
+		let _ = state.conn.poll_closed(waiter);
 		state.check_lost();
 		if state.conn.is_closed() && self.timer.closing.is_none() {
 			self.timer.closing = Some(now + CLOSE_TIMEOUT);
