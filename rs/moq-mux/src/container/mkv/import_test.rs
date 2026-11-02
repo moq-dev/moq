@@ -2142,7 +2142,11 @@ fn repeated_reinit_keeps_flat_state() {
 		let snapshot = catalog.snapshot();
 		assert_eq!(snapshot.video.renditions.len(), 1, "{label}");
 		assert_eq!(snapshot.audio.renditions.len(), 1, "{label}");
-		assert_eq!(catalog.hls_tracks(), 2, "{label}: only the live generation keeps records");
+		assert_eq!(
+			catalog.hls_tracks(),
+			2,
+			"{label}: only the live generation keeps records"
+		);
 		// A finished generation's records are kept for a re-enrollment until its drop retires them.
 		if generation % 2 == 1 {
 			mkv.finish().unwrap();
@@ -2152,6 +2156,10 @@ fn repeated_reinit_keeps_flat_state() {
 		let snapshot = catalog.snapshot();
 		assert!(snapshot.video.renditions.is_empty(), "{label}");
 		assert!(snapshot.audio.renditions.is_empty(), "{label}");
-		assert_eq!(catalog.hls_tracks(), 0, "{label}: a replaced generation retires its records");
+		assert_eq!(
+			catalog.hls_tracks(),
+			0,
+			"{label}: a replaced generation retires its records"
+		);
 	}
 }
