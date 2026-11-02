@@ -21,7 +21,7 @@ fork.
   Controller's per-packet send and receive instants; drop the parts that only
   serve RTCP or probe clusters unless the comparison needs them.
 - GCC outputs a target rate and pacing rate; map them to the Controller's
-  window and `ControllerMetrics::{pacing_rate, bandwidth_estimate}`, keeping
+  window and `Metrics::{pacing_rate, bandwidth_estimate}`, keeping
   its congestion-window pushback as the inflight bound.
 - Keep the BSD license and PATENTS file with the vendored code.
 - Implement `Controller::probes` and report `probe_inflight` so moq-quic's

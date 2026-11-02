@@ -80,7 +80,7 @@ group it judges, the common verdict at the live edge
 (perf dropped events), so this README's end-to-end rerun is its measurement.
 Every hot site is a read or re-poll
 of a per-track channel that all of a track's subscribers share, which is the
-[version counter](/quest/m2/perf/kio-channel-contention/version.md)'s target.
+version counter's target (below).
 `GroupState` is not contended here because both shapes send one-frame
 groups; `group_contended` in `rs/moq-net/benches/group.rs` measures a
 multi-frame group instead.
@@ -108,8 +108,7 @@ Decided (maintainer, 2026-10-14):
   mutex.
 - Breaking kio's API is allowed (e.g. a read becomes a snapshot or a cursor
   rather than a lock guard); moq-net updates in the same PR.
-- Candidates kept: a version counter with split waiter lists
-  ([Version counter](/quest/m2/perf/kio-channel-contention/version.md)) and
+- Candidates kept: a version counter with split waiter lists (landed below) and
   an append-only log primitive with front eviction
   (Append-only log (`kio::log`)), which
   much of moq-net could adopt
@@ -228,9 +227,65 @@ DWARF stacks, 36% incomplete) put waiter registration at 1.97% self-time, the
 fourth-largest site, on a 501-connection chat shape. It agrees with this
 epic's targets but carries no lock-wait split.
 
+Version counter (landed 2026-11-01,
+[moq-dev/moq#7532](https://github.com/moq-dev/moq/pull/7532)). Every channel's
+value sits under its own mutex beside an `AtomicU64` version (bumped per publish,
+low bit closed), with the waiter lists under a second lock. `kio::Watch<T>` owns a
+`Consumer` and the version its one predicate was last pending at, so a re-poll at
+that version parks without the value lock or the predicate (✅ maintainer
+2026-11-01, over a caller-held cursor: it can't cross channels by mistake). A
+noop waiter parks nowhere. moq-net watches `Subscriber::poll_finished` and
+`Recover::wants`. `poll_recv_group` and `poll_recv_datagram` stay on
+`Consumer::poll`: their predicates read the wall clock (a received copy's tail
+grace, through `is_complete`), and their read paths lock the track in
+`Cursor::sync` and `probe` anyway.
+
+The cost on paths that don't opt in, in instructions on one pinned core (one
+codegen unit, 64 consumers, main `59e12a5bb9` to the PR): unchanged re-poll 84
+to 72, notify cycle per consumer 297 to 361, a write nobody is parked on 74 to
+87, `is_closed` 21 to 7, `poll_closed` while parked 58 to 81, `read` 24 to 24.
+An unchanged re-poll through a `Watch` is 25. The contended bench, ns per
+consumer at 4,096 consumers and 1, 4, and 16 threads: unchanged re-poll 7.8,
+63, and 70; through a `Watch` 0.84, 0.20, and 0.04; notify cycle 45, 274, and
+430. Accepting that cost was the default taken for the PR's second decision
+(the maintainer did not answer it separately): an unparked write skipping the
+waiter lock (a SeqCst "maybe parked" flag, at a fence per park) waits for a
+profile that names it.
+
+`just bench-profile lock fanout "1 4 16" tokio-workers` against main, three
+rounds on a host at load 9 to 12, mutex wait in ms (wait/CPU). The first round
+predates the noop waiter fix, whose waiter lock then held 30% of the wait at 4
+workers:
+
+| round | 4 workers, main | 4 workers, PR | 16 workers, main | 16 workers, PR |
+| --- | --- | --- | --- | --- |
+| 1 | 68 (22%) | 59 (23%) | 506 (151%) | 542 (182%) |
+| 2 | 130 (56%) | 33 (13%) | 546 (172%) | 407 (165%) |
+| 3 | 148 (59%) | 101 (47%) | 624 (164%) | 388 (126%) |
+
+At 16 workers `Subscriber::poll_finished` held 37 to 49% of main's wait and
+2.6% of the PR's. The wait moved to `Cursor::sync`'s read of `TrackState`
+(10 to 14% of main's, 52% of the PR's), with `probe` (11%) and
+`GroupExpiry::is_expired` (8%) next: reads, which a `Watch` doesn't reach.
+
+`just bench-profile lock chat` against main (`88e6990626`), two rounds on a
+host at load 6 to 15, 20,000 frames/s throughout:
+
+| round | 4 workers, main | 4 workers, PR | worker CPU, main to PR |
+| --- | --- | --- | --- |
+| 1 | 5,641 ms (70%) | 341 ms (5.2%) | 1.57 to 1.30 cores |
+| 2 | 4,779 ms (59%) | 967 ms (13%) | 1.69 to 1.42 cores |
+
+1 worker measured 0 on both. At 4 workers `Cursor::poll` for
+`Subscriber::poll_finished` held 48% of main's wait and none of the PR's;
+`Cursor::sync` (38% of the PR's) and `probe` (15%) lead it. So the higher
+notify and unparked-write costs above don't show end to end: worker CPU fell
+at the same throughput. Main at 16 workers was refused twice (perf dropped
+events); the PR alone measured 4,747 ms (61%) at 16 workers at load 17 to 19,
+led by `Cursor::sync` (32%) and `probe` (17%), with no `poll_finished` wait.
+
 ## Required
 
-- [Version counter](/quest/m2/perf/kio-channel-contention/version.md) - an opted-in re-poll skips the mutex when nothing changed, and parking no longer contends with readers
 - [Replica spike](/quest/m2/perf/kio-channel-contention/spike-replica.md) - measures per-worker data-plane replicas linked over the in-memory transport, announcements shared
 - [Cluster spike](/quest/m2/perf/kio-channel-contention/spike-cluster.md) - measures a relay per thread clustered over the in-memory transport, nothing shared
 - [Log adoption](/quest/m2/perf/kio-channel-contention/log-adoption.md) - the rest of moq-net's log-shaped state moves onto the log where it measures as a win

@@ -527,7 +527,7 @@ impl<S: GroupedSend + 'static> Drop for SendStream<S> {
 				let reset = self.reset.take();
 				let finish = std::mem::take(&mut self.finish);
 				if reset.is_some() || finish {
-					crate::runtime::spawn(crate::panic::isolate(async move {
+					crate::runtime::detach(crate::panic::isolate(async move {
 						let (mut stream, _) = fut.await;
 						match reset {
 							Some(code) => stream.reset(code),
@@ -544,7 +544,7 @@ impl<S: GroupedSend + 'static> Drop for SendStream<S> {
 				let reset = self.reset.take();
 				let finish = std::mem::take(&mut self.finish);
 				if reset.is_some() || finish {
-					crate::runtime::spawn(crate::panic::isolate(async move {
+					crate::runtime::detach(crate::panic::isolate(async move {
 						let (mut stream, _) = fut.await;
 						match reset {
 							Some(code) => stream.reset(code),
@@ -873,7 +873,7 @@ impl<S: web_transport_trait::RecvStream + 'static> Drop for RecvStream<S> {
 			// waits on blocked I/O.
 			Some(RecvState::Reading(fut)) => {
 				if let Some(code) = self.stop.take() {
-					crate::runtime::spawn(crate::panic::isolate(async move {
+					crate::runtime::detach(crate::panic::isolate(async move {
 						let (mut stream, _) = fut.await;
 						stream.stop(code);
 					}));
