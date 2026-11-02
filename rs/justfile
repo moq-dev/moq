@@ -204,6 +204,13 @@ android *args:
     bash sh/local.sh cargo ndk -t arm64-v8a --platform 26 -o target/android-jni build-ffi "$@"
     nm -D --undefined-only target/android-jni/arm64-v8a/libmoq_ffi.so | grep -q __android_log_
 
+# Run moq-video's ignored MediaCodec tests on the Android device or emulator adb
+# reaches. Needs an NDK and the workspace-hack disabled, like `android`;
+# android.yml's `emulator` job runs it on an x86_64 emulator.
+[positional-arguments]
+android-test *args:
+    sh/rs/android-test.sh "$@"
+
 # Audit dependencies against deny.toml. Nightly: advisories land without a diff.
 audit:
     bash sh/local.sh cargo deny check --show-stats

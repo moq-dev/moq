@@ -756,15 +756,15 @@ fn largest_group(track: &track::Producer, answer: Option<ietf::Location>) -> Opt
 }
 
 /// Whether `subscription` needs a live feed for a copy whose publisher reported its Largest
-/// Object in group `edge`: one of its ranges is open, counts back from the live edge, or
-/// reaches the group the publisher may still be writing. Ranges wholly below it read only
-/// history, which fills serve.
+/// Object in group `edge`: a reader asked for it ([`track::Subscription::feed`]), or one of
+/// its ranges is open, counts back from the live edge, or reaches the group the publisher
+/// may still be writing. Ranges wholly below it read only history, which fills serve.
 fn wants_feed(subscription: &track::Subscription, edge: Option<u64>) -> bool {
 	if subscription.ranges.is_empty() {
 		return false;
 	}
 	let history = subscription.start().is_some() && subscription.end().zip(edge).is_some_and(|(end, edge)| end <= edge);
-	!history
+	subscription.feed || !history
 }
 
 /// A copy with no subscription upstream, kept for fetches and a returning subscriber.
@@ -2968,13 +2968,7 @@ impl Subscriber {
 			}
 		};
 		let start = subscription.as_ref().and_then(|s| s.start());
-		let join = match subscribe_join(start, subscription.as_ref().and_then(|s| s.end()), self.version) {
-			Ok(join) => join,
-			Err(err) => {
-				target.fail(err);
-				return None;
-			}
-		};
+		let join = subscribe_join(start, subscription.as_ref().and_then(|s| s.end()), self.version);
 		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest. Every
 		// draft-18 join is one, since its joining FETCH carries that group alone.
 		let live = start.is_none() || join.fetch;
@@ -3592,7 +3586,17 @@ impl Subscriber {
 						&& (poll_headed(&fill, waiter).is_ready()
 							|| largest.is_some_and(|largest| track.poll_past(largest.group, waiter).is_ready()))
 					{
-						track.set_live(largest, None);
+						// An absolute feed starts where it asked, whatever the answer's Largest; a
+						// live join's starts there.
+						let from = sent_bounds.0.filter(|_| !live);
+						match largest {
+							// A feed ending before the answer's Largest never shows it, so the
+							// answer alone makes the copy current. A live join's feed is open.
+							Some(largest) if !live && sent_bounds.1.is_some_and(|end| end <= largest.group) => {
+								track.set_live_ahead(largest, from)
+							}
+							largest => track.set_live(largest, from),
+						}
 						resuming = None;
 					}
 					// The last subscriber left: the upstream subscription goes with it, as on
@@ -3667,10 +3671,7 @@ impl Subscriber {
 					};
 					let ranges = if bounds != sent_bounds {
 						let mut join = if Filter::is_draft20(self.version) {
-							match subscribe_join(bounds.0, bounds.1, self.version) {
-								Ok(join) => join,
-								Err(err) => return Poll::Ready(End::Invalid(err)),
-							}
+							subscribe_join(bounds.0, bounds.1, self.version)
 						} else {
 							Join {
 								filter: match bounds {
@@ -12126,24 +12127,22 @@ struct Join {
 /// Earlier drafts have no fill parameter. Every subscription is a live join: Largest
 /// Object, followed by a joining FETCH relative at offset 0 for that group's head. An
 /// earlier start's groups are left to the copy's fills, one FETCH per run of them, and a
-/// later start skips the head locally. A bounded end has no
-/// joining-FETCH spelling, so it is refused rather than left open.
+/// later start skips the head locally. A bounded end has no joining-FETCH spelling
+/// either, so the join stays open and readers stop at their own end: refusing it would
+/// abort a resumed copy for every reader it serves.
 ///
 /// A start group we already know is absolute on draft-22 and needs no fill: the
 /// subscription's own range covers it, which is what our publisher serves from its cache.
-fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Result<Join, Error> {
+fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Join {
 	if !Filter::is_draft20(version) {
-		if end.is_some() {
-			return Err(Error::Unsupported);
-		}
-		return Ok(Join {
+		return Join {
 			filter: Filter::NextObject,
 			fill: None,
 			fetch: true,
-		});
+		};
 	}
 
-	Ok(match start {
+	match start {
 		// The live join: everything after the live edge, plus the current group's head.
 		None => Join {
 			filter: Filter::NextObject,
@@ -12177,7 +12176,7 @@ fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Res
 			fill: None,
 			fetch: false,
 		},
-	})
+	}
 }
 
 /// Resolve the first absolute ID or a later ID delta without overflowing. Subgroup relay
@@ -12225,7 +12224,7 @@ mod filter_tests {
 	#[test]
 	fn live_joins_the_current_group_with_a_fill() {
 		assert_eq!(
-			subscribe_join(None, None, Version::Draft22).unwrap(),
+			subscribe_join(None, None, Version::Draft22),
 			Join {
 				filter: Filter::NextObject,
 				fill: Some(ietf::Fill {
@@ -12243,7 +12242,7 @@ mod filter_tests {
 	#[test]
 	fn a_past_start_is_absolute() {
 		assert_eq!(
-			subscribe_join(Some(7), Some(10), Version::Draft22).unwrap(),
+			subscribe_join(Some(7), Some(10), Version::Draft22),
 			Join {
 				filter: Filter::Absolute {
 					start: ietf::Location { group: 7, object: 0 },
@@ -12259,7 +12258,7 @@ mod filter_tests {
 	#[test]
 	fn the_whole_track_is_unfiltered() {
 		assert_eq!(
-			subscribe_join(Some(0), None, Version::Draft22).unwrap(),
+			subscribe_join(Some(0), None, Version::Draft22),
 			Join {
 				filter: Filter::Unfiltered,
 				fill: None,
@@ -12270,34 +12269,23 @@ mod filter_tests {
 
 	const JOINING_DRAFTS: [Version; 1] = [Version::Draft18];
 
-	/// Every draft-18 join is Largest Object plus a joining FETCH, whatever its start,
-	/// so the current group's head arrives on the fetch stream and the live tail on the
+	/// Every draft-18 join is Largest Object plus a joining FETCH, whatever its start or
+	/// end, so the current group's head arrives on the fetch stream and the live tail on the
 	/// subscription.
 	#[test]
 	fn older_drafts_always_join_live() {
 		for version in JOINING_DRAFTS {
-			for start in [None, Some(7)] {
+			for (start, end) in [(None, None), (Some(7), None), (Some(7), Some(10))] {
 				assert_eq!(
-					subscribe_join(start, None, version).unwrap(),
+					subscribe_join(start, end, version),
 					Join {
 						filter: Filter::NextObject,
 						fill: None,
 						fetch: true,
 					},
-					"{version} from {start:?}"
+					"{version} from {start:?} to {end:?}"
 				);
 			}
-		}
-	}
-
-	/// A bounded end has no joining-FETCH spelling, so it is refused rather than left open.
-	#[test]
-	fn older_drafts_refuse_a_bounded_end() {
-		for version in JOINING_DRAFTS {
-			assert!(
-				matches!(subscribe_join(Some(7), Some(10), version), Err(Error::Unsupported)),
-				"{version}"
-			);
 		}
 	}
 }

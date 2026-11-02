@@ -136,13 +136,13 @@ per-frame CPU growth since #5926.
 - [Pre-cut audit findings](/quest/m1/cut-audit/README.md) - fix the crashes, hostile-input costs, and correctness bugs the 2026-10-24 audit of main found
 - [Vendored code has every upstream fix it needs](/quest/m1/vendor-sync/README.md) - quinn, libv4l-rs, nvidia-video-codec-sdk, rust-media-libs, cros-codecs, and UniFFI generator fixes are ported or planned, once per release cycle
 - [MKV leaf element limits](/quest/m1/mkv-leaf-limits.md) - `CodecID`, `DocType`, and `CodecPrivate` are refused past per-element size limits instead of read whole
+- [Mesh dials recover from a stuck flow](/quest/m1/mesh-fresh-port.md) - a relay redials a failing cluster peer from a fresh UDP port, so one dropped 5-tuple can't strand a link
 - [Remove the dependencies that don't earn their weight](/quest/m1/prune-deps.md) - Rust, JS, and vendored dependencies that are trivial, duplicated, or serve features not worth keeping are removed
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [moq-c at parity](/quest/m1/c/README.md) - the hand-written `moq-c` ships at the cut with every m1 binding feature moq-ffi gains
 - [Bindings see a moq-transport run end as an end](/quest/m1/ffi-ietf-run-end.md) - an IETF publisher ending its run reaches moq-ffi consumers as an end, not `Internal`
 - [Byte-stream renditions form a ladder](/quest/m1/stream-ladder.md) - moq-ffi stream producers link as `lower` and disable unfundable rungs like frame producers
-- [A relay answers a SUBSCRIBE on a copy it kept after a fetch](/quest/m1/relay-fetched-copy-subscribe.md) - the downstream SUBSCRIBE_OK waits for the upstream edge instead of hanging
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's instance, replacing the ANNOUNCE_TAKEOVER predecessor design
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
@@ -173,7 +173,6 @@ per-frame CPU growth since #5926.
 - [Main is no slower than release](/quest/m1/release-perf/README.md) - every benchmark where main is slower than release is fixed or accepted with a reason, checked by a final paired run before the cut
 - [Interop coverage](/quest/m1/interop-coverage/README.md) - the riskiest moq-transport features moq-net exposes get cross-implementation tests over drafts 18 and 22
 - [Calibrate the paired nightly benchmarks](/quest/m1/bench-ci.md) - A/A and deliberately slowed Nightly runs set the paired comparison's threshold, so its regression alerts can be trusted
-- [The shared pacer holds its rate under 2 Mbit/s](/quest/m1/pacer-low-rate.md) - a rate-paced controller stops sending up to twice its pacing rate at low rates, landed with a BBR3 retune that keeps the probe budgets
 - [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - nightly ffprobe checks that advertised timing, sync flags, and bytes match the media served
 - [Unbounded groups](/quest/m1/unbounded-groups/README.md) - groups and frames lose their size caps; a group keeps a 32 MB tail, and readers behind it replay through paced flights or refresh
 - [A follower is told when the serving instance's route leaves](/quest/m1/instance-leave-restart.md) - wire-level tests pin the restart a follower gets when the serving instance's route is withdrawn or dies while another instance's remains
