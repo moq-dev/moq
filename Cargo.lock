@@ -707,7 +707,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
- "base64 0.22.1",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -726,10 +725,8 @@ dependencies = [
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
- "sha1 0.10.7",
  "sync_wrapper",
  "tokio",
- "tokio-tungstenite 0.29.0",
  "tower",
  "tower-layer",
  "tower-service",
@@ -5391,6 +5388,7 @@ dependencies = [
  "aws-lc-rs",
  "axum",
  "base64 0.23.1",
+ "bench-harness",
  "data-encoding",
  "jsonwebtoken",
  "kio 0.6.2",
@@ -5909,6 +5907,7 @@ dependencies = [
  "http-body",
  "http-cache-reqwest",
  "humantime",
+ "hyper",
  "hyper-util",
  "kio 0.6.2",
  "libc",
@@ -6094,6 +6093,8 @@ dependencies = [
 name = "moq-sock"
 version = "0.2.0"
 dependencies = [
+ "arc-swap",
+ "bench-harness",
  "cfg_aliases",
  "core_affinity",
  "libc",
@@ -8535,7 +8536,7 @@ dependencies = [
  "libc",
  "thiserror 2.0.21",
  "tokio",
- "tokio-tungstenite 0.30.0",
+ "tokio-tungstenite",
  "tracing",
  "web-transport-proto",
  "web-transport-trait",
@@ -8559,7 +8560,8 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",
- "tokio-tungstenite 0.30.0",
+ "tokio-tungstenite",
+ "tokio-util",
  "tracing",
  "web-transport-trait",
 ]
@@ -11056,18 +11058,6 @@ dependencies = [
 
 [[package]]
 name = "tokio-tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
-dependencies = [
- "futures-util",
- "log",
- "tokio",
- "tungstenite 0.29.0",
-]
-
-[[package]]
-name = "tokio-tungstenite"
 version = "0.30.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "17a073bfed563fa236697a068031408a93cd9522e08abf9933ead3e73411bd71"
@@ -11079,7 +11069,7 @@ dependencies = [
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
- "tungstenite 0.30.0",
+ "tungstenite",
 ]
 
 [[package]]
@@ -11441,22 +11431,6 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
-
-[[package]]
-name = "tungstenite"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.9.5",
- "sha1 0.10.7",
- "thiserror 2.0.21",
-]
 
 [[package]]
 name = "tungstenite"
