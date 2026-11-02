@@ -10,10 +10,12 @@ final announced = connection.announced(
   options: const AnnounceOptions(prefix: 'live/', filter: '*/camera'),
 );
 await for (final event in announced.updates()) {
-  // A restart is a new publisher run at the same path: request it again.
+  // A restart is a new publisher run at the same path: request it again. A takeover
+  // continues what an earlier route served, like a start.
   switch (event) {
     case AnnounceEventStart(:final announce) ||
-        AnnounceEventRestart(:final announce):
+        AnnounceEventRestart(:final announce) ||
+        AnnounceEventTakeover(:final announce):
       // Prefix stays origin-relative; captures reports wildcard matches.
       print(announce.prefix);
       print(announce.captures);
@@ -43,8 +45,8 @@ await for (final request in server.requests()) {
 The package uses `Future` for asynchronous operations and `Stream` for
 announcements, and `connect` / `listen` take an options struct like Rust does.
 Types are spelled without the `Moq` prefix (`Session`, `BroadcastProducer`,
-`Backoff`), and microsecond fields read back as a `Duration` (`stats.rtt`,
-`frame.timestamp`). The lower-level generated API
+`Backoff`). Spans cross as a `Duration` (`stats.rtt`), and media times as an
+exact `Timestamp` with `toDuration()`. The lower-level generated API
 remains available through the re-exported `moq_ffi` package.
 
 Flutter Web is not supported. Browser applications should use the TypeScript

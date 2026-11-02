@@ -99,12 +99,15 @@ fn prepare_msg_x(
 	if let Some(ip) = &transmit.src_ip {
 		match ip {
 			IpAddr::V4(v4) => {
-				if encode_src_ip {
-					let addr = libc::in_addr {
+				// Darwin ignores IP_RECVDSTADDR as a send-side source override; only IP_PKTINFO is honored.
+				let pktinfo = libc::in_pktinfo {
+					ipi_ifindex: 0,
+					ipi_spec_dst: libc::in_addr {
 						s_addr: u32::from_ne_bytes(v4.octets()),
-					};
-					encoder.push(libc::IPPROTO_IP, libc::IP_RECVDSTADDR, addr);
-				}
+					},
+					ipi_addr: libc::in_addr { s_addr: 0 },
+				};
+				encoder.push(libc::IPPROTO_IP, libc::IP_PKTINFO, pktinfo);
 			}
 			IpAddr::V6(v6) => {
 				let pktinfo = libc::in6_pktinfo {
@@ -157,7 +160,7 @@ pub(crate) fn recv_via_recvmsg_x(
 	let msg_count =
 		retry_if_interrupted(|| unsafe { recvmsg_x(io.as_raw_fd(), hdrs.as_mut_ptr(), max_msg_count as _, 0) })?;
 	for i in 0..(msg_count as usize) {
-		meta[i] = decode_recv(&names[i], &hdrs[i], hdrs[i].msg_datalen as usize)?;
+		meta[i] = decode_recv(&names[i], &hdrs[i], hdrs[i].msg_flags, hdrs[i].msg_datalen as usize)?;
 	}
 	Ok(msg_count as usize)
 }

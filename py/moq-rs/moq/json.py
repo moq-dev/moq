@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import timedelta
 from typing import Any
 
 from moq_ffi import (
@@ -32,7 +31,7 @@ from moq_ffi import (
 )
 
 from . import publish, subscribe
-from ._records import _opt_from_us, _opt_us
+from ._records import Timestamp, _opt_from_ts, _opt_ts
 from ._stream import _Stream
 from .publish import BroadcastProducer, TrackDemand
 
@@ -55,19 +54,17 @@ __all__ = [
 class Timed:
     """A parsed JSON value and the timestamp of the frame that carried it.
 
-    ``timestamp`` is on the broadcast clock, and ``None`` on an untimed track. It is
-    rounded down to a whole microsecond, so a tick on a track like 90 kHz may not
-    survive a read and republish exactly.
+    ``timestamp`` is on the broadcast clock, and ``None`` on an untimed track.
     """
 
     value: Any
-    timestamp: timedelta | None
+    timestamp: Timestamp | None
 
     @staticmethod
     def _from_ffi(value: MoqJsonValue | None) -> Timed | None:
         if value is None:
             return None
-        return Timed(value=json.loads(value.value), timestamp=_opt_from_us(value.timestamp_us))
+        return Timed(value=json.loads(value.value), timestamp=_opt_from_ts(value.timestamp))
 
 
 class SnapshotProducer:
@@ -94,9 +91,9 @@ class SnapshotProducer:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def update(self, value: Any, *, timestamp: timedelta | None = None) -> None:
+    def update(self, value: Any, *, timestamp: Timestamp | None = None) -> None:
         """Publish a new value. A no-op if unchanged from the previous update."""
-        self._inner.update(json.dumps(value), _opt_us(timestamp, "timestamp"))
+        self._inner.update(json.dumps(value), _opt_ts(timestamp))
 
     def finish(self) -> None:
         """Finish the track, closing any open group."""
@@ -117,9 +114,9 @@ class StreamProducer:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def append(self, value: Any, *, timestamp: timedelta | None = None) -> None:
+    def append(self, value: Any, *, timestamp: Timestamp | None = None) -> None:
         """Append one record to the log."""
-        self._inner.append(json.dumps(value), _opt_us(timestamp, "timestamp"))
+        self._inner.append(json.dumps(value), _opt_ts(timestamp))
 
     def finish(self) -> None:
         """Finish the track, closing the group."""
@@ -194,13 +191,13 @@ class WindowProducer:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def push(self, value: Any, *, timestamp: timedelta | None = None) -> None:
+    def push(self, value: Any, *, timestamp: Timestamp | None = None) -> None:
         """Append one record to the back of the window."""
-        self._inner.push(json.dumps(value), _opt_us(timestamp, "timestamp"))
+        self._inner.push(json.dumps(value), _opt_ts(timestamp))
 
-    def pop(self, count: int, *, timestamp: timedelta | None = None) -> None:
+    def pop(self, count: int, *, timestamp: Timestamp | None = None) -> None:
         """Drop ``count`` records from the front of the window, clamped to what it holds."""
-        self._inner.pop(count, _opt_us(timestamp, "timestamp"))
+        self._inner.pop(count, _opt_ts(timestamp))
 
     def cut(self) -> None:
         """Close the open group, so the next edit opens one restating the retained window.
@@ -258,7 +255,7 @@ def _window_event(timed: MoqJsonWindowTimed | None) -> Timed | None:
         value = WindowSkip(range(event.start, event.end))
     else:
         raise TypeError(f"unknown window event: {event!r}")
-    return Timed(value=value, timestamp=_opt_from_us(timed.timestamp_us))
+    return Timed(value=value, timestamp=_opt_from_ts(timed.timestamp))
 
 
 class WindowConsumer(_Stream[Timed]):

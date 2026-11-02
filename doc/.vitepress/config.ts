@@ -117,8 +117,10 @@ export default defineConfig({
 						{ text: "Overview", link: "/concept/" },
 						{ text: "Transport", link: "/concept/transport" },
 						{ text: "moq-lite", link: "/concept/moq-lite" },
+						{ text: "Identity and recovery", link: "/concept/identity" },
 						{ text: "hang", link: "/concept/hang" },
 						{ text: "Audio jitter", link: "/concept/audio-jitter" },
+						{ text: "Compressed tracks", link: "/concept/compression" },
 						{ text: "Stats", link: "/concept/stats" },
 						{ text: "Standards", link: "/concept/standard" },
 						{
@@ -206,7 +208,7 @@ export default defineConfig({
 								{ text: "moq-auth", link: "/lib/rs/moq-auth" },
 								{ text: "moq-room", link: "/lib/rs/moq-room" },
 								{ text: "moq-json", link: "/lib/rs/moq-json" },
-								{ text: "moq-clock", link: "/lib/rs/moq-clock" },
+								{ text: "kio", link: "/lib/rs/kio" },
 							],
 						},
 						{

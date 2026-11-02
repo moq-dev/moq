@@ -40,7 +40,7 @@ fn frames(sequence: u64, mode: Option<&str>) -> Vec<Vec<u8>> {
 /// Publish every group, cutting group 1 for `drop`.
 fn write(track: &mut moq_net::track::Producer, mode: Option<&str>) -> anyhow::Result<()> {
 	// Declare the end before the final group's payload is even available.
-	track.finish_at(moq_net::track::Position::group(GROUPS))?;
+	track.finish_at(moq_net::track::Position::group(GROUPS), None)?;
 	for sequence in 0..GROUPS {
 		let mut group = track.append_group()?;
 		if mode == Some("drop") && sequence == 1 {
@@ -186,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
 				.connect(url)
 				.established()
 				.await?;
-			let broadcast = consumer.routed_broadcast(&args[3]).await?;
+			let broadcast = consumer.follow(&args[3], None)?.available().await?;
 			let remote = broadcast.track("tail")?;
 			if status {
 				// Query before subscribing so draft-18+ must use TRACK_STATUS,

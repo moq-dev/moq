@@ -39,7 +39,7 @@ async function session(protocol: string) {
 }
 
 async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadcast.Consumer> {
-	const request = origin.request(path, { announced: true });
+	const request = origin.follow(path);
 	for (;;) {
 		const front = request.active.peek();
 		if (front) return front;
@@ -48,11 +48,11 @@ async function active(origin: Origin.Producer, path: Path.Valid): Promise<Broadc
 }
 
 // Whether the wire carries the route's epoch, and the track's timestamps. Neither is
-// authenticated, so the frames open either way. A lite-05 receiver drops timestamps.
+// authenticated, so the frames open either way.
 const transports = [
 	["moq-lite-07", "moq-lite-07-wip", true, true],
-	["moq-lite-05", "moq-lite-05", false, false],
-	["moq-transport-18", "moqt-18", true, true],
+	["moq-lite-05", "moq-lite-05", false, true],
+	["moq-transport-18", "moqt-18", false, true],
 ] as const;
 
 for (const [name, protocol, routed, timed] of transports) {
@@ -74,8 +74,8 @@ for (const [name, protocol, routed, timed] of transports) {
 
 		const remote = await active(subscriber, path);
 		// The epoch rides the route where the wire carries it; elsewhere the application supplies it.
-		if (routed) expect(remote.epoch).toBe(generation.epoch);
-		const epoch = routed && remote.epoch ? remote.epoch : generation.epoch;
+		expect(remote.epoch).toBe(routed ? generation.epoch : undefined);
+		const epoch = remote.epoch ?? generation.epoch;
 		const consumer = await new Protected.Consumer(remote, cred.consume(epoch)).subscribe("video", {
 			maxDelay: Milli(60_000),
 		});

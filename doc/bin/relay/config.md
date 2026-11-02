@@ -28,11 +28,11 @@ secret = "/etc/moq/reset.key"        # File holding 64 hex chars. Omit for a ran
 cert = "cert.pem"                    # Certificate chain and key. Reloaded on change.
 key = "key.pem"
 generate = ["localhost"]             # Or: a self-signed cert for development.
-root = ["peer-ca.pem"]               # Optional: CAs for client certs (mTLS), reported to the auth server. Needs QUIC.
+root = ["peer-ca.pem"]               # Optional: CAs for client certs (mTLS), reported to the auth server. Needs QUIC or tcp.tls.
 
 [listen.tcp]                         # Plaintext qmux over TCP for trusted local workers.
 bind = "127.0.0.1:4444"
-# tls = true                         # Or: qmux over TLS (tls://) with the listen certificate, no client certs.
+# tls = true                         # Or: qmux over TLS (tls://) with the listen certificate and client-cert policy.
 
 [listen.unix]                        # Plaintext qmux over a Unix socket, gated by peer credentials.
 bind = "/run/moq/internal.sock"
@@ -42,7 +42,6 @@ allow.uid = [1001]
                                      # The relay always offers ietf, for moq-lite-07 relay links.
 auth = false                         # Decline MoQ Auth.
 solicit = false                      # Decline MoQ Solicit, so peers may announce unasked.
-epoch = false                        # Decline MoQ Epoch, so routes over moq-transport carry no epoch.
 ```
 
 `timeout` bounds the whole handshake, transport through MoQ SETUP and auth
@@ -54,6 +53,13 @@ admission is bounded by the same value from the request's arrival.
 alike. A client that advertises its own name (moq-lite-05+ or any moq-transport draft)
 reaches the [auth server](/bin/relay/auth#the-contract) with it as `implementation`,
 which is where to count client versions; older clients arrive without one.
+
+`bind` is the relay's one UDP port. Beside QUIC it carries WebRTC media for an
+[embedder](/bin/relay/#embed) that takes it; otherwise that traffic is dropped,
+as are STUN Binding queries ([`[stun]`](#stun) has its own port) and anything
+else. `/metrics` counts the drops in `moq_relay_demux_dropped_total` by `reason`:
+`unclaimed` (WebRTC with no embedder), `overflow`, `stun`, and `unknown`. Not
+with `runtime.io_uring`, which serves QUIC alone.
 
 `reset.secret` lets a relay restarted on the same address reset its
 predecessor's QUIC connections, so clients reconnect at once instead of
@@ -68,6 +74,8 @@ A setting no configured listener reads stops startup rather than being ignored.
 A stream-only relay refuses `preferred_v4`, `preferred_v6`, `lb.id`, and
 `reset.secret`, which only QUIC reads, and a `[listen.tls]` `cert`, `key`, or `generate` unless
 `tcp.tls` serves it.
+The io\_uring runtime refuses `preferred_v4`, `preferred_v6`, and `lb.id`;
+use the tokio runtime when the listener needs these settings.
 `[listen.lb] nonce` needs an `id` in the same table; unset nonce uses 8.
 The `--listen-quic-lb-id` and `--listen-quic-lb-nonce` flags update that table.
 `unix.allow` needs `unix.bind`.
@@ -81,7 +89,7 @@ Transport tuning, applied to accepted and dialed connections alike.
 congestion_control = "delay"         # "delay" (BBR, the default), "loss" (CUBIC), or "none".
 max_streams = 10000                  # Concurrent streams per connection, bidi and uni; 0 is refused. Default.
 idle_timeout = "10s"                 # Drop a connection after this long with nothing on it. Default.
-keep_alive = "3s"                    # Ping interval; "0s" disables it. iroh refuses zero and keeps a separate 5s path heartbeat. Default.
+# keep_alive = "3s"                  # Ping interval; unset or "0s" derives it from the idle timeout. iroh keeps a separate 5s path heartbeat.
 gso = true                           # UDP segmentation offload. iroh cannot turn it off.
 mtu_discovery = false                # Path MTU discovery. Default.
 receive_window = 134217728           # Whole-connection window, in bytes. Default (128 MiB).
@@ -103,7 +111,16 @@ Iroh currently refuses an explicit keylog path when enabled.
 `idle_timeout` is how long a peer that vanished without a close keeps its
 sessions, and so its [cluster routes](/bin/relay/cluster#failure-detection).
 QUIC uses the smaller of the two endpoints' values, so this also bounds the
-other end. Keep `keep_alive` under a third of it.
+other end.
+
+Leave `keep_alive` unset or set it to `"0s"` to derive it from the idle timeout both ends settle
+on: 3/10 of it, so 3s against the 10s default, and shorter against a peer that
+advertises a shorter `max_idle_timeout`. Changing `idle_timeout` then needs no
+matching change here. If neither end sets an idle timeout, pings still run every
+9s. Set it only for a NAT binding that expires sooner than
+the idle timeout. A value no shorter than the negotiated idle timeout could
+never keep the connection up, so it is capped at the derived interval. iroh
+cannot see the peer's timeout, so it derives from the local `idle_timeout`.
 
 Raise the receive windows when a fat, long path idles below the link rate. The
 128 MiB `receive_window` default carries several Gbps at a 100 ms RTT and bounds
@@ -191,7 +208,7 @@ start rather than being ignored. If io\_uring workers fail to start naming
 listen = "[::]:4443"                 # HTTP: fingerprint, announced, fetch, health.
 
 [web.https]
-listen = "[::]:443"                  # HTTPS plus the WebSocket fallback.
+listen = "[::]:443"                  # HTTPS, the WebSocket fallback, and tls:// with the listen certificate.
 cert = "cert.pem"                    # cert, key, and root need listen. Omit cert and key with [acme].
 key = "key.pem"
 
@@ -317,14 +334,14 @@ goaway.redirect = "same-host"        # How far to trust a draining peer's redire
 goaway.handover = "10s"              # Cap on how long the drained upstream keeps serving.
 extensions.auth = false              # Decline MoQ Auth on outbound moq-transport sessions.
 extensions.solicit = false           # Decline MoQ Solicit.
-extensions.epoch = false             # Decline MoQ Epoch. All default to on, as in [listen.extensions].
 ```
 
 A draining upstream may name a replacement URI. `same-host` follows it only
 onto the host already dialed, so a peer can move us between ports and schemes;
 `follow` also lets it choose the host, which trusts it not to point us into
 the local network; `ignore` keeps the current address. `handover` caps how long
-the old connection keeps serving after a GOAWAY.
+the old connection keeps serving after a GOAWAY; it closes sooner, once the
+replacement is up and it carries no subscription or fetch.
 
 ## \[cache]
 
@@ -338,7 +355,11 @@ duration = "30s"                     # Cap how long a non-latest group is kept, 
 `capacity` is a byte target, repaid as active publishers write. `duration`
 (30s by default) bounds memory by age, and sweeps on a timer, so a publisher
 that stalls but stays connected still has its idle groups reclaimed. The latest
-group of every track is always kept, even past `capacity`.
+group of every track, and any group still being read, is kept past `capacity` but
+sheds its oldest frames instead. Whatever the capacity, a group holds at most its
+newest 32 MB. A reader of a track's newest group that reaches a shed frame asks
+for a new group on tracks that opt into refresh. Any other reader of a shed
+frame sees `Evicted`.
 
 ## \[stats]
 
@@ -376,6 +397,10 @@ enabled = true
 secret = "./iroh-secret.key"         # Persist the key so the endpoint id survives restarts.
 # disable_relay = true               # Direct addresses only. Right on a LAN, wrong on the internet.
 ```
+
+The secret path must be a regular file, not a symlink. A missing file is created
+exclusively, with mode `0600` on Unix. Existing Unix files readable by group or
+others are refused; use `chmod 600` to make an existing key private before startup.
 
 See [Transport](/concept/transport#iroh-peer-to-peer-experimental).
 

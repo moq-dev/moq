@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Run `just rs check|check-test|lint|fix|test` on the crates a diff touches, plus
-# their dependents. `platform` is the Windows and macOS compile.
+# Run `just rs check|check-test|lint|fix|test` on the crates a diff touches,
+# plus their dependents. `platform` is the Windows and macOS compile.
 #
 # Usage: sh/rs/select.sh check|check-test|lint|fix|test|platform|uring LISTFILE|--all
 #
@@ -20,12 +20,10 @@ select_packages() {
         echo ALL
         return
     fi
-    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest|(net|tokio|media)-features)\.sh|\.config/nextest\.toml)$' "$list"; then
+    if [[ "$list" == --all ]] || grep -qE '^(\.cargo/.*|sh/local\.(sh|ts)|Cargo\.(toml|lock)|clippy\.toml|rust-toolchain\.toml|rs/justfile|sh/rs/(select|platform|nextest)\.sh|\.config/nextest\.toml)$' "$list"; then
         echo ALL
         return
     fi
-
-    grep -qE '^(rs|demo)/' "$list" || return 0
 
     # `--no-deps` keeps this to workspace members and off the network.
     local metadata
@@ -53,11 +51,28 @@ select_packages() {
     # depend on and the test build never compiles, so it selects that crate alone
     # (for its lint) rather than every dependent's tests.
     benches=$(sed -n 's|^rs/\([^/]*\)/benches/.*|\1|p' "$list")
+    # A target can also sit outside its crate, as moq-cli's interop examples
+    # under test/interop/clients/rust/ do, so a change in the directory of a
+    # target's root file, which holds that file's modules, seeds its crate.
+    # Cargo leaves the manifest's `..` in `src_path`, so they are resolved here.
+    # sh/dispatch.sh's `rs` scope must match those directories too; the
+    # selector's tests check that.
     seeds=$({
         sed -n '\|^rs/[^/]*/benches/|d; s|^rs/\([^/]*\)/.*|\1|p' "$list"
-        jq -r --rawfile list "$list" '($list | split("\n")) as $paths | .packages[]
-            | (.manifest_path | split("/")) as $p | select($p[-4] == "demo")
-            | select(any($paths[]; startswith("demo/\($p[-3])/\($p[-2])/"))) | .name' <<<"$metadata"
+        # moq-relay's tests read its NixOS module.
+        sed -n 's|^nix/modules/moq-relay\.nix$|moq-relay|p' "$list"
+        jq -r --rawfile list "$list" '
+            def resolve: gsub("\\\\"; "/") | reduce split("/")[] as $s ([];
+                if $s == ".." then .[:-1] elif $s == "." then . else . + [$s] end) | join("/");
+            ($list | split("\n") | map(select(. != ""))) as $paths
+            | ((.workspace_root | resolve) + "/") as $root
+            | .packages[]
+            | (.manifest_path | split("/")) as $p
+            | ($p[:-1] | join("/") + "/") as $crate
+            | select(($p[-4] == "demo" and any($paths[]; startswith("demo/\($p[-3])/\($p[-2])/")))
+                or any(.targets[].src_path | resolve | select(startswith($crate) | not)
+                    | ltrimstr($root) | sub("[^/]*$"; ""); . as $dir | any($paths[]; startswith($dir))))
+            | .name' <<<"$metadata"
     } | sort -u)
     edges=$(jq -r '.packages[] | .name as $name | .dependencies[] | "\($name) \(.name)"' <<<"$metadata")
 
@@ -133,19 +148,11 @@ case "$action" in
         if wants '(moq-uring|moq-relay)'; then just rs uring; fi
         ;;
     check | check-test | lint)
+        # The isolated feature builds (`just rs features`) stay out of the
+        # gate; the Features workflow runs them nightly and on release PRs.
+        # Nightly runs the Send-depth proof (`just rs send-depth`) on its
+        # pinned toolchain.
         just rs "$action" "${flags[@]}"
-        # Workspace feature unification can hide an individual crate's missing
-        # gates. Keep the boundary checks isolated and the full matrix nightly.
-        just rs feature-shapes "${flags[@]}"
-        if wants '(kio|moq-net)'; then just rs loom --no-run; fi
-        if wants moq-net; then just rs net-features; fi
-        if wants moq-quic; then just rs quic-features; fi
-        if wants moq-tokio; then just rs tokio-features; fi
-        if wants '(moq-video|moq-audio|moq-transcode)'; then just rs media-features; fi
-        # moq-wasm's crate root is `#![cfg(target_arch = "wasm32")]`, so only a
-        # wasm32 pass checks it. moq-mux, moq-ffi, and moq-clock ride along in that pass, and
-        # nothing depends on moq-ffi, so each has to reach it on its own.
-        if wants '(moq-wasm|moq-mux|moq-ffi|moq-clock)'; then just rs wasm; fi
         # Device code behind the off-by-default `capture` feature. check-test
         # lints it through the test build, as for the default features.
         if [[ "$action" != lint ]] && wants '(moq-video|moq-audio|moq-scene|moq-studio)'; then
@@ -153,12 +160,9 @@ case "$action" in
         fi
         # moq-cli's media tasks are behind `play`; only check-test runs tests.
         if [[ "$action" == check-test ]] && wants moq-cli; then just rs play; fi
-        # The relay's io_uring listener, off the default feature set.
-        if wants moq-relay; then just rs uring-check; fi
         ;;
     fix)
         just rs fix "${flags[@]}"
-        if wants '(moq-wasm|moq-mux|moq-ffi|moq-clock)'; then just rs wasm-fix; fi
         ;;
     test)
         # A selection can hold nothing testable, and
@@ -167,7 +171,7 @@ case "$action" in
         # CI keeps Cargo's per-crate build timings, which check.yml uploads.
         timings=()
         [[ "${GITHUB_ACTIONS:-}" != true ]] || timings=(--timings)
-        # The tests behind the off-by-default device features join this build
+        # The tests behind the off-by-default device and runtime features join this build
         # rather than compiling the workspace again per feature set. Those
         # features only add code, so every test still runs. Cargo rejects a
         # feature of a package outside the selection, hence the explicit picks.
@@ -179,6 +183,9 @@ case "$action" in
         if wants moq-cli; then features+=(moq-cli/play moq-cli/openh264); fi
         # The WebRTC module's hostile-input tests, such as mDNS backpressure.
         if wants moq-tokio; then features+=(moq-tokio/webrtc); fi
+        # The relay's io_uring listener, Linux-only. A moq-uring change selects
+        # the relay too, as its dependent.
+        if [[ "$(uname -s)" == Linux ]] && wants moq-relay; then features+=(moq-relay/io-uring); fi
         if ((${#features[@]})); then flags+=(--features "${features[*]}"); fi
         just rs test "${flags[@]}" ${timings[@]+"${timings[@]}"}
         ;;

@@ -55,11 +55,12 @@ pub struct Peer {
 }
 
 impl std::fmt::Debug for Peer {
-	/// Redact `token`: [`crate::Config::load`] traces the whole resolved config,
+	/// Redact credentials: [`crate::Config::load`] traces the whole resolved config,
 	/// so a derived `Debug` would print cluster credentials into logs.
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let url = peer_url(&self.url).ok();
 		f.debug_struct("Peer")
-			.field("url", &self.url)
+			.field("url", &url.as_ref().map(moq_tokio::RedactedUrl::new))
 			.field("cost", &self.cost)
 			.field("egress", &self.egress)
 			.field("token", &self.token.as_ref().map(|_| "..."))
@@ -1357,7 +1358,7 @@ impl Cluster {
 		}
 
 		let stats = self.stats.tier(token.tier.clone()).session(&token.label);
-		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = %token.root,
+		tracing::info!(transport = %request.transport, ?request.role, tier = %token.tier, root = ?token.root,
 			publish = ?publisher.as_ref().map(origin::Producer::allowed),
 			subscribe = ?subscriber.as_ref().map(origin::Producer::allowed),
 			"session accepted");
@@ -1423,13 +1424,16 @@ impl Cluster {
 	}
 
 	/// Attach a stats producer, replacing the default disabled registry with its
-	/// registry and taking over keeping its publish task alive.
+	/// registry, and run its publisher.
 	///
-	/// Build one with [`stats::Config::build`](crate::stats::Config::build), passing
+	/// Build both with [`stats::Config::build`](crate::stats::Config::build), passing
 	/// [`Self::origin`] so it publishes through the same origin cluster peers read
 	/// from. The cluster holds the producer from here on, so the caller may drop
-	/// its own handle: publishing lasts exactly as long as the cluster does.
-	pub fn with_stats(mut self, stats: moq_stats::Producer) -> Self {
+	/// its own handle: publishing lasts exactly as long as the cluster does. A
+	/// panic in the publisher ends [`Relay::run`](crate::Relay::run), like the
+	/// cluster's other critical tasks. Must be called within a Tokio runtime.
+	pub fn with_stats(mut self, stats: moq_stats::Producer, publisher: moq_stats::Publisher) -> Self {
+		self.critical.spawn("stats publisher", publisher.run());
 		self.stats = stats.registry().clone();
 		self.refusals = crate::refusals::Refusals::new(&self.stats);
 		self._stats_publisher = Some(stats);
@@ -1473,7 +1477,7 @@ impl Cluster {
 			origin = match mounted.and_then(|at| origin.mount(at, target)) {
 				Ok(origin) => origin,
 				Err(err) => {
-					tracing::warn!(root = %token.root, %at, %target, %err, "grant mount refused");
+					tracing::warn!(root = ?token.root, ?at, ?target, ?err, "grant mount refused");
 					return None;
 				}
 			};
@@ -1615,7 +1619,15 @@ impl Cluster {
 		}
 
 		// Build here so malformed API roots fail startup, before background work.
-		let http = if self.config.api.url.as_deref().is_some_and(connect_api_is_http) {
+		let http = if self
+			.config
+			.api
+			.url
+			.as_deref()
+			.map(connect_api_is_http)
+			.transpose()?
+			.unwrap_or(false)
+		{
 			let tls = self
 				.connect
 				.as_ref()
@@ -1841,10 +1853,10 @@ impl Cluster {
 		dialed: DialMap,
 		http: ClientWithMiddleware,
 	) {
-		let mut tick = moq_clock::interval(CONNECT_API_POLL_INTERVAL);
+		let mut tick = kio::clock::interval(CONNECT_API_POLL_INTERVAL);
 		// A slow fetch must not bank missed ticks into a catch-up burst; just resume
 		// the cadence from the next whole interval.
-		tick.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Skip);
+		tick.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
 		loop {
 			tick.tick().await;
 
@@ -1901,16 +1913,13 @@ impl Cluster {
 	/// stale-if-error are handled by the HTTP cache middleware on `http`, so this
 	/// just issues the request and parses the (possibly cache-served) body.
 	async fn fetch_peer_list(http: &ClientWithMiddleware, url: Url) -> anyhow::Result<Vec<Peer>> {
-		let body = http
-			.get(url)
-			.send()
-			.await
-			.context("cluster.api.url request failed")?
-			.error_for_status()
-			.context("cluster.api.url returned an error status")?
-			.text()
-			.await
-			.context("failed to read cluster.api.url body")?;
+		let response = http.get(url).send().await.context("cluster.api.url request failed")?;
+		anyhow::ensure!(
+			response.status().is_success(),
+			"cluster.api.url returned {}",
+			response.status()
+		);
+		let body = response.text().await.context("failed to read cluster.api.url body")?;
 
 		serde_json::from_str(&body).context("cluster.api.url response is not a JSON array of peers")
 	}
@@ -1975,7 +1984,7 @@ impl Cluster {
 		let mut redial = Redial::default();
 
 		loop {
-			let started = moq_clock::now();
+			let started = kio::clock::now();
 			let result = self.run_remote_once(&addrs, target).await;
 			let elapsed = started.elapsed();
 
@@ -1985,8 +1994,8 @@ impl Cluster {
 				Err(err) => tracing::warn!(%err, "cluster peer error; will retry"),
 			}
 
-			let wait = redial.next(&mut rand::rng());
-			moq_clock::sleep(wait).await;
+			let wait = redial.next(&mut kio::clock::rng());
+			kio::clock::sleep(wait).await;
 		}
 	}
 
@@ -2233,8 +2242,18 @@ fn strip_jwt(url: &mut Url) {
 
 /// Whether a `--cluster-api-url` source is an http(s) URL (otherwise it's
 /// treated as a local file path, which needs no TLS client).
-fn connect_api_is_http(source: &str) -> bool {
-	Url::parse(source).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+fn connect_api_is_http(source: &str) -> anyhow::Result<bool> {
+	let Ok(url) = Url::parse(source) else { return Ok(false) };
+	if url.scheme() == "http" {
+		let loopback = match url.host() {
+			Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+			Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+			Some(url::Host::Domain(host)) => host == "localhost",
+			None => false,
+		};
+		anyhow::ensure!(loopback, "--cluster-api-url requires HTTPS except on loopback");
+	}
+	Ok(matches!(url.scheme(), "http" | "https"))
 }
 
 /// Resolve a cluster peer to the URL we dial.
@@ -2321,7 +2340,6 @@ impl Default for Redial {
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use crate::Config as RelayConfig;
@@ -2390,7 +2408,8 @@ mod tests {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
@@ -2423,7 +2442,7 @@ mod tests {
 			.expect("publish at the fleet path");
 		let subscriber = cluster.subscriber(&token).expect("subscribe grant").consume();
 		let broadcast = subscriber
-			.request_broadcast(".svc/foo", None)
+			.request(".svc/foo", None)
 			.await
 			.expect("resolves through the mount");
 		assert_eq!(broadcast.info().path.as_str(), ".svc/foo");
@@ -2478,30 +2497,27 @@ mod tests {
 		};
 
 		let cluster = new_cluster(Config::default()).expect("cluster");
-		let stats = config.build(cluster.origin.clone()).expect("stats");
-		let cluster = cluster.with_stats(stats);
+		let (stats, publisher) = config.build(cluster.origin.clone()).expect("stats");
+		let cluster = cluster.with_stats(stats, publisher);
 
 		let path = moq_net::Path::from_static(".stats/node/test");
 		let consumer = cluster.origin.consume();
-		let route = tokio::time::timeout(std::time::Duration::from_secs(5), consumer.routed(&path))
-			.await
-			.expect("stats broadcast announced within 5s")
-			.expect("stats broadcast present");
-		assert!(route.epoch.is_some(), "stats announce under an epoch");
-		let broadcast = consumer
-			.request_broadcast(&path, None)
-			.await
-			.expect("stats broadcast resolves");
+		let broadcast = kio::clock::timeout(
+			std::time::Duration::from_secs(5),
+			consumer.follow(&path, None).unwrap().available(),
+		)
+		.await
+		.expect("stats broadcast announced within 5s")
+		.expect("stats broadcast resolves");
+		assert!(broadcast.info().epoch.is_some(), "stats announce under an epoch");
 
 		// Several publish intervals (1s each by default) after the handle went out
-		// of scope, the task is still running and its broadcast still open. The
-		// re-check is bounded: without the keepalive the broadcast is gone and
-		// `routed` waits forever, which must read as a failure rather
-		// than a hung test.
-		tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
-		let still_live = tokio::time::timeout(std::time::Duration::from_secs(2), consumer.routed(&path)).await;
+		// of scope, the task is still running and its broadcast still announced: a
+		// request refuses a front whose route retracted.
+		kio::clock::sleep(std::time::Duration::from_millis(2500)).await;
+		let still_live = consumer.request(&path, None).await;
 		assert!(
-			matches!(still_live, Ok(Some(_))),
+			still_live.is_ok(),
 			"stats broadcast unannounced after the producer handle was dropped: \
 			 the publish task stopped while the cluster kept serving"
 		);
@@ -2968,13 +2984,20 @@ mod tests {
 	/// credential from `Debug` instead of printing it into logs.
 	#[test]
 	fn peer_debug_redacts_token() {
-		let peer = Peer::new("https://peer.example/").with_cost(2).with_token("secret");
-		let debug = format!("{peer:?}");
-		assert!(!debug.contains("secret"), "Debug must not leak the credential: {debug}");
-		assert!(
-			debug.contains("https://peer.example/"),
-			"Debug keeps the address: {debug}"
-		);
+		for peer in [
+			Peer::new("https://peer.example/").with_cost(2).with_token("secret"),
+			Peer::new("https://user:secret@peer.example/?jwt=secret#secret"),
+			Peer::new("https://peer.example:bad/?jwt=secret"),
+		] {
+			let debug = format!("{peer:?}");
+			assert!(!debug.contains("secret"), "Debug must not leak the credential: {debug}");
+			if peer_url(peer.url()).is_ok() {
+				assert!(
+					debug.contains("https://peer.example/"),
+					"Debug keeps the address: {debug}"
+				);
+			}
+		}
 	}
 
 	/// Static `--cluster-connect` entries get the same all-or-nothing
@@ -3068,14 +3091,14 @@ mod tests {
 		assert_eq!(origin.config().cache_duration, duration);
 		assert_eq!(origin.config().pool.expiry(), Some(duration));
 
-		let stats = crate::stats::Config {
+		let (stats, publisher) = crate::stats::Config {
 			enabled: true,
 			node: Some("test".to_string()),
 			..Default::default()
 		}
 		.build(origin.clone())
 		.expect("stats");
-		let cluster = cluster.with_stats(stats);
+		let cluster = cluster.with_stats(stats, publisher);
 
 		assert_eq!(cluster.origin.hop().id(), origin.hop().id());
 		assert_eq!(cluster.origin.config().cache_duration, duration);
@@ -3088,16 +3111,19 @@ mod tests {
 		assert!(pool.used() > 0, "writes charge the constructed cache pool");
 
 		let consumer = cluster.origin.consume();
-		tokio::time::timeout(Duration::from_secs(2), consumer.request_broadcast("cam", None))
+		kio::clock::timeout(Duration::from_secs(2), consumer.request("cam", None))
 			.await
 			.expect("broadcast resolves")
 			.expect("broadcast present");
 
 		let stats_path = moq_net::Path::from_static(".stats/node/test");
-		tokio::time::timeout(Duration::from_secs(5), consumer.routed(&stats_path))
-			.await
-			.expect("stats announced")
-			.expect("stats present");
+		kio::clock::timeout(
+			Duration::from_secs(5),
+			consumer.follow(&stats_path, None).unwrap().available(),
+		)
+		.await
+		.expect("stats announced")
+		.expect("stats present");
 	}
 
 	/// The reserved `cluster.id` 0 is rejected, since it cannot be excluded for loop
@@ -3143,9 +3169,8 @@ mod tests {
 	#[test]
 	fn cluster_connect_object_form_round_trip() {
 		let toml = "[cluster]\nconnect = [\"https://a.example/?cost=1\", { url = \"https://b.example/\", cost = 2, egress = 2, token = \"secret\", upstream = true }]\n";
-		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-connect-object-toml.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("cluster-connect-object-toml.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
@@ -3245,9 +3270,8 @@ mod tests {
 		}
 
 		let toml = "[cluster]\nnode = \"https://relay.example.com\"\n\n[cluster.lan]\nenabled = true\nsecret = \"cluster.key\"\napp = \"custom\"\n";
-		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-lan-toml.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("cluster-lan-toml.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
@@ -3274,9 +3298,8 @@ mod tests {
 		}
 
 		let toml = "[cluster.lan]\nenabled = true\nsecret = \"from-toml.key\"\napp = \"from-toml\"\n";
-		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-lan-override.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("cluster-lan-override.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![
@@ -3463,9 +3486,8 @@ mod tests {
 	#[test]
 	fn cluster_connect_api_survives_toml_merge() {
 		let toml = "[cluster.api]\nurl = \"https://api.example.com/cluster/connect\"\ntls.root = [\"api.pem\"]\n";
-		let dir = std::env::temp_dir().join("moq-relay-cluster-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("cluster-connect-api-toml.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("cluster-connect-api-toml.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
@@ -3475,6 +3497,60 @@ mod tests {
 			Some("https://api.example.com/cluster/connect")
 		);
 		assert_eq!(config.cluster.api.tls.root, vec![PathBuf::from("api.pem")]);
+	}
+
+	#[tokio::test]
+	async fn remote_plaintext_api_refuses_startup() {
+		let _ = moq_tokio::crypto::install_default();
+		for url in ["http://api.example.com/", "http://192.0.2.1/", "http://[2001:db8::1]/"] {
+			let mut config = Config::default();
+			config.api.url = Some(url.into());
+			let result = new_cluster(config)
+				.unwrap()
+				.with_connect(Default::default(), Default::default())
+				.start()
+				.await;
+			let Err(err) = result else { panic!("accepted {url}") };
+			assert!(err.to_string().contains("loopback"), "{err}");
+		}
+	}
+
+	#[test]
+	fn cluster_api_supports_loopback_http_and_local_files() {
+		for source in [
+			"http://localhost/",
+			"http://127.0.0.2/",
+			"http://[::1]/",
+			"https://api.example.com/",
+		] {
+			assert!(connect_api_is_http(source).unwrap(), "{source}");
+		}
+		for source in ["peers.json", "/etc/moq/peers.json", "file:///etc/moq/peers.json"] {
+			assert!(!connect_api_is_http(source).unwrap(), "{source}");
+		}
+		assert!(connect_api_is_http("http://localhost.example.com/").is_err());
+	}
+
+	#[tokio::test]
+	async fn cluster_api_rejects_redirect_bodies() {
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+		let _ = moq_tokio::crypto::install_default();
+		let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+		let url = format!("http://{}/", listener.local_addr().unwrap()).parse().unwrap();
+		let server = async move {
+			let (mut stream, _) = listener.accept().await.unwrap();
+			let mut data = [0; 4096];
+			assert!(stream.read(&mut data).await.unwrap() > 0);
+			// No Location header: refusing to follow alone does not reject this body.
+			stream
+				.write_all(b"HTTP/1.1 302 Found\r\nContent-Length: 2\r\nConnection: close\r\n\r\n[]")
+				.await
+				.unwrap();
+		};
+		let tls = moq_tokio::tls::Connect::default().build().unwrap();
+		let client = crate::http_client::build(&tls, &[]).unwrap();
+		let (peers, ()) = tokio::join!(Cluster::fetch_peer_list(&client, url), server);
+		assert!(peers.unwrap_err().to_string().contains("302"));
 	}
 
 	/// Two in-process origins share broadcasts both ways over one
@@ -3512,7 +3588,7 @@ mod tests {
 		let accept = node.clone();
 		tokio::spawn(async move {
 			let mut listener = listener;
-			while let Some(request) = listener.accept().await {
+			while let Ok(request) = listener.accept().await {
 				let conn = crate::Connection::new(request, accept.clone(), crate::auth::Auth::refuse("test"));
 				tokio::spawn(async move {
 					conn.run().await;
@@ -3539,7 +3615,7 @@ mod tests {
 		let _dial = fingerprint.dial_lan_target(&target).expect("dial");
 
 		let mut announced = fingerprint.origin.consume().announced();
-		let (update, _) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+		let (update, _) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 			.await
 			.expect("timed out waiting for from-node")
 			.expect("origin closed");
@@ -3551,7 +3627,7 @@ mod tests {
 		_from_fp.announce(Default::default()).expect("announce");
 		let mut announced = node.origin.consume().announced();
 		loop {
-			let (update, _) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+			let (update, _) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 				.await
 				.expect("timed out waiting for from-fingerprint")
 				.expect("origin closed");
@@ -3674,7 +3750,7 @@ mod tests {
 		let started = cluster.clone().start().await.expect("start");
 		let running = tokio::spawn(started.run());
 
-		let _conn = tokio::time::timeout(TIMEOUT, server.accept())
+		let _conn = kio::clock::timeout(TIMEOUT, server.accept())
 			.await
 			.expect("dial timeout")
 			.expect("incoming")
@@ -3685,7 +3761,7 @@ mod tests {
 		running.abort();
 		let _ = running.await;
 		// Each dial holds a stop receiver until its task ends.
-		tokio::time::timeout(TIMEOUT, cluster.dialers.stop.closed())
+		kio::clock::timeout(TIMEOUT, cluster.dialers.stop.closed())
 			.await
 			.expect("a peer-list dial outlived its cancelled run");
 	}
@@ -3727,7 +3803,7 @@ mod tests {
 			.await
 			.expect("dialer task");
 
-		let conn = tokio::time::timeout(TIMEOUT, server.accept())
+		let conn = kio::clock::timeout(TIMEOUT, server.accept())
 			.await
 			.expect("dial timeout")
 			.expect("incoming")
@@ -3738,14 +3814,14 @@ mod tests {
 		cluster
 			.critical
 			.spawn("injected", async { panic!("injected critical failure") });
-		let result = tokio::time::timeout(TIMEOUT, running)
+		let result = kio::clock::timeout(TIMEOUT, running)
 			.await
 			.expect("run returns on a critical failure")
 			.expect("run task");
 		assert!(result.is_err(), "a critical failure fails run");
 		runtime.shutdown_background();
 
-		let err = tokio::time::timeout(TIMEOUT, conn.closed())
+		let err = kio::clock::timeout(TIMEOUT, conn.closed())
 			.await
 			.expect("the peer heard no close before its idle timeout");
 		match err {
@@ -3777,7 +3853,7 @@ mod tests {
 		first.abort();
 		let _ = first.await;
 		drop(background);
-		tokio::time::timeout(std::time::Duration::from_secs(5), second)
+		kio::clock::timeout(std::time::Duration::from_secs(5), second)
 			.await
 			.expect("the second close finishes the shutdown");
 	}
@@ -3811,7 +3887,7 @@ mod tests {
 		let accept = node.clone();
 		tokio::spawn(async move {
 			let mut listener = listener;
-			while let Some(request) = listener.accept().await {
+			while let Ok(request) = listener.accept().await {
 				let conn = crate::Connection::new(request, accept.clone(), crate::auth::Auth::refuse("test"));
 				tokio::spawn(conn.run());
 			}
@@ -3849,7 +3925,7 @@ mod tests {
 
 		let mut announced = node.origin.consume().announced();
 		loop {
-			let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+			let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 				.await
 				.expect("timed out waiting for from-dialer")
 				.expect("origin closed");
@@ -3864,7 +3940,7 @@ mod tests {
 		let _broadcast = broadcast;
 
 		loop {
-			let (update, active) = tokio::time::timeout(TIMEOUT, next_update(&mut announced))
+			let (update, active) = kio::clock::timeout(TIMEOUT, next_update(&mut announced))
 				.await
 				.expect("the peer kept the dialer's route past the close")
 				.expect("origin closed");

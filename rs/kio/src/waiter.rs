@@ -2,7 +2,6 @@ use std::{
 	fmt,
 	future::Future,
 	pin::Pin,
-	// std, not `crate::sync`: loom's Arc has no `downgrade`. See `sync.rs`.
 	sync::{
 		Arc, OnceLock, Weak,
 		atomic::{AtomicBool, AtomicU64, Ordering},
@@ -42,6 +41,9 @@ pub struct Waiter {
 	// A registration found no free slot in `parked`, so a list may hold this waiter
 	// unrecorded and a later registration there would stack a duplicate.
 	lost: AtomicBool,
+
+	// Made by `noop`, so a channel parks it nowhere: nothing would ever see its wake.
+	noop: bool,
 }
 
 /// Lists a waiter remembers being parked on. A relay's busiest tasks park on up to 8.
@@ -55,12 +57,25 @@ impl Waiter {
 			shared: OnceLock::new(),
 			parked: Default::default(),
 			lost: AtomicBool::new(false),
+			noop: false,
 		}
 	}
 
 	/// Create a no-op waiter that discards registrations.
+	///
+	/// A channel's value poll parks it nowhere, taking no waiter lock, so polling one only
+	/// for the answer now costs no more than a read.
 	pub fn noop() -> Self {
-		Self::new(Waker::noop().clone())
+		Self {
+			noop: true,
+			..Self::new(Waker::noop().clone())
+		}
+	}
+
+	/// Whether this is a [`noop`](Self::noop) waiter.
+	#[inline]
+	pub(crate) fn is_noop(&self) -> bool {
+		self.noop
 	}
 
 	/// Register this waiter with a [`WaiterList`] for future notification.
@@ -123,6 +138,13 @@ impl Waiter {
 		true
 	}
 
+	/// Whether a registration under `tag` is recorded, which proves the list carrying
+	/// `tag` still holds this waiter. Zero, a list never registered on, matches nothing.
+	#[inline]
+	pub(crate) fn holds(&self, tag: u64) -> bool {
+		tag != 0 && self.parked.iter().any(|slot| slot.load(Ordering::Relaxed) == tag)
+	}
+
 	/// Whether every list holding this waiter is recorded, so registering it again
 	/// cannot stack a duplicate.
 	fn reusable(&self) -> bool {
@@ -156,7 +178,7 @@ impl Waiter {
 
 	/// Poll a foreign [`Future`] against this waiter, so it re-wakes the enclosing
 	/// `poll_*` step when it is ready.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_future<F: Future + ?Sized>(&self, future: Pin<&mut F>) -> Poll<F::Output> {
 		match future.poll(&mut self.context()) {
 			Poll::Ready(value) => crate::coop::ready(value),
@@ -176,6 +198,7 @@ impl Clone for Waiter {
 			shared: OnceLock::from(shared),
 			parked: std::array::from_fn(|i| AtomicU64::new(self.parked[i].load(Ordering::Relaxed))),
 			lost: AtomicBool::new(self.lost.load(Ordering::Relaxed)),
+			noop: self.noop,
 		}
 	}
 }
@@ -275,6 +298,13 @@ impl WaiterList {
 			self.cursor = 0;
 		}
 		self.entries.push(new_weak);
+	}
+
+	/// The tag a registration records right now. It changes on every drain, so a waiter
+	/// that [holds](Waiter::holds) it is still here.
+	#[inline]
+	pub(crate) fn tag(&self) -> u64 {
+		self.tag
 	}
 
 	/// Start a new round, so no record of an entry made in the last one matches.
@@ -432,7 +462,7 @@ where
 	crate::Pending::new(poll)
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 
@@ -475,9 +505,11 @@ mod tests {
 	#[cfg(target_pointer_width = "64")]
 	fn the_list_stays_small() {
 		let list = std::mem::size_of::<WaiterList>();
-		let state = std::mem::size_of::<crate::State<()>>();
+		let state = std::mem::size_of::<crate::channel::Channel<()>>();
 		assert!(list <= 56, "WaiterList grew to {list} B");
-		assert!(state <= 176, "State<()> grew to {state} B");
+		// 184 B before the version counter, the value list's tag mirror (8 B each), and the
+		// waiter lists' own mutex moved the parking off the value's lock.
+		assert!(state <= 200, "Channel<()> grew to {state} B");
 	}
 
 	#[test]

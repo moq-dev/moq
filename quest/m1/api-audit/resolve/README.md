@@ -13,6 +13,10 @@ Rust, JS, and every binding:
 - `follow(path, epoch)` follows the path across publisher instances (today's
   `announced_broadcast`), pinned to `epoch` when given.
 
+[Identity and epoch](/quest/m1/api-audit/route/identity.md) later changes the
+pin from `epoch` to an `identity` in both; the two
+resolutions stay as they are.
+
 No caller can assemble a racy two-step resolve, and no crate hand-rolls
 "resolve once discovery synced".
 
@@ -20,40 +24,40 @@ No caller can assemble a racy two-step resolve, and no crate hand-rolls
 
 Decided 2026-10-22 (API audit, maintainer approved the recommendation).
 
-The behavioral checkpoint makes `request_broadcast` own scoped discovery and
+The behavioral checkpoint makes the Rust request own scoped discovery and
 retry route churn. It reports table absence only after sync; a selected handler's
 explicit refusal stays terminal, including a dropped Prepared answer. The front
 records that refusal privately at its existing standing-route decision, rather
 than guessing from unrelated mutations of the table. The old immediate lookup
 is private to sessions. `Requesting::is_queued` and the public `Routing` task are
 gone; `Requesting` is the owned task. The stats reader uses it instead of its
-own retry on `is_queued`; the mux binding keeps its pinned `routed_broadcast`
-wait. Rust and JS have same-epoch follow-return coverage, and every JS request
-owns its discovery watch from creation. A pending plain JS request fails
-`Unroutable` once that discovery syncs with no route for it, matching Rust. JS
-announcement-following no longer silently uses a blind peer. The existing
-`routed_broadcast` helper retains its route-change retry policy for the CLI,
-gateway, mux binding, and relay HTTP consumers. Its removal belongs to the remaining rollout.
+own retry on `is_queued`. Rust and JS have same-epoch follow-return coverage,
+and every JS request owns its discovery watch from creation. A pending plain JS
+request fails `Unroutable` once that discovery syncs with no route for it,
+matching Rust. JS announcement-following no longer silently uses a blind peer.
 
-The approved public method names have not rolled out. Decided 2026-10-28
-(maintainer, /quest-plan): the rollout splits into the four children below, so
-each language and the callers review on their own. Rust and JS proceed in
-parallel; the bindings follow Rust, and the callers follow both.
+Decided 2026-10-28 (maintainer, /quest-plan): the rollout splits into a child
+per language and one for the callers, so each reviews on its own. Rust has
+landed: `request(path, epoch)` and `follow(path, epoch)` (returning
+`origin::Following`), with `routed`, `routed_broadcast`, and the route-level
+`announce::Follow` gone, and its in-tree callers following the path where they
+used to wait for a route. JS has landed `follow(path, {epoch})`. The bindings
+have landed too: moq-ffi, the C ABI, and every wrapper name them `request` and
+`follow` with an optional epoch, `follow` returning `Following`. The callers
+follow both.
 
 This README's own work, once every child lands: the lifecycle and churn checks
 across languages, the required Nix gate, and all-language interop
 (`just test interop --all`).
 
 Public API: breaking task shape in moq-net; behavior changes in `@moq/net` and
-the bindings. Final method/epoch naming remains breaking across every wrapper.
+the bindings. The method and epoch renames broke every wrapper.
 Wire: none.
 
 ## Required
 
-- [Rust request and follow](/quest/m1/api-audit/resolve/rust.md) - Rust names the two resolutions `request` and `follow`, deletes `routed` and `routed_broadcast`, and makes the route-level `Follow` private
-- [JS request and follow](/quest/m1/api-audit/resolve/js.md) - `@moq/net` exposes `request(path, {epoch})` and `follow(path, {epoch})` instead of the `announced` option
-- [Bindings request and follow](/quest/m1/api-audit/resolve/bindings.md) - moq-ffi, the C ABI, and every wrapper mirror `request` and `follow` with an optional epoch
-- [Callers resolve once](/quest/m1/api-audit/resolve/callers.md) - no caller hand-rolls synced resolution or decides table absence by wall clock
+- [JS follow returns a Following](/quest/m1/api-audit/resolve/js-following.md) - `follow` and `request` get their own JS types, matching Rust and the bindings
+- [JS follow takes FollowOptions](/quest/m1/api-audit/resolve/follow-options.md) - `follow` and `request` get their own JS options types
 
 ## Related
 

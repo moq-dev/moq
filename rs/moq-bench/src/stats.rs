@@ -1,4 +1,4 @@
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::io::Write;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -38,6 +38,10 @@ pub struct Stats {
 	/// Completed group deliveries across all subscriptions (the displayed total).
 	/// A group the relay failed part-way is omitted and counted as lost.
 	pub groups_recv: AtomicU64,
+	/// Completed deliveries older than their subscription's first group, such as
+	/// cached history filled in after the subscribe. Included in `groups_recv`,
+	/// excluded from `groups_expected`, and never counted as loss.
+	pub groups_history: AtomicU64,
 	/// Settled sequence spans plus any failed live-frontier groups.
 	pub groups_expected: AtomicU64,
 	/// Completed deliveries within `groups_expected`. The shortfall is the gaps
@@ -69,6 +73,7 @@ impl Stats {
 			frames_recv: AtomicU64::new(0),
 			bytes_recv: AtomicU64::new(0),
 			groups_recv: AtomicU64::new(0),
+			groups_history: AtomicU64::new(0),
 			groups_expected: AtomicU64::new(0),
 			groups_present: AtomicU64::new(0),
 			groups_lost: AtomicU64::new(0),
@@ -101,7 +106,7 @@ impl Stats {
 	/// Record one group keyframe's wall-clock delivery latency.
 	pub fn latency(&self, sent_ms: u128) {
 		// Read the clock before locking so contention is not measured as latency.
-		let now_ms = moq_clock::wall()
+		let now_ms = kio::clock::wall()
 			.saturating_duration_since(Wall::UNIX_EPOCH)
 			.as_millis();
 		self.latency.observe(sent_ms, now_ms);
@@ -125,7 +130,7 @@ impl Stats {
 	/// recorded stats are partial is invalid, so the caller must fail the run
 	/// rather than exit green.
 	pub async fn report(&self, interval: Duration, mut output: Option<std::fs::File>) -> anyhow::Result<()> {
-		let mut ticker = moq_clock::interval(interval);
+		let mut ticker = kio::clock::interval(interval);
 		// Skip the immediate first tick so the first report covers a full interval.
 		ticker.tick().await;
 
@@ -168,6 +173,7 @@ impl Stats {
 				recv_mbps = format_args!("{recv_mbps:.1}"),
 				recv_fps = format_args!("{recv_fps:.0}"),
 				recv_groups = now.groups_recv,
+				history_groups = now.groups_history,
 				lost_groups = now.groups_lost,
 				loss = format_args!("{loss:.2}%"),
 				latency_samples = now.latency_samples,
@@ -256,6 +262,7 @@ struct Snapshot {
 	frames_recv: u64,
 	bytes_recv: u64,
 	groups_recv: u64,
+	groups_history: u64,
 	groups_expected: u64,
 	groups_present: u64,
 	groups_lost: u64,
@@ -362,6 +369,7 @@ impl Snapshot {
 			frames_recv: stats.frames_recv.load(Ordering::Relaxed),
 			bytes_recv: stats.bytes_recv.load(Ordering::Relaxed),
 			groups_recv: stats.groups_recv.load(Ordering::Relaxed),
+			groups_history: stats.groups_history.load(Ordering::Relaxed),
 			groups_expected: stats.groups_expected.load(Ordering::Relaxed),
 			groups_present,
 			groups_lost,
@@ -427,7 +435,7 @@ impl Latency {
 		// include only part of an observation. One that reads the clock before the
 		// boundary but locks after it counts in the next interval, unaltered.
 		let state = self.state.lock().expect("latency lock poisoned");
-		let captured_at = moq_clock::wall();
+		let captured_at = kio::clock::wall();
 		let LatencyState {
 			buckets,
 			max_ms,
@@ -489,11 +497,6 @@ fn highest_bucket(buckets: &[u64]) -> Option<u64> {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use std::sync::Arc;
 
@@ -570,9 +573,8 @@ mod tests {
 	async fn report_fails_on_output_error() {
 		tokio::time::pause();
 
-		let dir = std::env::temp_dir().join("moq-bench-stats-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("out.jsonl");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("out.jsonl");
 		std::fs::write(&path, b"").unwrap();
 		// A read-only handle: the first write fails.
 		let file = std::fs::File::open(&path).unwrap();
@@ -777,6 +779,11 @@ mod tests {
 	/// Sweep observation concurrency and report density without a network bottleneck.
 	#[test]
 	#[ignore = "performance measurement; run by the nightly stats benchmark"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures real observation throughput"
+	)]
 	fn benchmark_observation_contention() {
 		use std::sync::Barrier;
 		use std::time::Instant;

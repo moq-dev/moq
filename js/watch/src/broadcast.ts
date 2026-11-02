@@ -2,8 +2,9 @@ import * as Catalog from "@moq/hang/catalog";
 import * as Json from "@moq/json";
 import * as Msf from "@moq/msf";
 import type * as Moq from "@moq/net";
-import { Error as NetError, Path, StreamCode } from "@moq/net";
+import { Error as NetError, Path, StreamCode, Track } from "@moq/net";
 import {
+	Derived,
 	Effect,
 	type Getter,
 	type GetterType,
@@ -45,8 +46,8 @@ function provesOther(active: Moq.Broadcast.Consumer | undefined, epoch: Moq.Epoc
 // Whether an announced route covers `path`, until closed. Hidden routes count: a service claim
 // under a `.`-named prefix is kept out of listings, but it still covers the renditions it would
 // produce, and this is never shown to anyone.
-function watchCovered(origin: Moq.Origin.Table, path: Moq.Path.Valid): { covered: Getter<boolean>; close: () => void } {
-	const announced = origin.announced(Path.Pattern.literal(path), { hidden: true });
+function watchCovered(origin: Origin, path: Moq.Path.Valid): { covered: Getter<boolean>; close: () => void } {
+	const announced = origin.announced(Path.Pattern.literal(path), { hidden: true, covering: true });
 	const covered = new Signal(false);
 	const active = new Set<Moq.Path.Valid>();
 	void (async () => {
@@ -100,9 +101,9 @@ export type CatalogFormat = (typeof CATALOG_FORMATS)[number];
  * another component whose output is wired in) does the writing.
  */
 export type BroadcastInput = {
-	// The origin to consume from. Independent of any connection: whichever sessions feed
+	// The read-side origin to borrow. Independent of any connection: whichever sessions feed
 	// the origin resolve the broadcast, and the handle spans their reconnects.
-	origin: Getter<Moq.Origin.Table | undefined>;
+	origin: Getter<Pick<Moq.Origin.Consumer, "closed" | "discovery" | "request" | "follow" | "announced"> | undefined>;
 
 	// Whether to start downloading the broadcast. Defaults to true.
 	enabled: Getter<boolean>;
@@ -110,9 +111,10 @@ export type BroadcastInput = {
 	// The broadcast name.
 	name: Getter<Moq.Path.Valid>;
 
-	// Whether to wait for the broadcast to be announced before subscribing.
-	// Defaults to true; pass false to subscribe immediately without waiting for an announcement.
-	announced: Getter<boolean>;
+	// Whether to follow the broadcast's announcements (`Origin.follow`), waiting for one before
+	// subscribing and moving to each restart. Defaults to true; pass false to request it once
+	// (`Origin.request`), subscribing immediately without waiting for an announcement.
+	follow: Getter<boolean>;
 
 	// Which catalog format to use. When `undefined` (the default), the format is
 	// auto-detected from the broadcast name extension (`.hang`, `.msf`), falling
@@ -125,6 +127,8 @@ export type BroadcastInput = {
 	catalog: Getter<Catalog.Root | undefined>;
 };
 
+type Origin = NonNullable<GetterType<BroadcastInput["origin"]>>;
+
 /** Signals the component derives. */
 export type BroadcastOutput = {
 	// "error" means the origin refused the broadcast; `error` says why.
@@ -133,7 +137,7 @@ export type BroadcastOutput = {
 	active: Signal<Moq.Broadcast.Consumer | undefined>;
 
 	// Why the origin refused the broadcast, while `status` is "error". A refusal is final:
-	// only a fresh request (a new `name`, `origin`, or `announced`, or re-enabling) clears it and asks again.
+	// only a fresh request (a new `name`, `origin`, or `follow`, or re-enabling) clears it and asks again.
 	error: Signal<Error | undefined>;
 
 	// The effective catalog: the fetched one, or a copy of input.catalog in manual mode, minus
@@ -162,13 +166,13 @@ export class Broadcast {
 	// its relay about the broadcasts a catalog actually references.
 	readonly #watches = new Map<
 		Moq.Path.Valid,
-		{ origin: Moq.Origin.Table; covered: Getter<boolean>; close: () => void; users: number }
+		{ origin: Origin; covered: Getter<boolean>; close: () => void; users: number }
 	>();
 
 	// Requests are shared by callers; each owns its restart watch in the origin.
 	readonly #references = new Map<
 		Moq.Path.Valid,
-		{ origin: Moq.Origin.Table; announced: boolean; request: Moq.Origin.Requesting; users: number }
+		{ origin: Origin; follow: boolean; request: Moq.Origin.Requesting; users: number }
 	>();
 
 	// The catalog as published, before renditions this consumer cannot use are dropped. Kept
@@ -179,18 +183,22 @@ export class Broadcast {
 	// strands the filtered copy on the previous contents.
 	readonly #raw = new Signal<Catalog.Root | undefined>(undefined);
 
+	// Set only on a contribution: its broadcast resolves through the parent catalog's references,
+	// so the two never resolve one path independently.
+	readonly #resolve = new Signal<((effect: Effect) => Moq.Broadcast.Consumer | undefined) | undefined>(undefined);
+
 	#signals: Effect;
 
 	constructor(props?: Inputs<BroadcastInput>) {
-		if (props && "reload" in props) {
-			throw new Error("Watch.Broadcast: `reload` was renamed to `announced`");
+		for (const renamed of ["reload", "announced"]) {
+			if (props && renamed in props) throw new Error(`Watch.Broadcast: \`${renamed}\` was renamed to \`follow\``);
 		}
 		this.#signals = new Effect();
 		this.in = {
 			origin: getter(props?.origin),
 			name: getter(props?.name ?? Path.empty()),
 			enabled: getter(props?.enabled ?? true),
-			announced: getter(props?.announced ?? true),
+			follow: getter(props?.follow ?? true),
 			catalogFormat: getter<CatalogFormat | undefined>(props?.catalogFormat),
 			catalog: getter(props?.catalog),
 		};
@@ -220,7 +228,7 @@ export class Broadcast {
 	// gets selected: its service claims a covering prefix, and nothing announces the exact path
 	// until this subscribes. Watches exactly `path`, shared by every caller asking about it.
 	// The blind cases (announcement gate off, no discovery) never reach here; see `#relativeTarget`.
-	#isPathAnnounced(effect: Effect, origin: Moq.Origin.Table, path: Moq.Path.Valid): boolean {
+	#isPathAnnounced(effect: Effect, origin: Origin, path: Moq.Path.Valid): boolean {
 		let entry = this.#watches.get(path);
 		if (!entry || entry.origin !== origin) {
 			entry?.close();
@@ -243,16 +251,12 @@ export class Broadcast {
 	}
 
 	// Share one origin request across callers reading the same referenced broadcast.
-	#requestBroadcast(
-		effect: Effect,
-		origin: Moq.Origin.Table,
-		path: Moq.Path.Valid,
-	): Moq.Broadcast.Consumer | undefined {
-		const announced = effect.get(this.in.announced);
+	#requestBroadcast(effect: Effect, origin: Origin, path: Moq.Path.Valid): Moq.Broadcast.Consumer | undefined {
+		const follow = effect.get(this.in.follow);
 		let entry = this.#references.get(path);
-		if (!entry || entry.origin !== origin || entry.announced !== announced) {
+		if (!entry || entry.origin !== origin || entry.follow !== follow) {
 			entry?.request.close();
-			entry = { origin, announced, request: origin.request(path, { announced }), users: 0 };
+			entry = { origin, follow, request: follow ? origin.follow(path) : origin.request(path), users: 0 };
 			this.#references.set(path, entry);
 		}
 
@@ -275,15 +279,29 @@ export class Broadcast {
 		const enabled = effect.get(this.in.enabled);
 		if (!enabled) return;
 
+		const resolve = effect.get(this.#resolve);
+		if (resolve) {
+			// Like the origin request below, a path outside the origin's scope throws.
+			let active: Moq.Broadcast.Consumer | undefined;
+			try {
+				active = resolve(effect);
+			} catch (err) {
+				effect.set(this.#out.error, err instanceof Error ? err : new Error(String(err)), undefined);
+				return;
+			}
+			effect.set(this.#out.active, active, undefined);
+			return;
+		}
+
 		const origin = effect.get(this.in.origin);
 		if (!origin) return;
 
 		const name = effect.get(this.in.name);
-		const announced = effect.get(this.in.announced);
+		const follow = effect.get(this.in.follow);
 
 		let request: Moq.Origin.Requesting;
 		try {
-			request = origin.request(name, { announced });
+			request = follow ? origin.follow(name) : origin.request(name);
 		} catch (err) {
 			effect.set(this.#out.error, err instanceof Error ? err : new Error(String(err)), undefined);
 			return;
@@ -298,10 +316,10 @@ export class Broadcast {
 		effect.run((nested) => {
 			const closed = nested.get(request.closed);
 			if (!closed) return;
-			// An announced request outlives its instances, so only a refusal ends it. A blind one
+			// A follower outlives its instances, so only a refusal ends it. A plain request
 			// ends with its accepted instance, which reads as offline rather than an error.
 			const offline =
-				!announced && resolved && closed instanceof NetError.Stream && closed.code === StreamCode.Unroutable;
+				!follow && resolved && closed instanceof NetError.Stream && closed.code === StreamCode.Unroutable;
 			if (!offline) nested.set(this.#out.error, closed, undefined);
 		});
 	}
@@ -354,7 +372,10 @@ export class Broadcast {
 		this.#out.status.set("loading");
 
 		const trackName = format === "hang" ? Catalog.TRACK : "catalog";
-		const track = broadcast.track(trackName).subscribe({ priority: Catalog.PRIORITY.catalog });
+		const track = broadcast.track(trackName).subscribe({
+			...Track.Subscription.default(),
+			priority: Catalog.PRIORITY.catalog,
+		});
 		effect.cleanup(() => track.close());
 
 		// The hang catalog is reconstructed from snapshots (and future deltas) via @moq/json, which reads
@@ -435,7 +456,7 @@ export class Broadcast {
 		// resolve blind rather than waiting for an announcement that never comes. With the
 		// gate, only report the path usable once it is announced: the request then resolves
 		// from the table, never blind.
-		if (effect.get(this.in.announced) && effect.get(origin.discovery) !== false) {
+		if (effect.get(this.in.follow) && effect.get(origin.discovery) !== false) {
 			if (!this.#isPathAnnounced(effect, origin, resolved)) return undefined;
 		}
 
@@ -485,6 +506,53 @@ export class Broadcast {
 		if (!origin) return undefined;
 
 		return this.#requestBroadcast(effect, origin, target.path);
+	}
+
+	/**
+	 * Select a whole contribution, opening its catalog only while the caller owns this effect.
+	 *
+	 * Listing a contribution in the catalog opens nothing; this is the demand. The child tracks
+	 * the catalog entry and resolves through this broadcast's `relativeBroadcast`, sharing
+	 * its request: while following announcements it follows the contribution's restarts, and
+	 * otherwise it requests the first instance once. With an `epoch` it is offline while its
+	 * broadcast proves another instance. An absent entry leaves the child disabled, and an
+	 * unavailable contribution reads as offline. Its rendition IDs stay local to the child, so
+	 * they never shadow this catalog's IDs.
+	 *
+	 * ```ts
+	 * effects.run((effect) => {
+	 *   const child = broadcast.contribution(effect, "alice");
+	 *   const source = new Video.Source({ broadcast: child, supported: Video.Decoder.supported });
+	 *   effect.cleanup(() => source.close());
+	 *   // Feed source into a decoder as with any broadcast.
+	 * });
+	 * ```
+	 */
+	contribution(effect: Effect, id: string): Broadcast {
+		// Each computed notifies only on a real change, so an update that leaves the child's path
+		// alone (such as a new `epoch`) never restarts its catalog.
+		const entry = effect.computed((run) => {
+			const contributions = run.get(this.out.catalog)?.contributions;
+			return contributions && Object.hasOwn(contributions, id) ? contributions[id] : undefined;
+		});
+		const name = effect.computed((run) => {
+			// An empty reference is present: it names the catalog's own broadcast.
+			const selected = run.get(entry);
+			return selected && Path.tryResolve(run.get(this.in.name), selected.broadcast);
+		});
+		const enabled = effect.computed((run) => run.get(entry) !== undefined);
+		const child = new Broadcast({
+			origin: this.in.origin,
+			name: new Derived([name], (name) => name ?? Path.empty()),
+			enabled: new Derived([enabled], (enabled) => enabled === true),
+			follow: this.in.follow,
+		});
+		child.#resolve.set((run) => {
+			const selected = run.get(entry);
+			return selected && this.relativeBroadcast(run, selected.broadcast, selected.epoch);
+		});
+		effect.cleanup(() => child.close());
+		return child;
 	}
 
 	/** Stop and release everything this holds. */

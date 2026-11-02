@@ -96,17 +96,18 @@ export namespace Audio {
 export class Broadcast {
 	constructor(props?: Signals.Inputs<BroadcastInput>);
 	close(): void;
+	contribution(effect: Signals.Effect, id: string): Broadcast;
 	readonly in: Signals.Readonlys<BroadcastInput>;
 	readonly out: Signals.Readonlys<BroadcastOutput>;
 }
 
 export type BroadcastInput = {
-	announced: Signals.Getter<boolean>;
 	catalog: Signals.Getter<Hang.Catalog.Root | undefined>;
 	catalogFormat: Signals.Getter<CatalogFormat | undefined>;
 	enabled: Signals.Getter<boolean>;
+	follow: Signals.Getter<boolean>;
 	name: Signals.Getter<Net.Path.Valid>;
-	origin: Signals.Getter<Net.Origin.Table | undefined>;
+	origin: Signals.Getter<Pick<Net.Origin.Consumer, "closed" | "discovery" | "request" | "follow" | "announced"> | undefined>;
 };
 
 export type BroadcastOutput = {
@@ -148,7 +149,6 @@ export class Player {
 }
 
 export type PlayerInput = {
-	announced: Signals.Getter<boolean>;
 	audio: {
 		muted: Signals.Getter<boolean>;
 		target: Signals.Getter<Audio.Target | undefined>;
@@ -159,8 +159,9 @@ export type PlayerInput = {
 	catalogFormat: Signals.Getter<CatalogFormat | undefined>;
 	delay: Signals.Getter<Delay>;
 	enabled: Signals.Getter<boolean>;
+	follow: Signals.Getter<boolean>;
 	name: Signals.Getter<Net.Path.Valid>;
-	origin: Signals.Getter<Net.Origin.Table | undefined>;
+	origin: BroadcastInput["origin"];
 	paused: Signals.Getter<boolean>;
 	probe: Signals.Getter<Net.Connection.Probe | undefined>;
 	text: {

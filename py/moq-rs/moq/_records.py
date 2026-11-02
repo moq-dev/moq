@@ -1,8 +1,7 @@
 """Root records the wrapper owns, as frozen dataclasses with Python defaults.
 
-moq-ffi spells media timestamps as integer microseconds, so ``Frame`` and
-``Datagram`` convert them to ``timedelta`` at the boundary. Durations already
-cross as ``timedelta``. ``ClientTls`` lives here with the rest of the client
+Media timestamps cross as exact :class:`Timestamp` records; durations cross as
+``timedelta``. ``ClientTls`` lives here with the rest of the client
 config, so a bare string passed for a list is refused instead of splitting into
 characters.
 """
@@ -13,8 +12,10 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from importlib import metadata
+from typing import ClassVar, cast
 
 from moq_ffi import (
+    MoqAnchor,
     MoqBackoff,
     MoqClientTls,
     MoqCongestionControl,
@@ -26,8 +27,13 @@ from moq_ffi import (
     MoqQuicConfig,
     MoqRange,
     MoqSubscription,
+    MoqTimestamp,
     MoqTrackInfo,
+    MoqVideoDecodedFrame,
+    MoqVideoPixelFormat,
+    MoqVideoSurface,
     MoqWebSocketConfig,
+    moq_subscription_defaults,
 )
 
 _MICROSECOND = timedelta(microseconds=1)
@@ -42,20 +48,6 @@ def _implementation() -> str:
         return "moq-py/dev"
 
 
-def _to_us(value: timedelta, name: str) -> int:
-    if value < timedelta(0):
-        raise ValueError(f"{name} must not be negative: {value}")
-    return value // _MICROSECOND
-
-
-def _opt_us(value: timedelta | None, name: str) -> int | None:
-    return None if value is None else _to_us(value, name)
-
-
-def _from_us(us: int) -> timedelta:
-    return timedelta(microseconds=us)
-
-
 def _strs(value: Sequence[str], name: str) -> list[str]:
     # A str is itself a Sequence[str], so list() would split it into characters.
     if isinstance(value, str):
@@ -63,8 +55,46 @@ def _strs(value: Sequence[str], name: str) -> list[str]:
     return list(value)
 
 
-def _opt_from_us(us: int | None) -> timedelta | None:
-    return None if us is None else _from_us(us)
+@dataclass(frozen=True)
+class Timestamp:
+    """An exact media timestamp: ``value`` units at ``scale`` units per second.
+
+    ``value`` is at most ``2**61 - 1`` and ``scale`` is non-zero and at most ``2**62 - 1``;
+    a write past either bound raises ``moq.Error.TimeOverflow``. A read carries the
+    track's timescale, and a write at another scale is floored to it.
+    """
+
+    value: int
+    scale: int
+
+    @staticmethod
+    def from_timedelta(duration: timedelta) -> Timestamp:
+        """Exactly ``duration``, at microsecond scale since that is a ``timedelta``'s own unit."""
+        if duration < timedelta(0):
+            raise ValueError(f"timestamp must not be negative: {duration}")
+        return Timestamp(duration // _MICROSECOND, 1_000_000)
+
+    def to_timedelta(self) -> timedelta:
+        """This timestamp as a ``timedelta``, rounded down to a whole microsecond.
+
+        The timestamp itself is exact; keep it, not the ``timedelta``, to republish a tick such as 90 kHz.
+        """
+        return timedelta(microseconds=self.value * 1_000_000 // self.scale)
+
+    def _ffi(self) -> MoqTimestamp:
+        return MoqTimestamp(value=self.value, scale=self.scale)
+
+    @staticmethod
+    def _from_ffi(value: MoqTimestamp) -> Timestamp:
+        return Timestamp(value.value, value.scale)
+
+
+def _opt_ts(value: Timestamp | None) -> MoqTimestamp | None:
+    return None if value is None else value._ffi()
+
+
+def _opt_from_ts(value: MoqTimestamp | None) -> Timestamp | None:
+    return None if value is None else Timestamp._from_ffi(value)
 
 
 @dataclass(frozen=True)
@@ -75,14 +105,14 @@ class Frame:
     """
 
     payload: bytes
-    timestamp: timedelta | None = None
+    timestamp: Timestamp | None = None
 
     def _ffi(self) -> MoqFrame:
-        return MoqFrame(payload=self.payload, timestamp_us=_opt_us(self.timestamp, "timestamp"))
+        return MoqFrame(payload=self.payload, timestamp=_opt_ts(self.timestamp))
 
     @staticmethod
     def _from_ffi(frame: MoqFrame) -> Frame:
-        return Frame(payload=frame.payload, timestamp=_opt_from_us(frame.timestamp_us))
+        return Frame(payload=frame.payload, timestamp=_opt_from_ts(frame.timestamp))
 
 
 @dataclass(frozen=True)
@@ -93,16 +123,82 @@ class Datagram:
     """
 
     sequence: int
-    timestamp: timedelta | None
+    timestamp: Timestamp | None
     payload: bytes
 
     @staticmethod
     def _from_ffi(datagram: MoqDatagram) -> Datagram:
         return Datagram(
             sequence=datagram.sequence,
-            timestamp=_opt_from_us(datagram.timestamp_us),
+            timestamp=_opt_from_ts(datagram.timestamp),
             payload=datagram.payload,
         )
+
+
+class Anchor:
+    """Where one end of a :class:`Range` falls, mirroring moq-net's ``track::Anchor``.
+
+    Build one with ``Anchor.ABSOLUTE(group=...)``, ``Anchor.RELATIVE(groups=...)``, or
+    ``Anchor.TIME(timestamp=...)``.
+    """
+
+    ABSOLUTE: ClassVar[type[_AnchorAbsolute]]
+    RELATIVE: ClassVar[type[_AnchorRelative]]
+    TIME: ClassVar[type[_AnchorTime]]
+
+    def _ffi(self) -> MoqAnchor:
+        raise TypeError("build an Anchor with Anchor.ABSOLUTE, Anchor.RELATIVE, or Anchor.TIME")
+
+
+# The generated variants subclass MoqAnchor only at runtime, so each _ffi casts for pyright.
+@dataclass(frozen=True)
+class _AnchorAbsolute(Anchor):
+    """This group, delivered from its first frame."""
+
+    group: int
+
+    def _ffi(self) -> MoqAnchor:
+        return cast(MoqAnchor, MoqAnchor.ABSOLUTE(group=self.group))
+
+
+@dataclass(frozen=True)
+class _AnchorRelative(Anchor):
+    """The group this many before the latest, clamped to group 0: ``0`` is the latest group."""
+
+    groups: int
+
+    def _ffi(self) -> MoqAnchor:
+        return cast(MoqAnchor, MoqAnchor.RELATIVE(groups=self.groups))
+
+
+@dataclass(frozen=True)
+class _AnchorTime(Anchor):
+    """The group containing this presentation time. An untimed track refuses it."""
+
+    timestamp: Timestamp
+
+    def _ffi(self) -> MoqAnchor:
+        return cast(MoqAnchor, MoqAnchor.TIME(timestamp=self.timestamp._ffi()))
+
+
+Anchor.ABSOLUTE = _AnchorAbsolute
+Anchor.RELATIVE = _AnchorRelative
+Anchor.TIME = _AnchorTime
+
+
+@dataclass(frozen=True)
+class Range:
+    """A span of a track to deliver, from ``start`` to ``end``, ``None`` to keep following the live edge.
+
+    A relative or time start is the first frame of its group, and a relative or time end
+    includes its whole group. An absolute end is exclusive.
+    """
+
+    start: Anchor
+    end: Anchor | None = None
+
+    def _ffi(self) -> MoqRange:
+        return MoqRange(start=self.start._ffi(), end=None if self.end is None else self.end._ffi())
 
 
 @dataclass(frozen=True)
@@ -111,22 +207,40 @@ class Subscription:
 
     ``priority`` is in ``-128..=127``, higher first, and defaults to 0, the midpoint.
     ``max_delay`` is how far a non-latest group may fall behind before it is skipped;
-    zero skips at once, ``None`` leaves the publisher's max age alone to bound it, and it
-    caps every range. ``ranges`` are the spans of the track to
-    deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which pending
-    group the publisher sends first, ``None`` for newest first.
+    zero skips at once, ``None`` sets no subscriber limit and leaves the publisher's max
+    age alone to bound it, and it caps every range. ``ranges`` are the spans of the track
+    to deliver, ``None`` for everything ``max_delay`` still allows. ``order`` is which
+    pending group the publisher sends first, ``None`` for newest first.
+
+    A bare ``Subscription()`` has moq-net's defaults, as :meth:`default` does.
     """
 
     priority: int = 0
     max_delay: timedelta | None = timedelta(0)
-    ranges: Sequence[MoqRange] | None = None
+    ranges: Sequence[Range] | None = None
     order: MoqOrder | None = None
+
+    @classmethod
+    def default(cls) -> Subscription:
+        """moq-net's defaults, whose zero ``max_delay`` skips a superseded group at once.
+
+        A ``None`` subscription means the same; ``dataclasses.replace`` this one to change
+        a field.
+        """
+        defaults = moq_subscription_defaults()
+        return cls(
+            priority=defaults.priority,
+            max_delay=defaults.max_delay,
+            # The FFI defaults never restrict ranges, so there is no record to convert.
+            ranges=None,
+            order=defaults.order,
+        )
 
     def _ffi(self) -> MoqSubscription:
         return MoqSubscription(
             priority=self.priority,
             max_delay=self.max_delay,
-            ranges=None if self.ranges is None else list(self.ranges),
+            ranges=None if self.ranges is None else [r._ffi() for r in self.ranges],
             order=self.order,
         )
 
@@ -243,7 +357,7 @@ class QuicConfig:
     ``max_streams`` caps the concurrent streams the peer may open toward this endpoint
     (0 is refused); MoQ opens one per group, so a subscriber to many tracks wants it
     raised. ``idle_timeout`` is how long an idle connection survives, and ``keep_alive``
-    the ping interval (zero disables it). ``gso``, ``mtu_discovery``, and
+    the ping interval (zero uses the default). ``gso``, ``mtu_discovery``, and
     ``congestion_control`` leave the choice to the backend when ``None``. ``qlog`` is a
     directory, which must exist, for qlog traces when :func:`qlog_supported`.
     ``keylog=True`` writes TLS session secrets to the file ``SSLKEYLOGFILE`` names, for
@@ -342,3 +456,30 @@ class Grant:
             subscribe=tuple(grant.subscribe),
             expires=grant.expires,
         )
+
+
+class VideoDecodedFrame:
+    """One decoded picture. It owns the decoder's buffer until garbage collected, so drop it promptly."""
+
+    def __init__(self, inner: MoqVideoDecodedFrame) -> None:
+        self._inner = inner
+
+    def timestamp(self) -> Timestamp:
+        """The presentation timestamp, at the track's timescale."""
+        return Timestamp._from_ffi(self._inner.timestamp())
+
+    def width(self) -> int:
+        """The picture's width in pixels."""
+        return self._inner.width()
+
+    def height(self) -> int:
+        """The picture's height in pixels."""
+        return self._inner.height()
+
+    def pixels(self, format: MoqVideoPixelFormat) -> bytes:
+        """The picture converted to tightly packed CPU pixels in ``format``."""
+        return self._inner.pixels(format)
+
+    def surface(self) -> MoqVideoSurface | None:
+        """The decoder's platform surface, when the decoder output asked for one."""
+        return self._inner.surface()

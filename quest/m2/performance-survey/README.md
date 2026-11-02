@@ -79,8 +79,8 @@ Include idle connections and stalled
 readers as well as high-bandwidth, high-RTT relay links before recommending
 smaller windows. Receive leases ([moq-dev/moq#5878](https://github.com/moq-dev/moq/pull/5878)) own budget
 correctness; settings must preserve useful bandwidth-delay product and
-failover behavior. [Keepalive](/quest/m2/quic-keep-alive.md) already owns timer
-policy. Do not add a generic tuning surface without a measured consumer.
+failover behavior. The keep-alive already derives from the negotiated idle
+timeout, so leave timer policy alone. Do not add a generic tuning surface without a measured consumer.
 
 Reuse [the benchmark harness](/bench/README.md). Criterion's
 [timing-loop guidance](https://bheisler.github.io/criterion.rs/book/user_guide/timing_loops.html)
@@ -105,6 +105,14 @@ An operation-count probe imported the actual JS `bandwidth.allocate`, counted
 6,952/438,944 reads. Nix Bun 1.4.2 was used; no browser speedup is claimed.
 The bandwidth child must retain a reproducible benchmark, including the
 complete allocator and Rust consumers, before selecting a fix.
+
+[Resume identity history](https://github.com/moq-dev/moq/pull/7514) found, in
+Chromium after cache age-out, that a JS front's first-seen track record kept
+every route that first answered a name reachable: 32 routes of churned names
+left 31 sessions, transports and broadcast handles per front (7.7 MB of JS heap
+for 8 fronts reading 8 names by lookup). Recording the answering source by id
+releases them; the `resume-history` browser fixture now fails on any retired
+route still reachable.
 
 `python3 sh/gh/nightly.test.py NightlyTest.test_every_cargo_bench_target_runs_nightly`
 reproduced the missing `moq-archive/producer` selection. The existing
@@ -150,18 +158,17 @@ No duplicate quest or workflow edit belongs here.
   [performance audit](/quest/m2/audit-perf.md) repeats it before later cuts.
 - [Perf](/quest/m2/perf/README.md) owns measured channel contention, relay
   allocations, ingest batching, worker quiescence and runtime selection.
-- The [release audit](/quest/m1/release-audit/README.md) bounded the media
+- The 2026-10-22 release audit bounded the media
   reorder queues in [moq-dev/moq#6453](https://github.com/moq-dev/moq/pull/6453)
   and fixed QMux copying in
   [moq-dev/moq#6381](https://github.com/moq-dev/moq/pull/6381). MKV
   fragmentation below concerns parser replay before those queues.
-- [Binding bytes](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-bytes.md),
-  [foreign polling](https://github.com/kixelated/rust2/blob/main/quest/m1/ffi-poll-protocol.md),
-  [Kotlin calls](https://github.com/kixelated/rust2/blob/main/quest/m1/kt-ffi-calls.md),
+- [Binding bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md),
+  [foreign polling](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-poll-protocol.md),
+  [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md),
   [NVENC pooling](/quest/m2/nvenc-pool.md), and
   [watch worker planning](/quest/m2/plan-watch-worker.md) retain their scopes.
-- [Route wakes](/quest/m2/route-wakes.md),
-  [keyed prefix polling](/quest/m2/keyed-prefix-polling.md), and
+- [Route wakes](/quest/m2/route-wakes.md) and
   [front parking](/quest/m2/origin-front-parks.md) own discovery scans/wakes.
 - The [recurring audit](/quest/m2/audit-perf.md) retains real congestion-
   controller/loss-recovery coverage, broader importer/container coverage,
@@ -182,15 +189,11 @@ No duplicate quest or workflow edit belongs here.
 - [Cached JS group joins](/quest/m2/performance-survey/js-cached-groups.md) - repeated sorting while replaying retained groups
 - [PCM batch processing](/quest/m2/performance-survey/audio-batches.md) - repeated tail movement during encoding and resampling
 - [Fragmented MKV import](/quest/m2/performance-survey/mkv-fragments.md) - accumulated-buffer copies and parser replay
-- [QUIC scheduling churn](/quest/m2/performance-survey/quic-schedule-churn.md) - priority and retirement work across unrelated groups
 - [HLS request fan-out](/quest/m2/performance-survey/hls-serving.md) - repeated fetch, remux and playlist construction per viewer
 - [Buffered browser groups](/quest/m2/performance-survey/hang-buffered.md) - per-frame scans and bulk skip work
 - [Idle browser stats](/quest/m2/performance-survey/browser-idle-stats.md) - local transport polling without active publishing demand
-- [Transport preference history](/quest/m2/performance-survey/transport-history.md) - full URL retention across retired sessions
-- [Resume identity history](/quest/m2/performance-survey/resume-history.md) - historical source graphs held by first-seen track metadata
 - [UDP socket queues](/quest/m2/performance-survey/socket-queues.md) - drop attribution and queue-size tradeoffs across workers and load
 - [Session datagrams](/quest/m2/performance-survey/datagram-delivery.md) - complete per-object delivery across publishers and viewers
-- [JWT verification](/quest/m2/performance-survey/jwt-verification.md) - key loading, lookup, parsing and crypto attribution
 - [Announcement snapshots](/quest/m2/performance-survey/announced-snapshots.md) - HTTP polling cost versus result size and unrelated routes
 - [Selective session operations](/quest/m2/performance-survey/session-selection.md) - exact-ID lookups and registry lock hold time
 - [Browser media copies](/quest/m2/performance-survey/browser-media-copies.md) - CMAF sample and LOC framing copies versus retention

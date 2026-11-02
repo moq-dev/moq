@@ -1970,6 +1970,13 @@ impl Clone for Scope {
 }
 
 impl Scope {
+	/// Whether this scope was tagged, a cheap pre-check that never resolves: an untagged
+	/// scope's [`Meter`] counts nothing, but a tagged one's may count nothing either, when
+	/// the registry is disabled or excludes its path, so [`Meter::is_tracked`] decides.
+	pub(crate) fn is_tagged(&self) -> bool {
+		self.session.inner.is_some() && self.resolved.is_some()
+	}
+
 	/// The counters for the session's current tier. Skips the registry unless the
 	/// tier changed since the last call, so the per-group path stays cheap.
 	fn counters(&self) -> Option<Arc<TierCounters>> {
@@ -2635,7 +2642,6 @@ mod tests {
 		assert_eq!(retired.sessions.len(), 1);
 	}
 
-	#[cfg(not(target_family = "wasm"))]
 	#[test]
 	fn snapshot_and_report_transfer_counters_once() {
 		let stats = test_stats();

@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::Context;
 use bytes::Bytes;
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_scene::source::{self, Driver, Sources};
 use moq_scene::{Collection, Compositor, wgpu};
 use moq_video::render::export::{Exporter, Pending, Route};
@@ -160,6 +160,9 @@ impl Stats {
 pub struct Output {
 	/// The broadcast path on the relay.
 	pub path: String,
+	/// Whether the program video is copied and encoded only while someone
+	/// watches, rather than all the time.
+	pub on_demand: bool,
 	/// The relay connection, which reconnects on its own.
 	pub connection: moq_tokio::Connection,
 	publication: moq_net::origin::Publication,
@@ -191,7 +194,8 @@ const AUDIO_PERIOD: Duration = Duration::from_millis(10);
 
 impl Engine {
 	/// Open the collection at `path` on `gpu` and start the program clock.
-	/// With `connect`, publish the program at `broadcast` on that relay.
+	/// With `connect`, publish the program at `broadcast` on that relay,
+	/// encoding its video only while someone watches when `on_demand`.
 	///
 	/// Call inside the tokio runtime that serves the relay connection.
 	pub async fn start(
@@ -200,6 +204,7 @@ impl Engine {
 		collection: Collection,
 		connect: Option<(moq_tokio::Client, url::Url)>,
 		broadcast: &str,
+		on_demand: bool,
 	) -> anyhow::Result<Arc<Self>> {
 		let bus = moq_audio::bus::Bus::new(Default::default())?;
 		let subscribe = moq_tokio::origin::spawn();
@@ -217,7 +222,7 @@ impl Engine {
 
 		let (output, origin, publish) = match connect {
 			Some((client, url)) => {
-				let (output, publish) = publish(&gpu, client, url, subscribe, broadcast, canvas).await?;
+				let (output, publish) = publish(&gpu, client, url, subscribe, broadcast, canvas, on_demand).await?;
 				(Some(output), None, Some(publish))
 			}
 			None => (None, Some(subscribe), None),
@@ -280,7 +285,8 @@ impl Engine {
 	}
 
 	/// Draw a canvas frame per tick of the program clock, and hand the program
-	/// to the encoder while anyone watches, stamped `epoch` past `start`.
+	/// to the encoder, stamped `epoch` past `start`: every frame, or only while
+	/// anyone watches when the output is on demand.
 	///
 	/// Drawing outlives the encoder: a failed output stops copying the program,
 	/// and the preview and program keep moving.
@@ -292,9 +298,10 @@ impl Engine {
 	) {
 		let canvas = self.state.lock().unwrap().collection.canvas;
 		let period = Duration::from_secs(1) / canvas.framerate;
-		let mut clock = moq_clock::interval_at(start, period);
-		clock.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Skip);
-		let mut watched = false;
+		let mut clock = kio::clock::interval_at(start, period);
+		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
+		let on_demand = self.output.as_ref().is_some_and(|output| output.on_demand);
+		let mut encoding = false;
 
 		loop {
 			let tick = clock.tick().await;
@@ -315,8 +322,9 @@ impl Engine {
 			self.stats.rendered.fetch_add(1, Ordering::Relaxed);
 
 			let Some((sender, exporter)) = &mut video else { continue };
-			let was = std::mem::replace(&mut watched, self.stats.watched.load(Ordering::Relaxed));
-			if !watched {
+			let wanted = !on_demand || self.stats.watched.load(Ordering::Relaxed);
+			let was = std::mem::replace(&mut encoding, wanted);
+			if !encoding {
 				// Behind every frame already sent, so the break lands after them.
 				// A send fails only once the encoder stopped, having reported why.
 				if was && sender.send(Video::Pause).is_err() {
@@ -356,8 +364,8 @@ impl Engine {
 		let config = self.bus.config().clone();
 		let rate = u128::from(config.sample_rate);
 		let channels = config.layout.channels() as usize;
-		let mut clock = moq_clock::interval_at(start, AUDIO_PERIOD);
-		clock.set_missed_tick_behavior(moq_clock::MissedTickBehavior::Skip);
+		let mut clock = kio::clock::interval_at(start, AUDIO_PERIOD);
+		clock.set_missed_tick_behavior(kio::clock::MissedTickBehavior::Skip);
 		let mut samples = Vec::new();
 		let mut written: u128 = 0;
 
@@ -409,6 +417,7 @@ async fn publish(
 	subscribe: moq_net::origin::Producer,
 	path: &str,
 	canvas: moq_scene::Canvas,
+	on_demand: bool,
 ) -> anyhow::Result<(Output, Publish)> {
 	let origin = moq_tokio::origin::spawn();
 	let publication = origin.create_broadcast(path).context("cannot create the broadcast")?;
@@ -418,7 +427,7 @@ async fn publish(
 
 	let mut config = moq_video::encode::Config::new(canvas.width, canvas.height, canvas.framerate());
 	// Opens a throwaway encoder now, so a machine that cannot encode the
-	// canvas fails at startup rather than when the first viewer arrives. It
+	// canvas fails at startup rather than once the encode thread starts. It
 	// also settles whether that encoder reads the program on the GPU.
 	let (exporter, rendition) = Exporter::new(&gpu.device, &gpu.queue, &mut config)
 		.await
@@ -443,6 +452,7 @@ async fn publish(
 
 	let output = Output {
 		path: path.to_string(),
+		on_demand,
 		connection,
 		publication,
 	};
@@ -458,8 +468,8 @@ async fn publish(
 	))
 }
 
-/// Track whether anyone watches the video, so the program is only copied and
-/// encoded while someone does.
+/// Track whether anyone watches the video, for the Output panel, and so an
+/// on-demand program is only copied and encoded while someone does.
 async fn watch(mut demand: moq_net::track::Demand, engine: Arc<Engine>) {
 	loop {
 		match demand.wanted_changed().await {
@@ -477,7 +487,8 @@ async fn watch(mut demand: moq_net::track::Demand, engine: Arc<Engine>) {
 enum Video {
 	/// A copy of the program on its way to the encoder.
 	Frame(Pending),
-	/// The last viewer left, so frames stop until one returns.
+	/// The last viewer of an on-demand program left, so frames stop until one
+	/// returns.
 	Pause,
 	/// The program could not be copied, so the video stops.
 	Failed(moq_video::Error),
@@ -628,11 +639,12 @@ mod tests {
 		let gpu = Gpu::new().await.expect("a GPU");
 		let path = dir.path().join("show.toml");
 		let connect = Some((client, fixture.url.clone()));
-		let engine = Engine::start(gpu, path, collection, connect, "studio")
+		let on_demand = false;
+		let engine = Engine::start(gpu, path, collection, connect, "studio", on_demand)
 			.await
 			.expect("the studio starts");
 
-		let broadcast = tokio::time::timeout(TIMEOUT, relay.routed_broadcast("studio"))
+		let broadcast = kio::clock::timeout(TIMEOUT, relay.follow("studio", None).unwrap().available())
 			.await
 			.expect("the relay routes the program")
 			.expect("broadcast");
@@ -649,7 +661,7 @@ mod tests {
 			.expect("video decoder");
 		// The canvas is black until the color source delivers its first
 		// picture, so wait for the composed one rather than take the first.
-		tokio::time::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			loop {
 				let frame = match decoder.read().await.expect("decode") {
 					Some(moq_video::decode::Read::Frame(frame)) => frame,
@@ -688,7 +700,7 @@ mod tests {
 		let mut decoder = moq_audio::decode::Consumer::new(&broadcast, config, audio.clone(), options)
 			.await
 			.expect("audio decoder");
-		tokio::time::timeout(TIMEOUT, async {
+		kio::clock::timeout(TIMEOUT, async {
 			loop {
 				match decoder.read().await.expect("decode") {
 					Some(moq_audio::decode::Read::Frame(_)) => return,

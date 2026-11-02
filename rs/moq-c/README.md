@@ -55,10 +55,10 @@ int32_t moq_session_request_free(uint32_t request);
 int32_t moq_origin_create(void);
 int32_t moq_origin_close(uint32_t origin);
 int32_t moq_origin_create_broadcast(uint32_t origin, const char *path, uintptr_t path_len, uint32_t *broadcast);
-int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, moq_status_callback on_broadcast, void *user_data);
+int32_t moq_origin_request(uint32_t origin, const char *path, uintptr_t path_len, const char *epoch, uintptr_t epoch_len, moq_status_callback on_broadcast, void *user_data);
 int32_t moq_origin_request_cancel(uint32_t task);
-int32_t moq_origin_announced_broadcast(uint32_t origin, const char *path, uintptr_t path_len, moq_status_callback on_broadcast, void *user_data);
-int32_t moq_origin_announced_broadcast_cancel(uint32_t task);
+int32_t moq_origin_follow(uint32_t origin, const char *path, uintptr_t path_len, const char *epoch, uintptr_t epoch_len, moq_status_callback on_broadcast, void *user_data);
+int32_t moq_origin_follow_cancel(uint32_t task);
 int32_t moq_origin_announced(uint32_t origin, const moq_announce_config *config, moq_status_callback on_announce, void *user_data);
 int32_t moq_origin_announced_info(uint32_t announced, moq_announce_event *dst);
 int32_t moq_origin_announced_free(uint32_t announced);
@@ -66,7 +66,9 @@ int32_t moq_origin_announced_cancel(uint32_t announced);
 // config (NULL for everything): filter is relative to the literal prefix, or NULL for **. hidden also lists `.`-named paths. Updates stay relative to the origin.
 
 // Publishing: Announcement (a publication from moq_origin_create_broadcast or moq_broadcast_prepared_publish)
-int32_t moq_publication_announce(uint32_t publication, const moq_route *route);
+int32_t moq_publication_announce(uint32_t publication, const moq_announce_route *route);
+// route (NULL for the default): a cost and an optional epoch from moq_mint_epoch. Hops are the origin's to add.
+int32_t moq_mint_epoch(char *dst, uintptr_t dst_len);
 int32_t moq_publication_unannounce(uint32_t publication);
 int32_t moq_publication_free(uint32_t publication);
 
@@ -78,11 +80,11 @@ int32_t moq_publish_container(uint32_t broadcast, const moq_container_init *conf
 int32_t moq_publish_container_write(uint32_t container, const uint8_t *payload, uintptr_t payload_size);
 int32_t moq_publish_container_finish(uint32_t container);
 int32_t moq_publish_media_finish(uint32_t media);
-int32_t moq_publish_media_frame(uint32_t media, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
+int32_t moq_publish_media_frame(uint32_t media, const uint8_t *payload, uintptr_t payload_size, moq_timestamp timestamp);
 int32_t moq_publish_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_track_info *info);
 int32_t moq_publish_track_group(uint32_t track);
-int32_t moq_publish_track_frame(uint32_t track, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
-int32_t moq_publish_group_frame(uint32_t group, const uint8_t *payload, uintptr_t payload_size, uint64_t timestamp_us);
+int32_t moq_publish_track_frame(uint32_t track, const uint8_t *payload, uintptr_t payload_size, const moq_timestamp *timestamp);
+int32_t moq_publish_group_frame(uint32_t group, const uint8_t *payload, uintptr_t payload_size, const moq_timestamp *timestamp);
 int32_t moq_publish_group_finish(uint32_t group);
 int32_t moq_publish_track_finish(uint32_t track);
 
@@ -122,26 +124,29 @@ int32_t moq_consume_catalog_free(uint32_t catalog);
 int32_t moq_consume_video_config(uint32_t catalog, uint32_t index, moq_video_config *dst);
 int32_t moq_consume_video_enabled(uint32_t catalog, uint32_t index, bool *dst);
 int32_t moq_consume_audio_config(uint32_t catalog, uint32_t index, moq_audio_config *dst);
+int32_t moq_consume_audio_enabled(uint32_t catalog, uint32_t index, bool *dst);
 
 // Consuming: Video
-int32_t moq_consume_video(uint32_t catalog, uint32_t index, uint64_t max_delay_us, moq_status_callback on_frame, void *user_data);
+int32_t moq_consume_video(uint32_t catalog, uint32_t index, const moq_delay *delay, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_video_cancel(uint32_t track);
 
 // Consuming: Audio
-int32_t moq_consume_audio(uint32_t catalog, uint32_t index, uint64_t max_delay_us, moq_status_callback on_frame, void *user_data);
+int32_t moq_consume_audio(uint32_t catalog, uint32_t index, const moq_delay *delay, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_audio_cancel(uint32_t track);
 
 // Consuming: Frames
 int32_t moq_consume_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_frame_free(uint32_t frame);
+moq_subscription moq_subscription_defaults(void);
 int32_t moq_consume_track(uint32_t broadcast, const char *name, uintptr_t name_len, const moq_subscription *subscription, moq_status_callback on_frame, void *user_data);
 int32_t moq_consume_track_frame(uint32_t frame, moq_frame *dst);
 int32_t moq_consume_track_frame_free(uint32_t frame);
 int32_t moq_consume_track_cancel(uint32_t track);
 ```
 
-Raw track frames use the same `moq_frame` record as media frames. Use
-`moq_publish_track_frame` or `moq_publish_group_frame` to provide microsecond
-presentation timestamps; `moq_consume_track_frame` returns that timestamp in
-`moq_frame.timestamp_us`. moq-c creates raw tracks with a microsecond
-timescale, matching the C ABI's timestamp units.
+Raw track frames use the same `moq_frame` record as media frames. Timestamps
+are exact `moq_timestamp` records, `value` units at `scale` units per second.
+`moq_publish_track_frame` and `moq_publish_group_frame` convert theirs to the
+track's timescale, a microsecond one unless `moq_track_info.timescale` sets
+another, and `moq_consume_track_frame` points `moq_frame.timestamp` at the
+timestamp read, valid until the frame is freed, or NULL on an untimed track.

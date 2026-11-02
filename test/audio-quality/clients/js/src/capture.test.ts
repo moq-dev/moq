@@ -78,7 +78,7 @@ test("the observer shares playback demand and closes without ending playback", a
 	const published = publishedPublication.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
 	publishedPublication.announce();
-	const source = new Broadcast({ origin, name: Path.from("tone.hang"), announced: false, catalogFormat: "manual" });
+	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
 		broadcast: new Signal(source),
 		track: new Signal("audio"),
@@ -121,7 +121,7 @@ test("at auto the observer asks for the decoder's 2 s budget, not the target", a
 	const published = publishedPublication.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
 	publishedPublication.announce();
-	const source = new Broadcast({ origin, name: Path.from("tone.hang"), announced: false, catalogFormat: "manual" });
+	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
 		broadcast: new Signal(source),
 		track: new Signal("audio"),
@@ -151,7 +151,7 @@ async function captureGroupEnd(end: (group: Group.Producer) => void): Promise<st
 	const published = publishedPublication.broadcast;
 	const track = published.createTrack("audio", { timescale: Time.Timescale.MILLI });
 	publishedPublication.announce();
-	const source = new Broadcast({ origin, name: Path.from("tone.hang"), announced: false, catalogFormat: "manual" });
+	const source = new Broadcast({ origin, name: Path.from("tone.hang"), follow: false, catalogFormat: "manual" });
 	const capture = new Capture({
 		broadcast: new Signal(source),
 		track: new Signal("audio"),

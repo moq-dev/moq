@@ -20,7 +20,7 @@ use tokio::sync::oneshot;
 
 use crate::decode::Read;
 use crate::ffi::OnStatus;
-use crate::{moq_decode_gap, moq_decode_read_kind};
+use crate::{moq_decode_gap, moq_decode_read_kind, moq_decode_start, moq_timestamp};
 
 use crate::task::Task;
 use crate::{Error, Id, NonZeroSlab, Shared, State, ffi};
@@ -118,13 +118,16 @@ pub struct moq_audio_decoder_output {
 	/// layout as `moq_audio_encoder_input.channels` describes, and the decoder
 	/// remixes to it.
 	pub channels: u32,
-	/// Upper bound on buffering before skipping a stalled group, in
-	/// microseconds. Same congestion-control knob as
-	/// `moq_consume_audio`'s `max_delay_us`. 0 = skip
-	/// aggressively (the moq-mux default); set to your playout
-	/// buffer (tens to a few hundred ms) for a softer skip. This bounds
-	/// group staleness rather than setting a minimum playout delay.
-	pub max_delay_us: u64,
+	/// How far behind the live edge to play. Same knob as `moq_consume_audio`'s
+	/// `delay`. `min_us` floors the playout delay, which is otherwise measured
+	/// from arrival timing, and sets where a cold join starts. `max_us` bounds
+	/// group staleness and adds no buffering. Zeroed: start at the newest group
+	/// and skip aggressively (the moq-mux default).
+	pub delay: crate::api::moq_delay,
+	/// `moq_decode_start` discriminant: where to start on a track that already
+	/// holds groups. 0 = the oldest, decoding everything cached; a live player
+	/// sets `MOQ_DECODE_START_LATEST`.
+	pub start: u32,
 }
 
 /// One audio frame: payload bytes plus a presentation timestamp.
@@ -134,8 +137,8 @@ pub struct moq_audio_decoder_output {
 /// (the publisher copies before returning).
 #[repr(C)]
 pub struct moq_audio_frame {
-	/// The presentation timestamp in microseconds.
-	pub timestamp_us: u64,
+	/// The presentation timestamp.
+	pub timestamp: moq_timestamp,
 	/// The raw frame bytes in the configured layout.
 	pub data: *const u8,
 	/// The length in bytes of `data`.
@@ -153,11 +156,11 @@ pub struct moq_audio_read {
 	/// The lost span, for [moq_decode_read_kind::MOQ_DECODE_READ_GAP]. What follows does
 	/// not continue what came before.
 	pub gap: moq_decode_gap,
-	/// Where the stopped encoder's media stops in microseconds, for
+	/// Where the stopped encoder's media stops, for
 	/// [moq_decode_read_kind::MOQ_DECODE_READ_END]. Frames that follow and start before it
 	/// are the stopped encoder's remaining media; the first at or past it comes from a fresh
 	/// encoder.
-	pub end_us: u64,
+	pub end: moq_timestamp,
 }
 
 // ---- State extensions (used internally by lib.rs) ----
@@ -288,7 +291,7 @@ impl Audio {
 				read = consumer.read() => match read {
 					Ok(Some(moq_audio::decode::Read::Frame(frame))) => Read::Frame(frame),
 					Ok(Some(moq_audio::decode::Read::Gap { timestamp, duration })) => Read::gap(timestamp, duration)?,
-					Ok(Some(moq_audio::decode::Read::End { end })) => Read::end(end)?,
+					Ok(Some(moq_audio::decode::Read::End { end })) => Read::end(end),
 					Ok(None) => return Ok(()),
 					// One packet the codec rejected is that packet's problem: the
 					// decoder stays usable, so drop it and keep the subscription rather
@@ -315,29 +318,20 @@ impl Audio {
 	/// Borrow a delivered read, and a frame's samples, until its handle is freed.
 	pub fn read_info(&self, id: Id, dst: &mut moq_audio_read) -> Result<(), Error> {
 		let read = self.reads.get(id).ok_or(Error::FrameNotFound)?;
-		let (kind, gap, end_us) = read.info();
+		let (kind, gap, end) = read.info();
 		let frame = match read {
 			Read::Frame(frame) => moq_audio_frame {
-				// The C ABI carries plain microseconds, so flatten the scaled
-				// `Timestamp` here at the boundary. Saturating rather than erroring:
-				// this is a getter on a frame we already decoded, and a u64 overflow
-				// needs a timestamp ~580,000 years out.
-				timestamp_us: u64::try_from(frame.timestamp.as_micros()).unwrap_or(u64::MAX),
+				timestamp: frame.timestamp.into(),
 				data: frame.data.as_ptr(),
 				data_size: frame.data.len(),
 			},
 			_ => moq_audio_frame {
-				timestamp_us: 0,
+				timestamp: moq_timestamp::default(),
 				data: std::ptr::null(),
 				data_size: 0,
 			},
 		};
-		*dst = moq_audio_read {
-			kind,
-			frame,
-			gap,
-			end_us,
-		};
+		*dst = moq_audio_read { kind, frame, gap, end };
 		Ok(())
 	}
 
@@ -429,9 +423,11 @@ pub extern "C" fn moq_encode_audio_reservation(producer: u32) -> i32 {
 	})
 }
 
-/// Watch whether the encoded audio track has subscribers, so the microphone and
-/// encoder run only while someone listens. See [`crate::moq_publish_media_demand`]
-/// for the callback contract.
+/// Watch whether the encoded audio track has subscribers. The encoder publishes every
+/// sample written, subscribed or not; opting in to run the microphone and encoder
+/// only while someone listens saves that work but leaves a late subscriber nothing
+/// to fetch from before it arrived. See [`crate::moq_publish_media_demand`] for the
+/// callback contract.
 ///
 /// Returns a non-zero watcher handle on success, or a negative code on failure.
 ///
@@ -474,9 +470,7 @@ pub unsafe extern "C" fn moq_encode_audio_frame(producer: u32, frame: *const moq
 		let frame = unsafe { frame.as_ref() }.ok_or(Error::InvalidPointer)?;
 		let data = unsafe { ffi::parse_slice(frame.data, frame.data_size)? };
 
-		// The C ABI carries plain microseconds; scale them at the boundary.
-		let timestamp = moq_net::Timestamp::from_micros(frame.timestamp_us).map_err(moq_audio::Error::from)?;
-		let owned = moq_audio::Frame::new(Bytes::copy_from_slice(data), timestamp);
+		let owned = moq_audio::Frame::new(Bytes::copy_from_slice(data), frame.timestamp.try_into()?);
 
 		let producer = State::lock().audio.producer(producer)?;
 		producer
@@ -538,7 +532,7 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 /// again, so release `user_data` there. The terminal callback fires even after
 /// [`moq_decode_audio_cancel`].
 ///
-/// Starts at the newest cached group so reopening live playback skips the backlog.
+/// `output->start` picks where it starts on a track that already holds groups.
 ///
 /// A packet the codec cannot decode is logged and skipped rather than ending
 /// the subscription, so a single bad frame costs that frame and not the stream.
@@ -559,13 +553,16 @@ pub unsafe extern "C" fn moq_decode_audio(
 		let raw = unsafe { output.as_ref() }.ok_or(Error::InvalidPointer)?;
 
 		let mut config = moq_audio::decode::Options::default();
-		config.start = moq_audio::decode::Start::Latest;
+		config.start = match moq_decode_start::from_u32(raw.start)? {
+			moq_decode_start::MOQ_DECODE_START_OLDEST => moq_audio::decode::Start::Oldest,
+			moq_decode_start::MOQ_DECODE_START_LATEST => moq_audio::decode::Start::Latest,
+		};
 		config.output.format = audio_format_from_u32(raw.format)?;
 		config.output.sample_rate = zeroable(raw.sample_rate);
 		config.output.layout = zeroable(raw.channels)
 			.map(moq_audio::Layout::from_channels)
 			.transpose()?;
-		config.max_delay = Duration::from_micros(raw.max_delay_us);
+		config.delay = raw.delay.into();
 
 		let on_read = unsafe { OnStatus::new(user_data, on_read)? };
 

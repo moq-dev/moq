@@ -21,11 +21,10 @@ pub struct Config {}
 /// [`commit`](Self::commit).
 ///
 /// A frame that is never committed never reached the wire. Each record stands alone, so a dropped
-/// one leaves a gap in the log but nothing undecodable, and encoding continues; it is just not
-/// charged to the group's budget.
-#[must_use = "write and commit the record so it counts against the group's budget"]
+/// one leaves a gap in the log but nothing undecodable, and encoding continues.
+#[must_use = "write and commit the record"]
 pub struct Pending<'a, T> {
-	encoder: &'a mut Encoder<T>,
+	_encoder: &'a mut Encoder<T>,
 	payload: Bytes,
 }
 
@@ -35,13 +34,10 @@ impl<T> Pending<'_, T> {
 		&self.payload
 	}
 
-	/// Acknowledge that the record reached the wire, charging it to the group's budget.
+	/// Acknowledge that the record reached the wire.
 	///
 	/// Only call this once the write has actually succeeded.
-	pub fn commit(self) {
-		self.encoder.frames += 1;
-		self.encoder.bytes += self.payload.len() as u64;
-	}
+	pub fn commit(self) {}
 }
 
 /// Encodes JSON records into frame payloads.
@@ -50,31 +46,15 @@ impl<T> Pending<'_, T> {
 /// [`snapshot::Encoder`](crate::snapshot::Encoder) there are no group boundaries to report: a log is
 /// an unbroken sequence of self-contained records, so every payload is simply the next frame.
 ///
-/// Payloads must reach the wire in order. If the caller does roll a group, call
-/// [`reset`](Self::reset) so the budget restarts with it.
+/// Payloads must reach the wire in order. A group has no size cap, so the encoder keeps no budget.
 pub struct Encoder<T> {
-	/// Frames and bytes committed to the current group, checked against moq-net's group budget
-	/// before each record is encoded.
-	frames: usize,
-	bytes: u64,
-
 	_marker: PhantomData<fn(T)>,
 }
 
 impl<T> Encoder<T> {
-	/// Create an encoder for an empty group.
+	/// Create an encoder.
 	pub fn new(_config: Config) -> Self {
-		Self {
-			frames: 0,
-			bytes: 0,
-			_marker: PhantomData,
-		}
-	}
-
-	/// Restart the group's budget, for a caller that has just rolled a group.
-	pub fn reset(&mut self) {
-		self.frames = 0;
-		self.bytes = 0;
+		Self { _marker: PhantomData }
 	}
 }
 
@@ -84,18 +64,17 @@ impl<T: Serialize> Encoder<T> {
 	/// The record comes back as a [`Pending`] the caller writes and then
 	/// [`commit`](Pending::commit)s.
 	///
-	/// Errors with [`moq_net::Error::GroupTooLarge`] if the record does not fit in what is left of
-	/// the group's budget ([`moq_net::group::MAX_CACHE_BYTES`] and
-	/// [`moq_net::group::MAX_GROUP_FRAMES`]), counting every record committed since the last
-	/// [`reset`](Self::reset). The refused record leaves the encoder untouched.
+	/// Errors with [`moq_net::Error::FrameTooLarge`] if the record is larger than one frame may be
+	/// ([`moq_net::group::MAX_CACHE_BYTES`]). The refused record leaves the encoder untouched.
 	pub fn encode(&mut self, value: &T) -> Result<Pending<'_, T>> {
 		let payload = Bytes::from(serde_json::to_vec(value)?);
-		if self.frames >= moq_net::group::MAX_GROUP_FRAMES
-			|| self.bytes.saturating_add(payload.len() as u64) > moq_net::group::MAX_CACHE_BYTES
-		{
-			return Err(moq_net::Error::GroupTooLarge.into());
+		if payload.len() as u64 > moq_net::group::MAX_CACHE_BYTES {
+			return Err(moq_net::Error::FrameTooLarge.into());
 		}
 
-		Ok(Pending { encoder: self, payload })
+		Ok(Pending {
+			_encoder: self,
+			payload,
+		})
 	}
 }

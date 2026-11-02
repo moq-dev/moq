@@ -1,6 +1,7 @@
 import { describe, expect, mock, spyOn, test } from "bun:test";
-import { Micro, Milli } from "@moq/clock";
+import { Manual, Micro, Milli, Nano, now } from "@moq/clock";
 import * as Catalog from "@moq/hang/catalog";
+import * as Container from "@moq/hang/container";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 import { Signal } from "@moq/signals";
@@ -8,6 +9,15 @@ import { Broadcast } from "../broadcast";
 import { Estimator, Order } from "../order";
 import type { AudioFrame, Format } from "./capture";
 import { type Codec, Encoder, resolve, toEncoderConfig } from "./encoder";
+
+/** Install a Manual clock reading `ms`, set forward the way a mocked `performance.now()` was. */
+function manualAt(ms: number) {
+	const clock = new Manual();
+	const installed = clock.install();
+	const set = (to: number) => clock.jump(Nano(Nano.fromMilli(Milli(to)) - clock.now()));
+	set(ms);
+	return { set, close: () => installed.close(), [Symbol.dispose]: () => installed.close() };
+}
 
 // Bun does not load Vite's worklet URL imports from the public audio entrypoint.
 mock.module("./capture-worklet.ts?worklet", () => ({ default: async () => "blob:fake-capture" }));
@@ -294,7 +304,11 @@ async function setup(order = new Order(), codec?: Codec, groupDuration?: Milli) 
 
 	const enabled = new Signal(true);
 	const encoder = new Encoder("audio", {
-		broadcast: { audio: () => rendition, order } as never,
+		broadcast: {
+			audio: () => rendition,
+			order,
+			in: { maxAge: new Signal(undefined), onDemand: new Signal(false) },
+		} as never,
 		capture: capture as never,
 		enabled,
 		codec,
@@ -325,7 +339,7 @@ async function setup(order = new Order(), codec?: Codec, groupDuration?: Milli) 
 // resume. Written after the marker, they would put pre-gap media on the live edge, and a rounding
 // step below the marker aborts every subscriber. The resumed chunks have to carry the capture clock,
 // not the encoder's gap-blind one, or they trail the next gap's marker and are dropped as pre-gap.
-test("a demand gap marks where submitted audio ends and drops the chunks held across it", async () => {
+test("an on-demand gap marks where submitted audio ends and drops the chunks held across it", async () => {
 	using _webcodecs = installFakeWebCodecs();
 	using env = await setup();
 	const { track, rendition, feed, written, writes } = env;
@@ -649,7 +663,7 @@ test("the catalog bitrate only rises", async () => {
 // this one trailing it, which the catalog advertises as `delay`.
 test("a rendition written behind another advertises delay", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	const clock = spyOn(performance, "now").mockReturnValue(200);
+	const clock = manualAt(200);
 
 	try {
 		const order = new Order();
@@ -659,10 +673,10 @@ test("a rendition written behind another advertises delay", async () => {
 		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
 
 		// A sibling that already wrote media up to now.
-		new Estimator().write(performance.now() * 1000, order);
+		new Estimator().write(Nano.toMicro(Nano(now())), order);
 
 		// Captured 100ms ago, with a clock origin that keeps timestamps nonnegative.
-		const start = performance.now() * 1000 - 100_000;
+		const start = Nano.toMicro(Nano(now())) - 100_000;
 		for (let index = 0; index < 4; index++) {
 			await feed.push({ timestamp: Micro(start + index * 20_000), channels: [new Float32Array(960)] });
 		}
@@ -674,7 +688,7 @@ test("a rendition written behind another advertises delay", async () => {
 		]);
 		expect(encoder.out.catalog.peek()).toMatchObject({ delay: 100 });
 	} finally {
-		clock.mockRestore();
+		clock.close();
 	}
 });
 
@@ -743,7 +757,7 @@ async function settle(times = 5): Promise<void> {
 
 test("a failed audio encoder keeps its last catalog config disabled", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using _now = spyOn(performance, "now").mockReturnValue(0);
+	using _now = manualAt(0);
 	using _error = spyOn(console, "error").mockImplementation(() => {});
 	using env = await setup();
 	const live = LaggingAudioEncoder.instances.at(-1);
@@ -760,8 +774,12 @@ test("a failed audio encoder keeps its last catalog config disabled", async () =
 
 test("audio failure stays local through demand changes and capture format re-arms a fresh track", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using _now = spyOn(performance, "now").mockReturnValue(0);
-	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("failure.hang") });
+	using _now = manualAt(0);
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("failure.hang"),
+		onDemand: false,
+	});
 	const feed = new Feed();
 	const capture = fakeCapture(feed);
 	const estimate = new Signal<number | undefined>(10_000_000);
@@ -788,7 +806,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 		await settle();
 		const net = broadcast.net.peek();
 		if (!net) throw new Error("expected network broadcast");
-		announced = broadcast.in.origin.peek()?.request(broadcast.in.name.peek(), { announced: true });
+		announced = broadcast.in.origin.peek()?.follow(broadcast.in.name.peek());
 		const epoch = announced?.active.peek()?.epoch;
 		const sibling = broadcast.video("video");
 		sibling.config.set({ codec: "avc1.640028", container: { kind: "legacy" } });
@@ -863,7 +881,7 @@ test("audio failure stays local through demand changes and capture format re-arm
 
 test("an audio failure without demand still recovers under a fresh track name", async () => {
 	using _webcodecs = installFakeWebCodecs();
-	using _now = spyOn(performance, "now").mockReturnValue(0);
+	using _now = manualAt(0);
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("idle.hang") });
 	const configuring = configured();
 	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(new Feed()) as never });
@@ -905,8 +923,12 @@ test.each(["failure first", "config first"])(
 	"same-turn audio failure and config recovery keep a fresh track: %s",
 	async (order) => {
 		using _webcodecs = installFakeWebCodecs();
-		using _now = spyOn(performance, "now").mockReturnValue(0);
-		const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("coalesced.hang") });
+		using _now = manualAt(0);
+		const broadcast = new Broadcast({
+			origin: new Moq.Origin.Producer(),
+			onDemand: false,
+			name: Moq.Path.from("coalesced.hang"),
+		});
 		const configuring = configured();
 		const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(new Feed()) as never });
 		let catalogSubscriber: Moq.Track.Subscriber | undefined;
@@ -929,7 +951,8 @@ test.each(["failure first", "config first"])(
 			expect(config?.track).toBeDefined();
 			expect(config?.track).not.toBe("audio");
 			expect(encoder.out.error.peek()).toBeUndefined();
-			expect(encoder.out.active.peek()).toBe(false);
+			// Encoding resumes on the fresh track without waiting for a subscriber.
+			expect(encoder.out.active.peek()).toBe(true);
 			expect(broadcast.net.peek()).toBe(net);
 		} finally {
 			catalogSubscriber?.close();
@@ -938,6 +961,247 @@ test.each(["failure first", "config first"])(
 		}
 	},
 );
+
+// Both policies preserve the past; only always-on spends encode work while idle.
+test.each([undefined, false, true])(
+	"a late subscriber reaches captured audio with either encoding policy (%p)",
+	async (onDemand) => {
+		using _webcodecs = installFakeWebCodecs();
+		const broadcast = new Broadcast({
+			origin: new Moq.Origin.Producer(),
+			name: Moq.Path.from("eager.hang"),
+			onDemand,
+		});
+		const feed = new Feed();
+		const configuring = configured();
+		const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+		const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
+		let late: Moq.Track.Subscriber | undefined;
+		try {
+			await configuring;
+			await settle();
+			const net = broadcast.net.peek();
+			if (!net) throw new Error("expected network broadcast");
+			expect(encoder.out.active.peek()).toBe(onDemand === false);
+
+			// One 20ms Opus frame per push, each its own group.
+			let index = 0;
+			const push = async (count: number) => {
+				for (let i = 0; i < count; i++, index++) {
+					await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });
+				}
+				await feed.drain();
+			};
+
+			await push(4);
+			expect(encoder.out.stats.peek().frames).toBe(onDemand === false ? 2 : 0);
+			late = net.track("audio").subscribe({ maxDelay: Milli(10_000) });
+			await settle();
+			expect(encoder.out.active.peek()).toBe(true);
+			await push(3);
+
+			const group = await late.ordered().nextGroup();
+			if (!group) throw new Error("expected a group");
+			const frame = await group.readFrame();
+			if (!frame) throw new Error("expected a frame");
+			const [timestamp] = Moq.Varint.decode(frame.payload);
+			// Buffered audio is encoded ahead of the live input on the capture clock.
+			expect(group.sequence).toBe(0);
+			expect(timestamp).toBe(0);
+
+			// Losing demand preserves the epoch and resumes raw retention.
+			late.close();
+			late = undefined;
+			await settle();
+			expect(discontinuity).not.toHaveBeenCalled();
+			expect(encoder.out.active.peek()).toBe(onDemand === false);
+		} finally {
+			discontinuity.mockRestore();
+			late?.close();
+			encoder.close();
+			broadcast.close();
+		}
+	},
+);
+
+test("a backlog encode refusal aborts its rendition when demand arrives", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("refused.hang") });
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	let subscriber: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		await feed.push({ timestamp: Micro(0), channels: [new Float32Array(960)] });
+		await feed.drain();
+		const live = LaggingAudioEncoder.instances.at(-1);
+		if (!live) throw new Error("expected configured encoder");
+		const failure = new Error("codec refused buffered input");
+		using _encode = spyOn(live, "encode").mockImplementation(() => {
+			throw failure;
+		});
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		subscriber = net.track("audio").subscribe();
+		await settle();
+		expect(encoder.out.error.peek()).toBe(failure);
+		expect(subscriber.closed.peek()).toBe(failure);
+	} finally {
+		subscriber?.close();
+		encoder.close();
+		broadcast.close();
+	}
+});
+
+// Advancing capture and time independently catches a buffer bounded only by incoming timestamps,
+// and forces the on-demand transition to replay history even before another live quantum arrives.
+test("default audio replays the last second after three seconds without a subscriber", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("raw.hang"),
+		maxAge: Milli(1000),
+	});
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	let late: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		for (let index = 0; index < 150; index++) {
+			await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });
+			await feed.drain();
+			await clock.advance(Nano.fromMilli(Milli(20)));
+		}
+		expect(encoder.out.stats.peek().frames).toBe(0);
+		expect(encoder.out.active.peek()).toBe(false);
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		late = net.track("audio").subscribe({ maxDelay: Milli(1000) });
+		await settle();
+		expect(encoder.out.stats.peek().frames).toBe(50 - LaggingAudioEncoder.LAG);
+		for (let index = 150; index < 153; index++) {
+			await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+		const reader = late.ordered();
+		for (let index = 100; index < 151; index++) {
+			const group = await reader.nextGroup();
+			if (!group) throw new Error("expected buffered group");
+			const frame = await group.readFrame();
+			if (!frame) throw new Error("expected buffered frame");
+			expect(Moq.Varint.decode(frame.payload)[0]).toBe(index * 20_000);
+			group.close();
+		}
+	} finally {
+		late?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
+// Replay catches up behind the live edge another rendition already reached; advertising that as
+// `delay` would buffer playback by the retention for the rest of the broadcast.
+test("replayed raw audio raises no catalog delay", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("history.hang"),
+		maxAge: Milli(1000),
+	});
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	let late: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		for (let index = 0; index < 150; index++) {
+			await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });
+			await feed.drain();
+			await clock.advance(Nano.fromMilli(Milli(20)));
+		}
+		// Video already wrote up to the live edge.
+		new Estimator().write(150 * 20_000, broadcast.order);
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		late = net.track("audio").subscribe({ maxDelay: Milli(1000) });
+		await settle();
+		for (let index = 150; index < 153; index++) {
+			await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });
+		}
+		await feed.drain();
+		await settle();
+		expect(encoder.out.stats.peek().frames).toBeGreaterThan(50);
+		expect(encoder.out.catalog.peek()?.delay).toBeUndefined();
+	} finally {
+		late?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
+
+// Losing demand keeps the epoch, but history that expires unencoded is a real gap: the frame
+// before it must not read as lasting until the replay resumes.
+test("expired raw audio ends the epoch before the replay resumes", async () => {
+	using _webcodecs = installFakeWebCodecs();
+	const clock = new Manual();
+	const installed = clock.install();
+	const broadcast = new Broadcast({
+		origin: new Moq.Origin.Producer(),
+		name: Moq.Path.from("evicted.hang"),
+		maxAge: Milli(1000),
+	});
+	const feed = new Feed();
+	const configuring = configured();
+	const encoder = new Encoder("audio", { broadcast, capture: fakeCapture(feed) as never });
+	const discontinuity = spyOn(Container.Legacy.Producer.prototype, "discontinuity");
+	let subscriber: Moq.Track.Subscriber | undefined;
+	try {
+		await configuring;
+		await settle();
+		const net = broadcast.net.peek();
+		if (!net) throw new Error("expected network broadcast");
+		let index = 0;
+		const push = async (count: number) => {
+			for (const end = index + count; index < end; index++) {
+				await feed.push({ timestamp: Micro(index * 20_000), channels: [new Float32Array(960)] });
+				await feed.drain();
+				await clock.advance(Nano.fromMilli(Milli(20)));
+			}
+		};
+
+		subscriber = net.track("audio").subscribe();
+		await settle();
+		await push(4);
+		subscriber.close();
+		subscriber = undefined;
+		await settle();
+		expect(discontinuity).not.toHaveBeenCalled();
+
+		// Twice the retention unwatched: the first half expires before anyone returns.
+		await push(100);
+		subscriber = net.track("audio").subscribe();
+		await settle();
+		expect(discontinuity).toHaveBeenCalledTimes(1);
+		expect(discontinuity.mock.calls[0][0]).toBe(Micro(4 * 20_000));
+	} finally {
+		discontinuity.mockRestore();
+		subscriber?.close();
+		encoder.close();
+		broadcast.close();
+		installed.close();
+	}
+});
 
 test("Opus description is probed with the exact live config before advertising", async () => {
 	using _codecs = installFakeWebCodecs();

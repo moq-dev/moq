@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Run `just check`, `just fix`, or `just ci` over one resolved branch diff.
 # check and ci run CHECK_JOBS lanes of modules at once (default 3); 1 runs
-# them in order and streams their output.
+# them in order and streams their output. CHECK_MODULES limits the selection to
+# the modules it names, or skips those named with a leading `-`, so a gate too
+# large for one job splits across several.
+# CHECK_FAIL_FAST=1 stops every lane at the first failed module, for the land
+# gate, which ejects a failing batch either way and gains nothing from the rest.
 # `--query` prints the selection before CI installs its toolchain and caches.
 # `ci-platform` exists only as a query for the native platform workflows.
 set -euo pipefail
@@ -59,12 +63,15 @@ declare -A scope=(
     # fails a check that reads a cross-tree input this pattern misses.
     # demo/pub is a Worker outside the Bun workspace, listed so Biome lints it.
     # Root Nix inputs own the browser version every npm Playwright pin matches.
-    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/moq-wasm/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)'
+    [js]='^(js/|bench/browser/|doc/|drafts/|demo/(boy|pub|web|carla/web)/|test/|rs/.*\.json$|sh/js/|sh/rs/stats-docs\.py$|package\.json$|bun\.lock(b)?$|biome\.jsonc$|flake\.(nix|lock)$)'
     # Workers with lockfiles outside the Bun workspace.
     [workers]='^(infra/|demo/pub/|sh/js/workers\.sh$)'
     [moq_sh]='^infra/moq-sh/'
     # sh/rs/select.sh widens to the whole workspace for inputs every crate shares.
-    [rs]='^(\.cargo/|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|sh/rs/|Cargo\.(toml|lock)$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
+    # moq-cli builds the Rust interop clients as examples from outside its
+    # crate; sh/rs/select.test.py fails when a target's directory is missing.
+    # moq-relay's tests read its NixOS module.
+    [rs]='^(\.cargo/|nix/modules/moq-relay\.nix$|sh/local\.(sh|ts)$|rs/|demo/carla/bridge/|test/interop/clients/rust/|sh/rs/|Cargo\.(toml|lock)$|clippy\.toml$|rust-toolchain\.toml$|\.config/nextest\.toml$)'
     [bench]='^bench/'
     # The CARLA demo's simulator worker and launchers. Its player is a JS
     # package and its GPU bridge a Rust crate, so those modules cover them.
@@ -84,10 +91,11 @@ declare -A scope=(
     [swift]='^(\.cargo/config\.toml$|swift/|sh/swift/|rs/moq-ffi/|doc/lib/swift/|doc/lib/samples\.sh$)'
     [go]='^(\.cargo/config\.toml$|go/|sh/go/|rs/moq-ffi/|doc/lib/go/|doc/lib/samples\.sh$)'
     [dart]='^(\.cargo/config\.toml$|dart/|sh/dart/|rs/moq-ffi/|doc/lib/dart/|doc/lib/samples\.sh$)'
-    # The C package links moq-c's native-libs lists, and the C++ package's FFI pin.
-    [c]='^(\.cargo/config\.toml$|c/|sh/c/|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)'
+    # The C package links moq-c's native-libs lists, and the C++ package's FFI
+    # pin. Both packages format with sh/clang-format.sh and OBS's style file.
+    [c]='^(\.cargo/config\.toml$|c/|sh/c/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|cpp/moq/FFI_VERSION$|cpp/moq/cmake/moq-ffi\.cmake$)'
     # The package links moq-c's native-libs lists, and compiles its doc samples.
-    [cpp]='^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
+    [cpp]='^(\.cargo/config\.toml$|cpp/moq/|cpp/justfile$|sh/cpp/|sh/clang-format\.sh$|cpp/obs/\.clang-format$|rs/moq-ffi/|rs/moq-c/native-libs/|doc/lib/cpp/|doc/lib/samples\.sh$)'
     # The plugin and its tests call through the bindings generated from cpp/moq
     # and moq-ffi and link through moq-c's native-libs lists, and flake.nix owns
     # the libobs headers it compiles against.
@@ -101,6 +109,8 @@ declare -A scope=(
     # ts.yml's crate filters against the closure test/ts/run.sh builds, which
     # moves only with a manifest, the lockfile, or the harness's packages.
     [ts_paths]='^(rs/.*Cargo\.toml$|Cargo\.(toml|lock)$|test/ts/run\.sh$|\.github/workflows/release-gate\.yml$|sh/gh/ts-paths\.py$)'
+    # Ruff lints and formats every Python file under the nearest pyproject.toml.
+    [python]='(\.pyi?|(^|/)pyproject\.toml)$'
     [markdown]=''
     [shell]=''
     [large_files]=''
@@ -138,7 +148,8 @@ fi
 # The tools each module needs. A module missing one is skipped locally, so an
 # incomplete toolchain checks less; under CI_STRICT (CI) it is an error, up
 # front, because there a skip is indistinguishable from a pass. swift needs
-# none: it skips off macOS by design, and platform.yml is its real gate.
+# none: it skips off macOS by design, and platform.yml is its real gate. Its
+# formatter is absent where nixpkgs cannot build it (see flake.nix).
 declare -A tools=(
     [js]='bun python3'
     [workers]='bun'
@@ -150,23 +161,24 @@ declare -A tools=(
     [quest]='quest'
     [drill]=''
     [py]='uv'
-    [kt]='cargo gradle java'
+    [kt]='cargo gradle java ktfmt'
     [swift]=''
     [go]='cargo go uniffi-bindgen-go'
     [dart]='cargo dart uniffi_bindgen_dart'
-    [c]='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp'
-    [cpp]='cargo cmake c++ uniffi-bindgen-cpp'
+    [c]='cargo cmake cc c++ pkg-config uniffi-bindgen-cpp clang-format'
+    [cpp]='cargo cmake c++ uniffi-bindgen-cpp clang-format'
     [obs_compile]='cargo cmake pkg-config uniffi-bindgen-cpp'
     [obs]='clang-format cmake gersemi jq'
     [flake]='nix'
     [ts_paths]='cargo python3'
     [markdown]='bun'
+    [python]='ruff'
     [shell]='shellcheck shfmt'
     [large_files]=''
     [toml]='taplo'
     [nix]='nixfmt'
     [justfile]=''
-    [gh]='actionlint bun python3 cargo clippy-driver dpkg-deb nfpm rpm'
+    [gh]='actionlint zizmor bun python3 cargo clippy-driver dpkg-deb nfpm rpm'
 )
 
 # CI and the local check share one selection and one lint/test dispatch.
@@ -174,18 +186,17 @@ verb=$action
 [[ "$verb" != ci ]] || verb=check
 
 # The modules whose run compiles Rust through Cargo, so CI restores the Rust
-# build cache only when one is selected. JS checks build @moq/wasm for its
-# consumers, and the bindings build moq-ffi.
+# build cache only when one is selected. The bindings build moq-ffi.
 declare -A compiles=(
-    [check]='rs bench js py kt go dart c cpp obs_compile'
+    [check]='rs bench py kt go dart c cpp obs_compile'
     [fix]='rs'
 )
 
 # Lanes start in this order, so the slowest come first. dart runs alone (see
 # below), so it waits for the rest.
 case "$action" in
-    check | ci) modules=(py rs c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths shell large_files toml nix justfile dart) ;;
-    fix) modules=(js rs py carla dart obs markdown shell toml nix justfile) ;;
+    check | ci) modules=(py rs c cpp obs_compile js kt flake bench carla swift go drafts markdown gh drill workers moq_sh quest obs ts_paths python shell large_files toml nix justfile dart) ;;
+    fix) modules=(js rs dart go kt swift c cpp obs python markdown shell toml nix justfile) ;;
 esac
 
 # Modules that share mutable state run in one lane, in module order; every
@@ -216,9 +227,23 @@ declare -A lane=(
 # BINDGEN_EXTRA_CLANG_ARGS, and so rebuilds what the hook then rebuilds again.
 declare -A alone=([dart]=1)
 
+# CHECK_MODULES names the modules to run, or with a leading `-` those to skip.
+declare -A only=() skip=()
+for word in ${CHECK_MODULES:-}; do
+    name=${word#-}
+    if [[ " ${modules[*]} " != *" $name "* ]]; then
+        echo "error: CHECK_MODULES names '$name', which $action does not run; pick from: ${modules[*]}" >&2
+        exit 2
+    fi
+    if [[ "$word" == -* ]]; then skip[$name]=1; else only[$name]=1; fi
+done
+
 selected=()
 missing=()
 for module in "${modules[@]}"; do
+    if [[ -v "skip[$module]" ]] || { ((${#only[@]})) && [[ ! -v "only[$module]" ]]; }; then
+        continue
+    fi
     pattern=${scope[$module]}
     if [[ -z "$all" && -n "$pattern" ]] && ! grep -qE "$pattern" "$changed"; then
         continue
@@ -277,9 +302,13 @@ if [[ -z "$all" ]]; then
     js_list=$js_changed
 fi
 
-# Tracked and new files, skipping whatever .gitignore does (node_modules, target).
+# Tracked and new files, skipping whatever .gitignore does (node_modules, target)
+# and tracked files deleted from the working tree, which no formatter can read.
 files() {
-    git ls-files -z --cached --others --exclude-standard -- "$@"
+    git ls-files -z --cached --others --exclude-standard -- "$@" |
+        while IFS= read -r -d '' file; do
+            [[ ! -e "$file" ]] || printf '%s\0' "$file"
+        done
 }
 
 # One phase of one module. The bindings run their tests in their check; rs,
@@ -289,8 +318,8 @@ step() {
         check:js) just js check-changed "$js_list" ;;
         check:workers) just js workers ;;
         check:moq_sh) just infra moq-sh test ;;
-        # The check keeps docs and target-specific lints; the test phase
-        # enforces default-feature clippy without a second compile.
+        # The check keeps docs; the test phase enforces default-feature clippy
+        # without a second compile.
         check:rs) just rs lint-changed "$rs_list" ;;
         check:bench)
             python3 bench/compare.test.py
@@ -312,6 +341,13 @@ step() {
                     return 77
                 fi
             fi
+            # Without KVM, QEMU falls back to emulation and the VM tests time
+            # out long after. Refuse rather than skip, so a local gate never
+            # reads as passing without them.
+            if [[ "$OSTYPE" == linux* && "$HOSTTYPE" == x86_64 && ! -e /dev/kvm ]]; then
+                echo "$action: flake's NixOS VM tests need KVM, but /dev/kvm is missing; run them on a KVM host, as CI does" >&2
+                return 1
+            fi
             # 77 marks the probe's skip, so the check's own 77 is a failure.
             # Full build logs name a failing VM subtest; Nix otherwise keeps
             # only the last 25 lines, which are QEMU's cleanup.
@@ -327,6 +363,10 @@ step() {
             sh/markdown.sh check
             ;;
         check:large_files) sh/large-files.sh "$large_base" ;;
+        check:python)
+            files '*.py' '*.pyi' | xargs -0 ruff check --force-exclude
+            files '*.py' '*.pyi' | xargs -0 ruff format --check --force-exclude
+            ;;
         check:toml) RUST_LOG=error taplo format --check ;;
         check:nix) files '*.nix' | xargs -0 nixfmt --check ;;
         check:justfile) files justfile '*/justfile' | xargs -0 -n1 just --fmt --check --justfile ;;
@@ -339,6 +379,10 @@ step() {
         fix:markdown)
             bun install
             sh/markdown.sh fix
+            ;;
+        fix:python)
+            files '*.py' '*.pyi' | xargs -0 ruff check --fix --force-exclude
+            files '*.py' '*.pyi' | xargs -0 ruff format --force-exclude
             ;;
         fix:toml) RUST_LOG=error taplo format ;;
         fix:nix) files '*.nix' | xargs -0 nixfmt ;;
@@ -370,8 +414,9 @@ github() {
 }
 
 # Run one lane's modules in order, appending each phase's seconds to the lane's
-# times file. A failed phase skips the rest of that module, but independent
-# modules still run. A TERM records the phase it cut short.
+# times file and announcing each phase's start and end on fd 3. A failed phase
+# skips the rest of that module, but independent modules still run. A TERM
+# records the phase it cut short.
 run_lane() {
     times=$1
     shift
@@ -391,6 +436,7 @@ run_lane() {
             current="$phase $module"
             began=$SECONDS
             if github; then echo "::group::$current"; else echo "==> $current"; fi
+            echo "$action: $current started" >&3
             # A plain statement, so errexit stays on inside the subshell.
             set +e
             (
@@ -413,6 +459,7 @@ run_lane() {
                 record failed
                 ((lane_status)) || lane_status=$status
                 current=
+                [[ -z "${CHECK_FAIL_FAST:-}" ]] || return "$lane_status"
                 break
             fi
             record
@@ -422,7 +469,9 @@ run_lane() {
     return "$lane_status"
 }
 record() {
-    echo "$((SECONDS - began)) $current${1:+ ($1)}" >>"$times"
+    local seconds=$((SECONDS - began))
+    echo "$seconds $current${1:+ ($1)}" >>"$times"
+    echo "$action: $current ${1:-passed} in ${seconds}s" >&3
 }
 cancelled() {
     [[ -n "$current" ]] || return 0
@@ -477,11 +526,16 @@ trap 'exit 143' TERM
 # Each lane runs in its own process group, so a cancel reaches its whole tree;
 # a lane shell defers its own TERM trap until the running phase exits.
 # Concurrent lanes buffer their output and print it whole when they finish; a
-# serial run streams instead. Every lane completes even when another fails,
-# so one unavailable check cannot hide unrelated failures.
+# serial run streams instead. A buffered lane still announces each phase on the
+# run's stderr as it starts and ends, so a run cut off mid-phase, such as by a
+# job timeout that never reaches this script, names the phase it stopped in.
+# Every lane completes even when another fails, so one unavailable check cannot
+# hide unrelated failures; under CHECK_FAIL_FAST the first failure cancels the
+# running lanes and starts no more.
 set -m
+stopping=
 while true; do
-    while [[ -z "$lone" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
+    while [[ -z "$lone$stopping" ]] && ((next < ${#lanes[@]} && ${#running[@]} < limit)); do
         name=${lanes[next]}
         if [[ -v "alone[$name]" ]] && ((${#running[@]})); then
             break
@@ -489,10 +543,9 @@ while true; do
         next=$((next + 1))
         read -ra lane_modules <<<"${members[$name]}"
         if ((limit == 1)); then
-            run_lane "$logs/$name.times" "${lane_modules[@]}" </dev/null &
+            run_lane "$logs/$name.times" "${lane_modules[@]}" </dev/null 3>/dev/null &
         else
-            echo "$action: started ${lane_modules[*]}" >&2
-            run_lane "$logs/$name.times" "${lane_modules[@]}" </dev/null >"$logs/$name.log" 2>&1 &
+            run_lane "$logs/$name.times" "${lane_modules[@]}" </dev/null 3>&2 >"$logs/$name.log" 2>&1 &
         fi
         running[$!]=$name
         [[ ! -v "alone[$name]" ]] || lone=$!
@@ -504,9 +557,13 @@ while true; do
     name=${running[$pid]}
     unset "running[$pid]"
     [[ "$pid" != "$lone" ]] || lone=
-    if ((status)); then
+    if ((status)) && [[ -z "$stopping" ]]; then
         failed+=("$name")
         ((failed_status)) || failed_status=$status
+        if [[ -n "${CHECK_FAIL_FAST:-}" ]]; then
+            stopping=1
+            cancel
+        fi
     fi
     ((limit == 1)) || cat "$logs/$name.log"
 done

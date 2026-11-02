@@ -164,7 +164,8 @@ mod tests {
 		match announced.next().await? {
 			moq_net::announce::Event::Start(route)
 			| moq_net::announce::Event::Update(route)
-			| moq_net::announce::Event::Restart(route) => Some((route, true)),
+			| moq_net::announce::Event::Restart(route)
+			| moq_net::announce::Event::Takeover { announce: route, .. } => Some((route, true)),
 			moq_net::announce::Event::End(route) => Some((route, false)),
 		}
 	}
@@ -179,11 +180,11 @@ mod tests {
 
 	fn test_producer() -> (Producer, origin::Producer) {
 		let origin = produce_origin();
-		let producer = Producer::new(
+		let producer = crate::produce::spawned(Producer::new(
 			produce::Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::from_static("sjc")),
-		);
+		));
 		(producer, origin)
 	}
 
@@ -224,7 +225,7 @@ mod tests {
 
 		let (_, active) = next_update(&mut announced).await.expect("announce");
 		assert!(active);
-		let consumer = egress.request_broadcast(path, None).await.expect("resolve");
+		let consumer = egress.request(path, None).await.expect("resolve");
 		let sub = consumer.track("video").unwrap().subscribe(None).await.unwrap();
 
 		Feed {
@@ -241,11 +242,7 @@ mod tests {
 		tokio::time::advance(Duration::from_millis(1)).await;
 		let (update, active) = next_update(&mut consumer).await.expect("expected announce");
 		assert!(active);
-		origin
-			.consume()
-			.request_broadcast(&update.prefix, None)
-			.await
-			.expect("resolve")
+		origin.consume().request(&update.prefix, None).await.expect("resolve")
 	}
 
 	async fn drive_tick() {

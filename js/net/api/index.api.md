@@ -24,6 +24,7 @@ export namespace Announce {
 		kind: "start" | "update" | "restart" | "end";
 	} & Announce.Announce;
 	export interface Options {
+		covering?: boolean;
 		hidden?: boolean;
 	}
 }
@@ -165,7 +166,6 @@ export namespace Connection {
 	}
 	export interface Extensions {
 		auth?: boolean;
-		epoch?: boolean;
 		solicit?: boolean;
 	}
 	export interface Goaway {
@@ -316,6 +316,7 @@ export namespace Group {
 		get done(): boolean;
 		get frameCount(): number;
 		get isClosed(): boolean;
+		nextFrame(): Promise<Group.FrameConsumer | undefined>;
 		readBool(): Promise<boolean | undefined>;
 		readFrame(): Promise<Group.Frame | undefined>;
 		readFrameSequence(options?: Group.ReadOptions): Promise<{
@@ -335,16 +336,35 @@ export namespace Group {
 		payload: Uint8Array;
 		timestamp?: Time.Timestamp;
 	}
+	export class FrameConsumer {
+		get arrived(): Instant | undefined;
+		readAll(): Promise<Uint8Array>;
+		readChunk(): Promise<Uint8Array | undefined>;
+		readonly sequence: number;
+		readonly size: number;
+		readonly timestamp: Time.Timestamp | undefined;
+	}
+	export interface FrameInfo {
+		size: number;
+		timestamp?: Time.Timestamp;
+	}
+	export class FrameProducer {
+		abort(error: Error): void;
+		finish(): void;
+		get remaining(): number;
+		readonly size: number;
+		readonly timestamp: Time.Timestamp | undefined;
+		write(chunk: Uint8Array): void;
+	}
 	export interface Info {
 		sequence: number;
 	}
-	export const MAX_GROUP_CACHE_BYTES: number;
-	export const MAX_GROUP_FRAMES: 8192;
 	export class Producer {
 		constructor(sequence: number);
 		abort(error: Error): void;
 		get closed(): Signals.GetPromise<Error | null>;
 		consume(): Group.Consumer;
+		createFrame(info: Group.FrameInfo): Group.FrameProducer;
 		finish(): void;
 		get isClosed(): boolean;
 		readonly sequence: number;
@@ -362,6 +382,7 @@ export namespace Origin {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		get closed(): Signals.GetPromise<Error | null>;
 		get discovery(): Signals.Getter<boolean | undefined>;
+		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 	}
 	export type Cost = bigint;
@@ -381,6 +402,7 @@ export namespace Origin {
 		consume(): Origin.Consumer;
 		createBroadcast(path: Path.Valid): Origin.Publication;
 		get discovery(): Signals.Getter<boolean | undefined>;
+		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		requests(prefix: Path.Valid): Origin.Requests;
 		scope(root: Path.Valid, patterns: Path.Patterns): Origin.Producer;
@@ -402,7 +424,6 @@ export namespace Origin {
 		reject(err: Error): void;
 	}
 	export interface RequestOptions {
-		announced?: boolean;
 		epoch?: Epoch.Valid;
 	}
 	export class Requesting {
@@ -428,6 +449,7 @@ export namespace Origin {
 		readonly closed: Signals.GetPromise<Error | null>;
 		createBroadcast(path: Path.Valid): Origin.Publication;
 		readonly discovery: Signals.Getter<boolean | undefined>;
+		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		requests(prefix: Path.Valid): Origin.Requests;
 	}
@@ -619,7 +641,7 @@ export namespace Track {
 		createGroup(sequence: number): Group.Producer;
 		demand(): Track.Demand;
 		finish(): void;
-		finishAt(end: Track.Position): void;
+		finishAt(end: Track.Position, error?: Error): void;
 		info(): Promise<Track.Info>;
 		insertDatagram(sequence: number, timestamp: Time.Timestamp | undefined, payload: Uint8Array): void;
 		largest(): Track.Position | undefined;
@@ -652,9 +674,12 @@ export namespace Track {
 		update(options: Track.Subscription): void;
 		withRange(groups: Track.Groups): this;
 	}
+	export const Subscription: {
+		default(): Track.Subscription;
+	};
 	export interface Subscription {
 		groups?: Track.Groups;
-		maxDelay?: Milli;
+		maxDelay?: Milli | null;
 		order?: Track.Order;
 		priority?: number;
 	}

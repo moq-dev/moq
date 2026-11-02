@@ -349,13 +349,14 @@ impl Client {
 				let config = opened.config;
 				let session = qmux::Session::connect(opened.channel, config)
 					.await
+					.map(crate::spawn_qmux)
 					.map_err(crate::webrtc::Error::from)?;
 				Ok::<_, Error>(connect_session(&self.moq, session).await?)
 			};
 
 			let session = match self.timeout.is_zero() {
 				true => attempt.await?,
-				false => moq_clock::timeout(self.timeout, attempt)
+				false => kio::clock::timeout(self.timeout, attempt)
 					.await
 					.map_err(|_| Error::ConnectTimeout(self.timeout))??,
 			};
@@ -427,7 +428,7 @@ impl Client {
 		// arm was still pending.
 		let dialed = match self.timeout.is_zero() {
 			true => attempt.await?,
-			false => match moq_clock::timeout(self.timeout, attempt).await {
+			false => match kio::clock::timeout(self.timeout, attempt).await {
 				Ok(res) => res?,
 				Err(_) => return Err(Error::ConnectTimeout(self.timeout)),
 			},
@@ -499,7 +500,7 @@ impl Client {
 			let endpoint = self.iroh.as_ref().ok_or(Error::IrohDisabled)?;
 			let (session, address) =
 				crate::iroh::connect(endpoint, url, self.iroh_addrs.iter().copied(), &self.versions).await?;
-			let session = connect_session(&moq, crate::transport::Session::new(session, address)).await?;
+			let session = connect_session(&moq, crate::iroh::Session::new(session, address)).await?;
 			return Ok(Dialed::new(session, crate::Transport::Iroh));
 		}
 
@@ -713,7 +714,6 @@ async fn connect_session<S: moq_net::transport::poll::Boxable>(
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 
@@ -1105,7 +1105,7 @@ mod tests {
 				.map_err(Error::from)
 		});
 
-		let dialed = tokio::time::timeout(
+		let dialed = kio::clock::timeout(
 			std::time::Duration::from_secs(10),
 			client.race_moq_connect(&client.moq, ws_addr, quic),
 		)
@@ -1217,10 +1217,7 @@ mod tests {
 			event => panic!("expected announcement, got {event:?}"),
 		};
 		assert_eq!(update.prefix.as_str(), "test");
-		let broadcast = sub_consumer
-			.request_broadcast("test", None)
-			.await
-			.expect("broadcast resolves");
+		let broadcast = sub_consumer.request("test", None).await.expect("broadcast resolves");
 		let mut track = broadcast
 			.track("video")
 			.unwrap()
@@ -1361,7 +1358,7 @@ mod tests {
 		let quic = async { Ok("quic") };
 		let websocket = std::future::pending::<Option<crate::Result<&str>>>();
 
-		let value = tokio::time::timeout(
+		let value = kio::clock::timeout(
 			std::time::Duration::from_secs(1),
 			super::race_transport_connect(&race_url(), quic, websocket),
 		)

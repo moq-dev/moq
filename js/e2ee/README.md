@@ -45,12 +45,17 @@ video.finish();
 video.close();
 ```
 
-A subscriber resolves `credential.path(semantic)`, takes the epoch from the announced
-route (or from the application's channel on a wire without route epochs), binds it with
-`credential.consume(epoch)`, and wraps the broadcast in a `Broadcast.Consumer`. Its
+A subscriber follows `credential.path(semantic)` with `origin.follow(path)`. It takes each
+instance's epoch from the broadcast it resolved, `broadcast.epoch` (or from the application's
+channel on a wire without route epochs), so the key always matches the instance it reads. It
+binds the epoch with `credential.consume(epoch)` and wraps the broadcast in a
+`Broadcast.Consumer`. Its
 `subscribe(semantic)` opens the track a decrypted catalog names, and `close()` releases the
 wrapped broadcast. A consuming generation
 cannot produce. Nothing survives a publisher instance: a restart mints a new epoch.
+A cloned process image (a `fork` without `exec`, a restored VM snapshot or checkpoint, or a
+producing generation copied to another process) is a new instance too: each copy must call
+`produce()` itself, since copies of one generation reuse its nonces.
 
 ## Processing
 

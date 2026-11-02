@@ -4,21 +4,21 @@ import type * as Moq from "@moq/net";
 import { Path } from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys, Signal } from "@moq/signals";
 import * as Audio from "./audio";
-import { Broadcast, type CatalogFormat } from "./broadcast";
+import { Broadcast, type BroadcastInput, type CatalogFormat } from "./broadcast";
 import { type Delay, Sync } from "./sync";
 import * as Text from "./text";
 import * as Video from "./video";
 
 /** Inputs for a complete broadcast playback pipeline. */
 export type PlayerInput = {
-	/** Origin that supplies the broadcast. */
-	origin: Getter<Moq.Origin.Table | undefined>;
+	/** Read-side origin that supplies the broadcast, borrowed without its lifecycle. */
+	origin: BroadcastInput["origin"];
 	/** Broadcast path relative to the origin. */
 	name: Getter<Moq.Path.Valid>;
 	/** Whether the pipeline may subscribe. */
 	enabled: Getter<boolean>;
-	/** Wait for a broadcast announcement before subscribing. */
-	announced: Getter<boolean>;
+	/** Follow the broadcast's announcements, waiting for one before subscribing. */
+	follow: Getter<boolean>;
 	/** Catalog format override, or automatic detection when absent. */
 	catalogFormat: Getter<CatalogFormat | undefined>;
 	/** Catalog supplied when the format is `manual`. */
@@ -97,11 +97,14 @@ export class Player {
 	#signals = new Effect();
 
 	constructor(props: PlayerProps = {}) {
+		for (const renamed of ["reload", "announced"]) {
+			if (renamed in props) throw new Error(`Watch.Player: \`${renamed}\` was renamed to \`follow\``);
+		}
 		this.in = {
 			origin: getter(props.origin),
 			name: getter(props.name ?? Path.empty()),
 			enabled: getter(props.enabled ?? true),
-			announced: getter(props.announced ?? true),
+			follow: getter(props.follow ?? true),
 			catalogFormat: getter<CatalogFormat | undefined>(props.catalogFormat),
 			catalog: getter(props.catalog),
 			probe: getter(props.probe),

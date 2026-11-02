@@ -6,8 +6,9 @@ use crate::protocol::validate_protocol;
 use crate::transport::WsTransport;
 use moq_net::transport::Address;
 use moq_quic::Side;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
-use crate::{Config, Error, Session, Version, alpn};
+use crate::{Config, Driver, Error, Session, Version, alpn};
 
 /// The `tokio-tungstenite` version this crate is built against.
 ///
@@ -102,9 +103,7 @@ impl<T> Upgraded<T>
 where
 	T: futures::Stream<Item = Result<tungstenite::Message, tungstenite::Error>>
 		+ futures::Sink<tungstenite::Message, Error = tungstenite::Error>
-		+ Unpin
-		+ Send
-		+ 'static,
+		+ Unpin,
 {
 	/// Wrap `ws`, whose handshake negotiated the `Sec-WebSocket-Protocol` value `alpn`.
 	pub fn new(ws: T, alpn: &str) -> Self {
@@ -147,24 +146,24 @@ where
 		self
 	}
 
-	/// Wrap as a client-side session.
+	/// Wrap as a client-side session, returned with the [`Driver`] to spawn.
 	///
 	/// The protocol is already known from the negotiated subprotocol (ALPN), so
 	/// this returns synchronously without awaiting in-band parameters. Fails when
 	/// the subprotocol names no QMux version.
-	pub fn connect(self) -> Result<Session, Error> {
+	pub fn connect(self) -> Result<(Session, Driver<WsTransport<T>>), Error> {
 		self.start(Side::Client)
 	}
 
-	/// Wrap as a server-side session.
+	/// Wrap as a server-side session, returned with the [`Driver`] to spawn.
 	///
 	/// As with [`connect`](Self::connect), the protocol is known from the
 	/// negotiated subprotocol, so this returns synchronously.
-	pub fn accept(self) -> Result<Session, Error> {
+	pub fn accept(self) -> Result<(Session, Driver<WsTransport<T>>), Error> {
 		self.start(Side::Server)
 	}
 
-	fn start(self, side: Side) -> Result<Session, Error> {
+	fn start(self, side: Side) -> Result<(Session, Driver<WsTransport<T>>), Error> {
 		let (version, protocol) = alpn::parse(Some(&self.alpn))?;
 		let config = self.session.clone().with_negotiated(version, protocol);
 		let transport = self.into_transport()?;
@@ -269,7 +268,16 @@ impl Client {
 	}
 
 	/// Connect to a WebSocket server, negotiating an advertised `(alpn, version)`.
-	pub async fn connect(&self, url: &str) -> Result<Session, Error> {
+	pub async fn connect(
+		&self,
+		url: &str,
+	) -> Result<
+		(
+			Session,
+			Driver<WsTransport<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>>>,
+		),
+		Error,
+	> {
 		use tungstenite::{client::IntoClientRequest, http};
 
 		for (a, _) in &self.protocols {
@@ -399,10 +407,10 @@ impl Server {
 	///
 	/// Disable Nagle on a TCP `socket` first (`set_nodelay(true)`): records are
 	/// already batched, so Nagle would only hold a batch's tail for the peer's ACK.
-	pub async fn accept<T: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+	pub async fn accept<T: AsyncRead + AsyncWrite + Unpin>(
 		&self,
 		socket: T,
-	) -> Result<Session, Error> {
+	) -> Result<(Session, Driver<WsTransport<WebSocketStream<T>>>), Error> {
 		use std::sync::{Arc, Mutex};
 		use tungstenite::{handshake::server, http};
 
@@ -514,7 +522,8 @@ mod tests {
 			)
 			.await
 			.unwrap();
-		let session = accept.await.unwrap().unwrap();
+		let (session, driver) = accept.await.unwrap().unwrap();
+		tokio::spawn(driver);
 
 		// A masked binary frame declaring 1 MiB, with none of its payload sent.
 		let mut frame = vec![0x82, 0x80 | 127];
@@ -522,7 +531,7 @@ mod tests {
 		frame.extend_from_slice(&[0; 4]);
 		client.write_all(&frame).await.unwrap();
 
-		moq_clock::timeout(Duration::from_secs(1), session.closed())
+		kio::clock::timeout(Duration::from_secs(1), session.closed())
 			.await
 			.expect("the socket waited to buffer a frame larger than a record");
 	}

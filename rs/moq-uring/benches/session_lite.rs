@@ -16,6 +16,7 @@ mod support;
 #[cfg(all(target_os = "linux", feature = "quic"))]
 #[expect(
 	clippy::disallowed_methods,
+	clippy::disallowed_types,
 	reason = "benchmarks measure themselves on the host clock"
 )]
 mod linux {
@@ -178,9 +179,10 @@ mod linux {
 					});
 					let bc = {
 						let consumer = sub_origin.consume();
-						consumer.routed("bench").await.expect("broadcast announced");
 						consumer
-							.request_broadcast("bench", None)
+							.follow("bench", None)
+							.unwrap()
+							.available()
 							.await
 							.expect("broadcast resolves")
 					};

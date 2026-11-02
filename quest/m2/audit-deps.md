@@ -2,9 +2,11 @@
 
 ## Goal
 
-Dependencies are current, deduplicated, needed, and the best maintained option,
-and hand-rolled non-core code that a maintained library covers is planned for
-replacement.
+Every dependency, vendored ones included, earns its weight: the fewest that
+do the job, each current, deduplicated, and the best maintained option. A
+dependency whose use is trivial, that another already covers, or that serves a
+feature not worth keeping is removed. Only hand-rolled nontrivial non-core code
+that a maintained library covers is planned for replacement.
 
 ## Plan
 
@@ -19,6 +21,13 @@ recurrence. Fixes land in the run's PR, one commit each, rather than as follow-u
 Only a change that needs a maintainer decision (public API, scope) or is
 independently landable and too large to review alongside the rest becomes a
 follow-up through `/quest-plan`.
+
+Default to removing (decided 2026-11-01, maintainer): whatever doesn't earn its
+cost is deleted inline, and the PR body lists each deletion with its measured
+cost and why it wasn't worth it. Only what earns its keep is refactored to be
+cheaper instead. Prefer fewer dependencies, and count each one's
+compile time and transitive tree in its cost. Removing a public API or a user-facing feature stays a
+follow-up.
 
 Research the state of the art for each candidate: compare maintenance,
 performance, and API fit before planning a swap. Respect Dependabot's 7-day
@@ -46,6 +55,21 @@ Deliberately uncovered: `dart/moq` (see the comment in
 generator).
 The uniffi `>=0.33` ignore blocks nothing until 0.33 ships; keep it, since it
 ties uniffi to the Go generator.
+
+The QUIC hard fork has no advisory feed: `cargo deny` can't match quinn
+advisories against `rs/moq-quic` (quinn-proto) or `rs/moq-sock` (quinn-udp),
+as `SECURITY.md` notes. List quinn-proto and quinn-udp advisories (RustSec,
+and GHSA on quinn-rs/quinn) and the upstream commits since the last reviewed
+one, port any security fix, and record the newest reviewed commit in
+`rs/moq-quic/README.md` beside the fork point (`7616e6b2`). Added 2026-10-28
+(maintainer) from the second external security audit, instead of a separate
+CI watcher. Check GHSA, not only RustSec: three 2026-09-30 quinn advisories
+(GHSA-53rm-773f-4q8c, GHSA-wppq-2f6r-wfvm, GHSA-6pp4-4cxf-xf88) were in
+GitHub's feed but not the local RustSec database. That audit found every
+known fix already in the fork, each with a regression test. Kept as a
+manual step on 2026-10-28 after that evidence; a machine-readable ledger
+with a failing scheduled job was judged not worth it while the fork is
+current.
 
 Open at the end of the m1 run:
 
@@ -109,8 +133,6 @@ locks have none. Most duplicates are ecosystem transitions owned upstream:
 
 ### Kept on purpose
 
-- tracing-wasm: its repository is gone, but the maintained `wasm-tracing`
-  fork added 2.9 KB gzipped to `moq_wasm.wasm` for the same behavior.
 - tracing-android: `tracing-logcat` would add rustix 0.38.
 - humantime-serde, hex, send_wrapper, byteorder: unreleased for years but
   complete, with no advisory.
@@ -122,9 +144,9 @@ locks have none. Most duplicates are ecosystem transitions owned upstream:
 
 ### Hand-rolled code
 
-Planned: [H.264 parsing](/quest/m2/h264-reader.md),
-[avcC and hvcC](/quest/m2/mp4-atom-config.md), and
-[relay metrics](/quest/m2/relay-prometheus-client.md). Reviewed and kept,
+Planned: [H.264 parsing](/quest/m2/h264-reader.md); moq-mux's avcC and
+hvcC records go through mp4-atom, and relay metrics now render through
+prometheus-client. Reviewed and kept,
 each small or cold: about eleven `(d * 2).min(max)` backoff loops (moq-tokio
 already has a `Backoff` that moq-relay's cluster loop could reuse), per-byte
 hex formatting in moq-auth and moq-hls, the STUN token bucket, the JS
