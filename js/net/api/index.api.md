@@ -4,8 +4,8 @@
 import { $ZodBranded } from "zod/v4/core";
 import { Instant } from "@moq/clock";
 import { Milli } from "@moq/clock";
-import { ZodMiniBigInt } from "@zod/mini";
-import { infer } from "@zod/mini";
+import { ZodMiniBigInt } from "zod/mini";
+import { infer } from "zod/mini";
 
 export namespace Announce {
 	export interface Announce {

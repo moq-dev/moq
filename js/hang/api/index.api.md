@@ -2,19 +2,19 @@
 
 ```ts
 import { $ZodBranded } from "zod/v4/core";
-import { $brand } from "@zod/mini";
+import { $brand } from "zod/mini";
 import { $loose } from "zod/v4/core";
 import { $strip } from "zod/v4/core";
-import { ZodMiniNullable } from "@zod/mini";
-import { ZodMiniNumber } from "@zod/mini";
-import { ZodMiniObject } from "@zod/mini";
-import { ZodMiniOptional } from "@zod/mini";
-import { ZodMiniPipe } from "@zod/mini";
-import { ZodMiniRecord } from "@zod/mini";
-import { ZodMiniString } from "@zod/mini";
-import { ZodMiniTransform } from "@zod/mini";
-import { ZodMiniType } from "@zod/mini";
-import { infer } from "@zod/mini";
+import { ZodMiniNullable } from "zod/mini";
+import { ZodMiniNumber } from "zod/mini";
+import { ZodMiniObject } from "zod/mini";
+import { ZodMiniOptional } from "zod/mini";
+import { ZodMiniPipe } from "zod/mini";
+import { ZodMiniRecord } from "zod/mini";
+import { ZodMiniString } from "zod/mini";
+import { ZodMiniTransform } from "zod/mini";
+import { ZodMiniType } from "zod/mini";
+import { infer } from "zod/mini";
 
 export * as Catalog from "@moq/hang/catalog";
 
