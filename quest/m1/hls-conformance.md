@@ -15,8 +15,10 @@ reloads and a mid-run catalog estimate update.
 From the 2026-10-24 moq-hls audit, which found no player-level HLS or DASH
 coverage. Decided with the maintainer on 2026-10-24:
 
-- ffprobe conformance lands in m1, so it validates the
-  Catalog HLS field redesign and the fixed target duration before the cut. A
+- ffprobe conformance lands in m1, so it validates the grid segmentation of
+  [HLS export on a declared grid](/quest/m0/hls-media-grid.md) (which
+  replaced the Catalog HLS field on 2026-11-02) and the fixed target duration
+  before the cut. A
   browser player test follows in m2
   ([HLS and DASH browser playback](/quest/m2/hls-player-test.md)).
 - Cover a sliding window that evicts segments, a GOP that overruns the

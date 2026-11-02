@@ -11,8 +11,9 @@ host publishes at a path of its choosing. Track, group, and frame structure and
 payloads survive byte for byte, so any consumer of the live broadcast, HLS
 included, works on the stored one.
 
-The catalog carries no archive pointer. Timelines survive only as a
-per-rendition `hls` field for HLS compatibility.
+The catalog carries no archive pointer and no timelines: HLS segments come
+from the `media.join.interval` grid
+([HLS export on a declared grid](/quest/m0/hls-media-grid.md)).
 
 ## Plan
 
@@ -70,11 +71,12 @@ archive (per-track `.timeline.z` records named by the catalog's root
 - **Seek by time.** A `Time(pts)` range end
   ([Subscribe ranges](/quest/m1/subscribe-ranges/README.md)) is resolved by
   whoever holds the track, the cache or an archive consumer. DVR seeks with it.
-- **`hls` is for HLS only.** A per-rendition catalog field names a
-  track whose (first group, pts) records mark each HLS segment, each rendition
-  cutting its own on a pts grid so they line up wherever keyframes do
-  (Catalog HLS field, landed). The root `archive`
-  section is deleted everywhere. Rejected: always-on timelines.
+- **No timelines in the catalog.** The root `archive` section is deleted
+  everywhere. The per-rendition `hls` record field that replaced it (Catalog
+  HLS field, landed) is removed in turn by
+  [HLS export on a declared grid](/quest/m0/hls-media-grid.md) (maintainer,
+  2026-11-02), which numbers segments on `media.join.interval` from the media
+  tracks. Rejected: always-on timelines.
 
 Protected broadcasts stay out of scope. Recording keying, retention policy,
 credentials, and discovery of stored prefixes belong to the host.
