@@ -15,7 +15,7 @@ export function TrackProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 	// Chrome exposes MediaStreamTrackProcessor on the window, so use it directly.
 	if ("MediaStreamTrackProcessor" in self) {
 		const input: ReadableStream<VideoFrame> = new MediaStreamTrackProcessor({ track }).readable;
-		return input.pipeThrough(rewrite());
+		return rewrite(input);
 	}
 
 	// Safari exposes it only inside a dedicated worker, which means spawning one to find out; Firefox
@@ -79,14 +79,25 @@ class Epoch {
 }
 
 // Stamps frames as they arrive, for pipelines that deliver straight to us.
-function rewrite(): TransformStream<VideoFrame, VideoFrame> {
+function rewrite(source: ReadableStream<VideoFrame>): ReadableStream<VideoFrame> {
 	const epoch = new Epoch();
-
-	return new TransformStream<VideoFrame>({
-		transform(frame, controller) {
-			controller.enqueue(epoch.stamp(frame, Nano.toMilli(Nano(now()))));
+	const reader = source.getReader();
+	let cancelled = false;
+	return new ReadableStream<VideoFrame>(
+		{
+			async pull(controller) {
+				const { value } = await reader.read();
+				if (cancelled) value?.close();
+				else if (value) controller.enqueue(epoch.stamp(value, Nano.toMilli(Nano(now()))));
+				else controller.close();
+			},
+			async cancel(reason) {
+				cancelled = true;
+				await reader.cancel(reason);
+			},
 		},
-	});
+		{ highWaterMark: 0 },
+	);
 }
 
 // Runs the native MediaStreamTrackProcessor in a worker, returning undefined if the engine doesn't
@@ -111,34 +122,43 @@ async function workerProcessor(source: StreamTrack): Promise<ReadableStream<Vide
 	}
 
 	const epoch = new Epoch();
+	let cancelled = false;
 
-	return new ReadableStream<VideoFrame>({
-		async pull(controller) {
-			worker.post({ type: "pull" });
+	return new ReadableStream<VideoFrame>(
+		{
+			async pull(controller) {
+				worker.post({ type: "pull" });
 
-			const msg = await worker.next();
-			switch (msg.type) {
-				case "frame":
-					// Anchor on when the worker read the frame, not when we got around to handling
-					// the message, so a busy main thread can't skew video against audio. The worker's
-					// realm has its own origin, so the shared Unix-anchored time origin translates it
-					// onto the host clock.
-					// biome-ignore lint/style/noRestrictedGlobals: a cross-realm origin, not a clock read.
-					controller.enqueue(epoch.stamp(msg.frame, msg.at - performance.timeOrigin));
+				const msg = await worker.next();
+				if (cancelled) {
+					if (msg.type === "frame") msg.frame.close();
 					return;
-				case "done":
-					worker.close();
-					controller.close();
-					return;
-				default:
-					worker.close();
-					throw new Error(msg.type === "error" ? msg.message : `unexpected message: ${msg.type}`);
-			}
+				}
+				switch (msg.type) {
+					case "frame":
+						// Anchor on when the worker read the frame, not when we got around to handling
+						// the message, so a busy main thread can't skew video against audio. The worker's
+						// realm has its own origin, so the shared Unix-anchored time origin translates it
+						// onto the host clock.
+						// biome-ignore lint/style/noRestrictedGlobals: a cross-realm origin, not a clock read.
+						controller.enqueue(epoch.stamp(msg.frame, msg.at - performance.timeOrigin));
+						return;
+					case "done":
+						worker.close();
+						controller.close();
+						return;
+					default:
+						worker.close();
+						throw new Error(msg.type === "error" ? msg.message : `unexpected message: ${msg.type}`);
+				}
+			},
+			cancel() {
+				cancelled = true;
+				worker.close();
+			},
 		},
-		cancel() {
-			worker.close();
-		},
-	});
+		{ highWaterMark: 0 },
+	);
 }
 
 // A live capture worker, one request in flight at a time.
@@ -227,41 +247,44 @@ function videoProcessor(track: StreamTrack): ReadableStream<VideoFrame> {
 	let video: HTMLVideoElement;
 	let handle: number | undefined;
 
-	return new ReadableStream<VideoFrame>({
-		async start() {
-			video = document.createElement("video") as HTMLVideoElement;
-			// Autoplay policies refuse play() on an unmuted element without a user gesture, even one
-			// with no audio track, so mute it: it carries the video track alone. Inline keeps iOS from
-			// taking it fullscreen.
-			video.muted = true;
-			video.playsInline = true;
-			video.srcObject = new MediaStream([track]);
-			await Promise.all([
-				video.play(),
-				new Promise((r) => {
-					video.onloadedmetadata = r;
-				}),
-			]);
-		},
-		async pull(controller) {
-			// requestVideoFrameCallback fires once per frame the camera actually delivers, so we
-			// sample its true cadence rather than racing a wall clock: Safari and Firefox clamp
-			// performance.now() to whole milliseconds, which can't express a 33.333ms period.
-			await new Promise<void>((resolve) => {
-				handle = video.requestVideoFrameCallback((now, metadata) => {
-					// captureTime is the frame's capture instant; both it and now are DOM timestamps,
-					// which the host clock shares, so audio and video stay on one epoch.
-					const timestamp = (metadata.captureTime ?? now) as Milli;
-					controller.enqueue(new VideoFrame(video, { timestamp: Micro.fromMilli(timestamp) }));
-					resolve();
+	return new ReadableStream<VideoFrame>(
+		{
+			async start() {
+				video = document.createElement("video") as HTMLVideoElement;
+				// Autoplay policies refuse play() on an unmuted element without a user gesture, even one
+				// with no audio track, so mute it: it carries the video track alone. Inline keeps iOS from
+				// taking it fullscreen.
+				video.muted = true;
+				video.playsInline = true;
+				video.srcObject = new MediaStream([track]);
+				await Promise.all([
+					video.play(),
+					new Promise((r) => {
+						video.onloadedmetadata = r;
+					}),
+				]);
+			},
+			async pull(controller) {
+				// requestVideoFrameCallback fires once per frame the camera actually delivers, so we
+				// sample its true cadence rather than racing a wall clock: Safari and Firefox clamp
+				// performance.now() to whole milliseconds, which can't express a 33.333ms period.
+				await new Promise<void>((resolve) => {
+					handle = video.requestVideoFrameCallback((now, metadata) => {
+						// captureTime is the frame's capture instant; both it and now are DOM timestamps,
+						// which the host clock shares, so audio and video stay on one epoch.
+						const timestamp = (metadata.captureTime ?? now) as Milli;
+						controller.enqueue(new VideoFrame(video, { timestamp: Micro.fromMilli(timestamp) }));
+						resolve();
+					});
 				});
-			});
+			},
+			cancel() {
+				if (handle !== undefined) video.cancelVideoFrameCallback(handle);
+				if (video) video.srcObject = null;
+			},
 		},
-		cancel() {
-			if (handle !== undefined) video.cancelVideoFrameCallback(handle);
-			if (video) video.srcObject = null;
-		},
-	});
+		{ highWaterMark: 0 },
+	);
 }
 
 // Wraps a stream that can only be built asynchronously, without making the caller await it.
@@ -269,32 +292,36 @@ function deferred(open: () => Promise<ReadableStream<VideoFrame>>): ReadableStre
 	let reader: ReadableStreamDefaultReader<VideoFrame> | undefined;
 	let cancelled = false;
 
-	return new ReadableStream<VideoFrame>({
-		// Nothing is pulled until this settles, so the source is always ready by the first pull.
-		async start() {
-			const stream = await open();
+	return new ReadableStream<VideoFrame>(
+		{
+			// Nothing is pulled until this settles, so the source is always ready by the first pull.
+			async start() {
+				const stream = await open();
 
-			// Cancelled while we were opening, so throw it away instead of reading from it.
-			if (cancelled) {
-				await stream.cancel();
-				return;
-			}
+				// Cancelled while we were opening, so throw it away instead of reading from it.
+				if (cancelled) {
+					await stream.cancel();
+					return;
+				}
 
-			reader = stream.getReader();
-		},
-		async pull(controller) {
-			if (!reader) {
-				controller.close();
-				return;
-			}
+				reader = stream.getReader();
+			},
+			async pull(controller) {
+				if (!reader) {
+					controller.close();
+					return;
+				}
 
-			const { value } = await reader.read();
-			if (!value) controller.close();
-			else controller.enqueue(value);
+				const { value } = await reader.read();
+				if (cancelled) value?.close();
+				else if (!value) controller.close();
+				else controller.enqueue(value);
+			},
+			async cancel(reason) {
+				cancelled = true;
+				await reader?.cancel(reason);
+			},
 		},
-		async cancel(reason) {
-			cancelled = true;
-			await reader?.cancel(reason);
-		},
-	});
+		{ highWaterMark: 0 },
+	);
 }

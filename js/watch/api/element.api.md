@@ -16,7 +16,7 @@ import { Video } from "@moq/watch";
 
 export default class extends HTMLElement {
 	constructor();
-	attributeChangedCallback(name: "delay" | "buffer" | "follow" | "announced" | "url" | "echo" | "name" | "volume" | "muted" | "paused" | "visible" | "backend" | "versions" | "catalog-format" | "captions", oldValue: string | null, newValue: string | null): void;
+	attributeChangedCallback(name: "delay" | "buffer" | "url" | "echo" | "name" | "follow" | "volume" | "muted" | "paused" | "visible" | "backend" | "versions" | "announced" | "catalog-format" | "captions", oldValue: string | null, newValue: string | null): void;
 	readonly audio: Audio.Decoder;
 	get backend(): Video.Backend;
 	set backend(value: Video.Backend);
