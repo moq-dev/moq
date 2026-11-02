@@ -3507,6 +3507,9 @@ async fn run_front(task: FrontTask, origin: TasksWeak) {
 			return Poll::Ready(());
 		}
 		for mut io in std::mem::take(&mut in_flight) {
+			if let Some(request) = &mut io.request {
+				while let Poll::Ready(Some(_)) = request.poll_subscription_changed(waiter) {}
+			}
 			if io.request.is_some() {
 				match io
 					.query
@@ -9929,7 +9932,8 @@ mod tests {
 				let mut dynamic = broadcast.requests();
 				let resolved = consumer.request("room/alice", None).await.expect("resolves");
 				let track = resolved.track("video").unwrap();
-				let subscribing = kio::clock::sim::spawn(async move { track.subscribe(None).await });
+				let mut subscribing = track.subscribe(crate::track::Subscription::default().with_priority(3));
+				assert!((&mut subscribing).now_or_never().is_none());
 				let request = kio::clock::timeout(Duration::from_secs(1), dynamic.requested_track())
 					.await
 					.expect("the front asked the source")
@@ -9950,6 +9954,15 @@ mod tests {
 					broadcast.unannounce();
 				}
 				settle(|| resolved.is_closed()).await;
+				subscribing
+					.update(crate::track::Subscription::default().with_priority(7))
+					.unwrap();
+				settle(|| {
+					request
+						.subscription()
+						.is_some_and(|subscription| subscription.priority == 7)
+				})
+				.await;
 
 				let source = request.accept(crate::track::Info::timed());
 				let mut group = source.append_group().unwrap();
@@ -9957,7 +9970,7 @@ mod tests {
 				group.finish().unwrap();
 				source.finish().unwrap();
 
-				let mut subscription = subscribing.await.unwrap().expect("subscribe survives the retraction");
+				let mut subscription = subscribing.await.expect("subscribe survives the retraction");
 				assert_eq!(subscription.info(), source.info(), "the source's actual track info");
 				let mut group = subscription.recv_group().await.unwrap().expect("the source's group");
 				assert_eq!(&group.read_frame().await.unwrap().unwrap().payload[..], b"late");

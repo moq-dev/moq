@@ -429,7 +429,7 @@ impl Front {
 		}
 		// Every copy is from an older source, including one a track still drains from a
 		// source the previous one replaced.
-		self.drain_copies();
+		self.drain_copies(false);
 		self.serving = Some((source, candidate));
 		self.serving_closing = false;
 		if !self.resolved {
@@ -462,21 +462,22 @@ impl Front {
 		self.serving = None;
 		self.serving_closing = false;
 		actions.push(Action::Detach { source, drain: true });
-		self.drain_copies();
+		self.drain_copies(true);
 		actions.push(Action::Reselect);
 	}
 
 	/// The serving source is going: a spliced copy keeps feeding its track (readers read it
 	/// until a replacement's is spliced, or it runs out), and one still being asked for is
-	/// dropped.
-	fn drain_copies(&mut self) {
+	/// kept while that source can still answer, until a replacement attaches.
+	fn drain_copies(&mut self, keep_queries: bool) {
 		for track in self.tracks.values_mut() {
 			match track.state {
 				TrackState::Spliced { source } => {
 					track.draining = Some(source);
 					track.state = TrackState::Idle;
 				}
-				TrackState::Querying { .. } => track.state = TrackState::Idle,
+				TrackState::Querying { .. } if !keep_queries => track.state = TrackState::Idle,
+				TrackState::Querying { .. } => {}
 				TrackState::Idle | TrackState::Parked { .. } => {}
 			}
 		}
@@ -761,8 +762,8 @@ mod tests {
 		assert_eq!(front.next_deadline(), scanned.first().map(|(at, _)| *at));
 	}
 
-	/// A front serving `source` through `candidate`, with `video` spliced and read.
-	fn serving(candidate: Candidate, source: u64) -> Front {
+	/// A front querying `source` through `candidate` for the read track `video`.
+	fn querying(candidate: Candidate, source: u64) -> Front {
 		let mut front = Front::new(LINGER);
 		assert_actions(
 			front.step(Event::Selected {
@@ -796,6 +797,12 @@ mod tests {
 				Action::Arm { at: None },
 			],
 		);
+		front
+	}
+
+	/// A front serving `source` through `candidate`, with `video` spliced and read.
+	fn serving(candidate: Candidate, source: u64) -> Front {
+		let mut front = querying(candidate, source);
 		assert_actions(
 			front.step(Event::TrackInfo {
 				track: name("video"),
@@ -870,6 +877,28 @@ mod tests {
 			],
 		);
 		assert_eq!(front.serving, Some((200, remote(2))));
+	}
+
+	#[test]
+	fn a_closing_source_answers_while_another_route_is_resolving() {
+		let mut front = querying(remote(1), 100);
+		front.step(Event::SourceClosed { source: 100 });
+		front.step(Event::Selected {
+			best: Some(remote(2)),
+			serving_closing: false,
+		});
+		assert_actions(
+			front.step(Event::TrackInfo {
+				track: name("video"),
+				source: 100,
+				closing: true,
+				result: Ok(info()),
+			}),
+			&[Action::Splice {
+				track: name("video"),
+				source: 100,
+			}],
+		);
 	}
 
 	#[test]
