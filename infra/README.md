@@ -63,8 +63,8 @@ names the Environment, and a branch that is not on the list fails to start it.
 
 `main` is on the `publish` list for `workflow_run`, schedule, and dispatch jobs,
 which run there, until [those publishers run on their tag](../quest/m0/ci/publish-release-only.md).
-A job that needs only the moq-bot key, such as Dependabot's, names `bot`; the land gate runs on the
-maintainer's host, outside Actions. A job that also runs dry on other refs names the Environment
+A job that needs only the moq-bot key, such as Dependabot's, names `bot`; the merge queue's
+build holds no secrets, and the queue watcher runs on the maintainer's host, outside Actions. A job that also runs dry on other refs names the Environment
 only when it publishes, as in `environment: ${{ github.ref_type == 'tag' &&
 'publish' || '' }}`. Read-only secrets, such as the mbx read key, stay at the
 repository level.
@@ -144,20 +144,23 @@ regenerates the repository metadata, signs it, and uploads the diff.
 
 ## The landing gate
 
-PRs land through `quest land serve`, a daemon on the maintainer's NixOS host
-([kixelated/nixos](https://github.com/kixelated/nixos), `modules/quest-land.nix`),
-not a workflow. It holds moq-bot's key there, checks each batch with
-`just ci "$BASE"` in an isolated container with the former queue runner's
-caches and `/dev/kvm`, and lands each PR through GitHub's squash merge. The
-main ruleset requires the `quest land` check pinned to moq-bot, which never
-reports it, so only the gate (or the administrator bypass) lands on `main`.
+PRs land through GitHub's merge queue, one at a time with squash merges. Each
+`merge_group` build runs `just ci "$BASE"` against the group's base on the
+self-hosted runner `nixos-moq-ci` (label `moq-queue`, with its local caches and
+`/dev/kvm`), read-only and without secrets (`.github/workflows/queue.yml`). The
+main ruleset requires its `Queue` context and the merge queue, so only the
+queue (or the administrator bypass) lands on `main`. moq-dev/quest's queue
+watcher, `quest land watch`, runs on the maintainer's NixOS host
+([kixelated/nixos](https://github.com/kixelated/nixos), `modules/quest-land.nix`)
+with moq-bot's key: it comments on each PR the queue drops, runs the Codex
+fixer, and re-enqueues the result.
 See [`CONTRIBUTING.md`](../CONTRIBUTING.md#landing-gate) for requesting a landing.
 
 ## Bootstrapping the Rust build cache
 
 `.github/actions/rust-cache` points mbx at the private `mbx-moq-dev` bucket,
 namespaced per runner OS and architecture. Hosted jobs on `main` write what
-they compile. The landing worker uses its persistent local store and has no R2
+they compile. The merge queue's self-hosted build uses its persistent local store and has no R2
 credentials.
 Release pull request jobs only read (main pull requests run no cloud CI), and
 fork pull requests, which get no secrets, build cold.
@@ -204,8 +207,8 @@ is done for `main`.
      -f name=main -f type=branch
    ```
 
-   Remove an existing `gh-readonly-queue/main/*` branch policy after the
-   batched landing gate replaces GitHub's queue.
+   The merge queue's `gh-readonly-queue/main/*` builds need no branch policy:
+   they run on the self-hosted runner and never deploy `cache-write`.
 
 4. **Store the keys under the same two names at both levels.** An Environment
    secret shadows a repository secret of the same name, so writers get the

@@ -67,9 +67,9 @@ const request = dependabot.jobs["request-landing"];
 const enqueue = request.steps.find((step: { name?: string }) => step.name === "Request checked landing");
 // biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
 assert.equal(enqueue.env.PR_HEAD, "${{ github.event.pull_request.head.sha }}");
-assert.ok(enqueue.run.includes('quest merge "$PR_URL" "$hold" --land "$PR_HEAD"'));
-// Requesting a landing only pins the head; the host gate reads the queue itself.
-assert.ok(!enqueue.run.includes("quest land"), "Dependabot must not run the gate's own commands");
+assert.ok(enqueue.run.includes('quest merge "$PR_URL" --land "$PR_HEAD"'));
+// Requesting a landing only enqueues the pinned head; the queue and its watcher do the rest.
+assert.ok(!enqueue.run.includes("quest land"), "Dependabot must not run the land daemons' commands");
 assert.ok(!JSON.stringify(request).includes("gh pr merge"));
 
 // Release PRs report one context for every optional workflow, retargeted PRs included.

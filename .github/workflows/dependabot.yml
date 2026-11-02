@@ -77,5 +77,4 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           export GH_TOKEN="$BOT_TOKEN"
-          hold=$(quest merge "$PR_URL")
-          quest merge "$PR_URL" "$hold" --land "$PR_HEAD"
+          quest merge "$PR_URL" --land "$PR_HEAD"
