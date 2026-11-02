@@ -110,6 +110,7 @@ impl Pacer {
 
             // here we cap the number of bytes sent at once during a burst
             self.tokens = self.capacity.min(self.tokens);
+            self.debt = self.capacity.min(self.debt);
             self.last_window_inputs = Some(inputs);
         }
 
@@ -183,6 +184,7 @@ impl Pacer {
             self.capacity = capacity;
             // here we cap the number of bytes sent at once during a burst
             self.tokens = self.capacity.min(self.tokens);
+            self.debt = self.capacity.min(self.debt);
         }
         // Invalidate the window path's cache: its inputs no longer describe `capacity`.
         self.last_window_inputs = None;
@@ -353,8 +355,8 @@ mod tests {
         metrics: Rate,
         batch: u16,
     ) -> u64 {
-        /// Guards against a pacer that never advances time; far above the ~8k polls a correct
-        /// pacer needs for one second at [`TEST_PACING_RATE`].
+        /// Guards against a pacer that never advances time; above the ~170k polls a correct
+        /// pacer needs for ten seconds at [`TEST_PACING_RATE`].
         const MAX_POLLS: u64 = 1_000_000;
 
         let deadline = start + duration;
@@ -470,6 +472,45 @@ mod tests {
                 Some(resume),
             );
             assert_eq!(pacer.delay(rtt, u64::from(mtu), mtu, resume, metrics), None);
+        }
+    }
+
+    #[test]
+    fn capacity_changes_bound_unpaced_debt() {
+        let mtu = 1500;
+        let rtt = Duration::from_millis(50);
+        let start = Instant::now();
+        for rate in [1_250, 12_500, 62_500, 125_000] {
+            for explicit_rate in [false, true] {
+                let mut pacer = Pacer::new(rtt, 2_000_000, mtu, None, start);
+                burst_until_blocked(
+                    &mut pacer,
+                    rtt,
+                    mtu,
+                    start,
+                    paced_metrics(2_000_000, TEST_PACING_RATE),
+                )
+                .expect("the initial burst is finite");
+                // Unpaced traffic can spend more than the pending datagram's credit.
+                for _ in 0..10 {
+                    pacer.on_transmit(mtu);
+                }
+                assert!(pacer.debt > u64::from(mtu));
+
+                // The window path refills at 1.25 windows per RTT.
+                let metrics = Rate {
+                    window: rate / 25,
+                    pacing_rate: explicit_rate.then_some(rate),
+                };
+                let resume = start
+                    + Duration::from_nanos((2 * u64::from(mtu) * 1_000_000_000).div_ceil(rate));
+                assert_eq!(
+                    pacer.delay(rtt, u64::from(mtu), mtu, start, metrics),
+                    Some(resume)
+                );
+                assert_eq!(pacer.debt, u64::from(mtu));
+                assert_eq!(pacer.delay(rtt, u64::from(mtu), mtu, resume, metrics), None);
+            }
         }
     }
 

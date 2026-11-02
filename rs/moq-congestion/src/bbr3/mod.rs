@@ -581,7 +581,8 @@ impl Bbr3 {
                 init.max_pacing_rate,
                 init.now,
             ),
-            send_quantum: 2 * smss, /* we start high, but it will be adjusted in set_send_quantum <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-5.6.3> */
+            // Keep the first flight conservative until an ACK measures the path's RTT.
+            send_quantum: smss,
             pacing_gain: startup_pacing_gain,
             startup_pacing_gain,
             default_pacing_gain,
@@ -4692,7 +4693,7 @@ mod test {
         /// packet size in bytes
         const MSS: u64 = 1200;
         /// bottleneck bandwidth: 8 Mbit/s (1 MB/s) in bytes/sec. Two constraints pin this:
-        ///  - cruise pacing (~0.99*BW) times 1ms (~990 B) must stay under the `2*SMSS`
+        ///  - cruise pacing (~0.99*BW) times 1ms (~990 B) must stay under the `SMSS`
         ///    `set_send_quantum` floor, so `send_quantum` sits at that floor and `offload_budget`
         ///    (send_quantum + delayed-ACK term) stays below `MinPipeCwnd` (4*SMSS); otherwise the
         ///    floor can't bind.
@@ -7182,6 +7183,7 @@ mod test {
     fn first_rtt_recalibrates_startup_pacing() {
         for rtt_ns in [MS / 5, 10 * MS, 100 * MS, 1000 * MS] {
             let mut sim = scripted();
+            assert_eq!(sim.bbr.burst(), Some(sim.bbr.smss));
             sim.round(0, 1, rtt_ns);
             assert_eq!(sim.bbr.pacing_rate, startup_rate(rtt_ns));
             let quantum = (sim.bbr.pacing_rate / 1000.0) as u64;
