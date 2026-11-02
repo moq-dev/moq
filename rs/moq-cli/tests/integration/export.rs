@@ -10,6 +10,7 @@
 use std::io::Cursor;
 use std::os::fd::AsRawFd;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -1110,28 +1111,17 @@ async fn a_passthrough_export_ends_with_its_redundant_importer() {
 	feeding.abort();
 }
 
-/// The top-level boxes of an MP4 file, by kind.
-fn boxes(file: &[u8]) -> Vec<mp4_atom::Any> {
-	use mp4_atom::DecodeMaybe;
-	let mut cursor = Cursor::new(file);
-	let mut boxes = Vec::new();
-	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode the recording") {
-		boxes.push(atom);
-	}
-	boxes
-}
-
-/// SIGINT during `export mp4` finishes the recording as a regular MP4 with its moov at the end.
+/// `repair mp4` finishes a recording whose `export mp4` was killed as a regular MP4, and leaves
+/// it alone once finished.
 #[tokio::test]
 #[ignore = "real-time process test: just rs cli-export"]
-async fn an_interrupted_mp4_recording_is_finished() {
+async fn a_killed_mp4_recording_is_repaired() {
 	let relay = relay().await;
 	let dir = tempfile::tempdir().unwrap();
 	let path = dir.path().join("recording.mp4");
 	let mut recording = moq(&relay, &[])
 		.args(["export", "mp4", "--output"])
 		.arg(&path)
-		.stderr(Stdio::piped())
 		.spawn()
 		.expect("spawn export");
 	let (mut publisher, feeding) = import(&relay);
@@ -1143,6 +1133,136 @@ async fn an_interrupted_mp4_recording_is_finished() {
 	})
 	.await
 	.expect("the recording never grew");
+	recording.kill().await.unwrap();
+	let killed = std::fs::read(&path).unwrap();
+	assert_eq!(
+		boxes(&killed)[1].kind().to_string(),
+		"free",
+		"the killed recording is unfinished"
+	);
+
+	let repair = || async {
+		let output = tokio::process::Command::new(env!("CARGO_BIN_EXE_moq"))
+			.args(["repair", "mp4"])
+			.arg(&path)
+			.output();
+		let output = kio::clock::timeout(TIMEOUT, output)
+			.await
+			.expect("repair never exited")
+			.unwrap();
+		assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+		std::fs::read(&path).unwrap()
+	};
+	let repaired = repair().await;
+	let boxes = boxes(&repaired);
+	let kinds: Vec<String> = boxes.iter().map(|atom| atom.kind().to_string()).collect();
+	assert_eq!(kinds, ["ftyp", "mdat", "moov"]);
+	let Some(mp4_atom::Any::Moov(moov)) = boxes.last() else {
+		unreachable!();
+	};
+	assert_eq!(moov.trak.len(), 2, "video and audio");
+	// Only the reserved box changed before the moov, which replaces any partial fragment.
+	let reserved = u32::from_be_bytes(killed[..4].try_into().unwrap()) as usize;
+	let media = reserved + u64::from_be_bytes(repaired[reserved + 8..reserved + 16].try_into().unwrap()) as usize;
+	assert!(media <= killed.len());
+	assert_eq!(repaired[..reserved], killed[..reserved]);
+	assert_eq!(repaired[reserved + 16..media], killed[reserved + 16..media]);
+
+	assert_eq!(repair().await, repaired, "a finished recording is left alone");
+
+	let stdin = feeding.await.unwrap();
+	drop(stdin);
+	assert!(wait(&mut publisher).await.success());
+}
+
+/// The top-level boxes of an MP4 file, by kind.
+fn boxes(file: &[u8]) -> Vec<mp4_atom::Any> {
+	use mp4_atom::DecodeMaybe;
+	let mut cursor = Cursor::new(file);
+	let mut boxes = Vec::new();
+	while let Some(atom) = mp4_atom::Any::decode_maybe(&mut cursor).expect("decode the recording") {
+		boxes.push(atom);
+	}
+	boxes
+}
+
+/// Count the frames the relay delivers on `demo`'s video track as they arrive. A GOP lasts two
+/// seconds, so subscribing during the first one counts them all.
+fn delivered(relay: &Relay) -> Arc<AtomicUsize> {
+	let count = Arc::<AtomicUsize>::default();
+	let counting = count.clone();
+	let origin = relay.origin.clone();
+	tokio::spawn(async move {
+		let broadcast = origin.follow("demo", None).unwrap().available().await.unwrap();
+		let mut catalogs = hang::catalog::Catalog::<()>::subscribe(&broadcast).await.unwrap();
+		let name = loop {
+			let catalog = catalogs.next().await.unwrap().expect("the catalog ended");
+			if let Some(name) = catalog.video.renditions.keys().next() {
+				break name.clone();
+			}
+		};
+		let mut track = broadcast.track(&name).unwrap().subscribe(None).await.unwrap();
+		while let Some(mut group) = track.recv_group().await.unwrap() {
+			while group.read_frame().await.unwrap().is_some() {
+				counting.fetch_add(1, Ordering::SeqCst);
+			}
+		}
+	});
+	count
+}
+
+/// How many samples the regular MP4 `moov` indexes for `handler`'s track.
+fn indexed(moov: &mp4_atom::Moov, handler: &[u8; 4]) -> usize {
+	let trak = moov
+		.trak
+		.iter()
+		.find(|trak| trak.mdia.hdlr.handler == handler.into())
+		.expect("a trak");
+	match &trak.mdia.minf.stbl.stsz.samples {
+		mp4_atom::StszSamples::Identical { count, .. } => *count as usize,
+		mp4_atom::StszSamples::Different { sizes } => sizes.len(),
+	}
+}
+
+/// SIGINT during `export mp4` finishes the recording as a regular MP4 with its moov at the end,
+/// keeping every frame received, the GOP it was still buffering included.
+#[tokio::test]
+#[ignore = "real-time process test: just rs cli-export"]
+async fn an_interrupted_mp4_recording_is_finished() {
+	let relay = relay().await;
+	let dir = tempfile::tempdir().unwrap();
+	let path = dir.path().join("recording.mp4");
+	let video = delivered(&relay);
+	let mut recording = moq(&relay, &[])
+		.args(["export", "mp4", "--output"])
+		.arg(&path)
+		.stderr(Stdio::piped())
+		.spawn()
+		.expect("spawn export");
+	// Stop feeding partway into the second GOP, which then stays open.
+	let format = Format {
+		clip: &CLIP[..120_320],
+		..TS
+	};
+	let (mut publisher, feeding) = import_as(&relay, &[], format);
+	let stdin = feeding.await.unwrap();
+
+	// The relay delivers the export the same frames as the counter, so once it stops growing
+	// the export has received what it will before the signal.
+	let delivered = || video.load(Ordering::SeqCst);
+	kio::clock::timeout(TIMEOUT, async {
+		let mut last = delivered();
+		loop {
+			kio::clock::sleep(Duration::from_secs(1)).await;
+			let now = delivered();
+			if now == last && now > 0 {
+				break;
+			}
+			last = now;
+		}
+	})
+	.await
+	.expect("the relay kept delivering");
 	let pid = recording.id().expect("running").to_string();
 	let status = std::process::Command::new("kill")
 		.args(["-INT", &pid])
@@ -1169,8 +1289,12 @@ async fn an_interrupted_mp4_recording_is_finished() {
 	};
 	assert!(moov.mvex.is_none());
 	assert_eq!(moov.trak.len(), 2, "video and audio");
+	assert_eq!(
+		indexed(moov, b"vide"),
+		delivered(),
+		"every video frame delivered before the signal"
+	);
 
-	let stdin = feeding.await.unwrap();
 	drop(stdin);
 	assert!(wait(&mut publisher).await.success());
 }

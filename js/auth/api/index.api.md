@@ -61,23 +61,37 @@ export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
 	iss: ZodMiniOptional<ZodMiniUnknown>;
 	jti: ZodMiniOptional<ZodMiniUnknown>;
 	nbf: ZodMiniOptional<ZodMiniInt>;
-	publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	publish: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
+		path: ZodMiniArray<ZodMiniString<string>>;
+		rate: ZodMiniNumber<number>;
+	}, $strict>]>>;
 	put: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniString<string>, ZodMiniArray<ZodMiniString<string>>]>>;
 	root: ZodMiniDefault<ZodMiniString<string>>;
 	sub: ZodMiniOptional<ZodMiniUnknown>;
-	subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
-}, $strict>, ZodMiniTransform<Omit<{
+	subscribe: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
+		path: ZodMiniArray<ZodMiniString<string>>;
+		rate: ZodMiniNumber<number>;
+	}, $strict>]>>;
+}, $strict>, ZodMiniTransform<Omit<Omit<{
 	exp?: number | undefined;
 	get?: string | string[] | undefined;
 	iat?: number | undefined;
 	nbf?: number | undefined;
-	publish?: string[] | undefined;
+	publish?: string[] | {
+		path: string[];
+		rate: number;
+	} | undefined;
 	put?: string | string[] | undefined;
 	root: string;
-	subscribe?: string[] | undefined;
-}, "get" | "put"> & {
+	subscribe?: string[] | {
+		path: string[];
+		rate: number;
+	} | undefined;
+}, "get" | "put">, "publish" | "subscribe"> & {
 	publish?: string[];
+	publish_rate?: number;
 	subscribe?: string[];
+	subscribe_rate?: number;
 }, {
 	exp?: number | undefined;
 	get?: string | string[] | undefined;
@@ -85,27 +99,78 @@ export const ClaimsSchema: ZodMiniPipe<ZodMiniObject<{
 	iss?: unknown;
 	jti?: unknown;
 	nbf?: number | undefined;
-	publish?: string[] | undefined;
+	publish?: string[] | {
+		path: string[];
+		rate: number;
+	} | undefined;
 	put?: string | string[] | undefined;
 	root: string;
 	sub?: unknown;
-	subscribe?: string[] | undefined;
+	subscribe?: string[] | {
+		path: string[];
+		rate: number;
+	} | undefined;
 }>>;
 
 export type Grant = infer<typeof GrantSchema>;
 
-export const GrantSchema: ZodMiniObject<{
+export const GrantSchema: ZodMiniPipe<ZodMiniObject<{
 	expires: ZodMiniOptional<ZodMiniInt>;
 	label: ZodMiniOptional<ZodMiniString<string>>;
 	mounts: ZodMiniOptional<ZodMiniRecord<ZodMiniString<string>, ZodMiniString<string>>>;
 	peer: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-	publish: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	publish: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
+		path: ZodMiniArray<ZodMiniString<string>>;
+		rate: ZodMiniNumber<number>;
+	}, $strict>]>>;
 	revalidate: ZodMiniOptional<ZodMiniInt>;
 	root: ZodMiniOptional<ZodMiniString<string>>;
-	subscribe: ZodMiniOptional<ZodMiniArray<ZodMiniString<string>>>;
+	subscribe: ZodMiniOptional<ZodMiniUnion<readonly [ZodMiniArray<ZodMiniString<string>>, ZodMiniObject<{
+		path: ZodMiniArray<ZodMiniString<string>>;
+		rate: ZodMiniNumber<number>;
+	}, $strict>]>>;
 	tier: ZodMiniOptional<ZodMiniString<string>>;
 	upstream: ZodMiniOptional<ZodMiniBoolean<boolean>>;
-}, $strip>;
+}, $strip>, ZodMiniTransform<Omit<{
+	expires?: number | undefined;
+	label?: string | undefined;
+	mounts?: Record<string, string> | undefined;
+	peer?: boolean | undefined;
+	publish?: string[] | {
+		path: string[];
+		rate: number;
+	} | undefined;
+	revalidate?: number | undefined;
+	root?: string | undefined;
+	subscribe?: string[] | {
+		path: string[];
+		rate: number;
+	} | undefined;
+	tier?: string | undefined;
+	upstream?: boolean | undefined;
+}, "publish" | "subscribe"> & {
+	publish?: string[];
+	publish_rate?: number;
+	subscribe?: string[];
+	subscribe_rate?: number;
+}, {
+	expires?: number | undefined;
+	label?: string | undefined;
+	mounts?: Record<string, string> | undefined;
+	peer?: boolean | undefined;
+	publish?: string[] | {
+		path: string[];
+		rate: number;
+	} | undefined;
+	revalidate?: number | undefined;
+	root?: string | undefined;
+	subscribe?: string[] | {
+		path: string[];
+		rate: number;
+	} | undefined;
+	tier?: string | undefined;
+	upstream?: boolean | undefined;
+}>>;
 
 export { InvalidPattern } from "@moq/pattern";
 
@@ -120,11 +185,20 @@ export const Key: {
 		iss?: unknown;
 		jti?: unknown;
 		nbf?: number;
-		publish?: string[];
+		publish?: string[] | {
+			path: string[];
+			rate: number;
+		};
 		put?: string | string[];
 		root?: string;
 		sub?: unknown;
-		subscribe?: string[];
+		subscribe?: string[] | {
+			path: string[];
+			rate: number;
+		};
+	} & {
+		publish_rate?: number;
+		subscribe_rate?: number;
 	}) => Promise<string>;
 	verify: (key: PublicKey | SymmetricKey, token: string) => Promise<Claims>;
 };
@@ -171,10 +245,7 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		put?: string[] | undefined;
 		root: string;
 		subscribe?: string[] | undefined;
-	}, "get" | "put"> & {
-		publish?: string[];
-		subscribe?: string[];
-	}, {
+	}, "get" | "put">, {
 		get?: string[] | undefined;
 		publish?: string[] | undefined;
 		put?: string[] | undefined;
@@ -225,10 +296,7 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		put?: string[] | undefined;
 		root: string;
 		subscribe?: string[] | undefined;
-	}, "get" | "put"> & {
-		publish?: string[];
-		subscribe?: string[];
-	}, {
+	}, "get" | "put">, {
 		get?: string[] | undefined;
 		publish?: string[] | undefined;
 		put?: string[] | undefined;
@@ -275,10 +343,7 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		put?: string[] | undefined;
 		root: string;
 		subscribe?: string[] | undefined;
-	}, "get" | "put"> & {
-		publish?: string[];
-		subscribe?: string[];
-	}, {
+	}, "get" | "put">, {
 		get?: string[] | undefined;
 		publish?: string[] | undefined;
 		put?: string[] | undefined;
@@ -324,10 +389,7 @@ export const KeySchema: ZodMiniDiscriminatedUnion<[ZodMiniObject<{
 		put?: string[] | undefined;
 		root: string;
 		subscribe?: string[] | undefined;
-	}, "get" | "put"> & {
-		publish?: string[];
-		subscribe?: string[];
-	}, {
+	}, "get" | "put">, {
 		get?: string[] | undefined;
 		publish?: string[] | undefined;
 		put?: string[] | undefined;
@@ -348,11 +410,20 @@ export const KeySet: {
 		iss?: unknown;
 		jti?: unknown;
 		nbf?: number;
-		publish?: string[];
+		publish?: string[] | {
+			path: string[];
+			rate: number;
+		};
 		put?: string | string[];
 		root?: string;
 		sub?: unknown;
-		subscribe?: string[];
+		subscribe?: string[] | {
+			path: string[];
+			rate: number;
+		};
+	} & {
+		publish_rate?: number;
+		subscribe_rate?: number;
 	}) => Promise<string>;
 	verify: (set: KeySet, token: string) => Promise<Claims>;
 };
@@ -396,10 +467,7 @@ export const KeySetSchema: ZodMiniObject<{
 			put?: string[] | undefined;
 			root: string;
 			subscribe?: string[] | undefined;
-		}, "get" | "put"> & {
-			publish?: string[];
-			subscribe?: string[];
-		}, {
+		}, "get" | "put">, {
 			get?: string[] | undefined;
 			publish?: string[] | undefined;
 			put?: string[] | undefined;
@@ -450,10 +518,7 @@ export const KeySetSchema: ZodMiniObject<{
 			put?: string[] | undefined;
 			root: string;
 			subscribe?: string[] | undefined;
-		}, "get" | "put"> & {
-			publish?: string[];
-			subscribe?: string[];
-		}, {
+		}, "get" | "put">, {
 			get?: string[] | undefined;
 			publish?: string[] | undefined;
 			put?: string[] | undefined;
@@ -500,10 +565,7 @@ export const KeySetSchema: ZodMiniObject<{
 			put?: string[] | undefined;
 			root: string;
 			subscribe?: string[] | undefined;
-		}, "get" | "put"> & {
-			publish?: string[];
-			subscribe?: string[];
-		}, {
+		}, "get" | "put">, {
 			get?: string[] | undefined;
 			publish?: string[] | undefined;
 			put?: string[] | undefined;
@@ -549,10 +611,7 @@ export const KeySetSchema: ZodMiniObject<{
 			put?: string[] | undefined;
 			root: string;
 			subscribe?: string[] | undefined;
-		}, "get" | "put"> & {
-			publish?: string[];
-			subscribe?: string[];
-		}, {
+		}, "get" | "put">, {
 			get?: string[] | undefined;
 			publish?: string[] | undefined;
 			put?: string[] | undefined;
@@ -756,10 +815,7 @@ export const ScopeSchema: ZodMiniPipe<ZodMiniObject<{
 	put?: string[] | undefined;
 	root: string;
 	subscribe?: string[] | undefined;
-}, "get" | "put"> & {
-	publish?: string[];
-	subscribe?: string[];
-}, {
+}, "get" | "put">, {
 	get?: string[] | undefined;
 	publish?: string[] | undefined;
 	put?: string[] | undefined;
@@ -801,6 +857,25 @@ export const TransportSchema: ZodMiniPipe<ZodMiniString<string>, ZodMiniCatch<Zo
 export function authorize(claims: Claims, path: string): Permissions;
 
 export { compareSpecificity } from "@moq/pattern";
+
+export function encodeGrant(grant: Grant): {
+	expires?: number;
+	label?: string;
+	mounts?: Record<string, string>;
+	peer?: boolean;
+	publish?: string[] | {
+		path: string[];
+		rate: number;
+	};
+	revalidate?: number;
+	root?: string;
+	subscribe?: string[] | {
+		path: string[];
+		rate: number;
+	};
+	tier?: string;
+	upstream?: boolean;
+};
 
 export function patterns(texts: readonly string[] | undefined): Patterns;
 

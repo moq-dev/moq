@@ -227,36 +227,39 @@ impl Stream {
 	///
 	/// This operation is cancel-safe.
 	pub async fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
-		poll_fn(|cx| {
-			let mut conn = self.conn.state.lock();
+		poll_fn(|cx| self.poll_received_reset(cx)).await
+	}
 
-			if let Some(code) = self.reset {
-				return Poll::Ready(Ok(Some(code)));
-			}
+	/// Poll form of [`Self::received_reset`]. It takes no bytes, so a lease in progress is
+	/// left as it was.
+	pub(crate) fn poll_received_reset(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
+		let mut conn = self.conn.state.lock();
 
-			match conn.inner.recv_stream(self.id).received_reset() {
-				Err(_) => Poll::Ready(Ok(None)),
-				Ok(Some(error_code)) => {
-					// Stream state has just now been freed, so the connection may need to issue new
-					// stream ID flow control credit, and later reads fail with the cached code.
-					self.reset = Some(error_code);
-					conn.wake();
-					Poll::Ready(Ok(Some(error_code)))
-				}
-				Ok(None) => {
-					if let Some(e) = &conn.error {
-						return Poll::Ready(Err(e.clone().into()));
-					}
-					// Resets always notify readers, since a reset is an immediate read error. We
-					// could introduce a dedicated channel to reduce the risk of spurious wakeups,
-					// but that increased complexity is probably not justified, as an application
-					// that is expecting a reset is not likely to receive large amounts of data.
-					conn.blocked_readers.insert(self.id, cx.waker().clone());
-					Poll::Pending
-				}
+		if let Some(code) = self.reset {
+			return Poll::Ready(Ok(Some(code)));
+		}
+
+		match conn.inner.recv_stream(self.id).received_reset() {
+			Err(_) => Poll::Ready(Ok(None)),
+			Ok(Some(error_code)) => {
+				// Stream state has just now been freed, so the connection may need to issue new
+				// stream ID flow control credit, and later reads fail with the cached code.
+				self.reset = Some(error_code);
+				conn.wake();
+				Poll::Ready(Ok(Some(error_code)))
 			}
-		})
-		.await
+			Ok(None) => {
+				if let Some(e) = &conn.error {
+					return Poll::Ready(Err(e.clone().into()));
+				}
+				// Resets always notify readers, since a reset is an immediate read error. We
+				// could introduce a dedicated channel to reduce the risk of spurious wakeups,
+				// but that increased complexity is probably not justified, as an application
+				// that is expecting a reset is not likely to receive large amounts of data.
+				conn.blocked_readers.insert(self.id, cx.waker().clone());
+				Poll::Pending
+			}
+		}
 	}
 
 	/// Handle common logic related to reading out of a receive stream

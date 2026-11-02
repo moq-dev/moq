@@ -228,8 +228,8 @@ Added: the fixed AV1 codec grammar now lives beside the other fixed codec
 parsers. Keep it small and preserve malformed-field refusal; the benchmark
 and shared catalog parity corpus exercise the consumer.
 
-Planned: [H.264 parsing](/quest/m2/h264-reader.md); moq-mux's avcC and hvcC
-records go through mp4-atom, and relay metrics through prometheus-client.
+moq-mux's avcC and hvcC records go through mp4-atom, its H.264 SPS through
+h264-reader, and relay metrics through prometheus-client.
 Re-checked and kept small or cold: capped doubling backoff loops (moq-tokio
 already has a `Backoff`), per-byte hex formatting, the STUN token bucket,
 JS deep equality, WebVTT stamps and `jwt=` lookups. Adding a library would
@@ -240,7 +240,8 @@ build-time audit.
 
 When TypeScript 7.1 is stable, re-check whether the DOM includes
 `WebTransportConnectionStats` before deleting the local `TransportStats` in
-`js/net/src/connection/stats.ts`.
+`js/net/src/connection/stats.ts` (from
+[moq-dev/moq#6625](https://github.com/moq-dev/moq/pull/6625)).
 
 ## Required
 
