@@ -3,7 +3,7 @@ import { Report, Echo as Schema } from "@moq/hang";
 import * as Moq from "@moq/net";
 import { Effect, type Getter, getter, type Inputs, type Readonlys } from "@moq/signals";
 import type { Broadcast } from "./broadcast";
-import type { Received } from "./feedback";
+import { bound, type Received } from "./feedback";
 
 /** A viewer report as written: per-rendition counters and the connection's round-trip time. */
 type Snapshot = { transport?: { rtt: number }; renditions: Record<string, Received> };
@@ -213,7 +213,9 @@ class Shared {
 			this.#reporters.delete(owner);
 			const final: Snapshot = { renditions: reporter().renditions };
 			this.#shares.set(owner, final);
-			this.#departed = merge(this.#departed, final);
+			// Bounded like a tally, so departures that each read fresh rendition IDs cannot grow it.
+			const departed = merge(this.#departed, final);
+			this.#departed = { renditions: bound(departed.renditions) };
 			// Deferred, so a reporter's rerun reuses the broadcast rather than replacing it.
 			queueMicrotask(() => {
 				if (this.#reporters.size > 0 || published.get(this.#origin)?.get(this.#path) !== this) return;

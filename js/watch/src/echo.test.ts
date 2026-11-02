@@ -217,3 +217,34 @@ test("a reporter that leaves and returns is counted once", async () => {
 		installed.close();
 	}
 });
+
+test("departed reporters' rendition IDs stay bounded", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = new Origin.Producer();
+	const catalog = new Signal<Catalog.Root | undefined>({ echo: { path: "viewers" } } as Catalog.Root);
+	const broadcast = watched(origin, "room/live.hang", catalog);
+	const staying = new Echo({ broadcast, origin, name: "alice", sources: [source("room/live.hang", {})] });
+	try {
+		await flush();
+		for (let n = 0; n <= 1024; n++) {
+			const leaving = new Echo({
+				broadcast,
+				origin,
+				name: "alice",
+				sources: [source("room/live.hang", { [`r${n}`]: { frames: 1 } })],
+			});
+			await flush();
+			leaving.close();
+		}
+		await flush();
+		const renditions = (await read(origin, "room/viewers/alice.echo", clock))?.renditions ?? {};
+		expect(Object.keys(renditions)).toHaveLength(1024);
+		expect(renditions.r0).toBeUndefined();
+	} finally {
+		staying.close();
+		broadcast.close();
+		origin.close();
+		installed.close();
+	}
+});
