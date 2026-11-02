@@ -1741,7 +1741,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_wholly_buffered_group_records_its_end() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = crate::hls::Tracks::new(&broadcast);
+		let tracks = crate::hls::Tracks::new(&broadcast, crate::Clock::new());
 		let recorder = tracks.track("video", crate::hls::Config::default()).unwrap();
 		let track = broadcast.create_track("video", timed()).unwrap();
 		let mut producer = Producer::new(track, Container::Legacy(crate::container::Kind::Video))
@@ -1760,7 +1760,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_discontinuity_stops_the_segment_at_the_marker() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = crate::hls::Tracks::new(&broadcast);
+		let tracks = crate::hls::Tracks::new(&broadcast, crate::Clock::new());
 		let recorder = tracks.track("video", crate::hls::Config::default()).unwrap();
 		let track = broadcast.create_track("video", timed()).unwrap();
 		let mut producer =
