@@ -52,9 +52,12 @@ altogether (2026-10-25). The borrow-free mechanism report
 ([moq-dev/moq#7531](https://github.com/moq-dev/moq/pull/7531)) measured the
 designs on one core: the `Mutex` costs 1.1 to 3.5% over context passing, and a
 driver-owned channel (this quest's staging queue in full) costs about 4.5k
-instructions per stream plus about 320 per extra write. Adopting a design, or
-keeping the lock, is decided separately; this profile is the contended baseline
-that decision weighs.
+instructions per stream plus about 320 per extra write. Its recommendation is
+to keep the `Mutex` and `RefCell` on the data path and not build the channel
+design: they cost 1.1 to 3.5% and under 1% over context passing on one core,
+and the channel costs 5 to 29% more. Adopting a design, or keeping the lock, is
+still decided separately; this profile is the contended baseline that decision
+weighs.
 
 A measured no-win is a valid outcome. Report public API and wire impact; the
 staging queue and batch dispatch should need none.

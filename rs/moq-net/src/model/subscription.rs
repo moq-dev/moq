@@ -5,9 +5,11 @@ use std::{
 
 use crate::Timestamp;
 
+mod runs;
 mod window;
+pub(super) use runs::{Layered, Runs};
 pub(crate) use window::Accounted;
-pub(super) use window::{Containing, Held, Holdings, Resolved, Unheld, Window, later};
+pub(super) use window::{Containing, Held, Holdings, Resolved, Seen, Unheld, Window, later};
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -94,6 +96,11 @@ pub struct Subscription {
 	/// subscribers fresh. Each subscriber's own publisher (a relay's downstream session)
 	/// still serves it in its own order.
 	pub order: Order,
+	/// Whether this reader needs the source's live feed, not only its history: a wire
+	/// publisher owes its peer an answer naming the live edge, which only the upstream's own
+	/// answer gives. A session holding no upstream subscription for its copy subscribes again
+	/// for such a reader, whatever its ranges. Aggregated as any: one such reader is enough.
+	pub(crate) feed: bool,
 }
 
 /// Which of a subscription's pending groups the publisher sends first.
@@ -294,6 +301,7 @@ impl Default for Subscription {
 			max_delay: Some(Duration::ZERO),
 			ranges: vec![Range::oldest()],
 			order: Order::Descending,
+			feed: false,
 		}
 	}
 }
@@ -475,6 +483,7 @@ impl Combined {
 		if let Order::Descending = sub.order {
 			combined.order = Order::Descending;
 		}
+		combined.feed |= sub.feed;
 	}
 
 	/// The aggregate, or `None` without a subscriber.
