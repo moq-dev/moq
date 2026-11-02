@@ -89,6 +89,10 @@ poll on both builds. A paired round reruns the same two binaries, so a code or
 heap layout shift between them reads as a stable regression that rounds cannot
 filter. `codec_messages/*/lite` (+31%, +68%) moved only because a new bench group
 in the same binary changed what LTO inlines.
+[moq-dev/moq#7253](https://github.com/moq-dev/moq/pull/7253) found a third:
+`server_admission/workers=4/0` (+10%) runs machine code identical apart from
+addresses on both builds of the 2026-10-27 pair. The other four 2026-10-27 cases
+were real, and were fixed or accepted there.
 
 ## Related
 

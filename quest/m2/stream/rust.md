@@ -2,23 +2,24 @@
 
 ## Goal
 
-A Rust application opens a duplex byte stream to a peer by path and gets an
-`AsyncRead + AsyncWrite` that carries TCP semantics over a track pair: ordered,
-lossless, FIN as half-close, reset with a code. A listener accepts the streams
-dialed under its prefix. `moq` gains TCP forwarding on both ends so an
+A Rust application opens a duplex byte stream on a
+[socket](/quest/m2/socket/rust.md) and gets an `AsyncRead + AsyncWrite` that
+carries TCP semantics over one bi track: ordered,
+lossless, FIN as half-close, reset with a code. A socket's listener accepts the streams
+its dialers open. `moq` gains TCP forwarding on both ends so an
 unmodified client and server talk through a relay.
 
 ## Plan
 
-See the [epic](/quest/m2/stream/README.md) for the mapping: one track per
-direction, a group per connection, a frame per socket read, no fill handler.
+See the [epic](/quest/m2/stream/README.md) for the mapping: a socket per
+forwarded service, a bi track per connection with one group each way, a frame
+per TCP read, no fill handler.
 
-- Place it where the existing patterns put a reusable wire-level primitive
-  (a module in `moq-net` or its own crate); report the choice.
-- The dialer publishes its outbound track under its own path and the listener
-  discovers it by announcement, then answers on its own path. Settle the exact
-  path layout and how the two sides name a connection before coding, and record
-  it in this quest.
+- Build on `moq_net::socket`: the path layout and connection naming are the
+  socket's (`open_bi` and `accept_bi`), so this quest adds only the
+  `AsyncRead`/`AsyncWrite` adapter and the TCP mapping. Place the adapter
+  beside the socket module unless it pulls in a dependency moq-net avoids;
+  report the choice.
 - Each stream carries a subscription priority the caller sets; nothing is
   hard-coded below or above media.
 - `moq` CLI: one verb forwards a local TCP listener to a remote stream and one
@@ -31,4 +32,5 @@ direction, a group per connection, a frame per socket read, no fill handler.
 
 ## Required
 
+- [Rust sockets](/quest/m2/socket/rust.md) - the socket each stream is a bi track on
 - [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - lossless delivery to a reader that keeps up

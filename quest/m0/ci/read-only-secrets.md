@@ -71,4 +71,4 @@ publish, since jobs that do not name `publish` still read it:
 
 ## Related
 
-- [Land main through quest land](/quest/m0/ci/land.md) - its gate credential also belongs in a protected environment
+- [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - its gate credential also belongs in a protected environment

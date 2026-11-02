@@ -171,7 +171,10 @@ static void on_audio(void *ud, int32_t id) {
     moq_audio_frame f = read.frame;
     if (status == 0 && read.kind == MOQ_DECODE_READ_FRAME && a->samples < a->want) {
         uint64_t samples = f.data_size / a->frame_bytes;
-        fprintf(a->log, "%llu %llu\n", (unsigned long long)f.timestamp_us, (unsigned long long)samples);
+        // tone.py reads whole microseconds; splitting off the seconds keeps the product in range.
+        moq_timestamp ts = f.timestamp;
+        unsigned long long us = ts.value / ts.scale * 1000000 + ts.value % ts.scale * 1000000 / ts.scale;
+        fprintf(a->log, "%llu %llu\n", us, (unsigned long long)samples);
         fwrite(f.data, 1, f.data_size, a->pcm);
         a->samples += samples;
         if (a->samples >= a->want) {
@@ -245,7 +248,7 @@ static void start_audio(ctx_t *c, int32_t catalog) {
         moq_audio_decoder_output out;
         memset(&out, 0, sizeof(out));
         out.format = MOQ_AUDIO_SAMPLE_FORMAT_F32;
-        out.max_delay_us = MAX_DELAY_US;
+        out.delay.max_us = MAX_DELAY_US;
         int32_t track = moq_decode_audio((uint32_t)catalog, i, &out, on_audio, &c->audio[i]);
         pthread_mutex_lock(&c->mu);
         if (track > 0) c->audio[i].track = track;
@@ -324,7 +327,8 @@ static void on_catalog(void *ud, int32_t catalog) {
         moq_video_config vcfg;
         memset(&vcfg, 0, sizeof(vcfg));
         if (moq_consume_video_config((uint32_t)catalog, 0, &vcfg) == 0) {
-            int32_t track = moq_consume_video((uint32_t)catalog, 0, MAX_DELAY_US, on_frame, ud);
+            moq_delay delay = {.max_us = MAX_DELAY_US};
+            int32_t track = moq_consume_video((uint32_t)catalog, 0, &delay, on_frame, ud);
             if (track > 0) {
                 pthread_mutex_lock(&c->mu);
                 c->video_track = track;
@@ -383,9 +387,10 @@ static void on_finish_health_frame(void *ud, int32_t frame) {
     int32_t read = moq_consume_track_frame((uint32_t)frame, &info);
     const char payload[] = "session-alive";
     pthread_mutex_lock(&c->mu);
+    // Its timestamp goes unchecked: lite-05/06 carry an untimed track's send time.
     if (read < 0 || info.payload_size != sizeof(payload) - 1 ||
         memcmp(info.payload, payload, sizeof(payload) - 1) != 0 ||
-        info.timestamp_present || ++c->finish.health_frames != 1) c->finish.failed = 1;
+        ++c->finish.health_frames != 1) c->finish.failed = 1;
     pthread_cond_broadcast(&c->cv);
     pthread_mutex_unlock(&c->mu);
     moq_consume_track_frame_free((uint32_t)frame);

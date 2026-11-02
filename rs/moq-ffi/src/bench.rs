@@ -5,7 +5,7 @@
 //! runs the same rounds on moq-net, below moq-ffi's handles and runtime.
 
 use crate::consumer::MoqTrackConsumer;
-use crate::media::MoqFrame;
+use crate::media::{MoqFrame, MoqTimestamp};
 use crate::origin::{MoqOriginConfig, MoqOriginProducer};
 use crate::producer::{MoqBroadcastProducer, MoqTrackInfo, MoqTrackProducer};
 
@@ -98,7 +98,7 @@ impl Report {
 		Fut: Future<Output = ()>,
 	{
 		// The test runs many budgets back to back, so a wedged read is caught per round, not by nextest.
-		let mut run = |n| tokio::time::timeout(ROUND_TIMEOUT, round(n));
+		let mut run = |n| kio::clock::timeout(ROUND_TIMEOUT, round(n));
 		for n in 0..WARMUP {
 			run(n).await.expect("round wedged");
 		}
@@ -165,7 +165,10 @@ async fn ffi_round(
 				let mut read = Vec::with_capacity(frames);
 				for _ in 0..frames {
 					let frame = group.read_frame().await.unwrap().expect("group ended");
-					read.push((frame.payload, frame.timestamp_us));
+					let timestamp = frame
+						.timestamp
+						.map(|t| moq_net::Timestamp::try_from(t).unwrap().as_micros() as u64);
+					read.push((frame.payload, timestamp));
 				}
 				read
 			})
@@ -176,7 +179,10 @@ async fn ffi_round(
 		for f in 0..case.frames() {
 			let frame = MoqFrame {
 				payload: payload.to_vec(),
-				timestamp_us: Some(n * case.frames() as u64 + f as u64),
+				timestamp: Some(MoqTimestamp {
+					value: n * case.frames() as u64 + f as u64,
+					scale: 1_000_000,
+				}),
 			};
 			group.write_frame(frame).unwrap();
 		}

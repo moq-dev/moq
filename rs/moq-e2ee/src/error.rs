@@ -12,7 +12,7 @@ pub enum Error {
 	#[error("exhausted")]
 	Exhausted,
 
-	/// Encrypting at a sequence this generation already allocated, or producing a track it already claimed.
+	/// Encrypting at a sequence this generation already allocated for the track's name.
 	#[error("reuse")]
 	Reuse,
 
@@ -23,6 +23,10 @@ pub enum Error {
 	/// AEAD open failed, including relocation across any identity field, or a physical name does not open under its generation.
 	#[error("authentication")]
 	Authentication,
+
+	/// This CPU lacks an instruction set extension the crypto requires; the message names it.
+	#[error("unsupported: {0}")]
+	Unsupported(String),
 
 	/// The underlying MoQ track failed.
 	#[error(transparent)]

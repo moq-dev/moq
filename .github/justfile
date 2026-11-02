@@ -21,13 +21,14 @@ runner-vm-ci:
 runner-vm:
     bash sh/local.sh nix build --no-link .#checks.x86_64-linux.github-runner-vm .#checks.x86_64-linux.github-runner-vm-image .#checks.x86_64-linux.github-runner-vm-config --print-build-logs
 
-# Lint GitHub Actions workflows, their security, their alert coverage, and that every step runs a recipe.
+# Lint GitHub Actions workflows, their security, their alert coverage, that every step runs a recipe, and that every opt-in test has a caller.
 check:
     actionlint
     zizmor --offline --quiet .github
     sh/gh/alert.sh check-coverage
     bun test sh/gh/alert.test.ts
     bun sh/gh/check-runs.ts
+    python3 sh/gh/test-inventory.py
     python3 bench/relay.test.py
 
 # Tests of repository tooling; every `just check` and `just ci` runs them.
@@ -46,6 +47,7 @@ test:
     python3 sh/large-files.test.py
     python3 sh/dispatch-query.test.py
     python3 sh/dispatch-query.test.py --bench
+    python3 sh/gh/test-inventory.test.py
     bun test sh/gh/setup.test.ts
     bun sh/gh/queue.test.ts
     python3 sh/gh/install-formula.test.py

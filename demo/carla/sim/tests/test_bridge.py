@@ -1,6 +1,5 @@
 import asyncio
 import struct
-from datetime import timedelta
 from types import SimpleNamespace
 
 import moq
@@ -117,10 +116,6 @@ class FakeDemand:
         return self._wanted
 
 
-def microseconds(timestamp: timedelta) -> int:
-    return timestamp // timedelta(microseconds=1)
-
-
 class FakeTrack:
     def __init__(self, init: bytes, name: str, hint) -> None:
         self.init = init
@@ -133,8 +128,9 @@ class FakeTrack:
     def demand(self) -> FakeDemand:
         return self.demand_handle
 
-    def write_frame(self, payload: bytes, timestamp: timedelta) -> None:
-        self.frames.append((payload, microseconds(timestamp)))
+    def write_frame(self, payload: bytes, timestamp: SimpleNamespace) -> None:
+        assert timestamp.scale == 1_000_000
+        self.frames.append((payload, timestamp.value))
 
     def finish(self) -> None:
         self.finished = True
