@@ -250,6 +250,7 @@ pub(crate) async fn connect(url: Url, protocols: &[&str]) -> Result<qmux::Sessio
 	config.protocol = qmux::Protocol::Negotiate(protocols.iter().map(|p| (*p).to_owned()).collect());
 	qmux::uds::connect(path, config)
 		.await
+		.map(crate::spawn_qmux)
 		.map_err(|err| Error::Connect(crate::error::message(err)))
 }
 
@@ -304,7 +305,7 @@ impl Listener {
 	/// Report into `health` instead of the one this listener made for itself.
 	///
 	/// For an owner that has to hand the handle out *before* the listener exists:
-	/// [`crate::Server`] binds these lazily (they need a runtime), but an embedder
+	/// [`crate::Server`] binds these lazily (they bind asynchronously), but an embedder
 	/// registering them with a metrics endpoint does so at startup.
 	pub(crate) fn with_accept_health(mut self, health: crate::accept::Health) -> Self {
 		self.health = health;
@@ -361,6 +362,7 @@ impl Listener {
 			}
 			let session = qmux::uds::accept(stream, config)
 				.await
+				.map(crate::spawn_qmux)
 				.map_err(|err| Error::Accept(crate::error::message(err)))?;
 			Ok((session, cred))
 		}
@@ -376,7 +378,7 @@ impl Listener {
 				}
 				Err(err) => {
 					if let Some(delay) = self.health.failed(&err) {
-						moq_clock::sleep(delay).await;
+						kio::clock::sleep(delay).await;
 					}
 				}
 			}

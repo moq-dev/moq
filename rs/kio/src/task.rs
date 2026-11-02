@@ -41,15 +41,14 @@
 
 use std::{
 	cell::{Cell, RefCell},
-	// std's `Arc`: `Waker::from` needs it. The atomics are loom's under `--cfg loom`.
-	sync::{Arc, atomic::Ordering},
+	sync::{
+		Arc, Mutex,
+		atomic::{AtomicBool, AtomicU64, Ordering},
+	},
 	task::{Context, Poll, RawWakerVTable, Wake, Waker},
 };
 
-use crate::{
-	sync::{AtomicBool, AtomicU64, Mutex},
-	waiter::{Park, Waiter},
-};
+use crate::waiter::{Park, Waiter};
 
 /// Wake-bits per chunk word and words per chunk: one chunk covers 1024 slots.
 const WORD_BITS: usize = 64;
@@ -91,12 +90,24 @@ pub struct Tasks<T> {
 	/// The slot that leads the next readiness snapshot, rotated after every
 	/// nonempty pass so wake-all resources cannot favor low-numbered tasks.
 	next: usize,
+	/// Stamped on each occupant, so a [`TaskKey`] outliving its task names nothing.
+	generation: u64,
+}
+
+/// Names a task [`insert`](Tasks::insert)ed into a set, until it finishes or is
+/// [`remove`](Tasks::remove)d. A key to a task that is gone never names the
+/// task reusing its slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct TaskKey {
+	index: usize,
+	generation: u64,
 }
 
 /// A slot's current task and its retained kio registrations.
 struct Occupant<T> {
 	task: T,
 	park: Park,
+	generation: u64,
 }
 
 /// Waker state shared with every slot; deliberately `T`-free so the wakers
@@ -134,14 +145,8 @@ impl Shared {
 	}
 }
 
-// Loom runs its threads on one OS thread, so the scope must be loom's to stay per thread.
-#[cfg(not(loom))]
 std::thread_local! {
 	static POLLING: Polling = const { Polling { current: Cell::new(None), held: RefCell::new(Vec::new()) } };
-}
-#[cfg(loom)]
-loom::thread_local! {
-	static POLLING: Polling = Polling { current: Cell::new(None), held: RefCell::new(Vec::new()) };
 }
 
 /// A waker's identity: what [`Waker::will_wake`] compares.
@@ -251,6 +256,7 @@ impl<T> Tasks<T> {
 			}),
 			scratch: Vec::new(),
 			next: 0,
+			generation: 0,
 		}
 	}
 
@@ -269,6 +275,12 @@ impl<T> Tasks<T> {
 	/// Wakes the owner, so a task pushed between polls (from another arm of the
 	/// owner's own poll, say) still gets started.
 	pub fn push(&mut self, task: T) {
+		self.insert(task);
+	}
+
+	/// Add a task like [`push`](Self::push), returning the key that
+	/// [`remove`](Self::remove)s it before it finishes.
+	pub fn insert(&mut self, task: T) -> TaskKey {
 		let index = match self.free.pop() {
 			Some(index) => index,
 			None => {
@@ -286,13 +298,34 @@ impl<T> Tasks<T> {
 				index
 			}
 		};
+		self.generation += 1;
 		self.children[index] = Some(Occupant {
 			task,
 			park: Park::default(),
+			generation: self.generation,
 		});
 		self.len += 1;
 		// Queue the first poll exactly the way any wake would.
 		self.wakers[index].wake_by_ref();
+		TaskKey {
+			index,
+			generation: self.generation,
+		}
+	}
+
+	/// Take a task out of the set before it finishes, cancelling it there.
+	///
+	/// `None` when the task already finished or was removed.
+	pub fn remove(&mut self, key: TaskKey) -> Option<T> {
+		let slot = self.children.get_mut(key.index)?;
+		if slot.as_ref()?.generation != key.generation {
+			return None;
+		}
+		let occupant = slot.take()?;
+		// A wake bit left set costs the slot's next occupant one spurious poll at most.
+		self.free.push(key.index);
+		self.len -= 1;
+		Some(occupant.task)
 	}
 }
 
@@ -342,8 +375,17 @@ impl<T: Task<Output = ()>> Tasks<T> {
 	/// such an arm with [`is_empty`](Self::is_empty).
 	/// `waiter` is registered for the next task wake or push; the tasks
 	/// themselves park on their own wakers.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll(&mut self, waiter: &Waiter) -> Poll<()> {
+		self.poll_each(waiter, |_, ()| {})
+	}
+}
+
+impl<T: Task> Tasks<T> {
+	/// [`poll`](Self::poll) a set whose tasks resolve to a value: `done` takes
+	/// each task that returned `Ready`, with its output, as it retires.
+	#[cfg_attr(feature = "sim", track_caller)]
+	pub fn poll_each(&mut self, waiter: &Waiter, mut done: impl FnMut(T, T::Output)) -> Poll<()> {
 		{
 			let mut parent = self.shared.parent.lock().unwrap();
 			let waker = waiter.waker();
@@ -405,12 +447,13 @@ impl<T: Task<Output = ()>> Tasks<T> {
 					let child_waiter = occupant.park.hold(&cx);
 					// Each child is its own task, so a large sweep of finite children is not
 					// one spinning poll.
-					#[cfg(feature = "_sim")]
+					#[cfg(feature = "sim")]
 					let _scope = crate::coop::child();
-					if occupant.task.poll(child_waiter).is_ready() {
-						self.children[index] = None;
+					if let Poll::Ready(output) = occupant.task.poll(child_waiter) {
+						let occupant = self.children[index].take().expect("polled slot is occupied");
 						self.free.push(index);
 						self.len -= 1;
+						done(occupant.task, output);
 					}
 				}
 			}
@@ -430,7 +473,7 @@ impl<T> Default for Tasks<T> {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests {
 	use super::*;
 	use std::sync::{Mutex, atomic::AtomicUsize};
@@ -502,6 +545,81 @@ mod tests {
 		open(&c_gate);
 		assert!(tasks.poll(&waiter).is_ready(), "an empty set is Ready");
 		assert!(tasks.is_empty());
+	}
+
+	/// A removed task is gone at once, and its key never names the task that
+	/// reuses its slot.
+	#[test]
+	fn removed_tasks_free_their_slot_and_key() {
+		let mut tasks = Tasks::new();
+		let (a_gate, a_polls) = (crate::Producer::new(false), Arc::new(AtomicUsize::new(0)));
+		let a = tasks.insert(gated(a_gate.consume(), a_polls.clone()));
+		let waiter = Waiter::noop();
+		assert!(tasks.poll(&waiter).is_pending());
+
+		assert!(tasks.remove(a).is_some());
+		assert!(tasks.is_empty());
+		// Its pending wake is dropped with it.
+		open(&a_gate);
+		assert!(tasks.poll(&waiter).is_ready());
+		assert_eq!(a_polls.load(Ordering::SeqCst), 1);
+
+		let b_gate = crate::Producer::new(false);
+		let b = tasks.insert(gated(b_gate.consume(), Arc::new(AtomicUsize::new(0))));
+		assert_eq!(tasks.children.len(), 1, "b reuses a's slot");
+		assert!(tasks.remove(a).is_none(), "a stale key names nothing");
+		assert!(tasks.remove(b).is_some());
+		assert!(tasks.remove(b).is_none());
+	}
+
+	/// `poll_each` hands back each task that resolves, with its output.
+	#[test]
+	fn poll_each_hands_back_outputs() {
+		/// Resolves to ten times its id once the gate opens.
+		struct Tagged {
+			id: usize,
+			gate: crate::Consumer<bool>,
+		}
+		impl Task for Tagged {
+			type Output = usize;
+
+			fn poll(&mut self, waiter: &Waiter) -> Poll<usize> {
+				match self.gate.poll(waiter, |open| match **open {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				}) {
+					Poll::Ready(_) => Poll::Ready(self.id * 10),
+					Poll::Pending => Poll::Pending,
+				}
+			}
+		}
+
+		let mut tasks = Tasks::new();
+		let gate = crate::Producer::new(false);
+		for id in 0..3 {
+			tasks.push(Tagged {
+				id,
+				gate: gate.consume(),
+			});
+		}
+
+		let waiter = Waiter::noop();
+		let mut done = Vec::new();
+		assert!(
+			tasks
+				.poll_each(&waiter, |task, out| done.push((task.id, out)))
+				.is_pending()
+		);
+		assert!(done.is_empty());
+
+		open(&gate);
+		assert!(
+			tasks
+				.poll_each(&waiter, |task, out| done.push((task.id, out)))
+				.is_ready()
+		);
+		done.sort();
+		assert_eq!(done, [(0, 0), (1, 10), (2, 20)]);
 	}
 
 	/// A boxed set mixes shapes: a plain closure and an adapted future.

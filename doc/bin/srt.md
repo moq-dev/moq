@@ -35,7 +35,8 @@ return or a replacement on the same connection, as they do for
 A multi-program feed is refused unless `--program`
 picks one: `--program 2` imports program 2 alone, and `--program all`
 publishes each program as its own broadcast (`event.hang` becomes
-`event/1.hang`, `event/2.hang`, and so on).
+`event/1.hang`, `event/2.hang`, and so on), following the PAT as programs
+join and leave.
 
 ```bash
 moq --connect https://relay.example.com/anon --broadcast event.hang import srt --listen '[::]:9000' --program all

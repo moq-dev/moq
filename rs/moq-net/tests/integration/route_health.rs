@@ -65,8 +65,7 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 	let m1_e = link(version, &m1, &e).await;
 
 	let consumer = e.consume();
-	consumer.routed("live").await.unwrap();
-	let remote = consumer.request_broadcast("live", None).await.unwrap();
+	let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 	let prefs = track::Subscription::default().with_max_delay(budget);
 	let mut rx = read(remote.track("video").unwrap().subscribe(prefs).await.unwrap());
 	let m2_e = priced_link(version, &m2, &e, Some(1_000)).await;
@@ -85,7 +84,7 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 		for frame in 0..FRAMES {
 			let timestamp = Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap();
 			group.write_frame(timestamp, payload(sequence, frame)).unwrap();
-			moq_clock::sleep(STEP).await;
+			kio::clock::sleep(STEP).await;
 			tick += 1;
 			if tick == kill {
 				drain(&mut rx, &mut seen);
@@ -121,7 +120,7 @@ async fn silent_kill(budget: Duration, detect: Duration) -> Vec<u64> {
 /// about `detect - budget` of media, and nothing once detection beats the budget. Today
 /// detection is the idle timeout. A standby observing `M2` could detect after a frame
 /// interval plus the paths' skew.
-#[moq_clock::test]
+#[kio::test]
 async fn silent_kill_loses_what_detection_outlasts() {
 	let cases = [
 		// (budget, detection, groups lost)
@@ -133,7 +132,7 @@ async fn silent_kill_loses_what_detection_outlasts() {
 		(Duration::from_secs(2), Duration::from_millis(500), vec![]),
 	];
 	for (budget, detect, expected) in cases {
-		let lost = moq_clock::timeout(TEST_TIMEOUT, silent_kill(budget, detect))
+		let lost = kio::clock::timeout(TEST_TIMEOUT, silent_kill(budget, detect))
 			.await
 			.expect("timed out");
 		assert_eq!(lost, expected, "budget {budget:?}, detection {detect:?}");
@@ -171,7 +170,7 @@ fn observe(rx: &mut mpsc::UnboundedReceiver<Delivery>, sub: &mut track::Subscrib
 			(_, Err(_)) => observed.failed += 1,
 		}
 	}
-	let waiter = moq_net::kio::Waiter::noop();
+	let waiter = kio::Waiter::noop();
 	while let std::task::Poll::Ready(Some(largest)) = sub.poll_largest(&waiter) {
 		observed.largest = Some(largest);
 	}
@@ -205,8 +204,7 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 
 	async fn subscribe(origin: &origin::Producer) -> track::Subscriber {
 		let consumer = origin.consume();
-		consumer.routed("live").await.unwrap();
-		let remote = consumer.request_broadcast("live", None).await.unwrap();
+		let remote = consumer.follow("live", None).unwrap().available().await.unwrap();
 		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(2));
 		remote.track("video").unwrap().subscribe(prefs).await.unwrap()
 	}
@@ -225,7 +223,7 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 			for frame in 0..FRAMES {
 				let timestamp = Timestamp::from_millis(tick * STEP.as_millis() as u64).unwrap();
 				group.write_frame(timestamp, payload(sequence, frame)).unwrap();
-				moq_clock::sleep(STEP).await;
+				kio::clock::sleep(STEP).await;
 				tick += 1;
 			}
 			group.finish().unwrap();
@@ -255,13 +253,13 @@ async fn payload_stall(stall: Stall, span: Duration) -> (Observed, Observed) {
 /// ends nor moves, while `W` reads every frame through `M2`. When only `M1`'s group
 /// headers arrive, `E`'s largest keeps pace with `W`'s and its groups fail as too old:
 /// comparing the two routes' largest positions finds nothing wrong.
-#[moq_clock::test]
+#[kio::test]
 async fn a_payload_stall_with_live_sessions_is_never_recovered() {
 	const SPAN: Duration = Duration::from_secs(30);
 	// The stall starts after group 1, and `P` writes one group per second through it.
 	let newest = 1 + SPAN.as_secs();
 	for stall in [Stall::Upstream, Stall::Downstream, Stall::Headers] {
-		let (e, w) = moq_clock::timeout(TEST_TIMEOUT, payload_stall(stall, SPAN))
+		let (e, w) = kio::clock::timeout(TEST_TIMEOUT, payload_stall(stall, SPAN))
 			.await
 			.expect("timed out");
 		assert_eq!(e.frames, 0, "{stall:?}: E read through the stall");

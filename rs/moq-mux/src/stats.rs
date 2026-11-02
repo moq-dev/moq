@@ -5,7 +5,7 @@
 //! the catalog [`Producer`](crate::catalog::Producer) for what a publisher writes, the export
 //! [`Source`](crate::Source) for what a viewer reads.
 
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex, PoisonError};

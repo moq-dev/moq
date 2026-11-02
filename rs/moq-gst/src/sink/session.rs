@@ -252,6 +252,9 @@ pub(crate) struct Session {
 	/// The live recv-bitrate estimate, tracked across reconnects by the reconnect loop. Read directly
 	/// by the `estimated-recv-rate` getter.
 	recv_bandwidth: moq_net::bandwidth::Consumer,
+	/// Divides this publication's send estimate among tracks that opt into a ceiling. The reconnect
+	/// handle owns the registry, so reservations and their probe target survive reconnects.
+	bandwidth: moq_net::bandwidth::Allocator,
 	connection_stats: moq_tokio::connection::Monitor,
 	/// This publication's completion. The task moves it to `Failed` on a fatal transport error, so the
 	/// pad streaming threads stop feeding a dead session without consulting the element.
@@ -300,6 +303,7 @@ impl Session {
 		// Persistent handles that survive reconnects; the getters read them without touching the loop.
 		let send_bandwidth = reconnect.send_bandwidth();
 		let recv_bandwidth = reconnect.recv_bandwidth();
+		let bandwidth = reconnect.allocator();
 		let connection_stats = reconnect.monitor();
 
 		// The task is spawned parked. An immediate auth rejection would otherwise race the element
@@ -322,6 +326,7 @@ impl Session {
 				status,
 				send_bandwidth,
 				recv_bandwidth,
+				bandwidth,
 				connection_stats,
 				completion,
 			},
@@ -344,6 +349,16 @@ impl Session {
 	/// The estimated receive bitrate in bits per second, 0 when disconnected or unavailable.
 	pub fn estimated_recv_rate(&self) -> u64 {
 		self.recv_bandwidth.peek().map_or(0, moq_net::bandwidth::Rate::as_bps)
+	}
+
+	/// The allocator shared by tracks published in this session.
+	pub fn bandwidth(&self) -> moq_net::bandwidth::Allocator {
+		self.bandwidth.clone()
+	}
+
+	#[cfg(test)]
+	pub(super) fn replace_bandwidth(&mut self, bandwidth: moq_net::bandwidth::Allocator) {
+		self.bandwidth = bandwidth;
 	}
 
 	/// Snapshot the current connection statistics, or None while disconnected.

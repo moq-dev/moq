@@ -8,10 +8,11 @@ use bytes::{Buf, BufMut, Bytes};
 use rand::{Rng, RngExt};
 
 use crate::{
-	Duration, RESET_TOKEN_SIZE, ServerConfig, UNIX_EPOCH, Wall,
+	Duration, RESET_TOKEN_SIZE, UNIX_EPOCH, Wall,
 	coding::{BufExt, BufMutExt},
 	crypto::{HandshakeTokenKey, HmacKey},
 	packet::InitialHeader,
+	server,
 	shared::ConnectionId,
 };
 
@@ -102,7 +103,7 @@ impl IncomingToken {
 	/// cannot be established
 	pub(crate) fn from_header(
 		header: &InitialHeader,
-		server_config: &ServerConfig,
+		server_config: &server::Config,
 		remote_address: SocketAddr,
 	) -> Result<Self, InvalidRetryTokenError> {
 		let unvalidated = Self {
@@ -141,7 +142,7 @@ impl IncomingToken {
 				}
 				if issued
 					.checked_add(server_config.retry_token_lifetime)
-					.is_none_or(|expires| expires < moq_clock::wall())
+					.is_none_or(|expires| expires < kio::clock::wall())
 				{
 					return Err(InvalidRetryTokenError);
 				}
@@ -158,7 +159,7 @@ impl IncomingToken {
 				}
 				if issued
 					.checked_add(server_config.validation_token.lifetime)
-					.is_none_or(|expires| expires < moq_clock::wall())
+					.is_none_or(|expires| expires < kio::clock::wall())
 				{
 					return Ok(unvalidated);
 				}

@@ -15,20 +15,6 @@ export interface Config {
 	streamReceiveWindow?: bigint;
 }
 
-export class Datagrams implements WebTransportDatagramDuplexStream {
-	constructor(send: (data: Uint8Array) => void);
-	close(err?: Error): void;
-	incomingHighWaterMark: number;
-	incomingMaxAge: number | null;
-	get maxDatagramSize(): number;
-	outgoingHighWaterMark: number;
-	outgoingMaxAge: number | null;
-	push(data: Uint8Array): void;
-	readonly readable: ReadableStream<Uint8Array>;
-	setMaxDatagramSize(size: number): void;
-	readonly writable: WritableStream<Uint8Array>;
-}
-
 export interface InstallOptions {
 	requireProtocol?: boolean;
 	versions?: Record<string, Version | Version[] | null>;
@@ -120,7 +106,7 @@ export default class implements WebTransport {
 	get congestionControl(): WebTransportCongestionControl;
 	createBidirectionalStream(options?: SendStreamOptions): Promise<WebTransportBidirectionalStream>;
 	createUnidirectionalStream(options?: SendStreamOptions): Promise<WritableStream<Uint8Array>>;
-	readonly datagrams: Datagrams;
+	get datagrams(): WebTransportDatagramDuplexStream;
 	getStats(): Promise<{
 		datagrams: {};
 	}>;

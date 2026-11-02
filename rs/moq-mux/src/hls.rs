@@ -30,8 +30,13 @@
 //!
 //! [`catalog::Producer`](crate::catalog::Producer) owns the broadcast's record tracks and advertises
 //! each in its rendition's `hls` field. On the read side, [`Consumer::subscribe`] reads one
-//! rendition's records and yields decoded [`Event`]s. On the wire each record track is an
-//! uncompressed [`moq_json::window`] whose groups restate the recent records.
+//! rendition's records and yields decoded [`Event`]s. On the wire each record track is a
+//! [`compress`](moq_net::track::Info::compress)ed [`moq_json::window`] whose groups restate the
+//! recent records.
+//!
+//! An edge reads only the records and fetches media per segment request, so it never subscribes to
+//! the media. A record track's subscribers therefore count as demand for its media track: while
+//! any remain, a local subscription keeps the media wanted, so an on-demand publisher produces it.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -134,13 +139,11 @@ pub(crate) struct Segmenter {
 	last: Option<u64>,
 	/// The newest reported content time in the open segment.
 	frontier: Option<Timestamp>,
-	/// Boundaries not yet reached, in order.
+	/// Boundaries not yet reached, in order: at most the earliest and the latest.
 	cuts: VecDeque<Timestamp>,
 	/// The newest boundary declared, so a repeat of it (several sources declaring the same ones)
 	/// is ignored.
 	cut: Option<Timestamp>,
-	/// A boundary was queued since the newest group started.
-	queued: bool,
 	/// Whether boundaries come only from cuts: the source declares them.
 	manual: bool,
 	ready: VecDeque<Record>,
@@ -165,7 +168,6 @@ impl Segmenter {
 			frontier: None,
 			cuts: VecDeque::new(),
 			cut: None,
-			queued: false,
 			manual: false,
 			ready: VecDeque::new(),
 			closed: false,
@@ -218,9 +220,6 @@ impl Segmenter {
 			}
 		} else {
 			self.begin(group, pts);
-		}
-		if self.last != Some(group) {
-			self.queued = false;
 		}
 		self.last = Some(group);
 		self.advance(pts);
@@ -309,9 +308,13 @@ impl Segmenter {
 	///
 	/// The first cut takes over from grid pacing for good, since the grid would otherwise end a
 	/// segment just before the caller declares where it really ends. A cut at or before an earlier
-	/// one is ignored, so several sources declaring the same boundaries cost nothing. So is a cut
-	/// after one no group has started since: the next group ends the segment at the earlier one, and
-	/// a source declaring segments without sync samples would otherwise queue cuts without bound.
+	/// one is ignored, so several sources declaring the same boundaries cost nothing.
+	///
+	/// Only the earliest and latest pending cuts are kept: a source declaring segments faster than
+	/// it starts groups (an fMP4 `styp` without a sync sample) would otherwise queue them without
+	/// bound. A later group may still start before the earliest, since nothing keeps a keyframe's
+	/// pts from dipping below earlier content, so neither end is safe to drop; a dropped middle one
+	/// only lengthens a segment, which the ceiling still caps.
 	pub fn cut(&mut self, pts: Timestamp) {
 		if self.closed {
 			return;
@@ -321,8 +324,9 @@ impl Segmenter {
 			return;
 		}
 		self.cut = Some(pts);
-		if !std::mem::replace(&mut self.queued, true) {
-			self.cuts.push_back(pts);
+		match self.cuts.len() {
+			0 | 1 => self.cuts.push_back(pts),
+			_ => *self.cuts.back_mut().expect("two pending cuts") = pts,
 		}
 	}
 
@@ -373,6 +377,11 @@ pub struct Producer {
 	sink: moq_json::window::Producer<Record>,
 	/// The record track, to abort.
 	track: moq_net::track::Producer,
+	/// What each record is stamped on. A record's own pts can't be the stamp: a keyframe's pts may
+	/// dip below earlier content, and a group may not start before the one it follows.
+	clock: crate::Clock,
+	/// Whether a record was stamped on `clock`, which then can't be swapped for another.
+	stamped: bool,
 }
 
 impl Producer {
@@ -383,14 +392,19 @@ impl Producer {
 			.with_priority(hang::catalog::PRIORITY.catalog)
 			// A joiner asks for a fresh group once the ops outweigh eight headers.
 			.with_refresh(8)
+			// Records are small, repetitive JSON.
+			.with_compress(true)
 	}
 
-	/// Publish onto `track`, starting at record zero.
-	pub fn new(track: moq_net::track::Producer) -> Self {
+	/// Publish onto `track`, starting at record zero, stamping each record on `clock`: the
+	/// broadcast's [`Clock`](crate::Clock).
+	pub fn new(track: moq_net::track::Producer, clock: crate::Clock) -> Self {
 		let config = moq_json::window::ProducerConfig::default().with_checkpoint_records(CHECKPOINT_RECORDS);
 		Self {
 			sink: moq_json::window::Producer::new(track.clone(), config),
 			track,
+			clock,
+			stamped: false,
 		}
 	}
 
@@ -404,8 +418,9 @@ impl Producer {
 			});
 		}
 		self.refresh()?;
+		self.stamped = true;
 		self.sink
-			.push(moq_net::Timed::from(record).at(moq_net::Timestamp::now()))
+			.push(moq_net::Timed::from(record).at(self.clock.now()))
 			.map_err(json)
 	}
 
@@ -517,6 +532,8 @@ struct State {
 	/// recorder drops, so a re-enrolled track continues its numbering.
 	tracks: BTreeMap<String, (String, Arc<Mutex<Live>>)>,
 	finished: bool,
+	/// The broadcast clock every record is stamped on.
+	clock: crate::Clock,
 }
 
 /// A broadcast's HLS record tracks, one per enrolled rendition.
@@ -530,14 +547,31 @@ pub(crate) struct Tracks {
 }
 
 impl Tracks {
-	/// Record tracks for tracks of `broadcast`.
-	pub fn new(broadcast: &moq_net::broadcast::Producer) -> Self {
+	/// Record tracks for tracks of `broadcast`, stamped on its `clock`.
+	pub fn new(broadcast: &moq_net::broadcast::Producer, clock: crate::Clock) -> Self {
 		Self {
 			broadcast: broadcast.clone(),
 			state: Arc::new(Mutex::new(State {
 				tracks: BTreeMap::new(),
 				finished: false,
+				clock,
 			})),
+		}
+	}
+
+	/// Stamp later records on `clock`, which the catalog moved to before anything fixed it.
+	///
+	/// A record track that already stamped one keeps its clock: the move may read earlier, and a
+	/// track's timestamps never go back.
+	pub fn retime(&self, clock: &crate::Clock) {
+		let mut state = self.state.lock().unwrap();
+		state.clock = clock.clone();
+		for (_, live) in state.tracks.values() {
+			if let Some(output) = live.lock().unwrap().output.as_mut()
+				&& !output.stamped
+			{
+				output.clock = clock.clone();
+			}
 		}
 	}
 
@@ -578,7 +612,7 @@ impl Tracks {
 				let live = Arc::new(Mutex::new(Live {
 					segmenter: segmenter(0),
 					on_declare: None,
-					output: Some(Producer::new(track)),
+					output: Some(Producer::new(track, state.clock.clone())),
 					recording: true,
 				}));
 				state
@@ -587,7 +621,7 @@ impl Tracks {
 				live
 			}
 		};
-		Ok(Recorder { live })
+		Ok(Recorder { live, lend: None })
 	}
 
 	/// The record track and nominal duration advertised for `name`, once its duration is known.
@@ -669,6 +703,75 @@ fn round(duration: Duration) -> Duration {
 	Duration::from_millis(units(duration))
 }
 
+/// Lends a record track's demand to its media track: while anyone subscribes to the records, a
+/// local subscription keeps the media wanted, so an on-demand publisher produces the media that an
+/// HLS export, which reads only the records, describes and fetches.
+///
+/// Driven by the record track's wakeups rather than a task, since nothing here owns a runtime. A
+/// wake polls inline on the waking thread, reading the record track, so it relies on kio and
+/// moq-net waking a track's waiters only once its lock is released. The waker holds this weakly, so
+/// dropping the [`Recorder`] ends the subscription and the registration together. Both track
+/// handles are weak, so neither keeps its track open.
+struct Lend {
+	records: moq_net::track::Demand,
+	media: moq_net::track::Consumer,
+	/// The subscription held while the records are wanted. Never polled: holding it is the demand.
+	held: Option<moq_net::track::Subscribing>,
+	waiter: kio::Waiter,
+}
+
+impl Lend {
+	fn new(records: moq_net::track::Demand, media: moq_net::track::Consumer) -> Arc<Mutex<Self>> {
+		let lend = Arc::new_cyclic(|weak| {
+			let waker = std::task::Waker::from(Arc::new(LendWaker(weak.clone())));
+			Mutex::new(Self {
+				records,
+				media,
+				held: None,
+				waiter: kio::Waiter::new(waker),
+			})
+		});
+		Self::poll(&lend);
+		lend
+	}
+
+	/// Follow the record track's demand until it next changes.
+	fn poll(lend: &Mutex<Self>) {
+		let mut lend = lend.lock().unwrap();
+		let lend = &mut *lend;
+		loop {
+			match lend.records.poll_wanted_changed(&lend.waiter) {
+				Poll::Pending => return,
+				Poll::Ready(Ok(Some(_))) => {
+					if lend.held.is_none() {
+						lend.held = Some(lend.media.subscribe(None).into_inner());
+					}
+				}
+				Poll::Ready(Ok(None)) => lend.held = None,
+				Poll::Ready(Err(_)) => {
+					lend.held = None;
+					return;
+				}
+			}
+		}
+	}
+}
+
+/// Re-polls a [`Lend`] when its record track's demand changes.
+struct LendWaker(std::sync::Weak<Mutex<Lend>>);
+
+impl std::task::Wake for LendWaker {
+	fn wake(self: Arc<Self>) {
+		self.wake_by_ref();
+	}
+
+	fn wake_by_ref(self: &Arc<Self>) {
+		if let Some(lend) = self.0.upgrade() {
+			Lend::poll(&lend);
+		}
+	}
+}
+
 /// Reports one track's frames into its live record track.
 ///
 /// Move-only: it is the track's reporting handle, minted by [`Tracks::track`] and held by a
@@ -676,9 +779,28 @@ fn round(duration: Duration) -> Duration {
 /// segment; the record track stays open until [`Tracks::finish`].
 pub(crate) struct Recorder {
 	live: Arc<Mutex<Live>>,
+	/// Lends the record track's demand to the media track, once [`Self::lend`] names it.
+	lend: Option<Arc<Mutex<Lend>>>,
 }
 
 impl Recorder {
+	/// Keep `media`, the track this recorder reports, wanted while anyone subscribes to its
+	/// records, so an HLS export that reads only the records still starts an on-demand publisher.
+	/// The demand ends when the record track's last subscriber leaves, or this recorder drops.
+	pub fn lend(&mut self, media: &moq_net::track::Producer) {
+		let records = {
+			let live = self.live.lock().unwrap();
+			live.output.as_ref().map(|output| output.track.demand())
+		};
+		// A record track that already failed has no readers to lend for.
+		self.lend = records.map(|records| Lend::new(records, media.consume()));
+	}
+
+	/// The track's fixed nominal segment duration, once known.
+	pub fn declared(&self) -> Option<Duration> {
+		self.live.lock().unwrap().segmenter.declared()
+	}
+
 	/// Run `callback` once when an unhinted track learns its fixed duration.
 	pub fn on_declare(&mut self, callback: impl FnOnce(Duration) + Send + 'static) {
 		self.live.lock().unwrap().on_declare = Some(Box::new(callback));
@@ -982,19 +1104,36 @@ mod test {
 		);
 	}
 
-	/// A source declaring segments that start no group (no sync sample) queues one cut, which the
-	/// next group meets.
+	/// A hostile source declaring `styp` segments that start no group (no sync sample) keeps the
+	/// earliest and latest cuts, which the next groups meet.
 	#[test]
-	fn cuts_without_a_group_queue_one() {
+	fn styp_segments_without_a_sync_sample_hold_two_cuts() {
 		let mut segmenter = Segmenter::new(Config::default());
 		segmenter.frame(0, ms(0)).unwrap();
 		for step in 1..1_000u64 {
 			segmenter.cut(ms(step));
 			segmenter.frame(0, ms(step)).unwrap();
+			assert!(segmenter.cuts.len() <= 2, "step {step}");
 		}
-		assert_eq!(segmenter.cuts.len(), 1);
+		assert_eq!(segmenter.cuts, [ms(1), ms(999)]);
 		segmenter.frame(1, ms(1_000)).unwrap();
+		assert!(segmenter.cuts.is_empty());
 		assert_eq!(drain(&mut segmenter), [(0, 0, None), (1, 1_000, None)]);
+	}
+
+	/// A group may start before the newest cut, so a cut it passed and the one past it both stand:
+	/// the group at 15 ends the segment on the cut at 10, and the group at 25 on the cut at 20.
+	#[test]
+	fn a_group_between_cuts_keeps_the_later_one() {
+		let mut segmenter = Segmenter::new(Config::default());
+		segmenter.frame(0, ms(0)).unwrap();
+		segmenter.cut(ms(10));
+		segmenter.frame(0, ms(10)).unwrap();
+		segmenter.cut(ms(20));
+		segmenter.frame(0, ms(20)).unwrap();
+		segmenter.frame(1, ms(15)).unwrap();
+		segmenter.frame(2, ms(25)).unwrap();
+		assert_eq!(drain(&mut segmenter), [(0, 0, None), (1, 15, None), (2, 25, None)]);
 	}
 
 	/// A segment spends the cuts it reached however it starts: on a cut, at the ceiling, or after
@@ -1053,7 +1192,7 @@ mod test {
 	#[tokio::test]
 	async fn renditions_cut_alike_without_sharing_state() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		let mut video = tracks.track("video", hinted()).unwrap();
 		let mut audio = tracks.track("audio", hinted()).unwrap();
 		let mut late = tracks.track("late", hinted()).unwrap();
@@ -1101,7 +1240,7 @@ mod test {
 	#[test]
 	fn an_unhinted_track_is_advertised_once_declared() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		let mut recorder = tracks.track("video", Config::default()).unwrap();
 		recorder.frame(0, ms(0));
 		assert_eq!(tracks.hls("video"), None);
@@ -1115,7 +1254,7 @@ mod test {
 	#[tokio::test]
 	async fn a_rejected_report_fails_the_record_track() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		let mut recorder = tracks.track("video", hinted()).unwrap();
 		let hls = tracks.hls("video").unwrap();
 		let mut consumer = Consumer::subscribe(&broadcast.consume(), &hls).await.unwrap();
@@ -1137,7 +1276,7 @@ mod test {
 	#[tokio::test]
 	async fn re_enrolling_continues_the_numbering() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		let mut recorder = tracks.track("video", hinted()).unwrap();
 		assert!(tracks.track("video", hinted()).is_err(), "its recorder is still alive");
 		recorder.frame(0, ms(0));
@@ -1157,18 +1296,76 @@ mod test {
 		assert_eq!(records, [(0, 0, false), (1, 1, true), (2, 0, false), (3, 1, true)]);
 	}
 
+	/// A record track's readers are demand for its media, so an HLS export, which subscribes only to
+	/// the records, starts an on-demand publisher, and its leaving stops it.
+	#[tokio::test]
+	async fn record_readers_want_the_media() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let media = broadcast.create_track("video", None).unwrap();
+		let demand = media.demand();
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
+		let mut recorder = tracks.track("video", hinted()).unwrap();
+		recorder.lend(&media);
+		assert_eq!(demand.wanted(), None, "nobody reads the records yet");
+
+		let hls = tracks.hls("video").unwrap();
+		let records = Consumer::subscribe(&broadcast.consume(), &hls).await.unwrap();
+		assert!(demand.wanted().is_some(), "a record reader wants the media");
+		let again = Consumer::subscribe(&broadcast.consume(), &hls).await.unwrap();
+		drop(records);
+		assert!(demand.wanted().is_some(), "another reader remains");
+		drop(again);
+		assert_eq!(demand.wanted(), None, "the last reader left");
+
+		// Dropping the recorder ends the lend, even with a reader still on the records.
+		let _records = Consumer::subscribe(&broadcast.consume(), &hls).await.unwrap();
+		assert!(demand.wanted().is_some());
+		drop(recorder);
+		assert_eq!(demand.wanted(), None, "the recorder is gone");
+	}
+
+	/// A join over the record track's refresh ratio is answered by the next record's fresh group,
+	/// whose demand wake reaches the lend only once the track's lock is released, not under it.
+	#[tokio::test]
+	async fn a_refreshing_join_keeps_lending() {
+		let broadcast = moq_net::broadcast::Info::new().produce();
+		let media = broadcast.create_track("video", None).unwrap();
+		let demand = media.demand();
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
+		let mut recorder = tracks.track("video", hinted()).unwrap();
+		recorder.lend(&media);
+
+		let hls = tracks.hls("video").unwrap();
+		let _first = Consumer::subscribe(&broadcast.consume(), &hls).await.unwrap();
+		// Enough records that a join outweighs the refresh ratio and asks for a fresh group.
+		for group in 0..64 {
+			recorder.frame(group, ms(group * 4_000));
+		}
+		let records = broadcast.consume().track("video.hls").unwrap();
+		let before = records.subscribe(None).await.unwrap().largest().await;
+		let _late = Consumer::subscribe(&broadcast.consume(), &hls).await.unwrap();
+		recorder.frame(64, ms(64 * 4_000));
+
+		let after = records.subscribe(None).await.unwrap().largest().await;
+		assert!(
+			after.map(|at| at.group) > before.map(|at| at.group),
+			"the join was answered with a fresh group"
+		);
+		assert!(demand.wanted().is_some(), "the readers still want the media");
+	}
+
 	#[test]
 	fn a_taken_record_track_name_fails_enrollment() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
 		let _taken = broadcast.create_track("video.hls", None).unwrap();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		assert!(tracks.track("video", Config::default()).is_err());
 	}
 
 	#[test]
 	fn enrollment_after_finish_is_refused() {
 		let broadcast = moq_net::broadcast::Info::new().produce();
-		let tracks = Tracks::new(&broadcast);
+		let tracks = Tracks::new(&broadcast, crate::Clock::new());
 		tracks.finish();
 		assert!(tracks.track("video", Config::default()).is_err());
 	}

@@ -42,9 +42,13 @@ relay bounds a sparse FETCH only if the model can request ranges:
   upstream's live group (which arrives via SUBSCRIBE), so it never blocks.
   moq-transport caps a FETCH at the Largest Object, so it can return the live
   group's existing prefix but never wait for its future objects. Downstream,
-  an IETF FETCH is served from the model's ranges, ending at the Largest
-  Object's group, which it reads whole even while open (maintainer,
-  2026-10-25): the cache cannot know an open group's real Largest Object.
+  our publishers answer only a one-group FETCH or fill and refuse wider ones
+  (maintainer, 2026-10-28,
+  [moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204)), until
+  [hole markers](/quest/m2/ietf-hole-marker.md) let a cache that knows every
+  group answer a range. A FETCH of the open largest group reads it whole
+  (maintainer, 2026-10-25): the cache cannot know an open group's real
+  Largest Object.
 - **Relative ends** (maintainer, 2026-10-11, superseding the 10-07 `Live`
   flag and closing #5085). Each range end is `Absolute(group)` or
   `Relative(n)`, naming the group n before the latest; either end may be
@@ -61,8 +65,8 @@ relay bounds a sparse FETCH only if the model can request ranges:
   still caps every range, so `Absolute(0)..` means everything not stale.
   A relay that cannot resolve a relative end locally forwards it upstream as
   relative over lite-07; a moq-transport bridge resolves it to an absolute
-  Group ID first ([Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md),
-  decided 2026-10-27).
+  Group ID first, from its cache or the Largest Object of a live join
+  (decided 2026-10-27).
 - **Time ends** (maintainer, 2026-10-17, for DVR seek in the
   [archive line](/quest/m1/archive/README.md)). A range end may also be
   `Time(pts)`, in the track's timescale. Whoever holds the track resolves it:
@@ -98,8 +102,8 @@ every sequence delivered or dropped.
 
 ## Required
 
-- [Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md) - filling stays flat as range count and span grow, so a subscription's range count cannot multiply per-group cost
 - [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - `fetch_group` becomes a one-range subscription that ends once its range is accounted for
+- [Range count cost](/quest/m1/subscribe-ranges/fill-linear.md) - time anchors, outstanding fills, sparse live numbering, and lite-07 frame bounds stop walking every range per poll
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity, and the on-demand request surface
 - [Remove FETCH from lite-07](/quest/m1/subscribe-ranges/lite07-fetch.md) - FETCH removed from lite-07 in Rust, JS, and the draft
@@ -107,5 +111,4 @@ every sequence delivered or dropped.
 
 ## Related
 
-- [IETF fill timeout](/quest/m1/ietf-fill-timeout.md) - bounds upstream waiting independently of content age
 - [Rust groups by start](/quest/m1/time-addressing/model.md) - the cut reworks `Absolute(group)` ends and sequence-range drops onto times

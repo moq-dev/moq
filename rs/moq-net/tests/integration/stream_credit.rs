@@ -14,7 +14,7 @@ fn origin(hop: u64) -> origin::Producer {
 	origin
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn one_stream_credit_serves_every_backlogged_group() {
 	for version in ["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"] {
 		let version: Version = version.parse().unwrap();
@@ -34,7 +34,13 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
 
-		let remote = viewer.consume().routed_broadcast("live").await.unwrap();
+		let remote = viewer
+			.consume()
+			.follow("live", None)
+			.unwrap()
+			.available()
+			.await
+			.unwrap();
 		let prefs = track::Subscription::default().with_max_delay(Duration::from_secs(30));
 		let mut subscribers = Vec::new();
 		for i in 0..tracks.len() {
@@ -53,7 +59,7 @@ async fn one_stream_credit_serves_every_backlogged_group() {
 			// The transport, not the publisher, picks which parked open gets the next grant.
 			let mut received = Vec::new();
 			while received.len() < 4 {
-				let group = moq_clock::timeout(Duration::from_secs(5), subscriber.recv_group())
+				let group = kio::clock::timeout(Duration::from_secs(5), subscriber.recv_group())
 					.await
 					.unwrap_or_else(|_| panic!("{version}: only {received:?} arrived"))
 					.unwrap()

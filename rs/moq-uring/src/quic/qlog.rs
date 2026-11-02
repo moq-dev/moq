@@ -61,7 +61,7 @@ impl Side {
 /// A directory of qlog traces, and the thread that writes them.
 ///
 /// Build one per process (or per worker group) and hand clones to every
-/// [`Transport`](super::Transport) that should capture: clones share the
+/// [`transport::Config`](super::transport::Config) that should capture: clones share the
 /// directory and the writer thread, so the cost is one thread however many
 /// workers and connections there are. Dropping the last clone flushes and
 /// closes every open trace before returning.
@@ -80,8 +80,8 @@ impl Sink {
 		let dir = dir.into();
 		let process = std::process::id();
 		let sink = NEXT_SINK.fetch_add(1, Ordering::Relaxed);
-		let started = moq_clock::wall()
-			.saturating_duration_since(moq_clock::Wall::UNIX_EPOCH)
+		let started = kio::clock::wall()
+			.saturating_duration_since(kio::clock::Wall::UNIX_EPOCH)
 			.as_millis();
 
 		// A read-only or missing directory is reported here, where the

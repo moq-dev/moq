@@ -151,6 +151,10 @@ class BroadcastConsumer:
     def __init__(self, inner: MoqBroadcastConsumer) -> None:
         self._inner = inner
 
+    async def closed(self) -> None:
+        """Wait until the broadcast ends: its publisher closed it, or every producer left."""
+        await self._inner.closed()
+
     async def subscribe_track(self, name: str, subscription: Subscription | None = None) -> TrackConsumer:
         """Subscribe to a track and receive arbitrary byte payloads.
 

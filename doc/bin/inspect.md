@@ -74,11 +74,10 @@ curl http://localhost:4443/fetch/.stats/node/local/host/totals.json | jq
 ```
 
 The node name (`local/host` here) is `stats.node`. Each fetch returns the
-newest snapshot of cumulative counters. `totals.json` sums each tier's traffic
-and sessions. `group.json` (`<group>/group.json` at `stats.depth` 1 or more)
-carries a group's traffic per broadcast path and sessions per stats label: its
-newest group is a full snapshot followed by merge-patch deltas, one per line.
+newest group of cumulative counters: a full snapshot followed by merge-patch
+deltas, one per line. `totals.json` sums each tier's traffic and sessions.
+`group.json` (`<group>/group.json` at `stats.depth` 1 or more) carries a
+group's traffic per broadcast path and sessions per stats label.
 A subscriber may also ask for `<path>/prefix.json`, one broadcast prefix rolled
 up with each child, produced only while held. Fetch twice and divide by the
-interval for a rate. The `.json.z` twins carry compressed patches, which these
-tools print as raw bytes. [Stats](/concept/stats) describes every field.
+interval for a rate. [Stats](/concept/stats) describes every field.

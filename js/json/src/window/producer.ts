@@ -110,7 +110,7 @@ export class Producer<T> {
 
 	#write(encoded: Encoded & { commit(): void }, at: Time.Timestamp | undefined): void {
 		// A throw leaves the edit uncommitted and the retained window unchanged. The next edit opens a
-		// new group because the attempted frame advanced the group-local compression state.
+		// new group, since a consumer may hold the group the frame was meant for.
 		if (encoded.keyframe) {
 			// The previous group is complete; no more frames will be appended to it. Drop the handle
 			// before opening the next one, so a failure below doesn't leave a closed group behind.

@@ -50,23 +50,19 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	let pair: MockPair = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	moq_clock::timeout(TIMEOUT, consumer.routed("bcast"))
-		.await
-		.expect("announce timeout")
-		.expect("routed");
-	let remote = moq_clock::timeout(TIMEOUT, consumer.request_broadcast("bcast", None))
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
 
-	let reader = moq_clock::sim::spawn(async move {
-		let subscription = moq_net::track::Subscription::default().with_range(0..);
-		let mut sub = remote
-			.track("video")
-			.unwrap()
-			.subscribe(subscription)
-			.await
-			.expect("subscribe");
+	// Resolved before the ending starts: a SUBSCRIBE sent alongside its TRACK reaches the
+	// publisher before the subscriber has the TRACK_INFO it accepts the track with.
+	let subscription = moq_net::track::Subscription::default().with_range(0..);
+	let mut sub = kio::clock::timeout(TIMEOUT, remote.track("video").unwrap().subscribe(subscription))
+		.await
+		.expect("subscribe timeout")
+		.expect("subscribe");
+	let reader = kio::clock::sim::spawn(async move {
 		let mut got = Vec::new();
 		loop {
 			let mut group = match sub.recv_group().await {
@@ -84,7 +80,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 		}
 	});
 
-	moq_clock::timeout(TIMEOUT, support::harness::subscribed(&track))
+	kio::clock::timeout(TIMEOUT, support::harness::subscribed(&track))
 		.await
 		.expect("no subscriber appeared");
 
@@ -100,7 +96,7 @@ async fn round(finish_broadcast: bool) -> (Vec<Vec<u8>>, Option<moq_net::Error>)
 	}
 
 	// The session and both origins stay up until the reader is done.
-	let result = moq_clock::timeout(TIMEOUT, reader)
+	let result = kio::clock::timeout(TIMEOUT, reader)
 		.await
 		.expect("the subscription never ended")
 		.expect("reader panicked");
@@ -117,13 +113,13 @@ fn assert_complete((got, err): (Vec<Vec<u8>>, Option<moq_net::Error>)) {
 }
 
 /// The bug: finishing the broadcast after its track loses the track.
-#[moq_clock::test]
+#[kio::test]
 async fn a_finished_broadcast_delivers_its_finished_track() {
 	assert_complete(round(true).await);
 }
 
 /// Control: the same track with the broadcast left alive arrives whole.
-#[moq_clock::test]
+#[kio::test]
 async fn a_finished_track_is_delivered_while_its_broadcast_lives() {
 	assert_complete(round(false).await);
 }

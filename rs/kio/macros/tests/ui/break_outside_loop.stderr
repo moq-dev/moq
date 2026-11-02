@@ -1,0 +1,5 @@
+error: `break` and `continue` need a loop of their own
+  --> tests/ui/break_outside_loop.rs:19:4
+   |
+19 |             break;
+   |             ^^^^^

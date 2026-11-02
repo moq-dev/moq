@@ -774,10 +774,44 @@ root = ["ca.pem"]
 			"[auth] auth_api -> ",
 			"[auth] domains -> ",
 			"[auth] mtls_tier -> --auth-url to `moq auth serve --tier`",
-			"[auth.tls] -> --connect-tls-*",
+			"[auth.tls] -> --connect-tls-cert/--connect-tls-key for identity; --auth-root for server trust",
 		] {
 			assert!(err.contains(old), "{old}: {err}");
 		}
+	}
+
+	#[test]
+	fn auth_roots_merge_without_changing_mesh_roots() {
+		if !test_env::Env::default().set("MOQ_AUTH_ROOT", "env.pem").isolate() {
+			return;
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("relay.toml");
+		std::fs::write(
+			&path,
+			"[auth]\nroot = ['file.pem']\n[connect.tls]\nroot = ['mesh.pem']\n",
+		)
+		.unwrap();
+		let config = Config::parse_and_merge(["moq-relay", path.to_str().unwrap()]).unwrap();
+		assert_eq!(config.auth.root, vec![std::path::PathBuf::from("env.pem")]);
+		assert_eq!(config.connect.tls.root, vec![std::path::PathBuf::from("mesh.pem")]);
+		let config = Config::parse_and_merge([
+			"moq-relay",
+			path.to_str().unwrap(),
+			"--auth-root",
+			"cli.pem",
+			"--auth-root",
+			"other.pem",
+		])
+		.unwrap();
+		assert_eq!(
+			config.auth.root,
+			vec![
+				std::path::PathBuf::from("cli.pem"),
+				std::path::PathBuf::from("other.pem")
+			]
+		);
+		assert_eq!(config.connect.tls.root, vec![std::path::PathBuf::from("mesh.pem")]);
 	}
 
 	/// The released auth variables, each with the spelling its refusal names.
@@ -834,9 +868,8 @@ root = ["ca.pem"]
 			return;
 		}
 
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("released-quic-table.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("released-quic-table.toml");
 		std::fs::write(&path, "[server.quic]\nmax_streams = 4096\n").unwrap();
 
 		let err = Config::parse_and_merge([
@@ -914,7 +947,7 @@ root = ["ca.pem"]
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert!(config.stats.enabled);
 		let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster");
-		config.stats.build(cluster.origin.clone()).expect("stats build");
+		let _ = config.stats.build(cluster.origin.clone()).expect("stats build");
 	}
 
 	/// Bare defaults loaded from TOML survive when the CLI does not mention them.
@@ -932,9 +965,8 @@ node = "localhost"
 depth = 2
 linger = "2m"
 "#;
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("toml-wins.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("toml-wins.toml");
 		std::fs::write(&path, toml).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
@@ -987,9 +1019,8 @@ ws = false
 "#;
 		#[cfg(feature = "websocket")]
 		let toml = format!("{toml}\n[connect.websocket]\nenabled = false\n");
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("runtime-toml-wins.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("runtime-toml-wins.toml");
 		std::fs::write(&path, toml.as_bytes()).unwrap();
 
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
@@ -1227,11 +1258,10 @@ ws = false
 
 	/// Merge each case's file and flags, then check the value and the source it names.
 	fn check_provenance(cases: &[Case]) {
-		let dir = std::env::temp_dir().join("moq-relay-provenance");
-		std::fs::create_dir_all(&dir).unwrap();
+		let dir = tempfile::tempdir().unwrap();
 
 		for case in cases {
-			let path = dir.join(format!("{}.toml", case.name));
+			let path = dir.path().join(format!("{}.toml", case.name));
 			std::fs::write(&path, case.toml).unwrap();
 			let mut args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 			args.extend(case.cli.iter().map(std::ffi::OsString::from));
@@ -1548,9 +1578,8 @@ ws = false
 		);
 
 		let toml = "[auth]\npublic = \"anon/**\"\n";
-		let dir = std::env::temp_dir().join("moq-relay-config-test");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join("auth-public-toml.toml");
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("auth-public-toml.toml");
 		std::fs::write(&path, toml).unwrap();
 		let args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		let config = Config::parse_and_merge(args).expect("toml load");
@@ -1579,9 +1608,8 @@ ws = false
 	/// Merge `body` as the config file named `name` with `cli`, and require that the
 	/// listener refuses to start with an error containing `needle`.
 	fn refuse_quic_lb(name: &str, body: &str, cli: &[&str], needle: &str) {
-		let dir = std::env::temp_dir().join("moq-relay-lb-refusals");
-		std::fs::create_dir_all(&dir).unwrap();
-		let path = dir.join(name);
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join(name);
 		std::fs::write(&path, body).unwrap();
 		let mut args = vec![std::ffi::OsString::from("moq-relay"), std::ffi::OsString::from(&path)];
 		args.extend(cli.iter().copied().map(std::ffi::OsString::from));
@@ -1616,9 +1644,8 @@ ws = false
 
 		#[cfg(feature = "quic")]
 		{
-			let dir = std::env::temp_dir().join("moq-relay-lb-refusals");
-			std::fs::create_dir_all(&dir).unwrap();
-			let path = dir.join("typed.toml");
+			let dir = tempfile::tempdir().unwrap();
+			let path = dir.path().join("typed.toml");
 			std::fs::write(&path, "[listen.lb]\nid = \"ab\"\nnonce = 8\n").unwrap();
 			let config =
 				Config::parse_and_merge([std::ffi::OsString::from("moq-relay"), path.clone().into()]).expect("typed");

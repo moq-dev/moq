@@ -1,4 +1,4 @@
-import type * as Epoch from "../epoch.ts";
+import type { Milli } from "@moq/clock";
 import type * as Path from "../path.ts";
 import { type Reader, Writer } from "../stream.ts";
 import type { Order } from "../track.ts";
@@ -74,9 +74,6 @@ const STANDALONE = 0x1;
 const RELATIVE_JOINING = 0x2;
 const ABSOLUTE_JOINING = 0x3;
 
-/** FILL_TIMEOUT, a budget for waiting on upstream that ends in Timed-Out gaps. */
-const FILL_TIMEOUT = 0x0an;
-
 /** A FETCH request. */
 export class Fetch {
 	static id = 0x16;
@@ -95,14 +92,14 @@ export class Fetch {
 	/** Whether the request carried Range Filters, which we refuse. Never encoded. */
 	rangeFilters: boolean;
 
-	/** Whether the request carried FILL_TIMEOUT, which we refuse. Never encoded. */
-	fillTimeout: boolean;
+	/**
+	 * FILL_TIMEOUT: the total wait for objects not yet available before they are reported as
+	 * a gap, zero for only what is cached. Absent waits as long as the publisher chooses.
+	 */
+	fillTimeout?: Milli;
 
 	/** Whether the requester wants Track Properties in FETCH_OK (INCLUDE_PROPERTIES, draft-22). */
 	propertiesWanted: boolean;
-
-	/** The publisher instance the requester expects (EPOCH, MoQ Epoch), never on a joining fetch. */
-	epoch?: Epoch.Valid;
 
 	constructor({
 		requestId,
@@ -110,18 +107,16 @@ export class Fetch {
 		subscriberPriority = DEFAULT_WIRE,
 		groupOrder,
 		rangeFilters = false,
-		fillTimeout = false,
+		fillTimeout,
 		propertiesWanted = true,
-		epoch,
 	}: {
 		requestId: bigint;
 		type: FetchType;
 		subscriberPriority?: number;
 		groupOrder?: Order;
 		rangeFilters?: boolean;
-		fillTimeout?: boolean;
+		fillTimeout?: Milli;
 		propertiesWanted?: boolean;
-		epoch?: Epoch.Valid;
 	}) {
 		this.requestId = requestId;
 		this.type = type;
@@ -130,7 +125,6 @@ export class Fetch {
 		this.rangeFilters = rangeFilters;
 		this.fillTimeout = fillTimeout;
 		this.propertiesWanted = propertiesWanted;
-		this.epoch = epoch;
 	}
 
 	async #encode(w: Writer, version: IetfVersion): Promise<void> {
@@ -140,10 +134,10 @@ export class Fetch {
 		params.subscriberPriority = this.subscriberPriority;
 		if (this.groupOrder !== undefined)
 			params.groupOrder = this.groupOrder === "ascending" ? GroupOrder.Ascending : GroupOrder.Descending;
-		params.epoch = this.epoch;
+		params.fillTimeout = this.fillTimeout;
 
 		const type = this.type;
-		if (Filter.isDraft22(version)) {
+		if (Filter.isDraft20(version)) {
 			// The joining forms and the Fetch Type tag are gone in draft-22.
 			if (type.kind !== "filtered") throw new Error(`${type.kind} FETCH needs draft-18`);
 			await Namespace.encodeTrack(w, type.trackNamespace, type.trackName);
@@ -189,7 +183,7 @@ export class Fetch {
 		const requestId = await r.u62();
 
 		let type: FetchType;
-		if (Filter.isDraft22(version)) {
+		if (Filter.isDraft20(version)) {
 			// Draft-22 names the track up front and moves the range into LOCATION_FILTER.
 			const { namespace, name } = await Namespace.decodeTrack(r);
 			// Placeholder until the parameters name the filter.
@@ -222,11 +216,6 @@ export class Fetch {
 		if (params.trackPropertyFilter) {
 			throw new Error("TRACK_PROPERTY_FILTER is not allowed on FETCH");
 		}
-		// A joining FETCH is served by its subscription's instance, so naming one is malformed.
-		const epoch = params.epoch;
-		if (epoch !== undefined && (type.kind === "relativeJoining" || type.kind === "absoluteJoining")) {
-			throw new Error("EPOCH is not allowed on a joining FETCH");
-		}
 		// An absent LOCATION_FILTER fetches the whole track.
 		if (type.kind === "filtered") type.filter = params.subscriptionFilter ?? { kind: "unfiltered" };
 
@@ -238,10 +227,9 @@ export class Fetch {
 			// Parameters refuses anything but Ascending or Descending.
 			groupOrder: order === undefined ? undefined : order === GroupOrder.Ascending ? "ascending" : "descending",
 			rangeFilters: params.rangeFilters,
-			fillTimeout: params.vars.has(FILL_TIMEOUT),
+			fillTimeout: params.fillTimeout,
 			// Defaults to 1, so an absent parameter means the requester wants them.
 			propertiesWanted: params.includeProperties ?? true,
-			epoch,
 		});
 	}
 }

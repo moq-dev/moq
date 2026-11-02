@@ -16,8 +16,9 @@ use rustls::{
 };
 
 use crate::{
-	ConnectError, ConnectionId, Side, TransportError, TransportErrorCode,
-	crypto::{self, CryptoError, ExportKeyingMaterialError, HeaderKey, KeyPair, Keys, UnsupportedVersion},
+	ConnectionId, Side, TransportError, TransportErrorCode,
+	crypto::{self, CryptoError, ExportKeyingMaterialError, HeaderKey, KeyPair, Keys},
+	endpoint::ConnectError,
 	transport_parameters::TransportParameters,
 };
 
@@ -180,7 +181,6 @@ impl crypto::Session for TlsSession {
 
 		let (nonce, key) = match self.version {
 			Version::V1 => (RETRY_INTEGRITY_NONCE_V1, RETRY_INTEGRITY_KEY_V1),
-			Version::V1Draft => (RETRY_INTEGRITY_NONCE_DRAFT, RETRY_INTEGRITY_KEY_DRAFT),
 			_ => unreachable!(),
 		};
 
@@ -203,11 +203,6 @@ impl crypto::Session for TlsSession {
 		Ok(())
 	}
 }
-
-const RETRY_INTEGRITY_KEY_DRAFT: [u8; 16] = [
-	0xcc, 0xce, 0x18, 0x7e, 0xd0, 0x9a, 0x09, 0xd0, 0x57, 0x28, 0x15, 0x5a, 0x6c, 0xb9, 0x6b, 0xe1,
-];
-const RETRY_INTEGRITY_NONCE_DRAFT: [u8; 12] = [0xe5, 0x49, 0x30, 0xf9, 0x7f, 0x21, 0x36, 0xf0, 0x53, 0x0a, 0x8c, 0x1c];
 
 const RETRY_INTEGRITY_KEY_V1: [u8; 16] = [
 	0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e,
@@ -266,14 +261,14 @@ pub struct HandshakeData {
 
 /// A QUIC-compatible TLS client configuration
 ///
-/// [`ClientConfig::with_root_certificates()`][root_certs] constructs a QUIC-compatible TLS policy.
+/// [`client::Config::with_root_certificates()`][root_certs] constructs a QUIC-compatible TLS policy.
 /// Alternatively, `QuicClientConfig`'s [`TryFrom`] implementation can be used to wrap around a
 /// custom [`rustls::ClientConfig`], in which case care should be taken around certain points:
 ///
 /// TLS 1.3 is required. Early data is disabled, while the inner config's resumption
 /// cache still enables resumed 1-RTT handshakes.
 ///
-/// [root_certs]: crate::config::ClientConfig::with_root_certificates()
+/// [root_certs]: crate::client::Config::with_root_certificates()
 pub struct QuicClientConfig {
 	pub(crate) inner: Arc<rustls::ClientConfig>,
 	initial: Suite,
@@ -320,11 +315,11 @@ impl QuicClientConfig {
 impl crypto::ClientConfig for QuicClientConfig {
 	fn start_session(
 		self: Arc<Self>,
-		version: u32,
+		version: crate::Version,
 		server_name: &str,
 		params: &TransportParameters,
 	) -> Result<Box<dyn crypto::Session>, ConnectError> {
-		let version = interpret_version(version)?;
+		let version = rustls_version(version);
 		Ok(Box::new(TlsSession {
 			version,
 			got_handshake_data: false,
@@ -395,14 +390,14 @@ impl std::error::Error for NoInitialCipherSuite {}
 /// A QUIC-compatible TLS server configuration
 ///
 /// The transport constructs a `QuicServerConfig` with reasonable defaults within
-/// [`ServerConfig::with_single_cert()`][single]. Alternatively, `QuicServerConfig`'s [`TryFrom`]
+/// [`server::Config::with_single_cert()`][single]. Alternatively, `QuicServerConfig`'s [`TryFrom`]
 /// implementation or `with_initial` method can be used to wrap around a custom
 /// [`rustls::ServerConfig`], in which case care should be taken around certain points:
 ///
 /// TLS 1.3 is required. Early data is disabled, while session tickets still enable
 /// resumed 1-RTT handshakes.
 ///
-/// [single]: crate::config::ServerConfig::with_single_cert()
+/// [single]: crate::server::Config::with_single_cert()
 pub struct QuicServerConfig {
 	inner: Arc<rustls::ServerConfig>,
 	initial: Suite,
@@ -472,9 +467,12 @@ impl TryFrom<Arc<rustls::ServerConfig>> for QuicServerConfig {
 }
 
 impl crypto::ServerConfig for QuicServerConfig {
-	fn start_session(self: Arc<Self>, version: u32, params: &TransportParameters) -> Box<dyn crypto::Session> {
-		// Safe: `start_session()` is never called if `initial_keys()` rejected `version`
-		let version = interpret_version(version).unwrap();
+	fn start_session(
+		self: Arc<Self>,
+		version: crate::Version,
+		params: &TransportParameters,
+	) -> Box<dyn crypto::Session> {
+		let version = rustls_version(version);
 		Box::new(TlsSession {
 			version,
 			got_handshake_data: false,
@@ -486,17 +484,13 @@ impl crypto::ServerConfig for QuicServerConfig {
 		})
 	}
 
-	fn initial_keys(&self, version: u32, dst_cid: ConnectionId) -> Result<Keys, UnsupportedVersion> {
-		let version = interpret_version(version)?;
-		Ok(initial_keys(version, dst_cid, Side::Server, &self.initial))
+	fn initial_keys(&self, version: crate::Version, dst_cid: ConnectionId) -> Keys {
+		initial_keys(rustls_version(version), dst_cid, Side::Server, &self.initial)
 	}
 
-	fn retry_tag(&self, version: u32, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16] {
-		// Safe: `start_session()` is never called if `initial_keys()` rejected `version`
-		let version = interpret_version(version).unwrap();
-		let (nonce, key) = match version {
+	fn retry_tag(&self, version: crate::Version, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16] {
+		let (nonce, key) = match rustls_version(version) {
 			Version::V1 => (RETRY_INTEGRITY_NONCE_V1, RETRY_INTEGRITY_KEY_V1),
-			Version::V1Draft => (RETRY_INTEGRITY_NONCE_DRAFT, RETRY_INTEGRITY_KEY_DRAFT),
 			_ => unreachable!(),
 		};
 
@@ -586,11 +580,9 @@ impl crypto::PacketKey for Box<dyn PacketKey> {
 	}
 }
 
-fn interpret_version(version: u32) -> Result<Version, UnsupportedVersion> {
+fn rustls_version(version: crate::Version) -> Version {
 	match version {
-		0xff00_001d..=0xff00_0020 => Ok(Version::V1Draft),
-		0x0000_0001 | 0xff00_0021..=0xff00_0022 => Ok(Version::V1),
-		_ => Err(UnsupportedVersion),
+		crate::Version::V1 => Version::V1,
 	}
 }
 

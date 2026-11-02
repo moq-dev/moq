@@ -1,17 +1,17 @@
 //! Producing generations mint an epoch; consuming generations bind a discovered one.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use crate::credential::{Credential, append_bytes};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::key::TrackKey;
-use crate::limits::{KEY_LABEL, KEY_LEN, NAME_KEY_LABEL, NAME_MAC_LABEL};
+use crate::limits::{KEY_LABEL, NAME_KEY_LABEL, NAME_MAC_LABEL};
 use crate::name::{self, Name};
 use crate::track;
 use moq_net::Epoch;
+use rind::{aead, hmac};
 
 /// Grouped-frame versus datagram key domain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,8 +24,9 @@ struct Inner {
 	credential: Credential,
 	epoch: Epoch,
 	names: name::Keys,
-	// Keyed by semantic name. Never evicted: re-deriving a key would reset its budget. Bounded by
-	// the semantic names the application produces or subscribes to, for as long as it holds the generation.
+	// Keyed by semantic name. Never evicted: re-deriving a key would reset its budget and, for a
+	// producer, its sequences. Bounded by the semantic names the application produces, serves, or
+	// subscribes to, for as long as it holds the generation.
 	keys: Mutex<HashMap<String, track::Keys>>,
 }
 
@@ -57,8 +58,8 @@ impl fmt::Debug for Consumer {
 impl Consumer {
 	pub(crate) fn new(credential: Credential, epoch: Epoch) -> Self {
 		let names = name::Keys::new(
-			credential.expand(&name_mac_info(&credential, &epoch)),
-			credential.expand(&name_key_info(&credential, &epoch)),
+			credential.derive(&name_mac_info(&credential, &epoch), &hmac::HMAC_SHA256),
+			credential.derive(&name_key_info(&credential, &epoch), &aead::AES_128_GCM),
 		);
 		Self(Arc::new(Inner {
 			credential,
@@ -82,7 +83,7 @@ impl Consumer {
 	///
 	/// # Errors
 	///
-	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes.
+	/// [`Error::Identity`](crate::Error::Identity) if `semantic` exceeds 65535 bytes.
 	pub fn name(&self, semantic: &str) -> Result<Name> {
 		self.0.names.seal(semantic)
 	}
@@ -91,12 +92,12 @@ impl Consumer {
 	///
 	/// # Errors
 	///
-	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes.
+	/// [`Error::Identity`](crate::Error::Identity) if `semantic` exceeds 65535 bytes.
 	pub(crate) fn consume(&self, track: moq_net::track::Subscriber, semantic: &str) -> Result<track::Consumer> {
 		Ok(track::Consumer::new(track, self.keys(semantic)?))
 	}
 
-	/// The keys for `semantic`, shared with every earlier subscription to it.
+	/// The keys for `semantic`, shared with every earlier subscription to or claim of it.
 	pub(crate) fn keys(&self, semantic: &str) -> Result<track::Keys> {
 		let mut keys = self.0.keys.lock().expect("generation keys");
 		if let Some(keys) = keys.get(semantic) {
@@ -115,11 +116,8 @@ impl Consumer {
 	}
 
 	pub(crate) fn key(&self, semantic: &str, domain: Domain) -> Result<TrackKey> {
-		Ok(TrackKey::new(self.key_bytes(semantic, domain)?))
-	}
-
-	pub(crate) fn key_bytes(&self, semantic: &str, domain: Domain) -> Result<[u8; KEY_LEN]> {
-		Ok(self.0.credential.expand(&self.key_info(semantic, domain)?))
+		let info = self.key_info(semantic, domain)?;
+		Ok(TrackKey::new(self.0.credential.derive(&info, &aead::AES_128_GCM)))
 	}
 
 	pub(crate) fn key_info(&self, semantic: &str, domain: Domain) -> Result<Vec<u8>> {
@@ -155,6 +153,10 @@ fn scope(info: &mut Vec<u8>, credential: &Credential, epoch: &Epoch) {
 }
 
 /// A publisher-minted generation whose clones share permanent track claims.
+///
+/// A claim holds a semantic name's keys and its sequences' high-water mark, so a track
+/// created, reserved, or served again under the name resumes above every sequence it allocated
+/// before, on any broadcast of the generation.
 #[derive(Clone, Debug)]
 pub struct Producer {
 	// Its keys are the claims: never released, since reopening a track would restart its nonce counters.
@@ -183,15 +185,16 @@ impl Producer {
 		self.consumer.name(semantic)
 	}
 
+	/// The consuming half, which shares this generation's claims and key accounting.
+	pub(crate) fn consumer(&self) -> &Consumer {
+		&self.consumer
+	}
+
 	/// Recover the semantic name of a physical name this generation issued.
 	///
 	/// # Errors
 	///
-	/// [`Error::Authentication`] if this generation did not issue `name`.
-	#[cfg_attr(
-		not(test),
-		allow(dead_code, reason = "undeclared names will serve requests through it")
-	)]
+	/// [`Error::Authentication`](crate::Error::Authentication) if this generation did not issue `name`.
 	pub(crate) fn open(&self, name: &Name) -> Result<String> {
 		self.consumer.0.names.open(name)
 	}
@@ -200,8 +203,7 @@ impl Producer {
 	///
 	/// # Errors
 	///
-	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes, [`Error::Reuse`] if this
-	/// generation already produced it. Either way `track` is aborted.
+	/// [`Error::Identity`](crate::Error::Identity) if `semantic` exceeds 65535 bytes, and then `track` is aborted.
 	pub(crate) fn produce(&self, track: moq_net::track::Producer, semantic: &str) -> Result<track::Producer> {
 		match self.claim(semantic) {
 			Ok(keys) => Ok(track::Producer::new(track, keys)),
@@ -213,18 +215,38 @@ impl Producer {
 		}
 	}
 
-	/// Claim a semantic name, and so its physical name, for good, returning its keys.
+	/// Claim a semantic name, and so its physical name, for good, returning its keys and
+	/// sequences. Claiming it again resumes the earlier claim.
 	///
 	/// # Errors
 	///
-	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes, [`Error::Reuse`] if this
-	/// generation already claimed it.
+	/// [`Error::Identity`](crate::Error::Identity) if `semantic` exceeds 65535 bytes.
 	pub(crate) fn claim(&self, semantic: &str) -> Result<track::Keys> {
-		let mut keys = self.consumer.0.keys.lock().expect("generation keys");
-		let Entry::Vacant(entry) = keys.entry(semantic.to_string()) else {
-			return Err(Error::Reuse);
-		};
-		let derived = self.consumer.derive(semantic)?;
-		Ok(entry.insert(derived).clone())
+		self.consumer.keys(semantic)
+	}
+
+	/// The keys for `semantic` without claiming it: its claim's if it has one, otherwise fresh
+	/// keys that hold nothing until [`Self::adopt`].
+	///
+	/// # Errors
+	///
+	/// [`Error::Identity`](crate::Error::Identity) if `semantic` exceeds 65535 bytes.
+	pub(crate) fn peek(&self, semantic: &str) -> Result<track::Keys> {
+		if let Some(keys) = self.consumer.0.keys.lock().expect("generation keys").get(semantic) {
+			return Ok(keys.clone());
+		}
+		self.consumer.derive(semantic)
+	}
+
+	/// Claim `semantic` with keys from [`Self::peek`], resuming any claim made since instead.
+	pub(crate) fn adopt(&self, semantic: &str, keys: track::Keys) -> track::Keys {
+		let mut claims = self.consumer.0.keys.lock().expect("generation keys");
+		claims.entry(semantic.to_string()).or_insert(keys).clone()
+	}
+
+	/// How many semantic names this generation holds keys for.
+	#[cfg(test)]
+	pub(crate) fn claims(&self) -> usize {
+		self.consumer.0.keys.lock().expect("generation keys").len()
 	}
 }

@@ -1,4 +1,4 @@
-use std::task::{Context, Poll, ready};
+use std::task::{Poll, ready};
 
 use crate::Error;
 use crate::coding::{Reader, StreamCodes, Writer};
@@ -19,6 +19,11 @@ use crate::coding::{Reader, StreamCodes, Writer};
 /// round-robin share: a packet or two, which is all it needs.
 const CONTROL_SEND_ORDER: u8 = u8::MAX;
 
+/// The send order a TRACK_INFO answer goes at: ahead of every group stream, unlike other
+/// control. A subscriber that sent its SUBSCRIBE alongside the TRACK holds the groups that
+/// beat the info unread, so the info is all that stands between it and them.
+pub(crate) const TRACK_INFO_SEND_ORDER: i64 = CONTROL_SEND_ORDER as i64 + 1;
+
 /// A [Writer] and [Reader] pair for a single stream.
 pub struct Stream<S: crate::transport::poll::Session, V> {
 	pub writer: Writer<S::SendStream, V>,
@@ -27,12 +32,12 @@ pub struct Stream<S: crate::transport::poll::Session, V> {
 
 impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	/// Poll opening a new stream with the given version, waiting for stream credit.
-	pub fn poll_open(session: &mut S, version: V, cx: &mut Context<'_>) -> Poll<Result<Self, Error>>
+	pub fn poll_open(session: &S, version: V, waiter: &kio::Waiter) -> Poll<Result<Self, Error>>
 	where
 		V: Clone,
 	{
 		let (send, recv) =
-			ready!(session.poll_open_bi(cx, Default::default())).map_err(|err| version.transport_error(err))?;
+			ready!(session.poll_open_bi(waiter, Default::default())).map_err(|err| version.transport_error(err))?;
 		Poll::Ready(Ok(Self::build(send, recv, version)))
 	}
 
@@ -41,16 +46,16 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		kio::wait(|waiter| Self::poll_open(session, version.clone(), &mut waiter.context())).await
+		kio::wait(|waiter| Self::poll_open(session, version.clone(), waiter)).await
 	}
 
 	/// Poll opening a request stream, refused with [Error::NoStreamCredit] when the peer
 	/// grants no more streams instead of parking work the caller cannot see.
-	pub fn poll_open_request(session: &mut S, version: V, cx: &mut Context<'_>) -> Poll<Result<Self, Error>>
+	pub fn poll_open_request(session: &S, version: V, waiter: &kio::Waiter) -> Poll<Result<Self, Error>>
 	where
 		V: Clone,
 	{
-		let (send, recv) = ready!(session.poll_open_request(cx, Default::default()))
+		let (send, recv) = ready!(session.poll_open_request(waiter, Default::default()))
 			.map_err(|err| version.transport_error(err))?
 			.ok_or(Error::NoStreamCredit)?;
 		Poll::Ready(Ok(Self::build(send, recv, version)))
@@ -62,15 +67,15 @@ impl<S: crate::transport::poll::Session, V: StreamCodes> Stream<S, V> {
 	where
 		V: Clone,
 	{
-		kio::wait(|waiter| Self::poll_open_request(session, version.clone(), &mut waiter.context())).await
+		kio::wait(|waiter| Self::poll_open_request(session, version.clone(), waiter)).await
 	}
 
 	/// Poll accepting a new stream with the given version.
-	pub fn poll_accept(session: &mut S, version: V, cx: &mut Context<'_>) -> Poll<Result<Self, Error>>
+	pub fn poll_accept(session: &S, version: V, waiter: &kio::Waiter) -> Poll<Result<Self, Error>>
 	where
 		V: Clone,
 	{
-		let (send, recv) = ready!(session.poll_accept_bi(cx)).map_err(|err| version.transport_error(err))?;
+		let (send, recv) = ready!(session.poll_accept_bi(waiter)).map_err(|err| version.transport_error(err))?;
 		Poll::Ready(Ok(Self::build(send, recv, version)))
 	}
 
@@ -122,11 +127,11 @@ mod tests {
 			crate::Version::Lite(Version::Lite07),
 			crate::Version::Ietf(crate::ietf::Version::Draft18),
 		] {
-			let mut session = ScriptedSession::new(Vec::new()).without_credit();
-			let mut cx = Context::from_waker(std::task::Waker::noop());
+			let session = ScriptedSession::new(Vec::new()).without_credit();
+			let waiter = &kio::Waiter::noop();
 			for _ in 0..2 {
 				assert!(matches!(
-					Stream::poll_open_request(&mut session, version, &mut cx),
+					Stream::poll_open_request(&session, version, waiter),
 					Poll::Ready(Err(Error::NoStreamCredit))
 				));
 			}
@@ -146,9 +151,9 @@ mod tests {
 	fn request_header_backpressure_is_not_credit_refusal() {
 		use crate::lite::test_transport::ScriptedSession;
 		let gate = kio::Producer::new(false);
-		let mut session = ScriptedSession::gated_open(Vec::new(), gate.consume());
-		let mut cx = Context::from_waker(std::task::Waker::noop());
-		assert!(Stream::poll_open_request(&mut session, Version::Lite07, &mut cx).is_pending());
+		let session = ScriptedSession::gated_open(Vec::new(), gate.consume());
+		let waiter = &kio::Waiter::noop();
+		assert!(Stream::poll_open_request(&session, Version::Lite07, waiter).is_pending());
 		{
 			let Ok(mut open) = gate.write() else {
 				panic!("gate is still live");
@@ -156,7 +161,7 @@ mod tests {
 			*open = true;
 		}
 		assert!(matches!(
-			Stream::poll_open_request(&mut session, Version::Lite07, &mut cx),
+			Stream::poll_open_request(&session, Version::Lite07, waiter),
 			Poll::Ready(Ok(_))
 		));
 		assert_eq!(session.log.bi_opens(), 1);
@@ -166,7 +171,7 @@ mod tests {
 	/// starves it: quinn schedules strictly by priority and round-robins only
 	/// within a level, so a rank-0 group with bytes pending is enough to keep
 	/// the scheduler from ever reaching the transport's default of 0.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn open_prioritises_the_stream() {
 		let gate = kio::Producer::new(true);
 		let mut session = SinkSession::gated_bi(gate.consume());
@@ -176,7 +181,7 @@ mod tests {
 
 		assert_eq!(
 			log.priorities(),
-			vec![CONTROL_SEND_ORDER],
+			vec![i64::from(CONTROL_SEND_ORDER)],
 			"a control stream left at the transport default loses to every group",
 		);
 	}
@@ -184,7 +189,7 @@ mod tests {
 	/// The accepted half answers on the stream it was handed (track info, subscribe
 	/// responses), so it needs the same order as one we opened. A fix that only
 	/// covered `open` would leave every reply behind the media.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn accept_prioritises_the_stream() {
 		let gate = kio::Producer::new(true);
 		let mut session = SinkSession::accepted_bi(gate.consume());
@@ -194,7 +199,7 @@ mod tests {
 
 		assert_eq!(
 			log.priorities(),
-			vec![CONTROL_SEND_ORDER],
+			vec![i64::from(CONTROL_SEND_ORDER)],
 			"an accepted control stream left at the transport default loses to every group",
 		);
 	}

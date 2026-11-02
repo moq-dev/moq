@@ -70,7 +70,6 @@ pub mod v4l2;
 pub mod buffer;
 pub mod capability;
 pub mod context;
-pub mod control;
 pub mod device;
 pub mod format;
 pub mod fraction;
@@ -85,7 +84,6 @@ pub mod io;
 
 pub use {
 	capability::Capabilities,
-	control::Control,
 	device::Device,
 	format::{Format, FourCC},
 	fraction::Fraction,
@@ -98,4 +96,22 @@ pub use {
 pub mod prelude {
 	pub use crate::device::Device;
 	pub use crate::io::{mmap::Stream as MmapStream, userptr::Stream as UserptrStream};
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn kernel_flags_survive_conversion() {
+		// A newer kernel can return any bit, alone or alongside known flags.
+		for raw in (0..32).flat_map(|bit| [1u32 << bit, !(1u32 << bit)]) {
+			assert_eq!(u32::from(buffer::Flags::from(raw)), raw);
+			assert_eq!(u32::from(capability::Flags::from(raw)), raw);
+			assert_eq!(u32::from(format::Flags::from(raw)), raw);
+			assert_eq!(u32::from(format::description::Flags::from(raw)), raw);
+			assert_eq!(u32::from(parameters::Capabilities::from(raw)), raw);
+			assert_eq!(u32::from(video::capture::parameters::Modes::from(raw)), raw);
+		}
+	}
 }

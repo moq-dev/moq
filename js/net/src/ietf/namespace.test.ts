@@ -42,6 +42,26 @@ test("a full track name counts field bytes and is refused before writing", async
 	);
 });
 
+test("every path, `\\` and `/` included, returns from its namespace tuple unchanged", async () => {
+	let texts = [""];
+	for (let length = 1; length <= 8; length++) {
+		texts = texts.flatMap((text) => ["a", "/", "\\"].map((c) => text + c));
+		for (const text of texts) {
+			let path: Path.Valid;
+			try {
+				path = Path.from(text);
+			} catch {
+				continue;
+			}
+			expect(await roundTrip((w) => encode(w, path), decode)).toBe(path);
+		}
+	}
+});
+
+test("a lone backslash in a field is escaped on the way in", () => {
+	expect(fromTuple(["foo\\bar/baz", "qux"])).toBe(Path.from("foo\\\\bar\\/baz/qux"));
+});
+
 /** Write with `write`, then read the bytes back with `read`. */
 async function roundTrip<T>(write: (w: Writer) => Promise<void>, read: (r: Reader) => Promise<T>): Promise<T> {
 	const bytes: number[] = [];

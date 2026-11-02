@@ -11,8 +11,8 @@ it is compared against; missing or failed cases are not imputed.
 
 ## Plan
 
-Decided with the maintainer on 2026-10-26, from kixelated/rust2's
-[test selection report](https://github.com/kixelated/rust2/pull/69): the slowest 1%
+Decided with the maintainer on 2026-10-26, from moq-dev/rust2's
+[test selection report](https://github.com/moq-dev/rust2/pull/69): the slowest 1%
 of tests make up 57% of what either package selection or a function-level selector
 would run, so cutting them beats building a selector.
 
@@ -39,7 +39,7 @@ the tests a change touches.
 137.83 s to 116.83 s with fixture-only changes: the two MPEG-TS reset tests in
 `container::ts::import` drain on the exporter's deadlines with a retention derived from
 their stimulus instead of an hour of idle output (12.98 s to 0.18 s), and the jitter
-`drift` and `feed` helpers advance a `moq_clock::Deadlines` queue instead of the tokio
+`drift` and `feed` helpers advance a `kio::clock::Deadlines` queue instead of the tokio
 paused clock (10.16 s to 6.80 s across 8 tests). About 48 s remains to cut.
 
 Tried and dropped, so don't redo them without new evidence:

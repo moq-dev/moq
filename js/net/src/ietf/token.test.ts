@@ -15,7 +15,7 @@ import {
 } from "./token.ts";
 import { type IetfVersion, Version } from "./version.ts";
 
-const VERSIONS: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_22];
+const VERSIONS: IetfVersion[] = [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22];
 
 // A kind past one varint byte and a value that is not text, matching the Rust tests.
 const TOKEN: Token = { kind: 300n, value: new Uint8Array([0x00, 0xff, 0x03, 0x80, 0x6a]) };

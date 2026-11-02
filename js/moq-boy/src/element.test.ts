@@ -1,4 +1,5 @@
 import { expect, mock, test } from "bun:test";
+import { yieldNow } from "@moq/clock";
 
 // The UI renders into a shadow root, which the test runner has no DOM for.
 mock.module("solid-js/web", () => ({ render: () => () => {} }));
@@ -23,7 +24,7 @@ globalThis.customElements = {
 const { default: MoqBoy } = await import("./element");
 
 // Effects rerun in a later task, so each check waits one out.
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+const settle = () => yieldNow();
 
 // A refused prefix idles the element rather than discovering games under a default prefix.
 for (const attribute of ["prefix", "prefix-game", "prefix-viewer"] as const) {

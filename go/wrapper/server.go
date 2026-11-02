@@ -220,7 +220,7 @@ func (s *Server) CertFingerprints() ([]string, error) {
 // CreateBroadcast creates an unannounced broadcast at path, invisible to everyone until announced. Announce it after populating tracks.
 //
 // See [OriginProducer.CreateBroadcast].
-func (s *Server) CreateBroadcast(path string) (*BroadcastProducer, error) {
+func (s *Server) CreateBroadcast(path string) (*Publication, error) {
 	if s.publishOrigin == nil {
 		return nil, ErrNoPublishOrigin
 	}

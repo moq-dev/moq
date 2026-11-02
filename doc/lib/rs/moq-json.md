@@ -17,7 +17,8 @@ generic catalog reader will not pick it up.
 - **stream**: lossless append-log in a single group. A reader that falls behind fails the read rather than resuming mid-log.
 - **window**: a bounded run of records a reader can join at any point. A new group restates what it keeps explicitly, so a reader that was keeping up is not handed a record twice. Its ops roll on the track's `refresh` ratio the same way.
 
-Both sides choose the same compression. A bare value stays untimed; publish
+Compression is the track's: create it with `Info::default().with_compress(true)`,
+which JSON benefits from, and readers see plain frames either way. A bare value stays untimed; publish
 `moq_net::Timed::from(&value).at(captured)` to retain a capture timestamp.
 The timestamp must match the track: an untimed track has no timescale, and a
 timed track requires a timestamp on every write. Editing guards take the
@@ -33,10 +34,11 @@ continues after them.
 Upgrading from an older release: see moq-json's
 [MIGRATE.md](https://github.com/moq-dev/moq/blob/main/rs/moq-json/MIGRATE.md).
 
-A stream rides one group, so the whole log shares moq-net's group budget:
-32 MiB of payload and 8192 records. An append that might not fit is refused
-before anything is written and leaves the log intact. Once the budget is spent,
-start a new track.
+A stream rides one group, which grows for the track's life. The cache keeps its
+newest 32 MiB, less under memory pressure, and sheds older records, so a reader
+that falls further behind, or joins once the first record was shed, fails with
+`Evicted`. A record over 32 MiB is refused with `FrameTooLarge` and leaves the log
+intact.
 
 The TypeScript twin is [`@moq/json`](/lib/js/json). API:
 [docs.rs/moq-json](https://docs.rs/moq-json).

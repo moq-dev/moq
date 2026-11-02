@@ -1,7 +1,8 @@
 # Fuzzing moq-net
 
 Coverage-guided fuzzing of the wire codecs: the moq-lite and moq-transport control
-messages, stream and datagram headers, both varint codecs, and `Path`. These are the
+messages, stream and datagram headers, group streams through the incremental ingest,
+moq-transport request-stream framing, both varint codecs, and `Path`. These are the
 bytes a relay parses from an untrusted peer, so they are the surface worth fuzzing.
 
 ```bash
@@ -9,7 +10,7 @@ cargo install --locked cargo-fuzz
 just rs fuzz lite
 ```
 
-The targets are `lite`, `announce`, `ietf`, `varint`, `path`, and `pattern`. Extra arguments pass through to
+The targets are `lite`, `announce`, `ietf`, `varint`, `path`, `pattern`, `ingest`, and `request`. Extra arguments pass through to
 libFuzzer, so `just rs fuzz lite -- -max_total_time=300` bounds a run.
 
 The Nightly workflow runs every target for five minutes, resumes from the previous run's
@@ -56,6 +57,19 @@ Beyond "does not panic":
   PATH and AUTHORITY are one-sided.
 - `Path::relative` inverts `Path::resolve`, and never produces a reference that walks
   above the root.
+- A group stream ingests to the same frames and the same ending whether it arrives whole,
+  a byte at a time, or in chunks the input picks, and never stalls once complete. Every
+  frame matches its track's timeline, Object IDs only rise, and the frames hold no more
+  bytes than the stream carried. On a clean end, where no block length is hidden, every
+  byte is a frame, a header field, or a property block.
+- A request-stream message is its type, a two-byte length, and exactly that body; at
+  most one GOAWAY migrates it. Its body decodes as each message its type names exactly
+  when the control stream's length-prefixed reading accepts it, as the same message, and
+  the REQUEST\_UPDATE readers stop where the framing did.
+
+`seeds/` also holds length prefixes at and one past each cap (a moq-lite message's size,
+a moq-transport length, a frame, a property or extension block), so every rejection path
+starts with an input beside it.
 
 A refused decode is not a finding unless it asks for more bytes despite a complete
 body. An encode failure is legitimate: a value can decode at a version that cannot

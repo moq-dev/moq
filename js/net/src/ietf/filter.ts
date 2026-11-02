@@ -4,6 +4,7 @@
  * @module
  */
 
+import { Milli } from "@moq/clock";
 import { ProtocolViolation } from "../error.ts";
 import { concat, type Reader } from "../stream.ts";
 import type { Order } from "../track.ts";
@@ -34,13 +35,22 @@ const TAG_ABSOLUTE_START = 0x3n;
 const TAG_ABSOLUTE_RANGE = 0x4n;
 
 /**
- * Whether this is draft-22 or newer.
+ * Whether this is draft-20 or newer.
  *
- * Draft-22 replaced the Filter Type tag with a Location Filter Type that names the fields
- * that follow, so the value carries no Length, and added the parameters that ride with it.
+ * Draft-20 replaced the Filter Type tag with up to four optional varints, where the number
+ * present selects the meaning, and added the parameters that ride with it. Draft-22 names
+ * the meaning with a Location Filter Type instead, but keeps those parameters.
  */
-export function isDraft22(version: IetfVersion): boolean {
+export function isDraft20(version: IetfVersion): boolean {
 	return version !== Version.DRAFT_18;
+}
+
+/**
+ * Whether LOCATION_FILTER starts with a Location Filter Type, which says which fields follow,
+ * so the value carries no Length. Draft-22 replaced draft-20's field count with it.
+ */
+function isTyped(version: IetfVersion): boolean {
+	return isDraft20(version) && version !== Version.DRAFT_20;
 }
 
 /** The Location Filter Type of draft-22. */
@@ -53,7 +63,7 @@ const TYPE_NEXT_OBJECT = 0x5n;
 
 /** Whether the Range Filters exist on this draft. */
 export function hasRangeFilters(version: IetfVersion): boolean {
-	return isDraft22(version);
+	return isDraft20(version);
 }
 
 const varint = Varint.encodeLeadingOnes;
@@ -68,19 +78,20 @@ function endDelta(startGroup: bigint, endGroup: bigint): bigint {
 
 /** Encode a filter as its raw parameter value, without the Length that frames it before draft-22. */
 export function encode(filter: Filter, version: IetfVersion): Uint8Array {
-	return isDraft22(version) ? encodeTyped(filter) : encodeTag(filter);
+	if (isTyped(version)) return encodeTyped(filter);
+	return isDraft20(version) ? encodeFields(filter) : encodeTag(filter);
 }
 
 /** Encode LOCATION_FILTER's value as it follows the parameter type from draft-17 on. */
 export function encodeParam(filter: Filter, version: IetfVersion): Uint8Array {
 	const value = encode(filter, version);
 	// Draft-22's Location Filter Type says where the value ends, so it needs no Length.
-	return isDraft22(version) ? value : encodeLengthPrefixed(value);
+	return isTyped(version) ? value : encodeLengthPrefixed(value);
 }
 
 /** Read LOCATION_FILTER's value as it follows the parameter type from draft-17 on. */
 export async function decodeParam(r: Reader, version: IetfVersion): Promise<Filter> {
-	if (!isDraft22(version)) {
+	if (!isTyped(version)) {
 		return decode(await r.read(await r.u53()), version);
 	}
 	const type = await r.u62();
@@ -89,6 +100,32 @@ export async function decodeParam(r: Reader, version: IetfVersion): Promise<Filt
 		fields.push(await r.u62());
 	}
 	return fromTyped(type, fields);
+}
+
+/** Encode the draft-20 field list, where the number of fields selects the meaning. */
+function encodeFields(filter: Filter): Uint8Array {
+	switch (filter.kind) {
+		case "unfiltered":
+			return new Uint8Array();
+		case "nextObject":
+			return concat([varint(0n), varint(0n)]);
+		case "relative":
+			return varint(filter.groups);
+		case "absolute": {
+			// An open ended {0, 0} is defined as unfiltered, so it must not collide with Next Object.
+			if (filter.startGroup === 0n && filter.startObject === 0n && filter.endGroup === undefined) {
+				return new Uint8Array();
+			}
+			const parts = [varint(filter.startGroup), varint(filter.startObject)];
+			if (filter.endGroup !== undefined) {
+				parts.push(varint(endDelta(filter.startGroup, filter.endGroup)));
+				if (filter.endObject !== undefined) {
+					parts.push(varint(filter.endObject));
+				}
+			}
+			return concat(parts);
+		}
+	}
 }
 
 function encodeTyped(filter: Filter): Uint8Array {
@@ -204,12 +241,43 @@ function encodeTag(filter: Filter): Uint8Array {
 
 /** Decode a filter from its raw parameter value, which must be consumed whole. */
 export function decode(data: Uint8Array, version: IetfVersion): Filter {
-	if (isDraft22(version)) {
+	if (isTyped(version)) {
 		const [filter, rest] = readTyped(data);
 		expectEmpty(rest);
 		return filter;
 	}
-	return decodeTag(data);
+	return isDraft20(version) ? decodeFields(data) : decodeTag(data);
+}
+
+/** Decode the draft-20 field list, which the caller has already delimited. */
+function decodeFields(data: Uint8Array): Filter {
+	const fields: bigint[] = [];
+	let rest = data;
+	while (rest.length > 0) {
+		if (fields.length === 4) {
+			throw new Error("too many fields in LOCATION_FILTER");
+		}
+		const [value, next] = unvarint(rest);
+		fields.push(value);
+		rest = next;
+	}
+
+	switch (fields.length) {
+		case 0:
+			return { kind: "unfiltered" };
+		case 1:
+			return { kind: "relative", groups: fields[0] };
+		default: {
+			const [startGroup, startObject] = fields;
+			// Two zeroes is the Next Object spelling; anything else is an absolute start.
+			if (fields.length === 2 && startGroup === 0n && startObject === 0n) {
+				return { kind: "nextObject" };
+			}
+			const endGroup = fields.length >= 3 ? startGroup + fields[2] : undefined;
+			const endObject = fields.length === 4 ? fields[3] : undefined;
+			return { kind: "absolute", startGroup, startObject, endGroup, endObject };
+		}
+	}
 }
 
 function decodeTag(data: Uint8Array): Filter {
@@ -288,6 +356,9 @@ export interface Fill {
 	/** The filled groups' order, or the subscription's order when omitted. */
 	groupOrder?: Order;
 
+	/** FILL_TIMEOUT, bounding the fill's wait as it does a FETCH's; see {@link Parameters.fillTimeout}. */
+	fillTimeout?: Milli;
+
 	/**
 	 * The range to fill. `undefined` means the Location Filter was omitted, which inherits
 	 * the subscription's own filter; `unfiltered` (a zero length filter, or type 0x00 from
@@ -305,12 +376,14 @@ export interface Fill {
 
 /** LOCATION_FILTER, the parameter that selects the fill's objects. */
 const FILL_LOCATION_FILTER = 0x21n;
+/** FILL_TIMEOUT, the fill's budget for waiting on objects not yet available. */
+const FILL_TIMEOUT = 0x0an;
 
-type Framing = "byte" | "varint" | "bytes";
+type Framing = "byte" | "bytes";
 
 /**
- * The parameters draft-22 allows inside FILL_PARAMETERS besides LOCATION_FILTER, and how
- * each frames its value.
+ * The parameters draft-22 allows inside FILL_PARAMETERS besides LOCATION_FILTER and
+ * FILL_TIMEOUT, and how each frames its value.
  *
  * Tabulated rather than derived, because neither shortcut is right. The Key-Value-Pair rule
  * keys framing off the id's parity, but the Range Filters (0x25-0x28) carry an explicit
@@ -319,7 +392,6 @@ type Framing = "byte" | "varint" | "bytes";
  * mistake desyncs every parameter after it.
  */
 const FILL_ALLOWED = new Map<bigint, Framing>([
-	[0x0an, "varint"], // FILL_TIMEOUT
 	[0x20n, "byte"], // SUBSCRIBER_PRIORITY, a uint8
 	[0x22n, "byte"], // GROUP_ORDER, a uint8
 	[0x25n, "bytes"], // SUBGROUP_FILTER
@@ -334,16 +406,25 @@ const FILL_ALLOWED = new Map<bigint, Framing>([
  * The value is a nested parameter scope, encoded like a message's parameters.
  */
 export function encodeFill(fill: Fill, version: IetfVersion): Uint8Array {
-	const parts = [varint(BigInt(Number(fill.filter !== undefined) + Number(fill.groupOrder !== undefined)))];
+	const count = [fill.fillTimeout, fill.filter, fill.groupOrder].filter((v) => v !== undefined).length;
+	const parts = [varint(BigInt(count))];
+	// Parameters sort by id, each a delta from the one before.
+	let prev = 0n;
+	const key = (id: bigint) => {
+		parts.push(varint(id - prev));
+		prev = id;
+	};
+	if (fill.fillTimeout !== undefined) {
+		key(FILL_TIMEOUT);
+		parts.push(varint(BigInt(fill.fillTimeout)));
+	}
 	if (fill.filter !== undefined) {
-		parts.push(varint(FILL_LOCATION_FILTER), encodeParam(fill.filter, version));
+		key(FILL_LOCATION_FILTER);
+		parts.push(encodeParam(fill.filter, version));
 	}
 	if (fill.groupOrder !== undefined) {
-		// Parameters sort by id; GROUP_ORDER follows LOCATION_FILTER by one.
-		parts.push(
-			varint(fill.filter !== undefined ? 1n : 0x22n),
-			new Uint8Array([fill.groupOrder === "ascending" ? 1 : 2]),
-		);
+		key(0x22n);
+		parts.push(new Uint8Array([fill.groupOrder === "ascending" ? 1 : 2]));
 	}
 	return concat(parts);
 }
@@ -358,6 +439,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 	let rest = afterCount;
 	let filter: Filter | undefined;
 	let groupOrder: Order | undefined;
+	let fillTimeout: Milli | undefined;
 	let rangeFilters = false;
 	let prev = 0n;
 	for (let i = 0n; i < count; i++) {
@@ -371,13 +453,22 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 			if (filter !== undefined) {
 				throw new Error("duplicate LOCATION_FILTER inside FILL_PARAMETERS");
 			}
-			if (isDraft22(version)) {
+			if (isTyped(version)) {
 				[filter, rest] = readTyped(rest);
 			} else {
 				let value: Uint8Array;
 				[value, rest] = readLengthPrefixed(rest);
 				filter = decode(value, version);
 			}
+			continue;
+		}
+
+		if (key === FILL_TIMEOUT) {
+			if (fillTimeout !== undefined) throw new Error("duplicate FILL_TIMEOUT inside FILL_PARAMETERS");
+			let value: bigint;
+			[value, rest] = unvarint(rest);
+			// Saturated like a FETCH's, since no wait lasts that long anyway.
+			fillTimeout = Milli(value > BigInt(Number.MAX_SAFE_INTEGER) ? Number.MAX_SAFE_INTEGER : Number(value));
 			continue;
 		}
 
@@ -391,10 +482,6 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 		rangeFilters ||= key >= 0x25n && key <= 0x28n;
 
 		// Each parameter must consume its own value or the remaining keys desync.
-		if (framing === "varint") {
-			[, rest] = unvarint(rest);
-			continue;
-		}
 		if (framing === "byte") {
 			if (rest.length < 1) throw new Error("truncated value inside FILL_PARAMETERS");
 			if (key === 0x22n) {
@@ -415,7 +502,7 @@ export function decodeFill(data: Uint8Array, version: IetfVersion): Fill {
 		throw new Error("trailing bytes in FILL_PARAMETERS");
 	}
 
-	return { filter, groupOrder, rangeFilters };
+	return { filter, groupOrder, fillTimeout, rangeFilters };
 }
 
 /** Split a length-prefixed value off the front of `data`, returning it and what follows. */

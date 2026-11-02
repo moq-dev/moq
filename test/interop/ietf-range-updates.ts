@@ -61,12 +61,12 @@ async function stream() {
 }
 let serving: Promise<void> | undefined;
 try {
-	if (input.draft === 22) for (let i = 0; i < 4; i++) publishGroup();
+	if (input.draft >= 20) for (let i = 0; i < 4; i++) publishGroup();
 	await client.writer.write(Uint8Array.from(input.subscribe));
 	assert.equal(await server.reader.u53(), Subscribe.id);
 	serving = publisher.runSubscribe(await Subscribe.decode(server.reader, version), server);
 	await response(4); // SUBSCRIBE_OK
-	if (input.draft === 22) {
+	if (input.draft >= 20) {
 		await client.writer.write(Uint8Array.from(input.updates[0]));
 		await response(RequestOk.id);
 		publishGroup(); // Group 4 follows the filled snapshot, still on the original subscription.
@@ -81,8 +81,8 @@ try {
 	await client.writer.write(Uint8Array.from(narrowing));
 	await response(RequestOk.id);
 	// Draft-18 must replay both groups skipped below the old floor, rather than silently
-	// joining only the newest cached group. Draft-22 also verifies subsequent live delivery.
-	if (input.draft === 22) for (let i = 5; i < 9; i++) publishGroup();
+	// joining only the newest cached group. Draft-20 and later also verify subsequent live delivery.
+	if (input.draft >= 20) for (let i = 5; i < 9; i++) publishGroup();
 	for (let i = 0; i < 2; i++) await stream();
 } finally {
 	client.close();

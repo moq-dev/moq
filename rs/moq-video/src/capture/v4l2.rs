@@ -788,4 +788,126 @@ mod tests {
 		}
 		assert_eq!(Source::from_fourcc(FourCC::new(b"GREY")), None);
 	}
+
+	/// Against the kernel's `vivid` virtual capture driver, which nightly loads
+	/// with `modprobe vivid`; run with `just rs v4l2`. Its default input is a
+	/// webcam with discrete sizes and rates in raw formats only, so these cover
+	/// the YUYV path; MJPEG decode is tested on a fixture in `frame`.
+	mod vivid {
+		use super::*;
+
+		/// Frames to stream per open, enough to cycle the driver's buffer ring.
+		const FRAMES: usize = BUFFER_COUNT as usize * 2;
+
+		/// The `vivid` capture node, found by driver name rather than a fixed
+		/// `/dev/videoN`, which depends on what else the host has. A host without
+		/// one skips, unless CI_STRICT makes that a failure.
+		fn node() -> Option<String> {
+			let node = cameras().expect("list V4L2 cameras").into_iter().find_map(|camera| {
+				let device = Device::with_path(&camera.id).ok()?;
+				(device.query_caps().ok()?.driver == "vivid").then_some(camera.id)
+			});
+			if node.is_none() {
+				assert!(
+					std::env::var_os("CI_STRICT").is_none(),
+					"no vivid capture node; load it with `sudo modprobe vivid`"
+				);
+				eprintln!("skipping: no vivid capture node; load it with `sudo modprobe vivid`");
+			}
+			node
+		}
+
+		fn config(width: u32, height: u32) -> Config {
+			Config {
+				width: Some(width),
+				height: Some(height),
+				..Default::default()
+			}
+		}
+
+		/// Stream [`FRAMES`] frames and check each converted to the negotiated size.
+		fn stream(camera: &mut Camera) {
+			let size = Size::new(camera.width, camera.height);
+			for index in 0..FRAMES {
+				let surface = match camera.read().expect("read a frame") {
+					pump::Read::Frame(surface) | pump::Read::FrameAt(surface, _) => surface,
+					_ => panic!("frame {index}: V4L2 never idles or ends a live capture"),
+				};
+				let Surface::I420(frame) = surface else {
+					panic!("frame {index}: V4L2 capture converts to I420");
+				};
+				assert_eq!(frame.size(), size, "frame {index}");
+				assert_eq!(frame.data().len(), I420::len(size).unwrap(), "frame {index}");
+			}
+		}
+
+		#[test]
+		#[ignore = "needs the vivid kernel module; run with just rs v4l2 (also run nightly)"]
+		fn enumerates_formats_sizes_and_rates() {
+			let Some(node) = node() else { return };
+			let device = Device::with_path(&node).unwrap();
+			let caps = device.query_caps().unwrap();
+			assert!(caps.capabilities.contains(Flags::VIDEO_CAPTURE | Flags::STREAMING));
+
+			let formats: Vec<_> = moq_v4l::video::Capture::enum_formats(&device)
+				.unwrap()
+				.into_iter()
+				.map(|format| format.fourcc)
+				.collect();
+			assert!(formats.contains(&Source::Yuyv.fourcc()), "{formats:?}");
+			assert!(convertible(&device).unwrap());
+
+			let sizes = frame_sizes(&device, Source::Yuyv.fourcc()).unwrap();
+			assert!(
+				sizes.iter().all(|size| matches!(size, FrameSizeEnum::Discrete(_))),
+				"the webcam input lists discrete sizes: {sizes:?}"
+			);
+			let vga = Size::new(640, 480);
+			assert!(
+				sizes.iter().any(|size| matches!(
+					size,
+					FrameSizeEnum::Discrete(size) if (size.width, size.height) == (vga.width, vga.height)
+				)),
+				"{sizes:?}"
+			);
+			assert!(!framerates(&device, Source::Yuyv.fourcc(), vga).unwrap().is_empty());
+
+			let modes = modes(Some(&node)).unwrap();
+			let mode = modes
+				.iter()
+				.find(|mode| (mode.width, mode.height) == (vga.width, vga.height))
+				.expect("a VGA mode");
+			assert!(mode.max_framerate().is_some(), "{mode:?}");
+		}
+
+		/// Negotiate, MMAP-stream, close, and reopen at another size: the close
+		/// has to release the buffers, or the second `VIDIOC_REQBUFS` fails EBUSY.
+		#[test]
+		#[ignore = "needs the vivid kernel module; run with just rs v4l2 (also run nightly)"]
+		fn streams_yuyv_then_reopens() {
+			let Some(node) = node() else { return };
+			for (width, height) in [(640, 480), (1280, 720), (640, 480)] {
+				let mut camera = Camera::open(&config(width, height), Some(&node)).expect("open vivid");
+				assert_eq!(camera.source, Source::Yuyv);
+				assert_eq!((camera.width, camera.height), (width, height));
+				stream(&mut camera);
+			}
+		}
+
+		/// The same through the public API: the pump thread opens the camera, and
+		/// dropping the stream joins it and closes the device.
+		#[tokio::test]
+		#[ignore = "needs the vivid kernel module; run with just rs v4l2 (also run nightly)"]
+		async fn streams_through_the_pump() {
+			let Some(node) = node() else { return };
+			for _ in 0..2 {
+				let mut capture = open(&config(640, 480), Some(&node)).await.expect("open vivid");
+				assert_eq!((capture.width(), capture.height()), (640, 480));
+				for index in 0..FRAMES {
+					let frame = capture.read().await.expect("read").expect("a live stream");
+					assert_eq!(frame.size(), Size::new(640, 480), "frame {index}");
+				}
+			}
+		}
+	}
 }

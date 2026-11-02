@@ -27,18 +27,20 @@ export const host: Backend = {
 			if (timer !== undefined) clearTimeout(timer);
 		};
 	},
+	task(ready) {
+		// Message ports schedule a task without the nested timer's minimum delay.
+		const channel = new MessageChannel();
+		channel.port1.onmessage = () => {
+			channel.port1.close();
+			channel.port2.close();
+			ready();
+		};
+		channel.port2.postMessage(null);
+	},
 };
 
 // A host task drains every already-queued microtask, including promise chains;
 // counting Promise.resolve() turns would impose an arbitrary depth limit.
 export function drain(): Promise<void> {
-	return new Promise((resolve) => {
-		const channel = new MessageChannel();
-		channel.port1.onmessage = () => {
-			channel.port1.close();
-			channel.port2.close();
-			resolve();
-		};
-		channel.port2.postMessage(null);
-	});
+	return new Promise((resolve) => host.task(resolve));
 }

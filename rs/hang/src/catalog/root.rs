@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 /// (the broadcast's one wall-clock mapping), the data sections
 /// (`json`, `binary`) for application tracks that aren't media, and the optional `m2ts` (a
 /// transport stream carried whole), plus `stats` naming the publisher's media snapshot track and
-/// `echo` soliciting viewer feedback under a relative broadcast prefix.
+/// `echo` soliciting viewer feedback under a relative broadcast prefix, and `contributions` naming
+/// whole broadcasts for explicit selection.
 /// Applications extend it with their own root sections (e.g. `scte35`) through `E`. The catalog
 /// does not deny unknown fields, so a base consumer ignores the extra sections and an extended
 /// catalog stays wire-compatible. See the `extension_roundtrip` test.
@@ -86,6 +87,12 @@ pub struct Catalog<E = ()> {
 	/// An `echo` value without a string `path` decodes as absent, the same as [`stats`](Self::stats).
 	pub echo: Option<crate::catalog::Echo>,
 
+	/// Whole broadcasts listed for explicit, lazy selection, keyed by contribution ID.
+	///
+	/// Listing one subscribes to nothing; see [`Contribution`](crate::catalog::Contribution).
+	/// Omitted from the wire when empty. A malformed entry refuses the catalog.
+	pub contributions: std::collections::BTreeMap<String, crate::catalog::Contribution>,
+
 	/// Application-defined root sections, flattened alongside the base catalog sections.
 	///
 	/// The root `version` is reserved: serializing computes it from the base sections, and fails if
@@ -109,10 +116,18 @@ struct Wire<E> {
 	#[serde(default, getter = "Catalog::min_version", deserialize_with = "deserialize_version")]
 	version: Option<u64>,
 
-	#[serde(default, skip_serializing_if = "Video::is_empty")]
+	#[serde(
+		default,
+		skip_serializing_if = "Video::is_empty",
+		deserialize_with = "crate::catalog::deserialize_object"
+	)]
 	video: Video,
 
-	#[serde(default, skip_serializing_if = "Audio::is_empty")]
+	#[serde(
+		default,
+		skip_serializing_if = "Audio::is_empty",
+		deserialize_with = "crate::catalog::deserialize_object"
+	)]
 	audio: Audio,
 
 	#[serde(default)]
@@ -148,6 +163,9 @@ struct Wire<E> {
 	#[serde(default, deserialize_with = "crate::catalog::deserialize_echo")]
 	echo: Option<crate::catalog::Echo>,
 
+	#[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+	contributions: std::collections::BTreeMap<String, crate::catalog::Contribution>,
+
 	#[serde(flatten, serialize_with = "serialize_ext")]
 	ext: E,
 }
@@ -182,6 +200,7 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			m2ts,
 			stats,
 			echo,
+			contributions,
 			ext,
 		} = wire;
 		Self {
@@ -194,6 +213,7 @@ impl<E> From<Wire<E>> for Catalog<E> {
 			m2ts,
 			stats,
 			echo,
+			contributions,
 			ext,
 		}
 	}
@@ -225,23 +245,19 @@ impl Catalog<()> {
 	/// The default name for the catalog track.
 	pub const DEFAULT_NAME: &str = "catalog.json";
 
-	/// The track name for the DEFLATE-compressed catalog: the `.z` sibling of [`DEFAULT_NAME`](Self::DEFAULT_NAME).
-	///
-	/// Carries the identical catalog JSON, compressed per group (see `moq-json`). A publisher serves
-	/// both tracks; a consumer reads whichever it prefers.
-	pub const COMPRESSED_NAME: &str = "catalog.json.z";
-
 	/// Track properties for creating the catalog track via
 	/// [`create_track`](moq_net::broadcast::Producer::create_track) at
 	/// [`DEFAULT_NAME`](Self::DEFAULT_NAME).
 	///
 	/// Keeps the bare `moq_net` retention rather than the media one: the catalog is
 	/// snapshot mode, so the useful value is the live edge, which is always kept.
-	/// Timed in milliseconds, so snapshots share the broadcast clock with media.
+	/// Timed in milliseconds, so snapshots share the broadcast clock with media, and
+	/// [`compress`](moq_net::track::Info::compress)ed, since catalog JSON is small and repetitive.
 	pub fn default_track_info() -> moq_net::track::Info {
 		moq_net::track::Info::default()
 			.with_timescale(moq_net::Timescale::MILLI)
 			.with_priority(PRIORITY.catalog)
+			.with_compress(true)
 	}
 
 	/// The subscription preferences used for the catalog track (high priority so
@@ -253,8 +269,12 @@ impl Catalog<()> {
 
 impl<E> Catalog<E> {
 	/// Refuse a catalog with an ID naming both a video and an audio rendition, or with a
-	/// projection or audio layout out of range.
+	/// rendition field out of range, such as a zero sample rate or a projection out of bounds.
+	///
+	/// Decoding already refuses an out-of-range rendition, so this catches a catalog built by hand.
 	pub fn check_renditions(&self) -> Result<()> {
+		use crate::catalog::Rendition;
+
 		if let Some(id) = self
 			.video
 			.renditions
@@ -264,14 +284,10 @@ impl<E> Catalog<E> {
 			return Err(crate::Error::DuplicateRendition(id.clone()));
 		}
 		for config in self.video.renditions.values() {
-			if let Some(projection) = &config.projection {
-				projection.check()?;
-			}
+			config.check()?;
 		}
 		for config in self.audio.renditions.values() {
-			if let Some(layout) = &config.layout {
-				layout.check(config.channel_count)?;
-			}
+			config.check()?;
 		}
 		Ok(())
 	}
@@ -405,11 +421,48 @@ impl<E: Serialize> Catalog<E> {
 mod test {
 	use std::collections::BTreeMap;
 
-	use crate::catalog::{
-		AudioCodec::Opus, AudioConfig, BinaryConfig, Compression, Container, H264, JsonConfig, Mode, VideoConfig,
-	};
+	use crate::catalog::{AudioCodec::Opus, AudioConfig, BinaryConfig, Container, H264, JsonConfig, Mode, VideoConfig};
 
 	use super::*;
+
+	#[derive(Deserialize)]
+	struct ParityCase {
+		name: String,
+		catalog: serde_json::Value,
+		#[serde(default)]
+		refused: bool,
+		#[serde(default)]
+		video: Vec<String>,
+		#[serde(default)]
+		audio: Vec<String>,
+	}
+
+	/// The corpus `js/hang` also loads: both languages accept the same catalogs and keep the same
+	/// renditions, so a divergence fails CI on whichever side drifts.
+	#[test]
+	fn shared_parity_fixtures() {
+		let cases: Vec<ParityCase> = serde_json::from_str(include_str!("../../fixtures/catalog-parity.json")).unwrap();
+		let mut failures = Vec::new();
+		for case in cases {
+			let parsed = Catalog::<()>::from_str(&case.catalog.to_string()).and_then(|catalog| {
+				catalog.check_renditions()?;
+				Ok(catalog)
+			});
+			match (parsed, case.refused) {
+				(Err(_), true) => {}
+				(Ok(catalog), true) => failures.push(format!("{}: accepted {catalog:?}", case.name)),
+				(Err(err), false) => failures.push(format!("{}: refused: {err}", case.name)),
+				(Ok(catalog), false) => {
+					let video: Vec<_> = catalog.video.renditions.keys().cloned().collect();
+					let audio: Vec<_> = catalog.audio.renditions.keys().cloned().collect();
+					if (&video, &audio) != (&case.video, &case.audio) {
+						failures.push(format!("{}: kept video {video:?} audio {audio:?}", case.name));
+					}
+				}
+			}
+		}
+		assert!(failures.is_empty(), "{}", failures.join("\n"));
+	}
 
 	/// The rendition count is the publisher's to choose: a catalog listing many is accepted.
 	#[test]
@@ -462,6 +515,33 @@ mod test {
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 	}
 
+	/// A contribution round-trips, stays off the wire when none is listed, and a malformed entry
+	/// refuses the catalog rather than being dropped.
+	#[test]
+	fn contributions_roundtrip_and_refuse_malformed_entries() {
+		let json = r#"{"contributions":{"alice":{"broadcast":"./alice.hang"}},"video":{"renditions":{"alice":{"codec":"avc1.64001f","container":{"kind":"legacy"}}}}}"#;
+		let catalog = Catalog::<()>::from_str(json).unwrap();
+		assert_eq!(
+			catalog.contributions["alice"],
+			crate::catalog::Contribution::new(moq_net::path::Relative::new("./alice.hang").unwrap())
+		);
+		// Contribution IDs are their own namespace, so one may share a rendition's ID.
+		assert!(catalog.check_renditions().is_ok());
+		assert!(catalog.video.renditions.contains_key("alice"));
+		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
+		assert!(!Catalog::<()>::default().to_json().unwrap().contains("contributions"));
+
+		for bad in [
+			r#"{"contributions":[]}"#,
+			r#"{"contributions":{"alice":null}}"#,
+			r#"{"contributions":{"alice":{}}}"#,
+			r#"{"contributions":{"alice":{"broadcast":42}}}"#,
+			r#"{"contributions":{"alice":{"broadcast":"./alice.hang","epoch":"not-an-epoch"}}}"#,
+		] {
+			assert!(Catalog::<()>::from_str(bad).is_err(), "{bad} must be refused");
+		}
+	}
+
 	/// Every reference-bearing section carries an optional epoch beside its `broadcast`.
 	#[test]
 	fn reference_epochs_roundtrip_in_every_section() {
@@ -470,6 +550,7 @@ mod test {
 		const EPOCH: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
 		let encoded = format!(
 			r#"{{
+				"contributions": {{"c": {{"broadcast": "./a", "epoch": "{EPOCH}"}}}},
 				"video": {{"renditions": {{"v": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "avc1.64001f", "container": {{"kind": "legacy"}}}}}}}},
 				"audio": {{"renditions": {{"a": {{"broadcast": "./a", "epoch": "{EPOCH}", "codec": "opus", "sampleRate": 48000, "numberOfChannels": 2, "container": {{"kind": "legacy"}}}}}}}},
 				"text": {{"renditions": {{"t": {{"broadcast": "./a", "epoch": "{EPOCH}", "format": "vtt"}}}}}},
@@ -489,6 +570,7 @@ mod test {
 		for reference in references {
 			assert_eq!(reference.epoch(), Some(&epoch));
 		}
+		assert_eq!(catalog.contributions["c"].epoch.as_ref(), Some(&epoch));
 		assert_eq!(Catalog::<()>::from_str(&catalog.to_json().unwrap()).unwrap(), catalog);
 
 		// Omitted stays omitted, and a malformed or noncanonical epoch refuses the catalog.
@@ -518,23 +600,38 @@ mod test {
 		));
 	}
 
+	/// A publisher building the catalog by hand is caught before it writes a value every reader refuses.
 	#[test]
-	fn spatial_fields_out_of_range_are_refused() {
+	fn fields_out_of_range_are_refused() {
 		use crate::catalog::{AudioLayout, Projection, VideoCodec, VideoConfig};
 
-		let mut catalog = Catalog::<()>::from_str(
-			r#"{"audio": {"renditions": {"amb": {"codec": "opus", "sampleRate": 48000, "numberOfChannels": 6, "layout": "ambisonic", "container": {"kind": "legacy"}}}}}"#,
-		)
-		.unwrap();
+		let mut catalog = Catalog::<()>::default();
+		let mut amb = AudioConfig::new(Opus, 48_000, 6);
+		amb.layout = Some(AudioLayout::Ambisonic);
+		catalog.audio.insert("amb", amb).unwrap();
 		assert!(matches!(
 			catalog.check_renditions(),
 			Err(crate::Error::InvalidAmbisonicChannels(6))
 		));
 		catalog.audio.renditions.get_mut("amb").unwrap().channel_count = 4;
-		assert_eq!(catalog.audio.renditions["amb"].layout, Some(AudioLayout::Ambisonic));
 		catalog.check_renditions().unwrap();
 
-		// A publisher building the catalog by hand is caught before it writes the bad value.
+		catalog.audio.renditions.get_mut("amb").unwrap().sample_rate = 0;
+		assert!(matches!(
+			catalog.check_renditions(),
+			Err(crate::Error::Zero("sampleRate"))
+		));
+		catalog.audio.renditions.get_mut("amb").unwrap().sample_rate = 48_000;
+
+		let mut config = VideoConfig::new(VideoCodec::VP8);
+		config.coded_width = Some(0);
+		catalog.video.insert("empty", config).unwrap();
+		assert!(matches!(
+			catalog.check_renditions(),
+			Err(crate::Error::Zero("codedWidth"))
+		));
+		catalog.video.remove("empty");
+
 		let mut config = VideoConfig::new(VideoCodec::VP8);
 		config.projection = Some(Projection::Equirectangular { fov: Some(400.0) });
 		catalog.video.insert("vr", config).unwrap();
@@ -800,6 +897,24 @@ mod test {
 	}
 
 	#[test]
+	fn rendition_with_misspelled_broadcast_is_refused() {
+		// Spelled like a path, so an empty segment or a lone backslash makes the rendition malformed,
+		// which refuses the catalog. Mirrors the JS `rendition broadcast reference is parsed and normalized`.
+		for broadcast in ["./source/", "/source", "a//b", r"a\b"] {
+			let encoded = serde_json::json!({
+				"video": {"renditions": {"video": {
+					"broadcast": broadcast,
+					"codec": "avc1.64001f",
+					"container": {"kind": "legacy"}
+				}}}
+			})
+			.to_string();
+
+			Catalog::<()>::from_str(&encoded).expect_err(&format!("{broadcast:?} should be refused"));
+		}
+	}
+
+	#[test]
 	fn rendition_with_parent_broadcast_stays_distinct_from_empty() {
 		let encoded = r#"{
 			"video": {
@@ -852,7 +967,7 @@ mod test {
 		let Container::Unknown(unknown) = &future.container else {
 			panic!("expected unknown container: {:?}", future.container);
 		};
-		assert_eq!(unknown.kind(), Some("future"));
+		assert_eq!(unknown.kind(), "future");
 
 		// The unknown rendition survives a republish intact.
 		let output = parsed.to_json().expect("failed to encode");
@@ -980,7 +1095,7 @@ mod test {
 	#[test]
 	fn a_malformed_data_section_still_fails() {
 		for section in ["json", "binary"] {
-			let wire = format!(r#"{{"{section}":{{"tracks":{{"chat":{{"compression":"deflate"}}}}}}}}"#);
+			let wire = format!(r#"{{"{section}":{{"tracks":{{"chat":{{"schema":"chat"}}}}}}}}"#);
 			assert!(
 				Catalog::<()>::from_str(&wire).is_err(),
 				"a mode-less {section} track decoded instead of failing"
@@ -1074,7 +1189,7 @@ mod test {
 		);
 
 		// Record PTS 2000 (ms) lands 2s after the wall epoch, whatever the track timescale.
-		let expected = moq_clock::Wall::UNIX_EPOCH
+		let expected = kio::clock::Wall::UNIX_EPOCH
 			+ std::time::Duration::from_millis(crate::catalog::MOQ_EPOCH_UNIX_MILLIS + 1_751_846_402_000);
 		assert_eq!(
 			clock
@@ -1130,7 +1245,6 @@ mod test {
 				"tracks": {
 					"chat": {
 						"mode": "stream",
-						"compression": "deflate",
 						"schema": "https://example.com/chat.schema.json"
 					},
 					"status": {
@@ -1152,7 +1266,6 @@ mod test {
 		encoded.retain(|c| !c.is_whitespace());
 
 		let mut chat = JsonConfig::new(Mode::Stream);
-		chat.compression = Some(Compression::Deflate);
 		chat.schema = Some("https://example.com/chat.schema.json".to_string());
 
 		let mut status = JsonConfig::new(Mode::Snapshot);
@@ -1226,26 +1339,25 @@ mod test {
 			mavlink: BTreeMap<String, Mavlink>,
 		}
 
-		let encoded =
-			r#"{"com.example.mavlink":{"telemetry":{"config":{"mode":"stream","compression":"deflate"},"sysid":1}}}"#;
+		let encoded = r#"{"com.example.mavlink":{"telemetry":{"config":{"mode":"stream","mime":"application/mavlink"},"sysid":1}}}"#;
 
 		let catalog = Catalog::<Ext>::from_str(encoded).unwrap();
 		let entry = &catalog.ext.mavlink["telemetry"];
 		assert_eq!(entry.sysid, 1);
 		assert_eq!(entry.config.mode, Mode::Stream);
-		assert_eq!(entry.config.compression, Some(Compression::Deflate));
+		assert_eq!(entry.config.mime.as_deref(), Some("application/mavlink"));
 		assert_eq!(catalog.to_json().unwrap(), encoded);
 	}
 
-	/// A track using a future mode or compression must survive a reparse-and-republish intact, so a
-	/// relay doesn't corrupt what it can't read. Its siblings stay readable.
+	/// A track using a future mode must survive a reparse-and-republish intact, so a relay doesn't
+	/// corrupt what it can't read. Its siblings stay readable.
 	#[test]
-	fn unknown_mode_and_compression_keep_siblings() {
+	fn unknown_mode_keeps_siblings() {
 		let encoded = r#"{
 			"json": {
 				"tracks": {
-					"future": {"mode": "windowed", "compression": "zstd"},
-					"known": {"mode": "stream", "compression": "deflate"}
+					"future": {"mode": "windowed"},
+					"known": {"mode": "stream"}
 				}
 			}
 		}"#;
@@ -1254,11 +1366,9 @@ mod test {
 
 		let known = parsed.json.tracks.get("known").expect("missing track");
 		assert_eq!(known.mode, Mode::Stream);
-		assert_eq!(known.compression, Some(Compression::Deflate));
 
 		let future = parsed.json.tracks.get("future").expect("missing track");
 		assert_eq!(future.mode, Mode::Unknown("windowed".to_string()));
-		assert_eq!(future.compression, Some(Compression::Unknown("zstd".to_string())));
 
 		let output = parsed.to_json().expect("failed to encode");
 		assert!(
@@ -1290,7 +1400,7 @@ mod test {
 	/// last, so an entry without a mode is malformed rather than assumed.
 	#[test]
 	fn a_track_without_a_mode_is_rejected() {
-		Catalog::<()>::from_str(r#"{"json":{"tracks":{"chat":{"compression":"deflate"}}}}"#)
+		Catalog::<()>::from_str(r#"{"json":{"tracks":{"chat":{"schema":"chat"}}}}"#)
 			.expect_err("a mode-less track must not decode");
 	}
 

@@ -9,7 +9,7 @@
 //!
 //! Unsupported local kernels skip loudly; CI_STRICT makes CI refuse them.
 
-#![cfg(all(target_os = "linux", feature = "quic"))]
+#![cfg(feature = "quic")]
 
 use crate::support;
 
@@ -20,7 +20,6 @@ use std::task::Poll;
 use std::time::Duration;
 
 use moq_uring::{Config, Error, Worker, quic, udp};
-use web_transport_trait::poll::{RecvStream as _, SendStream as _, Session as _};
 
 const ALPN: &str = "moq-uring-mtu";
 /// The UDP payload every QUIC path must carry, and moq-quic's floor.
@@ -187,7 +186,7 @@ async fn within<T>(handle: &moq_uring::Handle, what: &str, future: impl Future<O
 /// the client's dial going through a path of `mtu`.
 fn endpoints(
 	handle: &moq_uring::Handle,
-	transport: &quic::Transport,
+	transport: &quic::transport::Config,
 	mtu: usize,
 ) -> (quic::Endpoint, quic::Endpoint, quic::client::Config, Path) {
 	let certs = support::certs().expect("certificates");
@@ -210,7 +209,7 @@ fn endpoints(
 	.expect("server endpoint");
 	let client = quic::Endpoint::new(socket(handle), quic::endpoint::Config::default()).expect("client endpoint");
 	let path = Path::new(server.local_addr(), mtu);
-	let mut dial = quic::client::Config::new(path.addr, "localhost");
+	let mut dial = quic::client::Config::default();
 	dial.alpn = vec![ALPN.to_string()];
 	dial.verify = false;
 	dial.transport = transport.clone();
@@ -223,8 +222,9 @@ async fn connect(
 	server: &quic::Endpoint,
 	client: &quic::Endpoint,
 	dial: &quic::client::Config,
+	remote: SocketAddr,
 ) -> (quic::Connection, quic::Connection) {
-	let dialed = within(handle, "the handshake", client.connect(dial))
+	let dialed = within(handle, "the handshake", client.connect(dial, remote, "localhost"))
 		.await
 		.expect("dial");
 	let accepted = within(handle, "the accept", server.accept()).await.expect("accept");
@@ -233,32 +233,18 @@ async fn connect(
 
 /// Send `len` bytes on a fresh stream from `from` and read them all at `to`.
 async fn transfer(handle: &moq_uring::Handle, from: &mut quic::Connection, to: &mut quic::Connection, len: usize) {
-	let mut send = std::future::poll_fn(|cx| from.poll_open_uni(cx))
-		.await
-		.expect("open_uni");
+	let mut send = from.open_uni(Default::default()).await.expect("open_uni");
 	handle.spawn(async move {
-		let payload = vec![7u8; len];
-		let mut buf = &payload[..];
-		while !buf.is_empty() {
-			match std::future::poll_fn(|cx| send.poll_write(cx, buf)).await {
-				Ok(n) => buf = &buf[n..],
-				Err(_) => return,
-			}
+		if send.write_all(bytes::Bytes::from(vec![7u8; len])).await.is_ok() {
+			let _ = send.finish().stopped().await;
 		}
-		let _ = send.finish();
-		let _ = std::future::poll_fn(|cx| send.poll_closed(cx)).await;
 	});
 
 	let read = within(handle, "the transfer", async {
-		let mut recv = std::future::poll_fn(|cx| to.poll_accept_uni(cx))
-			.await
-			.expect("accept_uni");
+		let mut recv = to.accept_uni().await.expect("accept_uni");
 		let mut buf = vec![0u8; 64 * 1024];
 		let mut read = 0;
-		while let Some(n) = std::future::poll_fn(|cx| recv.poll_read(cx, &mut buf))
-			.await
-			.expect("read")
-		{
+		while let Some(n) = recv.read(&mut &mut buf[..]).await.expect("read") {
 			read += n;
 		}
 		read
@@ -273,11 +259,12 @@ async fn transfer(handle: &moq_uring::Handle, from: &mut quic::Connection, to: &
 fn a_path_at_the_ipv6_minimum_connects() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
-	let (server, client, dial, path) = endpoints(&handle, &quic::Transport::default(), IPV6_MIN);
+	let (server, client, dial, path) = endpoints(&handle, &quic::transport::Config::default(), IPV6_MIN);
+	let remote = path.addr;
 
 	worker
 		.block_on(async move {
-			let (mut dialed, mut accepted) = connect(&handle, &server, &client, &dial).await;
+			let (mut dialed, mut accepted) = connect(&handle, &server, &client, &dial, remote).await;
 			transfer(&handle, &mut dialed, &mut accepted, PAYLOAD).await;
 			transfer(&handle, &mut accepted, &mut dialed, PAYLOAD).await;
 		})
@@ -291,11 +278,12 @@ fn a_path_at_the_ipv6_minimum_connects() {
 fn discovery_stays_off_by_default() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
-	let (server, client, dial, path) = endpoints(&handle, &quic::Transport::default(), ETHERNET);
+	let (server, client, dial, path) = endpoints(&handle, &quic::transport::Config::default(), ETHERNET);
+	let remote = path.addr;
 
 	worker
 		.block_on(async move {
-			let (mut dialed, mut accepted) = connect(&handle, &server, &client, &dial).await;
+			let (mut dialed, mut accepted) = connect(&handle, &server, &client, &dial, remote).await;
 			transfer(&handle, &mut dialed, &mut accepted, PAYLOAD).await;
 			transfer(&handle, &mut accepted, &mut dialed, PAYLOAD).await;
 		})
@@ -321,14 +309,15 @@ async fn discover(handle: &moq_uring::Handle, from: &mut quic::Connection, to: &
 fn discovery_finds_a_larger_mtu() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
-	let mut transport = quic::Transport::default();
+	let mut transport = quic::transport::Config::default();
 	transport.mtu_discovery = true;
 	let (server, client, dial, path) = endpoints(&handle, &transport, ETHERNET);
+	let remote = path.addr;
 
 	let metrics = handle.metrics();
 	let (path, (datagrams, sends)) = worker
 		.block_on(async move {
-			let (mut dialed, mut accepted) = connect(&handle, &server, &client, &dial).await;
+			let (mut dialed, mut accepted) = connect(&handle, &server, &client, &dial, remote).await;
 			discover(&handle, &mut dialed, &mut accepted, &path).await;
 
 			let before = (metrics.snapshot(), path.large_up());
@@ -357,13 +346,14 @@ fn discovery_finds_a_larger_mtu() {
 fn a_shrinking_path_falls_back_to_the_floor() {
 	let Some(mut worker) = worker() else { return };
 	let handle = worker.handle();
-	let mut transport = quic::Transport::default();
+	let mut transport = quic::transport::Config::default();
 	transport.mtu_discovery = true;
 	let (server, client, dial, path) = endpoints(&handle, &transport, ETHERNET);
+	let remote = path.addr;
 
 	worker
 		.block_on(async move {
-			let (mut dialed, mut accepted) = connect(&handle, &server, &client, &dial).await;
+			let (mut dialed, mut accepted) = connect(&handle, &server, &client, &dial, remote).await;
 			discover(&handle, &mut dialed, &mut accepted, &path).await;
 
 			path.set_mtu(IPV6_MIN);
