@@ -436,11 +436,10 @@ class Graph:
         self.executed.add(path)
         # The module dispatch passes its own names: `just <module> check` and the like.
         if path == self.root / "sh/dispatch.sh":
-            for line in re.findall(r"modules=\(([^)]*)\)", path.read_text(errors="replace")):
-                for name in line.split():
-                    for verb in ("check", "fix"):
-                        for recipe in self.resolve([name, verb], self.root):
-                            self.visit_recipe(recipe)
+            for name in re.findall(r"^module (\w+) ", path.read_text(errors="replace"), re.M):
+                for verb in ("check", "fix"):
+                    for recipe in self.resolve([name, verb], self.root):
+                        self.visit_recipe(recipe)
 
     def bases(self, text: str, cwd: Path, file: Path | None) -> list[Path]:
         """The directories a script path in text may be relative to."""

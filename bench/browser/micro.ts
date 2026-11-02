@@ -14,8 +14,10 @@ const { values, positionals } = parseArgs({
 	},
 });
 const benchmark = values.bench;
-const expectedRows = ({ frames: 26, drift: 36, ledger: 12, "resume-history": 72 } as Record<string, number>)[benchmark];
-if (expectedRows === undefined) throw new Error("--bench must be frames, drift, ledger, or resume-history");
+const expectedRows = (
+	{ frames: 26, drift: 36, ledger: 12, bandwidth: 44, "resume-history": 72 } as Record<string, number>
+)[benchmark];
+if (expectedRows === undefined) throw new Error("--bench must be frames, drift, ledger, bandwidth, or resume-history");
 const rounds = Number(values.rounds);
 if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("--rounds must be a positive integer");
 const roots = new Map<string, string>();
@@ -45,19 +47,22 @@ for (const [name, root] of roots) {
 							? { path: resolve(root, "js/net/bench", path) }
 							: undefined,
 					);
-					build.onLoad({ filter: /\/bench\/(frames|drift|ledger|resume-history)\.ts$/ }, async ({ path }) => {
-						const source = await Bun.file(path).text();
-						if (benchmark !== "frames")
-							return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
-						const marker =
-							'console.log("protocol,frame_bytes,chunk_bytes,frames_per_chunk,ns_per_frame,first_frame_us");';
-						const parts = source.split(marker);
-						if (parts.length !== 2) throw new Error("frames benchmark entry moved");
-						return {
-							loader: "ts",
-							contents: `${parts[0]}globalThis.measure = async () => {${marker}\n${parts[1]}\n};`,
-						};
-					});
+					build.onLoad(
+						{ filter: /\/bench\/(frames|drift|ledger|bandwidth|resume-history)\.ts$/ },
+						async ({ path }) => {
+							const source = await Bun.file(path).text();
+							if (benchmark !== "frames")
+								return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
+							const marker =
+								'console.log("protocol,frame_bytes,chunk_bytes,frames_per_chunk,ns_per_frame,first_frame_us");';
+							const parts = source.split(marker);
+							if (parts.length !== 2) throw new Error("frames benchmark entry moved");
+							return {
+								loader: "ts",
+								contents: `${parts[0]}globalThis.measure = async () => {${marker}\n${parts[1]}\n};`,
+							};
+						},
+					);
 				},
 			},
 		],

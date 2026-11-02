@@ -80,6 +80,7 @@ export namespace Audio {
 		available: Signals.Signal<Record<string, Hang.Catalog.Audio.AudioConfig>>;
 		catalog: Signals.Signal<Hang.Catalog.Audio | undefined>;
 		config: Signals.Signal<Hang.Catalog.Audio.AudioConfig | undefined>;
+		error: Signals.Signal<Error | undefined>;
 		jitter: Signals.Signal<Clock.Milli | undefined>;
 		track: Signals.Signal<string | undefined>;
 	};
