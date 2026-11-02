@@ -59,12 +59,13 @@ What that means for you:
 - **URLs name the publisher instance.** Every URL the multivariant playlist and DASH manifest list sits under `@<instance>`, the publisher's epoch, so every edge and every reload derive the same URLs and a CDN in front of export caches them. A restarted publisher gets URLs of its own, whose numbering starts over. The multivariant playlist and manifest switch to it at once, while the old instance's playlists end at the segments they listed before the switch, even if its publisher keeps sending; a player already on it plays those out and then has to reload the multivariant playlist. An instance without an epoch (one that reached export over moq-lite-06 or older) gets an id each export mints, so only that export serves its URLs.
 - **Only a clean finish ends a playlist.** `EXT-X-ENDLIST` and a `static` DASH manifest mean the records finished, or, on a replaced instance's media playlists, that another publisher took the broadcast over. A rendition whose records fail instead, such as a publisher dropping its session, answers HTTP 500 with `Cache-Control: no-store`, so a truncated recording never looks complete, and leaves the multivariant playlist and DASH manifest so players switch to a sibling. With none left, the DASH manifest answers the error too.
 
-A [`moq-archive`](https://docs.rs/moq-archive) recording is served the same
+A [broadcast archive](/concept/archives) is served the same
 way, with no second stored copy: record a broadcast, republish it, and export
-the republished broadcast.
+the republished broadcast. Recording needs moq-lite 07 on every network hop
+for track discovery.
 
 ```bash
-moq --connect https://relay.example.com/anon --broadcast event export archive s3://recordings
+moq --connect https://relay.example.com/anon --connect-version moq-lite-07-wip --broadcast event export archive s3://recordings
 moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<epoch>
 moq --connect https://relay.example.com/anon --broadcast event-replay.hang export hls --listen '[::]:8089'
 ```

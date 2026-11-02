@@ -416,6 +416,9 @@ moq --connect https://relay.example.com/anon \
     -- export --broadcast event.hang archive file:///recordings
 ```
 
+These exporters read the local import through their shared origin, so recording
+here needs no network track discovery.
+
 ## Publisher runs
 
 Each run of `moq` announces a fresh
