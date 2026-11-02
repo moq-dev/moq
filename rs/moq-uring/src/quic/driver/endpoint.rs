@@ -281,9 +281,7 @@ impl Inner {
 		// retry, a refusal), reused across the whole receive.
 		let mut buf = Vec::new();
 
-		// The connections this packet fed; almost always exactly one (a GRO
-		// coalesce is a single source, and ids rarely change mid-burst).
-		let mut fed: Vec<ConnectionHandle> = Vec::new();
+		let mut fed = Fed::default();
 
 		// moq-quic takes each datagram as an owned `BytesMut`: copy the whole
 		// completion out of the receive pool once and split it per datagram.
@@ -324,16 +322,11 @@ impl Inner {
 					// we can feed.
 					if let Some(conn) = conn {
 						conn.conn.borrow_mut().handle_event(event);
-						conn.wire.set_received_bytes(conn.conn.borrow().stats().udp_rx.bytes);
-						if !fed.contains(&key) {
-							fed.push(key);
-						}
+						fed.push(key);
 					}
 				}
 				Some(DatagramEvent::NewConnection(incoming)) => {
-					if let Some(key) = self.greet(incoming, &mut buf)
-						&& !fed.contains(&key)
-					{
+					if let Some(key) = self.greet(incoming, &mut buf) {
 						fed.push(key);
 					}
 				}
@@ -351,6 +344,9 @@ impl Inner {
 		for key in fed {
 			let conn = self.conns.borrow().get(&key).cloned();
 			if let Some(conn) = conn {
+				// Once per receive rather than per datagram: `stats` copies the
+				// whole struct and queries the congestion controller.
+				conn.wire.set_received_bytes(conn.conn.borrow().stats().udp_rx.bytes);
 				conn.kick();
 			}
 		}
@@ -523,5 +519,65 @@ impl Inner {
 			conn.fail(err.clone());
 		}
 		self.accept_waiters.borrow_mut().wake();
+	}
+}
+
+/// The connections one receive fed, each once, in the order first fed.
+///
+/// Almost always exactly one: a GRO coalesce is a single source, and ids
+/// rarely change mid-burst. So the first is held inline, and only a receive
+/// that mixes connections allocates.
+#[derive(Default)]
+struct Fed {
+	first: Option<ConnectionHandle>,
+	rest: Vec<ConnectionHandle>,
+}
+
+impl Fed {
+	fn push(&mut self, key: ConnectionHandle) {
+		match self.first {
+			None => self.first = Some(key),
+			Some(first) if first == key => {}
+			Some(_) if self.rest.contains(&key) => {}
+			Some(_) => self.rest.push(key),
+		}
+	}
+}
+
+impl IntoIterator for Fed {
+	type Item = ConnectionHandle;
+	type IntoIter = std::iter::Chain<std::option::IntoIter<ConnectionHandle>, std::vec::IntoIter<ConnectionHandle>>;
+
+	fn into_iter(self) -> Self::IntoIter {
+		self.first.into_iter().chain(self.rest)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn fed(keys: &[usize]) -> Vec<usize> {
+		let mut fed = Fed::default();
+		for &key in keys {
+			fed.push(ConnectionHandle(key));
+		}
+		fed.into_iter().map(|key| key.0).collect()
+	}
+
+	#[test]
+	fn fed_lists_each_connection_once_in_order() {
+		assert_eq!(fed(&[]), Vec::<usize>::new());
+		assert_eq!(fed(&[3, 3, 3]), [3]);
+		assert_eq!(fed(&[3, 1, 3, 2, 1, 2]), [3, 1, 2]);
+	}
+
+	#[test]
+	fn fed_one_connection_allocates_nothing() {
+		let mut fed = Fed::default();
+		for _ in 0..4 {
+			fed.push(ConnectionHandle(7));
+		}
+		assert_eq!(fed.rest.capacity(), 0);
 	}
 }

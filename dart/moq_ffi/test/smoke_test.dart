@@ -54,7 +54,10 @@ void main() {
 
     final producer = track.appendGroup();
     producer.writeFrame(
-      frame: MoqFrame(payload: utf8.encode('dart'), timestampUs: 0),
+      frame: MoqFrame(
+        payload: utf8.encode('dart'),
+        timestamp: MoqTimestamp(value: 0, scale: 1000000),
+      ),
     );
     producer.finish();
 
