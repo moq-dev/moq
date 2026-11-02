@@ -521,9 +521,10 @@ continuity error, and the rest carry on. It takes neither `--follow`,
 `--stitch` nor `--mux-rate`. Only the hang catalog names the track, so an
 `.msf` broadcast needs `--catalog-format hang`.
 
-A stdout export ends with the broadcast. A publisher that leaves still gets
-what the export buffered of it out on schedule first. `export ts --follow 10s`
-then waits that long for the same publisher instance to come back, and carries
+A stdout export ends when its catalog ends and its media has drained. Finishing
+only the media tracks keeps it waiting for catalog updates. A publisher that
+leaves still gets what the export buffered of it out on schedule first.
+`export ts --follow 10s` then waits that long for the same publisher instance to come back, and carries
 on with the same stream. A return that refuses its catalog keeps it waiting
 for the next announcement; if the follow runs out first, it exits 1 with that
 refusal. One that goes before serving, such as one still routed through a dead

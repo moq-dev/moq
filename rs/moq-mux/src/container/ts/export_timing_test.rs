@@ -347,15 +347,21 @@ impl Live {
 
 	/// End the broadcast and let every leg render what it holds.
 	fn finish(&mut self, legs: &mut [&mut Leg]) {
+		self.finish_media();
+		self.catalog.finish().unwrap();
+		for leg in legs.iter_mut() {
+			leg.drain(&self.clock);
+		}
+	}
+
+	/// End the media tracks while the catalog can still announce more.
+	fn finish_media(&mut self) {
 		if let Some(mut group) = self.group.take() {
 			group.finish().unwrap();
 		}
 		self.stalled.clear();
 		self.video.finish().unwrap();
 		self.audio.finish().unwrap();
-		for leg in legs.iter_mut() {
-			leg.drain(&self.clock);
-		}
 	}
 
 	/// Run the clock to `at`, letting every leg read whenever it would have on its own.
@@ -443,27 +449,59 @@ impl Leg {
 		false
 	}
 
-	/// Read to the end of the broadcast, or until nothing is due and 10 ms pass with no end.
-	///
-	/// Only `clock` fires the export's timers, so the 10 ms is an advance of it: a timeout armed
-	/// on it would never fire.
+	/// Read to the end of the broadcast, advancing only to scheduled output.
 	fn drain(&mut self, clock: &kio::clock::Deadlines) {
 		while !self.poll() {
-			if let Some(deadline) = self.export.next_due() {
-				clock.advance(deadline.max(clock.now()));
-				continue;
-			}
-			clock.advance(clock.now() + Duration::from_millis(10));
-			if self.export.next_due().is_none() {
-				self.poll();
-				break;
-			}
+			let deadline = self
+				.export
+				.next_due()
+				.expect("export parked without ending or scheduled output");
+			clock.advance(deadline.max(clock.now()));
 		}
 	}
 
 	/// The PES timing this leg rendered: one entry per PES start.
 	fn units(&self) -> Vec<Unit> {
 		units(&self.out)
+	}
+}
+
+/// Media drains while the catalog stays open; EOF needs both, in either finish order.
+#[tokio::test(start_paused = true)]
+async fn end_waits_for_catalog_and_media() {
+	for catalog_first in [false, true] {
+		let mut live = Live::new(1.0, 0).await;
+		let mut leg = live.join(Duration::ZERO).await;
+		live.run(2 * GOP, &mut [&mut leg], |_| false);
+		if catalog_first {
+			live.catalog.finish().unwrap();
+			assert!(!leg.poll(), "an ended catalog must not discard live media");
+		}
+		live.finish_media();
+		if !catalog_first {
+			loop {
+				assert!(!leg.poll(), "finished media must not end an open catalog");
+				let Some(deadline) = leg.export.next_due() else {
+					break;
+				};
+				live.clock.advance(deadline.max(live.clock.now()));
+			}
+			assert_eq!(
+				leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count(),
+				2 * GOP as usize
+			);
+			live.catalog.finish().unwrap();
+			assert!(
+				leg.woken.0.load(Ordering::Relaxed),
+				"catalog EOF must wake the exporter"
+			);
+		}
+		leg.drain(&live.clock);
+		assert_eq!(leg.export.dropped(), 0);
+		assert_eq!(
+			leg.units().iter().filter(|unit| unit.pid == VIDEO_PID).count(),
+			2 * GOP as usize
+		);
 	}
 }
 
