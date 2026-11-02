@@ -47,6 +47,7 @@ assert.equal(await Bun.file(".github/workflows/land.yml").exists(), false, "no w
 const queue = await workflow("queue");
 assert.deepEqual(queue.on.merge_group, { types: ["checks_requested"] });
 assert.deepEqual(queue.on.pull_request.branches, ["main"]);
+assert.ok(queue.on.pull_request.types.includes("edited"), "retargeting to main must report the context");
 assert.equal(queue.on.pull_request.paths, undefined, "the required context must always report");
 assert.deepEqual(queue.permissions, { contents: "read" });
 assert.equal(queue.jobs.queue.name, "Queue");

@@ -13,7 +13,8 @@ name: Queue
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened]
+    # `edited` covers a PR retargeted to main, which needs the context too.
+    types: [opened, synchronize, reopened, edited]
   merge_group:
     types: [checks_requested]
 
