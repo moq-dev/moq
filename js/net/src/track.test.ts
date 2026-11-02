@@ -131,6 +131,33 @@ test("an ordered owed hole wakes exactly at its wall budget", async () => {
 	}
 });
 
+test("an ordered read skipping a stale group stops waiting on holes below it", () => {
+	const clock = manualTime(0);
+	const producer = receivedTrack();
+	const reader = producer.subscribe({ maxDelay: Milli(50) }).ordered();
+	// A wider subscriber keeps the ledger's gaps open past this reader's budget.
+	const wide = producer.subscribe({ maxDelay: Milli(1000) });
+	try {
+		putGroup(producer, 0);
+		expect(drainOrdered(reader)).toEqual([0]);
+		putGroup(producer, 3);
+		// Group 2 arrives late: its successor makes it stale at 50 ms, while hole 1,
+		// succeeded by group 2, is spared until 90 ms.
+		clock.set(40);
+		putGroup(producer, 2);
+		expect(drainOrdered(reader)).toEqual([]);
+		// Skipping group 2 moves the cursor past hole 1, so group 3 waits on nothing.
+		clock.set(60);
+		expect(drainOrdered(reader)).toEqual([3]);
+	} finally {
+		reader.close();
+		wide.close();
+		producer.finish();
+		producer.close();
+		clock.installed.close();
+	}
+});
+
 test("an ordered owed hole follows media time and a lower successor", async () => {
 	const clock = manualTime(0);
 	const producer = receivedTrack({ timescale: Timescale.MILLI });

@@ -2900,7 +2900,7 @@ export class Subscriber {
 		this.#state.waitingOrdered = false;
 		const groups = this.#state.groups.peek();
 		const cursor = this.#cursor.peek();
-		const start = Math.max(cursor.start, this.#nextSequence);
+		let start = Math.max(cursor.start, this.#nextSequence);
 		while (groups.length > 0 && groups[0].sequence < start) groups.shift()?.close();
 		// One anchor for the whole pass, so walking a backlog off stays linear.
 		const drift = this.#drift();
@@ -2913,6 +2913,9 @@ export class Subscriber {
 			if (this.#staleAt(group.sequence, drift)) {
 				groups.shift();
 				this.#nextSequence = group.sequence + 1;
+				// Holes below a skipped group are undeliverable, even ones the wall clock
+				// still spares because their successor arrived late.
+				start = this.#nextSequence;
 				group.close();
 				continue;
 			}
