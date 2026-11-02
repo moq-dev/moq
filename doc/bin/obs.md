@@ -104,10 +104,11 @@ Xcode or Visual Studio 2022, plus Rust and
 [`cpp/obs/`](https://github.com/moq-dev/moq/tree/main/cpp/obs).
 
 To capture qlog traces, configure a source build with `-DMOQ_FFI_QLOG=ON`, for
-example `cmake --preset ubuntu-x86_64 -DMOQ_FFI_QLOG=ON`. It builds moq-ffi
-with its `qlog` feature, which adds a qlog directory to the advanced settings.
-It is off by default, and the prebuilt archives leave it out, so configuration
-fails if the C++ package would come from a release archive or `MOQ_FFI_DIR`.
+example `cmake --preset ubuntu-x86_64 -DMOQ_FFI_QLOG=ON` before `just obs build`.
+It builds moq-ffi with its `qlog` feature, which adds a qlog directory to the
+advanced settings. It is off by default, and the prebuilt archives leave it
+out, so configuration fails if the C++ package would come from a release
+archive or `MOQ_FFI_DIR`.
 
 ## Advanced settings
 

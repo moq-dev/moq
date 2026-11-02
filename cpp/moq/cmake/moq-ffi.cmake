@@ -163,8 +163,13 @@ else()
             "or architecture, set MOQ_FFI_DIR to a native package for it")
     endif()
     # The top-level build tree, so a project adding both packages shares one cargo build and
-    # one rule for its outputs, as Ninja requires.
+    # one rule for its outputs, as Ninja requires. A qlog build links into a directory of its
+    # own: the hard link keeps cargo's timestamp, so toggling MOQ_FFI_QLOG in place could swap
+    # in an older library that nothing relinks against, while a new path changes the commands.
     set(_out "${CMAKE_BINARY_DIR}/moq-ffi")
+    if(MOQ_FFI_QLOG)
+        string(APPEND _out "-qlog")
+    endif()
     set(MOQ_FFI_LIB "${_out}/${_moq_ffi_static}")
     set(MOQ_FFI_METADATA "${_out}/${_moq_ffi_dynamic}")
     set(MOQ_FFI_CARGO moq_ffi_cargo)
