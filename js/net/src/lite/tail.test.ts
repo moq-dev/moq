@@ -197,20 +197,25 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			await fin();
 
 			// Group 0 has no header, so accounting still waits, and its stream may yet
-			// land behind group 1's. The arrival reader holds at the hole; the sequence
-			// reader is already past it and ends at the boundary.
+			// land behind group 1's. Both readers wait, with the ordered reader holding
+			// group 1 until its budget gives up on the owed hole.
 			expect((await reader.recvGroup())?.sequence).toBe(1);
 			let ended = false;
 			const held = reader.recvGroup().finally(() => (ended = true));
-			expect(await ordered.readString()).toBe("1.0");
-			expect(await ordered.readString()).toBeUndefined();
+			const orderedHeld = ordered.readString();
+			let orderedReady = false;
+			void orderedHeld.then(() => (orderedReady = true));
+			await settle();
+			expect(orderedReady).toBe(false);
 			await settle();
 			expect(ended).toBe(false);
 			expect(reader.closed.peek()).toBeUndefined();
 			expect(hooks.subscriberEnd(reader)).toEqual({ group: 2, frame: 0 });
 
 			// The grace gives up on group 0, and the settled subscription ends the reader.
+			expect(await clock.drive(orderedHeld)).toBe("1.0");
 			expect(await clock.drive(held)).toBeUndefined();
+			expect(await ordered.readString()).toBeUndefined();
 			expect(await reader.closed).toBeNull();
 			ordered.close();
 		} finally {

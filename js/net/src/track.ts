@@ -464,8 +464,7 @@ export class Consumer {
 	 * {@link Subscription.maxDelay} is what asks for data: delivery skips everything above
 	 * the floor that the budget convicts. Without options this is {@link Subscription.default},
 	 * whose budget of zero delivers only the latest group; a larger one reaches back over what
-	 * it can still use, and an options object without `maxDelay` reaches back as far as the
-	 * publisher retains.
+	 * it can still use, and `maxDelay: null` reaches back as far as the publisher retains.
 	 */
 	subscribe(options?: Subscription): Subscriber {
 		return this.#broadcast.subscribe(this.name, options);
@@ -638,6 +637,7 @@ let reofferCached: (
 let reofferSequences: (producer: Producer, sink: TrackState, sequences: readonly number[]) => void;
 // Whether a group may still land on the producer's live feed; assigned in its static block.
 let mayLand: (producer: Producer, land: Land) => boolean;
+let owedGroup: (producer: Producer, start: number, end: number) => { sequence: number; folds?: number } | undefined;
 let sourceStart: (producer: Producer) => number | "pending" | undefined;
 // Actual object metadata outlives cached payloads, unlike empty group heads in model largest.
 let objectLargest: (producer: Producer) => Position | undefined;
@@ -792,6 +792,8 @@ export class Producer {
 	// The first group the wire subscription's live feed serves (see `hooks.startTrack`), unset
 	// until its START resolves it, null for a resolved-empty range, and the requested floor.
 	#served?: { start?: number | null; requested?: number };
+	// Only copies fed by a wire subscription owe missing groups.
+	#subscribed = false;
 	// The sequences the live feed delivered, as a group or a datagram: what a pending tail is
 	// judged by. Eviction never touches it. A gap folds away a subscription's grace after a
 	// later arrival opened it, as the session's tail does, so this holds only the gaps still
@@ -804,6 +806,9 @@ export class Producer {
 	}
 
 	static {
+		hooks.receiveTrack = (producer) => {
+			producer.#subscribed = true;
+		};
 		hooks.receiveGroup = (producer, { sequence, start }) => producer.#createGroup(sequence, start);
 		hooks.writeDatagram = (producer, datagram, inflated) => producer.#insertDatagram(datagram, inflated);
 		sourceStart = (producer) => producer.#served && producer.#feedStart();
@@ -855,17 +860,28 @@ export class Producer {
 				if (entry && !held.has(sequence)) producer.#mirror(entry, sink);
 			}
 		};
-		mayLand = (producer, land) => producer.#mayLand(land);
+		mayLand = (producer, land) => producer.#landable(land) !== undefined;
+		owedGroup = (producer, start, end) => {
+			if (!producer.#subscribed) return undefined;
+			const feed = producer.#feedStart();
+			const floor = feed === "pending" ? producer.#served?.requested : feed;
+			return producer.#landable({
+				start: Math.max(start, floor ?? 0),
+				end,
+				floor: floor !== undefined,
+				grace: producer.#grace(),
+			});
+		};
 	}
 
-	// Whether a group may still land from the live feed, by the rule a pending tail is judged
+	// The first group that may still land from the live feed, by the rule a pending tail is judged
 	// by; see {@link Land}. Mirrors the Rust `TrackState::may_land`.
-	#mayLand(land: Land): boolean {
-		if (this.#state.closed.peek() !== undefined) return false;
+	#landable(land: Land): { sequence: number; folds?: number } | undefined {
+		if (this.#state.closed.peek() !== undefined) return undefined;
 		let start = land.start;
 		if (!land.floor) {
 			const first = this.#arrivals.first();
-			if (first === undefined) return false;
+			if (first === undefined) return undefined;
 			start = Math.max(start, first);
 		}
 		start = Math.max(start, this.#served?.start ?? 0);
@@ -874,13 +890,14 @@ export class Producer {
 		const at = now();
 		const limit = Nano.fromMilli(land.grace);
 		const drops = this.#state.drops.peek();
-		return this.#arrivals
-			.gaps(start, end)
-			.some(
-				(gap) =>
-					(gap.since === undefined || Instant.durationSince(at, gap.since) < limit) &&
-					runGaps(drops, gap.start, gap.end).some((open) => !land.delivered?.covers(open.start, open.end)),
-			);
+		for (const gap of this.#arrivals.gaps(start, end)) {
+			const folds = gap.since === undefined ? undefined : gap.since + limit;
+			if (folds !== undefined && at >= folds) continue;
+			for (const open of runGaps(drops, gap.start, gap.end)) {
+				if (!land.delivered?.covers(open.start, open.end)) return { sequence: open.start, folds };
+			}
+		}
+		return undefined;
 	}
 
 	// Record `[start, end)` given up with `error`. An upstream drop (`open`) also ends the
@@ -999,8 +1016,7 @@ export class Producer {
 	 * {@link Subscription.maxDelay} is what asks for data: delivery skips everything above
 	 * the floor that the budget convicts. Without options this is {@link Subscription.default},
 	 * whose budget of zero delivers only the latest group; a larger one reaches back over what
-	 * it can still use, and an options object without `maxDelay` reaches back as far as the
-	 * publisher retains.
+	 * it can still use, and `maxDelay: null` reaches back as far as the publisher retains.
 	 */
 	subscribe(options: Subscription = Subscription.default()): Subscriber {
 		const sink = new TrackState(options);
@@ -1122,7 +1138,6 @@ export class Producer {
 		if (entry.unverified) hooks.unverifyGroup(dst);
 		entry.mirrors.set(sink, dst);
 		timelineInsert(sink.timeline, dst);
-		void dst.readable().then(() => sink.timelineChanged.update((revision) => revision + 1));
 		sink.latest = Math.max(sink.latest ?? 0, dst.sequence);
 		sink.received.set(Math.max(sink.received.peek(), dst.sequence + 1));
 		sink.groups.mutate((groups) => {
@@ -1365,9 +1380,12 @@ export class Producer {
 		// Follow the group's frames as they land, past the head `#advance` already named.
 		const stop = hooks.groupProgress(group, (total) => {
 			if (total > hooks.groupOffset(group)) this.#advanceObject({ group: group.sequence, frame: total - 1 });
+			// A frame can change an owed hole's reach or drift edge without adding a group.
+			for (const sink of this.#sinks) sink.timelineChanged.update((revision) => revision + 1);
 		});
 		void group.closed.then((closed) => {
 			stop();
+			for (const sink of this.#sinks) sink.timelineChanged.update((revision) => revision + 1);
 			if (closed === null) this.#finishLargest(group.sequence);
 		});
 		// Give held mirrors the new live edge before pruning their timeline entry,
@@ -2701,6 +2719,9 @@ export class Subscriber {
 			this.#state.groups.changed(fn),
 			this.#state.drops.changed(fn),
 			this.#state.startChanged.changed(fn),
+			this.#state.timelineChanged.changed(fn),
+			this.#wall.revision.changed(fn),
+			this.#state.info.changed(fn),
 			this.#cursor.changed(fn),
 			// A widened budget re-offers the groups it skipped as stale.
 			this.#state.update.changed(fn),
@@ -2812,6 +2833,17 @@ export class Subscriber {
 		}
 	}
 
+	// A missing group the subscription still owes holds sequence order until it lands,
+	// is accounted for, or the same drift budget as a buffered group gives up on it.
+	#waitOwed(start: number, end: number, drift: Drift): boolean {
+		const producer = this.#state.producer;
+		if (start >= end || !producer) return false;
+		const owed = owedGroup(producer, start, end);
+		if (!owed || this.#staleAt(owed.sequence, drift, true)) return false;
+		if (owed.folds !== undefined) this.#wakeAt(owed.folds);
+		return true;
+	}
+
 	// The sequence #tryNextGroup (`ordered`) or #tryRecvGroup would take next: the lowest buffered
 	// group in range, not yet handed out, that the budget spares.
 	#peekGroup(ordered: boolean): number | undefined {
@@ -2821,7 +2853,10 @@ export class Subscriber {
 		for (const group of this.#state.groups.peek()) {
 			if (group.sequence < start) continue;
 			if (cursor.end !== undefined && group.sequence >= cursor.end) return undefined;
-			if (!this.#delivered.has(group.sequence) && !this.#staleAt(group.sequence, drift)) return group.sequence;
+			if (!this.#delivered.has(group.sequence) && !this.#staleAt(group.sequence, drift)) {
+				if (ordered && this.#waitOwed(start, group.sequence, drift)) return undefined;
+				return group.sequence;
+			}
 		}
 		return undefined;
 	}
@@ -2849,14 +2884,17 @@ export class Subscriber {
 		for (;;) {
 			const group = groups[0];
 			if (!group || (cursor.end !== undefined && group.sequence >= cursor.end)) break;
-			groups.shift();
-			this.#nextSequence = group.sequence + 1;
 			// Every frame this group could still hold is past the budget, so keep
 			// scanning: one pass walks a whole backlog off rather than replaying it.
 			if (this.#staleAt(group.sequence, drift)) {
+				groups.shift();
+				this.#nextSequence = group.sequence + 1;
 				group.close();
 				continue;
 			}
+			if (this.#waitOwed(start, group.sequence, drift)) return { kind: "idle" };
+			groups.shift();
+			this.#nextSequence = group.sequence + 1;
 			this.#handOut(group.sequence, true);
 			return { kind: "group", group: this.#guard(group) };
 		}
@@ -2998,9 +3036,9 @@ export class Subscriber {
  * group already handed out too: a stalled group's pending frame read rejects once newer
  * content has pulled that far ahead.
  *
- * A history or VOD read sets `maxDelay: null` (no limit). This reader skips a missing
- * group rather than waiting for it, but the Rust reader waits for one a subscription still
- * owes, within the budget, or until it resolves without one. An unlimited or long budget
+ * A history or VOD read sets `maxDelay: null` (no limit). A subscribed track waits for a
+ * missing group the feed still owes, within the budget, or until it resolves without one.
+ * Local tracks skip missing groups. An unlimited or long budget
  * only avoids blocking where the feed signals its gaps: moq-lite, whose publisher sends
  * `SUBSCRIBE_DROP` for every group it won't deliver, or an ordered moq-transport FETCH.
  * Over a moq-transport SUBSCRIBE, which signals no gaps, that wait can last until the

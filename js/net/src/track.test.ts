@@ -59,6 +59,262 @@ function manualTime(initial: number) {
 	};
 }
 
+// A session-fed copy owes holes; an in-process producer does not.
+function receivedTrack(info: Parameters<TrackProducer["accept"]>[0] = {}) {
+	const producer = new TrackProducer("test").accept(info);
+	hooks.receiveTrack(producer);
+	return producer;
+}
+
+function putGroup(producer: TrackProducer, sequence: number, millis?: number) {
+	const group = producer.createGroup(sequence);
+	if (millis !== undefined) group.writeFrame(textFrame("x", Timestamp.fromMillis(millis)));
+	group.finish();
+}
+
+function drainOrdered(reader: import("./track.ts").Ordered) {
+	const sequences: number[] = [];
+	for (let group = reader.tryNextGroup(); group; group = reader.tryNextGroup()) {
+		sequences.push(group.sequence);
+		group.close();
+	}
+	return sequences;
+}
+
+test("ordered reads wait only for subscription-owed groups", () => {
+	const clock = manualTime(0);
+	try {
+		for (const received of [false, true]) {
+			const producer = received ? receivedTrack() : new TrackProducer("test");
+			const reader = producer.subscribe({ maxDelay: Milli(1000) }).ordered();
+			putGroup(producer, 0);
+			putGroup(producer, 2);
+			expect(drainOrdered(reader)).toEqual(received ? [0] : [0, 2]);
+			putGroup(producer, 1);
+			expect(drainOrdered(reader)).toEqual(received ? [1, 2] : []);
+			reader.close();
+			producer.finish();
+			producer.close();
+		}
+	} finally {
+		clock.installed.close();
+	}
+});
+
+test("an ordered owed hole wakes exactly at its wall budget", async () => {
+	const clock = manualTime(0);
+	const producer = receivedTrack();
+	const reader = producer.subscribe({ maxDelay: Milli(50) }).ordered();
+	try {
+		putGroup(producer, 0);
+		expect(drainOrdered(reader)).toEqual([0]);
+		putGroup(producer, 2);
+		let resolved = false;
+		const pending = reader.nextGroup().then((group) => {
+			resolved = true;
+			return group;
+		});
+		await clock.advance(49);
+		expect(resolved).toBe(false);
+		await clock.advance(50);
+		expect(resolved).toBe(true);
+		expect((await pending)?.sequence).toBe(2);
+		for (let sequence = 3; sequence < 10; sequence++) {
+			putGroup(producer, sequence);
+			expect(drainOrdered(reader)).toEqual([sequence]);
+		}
+	} finally {
+		reader.close();
+		producer.finish();
+		producer.close();
+		clock.installed.close();
+	}
+});
+
+test("an ordered owed hole follows media time and a lower successor", async () => {
+	const clock = manualTime(0);
+	const producer = receivedTrack({ timescale: Timescale.MILLI });
+	const reader = producer.subscribe({ maxDelay: Milli(1000) }).ordered();
+	try {
+		putGroup(producer, 0, 0);
+		expect(drainOrdered(reader)).toEqual([0]);
+		const edge = producer.createGroup(4);
+		edge.writeFrame(textFrame("edge", Timestamp.fromMillis(4000)));
+		expect(drainOrdered(reader)).toEqual([]);
+		let resolved = false;
+		const pending = reader.nextGroup().then((group) => {
+			resolved = true;
+			return group;
+		});
+		// The nearer successor puts group 1's reach behind the edge immediately.
+		putGroup(producer, 2, 2000);
+		await settle();
+		expect(resolved).toBe(true);
+		expect((await pending)?.sequence).toBe(2);
+		expect(drainOrdered(reader)).toEqual([]); // Group 3 is still owed.
+		edge.writeFrame(textFrame("within", Timestamp.fromMillis(4999)));
+		expect(drainOrdered(reader)).toEqual([]);
+		const deadline = reader.nextGroup();
+		edge.writeFrame(textFrame("deadline", Timestamp.fromMillis(5000)));
+		await settle();
+		expect((await deadline)?.sequence).toBe(4);
+		edge.finish();
+	} finally {
+		reader.close();
+		producer.finish();
+		producer.close();
+		clock.installed.close();
+	}
+});
+
+test("an ordered owed hole wakes when its ledger gap folds", async () => {
+	const clock = manualTime(0);
+	const producer = receivedTrack();
+	const reader = producer.subscribe({ maxDelay: Milli(50) }).ordered();
+	try {
+		putGroup(producer, 0);
+		expect(drainOrdered(reader)).toEqual([0]);
+		const opener = producer.createGroup(2);
+		await clock.advance(40);
+		putGroup(producer, 3);
+		opener.abort(new StreamError(StreamCode.Cancel));
+		let resolved = false;
+		const pending = reader.nextGroup().then((group) => {
+			resolved = true;
+			return group;
+		});
+		await clock.advance(49);
+		expect(resolved).toBe(false);
+		await clock.advance(50);
+		expect(resolved).toBe(true);
+		expect((await pending)?.sequence).toBe(2);
+		expect(drainOrdered(reader)).toEqual([3]);
+	} finally {
+		reader.close();
+		producer.finish();
+		producer.close();
+		clock.installed.close();
+	}
+});
+
+test("ordered reads pass accounted sequences and honor the feed and reader floors", () => {
+	const clock = manualTime(0);
+	const producer = receivedTrack();
+	const reader = producer.subscribe({ maxDelay: null }).ordered();
+	try {
+		putGroup(producer, 0);
+		producer.appendDatagram(undefined, enc.encode("d"));
+		putGroup(producer, 2);
+		expect(drainOrdered(reader)).toEqual([0, 2]);
+		hooks.dropTrackGroups(producer, 3, 4, new StreamError(StreamCode.Old));
+		putGroup(producer, 4);
+		expect(drainOrdered(reader)).toEqual([4]);
+		producer.createGroup(5).abort(new StreamError(StreamCode.Cancel));
+		putGroup(producer, 6);
+		expect(drainOrdered(reader)).toEqual([5, 6]);
+		hooks.startTrack(producer, { start: 8 });
+		putGroup(producer, 8);
+		expect(drainOrdered(reader)).toEqual([8]);
+		putGroup(producer, 10);
+		expect(drainOrdered(reader)).toEqual([]);
+		reader.withRange({ start: { included: 10 } });
+		expect(drainOrdered(reader)).toEqual([10]);
+	} finally {
+		reader.close();
+		producer.finish();
+		producer.close();
+		clock.installed.close();
+	}
+});
+
+test("ordered owed holes follow zero, narrowed, unlimited, and publisher budgets", async () => {
+	const clock = manualTime(0);
+	try {
+		for (const maxDelay of [Milli.zero, Milli(1000), null]) {
+			const producer = receivedTrack();
+			const reader = producer.subscribe({ maxDelay }).ordered();
+			putGroup(producer, 0);
+			expect(drainOrdered(reader)).toEqual([0]);
+			putGroup(producer, 2);
+			expect(drainOrdered(reader)).toEqual(maxDelay === 0 ? [2] : []);
+			if (maxDelay === null) {
+				await clock.advance(3_600_000);
+				expect(drainOrdered(reader)).toEqual([]);
+				putGroup(producer, 1);
+				expect(drainOrdered(reader)).toEqual([1, 2]);
+			} else if (maxDelay > 0) {
+				const pending = reader.nextGroup();
+				reader.update({ maxDelay: Milli.zero });
+				expect((await pending)?.sequence).toBe(2);
+			}
+			reader.close();
+			producer.finish();
+			producer.close();
+		}
+		const producer = receivedTrack({ maxAge: Milli(50) });
+		const reader = producer.subscribe({ maxDelay: null }).ordered();
+		putGroup(producer, 0);
+		putGroup(producer, 2);
+		expect(drainOrdered(reader)).toEqual([0]);
+		const pending = reader.nextGroup();
+		await clock.advance(3_600_050);
+		expect((await pending)?.sequence).toBe(2);
+		reader.close();
+		producer.finish();
+		producer.close();
+	} finally {
+		clock.installed.close();
+	}
+});
+
+test("ordered owed waits wake on a drop, a declared start, or track close", async () => {
+	const clock = manualTime(0);
+	try {
+		for (const resolve of ["drop", "start", "close"] as const) {
+			const producer = receivedTrack();
+			const reader = producer.subscribe({ maxDelay: null }).ordered();
+			putGroup(producer, 1);
+			// With no declared start the first arrival is the floor.
+			expect(drainOrdered(reader)).toEqual([1]);
+			hooks.startTrack(producer, { start: 0 });
+			putGroup(producer, 3);
+			let ready = false;
+			const held = reader.nextGroup().then((group) => {
+				ready = true;
+				return group;
+			});
+			await settle();
+			expect(ready).toBe(false);
+			if (resolve === "drop") hooks.dropTrackGroups(producer, 2, 3, new StreamError(StreamCode.Old));
+			if (resolve === "start") hooks.startTrack(producer, { start: 3 });
+			if (resolve === "close") {
+				producer.finish();
+				producer.close();
+			}
+			await settle();
+			expect(ready).toBe(true);
+			expect((await held)?.sequence).toBe(3);
+			reader.close();
+			if (resolve !== "close") {
+				producer.finish();
+				producer.close();
+			}
+		}
+		const producer = receivedTrack();
+		hooks.startTrack(producer, { start: 0 });
+		const reader = producer.subscribe({ maxDelay: null }).ordered();
+		putGroup(producer, 1);
+		expect(drainOrdered(reader)).toEqual([]);
+		putGroup(producer, 0);
+		expect(drainOrdered(reader)).toEqual([0, 1]);
+		reader.close();
+		producer.finish();
+		producer.close();
+	} finally {
+		clock.installed.close();
+	}
+});
+
 test("wanted reflects subscriber demand and clears when the last one leaves", async () => {
 	const producer = new TrackProducer("test");
 

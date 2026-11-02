@@ -1263,6 +1263,7 @@ export class Subscriber {
 			ietf: version,
 		});
 		const producer = staged.producer;
+		hooks.receiveTrack(producer);
 		const tail = new Tail();
 		const subscription: Subscription = { track: producer, tail, timescale: ok.properties.timescale, fetchIds: [] };
 		// The subscription starts after Largest, so the joining FETCH or the fill brings its
