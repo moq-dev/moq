@@ -80,7 +80,9 @@ stalled time, audio underruns, and the newest arrival, plus the PROBE
 round-trip time. It writes about once a second while someone subscribes, and
 follows the catalog: a removed or moved section retracts the broadcast. Players
 on one connection watching the same catalog under one name share it and add
-their counts. The decoders' `out.stats` and the stats panel read the same
+their counts. A feedback broadcast belongs to one catalog, so a player watching
+another catalog that solicits the same path under the same name publishes
+nothing and warns; give each catalog's player its own name. The decoders' `out.stats` and the stats panel read the same
 counters. The token must allow publishing under the echo path.
 
 ## Binding from a framework

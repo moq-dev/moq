@@ -150,3 +150,70 @@ test("reporters resolving one feedback path share its broadcast and add their co
 		installed.close();
 	}
 });
+
+test("a reporter for another catalog at a path in use publishes nothing", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = new Origin.Producer();
+	const paths = announced(origin);
+	const catalog = new Signal<Catalog.Root | undefined>({ echo: { path: "viewers" } } as Catalog.Root);
+	const a = watched(origin, "room/a.hang", catalog);
+	const b = watched(origin, "room/b.hang", catalog);
+	const reporters = [
+		new Echo({ broadcast: a, origin, name: "alice", sources: [source("room/a.hang", { video: { frames: 2 } })] }),
+		new Echo({ broadcast: b, origin, name: "alice", sources: [source("room/b.hang", { video: { frames: 100 } })] }),
+	];
+	try {
+		await flush();
+		expect([...paths]).toEqual(["room/viewers/alice.echo"]);
+		// Only the first catalog's counts, never a sum across catalogs.
+		expect((await read(origin, "room/viewers/alice.echo", clock)) as unknown).toEqual({
+			renditions: { video: { frames: 2 } },
+		});
+	} finally {
+		for (const reporter of reporters) reporter.close();
+		a.close();
+		b.close();
+		origin.close();
+		installed.close();
+	}
+});
+
+test("a reporter that leaves and returns is counted once", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	const origin = new Origin.Producer();
+	const catalog = new Signal<Catalog.Root | undefined>({ echo: { path: "viewers" } } as Catalog.Root);
+	const broadcast = watched(origin, "room/live.hang", catalog);
+	const enabled = new Signal(true);
+	const staying = new Echo({
+		broadcast,
+		origin,
+		name: "alice",
+		sources: [source("room/live.hang", { video: { frames: 1 } })],
+	});
+	const returning = new Echo({
+		broadcast,
+		origin,
+		enabled,
+		name: "alice",
+		sources: [source("room/live.hang", { video: { frames: 10 } })],
+	});
+	try {
+		await flush();
+		enabled.set(false);
+		await flush();
+		// The departed reporter's final counts stay in the report.
+		expect((await read(origin, "room/viewers/alice.echo", clock))?.renditions?.video.frames as unknown).toBe(11);
+
+		enabled.set(true);
+		await flush();
+		expect((await read(origin, "room/viewers/alice.echo", clock))?.renditions?.video.frames as unknown).toBe(11);
+	} finally {
+		staying.close();
+		returning.close();
+		broadcast.close();
+		origin.close();
+		installed.close();
+	}
+});

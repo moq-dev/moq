@@ -26,6 +26,11 @@ export interface Key {
 // incoming one, so a few cover it without holding every broadcast ever watched.
 const MAX_BROADCASTS = 4;
 
+// The most rendition IDs a tally keeps per catalog broadcast, so a catalog that keeps renaming its
+// renditions cannot grow it, or each report, without bound. Matches the Rust registry's limit. The
+// oldest makes way; one still counting into it starts over, which a reader treats as a reset.
+const MAX_RENDITIONS = 1024;
+
 type Entry = { received: Received; stalling?: Instant };
 
 /**
@@ -49,6 +54,10 @@ export class Tally {
 		if (!entry) {
 			entry = { received: {} };
 			renditions.set(key.id, entry);
+			if (renditions.size > MAX_RENDITIONS) {
+				const oldest = renditions.keys().next().value;
+				if (oldest !== undefined) renditions.delete(oldest);
+			}
 		}
 		return entry;
 	}

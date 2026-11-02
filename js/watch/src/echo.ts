@@ -57,8 +57,10 @@ export function checkName(name: string): string {
  * that catalog, and the connection's PROBE round-trip time. Each catalog update reconciles it: a
  * removed section, or a changed path, retracts the broadcast it replaces.
  *
- * Reporters on one origin that resolve the same feedback path share one broadcast and add their
- * counts, since a second broadcast at a path would replace the first.
+ * Reporters on one origin that resolve the same feedback path for the same catalog share one
+ * broadcast and add their counts, since a second broadcast at a path would replace the first. A
+ * feedback broadcast belongs to one soliciting catalog, so a reporter for another catalog that
+ * resolves a path already in use publishes nothing and warns: give it another name.
  */
 export class Echo {
 	/** The wired inputs, read-only. */
@@ -100,7 +102,7 @@ export class Echo {
 
 			let shared: Shared;
 			try {
-				shared = Shared.acquire(current.origin, current.path);
+				shared = Shared.acquire(current.origin, current.path, current.base);
 			} catch (err) {
 				console.warn("failed to publish feedback", current.path, err);
 				return;
@@ -133,37 +135,56 @@ export class Echo {
 const published = new WeakMap<Moq.Origin.Table, Map<Moq.Path.Valid, Shared>>();
 
 class Shared {
+	/** The broadcast whose catalog solicited this feedback, which it belongs to. */
+	readonly base: Moq.Path.Valid;
+
 	readonly #origin: Moq.Origin.Table;
 	readonly #path: Moq.Path.Valid;
 	readonly #broadcast: Moq.Broadcast.Producer;
 	readonly #writer: Report.Writer<Schema.Snapshot>;
 	// Each reporter's counts, keyed by its owner.
 	readonly #reporters = new Map<object, () => Snapshot>();
-	// What each owner that left last reported, so the counters stay cumulative without it. Its counts
-	// are cumulative, so a returning owner reports them again itself.
-	readonly #retired = new Map<object, Snapshot>();
+	// The final counts of the owners that left, summed, so the counters stay cumulative without them.
+	#departed: Snapshot = { renditions: {} };
+	// Each departed owner's share of #departed. Its counts are cumulative, so a returning owner takes
+	// its share back out and reports it again itself. Weak, so a departed owner is not retained.
+	readonly #shares = new WeakMap<object, Snapshot>();
 	#signals = new Effect();
 
 	/** Whether anyone reads the feedback, which is when it is written. */
 	readonly watched: Getter<boolean | undefined>;
 
-	static acquire(origin: Moq.Origin.Table, path: Moq.Path.Valid): Shared {
+	/**
+	 * The feedback broadcast at `path` for the catalog of the broadcast at `base`. Throws when it
+	 * already reports for another catalog, since a second broadcast at the path would replace it.
+	 */
+	static acquire(origin: Moq.Origin.Table, path: Moq.Path.Valid, base: Moq.Path.Valid): Shared {
 		let paths = published.get(origin);
 		if (!paths) {
 			paths = new Map();
 			published.set(origin, paths);
 		}
 		let shared = paths.get(path);
+		if (shared && shared.base !== base) {
+			if (shared.#reporters.size > 0) {
+				throw new Error(`${path} already reports feedback for the catalog of ${shared.base}`);
+			}
+			// Every reporter for the other catalog left, and its retraction is still pending: retract now.
+			paths.delete(path);
+			shared.#close();
+			shared = undefined;
+		}
 		if (!shared) {
-			shared = new Shared(origin, path);
+			shared = new Shared(origin, path, base);
 			paths.set(path, shared);
 		}
 		return shared;
 	}
 
-	private constructor(origin: Moq.Origin.Table, path: Moq.Path.Valid) {
+	private constructor(origin: Moq.Origin.Table, path: Moq.Path.Valid, base: Moq.Path.Valid) {
 		this.#origin = origin;
 		this.#path = path;
+		this.base = base;
 		const publication = origin.createBroadcast(path);
 		this.#broadcast = publication.broadcast;
 		try {
@@ -181,12 +202,18 @@ class Shared {
 
 	/** Add `owner`'s counts to the feedback, returning the function that removes them. */
 	join(owner: object, reporter: () => Snapshot): () => void {
-		this.#retired.delete(owner);
+		const share = this.#shares.get(owner);
+		if (share) {
+			this.#shares.delete(owner);
+			this.#departed = subtract(this.#departed, share);
+		}
 		this.#reporters.set(owner, reporter);
 		return () => {
 			if (this.#reporters.get(owner) !== reporter) return;
 			this.#reporters.delete(owner);
-			this.#retired.set(owner, { renditions: reporter().renditions });
+			const final: Snapshot = { renditions: reporter().renditions };
+			this.#shares.set(owner, final);
+			this.#departed = merge(this.#departed, final);
 			// Deferred, so a reporter's rerun reuses the broadcast rather than replacing it.
 			queueMicrotask(() => {
 				if (this.#reporters.size > 0 || published.get(this.#origin)?.get(this.#path) !== this) return;
@@ -198,9 +225,8 @@ class Shared {
 
 	#write(): void {
 		if (!this.#writer.wanted) return;
-		let snapshot: Snapshot = { renditions: {} };
+		let snapshot = this.#departed;
 		for (const reporter of this.#reporters.values()) snapshot = merge(snapshot, reporter());
-		for (const retired of this.#retired.values()) snapshot = merge(snapshot, retired);
 		this.#writer.update(snapshot as Schema.Snapshot);
 	}
 
@@ -230,4 +256,21 @@ function merge(a: Snapshot, b: Snapshot): Snapshot {
 	}
 	const transport = a.transport ?? b.transport;
 	return transport ? { transport, renditions } : { renditions };
+}
+
+// Take a departed reporter's counters back out of `a`. The newest arrival stays, since it is a gauge.
+function subtract(a: Snapshot, b: Snapshot): Snapshot {
+	const renditions: Record<string, Received> = { ...a.renditions };
+	for (const [id, received] of Object.entries(b.renditions)) {
+		const rest: Received = { ...renditions[id] };
+		for (const [counter, n] of Object.entries(received)) {
+			if (counter === "arrival") continue;
+			const key = counter as Exclude<keyof Received, "arrival">;
+			const left = (rest[key] ?? 0) - (n as number);
+			if (left > 0) rest[key] = left;
+			else delete rest[key];
+		}
+		renditions[id] = rest;
+	}
+	return { ...a, renditions };
 }

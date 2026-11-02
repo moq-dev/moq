@@ -47,3 +47,12 @@ test("keeps the most recent few catalog broadcasts", () => {
 	expect(tally.report(Path.from("b0.hang"))).toEqual({});
 	expect(tally.report(Path.from("b5.hang"))).toEqual({ video: { frames: 1 } });
 });
+
+test("keeps a bounded number of rendition IDs per catalog broadcast, dropping the oldest", () => {
+	const tally = new Tally();
+	for (let n = 0; n <= 1024; n++) tally.count({ ...live, id: `r${n}` }, { frames: 1 });
+	const report = tally.report(live.path);
+	expect(Object.keys(report)).toHaveLength(1024);
+	expect(report.r0).toBeUndefined();
+	expect(report.r1024).toEqual({ frames: 1 });
+});
