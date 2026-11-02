@@ -2,15 +2,30 @@
 # (MOQ_FFI_DIR), or a cargo build of this checkout. Sets MOQ_FFI_LIB (the staticlib to link),
 # MOQ_FFI_METADATA (the cdylib uniffi-bindgen-cpp reads), MOQ_FFI_CARGO (the target that builds
 # them, or empty for a prebuilt input), and MOQ_NATIVE_LIBS (what an external linker adds).
+# MOQ_FFI_QLOG adds moq-ffi's qlog feature to the cargo build, which a prebuilt input lacks.
 #
 # Run with -P, it is that cargo build: it links the libraries cargo reports into OUT, so no
 # cargo setting (target-dir, build.target) can move them from where the packages look.
 
 if(CMAKE_SCRIPT_MODE_FILE)
+    execute_process(
+        COMMAND cargo metadata --locked --no-deps --format-version 1
+        WORKING_DIRECTORY "${WORKSPACE}"
+        OUTPUT_VARIABLE _metadata
+        COMMAND_ERROR_IS_FATAL ANY
+    )
+    string(JSON _target_dir GET "${_metadata}" target_directory)
+    file(TO_CMAKE_PATH "${_target_dir}" _target_dir)
     # The shared default build (.cargo/config.toml), which the prebuilt input matches.
     set(_args build-ffi --message-format=json-render-diagnostics)
     if(RELEASE)
         list(APPEND _args --release)
+    endif()
+    # A cdylib's file name carries no feature hash, so a qlog build takes a target directory of
+    # its own rather than replacing the default library every other binding loads.
+    if(QLOG)
+        string(APPEND _target_dir "/qlog")
+        list(APPEND _args --features qlog --target-dir "${_target_dir}")
     endif()
     execute_process(
         COMMAND cargo ${_args}
@@ -27,15 +42,7 @@ if(CMAKE_SCRIPT_MODE_FILE)
     # The wrappers compile for the host, so moq-ffi must too. A build target (CARGO_BUILD_TARGET
     # or a cargo config's build.target) puts the library under <target-dir>/<triple>/<profile>/
     # rather than <target-dir>/<profile>/.
-    execute_process(
-        COMMAND cargo metadata --locked --no-deps --format-version 1
-        WORKING_DIRECTORY "${WORKSPACE}"
-        OUTPUT_VARIABLE _metadata
-        COMMAND_ERROR_IS_FATAL ANY
-    )
-    string(JSON _target_dir GET "${_metadata}" target_directory)
     string(JSON _file GET "${_artifact}" filenames 0)
-    file(TO_CMAKE_PATH "${_target_dir}" _target_dir)
     file(TO_CMAKE_PATH "${_file}" _file)
     get_filename_component(_dir "${_file}" DIRECTORY)
     file(RELATIVE_PATH _within "${_target_dir}" "${_dir}")
@@ -112,7 +119,12 @@ if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
 endif()
 
 set(MOQ_FFI_DIR "" CACHE PATH "Extracted default-feature moq-ffi native package")
+option(MOQ_FFI_QLOG "Build moq-ffi from source with qlog trace capture" OFF)
 if(MOQ_FFI_DIR)
+    if(MOQ_FFI_QLOG)
+        message(FATAL_ERROR "MOQ_FFI_QLOG requires a source build of moq-ffi; MOQ_FFI_DIR "
+            "carries default features only")
+    endif()
     get_filename_component(MOQ_FFI_DIR "${MOQ_FFI_DIR}" ABSOLUTE)
     file(READ "${MOQ_FFI_DIR}/manifest.json" _manifest)
     foreach(_field version target features profile source)
@@ -166,6 +178,7 @@ else()
         add_custom_target(moq_ffi_cargo
             COMMAND "${CMAKE_COMMAND}" -DWORKSPACE=${_moq_workspace} -DOUT=${_out}
                 -DSTATIC=${_moq_ffi_static} -DDYNAMIC=${_moq_ffi_dynamic} -DRELEASE=${_release}
+                -DQLOG=${MOQ_FFI_QLOG}
                 -P "${CMAKE_CURRENT_LIST_FILE}"
             BYPRODUCTS "${MOQ_FFI_LIB}" "${MOQ_FFI_METADATA}"
             COMMENT "Building moq-ffi"

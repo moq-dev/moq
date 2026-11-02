@@ -59,6 +59,22 @@ if command -v cmake >/dev/null; then
         cat "$build_dir/configure.log" >&2
         exit 1
     fi
+    # Neither a release archive nor a prebuilt moq-ffi carries qlog.
+    for scenario in archive prebuilt; do
+        args=(-DMOQ_FFI_QLOG=ON)
+        case "$scenario" in
+            archive) args+=(-DMOQ_LOCAL= -DMOQ_VERSION=0.0.0) ;;
+            prebuilt) args+=("-DMOQ_FFI_DIR=$build_dir") ;;
+        esac
+        if cmake -S . -B "$build_dir/qlog-$scenario" "${args[@]}" >"$build_dir/configure.log" 2>&1; then
+            echo "CMake accepted MOQ_FFI_QLOG without a source build: $scenario" >&2
+            exit 1
+        fi
+        if ! grep -Fq "MOQ_FFI_QLOG requires the in-tree build" "$build_dir/configure.log"; then
+            cat "$build_dir/configure.log" >&2
+            exit 1
+        fi
+    done
     archive="$build_dir/moq-cpp-0.0.0-x86_64-unknown-linux-gnu.tar.gz"
     touch "$archive"
     for scenario in conflict missing mismatch; do

@@ -103,6 +103,12 @@ Xcode or Visual Studio 2022, plus Rust and
 [`uniffi-bindgen-cpp`](/lib/cpp/) to build the C++ package in-tree; see
 [`cpp/obs/`](https://github.com/moq-dev/moq/tree/main/cpp/obs).
 
+To capture qlog traces, configure a source build with `-DMOQ_FFI_QLOG=ON`, for
+example `cmake --preset ubuntu-x86_64 -DMOQ_FFI_QLOG=ON`. It builds moq-ffi
+with its `qlog` feature, which adds a qlog directory to the advanced settings.
+It is off by default, and the prebuilt archives leave it out, so configuration
+fails if the C++ package would come from a release archive or `MOQ_FFI_DIR`.
+
 ## Advanced settings
 
 Off by default; the defaults suit a normal relay. They cover what you would
