@@ -66,7 +66,12 @@ impl SetupAccept {
 		let version = *version;
 
 		let mut accept_error = None;
-		while let Poll::Ready(stream) = session.poll_accept_uni(waiter) {
+		// A peer opening streams at once must not hold the task for its whole MAX_STREAMS
+		// credit. A yield has woken the task, so the rest are accepted on the next poll.
+		let mut budget = kio::coop::Budget::new(32);
+		while budget.poll_yield(waiter).is_ready()
+			&& let Poll::Ready(stream) = session.poll_accept_uni(waiter)
+		{
 			match stream {
 				Ok(stream) => pending.push(Reader::new(stream, version)),
 				Err(err) => {

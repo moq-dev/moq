@@ -14,9 +14,8 @@ const { values, positionals } = parseArgs({
 	},
 });
 const benchmark = values.bench;
-/** Rows each benchmark prints per measurement. */
-const ROWS: Record<string, number> = { frames: 26, drift: 36, ledger: 12, bandwidth: 44 };
-if (!(benchmark in ROWS)) throw new Error("--bench must be frames, drift, ledger, or bandwidth");
+const expectedRows = ({ frames: 26, drift: 36, ledger: 12, bandwidth: 44, "resume-history": 72 } as Record<string, number>)[benchmark];
+if (expectedRows === undefined) throw new Error("--bench must be frames, drift, ledger, bandwidth, or resume-history");
 const rounds = Number(values.rounds);
 if (!Number.isSafeInteger(rounds) || rounds < 1) throw new Error("--rounds must be a positive integer");
 const roots = new Map<string, string>();
@@ -40,12 +39,13 @@ for (const [name, root] of roots) {
 			{
 				name: "repeat-microbenchmark",
 				setup(build) {
-					// The ledger and allocator are internal, so select them explicitly instead of a
-					// package export, from each variant's own checkout.
-					build.onResolve({ filter: /^\.\.\/src\/(ledger|bandwidth|track)\.ts$/ }, ({ path }) => ({
-						path: resolve(root, "js/net/src", path.slice("../src/".length)),
-					}));
-					build.onLoad({ filter: /\/bench\/(frames|drift|ledger|bandwidth)\.ts$/ }, async ({ path }) => {
+					// Internal modules have no package export, so select each variant's own explicitly.
+					build.onResolve({ filter: /^\.\.\/src\// }, ({ path, importer }) =>
+						importer.endsWith(`/js/net/bench/${benchmark}.ts`)
+							? { path: resolve(root, "js/net/bench", path) }
+							: undefined,
+					);
+					build.onLoad({ filter: /\/bench\/(frames|drift|ledger|bandwidth|resume-history)\.ts$/ }, async ({ path }) => {
 						const source = await Bun.file(path).text();
 						if (benchmark !== "frames")
 							return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
@@ -83,7 +83,12 @@ const server = Bun.serve({
 		});
 	},
 });
-const browser = await chromium.launch({ headless: true, executablePath: process.env.BROWSER_BIN });
+const browser = await chromium.launch({
+	headless: true,
+	executablePath: process.env.BROWSER_BIN,
+	// Retention is counted after full collections the page asks for, against an unrounded heap size.
+	args: benchmark === "resume-history" ? ["--js-flags=--expose-gc", "--enable-precise-memory-info"] : [],
+});
 const samples: { round: number; variant: string; rows: string[] }[] = [];
 try {
 	const pages = new Map<string, Page>();
@@ -111,7 +116,7 @@ try {
 			rows.set(variant, []);
 			await pages.get(variant)?.evaluate("globalThis.measure()");
 			const measured = rows.get(variant);
-			if (measured?.length !== ROWS[benchmark]) throw new Error(`incomplete rows: ${variant}`);
+			if (measured?.length !== expectedRows) throw new Error(`incomplete rows: ${variant}`);
 			samples.push({ round, variant, rows: measured });
 			await Bun.write(
 				values.out,
@@ -123,6 +128,22 @@ try {
 			);
 			console.log(`measured ${round} ${variant}`);
 		}
+	}
+	// Reachability is exact here, so a retired route still reachable fails the run, once every
+	// variant's samples are written for comparison.
+	if (benchmark === "resume-history") {
+		const retaining = samples.filter(({ rows }) =>
+			rows.some((row) =>
+				row
+					.split(",")
+					.slice(5, 9)
+					.some((retired) => retired !== "0"),
+			),
+		);
+		if (retaining.length)
+			throw new Error(
+				`retired routes stayed reachable: ${[...new Set(retaining.map((s) => s.variant))].join(", ")}`,
+			);
 	}
 } finally {
 	await browser.close();

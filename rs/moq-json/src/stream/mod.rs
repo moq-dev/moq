@@ -380,15 +380,19 @@ mod test {
 		matches!(result, Err(crate::Error::Net(moq_net::Error::FrameTooLarge)))
 	}
 
+	/// A frame limit small enough to pass cheaply, standing in for moq-net's 32 MiB cache.
+	const BUDGET: u64 = 32 * 1024;
+
 	/// A record larger than a frame is refused before anything is written, so the log carries on:
 	/// the next record lands and decodes.
 	#[test]
 	fn an_oversized_record_is_refused_and_the_log_continues() {
 		for compression in [false, true] {
 			let (mut producer, track) = producer_on(Config::default(), info(compression));
+			producer.set_max_frame_bytes(BUDGET);
 			producer.append(&json!({ "n": 0 })).unwrap();
 
-			let oversized = Value::String("x".repeat(moq_net::group::MAX_CACHE_BYTES as usize));
+			let oversized = Value::String("x".repeat(BUDGET as usize));
 			assert!(refused(producer.append(&oversized)), "compression={compression}");
 
 			producer.append(&json!({ "n": 1 })).unwrap();

@@ -181,7 +181,7 @@ where
 		if let Some(stats) = &options.socket_stats {
 			upgraded = upgraded.with_socket_stats(stats.clone());
 		}
-		let session = upgraded.accept().map_err(Error::accept)?;
+		let session = crate::spawn_qmux(upgraded.accept().map_err(Error::accept)?);
 		crate::server::accept_websocket(session, options, deadline).await
 	})
 	.await
@@ -462,6 +462,7 @@ pub(crate) async fn connect(
 				.with_session_config(crate::qmux_config())
 				.connect(url.as_str())
 				.await
+				.map(crate::spawn_qmux)
 				.map_err(Error::connect)?
 		}
 	};
@@ -523,6 +524,7 @@ async fn connect_tls_override(
 		.with_keep_alive(qmux::ws::KeepAlive::default())
 		.with_session_config(crate::qmux_config())
 		.connect()
+		.map(crate::spawn_qmux)
 		.map_err(Error::connect)
 }
 
@@ -736,6 +738,7 @@ impl Listener {
 				.with_keep_alive(qmux::ws::KeepAlive::default())
 				.with_session_config(crate::qmux_config())
 				.accept()
+				.map(crate::spawn_qmux)
 				.map_err(Error::accept)?;
 			Ok((session, url, Accepted { remote: addr, protocol }))
 		}
@@ -1083,7 +1086,7 @@ mod timeout_tests {
 			let peer =
 				tokio_tungstenite::WebSocketStream::from_raw_socket(peer, tungstenite::protocol::Role::Client, None)
 					.await;
-			let peer = qmux::ws::Upgraded::new(peer, ALPN).connect().unwrap();
+			let peer = crate::spawn_qmux(qmux::ws::Upgraded::new(peer, ALPN).connect().unwrap());
 			let mut accept = Box::pin(accept(server, options));
 			assert!(accept.as_mut().now_or_never().is_none());
 			let _stream = moq_net::kio::wait(|waiter| peer.poll_open_bi(waiter, Default::default()))
