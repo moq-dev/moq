@@ -2,14 +2,14 @@
 //! delivered in batches from tiny steady writes to a single burst, swept over channels,
 //! input rates (with and without resampling) and independent producers.
 //!
-//! PCM is the codec, so buffering and resampling show instead of codec CPU; two Opus
+//! PCM is the codec, so buffering and resampling show instead of codec CPU; four Opus
 //! cases put that cost beside a real codec's. Each case builds fresh producers, writes
 //! every batch and finishes the track, so the partial tail and resampler flush count too.
 //!
 //! Run with `cargo bench -p moq-audio --bench batches`. A table comes first: user-space
 //! instructions per input sample (Linux `perf_event_open`, `-` where unavailable),
-//! allocations, allocated bytes and the slowest write of one counted pass. Criterion
-//! then times each case.
+//! allocations and allocated bytes from an untimed pass, plus the slowest write from a
+//! separate latency pass. Criterion then times each case without per-write timers.
 #![expect(
 	clippy::disallowed_methods,
 	clippy::disallowed_types,
@@ -204,14 +204,16 @@ impl Case {
 	}
 }
 
-/// Write every batch round-robin across the producers, then finish them, returning the slowest write.
-fn run(producers: &mut [Producer], input: &[Frame]) -> Duration {
+/// Time individual writes only in the separate latency pass, outside instruction and throughput measurements.
+fn run<const TIMED: bool>(producers: &mut [Producer], input: &[Frame]) -> Duration {
 	let mut slowest = Duration::ZERO;
 	for frame in input {
 		for producer in producers.iter_mut() {
-			let start = Instant::now();
+			let start = TIMED.then(Instant::now);
 			producer.write(black_box(frame)).unwrap();
-			slowest = slowest.max(start.elapsed());
+			if let Some(start) = start {
+				slowest = slowest.max(start.elapsed());
+			}
 		}
 	}
 	for producer in producers.iter_mut() {
@@ -274,9 +276,12 @@ fn counts() {
 		if let Some(counter) = &mut counter {
 			counter.start();
 		}
-		let slowest = run(&mut producers, &input);
+		run::<false>(&mut producers, &input);
 		let instructions = counter.as_mut().map(instructions::Counter::stop);
 		COUNTING.store(false, Ordering::Relaxed);
+		drop((producers, broadcast));
+		let (broadcast, mut producers) = case.producers();
+		let slowest = run::<true>(&mut producers, &input);
 		drop((producers, broadcast));
 
 		let per_sample = match instructions {
@@ -305,7 +310,7 @@ fn bench_batches(c: &mut Criterion) {
 			b.iter_batched(
 				|| case.producers(),
 				|(broadcast, mut producers)| {
-					run(&mut producers, &input);
+					run::<false>(&mut producers, &input);
 					(broadcast, producers)
 				},
 				BatchSize::PerIteration,
