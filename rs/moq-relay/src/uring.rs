@@ -1079,7 +1079,7 @@ mod tests {
 		set.send_window = Some(32 << 20);
 
 		for (quic, expected) in [
-			(moq_tokio::quic::Config::default(), (128 << 20, 4 << 20, 16 << 20)),
+			(moq_tokio::quic::Config::default(), (4 << 20, 1 << 20, 4 << 20)),
 			(set, (256 << 20, 8 << 20, 32 << 20)),
 		] {
 			let resolved = quic.resolve();
@@ -1137,7 +1137,7 @@ mod tests {
 		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		server.listen.tls.generate = vec!["localhost".into()];
 		let workers = Workers::bind(server, moq_tokio::worker::Config::new(2)).unwrap();
-		let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 		let workers = workers
 			.spawn(
 				cluster,

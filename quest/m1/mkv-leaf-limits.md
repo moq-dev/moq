@@ -29,7 +29,3 @@ importer's existing error for a refused element. Test each element declared
 past its limit, fed in small chunks.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [fMP4 refusals keep framing](/quest/m1/fmp4-refusal-framing.md) - the fMP4 leftover of the same streaming work

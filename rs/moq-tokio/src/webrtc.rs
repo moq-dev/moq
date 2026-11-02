@@ -56,8 +56,9 @@ const SEND_WINDOW: usize = RECORD_SIZE as usize * 4;
 /// ignores it has the channel closed instead of growing memory without limit.
 const READ_SLACK: u64 = 16 * RECORD_SIZE;
 
-/// The connection-level receive window a data channel session grants, qmux's default.
-const RECEIVE_WINDOW: u64 = 1 << 20;
+/// The connection-level receive window a data channel session grants, the `[quic]` default
+/// every qmux session takes.
+const RECEIVE_WINDOW: u64 = crate::quic::DEFAULT_RECEIVE_WINDOW;
 
 /// The default STUN port (RFC 8489 section 18.10).
 const STUN_PORT: u16 = 3478;
@@ -502,7 +503,7 @@ pub(crate) struct Opened {
 /// The qmux session settings for a channel carrying `protocol`, advertising
 /// `max_record_size`: 16 KiB, capped by the peer's SCTP message limit.
 fn session_config(protocol: &str, max_record_size: u64) -> qmux::Config {
-	let mut config = crate::qmux_config();
+	let mut config = crate::qmux_default();
 	config.version = qmux::Version::QMux01;
 	config.protocol = qmux::Protocol::Negotiated(protocol.to_string());
 	config.max_record_size = max_record_size;

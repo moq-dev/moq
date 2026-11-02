@@ -4,6 +4,12 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### fMP4 decode errors are terminal
+
+After `container::fmp4::Import::decode` fails, later decodes, cuts, seeks and discontinuities return that error without reading input or changing tracks, including through `import::Container`.
+Replace the importer to resume instead of feeding it another box or segment. `finish()` still ends the tracks with the accepted media and does not reset the error.
+HLS replaces a refused importer immediately; transient fetch failures still keep their retry budget.
+
 ### A `Delay` sets where a consumer starts ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
 `container::Consumer::set_max_delay(Duration)` is `set_delay(Delay)`, and `with_delay(Delay)` is its builder.
@@ -114,11 +120,11 @@ Call `.with_passthrough(true)` to keep publishing CMAF.
 Read the frame yourself and hand it over: `while let Some(frame) = group.read_frame().await? { for media in container.decode(frame)? { .. } }`.
 An implementation drops its `group.poll_read_frame` call and its `None` end-of-group case, and decodes the frame it is given.
 
-### `Source` resolution takes the reference's epoch (#5699)
+### `Source` resolution takes the reference's instance (#5699)
 
-`Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional epoch after `rel`.
-Pass `config.epoch.as_ref()` (or `Reference::epoch`), or `None` to accept the first instance resolved as before.
-A broadcast proven to serve another epoch fails with the new `Error::EpochMismatch`; over a route without an epoch the check is best effort.
+`Source::bind(rel)`, `resolve(rel)`, and `subscribe_track(rel, name)` take the catalog entry's optional instance after `rel`.
+Pass `config.instance.as_ref()` (or `Reference::instance`), or `None` to accept the first instance resolved as before.
+A broadcast proven to serve another instance fails with the new `Error::InstanceMismatch`; against an instance a session minted the check is best effort.
 
 ### `ts::stats::Export`'s release counters move into `release` (#5849)
 

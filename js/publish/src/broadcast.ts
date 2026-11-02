@@ -445,10 +445,9 @@ export class Broadcast {
 		// broadcast and new subscriptions land on the same producer.
 		const broadcastPublication = origin.createBroadcast(name);
 		const broadcast = broadcastPublication.broadcast;
+		// The publication mints one instance, kept across unannounce and announce, so a restart
+		// is a new stream rather than a resume into the old one.
 		effect.cleanup(() => broadcast.close());
-		// One publisher instance per broadcast, kept across unannounce and announce, so a
-		// restart is a new broadcast rather than a resume into the old one.
-		const epoch = Moq.Epoch.mint();
 
 		// Expose it before serving so an application reacting to `net` can insert its own tracks.
 		this.#net.set(broadcast);
@@ -458,9 +457,9 @@ export class Broadcast {
 
 		// Each track lives as long as the broadcast: a track name always means the same content,
 		// so a re-announce or a rendition change keeps writing to it instead of restarting its
-		// group sequence under the same epoch. The publication keeps rendition tracks by catalog ID,
-		// so registering an ID again finds its track; the catalog's stay out of reach of a colliding
-		// rendition.
+		// group sequence under the same instance. The publication keeps rendition tracks by catalog
+		// ID, so registering an ID again finds its track; the catalog's stay out of reach of a
+		// colliding rendition.
 		this.#records.set({});
 		const publication = new Publication(this.#listed, () => this.#reserved());
 		this.#publication.set(publication);
@@ -508,7 +507,7 @@ export class Broadcast {
 				this.catalog.serve(track, effect);
 			}
 
-			broadcastPublication.announce({ epoch });
+			broadcastPublication.announce();
 		});
 
 		// Static tracks fan out to every subscriber. The encoder-facing handle stays set while the

@@ -11,13 +11,13 @@ import {
 	connect as connectSession,
 	type Established,
 } from "./connection/index.ts";
-import * as Epoch from "./epoch.ts";
 import { SessionCode, SessionError, StreamCode, StreamError, TooFarBehind } from "./error.ts";
 import * as Ietf from "./ietf/index.ts";
 import { Publisher as IetfPublisher } from "./ietf/publisher.ts";
 import { RequestError } from "./ietf/request.ts";
 import { refuse as refuseRequest } from "./ietf/request_stream.ts";
 import { SubscribeTracks } from "./ietf/subscribe_tracks.ts";
+import * as Instance from "./instance.ts";
 import { hooks } from "./internal.ts";
 import * as Lite from "./lite/index.ts";
 import { Publisher as LitePublisher } from "./lite/publisher.ts";
@@ -88,9 +88,9 @@ afterEach(() => mock.restore());
 async function routed(origin: OriginConsumer, path: Path.Valid): Promise<BroadcastConsumer | undefined> {
 	const request = origin.request(path);
 	await yieldNow();
-	const front = request.active.peek()?.clone();
-	request.close();
-	return front;
+	// The handle is the request's logical front, which ends with the request, so the request
+	// stays open for the test.
+	return request.active.peek()?.clone();
 }
 
 async function runPublishSubscribeFlow(protocol: string, version?: number) {
@@ -961,11 +961,11 @@ test("integration: a peer is served the cheaper route it was offered, not the lo
 	const origin = new OriginProducer();
 	const path = Path.from("test");
 	// One publisher instance, so the two compete on cost alone.
-	const epoch = Epoch.mint();
+	const instance = Instance.random();
 	const localPublication = origin.createBroadcast(path);
 	const local = localPublication.broadcast;
-	localPublication.announce({ epoch, cost: 5n });
-	const dynamic = origin.requestsRoute(path, { epoch, cost: 1n });
+	localPublication.announce({ instance, cost: 5n });
+	const dynamic = origin.requestsRoute(path, { instance, cost: 1n });
 
 	const [client, server] = await Promise.all([
 		connect(url, { transport: pair.client }),
@@ -1943,7 +1943,9 @@ test("integration: a blind handle picks up a publisher that arrives late", async
 
 	// Nobody publishes the path yet, so a subscribe is how the caller finds out. That kills the
 	// track, not the handle: a consumed broadcast is scoped to the path, not to one publisher.
-	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toThrow();
+	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toMatchObject({
+		code: StreamCode.NotFound,
+	});
 	expect(watched.active.peek()).toBe(blind);
 
 	// So a subscribe made after the publisher finally shows up still works, on the same handle.
@@ -2006,7 +2008,7 @@ test("integration: ietf blind handle picks up a publisher that arrives late", as
 	if (!blind) throw new Error("expected a blind consumer");
 
 	// Rejects with 404 rather than resetting the whole handle.
-	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toThrow();
+	await expect(blind.track("video").subscribe().ordered().readString()).rejects.toThrow("does_not_exist");
 	expect(watched.active.peek()).toBe(blind);
 
 	const producer = publish(origin, Path.from("later"));

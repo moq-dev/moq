@@ -83,7 +83,9 @@ impl Stream<'_> {
 	/// Check whether this stream has been reset by the peer, returning the reset error code if so
 	///
 	/// After returning `Ok(Some(_))` once, stream state will be discarded and all future calls will
-	/// fail with [`Error::Closed`].
+	/// fail with [`Error::Closed`]. A stream evicted to free a stuck window fails with
+	/// [`Error::Evicted`] until the application stops it, so a reader that watches for a reset
+	/// instead of reading learns it too: bytes it took hold further eviction off until then.
 	pub fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
 		let hash_map::Entry::Occupied(entry) = self.state.recv.entry(self.id) else {
 			return Err(Error::Closed);
@@ -92,7 +94,10 @@ impl Stream<'_> {
 			return Ok(None);
 		};
 		if s.stopped {
-			return Err(Error::Closed);
+			return Err(match s.lease.evicted {
+				true => Error::Evicted,
+				false => Error::Closed,
+			});
 		}
 		let Some(code) = s.reset_code() else {
 			return Ok(None);

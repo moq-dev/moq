@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON window edits take an optional timestamp
+
+`moq_publish_json_window_push` and `moq_publish_json_window_pop` take a final
+`const moq_timestamp *timestamp`. Pass `NULL` to keep stamping the broadcast
+clock, or a pointer to the edit's capture time, converted to track milliseconds.
+Recompile callers against the regenerated `moq.h`.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `moq_announce_event.has_captures` is removed, changing the C ABI. Read `captures_len` directly: zero means the filter has no wildcards. Rebuild consumers against the regenerated header and matching native library.
@@ -120,7 +127,7 @@ Publish a replacement under a new name, and expect a finished track's demand ter
 ### A claim answers by publishing (#5678)
 
 `moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.
-`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer under the epoch you pass: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under that epoch.
+`moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under a fresh instance of its own.
 `moq_broadcast_prepared_free` refuses an answer you will not publish.
 
 ### `moq_track_info` gains `compress` (#5928)

@@ -556,10 +556,10 @@ impl MoqSide {
 		found
 	}
 
-	/// The cluster this process publishes and subscribes on. Built once; the
-	/// origin is its origin, whose Hop ID is random per run unless `--cluster-id`
-	/// names the node.
-	pub fn cluster(&self) -> anyhow::Result<moq_relay::cluster::Cluster> {
+	/// The cluster this process publishes and subscribes on, with the driver that
+	/// must run for as long as it serves. Built once; the origin is its origin, whose
+	/// Hop ID is random per run unless `--cluster-id` names the node.
+	pub fn cluster(&self) -> anyhow::Result<(moq_relay::cluster::Cluster, moq_relay::cluster::Driver)> {
 		moq_relay::cluster::Cluster::new(moq_relay::cluster::Options::new(self.cluster.clone()))
 	}
 
@@ -2084,14 +2084,14 @@ mod tests {
 	}
 
 	#[test]
-	fn independent_importers_cannot_select_a_shared_epoch() {
-		let epoch = hang::moq_net::Epoch::mint().to_string();
+	fn independent_importers_cannot_select_a_shared_instance() {
+		let instance = hang::moq_net::Instance::random().to_string();
 		let refused = Invocation::try_parse_from([
 			"moq",
 			"--connect",
 			"http://relay/anon",
-			"--epoch",
-			&epoch,
+			"--instance",
+			&instance,
 			"import",
 			"ts",
 		]);
