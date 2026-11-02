@@ -134,6 +134,10 @@ fix $BASE="":
 oss-scanner *args:
     sh/oss-scanner.sh "$@"
 
+# Set every eligible package to one minor at a release cut; omit to check.
+version TARGET="":
+    python3 sh/version.py {{ if TARGET == "" { "" } else { quote(TARGET) } }}
+
 # Build the packages.
 build:
     just js build
