@@ -37,18 +37,26 @@ Across our publishers and relays, track discovery needs **moq-lite 07
 tracks, and our moq-transport publishers refuse SUBSCRIBE\_TRACKS. Rust can list
 a third-party moq-transport publisher that supports that request, but that
 does not make a moq-transport hop through our publishers support recording.
-Choose the protocol versions at setup; see [transport](/concept/transport).
+No default version set includes it, so both ends of each hop must opt in: the
+publishing and recording clients with `--connect-version moq-lite-07-wip`, and
+each relay by listing it in [`listen.version`](/bin/relay/config#listen), plus
+`connect.version` for its cluster links. A relay left at its default versions
+cannot negotiate moq-lite 07.
 
 Recording starts with content the subscription can still receive. A missing
 group is given up after the publisher's max age capped by the producer's max
 delay, so a gap cannot stall later groups. Datagrams are uncached and can only
 be recorded from when the subscription takes effect. An archive cannot recover
-content already lost or evicted before it subscribed.
+content already lost or evicted before it subscribed. The same max delay
+(`producer::Config::max_delay`, 10 s by default and in `moq export archive`)
+bounds the backlog: content further behind the live edge is skipped, even when
+the publisher still caches it.
 
 Pick a distinct store prefix for each publisher instance, such as its broadcast
 path and [epoch](/concept/identity). Restarting a recorder on the same instance
-and prefix resumes after each track's last stored frame; a prefix already marked
-complete records nothing. Never append a new publisher run that restarts its
+and prefix resumes after each track's last stored frame, within that max delay:
+an interruption longer than it leaves a gap. A prefix already marked complete
+records nothing. Never append a new publisher run that restarts its
 group numbers to an old prefix. `moq export archive` makes this choice for you.
 
 ## What the store holds
@@ -68,7 +76,9 @@ wall time for untimed ones. A flush deadline also stores idle tracks, splitting
 long groups between frames when needed. Groups, frame positions, timestamps,
 payloads, and the distinction between groups and datagrams survive storage.
 With DVR pruning enabled, old superseded objects are deleted after the retention
-window and grace; the newest object of each track stays.
+window and grace; the newest object of each track stays. Pruning runs only while
+the recorder runs: once a recording completes or its recorder stops, objects not
+yet due stay until something else deletes them, such as a store lifecycle rule.
 
 The [moq-archive rustdoc](https://docs.rs/moq-archive) specifies the format for
 the published version. This page follows the

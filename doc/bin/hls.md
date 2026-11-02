@@ -61,8 +61,9 @@ What that means for you:
 
 A [broadcast archive](/concept/archives) is served the same
 way, with no second stored copy: record a broadcast, republish it, and export
-the republished broadcast. Recording needs moq-lite 07 on every network hop
-for track discovery.
+the republished broadcast. Through this project's publishers and relays,
+recording needs moq-lite 07 on every network hop for track discovery; see
+[Archives](/concept/archives#discover-and-record) for how each hop opts in.
 
 ```bash
 moq --connect https://relay.example.com/anon --connect-version moq-lite-07-wip --broadcast event export archive s3://recordings

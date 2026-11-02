@@ -365,8 +365,9 @@ equivalents.
 
 Recording through our publishers and relays needs opt-in `moq-lite-07-wip`
 on every hop for track discovery. Older moq-lite versions cannot list tracks,
-and our moq-transport publishers refuse the listing. See
-[Archives](/concept/archives) for discovery, storage, and serving limits.
+and our moq-transport publishers refuse the listing. The publisher and each
+relay must enable it too; see [Archives](/concept/archives#discover-and-record)
+for how, and for storage and serving limits.
 
 ```bash
 # Record every broadcast announced under `event`
