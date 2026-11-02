@@ -1137,7 +1137,7 @@ mod tests {
 		server.listen.bind = Some("127.0.0.1:0".parse().unwrap());
 		server.listen.tls.generate = vec!["localhost".into()];
 		let workers = Workers::bind(server, moq_tokio::worker::Config::new(2)).unwrap();
-		let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 		let workers = workers
 			.spawn(
 				cluster,

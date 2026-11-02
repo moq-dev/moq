@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Ordered subscriptions wait for owed groups
+
+An ordered reader on a subscribed track now waits at a missing group while the feed may still deliver it, up to `maxDelay` by media time or wall clock. Local tracks still skip gaps, and the zero default waits for nothing.
+With `maxDelay: null`, there is no subscriber deadline. Use a finite budget for bounded waiting: a moq-transport SUBSCRIBE signals no gaps, so an unlimited wait can last until the track ends. Publisher retention still bounds the budget.
+
 ### `maxDelay: null` sets no subscriber limit ([#7403](https://github.com/moq-dev/moq/pull/7403))
 
 A `Track.Subscription` whose `maxDelay` is `null` reaches back as far as the publisher's `Track.Info.maxAge` keeps, as `None` does in Rust. An omitted or `undefined` `maxDelay` is still zero.

@@ -13,6 +13,18 @@ WebSocket, `tcp://`, `tls://`, and `unix://` sessions take the `[quic]` windows 
 An embedder that builds `web::Web` itself passes the relay's `[quic]` with `Web::with_quic`; without it, WebSocket sessions start at the `[quic]` defaults until admitted.
 A lite-01/02 peer whose initial announcement set exceeds 1 MiB is refused; it needs lite-03 or later.
 
+### `Cluster::new` returns a driver to poll ([#7626](https://github.com/moq-dev/moq/pull/7626))
+
+`Cluster::new` no longer spawns the origin's lifecycle work or the cache governor; it returns `(Cluster, Driver)`, and nothing runs until the driver is polled.
+`Relay` polls it for you. An embedder building a `Cluster` itself keeps the driver for as long as the cluster serves, and polls it with `Driver::poll` or runs it with `Driver::run`, for example `tokio::spawn(driver.run())`:
+
+```rust
+let (cluster, driver) = moq_relay::cluster::Cluster::new(options)?;
+tokio::spawn(driver.run());
+```
+
+Dropping the driver tears the origin down. `Driver::run` returns the first panic among its tasks, such as `origin driver panicked: ...`, which `Started::run` used to report.
+
 ### `tls://` links verify client certificates ([#7358](https://github.com/moq-dev/moq/pull/7358))
 
 The `listen.tcp.tls` listener applies `listen.tls.root` and pinned `tls.peers` as the QUIC listener does, so a stream-only relay with that listener no longer refuses them.

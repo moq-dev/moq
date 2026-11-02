@@ -19,5 +19,4 @@ Public API: none. Wire: none.
 
 ## Required
 
-- [Cluster polls its own work](/quest/m1/poll-first/no-spawn/cluster.md) - the cluster's driver and dials stop spawning on tokio
 - [Admissions and stats are polled](/quest/m1/poll-first/no-spawn/admissions.md) - admissions stop spawning on tokio
