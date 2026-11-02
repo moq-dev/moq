@@ -25,6 +25,8 @@ class QueryTests(unittest.TestCase):
         (self.repo / "sh").mkdir(parents=True)
         for script in ("dispatch.sh", "changed.sh", "local.sh"):
             shutil.copy(ROOT / "sh" / script, self.repo / "sh" / script)
+        # The stub belongs in the base so it does not widen every test's diff.
+        (self.repo / "sh/kvm.sh").write_text("#!/bin/sh\nexit 0\n")
         self.bin = self.root / "bin"
         self.bin.mkdir()
         for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
@@ -213,7 +215,6 @@ class QueryTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
 
     def stub_ci(self, just=""):
-        (self.repo / "sh/kvm.sh").write_text("#!/bin/sh\nexit 0\n")
         for tool in (
             "bun",
             "python3",
