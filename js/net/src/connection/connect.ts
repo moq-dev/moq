@@ -48,7 +48,8 @@ export interface WebSocketProps {
 
 	/**
 	 * The delay in milliseconds before attempting the WebSocket fallback (default: 500).
-	 * If WebSocket won the previous race for a given URL, this is 0.
+	 * It is 0 while WebSocket holds the last win against the host and port the fallback dials,
+	 * until WebTransport wins a race there again.
 	 */
 	delay?: Milli;
 }
@@ -282,8 +283,19 @@ type SessionProps = {
 	implementation: string;
 };
 
-// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
+/**
+ * Servers (host and port) the WebSocket fallback dials where WebSocket won the last race, so the
+ * next dial there skips QUIC's head start. Both transports still race, and a WebTransport win
+ * deletes the entry, since UDP gets through again. Keyed like moq-tokio's: whether UDP reaches a
+ * server does not depend on the path or query, which may hold a rotating credential.
+ */
 const websocketWon = new Set<string>();
+
+/** The {@link websocketWon} key for the URL the WebSocket fallback dials. */
+function websocketKey(url: URL): string {
+	const port = url.port || (url.protocol === "http:" || url.protocol === "ws:" ? "80" : "443");
+	return `${url.hostname}:${port}`;
+}
 
 /** The default connect signal: never aborts. */
 const NEVER_ABORTED = new AbortController().signal;
@@ -387,13 +399,15 @@ async function connectInner(
 		? hedgeWebTransport(url, cancel, offered.alpns, props.webtransport)
 		: undefined;
 
-	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket has won in the past.
-	// NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.
+	// Give QUIC a head start to connect before trying WebSocket, unless WebSocket won the last race
+	// to this server. NOTE that QUIC should be faster because it involves 1/2 fewer RTTs.
+	const websocketUrl = fallbackDial?.url ?? url;
+	const server = websocketKey(websocketUrl);
 	const headstart =
-		!webtransport || websocketWon.has(url.toString()) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
+		!webtransport || websocketWon.has(server) ? 0 : (props.websocket?.delay ?? DEFAULT_WEBSOCKET_DELAY_MS);
 	const websocket =
 		props.websocket?.enabled !== false
-			? connectWebSocket(fallbackDial?.url ?? url, headstart, cancel, offered.alpns)
+			? connectWebSocket(websocketUrl, headstart, cancel, offered.alpns)
 			: undefined;
 
 	if (!websocket && !webtransport) {
@@ -422,12 +436,13 @@ async function connectInner(
 	// Abort the setup handshake without leaking the selected transport.
 	void abort.then(() => session.close());
 
-	// Save if WebSocket won the last race, so we won't give QUIC a head start next time.
+	// Record who won the race to this server, so QUIC's next head start follows the last result.
 	if (session instanceof Session) {
 		console.debug(redact(url), "connected via WebSocket");
-		websocketWon.add(url.toString());
+		websocketWon.add(server);
 	} else {
 		console.debug(redact(url), "connected via WebTransport");
+		websocketWon.delete(server);
 	}
 
 	// The remaining setup is identical whether the transport was raced or supplied.
