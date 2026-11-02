@@ -1558,13 +1558,33 @@ impl Reader {
 	/// by that copy), dropped, skipped as stale, or given up as unfillable. What lies under its
 	/// resume point was the copies' it replaced, each let go once it had nothing more, and a
 	/// backfill still out is not judged yet. A route between copies has nothing to judge.
+	/// `taken` holds the logical readers' records, the reader's own first.
 	fn exhausted(&mut self, taken: &[&Delivered], waiter: &kio::Waiter) -> bool {
 		if self.resumed.is_some() {
 			return false;
 		}
+		let (lowest, cap) = self.groups;
+		let resumed = self.copies.last().and_then(|copy| copy.floor);
 		let window = self.window();
-		if window.is_pending() || window.end().is_none() {
+		let Some(end) = window.end().filter(|_| !window.is_pending()) else {
 			return false;
+		};
+		// A group under the serving copy's resume point that the local floor or cap keeps
+		// out stays owed, as on one cursor, though no copy reads it.
+		if let Some(resumed) = resumed {
+			let until = resumed.min(end);
+			for run in window
+				.runs(window.floor().unwrap_or(0))
+				.take_while(|run| *run.start() < until)
+			{
+				let run = *run.start()..run.end().saturating_add(1).min(until);
+				if Delivered::gaps_in_all(taken, run)
+					.iter()
+					.any(|gap| gap.start < lowest || cap.is_some_and(|cap| gap.end > cap))
+				{
+					return false;
+				}
+			}
 		}
 		match self.copies.last_mut() {
 			Some(Copy {

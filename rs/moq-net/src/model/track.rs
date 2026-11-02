@@ -6761,11 +6761,7 @@ impl Cursor {
 			.take_while(|run| *run.start() < end)
 			.all(|run| {
 				let run = *run.start()..run.end().checked_add(1).map_or(end, |next| next.min(end));
-				let mut gaps = vec![run];
-				for taken in taken {
-					gaps = gaps.into_iter().flat_map(|gap| taken.gaps(gap)).collect();
-				}
-				gaps.into_iter().all(&accounted)
+				Delivered::gaps_in_all(taken, run).into_iter().all(&accounted)
 			})
 	}
 
@@ -7517,6 +7513,17 @@ impl Cursor {
 		if !self.seek_pending.is_empty() {
 			self.seek_pending = next.map_or_else(BTreeMap::new, |next| self.seek_pending.split_off(&next));
 		}
+		self.forget_heads_below(next);
+	}
+
+	/// Let go of the heads asked below `next`, which an ordered read never goes back for:
+	/// one still out would keep the read waiting on a fill it no longer polls.
+	fn forget_heads_below(&mut self, next: Option<u64>) {
+		if let Some(heads) = &mut self.heads {
+			let next = next.unwrap_or(u64::MAX);
+			heads.fetching = heads.fetching.split_off(&next);
+			heads.filled = heads.filled.split_off(&next);
+		}
 	}
 
 	/// The lowest servable group past the last one returned, walking off everything the
@@ -7647,9 +7654,7 @@ impl Cursor {
 		if let Some(misses) = &mut self.misses {
 			misses.take_filled(group.sequence);
 		}
-		if let Some(heads) = &mut self.heads {
-			heads.filled.remove(&group.sequence);
-		}
+		self.forget_heads_below(self.next_sequence);
 		// The delivery commits everything the seek stepped over to reach this group.
 		self.commit_seek_stale(self.next_sequence.unwrap_or(u64::MAX));
 		group.cache_refresh();
