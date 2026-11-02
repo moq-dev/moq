@@ -604,7 +604,8 @@ impl Rendition {
 
 	/// The predecessors' rows listed ahead of `own`, oldest first, each with its instance.
 	///
-	/// They are trimmed as one window with `own`, as if one instance had listed them all, and a
+	/// They are trimmed as one window with `own`, as if one instance had listed them all. Rows
+	/// before a jump in the numbering are dropped, as a skip clears one instance's window. A
 	/// predecessor none of whose rows is left is released, along with every older one, once none
 	/// of them can list another.
 	fn inherited(&self, own: &[segments::Row]) -> Vec<(Arc<Rendition>, segments::Row)> {
@@ -627,8 +628,11 @@ impl Rendition {
 			.collect();
 		let inherited = rows.len();
 		rows.extend(own.iter().map(|row| (None, row.clone())));
+		// Records skipped across the hand-over leave a jump the inherited rows can't bridge.
+		let numbers: Vec<_> = rows.iter().map(|(_, row)| row.segment).collect();
+		let mut trimmed = broken(&numbers, inherited);
+		rows.drain(..trimmed);
 		let window = self.fanout.window();
-		let mut trimmed = 0;
 		while trimmed < inherited {
 			let rest = match rows.get(1) {
 				Some((_, second)) => rows.back().expect("two rows").1.end.saturating_sub(second.pts.into()),
@@ -1139,17 +1143,16 @@ impl Rendition {
 	/// media remains usable after its broadcast ends or is replaced; replacement media is never
 	/// read.
 	pub async fn init(&self, hash: &str) -> Result<Option<Bytes>> {
-		let init = self.load_init().await?;
-		if let Some(init) = init.filter(|init| init.hash == hash) {
-			return Ok(Some(init.bytes.clone()));
-		}
-		// A predecessor's segments still listed map its init.
+		// A predecessor's segments still listed map its init, which was built before any playlist
+		// listed them (see `media_playlist`), so it is served without building this instance's.
 		for rendition in self.lineage() {
-			if let Some(init) = rendition.load_init().await?.filter(|init| init.hash == hash) {
+			rendition.authorize()?;
+			if let Some(init) = rendition.built_init(&rendition.run()).filter(|init| init.hash == hash) {
 				return Ok(Some(init.bytes.clone()));
 			}
 		}
-		Ok(None)
+		let init = self.load_init().await?;
+		Ok(init.filter(|init| init.hash == hash).map(|init| init.bytes.clone()))
 	}
 
 	/// The current CMAF init segment, whatever its hash, built on first request and cached.
@@ -1399,6 +1402,18 @@ impl Rendition {
 ///
 /// A record is listed once the next one arrives, which bounds its groups and, unless it states
 /// its own, its duration. A stop is listed at once, as a gap.
+/// How many leading rows of `segments` a jump in their numbering cuts off, looking only at the
+/// first `inherited` rows and the one after them.
+///
+/// A media playlist numbers its rows from the first one's segment, so rows listed before a jump
+/// would shift every later row's media sequence number once they slide out.
+fn broken(segments: &[u64], inherited: usize) -> usize {
+	(1..segments.len().min(inherited + 1))
+		.rev()
+		.find(|&i| segments[i - 1].checked_add(1) != Some(segments[i]))
+		.unwrap_or(0)
+}
+
 async fn watch_records(
 	broadcast: moq_net::broadcast::Consumer,
 	hls: Hls,
@@ -1903,5 +1918,18 @@ mod tests {
 			.await
 			.expect("the failure wakes the wait")
 			.unwrap();
+	}
+
+	// A jump in the numbering, from records skipped across a hand-over, drops the inherited rows
+	// before it, but never the rendition's own.
+	#[test]
+	fn a_numbering_jump_cuts_the_inherited_rows() {
+		assert_eq!(super::broken(&[0, 1, 2, 3], 2), 0);
+		assert_eq!(super::broken(&[0, 1, 5, 6], 2), 2, "between inherited and own");
+		assert_eq!(super::broken(&[0, 3, 4, 5], 2), 1, "between two predecessors");
+		assert_eq!(super::broken(&[0, 3, 7], 2), 2, "the last jump counts");
+		assert_eq!(super::broken(&[0, 1, 2, 9], 2), 0, "own rows are never cut");
+		assert_eq!(super::broken(&[0, 1], 2), 0);
+		assert_eq!(super::broken(&[], 0), 0);
 	}
 }
