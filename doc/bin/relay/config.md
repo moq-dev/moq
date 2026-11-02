@@ -154,17 +154,19 @@ cannot see the peer's timeout, so it derives from the local `idle_timeout`.
 
 Raise the receive windows when a fat, long path idles below the link rate: a
 connection carries at most its window per round trip. The 4 MiB
-`receive_window` default carries about 335 Mbps at a 100 ms RTT, plenty for one
+`receive_window` default carries about 270 Mbps at a 100 ms RTT, plenty for one
 viewer or publisher, and bounds how much unread data and incomplete messages
 one peer can make the relay buffer. It has to fit the largest unit a session
 assembles, one 1 MiB segment, so a smaller value, here or in
 `[limits.peer.quic]`, is refused at startup. When incomplete messages fill the
 window, the relay cancels the least urgent stream: the lowest subscription
 priority, then the group its subscription would deliver last. WebSocket and TCP
-sessions get the same windows and the same cancellation; over iroh the window
-bounds only unread data. `stream_receive_window` only paces one stream: its
-credit returns as bytes are read, whether or not their message is complete, so
-the 1 MiB default caps one group stream at about 84 Mbps at a 100 ms RTT.
+sessions cancel the same way; the relay accepts them at the default windows and
+widens peers to `[limits.peer.quic]`, while links it dials take these settings.
+Over iroh the window bounds only unread data. `stream_receive_window` only paces
+one stream: its credit returns as bytes are read, whether or not their message
+is complete, so the 1 MiB default caps one group stream at about 67 Mbps at a
+100 ms RTT.
 
 ## \[limits.client] and \[limits.peer]
 
@@ -188,11 +190,12 @@ send_window = 16777216               # Unacknowledged outgoing data (16 MiB).
 
 `[limits.peer.quic]` takes only `max_streams`, `receive_window`, and `send_window`;
 any other `[quic]` key is refused. They replace the `[quic]` values for a
-peer's QUIC connection once its grant is known, before the SETUP reply. Links
-the relay dials get them from the handshake on. A link carrying a whole cluster is then
-not throttled by `[quic]` limits sized for one viewer, for example
-`--limits-peer-quic-max-streams=200000`. Peers over WebSocket, TCP, or iroh keep
-their transport's own limits.
+peer's connection once its grant is known, before the SETUP reply, over QUIC,
+WebSocket, or TCP alike. Links the relay dials get them from the handshake on.
+A link carrying a whole cluster is then not throttled by `[quic]` limits sized
+for one viewer, for example `--limits-peer-quic-max-streams=200000`. Peers over
+iroh keep iroh's own limits. The 16 MiB windows carry about 450 Mbps at a 250 ms
+RTT and about 1 Gbps at 100 ms; raise both for a busier link.
 
 These are the defaults. Each subscription and FETCH holds a stream, as does each
 PUBLISH a peer's track listing gets, so `[quic]` or `[limits.peer.quic]`

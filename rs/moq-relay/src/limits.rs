@@ -113,7 +113,7 @@ pub struct Quic {
 impl Default for Quic {
 	fn default() -> Self {
 		// Above the `[quic]` defaults, which are sized for one viewer rather than a link
-		// carrying a whole cluster's traffic: about 537 Mbps at a 250 ms RTT, and a paused
+		// carrying a whole cluster's traffic: about 450 Mbps at a 250 ms RTT, and a paused
 		// stream budget of half of it for the groups slow readers hold back.
 		let window = std::num::NonZeroU64::new(16 << 20).expect("non-zero");
 		Self {

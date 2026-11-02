@@ -12,6 +12,14 @@ otherwise refreshes or ends with `Error::Evicted`. A byte stream over MoQ then
 loses nothing to a reader that keeps up, and each hop keeps its own congestion
 control and retransmissions.
 
+The paced hops include qmux sessions (WebSocket, `tcp://`, `tls://`,
+`unix://`, and WebRTC): they lease receive credit natively, so incomplete
+messages are bounded by the session's receive window and the lowest-priority
+holder is evicted when it is stuck, as on native QUIC. The per-session memory
+a peer can make us hold is one deliberate, documented number across native
+QUIC and qmux. The browser keeps reading unpaced until WebTransport offers a
+real receive-credit contract.
+
 ## Plan
 
 Decided 2026-10-25 (maintainer, mesh planning interview), reopening the
@@ -112,28 +120,80 @@ in `rs/moq-net/src/transport/boxed.rs`; moq-quic reports its windows through
 moq-tokio and moq-uring, and a transport that reports none never pauses) and
 the public readiness future.
 
+Decided 2026-11-02 (maintainer, /quest-grill interview on
+[moq-dev/moq#7624](https://github.com/moq-dev/moq/pull/7624)):
+
+- Native only: finish the moq-quic path (tokio, io_uring, and qmux on its
+  mux). Browser parity waits on a real receive-credit contract for
+  WebTransport, since `Reader.closed` watches resets but nothing says how much
+  credit a paused stream holds; guessed window constants would move memory
+  outside flow control. Rejected: a browser read-ahead cap, and dropping the
+  browser from scope.
+- qmux is handled here, absorbing the m2 qmux receive-lease quest: qmux's
+  `RecvStream` leases natively on moq-quic's mux instead of through
+  `poll::Buffered`, evicts by priority, and so closes the 2026-10-27 audit's
+  NET-3 gap (`Buffered` bounded each stream's incomplete message by the largest
+  message, and nothing bounded them in aggregate). Rejected: deferring qmux to
+  that quest, and adding hooks here while keeping leases in m2.
+- The lease floor is one 1 MiB segment for every transport and version: the
+  lite-01/02 `ANNOUNCE_INIT` cap drops from 64 MiB to a segment less its 16
+  bytes of prefixes, so `moq_net::transport::MIN_RECEIVE_WINDOW` is 1 MiB. A
+  legacy origin whose initial set exceeds it fails its announce loudly, on
+  both ends. Rejected: a 4 MiB cap, and keeping 64 MiB with a per-version
+  floor.
+- Window defaults are one per-session number across native QUIC and qmux:
+  clients get a 4 MiB connection and a 1 MiB stream receive window, and qmux
+  takes the same client/peer split as native QUIC. The cluster peer windows
+  (`[limits.peer.quic]`, 640 MiB) and the client `send_window` (16 MiB) are
+  re-derived from measured bandwidth-delay needs, with the maintainer
+  suggesting about 16 MiB for peers. Rejected for clients: 16, 32, or 128 MiB
+  connection windows, and a 4 MiB stream window.
+- Local readiness takes the next frame's `frame::Info`
+  (`group::Producer::poll_ready(waiter, &info)` and `ready(&info)`), reusing
+  ingest's admission semantics, including its whole-frame deadlock exception.
+  Rejected: a bare size on the same methods.
+- Whole-batch fills move to [flights](/quest/m1/unbounded-groups/flights.md),
+  since the failure crosses groups while this mechanism paces one group copy.
+
+The adapter inventory this plan once listed is stale: moq-tokio has no Quinn
+backend, and moq-ffi drives sessions through moq-tokio rather than a
+transport of its own, so neither needs an adapter. Iroh, which returns credit
+as it reads, leaves with its removal
+([moq-dev/moq#7345](https://github.com/moq-dev/moq/pull/7345)); until then its
+ingest never pauses.
+
+Landed in [moq-dev/moq#7624](https://github.com/moq-dev/moq/pull/7624):
+sized local readiness; the one-segment floor; 4 MiB, 1 MiB, and 4 MiB client
+receive, stream, and send windows in moq-tokio, moq-uring, and qmux; 16 MiB
+cluster peer windows; native qmux leases with eviction, window reporting, and
+`poll_reset`; qmux sessions starting at the `[quic]` windows and widening to
+`[limits.peer.quic]` for peers; and a Bun sender exhausting a qmux receiver
+over WebSocket (`just test receive-credit`). At the client defaults a session
+pauses two group streams (half the window, a stream window each), and a peer
+link eight; past that, groups read and shed as before pacing.
+
 What remains:
 
-- Receive-window reporting for the transports that report none yet (quinn,
-  iroh, qmux, WebTransport in the browser, and the FFI adapters), whose ingest
-  never pauses until they do. Each must also answer
-  `poll::RecvStream::poll_reset`, or a reset goes unseen while paused.
-- A sized readiness check for local writers: `group::Producer::ready()`
-  waits for room but not for the next frame's size, so a local frame larger
-  than the room left still sheds what the egress has yet to send.
-- JS parity.
+- Control credit for streams parked on TRACK_INFO. Group data a SUBSCRIBE
+  sent alongside TRACK, or a FETCH, leaves unread until TRACK_INFO arrives
+  must not use up the connection window, or TRACK_INFO itself can't arrive;
+  TRACK_INFO and other control messages always get connection credit. Today
+  a parked stream holds credit outside the paused budget, and only eviction
+  on a leasing transport frees it. The open choice is what a parked stream
+  does once the budget is full: stop it (the group is shed whole, and a burst
+  of subscriptions loses first groups past two per client session), or park
+  it unreserved at the lowest receive priority, so a stuck window evicts it
+  before control streams. Test it: enough parked groups to fill the
+  connection window, with TRACK_INFO still arriving and the groups then read.
 - A two-relay chain test with memory measured near the window.
+- Per-session retained bytes and throughput across many qmux sessions at the
+  chosen window, in the
+  [transport x version benches](/quest/m2/bench-transport-sweep.md).
 - A quiet-host comparison against the base of `group_read_frames`,
   `group_contended`, and `group_relay_frames`, plus `group_paced` (a writer
   parked at the window, over 1, 8, and 64 readers), which the first slice
   added. The cursor's report is one relaxed load per frame or batch, and a
   `fetch_max` only for the fastest reader. On the busy host that landed it,
   runs swung by up to 50% either way between repeats.
-- Fills that write a whole batch of groups at once evict their own earlier
-  groups before the reader takes them (the follow-up from
-  [moq-dev/moq#7339](https://github.com/moq-dev/moq/pull/7339)). Pacing within
-  a group does not cover this; decide whether it belongs here or with
-  [flights](/quest/m1/unbounded-groups/flights.md).
-
-qmux transports carry the same rule through their own stream credit
-([qmux receive lease](/quest/m2/qmux-receive-lease.md)).
+- JS parity, once the browser offers a receive-credit contract. The JS qmux
+  receiver could pace today but follows the browser.
