@@ -51,7 +51,7 @@ async fn serve() -> Server {
 	let port = listener.local_addr().expect("no quic addr").port();
 
 	tokio::spawn(async move {
-		while let Some(request) = listener.accept().await {
+		while let Ok(request) = listener.accept().await {
 			tokio::spawn(async move {
 				let _session = request.ok().await;
 				std::future::pending::<()>().await;
@@ -103,7 +103,7 @@ async fn refused_code(server: &Server, alpn: &str) -> Option<driver::VarInt> {
 		.await
 		.expect("write");
 
-	tokio::time::timeout(Duration::from_secs(10), send.stopped())
+	kio::clock::timeout(Duration::from_secs(10), send.stopped())
 		.await
 		.expect("the stream was not stopped")
 		.expect("stopped")

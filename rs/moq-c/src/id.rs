@@ -156,7 +156,7 @@ mod tests {
 					slab.map.insert(Id::try_from(raw).unwrap(), 0);
 				}
 				let iterations = 1000;
-				let start = moq_clock::Instant::now();
+				let start = kio::clock::Instant::now();
 				for _ in 0..iterations {
 					if wrap {
 						next.store(i32::MAX as u32, Ordering::Relaxed);

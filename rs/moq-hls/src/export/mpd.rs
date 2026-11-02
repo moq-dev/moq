@@ -14,7 +14,7 @@
 //! `Representation` id keeps the raw name. The resources are shared byte-for-byte with the
 //! HLS routes; only the time-addressed segment alias `seg/t<pts>.m4s` is DASH's own.
 
-use moq_clock::Wall;
+use kio::clock::Wall;
 use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::sync::Arc;

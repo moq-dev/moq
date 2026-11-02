@@ -211,7 +211,10 @@ async fn consumer_preserves_reference_samples_and_timeline() {
 	for vector in VECTORS {
 		let (_source, broadcast, name, config) = import(vector);
 		let options = decode::Options {
-			max_delay: Duration::from_secs(1),
+			delay: decode::Delay {
+				max: Some(Duration::from_secs(1)),
+				..Default::default()
+			},
 			..Default::default()
 		};
 		let mut decoder = decode::Consumer::new(&broadcast, &config, name, options).await.unwrap();
@@ -239,12 +242,7 @@ async fn consumer_preserves_reference_samples_and_timeline() {
 				pcm.extend(samples(&frame.data));
 			}
 		}
-		let warmup = config.warmup.unwrap_or_default();
-		let skip = (warmup.as_nanos() * vector.rate as u128 / 1_000_000_000) as usize * vector.channels as usize;
-		let reference = Vector {
-			reference: &vector.reference[skip * 4..],
-			..*vector
-		};
-		compare(&reference, "consumer", &pcm);
+		// Decoded from the track's first packet, so no warmup is trimmed.
+		compare(vector, "consumer", &pcm);
 	}
 }

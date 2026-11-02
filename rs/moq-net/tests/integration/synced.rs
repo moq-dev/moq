@@ -25,7 +25,7 @@ fn produce_origin(hop: u64) -> origin::Producer {
 async fn read_until_synced(announced: &mut announce::Consumer) -> BTreeSet<String> {
 	let mut seen = BTreeSet::new();
 	while !announced.poll_synced(&moq_net::kio::Waiter::noop()).is_ready() {
-		let event = moq_clock::timeout(SETTLE, announced.next())
+		let event = kio::clock::timeout(SETTLE, announced.next())
 			.await
 			.expect("synced in time")
 			.expect("the cursor stays open");
@@ -68,7 +68,7 @@ fn both() -> BTreeSet<String> {
 }
 
 /// Every version that marks the boundary syncs with the whole initial set.
-#[moq_clock::test]
+#[kio::test]
 async fn an_exact_boundary_catches_up_with_the_initial_set() {
 	for version in [
 		"moq-lite-05",
@@ -82,7 +82,7 @@ async fn an_exact_boundary_catches_up_with_the_initial_set() {
 }
 
 /// Versions without a boundary still sync, so nothing waiting on it hangs.
-#[moq_clock::test]
+#[kio::test]
 async fn a_best_effort_boundary_still_catches_up() {
 	for version in ["moq-lite-03", "moq-lite-04"] {
 		synced(version).await;
@@ -91,7 +91,7 @@ async fn a_best_effort_boundary_still_catches_up() {
 
 /// A second session into the same origin, as a reconnect makes, syncs too: the
 /// consumer waits on every current session.
-#[moq_clock::test]
+#[kio::test]
 async fn a_second_session_catches_up() {
 	let publisher = produce_origin(1);
 	let a = publisher.create_broadcast("a").unwrap();
@@ -113,13 +113,13 @@ async fn a_second_session_catches_up() {
 
 	let second = connect().await;
 	drop(first);
-	moq_clock::sleep(SETTLE).await;
+	kio::clock::sleep(SETTLE).await;
 	read_until_synced(&mut announced).await;
 	drop(second);
 }
 
 /// A cold relay's empty set is complete before an upstream joins it.
-#[moq_clock::test]
+#[kio::test]
 async fn a_cold_relay_syncs_then_forwards_upstream_routes_as_live() {
 	let relay = produce_origin(2);
 	let subscriber = produce_origin(3);

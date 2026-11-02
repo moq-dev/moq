@@ -137,9 +137,6 @@ pub(crate) mod request {
 	/// The endpoint is overloaded and cannot process the request.
 	pub(crate) const EXCESSIVE_LOAD: u64 = 0x9;
 
-	/// A SUBSCRIBE_NAMESPACE or SUBSCRIBE_TRACKS prefix overlapping an established one.
-	pub(crate) const PREFIX_OVERLAP: u64 = 0x30;
-
 	/// A GOAWAY is draining the session, so no new request is accepted.
 	const GOING_AWAY: u64 = 0x6;
 

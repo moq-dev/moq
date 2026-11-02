@@ -40,10 +40,10 @@
 //! [`DEFAULT_EXPIRY`], while a relay creates one configured pool and shares it across
 //! every origin so the whole process caches into a single policy.
 
-use crate::sync::Mutex;
 use crate::util::SendCell;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, Weak};
 use std::task::{Poll, ready};
 use std::time::Duration;
@@ -714,6 +714,10 @@ pub(super) struct Track {
 	// lock, and wakes only the readers following it.
 	largest: kio::Shared<Largest>,
 
+	// Whether the track ever declared an end, set under the track lock and never cleared,
+	// so a reader looking for one skips that lock until there is one to read.
+	declared: AtomicBool,
+
 	// What the frames this track's groups are still receiving may allocate up front,
 	// shared with every track minted from the same origin handle.
 	frames: super::frame::Budget,
@@ -822,6 +826,7 @@ impl Track {
 			wakes: Default::default(),
 			aborts: OnceLock::new(),
 			largest: Default::default(),
+			declared: AtomicBool::new(false),
 		});
 		if let Some(key) = track.pool.register(&track) {
 			let _ = track.sweep.set(key);
@@ -847,6 +852,16 @@ impl Track {
 	/// The track's reads parked on their drift budget.
 	pub(super) fn wakes(&self) -> &expiry::Wakes {
 		&self.wakes
+	}
+
+	/// The track declared an end. Called under the track lock.
+	pub(super) fn declare_end(&self) {
+		self.declared.store(true, Ordering::Release);
+	}
+
+	/// Whether the track ever declared an end, so the end may be worth the track lock.
+	pub(super) fn end_declared(&self) -> bool {
+		self.declared.load(Ordering::Acquire)
 	}
 
 	/// Watch every group the publisher cuts, rather than chosen sequences.
@@ -1421,17 +1436,17 @@ mod test {
 
 	/// Wall time can lead a lagging driver's sample, while another driver can supply
 	/// future time. Neither a new driver nor a backward sample may rewind expiration.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn wall_deadlines_use_the_later_of_ambient_and_driven_time() {
 		let pool = Pool::unbounded();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let waiter = kio::Waiter::noop();
 		pool.poll(now, &waiter);
 		let track = Track::new(pool.clone(), Default::default(), kio::Weak::new());
 		let (read, reading) = flag();
 		let at = now + Duration::from_secs(1);
 		track.watch_wall(at, &reading);
-		moq_clock::sleep(Duration::from_secs(1)).await;
+		kio::clock::sleep(Duration::from_secs(1)).await;
 		assert_eq!(pool.poll(now, &waiter), None);
 		assert!(read.0.swap(false, Ordering::SeqCst), "ambient time was ignored");
 

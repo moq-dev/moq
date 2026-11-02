@@ -1,7 +1,7 @@
 //! Incoming streams: their handles, leases, and errors.
 
 use std::collections::hash_map::{self, Entry};
-use std::{io, mem};
+use std::{io, mem, task::Poll};
 
 use thiserror::Error;
 use tracing::debug;
@@ -11,7 +11,7 @@ use super::state::get_or_insert_recv;
 use super::{Retransmits, ShouldTransmit, StreamId, StreamsState};
 use crate::connection::assembler::Assembler;
 pub use crate::connection::assembler::Chunk;
-use crate::connection::streams::state::StreamRecv;
+use crate::connection::waits::Wait;
 use crate::{TransportError, VarInt, frame};
 
 pub use super::lease::Lease;
@@ -74,6 +74,8 @@ impl Stream<'_> {
 		self.pending.max_data |= leased.should_transmit() || transmit.should_transmit();
 		// The credit returned may only have paid a shrunk window's debt.
 		self.unstick();
+		// A reader parked on the stream learns it is closed.
+		self.state.waits.wake(self.id, Wait::Read);
 
 		Ok(())
 	}
@@ -81,16 +83,21 @@ impl Stream<'_> {
 	/// Check whether this stream has been reset by the peer, returning the reset error code if so
 	///
 	/// After returning `Ok(Some(_))` once, stream state will be discarded and all future calls will
-	/// fail with [`Error::Closed`].
+	/// fail with [`Error::Closed`]. A stream evicted to free a stuck window fails with
+	/// [`Error::Evicted`] until the application stops it, so a reader that watches for a reset
+	/// instead of reading learns it too: bytes it took hold further eviction off until then.
 	pub fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
 		let hash_map::Entry::Occupied(entry) = self.state.recv.entry(self.id) else {
 			return Err(Error::Closed);
 		};
-		let Some(s) = entry.get().as_ref().and_then(|s| s.as_open_recv()) else {
+		let Some(s) = entry.get().as_deref() else {
 			return Ok(None);
 		};
 		if s.stopped {
-			return Err(Error::Closed);
+			return Err(match s.lease.evicted {
+				true => Error::Evicted,
+				false => Error::Closed,
+			});
 		}
 		let Some(code) = s.reset_code() else {
 			return Ok(None);
@@ -114,7 +121,6 @@ impl Stream<'_> {
 
 #[derive(Debug, Default)]
 pub(super) struct Recv {
-	// NB: when adding or removing fields, remember to update `reinit`.
 	state: RecvState,
 	pub(super) assembler: Assembler,
 	sent_max_stream_data: u64,
@@ -140,20 +146,6 @@ impl Recv {
 			stopped: false,
 			lease: Leased::default(),
 		})
-	}
-
-	/// Reset to the initial state
-	pub(super) fn reinit(&mut self, initial_max_data: u64) {
-		self.state = RecvState::default();
-		self.assembler.reinit();
-		self.sent_max_stream_data = initial_max_data;
-		self.end = 0;
-		#[cfg(feature = "mux")]
-		{
-			self.data_end = 0;
-		}
-		self.stopped = false;
-		self.lease = Leased::default();
 	}
 
 	/// Process a STREAM frame
@@ -430,7 +422,7 @@ impl<'a> Chunks<'a> {
 		if recv.stopped {
 			return Err(Error::Closed);
 		}
-		let recv = entry.remove().unwrap().into_inner(); // initialized above
+		let recv = entry.remove().unwrap(); // initialized above
 		Ok(Self {
 			id,
 			streams,
@@ -470,7 +462,7 @@ impl<'a> Chunks<'a> {
 				let state = mem::replace(&mut self.state, ChunksState::Reset(error_code));
 				// At this point if we have `rs` self.state must be `ChunksState::Readable`
 				let recv = match state {
-					ChunksState::Readable(recv) => StreamRecv::Open(recv),
+					ChunksState::Readable(recv) => recv,
 					_ => unreachable!("state must be ChunkState::Readable"),
 				};
 				self.pending.max_data |= self.streams.stream_recv_freed(self.id, recv).should_transmit();
@@ -481,7 +473,7 @@ impl<'a> Chunks<'a> {
 					let state = mem::replace(&mut self.state, ChunksState::Finished);
 					// At this point if we have `rs` self.state must be `ChunksState::Readable`
 					let recv = match state {
-						ChunksState::Readable(recv) => StreamRecv::Open(recv),
+						ChunksState::Readable(recv) => recv,
 						_ => unreachable!("state must be ChunkState::Readable"),
 					};
 					self.pending.max_data |= self.streams.stream_recv_freed(self.id, recv).should_transmit();
@@ -494,6 +486,22 @@ impl<'a> Chunks<'a> {
 					Err(Error::Blocked)
 				}
 			}
+		}
+	}
+
+	/// [`Self::next`], or wait for more to arrive
+	///
+	/// Pending registers `waiter` until data, a FIN, or a reset arrives. Data that arrived stays
+	/// readable after the connection is lost, and only then does this fail with
+	/// [`Error::ConnectionLost`].
+	pub fn poll_next(&mut self, waiter: &kio::Waiter, max_length: usize) -> Poll<Result<Option<Chunk>, Error>> {
+		match self.next(max_length) {
+			Err(Error::Blocked) if self.streams.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
+			Err(Error::Blocked) => {
+				self.streams.waits.register(self.id, Wait::Read, waiter);
+				Poll::Pending
+			}
+			result => Poll::Ready(result),
 		}
 	}
 
@@ -530,7 +538,7 @@ impl<'a> Chunks<'a> {
 				self.pending.max_stream_data.insert(self.id);
 			}
 			// Return the stream to storage for future use
-			self.streams.recv.insert(self.id, Some(StreamRecv::Open(rs)));
+			self.streams.recv.insert(self.id, Some(rs));
 		}
 
 		// Issue connection-level flow control credit for any data we read regardless of state
@@ -558,8 +566,7 @@ enum ChunksState {
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-	/// Nothing more has arrived yet; a [`StreamEvent::Readable`](super::StreamEvent::Readable)
-	/// says when to retry
+	/// Nothing more has arrived yet; [`Chunks::poll_next`] and [`Stream::poll_lease`] wait for it
 	#[error("blocked")]
 	Blocked,
 	/// The peer abandoned the stream, with its code
@@ -579,6 +586,10 @@ pub enum Error {
 	/// The stream was stopped, or never opened, or already read to its end
 	#[error("closed stream")]
 	Closed,
+	/// The connection was lost before the stream ended; [`Connection::poll_closed`](crate::connection::Connection::poll_closed)
+	/// says why
+	#[error("connection lost")]
+	ConnectionLost,
 }
 
 impl From<Error> for io::Error {
@@ -587,7 +598,7 @@ impl From<Error> for io::Error {
 			Error::Blocked => io::ErrorKind::WouldBlock,
 			Error::Reset(_) | Error::Evicted => io::ErrorKind::ConnectionReset,
 			Error::TooLarge => io::ErrorKind::InvalidInput,
-			Error::Closed => io::ErrorKind::NotConnected,
+			Error::Closed | Error::ConnectionLost => io::ErrorKind::NotConnected,
 		};
 		Self::new(kind, err)
 	}

@@ -90,7 +90,7 @@ test("wallClockTime refuses bad inputs", () => {
 test("the packaged shape maps HLS record timestamps through the root clock", () => {
 	const catalog = RootSchema.parse(FIXTURE);
 	if (!catalog.clock) throw new Error("fixture lost its clock");
-	const video = catalog.video && "renditions" in catalog.video ? catalog.video.renditions.video : undefined;
+	const video = catalog.video?.renditions.video;
 	expect(video?.hls).toEqual({ track: "video.hls", duration: u53(2000) });
 
 	// Record PTS 2000 (ms) lands 2s after the wall epoch.

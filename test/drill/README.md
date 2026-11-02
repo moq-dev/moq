@@ -217,18 +217,17 @@ two headers, and add a row above.
 
 ## What is underneath
 
-A drill exercises a primitive end to end; the primitive's own orderings are
-covered by the loom models, and the wire it rides by the fuzz targets. When a
-drill fails, these are where the mechanism is pinned.
+A drill exercises a primitive end to end; the wire it rides is covered by the
+fuzz targets. When a drill fails, these are where the mechanism is pinned.
 
-| Drill | Loom cases | Fuzz coverage |
-|---|---|---|
-| cancel under backpressure | `kio::loom::{last_consumer_wakes_unused, consumer_churn_resolves_unused, first_consumer_wakes_used}`, `moq-net tests/loom.rs::{subscriber_wakes_parked_demand, concurrent_tracks_drain_a_shared_pool}` | `lite` (`SUBSCRIBE` / `SUBSCRIBE_UPDATE` encodings) |
-| relay killed mid-group | `kio::loom::{racing_last_producer_drops_still_close, queue_close_wakes_a_parked_pop, write_wakes_a_parked_consumer}`, `moq-net tests/loom.rs::publisher_drop_resolves_a_parked_subscriber` | `lite` and `ietf` (a truncated stream must fail to decode, never decode into something else), regression `ietf/subscribe-absolute-filter` |
-| interrupted publisher republishes | `kio::loom::{write_wakes_a_parked_consumer, weak_upgrade_never_resurrects_a_closed_channel}`, `moq-net tests/loom.rs::back_to_back_groups_arrive_in_order` | `path` (the broadcast name is a path: normalization, prefixes, and the wire round-trip) |
-| bursts across a cluster, steady, flapping, or on moq-transport | `moq-net tests/loom.rs::{a_fetch_never_joins_a_withdrawn_attempt, back_to_back_groups_arrive_in_order}` | `lite` (`FETCH` encodings) |
+| Drill | Fuzz coverage |
+|---|---|
+| cancel under backpressure | `lite` (`SUBSCRIBE` / `SUBSCRIBE_UPDATE` encodings) |
+| relay killed mid-group | `lite` and `ietf` (a truncated stream must fail to decode, never decode into something else), regression `ietf/subscribe-absolute-filter` |
+| interrupted publisher republishes | `path` (the broadcast name is a path: normalization, prefixes, and the wire round-trip) |
+| bursts across a cluster, steady, flapping, or on moq-transport | `lite` (`FETCH` encodings) |
 
-Run them with `just rs loom` and `just rs fuzz <target>`. The committed fuzz
+Run them with `just rs fuzz <target>`. The committed fuzz
 findings under `rs/moq-net/fuzz/regressions/` replay on stable as part of
 `just check`, so a crash a drill leads you to belongs there rather than in a
 corpus nobody replays.

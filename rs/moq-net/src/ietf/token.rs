@@ -115,10 +115,8 @@ pub(super) async fn reject(
 	version: Version,
 ) -> Result<(), Error> {
 	let reason = reason(&err);
-	super::request_stream::write_error(&mut stream.writer, kind, &Error::Decode(err), reason, version).await?;
-	// The peer dropping the stream once it has the rejection is a normal end.
-	let _ = stream.writer.close().await;
-	Ok(())
+	super::request_stream::buffer_error(&mut stream.writer, kind, &Error::Decode(err), reason, version)?;
+	super::request_stream::deliver(&mut stream.writer).await
 }
 
 /// Encode `token` by value.

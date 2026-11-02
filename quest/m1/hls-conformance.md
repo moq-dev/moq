@@ -15,16 +15,20 @@ reloads and a mid-run catalog estimate update.
 From the 2026-10-24 moq-hls audit, which found no player-level HLS or DASH
 coverage. Decided with the maintainer on 2026-10-24:
 
-- ffprobe conformance lands in m1, so it validates the
-  Catalog HLS field redesign and the fixed target duration before the cut. A
+- ffprobe conformance lands in m1, so it validates the grid segmentation of
+  [HLS export on a declared grid](/quest/m0/hls-media-grid.md) (which
+  replaced the Catalog HLS field on 2026-11-02) and the fixed target duration
+  before the cut. A
   browser player test follows in m2
   ([HLS and DASH browser playback](/quest/m2/hls-player-test.md)).
 - Cover a sliding window that evicts segments, a GOP that overruns the
   declared duration, a mid-run reconfiguration (new rendition instance), and a
   recording through the segment cursors.
-- Cover an unaligned ladder, renditions whose keyframes and segment numbers
-  differ: every segment is listed and fetched (no `EXT-X-GAP`), and the DASH
-  manifest omits `segmentAlignment`.
+- Cover an unaligned ladder, renditions whose keyframes differ: every
+  segment is listed and fetched (no `EXT-X-GAP`), and the DASH manifest
+  omits `segmentAlignment`. Since the grid replaced records (2026-11-02),
+  every rendition shares the grid's segment numbers while its segment
+  boundaries follow its own keyframes; the test checks both.
 - Runs nightly; move any part fast enough into the merge gate.
 
 Public API: none. Wire: none.
@@ -33,18 +37,14 @@ Decided 2026-10-30 (maintainer): fix first. The two bugs the test found
 are their own quests, required below, and the test lands once it passes
 with both checks intact.
 
-Decided 2026-10-31 (maintainer): the fixture muxes with
-`-max_interleave_delta 0`, so `video1`'s size switch no longer lands in the TS
-ahead of the other streams, and the mid-run estimate edit only raises jitter.
-With that, the import fails at the switch with `catalog jitter cannot decrease
-for a published rendition`: `Rendition::set` in moq-mux resolves the new
-config's jitter without the floor the edit published. That fix is a separate
-quest the test also waits on.
+Added 2026-10-31 (maintainer, the /quest-complete requeue session): once
+the fixture is repaired, the test's TS import hits a third bug, a
+reconfigure failing `JitterDecreased` after a mid-run jitter rise, also its
+own quest below.
 
 ## Required
 
-- [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - the conformance test's same-codec switch fails until it lands
-- [The last AAC segment advertises its full duration](/quest/m1/hls-final-aac-segment.md) - the conformance test's audio check fails until it lands
+- [HLS export lists a same-codec reconfigure's first group under the new init](/quest/m1/hls-reinit-same-codec.md) - the conformance test's same-codec switch fails until it lands
 
 ## Related
 

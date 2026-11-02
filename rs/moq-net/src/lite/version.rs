@@ -80,9 +80,8 @@ impl Version {
 	}
 
 	/// Whether the session may deliver groups over unreliable QUIC datagrams (lite-05 §6.4).
-	/// A datagram carries one single-frame group's `subscribe | sequence | timestamp | payload`
-	/// and is routed over the existing subscription. Added in lite-05; older versions never
-	/// send or accept datagram bodies.
+	/// Group datagrams route one frame over an existing subscription; lite-07 adds a
+	/// leading type and padding. Older than lite-05 never sends or accepts datagrams.
 	pub fn has_datagrams(self) -> bool {
 		!matches!(self, Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04)
 	}
@@ -108,7 +107,7 @@ impl Version {
 		)
 	}
 
-	/// Whether either endpoint may open a Padding Stream (0x2). Added in lite-07.
+	/// Whether datagrams have a type and either endpoint may send padding streams or datagrams.
 	pub(crate) fn has_padding(self) -> bool {
 		!matches!(
 			self,
@@ -226,12 +225,11 @@ impl Version {
 		self.resolves_start() && !self.has_media_time() && !self.has_fetch_max_delay()
 	}
 
-	/// Whether subscription completion waits for the subscriber's FIN.
+	/// Whether subscription completion waits for the subscriber's FIN, which it sends once
+	/// its tail accounting settles. SUBSCRIBE_END says which groups are owed, so that is
+	/// prompt from lite-05; before it, only the subscriber's grace settles the tail.
 	pub(crate) fn waits_for_subscriber_fin(self) -> bool {
-		!matches!(
-			self,
-			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
-		)
+		self.has_track_stream()
 	}
 
 	/// Whether ANNOUNCE_REQUEST carries the hidden opt-in. Added in lite-07; older
@@ -291,11 +289,10 @@ impl Version {
 		)
 	}
 
-	/// Whether announcements and track requests carry the publisher epoch, the
-	/// identity that says two routes serve the same bytes. Added in lite-07.
-	/// Older versions carry nothing, so a received route has no epoch and is
-	/// never resumed through another route.
-	pub fn has_epoch(self) -> bool {
+	/// Whether announcements carry their instance and epoch, and track requests the
+	/// instance they pin. Added in lite-07. Older versions carry nothing, so the
+	/// receiving session mints an instance for each announcement.
+	pub fn has_instance(self) -> bool {
 		!matches!(
 			self,
 			Self::Lite01 | Self::Lite02 | Self::Lite03 | Self::Lite04 | Self::Lite05 | Self::Lite06
@@ -344,7 +341,7 @@ impl Version {
 
 	/// Whether received frame timestamps are the publisher's media time. Lite05/06 stamp an
 	/// untimed track's payloads with their send time, which a receiver cannot tell from it,
-	/// so it drops every timestamp received on them and the track arrives untimed.
+	/// so it passes them through as the track's time without checking them for a rewind.
 	pub(crate) fn has_media_time(self) -> bool {
 		!matches!(
 			self,

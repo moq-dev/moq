@@ -820,3 +820,49 @@ fn records_order_send_groups() {
 	pair.client.send_groups().set_priority(&low, 2);
 	assert_eq!(stream_order(&mut pair), [(second, 20_000), (first, 20_000)]);
 }
+
+/// The waits work over QMux as over QUIC: arrivals wake them, and a close wakes them to drain
+/// what arrived and then fail
+#[test]
+fn waits_drain_then_fail() {
+	use std::task::Poll;
+
+	use crate::connection::waits::Counter;
+
+	let mut pair = Pair::new(config(Version::QMux02));
+	let (accept, closed) = (Counter::new(), Counter::new());
+	assert_eq!(pair.server.poll_connected(&accept), Poll::Ready(Ok(())));
+	assert!(pair.server.streams().poll_accept(&accept, Dir::Uni).is_pending());
+	assert!(pair.server.poll_closed(&closed).is_pending());
+
+	let id = pair.client.streams().open(Dir::Uni, send::Options::default()).unwrap();
+	pair.client.send_stream(id).write(&mut &b"a"[..]).unwrap();
+	pair.drive();
+	assert_eq!(accept.wakes(), 1);
+
+	pair.client.close(VarInt::from_u32(42), "bye".to_string());
+	pair.drive();
+	assert_eq!(closed.wakes(), 1);
+	let reason = match pair.server.poll_closed(&closed) {
+		Poll::Ready(reason) => reason,
+		Poll::Pending => panic!("still open"),
+	};
+	assert_eq!(
+		pair.server.streams().poll_accept(&accept, Dir::Uni),
+		Poll::Ready(Ok(id))
+	);
+	assert_eq!(
+		pair.server.streams().poll_accept(&accept, Dir::Uni),
+		Poll::Ready(Err(reason))
+	);
+	let mut recv = pair.server.recv_stream(id);
+	let mut chunks = recv.read().unwrap();
+	assert!(matches!(
+		chunks.poll_next(&accept, usize::MAX),
+		Poll::Ready(Ok(Some(_)))
+	));
+	assert_eq!(
+		chunks.poll_next(&accept, usize::MAX),
+		Poll::Ready(Err(recv::Error::ConnectionLost))
+	);
+}

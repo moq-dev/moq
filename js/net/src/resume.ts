@@ -3,8 +3,8 @@
  * `rs/moq-net`.
  *
  * A {@link Front} is one broadcast served through one route at a time: the origin re-sources it
- * when another route of the same epoch takes over, since routes with one epoch serve one
- * broadcast and so hold the same groups and frames. A reader of a logical track reads the
+ * when another route of the same instance takes over, since routes with one instance serve one
+ * stream and so hold the same groups and frames. A reader of a logical track reads the
  * serving route's copy directly, through its own subscription: nothing is copied, and with one
  * route it is a passthrough.
  *
@@ -20,7 +20,9 @@
  * A new copy is asked from where the reader got to, so it never has the groups below the reader's
  * local floor that the copies it replaced cached. Lowering that floor asks the newest route for
  * them through a backfill: another copy of that route, bounded to the groups the floor newly
- * covers, and kept like a replaced copy.
+ * covers, and kept like a replaced copy. A switch asks the same way for the groups below where the
+ * reader got to that it still lacks, from the lowest one: one late, reordered, or in flight on the
+ * replaced route still arrives within the reader's budget, as it would on one cursor.
  *
  * A group carries on across the switch through its {@link Recover}: once its copy stalls while a
  * newer route serves, it continues from the serving route's copy of the same group at the same
@@ -102,7 +104,9 @@ export function routeFailed(err: Error): boolean {
 	return err instanceof SessionError || sessionClosed(err);
 }
 
-// Every `track.Info` field, so one added later fails to compile until it is listed here.
+// Every `track.Info` field but `unchecked`, so one added later fails to compile until it is
+// listed here. `unchecked` says how a copy arrived, not what it holds, so copies over different
+// lite versions still match. `ietf` is compared, like Rust's moq-transport `properties`.
 const INFO_FIELDS = Object.keys({
 	compress: true,
 	timescale: true,
@@ -110,7 +114,7 @@ const INFO_FIELDS = Object.keys({
 	priority: true,
 	refresh: true,
 	ietf: true,
-} satisfies Record<keyof track.Info, true>) as (keyof track.Info)[];
+} satisfies Record<Exclude<keyof track.Info, "unchecked">, true>) as (keyof track.Info)[];
 
 /** Two copies claiming the same content must agree on all of it, like Rust's `Info` equality. */
 function compatible(a: track.Info, b: track.Info): boolean {
@@ -134,8 +138,15 @@ function ask(source: Source, name: string, retired: AbortSignal, hold?: AbortSig
 	});
 }
 
+let sources = 0;
+
 /** One route's broadcast, held while the front serves it or a reader still reads a copy of it. */
 class Source {
+	/**
+	 * Names this source where it outlives its route, as a front's record of who said what a
+	 * track is: a reference there would keep a retired route's session reachable.
+	 */
+	readonly id = sources++;
 	readonly wire: BroadcastWire;
 	/** The table's handle this was served from, so serving it again is a no-op. */
 	readonly from: broadcast.Consumer;
@@ -270,8 +281,8 @@ function subscribe(wire: BroadcastWire, name: string, subscription: track.Subscr
 }
 
 /** Take a copy's next group, in sequence or arrival order. */
-function take(copy: Copy, ordered: boolean): Recv {
-	return ordered ? hooks.tryNextGroup(copy.sub) : hooks.tryRecvGroup(copy.sub, false);
+function take(copy: Copy, ordered: boolean, floor?: number): Recv {
+	return ordered ? hooks.tryNextGroup(copy.sub, floor) : hooks.tryRecvGroup(copy.sub, false);
 }
 
 /** The first group past where `copy` was replaced: 0 for one replaced before any group. */
@@ -295,6 +306,11 @@ class Reader implements ResumeSource {
 	#start: number;
 	/** The newest group handed out: where a new copy is asked to start. */
 	#newest?: number;
+	/**
+	 * Set once the route changed, so the serving copy's resume point may pass over groups the
+	 * reader lacks. Kept until the gaps are backfilled; see {@link #backfillGaps}.
+	 */
+	#resumed = false;
 	/** The last datagram handed out, which never ages until another supersedes it. */
 	#datagram?: number;
 	/**
@@ -381,6 +397,9 @@ class Reader implements ResumeSource {
 		this.#drops = [];
 		const source = route.source;
 		if (!source) return;
+		// The new copy starts at the newest group handed out, so a lower one still missing is
+		// asked of its route once a read says which; see #backfillGaps.
+		this.#resumed = true;
 		// The replaced copies keep delivering until the new one delivers its first group: a
 		// group they get meanwhile may be one the new route never has. See #observe.
 		for (const copy of this.#copies) copy.replaced = true;
@@ -511,12 +530,22 @@ class Reader implements ResumeSource {
 		if (this.#delivered.covers(start, end)) return;
 		// A floor lowered again asks once.
 		const closed = newest.source.from.closed;
-		const asked = (copy: Copy) =>
-			copy.source.from.closed === closed &&
-			copy.floor !== undefined &&
-			copy.floor <= start &&
-			(copyEnd(copy) ?? Number.POSITIVE_INFINITY) >= end;
-		if (this.#copies.some(asked)) return;
+		const asks = (copy: Copy) =>
+			copy.source.from.closed === closed && copy.floor !== undefined && copy.floor <= start;
+		if (this.#copies.some((copy) => asks(copy) && (copyEnd(copy) ?? Number.POSITIVE_INFINITY) >= end)) return;
+		// A later resume point widens the route's backfill rather than asking again, so flaps over
+		// a gap keep one per route. Waited for as long as a new one would be.
+		const widened = this.#copies
+			.slice(0, -1)
+			.find((copy) => copy.done === undefined && copy.until !== undefined && asks(copy));
+		if (widened) {
+			widened.until = end - 1;
+			widened.since = now();
+			this.#update(widened);
+			this.#bound(widened);
+			this.wake();
+			return;
+		}
 		const backfill = { floor: start, until: end - 1 };
 		this.#add(
 			{
@@ -532,6 +561,23 @@ class Reader implements ResumeSource {
 			},
 			this.#copies.length - 1,
 		);
+	}
+
+	/**
+	 * Ask the serving route for the groups below its copy's resume point that the reader still
+	 * lacks: a late or reordered one, or one in flight on the route it replaced, as one cursor on
+	 * the logical track would still get. From the lowest gap within the reader's cursor, which
+	 * decides what it reads, so groups already handed out are not asked for again below it. A gap
+	 * past the reader's budget was already forgotten as handed out. A lowered cursor asks through
+	 * {@link #backfill} itself. Mirrors the Rust `Reader::backfill_gaps`.
+	 */
+	#backfillGaps(delivered: Delivered): void {
+		if (!this.#resumed) return;
+		this.#resumed = false;
+		const resumed = this.#copies.at(-1)?.floor;
+		if (resumed === undefined) return;
+		const [gap] = delivered.gaps(this.#shell.cursor.peek().start, resumed);
+		if (gap) this.#backfill(gap.start, resumed);
 	}
 
 	/** Wake parked reads, so they look again and let go of what nothing needs. */
@@ -594,6 +640,7 @@ class Reader implements ResumeSource {
 		this.#learnEnd();
 		if (this.#closed) return this.#refused ? { kind: "error", error: this.#refused } : { kind: "done" };
 		this.#groupsRead = true;
+		this.#backfillGaps(delivered);
 		if (dispositions) {
 			const dropped = this.#tryDrop(delivered);
 			if (dropped) return dropped;
@@ -603,18 +650,21 @@ class Reader implements ResumeSource {
 		// lower group that truly arrives later.
 		const next = this.#lowest(ordered, delivered);
 		if (next) {
-			const recv = take(next, ordered);
+			const recv = take(next, ordered, this.#newest === undefined ? undefined : this.#newest + 1);
 			if (recv.kind === "group") {
 				this.#observe(next, recv.group.sequence);
 				return { kind: "group", group: this.#handOut(next, recv.group) };
 			}
+			// The lowest buffered group keeps its place while its copy waits on a hole.
+			// A newer copy must not pass it and permanently discard it from sequence order.
+			if (ordered && recv.kind === "idle") return recv;
 		}
 		// The serving copy first: it is the one that keeps delivering.
 		for (let index = this.#copies.length - 1; index >= 0; index--) {
 			const copy = this.#copies[index];
 			if (!this.#feeds(copy)) continue;
 			for (;;) {
-				const recv = take(copy, ordered);
+				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1);
 				if (recv.kind === "group") {
 					if (!this.#deliverable(copy, recv.group.sequence, delivered)) {
 						recv.group.close();
@@ -698,7 +748,11 @@ class Reader implements ResumeSource {
 		for (const copy of this.#copies) {
 			if (!this.#feeds(copy)) continue;
 			for (;;) {
-				const sequence = hooks.peekGroup(copy.sub, ordered);
+				const sequence = hooks.peekGroup(
+					copy.sub,
+					ordered,
+					this.#newest === undefined ? undefined : this.#newest + 1,
+				);
 				if (sequence === undefined) break;
 				if (this.#deliverable(copy, sequence, delivered)) {
 					// A tie goes to the newer copy, so the serving one hands out its first group and
@@ -706,7 +760,7 @@ class Reader implements ResumeSource {
 					if (!lowest || sequence <= lowest.sequence) lowest = { copy, sequence };
 					break;
 				}
-				const recv = take(copy, ordered);
+				const recv = take(copy, ordered, this.#newest === undefined ? undefined : this.#newest + 1);
 				if (recv.kind !== "group") break;
 				recv.group.close();
 			}
@@ -1468,7 +1522,7 @@ class Recover implements GroupRecover {
  * One broadcast served through one route at a time; see the module docs.
  *
  * Its {@link consumer} is the broadcast handed out: every track read through it follows the
- * front's route. The origin calls {@link serve} as routes of the same epoch take over, and
+ * front's route. The origin calls {@link serve} as routes of the same instance take over, and
  * {@link conclude} once none will: readers then follow the last copy to its end.
  */
 export class Front {
@@ -1476,8 +1530,11 @@ export class Front {
 	readonly consumer: broadcast.Consumer;
 	#source?: Source;
 	#routes = new Map<string, Route>();
-	/** Each track's properties as first committed, and the source that said so: every later copy must match. */
-	#info = new Map<string, { info: track.Info; source: Source }>();
+	/**
+	 * Each track's properties as first committed, and the {@link Source.id} of the source that said
+	 * so: every later copy must match. Kept for the front's lifetime, so it holds no route.
+	 */
+	#info = new Map<string, { info: track.Info; source: number }>();
 	/** Bumped whenever the source changes, so an answer from a replaced one is dropped. */
 	#changed = new Signal(0);
 	/** Aborted once the current source is replaced, retiring what was asked of it. */
@@ -1681,7 +1738,7 @@ export class Front {
 		const previous = route.served;
 		// The first copy of a track has nothing to match, and the source that said what it is
 		// matches itself.
-		if ((!recorded && !previous) || recorded?.source === source) {
+		if ((!recorded && !previous) || recorded?.source === source.id) {
 			route.serve(source);
 			return;
 		}
@@ -1747,7 +1804,7 @@ export class Front {
 	// never reads a copy a subscription would refuse.
 	async #verify(name: string, source: Source): Promise<void> {
 		const recorded = this.#info.get(name);
-		if (recorded?.source === source) return;
+		if (recorded?.source === source.id) return;
 		let verified = this.#verified.get(source);
 		if (verified?.has(name)) return;
 		const retired = this.#retire.signal;
@@ -1778,7 +1835,7 @@ export class Front {
 	}
 
 	#record(name: string, info: track.Info, source: Source): void {
-		if (!this.#info.has(name)) this.#info.set(name, { info, source });
+		if (!this.#info.has(name)) this.#info.set(name, { info, source: source.id });
 	}
 
 	subscribe(name: string, options?: track.Subscription): track.Subscriber {
@@ -1897,10 +1954,27 @@ export class Front {
 			const retired = this.#retire.signal;
 			const signal = options?.signal ? AbortSignal.any([options.signal, retired]) : retired;
 			try {
-				await until(this.#verify(name, source), signal);
+				// Asked alongside the check that the source claims the track's recorded properties,
+				// rather than a round trip after it: only handing the group out waits for the check.
 				const fetchGroup = source.wire.fetchGroup;
-				if (!fetchGroup) throw new Error("fetch group is not supported by this session's version");
-				const group = await fetchGroup(name, sequence, { ...options, signal });
+				const ahead = new AbortController();
+				const fetching = fetchGroup?.(name, sequence, {
+					...options,
+					signal: AbortSignal.any([signal, ahead.signal]),
+				});
+				fetching?.catch(() => {});
+				try {
+					await until(this.#verify(name, source), signal);
+				} catch (err) {
+					ahead.abort(err);
+					void fetching?.then(
+						(group) => group.close(),
+						() => {},
+					);
+					throw err;
+				}
+				if (!fetching) throw new Error("fetch group is not supported by this session's version");
+				const group = await fetching;
 				// A copy that already failed continues nothing: that is the route failing again.
 				const failed = group.closed.peek();
 				if (failed instanceof Error) {

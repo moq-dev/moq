@@ -9,17 +9,17 @@ use std::task::Poll;
 
 use crate::Waiter;
 
-#[cfg(feature = "_sim")]
+#[cfg(feature = "sim")]
 thread_local! {
 	static READY: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 /// Restores the enclosing count, even when a spawned task panics and its executor
 /// catches the panic.
-#[cfg(feature = "_sim")]
+#[cfg(feature = "sim")]
 struct Reset(Option<usize>);
 
-#[cfg(feature = "_sim")]
+#[cfg(feature = "sim")]
 impl Drop for Reset {
 	fn drop(&mut self) {
 		READY.set(self.0);
@@ -27,22 +27,22 @@ impl Drop for Reset {
 }
 
 /// Count ready kio polls until the returned guard drops, panicking if the task spins.
-#[cfg(feature = "_sim")]
+#[cfg(feature = "sim")]
 #[must_use = "keep the guard until the task poll returns"]
-pub fn scope() -> impl Drop {
+pub(crate) fn scope() -> impl Drop {
 	Reset(READY.replace(Some(0)))
 }
 
 /// Give a [`Tasks`](crate::Tasks) child's poll its own count, but only inside a counting scope.
-#[cfg(feature = "_sim")]
+#[cfg(feature = "sim")]
 pub(crate) fn child() -> impl Drop {
 	Reset(READY.replace(READY.get().map(|_| 0)))
 }
 
 #[inline]
-#[cfg_attr(feature = "_sim", track_caller)]
+#[cfg_attr(feature = "sim", track_caller)]
 pub(crate) fn ready<T>(value: T) -> Poll<T> {
-	#[cfg(feature = "_sim")]
+	#[cfg(feature = "sim")]
 	{
 		let count = READY.get().map(|count| count + 1);
 		READY.set(count);
@@ -75,7 +75,7 @@ impl Budget {
 	/// The yield refills the budget for the next poll. Call it only where `Pending` goes
 	/// straight up to the task: a caller that reads `Pending` as "nothing now" would
 	/// mistake the yield for an answer.
-	#[cfg_attr(feature = "_sim", track_caller)]
+	#[cfg_attr(feature = "sim", track_caller)]
 	pub fn poll_yield(&mut self, waiter: &Waiter) -> Poll<()> {
 		match self.left.checked_sub(1) {
 			Some(left) => {
@@ -91,7 +91,7 @@ impl Budget {
 	}
 }
 
-#[cfg(all(test, not(loom)))]
+#[cfg(test)]
 mod tests {
 	use std::{
 		sync::{

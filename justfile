@@ -97,9 +97,10 @@ check $BASE="":
     sh/dispatch.sh check "$BASE"
 
 # The landing worker runs this gate in one job. The test build also enforces
-# default-feature clippy; selected feature extremes run in the gate, while
-# the full feature matrix and optimized bindings run nightly and on release
-# PRs. Missing tools fail under CI_STRICT.
+# default-feature clippy; the feature matrix and optimized bindings run
+# nightly and on release PRs. Missing tools fail under CI_STRICT. The host
+# land gate also sets CHECK_FAIL_FAST=1, so a failing batch stops at its first
+# failed module.
 
 # Run the landing worker's Linux gate over the branch diff against BASE.
 ci $BASE="":
@@ -133,12 +134,15 @@ fix $BASE="":
 oss-scanner *args:
     sh/oss-scanner.sh "$@"
 
+# Set every eligible package to one minor at a release cut; omit to check.
+version TARGET="":
+    python3 sh/version.py {{ if TARGET == "" { "" } else { quote(TARGET) } }}
+
 # Build the packages.
 build:
     just js build
     just rs build
     just py build
-    just js wasm
 
 # Delete this checkout's build artifacts and caches; `all` includes agent worktrees.
 clean SCOPE="here":

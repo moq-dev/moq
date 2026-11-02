@@ -50,7 +50,7 @@ paths diverged.
 
 1. Route copies become successive writers into the logical `TrackState`,
    the only cache. Every writer is of the instance the subscription started
-   on: a newer [publisher epoch](/doc/concept/moq-lite.md#publisher-epochs)
+   on: a newer [publisher epoch](/doc/concept/moq-lite.md#publisher-instances)
    never feeds it (the route rule in `rs/moq-net/AGENTS.md`), so its readers
    end with an error once their instance's routes are gone. Same-epoch routes
    carry identical content, so a later writer's duplicate sequence is
@@ -74,7 +74,7 @@ b9398f7459, 68c73349a3). Session copies under a front must stop caching for
 themselves and only feed the logical track.
 
 Land it in Rust first, then mirror `js/net` unless
-[rs2ts](/quest/m2/rs2ts/README.md) has replaced it. Extend
+[JS-only @moq/net](/quest/m2/rs2ts-js.md) has replaced it. Extend
 `benches/origin.rs` with the reader times flap sweep before starting, to
 measure the change.
 
@@ -87,5 +87,4 @@ Public API: none. Wire: none.
 
 ## Related
 
-- [A reserved group survives a route returning](/quest/m1/cut-audit/reserved-route-return.md) - a pre-cut fix this deletes
 - [Recover reads its budget without a sync](/quest/m2/recover-budget.md) - a per-frame cost this deletes

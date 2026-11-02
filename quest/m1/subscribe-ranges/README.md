@@ -68,7 +68,7 @@ relay bounds a sparse FETCH only if the model can request ranges:
   Group ID first, from its cache or the Largest Object of a live join
   (decided 2026-10-27).
 - **Time ends** (maintainer, 2026-10-17, for DVR seek in the
-  [archive line](/quest/m1/archive/README.md)). A range end may also be
+  [archive design](/doc/concept/archives.md)). A range end may also be
   `Time(pts)`, in the track's timescale. Whoever holds the track resolves it:
   the cache from its groups' timestamps, or a `track::Requests` handler such as
   an archive consumer. A start resolves to the group containing pts, and an
@@ -102,7 +102,6 @@ every sequence delivered or dropped.
 
 ## Required
 
-- [Linear fill path](/quest/m1/subscribe-ranges/fill-linear.md) - filling stays flat as range count and span grow, so a subscription's range count cannot multiply per-group cost
 - [Fetch as a range](/quest/m1/subscribe-ranges/fetch-range.md) - `fetch_group` becomes a one-range subscription that ends once its range is accounted for
 - [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md) - the lite-07 wire, Rust publisher and subscriber, and the draft
 - [JS ranges](/quest/m1/subscribe-ranges/js.md) - `@moq/net` model and lite-07 parity, and the on-demand request surface

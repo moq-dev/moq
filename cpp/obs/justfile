@@ -37,14 +37,15 @@ compile:
     ../../sh/obs/compile.sh
 
 # Compile and link the plugin the way CI does, against the `.#obs` shell's own
-# libobs/Qt6/ffmpeg, then run the unit tests. Linux-only in practice: it's the
-# one platform where nixpkgs has obs-studio. The Debug build type reuses the
-# dev-profile Rust artifacts CI restores, where a release moq-ffi would rebuild
-# its whole dependency tree.
+# libobs/Qt6/ffmpeg, then run the unit tests and check that MOQ_FFI_QLOG builds
+# moq-ffi with qlog. Linux-only in practice: it's the one platform where nixpkgs
+# has obs-studio. The Debug build type reuses the dev-profile Rust artifacts CI
+# restores, where a release moq-ffi would rebuild its whole dependency tree.
 ci preset="":
     cmake --preset "$(../../sh/obs/preset.sh '{{ preset }}' ci)" -DCMAKE_BUILD_TYPE=Debug
     cmake --build --preset "$(../../sh/obs/preset.sh '{{ preset }}' ci)"
     ../../sh/obs/unit.sh
+    ../../sh/obs/qlog.sh
 
 # Unit-test the plugin sources against stubbed libobs and ffmpeg and the real
 # moq-ffi, under ThreadSanitizer. Nightly runs it; `just obs ci` runs them

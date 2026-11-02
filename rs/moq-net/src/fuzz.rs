@@ -16,6 +16,9 @@ mod request;
 pub use ingest::ingest;
 pub use request::request;
 
+/// A lite-07 publisher run loop waiting on SUBSCRIBE_START, for the publisher bench.
+pub use crate::lite::CoverageBench;
+
 use bytes::Bytes;
 
 use crate::{
@@ -88,6 +91,22 @@ impl CanonicalStorage {
 	}
 	pub fn size(&self) -> u64 {
 		self.0.size()
+	}
+}
+
+/// A lite-07 subscription's frame bounds over many ranges, for the range-count bench.
+pub struct FrameBounds(crate::lite::FramesBench);
+
+impl FrameBounds {
+	/// `ranges` ranges, each starting and ending partway through its own group.
+	pub fn new(ranges: u64) -> Self {
+		Self(crate::lite::FramesBench::new(ranges))
+	}
+
+	/// The first and last frame served of `group`, as a served group or datagram looks
+	/// them up.
+	pub fn serve(&self, group: u64) -> (u64, Option<u64>) {
+		self.0.serve(group)
 	}
 }
 
@@ -247,13 +266,17 @@ fn datagram(data: &[u8], version: lite::Version) -> bool {
 						continue;
 					};
 					any = true;
+					let Some(decoded) = decoded else {
+						continue;
+					};
 
 					let Ok(first) = decoded.encode_bytes(version) else {
 						continue;
 					};
 
 					let echo = lite::Datagram::decode(first, version, negotiated, |_| framing)
-						.expect("could not decode our own encoding");
+						.expect("could not decode our own encoding")
+						.expect("encoded group decoded as padding");
 					assert_eq!(echo, decoded, "datagram did not survive a round trip");
 				}
 			}
@@ -349,8 +372,10 @@ impl AnnounceWriter {
 		let msg = match announced {
 			Announced::Start(suffix, hops) => {
 				let (_, suffix, hops) = self.encoder.start(suffix.clone(), hops.clone());
+				// A fixed instance, so the bytes stay pinned and match what `js/net` writes.
 				lite::AnnounceBroadcast::Active {
-					epoch: None,
+					instance: self.version.has_instance().then(|| "a".parse().unwrap()),
+					epoch: 0,
 					suffix,
 					hops,
 					cost: Default::default(),
@@ -620,7 +645,7 @@ impl LiteSample {
 			.unwrap(),
 			Self::Subscribe => lite::Subscribe {
 				order: crate::track::Order::Descending,
-				epoch: None,
+				instance: None,
 				id: 3,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -754,9 +779,9 @@ where
 	let outer = crate::Version::Ietf(version);
 	if let Ok((message, _)) = T::decode_slice(data, outer) {
 		let parameters = parameters(&message);
-		if ietf::decode_peer_setup(parameters.clone(), version, true).is_ok() {
+		if ietf::decode_peer_setup(parameters, version, true).is_ok() {
 			assert!(
-				ietf::decode_peer_setup(parameters.clone(), version, false).is_ok(),
+				ietf::decode_peer_setup(parameters, version, false).is_ok(),
 				"a server's Setup Options are refused from a client"
 			);
 		}
@@ -825,7 +850,7 @@ impl Default for Messages {
 		Self {
 			lite_subscribe: lite::Subscribe {
 				order: crate::track::Order::Descending,
-				epoch: None,
+				instance: None,
 				id: 7,
 				broadcast: Path::from_static("room/alice"),
 				track: "video".into(),
@@ -877,7 +902,6 @@ impl Default for Messages {
 				rendezvous: false,
 				range_filters: false,
 				authorization_token: None,
-				epoch: None,
 			},
 			ietf_ok: ietf::SubscribeOk {
 				track_alias: 5,
@@ -1005,7 +1029,7 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 		false => lite::Subscribe {
 			id: 0,
 			broadcast: broadcast.clone(),
-			epoch: None,
+			instance: None,
 			track: track.into(),
 			priority: 0,
 			max_delay: std::time::Duration::ZERO,
@@ -1029,7 +1053,6 @@ pub fn encode_subscribe(broadcast: &Path, track: &str, ietf: bool, out: &mut Vec
 			authorization_token: None,
 			new_group: None,
 			max_age: None,
-			epoch: None,
 		}
 		.encode(w, BENCH_IETF)
 		.unwrap(),
@@ -1371,7 +1394,6 @@ pub fn seeds() -> Vec<Seed> {
 				range_filters: false,
 				fill_timeout: false,
 				properties_wanted: true,
-				epoch: None,
 			};
 			fetch.encode_bytes(*version).ok()
 		}) else {
@@ -1504,11 +1526,12 @@ pub fn seeds() -> Vec<Seed> {
 
 	// Length prefixes at and one past each cap, ahead of a body far too short for them, so
 	// the fuzzer starts beside every rejection path instead of searching for its bound: a
-	// moq-lite message's size (0xffff for most, 64 MiB for ANNOUNCE_INIT) and a
+	// moq-lite message's size (0xffff for most, a segment for ANNOUNCE_INIT) and a
 	// moq-transport control message's two-byte length.
 	for (index, version) in LITE_VERSIONS.iter().enumerate() {
 		for kind in 0..LITE_KINDS {
-			for size in limits(&[0xffff, 64 << 20]) {
+			let announce_init = <crate::lite::AnnounceInit as crate::lite::Message>::MAX_SIZE as u64;
+			for size in limits(&[0xffff, announce_init]) {
 				let mut data = vec![index as u8, kind];
 				Encoder::new(&mut data, (*version).into()).varint(size).unwrap();
 				data.extend_from_slice(&[0; 4]);
@@ -1552,10 +1575,47 @@ type FrameReader = coding::Reader<crate::transport::poll::Buffered<Chunks>, lite
 /// every declared size when the first byte lands and `Some(0)` grows every buffer with
 /// the bytes received.
 pub struct FrameRecv {
-	streams: Vec<Option<(FrameReader, frame::Producer)>>,
+	streams: Vec<Option<Stream>>,
+	chunk: usize,
 	// Keeps the groups' track alive.
 	_track: track::Producer,
 	_broadcast: broadcast::Producer,
+}
+
+struct Stream {
+	reader: FrameReader,
+	frame: frame::Producer,
+	readers: Vec<FrameRead>,
+}
+
+/// A subscriber reading a stream's frame while it arrives, as a relay forwards it.
+///
+/// It keeps every chunk until the run ends, as a send queue would, so the chunks it read
+/// before the frame's buffer grew still hold the buffer they were cut from.
+struct FrameRead {
+	group: group::Consumer,
+	frame: Option<frame::Consumer>,
+	held: Vec<Bytes>,
+}
+
+impl FrameRead {
+	/// Read every chunk published so far, returning how many.
+	fn read(&mut self, waiter: &kio::Waiter) -> usize {
+		let frame = match &mut self.frame {
+			Some(frame) => frame,
+			None => match self.group.poll_next_frame(waiter) {
+				std::task::Poll::Ready(res) => self.frame.insert(res.unwrap().expect("the frame is in flight")),
+				std::task::Poll::Pending => return 0,
+			},
+		};
+		let mut reads = 0;
+		while let std::task::Poll::Ready(chunk) = frame.poll_read_chunk(waiter) {
+			let Some(chunk) = chunk.unwrap() else { break };
+			self.held.push(chunk);
+			reads += 1;
+		}
+		reads
+	}
 }
 
 impl FrameRecv {
@@ -1588,36 +1648,63 @@ impl FrameRecv {
 					chunk,
 					ready: true,
 				};
-				Some((
-					coding::Reader::new(crate::transport::poll::Buffered::new(stream), lite::Version::Lite05),
+				Some(Stream {
+					reader: coding::Reader::new(crate::transport::poll::Buffered::new(stream), lite::Version::Lite05),
 					frame,
-				))
+					readers: Vec::new(),
+				})
 			})
 			.collect();
 
 		Self {
 			streams,
+			chunk,
 			_track: track,
 			_broadcast: broadcast,
 		}
 	}
 
-	/// Receive every frame, round-robin a chunk at a time, then drop them.
-	pub fn run(mut self) {
+	/// Add `readers` subscribers to each stream, reading its frame after every chunk it
+	/// receives.
+	pub fn with_readers(mut self, readers: usize) -> Self {
+		for stream in self.streams.iter_mut().flatten() {
+			let size = stream.frame.size as usize;
+			// A read ends at the bytes published or its segment's end, whichever is first.
+			let reads = size.div_ceil(self.chunk) + size.div_ceil(frame::SEGMENT);
+			stream.readers = (0..readers)
+				.map(|_| FrameRead {
+					group: stream.frame.group().consume(),
+					frame: None,
+					held: Vec::with_capacity(reads),
+				})
+				.collect();
+		}
+		self
+	}
+
+	/// Receive every frame, round-robin a chunk at a time, then drop them. Returns the
+	/// chunks the readers read.
+	pub fn run(mut self) -> usize {
 		let waiter = &kio::Waiter::noop();
 		let mut open = self.streams.len();
+		let mut reads = 0;
 		while open > 0 {
 			for slot in &mut self.streams {
-				let Some((reader, frame)) = slot else { continue };
-				if let std::task::Poll::Ready(res) = reader.poll_read_frame(waiter, frame) {
+				let Some(stream) = slot else { continue };
+				let received = stream.reader.poll_read_frame(waiter, &mut stream.frame);
+				for reader in &mut stream.readers {
+					reads += reader.read(waiter);
+				}
+				if let std::task::Poll::Ready(res) = received {
 					res.unwrap();
-					let (_, frame) = slot.take().unwrap();
-					let mut group = frame.finish().unwrap();
+					let stream = slot.take().unwrap();
+					let mut group = stream.frame.finish().unwrap();
 					group.finish().unwrap();
 					open -= 1;
 				}
 			}
 		}
+		reads
 	}
 }
 
@@ -1669,21 +1756,114 @@ impl crate::transport::Error for NoError {
 	}
 }
 
+/// One group's stream on a receiving session, as the backing bench feeds it: each frame's
+/// payload arrives as the chunks given, exactly as a transport hands them over, and passes
+/// through the session's frame reader into the cache.
+///
+/// A chunk keeps whatever allocation it was sliced from, so the bench can see which
+/// receive buffers the cached frames keep alive.
+pub struct GroupRecv {
+	reader: coding::Reader<crate::transport::poll::Buffered<Queue>, lite::Version>,
+	queue: std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Bytes>>>,
+	group: Option<group::Producer>,
+}
+
+impl GroupRecv {
+	/// Receive frames into `group`.
+	pub fn new(group: group::Producer) -> Self {
+		let queue = std::rc::Rc::default();
+		let stream = Queue(std::rc::Rc::clone(&queue));
+		Self {
+			reader: coding::Reader::new(crate::transport::poll::Buffered::new(stream), lite::Version::Lite05),
+			queue,
+			group: Some(group),
+		}
+	}
+
+	/// Receive one frame whose payload is `chunks`, in order, and commit it.
+	pub fn frame(
+		&mut self,
+		timestamp: Option<crate::Timestamp>,
+		chunks: impl IntoIterator<Item = Bytes>,
+	) -> crate::Result<()> {
+		let mut size = 0;
+		self.queue
+			.borrow_mut()
+			.extend(chunks.into_iter().inspect(|chunk| size += chunk.len()));
+		let group = self.group.take().ok_or(crate::Error::Closed)?;
+		let mut frame = group.create_frame(frame::Info {
+			size: size as u64,
+			timestamp,
+		})?;
+		match self.reader.poll_read_frame(&kio::Waiter::noop(), &mut frame) {
+			std::task::Poll::Ready(Ok(())) => {}
+			std::task::Poll::Ready(Err(err)) => return Err(err),
+			std::task::Poll::Pending => unreachable!("every chunk of the frame is queued"),
+		}
+		self.group = Some(frame.finish()?);
+		Ok(())
+	}
+
+	/// Finish the group, returning its producer, which keeps it cached until dropped or aborted.
+	pub fn finish(mut self) -> crate::Result<group::Producer> {
+		let mut group = self.group.take().ok_or(crate::Error::Closed)?;
+		group.finish()?;
+		Ok(group)
+	}
+}
+
+/// The chunks queued by [`GroupRecv::frame`], handed over one at a time without copying.
+struct Queue(std::rc::Rc<std::cell::RefCell<std::collections::VecDeque<Bytes>>>);
+
+impl crate::transport::poll::Chunks for Queue {
+	type Error = NoError;
+
+	fn poll_read_chunk(
+		&mut self,
+		_waiter: &kio::Waiter,
+		max: usize,
+	) -> std::task::Poll<Result<Option<bytes::Bytes>, NoError>> {
+		let mut queue = self.0.borrow_mut();
+		let Some(front) = queue.front_mut() else {
+			return std::task::Poll::Pending;
+		};
+		let chunk = match front.len() > max {
+			true => front.split_to(max),
+			false => queue.pop_front().expect("front exists"),
+		};
+		std::task::Poll::Ready(Ok(Some(chunk)))
+	}
+
+	fn stop(&mut self, _code: u32) {}
+}
+
 /// A source-selection watch for the private request-lifetime benchmark.
-pub struct RequestValidity(crate::model::broadcast::RequestValidity);
+pub struct RequestValidity {
+	watch: crate::model::broadcast::RequestValidity,
+	/// Every period [`Self::start`] captured. A pending request holds its route and
+	/// answering leases until it ends, so a replacement closes both without freeing
+	/// either, and the benchmark must not charge it for freeing them.
+	periods: Vec<crate::model::broadcast::RequestValidity>,
+}
 
 impl RequestValidity {
 	/// Watch which instance this route's peer selects for a path.
 	pub fn new(route: &crate::origin::Requests, path: &crate::Path) -> Self {
-		Self(crate::model::broadcast::RequestValidity::for_source(route, path))
+		Self {
+			watch: crate::model::broadcast::RequestValidity::for_source(route, path),
+			periods: Vec::new(),
+		}
 	}
 
-	/// Capture the lifetime of one pending request.
-	pub fn start(&self) -> kio::Consumer<()> {
-		match self.0.start() {
-			crate::model::broadcast::RequestValidity::Period(route, ..) => route,
-			_ => unreachable!("a source watch always captures a route lease"),
-		}
+	/// Capture the lifetime of one pending request, retaining its leases until this drops.
+	pub fn start(&mut self) -> kio::Consumer<()> {
+		let period = self.watch.start();
+		let crate::model::broadcast::RequestValidity::Period(route, ..) = &period else {
+			unreachable!("a source watch always captures a route lease");
+		};
+		let route = route.clone();
+		self.periods.push(period);
+		route
 	}
 }
 

@@ -17,11 +17,13 @@ fastest-reader pacing gives.
 Decided 2026-10-25 with the maintainer (mesh planning interview):
 
 - TCP-level proxying over groups, never IP over datagrams.
-- Each direction is one track. A connection is one group on each; each socket
-  `read()` becomes one frame, because a frame's length must be known before it
-  is written and a read has one. It coalesces whatever is buffered with no
-  added timer (the local socket's own Nagle or `TCP_NODELAY` still applies).
-- The receiver flushes a frame's bytes to its socket as they arrive, never
+- A forwarded service is one [socket](/quest/m2/socket/README.md), and each
+  TCP connection is one bi track on it (amended 2026-11-01, below), one group
+  each way; each TCP `read()` becomes one frame, because a frame's length must
+  be known before it is written and a read has one. It coalesces whatever is
+  buffered with no added timer (the local TCP socket's own Nagle or
+  `TCP_NODELAY` still applies).
+- The receiver flushes a frame's bytes to its TCP socket as they arrive, never
   waiting for the whole frame, unless the mesh's authentication level
   (`moq-sign`) must verify it first; a frame that fails verification ends its
   group with a typed error, surfaced as a reset.
@@ -37,6 +39,14 @@ Decided 2026-10-25 with the maintainer (mesh planning interview):
   identity, signing, and service names belong to the
   [mesh](/quest/m2/mesh/README.md), which builds on this.
 
+Amended 2026-11-01 with the maintainer (socket planning interview): connection
+setup is the [socket](/quest/m2/socket/README.md) epic's `Listener` and `dial`,
+which settles the path layout (`L/.dial/<id>`, `L/.accept/<id>`). The earlier
+one track per direction with a group per connection is replaced by one bi
+track per connection. Each connection then gets its own priority, pacing, and
+eviction, and a long-lived connection never sits in an old group that newer
+ones crowd out of a track's window.
+
 This epic owns the end-to-end proof: an unmodified TCP client and server (SSH
 and an HTTP bulk transfer) talk through a two-relay chain with loss injected on
 one hop, with no corruption, FIN and reset propagated, and memory bounded by
@@ -44,6 +54,7 @@ the window.
 
 ## Required
 
+- [Rust sockets](/quest/m2/socket/rust.md) - the dial/accept primitive and tracks as streams
 - [Fastest-reader pacing](/quest/m1/unbounded-groups/fastest-reader.md) - relays push back instead of evicting a reader that keeps up
 - [Rust byte streams](/quest/m2/stream/rust.md) - a duplex `AsyncRead`/`AsyncWrite` stream, a listener and a dialer, and `moq` CLI forwarding
 - [JS byte streams](/quest/m2/stream/js.md) - the same surface in `@moq/net`

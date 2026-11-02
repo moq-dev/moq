@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Manual, Milli, Nano } from "@moq/clock";
+import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
 import { Once } from "@moq/signals";
 import { accept } from "./connection/accept.ts";
 import { connect } from "./connection/connect.ts";
@@ -25,14 +25,14 @@ const url = new URL("https://relay.example/room");
 const DRAIN = 2n ** 62n - 1n;
 
 async function settle() {
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 }
 
 async function waitUntil(pred: () => boolean): Promise<void> {
-	const deadline = Date.now() + 2000;
+	const deadline = Instant.add(now(), Nano.fromMilli(Milli(2000)));
 	for (;;) {
 		if (pred()) return;
-		if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+		if (now() > deadline) throw new Error("timed out waiting for condition");
 		await settle();
 	}
 }
@@ -96,7 +96,7 @@ async function sendLiteGoaway(server: WebTransport): Promise<void> {
 /**
  * After GOAWAY the old session keeps opening subscribe, fetch, and announce-interest streams
  * while it is the only route, at the drain cost. Once a replacement answers, it outranks the
- * old session and new requests open there instead. These wires carry no epoch, so the
+ * old session and new requests open there instead. These wires carry no instance, so the
  * replacement is another instance: the request already open stays on the draining session.
  */
 async function handover(kind: "lite" | "ietf"): Promise<void> {
@@ -162,7 +162,7 @@ async function handover(kind: "lite" | "ietf"): Promise<void> {
 
 		if (inject && goawayBytes) await inject.inject(goawayBytes);
 		else await sendLiteGoaway(pair.server);
-		await wireOf(client).goaway;
+		await client.draining;
 
 		const update = await announced.next();
 		expect(update?.kind).toBe("update");
@@ -333,7 +333,7 @@ async function routeDeath(kind: "lite" | "ietf", after: boolean): Promise<void> 
 
 		if (inject && goawayBytes) await inject.inject(goawayBytes);
 		else await sendLiteGoaway(pair.server);
-		await wireOf(client).goaway;
+		await client.draining;
 
 		routes = consume.announced();
 		expect((await routes.next())?.kind).toBe("start");

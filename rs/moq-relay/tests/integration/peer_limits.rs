@@ -1,5 +1,5 @@
 //! A session admitted as a cluster peer widens its QUIC limits before SETUP OK,
-//! while a viewer keeps the `--quic-*` ones, on the tokio listener and the
+//! while a viewer opens to the `--quic-*` ones, on the tokio listener and the
 //! io_uring workers alike.
 #![cfg(feature = "quic")]
 
@@ -80,7 +80,7 @@ async fn probe(port: u16, peer: bool) -> Seen {
 
 	// The relay widens a peer before it answers SETUP, so its SETUP stream
 	// arrives behind the new credit.
-	let _setup = tokio::time::timeout(TIMEOUT, conn.accept_uni())
+	let _setup = kio::clock::timeout(TIMEOUT, conn.accept_uni())
 		.await
 		.expect("relay SETUP timeout")
 		.expect("relay SETUP");
@@ -89,7 +89,7 @@ async fn probe(port: u16, peer: bool) -> Seen {
 	while streams.len() < PROBE {
 		let open = conn.open_uni(Default::default());
 		let stream = match peer {
-			true => tokio::time::timeout(TIMEOUT, open)
+			true => kio::clock::timeout(TIMEOUT, open)
 				.await
 				.expect("peer stream credit timeout"),
 			false => match open.now_or_never() {
@@ -115,7 +115,7 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 	let deciding = tokio::spawn(async move {
 		let mut leases = Vec::new();
 		for peer in [true, false] {
-			let admission = tokio::time::timeout(TIMEOUT, admissions.next())
+			let admission = kio::clock::timeout(TIMEOUT, admissions.next())
 				.await
 				.expect("admission timeout")
 				.expect("admission");
@@ -128,7 +128,9 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 		}
 		leases
 	});
+	let ready = relay.ready();
 	let running = tokio::spawn(relay.run());
+	ready.wait().await.expect("relay ready");
 
 	let peer = probe(port, true).await;
 	assert_eq!(peer.streams, PROBE, "a peer opens past the viewer stream limit");
@@ -140,7 +142,8 @@ async fn peer_widens_and_viewer_does_not(mut relay: Relay, port: u16) {
 		"a viewer keeps the stream limit, opened {}",
 		viewer.streams
 	);
-	assert_eq!(viewer.max_data, 0, "a viewer's receive window is unchanged");
+	// Both start with only the SETUP window, which admission opens for a viewer too.
+	assert!(viewer.max_data > 0, "a viewer's receive window opens once admitted");
 
 	let _leases = deciding.await.expect("decider");
 	running.abort();
@@ -261,11 +264,9 @@ async fn static_dial(
 	let mut options = moq_relay::cluster::Options::new(Default::default());
 	options.config.connect = vec![moq_relay::cluster::Peer::new(format!("moql://127.0.0.1:{port}/"))];
 	options.peer.quic.max_streams = std::num::NonZeroU64::new(4 * PROBE as u64).unwrap();
-	let cluster = moq_relay::cluster::Cluster::new(options)
-		.expect("cluster init")
-		.with_connect(connect, quic);
+	let cluster = crate::spawn_cluster(options).with_connect(connect, quic);
 	let running = tokio::spawn(cluster.start().await.expect("cluster start").run());
-	let conn = tokio::time::timeout(TIMEOUT, server.accept())
+	let conn = kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("dial timeout")
 		.expect("incoming")

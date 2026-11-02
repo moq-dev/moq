@@ -186,7 +186,9 @@ fn same_origin(entry: &Url, url: &Url) -> bool {
 /// Fetches playlists and segments over HTTP or from the filesystem, applying HLS byte
 /// ranges (and validating that the server honored them).
 struct Fetcher {
-	client: Client,
+	/// `None` for a `file` playlist: every fetch stays on its scheme, so it never needs one, nor
+	/// the system trust roots building one loads.
+	client: Option<Client>,
 	/// The caller's playlist URL. A playlist is untrusted, so every fetch stays on its origin.
 	entry: Url,
 }
@@ -196,6 +198,10 @@ impl Fetcher {
 		let entry = config.playlist.clone();
 		if !matches!(entry.scheme(), "file" | "http" | "https") {
 			return Err(Error::ResourceRefused);
+		}
+
+		if entry.scheme() == "file" {
+			return Ok(Self { client: None, entry });
 		}
 
 		// An intermediate hop is already a request to its origin, so check each one before
@@ -210,13 +216,22 @@ impl Fetcher {
 			}
 		});
 
+		// reqwest reads rustls's process default and panics without one, so install rind's
+		// unless the host already chose a provider.
+		let _ = rind_rustls::default_provider()
+			.map_err(Error::unsupported_cpu)?
+			.install_default();
+
 		let client = Client::builder()
 			.user_agent(concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION")))
 			// Bound playlist/segment fetches so a stuck request can't wedge `run()`.
 			.timeout(REQUEST_TIMEOUT)
 			.redirect(redirect)
 			.build()?;
-		Ok(Self { client, entry })
+		Ok(Self {
+			client: Some(client),
+			entry,
+		})
 	}
 
 	/// Fetch and parse a media playlist, with the URL its relative URIs resolve against.
@@ -245,7 +260,8 @@ impl Fetcher {
 		if !same_origin(&self.entry, url) {
 			return Err(Error::ResourceRefused);
 		}
-		if url.scheme() == "file" {
+		// Same origin, so a file URL exactly when the entry is one.
+		let Some(client) = &self.client else {
 			let path = url.to_file_path().map_err(|_| Error::InvalidFileUrl)?;
 			let Some(range) = resource.range else {
 				let bytes = tokio::fs::read(&path).await.map(Bytes::from).map_err(Error::from)?;
@@ -259,50 +275,49 @@ impl Fetcher {
 				.read_to_end(&mut bytes)
 				.await
 				.map_err(Error::from)?;
-			Ok((
+			return Ok((
 				Self::validate_range_length(url, range, Bytes::from(bytes))?,
 				url.clone(),
-			))
-		} else {
-			let response = self.request(resource).send().await?;
-			if response.status().is_redirection() {
-				return Err(Error::ResourceRefused);
-			}
-			let mut response = response.error_for_status()?;
-			let served = response.url().clone();
-			let Some(range) = resource.range else {
-				return Ok((response.bytes().await?, served));
-			};
+			));
+		};
+		let response = Self::request(client, resource).send().await?;
+		if response.status().is_redirection() {
+			return Err(Error::ResourceRefused);
+		}
+		let mut response = response.error_for_status()?;
+		let served = response.url().clone();
+		let Some(range) = resource.range else {
+			return Ok((response.bytes().await?, served));
+		};
 
-			// An origin that ignores `Range` sends the whole resource, which would cost every
-			// earlier byte of the file for each segment.
-			if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-				return Err(Error::ByteRangeIgnored {
+		// An origin that ignores `Range` sends the whole resource, which would cost every
+		// earlier byte of the file for each segment.
+		if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+			return Err(Error::ByteRangeIgnored {
+				url: redact(url),
+				status: response.status().as_u16(),
+			});
+		}
+		Self::validate_content_range(url, range, response.headers())?;
+
+		// Stream the body so an overrun fails without buffering the excess.
+		let mut body = BytesMut::new();
+		while let Some(chunk) = response.chunk().await? {
+			let read = body.len() + chunk.len();
+			if !u64::try_from(read).is_ok_and(|read| read <= range.length) {
+				return Err(Error::ByteRangeLengthMismatch {
 					url: redact(url),
-					status: response.status().as_u16(),
+					expected: range.length,
+					actual: read,
 				});
 			}
-			Self::validate_content_range(url, range, response.headers())?;
-
-			// Stream the body so an overrun fails without buffering the excess.
-			let mut body = BytesMut::new();
-			while let Some(chunk) = response.chunk().await? {
-				let read = body.len() + chunk.len();
-				if !u64::try_from(read).is_ok_and(|read| read <= range.length) {
-					return Err(Error::ByteRangeLengthMismatch {
-						url: redact(url),
-						expected: range.length,
-						actual: read,
-					});
-				}
-				body.extend_from_slice(&chunk);
-			}
-			Ok((Self::validate_range_length(url, range, body.freeze())?, served))
+			body.extend_from_slice(&chunk);
 		}
+		Ok((Self::validate_range_length(url, range, body.freeze())?, served))
 	}
 
-	fn request(&self, resource: &Resource) -> reqwest::RequestBuilder {
-		let mut request = self.client.get(resource.url.clone());
+	fn request(client: &Client, resource: &Resource) -> reqwest::RequestBuilder {
+		let mut request = client.get(resource.url.clone());
 		if let Some(range) = resource.range {
 			let end = range.start + range.length - 1;
 			request = request.header(reqwest::header::RANGE, format!("bytes={}-{}", range.start, end));
@@ -665,7 +680,12 @@ impl TrackState {
 				rendition: self.label.clone(),
 				source: err,
 			},
-			err => err.into(),
+			err => {
+				// A decode error is terminal. Retire this generation now instead of fetching
+				// another segment for an importer that cannot read it.
+				self.evict();
+				err.into()
+			}
 		})?;
 
 		self.media_range = range;
@@ -694,6 +714,9 @@ pub struct Import {
 
 impl Import {
 	/// Create a new HLS import that will write into the given broadcast.
+	///
+	/// For an HTTP playlist, installs rind's rustls provider as the process default unless one
+	/// already is. A file playlist builds no HTTP client, so it installs none.
 	pub fn new(broadcast: moq_net::broadcast::Producer, catalog: CatalogProducer, cfg: Config) -> Result<Self> {
 		let fetcher = Fetcher::new(&cfg)?;
 		Ok(Self {
@@ -742,7 +765,7 @@ impl Import {
 	/// amount of waiting changes either.
 	pub async fn run(&mut self) -> Result<()> {
 		let mut delay = STEP_RETRY_MIN;
-		let mut deadline = moq_clock::now() + STEP_RETRY_BUDGET;
+		let mut deadline = kio::clock::now() + STEP_RETRY_BUDGET;
 
 		loop {
 			// A step where *nothing* ingested while a rendition was failing is a failed pass wearing
@@ -766,7 +789,7 @@ impl Import {
 				Ok(outcome) => {
 					// The source is alive, so the earlier failures no longer describe it.
 					delay = STEP_RETRY_MIN;
-					deadline = moq_clock::now() + STEP_RETRY_BUDGET;
+					deadline = kio::clock::now() + STEP_RETRY_BUDGET;
 					outcome
 				}
 				Err(err @ Error::ResourceRefused) => return Err(err),
@@ -778,7 +801,7 @@ impl Import {
 				// The source rewound its timestamps, which no later pass can import.
 				Err(err @ Error::Rewind { .. }) => return Err(err),
 				Err(err) => {
-					let now = moq_clock::now();
+					let now = kio::clock::now();
 					if now >= deadline {
 						return Err(err);
 					}
@@ -787,10 +810,10 @@ impl Import {
 					// Jittered so a fleet of importers pointed at one origin doesn't retry in
 					// lockstep, and never past the deadline the budget promised.
 					let wait = delay
-						.mul_f64(0.5 + rand::rng().random::<f64>() / 2.0)
+						.mul_f64(0.5 + kio::clock::rng().random::<f64>() / 2.0)
 						.min(deadline - now);
 					delay = (delay * 2).min(STEP_RETRY_MAX);
-					moq_clock::sleep(wait).await;
+					kio::clock::sleep(wait).await;
 					continue;
 				}
 			};
@@ -807,7 +830,7 @@ impl Import {
 				"HLS import step complete"
 			);
 
-			moq_clock::sleep(delay).await;
+			kio::clock::sleep(delay).await;
 		}
 	}
 
@@ -1187,7 +1210,6 @@ fn moq_sequence(discontinuity_sequence: u64, media_sequence: u64) -> Result<u64>
 }
 
 #[cfg(test)]
-#[expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 mod tests {
 	use super::*;
 	use std::path::{Path, PathBuf};
@@ -1973,7 +1995,7 @@ mod tests {
 		assert!(import.video[0].importer.is_none(), "nothing was imported");
 		assert!(catalog.snapshot().video.renditions.is_empty());
 
-		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+		let run = kio::clock::timeout(Duration::from_secs(5), import.run())
 			.await
 			.expect("a settled refusal skips the retry budget");
 		assert!(matches!(run, Err(Error::PlaylistEnded)));
@@ -2000,7 +2022,7 @@ mod tests {
 		let cfg = Config::new(Url::from_file_path(dir.join("master.m3u8")).unwrap());
 		let mut import = Import::new(broadcast, catalog, cfg).unwrap();
 
-		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+		let run = kio::clock::timeout(Duration::from_secs(5), import.run())
 			.await
 			.expect("the ended rendition ends the import");
 		assert!(matches!(run, Err(Error::PlaylistEnded)), "{run:?}");
@@ -2033,7 +2055,7 @@ mod tests {
 
 		let (_, ended) = recording(4, true);
 		std::fs::write(dir.join("media.m3u8"), ended).unwrap();
-		tokio::time::timeout(Duration::from_secs(10), import.run())
+		kio::clock::timeout(Duration::from_secs(10), import.run())
 			.await
 			.expect("an ended playlist ends the import")
 			.unwrap();
@@ -2080,6 +2102,45 @@ mod tests {
 
 		import.step(OnError::Warn).await.unwrap();
 		assert!(import.video[0].importer.is_none(), "the dead rendition is retired");
+	}
+
+	/// A decode refusal retires its importer at once, rather than after
+	/// [`MAX_RENDITION_FAILURES`] consecutive failures, so the next pass rebuilds it under fresh
+	/// track names and can import a repaired source. The refusal is not settled, so `run` still
+	/// retries the step within its backoff budget.
+	#[tokio::test]
+	async fn a_refused_segment_recovers_through_a_new_importer() {
+		for passthrough in [false, true] {
+			let dir = temp_dir();
+			write_synth(&dir, &synth(true), "video", &[5_000_000, 7_000_000]);
+			let playlist =
+				"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MAP:URI=\"videoinit.mp4\"\n#EXTINF:1,\nvideo0.m4s\n";
+			std::fs::write(dir.join("media.m3u8"), playlist).unwrap();
+			let mut broadcast = moq_net::broadcast::Info::new().produce();
+			let catalog = CatalogProducer::new(&mut broadcast, moq_mux::catalog::Config::default()).unwrap();
+			let mut cfg = Config::new(Url::from_file_path(dir.join("media.m3u8")).unwrap());
+			cfg.passthrough = passthrough;
+			let mut import = Import::new(broadcast, catalog.clone(), cfg).unwrap();
+			import.init().await.unwrap();
+			let previous = catalog.snapshot().video.renditions.keys().next().unwrap().clone();
+
+			let segment = std::fs::read(dir.join("video1.m4s")).unwrap();
+			// An mdat without a moof is refused at its header.
+			std::fs::write(dir.join("video1.m4s"), b"\0\0\0\x0cmdatdata").unwrap();
+			std::fs::write(dir.join("media.m3u8"), format!("{playlist}#EXTINF:1,\nvideo1.m4s\n")).unwrap();
+			let step = import.step(OnError::Warn).await.unwrap();
+			assert!(step.failed.is_some());
+			assert!(import.video[0].importer.is_none());
+			std::fs::write(dir.join("video1.m4s"), &segment).unwrap();
+			let step = import.step(OnError::Warn).await.unwrap();
+			assert!(step.failed.is_none());
+			assert_eq!(step.wrote_segments, 2);
+			let snapshot = catalog.snapshot();
+			assert_eq!(snapshot.video.renditions.len(), 1);
+			assert_ne!(*snapshot.video.renditions.keys().next().unwrap(), previous);
+			import.finish().unwrap();
+			std::fs::remove_dir_all(dir).unwrap();
+		}
 	}
 
 	/// An ended rendition is never fetched again, so losing its playlist while its siblings
@@ -2427,7 +2488,7 @@ mod tests {
 			"audio",
 			"#EXTINF:1,\naudio0.m4s\n#EXT-X-DISCONTINUITY\n#EXTINF:1,\naudio1.m4s\n",
 		);
-		let run = tokio::time::timeout(Duration::from_secs(5), import.run())
+		let run = kio::clock::timeout(Duration::from_secs(5), import.run())
 			.await
 			.expect("a rewind is not retried");
 		assert!(
@@ -2463,8 +2524,8 @@ mod tests {
 		let mut track = consumer.track(name).unwrap().subscribe(replay).await.unwrap();
 		let wait = std::time::Duration::from_millis(100);
 		let mut out = Vec::new();
-		while let Ok(Ok(Some(mut group))) = tokio::time::timeout(wait, track.recv_group()).await {
-			while let Ok(Ok(Some(frame))) = tokio::time::timeout(wait, group.read_frame()).await {
+		while let Ok(Ok(Some(mut group))) = kio::clock::timeout(wait, track.recv_group()).await {
+			while let Ok(Ok(Some(frame))) = kio::clock::timeout(wait, group.read_frame()).await {
 				out.push(frame.timestamp.unwrap().as_micros());
 			}
 		}
@@ -2514,7 +2575,7 @@ mod tests {
 		let before = published(&consumer, &catalog).await;
 
 		// Let the clock run on, so a fresh offset could not land back on the source's timestamps.
-		tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+		kio::clock::sleep(std::time::Duration::from_millis(50)).await;
 		let mut second = sink.importer(&select_muxed());
 		second.decode(&init).unwrap();
 		drop(first);

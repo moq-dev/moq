@@ -46,7 +46,7 @@ impl Config {
 		let mut streamer = QlogStreamer::new(
 			self.title,
 			self.description,
-			moq_clock::now().into_std(),
+			kio::clock::now().into_std(),
 			trace,
 			qlog::events::EventImportance::Core,
 			// `Instant` should have sub-microsecond precision on most platforms

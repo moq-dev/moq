@@ -22,7 +22,7 @@ pub(crate) async fn dial(client: &Client, url: Url, broadcast: moq_net::broadcas
 	let sink = Box::new(IngestSink::new(broadcast, config)?);
 
 	let socket = session::bind_udp(&client.config().ice_candidates).await?;
-	let mut rtc = Rtc::new(moq_clock::now().into_std());
+	let mut rtc = Rtc::new(kio::clock::now().into_std());
 	for addr in socket.locals() {
 		let cand = Candidate::host(*addr, "udp").map_err(Error::rtc)?;
 		rtc.add_local_candidate(cand);

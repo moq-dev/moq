@@ -191,7 +191,7 @@ async fn open(config: &Config, filter: &SCContentFilter, size: (u32, u32)) -> Re
 	};
 
 	let label = config.source.label();
-	let first = match moq_clock::timeout(FIRST_FRAME_TIMEOUT, chan.recv()).await {
+	let first = match kio::clock::timeout(FIRST_FRAME_TIMEOUT, chan.recv()).await {
 		Ok(Ok(Some(frame))) => frame,
 		Ok(Err(error)) => return Err(error),
 		Ok(Ok(None)) | Err(_) => {
@@ -376,7 +376,7 @@ async fn shareable_content() -> Result<Retained<SCShareableContent>, Error> {
 	});
 	unsafe { SCShareableContent::getShareableContentWithCompletionHandler(&handler) };
 
-	match moq_clock::timeout(ASYNC_TIMEOUT, rx).await {
+	match kio::clock::timeout(ASYNC_TIMEOUT, rx).await {
 		Ok(Ok(Ok(content))) => Ok(content.0),
 		Ok(Ok(Err(msg))) => Err(Error::Codec(anyhow::anyhow!("shareable content: {msg}"))),
 		Ok(Err(_)) => Err(Error::Codec(anyhow::anyhow!("shareable content handler dropped"))),
@@ -398,7 +398,7 @@ async fn start_capture(stream: &SCStream) -> Result<(), Error> {
 	});
 	unsafe { stream.startCaptureWithCompletionHandler(Some(&handler)) };
 
-	match moq_clock::timeout(ASYNC_TIMEOUT, rx).await {
+	match kio::clock::timeout(ASYNC_TIMEOUT, rx).await {
 		Ok(Ok(None)) => Ok(()),
 		Ok(Ok(Some(msg))) => Err(Error::Codec(anyhow::anyhow!("start capture: {msg}"))),
 		Ok(Err(_)) => Err(Error::Codec(anyhow::anyhow!("start-capture handler dropped"))),

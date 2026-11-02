@@ -1,12 +1,12 @@
 import { afterEach, expect, mock, spyOn, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Milli, yieldNow } from "@moq/clock";
 import { type Getter, Signal } from "@moq/signals";
 import type { Grant } from "../auth.ts";
 import { Producer as BroadcastProducer, type Tracks } from "../broadcast.ts";
 import { accept, connect } from "../connection/index.ts";
-import * as Epoch from "../epoch.ts";
 import { fromTransport, NotFound, SessionCode, StreamCode, StreamError } from "../error.ts";
 import { randomHop } from "../hop.ts";
+import * as Instance from "../instance.ts";
 import { hooks } from "../internal.ts";
 import { createMockTransportPair } from "../mock.ts";
 import { Producer as OriginProducer } from "../origin.ts";
@@ -29,7 +29,7 @@ afterEach(() => mock.restore());
 
 /** Lets queued microtasks, signal notifications, and mock stream deliveries run. */
 function settle(): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, 0));
+	return yieldNow();
 }
 
 async function bytes(f: (w: Writer) => Promise<void>): Promise<Uint8Array> {
@@ -92,11 +92,11 @@ test("events and the request round-trip", async () => {
 	expect(await decodeTracksEventMaybe(reader, version)).toEqual({ kind: "synced" });
 	expect(await decodeTracksEventMaybe(reader, version)).toBeUndefined();
 
-	const epoch = Epoch.parse("01900000-0000-7000-8000-000000000001");
-	const request = await bytes((w) => new TracksMessage(Path.from("room/alice"), epoch).encode(w, version));
+	const instance = Instance.parse("01900000-0000-7000-8000-000000000001");
+	const request = await bytes((w) => new TracksMessage(Path.from("room/alice"), instance).encode(w, version));
 	const got = await TracksMessage.decode(new Reader(undefined, request, version), version);
 	expect(got.broadcast).toBe(Path.from("room/alice"));
-	expect(got.epoch).toBe(epoch);
+	expect(got.instance).toBe(instance);
 });
 
 test("older versions have no tracks stream", async () => {
@@ -265,9 +265,9 @@ test("a flood of a peer's listing churn yields to the host's tasks", async () =>
 	// The receiver is mid-flood: a task queued now runs before it reaches the end.
 	let last = false;
 	let ranFirst: boolean | undefined;
-	setTimeout(() => {
+	void yieldNow().then(() => {
 		ranFirst = !last;
-	}, 0);
+	});
 	let event: string;
 	do event = await next(tracks);
 	while (event !== "+last");
@@ -490,7 +490,7 @@ test("a listing over a session carries each track's info, end to end", async () 
 	server.abort();
 });
 
-test("an epoch-pinned front lists its serving route's tracks", async () => {
+test("an instance-pinned front lists its serving route's tracks", async () => {
 	const pair = createMockTransportPair(ALPN_07_WIP);
 	const serverOrigin = new OriginProducer();
 	const clientOrigin = new OriginProducer();
@@ -501,7 +501,7 @@ test("an epoch-pinned front lists its serving route's tracks", async () => {
 	const broadcastPublication = serverOrigin.createBroadcast(Path.from("room"));
 	const broadcast = broadcastPublication.broadcast;
 	broadcast.createTrack("a");
-	broadcastPublication.announce({ epoch: Epoch.parse("01900000-0000-7000-8000-000000000001") });
+	broadcastPublication.announce({ instance: Instance.parse("01900000-0000-7000-8000-000000000001") });
 
 	const reader = clientOrigin.consume();
 	const announced = reader.announced();
@@ -524,11 +524,9 @@ test("an epoch-pinned front lists its serving route's tracks", async () => {
 	server.abort();
 });
 
-test("an epoch-pinned front served through a covering prefix route is NOT_FOUND", async () => {
+test("a front pinned to a named instance served through a covering prefix route is NOT_FOUND", async () => {
 	const origin = new OriginProducer();
-	const dynamic = origin.requestsRoute(Path.from("room"), {
-		epoch: Epoch.parse("01900000-0000-7000-8000-000000000001"),
-	});
+	const dynamic = origin.requestsRoute(Path.from("room"), { instance: Instance.parse("named") });
 	void (async () => {
 		for await (const request of dynamic.requested()) {
 			const served = new BroadcastProducer();
@@ -540,9 +538,9 @@ test("an epoch-pinned front served through a covering prefix route is NOT_FOUND"
 	await settle();
 	const front = request.active.peek();
 	if (!front) throw new Error("expected the covering route to serve");
-	expect(await next(front.tracks())).toBe(`error: ${StreamCode.NotFound}`);
+	expect(() => front.tracks()).toThrow(NotFound);
 	// A later reader asks again, and is refused again.
-	expect(await next(front.tracks())).toBe(`error: ${StreamCode.NotFound}`);
+	expect(() => front.tracks()).toThrow(NotFound);
 	request.close();
 	origin.close();
 });

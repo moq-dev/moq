@@ -5,8 +5,11 @@ use std::{
 
 use crate::Timestamp;
 
+mod runs;
 mod window;
-pub(super) use window::{Containing, Held, Holdings, Resolved, Unheld, Window, later};
+pub(super) use runs::{Layered, Runs};
+pub(crate) use window::Accounted;
+pub(super) use window::{Containing, Held, Holdings, Resolved, Seen, Unheld, Window, later};
 
 /// Subscriber-side preferences for receiving a track.
 ///
@@ -93,6 +96,11 @@ pub struct Subscription {
 	/// subscribers fresh. Each subscriber's own publisher (a relay's downstream session)
 	/// still serves it in its own order.
 	pub order: Order,
+	/// Whether this reader needs the source's live feed, not only its history: a wire
+	/// publisher owes its peer an answer naming the live edge, which only the upstream's own
+	/// answer gives. A session holding no upstream subscription for its copy subscribes again
+	/// for such a reader, whatever its ranges. Aggregated as any: one such reader is enough.
+	pub(crate) feed: bool,
 }
 
 /// Which of a subscription's pending groups the publisher sends first.
@@ -137,8 +145,11 @@ pub enum Anchor {
 	/// The group containing this presentation time: the newest one starting at or before it.
 	///
 	/// Resolved from the starts of the groups the serving hop holds. When none starts at
-	/// or before it, a start reaches back to the oldest group, and while no group has
-	/// started at all it waits like `Relative(0)`. An end settles once a group starting
+	/// or before it, a hop whose [`Requests`](crate::track::Requests) handler serves its
+	/// history looks the start up there (see [`Fill::time`](crate::track::Fill::time)),
+	/// reading nothing until it answers; otherwise, or when the handler can't tell, a start
+	/// reaches back to the oldest group. While no group has started at all it waits like
+	/// `Relative(0)`. An end settles once a group starting
 	/// after it is known and every sequence below that one is accounted for (started,
 	/// dropped, or never to start). Until then reads stop at the first held group that
 	/// may still start, so at the live edge at most that one group past the end is read
@@ -290,6 +301,7 @@ impl Default for Subscription {
 			max_delay: Some(Duration::ZERO),
 			ranges: vec![Range::oldest()],
 			order: Order::Descending,
+			feed: false,
 		}
 	}
 }
@@ -471,6 +483,7 @@ impl Combined {
 		if let Order::Descending = sub.order {
 			combined.order = Order::Descending;
 		}
+		combined.feed |= sub.feed;
 	}
 
 	/// The aggregate, or `None` without a subscriber.
