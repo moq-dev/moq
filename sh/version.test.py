@@ -268,7 +268,11 @@ class Versions(unittest.TestCase):
     def test_release_plz_keeps_manual_cut_despite_breaking_commits(self):
         # update is the version/changelog engine used by release-pr. Local
         # registry manifests exercise it without credentials, publishing, or a forge.
-        self.write(".release-plz.toml", "[workspace]\nsemver_check = false\ndependencies_update = false\n")
+        self.write(".release-plz.toml", (ROOT / ".release-plz.toml").read_text())
+        # A breaking bump from this baseline would be 0.20.0, so a recomputed
+        # version cannot accidentally satisfy the hand-set 0.22.0 assertion.
+        self.write("rs/shared/Cargo.toml", (self.root / "rs/shared/Cargo.toml").read_text().replace("0.21.3", "0.19.3"))
+        self.call("cargo", "generate-lockfile", "--offline")
         for p in module.packages(self.root):
             if p.ecosystem == "rust":
                 self.write(
@@ -286,6 +290,8 @@ class Versions(unittest.TestCase):
         for path, original in changelogs.items():
             self.assertEqual(path.read_bytes(), original)
         self.commit("chore: shared minor cut")
+        self.write("rs/shared/src/lib.rs", "pub fn replacement_after_cut() {}\n")
+        self.commit("feat!: break the public API after the cut")
         result = self.call(
             "release-plz",
             "update",
@@ -294,7 +300,7 @@ class Versions(unittest.TestCase):
             "--repo-url",
             "https://github.com/moq-dev/moq",
         )
-        self.assertIn("shared`: 0.21.3 -> 0.22.0", result.stdout)
+        self.assertIn("shared`: 0.19.3 -> 0.22.0", result.stdout)
         self.check()
         self.assertIn("## [0.22.0]", (self.root / "rs/shared/CHANGELOG.md").read_text())
         # Unchanged published members also retain the cut; exempt packages keep
