@@ -4,7 +4,7 @@ import * as jose from "jose";
 import { type Algorithm, AlgorithmSchema } from "./algorithm.ts";
 import { type Claims, ClaimsSchema, ScopeSchema, scopeAllows } from "./claims.ts";
 import * as Path from "./path.ts";
-import { encodeGrants } from "./wire.ts";
+import { encodeGrants, nestRates } from "./wire.ts";
 
 /**
  * A validated key identifier (kid). At most 128 alphanumeric, hyphen, or underscore characters.
@@ -194,18 +194,25 @@ function parse(jwk: string): Key {
  * `iat` is written only when the claims carry one, so an unset field stays off the
  * wire rather than being stamped with the current time.
  *
+ * Takes the wire shape or the decoded {@link Claims}, so a cap may be either a capped
+ * role or a `publish_rate`/`subscribe_rate` beside it.
+ *
  * Throws on a root spelled with an empty segment, a `\` escaping anything but `\` or
  * `/`, or more than 4096 bytes. Verifying stays lenient on the empty segments, so tokens
  * minted before stay valid.
  */
-async function sign(key: Key, claims: z.input<typeof ClaimsSchema>): Promise<string> {
+async function sign(
+	key: Key,
+	claims: z.input<typeof ClaimsSchema> & { publish_rate?: number; subscribe_rate?: number },
+): Promise<string> {
 	ensureOperationSupported(key, "sign");
 
 	// Scope-check and sign what the schema parsed, never the raw input: an untyped
-	// caller could pass legacy `put`/`get` fields the scope check would not see.
+	// caller could pass legacy `put`/`get` fields the scope check would not see. The
+	// caps of decoded claims, as `verify` returns them, nest back into their roles first.
 	let parsed: Claims;
 	try {
-		parsed = ClaimsSchema.parse(claims);
+		parsed = ClaimsSchema.parse(nestRates(claims));
 	} catch (error) {
 		throw new Error(`Invalid claims: ${error instanceof Error ? error.message : "unknown error"}`);
 	}

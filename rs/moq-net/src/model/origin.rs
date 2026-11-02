@@ -67,8 +67,7 @@ impl Hop {
 	/// and reject values above 2^53-1. Keep generated IDs in that range while
 	/// [`Self::new`] accepts any non-zero 64-bit id.
 	pub fn random() -> Self {
-		let mut rng = rand::rng();
-		let id = rng.random_range(1..(1u64 << 53));
+		let id = kio::clock::rng().random_range(1..(1u64 << 53));
 		Self { id }
 	}
 
@@ -7847,7 +7846,7 @@ mod tests {
 		assert_eq!(scoped.consume().forwardable().horizon.max_hops, HopLimit::new(6));
 	}
 	#[cfg(feature = "async")]
-	use crate::model::test_tracing::count_drop_warnings;
+	use crate::test_tracing::count_drop_warnings;
 	use futures::FutureExt;
 	use std::sync::atomic::AtomicBool;
 

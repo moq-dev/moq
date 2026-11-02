@@ -36,6 +36,13 @@ local.cameraEnabled.set(true);
 const room = new Room({ connection, identity: Path.from("alice") });
 ```
 
+`Local` publishes through `Publish.Broadcast`, which
+[encodes while enabled](/lib/js/publish#encoding): while `cameraEnabled` is on,
+the camera's hd and sd renditions encode even when nobody in the room watches,
+so a member who arrives late can fetch the last few seconds. While
+`microphoneEnabled` is on, the microphone keeps raw audio and encodes it once
+someone listens. Turn either off to stop that capture.
+
 On a public prefix, skip the token and dial that path directly. The conferencing
 demo at [`demo/web`](https://github.com/moq-dev/moq/tree/main/demo/web) (`meet.html`)
 does that under `anon/meet/{room}`.

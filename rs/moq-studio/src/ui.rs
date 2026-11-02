@@ -505,8 +505,10 @@ impl Panels {
 					ui.label("Viewers");
 					ui.label(if stats.watched.load(Ordering::Relaxed) {
 						"watching"
-					} else {
+					} else if output.on_demand {
 						"none; not encoding"
+					} else {
+						"none"
 					});
 					ui.end_row();
 				}
