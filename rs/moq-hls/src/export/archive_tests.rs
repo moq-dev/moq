@@ -149,7 +149,7 @@ impl Recording {
 				.unwrap();
 			let source = Source {
 				media,
-				records: moq_mux::hls::Producer::new(track.clone()),
+				records: moq_mux::hls::Producer::new(track.clone(), moq_mux::Clock::new()),
 				track,
 				record: 0,
 			};

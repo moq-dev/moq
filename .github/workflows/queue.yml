@@ -1,0 +1,71 @@
+name: Queue
+
+# GitHub's merge queue tests each picked PR on top of main, one at a time, on
+# the host's self-hosted runner, and merges exactly the tree it tested. When the
+# queue drops a PR, moq-dev/quest's queue watcher on the host runs the land
+# fixer and re-enqueues it (quest/m0/ci/land.md).
+#
+# `main`'s ruleset requires this job's `Queue` context. GitHub admits a PR to
+# the queue only once its required checks pass on the PR itself, so the job
+# also runs, as skipped, on main pull requests; a skipped job satisfies the
+# requirement. Only the merge group build runs code, and only a maintainer's
+# pick enters the queue.
+on:
+  pull_request:
+    branches: [main]
+    # `edited` covers a PR retargeted to main, which needs the context too.
+    types: [opened, synchronize, reopened, edited]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+
+# Each group has its own ref, so a group never cancels another; a pull request's
+# skipped runs replace their own.
+concurrency:
+  group: queue-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  queue:
+    name: Queue
+    if: github.event_name == 'merge_group'
+    runs-on: [self-hosted, moq-queue]
+    # A merge group is one PR at build concurrency 1; `just ci` takes about 5-15
+    # minutes. Backstop a hang instead of holding the queue.
+    timeout-minutes: 90
+    env:
+      # The diff the dispatcher selects from: the group's base, as the host gate
+      # passed its own BASE.
+      BASE: ${{ github.event.merge_group.base_sha }}
+      # A failure goes to the fixer whatever else fails, so stop at the first
+      # failed module (moq-dev/moq#7466).
+      CHECK_FAIL_FAST: "1"
+      NEXTEST_TEST_THREADS: 24
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history for the dispatcher's base comparison.
+          fetch-depth: 0
+
+      - uses: ./.github/actions/just
+
+      # Local storage only: a self-hosted runner gets no remote cache key.
+      - name: Rust cache
+        uses: ./.github/actions/rust-cache
+
+      - name: Check
+        run: |
+          rm -rf target/cargo-timings
+          nix develop --command just ci "$BASE"
+
+      - name: Upload build timings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cargo-timings
+          path: target/cargo-timings/cargo-timing-*.html
+          if-no-files-found: ignore
+          retention-days: 14
