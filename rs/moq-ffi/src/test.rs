@@ -2175,13 +2175,35 @@ async fn timestamps_are_exact() {
 				timestamp: Some(timestamp),
 			})
 			.unwrap();
-		let frame = tokio::time::timeout(TIMEOUT, consumer.read_frame())
+		let frame = kio::clock::timeout(TIMEOUT, consumer.read_frame())
 			.await
 			.unwrap()
 			.unwrap()
 			.unwrap();
 		assert_eq!(frame.timestamp, Some(timestamp));
 	}
+
+	// An inserted datagram keeps the exact tick too.
+	let tick = MoqTimestamp {
+		value: 1,
+		scale: 90_000,
+	};
+	track
+		.insert_datagram(
+			7,
+			MoqFrame {
+				payload: b"datagram".to_vec(),
+				timestamp: Some(tick),
+			},
+		)
+		.unwrap();
+	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
+		.await
+		.unwrap()
+		.unwrap()
+		.unwrap();
+	assert_eq!(datagram.sequence, 7);
+	assert_eq!(datagram.timestamp, Some(tick));
 
 	for invalid in [
 		MoqTimestamp { value: 0, scale: 0 },
