@@ -28,7 +28,8 @@ if ! command -v java >/dev/null 2>&1; then
     exit 1
 fi
 
-GRADLE_CMD="${GRADLE_CMD:-$(command -v gradle || true)}"
+# Resolve an executable before defining gradle(), so an inherited function cannot recurse into it.
+GRADLE_CMD="$(type -P "${GRADLE_CMD:-gradle}" || true)"
 if [[ -z "$GRADLE_CMD" ]]; then
     echo "kt check: gradle not on PATH; run 'nix develop' or use 'just kt generate' to only regenerate bindings" >&2
     exit 1

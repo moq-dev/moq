@@ -173,7 +173,7 @@ if [[ "$HAVE_ANDROID_LIBS" == true ]]; then
     GRADLE_ARGS+=("-Pandroid.enabled=true")
 fi
 
-GRADLE_CMD="${GRADLE_CMD:-$(command -v gradle || true)}"
+GRADLE_CMD="$(type -P "${GRADLE_CMD:-gradle}" || true)"
 [[ -n "$GRADLE_CMD" ]] || {
     echo "Error: gradle not on PATH" >&2
     exit 1
