@@ -121,23 +121,26 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 ///
 /// Bounds how much unread data and incomplete messages one peer can make us buffer across
 /// all of its streams, which the backends otherwise leave unlimited. On iroh, which returns
-/// credit as it reads, it bounds only the unread data. It has to be at least
-/// moq-net's `transport::MIN_RECEIVE_WINDOW`, the 64 MiB announcement
-/// cap plus framing, so 64 MiB would be refused; 128 MiB also holds two maximum-size frames
-/// at once, and lets a relay-to-relay session sustain several Gbps at intercontinental RTTs.
-pub const DEFAULT_RECEIVE_WINDOW: u64 = 128 << 20;
+/// credit as it reads, it bounds only the unread data. It has to be at least moq-net's
+/// `transport::MIN_RECEIVE_WINDOW`, one 1 MiB segment. 4 MiB sustains about 270 Mbps at a
+/// 100 ms RTT, room for any one viewer or publisher, and lets a session pause two group
+/// streams for slow readers (half the window, a stream window each).
+pub const DEFAULT_RECEIVE_WINDOW: u64 = 4 << 20;
 #[cfg(feature = "_transport")]
 const _: () = assert!(DEFAULT_RECEIVE_WINDOW >= moq_net::transport::MIN_RECEIVE_WINDOW);
 
 /// Default per-stream receive window, used when [`Config::stream_receive_window`] is unset.
 ///
 /// Stream credit returns as bytes are read, whether or not their message is complete,
-/// so this only paces one stream: enough for a single group stream to reach a few
-/// hundred Mbps at a 100 ms RTT.
-pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 4 << 20;
+/// so this only paces one stream: enough for a single group stream to reach about
+/// 67 Mbps at a 100 ms RTT. It is also what a stream paused for a slow reader holds.
+pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 1 << 20;
 
 /// Default cap on unacknowledged outgoing data, used when [`Config::send_window`] is unset.
-pub const DEFAULT_SEND_WINDOW: u64 = 16 << 20;
+///
+/// Matches [`DEFAULT_RECEIVE_WINDOW`], the most a peer with the defaults takes in flight, so
+/// a slow peer's connection buffers no more than it could receive.
+pub const DEFAULT_SEND_WINDOW: u64 = 4 << 20;
 
 /// Default idle timeout before an inactive connection is dropped.
 ///
@@ -241,7 +244,7 @@ pub struct Config {
 
 	/// Connection-wide receive window, in bytes: how much data the peer may have
 	/// in flight or in incomplete messages across every stream at once. Defaults to
-	/// 128 MiB, and must fit the largest message a session assembles, just over 64 MiB.
+	/// 4 MiB, and must fit the largest unit a session assembles, one 1 MiB segment.
 	///
 	/// When incomplete messages fill it, the least urgent stream is cancelled. iroh
 	/// returns credit as it reads, so there it bounds only unread data.
@@ -258,7 +261,7 @@ pub struct Config {
 	)]
 	pub receive_window: Option<u64>,
 
-	/// Per-stream receive window, in bytes. Defaults to 4 MiB.
+	/// Per-stream receive window, in bytes. Defaults to 1 MiB.
 	///
 	/// Stream credit returns as bytes are read, whether or not their message is
 	/// complete, so a smaller window only adds round trips to a large frame. The
@@ -273,7 +276,7 @@ pub struct Config {
 	pub stream_receive_window: Option<u64>,
 
 	/// Cap on unacknowledged outgoing data, in bytes, regardless of what the peer
-	/// allows. Defaults to 16 MiB.
+	/// allows. Defaults to 4 MiB.
 	///
 	/// This bounds the transport send buffer.
 	#[serde(skip_serializing_if = "Option::is_none")]

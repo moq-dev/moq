@@ -7949,6 +7949,43 @@ mod tests {
 		);
 	}
 
+	/// An initial set past ANNOUNCE_INIT's one-segment cap fails the announce loudly,
+	/// rather than sending a message the peer refuses or silently dropping broadcasts.
+	#[kio::test]
+	async fn announce_init_past_the_cap_fails() {
+		let self_origin = crate::Hop::new(1).unwrap();
+		let origin = crate::origin::Config::new(self_origin).produce();
+		let max = <lite::AnnounceInit as lite::Message>::MAX_SIZE;
+		// Each suffix costs its length plus a varint prefix, so these overflow the cap.
+		let name = "x".repeat(500);
+		let _broadcasts: Vec<_> = (0..max / 500 + 1)
+			.map(|i| {
+				origin
+					.announce(format!("{name}{i}"), crate::origin::Route::default())
+					.unwrap()
+			})
+			.collect();
+
+		let gate = kio::Producer::new(true);
+		let session = SinkSession::gated_bi(gate.consume());
+		let mut stream = Stream::open(&mut crate::driver::Transport::new(session.clone()), Version::Lite02)
+			.await
+			.unwrap();
+		let consumer = origin.consume();
+		let mut announced = consumer.announced();
+		let err = Publisher::run_announce(
+			&mut stream,
+			&consumer,
+			&mut announced,
+			self_origin,
+			Version::Lite02,
+			None,
+		)
+		.await
+		.expect_err("an initial set past the cap");
+		assert!(matches!(err, Error::Encode(crate::EncodeError::TooLarge)), "{err:?}");
+	}
+
 	/// A broadcast sent in ANNOUNCE_INIT is live like any other, so its end reaches
 	/// the peer instead of being treated as never advertised.
 	#[kio::test]

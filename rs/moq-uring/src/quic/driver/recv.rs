@@ -211,7 +211,8 @@ impl Stream {
 	///
 	/// Yields `Some` with the reset error code when the stream is reset by the peer, and `None`
 	/// once every byte the peer finished it with has been read, after which it is no longer
-	/// meaningful for the stream to be reset.
+	/// meaningful for the stream to be reset. Fails with [`Error::Evicted`] once the stream was
+	/// evicted to free a stuck receive window, until it is stopped.
 	///
 	/// Cancel-safe.
 	pub async fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
@@ -230,6 +231,8 @@ impl Stream {
 		}
 		let reset = self.shared.conn.borrow_mut().recv_stream(self.id).received_reset();
 		match reset {
+			// Evicted, so its bytes are gone: nothing frees the window until it is stopped.
+			Err(moq_quic::recv::Error::Evicted) => Poll::Ready(Err(Error::Evicted)),
 			Err(_) => Poll::Ready(Ok(None)),
 			Ok(Some(code)) => {
 				// The stream's state was just freed, so the peer may be owed stream credit, and

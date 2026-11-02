@@ -2913,6 +2913,21 @@ impl TrackState {
 	/// read as the live edge, though the route already holds a newer one.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) {
+		self.answered(largest, start, true);
+	}
+
+	/// [`Self::set_live`] for a feed that serves no group from `largest`'s on, such as a
+	/// bounded subscription of history: the cache can never show that group, so the answer
+	/// alone makes it current, and relative starts count back from that group.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn set_live_ahead(&mut self, largest: Position, start: Option<u64>) {
+		self.answered(Some(largest), start, false);
+	}
+
+	/// The route answered with `largest`. With `reaches`, its feed reaches that group, so
+	/// readers wait until the cache shows it.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn answered(&mut self, largest: Option<Position>, start: Option<u64>, reaches: bool) {
 		let Feed::Idle { newest } = self.feed else {
 			return;
 		};
@@ -2935,7 +2950,7 @@ impl TrackState {
 			_ => self.live_floor,
 		};
 		match largest.map(|largest| largest.group) {
-			Some(from) if !self.shows(from) => self.feed = Feed::Answered { from },
+			Some(from) if reaches && !self.shows(from) => self.feed = Feed::Answered { from },
 			edge => self.go_live(edge),
 		}
 	}
@@ -3752,6 +3767,16 @@ impl Producer {
 	pub(crate) fn set_live(&mut self, largest: Option<Position>, start: Option<u64>) {
 		if let Ok(mut state) = self.modify() {
 			state.set_live(largest, start);
+		}
+	}
+
+	/// [`Self::set_live`] for a feed that serves no group from `largest`'s on, such as a
+	/// bounded subscription of history: readers resume at once, counting relative starts
+	/// back from `largest`'s group. A no-op unless idle.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn set_live_ahead(&mut self, largest: Position, start: Option<u64>) {
+		if let Ok(mut state) = self.modify() {
+			state.set_live_ahead(largest, start);
 		}
 	}
 

@@ -915,8 +915,12 @@ fn bench_paced(c: &mut Criterion) {
 			let writer = kio::Waiter::new(wakes.clone().into());
 			let reader = kio::Waiter::noop();
 			let mut parked = 0u64;
+			let next = moq_net::frame::Info {
+				size: payload.len() as u64,
+				timestamp: Some(Timestamp::ZERO),
+			};
 			b.iter(|| {
-				parked += ctx.group.poll_ready(&writer).is_pending() as u64;
+				parked += ctx.group.poll_ready(&writer, &next).is_pending() as u64;
 				for consumer in &mut consumers {
 					let Poll::Ready(Ok(Some(frame))) = consumer.poll_read_frame(&reader) else {
 						panic!("a frame is ready");

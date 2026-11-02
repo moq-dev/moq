@@ -1526,11 +1526,12 @@ pub fn seeds() -> Vec<Seed> {
 
 	// Length prefixes at and one past each cap, ahead of a body far too short for them, so
 	// the fuzzer starts beside every rejection path instead of searching for its bound: a
-	// moq-lite message's size (0xffff for most, 64 MiB for ANNOUNCE_INIT) and a
+	// moq-lite message's size (0xffff for most, a segment for ANNOUNCE_INIT) and a
 	// moq-transport control message's two-byte length.
 	for (index, version) in LITE_VERSIONS.iter().enumerate() {
 		for kind in 0..LITE_KINDS {
-			for size in limits(&[0xffff, 64 << 20]) {
+			let announce_init = <crate::lite::AnnounceInit as crate::lite::Message>::MAX_SIZE as u64;
+			for size in limits(&[0xffff, announce_init]) {
 				let mut data = vec![index as u8, kind];
 				Encoder::new(&mut data, (*version).into()).varint(size).unwrap();
 				data.extend_from_slice(&[0; 4]);

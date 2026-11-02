@@ -22,6 +22,8 @@ pub(super) struct Subscriptions {
 	max_delay: BTreeMap<Duration, usize>,
 	ranges: Ranges,
 	descending: usize,
+	/// Subscribers that need the live feed; see [`Subscription::feed`].
+	feed: usize,
 	/// The lowest group consumers want while no refresh is pending, never lowered. See
 	/// [`super::Demand::wanted`].
 	wanted: u64,
@@ -35,16 +37,17 @@ pub(super) struct Subscriptions {
 }
 
 /// Everything the aggregate holds besides its ranges.
-type Scalars = (i8, Option<Duration>, Order);
+type Scalars = (i8, Option<Duration>, Order, bool);
 
 impl Subscriptions {
 	pub(super) fn combined(&self) -> Option<Subscription> {
-		let (priority, max_delay, order) = self.scalars()?;
+		let (priority, max_delay, order, feed) = self.scalars()?;
 		Some(Subscription {
 			priority,
 			max_delay,
 			ranges: self.ranges.union(),
 			order,
+			feed,
 		})
 	}
 
@@ -65,6 +68,7 @@ impl Subscriptions {
 				} else {
 					Order::Descending
 				},
+				self.feed != 0,
 			)
 		})
 	}
@@ -140,6 +144,7 @@ impl Subscriptions {
 				}
 			}
 			self.descending += usize::from(new.order == Order::Descending);
+			self.feed += usize::from(new.feed);
 			self.count += 1;
 		}
 		if let Some(old) = old {
@@ -151,6 +156,7 @@ impl Subscriptions {
 				}
 			}
 			self.descending -= usize::from(old.order == Order::Descending);
+			self.feed -= usize::from(old.feed);
 			self.count -= 1;
 		}
 		if reshaped || self.scalars() != prev {
@@ -315,6 +321,7 @@ mod tests {
 				} else {
 					Order::Descending
 				},
+				feed: rng.random_bool(0.25),
 			};
 			match (&mut slots[index], rng.random_range(0..3)) {
 				(slot @ None, _) => *slot = Some((producer.subscribe(next.clone()), next)),

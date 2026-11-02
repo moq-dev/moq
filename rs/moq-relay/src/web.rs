@@ -168,6 +168,8 @@ pub(crate) struct WebState {
 	/// handshake and partial headers included), and a WebSocket wait for its MoQ
 	/// SETUP; `None` waits forever.
 	pub(crate) timeout: Option<std::time::Duration>,
+	/// The `[quic]` windows and stream count each WebSocket session starts with.
+	pub(crate) quic: moq_tokio::quic::Resolved,
 }
 
 /// The bound addresses of the public web listeners.
@@ -221,6 +223,7 @@ impl Web {
 			shutdown: crate::shutdown::Observer::disabled(),
 			sessions: crate::session::Registry::new(),
 			timeout: moq_tokio::listen::Config::default().resolved_timeout(),
+			quic: Default::default(),
 		});
 		Self {
 			state,
@@ -384,6 +387,15 @@ impl Web {
 		// hyper adds the header timeout to the clock unchecked, so an unreachable
 		// one would panic on every connection.
 		state.timeout = timeout.filter(|timeout| kio::clock::now().checked_add(*timeout).is_some());
+		self
+	}
+
+	/// Start each WebSocket session at `quic`'s windows and stream count, the relay's
+	/// `[quic]` section, as its QUIC and `tcp://` sessions do. Defaults to the `[quic]`
+	/// defaults.
+	pub fn with_quic(mut self, quic: &moq_tokio::quic::Config) -> Self {
+		let state = Arc::get_mut(&mut self.state).expect("with_quic called after routes were built");
+		state.quic = quic.resolve();
 		self
 	}
 
