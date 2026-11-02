@@ -11654,6 +11654,7 @@ mod tests {
 	/// A published job must stop answering through its claim when its exact route leaves,
 	/// even while its fill handle and readers keep the broadcast alive.
 	#[kio::test]
+	#[cfg(feature = "async")]
 	async fn a_withdrawn_publication_is_not_a_cached_claim_answer() {
 		let producer = origin(1).produce();
 		let claim = producer.requests("room").unwrap();

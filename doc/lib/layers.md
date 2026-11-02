@@ -42,11 +42,11 @@ Sessions, origins, broadcasts, tracks, and groups: `Client`, `Server`,
 | C++ | `moq::` | `moq::BroadcastProducer` |
 | C | `moq_session_*`, `moq_origin_*`, `moq_publish_track_*`, `moq_consume_track_*` | `moq_publish_track` |
 
-An on-demand broadcast request can `serve` a held consumer without announcing
-an exact route in every binding (`Serve` in Go and
-`moq_broadcast_request_serve` in C). It answers under the prefix route's
-continuous sequence space at that path. Use prepare and publish for a job
-that may restart independently; see [work on demand](/concept/identity#work-on-demand).
+On-demand broadcast requests in every binding can answer with held content
+without announcing an exact route. The answer uses the prefix route's
+continuous sequence space at that path. Use a fresh publication for a job
+that may restart independently; see [work on demand](/concept/identity#work-on-demand)
+and the [Go](/lib/go/) and [C](/lib/c/) binding references.
 
 ## media
 

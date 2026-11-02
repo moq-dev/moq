@@ -116,19 +116,19 @@ demand, which has none until a worker answers.
 
 ## Work on demand
 
-A worker can advertise a prefix it serves on demand. When answering with a
-broadcast it already holds, Rust uses `request.serve(consumer)` and JavaScript
-`request.serve(broadcast)`. This announces no exact route: the answer belongs
+A worker can advertise a prefix it serves on demand and answer with a
+broadcast it already holds. This announces no exact route: the answer belongs
 to the prefix route's instance at that path. Every answer there must continue
 one sequence space with the same bytes. To serve different content at a path
-already served, start a new prefix route. Its first subscription succeeds
-without a restart on moq-transport 18 and 22 and moq-lite 06 and 07.
+already served, start a new prefix route. Its first subscription stays on
+the prefix route without a restart.
 
 A job that may restart independently, such as a transcoder claiming
 `transcode`, instead prepares and publishes each requested path under a
 fresh epoch. The claim promises capability, not content, and carries no
-epoch. Each job announces an exact route; the cold-start subscription resets
-on versions without takeover, as described below.
+epoch. Each job announces an exact route; without takeover support, the
+cold-start subscription ends and the subscriber follows the new announcement,
+as described below.
 
 ```rust
 let claim = origin.requests("transcode")?;
