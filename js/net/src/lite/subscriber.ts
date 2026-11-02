@@ -1163,6 +1163,7 @@ export class Subscriber {
 		request: track.Request,
 		state: SubscribeSetup,
 	): SubscribeEntry {
+		hooks.receiveTrack(producer);
 		// Lite-06+ resolves where the feed starts only with SUBSCRIBE_START, so a relay serving
 		// this copy holds its first group until the answer arrives.
 		if (resolvesStart(this.version)) hooks.startTrack(producer, { requested: msg.startGroup });

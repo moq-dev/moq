@@ -410,6 +410,8 @@ export const hooks: {
 	 * the drop. Mirrors the Rust `drop_groups`; assigned by `track.ts`.
 	 */
 	dropTrackGroups: (producer: Producer, start: number, end: number, error: Error) => void;
+	/** Mark a track as fed by a wire subscription, which owes missing groups. Assigned by `track.ts`. */
+	receiveTrack: (producer: Producer) => void;
 	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
 	receiveGroup: (producer: Producer, group: { sequence: number; start: number }) => GroupProducer;
 	/** The producer's largest reported location and its subsequent changes. */
@@ -485,10 +487,10 @@ export const hooks: {
 	 * kept for it, so a resumed reader takes groups the plain way and drops from here.
 	 */
 	tryDrop: (subscriber: Subscriber) => (Recv & { kind: "drop" }) | undefined;
-	/** The sequence {@link tryNextGroup} (`ordered`) or {@link tryRecvGroup} would take next, without taking it. */
-	peekGroup: (subscriber: Subscriber, ordered: boolean) => number | undefined;
+	/** The lowest buffered candidate, which an ordered take may wait below; `floor` passes sequences taken on other copies. */
+	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: number) => number | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
-	tryNextGroup: (subscriber: Subscriber) => Recv;
+	tryNextGroup: (subscriber: Subscriber, floor?: number) => Recv;
 	/** Wake once a subscriber's datagram cursor may read differently; fires at most once. */
 	datagramChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** Take the next datagram in arrival order without waiting. */
@@ -765,6 +767,9 @@ export const hooks: {
 	},
 	bindGroupCompression: () => {
 		throw new Error("group.ts not loaded");
+	},
+	receiveTrack: () => {
+		throw new Error("track.ts not loaded");
 	},
 	receiveGroup: () => {
 		throw new Error("track.ts not loaded");

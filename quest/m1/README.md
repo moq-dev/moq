@@ -183,7 +183,6 @@ per-frame CPU growth since #5926.
 - [JS join tests cover draft 20](/quest/m1/join-tests-draft20.md) - join.test.ts runs on every supported draft, not just 18 and 22
 - [Poll-first async](/quest/m1/poll-first/README.md) - library crates compile no coroutines by default: async wrappers are generated from `poll_*` and gated behind an `async` feature
 - [Audit retention defaults](/quest/m1/max-age-defaults.md) - every max-age default listed, with a proposed finite default for the maintainer
-- [JS ordered reads wait only on owed groups](/quest/m1/js-ordered-owed.md) - @moq/net matches Rust's owed-group wait
 - [Binding announcements always carry captures](/quest/m1/ffi-required-captures.md) - moq-ffi and its generated bindings make `captures` a required list, as #7266 always sets it
 - [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - a decoder-identity change under the same codec string starts a new init and segment tag
 - [fMP4 decode times keep increasing](/quest/m1/fmp4-bframe-decode-time.md) - fragments shorter than a GOP of B-frame video never step `tfdt` backwards
