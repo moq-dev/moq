@@ -25,6 +25,8 @@ class QueryTests(unittest.TestCase):
         (self.repo / "sh").mkdir(parents=True)
         for script in ("dispatch.sh", "changed.sh", "local.sh"):
             shutil.copy(ROOT / "sh" / script, self.repo / "sh" / script)
+        # The stub belongs in the base so it does not widen every test's diff.
+        (self.repo / "sh/kvm.sh").write_text("#!/bin/sh\nexit 0\n")
         self.bin = self.root / "bin"
         self.bin.mkdir()
         for command in ("bash", "git", "sort", "mktemp", "rm", "grep"):
@@ -125,9 +127,12 @@ class QueryTests(unittest.TestCase):
                 (self.repo / path).unlink()
 
     def test_orchestration_and_all_select_work(self):
-        self.expect(True, base="--all")
+        self.expect(True, base="--all", rust=True)
         self.change("justfile")
-        self.expect(True)
+        self.expect(True, rust=True)
+        (self.repo / "justfile").unlink()
+        self.change("sh/kvm.sh")
+        self.expect(True, rust=True)
 
     def test_working_tree_changes_and_deletions_count(self):
         self.change("rs/moq-net/src/lib.rs")
@@ -463,7 +468,32 @@ class QueryTests(unittest.TestCase):
         self.assertNotIn("nix flake check --print-build-logs", calls)
         self.assertIn("gh test", calls)
 
-    def test_strict_ci_runs_the_full_flake_without_a_probe(self):
+    @unittest.skipUnless(sys.platform == "linux" and os.uname().machine == "x86_64", "Linux VM checks only")
+    def test_missing_kvm_refuses_flake_without_skipping_or_cancelling_other_modules(self):
+        for strict in (False, True):
+            with self.subTest(strict=strict):
+                self.stub_ci()
+                self.change("flake.nix")
+                (self.repo / "sh/kvm.sh").write_text("#!/bin/sh\nexit 1\n")
+                env = dict(self.env)
+                if not strict:
+                    env.pop("CI_STRICT")
+                result = subprocess.run(
+                    ["bash", "sh/dispatch.sh", "ci" if strict else "check", "origin/main"],
+                    cwd=self.repo,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("/dev/kvm is missing", result.stdout + result.stderr)
+                self.assertRegex(result.stderr, r"\d+  check flake \(failed\)")
+                self.assertNotIn("(skipped)", result.stderr)
+                calls = (self.root / "calls").read_text().splitlines()
+                self.assertNotIn("nix flake check --print-build-logs", calls)
+                self.assertIn("gh test", calls)
+
+    def test_strict_ci_runs_the_full_flake_without_a_namespace_probe(self):
         self.change("flake.nix")
         calls = self.run_ci()
         self.assertIn("nix flake check --print-build-logs", calls)

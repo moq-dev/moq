@@ -50,7 +50,7 @@ else
 
     # These files hold the map and the recipes that call it, and match no
     # module, so a change to them would otherwise validate none of it.
-    if grep -qE '^(justfile|sh/(dispatch|changed)\.sh|sh/local\.(sh|ts))$' "$changed"; then
+    if grep -qE '^(justfile|sh/(dispatch|changed|kvm)\.sh|sh/local\.(sh|ts))$' "$changed"; then
         echo "$action: root orchestration changed; running everything." >&2
         all=1
     fi
@@ -344,7 +344,7 @@ step() {
             # Without KVM, QEMU falls back to emulation and the VM tests time
             # out long after. Refuse rather than skip, so a local gate never
             # reads as passing without them.
-            if [[ "$OSTYPE" == linux* && "$HOSTTYPE" == x86_64 && ! -e /dev/kvm ]]; then
+            if [[ "$OSTYPE" == linux* && "$HOSTTYPE" == x86_64 ]] && ! bash sh/kvm.sh; then
                 echo "$action: flake's NixOS VM tests need KVM, but /dev/kvm is missing; run them on a KVM host, as CI does" >&2
                 return 1
             fi
