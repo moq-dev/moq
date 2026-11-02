@@ -1,0 +1,80 @@
+{
+  "valid": [
+    {
+      "input": {
+        "root": "room",
+        "publish": { "path": ["alice/**"], "rate": 8000000 },
+        "subscribe": ["**"]
+      },
+      "claims": {
+        "root": "room",
+        "publish": { "path": ["alice/**"], "rate": 8000000 },
+        "subscribe": ["**"]
+      },
+      "grant": {
+        "root": "room",
+        "publish": { "path": ["alice/**"], "rate": 8000000 },
+        "subscribe": ["**"]
+      }
+    },
+    {
+      "input": {
+        "root": "room",
+        "subscribe": { "path": ["bob"], "rate": 1 }
+      },
+      "claims": {
+        "root": "room",
+        "subscribe": { "path": ["bob"], "rate": 1 }
+      },
+      "grant": {
+        "root": "room",
+        "subscribe": { "path": ["bob"], "rate": 1 }
+      }
+    },
+    {
+      "input": {
+        "root": "room",
+        "publish": { "path": ["**"], "rate": 9007199254740991 }
+      },
+      "claims": {
+        "root": "room",
+        "publish": { "path": ["**"], "rate": 9007199254740991 }
+      },
+      "grant": {
+        "root": "room",
+        "publish": { "path": ["**"], "rate": 9007199254740991 }
+      }
+    },
+    {
+      "input": {
+        "root": "room",
+        "publish": { "path": [], "rate": 8000 },
+        "subscribe": ["**"]
+      },
+      "claims": {
+        "root": "room",
+        "publish": { "path": [], "rate": 8000 },
+        "subscribe": ["**"]
+      },
+      "grant": {
+        "root": "room",
+        "publish": { "path": [], "rate": 8000 },
+        "subscribe": ["**"]
+      }
+    }
+  ],
+  "invalid": [
+    { "publish": { "path": ["**"], "rate": 0 } },
+    { "publish": { "path": ["**"], "rate": -1 } },
+    { "publish": { "path": ["**"], "rate": 1.5 } },
+    { "publish": { "path": ["**"], "rate": 9007199254740992 } },
+    { "publish": { "path": ["**"], "rate": null } },
+    { "publish": { "path": ["**"], "rate": "8000" } },
+    { "publish": { "rate": 8000 } },
+    { "publish": { "path": ["**"] } },
+    { "publish": { "path": "**", "rate": 8000 } },
+    { "publish": { "path": ["**"], "raet": 8000 } },
+    { "publish": { "path": ["**"], "rate": 8000, "extra": true } },
+    { "subscribe": { "path": ["not//valid"], "rate": 8000 } }
+  ]
+}

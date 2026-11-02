@@ -23,4 +23,4 @@ Public API: possibly new `pub const` bounds and a shared refusal error in moq-mu
 ## Related
 
 - [Untrusted media parsers have fuzz targets](/quest/m2/media-fuzz.md) - would measure parsed-state amplification under either policy
-- [MKV leaf limits](https://github.com/moq-dev/moq/pull/7468) - planned in that open PR as `quest/m1/security-audit/mkv-leaf-limits.md`: per-element limits on the three MKV fields read whole, in m1. This quest starts from whatever it lands and aligns the two importers' rules, not the limits it picked
+- [MKV leaf limits](/quest/m1/mkv-leaf-limits.md) - per-element limits on the three MKV fields read whole, in m1. This quest starts from whatever it lands and aligns the two importers' rules, not the limits it picked

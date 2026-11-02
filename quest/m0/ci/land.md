@@ -68,15 +68,19 @@ Baselines:
 
 Remaining:
 
-- **Workflow.** A `merge_group` workflow runs `just ci` against the group's
-  base on `runs-on: [self-hosted, moq-queue]`, read-only, with no secrets.
-- **Ruleset.** `main` requires that check and the merge queue (squash, build
-  concurrency 1, merge limit 1), drops the unreported `quest land`
-  requirement, and keeps only the administrator bypass.
-- **Host.** The host config stops serving moq from `quest land`
-  (`services.quest-land.repositories.moq.enable = false`) at the cutover,
-  while the watcher and fixer keep serving moq.
-- **Dependabot and picks** enqueue through the merge queue like any other PR.
+- **Ruleset.** `main` requires the `Queue` context, which
+  `.github/workflows/queue.yml` reports from its `merge_group` build on
+  `[self-hosted, moq-queue]` (skipped on pull requests, so a PR can enter
+  the queue), and the merge queue (squash, build concurrency 1, merge limit
+  1). It drops the unreported `quest land` requirement and keeps only the
+  administrator bypass.
+- **Host.** At the cutover the host's moq daemon switches from
+  `quest land serve` to the watcher
+  (`services.quest-land.repositories.moq.watch = true` in kixelated/nixos,
+  same user and state), and the fixer keeps serving moq.
+- **Open PRs.** A PR opened before `queue.yml` reports `Queue` only after
+  its next push, reopen, or edit; until then GitHub refuses to enqueue it,
+  and `quest merge --land` says so.
 - Open since 2026-10-29: `APP_CLIENT_ID` and `APP_PRIVATE_KEY` are moq-dev
   organization secrets visible to this repository, so any workflow on a
   pushed branch can read the moq-bot key. The maintainer deletes the
