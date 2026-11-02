@@ -272,7 +272,7 @@ mod test {
 	/// starting before it. That stands in for any post-`append_group` write failure (the reported
 	/// one is a frame over moq-net's 32 MB per-group cache) without allocating 32 MB to provoke it.
 	fn rejecting_track() -> moq_net::track::Producer {
-		let mut track = moq_net::broadcast::Info::new()
+		let track = moq_net::broadcast::Info::new()
 			.produce()
 			.create_track("test", timed())
 			.unwrap();
