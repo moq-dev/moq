@@ -24,7 +24,7 @@ pub(crate) fn expand(args: TokenStream, method: &ImplItemFn) -> syn::Result<Toke
 			"#[kio::wrapper] cannot wrap a `const fn`",
 		));
 	}
-	if let Some(token) = &sig.unsafety {
+	if let syn::Safety::Unsafe(token) = &sig.safety {
 		return Err(syn::Error::new_spanned(
 			token,
 			"#[kio::wrapper] cannot wrap an `unsafe fn`",
@@ -68,7 +68,7 @@ pub(crate) fn expand(args: TokenStream, method: &ImplItemFn) -> syn::Result<Toke
 
 	let mut inputs = sig.inputs.iter();
 	let receiver = match inputs.next() {
-		Some(FnArg::Receiver(receiver)) if receiver.reference.is_some() && receiver.colon_token.is_none() => receiver,
+		Some(FnArg::Receiver(receiver)) if matches!(receiver.kind, syn::ReceiverKind::Reference(..)) => receiver,
 		Some(FnArg::Receiver(receiver)) => {
 			return Err(syn::Error::new_spanned(
 				receiver,
@@ -237,4 +237,29 @@ fn copied(attr: &Attribute) -> bool {
 	["doc", "cfg", "deprecated"]
 		.iter()
 		.any(|name| attr.path().is_ident(name))
+}
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn only_shorthand_borrowed_receivers_can_be_wrapped() {
+		for (receiver, accepted) in [
+			("&self", true),
+			("&mut self", true),
+			("&'a self", true),
+			("&'a mut self", true),
+			("self", false),
+			("mut self", false),
+			("self: &Self", false),
+			("self: &mut Self", false),
+			("self: Box<Self>", false),
+		] {
+			let method = syn::parse_str(&format!(
+				"fn poll_next<'a>({receiver}, waiter: &Waiter) -> Poll<()> {{ todo!() }}"
+			))
+			.unwrap();
+			let result = super::expand(proc_macro2::TokenStream::new(), &method);
+			assert_eq!(result.is_ok(), accepted, "{receiver}");
+		}
+	}
 }

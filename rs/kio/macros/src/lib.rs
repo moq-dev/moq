@@ -797,7 +797,7 @@ fn borrows(ty: &Type) -> Option<Span> {
 				self.0.get_or_insert(lifetime.span());
 			}
 		}
-		fn visit_type_bare_fn_mut(&mut self, _: &mut syn::TypeBareFn) {}
+		fn visit_type_fn_ptr_mut(&mut self, _: &mut syn::TypeFnPtr) {}
 		fn visit_parenthesized_generic_arguments_mut(&mut self, _: &mut syn::ParenthesizedGenericArguments) {}
 	}
 	let mut borrows = Borrows::default();
@@ -905,4 +905,23 @@ fn used_later(name: &str, segments: &[Vec<Reads>], polls: &[HashSet<String>]) ->
 		}
 	}
 	false
+}
+
+#[cfg(test)]
+mod tests {
+	#[test]
+	fn function_signatures_do_not_borrow_but_their_containers_can() {
+		for (ty, borrows) in [
+			("fn(&str) -> &str", false),
+			("for<'a> fn(&'a str) -> &'a str", false),
+			("Box<dyn Fn(&str) -> &str>", false),
+			("Box<dyn Fn(&str) -> &str + 'static>", false),
+			("&'static fn(&str) -> &str", true),
+			("Box<dyn Fn(&str) -> &str + 'a>", true),
+			("(fn(&str) -> &str, Vec<&'a str>)", true),
+		] {
+			let parsed = syn::parse_str(ty).unwrap();
+			assert_eq!(super::borrows(&parsed).is_some(), borrows, "{ty}");
+		}
+	}
 }
