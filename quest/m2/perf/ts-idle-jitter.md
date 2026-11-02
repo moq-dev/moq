@@ -11,3 +11,7 @@ Planned 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-c
 a delay, `jitter::Acquire::freshest` (18%) and `memcmp` (26%) lead the idle
 poll (`rs/moq-mux`). Skip the freshest scan when nothing arrived, and find what
 the memcmp compares on an idle poll. Measure with #7504's export idle bench.
+
+## Required
+
+- [An export poll nothing woke is cheap](/quest/m2/perf/export-idle-poll.md) - adds the export idle bench and the baseline this measures against, in [moq-dev/moq#7504](https://github.com/moq-dev/moq/pull/7504)

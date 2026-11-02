@@ -8,7 +8,8 @@ an unknown server ID, and refused.
 
 ## Plan
 
-Planned 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-complete run). Follow-ups from [moq-dev/moq#7539](https://github.com/moq-dev/moq/pull/7539).
+Planned 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-complete run). Follow-ups from [moq-dev/moq#7539](https://github.com/moq-dev/moq/pull/7539),
+which landed the forwarding on 2026-11-02.
 The maintainer kept the TOML file as the source there (decision 4), with the
 cluster API as this follow-up. Use the cluster API only if the deployment's API
 already serves the mesh peer list.
@@ -28,7 +29,3 @@ owns them and the relay exposes them in its stats and `/metrics`:
 - unknown server ID: a short header naming a server ID the map lacks, dropped;
 - refused: a received forward dropped for an unlisted source, a bad tag, or
   naming a server other than this one.
-
-## Required
-
-- [moq-relay forwards QUIC packets by QUIC-LB server ID](/quest/m2/relay-quic-lb-forward.md) - the forwarding this extends, in [moq-dev/moq#7539](https://github.com/moq-dev/moq/pull/7539)

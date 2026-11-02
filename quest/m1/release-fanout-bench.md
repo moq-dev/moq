@@ -16,7 +16,7 @@ other cases, but this one isn't a plain cherry-pick. Main's split
 
 Port it into release's single-file `session.rs`, adding the process CPU clock
 and a multi-threaded runtime with bench-local shims only, and follow
-`CONTRIBUTING.md`'s bench-only backport rules. Start after #7493 lands.
+`CONTRIBUTING.md`'s bench-only backport rules. #7493 has landed on main.
 
 ## Related
 

@@ -21,6 +21,10 @@ regresses within one clock period, and declared-reorder video fails with
   declares no reorder depth must not be mistaken for a step.
 - Extend `an_unmarked_step_keeps_the_export_rendering`.
 
+## Required
+
+- [A small step back keeps the TS export's video](/quest/m1/ts-reliability/step-back.md) - adds `Track::steps_back`, which this extends, in [moq-dev/moq#7221](https://github.com/moq-dev/moq/pull/7221)
+
 ## Related
 
 - [TS reliability](/quest/m1/ts-reliability/README.md) - the epic whose step-back fix this extends
