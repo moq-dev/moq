@@ -73,6 +73,18 @@ fn real_now() -> Instant {
 	Instant::from_origin(LEAD + std::time::Instant::now().saturating_duration_since(origin.into_std()))
 }
 
+/// The host clock every unpaused runtime and plain thread shares, whichever runtime reads it.
+#[cfg(feature = "runtime")]
+pub(crate) fn host_now() -> Instant {
+	real_now()
+}
+
+/// Without the runtime there are no paused runtimes, so the clock is the host's.
+#[cfg(not(feature = "runtime"))]
+pub(crate) fn host_now() -> Instant {
+	now()
+}
+
 /// The std instant the runtime clock counts from, as [`read`] picks it.
 #[cfg(feature = "runtime")]
 fn std_base() -> std::time::Instant {
