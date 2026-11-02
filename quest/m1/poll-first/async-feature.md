@@ -30,6 +30,20 @@ and moq-net's poll-only builds. Callers gate the attribute with
 `#[cfg_attr(feature = "async", kio::wrapper)]`, so a poll-only build skips the
 proc macro, and the scan catches a wrapper left ungated.
 
+Checkpoint in [moq-dev/moq#7607](https://github.com/moq-dev/moq/pull/7607):
+moq-json's six wrappers are generated behind its default-off `async` feature;
+its consumers in moq-mux, moq-stats, moq-cli, moq-boy, moq-ffi, moq-c, and
+moq-net-tests enable it. The migration guide and coroutine matrix cover it.
+The coroutine scan still needs validation: the local mbx Cargo launcher fails
+with `Argument list too long (os error 7)` before rustc.
+
+Decided with the foreground on 2026-11-01: sequence the overlapping origin
+driver conversion after the instance API in
+[moq-dev/moq#7489](https://github.com/moq-dev/moq/pull/7489) and the related serve
+API changes land. Do not integrate their unmerged heads. They change the
+`serve_front` state, source selection, and request/follow signatures that this
+quest must convert. Independent wrappers and feature propagation can proceed.
+
 What remains:
 
 - **moq-net's remaining wrappers:** about 47 hand-written
@@ -51,7 +65,7 @@ What remains:
   converted by hand, since the macro stays straight-line only (decided
   2026-10-28).
 - **Sibling libraries:** the poll-based libraries with hand-written wrappers
-  (moq-mux, moq-hls, moq-auth, moq-stats, moq-room, moq-json, moq-sign, moq-e2ee,
+  (moq-mux, moq-hls, moq-auth, moq-stats, moq-room, moq-sign, moq-e2ee,
   qmux, and others) gain an `async` feature, generate their wrappers, and join
   `just rs coroutines`.
 - **Default off:** moq-net's `async` feature is still on by default. Turn it off,

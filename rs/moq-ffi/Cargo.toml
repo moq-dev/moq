@@ -42,7 +42,7 @@ hang = { workspace = true }
 kio = { workspace = true, features = ["runtime"] }
 # Codecs only: the language wrappers do their own device I/O.
 moq-audio = { workspace = true, optional = true, features = ["aac"] }
-moq-json = { workspace = true }
+moq-json = { workspace = true, features = ["async"] }
 moq-mux = { workspace = true }
 moq-net = { workspace = true }
 moq-tokio = { workspace = true, default-features = true }

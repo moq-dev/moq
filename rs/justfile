@@ -245,6 +245,8 @@ coroutines:
     bash sh/rs/coroutines.sh kio -- --no-default-features --features macros,runtime,manual,serde
     RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p kio --no-deps --no-default-features --features macros,runtime,manual,serde
     bash sh/rs/coroutines.sh moq-net --allow until --allow run_front --allow serve_front -- --no-default-features
+    bash sh/rs/coroutines.sh moq-json -- --no-default-features
+    RUSTDOCFLAGS="-D warnings" bash sh/local.sh cargo doc --locked -p moq-json --no-deps --no-default-features
 
 # Prove moq-quic leaves kio's dev-only clock runtime to its consumers, and lints without its default features; a workspace build unifies both back in.
 [positional-arguments]

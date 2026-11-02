@@ -50,33 +50,16 @@ impl<T: DeserializeOwned> Consumer<T> {
 	}
 
 	/// Get the next state and its exact frame timestamp, or `None` once the track ends.
-	pub async fn next(&mut self) -> Result<Option<moq_net::Timed<T>>>
-	where
-		T: Unpin,
-	{
-		kio::wait(|waiter| self.poll_next(waiter)).await
-	}
-
-	/// Poll for each state in order, retaining the subscription's drift budget.
 	///
 	/// Finish the current group before taking the next. Lost groups resynchronize from a
 	/// later snapshot. A timed playhead reader sets its subscription's `max_delay` to its
 	/// distance behind live; the default zero budget keeps only groups not yet superseded.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_next(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
 		self.poll_read(waiter, false)
 	}
 
-	/// Skip to the newest buffered state and its timestamp, or wait for a new one.
-	///
-	/// See [`Self::poll_latest`] for how a nonzero `max_delay` delays it.
-	pub async fn latest(&mut self) -> Result<Option<moq_net::Timed<T>>>
-	where
-		T: Unpin,
-	{
-		kio::wait(|waiter| self.poll_latest(waiter)).await
-	}
-
-	/// Poll for the newest state, discarding superseded groups and intermediate yields.
+	/// Get the newest state and its timestamp, discarding superseded groups and intermediate yields.
 	///
 	/// Frames inside the newest group are still decoded in order. What this skips is gone;
 	/// a subsequent `next` resumes after it. An untimed frame keeps `at: None`.
@@ -85,6 +68,7 @@ impl<T: DeserializeOwned> Consumer<T> {
 	/// waits for a lower group the subscription still owes, up to that budget, and with no
 	/// limit until the gap resolves, even when a newer group is buffered. A reader that only
 	/// wants the newest state keeps the default zero budget.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_latest(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::Timed<T>>>> {
 		self.poll_read(waiter, true)
 	}

@@ -115,7 +115,7 @@ moq-auth = { workspace = true, features = ["serve"] }
 # `server` enables the HTTP egress server for `moq export hls`; the importer is always available.
 moq-hls = { workspace = true, features = ["server"] }
 # Writes and reads the stats and feedback snapshots.
-moq-json = { workspace = true }
+moq-json = { workspace = true, features = ["async"] }
 moq-mux = { workspace = true }
 # Cluster, LAN mesh, and inbound `/.cluster` auth. default-features off so the
 # CLI's own feature set (iroh, quic, cluster-lan) is what selects them.
