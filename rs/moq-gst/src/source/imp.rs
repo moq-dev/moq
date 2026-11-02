@@ -5532,11 +5532,11 @@ mod session_tests {
 		let errors = || {
 			[&publisher, &subscriber].map(|pipeline| pipeline.bus().unwrap().pop_filtered(&[gst::MessageType::Error]))
 		};
-		let deadline = std::time::Instant::now() + Duration::from_secs(30);
+		let deadline = kio::clock::now() + Duration::from_secs(30);
 		let mut samples = Vec::new();
 		while samples.len() < FRAMES * CHANNELS {
 			assert!(
-				std::time::Instant::now() < deadline,
+				kio::clock::now() < deadline,
 				"{} of {FRAMES} frames decoded; errors: {:?}",
 				samples.len() / CHANNELS,
 				errors()
@@ -5550,8 +5550,10 @@ mod session_tests {
 			let buffer = sample.buffer().unwrap().map_readable().unwrap();
 			samples.extend(
 				buffer
-					.chunks_exact(2)
-					.map(|sample| f64::from(i16::from_le_bytes([sample[0], sample[1]]))),
+					.as_chunks::<2>()
+					.0
+					.iter()
+					.map(|&sample| f64::from(i16::from_le_bytes(sample))),
 			);
 		}
 		subscriber.set_state(gst::State::Null).unwrap();
