@@ -94,7 +94,9 @@ Advisories waiting on upstream:
   (removing braces), postcss-selector-parser 6 to 7.1.7, and Vite 5 to 6.4.5
   (also removing vulnerable esbuild). Remove each override when its parent,
   remark-cli/unified-args, `@tailwindcss/typography`, or VitePress, declares
-  a safe dependency range. The root and Worker lockfiles audit clean.
+  a safe dependency range. The Worker and other standalone lockfiles audit
+  clean; the root lockfile does not (see the glob and minimatch advisories
+  below).
 - paste (RUSTSEC-2024-0436) remains through tikv-jemalloc-ctl and iroh's
   netlink-packet-core 0.8. tikv-jemallocator's unreleased main drops it.
 
@@ -118,9 +120,11 @@ libloading 0.8 and thiserror 1; mp4-atom also holds thiserror 1. Do not treat
 all 117 extras as locally removable without checking those consumers.
 
 Bun's same-major duplicates can persist until a parent re-resolves. For a
-transitive-only security bump, edit the lock entry's version and integrity
-and verify with `bun install --frozen-lockfile`, preserving unaffected
-resolutions. Re-check the current package-manager capabilities before
+transitive-only security bump, edit the lock entry's version, integrity and
+`dependencies` object to match the new release's published manifest, then
+verify with `bun install --frozen-lockfile`, preserving unaffected
+resolutions. If the new release adds dependencies the lock lacks, use a
+version-scoped root override, as above, instead of a hand edit. Re-check the current package-manager capabilities before
 attempting broader deduplication.
 
 Removed inline, with no dependency upgrades:
