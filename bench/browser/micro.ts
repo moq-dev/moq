@@ -47,19 +47,22 @@ for (const [name, root] of roots) {
 							? { path: resolve(root, "js/net/bench", path) }
 							: undefined,
 					);
-					build.onLoad({ filter: /\/bench\/(frames|drift|ledger|replay|resume-history)\.ts$/ }, async ({ path }) => {
-						const source = await Bun.file(path).text();
-						if (benchmark !== "frames")
-							return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
-						const marker =
-							'console.log("protocol,frame_bytes,chunk_bytes,frames_per_chunk,ns_per_frame,first_frame_us");';
-						const parts = source.split(marker);
-						if (parts.length !== 2) throw new Error("frames benchmark entry moved");
-						return {
-							loader: "ts",
-							contents: `${parts[0]}globalThis.measure = async () => {${marker}\n${parts[1]}\n};`,
-						};
-					});
+					build.onLoad(
+						{ filter: /\/bench\/(frames|drift|ledger|replay|resume-history)\.ts$/ },
+						async ({ path }) => {
+							const source = await Bun.file(path).text();
+							if (benchmark !== "frames")
+								return { loader: "ts", contents: `${source}\nglobalThis.measure = run;` };
+							const marker =
+								'console.log("protocol,frame_bytes,chunk_bytes,frames_per_chunk,ns_per_frame,first_frame_us");';
+							const parts = source.split(marker);
+							if (parts.length !== 2) throw new Error("frames benchmark entry moved");
+							return {
+								loader: "ts",
+								contents: `${parts[0]}globalThis.measure = async () => {${marker}\n${parts[1]}\n};`,
+							};
+						},
+					);
 				},
 			},
 		],
@@ -97,13 +100,14 @@ const browser = await chromium.launch({
 	args: benchmark === "resume-history" ? ["--js-flags=--expose-gc", "--enable-precise-memory-info"] : [],
 });
 const samples: { round: number; variant: string; rows: string[] }[] = [];
+const traced: { variant: string; rows: string[] }[] = [];
 // Main-thread GC across one whole run per variant, from a traced pass after the timed rounds.
 const gc: Record<string, ReturnType<typeof collections>> = {};
 const save = () =>
 	Bun.write(
 		values.out,
 		JSON.stringify(
-			{ benchmark, browser: browser.version(), warmup: 1, roots: Object.fromEntries(roots), samples, gc },
+			{ benchmark, browser: browser.version(), warmup: 1, roots: Object.fromEntries(roots), samples, traced, gc },
 			null,
 			2,
 		),
@@ -150,7 +154,7 @@ try {
 		await browser.startTracing(page, { categories: GC_CATEGORIES });
 		let buffer: Buffer | undefined;
 		try {
-			await measure(variant);
+			traced.push({ variant, rows: await measure(variant) });
 		} finally {
 			buffer = await browser.stopTracing();
 		}
@@ -162,7 +166,7 @@ try {
 	// Reachability is exact here, so a retired route still reachable fails the run, once every
 	// variant's samples are written for comparison.
 	if (benchmark === "resume-history") {
-		const retaining = samples.filter(({ rows }) =>
+		const retaining = [...samples, ...traced].filter(({ rows }) =>
 			rows.some((row) =>
 				row
 					.split(",")
