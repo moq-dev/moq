@@ -25,7 +25,7 @@ moq-net = { workspace = true }
 # The NVIDIA encoder, which imports the plugin's Vulkan images. The encoder is
 # opened for the plugin's device, so no software fallback can take a frame.
 moq-video = { workspace = true, features = ["nvidia"] }
-parking_lot = "0.12"
+parking_lot = "0.13"
 # Blocking on a slot's GPU completion when a source closes, which is the one
 # place the bridge waits on the GPU.
 pollster = { workspace = true }
