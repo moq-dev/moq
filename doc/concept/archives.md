@@ -34,7 +34,7 @@ must record those broadcasts separately too.
 
 Across our publishers and relays, track discovery needs **moq-lite 07
 (`moq-lite-07-wip`, opt-in) on every hop**. Older moq-lite versions cannot list
-tracks, and our moq-transport publishers refuse SUBSCRIBE_TRACKS. Rust can list
+tracks, and our moq-transport publishers refuse SUBSCRIBE\_TRACKS. Rust can list
 a third-party moq-transport publisher that supports that request, but that
 does not make a moq-transport hop through our publishers support recording.
 Choose the protocol versions at setup; see [transport](/concept/transport).

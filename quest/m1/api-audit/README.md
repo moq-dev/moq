@@ -8,7 +8,7 @@ or is removed or made private. Overlapping operations are collapsed into one.
 Names mirror across Rust, JS, and the bindings. Every break says how
 to migrate.
 
-Non-goals: redesigning surfaces that already have their own quest
+Non-goals: redesigning independently scoped surfaces
 ([subscribe ranges](/quest/m1/subscribe-ranges/README.md),
 [archives](/doc/concept/archives.md),
 [compressed tracks](/doc/concept/compression.md),
