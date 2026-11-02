@@ -36,6 +36,7 @@ Pi 4, CM4, or Zero 2 W on a 64-bit OS. On a CPU missing a feature rind needs,
 | `announced` | `[prefix]` | Follow the broadcasts announced on a relay. |
 | `fetch` | `<track>` | Write one group of a track to stdout. |
 | `auth` | | Generate, sign, and verify relay JWTs. |
+| `repair` | `mp4 <file>` | Finish an `export mp4` recording that was cut short. |
 | `devices` | | List capture sources and their ids. |
 
 ## Grammar
@@ -207,11 +208,15 @@ fragmented MP4 while recording, so a crash leaves a playable file, and the
 broadcast's end or the first Ctrl-C (or SIGTERM) finishes it as a regular MP4 with
 its index at the end, without copying the media. Finishing writes everything
 received, the fragment still buffering included. A second signal exits at once
-and leaves it fragmented, minus that fragment. Unlike `fmp4`, a rendition that joins mid-recording is
-kept, though only the finished file indexes it.
+and leaves it fragmented, minus that fragment. Unlike `fmp4`, a rendition that
+joins mid-recording is kept, though only the finished file indexes it.
+`moq repair mp4 <file>` finishes a recording that a crash or second signal left
+fragmented, in place and the same way: it indexes every fragment written in full,
+late renditions included, and cuts a partial one at the end.
 
 ```bash
 moq ... export mp4 --output recording.mp4
+moq repair mp4 recording.mp4
 ```
 
 MPEG-TS export pads to the source's constant mux rate when the catalog
@@ -364,9 +369,15 @@ equivalents.
 
 ## Archive
 
+Recording through our publishers and relays needs opt-in `moq-lite-07-wip`
+on every hop for track discovery. Older moq-lite versions cannot list tracks,
+and our moq-transport publishers refuse the listing. The publisher and each
+relay must enable it too; see [Archives](/concept/archives#discover-and-record)
+for how, and for storage and serving limits.
+
 ```bash
 # Record every broadcast announced under `event`
-moq --connect https://relay.example.com/anon --broadcast event export archive s3://recordings
+moq --connect https://relay.example.com/anon --connect-version moq-lite-07-wip --broadcast event export archive s3://recordings
 
 # Replay one recorded broadcast under another name
 moq --connect https://relay.example.com/anon --broadcast event-replay.hang import archive s3://recordings/event/@<epoch>
@@ -411,6 +422,9 @@ moq --connect https://relay.example.com/anon \
     -- export --broadcast event.hang hls --listen 0.0.0.0:8080 \
     -- export --broadcast event.hang archive file:///recordings
 ```
+
+These exporters read the local import through their shared origin, so recording
+here needs no network track discovery.
 
 ## Publisher runs
 

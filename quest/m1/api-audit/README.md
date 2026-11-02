@@ -8,9 +8,9 @@ or is removed or made private. Overlapping operations are collapsed into one.
 Names mirror across Rust, JS, and the bindings. Every break says how
 to migrate.
 
-Non-goals: redesigning surfaces that already have their own quest
+Non-goals: redesigning independently scoped surfaces
 ([subscribe ranges](/quest/m1/subscribe-ranges/README.md),
-[archives](/quest/m1/archive/README.md),
+[archives](/doc/concept/archives.md),
 [compressed tracks](/doc/concept/compression.md),
 [A/V clock](/quest/m1/av-clock.md)), and inherited debt that a later quest
 already reshapes.
@@ -75,7 +75,6 @@ Rejected in planning:
 
 - [Two broadcast resolutions](/quest/m1/api-audit/resolve/README.md) - Rust, JS, and the bindings resolve a broadcast with `request(path, epoch)` or `follow(path, epoch)`, and every racy two-step caller is gone
 - [Routes are the origin API](/quest/m1/api-audit/route/README.md) - apps announce exact or prefix routes through one `Route` handle that owns its broadcast and carries an `identity`, prefix routes can serve a held broadcast, and readers get a listing plus `follow`
-- [@moq/net names the origin read side](/quest/m1/api-audit/origin-reader.md) - `Origin.Reader`, which `Origin.Table` extends, replaces `Pick` lists
 
 ## Related
 
