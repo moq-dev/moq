@@ -1,4 +1,4 @@
-// Main PRs land through the host's batched gate; release PRs retain their own checks.
+// Main PRs land through GitHub's merge queue (queue.yml); release PRs retain their own checks.
 import assert from "node:assert/strict";
 import { readdir } from "node:fs/promises";
 
@@ -38,15 +38,33 @@ for (const step of check.jobs.check.steps) assert.equal(step.env?.CI_BASE, undef
 assert.equal(check.concurrency.group, "check-${{ github.ref }}");
 assert.equal(check.concurrency["cancel-in-progress"], true);
 
-// The land gate runs on the maintainer's host (`quest land serve`), not in Actions.
-assert.equal(await Bun.file(".github/workflows/land.yml").exists(), false, "no workflow may land around the host gate");
+// No workflow lands around the merge queue.
+assert.equal(await Bun.file(".github/workflows/land.yml").exists(), false, "no workflow may land around the merge queue");
+
+// Queue is the one merge group build: main's ruleset requires its context, so
+// it reports (skipped) on main PRs and runs only in the merge queue, on the
+// host's runner, read-only and without secrets.
+const queue = await workflow("queue");
+assert.deepEqual(queue.on.merge_group, { types: ["checks_requested"] });
+assert.deepEqual(queue.on.pull_request.branches, ["main"]);
+assert.equal(queue.on.pull_request.paths, undefined, "the required context must always report");
+assert.deepEqual(queue.permissions, { contents: "read" });
+assert.equal(queue.jobs.queue.name, "Queue");
+assert.equal(queue.jobs.queue.if, "github.event_name == 'merge_group'");
+assert.deepEqual(queue.jobs.queue["runs-on"], ["self-hosted", "moq-queue"]);
+assert.equal(queue.jobs.queue.permissions, undefined, "the job keeps the workflow's read-only token");
+assert.ok(!JSON.stringify(queue).includes("secrets."), "the merge queue build gets no secrets");
+const checkout = queue.jobs.queue.steps.find((step: { uses?: string }) => step.uses?.startsWith("actions/checkout@"));
+assert.equal(checkout.with["persist-credentials"], false);
+// biome-ignore lint/suspicious/noTemplateCurlyInString: GitHub expression is literal YAML.
+assert.equal(queue.jobs.queue.env.BASE, "${{ github.event.merge_group.base_sha }}");
 
 // Every other workflow stays out of main PRs and main's merge groups: optional
 // checks run nightly on main, and on release PRs through the Release gate.
 const files = (await readdir(".github/workflows")).filter((file) => file.endsWith(".yml"));
 for (const file of files) {
 	const name = file.replace(/\.yml$/, "");
-	if (name === "check" || name === "release-gate") continue;
+	if (name === "check" || name === "release-gate" || name === "queue") continue;
 	const config = await workflow(name);
 	assert.equal(config.on.merge_group, undefined, `${file} must not run in the merge queue`);
 	assert.equal(config.on.pull_request, undefined, `${file} must run on release PRs through release-gate.yml`);
