@@ -19,7 +19,7 @@ mod schedule;
 /// The transport every characterization pair runs: Cubic with deterministic packet numbers
 fn transport() -> transport::Config {
 	transport::Config {
-		congestion: Arc::new(congestion::CubicConfig::default()),
+		congestion: Arc::new(congestion::cubic::Config::default()),
 		deterministic_packet_numbers: true,
 		..transport::Config::default()
 	}

@@ -171,7 +171,10 @@ static void on_audio(void *ud, int32_t id) {
     moq_audio_frame f = read.frame;
     if (status == 0 && read.kind == MOQ_DECODE_READ_FRAME && a->samples < a->want) {
         uint64_t samples = f.data_size / a->frame_bytes;
-        fprintf(a->log, "%llu %llu\n", (unsigned long long)f.timestamp_us, (unsigned long long)samples);
+        // tone.py reads whole microseconds; splitting off the seconds keeps the product in range.
+        moq_timestamp ts = f.timestamp;
+        unsigned long long us = ts.value / ts.scale * 1000000 + ts.value % ts.scale * 1000000 / ts.scale;
+        fprintf(a->log, "%llu %llu\n", us, (unsigned long long)samples);
         fwrite(f.data, 1, f.data_size, a->pcm);
         a->samples += samples;
         if (a->samples >= a->want) {

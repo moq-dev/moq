@@ -90,4 +90,4 @@ What remains for a moq-net edit, largest first:
 
 - [Halve the slowest tests' CPU](/quest/m0/ci/slow-tests.md) - the largest test-time lever
 - [Unify dependency features](/quest/m0/ci/hakari.md) - cache hits across feature shapes
-- [Land main through quest land](/quest/m0/ci/land.md) - the queue gate that keeps checks moved out of the local gate
+- [Land main through GitHub's merge queue](/quest/m0/ci/land.md) - the queue gate that keeps checks moved out of the local gate
