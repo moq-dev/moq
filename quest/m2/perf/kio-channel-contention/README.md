@@ -266,8 +266,23 @@ workers:
 At 16 workers `Subscriber::poll_finished` held 37 to 49% of main's wait and
 2.6% of the PR's. The wait moved to `Cursor::sync`'s read of `TrackState`
 (10 to 14% of main's, 52% of the PR's), with `probe` (11%) and
-`GroupExpiry::is_expired` (8%) next: reads, which a `Watch` doesn't reach. The
-chat profile was refused again (perf dropped events).
+`GroupExpiry::is_expired` (8%) next: reads, which a `Watch` doesn't reach.
+
+`just bench-profile lock chat` against main (`88e6990626`), two rounds on a
+host at load 6 to 15, 20,000 frames/s throughout:
+
+| round | 4 workers, main | 4 workers, PR | worker CPU, main to PR |
+| --- | --- | --- | --- |
+| 1 | 5,641 ms (70%) | 341 ms (5.2%) | 1.57 to 1.30 cores |
+| 2 | 4,779 ms (59%) | 967 ms (13%) | 1.69 to 1.42 cores |
+
+1 worker measured 0 on both. At 4 workers `Cursor::poll` for
+`Subscriber::poll_finished` held 48% of main's wait and none of the PR's;
+`Cursor::sync` (38% of the PR's) and `probe` (15%) lead it. So the higher
+notify and unparked-write costs above don't show end to end: worker CPU fell
+at the same throughput. Main at 16 workers was refused twice (perf dropped
+events); the PR alone measured 4,747 ms (61%) at 16 workers at load 17 to 19,
+led by `Cursor::sync` (32%) and `probe` (17%), with no `poll_finished` wait.
 
 ## Required
 
