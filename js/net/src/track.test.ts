@@ -267,10 +267,10 @@ test("ordered owed holes follow zero, narrowed, unlimited, and publisher budgets
 	}
 });
 
-test("ordered owed waits wake on a drop, a declared start, or track close", async () => {
+test("ordered owed waits wake on a datagram, a drop, a declared start, or track close", async () => {
 	const clock = manualTime(0);
 	try {
-		for (const resolve of ["drop", "start", "close"] as const) {
+		for (const resolve of ["datagram", "drop", "start", "close"] as const) {
 			const producer = receivedTrack();
 			const reader = producer.subscribe({ maxDelay: null }).ordered();
 			putGroup(producer, 1);
@@ -285,6 +285,8 @@ test("ordered owed waits wake on a drop, a declared start, or track close", asyn
 			});
 			await settle();
 			expect(ready).toBe(false);
+			// A datagram shares the sequence namespace, so it accounts for the hole too.
+			if (resolve === "datagram") producer.insertDatagram(2, undefined, new Uint8Array([2]));
 			if (resolve === "drop") hooks.dropTrackGroups(producer, 2, 3, new StreamError(StreamCode.Old));
 			if (resolve === "start") hooks.startTrack(producer, { start: 3 });
 			if (resolve === "close") {

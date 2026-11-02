@@ -2744,6 +2744,8 @@ export class Subscriber {
 				this.#state.timelineChanged.changed(fn),
 				this.#wall.revision.changed(fn),
 				this.#state.info.changed(fn),
+				// A datagram shares the sequence namespace, so it can fill the owed hole.
+				this.#state.datagrams.changed(fn),
 			);
 		return () => {
 			for (const close of dispose) close();
