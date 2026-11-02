@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### Async wrappers are opt-in
+
+Enable the `async` Cargo feature to keep awaiting consumer `next`/`latest` and producer
+`refresh`: `moq-json = { version = "...", features = ["async"] }`. This also applies
+with `default-features = false`. The feature is off by default; `poll_next`,
+`poll_latest`, and `poll_refresh` stay available without it.
+The generated consumer wrappers no longer require `T: Unpin`.
+The JSON framing and JS and binding APIs are unchanged.
+
 ### Compression moves to the track
 
 `Compression`, every `Config::compression` field, the `with_compression` setters, `Error::Flate`, `Error::Desync`, and `stream::Decoder::reset` are gone, along with the moq-flate dependency.

@@ -20,7 +20,7 @@ bench = ["moq-net/fuzz"]
 
 [dependencies]
 kio = { workspace = true, features = ["runtime"] }
-moq-json = { workspace = true }
+moq-json = { workspace = true, features = ["async"] }
 moq-net = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

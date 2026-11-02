@@ -5701,6 +5701,7 @@ dependencies = [
  "futures",
  "json-patch",
  "kio 0.6.2",
+ "moq-json",
  "moq-net",
  "proptest",
  "serde",

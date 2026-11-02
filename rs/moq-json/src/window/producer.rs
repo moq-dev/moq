@@ -16,7 +16,7 @@ use crate::refresh::Refresh;
 /// An [`Encoder`] that owns its track: it writes each encoded frame and rolls a group whenever the
 /// encoder emits a header. When something else already owns the track, use the [`Encoder`] directly.
 ///
-/// A group runs until a joiner wants a fresh one, which [`refresh`](Self::refresh) answers, or until
+/// A group runs until a joiner wants a fresh one, which [`poll_refresh`](Self::poll_refresh) answers, or until
 /// it reaches the encoder's caps. Set the track's [`refresh`](moq_net::track::Info::refresh) ratio
 /// when creating it, or joins never ask.
 ///
@@ -97,11 +97,7 @@ impl<T> Producer<T> {
 	///
 	/// The producer has no runtime of its own, so the owner drives this: loop on it, or select on it
 	/// beside the edits. Errors once the track is finished or closed.
-	pub async fn refresh(&self) -> Result<()> {
-		kio::wait(|waiter| self.poll_refresh(waiter)).await
-	}
-
-	/// Poll for [`refresh`](Self::refresh), for an owner driving the producer synchronously.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_refresh(&self, waiter: &kio::Waiter) -> std::task::Poll<Result<()>> {
 		self.inner.lock().unwrap().poll_refresh(waiter)
 	}
