@@ -52,8 +52,8 @@ Current hosted baseline:
 - [2026-11-01 Nightly, gate job](https://github.com/moq-dev/moq/actions/runs/41313466339/job/124868517727):
   9,163 of 10,891 tests ran in 249.218 seconds before the relay stack test
   aborted. This is an incomplete selection, not a new whole-suite baseline.
-  [moq-dev/moq#7595](https://github.com/moq-dev/moq/pull/7595) fixes the
-  private configuration size without weakening that test.
+  [moq-dev/moq#7595](https://github.com/moq-dev/moq/pull/7595) has since
+  fixed the private configuration size without weakening that test.
 - [2026-10-31 CLI export lane](https://github.com/moq-dev/moq/actions/runs/41204380716/job/124546373649):
   14 passed in 38.774 seconds, using 124.897 summed test seconds. The clean
   and bufferbloated redundant-importer arms cost 18.669 and 26.278 seconds.
@@ -73,14 +73,11 @@ Local default-feature workspace selection on `21d6da9fc1`, pinned to CPUs
 tracked by [moq-dev/moq#7590](https://github.com/moq-dev/moq/pull/7590).
 This is not `just ci`'s device/runtime feature selection. Before the cut, the
 99-test import/report selection passed; the deletion candidate cost 7.763
-seconds in the full run and 7.152 in that selection. Do not claim either run
-as a passing full gate or attribute whole-suite speed to this deletion.
-After removal, the matching import/report selection passed all 98 remaining
-tests. The standard `just ci` attempt stopped in Cargo documentation on mbx
-`E2BIG`; [moq-dev/moq#7594](https://github.com/moq-dev/moq/pull/7594) owns it.
-No environment or Cargo launcher bypass was used.
+seconds in the full run and 7.152 in that selection; do not attribute
+whole-suite speed to it.
 
-The m1 cut removes `report::import_reports_a_silent_video_pid` and its private
+The m1 cut ([moq-dev/moq#7600](https://github.com/moq-dev/moq/pull/7600))
+removed `report::import_reports_a_silent_video_pid` and its private
 TS rewriting helpers. It cost 6.932 and 6.948 seconds in the two hosted gate
 runs. The kept mid-import report test already checks the CLI-to-relay-to-report
 path; `liveness_steps_over_a_corrupt_pcr_and_the_wrap` covers silence and
@@ -118,8 +115,8 @@ Check first:
   socket boundaries. Their elapsed cost alone is not evidence of redundancy.
 - Classify failures before calling them flakes. October 30 and 31's feature
   jobs stopped on an unused `moq-tokio::connect::Config::with_url` method;
-  November 1's gate and all-features run aborted on the relay stack. Neither
-  is intermittent evidence against a test. Existing flake quests retain
+  November 1's gate and all-features run aborted on the relay stack, since
+  fixed. Neither is intermittent evidence against a test. Existing flake quests retain
   their ownership; do not delete their tests to green the audit.
 
 ## Required

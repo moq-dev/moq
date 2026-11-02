@@ -5,7 +5,7 @@
 Every CI workflow and job, on PRs, the queue, Nightly, and schedules, is worth
 its runner time. One that doesn't is deleted. A costly one that earns its
 keep is made cheaper or moved off the merge path. Individual tests belong to
-[Delete the tests that don't earn their cost](/quest/m1/prune-tests.md).
+the [test cost audit](/quest/m2/audit-test-cost.md).
 
 ## Plan
 
