@@ -370,6 +370,10 @@ pub enum Error {
 		/// What the sample tables can't express.
 		reason: &'static str,
 	},
+
+	/// A file to repair is not a recording that an MP4 export left unfinished.
+	#[error("not an unfinished mp4 recording: {0}")]
+	Unrepairable(&'static str),
 }
 
 impl From<mp4_atom::Error> for Error {
@@ -670,7 +674,7 @@ pub(crate) fn encode_fragment(info: FragmentInfo, frames: &[Frame]) -> Result<By
 	let Some(first) = frames.first() else {
 		return Ok(Bytes::new());
 	};
-	encode_at(info, base_ticks(first, info.timescale)?, frames)
+	Ok(encode_at(info, base_ticks(first, info.timescale)?, frames)?.0)
 }
 
 /// A frame's presentation time as a tick count at the track's timescale.
@@ -705,8 +709,9 @@ fn timestamp_ticks(timestamp: Timestamp, timescale: moq_net::Timescale) -> Resul
 /// signed composition offset, so a reordered frame keeps its presentation time even when the
 /// fragment holds a single sample.
 ///
-/// Returns an empty `Bytes` when `frames` is empty.
-fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Bytes> {
+/// Returns the fragment with the decode time it ends at, which is where the next fragment on
+/// the same timeline continues, or an empty `Bytes` and `base_dts` when `frames` is empty.
+pub(super) fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<(Bytes, u64)> {
 	let FragmentInfo {
 		track_id,
 		timescale,
@@ -717,7 +722,7 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 	use mp4_atom::Encode;
 
 	if frames.is_empty() {
-		return Ok(Bytes::new());
+		return Ok((Bytes::new(), base_dts));
 	}
 
 	let mut dts = base_dts;
@@ -784,7 +789,7 @@ fn encode_at(info: FragmentInfo, base_dts: u64, frames: &[Frame]) -> Result<Byte
 	let mdat = mp4_atom::Mdat { data: mdat_data };
 	mdat.encode(&mut buf)?;
 
-	Ok(Bytes::from(buf))
+	Ok((Bytes::from(buf), dts))
 }
 
 /// Convert a duration to the exact value stored in a 32-bit `trun` sample-duration field.

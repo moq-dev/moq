@@ -14,12 +14,14 @@ use std::sync::Arc;
 pub mod bbr3;
 /// CUBIC congestion control.
 pub mod cubic;
+pub mod gcc;
 mod pacer;
 mod rate;
 mod unlimited;
 
 pub use bbr3::Bbr3;
 pub use cubic::Cubic;
+pub use gcc::Gcc;
 pub use rate::Packet;
 pub use unlimited::Unlimited;
 
@@ -127,6 +129,29 @@ pub trait Controller: Send + Sync {
     fn probes(&self) -> bool {
         false
     }
+
+    /// Whether each probe is a cluster the controller sizes and paces itself, so a transport
+    /// filling [`Metrics::probe_inflight`] sends at the controller's [`Controller::pace`]
+    /// rather than holding its duplicates to the session's probe target
+    ///
+    /// A controller that probes by a gain on its estimate for as long as its cycle allows, as
+    /// BBR3 does, leaves the target to bound what its probes cost. One that reads a probe at the
+    /// rate it was sent, as GoogCC does, learns only that rate from a probe held below it, and
+    /// bounds the cost by the cluster's size.
+    fn paces_probe(&self) -> bool {
+        false
+    }
+
+    /// The session's probe target, the rate in bytes per second the application wants to send,
+    /// or zero for none
+    ///
+    /// The transport reports it to each controller it builds and whenever it changes. A
+    /// controller that sizes its own probes, as GoogCC does, may aim them at it.
+    #[allow(
+        unused_variables,
+        reason = "a no-op default that keeps the parameter names for implementors"
+    )]
+    fn on_probe_target(&mut self, bytes_per_second: u64) {}
 
     /// Duplicate the controller's state
     fn clone_box(&self) -> Box<dyn Controller>;

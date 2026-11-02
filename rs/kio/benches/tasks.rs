@@ -23,6 +23,20 @@
 //!   which is the driver shape: `Tasks` reuses retired slots and their wakers,
 //!   so steady-state churn stops allocating.
 //!
+//! The `tasks_capacity_*` groups sweep a set's historical peak (1 to 65,536
+//! slots) against what is live and woken now, `kio::Tasks` alone. A burst grows
+//! the set, and all but the named tasks are removed before measuring, so a cost
+//! that rises with the peak is one the drained burst left behind:
+//!
+//! - `idle`: one live task, nothing woken. The owner polled for unrelated work.
+//! - `survivor`: one live task, woken every poll.
+//! - `sparse`: every 64th slot live, 16 of them woken per poll.
+//! - `full`: every slot live, 16 woken per poll (no drained burst at all).
+//! - `churn`: nothing live; 16 tasks pushed and drained per iteration, reusing
+//!   the slots the burst left.
+//!
+//! Retained bytes after the burst are in the `task_capacity` bench.
+//!
 //! Run with `cargo bench -p kio`.
 
 use std::{
@@ -36,7 +50,7 @@ use std::{
 	task::{Context, Poll, Waker},
 };
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use futures::stream::StreamExt;
 
 /// The shared wakeable primitive: a resettable flag plus a parked waker.
@@ -236,5 +250,83 @@ fn spawn_drain_hot(c: &mut Criterion) {
 	group.finish();
 }
 
-criterion_group!(benches, wake_sparse, spawn_drain, spawn_drain_hot);
+/// Historical peaks: one task, one chunk, and 16 and 64 chunks (the exact reach
+/// of the top wake-index word).
+const PEAKS: [usize; 4] = [1, 1024, 16_384, 65_536];
+
+/// A set that grew to `peak` tasks, every one parked, then removed all but the
+/// slots `live` keeps. Returns the set and the live tasks' gates.
+#[expect(clippy::type_complexity, reason = "an opaque task type cannot be aliased on stable")]
+fn after_burst(
+	peak: usize,
+	live: impl Fn(usize) -> bool,
+) -> (kio::Tasks<impl FnMut(&kio::Waiter) -> Poll<()>>, Vec<Arc<Gate>>) {
+	let gates: Vec<_> = (0..peak).map(|_| Gate::new()).collect();
+	let mut tasks = kio::Tasks::new();
+	let keys: Vec<_> = gates.iter().map(|gate| tasks.insert(forever(gate.clone()))).collect();
+	let _ = tasks.poll(&kio::Waiter::noop());
+	let mut kept = Vec::new();
+	for (slot, (key, gate)) in keys.into_iter().zip(gates).enumerate() {
+		match live(slot) {
+			true => kept.push(gate),
+			false => drop(tasks.remove(key)),
+		}
+	}
+	(tasks, kept)
+}
+
+fn capacity(c: &mut Criterion) {
+	// Live slot predicate and tasks woken per owner poll.
+	type Shape = (&'static str, fn(usize) -> bool, usize);
+	let shapes: [Shape; 4] = [
+		("idle", |slot| slot == 0, 0),
+		("survivor", |slot| slot == 0, 1),
+		("sparse", |slot| slot % 64 == 0, 16),
+		("full", |_| true, 16),
+	];
+	for (name, live, ready) in shapes {
+		let mut group = c.benchmark_group(format!("tasks_capacity_{name}"));
+		for peak in PEAKS {
+			group.bench_with_input(BenchmarkId::from_parameter(peak), &peak, |b, &peak| {
+				let (mut tasks, gates) = after_burst(peak, live);
+				let ready = ready.min(gates.len());
+				let waiter = kio::Waiter::noop();
+				let mut next = 0;
+				b.iter(|| {
+					for _ in 0..ready {
+						gates[next].fire();
+						next = (next + 1) % gates.len();
+					}
+					let _ = black_box(tasks.poll(&waiter));
+				});
+			});
+		}
+		group.finish();
+	}
+
+	let mut group = c.benchmark_group("tasks_capacity_churn");
+	for peak in PEAKS {
+		group.bench_with_input(BenchmarkId::from_parameter(peak), &peak, |b, &peak| {
+			fn done(_: &kio::Waiter) -> Poll<()> {
+				Poll::Ready(())
+			}
+			let waiter = kio::Waiter::noop();
+			let mut tasks = kio::Tasks::new();
+			for _ in 0..peak {
+				tasks.push(done);
+			}
+			while tasks.poll(&waiter).is_pending() {}
+			b.iter(|| {
+				for _ in 0..16 {
+					tasks.push(done);
+				}
+				while tasks.poll(&waiter).is_pending() {}
+				black_box(&tasks);
+			});
+		});
+	}
+	group.finish();
+}
+
+criterion_group!(benches, wake_sparse, spawn_drain, spawn_drain_hot, capacity);
 criterion_main!(benches);
