@@ -68,14 +68,15 @@ pub struct Config {
 
 /// The relay's resolved cache settings: the shared byte-budget pool plus the
 /// retention ceiling applied to every track.
-#[non_exhaustive]
 ///
-/// The headroom governor, when configured, starts once this is handed to
-/// [`Cluster::new`](crate::cluster::Cluster::new), which runs it as a critical task, and
-/// is then owned by [`Self::pool`]: it holds only a [`cache::PoolWeak`] and stops on
+/// The headroom governor, when configured, moves into the
+/// [`Driver`](crate::cluster::Driver) that [`Cluster::new`](crate::cluster::Cluster::new)
+/// returns once this is handed to it, and starts sampling only while that driver is
+/// polled ([`Relay::run`](crate::Relay::run) does). It is then owned by [`Self::pool`]: it holds only a [`cache::PoolWeak`] and stops on
 /// its next tick once every [`cache::Pool`] clone has dropped. Holding a clone of
 /// [`Self::pool`] past the relay keeps the governor running, deliberately: as long as
 /// anything can still cache into the budget, resizing it is still the right thing to do.
+#[non_exhaustive]
 pub struct Cache {
 	/// The shared pool every session's groups register with: the byte budget plus
 	/// the wall-clock LRU window that reclaims idle groups.
@@ -96,9 +97,10 @@ impl Config {
 	/// Resolve the size knobs into a shared [`cache::Pool`] and age ceiling,
 	/// plus the headroom governor when configured.
 	///
-	/// The governor starts with the cluster the [`Cache`] is attached to, so a
-	/// caller that drops it without attaching it (a setup step failing after this
-	/// point, say) leaves nothing sampling memory behind.
+	/// The governor starts only once the [`Cache`] is attached to a cluster and
+	/// that cluster's [`Driver`](crate::cluster::Driver) is polled, so a caller that
+	/// drops it first (a setup step failing after this point, say) leaves nothing
+	/// sampling memory behind.
 	pub fn init(&self) -> anyhow::Result<Cache> {
 		let capacity = self.capacity.as_deref().map(parse_limit).transpose()?;
 		let duration = self.duration.map(Into::into);
