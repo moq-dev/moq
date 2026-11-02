@@ -229,7 +229,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Clean ALSA playback onset](/quest/m2/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
 - [Interop audit](/quest/m2/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
-- [moq-gst playback shares one session context](/quest/m2/gst-session-context.md) - the playback helpers take one context instead of six arguments
 - [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
 - [The memory bench finishes at 1 MiB frames](/quest/m2/memory-bench-hang.md) - the allocation mode's park at `size=1048576` is root-caused and fixed
 - [Audio's Latest start reaches back](/quest/m2/audio-latest-reach-back.md) - moq_audio's start covers min plus warmup like other consumers
