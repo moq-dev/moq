@@ -42,7 +42,8 @@ url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 anyhow = { workspace = true }
-kio = { path = "../kio", features = ["runtime", "sim"] }
+criterion = { package = "bench-harness", path = "../bench-harness" }
+kio = { path = "../kio", features = ["manual", "runtime", "sim"] }
 moq-auth = { path = ".", features = ["client", "serve"] }
 moq-auth-published = { package = "moq-auth", version = "=0.2.1", default-features = false }
 moq-token = "0.7"
@@ -50,6 +51,10 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tracing-test = { workspace = true }
 wiremock = "0.6"
+
+[[bench]]
+name = "verify"
+harness = false
 
 [lints]
 workspace = true

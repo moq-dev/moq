@@ -230,7 +230,7 @@ fn endpoint(seed: u64, host: u8) -> driver::endpoint::Config {
 
 /// The default transport, with BBR3's probe phases drawn from `seed`
 fn transport(seed: u64) -> driver::transport::Config {
-	let mut bbr = moq_congestion::Bbr3Config::default();
+	let mut bbr = moq_congestion::bbr3::Config::default();
 	let mut probe = [0; 16];
 	probe[..8].copy_from_slice(&seed.to_le_bytes());
 	bbr.probe_rng_seed(probe);
