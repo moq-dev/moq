@@ -27,60 +27,100 @@ cost and why it wasn't worth it. Only what earns its keep is refactored to be
 cheaper instead. Removing a public API or a user-facing feature stays a
 follow-up.
 
-Rank tests from nextest's lines in a full-selection queue log (`slow-timeout`
-is 60 s under the `ci` profile). Flakes are tracked by hand in their own
-quests, and `retries = 0` is deliberate. A test that sleeps on the wall clock
-should mock time (AGENTS.md). A test whose cost outweighs the regression it
-alone catches is deleted even when nothing else covers it. Repeat each local measurement: parallel agents load the host, so a
-single run can be off by 2x. Pin to the queue VM's 8 CPUs with `taskset -c
-0-7` when timing the whole suite. A test whose time differs between runs by
-about 3 s is waiting out a QUIC draining period, not computing.
+The off-cycle m1 pruning run (2026-11-01) refreshes this baseline in place;
+it does not finish this recurring run, move its schedule, or create a successor.
 
-What the m1 run (2026-10-21) fixed: the 900 s TS export past-limit failure the
-jitter buffer's tests already cover (16.6 s), the close-code tests dialing
-`localhost` against an IPv4-only server (3 s to 0.5 s each on the NixOS
-runner, which lists `::1` first), and the split-accept driver tests' 333 ms
-initial RTT (3 s to 0.2 s each). A benchmark-only edit now selects only its
-own Rust crate or JS workspace; a moq-stats bench edit had run the relay and
-CLI suites. To catch the `localhost` race on a host without it, run the
-suite under an `/etc/hosts` that lists `::1` first (`unshare -rm`, then a
-bind mount over `/etc/hosts`); only the close-code tests regressed.
-[moq-dev/moq#6192](https://github.com/moq-dev/moq/pull/6192) landed alongside:
-moq-auth's re-checks on the paused clock, moq-c's encoder probe, moq-gst's and
-moq-relay's idle and retry waits, and moq-cli's export process tests moved to
-nightly.
+Measure nextest's per-test elapsed time as slot time, not CPU time. Sum only
+one invocation: the full gate also runs feature-specific selections, and a
+failed run may print the failed test twice. Keep the invocation's test count,
+profile, features, thread count and completion state beside its timing. Repeat
+local measurements under `quest gate`; concurrent work makes one sample
+unreliable. Pin whole-suite comparisons to the same eight CPUs. A roughly
+three-second swing can be QUIC draining rather than computation. The `ci`
+profile marks a test slow at 60 seconds and uses zero retries.
 
-Baselines from queue run
-[39546261474](https://github.com/moq-dev/moq/actions/runs/39546261474), a full
-selection on the 8-core runner VM: nextest ran 9,312 tests in 127 s. Their
-summed time was 995 s, so the run is packed by slot time; the 48 tests over
-5 s were 480 s of it. By crate: moq-cli 225 s, moq-relay 202 s, moq-mux 130 s,
-moq-net 73 s, moq-tokio 59 s, moq-gst 56 s, moq-uring 41 s.
+Current hosted baseline:
+
+- [2026-10-31 Nightly, gate job](https://github.com/moq-dev/moq/actions/runs/41204380716/job/124546373689):
+  the main nextest invocation passed 10,645 tests, skipped 115, and took
+  196.586 seconds. Summed test slot time was 768.723 seconds; the 27 tests
+  above five seconds used 258.848 of it. By crate: moq-mux 193.621 seconds,
+  moq-net 142.320, moq-relay 80.813, moq-quic 48.398, moq-tokio 46.230,
+  moq-uring 42.835, and moq-cli 37.359. Other invocations in that job are
+  excluded from those sums. These hosted ARM64 timings replace the old
+  9,312-test queue baseline for ranking, not for a same-machine speedup claim.
+- [2026-11-01 Nightly, gate job](https://github.com/moq-dev/moq/actions/runs/41313466339/job/124868517727):
+  9,163 of 10,891 tests ran in 249.218 seconds before the relay stack test
+  aborted. This is an incomplete selection, not a new whole-suite baseline.
+  [moq-dev/moq#7595](https://github.com/moq-dev/moq/pull/7595) fixes the
+  private configuration size without weakening that test.
+- [2026-10-31 CLI export lane](https://github.com/moq-dev/moq/actions/runs/41204380716/job/124546373649):
+  14 passed in 38.774 seconds, using 124.897 summed test seconds. The clean
+  and bufferbloated redundant-importer arms cost 18.669 and 26.278 seconds.
+  They exercise real process failover and impaired delivery. The route
+  identity change in [moq-dev/moq#7489](https://github.com/moq-dev/moq/pull/7489)
+  owns changes to that harness; do not duplicate them here.
+- [2026-11-01 Rust benchmark-test lane](https://github.com/moq-dev/moq/actions/runs/41313466339/job/124868518054):
+  all 15 selected benchmark tests passed, using 114.177 summed seconds.
+  Receive-window sweeps used 80.370 seconds, raw audio 11.341. These measure
+  different transport, layout and fanout cases, rather than repeating one
+  behavior assertion.
+
+Local default-feature workspace selection on `21d6da9fc1`, pinned to CPUs
+0-7 with 24 nextest threads and the `ci` profile: 10,623 tests ran in
+50.433 seconds, using 997.332 summed seconds. One failed:
+`backend::quic_client_close_drains_finished_track` with `Unroutable`, already
+tracked by [moq-dev/moq#7590](https://github.com/moq-dev/moq/pull/7590).
+This is not `just ci`'s device/runtime feature selection. Before the cut, the
+99-test import/report selection passed; the deletion candidate cost 7.763
+seconds in the full run and 7.152 in that selection. Do not claim either run
+as a passing full gate or attribute whole-suite speed to this deletion.
+After removal, the matching import/report selection passed all 98 remaining
+tests. The standard `just ci` attempt stopped in Cargo documentation on mbx
+`E2BIG`; [moq-dev/moq#7594](https://github.com/moq-dev/moq/pull/7594) owns it.
+No environment or Cargo launcher bypass was used.
+
+The m1 cut removes `report::import_reports_a_silent_video_pid` and its private
+TS rewriting helpers. It cost 6.932 and 6.948 seconds in the two hosted gate
+runs. The kept mid-import report test already checks the CLI-to-relay-to-report
+path; `liveness_steps_over_a_corrupt_pcr_and_the_wrap` covers silence and
+resumption directly, and the importer and stats tests cover stalled video
+beside sparse data. The removed process test added a paced five-second clip,
+two child processes, and another TS suppressor to repeat those properties.
+The mid-import report and late-sink tests stay, as do the two stdin-EOF tests:
+ongoing reports, cached final reports, catalog finish, and media announced only
+at EOF are different process boundaries.
 
 Check first:
 
-- Test threads. Pinned to 8 CPUs on a loaded host, the whole suite took
-  105 to 113 s at 8 threads (about 185% CPU), 60 s at 16 (315%), 47 s at 24
-  (420%), and 41 s at 32 (500%): the suite needs about 200 CPU-seconds, and
-  most slots wait on sockets, subprocesses, and wall-clock timeouts.
-  The maintainer selected 24 threads for the queue in
-  [CI housekeeping](/quest/m1/ci-housekeeping.md), which owns the loaded
-  proof before applying it. Only the known redundant-importer flake failed,
-  once, at 16 threads in this baseline.
-- moq-gst's unanswered-dial close wait was fixed by
-  [moq-dev/moq#6201](https://github.com/moq-dev/moq/pull/6201): the close
-  stops counting an unanswered handshake as active immediately while the
-  closing period still answers late packets. Do not repeat the old request
-  to skip draining. [moq-dev/moq#6240](https://github.com/moq-dev/moq/pull/6240)
-  retired the silent-peer quest as complete.
-- moq-uring: three endpoint tests wait out moq-quic's fixed 10 s handshake
-  idle timeout (30 s together). Neither moq-uring's `Transport` nor
-  `--quic-idle-timeout` sets it. #6201 does not change that timeout. The
-  [retirement](https://github.com/moq-dev/moq/pull/6240) settled keeping it
-  separate with no new knob; do not select another API in a cost audit.
-- CPU-bound simulations in a debug build: five TS export timing cases (3 to
-  11 s each) and the jitter buffer's day of drift (6 to 13 s), whose `Steer`
-  rebuilds the hull and median over its whole window on every step.
+- Account for [moq-dev/moq#6987](https://github.com/moq-dev/moq/pull/6987)
+  before touching the TS export/jitter simulations, routing reference model,
+  JSON budgets, QUIC simulation payloads, or other CPU cuts it owns. Its
+  repeated cohort measurements are 61.02 and 67.49 CPU-seconds; neither is
+  this audit's saving. The hosted drift cases still cost 12 to 19 seconds
+  each before those changes land.
+- [moq-dev/moq#7549](https://github.com/moq-dev/moq/pull/7549) owns the
+  refused-fill test and its scaling benchmark. Recovery fixture caching,
+  tracing isolation and stats oversize cuts have already landed; its body
+  identifies their owners. Do not repeat the old follow-up list.
+- Compressed-cache bounds earn their cost: the long compressed group used
+  22.150 and 42.928 hosted seconds, the large compressible batch 6.608 and
+  10.849. They test stored-tail shedding while a plain reader lags, and
+  bounded inflation when tiny slices describe large frames. Smaller codec
+  round trips do not test either resource bound. Preserve those assertions.
+- The three io_uring endpoint timeout/backlog tests used 30.284 seconds
+  together on October 31. Their unanswered handshake, pending admission and
+  completed-but-unaccepted connection cases are distinct. Keep them without
+  adding a timeout knob. [moq-dev/moq#7593](https://github.com/moq-dev/moq/pull/7593)
+  owns ring grouping and fixture startup diagnostics, not test deletion.
+- Macro UI compile failures, ACME issuance/cache/rate-limit cases, and
+  GStreamer reconnects have distinct compiler, TLS, persistence and real
+  socket boundaries. Their elapsed cost alone is not evidence of redundancy.
+- Classify failures before calling them flakes. October 30 and 31's feature
+  jobs stopped on an unused `moq-tokio::connect::Config::with_url` method;
+  November 1's gate and all-features run aborted on the relay stack. Neither
+  is intermittent evidence against a test. Existing flake quests retain
+  their ownership; do not delete their tests to green the audit.
 
 ## Required
 
