@@ -54,7 +54,6 @@ leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts-js.md).
 
 ## Required
 
-- [Rust and JS skip a backlog by the same measure](/quest/m1/cut-audit/catalog-parity.md) - a backlog join starts at the same group in every player
 - [Text and data sections keep a prototype-named ID](/quest/m1/cut-audit/catalog-proto-ids.md) - text and data entries keep the ID JS's `z.record` drops
 
 ## Related
