@@ -908,6 +908,10 @@ impl Grouped for crate::quic::web::Session {
 		Some(crate::quic::driver::connection::Connection::stats(self).credit.evicted)
 	}
 
+	fn receive_window(&self) -> Option<moq_net::transport::ReceiveWindow> {
+		Some(crate::quic::driver::connection::Connection::receive_window(self))
+	}
+
 	fn send_group(&self, priority: i64) -> Option<crate::quic::driver::send::Group> {
 		Some(Self::send_group(self, priority))
 	}

@@ -373,7 +373,8 @@ impl Subscribe {
 		Ok(())
 	}
 
-	/// Record a regular MP4 until the broadcast ends or `finish` is cancelled, then finish it.
+	/// Record a regular MP4 until the broadcast ends or `finish` is cancelled, then finish it with
+	/// everything it received.
 	async fn run_mp4(self) -> anyhow::Result<()> {
 		let path = self.args.output.clone().context("an mp4 export records to --output")?;
 		let finish = self.finish.clone();
@@ -389,10 +390,16 @@ impl Subscribe {
 			.with_context(|| format!("failed to create {}", path.display()))?;
 
 		// A failed export still finishes what it recorded; a failed write leaves the file as is.
+		let mut stopped = false;
 		let ended = loop {
 			let next = tokio::select! {
 				next = mp4.next() => next,
-				() = finish.cancelled() => break Ok(()),
+				// Write out what was received before finishing.
+				() = finish.cancelled(), if !stopped => {
+					mp4.stop();
+					stopped = true;
+					continue;
+				}
 			};
 			match next {
 				Ok(Some(data)) => file.write_all(&data).await?,

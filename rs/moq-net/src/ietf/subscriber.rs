@@ -276,7 +276,8 @@ enum Fill {
 	/// The tail is what ends the group, and a publisher serving the subscription's range
 	/// opens a stream for it even when the group ended at the join point, since that empty
 	/// stream is how the group ends. One that opens none instead leaves this head unfinished
-	/// until the publisher ends the subscription, which is what publishes it.
+	/// until the publisher ends the subscription: TRACK_ENDED publishes it, and any other
+	/// end cancels it.
 	///
 	/// Nothing shorter is safe to infer. A later group arriving looks like proof that no
 	/// tail is coming, but streams are independent: the tail's own can still be behind it.
@@ -298,7 +299,7 @@ enum Fill {
 	/// the join to the next group boundary.
 	Failed { sequence: u64 },
 
-	/// The publisher ended the subscription cleanly, so no tail is coming. Unlike
+	/// The publisher ended the track, so no tail is coming. Unlike
 	/// [`Fill::Done`], a head still being written is the whole group once it lands: a
 	/// draft-18 joining FETCH is not in PUBLISH_DONE's Stream Count, so the settle can
 	/// end before it does.
@@ -373,7 +374,7 @@ impl Fill {
 	/// Release a head nothing claimed, publishing the objects it did carry.
 	///
 	/// The tail is what normally ends the group, so this is the fallback for when none is
-	/// coming: the publisher ended the subscription, or the tail that arrived could not be
+	/// coming: the publisher ended the track, or the tail that arrived could not be
 	/// stitched. Finishing rather than aborting, because the head is a valid prefix of the
 	/// group: it starts at the group's first object and has no holes.
 	fn release(&mut self) {
@@ -382,8 +383,11 @@ impl Fill {
 		}
 	}
 
-	/// The publisher ended the subscription cleanly: release the head, and any still being
-	/// written when it lands.
+	/// The publisher ended the track: release the head, and any still being written when it
+	/// lands.
+	///
+	/// Only TRACK_ENDED, since any other end, such as SUBSCRIPTION_ENDED, leaves the group
+	/// open upstream and so [`Self::abort`]s the head instead.
 	///
 	/// [`Fill::Failed`] stays: a joining FETCH is not in PUBLISH_DONE's Stream Count, so its
 	/// head can land after the end, and the tail it owed may already have been dropped.
@@ -3865,10 +3869,15 @@ impl Subscriber {
 										poll_settled(&mut settle, waiter, &fill, count)
 									})
 									.await;
-									// The publisher ended without a tail for the head, so the head
-									// is the whole group, even one that lands after this.
+									// No tail is coming for the head. Only TRACK_ENDED makes it the
+									// whole group, even one that lands after this. Any other end
+									// leaves the group open upstream, so the head is cut short
+									// rather than passed off as the whole group.
 									if let Ok(mut fill) = fill.write() {
-										fill.end();
+										match &end {
+											Ok(()) => fill.end(),
+											Err(err) => fill.abort(err.clone()),
+										}
 									}
 								}
 								// Only TRACK_ENDED ends the track. Any other status ends just this
@@ -5110,6 +5119,9 @@ enum IngestPhase {
 	Size { timestamp: Option<crate::Timestamp> },
 	/// Reading the status of an empty object.
 	Status { timestamp: Option<crate::Timestamp> },
+	/// Waiting to admit the object, or an empty one's properties, until the group's
+	/// fastest reader leaves room for it.
+	Admit { header: frame::Header },
 	/// Streaming the object payload.
 	Payload { frame: frame::Producer },
 	/// An explicit end-of-group or end-of-track status arrived.
@@ -6027,11 +6039,12 @@ impl FetchPayloadRecv {
 				properties: decoded.properties,
 			})
 		});
-		let header = frame::Header {
+		let header: frame::Header = frame::Header {
 			info: frame::Info { size, timestamp },
 			fields,
 			inflated: super::object::inflated(decoded.inflated, producer.compressed())?,
 		};
+		wait!(Admit => stream.poll_admit(waiter, producer, header))?;
 		let mut frame: crate::frame::Producer = producer.create_object(header)?;
 		let read: Result<(), Error> = wait!(Read => stream.poll_read_frame(waiter, frame));
 		if let Err(err) = read {
@@ -6187,7 +6200,7 @@ impl GroupIngest {
 	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
 	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
 	/// group; an object cut short mid-payload was already aborted here with the reason.
-	pub(crate) fn poll<R: crate::transport::poll::RecvStream>(
+	pub(crate) fn poll<R: crate::transport::poll::RecvStream + crate::coding::Pause>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut crate::recv::Group,
@@ -6237,22 +6250,32 @@ impl GroupIngest {
 						self.phase = IngestPhase::Status { timestamp: *timestamp };
 						continue;
 					}
+					let timestamp = object_time(self.timescale, *timestamp)?;
+					let header = self.header(group, frame::Info { size, timestamp })?;
+					self.phase = IngestPhase::Admit { header };
+				}
+				IngestPhase::Admit { header } => {
+					ready!(reader.poll_admit(waiter, group, header))?;
+					let IngestPhase::Admit { header } = std::mem::replace(&mut self.phase, IngestPhase::Delta) else {
+						unreachable!()
+					};
 					// `create_object` is the allocation chokepoint: it rejects an oversized
 					// `size` and allocates up front only within the origin's budget, so no
 					// pre-check is needed.
-					let timestamp = object_time(self.timescale, *timestamp)?;
-					let header = self.header(group, frame::Info { size, timestamp })?;
+					let empty = header.info.size == 0;
 					let frame = group.create_object(header)?;
-					self.phase = IngestPhase::Payload { frame };
+					match empty {
+						// An empty object has no payload to read, only properties to admit.
+						true => group.restore(frame.finish()?),
+						false => self.phase = IngestPhase::Payload { frame },
+					}
 				}
 				IngestPhase::Status { timestamp } => {
 					let status = ready!(reader.poll_varint(waiter))?;
 					if status == 0 {
 						let timestamp = object_time(self.timescale, *timestamp)?;
 						let header = self.header(group, frame::Info { size: 0, timestamp })?;
-						let frame = group.create_object(header)?;
-						group.restore(frame.finish()?);
-						self.phase = IngestPhase::Delta;
+						self.phase = IngestPhase::Admit { header };
 						continue;
 					}
 					// A status object has no frame to hold its time, so its block keeps it.
@@ -15691,6 +15714,88 @@ mod joining_fetch_tests {
 			);
 			let end = group.read_frame().await;
 			assert!(matches!(end, Ok(None)), "{version}: the head was cut short: {end:?}");
+		}
+	}
+
+	/// A head nothing claimed when the publisher ends the subscription is the whole group only
+	/// on TRACK_ENDED. SUBSCRIPTION_ENDED leaves the group open upstream, so finishing the head
+	/// would pass a prefix off as the whole group: it is cancelled instead.
+	#[kio::test]
+	async fn an_unclaimed_head_finishes_only_when_the_track_ends() {
+		let largest = Some(ietf::Location { group: 4, object: 0 });
+		for version in JOINING_DRAFTS {
+			for (status_code, whole) in [(ietf::PublishDoneStatus::TrackEnded.code(), true), (0x3, false)] {
+				let mut ok = subscribe_ok(version, largest);
+				ok.extend(message_bytes(
+					ietf::PublishDone::ID,
+					&ietf::PublishDone {
+						status_code,
+						stream_count: 0,
+						reason_phrase: "done".into(),
+					},
+					version,
+				));
+				let mut run = JoinRun::start(version, None, ok, fetch_ok(version)).await;
+				let fetch_id = *run
+					.subscriber
+					.state
+					.lock()
+					.fetches
+					.keys()
+					.next()
+					.expect("joining FETCH");
+
+				let mut objects = Vec::new();
+				let w = &mut Encoder::new(&mut objects, version.into());
+				w.varint(ietf::FetchHeader::TYPE).unwrap();
+				ietf::FetchHeader { request_id: fetch_id }.encode(w, version).unwrap();
+				ietf::FetchObject::Object {
+					subgroup: ietf::FetchSubgroup::Zero,
+					group: Some(4),
+					object: Some(0),
+					priority: Some(0),
+					properties: None,
+				}
+				.encode(w, version)
+				.unwrap();
+				w.bytes(b"x").unwrap();
+				let data = ScriptedSession::new(objects);
+				data.close(crate::lite::test_transport::Close::Fin);
+				let (_, recv) = data.clone().open_bi(Default::default()).await.unwrap();
+				let mut reader = Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
+
+				// The whole head lands before the grace runs out, and no tail ever claims it.
+				run.subscriber.clone().recv_fill(&mut reader).await.expect("fill");
+				assert!(
+					matches!(
+						*run.subscriber
+							.state
+							.lock()
+							.subscribes
+							.values()
+							.next()
+							.unwrap()
+							.fill
+							.read(),
+						Fill::Ready { .. }
+					),
+					"{version}/{status_code}: the head waits for its tail"
+				);
+
+				let mut subscriber = (&mut run._hold.2).await.expect("subscribed");
+				let mut group = subscriber.recv_group().await.unwrap().unwrap();
+				assert_eq!(group.sequence, 4, "{version}/{status_code}");
+				assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"x");
+
+				while !run.subscriber.state.lock().subscribes.is_empty() {
+					settle().await;
+				}
+				let end = group.read_frame().await;
+				match whole {
+					true => assert!(matches!(end, Ok(None)), "{version}: the head was cut short: {end:?}"),
+					false => assert!(end.is_err(), "{version}: the head read as the whole group: {end:?}"),
+				}
+			}
 		}
 	}
 

@@ -206,12 +206,13 @@ Other video waits for its first keyframe.
 `mp4 --output <file>` records to a new file the way OBS's hybrid MP4 does: it is
 fragmented MP4 while recording, so a crash leaves a playable file, and the
 broadcast's end or the first Ctrl-C (or SIGTERM) finishes it as a regular MP4 with
-its index at the end, without copying the media. A second signal exits at once
-and leaves it fragmented. Unlike `fmp4`, a rendition that joins mid-recording is
-kept, though only the finished file indexes it. `moq repair mp4 <file>` finishes a
-recording that a crash or second signal left fragmented, in place and the same
-way: it indexes every fragment written in full, late renditions included, and
-cuts a partial one at the end.
+its index at the end, without copying the media. Finishing writes everything
+received, the fragment still buffering included. A second signal exits at once
+and leaves it fragmented, minus that fragment. Unlike `fmp4`, a rendition that
+joins mid-recording is kept, though only the finished file indexes it.
+`moq repair mp4 <file>` finishes a recording that a crash or second signal left
+fragmented, in place and the same way: it indexes every fragment written in full,
+late renditions included, and cuts a partial one at the end.
 
 ```bash
 moq ... export mp4 --output recording.mp4

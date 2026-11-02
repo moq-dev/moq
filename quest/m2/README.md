@@ -118,7 +118,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [Transcode rungs scale off the runtime and keep bounded state](/quest/m2/transcode-rungs.md) - resize on encoder threads, memoize rungs by shape, one writer per rung track
 - [One port](/quest/m2/one-port/README.md) - one UDP port carries QUIC, SRT, and WebRTC media through an embedder hook, and one TCP port carries HTTP, RTMP, and RTMPS
 - [qmux receive leases](/quest/m2/qmux-receive-lease.md) - WebSocket, TCP, and WebRTC sessions bound incomplete messages by their receive window, at a per-session cost the maintainer picks
-- [QUIC caps](/quest/m2/rate-quic.md) - paced MAX_DATA credit in and a capped pacer out hold a QUIC session to its token's bitrate
 - [WebSocket caps](/quest/m2/rate-websocket.md) - paced reads and writes over bounded socket buffers hold WebSocket to the same caps
 - [Publishers learn their cap](/quest/m2/rate-grant.md) - the AUTH grant carries the caps and publishers clamp their encoder to them
 - [moq-rtc pacing](/quest/m2/rtc-pacing.md) - a capped WHEP viewer never receives more than its cap plus burst, NACK resends included
@@ -184,11 +183,8 @@ lite-07; bitrate enforcement is not part of this release.
 - [The relay over QUIC on the sim](/quest/m2/quic-sim.md) - the relay and moq-tokio's `Client` and `Server` run over `moq-quic` on the seeded sim
 - [moq-shaper's own socket never passes for path loss](/quest/m2/shaper-socket.md) - relay-sized buffers and its own socket drops reported beside path drops
 
-- [Archive time ranges](/quest/m2/archive-time-ranges.md) - a `Time(pts)` range on an archive consumer broadcast resolves from the archive's keys, however old
 - [DVR rewind](/quest/m2/archive-dvr.md) - follow-on capability after the release contract is stable
 - [Archive lookups cancel when abandoned](/quest/m2/archive-lookup-withdrawal.md) - a public withdrawal signal on `Fill` stops a time lookup's store read once its readers leave
-
-- [JS HLS field](/quest/m2/js-hls.md) - follow-on capability after the release contract is stable
 
 - [Demo dashboard shows viewer lag](/quest/m2/qos-lag-dashboard.md) - follow-on capability after the release contract is stable
 
@@ -238,7 +234,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [We own our WebRTC stack](/quest/m2/webrtc/README.md) - moq-rtc becomes moq-webrtc with moq-ice, the data-channel transport, and a vendored, trimmed str0m/dimpl/is/sctp-proto
 - [Certificate reload and qmux's tasks are supervised](/quest/m2/tls-reload-supervision.md) - a panic in either fails loudly instead of silently stopping
 - [PUBLISH_DONE says why](/quest/m2/publish-done-codes.md) - GOING_AWAY, TOO_FAR_BEHIND, and EXPIRED round-trip as stream codes
-- [An interrupted mp4 recording keeps its last fragment](/quest/m2/mp4-sigint-flush.md) - SIGINT flushes the buffering fragment before finishing
 - [moq repair refuses a live recording](/quest/m2/mp4-repair-lock.md) - the recorder's advisory lock keeps `moq repair mp4` off a file still being written
 - [Windows receives notice truncated control data](/quest/m2/cmsg-windows-truncation.md) - Windows handles `MSG_CTRUNC` like the Unix paths
 - [The error-queue reader decodes truncated control data](/quest/m2/errqueue-truncation.md) - `MSG_ERRQUEUE` keeps what fit on `MSG_CTRUNC`, like the receive paths

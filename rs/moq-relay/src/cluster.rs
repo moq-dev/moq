@@ -1189,10 +1189,18 @@ impl Cluster {
 		}
 	}
 
-	/// The QUIC limits an admitted session widens to, if any: only a `peer` grant does.
-	#[cfg(any(feature = "quic", all(target_os = "linux", feature = "_uring")))]
-	pub(crate) fn quic_limits(&self, lease: &auth::Lease) -> Option<moq_quic::Limits> {
-		lease.token().peer.then(|| self.peer_quic.limits())
+	/// The QUIC limits an admitted session runs under once it is answered: a `peer`
+	/// grant's wider ones, and the lease's bitrate caps. A receive window left unset opens
+	/// to the configured one.
+	pub(crate) fn quic_limits(&self, lease: &auth::Lease) -> moq_quic::Limits {
+		let mut limits = match lease.token().peer {
+			true => self.peer_quic.limits(),
+			false => moq_quic::Limits::default(),
+		};
+		let caps = lease.caps().limits();
+		limits.receive_rate = caps.receive_rate;
+		limits.send_rate = caps.send_rate;
+		limits
 	}
 
 	/// The origin ID used by this relay on the wire.
@@ -1301,9 +1309,10 @@ impl Cluster {
 		&self,
 		auth: &auth::Auth,
 		request: moq_auth::Request,
+		pacer: Option<auth::Pacer>,
 	) -> Result<Admitted, auth::Error> {
 		let result = async {
-			let lease = auth.admit(request.clone()).await?;
+			let lease = auth.admit_paced(request.clone(), pacer).await?;
 			self.scope_session(lease, &request)
 		}
 		.await;
