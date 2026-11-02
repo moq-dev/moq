@@ -1,13 +1,13 @@
 //! Outgoing streams and datagrams: their handles, scheduling, and errors.
 
-use std::io;
+use std::{io, task::Poll};
 
 use bytes::Buf;
 use thiserror::Error;
 use tracing::trace;
 
 use super::{StreamEvent, StreamsState, schedule::Slot};
-use crate::connection::{ConnectionTag, State as ConnState, send_buffer::SendBuffer, spaces::Retransmits};
+use crate::connection::{ConnectionTag, State as ConnState, send_buffer::SendBuffer, spaces::Retransmits, waits::Wait};
 use crate::{StreamId, VarInt, frame};
 
 #[derive(Debug)]
@@ -400,6 +400,22 @@ impl<'a> Stream<'a> {
 		Ok(written)
 	}
 
+	/// [`Self::write`], or wait for room when nothing fits
+	///
+	/// Pending registers `waiter` until flow control or the send buffer has room, the peer stops
+	/// the stream, or it is finished, reset, or released. Fails with [`Error::ConnectionLost`] once
+	/// the connection is lost.
+	pub fn poll_write(&mut self, waiter: &kio::Waiter, data: &mut impl Buf) -> Poll<Result<usize, Error>> {
+		match self.write(data) {
+			Err(Error::Blocked) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
+			Err(Error::Blocked) => {
+				self.state.waits.register(self.id, Wait::Write, waiter);
+				Poll::Pending
+			}
+			result => Poll::Ready(result),
+		}
+	}
+
 	/// How the stream ended, or `None` while it is still going
 	///
 	/// The peer's stop, a reset, or a finish every byte of which the peer acknowledged. Kept
@@ -410,6 +426,23 @@ impl<'a> Stream<'a> {
 			Some(Some(stream)) => Ok(stream.end()),
 			Some(None) => Ok(None),
 			None => self.state.ends.get(&self.id).map(|&end| Some(end)).ok_or(Error::Closed),
+		}
+	}
+
+	/// Wait for the stream to end, as [`Self::end`] reports it
+	///
+	/// Pending registers `waiter` until the peer acknowledges a finish, stops the stream, or the
+	/// stream is reset or released. Fails with [`Error::ConnectionLost`] once the connection is
+	/// lost first.
+	pub fn poll_end(&mut self, waiter: &kio::Waiter) -> Poll<Result<End, Error>> {
+		match self.end() {
+			Ok(Some(end)) => Poll::Ready(Ok(end)),
+			Err(err) => Poll::Ready(Err(err)),
+			Ok(None) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
+			Ok(None) => {
+				self.state.waits.register(self.id, Wait::End, waiter);
+				Poll::Pending
+			}
 		}
 	}
 
@@ -425,6 +458,10 @@ impl<'a> Stream<'a> {
 		let max_data = self.state.max_send_data(self.id);
 		if let Ok(stream) = StreamsState::send_mut(&mut self.state.send, self.id, max_data) {
 			stream.released = true;
+			// Every wait on the ID now fails with Closed.
+			for wait in [Wait::Write, Wait::End, Wait::Acked] {
+				self.state.waits.wake(self.id, wait);
+			}
 		}
 	}
 
@@ -440,6 +477,8 @@ impl<'a> Stream<'a> {
 		if !was_pending {
 			self.state.pending.push(self.id, &mut stream.slot, stream.priority);
 		}
+		// A writer waiting on it learns it is closed.
+		self.state.waits.wake(self.id, Wait::Write);
 
 		Ok(())
 	}
@@ -497,6 +536,25 @@ impl<'a> Stream<'a> {
 		}
 	}
 
+	/// Wait for the peer to acknowledge every byte before `offset`, as [`Self::acked`] answers it
+	///
+	/// Pending registers `waiter` until the answer changes. Fails with [`Error::ConnectionLost`]
+	/// instead of [`Error::Closed`] once the connection is lost.
+	///
+	/// # Panics
+	/// - when `offset` came from another stream
+	pub fn poll_acked(&mut self, waiter: &kio::Waiter, offset: Offset) -> Poll<Result<(), Error>> {
+		match self.acked(offset) {
+			Ok(true) => Poll::Ready(Ok(())),
+			Ok(false) => {
+				self.state.waits.register(self.id, Wait::Acked, waiter);
+				Poll::Pending
+			}
+			Err(Error::Closed) if self.state.waits.lost().is_some() => Poll::Ready(Err(Error::ConnectionLost)),
+			Err(err) => Poll::Ready(Err(err)),
+		}
+	}
+
 	/// Abandon the stream, but still deliver the bytes before `offset`
 	///
 	/// Nothing past `offset` is sent or retransmitted. A peer that accepts RESET_STREAM_AT gets
@@ -548,9 +606,7 @@ impl<'a> Stream<'a> {
 		let send = stream.reset(error_code, reliable_size, at);
 		self.state.connection_blocked.swap_remove(&self.id);
 		self.state.buffered_data -= buffered - stream.pending.buffered();
-		if let Some(offset) = stream.take_waiting() {
-			self.state.events.push_back(StreamEvent::Acked { id: self.id, offset });
-		}
+		let waiting = stream.take_waiting();
 		// Only data below the Reliable Size is left to send
 		if !stream.is_pending() {
 			self.state.pending.remove(&mut stream.slot);
@@ -558,6 +614,13 @@ impl<'a> Stream<'a> {
 		if let Some(reliable_size) = send {
 			self.pending.reset_stream.push((self.id, reliable_size));
 		}
+		if let Some(offset) = waiting {
+			self.state.notify(StreamEvent::Acked { id: self.id, offset });
+		}
+		// The stream ended, and a writer waiting on it learns it is closed.
+		self.state.waits.wake(self.id, Wait::End);
+		self.state.waits.wake(self.id, Wait::Write);
+		self.state.unblock();
 
 		Ok(())
 	}
@@ -718,8 +781,7 @@ impl Group {
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Error {
-	/// Flow control or the send buffer has no room; a [`StreamEvent::Writable`] says when to
-	/// retry
+	/// Flow control or the send buffer has no room; [`Stream::poll_write`] waits for it
 	#[error("blocked")]
 	Blocked,
 	/// The peer asked us to stop sending, with its code
@@ -734,6 +796,10 @@ pub enum Error {
 	/// The stream was finished, reset, or released, or was never opened
 	#[error("closed stream")]
 	Closed,
+	/// The connection was lost; [`Connection::poll_closed`](crate::connection::Connection::poll_closed)
+	/// says why
+	#[error("connection lost")]
+	ConnectionLost,
 }
 
 impl From<Error> for io::Error {
@@ -743,7 +809,7 @@ impl From<Error> for io::Error {
 			Error::Stopped(_) => io::ErrorKind::ConnectionReset,
 			Error::TooLarge => io::ErrorKind::InvalidInput,
 			Error::Unsupported => io::ErrorKind::Unsupported,
-			Error::Closed => io::ErrorKind::NotConnected,
+			Error::Closed | Error::ConnectionLost => io::ErrorKind::NotConnected,
 		};
 		Self::new(kind, err)
 	}

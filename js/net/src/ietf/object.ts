@@ -1,4 +1,5 @@
 import { ProtocolViolation, StreamCode, Stream as StreamError } from "../error.ts";
+import { decodePayload } from "../payload.ts";
 import type { Cursor, Reader } from "../stream.ts";
 import { concat, encodeVarint, Writer } from "../stream.ts";
 import { type Timescale, Timestamp } from "../time.ts";
@@ -227,8 +228,13 @@ export class EndOfTrackProperties extends Error {
 
 /** A moq-transport object inside a group stream. */
 export class Frame {
-	/** The object payload, or `undefined` for an end of group or end of track marker. */
+	/**
+	 * The object payload, or `undefined` for an end of group or end of track marker, or for
+	 * an object whose payload streams after its header (see {@link streamed}).
+	 */
 	payload?: Uint8Array;
+	/** The payload length of an object past one segment, which follows on the stream instead of in {@link payload}. */
+	streamed?: number;
 	/** The presentation timestamp carried in object properties, when present. */
 	timestamp?: Timestamp;
 	/**
@@ -243,12 +249,19 @@ export class Frame {
 
 	constructor({
 		payload,
+		streamed,
 		timestamp,
 		endOfTrack = false,
-	}: { payload?: Uint8Array; timestamp?: Timestamp; endOfTrack?: boolean } = {}) {
+	}: { payload?: Uint8Array; streamed?: number; timestamp?: Timestamp; endOfTrack?: boolean } = {}) {
 		this.payload = payload;
+		this.streamed = streamed;
 		this.timestamp = timestamp;
 		this.endOfTrack = endOfTrack;
+	}
+
+	/** Whether this is an object, rather than an end of group or end of track marker. */
+	get isObject(): boolean {
+		return this.payload !== undefined || this.streamed !== undefined;
 	}
 
 	/**
@@ -257,7 +270,7 @@ export class Frame {
 	 * The timestamp goes out in `timescale`, the units the track declared, and not at all when
 	 * it declared none. `idDelta` is the first object's absolute Object ID and zero for every
 	 * later one, so a group whose head was trimmed by a filter still puts the true numbering
-	 * on the wire.
+	 * on the wire. A {@link streamed} object writes only its header; the caller writes its payload.
 	 */
 	async encode(
 		w: Writer,
@@ -278,6 +291,8 @@ export class Frame {
 		const payload = this.endOfTrack ? undefined : this.payload;
 		if (this.endOfTrack) {
 			header.push(encodeVarint(0, version), encodeVarint(END_OF_TRACK, version)); // length = 0
+		} else if (this.streamed) {
+			header.push(encodeVarint(this.streamed, version));
 		} else if (payload === undefined) {
 			header.push(encodeVarint(0, version), encodeVarint(GROUP_END, version)); // length = 0
 		} else {
@@ -333,8 +348,12 @@ export class Frame {
 
 		if (payloadLength > 0) {
 			if (delta !== 0 && !offset) throw new ObjectIdGap(delta);
-			const payload = c.read(payloadLength);
-			const frame = new Frame({ payload, timestamp });
+			const payload = decodePayload(c, payloadLength);
+			const frame = new Frame({
+				payload,
+				streamed: payload === undefined ? payloadLength : undefined,
+				timestamp,
+			});
 			frame.idDelta = delta;
 			return frame;
 		}
@@ -529,8 +548,10 @@ export type FetchedObject =
 			priority?: number;
 			/** The Timestamp in the track's units, when it declared some. */
 			timestamp?: Timestamp;
-			/** The object payload; empty for an empty object. */
-			payload: Uint8Array;
+			/** The object payload; empty for an empty object, and `undefined` when it streams after the object. */
+			payload?: Uint8Array;
+			/** The payload length; past one segment, the payload follows on the stream. */
+			size: number;
 	  }
 	| { kind: "endOfRange"; reason: EndOfRange; group: number; object: number };
 
@@ -587,6 +608,6 @@ export function decodeFetchObject(c: Cursor, timescale: Timescale | undefined): 
 
 	// A fetch stream carries no Object Status: a zero length is simply an empty object.
 	const length = c.u53();
-	const payload = length > 0 ? c.read(length) : new Uint8Array(0);
-	return { kind: "object", group, subgroup, subgroupId, object, priority, timestamp, payload };
+	const payload = decodePayload(c, length);
+	return { kind: "object", group, subgroup, subgroupId, object, priority, timestamp, payload, size: length };
 }

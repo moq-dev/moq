@@ -113,7 +113,7 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	let downstream = connect_mock(options).await;
 
 	let consumer = subscriber.consume();
-	let remote = moq_clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
+	let remote = kio::clock::timeout(TIMEOUT, consumer.follow("bcast", None).unwrap().available())
 		.await
 		.expect("resolve timeout")
 		.expect("broadcast resolves");
@@ -122,12 +122,12 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	for (index, track) in tracks.iter().enumerate() {
 		let subscription = Subscription::default().with_max_delay(MAX_DELAY).with_range(0..);
 		let sub = remote.track(&format!("track{index}")).unwrap().subscribe(subscription);
-		let sub = moq_clock::timeout(TIMEOUT, sub)
+		let sub = kio::clock::timeout(TIMEOUT, sub)
 			.await
 			.expect("the subscription never became active")
 			.expect("subscribe");
-		readers.push(moq_clock::sim::spawn(read(sub)));
-		moq_clock::timeout(TIMEOUT, support::harness::subscribed(track))
+		readers.push(kio::clock::sim::spawn(read(sub)));
+		kio::clock::timeout(TIMEOUT, support::harness::subscribed(track))
 			.await
 			.expect("no subscriber appeared");
 	}
@@ -148,25 +148,25 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 	}
 
 	match end {
-		End::Close => moq_clock::timeout(TIMEOUT, upstream.server.clone().close())
+		End::Close => kio::clock::timeout(TIMEOUT, upstream.server.clone().close())
 			.await
 			.expect("close timed out")
 			.expect("the close drains"),
 		End::Abort => {
 			// Simulated time advances only once every task is idle: the relay has read
 			// everything the unheld upstream hop carried.
-			moq_clock::sleep(Duration::from_millis(100)).await;
+			kio::clock::sleep(Duration::from_millis(100)).await;
 			upstream.server.abort(Error::Cancel);
 		}
 	}
 	drop((tracks, broadcast, publisher, upstream));
 	// The relay sees the session and its broadcast go before the subscriber reads on.
-	moq_clock::sleep(Duration::from_millis(100)).await;
+	kio::clock::sleep(Duration::from_millis(100)).await;
 	downstream.server_transport.release_unis();
 
 	let mut outcomes = Vec::new();
 	for reader in readers {
-		let outcome = moq_clock::timeout(TIMEOUT, reader)
+		let outcome = kio::clock::timeout(TIMEOUT, reader)
 			.await
 			.unwrap_or_else(|_| panic!("{name} {end:?}: a track never ended"))
 			.expect("reader panicked");
@@ -180,7 +180,7 @@ async fn round(name: &str, end: End) -> Vec<Outcome> {
 /// track's SUBSCRIBE FIN, which lets the close drain, before the relay has read it, so the
 /// relay must still read it from the closed session. Lite03 and Lite04 declare no end, so
 /// there the relay is still waiting out its tail grace and the FIN is the track's only end.
-#[moq_clock::test]
+#[kio::test]
 async fn relay_delivers_finished_tracks_after_upstream_closes() {
 	let want: Vec<(u64, u64)> = (0..GROUPS)
 		.flat_map(|group| (0..FRAMES).map(move |frame| (group, frame)))

@@ -5,7 +5,16 @@
 import type MoqPublish from "@moq/publish/element";
 import type MoqWatch from "@moq/watch/element";
 import { refused, refusedWebSocket } from "./close";
-import { CAPTURE_EVENT, type CaptureState, FAULTS, type Fault, publish, SAMPLE_MS } from "./contract";
+import {
+	AUDIO_CODECS,
+	type AudioCodec,
+	CAPTURE_EVENT,
+	type CaptureState,
+	FAULTS,
+	type Fault,
+	publish,
+	SAMPLE_MS,
+} from "./contract";
 import { finish } from "./finish";
 import { Fixture } from "./fixture";
 import { attach, watchResources } from "./probe";
@@ -83,13 +92,17 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 	document.body.appendChild(host);
 
 	const fault = parseFault(params.get("fault"));
-	let fixture: Fixture | undefined = new Fixture(host, {
+	const audioCodec = params.get("audio-codec") ?? "opus";
+	if (!AUDIO_CODECS.some((codec) => codec === audioCodec)) throw new Error(`unknown audio codec: ${audioCodec}`);
+	const props = {
 		url,
 		name: broadcast,
 		fault,
 		versions: versions?.split(","),
 		generation: Number(params.get("generation") ?? 0),
-	});
+		audioCodec: audioCodec as AudioCodec,
+	};
+	let fixture: Fixture | undefined = new Fixture(host, props);
 
 	// The driver stops and restarts the publisher in place to exercise a same-path republish, which
 	// has to reuse this page so the audio context keeps its user activation.
@@ -100,18 +113,17 @@ if (role === "finish-publish" || role === "finish-subscribe") {
 		},
 		start: () => {
 			fixture?.close();
-			fixture = new Fixture(host, {
-				url,
-				name: broadcast,
-				fault,
-				versions: versions?.split(","),
-				generation: Number(params.get("generation") ?? 0),
-			});
+			fixture = new Fixture(host, props);
 		},
 		disableVideo: () => fixture?.setVideo(false),
 		enableVideo: () => fixture?.setVideo(true),
 		changeVideoCodec: () => fixture?.changeVideoCodec(),
 		resizeVideo: () => fixture?.resizeVideo(),
+		changeAudioCodec: () => fixture?.changeAudioCodec(),
+		changeAudioRate: () => fixture?.changeAudioRate(),
+		changeAudioChannels: () => fixture?.changeAudioChannels(),
+		addAudioRendition: () => fixture?.addAudioRendition(),
+		removeAudioRendition: () => fixture?.removeAudioRendition(),
 	});
 } else if (role === "subscribe") {
 	await customElements.whenDefined("moq-watch");

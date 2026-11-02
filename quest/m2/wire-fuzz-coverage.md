@@ -20,7 +20,7 @@ Each crate follows moq-net's shape (`rs/moq-net/fuzz/README.md`): the target bod
 
 Ordering:
 
-- `moq-sock`'s `CMsg::decode` still reads `size_of::<T>()` past a short message (only a `debug_assert_eq!` checks it), which [Bound cmsg payload reads](/quest/m2/cmsg-decode-bound.md) fixes. A moq-sock target landing first would fail nightly on that known overread, so land it after, or with, that fix. The moq-uring target has no such dependency.
+- `moq-sock`'s `CMsg::decode` still reads `size_of::<T>()` past a short message (only a `debug_assert_eq!` checks it), which [Bound cmsg payload reads](https://github.com/moq-dev/moq/pull/7394) fixes. A moq-sock target landing first would fail nightly on that known overread, so land it after, or with, that fix. The moq-uring target has no such dependency.
 - [In-memory unsafe under Miri](/quest/m2/miri-memory.md) shares one `just rs miri` recipe and nightly job with this quest: whichever lands first creates it, and the other adds its crates.
 
 Public API: none. Wire: none.
@@ -28,6 +28,6 @@ Public API: none. Wire: none.
 ## Related
 
 - [CI cost and latency](/quest/m0/ci/README.md) - where the nightly budget lives
-- [Bound cmsg payload reads](/quest/m2/cmsg-decode-bound.md) - fixes the moq-sock overread a cmsg target would hit
+- [Bound cmsg payload reads](https://github.com/moq-dev/moq/pull/7394) - fixes the moq-sock overread a cmsg target would hit
 - [In-memory unsafe under Miri](/quest/m2/miri-memory.md) - shares the Miri recipe and nightly job
 - [Untrusted media parsers have fuzz targets](/quest/m2/media-fuzz.md) - the media parser targets beside these

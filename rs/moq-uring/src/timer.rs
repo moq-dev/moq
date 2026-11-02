@@ -1,6 +1,6 @@
 //! Userspace timers on the worker's deadline queue, never a timeout SQE.
 //!
-//! Every armed deadline lives in the worker's [`moq_clock::Deadlines`]. The
+//! Every armed deadline lives in the worker's [`kio::clock::Deadlines`]. The
 //! worker advances it to each turn's instant, firing the due prefix, and parks
 //! with the earliest remaining deadline as the absolute `io_uring_enter`
 //! timeout, so timers cost zero submissions and re-arming is a pure memory
@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::task::Poll;
 
-use moq_clock::{Deadline, Deadlines, Instant};
+use kio::clock::{Deadline, Deadlines, Instant};
 
 use crate::metrics::Counters;
 

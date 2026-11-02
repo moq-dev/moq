@@ -1,4 +1,4 @@
-use moq_clock::Wall;
+use kio::clock::Wall;
 use moq_pattern::Patterns;
 use serde::{Deserialize, Serialize};
 use serde_with::{DurationSeconds, serde_as};
@@ -36,7 +36,7 @@ pub struct Grant {
 	pub mounts: BTreeMap<String, String>,
 
 	/// When the session closes, as unix seconds.
-	#[serde_as(as = "Option<moq_clock::serde::UnixSeconds>")]
+	#[serde_as(as = "Option<kio::clock::serde::UnixSeconds>")]
 	pub expires: Option<Wall>,
 
 	/// How long until the relay asks again, in seconds.
@@ -75,11 +75,11 @@ impl Grant {
 
 	/// Snapshot the expiry on the ambient clock; one already past is now, and one beyond
 	/// the clock's range is never.
-	pub fn deadline(&self) -> Option<moq_clock::Instant> {
+	pub fn deadline(&self) -> Option<kio::clock::Instant> {
 		// Read the instant first, so a pause between the two reads shortens the grant
 		// instead of extending it.
-		let start = moq_clock::now();
-		let now = moq_clock::wall();
+		let start = kio::clock::now();
+		let now = kio::clock::wall();
 		let remaining = self.expires?.checked_duration_since(now).unwrap_or_default();
 		start.checked_add(remaining)
 	}
@@ -107,7 +107,7 @@ impl Grant {
 		if let Some(label) = &self.label {
 			moq_pattern::Pattern::literal(label).map_err(crate::Error::InvalidLabel)?;
 		}
-		if self.expires.is_some_and(|expires| expires <= moq_clock::wall()) {
+		if self.expires.is_some_and(|expires| expires <= kio::clock::wall()) {
 			return Err(crate::Error::GrantExpired);
 		}
 		Ok(())
@@ -183,7 +183,7 @@ mod tests {
 		assert_eq!(serde_json::from_str::<Grant>(r#"{"publish":["**"]}"#).unwrap(), grant);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn validate_refuses_nothing_unbounded_and_expired() {
 		assert!(matches!(Grant::default().validate(), Err(crate::Error::UselessGrant)));
 
@@ -194,7 +194,7 @@ mod tests {
 		assert!(matches!(grant.validate(), Err(crate::Error::UnboundedRevalidate)));
 
 		// Exact: no grace for an auth server whose clock runs behind.
-		let now = moq_clock::wall();
+		let now = kio::clock::wall();
 		grant.expires = Some(now);
 		assert!(matches!(grant.validate(), Err(crate::Error::GrantExpired)));
 
@@ -203,7 +203,7 @@ mod tests {
 
 		grant.expires = Some(now + Duration::from_secs(60));
 		grant.validate().unwrap();
-		moq_clock::sim::advance(Duration::from_secs(60)).await;
+		kio::clock::sim::advance(Duration::from_secs(60)).await;
 		assert!(
 			matches!(grant.validate(), Err(crate::Error::GrantExpired)),
 			"expiry follows the ambient clock, not the host's"
@@ -246,15 +246,15 @@ mod tests {
 
 	/// The expiry and the instant come from one clock, so time passing before the
 	/// snapshot never shortens the grant.
-	#[moq_clock::test]
+	#[kio::test]
 	async fn deadline_is_the_exact_expiry() {
-		let start = moq_clock::now();
-		let now = moq_clock::wall();
+		let start = kio::clock::now();
+		let now = kio::clock::wall();
 		let mut grant = Grant::new(patterns(&["**"]), Patterns::default());
 		assert_eq!(grant.deadline(), None);
 
 		grant.expires = Some(now + Duration::from_secs(10));
-		moq_clock::sim::advance(Duration::from_secs(4)).await;
+		kio::clock::sim::advance(Duration::from_secs(4)).await;
 		assert_eq!(grant.deadline(), Some(start + Duration::from_secs(10)));
 
 		grant.expires = Some(now - Duration::from_secs(1));
@@ -265,7 +265,7 @@ mod tests {
 		);
 	}
 
-	#[moq_clock::test]
+	#[kio::test]
 	async fn expiry_saturates_to_the_wall_range() {
 		let parse = |expires: i64| {
 			serde_json::from_value::<Grant>(serde_json::json!({"publish":["**"],"expires":expires})).unwrap()

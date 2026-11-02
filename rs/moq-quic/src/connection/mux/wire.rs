@@ -124,13 +124,13 @@ pub(super) fn next_frame(bytes: &mut Bytes) -> Result<Option<Frame>, TransportEr
 	Ok(Some(frame))
 }
 
-pub(super) fn encode_transport_parameters(buf: &mut Vec<u8>, params: &[u8]) {
+pub(super) fn encode_transport_parameters(buf: &mut impl BufMut, params: &[u8]) {
 	buf.write_var(QX_TRANSPORT_PARAMETERS);
 	buf.write_var(params.len() as u64);
 	buf.put_slice(params);
 }
 
-pub(super) fn encode_ping(buf: &mut Vec<u8>, response: bool, seq: VarInt) {
+pub(super) fn encode_ping(buf: &mut impl BufMut, response: bool, seq: VarInt) {
 	buf.write_var(match response {
 		true => QX_PING_RESPONSE,
 		false => QX_PING_REQUEST,

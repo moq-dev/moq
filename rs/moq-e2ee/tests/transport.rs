@@ -1,5 +1,4 @@
 //! Grouped tracks and datagrams on moq-lite and MoQ Transport.
-#![expect(clippy::disallowed_methods, reason = "tests read the host clock directly")]
 
 mod support;
 
@@ -90,7 +89,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 
 #[tokio::test]
 async fn grouped_over_lite() {
-	tokio::time::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_protected("moq-lite-07-wip".parse().unwrap(), "video").await;
 		let mut group = fixture.producer.append_group().unwrap();
 		group
@@ -107,7 +106,7 @@ async fn grouped_over_lite() {
 
 #[tokio::test]
 async fn grouped_over_ietf() {
-	tokio::time::timeout(TEST_TIMEOUT, async {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_protected("moq-transport-22".parse().unwrap(), "video").await;
 		let mut group = fixture.producer.append_group().unwrap();
 		group
@@ -122,16 +121,16 @@ async fn grouped_over_ietf() {
 	.expect("timed out");
 }
 
-async fn datagram_roundtrip(version: &str) {
-	tokio::time::timeout(TEST_TIMEOUT, async {
+async fn datagram_roundtrip(version: &str, plaintext: &[u8]) {
+	kio::clock::timeout(TEST_TIMEOUT, async {
 		let mut fixture = connect_protected(version.parse().unwrap(), "audio").await;
 		fixture
 			.producer
-			.append_datagram(Timestamp::from_millis(9).unwrap(), b"opus")
+			.append_datagram(Timestamp::from_millis(9).unwrap(), plaintext)
 			.unwrap();
 		match fixture.consumer.recv_datagram().await.unwrap() {
 			Some(moq_e2ee::datagram::Event::Datagram(d)) => {
-				assert_eq!(&d.plaintext[..], b"opus");
+				assert_eq!(&d.plaintext[..], plaintext);
 				assert_eq!(d.sequence, 0);
 			}
 			other => panic!("{other:?}"),
@@ -143,10 +142,16 @@ async fn datagram_roundtrip(version: &str) {
 
 #[tokio::test]
 async fn datagrams_over_lite() {
-	datagram_roundtrip("moq-lite-05").await;
+	datagram_roundtrip("moq-lite-05", b"opus").await;
+}
+
+/// The largest plaintext still fits once lite-07 prefixes the datagram with its Type.
+#[tokio::test]
+async fn max_datagram_over_lite_07() {
+	datagram_roundtrip("moq-lite-07-wip", &[7; moq_e2ee::MAX_DATAGRAM_PLAINTEXT]).await;
 }
 
 #[tokio::test]
 async fn datagrams_over_ietf() {
-	datagram_roundtrip("moq-transport-22").await;
+	datagram_roundtrip("moq-transport-22", b"opus").await;
 }

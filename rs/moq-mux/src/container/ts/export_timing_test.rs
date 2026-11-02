@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use bytes::{Bytes, BytesMut};
 use hang::catalog::{AAC, AudioConfig, Container, H264, VideoConfig};
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::Timestamp;
 use mpeg2ts::ts::{ReadTsPacket, TsPacketReader, TsPayload};
 
@@ -129,6 +129,7 @@ impl Live {
 			)
 			.unwrap();
 		let mut cfg = AudioConfig::new(AAC { profile: 2 }, 48_000, 2);
+		cfg.description = Some(Bytes::from_static(&[0x11, 0x90]));
 		cfg.container = Container::Legacy;
 		catalog
 			.modify()
@@ -153,7 +154,7 @@ impl Live {
 			reorder: false,
 			delta_size: 400,
 			offset: 0,
-			start: moq_clock::now(),
+			start: kio::clock::now(),
 			tick: 0,
 			audio_index: 0,
 		}
@@ -205,7 +206,7 @@ impl Live {
 	/// same timeline from the next group, as its replacement or the other half of a 1+1 pair
 	/// would.
 	async fn fall_silent(&mut self, gap: Duration, legs: &mut [&mut Leg]) {
-		let resume = moq_clock::now() + gap;
+		let resume = kio::clock::now() + gap;
 		advance(resume, legs).await;
 		let media = (resume.duration_since(self.start).as_secs_f64() * self.scale * 1e6) as u64;
 		self.tick = media.div_ceil(VIDEO_US * GOP) * GOP;
@@ -222,7 +223,7 @@ impl Live {
 		Leg {
 			export,
 			every,
-			next_poll: moq_clock::now(),
+			next_poll: kio::clock::now(),
 			out: Vec::new(),
 		}
 	}
@@ -356,7 +357,7 @@ impl Leg {
 
 	fn poll(&mut self) {
 		let waiter = kio::Waiter::noop();
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		while let std::task::Poll::Ready(frame) = self.export.poll_next(&waiter) {
 			match frame.expect("exporter error") {
 				Some(frame) => self.out.push((now, frame)),
@@ -370,11 +371,11 @@ impl Leg {
 		loop {
 			self.poll();
 			if let Some(deadline) = self.export.next_due() {
-				moq_clock::sleep_until(deadline).await;
+				kio::clock::sleep_until(deadline).await;
 				continue;
 			}
-			match tokio::time::timeout(Duration::from_millis(10), self.export.next()).await {
-				Ok(Ok(Some(frame))) => self.out.push((moq_clock::now(), frame)),
+			match kio::clock::timeout(Duration::from_millis(10), self.export.next()).await {
+				Ok(Ok(Some(frame))) => self.out.push((kio::clock::now(), frame)),
 				Ok(Ok(None)) => break,
 				Err(_) if self.export.next_due().is_none() => break,
 				Err(_) => {}
@@ -397,8 +398,8 @@ async fn advance(at: Instant, legs: &mut [&mut Leg]) {
 		.filter(|wake| *wake <= at)
 		.min()
 	{
-		moq_clock::sleep_until(wake).await;
-		let now = moq_clock::now();
+		kio::clock::sleep_until(wake).await;
+		let now = kio::clock::now();
 		for leg in legs.iter_mut() {
 			if leg.wake().is_some_and(|wake| wake <= now) {
 				leg.poll();
@@ -410,7 +411,7 @@ async fn advance(at: Instant, legs: &mut [&mut Leg]) {
 			}
 		}
 	}
-	moq_clock::sleep_until(at).await;
+	kio::clock::sleep_until(at).await;
 	// Read up to the instant the next frame arrives, so the arrival is timed exactly.
 	for leg in legs.iter_mut() {
 		leg.poll_now();
@@ -642,7 +643,7 @@ async fn an_unmarked_step_keeps_the_export_rendering() {
 			let mut leg = live.join(Duration::ZERO).await;
 			live.run(8 * GOP + GOP / 2, &mut [&mut leg], |_| false).await;
 			live.offset += step;
-			let stepped = moq_clock::now();
+			let stepped = kio::clock::now();
 			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;
 
 			let case = format!("{} s step, lag {lag}", step as f64 / 1e6);
@@ -684,7 +685,7 @@ async fn frames_held_through_a_silence_drop_as_late() {
 			let tail = if declared { 2 } else { 5 };
 			live.run(8 * GOP + tail, &mut [&mut leg], |_| false).await;
 			live.fall_silent(Duration::from_secs(3), &mut [&mut leg]).await;
-			let resumed = moq_clock::now();
+			let resumed = kio::clock::now();
 			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;
 
 			let dropped = leg.export.dropped();
@@ -730,7 +731,7 @@ async fn a_cut_judges_held_video_when_the_loss_is_observed() {
 			let tail = if declared { 2 } else { 8 };
 			live.run(8 * GOP + tail, &mut [&mut leg], |_| false).await;
 			live.fall_silent(silence, &mut [&mut leg]).await;
-			let observed = moq_clock::now();
+			let observed = kio::clock::now();
 			live.group.take().unwrap().abort(moq_net::Error::Unroutable).unwrap();
 			leg.poll_now();
 			live.run(live.tick + 8 * GOP, &mut [&mut leg], |_| false).await;

@@ -23,7 +23,7 @@ fn origin(hop: u64) -> origin::Producer {
 	origin
 }
 
-#[moq_clock::test]
+#[kio::test]
 async fn a_segmented_frame_crosses_whole() {
 	let payload = Bytes::from((0..SIZE).map(|i| (i % 251) as u8).collect::<Vec<_>>());
 	for version in VERSIONS {
@@ -40,7 +40,7 @@ async fn a_segmented_frame_crosses_whole() {
 		options.client_subscribe = Some(viewer.clone());
 		let _pair = connect_mock(options).await;
 
-		let remote = moq_clock::timeout(TIMEOUT, viewer.consume().follow("room", None).unwrap().available())
+		let remote = kio::clock::timeout(TIMEOUT, viewer.consume().follow("room", None).unwrap().available())
 			.await
 			.expect("broadcast timeout")
 			.unwrap();
@@ -63,7 +63,7 @@ async fn a_segmented_frame_crosses_whole() {
 		}
 		group.finish().unwrap();
 
-		let mut group = moq_clock::timeout(TIMEOUT, sub.recv_group())
+		let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 			.await
 			.expect("group timeout")
 			.unwrap()

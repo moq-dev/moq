@@ -47,6 +47,18 @@ pub(super) struct Errors {
 	pids: BTreeMap<u16, PidErrors>,
 }
 
+/// The checks a program times on a PID by the way it reads it, which programs reading the PID
+/// the same way count alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) enum Checks {
+	/// The PTS cadence of an elementary stream it carries, and the PAT's interval on PID 0.
+	Stream,
+	/// The PCR checks on the PID it takes its clock from.
+	Clock,
+	/// The PMT interval on the PID it reads its PMT from.
+	Table,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct PidErrors {
 	continuity_count_error: u64,
@@ -80,6 +92,31 @@ impl Errors {
 				theirs.pcr_discontinuity_indicator_error,
 			);
 			ours.pts_error = f(ours.pts_error, theirs.pts_error);
+		}
+	}
+
+	/// The `checks` counted on `pid` alone.
+	pub(super) fn only(&self, pid: u16, checks: Checks) -> Self {
+		let all = self.pids.get(&pid).copied().unwrap_or_default();
+		let mut errors = PidErrors::default();
+		let mut pat_error = 0;
+		match checks {
+			Checks::Stream => {
+				errors.pts_error = all.pts_error;
+				if pid == Pid::PAT {
+					pat_error = self.pat_error;
+				}
+			}
+			Checks::Clock => {
+				errors.pcr_repetition_error = all.pcr_repetition_error;
+				errors.pcr_discontinuity_indicator_error = all.pcr_discontinuity_indicator_error;
+			}
+			Checks::Table => errors.pmt_error = all.pmt_error,
+		}
+		Self {
+			pat_error,
+			pids: BTreeMap::from([(pid, errors)]),
+			..Default::default()
 		}
 	}
 
@@ -173,7 +210,7 @@ impl Multiplex {
 }
 
 /// The TR 101 290 checks timed on one program's clock: table, PCR and PTS intervals.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Health {
 	errors: Errors,
 	pcr_pid: Option<u16>,
@@ -274,7 +311,7 @@ impl Health {
 	pub(super) fn pmt_pids(&mut self, pids: &[u16], now: Option<u64>) {
 		self.pmt.retain(|pid, _| pids.contains(pid));
 		for &pid in pids {
-			self.pmt.entry(pid).or_insert(Timer { last: now });
+			self.pmt.entry(pid).or_insert(Timer::at(now));
 		}
 	}
 
@@ -300,6 +337,32 @@ impl Health {
 	/// `pid` changed route: stop grading its PTS until it has one.
 	pub(super) fn restart(&mut self, pid: u16) {
 		self.pts.remove(&pid);
+	}
+
+	/// Carry what this checker has timed on `pid` over to `to`, which reads the same packets and
+	/// counts `pid` from here on, where `to` has not timed it yet: the PAT's interval on PID 0,
+	/// the PMT's on a PMT PID `to` reads, and the PTS cadence when `to` grades one there. So an
+	/// interval running across the handover counts once, from where it began, even from before
+	/// `to`'s clock started. `now` and `then` are this checker's clock and `to`'s; nothing
+	/// carries over before both run.
+	pub(super) fn hand_over(&self, pid: u16, to: &mut Self, pts: bool, now: Option<u64>, then: Option<u64>) {
+		let (Some(now), Some(then)) = (now, then) else {
+			return;
+		};
+		let carry = |timer: &Timer, theirs: &mut Timer| {
+			if theirs.last.is_none() {
+				theirs.last = timer.last.map(|last| last + ticks(then) - ticks(now));
+			}
+		};
+		if pid == Pid::PAT {
+			carry(&self.pat, &mut to.pat);
+		}
+		if let (Some(timer), Some(theirs)) = (self.pmt.get(&pid), to.pmt.get_mut(&pid)) {
+			carry(timer, theirs);
+		}
+		if pts && let Some(timer) = self.pts.get(&pid) {
+			carry(timer, to.pts.entry(pid).or_default());
+		}
 	}
 }
 
@@ -338,31 +401,41 @@ fn section_start(pkt: &[u8; TsPacket::SIZE]) -> Option<u8> {
 }
 
 /// How long since a table or a PTS last occurred, on the program clock.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 struct Timer {
-	/// `None` until the clock starts.
-	last: Option<u64>,
+	/// `None` until the clock starts. Signed, since one [handed over](Health::hand_over) from
+	/// an earlier clock may predate this one's start.
+	last: Option<i64>,
 }
 
 impl Timer {
+	fn at(now: Option<u64>) -> Self {
+		Self { last: now.map(ticks) }
+	}
+
 	fn reset(&mut self, now: Option<u64>) {
 		if now.is_some() {
-			self.last = now;
+			*self = Self::at(now);
 		}
 	}
 
 	/// How many times `limit` ran out since the last occurrence, restarting the wait at each,
 	/// so an outage counts once per limit it lasts rather than once in all.
 	fn expired(&mut self, now: u64, limit: u64) -> u64 {
-		let last = self.last.get_or_insert(now);
-		let late = now.saturating_sub(*last);
+		let last = self.last.get_or_insert(ticks(now));
+		let late = u64::try_from(ticks(now) - *last).unwrap_or(0);
 		if late <= limit {
 			return 0;
 		}
 		let count = (late - 1) / limit;
-		*last += count * limit;
+		*last += ticks(count * limit);
 		count
 	}
+}
+
+/// A program clock reading as a signed tick count, which 27 MHz keeps in range for millennia.
+fn ticks(now: u64) -> i64 {
+	i64::try_from(now).unwrap_or(i64::MAX)
 }
 
 /// `TS_sync_loss` and `Sync_byte_error`, on a grid of its own.

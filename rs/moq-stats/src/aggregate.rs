@@ -11,7 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::task::Poll;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use moq_net::kio::{self, Pending, Waiter};
 use moq_net::stats::{Presence, Traffic};
 use moq_net::track::Subscribing;
@@ -840,7 +840,7 @@ impl<S: Shape> Merged<S> {
 		// then fold every departed node whose grace elapsed. A fold leaves the
 		// merged view unchanged, and only an announce adds a node, which polls
 		// here, so no timer is needed to keep the map bounded.
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		let config = &self.config;
 		let name = self.name.as_str();
 		let origin = &self.origin;
@@ -897,7 +897,7 @@ impl<S: Shape> Merged<S> {
 			// grace re-arms it.
 			return match self.nodes.get_mut(&key) {
 				Some(node) => {
-					node.departed = Some(moq_clock::now());
+					node.departed = Some(kio::clock::now());
 					node.depart()
 				}
 				None => false,
@@ -939,7 +939,7 @@ impl<S: Shape> Merged<S> {
 				let node = entry.get_mut();
 				// A return after the grace starts over, even when this announce
 				// is the first poll since the grace elapsed.
-				node.fold_expired(&mut self.retired, self.grace, moq_clock::now());
+				node.fold_expired(&mut self.retired, self.grace, kio::clock::now());
 				node.departed = None;
 				if matches!(node.reader, Reader::Ended) {
 					node.reader = resolve(&self.origin, &node.path, node.epoch.clone());
@@ -1259,12 +1259,12 @@ mod tests {
 	/// depth 1 (so feeding a broadcast under `<group>/...` publishes a
 	/// `<group>/group.json` track on `.stats/node/<node>`).
 	fn node_producer(origin: &origin::Producer, node: &str) -> Producer {
-		Producer::new(
+		crate::produce::spawned(Producer::new(
 			produce::Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::try_from(node.to_string()).unwrap())
 				.with_depth(1),
-		)
+		))
 	}
 
 	/// Kept-alive handles from [`feed`]: dropping them closes the subscription and
@@ -1669,7 +1669,7 @@ mod tests {
 	fn replacement_while_reader_retries(drop_epoch: bool) {
 		use std::sync::Barrier;
 
-		let now = moq_clock::now();
+		let now = kio::clock::now();
 		// The clock never advances here, so nothing may wait out the update hold.
 		let mut config = origin::Config::default();
 		config.update_hold = std::time::Duration::ZERO;
@@ -2157,13 +2157,13 @@ mod tests {
 		// counted from zero under a new epoch: the reader follows the listing to
 		// it, and its totals add to the old instance's instead of regressing.
 		let origin = produce_origin();
-		let node = Producer::new(
+		let node = crate::produce::spawned(Producer::new(
 			produce::Config::new()
 				.with_origin(origin.clone())
 				.with_node(Path::from_static("a"))
 				.with_depth(1)
 				.with_linger(Duration::ZERO),
-		);
+		));
 		let agg = Consumer::new(origin.consume(), Config::new());
 		let mut group = agg.group(moq_net::Path::from_static("acme"));
 

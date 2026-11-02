@@ -25,6 +25,12 @@ pub struct Config {
 	#[usage(long, default = "studio")]
 	pub broadcast: String,
 
+	/// Copy and encode the program video only while someone watches it. This
+	/// saves the work while nobody watches, but leaves a late viewer nothing
+	/// from before they arrived. Audio is always encoded.
+	#[usage(long)]
+	pub on_demand: bool,
+
 	/// The MoQ client configuration. Without `--connect`, nothing is published
 	/// and broadcast sources stay offline.
 	#[usage(flatten)]
@@ -70,6 +76,7 @@ fn main() -> anyhow::Result<()> {
 		collection,
 		connect,
 		&config.broadcast,
+		config.on_demand,
 	))?;
 
 	run(engine, gpu, runtime.handle().clone())
@@ -119,6 +126,7 @@ mod tests {
 		config.check_deprecated().unwrap();
 		assert_eq!(config.scenes, PathBuf::from("show.toml"));
 		assert_eq!(config.broadcast, "studio");
+		assert!(!config.on_demand, "the program encodes whatever the demand by default");
 		assert_eq!(config.client.url.unwrap().port(), Some(4443));
 	}
 }

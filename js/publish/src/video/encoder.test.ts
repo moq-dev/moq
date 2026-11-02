@@ -1227,7 +1227,6 @@ test("an unwatched rendition reserves nothing and encodes at its configured bitr
 test("a failed video encoder disables only its rendition and recovers on a fresh track", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockResolvedValue({ supported: true });
-	using _now = spyOn(performance, "now").mockReturnValue(0);
 	const flush = async () => {
 		for (let i = 0; i < 10; i++) await new Promise<void>((resolve) => queueMicrotask(resolve));
 	};
@@ -1752,7 +1751,6 @@ test("a refused first ceiling recovers at a smaller size", async () => {
 test("ceiling growth updates the served track in place", async () => {
 	using _videoEncoder = installFakeVideoEncoder();
 	using _probe = spyOn(FakeVideoEncoder, "isConfigSupported").mockResolvedValue({ supported: true });
-	using _now = spyOn(performance, "now").mockReturnValue(0);
 	const broadcast = new Broadcast({ origin: new Moq.Origin.Producer(), name: Moq.Path.from("ceiling.hang") });
 	const capture = {
 		in: { source: new Signal({ getSettings: () => ({ frameRate: 30 }), getConstraints: () => ({}) }) },

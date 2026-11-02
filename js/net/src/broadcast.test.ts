@@ -1,8 +1,7 @@
-import { expect, setSystemTime, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { expect, test } from "bun:test";
+import { Manual, Milli, Nano, yieldNow } from "@moq/clock";
 import { Consumer as BroadcastConsumer, Producer as BroadcastProducer } from "./broadcast.ts";
-import { GroupTooLarge, NotFound, StreamCode } from "./error.ts";
-import { MAX_GROUP_FRAMES } from "./group.ts";
+import { NotFound, StreamCode } from "./error.ts";
 import { hooks } from "./internal.ts";
 import { textFrame } from "./mock.ts";
 import { Timescale, Timestamp } from "./time.ts";
@@ -205,7 +204,7 @@ test("an info lookup joining a subscription's request is answered after the subs
 
 	// Flush every pending notification, so only the lookup is left holding demand.
 	subscriber.close();
-	await new Promise((resolve) => setTimeout(resolve, 0));
+	await yieldNow();
 	expect(request.demand().wanted.peek()).toBeUndefined();
 
 	request.accept({ timescale: Timescale.MILLI, priority: 2 });
@@ -474,7 +473,7 @@ test("a late subscriber replays the cached window", async () => {
 	expect(await late.readString()).toBe("later");
 });
 
-test("a read throws GroupTooLarge on an overflow, then resyncs to the next group", async () => {
+test("a read throws Evicted at a shed front, then resyncs to the next group", async () => {
 	const broadcast = new BroadcastProducer();
 	const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const sub = broadcast
@@ -482,26 +481,26 @@ test("a read throws GroupTooLarge on an overflow, then resyncs to the next group
 		.subscribe({ maxDelay: Milli(5000) })
 		.ordered();
 
-	// Group 0 overflows its frame cap: the group is aborted.
+	// Group 0 sheds its front without aborting the writer.
 	const g0 = producer.appendGroup();
-	for (let i = 0; i < MAX_GROUP_FRAMES; i++)
-		g0.writeFrame({ payload: new Uint8Array([i & 0xff]), timestamp: Timestamp.now() });
-	expect(() => g0.writeFrame({ payload: new Uint8Array([0]), timestamp: Timestamp.now() })).toThrow(GroupTooLarge);
+	for (let i = 0; i < 40; i++) g0.writeFrame({ payload: new Uint8Array(1024 * 1024), timestamp: Timestamp.now() });
 
 	// Group 1 is clean.
 	const g1 = producer.appendGroup();
 	g1.writeFrame({ payload: new TextEncoder().encode("ok"), timestamp: Timestamp.now() });
 	g1.finish();
 
-	// The reader hits the abort in group 0 (error, not a silent skip), then the next
+	// The reader hits the shed front in group 0, then the next
 	// read resyncs from group 1.
-	expect(sub.readFrame()).rejects.toBeInstanceOf(GroupTooLarge);
+	await expect(sub.readFrame()).rejects.toMatchObject({ code: StreamCode.Evicted });
 	expect(await sub.readString()).toBe("ok");
 });
 
 test("a stalled consumer does not pin evicted groups", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
 	try {
-		setSystemTime(new Date(10_000));
+		clock.jump(Nano.fromMilli(Milli(10_000)));
 
 		const broadcast = new BroadcastProducer();
 		const producer = broadcast.createTrack("video", { timescale: Timescale.MILLI, maxAge: Milli(1000) });
@@ -513,7 +512,7 @@ test("a stalled consumer does not pin evicted groups", async () => {
 
 		// Advance past the cache window and write again to trigger a prune. The old
 		// (closed, aged-out) group is dropped from the stalled sink, not retained.
-		setSystemTime(new Date(12_000));
+		clock.jump(Nano.fromMilli(Milli(2_000)));
 		producer.writeFrame(textFrame("fresh"));
 
 		// The next group in arrival order is the fresh one (seq 1): the old (seq 0) group
@@ -526,7 +525,7 @@ test("a stalled consumer does not pin evicted groups", async () => {
 		const next = await Promise.race([stalled.recvGroup(), Promise.resolve(pending)]);
 		expect(next).toBe(pending);
 	} finally {
-		setSystemTime();
+		installed.close();
 	}
 });
 

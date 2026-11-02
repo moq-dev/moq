@@ -19,6 +19,10 @@ other range stays refused, as
 [moq-dev/moq#7204](https://github.com/moq-dev/moq/pull/7204)
 leaves it.
 
+A live ordered reader on an extension-carrying SUBSCRIBE stops waiting at a
+signalled hole, as it already does on moq-lite with SUBSCRIBE_DROP. Peers
+without the extension behave as today.
+
 ## Plan
 
 Decided with the maintainer on 2026-10-28 (`/quest-plan`, "what's not worth
@@ -32,6 +36,19 @@ Decision prompts:
   answer, not the copy that answers it.
 - Scope: ✅ extension plus range FETCH from caches that know every hole, in
   m2; extension only; both in m1.
+
+Decided 2026-10-30 (maintainer, from
+[moq-dev/moq#7403](https://github.com/moq-dev/moq/pull/7403)), on detecting
+unsignalled holes on a live moq-transport SUBSCRIBE:
+
+- Unsignalled holes are a moq-transport protocol bug. Until a peer signals
+  them, an ordered reader with an unlimited budget blocks at an owed hole on
+  a moq-transport SUBSCRIBE. That's accepted, and documented on
+  `Ordered`/`max_delay`.
+- No FETCH to learn whether a hole will fill: it races the live
+  subscription. No inference from later groups, and no grace periods.
+- Build this extension when an IETF client wants it; until then this quest
+  waits on that demand.
 
 Only peers that implement the extension benefit, which today means our own
 Rust and JS moq-transport stacks. Our own peers talk moq-lite to each other,
@@ -61,3 +78,7 @@ Our publishers answer multi-group FETCH and fills over known caches.
 ## Required
 
 - [Drop set](/quest/m1/drop-set.md) - the per-track runs that say which groups are known holes
+
+## Related
+
+- [Ordered reads wait only on owed groups](https://github.com/moq-dev/moq/pull/7403) - the ordered-reader wait a signalled hole ends

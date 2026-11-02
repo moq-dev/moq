@@ -27,3 +27,12 @@ at `59384456`, five commits ahead, of which `59384456` (a VP9 struct field for
 libva 2.23+) is the only fix and moq-vaapi is H.264-only, and
 chromeos/cros-codecs was at `a050c6cd`, one commit ahead. Record the commits
 checked in moq-dev/vaapi's README, and copy them here for the next run.
+
+CI, added 2026-11-01 (maintainer, follow-up planning after the 2026-11-01
+/quest-afk run): moq-dev/vaapi's only workflow, `.github/workflows/check.yml`,
+sets `id-token: write` at the workflow level and runs on `pull_request`, so
+every PR's check job can mint an OIDC token without a protected environment.
+CI on pull requests must stay read-only. Remove it, leaving
+`contents: read`; if a step needs OIDC (`magic-nix-cache-action` is the likely one), confirm
+it still works without it, and otherwise move that step to a job limited to
+`main` behind a protected environment.

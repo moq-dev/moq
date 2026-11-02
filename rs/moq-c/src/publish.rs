@@ -252,8 +252,8 @@ impl<T> std::ops::DerefMut for Kept<T> {
 	}
 }
 
-// Legacy C data methods stamp writes on one fixed broadcast clock without retaining
-// another catalog handle after a failed stream retires its listing.
+// C data methods stamp a write the caller left unstamped on one fixed broadcast clock,
+// without retaining another catalog handle after a failed stream retires its listing.
 struct Data<T> {
 	producer: T,
 	clock: moq_mux::Clock,
@@ -1134,8 +1134,13 @@ impl Publish {
 		self.groups.insert(group)
 	}
 
-	/// Write a single-frame group to a raw track with an explicit timestamp.
-	pub fn track_frame(&mut self, track: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<(), Error> {
+	/// Write a single-frame group to a raw track, `None` when untimed.
+	pub fn track_frame(
+		&mut self,
+		track: Id,
+		timestamp: Option<moq_net::Timestamp>,
+		payload: &[u8],
+	) -> Result<(), Error> {
 		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
 		track.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
@@ -1146,9 +1151,13 @@ impl Publish {
 	/// The payload must be at most [`moq_net::MAX_DATAGRAM_PAYLOAD`] bytes. Datagrams are
 	/// delivered only on transports and wire versions with a datagram channel; there is no
 	/// group fallback.
-	pub fn track_datagram(&mut self, track: Id, timestamp_us: u64, payload: &[u8]) -> Result<u64, Error> {
+	pub fn track_datagram(
+		&mut self,
+		track: Id,
+		timestamp: Option<moq_net::Timestamp>,
+		payload: &[u8],
+	) -> Result<u64, Error> {
 		let track = self.tracks.get_mut(track).ok_or(Error::TrackNotFound)?;
-		let timestamp = moq_net::Timestamp::from_micros(timestamp_us)?;
 		Ok(track.append_datagram(timestamp, bytes::Bytes::copy_from_slice(payload))?)
 	}
 
@@ -1280,10 +1289,15 @@ impl Publish {
 	}
 
 	/// Publish a new value to a JSON snapshot track. A no-op if unchanged.
-	pub fn json_snapshot_update(&mut self, json: Id, value: serde_json::Value) -> Result<(), Error> {
+	pub fn json_snapshot_update(
+		&mut self,
+		json: Id,
+		value: serde_json::Value,
+		timestamp: Option<moq_net::Timestamp>,
+	) -> Result<(), Error> {
 		let json = &mut self.json_snapshot.get_mut(json).ok_or(Error::TrackNotFound)?.data;
-		json.producer
-			.update(moq_net::Timed::from(&value).at(json.clock.now()))?;
+		let at = timestamp.unwrap_or_else(|| json.clock.now());
+		json.producer.update(moq_net::Timed::from(&value).at(at))?;
 		Ok(())
 	}
 
@@ -1309,11 +1323,15 @@ impl Publish {
 	}
 
 	/// Append one record to a JSON stream track.
-	pub fn json_stream_append(&mut self, stream: Id, value: serde_json::Value) -> Result<(), Error> {
+	pub fn json_stream_append(
+		&mut self,
+		stream: Id,
+		value: serde_json::Value,
+		timestamp: Option<moq_net::Timestamp>,
+	) -> Result<(), Error> {
 		let producer = self.json_stream.get_mut(stream).ok_or(Error::TrackNotFound)?;
-		producer
-			.producer
-			.append(moq_net::Timed::from(&value).at(producer.clock.now()))?;
+		let at = timestamp.unwrap_or_else(|| producer.clock.now());
+		producer.producer.append(moq_net::Timed::from(&value).at(at))?;
 		Ok(())
 	}
 
@@ -1390,8 +1408,13 @@ impl Publish {
 		Ok(())
 	}
 
-	/// Write a frame into a raw group with an explicit timestamp.
-	pub fn group_frame(&mut self, group: Id, timestamp: moq_net::Timestamp, payload: &[u8]) -> Result<(), Error> {
+	/// Write a frame into a raw group, `None` when untimed.
+	pub fn group_frame(
+		&mut self,
+		group: Id,
+		timestamp: Option<moq_net::Timestamp>,
+		payload: &[u8],
+	) -> Result<(), Error> {
 		let group = self.groups.get_mut(group).ok_or(Error::GroupNotFound)?;
 		group.write_frame(timestamp, bytes::Bytes::copy_from_slice(payload))?;
 		Ok(())
@@ -1510,7 +1533,7 @@ mod children_tests {
 		let (broadcast, track, media, readers) = children(&mut state).await;
 		state.publish_close(broadcast).unwrap().run().unwrap();
 		for mut reader in readers {
-			let read = moq_clock::timeout(TIMEOUT, reader.recv_group()).await;
+			let read = kio::clock::timeout(TIMEOUT, reader.recv_group()).await;
 			assert!(matches!(
 				read.expect("the track carried on"),
 				Err(moq_net::Error::Unroutable)
@@ -1543,7 +1566,7 @@ mod children_tests {
 
 		state.publish_close(broadcast).unwrap().run().unwrap();
 		for mut reader in readers {
-			let read = moq_clock::timeout(TIMEOUT, reader.recv_group()).await;
+			let read = kio::clock::timeout(TIMEOUT, reader.recv_group()).await;
 			assert!(matches!(
 				read.expect("the track carried on"),
 				Err(moq_net::Error::Unroutable)
@@ -1551,11 +1574,11 @@ mod children_tests {
 		}
 		let json = serde_json::Value::Null;
 		assert!(matches!(
-			state.publish.json_snapshot_update(json_snapshot, json.clone()),
+			state.publish.json_snapshot_update(json_snapshot, json.clone(), None),
 			Err(Error::TrackNotFound)
 		));
 		assert!(matches!(
-			state.publish.json_stream_append(json_stream, json),
+			state.publish.json_stream_append(json_stream, json, None),
 			Err(Error::TrackNotFound)
 		));
 	}
@@ -1569,7 +1592,7 @@ mod children_tests {
 		state.publish.media_finish(media).unwrap();
 		state.publish_close(broadcast).unwrap().run().unwrap();
 		for mut reader in readers {
-			let read = moq_clock::timeout(TIMEOUT, reader.recv_group()).await;
+			let read = kio::clock::timeout(TIMEOUT, reader.recv_group()).await;
 			assert!(matches!(read.expect("the track carried on"), Ok(None)));
 		}
 	}

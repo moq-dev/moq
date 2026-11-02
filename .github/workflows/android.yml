@@ -14,7 +14,7 @@ name: Android
 # It also builds moq-ffi and asserts the `.so` imports `__android_log_*`, so a
 # build that stops linking logcat fails here.
 #
-# Narrow trigger, like wasm.yml. The filter is moq-video's in-repo dependency
+# Narrow trigger. The filter is moq-video's in-repo dependency
 # graph (`cargo metadata`, normal dependencies), plus moq-ffi and moq-tokio, which
 # own the logcat link, and the files that decide how it is built. A crate added
 # to that graph has to be added here too.

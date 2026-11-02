@@ -2,8 +2,6 @@ import audio from "./icons/audio.svg?raw";
 import captions from "./icons/captions.svg?raw";
 import check from "./icons/check.svg?raw";
 import close from "./icons/close.svg?raw";
-import fullscreenEnter from "./icons/fullscreen-enter.svg?raw";
-import fullscreenExit from "./icons/fullscreen-exit.svg?raw";
 import gauge from "./icons/gauge.svg?raw";
 import mute from "./icons/mute.svg?raw";
 import network from "./icons/network.svg?raw";
@@ -22,8 +20,6 @@ export {
 	captions,
 	check,
 	close,
-	fullscreenEnter,
-	fullscreenExit,
 	gauge,
 	mute,
 	network,

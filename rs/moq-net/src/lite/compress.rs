@@ -42,7 +42,8 @@ impl Live {
 			return Ok(None);
 		}
 		let id = self.next.checked_sub(distance).ok_or(Error::ProtocolViolation)?;
-		self.entries.get(&id).map(Some).ok_or(Error::ProtocolViolation)
+		let entry = self.entries.get(&id).ok_or(Error::ProtocolViolation)?;
+		Ok(Some(entry))
 	}
 
 	fn resolve_path(&self, path: PathRef) -> Result<Path, Error> {

@@ -5,16 +5,13 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 
 use super::{Export, catalog};
 use crate::container::Frame;
 use crate::follow::{Event, Instances};
 
-#[cfg(not(target_family = "wasm"))]
 type Subscribing<E> = Pin<Box<dyn Future<Output = crate::Result<crate::catalog::Consumer<E>>> + Send>>;
-#[cfg(target_family = "wasm")]
-type Subscribing<E> = Pin<Box<dyn Future<Output = crate::Result<crate::catalog::Consumer<E>>>>>;
 
 /// What the instances say serves the exported path.
 enum Serving {
@@ -99,7 +96,7 @@ pub struct Follower<E: catalog::Catalog = ()> {
 	refused: bool,
 	follow: Duration,
 	stitch: bool,
-	timer: Option<Pin<Box<moq_clock::Sleep>>>,
+	timer: Option<Pin<Box<kio::clock::Sleep>>>,
 }
 
 impl<E: catalog::Catalog + 'static> Follower<E> {
@@ -213,7 +210,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 					self.following(&end);
 					self.state = State::Settling {
 						end,
-						deadline: moq_clock::now() + self.follow,
+						deadline: kio::clock::now() + self.follow,
 					};
 				}
 				State::Settling { end, deadline } => {
@@ -393,7 +390,7 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 				end: Err(
 					anyhow::anyhow!("replacement broadcast `{}` ended before serving its catalog", self.path).into(),
 				),
-				deadline: moq_clock::now() + self.follow,
+				deadline: kio::clock::now() + self.follow,
 			},
 		}
 	}
@@ -424,10 +421,10 @@ impl<E: catalog::Catalog + 'static> Follower<E> {
 
 	/// Whether `at` has come, registering `waiter` to wake then if not.
 	fn elapsed(&mut self, waiter: &kio::Waiter, at: Instant) -> bool {
-		if moq_clock::now() >= at {
+		if kio::clock::now() >= at {
 			return true;
 		}
-		let timer = self.timer.get_or_insert_with(|| Box::pin(moq_clock::sleep_until(at)));
+		let timer = self.timer.get_or_insert_with(|| Box::pin(kio::clock::sleep_until(at)));
 		if timer.deadline() != at {
 			timer.as_mut().reset(at);
 		}

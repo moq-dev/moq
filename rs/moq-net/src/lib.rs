@@ -123,7 +123,6 @@ pub mod setup;
 #[cfg(not(feature = "async"))]
 #[allow(dead_code, unused_imports, reason = "async-only")]
 mod setup;
-mod sync;
 #[cfg(feature = "async")]
 mod tail;
 #[cfg(all(test, feature = "async"))]

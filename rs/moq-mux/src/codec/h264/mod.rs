@@ -18,7 +18,7 @@ pub use export::*;
 pub use import::*;
 pub use split::*;
 
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 
 use crate::codec::annexb::{InBandCodec, ParameterSets};
 
@@ -76,6 +76,10 @@ pub enum Error {
 	/// The AVCDecoderConfigurationRecord ends before its declared parameter sets.
 	#[error("AVCDecoderConfigurationRecord truncated")]
 	AvccTruncated,
+
+	/// The AVCDecoderConfigurationRecord declares a configurationVersion other than 1.
+	#[error("unsupported AVCDecoderConfigurationRecord version {0}")]
+	AvccVersion(u8),
 
 	/// The named avc1 rendition lacks an SPS or PPS in its description.
 	#[error("avc1 description for rendition {name:?} is missing SPS or PPS (sps={sps}, pps={pps})")]
@@ -466,21 +470,9 @@ impl Avcc {
 			return Err(Error::AvccTooShort);
 		}
 
-		let profile = avcc[1];
-		let constraints = avcc[2];
-		let level = avcc[3];
-		let length_size = (avcc[4] & 0x03) as usize + 1;
-		let num_sps = (avcc[5] & 0x1f) as usize;
-
-		let mut pos = 6;
-		let sps = read_param_sets(avcc, &mut pos, num_sps)?;
-
-		if avcc.len() <= pos {
-			return Err(Error::AvccTruncated);
-		}
-		let num_pps = avcc[pos] as usize;
-		pos += 1;
-		let pps = read_param_sets(avcc, &mut pos, num_pps)?;
+		let record = decode_avcc(avcc)?;
+		let sps: Vec<Bytes> = record.sequence_parameter_sets.into_iter().map(Bytes::from).collect();
+		let pps = record.picture_parameter_sets.into_iter().map(Bytes::from).collect();
 
 		// Resolution from the first parseable SPS.
 		let (mut coded_width, mut coded_height) = (None, None);
@@ -493,16 +485,38 @@ impl Avcc {
 		}
 
 		Ok(Self {
-			profile,
-			constraints,
-			level,
-			length_size,
+			profile: record.avc_profile_indication,
+			constraints: record.profile_compatibility,
+			level: record.avc_level_indication,
+			length_size: record.length_size.into(),
 			sps,
 			pps,
 			coded_width,
 			coded_height,
 		})
 	}
+}
+
+/// Decode an AVCDecoderConfigurationRecord body with mp4-atom.
+///
+/// Stricter than a bare scan of the parameter-set arrays: the record must be version 1,
+/// and any bytes after the PPS array must form a whole High-profile extension.
+fn decode_avcc(avcc: &[u8]) -> Result<mp4_atom::Avcc> {
+	use mp4_atom::Atom;
+	mp4_atom::Avcc::decode_body(&mut &avcc[..]).map_err(|err| match err {
+		mp4_atom::Error::UnknownVersion(version) => Error::AvccVersion(version),
+		_ => Error::AvccTruncated,
+	})
+}
+
+/// Encode a record whose fields the caller has already bounded.
+fn encode_avcc(record: &mp4_atom::Avcc) -> Bytes {
+	use mp4_atom::Atom;
+	let mut out = BytesMut::new();
+	record
+		.encode_body(&mut out)
+		.expect("a length size of 4 and an 8-bit 4:2:0 extension encode");
+	out.freeze()
 }
 
 fn pack_constraint_flags(sps: &h264_parser::Sps) -> u8 {
@@ -524,7 +538,8 @@ pub(crate) fn build_avcc(sps_nals: &[Bytes], pps_nals: &[Bytes]) -> Result<Bytes
 	if first_sps.len() < 4 {
 		return Err(Error::SpsTooShort);
 	}
-	// numOfSequenceParameterSets is a 5-bit field, numOfPictureParameterSets a byte.
+	// numOfSequenceParameterSets is a 5-bit field, numOfPictureParameterSets a byte;
+	// mp4-atom truncates the counts and lengths rather than refusing them.
 	if sps_nals.len() > 0x1f {
 		return Err(Error::TooManySps(sps_nals.len()));
 	}
@@ -542,28 +557,16 @@ pub(crate) fn build_avcc(sps_nals: &[Bytes], pps_nals: &[Bytes]) -> Result<Bytes
 		}
 	}
 
-	let profile_idc = first_sps[1];
-	let constraints = first_sps[2];
-	let level_idc = first_sps[3];
-
-	let payload: usize = sps_nals.iter().chain(pps_nals).map(|n| 2 + n.len()).sum();
-	let mut out = BytesMut::with_capacity(7 + payload);
-	out.put_u8(1); // configurationVersion
-	out.put_u8(profile_idc);
-	out.put_u8(constraints);
-	out.put_u8(level_idc);
-	out.put_u8(0xff); // reserved (6 bits) | lengthSizeMinusOne (2 bits = 3)
-	out.put_u8(0xe0 | sps_nals.len() as u8); // reserved (3 bits) | numOfSequenceParameterSets
-	for sps in sps_nals {
-		out.put_u16(sps.len() as u16);
-		out.put_slice(sps);
-	}
-	out.put_u8(pps_nals.len() as u8); // numOfPictureParameterSets
-	for pps in pps_nals {
-		out.put_u16(pps.len() as u16);
-		out.put_slice(pps);
-	}
-	Ok(out.freeze())
+	Ok(encode_avcc(&mp4_atom::Avcc {
+		configuration_version: 1,
+		avc_profile_indication: first_sps[1],
+		profile_compatibility: first_sps[2],
+		avc_level_indication: first_sps[3],
+		length_size: 4,
+		sequence_parameter_sets: sps_nals.iter().map(|nal| nal.to_vec()).collect(),
+		picture_parameter_sets: pps_nals.iter().map(|nal| nal.to_vec()).collect(),
+		ext: None,
+	}))
 }
 
 /// An avcC whose parameter sets will arrive in the samples, from a catalog codec
@@ -578,81 +581,37 @@ pub(crate) fn catalog_avcc(h264: &hang::catalog::H264) -> Option<Bytes> {
 	if !h264.inline {
 		return None;
 	}
-	let extension = match h264.profile {
-		66 | 77 | 88 => false,
-		100 => true,
+	let ext = match h264.profile {
+		66 | 77 | 88 => None,
+		// The default extension is 8-bit 4:2:0 with no SPS extensions.
+		100 => Some(mp4_atom::AvccExt::default()),
 		_ => return None,
 	};
 
-	let mut out = BytesMut::with_capacity(if extension { 11 } else { 7 });
-	out.put_u8(1);
-	out.put_u8(h264.profile);
-	out.put_u8(h264.constraints);
-	out.put_u8(h264.level);
-	out.put_u8(0xff); // lengthSizeMinusOne = 3
-	out.put_u8(0xe0); // numOfSequenceParameterSets = 0
-	out.put_u8(0); // numOfPictureParameterSets = 0
-	if extension {
-		out.put_u8(0xfc | 1); // chroma_format_idc = 1 (4:2:0)
-		out.put_u8(0xf8); // bit_depth_luma_minus8 = 0
-		out.put_u8(0xf8); // bit_depth_chroma_minus8 = 0
-		out.put_u8(0); // numOfSequenceParameterSetExt = 0
-	}
-	Some(out.freeze())
-}
-
-/// Read `count` length-prefixed (u16) NAL units from `buf` starting at `*pos`,
-/// advancing `*pos` past the last one. All arithmetic is checked so malformed
-/// configs surface as errors rather than panics.
-fn read_param_sets(buf: &[u8], pos: &mut usize, count: usize) -> Result<Vec<Bytes>> {
-	let mut out = Vec::with_capacity(count);
-	for _ in 0..count {
-		let after_len = pos.checked_add(2).ok_or(Error::AvccTruncated)?;
-		if buf.len() < after_len {
-			return Err(Error::AvccTruncated);
-		}
-		let len = u16::from_be_bytes([buf[*pos], buf[*pos + 1]]) as usize;
-		let after_nal = after_len.checked_add(len).ok_or(Error::AvccTruncated)?;
-		if buf.len() < after_nal {
-			return Err(Error::AvccTruncated);
-		}
-		out.push(Bytes::copy_from_slice(&buf[after_len..after_nal]));
-		*pos = after_nal;
-	}
-	Ok(out)
+	Some(encode_avcc(&mp4_atom::Avcc {
+		configuration_version: 1,
+		avc_profile_indication: h264.profile,
+		profile_compatibility: h264.constraints,
+		avc_level_indication: h264.level,
+		length_size: 4,
+		sequence_parameter_sets: Vec::new(),
+		picture_parameter_sets: Vec::new(),
+		ext,
+	}))
 }
 
 /// Extract the parameter-set NALs (SPS then PPS) and the NALU length size from
 /// an AVCDecoderConfigurationRecord. The inverse of [`build_avcc`]; used to
 /// re-emit out-of-band avc1 parameter sets as inline Annex-B (e.g. for MPEG-TS).
-pub(crate) fn avcc_params(avcc: &[u8]) -> anyhow::Result<(usize, Vec<Bytes>)> {
-	anyhow::ensure!(avcc.len() >= 6, "AVCDecoderConfigurationRecord too short");
-	let length_size = (avcc[4] & 0x03) as usize + 1;
-
-	let mut params = Vec::new();
-	let num_sps = avcc[5] & 0x1f;
-	let mut pos = read_param_set_array(avcc, 6, num_sps as usize, &mut params)?;
-
-	anyhow::ensure!(avcc.len() > pos, "avcC missing PPS count");
-	let num_pps = avcc[pos];
-	pos += 1;
-	read_param_set_array(avcc, pos, num_pps as usize, &mut params)?;
-
-	Ok((length_size, params))
-}
-
-/// Read `count` u16-length-prefixed NALs starting at `pos`, appending each to
-/// `params`. Returns the offset just past the last NAL read.
-fn read_param_set_array(buf: &[u8], mut pos: usize, count: usize, params: &mut Vec<Bytes>) -> anyhow::Result<usize> {
-	for _ in 0..count {
-		anyhow::ensure!(buf.len() >= pos + 2, "truncated parameter-set length");
-		let len = u16::from_be_bytes([buf[pos], buf[pos + 1]]) as usize;
-		pos += 2;
-		anyhow::ensure!(buf.len() >= pos + len, "parameter-set NAL exceeds buffer");
-		params.push(Bytes::copy_from_slice(&buf[pos..pos + len]));
-		pos += len;
-	}
-	Ok(pos)
+pub(crate) fn avcc_params(avcc: &[u8]) -> Result<(usize, Vec<Bytes>)> {
+	let record = decode_avcc(avcc)?;
+	let params = record
+		.sequence_parameter_sets
+		.into_iter()
+		.chain(record.picture_parameter_sets)
+		.map(Bytes::from)
+		.collect();
+	Ok((record.length_size.into(), params))
 }
 
 /// Transform H.264 frames from Annex-B (inline SPS/PPS, "avc3") to
@@ -1024,6 +983,65 @@ mod tests {
 		assert_eq!(params.len(), 2);
 		assert_eq!(params[0], sps);
 		assert_eq!(params[1], pps);
+	}
+
+	#[test]
+	fn build_avcc_layout_is_unchanged() {
+		let sps = Bytes::from_static(&[0x67, 0x42, 0xc0, 0x1f, 0xde]);
+		let pps = Bytes::from_static(&[0x68, 0xce, 0x3c, 0x80]);
+
+		let avcc = build_avcc(std::slice::from_ref(&sps), std::slice::from_ref(&pps)).unwrap();
+		assert_eq!(
+			avcc.as_ref(),
+			&[
+				0x01, 0x42, 0xc0, 0x1f, 0xff, 0xe1, 0x00, 0x05, 0x67, 0x42, 0xc0, 0x1f, 0xde, 0x01, 0x00, 0x04, 0x68,
+				0xce, 0x3c, 0x80,
+			]
+		);
+	}
+
+	#[test]
+	fn avcc_parse_reads_past_the_high_extension() {
+		let sps = fixtures::SPS_ANAMORPHIC;
+		let avcc = encode_avcc(&mp4_atom::Avcc {
+			configuration_version: 1,
+			avc_profile_indication: sps[1],
+			profile_compatibility: sps[2],
+			avc_level_indication: sps[3],
+			length_size: 4,
+			sequence_parameter_sets: vec![sps.to_vec()],
+			picture_parameter_sets: vec![fixtures::PPS.to_vec()],
+			ext: Some(mp4_atom::AvccExt::default()),
+		});
+
+		let parsed = Avcc::parse(&avcc).unwrap();
+		assert_eq!(parsed.profile, 100);
+		assert_eq!(parsed.length_size, 4);
+		assert_eq!(parsed.sps, vec![Bytes::from_static(sps)]);
+		assert_eq!(parsed.pps, vec![Bytes::from_static(fixtures::PPS)]);
+		assert_eq!((parsed.coded_width, parsed.coded_height), (Some(1440), Some(1080)));
+	}
+
+	#[test]
+	fn avcc_parse_refuses_other_versions_and_partial_extensions() {
+		let sps = Bytes::from_static(&[0x67, 0x42, 0xc0, 0x1f, 0xde]);
+		let pps = Bytes::from_static(&[0x68, 0xce, 0x3c, 0x80]);
+		let avcc = build_avcc(std::slice::from_ref(&sps), std::slice::from_ref(&pps)).unwrap();
+
+		let mut version = avcc.to_vec();
+		version[0] = 0;
+		assert!(matches!(Avcc::parse(&version), Err(Error::AvccVersion(0))));
+
+		// One trailing byte cannot be the 4-byte High-profile extension.
+		let mut partial = avcc.to_vec();
+		partial.push(0xfd);
+		assert!(matches!(Avcc::parse(&partial), Err(Error::AvccTruncated)));
+
+		assert!(matches!(
+			Avcc::parse(&avcc[..avcc.len() - 1]),
+			Err(Error::AvccTruncated)
+		));
+		assert!(matches!(Avcc::parse(&avcc[..6]), Err(Error::AvccTooShort)));
 	}
 
 	#[test]

@@ -18,7 +18,7 @@ Decided 2026-10-28 (maintainer): accept the residual in #7141 and explore a
 lock-free path here, in m2.
 
 - The risk is a second copy attaching to a frame while it is still being
-  written. Model that race in loom before relying on it.
+  written. Rule that race out before relying on it.
 - Keep the shared reservation and canonical-content rules #6922 added.
 - A measured no-win abandons the quest.
 

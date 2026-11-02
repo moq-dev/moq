@@ -19,7 +19,7 @@ and their alternatives:
   - function coloring;
   - `Pin` and `Unpin`;
   - cancel safety and no async drop;
-  - `Send` inference and the `Send` bound problem (two `MaybeSend`s in moq);
+  - `Send` inference and the `Send` bound problem;
   - `'static` spawn;
   - runtime coupling;
   - future size (a 32 MiB test stack in moq-relay);
@@ -34,8 +34,8 @@ and their alternatives:
 - **kio already avoids:** `Pin` in user code, hidden cancellation points (progress
   lives in named fields), leaked wakers, runtime coupling in the library, and
   per-future allocation in `Tasks`.
-- **What kio keeps:** coloring (`poll_x` plus `async fn x`), `'static` spawn, the
-  `MaybeSend` split, hand-written state machines, and 184 non-test `async fn`
+- **What kio keeps:** coloring (`poll_x` plus `async fn x`), `'static` spawn,
+  hand-written state machines, and 184 non-test `async fn`
   wrappers in moq-net that still compile into coroutines.
 - **Rejected:** stackful coroutines (green threads). They break wasm, rust2's MIR
   TypeScript translation, and thread-local soundness.
@@ -74,6 +74,5 @@ and their alternatives:
 
 ## Required
 
-- [Straight-line bodies become machines](/quest/m1/poll-first/machine-bodies.md) - moq-net's straight-line `async fn` bodies become `#[kio::machine]` polls
 - [Generated async wrappers behind a feature](/quest/m1/poll-first/async-feature.md) - each library's `async fn` wrappers are generated from its `poll_*` signatures and compile only with its `async` feature
-- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md) - web-async goes, and moq-ffi, moq-stats, moq-wasm and moq-relay's cluster and auth run as polled `kio::Tasks` children instead of spawned tasks
+- [Libraries spawn nothing](/quest/m1/poll-first/no-spawn.md) - moq-ffi, moq-stats, and moq-relay's cluster and auth run as polled `kio::Tasks` children instead of spawned tasks
