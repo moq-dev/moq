@@ -2,15 +2,17 @@ import type { Micro } from "@moq/clock";
 import type * as Hls from "@moq/hang/hls";
 import type * as Moq from "@moq/net";
 import { type Getter, Signal } from "@moq/signals";
+import type { Slot } from "./publication";
 
 /** The media kind of a rendition, selecting its catalog section (`video`, `audio`, or `text`). */
 export type Kind = "video" | "audio" | "text";
 
-/** Register a handle whose track and teardown belong to its broadcast. */
+/** @internal Register a handle whose track and teardown belong to its broadcast. */
 export let makeRendition: <Config>(
 	name: string,
 	kind: Kind,
 	track: Getter<Moq.Track.Producer | undefined>,
+	slot: Getter<Slot<Config> | undefined>,
 	hls: (track: Moq.Track.Producer) => Hls.Recorder | undefined,
 	close: () => void,
 ) => Rendition<Config>;
@@ -56,6 +58,12 @@ export class Rendition<Config> {
 	 */
 	readonly track: Getter<Moq.Track.Producer | undefined>;
 
+	/**
+	 * @internal What the producer keeps for this rendition in the current network broadcast, or
+	 * `undefined` while there is none. Setting its `error` ends the track.
+	 */
+	readonly slot: Getter<Slot<Config> | undefined>;
+
 	readonly #hls: (track: Moq.Track.Producer) => Hls.Recorder | undefined;
 	readonly #close: () => void;
 	#closed = false;
@@ -64,18 +72,20 @@ export class Rendition<Config> {
 		name: string,
 		kind: Kind,
 		track: Getter<Moq.Track.Producer | undefined>,
+		slot: Getter<Slot<Config> | undefined>,
 		hls: (track: Moq.Track.Producer) => Hls.Recorder | undefined,
 		close: () => void,
 	) {
 		this.name = name;
 		this.kind = kind;
 		this.track = track;
+		this.slot = slot;
 		this.#hls = hls;
 		this.#close = close;
 	}
 
 	static {
-		makeRendition = (name, kind, track, hls, close) => new Rendition(name, kind, track, hls, close);
+		makeRendition = (name, kind, track, slot, hls, close) => new Rendition(name, kind, track, slot, hls, close);
 	}
 
 	/**

@@ -5,7 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import timedelta
 
-from ._records import _from_us
+from moq_ffi import MoqTimestamp
+
+from ._records import Timestamp
 
 
 @dataclass(frozen=True)
@@ -17,7 +19,7 @@ class Gap:
     furthest presentation point already read.
     """
 
-    timestamp: timedelta
+    timestamp: Timestamp
     duration: timedelta
 
 
@@ -29,12 +31,12 @@ class End:
     remaining media; the first at or past it comes from a fresh encoder.
     """
 
-    end: timedelta
+    end: Timestamp
 
 
-def _gap(timestamp_us: int, duration: timedelta) -> Gap:
-    return Gap(timestamp=_from_us(timestamp_us), duration=duration)
+def _gap(timestamp: MoqTimestamp, duration: timedelta) -> Gap:
+    return Gap(timestamp=Timestamp._from_ffi(timestamp), duration=duration)
 
 
-def _end(end_us: int) -> End:
-    return End(end=_from_us(end_us))
+def _end(end: MoqTimestamp) -> End:
+    return End(end=Timestamp._from_ffi(end))

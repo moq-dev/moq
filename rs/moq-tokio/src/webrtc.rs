@@ -534,7 +534,7 @@ struct Open {
 	protocol: String,
 	reads: channel::Inbox,
 	/// `None` once the session's writer closed.
-	writes: Option<mpsc::Receiver<Bytes>>,
+	writes: Option<channel::Outbox>,
 	config: qmux::Config,
 	/// The session's halves, until a session takes them.
 	halves: Option<channel::Channel>,
@@ -765,21 +765,14 @@ impl Driver {
 
 		let config = session_config(&protocol, max_record_size);
 		let (reads, reader) = channel::queue(RECEIVE_WINDOW + READ_SLACK);
-		let (tx, writes) = mpsc::channel(1);
+		let (writes, writer) = channel::outbox(usize::try_from(max_message).unwrap_or(usize::MAX));
 		Ok(Open {
 			id,
 			protocol,
 			reads,
 			writes: Some(writes),
 			config,
-			halves: Some(channel::Channel {
-				writer: channel::Writer {
-					tx: Some(tx),
-					max: usize::try_from(max_message).unwrap_or(usize::MAX),
-					_driver: None,
-				},
-				reader,
-			}),
+			halves: Some(channel::Channel { writer, reader }),
 		})
 	}
 
@@ -808,9 +801,9 @@ impl Driver {
 }
 
 /// The session's next record, or `None` when its writer closed. Pends without a channel.
-async fn next_write(writes: Option<&mut mpsc::Receiver<Bytes>>) -> Option<Bytes> {
+async fn next_write(writes: Option<&mut channel::Outbox>) -> Option<Bytes> {
 	match writes {
-		Some(writes) => writes.recv().await,
+		Some(writes) => writes.next().await,
 		None => std::future::pending().await,
 	}
 }

@@ -8,7 +8,7 @@ How to update your code for each breaking change, newest first.
 
 `ConsumerProps.maxDelay` is `delay: GetterInit<Container.Delay>`, where `Delay` is `{ min?: Milli; max?: Milli | null }` and an omitted field is zero.
 Replace `maxDelay: d` with `delay: { max: d }`, or derive it from a signal. `max: null` is no limit.
-`min` is the playout delay: the consumer starts at the group covering the live edge less `min` plus any `warmup`, waiting for it when the newest group arrives first. `max` never moves the start.
+`min` is the playout delay: the consumer starts at the group covering the live edge less `min` plus any `warmup`, waiting for it when the newest group arrives first. Before the first read, a backlog that already landed starts at the first group whose first frame is within `max`, plus the warmup, of the newest content, keeping the group covering the live edge less `min` and the warmup.
 
 ### The catalog rendition cap is removed
 

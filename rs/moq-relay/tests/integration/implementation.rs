@@ -55,13 +55,14 @@ async fn the_relay_and_client_exchange_implementations() {
 		})
 		.await;
 
-		let transport = qmux::tcp::connect(("127.0.0.1", port), {
+		let (transport, driver) = qmux::tcp::connect(("127.0.0.1", port), {
 			let mut config = qmux::Config::new(qmux::Version::QMux01);
 			config.protocol = qmux::Protocol::Negotiate(vec!["moq-lite-07-wip".into()]);
 			config
 		})
 		.await
 		.expect("connect TCP");
+		tokio::spawn(driver);
 		let (session, driver) = moq_net::Client::new()
 			.with_versions("moq-lite-07-wip".parse::<moq_net::Version>().expect("lite-07").into())
 			.with_implementation("app/1 moq-net-rs/9")

@@ -17,7 +17,7 @@ use super::{
 };
 use crate::{
 	Dir, Instant, MAX_STREAM_COUNT, Rate, Side, StreamId, TransportError, VarInt,
-	coding::BufMutExt,
+	coding::{BufMutExt, FrameBuf},
 	connection::ConnectionTag,
 	connection::rate::Bucket,
 	connection::stats::{CreditStats, FrameStats},
@@ -559,7 +559,7 @@ impl StreamsState {
 
 	pub(in crate::connection) fn write_control_frames(
 		&mut self,
-		buf: &mut Vec<u8>,
+		buf: &mut impl FrameBuf,
 		pending: &mut Retransmits,
 		retransmits: &mut ThinRetransmits,
 		stats: &mut FrameStats,
@@ -740,7 +740,7 @@ impl StreamsState {
 	/// below the path MTU can be, steps aside for what fits behind it instead, since
 	/// [`Self::can_send_frames`] promised a frame and control frames alone would leave the
 	/// packet short.
-	pub(crate) fn write_frames(&mut self, buf: &mut Vec<u8>, payload: Range<usize>, fair: bool) -> WrittenFrames {
+	pub(crate) fn write_frames(&mut self, buf: &mut impl FrameBuf, payload: Range<usize>, fair: bool) -> WrittenFrames {
 		let max_buf_size = payload.end;
 		let mut written = WrittenFrames::default();
 		while buf.len() + frame::Stream::SIZE_BOUND < max_buf_size {

@@ -65,9 +65,10 @@ jobs:
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
           owner: moq-dev
           repositories: moq
-          # Only the permissions needed to pin and request a landing.
+          # Only the permissions needed to pin and enqueue a landing.
           permission-contents: write
           permission-pull-requests: write
+          permission-merge-queues: write
 
       - name: Request checked landing
         env:
@@ -77,5 +78,4 @@ jobs:
           PR_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           export GH_TOKEN="$BOT_TOKEN"
-          hold=$(quest merge "$PR_URL")
-          quest merge "$PR_URL" "$hold" --land "$PR_HEAD"
+          quest merge "$PR_URL" --land "$PR_HEAD"

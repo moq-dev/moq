@@ -13,6 +13,7 @@ criterion_group!(
 	session::fetch_range::<Model>,
 	session::range_updates::<Model>,
 	session::withdrawal::<Model>,
+	session::fanout_threads::<Model>,
 	session::idle
 );
 criterion_main!(benches);
