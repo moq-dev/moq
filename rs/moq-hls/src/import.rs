@@ -2104,8 +2104,10 @@ mod tests {
 		assert!(import.video[0].importer.is_none(), "the dead rendition is retired");
 	}
 
-	/// A decode refusal retires its importer at once. HLS can import a repaired source on the
-	/// next pass under fresh track names, without spending the transient fetch retry budget.
+	/// A decode refusal retires its importer at once, rather than after
+	/// [`MAX_RENDITION_FAILURES`] consecutive failures, so the next pass rebuilds it under fresh
+	/// track names and can import a repaired source. The refusal is not settled, so `run` still
+	/// retries the step within its backoff budget.
 	#[tokio::test]
 	async fn a_refused_segment_recovers_through_a_new_importer() {
 		for passthrough in [false, true] {
