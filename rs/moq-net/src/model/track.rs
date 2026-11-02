@@ -5740,6 +5740,10 @@ pub(super) struct Unread<'a> {
 }
 
 /// How a [`Subscriber`] reads: its track's own cache, or a front's routes.
+#[expect(
+	clippy::large_enum_variant,
+	reason = "the plain cursor is the hot path, so it stays inline and the front's reader is boxed"
+)]
 enum Inner {
 	Plain(Cursor),
 	/// A front's logical track, read straight from its routes' copies; see
@@ -6195,6 +6199,9 @@ struct Cursor {
 	/// The group read that last parked, answered again without the walk until something
 	/// it parked on fires, once it first parks.
 	idle: Option<Box<idle::Idle>>,
+	/// [`Self::state`] for [`Self::poll_finished`], which a publisher re-polls on every
+	/// wake: one the track has not changed since skips the lock. Made on the first poll.
+	finished: Option<Box<kio::Watch<TrackState>>>,
 }
 
 /// A group a cursor found but has not moved past; see [`Cursor::take`].
@@ -6410,6 +6417,7 @@ impl Cursor {
 			drops: None,
 			misses: None,
 			idle: None,
+			finished: None,
 		}
 	}
 
@@ -6706,6 +6714,21 @@ impl Cursor {
 		Poll::Ready(match ready!(polled) {
 			Ok(res) => res,
 			// We try to clone abort just in case the function forgot to check for terminal state.
+			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
+		})
+	}
+
+	/// Poll for the track's declared end, or the error it was cut short with.
+	///
+	/// Through a [`kio::Watch`]: the end and the abort are plain fields of the track, so an
+	/// unchanged version proves the answer unchanged. [`Self::poll`]'s tail watch is no loss
+	/// here: a pending answer means no end, and the tail only waits once one is declared.
+	fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
+		let watch = self
+			.finished
+			.get_or_insert_with(|| Box::new(kio::Watch::new(self.state.clone())));
+		Poll::Ready(match ready!(watch.poll(waiter, |state| state.poll_finished())) {
+			Ok(res) => res,
 			Err(state) => Err(state.abort.clone().unwrap_or(Error::Dropped)),
 		})
 	}
@@ -7916,7 +7939,7 @@ impl Subscriber {
 	/// Poll for the track's declared exclusive end, without blocking.
 	pub fn poll_finished(&mut self, waiter: &kio::Waiter) -> Poll<Result<Position>> {
 		match &mut self.inner {
-			Inner::Plain(cursor) => cursor.poll(waiter, |state| state.poll_finished()),
+			Inner::Plain(cursor) => cursor.poll_finished(waiter),
 			Inner::Resume(resume, _) => resume.poll_finished(waiter),
 		}
 	}

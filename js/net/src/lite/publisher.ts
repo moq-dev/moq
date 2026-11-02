@@ -30,7 +30,7 @@ import { type Timescale, Timestamp } from "../time.ts";
 import type * as track from "../track.ts";
 import { untilAborted } from "../util/abort.ts";
 import { nextChange } from "../util/change.ts";
-import { untilGivenUp } from "../util/given_up.ts";
+import { GivenUp } from "../util/given_up.ts";
 import { type Advertised, type Advertisements, sameInstance, wireOf } from "../wire.ts";
 import { AnnounceInit, AnnounceOk, type AnnounceRequest, encodeAnnounceBroadcast } from "./announce.ts";
 import { Datagram as DatagramMessage } from "./datagram.ts";
@@ -155,6 +155,8 @@ interface RunGroup {
 
 	/** The group to serve. */
 	group: group.Consumer;
+	/** Why to stop writing {@link group}, watched while it is served. */
+	givenUp: GivenUp;
 
 	/** How every frame is stamped, or undefined to send no timestamps. */
 	stamp: Stamp | undefined;
@@ -1482,6 +1484,7 @@ export class Publisher {
 				const options: RunGroup = {
 					sub,
 					group,
+					givenUp: new GivenUp(group),
 					stamp,
 					compress,
 					priority,
@@ -1499,7 +1502,10 @@ export class Publisher {
 					}
 				});
 				groups.add(task);
-				void task.finally(() => groups.delete(task));
+				void task.finally(() => {
+					options.givenUp.close();
+					groups.delete(task);
+				});
 			}
 		} finally {
 			if (!finished) unsubscribe();
@@ -1785,7 +1791,7 @@ export class Publisher {
 	 * @internal
 	 */
 	async #openGroup(options: RunGroup): Promise<Writer | Error> {
-		const { group, priority, unsubscribed, start } = options;
+		const { group, givenUp, priority, unsubscribed, start } = options;
 		try {
 			// The transport drains streams by send order, so this is what makes a high-priority
 			// track (and a newer group within it) win the link when there isn't room for both.
@@ -1798,9 +1804,11 @@ export class Publisher {
 			// once the open settles. tryOpen owns resetting a slot that arrives too late.
 			const opened = Promise.withResolvers<void>();
 			let failure: Error | undefined;
-			const abandoned = untilGivenUp(group, () => opened.promise).then((stop) => {
-				failure = stop;
-			});
+			const abandoned = givenUp
+				.write(() => opened.promise)
+				.then((stop) => {
+					failure = stop;
+				});
 			let stream: Writer | undefined;
 			try {
 				stream = await Writer.tryOpen(this.#quic, {
@@ -1831,13 +1839,13 @@ export class Publisher {
 	 * @internal
 	 */
 	async #serveGroup(stream: Writer, options: RunGroup) {
-		const { sub, group, stamp, compress, priority, start: startFrame, end: endFrame } = options;
+		const { sub, group, givenUp, stamp, compress, priority, start: startFrame, end: endFrame } = options;
 		// The header names the requested position, so a copy missing it must be refused.
 		const msg = new GroupMessage({ subscribe: sub, sequence: group.sequence, frameStart: startFrame });
 		// The subscription's budget, or an eviction of what is left to read, may give up on the
 		// group mid-write, which abandons the stream. A group already given up never starts the write.
 		const write = async (op: () => Promise<unknown>) => {
-			const stop = await untilGivenUp(group, op);
+			const stop = await givenUp.write(op);
 			if (stop) throw stop;
 		};
 		// Everything past this point runs inside the cleanup scope, so a failure never leaves
@@ -1885,10 +1893,14 @@ export class Publisher {
 				}
 
 				const header = frameHeader(stream.version, delta, read.inflated, readSize(read));
-				await write(() => stream.write(header));
 				const chunks = read.chunks;
-				if (chunks) await write(() => sendPayload(chunks, (chunk) => stream.write(chunk), stream.closed));
-				else if (read.frame.payload.length > 0) await write(() => stream.write(read.frame.payload));
+				const payload = chunks ? undefined : read.frame.payload;
+				// One budget race covers the frame's header and payload.
+				await write(async () => {
+					await stream.write(header);
+					if (chunks) await sendPayload(chunks, (chunk) => stream.write(chunk), stream.closed);
+					else if (payload && payload.length > 0) await stream.write(payload);
+				});
 			}
 
 			stream.close();

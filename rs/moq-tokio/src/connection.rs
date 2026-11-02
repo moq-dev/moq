@@ -3563,6 +3563,7 @@ mod tests {
 			qmux::Session::accept(stream(server), config())
 		)
 		.unwrap();
+		let (client, server) = (crate::spawn_qmux(client), crate::spawn_qmux(server));
 		let now = moq_net::time::Instant::now();
 		let client = async {
 			let (session, driver) = moq_net::Client::new()
@@ -3651,6 +3652,7 @@ mod tests {
 					qmux::Session::accept(qmux::transport::Stream::new(server), config())
 				)
 				.unwrap();
+				let (client, server) = (crate::spawn_qmux(client), crate::spawn_qmux(server));
 				let now = moq_net::time::Instant::now();
 				let moq = moq_net::Client::new()
 					.with_versions(versions.clone())
