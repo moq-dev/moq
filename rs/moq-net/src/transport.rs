@@ -152,6 +152,20 @@ pub const MIN_RECEIVE_WINDOW: u64 = {
 	if message > segment { message } else { segment }
 };
 
+/// The connection receive window a server offers before it admits the session.
+///
+/// It fits the SETUP and one in-band AUTH, each with its framing, which is all a client
+/// sends before the reply. Credit cannot be withdrawn, so a session that started with
+/// its full window could bank it and spend it after a lower window or a bitrate cap
+/// arrives; the server opens the full window only once it admits the session.
+pub const SETUP_RECEIVE_WINDOW: u64 = {
+	// A type and a size prefix, each a varint of at most 8 bytes.
+	const PREFIXES: u64 = 16;
+	let setup = crate::setup::MAX_SETUP_SIZE as u64 + PREFIXES;
+	let auth = <crate::lite::Auth as crate::lite::Message>::MAX_SIZE as u64 + PREFIXES;
+	setup + auth
+};
+
 /// The typed transport condition when no application code was received.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
