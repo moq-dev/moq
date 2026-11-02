@@ -150,3 +150,12 @@ are exact `moq_timestamp` records, `value` units at `scale` units per second.
 track's timescale, a microsecond one unless `moq_track_info.timescale` sets
 another, and `moq_consume_track_frame` points `moq_frame.timestamp` at the
 timestamp read, valid until the frame is freed, or NULL on an untimed track.
+
+JSON window pushes and pops accept an optional `const moq_timestamp *timestamp`,
+like snapshot updates and stream appends. It is when the edit occurred,
+converted to the track's milliseconds; pass NULL to stamp the broadcast clock.
+
+```c
+int32_t moq_publish_json_window_push(uint32_t window, const char *value, uintptr_t value_len, const moq_timestamp *timestamp);
+int32_t moq_publish_json_window_pop(uint32_t window, uint64_t count, const moq_timestamp *timestamp);
+```

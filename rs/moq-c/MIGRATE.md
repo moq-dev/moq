@@ -4,6 +4,13 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON window edits take an optional timestamp
+
+`moq_publish_json_window_push` and `moq_publish_json_window_pop` take a final
+`const moq_timestamp *timestamp`. Pass `NULL` to keep stamping the broadcast
+clock, or a pointer to the edit's capture time, converted to track milliseconds.
+Recompile callers against the regenerated `moq.h`.
+
 ### Media consumers take a `moq_delay` ([#7311](https://github.com/moq-dev/moq/pull/7311))
 
 `moq_consume_video` and `moq_consume_audio` take `const moq_delay *delay` in place of `uint64_t max_delay_us`; NULL is the default.

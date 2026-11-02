@@ -2738,7 +2738,7 @@ fn recv_window(cb: &Callback) -> WindowEvent {
 fn window_push(handle: u32, n: u64) {
 	let value = format!(r#"{{"n":{n}}}"#);
 	assert_eq!(
-		unsafe { moq_publish_json_window_push(handle, value.as_ptr() as *const c_char, value.len()) },
+		unsafe { moq_publish_json_window_push(handle, value.as_ptr() as *const c_char, value.len(), std::ptr::null()) },
 		0
 	);
 }
@@ -2781,7 +2781,7 @@ fn json_window_publish_consume() {
 	for n in 0..3 {
 		window_push(producer, n);
 	}
-	assert_eq!(moq_publish_json_window_pop(producer, 2), 0);
+	assert_eq!(unsafe { moq_publish_json_window_pop(producer, 2, std::ptr::null()) }, 0);
 
 	let mut last = moq_net::Timestamp::ZERO;
 	for n in 0..3 {
@@ -2802,9 +2802,85 @@ fn json_window_publish_consume() {
 	assert_eq!(moq_publish_close(broadcast), 0);
 	assert!(event_cb.recv_terminal() < 0, "an aborted window is not a clean end");
 	assert!(moq_consume_json_cancel(consumer) < 0, "the task removed itself");
-	assert!(moq_publish_json_window_pop(producer, 1) < 0, "the handle was released");
+	assert!(
+		unsafe { moq_publish_json_window_pop(producer, 1, std::ptr::null()) } < 0,
+		"the handle was released"
+	);
 	assert!(moq_publish_json_window_finish(producer) < 0, "the handle was released");
 	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Caller timestamps include zero and non-millisecond scales; refusing an invalid timestamp
+/// must leave both the records and the emitted events unchanged.
+#[test]
+fn json_window_caller_timestamps() {
+	use moq_json_window_kind::*;
+
+	let origin = id(moq_origin_create());
+	let path = b"json-window-timestamps";
+	let broadcast = publish_broadcast(origin, path);
+	let name = b"log";
+	let config = moq_json_window_config { checkpoint_records: 0 };
+	let producer = id(unsafe { moq_publish_json_window(broadcast, name.as_ptr().cast(), name.len(), &config) });
+	let consume = request_broadcast(origin, path);
+	let event_cb = Callback::new();
+	let consumer = window_consume(consume, name, &event_cb);
+	let value = br#"{"n":1}"#;
+	let invalid = moq_timestamp { value: 1, scale: 0 };
+
+	assert_eq!(
+		unsafe { moq_publish_json_window_push(producer, value.as_ptr().cast(), value.len(), &invalid) },
+		MOQ_ERROR_TIMESTAMP_OVERFLOW
+	);
+	for timestamp in [
+		micros(0),
+		moq_timestamp {
+			value: 111_111,
+			scale: 90_000,
+		},
+	] {
+		assert_eq!(
+			unsafe { moq_publish_json_window_push(producer, value.as_ptr().cast(), value.len(), &timestamp) },
+			0
+		);
+	}
+	assert_eq!(
+		unsafe { moq_publish_json_window_pop(producer, 1, &invalid) },
+		MOQ_ERROR_TIMESTAMP_OVERFLOW
+	);
+	assert_eq!(
+		unsafe { moq_publish_json_window_pop(producer, 1, &micros(2_500_999)) },
+		0
+	);
+	assert_eq!(moq_publish_json_window_finish(producer), 0);
+
+	for (n, millis) in [0, 1234].into_iter().enumerate() {
+		let (kind, range, json, timestamp) = recv_window(&event_cb);
+		assert_eq!(
+			(kind, range, json, timestamp),
+			(
+				MOQ_JSON_WINDOW_KIND_PUSH,
+				n as u64..n as u64 + 1,
+				Some(serde_json::json!({ "n": 1 })),
+				Some(moq_net::Timestamp::from_millis(millis).unwrap()),
+			)
+		);
+	}
+	let (kind, range, json, timestamp) = recv_window(&event_cb);
+	assert_eq!(
+		(kind, range, json, timestamp),
+		(
+			MOQ_JSON_WINDOW_KIND_POP,
+			0..1,
+			None,
+			Some(moq_net::Timestamp::from_millis(2500).unwrap())
+		)
+	);
+	assert_eq!(event_cb.recv_terminal(), 0);
+	assert!(moq_consume_json_cancel(consumer) < 0, "the task removed itself");
+	assert_eq!(moq_consume_close(consume), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 

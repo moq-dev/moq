@@ -1369,20 +1369,28 @@ impl Publish {
 	}
 
 	/// Append one record to the back of a JSON window.
-	pub fn json_window_push(&mut self, window: Id, value: serde_json::Value) -> Result<(), Error> {
+	pub fn json_window_push(
+		&mut self,
+		window: Id,
+		value: serde_json::Value,
+		timestamp: Option<moq_net::Timestamp>,
+	) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window
-			.producer
-			.push(moq_net::Timed::from(&value).at(window.clock.now()))?;
+		let at = timestamp.unwrap_or_else(|| window.clock.now());
+		window.producer.push(moq_net::Timed::from(&value).at(at))?;
 		Ok(())
 	}
 
 	/// Drop `count` records from the front of a JSON window, clamped to what it holds.
-	pub fn json_window_pop(&mut self, window: Id, count: u64) -> Result<(), Error> {
+	pub fn json_window_pop(
+		&mut self,
+		window: Id,
+		count: u64,
+		timestamp: Option<moq_net::Timestamp>,
+	) -> Result<(), Error> {
 		let window = &mut self.json_window.get_mut(window).ok_or(Error::TrackNotFound)?.data;
-		window
-			.producer
-			.pop(moq_net::Timed::from(count).at(window.clock.now()))?;
+		let at = timestamp.unwrap_or_else(|| window.clock.now());
+		window.producer.pop(moq_net::Timed::from(count).at(at))?;
 		Ok(())
 	}
 
