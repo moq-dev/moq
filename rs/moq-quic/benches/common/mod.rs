@@ -8,7 +8,6 @@
 //! host descheduling the benchmark does not inflate them.
 
 use std::{
-	any::Any,
 	collections::{HashMap, VecDeque},
 	net::{Ipv6Addr, SocketAddr},
 	num::NonZeroU64,
@@ -16,21 +15,22 @@ use std::{
 	time::Duration,
 };
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use cpu_time::ThreadTime;
 use criterion::{
 	Criterion,
 	measurement::{Measurement, ValueFormatter, WallTime},
 };
-use moq_clock::Instant;
-use moq_congestion::{Ack, Ce, Controller, ControllerFactory, ControllerMetrics, Init, Loss, Packet, Sent};
+use kio::clock::Instant;
+use moq_congestion::{Ack, Ce, Controller, Factory, Init, Loss, Metrics, Packet, Sent};
 use moq_quic::{
-	ConnectionId, ConnectionIdGenerator, Event, LeaseError, RandomConnectionIdGenerator, ReadError, StreamEvent,
-	StreamId, VarInt, client,
+	ConnectionId, ConnectionIdGenerator, Event, RandomConnectionIdGenerator, StreamEvent, VarInt, client,
 	connection::Connection,
 	endpoint::{self, ConnectionHandle, DatagramEvent, Dial, Endpoint, Received as Inbound},
 	fuzz::Plaintext,
-	server, transport,
+	recv, server,
+	stream::Id as StreamId,
+	transport,
 };
 
 /// The most datagrams one `poll_transmit` may batch, as a GSO-capable socket would take.
@@ -151,6 +151,7 @@ impl Peer {
 					local_ip: None,
 					ecn: None,
 					data,
+					arrival: None,
 				},
 				&mut buf,
 			) {
@@ -249,8 +250,8 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
 				received.finished += 1;
 				break;
 			}
-			Err(ReadError::Blocked) => break,
-			Err(ReadError::Reset(_)) => {
+			Err(recv::Error::Blocked) => break,
+			Err(recv::Error::Reset(_)) => {
 				received.reset += 1;
 				break;
 			}
@@ -270,29 +271,27 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
 /// discards its lease.
 fn lease(conn: &mut Connection, id: StreamId, want: usize, received: &mut Received) {
 	loop {
-		let ended = match conn.recv_stream(id).lease(want) {
-			Ok(_) => None,
-			Err(LeaseError::Blocked(_) | LeaseError::ClosedStream) => return,
-			Err(LeaseError::Reset(_)) => Some(&mut received.reset),
-			Err(LeaseError::Evicted) => Some(&mut received.evicted),
-			Err(err) => panic!("lease failed: {err}"),
-		};
-		if let Some(count) = ended {
-			*count += 1;
-			let _ = conn.recv_stream(id).stop(VarInt::from_u32(0));
-			return;
-		}
-		let fin = conn.leased(id).expect("leased above").is_fin();
 		let mut stream = conn.recv_stream(id);
-		// Taken a chunk at a time, as moq-net hands a frame's payload on.
-		loop {
-			let chunk = stream.take(usize::MAX);
-			if chunk.is_empty() {
-				break;
+		let mut lease = match stream.lease(want).0 {
+			Ok(lease) => lease,
+			Err(recv::Error::Blocked | recv::Error::Closed) => return,
+			Err(err) => {
+				match err {
+					recv::Error::Reset(_) => received.reset += 1,
+					recv::Error::Evicted => received.evicted += 1,
+					err => panic!("lease failed: {err}"),
+				}
+				let _ = stream.stop(VarInt::from_u32(0));
+				return;
 			}
+		};
+		let fin = lease.is_fin();
+		// Taken a chunk at a time, as moq-net hands a frame's payload on.
+		while lease.has_remaining() {
+			let chunk = lease.copy_to_bytes(lease.chunk().len());
 			received.bytes += chunk.len() as u64;
 		}
-		let _ = stream.release();
+		let _ = stream.release(lease);
 		if fin {
 			received.finished += 1;
 			let _ = stream.stop(VarInt::from_u32(0));
@@ -578,6 +577,7 @@ pub(crate) fn deliver(pair: &mut Pair, datagram: BytesMut) {
 			local_ip: None,
 			ecn: None,
 			data: datagram,
+			arrival: None,
 		},
 		&mut server.buf,
 	) {
@@ -634,8 +634,9 @@ fn transport(receive_window: VarInt, send_window: u64, probe: bool) -> transport
 	transport.idle_timeout = None;
 	transport.limits.max_streams = NonZeroU64::new(4096);
 	transport.limits.stream_receive_window = NonZeroU64::new(16 << 20);
-	transport.limits.receive_window = NonZeroU64::new(receive_window.into_inner());
-	transport.limits.send_window = NonZeroU64::new(send_window);
+	// `None` is the default window, so a zero would silently lift the limit instead.
+	transport.limits.receive_window = Some(NonZeroU64::new(receive_window.into_inner()).expect("zero receive window"));
+	transport.limits.send_window = Some(NonZeroU64::new(send_window).expect("zero send window"));
 	transport.datagram.receive_buffer = Some(DATAGRAM_BUFFER);
 	transport.datagram.send_buffer = DATAGRAM_BUFFER;
 	transport
@@ -704,8 +705,8 @@ impl Controller for Unlimited {
 		None
 	}
 
-	fn metrics(&self) -> ControllerMetrics {
-		ControllerMetrics {
+	fn metrics(&self) -> Metrics {
+		Metrics {
 			congestion_window: WINDOW,
 			probe_inflight: self.probe.then_some(WINDOW),
 			..Default::default()
@@ -719,13 +720,9 @@ impl Controller for Unlimited {
 	fn clone_box(&self) -> Box<dyn Controller> {
 		Box::new(*self)
 	}
-
-	fn into_any(self: Box<Self>) -> Box<dyn Any> {
-		self
-	}
 }
 
-impl ControllerFactory for Unlimited {
+impl Factory for Unlimited {
 	fn build(self: Arc<Self>, _init: Init) -> Box<dyn Controller> {
 		Box::new(*self)
 	}

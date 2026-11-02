@@ -4,6 +4,7 @@
 //! format only, not as a wire format: [`Import`] parses MKV byte streams
 //! into a broadcast and [`Export`] does the reverse.
 
+mod ebml;
 mod export;
 mod import;
 
@@ -27,9 +28,23 @@ pub enum Error {
 	#[error("invalid display aspect: {0}")]
 	InvalidAspect(&'static str),
 
-	/// A subtitle cue cannot be represented with valid text and timing.
-	#[error("invalid subtitle: {0}")]
-	InvalidSubtitle(&'static str),
+	/// A subtitle track cannot be imported in one pass: a WebVTT cue's length depends on its
+	/// content, so it cannot stream into a frame of a declared size.
+	#[error("MKV subtitle track {0} is unsupported: its cues cannot stream")]
+	SubtitleTrack(String),
+
+	/// A video Block neither follows a ReferenceBlock nor ends its BlockGroup, so whether it starts
+	/// a group would wait on fields after its payload.
+	#[error("video BlockGroup with fields after its Block is unsupported: a later ReferenceBlock decides its group")]
+	TrailingReference,
+
+	/// CMAF output needs a `moof` describing each payload before it, but MKV import streams payloads.
+	#[error("MKV import cannot write CMAF; select Legacy or LOC")]
+	StreamedCmaf,
+
+	/// The input ended inside an element.
+	#[error("truncated MKV element")]
+	Truncated,
 
 	/// The EBML header declares an unsupported DocType.
 	#[error("unsupported EBML DocType: {0}")]
@@ -99,6 +114,10 @@ pub enum Error {
 	/// A `Colour` element value has no catalog representation.
 	#[error("invalid Colour {0}")]
 	InvalidColour(&'static str),
+
+	/// A `StereoMode` or `Projection` element the catalog cannot describe, or a malformed one.
+	#[error("unsupported spherical video: {0}")]
+	UnsupportedSpatial(&'static str),
 
 	/// The named track joined after the MKV header was emitted.
 	#[error("MKV track layout changed after header was emitted: track '{0}' added")]

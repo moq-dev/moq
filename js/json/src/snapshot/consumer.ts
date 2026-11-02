@@ -39,8 +39,8 @@ export class Consumer<T> {
 	 * Yields one state per frame and finishes a group before starting the next, buffering every
 	 * state the reader has not reached yet. A group the subscription's `maxDelay` proves too old
 	 * is skipped, counting media time and wall time, or wall time alone for an untimed track. The
-	 * default of zero keeps only the newest group, so a playhead reader sets `maxDelay` to how far
-	 * it trails the live edge. Use {@link latest} to skip straight to the head. A group lost to a
+	 * default subscription's zero keeps only the newest group, so a playhead reader sets `maxDelay`
+	 * to how far it trails the live edge. Use {@link latest} to skip straight to the head. A group lost to a
 	 * gap resyncs from the next one.
 	 */
 	next(): Promise<Timed<T> | undefined> {

@@ -183,11 +183,11 @@ std::vector<float> NoiseFrame(uint32_t &state, size_t samples)
 	return pcm;
 }
 
-// MoQOutput's conversion of an OBS packet's timestamp to the track's microseconds.
-uint64_t PacketMicros(const encoder_packet &packet)
+// MoQOutput's conversion of an OBS packet's timestamp to the track's.
+moq::Timestamp PacketTimestamp(const encoder_packet &packet)
 {
-	const int64_t pts = packet.pts + packet.timebase_den / packet.timebase_num;
-	return static_cast<uint64_t>(pts) * 1000000ULL * packet.timebase_num / packet.timebase_den;
+	const int64_t value = packet.pts * packet.timebase_num + packet.timebase_den;
+	return moq::Timestamp{static_cast<uint64_t>(value), static_cast<uint64_t>(packet.timebase_den)};
 }
 
 // Publishes `count` tone packets from an encoder with `settings` the way MoQOutput
@@ -214,7 +214,7 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 	init.data = encoder.ExtraData();
 	auto track = TestOk(moq::MediaTrackProducer::audio(broadcast, moq::MediaTarget::kNamed{}, init), "audio track");
 
-	auto announced = TestOk(origin->consume()->announced_broadcast("room"), "announced_broadcast");
+	auto announced = TestOk(origin->consume()->follow("room", std::nullopt), "follow");
 	auto consumer = TestOk(announced->available().get(), "available");
 	auto catalogs = TestOk(moq::MediaCatalogConsumer::subscribe(consumer).get(), "catalog consumer");
 	std::optional<moq::Catalog> catalog;
@@ -236,14 +236,14 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 	moq::AudioDecoderOutput output{moq::AudioSampleFormat::kF32};
 	output.channels = static_cast<uint32_t>(channels);
 	// The packets are written faster than real time, so let none be skipped as stale.
-	output.max_delay = std::chrono::seconds(10);
+	output.delay = moq::Delay{std::chrono::seconds(0), std::chrono::seconds(10)};
 	auto audio = TestOk(moq::AudioConsumer::subscribe(consumer, name, rendition, output).get(), "audio consumer");
 
 	const int count = 50;
 	const int64_t start = 3 * RATE;
 	// Where input sample `index` lands on the track: MoQOutput's one second offset on top.
-	auto micros = [&](int64_t index) {
-		return static_cast<uint64_t>((start + RATE + index) * 1000000LL / RATE);
+	auto sample = [&](int64_t index) {
+		return static_cast<uint64_t>(start + RATE + index);
 	};
 	for (int i = 0; i < count; i++) {
 		const int64_t pts = start + i * static_cast<int64_t>(encoder.frame_size);
@@ -253,8 +253,8 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 		if (!packet)
 			return;
 		CHECK(packet->pts == pts && packet->dts == pts);
-		const uint64_t us = PacketMicros(*packet);
-		TestOk(track->write_frame({std::vector<uint8_t>(packet->data, packet->data + packet->size), us}),
+		TestOk(track->write_frame({std::vector<uint8_t>(packet->data, packet->data + packet->size),
+					   PacketTimestamp(*packet)}),
 		       "write_frame");
 		TestOk(track->cut(), "cut");
 	}
@@ -265,7 +265,7 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 	// with anything but its first input sample, shifts the phase and fails this.
 	size_t decoded = 0;
 	double error = 0, energy = 0;
-	std::optional<uint64_t> first_decoded_us;
+	std::optional<moq::Timestamp> first_decoded;
 	for (;;) {
 		auto next = audio->next();
 		if (next.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
@@ -281,11 +281,12 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 		if (!variant)
 			break;
 		const auto *frame = &variant->frame;
-		if (!first_decoded_us)
-			first_decoded_us = frame->timestamp_us;
+		if (!first_decoded)
+			first_decoded = frame->timestamp;
 		const auto *samples = reinterpret_cast<const float *>(frame->data.data());
 		const size_t frames = frame->data.size() / sizeof(float) / channels;
-		const int64_t offset = static_cast<int64_t>(frame->timestamp_us * RATE / 1000000ULL) - (start + RATE);
+		const int64_t offset =
+			static_cast<int64_t>(frame->timestamp.value * RATE / frame->timestamp.scale) - (start + RATE);
 		for (size_t i = 0; i < frames; i++) {
 			const double expected = Tone(offset + static_cast<int64_t>(i));
 			for (size_t c = 0; c < channels; c++) {
@@ -299,7 +300,8 @@ void CheckSubscriberDecodes(const char *preset, size_t channels)
 
 	// OBS never drains an audio encoder, so the decoder trims the 312-sample pre-skip
 	// and nothing pads the tail: every input sample but that lookahead comes back.
-	CHECK(first_decoded_us == micros(0));
+	// Compared as fractions of a second, since the track reads back at its own scale.
+	CHECK(first_decoded && first_decoded->value * RATE == sample(0) * first_decoded->scale);
 	CHECK(decoded == count * encoder.frame_size - 312);
 	CHECK(energy > 0 && error / energy < 0.05);
 	printf("  %s, %zu channels: %zu samples, error %.4f\n", preset, channels, decoded,

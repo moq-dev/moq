@@ -4,7 +4,7 @@ import { Milli } from "@moq/clock";
 import type { Consumer as GroupConsumer, Producer as GroupProducer } from "../src/group.ts";
 import { Timescale, Timestamp } from "../src/time.ts";
 import { Producer, type Subscriber } from "../src/track.ts";
-import { untilGivenUp } from "../src/util/given_up.ts";
+import { GivenUp } from "../src/util/given_up.ts";
 
 const retainedCounts = [25, 100, 400, 1500];
 const subscriberCounts = [1, 4, 16];
@@ -84,7 +84,8 @@ async function measure(
 					// The watch a publisher holds while a group stream waits for credit.
 					const opening = Promise.withResolvers<void>();
 					opened.push(opening.resolve);
-					reads.push(untilGivenUp(consumer, () => opening.promise));
+					const givenUp = new GivenUp(consumer);
+					reads.push(givenUp.write(() => opening.promise).finally(() => givenUp.close()));
 				}
 			}
 		}

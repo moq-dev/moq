@@ -18,7 +18,7 @@ async fn running<T>(child: &mut Child, what: &str, step: impl Future<Output = T>
 	tokio::select! {
 		out = step => out,
 		status = child.wait() => panic!("moq exited with {} before {what}", status.expect("wait for moq")),
-		_ = tokio::time::sleep(TIMEOUT) => panic!("{what} timed out"),
+		_ = kio::clock::sleep(TIMEOUT) => panic!("{what} timed out"),
 	}
 }
 
@@ -63,7 +63,9 @@ async fn next_broadcast(
 			.await
 			.expect("origin closed")
 		{
-			moq_net::announce::Event::Start(_) | moq_net::announce::Event::Restart(_) => break,
+			moq_net::announce::Event::Start(_)
+			| moq_net::announce::Event::Restart(_)
+			| moq_net::announce::Event::Takeover { .. } => break,
 			moq_net::announce::Event::End(_) | moq_net::announce::Event::Update(_) => {}
 		}
 	}

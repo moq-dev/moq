@@ -15,7 +15,7 @@
  */
 import type MoqWatch from "@moq/watch/element";
 import { AUDIBLE_RMS, SAMPLE_EVENT, SAMPLE_MS, type Sample, TONE_FLOOR_DB } from "./contract";
-import { resources } from "./instrument";
+import { resources, speaker } from "./instrument";
 import * as Pattern from "./pattern";
 
 /** FFT window used to identify the tone. 2048 bins at 48kHz is ~23Hz wide and ~43ms long. */
@@ -118,6 +118,17 @@ class ToneCheck {
 	}
 }
 
+// The level reaching the speakers, after the player's volume and mute. Zero once nothing is connected.
+function speakerRms(context: BaseAudioContext | undefined, wave: Float32Array<ArrayBuffer>): number | undefined {
+	if (!context) return undefined;
+	const analyser = speaker(context);
+	if (!analyser) return 0;
+	analyser.getFloatTimeDomainData(wave);
+	let energy = 0;
+	for (const sample of wave) energy += sample * sample;
+	return Math.sqrt(energy / wave.length);
+}
+
 // Read both the fixture counter and the "is anything painted at all" check off one pixel snapshot.
 function readCanvas(canvas: HTMLCanvasElement | null) {
 	if (!canvas || canvas.width === 0 || canvas.height === 0) return { painted: false };
@@ -188,6 +199,7 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 			}
 		}
 		const audioRendition = el.audio.source.out.config.peek();
+		const audioName = el.audio.source.out.track.peek();
 
 		const ui = document.querySelector("moq-watch-ui")?.shadowRoot;
 		const control = ui?.querySelector<HTMLButtonElement>("button.control[aria-label]");
@@ -215,6 +227,10 @@ export function attach(el: MoqWatch, tones: number[] = []): () => void {
 			...(analyser ? analyze(analyser, spectrum, wave) : {}),
 			audioCodec: audioRendition?.codec,
 			audioChannels: audioRendition?.numberOfChannels,
+			audioSampleRate: audioRendition?.sampleRate,
+			audioRendition: audioName,
+			audioTrack: audioRendition?.track ?? audioName,
+			speakerRms: speakerRms(el.audio.out.context.peek(), wave),
 			tones: toneCheck?.read(),
 			controlLabel: control?.getAttribute("aria-label") ?? undefined,
 			centerPlayVisible: centerPlay ? getComputedStyle(centerPlay).display !== "none" : false,

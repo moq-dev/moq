@@ -4,7 +4,7 @@ name: Video
 # the WebGPU path, a lost device, and the Canvas2D fallback only exist in a real
 # browser. SwiftShader stands in for the GPU, so no GPU runner is needed.
 #
-# Narrow trigger, like wasm.yml: the renderer, the harness, and what the harness
+# Narrow trigger: the renderer, the harness, and what the harness
 # drives: the two files that wire the renderer into `<moq-publish>`, and the
 # `@moq/watch` playback path, fed from an in-memory origin so no relay is needed.
 

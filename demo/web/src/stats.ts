@@ -185,7 +185,7 @@ discovery.run((effect) => {
 	});
 });
 
-function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Table, path: Net.Path.Valid, node: string) {
+function subscribeNode(effect: Signals.Effect, origin: Net.Origin.Reader, path: Net.Path.Valid, node: string) {
 	nodeStats.mutate((s) => {
 		s[node] = {
 			egress: {},

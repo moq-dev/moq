@@ -11,6 +11,8 @@
 //! - `contended_repoll`: consumers re-poll a value that has not changed, as when a
 //!   deadline or a second channel wakes their task. Workers run free, with no
 //!   producer and no per-pass sync.
+//! - `contended_repoll_watch`: the same re-poll through a [`kio::Watch`], which finds the
+//!   version unchanged and parks without the value lock or the predicate.
 //! - `contended_log`: a `GroupState`-shaped log. The producer appends a frame to a
 //!   `VecDeque`; each consumer reads its cursor's frame, cloning it out under the
 //!   lock, and parks again.
@@ -21,6 +23,7 @@
 //! iteration, a fixed cost that matters only at a few consumers per thread.
 //!
 //! Run with `cargo bench -p kio --bench contended`.
+#![expect(clippy::disallowed_methods, reason = "host time measures benchmark throughput")]
 
 use std::{
 	collections::VecDeque,
@@ -260,6 +263,47 @@ fn bench_repoll(c: &mut Criterion) {
 	group.finish();
 }
 
+fn bench_repoll_watch(c: &mut Criterion) {
+	let mut group = c.benchmark_group("contended_repoll_watch");
+	for (threads, consumers) in sweep() {
+		group.throughput(Throughput::Elements(consumers as u64));
+		let id = BenchmarkId::new(format!("threads_{threads}"), consumers);
+		group.bench_function(id, |b| {
+			let producer = Producer::new(0u64);
+			let work = readers(&producer, consumers, threads)
+				.into_iter()
+				.map(|set| -> Work {
+					let mut set: Vec<_> = set
+						.into_iter()
+						.map(|reader| (kio::Watch::new(reader.consumer), reader.waiter, reader.seen))
+						.collect();
+					Box::new(move || {
+						for (watch, waiter, seen) in &mut set {
+							let seen = *seen;
+							let changed = |state: &kio::Ref<'_, u64>| {
+								if **state != seen {
+									Poll::Ready(())
+								} else {
+									Poll::Pending
+								}
+							};
+							assert!(watch.poll(waiter, changed).is_pending());
+						}
+					})
+				})
+				.collect();
+			let crew = Crew::new(work);
+
+			b.iter_custom(|iters| {
+				let start = Instant::now();
+				crew.run(iters);
+				start.elapsed()
+			});
+		});
+	}
+	group.finish();
+}
+
 /// A frame payload. Like `Bytes`, cloning it bumps a refcount shared by every reader.
 type Frame = Arc<u64>;
 
@@ -394,6 +438,6 @@ fn bench_log_lockfree(c: &mut Criterion) {
 criterion_group! {
 	name = benches;
 	config = Criterion::default().warm_up_time(Duration::from_secs(1)).measurement_time(Duration::from_secs(3));
-	targets = bench_notify, bench_repoll, bench_log, bench_log_lockfree
+	targets = bench_notify, bench_repoll, bench_repoll_watch, bench_log, bench_log_lockfree
 }
 criterion_main!(benches);

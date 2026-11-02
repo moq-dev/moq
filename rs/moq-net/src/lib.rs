@@ -104,6 +104,8 @@ pub mod goaway;
 #[cfg(not(feature = "async"))]
 #[allow(dead_code, unused_imports, reason = "async-only")]
 mod goaway;
+#[cfg(test)]
+mod test_tracing;
 // Not part of the public API: compiled only for the crate's own tests and for the
 // `fuzz/` harness.
 #[cfg(all(feature = "async", any(test, feature = "fuzz")))]
@@ -123,7 +125,6 @@ pub mod setup;
 #[cfg(not(feature = "async"))]
 #[allow(dead_code, unused_imports, reason = "async-only")]
 mod setup;
-mod sync;
 #[cfg(feature = "async")]
 mod tail;
 #[cfg(all(test, feature = "async"))]

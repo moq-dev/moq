@@ -393,11 +393,6 @@ impl Mixer {
 }
 
 #[cfg(test)]
-#[expect(
-	clippy::disallowed_methods,
-	clippy::disallowed_types,
-	reason = "tests read the host clock directly"
-)]
 mod tests {
 	use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
@@ -496,6 +491,11 @@ mod tests {
 	/// Measurement-only harness: no device and no timing acceptance threshold.
 	#[test]
 	#[ignore = "run with just rs bench-playback"]
+	#[expect(
+		clippy::disallowed_methods,
+		clippy::disallowed_types,
+		reason = "the benchmark measures mixer callbacks on the host clock"
+	)]
 	fn benchmark_mixer_callbacks() {
 		for sinks in [1, 8, 32, MAX_SINKS] {
 			for frames in [128, 480, 1024, 2048] {

@@ -196,7 +196,11 @@ impl PacketBuilder {
 			false => 0,
 		};
 
-		// Every packet counted in flight goes through the controller, which also paces it.
+		// Every packet counted in flight goes through the controller, which also paces it, and
+		// spends the send rate cap.
+		if let Some(cap) = conn.send_rate.as_mut().filter(|_| size != 0) {
+			cap.charge(size.into());
+		}
 		let congestion = (size != 0).then(|| {
 			conn.path.congestion.on_sent(congestion::Sent {
 				now,

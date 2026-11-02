@@ -2,7 +2,7 @@
 
 Experimental Linux io\_uring support for the native MoQ stack: a
 thread-per-core `Worker` that owns a `SINGLE_ISSUER | DEFER_TASKRUN |
-COOP_TASKRUN | TASKRUN_FLAG` ring, a userspace timer queue on moq-clock, a
+COOP_TASKRUN | TASKRUN_FLAG` ring, a userspace timer queue on `kio::clock`, a
 local (`!Send`) task set, and the UDP sockets bound through it.
 
 - **Receive**: one persistent multishot `recvmsg` per socket, fed from a
@@ -15,7 +15,7 @@ local (`!Send`) task set, and the UDP sockets bound through it.
 - **Send**: `sendmsg` with an explicit `UDP_SEGMENT` control message per call,
   staged in a fixed pool of buffers owned by id and released on completion
   (the shape a later `SENDMSG_ZC` needs).
-- **Timers**: a `moq_clock::Deadlines` queue the worker advances once per
+- **Timers**: a `kio::clock::Deadlines` queue the worker advances once per
   turn, from its one clock read; the earliest deadline rides `io_uring_enter`
   as an absolute timeout. Zero timeout SQEs. The queue is the worker's ambient
   clock, and `Handle::run` drives MoQ with it and a single timer.
