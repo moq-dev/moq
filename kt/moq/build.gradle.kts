@@ -6,11 +6,10 @@
 // `dev.moq.*` typealiases and adds idiomatic helpers (a `connect()` facade,
 // Flow extensions, AutoCloseable ergonomics).
 //
-// Versioning is INDEPENDENT of the crate: `-Pmoq.version` (default in
-// gradle.properties), bumped by hand. release-kt-lib.yml publishes a new
-// version only when that property changes. The dependency on `moq-ffi` is a
-// floating range so consumers transitively pick up new bindings patches
-// without this wrapper being re-cut. See MOQ_FFI_RANGE below.
+// `-Pmoq.version` (default in gradle.properties) owns the wrapper version.
+// Shared cuts set its minor; patches are independent of the bindings.
+// release-kt-lib.yml publishes when that property changes. MOQ_FFI_RANGE
+// lets consumers pick up bindings patches without a wrapper re-release.
 //
 // Local builds and CI resolve `moq-ffi` from the sibling project via the
 // dependency substitution below, so tests run against freshly-built bindings.
@@ -58,9 +57,8 @@ val generateVersion =
         }
     }
 
-// Compatible-patch range for the bindings: 0.4.3 (the WebSocket fallback
-// setters) or newer, never 0.5.0. Published into the wrapper's POM so consumers
-// float to the newest bindings patch.
+// The published POM admits newer bindings patches within the cut's minor.
+// Shared cuts move this range; raise its floor when newer FFI API is required.
 val MOQ_FFI_RANGE = "[0.4.3,0.5)"
 
 val androidEnabled = providers.gradleProperty("android.enabled").orNull == "true"

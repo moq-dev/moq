@@ -48,6 +48,7 @@ class Versions(unittest.TestCase):
             "binary", "0.21.0", '[dependencies]\narchive = { path = "../archive", version = "0.0.1" }\n', binary=True
         )
         self.crate("independent", "0.6.0")
+        self.crate("moq-ffi", "0.21.3")
         self.crate(
             "private",
             "0.1.0",
@@ -72,12 +73,13 @@ class Versions(unittest.TestCase):
         self.call("bun", "install", "--lockfile-only", "--ignore-scripts")
         for ecosystem, (_, path, _) in module.WRAPPERS.items():
             value = {
-                "python": '[project]\nname = "moq-rs"\nversion = "0.21.3"\n',
+                "python": '[project]\nname = "moq-rs"\nversion = "0.21.3"\ndependencies = ["moq-ffi ~= 0.21.0"]\n',
                 "kotlin": "moq.version=0.21.3\n",
-                "dart": "name: moq\nversion: 0.21.3\n",
+                "dart": "name: moq\nversion: 0.21.3\ndependencies:\n  moq_ffi: ^0.21.0\n",
                 "go": "0.21\n",
             }.get(ecosystem, "0.21.3\n")
             self.write(path, value)
+        self.write("kt/moq/build.gradle.kts", 'val MOQ_FFI_RANGE = "[0.21.0,0.22)"\n')
         self.write(
             "uv.lock",
             'version = 1\n\n[[package]]\nname = "moq-rs"\nversion = "0.21.3"\nsource = { editable = "py/moq-rs" }\n'
@@ -221,6 +223,29 @@ class Versions(unittest.TestCase):
             self.write(path, text.replace("0.22.", "0.21.", 1))
             self.assertIn("lockfile version differs", self.check(ok=False).stderr)
             self.write(path, text)
+
+    def test_ffi_constraints_advance_and_reject_stale_ranges(self):
+        self.cut()
+        for path, pattern, template in module.FFI_REQUIREMENTS:
+            with self.subTest(path=path):
+                text = (self.root / path).read_text()
+                self.assertEqual(module.captured(text, pattern), template.format(version="0.22.0", next_minor=23))
+                for floor, upper in (("0.21.0", 22), ("0.22.1", 23)):
+                    self.write(path, module.replace(text, pattern, template.format(version=floor, next_minor=upper)))
+                    self.assertIn("FFI requirement", self.check(ok=False).stderr)
+                self.write(path, text)
+        self.write(
+            "rs/moq-ffi/Cargo.toml", (self.root / "rs/moq-ffi/Cargo.toml").read_text().replace("0.22.0", "0.22.3")
+        )
+        for path, pattern, template in module.FFI_REQUIREMENTS:
+            self.write(
+                path,
+                module.replace(
+                    (self.root / path).read_text(), pattern, template.format(version="0.22.2", next_minor=23)
+                ),
+            )
+        self.call("cargo", "generate-lockfile", "--offline")
+        self.check()
 
     def test_cut_refuses_bad_targets_and_restores_partial_external_failure(self):
         before = self.snapshot()

@@ -178,7 +178,7 @@ declare -A tools=(
     [toml]='taplo'
     [nix]='nixfmt'
     [justfile]=''
-    [gh]='actionlint zizmor bun python3 cargo clippy-driver dpkg-deb nfpm rpm'
+    [gh]='actionlint zizmor bun python3 cargo release-plz clippy-driver dpkg-deb nfpm rpm'
 )
 
 # CI and the local check share one selection and one lint/test dispatch.

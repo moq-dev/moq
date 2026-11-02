@@ -116,13 +116,15 @@ Thus `moq-uring` joins through the relay library, while `moq-archive` stays
 experimental through the binary-only CLI and a dev dependency.
 
 `just version 0.22.0` sets eligible versions and workspace lock entries without
-resolving unrelated dependencies. Rust requirements are updated by
+resolving unrelated dependencies. It also advances Python, Dart, and Kotlin
+bindings requirements to the cut's minor while allowing independent patches.
+Rust requirements are updated by
 `release-plz set-version`; disposable changelogs keep published history intact.
 The recipe records the shared minor and named exemptions in `version.json`.
 `just version` checks it on every `just check` and `just ci`; enforcement is
 disabled while its minor is `null`, until the cut runs the recipe. Once active,
 the check rejects minor drift, unpromoted dependencies, stale exemptions, and
-mismatched npm/Python lock entries.
+mismatched npm/Python lock entries, and stale bindings requirements.
 
 The nonpublishing fixture in `sh/version.test.py` verifies that release-plz's
 `update` engine, also used by `release-pr`, preserves a manually set unpublished

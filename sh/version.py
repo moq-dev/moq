@@ -56,6 +56,22 @@ WRAPPERS = {
 }
 
 
+# Published wrappers must resolve bindings from the cut's minor. Their local
+# workspace/path substitutions would otherwise hide a stale registry constraint.
+FFI_REQUIREMENTS = (
+    ("py/moq-rs/pyproject.toml", r'"moq-ffi ([^"\n]+)"', "~= {version}"),
+    ("dart/moq/pubspec.yaml", r"^  moq_ffi: ([^\n]+)$", "^{version}"),
+    ("kt/moq/build.gradle.kts", r'^val MOQ_FFI_RANGE = "([^"\n]+)"$', "[{version},0.{next_minor})"),
+)
+
+
+def captured(text, pattern):
+    matches = list(re.finditer(pattern, text, re.MULTILINE | re.DOTALL))
+    if len(matches) != 1:
+        raise ValueError(f"expected one value matching {pattern!r}, found {len(matches)}")
+    return matches[0][1]
+
+
 def run(root, *args):
     return subprocess.run(args, cwd=root, check=True, text=True, capture_output=True).stdout
 
@@ -159,13 +175,25 @@ def check(root, config):
         return
     if not re.fullmatch(r"0\.[1-9][0-9]*", minor):
         raise ValueError(f"invalid shared minor: {minor!r}")
-    selected = eligible(packages(root), config["exemptions"])
+    inventory = packages(root)
+    selected = eligible(inventory, config["exemptions"])
     errors = []
     for p in selected:
         if ".".join(map(str, version(p.current)[:2])) != minor:
             errors.append(f"{p.ecosystem} {p.name}: {p.current} must join {minor}.x")
         if p.ecosystem in ("npm", "python") and lock_version(root, p) != p.current:
             errors.append(f"{p.name}: lockfile version differs from {p.current}")
+    ffi = next(p for p in inventory if p.key == ("rust", "moq-ffi"))
+    for path, pattern, template in FFI_REQUIREMENTS:
+        requirement = captured((root / path).read_text(), pattern)
+        expected = template.format(version="VERSION", next_minor=int(minor.split(".")[1]) + 1)
+        match = re.fullmatch(re.escape(expected).replace("VERSION", f"({SEMVER})"), requirement)
+        if (
+            match is None
+            or ".".join(map(str, version(match[1])[:2])) != minor
+            or version(match[1]) > version(ffi.current)
+        ):
+            errors.append(f"{path}: FFI requirement {requirement!r} must use {minor}.x, at most {ffi.current}")
     if errors:
         raise ValueError("\n".join(errors))
     print(f"shared version: {len(selected)} packages on {minor}.x (patches independent)")
@@ -197,6 +225,10 @@ def bump(root, config, target):
             path, pattern = lock_pattern(p, root)
             path = root / path
             edits[path] = replace(edits.get(path, path.read_text()), pattern, target)
+    for path, pattern, template in FFI_REQUIREMENTS:
+        path = root / path
+        requirement = template.format(version=target, next_minor=minor + 1)
+        edits[path] = replace(edits.get(path, path.read_text()), pattern, requirement)
     rust = [p for p in selected if p.ecosystem == "rust"]
     # set-version renames the last release heading, including published history,
     # and refuses crates without a changelog. Give it disposable changelogs;

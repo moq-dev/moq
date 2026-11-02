@@ -214,6 +214,7 @@ class QueryTests(unittest.TestCase):
             "bun",
             "python3",
             "cargo",
+            "release-plz",
             "jq",
             "shellcheck",
             "shfmt",
