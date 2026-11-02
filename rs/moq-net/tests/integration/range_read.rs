@@ -146,14 +146,12 @@ async fn straddling(version: Version, relay: bool) {
 }
 
 /// A range from below the live edge to past it reads the history and the live groups up
-/// to its end, then ends. Draft-18 has no bounded SUBSCRIBE, so it refuses one.
+/// to its end, then ends. Draft-18 has no bounded SUBSCRIBE, so it joins live and the
+/// reader stops at its own end.
 #[kio::test]
 async fn a_range_across_the_live_edge_reads_up_to_its_end() {
 	let mut failures = Vec::new();
-	for version in support::every_version()
-		.into_iter()
-		.filter(|version| version.to_string() != "moq-transport-18")
-	{
+	for version in support::every_version() {
 		for relay in [false, true] {
 			if kio::clock::sim::spawn(straddling(version, relay)).await.is_err() {
 				failures.push((version, relay));
