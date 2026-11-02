@@ -17,14 +17,16 @@ the ranges model, anchors, `maxDelay: null`, and the on-demand request
 surface. Rust's lite-07 SUBSCRIBE already carries ranges
 ([moq-dev/moq#6715](https://github.com/moq-dev/moq/pull/6715)).
 
-Mirror lite-07 bounded completion in the publisher. Today a covered bounded
-subscription FINs without SUBSCRIBE_END. The JS subscriber already accepts that
-FIN, closing the request's track once its tail settles, and failing it when an
-update moved the range and the groups that arrived leave it uncovered. Reopen
-that demand on the same track instead, as the Rust copy does. The settled
-replacement, SUBSCRIBE_FINISH with the Subscribe Stream kept open and no
-covered FIN, is in [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md)'
-"Ends are signaled" plan; mirror whichever the wire has when this lands.
+Mirror lite-07 bounded completion as the Rust copy implements it when this
+lands. The target is [Lite-07 ranges](/quest/m1/subscribe-ranges/lite.md)'
+"Ends are signaled" design: a covered bounded subscription sends
+SUBSCRIBE_FINISH, keeps the Subscribe Stream open, and never FINs it. This
+quest does not wait on that one, so if it lands first, the wire still FINs a
+covered bounded subscription without SUBSCRIBE_END. The JS subscriber already
+accepts that FIN, closing the request's track once its tail settles, and
+failing it when an update moved the range and the groups that arrived leave it
+uncovered; until SUBSCRIBE_FINISH ships it reopens that demand on the same
+track instead, as the Rust copy does.
 
 Mirror the Rust names, including `Time(pts)` ends and their refusal on an untimed track.
 The publisher resolves no relative or time start, serving it from the oldest

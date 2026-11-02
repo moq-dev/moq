@@ -588,9 +588,14 @@ impl Copy {
 		if !reader.groups_read {
 			return Retains::No;
 		}
-		// Not yet bounded, it may still feed a group the new copy never has.
+		// Not yet bounded, it may still feed a group the new copy never has, unless the reader
+		// already holds every group of a bounded window. Then it is kept rather than waited
+		// on, so the read ends, and a widening judges it again.
 		if self.until.is_none() && self.done.is_none() {
-			return Retains::Wait;
+			return match reader.holds_window() {
+				true => Retains::Keep,
+				false => Retains::Wait,
+			};
 		}
 		// Superseded once the serving copy has a group past the bound.
 		if self.since.is_none()
@@ -667,6 +672,22 @@ struct Retain<'a> {
 	delivered: &'a Delivered,
 	out: &'a [(u64, Weak<()>)],
 	waiter: &'a kio::Waiter,
+}
+
+impl Retain<'_> {
+	/// Whether the reader handed out every group its bounded, resolved window names.
+	fn holds_window(&self) -> bool {
+		let Some(end) = self.window.end().filter(|_| !self.window.is_pending()) else {
+			return false;
+		};
+		self.window
+			.runs(self.window.floor().unwrap_or(0))
+			.take_while(|run| *run.start() < end)
+			.all(|run| {
+				let run = *run.start()..run.end().saturating_add(1).min(end);
+				self.delivered.gaps(run).is_empty()
+			})
+	}
 }
 
 /// How a reader still needs a replaced copy; see [`Copy::retains`].
@@ -4124,6 +4145,49 @@ mod test {
 				matches!(sub.poll_next_group(&kio::Waiter::noop()), Poll::Ready(Ok(None))),
 				"nested end propagates past covered copies"
 			);
+		}
+	}
+
+	/// A bounded read whose whole window was handed out ends after a route switch, to a copy
+	/// with nothing or only a group already read, though the replaced copy is still live.
+	#[test]
+	fn a_read_range_ends_after_a_switch_to_a_repeating_route() {
+		for ordered in [false, true] {
+			for repeats in [false, true] {
+				let case = format!("ordered={ordered}, repeats={repeats}");
+				let routes = Producer::new();
+				let logical = logical(&routes);
+				let a = copy();
+				routes.serve(a.consume());
+				let subscription = Subscription::default().with_max_delay(HOUR).with_range(0..1);
+				let mut sub = logical
+					.consume()
+					.subscribe(subscription)
+					.now_or_never()
+					.unwrap()
+					.unwrap();
+				write(&a, 0);
+				assert_eq!(drain(&mut sub, ordered), [0], "{case}");
+				let b = copy();
+				if repeats {
+					write(&b, 0);
+				}
+				routes.serve(b.consume());
+				let res = match ordered {
+					true => sub.poll_next_group(&kio::Waiter::noop()),
+					false => sub.poll_recv_group(&kio::Waiter::noop()),
+				};
+				let res = res.map(|res| res.map(|group| group.map(|group| group.sequence)));
+				assert!(
+					matches!(res, Poll::Ready(Ok(None))),
+					"{case}: the read ends, got {res:?}"
+				);
+				// The replaced copy was kept, so a widening still reads what only it has.
+				write(&a, 1);
+				sub.update(Subscription::default().with_max_delay(HOUR).with_range(0..2))
+					.unwrap();
+				assert_eq!(drain(&mut sub, ordered), [1], "{case}");
+			}
 		}
 	}
 

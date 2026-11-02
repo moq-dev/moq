@@ -7943,10 +7943,15 @@ impl Cursor {
 		}
 	}
 
-	/// The lowest head answered and not handed out yet.
+	/// The next head answered and not handed out yet, in the subscription's order.
 	fn next_head(&self) -> Option<group::Consumer> {
 		let heads = self.heads.as_ref()?;
-		heads.filled.values().next().cloned()
+		let mut filled = heads.filled.values();
+		match self.subscription.read().order {
+			Order::Ascending => filled.next(),
+			Order::Descending => filled.next_back(),
+		}
+		.cloned()
 	}
 
 	/// The next datagram inside this subscriber's range, dropping the ones outside it.
@@ -18054,6 +18059,49 @@ mod test {
 				.unwrap();
 			assert!(end.is_none(), "evict={evict}: the read ends with group 0 written off");
 			drop(request);
+		}
+	}
+
+	/// Answered heads go out in the subscription's order, as owed and filled groups do.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn answered_heads_go_out_in_the_subscription_order() {
+		for (order, expected) in [(Order::Ascending, [0, 1]), (Order::Descending, [1, 0])] {
+			let producer = track_producer("test", Info::default());
+			let dynamic = producer.requests();
+			for sequence in 0..2 {
+				let mut live = producer.create_group(group::Info { sequence }).unwrap();
+				live.start_at(1).unwrap();
+				live.write_frame(None, bytes::Bytes::from_static(b"delta")).unwrap();
+				live.finish().unwrap();
+			}
+
+			let mut sub = producer.subscribe(replay().with_order(order).with_range(0..2));
+			assert!(
+				sub.recv_group().now_or_never().is_none(),
+				"{order:?}: the heads are asked"
+			);
+			let mut requests = Vec::new();
+			while let Some(request) = dynamic.requested_fill_group().now_or_never() {
+				requests.push(request.unwrap());
+			}
+			assert_eq!(requests.len(), 2, "{order:?}: both heads are asked");
+			for request in requests {
+				let mut head = request.accept(Info::default()).unwrap();
+				head.write_frame(None, bytes::Bytes::from_static(b"snapshot")).unwrap();
+				head.finish().unwrap();
+			}
+
+			let mut got = Vec::new();
+			for _ in 0..2 {
+				let group = sub.recv_group().now_or_never().unwrap().unwrap().expect("a head");
+				got.push(group.sequence);
+			}
+			assert_eq!(got, expected, "{order:?}");
+			assert!(
+				matches!(sub.recv_group().now_or_never(), Some(Ok(None))),
+				"{order:?}: the read ends"
+			);
 		}
 	}
 
