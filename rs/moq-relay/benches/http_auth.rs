@@ -57,7 +57,8 @@ impl Fixture {
 		let certificates = moq_tokio::tls::Certificates::from_pem(pem.as_bytes()).unwrap();
 		let mut config = web::Config::default();
 		config.http.listen = Some("127.0.0.1:0".parse().unwrap());
-		let cluster = cluster::Cluster::new(Default::default()).unwrap();
+		let (cluster, driver) = cluster::Cluster::new(Default::default()).unwrap();
+		tokio::spawn(driver.run());
 		// No admission timeout, so held requests stay waiting however long setup and the
 		// measurement take.
 		let web = web::Web::new(auth, cluster, certificates, config)
