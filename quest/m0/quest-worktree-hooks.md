@@ -29,9 +29,11 @@ and isolated delegates. What remains:
   quest release recognizes them, bump the pin, check that `quest init` is a
   no-op here, and drop that AGENTS.md sentence.
 - Bump moq's `quest` input past
-  [moq-dev/quest#425](https://github.com/moq-dev/quest/pull/425), so
-  `--worktree '#123'` starts at the PR head instead of `origin/HEAD` and
-  workflow agents' checkouts get released.
+  [moq-dev/quest#425](https://github.com/moq-dev/quest/pull/425) (merged
+  2026-11-03 as `53f78b9`), so `--worktree '#123'` starts at the PR head
+  instead of `origin/HEAD` and workflow agents' checkouts get released.
+  Refresh the skill stubs with the AGENTS.md drop-and-restore step, then
+  check both routes live.
 
 ## Waiting
 
@@ -42,5 +44,3 @@ and isolated delegates. What remains:
   and `quest init` stays idempotent); (b) a configured hook command `quest init`
   writes and matches; (c) don't ask, and keep the drop-and-restore step on
   every pin bump.
-- moq-dev/quest: land
-  [moq-dev/quest#425](https://github.com/moq-dev/quest/pull/425).
