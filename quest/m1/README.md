@@ -203,7 +203,6 @@ per-frame CPU growth since #5926.
 - [A returning route serves past the cap its old copy was given](/quest/m1/returning-route-cap.md) - when a resumed reader's route returns, the reused serving copy asks with the reader's current resolution, not the capped resolution it was left with when it was replaced
 - [The resume model passes its long run again](/quest/m1/resume-model-7542.md) - fix #7542's regression that drops groups a long-budget reader can still get
 - [A resume more than one group behind never hangs](/quest/m1/ietf-resume-behind.md) - a resumed read gets every group or a drop on every wire version
-- [moq-quic's idle connections keep no burst-sized state](/quest/m1/quic-readable-dedupe.md) - readable events are deduplicated and a quiet connection keeps no per-peak-stream bytes
 - [Stats name the route instance's epoch with a type](/quest/m1/stats-epoch-type.md) - `GroupFrame::epoch` gets a dedicated type and tests stop mislabelling the instance
 
 ## Related
