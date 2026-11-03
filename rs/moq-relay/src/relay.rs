@@ -518,9 +518,8 @@ impl Relay {
 		&self.cluster
 	}
 
-	/// The stats producer, for publishing extra counters through the same
-	/// registry. [`Self::cluster`] holds a clone, so the publish task lives as
-	/// long as the cluster whether or not this handle is kept.
+	/// The stats producer, for publishing extra counters through the same registry.
+	/// The cluster retains a clone; its driver must keep running to publish.
 	pub fn stats(&self) -> &moq_stats::Producer {
 		&self.stats
 	}
