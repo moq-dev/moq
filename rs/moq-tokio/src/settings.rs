@@ -321,4 +321,21 @@ struct ListenLb {
 
 	#[usage(env = "MOQ_LISTEN_QUIC_LB_NONCE", cli("--listen-quic-lb-nonce"))]
 	nonce: Option<u64>,
+
+	#[usage(flatten)]
+	forward: ListenLbForward,
+}
+
+/// `[listen.lb.forward]` / `--listen-quic-lb-forward-*`.
+#[derive(usage_rs::Config)]
+#[usage(prefix = "listen.lb.forward")]
+struct ListenLbForward {
+	#[usage(env = "MOQ_LISTEN_QUIC_LB_FORWARD_BIND", cli("--listen-quic-lb-forward-bind"))]
+	bind: Option<String>,
+
+	#[usage(env = "MOQ_LISTEN_QUIC_LB_FORWARD_KEY", cli("--listen-quic-lb-forward-key"))]
+	key: Option<String>,
+
+	#[usage(env = "MOQ_LISTEN_QUIC_LB_FORWARD_PEERS", cli("--listen-quic-lb-forward-peers"))]
+	peers: Option<String>,
 }

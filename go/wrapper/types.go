@@ -19,7 +19,7 @@ type (
 	AudioEncoderOutput = ffi.MoqAudioEncoderOutput
 	// AudioSampleFormat is a raw PCM sample layout, mirroring WebCodecs AudioData.format.
 	AudioSampleFormat = ffi.MoqAudioSampleFormat
-	// AudioFrame is one audio frame: PCM payload plus a presentation timestamp in microseconds.
+	// AudioFrame is one audio frame: PCM payload plus a presentation Timestamp.
 	AudioFrame = ffi.MoqAudioFrame
 	// ConnectionPhase is a connection lifecycle transition reported by Session.State.
 	ConnectionPhase = ffi.MoqConnectionPhase
@@ -33,13 +33,18 @@ type (
 	ProtocolKind = ffi.MoqProtocolKind
 	// OriginConfig configures a new origin, such as its maximum cache size in bytes.
 	OriginConfig = ffi.MoqOriginConfig
-	// AnnounceRoute is how a broadcast advertises its exact path: its static production Cost (lower wins) and the publisher Epoch it serves (nil when unknown).
+	// AnnounceRoute is how a broadcast advertises its exact path: its static production Cost (lower wins) and, optionally, a stable Instance.
+	// A nil Instance keeps the one the broadcast minted, which it keeps across re-announcing, so a restarted
+	// publisher is a new stream viewers restart onto. Set one only for a publisher that continues its group
+	// sequences across restarts and raises Epoch on each: readers stitch every route of one instance together,
+	// so restarting the sequences under an old instance splices unrelated groups into their tracks.
 	AnnounceRoute = ffi.MoqAnnounceRoute
-	// Route is an observed route: the publisher Epoch it serves (nil when unknown), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
+	// Route is an observed route: the Instance of the stream it serves (routes with one instance are one continuous stream), the hop chain it took to reach an origin, and its static production and link cost (lower wins).
 	Route = ffi.MoqRoute
 	// Announce is a route over a prefix: the origin-relative Prefix, what each filter
 	// wildcard matched (Captures), and the Route serving it. It carries no broadcast;
-	// resolve a path with [OriginConsumer.Request].
+	// resolve a path with [OriginConsumer.Request]. Captures is a required slice,
+	// empty when the filter has no wildcards.
 	Announce = ffi.MoqAnnounce
 	// AnnounceEvent is what an AnnounceConsumer yields: AnnounceEventStart,
 	// AnnounceEventUpdate, AnnounceEventEnd, AnnounceEventRestart, or AnnounceEventTakeover.
@@ -66,7 +71,7 @@ type (
 	AnchorAbsolute = ffi.MoqAnchorAbsolute
 	// AnchorRelative is the group Groups before the latest one, clamped to group 0: 0 is the latest.
 	AnchorRelative = ffi.MoqAnchorRelative
-	// AnchorTime is the group containing TimestampUs, a presentation time in microseconds.
+	// AnchorTime is the group containing a presentation Timestamp.
 	AnchorTime = ffi.MoqAnchorTime
 	// Order is which of a subscription's pending groups the publisher sends first.
 	Order = ffi.MoqOrder
@@ -86,7 +91,7 @@ type (
 	VideoEncoderInput = ffi.MoqVideoEncoderInput
 	// VideoEncoderOutput configures the video codec, bitrate, keyframe interval, and backend preference.
 	VideoEncoderOutput = ffi.MoqVideoEncoderOutput
-	// VideoFrame is one raw video frame: pixels in the configured layout plus a presentation timestamp in microseconds.
+	// VideoFrame is one raw video frame: pixels in the configured layout plus a presentation Timestamp.
 	VideoFrame = ffi.MoqVideoFrame
 	// VideoEncoderKind selects the encoder implementation. Build one with
 	// AutoEncoder, HardwareEncoder, SoftwareEncoder, or NamedEncoder.
@@ -199,13 +204,6 @@ func QlogSupported() bool {
 // LogLevel configures the native tracing log level (e.g. "info", "debug").
 func LogLevel(level string) error {
 	return ffi.MoqLogLevel(level)
-}
-
-// MintEpoch mints a fresh publisher epoch from the wall clock and secure randomness,
-// ordered newest last. Mint one per publisher run and announce it in AnnounceRoute.Epoch, so
-// viewers see a restart as a new broadcast instead of a stalled one.
-func MintEpoch() string {
-	return ffi.MoqMintEpoch()
 }
 
 // Protocol registries and recognized kinds carried by ProtocolError.

@@ -16,13 +16,15 @@ linux/amd64, linux/arm64, darwin/arm64 (macOS 12.3+), windows/amd64.
 `moq.dev/moq/media` owns catalogs, encoded imports, and container consumers.
 Construct `NewAudioTrackProducer` / `NewVideoTrackProducer` from a broadcast, an init record,
 and a `Named` or `Requested` target. `NewCatalogProducer` holds its broadcast weakly;
-catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamps use `time.Duration`.
+catalog writes fail with `ErrClosed` after the broadcast closes. Media timestamps are exact
+`moq.Timestamp` records (`Value` at `Scale` units per second), so a 90 kHz tick survives a read and republish;
+`TimestampFromDuration` converts exactly; `TimestampToDuration` rounds down to a whole nanosecond.
 A missing data timestamp stays untimed; the library never substitutes zero or now.
 Raw tracks with a `nil` timescale are untimed on both publish and receive.
 `TrackInfo.Compress` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
-The JSON producers' `Update` / `Append` take a final `*time.Duration` timestamp argument (`nil` for untimed).
+The JSON producers' `Update` / `Append` take a final `*moq.Timestamp` argument (`nil` for untimed).
 JSON consumers return a `*Timed` holding the value and that timestamp; `SnapshotConsumer.Latest`
-skips to the newest state where `Next` yields each one. Read timestamps are rounded down to a whole microsecond.
+skips to the newest state where `Next` yields each one. A read timestamp is at the track's timescale.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.Now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -75,7 +77,7 @@ for event, err := range announced.All(ctx) {
     default:
         continue // AnnounceEventUpdate or AnnounceEventEnd
     }
-    // Prefix stays origin-relative; Captures reports what each wildcard matched.
+    // Prefix stays origin-relative; Captures is a list, empty without wildcards.
     fmt.Printf("captures: %v\n", ann.Captures)
     broadcast, err := client.Request(ctx, ann.Prefix, nil)
     if err != nil {
@@ -91,16 +93,15 @@ for event, err := range announced.All(ctx) {
 
 ```go
 import (
-    "time"
     moqvideo "moq.dev/moq/video"
 )
 
 // Publish encoded frames, or raw pixels with the codec inside the binding.
-// opusInit, packet, pts, and rgba come from your encoder or capture source.
+// opusInit, packet, pts (90 kHz ticks), and rgba come from your encoder or capture source.
 publication, _ := client.CreateBroadcast("my-stream.hang")
 broadcast := publication.Broadcast()
 audio, _ := moqmedia.NewAudioTrackProducer(broadcast, moqmedia.Named{}, moqmedia.AudioInit{Format: moqmedia.AudioFormatOpus, Data: opusInit})
-timestamp := 20 * time.Millisecond
+timestamp := moq.Timestamp{Value: 960, Scale: 48_000} // 20 ms on the Opus sample clock
 _ = audio.WriteFrame(moq.Frame{Payload: packet, Timestamp: &timestamp})
 _ = audio.Cut() // audio has no keyframes, so this is what gives it groups
 
@@ -111,15 +112,14 @@ video, _ := moqvideo.NewProducer(catalogProducer, moqvideo.ProducerOptions{
     Output: moqvideo.EncoderOutput{Codec: moq.VideoCodecH264, Kind: moq.AutoEncoder()},
     Track: &track,
 })
-_ = video.Write(moqvideo.Frame{Timestamp: time.Duration(pts) * time.Microsecond, Data: rgba})
-epoch := moq.MintEpoch() // a fresh epoch per run
-_ = publication.Announce(moq.AnnounceRoute{Epoch: &epoch})
+_ = video.Write(moqvideo.Frame{Timestamp: moq.Timestamp{Value: pts, Scale: 90_000}, Data: rgba})
+_ = publication.Announce(moq.AnnounceRoute{}) // each broadcast mints a fresh instance
 _ = audio.Finish()
 _ = video.Finish()
 broadcast.Close()    // keep the producer reachable while publishing, then close explicitly
 ```
 
-Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `Lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3.
+Raw video encoders take an exact numerator/denominator frame rate, such as 30000/1001. Producer options hold input, codec settings, track naming, and optional session bandwidth ownership; standalone encoders take only codec settings. For simulcast, give each rendition the next one down as `Lower`: it stops encoding, advertised as disabled, while its bandwidth grant cannot fund it, and resumes once the grant recovers. A rung only disables while the session probes for bandwidth, which on native transports takes moq-quic with BBR3. A pre-encoded video track takes `Lower` in its `media.VideoInit` too, which only places it one priority below; follow its reservation with `RateControl`, and while it reports disabled, drop the frames, call `SetEnabled(false)` after a `Discontinuity()`, and `SetEnabled(true)` on the keyframe that resumes it.
 
 ## Things to know
 
@@ -134,7 +134,7 @@ shows which module holds each.
 - **Timeline breaks.** On a seek or pause, call `Discontinuity()`, then keep timestamps moving forward and resume video on a keyframe.
 - **Media reads.** `media.TrackConsumer`, `audio.Consumer`, and `video.Consumer` return a `Read` in order: `ReadFrame`, a `ReadGap` where media was lost, or a `ReadEnd` where the publisher stopped its encoder. A gap breaks continuity. An encoder end is not stream EOF: following frames before its endpoint are the old encoder's drain; the first at or past it starts fresh. A decoder reads everything the track still holds unless a live player sets `Start: media.DecodeStartLatest` in its decoder output, which joins at the newest group and skips the cached backlog.
 - **Decoded frames hold decoder buffers.** `Close` each `VideoDecodedFrame` promptly, or the decoder stalls. `Resize` is best effort, so read each frame's `Width()` and `Height()`.
-- **Closing.** `client.Close()` drains for up to one second and returns an error on failure. `session.Shutdown()` requests that drain immediately; `session.Closed(ctx)` waits for its result, and `session.Cancel(code)` closes at once. Finish or abort live tracks first. Application delivery requires explicitly selecting `moq-lite-07-wip` on both peers; older Lite versions (including default lite-06) and IETF wait only for transport ACKs.
+- **Closing.** `client.Close()` drains for up to one second and returns an error on failure. `session.Shutdown()` requests that drain immediately; `session.Closed(ctx)` waits for its result, and `session.Cancel(code)` closes at once. Finish or abort live tracks first. moq-lite-05 and newer wait for the peer to receive finished tails; older Lite versions and IETF wait only for transport ACKs.
 - **Ending cleanly.** When the input ends, finish every track, then call `Finish()` on its `media.CatalogProducer` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `broadcast.Close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close, or released without a finish, ends with `Unroutable`, which readers take as the publisher leaving.
 - **Stats.** `Session().Stats()` reports `RTT`, `EstimatedSendRateBps`, and the byte and packet counters (`BytesSent`, `BytesReceived`, `BytesLost`, `PacketsSent`, `PacketsReceived`, `PacketsLost`). A field is nil when the transport does not report it, which is not the same as zero. `Version` names the negotiated protocol. `Dial` returns a connecting session; read `Session().State()` and wait with `StateChanged(ctx, state.Revision)` to observe first-dial failures and reconnects. Hold the owned `BandwidthConsumer` returned by `Session().RecvBandwidth()` to receive bandwidth estimates. `Rate()` reads the current estimate in bits per second and `RateChanged(ctx)` waits for a new one. Calling `Close()` on the last consumer stops PROBE; the session and stats snapshots do not request it. Client consumers survive reconnects and report no estimate while disconnected.
 - **Authorization.** On `moq-lite-07-wip` (opt in with `ClientConfig.Versions`) and on moq-transport draft-18+ with the [MoQ Auth extension](/draft/moq-auth), `Session().Grants()` returns a `GrantConsumer`: `Grant()` is the `Grant` the relay sent back, nil until it answers and while a client session reconnects, and `Changed(ctx)` waits for the next one. `Close()` it when done.

@@ -69,9 +69,7 @@ async fn closing_a_cluster_closes_its_static_dials() {
 	let runtime = dialer_runtime();
 	let cluster = runtime
 		.spawn(async move {
-			let cluster = moq_relay::cluster::Cluster::new(options)
-				.expect("cluster init")
-				.with_connect(connect, quic);
+			let cluster = crate::spawn_cluster(options).with_connect(connect, quic);
 			let started = cluster.clone().start().await.expect("cluster start");
 			tokio::spawn(started.run());
 			cluster
@@ -101,9 +99,7 @@ async fn closing_a_cluster_ends_its_websocket_dials() {
 	let mut options = moq_relay::cluster::Options::new(Default::default());
 	options.config.connect = vec![moq_relay::cluster::Peer::new(format!("ws://127.0.0.1:{port}/"))];
 	let (connect, quic) = dial_template();
-	let cluster = moq_relay::cluster::Cluster::new(options)
-		.expect("cluster init")
-		.with_connect(connect, quic);
+	let cluster = crate::spawn_cluster(options).with_connect(connect, quic);
 	let started = cluster.clone().start().await.expect("cluster start");
 	let running = tokio::spawn(started.run());
 

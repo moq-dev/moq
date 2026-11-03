@@ -1,7 +1,6 @@
 //! Cost of one merged group frame from [`moq_stats::aggregate`], swept over live nodes and
 //! nodes that have come and gone, with and without the grace that folds departed nodes away.
-//! Compare known metadata with one touched publisher losing and recovering its epoch,
-//! and with live nodes that resumed after their open pairs were closed.
+//! Compare steady nodes with live nodes that resumed after their open pairs were closed.
 //!
 //! Each node reports the same broadcast paths, like a restarted node under a new name. A bounded
 //! aggregate's cost follows the live nodes; an unbounded one (`grace` never elapsing) also pays for
@@ -18,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use moq_net::{Epoch, origin};
+use moq_net::{Instance, origin};
 use moq_stats::{Group, Traffic, aggregate, group_track};
 
 /// Broadcast paths each node reports.
@@ -41,8 +40,7 @@ struct Body {
 /// default-tier egress.
 struct Node {
 	source: moq_net::origin::Publication,
-	epoch: Epoch,
-	known: bool,
+	epoch: Instance,
 	group: moq_json::snapshot::Producer<Body>,
 	frame: Body,
 }
@@ -50,9 +48,9 @@ struct Node {
 impl Node {
 	fn new(origin: &origin::Producer, name: &str) -> Self {
 		let source = origin.create_broadcast(format!(".stats/node/{name}").as_str()).unwrap();
-		let epoch = Epoch::mint();
+		let epoch = Instance::random();
 		source
-			.announce(origin::Route::default().with_epoch(epoch.clone()))
+			.announce(origin::Route::default().with_instance(epoch.clone(), 0))
 			.unwrap();
 		let track = source
 			.create_track(
@@ -68,13 +66,12 @@ impl Node {
 			group.paths.entry(format!("acme/room-{key:02}")).or_default().publisher = traffic;
 		}
 		let frame = Body {
-			epoch: Epoch::mint().to_string(),
+			epoch: "01900000-0000-7000-8000-000000000001".to_string(),
 			tiers: BTreeMap::from([(String::new(), group)]),
 		};
 		Self {
 			source,
 			epoch,
-			known: true,
 			group: moq_json::snapshot::Producer::new(track, config),
 			frame,
 		}
@@ -110,7 +107,6 @@ async fn read_until(traffic: &mut aggregate::GroupConsumer, want: u64) {
 #[derive(Clone, Copy)]
 enum State {
 	Known,
-	Mixed,
 	Resumed,
 }
 
@@ -148,7 +144,7 @@ async fn measure(live: usize, departed: usize, grace: Duration, state: State) ->
 				}
 			}
 			node.source
-				.announce(origin::Route::default().with_epoch(node.epoch.clone()))
+				.announce(origin::Route::default().with_instance(node.epoch.clone(), 0))
 				.unwrap();
 			node.publish(1);
 			total += 1;
@@ -163,14 +159,6 @@ async fn measure(live: usize, departed: usize, grace: Duration, state: State) ->
 	for frame in 0..=FRAMES {
 		let node = &mut nodes[frame as usize % live];
 		let start = Instant::now();
-		if matches!(state, State::Mixed) {
-			node.known = !node.known;
-			let mut route = origin::Route::default();
-			if node.known {
-				route.epoch = Some(node.epoch.clone());
-			}
-			node.source.announce(route).unwrap();
-		}
 		node.publish(1);
 		total += 1;
 		read_until(&mut traffic, total).await;
@@ -200,11 +188,7 @@ fn main() {
 	for live in [1, 16, 128] {
 		for departed in [0, 256, 4096] {
 			for (label, grace) in [("1s", GRACE), ("never", Duration::MAX)] {
-				for (metadata, state) in [
-					("known", State::Known),
-					("mixed", State::Mixed),
-					("resumed", State::Resumed),
-				] {
+				for (metadata, state) in [("known", State::Known), ("resumed", State::Resumed)] {
 					let elapsed = runtime.block_on(measure(live, departed, grace, state));
 					let micros = elapsed.as_secs_f64() * 1e6;
 					println!("{live:>4} {departed:>8} {label:>5} {metadata:>8} {micros:>11.1}");

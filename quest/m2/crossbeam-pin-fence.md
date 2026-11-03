@@ -2,14 +2,18 @@
 
 ## Goal
 
-Waiting on upstream crossbeam. Once
-[crossbeam-rs/crossbeam#1352](https://github.com/crossbeam-rs/crossbeam/issues/1352)
-is fixed in a released crossbeam-epoch, the workspace takes that release and
+The workspace takes a crossbeam-epoch release that fixes `Local::pin`, and
 kio's `fence(Release)` in `Read::drop` (`rs/kio/src/log.rs`) is deleted, with
 kio's log tests still passing on ARM.
 
-Check #1352's state and crossbeam-epoch's latest release. Delete this quest if
-upstream declines the fix.
+## Waiting
+
+- crossbeam-rs/crossbeam: a released crossbeam-epoch fixes
+  [crossbeam-rs/crossbeam#1352](https://github.com/crossbeam-rs/crossbeam/issues/1352)
+  (the fix is proposed in
+  [crossbeam-rs/crossbeam#1355](https://github.com/crossbeam-rs/crossbeam/pull/1355)).
+  Check #1352's state and crossbeam-epoch's latest release. Delete this quest
+  if upstream declines the fix.
 
 ## Plan
 

@@ -17,8 +17,11 @@ demuxed packets. That is more code, but it removes the dependency on
 upstream (now rosalyntg/srt-rs) has not been pushed since 2024-05, and its
 maintainer said they do not actively support it.
 
-The demux side is the flow table from [UDP demux](/quest/m2/p2p/udp-demux.md):
-a 4-tuple already pinned to WebRTC (ICE succeeded) is never tested for SRT.
+The demux side extends `moq_sock::demux`, whose `Flows` table today pins a
+remote to WebRTC only, and the tokio listener's `quic::demux::Demux`, which
+diverts inline in the QUIC socket's receive: add an SRT class with its own
+feed and bounded `Queue`, and an owner per pin. A 4-tuple already pinned to
+WebRTC (ICE succeeded) is never tested for SRT.
 An unknown 4-tuple whose full SRT handshake header matches (control bit,
 type 0, and the SRT magic, not merely `80 00`) pins to SRT provisionally:
 the provisional table is small and bounded, per-source rate limited, and an
@@ -43,7 +46,3 @@ clock, so `tokio::time::pause` cannot drive its idle timeout.
 Tests: `moq-srt`'s existing integration test runs against the shared socket
 with a QUIC client active on the same port; a QUIC short header from a new
 4-tuple during an SRT session still reaches QUIC.
-
-## Required
-
-- [UDP demux](/quest/m2/p2p/udp-demux.md)

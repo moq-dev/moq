@@ -429,7 +429,7 @@ impl Producer {
 	}
 
 	/// Start every enabled video rendition's init build, then resolve once one of them has its
-	/// init and is [advertised](Rendition::is_advertised), so a manifest lists it, or none is left
+	/// init and lists a segment of its own, so a manifest lists it, or none is left
 	/// that listings do not refuse: a denied or failed one can never be listed. A build that has
 	/// nothing to read from yet starts on the wake that indexes its media.
 	#[cfg_attr(
@@ -453,7 +453,7 @@ impl Producer {
 						// Rerun on every wake: `poll_refused` registered `waiter` on its records, so
 						// the rows a build needs wake this wait to start it.
 						rendition.start_init();
-						rendition.poll_init(waiter).is_ready() && rendition.poll_advertised(waiter).is_ready()
+						rendition.poll_init(waiter).is_ready() && rendition.poll_represented(waiter).is_ready()
 					}) {
 					Poll::Ready(())
 				} else {
