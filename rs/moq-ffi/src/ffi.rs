@@ -313,6 +313,8 @@ impl Drop for Root {
 		let _root = InRoot::enter();
 		let pending = self.pending.lock().take();
 		drop(pending);
+		// Here rather than after this returns, so their teardown wakes still see the root.
+		drop(std::mem::replace(&mut self.children, kio::Tasks::new()));
 	}
 }
 
@@ -1173,6 +1175,51 @@ mod tests {
 
 		release.send(()).unwrap();
 		runtime.shutdown();
+	}
+
+	/// Children released by the root's teardown wake host calls off the root too.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn root_teardown_wakes_host_calls_off_the_root() {
+		struct Record(std::sync::Mutex<std::sync::mpsc::Sender<std::thread::ThreadId>>);
+		impl std::task::Wake for Record {
+			fn wake(self: Arc<Self>) {
+				self.wake_by_ref();
+			}
+			fn wake_by_ref(self: &Arc<Self>) {
+				let _ = self.0.lock().unwrap().send(std::thread::current().id());
+			}
+		}
+
+		let mut root = Root {
+			pending: kio::Shared::new(Some(Vec::new())),
+			children: kio::Tasks::new(),
+		};
+		let held = kio::Producer::new(());
+		let consumer = held.consume();
+		root.pending.lock().as_mut().unwrap().push(Child {
+			future: Some(Box::pin(async move {
+				let _held = held;
+				std::future::pending().await
+			})),
+			result: kio::Producer::new(None),
+		});
+		// Enroll the child, so the teardown below releases it from the child set.
+		assert!(root.poll(&kio::Waiter::noop()).is_pending());
+
+		let mut call = Box::pin(host(kio::wait(|waiter| consumer.poll(waiter, |_| Poll::<()>::Pending))));
+		let (woke, woken) = std::sync::mpsc::channel();
+		let waker = Waker::from(Arc::new(Record(std::sync::Mutex::new(woke))));
+		assert!(call.as_mut().poll(&mut Context::from_waker(&waker)).is_pending());
+
+		drop(root);
+		let woken = woken
+			.recv_timeout(Duration::from_secs(5))
+			.expect("teardown wakes the call");
+		assert_ne!(
+			woken,
+			std::thread::current().id(),
+			"the continuation ran inside the root"
+		);
 	}
 
 	/// A state that reports its own drop, which is what a terminal cancel has to trigger.
