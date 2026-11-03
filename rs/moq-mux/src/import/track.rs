@@ -1369,6 +1369,55 @@ mod tests {
 			.expect("the track ended without a frame")
 	}
 
+	async fn headers_survive_reset(format: VideoFormat, init: Vec<u8>, keyframe: Vec<u8>) {
+		for seek in [false, true] {
+			let (broadcast, catalog) = new_broadcast();
+			let consumer = broadcast.consume();
+			let mut import = Track::video(
+				broadcast.reserve_track("video").unwrap(),
+				catalog.reserve(),
+				VideoInit::new(format, init.clone()),
+			)
+			.unwrap();
+			// Repeated timeline breaks must retain the init until a picture uses it.
+			for _ in 0..2 {
+				if seek {
+					import.seek(7).unwrap();
+				} else {
+					import.discontinuity().unwrap();
+				}
+			}
+			let timestamp = Timestamp::from_micros(1_000).unwrap();
+			import.decode(&keyframe, Some(timestamp)).unwrap();
+			import.finish().unwrap();
+			let frame = first_frame(&consumer, "video").await;
+			assert!(frame.keyframe, "{format}, seek={seek}");
+			assert_eq!(frame.timestamp, timestamp, "{format}, seek={seek}");
+			assert_eq!(
+				frame.payload.as_ref(),
+				[init.as_slice(), &keyframe].concat(),
+				"{format}, seek={seek}"
+			);
+		}
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn avc3_init_headers_survive_reset() {
+		headers_survive_reset(VideoFormat::Avc3, h264_init(), annexb(&[H264_IDR])).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn hev1_init_headers_survive_reset() {
+		use crate::codec::h265::fixtures::{PPS, SPS, VPS};
+		headers_survive_reset(VideoFormat::Hev1, annexb(&[VPS, SPS, PPS]), annexb(&[H265_IDR])).await;
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn av01_init_headers_survive_reset() {
+		let (av1c, _) = av1_init_and_keyframe();
+		headers_survive_reset(VideoFormat::Av01, av1c[4..].to_vec(), vec![0x32, 0x01, 0x10]).await;
+	}
+
 	/// Every video format a binding can hand [`Track::video`] lands a keyframe on
 	/// its track. The facade dispatches per codec, and before this only Avc3,
 	/// Hvc1, and VP8 had ever decoded through it.

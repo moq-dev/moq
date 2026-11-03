@@ -31,6 +31,8 @@ pub struct Split {
 	/// NAL here until the next start code arrives or [`flush`](Self::flush) drains it.
 	tail: BytesMut,
 	current: Avc3Frame,
+	/// Once a picture has completed, resets discard the whole pending access unit.
+	started: bool,
 	/// Retained SPS NALs from the latest keyframe that carried them, re-injected
 	/// on bare keyframes. Replaced (not accumulated) when a keyframe presents a
 	/// different set, so a mid-stream reinit drops the superseded ones.
@@ -81,6 +83,7 @@ impl Split {
 		Self {
 			tail: BytesMut::new(),
 			current: Avc3Frame::default(),
+			started: false,
 			sps: ParameterSets::new(),
 			pps: ParameterSets::new(),
 			zero: None,
@@ -219,6 +222,7 @@ impl Split {
 			return Ok(());
 		}
 		let payload = std::mem::take(&mut self.current.chunks).freeze();
+		self.started = true;
 		// A clean IDR or an open-GOP recovery point both mark a tune-in point.
 		let keyframe = self.current.contains_idr || self.current.contains_recovery_point;
 		self.current.contains_idr = false;
@@ -236,15 +240,21 @@ impl Split {
 		Ok(())
 	}
 
-	/// Drop any in-flight access unit, and any frame completed but not yet returned.
+	/// Drop any in-flight picture, and any frame completed but not yet returned.
 	///
 	/// Pre-reset NALs would otherwise leak into a later frame with the wrong
 	/// timestamp, and a frame queued before a failed [`decode`](Self::decode) would
 	/// surface on the next call. The parameter-set cache is kept so subsequent
-	/// keyframes stay self-contained.
+	/// keyframes stay self-contained. Before the first picture, a prefix with no
+	/// slice keeps its init parameter sets, including a final parameter-set NAL
+	/// waiting for a start code.
 	pub fn reset(&mut self) {
-		self.current = Avc3Frame::default();
-		self.tail.clear();
+		if self.started || self.current.contains_slice {
+			self.current = Avc3Frame::default();
+			self.tail.clear();
+		} else if !InBandCodec::H264.parameter_set_tail(&self.tail) {
+			self.tail.clear();
+		}
 		self.pending.clear();
 	}
 
@@ -413,6 +423,41 @@ mod tests {
 		let tail = split.flush(ts()).unwrap();
 		assert_eq!(tail.len(), 1);
 		assert!(!tail[0].keyframe);
+	}
+
+	#[tokio::test(start_paused = true)]
+	async fn reset_keeps_headers_but_discards_pictures_and_queued_frames() {
+		let sps: &[u8] = &[0x67, 0x42, 0xc0, 0x1f, 0xde];
+		let pps: &[u8] = &[0x68, 0xce, 0x3c, 0x80];
+		let idr: &[u8] = &[0x65, 0x88, 0x84, 0x21];
+		let delta: &[u8] = &[0x61, 0xe0, 0x12, 0x34];
+		let aud: &[u8] = &[0x09, 0x10];
+		let mut split = Split::new();
+		assert!(decode_one(&mut split, &mut annexb(&[sps, pps]), ts()).is_empty());
+		// The last NAL may instead be an incomplete slice: it must not survive.
+		assert!(split.decode(&annexb(&[&[0x61]]), ts()).unwrap().is_empty());
+		split.reset();
+		let next = moq_net::Timestamp::from_micros(1_000).unwrap();
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].payload, annexb(&[sps, pps, idr]));
+		assert_eq!(frames[0].timestamp, next);
+
+		// After the first picture, even a slice-less prefix belongs to the discarded AU.
+		assert!(decode_one(&mut split, &mut annexb(&[sps, pps, aud]), ts()).is_empty());
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1);
+		assert_eq!(frames[0].payload, annexb(&[sps, pps, idr]));
+
+		// The delta queues the preceding IDR, then an invalid NAL fails decode.
+		assert!(split.decode(&annexb(&[idr, delta, &[0x80], aud]), ts()).is_err());
+		split.reset();
+		let frames = decode_one(&mut split, &mut annexb(&[idr]), next);
+		assert_eq!(frames.len(), 1, "neither the queued IDR nor the partial delta survives");
+		assert_eq!(frames[0].payload, annexb(&[sps, pps, idr]));
+		assert!(frames[0].keyframe);
+		assert_eq!(frames[0].timestamp, next);
 	}
 
 	/// A source that defines two PPS once, then sends a bare IDR (no inline
