@@ -70,17 +70,15 @@ token-full:
 # carries client toolchains; moq is built separately here. Override the source
 # with SMOKE_FLAKE (e.g. a fork or a pinned ref).
 SMOKE_FLAKE := env_var_or_default("SMOKE_FLAKE", "github:moq-dev/moq")
-CACHIX_SUB := "https://kixelated.cachix.org"
-CACHIX_KEY := "kixelated.cachix.org-1:CmFcV0lyM6KuVM2m9mih0q4SrAa0XyCsiM7GHrz3KKk="
 
 nix-channel *args:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "building moq-relay + moq from {{ SMOKE_FLAKE }} (latest)..."
+    # --accept-flake-config substitutes from the cache the flake's nixConfig
+    # names (nix.moq.dev).
     nix_build() {
-        nix build --refresh --no-link --print-out-paths \
-            --extra-substituters "{{ CACHIX_SUB }}" \
-            --extra-trusted-public-keys "{{ CACHIX_KEY }}" "$1"
+        nix build --refresh --no-link --print-out-paths --accept-flake-config "$1"
     }
     relay=$(nix_build '{{ SMOKE_FLAKE }}#moq-relay')
     cli=$(nix_build '{{ SMOKE_FLAKE }}#moq')

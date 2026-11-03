@@ -44,17 +44,18 @@ Then confirm the rest, and record the numbers in the PR that closes this:
   `release-nix.yml` succeeding on all three legs and the clean-machine
   `nix run` above substitutes (decided 2026-10-29): that is the first release
   a downstream user could fetch from `nix.moq.dev`. Then delete the
-  `CACHIX_AUTH_TOKEN` secret and the `kixelated` Cachix cache, `smoke.yml`'s
-  Cachix substituter and its push step for the nix channel, and
-  `CACHIX_SUB`/`CACHIX_KEY` in `test/smoke/justfile`.
-- In the same change, `cache.yml` also pushes the `moq-relay` and `moq`
-  runtime closures to `nix-ci-moq-dev` (decided 2026-10-29). The smoke nix
-  channel builds `main` HEAD's `moq-relay` and `moq` packages, which
-  `cache.yml` does not push yet, so without a replacement each new HEAD
-  compiles for 20-43 minutes there. `cache.yml` already holds the write
-  credentials on every merge, so smoke needs no secret: it substitutes with
-  `--accept-flake-config` (or `nix.moq.dev` as a substituter) in place of the
-  Cachix one.
+  `CACHIX_AUTH_TOKEN` secret and the `kixelated` Cachix cache.
+  [moq-dev/moq#7431](https://github.com/moq-dev/moq/pull/7431) already
+  dropped Cachix from `main` (decided 2026-11-02, in place of moving its token
+  into `cache-write`): Smoke's nix channel substitutes from `nix.moq.dev` and
+  no longer pushes. `release` keeps `cachix.yml` until that cut merges `main`
+  into it.
+- Also push the `moq-relay` and `moq` runtime closures to `nix-ci-moq-dev`
+  (decided 2026-10-29). The smoke nix channel builds `main` HEAD's
+  `moq-relay` and `moq` packages, which nothing caches since Smoke stopped
+  pushing to Cachix, so each new HEAD compiles for 20-43 minutes there.
+  `cache.yml` already holds the write credentials on every merge, so smoke
+  needs no secret.
 
 ## Related
 
