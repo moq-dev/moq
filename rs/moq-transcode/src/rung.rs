@@ -86,6 +86,8 @@ pub(crate) struct Rung {
 	pub resize: moq_video::resize::Config,
 	/// Where to report that this rung is encoding.
 	pub active: crate::active::Producer,
+	/// The handle this rung's output is counted on, the one a caller bills.
+	pub rendition: crate::active::Rendition,
 	/// Fires when the ladder resizes past this rung.
 	pub retire: Retire,
 }
@@ -99,7 +101,12 @@ impl Rung {
 		Ok(moq_mux::catalog::hang::Container::try_from(&self.config)?)
 	}
 
-	/// An encoder producing this rung's rendition.
+	/// An encoder producing this rung's rendition, scaling what it is fed to the
+	/// rung size.
+	///
+	/// The scale runs on the sink's own thread rather than the caller's: frames
+	/// arrive at the source's native size (one decode feeds every rung), and a
+	/// CPU resize per rung per frame on the rung task would pin runtime workers.
 	///
 	/// `color` is the space the frames reaching it are in, as the decoder
 	/// labelled them. A rung below 576 lines fed by an HD source carries the
@@ -112,12 +119,13 @@ impl Rung {
 	/// backend's COM apartment is per-thread, so that would leak the opening
 	/// worker's initialization and uninitialize COM on one that never initialized
 	/// it. The sink owns a thread and stays on it.
-	async fn encode(&self, color: Option<moq_video::Color>) -> Result<moq_video::encode::Sink, Error> {
+	async fn encode(&self, color: moq_video::Color) -> Result<moq_video::encode::Sink, Error> {
 		let framerate = self.info.framerate.unwrap_or(moq_video::FrameRate::new(30, 1).unwrap());
 		let mut config = moq_video::encode::Config::new(self.info.size.width, self.info.size.height, framerate);
 		config.bitrate = Some(self.info.bitrate);
 		config.kind = self.encoder.clone();
-		config.color = color;
+		config.color = Some(color);
+		config.resize = Some(self.resize);
 		// Every source group boundary is a cut; the keyframe interval is only a
 		// backstop against pathologically long source groups.
 		config.gop = moq_video::encode::Gop::keyframe_every(std::time::Duration::from_secs(8), framerate);
@@ -229,9 +237,10 @@ async fn until_wanted(demand: &moq_net::track::Demand, wanted: bool) -> moq_net:
 }
 
 /// The live path: wait for demand, attach to the shared decode [`Feed`], and
-/// resize + encode its frames group for group until demand goes away. The
-/// heavy lifting (subscription, decode) is shared with every other active rung
-/// of this source; only the per-rung resize and encode happen here.
+/// encode its frames group for group until demand goes away. The heavy lifting
+/// (subscription, decode) is shared with every other active rung of this
+/// source; only the per-rung resize and encode are this rung's, and both run on
+/// its encoder's thread.
 ///
 /// Reports how it ended rather than ending the track: [`serve`] owns that, once
 /// the fetches in flight can no longer add a group.
@@ -269,7 +278,7 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 		// Attach the meter here rather than at the first frame: it counts nothing
 		// until this pipeline encodes one, so a subscriber waiting on a stalled
 		// source is not billed for a session that produced nothing.
-		let active = rung.active.attach(&rung.info);
+		let active = rung.active.attach(&rung.rendition);
 
 		// One listener + encoder per demand session: rate control persists
 		// across groups, while every group still opens with a forced IDR.
@@ -369,9 +378,17 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 						// reaches every subscriber through the shared track cache,
 						// so skip it here. Residual: if that fetch then fails and
 						// aborts the group, this rung skips one GOP until the next
-						// keyframe. Unifying live + fetch into one cache-backed
-						// serving loop (like the relay) would remove the two-writer
-						// race entirely; tracked as a follow-up.
+						// keyframe.
+						//
+						// The two paths stay separate writers on purpose. This one
+						// rides the shared feed (one decoder for every rung) and keeps
+						// its encoder's rate control across groups; a fetch decodes one
+						// past group on its own, at whatever pace the source serves it,
+						// with a fresh codec pair. Folding the fetch into this loop
+						// would either stall the live edge behind a past group's decode
+						// or give up the shared decode, and the track cache already
+						// settles who writes a sequence: the first `create_group` or
+						// `accept` wins, and the other sees `Duplicate`.
 						Err(moq_net::Error::Duplicate) => None,
 						Err(err) => return Err(err.into()),
 					};
@@ -387,14 +404,10 @@ async fn live(rung: &Rung, producer: &mut moq_net::track::Producer) -> Result<En
 						continue;
 					};
 
-					// The feed decodes at the source's native size; size this rung's copy
-					// here. Supported GPU paths feed the encoder without touching the
-					// CPU. The resize carries the source's color space across, which is
-					// what the encoder signals.
-					let frame: Arc<moq_video::Frame> = match frame.size() == rung.info.size {
-						true => frame,
-						false => Arc::new(frame.resize(rung.info.size, &rung.resize)?),
-					};
+					// The feed decodes at the source's native size; the encoder sizes
+					// this rung's copy on its own thread. Supported GPU paths feed the
+					// encoder without touching the CPU. The resize carries the source's
+					// color space across, which is what the encoder signals.
 					write(output, &active, encoder.encode(rung, frame).await?)?;
 				}
 				Some(Item::End) => {
@@ -648,7 +661,7 @@ async fn fetch(rung: &Rung, fill: &moq_net::track::Fill, sequence: u64) -> Resul
 	// A fetch builds its own pipeline, so it is billable work even when the
 	// live path is idle. Reference counted, so overlapping the live session
 	// bills the rendition once rather than twice.
-	let active = rung.active.attach(&rung.info);
+	let active = rung.active.attach(&rung.rendition);
 	transcode_group(pipeline, &container, &mut source, Writing(Some(output)), &active).await?;
 	Ok(())
 }
@@ -757,12 +770,11 @@ fn write(
 /// rung's resolution (`decode::Config::scale_hint`). A decoder with a hardware
 /// scaler (NVDEC) does, and its GPU frames feed the encoder in place: the NVDEC
 /// -> NVENC path never touches the CPU. Frames that come back at any other size
-/// get `Frame::resize` instead.
+/// are resized by the encoder, on its own thread.
 struct Pipeline {
 	decoder: moq_video::decode::Sink,
 	encoder: Encoder,
 	rung: Rung,
-	size: moq_video::Size,
 }
 
 impl Pipeline {
@@ -779,7 +791,6 @@ impl Pipeline {
 			decoder,
 			encoder: Encoder::default(),
 			rung: rung.clone(),
-			size: rung.info.size,
 		})
 	}
 
@@ -800,20 +811,9 @@ impl Pipeline {
 
 		let mut encoded = Vec::new();
 		for raw in self.decoder.decode(payload, timestamp, keyframe).await? {
-			encoded.extend(self.encode_frame(raw).await?);
+			encoded.extend(self.encoder.encode(&self.rung, raw).await?);
 		}
 		Ok(encoded)
-	}
-
-	/// Resize and encode one decoded frame.
-	async fn encode_frame(&mut self, raw: moq_video::Frame) -> Result<Vec<moq_video::encode::Encoded>, Error> {
-		// Already at the rung size (the decoder scaled): feed the frame through
-		// as-is, keeping a GPU frame on the GPU.
-		let raw = match raw.size() == self.size {
-			true => raw,
-			false => raw.resize(self.size, &self.rung.resize)?,
-		};
-		self.encoder.encode(&self.rung, raw).await
 	}
 
 	/// Drain the decoder and then the encoder, keeping every frame's timestamp.
@@ -823,7 +823,7 @@ impl Pipeline {
 	async fn finish(mut self) -> Result<Vec<moq_video::encode::Encoded>, Error> {
 		let mut encoded = Vec::new();
 		for raw in self.decoder.flush().await? {
-			encoded.extend(self.encode_frame(raw).await?);
+			encoded.extend(self.encoder.encode(&self.rung, raw).await?);
 		}
 
 		encoded.extend(self.encoder.finish().await?);
@@ -840,7 +840,7 @@ impl Pipeline {
 #[derive(Default)]
 struct Encoder {
 	/// The open encoder and the space it signals.
-	open: Option<(moq_video::encode::Sink, Option<moq_video::Color>)>,
+	open: Option<(moq_video::encode::Sink, moq_video::Color)>,
 	/// A cut asked for while no encoder was open, applied when one opens.
 	pending_cut: bool,
 }
@@ -855,7 +855,7 @@ impl Encoder {
 		Ok(())
 	}
 
-	/// Encode one frame at the rung size, reopening first if its space changed.
+	/// Encode one frame, at any size, reopening first if its space changed.
 	///
 	/// The previous encoder's tail comes out ahead of the frame, in order.
 	async fn encode(
@@ -864,7 +864,14 @@ impl Encoder {
 		frame: impl Into<Arc<moq_video::Frame>>,
 	) -> Result<Vec<moq_video::encode::Encoded>, Error> {
 		let frame = frame.into();
-		let color = frame.surface.color();
+		// The space the encoder will see, after it scales the frame: an unlabelled
+		// source means what its own size implies, and the resize labels it so.
+		// Left to the encoder's own guess, an HD frame scaled below 576 lines would
+		// arrive as BT.709 at an encoder signalling BT.601 and be refused.
+		let color = frame
+			.surface
+			.color()
+			.unwrap_or_else(|| moq_video::Color::infer(frame.size()));
 		let mut encoded = Vec::new();
 		if let Some((_, signalled)) = &self.open
 			&& *signalled != color
@@ -927,14 +934,17 @@ mod tests {
 			level: 30,
 		});
 		let (trigger, retire) = Retire::channel();
+		let info = Resolved {
+			name: "video/120p".into(),
+			short_side: 120,
+			size: moq_video::Size::new(160, 120),
+			bitrate: moq_net::bandwidth::Rate::from_bps(100_000),
+			framerate: None,
+		};
+		let active = crate::active::Producer::default();
 		let rung = Rung {
-			info: Resolved {
-				name: "video/120p".into(),
-				short_side: 120,
-				size: moq_video::Size::new(160, 120),
-				bitrate: moq_net::bandwidth::Rate::from_bps(100_000),
-				framerate: None,
-			},
+			rendition: active.rendition(&info),
+			info,
 			source: "video".into(),
 			feed: Feed::new(
 				broadcast.clone(),
@@ -947,7 +957,7 @@ mod tests {
 			encoder: moq_video::encode::Kind::Software,
 			decoder: moq_video::decode::Kind::Software,
 			resize: Default::default(),
-			active: Default::default(),
+			active,
 			retire,
 		};
 		(rung, source, trigger)
@@ -1089,7 +1099,28 @@ mod tests {
 		assert!(switched.last().expect("the switched frame").keyframe);
 	}
 
-	/// A fetched NVDEC group reaches `Frame::resize` at native size when
+	/// An unlabelled HD frame means BT.709, and scaling it to an SD rung keeps
+	/// that label. The rung's encoder has to signal it too, rather than the
+	/// BT.601 its own size implies, or it refuses the frame it scaled.
+	#[tokio::test]
+	#[cfg(feature = "openh264")]
+	async fn an_unlabelled_hd_frame_encodes_on_an_sd_rung() {
+		let (rung, _source, _retire) = idle_rung();
+		let hd = moq_video::Size::new(1280, 720);
+		let i420 = moq_video::I420::new(hd, vec![128; hd.pixels() as usize * 3 / 2]).unwrap();
+		let frame = moq_video::Frame::new(
+			moq_video::Surface::I420(i420),
+			moq_net::Timestamp::from_micros(0).unwrap(),
+		);
+
+		let mut encoder = Encoder::default();
+		encoder.cut().await.unwrap();
+		let mut encoded = encoder.encode(&rung, frame).await.unwrap();
+		encoded.extend(encoder.finish().await.unwrap());
+		assert!(encoded.first().expect("the frame").keyframe);
+	}
+
+	/// A fetched NVDEC group reaches the encoder at native size when
 	/// CPU output is forced, rather than being resized in the decoder first.
 	#[test]
 	fn forced_cpu_skips_the_decoder_scaler() {
@@ -1122,7 +1153,7 @@ mod tests {
 			.create_track("video/120p", hang::container::track_info(hang::catalog::PRIORITY.video))
 			.unwrap();
 		let mut group = track.create_group(moq_net::group::Info { sequence: 0 }).unwrap();
-		let guard = active.attach(&rung);
+		let guard = active.attach(&active.rendition(&rung));
 
 		// The second frame cannot be expressed in the container's timescale, so it
 		// fails to write while the first is already on the group.

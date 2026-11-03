@@ -548,7 +548,10 @@ impl Bbr3 {
             Ord::max(MIN_MAX_DATAGRAM_SIZE, init.mtu) as u64,
             MAX_DATAGRAM_SIZE,
         );
-        let initial_cwnd = config.initial_window;
+        let min_pipe_cwnd = 4 * smss;
+        // The 1200-based default may not hold one datagram of a larger MTU, which would block
+        // the first packet with nothing in flight to ever open the window.
+        let initial_cwnd = config.initial_window.max(min_pipe_cwnd);
         let startup_pacing_gain = config.startup_pacing_gain.unwrap_or(STARTUP_PACING_GAIN);
         let default_pacing_gain = config.default_pacing_gain.unwrap_or(DEFAULT_PACING_GAIN);
         let probe_bw_down_pacing_gain = config
@@ -606,7 +609,7 @@ impl Bbr3 {
             round_start: true,
             next_round_delivered: 0,
             idle_restart: false,
-            min_pipe_cwnd: 4 * smss, /* 4 * C.SMSS as defined in <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.8> */
+            min_pipe_cwnd, /* 4 * C.SMSS as defined in <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-06.html#section-2.8> */
             max_bw: 0.0,
             bw_shortterm: f64::INFINITY,
             undo_bw_shortterm: f64::INFINITY,
@@ -2044,7 +2047,8 @@ pub struct Config {
 impl Config {
     /// Default limit on the amount of outstanding data in bytes.
     ///
-    /// Recommended value: `min(10 * max_datagram_size, max(2 * max_datagram_size, 14720))`
+    /// Recommended value: `min(10 * max_datagram_size, max(2 * max_datagram_size, 14720))`.
+    /// Raised to at least four datagrams of the path MTU, BBR's `MinPipeCwnd`.
     pub fn initial_window(&mut self, value: u64) -> &mut Self {
         self.initial_window = value;
         self
