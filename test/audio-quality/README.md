@@ -130,7 +130,7 @@ The shaper's profiles are synthetic. [`traces/`](traces) holds real arrivals, ea
 | --- | --- |
 | `relay-bbb` | the public relay's `bbb.hang`: one AAC frame per group, flushed in bursts of about seven, the flush-span shape #3477 measured |
 | `local-aac` | this harness's AAC publisher through a local relay: the shallow control |
-| `relay-mic` | `<moq-publish>` in headless Chromium, publishing its fake capture device through the public relay |
+| `relay-mic` | `<moq-publish>` through the public relay: headless Chromium's fake capture device, or with `--mic-broadcast`, a real browser and microphone publishing by hand |
 | `bursty-aac` | a nightly `bursty` AAC row's capture: each flush delivered newest first, which kept the player re-stalling until the estimator measured reordered frames |
 
 A trace is a [`Trace`](clients/js/src/schema.ts): the catalog's audio rendition, the smallest
@@ -157,7 +157,13 @@ its budgets are exactly what it measured.
 ```bash
 just test audio-quality-record                        # the three recorded lanes, 35 s each, needs the network
 just test audio-quality-record --lanes relay-bbb
+just test audio-quality-record --lanes relay-mic --mic-broadcast <name>
 ```
+
+`--mic-broadcast` records `relay-mic` from a broadcast already publishing audio on the public relay's
+`anon` path, such as the demo's publish page pointed at `https://cdn.moq.dev/anon` with a real
+microphone, instead of publishing Chromium's fake capture device. Name the browser and device in
+the trace's `source` before checking it in.
 
 Version 3 adds per-frame durations. The AAC-LC recordings made before that field existed retain
 their arrival clocks and use the codec's fixed 1024 samples per frame. The Opus `relay-mic` recording

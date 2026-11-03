@@ -28,18 +28,25 @@ fixtures retain their original arrivals with exact 1024-sample durations;
 `relay-mic` was re-recorded with Chromium's fake capture device because the
 old recording retained no payloads from which to recover Opus durations.
 
-Re-measured on 2026-10-22: all four replay rows have zero underruns. These
-numbers predate
+Re-measured on 2026-11-02 at `84a0c1ede6`, after
 [moq-dev/moq#6484](https://github.com/moq-dev/moq/pull/6484),
 [moq-dev/moq#6609](https://github.com/moq-dev/moq/pull/6609), and
-[moq-dev/moq#6595](https://github.com/moq-dev/moq/pull/6595); the manual run
-re-measures them (decided 2026-10-27, maintainer). The
-fresh `relay-mic` has zero skips, stalls, or silence, a 60 ms p95 target,
-and 3.5 s convergence, over a 2 ms minimum RTT. It is a new
-fake-device recording, so that result proves neither an improvement on
-the old path nor the manual goal. The AAC recordings still refill: worst
-stalled share is 1.7% (`relay-bbb`), with `local-aac` skipping
-about twice a minute while converging over 15.5 s.
+[moq-dev/moq#6595](https://github.com/moq-dev/moq/pull/6595): the four
+replay rows match the 2026-10-22 numbers exactly, all with zero underruns. The
+manual run still re-measures the live path (decided 2026-10-27, maintainer).
+`relay-mic` has zero skips, stalls, or silence, a 60 ms p95 target, and 3.5 s
+convergence, over a 2 ms minimum RTT. It is a fake-device recording, so that
+result proves neither an improvement on the old path nor the manual goal. The
+AAC recordings still refill: worst stalled share is 1.7% (`relay-bbb`), with
+`local-aac` skipping about twice a minute while converging over 15.5 s.
+
+The nightly browser rows are not clean in steady state either. On the four
+whose artifacts were still kept on 2026-11-02 (2026-10-30 to 11-02), AAC
+`wide` (40 ms one way, 40 ms sigma) ran its ring dry one to four times a minute
+after converging at a 323 ms target, most gaps 100 to 340 ms. Opus `wide`
+did so on two nights (once after its target fell from 200 to 180 ms) and Opus
+`mild` on one. These synthetic Gaussian paths are harsher than a real 40 ms
+RTT, so they are evidence for the manual run to compare against, not a cause.
 
 What remains is one manual run by a person on Apple hardware; nothing
 deterministic is left to automate. Decided 2026-10-22:
@@ -47,9 +54,11 @@ deterministic is left to automate. Decided 2026-10-22:
 - Run against the public relay on Chrome and Safari, the two rows the
   issue measured, with a real microphone and 40 ms or more of added RTT. Watch
   the stats panel's audio underrun counter and the latency tab's auto readout.
-  Re-record the
-  `relay-mic` trace in the same run (`just test audio-quality-record`); the
-  checked-in one used Chromium's fake capture device and proves nothing here.
+  Re-record the `relay-mic` trace in the same run: publish the microphone from
+  the demo's publish page to `https://cdn.moq.dev/anon`, then
+  `just test audio-quality-record --lanes relay-mic --mic-broadcast <name>`;
+  the checked-in one used Chromium's fake capture device and proves nothing
+  here.
 - Keep the production refill policy until that run's measurements exist. A
   ring that runs dry re-stalls and refills to the target; change that only if
   the run shows a cause and a justified alternative beats it. The
@@ -67,6 +76,16 @@ deterministic is left to automate. Decided 2026-10-22:
 Decided 2026-10-15: keep this proof in m1 with the existing playback and
 A/V clock work. The estimator defaults on; deferring watch-worker does not
 defer validation of the current player.
+
+## Waiting
+
+- Maintainer: the manual run above, on Apple hardware with Chrome and Safari,
+  a real microphone, and 40 ms or more of added RTT against the public relay.
+  It is done when the PR records, per browser, the stats panel's audio
+  underrun count after convergence, any skip-aheads in steady state, and the
+  latency tab's auto target; checks in the re-recorded `relay-mic` trace with
+  its replay budgets re-measured; and records the encoder lag and drift with
+  the 20 ms and 100 ms `groupDuration` A/B.
 
 ## Related
 
