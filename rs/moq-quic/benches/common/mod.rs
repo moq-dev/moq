@@ -362,7 +362,7 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
 			Poll::Ready(Err(err)) => panic!("read failed: {err}"),
 		}
 	};
-	let _ = chunks.finalize();
+	chunks.finalize();
 	done
 }
 
@@ -374,7 +374,7 @@ fn drain(conn: &mut Connection, id: StreamId, sink: Sink, received: &mut Receive
 fn lease(conn: &mut Connection, id: StreamId, want: usize, received: &mut Received, waiter: &kio::Waiter) -> bool {
 	loop {
 		let mut stream = conn.recv_stream(id);
-		let mut lease = match stream.poll_lease(waiter, want).0 {
+		let mut lease = match stream.poll_lease(waiter, want) {
 			Poll::Ready(Ok(lease)) => lease,
 			Poll::Pending => return false,
 			Poll::Ready(Err(recv::Error::Closed)) => return true,
@@ -394,7 +394,7 @@ fn lease(conn: &mut Connection, id: StreamId, want: usize, received: &mut Receiv
 			let chunk = lease.copy_to_bytes(lease.chunk().len());
 			received.bytes += chunk.len() as u64;
 		}
-		let _ = stream.release(lease);
+		stream.release(lease);
 		if fin {
 			received.finished += 1;
 			let _ = stream.stop(VarInt::from_u32(0));

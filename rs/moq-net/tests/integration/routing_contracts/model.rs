@@ -1,7 +1,7 @@
 //! A reference model of the proposed per-origin route layer, small enough to read.
 //!
 //! It is not the implementation. It exists so the routing contract in
-//! `quest/m1/cluster-routing/routes.md` has deterministic counterexamples before
+//! `quest/m1/cluster-routing/routes/README.md` has deterministic counterexamples before
 //! the lite-07 wire is fixed: every rule the contract depends on is a switch
 //! here, and each fixture runs a scenario under the rule that fails and the rule
 //! that holds.

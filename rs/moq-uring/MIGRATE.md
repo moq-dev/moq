@@ -4,6 +4,15 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### QUIC waits have caller-owned poll forms ([#7707](https://github.com/moq-dev/moq/pull/7707))
+
+The QUIC driver connection's stream opens, accepts, datagram receive and close waits,
+the endpoint's accept, and both send handles' close waits now expose `poll_*` methods
+taking `&self, &kio::Waiter`. Existing async methods keep their behavior and wrap the
+polls. `send::Finished` also implements `Future`, with the same result as `stopped()`:
+`None` for acknowledged data and FIN or a local reset, `Some(code)` for a peer stop,
+and an error if the connection ends first.
+
 ### `peer_chain` is `peer_identity` ([#7028](https://github.com/moq-dev/moq/pull/7028))
 
 `quic::driver::Connection::peer_chain()` is now `peer_identity()` and returns `Option<Vec<CertificateDer<'static>>>`, mirroring moq-tokio.

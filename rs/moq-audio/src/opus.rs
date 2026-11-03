@@ -68,8 +68,17 @@ pub(crate) fn frame_size(sample_rate: u32, duration: Duration) -> Result<usize, 
 	Ok((sample_rate as u128 * micros / 1_000_000) as usize)
 }
 
+/// A failed libopus call, split by whether the arguments explain it.
+///
+/// Only a rejected argument or an unimplemented feature is a configuration libopus
+/// refuses. An allocation, internal, or state failure is a fault in the codec, which
+/// no other configuration is more likely to avoid.
 pub(crate) fn error(code: i32, context: &str) -> Error {
-	Error::Unsupported(format!("libopus {context} failed (code {code})"))
+	let message = format!("libopus {context} failed (code {code})");
+	match code {
+		unsafe_libopus::OPUS_BAD_ARG | unsafe_libopus::OPUS_UNIMPLEMENTED => Error::Unsupported(message),
+		_ => Error::Codec(message),
+	}
 }
 
 /// A failed decode call, split by whose fault it is.
@@ -328,6 +337,23 @@ pub(crate) fn bitrate_floor(sample_rate: u32, frame_size: usize) -> u64 {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn only_argument_failures_are_unsupported() {
+		assert!(matches!(
+			error(unsafe_libopus::OPUS_BAD_ARG, "ctx"),
+			Error::Unsupported(_)
+		));
+		assert!(matches!(
+			error(unsafe_libopus::OPUS_UNIMPLEMENTED, "ctx"),
+			Error::Unsupported(_)
+		));
+		assert!(matches!(error(unsafe_libopus::OPUS_ALLOC_FAIL, "ctx"), Error::Codec(_)));
+		assert!(matches!(
+			error(unsafe_libopus::OPUS_INTERNAL_ERROR, "ctx"),
+			Error::Codec(_)
+		));
+	}
 
 	#[test]
 	fn rate_picker_snaps_up() {

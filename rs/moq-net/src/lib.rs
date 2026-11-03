@@ -120,6 +120,7 @@ pub mod path;
 mod priority;
 #[cfg(feature = "async")]
 mod recv;
+mod route;
 #[cfg(feature = "async")]
 pub mod setup;
 #[cfg(not(feature = "async"))]

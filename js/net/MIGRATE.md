@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### A timestamp out of range at the track's timescale is a `TimestampMismatch` ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+A frame or datagram whose timestamp leaves the safe range once converted to the track's timescale is refused at the write with `TimestampMismatch`, as Rust refuses it, rather than with a `RangeError` when it is encoded.
+Catch `TimestampMismatch` where you caught that `RangeError`.
+
+### A timestamp finer than the track's timescale is rounded down ([#7702](https://github.com/moq-dev/moq/pull/7702))
+
+A timestamp that is fractional at the track's timescale, such as 1500µs on a millisecond track or a fractional `Timestamp.now()`, now goes out rounded down instead of to the nearest unit: 1500µs is 1 ms, not 2. Rust's `Timestamp::convert` and `track::Info::rescale` already round down, and `Track.rescale` does too.
+Write timestamps at the track's own scale where the exact value matters.
+
 ### Group sequences are `bigint` ([#7681](https://github.com/moq-dev/moq/pull/7681))
 
 Every group sequence is a `bigint`, so a group ID past 2^53 decodes, relays, and encodes again instead of being refused: `Group.Producer`/`Consumer.sequence`, `Track.Position.group`, `Track.Bound`, an `absolute` `Track.Anchor`, `Track.Datagram.sequence`, `Track.Demand.wanted`, the `group` of `Ordered.readFrame()`, and the `sequence` that `createGroup`, `insertDatagram`, and `fetchGroup` take and `appendDatagram` returns.
@@ -135,7 +145,8 @@ Only `publish` announces it: `prepared.broadcast` has no announcement methods.
 `Prepared.reject(err)` is replaced by idempotent `close()` and `[Symbol.dispose]()`; either refuses the unpublished answer as `Unroutable` and closes its broadcast. Closing that broadcast also refuses the request. `using` handles normal scope exit and exceptions; after `publish()`, disposal leaves the returned publication and its fill producer live.
 Use `request.reject(err)` to refuse before preparing. A retained, unclosed `Prepared` keeps its request pending; garbage collection provides no prompt cleanup guarantee.
 Construct a `Prepared` only with `request.prepare()`. Its constructor and the `Request.publisher`, `publishPrepared`, and `rejectPrepared` completion hooks are no longer public.
-`Dynamic.update` is no longer part of the public API, and `Request` has no `accept` (#6496): only the built-in sessions answer with a broadcast they already hold.
+`Dynamic.update` is no longer part of the public API (#6496).
+`Request.serve(broadcast)` additively exposes the former private answer path: serve held content without announcing an exact route. The prefix route promises the same bytes and continuous sequences at each served path; start a new prefix route for different content, or prepare and publish an independent job.
 Close the claim and claim again to change it, and close an answer's producer to end that output.
 
 ### `largest()` reports within a reader's `setGroups` bounds

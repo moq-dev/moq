@@ -642,7 +642,7 @@ impl RecvStream {
 		let mut state = self.inner.lock();
 		// moq-quic wakes the driver for any credit the lease frees, and the reader of any stream
 		// it evicts.
-		let (result, _) = state.conn.recv_stream(self.id).poll_lease(waiter, want);
+		let result = state.conn.recv_stream(self.id).poll_lease(waiter, want);
 		match ready!(result) {
 			Ok(lease) => Poll::Ready(Ok(lease)),
 			Err(recv::Error::Reset(code)) => {
@@ -785,7 +785,7 @@ impl poll::Lease for RecvLease<'_> {
 		let lease = self.lease.take().expect("only taken to hand it back");
 		let mut state = self.stream.inner.lock();
 		// moq-quic wakes the driver for the credit this returns.
-		let _ = state.conn.recv_stream(self.stream.id).release(lease);
+		state.conn.recv_stream(self.stream.id).release(lease);
 	}
 }
 
@@ -796,7 +796,7 @@ impl Drop for RecvLease<'_> {
 		};
 		let mut state = self.stream.inner.lock();
 		// moq-quic wakes the driver if the window was stuck on this lease.
-		let _ = state.conn.recv_stream(self.stream.id).restore(lease);
+		state.conn.recv_stream(self.stream.id).restore(lease);
 	}
 }
 

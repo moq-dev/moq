@@ -289,5 +289,13 @@ without the hidden extension, cannot. Dials retry forever with jittered backoff
 capped at 30s, so a rejected peer is loud in the logs rather than fatal. See
 [Authentication](/bin/relay/auth#mtls).
 
+Each dialed session binds its own UDP socket on an ephemeral port of
+`connect.bind`'s address. Once `connect.backoff.timeout` (10s by default; `0`
+takes that default here) passes without a session, the redial leaves from a
+fresh port, so a network path that drops one UDP flow can't hold a link down
+while other ports to the same peer would work. A fixed `connect.bind` port opts
+out: static and API peers then share one socket on that port, and a redial
+reuses it.
+
 The `/nodes` [internal endpoint](/bin/relay/http#get-nodes) lists the peers
 this relay dialed and holds a session with.

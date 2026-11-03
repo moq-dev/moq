@@ -16,7 +16,15 @@ use serde_with::{DeserializeAs, SerializeAs};
 ///
 /// The optional implementation is for jitter and delay, where zero decodes as absent and
 /// cannot be written. Fields such as warmup, where zero is meaningful, use `Option<MillisCeil>`.
+/// A `delay` of zero is a publisher stating it trails nothing, so that field skips it with
+/// [`no_delay`] instead of refusing it.
 pub(crate) struct MillisCeil;
+
+/// Whether a `delay` is left off the wire: absent, or a stated zero, which a consumer reads the
+/// same way.
+pub(crate) fn no_delay(delay: &Option<Duration>) -> bool {
+	delay.is_none_or(|delay| delay.is_zero())
+}
 
 impl SerializeAs<Duration> for MillisCeil {
 	fn serialize_as<S: Serializer>(source: &Duration, serializer: S) -> Result<S::Ok, S::Error> {
@@ -96,6 +104,25 @@ mod test {
 		// A whole number of milliseconds is left alone.
 		let json = audio(Some(std::time::Duration::from_millis(20))).to_json().unwrap();
 		assert!(json.contains(r#""jitter":20"#), "{json}");
+	}
+
+	/// A stated zero delay is omitted, since absent already means the rendition trails nothing,
+	/// and reads back as absent.
+	#[test]
+	fn zero_delay_is_omitted() {
+		let mut catalog = Catalog::<()>::default();
+		let mut config = crate::catalog::AudioConfig::new(crate::catalog::AudioCodec::Opus, 48_000, 2);
+		config.delay = Some(std::time::Duration::ZERO);
+		catalog.audio.renditions.insert("audio".to_string(), config);
+		let json = catalog.to_json().unwrap();
+		assert!(!json.contains("delay"), "{json}");
+		assert_eq!(
+			Catalog::<()>::from_str(&json).unwrap().audio.renditions["audio"].delay,
+			None
+		);
+
+		catalog.audio.renditions.get_mut("audio").unwrap().delay = Some(std::time::Duration::from_micros(500));
+		assert!(catalog.to_json().unwrap().contains(r#""delay":1"#));
 	}
 
 	/// Zero is not a value the field carries. A publisher stating it is refused; a catalog
