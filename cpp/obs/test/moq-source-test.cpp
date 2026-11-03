@@ -1267,6 +1267,12 @@ int main()
 		sbr_audio.description = std::vector<uint8_t>{0x12, 0x10, 0x56, 0xe5, 0x98};
 		sbr_audio.bitrate = 5400000;
 		catalog.audio.emplace("sbr", sbr_audio);
+		// Two bytes can still be malformed: this ASC promises a missing explicit sample rate.
+		auto truncated_aac_audio = audio;
+		truncated_aac_audio.codec = "mp4a.40.2";
+		truncated_aac_audio.description = std::vector<uint8_t>{0x17, 0x90};
+		truncated_aac_audio.bitrate = 5450000;
+		catalog.audio.emplace("truncated-aac", truncated_aac_audio);
 		// 5.1 AAC-LC: OBS has the layout, but moq-audio decodes AAC only in mono or stereo.
 		auto surround_aac_audio = audio;
 		surround_aac_audio.codec = "mp4a.40.2";

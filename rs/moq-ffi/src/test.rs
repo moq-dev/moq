@@ -9179,6 +9179,8 @@ async fn audio_subscribe_configuration_boundary() {
 		("mp4a.40.2", Some(vec![0x11, 0x90]), 2, true),
 		("mp4a.40.2", Some(vec![0x12, 0x10, 0x56, 0xe5, 0x98]), 2, false),
 		("mp4a.40.2", Some(vec![0x11]), 2, false),
+		// Frequency index 15 promises a 24-bit rate that is absent from these two bytes.
+		("mp4a.40.2", Some(vec![0x17, 0x90]), 2, false),
 		("mp4a.40.2", None, 6, false),
 		("mp4a.40.5", None, 2, false),
 	] {
@@ -9190,9 +9192,10 @@ async fn audio_subscribe_configuration_boundary() {
 		if supported {
 			result.unwrap().cancel();
 		} else {
+			let error = result.err();
 			assert!(
-				matches!(result, Err(MoqError::UnsupportedConfig { .. })),
-				"{codec}/{channels}"
+				matches!(&error, Some(MoqError::UnsupportedConfig { .. })),
+				"{codec}/{channels}: {error:?}"
 			);
 		}
 	}
@@ -9254,6 +9257,7 @@ async fn video_subscribe_configuration_boundary() {
 		("avc1.42001e", None, true),
 		("avc1.42001e", Some(vec![]), false),
 		("avc1.42001e", Some(vec![1, 0x42, 0, 0x1e]), false),
+		// hvc1 requires hvcC before any backend is opened, even on HEVC-capable hosts.
 		("hvc1.1.6.L93.B0", None, false),
 		("vp09.02.10.10", None, false),
 		("avc1.invalid", None, false),
