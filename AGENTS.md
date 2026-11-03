@@ -43,7 +43,7 @@ just check   # Lint, compile, and test what the branch changed
 just fix     # Auto-fix lint/formatting, same scope
 ```
 
-Quests: before starting work, run `quest context` and `quest guide`, and follow both.
+Quests: before any work, run `quest context` and follow it.
 The `quest` binary and its skills come from the moq-dev/quest flake input; change them upstream and bump the input.
 `quest init` refuses Claude Code's worktree hooks: drop them from `.claude/settings.json` for its run, then restore them.
 
