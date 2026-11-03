@@ -74,6 +74,9 @@ struct Route {
 	staged: Option<(u64, track::Consumer)>,
 	/// The stage the serving copy was spliced from, if any.
 	spliced: Option<u64>,
+	/// The newest sequence as of the front's request for the serving copy, where a
+	/// subscription made before the track resolved joins; see [`track::Subscriber::requested_sequence`].
+	resolved: Option<u64>,
 	/// The id the next stage takes.
 	next_stage: u64,
 }
@@ -192,18 +195,21 @@ impl Producer {
 	/// Serve the track from `copy` from now on, subscribing every reader to it.
 	#[cfg(test)]
 	pub(super) fn serve(&self, copy: track::Consumer) {
-		self.serve_from(copy, None);
+		let resolved = copy.latest_sequence();
+		self.serve_from(copy, None, resolved);
 	}
 
 	/// Serve the track from `copy`, the one `staged` was made for, subscribing every reader
-	/// to it: what was fetched from it is handed out from here on.
-	pub(super) fn splice(&self, copy: track::Consumer, staged: Staged) {
-		self.serve_from(copy, Some(staged.id));
+	/// to it: what was fetched from it is handed out from here on. `resolved` is the newest
+	/// sequence as of the front's request for it.
+	pub(super) fn splice(&self, copy: track::Consumer, staged: Staged, resolved: Option<u64>) {
+		self.serve_from(copy, Some(staged.id), resolved);
 	}
 
-	fn serve_from(&self, copy: track::Consumer, stage: Option<u64>) {
+	fn serve_from(&self, copy: track::Consumer, stage: Option<u64>, resolved: Option<u64>) {
 		if let Ok(mut route) = self.state.write() {
 			route.generation += 1;
+			route.resolved = resolved;
 			route.copy = Some(copy);
 			route.parked = None;
 			route.spliced = stage;
@@ -315,6 +321,11 @@ impl Consumer {
 	/// The serving route's copy, if any.
 	pub(super) fn serving(&self) -> Option<track::Consumer> {
 		self.state.read().copy.clone()
+	}
+
+	/// The newest sequence as of the front's request for the serving copy, as it was spliced.
+	pub(super) fn resolved(&self) -> Option<u64> {
+		self.state.read().resolved
 	}
 
 	/// The copy the front parked, while it serves none and may still serve one again.
@@ -510,9 +521,9 @@ struct Copy {
 	feeds: bool,
 }
 
-// Boxed: a subscriber is twice a pending answer, and a copy holds one for its whole life.
+// Both boxed: either is large, and a copy holds one for its whole life.
 enum Sub {
-	Pending(kio::Pending<track::Subscribing>),
+	Pending(Box<kio::Pending<track::Subscribing>>),
 	Ready(Box<track::Subscriber>),
 }
 
@@ -1265,7 +1276,7 @@ impl Reader {
 		let wire = self.mirrored.clamped(floor, None, &resolved);
 		self.copies.push(Copy {
 			generation,
-			sub: Sub::Pending(track.subscribe(wire)),
+			sub: Sub::Pending(Box::new(track.subscribe(wire))),
 			track,
 			floor,
 			from: self.mirrored.ranges.clone(),
@@ -1979,7 +1990,7 @@ impl Reader {
 		let wire = self.mirrored.clamped(floor, Some(lowered.end), &resolved);
 		let copy = Copy {
 			generation,
-			sub: Sub::Pending(track.subscribe(wire)),
+			sub: Sub::Pending(Box::new(track.subscribe(wire))),
 			floor,
 			from: self.mirrored.ranges.clone(),
 			resolved,
@@ -3502,7 +3513,7 @@ mod test {
 		);
 
 		let _logical = logical.accept(crate::track::Info::timed());
-		routes.splice(copy.consume(), staged);
+		routes.splice(copy.consume(), staged, None);
 		let mut fetched = fetching.now_or_never().expect("spliced").unwrap();
 		assert_eq!(read(&mut fetched), Some(b"early".to_vec()));
 	}
@@ -3539,7 +3550,7 @@ mod test {
 		group.write_frame(ts(0), b"right".as_ref()).unwrap();
 		group.finish().unwrap();
 		let _logical = logical.accept(crate::track::Info::timed());
-		routes.splice(copy.consume(), staged);
+		routes.splice(copy.consume(), staged, None);
 		let mut fetched = fetching.now_or_never().expect("spliced").unwrap();
 		assert_eq!(read(&mut fetched), Some(b"right".to_vec()));
 	}

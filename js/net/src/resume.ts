@@ -456,7 +456,7 @@ class Reader implements ResumeSource {
 		copy.sub.info().then(
 			(info) => {
 				record(info, source);
-				shell.commit(info);
+				shell.commit(info, hooks.requestedSequence(copy.sub));
 			},
 			() => {},
 		);

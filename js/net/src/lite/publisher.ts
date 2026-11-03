@@ -967,10 +967,11 @@ export class Publisher {
 			const info = await untilAborted(track.info(), left.signal);
 			const publisher = info.priority;
 			// A SUBSCRIBE can arrive before its track resolves, such as one a relay serves from a
-			// copy still fetching upstream, or on lite-05 one sent alongside its TRACK, when no
-			// group is known yet: the newest once it resolves stands in, as it would for one
-			// sent after.
-			const resolved = cursorFloor(this.version, msg.startGroup, hooks.latestSequence(track));
+			// copy still fetching upstream, an on-demand track, or on lite-05 one sent alongside
+			// its TRACK, when no group is known yet. The newest as of the request is then the
+			// newest the answer held, or the first group when it held none: cached history below
+			// it is skipped, and anything written since, even for this demand, is delivered.
+			const resolved = cursorFloor(this.version, msg.startGroup, hooks.requestedSequence(track));
 			if (latest === undefined && resolved !== floor) {
 				floor = resolved;
 				track.withRange({ start: { included: floor } });

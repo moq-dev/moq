@@ -122,9 +122,12 @@ fn serving_max_delay(version: Version, requested: Duration) -> Option<Duration> 
 ///
 /// `latest` is the newest group when the SUBSCRIBE arrived, not once the subscription
 /// resolved: anything written in between is newer, so it is delivered. On lite03-05, a
-/// SUBSCRIBE on a copy still fetching upstream (or alongside its TRACK on lite-05) can
-/// arrive before any group is known: the newest once it resolves stands in, as for one
-/// sent after. Lite01/02 keep a zero floor when no group was known on arrival.
+/// SUBSCRIBE on a copy still resolving (fetching upstream, served on request, or alongside
+/// its TRACK on lite-05) learns that newest group from the answer: the newest the copy held
+/// once it resolved ([`track::Subscriber::requested_sequence`]), or the first group when it
+/// held none. Cached history below it is skipped, and anything written after it, even in
+/// response to this subscription's demand, is delivered. Lite01/02 keep a zero floor when no
+/// group was known on arrival.
 fn cursor_floor(version: Version, start_group: Option<u64>, latest: Option<u64>) -> u64 {
 	if version.resolves_start() || start_group.is_some() {
 		return 0;
@@ -2259,7 +2262,7 @@ impl Request for SubscribeServe {
 
 					let latest = match shared.version {
 						Version::Lite01 | Version::Lite02 => latest,
-						_ => latest.or_else(|| track.latest_sequence()),
+						_ => latest.or_else(|| track.requested_sequence()),
 					};
 					let floor = cursor_floor(shared.version, bounds.groups().start(), latest);
 					let mut run = TrackRun::new(sub, track, bounds, floor, steer_tx);
@@ -8799,14 +8802,17 @@ mod tests {
 		}
 	}
 
-	/// A join on an unresolved copy uses its live edge once the upstream answer lands.
-	/// Named starts and joins whose live edge was already known keep their original floor.
+	/// A join on an unresolved copy floors at the newest group as of its request, which the
+	/// answer gives: history the answer holds is skipped, and groups written after it, even
+	/// before the subscription is served, are delivered. Named starts and joins whose live
+	/// edge was already known keep their original floor.
 	#[kio::test]
-	async fn a_pending_subscribe_joins_the_resolved_live_edge() {
+	async fn a_pending_subscribe_joins_where_the_answer_stood() {
 		use crate::lite::test_transport::{Log, Sent};
 
 		for version in [Version::Lite03, Version::Lite04, Version::Lite05, Version::Lite06] {
-			for unresolved in [true, false] {
+			// Unresolved on arrival: whether the answer holds the groups, or they follow it.
+			for (unresolved, cached) in [(true, true), (true, false), (false, false)] {
 				for start in [None, Some(0)] {
 					let origin = crate::origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 					let broadcast = origin.create_broadcast("room").unwrap();
@@ -8871,6 +8877,10 @@ mod tests {
 					}
 					// The answer exposes retained history below the live edge, and advertises
 					// a source start below it. A join must use the newest group, not either.
+					// An answer without them is followed by them, before the join is served.
+					if unresolved && !cached {
+						track = Some(staged.take().unwrap().commit());
+					}
 					let producer = match &mut track {
 						Some(track) => track,
 						None => &mut *staged.as_mut().unwrap(),
@@ -8881,7 +8891,7 @@ mod tests {
 						group.write_frame(crate::Timestamp::ZERO, b"x".as_slice()).unwrap();
 						group.finish().unwrap();
 					}
-					if unresolved {
+					if cached {
 						track = Some(staged.take().unwrap().commit());
 					}
 					let track = track.unwrap();
@@ -8915,7 +8925,7 @@ mod tests {
 						})
 						.collect::<Vec<_>>();
 					sequences.sort();
-					let expected = if start.is_some() || version.resolves_start() {
+					let expected = if start.is_some() || version.resolves_start() || (unresolved && !cached) {
 						vec![0, 3, 7]
 					} else if unresolved {
 						vec![7]
@@ -8924,7 +8934,7 @@ mod tests {
 					};
 					assert_eq!(
 						sequences, expected,
-						"{version}, unresolved={unresolved}, start={start:?}"
+						"{version}, unresolved={unresolved}, cached={cached}, start={start:?}"
 					);
 					track.abort(Error::Cancel).unwrap();
 				}

@@ -780,11 +780,17 @@ async function servedSubscription(
 		serving,
 		parked: gate.parked,
 		release: gate.release,
-		// Resolve a pending track with the publisher's request for it.
-		async accept() {
+		// Resolve a pending track with the publisher's request for it, answering with `held`.
+		async accept(held: number[] = []) {
 			const pulled = await request;
 			if (!pulled) throw new Error("the publisher never requested the track");
-			track = pulled.accept(info);
+			const staged = hooks.stageRequest(pulled, info);
+			for (const sequence of held) {
+				const group = staged.producer.createGroup(sequence);
+				for (const frame of frames) group.writeFrame(textFrame(frame, Timestamp.fromMillis(sequence)));
+				group.finish();
+			}
+			track = staged.commit();
 		},
 		// Stamped by sequence, so a group served out of order still starts in order.
 		serve(sequence: number) {
@@ -1401,10 +1407,11 @@ test("lite draft-05: an update dropping the floor re-pins to the latest group", 
 });
 
 // A SUBSCRIBE can beat its track resolving, as one a relay serves from a copy still fetching
-// upstream. Groups the track holds once it does are older than the join, so an absent Group
-// Start is still the latest group.
+// upstream. An absent Group Start is still the newest group as of the request, which the
+// answer gives: groups written once it resolved are newer, even those written for this
+// subscription's demand, so they are delivered.
 test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_05])(
-	"lite %s: a subscribe that beats its track resolving joins at the latest group",
+	"lite %s: a subscribe that beats its track resolving delivers what follows the answer",
 	async (version) => {
 		const sub = await servedSubscription({ version, pending: true });
 		try {
@@ -1412,7 +1419,24 @@ test.each([Version.DRAFT_01, Version.DRAFT_03, Version.DRAFT_05])(
 			sub.serve(0);
 			sub.serve(1);
 			sub.serve(2);
+			// Headers only: frames before lite-05 carry no timestamp for `servedGroup` to read.
+			expect(await sub.servedHeader()).toBe(0);
+			expect(await sub.servedHeader()).toBe(1);
 			expect(await sub.servedHeader()).toBe(2);
+		} finally {
+			await sub.close();
+		}
+	},
+);
+
+// The answer's own groups are history as of the request: the join starts at its newest.
+test.each([Version.DRAFT_03, Version.DRAFT_04, Version.DRAFT_05])(
+	"lite %s: a subscribe that beats its track resolving joins at the answer's newest group",
+	async (version) => {
+		const sub = await servedSubscription({ version, pending: true });
+		try {
+			await sub.accept([0, 3, 7]);
+			expect(await sub.servedHeader()).toBe(7);
 			expect(await sub.servedSequence()).toBeUndefined();
 		} finally {
 			await sub.close();

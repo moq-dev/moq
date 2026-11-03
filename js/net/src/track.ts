@@ -660,6 +660,9 @@ class TrackState {
 	update: Signal<Subscription | undefined>;
 	/** Resolved once the producer commits the immutable properties. */
 	info = new Signal<Info | undefined>(undefined);
+	// The newest group as of this reader's request, recorded as {@link info} resolves: the
+	// track's newest then, or what its answer held for a request that beat it. `null` for none.
+	requested?: number | null;
 	/** Newest group head, datagram, frame, or location reported by the publisher. */
 	largest = new Signal<Position | undefined>(undefined);
 	// The group {@link largest} first named, where a relative anchor resolved before any group
@@ -1101,6 +1104,8 @@ export class Producer {
 			throw err;
 		}
 		this.#state.info.set(resolved);
+		// What the answer holds, written before accept, is where a sink that beat it joins.
+		const requested = this.#state.latest ?? null;
 		// Propagate to any sink handed out before accept (the on-demand path).
 		const compressed = new Map<Datagram, Stored>();
 		for (const sink of this.#sinks) {
@@ -1117,6 +1122,7 @@ export class Producer {
 					}
 				});
 			}
+			sink.requested ??= requested;
 			sink.info.set(resolved);
 		}
 		this.#updateSubscription();
@@ -1169,7 +1175,10 @@ export class Producer {
 	#addSink(sink: TrackState): void {
 		sink.producer = this;
 		const info = this.#state.info.peek();
-		if (info) sink.info.set(info);
+		if (info) {
+			sink.requested = this.#state.latest ?? null;
+			sink.info.set(info);
+		}
 		sink.largest.set(this.#state.largest.peek());
 		sink.first = this.#state.largest.peek()?.group;
 		sink.largestEnded.set(this.#state.largestEnded.peek());
@@ -2611,8 +2620,10 @@ export class Subscriber {
 				cursor: subscriber.#cursor,
 				closed: state.closed,
 				info: () => state.info.peek(),
-				commit: (info) => {
-					if (state.info.peek() === undefined) state.info.set(info);
+				commit: (info, requested) => {
+					if (state.info.peek() !== undefined) return;
+					state.requested = requested ?? null;
+					state.info.set(info);
 				},
 				close: (abort) => {
 					closeTrackState(state, abort);
@@ -2622,6 +2633,7 @@ export class Subscriber {
 		};
 		hooks.latestSequence = (subscriber) =>
 			subscriber.#resume ? subscriber.#resume.latest() : subscriber.#state.latest;
+		hooks.requestedSequence = (subscriber) => subscriber.#state.requested ?? undefined;
 		hooks.bufferedLargest = (subscriber) => subscriber.#bufferedLargest();
 		hooks.objectLargest = (subscriber) => {
 			if (subscriber.#resume) return subscriber.#resume.objectLargest();

@@ -32,34 +32,23 @@ pipeline-requests epic, so this sits at the m1 top level.
 
 Public API: none. Wire: none.
 
-Implementation checkpoint: [moq-dev/moq#7737](https://github.com/moq-dev/moq/pull/7737)
-extends the confirmation-time lookup to lite03/04 and adds a controlled held-answer test.
-The test exposes cached groups 0, 3, and 7 with source start 0, and checks the
-encoded group streams. Lite03/04 join at 7; explicit starts and arrival floors
-remain covered, with lite05/06 controls. The range-anchor integration expectation
-and budget integration expectations now include lite03/04 among the versions
-whose unfloored copy joins live. Lite01/02 retain their existing behavior.
-`just rs test -p moq-net --no-fail-fast` passes all 3,343 selected tests
-(13 skipped by the standard profile).
+Decided 2026-11-03 (maintainer, /quest-unblock): ✅ **A pending join floors at
+request time.** A lite-03/04 SUBSCRIBE on a still-resolving copy floors at the
+newest group as of the SUBSCRIBE's arrival, which is the upstream's answer, or
+the first group when none existed then. It does not use the local cache's newest
+group when the copy later resolves. A group produced after the request,
+including in response to its demand, is delivered, and cached history before
+the request is skipped. This is a relay rule that covers HLS recording and every
+other late-resolving consumer.
 
-## Waiting
+- Not chosen: the HLS recorder requesting its own floor; waiting on
+  [moq-dev/moq#7652](https://github.com/moq-dev/moq/pull/7652).
+- `rs/moq-hls/tests/integration/server.rs`
+  `a_cursor_records_a_publisher_without_fetch` must pass unchanged, with no
+  weakened assertion or timing wait. The controlled held-answer test (cached
+  groups 0, 3 and 7 join at 7) keeps passing. Apply the same rule to lite-05+
+  (`SubscribeServe`) and JS where they share the gap.
+- Rerun `just ci`. Check whether the old-version finite-finish and CLI FETCH
+  interop failures reproduce on base main, and record them as pre-existing if so.
 
-- Maintainer: settle the HLS recorder startup contract before this behavior lands.
-  The live-edge fix makes
-  `moq-hls::integration server::a_cursor_records_a_publisher_without_fetch`
-  time out with `moq-lite-03: no segment recorded`; the same test passes with
-  `origin/main`'s publisher implementation. A diagnostic run limited to lite03
-  confirmed this before the fix was restricted to lite03/04. `Demand::wanted` includes queries, and
-  pre05 copies expose synthetic info before their upstream SUBSCRIBE answer,
-  so neither signal establishes that a media subscription can retain the
-  recorder's first segment. Options: (1) preserve the settled live-edge join
-  and make HLS recording request an explicit media floor derived from its
-  records (recommended), or (2) revisit how a pending join distinguishes cached
-  history from media produced in response to its demand. Do not weaken the
-  recorder assertion or add a timing wait. Complete the source fix, rerun
-  `just ci`, and run all-language interop if this extends into the gateway.
-  The twelve requested lite03/04 Rust/browser-JS publisher by Rust/Node/Bun
-  subscriber matrix cells passed. The broader interop invocation also runs
-  finite-finish and CLI FETCH cases that failed on these old versions; their
-  applicability and base behavior still need verification before claiming
-  that broader suite passes.
+Implementation: [moq-dev/moq#7737](https://github.com/moq-dev/moq/pull/7737).

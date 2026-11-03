@@ -259,8 +259,11 @@ export interface ResumeShell {
 	readonly closed: GetPromise<Error | null>;
 	/** The properties the first copy committed, if any yet. */
 	info(): Info | undefined;
-	/** Commit the logical track's properties, once. */
-	commit(info: Info): void;
+	/**
+	 * Commit the logical track's properties, once, with the newest group the committing copy
+	 * found as of its request (see `hooks.requestedSequence`).
+	 */
+	commit(info: Info, requested: number | undefined): void;
 	/** End the logical track: cleanly, or with `abort`. */
 	close(abort?: Error): void;
 }
@@ -516,6 +519,13 @@ export const hooks: {
 	tailGrace: (producer: Producer) => Milli;
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
 	latestSequence: (subscriber: Subscriber) => number | undefined;
+	/**
+	 * The newest group as of the subscription's request, once its info resolved: the track's
+	 * newest then, or, for a track still resolving then, the newest its answer held. Nothing
+	 * written since counts, even in response to the subscription's own demand. Assigned by
+	 * `track.ts`.
+	 */
+	requestedSequence: (subscriber: Subscriber) => number | undefined;
 	/**
 	 * The source's declared start, raised to the subscriber's cursor floor, or `"pending"` while
 	 * the upstream START that resolves it has yet to arrive; assigned by `track.ts`.
@@ -776,6 +786,9 @@ export const hooks: {
 		throw new Error("track.ts not loaded");
 	},
 	latestSequence: () => {
+		throw new Error("track.ts not loaded");
+	},
+	requestedSequence: () => {
 		throw new Error("track.ts not loaded");
 	},
 	sourceStart: () => {
