@@ -73,6 +73,12 @@ try {
 	if (held.active || held.config?.enabled !== false || held.selected !== initial.selected) {
 		throw new Error("the muted listener did not hold its rendition");
 	}
+	// Tune-in can consume retained audio and fill the impaired queue. Validate the tap on
+	// a fresh press only after the muted listener holds its subscription and the queue drains.
+	await page.evaluate(() => globalThis.ptt.press(true));
+	await page.waitForTimeout(3000);
+	await page.evaluate(() => globalThis.ptt.press(false));
+	await page.waitForTimeout(5000);
 	const warmup = await page.evaluate(() => globalThis.ptt.result());
 	await Bun.write(join(out, "warmup.json"), JSON.stringify({ browser: browser.version(), initial, held, ...warmup }));
 	if (!warmup.audible.length) throw new Error("the tone never reached the output tap");

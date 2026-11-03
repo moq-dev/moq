@@ -4,7 +4,8 @@ import type { measurement } from "./src/ptt";
 
 type Result = ReturnType<typeof measurement.result>;
 const [directory, diagnostic] = process.argv.slice(2);
-if (!directory) throw new Error("usage: ptt-analyze.ts RUN_DIR");
+if (!directory || (diagnostic !== undefined && diagnostic !== "--diagnostic"))
+	throw new Error("usage: ptt-analyze.ts RUN_DIR [--diagnostic]");
 const result: Result = await Bun.file(join(directory, "presses.json")).json();
 if (result.presses.length !== 44 || result.presses.some((press, i) => press.on !== (i % 2 === 0))) {
 	throw new Error("expected 22 complete presses");
@@ -51,7 +52,7 @@ const summary = {
 	captures: result.captures,
 	probes: result.probes,
 	subscriptions: result.subscriptions,
-	unencoded: result.submitted.length - result.encoded.length,
+	unencoded: result.submitted.filter((frame) => !encoded.has(frame.timestamp)).length,
 	unsent: result.encoded.filter((frame) => !sent.has(frame.timestamp)).length,
 };
 await Bun.write(join(directory, "summary.json"), JSON.stringify(summary, null, 2));

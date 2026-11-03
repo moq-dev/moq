@@ -124,7 +124,7 @@ transport already discarded.
 ## Push-to-talk
 
 ```bash
-just test push-to-talk                  # acceptance: 64 kbit/s, finite 1 s queue, 50 ms each way
+just test push-to-talk                  # bufferbloat: 64 kbit/s, finite 1 s queue, 50 ms each way
 just test push-to-talk --reproduction   # diagnostic: 100 ms RTT, 2% random loss
 ```
 
@@ -143,7 +143,7 @@ the browser's projected device output, not acoustic output from a physical speak
 presses can remain continuously audible; a missing onset is reported as null, never zero latency.
 
 `summary.json` matches inputs, outputs, writes, and arrivals by media timestamp, so a late arrival
-is still attributed to its utterance. The command refuses missing encoder inputs, missing heads,
+is still attributed to its utterance. The command checks pipeline completeness, not the epic's latency verdict. It refuses missing encoder inputs, missing heads,
 submitted frames that never encode or reach the container, reopened capture, repeated probes or
 subscriptions, and separated utterances with no audible output. The shaper must report throttling
 and queue overflow without random loss. Lost receiver frames are reported separately; aggregate

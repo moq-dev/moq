@@ -5,6 +5,7 @@ import { Milli } from "@moq/clock";
 import * as Container from "@moq/hang/container";
 import { Track } from "@moq/net";
 import type MoqPublish from "@moq/publish/element";
+import { Derived } from "@moq/signals";
 import type MoqWatch from "@moq/watch/element";
 import { Capture } from "./capture";
 import type { Arrival } from "./schema";
@@ -93,7 +94,11 @@ const capture = new Capture({
 	track: audio.source.out.track,
 	config: audio.source.out.config,
 	delay: watch.player.sync.in.delay,
-	maxDelay: watch.player.sync.out.maxDelay,
+	// Decoder subscriptions include codec warmup beyond Sync's budget. The observer must
+	// request the same age so its own subscription cannot discard an otherwise visible frame.
+	maxDelay: new Derived([watch.player.sync.out.maxDelay, audio.source.out.config], (max, config) =>
+		Milli(max + (config?.warmup ?? 0)),
+	),
 });
 const arrivals: Arrival[] = [];
 let attached: AudioNode | undefined;
@@ -156,6 +161,9 @@ export const measurement = {
 			selected: audio.source.out.track.peek(),
 			tapped: tapped !== undefined && tapped === audio.out.root.peek(),
 			active: publish.audio.out.active.peek(),
+			context: audio.out.context.peek()?.state,
+			stalled: audio.out.stalled.peek(),
+			timestamp: audio.out.timestamp.peek(),
 			error: String(publish.audio.out.error.peek() ?? audio.out.error.peek() ?? ""),
 		};
 	},
