@@ -314,7 +314,7 @@ impl Drop for Root {
 		let pending = self.pending.lock().take();
 		drop(pending);
 		// Here rather than after this returns, so their teardown wakes still see the root.
-		drop(std::mem::replace(&mut self.children, kio::Tasks::new()));
+		drop(std::mem::take(&mut self.children));
 	}
 }
 
