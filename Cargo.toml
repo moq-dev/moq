@@ -176,6 +176,7 @@ moq-vaapi = "0.1.0"
 # that argument, so moq-ffi and moq-c opt NVIDIA and VAAPI back in (OpenH264
 # through their own `openh264` feature, which release builds enable).
 moq-video = { version = "0.1.10", path = "rs/moq-video", default-features = false }
+mp4-atom = "0.17.0"
 nix = { version = "0.31.3", features = ["net", "socket", "uio"] }
 # Upstream noq-proto, only for iroh's controller factory types.
 noq-proto = { version = "1.2", default-features = false }
