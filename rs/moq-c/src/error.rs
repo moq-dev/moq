@@ -349,15 +349,6 @@ pub enum Error {
 	UnresolvableBroadcast(String),
 }
 
-impl Error {
-	pub(crate) fn audio_subscribe(err: moq_audio::Error) -> Self {
-		match err {
-			moq_audio::Error::Unsupported(reason) => Self::UnsupportedConfig(reason),
-			err => err.into(),
-		}
-	}
-}
-
 impl From<moq_json::Error> for Error {
 	fn from(err: moq_json::Error) -> Self {
 		match err {
@@ -389,7 +380,10 @@ impl From<url::ParseError> for Error {
 
 impl From<moq_audio::Error> for Error {
 	fn from(err: moq_audio::Error) -> Self {
-		Error::Audio(Arc::new(err))
+		match err {
+			moq_audio::Error::UnsupportedConfig(reason) => Error::UnsupportedConfig(reason),
+			err => Error::Audio(Arc::new(err)),
+		}
 	}
 }
 
@@ -553,7 +547,7 @@ mod tests {
 	#[test]
 	fn setup_refusals_are_distinct_from_later_codec_failures() {
 		use crate::ffi::ReturnCode;
-		let setup = super::Error::audio_subscribe(moq_audio::Error::Unsupported("layout".into()));
+		let setup = super::Error::from(moq_audio::Error::UnsupportedConfig("layout".into()));
 		assert_eq!(setup.code(), super::MOQ_ERROR_UNSUPPORTED_CONFIG);
 		let later = super::Error::from(moq_audio::Error::Unsupported("duration".into()));
 		assert_eq!(later.code(), super::MOQ_ERROR_AUDIO);

@@ -409,16 +409,6 @@ pub enum MoqError {
 	},
 }
 
-impl MoqError {
-	#[cfg(feature = "audio")]
-	pub(crate) fn audio_subscribe(err: moq_audio::Error) -> Self {
-		match err {
-			moq_audio::Error::Unsupported(reason) => Self::UnsupportedConfig { reason },
-			err => err.into(),
-		}
-	}
-}
-
 impl From<moq_net::Error> for MoqError {
 	fn from(err: moq_net::Error) -> Self {
 		match err {
@@ -509,8 +499,11 @@ impl From<moq_json::Error> for MoqError {
 #[cfg(feature = "audio")]
 impl From<moq_audio::Error> for MoqError {
 	fn from(err: moq_audio::Error) -> Self {
-		Self::Audio {
-			reason: err.to_string(),
+		match err {
+			moq_audio::Error::UnsupportedConfig(reason) => Self::UnsupportedConfig { reason },
+			err => Self::Audio {
+				reason: err.to_string(),
+			},
 		}
 	}
 }

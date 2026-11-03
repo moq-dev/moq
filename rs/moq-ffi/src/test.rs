@@ -9214,6 +9214,32 @@ async fn audio_subscribe_configuration_boundary() {
 	}
 	let missing = MoqAudioConsumer::subscribe(&consumer, "missing".into(), sibling_audio(""), audio_output()).await;
 	assert!(matches!(missing, Err(MoqError::Audio { .. })));
+	let _limited = broadcast
+		.publish_track(
+			"limited".into(),
+			Some(MoqTrackInfo {
+				priority: 0,
+				max_age: Some(Duration::from_millis(10)),
+				refresh: None,
+				timescale: None,
+				compress: false,
+			}),
+		)
+		.unwrap();
+	let retained = MoqAudioConsumer::subscribe(
+		&consumer,
+		"limited".into(),
+		sibling_audio(""),
+		crate::audio::MoqAudioDecoderOutput {
+			delay: Some(MoqDelay {
+				min: Duration::from_millis(20),
+				max: None,
+			}),
+			..audio_output()
+		},
+	)
+	.await;
+	assert!(matches!(retained, Err(MoqError::Audio { .. })));
 	broadcast.close().unwrap();
 }
 

@@ -5,6 +5,10 @@
 #[derive(Clone, Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
+	/// The rendition or decoder output was refused before subscribing to its track.
+	#[error("unsupported audio configuration: {0}")]
+	UnsupportedConfig(String),
+
 	/// The requested configuration is outside what the codec or device supports,
 	/// e.g. a sample rate, channel count, or frame duration Opus can't encode, or a
 	/// capture format the microphone can't deliver. The

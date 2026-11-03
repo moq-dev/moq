@@ -270,9 +270,7 @@ impl Audio {
 			|close| async move {
 				driver
 					.watch(async move {
-						let consumer = moq_audio::decode::Consumer::new(&broadcast, &catalog, name, config)
-							.await
-							.map_err(Error::audio_subscribe)?;
+						let consumer = moq_audio::decode::Consumer::new(&broadcast, &catalog, name, config).await?;
 						Self::run(on_frame, consumer, close).await
 					})
 					.await
@@ -525,8 +523,9 @@ pub extern "C" fn moq_encode_audio_finish(producer: u32) -> i32 {
 /// model. TODO: a future API will pick the right rendition
 /// automatically (ABR).
 ///
-/// A codec, layout, or description refused during setup reports
+/// A rendition's codec, layout, or description refused during setup reports
 /// [`MOQ_ERROR_UNSUPPORTED_CONFIG`](crate::MOQ_ERROR_UNSUPPORTED_CONFIG) on the terminal callback.
+/// An unsupported output channel count returns that code directly, without a callback.
 ///
 /// Returns a non-zero handle on success or a negative error code.
 ///
@@ -567,7 +566,7 @@ pub unsafe extern "C" fn moq_decode_audio(
 		config.output.layout = zeroable(raw.channels)
 			.map(moq_audio::Layout::from_channels)
 			.transpose()
-			.map_err(Error::audio_subscribe)?;
+			.map_err(|err| Error::UnsupportedConfig(err.to_string()))?;
 		config.delay = raw.delay.into();
 
 		let on_read = unsafe { OnStatus::new(user_data, on_read)? };

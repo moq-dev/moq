@@ -651,8 +651,8 @@ impl MoqAudioConsumer {
 		catalog_audio: crate::media::MoqAudio,
 		output: MoqAudioDecoderOutput,
 	) -> Result<Arc<MoqAudioConsumer>, MoqError> {
-		// Reject the codec before resolving: resolving reaches the origin, which can invoke a
-		// dynamic handler and open an upstream subscription we would immediately drop.
+		// Reject malformed or unknown codec names before resolving the broadcast reference.
+		// Decoder setup checks recognized codecs after resolution, without a second codec gate.
 		let reference = catalog_audio.broadcast.clone();
 		let instance = catalog_audio.instance.clone();
 		let cfg = audio_config(catalog_audio)?;
@@ -667,7 +667,9 @@ impl MoqAudioConsumer {
 			.channels
 			.map(moq_audio::Layout::from_channels)
 			.transpose()
-			.map_err(MoqError::audio_subscribe)?;
+			.map_err(|err| MoqError::UnsupportedConfig {
+				reason: err.to_string(),
+			})?;
 		config.delay = output.delay.map(Into::into).unwrap_or_default();
 		config.estimate = output.estimate;
 		config.start = match output.start.unwrap_or_default() {
@@ -677,11 +679,7 @@ impl MoqAudioConsumer {
 
 		let consumer = broadcast
 			.driver
-			.watch(async {
-				moq_audio::decode::Consumer::new(&resolved, &cfg, id, config)
-					.await
-					.map_err(MoqError::audio_subscribe)
-			})
+			.watch(async { Ok(moq_audio::decode::Consumer::new(&resolved, &cfg, id, config).await?) })
 			.await?;
 
 		let delay = Arc::new(AtomicU64::new(nanos(consumer.delay())));

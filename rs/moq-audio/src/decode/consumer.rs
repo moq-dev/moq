@@ -179,15 +179,22 @@ impl Consumer {
 		name: impl Into<String>,
 		options: Options,
 	) -> Result<Self, Error> {
-		let decoder = Decoder::new(catalog, &options.decoder)?;
+		// Only the local decoder/output setup is a capability refusal. Conditions learned
+		// from the subscription, such as retention, keep their original errors.
+		let setup = |err| match err {
+			Error::Unsupported(reason) => Error::UnsupportedConfig(reason),
+			err => err,
+		};
+		let decoder = Decoder::new(catalog, &options.decoder).map_err(setup)?;
 		let sample_rate = options.output.sample_rate.unwrap_or_else(|| decoder.sample_rate());
 		let layout = options.output.layout.unwrap_or_else(|| decoder.layout());
 		let remix = (decoder.layout() != layout)
 			.then(|| Remix::new(decoder.layout(), layout))
-			.transpose()?;
+			.transpose()
+			.map_err(setup)?;
 
 		if sample_rate == 0 {
-			return Err(Error::Unsupported("output sample rate must be > 0".into()));
+			return Err(Error::UnsupportedConfig("output sample rate must be > 0".into()));
 		}
 
 		let name = name.into();
