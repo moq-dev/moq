@@ -9,6 +9,7 @@ How to update your code for each breaking change, newest first.
 `GroupFrame::epoch` is `moq_stats::Epoch` instead of `moq_net::Instance`.
 Use `Epoch` for stored group epochs; parse their text with `str::parse` or
 `Epoch::try_from(String)`, and read it with `as_str` or `Display`.
+Epochs are opaque identities with equality and hashing, without a temporal order.
 Broadcast routes still use `moq_net::Instance`. Group JSON is unchanged:
 producers mint UUIDv7 strings, and readers accept any nonempty epoch string.
 
