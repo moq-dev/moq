@@ -494,7 +494,10 @@ without it), a resume cycle that never gets its slice, or an unavailable CPU
 clock fail the run; timing never does. The nightly runs
 `--smoke`, whose racing sweep runs every mode and a rotated query at 4 URLs x 2
 reconnects x 64 characters, and keeps its run directory as the `bench-browser`
-artifact.
+artifact. `consoles.jsonl` beside `report.json` retains page console messages and
+uncaught errors, including failed setup and samples. Each entry identifies its
+page, role, variant, workload, round and pass; `time` is Unix milliseconds.
+Console levels do not change the benchmark's existing failure checks.
 
 The in-memory frame, retained-history, gap ledger, bandwidth allocation, cached-group
 replay, resume-history, buffered-group, and peer grant paths also run directly in Chromium:

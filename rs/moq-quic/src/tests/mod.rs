@@ -949,7 +949,7 @@ fn finish_stream_simple() {
 		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 #[test]
@@ -976,7 +976,7 @@ fn reset_stream() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Err(recv::Error::Reset(ERROR)));
-	let _ = chunks.finalize();
+	chunks.finalize();
 	// The reset stream ends reset, never finished.
 	assert_eq!(
 		peek(|waiter| pair.client_send(client_ch, s).poll_end(waiter)),
@@ -1500,7 +1500,7 @@ fn stream_id_limit() {
 		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	assert_eq!(chunks.next(usize::MAX), Ok(None));
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	// Lose the stream-credit grant itself, after proving the sender exhausted its budget.
 	let grants = |pair: &mut Pair| pair.server_conn_mut(server_ch).stats().frame_tx.max_streams_uni;
@@ -1542,7 +1542,7 @@ fn stream_id_limit() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 #[test]
@@ -1639,7 +1639,7 @@ fn data_blocked() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes.len() == 10);
-	let _ = chunks.finalize();
+	chunks.finalize();
 	pair.drive();
 	assert_eq!(
 		pair.client_send(client_ch, s).write(&mut &b"0123456789ab"[..]).unwrap(),
@@ -1701,7 +1701,7 @@ fn stream_data_blocked() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(Some(chunk)) if chunk.bytes.len() == 10);
-	let _ = chunks.finalize();
+	chunks.finalize();
 	pair.drive();
 	assert_eq!(
 		pair.client_send(client_ch, s).write(&mut &b"0123456789ab"[..]).unwrap(),
@@ -1956,7 +1956,7 @@ fn key_update_reordered() {
 	assert_matches!(&*buf1.bytes, MSG1);
 	let buf2 = chunks.next(usize::MAX).unwrap().unwrap();
 	assert_eq!(buf2.bytes, MSG2);
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	assert_eq!(pair.client_conn_mut(client_ch).stats().path.lost_packets, 0);
 	assert_eq!(pair.server_conn_mut(server_ch).stats().path.lost_packets, 0);
@@ -2355,7 +2355,7 @@ fn test_flow_control(config: transport::Config, window_size: usize) {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_eq!(chunks.next(usize::MAX).err(), Some(recv::Error::Reset(VarInt(42))));
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	// Happy path
 	info!("writing");
@@ -2389,7 +2389,7 @@ fn test_flow_control(config: transport::Config, window_size: usize) {
 			}
 		}
 	}
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	info!("finished reading");
 	assert_eq!(cursor, window_size);
@@ -2443,7 +2443,7 @@ fn test_flow_control(config: transport::Config, window_size: usize) {
 		}
 	}
 	assert_eq!(cursor, window_size);
-	let _ = chunks.finalize();
+	chunks.finalize();
 	info!("finished reading");
 }
 
@@ -2510,7 +2510,7 @@ fn stop_opens_bidi() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Err(recv::Error::Blocked));
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	assert_matches!(
 		pair.server_send(server_ch, s).write(&mut &b"foo"[..]),
@@ -2844,7 +2844,7 @@ fn finish_stream_flow_control_reordered() {
 		chunks.next(usize::MAX),
 		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	pair.server.drive(pair.time, pair.client.addr);
 	pair.server.delay_outbound(); // Delay it
@@ -2867,7 +2867,7 @@ fn finish_stream_flow_control_reordered() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 #[test]
@@ -2918,7 +2918,7 @@ fn handshake_1rtt_handling() {
 		chunks.next(usize::MAX),
 		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 #[test]
@@ -3520,7 +3520,7 @@ fn finish_acked() {
 		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	assert_matches!(chunks.next(usize::MAX), Err(recv::Error::Blocked));
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	// Finish before receiving data ack
 	pair.client_send(client_ch, s).finish().unwrap();
@@ -3544,7 +3544,7 @@ fn finish_acked() {
 	let mut recv = pair.server_recv(server_ch, s);
 	let mut chunks = recv.read().unwrap();
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 #[test]
@@ -3593,7 +3593,7 @@ fn finish_retransmit() {
 		Ok(Some(chunk)) if chunk.bytes == MSG
 	);
 	assert_matches!(chunks.next(usize::MAX), Ok(None));
-	let _ = chunks.finalize();
+	chunks.finalize();
 }
 
 /// Ensures that exchanging data on a client-initiated bidirectional stream works past the initial
@@ -3635,7 +3635,7 @@ fn repeated_request_response() {
 		);
 
 		assert_matches!(chunks.next(usize::MAX), Ok(None));
-		let _ = chunks.finalize();
+		chunks.finalize();
 		pair.server_send(server_ch, s).write(&mut &RESPONSE[..]).unwrap();
 		pair.server_send(server_ch, s).finish().unwrap();
 
@@ -3648,7 +3648,7 @@ fn repeated_request_response() {
 			Ok(Some(chunk)) if chunk.bytes == RESPONSE
 		);
 		assert_matches!(chunks.next(usize::MAX), Ok(None));
-		let _ = chunks.finalize();
+		chunks.finalize();
 	}
 }
 
@@ -4934,7 +4934,7 @@ fn stream_chunks(mut recv: recv::Stream<'_>) -> Vec<u8> {
 		buf.extend(chunk.bytes);
 	}
 
-	let _ = chunks.finalize();
+	chunks.finalize();
 
 	buf
 }
@@ -6731,10 +6731,10 @@ fn leased(pair: &mut Pair, server_ch: ConnectionHandle) -> usize {
 /// whether the peer finished the stream right after the leased bytes.
 fn consume(pair: &mut Pair, server_ch: ConnectionHandle, s: StreamId, n: usize) -> bool {
 	let mut recv = pair.server_recv(server_ch, s);
-	let mut lease = recv.lease(0).0.unwrap();
+	let mut lease = recv.lease(0).unwrap();
 	let fin = lease.is_fin();
 	lease.advance(n);
-	let _ = recv.release(lease);
+	recv.release(lease);
 	fin
 }
 
@@ -6765,8 +6765,8 @@ fn pump_leased(
 
 		let before = leased(pair, server_ch);
 		let mut recv = pair.server_recv(server_ch, s);
-		if let Ok(lease) = recv.lease(0).0 {
-			let _ = recv.restore(lease);
+		if let Ok(lease) = recv.lease(0) {
+			recv.restore(lease);
 		}
 		let read = leased(pair, server_ch) - before;
 		if read == 0 && wrote == 0 {
@@ -6823,10 +6823,7 @@ fn lease_spends_connection_window_only() {
 	assert!(consume(&mut pair, server_ch, s, all), "finished after the leased bytes");
 	assert_eq!(leased(&mut pair, server_ch), 0);
 	pair.server_recv(server_ch, s).stop(0u32.into()).unwrap();
-	assert_eq!(
-		pair.server_recv(server_ch, s).lease(0).0.err(),
-		Some(recv::Error::Closed)
-	);
+	assert_eq!(pair.server_recv(server_ch, s).lease(0).err(), Some(recv::Error::Closed));
 }
 
 #[test]
@@ -7068,7 +7065,7 @@ fn upload(
 			while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
 				received += chunk.bytes.len();
 			}
-			let _ = chunks.finalize();
+			chunks.finalize();
 		}
 
 		if received == total || !pair.step() {
