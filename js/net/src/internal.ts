@@ -667,6 +667,8 @@ export const hooks: {
 	/** The next absolute frame this reader can serve. Assigned by `group.ts`. */
 	groupIndex: (group: GroupConsumer) => number;
 	groupStarted: (group: GroupConsumer) => boolean;
+	/** The copy's producer end, even while this reader still has buffered frames. */
+	groupSealed: (group: GroupConsumer) => GetPromise<Error | null>;
 	/** Watch the error a group's copy closes with, ignoring readers' verdicts, without holding the consumer. */
 	groupFate: (group: GroupConsumer) => () => Error | undefined;
 	/** Record when a track's mirror of a group joined that track at this hop. */
@@ -675,6 +677,8 @@ export const hooks: {
 	expireGroup: (group: GroupConsumer, expiry: Expiry) => void;
 	/** Carry a handed-out group across its logical track's route changes. */
 	recoverGroup: (group: GroupConsumer, recover: GroupRecover) => void;
+	/** Read a payload chunk, releasing its wait when the output stream closes. */
+	readFrameChunk: (frame: FrameConsumer, closed: Promise<void>) => Promise<Uint8Array | undefined>;
 	/** Read the next frame, as its stored DEFLATE slice when `compressed`, so a lite-07 publisher forwards it without inflating. */
 	readGroupFrame: (group: GroupConsumer, compressed: boolean, from?: number) => Promise<ReadGroupFrame | undefined>;
 	/** Notify the owning track when a reader reaches its shed front. */
@@ -928,6 +932,9 @@ export const hooks: {
 	groupStarted: () => {
 		throw new Error("group.ts not loaded");
 	},
+	groupSealed: () => {
+		throw new Error("group.ts not loaded");
+	},
 	groupFate: () => {
 		throw new Error("group.ts not loaded");
 	},
@@ -935,6 +942,9 @@ export const hooks: {
 		throw new Error("group.ts not loaded");
 	},
 	recoverGroup: () => {
+		throw new Error("group.ts not loaded");
+	},
+	readFrameChunk: () => {
 		throw new Error("group.ts not loaded");
 	},
 	readGroupFrame: () => {

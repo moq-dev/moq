@@ -1,35 +1,39 @@
-# [M] FETCH egress and ingest stream large frames without buffering
+# [M] Verify FETCH streaming and group tails on a quiet Chromium host
 
 ## Goal
 
-`@moq/net` serves a moq-transport FETCH object by object as it reads them,
-never collecting a requested group slice whole, so a FETCH of a group with
-large frames holds no more than the group tail. A lite FETCH whose readers
-all leave in the middle of a frame stops reading that frame's payload at
-once. The Chromium group-tail memory measurement and the frame benches are
-rerun on a quiet host after [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) and after this quest.
+Rerun the Chromium group-tail memory measurement and frame benches on a quiet
+host against the pre-[moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411)
+base, the landed chunked storage, and the FETCH streaming head. Record the
+comparison in [moq-dev/moq#7721](https://github.com/moq-dev/moq/pull/7721), and
+fix any small-frame browser regression it establishes.
 
 ## Plan
 
-Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
-/quest-complete run), from
-[moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411).
+The implementation in [moq-dev/moq#7721](https://github.com/moq-dev/moq/pull/7721)
+streams moq-transport FETCH and subscription fill objects through the existing
+chunked group reader, without collecting a requested slice. Bounded FETCHes
+answer before payloads finish; whole-group FETCHes wait for the final count
+without retaining payloads beyond the ordinary group tail. An evicted answer
+fails rather than pinning data for a slow reader. Lite FETCH cancellation watches
+reader demand throughout the frame pump, including a stalled payload. A stopped
+egress releases its chunk wait. Public API: none. Wire format: none.
 
-- moq-transport FETCH egress: the user: "absolutely don't buffer."
-  `readFetched` (`js/net/src/ietf/publisher.ts:2760` at be39188000, called at
-  `:2408` and `:2521`) collects each requested group slice before writing it. Stream it
-  the way [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411)'s subgroup egress (the `serveGroup` closure, `:811`) does, with `nextFrame`-style
-  reads and chunked writes for a payload past one segment.
-- lite FETCH whose readers all leave mid-frame: the user: "fix that I
-  think." Today it keeps reading the frame's payload before it notices. Watch
-  the reader count while streaming a frame and stop the stream (reset or
-  `STOP_SENDING`) as soon as none is left.
-- Benches: [moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411)'s small-frame hot-path results were inconclusive (paired
-  head/base medians 0.91 to 1.11 at load 24 to 29), and the Chromium
-  group-tail memory numbers predate chunked storage. Rerun both on a quiet
-  host (`js/net/bench/frames.ts` and the Chromium group-tail measurement)
-  against the pre-[moq-dev/moq#7411](https://github.com/moq-dev/moq/pull/7411) base and record them in the PR. A small-frame
-  regression found here is fixed here.
-- Milestone: ✅ m1. Not chosen: m2.
+The functional coverage includes a requested slice and an individual frame
+larger than the tail, mid-frame source/request/output failures, coalesced lite
+readers leaving mid-frame, and disposal of a stopped egress's chunk listener.
+`js/net/bench/fetch.ts` sweeps retained groups, independent readers, and small or
+chunked frames; Nightly runs it alongside `js/net/bench/frames.ts`.
 
-Public API: none. Wire: none.
+Decided 2026-10-31 (user): do not buffer moq-transport FETCH slices; cancel a
+lite FETCH promptly when its last reader leaves mid-frame. The requested quiet
+comparison remains unfinished. This implementation ran alongside the user's
+`/quest-spawn m0/m1` work, so shared-host timings cannot establish the browser
+performance outcome. Do not substitute them for the quiet-host comparison.
+
+## Waiting
+
+- Maintainer: provide a quiet host or a reserved measurement window for the
+  Chromium group-tail memory and paired frame benches. Recommend comparing the
+  pre-7411 base, landed chunked storage, and FETCH streaming head there, then
+  fixing any demonstrated small-frame regression before completing this quest.

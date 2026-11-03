@@ -421,11 +421,14 @@ export interface FetchPosition {
 export class FetchFrame {
 	/** The object payload. */
 	payload: Uint8Array;
+	/** The payload length when the caller streams its bytes after the header. */
+	streamed?: number;
 	/** The presentation timestamp carried in object properties, when present. */
 	timestamp?: Timestamp;
 
-	constructor({ payload, timestamp }: { payload: Uint8Array; timestamp?: Timestamp }) {
-		this.payload = payload;
+	constructor({ payload, streamed, timestamp }: { payload?: Uint8Array; streamed?: number; timestamp?: Timestamp }) {
+		this.payload = payload ?? new Uint8Array(0);
+		this.streamed = streamed;
 		this.timestamp = timestamp;
 	}
 
@@ -470,7 +473,7 @@ export class FetchFrame {
 			header.push(encodeVarint(extensions.byteLength, version), extensions);
 		}
 
-		header.push(encodeVarint(this.payload.byteLength, version));
+		header.push(encodeVarint(this.streamed ?? this.payload.byteLength, version));
 		await w.write(concat(header));
 		if (this.payload.byteLength > 0) {
 			await w.write(this.payload);

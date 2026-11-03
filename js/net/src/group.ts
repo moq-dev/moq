@@ -822,6 +822,7 @@ export class FrameConsumer {
 
 	static {
 		makeFrameConsumer = (sequence, frame) => new FrameConsumer(sequence, frame);
+		hooks.readFrameChunk = (consumer, closed) => consumer.#readChunk(closed);
 		pollChunk = (consumer) => consumer.#poll();
 		chunkChanged = (consumer) => {
 			const frame = consumer.#frame;
@@ -853,11 +854,18 @@ export class FrameConsumer {
 	}
 
 	/** The next chunk of the payload, waiting for it to be written; `undefined` once every byte is read. */
-	async readChunk(): Promise<Uint8Array | undefined> {
+	readChunk(): Promise<Uint8Array | undefined> {
+		return this.#readChunk();
+	}
+
+	async #readChunk(closed?: Promise<void>): Promise<Uint8Array | undefined> {
 		for (;;) {
 			const chunk = this.#poll();
 			if (chunk !== WAIT) return chunk;
-			await Signal.race(...chunkChanged(this));
+			const changed = Signal.race(...chunkChanged(this));
+			if (closed === undefined) await changed;
+			// A frame changes with a byte count or a verdict; only the stream resolves void.
+			else if ((await race([changed, closed])) === undefined) return undefined;
 		}
 	}
 
@@ -1167,6 +1175,7 @@ export class Consumer {
 		hooks.groupIndex = (group) => group.#index();
 		hooks.groupStarted = (group) =>
 			group.#state.total.peek() > group.#state.offset || group.#state.closed.peek() !== undefined;
+		hooks.groupSealed = (group) => group.#state.closed;
 		hooks.groupFate = (group) => {
 			const state = group.#state;
 			return () => {

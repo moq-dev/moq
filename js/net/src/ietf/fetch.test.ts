@@ -9,10 +9,11 @@ import * as Path from "../path.ts";
 import { Reader, Stream, Writer } from "../stream.ts";
 import { Timescale, Timestamp } from "../time.ts";
 import type { Order, Producer as TrackProducer } from "../track.ts";
+import { SEGMENT_BYTES } from "../util/limits.ts";
 import { wireOf } from "../wire.ts";
 import { Fetch, FetchHeader, FetchOk, type FetchType, type Location } from "./fetch.ts";
 import type * as Filter from "./filter.ts";
-import { Group as GroupMessage } from "./object.ts";
+import { decodeFetchObject, Group as GroupMessage } from "./object.ts";
 import { Publisher } from "./publisher.ts";
 import { RequestError } from "./request.ts";
 import { NativeSession } from "./session.ts";
@@ -715,3 +716,88 @@ test("draft-18: a joining FETCH whose subscription is refused is refused", async
 	await task;
 	client.close();
 });
+
+// A bounded FETCH must deliver before its final frame is complete. Keep growing the
+// requested slice past the group tail, so collecting either frames or payloads cannot pass.
+test.each([
+	{ count: 40, size: SEGMENT_BYTES + 1 },
+	{ count: 1, size: SEGMENT_BYTES * 40 },
+])("a bounded FETCH streams $count frames of $size bytes past the tail", async ({ count, size }) => {
+	for (const version of VERSIONS) {
+		using fx = serve(version);
+		const group = fx.track.createGroup(0);
+		let frame = group.createFrame({ size, timestamp: new Timestamp(0, Timescale.MILLI) });
+		const request = requestStream(version);
+		const task = fx.pub.runFetch(
+			new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, count)) }),
+			request.stream,
+		);
+		try {
+			expect(await request.answer.u53()).toBe(FetchOk.id);
+			const ok = await FetchOk.decode(request.answer, version);
+			expect(ok.endLocation).toEqual(endAt(version, 0, count - 1));
+			const next = await fx.uni.read();
+			if (!next.value) throw new Error("missing fetch stream");
+			const reader = new Reader(next.value, undefined, version);
+			expect(await reader.u53()).toBe(FetchHeader.type);
+			expect((await FetchHeader.decode(reader, version)).requestId).toBe(FETCH_ID);
+			for (let index = 0; index < count; index++) {
+				if (index > 0) frame = group.createFrame({ size, timestamp: new Timestamp(index, Timescale.MILLI) });
+				const object = await reader.decode((cursor) => decodeFetchObject(cursor, Timescale.MILLI));
+				expect(object).toMatchObject({ kind: "object", size, payload: undefined });
+				if (object.kind !== "object") throw new Error("expected object");
+				expect(object.timestamp?.value).toBe(index);
+				// Forward each segment before the rest exists; no whole-frame read can do this.
+				for (let offset = 0; offset < size; offset += SEGMENT_BYTES) {
+					const bytes = new Uint8Array(Math.min(SEGMENT_BYTES, size - offset)).fill(index);
+					frame.write(bytes);
+					expect(await reader.read(bytes.byteLength)).toEqual(bytes);
+				}
+				frame.finish();
+			}
+			// The bound ends the response without waiting for this live group's FIN.
+			expect(await reader.done()).toBe(true);
+			await task;
+		} finally {
+			request.stream.abort(new Error("test ended"));
+			group.abort(new Error("test ended"));
+			await task;
+		}
+	}
+});
+
+// Both streams must fail together if any part of an accepted answer becomes undeliverable.
+test.each(["source", "request", "output"] as const)(
+	"a FETCH stalled inside a frame stops on %s failure",
+	async (failure) => {
+		for (const version of VERSIONS) {
+			using fx = serve(version);
+			const group = fx.track.createGroup(0);
+			group.createFrame({ size: SEGMENT_BYTES * 2, timestamp: new Timestamp(0, Timescale.MILLI) });
+			const request = requestStream(version);
+			const task = fx.pub.runFetch(
+				new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, 1)) }),
+				request.stream,
+			);
+			expect(await request.answer.u53()).toBe(FetchOk.id);
+			await FetchOk.decode(request.answer, version);
+			const next = await fx.uni.read();
+			if (!next.value) throw new Error("missing fetch stream");
+			const reader = new Reader(next.value, undefined, version);
+			expect(await reader.u53()).toBe(FetchHeader.type);
+			await FetchHeader.decode(reader, version);
+			expect(await reader.decode((cursor) => decodeFetchObject(cursor, Timescale.MILLI))).toMatchObject({
+				kind: "object",
+				size: SEGMENT_BYTES * 2,
+				payload: undefined,
+			});
+			const cause = new Error("test failure");
+			if (failure === "source") group.abort(cause);
+			else if (failure === "request") request.withdraw();
+			else reader.stop(cause);
+			await task;
+			if (failure !== "output") expect(await reader.readChunk(1).catch(error)).toBeInstanceOf(Error);
+			group.abort(cause);
+		}
+	},
+);
