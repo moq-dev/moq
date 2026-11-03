@@ -173,25 +173,29 @@ fn receive(c: &mut Criterion) {
 				for streams in [1, 8] {
 					let id = format!("{transport}/{}/{sessions}s/{streams}streams", version.alpn());
 					group.throughput(Throughput::Bytes((sessions * streams * MESSAGE) as u64));
+					let mut rig = None;
 					group.bench_function(BenchmarkId::from_parameter(&id), |b| {
-						let before = LIVE.load(Ordering::Relaxed);
-						let mut rig = runtime.block_on(Receivers::new(
-							Shape {
-								websocket,
-								version,
-								sessions,
-								streams,
-							},
-							payload.clone(),
-						));
-						runtime.block_on(rig.round());
-						runtime.block_on(rig.round());
-						let held = LIVE.load(Ordering::Relaxed) - before;
-						eprintln!(
-							"{id}: retained={held} B, per-session={} B, unread-per-session={} B, connection-window={CONNECTION} B",
-							held / sessions as isize,
-							streams * MESSAGE
-						);
+						let rig = rig.get_or_insert_with(|| {
+							let before = LIVE.load(Ordering::Relaxed);
+							let mut rig = runtime.block_on(Receivers::new(
+								Shape {
+									websocket,
+									version,
+									sessions,
+									streams,
+								},
+								payload.clone(),
+							));
+							runtime.block_on(rig.round());
+							runtime.block_on(rig.round());
+							let held = LIVE.load(Ordering::Relaxed) - before;
+							eprintln!(
+								"{id}: retained={held} B, per-session={} B, unread-per-session={} B, connection-window={CONNECTION} B",
+								held / sessions as isize,
+								streams * MESSAGE
+							);
+							rig
+						});
 						b.iter_custom(|iters| {
 							runtime.block_on(async {
 								let start = Instant::now();
@@ -201,8 +205,10 @@ fn receive(c: &mut Criterion) {
 								start.elapsed()
 							})
 						});
-						runtime.block_on(rig.close());
 					});
+					if let Some(rig) = rig {
+						runtime.block_on(rig.close());
+					}
 				}
 			}
 		}

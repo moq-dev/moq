@@ -212,7 +212,7 @@ Evidence added in the follow-up attempt (2026-11-02):
   512 KiB leases fill each receiver's connection window. Heap includes both
   endpoints, drivers, stream tables, pipes, and receive backings, excluding
   the runtime and shared source payload. Nightly's supplemental Rust leg runs
-  it. All 36 cases completed locally on the shared host. With 64 sessions and
+  it. The initial 36-case sweep completed locally on the shared host. With 64 sessions and
   eight streams each, live heap per session was 4,506,154-4,506,265 bytes for
   TCP framing and 4,671,843-4,671,979 bytes for WebSocket framing across the
   three versions, including both endpoints. Throughput point estimates were
