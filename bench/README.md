@@ -297,20 +297,24 @@ BENCH_RELAY_CPUS=4-7 BENCH_GENERATOR_CPUS=0-3 BENCH_GENERATOR=21d6da9fc1 \
 Choose disjoint allowed CPU sets, with at least one relay CPU per worker.
 Hybrid CPUs require performance cores, and count their `cpu_core` events.
 The relay and generator keep these affinities for every revision. Instructions
-mode runs alone. Each base keeps a detached worktree and target under
+mode runs alone.
+
+Each base keeps a detached worktree and target under
 `target/bench/revisions/<sha>`, so later runs reuse its build; delete them with
 `git worktree remove`. The revisions build side by side on every allowed CPU,
-since fat LTO links on one thread. Every round measures each base and the current tree back
-to back, rotating which goes first, for `BENCH_RUNTIME_ROUNDS` rounds (default
-3); one generator drives them all. That is the current tree's unless
-`BENCH_GENERATOR` names a revision: hold it fixed across a bisect's runs, since
-client changes (flow control, subscription options) move what an old relay
-spends per frame. The revisions are each other's
-control, so there is no unprofiled run per revision. The run ends with each
-revision's median and range in `instructions-summary.json`, including the groups
-the generator confirmed lost between the reports bracketing each counter window
-and the host's highest one-minute load during it. Admission only waits for room
-when the run starts, so judge cells by the load they actually ran under.
+since fat LTO links on one thread. Every round measures each base and the
+current tree back to back, rotating which goes first, for
+`BENCH_RUNTIME_ROUNDS` rounds (default 3). The revisions are each other's
+control, so there is no unprofiled run per revision. One generator drives them
+all: the current tree's, unless `BENCH_GENERATOR` names a revision. Hold it
+fixed across a bisect's runs, so client changes (flow control, subscription
+options) can't move what an old relay spends per frame.
+
+The run ends with each revision's median and range in
+`instructions-summary.json`, including the groups the generator confirmed lost
+between the reports bracketing each counter window and the host's highest
+one-minute load during it. Admission only waits for room when the run starts,
+so judge cells by the load they actually ran under.
 
 After seven seconds of warmup, acknowledged perf enable/disable commands bound
 five seconds of relay counters. `instructions/instructions.json` records both
@@ -325,24 +329,26 @@ On the profiling host, a 1,000 Hz limit throttled every sample even at a period
 of 10,000,019. Temporarily raising `kernel.perf_event_max_sample_rate` to 100,000
 allowed complete captures. Save and restore the original setting around the
 whole gated run; the driver records the observed limit and changes no sysctls.
-The host sampler lasts nineteen seconds so delivery reports bracket both edges
-and the sampling window that follows.
-The normal `summary.json` still describes its own final throughput window;
-use `instructions.json` for instruction comparisons.
+The host sampler lasts nineteen seconds, so delivery reports bracket both edges
+of the counter window and cover the sampling window after it. The normal
+`summary.json` still describes its own final throughput window; use
+`instructions.json` for instruction comparisons.
 
-`BENCH_INSTRUCTION_PERIOD` defaults to 1,000,003 retired instructions per sample.
-The fixed-period recording covers the five seconds after the counter window,
-not the window itself, so sampling interrupts, which run as the relay's kernel
-instructions, stay out of the counts. Scale stacks by their share of samples.
-`instructions.folded`
-weights each stack by that period. `perf.data`, raw `stat.json`, `perf.log`,
-thread names, CPU sets, and delivery reports remain with the evidence. Both
-counters and samples cover only the relay. Compare equivalent delivery and loss.
-Instructions reduce frequency noise, but not batching: a relay contending with
-other host work handles more frames per wakeup, so each frame costs fewer
-instructions. On the profiling host, cells measured under a one-minute load
-above about 5 read up to 20% low, so compare cells from quiet stretches, within
-one run. Pinning does not remove interference from other host work.
+`BENCH_INSTRUCTION_PERIOD` defaults to 1,000,003 retired instructions per
+sample. The fixed-period recording covers the five seconds after the counter
+window, not the window itself, so sampling interrupts, which run as the relay's
+kernel instructions, stay out of the counts. `instructions.folded` weights each
+stack by that period; scale stacks to a frame by their share of samples.
+`perf.data`, raw `stat.json`, `perf.log`, thread names, CPU sets, and delivery
+reports remain with the evidence. Both counters and samples cover only the
+relay.
+
+Compare equivalent delivery and loss. Instructions reduce frequency noise, but
+not batching: a relay contending with other host work handles more frames per
+wakeup, so each frame costs fewer instructions. On the profiling host, cells
+measured under a one-minute load above about 9 read 5-20% low, so compare
+cells from quiet stretches within one run. Pinning does not remove interference
+from other host work.
 
 ### Heap
 
