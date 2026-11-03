@@ -45,6 +45,21 @@ Then, only where the profile shows a cost:
   (opt-in through `Endpoint::batch_sends`), and comes with its
   [raw samples](https://github.com/zshenker/moq/blob/eae2ca6941ce67b8e14ba6afdb76c1c2240c45a0/bench/driver-batch-sends/samples.jsonl),
   so the profile should re-measure the port.
+  - Revision: measured on e072cf604 with #7458, #7418, #7394, #7543, and a
+    GSO byte cap equivalent to #7649 applied. The prototype revisions measured
+    predate the handshake bypass, and the last round ran after the drop and
+    rebind fixes. The steady-state send path matches the port, which differs
+    in its opt-in (`Endpoint::batch_sends`), its flush task's spawner, the
+    handshake bypass, and its base. Those revisions and the harness are not
+    public.
+  - Invocation: one run per point of the harness's
+    `bench --sessions 1000 --rate 30 --object-size 1024-4096 --objects-per-stream 1 --client-threads 6 --client-endpoints 12 --pin --batch-sends {false|true}`,
+    with audio at `--rate 50 --object-size 100-200`, 1 Mbit/s video at
+    `--object-size 3125-5208 --objects-per-stream 30`, and 3 Mbit/s video at
+    `--sessions 500 --object-size 9375-15625 --objects-per-stream 30`. Its
+    defaults are a 1,280-byte payload, GSO on, one tokio worker, a 5 s warmup,
+    a 15 s measure, 128 handshakes in flight, and a 15 s keep-alive, all under
+    `taskset` on physical cores.
   - Setup: server and client on one host over loopback, the server on one
     tokio worker pinned to one physical core, and the client on 6 pinned workers
     over 12 sockets. 1,280-byte payloads, MTU discovery off, GSO and GRO on,
@@ -60,9 +75,11 @@ Then, only where the profile shows a cost:
 
     The system share fell from 31 to 38% to 22 to 34%. A single run varies by
     about ±3%.
-  - Calls: over 5 s of the small-object point, `strace` counted 7,214
-    `sendmmsg` against 135,497 `sendmsg`, about 17 trains per call. `strace`
-    slows the server, so only the ratio holds.
+  - Calls: in separate 5 s `strace` windows of the small-object point, the
+    unbatched server made 135,497 `sendmsg` and the batched one 7,214
+    `sendmmsg` plus 506 `sendmsg`, so about 18 to 19 trains per `sendmmsg`.
+    That is an estimate across runs with no direct counter, and `strace` slows
+    each arm differently.
   - Latency (per object, from the server's write to the client's read of the
     last byte): p50 rose from 36 to 72 µs to 258 to 352 µs. On the small-object
     and audio points, p99 rose from 104 to 705 µs to 606 to 770 µs.
