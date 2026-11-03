@@ -1929,6 +1929,7 @@ where
 										{
 											fetch_done = true;
 										}
+										let _ = group_fetches.poll(waiter);
 										poll_settled(&mut settle, waiter, &fill, count)
 									})
 									.await;
@@ -2615,7 +2616,7 @@ where
 	///
 	/// Waiting is what keeps the two streams from interleaving into one producer. It ends
 	/// with the subscription, so a publisher that promises a fill and never delivers one
-	/// costs this stream and nothing else. Meanwhile this stream stops holding the
+	/// costs this group and nothing else. Meanwhile this stream stops holding the
 	/// subscription's end open: the fill's own stream holds it if its header arrived, and
 	/// the grace gives up on it if not.
 	async fn claim_fill(
@@ -7749,7 +7750,10 @@ mod joining_fetch_tests {
 
 	impl JoinRun {
 		async fn start(version: Version, start: Option<track::Position>, ok: Vec<u8>, fetch: Vec<u8>) -> Self {
-			let session = ScriptedSession::per_stream(vec![ok, fetch]);
+			Self::subscribe(version, start, ScriptedSession::per_stream(vec![ok, fetch])).await
+		}
+
+		async fn subscribe(version: Version, start: Option<track::Position>, session: ScriptedSession) -> Self {
 			let (tasks, _task_set) = crate::util::TaskSet::new();
 			let subscriber = Subscriber::new(
 				crate::time::Clock::tokio(),
@@ -7988,6 +7992,54 @@ mod joining_fetch_tests {
 		assert!(futures::poll!(fetch.as_mut()).is_pending());
 		settle().await;
 		assert_eq!(fetches(), 1, "group 3 is fetched without waiting for group 4's head");
+	}
+
+	/// A failed head still permits a cache-miss FETCH while PUBLISH_DONE waits for its
+	/// reordered data streams, rather than leaving that request unpolled until teardown.
+	#[tokio::test(start_paused = true)]
+	async fn a_settled_head_wait_fetches_during_publish_done_grace() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::subscribe(version, None, ScriptedSession::new(subscribe_ok(version, largest))).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+		let _fetch = run._hold.1.fetch_group(4, None);
+		settle().await;
+		assert_eq!(fetches(), 0, "the miss waits for the subscription's fill");
+		let fill = run
+			.subscriber
+			.state
+			.lock()
+			.subscribes
+			.values()
+			.next()
+			.unwrap()
+			.fill
+			.clone();
+
+		run.session.push(&message_bytes(
+			ietf::PublishDone::ID,
+			&ietf::PublishDone {
+				request_id: None,
+				status_code: ietf::PublishDoneStatus::TrackEnded.code(version),
+				stream_count: 0,
+				reason_phrase: "done".into(),
+			},
+			version,
+		));
+		// The scripted reader needs an explicit wake after push. Starting the head
+		// wakes its parked miss, so the driver reads PUBLISH_DONE and enters the grace.
+		*fill.write().ok().unwrap() = Fill::Active;
+		settle().await;
+		assert!(!run.serving.is_finished());
+
+		*fill.write().ok().unwrap() = Fill::Done;
+		settle().await;
+		assert_eq!(fetches(), 1, "a settled head permits a FETCH during the grace");
 	}
 
 	/// Withdrawing the last reader releases a pending head wait without a FETCH.
