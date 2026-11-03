@@ -567,6 +567,7 @@ pub enum Kind {
 
 /// A timestamp or delay cannot be represented on the playout clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
 	/// Mapping the timestamp would overflow.
 	#[error("playback timeline overflow")]
@@ -597,18 +598,10 @@ pub struct Audio {
 ///
 /// Clones capture this broadcast's clock; resetting a handle never changes the
 /// clock its previous clones or track handles update.
+#[derive(Clone)]
 pub struct Producer {
-	clock: Mutex<Arc<Clock>>,
+	clock: Arc<Clock>,
 	current: Arc<Mutex<Arc<Clock>>>,
-}
-
-impl Clone for Producer {
-	fn clone(&self) -> Self {
-		Self {
-			clock: Mutex::new(self.clock()),
-			current: self.current.clone(),
-		}
-	}
 }
 
 /// Reads the current playout schedule without moving its anchor.
@@ -625,20 +618,22 @@ impl Producer {
 	pub fn new(delay: Duration) -> Self {
 		let clock = Arc::new(Clock::new(delay));
 		Self {
-			clock: Mutex::new(clock.clone()),
+			clock: clock.clone(),
 			current: Arc::new(Mutex::new(clock)),
 		}
 	}
 
-	fn clock(&self) -> Arc<Clock> {
-		self.clock.lock().unwrap().clone()
-	}
-
-	/// Start a new broadcast clock and switch readers to it, isolating all previous update handles.
-	pub fn reset(&self, delay: Duration) {
+	/// Replace this producer with a new broadcast clock and switch readers to it.
+	///
+	/// Previous clones and track handles retain their old broadcast's clock.
+	#[must_use = "use the returned producer for the replacement broadcast"]
+	pub fn reset(self, delay: Duration) -> Self {
 		let clock = Arc::new(Clock::new(delay));
-		*self.clock.lock().unwrap() = clock.clone();
-		*self.current.lock().unwrap() = clock;
+		*self.current.lock().unwrap() = clock.clone();
+		Self {
+			clock,
+			current: self.current,
+		}
 	}
 
 	/// Return a reader that follows this handle's broadcast replacements.
@@ -650,7 +645,7 @@ impl Producer {
 
 	/// Return a track handle bound to this broadcast's clock.
 	pub fn track(&self, kind: Kind) -> Track {
-		Track::new(self.clock(), kind)
+		Track::new(self.clock.clone(), kind)
 	}
 
 	/// Fold an arriving video frame into the anchor, unless the speaker owns it,
@@ -659,7 +654,7 @@ impl Producer {
 	/// A move makes every queued frame due earlier, so the window has to recompute
 	/// the deadline it is already asleep on.
 	pub fn video(&self, timestamp: Timestamp, now: Instant) -> bool {
-		let clock = self.clock();
+		let clock = &self.clock;
 		let moved = clock.state.lock().unwrap().video(timestamp, now);
 		if moved {
 			clock.wake();
@@ -669,7 +664,7 @@ impl Producer {
 
 	/// Start a new video timeline without taking ownership from a speaker.
 	pub fn video_restarted(&self) {
-		let clock = self.clock();
+		let clock = &self.clock;
 		let moved = {
 			let mut state = clock.state.lock().unwrap();
 			if state.speaker {
@@ -697,7 +692,7 @@ impl Producer {
 	/// A move makes every queued video frame due earlier, so the window has to
 	/// recompute the deadline it is already asleep on.
 	pub fn audio(&self, audio: Audio, now: Instant) -> bool {
-		let clock = self.clock();
+		let clock = &self.clock;
 		let moved = {
 			let mut state = clock.state.lock().unwrap();
 			state.hold(audio.target);
@@ -713,7 +708,7 @@ impl Producer {
 	/// break is unrelated: re-pin the anchor on the next audio frame rather than
 	/// pacing across a jump the speaker never plays.
 	pub fn audio_restarted(&self) {
-		self.clock().state.lock().unwrap().restarted()
+		self.clock.state.lock().unwrap().restarted()
 	}
 
 	/// The speaker went quiet, so nothing holds playback to its cadence any
@@ -724,14 +719,14 @@ impl Producer {
 	/// necessarily continuous with what just ended. That covers a pending
 	/// restart, which would otherwise re-pin the frame after it too.
 	pub fn audio_stopped(&self) {
-		self.clock().state.lock().unwrap().stopped()
+		self.clock.state.lock().unwrap().stopped()
 	}
 
 	/// When `timestamp` should be presented, or `None` before any frame has
 	/// anchored the clock. `None` means as soon as possible: there is nothing
 	/// left to wait for.
 	pub fn due(&self, timestamp: Timestamp) -> Option<Instant> {
-		self.clock().state.lock().unwrap().due(timestamp)
+		self.clock.state.lock().unwrap().due(timestamp)
 	}
 }
 
@@ -779,7 +774,7 @@ mod tests {
 		let previous = clock.clone();
 		let old = clock.track(Kind::Audio);
 		old.declare();
-		clock.reset(DELAY);
+		let clock = clock.reset(DELAY);
 		let now = kio::clock::now();
 		clock.audio(
 			Audio {

@@ -52,6 +52,7 @@ const AUDIO_SILENCE: usize = 960;
 const AUDIO_DRAIN_GRACE: Duration = Duration::from_secs(1);
 
 /// Everything the media task needs to fill the window and the speaker.
+#[derive(Clone)]
 pub(super) struct Media<O: Output> {
 	pub(super) origin: moq_net::origin::Consumer,
 	pub(super) broadcast: String,
@@ -76,7 +77,7 @@ impl<O: Output> Media<O> {
 	/// plays the broadcast, a restart drops it for the instance that replaced it,
 	/// and an end lets what is playing finish while waiting for the next start. An
 	/// update is the same instance, which its subscriptions already ride out.
-	async fn play(self) -> anyhow::Result<()> {
+	async fn play(mut self) -> anyhow::Result<()> {
 		let mut follow = Instances::new(&self.origin, &self.broadcast, None)?;
 		// The device belongs to the player, so replacing a broadcast never waits
 		// for it to close and reopen. Each sink adapts its own rate and layout.
@@ -103,11 +104,13 @@ impl<O: Output> Media<O> {
 
 					// Another instance's timeline is its own, so nothing of the old one carries over.
 					drop(playing.take());
-					self.presentation.reset(self.args.video_delay());
+					self.presentation = self.presentation.reset(self.args.video_delay());
 					self.video.lock().unwrap().clear();
 					self.drained.notify_one();
 					self.output.send(Event::Wake);
-					playing = Some(Box::pin(self.play_broadcast(broadcast, &device)));
+					let media = self.clone();
+					let device = &device;
+					playing = Some(Box::pin(async move { media.play_broadcast(broadcast, device).await }));
 				}
 				result = async { playing.as_mut().expect("guarded").await }, if playing.is_some() => {
 					playing = None;
