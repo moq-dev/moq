@@ -6,7 +6,7 @@ import { sendPayload } from "./payload.ts";
 // A stopped sender must release its wait even when the source frame stays open forever.
 // Otherwise each cancelled FETCH leaves a reader and its listeners on the shared frame.
 test("stopping a payload releases its pending chunk wait", async () => {
-	const producer = new Producer(0);
+	const producer = new Producer(0n);
 	producer.createFrame({ size: 2 });
 	const group = producer.consume();
 	const frame = await group.nextFrame();

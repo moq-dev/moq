@@ -70,7 +70,7 @@ function serve(version: IetfVersion, grant?: Signal<Grant | undefined>) {
 type Served = ReturnType<typeof serve>;
 
 /** Write `payloads` into group `sequence`, finishing it unless told otherwise. */
-function writeGroup(track: TrackProducer, sequence: number, payloads: string[], finish = true) {
+function writeGroup(track: TrackProducer, sequence: bigint, payloads: string[], finish = true) {
 	const group = track.createGroup(sequence);
 	for (const [object, payload] of payloads.entries()) {
 		group.writeFrame({
@@ -85,7 +85,7 @@ function writeGroup(track: TrackProducer, sequence: number, payloads: string[], 
 /** Groups `0..count`, each holding `g-0` and `g-1`, skipping `hole`. */
 function publishPairs(track: TrackProducer, count: number, hole?: number) {
 	for (let sequence = 0; sequence < count; sequence++) {
-		if (sequence !== hole) writeGroup(track, sequence, [`${sequence}-0`, `${sequence}-1`]);
+		if (sequence !== hole) writeGroup(track, BigInt(sequence), [`${sequence}-0`, `${sequence}-1`]);
 	}
 }
 
@@ -355,7 +355,7 @@ test("a FETCH waits for the Largest Object's open group", async () => {
 	for (const version of VERSIONS) {
 		using fx = serve(version);
 		publishPairs(fx.track, 4);
-		const live = writeGroup(fx.track, 4, ["4-0"], false);
+		const live = writeGroup(fx.track, 4n, ["4-0"], false);
 		let answered = false;
 		const answering = fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(4, 0), at(4, 0)) }));
 		void answering.finally(() => {
@@ -387,7 +387,7 @@ test("a FETCH the cache cannot answer is refused before FETCH_OK", async () => {
 		expect(await ask(at(3, 2), at(3, 6))).toBe(INVALID_RANGE);
 		expect(await ask(at(3, 1), at(3, 1))).toBe(INVALID_RANGE);
 		// A newest group with no objects starts past Largest Object too.
-		writeGroup(fx.track, 4, []);
+		writeGroup(fx.track, 4n, []);
 		expect(await ask(at(4, 0), at(4, 4))).toBe(INVALID_RANGE);
 	}
 });
@@ -397,8 +397,8 @@ test("a FETCH of a datagram is refused", async () => {
 	for (const version of VERSIONS) {
 		using fx = serve(version);
 		publishPairs(fx.track, 3);
-		expect(fx.track.appendDatagram(new Timestamp(0, Timescale.MILLI), new Uint8Array([1]))).toBe(3);
-		writeGroup(fx.track, 4, ["4-0"]);
+		expect(fx.track.appendDatagram(new Timestamp(0, Timescale.MILLI), new Uint8Array([1]))).toBe(3n);
+		writeGroup(fx.track, 4n, ["4-0"]);
 
 		const only = new Fetch({ requestId: FETCH_ID, type: range(version, at(3, 0), at(3, 0)) });
 		expect(refused(await fetch(fx, only))).toBe(DOES_NOT_EXIST);
@@ -450,7 +450,7 @@ test("a cancelled FETCH stops waiting", async () => {
 			using _clock = manual();
 			using fx = serve(version);
 			publishPairs(fx.track, 2);
-			writeGroup(fx.track, 2, ["2-0"], false);
+			writeGroup(fx.track, 2n, ["2-0"], false);
 			const request = requestStream(version);
 			const task = fx.pub.runFetch(
 				new Fetch({ requestId: FETCH_ID, type: range(version, at(2, 0), at(2, 0)), fillTimeout }),
@@ -471,7 +471,7 @@ test("FILL_TIMEOUT is ignored while a group finishes", async () => {
 		for (const fillTimeout of [Milli(0), Milli(100)]) {
 			using clock = manual();
 			using fx = serve(version);
-			const live = writeGroup(fx.track, 4, ["4-0"], false);
+			const live = writeGroup(fx.track, 4n, ["4-0"], false);
 			let answered = false;
 			const answering = fetch(
 				fx,
@@ -523,7 +523,7 @@ function joining(offset = 0n): Fetch {
 test("draft-18: a joining FETCH serves the head its subscription starts after", async () => {
 	using fx = serve(D18);
 	publishPairs(fx.track, 5);
-	const live = writeGroup(fx.track, 5, ["5-0", "", "5-2"], false);
+	const live = writeGroup(fx.track, 5n, ["5-0", "", "5-2"], false);
 	const { client, ok } = await subscribe(fx);
 	expect(ok.largest).toEqual({ groupId: 5n, objectId: 2n });
 
@@ -537,7 +537,7 @@ test("draft-18: a joining FETCH serves the head its subscription starts after", 
 	if (next.done) throw new Error("no subscription stream");
 	const group = new Reader(next.value, undefined, D18);
 	const header = await GroupMessage.decode(group, D18);
-	expect(header.groupId).toBe(5);
+	expect(header.groupId).toBe(5n);
 	expect(header.flags.firstObject).toBe(false);
 	expect(await group.u53()).toBe(3);
 
@@ -572,7 +572,7 @@ test("draft-18: a joining FETCH serves the head its subscription starts after", 
 // SUBSCRIBE_OK, and the head is then all the subscriber gets of that group.
 test("draft-18: a joining FETCH outlives a subscription that ends after FETCH_OK", async () => {
 	using fx = serve(D18);
-	const live = writeGroup(fx.track, 5, ["5-0", "5-1"], false);
+	const live = writeGroup(fx.track, 5n, ["5-0", "5-1"], false);
 	const { client, serving } = await subscribe(fx);
 
 	const request = requestStream(D18);
@@ -646,7 +646,7 @@ test("draft-18: a joining FETCH its subscription cannot answer is refused", asyn
 		// A head the cache lost is refused, rather than answered short of where the
 		// subscription starts.
 		using fx = serve(D18);
-		const live = writeGroup(fx.track, 5, ["5-0", "5-1"], false);
+		const live = writeGroup(fx.track, 5n, ["5-0", "5-1"], false);
 		const { client } = await subscribe(fx);
 		live.abort(new Error("evicted"));
 		expect(refused(await fetch(fx, joining()))).toBe(DOES_NOT_EXIST);
@@ -658,7 +658,7 @@ test("draft-18: a joining FETCH its subscription cannot answer is refused", asyn
 // the subscriber pipelines both: it waits for the subscription rather than being refused.
 test("draft-18: a joining FETCH waits for the subscription it names", async () => {
 	using fx = serve(D18);
-	writeGroup(fx.track, 5, ["5-0", "5-1"], false);
+	writeGroup(fx.track, 5n, ["5-0", "5-1"], false);
 	const request = requestStream(D18);
 	const task = fx.pub.runFetch(joining(), request.stream);
 	await flush();
@@ -725,7 +725,7 @@ test.each([
 ])("a FETCH streams $prefix cached frames and a $size byte final frame past the tail", async ({ prefix, size }) => {
 	for (const version of VERSIONS) {
 		using fx = serve(version);
-		const group = fx.track.createGroup(0);
+		const group = fx.track.createGroup(0n);
 		const prefixSize = SEGMENT_BYTES * 8;
 		for (let index = 0; index < prefix; index++) {
 			const frame = group.createFrame({ size: prefixSize, timestamp: new Timestamp(index, Timescale.MILLI) });
@@ -777,7 +777,7 @@ test.each([
 test("a bounded FETCH waits for headers or the final group before promising its end", async () => {
 	for (const version of VERSIONS) {
 		using fx = serve(version);
-		const live = writeGroup(fx.track, 0, ["0-0", "0-1", "0-2"], false);
+		const live = writeGroup(fx.track, 0n, ["0-0", "0-1", "0-2"], false);
 		const answering = fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, 10)) }));
 		await flush();
 		live.finish();
@@ -799,7 +799,7 @@ test.each(["source", "request", "output"] as const)(
 	async (failure) => {
 		for (const version of VERSIONS) {
 			using fx = serve(version);
-			const group = fx.track.createGroup(0);
+			const group = fx.track.createGroup(0n);
 			group.createFrame({ size: SEGMENT_BYTES * 2, timestamp: new Timestamp(0, Timescale.MILLI) });
 			const request = requestStream(version);
 			const task = fx.pub.runFetch(
