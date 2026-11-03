@@ -59,12 +59,12 @@ pub struct Info {
 	/// root: any `..` reference escapes.
 	pub path: crate::Path,
 
-	/// The epoch of the route a [`Consumer`] was resolved through, naming the publisher
-	/// instance it reads.
+	/// The instance of the route a [`Consumer`] was resolved through, naming the stream
+	/// it reads.
 	///
 	/// Stamped on every [`Consumer`] an origin resolves, like [`Self::path`]. `None` for a
-	/// route without an epoch and for a handle not resolved through an origin.
-	pub epoch: Option<crate::Epoch>,
+	/// handle not resolved through an origin.
+	pub instance: Option<crate::Instance>,
 
 	// What the frames this broadcast's groups are still receiving may allocate up front,
 	// inherited from the origin handle that created it.
@@ -77,7 +77,7 @@ impl Default for Info {
 			pool: cache::Pool::new(cache::Config::default().with_expiry(cache::DEFAULT_EXPIRY)),
 			cache_duration: std::time::Duration::MAX,
 			path: crate::Path::default(),
-			epoch: None,
+			instance: None,
 			frames: Default::default(),
 		}
 	}
@@ -278,10 +278,9 @@ impl Producer {
 	}
 
 	/// Advertise this broadcast's exact path as a route, or replace the standing
-	/// advertisement's route. The route is taken as given, epoch included: another
-	/// epoch, or none, announces a new broadcast. To re-price the same instance,
-	/// start from the current route:
-	/// `broadcast.announce(broadcast.route().unwrap_or_default().with_cost(cost))`.
+	/// advertisement's route. A route naming no instance keeps the broadcast's, so
+	/// `broadcast.announce(Route::default().with_cost(cost))` re-prices it; one naming
+	/// another instance announces a new stream.
 	///
 	/// Until this is called the broadcast exists for nobody: announce cursors do
 	/// not list it and requests for its path fail with [`Error::Unroutable`], for
@@ -615,6 +614,8 @@ pub(crate) enum RequestValidity {
 	Period(
 		kio::Consumer<()>,
 		kio::Consumer<()>,
+		// Keeps the selection registered, which is what keeps the two periods open.
+		#[expect(dead_code, reason = "held only for its registration")]
 		std::sync::Arc<crate::model::origin_impl::Selection>,
 	),
 }
@@ -644,29 +645,19 @@ impl RequestValidity {
 	pub(crate) fn check(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
 		match self {
 			Self::Route(route) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
-			// A replacement retires the period only once its held `Restart` is released.
-			Self::Period(route, _, selected)
-				if route.poll_closed(waiter).is_ready() || selected.poll_retired(waiter).is_ready() =>
-			{
-				Err(crate::Error::Unroutable)
-			}
+			Self::Period(route, _, _) if route.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
 			Self::Selected(_) => self.start().check(waiter),
 			_ => Ok(()),
 		}
 	}
 
 	/// [`Self::check`] for a request already sent but not yet answered: only another
-	/// instance taking the path refuses it, since without an epoch that instance may be
-	/// the one answering. A withdrawal leaves it to its answer, as moq-lite has the
-	/// publisher conclude in-flight requests.
+	/// instance taking the path refuses it. A withdrawal leaves it to its answer, as
+	/// moq-lite has the publisher conclude in-flight requests.
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn check_unanswered(&self, waiter: &kio::Waiter) -> Result<(), crate::Error> {
 		match self {
-			Self::Period(_, answering, selected)
-				if answering.poll_closed(waiter).is_ready() || selected.poll_retired(waiter).is_ready() =>
-			{
-				Err(crate::Error::Unroutable)
-			}
+			Self::Period(_, answering, _) if answering.poll_closed(waiter).is_ready() => Err(crate::Error::Unroutable),
 			Self::Selected(_) => self.start().check_unanswered(waiter),
 			_ => Ok(()),
 		}
@@ -785,10 +776,11 @@ impl Requests {
 		&self.info
 	}
 
-	/// Poll for the next consumer-requested track, without blocking.
+	/// The next track a consumer requests, as a [`track::Request`] to serve.
 	///
 	/// Returns [`Error::Closed`] once the broadcast has ended, so a serving loop
 	/// knows to stop and release its handle.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<track::Request, Error>> {
 		// A source that no longer names the instance that minted it takes no new track:
 		// ending it refuses what is queued with `Unroutable`, while the tracks it handed
@@ -817,12 +809,6 @@ impl Requests {
 		Poll::Ready(Ok(pending.claim().with_stats(self.stats.clone())))
 	}
 
-	/// Block until a consumer requests a track, returning a [`track::Request`] to serve.
-	#[cfg(feature = "async")]
-	pub async fn requested_track(&mut self) -> Result<track::Request, Error> {
-		kio::wait(|waiter| self.poll_requested_track(waiter)).await
-	}
-
 	/// Create a consumer that can subscribe to tracks in this broadcast.
 	pub fn consume(&self) -> Consumer {
 		Consumer {
@@ -849,13 +835,8 @@ impl Requests {
 		Lister::new(self.state.clone())
 	}
 
-	/// Block until the broadcast ends, by [`Producer::close`] or every producer dropping.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) {
-		kio::wait(|waiter| self.poll_closed(waiter)).await
-	}
-
-	/// Poll until the producer closes.
+	/// Resolves once the broadcast ends, by [`Producer::close`] or every producer dropping.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.alive.token.poll_closed(waiter)
 	}
@@ -941,11 +922,12 @@ impl Consumer {
 		self
 	}
 
-	/// Stamp the epoch of the route this handle was resolved through, overriding [`Info::epoch`].
-	pub(super) fn with_epoch(mut self, epoch: Option<crate::Epoch>) -> Self {
-		if self.info.epoch != epoch {
+	/// Stamp the instance of the route this handle was resolved through, overriding
+	/// [`Info::instance`].
+	pub(super) fn with_instance(mut self, instance: Option<crate::Instance>) -> Self {
+		if self.info.instance != instance {
 			let mut info = (*self.info).clone();
-			info.epoch = epoch;
+			info.instance = instance;
 			self.info = Arc::new(info);
 		}
 		self
@@ -1053,12 +1035,6 @@ impl Consumer {
 		BroadcastState::peek(&mut state, name).or_else(|| ended.filter(|_| state.closing).cloned())
 	}
 
-	/// Block until the broadcast ends, by [`Producer::close`] or every producer dropping.
-	#[cfg(feature = "async")]
-	pub async fn closed(&self) {
-		self.alive.closed().await
-	}
-
 	/// Returns true once the broadcast has ended.
 	pub fn is_closed(&self) -> bool {
 		self.alive.is_closed()
@@ -1071,11 +1047,11 @@ impl Consumer {
 		self.state.read().closing
 	}
 
-	/// Register a [`kio::Waiter`] that fires when the broadcast closes.
+	/// Resolves once the broadcast ends, by [`Producer::close`] or every producer dropping.
 	///
-	/// Returns [`Poll::Ready`] if already closed, otherwise [`Poll::Pending`] after
-	/// arming the waiter. Useful for composing close-detection into a larger poll
-	/// without spawning a task per broadcast.
+	/// The poll composes close-detection into a larger one without spawning a task
+	/// per broadcast.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_closed(&self, waiter: &kio::Waiter) -> Poll<()> {
 		self.alive.poll_closed(waiter)
 	}
@@ -1191,17 +1167,13 @@ impl Demand {
 		!state.requests.is_empty() || state.tracks.iter().any(|track| track.is_wanted())
 	}
 
-	/// Return [`wanted`](Self::wanted) once it differs from what this handle last returned:
-	/// immediately on the first call, then on each change. Errors once the broadcast closes.
+	/// Resolves to [`wanted`](Self::wanted) once it differs from what this handle last
+	/// returned: immediately on the first call, then on each change. Errors once the
+	/// broadcast closes.
 	///
 	/// So `while !demand.wanted_changed().await? {}` waits for a reader, and
 	/// `while demand.wanted_changed().await? {}` waits for the last one to leave.
-	#[cfg(feature = "async")]
-	pub async fn wanted_changed(&mut self) -> Result<bool, Error> {
-		kio::wait(|waiter| self.poll_wanted_changed(waiter)).await
-	}
-
-	/// Poll for [`wanted`](Self::wanted) to differ from what this handle last returned.
+	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_wanted_changed(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool, Error>> {
 		if self.alive.poll_closed(waiter).is_ready() {
 			return Poll::Ready(Err(Error::Dropped));

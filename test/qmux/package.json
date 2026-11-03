@@ -9,7 +9,7 @@
 		"@moq/qmux": "workspace:*"
 	},
 	"devDependencies": {
-		"@types/bun": "^1.4.3",
+		"@types/bun": "^1.4.4",
 		"@typescript/lib-dom": "npm:@types/web@^0.0.358",
 		"typescript": "7.0.2"
 	}

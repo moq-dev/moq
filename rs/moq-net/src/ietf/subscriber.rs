@@ -276,7 +276,8 @@ enum Fill {
 	/// The tail is what ends the group, and a publisher serving the subscription's range
 	/// opens a stream for it even when the group ended at the join point, since that empty
 	/// stream is how the group ends. One that opens none instead leaves this head unfinished
-	/// until the publisher ends the subscription, which is what publishes it.
+	/// until the publisher ends the subscription: TRACK_ENDED publishes it, and any other
+	/// end cancels it.
 	///
 	/// Nothing shorter is safe to infer. A later group arriving looks like proof that no
 	/// tail is coming, but streams are independent: the tail's own can still be behind it.
@@ -298,7 +299,7 @@ enum Fill {
 	/// the join to the next group boundary.
 	Failed { sequence: u64 },
 
-	/// The publisher ended the subscription cleanly, so no tail is coming. Unlike
+	/// The publisher ended the track, so no tail is coming. Unlike
 	/// [`Fill::Done`], a head still being written is the whole group once it lands: a
 	/// draft-18 joining FETCH is not in PUBLISH_DONE's Stream Count, so the settle can
 	/// end before it does.
@@ -373,7 +374,7 @@ impl Fill {
 	/// Release a head nothing claimed, publishing the objects it did carry.
 	///
 	/// The tail is what normally ends the group, so this is the fallback for when none is
-	/// coming: the publisher ended the subscription, or the tail that arrived could not be
+	/// coming: the publisher ended the track, or the tail that arrived could not be
 	/// stitched. Finishing rather than aborting, because the head is a valid prefix of the
 	/// group: it starts at the group's first object and has no holes.
 	fn release(&mut self) {
@@ -382,8 +383,11 @@ impl Fill {
 		}
 	}
 
-	/// The publisher ended the subscription cleanly: release the head, and any still being
-	/// written when it lands.
+	/// The publisher ended the track: release the head, and any still being written when it
+	/// lands.
+	///
+	/// Only TRACK_ENDED, since any other end, such as SUBSCRIPTION_ENDED, leaves the group
+	/// open upstream and so [`Self::abort`]s the head instead.
 	///
 	/// [`Fill::Failed`] stays: a joining FETCH is not in PUBLISH_DONE's Stream Count, so its
 	/// head can land after the end, and the tail it owed may already have been dropped.
@@ -749,6 +753,18 @@ fn refused(properties: &ietf::Properties, version: Version, negotiated: bool) ->
 /// The Largest Group a subscription knows: its SUBSCRIBE_OK's, or a newer one since.
 fn largest_group(track: &track::Producer, answer: Option<ietf::Location>) -> Option<u64> {
 	answer.map(|largest| largest.group).max(track.latest_sequence())
+}
+
+/// Whether `subscription` needs a live feed for a copy whose publisher reported its Largest
+/// Object in group `edge`: a reader asked for it ([`track::Subscription::feed`]), or one of
+/// its ranges is open, counts back from the live edge, or reaches the group the publisher
+/// may still be writing. Ranges wholly below it read only history, which fills serve.
+fn wants_feed(subscription: &track::Subscription, edge: Option<u64>) -> bool {
+	if subscription.ranges.is_empty() {
+		return false;
+	}
+	let history = subscription.start().is_some() && subscription.end().zip(edge).is_some_and(|(end, edge)| end <= edge);
+	subscription.feed || !history
 }
 
 /// A copy with no subscription upstream, kept for fetches and a returning subscriber.
@@ -1873,7 +1889,12 @@ impl Subscriber {
 				let version = self.version;
 				let verified = kio::wait(|waiter| {
 					if session.poll_closed(waiter).is_ready()
-						|| super::request_stream::poll_withdrawn(&mut stream, version, waiter).is_ready()
+						|| super::request_stream::poll_withdrawn(
+							&mut stream,
+							super::request_stream::fin_cancels(version),
+							waiter,
+						)
+						.is_ready()
 					{
 						return Poll::Ready(None);
 					}
@@ -2440,6 +2461,8 @@ impl Subscriber {
 		match state.broadcasts.entry(path.clone()) {
 			Entry::Occupied(entry) => {
 				let entry = entry.into_mut();
+				// Another advertisement of a namespace the peer holds is the same stream.
+				route.instance = entry.route.instance.clone();
 				match entry.adverts.iter().position(|(advert, _)| *advert == id) {
 					Some(index) => entry.adverts[index].1 = route,
 					None => entry.adverts.push((id, route)),
@@ -2457,6 +2480,9 @@ impl Subscriber {
 				Ok(())
 			}
 			Entry::Vacant(entry) => {
+				// moq-transport carries no instance, so each namespace the peer advertises anew
+				// is a stream of its own, even one it advertised before on this session.
+				route.instance = Some(crate::Instance::minted());
 				// A peer past its limits loses the session, not just this namespace.
 				let slot = match slot {
 					Some(slot) => slot,
@@ -2859,12 +2885,14 @@ impl Subscriber {
 
 		// Demand with nobody subscribing (fetches, or a TRACK_STATUS downstream) learns the
 		// track from TRACK_STATUS rather than a SUBSCRIBE: a finished track refuses one, and
-		// one made only to learn the track races the fetches it was for.
+		// one made only to learn the track races the fetches it was for. So does a bounded
+		// subscription, which may read only history below the Largest Object the status
+		// reports, as a fetch would: `linger` subscribes once it reaches past that.
 		let mut target = match request.subscription() {
 			subscription
-				if subscription
-					.as_ref()
-					.is_none_or(|subscription| subscription.ranges.is_empty()) =>
+				if subscription.as_ref().is_none_or(|subscription| {
+					subscription.ranges.is_empty() || subscription.start().is_some() && subscription.end().is_some()
+				}) =>
 			{
 				let Some(idle) = self
 					.track_status(&broadcast_path, &track_name, request, &mut group_fetches, &mut gate)
@@ -2940,13 +2968,7 @@ impl Subscriber {
 			}
 		};
 		let start = subscription.as_ref().and_then(|s| s.start());
-		let join = match subscribe_join(start, subscription.as_ref().and_then(|s| s.end()), self.version) {
-			Ok(join) => join,
-			Err(err) => {
-				target.fail(err);
-				return None;
-			}
-		};
+		let join = subscribe_join(start, subscription.as_ref().and_then(|s| s.end()), self.version);
 		// A live join delivers nothing below the group SUBSCRIBE_OK names as Largest. Every
 		// draft-18 join is one, since its joining FETCH carries that group alone.
 		let live = start.is_none() || join.fetch;
@@ -3564,7 +3586,17 @@ impl Subscriber {
 						&& (poll_headed(&fill, waiter).is_ready()
 							|| largest.is_some_and(|largest| track.poll_past(largest.group, waiter).is_ready()))
 					{
-						track.set_live(largest, None);
+						// An absolute feed starts where it asked, whatever the answer's Largest; a
+						// live join's starts there.
+						let from = sent_bounds.0.filter(|_| !live);
+						match largest {
+							// A feed ending before the answer's Largest never shows it, so the
+							// answer alone makes the copy current. A live join's feed is open.
+							Some(largest) if !live && sent_bounds.1.is_some_and(|end| end <= largest.group) => {
+								track.set_live_ahead(largest, from)
+							}
+							largest => track.set_live(largest, from),
+						}
 						resuming = None;
 					}
 					// The last subscriber left: the upstream subscription goes with it, as on
@@ -3639,10 +3671,7 @@ impl Subscriber {
 					};
 					let ranges = if bounds != sent_bounds {
 						let mut join = if Filter::is_draft20(self.version) {
-							match subscribe_join(bounds.0, bounds.1, self.version) {
-								Ok(join) => join,
-								Err(err) => return Poll::Ready(End::Invalid(err)),
-							}
+							subscribe_join(bounds.0, bounds.1, self.version)
 						} else {
 							Join {
 								filter: match bounds {
@@ -3803,6 +3832,7 @@ impl Subscriber {
 							track_name.to_owned(),
 							requested,
 							Later::Known(timescale),
+							Some(Heading { request_id }),
 						);
 						group_fetches.push(fetch);
 					}
@@ -3848,10 +3878,15 @@ impl Subscriber {
 										poll_settled(&mut settle, waiter, &fill, count)
 									})
 									.await;
-									// The publisher ended without a tail for the head, so the head
-									// is the whole group, even one that lands after this.
+									// No tail is coming for the head. Only TRACK_ENDED makes it the
+									// whole group, even one that lands after this. Any other end
+									// leaves the group open upstream, so the head is cut short
+									// rather than passed off as the whole group.
 									if let Ok(mut fill) = fill.write() {
-										fill.end();
+										match &end {
+											Ok(()) => fill.end(),
+											Err(err) => fill.abort(err.clone()),
+										}
 									}
 								}
 								// Only TRACK_ENDED ends the track. Any other status ends just this
@@ -3963,6 +3998,12 @@ impl Subscriber {
 	/// Keep a copy nobody subscribes to, cache and all, for fetches and a subscriber
 	/// returning soon: `Some` once one does, to subscribe again, `None` once nobody held
 	/// it through the linger, or the session ended. A finished copy never subscribes again.
+	///
+	/// The session holds no upstream subscription for the copy meanwhile, so it marks the
+	/// copy unfed: a bounded read's holes are misses at once, which the fills answer. A
+	/// subscription whose ranges all lie below the Largest Object the publisher reported
+	/// reads only history, so it is served that way too, as a FETCH would be, rather than
+	/// subscribing.
 	async fn linger(
 		&mut self,
 		broadcast_path: &Path,
@@ -3980,10 +4021,11 @@ impl Subscriber {
 			id
 		};
 		let mut linger = crate::time::Deadline::new(&self.runtime);
+		idle.track.set_unfed(true);
 		let mut subscribed = idle
 			.track
 			.subscription()
-			.is_some_and(|subscription| !subscription.ranges.is_empty());
+			.is_some_and(|subscription| wants_feed(&subscription, idle.track.reported_group()));
 		enum Step {
 			Fill(track::Fill),
 			Subscribe,
@@ -4006,7 +4048,7 @@ impl Subscriber {
 				while let Poll::Ready(Ok(subscription)) = idle.track.poll_subscription_changed(waiter) {
 					subscribed = subscription
 						.as_ref()
-						.is_some_and(|subscription| !subscription.ranges.is_empty());
+						.is_some_and(|subscription| wants_feed(subscription, idle.track.reported_group()));
 				}
 				if subscribed && !idle.finished {
 					return Poll::Ready(Step::Subscribe);
@@ -4035,10 +4077,15 @@ impl Subscriber {
 						track_name.to_owned(),
 						fill,
 						Later::Known(idle.properties.timescale),
+						None,
 					);
 					group_fetches.push(fetch);
 				}
-				Step::Subscribe => break true,
+				Step::Subscribe => {
+					// Marked before the SUBSCRIBE goes out: a hole may arrive live from here.
+					idle.track.set_unfed(false);
+					break true;
+				}
 				Step::Expired => match idle.track.abort_unwanted(Error::Cancel) {
 					Ok(()) => {
 						tracing::debug!(broadcast = %crate::path::Rooted(self.origin.root(), broadcast_path), track = %track_name, "track released (idle)");
@@ -4438,6 +4485,7 @@ impl Subscriber {
 							track_name.to_owned(),
 							fill,
 							timescale.later(),
+							None,
 						);
 						group_fetches.push(fetch);
 					}
@@ -4529,8 +4577,9 @@ impl Subscriber {
 		stream: &mut Reader<crate::transport::boxed::RecvStream, Version>,
 	) -> Result<(), Error> {
 		let group: ietf::GroupHeader = stream.decode().await?;
-		// Ranked as the least urgent subscription until its alias resolves.
-		stream.set_priority(crate::priority::recv_group(i8::MIN, group.group_id, Default::default()));
+		// Parked below every other stream until its alias resolves, so a full window stops it
+		// before the SUBSCRIBE_OK or PUBLISH it waits on.
+		stream.set_priority(crate::priority::RECV_PARKED);
 
 		if group.sub_group_id != 0 {
 			tracing::warn!(sub_group_id = %group.sub_group_id, "subgroup ID is not supported, dropping stream");
@@ -4540,7 +4589,15 @@ impl Subscriber {
 		// SUBSCRIBE_OK or PUBLISH can be reordered behind this stream. Hold only the
 		// subgroup header while waiting so the data stream cannot consume flow control.
 		let aliases = self.state.lock().aliases.consume();
-		let request_id = match resolve_track_alias(&self.runtime, aliases, group.track_alias).await {
+		let mut resolving = std::pin::pin!(resolve_track_alias(&self.runtime, aliases, group.track_alias));
+		// Unread meanwhile, so a reset or an eviction would otherwise go unseen, and an evicted
+		// stream holds further eviction off until it is stopped.
+		let resolved = kio::wait(|waiter| match waiter.poll_future(resolving.as_mut()) {
+			Poll::Ready(resolved) => Poll::Ready(Ok(resolved)),
+			Poll::Pending => stream.poll_reset(waiter).map(Err),
+		})
+		.await?;
+		let request_id = match resolved {
 			Ok(request_id) => request_id,
 			// Ours: we cancelled the subscription and the publisher has not stopped yet.
 			Err(err @ Error::Cancel) => {
@@ -5082,6 +5139,9 @@ enum IngestPhase {
 	Size { timestamp: Option<crate::Timestamp> },
 	/// Reading the status of an empty object.
 	Status { timestamp: Option<crate::Timestamp> },
+	/// Waiting to admit the object, or an empty one's properties, until the group's
+	/// fastest reader leaves room for it.
+	Admit { header: frame::Header },
 	/// Streaming the object payload.
 	Payload { frame: frame::Producer },
 	/// An explicit end-of-group or end-of-track status arrived.
@@ -5407,6 +5467,13 @@ impl Subscriber {
 	/// hold the earlier groups until it finishes, or be cut short at the Largest Object by a
 	/// publisher following draft-22 section 9.11.
 	///
+	/// `heading` is the subscription's own fill, when it may be bringing a joined group's
+	/// head. That group waits for it instead: a FETCH racing it can cache the group first,
+	/// and then the tail stream, which is what ends the group for live readers, is refused
+	/// as a duplicate. The cache answers the group once the head lands, and a fill that
+	/// settles without one leaves it to a FETCH. Only that group waits, and only while a
+	/// reader still wants it.
+	///
 	/// `_working` counts the fill from when it is queued, before its first poll.
 	async fn serve_fill(
 		self,
@@ -5415,23 +5482,46 @@ impl Subscriber {
 		name: String,
 		fill: track::Fill,
 		timescale: Later<Option<Timescale>>,
+		heading: Option<Heading>,
 	) {
 		let fill = std::sync::Arc::new(fill);
 		let mut last = None;
-		while let Some(run) = fill.next_run() {
-			let run = match fill.live_group() {
-				Some(live) if run.contains(&live) => {
-					let mut pieces = [run.start..live, live..live + 1, live + 1..run.end]
-						.into_iter()
-						.filter(|piece| !piece.is_empty());
-					let piece = match fill.order() {
-						track::Order::Ascending => pieces.next(),
-						track::Order::Descending => pieces.next_back(),
-					};
-					piece.expect("the run holds the live group")
-				}
-				_ => run,
+		loop {
+			// The groups around a pending head go first, so it holds back only its own group.
+			let pending = match heading.as_ref().and_then(|heading| heading.pending(&self.state)) {
+				Some(Head::Group(group)) => fill.next_run_except(group),
+				_ => None,
 			};
+			let Some(run) = pending.or_else(|| fill.next_run()) else {
+				break;
+			};
+			let mut run = match fill.live_group() {
+				Some(live) => first_piece(run, live, fill.order()),
+				None => run,
+			};
+			if let Some(heading) = &heading
+				&& let Some(head) = heading.pending(&self.state)
+			{
+				if let Head::Group(group) = head {
+					run = first_piece(run, group, fill.order());
+				}
+				if head.overlaps(&run) {
+					let waited = kio::wait(|waiter| {
+						if let Poll::Ready(err) = fill.poll_aborted(waiter) {
+							return Poll::Ready(Err(err));
+						}
+						if fill.poll_unwanted_groups(run.clone(), waiter).is_ready() {
+							return Poll::Ready(Ok(()));
+						}
+						heading.poll_changed(&self.state, head, waiter).map(Ok)
+					})
+					.await;
+					if let Err(err) = waited {
+						fill.reject_groups(run, err);
+					}
+					continue;
+				}
+			}
 			// Every fetch answers its run, so the same one coming back is a bug; ending the
 			// fill names it dropped rather than fetching it forever.
 			if last.as_ref() == Some(&run) {
@@ -5999,11 +6089,12 @@ impl FetchPayloadRecv {
 				properties: decoded.properties,
 			})
 		});
-		let header = frame::Header {
+		let header: frame::Header = frame::Header {
 			info: frame::Info { size, timestamp },
 			fields,
 			inflated: super::object::inflated(decoded.inflated, producer.compressed())?,
 		};
+		wait!(Admit => stream.poll_admit(waiter, producer, header))?;
 		let mut frame: crate::frame::Producer = producer.create_object(header)?;
 		let read: Result<(), Error> = wait!(Read => stream.poll_read_frame(waiter, frame));
 		if let Err(err) = read {
@@ -6125,6 +6216,79 @@ fn poll_headed(fill: &kio::Producer<Fill>, waiter: &kio::Waiter) -> Poll<()> {
 	}
 }
 
+/// A subscription's own fill, which may still be bringing the head of the group it joined.
+/// It is looked up on each read, since a widening replaces the fill with its own.
+struct Heading {
+	request_id: RequestId,
+}
+
+/// The group a subscription's fill may still bring a head for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Head {
+	/// A widening's fill awaits the answer that names its group, so it could be any.
+	Unnamed,
+	/// The group the subscription joined, whose head is on its way.
+	Group(u64),
+}
+
+impl Head {
+	fn overlaps(self, run: &std::ops::Range<u64>) -> bool {
+		match self {
+			Head::Unnamed => true,
+			Head::Group(group) => run.contains(&group),
+		}
+	}
+}
+
+impl Heading {
+	/// The group whose head the fill may still bring, or `None` once the head landed or
+	/// none is coming.
+	fn pending(&self, state: &Lock<State>) -> Option<Head> {
+		self.read(state, None)
+	}
+
+	/// Ready once [`Self::pending`] no longer answers `head`.
+	fn poll_changed(&self, state: &Lock<State>, head: Head, waiter: &kio::Waiter) -> Poll<()> {
+		match self.read(state, Some(waiter)) == Some(head) {
+			true => Poll::Pending,
+			false => Poll::Ready(()),
+		}
+	}
+
+	/// [`Self::pending`], registering `waiter` on the fill read before reading it, so a change
+	/// after the read still wakes it. The group only changes with the fill's state, and a
+	/// widening cancels the fill it replaces, which wakes a waiter on that one.
+	fn read(&self, state: &Lock<State>, waiter: Option<&kio::Waiter>) -> Option<Head> {
+		// The state lock first, as SUBSCRIBE_OK takes it to name the group and serve the fill.
+		// Holding it across the read keeps a widening from swapping the fill in between.
+		let state = state.lock();
+		let held = state.subscribes.get(&self.request_id)?;
+		if let Some(waiter) = waiter {
+			let _ = held.fill.poll_ref(waiter, |_| Poll::<()>::Pending);
+		}
+		match *held.fill.read() {
+			Fill::Requested => Some(Head::Unnamed),
+			Fill::Serving(_) | Fill::Active => held.fill_largest.map(Head::Group),
+			Fill::Ready { .. } | Fill::Done | Fill::Failed { .. } | Fill::Ended => None,
+		}
+	}
+}
+
+/// The first piece of `run` in `order` once `group` is split off into a run of its own.
+fn first_piece(run: std::ops::Range<u64>, group: u64, order: track::Order) -> std::ops::Range<u64> {
+	if !run.contains(&group) {
+		return run;
+	}
+	let mut pieces = [run.start..group, group..group + 1, group + 1..run.end]
+		.into_iter()
+		.filter(|piece| !piece.is_empty());
+	let piece = match order {
+		track::Order::Ascending => pieces.next(),
+		track::Order::Descending => pieces.next_back(),
+	};
+	piece.expect("the run holds the group")
+}
+
 /// A Normal object's timestamp: none on an untimed track, and required on a timed one,
 /// where an object without a Timestamp is malformed.
 fn object_time(
@@ -6159,7 +6323,7 @@ impl GroupIngest {
 	/// `Ready(Ok(_))` once the stream FINs on an object boundary, or an explicit
 	/// end-of-group or end-of-track status arrives. The caller finishes or aborts the
 	/// group; an object cut short mid-payload was already aborted here with the reason.
-	pub(crate) fn poll<R: crate::transport::poll::RecvStream>(
+	pub(crate) fn poll<R: crate::transport::poll::RecvStream + crate::coding::Pause>(
 		&mut self,
 		reader: &mut Reader<R, Version>,
 		group: &mut crate::recv::Group,
@@ -6209,22 +6373,32 @@ impl GroupIngest {
 						self.phase = IngestPhase::Status { timestamp: *timestamp };
 						continue;
 					}
+					let timestamp = object_time(self.timescale, *timestamp)?;
+					let header = self.header(group, frame::Info { size, timestamp })?;
+					self.phase = IngestPhase::Admit { header };
+				}
+				IngestPhase::Admit { header } => {
+					ready!(reader.poll_admit(waiter, group, header))?;
+					let IngestPhase::Admit { header } = std::mem::replace(&mut self.phase, IngestPhase::Delta) else {
+						unreachable!()
+					};
 					// `create_object` is the allocation chokepoint: it rejects an oversized
 					// `size` and allocates up front only within the origin's budget, so no
 					// pre-check is needed.
-					let timestamp = object_time(self.timescale, *timestamp)?;
-					let header = self.header(group, frame::Info { size, timestamp })?;
+					let empty = header.info.size == 0;
 					let frame = group.create_object(header)?;
-					self.phase = IngestPhase::Payload { frame };
+					match empty {
+						// An empty object has no payload to read, only properties to admit.
+						true => group.restore(frame.finish()?),
+						false => self.phase = IngestPhase::Payload { frame },
+					}
 				}
 				IngestPhase::Status { timestamp } => {
 					let status = ready!(reader.poll_varint(waiter))?;
 					if status == 0 {
 						let timestamp = object_time(self.timescale, *timestamp)?;
 						let header = self.header(group, frame::Info { size: 0, timestamp })?;
-						let frame = group.create_object(header)?;
-						group.restore(frame.finish()?);
-						self.phase = IngestPhase::Delta;
+						self.phase = IngestPhase::Admit { header };
 						continue;
 					}
 					// A status object has no frame to hold its time, so its block keeps it.
@@ -7634,7 +7808,7 @@ mod tests {
 		}
 	}
 
-	/// An unanswered epochless request cannot prove which instance the peer resolved.
+	/// An unanswered unnamed request cannot prove which instance the peer resolved.
 	/// Retiring its source cancels it even while the caller keeps its demand.
 	#[kio::test]
 	async fn a_retirement_before_subscribe_ok_refuses_the_subscription() {
@@ -8763,7 +8937,7 @@ mod tests {
 	}
 
 	/// Two sessions assigned the same identity announce the same anonymous chain.
-	/// Without an epoch the fresh session is another source, so consumers restart
+	/// Under another instance the fresh session is another source, so consumers restart
 	/// once, and retracting the stale session leaves the fresh route standing quietly.
 	#[kio::test]
 	async fn reconnecting_peer_restarts_the_route() {
@@ -12068,24 +12242,22 @@ struct Join {
 /// Earlier drafts have no fill parameter. Every subscription is a live join: Largest
 /// Object, followed by a joining FETCH relative at offset 0 for that group's head. An
 /// earlier start's groups are left to the copy's fills, one FETCH per run of them, and a
-/// later start skips the head locally. A bounded end has no
-/// joining-FETCH spelling, so it is refused rather than left open.
+/// later start skips the head locally. A bounded end has no joining-FETCH spelling
+/// either, so the join stays open and readers stop at their own end: refusing it would
+/// abort a resumed copy for every reader it serves.
 ///
 /// A start group we already know is absolute on draft-22 and needs no fill: the
 /// subscription's own range covers it, which is what our publisher serves from its cache.
-fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Result<Join, Error> {
+fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Join {
 	if !Filter::is_draft20(version) {
-		if end.is_some() {
-			return Err(Error::Unsupported);
-		}
-		return Ok(Join {
+		return Join {
 			filter: Filter::NextObject,
 			fill: None,
 			fetch: true,
-		});
+		};
 	}
 
-	Ok(match start {
+	match start {
 		// The live join: everything after the live edge, plus the current group's head.
 		None => Join {
 			filter: Filter::NextObject,
@@ -12119,7 +12291,7 @@ fn subscribe_join(start: Option<u64>, end: Option<u64>, version: Version) -> Res
 			fill: None,
 			fetch: false,
 		},
-	})
+	}
 }
 
 /// Resolve the first absolute ID or a later ID delta without overflowing. Subgroup relay
@@ -12167,7 +12339,7 @@ mod filter_tests {
 	#[test]
 	fn live_joins_the_current_group_with_a_fill() {
 		assert_eq!(
-			subscribe_join(None, None, Version::Draft22).unwrap(),
+			subscribe_join(None, None, Version::Draft22),
 			Join {
 				filter: Filter::NextObject,
 				fill: Some(ietf::Fill {
@@ -12185,7 +12357,7 @@ mod filter_tests {
 	#[test]
 	fn a_past_start_is_absolute() {
 		assert_eq!(
-			subscribe_join(Some(7), Some(10), Version::Draft22).unwrap(),
+			subscribe_join(Some(7), Some(10), Version::Draft22),
 			Join {
 				filter: Filter::Absolute {
 					start: ietf::Location { group: 7, object: 0 },
@@ -12201,7 +12373,7 @@ mod filter_tests {
 	#[test]
 	fn the_whole_track_is_unfiltered() {
 		assert_eq!(
-			subscribe_join(Some(0), None, Version::Draft22).unwrap(),
+			subscribe_join(Some(0), None, Version::Draft22),
 			Join {
 				filter: Filter::Unfiltered,
 				fill: None,
@@ -12212,34 +12384,23 @@ mod filter_tests {
 
 	const JOINING_DRAFTS: [Version; 1] = [Version::Draft18];
 
-	/// Every draft-18 join is Largest Object plus a joining FETCH, whatever its start,
-	/// so the current group's head arrives on the fetch stream and the live tail on the
+	/// Every draft-18 join is Largest Object plus a joining FETCH, whatever its start or
+	/// end, so the current group's head arrives on the fetch stream and the live tail on the
 	/// subscription.
 	#[test]
 	fn older_drafts_always_join_live() {
 		for version in JOINING_DRAFTS {
-			for start in [None, Some(7)] {
+			for (start, end) in [(None, None), (Some(7), None), (Some(7), Some(10))] {
 				assert_eq!(
-					subscribe_join(start, None, version).unwrap(),
+					subscribe_join(start, end, version),
 					Join {
 						filter: Filter::NextObject,
 						fill: None,
 						fetch: true,
 					},
-					"{version} from {start:?}"
+					"{version} from {start:?} to {end:?}"
 				);
 			}
-		}
-	}
-
-	/// A bounded end has no joining-FETCH spelling, so it is refused rather than left open.
-	#[test]
-	fn older_drafts_refuse_a_bounded_end() {
-		for version in JOINING_DRAFTS {
-			assert!(
-				matches!(subscribe_join(Some(7), Some(10), version), Err(Error::Unsupported)),
-				"{version}"
-			);
 		}
 	}
 }
@@ -12633,7 +12794,7 @@ mod stitch_tests {
 			.subscribe(Some(
 				track::Subscription::default()
 					.with_order(crate::track::Order::Ascending)
-					.with_max_delay(None),
+					.with_delay(track::Delay::default().with_max(None)),
 			))
 			.with_range(..);
 		let mut fill = h.stream().await;
@@ -13358,12 +13519,23 @@ mod stitch_tests {
 				original.push(datagram);
 			}
 			track.finish().unwrap();
-			let (served, _sessions) = match hop {
+			let (served, _sessions, _copy) = match hop {
 				true => {
 					let (served, sessions) = crate::lite::ietf::test_hop(&origin, "room", [true, true]).await;
-					(served, Some(sessions))
+					// The hop learns the track's info first, and holds the copy for the SUBSCRIBE
+					// below: a SUBSCRIBE sent alongside the TRACK has the cache replayed as
+					// datagrams before the TRACK_INFO they are read with, and they are dropped.
+					let copy = served
+						.consume()
+						.request("room", None)
+						.await
+						.unwrap()
+						.track("video")
+						.unwrap();
+					copy.info().await.unwrap();
+					(served, Some(sessions), Some(copy))
 				}
-				false => (origin, None),
+				false => (origin, None, None),
 			};
 			let downstream = ScriptedSession::per_stream(vec![vec![]]).with_datagrams(65535);
 			let peer = peer::PeerSetup::default();
@@ -14771,7 +14943,7 @@ mod stitch_tests {
 						track::Subscription::default()
 							.with_range(SEQUENCE..last + 1)
 							.with_order(crate::track::Order::Ascending)
-							.with_max_delay(None),
+							.with_delay(track::Delay::default().with_max(None)),
 					))
 					.await
 					.unwrap();
@@ -14859,7 +15031,7 @@ mod stitch_tests {
 					track::Subscription::default()
 						.with_range(3..7)
 						.with_order(crate::track::Order::Ascending)
-						.with_max_delay(None),
+						.with_delay(track::Delay::default().with_max(None)),
 				))
 				.await
 				.unwrap();
@@ -15563,6 +15735,149 @@ mod joining_fetch_tests {
 		}
 	}
 
+	/// A reader missing the head of the group the subscription joined waits for the
+	/// subscription's own fill, which is bringing that head. A cache-miss FETCH racing it
+	/// could cache the group first, refusing the tail that ends it for live readers. Only a
+	/// fill that settled without the head leaves the miss to a FETCH.
+	#[kio::test]
+	async fn a_miss_waits_for_the_subscriptions_own_fill() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_ok(version)).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+		assert!(run.fill_outstanding(), "the subscription asked for a fill");
+
+		let mut fetch = Box::pin(run._hold.1.fetch_group(4, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		assert_eq!(fetches(), 0, "the miss waits for the subscription's fill");
+
+		// The fill fails, so the head is the miss's to fetch after all.
+		let fill = run
+			.subscriber
+			.state
+			.lock()
+			.subscribes
+			.values()
+			.next()
+			.unwrap()
+			.fill
+			.clone();
+		*fill.write().ok().unwrap() = Fill::Done;
+		settle().await;
+		assert_eq!(fetches(), 1, "a settled fill leaves the miss to a FETCH");
+	}
+
+	/// The head landing ends the wait, and the cache answers the miss: no FETCH duplicates
+	/// the group the fill wrote.
+	#[kio::test]
+	async fn a_miss_is_answered_by_the_head_its_fill_lands() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_ok(version)).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+
+		let mut fetch = Box::pin(run._hold.1.fetch_group(4, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		assert_eq!(fetches(), 0, "the miss waits for the subscription's fill");
+
+		// The fill writes the head, as `run_fill` does.
+		let (mut track, fill) = {
+			let state = run.subscriber.state.lock();
+			let held = state.subscribes.values().next().unwrap();
+			(held.producer.clone().unwrap(), held.fill.clone())
+		};
+		let mut head = None;
+		open_fill_group(&mut track, &mut head, 4).unwrap();
+		let (sequence, next, producer) = head.unwrap();
+		*fill.write().ok().unwrap() = Fill::Ready {
+			sequence,
+			next,
+			producer: producer.into_inner(),
+		};
+		settle().await;
+		assert_eq!(fetches(), 0, "the cache answers the miss");
+		let Poll::Ready(Ok(group)) = futures::poll!(fetch.as_mut()) else {
+			panic!("the miss must resolve from the cache");
+		};
+		assert_eq!(group.sequence, 4);
+	}
+
+	/// Only the joined group waits for the subscription's fill. A head that never arrives
+	/// leaves its fill outstanding for as long as the subscription lasts, which must not hold
+	/// back older groups it brings nothing for.
+	#[kio::test]
+	async fn a_miss_for_older_history_skips_the_fill_wait() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_ok(version)).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+		assert!(run.fill_outstanding(), "the subscription asked for a fill");
+
+		let mut fetch = Box::pin(run._hold.1.fetch_group(3, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		assert_eq!(fetches(), 1, "group 3 is fetched without waiting for group 4's head");
+	}
+
+	/// A widening replaces the subscription's fill with its own, so a miss follows the new
+	/// one: until its answer names the group it heads, every miss waits for it.
+	#[kio::test]
+	async fn a_miss_follows_the_fill_a_widening_requested() {
+		let version = Version::Draft22;
+		let largest = Some(ietf::Location { group: 4, object: 1 });
+		let run = JoinRun::start(version, None, subscribe_ok(version, largest), fetch_ok(version)).await;
+		let fetches = || {
+			decode_messages(&run.session.log, version)
+				.iter()
+				.filter(|(id, _)| *id == ietf::Fetch::ID)
+				.count()
+		};
+
+		// As the update arm does: cancel the old fill and request a new one in its place.
+		{
+			let mut state = run.subscriber.state.lock();
+			let held = state.subscribes.values_mut().next().unwrap();
+			held.fill.write().ok().unwrap().cancel();
+			held.fill = kio::Producer::new(Fill::Requested);
+		}
+
+		let mut fetch = Box::pin(run._hold.1.fetch_group(3, None));
+		assert!(futures::poll!(fetch.as_mut()).is_pending());
+		settle().await;
+		assert_eq!(fetches(), 0, "the miss waits for the widening's fill");
+
+		let fill = run
+			.subscriber
+			.state
+			.lock()
+			.subscribes
+			.values()
+			.next()
+			.unwrap()
+			.fill
+			.clone();
+		*fill.write().ok().unwrap() = Fill::Done;
+		settle().await;
+		assert_eq!(fetches(), 1, "a settled fill leaves the miss to a FETCH");
+	}
+
 	/// A malformed answer to the joining FETCH is not a refusal: the peer broke the
 	/// protocol, so the session closes.
 	#[kio::test]
@@ -15652,6 +15967,88 @@ mod joining_fetch_tests {
 			);
 			let end = group.read_frame().await;
 			assert!(matches!(end, Ok(None)), "{version}: the head was cut short: {end:?}");
+		}
+	}
+
+	/// A head nothing claimed when the publisher ends the subscription is the whole group only
+	/// on TRACK_ENDED. SUBSCRIPTION_ENDED leaves the group open upstream, so finishing the head
+	/// would pass a prefix off as the whole group: it is cancelled instead.
+	#[kio::test]
+	async fn an_unclaimed_head_finishes_only_when_the_track_ends() {
+		let largest = Some(ietf::Location { group: 4, object: 0 });
+		for version in JOINING_DRAFTS {
+			for (status_code, whole) in [(ietf::PublishDoneStatus::TrackEnded.code(), true), (0x3, false)] {
+				let mut ok = subscribe_ok(version, largest);
+				ok.extend(message_bytes(
+					ietf::PublishDone::ID,
+					&ietf::PublishDone {
+						status_code,
+						stream_count: 0,
+						reason_phrase: "done".into(),
+					},
+					version,
+				));
+				let mut run = JoinRun::start(version, None, ok, fetch_ok(version)).await;
+				let fetch_id = *run
+					.subscriber
+					.state
+					.lock()
+					.fetches
+					.keys()
+					.next()
+					.expect("joining FETCH");
+
+				let mut objects = Vec::new();
+				let w = &mut Encoder::new(&mut objects, version.into());
+				w.varint(ietf::FetchHeader::TYPE).unwrap();
+				ietf::FetchHeader { request_id: fetch_id }.encode(w, version).unwrap();
+				ietf::FetchObject::Object {
+					subgroup: ietf::FetchSubgroup::Zero,
+					group: Some(4),
+					object: Some(0),
+					priority: Some(0),
+					properties: None,
+				}
+				.encode(w, version)
+				.unwrap();
+				w.bytes(b"x").unwrap();
+				let data = ScriptedSession::new(objects);
+				data.close(crate::lite::test_transport::Close::Fin);
+				let (_, recv) = data.clone().open_bi(Default::default()).await.unwrap();
+				let mut reader = Reader::new(crate::transport::boxed::RecvStream::new(recv), version);
+
+				// The whole head lands before the grace runs out, and no tail ever claims it.
+				run.subscriber.clone().recv_fill(&mut reader).await.expect("fill");
+				assert!(
+					matches!(
+						*run.subscriber
+							.state
+							.lock()
+							.subscribes
+							.values()
+							.next()
+							.unwrap()
+							.fill
+							.read(),
+						Fill::Ready { .. }
+					),
+					"{version}/{status_code}: the head waits for its tail"
+				);
+
+				let mut subscriber = (&mut run._hold.2).await.expect("subscribed");
+				let mut group = subscriber.recv_group().await.unwrap().unwrap();
+				assert_eq!(group.sequence, 4, "{version}/{status_code}");
+				assert_eq!(group.read_frame().await.unwrap().unwrap().payload.as_ref(), b"x");
+
+				while !run.subscriber.state.lock().subscribes.is_empty() {
+					settle().await;
+				}
+				let end = group.read_frame().await;
+				match whole {
+					true => assert!(matches!(end, Ok(None)), "{version}: the head was cut short: {end:?}"),
+					false => assert!(end.is_err(), "{version}: the head read as the whole group: {end:?}"),
+				}
+			}
 		}
 	}
 

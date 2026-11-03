@@ -58,7 +58,9 @@ async fn rejoin_recovers_the_group_reset_on_leave() {
 				let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
 
 				let ts = |ms| Timestamp::from_millis(ms).unwrap();
-				let prefs = || track::Subscription::default().with_max_delay(Duration::from_secs(10));
+				let prefs = || {
+					track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)))
+				};
 
 				let mut group = track.append_group().unwrap();
 				group.write_frame(ts(0), b"a0".as_ref()).unwrap();
@@ -207,7 +209,8 @@ async fn rejoin_keeps_the_cache_when_the_backlog_lands_newest_first() {
 			let consumer = relay.consume();
 			let remote = consumer.follow("bench", None).unwrap().available().await.unwrap();
 			let ts = |ms| Timestamp::from_millis(ms).unwrap();
-			let prefs = || track::Subscription::default().with_max_delay(Duration::from_secs(10));
+			let prefs =
+				|| track::Subscription::default().with_delay(track::Delay::default().with_max(Duration::from_secs(10)));
 
 			// Held for fetches only: it keeps the relay's copy without subscribing.
 			let _held = remote.track("video").unwrap();
@@ -683,7 +686,7 @@ async fn rejoined_quiet_catalog_survives_cache_expiry() {
 /// A quiet track's latest group outlives the cache window across a publisher takeover.
 ///
 /// The publisher reconnects while a reader holds the catalog. A late reader through the
-/// new connection still needs the quiet catalog, even on a wire without epochs where
+/// new connection still needs the quiet catalog, even on a wire without instances where
 /// the old reader ends with its route.
 #[kio::test]
 async fn taken_over_quiet_catalog_survives_cache_expiry() {
@@ -705,7 +708,7 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 		let broadcast = publisher.create_broadcast("bench").unwrap();
 		let track = broadcast.create_track("catalog", timed()).unwrap();
 		broadcast
-			.announce(moq_net::origin::Route::default().with_epoch(moq_net::Epoch::mint()))
+			.announce(moq_net::origin::Route::default().with_instance(moq_net::Instance::random(), 0))
 			.unwrap();
 		let mut group = track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, b"catalog".as_ref()).unwrap();
@@ -785,7 +788,7 @@ async fn quiet_catalog_survives_cache_expiry(version: Version, takeover: bool) {
 			.write_frame(Timestamp::from_millis(1000).unwrap(), b"newer".as_ref())
 			.unwrap();
 		newer.finish().unwrap();
-		// Epochless wires end the old holder on takeover. The late reader uses the
+		// Unnamed wires end the old holder on takeover. The late reader uses the
 		// current route on every version, and keeps that copy live for the expiry check.
 		assert_eq!(later.recv_group().await.unwrap().unwrap().sequence, 1, "{version}");
 		kio::clock::sleep(moq_net::cache::DEFAULT_EXPIRY * 2 + Duration::from_secs(2)).await;
