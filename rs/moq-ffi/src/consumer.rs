@@ -1,12 +1,11 @@
 //! Read broadcasts, tracks, and groups.
 
-use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::task::{Poll, ready};
 use std::time::Duration;
 
 use crate::error::MoqError;
-use crate::ffi::{Background, Guard, Task};
+use crate::ffi::{Background, Polled};
 use crate::media::*;
 use crate::producer::MoqTrackInfo;
 
@@ -17,27 +16,59 @@ fn raw_frame(frame: moq_net::frame::Frame) -> MoqFrame {
 	}
 }
 
+/// How far behind the live edge a subscriber plays, mirroring [`moq_net::track::Delay`]: where
+/// it starts, and how late it may fall.
+///
+/// [`moq_subscription_defaults`] carries moq-net's default, zero for both. Uniffi can't default
+/// a duration, so Kotlin and Swift name both fields, the Python, Go, and Dart wrappers default
+/// an omitted one to zero, and a bare C or C++ record leaves both unset.
+#[derive(Clone, Copy, Debug, uniffi::Record)]
+pub struct MoqDelay {
+	/// The target latency: the playout or jitter-buffer delay held behind the live edge, and
+	/// where a cold join starts, or null to leave it unstated. A media consumer plays an
+	/// unstated minimum as zero, while the subscription keeps it unstated, so it never pulls
+	/// the aggregate across subscribers to zero. moq-lite-07 sends it upstream. A `min` past
+	/// `max` starts at `max`, since the publisher serves nothing older.
+	pub min: Option<Duration>,
+	/// How far a non-latest group may fall behind the live edge before it is skipped, or null
+	/// for no subscriber limit, leaving the publisher's max age alone to bound it. `0` skips
+	/// immediately; a larger value tolerates that much reordering. It bounds lateness only,
+	/// never the start.
+	///
+	/// Enforced both by the publisher's cache (sent on the wire) and by any local buffering,
+	/// such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
+	pub max: Option<Duration>,
+}
+
+impl From<MoqDelay> for moq_net::track::Delay {
+	fn from(delay: MoqDelay) -> Self {
+		Self::default().with_min(delay.min).with_max(delay.max)
+	}
+}
+
+impl From<moq_net::track::Delay> for MoqDelay {
+	fn from(delay: moq_net::track::Delay) -> Self {
+		Self {
+			min: delay.min,
+			max: delay.max,
+		}
+	}
+}
+
 /// Subscriber-side delivery preferences, mirroring [`moq_net::track::Subscription`].
 ///
-/// Start from [`moq_subscription_defaults`] for moq-net's defaults (priority 0, a `max_delay`
-/// of 0, everything still fresh, newest first) and change the fields you care about. Kotlin and
-/// Swift make a record built field by field name `max_delay`; Dart, Go, and C can still omit it,
-/// which means no subscriber limit.
+/// Start from [`moq_subscription_defaults`] for moq-net's defaults (priority 0, a zero
+/// `delay`, everything still fresh, newest first) and change the fields you care about.
 #[derive(Clone, uniffi::Record)]
 pub struct MoqSubscription {
 	/// Delivery priority; higher values preempt lower ones under bandwidth contention.
 	/// The default 0 is the midpoint.
 	#[uniffi(default = 0)]
 	pub priority: i8,
-	/// Maximum age of a non-latest group before it is skipped.
-	/// `0` skips immediately; a larger value tolerates that much reordering; null sets no
-	/// subscriber limit and leaves the publisher's max age alone to bound it. Required,
-	/// since uniffi can't default a duration to `0`.
-	///
-	/// Enforced both by the publisher's cache (sent on the wire) and by any local
-	/// buffering, such as [`MoqMediaTrackConsumer`]'s jitter buffer. It caps every range.
-	pub max_delay: Option<Duration>,
-	/// The spans of the track to deliver, or null for everything `max_delay` still
+	/// How far behind the live edge this subscriber plays: where a cold join starts, and how
+	/// late a non-latest group may fall before it is skipped.
+	pub delay: MoqDelay,
+	/// The spans of the track to deliver, or null for everything `delay.max` still
 	/// considers fresh. An empty list asks for nothing.
 	///
 	/// A request to the publisher, aggregated across every subscriber, and this
@@ -49,7 +80,8 @@ pub struct MoqSubscription {
 	pub order: Option<MoqOrder>,
 }
 
-/// A subscription with moq-net's defaults, which skips a superseded group at once.
+/// A subscription with moq-net's defaults, which starts at the newest group and skips a
+/// superseded group at once.
 ///
 /// A null subscription argument means the same; build from this one to change a field.
 #[uniffi::export]
@@ -57,7 +89,7 @@ pub fn moq_subscription_defaults() -> MoqSubscription {
 	let defaults = moq_net::track::Subscription::default();
 	MoqSubscription {
 		priority: defaults.priority,
-		max_delay: defaults.delay.max,
+		delay: defaults.delay.into(),
 		ranges: None,
 		order: None,
 	}
@@ -175,7 +207,7 @@ impl TryFrom<MoqSubscription> for moq_net::track::Subscription {
 	fn try_from(s: MoqSubscription) -> Result<Self, MoqError> {
 		let mut subscription = moq_net::track::Subscription::default()
 			.with_priority(s.priority)
-			.with_delay(moq_net::track::Delay::default().with_max(s.max_delay));
+			.with_delay(s.delay.into());
 		if let Some(ranges) = s.ranges {
 			subscription = subscription.with_ranges(
 				ranges
@@ -451,6 +483,9 @@ impl TrackInner {
 		match self.ordered() {
 			Ok(ordered) => {
 				if let Some(group) = ordered.pending.take() {
+					// A frame reader parked on it would otherwise wait for a frame it no longer
+					// reads. The waker wakes every call parked on this handle, once it unlocks.
+					waiter.waker().wake_by_ref();
 					return Poll::Ready(Ok(Some(group)));
 				}
 				ordered.track.poll_next_group(waiter).map(|r| r.map_err(Into::into))
@@ -459,41 +494,35 @@ impl TrackInner {
 		}
 	}
 
-	fn poll_acquire_pending(&mut self, waiter: &kio::Waiter) -> Poll<Result<bool, MoqError>> {
+	/// The first frame of the next group in sequence order, skipping completed empty groups.
+	///
+	/// One poll does the whole step, so it never trusts a slot it filled on an earlier poll:
+	/// a group `next_group` took from `pending` in between is simply gone, and the wake it
+	/// sends makes this acquire the next one. A group still waiting on its first frame stays
+	/// in `pending`, so a cancelled call leaves it for the next `read_frame` or `next_group`.
+	fn poll_read_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::frame::Frame>, MoqError>> {
 		let ordered = match self.ordered() {
 			Ok(ordered) => ordered,
 			Err(e) => return Poll::Ready(Err(e)),
 		};
-		if ordered.pending.is_some() {
-			return Poll::Ready(Ok(true));
-		}
-		match ready!(ordered.track.poll_next_group(waiter)) {
-			Ok(Some(group)) => {
-				ordered.pending = Some(group);
-				Poll::Ready(Ok(true))
+		loop {
+			let group = match &mut ordered.pending {
+				Some(group) => group,
+				None => match ready!(ordered.track.poll_next_group(waiter)) {
+					Ok(Some(group)) => ordered.pending.insert(group),
+					Ok(None) => return Poll::Ready(Ok(None)),
+					Err(err) => return Poll::Ready(Err(err.into())),
+				},
+			};
+			let result = ready!(group.poll_read_frame(waiter));
+			// Drop a completed or failed group so the next pass moves on.
+			ordered.pending = None;
+			match result {
+				Ok(Some(frame)) => return Poll::Ready(Ok(Some(frame))),
+				// An empty group, or one that expired here or at a hop that reset it.
+				Ok(None) | Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => continue,
+				Err(err) => return Poll::Ready(Err(err.into())),
 			}
-			Ok(None) => Poll::Ready(Ok(false)),
-			Err(err) => Poll::Ready(Err(err.into())),
-		}
-	}
-
-	fn poll_pending_frame(&mut self, waiter: &kio::Waiter) -> Poll<Result<Option<moq_net::frame::Frame>, MoqError>> {
-		let ordered = match self.ordered() {
-			Ok(ordered) => ordered,
-			Err(e) => return Poll::Ready(Err(e)),
-		};
-		let result = {
-			let group = ordered.pending.as_mut().expect("pending group");
-			ready!(group.poll_read_frame(waiter))
-		};
-		// Drop a completed or failed group so the next call can move on. A
-		// cancelled wait never reaches here, so `pending` stays in that case.
-		ordered.pending = None;
-		match result {
-			Ok(frame) => Poll::Ready(Ok(frame)),
-			// The group expired, here or at a hop that reset it, so move on like an empty one.
-			Err(moq_net::Error::Old | moq_net::Error::Stream(moq_net::StreamError::Old)) => Poll::Ready(Ok(None)),
-			Err(err) => Poll::Ready(Err(err.into())),
 		}
 	}
 
@@ -520,69 +549,12 @@ impl TrackInner {
 	}
 }
 
-/// Shared subscriber state for both read lanes.
-///
-/// The mutex is held only across a poll, not the wait: moq-net can serve a
-/// datagram while a group read is parked, and vice versa, as long as we do not
-/// keep exclusive access for the duration of one `recv`.
-struct TrackShared {
-	inner: Mutex<Option<TrackInner>>,
-}
-
-impl TrackShared {
-	fn close(&self) {
-		let _ = self.inner.lock().expect("track reader").take();
-	}
-
-	fn poll<R>(&self, f: impl FnOnce(&mut TrackInner) -> Poll<Result<R, MoqError>>) -> Poll<Result<R, MoqError>> {
-		match self.inner.lock().expect("track reader").as_mut() {
-			Some(inner) => f(inner),
-			None => Poll::Ready(Err(MoqError::Cancelled)),
-		}
-	}
-
-	async fn recv_group(&self) -> Result<Option<moq_net::group::Consumer>, MoqError> {
-		kio::wait(|waiter| self.poll(|inner| inner.poll_recv_group(waiter))).await
-	}
-
-	async fn next_group(&self) -> Result<Option<moq_net::group::Consumer>, MoqError> {
-		kio::wait(|waiter| self.poll(|inner| inner.poll_next_group(waiter))).await
-	}
-
-	async fn recv_datagram(&self) -> Result<Option<MoqDatagram>, MoqError> {
-		kio::wait(|waiter| self.poll(|inner| inner.poll_recv_datagram(waiter))).await
-	}
-
-	async fn read_frame(&self) -> Result<Option<MoqFrame>, MoqError> {
-		loop {
-			let acquired = kio::wait(|waiter| self.poll(|inner| inner.poll_acquire_pending(waiter))).await?;
-			if !acquired {
-				return Ok(None);
-			}
-			if let Some(frame) = kio::wait(|waiter| self.poll(|inner| inner.poll_pending_frame(waiter))).await? {
-				return Ok(Some(raw_frame(frame)));
-			}
-		}
-	}
-}
-
-/// Serializes one track read lane so two `next_group` calls cannot race the cursor.
-struct ReadLane;
-
-/// Hold the lane guard until `fut` finishes. `Task::run` only serializes while the
-/// guard lives; an unused `_lane` in the closure would drop it before the wait.
-async fn with_lane<R>(_lane: Guard<ReadLane>, fut: impl Future<Output = Result<R, MoqError>>) -> Result<R, MoqError> {
-	fut.await
-}
-
 /// A subscribed track whose groups, frames, or datagrams can be read.
 #[derive(uniffi::Object)]
 pub struct MoqTrackConsumer {
-	shared: Arc<TrackShared>,
-	/// Group reads (`recv_group`, `next_group`, `read_frame`). Independent of [`Self::datagrams`].
-	groups: Task<ReadLane>,
-	/// Datagram reads. Independent of [`Self::groups`].
-	datagrams: Task<ReadLane>,
+	/// Every read polls this; none holds it across a wait, so a datagram read progresses while
+	/// a group read is parked, and vice versa.
+	reads: Polled<TrackInner>,
 	control: moq_net::track::Control,
 	info: moq_net::track::Info,
 	/// The owner whose panic ends this track's reads, handed to every group and reader taken from it.
@@ -594,13 +566,10 @@ impl MoqTrackConsumer {
 		let control = track.control();
 		let info = track.info().clone();
 		Self {
-			shared: Arc::new(TrackShared {
-				inner: Mutex::new(Some(TrackInner {
-					track: Cursor::Uncommitted(track),
-				})),
-			}),
-			groups: Task::new(ReadLane).supervised(driver.clone()),
-			datagrams: Task::new(ReadLane).supervised(driver.clone()),
+			reads: Polled::new(TrackInner {
+				track: Cursor::Uncommitted(track),
+			})
+			.supervised(driver.clone()),
 			control,
 			info,
 			driver,
@@ -610,43 +579,26 @@ impl MoqTrackConsumer {
 	/// Hand the subscription to a typed reader (a JSON consumer, say), closing this handle.
 	///
 	/// Errors with [`MoqError::AlreadyCommitted`] once a group read has started, since the reader
-	/// would miss whatever that read consumed.
+	/// would miss whatever that read consumed. A datagram read still parked resolves `Cancelled`.
 	pub(crate) fn take(&self) -> Result<(moq_net::track::Subscriber, Background), MoqError> {
-		self.driver.check()?;
-		let mut guard = self.shared.inner.lock().expect("track reader");
-		match guard.as_ref().map(|inner| &inner.track) {
-			Some(Cursor::Uncommitted(_)) => {}
-			Some(_) => return Err(MoqError::AlreadyCommitted),
-			None => return Err(MoqError::Closed),
-		}
-		let Some(TrackInner {
-			track: Cursor::Uncommitted(track),
-		}) = guard.take()
-		else {
-			unreachable!("just matched Uncommitted");
+		let inner = self
+			.reads
+			.take(|inner| match inner.track {
+				Cursor::Uncommitted(_) => Ok(()),
+				_ => Err(MoqError::AlreadyCommitted),
+			})
+			.map_err(|err| match err {
+				MoqError::Cancelled => MoqError::Closed,
+				err => err,
+			})?;
+		let Cursor::Uncommitted(track) = inner.track else {
+			unreachable!("just checked Uncommitted");
 		};
-		drop(guard);
-		// Wake any datagram read still parked on the subscriber this handle no longer owns.
-		self.cancel_lanes();
 		Ok((track, self.driver.clone()))
 	}
 
-	fn cancel_lanes(&self) {
-		self.shared.close();
-		self.groups.cancel();
-		self.datagrams.cancel();
-	}
-
-	/// True while a group-lane `Task::run` still holds its guard.
-	#[cfg(test)]
-	pub(crate) fn group_lane_busy(&self) -> bool {
-		self.groups.lock().is_none()
-	}
-}
-
-impl Drop for MoqTrackConsumer {
-	fn drop(&mut self) {
-		self.shared.close();
+	fn group(&self, group: Option<moq_net::group::Consumer>) -> Option<Arc<MoqGroupConsumer>> {
+		group.map(|group| Arc::new(MoqGroupConsumer::new(group, self.driver.clone())))
 	}
 }
 
@@ -656,25 +608,15 @@ impl MoqTrackConsumer {
 	///
 	/// Groups are returned as they arrive on the wire, which may be out of sequence
 	/// order (e.g. if a later group lands before an earlier one on a separate stream).
-	/// One that drifts further behind the live edge than the subscription's `max_delay`
+	/// One that drifts further behind the live edge than the subscription's `delay.max`
 	/// is skipped, or ends its pending read if already returned; raise it to keep stalled groups.
 	///
 	/// The first call commits this track to arrival order: sequence-order reads
 	/// ([`Self::next_group`], [`Self::read_frame`]) fail with
 	/// [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn recv_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
-		let shared = self.shared.clone();
-		let driver = self.driver.clone();
-		self.groups
-			.run(move |lane| {
-				with_lane(lane, async move {
-					Ok(shared
-						.recv_group()
-						.await?
-						.map(|group| Arc::new(MoqGroupConsumer::new(group, driver))))
-				})
-			})
-			.await
+		let group = self.reads.wait(|inner, waiter| inner.poll_recv_group(waiter)).await?;
+		Ok(self.group(group))
 	}
 
 	/// Return the next group with a higher sequence number than any previously
@@ -687,18 +629,8 @@ impl MoqTrackConsumer {
 	/// The first call commits this track to sequence order: arrival-order reads
 	/// ([`Self::recv_group`]) fail with [`MoqError::AlreadyCommitted`] afterwards.
 	pub async fn next_group(&self) -> Result<Option<Arc<MoqGroupConsumer>>, MoqError> {
-		let shared = self.shared.clone();
-		let driver = self.driver.clone();
-		self.groups
-			.run(move |lane| {
-				with_lane(lane, async move {
-					Ok(shared
-						.next_group()
-						.await?
-						.map(|group| Arc::new(MoqGroupConsumer::new(group, driver))))
-				})
-			})
-			.await
+		let group = self.reads.wait(|inner, waiter| inner.poll_next_group(waiter)).await?;
+		Ok(self.group(group))
 	}
 
 	/// Read the first frame of the next group, including its timestamp.
@@ -711,10 +643,8 @@ impl MoqTrackConsumer {
 	/// Shares the sequence cursor with [`Self::next_group`], committing the track
 	/// the same way.
 	pub async fn read_frame(&self) -> Result<Option<MoqFrame>, MoqError> {
-		let shared = self.shared.clone();
-		self.groups
-			.run(move |lane| with_lane(lane, async move { shared.read_frame().await }))
-			.await
+		let frame = self.reads.wait(|inner, waiter| inner.poll_read_frame(waiter)).await?;
+		Ok(frame.map(raw_frame))
 	}
 
 	/// Receive the next best-effort datagram in arrival order.
@@ -725,10 +655,7 @@ impl MoqTrackConsumer {
 	/// group order, never commits the track to one, and progresses while a group
 	/// read is pending.
 	pub async fn recv_datagram(&self) -> Result<Option<MoqDatagram>, MoqError> {
-		let shared = self.shared.clone();
-		self.datagrams
-			.run(move |lane| with_lane(lane, async move { shared.recv_datagram().await }))
-			.await
+		self.reads.wait(|inner, waiter| inner.poll_recv_datagram(waiter)).await
 	}
 
 	/// Return the publisher-side track properties learned during subscription.
@@ -752,17 +679,7 @@ impl MoqTrackConsumer {
 	///
 	/// Terminal: the subscription is released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.cancel_lanes();
-	}
-}
-
-struct GroupInner {
-	group: moq_net::group::Consumer,
-}
-
-impl GroupInner {
-	async fn read_frame(&mut self) -> Result<Option<MoqFrame>, MoqError> {
-		Ok(self.group.read_frame().await?.map(raw_frame))
+		self.reads.cancel();
 	}
 }
 
@@ -770,7 +687,7 @@ impl GroupInner {
 #[derive(uniffi::Object)]
 pub struct MoqGroupConsumer {
 	sequence: u64,
-	task: Task<GroupInner>,
+	reads: Polled<moq_net::group::Consumer>,
 	driver: Background,
 }
 
@@ -778,7 +695,7 @@ impl MoqGroupConsumer {
 	pub(crate) fn new(group: moq_net::group::Consumer, driver: Background) -> Self {
 		Self {
 			sequence: group.sequence,
-			task: Task::new(GroupInner { group }).supervised(driver.clone()),
+			reads: Polled::new(group).supervised(driver.clone()),
 			driver,
 		}
 	}
@@ -788,11 +705,14 @@ impl MoqGroupConsumer {
 	/// Errors with [`MoqError::AlreadyCommitted`] once a frame has been read, since the reader
 	/// would start mid-group, and [`MoqError::Busy`] while a read is in flight.
 	pub(crate) fn take(&self) -> Result<(moq_net::group::Consumer, Background), MoqError> {
-		let inner = self.task.take(|inner| match inner.group.index() {
+		if self.reads.busy() {
+			return Err(MoqError::Busy);
+		}
+		let group = self.reads.take(|group| match group.index() {
 			0 => Ok(()),
 			_ => Err(MoqError::AlreadyCommitted),
 		})?;
-		Ok((inner.group, self.driver.clone()))
+		Ok((group, self.driver.clone()))
 	}
 }
 
@@ -807,13 +727,17 @@ impl MoqGroupConsumer {
 	///
 	/// Returns `None` when the group ends.
 	pub async fn read_frame(&self) -> Result<Option<MoqFrame>, MoqError> {
-		self.task.run(|mut state| async move { state.read_frame().await }).await
+		let frame = self
+			.reads
+			.wait(|group, waiter| Poll::Ready(Ok(ready!(group.poll_read_frame(waiter))?)))
+			.await?;
+		Ok(frame.map(raw_frame))
 	}
 
 	/// Cancel all current and future `read_frame()` calls.
 	///
 	/// Terminal: the group and whatever it still buffers are released here, not when the handle is.
 	pub fn cancel(&self) {
-		self.task.cancel();
+		self.reads.cancel();
 	}
 }

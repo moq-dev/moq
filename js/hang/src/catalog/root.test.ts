@@ -112,6 +112,9 @@ test("a contribution parses beside a same-ID rendition and a malformed one is re
 	]) {
 		expect(RootSchema.safeParse({ contributions }).success).toBe(false);
 	}
+	// The issue names a contribution, not a rendition.
+	const refused = RootSchema.safeParse({ contributions: { alice: {} } });
+	expect(refused.error?.message).toContain("malformed contribution alice");
 });
 
 test("rendition parent broadcast reference stays distinct from empty", () => {

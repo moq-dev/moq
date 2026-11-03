@@ -42,7 +42,7 @@ test("synchronous writers store slices; plain readers share one charged inflated
 });
 
 test("received slices are forwarded byte-for-byte and exact declarations fail all plain readers", async () => {
-	const group = new Group(0);
+	const group = new Group(0n);
 	hooks.bindGroupCompression(group, true);
 	const slice = new Encoder().frame(payload);
 	hooks.writeGroupFrame(group, { payload: slice }, payload.length + 1);
@@ -56,7 +56,7 @@ test("received slices are forwarded byte-for-byte and exact declarations fail al
 });
 
 test("a slice that fails to decode fails its open group, which takes no more frames", async () => {
-	const group = new Group(0);
+	const group = new Group(0n);
 	hooks.bindGroupCompression(group, true);
 	const raw = group.consume();
 	const slice = new Encoder().frame(payload);
@@ -69,7 +69,7 @@ test("a slice that fails to decode fails its open group, which takes no more fra
 
 for (const readPlain of [false, true]) {
 	test(`compressed tails shed dictionary prefixes without retaining inflated history (plain=${readPlain})`, async () => {
-		const group = new Group(0);
+		const group = new Group(0n);
 		hooks.bindGroupCompression(group, true);
 		const raw = group.consume();
 		const plain = readPlain ? group.consume() : undefined;
@@ -93,7 +93,7 @@ for (const readPlain of [false, true]) {
 
 test("empty frames preserve the window", async () => {
 	const track = new Track("compressed").accept({ compress: true });
-	const group = track.createGroup(0);
+	const group = track.createGroup(0n);
 	group.writeFrame({ payload });
 	group.writeFrame({ payload: new Uint8Array() });
 	const reader = group.mirror();
@@ -158,7 +158,7 @@ test("a malformed compressed datagram is refused before reaching readers", () =>
 	const reader = track.subscribe();
 	const payload = new Uint8Array(100);
 	const slice = new Encoder().frame(payload);
-	expect(() => hooks.writeDatagram(track, { sequence: 0, payload: slice }, payload.length + 1)).toThrow(
+	expect(() => hooks.writeDatagram(track, { sequence: 0n, payload: slice }, payload.length + 1)).toThrow(
 		/declared size/,
 	);
 	expect(hooks.tryRecvDatagram(reader).kind).toBe("idle");

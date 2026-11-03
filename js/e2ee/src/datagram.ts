@@ -8,7 +8,7 @@ import type { Time } from "@moq/net";
 /** A decrypted datagram. */
 export interface Datagram {
 	/** Per-track sequence, shared with the group namespace. */
-	sequence: number;
+	sequence: bigint;
 	/** Presentation timestamp, or `undefined` when untimed. Not authenticated. */
 	timestamp?: Time.Timestamp;
 	/** Decrypted application bytes. */
@@ -26,7 +26,7 @@ export interface Datagram {
  */
 export type Event =
 	| { kind: "datagram"; datagram: Datagram }
-	| { kind: "authentication"; sequence: number }
-	| { kind: "duplicate"; sequence: number }
-	| { kind: "identity"; sequence: number }
-	| { kind: "oversize"; sequence: number };
+	| { kind: "authentication"; sequence: bigint }
+	| { kind: "duplicate"; sequence: bigint }
+	| { kind: "identity"; sequence: bigint }
+	| { kind: "oversize"; sequence: bigint };
