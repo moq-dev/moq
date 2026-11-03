@@ -19,6 +19,7 @@ use std::sync::Mutex;
 
 use super::Datagram;
 use super::delivered::Delivered;
+use super::idle;
 use super::skipped::Skipped;
 use crate::ledger::{self, Ledger};
 
@@ -31,7 +32,6 @@ pub(super) use demand::Preferences;
 use demand::Subscriptions;
 
 mod fill;
-mod idle;
 mod miss;
 pub use fill::Fill;
 use fill::FillState;
@@ -6674,7 +6674,7 @@ struct Cursor {
 	heads: Option<Box<Heads>>,
 	/// The group read that last parked, answered again without the walk until something
 	/// it parked on fires, once it first parks.
-	idle: Option<Box<idle::Idle>>,
+	idle: Option<Box<idle::Idle<idle::Walk>>>,
 	/// [`Self::state`] for [`Self::poll_finished`], which a publisher re-polls on every
 	/// wake: one the track has not changed since skips the lock. Made on the first poll.
 	finished: Option<Box<kio::Watch<TrackState>>>,
@@ -8400,13 +8400,17 @@ impl Subscriber {
 	/// already handed out.
 	fn poll_group(&mut self, ordered: bool, waiter: &kio::Waiter) -> Poll<Result<Option<group::Consumer>>> {
 		// Ahead of the meter: a read that parks again counts only what a peek skipped.
-		if let Inner::Plain(cursor) = &self.inner
-			&& cursor.parked(idle::Walk::new(ordered), waiter)
-		{
-			if cursor.stale != stats::Content::default() && self.stats.is_tagged() {
-				self.count_stale(&self.stats.meter());
+		let walk = idle::Walk::new(ordered);
+		match &self.inner {
+			Inner::Plain(cursor) if cursor.parked(walk, waiter) => {
+				if cursor.stale != stats::Content::default() && self.stats.is_tagged() {
+					self.count_stale(&self.stats.meter());
+				}
+				return Poll::Pending;
 			}
-			return Poll::Pending;
+			// A resumed read takes its copies' skips only on a full read, which counts them.
+			Inner::Resume(resume, _) if resume.parked(walk, waiter) => return Poll::Pending,
+			_ => {}
 		}
 		match self.poll_peek_group(ordered, waiter) {
 			Poll::Ready(Ok(Some(reserved))) => Poll::Ready(self.take(reserved).map(Some)),
@@ -8521,7 +8525,12 @@ impl Subscriber {
 	pub(super) fn skip_ordered(&mut self, floor: Option<u64>) {
 		match &mut self.inner {
 			Inner::Plain(cursor) => cursor.skip_ordered(floor),
-			Inner::Resume(..) => {
+			Inner::Resume(resume, _) => {
+				// What it handed out moves, which nothing it parked on notifies.
+				let end = floor.unwrap_or(u64::MAX);
+				if !self.delivered.covers(0..end) || (floor.is_none() && !self.delivered.contains(u64::MAX)) {
+					resume.disarm();
+				}
 				// Its retention decisions also need the containing reader's past prefix.
 				// This records what is no longer owed, without handing a group out.
 				self.delivered.forget_below(floor.unwrap_or(u64::MAX));
@@ -22928,6 +22937,49 @@ mod test {
 			end: Some(time(2200)),
 		}]));
 		assert_eq!(drain(&mut seek), vec![1, 2]);
+	}
+
+	/// A time start resolves once a group starts, not at the latest group: a copy can show
+	/// the route's answer (here an empty group) before the groups its publisher resolved the
+	/// time to start, and a producer can open groups before their first frames.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_time_start_waits_for_a_group_to_start() {
+		let at = |millis| Timestamp::from_millis(millis).unwrap();
+		let since = [Range {
+			start: Anchor::Time(at(2500)),
+			end: None,
+		}];
+		for (copy, order) in [
+			(false, Order::Ascending),
+			(true, Order::Ascending),
+			(true, Order::Descending),
+		] {
+			let mut producer = track_producer("test", Info::timed());
+			if copy {
+				producer.set_idle();
+				producer.set_live(Some(Position::group(9)), Some(2));
+			}
+			let mut groups: Vec<_> = (2..9)
+				.map(|sequence| producer.create_group(group::Info { sequence }).unwrap())
+				.collect();
+			producer
+				.create_group(group::Info { sequence: 9 })
+				.unwrap()
+				.finish()
+				.unwrap();
+
+			let mut subscriber = producer.subscribe(replay().with_ranges(since).with_order(order));
+			assert_eq!(drain(&mut subscriber), Vec::<u64>::new(), "copy: {copy}, {order:?}");
+			for (group, sequence) in groups.iter_mut().zip(2..) {
+				group
+					.write_frame(at(sequence * 1000), bytes::Bytes::from_static(b"x"))
+					.unwrap();
+			}
+			let mut read = drain(&mut subscriber);
+			read.sort_unstable();
+			assert_eq!(read, (2..10).collect::<Vec<_>>(), "copy: {copy}, {order:?}");
+		}
 	}
 
 	/// A time end stays open across a group that has yet to start: it may start before the

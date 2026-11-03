@@ -97,8 +97,8 @@ enum Family {
 
 /// The track-publishing handles of one broadcast.
 ///
-/// Closing the broadcast ends every child still open with `Unroutable`, the way a reader sees a
-/// publisher leave, and frees its handle. A finished track stops being served once its last
+/// Closing the broadcast ends every child still open with `Unroutable` (`Internal` to a
+/// moq-transport reader), and frees its handle. A finished track stops being served once its last
 /// producer drops, and a `*_finish` call frees its handle, so the broadcast keeps the finished
 /// producer here instead: a subscriber arriving after the end still finds the track until
 /// [`State::publish_close`].
