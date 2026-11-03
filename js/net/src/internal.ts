@@ -616,10 +616,10 @@ export const hooks: {
 	/** Apply a FETCH reader budget without inheriting SUBSCRIBE's zero default. */
 	fetchBudget: (subscriber: Subscriber, maxDelay: Milli | undefined) => void;
 	/**
-	 * Bind a group to its track's timedness, so a frame whose timestamp disagrees is refused.
-	 * Throws `TimestampMismatch` if a buffered frame already disagrees.
+	 * Bind a group to its track's info, so a frame whose timestamp doesn't `rescale` to the track
+	 * is refused. Throws `TimestampMismatch` if a buffered frame already disagrees.
 	 */
-	bindGroupTimed: (group: GroupProducer, timed: boolean) => void;
+	bindGroupTimed: (group: GroupProducer, track: Info) => void;
 	/** Admit a datagram in its stored wire form. */
 	writeDatagram: (producer: Producer, datagram: Datagram, inflated?: number) => void;
 	/** Bind the group to its immutable track codec. */
