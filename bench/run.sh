@@ -1057,7 +1057,9 @@ run_fanout() {
     # The working tree changes under one target; Cargo's fingerprints track it.
     keys+=(current)
 
-    # Fat LTO links on one thread, so the harnesses build side by side on every allowed CPU.
+    # Fat LTO links on one thread, so the harnesses build side by side on every allowed CPU,
+    # BENCH_FANOUT_JOBS at a time.
+    local jobs=${BENCH_FANOUT_JOBS:-4} first launched
     for ((index = 0; index < ${#labels[@]}; index++)); do
         for scenario in $FANOUT_SCENARIOS; do
             dir=$RUN/fanout/${labels[$index]}/$scenario
@@ -1066,28 +1068,36 @@ run_fanout() {
             # This revision's crates, resolved by its own lock.
             sed -i "s|path = \"../../../rs/|path = \"${checkouts[$index]}/rs/|" "$dir/Cargo.toml"
             cp "${checkouts[$index]}/Cargo.lock" "$dir/Cargo.lock"
-            # shellcheck disable=SC2016 # the inner shell expands its own arguments
-            setsid taskset -c "$ALLOWED_CPUS" bash -c 'cd "$1" && CARGO_TARGET_DIR=$2 cargo build --release' _ \
-                "$dir" "$TARGET/fanout/${keys[$index]}/$scenario" >"$dir/build.log" 2>&1 &
-            BUILD_PIDS+=($!)
+            printf '%s\n' "$TARGET/fanout/${keys[$index]}/$scenario" >"$dir/target"
             build_dirs+=("$dir")
         done
     done
-    for ((index = 0; index < ${#build_dirs[@]}; index++)); do
-        status=0
-        wait "${BUILD_PIDS[$index]}" || status=$?
-        # Reaped, so cleanup must not signal a group that ID may now name.
-        unset "BUILD_PIDS[$index]"
-        if ((status == 0)); then
-            continue
-        fi
-        if [[ ${build_dirs[$index]} == "$RUN/fanout/current/"* ]]; then
-            printf 'the current tree'"'"'s fan-out harness failed to build:\n' >&2
-            tail -n 40 "${build_dirs[$index]}/build.log" >&2
-            return 1
-        fi
-        printf 'fan-out harness %s does not build; reported unsupported\n' "${build_dirs[$index]#"$RUN"/fanout/}"
-        touch "${build_dirs[$index]}/unsupported"
+    for ((first = 0; first < ${#build_dirs[@]}; first += jobs)); do
+        BUILD_PIDS=()
+        for dir in "${build_dirs[@]:first:jobs}"; do
+            # shellcheck disable=SC2016 # the inner shell expands its own arguments
+            setsid taskset -c "$ALLOWED_CPUS" bash -c 'cd "$1" && CARGO_TARGET_DIR=$2 cargo build --release' _ \
+                "$dir" "$(cat "$dir/target")" >"$dir/build.log" 2>&1 &
+            BUILD_PIDS+=($!)
+        done
+        launched=${#BUILD_PIDS[@]}
+        for ((index = 0; index < launched; index++)); do
+            dir=${build_dirs[$((first + index))]}
+            status=0
+            wait "${BUILD_PIDS[$index]}" || status=$?
+            # Reaped, so cleanup must not signal a group that ID may now name.
+            unset "BUILD_PIDS[$index]"
+            if ((status == 0)); then
+                continue
+            fi
+            if [[ $dir == "$RUN/fanout/current/"* ]]; then
+                printf 'the current tree'"'"'s fan-out harness failed to build:\n' >&2
+                tail -n 40 "$dir/build.log" >&2
+                return 1
+            fi
+            printf 'fan-out harness %s does not build; reported unsupported\n' "${dir#"$RUN"/fanout/}"
+            touch "$dir/unsupported"
+        done
     done
 
     if [[ -n ${BENCH_FANOUT_VERSION:-} ]]; then extra+=(--version "$BENCH_FANOUT_VERSION"); fi
