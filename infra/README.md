@@ -56,7 +56,7 @@ names the Environment, and a branch that is not on the list fails to start it.
 | `bot` | `main`, `release`, `moq-ffi-v*` | The moq-bot key (`APP_CLIENT_ID`, `APP_PRIVATE_KEY`) alone |
 | `publish` | `release`, `moq-ffi-v*`, `moq-relay-v*`, `moq-cli-v*` | Registry, signing, and deploy credentials, and the moq-bot key for jobs that also need one of those |
 | `alert` | `main` | `DISCORD_WEBHOOK`, for `alert.yml`'s failure posts |
-| `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)), and `CACHIX_AUTH_TOKEN` for Smoke's push until Cachix retires |
+| `cache-write` | `main`, its merge queue, binary release tags | The mbx and Nix cache write keys ([below](#bootstrapping-the-rust-build-cache)) |
 | `npm` | `release` | `JSR_TOKEN`; npm's trusted publisher names it |
 | `pypi` | `main`, `release`, `moq-ffi-v*` | Nothing; PyPI's trusted publisher names it |
 | `pub.dev` | `moq-dart-v*`, `moq-ffi-v*` | Nothing; pub.dev's automated publishing names it |

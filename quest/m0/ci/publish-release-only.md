@@ -8,28 +8,34 @@ deploy credentials, admits only `release` and the protected release tags
 longer publish a package or sign a release. This waits on the maintainer's
 live GitHub settings changes below; check them with
 `gh api repos/moq-dev/moq/environments/publish/deployment-branch-policies`
-and `gh api repos/moq-dev/moq/environments/alert`.
+and `gh api repos/moq-dev/moq/environments/publish/secrets`.
 
 ## Plan
 
 [moq-dev/moq#7431](https://github.com/moq-dev/moq/pull/7431) moved every job
 that names `publish` off `main`: the tag's own run dispatches `release-winget`
 on the tag and calls the Kotlin wrapper, instead of chaining them by
-`workflow_run`, apt and rpm dispatches name `--ref release`, `alert` names a new `alert` Environment,
-and Smoke's Cachix push names `cache-write`.
+`workflow_run`. apt and rpm dispatches name `--ref release`, and `alert` names
+the `alert` Environment, which the maintainer created on 2026-11-02 (admits
+only `main`, holds `DISCORD_WEBHOOK`).
+
+The same PR dropped Cachix from `main` (decided 2026-11-02): Smoke's nix
+channel substitutes from `nix.moq.dev` and no longer pushes, so it names no
+Environment and `CACHIX_AUTH_TOKEN` needs no new home. The alternatives were
+moving the token into `cache-write`, or deleting Cachix everywhere now with a
+`release` backport. `release` keeps its Cachix workflows until the next cut
+merges `main` into it, and
+[nix-cache-verify](/quest/m0/ci/nix-cache-verify.md) deletes the Cachix
+cache and token once a release tag substitutes from `nix.moq.dev`.
 
 What remains is the maintainer's, in order:
 
-1. Before that PR merges, create the `alert` Environment with a deployment
-   policy admitting only `main`, holding `DISCORD_WEBHOOK`, and copy
-   `CACHIX_AUTH_TOKEN` into `cache-write`. Without the webhook every alert
-   fails; without the token Smoke's Cachix push is skipped.
-2. Merge `main` into `release` (a release cut or a backport). Tags run
+1. Merge `main` into `release` (a release cut or a backport). Tags run
    `release`'s copies of the workflows, so until then a tag still chains its
    winget and Kotlin wrapper publishers through `main`'s `workflow_run`, which
-   this PR removed: those two skip, and `release`'s apt and rpm dispatches
+   that PR removed: those two skip, and `release`'s apt and rpm dispatches
    still run on `main`.
-3. Then drop `main` from `publish`'s deployment policy, and remove
+2. Then drop `main` from `publish`'s deployment policy, and remove
    `DISCORD_WEBHOOK` and `CACHIX_AUTH_TOKEN` from `publish`.
 
 Public API: none. Wire: none.

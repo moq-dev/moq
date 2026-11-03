@@ -47,8 +47,8 @@ publish, since jobs that do not name `publish` still read it:
    `SIGNING_KEY`, `SIGNING_PASSWORD`, `WINGET_TOKEN`, `R2_ACCESS_KEY_ID`,
    `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID` and `APP_PRIVATE_KEY` (the value
    jobs use today, the repository's, which shadows the organization's).
-   `DISCORD_WEBHOOK` goes into the `alert` Environment and
-   `CACHIX_AUTH_TOKEN` into `cache-write`
+   `DISCORD_WEBHOOK` is already in the `alert` Environment, and
+   `CACHIX_AUTH_TOKEN` moves nowhere: `main` no longer uses Cachix
    ([publish off main](/quest/m0/ci/publish-release-only.md)).
 3. Then deletes those repository secrets, the unused ones
    (`GCP_SERVICE_ACCOUNT_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`,
