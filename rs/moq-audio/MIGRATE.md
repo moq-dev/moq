@@ -11,7 +11,8 @@ Open `capture::Producer::open(config).await?` once and create a consumer with
 and another to `encode::Capture::new(consumer)`, then set its `encode` and
 `on_demand` fields. Drive `capture.run()` alongside the bus and encoder futures.
 This replaces both device-opening entry points; `encode::Capture::default()`
-and its `capture: Config` field are gone.
+and its `capture: Config` field are gone. The audio rendition is registered
+only after the capture has opened and its actual input format is known.
 
 `encode::Control::start` and `stop` control only that encoder, and `replace`
 takes another capture consumer. They never open or release the device. A capture

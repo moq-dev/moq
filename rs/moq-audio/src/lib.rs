@@ -19,8 +19,9 @@
 //!   - `encode::Control::new` takes a capture consumer and returns a `Control`
 //!     and `Driver`. The handle starts, stops, and replaces this track's reader,
 //!     preserving track identity without controlling the shared device.
-//!   - `encode::publish_capture` is the turnkey shorthand. The track and
-//!     catalog are advertised up front. Capture keeps running while raw audio
+//!   - `encode::publish_capture` is the turnkey shorthand for an already-open
+//!     capture consumer. Its rendition is registered before processing samples.
+//!     Capture keeps running while raw audio
 //!     waits for a subscriber, then encodes that history and continues live.
 //!     Set `encode::Capture::on_demand` to false to encode continuously instead.
 //!   - [`encode::Producer`] publishes PCM you hand it.

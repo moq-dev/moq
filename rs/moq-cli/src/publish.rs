@@ -667,6 +667,7 @@ impl Publish {
 				audio,
 				gate,
 			} => {
+				drop(gate);
 				let mut report = self.report;
 				// Each enabled medium publishes its own track onto the shared
 				// broadcast + catalog. Both stamp frames on the catalog's
@@ -695,9 +696,6 @@ impl Publish {
 							options.encode = encode;
 							options.on_demand = on_demand;
 							let (_control, driver) = moq_audio::encode::Control::new(broadcast, catalog, options)?;
-							// Include the audio rendition in the first catalog, even when
-							// opening the device needs a permission prompt.
-							drop(gate);
 							let mut publish = std::pin::pin!(driver.run());
 							tokio::select! {
 								result = capture.run() => {
@@ -709,10 +707,7 @@ impl Publish {
 								result = &mut publish => result.map_err(anyhow::Error::from),
 							}
 						}
-						None => {
-							drop(gate);
-							Ok(())
-						}
+						None => Ok(()),
 					}
 				};
 
