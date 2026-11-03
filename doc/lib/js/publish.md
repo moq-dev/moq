@@ -71,10 +71,12 @@ with a warning, since every viewer would refuse it.
 ## Encoding
 
 Video encodes while enabled, so its recent groups wait in the track's cache for
-a late subscription's `delay.max` or a fetch. Audio keeps raw PCM while nobody
-listens, then encodes that history ahead of live audio when a subscriber arrives.
-Both retain up to `maxAge`; raw audio without a declared retention keeps at most
-30 seconds (about 11.5 MB for 48 kHz stereo f32). Capture stays open.
+a late subscription's `delay.max` or a fetch. The cache keeps an idle group for
+30 seconds whatever `maxAge` says; `maxAge` only bounds how far back a reader
+may reach into it. Audio keeps raw PCM while nobody listens, then encodes that
+history ahead of live audio when a subscriber arrives. Raw audio keeps up to
+`maxAge`, or at most 30 seconds without one (about 11.5 MB for 48 kHz stereo
+f32). Capture stays open.
 
 Pass `onDemand: false` to `Publish.Broadcast` to encode audio continuously too.
 `onDemand: true` also gates video, which then loses its unsubscribed past.
@@ -115,7 +117,6 @@ the same content, so a track re-created on the same `net` throws on an append
 that would reuse its sequences:
 
 ```ts
-import { Milli } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 
@@ -123,12 +124,10 @@ signals.run((effect) => {
     const net = effect.get(broadcast.net);
     if (!net) return;
 
-    // A day-long retention so a late viewer still replays the last value. Each
-    // value is stamped with when it was written, so the track declares a timescale.
-    const track = net.createTrack("meta.json", {
-        timescale: Moq.Time.Timescale.MILLI,
-        maxAge: Milli(86_400_000),
-    });
+    // A live track always serves and keeps its newest group, so a late viewer
+    // still replays the last value. Each value is stamped with when it was
+    // written, so the track declares a timescale.
+    const track = net.createTrack("meta.json", { timescale: Moq.Time.Timescale.MILLI });
     effect.cleanup(() => {
         track.finish();
         track.close();

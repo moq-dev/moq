@@ -37,7 +37,8 @@ the methods exactly as moq-net has them today.
     wrapper's own subscriber, so E2EE decrypts behind it; `Resolving` and
     `Fetching` resolve to the wrapper's logical metadata and groups.
   - Adapters: a subscriber's `ordered` returns its own `track::Ordered`
-    with the same group, datagram, and control surface. moq-json's snapshot
+    with the same group and control surface; datagrams leave stream tracks
+    with [Datagram tracks](/quest/m1/datagram-tracks/README.md). moq-json's snapshot
     and window consumers, moq-mux, and moq-stats read through `ordered()`,
     so without it they stay concrete.
   - Listing (maintainer, 2026-10-24): a broadcast consumer's `tracks`
