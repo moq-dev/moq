@@ -1739,9 +1739,12 @@ impl TrackState {
 	/// The edge must sit strictly above the candidate. The live edge is never late
 	/// against itself, and a group received from past its first frame carries a later
 	/// frame's timestamp on a low sequence without being an edge at all.
+	///
+	/// A group below [`Self::cache_floor`] is stale whether or not the cache still holds
+	/// it: an eviction between selecting it and this verdict must not hand it out.
 	fn is_stale(&self, sequence: u64, edge: &Edge, budget: Duration) -> bool {
-		self.lookup.contains_key(&sequence)
-			&& (sequence < self.cache_floor(budget) || self.drifted(sequence, edge, budget))
+		sequence < self.cache_floor(budget)
+			|| (self.lookup.contains_key(&sequence) && self.drifted(sequence, edge, budget))
 	}
 
 	/// A finite subscription cannot admit a cache whose reach its resumed feed cannot
@@ -8594,8 +8597,11 @@ impl Subscriber {
 			Inner::Plain(cursor) => cursor,
 			Inner::Resume(resume, _) => return resume.has_unread_group(unread),
 		};
+		let budget = cursor.subscription.read().budget();
 		let state = cursor.state.read();
-		let floor = cursor.floor().max(unread.start);
+		// A finite budget skips the cache below its floor at once, so it is not unread.
+		let budget = clamp_max_delay(budget, state.max_age_bound());
+		let floor = cursor.floor().max(state.cache_floor(budget)).max(unread.start);
 		let eligible = |sequence: u64| {
 			sequence >= floor
 				&& super::subscription::before_end(sequence, unread.end)
@@ -12367,6 +12373,112 @@ mod test {
 			got.sort_unstable();
 			assert_eq!(got, [3, 4, 5], "cached: {cached}");
 		}
+	}
+
+	/// A budget narrowed while a fill is outstanding raises the cache floor through the
+	/// fill's wanted run. Only the unjudgeable prefix is given up; the fresh suffix stays
+	/// wanted and is delivered once the fill answers.
+	#[test]
+	#[cfg(feature = "async")]
+	fn a_floor_raised_under_an_asked_fill_keeps_its_fresh_suffix() {
+		let mut producer = track_producer("test", Info::default());
+		let requests = producer.requests();
+		producer.received();
+		for sequence in 0..3 {
+			framed(&producer, sequence, 1).finish().unwrap();
+		}
+		producer.set_idle();
+		producer.start_at(6).unwrap();
+		producer.set_live(Some(Position::group(6)), None);
+		framed(&producer, 6, 1).finish().unwrap();
+		for sequence in 0..3 {
+			evict(&producer, sequence);
+		}
+		let unlimited = Subscription::default()
+			.with_delay(Delay::default().with_max(None))
+			.with_range(0..6);
+		let mut reader = producer.subscribe(unlimited.clone());
+		let waiter = kio::Waiter::noop();
+		assert_eq!(read_now(&mut reader, true), None);
+		let Poll::Ready(Ok(fill)) = requests.poll_requested_fill(&waiter) else {
+			panic!("missing history must be requested");
+		};
+		assert_eq!(
+			(fill.start().group, fill.end()),
+			(0, 6),
+			"unlimited history is fetched whole"
+		);
+		assert!(reader.poll_drop(&waiter).is_pending());
+
+		reader
+			.update(unlimited.with_delay(Delay::default().with_max(Duration::from_millis(400))))
+			.unwrap();
+		assert_eq!(read_now(&mut reader, true), None, "the fresh suffix is still owed");
+		assert_eq!(
+			reader.poll_drop(&waiter),
+			Poll::Ready((0..3, StreamError::NotFound)),
+			"the unjudgeable prefix is given up"
+		);
+		assert!(fill.wanted().is_some(), "the fresh suffix stays wanted");
+		for sequence in 3..6 {
+			let mut group = fill.accept(sequence, None).unwrap();
+			group.write_frame(None, &b"x"[..]).unwrap();
+			group.finish().unwrap();
+		}
+		for sequence in 3..6 {
+			assert_eq!(read_now(&mut reader, true), Some(Some(sequence)));
+		}
+		assert_eq!(read_now(&mut reader, true), Some(None));
+	}
+
+	/// A finite budget skips the cache below the floor at once, so a copy handing over
+	/// waits on none of it; an unlimited read still owes it.
+	#[test]
+	#[cfg(feature = "async")]
+	fn the_cache_below_the_floor_is_unread_only_to_unlimited_reads() {
+		let mut producer = track_producer("test", Info::default());
+		producer.received();
+		for sequence in 0..3 {
+			framed(&producer, sequence, 1).finish().unwrap();
+		}
+		producer.set_idle();
+		producer.set_live(Some(Position::group(6)), None);
+		framed(&producer, 6, 1).finish().unwrap();
+		let delivered = Delivered::default();
+		let unread = Unread {
+			start: 0,
+			end: Some(6),
+			delivered: &delivered,
+		};
+		for (max, owed) in [(Some(Duration::from_millis(400)), false), (None, true)] {
+			let reader = producer.subscribe(
+				Subscription::default()
+					.with_delay(Delay::default().with_max(max))
+					.with_range(0..),
+			);
+			assert_eq!(reader.has_unread_group(&unread), owed, "max delay {max:?}");
+		}
+	}
+
+	/// A finite reader selects a group below the floor, then judges it with the lock
+	/// released in between. An eviction in that window must not turn the skip into a delivery.
+	#[test]
+	#[cfg(feature = "async")]
+	fn an_evicted_group_below_the_floor_stays_stale() {
+		let mut producer = track_producer("test", Info::default());
+		producer.received();
+		framed(&producer, 0, 1).finish().unwrap();
+		producer.set_idle();
+		producer.set_live(Some(Position::group(6)), None);
+		framed(&producer, 6, 1).finish().unwrap();
+		evict(&producer, 0);
+		let state = producer.state.read();
+		let edge = state.drift_edge(&Servable::ALL);
+		assert!(state.is_stale(0, &edge, Duration::from_millis(400)));
+		assert!(
+			!state.is_stale(0, &edge, Duration::MAX),
+			"unlimited history still owes it"
+		);
 	}
 
 	/// An idle cache's old groups and the holes after them stay owed by unlimited reads.
