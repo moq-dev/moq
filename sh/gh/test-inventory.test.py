@@ -382,8 +382,12 @@ class InventoryTest(unittest.TestCase):
         )
         self.write("justfile", JUSTFILE.replace("    mod rs\n", "    mod js\n    mod rs\n") + "        sh/nightly.sh\n")
         # A module, imported with or without its extension, and a page a bench bundles are not
-        # entry points; a doc comment naming its loader, or a test importing it, changes nothing.
-        self.write("js/net/bench/fills.ts", 'import { sweep } from "./sweep";\nimport "./shared.ts";\n')
+        # entry points; a doc comment naming its loader, a commented-out import, or a test
+        # importing it changes nothing.
+        self.write(
+            "js/net/bench/fills.ts",
+            'import { sweep } from "./sweep";\nimport "./shared.ts"; // import "./forward";\n// import "./gc";\n',
+        )
         self.write("js/net/bench/sweep.ts", "/** Shared by `fills.ts` and `forward.ts`. */\n")
         self.write("js/net/bench/shared.ts", "")
         self.write("js/net/bench/forward.ts", 'import { sweep } from "./sweep.ts";\n')

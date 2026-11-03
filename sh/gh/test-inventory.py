@@ -988,8 +988,10 @@ def bench_entries(root: Path, graph: Graph) -> set[Path]:
     ]
     named = set()
     for source in sources:
-        # Block comments go first, since a doc comment may name the script that loads this one.
+        # Block comments go first, since a doc comment may name the script that loads this one;
+        # then line comments, so a commented-out import does not make its target a module.
         text = re.sub(r"(?s)(?:^|(?<=\s))/\*.*?\*/", "", source.read_text(errors="replace"))
+        text = re.sub(r"(?m)(?:^|\s)//.*$", "", text)
         named.update(path for path in graph.scripts(text, source.parent, source) if path != source.resolve())
         for specifier in IMPORT.findall(text):
             base = (source.parent / specifier).resolve()
