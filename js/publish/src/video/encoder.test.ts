@@ -715,7 +715,7 @@ test("disabling encodes one black keyframe and keeps the rendition with enabled:
 		]);
 		expect(encoder.out.active.peek()).toBe(false);
 		// The black keyframe is written during teardown, which must not seat the stopped rendition again.
-		expect(new Estimator().write(0, order)).toBe(false);
+		expect(new Estimator().write(0, order, true)).toBe(false);
 
 		// Muting releases the capture; the rendition keeps advertising what it last published.
 		source.set(undefined);
