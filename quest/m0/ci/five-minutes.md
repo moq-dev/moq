@@ -79,8 +79,11 @@ restored after measuring.
 `bench/local.py --checkout . --workers 4 --jobs 3 --samples 1 --cache ... --
 just check HEAD` admits the whole command once, separates admission from work,
 and records child CPU time. `HEAD` makes the edited source the entire measured
-diff. The net and JS runs used `196e4f8126`; the FFI run used `e6afdcca32` with
-the installed pkg-config lookup fix. Logs remain in the checkout's
+diff. The net and JS runs used
+[196e4f8126](https://github.com/moq-dev/moq/commit/196e4f81262f71d1477c7b2c5e14e0e241c12125);
+the FFI run used
+[e6afdcca32](https://github.com/moq-dev/moq/commit/e6afdcca3210962b7ee34896fc0cff87cfeec186)
+with the installed pkg-config lookup fix. Logs remain in the checkout's
 `.tmp/local-bench/`.
 
 | Edited source | Admission (s) | Work (s) | Total (s) | CPU (s) | Starting load (1 min) |
