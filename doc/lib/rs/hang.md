@@ -27,7 +27,9 @@ the live edge to play: it skips groups that fall past `max`, and starts at the
 group covering the live edge less `min` (your playout delay), plus a rendition's
 catalog `warmup` passed to `with_warmup`, waiting up to that long for it when the
 newest group arrives first. Both default to zero, which starts at the newest
-group at once; `max` never moves the start.
+group at once. A backlog that landed before the first read starts within `max`
+of the newest content, keeping the group covering the live edge less `min` and
+the warmup.
 [`moq-video`](/lib/rs/moq-video) and [`moq-audio`](/lib/rs/moq-audio) publish
 from a device. Examples:
 [`video.rs`](https://github.com/moq-dev/moq/blob/main/rs/hang/examples/video.rs)

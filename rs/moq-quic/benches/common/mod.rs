@@ -643,13 +643,13 @@ fn transport(receive_window: VarInt, send_window: u64, probe: bool) -> transport
 }
 
 fn server_config(receive_window: VarInt) -> server::Config {
-	let mut config = server::Config::new(Arc::new(Plaintext));
+	let mut config = Plaintext::server();
 	config.transport = transport(receive_window, SEND_WINDOW, false);
 	config
 }
 
 fn client_config(send_window: u64, probe: bool) -> client::Config {
-	let mut config = client::Config::new(Arc::new(Plaintext));
+	let mut config = Plaintext::client();
 	config.transport = transport(VarInt::MAX, send_window, probe);
 	config
 }

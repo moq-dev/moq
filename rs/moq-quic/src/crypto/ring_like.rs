@@ -13,10 +13,6 @@ impl crypto::HmacKey for hmac::Key {
 	fn signature_len(&self) -> usize {
 		32
 	}
-
-	fn verify(&self, data: &[u8], signature: &[u8]) -> Result<(), CryptoError> {
-		Ok(hmac::verify(self, data, signature)?)
-	}
 }
 
 impl crypto::HandshakeTokenKey for hkdf::Prk {

@@ -780,6 +780,8 @@ mod tests {
 
 	fn create_test_claims() -> Claims {
 		Claims {
+			publish_rate: None,
+			subscribe_rate: None,
 			root: "test-path".to_string(),
 			publish: patterns(&["test-pub/**"]),
 			subscribe: patterns(&["test-sub/**"]),
@@ -1059,6 +1061,8 @@ mod tests {
 	fn test_key_sign_invalid_claims() {
 		let key = create_test_key();
 		let invalid_claims = Claims {
+			publish_rate: None,
+			subscribe_rate: None,
 			root: "test-path".to_string(),
 			publish: patterns(&[]),
 			subscribe: patterns(&[]),
@@ -1237,6 +1241,8 @@ mod tests {
 	fn test_key_verify_token_without_exp() {
 		let key = create_test_key();
 		let claims = Claims {
+			publish_rate: None,
+			subscribe_rate: None,
 			root: "test-path".to_string(),
 			publish: patterns(&["**"]),
 			subscribe: patterns(&["**"]),
@@ -1257,6 +1263,8 @@ mod tests {
 	fn test_key_round_trip() {
 		let key = create_test_key();
 		let original_claims = Claims {
+			publish_rate: None,
+			subscribe_rate: None,
 			root: "test-path".to_string(),
 			publish: patterns(&["test-pub/**"]),
 			subscribe: patterns(&["test-sub/**"]),
