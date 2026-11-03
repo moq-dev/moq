@@ -25,11 +25,11 @@ A loop that read a bounded range until a timeout now ends on its own; one that w
 ### Ordered subscriptions wait for owed groups
 
 An ordered reader on a subscribed track now waits at a missing group while the feed may still deliver it, up to `delay.max` by media time or wall clock. Local tracks still skip gaps, and the zero default waits for nothing.
-With `delay: { max: null }`, there is no subscriber deadline. Use a finite budget for bounded waiting: a moq-transport SUBSCRIBE signals no gaps, so an unlimited wait can last until the track ends. Publisher retention still bounds the budget.
+With `delay: { max: null }`, there is no subscriber deadline. Use a finite budget for bounded waiting: a moq-transport SUBSCRIBE signals no gaps, so an unlimited wait can last until the track ends. The publisher's `Track.Info.maxAge` still bounds the budget.
 
 ### `maxDelay: null` sets no subscriber limit ([#7403](https://github.com/moq-dev/moq/pull/7403))
 
-A `Track.Subscription` whose `maxDelay` is `null` reaches back as far as the publisher's `Track.Info.maxAge` keeps, as `None` does in Rust. An omitted or `undefined` `maxDelay` is still zero.
+A `Track.Subscription` whose `maxDelay` is `null` reaches back as far as the publisher's `Track.Info.maxAge` allows, as `None` does in Rust. An omitted or `undefined` `maxDelay` is still zero.
 
 ### Paths fit moq-transport's 4096-byte namespace ([#6927](https://github.com/moq-dev/moq/pull/6927))
 
@@ -247,10 +247,10 @@ A write whose timedness does not match its track throws `Error.TimestampMismatch
 
 ### Subscriber staleness is `maxDelay`
 
-`Track.Subscription`'s `maxAge` is `maxDelay`; `maxAge` stays the publisher's retention on `Track.Info`.
+`Track.Subscription`'s `maxAge` is `maxDelay`; `maxAge` stays the publisher's staleness bound on `Track.Info`.
 A `maxAge` key in subscription options throws a `TypeError`, even when `undefined` or beside `maxDelay`.
 
-### Publisher retention is optional (#4242)
+### `Track.Info.maxAge` is optional (#4242)
 
 `Track.Info.maxAge` is optional, absent meaning no publisher limit, and `DEFAULT_MAX_AGE_MS` is gone.
 Pass an explicit value such as `Milli(30_000)` where you used the constant.
