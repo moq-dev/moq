@@ -368,11 +368,13 @@ impl Health {
 	fn pcr(&mut self, pid: u16, pkt: &[u8; TsPacket::SIZE], count: u64) -> bool {
 		let value = pcr(pkt);
 		if discontinuity_indicator(pkt) {
+			// A new time base voids the measured rate whether or not this packet carries its
+			// first PCR. Progress waits for that PCR, so a flag alone cannot hide its absence.
+			self.clock.meter.discontinuity();
 			self.pcr = value;
 			let Some(value) = value else {
 				return false;
 			};
-			self.clock.meter.discontinuity();
 			self.clock.meter.pcr(value, count);
 			self.restart_progress();
 			return true;
@@ -1284,6 +1286,35 @@ mod test {
 		}
 		import.finish().unwrap();
 		assert_eq!(import.stats().health(), [0; 9]);
+	}
+
+	/// A flagged break without a PCR still voids the measured rate: a stall after the
+	/// multiplex changed rate is timed at the rate measured since, never the one before.
+	#[tokio::test(start_paused = true)]
+	async fn a_flagged_break_without_a_pcr_remeasures_the_rate() {
+		let stalled = |t: u64| (5_200..6_200).contains(&t);
+		let mut feed = Feed {
+			slot: 6,
+			..Default::default()
+		};
+		feed.clean(0, 3_000);
+		let mut flag = feed.header(VIDEO, false, true, false);
+		flag.extend_from_slice(&[183, 0x80]);
+		feed.push(flag);
+		// Twice the rate from the break on: the window spanning it would keep the old one.
+		feed.slot = 12;
+		feed.run(3_000, 7_000, |t, _| t * MS, |t, _| !stalled(t));
+		let stats = feed.stats();
+		assert_eq!(
+			(
+				stats.pat_error,
+				stats.pmt_error,
+				stats.pts_error,
+				stats.pcr_repetition_error
+			),
+			(2, 2, 2, 1),
+			"{stats:?}"
+		);
 	}
 
 	#[tokio::test(start_paused = true)]
