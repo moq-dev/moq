@@ -1,16 +1,16 @@
 {
   description = "MoQ - Media over QUIC";
 
-  # Pre-built binaries live in our binary cache at nix.moq.dev. Of the
-  # packages, only tagged releases are pushed (moq-relay-v*, moq-cli-v*, etc.),
-  # so pin the flake ref to a recent tag to get a hit. The default branch HEAD
-  # builds from source, though its dev shell is cached:
+  # Pre-built binaries live in our binary cache at nix.moq.dev. Tagged
+  # releases are retained permanently. The default branch's dev shell,
+  # moq-relay, and moq are also cached, with a 30-day expiry. Pin the flake ref
+  # to a recent tag for a retained package:
   #   nix run github:moq-dev/moq/moq-relay-v0.12.4#moq-relay --accept-flake-config
   #
   # --accept-flake-config opts into the nixConfig below for one command. To
   # trust the cache permanently instead, add these settings to nix.conf.
   #
-  # The dev shell paths expire 30 days after upload, possibly before a path
+  # The CI paths expire 30 days after upload, possibly before a path
   # that depends on them; `fallback` builds whatever is missing instead of
   # failing the substitution.
   nixConfig = {

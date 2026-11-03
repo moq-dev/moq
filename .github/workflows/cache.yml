@@ -1,6 +1,6 @@
 name: Cache
 
-# Publish development environments independently of the landing worker's local caches.
+# Publish dev shells and Smoke's runtime packages independently of the landing worker's local caches.
 permissions:
   contents: read
 
@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/nix
       - uses: ./.github/actions/just
-      - name: Cache the dev shell
+      - name: Cache the dev shell and runtime packages
         env:
           NIX_SIGNING_KEY: ${{ secrets.NIX_SIGNING_KEY }}
           AWS_ACCESS_KEY_ID: ${{ secrets.NIX_R2_ACCESS_KEY_ID }}

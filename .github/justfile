@@ -1,6 +1,6 @@
 set working-directory := '..'
 
-# Build and publish the development environment to nix.moq.dev.
+# Build and publish the dev shell and Smoke's runtime packages to nix.moq.dev.
 cache:
     bash sh/gh/cache.sh
 
