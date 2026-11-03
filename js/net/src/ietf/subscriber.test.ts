@@ -893,7 +893,7 @@ test("older peer without priority property inherits the default publisher priori
 	expect((await track.info()).priority).toBe(127 - 128);
 	const group = new GroupMessage({
 		trackAlias: ALIAS,
-		groupId: 3,
+		groupId: 3n,
 		subGroupId: 0,
 		publisherPriority: 0,
 		flags: { ...groupFlags(true), hasPriority: false },
@@ -1093,7 +1093,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	await Subscribe.decode(peer.reader, VERSION);
 
 	const flags = { ...groupFlags(true), hasPriority: false };
-	const group = new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags });
+	const group = new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0, publisherPriority: 0, flags });
 	const arriving = subscriber.handleGroup(group, new Reader(undefined, encodeObjects([0]), VERSION));
 	const pending = await Promise.race([arriving.then(() => false), Promise.resolve(true)]);
 	expect(pending).toBe(true);
@@ -1107,10 +1107,10 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	expect((await track.info()).priority).toBe(127 - 37);
 	expect(group.publisherPriority).toBe(37);
 	const ordered = track.ordered();
-	expect((await ordered.nextGroup())?.sequence).toBe(3);
+	expect((await ordered.nextGroup())?.sequence).toBe(3n);
 	const explicit = new GroupMessage({
 		trackAlias: ALIAS,
-		groupId: 4,
+		groupId: 4n,
 		subGroupId: 0,
 		publisherPriority: 9,
 		flags: groupFlags(true),
@@ -1118,7 +1118,7 @@ test("early group waits for SUBSCRIBE_OK priority before track acceptance", asyn
 	await subscriber.handleGroup(explicit, new Reader(undefined, encodeObjects([0]), VERSION));
 	expect(explicit.publisherPriority).toBe(9);
 	expect((await track.info()).priority).toBe(127 - 37);
-	expect((await ordered.nextGroup())?.sequence).toBe(4);
+	expect((await ordered.nextGroup())?.sequence).toBe(4n);
 	ordered.close();
 	track.close();
 });
@@ -1135,18 +1135,18 @@ test("a group served from partway through is dropped", async () => {
 
 	// FIRST_OBJECT clear, and the first object's delta is its absolute id.
 	const flags = groupFlags(false);
-	const header = new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags });
+	const header = new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0, publisherPriority: 0, flags });
 	await subscriber.handleGroup(header, new Reader(undefined, encodeObjects([5, 0, 0]), VERSION));
 
 	// The next group is served whole, and it is the one the track delivers.
 	const whole = groupFlags(true);
 	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 4, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new GroupMessage({ trackAlias: ALIAS, groupId: 4n, subGroupId: 0, publisherPriority: 0, flags: whole }),
 		new Reader(undefined, encodeObjects([0, 0]), VERSION),
 	);
 
 	const group = await track.ordered().nextGroup();
-	expect(group?.sequence).toBe(4);
+	expect(group?.sequence).toBe(4n);
 
 	track.close();
 });
@@ -1161,12 +1161,12 @@ test("a clear FIRST_OBJECT at object 0 is the whole group", async () => {
 
 	const flags = groupFlags(false);
 	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags }),
+		new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0, publisherPriority: 0, flags }),
 		new Reader(undefined, encodeObjects([0, 0]), VERSION),
 	);
 
 	const group = await track.ordered().nextGroup();
-	expect(group?.sequence).toBe(3);
+	expect(group?.sequence).toBe(3n);
 	if (!group) return;
 	expect(await group.readString()).toBe("object 0");
 	expect(group.frameCount).toBe(2);
@@ -1186,12 +1186,12 @@ test("an END_OF_GROUP status on a marked stream finishes the group", async () =>
 	// Objects 0..4, then object 5 as a zero-length END_OF_GROUP (0x3) status.
 	const objects = new Uint8Array([...encodeObjects([0, 0, 0, 0, 0]), 0, 0, 0x3]);
 	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags }),
+		new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0, publisherPriority: 0, flags }),
 		new Reader(undefined, objects, VERSION),
 	);
 
 	const group = await track.ordered().nextGroup();
-	expect(group?.sequence).toBe(3);
+	expect(group?.sequence).toBe(3n);
 	if (!group) return;
 	for (let i = 0; i < 5; i++) {
 		expect(await group.readString()).toBe("object 0");
@@ -1211,18 +1211,18 @@ test("a clear FIRST_OBJECT past object 0 is dropped", async () => {
 
 	const flags = groupFlags(false);
 	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags }),
+		new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0, publisherPriority: 0, flags }),
 		new Reader(undefined, encodeObjects([3]), VERSION),
 	);
 
 	const whole = groupFlags(true);
 	await subscriber.handleGroup(
-		new GroupMessage({ trackAlias: ALIAS, groupId: 4, subGroupId: 0, publisherPriority: 0, flags: whole }),
+		new GroupMessage({ trackAlias: ALIAS, groupId: 4n, subGroupId: 0, publisherPriority: 0, flags: whole }),
 		new Reader(undefined, encodeObjects([0]), VERSION),
 	);
 
 	const group = await track.ordered().nextGroup();
-	expect(group?.sequence).toBe(4);
+	expect(group?.sequence).toBe(4n);
 
 	track.close();
 });
@@ -1242,7 +1242,7 @@ test.each([
 	await subscriber.handleGroup(
 		new GroupMessage({
 			trackAlias: ALIAS,
-			groupId: 3,
+			groupId: 3n,
 			subGroupId: 0,
 			publisherPriority: 0,
 			flags: groupFlags(firstObject),
@@ -1252,7 +1252,7 @@ test.each([
 	await subscriber.handleGroup(
 		new GroupMessage({
 			trackAlias: ALIAS,
-			groupId: 4,
+			groupId: 4n,
 			subGroupId: 0,
 			publisherPriority: 0,
 			flags: groupFlags(true),
@@ -1275,7 +1275,7 @@ test("a group that claims its first object must start at zero", async () => {
 	const { subscriber, track } = await subscribeTrack();
 
 	const flags = groupFlags(true);
-	const header = new GroupMessage({ trackAlias: ALIAS, groupId: 3, subGroupId: 0, publisherPriority: 0, flags });
+	const header = new GroupMessage({ trackAlias: ALIAS, groupId: 3n, subGroupId: 0, publisherPriority: 0, flags });
 	await subscriber.handleGroup(header, new Reader(undefined, encodeObjects([5, 0, 0]), VERSION));
 
 	const group = await track.ordered().nextGroup();
@@ -1310,7 +1310,7 @@ for (const [name, firstObject, bytes] of [
 		const reader = new Reader(readable, new Uint8Array(bytes), VERSION);
 		const header = new GroupMessage({
 			trackAlias: ALIAS,
-			groupId: 3,
+			groupId: 3n,
 			subGroupId: 0,
 			publisherPriority: 0,
 			flags: groupFlags(firstObject),
@@ -1336,7 +1336,7 @@ test("every object in a chunk reaches the reader before it wakes", async () => {
 
 	const header = new GroupMessage({
 		trackAlias: ALIAS,
-		groupId: 3,
+		groupId: 3n,
 		subGroupId: 0,
 		publisherPriority: 0,
 		flags: groupFlags(true),
@@ -1402,7 +1402,7 @@ test("object extension limit accepts 64 KiB and stops one byte over before readi
 			const stop = spyOn(reader, "stop");
 			const header = new GroupMessage({
 				trackAlias: ALIAS,
-				groupId: 3,
+				groupId: 3n,
 				subGroupId: 0,
 				publisherPriority: 0,
 				flags: { ...groupFlags(true), hasExtensions: true },
@@ -1451,7 +1451,7 @@ test("an object datagram is a datagram group", async () => {
 		writer.write(
 			new ObjectDatagram({
 				trackAlias: ALIAS,
-				groupId: 4,
+				groupId: 4n,
 				endOfGroup: true,
 				body: { payload: new TextEncoder().encode("no") },
 				...fields,
@@ -1462,12 +1462,12 @@ test("an object datagram is a datagram group", async () => {
 	await send({ objectId: 1 });
 	await send({ trackAlias: ALIAS + 1n });
 	await send({ endOfGroup: false, body: { status: 3 } });
-	await send({ groupId: 5, objectId: 0 });
+	await send({ groupId: 5n, objectId: 0 });
 	const properties = encodeObjectExtensions(Timestamp.fromMillis(1234), Timescale.MILLI, VERSION);
-	await send({ groupId: 9, objectId: 0, publisherPriority: 7, properties, body: { payload: Uint8Array.of(1) } });
+	await send({ groupId: 9n, objectId: 0, publisherPriority: 7, properties, body: { payload: Uint8Array.of(1) } });
 
 	const datagram = await track.recvDatagram();
-	expect(datagram?.sequence).toBe(9);
+	expect(datagram?.sequence).toBe(9n);
 	expect(datagram?.payload).toEqual(Uint8Array.of(1));
 	expect(datagram?.timestamp?.as(Timescale.MILLI)).toBe(1234);
 
@@ -1530,7 +1530,7 @@ for (const version of [Version.DRAFT_18, Version.DRAFT_20, Version.DRAFT_22]) {
 		onTestFinished(() => track.close());
 		const message = new GroupMessage({
 			trackAlias: ALIAS,
-			groupId: 0,
+			groupId: 0n,
 			subGroupId: 0,
 			publisherPriority: 0,
 			flags: { ...groupFlags(true), hasEnd: false },

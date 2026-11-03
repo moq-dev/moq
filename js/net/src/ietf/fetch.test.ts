@@ -396,7 +396,7 @@ test("a FETCH of a datagram is refused", async () => {
 	for (const version of VERSIONS) {
 		using fx = serve(version);
 		publishPairs(fx.track, 3);
-		expect(fx.track.appendDatagram(new Timestamp(0, Timescale.MILLI), new Uint8Array([1]))).toBe(3);
+		expect(fx.track.appendDatagram(new Timestamp(0, Timescale.MILLI), new Uint8Array([1]))).toBe(3n);
 		writeGroup(fx.track, 4, ["4-0"]);
 
 		const only = new Fetch({ requestId: FETCH_ID, type: range(version, at(3, 0), at(3, 0)) });
@@ -536,7 +536,7 @@ test("draft-18: a joining FETCH serves the head its subscription starts after", 
 	if (next.done) throw new Error("no subscription stream");
 	const group = new Reader(next.value, undefined, D18);
 	const header = await GroupMessage.decode(group, D18);
-	expect(header.groupId).toBe(5);
+	expect(header.groupId).toBe(5n);
 	expect(header.flags.firstObject).toBe(false);
 	expect(await group.u53()).toBe(3);
 

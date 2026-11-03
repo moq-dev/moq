@@ -1113,16 +1113,16 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])(
 			await answerTrackInfo(await opened(0), version, 1000);
 			const request = await opened(1);
 			await request.reading;
-			await respond(request, version, [{ start: new SubscribeStart([0]) }]);
+			await respond(request, version, [{ start: new SubscribeStart([0n]) }]);
 			const received = track.recvDatagram();
 			if (version === Version.DRAFT_07) {
 				await writer.write(new Uint8Array([1]));
 				await writer.write(new Uint8Array([1, ...new Uint8Array(1199).fill(0xff)]));
 			}
 			const size = version === Version.DRAFT_07 ? 1196 : 1197;
-			await writer.write(new DatagramMessage(0n, 0, 0, new Uint8Array(size + 1)).encode(version));
-			await writer.write(new DatagramMessage(0n, 1, 1, new Uint8Array(size)).encode(version));
-			expect((await received)?.sequence).toBe(1);
+			await writer.write(new DatagramMessage(0n, 0n, 0, new Uint8Array(size + 1)).encode(version));
+			await writer.write(new DatagramMessage(0n, 1n, 1, new Uint8Array(size)).encode(version));
+			expect((await received)?.sequence).toBe(1n);
 		} finally {
 			await writer.close();
 			await receiving;
@@ -1155,7 +1155,7 @@ test.each([
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 	let settled = false;
-	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).then(
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0n).then(
 		() => {
 			settled = true;
 			return undefined;
@@ -1218,7 +1218,7 @@ test.each([
 				return () => {};
 			},
 		});
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0 }), reader);
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), reader);
 		expect(touched).toEqual([]);
 	} finally {
 		subscriber.close();
@@ -1345,14 +1345,14 @@ test("a group that beats its track info waits for it", async () => {
 				return typeof value === "function" ? value.bind(target) : value;
 			},
 		});
-		const receiving = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0 }), reader);
+		const receiving = subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), reader);
 		await drainReactions();
 		expect(touched).toEqual([]);
 
 		await answerTrackInfo(streams[0], version, 1000);
 		await receiving;
 		const group = await track.recvGroup();
-		expect(group?.sequence).toBe(0);
+		expect(group?.sequence).toBe(0n);
 		expect((await group?.readFrame())?.payload).toEqual(new Uint8Array([0]));
 	} finally {
 		track.close();
@@ -1385,7 +1385,7 @@ test("a fetch started after the subscriber closes rejects without opening a stre
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 	subscriber.close();
 
-	const err = await subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => err);
+	const err = await subscriber.fetchGroup(Path.from("room"), "video", 0n).catch((err: unknown) => err);
 	expectCut(err, undefined);
 	expect(streams.length).toBe(0);
 });
@@ -1432,7 +1432,7 @@ test("an already-aborted fetch rejects without opening a stream", async () => {
 	const cause = new Error("gone");
 
 	const err = await subscriber
-		.fetchGroup(Path.from("room"), "video", 0, { signal: AbortSignal.abort(cause) })
+		.fetchGroup(Path.from("room"), "video", 0n, { signal: AbortSignal.abort(cause) })
 		.catch((err: unknown) => err);
 	expect(err).toBe(cause);
 	expect(streams.length).toBe(0);
@@ -1445,7 +1445,7 @@ test("the first FETCH goes out before TRACK_INFO answers", async () => {
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 	let fetched: GroupConsumer | undefined;
-	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).then((group) => {
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0n).then((group) => {
 		fetched = group;
 		return group;
 	});
@@ -1468,7 +1468,7 @@ test("a failed TRACK_INFO fails the FETCH sent alongside it", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
-	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => err);
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0n).catch((err: unknown) => err);
 	await opened(0);
 	await opened(1);
 	await streams[1].reading;
@@ -1487,8 +1487,8 @@ test("one of two fetch sharers aborting leaves the other's fetch", async () => {
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 	const controller = new AbortController();
-	const a = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: controller.signal });
-	const b = subscriber.fetchGroup(Path.from("room"), "video", 0);
+	const a = subscriber.fetchGroup(Path.from("room"), "video", 0n, { signal: controller.signal });
+	const b = subscriber.fetchGroup(Path.from("room"), "video", 0n);
 
 	await opened(0);
 	await answerTrackInfo(streams[0]);
@@ -1521,8 +1521,8 @@ test.each([
 
 	const first = new AbortController();
 	const second = new AbortController();
-	const a = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: first.signal });
-	const b = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: second.signal });
+	const a = subscriber.fetchGroup(Path.from("room"), "video", 0n, { signal: first.signal });
+	const b = subscriber.fetchGroup(Path.from("room"), "video", 0n, { signal: second.signal });
 
 	await opened(0);
 	await streams[0].reading;
@@ -1560,7 +1560,7 @@ test("a fetch after the last sharer left is never failed with the cancelled one"
 		const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
 		const controller = new AbortController();
-		const a = subscriber.fetchGroup(Path.from("room"), "video", 0, { signal: controller.signal });
+		const a = subscriber.fetchGroup(Path.from("room"), "video", 0n, { signal: controller.signal });
 		void a.catch(() => undefined);
 		await opened(0);
 		await answerTrackInfo(streams[0]);
@@ -1569,7 +1569,7 @@ test("a fetch after the last sharer left is never failed with the cancelled one"
 
 		controller.abort(new Error("gone"));
 		for (let i = 0; i < depth; i++) await Promise.resolve();
-		const b = subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => err);
+		const b = subscriber.fetchGroup(Path.from("room"), "video", 0n).catch((err: unknown) => err);
 		for (let i = 0; i < 64; i++) await Promise.resolve();
 
 		// An empty-group FIN accepts whichever FETCH the late caller is waiting on.
@@ -1600,7 +1600,7 @@ test("a fresh consume never joins a fetch an earlier one opened", async () => {
 	const room = Path.from("room");
 
 	const old = subscriber.consume(room);
-	const fetch = old.track("video").fetchGroup(0);
+	const fetch = old.track("video").fetchGroup(0n);
 	await opened(0);
 	await answerTrackInfo(streams[0]);
 	await opened(1);
@@ -1613,7 +1613,7 @@ test("a fresh consume never joins a fetch an earlier one opened", async () => {
 	expect(fresh.closed).not.toBe(old.closed);
 	void fresh
 		.track("video")
-		.fetchGroup(0)
+		.fetchGroup(0n)
 		.catch(() => {});
 	await opened(2);
 
@@ -1628,7 +1628,7 @@ test("the last reader leaving mid-response cancels the fetch", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, Version.DRAFT_05, HopSchema.parse(1n));
 
-	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0);
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0n);
 	await opened(0);
 	await answerTrackInfo(streams[0]);
 	await opened(1);
@@ -1665,7 +1665,7 @@ test.each(["initial", "track", "fetch", "body"] as const)(
 			grant,
 		);
 		let result: unknown;
-		const pending = subscriber.fetchGroup(Path.from("room/cam"), "video", 0).then(
+		const pending = subscriber.fetchGroup(Path.from("room/cam"), "video", 0n).then(
 			(group) => {
 				result = group;
 				return group;
@@ -1848,7 +1848,7 @@ test.each([
 		await subscribe.reading;
 
 		if (outcome === "answered") {
-			await respond(subscribe, version, [{ start: new SubscribeStart([0]) }]);
+			await respond(subscribe, version, [{ start: new SubscribeStart([0n]) }]);
 			await drainReactions();
 			await pool.replace();
 			await drainReactions();
@@ -1857,7 +1857,7 @@ test.each([
 			await pool.withdraw();
 			await drainReactions();
 			expect(track.closed.peek()).toBeUndefined();
-			await respond(subscribe, version, [{ start: new SubscribeStart([0]) }, { end: new SubscribeEnd(0) }], true);
+			await respond(subscribe, version, [{ start: new SubscribeStart([0n]) }, { end: new SubscribeEnd(0n) }], true);
 			expect(await track.closed).toBeNull();
 		} else {
 			await pool.replace();
@@ -1955,8 +1955,8 @@ test.each(["track", "fetch", "open"] as const)(
 		const retired = new AbortController();
 		const consumed = { id: 1, valid: retired.signal };
 		const path = Path.from("room");
-		const first = subscriber.fetchGroup(path, "video", 0, {}, consumed).catch((err: unknown) => err);
-		const second = subscriber.fetchGroup(path, "video", 0, {}, consumed).catch((err: unknown) => err);
+		const first = subscriber.fetchGroup(path, "video", 0n, {}, consumed).catch((err: unknown) => err);
+		const second = subscriber.fetchGroup(path, "video", 0n, {}, consumed).catch((err: unknown) => err);
 		await opened(0);
 		if (stage !== "track") {
 			await answerTrackInfo(streams[0], Version.DRAFT_06);
@@ -1979,7 +1979,7 @@ test("retirement preserves an accepted fetch and its coalesced reads", async () 
 	const retired = new AbortController();
 	const consumed = { id: 1, valid: retired.signal };
 	const path = Path.from("room");
-	const fetch = subscriber.fetchGroup(path, "video", 0, {}, consumed);
+	const fetch = subscriber.fetchGroup(path, "video", 0n, {}, consumed);
 	await opened(0);
 	await answerTrackInfo(streams[0], Version.DRAFT_06);
 	await opened(1);
@@ -1987,7 +1987,7 @@ test("retirement preserves an accepted fetch and its coalesced reads", async () 
 	streams[1].inbound.enqueue(new Uint8Array([0, 4, ...new TextEncoder().encode("old!")]));
 	const first = await fetch;
 	retired.abort(new Error("broadcast instance retired"));
-	const cached = await subscriber.fetchGroup(path, "video", 0, {}, consumed);
+	const cached = await subscriber.fetchGroup(path, "video", 0n, {}, consumed);
 	expect(streams.length).toBe(2);
 	expect((await first.readFrame())?.payload).toEqual((await cached.readFrame())?.payload);
 	first.close();
@@ -2207,7 +2207,7 @@ test("a local unsubscribe owes no SUBSCRIBE_END", async () => {
 		await (await opened(1)).reading;
 		const next = ordered.nextGroup();
 		await subscriber.runGroup(
-			new Group({ subscribe: 0n, sequence: 0 }),
+			new Group({ subscribe: 0n, sequence: 0n }),
 			new Reader(
 				new ReadableStream({
 					start: (controller) => controller.close(),
@@ -2322,7 +2322,7 @@ test.each([0, 5, 9000])("a received group numbers its frames from transport offs
 		await answerTrackInfo(streams[0], version, 1000);
 		await (await opened(1)).reading;
 		await subscriber.runGroup(
-			new Group({ subscribe: 0n, sequence: 0, frameStart }),
+			new Group({ subscribe: 0n, sequence: 0n, frameStart }),
 			await groupStream(1000, version),
 		);
 		const late = consumer.subscribe();
@@ -2379,11 +2379,11 @@ test.each([Version.DRAFT_05, Version.DRAFT_06])("version %p passes received time
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
 		await (await opened(1)).reading;
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 4 }), await groupStream(1000, version));
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 4n }), await groupStream(1000, version));
 		// Starts before the group below it.
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 5 }), await groupStream(500, version));
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 5n }), await groupStream(500, version));
 		// Lands below group 5 but starts after it.
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3 }), await groupStream(2000, version));
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 3n }), await groupStream(2000, version));
 		const got = [];
 		for (let i = 0; i < 3; i++) {
 			const group = await track.recvGroup();
@@ -2415,11 +2415,11 @@ test("a lite-07 rewind is refused", async () => {
 		await opened(0);
 		await answerTrackInfo(streams[0], version, 1000);
 		await (await opened(1)).reading;
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 4 }), await groupStream(1000, version));
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 4n }), await groupStream(1000, version));
 		// Starts before the group below it, so its stream is stopped with the refusal.
 		const rewound = await groupStream(500, version);
 		const stop = spyOn(rewound, "stop");
-		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 5 }), rewound);
+		await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 5n }), rewound);
 		expect(stop.mock.calls[0]?.[0]).toBeInstanceOf(TimestampMismatch);
 	} finally {
 		track.close();
@@ -2476,7 +2476,7 @@ test("an empty START remains resolved when its range widens", async () => {
 	const { quic, streams, opened } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0 }, end: { absolute: 1 } }] });
+	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -2485,7 +2485,7 @@ test("an empty START remains resolved when its range widens", async () => {
 		expect(hooks.sourceStart(track)).toBe("pending");
 		await respond(request, version, [{ start: new SubscribeStart([undefined]) }]);
 		await drainReactions();
-		track.update({ ranges: [{ start: { absolute: 0 }, end: { absolute: 2 } }] });
+		track.update({ ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
 		await drainReactions();
 		expect(hooks.sourceStart(track)).not.toBe("pending");
 	} finally {
@@ -2504,7 +2504,7 @@ test("a lite-07 publisher FIN keeps a covered bounded subscription's copy", asyn
 	const { quic, streams, opened, closes } = fakeSession();
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0 }, end: { absolute: 2 } }] });
+	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -2515,10 +2515,10 @@ test("a lite-07 publisher FIN keeps a covered bounded subscription's copy", asyn
 			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 			version,
 		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0]) }, version);
+		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
 		await encodeSubscribeResponse(
 			writer,
-			{ drop: new SubscribeDrop({ start: 0, end: 1, error: StreamCode.NotFound }) },
+			{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.NotFound }) },
 			version,
 		);
 		for (const chunk of chunks) stream.inbound.enqueue(chunk);
@@ -2527,7 +2527,7 @@ test("a lite-07 publisher FIN keeps a covered bounded subscription's copy", asyn
 		expect(track.closed.peek()).toBeUndefined();
 		expect(streams).toHaveLength(2);
 
-		track.update({ ranges: [{ start: { absolute: 0 }, end: { absolute: 3 } }] });
+		track.update({ ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }] });
 		const reopened = await opened(2);
 		await reopened.reading;
 		const reader = new Reader(undefined, new Uint8Array(Buffer.concat(reopened.written)), version);
@@ -2550,7 +2550,7 @@ test("a reopened lite-07 subscription ends once its readers leave", async () => 
 	const { quic, streams, opened } = fakeSession([], [2]);
 	const subscriber = new Subscriber(quic, version, HopSchema.parse(1n));
 	const broadcast = subscriber.consume(Path.from("room"));
-	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0 }, end: { absolute: 2 } }] });
+	const track = broadcast.track("video").subscribe({ ranges: [{ start: { absolute: 0n }, end: { absolute: 2n } }] });
 	let next: TrackSubscriber | undefined;
 	try {
 		await opened(0);
@@ -2562,17 +2562,17 @@ test("a reopened lite-07 subscription ends once its readers leave", async () => 
 			new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 			version,
 		);
-		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0]) }, version);
+		await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
 		await encodeSubscribeResponse(
 			writer,
-			{ drop: new SubscribeDrop({ start: 0, end: 1, error: StreamCode.NotFound }) },
+			{ drop: new SubscribeDrop({ start: 0n, end: 1n, error: StreamCode.NotFound }) },
 			version,
 		);
 		for (const chunk of chunks) stream.inbound.enqueue(chunk);
 		stream.inbound.close();
 		await drainReactions();
 
-		track.update({ ranges: [{ start: { absolute: 0 }, end: { absolute: 3 } }] });
+		track.update({ ranges: [{ start: { absolute: 0n }, end: { absolute: 3n } }] });
 		await (await opened(2)).writing;
 		track.close();
 		await drainReactions();
@@ -2612,7 +2612,7 @@ test.each(
 		await drainReactions();
 
 		await clock.advance(Nano.fromMilli(GRACE));
-		expect(await track.finished()).toEqual({ group: 0, frame: 0 });
+		expect(await track.finished()).toEqual({ group: 0n, frame: 0 });
 		expect(await track.closed).toBeNull();
 		expect(closes).toEqual([]);
 	} finally {
@@ -2648,7 +2648,7 @@ test.each([
 		await subscribe.reading;
 		const responses: SubscribeResponse[] = legacy
 			? [{ ok: new SubscribeOk({}) }]
-			: [{ start: new SubscribeStart([0]) }, { end: new SubscribeEnd(1) }];
+			: [{ start: new SubscribeStart([0n]) }, { end: new SubscribeEnd(1n) }];
 		await respond(subscribe, version, responses, true);
 		if (settled) {
 			const group = new ReadableStream<Uint8Array>({
@@ -2657,11 +2657,11 @@ test.each([
 					controller.close();
 				},
 			});
-			await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0 }), new Reader(group, undefined, version));
+			await subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), new Reader(group, undefined, version));
 		} else if (legacy) {
 			// Lite-03 says nothing about which groups are owed, so only a stream still being read is.
 			const group = new ReadableStream<Uint8Array>({ start: frame });
-			void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0 }), new Reader(group, undefined, version));
+			void subscriber.runGroup(new Group({ subscribe: 0n, sequence: 0n }), new Reader(group, undefined, version));
 		}
 		await drainReactions();
 
@@ -2690,7 +2690,7 @@ test.each([
 	const broadcast = subscriber.consume(Path.from("room"));
 	const track = broadcast
 		.track("video")
-		.subscribe({ delay: { max: Milli.zero }, ranges: [{ start: { absolute: 0 }, end: { absolute: 1 } }] });
+		.subscribe({ delay: { max: Milli.zero }, ranges: [{ start: { absolute: 0n }, end: { absolute: 1n } }] });
 	try {
 		await opened(0);
 		await answerTrackInfo(streams[0], version);
@@ -2714,10 +2714,10 @@ test.each([
 			version,
 		);
 		if (start) {
-			await encodeSubscribeResponse(writer, { start: new SubscribeStart([0]) }, version);
+			await encodeSubscribeResponse(writer, { start: new SubscribeStart([0n]) }, version);
 			await encodeSubscribeResponse(
 				writer,
-				{ drop: new SubscribeDrop({ start: 0, end: 0, error: StreamCode.NotFound }) },
+				{ drop: new SubscribeDrop({ start: 0n, end: 0n, error: StreamCode.NotFound }) },
 				version,
 			);
 		}
@@ -2777,7 +2777,7 @@ test.each([
 				new WritableStream<Uint8Array>({ write: (chunk) => void chunks.push(new Uint8Array(chunk)) }),
 				version,
 			);
-			await encodeSubscribeResponse(writer, { end: new SubscribeEnd(0) }, version);
+			await encodeSubscribeResponse(writer, { end: new SubscribeEnd(0n) }, version);
 			for (const chunk of chunks) stream.inbound.enqueue(chunk);
 			stream.inbound.close();
 			expect(await track.closed).toBeNull();
@@ -2954,7 +2954,7 @@ test.each(["answer", "credit"] as const)("FETCH shares the TRACK deadline while 
 	const { quic, streams, opened } = fakeSession(stage === "credit" ? [1] : []);
 	const subscriber = new Subscriber(quic, Version.DRAFT_07, HopSchema.parse(1n));
 	let failure: unknown;
-	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0).catch((err: unknown) => {
+	const fetch = subscriber.fetchGroup(Path.from("room"), "video", 0n).catch((err: unknown) => {
 		failure = err;
 	});
 	try {

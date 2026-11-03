@@ -258,7 +258,7 @@ test("TRACK_STATUS is answered on every draft without subscribing", async () => 
 				maxAge: Milli(5000),
 				priority: 2,
 			});
-			const group = track.createGroup(4);
+			const group = track.createGroup(4n);
 			group.writeFrame({ payload: new Uint8Array([1]), timestamp: Timestamp.fromMillis(0) });
 			group.writeFrame({ payload: new Uint8Array([2]), timestamp: Timestamp.fromMillis(1) });
 			const subscribed = spyOn(track, "subscribe");
@@ -767,19 +767,19 @@ test("a blocked group header is reset when the group expires", async () => {
 			server,
 		);
 
-		const old = track.createGroup(0);
+		const old = track.createGroup(0n);
 		old.writeFrame({ payload: new TextEncoder().encode("old"), timestamp: Timestamp.fromMillis(0) });
 		old.finish();
 		await headerStarted;
 
-		const edge = track.createGroup(1);
+		const edge = track.createGroup(1n);
 		edge.writeFrame({ payload: new TextEncoder().encode("edge"), timestamp: Timestamp.fromMillis(10_000) });
 		edge.finish();
 
 		// A group beyond the edge, so group 0's reach (10s, where group 1 begins) is
 		// provably past the budget. A group is bounded by where its successor starts, so
 		// the successor alone never convicts it: nothing yet proves group 0 ends sooner.
-		const later = track.createGroup(2);
+		const later = track.createGroup(2n);
 		later.writeFrame({ payload: new TextEncoder().encode("later"), timestamp: Timestamp.fromMillis(20_000) });
 		later.finish();
 
@@ -2445,7 +2445,7 @@ test.each([Version.DRAFT_22])("IETF %s: datagrams honor the absolute object rang
 		if (next.done) throw new Error("the in-range datagram was never sent");
 		const datagram = await ObjectDatagram.decode(next.value, version);
 		expect(datagram.trackAlias).toBe(7n);
-		expect(datagram.groupId).toBe(1);
+		expect(datagram.groupId).toBe(1n);
 		expect(datagram.objectId ?? 0).toBe(0);
 	} finally {
 		await reader.cancel();
@@ -2472,7 +2472,7 @@ test("draft-22: an absolute subscribe is no join", async () => {
 	);
 
 	try {
-		expect(track.demand().wanted.peek()).toBe(0);
+		expect(track.demand().wanted.peek()).toBe(0n);
 	} finally {
 		fx.close();
 		client.close();
@@ -2732,7 +2732,7 @@ async function subscribeOkLargest(version: IetfVersion): Promise<SubscribeOk["la
 	const fx = fixture(version);
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-	const group = track.createGroup(5);
+	const group = track.createGroup(5n);
 	for (let i = 0; i < 4; i++) {
 		group.writeFrame({ payload: new TextEncoder().encode(`5.${i}`), timestamp: Timestamp.now() });
 	}
@@ -2889,13 +2889,13 @@ test.each([false, true])("draft-22: exact terminal 5/5 survives group FIN=%s", a
 		}),
 	);
 	try {
-		const group = track.createGroup(5);
+		const group = track.createGroup(5n);
 		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
 		const uni = await fx.uni.read();
 		if (!uni.value) throw new Error("missing group stream");
 		const reader = new Reader(uni.value, undefined, V22);
 		const header = await GroupMessage.decode(reader, V22);
-		expect(header.groupId).toBe(5);
+		expect(header.groupId).toBe(5n);
 		for (let i = 0; i < 5; i++) {
 			const frame = await reader.decode((c) => Frame.decode(c, header.flags, undefined));
 			expect(frame.payload).toEqual(new Uint8Array([i]));
@@ -2904,7 +2904,7 @@ test.each([false, true])("draft-22: exact terminal 5/5 survives group FIN=%s", a
 			group.finish();
 			expect(await reader.done()).toBe(true);
 		}
-		track.finishAt({ group: 5, frame: 5 });
+		track.finishAt({ group: 5n, frame: 5 });
 		group.finish();
 		track.finish();
 		track.close();
@@ -2913,7 +2913,7 @@ test.each([false, true])("draft-22: exact terminal 5/5 survives group FIN=%s", a
 			if (!marker.value) throw new Error("missing terminal stream");
 			const end = new Reader(marker.value, undefined, V22);
 			const endHeader = await GroupMessage.decode(end, V22);
-			expect(endHeader.groupId).toBe(5);
+			expect(endHeader.groupId).toBe(5n);
 			expect(endHeader.flags.hasEnd).toBe(false);
 			expect(endHeader.flags.firstObject).toBe(false);
 			const frame = await end.decode((c) => Frame.decode(c, endHeader.flags, undefined));
@@ -2956,7 +2956,7 @@ test("draft-22: an inline terminal reset after its FIN falls back to a standalon
 		}),
 	);
 	try {
-		const group = track.createGroup(5);
+		const group = track.createGroup(5n);
 		for (let i = 0; i < 5; i++) group.writeFrame({ payload: new Uint8Array([i]) });
 		const uni = await fx.uni.read();
 		if (!uni.value) throw new Error("missing group stream");
@@ -2980,7 +2980,7 @@ test("draft-22: an inline terminal reset after its FIN falls back to a standalon
 			},
 		});
 
-		track.finishAt({ group: 5, frame: 5 });
+		track.finishAt({ group: 5n, frame: 5 });
 		group.finish();
 		track.finish();
 		track.close();
@@ -2991,7 +2991,7 @@ test("draft-22: an inline terminal reset after its FIN falls back to a standalon
 		if (!marker.value) throw new Error("missing standalone terminal stream");
 		const end = new Reader(marker.value, undefined, V22);
 		const endHeader = await GroupMessage.decode(end, V22);
-		expect(endHeader.groupId).toBe(5);
+		expect(endHeader.groupId).toBe(5n);
 		const frame = await end.decode((c) => Frame.decode(c, endHeader.flags, undefined));
 		expect(frame.endOfTrack).toBe(true);
 		expect(frame.idDelta).toBe(5);
@@ -3379,7 +3379,7 @@ test("requester FIN keeps a draft-22 subscription serving; STOP_SENDING cancels 
 		if (next.done) throw new Error("subscription stopped after requester FIN");
 		const reader = new Reader(next.value, undefined, fx.version);
 		const header = await GroupMessage.decode(reader, fx.version);
-		expect(header.groupId).toBe(0);
+		expect(header.groupId).toBe(0n);
 		client.reader.stop(new Error("cancel"));
 		await serving;
 	} finally {
@@ -4041,7 +4041,7 @@ test("draft-22: reported Largest survives absent headers, older cache entries, a
 	using clock = manual();
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	hooks.reportedLargest(track, { group: 4, frame: 3 });
+	hooks.reportedLargest(track, { group: 4n, frame: 3 });
 	const { client, ok } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -4080,7 +4080,7 @@ test("draft-22: Next Object behind an upstream group report still delivers its f
 	const fx = fixture();
 	const track = fx.broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	// What an IETF SUBSCRIBE_OK leaves on a cold copy: the group, but no frame it can name.
-	hooks.reportedGroup(track, 0);
+	hooks.reportedGroup(track, 0n);
 	const { client, ok } = await runSubscribe(
 		fx,
 		new Subscribe({
@@ -4095,7 +4095,7 @@ test("draft-22: Next Object behind an upstream group report still delivers its f
 	const group = track.appendGroup();
 	try {
 		expect(ok.largest).toBeUndefined();
-		expect(group.sequence).toBe(0);
+		expect(group.sequence).toBe(0n);
 		group.writeFrame({ payload: new TextEncoder().encode("first"), timestamp: Timestamp.now() });
 		group.finish();
 		const stream = await nextUni(fx.uni);

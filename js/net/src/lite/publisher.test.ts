@@ -379,7 +379,7 @@ test("lite draft-05: a subscribe update re-ranks a group already on the wire", a
 	void publisher.runSubscribe(msg, server);
 
 	// Leave the group open, so its stream is still being served when the update lands.
-	const group = track.createGroup(4);
+	const group = track.createGroup(4n);
 	group.writeFrame(textFrame("hello"));
 
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
@@ -441,7 +441,7 @@ test("lite draft-05: a subscribe update during the stream open still ranks the g
 	});
 	void publisher.runSubscribe(msg, server);
 
-	const group = track.createGroup(4);
+	const group = track.createGroup(4n);
 	group.writeFrame(textFrame("hello"));
 
 	try {
@@ -532,7 +532,7 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 
-	const group = track.createGroup(7);
+	const group = track.createGroup(7n);
 	group.writeFrame(textFrame("hello"));
 	group.finish();
 
@@ -546,7 +546,7 @@ test("lite draft-05: the fetch response ranks the publisher's own writes", async
 	if (accepted.done) throw new Error("publisher never saw the fetch stream");
 	const server = new Stream({ ...accepted.value, version: Version.DRAFT_05 });
 
-	const msg = new Fetch({ broadcast: Path.from("test"), track: "video", priority: 3, group: 7 });
+	const msg = new Fetch({ broadcast: Path.from("test"), track: "video", priority: 3, group: 7n });
 	try {
 		await publisher.runFetch(msg, server);
 
@@ -564,7 +564,7 @@ test.each([0, 5, 6, 7])("a fetched cached tail keeps absolute indices from %s", 
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const group = hooks.receiveGroup(track, { sequence: 0, start: 5 });
+	const group = hooks.receiveGroup(track, { sequence: 0n, start: 5 });
 	for (const value of ["a", "b"]) group.writeFrame(textFrame(value));
 	group.finish();
 	const client = await Stream.open(pair.client, { version });
@@ -576,7 +576,7 @@ test.each([0, 5, 6, 7])("a fetched cached tail keeps absolute indices from %s", 
 				broadcast: Path.from("test"),
 				track: "video",
 				priority: 0,
-				group: 0,
+				group: 0n,
 				startFrame,
 			}),
 			server,
@@ -609,7 +609,7 @@ test("lite draft-06: an unchecked track's fetched frames carry their own timesta
 	const broadcast = publish(origin, Path.from("test"));
 	const track = broadcast.createTrack("video", { timescale: Timescale.MICRO, unchecked: true });
 
-	const group = track.createGroup(0);
+	const group = track.createGroup(0n);
 	group.writeFrame(textFrame("hello", Timestamp.fromMillis(36_000_000)));
 	group.finish();
 
@@ -617,7 +617,7 @@ test("lite draft-06: an unchecked track's fetched frames carry their own timesta
 	const server = await Stream.accept(pair.server, Version.DRAFT_06);
 	if (!server) throw new Error("publisher never saw the fetch stream");
 
-	const msg = new Fetch({ broadcast: Path.from("test"), track: "video", priority: 0, group: 0 });
+	const msg = new Fetch({ broadcast: Path.from("test"), track: "video", priority: 0, group: 0n });
 	try {
 		await publisher.runFetch(msg, server);
 
@@ -873,17 +873,17 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 		ranges: [
 			{ start: { relative: 1 } },
 			// Group 1 starts at 1 ms.
-			{ start: { time: 1 }, end: { absolute: 2 } },
+			{ start: { time: 1 }, end: { absolute: 2n } },
 			// Empty, so it starts nowhere.
-			{ start: { absolute: 3 }, end: { absolute: 3 } },
+			{ start: { absolute: 3n }, end: { absolute: 3n } },
 			// Empty only once its start resolves to group 4.
-			{ start: { relative: 0 }, end: { absolute: 2 } },
+			{ start: { relative: 0 }, end: { absolute: 2n } },
 		],
 	});
 	try {
 		const resp = await decodeSubscribeResponse(sub.client.reader, version);
 		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
-		expect(resp.start.starts).toEqual([3, 1, undefined, undefined]);
+		expect(resp.start.starts).toEqual([3n, 1n, undefined, undefined]);
 	} finally {
 		await sub.close();
 	}
@@ -897,7 +897,7 @@ test("lite-07 answers and ends a bounded window that resolves empty", async () =
 		version,
 		prefill: [0, 1, 2, 3, 4, 5],
 		maxAge: Milli(3_600_000),
-		ranges: [{ start: { relative: 0 }, end: { absolute: 3 } }],
+		ranges: [{ start: { relative: 0 }, end: { absolute: 3n } }],
 	});
 	try {
 		const resp = await decodeSubscribeResponse(sub.client.reader, version);
@@ -965,11 +965,11 @@ test("lite draft-06: a cut group is dropped early, once", async () => {
 		expect(await sub.servedSequence()).toBe(0);
 		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06))).toBe(true);
 
-		const cut = sub.track.createGroup(1);
+		const cut = sub.track.createGroup(1n);
 		cut.abort(new Error("cut"));
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
+		expect([resp.drop.start, resp.drop.end]).toEqual([1n, 1n]);
 
 		sub.serve(2);
 		expect(await sub.servedSequence()).toBe(2);
@@ -991,7 +991,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			expect(await sub.servedSequence()).toBe(0);
 			expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
 
-			const cut = sub.track.createGroup(1);
+			const cut = sub.track.createGroup(1n);
 			cut.abort(new StreamError(StreamCode(70), { message: "cut" }));
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
@@ -1012,7 +1012,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			expect(await sub.servedSequence()).toBe(0);
 			expect("start" in (await decodeSubscribeResponse(sub.client.reader, version))).toBe(true);
 
-			hooks.dropTrackGroups(sub.track, 1, 3, new StreamError(StreamCode(70), { message: "cut" }));
+			hooks.dropTrackGroups(sub.track, 1n, 3n, new StreamError(StreamCode(70), { message: "cut" }));
 			const resp = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
 			expect([resp.drop.start, resp.drop.end, resp.drop.error]).toEqual([
@@ -1030,7 +1030,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 		try {
 			sub.serve(5);
 			expect(await sub.servedSequence()).toBe(5);
-			await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, version);
+			await replayUpdate({ priority: 0, startGroup: 2n }).encode(sub.client.writer, version);
 			await flush();
 			sub.track.finish();
 			sub.track.close();
@@ -1057,12 +1057,12 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 			try {
 				// Lite-07's type adds one byte to the three one-byte group fields.
 				const header = version === Version.DRAFT_07 ? 4 : 3;
-				sub.track.insertDatagram(0, Timestamp.fromMillis(0), new Uint8Array(max - header + 1));
-				sub.track.insertDatagram(1, Timestamp.fromMillis(1), new Uint8Array(max - header));
+				sub.track.insertDatagram(0n, Timestamp.fromMillis(0), new Uint8Array(max - header + 1));
+				sub.track.insertDatagram(1n, Timestamp.fromMillis(1), new Uint8Array(max - header));
 				const next = await reader.read();
 				if (next.done) throw new Error("datagrams ended early");
 				expect(next.value.byteLength).toBe(max);
-				expect((await DatagramMessage.decode(next.value, version, () => ({ timed: true })))?.sequence).toBe(1);
+				expect((await DatagramMessage.decode(next.value, version, () => ({ timed: true })))?.sequence).toBe(1n);
 			} finally {
 				await reader.cancel();
 				await sub.close();
@@ -1097,22 +1097,22 @@ test.each([Version.DRAFT_06, Version.DRAFT_07])("lite %s: datagrams honor group 
 	};
 	try {
 		send([0, 2, 1]);
-		expect(await recv()).toBe(1);
+		expect(await recv()).toBe(1n);
 		// Widen both boundaries, then narrow to one datagram.
-		await replayUpdate({ priority: 0, startGroup: 0, startFrame: 0, endGroup: 4, endFrame: 0 }).encode(
+		await replayUpdate({ priority: 0, startGroup: 0n, startFrame: 0, endGroup: 4n, endFrame: 0 }).encode(
 			sub.client.writer,
 			version,
 		);
 		await applied(5);
 		send([2, 3, 5, 4]);
-		expect([await recv(), await recv(), await recv()]).toEqual([2, 3, 4]);
-		await replayUpdate({ priority: 0, startGroup: 6, startFrame: 1, endGroup: 7, endFrame: 0 }).encode(
+		expect([await recv(), await recv(), await recv()]).toEqual([2n, 3n, 4n]);
+		await replayUpdate({ priority: 0, startGroup: 6n, startFrame: 1, endGroup: 7n, endFrame: 0 }).encode(
 			sub.client.writer,
 			version,
 		);
 		await applied(8);
 		send([6, 8, 7]);
-		expect(await recv()).toBe(7);
+		expect(await recv()).toBe(7n);
 	} finally {
 		await reader.cancel();
 		await sub.close();
@@ -1127,7 +1127,7 @@ test("lite draft-06: the end sweep does not drop a sent datagram", async () => {
 	try {
 		sub.serve(0);
 		expect(await sub.servedSequence()).toBe(0);
-		sub.track.insertDatagram(1, Timestamp.fromMillis(1), new Uint8Array([1]));
+		sub.track.insertDatagram(1n, Timestamp.fromMillis(1), new Uint8Array([1]));
 		await flush();
 		sub.track.finish();
 		sub.track.close();
@@ -1145,11 +1145,11 @@ test("lite draft-06: a reported cut still allows a late group", async () => {
 		expect(await sub.servedSequence()).toBe(0);
 		expect("start" in (await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06))).toBe(true);
 
-		const cut = sub.track.createGroup(1);
+		const cut = sub.track.createGroup(1n);
 		cut.abort(new Error("cut"));
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
+		expect([resp.drop.start, resp.drop.end]).toEqual([1n, 1n]);
 
 		sub.serve(1);
 		sub.serve(2);
@@ -1197,7 +1197,7 @@ test("lite draft-06: a group stream that never completes is reset once the group
 		expect(toStreamCode(fromTransport(reason))).toBe(StreamCode.Old);
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 		if (!("drop" in resp)) throw new Error("expected SUBSCRIBE_DROP");
-		expect([resp.drop.start, resp.drop.end]).toEqual([1, 1]);
+		expect([resp.drop.start, resp.drop.end]).toEqual([1n, 1n]);
 	} finally {
 		await sub.close();
 		installed.close();
@@ -1211,7 +1211,7 @@ test("lite draft-06: an update lowering the start is swept at the end", async ()
 	try {
 		sub.serve(5);
 		expect(await sub.servedSequence()).toBe(5);
-		await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 0, startGroup: 2n }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
 		sub.track.finish();
 		sub.track.close();
@@ -1228,9 +1228,9 @@ test("lite draft-06: a raised floor is not dropped early", async () => {
 	try {
 		sub.serve(0);
 		expect(await sub.servedSequence()).toBe(0);
-		await replayUpdate({ priority: 0, startGroup: 5 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 0, startGroup: 5n }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
-		await replayUpdate({ priority: 0, startGroup: 1 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 0, startGroup: 1n }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
 		for (const sequence of [1, 2, 3, 4]) {
 			sub.serve(sequence);
@@ -1256,7 +1256,7 @@ test("lite draft-05: a straggler below the announced start group is not served",
 		// The publisher announced group 2 as the resolved start.
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
 		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
-		expect(resp.start.starts[0]).toBe(2);
+		expect(resp.start.starts[0]).toBe(2n);
 
 		// A straggler below the announced start never reaches the wire: the next
 		// stream the publisher opens is group 3's.
@@ -1278,7 +1278,7 @@ test("lite draft-05: an explicit floor still serves a group below the first one"
 
 		const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_05);
 		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
-		expect(resp.start.starts[0]).toBe(2);
+		expect(resp.start.starts[0]).toBe(2n);
 
 		sub.serve(0);
 		expect(await sub.servedSequence()).toBe(0);
@@ -1298,7 +1298,7 @@ for (const version of [Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07]) {
 		test(`lite ${version}: descending delivery resolves source start ${source} at ${expected}`, async () => {
 			const sub = await servedSubscription({ version, startGroup: 2 });
 			try {
-				hooks.startTrack(sub.track, { start: source, requested: 2 });
+				hooks.startTrack(sub.track, { start: source, requested: 2n });
 				sub.serve(6);
 				expect(await sub.servedSequence()).toBe(6);
 				const response = await decodeSubscribeResponse(sub.client.reader, version);
@@ -1321,13 +1321,13 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	test(`lite ${version}: START waits for the upstream START before resolving`, async () => {
 		const sub = await servedSubscription({ version, startGroup: 2 });
 		try {
-			hooks.startTrack(sub.track, { requested: 2 });
+			hooks.startTrack(sub.track, { requested: 2n });
 			sub.serve(6);
 			await flush();
-			hooks.startTrack(sub.track, { start: 3, requested: 2 });
+			hooks.startTrack(sub.track, { start: 3n, requested: 2n });
 			const response = await decodeSubscribeResponse(sub.client.reader, version);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
-			expect(response.start.starts[0]).toBe(3);
+			expect(response.start.starts[0]).toBe(3n);
 			expect(await sub.servedSequence()).toBe(6);
 		} finally {
 			await sub.close();
@@ -1338,7 +1338,7 @@ for (const version of [Version.DRAFT_06, Version.DRAFT_07]) {
 	test(`lite ${version}: a closed source releases the START it was waiting for`, async () => {
 		const sub = await servedSubscription({ version, startGroup: 2 });
 		try {
-			hooks.startTrack(sub.track, { requested: 2 });
+			hooks.startTrack(sub.track, { requested: 2n });
 			sub.serve(6);
 			await flush();
 			sub.track.finish();
@@ -1360,20 +1360,20 @@ for (const skipped of ["failed", "stale"] as const) {
 			maxAge: skipped === "stale" ? Milli(0) : undefined,
 		});
 		try {
-			hooks.startTrack(sub.track, { start: 5, requested: 5 });
-			const group = sub.track.createGroup(5);
+			hooks.startTrack(sub.track, { start: 5n, requested: 5n });
+			const group = sub.track.createGroup(5n);
 			group.writeFrame(textFrame("old", Timestamp.fromMillis(5)));
 			if (skipped === "failed") group.abort(new Error("cut"));
 			else group.finish();
-			if (skipped === "failed") hooks.dropTrackGroups(sub.track, 7, 8, new Error("cut"));
+			if (skipped === "failed") hooks.dropTrackGroups(sub.track, 7n, 8n, new Error("cut"));
 			sub.serve(6);
 			const response = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 			if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
-			expect(response.start.starts[0]).toBe(6);
+			expect(response.start.starts[0]).toBe(6n);
 			if (skipped === "failed") {
 				const dropped = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 				if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
-				expect([dropped.drop.start, dropped.drop.end]).toEqual([7, 7]);
+				expect([dropped.drop.start, dropped.drop.end]).toEqual([7n, 7n]);
 			}
 			expect(await sub.servedSequence()).toBe(6);
 		} finally {
@@ -1459,7 +1459,7 @@ test("lite draft-05: a group popped before a cap update is still served", async 
 		await sub.parked;
 		ranges.mockClear();
 
-		await replayUpdate({ priority: 0, endGroup: 0 }).encode(sub.client.writer, Version.DRAFT_05);
+		await replayUpdate({ priority: 0, endGroup: 0n }).encode(sub.client.writer, Version.DRAFT_05);
 		await flush();
 		// The full update is visible, but the parked serving loop still owns its local cursor.
 		expect(ranges).not.toHaveBeenCalled();
@@ -1487,7 +1487,7 @@ test("lite draft-06: a queued floor update applies before the next group pop", a
 		await sub.parked;
 		sub.serve(1);
 
-		await replayUpdate({ priority: 0, startGroup: 2 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 0, startGroup: 2n }).encode(sub.client.writer, Version.DRAFT_06);
 		sub.serve(2);
 		await flush();
 		// Draft-06 group 0 is a floor, so the first group does not raise the cursor.
@@ -1514,7 +1514,7 @@ test("lite draft-06: a widening update lowers the serving floor", async () => {
 		sub.serve(10);
 		expect(await sub.servedSequence()).toBe(10);
 
-		await replayUpdate({ priority: 0, startGroup: 5 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 0, startGroup: 5n }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
 
 		sub.serve(5);
@@ -1541,7 +1541,7 @@ test("lite draft-06: a queued frame floor applies before the next group pop", as
 		await sub.parked;
 		sub.serve(1);
 
-		await replayUpdate({ priority: 0, startGroup: 1, startFrame: 2 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 0, startGroup: 1n, startFrame: 2 }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
 		// Draft-06 group 0 is a floor, so serving the first group does not move the cursor.
 		// The queued update is still waiting on the parked write.
@@ -1574,7 +1574,7 @@ test("lite draft-06: a queued frame update applies before the next group pop", a
 		sub.serve(0);
 		await sub.parked;
 		sub.serve(1);
-		await replayUpdate({ priority: 0, endGroup: 1, endFrame: 0 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 0, endGroup: 1n, endFrame: 0 }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
 
 		sub.release();
@@ -1600,7 +1600,7 @@ test("lite draft-06: a popped group keeps its frame bounds across a queued updat
 	try {
 		sub.serve(0);
 		await sub.parked;
-		await replayUpdate({ priority: 0, endGroup: 0, endFrame: 2 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 0, endGroup: 0n, endFrame: 2 }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
 
 		sub.release();
@@ -1630,8 +1630,8 @@ test("lite draft-06: a burst of updates coalesces before the next group pop", as
 
 		try {
 			// Two updates land back to back, the second superseding the first.
-			await replayUpdate({ priority: 0, endGroup: 1, endFrame: 1 }).encode(sub.client.writer, Version.DRAFT_06);
-			await replayUpdate({ priority: 0, endGroup: 1, endFrame: 0 }).encode(sub.client.writer, Version.DRAFT_06);
+			await replayUpdate({ priority: 0, endGroup: 1n, endFrame: 1 }).encode(sub.client.writer, Version.DRAFT_06);
+			await replayUpdate({ priority: 0, endGroup: 1n, endFrame: 0 }).encode(sub.client.writer, Version.DRAFT_06);
 			await flush();
 
 			sub.release();
@@ -1665,7 +1665,7 @@ test("lite draft-06: a newer update wins before a buffered group backlog drains"
 	});
 	// Encoded up front, so the second update arrives whole the way a peer's would.
 	const capped = await Writer.collect(Version.DRAFT_06, (w) =>
-		replayUpdate({ priority: 0, endGroup: 1 }).encode(w, Version.DRAFT_06),
+		replayUpdate({ priority: 0, endGroup: 1n }).encode(w, Version.DRAFT_06),
 	);
 	let second!: Promise<void>;
 	const withRange = TrackSubscriber.prototype.withRange;
@@ -1687,7 +1687,7 @@ test("lite draft-06: a newer update wins before a buffered group backlog drains"
 
 		// The first update wakes the serving loop. Applying it starts the second update,
 		// which caps the subscription before group 2.
-		await replayUpdate({ priority: 0, endGroup: 2 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 0, endGroup: 2n }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
 		sub.release();
 
@@ -1712,7 +1712,7 @@ test("lite draft-06: scheduling updates apply while SUBSCRIBE_START is blocked",
 		await sub.parked;
 		ranges.mockClear();
 
-		await replayUpdate({ priority: 9, endGroup: 5 }).encode(sub.client.writer, Version.DRAFT_06);
+		await replayUpdate({ priority: 9, endGroup: 5n }).encode(sub.client.writer, Version.DRAFT_06);
 		await flush();
 
 		expect(sub.track.subscription.peek()).toEqual({
@@ -1791,7 +1791,7 @@ test("lite draft-05: teardown unwinds with an undelivered update queued", async 
 
 		// The update decodes into the slot behind the parked loop, which never takes it
 		// because the write it is parked on fails.
-		await replayUpdate({ priority: 0, endGroup: 5 }).encode(sub.client.writer, Version.DRAFT_05);
+		await replayUpdate({ priority: 0, endGroup: 5n }).encode(sub.client.writer, Version.DRAFT_05);
 		await flush();
 
 		sub.release(new Error("write failed"));
@@ -1804,19 +1804,19 @@ test("lite draft-05: teardown unwinds with an undelivered update queued", async 
 // A Rust subscriber feeds this value straight into `track::Producer::finish_at`, which is
 // exclusive, so an inclusive bound here silently truncates the final group across languages.
 test("lite draft-05: subscribe end is the exclusive boundary", async () => {
-	expect((await subscribeEnd([0, 1, 2])).group).toBe(3);
+	expect((await subscribeEnd([0, 1, 2])).group).toBe(3n);
 });
 
 // recvGroup is arrival-ordered, so the boundary has to clear the max sequence delivered,
 // not the last one seen. Otherwise the boundary lands on a group already on the wire.
 test("lite draft-05: subscribe end clears the max sequence when groups arrive out of order", async () => {
-	expect((await subscribeEnd([0, 2, 1])).group).toBe(3);
+	expect((await subscribeEnd([0, 2, 1])).group).toBe(3n);
 });
 
 // 0 is the only encoding for "no groups at all"; an inclusive bound cannot express it
 // without colliding with a track whose sole group was sequence 0.
 test("lite draft-05: subscribe end is 0 when no groups were produced", async () => {
-	expect((await subscribeEnd([])).group).toBe(0);
+	expect((await subscribeEnd([])).group).toBe(0n);
 });
 
 // Lite-07 forwards an errored end's error with its boundary, so the subscriber keeps the history.
@@ -1829,12 +1829,12 @@ test("lite draft-07: subscribe end carries the track's error", async () => {
 // The boundary clears every produced group even when a sequence was skipped.
 test("lite draft-07: subscribe end names the final boundary", async () => {
 	const end = await subscribeEnd([0, 2], Version.DRAFT_07);
-	expect(end.group).toBe(3);
+	expect(end.group).toBe(3n);
 });
 
 test("lite draft-07: an empty track ends at zero", async () => {
 	const end = await subscribeEnd([], Version.DRAFT_07);
-	expect(end.group).toBe(0);
+	expect(end.group).toBe(0n);
 });
 
 // finishAt declares the boundary while lower groups are still being produced.
@@ -1854,10 +1854,10 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 	);
 
 	try {
-		const first = track.createGroup(0);
+		const first = track.createGroup(0n);
 		first.writeFrame(textFrame("hello"));
 		first.finish();
-		track.finishAt({ group: 2, frame: 0 });
+		track.finishAt({ group: 2n, frame: 0 });
 
 		const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_07);
 		expect("start" in start).toBe(true);
@@ -1865,7 +1865,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 		const early = await pending;
 		expect("end" in early).toBe(true);
 
-		const second = track.createGroup(1);
+		const second = track.createGroup(1n);
 		second.writeFrame(textFrame("hello"));
 		second.finish();
 		track.finish();
@@ -1873,7 +1873,7 @@ test("lite draft-07: subscribe end precedes groups below a declared finish", asy
 
 		const resp = await pending;
 		if (!("end" in resp)) throw new Error("expected SUBSCRIBE_END");
-		expect(resp.end.group).toBe(2);
+		expect(resp.end.group).toBe(2n);
 	} finally {
 		publisher.close();
 		client.close();
@@ -1898,10 +1898,10 @@ test("lite draft-06: an errored end is not declared early", async () => {
 	);
 
 	try {
-		const first = track.createGroup(0);
+		const first = track.createGroup(0n);
 		first.writeFrame(textFrame("hello"));
 		first.finish();
-		track.finishAt({ group: 2, frame: 0 }, new StreamError(StreamCode(71)));
+		track.finishAt({ group: 2n, frame: 0 }, new StreamError(StreamCode(71)));
 
 		const start = await decodeSubscribeResponse(client.reader, Version.DRAFT_06);
 		expect("start" in start).toBe(true);
@@ -1915,7 +1915,7 @@ test("lite draft-06: an errored end is not declared early", async () => {
 		]);
 		expect(early).toBe("none");
 
-		const second = track.createGroup(1);
+		const second = track.createGroup(1n);
 		second.writeFrame(textFrame("hello"));
 		second.finish();
 		await expect(pending).rejects.toBeDefined();
@@ -1930,11 +1930,11 @@ test("lite draft-06: a subscription capped short of an errored end gets its boun
 	const sub = await servedSubscription({ version: Version.DRAFT_06, startGroup: 0, endGroup: 1 });
 	try {
 		for (const sequence of [0, 1, 2, 3]) sub.serve(sequence);
-		sub.track.finishAt({ group: 4, frame: 0 }, new StreamError(StreamCode(71)));
+		sub.track.finishAt({ group: 4n, frame: 0 }, new StreamError(StreamCode(71)));
 		for (;;) {
 			const resp = await decodeSubscribeResponse(sub.client.reader, Version.DRAFT_06);
 			if (!("end" in resp)) continue;
-			expect(resp.end.group).toBe(4);
+			expect(resp.end.group).toBe(4n);
 			break;
 		}
 	} finally {
@@ -1969,7 +1969,7 @@ async function heldOpenEnd() {
 		server,
 	);
 
-	const group = track.createGroup(0);
+	const group = track.createGroup(0n);
 	group.writeFrame(textFrame("hello"));
 	group.finish();
 	track.finish();
@@ -2000,7 +2000,7 @@ test("lite draft-07: subscribe end precedes a blocked stream open", async () => 
 		held.open(true);
 		const resp = await held.end;
 		if (!("end" in resp)) throw new Error("expected SUBSCRIBE_END");
-		expect(resp.end.group).toBe(1);
+		expect(resp.end.group).toBe(1n);
 	} finally {
 		held.close();
 	}
@@ -2013,7 +2013,7 @@ test("lite draft-07: subscribe end precedes a failed stream open", async () => {
 		held.open(false);
 		const resp = await held.end;
 		if (!("end" in resp)) throw new Error("expected SUBSCRIBE_END");
-		expect(resp.end.group).toBe(1);
+		expect(resp.end.group).toBe(1n);
 		const dropped = await held.next();
 		if (!("drop" in dropped)) throw new Error("expected SUBSCRIBE_DROP");
 		expect([dropped.drop.start, dropped.drop.end, dropped.drop.error]).toEqual([0, 0, 0]);
@@ -2051,7 +2051,7 @@ test("lite draft-07: a group whose close fails is dropped", async () => {
 	);
 
 	try {
-		const group = track.createGroup(0);
+		const group = track.createGroup(0n);
 		group.writeFrame(textFrame("hello"));
 		group.finish();
 		track.finish();
@@ -2367,7 +2367,7 @@ async function saturatedGroup() {
 	void publisher.runSubscribe(msg, server);
 
 	// A finished group still has frames to send, so its own close must not drop it.
-	const group = track.createGroup(0);
+	const group = track.createGroup(0n);
 	group.writeFrame(textFrame("hello"));
 	group.finish();
 
@@ -2447,12 +2447,12 @@ test("lite draft-05: a blocked group header is reset when the group expires", as
 			server,
 		);
 
-		const old = track.createGroup(0);
+		const old = track.createGroup(0n);
 		old.writeFrame({ payload: new TextEncoder().encode("old"), timestamp: Timestamp.fromMillis(0) });
 		old.finish();
 		await headerStarted;
 
-		const edge = track.createGroup(1);
+		const edge = track.createGroup(1n);
 		edge.writeFrame({ payload: new TextEncoder().encode("edge"), timestamp: Timestamp.fromMillis(1000) });
 		edge.finish();
 
@@ -2569,7 +2569,7 @@ test("lite draft-05: a group parked at its tail resets as too old when it expire
 	if (!server) throw new Error("publisher never accepted the subscribe stream");
 	const opened = pair.client.incomingUnidirectionalStreams.getReader();
 	// Left open: its producer never finishes it.
-	const open = track.createGroup(0);
+	const open = track.createGroup(0n);
 
 	try {
 		void publisher.runSubscribe(
@@ -2940,7 +2940,7 @@ test("lite draft-06: a grant that shrinks mid-fetch resets the fetch", async () 
 	const broadcast = publish(origin, Path.from("live"));
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	// Left open, so the fetch is still serving when the grant shrinks.
-	const group = track.createGroup(0);
+	const group = track.createGroup(0n);
 	group.writeFrame(textFrame("first"));
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_06 });
@@ -2949,7 +2949,7 @@ test("lite draft-06: a grant that shrinks mid-fetch resets the fetch", async () 
 
 	const resets = spyOn(Writer.prototype, "reset");
 	try {
-		const msg = new Fetch({ broadcast: Path.from("live"), track: "video", priority: 0, group: 0 });
+		const msg = new Fetch({ broadcast: Path.from("live"), track: "video", priority: 0, group: 0n });
 		const serving = publisher.runFetch(msg, server);
 		// The first frame is on the wire before the grant shrinks.
 		await client.reader.u8();
@@ -2977,7 +2977,7 @@ test("lite draft-07: a fetch whose budget gives up partway resets as too old", a
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	const frame = (ms: number) => ({ payload: new TextEncoder().encode("x"), timestamp: Timestamp.fromMillis(ms) });
 	// Left open, so the fetch is still serving when the track runs on.
-	const open = track.createGroup(0);
+	const open = track.createGroup(0n);
 	open.writeFrame(frame(0));
 
 	const client = await Stream.open(pair.client, { version: Version.DRAFT_07 });
@@ -2991,7 +2991,7 @@ test("lite draft-07: a fetch whose budget gives up partway resets as too old", a
 			track: "video",
 			priority: 0,
 			maxDelay: Milli(500),
-			group: 0,
+			group: 0n,
 		});
 		const serving = publisher.runFetch(msg, server);
 		// The first frame is on the wire before the track runs a second past its successor.
@@ -3021,7 +3021,7 @@ test.each([0, 1])("lite draft-07 reports the cached largest position when starti
 	const publisher = new Publisher(pair.server, version, randomHop(), origin.consume());
 	const broadcast = publish(origin, Path.from("quiet"));
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
-	const group = track.createGroup(0);
+	const group = track.createGroup(0n);
 	group.writeFrame(textFrame("cached"));
 	group.finish();
 	const client = await Stream.open(pair.client, { version });
@@ -3064,8 +3064,8 @@ test("lite draft-07 reports the source's largest position past what a relay hold
 	const broadcast = publish(origin, Path.from("relayed"));
 	const track = broadcast.createTrack("video", { timescale: Timescale.MILLI });
 	// The source answered with group 4 as its largest; only group 0 has landed.
-	hooks.reportedLargest(track, { group: 4, frame: 0 });
-	const group = track.createGroup(0);
+	hooks.reportedLargest(track, { group: 4n, frame: 0 });
+	const group = track.createGroup(0n);
 	group.writeFrame(textFrame("oldest"));
 	group.finish();
 	const client = await Stream.open(pair.client, { version });
@@ -3078,7 +3078,7 @@ test("lite draft-07 reports the source's largest position past what a relay hold
 	try {
 		const response = await decodeSubscribeResponse(client.reader, version);
 		if (!("start" in response)) throw new Error("expected SUBSCRIBE_START");
-		expect([response.start.starts[0], response.start.largest]).toEqual([0, { group: 4, frame: 0 }]);
+		expect([response.start.starts[0], response.start.largest]).toEqual([0n, { group: 4n, frame: 0 }]);
 	} finally {
 		client.close();
 		publisher.close();

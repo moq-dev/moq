@@ -11,12 +11,13 @@
 
 import { Timestamp } from "./time.ts";
 import type { Anchor, Range } from "./track.ts";
+import { max, min, saturatingSub, UNBOUNDED } from "./util/sequence.ts";
 
-/** A run of group sequences `[start, end)`; an open run ends at infinity. */
-export type Run = { start: number; end: number };
+/** A run of group sequences `[start, end)`; an open run ends at {@link UNBOUNDED}. */
+export type Run = { start: bigint; end: bigint };
 
 /** One range resolved to groups: from `start` up to the exclusive `end`, undefined while open. */
-export type Resolved = { start: number; end?: number };
+export type Resolved = { start: bigint; end?: bigint };
 
 /** Everything from the latest group onward. */
 export const LIVE: Range = Object.freeze({ start: Object.freeze({ relative: 0 }) });
@@ -26,12 +27,11 @@ function anchorOf(field: string, anchor: Anchor): Anchor {
 	const keys = typeof anchor === "object" && anchor !== null ? Object.keys(anchor) : [];
 	const value = keys.length === 1 ? (anchor as Record<string, unknown>)[keys[0]] : undefined;
 	if (keys[0] === "time" && value instanceof Timestamp) return { time: value };
-	if ((keys[0] !== "absolute" && keys[0] !== "relative") || !Number.isSafeInteger(value) || (value as number) < 0) {
-		throw new TypeError(
-			`${field} must be {absolute} or {relative}, a non-negative safe integer, or {time}, a Timestamp`,
-		);
-	}
-	return keys[0] === "absolute" ? { absolute: value as number } : { relative: value as number };
+	if (keys[0] === "absolute" && typeof value === "bigint" && value >= 0n) return { absolute: value };
+	if (keys[0] === "relative" && Number.isSafeInteger(value) && (value as number) >= 0) return { relative: value as number };
+	throw new TypeError(
+		`${field} must be {absolute}, a non-negative bigint, {relative}, a non-negative safe integer, or {time}, a Timestamp`,
+	);
 }
 
 /** Check and copy a caller's ranges, refusing a malformed one rather than serving it widened. */
@@ -47,7 +47,7 @@ export function rangesOf(ranges: readonly Range[]): Range[] {
 }
 
 /** The exclusive end of an absolute anchor, or undefined for any other end. */
-function absolute(anchor: Anchor | undefined): number | undefined {
+function absolute(anchor: Anchor | undefined): bigint | undefined {
 	return anchor?.absolute;
 }
 
@@ -76,14 +76,14 @@ export function isEmpty(range: Range): boolean {
 	const end = absolute(range.end);
 	if (end === undefined) return false;
 	// Nothing sorts below group 0, whatever the start.
-	if (end === 0) return true;
+	if (end === 0n) return true;
 	// Nothing sorts below group 0, so the oldest start floors there.
-	const start = range.start === undefined ? 0 : absolute(range.start);
+	const start = range.start === undefined ? 0n : absolute(range.start);
 	return start !== undefined && end <= start;
 }
 
 /** An anchor as a sort key: absolute, then relative, then time, with `none` for an omitted one. */
-function anchorKey(anchor: Anchor | undefined, none: [number, number]): [number, number] {
+function anchorKey(anchor: Anchor | undefined, none: [number, number]): [number, number | bigint] {
 	if (anchor === undefined) return none;
 	if (anchor.absolute !== undefined) return [0, anchor.absolute];
 	if (anchor.relative !== undefined) return [1, anchor.relative];
@@ -100,7 +100,29 @@ function compare(a: Range, b: Range): number {
 		anchorKey(b.start, [1, Number.POSITIVE_INFINITY]),
 	];
 	const [p, q] = [anchorKey(a.end, [3, 0]), anchorKey(b.end, [3, 0])];
-	return x[0] - y[0] || x[1] - y[1] || p[0] - q[0] || p[1] - q[1];
+	return x[0] - y[0] || order(x[1], y[1]) || p[0] - q[0] || order(p[1], q[1]);
+}
+
+// Compare a group sequence, a count, or a time, which only ever meet their own kind.
+function order(a: number | bigint, b: number | bigint): number {
+	return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Whether two lists hold the same ranges in the same order. */
+export function sameRanges(a: readonly Range[], b: readonly Range[]): boolean {
+	return a.length === b.length && a.every((range, index) => rangeKey(range) === rangeKey(b[index]));
+}
+
+// A range as a string, equal exactly when the ranges are; JSON can't hold a bigint.
+function rangeKey(range: Range): string {
+	return `${anchorText(range.start)}..${anchorText(range.end)}`;
+}
+
+function anchorText(anchor: Anchor | undefined): string {
+	if (anchor === undefined) return "";
+	if (anchor.absolute !== undefined) return `a${anchor.absolute}`;
+	if (anchor.relative !== undefined) return `r${anchor.relative}`;
+	return `t${anchor.time.value}/${anchor.time.scale}`;
 }
 
 /**
@@ -120,20 +142,20 @@ export function union(ranges: readonly Range[]): Range[] {
 	for (const range of kept) {
 		const start = absolute(range.start);
 		if (start === undefined) continue;
-		if (range.end === undefined) spans.push({ start, end: Number.POSITIVE_INFINITY });
+		if (range.end === undefined) spans.push({ start, end: UNBOUNDED });
 		else {
 			const end = absolute(range.end);
 			if (end !== undefined) spans.push({ start, end });
 		}
 	}
-	spans.sort((a, b) => a.start - b.start || a.end - b.end);
+	spans.sort((a, b) => order(a.start, b.start) || order(a.end, b.end));
 	const runs: Run[] = [];
 	for (const span of spans) {
 		const last = runs.at(-1);
-		if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+		if (last && span.start <= last.end) last.end = max(last.end, span.end);
 		else runs.push({ ...span });
 	}
-	const tail = runs.at(-1)?.end === Number.POSITIVE_INFINITY ? runs.at(-1)?.start : undefined;
+	const tail = runs.at(-1)?.end === UNBOUNDED ? runs.at(-1)?.start : undefined;
 	let farthest: number | undefined;
 	for (const range of kept) {
 		const back = relative(range.start);
@@ -141,7 +163,7 @@ export function union(ranges: readonly Range[]): Range[] {
 	}
 
 	const out: Range[] = runs.map((run) =>
-		run.end === Number.POSITIVE_INFINITY
+		run.end === UNBOUNDED
 			? { start: { absolute: run.start } }
 			: { start: { absolute: run.start }, end: { absolute: run.end } },
 	);
@@ -160,19 +182,19 @@ export function union(ranges: readonly Range[]): Range[] {
 	if (farthest !== undefined) out.push({ start: { relative: farthest } });
 
 	out.sort(compare);
-	return out.filter((range, index) => index === 0 || JSON.stringify(range) !== JSON.stringify(out[index - 1]));
+	return out.filter((range, index) => index === 0 || rangeKey(range) !== rangeKey(out[index - 1]));
 }
 
 /**
  * The lowest absolute group any range asks for, or undefined when one counts back from the
  * latest group or reaches back to the oldest one: the floor a wire without ranges carries.
  */
-export function rangesStart(ranges: readonly Range[]): number | undefined {
-	let floor: number | undefined;
+export function rangesStart(ranges: readonly Range[]): bigint | undefined {
+	let floor: bigint | undefined;
 	for (const range of ranges) {
 		const start = absolute(range.start);
 		if (start === undefined) return undefined;
-		floor = Math.min(floor ?? start, start);
+		floor = min(floor ?? start, start);
 	}
 	return floor;
 }
@@ -181,12 +203,12 @@ export function rangesStart(ranges: readonly Range[]): number | undefined {
  * The exclusive end past every range, or undefined when one is open or ends relative to the
  * latest group: the cap a wire without ranges carries. No range at all ends at group 0.
  */
-export function rangesEnd(ranges: readonly Range[]): number | undefined {
-	let end = 0;
+export function rangesEnd(ranges: readonly Range[]): bigint | undefined {
+	let end = 0n;
 	for (const range of ranges) {
 		const next = absolute(range.end);
 		if (next === undefined) return undefined;
-		end = Math.max(end, next);
+		end = max(end, next);
 	}
 	return end;
 }
@@ -250,9 +272,9 @@ export function joinsLive(ranges: readonly Range[] | undefined): boolean {
  * from group 0, since no single start covers both: the latest group may sit below the absolute
  * start. Mirrors the Rust `wire_span`.
  */
-export function wireSpan(ranges: readonly Range[]): { start?: number; end?: number } {
+export function wireSpan(ranges: readonly Range[]): { start?: bigint; end?: bigint } {
 	let start = rangesStart(ranges);
-	if (start === undefined && ranges.some((range) => absolute(range.start) !== undefined)) start = 0;
+	if (start === undefined && ranges.some((range) => absolute(range.start) !== undefined)) start = 0n;
 	return { start, end: rangesEnd(ranges) };
 }
 
@@ -268,8 +290,8 @@ export function wireSpan(ranges: readonly Range[]): { start?: number; end?: numb
  */
 export function clamped(
 	ranges: readonly Range[],
-	floor: number | undefined,
-	end: number | undefined,
+	floor: bigint | undefined,
+	end: bigint | undefined,
 	resolved: readonly (Resolved | undefined)[],
 ): Range[] {
 	if (floor === undefined && end === undefined) return [...ranges];
@@ -281,11 +303,11 @@ export function clamped(
 		if (at?.end !== undefined && requested !== undefined && absolute(requested) === undefined)
 			requested = { absolute: at.end };
 		const named = absolute(start);
-		if (floor !== undefined && named !== undefined) start = { absolute: Math.max(named, floor) };
+		if (floor !== undefined && named !== undefined) start = { absolute: max(named, floor) };
 		else if (floor !== undefined && start === undefined) start = { absolute: floor };
 		if (end !== undefined && time(requested) === undefined) {
 			const capped = absolute(requested);
-			requested = { absolute: capped === undefined ? end : Math.min(capped, end) };
+			requested = { absolute: capped === undefined ? end : min(capped, end) };
 		}
 		const out: Range = {};
 		if (start !== undefined) out.start = start;
@@ -297,7 +319,7 @@ export function clamped(
 /** Where a presentation time falls among the groups a hop holds. Mirrors the Rust `Containing`. */
 export type Containing =
 	/** The newest group starting at or before it. */
-	| { group: number }
+	| { group: bigint }
 	/** Every group with a known start begins after it. */
 	| "before"
 	/** No group has a known start. */
@@ -322,14 +344,14 @@ export interface Holdings {
 	/** Where `pts` falls among the groups with a known start. */
 	containing(pts: Timestamp): Containing;
 	/** The lowest group at or above `from` known to start, with where it starts. */
-	nextStart(from: number): { sequence: number; start: Timestamp } | undefined;
+	nextStart(from: bigint): { sequence: bigint; start: Timestamp } | undefined;
 	/** The lowest held group at or above `from`, with what it says about its start. */
-	nextHeld(from: number): { sequence: number; held: Held } | undefined;
+	nextHeld(from: bigint): { sequence: bigint; held: Held } | undefined;
 	/**
 	 * The exclusive end, past `sequence`, of the run of sequences from it that can no longer
 	 * arrive (dropped, given up, or below where the feed starts), undefined while it may.
 	 */
-	gone(sequence: number): number | undefined;
+	gone(sequence: bigint): bigint | undefined;
 	/** Whether nothing more can arrive or start here, so a time end has nothing to wait on. */
 	complete(): boolean;
 }
@@ -357,19 +379,19 @@ export const UNHELD: Holdings = Object.freeze({
 class TimeEnd {
 	readonly pts: Timestamp;
 	/** The newest group known to start at or before `pts`: it and everything below it in the span is in range. */
-	known?: number;
+	known?: bigint;
 	/** The lowest group known to start after `pts`: where the end falls once settled. */
-	after?: number;
+	after?: bigint;
 	/** Where the walk over held groups resumes: those below it started, or never will. */
-	held: number;
+	held: bigint;
 	/** Where settling resumes: every sequence from above `known` up to it is accounted for. */
-	accounted: number;
+	accounted: bigint;
 	/** The exclusive cap on what is read meanwhile, undefined for none. */
-	limit?: number;
+	limit?: bigint;
 	/** The group the cap admits on speculation: the first above `known` that may still start, which may start past `pts`. */
-	speculative?: number;
+	speculative?: bigint;
 
-	constructor(pts: Timestamp, start: number) {
+	constructor(pts: Timestamp, start: bigint) {
 		this.pts = pts;
 		this.held = start;
 		this.accounted = start;
@@ -377,12 +399,12 @@ class TimeEnd {
 	}
 
 	/** The lowest sequence not known to be in range. */
-	unknown(start: number): number {
-		return this.known === undefined ? start : Math.max(this.known + 1, start);
+	unknown(start: bigint): bigint {
+		return this.known === undefined ? start : max(this.known + 1n, start);
 	}
 
 	/** Walk the held groups on from where the last call stopped. Returns where the end falls once it settles. */
-	advance(start: number, holdings: Holdings): number | undefined {
+	advance(start: bigint, holdings: Holdings): bigint | undefined {
 		// The starts index passes a group that may still start, so a stalled one never keeps a
 		// later group known to start inside the end from being read.
 		for (;;) {
@@ -397,7 +419,7 @@ class TimeEnd {
 		// inside the end is jumped to, since it puts all below it in range.
 		this.speculative = undefined;
 		for (;;) {
-			const at = Math.max(this.held, this.unknown(start));
+			const at = max(this.held, this.unknown(start));
 			if (this.after !== undefined && at >= this.after) break;
 			let next = holdings.nextHeld(at);
 			if (next && this.after !== undefined && next.sequence >= this.after) next = undefined;
@@ -429,10 +451,10 @@ class TimeEnd {
 				this.speculative = holdings.complete() ? undefined : at;
 				break;
 			}
-			this.held = at + 1;
+			this.held = at + 1n;
 		}
 		if (holdings.complete()) this.limit = undefined;
-		else if (this.speculative !== undefined) this.limit = this.speculative + 1;
+		else if (this.speculative !== undefined) this.limit = this.speculative + 1n;
 		// Every held group is accounted for: the next to arrive is the speculative one.
 		else this.limit = this.after;
 
@@ -442,7 +464,7 @@ class TimeEnd {
 		const after = this.after;
 		if (after === undefined) return undefined;
 		// Everything at or below `known` is in range, and `after` lies above it.
-		this.accounted = Math.max(this.accounted, this.unknown(start));
+		this.accounted = max(this.accounted, this.unknown(start));
 		while (this.accounted < after) {
 			const next = holdings.nextHeld(this.accounted);
 			if (next && next.sequence === this.accounted) {
@@ -455,12 +477,12 @@ class TimeEnd {
 				}
 				this.accounted++;
 			} else {
-				const below = next ? Math.min(next.sequence, after) : after;
+				const below = next ? min(next.sequence, after) : after;
 				if (holdings.complete()) this.accounted = below;
 				else {
 					const gone = holdings.gone(this.accounted);
 					if (gone === undefined || gone <= this.accounted) return undefined;
-					this.accounted = Math.min(gone, below);
+					this.accounted = min(gone, below);
 				}
 			}
 		}
@@ -471,7 +493,7 @@ class TimeEnd {
 /** Where a resolved range stops. */
 type End =
 	/** Before this group. */
-	| { before: number }
+	| { before: bigint }
 	/** Past every group. */
 	| "open"
 	/** Before the first group starting after a time, once that is known. */
@@ -481,17 +503,17 @@ type End =
 type Span = {
 	/** Which of the ranges it came from. */
 	index: number;
-	start: number;
+	start: bigint;
 	end: End;
 	/** Whether the start names a group, rather than reaching back to the oldest one. */
 	floored: boolean;
 };
 
-/** The exclusive end of the groups a span reads now, infinity for none: an unsettled time end reads up to its cap. */
-function limitOf(span: Span): number {
-	if (span.end === "open") return Number.POSITIVE_INFINITY;
+/** The exclusive end of the groups a span reads now, {@link UNBOUNDED} for none: an unsettled time end reads up to its cap. */
+function limitOf(span: Span): bigint {
+	if (span.end === "open") return UNBOUNDED;
 	if ("before" in span.end) return span.end.before;
-	return span.end.time.limit ?? Number.POSITIVE_INFINITY;
+	return span.end.time.limit ?? UNBOUNDED;
 }
 
 /**
@@ -515,12 +537,12 @@ export class Window {
 	 * The ranges, by index, whose time start waits on a group starting, so they read nothing yet,
 	 * with the latest group their relative end counts back from.
 	 */
-	#waiting: { index: number; latest: number | undefined }[] = [];
+	#waiting: { index: number; latest: bigint | undefined }[] = [];
 	/** Nothing is left to resolve as groups arrive and start. */
 	#settled = false;
 
 	/** Resolve `ranges`, counting relative anchors back from `latest` and time anchors from `holdings`. */
-	constructor(ranges: readonly Range[], latest: number | undefined, holdings: Holdings = UNHELD) {
+	constructor(ranges: readonly Range[], latest: bigint | undefined, holdings: Holdings = UNHELD) {
 		this.ranges = ranges;
 		this.#place(latest, holdings);
 	}
@@ -539,7 +561,7 @@ export class Window {
 	 * Resolve what the groups now held settle: relative anchors once `latest` exists, and time
 	 * starts and ends as groups start. Returns whether the groups in range moved.
 	 */
-	settle(latest: number | undefined, holdings: Holdings = UNHELD): boolean {
+	settle(latest: bigint | undefined, holdings: Holdings = UNHELD): boolean {
 		if (this.#pending) {
 			if (latest === undefined) return false;
 			this.#place(latest, holdings);
@@ -568,7 +590,7 @@ export class Window {
 	}
 
 	/** Whether group `sequence` is in range. Everything is while a relative anchor waits. */
-	contains(sequence: number): boolean {
+	contains(sequence: bigint): boolean {
 		if (this.#pending) return true;
 		const run = this.#runAt(sequence);
 		return run !== undefined && sequence >= run.start;
@@ -579,7 +601,7 @@ export class Window {
 	 * its `timestamp` against each range's times, and its `sequence` against the range's absolute
 	 * groups and the relative ones resolved so far.
 	 */
-	admitsDatagram(sequence: number, timestamp: Timestamp | undefined): boolean {
+	admitsDatagram(sequence: bigint, timestamp: Timestamp | undefined): boolean {
 		if (timestamp === undefined) {
 			return this.#pending || this.#spans.some((span) => sequence >= span.start && sequence < limitOf(span));
 		}
@@ -607,26 +629,26 @@ export class Window {
 	}
 
 	/** The lowest group in range at or above `from`, undefined when none is. `from` itself while a relative anchor waits. */
-	next(from: number): number | undefined {
+	next(from: bigint): bigint | undefined {
 		if (this.#pending) return from;
 		const run = this.#runAt(from);
-		return run === undefined ? undefined : Math.max(run.start, from);
+		return run === undefined ? undefined : max(run.start, from);
 	}
 
 	/** The lowest group in range, undefined while an anchor waits. Nothing in range floors at group 0. */
-	floor(): number | undefined {
+	floor(): bigint | undefined {
 		if (this.#pending || this.#waiting.length > 0) return undefined;
-		return this.#runs[0]?.start ?? 0;
+		return this.#runs[0]?.start ?? 0n;
 	}
 
 	/**
 	 * The lowest group the ranges name, undefined while one reaches back to the oldest group or
 	 * a relative anchor waits on a first group.
 	 */
-	start(): number | undefined {
+	start(): bigint | undefined {
 		if (this.#pending || this.#waiting.length > 0 || this.#spans.some((span) => !span.floored)) return undefined;
-		let start: number | undefined;
-		for (const span of this.#spans) start = Math.min(start ?? span.start, span.start);
+		let start: bigint | undefined;
+		for (const span of this.#spans) start = min(start ?? span.start, span.start);
 		return start;
 	}
 
@@ -634,22 +656,22 @@ export class Window {
 	 * The exclusive end past every group in range, undefined when one stays open. An unsettled
 	 * time end counts as open: its cap only holds reads back meanwhile. Nothing in range ends at 0.
 	 */
-	end(): number | undefined {
+	end(): bigint | undefined {
 		if (this.#pending || this.#waiting.length > 0) return undefined;
 		if (this.#spans.some((span) => span.end !== "open" && "time" in span.end)) return undefined;
-		const end = this.#runs.at(-1)?.end ?? 0;
-		return end === Number.POSITIVE_INFINITY ? undefined : end;
+		const end = this.#runs.at(-1)?.end ?? 0n;
+		return end === UNBOUNDED ? undefined : end;
 	}
 
 	/** The runs in range from `from` up to the exclusive `end`, lowest first. */
-	runs(from = 0, end = Number.POSITIVE_INFINITY): Run[] {
+	runs(from = 0n, end = UNBOUNDED): Run[] {
 		if (from >= end) return [];
 		if (this.#pending) return [{ start: from, end }];
 		const out: Run[] = [];
 		for (const run of this.#runs) {
 			if (run.end <= from) continue;
 			if (run.start >= end) break;
-			out.push({ start: Math.max(run.start, from), end: Math.min(run.end, end) });
+			out.push({ start: max(run.start, from), end: min(run.end, end) });
 		}
 		return out;
 	}
@@ -673,16 +695,16 @@ export class Window {
 	 * Where each range starts once delivery starts at `from`, in the order given: undefined for
 	 * one with no group there, or whose start still waits. Mirrors the Rust `Window::starts`.
 	 */
-	starts(from: number): (number | undefined)[] {
+	starts(from: bigint): (bigint | undefined)[] {
 		return this.resolved().map((range) => {
 			if (!range) return undefined;
-			const start = Math.max(range.start, from);
+			const start = max(range.start, from);
 			return range.end === undefined || range.end > start ? start : undefined;
 		});
 	}
 
 	// The first run ending past `sequence`.
-	#runAt(sequence: number): Run | undefined {
+	#runAt(sequence: bigint): Run | undefined {
 		let lo = 0;
 		let hi = this.#runs.length;
 		while (lo < hi) {
@@ -693,7 +715,7 @@ export class Window {
 		return this.#runs[lo];
 	}
 
-	#place(latest: number | undefined, holdings: Holdings): void {
+	#place(latest: bigint | undefined, holdings: Holdings): void {
 		this.#spans = [];
 		this.#pending = false;
 		this.#waiting = [];
@@ -702,7 +724,7 @@ export class Window {
 	}
 
 	// Resolve range `index` into a span, or note what it waits on. Returns whether it resolved.
-	#span(index: number, latest: number | undefined, holdings: Holdings): boolean {
+	#span(index: number, latest: bigint | undefined, holdings: Holdings): boolean {
 		const range = this.ranges[index];
 		if (isEmpty(range)) return false;
 		const until = endOf(range.end, latest);
@@ -736,11 +758,11 @@ export class Window {
 		const spans = this.#spans
 			.map((span) => ({ start: span.start, end: limitOf(span) }))
 			.filter((span) => span.end > span.start)
-			.sort((a, b) => a.start - b.start);
+			.sort((a, b) => order(a.start, b.start));
 		this.#runs = [];
 		for (const span of spans) {
 			const last = this.#runs.at(-1);
-			if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+			if (last && span.start <= last.end) last.end = max(last.end, span.end);
 			else this.#runs.push({ start: span.start, end: span.end });
 		}
 	}
@@ -753,9 +775,9 @@ export class Window {
  */
 function startOf(
 	anchor: Anchor | undefined,
-	latest: number | undefined,
+	latest: bigint | undefined,
 	holdings: Holdings,
-): { group: number; floored: boolean } | "waiting" | undefined {
+): { group: bigint; floored: boolean } | "waiting" | undefined {
 	const group = absolute(anchor);
 	if (group !== undefined) return { group, floored: true };
 	const pts = time(anchor);
@@ -763,20 +785,20 @@ function startOf(
 		const containing = holdings.containing(pts);
 		if (containing !== "before" && containing !== "unknown") return { group: containing.group, floored: true };
 		// The group holding it is older than any held, so reach back to the oldest.
-		if (containing === "before") return { group: 0, floored: false };
+		if (containing === "before") return { group: 0n, floored: false };
 		// Before any group, as for a relative anchor, which a hop that holds none (such as a
 		// reader following route copies) leaves to the copies to resolve.
 		if (latest === undefined) return undefined;
 		// Nothing can start any more, so nothing held reaches past it.
-		if (holdings.complete()) return { group: 0, floored: false };
+		if (holdings.complete()) return { group: 0n, floored: false };
 		// Nothing has started yet, so wait for a group that has. A copy may hear the live edge
 		// before the groups its publisher resolved the time to, which the edge would skip.
 		return "waiting";
 	}
 	const back = relative(anchor);
-	if (back === undefined) return { group: 0, floored: false };
+	if (back === undefined) return { group: 0n, floored: false };
 	if (latest === undefined) return undefined;
-	return { group: Math.max(0, latest - back), floored: true };
+	return { group: saturatingSub(latest, BigInt(back)), floored: true };
 }
 
 /**
@@ -785,13 +807,13 @@ function startOf(
  */
 function endOf(
 	anchor: Anchor | undefined,
-	latest: number | undefined,
-): { before: number } | "open" | { pts: Timestamp } | undefined {
+	latest: bigint | undefined,
+): { before: bigint } | "open" | { pts: Timestamp } | undefined {
 	if (anchor === undefined) return "open";
 	const end = absolute(anchor);
 	if (end !== undefined) return { before: end };
 	const pts = time(anchor);
 	if (pts !== undefined) return { pts };
 	if (latest === undefined) return undefined;
-	return { before: Math.max(0, latest - (relative(anchor) ?? 0)) + 1 };
+	return { before: saturatingSub(latest, BigInt(relative(anchor) ?? 0)) + 1n };
 }

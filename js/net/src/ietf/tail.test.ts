@@ -194,7 +194,7 @@ test("END_OF_TRACK after a group's last object ends the track after that group",
 	group.write(END_OF_TRACK);
 	group.finish();
 
-	expect(await reader.finished()).toEqual({ group: 4, frame: 1 });
+	expect(await reader.finished()).toEqual({ group: 4n, frame: 1 });
 	expect(await readAll(await reader.recvGroup())).toEqual(["4.0"]);
 
 	await done(TRACK_ENDED, 1n);
@@ -211,9 +211,9 @@ test("END_OF_TRACK at object 0 ends the track before its group, which never exis
 	end.write(END_OF_TRACK);
 	end.finish();
 
-	expect(await reader.finished()).toEqual({ group: 2, frame: 0 });
+	expect(await reader.finished()).toEqual({ group: 2n, frame: 0 });
 	await done(TRACK_ENDED, 2n);
-	expect((await reader.recvGroup())?.sequence).toBe(0);
+	expect((await reader.recvGroup())?.sequence).toBe(0n);
 	expect(await reader.recvGroup()).toBeUndefined();
 	expect(hooks.subscriberEnd(reader)).toEqual({ group: 2, frame: 0 });
 });
@@ -249,7 +249,7 @@ test("a compact stream starting at object 5 is subgroup 5, refused without a gro
 	const group = groupStream(subscriber, 6, { ...FLAGS, hasSubgroupObject: true });
 	group.write(object("6.0"));
 	group.finish();
-	expect((await reader.recvGroup())?.sequence).toBe(6);
+	expect((await reader.recvGroup())?.sequence).toBe(6n);
 });
 
 // A live join starts at the publisher's Largest, and QUIC does not order streams, so the
@@ -263,7 +263,7 @@ test("a reader holds for groups from SUBSCRIBE_OK's Largest that land after a hi
 	const end = groupStream(subscriber, 6);
 	end.write(END_OF_TRACK);
 	end.finish();
-	expect(await reader.finished()).toEqual({ group: 6, frame: 0 });
+	expect(await reader.finished()).toEqual({ group: 6n, frame: 0 });
 	expect(await readAll(await reader.recvGroup())).toEqual(["5.0"]);
 
 	// Asked before the lower groups land: a reader that ended early returns nothing.
@@ -285,7 +285,7 @@ test("a group at or past the END_OF_TRACK aborts the track", async () => {
 	const end = groupStream(subscriber, 2);
 	end.write(END_OF_TRACK);
 	end.finish();
-	expect(await reader.finished()).toEqual({ group: 2, frame: 0 });
+	expect(await reader.finished()).toEqual({ group: 2n, frame: 0 });
 
 	const late = groupStream(subscriber, 2);
 	late.write(object("2.0"));

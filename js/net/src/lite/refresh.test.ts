@@ -55,7 +55,7 @@ test.each([ALPN_06, ALPN_07_WIP])("refresh joins reach a browser publisher on %s
 		expect((await received.readFrame())?.payload.length).toBe(3);
 		const joins = [remote.subscribe()];
 		await clock.advance(Nano(0));
-		expect(producer.demand().wanted.peek()).toBe(0);
+		expect(producer.demand().wanted.peek()).toBe(0n);
 		updates.length = 0;
 		group.writeFrame({ payload: new Uint8Array(1) });
 		expect((await received.readFrame())?.payload.length).toBe(1);

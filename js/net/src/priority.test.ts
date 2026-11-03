@@ -92,8 +92,8 @@ test("groups still draining are promoted after the subscription closes", () => {
 
 	const older = open();
 	const newer = open();
-	priority.add(older, 0, 0);
-	priority.add(newer, 1, 0);
+	priority.add(older, 0n, 0);
+	priority.add(newer, 1n, 0);
 	expect(streams[0].sendOrder).toBe(sendOrder({ priority: 7, position: 1 }));
 
 	// The serving loop is done, but both groups are still on the wire.
@@ -139,8 +139,8 @@ test.each(["ascending", "descending"] as const)("a fill outranks its group's liv
 	const rest = open();
 	const fill = open();
 	const other = open();
-	priority.add(rest, 5, 2 ** 45);
-	priority.add(fill, 5, 0);
+	priority.add(rest, 5n, 2 ** 45);
+	priority.add(fill, 5n, 0);
 	priority.add(other, order === "ascending" ? 4 : 6, Number.MAX_SAFE_INTEGER);
 	const [restOrder, fillOrder, otherOrder] = streams.map((stream) => {
 		if (stream.sendOrder === undefined) throw new Error("send order missing");

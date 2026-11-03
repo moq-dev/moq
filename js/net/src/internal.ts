@@ -17,6 +17,7 @@ import type * as Instance from "./instance.ts";
 import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
+import { max, min } from "./util/sequence.ts";
 import type { Delay, Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
 import * as Varint from "./varint.ts";
 import type { Window } from "./window.ts";
@@ -40,19 +41,19 @@ export function minDelayOf(subscription: Pick<Subscription, "delay">): Milli | u
 }
 
 /** Normalize public group bounds into an inclusive start and exclusive end. */
-export function groupBounds(groups: Groups = {}): { start: number; end?: number } {
-	const bound = (value: Groups["start"] | undefined, start: boolean): number | undefined => {
+export function groupBounds(groups: Groups = {}): { start: bigint; end?: bigint } {
+	const bound = (value: Groups["start"] | undefined, start: boolean): bigint | undefined => {
 		if (value === undefined) return undefined;
 		if ((value.included === undefined) === (value.excluded === undefined)) {
 			throw new Error("a group bound must be either included or excluded");
 		}
 		const sequence = value.included ?? value.excluded;
-		if (sequence === undefined || !Number.isSafeInteger(sequence) || sequence < 0) {
-			throw new Error("a group bound must be a non-negative safe integer");
+		if (typeof sequence !== "bigint" || sequence < 0n) {
+			throw new Error("a group bound must be a non-negative bigint");
 		}
-		return sequence + (start ? Number(value.excluded !== undefined) : Number(value.included !== undefined));
+		return sequence + ((start ? value.excluded !== undefined : value.included !== undefined) ? 1n : 0n);
 	};
-	return { start: bound(groups.start, true) ?? 0, end: bound(groups.end, false) };
+	return { start: bound(groups.start, true) ?? 0n, end: bound(groups.end, false) };
 }
 
 /**
@@ -148,12 +149,12 @@ export function scopeCaptures(scope: Path.Pattern, prefix: Path.Valid): Path.Pat
 
 /** A half-open run of group sequences, `[start, end)`. */
 export interface Run {
-	start: number;
-	end: number;
+	start: bigint;
+	end: bigint;
 }
 
 /** Add `[start, end)` to sorted, disjoint, non-adjacent `runs`, merging every run it touches. */
-export function insertRun(runs: Run[], start: number, end: number): void {
+export function insertRun(runs: Run[], start: bigint, end: bigint): void {
 	if (start >= end) return;
 	let first = 0;
 	while (first < runs.length && runs[first].end < start) first++;
@@ -162,16 +163,16 @@ export function insertRun(runs: Run[], start: number, end: number): void {
 	const merged =
 		first === last
 			? { start, end }
-			: { start: Math.min(start, runs[first].start), end: Math.max(end, runs[last - 1].end) };
+			: { start: min(start, runs[first].start), end: max(end, runs[last - 1].end) };
 	runs.splice(first, last - first, merged);
 }
 
 /** The sorted, disjoint `runs` with `[start, end)` taken out, each part keeping its run's fields. */
-export function removeRun<R extends Run>(runs: readonly R[], start: number, end: number): R[] {
+export function removeRun<R extends Run>(runs: readonly R[], start: bigint, end: bigint): R[] {
 	return runs.flatMap((run) =>
 		[
-			{ ...run, start: run.start, end: Math.min(run.end, start) },
-			{ ...run, start: Math.max(run.start, end), end: run.end },
+			{ ...run, start: run.start, end: min(run.end, start) },
+			{ ...run, start: max(run.start, end), end: run.end },
 		].filter((part) => part.start < part.end),
 	);
 }
@@ -186,7 +187,7 @@ export interface DropRun extends Run {
  * it overlaps. Neighbours given up with the same stream code merge, so a wide DROP stays one
  * run and a peer naming one sequence per DROP cannot grow the runs.
  */
-export function insertDrop(drops: readonly DropRun[], start: number, end: number, error: Error): DropRun[] {
+export function insertDrop(drops: readonly DropRun[], start: bigint, end: bigint, error: Error): DropRun[] {
 	if (start >= end) return [...drops];
 	const next = removeRun(drops, start, end);
 	let at = 0;
@@ -202,18 +203,18 @@ export function insertDrop(drops: readonly DropRun[], start: number, end: number
 }
 
 /** The error `drops` gave `sequence` up with, if any. */
-export function dropAt(drops: readonly DropRun[], sequence: number): Error | undefined {
+export function dropAt(drops: readonly DropRun[], sequence: bigint): Error | undefined {
 	return drops.find((run) => run.start <= sequence && sequence < run.end)?.error;
 }
 
 /** The parts of `[start, end)` that sorted, disjoint `runs` do not cover, in order. */
-export function runGaps(runs: readonly Run[], start: number, end: number): Run[] {
+export function runGaps(runs: readonly Run[], start: bigint, end: bigint): Run[] {
 	const gaps: Run[] = [];
 	let next = start;
 	for (const run of runs) {
 		if (next >= end) break;
-		if (run.start > next) gaps.push({ start: next, end: Math.min(run.start, end) });
-		next = Math.max(next, run.end);
+		if (run.start > next) gaps.push({ start: next, end: min(run.start, end) });
+		next = max(next, run.end);
 	}
 	if (next < end) gaps.push({ start: next, end });
 	return gaps;
@@ -227,7 +228,7 @@ export type Recv =
 	/** A group to serve. It has already left the buffer, so dropping this is dropping the group. */
 	| { kind: "group"; group: GroupConsumer }
 	/** Sequences `[start, end)` this cursor gave up without serving, and why. */
-	| { kind: "drop"; start: number; end: number; error: Error }
+	| { kind: "drop"; start: bigint; end: bigint; error: Error }
 	/** Nothing readable, but the track is live and may produce more. */
 	| { kind: "idle" }
 	/** The producer finished, yet groups above the cap are still held: raising it releases them. */
@@ -254,7 +255,7 @@ export interface ResumeShell {
 	/** The reader's own preferences, mirrored into every copy it subscribes. */
 	readonly subscription: Getter<Subscription | undefined>;
 	/** The reader's group cursor: an inclusive start and an exclusive end. */
-	readonly cursor: Getter<{ start: number; end?: number }>;
+	readonly cursor: Getter<{ start: bigint; end?: bigint }>;
 	/** Settles once the logical track ends. */
 	readonly closed: GetPromise<Error | null>;
 	/** The properties the first copy committed, if any yet. */
@@ -318,9 +319,9 @@ export type RecvDatagram =
  */
 export interface Land {
 	/** The first group asked about. */
-	start: number;
+	start: bigint;
 	/** The first group past those asked about. */
-	end: number;
+	end: bigint;
 	/** Whether the feed was asked to start at `start`: otherwise only from its first arrival. */
 	floor: boolean;
 	/** How long a gap a later arrival opened is waited for. */
@@ -359,20 +360,20 @@ export interface ResumeSource {
 	/** Forget the gaps in `delivered` below each group past the budget, judged on the newest copy. */
 	forgetPastBudget(delivered: Delivered): void;
 	/** The newest sequence any copy has seen. */
-	latest(): number | undefined;
+	latest(): bigint | undefined;
 	/** The serving copy's declared start, raised to its cursor floor, or `"pending"` until resolved. */
-	start(): number | "pending" | undefined;
+	start(): bigint | "pending" | undefined;
 	/** The logical track's declared exclusive end, as the first copy to know it declared it. */
 	end(): Position | undefined;
 	/** Where each range starts on the serving copy once delivery starts at `from`, undefined without one. */
-	starts(from: number): (number | undefined)[] | undefined;
+	starts(from: bigint): (bigint | undefined)[] | undefined;
 	/** The runs of `[start, end)` the serving copy reads, undefined without one. */
-	runs(start: number, end: number): Run[] | undefined;
+	runs(start: bigint, end: bigint): Run[] | undefined;
 	/**
 	 * The exclusive end past every group the serving copy reads: undefined while one of its
 	 * ranges stays open or without a serving copy.
 	 */
-	servingEnd(): number | undefined;
+	servingEnd(): bigint | undefined;
 	/** The error the logical track's end carries, if it does not end cleanly. */
 	endError(): Error | undefined;
 	/** Resolve with the logical track's exclusive end once known. */
@@ -391,7 +392,7 @@ export interface ResumeSource {
 	/** An independent subscriber to the serving copy. */
 	fork(options?: Subscription): Subscriber;
 	/** A fresh reader for a group still cached by one of this reader's copies. */
-	cachedGroup(sequence: number, from?: number): GroupConsumer | undefined;
+	cachedGroup(sequence: bigint, from?: number): GroupConsumer | undefined;
 	/** Let go of every copy. */
 	close(abort?: Error): void;
 }
@@ -421,8 +422,8 @@ export interface StagedTrack {
 export const MAX_DATAGRAMS = 64;
 
 /** The first group an exclusive track end excludes whole: one past the last group that may exist. */
-export function finalSequence(end: Position): number {
-	return end.group + (end.frame === 0 ? 0 : 1);
+export function finalSequence(end: Position): bigint {
+	return end.group + (end.frame === 0 ? 0n : 1n);
 }
 
 /** Hooks assigned in static blocks by the owning class. */
@@ -457,11 +458,11 @@ export const hooks: {
 	 * `error`, the declared end does not wait for them, and a relay serving this track forwards
 	 * the drop. Mirrors the Rust `drop_groups`; assigned by `track.ts`.
 	 */
-	dropTrackGroups: (producer: Producer, start: number, end: number, error: Error) => void;
+	dropTrackGroups: (producer: Producer, start: bigint, end: bigint, error: Error) => void;
 	/** Mark a track as fed by a wire subscription, which owes missing groups. Assigned by `track.ts`. */
 	receiveTrack: (producer: Producer) => void;
 	/** Create a received group at its wire offset before publishing it to readers. Assigned by `track.ts`. */
-	receiveGroup: (producer: Producer, group: { sequence: number; start: number }) => GroupProducer;
+	receiveGroup: (producer: Producer, group: { sequence: bigint; start: number }) => GroupProducer;
 	/** The producer's largest reported location and its subsequent changes. */
 	producerLargest: (producer: Producer) => Getter<Position | undefined>;
 
@@ -484,7 +485,7 @@ export const hooks: {
 	 * `track.ts`. A null `start` resolves an empty range; without `start`, the SUBSCRIBE still
 	 * waits on its START, as the Rust `request_start`.
 	 */
-	startTrack: (producer: Producer, served: { start?: number | null; requested?: number }) => void;
+	startTrack: (producer: Producer, served: { start?: bigint | null; requested?: bigint }) => void;
 	/**
 	 * Mark a track as a copy received over a wire without ranges, which cannot carry a relative
 	 * anchor other than the live start, so its readers refuse one rather than guess from a
@@ -508,19 +509,19 @@ export const hooks: {
 	 * Seed a received track from the publisher's reported group alone, whose frame is unknown,
 	 * so it names no object; assigned by `track.ts`.
 	 */
-	reportedGroup: (producer: Producer, group: number) => void;
+	reportedGroup: (producer: Producer, group: bigint) => void;
 	/**
 	 * How long a session's tail waits for a late group: the subscribers' max delay, bounded by
 	 * the track's max age; assigned by `track.ts`.
 	 */
 	tailGrace: (producer: Producer) => Milli;
 	/** Snapshot the latest group sequence for wire positioning; assigned by `track.ts`. */
-	latestSequence: (subscriber: Subscriber) => number | undefined;
+	latestSequence: (subscriber: Subscriber) => bigint | undefined;
 	/**
 	 * The source's declared start, raised to the subscriber's cursor floor, or `"pending"` while
 	 * the upstream START that resolves it has yet to arrive; assigned by `track.ts`.
 	 */
-	sourceStart: (subscriber: Subscriber) => number | "pending" | undefined;
+	sourceStart: (subscriber: Subscriber) => bigint | "pending" | undefined;
 	/** The newest frame still buffered for a subscriber; assigned by `track.ts`. */
 	bufferedLargest: (subscriber: Subscriber) => Position | undefined;
 	/** The newest actual object received or reported upstream, independent of cache retention. */
@@ -545,32 +546,32 @@ export const hooks: {
 	 * The runs of `[start, end)` a subscriber reads: inside its ranges and its local bounds.
 	 * Assigned by `track.ts`.
 	 */
-	servingRuns: (subscriber: Subscriber, start: number, end: number) => Run[];
+	servingRuns: (subscriber: Subscriber, start: bigint, end: bigint) => Run[];
 	/**
 	 * The exclusive end past every group a subscriber reads, or undefined while one of its ranges
 	 * stays open. Assigned by `track.ts`.
 	 */
-	servingEnd: (subscriber: Subscriber) => number | undefined;
+	servingEnd: (subscriber: Subscriber) => bigint | undefined;
 	/**
 	 * Where each of a subscriber's ranges starts once delivery starts at `from`, undefined for one
 	 * with no group there: what lite-07 SUBSCRIBE_START answers. Assigned by `track.ts`.
 	 */
-	servingStarts: (subscriber: Subscriber, from: number) => (number | undefined)[];
+	servingStarts: (subscriber: Subscriber, from: bigint) => (bigint | undefined)[];
 	/** The lowest buffered candidate, which an ordered take may wait below; `floor` passes sequences taken on other copies. */
-	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: number) => number | undefined;
+	peekGroup: (subscriber: Subscriber, ordered: boolean, floor?: bigint) => bigint | undefined;
 	/** Take the next group in sequence order without waiting, as {@link tryRecvGroup} does in arrival order. */
-	tryNextGroup: (subscriber: Subscriber, floor?: number) => Recv;
+	tryNextGroup: (subscriber: Subscriber, floor?: bigint) => Recv;
 	/** Wake once a subscriber's datagram cursor may read differently; fires at most once. */
 	datagramChanged: (subscriber: Subscriber, fn: () => void) => Dispose;
 	/** Take the next datagram in arrival order without waiting. */
 	tryRecvDatagram: (subscriber: Subscriber) => RecvDatagram;
 	/** Whether a buffered group in `[start, end)` that `delivered` lacks still waits to be read. */
-	hasUnreadGroup: (subscriber: Subscriber, start: number, end: number | undefined, delivered: Delivered) => boolean;
+	hasUnreadGroup: (subscriber: Subscriber, start: bigint, end: bigint | undefined, delivered: Delivered) => boolean;
 	/**
 	 * Whether a subscriber's track ended and it holds nothing left to read: no datagram within its
 	 * cursor, and no group in `[start, end)` that `delivered` lacks.
 	 */
-	spent: (subscriber: Subscriber, start: number, end: number | undefined, delivered: Delivered) => boolean;
+	spent: (subscriber: Subscriber, start: bigint, end: bigint | undefined, delivered: Delivered) => boolean;
 	/**
 	 * Mark a wire publisher's reader to park past the end of a bounded window rather than end the
 	 * read there, since its peer reads the end of a stream as the track's. Mirrors the Rust
@@ -585,22 +586,22 @@ export const hooks: {
 	/** How many runs of handed-out groups a subscriber remembers: one per gap, plus the floor. Tests only. */
 	deliveredRuns: (subscriber: Subscriber) => number;
 	/** Whether the subscriber already handed out group `sequence`, or no longer expects it. */
-	handedOut: (subscriber: Subscriber, sequence: number) => boolean;
+	handedOut: (subscriber: Subscriber, sequence: bigint) => boolean;
 	/** Forget the gaps in another reader's `delivered` below each group past this subscriber's budget. */
 	forgetPastBudget: (subscriber: Subscriber, delivered: Delivered) => void;
 	/**
 	 * Take `[start, end)` back out of what a subscriber's wire cursor reported dropped: a drop
 	 * below where SUBSCRIBE_START resolved never goes out, so a wider budget may still serve it.
 	 */
-	unreport: (subscriber: Subscriber, start: number, end: number) => void;
+	unreport: (subscriber: Subscriber, start: bigint, end: bigint) => void;
 	/** Whether this subscriber's budget gives up on `sequence`, judged by its successor; see {@link expireGroup}. */
-	staleAt: (subscriber: Subscriber, sequence: number) => Expiry;
+	staleAt: (subscriber: Subscriber, sequence: bigint) => Expiry;
 	/** A group the subscriber's track still caches, as a fresh read handle. */
-	cachedGroup: (subscriber: Subscriber, sequence: number, from?: number) => GroupConsumer | undefined;
+	cachedGroup: (subscriber: Subscriber, sequence: bigint, from?: number) => GroupConsumer | undefined;
 	/** Whether {@link cachedGroup} would find the group, without making a read handle. */
-	holdsGroup: (subscriber: Subscriber, sequence: number) => boolean;
+	holdsGroup: (subscriber: Subscriber, sequence: bigint) => boolean;
 	/** The error the subscriber's track gave `sequence` up with, if it did, and what changes it. */
-	givenUp: (subscriber: Subscriber, sequence: number) => { error?: Error; changed: Getter<unknown> };
+	givenUp: (subscriber: Subscriber, sequence: bigint) => { error?: Error; changed: Getter<unknown> };
 	/** Whether a group may still land on the live feed of the subscriber's track; see {@link Land}. */
 	mayLand: (subscriber: Subscriber, land: Land) => boolean;
 	/** A subscriber's largest location now, and whether it can still advance. */

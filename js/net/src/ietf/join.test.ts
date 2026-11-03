@@ -218,7 +218,7 @@ test("a catalog written once is readable from the head alone", async () => {
 	await subscriber.handleFetch(await head(fetch.requestId, ['{"video":{}}'], 0));
 
 	const group = await consumer.ordered().nextGroup();
-	expect(group?.sequence).toBe(0);
+	expect(group?.sequence).toBe(0n);
 	expect(untext((await group?.readFrame())?.payload)).toBe('{"video":{}}');
 });
 
@@ -526,7 +526,7 @@ for (const version of VERSIONS) {
 
 		// The fill was the one stream counted, so the head is the whole group and the track ends.
 		const group = await consumer.recvGroup();
-		expect(group?.sequence).toBe(0);
+		expect(group?.sequence).toBe(0n);
 		expect(await frames(group)).toEqual(["catalog"]);
 		expect(await consumer.recvGroup()).toBeUndefined();
 		expect(await consumer.closed).toBeNull();
@@ -536,8 +536,8 @@ for (const version of VERSIONS) {
 
 test("a clean end finishes a head nothing claimed", () => {
 	const t = new Tail();
-	const j = new Join(0, t);
-	const producer = new track.Producer("catalog").createGroup(0);
+	const j = new Join(0n, t);
+	const producer = new track.Producer("catalog").createGroup(0n);
 	expect(j.open(() => producer)).toBe(producer);
 	producer.writeFrame({ payload: text("c") });
 	j.wrote();
@@ -552,13 +552,13 @@ test("fetch objects decode as FetchFrame wrote them", async () => {
 	const bytes = await Writer.collect(VERSION, async (w) => {
 		await new FetchFrame({ payload: text("a") }).encode(
 			w,
-			{ group: 5, object: 0, first: true },
+			{ group: 5n, object: 0, first: true },
 			undefined,
 			VERSION,
 		);
 		await new FetchFrame({ payload: new Uint8Array() }).encode(
 			w,
-			{ group: 5, object: 1, first: false },
+			{ group: 5n, object: 1, first: false },
 			undefined,
 			VERSION,
 		);
@@ -605,11 +605,11 @@ for (const version of VERSIONS) {
 	test(`${versionName(version)}: a late JS subscriber gets a JS publisher's current groups from object 0`, async () => {
 		const { remote, group, sent } = await publishing(version);
 		const catalogGroup = await remote.track("catalog.json").subscribe().recvGroup();
-		expect(catalogGroup?.sequence).toBe(0);
+		expect(catalogGroup?.sequence).toBe(0n);
 		expect(untext((await catalogGroup?.readFrame())?.payload)).toBe("catalog");
 
 		const videoGroup = await remote.track("video").subscribe().recvGroup();
-		expect(videoGroup?.sequence).toBe(0);
+		expect(videoGroup?.sequence).toBe(0n);
 		group.writeFrame(textFrame("v2"));
 		group.finish();
 		expect(await frames(videoGroup)).toEqual(["v0", "v1", "v2"]);
