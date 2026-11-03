@@ -105,6 +105,17 @@ When the union shrinks, the presenter SHOULD withdraw its advertisements and can
 A presenter that would advertise a namespace outside the union, once the tokens it presented at setup are answered, SHOULD close the session with UNAUTHORIZED instead of sending PUBLISH_NAMESPACE, since a subscription for it will never come.
 A publication that loses coverage because the union shrank is withdrawn, which is no reason to close the session.
 
+## Request Tokens
+
+An acceptor that verifies {{moqt}} AUTHORIZATION TOKEN request parameters treats each distinct token on a session as one implicit Auth request while any open request names it.
+Its grant MUST NOT join the session scope: a naming request uses that grant alone, and a request without the token gains nothing from it.
+The acceptor verifies the token when its first naming request opens and ends its grant when the last naming request ends; a later request verifies it again.
+Expiry or revocation ends every naming request.
+A request is admitted either by the session or by a token, and that never changes.
+A REQUEST_UPDATE carrying a token replaces the token authority of a request a token admitted, including when the update pauses forwarding; the acceptor MUST verify the token before acknowledging the update.
+On a request the session admitted, the acceptor MUST refuse an update carrying a token.
+A joining FETCH retains its subscription's authority.
+
 ## Patterns {#patterns}
 
 A grant names Path Patterns of {{moq-lite}}, with the same grammar, canonical form, and encoding as its AUTH_OK.
@@ -239,6 +250,8 @@ This document requests three registrations in the "MOQT Message Types" registry 
 # Changelog
 
 ## Since draft-lcurley-moq-auth-00 (in progress)
+
+- Request tokens share verification and lifetime per distinct token, isolated from session scope; updates replace a token-admitted request's token, even while pausing or resuming, and a token on a session-admitted request's update is refused.
 
 - AUTH_ERROR can carry GOING_AWAY, refusing an AUTH past the acceptor's GOAWAY without refusing the token.
 - AUTH_OK carries moq-lite Path Patterns instead of Track Namespace prefixes, and a grant is refused only when too large for one AUTH_OK.

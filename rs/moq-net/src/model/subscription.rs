@@ -196,8 +196,8 @@ pub enum Anchor {
 	/// or before it, a hop whose [`Requests`](crate::track::Requests) handler serves its
 	/// history looks the start up there (see [`Fill::time`](crate::track::Fill::time)),
 	/// reading nothing until it answers; otherwise, or when the handler can't tell, a start
-	/// reaches back to the oldest group. While no group has started at all it waits like
-	/// `Relative(0)`. An end settles once a group starting
+	/// reaches back to the oldest group. While no group has started at all it waits for one
+	/// that has, reading nothing of its range meanwhile. An end settles once a group starting
 	/// after it is known and every sequence below that one is accounted for (started,
 	/// dropped, or never to start). Until then reads stop at the first held group that
 	/// may still start, so at the live edge at most that one group past the end is read

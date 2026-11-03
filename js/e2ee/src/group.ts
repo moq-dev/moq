@@ -23,7 +23,7 @@ export interface Frame {
  */
 export class Producer {
 	/** The group's sequence number. */
-	readonly sequence: number;
+	readonly sequence: bigint;
 
 	#inner: NetGroup.Producer;
 	#writer: Writer;
@@ -120,7 +120,7 @@ export class Producer {
  */
 export class Consumer {
 	/** The group's sequence number. */
-	readonly sequence: number;
+	readonly sequence: bigint;
 
 	#inner: NetGroup.Consumer;
 	#reader: Reader;

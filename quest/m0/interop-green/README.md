@@ -24,7 +24,7 @@ Already owned: the intermittent media-matrix timestamp-gap cells
 [test flakes](/quest/m0/test-flakes-2/README.md), with
 [moq-dev/moq#6990](https://github.com/moq-dev/moq/pull/6990) open.
 
-Every child has landed. What remains: confirm a scheduled Interop
+This README's own work, after the children: confirm a scheduled Interop
 and Video run each pass.
 
 Public API: none. Wire: none.

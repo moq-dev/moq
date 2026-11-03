@@ -131,7 +131,7 @@ age.set(21); // only the nested effect reruns: "You are 21 years old!"
 ### effect.abort
 
 An `AbortSignal` that is aborted when the effect reruns or closes.
-Pass it to any API that accepts an `AbortSignal` — `fetch`, `addEventListener`, streams, etc.
+Pass it to any API that accepts an `AbortSignal` - `fetch`, `addEventListener`, streams, etc.
 
 ```ts
 const url = new Signal("/api/data");

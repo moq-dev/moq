@@ -45,6 +45,9 @@ same frame/gap/end tags as decoded audio and video. Release every kind with
 `moq_consume_read_free`; frame payload pointers borrow that handle. A gap breaks
 continuity. An encoder end is not callback EOF: frames before its endpoint are the old
 encoder's drain, and the first at or past it starts fresh. Callback 0 ends the stream.
+These consumers include the rendition's catalog `warmup` in both the history fetched at
+join and the subscription budget. Feed that history to your decoder before presenting
+output; the requested max delay still controls steady-state skips.
 
 ## Connect
 
@@ -105,7 +108,7 @@ inside. The header is the reference: each function carries a doc comment.
 - **Audio needs cuts.** Video groups at its keyframes, but audio forms a group only where you call `moq_publish_media_cut`: after every frame, or at a segment cadence to align with video. Pass that cadence as `moq_audio_init.hint.group_duration_us`.
 - **Catalog hints.** Give the catalog what the encoder knows instead of having it estimated: `moq_video_init.hint` (coded size, bitrate, frame rate, group duration) and `moq_audio_init.hint` (bitrate, group duration). A supplied bitrate is never re-estimated. `group_duration_us` is the longest span between two group starts: the GOP, or your cut cadence. Leave a field's `has_*` flag false to have it measured. A bitrate or `group_duration_us` flag set with a 0 value returns `MOQ_ERROR_INVALID_CONFIG`.
 - **Discovery.** Announcement captures are always a list of wildcard matches, empty when the filter has no wildcards.
-- **Ending cleanly.** When the input ends, finish every track, then call `moq_publish_catalog_finish()` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `moq_publish_close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close ends with `UNROUTABLE`, which readers take as the publisher leaving, and its handle is released.
+- **Ending cleanly.** When the input ends, finish every track, then call `moq_publish_catalog_finish()` to finish the catalog, which ends the content. The broadcast stays announced and keeps serving the finished tracks, so a subscriber still catching up can drain them, until `moq_publish_close()` takes it offline. How long to keep it up is yours to decide. A track still open at the close ends with `UNROUTABLE` (an internal error over moq-transport, which has no such code), and its handle is released. Readers follow a publisher's runs by announcement, not by that error: see [identity and recovery](/concept/identity).
 - **Timeline breaks.** On a seek or pause, call `moq_publish_media_discontinuity`, then keep timestamps moving forward and resume video on a keyframe.
 - **Timestamps.** A `moq_timestamp` is exact: `value` units at `scale` units per second, so a 90 kHz tick survives a read and republish. Frames, datagrams, and JSON values point `timestamp` at theirs, NULL on an untimed track and valid as long as the payload. Tracks moq-c creates are timed, so their raw writes need one. JSON writes, including window pushes and pops, take one too, converted to their track's milliseconds; NULL stamps the broadcast clock's current time. A zero scale or an out-of-range value fails with `MOQ_ERROR_TIMESTAMP_OVERFLOW`.
 - **JSON values.** `moq_consume_json_value` fills `moq_json_value` with the document and its frame's timestamp. A snapshot consumer's callback fires for each state in order, but a group superseded before it is read is skipped.
