@@ -73,7 +73,10 @@ test("frames roundtrip signed, timestamps included", async () => {
 	const key = await SecretKey.generate();
 	const path = Path.from(`mesh/${key.public}/agent`);
 	const published = await publish(key, path);
-	const video = published.signed.createTrack("video", { timescale: Time.Timescale.MILLI });
+	const options: { timescale: Time.Timescale } = { timescale: Time.Timescale.MILLI };
+	const video = published.signed.createTrack("video", options);
+	// The track committed its scale; reusing the options object changes nothing it signs.
+	options.timescale = Time.Timescale.MICRO;
 
 	const group = video.appendGroup();
 	await group.writeFrame(Time.Timestamp.fromMillis(1), encoder.encode("keyframe"));

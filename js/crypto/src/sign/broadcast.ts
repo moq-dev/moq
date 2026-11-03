@@ -47,7 +47,10 @@ export class Producer {
 			sequences = { next: 0n };
 			this.#sequences.set(name, sequences);
 		}
-		return Track.Producer.make(inner, this.#key, new Scope(this.#path, this.instance, name), sequences, info);
+		// Snapshot the timescale, as the net track does, so a caller reusing its options cannot
+		// change the scale frames are signed at.
+		const timescale = { timescale: info.timescale };
+		return Track.Producer.make(inner, this.#key, new Scope(this.#path, this.instance, name), sequences, timescale);
 	}
 
 	/** End the wrapped broadcast, as `@moq/net`'s `close` does. Idempotent. */
