@@ -83,6 +83,7 @@ case "$1" in
         run just rs bench-feed-fetch
         run just rs test -p moq-quic --release -E 'test(benchmark_receive_credit)' --run-ignored only --success-output immediate
         run just rs test -p moq-tokio --release -E 'test(benchmark_receive_windows)' --run-ignored only --success-output immediate
+        run just rs test -p moq-tokio --release -E 'test(benchmark_datagram_delivery)' --run-ignored only --success-output immediate
         run just rs test -p moq-relay -E 'test(benchmark_stun_sources)' --run-ignored only --success-output immediate
         run just rs test -p moq-c -E 'test(benchmark_handles)' --run-ignored only --success-output immediate
         run just rs test -p moq-archive -p moq-mux -p moq-hls --no-fail-fast \
@@ -120,13 +121,13 @@ case "$1" in
         ;;
     # Keep added coverage out of the rust-bench and rust-shared legs.
     rust-extra)
-        # The allocation/window/play-buffer tables keep their stdout in the run;
+        # The allocation/window/play-buffer/receive-bursts tables keep their stdout in the run;
         # only Criterion estimates enter the trend report.
         criterion extra --no-fail-fast -p moq-e2ee -p moq-sign -p moq-json -p moq-archive -p moq-cli -p moq-mux -p moq-audio \
-            -p moq-quic -p moq-sock -p moq-tokio --features moq-quic/fuzz \
+            -p moq-quic -p moq-sock -p moq-tokio -p moq-transcode --features moq-quic/fuzz \
             --bench protect --bench sign --bench codec --bench table --bench allocations --bench window \
             --bench producer --bench play_buffer --bench jitter --bench decode_clock --bench ts_programs --bench ts_video \
-            --bench bus --bench parameter_sets --bench sent_packets --bench demux --bench fanout
+            --bench bus --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder --bench fanout
         # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous.
         # The concurrent cases' latency percentiles stay in the run's stdout.
         criterion auth --manifest-path rs/moq-auth/Cargo.toml --bench verify
@@ -139,7 +140,7 @@ case "$1" in
         done
         ;;
     js)
-        for benchmark in broadcasts requests fills forward reader frames drift ledger varint lite-varint track resume priority subscribe-drop refresh observed compression; do
+        for benchmark in broadcasts requests fills forward reader frames drift ledger bandwidth replay varint lite-varint track resume priority subscribe-drop refresh observed compression; do
             javascript "$benchmark" just js bench "$benchmark"
         done
         javascript catalog just js catalog-bench
@@ -156,6 +157,7 @@ case "$1" in
         javascript slow-group just js slow-group-bench
         javascript jitter just js jitter-bench
         javascript audio-warmup just js audio-warmup-bench
+        javascript audio-support just js audio-support-bench
         javascript clock just js clock-bench
         ;;
     # The binding benchmark's runners at a token budget, so they keep working at this

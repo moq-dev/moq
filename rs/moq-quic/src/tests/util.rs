@@ -18,7 +18,7 @@ use rustls::{
 	client::WebPkiServerVerifier,
 	pki_types::{CertificateDer, PrivateKeyDer},
 };
-use tracing::{info_span, trace};
+use tracing::{debug_span, trace};
 
 use super::crypto::rustls::{QuicClientConfig, QuicServerConfig, configured_provider};
 use super::*;
@@ -161,7 +161,7 @@ impl Pair {
 	}
 
 	pub(super) fn drive_client(&mut self) {
-		let span = info_span!("client");
+		let span = debug_span!("client");
 		let _guard = span.enter();
 		self.client.drive(self.time, self.server.addr);
 		for (packet, buffer) in self.client.outbound.drain(..) {
@@ -193,7 +193,7 @@ impl Pair {
 	}
 
 	pub(super) fn drive_server(&mut self) {
-		let span = info_span!("server");
+		let span = debug_span!("server");
 		let _guard = span.enter();
 		self.server.drive(self.time, self.client.addr);
 		for (packet, buffer) in self.server.outbound.drain(..) {
@@ -234,7 +234,7 @@ impl Pair {
 
 	/// Just start connecting the client
 	pub(super) fn begin_connect(&mut self, config: client::Config) -> ConnectionHandle {
-		let span = info_span!("client");
+		let span = debug_span!("client");
 		let _guard = span.enter();
 		let (client_ch, client_conn) = self
 			.client
@@ -672,14 +672,18 @@ pub(super) fn is_confirmed(conn: &mut Connection) -> bool {
 	peek(|waiter| conn.poll_handshake_confirmed(waiter)) == Poll::Ready(Ok(()))
 }
 
+/// Logs the test's own events, and the stack's per-packet trace when `RUST_LOG` asks for it.
+///
+/// Formatting every trace event costs more than the simulation it describes, and the runs are
+/// deterministic, so a failure replays with `RUST_LOG=trace` to read it. The per-step side spans
+/// are debug for the same reason: they only label the stack's own events.
 pub(super) fn subscribe() -> tracing::subscriber::DefaultGuard {
-	subscribe_at(tracing::Level::TRACE)
-}
-
-/// [`subscribe`] at `level`, for a test whose trace would be too long to read
-pub(super) fn subscribe_at(level: tracing::Level) -> tracing::subscriber::DefaultGuard {
+	let filter = tracing_subscriber::EnvFilter::builder()
+		.with_default_directive(tracing::Level::INFO.into())
+		.from_env()
+		.expect("RUST_LOG");
 	let builder = tracing_subscriber::FmtSubscriber::builder()
-		.with_max_level(level)
+		.with_env_filter(filter)
 		.with_writer(|| TestWriter);
 	tracing::subscriber::set_default(builder.finish())
 }
@@ -728,22 +732,25 @@ pub(super) fn server_config_with_cert(cert: CertificateDer<'static>, key: Privat
 	config
 }
 
-pub(super) fn server_crypto() -> QuicServerConfig {
+pub(super) fn server_crypto() -> rustls::ServerConfig {
 	server_crypto_inner(None, None)
 }
 
-pub(super) fn server_crypto_with_alpn(alpn: Vec<Vec<u8>>) -> QuicServerConfig {
+pub(super) fn server_crypto_with_alpn(alpn: Vec<Vec<u8>>) -> rustls::ServerConfig {
 	server_crypto_inner(None, Some(alpn))
 }
 
-pub(super) fn server_crypto_with_cert(cert: CertificateDer<'static>, key: PrivateKeyDer<'static>) -> QuicServerConfig {
+pub(super) fn server_crypto_with_cert(
+	cert: CertificateDer<'static>,
+	key: PrivateKeyDer<'static>,
+) -> rustls::ServerConfig {
 	server_crypto_inner(Some((cert, key)), None)
 }
 
 fn server_crypto_inner(
 	identity: Option<(CertificateDer<'static>, PrivateKeyDer<'static>)>,
 	alpn: Option<Vec<Vec<u8>>>,
-) -> QuicServerConfig {
+) -> rustls::ServerConfig {
 	let (cert, key) = identity.unwrap_or_else(|| {
 		(
 			CERTIFIED_KEY.cert.der().clone(),
@@ -756,7 +763,7 @@ fn server_crypto_inner(
 		config.alpn_protocols = alpn;
 	}
 
-	config.try_into().unwrap()
+	config
 }
 
 pub(super) fn client_config() -> client::Config {
@@ -790,15 +797,18 @@ pub(super) fn client_config_with_certs(certs: Vec<CertificateDer<'static>>) -> c
 	client::Config::new(Arc::new(client_crypto_inner(Some(certs), None)))
 }
 
-pub(super) fn client_crypto() -> QuicClientConfig {
+pub(super) fn client_crypto() -> rustls::ClientConfig {
 	client_crypto_inner(None, None)
 }
 
-pub(super) fn client_crypto_with_alpn(protocols: Vec<Vec<u8>>) -> QuicClientConfig {
+pub(super) fn client_crypto_with_alpn(protocols: Vec<Vec<u8>>) -> rustls::ClientConfig {
 	client_crypto_inner(None, Some(protocols))
 }
 
-fn client_crypto_inner(certs: Option<Vec<CertificateDer<'static>>>, alpn: Option<Vec<Vec<u8>>>) -> QuicClientConfig {
+fn client_crypto_inner(
+	certs: Option<Vec<CertificateDer<'static>>>,
+	alpn: Option<Vec<Vec<u8>>>,
+) -> rustls::ClientConfig {
 	let mut roots = RootCertStore::empty();
 	for cert in certs.unwrap_or_else(|| vec![CERTIFIED_KEY.cert.der().clone()]) {
 		roots.add(cert).unwrap();
@@ -814,7 +824,7 @@ fn client_crypto_inner(certs: Option<Vec<CertificateDer<'static>>>, alpn: Option
 		inner.alpn_protocols = alpn;
 	}
 
-	inner.try_into().unwrap()
+	inner
 }
 
 pub(super) fn min_opt<T: Ord>(x: Option<T>, y: Option<T>) -> Option<T> {

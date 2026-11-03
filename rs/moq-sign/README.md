@@ -16,9 +16,9 @@ An endpoint's `SecretKey` signs; its `PublicKey` is the endpoint ID, displayed a
 characters (a DNS label). `SecretKey::load_or_generate(path)` keeps one key for the life of a host,
 as 52 z-base-32 characters in a `0600` file it never replaces implicitly.
 
-`broadcast::Producer` wraps the `moq-net` broadcast, mints a fresh epoch, and signs each frame
-over the application path, epoch, track, group, frame index, and timestamp (at the track's
-timescale). Announce the broadcast with that epoch on its route:
+`broadcast::Producer` wraps the `moq-net` broadcast, mints a fresh instance, and signs each frame
+over the application path, instance, track, group, frame index, and timestamp (at the track's
+timescale). Announce the broadcast with that instance on its route:
 
 ```rust
 let key = SecretKey::load_or_generate("/var/lib/moq/endpoint.key")?;
@@ -26,13 +26,13 @@ let path = moq_net::Path::new(&format!("mesh/{}/agent", key.public()))?;
 let publication = origin.create_broadcast(&path)?;
 let signed = broadcast::Producer::new(publication.broadcast().clone(), key, path);
 let messages = signed.create_track("messages", None)?;
-publication.announce(Route::default().with_epoch(signed.epoch().clone()))?;
+publication.announce(Route::default().with_instance(signed.instance().clone(), 0))?;
 ```
 
 A subscriber wraps the broadcast an origin resolved in a `broadcast::Consumer` with the key it
-expects and the same application path; it takes the epoch from the route. A frame reaches the
+expects and the same application path; it takes the instance from the route. A frame reaches the
 application only after it verifies. A forged or relocated frame ends its group with
-`Error::Signature`, and the track keeps delivering other groups. Every hop must carry the epoch
+`Error::Signature`, and the track keeps delivering other groups. Every hop must carry the instance
 and timestamps unchanged, which means moq-lite-07. A group's end is not signed: a relay may drop
 a group's tail, as MoQ already allows.
 

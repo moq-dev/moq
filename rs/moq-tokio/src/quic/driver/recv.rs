@@ -203,11 +203,19 @@ impl Stream {
 	/// Yields `Some` with the reset error code when the stream is reset by the peer. Yields `None`
 	/// when the stream was [`finish()`](crate::quic::driver::send::Stream::finish)ed by the peer
 	/// and all data has been received, after which it is no longer meaningful for the stream to
-	/// be reset.
+	/// be reset. Fails with [`Error::Evicted`] once the stream was evicted to free a stuck receive
+	/// window, until it is stopped.
 	///
 	/// This operation is cancel-safe.
 	pub async fn received_reset(&mut self) -> Result<Option<VarInt>, Error> {
 		kio::wait(|waiter| self.reader.poll_received_reset(waiter)).await
+	}
+
+	/// Poll form of [`Self::received_reset`]. It takes no bytes, so a lease in progress is
+	/// left as it was.
+	pub(crate) fn poll_received_reset(&mut self, cx: &mut Context<'_>) -> Poll<Result<Option<VarInt>, Error>> {
+		let waiter = self.park.hold(cx);
+		self.reader.poll_received_reset(waiter)
 	}
 }
 
@@ -250,6 +258,8 @@ impl Reader {
 					self.reset = Some(error_code);
 					Ok(Some(error_code))
 				}
+				// Evicted, so its bytes are gone: nothing frees the window until it is stopped.
+				Err(moq_quic::recv::Error::Evicted) => Err(Error::Evicted),
 				Err(moq_quic::recv::Error::ConnectionLost) => Err(Error::Connection(conn.lost())),
 				Err(_) => Ok(None),
 			},

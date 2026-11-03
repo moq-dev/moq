@@ -81,6 +81,7 @@ jobs:
               - "Cargo.toml"
               - "Cargo.lock"
               - "rust-toolchain.toml"
+              - "sh/rs/android-test.sh"
               - ".github/workflows/android.yml"
             # Anything a published API is built from, including the lockfiles,
             # since a bumped dependency can change a re-exported type.
@@ -463,7 +464,6 @@ jobs:
     uses: ./.github/workflows/release-kt-lib.yml
     permissions:
       contents: read
-      actions: read
 
   release-swift-lib:
     name: Release Swift Lib

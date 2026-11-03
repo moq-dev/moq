@@ -218,6 +218,24 @@ impl Session {
 		self.inner.lock().conn.version()
 	}
 
+	/// Change the windows and stream counts `limits` sets, leaving the others as they are, such
+	/// as to widen a session once its peer is known.
+	///
+	/// Refuses, changing nothing, a rate cap (QMux never paces, so only
+	/// [`Rate::Unlimited`](moq_quic::Rate::Unlimited) is accepted), a receive window below
+	/// moq-net's [`MIN_RECEIVE_WINDOW`](net::MIN_RECEIVE_WINDOW), and limits a peer would
+	/// refuse. A window only grows at once: credit already granted cannot be taken back.
+	pub fn set_limits(&self, limits: moq_quic::Limits) -> Result<(), Error> {
+		crate::config::check_limits(&limits)?;
+		let capped = |rate: Option<moq_quic::Rate>| matches!(rate, Some(moq_quic::Rate::BytesPerSecond(_)));
+		if capped(limits.receive_rate) || capped(limits.send_rate) {
+			return Err(Error::InvalidConfig("qmux does not pace, so it takes no rate cap"));
+		}
+		// moq-quic wakes the driver for any MAX_DATA or MAX_STREAMS this owes the peer.
+		self.inner.lock().conn.set_limits(limits)?;
+		Ok(())
+	}
+
 	/// Open a send group at `priority`, for streams to join with
 	/// [`SendStream::set_group`](poll::SendStream::set_group) and datagrams with
 	/// [`SendOptions`](poll::SendOptions).
@@ -381,11 +399,20 @@ impl poll::Session for Session {
 		Metrics {
 			rtt: socket.and_then(|stats| stats.rtt()).or(state.conn.rtt()),
 			rate: socket.and_then(|stats| stats.estimated_send_rate()),
+			evicted: state.conn.credit_stats().evicted,
 		}
 	}
 
 	fn wire(&self) -> Option<net::Wire> {
 		Some(self.inner.wire.clone())
+	}
+
+	fn receive_window(&self) -> Option<net::ReceiveWindow> {
+		let state = self.inner.lock();
+		Some(net::ReceiveWindow::new(
+			state.conn.receive_window(),
+			state.conn.stream_receive_window(),
+		))
 	}
 }
 
@@ -393,6 +420,7 @@ impl poll::Session for Session {
 struct Metrics {
 	rtt: Option<Duration>,
 	rate: Option<u64>,
+	evicted: u64,
 }
 
 impl net::Metrics for Metrics {
@@ -402,6 +430,10 @@ impl net::Metrics for Metrics {
 
 	fn estimated_send_rate(&self) -> Option<u64> {
 		self.rate
+	}
+
+	fn streams_evicted(&self) -> Option<u64> {
+		Some(self.evicted)
 	}
 }
 
@@ -572,93 +604,85 @@ impl std::fmt::Debug for SendStream {
 	}
 }
 
-/// An incoming stream. Dropping it unfinished sends STOP_SENDING with code 0.
+/// An incoming stream. Dropping it sends STOP_SENDING with code 0, which also frees its state.
 ///
-/// Reading returns the peer's connection credit as it goes, so incomplete messages are
-/// bounded by the largest message each rather than by `receive_window`, and nothing is evicted.
-pub struct RecvStream(poll::Buffered<RecvChunks>);
+/// Leased bytes keep their connection credit until released, so `receive_window` bounds what
+/// every stream's incomplete messages hold together. When they fill it and no reader can make
+/// progress, the stream ranked lowest by [`set_priority`](poll::RecvStream::set_priority) is
+/// evicted: its next lease fails with [`Error::Evicted`].
+pub struct RecvStream {
+	inner: Arc<Inner>,
+	id: StreamId,
+	/// The peer reset the stream with this code. Observing it frees the connection's stream
+	/// state, so later calls report it from here.
+	reset: Option<u64>,
+	/// We stopped the stream; it is gone.
+	stopped: bool,
+}
 
 impl RecvStream {
 	fn new(inner: Arc<Inner>, id: StreamId) -> Self {
-		Self(poll::Buffered::new(RecvChunks {
+		Self {
 			inner,
 			id,
-			finished: false,
 			reset: None,
 			stopped: false,
-		}))
+		}
+	}
+
+	/// Take the connection's lease, which [`RecvLease`] wraps once this returns: the borrow of
+	/// `self` it holds cannot start inside a poll that may return `Pending`.
+	fn poll_take(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<moq_quic::recv::Lease, Error>> {
+		if let Some(code) = self.reset {
+			return Poll::Ready(Err(Error::StreamReset(code)));
+		}
+		if self.stopped {
+			return Poll::Ready(Err(Error::StreamClosed));
+		}
+		let mut state = self.inner.lock();
+		// moq-quic wakes the driver for any credit the lease frees, and the reader of any stream
+		// it evicts.
+		let (result, _) = state.conn.recv_stream(self.id).poll_lease(waiter, want);
+		match ready!(result) {
+			Ok(lease) => Poll::Ready(Ok(lease)),
+			Err(recv::Error::Reset(code)) => {
+				// Observing the reset frees the stream and the credit its lease withheld; only
+				// then may later calls skip it.
+				let _ = state.conn.recv_stream(self.id).received_reset();
+				self.reset = Some(code.into_inner());
+				Poll::Ready(Err(Error::StreamReset(code.into_inner())))
+			}
+			Err(recv::Error::Evicted) => Poll::Ready(Err(Error::Evicted)),
+			Err(recv::Error::TooLarge) => Poll::Ready(Err(Error::LeaseTooLarge)),
+			// The connection was lost, once everything that arrived before it was taken. The
+			// stream being gone means the same, since only a lost connection does that to one
+			// we hold.
+			Err(_) => Poll::Ready(Err(state.lost())),
+		}
 	}
 }
 
 impl poll::RecvStream for RecvStream {
 	type Error = Error;
-	type Lease<'a> = poll::BufferedLease<'a>;
+	type Lease<'a> = RecvLease<'a>;
 
-	fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<Self::Lease<'_>, Error>> {
-		self.0.poll_lease(waiter, want)
+	fn poll_lease(&mut self, waiter: &kio::Waiter, want: usize) -> Poll<Result<RecvLease<'_>, Error>> {
+		let lease = ready!(self.poll_take(waiter, want))?;
+		Poll::Ready(Ok(RecvLease {
+			stream: self,
+			lease: Some(lease),
+		}))
 	}
 
 	fn set_priority(&mut self, priority: i64) {
-		self.0.set_priority(priority);
+		if self.reset.is_some() || self.stopped {
+			return;
+		}
+		self.inner.lock().conn.recv_stream(self.id).set_priority(priority);
 	}
 
 	fn stop(&mut self, code: u32) {
-		self.0.stop(code);
-	}
-}
-
-impl std::fmt::Debug for RecvStream {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("RecvStream").field("id", &self.0.get_ref().id).finish()
-	}
-}
-
-/// Reads a [`RecvStream`] out of the connection's reassembly buffer.
-struct RecvChunks {
-	inner: Arc<Inner>,
-	id: StreamId,
-	/// Every byte up to the FIN was read out of the connection.
-	finished: bool,
-	/// The peer reset the stream with this code. Reading it frees the connection's stream
-	/// state, so later reads report it from here.
-	reset: Option<u64>,
-	/// We stopped the stream; no more reads matter.
-	stopped: bool,
-}
-
-impl poll::Chunks for RecvChunks {
-	type Error = Error;
-
-	fn poll_read_chunk(&mut self, waiter: &kio::Waiter, max: usize) -> Poll<Result<Option<Bytes>, Error>> {
-		if max == 0 {
-			return Poll::Ready(Ok(Some(Bytes::new())));
-		}
-		if let Some(code) = self.reset {
-			return Poll::Ready(Err(Error::StreamReset(code)));
-		}
-		if self.finished {
-			return Poll::Ready(Ok(None));
-		}
-		let mut state = self.inner.lock();
-		match ready!(poll_read(&mut state, waiter, self.id, max)) {
-			Ok(Some(bytes)) => Poll::Ready(Ok(Some(bytes))),
-			Ok(None) => {
-				self.finished = true;
-				Poll::Ready(Ok(None))
-			}
-			Err(recv::Error::Reset(code)) => {
-				let code = code.into_inner();
-				self.reset = Some(code);
-				Poll::Ready(Err(Error::StreamReset(code)))
-			}
-			// Only once everything that arrived before the loss was read.
-			Err(recv::Error::ConnectionLost) => Poll::Ready(Err(state.lost())),
-			Err(_) => Poll::Ready(Err(Error::StreamClosed)),
-		}
-	}
-
-	fn stop(&mut self, code: u32) {
-		if self.stopped || self.finished || self.reset.is_some() {
+		if self.stopped || self.reset.is_some() {
 			return;
 		}
 		let mut state = self.inner.lock();
@@ -666,35 +690,122 @@ impl poll::Chunks for RecvChunks {
 		let _ = state.conn.recv_stream(self.id).stop(VarInt::from_u32(code));
 		self.stopped = true;
 	}
-}
 
-/// Take up to `max` bytes out of the reassembly buffer, or wait for more, returning `None`
-/// once every byte up to the FIN has been handed over.
-///
-/// Reading is what returns the peer's flow control credit; a read that owes it a frame wakes
-/// the driver through the connection.
-fn poll_read(
-	state: &mut State,
-	waiter: &kio::Waiter,
-	id: StreamId,
-	max: usize,
-) -> Poll<Result<Option<Bytes>, recv::Error>> {
-	let mut recv = state.conn.recv_stream(id);
-	let Ok(mut chunks) = recv.read() else {
-		// The stream is gone, so everything it held is already ours.
-		return Poll::Ready(Ok(None));
-	};
-	let read = chunks.poll_next(waiter, max);
-	let _ = chunks.finalize();
-	read.map_ok(|chunk| chunk.map(|chunk| chunk.bytes))
-}
-
-impl Drop for RecvChunks {
-	fn drop(&mut self) {
-		let mut state = self.inner.lock();
-		if !self.finished && !self.stopped && self.reset.is_none() {
-			let _ = state.conn.recv_stream(self.id).stop(VarInt::from_u32(0));
+	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
+		if let Some(code) = self.reset {
+			return Poll::Ready(Error::StreamReset(code));
 		}
+		if self.stopped {
+			return Poll::Ready(Error::StreamClosed);
+		}
+		let mut state = self.inner.lock();
+		match ready!(state.conn.recv_stream(self.id).poll_received_reset(waiter)) {
+			Ok(code) => {
+				// Observing it freed the stream, and moq-quic wakes the driver for any credit
+				// that owes the peer.
+				self.reset = Some(code.into_inner());
+				Poll::Ready(Error::StreamReset(code.into_inner()))
+			}
+			// Evicted, so its bytes are gone: nothing frees the window until it is stopped.
+			Err(recv::Error::Evicted) => Poll::Ready(Error::Evicted),
+			Err(recv::Error::ConnectionLost) => Poll::Ready(state.lost()),
+			// Every byte arrived, so nothing is left to reset.
+			Err(_) => Poll::Pending,
+		}
+	}
+}
+
+impl Drop for RecvStream {
+	fn drop(&mut self) {
+		if self.stopped || self.reset.is_some() {
+			return;
+		}
+		let mut state = self.inner.lock();
+		// A leased stream keeps its state until stopped, even once it ended; Err means it is
+		// already gone.
+		let _ = state.conn.recv_stream(self.id).stop(VarInt::from_u32(0));
+	}
+}
+
+impl std::fmt::Debug for RecvStream {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("RecvStream").field("id", &self.id).finish()
+	}
+}
+
+/// Unreleased bytes of a [`RecvStream`], read as a [`Buf`].
+///
+/// It owns the bytes, so the session carries on while it is held. [`release`](poll::Lease::release)
+/// returns the credit of the bytes read; dropping it keeps their credit, as for a message read
+/// only in part. Either way the bytes not read are leased again next time.
+pub struct RecvLease<'a> {
+	stream: &'a mut RecvStream,
+	/// Taken only to hand it back.
+	lease: Option<moq_quic::recv::Lease>,
+}
+
+impl RecvLease<'_> {
+	fn lease(&self) -> &moq_quic::recv::Lease {
+		self.lease.as_ref().expect("only taken to hand it back")
+	}
+
+	fn lease_mut(&mut self) -> &mut moq_quic::recv::Lease {
+		self.lease.as_mut().expect("only taken to hand it back")
+	}
+}
+
+impl Buf for RecvLease<'_> {
+	fn remaining(&self) -> usize {
+		self.lease().remaining()
+	}
+
+	fn chunk(&self) -> &[u8] {
+		self.lease().chunk()
+	}
+
+	fn advance(&mut self, n: usize) {
+		self.lease_mut().advance(n);
+	}
+
+	fn copy_to_bytes(&mut self, n: usize) -> Bytes {
+		self.lease_mut().copy_to_bytes(n)
+	}
+}
+
+impl poll::Lease for RecvLease<'_> {
+	fn chunks(&self) -> impl Iterator<Item = &[u8]> {
+		self.lease().chunks()
+	}
+
+	fn is_fin(&self) -> bool {
+		self.lease().is_fin()
+	}
+
+	fn release(mut self) {
+		let lease = self.lease.take().expect("only taken to hand it back");
+		let mut state = self.stream.inner.lock();
+		// moq-quic wakes the driver for the credit this returns.
+		let _ = state.conn.recv_stream(self.stream.id).release(lease);
+	}
+}
+
+impl Drop for RecvLease<'_> {
+	fn drop(&mut self) {
+		let Some(lease) = self.lease.take() else {
+			return;
+		};
+		let mut state = self.stream.inner.lock();
+		// moq-quic wakes the driver if the window was stuck on this lease.
+		let _ = state.conn.recv_stream(self.stream.id).restore(lease);
+	}
+}
+
+impl std::fmt::Debug for RecvLease<'_> {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("RecvLease")
+			.field("id", &self.stream.id)
+			.field("remaining", &self.remaining())
+			.finish()
 	}
 }
 

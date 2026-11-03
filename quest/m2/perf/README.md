@@ -20,10 +20,8 @@ Planning quests can settle their contracts independently. Facts from the 2026-09
 hot-path survey, so quests don't re-litigate them:
 
 - Decided in the 2026-10-05 audit: perf quests that edit moq-uring's QUIC
-  driver (Run to quiescence) measure their before and after on `moq-quic`.
-- `moq-uring`'s only backend is `moq-quic`. Every profile names its backend. The
-  historical quiche-flavor numbers cited in
-  [Run to quiescence](/quest/m2/perf/uring-quiescence.md) are re-measured on `moq-quic`.
+  driver measure their before and after on `moq-quic`.
+- `moq-uring`'s only backend is `moq-quic`. Every profile names its backend.
 - Cross-thread wakeups are already cheap: one futex word per worker, at most
   one `futex(FUTEX_WAKE)` per park cycle, wake bursts coalesce through the
   `kio::Tasks` bitset. No eventfd, no MSG_RING, by design (`SINGLE_ISSUER`).
@@ -87,17 +85,14 @@ revisions on the same host and worker count, and profiles with
 - [Stream transports](/quest/m2/perf/stream/README.md) - qmux drives its own WebSocket and TCP sockets in one task, measured end to end, then serves them from the io_uring workers
 - [Relay allocations](/quest/m2/perf/relay-allocs.md) - fewer allocations per delivered frame, starting with per-stream session clones
 - [QUIC lock contention](/quest/m2/perf/quic-lock-contention.md) - a measured verdict on the tokio driver's connection-wide mutex and per-packet endpoint-to-connection hop, with levers built only on evidence
-- [Borrow-free QUIC state](/quest/m2/perf/quic-borrow-free.md) - a prototyped report on sharing connection state with stream handles without `RefCell` or `Mutex`: context passing vs driver-owned state with per-stream channels
-- [Run to quiescence](/quest/m2/perf/uring-quiescence.md) - a received packet's reply is staged in the same turn, under a pass and train budget that keeps the fairness rule
 - [Ingest batch](/quest/m2/perf/ingest-batch.md) - relay ingest pays one lock, wake, and clock read per burst of whole frames instead of per frame
-- [Streaming frame read owners](/quest/m2/perf/frame-read-owners.md) - readers of a frame still arriving share one byte owner per publication instead of allocating one each per read
 - [kio waiter costs](/quest/m2/perf/kio-waiter-costs.md) - long-lived waiters stop being rebuilt every poll, IETF fetch keeps one close watch per stream, and a short `kio::log` costs less
 - [Shard by default](/quest/m2/perf/shard-default.md) - a saturating shard sweep decides whether an unset `runtime.workers` runs one worker per core on Linux
-- [io_uring buffer pool memory](/quest/m2/perf/uring-pool-memory.md) - measure reserved versus resident pool memory before any shrink policy
 - [An idle export poll is cheap](/quest/m2/perf/export-idle-poll.md) - an export poll nothing woke skips the track fill and catalog work it repeats today
 - [Mesh session cost](/quest/m2/perf/mesh-session-cost.md) - moq-net's per-session announce, route sync, and scope work drops, swept over sessions and announces
 - [Cluster route memory](/quest/m2/perf/cluster-route-memory.md) - a full-mesh cluster's ~3.7 KB per route per broadcast shrinks, the in-memory hop is profiled, and `bench-profile lock` tolerates lost records
-- [Lite request allocations](/quest/m2/perf/lite-request-allocs.md) - `Path::concat` allocates once and the lite request handler keeps one track-name copy
-- [Coverage before START](/quest/m2/perf/covered-before-start.md) - the lite-07 publisher's coverage check costs O(1) per wake before SUBSCRIBE_START
 - [Lock-free single-delivery writes](/quest/m2/perf/single-delivery-write.md) - a frame with one delivery writes without a lock, recovering #6922's remaining FETCH cost
 - [Small hot-path waste](/quest/m2/perf/hot-path-waste.md) - one track-name copy per lite subscription, no full-history `#drift` walk, and one header buffer per JS object
+- [Track-state reads skip when nothing changed](/quest/m2/perf/cursor-version-skip.md) - `Cursor::sync`, `probe` and `GroupExpiry` skip unchanged reads, then group reads move onto a Watch
+- [An idle TS export with a delay costs what one without does](/quest/m2/perf/ts-idle-jitter.md) - the jitter scan and memcmp stop leading the idle poll
+- [Fanout takes the route lock less](/quest/m2/perf/route-lock.md) - fewer than 41 route-lock acquisitions per fanout round

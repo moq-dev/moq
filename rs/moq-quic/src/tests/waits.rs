@@ -369,7 +369,7 @@ fn handshake_data_waits() {
 	let now = pair.time;
 	let conn = pair.client_conn_mut(client_ch);
 	assert_eq!(conn.poll_handshake_data(&waiter), Poll::Ready(Ok(())));
-	assert!(conn.crypto_session().handshake_data().is_some());
+	assert!(conn.handshake_data().is_some());
 
 	// Still available once lost: the parameters did arrive.
 	conn.close(now, VarInt(0), String::new());

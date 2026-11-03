@@ -65,5 +65,5 @@ pub fn public(public: &[&str], publish: &[&str], subscribe: &[&str]) -> auth::Au
 /// A standalone cluster with default options.
 #[cfg(feature = "test-support")]
 pub fn cluster() -> cluster::Cluster {
-	cluster::Cluster::new(cluster::Options::default()).expect("cluster init")
+	crate::spawn_cluster(cluster::Options::default())
 }

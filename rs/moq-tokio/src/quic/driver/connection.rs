@@ -1,7 +1,6 @@
 //! A single connection: its streams, datagrams, and why it ends.
 
 use std::{
-	any::Any,
 	fmt,
 	future::Future,
 	io,
@@ -24,8 +23,9 @@ use crate::quic::driver::{
 use moq_congestion::Controller;
 pub use moq_quic::connection::{Error, Stats};
 use moq_quic::{
-	EndpointEvent, TransportError, TransportErrorCode,
+	EndpointEvent, TransportError, TransportErrorCode, crypto,
 	endpoint::ConnectionHandle,
+	rustls::pki_types::CertificateDer,
 	stream::{Dir, Id as StreamId},
 };
 
@@ -81,22 +81,17 @@ impl Connecting {
 
 	/// Parameters negotiated during the handshake
 	///
-	/// The dynamic type returned is determined by the configured
-	/// [`Session`](moq_quic::crypto::Session). For the default `rustls` session, the return value can
-	/// be [`downcast`](Box::downcast) to a
-	/// [`crypto::rustls::HandshakeData`](crate::quic::driver::crypto::rustls::HandshakeData).
-	///
 	/// Peer certificates are not available at this stage; see [`Connection::peer_identity()`].
 	///
 	/// This operation is cancel-safe.
-	pub async fn handshake_data(&mut self) -> Result<Box<dyn Any>, Error> {
+	pub async fn handshake_data(&mut self) -> Result<crypto::HandshakeData, Error> {
 		let conn = self.conn.as_ref().unwrap();
 		kio::wait(|waiter| {
 			let mut state = conn.state.lock();
 			if let Err(err) = ready!(state.inner.poll_handshake_data(waiter)) {
 				return Poll::Ready(Err(state.lost_as(err)));
 			}
-			let data = state.inner.crypto_session().handshake_data();
+			let data = state.inner.handshake_data();
 			Poll::Ready(data.ok_or_else(|| state.lost()))
 		})
 		.await
@@ -484,6 +479,13 @@ impl Connection {
 		self.0.state.lock().inner.stats()
 	}
 
+	/// The receive windows now in force: the connection's, and the most one stream holds.
+	#[cfg(feature = "net")]
+	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
+		let state = self.0.state.lock();
+		moq_net::transport::ReceiveWindow::new(state.inner.receive_window(), state.inner.stream_receive_window())
+	}
+
 	/// How many send streams the connection still holds state for
 	#[cfg(test)]
 	pub(crate) fn send_streams(&self) -> usize {
@@ -517,25 +519,18 @@ impl Connection {
 	/// Parameters negotiated during the handshake
 	///
 	/// Guaranteed to return `Some` on fully established connections or after
-	/// [`Connecting::handshake_data()`] succeeds. See that method's documentations for details on
-	/// the returned value.
-	///
-	/// [`Connection::handshake_data()`]: crate::quic::driver::connection::Connecting::handshake_data
-	pub fn handshake_data(&self) -> Option<Box<dyn Any>> {
-		self.0.state.lock().inner.crypto_session().handshake_data()
+	/// [`Connecting::handshake_data()`] succeeds.
+	pub fn handshake_data(&self) -> Option<crypto::HandshakeData> {
+		self.0.state.lock().inner.handshake_data()
 	}
 
-	/// Cryptographic identity of the peer
-	///
-	/// The dynamic type returned is determined by the configured
-	/// [`Session`](moq_quic::crypto::Session). For the default `rustls` session, the return value can
-	/// be [`downcast`](Box::downcast) to a <code>Vec<[rustls::pki_types::CertificateDer]></code>.
+	/// The certificate chain the peer presented, end entity first, if it presented one
 	///
 	/// For custom asynchronous validation (e.g. checking a certificate against an external
 	/// database), call this after awaiting [`Connecting`] and use [`close()`][Self::close] to
 	/// reject untrusted peers.
-	pub fn peer_identity(&self) -> Option<Box<dyn Any>> {
-		self.0.state.lock().inner.crypto_session().peer_identity()
+	pub fn peer_identity(&self) -> Option<Vec<CertificateDer<'static>>> {
+		self.0.state.lock().inner.peer_identity()
 	}
 
 	/// A stable identifier for this connection
@@ -544,29 +539,6 @@ impl Connection {
 	/// fixed for the lifetime of the connection.
 	pub fn stable_id(&self) -> usize {
 		self.0.stable_id()
-	}
-
-	/// Derive keying material from this connection's TLS session secrets.
-	///
-	/// When both peers call this method with the same `label` and `context`
-	/// arguments and `output` buffers of equal length, they will get the
-	/// same sequence of bytes in `output`. These bytes are cryptographically
-	/// strong and pseudorandom, and are suitable for use as keying material.
-	///
-	/// See [RFC5705](https://tools.ietf.org/html/rfc5705) for more information.
-	#[cfg(test)]
-	pub(super) fn export_keying_material(
-		&self,
-		output: &mut [u8],
-		label: &[u8],
-		context: &[u8],
-	) -> Result<(), moq_quic::crypto::ExportKeyingMaterialError> {
-		self.0
-			.state
-			.lock()
-			.inner
-			.crypto_session()
-			.export_keying_material(output, label, context)
 	}
 
 	/// See [`moq_quic::connection::Connection::set_limits`]

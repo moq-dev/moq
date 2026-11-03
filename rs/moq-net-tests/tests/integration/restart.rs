@@ -1,9 +1,9 @@
 //! A replaced broadcast restarts announce consumers across relays, end to end over
 //! real sessions, while the subscriptions already on it stay.
 //!
-//! On moq-lite-07 the restart travels as ANNOUNCE_RESTART, and on moq-transport between
-//! two epochs as a new advertisement before the old one's withdrawal (MoQ Epoch); older
-//! versions and anything epochless carry it as an end and a fresh start. Either way a downstream relay
+//! On moq-lite-07 the restart travels as ANNOUNCE_RESTART, carrying the new instance;
+//! older versions and moq-transport carry no instance, so it travels as an end and a
+//! fresh start, which the receiving relay mints a new instance for. Either way a downstream relay
 //! retires its copy of the old source, so a new subscriber never sees the old
 //! instance's cached groups.
 
@@ -11,7 +11,7 @@ use crate::support;
 
 use std::{cell::RefCell, rc::Rc, time::Duration};
 
-use moq_net::{Epoch, Hop, Timestamp, Version, announce, broadcast, origin, track};
+use moq_net::{Hop, Instance, Timestamp, Version, announce, broadcast, origin, track};
 use support::harness::{MockConnectOptions, MockPair, connect_mock};
 
 /// A millisecond track: the frames written here carry timestamps.
@@ -49,7 +49,7 @@ async fn next_event(announced: &mut announce::Consumer) -> announce::Event {
 		.expect("announce ended")
 }
 
-/// Expect the restart of `prefix` without any epoch, as `version` carries it: one restart
+/// Expect the restart of `prefix` onto another instance, as `version` carries it: one restart
 /// on lite-07, an end then a start elsewhere.
 async fn expect_restart(version: Version, announced: &mut announce::Consumer, prefix: &str) {
 	expect_replaced(
@@ -108,7 +108,7 @@ async fn subscribe(origin: &origin::Producer, path: &str) -> (broadcast::Consume
 	(broadcast, subscription)
 }
 
-/// `P -> R -> V`, where a publisher at `P` without an epoch restarts while the old one
+/// `P -> R -> V`, where a publisher at `P` under another instance restarts while the old one
 /// lingers: `V` restarts the path, its old subscription keeps the old instance, and a
 /// re-request reaches the new one without any of the old instance's cached groups.
 async fn relay_chain(version: &str) {
@@ -133,7 +133,7 @@ async fn relay_chain(version: &str) {
 		assert_eq!(read(&mut sticky).await, format!("old:{group}"), "{version}");
 	}
 
-	// The publisher restarts without an epoch, its old session still open.
+	// The publisher restarts under another instance, its old session still open.
 	let new = publisher.publish("live", origin::Route::default()).unwrap();
 	let new_track = new.create_track("video", timed()).unwrap();
 	expect_restart(version, &mut announced, "live").await;
@@ -169,8 +169,8 @@ relay_chain_tests! {
 	relay_chain_ietf22: "moq-transport-22",
 }
 
-/// A worker claiming `pool` without an epoch, answering each request with an output
-/// whose `video` track carries the worker's name. The claim is a peer's, landed through
+/// A worker claiming `pool` under its own instance, `worker-<hop>`, answering each request
+/// with an output whose `video` track carries the worker's name. The claim is a peer's, landed through
 /// the hidden `fuzz` module as a session lands it, so its answers carry no exact route.
 struct Worker {
 	origin: origin::Producer,
@@ -182,8 +182,12 @@ impl Worker {
 	fn new(hop: u64) -> Self {
 		let origin = produce_origin(hop);
 		let claim = Rc::new(
-			moq_net::fuzz::requests_route(&origin, moq_net::Path::from_static("pool"), origin::Route::default())
-				.unwrap(),
+			moq_net::fuzz::requests_route(
+				&origin,
+				moq_net::Path::from_static("pool"),
+				origin::Route::default().with_instance(format!("worker-{hop}").parse().unwrap(), 0),
+			)
+			.unwrap(),
 		);
 		let outputs = Rc::new(RefCell::new(Vec::new()));
 		let (handler, served) = (claim.clone(), outputs.clone());
@@ -204,10 +208,25 @@ impl Worker {
 	}
 }
 
-/// Workers `10` and `11` claim `pool` behind `U -> D`. Worker `12` joining moves
-/// `pool/job-2` from `10` to itself while `11` keeps winning `pool` itself and
-/// `pool/job-0`, and `10` keeps `pool/job-1` (pinned by the spread hash). `D` restarts
-/// `pool`, and the next subscribes reach the right workers.
+/// The worker that wins `path` among `workers`: the lowest spread hash of the path and its
+/// instance, which every relay computes alike (`instance_key` in `moq-net`).
+fn spread(path: &str, workers: &[u64]) -> String {
+	let key = |hop: &u64| {
+		let mut hash: u64 = 0x420C0DECB00B;
+		for byte in path.bytes().chain(format!("worker-{hop}").into_bytes()) {
+			hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+		}
+		hash
+	};
+	workers.iter().min_by_key(|hop| key(hop)).unwrap().to_string()
+}
+
+/// Workers `10` and `11` claim `pool` behind `U -> D`, each under its own instance. `U`
+/// spreads the pool's paths over them, but advertises one route for `pool`, its own winner
+/// for the prefix, and `D` names that route's instance on every request it forwards, so
+/// every hop serves the instance the first one chose: behind `D` the pool collapses onto
+/// that one worker. Worker `12` joining takes `U`'s requests for the paths it wins, and
+/// `D`'s whenever `U` advertises it for `pool`.
 async fn prefix_pool(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let upstream = produce_origin(2);
@@ -220,33 +239,55 @@ async fn prefix_pool(version: &str) {
 	}
 	settle().await;
 
+	// The worker whose instance `D`'s route for `pool` names.
+	let advertised = |announce: announce::Announce| {
+		assert_eq!(announce.prefix.as_str(), "pool");
+		let instance = announce.route.instance.expect("a delivered route has an instance");
+		instance.as_str().strip_prefix("worker-").expect("a worker").to_string()
+	};
 	let mut announced = downstream.consume().announced();
-	match next_event(&mut announced).await {
-		announce::Event::Start(announce) => assert_eq!(announce.prefix.as_str(), "pool"),
+	let mut prefix = match next_event(&mut announced).await {
+		announce::Event::Start(announce) => advertised(announce),
 		other => panic!("{version}: expected the pool, got {other:?}"),
-	}
+	};
 
+	let paths = ["pool/job-0", "pool/job-1", "pool/job-2", "pool/job-3"];
 	let mut held = Vec::new();
-	for (path, worker) in [("pool/job-0", "11"), ("pool/job-1", "10"), ("pool/job-2", "10")] {
+	for path in paths {
 		let (broadcast, mut subscription) = subscribe(&downstream, path).await;
-		assert_eq!(read(&mut subscription).await, worker, "{version}: {path}");
+		assert_eq!(read(&mut subscription).await, prefix, "{version}: {path}");
 		held.push((broadcast, subscription));
+		let (_broadcast, mut subscription) = subscribe(&upstream, path).await;
+		assert_eq!(
+			read(&mut subscription).await,
+			spread(path, &[10, 11]),
+			"{version}: {path} at U"
+		);
 	}
+	assert!(
+		paths.iter().any(|path| spread(path, &[10, 11, 12]) == "12"),
+		"the paths must exercise the joining worker"
+	);
 
 	links.push(link(version, &workers[2].origin, &upstream).await);
-	expect_restart(version, &mut announced, "pool").await;
-
-	for (path, worker) in [("pool/job-0", "11"), ("pool/job-1", "10"), ("pool/job-2", "12")] {
-		let (_broadcast, mut subscription) = subscribe(&downstream, path).await;
-		assert_eq!(read(&mut subscription).await, worker, "{version}: {path}");
+	settle().await;
+	while let Ok(Some(event)) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
+		match event {
+			announce::Event::Restart(announce) => prefix = advertised(announce),
+			other => panic!("{version}: expected a restart at most, got {other:?}"),
+		}
 	}
-}
 
-#[kio::test]
-async fn prefix_pool_lite06() {
-	kio::clock::timeout(TEST_TIMEOUT, prefix_pool("moq-lite-06"))
-		.await
-		.expect("timed out");
+	for path in paths {
+		let (_broadcast, mut subscription) = subscribe(&downstream, path).await;
+		assert_eq!(read(&mut subscription).await, prefix, "{version}: {path}");
+		let (_broadcast, mut subscription) = subscribe(&upstream, path).await;
+		assert_eq!(
+			read(&mut subscription).await,
+			spread(path, &[10, 11, 12]),
+			"{version}: {path} at U"
+		);
+	}
 }
 
 #[kio::test]
@@ -258,17 +299,17 @@ async fn prefix_pool_lite07() {
 
 /// A claim at `live` whose handler answers each request with a fresh output, kept so
 /// the test can write into it: `outputs[n]` answered the `n`th request. Only a peer's
-/// claim carries an epoch or re-prices, so it lands through the hidden `fuzz` module as
-/// a session lands it.
+/// claim moves to another instance or re-prices in place, so it lands through the hidden
+/// `fuzz` module as a session lands it.
 struct Claim {
 	dynamic: Rc<origin::Requests>,
 	outputs: Rc<RefCell<Vec<(broadcast::Producer, track::Producer)>>>,
 }
 
 impl Claim {
-	fn new(origin: &origin::Producer, epoch: Option<Epoch>) -> Self {
+	fn new(origin: &origin::Producer, instance: Option<Instance>) -> Self {
 		let mut route = origin::Route::default();
-		route.epoch = epoch;
+		route.instance = instance;
 		let dynamic =
 			Rc::new(moq_net::fuzz::requests_route(origin, moq_net::Path::from_static("live"), route).unwrap());
 		let outputs = Rc::new(RefCell::new(Vec::new()));
@@ -293,10 +334,9 @@ impl Claim {
 		self.outputs.borrow().len()
 	}
 
-	/// Move the claim to `epoch` in place, keeping the rest of its route.
-	fn update_epoch(&self, epoch: Option<Epoch>) {
-		let mut route = self.dynamic.route();
-		route.epoch = epoch;
+	/// Move the claim to `instance` in place, keeping the rest of its route.
+	fn update_instance(&self, instance: Instance) {
+		let route = self.dynamic.route().with_instance(instance, 0);
 		self.update_route(route);
 	}
 
@@ -305,11 +345,11 @@ impl Claim {
 	}
 }
 
-/// `P -> R -> V`, where `P` claims `live` at `from` and updates the claim in place.
-/// A same-epoch re-price keeps every handle. Moving to `to` restarts `V`, the
-/// subscription already open stays on the old answer, and a re-request asks the
-/// handler again and reads none of the old answer's cached groups.
-async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
+/// `P -> R -> V`, where `P` claims `live` under `from` and updates the claim in place.
+/// A re-price keeps every handle. Moving to `to` restarts `V`, the subscription already
+/// open stays on the old answer, and a re-request asks the handler again and reads none
+/// of the old answer's cached groups.
+async fn dynamic_instance(version: &str, from: Option<Instance>, to: Instance) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
 	let relay = produce_origin(2);
@@ -328,7 +368,7 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	claim.write(0, "old:0");
 	assert_eq!(read(&mut sticky).await, "old:0", "{version}");
 
-	// A re-price at the same epoch is an update at most: every handle survives.
+	// A re-price is an update at most: every handle survives.
 	claim.update_route(claim.dynamic.route().with_cost(5));
 	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
 		assert!(
@@ -342,12 +382,11 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	assert!(same.is_clone(&stale), "{version}: a re-price replaced the broadcast");
 	assert_eq!(claim.answered(), 1, "{version}: a re-price asked the handler again");
 
-	// Another epoch, or none, is another instance downstream. Only lite-07 restarts it in
-	// place: the new instance is advertised before the old is withdrawn, so the path is
-	// never absent.
-	let lite07 = version == "moq-lite-07-wip".parse().unwrap();
-	claim.update_epoch(to.clone());
-	expect_replaced(version, &mut announced, "live", lite07).await;
+	// Another instance is another stream downstream. lite-07 restarts it in place; the
+	// other wires end it and start a fresh one.
+	let in_place = version == "moq-lite-07-wip".parse().unwrap();
+	claim.update_instance(to.clone());
+	expect_replaced(version, &mut announced, "live", in_place).await;
 
 	// The subscription already open stays on the old answer.
 	claim.write(0, "old:2");
@@ -357,9 +396,14 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	let (fresh, mut subscription) = subscribe(&viewer, "live/cam").await;
 	assert!(!fresh.is_clone(&stale), "{version}: joined the old instance's copy");
 	assert_eq!(claim.answered(), 2, "{version}: the old answer was served again");
-	// Only lite-07 carries the epoch; the other wires resolve an epochless instance.
-	let epoch = if lite07 { to } else { None };
-	assert_eq!(fresh.info().epoch, epoch, "{version}: resolved under the old epoch");
+	// Only lite-07 carries the instance.
+	if in_place {
+		assert_eq!(
+			fresh.info().instance,
+			Some(to),
+			"{version}: resolved under the old instance"
+		);
+	}
 	claim.write(1, "new:0");
 	assert_eq!(read(&mut subscription).await, "new:0", "{version}");
 
@@ -368,22 +412,22 @@ async fn dynamic_epoch(version: &str, from: Option<Epoch>, to: Option<Epoch>) {
 	quiet(version, &mut announced).await;
 }
 
-/// The epoch the claim starts at, and a newer one it moves to.
-fn epochs() -> (Epoch, Epoch) {
+/// The instance the claim starts at, and another one it moves to.
+fn instances() -> (Instance, Instance) {
 	(
 		"01900000-0000-7000-8000-000000000001".parse().unwrap(),
 		"01900000-0000-7000-8000-000000000002".parse().unwrap(),
 	)
 }
 
-macro_rules! dynamic_epoch_tests {
+macro_rules! dynamic_instance_tests {
 	($($name:ident: $version:literal,)*) => {
 		$(
 			#[kio::test]
 			async fn $name() {
-				let (a, b) = epochs();
-				for (from, to) in [(Some(a.clone()), Some(b.clone())), (Some(a), None), (None, Some(b))] {
-					kio::clock::timeout(TEST_TIMEOUT, dynamic_epoch($version, from, to))
+				let (a, b) = instances();
+				for from in [Some(a), None] {
+					kio::clock::timeout(TEST_TIMEOUT, dynamic_instance($version, from, b.clone()))
 						.await
 						.expect("timed out");
 				}
@@ -392,51 +436,11 @@ macro_rules! dynamic_epoch_tests {
 	};
 }
 
-dynamic_epoch_tests! {
-	dynamic_epoch_lite06: "moq-lite-06",
-	dynamic_epoch_lite07: "moq-lite-07-wip",
-	dynamic_epoch_ietf18: "moq-transport-18",
-	dynamic_epoch_ietf22: "moq-transport-22",
-}
-
-/// An update does not override route selection: with a second claim still at the
-/// epoch, a claim dropping it hands re-requests to the second, which outranks any
-/// route without one.
-#[kio::test]
-async fn dynamic_epoch_second_route_keeps_winning() {
-	let (a, _) = epochs();
-	let origin = produce_origin(1);
-	let first = Claim::new(&origin, Some(a.clone()));
-	first.update_route(first.dynamic.route().with_cost(1));
-	let second = Claim::new(&origin, Some(a.clone()));
-	second.update_route(second.dynamic.route().with_cost(5));
-	let mut announced = origin.consume().announced();
-	match next_event(&mut announced).await {
-		announce::Event::Start(announce) => assert_eq!(announce.route.epoch.as_ref(), Some(&a)),
-		other => panic!("expected the claim, got {other:?}"),
-	}
-
-	let (resolved, mut sticky) = subscribe(&origin, "live/cam").await;
-	first.write(0, "first:0");
-	assert_eq!(read(&mut sticky).await, "first:0");
-	assert_eq!(second.answered(), 0, "the costlier claim answered");
-
-	// The epoch still stands through the second claim, so this is no restart, and the
-	// instance's subscriptions resume through it.
-	first.update_epoch(None);
-	while let Ok(event) = kio::clock::timeout(Duration::from_secs(1), announced.next()).await {
-		assert!(
-			matches!(event, Some(announce::Event::Update(_))),
-			"dropping a shared epoch delivered {event:?}"
-		);
-	}
-	let fresh = origin.consume().request("live/cam", None).await.unwrap();
-	assert!(fresh.is_clone(&resolved), "the epoch's broadcast was replaced");
-	assert_eq!((first.answered(), second.answered()), (1, 1));
-	// The same epoch serves the same bytes: group 0 was delivered, so it resumes at 1.
-	second.write(0, "first:0");
-	second.write(0, "second:1");
-	assert_eq!(read(&mut sticky).await, "second:1");
+dynamic_instance_tests! {
+	dynamic_instance_lite06: "moq-lite-06",
+	dynamic_instance_lite07: "moq-lite-07-wip",
+	dynamic_instance_ietf18: "moq-transport-18",
+	dynamic_instance_ietf22: "moq-transport-22",
 }
 
 /// A held track must not fill an old instance's cache from its replacement.
@@ -445,14 +449,14 @@ async fn retired_fetch(version: &str, explicit: bool) {
 	let publisher = produce_origin(1);
 	let viewer = produce_origin(2);
 	let _session = link(version, &publisher, &viewer).await;
-	let (a, b) = epochs();
+	let (a, b) = instances();
 	let old_route = if explicit {
-		origin::Route::default().with_epoch(a)
+		origin::Route::default().with_instance(a, 0)
 	} else {
 		origin::Route::default()
 	};
 	let new_route = if explicit {
-		origin::Route::default().with_epoch(b)
+		origin::Route::default().with_instance(b, 0)
 	} else {
 		origin::Route::default()
 	};
@@ -523,10 +527,11 @@ retired_fetch_tests! {
 	retired_fetch_ietf22: "moq-transport-22",
 }
 
-/// An epochless SUBSCRIBE names no instance, so until the publisher answers it, it may have
-/// resolved whichever instance won the path. Unanswered when its instance is replaced, it is
-/// refused, even if the publisher had resolved it on the old one, rather than risk filling
-/// the old instance from the replacement.
+/// A SUBSCRIBE on a wire without instances names none, so until the publisher answers it,
+/// it may have resolved whichever instance won the path. Unanswered when its stream is
+/// replaced, it is refused, even if the publisher had resolved it on the old one, rather than
+/// risk filling the old stream from the replacement. lite-07 pins the instance, so its
+/// SUBSCRIBE reads the old stream it named.
 async fn unanswered_takeover(version: &str) {
 	let version: Version = version.parse().unwrap();
 	let publisher = produce_origin(1);
@@ -576,11 +581,10 @@ macro_rules! unanswered_takeover_tests {
 unanswered_takeover_tests! {
 	unanswered_takeover_lite05: "moq-lite-05",
 	unanswered_takeover_lite06: "moq-lite-06",
-	unanswered_takeover_lite07: "moq-lite-07-wip",
 }
 
 #[kio::test]
-async fn retired_fetch_explicit_epoch_control() {
+async fn retired_fetch_explicit_instance_control() {
 	kio::clock::timeout(TEST_TIMEOUT, retired_fetch("moq-lite-07-wip", true))
 		.await
 		.expect("timed out");
@@ -638,7 +642,7 @@ async fn a_more_specific_source_cannot_fill_a_held_covering_track() {
 }
 
 /// A worker claiming `pool` through the public API: each request is prepared under a
-/// fresh epoch and published at its exact path, and `outputs[path]` holds the latest.
+/// fresh instance and published at its exact path, and `outputs[path]` holds the latest.
 struct Pool {
 	_claim: Rc<origin::Requests>,
 	outputs: Rc<RefCell<std::collections::HashMap<String, (origin::Publication, track::Producer)>>>,
@@ -654,7 +658,7 @@ impl Pool {
 		drop(kio::clock::sim::spawn(async move {
 			while let Ok(request) = handler.requested_broadcast().await {
 				let path = request.path().to_string();
-				let prepared = request.prepare(Epoch::mint()).unwrap();
+				let prepared = request.prepare().unwrap();
 				let track = prepared.broadcast().create_track("video", timed()).unwrap();
 				let output = prepared.publish().unwrap();
 				served.borrow_mut().insert(path, (output, track));
@@ -754,7 +758,7 @@ claim_restart_tests! {
 
 /// A mid-stream priority change on a viewer's subscription reaches the publisher's
 /// aggregate, directly or through a relay (`P -> R -> V`), and on an old instance after
-/// an epoch switch left the subscription on it.
+/// an instance switch left the subscription on it.
 async fn priority_update(version: &str, relayed: bool, switch: bool) {
 	let version: Version = version.parse().unwrap();
 	let case = format!("{version} relayed={relayed} switch={switch}");
@@ -769,9 +773,9 @@ async fn priority_update(version: &str, relayed: bool, switch: bool) {
 		links.push(link(version, &publisher, &viewer).await);
 	}
 
-	let (a, b) = epochs();
+	let (a, b) = instances();
 	let old = publisher
-		.publish("live", origin::Route::default().with_epoch(a))
+		.publish("live", origin::Route::default().with_instance(a, 0))
 		.unwrap();
 	let old_track = old.create_track("video", timed()).unwrap();
 	let mut announced = viewer.consume().announced();
@@ -786,13 +790,11 @@ async fn priority_update(version: &str, relayed: bool, switch: bool) {
 
 	let _new = switch.then(|| {
 		publisher
-			.publish("live", origin::Route::default().with_epoch(b))
+			.publish("live", origin::Route::default().with_instance(b, 0))
 			.unwrap()
 	});
 	if switch {
-		// Only lite-07 carries the epoch, so only it restarts in place.
-		let in_place = version == "moq-lite-07-wip".parse().unwrap();
-		expect_replaced(version, &mut announced, "live", in_place).await;
+		expect_restart(version, &mut announced, "live").await;
 	}
 
 	// Demoted, promoted, then back to the default, each reaching the publisher before the
