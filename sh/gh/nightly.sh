@@ -131,7 +131,7 @@ case "$1" in
             --bench bus --bench parameter_sets --bench sent_packets --bench demux --bench receive_bursts --bench ladder
         # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous.
         # The concurrent cases' latency percentiles stay in the run's stdout.
-        criterion auth --manifest-path rs/moq-auth/Cargo.toml --bench verify
+        criterion auth --manifest-path rs/moq-auth/Cargo.toml --bench verify --bench jwt
         ;;
     rust-uring)
         # One run per target makes an unsupported/skipped ring fail report
