@@ -138,7 +138,6 @@ per-frame CPU growth since #5926.
 - [Vendored code has every upstream fix it needs](/quest/m1/vendor-sync/README.md) - quinn, libv4l-rs, nvidia-video-codec-sdk, rust-media-libs, cros-codecs, and UniFFI generator fixes are ported or planned, once per release cycle
 - [Media fuzz findings](/quest/m1/fuzz-findings/README.md) - the nightly media fuzz targets run clean: mp4-atom, MKV block, TS step, SPS overflow, and catalog encoder bugs they found are fixed
 - [fMP4 sample plans, trun counts, and trak counts are bounded](/quest/m1/fmp4-metadata-limits.md) - a `moof` or `moov` within the importer's bounds cannot plan hundreds of megabytes or take quadratic time; 116 bytes cost 584 MB today
-- [Mesh dials recover from a stuck flow](/quest/m1/mesh-fresh-port.md) - a relay redials a failing cluster peer from a fresh UDP port, so one dropped 5-tuple can't strand a link
 - [Cluster routing](/quest/m1/cluster-routing/README.md) - prove shared routing contracts, implement per-origin routes, and connect outbound local clusters
 - [Routing guide](/quest/m1/routing-guide.md) - concepts and practical outbound federation setup
 - [moq-c at parity](/quest/m1/c/README.md) - the hand-written `moq-c` ships at the cut with every m1 binding feature moq-ffi gains
