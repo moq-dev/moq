@@ -184,7 +184,7 @@ struct Inner {
 pub struct Coordinator {
 	config: Arc<Config>,
 	/// Seals challenges, so an outstanding one needs no state.
-	secret: Arc<aws_lc_rs::hmac::Key>,
+	secret: Arc<rind::hmac::Key>,
 	/// The next challenge's sequence number. It restarts with the secret, which voids
 	/// every earlier challenge.
 	sequence: Arc<AtomicU64>,
@@ -211,7 +211,7 @@ impl Coordinator {
 			.sign(&claims(EndpointId::from_bytes([0; 32]), kio::clock::wall(), None))?;
 		Ok(Self {
 			config: Arc::new(config),
-			secret: Arc::new(aws_lc_rs::hmac::Key::new(aws_lc_rs::hmac::HMAC_SHA256, &random(32))),
+			secret: Arc::new(rind::hmac::Key::new(&rind::hmac::HMAC_SHA256, &random(32))),
 			sequence: Default::default(),
 			inner: Arc::new(Mutex::new(Inner {
 				store,
@@ -432,7 +432,7 @@ impl Coordinator {
 
 	/// The truncated HMAC sealing a challenge's expiry and nonce.
 	fn tag(&self, body: &[u8]) -> Vec<u8> {
-		aws_lc_rs::hmac::sign(&self.secret, body).as_ref()[..TAG_LEN].to_vec()
+		rind::hmac::sign(&self.secret, body).as_ref()[..TAG_LEN].to_vec()
 	}
 
 	/// Apply `change` to a copy of the store and save it, adopting the copy only once it
@@ -589,18 +589,16 @@ fn encode(bytes: &[u8]) -> String {
 
 fn random(len: usize) -> Vec<u8> {
 	let mut bytes = vec![0u8; len];
-	aws_lc_rs::rand::fill(&mut bytes).expect("system randomness");
+	rind::rand::fill(&mut bytes).expect("system randomness");
 	bytes
 }
 
 fn sha256(bytes: &[u8]) -> Vec<u8> {
-	aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes)
-		.as_ref()
-		.to_vec()
+	rind::digest::digest(&rind::digest::SHA256, bytes).as_ref().to_vec()
 }
 
 fn constant_eq(a: &[u8], b: &[u8]) -> bool {
-	aws_lc_rs::constant_time::verify_slices_are_equal(a, b).is_ok()
+	rind::constant_time::verify(a, b).is_ok()
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -733,9 +731,9 @@ mod tests {
 			.unwrap()
 			.key
 			.unwrap();
-		let a = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
-		let b = aws_lc_rs::signature::Ed25519KeyPair::generate().unwrap();
-		let enroll = |signer: &aws_lc_rs::signature::Ed25519KeyPair, challenge: &Challenge| EnrollRequest {
+		let a = rind::signature::Ed25519KeyPair::generate().unwrap();
+		let b = rind::signature::Ed25519KeyPair::generate().unwrap();
+		let enroll = |signer: &rind::signature::Ed25519KeyPair, challenge: &Challenge| EnrollRequest {
 			proof: Proof::sign(signer, &base, challenge.challenge.clone()),
 			key: secret.clone(),
 			name: None,

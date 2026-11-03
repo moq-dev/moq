@@ -4945,7 +4945,6 @@ name = "moq-auth"
 version = "0.2.1"
 dependencies = [
  "anyhow",
- "aws-lc-rs",
  "axum",
  "base64 0.23.1",
  "bench-harness",
@@ -4956,13 +4955,15 @@ dependencies = [
  "moq-auth 0.2.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "moq-pattern 0.1.2",
  "moq-token",
- "p256",
- "p384",
  "pkcs1",
  "pkcs8 0.11.0",
  "rand 0.10.3",
  "reqwest",
+ "rind",
+ "rind-jsonwebtoken",
+ "rind-rustls",
  "rustls",
+ "rustls-platform-verifier",
  "serde",
  "serde_json",
  "serde_with",
@@ -8550,6 +8551,17 @@ dependencies = [
  "libcrux-p256",
  "libcrux-poly1305",
  "libcrux-traits",
+]
+
+[[package]]
+name = "rind-jsonwebtoken"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3dbbb3e3d229205e18f9a5b3ee418071a29eacdb61aec66a5f34eeffef8e55f"
+dependencies = [
+ "jsonwebtoken",
+ "pkcs1",
+ "rind",
 ]
 
 [[package]]
@@ -12412,6 +12424,7 @@ dependencies = [
  "hyper-util",
  "indexmap 2.14.2",
  "itertools 0.13.0",
+ "jsonwebtoken",
  "lazy_static",
  "libc",
  "libspa",

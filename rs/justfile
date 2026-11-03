@@ -505,6 +505,10 @@ codspeed:
         --bench priority --bench retirement --bench schedule --bench stats --bench synced --bench tail \
         --bench tracks --bench varint --bench viewers --bench matching \
         --bench endpoint --bench receive --bench sent_packets --bench streams --bench chunk_interleaving
+    # moq-auth's published release is its own dev-dependency, so `-p moq-auth` is ambiguous and
+    # cargo-codspeed takes no `--manifest-path`: build it from its own directory. Each build
+    # replaces only its own packages' benches, so `cargo codspeed run` runs both.
+    cd rs/moq-auth && VALGRIND_BUG_494162=1 cargo codspeed build --locked -m simulation --bench jwt
 
 # Held feed FETCH readiness across independent request and track counts.
 [positional-arguments]
