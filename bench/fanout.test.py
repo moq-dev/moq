@@ -29,8 +29,9 @@ class Fanout(unittest.TestCase):
 
     def test_each_count_divides_the_cycles_it_added_by_the_groups_delivered(self):
         counts = {0: 1_000, fanout.cycles("model", 4): 1_000 + 7 * fanout.cycles("model", 4) * 4}
-        with patch.object(fanout, "count", side_effect=lambda _, args, __: counts[args[1]]):
+        with patch.object(fanout, "count", side_effect=lambda _, args, __: counts[args[1]]) as counted:
             self.assertEqual(fanout.per_group("model", "bin", 4, "0"), 7)
+        self.assertEqual(counted.call_count, 2 * fanout.REPEATS)
         self.assertEqual(fanout.cycles("session", 512), 196)
         self.assertEqual(fanout.cycles("model", 2_000_000), 1)
 

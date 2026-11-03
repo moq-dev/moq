@@ -55,11 +55,21 @@ def count(binary, args, cpu):
     return parse_stat(run.stderr)
 
 
+# Each process draws its own hash seeds, which move a count by up to about 0.5%, so each
+# count is the median of a few.
+REPEATS = 3
+
+
 def per_group(scenario, binary, subscribers, cpu, extra=()):
+    from statistics import median
+
     n = cycles(scenario, subscribers)
-    base = count(binary, [subscribers, 0, *extra], cpu)
-    full = count(binary, [subscribers, n, *extra], cpu)
-    return (full - base) / (n * subscribers)
+    counts = []
+    for _ in range(REPEATS):
+        base = count(binary, [subscribers, 0, *extra], cpu)
+        full = count(binary, [subscribers, n, *extra], cpu)
+        counts.append((full - base) / (n * subscribers))
+    return median(counts)
 
 
 def callgrind(scenario, binary, subscribers, out, extra=()):

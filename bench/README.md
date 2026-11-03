@@ -306,8 +306,10 @@ mode runs alone.
 
 Each base builds into its own target under `target/bench/revisions/<sha>`,
 from a detached worktree in `.tmp/` that the run removes when it exits, so a
-later run reuses that build. The revisions build side by side on every allowed CPU,
-since fat LTO links on one thread. Every round measures each base and the
+later run reuses that build. The revisions build side by side on every allowed
+CPU, since fat LTO links on one thread, `BENCH_BUILD_JOBS` (default 4) at a
+time: each link takes gigabytes, so lower it on a host with little memory.
+Every round measures each base and the
 current tree back to back, rotating which goes first, for
 `BENCH_RUNTIME_ROUNDS` rounds (default 3). The revisions are each other's
 control, so there is no unprofiled run per revision. One generator drives them
@@ -379,13 +381,14 @@ Two scenarios run every subscriber count on one thread:
   revision whose session API predates this harness reports it unsupported.
 
 Each `bench/fanout/<scenario>` crate builds against each base's and the current
-tree's own crates and lock, side by side, into `target/bench/fanout/`, or
+tree's own crates and lock, `BENCH_BUILD_JOBS` at a time, into
+`target/bench/fanout/`, or
 `BENCH_FANOUT_TARGET` where a build cache might evict that during a long sweep. Each
 count pins the harness to one CPU (`BENCH_FANOUT_CPU`, by default the last
 allowed one) and takes its user instructions from `perf stat` for a run of
 zero cycles and one of many; the difference over the groups delivered is
-`fanout-summary.json`. Repeated counts agree to within a few instructions per
-group. `BENCH_FANOUT_CALLGRIND=1`, with `valgrind` on `PATH`, also keeps
+`fanout-summary.json`. Each process draws its own hash seeds, which move a
+count by up to about 0.5%, so each is the median of three. `BENCH_FANOUT_CALLGRIND=1`, with `valgrind` on `PATH`, also keeps
 callgrind outputs of both runs under `fanout/<revision>/<scenario>/callgrind/`;
 `python3 bench/fanout.py functions ZERO FULL UNITS` ranks functions by
 instructions per group, and `python3 bench/fanout.py compare BASE CURRENT

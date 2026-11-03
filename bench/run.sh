@@ -949,6 +949,30 @@ run_profiles() {
     done
 }
 
+# Run each QUEUED_BUILDS shell command with its output in the matching QUEUED_LOGS file, on
+# every allowed CPU and BENCH_BUILD_JOBS at a time: fat LTO links on one thread, but each
+# link takes gigabytes. Each runs as its own process group, so cleanup stops its rustc too.
+# Sets BUILD_STATUS to each command's exit status.
+run_queued_builds() {
+    local jobs=${BENCH_BUILD_JOBS:-4} first index launched
+    BUILD_STATUS=()
+    for ((first = 0; first < ${#QUEUED_BUILDS[@]}; first += jobs)); do
+        BUILD_PIDS=()
+        for ((index = first; index < first + jobs && index < ${#QUEUED_BUILDS[@]}; index++)); do
+            # setsid makes each build a group leader without forking.
+            setsid taskset -c "$ALLOWED_CPUS" bash -c "${QUEUED_BUILDS[$index]}" >"${QUEUED_LOGS[$index]}" 2>&1 &
+            BUILD_PIDS+=($!)
+        done
+        launched=${#BUILD_PIDS[@]}
+        for ((index = 0; index < launched; index++)); do
+            BUILD_STATUS[first + index]=0
+            wait "${BUILD_PIDS[$index]}" || BUILD_STATUS[first + index]=$?
+            # Reaped, so cleanup must not signal a group that ID may now name.
+            unset "BUILD_PIDS[$index]"
+        done
+    done
+}
+
 # Check out one revision for this run, in the checkout's ignored scratch space,
 # where it loads only its own Cargo configuration. Its target persists, keyed by
 # revision; the compiler cache keys on remapped paths, so a fresh checkout reuses it.
@@ -997,22 +1021,16 @@ run_instructions() {
     LOAD_BIN=$generator/profiling/moq-bench
     HOST_BIN=$generator/profiling/moq-bench-host
 
-    # Fat LTO links on one thread, so revisions build side by side on every allowed CPU.
     mkdir -p "$RUN/build"
-    # setsid makes each build a group leader without forking, so cleanup stops its rustc too.
+    QUEUED_BUILDS=() QUEUED_LOGS=()
     for ((index = 0; index < ${#build_labels[@]}; index++)); do
-        setsid taskset -c "$ALLOWED_CPUS" bash -c "$(declare -f build_workers); build_workers \"\$@\"" _ \
-            "${build_checkouts[$index]}" "${build_targets[$index]}" profiling instructions \
-            >"$RUN/build/${build_labels[$index]}.log" 2>&1 &
-        BUILD_PIDS+=($!)
+        QUEUED_BUILDS+=("$(declare -f build_workers); build_workers $(printf '%q ' \
+            "${build_checkouts[$index]}" "${build_targets[$index]}" profiling instructions)")
+        QUEUED_LOGS+=("$RUN/build/${build_labels[$index]}.log")
     done
-    local status
+    run_queued_builds
     for ((index = 0; index < ${#build_labels[@]}; index++)); do
-        status=0
-        wait "${BUILD_PIDS[$index]}" || status=$?
-        # Reaped, so cleanup must not signal a group that ID may now name.
-        unset "BUILD_PIDS[$index]"
-        if ((status != 0)); then
+        if ((BUILD_STATUS[index] != 0)); then
             printf 'build failed for %s:\n' "${build_labels[$index]}" >&2
             tail -n 40 "$RUN/build/${build_labels[$index]}.log" >&2
             return 1
@@ -1060,12 +1078,10 @@ run_fanout() {
     # The working tree changes under one target; Cargo's fingerprints track it.
     keys+=(current)
 
-    # Fat LTO links on one thread, so the harnesses build side by side on every allowed CPU,
-    # BENCH_FANOUT_JOBS at a time.
-    local jobs=${BENCH_FANOUT_JOBS:-4} first launched
     # A build cache that evicts the `target` directory under a long sweep fails every later
     # build; BENCH_FANOUT_TARGET names a directory it doesn't manage.
-    local targets=${BENCH_FANOUT_TARGET:-$TARGET/fanout}
+    local harnesses=${BENCH_FANOUT_TARGET:-$TARGET/fanout} target
+    QUEUED_BUILDS=() QUEUED_LOGS=()
     for ((index = 0; index < ${#labels[@]}; index++)); do
         for scenario in $FANOUT_SCENARIOS; do
             dir=$RUN/fanout/${labels[$index]}/$scenario
@@ -1074,36 +1090,27 @@ run_fanout() {
             # This revision's crates, resolved by its own lock.
             sed -i "s|path = \"../../../rs/|path = \"${checkouts[$index]}/rs/|" "$dir/Cargo.toml"
             cp "${checkouts[$index]}/Cargo.lock" "$dir/Cargo.lock"
-            printf '%s\n' "$targets/${keys[$index]}/$scenario" >"$dir/target"
+            target=$harnesses/${keys[$index]}/$scenario
+            # shellcheck disable=SC2016 # expanded by the build's own shell
+            QUEUED_BUILDS+=("$(printf 'mkdir -p "$(readlink -m %q)" && cd %q && CARGO_TARGET_DIR=%q cargo build --release' \
+                "$target" "$dir" "$target")")
+            QUEUED_LOGS+=("$dir/build.log")
             build_dirs+=("$dir")
         done
     done
-    for ((first = 0; first < ${#build_dirs[@]}; first += jobs)); do
-        BUILD_PIDS=()
-        for dir in "${build_dirs[@]:first:jobs}"; do
-            # shellcheck disable=SC2016 # the inner shell expands its own arguments
-            setsid taskset -c "$ALLOWED_CPUS" bash -c 'mkdir -p "$(readlink -m "$2")" && cd "$1" && CARGO_TARGET_DIR=$2 cargo build --release' _ \
-                "$dir" "$(cat "$dir/target")" >"$dir/build.log" 2>&1 &
-            BUILD_PIDS+=($!)
-        done
-        launched=${#BUILD_PIDS[@]}
-        for ((index = 0; index < launched; index++)); do
-            dir=${build_dirs[$((first + index))]}
-            status=0
-            wait "${BUILD_PIDS[$index]}" || status=$?
-            # Reaped, so cleanup must not signal a group that ID may now name.
-            unset "BUILD_PIDS[$index]"
-            if ((status == 0)); then
-                continue
-            fi
-            if [[ $dir == "$RUN/fanout/current/"* ]]; then
-                printf 'the current tree'"'"'s fan-out harness failed to build:\n' >&2
-                tail -n 40 "$dir/build.log" >&2
-                return 1
-            fi
-            printf 'fan-out harness %s does not build; reported unsupported\n' "${dir#"$RUN"/fanout/}"
-            touch "$dir/unsupported"
-        done
+    run_queued_builds
+    for ((index = 0; index < ${#build_dirs[@]}; index++)); do
+        dir=${build_dirs[$index]}
+        if ((BUILD_STATUS[index] == 0)); then
+            continue
+        fi
+        if [[ $dir == "$RUN/fanout/current/"* ]]; then
+            printf 'the current tree'"'"'s fan-out harness failed to build:\n' >&2
+            tail -n 40 "$dir/build.log" >&2
+            return 1
+        fi
+        printf 'fan-out harness %s does not build; reported unsupported\n' "${dir#"$RUN"/fanout/}"
+        touch "$dir/unsupported"
     done
 
     if [[ -n ${BENCH_FANOUT_VERSION:-} ]]; then extra+=(--version "$BENCH_FANOUT_VERSION"); fi
@@ -1112,7 +1119,7 @@ run_fanout() {
     for scenario in $FANOUT_SCENARIOS; do
         for ((index = 0; index < ${#labels[@]}; index++)); do
             dir=$RUN/fanout/${labels[$index]}/$scenario
-            binary=$targets/${keys[$index]}/$scenario/release/fanout-$scenario
+            binary=$harnesses/${keys[$index]}/$scenario/release/fanout-$scenario
             if [[ -f $dir/unsupported ]]; then binary=-; fi
             # shellcheck disable=SC2086 # one argument per subscriber count
             python3 "$ROOT/bench/fanout.py" measure "$RUN" "${labels[$index]}" "${revisions[$index]}" \
