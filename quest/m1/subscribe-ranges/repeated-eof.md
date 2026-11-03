@@ -4,7 +4,8 @@
 
 Once a `moq_net::track::Subscriber` with a bounded range has returned
 `Ok(None)` from `recv_group`/`next_group`, every later call returns
-`Ok(None)` at once instead of parking. The contract is documented on both
+`Ok(None)` at once instead of parking, until an update widens its bounds.
+The contract is documented on both
 methods and tested on the Plain and Resume cursors. A wire publisher's
 deliberate park past its bounded end (`parks`) is left as it is.
 

@@ -32,7 +32,8 @@ and
 [moq-dev/moq#7716](https://github.com/moq-dev/moq/pull/7716) found it
 separate from the Firefox tone problem. Read those jobs' artifacts first. If
 they isolate the cause, the Waiting item clears. If they don't, rerun the
-Firefox lane with the debug filter below.
+Waiting section's command with `--media-engines firefox` and the same
+`RUST_LOG` filter.
 
 Two failures were seen while landing
 [moq-dev/moq#6548](https://github.com/moq-dev/moq/pull/6548), on a host at

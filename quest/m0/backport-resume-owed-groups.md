@@ -17,8 +17,10 @@ beside the other backports. It starts once
   has no `live_floor`, `judge`, or `Misses`. The shared live floor that
   #7708 fixes arrived with
   [moq-dev/moq#4741](https://github.com/moq-dev/moq/pull/4741), which is not
-  on `release`. `release` does have `resume.rs` and drafts 14 to 21, so
+  on `release`. `release` does have `resume.rs`, so
   the symptom may still come through another path.
+  `release` also speaks draft 22 (`rs/moq-net/src/ietf/version.rs`), so
+  check drafts 14 to 22.
 - Reproduce first. Port #7708's regression tests (the cache-loss case and
   the bounded resumes) onto `release`'s older cache model and run them
   there. If none fails, delete this quest and record the run in the PR.

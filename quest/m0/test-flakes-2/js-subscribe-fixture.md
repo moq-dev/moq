@@ -19,9 +19,11 @@ leaves these tests alone.
   decodes `streams[1].written`. The `fakeSession` fixture (`:1015`) copies
   the bytes after one host turn, so under forced yields the SUBSCRIBE can
   still be partial.
-- Wait on a signal that the request is complete. That signal is the
-  subscriber reading its response, as #7663 does for the announce harness,
-  or the fixture exposing a full-message promise. Then decode.
+- Wait on a signal that the request is complete, such as a full-message
+  promise from the fixture, then decode. Don't wait on the subscriber reading
+  its response, as #7663 does for the announce harness: on lite-05 and later
+  the subscriber reads it only after TRACK_INFO, which the test sends after
+  decoding SUBSCRIBE.
 - Verify under forced yields (#7663 shows how to force them) and at normal
   speed. Check `fakeSession`'s other users for the same partial-write
   wait.

@@ -27,9 +27,14 @@ only works around the same GC for long interop runs.
   free, still under the threshold, so any cargo call can trigger it again.
 - Work out why the disk is that full first: other worktrees' targets, `.tmp/`
   scratch, Nix store. `quest worktree` reclaims finished checkouts.
-- Then set `[gc]` in dotfiles so the free-space trigger never collects a
-  live target, for example by lowering `min_free_size` to a real emergency
-  floor. If mbx can't spare live targets at all, report that upstream and
+- Then protect live targets in dotfiles. Lowering `min_free_size` only
+  changes when collection runs: below it, mbx still removes unprotected
+  managed targets. mbx's docs
+  ([managed targets](https://mr-boxington.jdx.dev/managed-targets)) describe
+  a running command's lease and a `target.keep` setting. Check which of them
+  failed for the target logged as live: a binary run straight from
+  `target/` holds no lease. Then set `target.keep` or the fitting `[gc]`
+  option. If mbx can't spare live targets at all, report that upstream and
   record the issue link here.
 - Edit dotfiles in place (`~/work/dotfiles` is live config), and link its
   commit here when done.
