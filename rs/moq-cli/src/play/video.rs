@@ -1138,7 +1138,7 @@ mod tests {
 		assert!(Instant::now() < last, "the track closed after its tail was due");
 		let audio = media.presentation.track(super::super::playback::Kind::Audio);
 		let transition = audio.declare();
-		audio
+		let _mapping = audio
 			.resume(transition, moq_net::Timestamp::ZERO, None)
 			.ready()
 			.await
