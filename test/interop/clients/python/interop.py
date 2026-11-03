@@ -196,7 +196,7 @@ async def _finish_subscribe(client: moq.Client, broadcast: str, frames: int) -> 
                     raise RuntimeError("catalog ended without video")
                 id, video = next(iter(catalog.video.items()))
                 async with await moq.media.TrackConsumer.subscribe(
-                    consumer, id, video, subscription=moq.Subscription(max_delay=MAX_DELAY)
+                    consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(max=MAX_DELAY))
                 ) as media:
                     count = 0
                     async for frame in media:
@@ -261,7 +261,7 @@ async def _decode_audio(
         id,
         audio,
         moq.audio.DecoderOutput(
-            format=moq.audio.SampleFormat.F32, delay=moq.media.Delay(min=timedelta(0), max=MAX_DELAY)
+            format=moq.audio.SampleFormat.F32, delay=moq.Delay(max=MAX_DELAY)
         ),
     )
     frame_bytes = 4 * audio.channel_count
@@ -312,7 +312,7 @@ async def subscribe(
         id, video = next(iter(catalog.video.items()))
 
         media = await moq.media.TrackConsumer.subscribe(
-            consumer, id, video, subscription=moq.Subscription(max_delay=MAX_DELAY)
+            consumer, id, video, subscription=moq.Subscription(delay=moq.Delay(max=MAX_DELAY))
         )
 
         total = 0

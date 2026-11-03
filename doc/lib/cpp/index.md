@@ -219,7 +219,7 @@ Hold the owned `BandwidthConsumer` returned by `session->recv_bandwidth()` to re
 
 ## Subscription defaults
 
-`moq::subscription_defaults()` returns moq-net's defaults, whose zero `max_delay` skips a superseded group at once; passing `std::nullopt` for a subscription means the same. Change its fields rather than starting from `moq::Subscription{}`, whose unset `max_delay` sets no subscriber limit.
+`moq::subscription_defaults()` returns moq-net's defaults, whose zero `delay` starts at the newest group and skips a superseded one at once; passing `std::nullopt` for a subscription means the same. Change its fields rather than starting from `moq::Subscription{}`, whose unset `delay.max` sets no subscriber limit and unset `delay.min` leaves the target latency unstated.
 
 ## Track demand
 

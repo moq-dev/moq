@@ -5,6 +5,12 @@ These are the UniFFI names; each language wrapper has its own `MIGRATE.md` in it
 
 ## Unreleased
 
+### Subscriptions take a `MoqDelay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
+
+`MoqSubscription.max_delay` is `delay: MoqDelay`, the record the decoder outputs take: set `delay.max` to the old `max_delay`.
+`MoqDelay.min` is `Option<Duration>`: null leaves the target latency unstated, which a decoder plays as zero, while `moq_subscription_defaults()` states zero. Wrap a decoder's `min: d` as `Some(d)`.
+Kotlin and Swift name both fields; the Dart, Go, and C wrappers make an omitted bound zero.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `MoqAnnounce.captures` is `Vec<String>` instead of `Option<Vec<String>>`. Remove optional checks and pass an empty list when constructing an announcement for a filter without wildcards. Regenerate bindings and rebuild the matching native library together.
@@ -53,9 +59,6 @@ It defaults to empty in every generated binding; a Rust struct literal adds `tok
 Every duration is a UniFFI `Duration` instead of an integer microsecond field, and drops its `_us` suffix: each language receives its own duration type (`timedelta`, `TimeInterval`, `java.time.Duration`, `time.Duration`, Dart `Duration`, C++ `std::chrono` nanoseconds).
 The renamed fields are `MoqClientConfig.{timeout, race, resolution_delay}`, `MoqQuicConfig.{idle_timeout, keep_alive}`, `MoqWebSocketConfig.delay`, `MoqBackoff.{initial, max, timeout}`, `MoqConnectionStats.rtt`, `MoqGrant.expires`, `MoqTrackInfo.max_age`, `MoqSubscription.max_delay`, `MoqFetchGroupOptions.max_delay`, `MoqAudio.jitter`, `MoqAudioDecoderOutput.{max_delay, delay}`, and `MoqVideoDecoderOutput.max_delay`; the methods are `MoqFill::max_delay()` and `MoqAudioConsumer::delay()`.
 `MoqAudioEncoderOutput.frame_duration_us: u32` is `frame_duration: Option<Duration>`: pass null where you passed 0 for the codec's own frame.
-`MoqSubscription.max_delay` has no default, since UniFFI can't default a duration to 0: Kotlin and Swift must name it, `0` for moq-net's default or null for no subscriber limit.
-Dart, Go, and C can still omit it (Dart's optional parameter, Go's nil `*time.Duration`, a zeroed C struct), which means no subscriber limit; name it there too.
-Start from `moq_subscription_defaults()` where you relied on that default; a null subscription argument still means it.
 `MoqTrackConsumer::info()` no longer fails.
 A duration handed out saturates at `i64::MAX` nanoseconds (about 292 years), so C, C++, and Go hold every value.
 

@@ -8,7 +8,9 @@ import "dart:ffi";
 import "dart:io" show Platform, File, Directory;
 import "dart:isolate";
 import "dart:typed_data";
+
 import "package:ffi/ffi.dart";
+
 import "uniffi_runtime.dart";
 export "uniffi_runtime.dart";
 
@@ -707,6 +709,65 @@ class FfiConverterMoqRatePolicy {
   }
 }
 
+class MoqDelay {
+  final Duration? min;
+  final Duration? max;
+  MoqDelay({this.min, this.max});
+}
+
+class FfiConverterMoqDelay {
+  static MoqDelay lift(RustBuffer buf) {
+    return FfiConverterMoqDelay.read(buf.asUint8List()).value;
+  }
+
+  static LiftRetVal<MoqDelay> read(Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    final min_lifted = FfiConverterOptionalDuration.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final min = min_lifted.value;
+    new_offset += min_lifted.bytesRead;
+    final max_lifted = FfiConverterOptionalDuration.read(
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    final max = max_lifted.value;
+    new_offset += max_lifted.bytesRead;
+    return LiftRetVal(
+      MoqDelay(min: min, max: max),
+      new_offset - buf.offsetInBytes,
+    );
+  }
+
+  static RustBuffer lower(MoqDelay value) {
+    final total_length =
+        FfiConverterOptionalDuration.allocationSize(value.min) +
+        FfiConverterOptionalDuration.allocationSize(value.max) +
+        0;
+    final buf = Uint8List(total_length);
+    write(value, buf);
+    return toRustBuffer(buf);
+  }
+
+  static int write(MoqDelay value, Uint8List buf) {
+    int new_offset = buf.offsetInBytes;
+    new_offset += FfiConverterOptionalDuration.write(
+      value.min,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    new_offset += FfiConverterOptionalDuration.write(
+      value.max,
+      Uint8List.view(buf.buffer, new_offset),
+    );
+    return new_offset - buf.offsetInBytes;
+  }
+
+  static int allocationSize(MoqDelay value) {
+    return FfiConverterOptionalDuration.allocationSize(value.min) +
+        FfiConverterOptionalDuration.allocationSize(value.max) +
+        0;
+  }
+}
+
 class MoqFetchGroupOptions {
   final int priority;
   final Duration? maxDelay;
@@ -827,12 +888,12 @@ class FfiConverterMoqRange {
 
 class MoqSubscription {
   final int priority;
-  final Duration? maxDelay;
+  final MoqDelay delay;
   final List<MoqRange>? ranges;
   final MoqOrder? order;
   MoqSubscription({
     this.priority = 0,
-    this.maxDelay,
+    required this.delay,
     this.ranges = null,
     this.order = null,
   });
@@ -850,11 +911,11 @@ class FfiConverterMoqSubscription {
     );
     final priority = priority_lifted.value;
     new_offset += priority_lifted.bytesRead;
-    final maxDelay_lifted = FfiConverterOptionalDuration.read(
+    final delay_lifted = FfiConverterMoqDelay.read(
       Uint8List.view(buf.buffer, new_offset),
     );
-    final maxDelay = maxDelay_lifted.value;
-    new_offset += maxDelay_lifted.bytesRead;
+    final delay = delay_lifted.value;
+    new_offset += delay_lifted.bytesRead;
     final ranges_lifted = FfiConverterOptionalSequenceMoqRange.read(
       Uint8List.view(buf.buffer, new_offset),
     );
@@ -868,7 +929,7 @@ class FfiConverterMoqSubscription {
     return LiftRetVal(
       MoqSubscription(
         priority: priority,
-        maxDelay: maxDelay,
+        delay: delay,
         ranges: ranges,
         order: order,
       ),
@@ -879,7 +940,7 @@ class FfiConverterMoqSubscription {
   static RustBuffer lower(MoqSubscription value) {
     final total_length =
         FfiConverterInt8.allocationSize(value.priority) +
-        FfiConverterOptionalDuration.allocationSize(value.maxDelay) +
+        FfiConverterMoqDelay.allocationSize(value.delay) +
         FfiConverterOptionalSequenceMoqRange.allocationSize(value.ranges) +
         FfiConverterOptionalMoqOrder.allocationSize(value.order) +
         0;
@@ -894,8 +955,8 @@ class FfiConverterMoqSubscription {
       value.priority,
       Uint8List.view(buf.buffer, new_offset),
     );
-    new_offset += FfiConverterOptionalDuration.write(
-      value.maxDelay,
+    new_offset += FfiConverterMoqDelay.write(
+      value.delay,
       Uint8List.view(buf.buffer, new_offset),
     );
     new_offset += FfiConverterOptionalSequenceMoqRange.write(
@@ -911,7 +972,7 @@ class FfiConverterMoqSubscription {
 
   static int allocationSize(MoqSubscription value) {
     return FfiConverterInt8.allocationSize(value.priority) +
-        FfiConverterOptionalDuration.allocationSize(value.maxDelay) +
+        FfiConverterMoqDelay.allocationSize(value.delay) +
         FfiConverterOptionalSequenceMoqRange.allocationSize(value.ranges) +
         FfiConverterOptionalMoqOrder.allocationSize(value.order) +
         0;
@@ -1762,65 +1823,6 @@ class FfiConverterMoqDatagram {
     return FfiConverterUInt64.allocationSize(value.sequence) +
         FfiConverterOptionalMoqTimestamp.allocationSize(value.timestamp) +
         FfiConverterUint8List.allocationSize(value.payload) +
-        0;
-  }
-}
-
-class MoqDelay {
-  final Duration min;
-  final Duration? max;
-  MoqDelay({required this.min, this.max});
-}
-
-class FfiConverterMoqDelay {
-  static MoqDelay lift(RustBuffer buf) {
-    return FfiConverterMoqDelay.read(buf.asUint8List()).value;
-  }
-
-  static LiftRetVal<MoqDelay> read(Uint8List buf) {
-    int new_offset = buf.offsetInBytes;
-    final min_lifted = FfiConverterDuration.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final min = min_lifted.value;
-    new_offset += min_lifted.bytesRead;
-    final max_lifted = FfiConverterOptionalDuration.read(
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    final max = max_lifted.value;
-    new_offset += max_lifted.bytesRead;
-    return LiftRetVal(
-      MoqDelay(min: min, max: max),
-      new_offset - buf.offsetInBytes,
-    );
-  }
-
-  static RustBuffer lower(MoqDelay value) {
-    final total_length =
-        FfiConverterDuration.allocationSize(value.min) +
-        FfiConverterOptionalDuration.allocationSize(value.max) +
-        0;
-    final buf = Uint8List(total_length);
-    write(value, buf);
-    return toRustBuffer(buf);
-  }
-
-  static int write(MoqDelay value, Uint8List buf) {
-    int new_offset = buf.offsetInBytes;
-    new_offset += FfiConverterDuration.write(
-      value.min,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    new_offset += FfiConverterOptionalDuration.write(
-      value.max,
-      Uint8List.view(buf.buffer, new_offset),
-    );
-    return new_offset - buf.offsetInBytes;
-  }
-
-  static int allocationSize(MoqDelay value) {
-    return FfiConverterDuration.allocationSize(value.min) +
-        FfiConverterOptionalDuration.allocationSize(value.max) +
         0;
   }
 }
@@ -21790,7 +21792,7 @@ void _checkApiVersion() {
 }
 
 void _checkApiChecksums() {
-  if (uniffi_moq_ffi_checksum_func_moq_subscription_defaults() != 37074) {
+  if (uniffi_moq_ffi_checksum_func_moq_subscription_defaults() != 63642) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_func_moq_log_level() != 24625) {
@@ -21917,7 +21919,7 @@ void _checkApiChecksums() {
       17412) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_recv_group() != 12949) {
+  if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_recv_group() != 40781) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqtrackconsumer_update() != 39083) {
@@ -21940,7 +21942,7 @@ void _checkApiChecksums() {
       60932) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotconsumer_next() != 37038) {
+  if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotconsumer_next() != 5806) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotproducer_demand() !=
@@ -22476,7 +22478,7 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediagroupconsumer_new() !=
-      58198) {
+      43404) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqmediatimebase_new() != 21606) {
