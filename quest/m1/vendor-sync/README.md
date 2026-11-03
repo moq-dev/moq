@@ -25,7 +25,9 @@ Each child, each run:
   dependency bumps.
 - Record the newest upstream commit checked where the next run will look: an
   `Upstream` section in the vendored crate's README (or module doc), or the
-  child's Plan for code outside this repository.
+  child's Plan for code outside this repository. When a child completes before
+  re-creation, move its checked heads and next-run decisions into this Plan.
+  Step 2 re-creates completed children from those records too.
 
 This README's own work, once every child has merged:
 
