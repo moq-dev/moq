@@ -189,6 +189,11 @@ print((root / "jobs").read_text())
             ("x86_64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", True),
         ]:
             with self.subTest(host=host, target=target, minimal=minimal):
+                payload = f"{host}:{target}:{minimal}".encode()
+                self.env["BUILD_ID"] = payload.decode()
+                default_library = self.root / "target/release/libmoq_ffi.so"
+                if minimal:
+                    default_bytes = default_library.read_bytes()
                 # Packaging the native host also generates bindings. Only the
                 # library lookup matters here; no generator needs to execute.
                 self.tool("rustc", f'print("host: {host}")\n')
@@ -211,9 +216,9 @@ elif args[0] == "build-ffi":
     directory /= "release"
     directory.mkdir(parents=True, exist_ok=True)
     for name in ["libmoq_ffi.so", "libmoq_ffi.a"]:
-        (directory / name).write_bytes(b"selected build")
+        (directory / name).write_bytes(os.environ["BUILD_ID"].encode())
 elif args[0] == "run":
-    assert pathlib.Path(args[args.index("--library") + 1]).read_bytes() == b"selected build"
+    assert pathlib.Path(args[args.index("--library") + 1]).read_bytes() == os.environ["BUILD_ID"].encode()
 else: raise AssertionError(args)
 """,
                 )
@@ -242,8 +247,10 @@ else: raise AssertionError(args)
                     str(self.root / "target" / "minimal" if minimal else self.root / "target"),
                 )
                 staged = self.root / f"dist/moq-ffi-1.2.3-{target}/lib"
-                self.assertEqual((staged / "libmoq_ffi.a").read_bytes(), b"selected build")
-                self.assertEqual((staged / "libmoq_ffi.so").read_bytes(), b"selected build")
+                self.assertEqual((staged / "libmoq_ffi.a").read_bytes(), payload)
+                self.assertEqual((staged / "libmoq_ffi.so").read_bytes(), payload)
+                if minimal:
+                    self.assertEqual(default_library.read_bytes(), default_bytes)
 
     def test_bindings_from_existing_library_never_build_moq_ffi(self):
         library = self.root / "libmoq_ffi.so"
