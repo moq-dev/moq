@@ -631,19 +631,19 @@ export namespace Track {
 	}
 	export class Fill {
 		[Symbol.dispose](): void;
-		accept(sequence: number, info?: Partial<Track.Info>): Group.Producer;
+		accept(sequence: bigint, info?: Partial<Track.Info>): Group.Producer;
 		close(): void;
-		dropGroups(start: number, end: number): void;
-		readonly end: number;
-		isWanted(sequence: number): boolean;
+		dropGroups(start: bigint, end: bigint): void;
+		readonly end: bigint;
+		isWanted(sequence: bigint): boolean;
 		get maxDelay(): Milli | null;
 		get order(): Track.Order;
 		get priority(): number;
-		refuseGroups(start: number, end: number, error: Error): void;
-		readonly start: number;
-		unwanted(sequence: number): Promise<void>;
-		wanted(): number | undefined;
-		wantedChanged(): Promise<number | undefined>;
+		refuseGroups(start: bigint, end: bigint, error: Error): void;
+		readonly start: bigint;
+		unwanted(sequence: bigint): Promise<void>;
+		wanted(): bigint | undefined;
+		wantedChanged(): Promise<bigint | undefined>;
 	}
 	export interface Groups {
 		end?: Track.Bound;
