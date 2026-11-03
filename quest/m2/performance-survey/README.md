@@ -173,8 +173,12 @@ The `js/replay` nightly series and the browser smoke's `replay.json` protect it.
 - The 2026-10-22 release audit bounded the media
   reorder queues in [moq-dev/moq#6453](https://github.com/moq-dev/moq/pull/6453)
   and fixed QMux copying in
-  [moq-dev/moq#6381](https://github.com/moq-dev/moq/pull/6381). MKV
-  fragmentation below concerns parser replay before those queues.
+  [moq-dev/moq#6381](https://github.com/moq-dev/moq/pull/6381). The MKV
+  importer's replay of accumulated input before those queues was removed by
+  [moq-dev/moq#6908](https://github.com/moq-dev/moq/pull/6908) and
+  [moq-dev/moq#7234](https://github.com/moq-dev/moq/pull/7234); the
+  measured no-win is in [moq-dev/moq#7515](https://github.com/moq-dev/moq/pull/7515),
+  and the nightly `mkv-chunks` and `mkv-payloads` series cover the slope.
 - [Binding bytes](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-bytes.md),
   [foreign polling](https://github.com/moq-dev/rust2/blob/main/quest/m1/ffi-poll-protocol.md),
   [Kotlin calls](https://github.com/moq-dev/rust2/blob/main/quest/m1/kt-ffi-calls.md),
@@ -196,7 +200,6 @@ The `js/replay` nightly series and the browser smoke's `replay.json` protect it.
 - [Task capacity after bursts](/quest/m2/performance-survey/task-capacity.md) - memory a task set keeps after peak occupancy subsides
 - [Cache metadata](/quest/m2/performance-survey/cache-metadata.md) - bookkeeping capacity after cached groups expire
 - [PCM batch processing](/quest/m2/performance-survey/audio-batches.md) - repeated tail movement during encoding and resampling
-- [Fragmented MKV import](/quest/m2/performance-survey/mkv-fragments.md) - accumulated-buffer copies and parser replay
 - [HLS request fan-out](/quest/m2/performance-survey/hls-serving.md) - repeated fetch, remux and playlist construction per viewer
 - [Buffered browser groups](/quest/m2/performance-survey/hang-buffered.md) - per-frame scans and bulk skip work
 - [Idle browser stats](/quest/m2/performance-survey/browser-idle-stats.md) - local transport polling without active publishing demand
