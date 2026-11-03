@@ -38,3 +38,28 @@ or holds.
   `group::Consumer::poll_read_frame_once` → `Prefetch::pop_cached`, which
   #6782 alone did not. If they persist on the quiet rerun, suggest a follow-up
   quest profiling `d854bf98b1` against `main`.
+- A 2026-11-03 rerun began on `desktop` at 0.21 one-minute load,
+  with no other T3 agents running, and captured both historical bases at
+  1/4/16 workers ([moq-dev/moq#7742](https://github.com/moq-dev/moq/pull/7742)).
+  At 4 workers, `GroupState` wait fell from 8 us (0.50% of mutex wait) to
+  none. At 16 workers, its share fell from 11.72% to 1.78%, but its absolute
+  wait rose from 47 us to 599 us in `Consumer::poll_read_frame_once` ->
+  `Cursor::poll_read_frame`. Total mutex wait rose from 0.401 ms to
+  33.722 ms, so the share alone hides the contrary absolute result.
+  These single five-second captures do not establish a regression or its
+  absence. The PR retains the reduced evidence and stack diff.
+- Current `main` at the claim's source revision has group-state waits in the
+  cached read path at 4 workers in both runs (26 and 18 us), and 937 us at
+  16 workers in the first run. The second current 16-worker capture was
+  refused for nonalternating switch records, so it supplies no measurement.
+  A separate epoch-versus-main investigation remains a suggested follow-up,
+  not work owned by this quest.
+
+## Waiting
+
+- Maintainer: resolve the contrary 16-worker absolute wait before calling this
+  a no-regression result. Recommend repeating the two historical revisions in
+  alternating order with warm direct-Nix-Cargo builds, keeping the workload,
+  worker counts and capture validation unchanged. Alternatively, explicitly
+  accept the share-only goal despite the increased absolute wait. No
+  production change is justified by these single captures.
