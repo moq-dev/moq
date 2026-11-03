@@ -296,12 +296,12 @@ c_build_pkgconfig() {
         echo "pkg-config not on PATH (apt install pkg-config / brew install pkgconf)" >&2
         return 1
     }
-    local pc="$LIBMOQ_ROOT/lib/pkgconfig/moq.pc"
-    cflags=$(pkg-config --cflags "$pc") || {
+    export PKG_CONFIG_PATH="$LIBMOQ_ROOT/lib/pkgconfig"
+    cflags=$(pkg-config --cflags moq) || {
         echo "pkg-config --cflags moq failed" >&2
         return 1
     }
-    libs=$(pkg-config --static --libs "$pc") || {
+    libs=$(pkg-config --static --libs moq) || {
         echo "pkg-config --static --libs moq failed" >&2
         return 1
     }

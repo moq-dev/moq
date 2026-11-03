@@ -104,8 +104,9 @@ The first FFI attempt exposed two base-branch failures:
   pkg-config packages. Nix's pkg-config wrapper replaces `PKG_CONFIG_PATH`
   with its target-specific value. Passing the installed `.pc` file directly
   fixes the lookup without changing the wrapper's dependency search. The
-  same explicit-prefix queries in OBS, Nix packaging, and published smoke
-  validation now use their `.pc` file too. C and C++ passed in both subsequent
+  same explicit-prefix queries in OBS and Nix packaging now use their `.pc`
+  file too. Published smoke keeps its name-based lookup to test consumer
+  resolution. C and C++ passed in both subsequent
   configured FFI runs.
 - Kotlin recursively called its own Gradle wrapper because `command -v gradle`
   selected Nix's exported function. The attempt was cancelled and its child
