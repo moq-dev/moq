@@ -14,7 +14,6 @@ import { toStreamCode } from "./error.ts";
 import type { Frame, FrameConsumer, Consumer as GroupConsumer, Producer as GroupProducer } from "./group.ts";
 import { isAnonymous, type Route } from "./hop.ts";
 import type * as Instance from "./instance.ts";
-import type { Request as OriginRequest } from "./origin.ts";
 import * as Path from "./path.ts";
 import type { Timestamp } from "./time.ts";
 import type { Delay, Demand, Groups, Info, Position, Producer, Request, Subscriber, Subscription } from "./track.ts";
@@ -623,10 +622,10 @@ export const hooks: {
 	 */
 	askFetch: (subscriber: Subscriber, sequence: bigint) => boolean | "pending";
 	/**
-	 * Bind a group to its track's timedness, so a frame whose timestamp disagrees is refused.
-	 * Throws `TimestampMismatch` if a buffered frame already disagrees.
+	 * Bind a group to its track's info, so a frame whose timestamp doesn't `rescale` to the track
+	 * is refused. Throws `TimestampMismatch` if a buffered frame already disagrees.
 	 */
-	bindGroupTimed: (group: GroupProducer, timed: boolean) => void;
+	bindGroupTimed: (group: GroupProducer, track: Info) => void;
 	/** Admit a datagram in its stored wire form. */
 	writeDatagram: (producer: Producer, datagram: Datagram, inflated?: number) => void;
 	/** Bind the group to its immutable track codec. */
@@ -705,11 +704,6 @@ export const hooks: {
 	stampUnlisted: (target: BroadcastConsumer) => void;
 	/** Whether a broadcast handle was {@link stampUnlisted marked unlisted}. */
 	unlisted: (target: BroadcastConsumer) => boolean;
-	/**
-	 * Resolve a session-forwarded request with its peer's routed broadcast. An application
-	 * claim answers through `prepare` and `publish` instead. Assigned by `origin.ts`.
-	 */
-	acceptRequest: (request: OriginRequest, source: BroadcastProducer | BroadcastConsumer) => void;
 } = {
 	endTrack: () => {
 		throw new Error("track.ts not loaded");
@@ -972,9 +966,6 @@ export const hooks: {
 	},
 	unlisted: () => {
 		throw new Error("broadcast.ts not loaded");
-	},
-	acceptRequest: () => {
-		throw new Error("origin.ts not loaded");
 	},
 };
 

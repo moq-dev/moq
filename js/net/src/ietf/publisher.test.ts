@@ -306,7 +306,7 @@ test("TRACK_STATUS finished at once is answered on every draft", async () => {
 		finish();
 		const served = new BroadcastProducer();
 		served.createTrack("video");
-		hooks.acceptRequest(pending, served);
+		pending.serve(served);
 		await task;
 		expect(await wire().u53()).toBe(TrackStatusOk.id);
 
@@ -439,7 +439,7 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		expect(early.written).toEqual([]);
 		// Withdrawn, so a late answer is closed rather than served.
 		const answer = new SessionBroadcast();
-		hooks.acceptRequest(pending, answer);
+		pending.serve(answer);
 		expect(answer.closed.peek()).toBeNull();
 
 		// The broadcast resolves, but its track is never answered.
@@ -449,7 +449,7 @@ test("a cancelled TRACK_STATUS releases its demand on every draft", async () => 
 		if (!request) throw new Error("no request for room/late");
 		const served = new BroadcastProducer();
 		const trackRequest = wireOf(served).requested();
-		hooks.acceptRequest(request, served);
+		request.serve(served);
 		const track = await trackRequest;
 		expect(track?.name).toBe("video");
 		late.cancel();
@@ -491,7 +491,7 @@ test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", as
 		expect(early.written).toEqual([]);
 		// Withdrawn, so a late answer is closed rather than served.
 		const answer = new SessionBroadcast();
-		if (pending) hooks.acceptRequest(pending, answer);
+		if (pending) pending.serve(answer);
 		expect(answer.closed.peek()).toBeNull();
 
 		// The broadcast resolves, but its track is never answered.
@@ -501,7 +501,7 @@ test("a SUBSCRIBE withdrawn during setup releases its demand on every draft", as
 		if (!request) throw new Error("no request for room/late");
 		const served = new BroadcastProducer();
 		const trackRequest = wireOf(served).requested();
-		hooks.acceptRequest(request, served);
+		request.serve(served);
 		const track = await trackRequest;
 		if (!track) throw new Error("no request for video");
 		expect(track.name).toBe("video");

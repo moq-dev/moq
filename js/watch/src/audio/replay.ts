@@ -84,6 +84,8 @@ export interface Quantum {
 	timestamp: number;
 	/** The delay `Sync` resolved as of this quantum, in ms: what the ring and the decode gate hold. */
 	delay: number;
+	/** The ring's cumulative underruns, as the player's stats count them: each run-dry and each short quantum. */
+	underruns: number;
 }
 
 /** Samples as the milliseconds `AudioBuffer` posts to the worklet. */
@@ -280,6 +282,7 @@ export async function* replay(trace: Arrival[], options: Options): AsyncGenerato
 				stalled: ring.stalled,
 				timestamp: Milli.fromMicro(ring.timestamp),
 				delay,
+				underruns: ring.underruns,
 			};
 		}
 	} finally {
