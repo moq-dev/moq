@@ -1942,7 +1942,7 @@ impl<R: Request> Drop for RequestServe<R> {
 /// The open stream is interest in the track: the query that answered it stays until the
 /// requester closes its side, so demand holds while the requester moves on to SUBSCRIBE.
 enum TrackInfoServe {
-	Track(track::Resolving),
+	Track(track::Resolving, Option<Box<Legacy>>),
 	/// Lite-05/06: a name no stream track has, answered for its datagram track.
 	Datagrams(datagram::Consumer),
 }
@@ -1976,9 +1976,10 @@ impl Request for TrackInfoServe {
 		track: &str,
 		broadcast: crate::broadcast::Consumer,
 	) -> Result<Self, Error> {
+		let legacy = Legacy::new(shared.version, &broadcast, track);
 		match broadcast.track(track) {
-			Ok(track) => Ok(Self::Track(track.info().into_inner())),
-			Err(err) => Ok(Self::Datagrams(legacy_datagrams(shared, &broadcast, track, err)?)),
+			Ok(track) => Ok(Self::Track(track.info().into_inner(), legacy)),
+			Err(err) => Ok(Self::Datagrams(Legacy::datagrams(legacy, err)?)),
 		}
 	}
 
@@ -1993,8 +1994,13 @@ impl Request for TrackInfoServe {
 		waiter: &kio::Waiter,
 	) -> Poll<Result<ControlFlow<()>, Error>> {
 		let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
+		if let Self::Track(querying, legacy) = self
+			&& let Poll::Ready(Err(err)) = querying.poll_ok(waiter)
+		{
+			*self = Self::Datagrams(Legacy::datagrams(legacy.take(), err)?);
+		}
 		let querying = match self {
-			Self::Track(querying) => querying,
+			Self::Track(querying, _) => querying,
 			Self::Datagrams(consumer) => {
 				let info = ready!(consumer.poll_info(waiter))?;
 				writer.set_priority(crate::coding::TRACK_INFO_SEND_ORDER);
@@ -2107,6 +2113,7 @@ enum SubscribeServe {
 		/// The newest group when the SUBSCRIBE arrived; see [`cursor_floor`].
 		latest: Option<u64>,
 		update: Option<lite::SubscribeUpdate>,
+		legacy: Option<Box<Legacy>>,
 	},
 	/// Waiting for the model subscription to be confirmed.
 	Confirm {
@@ -2117,6 +2124,7 @@ enum SubscribeServe {
 		/// The newest group when the SUBSCRIBE arrived; see [`cursor_floor`].
 		latest: Option<u64>,
 		update: Option<lite::SubscribeUpdate>,
+		legacy: Option<Box<Legacy>>,
 	},
 	/// Streaming groups. Boxed: by far the largest state, and the enum is moved on every
 	/// transition.
@@ -2172,18 +2180,10 @@ impl Request for SubscribeServe {
 		track: &str,
 		broadcast: crate::broadcast::Consumer,
 	) -> Result<Self, Error> {
+		let legacy = Legacy::new(shared.version, &broadcast, track);
 		let track = match broadcast.track(track) {
 			Ok(track) => track,
-			Err(err) => {
-				let mut consumer = legacy_datagrams(shared, &broadcast, track, err)?;
-				consumer.set_priority(msg.priority);
-				return Ok(Self::Datagrams {
-					consumer,
-					id: msg.id,
-					priority: msg.priority,
-					send: None,
-				});
-			}
+			Err(err) => return Ok(Self::datagrams(Legacy::datagrams(legacy, err)?, &msg, None)),
 		};
 		let latest = track.latest_sequence();
 		if Bounds::has_time(&msg.ranges) {
@@ -2194,10 +2194,11 @@ impl Request for SubscribeServe {
 				querying,
 				latest,
 				update: None,
+				legacy,
 			});
 		}
 		let bounds = Bounds::new(&msg.ranges, None)?;
-		Ok(Self::subscribe(shared, msg, bounds, &track, latest, None))
+		Ok(Self::subscribe(shared, msg, bounds, &track, latest, None, legacy))
 	}
 
 	fn update(&mut self, update: lite::SubscribeUpdate) {
@@ -2230,12 +2231,13 @@ impl Request for SubscribeServe {
 		loop {
 			match self {
 				Self::Query { querying, .. } => {
-					let info = ready!(querying.poll_ok(waiter))?;
+					let info = ready!(querying.poll_ok(waiter));
 					let Self::Query {
 						msg,
 						track,
 						latest,
 						update,
+						legacy,
 						..
 					} = std::mem::replace(
 						self,
@@ -2247,18 +2249,25 @@ impl Request for SubscribeServe {
 					else {
 						unreachable!()
 					};
+					let info = match info {
+						Ok(info) => info,
+						Err(err) => {
+							*self = Self::datagrams(Legacy::datagrams(legacy, err)?, &msg, update);
+							continue;
+						}
+					};
 					let bounds = Bounds::new(&msg.ranges, info.timescale)?;
-					*self = Self::subscribe(shared, *msg, bounds, &track, latest, update);
+					*self = Self::subscribe(shared, *msg, bounds, &track, latest, update, legacy);
 				}
 				Self::Confirm { subscribing, .. } => {
 					let ietf = ready!(shared.peer_setup.poll_ietf(waiter));
-					let track = ready!(subscribing.poll_ok(waiter))?;
-					crate::ietf::flate::egress(track.info(), shared.version.has_compression())?;
+					let track = ready!(subscribing.poll_ok(waiter));
 					let Self::Confirm {
 						msg,
 						bounds,
 						latest,
 						update,
+						legacy,
 						..
 					} = std::mem::replace(
 						self,
@@ -2270,6 +2279,14 @@ impl Request for SubscribeServe {
 					else {
 						unreachable!()
 					};
+					let track = match track {
+						Ok(track) => track,
+						Err(err) => {
+							*self = Self::datagrams(Legacy::datagrams(legacy, err)?, &msg, update);
+							continue;
+						}
+					};
+					crate::ietf::flate::egress(track.info(), shared.version.has_compression())?;
 
 					// `None` omits the per-frame timestamp prefix: an untimed track on
 					// Lite07+, or any track before Lite05 (whose frames still carry
@@ -2380,19 +2397,36 @@ impl Request for SubscribeServe {
 	}
 }
 
-/// Lite-05/06 carry a name's stream track and datagram track on one subscription: a name
-/// no stream track has is served from its datagram track. `err` is the stream track's
-/// refusal, returned as is otherwise.
-fn legacy_datagrams(
-	shared: &Shared,
-	broadcast: &crate::broadcast::Consumer,
-	track: &str,
-	err: Error,
-) -> Result<datagram::Consumer, Error> {
-	if !matches!(err, Error::NotFound) || !shared.version.has_datagrams() || shared.version.has_datagram_tracks() {
-		return Err(err);
+/// Lite-05/06 carry a name's stream track and datagram track on one subscription, so a
+/// name no stream track has is served from its datagram track. The stream track's lookup
+/// resolves later through an origin, so the request keeps this until it does.
+struct Legacy {
+	broadcast: crate::broadcast::Consumer,
+	name: String,
+}
+
+impl Legacy {
+	/// The fallback for a request on `version`, or `None` when the stream track's answer stands.
+	fn new(version: Version, broadcast: &crate::broadcast::Consumer, name: &str) -> Option<Box<Self>> {
+		(version.has_datagrams() && !version.has_datagram_tracks()).then(|| {
+			Box::new(Self {
+				broadcast: broadcast.clone(),
+				name: name.to_string(),
+			})
+		})
 	}
-	broadcast.datagrams(track).map_err(|_| err)
+
+	/// The datagram track to serve instead when the stream track's lookup failed with `err`,
+	/// or `err` itself.
+	fn datagrams(legacy: Option<Box<Self>>, err: Error) -> Result<datagram::Consumer, Error> {
+		let Some(legacy) = legacy else {
+			return Err(err);
+		};
+		if !matches!(err, Error::NotFound | Error::Stream(StreamError::NotFound)) {
+			return Err(err);
+		}
+		legacy.broadcast.datagrams(&legacy.name).map_err(|_| err)
+	}
 }
 
 /// Sends a datagram track's datagrams to one subscription, best-effort.
@@ -2555,9 +2589,8 @@ impl Request for DatagramServe {
 impl SubscribeServe {
 	/// Open the model subscription for `msg`'s `bounds`.
 	///
-	/// One subscriber for the whole subscription: the run loop polls its groups and its
-	/// best-effort datagrams from this single cursor, so a group-only or datagram-only track
-	/// opens exactly one subscription (no duplicate demand).
+	/// One subscriber for the whole subscription, so a track opens exactly one (no duplicate
+	/// demand).
 	fn subscribe(
 		shared: &Shared,
 		msg: lite::Subscribe<'static>,
@@ -2565,6 +2598,7 @@ impl SubscribeServe {
 		track: &track::Consumer,
 		latest: Option<u64>,
 		update: Option<lite::SubscribeUpdate>,
+		legacy: Option<Box<Legacy>>,
 	) -> Self {
 		let subscription = crate::track::Subscription {
 			priority: msg.priority,
@@ -2582,6 +2616,23 @@ impl SubscribeServe {
 			subscribing,
 			latest,
 			update,
+			legacy,
+		}
+	}
+
+	/// Serve `msg` from the name's datagram track, at the priority of its latest `update`.
+	fn datagrams(
+		mut consumer: datagram::Consumer,
+		msg: &lite::Subscribe<'static>,
+		update: Option<lite::SubscribeUpdate>,
+	) -> Self {
+		let priority = update.map_or(msg.priority, |update| update.priority);
+		consumer.set_priority(priority);
+		Self::Datagrams {
+			consumer,
+			id: msg.id,
+			priority,
+			send: None,
 		}
 	}
 }

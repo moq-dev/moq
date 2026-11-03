@@ -2440,6 +2440,8 @@ enum DatagramState {
 	Info {
 		request: datagram::Request,
 		stream: Stream<Transport, Version>,
+		/// The priority DATAGRAMS carried.
+		priority: i8,
 	},
 	/// Lite-05/06: waiting for TRACK_INFO.
 	TrackInfo {
@@ -2530,15 +2532,20 @@ impl DatagramServe {
 					let track = request.name().to_string().into();
 					match version.has_datagram_tracks() {
 						true => {
+							let priority = request.priority().unwrap_or_default();
 							stream.writer.buffer(&lite::ControlType::Datagrams)?;
 							stream.writer.buffer(&lite::Datagrams {
 								id: self.id,
 								broadcast: self.path.clone(),
 								instance: self.instance.clone(),
 								track,
-								priority: request.priority().unwrap_or_default(),
+								priority,
 							})?;
-							self.state = DatagramState::Info { request, stream };
+							self.state = DatagramState::Info {
+								request,
+								stream,
+								priority,
+							};
 						}
 						false => {
 							stream.writer.buffer(&lite::ControlType::Track)?;
@@ -2555,12 +2562,15 @@ impl DatagramServe {
 					self.validity.check_unanswered(waiter)?;
 					ready!(stream.writer.poll_flush(waiter))?;
 					let info = ready!(stream.reader.poll_decode::<lite::DatagramsInfo>(waiter))?;
-					let DatagramState::Info { request, stream } =
-						std::mem::replace(&mut self.state, DatagramState::Done)
+					let DatagramState::Info {
+						request,
+						stream,
+						priority,
+					} = std::mem::replace(&mut self.state, DatagramState::Done)
 					else {
 						unreachable!()
 					};
-					let priority = request.priority().unwrap_or_default();
+					// A change since DATAGRAMS went out reaches the publisher as an update.
 					let producer = request.accept(info.into());
 					self.register(&producer, info.timescale);
 					self.state = DatagramState::Live {
@@ -2692,7 +2702,7 @@ impl DatagramServe {
 		self.subscriber.datagrams.lock().remove(&self.id);
 		match std::mem::replace(&mut self.state, DatagramState::Done) {
 			DatagramState::Open { request } => request.reject(err),
-			DatagramState::Info { request, stream } | DatagramState::TrackInfo { request, stream } => {
+			DatagramState::Info { request, stream, .. } | DatagramState::TrackInfo { request, stream } => {
 				stream.writer.abort(&err);
 				request.reject(err);
 			}
