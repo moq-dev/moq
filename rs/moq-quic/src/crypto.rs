@@ -1,15 +1,12 @@
-//! Traits and implementations for the QUIC cryptography protocol
+//! What a connection's TLS handshake negotiated.
 //!
-//! The protocol logic in moq-quic is contained in types that abstract over the actual
-//! cryptographic protocol used. This module contains the traits used for this
-//! abstraction layer as well as a single implementation of these traits that uses
-//! rustls with ring or aws-lc-rs to implement the TLS protocol support.
-//!
-//! Note that usage of any protocol (version) other than TLS 1.3 does not conform to any
-//! published versions of the specification, and will not be supported in QUIC v1.
+//! The handshake runs on rustls with ring or aws-lc-rs. The traits here are crate-private:
+//! rustls is their one real implementation, and the plaintext one behind the `fuzz` feature
+//! serves the fuzz target and the benchmarks.
 
-use std::{any::Any, str, sync::Arc};
+use std::{str, sync::Arc};
 
+use ::rustls::pki_types::CertificateDer;
 use bytes::BytesMut;
 
 use crate::{
@@ -19,23 +16,40 @@ use crate::{
 
 /// Cryptography interface based on *ring*
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-pub(crate) mod ring_like;
+mod ring_like;
 /// TLS interface based on rustls
 #[cfg(any(feature = "aws-lc-rs", feature = "ring"))]
-pub mod rustls;
+pub(crate) mod rustls;
+
+/// What the handshake negotiated, available once the connection emits `HandshakeDataReady`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct HandshakeData {
+	/// The negotiated application protocol, if ALPN is in use.
+	///
+	/// Always set when the client offered protocols, since rustls refuses a handshake without one.
+	pub alpn: Option<Vec<u8>>,
+	/// The server name the client sent, seen only by the server.
+	pub server_name: Option<String>,
+}
+
+/// The requested keying material is longer than the handshake's hash can export.
+#[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), expect(dead_code, reason = "only tests export keying material"))]
+pub(crate) struct ExportKeyingMaterialError;
 
 /// A cryptographic session (commonly TLS)
-pub trait Session: Send + Sync + 'static {
+pub(crate) trait Session: Send + Sync + 'static {
 	/// Create the initial set of keys given the client's initial destination ConnectionId
 	fn initial_keys(&self, dst_cid: ConnectionId, side: Side) -> Keys;
 
 	/// Get data negotiated during the handshake, if available
 	///
 	/// Returns `None` until the connection emits `HandshakeDataReady`.
-	fn handshake_data(&self) -> Option<Box<dyn Any>>;
+	fn handshake_data(&self) -> Option<HandshakeData>;
 
-	/// Get the peer's identity, if available
-	fn peer_identity(&self) -> Option<Box<dyn Any>>;
+	/// The certificate chain the peer presented, end entity first, if any
+	fn peer_identity(&self) -> Option<Vec<CertificateDer<'static>>>;
 
 	/// Returns `true` until the connection is fully established.
 	fn is_handshaking(&self) -> bool;
@@ -73,6 +87,7 @@ pub trait Session: Send + Sync + 'static {
 	///
 	/// This function will fail, returning [ExportKeyingMaterialError],
 	/// if the requested output length is too large.
+	#[cfg_attr(not(test), expect(dead_code, reason = "only tests export keying material"))]
 	fn export_keying_material(
 		&self,
 		output: &mut [u8],
@@ -82,7 +97,7 @@ pub trait Session: Send + Sync + 'static {
 }
 
 /// A pair of keys for bidirectional communication
-pub struct KeyPair<T> {
+pub(crate) struct KeyPair<T> {
 	/// Key for encrypting data
 	pub local: T,
 	/// Key for decrypting data
@@ -90,7 +105,7 @@ pub struct KeyPair<T> {
 }
 
 /// A complete set of keys for a certain packet space
-pub struct Keys {
+pub(crate) struct Keys {
 	/// Header protection keys
 	pub header: KeyPair<Box<dyn HeaderKey>>,
 	/// Packet protection keys
@@ -98,7 +113,7 @@ pub struct Keys {
 }
 
 /// Client-side configuration for the crypto protocol
-pub trait ClientConfig: Send + Sync {
+pub(crate) trait ClientConfig: Send + Sync {
 	/// Start a client session with this configuration
 	fn start_session(
 		self: Arc<Self>,
@@ -109,9 +124,11 @@ pub trait ClientConfig: Send + Sync {
 }
 
 /// Server-side configuration for the crypto protocol
-pub trait ServerConfig: Send + Sync {
+pub(crate) trait ServerConfig: Send + Sync {
 	/// Create the initial set of keys given the client's initial destination ConnectionId
-	fn initial_keys(&self, version: Version, dst_cid: ConnectionId) -> Keys;
+	///
+	/// `None` when the config cannot protect Initial packets, so no connection can start.
+	fn initial_keys(&self, version: Version, dst_cid: ConnectionId) -> Option<Keys>;
 
 	/// Generate the integrity tag for a retry packet
 	fn retry_tag(&self, version: Version, orig_dst_cid: ConnectionId, packet: &[u8]) -> [u8; 16];
@@ -119,11 +136,15 @@ pub trait ServerConfig: Send + Sync {
 	/// Start a server session with this configuration
 	///
 	/// Sessions must reject early data; the transport only processes 1-RTT application packets.
-	fn start_session(self: Arc<Self>, version: Version, params: &TransportParameters) -> Box<dyn Session>;
+	fn start_session(
+		self: Arc<Self>,
+		version: Version,
+		params: &TransportParameters,
+	) -> Result<Box<dyn Session>, TransportError>;
 }
 
 /// Keys used to protect packet payloads
-pub trait PacketKey: Send + Sync {
+pub(crate) trait PacketKey: Send + Sync {
 	/// Encrypt the packet payload with the given packet number
 	fn encrypt(&self, packet: u64, buf: &mut [u8], header_len: usize);
 	/// Decrypt the packet payload with the given packet number
@@ -138,7 +159,7 @@ pub trait PacketKey: Send + Sync {
 }
 
 /// Keys used to protect packet headers
-pub trait HeaderKey: Send + Sync {
+pub(crate) trait HeaderKey: Send + Sync {
 	/// Decrypt the given packet's header
 	fn decrypt(&self, pn_offset: usize, packet: &mut [u8]);
 	/// Encrypt the given packet's header
@@ -148,29 +169,21 @@ pub trait HeaderKey: Send + Sync {
 }
 
 /// A key for signing with HMAC-based algorithms
-pub trait HmacKey: Send + Sync {
+pub(crate) trait HmacKey: Send + Sync {
 	/// Method for signing a message
 	fn sign(&self, data: &[u8], signature_out: &mut [u8]);
 	/// Length of `sign`'s output
 	fn signature_len(&self) -> usize;
-	/// Method for verifying a message
-	fn verify(&self, data: &[u8], signature: &[u8]) -> Result<(), CryptoError>;
 }
 
-/// Error returned by [Session::export_keying_material].
-///
-/// This error occurs if the requested output length is too large.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ExportKeyingMaterialError;
-
 /// A pseudo random key for HKDF
-pub trait HandshakeTokenKey: Send + Sync {
+pub(crate) trait HandshakeTokenKey: Send + Sync {
 	/// Derive AEAD using hkdf
 	fn aead_from_hkdf(&self, random_bytes: &[u8]) -> Box<dyn AeadKey>;
 }
 
 /// A key for sealing data with AEAD-based algorithms
-pub trait AeadKey {
+pub(crate) trait AeadKey {
 	/// Method for sealing message `data`
 	fn seal(&self, data: &mut Vec<u8>, additional_data: &[u8]) -> Result<(), CryptoError>;
 	/// Method for opening a sealed message `data`
@@ -179,4 +192,4 @@ pub trait AeadKey {
 
 /// Generic crypto errors
 #[derive(Debug)]
-pub struct CryptoError;
+pub(crate) struct CryptoError;

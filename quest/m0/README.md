@@ -28,7 +28,6 @@ since cutting segments from first-frame pts waits on nothing in m1.
 ## Required
 
 - [Nightly passes on main](/quest/m0/nightly/README.md) - the scheduled Nightly passes end to end, so red means a new break
-- [Release credential leaks](/quest/m0/security-audit/README.md) - tokens stay out of logs and outbound HTTP clients verify their peer, on `main` and `release`
 - [Interop and Video pass on main](/quest/m0/interop-green/README.md) - the scheduled Interop and Video workflows pass, so red means a new break
 - [Publish the release line's drain() wrappers](/quest/m0/ffi-shutdown-backport.md) - Python `moq-rs` 0.5.2 and Dart `moq` 0.1.1 reach PyPI and pub.dev from `release`
 - [Backport audio groupDuration](/quest/m0/backport-audio-group-duration.md) - `@moq/publish` 0.5.4 on `release` can pack several Opus frames per group, making Cloudflare's relay drop audio less often
@@ -38,3 +37,5 @@ since cutting segments from first-frame pts waits on nothing in m1.
 - [More tests under load](/quest/m0/test-flakes-2/README.md) - load-only and queue failures, one quest per flake, fixed at the cause, since each one fails a whole batch
 - [Backport the dot-segment and auth-redirect refusals](/quest/m0/backport-release-hardening.md) - `release`'s relay refuses dot-segment paths and its auth client refuses redirects
 - [HLS export on a declared grid](/quest/m0/hls-media-grid.md) - the catalog's `hls` field and record tracks go away, and the export numbers segments on `media.join.interval` from media tracks
+- [Agents use quest's worktree hooks](/quest/m0/quest-worktree-hooks.md) - adopt `quest worktree hook` once it's shown to coexist with T3 Code's worktrees
+- [HLS lists contributions](/quest/m0/hls-contributions.md) - an HLS master lists each catalog contribution's renditions, and a contribution's media is subscribed only while players fetch it

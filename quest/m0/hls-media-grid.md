@@ -66,6 +66,12 @@ start, consumers.md swaps the first-frame pts for the group start.
   `moq import capture`, whose audio has been on demand since
   [moq-dev/moq#7238](https://github.com/moq-dev/moq/pull/7238)) starts capture
   and gets a playlist with both renditions.
+- Convert the nightly segment conformance test
+  (`rs/moq-hls/tests/integration/conformance.rs`, `just rs hls-conformance`),
+  which declares its segment duration with `with_hls`. Extend it to check that
+  every rendition of its unaligned ladder shares the grid's segment numbers
+  while its segment boundaries follow its own keyframes (moved here from the
+  conformance quest when that test landed, 2026-11-02).
 - Convert the HLS recorder (`rs/moq-cli/src/hls/record.rs`). Update the hang
   draft and the HLS, CLI, and archive docs this makes stale, including
   `doc/concept/archives.md`, whose HLS paragraph says a recording needs its
@@ -76,8 +82,15 @@ deleted, `clock` moves to `media.clock`, and `moq_mux::hls` shrinks to
 declaring the interval. Wire: hang drops the `hls` field and the record
 tracks, adds `media.join.interval`, and moves `clock` to `media.clock`.
 
+Decided 2026-11-02 (maintainer, /quest-unblock), a follow-up of
+[moq-dev/moq#7387](https://github.com/moq-dev/moq/pull/7387): the grid export's
+media playlists advertise `EXT-X-INDEPENDENT-SEGMENTS` whenever every listed
+segment opens on a sync sample. No renderer emits it today, and
+[export-sync-flags](/quest/m2/intra-refresh/export-sync-flags.md) assumes it, so
+that quest only has to omit it for warmup renditions. #7387's conformance probe
+then checks the tag against each segment's first sample.
+
 ## Related
 
 - [Consumers by start](/quest/m1/time-addressing/consumers.md) - later swaps the first-frame pts for group starts
-- [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - the nightly probes validate this segmentation
 - [HLS export follows a resolution change](/quest/m1/hls-reinit-same-codec.md) - its hand-over race is reconsidered without records

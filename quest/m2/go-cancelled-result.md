@@ -36,7 +36,7 @@ they are. A binding that destroys the result returns `ctx.Err()`, which
 `run` never releases, so nothing is destroyed twice. Check
 whether `bridge.CallHandle` still covers anything once the binding releases
 these results itself. If the
-[generator hard fork](/quest/m2/uniffi-fork.md) has landed, the change goes
+[exporter switch](/quest/m2/ffi-exporter.md) has landed, the change goes
 there; otherwise into the current fork, with a pin bump.
 
 Test it with a cancelled context racing a call that completes at once, and

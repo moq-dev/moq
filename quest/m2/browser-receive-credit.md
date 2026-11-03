@@ -2,10 +2,15 @@
 
 ## Goal
 
-Condition: WebTransport tells the page how much receive credit a stream it has
-stopped reading still holds, in the spec and in shipping Chrome and Firefox.
-Then [JS fastest-reader pacing](/quest/m2/js-fastest-reader.md) can pause
-groups safely. Delete this quest once the condition holds.
+WebTransport tells the page how much receive credit a stream it has stopped
+reading still holds, so [JS fastest-reader pacing](/quest/m2/js-fastest-reader.md)
+can pause groups safely. Delete this quest once the condition holds.
+
+## Waiting
+
+- w3c/webtransport: the spec, and shipping Chrome and Firefox, expose that
+  credit. Check with the steps under Plan. Decided 2026-11-02 (maintainer,
+  /quest-unblock): no W3C issue is filed for now.
 
 ## Plan
 

@@ -53,7 +53,7 @@ Decided 2026-10-25 with the maintainer (planning interview), still in force:
 - The token is the binding: enrollment proves the device key, then the
   coordinator issues a grant to publish `mesh/<id>/**` and subscribe
   `mesh/**`, plus publish on `mesh/*/*/.dial/<id>` so the node can dial
-  another's [socket](/quest/m2/socket/README.md) under its own id (amended
+  another's [socket](/quest/m1/socket/README.md) under its own id (amended
   2026-11-01). Relays need no new check. Membership is the coordinator's
   token only; a Tailnet-Lock analog was declined.
 - Protection is per broadcast, with levels that nest: identity (the token

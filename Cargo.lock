@@ -5237,6 +5237,7 @@ dependencies = [
  "moq-mux",
  "moq-net",
  "moq-tokio",
+ "mp4-atom",
  "percent-encoding",
  "rand 0.10.3",
  "reqwest",
@@ -5244,6 +5245,7 @@ dependencies = [
  "rind-rustls",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tower",
@@ -5344,6 +5346,14 @@ dependencies = [
  "url",
  "webm-iterable",
  "workspace-hack",
+]
+
+[[package]]
+name = "moq-mux-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-mux",
 ]
 
 [[package]]
@@ -5603,6 +5613,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "moq-rtmp-fuzz"
+version = "0.0.0"
+dependencies = [
+ "libfuzzer-sys",
+ "moq-rtmp",
+]
+
+[[package]]
 name = "moq-rtsp"
 version = "0.1.0"
 dependencies = [
@@ -5807,9 +5825,12 @@ name = "moq-transcode"
 version = "0.1.10"
 dependencies = [
  "anyhow",
+ "bench-harness",
  "bytes",
+ "futures",
  "hang",
  "kio 0.6.2",
+ "libc",
  "moq-mux",
  "moq-net",
  "moq-tokio",
@@ -11551,9 +11572,9 @@ dependencies = [
 
 [[package]]
 name = "web-transport-proto"
-version = "0.6.3"
+version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2baf87f7a4701d964fd23529b440db3da535b1d7539289f7a463c3481dafcff"
+checksum = "40d8e5dba9b14dbe25b116ac7e62ca82bf7c328d1c6072238bf0b9b47874c9d1"
 dependencies = [
  "bytes",
  "http",

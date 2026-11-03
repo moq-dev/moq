@@ -8,14 +8,18 @@ lane's derived 1039 ms bound. It keeps its session, and its audio resumes
 with its video. Both failures are fixed at their cause once one recurs with
 enough evidence to reproduce it deterministically.
 
+## Waiting
+
+- moq-dev/moq: either failure recurs with enough evidence to isolate a
+  deterministic cause. Advance it by running `just test media --media-cases
+  replacement --media-engines chromium` with
+  `RUST_LOG=moq_net=debug,moq_relay=debug`, and read any failure here with its
+  relay and browser logs.
+
 ## Plan
 
-Waiting on a recurrence: run `just test media --media-cases replacement
---media-engines chromium` with `RUST_LOG=moq_net=debug,moq_relay=debug`, and
-read any failure here with its relay and browser logs. Neither failure has a
-known cause or a reproduction yet, so no production or test change is
-justified until one recurs with enough evidence to isolate a deterministic
-cause.
+Neither failure has a known cause or a reproduction yet, so no production or
+test change is justified until one recurs.
 
 Two failures were seen while landing
 [moq-dev/moq#6548](https://github.com/moq-dev/moq/pull/6548), on a host at
