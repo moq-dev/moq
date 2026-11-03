@@ -21,6 +21,12 @@ producer stops every consumer; dropping one consumer leaves the others running.
 Capture readers share immutable f32 buffers, a fixed `encode::Input`, an `Instant`
 for the first sample, and a gap flag that also reports that reader's overruns.
 
+Device channel counts above stereo are now consistently `Layout::Discrete`:
+a microphone array does not declare surround-speaker positions. A stereo bus
+refuses those inputs instead of guessing a surround downmix. Request mono or
+stereo through `capture::Config::channels` when the device supports it, or map
+the known channels explicitly before writing a `Bus::channel`.
+
 ### `decode::Options` takes a `Delay` and `estimate` ([#7311](https://github.com/moq-dev/moq/pull/7311), [#7597](https://github.com/moq-dev/moq/pull/7597))
 
 `decode::Options::max_delay: Duration` and the playout `delay: Option<Duration>` are one `delay: decode::Delay` (`moq_net::track::Delay`) plus `estimate: bool`.

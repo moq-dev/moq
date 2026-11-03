@@ -25,7 +25,7 @@ use ringbuf::traits::Producer as _;
 use crate::Error;
 
 mod buffer;
-pub(crate) mod fanout;
+mod fanout;
 pub use fanout::{Buffer, Consumer};
 #[cfg(target_os = "macos")]
 mod channel;
@@ -312,6 +312,16 @@ impl Producer {
 	}
 }
 
+/// Native device futures must remain spawnable wherever the backend permits it.
+#[cfg(not(target_os = "macos"))]
+#[allow(dead_code, reason = "compile-time Send assertions, never called")]
+fn assert_capture_send(config: Config, producer: Producer) {
+	fn is_send<T: Send>(_: &T) {}
+	is_send(&Producer::open(config));
+	is_send(&producer.run());
+}
+
+/// A channel count alone cannot identify the speakers of a microphone array.
 pub(crate) fn device_layout(channels: u32) -> Result<crate::Layout, Error> {
 	match channels {
 		0..=2 => crate::Layout::from_channels(channels),

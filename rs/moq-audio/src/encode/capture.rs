@@ -11,7 +11,7 @@ use moq_mux::catalog::hang::CatalogExt;
 use super::{Input, Options, Producer};
 use crate::capture;
 use crate::resample::{Remix, Resampler};
-use crate::{Error, Frame, Layout as PcmLayout, Level};
+use crate::{Error, Frame, Level};
 
 /// The capture publication's current lifecycle state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -358,7 +358,6 @@ impl Driver {
 				device: capture.device().cloned(),
 				state: &self.state,
 				level: &self.level,
-				live: true,
 			};
 			// Capture is immutable metadata plus a cursor; read through an independent clone.
 			let mut reader = capture.clone();
@@ -378,7 +377,7 @@ impl Driver {
 					samples = reader.read() => {
 						let samples = samples?;
 						if samples.gap { output.producer.reanchor(); }
-						let timestamp = output.stamp(Some(samples.captured))?;
+						let timestamp = output.stamp(samples.captured)?;
 						if let Some((samples, timestamp)) = converter.process(samples, timestamp)? {
 							output.write(samples, timestamp)?;
 						}
@@ -462,11 +461,7 @@ pub async fn publish_capture<E: CatalogExt>(
 	driver.run().await
 }
 
-/// Off macOS, [`publish_capture`]'s future must stay `Send` so a server can
-/// `tokio::spawn` it. This is never called; it exists only to fail compilation
-/// if the future ever regains a `!Send` component. macOS is exempt: the TCC
-/// prompt and ScreenCaptureKit both hold ObjC handles across an await.
-#[cfg(not(target_os = "macos"))]
+/// Publishing a consumer can be spawned independently of the device's platform affinity.
 #[allow(dead_code, reason = "a compile-time `Send` assertion, never called")]
 fn assert_publish_capture_send(
 	broadcast: moq_net::broadcast::Producer,
@@ -488,28 +483,23 @@ struct EncoderOutput<'a> {
 	state: &'a kio::Producer<PublishedState>,
 	level: &'a kio::Producer<Level>,
 	device: Option<capture::Device>,
-	live: bool,
 }
 
 impl EncoderOutput<'_> {
-	fn stamp(&self, captured: Option<Instant>) -> Result<u64, Error> {
-		let timestamp = match captured {
-			// Clamp to the nearest instant the clock can name instead of ending the publication:
-			// a host that under-reports its delay can stamp a chunk after now, and a `Clock::at`
-			// epoch taken just after the first sample leaves it before PTS zero.
-			Some(at) => match self.clock.capture(at) {
-				Err(moq_mux::Error::InvalidCapture) => {
-					let now = self.clock.now();
-					let ago = Instant::now().saturating_duration_since(at).as_micros();
-					if ago > now.as_micros() {
-						moq_net::Timestamp::ZERO
-					} else {
-						now
-					}
+	fn stamp(&self, captured: Instant) -> Result<u64, Error> {
+		// Clamp to the nearest instant the clock can name: a host can stamp a
+		// chunk after now, or a newly created clock can begin after capture.
+		let timestamp = match self.clock.capture(captured) {
+			Err(moq_mux::Error::InvalidCapture) => {
+				let now = self.clock.now();
+				let ago = Instant::now().saturating_duration_since(captured).as_micros();
+				if ago > now.as_micros() {
+					moq_net::Timestamp::ZERO
+				} else {
+					now
 				}
-				timestamp => timestamp?,
-			},
-			None => self.clock.now(),
+			}
+			timestamp => timestamp?,
 		};
 		Ok(timestamp.as_micros() as u64)
 	}
@@ -542,15 +532,13 @@ impl EncoderOutput<'_> {
 	fn refresh(&mut self) -> Result<(), Error> {
 		let active = !self.on_demand || self.demand.wanted().is_some();
 		self.producer.set_active(active, self.clock.now())?;
-		if self.live {
-			publish_state(
-				self.state,
-				self.source,
-				if active { Status::Live } else { Status::Waiting },
-				self.device.clone(),
-				None,
-			);
-		}
+		publish_state(
+			self.state,
+			self.source,
+			if active { Status::Live } else { Status::Waiting },
+			self.device.clone(),
+			None,
+		);
 		Ok(())
 	}
 
@@ -565,16 +553,6 @@ impl EncoderOutput<'_> {
 	}
 }
 
-/// The layout of a capture device, which reports only a channel count. That names
-/// speakers for mono and stereo alone: a six-channel microphone array is not a
-/// 5.1 speaker layout, so it stays discrete rather than being remixed as one.
-fn device_layout(channels: u32) -> Result<PcmLayout, Error> {
-	match channels {
-		0..=2 => PcmLayout::from_channels(channels),
-		channels => Ok(PcmLayout::Discrete(channels)),
-	}
-}
-
 /// Converts a replacement consumer into the track's fixed PCM layout.
 struct Converter {
 	remix: Option<Remix>,
@@ -585,7 +563,12 @@ struct Converter {
 impl Converter {
 	fn new(input: capture::Layout, output: capture::Layout) -> Result<Self, Error> {
 		let remix = (input.channels != output.channels)
-			.then(|| Remix::new(device_layout(input.channels)?, device_layout(output.channels)?))
+			.then(|| {
+				Remix::new(
+					capture::device_layout(input.channels)?,
+					capture::device_layout(output.channels)?,
+				)
+			})
 			.transpose()?;
 
 		let resampler = if input.sample_rate == output.sample_rate {

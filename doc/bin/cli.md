@@ -290,7 +290,9 @@ moq ... import capture --audio on                        # encode audio continuo
 
 Video goes through the platform hardware encoder, with an H.264 software
 fallback when built with `openh264`, and audio is Opus; [moq-video](/lib/rs/moq-video) lists the
-backends. The camera and microphone stay open while publishing, so a late
+backends. An audio device that fails or stops ends the import with its source
+error; restart the command after the device is available again. The camera and
+microphone stay open while publishing, so a late
 subscriber can fetch the recent past. Choose each medium with
 `--video <on|demand|off>` (default `on`) and `--audio <on|demand|off>`
 (default `demand`). `on` encodes for the whole publish, and `off` publishes no
