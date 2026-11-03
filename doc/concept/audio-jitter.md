@@ -347,25 +347,29 @@ constant offset between tracks cancels out of `measured`: a video encoder that
 flushes 200 ms behind the audio encoder produces the same video target as one
 that does not, and its frames would all arrive 200 ms late for the shared clock.
 
-The catalog `delay` field carries that offset: the least a rendition's
-timestamps trailed those the broadcast's other renditions already wrote, over a
-window of a second of its media, and the largest of those windows. It is
-measured by the publisher, reported only once a window closes, and never
-lowered. It is an addend, not a floor, because nothing on this page contains
-it. Lateness only some frames have is left out, since `measured` already
-contains it: a B-frame written after a later reference picture trails that
-picture and another rendition's, and the audio written beside it trails them
-too, but the reference pictures do not, and every window holds one. The shared playout is the largest requirement among the
-renditions actually subscribed:
+The catalog `delay` field carries that offset. A publisher that knows it
+supplies it, and it is used as given. Otherwise the publisher measures it as the
+least a rendition's timestamps trailed those the broadcast's other renditions
+already wrote, over a window of a second of its media, keeping the largest of
+those windows. Either way it is reported only once known, and never lowered. It
+is an addend, not a floor, because nothing on this page contains it.
+
+Lateness only some frames have is left out, since `measured` already contains
+it. A B-frame written after a later reference picture trails that picture and
+another rendition's, and the audio written beside it trails them too. The
+reference pictures do not, and every window holds one.
+
+The shared playout is the largest requirement among the renditions actually
+subscribed:
 
 ```
 playout = max over subscribed renditions of (delay + target)
 ```
 
 A receiver **must not** subtract one rendition's `delay` from another's. Each is
-taken against whichever rendition was ahead and only ever rises, so two values need not
-share an origin: if the earliest rendition later drifts behind another, their
-difference understates the real spread. The maximum never under-buffers,
+taken against whichever rendition was ahead and only ever rises, so two values
+need not share an origin: if the earliest rendition later drifts behind another,
+their difference understates the real spread. The maximum never under-buffers,
 because the subscribed renditions' spread is measured from an earliest baseline
 no earlier than the broadcast's, so it never exceeds the largest `delay` among
 them. The cost is over-buffering by the smallest subscribed `delay` when the

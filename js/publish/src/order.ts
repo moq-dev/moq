@@ -34,7 +34,9 @@ export class Order {
 	}
 }
 
-// One rendition's catalog `delay`, in whole milliseconds. Mirrors `moq_mux::catalog::Estimator`.
+// One rendition's measured catalog `delay`, in whole milliseconds. Mirrors
+// `moq_mux::catalog::Estimator`, which measures it only for a rendition whose config supplies no
+// `delay` hint; the js/publish encoders supply none, so theirs is always measured.
 //
 // Each window of a second of the rendition's media measures the least its frames trailed the other
 // renditions, and the delay is the largest of those. A constant offset is in every window, so it
