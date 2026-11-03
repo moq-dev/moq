@@ -11,22 +11,6 @@ PR. Only a decision the fixer can't make reaches a person. The host
 `quest land` gate stops landing moq. Merged PRs per hour on a busy day match
 or beat both baselines below.
 
-## Waiting
-
-- Maintainer: verify the deployed `nixos` moq unit/generation runs
-  `quest land watch` with its fixer and retained state, no moq `serve` gate
-  remains, and the deployed installation token permits workflow-touching
-  fixes and re-enqueues. Current host access was unavailable at this
-  recheck. Recommend a read-only unit/journal check before any deployment
-  or permission change; installation metadata already grants workflows
-  write.
-- Maintainer: decide whether this day's throughput satisfies the approximate
-  host baseline of 4-6 PRs/hour, or keep performance verification open until
-  the never-empty-hour comparison below is complete. Recommend keeping it
-  open: 5.79 beats the old queue's overall 5.5, but the matching busy-hour
-  statistic is still missing. The host range's upper observed 6 is not a
-  new hard acceptance threshold.
-
 ## Plan
 
 Decided 2026-11-01 (maintainer, /quest-plan), reversing the 2026-10-26
@@ -103,7 +87,9 @@ Cutover recheck, 2026-11-03 (read-only):
   [historical workflow re-enqueue refusal](https://github.com/moq-dev/moq/pull/7431#issuecomment-6594966849)
   at 2026-11-03 03:49 UTC must not be mistaken for a current installation
   permission check. Organization installation metadata now lists moq-bot's
-  `workflows`, `contents` and `merge_queues` permissions as `write`.
+  `workflows`, `contents` and `merge_queues` permissions as `write`. The
+  deployed watcher mints installation tokens from that App (1039466), so
+  workflow-touching fixes and re-enqueues have the scope they need.
 - **Organization secrets verified absent.** Paginated
   `GET /orgs/moq-dev/actions/secrets?per_page=100` returned one page,
   `total_count=1`, and one name, neither `APP_CLIENT_ID` nor
@@ -117,6 +103,30 @@ Cutover recheck, 2026-11-03 (read-only):
   skipped `Queue` context on an old PR head. A pre-workflow PR can still
   need that report; see its workflow comments. No PR was enqueued and no
   workflow dispatched for this recheck.
+
+Host check, 2026-11-03 about 23:14 UTC (read-only SSH to `nixos`, no secret
+values read):
+
+- ✅ Recorded as verified (maintainer, 2026-11-03): the deployed watcher
+  matches the configuration above, and no moq `serve` gate remains.
+- `quest-land-moq.service` ("moq-dev/moq merge queue watcher") is active.
+  Its main process started 2026-11-02 06:48:41 PST, and
+  `NeedDaemonReload=no`, so it runs the deployed unit file. The system
+  generation is `nixos-system-nixos-26.11.20261014.55bfb4d`, switched
+  2026-11-03 09:54 PST.
+- It runs `quest land watch --app-id 1039466 --fixer <quest-land-moq-fixer>`
+  from quest 0.1.0 under bun, as user `quest-land-moq`, with the App key
+  passed by `LoadCredential=github-app-key:...`.
+- Retained state is in `/var/lib/quest-land-moq` (mode 0700): `checkout/`
+  and the live `moq-dev-moq/`.
+- `quest-land-fixer.socket` is listening, and an ephemeral
+  `quest-land-fixer@` container was running during the check.
+- The only remaining host gate unit is `quest-land-moq-pro.service`, for
+  moq.pro. moq-dev/moq has only the watcher. Watchers for quest, rind and
+  rust2 are also active.
+- Housekeeping, not a separate quest: the state directory still holds
+  `codex-repro-*` and `fixer-verified-*` directories left from 2026-10-30,
+  which can be deleted.
 
 Completed busy-day measurement: **2026-11-02 08:00 UTC to 2026-11-03 08:00
 UTC**, a full 24-hour window following the first successful merge-group build.
@@ -141,9 +151,15 @@ Final-enqueue latency excludes earlier failed attempts, fixer time before
 re-enqueue, and PRs that never merged, as in the queue baseline. No host
 latency baseline was recorded.
 
-Performance verification remaining: reconstruct complete queue occupancy,
-including removed and unmerged PRs, and compare the median merges in
-never-empty hours with the queue baseline's 6.0. A 24-hour rate is not that
-statistic. Keep concurrency 1 while gathering this evidence.
+Performance acceptance (maintainer, 2026-11-03):
+
+- ✅ Keep performance verification open; 5.79 PRs/hour for this day does
+  not by itself meet the goal.
+- Accept this day as meeting the approximate host range of 4-6 PRs/hour.
+
+Remaining work: reconstruct complete queue occupancy, including removed and
+unmerged PRs, and compare the median merges in never-empty hours with the
+queue baseline's 6.0. A 24-hour rate is not that statistic. Keep
+concurrency 1 while gathering this evidence.
 
 Public API: none. Wire: none.
