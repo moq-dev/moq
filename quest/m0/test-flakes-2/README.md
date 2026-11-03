@@ -68,12 +68,15 @@ The JS announce harness assumed one host turn drained all request writes. It
 now waits until the subscriber reads the response, with forced write-budget
 yields covering lite-03 and lite-04, fixed by [moq-dev/moq#7663](https://github.com/moq-dev/moq/pull/7663).
 
+The JS close-drain fixture advanced after the setup group's first payload, so a
+zero-delay subscription could expire its sender while the write budget yielded.
+It now reads that group through FIN before starting the next one, fixed by
+[moq-dev/moq#7658](https://github.com/moq-dev/moq/pull/7658).
+
 Public API: none. Wire: none.
 
 ## Required
 
 - [IETF22 fallback](/quest/m0/test-flakes-2/ietf22-fallback.md) - an IETF22 browser viewer follows a fallback within the media lane's bound, keeping its session and its audio
-- [Draft-22 interop with a native publisher](/quest/m0/test-flakes-2/draft22-interop.md) - no "invalid fetch range" or audio gap with a Rust or C++ publisher
+- [Browser buffering and Firefox audio-tone tests pass under load](/quest/m0/test-flakes-2/browser-media-flakes.md) - the two `harness.browser.ts` buffering tests and the Firefox player's audio-tone checks pass reliably in Interop and Nightly, each fixed at its cause under the epic's rules
 - [moq-tokio's close-drain test survives load](/quest/m0/test-flakes-2/tokio-close-drain.md) - `quic_client_close_drains_finished_track` stops failing land batches with "Unroutable"
-- [@moq/net's close-drain tests survive load](/quest/m0/test-flakes-2/js-close-drain.md) - the lite close-drain cases pass on every full suite run
-- [moq-c's gated callback test frees nothing early](/quest/m0/test-flakes-2/moq-c-gated-callback.md) - the moq-c tests stop aborting with a use-after-free under load

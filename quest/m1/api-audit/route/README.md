@@ -169,7 +169,6 @@ stale, including `doc/concept/identity.md`.
 
 - [Serve a held broadcast](/quest/m1/api-audit/route/serve.md) - a prefix route's request can be answered with a broadcast the app already holds, and the first subscribe succeeds on every wire
 - [One Route handle](/quest/m1/api-audit/route/handle.md) - `Publication`, `Prepared`, `Announcer` and `Requests` become one `Route` that owns its broadcast, with app options separate from transit facts
-- [Instances are percent-encoded in paths](/quest/m1/api-audit/route/instance-encoding.md) - HLS URLs and archive keys round-trip any stable instance
 - [Listing and follow](/quest/m1/api-audit/route/events.md) - apps read a path listing plus `follow`/`request`, and route metadata moves to a relay-level stream
 
 ## Related

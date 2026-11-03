@@ -27,7 +27,7 @@ export class TrackKey {
 	}
 
 	/** Admit an encryption of `length` plaintext bytes; refusals (identity, oversize, exhausted) spend nothing. */
-	admitSeal(group: number, frame: number, length: number, limit: number): Nonce {
+	admitSeal(group: bigint, frame: number, length: number, limit: number): Nonce {
 		const iv = nonce(group, frame);
 		if (length + TAG_LEN > limit) throw new Failure("oversize");
 		this.#spend(length);
@@ -39,7 +39,7 @@ export class TrackKey {
 	 *
 	 * A failed open still runs AES-GCM over every block, so admission spends whatever the outcome.
 	 */
-	admitOpen(group: number, frame: number, length: number, limit: number): Nonce {
+	admitOpen(group: bigint, frame: number, length: number, limit: number): Nonce {
 		const iv = nonce(group, frame);
 		if (length < TAG_LEN || length > limit) throw new Failure("oversize");
 		this.#spend(length - TAG_LEN);

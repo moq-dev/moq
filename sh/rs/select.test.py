@@ -3,12 +3,14 @@
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+FUZZ_EXCLUDES = " ".join(f"--exclude {crate}-fuzz" for crate in ("moq-net", "moq-quic", "moq-mux", "moq-rtmp"))
 DEVICE_FEATURES = "moq-video/capture moq-audio/capture moq-audio/playback moq-cli/play moq-cli/openh264"
 LINUX = os.uname().sysname == "Linux"
 
@@ -55,7 +57,7 @@ class SelectTest(unittest.TestCase):
                     suffix += " moq-relay/io-uring" if LINUX and action == "test" else ""
                     suffix += " --timings" if github_actions and action == "test" else ""
                     self.assertIn(
-                        f"rs {action} --workspace --exclude moq-net-fuzz --exclude moq-quic-fuzz{suffix}",
+                        f"rs {action} --workspace {FUZZ_EXCLUDES}{suffix}",
                         self.selected("sh/rs/nextest.sh", action=action, github_actions=github_actions),
                     )
         selected = self.selected("sh/rs/nextest.sh")
@@ -192,6 +194,147 @@ class SelectTest(unittest.TestCase):
                 self.assertFalse(any("moq-relay" in call or "moq-cli" in call for call in calls), calls)
         calls = self.selected(bench, "rs/moq-stats/src/lib.rs", action="test")
         self.assertTrue(any("/rs/moq-relay#" in call for call in calls), calls)
+
+
+class MetadataTest(unittest.TestCase):
+    def setUp(self):
+        scratch = ROOT / ".tmp"
+        scratch.mkdir(exist_ok=True)
+        directory = tempfile.TemporaryDirectory(dir=scratch)
+        self.addCleanup(directory.cleanup)
+        self.scratch = Path(directory.name)
+        self.calls = self.scratch / "calls"
+        self.fixture = self.scratch / "metadata"
+        self.changed = self.scratch / "changed"
+        self.changed.write_text("rs/seed/src/lib.rs\n")
+        self.env = dict(
+            os.environ,
+            LOCAL_SUPERVISED="1",
+            BASH_ENV=os.devnull,
+            GITHUB_ACTIONS="false",
+            PATH=f"{self.scratch}:{os.environ['PATH']}",
+            SELECT_CALLS=str(self.calls),
+            TEST_METADATA=str(self.fixture),
+            CC=str(self.scratch / "cc"),
+            TMPDIR=str(self.scratch),
+        )
+        for name, source in (
+            ("cargo", '#!/bin/sh\ncat "$TEST_METADATA"\n'),
+            ("just", '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SELECT_CALLS"\n'),
+            # Stop after artifact selection, before compiling or linking anything.
+            ("cc", '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SELECT_CALLS"\nexit 77\n'),
+        ):
+            tool = self.scratch / name
+            tool.write_text(source)
+            tool.chmod(0o755)
+
+    def metadata(self):
+        return {
+            "workspace_root": "/",
+            "packages": [
+                {
+                    "name": name,
+                    "id": f"path+file:///rs/{name}#1.0.0",
+                    "manifest_path": f"/rs/{name}/Cargo.toml",
+                    "targets": [{"src_path": f"/rs/{name}/src/lib.rs"}],
+                    "dependencies": [{"name": dep} for dep in deps],
+                }
+                for name, deps in (("seed", []), ("dependent", ["seed"]))
+            ],
+        }
+
+    def run_selection(self, script="select", fixture=None):
+        self.fixture.write_text(json.dumps(fixture) if fixture is not None else "{")
+        self.calls.unlink(missing_ok=True)
+        args = ["test", str(self.changed)] if script == "select" else []
+        return subprocess.run(
+            ["bash", f"sh/rs/{script}.sh", *args], cwd=ROOT, env=self.env, capture_output=True, text=True
+        )
+
+    def assert_failed_selection(self, result):
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("jq:", result.stderr)
+        self.assertFalse(self.calls.exists(), self.calls.read_text() if self.calls.exists() else "")
+        self.assertNotIn("skipping", result.stdout)
+
+    def test_valid_metadata_selects_dependents_without_errors(self):
+        result = self.run_selection(fixture=self.metadata())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            self.calls.read_text().splitlines(),
+            ["rs test --package path+file:///rs/dependent#1.0.0 --package path+file:///rs/seed#1.0.0 --no-tests=pass"],
+        )
+
+    def test_malformed_metadata_stops_before_running_tests(self):
+        for field in ("json", "manifest_path", "workspace_root", "targets", "dependencies"):
+            with self.subTest(field=field):
+                metadata = self.metadata()
+                if field == "workspace_root":
+                    del metadata[field]
+                elif field != "json":
+                    # Keep the first package valid so a stream can emit partial output.
+                    del metadata["packages"][1][field]
+                self.assert_failed_selection(self.run_selection(fixture=None if field == "json" else metadata))
+
+    def test_directory_mismatch_still_selects_the_workspace(self):
+        metadata = self.metadata()
+        metadata["packages"][1]["name"] = "renamed"
+        result = self.run_selection(fixture=metadata)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("a crate directory no longer matches", result.stderr)
+        self.assertIn(f"rs test --workspace {FUZZ_EXCLUDES}", self.calls.read_text())
+
+    def test_every_jq_failure_stops_selection_even_after_partial_output(self):
+        jq = self.scratch / "jq"
+        jq.write_text(
+            "#!/usr/bin/env bash\nset -eu\n"
+            'count_file="$TEST_METADATA.count"\ncount=0\n'
+            'if [[ -f "$count_file" ]]; then read -r count <"$count_file"; fi\n'
+            'count=$((count + 1))\nprintf "%s\\n" "$count" >"$count_file"\n'
+            'if [[ "$count" == "$FAIL_JQ" ]]; then\n'
+            '    echo "partial output"\n    echo "jq: injected failure" >&2\n    exit 7\nfi\n'
+            f'exec "{shutil.which("jq")}" "$@"\n'
+        )
+        jq.chmod(0o755)
+        self.env["FAIL_JQ"] = "0"
+        result = self.run_selection(fixture=self.metadata())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        stages = int(self.fixture.with_suffix(".count").read_text())
+        for stage in range(1, stages + 1):
+            with self.subTest(stage=stage):
+                self.fixture.with_suffix(".count").unlink(missing_ok=True)
+                self.env["FAIL_JQ"] = str(stage)
+                result = self.run_selection(fixture=self.metadata())
+                self.assert_failed_selection(result)
+                self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+
+    def test_c_artifact_and_header_selection_rejects_partial_json_streams(self):
+        include = self.scratch / "include"
+        include.mkdir()
+        (include / "moq.h").touch()
+        artifact = {"reason": "compiler-artifact", "filenames": [str(self.scratch / "libmoq.a")]}
+        header = {
+            "reason": "build-script-executed",
+            "package_id": "path+file:///rs/moq-c#1.0.0",
+            "out_dir": str(self.scratch),
+        }
+        # Cargo emits a stream, not an array. Both selectors must reject an
+        # error even when another record supplied the artifact they wanted.
+        for malformed in (None, {"reason": "compiler-artifact"}, {"reason": "build-script-executed"}):
+            with self.subTest(malformed=malformed):
+                stream = "\n".join(json.dumps(record) for record in (artifact, header))
+                stream += "\n" + ("{" if malformed is None else json.dumps(malformed))
+                self.fixture.write_text(stream)
+                result = subprocess.run(
+                    ["bash", "sh/rs/c-tests.sh"], cwd=ROOT, env=self.env, capture_output=True, text=True
+                )
+                self.assert_failed_selection(result)
+        self.fixture.write_text("\n".join(json.dumps(record) for record in (artifact, header)))
+        result = subprocess.run(["bash", "sh/rs/c-tests.sh"], cwd=ROOT, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 77, result.stdout + result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertIn(f"-I{include}", self.calls.read_text())
 
 
 class RecipeTest(unittest.TestCase):
