@@ -41,7 +41,9 @@ class Builds(unittest.TestCase):
                     env.pop(key, None)
 
                 def run(*args):
-                    return subprocess.run(args, cwd=repo, env=env, text=True, capture_output=True, check=True)
+                    result = subprocess.run(args, cwd=repo, env=env, text=True, capture_output=True)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    return result
 
                 run("cargo", "generate-lockfile")
                 run("git", "init", "-q", "-b", "main")
