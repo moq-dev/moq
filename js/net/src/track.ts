@@ -2523,6 +2523,15 @@ export class Subscriber {
 		return asker && fills.owed(start, end, asker);
 	}
 
+	// The lowest group a fill still brings this reader, asking for what it misses first.
+	#filling(): number | undefined {
+		const producer = this.#state.producer;
+		if (this.#resume || !producer || !fillsOf(producer).serving) return undefined;
+		const drift = this.#drift();
+		const filling = this.#askFills(this.#cursor.peek().start, Number.POSITIVE_INFINITY, drift);
+		return filling !== undefined && !this.#staleAt(filling, drift) ? filling : undefined;
+	}
+
 	// Ask a fill for the missed run `[start, end)`, unless its newest group is stale: what was
 	// never asked, and once more what was asked but is missed again.
 	#askMiss(start: number, end: number, drift: Drift, asker: Asker): void {
@@ -2627,8 +2636,13 @@ export class Subscriber {
 			if (subscriber.#resume) return subscriber.#resume.start();
 			const producer = subscriber.#state.producer;
 			const start = producer && sourceStart(producer);
-			if (start === undefined || start === "pending") return start;
-			return Math.max(start, subscriber.#cursor.peek().start);
+			if (start === "pending") return start;
+			const floor = start === undefined ? undefined : Math.max(start, subscriber.#cursor.peek().start);
+			// The lowest group a fill brings this reader starts it too, as the Rust `poll_start`
+			// has it: a group arriving first must not give up the history being filled below it.
+			const filling = subscriber.#filling();
+			if (filling === undefined) return floor;
+			return floor === undefined ? filling : Math.min(floor, filling);
 		};
 		hooks.tryRecvGroup = (subscriber, dispositions) => subscriber.#tryRecvGroup(dispositions);
 		hooks.parked = (subscriber) => {

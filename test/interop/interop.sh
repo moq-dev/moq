@@ -504,6 +504,7 @@ plan_pass() {
     for runtime in js-native-node js-native-bun; do
         needs "$runtime" || continue
         record "not run" case="CLI FETCH" publisher="$runtime" subscriber=rust
+        record "not run" case="CLI FETCH history" publisher="$runtime" subscriber=rust
         record "not run" case="late join" publisher=rust subscriber="$runtime"
         record "not run" case="late join" publisher="$runtime" subscriber=rust
         record "not run" case=tail publisher=rust subscriber="$runtime"
@@ -2034,12 +2035,16 @@ run_late_pair() {
 
 # This checkout's CLI FETCHes a past group of a finished track, under the same relay close check as
 # live readers. Every object has its own bytes, so a FETCH that drops, repeats, or reorders one fails.
+# The `history` mode (native JS only) serves the group from the publisher's request handler: it
+# was never in its cache.
 run_fetch_round() {
-    local pub="$1" name="fetch-$1" fifo="$LOGS/fetch-ack" broadcast="fetch-$1-$$-$RANDOM" pid from version
+    local pub="$1" mode="${2:-cached}" pid from version
+    local name="fetch-$1${2:+-$2}" fifo="$LOGS/fetch-ack" broadcast="fetch-$1-$$-$RANDOM"
+    local label="CLI FETCH${2:+ $2}"
     local started=$SECONDS why=""
-    local cell=(case="CLI FETCH" publisher="$pub" subscriber=rust log="$LOGS/$name-pub.log")
+    local cell=(case="$label" publisher="$pub" subscriber=rust log="$LOGS/$name-pub.log")
     if is_broken "$pub"; then
-        echo "  FAIL  CLI FETCH $pub (client unavailable)"
+        echo "  FAIL  $label $pub (client unavailable)"
         record fail "${cell[@]}" detail="client unavailable"
         overall=1
         return
@@ -2048,7 +2053,7 @@ run_fetch_round() {
     from=$(relay_next_line)
     mkfifo "$fifo"
     exec 9<>"$fifo"
-    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" cached
+    harness_spawn "$name-pub" "$LOGS/$name-pub.log" run_tail_publisher "$fifo" "$pub" publish "$broadcast" "$(token_url --publish "$(publish_grant "$broadcast")")" "$version" "$mode"
     pid="$HARNESS_PID"
     if timeout -k 3 "$TIMEOUT" "$MOQ" --connect "$(token_url --subscribe "$(subscribe_grant "$broadcast")")" ${version:+--connect-version "$version"} \
         --broadcast "$broadcast" fetch tail --group 1 --json >"$LOGS/$name.json" &&
@@ -2062,15 +2067,15 @@ PYCODE
         printf 'clean end\n' >&9
         harness_wait "$pid" || true
         if grep -qx 'tail acknowledged' "$LOGS/$name-pub.log"; then
-            echo "  PASS  CLI FETCH $pub (group 1; 3 objects)"
+            echo "  PASS  $label $pub (group 1; 3 objects)"
         else
-            echo "  FAIL  CLI FETCH $pub (publisher did not acknowledge)"
+            echo "  FAIL  $label $pub (publisher did not acknowledge)"
             why="publisher did not acknowledge"
             overall=1
             cat "$LOGS/$name-pub.log"
         fi
     else
-        echo "  FAIL  CLI FETCH $pub"
+        echo "  FAIL  $label $pub"
         why="incorrect or missing FETCH payload"
         overall=1
         cat "$LOGS/$name-pub.log"
@@ -2416,7 +2421,10 @@ run_tails() {
     echo "=== CLI FETCH close ==="
     run_fetch_round rust
     for runtime in js-native-node js-native-bun; do
-        ! needs "$runtime" || run_fetch_round "$runtime"
+        needs "$runtime" || continue
+        run_fetch_round "$runtime"
+        # A moq-transport FETCH is not served from the request handler yet.
+        [[ "$(pinned_version)" == moq-transport-* ]] || run_fetch_round "$runtime" history
     done
     echo "=== late join ==="
     run_late_pair rust rust

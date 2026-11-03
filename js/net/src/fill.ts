@@ -14,10 +14,18 @@ import { Milli } from "@moq/clock";
 import { type GetPromise, Signal } from "@moq/signals";
 import { NotFound } from "./error.ts";
 import type { Producer as GroupProducer } from "./group.ts";
-import { insertRun, NO_MAX_DELAY, type Run, runGaps } from "./internal.ts";
+import { insertRun, NO_MAX_DELAY, runGaps } from "./internal.ts";
 import type { Info, Order } from "./track.ts";
 
-/** What the fills need from the track they serve. Package-internal. */
+// A half-open run of group sequences, as `internal.ts` has it, kept local so the published
+// declarations never reach the package internals.
+type Run = { start: number; end: number };
+
+/**
+ * What the fills need from the track they serve.
+ *
+ * @internal
+ */
 export interface FillTrack {
 	/** The track's name. */
 	readonly name: string;
@@ -33,7 +41,11 @@ export interface FillTrack {
 	readonly released: GetPromise<unknown>;
 }
 
-/** A reader waiting on fills. Package-internal. */
+/**
+ * A reader waiting on fills.
+ *
+ * @internal
+ */
 export interface Asker {
 	/** The parts of `[start, end)` it still reads. */
 	wants(start: number, end: number): Run[];
@@ -98,8 +110,10 @@ class Pending {
 }
 
 /**
- * The fills of one track: what its readers miss, queued for its {@link Requests} handles.
- * Package-internal; a producer owns one.
+ * The fills of one track: what its readers miss, queued for its {@link Requests} handles. A
+ * producer owns one.
+ *
+ * @internal
  */
 export class FillState {
 	readonly #track: FillTrack;
@@ -281,12 +295,15 @@ function subtract(gap: Run, run: Run): Run[] {
 	].filter((part) => part.start < part.end);
 }
 
-
 // Constructs the public handles from within this module; assigned in their static blocks.
 let makeFill: (state: FillState, pending: Pending) => Fill;
 let makeRequests: (state: FillState) => Requests;
 
-/** A {@link Requests} handle on `state`. Package-internal: a producer's `requests()` calls it. */
+/**
+ * A {@link Requests} handle on `state`, for a producer's `requests()`.
+ *
+ * @internal
+ */
 export function requestsOf(state: FillState): Requests {
 	return makeRequests(state);
 }
