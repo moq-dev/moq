@@ -29,7 +29,3 @@ code and a revoked one doesn't, and note it in `doc/bin/relay/auth.md`.
 
 Public API: none. Wire: moq-transport group resets on token lapse change
 code.
-
-## Related
-
-- [moq-transport request tokens](/quest/m1/ietf-token-auth.md) - #7646's points 2 to 4 land there

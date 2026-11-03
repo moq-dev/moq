@@ -38,7 +38,7 @@ type Access = "lookup" | "fetch" | "subscribe";
 /** Full collections with no stack heap pointers, so dead stack slots cannot pin a target. */
 async function collect(): Promise<void> {
 	const gc = (globalThis as { gc?: (options: { type: "major"; execution: "async" }) => Promise<void> }).gc;
-	if (!gc) throw new Error("resume-history needs a precise collector: run it with bench/browser/micro.ts");
+	if (!gc) throw new Error("resume-history needs a precise collector: run it in Chromium through bench/browser");
 	for (let pass = 0; pass < 3; pass++) {
 		// V8's synchronous gc scans the embedder stack conservatively even from a fresh task.
 		// Async gc runs with StackState::kNoHeapPointers, including while tracing is enabled.

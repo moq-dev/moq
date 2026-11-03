@@ -31,7 +31,7 @@ try {
 	const initial = await active(requests[0]);
 	// moq-transport carries no instance, so the session mints one for each announcement.
 	assert(initial.instance && Moq.Instance.isMinted(initial.instance), "moq-transport carries no instance");
-	let track = initial.track("video").subscribe({ groups: { start: { included: 0 } } });
+	let track = initial.track("video").subscribe({ ranges: [{ start: { absolute: 0 } }] });
 	try {
 		for (let sequence = 0; sequence < 3; sequence++) {
 			const group = await track.recvGroup();
@@ -67,7 +67,7 @@ try {
 				replacementProbe = wireOf(replacement)
 					.consume(Moq.Path.from("handover"))
 					.track("video")
-					.subscribe({ groups: { start: { included: 1 } } });
+					.subscribe({ ranges: [{ start: { absolute: 1 } }] });
 				const probe = await replacementProbe.recvGroup();
 				assert(probe, "replacement has no group");
 				try {
@@ -87,7 +87,7 @@ try {
 						restarted.instance !== initial.instance,
 					"the replacement announcement is another minted instance",
 				);
-				const next = restarted.track("video").subscribe({ groups: { start: { included: 2 } } });
+				const next = restarted.track("video").subscribe({ ranges: [{ start: { absolute: 2 } }] });
 				track.close();
 				track = next;
 				process.stdout.write("replacement ready\n");
