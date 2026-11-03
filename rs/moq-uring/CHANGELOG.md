@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.22](https://github.com/moq-dev/moq/compare/moq-uring-v0.0.21...moq-uring-v0.0.22) - 2026-11-03
+
+### Fixed
+
+- require redacting web-transport-proto and redact moq-uring CONNECT Debug
+
+### Other
+
+- Merge remote-tracking branch 'origin/release' into iter/log-secrets-release
+
 ## [0.0.21](https://github.com/moq-dev/moq/compare/moq-uring-v0.0.20...moq-uring-v0.0.21) - 2026-11-03
 
 ### Other
