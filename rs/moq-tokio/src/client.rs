@@ -81,6 +81,10 @@ pub struct Client {
 	tls: rustls::ClientConfig,
 	#[cfg(feature = "quic")]
 	quic: Option<crate::quic::Client>,
+	/// The settings each qmux dial starts from: the `[quic]` windows and stream count, so a
+	/// qmux session takes the same per-session numbers as a QUIC one.
+	#[cfg(any(feature = "websocket", feature = "tcp"))]
+	qmux: qmux::Config,
 	/// Replaces the transport dial in tests, so the reconnect loop can run over
 	/// in-memory sessions on a paused clock.
 	#[cfg(test)]
@@ -126,6 +130,8 @@ impl Client {
 		#[cfg(any(feature = "quic", feature = "websocket"))]
 		let tls = config.tls.build()?;
 
+		#[cfg(any(feature = "websocket", feature = "tcp"))]
+		let qmux = crate::qmux_config(&quic.resolve());
 		#[cfg(feature = "quic")]
 		let quic = Some(crate::quic::Client::new(&config, &quic)?);
 
@@ -174,6 +180,8 @@ impl Client {
 			tls,
 			#[cfg(feature = "quic")]
 			quic,
+			#[cfg(any(feature = "websocket", feature = "tcp"))]
+			qmux,
 			#[cfg(test)]
 			dialer: None,
 		})
@@ -320,6 +328,7 @@ impl Client {
 				let config = opened.config;
 				let session = qmux::Session::connect(opened.channel, config)
 					.await
+					.map(crate::spawn_qmux)
 					.map_err(crate::webrtc::Error::from)?;
 				Ok::<_, Error>(connect_session(&self.moq, session).await?)
 			};
@@ -407,8 +416,14 @@ impl Client {
 		// QUIC, which can't speak it. Use only on a trusted network.
 		#[cfg(feature = "tcp")]
 		if url.scheme() == "tcp" {
-			let session =
-				crate::tcp::connect(url, &self.versions.alpns(), self.failover_delay, self.resolution_delay).await?;
+			let session = crate::tcp::connect(
+				url,
+				&self.versions.alpns(),
+				&self.qmux,
+				self.failover_delay,
+				self.resolution_delay,
+			)
+			.await?;
 			let session = connect_session(&moq, session).await?;
 			return Ok(Dialed::new(session, crate::Transport::Tcp));
 		}
@@ -420,6 +435,7 @@ impl Client {
 				url,
 				&self.versions.alpns(),
 				&self.tcp_tls,
+				&self.qmux,
 				self.failover_delay,
 				self.resolution_delay,
 			)
@@ -432,7 +448,7 @@ impl Client {
 		// authenticate us by uid/gid via SO_PEERCRED.
 		#[cfg(all(feature = "uds", unix))]
 		if url.scheme() == "unix" {
-			let session = crate::unix::connect(url, &self.versions.alpns()).await?;
+			let session = crate::unix::connect(url, &self.versions.alpns(), &self.qmux).await?;
 			let session = connect_session(&moq, session).await?;
 			return Ok(Dialed::new(session, crate::Transport::Unix));
 		}
@@ -482,8 +498,15 @@ impl Client {
 	#[cfg(feature = "websocket")]
 	async fn connect_websocket(&self, moq: &moq_net::Client, addr: crate::connect::Addr) -> crate::Result<Dialed> {
 		let alpns = self.versions.alpns();
-		let session =
-			crate::websocket::connect(&self.websocket, &self.tls, self.tls_host_name.as_deref(), addr, &alpns).await?;
+		let session = crate::websocket::connect(
+			&self.websocket,
+			&self.tls,
+			self.tls_host_name.as_deref(),
+			addr,
+			&alpns,
+			&self.qmux,
+		)
+		.await?;
 		let session = connect_session(moq, session).await?;
 		Ok(Dialed::new(session, crate::Transport::WebSocket))
 	}
@@ -510,10 +533,18 @@ impl Client {
 		let ws_config = self.websocket.clone();
 		let ws_tls = self.tls.clone();
 		let ws_tls_host_name = self.tls_host_name.clone();
+		let ws_session = self.qmux.clone();
 		let websocket = async move {
-			crate::websocket::race_handle(&ws_config, &ws_tls, ws_tls_host_name.as_deref(), addr, &alpns)
-				.await
-				.map(|res| res.map_err(Error::from))
+			crate::websocket::race_handle(
+				&ws_config,
+				&ws_tls,
+				ws_tls_host_name.as_deref(),
+				addr,
+				&alpns,
+				&ws_session,
+			)
+			.await
+			.map(|res| res.map_err(Error::from))
 		};
 
 		match race_transport_connect(&url, quic, websocket).await? {

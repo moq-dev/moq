@@ -57,6 +57,17 @@ spike assumed no consumer; teleoperation uplinks are one):
 - Docs: inline only. The congestion-control lines in `doc/bin/cli.md` and
   `doc/lib/*` gain the new variant; no new page.
 
+The shared pacer's low-rate correction and BBR3's one-datagram minimum send
+quantum are implemented together in [moq-dev/moq#7606](https://github.com/moq-dev/moq/pull/7606).
+GCC ([moq-dev/moq#7546](https://github.com/moq-dev/moq/pull/7546)) landed first,
+so #7606 reran its in-tree row, `rises_to_target_under_gcc` (1 Mbit/s start, a
+3 Mbit/s path opening to 12 Mbit/s), on all 8 seeds. The correction left it
+unchanged: 1 late frame probing and baseline, the same p99, and the target
+reached 5 s (1x) and 9 s (2x) after the path opened on every seed. The bake-off
+must use the corrected pacer: earlier candidate rows below 2 Mbit/s, including
+GCC's out-of-tree `tests::realtime` rows in #7546, can include up to 2x pacing
+overshoot.
+
 Remaining work once the candidates finish (this README's own job):
 
 - Run the shared comparison on the uplink presets: queuing delay p50/p95/p99,
@@ -90,7 +101,7 @@ Remaining work once the candidates finish (this README's own job):
 - Delete the losing candidates' code.
 - Decide who asks for receive timestamps. The spike added
   `transport::Config::receive_timestamps`, off by default, and the maintainer
-  kept it on 2026-10-30. The winner decides whether its `ControllerFactory`
+  kept it on 2026-10-30. The winner decides whether its `Factory`
   turns them on instead, so only `Realtime` sessions pay the ACK bytes.
 - Wire the winner's moq-shaper run into the nightly so a regression in
   queuing delay shows up.
@@ -104,7 +115,6 @@ owns that feedback.
 
 ## Required
 
-- [GCC candidate](/quest/m2/quic-realtime/gcc.md) - libwebrtc's GoogCC vendored into `moq-congestion` and refreshed to current WebRTC
 - [BBR3 delay bound](/quest/m2/quic-realtime/bbr-delay-bound.md) - BBR3 with inflight capped when the forward delay gradient shows queue growth
 - [SCReAMv2 candidate](/quest/m2/quic-realtime/scream.md) - the RFC 8298bis delay path ported to `moq-congestion`
 - [io_uring runs an application's controller](/quest/m2/quic-realtime/uring-controller.md) - moq-uring takes a controller factory, so the winner installs the same way on both runtimes
@@ -112,7 +122,6 @@ owns that feedback.
 
 ## Related
 
-- [The shared pacer holds its rate under 2 Mbit/s](/quest/m1/pacer-low-rate.md) - every candidate paces through it, so its fix shifts their low-rate rows
 - [Per-stream and per-datagram deadlines](/quest/m2/quic-deadline.md) - also consumes the forward-delay estimate
 - [BBR media study](/quest/m2/quic-bbr-study.md) - BBR3 behavior under media, the baseline here
 - [Measure ECN on the backbone](/quest/m2/quic-ecn-measure.md) - decides whether SCReAMv2's L4S path is worth porting

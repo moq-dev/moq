@@ -303,65 +303,68 @@ mod tests {
 	use super::*;
 
 	#[test]
-	#[tracing_test::traced_test]
 	fn credentials_stay_out_of_traces() {
 		let secret = "credential-that-must-not-be-logged";
-		let token = Token {
-			kind: Token::OUT_OF_BAND,
-			value: secret.as_bytes().to_vec(),
-		};
-		let setup = lite::Setup {
-			path: Some(format!("/room?jwt={secret}")),
-			token: Some(token.clone()),
-			..Default::default()
-		};
-		let wire = setup.encode_bytes(lite::Version::Lite07).unwrap();
-		assert_eq!(
-			lite::Setup::decode_slice(&wire, lite::Version::Lite07).unwrap().0,
-			setup
-		);
-		let auth = lite::Auth {
-			token: Bytes::copy_from_slice(secret.as_bytes()),
-		};
-		let wire = auth.encode_bytes(lite::Version::Lite07).unwrap();
-		assert_eq!(lite::Auth::decode_slice(&wire, lite::Version::Lite07).unwrap().0, auth);
+		let logs = crate::test_tracing::capture(tracing::Level::TRACE, || {
+			let token = Token {
+				kind: Token::OUT_OF_BAND,
+				value: secret.as_bytes().to_vec(),
+			};
+			let setup = lite::Setup {
+				path: Some(format!("/room?jwt={secret}")),
+				token: Some(token.clone()),
+				..Default::default()
+			};
+			let wire = setup.encode_bytes(lite::Version::Lite07).unwrap();
+			assert_eq!(
+				lite::Setup::decode_slice(&wire, lite::Version::Lite07).unwrap().0,
+				setup
+			);
+			let auth = lite::Auth {
+				token: Bytes::copy_from_slice(secret.as_bytes()),
+			};
+			let wire = auth.encode_bytes(lite::Version::Lite07).unwrap();
+			assert_eq!(lite::Auth::decode_slice(&wire, lite::Version::Lite07).unwrap().0, auth);
 
-		let version = crate::ietf::Version::Draft22;
-		let auth = crate::ietf::auth::Auth {
-			request_id: crate::ietf::RequestId(0),
-			token: Bytes::copy_from_slice(secret.as_bytes()),
-		};
-		let wire = auth.encode_bytes(version).unwrap();
-		assert_eq!(crate::ietf::auth::Auth::decode_slice(&wire, version).unwrap().0, auth);
-		let mut params = crate::ietf::Parameters::default();
-		crate::ietf::token::into_setup(&mut params, &token, version).unwrap();
-		params.set_bytes(
-			crate::ietf::ParameterBytes::Path,
-			format!("/room?jwt={secret}").into_bytes(),
-		);
-		let setup = Setup {
-			parameters: params.encode_bytes(version).unwrap(),
-		};
-		let wire = setup.encode_bytes(crate::Version::Ietf(version)).unwrap();
-		let decoded = Setup::decode_slice(&wire, crate::Version::Ietf(version)).unwrap().0;
-		let (params, _) = crate::ietf::Parameters::decode_slice(&decoded.parameters, version).unwrap();
-		assert_eq!(crate::ietf::token::from_setup(&params, version).unwrap(), Some(token));
-		tracing::trace!(?setup, ?decoded, ?params, "SETUP diagnostics");
+			let version = crate::ietf::Version::Draft22;
+			let auth = crate::ietf::auth::Auth {
+				request_id: crate::ietf::RequestId(0),
+				token: Bytes::copy_from_slice(secret.as_bytes()),
+			};
+			let wire = auth.encode_bytes(version).unwrap();
+			assert_eq!(crate::ietf::auth::Auth::decode_slice(&wire, version).unwrap().0, auth);
+			let mut params = crate::ietf::Parameters::default();
+			crate::ietf::token::into_setup(&mut params, &token, version).unwrap();
+			params.set_bytes(
+				crate::ietf::ParameterBytes::Path,
+				format!("/room?jwt={secret}").into_bytes(),
+			);
+			let setup = Setup {
+				parameters: params.encode_bytes(version).unwrap(),
+			};
+			let wire = setup.encode_bytes(crate::Version::Ietf(version)).unwrap();
+			let decoded = Setup::decode_slice(&wire, crate::Version::Ietf(version)).unwrap().0;
+			let (params, _) = crate::ietf::Parameters::decode_slice(&decoded.parameters, version).unwrap();
+			assert_eq!(crate::ietf::token::from_setup(&params, version).unwrap(), Some(token));
+			tracing::trace!(?setup, ?decoded, ?params, "SETUP diagnostics");
 
-		let uri = format!("https://relay.example/room?jwt={secret}");
-		let goaway = lite::Goaway {
-			uri: uri.as_str().into(),
-		};
-		let wire = goaway.encode_bytes(lite::Version::Lite07).unwrap();
-		lite::Goaway::decode_slice(&wire, lite::Version::Lite07).unwrap();
-		let goaway = crate::ietf::GoAway {
-			new_session_uri: uri.as_str().into(),
-			timeout: 0,
-			request_id: Some(crate::ietf::RequestId(0)),
-		};
-		let wire = goaway.encode_bytes(version).unwrap();
-		crate::ietf::GoAway::decode_slice(&wire, version).unwrap();
-		tracing::trace!(goaway = ?crate::goaway::Goaway::redirect(uri), "GOAWAY diagnostics");
+			let uri = format!("https://relay.example/room?jwt={secret}");
+			let goaway = lite::Goaway {
+				uri: uri.as_str().into(),
+			};
+			let wire = goaway.encode_bytes(lite::Version::Lite07).unwrap();
+			lite::Goaway::decode_slice(&wire, lite::Version::Lite07).unwrap();
+			let goaway = crate::ietf::GoAway {
+				new_session_uri: uri.as_str().into(),
+				timeout: 0,
+				request_id: Some(crate::ietf::RequestId(0)),
+			};
+			let wire = goaway.encode_bytes(version).unwrap();
+			crate::ietf::GoAway::decode_slice(&wire, version).unwrap();
+			tracing::trace!(goaway = ?crate::goaway::Goaway::redirect(uri), "GOAWAY diagnostics");
+		})
+		.join("\n");
+		let logs_contain = |needle: &str| logs.contains(needle);
 
 		assert!(logs_contain("encoding"));
 		assert!(logs_contain("decoded"));

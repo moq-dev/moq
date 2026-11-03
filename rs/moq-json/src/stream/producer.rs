@@ -69,7 +69,8 @@ impl<T: Serialize> Producer<T> {
 	///
 	/// The log accepts appends for its track's life. A record larger than a frame may be is refused
 	/// with [`moq_net::Error::FrameTooLarge`] before anything is written, leaving the log intact. A
-	/// timestamp whose presence doesn't match the track's timescale is refused with
+	/// timestamp that doesn't match the track's timescale (missing on a timed track, present on an
+	/// untimed one, or beyond what its scale can hold) is refused with
 	/// [`moq_net::Error::TimestampMismatch`] the same way, so a corrected append carries on.
 	///
 	/// Any other failure ends the track. A log missing a record is not the lossless log a stream
@@ -101,6 +102,14 @@ impl<T: Serialize> Producer<T> {
 	}
 }
 
+#[cfg(test)]
+impl<T> Producer<T> {
+	/// Shrink the frame limit to a size a test can reach.
+	pub(super) fn set_max_frame_bytes(&self, bytes: u64) {
+		self.inner.lock().unwrap().encoder.max_frame_bytes = bytes;
+	}
+}
+
 /// Shared publishing state behind [`Producer`]'s `Arc<Mutex>`.
 ///
 /// The track and the encoder are separate fields so a [`Pending`](super::Pending) record (which
@@ -116,11 +125,9 @@ impl<T: Serialize> Inner<T> {
 		// Split the borrow so `record` can hold the encoder while `track` is written through.
 		let Inner { track, encoder } = self;
 
-		// A timestamp that doesn't match the track is refused before anything changes: found by
-		// `write`, it would be a hole that ends the whole log.
-		if payload.at.is_some() != track.inner.info().timescale.is_some() {
-			return Err(moq_net::Error::TimestampMismatch.into());
-		}
+		// A timestamp that doesn't match the track, or that its scale can't hold, is refused before
+		// anything changes: found by `write`, it would be a hole that ends the whole log.
+		let at = moq_net::group::on_track(payload.at, track.inner.info().timescale)?;
 
 		// Encode first, so a value that can't be serialized doesn't publish an empty group that
 		// subscribers would advance into and wait on. Opening the group afterwards is safe because
@@ -141,7 +148,7 @@ impl<T: Serialize> Inner<T> {
 		let opened = track.open();
 		let published = opened.is_ok();
 		let result = match opened {
-			Ok(()) => track.write(payload.at, record.payload()),
+			Ok(()) => track.write(at, record.payload()),
 			Err(err) => Err(err),
 		};
 

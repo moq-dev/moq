@@ -107,9 +107,7 @@ async fn silent_peer_detected() {
 	// The keep-alive derives from the idle timeout, so only the silenced peer idles out.
 	let mut quic = moq_tokio::quic::Config::default();
 	quic.idle_timeout = Some((IDLE).into());
-	let cluster = cluster::Cluster::new(cluster::Options::new(config))
-		.expect("cluster init")
-		.with_connect(connect, quic);
+	let cluster = crate::spawn_cluster(cluster::Options::new(config)).with_connect(connect, quic);
 	let mut announced = cluster.origin.consume().announced();
 	let run = tokio::spawn(cluster.clone().start().await.expect("cluster start").run());
 

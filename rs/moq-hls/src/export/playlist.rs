@@ -40,6 +40,10 @@ pub(crate) struct Segment {
 	pub segment: u64,
 	/// The [`tag`](super::segments::tag) of the record track numbering the segment.
 	pub tag: String,
+	/// The hash of the init segment it decodes under, when that is a predecessor's rather than
+	/// the rendition's own: a reconfigure keeps its predecessor's segments listed (RFC 8216
+	/// 6.2.2), each under the `EXT-X-MAP` it was muxed for.
+	pub map: Option<String>,
 	/// `EXTINF` duration.
 	pub duration: Duration,
 	/// The rendition has no content for this span (`EXT-X-GAP`): the segment keeps its slot in
@@ -53,7 +57,8 @@ pub(crate) struct Segment {
 	pub program_date_time: Option<Wall>,
 }
 
-/// Render a media playlist for one rendition from a [`Snapshot`], mapping `init.{init}.mp4`.
+/// Render a media playlist for one rendition from a [`Snapshot`], mapping `init.{init}.mp4`
+/// except where a segment names another [`map`](Segment::map).
 ///
 /// `query` is an optional query string (without the leading `?`, e.g. `jwt=<token>`)
 /// appended to every child URL (the init map and each segment), so a stock player that
@@ -81,11 +86,20 @@ pub(crate) fn render_media(snapshot: &Snapshot, init: &str, query: Option<&str>)
 	if snapshot.discontinuity_sequence > 0 {
 		let _ = writeln!(out, "#EXT-X-DISCONTINUITY-SEQUENCE:{}", snapshot.discontinuity_sequence);
 	}
-	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.{init}.mp4{suffix}\"");
+	fn map<'a>(segment: &'a Segment, init: &'a str) -> &'a str {
+		segment.map.as_deref().unwrap_or(init)
+	}
+	let mut current = snapshot.segments.first().map_or(init, |segment| map(segment, init));
+	let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.{current}.mp4{suffix}\"");
 
 	for (index, segment) in snapshot.segments.iter().enumerate() {
 		if segment.discontinuity {
 			let _ = writeln!(out, "#EXT-X-DISCONTINUITY");
+		}
+		// A new init follows the discontinuity its reconfigure starts (RFC 8216 4.3.2.5).
+		if map(segment, init) != current {
+			current = map(segment, init);
+			let _ = writeln!(out, "#EXT-X-MAP:URI=\"init.{current}.mp4{suffix}\"");
 		}
 		if (index == 0 || segment.discontinuity)
 			&& let Some(pdt) = segment.program_date_time
@@ -126,6 +140,7 @@ mod tests {
 				Segment {
 					segment: 10,
 					tag: "ab12cd34".into(),
+					map: None,
 					duration: Duration::from_secs(2),
 					gap: false,
 					discontinuity: false,
@@ -134,6 +149,7 @@ mod tests {
 				Segment {
 					segment: 11,
 					tag: "ab12cd34".into(),
+					map: None,
 					duration: Duration::from_millis(1960),
 					gap: false,
 					discontinuity: false,
@@ -170,6 +186,7 @@ mod tests {
 		let segment = |segment, duration, gap, discontinuity, program_date_time| Segment {
 			segment,
 			tag: "ab12cd34".into(),
+			map: None,
 			duration: Duration::from_millis(duration),
 			gap,
 			discontinuity,
@@ -208,6 +225,7 @@ mod tests {
 			segments: vec![Segment {
 				segment: 0,
 				tag: "ab12cd34".into(),
+				map: None,
 				duration: Duration::from_secs(2),
 				gap: false,
 				discontinuity: false,
@@ -231,6 +249,7 @@ mod tests {
 			segments: vec![Segment {
 				segment: 0,
 				tag: "ab12cd34".into(),
+				map: None,
 				duration: Duration::from_secs(4),
 				gap: false,
 				discontinuity: false,
@@ -243,5 +262,41 @@ mod tests {
 		let out = render_media(&snapshot, "0123abcd", None);
 		assert!(out.contains("#EXT-X-ENDLIST\n"));
 		assert!(!out.contains("PROGRAM-DATE-TIME"));
+	}
+
+	// A reconfigured rendition keeps its predecessor's segments, each under its own init, and
+	// maps the new init after the discontinuity that starts it.
+	#[test]
+	fn a_predecessor_keeps_its_own_map() {
+		let segment = |segment, map: Option<&str>, discontinuity| Segment {
+			segment,
+			tag: "ab12cd34".into(),
+			map: map.map(str::to_string),
+			duration: Duration::from_secs(2),
+			gap: false,
+			discontinuity,
+			program_date_time: None,
+		};
+		let snapshot = Snapshot {
+			target_duration: 2,
+			media_sequence: 3,
+			discontinuity_sequence: 0,
+			segments: vec![
+				segment(3, Some("00000000"), false),
+				segment(4, Some("00000000"), false),
+				segment(5, None, true),
+			],
+			finished: false,
+			generation: None,
+		};
+
+		let out = render_media(&snapshot, "11111111", None);
+		assert!(
+			out.contains(
+				"#EXT-X-MAP:URI=\"init.00000000.mp4\"\n#EXTINF:2.00000,\nseg/ab12cd34.3.m4s\n#EXTINF:2.00000,\nseg/ab12cd34.4.m4s\n#EXT-X-DISCONTINUITY\n#EXT-X-MAP:URI=\"init.11111111.mp4\"\n#EXTINF:2.00000,\nseg/ab12cd34.5.m4s\n"
+			),
+			"{out}"
+		);
+		assert_eq!(out.matches("EXT-X-MAP").count(), 2, "{out}");
 	}
 }

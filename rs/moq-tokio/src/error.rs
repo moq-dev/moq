@@ -259,6 +259,12 @@ pub enum Error {
 	#[cfg(feature = "webrtc")]
 	#[error(transparent)]
 	WebRtc(Arc<crate::webrtc::Error>),
+
+	/// A qmux session refused the limits [`crate::server::Request::with_quic_limits`] set,
+	/// such as a rate cap, which qmux cannot pace.
+	#[cfg(any(feature = "websocket", feature = "tcp", feature = "webrtc"))]
+	#[error("qmux refused the session limits: {0}")]
+	QmuxLimits(String),
 }
 
 impl Error {

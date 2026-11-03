@@ -168,6 +168,7 @@ test-env = { path = "../test-env" }
 tokio = { workspace = true, features = ["test-util"] }
 # Plays the `announced` view's frames on a virtual terminal, scrolling included.
 vt100 = "0.17.0"
+workspace-hack = { path = "../workspace-hack" }
 
 [target.'cfg(unix)'.dev-dependencies]
 # Sends the signals the `auth serve` shutdown test checks.
@@ -200,6 +201,10 @@ path = "../../test/interop/clients/rust/goaway-client.rs"
 [[example]]
 name = "interop-finish"
 path = "../../test/interop/clients/rust/finish.rs"
+
+[[example]]
+name = "interop-hls"
+path = "../../test/interop/clients/rust/hls.rs"
 
 [[example]]
 name = "interop-audio"

@@ -1,0 +1,23 @@
+error: #[kio::wrapper] goes on a poll method, not an `async fn`
+ --> tests/ui/wrapper_qualifiers.rs:8:2
+  |
+8 |     async fn poll_async(&self, _waiter: &kio::Waiter) -> Poll<()> {
+  |     ^^^^^
+
+error: #[kio::wrapper] cannot wrap a `const fn`
+  --> tests/ui/wrapper_qualifiers.rs:13:2
+   |
+13 |     const fn poll_const(&self, _waiter: &kio::Waiter) -> Poll<()> {
+   |     ^^^^^
+
+error: #[kio::wrapper] cannot wrap an `unsafe fn`
+  --> tests/ui/wrapper_qualifiers.rs:18:2
+   |
+18 |     unsafe fn poll_unsafe(&self, _waiter: &kio::Waiter) -> Poll<()> {
+   |     ^^^^^^
+
+error: #[kio::wrapper] takes no arguments
+  --> tests/ui/wrapper_qualifiers.rs:22:17
+   |
+22 |     #[kio::wrapper(name = ready)]
+   |                    ^^^^^^^^^^^^

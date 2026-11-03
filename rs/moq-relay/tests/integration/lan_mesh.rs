@@ -49,8 +49,7 @@ async fn moq_import_cluster_lan_beside_a_relay() {
 	config.lan = lan;
 	config.node = Some(format!("https://127.0.0.1:{port}/"));
 
-	let cluster = cluster::Cluster::new(cluster::Options::new(config))
-		.expect("cluster")
+	let cluster = crate::spawn_cluster(cluster::Options::new(config))
 		.with_connect(connect, Default::default())
 		.with_advertise(cluster::LanAdvertise::new(port).with_fingerprint(fingerprint));
 

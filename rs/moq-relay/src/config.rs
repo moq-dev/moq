@@ -902,7 +902,7 @@ root = ["ca.pem"]
 		];
 		let config = Config::parse_and_merge(args).expect("config load");
 		assert!(config.stats.enabled);
-		let cluster = cluster::Cluster::new(cluster::Options::default()).expect("cluster");
+		let cluster = cluster::Cluster::spawn(cluster::Options::default()).expect("cluster");
 		let _ = config.stats.build(cluster.origin.clone()).expect("stats build");
 	}
 

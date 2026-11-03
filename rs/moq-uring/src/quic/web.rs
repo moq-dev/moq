@@ -389,9 +389,12 @@ impl Rejected {
 	}
 }
 
+/// Safe to log: [`proto::ConnectRequest`]'s `Debug` redacts the URL's
+/// userinfo, query, and fragment and every header value but `origin` and
+/// `user-agent`, so a `?jwt=` or `Authorization` credential stays out.
 impl std::fmt::Debug for Request {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-		f.debug_struct("Request").field("url", &self.request.url).finish()
+		f.debug_struct("Request").field("connect", &self.request).finish()
 	}
 }
 
@@ -457,6 +460,11 @@ impl Session {
 	/// Receive streams evicted to free a stuck receive window.
 	pub(crate) fn streams_evicted(&self) -> u64 {
 		self.conn.streams_evicted()
+	}
+
+	/// The receive windows now in force: the connection's, and the most one stream holds.
+	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
+		self.conn.receive_window()
 	}
 
 	/// Open a send group at `priority`, for streams to join with
@@ -1119,6 +1127,21 @@ impl RecvStream {
 			inner.set_priority(priority);
 		}
 	}
+
+	/// Poll until the peer resets the stream, the receiver evicts it, or the connection closes,
+	/// without reading it; pending for good once every byte arrived. See
+	/// [`recv::Stream::received_reset`].
+	pub fn poll_reset(&mut self, cx: &mut Context<'_>) -> Poll<Error> {
+		let web = self.web;
+		let Some(inner) = &mut self.inner else {
+			return Poll::Ready(Error::Closed);
+		};
+		match ready!(inner.poll_received_reset(cx)) {
+			Ok(None) => Poll::Pending,
+			Ok(Some(code)) => Poll::Ready(map(web, Error::Reset(code.into_inner()))),
+			Err(err) => Poll::Ready(map(web, err.into())),
+		}
+	}
 }
 
 /// Unmap a stream error's code from the session's code space.
@@ -1682,6 +1705,24 @@ mod tests {
 			}),
 			Error::App { code: c, .. } if c == code
 		));
+	}
+
+	/// The CONNECT request is logged here, so its `Debug` must keep credentials
+	/// out: `web-transport-proto` redacts them from 0.6.4.
+	#[test]
+	fn connect_debug_redacts_credentials() {
+		let url = url::Url::parse("https://user:hunter2@relay.example/anon?jwt=SECRET#SECRET").unwrap();
+		let request = proto::ConnectRequest::new(url)
+			.with_header(
+				http::header::AUTHORIZATION,
+				http::HeaderValue::from_static("Bearer SECRET"),
+			)
+			.with_header(http::header::COOKIE, http::HeaderValue::from_static("session=SECRET"));
+		let debug = format!("{request:?}");
+		assert!(debug.contains("relay.example/anon"), "{debug}");
+		for secret in ["SECRET", "hunter2", "jwt="] {
+			assert!(!debug.contains(secret), "{secret} leaked: {debug}");
+		}
 	}
 
 	/// Wrap `payload` in an HTTP/3 frame of type `typ`.
