@@ -321,15 +321,24 @@ exec "$@"
                 calls = (self.root / "calls").read_text().splitlines()
                 admissions = [call.split() for call in calls if call.startswith("admit ")]
                 self.assertTrue(admissions, calls)
-                phases = {(call[-2], call[-1]) for call in admissions}
+                phases = {(call[-2], call[-1]) for call in admissions if call[1] == "--quick"}
                 self.assertIn(("fix" if action == "fix" else "check", "markdown"), phases)
                 if action != "fix":
                     self.assertIn(("check", "quest"), phases)
-                    self.assertIn(("test", "rs"), phases)
-                    self.assertIn(("test", "gh"), phases)
+                    self.assertIn("rs test-changed --all", calls)
+                    self.assertIn("gh test", calls)
                 for call in admissions:
+                    if call[1] != "--quick":
+                        self.assertIn(call[1], {"cargo", "nix"}, call)
+                        continue
                     phase, module = call[-2:]
-                    self.assertEqual(call[1] == "--quick", module in quick and phase != "test", call)
+                    self.assertEqual(call[1], "--quick", call)
+                    self.assertIn(module, quick)
+                    self.assertNotEqual(phase, "test")
+                self.assertEqual(
+                    {module for _, module in phases},
+                    quick if action != "fix" else quick - {"quest", "large_files", "text"},
+                )
 
     def test_check_and_ci_reject_em_dashes_outside_the_diff(self):
         self.stub_ci()
@@ -608,39 +617,42 @@ exec "$@"
         os.mkfifo(started)
         pid = self.root / "pid"
         self.stub_ci(f'''case "$*" in
-    "rs lint-changed "*) echo $$ >"{pid}"; echo >"{started}"; exec sleep 600 ;;
+    "rs lint-changed "* | "biome") echo $$ >"{pid}"; echo >"{started}"; exec sleep 600 ;;
 esac
 ''')
         self.change("rs/kio/src/clock/mod.rs")
-        for jobs in ("1", "3"):
-            with self.subTest(jobs=jobs):
-                run = subprocess.Popen(
-                    ["bash", "sh/dispatch.sh", "ci", "origin/main"],
-                    cwd=self.repo,
-                    env=dict(self.env, CHECK_JOBS=jobs),
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                )
-                started.read_text()
-                # A job timeout can kill the run without a signal it traps, so
-                # a buffered lane names its running phase before the phase ends.
-                live = b""
-                try:
-                    if jobs != "1":
-                        deadline = time.monotonic() + 60
-                        while b"ci: check rs started\n" not in live:
-                            readable, _, _ = select.select([run.stderr], [], [], max(0, deadline - time.monotonic()))
-                            self.assertTrue(readable, live.decode(errors="replace"))
-                            chunk = os.read(run.stderr.fileno(), 4096)
-                            self.assertTrue(chunk, live.decode(errors="replace"))
-                            live += chunk
-                finally:
-                    run.terminate()
-                    stderr = (live + run.communicate(timeout=60)[1]).decode()
-                self.assertEqual(run.returncode, 143, stderr)
-                self.assertRegex(stderr, r"\d+  check rs \(cancelled\)")
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(int(pid.read_text()), 0)
+        for module in ("rs", "biome"):
+            for jobs in ("1", "3"):
+                with self.subTest(module=module, jobs=jobs):
+                    run = subprocess.Popen(
+                        ["bash", "sh/dispatch.sh", "ci", "origin/main"],
+                        cwd=self.repo,
+                        env=dict(self.env, CHECK_JOBS=jobs, CHECK_MODULES=module),
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                    )
+                    started.read_text()
+                    # A job timeout can kill the run without a signal it traps, so
+                    # a buffered lane names its running phase before the phase ends.
+                    live = b""
+                    try:
+                        if jobs != "1":
+                            deadline = time.monotonic() + 60
+                            while f"ci: check {module} started\n".encode() not in live:
+                                readable, _, _ = select.select(
+                                    [run.stderr], [], [], max(0, deadline - time.monotonic())
+                                )
+                                self.assertTrue(readable, live.decode(errors="replace"))
+                                chunk = os.read(run.stderr.fileno(), 4096)
+                                self.assertTrue(chunk, live.decode(errors="replace"))
+                                live += chunk
+                    finally:
+                        run.terminate()
+                        stderr = (live + run.communicate(timeout=60)[1]).decode()
+                    self.assertEqual(run.returncode, 143, stderr)
+                    self.assertRegex(stderr, rf"\d+  check {module} \(cancelled\)")
+                    with self.assertRaises(ProcessLookupError):
+                        os.kill(int(pid.read_text()), 0)
 
     def test_ci_runs_one_lint_preamble_and_one_test_pass(self):
         self.change("rs/kio/src/clock/mod.rs")

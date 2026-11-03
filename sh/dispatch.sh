@@ -462,15 +462,17 @@ run_lane() {
                 # processes. Trapped, it exits once they do, so a cancel
                 # returns only after the whole tree has exited.
                 trap 'exit 143' TERM
-                # Admission belongs to the module, not its command name or lane:
-                # the bun lane mixes formatters with builds and tooling tests.
-                export action rs_list js_list large_base
-                gate=()
-                [[ ! -v "quick[$module]" || "$phase" == test ]] || gate+=(--quick)
-                # systemd scopes cannot carry exported Bash functions, so pass
-                # the phase's function source as the script instead.
-                script=$(declare -f files step)
-                bash sh/local.sh "${gate[@]}" bash -euo pipefail -c "$script"$'\n''trap "exit 143" TERM; step "$@"' -- "$phase" "$module"
+                if [[ -v "quick[$module]" && "$phase" != test ]]; then
+                    # The bun lane also runs builds and tests; only this phase
+                    # gets quick admission. Keep the normal runners unchanged.
+                    export action rs_list js_list large_base
+                    # systemd scopes cannot carry exported Bash functions, so
+                    # pass the phase's function source as the script instead.
+                    script=$(declare -f files step)
+                    bash sh/local.sh --quick bash -euo pipefail -c "$script"$'\n''trap "exit 143" TERM; step "$@"' -- "$phase" "$module"
+                else
+                    step "$phase" "$module"
+                fi
             )
             status=$?
             set -e

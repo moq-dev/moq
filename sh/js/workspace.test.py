@@ -52,7 +52,8 @@ class SelectionTest(unittest.TestCase):
 
     def test_dispatcher_passes_only_js_impact_paths(self):
         sh = self.root / "sh"
-        shutil.copy(selector.ROOT / "sh/dispatch.sh", sh / "dispatch.sh")
+        for script in ("dispatch.sh", "local.sh"):
+            shutil.copy(selector.ROOT / "sh" / script, sh / script)
         changed = sh / "changed.sh"
         changed.write_text("#!/bin/sh\nprintf '%s\\n' js/auth/src/token.ts demo/pub/worker.ts quest/unrelated.md\n")
         changed.chmod(0o755)
@@ -75,7 +76,12 @@ class SelectionTest(unittest.TestCase):
             GITHUB_BASE_REF="missing",
             GITHUB_STEP_SUMMARY=str(summary),
         ):
-            env = dispatch_env(PATH=f"{tools}:{os.environ['PATH']}", ALLOW_HOST_TOOLCHAIN="1", SELECT_CALLS=str(calls))
+            env = dispatch_env(
+                PATH=f"{tools}:{os.environ['PATH']}",
+                ALLOW_HOST_TOOLCHAIN="1",
+                LOCAL_SUPERVISED="1",
+                SELECT_CALLS=str(calls),
+            )
         for script in ("markdown.sh", "shell.sh", "large-files.sh", "text.sh"):
             path = sh / script
             path.write_text("#!/bin/sh\nexit 0\n")
