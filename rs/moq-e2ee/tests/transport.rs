@@ -1,4 +1,4 @@
-//! Grouped tracks and datagrams on moq-lite and MoQ Transport.
+//! Grouped tracks on moq-lite and MoQ Transport, and datagram tracks on moq-lite.
 
 mod support;
 
@@ -22,16 +22,22 @@ fn produce_origin(hop: u64) -> moq_net::origin::Producer {
 	producer
 }
 
+/// A millisecond datagram track.
+fn timed_datagrams() -> moq_net::datagram::Info {
+	moq_net::datagram::Info::default().with_timescale(moq_net::Timescale::MILLI)
+}
+
+/// A protected broadcast and its subscriber's view across one session.
 struct Fixture {
-	producer: moq_e2ee::track::Producer,
-	consumer: moq_e2ee::track::Consumer,
+	producer: moq_e2ee::broadcast::Producer,
+	consumer: moq_e2ee::broadcast::Consumer,
 	_broadcast: moq_net::origin::Publication,
 	_pair: MockPair,
 }
 
-async fn connect_protected(version: Version, track: &str) -> Fixture {
+async fn connect_protected(version: Version, label: &str) -> Fixture {
 	let cred = Credential::new(Config {
-		context: format!("transport-{version}-{track}").into(),
+		context: format!("transport-{version}-{label}").into(),
 		kid: 7,
 		secret: *b"moq-e2ee-00 test secret!!!!!!!!!",
 	})
@@ -43,8 +49,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	let consumer_origin = produce_origin(2);
 
 	let broadcast = publisher.create_broadcast(&path).unwrap();
-	let protected = moq_e2ee::broadcast::Producer::new(broadcast.broadcast().clone(), generation.clone());
-	let producer = protected.create_track(track, timed()).unwrap();
+	let producer = moq_e2ee::broadcast::Producer::new(broadcast.broadcast().clone(), generation.clone());
 	broadcast
 		.announce(moq_net::origin::Route::default().with_instance(generation.epoch().instance(), 0))
 		.unwrap();
@@ -66,15 +71,7 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 		);
 	}
 	let epoch = moq_e2ee::Epoch::of(&remote).unwrap_or_else(|| generation.epoch().clone());
-	let consumer = moq_e2ee::broadcast::Consumer::new(remote, cred.consume(epoch))
-		.subscribe(
-			track,
-			moq_net::track::Subscription::default()
-				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
-		)
-		.unwrap()
-		.await
-		.unwrap();
+	let consumer = moq_e2ee::broadcast::Consumer::new(remote, cred.consume(epoch));
 
 	Fixture {
 		producer,
@@ -84,51 +81,58 @@ async fn connect_protected(version: Version, track: &str) -> Fixture {
 	}
 }
 
-#[tokio::test]
-async fn grouped_over_lite() {
+async fn grouped_roundtrip(version: &str, payload: &[u8]) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
-		let mut fixture = connect_protected("moq-lite-07-wip".parse().unwrap(), "video").await;
-		let mut group = fixture.producer.append_group().unwrap();
-		group
-			.write_frame(Timestamp::from_millis(1).unwrap(), b"lite-frame")
+		let fixture = connect_protected(version.parse().unwrap(), "video").await;
+		let mut producer = fixture.producer.create_track("video", timed()).unwrap();
+		let mut consumer = fixture
+			.consumer
+			.subscribe(
+				"video",
+				moq_net::track::Subscription::default()
+					.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(60))),
+			)
+			.unwrap()
+			.await
 			.unwrap();
+		let mut group = producer.append_group().unwrap();
+		group.write_frame(Timestamp::from_millis(1).unwrap(), payload).unwrap();
 		group.finish().unwrap();
-		let mut group = fixture.consumer.recv_group().await.unwrap().unwrap();
+		let mut group = consumer.recv_group().await.unwrap().unwrap();
 		let frame = group.read_frame().await.unwrap().unwrap();
-		assert_eq!(&frame.plaintext[..], b"lite-frame");
+		assert_eq!(&frame.plaintext[..], payload);
 	})
 	.await
 	.expect("timed out");
+}
+
+#[tokio::test]
+async fn grouped_over_lite() {
+	grouped_roundtrip("moq-lite-07-wip", b"lite-frame").await;
 }
 
 #[tokio::test]
 async fn grouped_over_ietf() {
-	kio::clock::timeout(TEST_TIMEOUT, async {
-		let mut fixture = connect_protected("moq-transport-22".parse().unwrap(), "video").await;
-		let mut group = fixture.producer.append_group().unwrap();
-		group
-			.write_frame(Timestamp::from_millis(1).unwrap(), b"ietf-frame")
-			.unwrap();
-		group.finish().unwrap();
-		let mut group = fixture.consumer.recv_group().await.unwrap().unwrap();
-		let frame = group.read_frame().await.unwrap().unwrap();
-		assert_eq!(&frame.plaintext[..], b"ietf-frame");
-	})
-	.await
-	.expect("timed out");
+	grouped_roundtrip("moq-transport-22", b"ietf-frame").await;
 }
 
 async fn datagram_roundtrip(version: &str, plaintext: &[u8]) {
 	kio::clock::timeout(TEST_TIMEOUT, async {
-		let mut fixture = connect_protected(version.parse().unwrap(), "audio").await;
-		fixture
-			.producer
-			.append_datagram(Timestamp::from_millis(9).unwrap(), plaintext)
-			.unwrap();
-		match fixture.consumer.recv_datagram().await.unwrap() {
+		let fixture = connect_protected(version.parse().unwrap(), "audio").await;
+		let mut producer = fixture.producer.create_datagrams("audio", timed_datagrams()).unwrap();
+		let mut consumer = fixture.consumer.datagrams("audio").unwrap();
+		// A remote subscriber is live once its request reaches the publisher, which sees its priority.
+		consumer.set_priority(1);
+		let mut priority = producer.priority();
+		while priority != Some(1) {
+			priority = kio::wait(|waiter| producer.poll_priority(waiter, priority)).await;
+		}
+
+		let sequence = producer.append(Timestamp::from_millis(9).unwrap(), plaintext).unwrap();
+		match consumer.recv().await.unwrap() {
 			Some(moq_e2ee::datagram::Event::Datagram(d)) => {
 				assert_eq!(&d.plaintext[..], plaintext);
-				assert_eq!(d.sequence, 0);
+				assert_eq!(d.sequence, sequence);
 			}
 			other => panic!("{other:?}"),
 		}
@@ -138,17 +142,12 @@ async fn datagram_roundtrip(version: &str, plaintext: &[u8]) {
 }
 
 #[tokio::test]
-async fn datagrams_over_lite() {
+async fn datagrams_over_lite_05() {
 	datagram_roundtrip("moq-lite-05", b"opus").await;
 }
 
-/// The largest plaintext still fits once lite-07 prefixes the datagram with its Type.
+/// The largest plaintext still fits lite-07's datagram body at its widest header.
 #[tokio::test]
 async fn max_datagram_over_lite_07() {
 	datagram_roundtrip("moq-lite-07-wip", &[7; moq_e2ee::MAX_DATAGRAM_PLAINTEXT]).await;
-}
-
-#[tokio::test]
-async fn datagrams_over_ietf() {
-	datagram_roundtrip("moq-transport-22", b"opus").await;
 }

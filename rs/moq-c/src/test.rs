@@ -1882,7 +1882,7 @@ fn timestamps_round_trip_exactly() {
 		assert_eq!(read_timestamp(frame.timestamp), written, "{name} frame");
 		assert_eq!(moq_consume_track_frame_free(frame_id), 0);
 
-		// The datagram subscription is live once the frame arrived on the same track.
+		// The datagram consumer is live from its `moq_consume_datagrams` call.
 		assert_eq!(
 			unsafe {
 				moq_publish_track_datagram(track, payload.as_ptr(), payload.len(), timestamp, std::ptr::null_mut())
@@ -3018,14 +3018,15 @@ fn json_window_refreshes_a_bounded_checkpoint() {
 	assert_eq!(moq_origin_close(origin), 0);
 }
 
-/// Every consumer that subscribes by name, with its cancel.
+/// Every consumer that subscribes by name, with its cancel. Datagrams have no subscription to
+/// wait on: a datagram track is joined at once or not found.
 type NamedConsumer = (
 	&'static [u8],
 	fn(u32, &[u8], *mut c_void) -> i32,
 	extern "C" fn(u32) -> i32,
 );
 
-const NAMED_CONSUMERS: [NamedConsumer; 5] = [
+const NAMED_CONSUMERS: [NamedConsumer; 4] = [
 	(
 		b"raw",
 		|consume, name, user_data| unsafe {
@@ -3039,19 +3040,6 @@ const NAMED_CONSUMERS: [NamedConsumer; 5] = [
 			)
 		},
 		moq_consume_track_cancel,
-	),
-	(
-		b"datagrams",
-		|consume, name, user_data| unsafe {
-			moq_consume_datagrams(
-				consume,
-				name.as_ptr() as *const c_char,
-				name.len(),
-				Some(channel_callback),
-				user_data,
-			)
-		},
-		moq_consume_datagrams_cancel,
 	),
 	(
 		b"snapshot",

@@ -360,27 +360,30 @@ mod test {
 	fn the_request_roundtrips_on_lite07_only() {
 		let request = Datagrams {
 			id: 7,
-			broadcast: "room/alice".into(),
+			broadcast: Path::from_static("room/alice"),
 			instance: None,
 			track: "audio".into(),
 			priority: -3,
 		};
 		let buf = request.encode_bytes(Version::Lite07).unwrap();
-		let decoded = Datagrams::decode_slice(&buf, Version::Lite07).unwrap();
+		let (decoded, _) = Datagrams::decode_slice(&buf, Version::Lite07).unwrap();
 		assert_eq!(decoded.id, 7);
 		assert_eq!(decoded.broadcast, request.broadcast);
 		assert_eq!(decoded.track, "audio");
 		assert_eq!(decoded.priority, -3);
-		assert!(matches!(request.encode_bytes(Version::Lite06), Err(EncodeError::Version)));
+		assert!(matches!(
+			request.encode_bytes(Version::Lite06),
+			Err(EncodeError::Version)
+		));
 
 		let update = DatagramsUpdate { priority: 9 };
 		let buf = update.encode_bytes(Version::Lite07).unwrap();
-		assert_eq!(DatagramsUpdate::decode_slice(&buf, Version::Lite07).unwrap(), update);
+		assert_eq!(DatagramsUpdate::decode_slice(&buf, Version::Lite07).unwrap().0, update);
 
 		for timescale in [None, Some(Timescale::MILLI)] {
 			let info = DatagramsInfo { priority: 2, timescale };
 			let buf = info.encode_bytes(Version::Lite07).unwrap();
-			assert_eq!(DatagramsInfo::decode_slice(&buf, Version::Lite07).unwrap(), info);
+			assert_eq!(DatagramsInfo::decode_slice(&buf, Version::Lite07).unwrap().0, info);
 		}
 	}
 }

@@ -96,6 +96,23 @@ where
 	handle
 }
 
+/// The datagram `send` writes, read by a `recv_datagram` started first: a reader receives
+/// only datagrams sent after its first read.
+async fn datagram_sent_by<T>(consumer: &Arc<MoqTrackConsumer>, send: impl FnOnce() -> T) -> (T, MoqDatagram) {
+	let read = {
+		let consumer = consumer.clone();
+		spawn_parked(async move { consumer.recv_datagram().await }).await
+	};
+	let sent = send();
+	let datagram = kio::clock::timeout(TIMEOUT, read)
+		.await
+		.expect("timed out waiting for a datagram")
+		.expect("datagram read panicked")
+		.unwrap()
+		.expect("expected a datagram");
+	(sent, datagram)
+}
+
 /// Trust any certificate, for dialing a server with a generated one.
 fn insecure_tls() -> MoqClientTls {
 	MoqClientTls {
@@ -1244,17 +1261,22 @@ async fn raw_track_datagram_roundtrip() {
 	let consumer = track.consume(None).unwrap();
 	let payload = b"hello datagram".to_vec();
 
-	let sequence = track
+	// Sent before the reader asked for datagrams, so never delivered to it.
+	track
 		.append_datagram(MoqFrame {
-			payload: payload.clone(),
-			timestamp: Some(us(123_456)),
+			payload: b"early".to_vec(),
+			timestamp: Some(us(0)),
 		})
 		.unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for datagram")
-		.unwrap()
-		.expect("expected a datagram");
+	let (sequence, datagram) = datagram_sent_by(&consumer, || {
+		track
+			.append_datagram(MoqFrame {
+				payload: payload.clone(),
+				timestamp: Some(us(123_456)),
+			})
+			.unwrap()
+	})
+	.await;
 
 	assert_eq!(datagram.sequence, sequence);
 	assert_eq!(datagram.timestamp.map(micros), Some(123_456));
@@ -1994,6 +2016,26 @@ async fn track_request_demand_survives_accept() {
 	);
 }
 
+/// A requested track carries datagrams, even accepted once only its request handler keeps
+/// the broadcast open.
+#[tokio::test]
+async fn requested_track_carries_datagrams() {
+	let broadcast = MoqBroadcastProducer::new().unwrap();
+	let dynamic = broadcast.requests().unwrap();
+	let consumer = broadcast.consume().unwrap();
+	drop(broadcast);
+	let subscribe = tokio::spawn(async move { consumer.subscribe_track("events".into(), None).await });
+	let request = kio::clock::timeout(TIMEOUT, dynamic.requested_track())
+		.await
+		.expect("timed out waiting for the request")
+		.unwrap();
+	let track = request.accept(Some(timed_info())).unwrap();
+	let consumer = subscribe.await.unwrap().unwrap();
+	let (sequence, datagram) =
+		datagram_sent_by(&consumer, || track.append_datagram(datagram_frame(b"beep")).unwrap()).await;
+	assert_eq!((datagram.sequence, datagram.payload), (sequence, b"beep".to_vec()));
+}
+
 #[tokio::test]
 async fn track_request_demand_ends_on_rejection() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
@@ -2054,7 +2096,7 @@ async fn dynamic_track_request() {
 	track.finish().unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn raw_untimed_frames_and_datagrams_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let track = broadcast.publish_track("untimed".into(), None).unwrap();
@@ -2081,13 +2123,15 @@ async fn raw_untimed_frames_and_datagrams_roundtrip() {
 	let frame = reader.read_frame().await.unwrap().unwrap();
 	assert_eq!(frame.payload, b"group");
 	assert_eq!(frame.timestamp, None);
-	track
-		.append_datagram(MoqFrame {
-			payload: b"datagram".to_vec(),
-			timestamp: None,
-		})
-		.unwrap();
-	let datagram = consumer.recv_datagram().await.unwrap().unwrap();
+	let (_, datagram) = datagram_sent_by(&consumer, || {
+		track
+			.append_datagram(MoqFrame {
+				payload: b"datagram".to_vec(),
+				timestamp: None,
+			})
+			.unwrap()
+	})
+	.await;
 	assert_eq!(datagram.payload, b"datagram");
 	assert_eq!(datagram.timestamp, None);
 	track.finish().unwrap();
@@ -2196,20 +2240,18 @@ async fn timestamps_are_exact() {
 		value: 1,
 		scale: 90_000,
 	};
-	track
-		.insert_datagram(
-			7,
-			MoqFrame {
-				payload: b"datagram".to_vec(),
-				timestamp: Some(tick),
-			},
-		)
-		.unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.unwrap()
-		.unwrap()
-		.unwrap();
+	let (_, datagram) = datagram_sent_by(&consumer, || {
+		track
+			.insert_datagram(
+				7,
+				MoqFrame {
+					payload: b"datagram".to_vec(),
+					timestamp: Some(tick),
+				},
+			)
+			.unwrap()
+	})
+	.await;
 	assert_eq!(datagram.sequence, 7);
 	assert_eq!(datagram.timestamp, Some(tick));
 
@@ -5153,17 +5195,15 @@ async fn raw_track_group_order_commits_on_first_read() {
 	assert_eq!(group.sequence(), 1);
 
 	// Datagrams never commit and keep working after a commitment.
-	let sequence = track
-		.append_datagram(MoqFrame {
-			payload: b"beep".to_vec(),
-			timestamp: Some(us(0)),
-		})
-		.unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for a datagram")
-		.unwrap()
-		.expect("expected a datagram");
+	let (sequence, datagram) = datagram_sent_by(&consumer, || {
+		track
+			.append_datagram(MoqFrame {
+				payload: b"beep".to_vec(),
+				timestamp: Some(us(0)),
+			})
+			.unwrap()
+	})
+	.await;
 	assert_eq!(datagram.sequence, sequence);
 	assert_eq!(datagram.payload, b"beep".to_vec());
 }
@@ -5208,12 +5248,8 @@ where
 	};
 	assert!(!group_read.is_finished(), "group read should still be pending");
 
-	let sequence = track.append_datagram(datagram_frame(b"beep")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for datagram behind a pending group read")
-		.unwrap()
-		.expect("expected a datagram");
+	let (sequence, datagram) =
+		datagram_sent_by(&consumer, || track.append_datagram(datagram_frame(b"beep")).unwrap()).await;
 	assert_eq!(datagram.sequence, sequence);
 	assert_eq!(datagram.payload, b"beep".to_vec());
 	assert!(!group_read.is_finished(), "group read should stay pending");
@@ -5264,12 +5300,10 @@ where
 async fn raw_track_insert_datagram_keeps_its_sequence() {
 	let (_broadcast, track, consumer) = raw_track();
 
-	track.insert_datagram(7, datagram_frame(b"seven")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for the inserted datagram")
-		.unwrap()
-		.expect("expected a datagram");
+	let ((), datagram) = datagram_sent_by(&consumer, || {
+		track.insert_datagram(7, datagram_frame(b"seven")).unwrap()
+	})
+	.await;
 	assert_eq!(datagram.sequence, 7);
 	assert_eq!(datagram.payload, b"seven".to_vec());
 	assert_eq!(datagram.timestamp.map(micros), Some(1));
@@ -5368,12 +5402,10 @@ async fn raw_track_update_during_pending_group_still_reads_datagram() {
 		})
 		.unwrap();
 
-	let sequence = track.append_datagram(datagram_frame(b"after-update")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for datagram after update")
-		.unwrap()
-		.expect("expected a datagram");
+	let (sequence, datagram) = datagram_sent_by(&consumer, || {
+		track.append_datagram(datagram_frame(b"after-update")).unwrap()
+	})
+	.await;
 	assert_eq!(datagram.sequence, sequence);
 	assert_eq!(datagram.payload, b"after-update".to_vec());
 
@@ -5401,12 +5433,10 @@ async fn raw_track_dropping_a_pending_group_read_does_not_cancel_datagrams() {
 		Ok(_) => panic!("aborting the call should cancel only that future"),
 	}
 
-	let sequence = track.append_datagram(datagram_frame(b"still-open")).unwrap();
-	let datagram = kio::clock::timeout(TIMEOUT, consumer.recv_datagram())
-		.await
-		.expect("timed out waiting for datagram after a cancelled group read")
-		.unwrap()
-		.expect("expected a datagram");
+	let (sequence, datagram) = datagram_sent_by(&consumer, || {
+		track.append_datagram(datagram_frame(b"still-open")).unwrap()
+	})
+	.await;
 	assert_eq!(datagram.sequence, sequence);
 
 	track.write_frame(group_frame(b"group")).unwrap();
@@ -5572,7 +5602,11 @@ async fn raw_read_frame_skips_a_group_reset_as_old() {
 			Some(moq_net::track::Info::default().with_timescale(moq_net::Timescale::MILLI)),
 		)
 		.unwrap();
-	let consumer = MoqTrackConsumer::new(track.subscribe(None), crate::ffi::Background::default());
+	let consumer = MoqTrackConsumer::new(
+		track.subscribe(None),
+		crate::consumer::Datagrams::Remote(broadcast.consume()),
+		crate::ffi::Background::default(),
+	);
 
 	let expired = track.append_group().unwrap();
 	// The read holds the group when the reset lands, as one arriving over the wire does.

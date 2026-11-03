@@ -8,8 +8,8 @@ use crate::{Error, Result, VERSION, VERSION_MIN};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Stored")]
 pub struct Info {
-	/// Recording format version: [`VERSION`], or 2 for a recording read from before
-	/// priorities were signed, which only a reader accepts.
+	/// Recording format version: [`VERSION`], or 2 or 3 for an older recording, which only a
+	/// reader accepts.
 	pub version: u64,
 	/// The publisher's track priority, higher first.
 	pub priority: i8,
@@ -98,7 +98,7 @@ mod tests {
 	fn roundtrip() {
 		let info = Info::new(0, Some(1_000_000)).unwrap();
 		let bytes = info.encode().unwrap();
-		assert_eq!(bytes.as_ref(), br#"{"version":3,"priority":0,"timescale":1000000}"#);
+		assert_eq!(bytes.as_ref(), br#"{"version":4,"priority":0,"timescale":1000000}"#);
 		assert_eq!(Info::decode(&bytes).unwrap(), info);
 	}
 
@@ -106,16 +106,16 @@ mod tests {
 	fn an_untimed_track_omits_its_timescale() {
 		let info = Info::new(3, None).unwrap();
 		let bytes = info.encode().unwrap();
-		assert_eq!(bytes.as_ref(), br#"{"version":3,"priority":3}"#);
+		assert_eq!(bytes.as_ref(), br#"{"version":4,"priority":3}"#);
 		assert_eq!(Info::decode(&bytes).unwrap(), info);
 	}
 
 	#[test]
 	fn whitespace_and_member_order_do_not_affect_equality() {
-		let info = Info::decode(br#"{"timescale":1000,"priority":7,"version":3}"#).unwrap();
+		let info = Info::decode(br#"{"timescale":1000,"priority":7,"version":4}"#).unwrap();
 		assert_eq!(
 			info,
-			Info::decode(br#"{ "version": 3, "priority": 7, "timescale": 1000 }"#).unwrap()
+			Info::decode(br#"{ "version": 4, "priority": 7, "timescale": 1000 }"#).unwrap()
 		);
 		assert_eq!(info.priority, 7);
 		assert_eq!(info.timescale, Some(1000));
@@ -125,12 +125,12 @@ mod tests {
 	fn priority_is_stored_signed() {
 		for priority in [i8::MIN, -1, 0, i8::MAX] {
 			let info = Info::new(priority, None).unwrap();
-			let json = format!(r#"{{"version":3,"priority":{priority}}}"#);
+			let json = format!(r#"{{"version":4,"priority":{priority}}}"#);
 			assert_eq!(info.encode().unwrap().as_ref(), json.as_bytes());
 			assert_eq!(Info::decode(json.as_bytes()).unwrap(), info);
 		}
 		for priority in [-129, 128] {
-			let json = format!(r#"{{"version":3,"priority":{priority}}}"#);
+			let json = format!(r#"{{"version":4,"priority":{priority}}}"#);
 			assert!(
 				matches!(Info::decode(json.as_bytes()), Err(Error::Json(_))),
 				"{priority}"
@@ -177,11 +177,11 @@ mod tests {
 			Err(Error::Json(_))
 		));
 		assert!(matches!(
-			Info::decode(br#"{"version":3,"priority":0,"timescale":1,"extra":true}"#),
+			Info::decode(br#"{"version":4,"priority":0,"timescale":1,"extra":true}"#),
 			Err(Error::Json(_))
 		));
 		assert!(matches!(
-			Info::decode(br#"{"version":3,"timescale":1}"#),
+			Info::decode(br#"{"version":4,"timescale":1}"#),
 			Err(Error::Json(_))
 		));
 	}

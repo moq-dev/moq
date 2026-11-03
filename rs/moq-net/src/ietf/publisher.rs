@@ -6652,49 +6652,6 @@ mod group_priority_test {
 		assert_eq!(log.orders().len(), 2, "the streams keep their place in the group");
 	}
 
-	/// An OBJECT_DATAGRAM goes in its subscription's send group, ranked like the stream
-	/// carrying its group from the start, so the transport merges it into the group order.
-	#[test]
-	fn datagrams_rank_within_their_subscription() {
-		let log = crate::lite::test_transport::Log::default();
-		let session = SinkSession::new(log.clone())
-			.with_groups()
-			.with_datagrams(1200)
-			.with_unacked_fin();
-		let mut track = track::Producer::new(
-			std::sync::Arc::new(crate::broadcast::Info::default()),
-			"test",
-			crate::track::Info::timed(),
-		);
-		let subscriber = track.subscribe(
-			track::Subscription::default()
-				.with_priority(3)
-				.with_delay(track::Delay::default().with_max(std::time::Duration::from_secs(3600))),
-		);
-		let mut serve = TrackServe::new(
-			crate::driver::Transport::new(session.clone()),
-			subscriber,
-			RequestId(0),
-			Version::Draft18,
-			ServeRange::default(),
-			None,
-		);
-		let mut group = track.create_group(group::Info { sequence: 0 }).unwrap();
-		group
-			.write_frame(crate::Timestamp::from_millis(0).unwrap(), b"x".as_slice())
-			.unwrap();
-		group.finish().unwrap();
-		let sequence = track
-			.append_datagram(crate::Timestamp::from_millis(1).unwrap(), b"d".as_slice())
-			.unwrap();
-
-		let waiter = kio::Waiter::noop();
-		assert!(serve.poll(&waiter).is_pending());
-		let order = crate::priority::in_group(sequence, 0, Order::Descending);
-		assert_eq!(log.datagram_ranks(), [(Some(0), order)]);
-		assert_eq!(log.orders(), [(0, 1)], "the stream for group 0 ranks below");
-	}
-
 	/// A group with more objects ready than one poll's budget drains over several polls.
 	#[kio::test]
 	async fn a_long_group_drains_within_the_budget() {
@@ -7207,7 +7164,7 @@ mod subscribe_cursor_test {
 #[cfg(test)]
 mod serve_tests {
 	use super::*;
-	use crate::coding::{Decode, Decoder};
+	use crate::coding::{Decode, Decoder, Encode as _};
 	use crate::ietf::GroupOrder;
 	use crate::lite::test_transport::{Close, Log, ScriptedSession, Sent, SinkSession};
 	use crate::model::ProduceTest;
@@ -12333,8 +12290,6 @@ mod serve_tests {
 		IdleEnded,
 		/// An idle copy whose track ends after its newest group: that group's last object.
 		IdleFinished,
-		/// A live feed whose newest group is a datagram the cache cannot read: unknown.
-		Datagram,
 		/// A live feed whose newest group was aborted mid-write: unknown.
 		Aborted,
 	}
@@ -12362,10 +12317,6 @@ mod serve_tests {
 				h.track.finish().unwrap();
 				None
 			}
-			Largest::Datagram => {
-				h.track.append_datagram(timestamp(), b"d".as_slice()).unwrap();
-				None
-			}
 			Largest::Aborted => {
 				let mut newer = h.track.create_group(group::Info { sequence: 5 }).unwrap();
 				newer.write_frame(timestamp(), b"5-0".to_vec()).unwrap();
@@ -12387,7 +12338,6 @@ mod serve_tests {
 			Largest::Idle,
 			Largest::IdleEnded,
 			Largest::IdleFinished,
-			Largest::Datagram,
 			Largest::Aborted,
 		] {
 			for start in [2, 3] {
@@ -12458,7 +12408,6 @@ mod serve_tests {
 			(4, Largest::Finished, 1),
 			(4, Largest::Idle, 7),
 			(4, Largest::IdleEnded, 7),
-			(4, Largest::Datagram, 7),
 			(4, Largest::Aborted, 7),
 		] {
 			let mut h = serve(version);
@@ -13709,34 +13658,6 @@ mod serve_tests {
 				.unwrap();
 			settle().await;
 			assert!(h.track.subscription().is_none(), "{version}: held its demand");
-		}
-	}
-
-	/// A datagram group is never fetchable: a FETCH for one is refused like a group that
-	/// does not exist, newest or not, and opens no fetch stream for its payload.
-	#[kio::test]
-	async fn a_standalone_fetch_of_a_datagram_group_is_refused() {
-		for version in FETCH_DRAFTS {
-			for newest in [true, false] {
-				let mut h = serve(version);
-				publish_pairs(&mut h, 2, None);
-				let sequence = h.track.append_datagram(timestamp(), b"d".as_slice()).unwrap();
-				if !newest {
-					h.track.append_group().unwrap().finish().unwrap();
-				}
-				settle().await;
-
-				let location = Location {
-					group: sequence,
-					object: 0,
-				};
-				let buf = standalone_fetch(&h, location, location, GroupOrder::Ascending).await;
-				assert_eq!(
-					fetch_refusal(buf, version),
-					DOES_NOT_EXIST,
-					"{version}: newest={newest}"
-				);
-			}
 		}
 	}
 
@@ -19009,6 +18930,7 @@ mod fill_range_tests {
 #[cfg(test)]
 mod compression_tests {
 	use super::*;
+	use crate::coding::Encode as _;
 	#[test]
 	fn sealed_compression_refuses_incompatible_egress() {
 		for version in [Version::Draft18, Version::Draft20, Version::Draft22] {

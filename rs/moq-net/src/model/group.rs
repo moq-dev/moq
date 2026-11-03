@@ -2594,13 +2594,12 @@ impl Handle {
 			&& !matches!(
 				err,
 				Error::Cancel
-					| Error::Lagged
-					| Error::Stream(
-						StreamError::Cancel
-							| StreamError::Old | StreamError::Evicted
-							| StreamError::DeliveryTimeout
-							| StreamError::TooFarBehind
-					)
+					| Error::Lagged | Error::Stream(
+					StreamError::Cancel
+						| StreamError::Old | StreamError::Evicted
+						| StreamError::DeliveryTimeout
+						| StreamError::TooFarBehind
+				)
 			);
 		if cut {
 			let _ = self.alive.cut.set(err.clone());

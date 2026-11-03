@@ -493,6 +493,11 @@ impl<T> Polled<T> {
 		self.state.lock().as_ref().map(f)
 	}
 
+	/// Modify the state synchronously, between polls, or `None` once it is gone.
+	pub fn peek_mut<R>(&self, f: impl FnOnce(&mut T) -> R) -> Option<R> {
+		self.state.lock().as_mut().map(f)
+	}
+
 	/// Whether [Self::cancel] or [Self::take] has run.
 	pub fn is_cancelled(&self) -> bool {
 		self.state.lock().is_none()

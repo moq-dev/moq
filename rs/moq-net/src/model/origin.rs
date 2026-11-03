@@ -11684,6 +11684,25 @@ mod tests {
 		assert!(matches!(err, Error::Closed), "unexpected end: {err}");
 	}
 
+	/// A datagram track a published broadcast creates reaches a reader through the origin:
+	/// the front looks it up on the source it serves from.
+	#[kio::test]
+	#[cfg(feature = "async")]
+	async fn a_front_serves_its_sources_datagram_tracks() {
+		let producer = origin(1).produce();
+		let publication = producer.publish("room", Route::default()).unwrap();
+		let mut datagrams = publication
+			.create_datagrams("audio", crate::datagram::Info::default())
+			.unwrap();
+
+		let front = producer.consume().request("room", None).await.unwrap();
+		let mut reader = front.datagrams("audio").unwrap();
+		datagrams.append(None, "x").unwrap();
+		let datagram = reader.recv().now_or_never().unwrap().unwrap().unwrap();
+		assert_eq!(datagram.sequence, 0);
+		assert!(matches!(front.datagrams("video"), Err(Error::NotFound)));
+	}
+
 	/// A track first subscribed after the front is already serving another still
 	/// replays what its source holds, like the first track did.
 	#[kio::test]

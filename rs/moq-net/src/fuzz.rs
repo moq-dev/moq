@@ -666,11 +666,9 @@ impl LiteSample {
 			}
 			Self::Group => lite::Group::decode(r, version).map(|_| 1).unwrap(),
 			Self::Subscribe => lite::Subscribe::decode(r, version).map(|_| 1).unwrap(),
-			Self::Datagram => {
-				lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
-					.map(|_| 1)
-					.unwrap()
-			}
+			Self::Datagram => lite::Datagram::decode(bytes::Bytes::copy_from_slice(data), version, |_| true)
+				.map(|_| 1)
+				.unwrap(),
 			Self::Setup => lite::Setup::decode(r, version).map(|_| 1).unwrap(),
 		}
 	}

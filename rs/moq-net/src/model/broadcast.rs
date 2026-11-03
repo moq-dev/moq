@@ -403,7 +403,11 @@ impl Producer {
 	/// Datagram tracks are a namespace apart from stream tracks, so this never conflicts with
 	/// [`Self::create_track`]. Fails with [`Error::Duplicate`] while a live datagram track
 	/// holds the name.
-	pub fn create_datagrams(&self, name: impl Into<Arc<str>>, info: datagram::Info) -> Result<datagram::Producer, Error> {
+	pub fn create_datagrams(
+		&self,
+		name: impl Into<Arc<str>>,
+		info: datagram::Info,
+	) -> Result<datagram::Producer, Error> {
 		let name = name.into();
 		let mut state = self.state.lock();
 		if let Some(live) = state.datagrams.get(name.as_ref()) {
@@ -2474,5 +2478,126 @@ mod test {
 		assert!(!track.demand().is_wanted());
 		assert!(track.abort_unwanted(Error::Cancel).is_ok());
 		producer.close();
+	}
+
+	fn recv_datagram(consumer: &mut datagram::Consumer) -> Poll<Result<Option<crate::Datagram>, Error>> {
+		consumer.poll_recv(&kio::Waiter::noop())
+	}
+
+	fn received(consumer: &mut datagram::Consumer) -> u64 {
+		match recv_datagram(consumer) {
+			Poll::Ready(Ok(Some(datagram))) => datagram.sequence,
+			other => panic!("expected a datagram, got {other:?}"),
+		}
+	}
+
+	/// A datagram track shares no name with a stream track, and holds its own while live.
+	#[test]
+	fn datagram_tracks_are_a_namespace_apart() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		let _track = producer.create_track("audio", crate::track::Info::timed()).unwrap();
+		let mut datagrams = producer.create_datagrams("audio", datagram::Info::default()).unwrap();
+		assert!(matches!(
+			producer.create_datagrams("audio", datagram::Info::default()),
+			Err(Error::Duplicate)
+		));
+
+		let mut reader = consumer.datagrams("audio").unwrap();
+		datagrams.append(None, "x").unwrap();
+		assert_eq!(received(&mut reader), 0);
+
+		// Once it ends, the name is free again, and a reader no longer joins it.
+		datagrams.finish();
+		assert!(matches!(recv_datagram(&mut reader), Poll::Ready(Ok(None))));
+		assert!(matches!(consumer.datagrams("audio"), Err(Error::NotFound)));
+		producer.create_datagrams("audio", datagram::Info::default()).unwrap();
+	}
+
+	/// A datagram track nothing publishes is asked of a handler, once however many readers
+	/// want it, and the handler's answer reaches them all.
+	#[test]
+	fn a_datagram_request_resolves_with_its_answer() {
+		let producer = Info::new().produce();
+		let consumer = producer.consume();
+		assert!(matches!(consumer.datagrams("audio"), Err(Error::NotFound)));
+
+		let mut handler = producer.requests().datagrams();
+		let requested = |handler: &mut DatagramRequests| handler.poll_requested(&kio::Waiter::noop());
+		let mut first = consumer.datagrams("audio").unwrap();
+		let mut second = consumer.datagrams("audio").unwrap();
+		assert!(first.poll_info(&kio::Waiter::noop()).is_pending());
+		let Poll::Ready(Ok(request)) = requested(&mut handler) else {
+			panic!("expected a request");
+		};
+		assert!(requested(&mut handler).is_pending(), "the readers share one request");
+		assert_eq!(request.name(), "audio");
+
+		let info = datagram::Info::default().with_priority(2);
+		let mut served = request.accept(info);
+		assert!(matches!(second.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(got)) if got == info));
+		served.append(None, "x").unwrap();
+		assert_eq!(received(&mut first), 0);
+		assert_eq!(received(&mut second), 0);
+
+		let mut refused = consumer.datagrams("video").unwrap();
+		let Poll::Ready(Ok(request)) = requested(&mut handler) else {
+			panic!("expected a request");
+		};
+		request.reject(Error::NotFound);
+		assert!(matches!(recv_datagram(&mut refused), Poll::Ready(Err(Error::NotFound))));
+	}
+
+	/// Creating a datagram track serves the readers already asking for it, before any
+	/// handler takes their request.
+	#[test]
+	fn create_datagrams_fulfills_a_queued_request() {
+		let producer = Info::new().produce();
+		let mut handler = producer.requests().datagrams();
+		let mut reader = producer.consume().datagrams("audio").unwrap();
+
+		let info = datagram::Info::default().with_priority(2);
+		let mut datagrams = producer.create_datagrams("audio", info).unwrap();
+		assert!(matches!(reader.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(got)) if got == info));
+		datagrams.append(None, "x").unwrap();
+		assert_eq!(received(&mut reader), 0);
+		assert!(handler.poll_requested(&kio::Waiter::noop()).is_pending());
+	}
+
+	/// Closing the broadcast refuses its queued datagram requests and every later one, and
+	/// ends its handlers.
+	#[test]
+	fn close_refuses_datagram_requests() {
+		let producer = Info::new().produce();
+		let mut handler = producer.requests().datagrams();
+		let consumer = producer.consume();
+		let mut queued = consumer.datagrams("audio").unwrap();
+
+		producer.close();
+		assert!(matches!(
+			recv_datagram(&mut queued),
+			Poll::Ready(Err(Error::Unroutable))
+		));
+		assert!(matches!(consumer.datagrams("audio"), Err(Error::Unroutable)));
+		assert!(matches!(
+			handler.poll_requested(&kio::Waiter::noop()),
+			Poll::Ready(Err(Error::Closed))
+		));
+	}
+
+	/// Losing the last datagram handler drops the requests it never took, and readers find
+	/// nothing to ask after.
+	#[test]
+	fn dropping_the_datagram_handler_drops_its_queue() {
+		let producer = Info::new().produce();
+		let handler = producer.requests().datagrams();
+		let consumer = producer.consume();
+		let mut queued = consumer.datagrams("audio").unwrap();
+
+		drop(handler.clone());
+		assert!(recv_datagram(&mut queued).is_pending(), "a clone still handles it");
+		drop(handler);
+		assert!(matches!(recv_datagram(&mut queued), Poll::Ready(Err(Error::Dropped))));
+		assert!(matches!(consumer.datagrams("audio"), Err(Error::NotFound)));
 	}
 }

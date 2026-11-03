@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 
 use super::*;
 use crate::Info;
-use crate::layout::{At, Entry, Object};
+use crate::layout::{At, Object};
 use crate::mock::Mock;
 
 const SECOND: Duration = Duration::from_secs(1);
@@ -109,8 +109,8 @@ async fn objects(store: &Store<Mock>, track: &str, timed: bool) -> BTreeMap<Stri
 	objects
 }
 
-/// Each object's entries as `(sequence, form, frames)`, where a frame is `pts/payload`.
-fn contents(objects: &BTreeMap<String, Object>) -> Vec<Vec<(u64, &'static str, Vec<String>)>> {
+/// Each object's entries as `(sequence, frames)`, where a frame is `pts/payload`.
+fn contents(objects: &BTreeMap<String, Object>) -> Vec<Vec<(u64, Vec<String>)>> {
 	objects
 		.values()
 		.map(|object| {
@@ -118,11 +118,8 @@ fn contents(objects: &BTreeMap<String, Object>) -> Vec<Vec<(u64, &'static str, V
 				.entries
 				.iter()
 				.map(|entry| {
-					let (form, frames) = match entry {
-						Entry::Group { frames, .. } => ("group", frames.as_slice()),
-						Entry::Datagram { frame, .. } => ("datagram", std::slice::from_ref(frame)),
-					};
-					let frames = frames
+					let frames = entry
+						.frames
 						.iter()
 						.map(|frame| {
 							let payload = String::from_utf8(frame.payload.to_vec()).unwrap();
@@ -132,7 +129,7 @@ fn contents(objects: &BTreeMap<String, Object>) -> Vec<Vec<(u64, &'static str, V
 							}
 						})
 						.collect();
-					(entry.sequence(), form, frames)
+					(entry.sequence, frames)
 				})
 				.collect()
 		})
@@ -180,8 +177,8 @@ async fn timed_objects_cut_at_group_boundaries_by_duration() {
 	assert_eq!(
 		contents(&objects)[0],
 		[
-			(0, "group", vec!["0/a".to_string(), "500/b".to_string()]),
-			(1, "group", vec!["1000/a".to_string(), "1500/b".to_string()]),
+			(0, vec!["0/a".to_string(), "500/b".to_string()]),
+			(1, vec!["1000/a".to_string(), "1500/b".to_string()]),
 		]
 	);
 	let info = Info::decode(&get(&store, "video/.info").await.unwrap()).unwrap();
@@ -219,10 +216,7 @@ async fn a_lost_group_is_a_gap_that_never_stalls_later_groups() {
 	);
 	assert_eq!(
 		contents(&stored)[1],
-		[
-			(2, "group", vec!["2000/c".to_string()]),
-			(3, "group", vec!["3000/d".to_string()]),
-		]
+		[(2, vec!["2000/c".to_string()]), (3, vec!["3000/d".to_string()]),]
 	);
 
 	// The lost group arriving too late stays a gap.
@@ -258,10 +252,7 @@ async fn a_fresh_track_waits_for_a_group_below_its_first_arrival() {
 	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [key(1, 0, 1000)]);
 	assert_eq!(
 		contents(&stored)[0],
-		[
-			(1, "group", vec!["1000/b".to_string()]),
-			(2, "group", vec!["2000/c".to_string()]),
-		]
+		[(1, vec!["1000/b".to_string()]), (2, vec!["2000/c".to_string()]),]
 	);
 
 	// Group 0 arriving after that is too late.
@@ -303,7 +294,7 @@ async fn an_oversized_timed_group_splits_into_ordered_unique_keys() {
 	let stored: Vec<String> = contents(&objects)
 		.into_iter()
 		.flatten()
-		.flat_map(|(_, _, frames)| frames)
+		.flat_map(|(_, frames)| frames)
 		.collect();
 	let expected: Vec<String> = frames.iter().map(|(pts, payload)| format!("{pts}/{payload}")).collect();
 	assert_eq!(stored, expected);
@@ -335,10 +326,7 @@ async fn an_open_untimed_group_is_cut_at_each_flush() {
 	assert_eq!(stored.keys().cloned().collect::<Vec<_>>(), [head, untimed(0, 1)]);
 	assert_eq!(
 		contents(&stored),
-		[
-			[(0, "group", vec!["a".to_string()])],
-			[(0, "group", vec!["b".to_string()])]
-		]
+		[[(0, vec!["a".to_string()])], [(0, vec!["b".to_string()])]]
 	);
 
 	open.finish().unwrap();
@@ -386,9 +374,9 @@ async fn an_untimed_group_splits_by_wall_clock() {
 	assert_eq!(
 		contents(&stored),
 		[
-			vec![(0, "group", strings(&["a", "b", "c", "d"]))],
-			vec![(0, "group", strings(&["e"]))],
-			vec![(1, "group", strings(&["f"]))],
+			vec![(0, strings(&["a", "b", "c", "d"]))],
+			vec![(0, strings(&["e"]))],
+			vec![(1, strings(&["f"]))],
 		]
 	);
 }
@@ -470,7 +458,7 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
 		.flatten()
-		.flat_map(|(_, _, frames)| frames)
+		.flat_map(|(_, frames)| frames)
 		.collect();
 	assert_eq!(frames, ["0/a", "100/b", "200/c", "300/d"]);
 
@@ -483,7 +471,7 @@ async fn a_restart_mid_group_loses_and_duplicates_nothing() {
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
 		.flatten()
-		.flat_map(|(_, _, frames)| frames)
+		.flat_map(|(_, frames)| frames)
 		.collect();
 	assert_eq!(frames, ["a", "b", "c", "d"]);
 	assert!(complete(&store).await);
@@ -526,7 +514,7 @@ async fn a_partial_group_resumes_after_its_last_stored_frame() {
 	let frames: Vec<String> = contents(&stored)
 		.into_iter()
 		.flatten()
-		.flat_map(|(_, _, frames)| frames)
+		.flat_map(|(_, frames)| frames)
 		.collect();
 	assert_eq!(frames, ["0/a", "500/c", "600/d"]);
 	assert_eq!(end(&store, "video").await, Some(End::Finish(At { group: 2, frame: 0 })));
@@ -684,38 +672,6 @@ async fn a_track_added_mid_recording_is_recorded() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn groups_and_datagrams_keep_their_form_through_an_abrupt_end() {
-	let store = store();
-	let broadcast = broadcast::Info::new().produce();
-	let mut track = broadcast.create_track("mixed", timed()).unwrap();
-	let task = spawn(&store, &broadcast, config());
-	subscribed(&track).await;
-
-	group(&track, 0, &[(0, "g0")]);
-	track.insert_datagram(1, ms(100), "d1").unwrap();
-	group(&track, 2, &[(200, "g2")]);
-	track.insert_datagram(3, ms(300), "d3").unwrap();
-	track.insert_datagram(4, ms(400), "d4").unwrap();
-	// Ends at once: every received datagram is stored before the end.
-	track.finish().unwrap();
-	broadcast.close();
-	finished(task).await;
-
-	let stored = objects(&store, "mixed", true).await;
-	assert_eq!(
-		contents(&stored),
-		[[
-			(0, "group", vec!["0/g0".to_string()]),
-			(1, "datagram", vec!["100/d1".to_string()]),
-			(2, "group", vec!["200/g2".to_string()]),
-			(3, "datagram", vec!["300/d3".to_string()]),
-			(4, "datagram", vec!["400/d4".to_string()]),
-		]]
-	);
-	assert_eq!(end(&store, "mixed").await, Some(End::Finish(At { group: 5, frame: 0 })));
-}
-
-#[tokio::test(start_paused = true)]
 async fn markers_wait_for_the_listing_to_end() {
 	let store = store();
 	let broadcast = broadcast::Info::new().produce();
@@ -770,7 +726,7 @@ async fn an_errored_end_records_its_error() {
 	let frames: Vec<String> = contents(&objects(&store, "video", true).await)
 		.into_iter()
 		.flatten()
-		.flat_map(|(_, _, frames)| frames)
+		.flat_map(|(_, frames)| frames)
 		.collect();
 	assert_eq!(frames, ["0/a", "1000/b"]);
 	assert_eq!(end(&store, "video").await, Some(End::Error(64 + 7)));
@@ -802,7 +758,7 @@ async fn a_re_added_track_continues_and_its_marker_records_the_last_run() {
 	let frames: Vec<String> = contents(&objects(&store, "video", true).await)
 		.into_iter()
 		.flatten()
-		.flat_map(|(_, _, frames)| frames)
+		.flat_map(|(_, frames)| frames)
 		.collect();
 	assert_eq!(frames, ["0/a", "1000/b", "2000/c"]);
 	assert_eq!(end(&store, "video").await, Some(End::Error(64 + 3)));

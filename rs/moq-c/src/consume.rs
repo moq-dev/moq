@@ -832,23 +832,15 @@ impl Consume {
 			.as_ref()
 			.map(|origin| origin.driver.clone())
 			.unwrap_or_default();
-		let broadcast = context.broadcast.clone();
-		let name = name.to_string();
+		// Live from this call, which the task reports a failure of like any other.
+		let track = context.broadcast.datagrams(name);
 
-		// `subscribe` blocks on SUBSCRIBE_OK, so run it inside the task.
 		self.datagram_task.spawn(
 			on_datagram,
 			|state| &mut state.consume.datagram_task,
-			|mut close| async move {
+			|close| async move {
 				driver
-					.watch(async move {
-						let Some(track) =
-							Self::until_closed(&mut close, Self::subscribe(&broadcast, &name, None)).await?
-						else {
-							return Ok(());
-						};
-						Self::run_datagrams(on_datagram, track, close).await
-					})
+					.watch(async move { Self::run_datagrams(on_datagram, track?, close).await })
 					.await
 			},
 		)
@@ -856,7 +848,7 @@ impl Consume {
 
 	async fn run_datagrams(
 		callback: OnStatus,
-		mut track: moq_net::track::Subscriber,
+		mut track: moq_net::datagram::Consumer,
 		mut close: oneshot::Receiver<()>,
 	) -> Result<(), Error> {
 		loop {
@@ -864,7 +856,7 @@ impl Consume {
 			let datagram = tokio::select! {
 				biased;
 				_ = &mut close => return Ok(()),
-				datagram = track.recv_datagram() => match datagram? {
+				datagram = track.recv() => match datagram? {
 					Some(datagram) => datagram,
 					None => return Ok(()),
 				},

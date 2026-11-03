@@ -2,12 +2,15 @@
 //!
 //! The application names tracks the way it would in plaintext (`catalog.json`, `video`). These
 //! wrappers derive the physical name of each, so only physical names reach `moq-net` and the
-//! relays behind it.
+//! relays behind it. Stream and datagram tracks are separate namespaces, as in `moq-net`: one
+//! semantic name may be both, under one physical name and separate keys.
 
 use std::task::{Poll, ready};
 
 use crate::error::{Error, Result};
-use crate::{Name, generation, track};
+use crate::generation::Domain;
+use crate::key::Claim;
+use crate::{Name, datagram, generation, track};
 
 /// The publishing side of a protected broadcast.
 ///
@@ -62,11 +65,11 @@ impl Producer {
 	pub fn reserve_track(&self, semantic: &str) -> Result<track::Request> {
 		let name = self.generation.name(semantic)?;
 		let request = self.inner.reserve_track(name.as_str())?;
-		match self.generation.claim(semantic) {
-			Ok(keys) => Ok(track::Request::new(
+		match self.generation.claim(semantic, Domain::Group) {
+			Ok(claim) => Ok(track::Request::new(
 				request,
 				self.generation.clone(),
-				keys,
+				claim,
 				semantic.to_string(),
 			)),
 			Err(err) => {
@@ -74,6 +77,22 @@ impl Producer {
 				Err(err)
 			}
 		}
+	}
+
+	/// Create the datagram track for `semantic` under its physical name.
+	///
+	/// A name this generation already produced datagrams for, even on another broadcast,
+	/// resumes above every datagram sequence it allocated. A stream track of the same name is
+	/// independent.
+	///
+	/// # Errors
+	///
+	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes, or a net error if the broadcast
+	/// already holds a live datagram track of that name.
+	pub fn create_datagrams(&self, semantic: &str, info: moq_net::datagram::Info) -> Result<datagram::Producer> {
+		let name = self.generation.name(semantic)?;
+		let track = self.inner.create_datagrams(name.as_str(), info)?;
+		self.generation.produce_datagrams(track, semantic)
 	}
 
 	/// Create a handler for requests to tracks nobody created or reserved, named by their
@@ -113,23 +132,14 @@ impl Requests {
 	pub fn poll_requested_track(&mut self, waiter: &kio::Waiter) -> Poll<Result<track::Request>> {
 		loop {
 			let request = ready!(self.inner.poll_requested_track(waiter))?;
-			match self.open(request.name()) {
-				Ok((keys, semantic)) => {
+			match open(&self.generation, request.name(), Domain::Group) {
+				Ok((claim, semantic)) => {
 					let generation = self.generation.clone();
-					return Poll::Ready(Ok(track::Request::new(request, generation, keys, semantic)));
+					return Poll::Ready(Ok(track::Request::new(request, generation, claim, semantic)));
 				}
 				Err(_) => request.reject(moq_net::Error::NotFound),
 			}
 		}
-	}
-
-	/// Open a requested physical name to its semantic name and keys, claiming nothing: the
-	/// request claims the name only once the handler accepts it.
-	fn open(&self, name: &str) -> Result<(track::Keys, String)> {
-		// Syntax first, so a name that cannot be one costs no open.
-		let name: Name = name.parse()?;
-		let semantic = self.generation.open(&name)?;
-		Ok((self.generation.peek(&semantic)?, semantic))
 	}
 
 	/// Block until a consumer requests a track, returning a [`track::Request`] to serve.
@@ -139,6 +149,15 @@ impl Requests {
 	/// Same as [`Self::poll_requested_track`].
 	pub async fn requested_track(&mut self) -> Result<track::Request> {
 		kio::wait(|waiter| self.poll_requested_track(waiter)).await
+	}
+
+	/// Create a handler for requests to datagram tracks nobody created, named by their semantic
+	/// names. See [`moq_net::broadcast::Requests::datagrams`].
+	pub fn datagrams(&self) -> DatagramRequests {
+		DatagramRequests {
+			inner: self.inner.datagrams(),
+			generation: self.generation.clone(),
+		}
 	}
 
 	/// Create a consumer that can subscribe to tracks in this broadcast.
@@ -172,6 +191,55 @@ impl Requests {
 	/// Return true if this is the same broadcast instance.
 	pub fn is_clone(&self, other: &Self) -> bool {
 		self.inner.is_clone(&other.inner)
+	}
+}
+
+/// Open a requested physical name to its semantic name and `domain` key, claiming nothing: the
+/// request claims the name only once the handler accepts it.
+fn open(generation: &generation::Producer, name: &str, domain: Domain) -> Result<(Claim, String)> {
+	// Syntax first, so a name that cannot be one costs no open.
+	let name: Name = name.parse()?;
+	let semantic = generation.open(&name)?;
+	Ok((generation.peek(&semantic, domain)?, semantic))
+}
+
+/// Handles on-demand datagram tracks for a protected broadcast, as [`Requests`] does stream
+/// tracks.
+///
+/// Created by [`Requests::datagrams`]. A requested name this generation did not issue is
+/// answered as [`moq_net::Error::NotFound`] after at most one open, and keeps no state.
+#[derive(Clone)]
+pub struct DatagramRequests {
+	inner: moq_net::broadcast::DatagramRequests,
+	generation: generation::Producer,
+}
+
+impl DatagramRequests {
+	/// Poll for the next datagram track a subscriber asks for, to accept or reject.
+	///
+	/// # Errors
+	///
+	/// [`moq_net::Error::Closed`] once the broadcast has ended.
+	pub fn poll_requested(&mut self, waiter: &kio::Waiter) -> Poll<Result<datagram::Request>> {
+		loop {
+			let request = ready!(self.inner.poll_requested(waiter))?;
+			match open(&self.generation, request.name(), Domain::Datagram) {
+				Ok((claim, semantic)) => {
+					let generation = self.generation.clone();
+					return Poll::Ready(Ok(datagram::Request::new(request, generation, claim, semantic)));
+				}
+				Err(_) => request.reject(moq_net::Error::NotFound),
+			}
+		}
+	}
+
+	/// Block until a subscriber asks for a datagram track, returning a [`datagram::Request`] to serve.
+	///
+	/// # Errors
+	///
+	/// Same as [`Self::poll_requested`].
+	pub async fn requested(&mut self) -> Result<datagram::Request> {
+		kio::wait(|waiter| self.poll_requested(waiter)).await
 	}
 }
 
@@ -294,6 +362,18 @@ impl Consumer {
 			semantic.to_string(),
 		)))
 	}
+
+	/// Read the datagram track for `semantic` under its physical name, live from now.
+	///
+	/// # Errors
+	///
+	/// [`Error::Identity`] if `semantic` exceeds 65535 bytes, or a net error if the broadcast
+	/// has ended or serves no such datagram track.
+	pub fn datagrams(&self, semantic: &str) -> Result<datagram::Consumer> {
+		let name = self.generation.name(semantic)?;
+		let track = self.inner.datagrams(name.as_str())?;
+		self.generation.consume_datagrams(track, semantic)
+	}
 }
 
 impl std::fmt::Debug for Producer {
@@ -307,6 +387,14 @@ impl std::fmt::Debug for Producer {
 impl std::fmt::Debug for Requests {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		f.debug_struct("broadcast::Requests")
+			.field("generation", &self.generation)
+			.finish()
+	}
+}
+
+impl std::fmt::Debug for DatagramRequests {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		f.debug_struct("broadcast::DatagramRequests")
 			.field("generation", &self.generation)
 			.finish()
 	}

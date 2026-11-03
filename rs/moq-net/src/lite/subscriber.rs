@@ -2433,7 +2433,9 @@ struct DatagramServe {
 
 enum DatagramState {
 	/// Opening the request stream: TRACK on lite-05/06, DATAGRAMS on lite-07.
-	Open { request: datagram::Request },
+	Open {
+		request: datagram::Request,
+	},
 	/// Lite-07: waiting for DATAGRAMS_INFO.
 	Info {
 		request: datagram::Request,
@@ -2521,7 +2523,8 @@ impl DatagramServe {
 					}
 					let mut stream = ready!(Stream::poll_open_request(&self.subscriber.session, version, waiter))?
 						.with_stats(self.subscriber.origin.stats());
-					let DatagramState::Open { request } = std::mem::replace(&mut self.state, DatagramState::Done) else {
+					let DatagramState::Open { request } = std::mem::replace(&mut self.state, DatagramState::Done)
+					else {
 						unreachable!()
 					};
 					let track = request.name().to_string().into();
@@ -2552,7 +2555,8 @@ impl DatagramServe {
 					self.validity.check_unanswered(waiter)?;
 					ready!(stream.writer.poll_flush(waiter))?;
 					let info = ready!(stream.reader.poll_decode::<lite::DatagramsInfo>(waiter))?;
-					let DatagramState::Info { request, stream } = std::mem::replace(&mut self.state, DatagramState::Done)
+					let DatagramState::Info { request, stream } =
+						std::mem::replace(&mut self.state, DatagramState::Done)
 					else {
 						unreachable!()
 					};
@@ -4825,11 +4829,10 @@ mod tests {
 		}
 	}
 
-	/// Removing a subscription both stops delivery and releases the session's handle
-	/// on the producer, so the track (its cached groups, its stats subscription) ends
-	/// rather than outliving the subscription it belonged to.
+	/// The session routes a datagram to its datagram track's subscription by Subscribe ID,
+	/// dropping lite-07 padding and a body past the wire cap.
 	#[kio::test]
-	async fn unsubscribe_drops_the_datagram_and_releases_the_producer() {
+	async fn route_datagram_delivers_to_its_subscription() {
 		for version in [Version::Lite05, Version::Lite06, Version::Lite07] {
 			let origin = origin::Config::new(crate::Hop::new(1).unwrap()).produce();
 			let subscriber = Subscriber::new(SubscriberConfig {
@@ -4845,44 +4848,24 @@ mod tests {
 				auth: crate::auth::Link::new(false),
 			});
 
-			let broadcast = crate::broadcast::Info::new().produce();
-			// The broadcast keeps only a weak handle, so the map below owns the only strong
-			// `track::Producer`: dropping it is what ends the track.
-			let mut producer = broadcast
-				.create_track("datagrams", crate::track::Info::timed())
-				.unwrap();
-			producer.set_idle();
-			let mut received = producer.subscribe(None);
-			subscriber.subscribes.lock().insert(
+			let producer = datagram::Info::default()
+				.with_timescale(Timescale::MILLI)
+				.produce("datagrams");
+			let mut received = producer.consume();
+			subscriber.datagrams.lock().insert(
 				1,
-				TrackEntry::accepted(
+				DatagramEntry {
 					producer,
-					lite::Framing {
-						timescale: Some(Timescale::MILLI),
-						ietf: None,
-						compressed: false,
-					},
-					Default::default(),
-				),
+					timescale: Some(Timescale::MILLI),
+				},
 			);
+			let mut recv = || received.poll_recv(&kio::Waiter::noop());
 
 			if version.has_padding() {
 				// These bytes would name the active subscription without the discriminator.
 				for body in [vec![1], vec![1; 1200], vec![1; 1201]] {
 					subscriber.route_datagram(body.into()).unwrap();
-					assert!(received.recv_datagram().now_or_never().is_none());
-					assert!(
-						!subscriber
-							.subscribes
-							.lock()
-							.get(&1)
-							.unwrap()
-							.copy
-							.as_ref()
-							.unwrap()
-							.producer
-							.is_live()
-					);
+					assert!(recv().is_pending());
 				}
 			}
 
@@ -4892,46 +4875,32 @@ mod tests {
 					sequence,
 					timestamp: Some(sequence),
 					payload: bytes::Bytes::from(vec![0; size]),
-					inflated: None,
-					ietf: None,
 				}
 				.encode_bytes(version)
 				.unwrap()
 			};
 			subscriber.route_datagram(payload(1, 1)).unwrap();
-			assert_eq!(
-				received
-					.recv_datagram()
-					.now_or_never()
-					.unwrap()
-					.unwrap()
-					.unwrap()
-					.sequence,
-				1
-			);
+			let Poll::Ready(Ok(Some(datagram))) = recv() else {
+				panic!("{version}: the datagram was not delivered");
+			};
+			assert_eq!(datagram.sequence, 1);
+			assert_eq!(datagram.timestamp, Some(Timestamp::new(1, Timescale::MILLI).unwrap()));
 
 			let max_payload = 1200 - payload(2, 0).len();
 			let oversized = payload(2, max_payload + 1);
 			assert_eq!(oversized.len(), 1201);
 			subscriber.route_datagram(oversized).unwrap();
-			assert!(
-				received.recv_datagram().now_or_never().is_none(),
-				"oversized body was delivered"
-			);
+			assert!(recv().is_pending(), "oversized body was delivered");
 			let boundary = payload(3, max_payload);
 			assert_eq!(boundary.len(), 1200);
 			subscriber.route_datagram(boundary).unwrap();
-			assert_eq!(received.recv_datagram().await.unwrap().unwrap().sequence, 3);
+			assert!(matches!(recv(), Poll::Ready(Ok(Some(datagram))) if datagram.sequence == 3));
 
-			subscriber.remove_subscribe(1);
-			subscriber.route_datagram(payload(4, 1)).unwrap();
-			// Dropping the last producer is an abrupt teardown, so the track resolves with
-			// `Dropped` rather than parking. A route that outlived the removal would keep the
-			// producer alive and leave this pending forever.
-			assert!(
-				matches!(received.recv_datagram().now_or_never(), Some(Err(Error::Dropped))),
-				"the track outlived its subscription"
-			);
+			// Another subscription's datagram, such as a stream track's group datagram, goes nowhere.
+			let mut other = payload(4, 1).to_vec();
+			other[usize::from(version.has_padding())] = 2;
+			subscriber.route_datagram(other.into()).unwrap();
+			assert!(recv().is_pending());
 		}
 	}
 
@@ -6273,7 +6242,7 @@ mod tests {
 	}
 
 	/// A lite-07 FIN on unchanged bounded ranges covers them even when a group the publisher
-	/// sent, such as a lost datagram, never arrived: subscribing again would replay the rest
+	/// sent never arrived: subscribing again would replay the rest
 	/// and repeat for as long as it stays undeliverable. Ranges an update changed are asked
 	/// again, since the FIN may predate the update.
 	#[kio::test]
@@ -9331,7 +9300,7 @@ enum ServeMode {
 	Establish(Establish),
 	/// The upstream FIN'd, but QUIC does not order streams: keep the subscription
 	/// routable until every owed group is accounted for. The grace bounds an unaccounted
-	/// sequence, such as a lost datagram.
+	/// sequence.
 	Tail {
 		settle: Settle,
 		/// The groups owed, `None` when nothing says which, so only the grace settles.
@@ -9737,7 +9706,7 @@ impl ServeLoop {
 							if writer.finish().is_ok() {
 								self.closing = Some((writer, active._working));
 							}
-							// Unchanged ranges are what the publisher covered, even if a datagram
+							// Unchanged ranges are what the publisher covered, even if a group
 							// went missing. Changed ones settled by the grace instead may have
 							// been covered before an update it never read.
 							self.covered = (whole || !active.updated).then_some(active.ranges);

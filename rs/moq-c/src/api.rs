@@ -636,7 +636,7 @@ pub struct moq_datagram {
 	/// long as `payload`.
 	pub timestamp: *const moq_timestamp,
 
-	/// Per-track sequence number, drawn from the same namespace as groups.
+	/// The datagram's sequence number, counted apart from the track's groups.
 	pub sequence: u64,
 }
 
@@ -3131,10 +3131,10 @@ pub unsafe extern "C" fn moq_publish_track_frame(
 /// Send a best-effort datagram on a raw track created by [moq_publish_track].
 ///
 /// Takes `payload` then `timestamp`, matching [moq_publish_track_frame]. The payload must
-/// be at most 1200 bytes. On success the datagram's per-track sequence number (shared with the
-/// group namespace) is written to `out_sequence` when it is non-NULL. Datagrams are
-/// delivered only on transports and wire versions with a datagram channel; there is no
-/// group fallback.
+/// be at most 1200 bytes. On success the datagram's sequence number, counted apart from the
+/// track's groups, is written to `out_sequence` when it is non-NULL. A subscriber receives the
+/// datagrams sent after its [moq_consume_datagrams] call. Datagrams are delivered only on
+/// transports and wire versions with a datagram channel; there is no group fallback.
 ///
 /// Returns a zero on success, or a negative code on failure.
 ///
@@ -4257,14 +4257,15 @@ pub extern "C" fn moq_consume_track_cancel(track: u32) -> i32 {
 
 /// Subscribe to a raw track's best-effort datagrams by name.
 ///
-/// The datagram counterpart to [moq_consume_track], on its own subscription. `on_datagram`
+/// The datagram counterpart to [moq_consume_track], on its own subscription, delivering the
+/// datagrams sent from this call on. `on_datagram`
 /// is called with a positive datagram ID for each datagram in arrival order, then exactly
 /// once more with a terminal code: `0` (closed cleanly) or a negative error. After the
 /// terminal (`<= 0`) callback, `on_datagram` is never called again and `user_data` is never
 /// touched again, so release `user_data` there. The terminal callback fires even after
 /// [moq_consume_datagrams_cancel]. Read each datagram with [moq_consume_datagram] and release
 /// it with [moq_consume_datagram_free]. Datagrams arrive only over datagram-capable
-/// transports on moq-transport or lite-05 and newer moq-lite; there is no stream fallback.
+/// transports on lite-05 and newer moq-lite; there is no stream fallback.
 ///
 /// Returns a non-zero handle to the subscription on success, or a negative code on failure.
 ///

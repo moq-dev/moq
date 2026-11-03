@@ -426,10 +426,13 @@ impl Consumer {
 	/// The track's properties, once its publisher accepted it.
 	#[cfg_attr(feature = "async", kio::wrapper)]
 	pub fn poll_info(&self, waiter: &kio::Waiter) -> Poll<Result<Info>> {
-		let state = ready!(self.state.poll(waiter, |state| match state.info.is_some() || state.end.is_some() {
-			true => Poll::Ready(()),
-			false => Poll::Pending,
-		}));
+		let state = ready!(
+			self.state
+				.poll(waiter, |state| match state.info.is_some() || state.end.is_some() {
+					true => Poll::Ready(()),
+					false => Poll::Pending,
+				})
+		);
 		match (state.info, &state.end) {
 			(Some(info), _) => Poll::Ready(Ok(info)),
 			(None, Some(Err(err))) => Poll::Ready(Err(err.clone())),
@@ -609,7 +612,10 @@ mod tests {
 		assert_eq!(producer.priority(), Some(5));
 		assert!(producer.poll_priority(&kio::Waiter::noop(), Some(5)).is_pending());
 		drop(high);
-		assert_eq!(producer.poll_priority(&kio::Waiter::noop(), Some(5)), Poll::Ready(Some(-3)));
+		assert_eq!(
+			producer.poll_priority(&kio::Waiter::noop(), Some(5)),
+			Poll::Ready(Some(-3))
+		);
 		assert!(!producer.close_unused());
 		drop(low);
 		assert!(producer.close_unused());
@@ -622,7 +628,7 @@ mod tests {
 		assert!(consumer.poll_info(&kio::Waiter::noop()).is_pending());
 		let info = Info::default().with_priority(3);
 		let _producer = request.accept(info);
-		assert_eq!(consumer.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(info)));
+		assert!(matches!(consumer.poll_info(&kio::Waiter::noop()), Poll::Ready(Ok(got)) if got == info));
 
 		let request = Request::new("dg".into());
 		let mut consumer = request.weak().try_consume(stats::Scope::default()).unwrap();

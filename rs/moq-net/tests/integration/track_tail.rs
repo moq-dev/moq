@@ -403,64 +403,6 @@ async fn ietf_leaving_cancels_a_blocked_end_of_track() {
 	}
 }
 
-/// A lost datagram is indistinguishable from a reordered stream header, so its hole
-/// waits out the tail grace on every lite version.
-#[kio::test]
-async fn a_lost_datagram_delays_the_end() {
-	for version in ["moq-lite-05", "moq-lite-07-wip"] {
-		let Pair {
-			pair,
-			mut track,
-			remote,
-			_keep,
-		} = connect(version).await;
-
-		let reader = kio::clock::sim::spawn(async move {
-			let subscription = moq_net::track::Subscription::default().with_range(0..);
-			let mut sub = remote
-				.track("video")
-				.unwrap()
-				.subscribe(subscription)
-				.await
-				.expect("subscribe");
-			let mut groups = Vec::new();
-			while let Some(group) = sub.recv_group().await.expect("track aborted") {
-				groups.push(group.sequence);
-			}
-			(groups, kio::clock::now())
-		});
-		kio::clock::timeout(TIMEOUT, support::harness::subscribed(&track))
-			.await
-			.expect("no subscriber appeared");
-
-		for datagram in [false, true, false] {
-			if datagram {
-				pair.server_transport.lose_datagrams();
-				track.append_datagram(Timestamp::ZERO, PAYLOAD).unwrap();
-			} else {
-				let mut group = track.append_group().unwrap();
-				group.write_frame(Timestamp::ZERO, PAYLOAD).unwrap();
-				group.finish().unwrap();
-			}
-			kio::clock::sleep(GRACE / 100).await;
-		}
-		let finished = kio::clock::now();
-		track.finish().unwrap();
-
-		let (groups, ended) = kio::clock::timeout(TIMEOUT, reader)
-			.await
-			.expect("the subscription never ended")
-			.expect("reader panicked");
-		assert_eq!(groups, [0, 2], "{version}");
-		let elapsed = ended - finished;
-		assert!(
-			(GRACE / 2..GRACE * 2).contains(&elapsed),
-			"{version}: ended after {elapsed:?}"
-		);
-		drop((pair, _keep));
-	}
-}
-
 /// A publisher can declare the end, then open each group's stream before writing its first
 /// frame. The subscriber withholds a group until that frame lands, and the end waits for
 /// it: a reader that ended at the boundary would miss every group.

@@ -219,9 +219,6 @@ pub(crate) mod request {
 			| Error::Session(SessionError::Version | SessionError::Unsupported) => {
 				return NOT_SUPPORTED;
 			}
-			// moq-transport has no code for a FETCH that reached a datagram, which is never
-			// cached, so it is a group that is not there. NOT_SUPPORTED would claim the peer
-			// does not implement FETCH at all.
 			Error::NotFound | Error::Stream(StreamError::NotFound) => return DOES_NOT_EXIST,
 			Error::InvalidRange => invalid_range(kind),
 			Error::InvalidJoiningRequestId => invalid_joining_request_id(kind, version),
@@ -290,7 +287,7 @@ pub(crate) mod request {
 		/// Every error a rejection distinguishes, plus one it does not, so the checks below cover
 		/// the whole registry rather than the variants someone remembered. A new arm in
 		/// [`to_code`] belongs here.
-		const EVERY_ERROR: [Error; 15] = [
+		const EVERY_ERROR: [Error; 14] = [
 			Error::Duplicate,
 			Error::Unauthorized,
 			Error::Expired,
@@ -596,7 +593,7 @@ mod tests {
 
 	/// Every stream error this crate can hold, so the conformance check below covers the
 	/// whole space rather than the variants someone remembered. A new variant belongs here.
-	const EVERY_ERROR: [StreamError; 20] = [
+	const EVERY_ERROR: [StreamError; 19] = [
 		StreamError::Session(SessionError::Cancel),
 		StreamError::Internal,
 		StreamError::Cancel,
