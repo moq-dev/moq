@@ -34,7 +34,7 @@ ships, not the default.
   crosses runtimes (WebRTC media and SRT, received on the ring's one port
   and handed to their tokio stacks), what a
   ring relay still serves from the shared tokio runtime (TCP, WebSocket,
-  Unix, HTTP, iroh, outbound cluster dials), and what it refuses loudly
+  Unix, HTTP, outbound cluster dials), and what it refuses loudly
   (`listen.lb_id` QUIC-LB server ids). That refusal is a recorded exception
   to parity, not a prerequisite, until a consumer asks.
 

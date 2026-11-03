@@ -103,7 +103,7 @@ export interface GroupFlags {
 export class Group {
 	flags: GroupFlags;
 	trackAlias: bigint;
-	groupId: number;
+	groupId: bigint;
 	subGroupId: number;
 	publisherPriority: number;
 
@@ -115,7 +115,7 @@ export class Group {
 		flags,
 	}: {
 		trackAlias: bigint;
-		groupId: number;
+		groupId: bigint;
 		subGroupId: number;
 		publisherPriority: number;
 		flags: GroupFlags;
@@ -159,7 +159,7 @@ export class Group {
 		}
 		await w.u53(id);
 		await w.u62(this.trackAlias);
-		await w.u53(this.groupId);
+		await w.u62(this.groupId);
 		if (this.flags.hasSubgroup) {
 			await w.u53(this.subGroupId);
 		}
@@ -197,7 +197,7 @@ export class Group {
 		};
 
 		const trackAlias = await r.u62();
-		const groupId = await r.u53();
+		const groupId = await r.u62();
 		const subGroupId = flags.hasSubgroup ? await r.u53() : 0;
 		const publisherPriority = hasPriority ? await r.u8() : DEFAULT_WIRE;
 
@@ -399,7 +399,7 @@ const FETCH_PROPERTIES = 0x20;
 /** Where a {@link FetchFrame} sits in the track, and whether it opens the stream. */
 export interface FetchPosition {
 	/** The group's sequence number. */
-	group: number;
+	group: bigint;
 	/** The object's id within that group. */
 	object: number;
 	/**
@@ -408,7 +408,7 @@ export interface FetchPosition {
 	 */
 	first: boolean;
 	/** The group of the prior object or End of Range when this object starts a different group. */
-	previousGroup?: number;
+	previousGroup?: bigint;
 }
 
 /**
@@ -452,7 +452,9 @@ export class FetchFrame {
 					version,
 				),
 				encodeVarint(
-					previous === undefined ? position.group : Math.abs(position.group - previous) - 1,
+					previous === undefined
+						? position.group
+						: (position.group > previous ? position.group - previous : previous - position.group) - 1n,
 					version,
 				),
 				encodeVarint(position.object, version),
@@ -537,7 +539,7 @@ export type FetchedObject =
 	| {
 			kind: "object";
 			/** The Group ID field: absolute on the first object, a delta to a different group after. */
-			group?: number;
+			group?: bigint;
 			/** How the Subgroup ID is spelled. */
 			subgroup: FetchSubgroup;
 			/** The explicit Subgroup ID, for `subgroup: "explicit"`. */
@@ -553,7 +555,7 @@ export type FetchedObject =
 			/** The payload length; past one segment, the payload follows on the stream. */
 			size: number;
 	  }
-	| { kind: "endOfRange"; reason: EndOfRange; group: number; object: number };
+	| { kind: "endOfRange"; reason: EndOfRange; group: bigint; object: number };
 
 /**
  * Decode the next object on a fetch stream, in the track's `timescale`, or not at all when
@@ -565,11 +567,11 @@ export function decodeFetchObject(c: Cursor, timescale: Timescale | undefined): 
 		if (!END_OF_RANGE.includes(flags)) {
 			throw new ProtocolViolation(`unknown fetch serialization flags: 0x${flags.toString(16)}`);
 		}
-		return { kind: "endOfRange", reason: flags as EndOfRange, group: c.u53(), object: c.u53() };
+		return { kind: "endOfRange", reason: flags as EndOfRange, group: c.u62(), object: c.u53() };
 	}
 
 	// Wire order: Group ID, Subgroup ID, Object ID, Priority, Properties.
-	const group = flags & FETCH_GROUP_ID ? c.u53() : undefined;
+	const group = flags & FETCH_GROUP_ID ? c.u62() : undefined;
 	let subgroup: FetchSubgroup;
 	let subgroupId: number | undefined;
 	if (flags & FETCH_DATAGRAM) {

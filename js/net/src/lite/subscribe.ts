@@ -34,12 +34,12 @@ import {
  * encodes the sequence + 1: omitting the floor is 0 (the latest group, where the
  * publisher starts) and an explicit 0 is 1, replay from the beginning.
  */
-async function encodeStartGroup(w: Writer, version: Version, startGroup?: number) {
+async function encodeStartGroup(w: Writer, version: Version, startGroup?: bigint) {
 	if (resolvesStart(version)) {
-		await w.u53(startGroup ?? 0);
+		await w.u62(startGroup ?? 0n);
 		return;
 	}
-	await w.u53(startGroup === undefined ? 0 : startGroup + 1);
+	await w.u62(startGroup === undefined ? 0n : startGroup + 1n);
 }
 
 /**
@@ -48,10 +48,10 @@ async function encodeStartGroup(w: Writer, version: Version, startGroup?: number
  * The inverse of {@link encodeStartGroup}. Callers canonicalize with
  * {@link canonicalStartGroup} once the frame bounds are known.
  */
-async function decodeStartGroup(r: Reader, version: Version): Promise<number | undefined> {
-	const value = await r.u53();
+async function decodeStartGroup(r: Reader, version: Version): Promise<bigint | undefined> {
+	const value = await r.u62();
 	if (resolvesStart(version)) return value;
-	return value > 0 ? value - 1 : undefined;
+	return value > 0n ? value - 1n : undefined;
 }
 
 /**
@@ -60,8 +60,8 @@ async function decodeStartGroup(r: Reader, version: Version): Promise<number | u
  * stays named only when a `Frame Start` actually qualifies it (a subscription can resume
  * partway through group 0: a catalog never leaves it).
  */
-function canonicalStartGroup(version: Version, startGroup: number | undefined, startFrame: number): number | undefined {
-	if (resolvesStart(version) && startGroup === 0 && startFrame === 0) return undefined;
+function canonicalStartGroup(version: Version, startGroup: bigint | undefined, startFrame: number): bigint | undefined {
+	if (resolvesStart(version) && startGroup === 0n && startFrame === 0) return undefined;
 	return startGroup;
 }
 
@@ -77,7 +77,7 @@ async function encodeFrameBounds(
 		startFrame,
 		endGroup,
 		endFrame,
-	}: { startGroup?: number; startFrame: number; endGroup?: number; endFrame?: number },
+	}: { startGroup?: bigint; startFrame: number; endGroup?: bigint; endFrame?: number },
 ) {
 	if ((startFrame !== 0 && startGroup === undefined) || (endFrame !== undefined && endGroup === undefined)) {
 		throw new Error("frame bound without a group bound");
@@ -104,8 +104,8 @@ async function encodeFrameBounds(
 async function decodeFrameBounds(
 	r: Reader,
 	version: Version,
-	startGroup?: number,
-	endGroup?: number,
+	startGroup?: bigint,
+	endGroup?: bigint,
 ): Promise<{ startFrame: number; endFrame?: number }> {
 	if (!hasFrameBounds(version)) {
 		return { startFrame: 0 };
@@ -123,9 +123,9 @@ async function decodeFrameBounds(
 
 /** The span SUBSCRIBE and SUBSCRIBE_UPDATE carry, with inclusive ends. */
 interface Span {
-	startGroup?: number;
+	startGroup?: bigint;
 	startFrame: number;
-	endGroup?: number;
+	endGroup?: bigint;
 	endFrame?: number;
 }
 
@@ -134,7 +134,7 @@ interface Span {
  * counts in the track's `Timescale` as the peer was told it.
  */
 export type WireAnchor =
-	| { absolute: number; relative?: never; time?: never }
+	| { absolute: bigint; relative?: never; time?: never }
 	| { relative: number; absolute?: never; time?: never }
 	| { time: number; absolute?: never; relative?: never };
 
@@ -173,7 +173,7 @@ export function hasWireTime(ranges: readonly WireRange[] | undefined): boolean {
 async function encodeAnchor(w: Writer, anchor: WireAnchor | undefined) {
 	if (anchor?.absolute !== undefined) {
 		await w.u53(1);
-		await w.u53(anchor.absolute);
+		await w.u62(anchor.absolute);
 		await w.u53(0);
 	} else if (anchor?.relative !== undefined) {
 		await w.u53(2);
@@ -203,7 +203,7 @@ async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: read
 	}
 	if (!hasRanges(version)) {
 		await encodeStartGroup(w, version, span.startGroup);
-		await w.u53(span.endGroup !== undefined ? span.endGroup + 1 : 0);
+		await w.u62(span.endGroup !== undefined ? span.endGroup + 1n : 0n);
 		await encodeFrameBounds(w, version, span);
 		return;
 	}
@@ -219,14 +219,14 @@ async function encodeSpan(w: Writer, version: Version, span: Span, ranges?: read
 		await w.u53(0);
 	} else {
 		await w.u53(1);
-		await w.u53(startGroup);
+		await w.u62(startGroup);
 		await w.u53(startFrame);
 	}
 	if (endGroup === undefined) {
 		await w.u53(0);
 	} else {
 		await w.u53(1);
-		await w.u53(endFrame === undefined ? endGroup + 1 : endGroup);
+		await w.u62(endFrame === undefined ? endGroup + 1n : endGroup);
 		await w.u53(endFrame === undefined ? 0 : endFrame + 1);
 	}
 }
@@ -254,12 +254,12 @@ export function requestedRanges(msg: Span & { ranges?: WireRange[] }, timescale:
 	}
 	const range: Range = {};
 	if (msg.startGroup !== undefined) range.start = { absolute: msg.startGroup };
-	if (msg.endGroup !== undefined) range.end = { absolute: msg.endGroup + 1 };
+	if (msg.endGroup !== undefined) range.end = { absolute: msg.endGroup + 1n };
 	return [range];
 }
 
 /** A position as a comparable pair, group then frame. */
-type Point = [group: number, frame: number];
+type Point = [group: bigint, frame: number];
 
 function before(a: Point, b: Point): boolean {
 	return a[0] < b[0] || (a[0] === b[0] && a[1] < b[1]);
@@ -275,8 +275,8 @@ async function decodeAnchor(r: Reader, end: boolean): Promise<{ point?: Point; a
 		case 0:
 			return {};
 		case 1: {
-			const point: Point = [await r.u53(), await r.u53()];
-			return { point, anchor: { absolute: end && point[1] > 0 ? point[0] + 1 : point[0] } };
+			const point: Point = [await r.u62(), await r.u53()];
+			return { point, anchor: { absolute: end && point[1] > 0 ? point[0] + 1n : point[0] } };
 		}
 		case 2:
 			return { anchor: { relative: await r.u53() } };
@@ -294,8 +294,8 @@ async function decodeAnchor(r: Reader, end: boolean): Promise<{ point?: Point; a
 async function decodeSpan(r: Reader, version: Version): Promise<Span & { ranges?: WireRange[] }> {
 	if (!hasRanges(version)) {
 		const startGroup = await decodeStartGroup(r, version);
-		const endGroup = (await r.u53()) || undefined;
-		const end = endGroup !== undefined ? endGroup - 1 : undefined;
+		const endGroup = (await r.u62()) || undefined;
+		const end = endGroup !== undefined ? endGroup - 1n : undefined;
 		const frames = await decodeFrameBounds(r, version, startGroup, end);
 		return { startGroup: canonicalStartGroup(version, startGroup, frames.startFrame), endGroup: end, ...frames };
 	}
@@ -325,14 +325,14 @@ async function decodeSpan(r: Reader, version: Version): Promise<Span & { ranges?
 	if (!floor) start = undefined;
 	if (live) end = undefined;
 	// An exclusive end at the very first position names nothing.
-	if (end !== undefined && end[0] === 0 && end[1] === 0) throw new ProtocolViolation(EMPTY_RANGE);
+	if (end !== undefined && end[0] === 0n && end[1] === 0) throw new ProtocolViolation(EMPTY_RANGE);
 
 	const startFrame = start?.[1] ?? 0;
 	return {
 		ranges,
 		startGroup: canonicalStartGroup(version, start?.[0], startFrame),
 		startFrame,
-		endGroup: end === undefined ? undefined : end[1] === 0 ? end[0] - 1 : end[0],
+		endGroup: end === undefined ? undefined : end[1] === 0 ? end[0] - 1n : end[0],
 		endFrame: end === undefined || end[1] === 0 ? undefined : end[1] - 1,
 	};
 }
@@ -388,10 +388,10 @@ export const EMPTY_RANGE = "empty subscription range cannot be encoded";
  * Empty (`0`) cannot be encoded: the wire's 0 means unbounded. Callers refuse an empty
  * requested range before reaching here.
  */
-export function inclusiveGroupEnd(exclusive?: number): number | undefined {
+export function inclusiveGroupEnd(exclusive?: bigint): bigint | undefined {
 	if (exclusive === undefined) return undefined;
-	if (exclusive === 0) throw new Error(EMPTY_RANGE);
-	return exclusive - 1;
+	if (exclusive === 0n) throw new Error(EMPTY_RANGE);
+	return exclusive - 1n;
 }
 
 /** Encode the `Subscriber Min Age`: milliseconds plus one, zero meaning not stated. Dropped
@@ -411,7 +411,7 @@ async function decodeMinDelay(r: Reader, version: Version): Promise<number | und
 
 export class SubscribeUpdate {
 	/** A join requesting this group or later, judged against the local refresh ratio. */
-	wantedGroup?: number;
+	wantedGroup?: bigint;
 	priority: number;
 	/** See {@link Subscribe.order}. */
 	order: Order;
@@ -422,8 +422,8 @@ export class SubscribeUpdate {
 	 * Lite-07+; earlier wires decode it as not stated and drop it on encode.
 	 */
 	minDelay?: number;
-	startGroup?: number;
-	endGroup?: number;
+	startGroup?: bigint;
+	endGroup?: bigint;
 	/** See {@link Subscribe.startFrame}. */
 	startFrame: number;
 	/** See {@link Subscribe.endFrame}. */
@@ -433,18 +433,18 @@ export class SubscribeUpdate {
 
 	constructor(props: {
 		priority: number;
-		wantedGroup?: number;
+		wantedGroup?: bigint;
 		order?: Order;
 		maxDelay?: number;
 		minDelay?: number;
-		startGroup?: number;
-		endGroup?: number;
+		startGroup?: bigint;
+		endGroup?: bigint;
 		startFrame?: number;
 		endFrame?: number;
 		ranges?: WireRange[];
 	}) {
-		if (props.wantedGroup !== undefined && (!Number.isSafeInteger(props.wantedGroup) || props.wantedGroup < 0))
-			throw new RangeError("wanted group must be a safe non-negative integer");
+		if (props.wantedGroup !== undefined && props.wantedGroup < 0n)
+			throw new RangeError("wanted group must be non-negative");
 		this.wantedGroup = props.wantedGroup;
 		this.priority = props.priority;
 		this.order = props.order ?? "descending";
@@ -469,8 +469,7 @@ export class SubscribeUpdate {
 				await w.u53(this.maxDelay);
 				await encodeMinDelay(w, version, this.minDelay);
 				await encodeSpan(w, version, this, this.ranges);
-				if (hasRefresh(version))
-					await w.u62(this.wantedGroup === undefined ? 0n : BigInt(this.wantedGroup) + 1n);
+				if (hasRefresh(version)) await w.u62(this.wantedGroup === undefined ? 0n : this.wantedGroup + 1n);
 				break;
 		}
 	}
@@ -487,10 +486,8 @@ export class SubscribeUpdate {
 				const minDelay = await decodeMinDelay(r, version);
 				const span = await decodeSpan(r, version);
 				const wanted = hasRefresh(version) ? await r.u62() : 0n;
-				if (wanted > BigInt(Number.MAX_SAFE_INTEGER) + 1n)
-					throw new RangeError("wanted group exceeds safe integer");
 				return new SubscribeUpdate({
-					wantedGroup: wanted === 0n ? undefined : Number(wanted - 1n),
+					wantedGroup: wanted === 0n ? undefined : wanted - 1n,
 					priority,
 					order,
 					maxDelay,
@@ -502,8 +499,8 @@ export class SubscribeUpdate {
 	}
 
 	async encode(w: Writer, version: Version): Promise<void> {
-		if (this.wantedGroup !== undefined && (!Number.isSafeInteger(this.wantedGroup) || this.wantedGroup < 0))
-			throw new RangeError("wanted group must be a safe non-negative integer");
+		if (this.wantedGroup !== undefined && this.wantedGroup < 0n)
+			throw new RangeError("wanted group must be non-negative");
 		return Message.encode(w, (w) => this.#encode(w, version));
 	}
 
@@ -536,8 +533,8 @@ export class Subscribe {
 	 */
 	minDelay?: number;
 
-	startGroup?: number;
-	endGroup?: number;
+	startGroup?: bigint;
+	endGroup?: bigint;
 
 	/**
 	 * First frame to deliver within `startGroup`'s group; 0 is the whole group.
@@ -567,8 +564,8 @@ export class Subscribe {
 		order?: Order;
 		maxDelay?: number;
 		minDelay?: number;
-		startGroup?: number;
-		endGroup?: number;
+		startGroup?: bigint;
+		endGroup?: bigint;
 		startFrame?: number;
 		endFrame?: number;
 		ranges?: WireRange[];
@@ -658,8 +655,8 @@ export class SubscribeOk {
 	priority: number;
 	/** Accepted subscriber max delay in milliseconds. */
 	maxDelay: number;
-	startGroup?: number;
-	endGroup?: number;
+	startGroup?: bigint;
+	endGroup?: bigint;
 
 	constructor({
 		priority = 0,
@@ -669,8 +666,8 @@ export class SubscribeOk {
 	}: {
 		priority?: number;
 		maxDelay?: number;
-		startGroup?: number;
-		endGroup?: number;
+		startGroup?: bigint;
+		endGroup?: bigint;
 	}) {
 		this.priority = priority;
 		this.maxDelay = maxDelay;
@@ -692,8 +689,8 @@ export class SubscribeOk {
 				await w.u8(toWire(this.priority));
 				await padGroupOrder(w, version);
 				await w.u53(this.maxDelay);
-				await w.u53(this.startGroup !== undefined ? this.startGroup + 1 : 0);
-				await w.u53(this.endGroup !== undefined ? this.endGroup + 1 : 0);
+				await w.u62(this.startGroup !== undefined ? this.startGroup + 1n : 0n);
+				await w.u62(this.endGroup !== undefined ? this.endGroup + 1n : 0n);
 				break;
 		}
 	}
@@ -701,8 +698,8 @@ export class SubscribeOk {
 	static async #decode(version: Version, r: Reader): Promise<SubscribeOk> {
 		let priority: number | undefined;
 		let maxDelay: number | undefined;
-		let startGroup: number | undefined;
-		let endGroup: number | undefined;
+		let startGroup: bigint | undefined;
+		let endGroup: bigint | undefined;
 
 		switch (version) {
 			case Version.DRAFT_02:
@@ -715,16 +712,16 @@ export class SubscribeOk {
 				priority = fromWire(await r.u8());
 				await skipGroupOrder(r, version);
 				maxDelay = await r.u53();
-				startGroup = await r.u53();
-				endGroup = await r.u53();
+				startGroup = await r.u62();
+				endGroup = await r.u62();
 				break;
 		}
 
 		return new SubscribeOk({
 			priority,
 			maxDelay,
-			startGroup: startGroup !== undefined && startGroup > 0 ? startGroup - 1 : undefined,
-			endGroup: endGroup !== undefined && endGroup > 0 ? endGroup - 1 : undefined,
+			startGroup: startGroup !== undefined && startGroup > 0n ? startGroup - 1n : undefined,
+			endGroup: endGroup !== undefined && endGroup > 0n ? endGroup - 1n : undefined,
 		});
 	}
 
@@ -751,7 +748,7 @@ export class SubscribeStart {
 	 * The group each range's delivery starts at, in turn, `undefined` for a range with no
 	 * group there. Before draft-07 the wire carries the one range's start as `Group`.
 	 */
-	starts: (number | undefined)[];
+	starts: (bigint | undefined)[];
 
 	/**
 	 * The publisher's largest (group, frame) when it answered, or `undefined` for a track
@@ -759,7 +756,7 @@ export class SubscribeStart {
 	 */
 	largest?: Position;
 
-	constructor(starts: (number | undefined)[], largest?: Position) {
+	constructor(starts: (bigint | undefined)[], largest?: Position) {
 		this.starts = starts;
 		this.largest = largest;
 	}
@@ -770,30 +767,30 @@ export class SubscribeStart {
 			if (!hasRanges(version)) {
 				const [group, ...rest] = this.starts;
 				if (group === undefined || rest.length > 0) throw new Error("one start group before draft-07");
-				return w.u53(group);
+				return w.u62(group);
 			}
 			// Group + 1, so 0 is a track with nothing yet; the frame follows only otherwise.
 			if (this.largest === undefined) {
 				await w.u53(0);
 			} else {
-				await w.u53(this.largest.group + 1);
+				await w.u62(this.largest.group + 1n);
 				await w.u53(this.largest.frame);
 			}
 			await w.u53(this.starts.length);
-			for (const start of this.starts) await w.u53(start === undefined ? 0 : start + 1);
+			for (const start of this.starts) await w.u62(start === undefined ? 0n : start + 1n);
 		});
 	}
 
 	static async decode(r: Reader, version: Version): Promise<SubscribeStart> {
 		return Message.decode(r, async (r) => {
-			if (!hasRanges(version)) return new SubscribeStart([await r.u53()]);
-			const wire = await r.u53();
-			const largest = wire === 0 ? undefined : { group: wire - 1, frame: await r.u53() };
+			if (!hasRanges(version)) return new SubscribeStart([await r.u62()]);
+			const wire = await r.u62();
+			const largest = wire === 0n ? undefined : { group: wire - 1n, frame: await r.u53() };
 			// Not preallocated: each start costs a byte of the bounded message.
-			const starts: (number | undefined)[] = [];
+			const starts: (bigint | undefined)[] = [];
 			for (let count = await r.u53(); count > 0; count--) {
-				const start = await r.u53();
-				starts.push(start === 0 ? undefined : start - 1);
+				const start = await r.u62();
+				starts.push(start === 0n ? undefined : start - 1n);
 			}
 			return new SubscribeStart(starts, largest);
 		});
@@ -806,11 +803,11 @@ export class SubscribeStart {
  */
 export class SubscribeEnd {
 	/** The exclusive final group sequence: the first sequence that will never be produced. */
-	group: number;
+	group: bigint;
 	/** The stream error code the track ended with, if it did not end cleanly. Draft-07+ only. */
 	error?: number;
 
-	constructor(group: number, error?: number) {
+	constructor(group: bigint, error?: number) {
 		this.group = group;
 		this.error = error;
 	}
@@ -825,7 +822,7 @@ export class SubscribeEnd {
 
 	async encode(w: Writer, version: Version): Promise<void> {
 		return Message.encode(w, async (w) => {
-			await w.u53(this.group);
+			await w.u62(this.group);
 			// The code + 1, so 0 is a clean end.
 			if (hasEndError(version)) await w.u53(this.error === undefined ? 0 : this.error + 1);
 			else if (this.error !== undefined) throw new Error("an errored end needs draft-07");
@@ -834,7 +831,7 @@ export class SubscribeEnd {
 
 	static async decode(r: Reader, version: Version): Promise<SubscribeEnd> {
 		return Message.decode(r, async (r) => {
-			const group = await r.u53();
+			const group = await r.u62();
 			if (!hasEndError(version)) return new SubscribeEnd(group);
 			const code = await r.u53();
 			return new SubscribeEnd(group, code === 0 ? undefined : code - 1);
@@ -846,18 +843,18 @@ export class SubscribeEnd {
 ///
 /// Draft-03+; publishers send it on Draft-05 and later.
 export class SubscribeDrop {
-	start: number;
-	end: number;
+	start: bigint;
+	end: bigint;
 	error: number;
 
-	constructor(props: { start: number; end: number; error: number }) {
+	constructor(props: { start: bigint; end: bigint; error: number }) {
 		this.start = props.start;
 		this.end = props.end;
 		this.error = props.error;
 	}
 
 	/** Name `[start, end]` given up with `err`, as `version` carries it. */
-	static given(start: number, end: number, err: unknown, version: Version): SubscribeDrop {
+	static given(start: bigint, end: bigint, err: unknown, version: Version): SubscribeDrop {
 		// Before lite-07 the code is the application's, so it says nothing of why.
 		return new SubscribeDrop({ start, end, error: hasDropCode(version) ? toStreamCode(err) : 0 });
 	}
@@ -876,15 +873,15 @@ export class SubscribeDrop {
 	}
 
 	async #encode(w: Writer) {
-		if (this.start - this.end > 1) throw new RangeError("invalid dropped range");
-		await w.u53(this.start);
-		await w.u53(this.end);
+		if (this.start - this.end > 1n) throw new RangeError("invalid dropped range");
+		await w.u62(this.start);
+		await w.u62(this.end);
 		await w.u53(this.error);
 	}
 
 	static async #decode(r: Reader): Promise<SubscribeDrop> {
-		const drop = new SubscribeDrop({ start: await r.u53(), end: await r.u53(), error: await r.u53() });
-		if (drop.start - drop.end > 1) throw new ProtocolViolation("invalid dropped range");
+		const drop = new SubscribeDrop({ start: await r.u62(), end: await r.u62(), error: await r.u53() });
+		if (drop.start - drop.end > 1n) throw new ProtocolViolation("invalid dropped range");
 		return drop;
 	}
 

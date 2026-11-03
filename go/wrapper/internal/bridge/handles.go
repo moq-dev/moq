@@ -41,6 +41,9 @@ var TrackRequest func(any) *ffi.MoqTrackRequest
 // Subscription converts a *moq.Subscription to the generated record.
 var Subscription func(any) (*ffi.MoqSubscription, error)
 
+// Delay converts a moq.Delay to the generated record.
+var Delay func(any) (ffi.MoqDelay, error)
+
 // NonNegative refuses a negative duration, which the generated converter
 // would panic on rather than return an error.
 func NonNegative(value *time.Duration, name string) error {

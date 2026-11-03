@@ -668,6 +668,9 @@ impl StreamsState {
 			buf.write_var(limit);
 			stats.stream_data_blocked += 1;
 		}
+		if pending.is_empty(self) {
+			*pending = Retransmits::default();
+		}
 	}
 
 	/// Write STREAM and DATAGRAM frames in schedule order until the packet is full.
@@ -1280,6 +1283,21 @@ impl StreamsState {
 		if half == StreamHalf::Send {
 			self.connection_blocked.swap_remove(&id);
 			self.send_streams -= 1;
+			if self.send.capacity() > self.send.len().saturating_mul(4) {
+				self.send.shrink_to_fit();
+			}
+			if self.connection_blocked.capacity() > self.connection_blocked.len().saturating_mul(4) {
+				self.connection_blocked.shrink_to_fit();
+			}
+		} else {
+			// Contract geometrically, so a surviving stream cannot pin a burst's empty slots and
+			// removing a burst costs linear work overall. Empty tables release every slot.
+			if self.recv.capacity() > self.recv.len().saturating_mul(4) {
+				self.recv.shrink_to_fit();
+			}
+			if self.unlooked.capacity() > self.unlooked.len().saturating_mul(4) {
+				self.unlooked.shrink_to_fit();
+			}
 		}
 		self.waits.freed(id);
 	}
@@ -1344,6 +1362,158 @@ mod tests {
 			(1024 * 1024u32).into(),
 			(1024 * 1024u32).into(),
 		)
+	}
+
+	/// Notifications coalesce while a reader is parked, and freed streams leave no table storage.
+	#[test]
+	fn receive_bursts_release_stream_storage() {
+		for dir in [Dir::Uni, Dir::Bi] {
+			for streams in [1, 16, 128] {
+				for packets in [1, 16, 256] {
+					let mut server = make(Side::Server);
+					let mut pending = Retransmits::default();
+					for round in 0..3 {
+						let readers: Vec<_> = (0..streams).map(|_| Counter::new()).collect();
+						let ids: Vec<_> = (0..streams)
+							.map(|i| StreamId::new(Side::Client, dir, round * streams + i))
+							.collect();
+						for (&id, reader) in ids.iter().zip(&readers) {
+							data(&mut server, id, 0, 0, false);
+							server.waits.register(id, Wait::Read, reader);
+							assert_eq!(Streams::new(&mut server, &ConnState::Established).accept(dir), Some(id));
+						}
+						for packet in 0..packets {
+							for &id in &ids {
+								data(&mut server, id, packet, 1, false);
+							}
+						}
+						assert!(readers.iter().all(|reader| reader.wakes() == 1));
+						assert_eq!(server.waits.stream_entries(), 0);
+						assert_eq!(server.unlooked.len(), streams as usize);
+						for id in ids {
+							data(&mut server, id, packets, 0, true);
+							// Read, cancel, and observe a reset on successive bursts of one connection.
+							if round == 0 {
+								let mut stream = recv(&mut server, &mut pending, id);
+								let mut chunks = stream.read().unwrap();
+								let mut bytes = 0;
+								while let Some(chunk) = chunks.next(usize::MAX).unwrap() {
+									bytes += chunk.bytes.len();
+								}
+								assert_eq!(bytes as u64, packets);
+								chunks.finalize();
+							} else if round == 1 {
+								recv(&mut server, &mut pending, id).stop(0u32.into()).unwrap();
+							} else {
+								let _ = server.received_reset(reset_at(id, 7, packets as u32, None)).unwrap();
+								assert_eq!(
+									recv(&mut server, &mut pending, id).received_reset(),
+									Ok(Some(7u32.into()))
+								);
+							}
+							assert!(server.recv.capacity() <= server.recv.len() * 4);
+							assert!(server.unlooked.capacity() <= server.unlooked.len() * 4);
+							if dir == Dir::Bi {
+								let mut stream = send::Stream {
+									id,
+									state: &mut server,
+									pending: &mut pending,
+									conn_state: &ConnState::Established,
+								};
+								stream.finish().unwrap();
+								stream.release();
+								server.received_ack_of(frame::StreamMeta {
+									id,
+									offsets: 0..0,
+									fin: true,
+								});
+								assert!(server.send.capacity() <= server.send.len() * 4);
+							}
+						}
+						assert_eq!(server.recv.capacity(), 0, "receive slots outlived their streams");
+						assert_eq!(server.send.capacity(), 0, "send slots outlived their streams");
+						assert_eq!(server.unlooked.capacity(), 0, "unread index outlived its streams");
+					}
+				}
+			}
+		}
+	}
+
+	#[test]
+	fn control_bursts_release_stream_storage() {
+		for streams in [1, 16, 128] {
+			let mut server = make(Side::Server);
+			server.set_params(&TransportParameters {
+				initial_max_streams_uni: (streams as u32).into(),
+				initial_max_data: 1024u32.into(),
+				..TransportParameters::default()
+			});
+			server.initial_stream_receive_window = 1;
+			server.stream_receive_window = 1;
+			let mut pending = Retransmits::default();
+			let mut sent = Vec::new();
+			for index in 0..streams {
+				let id = Streams::new(&mut server, &ConnState::Established)
+					.open(Dir::Uni, Default::default())
+					.unwrap();
+				let mut stream = send::Stream {
+					id,
+					state: &mut server,
+					pending: &mut pending,
+					conn_state: &ConnState::Established,
+				};
+				assert_eq!(stream.write(&mut &b"x"[..]), Err(send::Error::Blocked));
+				stream.reset(0u32.into()).unwrap();
+				sent.push(id);
+
+				let id = StreamId::new(Side::Client, Dir::Uni, index);
+				data(&mut server, id, 0, 1, false);
+				let mut stream = recv(&mut server, &mut pending, id);
+				let mut chunks = stream.read().unwrap();
+				assert_eq!(chunks.next(1).unwrap().unwrap().bytes.len(), 1);
+				assert!(matches!(chunks.next(1), Err(recv::Error::Blocked)));
+				chunks.finalize();
+				assert!(pending.max_stream_data.contains(&id));
+				recv(&mut server, &mut pending, id).stop(0u32.into()).unwrap();
+				data(&mut server, id, 1, 0, true);
+			}
+			// Control frames retain their obligations until sent, but no capacity after draining.
+			let mut stats = FrameStats::default();
+			while !pending.is_empty(&server) {
+				let mut written = ThinRetransmits::default();
+				server.write_control_frames(&mut Vec::new(), &mut pending, &mut written, &mut stats, 128);
+				if let Some(written) = written.get() {
+					for &(id, size) in &written.reset_stream {
+						server.reset_acked(id, size);
+					}
+				}
+			}
+			// QMux also serializes an idle batch, which discards obsolete credit updates.
+			server.write_control_frames(
+				&mut Vec::new(),
+				&mut pending,
+				&mut ThinRetransmits::default(),
+				&mut stats,
+				128,
+			);
+			for id in sent {
+				send::Stream {
+					id,
+					state: &mut server,
+					pending: &mut pending,
+					conn_state: &ConnState::Established,
+				}
+				.release();
+				assert!(server.ends.capacity() <= server.ends.len() * 4);
+			}
+			assert_eq!(stats.reset_stream, streams);
+			assert_eq!(stats.stop_sending, streams);
+			assert_eq!(server.ends.capacity(), 0);
+			assert_eq!(pending.reset_stream.capacity(), 0);
+			assert_eq!(pending.stop_sending.capacity(), 0);
+			assert_eq!(pending.max_stream_data.capacity(), 0);
+			assert_eq!(pending.stream_data_blocked.capacity(), 0);
+		}
 	}
 
 	#[test]
