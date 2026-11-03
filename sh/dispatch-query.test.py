@@ -83,6 +83,15 @@ class QueryTests(unittest.TestCase):
         self.change("quest/m1/example.md")
         self.expect(True, rust=False)
 
+    def test_biome_checks_files_outside_the_js_impact_map(self):
+        for path in ("cpp/obs/buildspec.json", "sh/gh/setup.test.ts", ".github/ci-selection-audit.json"):
+            with self.subTest(path=path):
+                self.change(path)
+                calls = self.run_ci()
+                self.assertIn("biome", calls)
+                self.assertFalse(any(call.startswith("js check-changed ") for call in calls), calls)
+                (self.repo / path).unlink()
+
     def test_rust_cache_follows_modules_that_compile_rust(self):
         for path, rust in (
             ("rs/moq-net/src/lib.rs", True),
@@ -273,7 +282,7 @@ class QueryTests(unittest.TestCase):
         nix.chmod(0o755)
         self.env.update(IN_MOQ_DEV_SHELL="1", CALLS=str(self.root / "calls"))
         (self.root / "calls").unlink(missing_ok=True)
-        for script in ("markdown.sh", "shell.sh", "large-files.sh"):
+        for script in ("markdown.sh", "shell.sh", "large-files.sh", "text.sh"):
             path = self.repo / "sh" / script
             path.write_text("#!/bin/sh\nexit 0\n")
             path.chmod(0o755)
@@ -285,6 +294,28 @@ class QueryTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         return (self.root / "calls").read_text().splitlines()
+
+    def test_check_and_ci_reject_em_dashes_outside_the_diff(self):
+        self.stub_ci()
+        shutil.copy(ROOT / "sh/text.sh", self.repo / "sh/text.sh")
+        self.change("doc/unchanged.md")
+        (self.repo / "doc/unchanged.md").write_text("old text \u2014 still checked\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "existing text")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        self.change("quest/m1/example.md")
+        for action in ("check", "ci"):
+            with self.subTest(action=action):
+                result = subprocess.run(
+                    ["bash", "sh/dispatch.sh", action, "origin/main"],
+                    cwd=self.repo,
+                    env=self.env,
+                    text=True,
+                    capture_output=True,
+                )
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("doc/unchanged.md:1:", result.stdout)
+                self.assertIn(f"{action}: check text failed", result.stderr)
 
     def test_ci_requires_its_tool_stubs_even_when_the_host_has_them(self):
         host = self.root / "host"

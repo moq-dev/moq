@@ -11,7 +11,7 @@
 use std::{
 	sync::{
 		Arc, Mutex,
-		atomic::{AtomicUsize, Ordering},
+		atomic::{AtomicBool, AtomicUsize, Ordering},
 	},
 	task::Poll,
 };
@@ -78,6 +78,8 @@ pub struct Log {
 	groups: Arc<Mutex<Vec<(usize, i64)>>>,
 	joins: Arc<Mutex<Vec<(usize, usize)>>>,
 	orders: Arc<Mutex<Vec<(usize, i64)>>>,
+	/// Set by [`Self::fail_writes`].
+	writes_fail: Arc<AtomicBool>,
 }
 
 /// One thing a send stream did, as recorded in [`Log::trail`].
@@ -106,6 +108,12 @@ impl Log {
 				code: closed.expect("closed"),
 				stream: None,
 			})
+	}
+
+	/// Fail every later write on every send stream, as a peer that stopped reading
+	/// them (STOP_SENDING) would.
+	pub fn fail_writes(&self) {
+		self.writes_fail.store(true, Ordering::Relaxed);
 	}
 
 	/// What every send stream did, in call order, tagged with the stream's id (its
@@ -302,6 +310,12 @@ impl poll::SendStream for SinkSend {
 	type Group = SinkGroup;
 
 	fn poll_write(&mut self, waiter: &kio::Waiter, buf: &[u8]) -> Poll<Result<usize, Self::Error>> {
+		if self.log.writes_fail.load(Ordering::Relaxed) {
+			return Poll::Ready(Err(SinkError {
+				stream: Some(0),
+				..Default::default()
+			}));
+		}
 		if self.prefix == 0
 			&& let Some(gate) = &self.gate
 		{
