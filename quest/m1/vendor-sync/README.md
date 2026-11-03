@@ -49,8 +49,8 @@ This README's own work, once every child has merged:
 Only `/quest-delete` ends the recurrence.
 
 UniFFI recurrence baseline, checked 2026-11-02: all four upstream default
-branches are unchanged since the Oct31 ports, and all four public advisory lists
-are empty. Carry these checked heads into the next child:
+branches were checked, and all four public advisory lists were empty. Carry
+these checked heads into the next child:
 
 | Upstream | Head checked |
 |---|---|
@@ -59,19 +59,14 @@ are empty. Carry these checked heads into the next child:
 | [Uniffi-Dart/uniffi-dart](https://github.com/Uniffi-Dart/uniffi-dart) | [`e644a4ad`](https://github.com/Uniffi-Dart/uniffi-dart/commit/e644a4ad980f72697aba211fd30cb4fbd8fc7324) |
 | [livekit/uniffi-bindgen-cpp](https://github.com/livekit/uniffi-bindgen-cpp) | [`20bef754`](https://github.com/livekit/uniffi-bindgen-cpp/commit/20bef754391023df147267482513c35120dee343) |
 
-The Oct31 generator ports and pin updates already landed in
-[moq-dev/moq#7461](https://github.com/moq-dev/moq/pull/7461), with their rust2
-mirror in [moq-dev/rust2#364](https://github.com/moq-dev/rust2/pull/364).
-The Dart fork's [CI coverage](https://github.com/kixelated/uniffi-dart/blob/moq-0.32/README.md#fork-ci-coverage)
-keeps the full fixture and lint suite plus Nix smoke checks. Its unrelated wallet
-jobs are removed; MoQ's binding and cross-language checks own the downstream
-integration. The fork changes only tests, CI, and documentation, so no generator
-pin or regenerated binding changes were needed this run. Retain the
-completed child's applicability decisions from its history; foreign traits,
-custom types, dollar-bearing defaults, and recursive enum graphs still have no
-MoQ consumer. Recheck that before importing their upstream fixes. Until the
-exporter switch, mirror any generator fixes into rust2's maintenance fork too.
-Drop the UniFFI child once [the exporter switch](/quest/m2/ffi-exporter.md) lands.
+MoQ exports no foreign-implementable traits, custom types, dollar-bearing
+defaults, or recursive enum graphs. Recheck these uses before importing the
+related upstream fixes. Upstream's parser, JNI backend, mutable bytes, and
+library-mode removal are redesigns outside this sync. Before changing Dart
+fork CI, read its [coverage record](https://github.com/kixelated/uniffi-dart/blob/moq-0.32/README.md#fork-ci-coverage).
+Until the exporter switch, mirror any generator fixes into rust2's maintenance
+fork too. Drop the UniFFI child once
+[the exporter switch](/quest/m2/ffi-exporter.md) lands.
 
 Out of scope: forks moq no longer consumes (moq-dev/quiche, moq-dev/noq,
 kixelated/cros-codecs, kixelated/openh264-rs, kixelated/fflate) and the
