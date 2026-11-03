@@ -305,7 +305,9 @@ to back, rotating which goes first, for `BENCH_RUNTIME_ROUNDS` rounds (default
 3); the current generator drives them all. The revisions are each other's
 control, so there is no unprofiled run per revision. The run ends with each
 revision's median and range in `instructions-summary.json`, including the groups
-the generator confirmed lost between the reports bracketing each counter window.
+the generator confirmed lost between the reports bracketing each counter window
+and the host's highest one-minute load during it. Admission only waits for room
+when the run starts, so judge cells by the load they actually ran under.
 
 After seven seconds of warmup, acknowledged perf enable/disable commands bound
 five seconds of relay counters. `instructions/instructions.json` records both

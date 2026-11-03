@@ -158,8 +158,10 @@ def capture(pid, directory, delay, duration):
             time.sleep(delay)
             record.command("enable")
             start = stat.command("enable")
+            load = [host_load()]
             time.sleep(duration)
             end = stat.command("disable")
+            load.append(host_load())
             record.command("disable")
     finally:
         errors = []
@@ -180,11 +182,17 @@ def capture(pid, directory, delay, duration):
                 threads=names,
                 events=counters,
                 sample_rate_limit=int(Path("/proc/sys/kernel/perf_event_max_sample_rate").read_text()),
+                host_load_1m=load,
             ),
             indent=2,
         )
         + "\n"
     )
+
+
+def host_load():
+    """Other host work can change after admission, so each window keeps the load it ran under."""
+    return float(Path("/proc/loadavg").read_text().split()[0])
 
 
 def delivered(rows, at):
@@ -295,22 +303,26 @@ def summarize(run, labels):
                     cycles_per_frame=cell["cycles_per_frame"],
                     recv_fps=cell["recv_fps"],
                     groups_lost=lost(rows, cell["window_start_ms"], cell["window_end_ms"]),
+                    host_load_1m=max(cell.get("host_load_1m", [math.nan])),
                 )
             )
         if not cells:
             raise ValueError(f"no instruction cells for {label}")
         result[label] = dict(cells=cells)
-        for key in ("instructions_per_frame", "cycles_per_frame", "recv_fps", "groups_lost"):
+        for key in ("instructions_per_frame", "cycles_per_frame", "recv_fps", "groups_lost", "host_load_1m"):
             values = [cell[key] for cell in cells]
             result[label][key] = dict(median=median(values), min=min(values), max=max(values))
     (run / "instructions-summary.json").write_text(json.dumps(result, indent=2) + "\n")
-    print(f"\n{'revision':<20} {'kinstr/frame [min-max]':>26} {'kcycles/frame':>14} {'fps [min-max]':>24} {'lost':>5}")
+    print(
+        f"\n{'revision':<20} {'kinstr/frame [min-max]':>26} {'kcycles/frame':>14} {'fps [min-max]':>24} "
+        f"{'lost':>6} {'load':>5}"
+    )
     for label, row in result.items():
         i, c, f = row["instructions_per_frame"], row["cycles_per_frame"], row["recv_fps"]
         print(
             f"{label:<20} {i['median'] / 1e3:>9.1f} [{i['min'] / 1e3:.1f}-{i['max'] / 1e3:.1f}] "
             f"{c['median'] / 1e3:>14.1f} {f['median']:>9.0f} [{f['min']:.0f}-{f['max']:.0f}] "
-            f"{row['groups_lost']['max']:>5}"
+            f"{row['groups_lost']['max']:>6} {row['host_load_1m']['max']:>5.1f}"
         )
 
 

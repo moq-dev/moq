@@ -87,6 +87,7 @@ class Instructions(unittest.TestCase):
                                 recv_fps=1000,
                                 window_start_ms=1250,
                                 window_end_ms=2250,
+                                host_load_1m=[round, 0.5],
                             )
                         )
                     )
@@ -99,6 +100,7 @@ class Instructions(unittest.TestCase):
             self.assertEqual(summary["current"]["instructions_per_frame"]["median"], 20.5)
             # Loss counts between the reports bracketing the window, not over the lifetime.
             self.assertEqual([cell["groups_lost"] for cell in summary["base-0123"]["cells"]], [0, 1, 2])
+            self.assertEqual(summary["base-0123"]["host_load_1m"], dict(median=2, min=1, max=3))
             with self.assertRaisesRegex(ValueError, "no instruction cells"):
                 instructions.summarize(run, ["missing"])
 
