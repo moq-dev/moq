@@ -238,7 +238,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [An advertisement stuck on a zero-credit peer gives up](/quest/m2/advertise-credit-timeout.md) - A Rust moq-transport publisher whose PUBLISH_NAMESPACE or namespace update cannot leave because the peer grants no send credit gives up on it within a bounded time, as it already does on a silent answer: it resets the request and frees its state
 - [aec::Processor's edge cases are tested](/quest/m2/aec-tests.md) - moq-audio tests cover `aec::Processor` at the extremes of its accepted input
 - [A failed archive time lookup fails the subscription](/quest/m2/archive-time-followups.md) - when an `archive::Consumer` cannot answer a `Time(pts)` lookup because a store GET fails or an object does not decode, the subscription fails with a typed error naming the lookup failure instead of silently falling back to the cache
-- [An audio-only broadcast that can't play hides the play button](/quest/m2/center-play-audio.md) - `<moq-watch-ui>`'s center play button hides when an audio-only broadcast's audio decoder is unsupported, as it already does for a video error, and a real-browser test proves `AudioDecoder.isConfigSupported` rejects an unsupported codec and the UI shows the notice
 - [moq-sock's control buffer is sized for the send options too](/quest/m2/cmsg-len-send.md) - `cmsg::LEN` in moq-sock is derived from, or checked at compile time against, both the receive options and the send options
 - [A panic inside moq-tokio's connection internals fails callers instead of panicking them](/quest/m2/connection-panic-isolation.md) - after a moq-tokio QUIC connection driver panics, every client-side caller gets the connection's terminal error instead of panicking in its own task
 - [No large future in the FFI layers can overflow a runtime or foreign thread's stack](/quest/m2/ffi-future-size.md) - every future moq-c and moq-ffi spawn or block on is below a size bound that a lint enforces, so unoptimized builds stay inside the runtime thread stack
@@ -270,7 +269,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [Nightly runs zizmor's online workflow audits](/quest/m2/workflow-audit-followups.md) - nightly runs zizmor's online audits
 - [moq auth sign mints capped tokens](/quest/m2/auth-sign-caps.md) - CLI flags for the bitrate caps
 - [QUIC-LB forwarding reads the cluster's peers and reports its counts](/quest/m2/quic-lb-forward-extras.md) - a cluster-API peer map and forward counters
-- [An audio-only broadcast that can't play hides its play button](/quest/m2/audio-only-play.md) - center-play follows the audio-only rule
+- [An audio-only broadcast that can't play hides its play button](/quest/m2/audio-only-play.md) - center-play follows the audio-only rule, proven by a browser test
 - [The browser bench keeps its page consoles](/quest/m2/browser-bench-consoles.md) - publisher and consumer page logs in the run directory
 - [moq-quic's long header type is one variant](/quest/m2/quic-long-type.md) - collapse LongType after the 0-RTT removal
 - [One predicate for the lite close wait](/quest/m2/subscriber-fin-fold.md) - fold waits_for_subscriber_fin into has_track_stream
