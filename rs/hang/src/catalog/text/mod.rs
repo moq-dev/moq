@@ -136,9 +136,11 @@ pub struct TextConfig {
 	/// consumer measures it. Absent on a rendition that trails nothing, and on any rendition the
 	/// publisher neither supplied nor measured.
 	///
-	/// A publisher that knows its rendition trails nothing states `Some(Duration::ZERO)`: it is
-	/// never measured, and is omitted on the wire like an absent value, which means the same to a
-	/// consumer. `None` leaves it to measurement.
+	/// A consumer adds a frame duration on top, so a publisher that knows its frames trail by no
+	/// more than their own duration, such as an encoder configured not to reorder or queue, states
+	/// `Some(Duration::ZERO)`. It is never measured, and is omitted on the
+	/// wire like an absent value, which means the same to a consumer. `None` leaves it to
+	/// measurement.
 	///
 	/// A consumer holds `delay + jitter` for this rendition and MUST NOT subtract one rendition's
 	/// `delay` from another's: each is taken against whichever rendition was ahead, so two need not

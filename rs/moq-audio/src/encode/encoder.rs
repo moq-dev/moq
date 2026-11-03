@@ -540,6 +540,14 @@ impl Encoder {
 		};
 		config.description = self.description.clone();
 		config.container = hang::catalog::Container::Legacy;
+		// An Opus or PCM packet goes out as soon as its frame's last sample is in, stamped at its
+		// first, so it trails by its own duration and nothing else; the player adds that frame, and
+		// the catalog `delay` is a known zero. AAC folds its priming into the timestamps and a platform
+		// encoder may hold frames, so it is measured.
+		config.delay = match self.config.codec {
+			Codec::Opus | Codec::Pcm => Some(std::time::Duration::ZERO),
+			Codec::Aac => None,
+		};
 		if matches!(self.config.codec, Codec::Opus) {
 			config.warmup = Some(moq_mux::codec::opus::WARMUP);
 		}
@@ -992,6 +1000,17 @@ mod tests {
 		let enc = stub(&aac(Layout::Stereo)).unwrap();
 		assert_eq!(enc.config().bitrate, None);
 		assert_eq!(enc.catalog().bitrate, Some(128_000));
+	}
+
+	/// A codec whose packets trail by their own duration alone states a zero delay; AAC, whose
+	/// encoder may hold frames, leaves it to measurement.
+	#[test]
+	fn delay_is_stated_where_the_codec_fixes_it() {
+		assert_eq!(stub(&aac(Layout::Stereo)).unwrap().catalog().delay, None);
+		for codec in [Codec::Opus, Codec::Pcm] {
+			let enc = Encoder::new(&Config::from_input(codec, &Input::new(48_000, Layout::Stereo))).unwrap();
+			assert_eq!(enc.catalog().delay, Some(std::time::Duration::ZERO), "{codec:?}");
+		}
 	}
 
 	/// The drain pushes the encoder delay out through whole silent frames.
