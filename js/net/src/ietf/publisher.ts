@@ -2281,8 +2281,8 @@ export class Publisher {
 			join = found;
 		}
 		const namespace = named?.trackNamespace ?? (join?.kind === "join" ? join.namespace : undefined);
-		// A resolved answer holds its head in memory, so a subscription that ends after it, as
-		// a track finishing right after SUBSCRIBE_OK does, still gets the head it joined.
+		// A resolved answer owns its group reader independently of the subscription. Ending
+		// that subscription alone does not cancel the head; source failure or eviction still can.
 		let resolved = false;
 		const lapsed = new Error("subscription ended");
 		const lapse =
@@ -2408,22 +2408,19 @@ export class Publisher {
 			const group = hooks.cachedGroup(cache, selected);
 			if (!group) return { condition: "does_not_exist", reasonPhrase: `group ${range.start.group}` };
 			const slice = fetchSlice(range, selected);
-			// An unbounded answer needs the group's final count for FETCH_OK. Waiting holds
-			// only its normal tail; a bounded answer already knows its end and can stream now.
+			// Wait for the selected headers or the group's end, through this reader's recovery
+			// and verdict. The reader holds only the normal tail, not a copied slice.
 			try {
-				if (slice.until === undefined) await untilAborted(Promise.resolve(hooks.groupSealed(group)), signal);
-				const failed = hooks.groupFate(group)();
-				if (failed) throw failed;
+				const last = await untilAborted(hooks.groupEnd(group, slice.until), signal);
 
 				// Only a finished track's final object ends it, never a live track's Largest Object.
 				const final = hooks.subscriberEnd(cache);
-				const complete = group.isClosed && (slice.until === undefined || group.frameCount <= slice.until);
 				const endOfTrack =
-					complete &&
+					last.complete &&
 					final !== undefined &&
 					(final.frame === 0 ? final.group : final.group + 1) === group.sequence + 1;
 				const sequence = BigInt(group.sequence);
-				const groupEnd = BigInt(Math.max(slice.skip, group.frameCount));
+				const groupEnd = BigInt(Math.max(slice.skip, last.end));
 				const until = slice.until;
 				let endLocation: Location;
 				if (Filter.isDraft20(version)) {

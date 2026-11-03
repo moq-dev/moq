@@ -717,43 +717,50 @@ test("draft-18: a joining FETCH whose subscription is refused is refused", async
 	client.close();
 });
 
-// A bounded FETCH must deliver before its final frame is complete. Keep growing the
-// requested slice past the group tail, so collecting either frames or payloads cannot pass.
+// Every selected header is known, but the last payload grows the slice past the group
+// tail. Neither collecting the slice nor reading its last frame whole can deliver this.
 test.each([
-	{ count: 40, size: SEGMENT_BYTES + 1 },
-	{ count: 1, size: SEGMENT_BYTES * 40 },
-])("a bounded FETCH streams $count frames of $size bytes past the tail", async ({ count, size }) => {
+	{ prefix: 3, size: SEGMENT_BYTES * 16 },
+	{ prefix: 0, size: SEGMENT_BYTES * 40 },
+])("a FETCH streams $prefix cached frames and a $size byte final frame past the tail", async ({ prefix, size }) => {
 	for (const version of VERSIONS) {
 		using fx = serve(version);
 		const group = fx.track.createGroup(0);
-		let frame = group.createFrame({ size, timestamp: new Timestamp(0, Timescale.MILLI) });
+		const prefixSize = SEGMENT_BYTES * 8;
+		for (let index = 0; index < prefix; index++) {
+			const frame = group.createFrame({ size: prefixSize, timestamp: new Timestamp(index, Timescale.MILLI) });
+			for (let offset = 0; offset < prefixSize; offset += SEGMENT_BYTES)
+				frame.write(new Uint8Array(SEGMENT_BYTES).fill(index));
+			frame.finish();
+		}
+		const frame = group.createFrame({ size, timestamp: new Timestamp(prefix, Timescale.MILLI) });
 		const request = requestStream(version);
 		const task = fx.pub.runFetch(
-			new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, count)) }),
+			new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, prefix + 1)) }),
 			request.stream,
 		);
 		try {
 			expect(await request.answer.u53()).toBe(FetchOk.id);
 			const ok = await FetchOk.decode(request.answer, version);
-			expect(ok.endLocation).toEqual(endAt(version, 0, count - 1));
+			expect(ok.endLocation).toEqual(endAt(version, 0, prefix));
 			const next = await fx.uni.read();
 			if (!next.value) throw new Error("missing fetch stream");
 			const reader = new Reader(next.value, undefined, version);
 			expect(await reader.u53()).toBe(FetchHeader.type);
 			expect((await FetchHeader.decode(reader, version)).requestId).toBe(FETCH_ID);
-			for (let index = 0; index < count; index++) {
-				if (index > 0) frame = group.createFrame({ size, timestamp: new Timestamp(index, Timescale.MILLI) });
+			for (let index = 0; index <= prefix; index++) {
+				const length = index === prefix ? size : prefixSize;
 				const object = await reader.decode((cursor) => decodeFetchObject(cursor, Timescale.MILLI));
-				expect(object).toMatchObject({ kind: "object", size, payload: undefined });
+				expect(object).toMatchObject({ kind: "object", size: length, payload: undefined });
 				if (object.kind !== "object") throw new Error("expected object");
 				expect(object.timestamp?.value).toBe(index);
-				// Forward each segment before the rest exists; no whole-frame read can do this.
-				for (let offset = 0; offset < size; offset += SEGMENT_BYTES) {
-					const bytes = new Uint8Array(Math.min(SEGMENT_BYTES, size - offset)).fill(index);
-					frame.write(bytes);
+				for (let offset = 0; offset < length; offset += SEGMENT_BYTES) {
+					const bytes = new Uint8Array(Math.min(SEGMENT_BYTES, length - offset)).fill(index);
+					// Forward each segment before the rest exists; no whole-frame read can do this.
+					if (index === prefix) frame.write(bytes);
 					expect(await reader.read(bytes.byteLength)).toEqual(bytes);
 				}
-				frame.finish();
+				if (index === prefix) frame.finish();
 			}
 			// The bound ends the response without waiting for this live group's FIN.
 			expect(await reader.done()).toBe(true);
@@ -763,6 +770,26 @@ test.each([
 			group.abort(new Error("test ended"));
 			await task;
 		}
+	}
+});
+
+// The group ending before a requested bound determines both the true end and its track flag.
+test("a bounded FETCH waits for headers or the final group before promising its end", async () => {
+	for (const version of VERSIONS) {
+		using fx = serve(version);
+		const live = writeGroup(fx.track, 0, ["0-0", "0-1", "0-2"], false);
+		const answering = fetch(fx, new Fetch({ requestId: FETCH_ID, type: range(version, at(0, 0), at(0, 10)) }));
+		await flush();
+		live.finish();
+		fx.track.finish();
+		const answer = served(await answering);
+		expect(answer.ok.endOfTrack).toBe(true);
+		expect(answer.ok.endLocation).toEqual(endAt(version, 0, 2));
+		expect(answer.objects).toEqual([
+			[0, 0, "0-0"],
+			[0, 1, "0-1"],
+			[0, 2, "0-2"],
+		]);
 	}
 });
 

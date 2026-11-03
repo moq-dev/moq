@@ -1175,7 +1175,7 @@ export class Consumer {
 		hooks.groupIndex = (group) => group.#index();
 		hooks.groupStarted = (group) =>
 			group.#state.total.peek() > group.#state.offset || group.#state.closed.peek() !== undefined;
-		hooks.groupSealed = (group) => group.#state.closed;
+		hooks.groupEnd = (group, until) => group.#end(until);
 		hooks.groupFate = (group) => {
 			const state = group.#state;
 			return () => {
@@ -1201,6 +1201,38 @@ export class Consumer {
 		hooks.onShedRead = (group, notify) => {
 			group.#state.shedRead = notify;
 		};
+	}
+
+	// Resolve a FETCH's end from headers without consuming or pinning payloads. This is a
+	// reader operation: its verdict and replacement copy, not a raw producer end, decide it.
+	async #end(until?: number): Promise<{ end: number; complete: boolean }> {
+		for (;;) {
+			if (this.#terminal) {
+				this.#abandon();
+				throw this.#terminal;
+			}
+			const closed = this.#state.closed.peek();
+			if (closed instanceof Error) {
+				if (await this.#resume(closed)) continue;
+				this.#abandon();
+				throw closed;
+			}
+			const count = this.frameCount;
+			if (closed !== undefined || (until !== undefined && count >= until)) {
+				this.#abandon();
+				return {
+					end: Math.min(count, until ?? count),
+					complete: closed !== undefined && (until === undefined || count <= until),
+				};
+			}
+			if (this.#expire()) continue;
+			if (this.#recover?.wants(undefined)) {
+				// Buffered payloads do not satisfy an end wait, so a newer copy may win here.
+				await this.#resume(undefined, false);
+				continue;
+			}
+			await this.#changed();
+		}
 	}
 
 	// Evaluate the drift budget for a read that has nothing buffered and is about to
@@ -1258,7 +1290,7 @@ export class Consumer {
 	// Continue from the serving route's copy once the one being read failed with `failed`, or
 	// stalled (no `failed`) while a newer route serves. Returns whether the read should look
 	// again; throws the error that ends the group once nothing can continue it.
-	async #resume(failed: Error | undefined): Promise<boolean> {
+	async #resume(failed: Error | undefined, preferBuffered = true): Promise<boolean> {
 		const recover = this.#recover;
 		if (this.#torn() || !recover?.wants(failed)) return false;
 		// A stall's attempt learns nothing of a failure since: ask again with it.
@@ -1294,7 +1326,10 @@ export class Consumer {
 		const replacement = attempt.replacement;
 		attempt.replacement = undefined;
 		if (!replacement) return true;
-		if (!failed && (this.#bufferedFrames().length > 0 || this.#state.closed.peek() !== undefined)) {
+		if (
+			!failed &&
+			((preferBuffered && this.#bufferedFrames().length > 0) || this.#state.closed.peek() !== undefined)
+		) {
 			// The copy being read delivered or ended meanwhile; keep reading it.
 			replacement.discard();
 			return true;

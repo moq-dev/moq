@@ -667,8 +667,8 @@ export const hooks: {
 	/** The next absolute frame this reader can serve. Assigned by `group.ts`. */
 	groupIndex: (group: GroupConsumer) => number;
 	groupStarted: (group: GroupConsumer) => boolean;
-	/** The copy's producer end, even while this reader still has buffered frames. */
-	groupSealed: (group: GroupConsumer) => GetPromise<Error | null>;
+	/** Wait for the selected headers or this reader's group end, without retaining payloads. */
+	groupEnd: (group: GroupConsumer, until?: number) => Promise<{ end: number; complete: boolean }>;
 	/** Watch the error a group's copy closes with, ignoring readers' verdicts, without holding the consumer. */
 	groupFate: (group: GroupConsumer) => () => Error | undefined;
 	/** Record when a track's mirror of a group joined that track at this hop. */
@@ -932,7 +932,7 @@ export const hooks: {
 	groupStarted: () => {
 		throw new Error("group.ts not loaded");
 	},
-	groupSealed: () => {
+	groupEnd: () => {
 		throw new Error("group.ts not loaded");
 	},
 	groupFate: () => {

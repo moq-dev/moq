@@ -886,3 +886,56 @@ test("a drained unfinished group fails with Old when its budget gives up", async
 	expect(consumer.done).toBe(true);
 	expect(await consumer.closed).toBe(err as StreamError);
 });
+
+// Metadata waits use the same recovery and reader verdict as payload reads, without
+// consuming the frames a later FETCH must still deliver.
+test.each([undefined, 2].flatMap((until) => [false, true].map((stalled) => ({ until, stalled }))))(
+	"a group end wait recovers before selecting its end (cap $until, stalled $stalled)",
+	async ({ until, stalled }) => {
+		const source = new Producer(0);
+		source.writeFrame(textFrame("zero"));
+		const reader = source.consume();
+		const replacement = new Producer(0);
+		replacement.writeFrame(textFrame("zero"));
+		replacement.writeFrame(textFrame("one"));
+		replacement.finish();
+		const newer = new Signal(false);
+		hooks.recoverGroup(reader, {
+			changed: newer,
+			wants: (failed) => failed !== undefined || newer.peek(),
+			replace: async (index) => {
+				expect(index).toBe(0);
+				return {
+					group: replacement.consume(),
+					expiry: { expired: () => false, changed: [] },
+					adopt: () => newer.set(false),
+					discard: () => {},
+				};
+			},
+		});
+		const end = hooks.groupEnd(reader, until);
+		if (stalled) newer.set(true);
+		else source.abort(new Error("route failed"));
+		expect(await end).toEqual({ end: 2, complete: true });
+		expect(await reader.readString()).toBe("zero");
+		expect(await reader.readString()).toBe("one");
+		reader.close();
+		source.finish();
+	},
+);
+
+test.each(["eviction", "expiry"] as const)("a group end wait observes reader %s", async (failure) => {
+	const source = new Producer(0);
+	source.writeFrame(textFrame("zero"));
+	const reader = source.consume();
+	const expired = new Signal(false);
+	hooks.expireGroup(reader, { expired: () => expired.peek(), changed: [expired] });
+	const end = hooks.groupEnd(reader);
+	if (failure === "eviction") hooks.evictGroup(reader);
+	else expired.set(true);
+	await expect(end).rejects.toMatchObject({
+		code: failure === "eviction" ? StreamCode.TooFarBehind : StreamCode.Old,
+	});
+	source.finish();
+	reader.close();
+});

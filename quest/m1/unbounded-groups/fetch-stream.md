@@ -13,8 +13,9 @@ fix any small-frame browser regression it establishes.
 The implementation in [moq-dev/moq#7721](https://github.com/moq-dev/moq/pull/7721)
 streams moq-transport FETCH and subscription fill objects through the existing
 chunked group reader, without collecting a requested slice. Bounded FETCHes
-answer before payloads finish; whole-group FETCHes wait for the final count
-without retaining payloads beyond the ordinary group tail. An evicted answer
+wait for their selected headers, then answer before payloads finish; whole-group
+FETCHes wait for the final count. These metadata waits preserve reader recovery,
+eviction, and expiry without retaining payloads beyond the ordinary group tail. An evicted answer
 fails rather than pinning data for a slow reader. Lite FETCH cancellation watches
 reader demand throughout the frame pump, including a stalled payload. A stopped
 egress releases its chunk wait. Public API: none. Wire format: none.
