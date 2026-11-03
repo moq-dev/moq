@@ -435,7 +435,7 @@ export namespace Origin {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly closed: Signals.GetPromise<Error | null>;
 		readonly discovery: Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Following;
 		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 	}
 	export class Request {
