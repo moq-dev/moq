@@ -1,0 +1,484 @@
+/**
+ * Serving the groups a track's readers miss: the on-demand request surface. Mirrors the Rust
+ * `track::Requests` and `track::Fill` (`rs/moq-net/src/model/track/fill.rs`).
+ *
+ * A reader misses a group its ranges name that the track no longer caches, or never did, below
+ * the newest group the producer wrote: nothing above it is a miss, since it arrives live. While a
+ * {@link Requests} handle is open, each run of misses queues a {@link Fill} for it to serve, and
+ * readers missing the same groups join the one fill rather than asking twice. With none open, a
+ * miss is given up as it always was.
+ *
+ * @module
+ */
+import { Milli } from "@moq/clock";
+import { type GetPromise, Signal } from "@moq/signals";
+import { NotFound } from "./error.ts";
+import type { Producer as GroupProducer } from "./group.ts";
+import { insertRun, NO_MAX_DELAY, type Run, runGaps } from "./internal.ts";
+import type { Info, Order } from "./track.ts";
+
+/** What the fills need from the track they serve. Package-internal. */
+export interface FillTrack {
+	/** The track's name. */
+	readonly name: string;
+	/** Insert group `sequence` into the cache, committing `info` first if the track has none. */
+	accept(sequence: number, info: Partial<Info> | undefined): GroupProducer;
+	/** Record `[start, end)` as never to be delivered. */
+	drop(start: number, end: number, error: Error): void;
+	/** Whether the track still caches group `sequence`, not failed. */
+	holds(sequence: number): boolean;
+	/** Whether the track closed, so nothing more can be served. */
+	closed(): boolean;
+	/** Settles once the track closes. */
+	readonly released: GetPromise<unknown>;
+}
+
+/** A reader waiting on fills. Package-internal. */
+export interface Asker {
+	/** The parts of `[start, end)` it still reads. */
+	wants(start: number, end: number): Run[];
+	/** Its delivery priority. */
+	priority(): number;
+	/** Its age budget in milliseconds: `Infinity` for none, so the publisher's alone bounds it. */
+	maxDelay(): number;
+	/** Which end it reads first. */
+	order(): Order;
+	/** Stop waiting for `[start, end)`, which a fill refused with `error`, without asking again. */
+	refuse(start: number, end: number, error: Error): void;
+}
+
+// The fill operations a handle runs against the state it came from; assigned in its static block.
+let fillOps: {
+	accept(state: FillState, pending: Pending, sequence: number, info: Partial<Info> | undefined): GroupProducer;
+	drop(state: FillState, pending: Pending, start: number, end: number): void;
+	refuse(state: FillState, pending: Pending, start: number, end: number, error: Error): void;
+	settle(state: FillState, pending: Pending): void;
+	name(state: FillState): string;
+};
+
+// One fill: a run of groups some readers miss, until each is answered or nobody wants it.
+class Pending {
+	readonly start: number;
+	readonly end: number;
+	readonly askers = new Set<Asker>();
+	// The groups answered: accepted, delivered live, dropped, or refused.
+	readonly resolved: Run[] = [];
+	// Still in the queue, not yet handed to a handler.
+	queued = true;
+	// Withdrawn or settled: owes nothing more.
+	done = false;
+	// Bumped on every change to what the fill owes, for its handler to wake on.
+	readonly revision = new Signal(0);
+
+	constructor(start: number, end: number) {
+		this.start = start;
+		this.end = end;
+	}
+
+	bump(): void {
+		this.revision.update((revision) => revision + 1);
+	}
+
+	// The parts of `[start, end)` within the fill that are still unanswered.
+	unresolved(start = this.start, end = this.end): Run[] {
+		if (this.done) return [];
+		return runGaps(this.resolved, Math.max(start, this.start), Math.min(end, this.end));
+	}
+
+	// The parts of `[start, end)` still unanswered that a reader still reads.
+	owed(start = this.start, end = this.end): Run[] {
+		const owed: Run[] = [];
+		for (const gap of this.unresolved(start, end)) {
+			for (const asker of this.askers) {
+				for (const run of asker.wants(gap.start, gap.end)) insertRun(owed, run.start, run.end);
+			}
+		}
+		return owed;
+	}
+}
+
+/**
+ * The fills of one track: what its readers miss, queued for its {@link Requests} handles.
+ * Package-internal; a producer owns one.
+ */
+export class FillState {
+	readonly #track: FillTrack;
+	#handlers = 0;
+	#queue: Pending[] = [];
+	readonly #queued = new Signal(0);
+	readonly #pending = new Set<Pending>();
+
+	constructor(track: FillTrack) {
+		this.#track = track;
+		void track.released.then(() => this.#release());
+	}
+
+	/** Whether a handler is open to serve a miss now. */
+	get serving(): boolean {
+		return this.#handlers > 0 && !this.#track.closed();
+	}
+
+	/** Ask for `[start, end)` for `asker`, joining the fills already bringing part of it. */
+	ask(start: number, end: number, asker: Asker): void {
+		if (!this.serving || start >= end) return;
+		let missing: Run[] = [{ start, end }];
+		for (const pending of this.#pending) {
+			const unresolved = pending.unresolved(start, end);
+			if (unresolved.length === 0) continue;
+			if (!pending.askers.has(asker)) {
+				pending.askers.add(asker);
+				pending.bump();
+			}
+			for (const run of unresolved) missing = missing.flatMap((gap) => subtract(gap, run));
+		}
+		for (const gap of missing) {
+			const pending = new Pending(gap.start, gap.end);
+			pending.askers.add(asker);
+			this.#pending.add(pending);
+			this.#queue.push(pending);
+		}
+		if (missing.length > 0) this.#queued.update((revision) => revision + 1);
+	}
+
+	/** The first sequence of `[start, end)` a fill still owes `asker`. */
+	owed(start: number, end: number, asker: Asker): number | undefined {
+		return this.covered(start, end, asker)[0]?.start;
+	}
+
+	/** The parts of `[start, end)` a fill `asker` joined still owes, in order. */
+	covered(start: number, end: number, asker: Asker): Run[] {
+		const covered: Run[] = [];
+		for (const pending of this.#pending) {
+			if (!pending.askers.has(asker)) continue;
+			for (const run of pending.unresolved(start, end)) insertRun(covered, run.start, run.end);
+		}
+		return covered;
+	}
+
+	/** `asker` left: the fills it alone waited on are withdrawn. */
+	leave(asker: Asker): void {
+		for (const pending of this.#pending) {
+			if (!pending.askers.delete(asker)) continue;
+			this.#judge(pending);
+		}
+	}
+
+	/** What `asker` reads changed: a fill nobody reads any more is withdrawn. */
+	moved(asker: Asker): void {
+		for (const pending of this.#pending) {
+			if (pending.askers.has(asker)) this.#judge(pending);
+		}
+	}
+
+	/** Group `sequence` landed in the cache, through a fill or live: it is answered. */
+	arrived(sequence: number): void {
+		for (const pending of this.#pending) this.#resolve(pending, sequence, sequence + 1);
+	}
+
+	/** Open a handler. */
+	addHandler(): void {
+		this.#handlers++;
+	}
+
+	/** Close a handler. The last one leaving names every queued miss dropped, as with none open. */
+	removeHandler(): void {
+		this.#handlers--;
+		if (this.#handlers > 0) return;
+		for (const pending of this.#queue.splice(0)) this.#settle(pending);
+	}
+
+	/** The next queued fill, or `undefined` once the track closes with none queued. */
+	async next(): Promise<Pending | undefined> {
+		for (;;) {
+			const pending = this.#queue.shift();
+			if (pending) {
+				pending.queued = false;
+				return pending;
+			}
+			if (this.#track.closed()) return undefined;
+			await Signal.race(this.#queued, this.#track.released);
+		}
+	}
+
+	// Withdraw `pending` once no reader still reads any of what it owes.
+	#judge(pending: Pending): void {
+		if (pending.done) return;
+		if (pending.owed().length > 0) {
+			pending.bump();
+			return;
+		}
+		this.#finish(pending);
+	}
+
+	// Record `[start, end)` of `pending` answered.
+	#resolve(pending: Pending, start: number, end: number): void {
+		const unresolved = pending.unresolved(start, end);
+		if (unresolved.length === 0) return;
+		for (const run of unresolved) insertRun(pending.resolved, run.start, run.end);
+		if (pending.unresolved().length === 0) this.#finish(pending);
+		else pending.bump();
+	}
+
+	// Answer what `pending` still owes as dropped, then forget it.
+	#settle(pending: Pending): void {
+		for (const run of pending.owed()) this.#track.drop(run.start, run.end, new NotFound(`group ${run.start}`));
+		this.#finish(pending);
+	}
+
+	// Forget `pending`: it owes nothing more.
+	#finish(pending: Pending): void {
+		if (pending.done) return;
+		pending.done = true;
+		this.#pending.delete(pending);
+		if (pending.queued) this.#queue.splice(this.#queue.indexOf(pending), 1);
+		pending.bump();
+	}
+
+	#release(): void {
+		this.#queue = [];
+		for (const pending of this.#pending) this.#finish(pending);
+		this.#queued.update((revision) => revision + 1);
+	}
+
+	static {
+		fillOps = {
+			accept: (state, pending, sequence, info) => {
+				if (sequence < pending.start || sequence >= pending.end) {
+					throw new RangeError(`group ${sequence} is outside the fill ${pending.start}..${pending.end}`);
+				}
+				if (pending.resolved.some((run) => run.start <= sequence && sequence < run.end)) {
+					throw new Error(`group ${sequence} was already answered`);
+				}
+				if (state.#track.holds(sequence)) throw new Error(`duplicate group: sequence=${sequence}`);
+				// Landing in the cache answers it, as `arrived` records.
+				return state.#track.accept(sequence, info);
+			},
+			drop: (state, pending, start, end) => {
+				for (const run of pending.owed(start, end)) {
+					state.#track.drop(run.start, run.end, new NotFound(`group ${run.start}`));
+				}
+				state.#resolve(pending, start, end);
+			},
+			refuse: (state, pending, start, end, error) => {
+				for (const gap of pending.unresolved(start, end)) {
+					for (const asker of pending.askers) {
+						for (const run of asker.wants(gap.start, gap.end)) asker.refuse(run.start, run.end, error);
+					}
+				}
+				state.#resolve(pending, start, end);
+			},
+			settle: (state, pending) => state.#settle(pending),
+			name: (state) => state.#track.name,
+		};
+	}
+}
+
+// The parts of `gap` outside `run`.
+function subtract(gap: Run, run: Run): Run[] {
+	return [
+		{ start: gap.start, end: Math.min(gap.end, run.start) },
+		{ start: Math.max(gap.start, run.end), end: gap.end },
+	].filter((part) => part.start < part.end);
+}
+
+
+// Constructs the public handles from within this module; assigned in their static blocks.
+let makeFill: (state: FillState, pending: Pending) => Fill;
+let makeRequests: (state: FillState) => Requests;
+
+/** A {@link Requests} handle on `state`. Package-internal: a producer's `requests()` calls it. */
+export function requestsOf(state: FillState): Requests {
+	return makeRequests(state);
+}
+
+/**
+ * Serves the groups a track's readers miss: from {@link Producer.requests}. Mirrors the Rust
+ * `track::Requests`.
+ *
+ * Most tracks never serve old content, so this lives on its own handle rather than the producer:
+ * a publisher backed by storage opens one to serve groups its live cache no longer holds, or
+ * never held. While at least one is open, a reader missing a run of groups queues a {@link Fill}
+ * here; with none open, the miss is given up. {@link close} it once done.
+ *
+ * @public
+ */
+export class Requests {
+	#state: FillState;
+	#closed = false;
+
+	private constructor(state: FillState) {
+		this.#state = state;
+		state.addHandler();
+	}
+
+	static {
+		makeRequests = (state) => new Requests(state);
+	}
+
+	/** The track's name, unique within its broadcast. */
+	get name(): string {
+		return fillOps.name(this.#state);
+	}
+
+	/**
+	 * Wait until readers miss a run of groups, returning the {@link Fill} to serve. Resolves
+	 * `undefined` once the track closes with nothing queued, or this handle is closed.
+	 */
+	async requestedFill(): Promise<Fill | undefined> {
+		if (this.#closed) return undefined;
+		const pending = await this.#state.next();
+		if (!pending) return undefined;
+		return makeFill(this.#state, pending);
+	}
+
+	/**
+	 * Stop serving. The last handle closing names every miss still queued dropped, so its
+	 * readers stop waiting; a fill already handed out keeps its own handle. Idempotent.
+	 */
+	close(): void {
+		if (this.#closed) return;
+		this.#closed = true;
+		this.#state.removeHandler();
+	}
+
+	[Symbol.dispose](): void {
+		this.close();
+	}
+}
+
+/**
+ * A run of groups readers miss, from {@link Requests.requestedFill}: `start` up to the exclusive
+ * `end`. Mirrors the Rust `track::Fill`.
+ *
+ * Its {@link priority}, {@link maxDelay}, and {@link order} follow its readers as they change, so
+ * read them as each group is served. Call {@link accept} for each group the source has, writing
+ * its frames into the returned producer, and {@link dropGroups} for those it does not. Readers
+ * that leave, or narrow their ranges past a group, stop wanting it: serve {@link wanted} until it
+ * is `undefined`, which {@link wantedChanged} waits on. {@link close} the fill once done; closing
+ * names whatever is still wanted dropped rather than leaving its readers waiting.
+ *
+ * Groups keep their sequence, so an accepted group should hold the frames, payloads, and
+ * boundaries it had when it was first published: a fill replays the track, never a new version.
+ *
+ * @public
+ */
+export class Fill {
+	/** The first group to fill. */
+	readonly start: number;
+	/** The exclusive end group. */
+	readonly end: number;
+
+	#state: FillState;
+	#pending: Pending;
+	// The value `wantedChanged` last returned, or unset before it returned any.
+	#prev?: { wanted: number | undefined };
+
+	private constructor(state: FillState, pending: Pending) {
+		this.#state = state;
+		this.#pending = pending;
+		this.start = pending.start;
+		this.end = pending.end;
+	}
+
+	static {
+		makeFill = (state, pending) => new Fill(state, pending);
+	}
+
+	/** The most urgent delivery priority among the readers waiting on it now. */
+	get priority(): number {
+		let priority: number | undefined;
+		for (const asker of this.#pending.askers) priority = Math.max(priority ?? asker.priority(), asker.priority());
+		return priority ?? 0;
+	}
+
+	/**
+	 * The most tolerant age budget among the readers waiting on it now, or `null` for none: the
+	 * publisher's {@link Info.maxAge} alone bounds it. Each reader still enforces its own.
+	 */
+	get maxDelay(): Milli | null {
+		let max = 0;
+		for (const asker of this.#pending.askers) max = Math.max(max, asker.maxDelay());
+		return max < NO_MAX_DELAY ? Milli(max) : null;
+	}
+
+	/** Which end to fill first now: `"descending"`, newest first, if any reader asks it. */
+	get order(): Order {
+		for (const asker of this.#pending.askers) if (asker.order() === "descending") return "descending";
+		return this.#pending.askers.size > 0 ? "ascending" : "descending";
+	}
+
+	/** Whether a reader still waits for group `sequence` from this fill. Once false, it stays false. */
+	isWanted(sequence: number): boolean {
+		return this.#pending.owed(sequence, sequence + 1).length > 0;
+	}
+
+	/**
+	 * The next group still owed in the fill's {@link order}: a reader still reads it, and it was
+	 * neither answered nor delivered live since it was asked. `undefined` once none is, so stop
+	 * serving the fill.
+	 */
+	wanted(): number | undefined {
+		const owed = this.#pending.owed();
+		if (owed.length === 0) return undefined;
+		return this.order === "ascending" ? owed[0].start : (owed.at(-1) as Run).end - 1;
+	}
+
+	/**
+	 * {@link wanted} once it differs from what this handle last returned: at once on the first
+	 * call, then on each change. So `for (let at = await fill.wantedChanged(); at !== undefined;
+	 * at = await fill.wantedChanged())` serves each group as it becomes owed, and ends once the
+	 * fill is answered or withdrawn.
+	 */
+	async wantedChanged(): Promise<number | undefined> {
+		for (;;) {
+			const wanted = this.wanted();
+			if (!this.#prev || this.#prev.wanted !== wanted) {
+				this.#prev = { wanted };
+				return wanted;
+			}
+			await this.#pending.revision.changed();
+		}
+	}
+
+	/** Resolves once no reader waits for group `sequence` from this fill, so stop serving it. */
+	async unwanted(sequence: number): Promise<void> {
+		while (this.isWanted(sequence)) await this.#pending.revision.changed();
+	}
+
+	/**
+	 * Insert group `sequence` into the track's cache, handing it to the readers waiting on it,
+	 * and return the producer to write its frames into. `info` commits the track's {@link Info}
+	 * if it has none yet. Throws a `RangeError` outside the fill, and an error if the group was
+	 * already answered or cached, or the track is closed.
+	 */
+	accept(sequence: number, info?: Partial<Info>): GroupProducer {
+		return fillOps.accept(this.#state, this.#pending, sequence, info);
+	}
+
+	/**
+	 * Name `[start, end)` as never to be delivered: the source does not have them. Readers stop
+	 * waiting for them, and the track records them so nobody asks again. Only the groups a reader
+	 * still reads count; the rest of the fill was never owed.
+	 */
+	dropGroups(start: number, end: number): void {
+		fillOps.drop(this.#state, this.#pending, start, end);
+	}
+
+	/**
+	 * Refuse `[start, end)` with `error` without saying the source lost them, as when serving them
+	 * failed for now. The readers waiting now stop waiting and get `error`; a later reader asks
+	 * again.
+	 */
+	refuseGroups(start: number, end: number, error: Error): void {
+		fillOps.refuse(this.#state, this.#pending, start, end, error);
+	}
+
+	/** Done serving: whatever a reader still wants is named dropped. Idempotent. */
+	close(): void {
+		fillOps.settle(this.#state, this.#pending);
+	}
+
+	[Symbol.dispose](): void {
+		this.close();
+	}
+}

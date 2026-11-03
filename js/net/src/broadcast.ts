@@ -4,7 +4,7 @@
  * @module
  */
 import { type GetPromise, Once, Signal } from "@moq/signals";
-import { NotFound, StreamCode, StreamError } from "./error.ts";
+import { NotFound, StreamCode, StreamError, toStreamCode } from "./error.ts";
 import type { Consumer as GroupConsumer } from "./group.ts";
 import type { Route } from "./hop.ts";
 import type * as Instance from "./instance.ts";
@@ -214,9 +214,10 @@ function largest(state: BroadcastState, name: string): track.Position | undefine
 	return producer && hooks.cachedLargest(producer);
 }
 
-// Serve a group from the local retained window by subscribing and scanning to the
-// requested sequence. The default for a produced broadcast; the consuming wire layer
-// overrides it to fetch over the network (or to reject when the transport has no FETCH).
+// Fetch one group as a one-range subscription: the cached group at once, or one the track's
+// {@link track.Requests} fills, or `NotFound` once the track can no longer deliver it. A group
+// not written yet waits for the producer. The default for a produced broadcast; the consuming
+// wire layer overrides it to fetch over the network (or to reject when the transport has no FETCH).
 async function fetchGroup(
 	state: BroadcastState,
 	name: string,
@@ -224,27 +225,47 @@ async function fetchGroup(
 	options: track.FetchGroupOptions = {},
 ): Promise<GroupConsumer> {
 	options.signal?.throwIfAborted();
-	const subscriber = subscribe(state, name, { ...track.Subscription.default(), priority: options.priority });
+	const subscriber = subscribe(state, name, {
+		...track.Subscription.default(),
+		priority: options.priority,
+		ranges: [{ start: { absolute: sequence }, end: { absolute: sequence + 1 } }],
+	});
 	hooks.fetchBudget(subscriber, options.maxDelay);
 	try {
 		for (;;) {
-			const group = await untilAborted(subscriber.recvGroup(), options.signal);
-			if (!group) throw new NotFound(`group ${sequence}`);
-			if (group.sequence === sequence) {
-				// Close the subscription when the returned group finishes, not now: an
-				// in-progress group must keep receiving frames for its lifetime (mirrors
-				// Rust poll_fetch). Also fires if the caller closes the group early.
-				void group.closed.then(() => subscriber.close());
-				return group;
+			const recv = hooks.tryRecvGroup(subscriber, true);
+			switch (recv.kind) {
+				case "group":
+					// Close the subscription when the returned group finishes, not now: an
+					// in-progress group must keep receiving frames for its lifetime (mirrors
+					// Rust poll_fetch). Also fires if the caller closes the group early.
+					void recv.group.closed.then(() => subscriber.close());
+					return recv.group;
+				case "drop":
+					// A fill's refusal says why; anything else given up is just gone.
+					if (toStreamCode(recv.error) === StreamCode.Old) throw new NotFound(`group ${sequence}`);
+					throw recv.error;
+				case "error":
+					throw recv.error;
+				case "done":
+					throw new NotFound(`group ${sequence}`);
 			}
-
-			group.close();
-			if (group.sequence > sequence) throw new NotFound(`group ${sequence}`);
+			await untilAborted(changed(subscriber), options.signal);
 		}
 	} catch (err) {
 		subscriber.close();
 		throw err;
 	}
+}
+
+// Settles once a read of `subscriber` may go differently.
+function changed(subscriber: track.Subscriber): Promise<void> {
+	return new Promise((resolve) => {
+		const dispose = hooks.groupChanged(subscriber, () => {
+			dispose();
+			resolve();
+		});
+	});
 }
 
 // Remove and return the request queued for `name`, if no handler has taken it yet.
