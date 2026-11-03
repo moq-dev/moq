@@ -9,12 +9,6 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Finish the active publication; new pushes replace only the pending warm.
-# Canceling active builds could starve a cold dependency upload on busy main.
-concurrency:
-  group: cache-${{ github.ref }}
-  cancel-in-progress: false
-
 jobs:
   warm:
     name: Warm (${{ matrix.runner }})
@@ -33,9 +27,36 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/nix
       - uses: ./.github/actions/just
-      - name: Cache the dev shell and runtime packages
+      - name: Cache the dev shell
         env:
           NIX_SIGNING_KEY: ${{ secrets.NIX_SIGNING_KEY }}
           AWS_ACCESS_KEY_ID: ${{ secrets.NIX_R2_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_R2_SECRET_ACCESS_KEY }}
         run: just gh cache
+
+  runtime:
+    name: Runtime (ubuntu-24.04)
+    if: github.ref == 'refs/heads/main'
+    # Smoke's only current nix platform. Keep its Rust builds independent of
+    # the dev-shell matrix and use Smoke's cold-build budget.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    environment: cache-write
+    # Finish the active publication; new pushes replace only the pending run.
+    # Canceling active builds could starve cold dependency uploads on busy main.
+    concurrency:
+      group: cache-runtime-${{ github.ref }}
+      cancel-in-progress: false
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix
+      - uses: ./.github/actions/just
+      - name: Cache runtime packages and dependencies
+        env:
+          NIX_SIGNING_KEY: ${{ secrets.NIX_SIGNING_KEY }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.NIX_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.NIX_R2_SECRET_ACCESS_KEY }}
+        run: just gh cache-runtime

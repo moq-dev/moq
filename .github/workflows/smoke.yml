@@ -75,7 +75,7 @@ jobs:
             channel: docker
           # macOS cells temporarily disabled to cut CI spend (over budget this
           # month). Re-enable by uncommenting; the nix cell also needs its
-          # platform added to sh/gh/cache.sh's runtime publication.
+          # platform added to cache.yml's runtime job.
           # - os: macos-latest
           #   channel: cargo
           # - os: macos-latest

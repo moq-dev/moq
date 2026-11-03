@@ -24,13 +24,14 @@ minute with nothing compiled, against 12-14 minutes of source builds in the
 `cache.yml` now also builds and pushes the `moq-relay` and `moq` runtime
 closures to `nix-ci-moq-dev` on x86 Linux, Smoke's only current nix platform
 (runtime caching decided 2026-10-29). All three platforms still publish
-their dev shells first. Smoke reads the packages without write credentials. Verify the first
+their dev shells independently. Smoke reads the packages without write credentials. Verify the first
 post-merge Cache run uploads both and the next Smoke nix run substitutes
 them; a local build does not prove hosted publication.
-The runtime packages' existing Crane dependency artifacts are published
-first so source-only changes can reuse them. Cache finishes the active
-warm and keeps only the newest pending run rather than building every
-intermediate commit or repeatedly canceling cold dependency builds.
+The runtime job publishes the packages' existing Crane dependency artifacts
+first, reusing them while their inputs (including patched `kio` sources)
+are unchanged. It has Smoke's 75-minute cold-build budget and finishes the
+active warm while keeping only the newest pending runtime run. The dev-shell
+matrix does not queue behind it.
 
 [moq-dev/moq#7431](https://github.com/moq-dev/moq/pull/7431) dropped Cachix
 from `main` (decided 2026-11-02): Smoke substitutes from `nix.moq.dev` and
