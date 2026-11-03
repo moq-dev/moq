@@ -640,13 +640,13 @@ impl Gate {
 
 /// Publish split `frames` through a [`TrackStream`]'s gate.
 ///
-/// A dropped keyframe still configures the importer: a stream may carry its config only in
-/// band (an AV1 sequence header), and the keyframe that resumes need not repeat it.
+/// The importer still sees what the gate drops: a stream may carry its config only in band (an
+/// AV1 sequence header), and the keyframe that resumes need not repeat it.
 macro_rules! publish {
 	($gate:expr, $import:expr, $frames:expr) => {{
 		let (dropped, frames, resumed) = $gate.admit($frames);
 		for frame in &dropped {
-			$import.configure(frame)?;
+			$import.dropped(frame)?;
 		}
 		if resumed {
 			$import.set_enabled(true)?;
@@ -1831,12 +1831,14 @@ mod tests {
 		import.decode(&bare).unwrap();
 		kio::clock::sleep(Duration::from_millis(33)).await;
 
+		// Finish flushes the last temporal unit, the keyframe that resumes.
 		import.set_enabled(true).unwrap();
-		import.decode(&bare).unwrap();
 		import.finish().unwrap();
 
 		assert!(catalog.snapshot().video.renditions["video"].enabled);
 		let frame = first_frame(&consumer, "video").await;
 		assert!(frame.keyframe, "the resumed group opens on a keyframe");
+		// The dropped sequence header goes out with it, after its temporal delimiter.
+		assert_eq!(frame.payload.as_ref(), with_header.as_slice());
 	}
 }

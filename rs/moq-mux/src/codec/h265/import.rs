@@ -232,8 +232,14 @@ impl Import {
 		Ok(())
 	}
 
+	/// Account for a frame its caller drops rather than writes: a keyframe still configures the
+	/// rendition. The splitter re-injects the VPS, SPS, and PPS into the next keyframe itself.
+	pub(crate) fn dropped(&mut self, frame: &Frame) -> Result<()> {
+		self.configure(frame)
+	}
+
 	/// Resolve the config and HDR metadata a keyframe carries inline, without publishing it.
-	pub(crate) fn configure(&mut self, frame: &Frame) -> Result<()> {
+	fn configure(&mut self, frame: &Frame) -> Result<()> {
 		if !frame.keyframe {
 			return Ok(());
 		}
