@@ -1,7 +1,7 @@
-import { afterEach, expect, test } from "bun:test";
-import { Instant, Milli, Nano, now, yieldNow } from "@moq/clock";
+import { afterEach, expect, spyOn, test } from "bun:test";
+import { Instant, Manual, Milli, Nano, now, yieldNow } from "@moq/clock";
 import * as Lite from "../lite/index.ts";
-import { createMockTransportPair } from "../mock.ts";
+import { createMockTransportPair, type MockTransport } from "../mock.ts";
 import { Producer as TrackProducer } from "../track.ts";
 import { type AcceptProps, accept as acceptSession } from "./index.ts";
 import { Connection, resetShared } from "./pool.ts";
@@ -115,6 +115,115 @@ test("an idle track on a live connection claims nothing", async () => {
 		handle.close();
 	}
 });
+
+test("a connection samples the transport only while a reservation reads the estimate", async () => {
+	const clock = new Manual();
+	const installed = clock.install();
+	let calls = 0;
+	const stub = function StubWebTransport() {
+		const pair = createMockTransportPair(Lite.ALPN_06, { stats: { estimatedSendRate: 2_000_000 } });
+		const getStats = pair.client.getStats.bind(pair.client);
+		pair.client.getStats = () => {
+			calls++;
+			return getStats();
+		};
+		void accept(pair.server, url);
+		return pair.client;
+	};
+	globalThis.WebTransport = stub as unknown as typeof WebTransport;
+	const advance = (ms: number) => clock.advance(Nano.fromMilli(Milli(ms)));
+	// Snapshots taken over 350 ms of manual time, enough for three 100 ms ticks.
+	const sampled = async () => {
+		const before = calls;
+		await advance(350);
+		return calls - before;
+	};
+
+	const connection = new Connection({ url });
+	try {
+		await advance(0);
+		expect(connection.status.peek()).toBe("connected");
+		const allocator = connection.allocator.peek();
+		if (!allocator) throw new Error("missing allocator");
+		// Connected with nothing reserved: no snapshots at all.
+		expect(await sampled()).toBe(0);
+
+		const track = new TrackProducer("video").accept({ priority: 60 });
+		track.subscribe();
+		const first = allocator.reserve(track.demand(), 4_000_000);
+		await advance(0);
+		expect(first.peek()).toBe(2_000_000);
+		expect(await sampled()).toBe(3);
+
+		first.close();
+		await advance(0);
+		expect(await sampled()).toBe(0);
+
+		// The estimate cleared with the last reservation, so the next reads nothing stale.
+		const second = allocator.reserve(track.demand(), 4_000_000);
+		expect(second.peek()).toBeUndefined();
+		await advance(0);
+		expect(second.peek()).toBe(2_000_000);
+
+		// A closed track's reservation reads no slice, so it stops the sampling too.
+		track.close();
+		await advance(0);
+		expect(await sampled()).toBe(0);
+		second.close();
+	} finally {
+		connection.close();
+		installed.close();
+	}
+});
+
+// The WebSocket fallback is covered where sessions detect their transport (stats.test.ts):
+// a dial that reads as one would mark the URL as WebSocket-preferred for later tests.
+const silent: { name: string; shape: (quic: MockTransport) => void }[] = [
+	{
+		name: "WebTransport without getStats",
+		shape: (quic) => {
+			(quic as unknown as { getStats?: unknown }).getStats = undefined;
+		},
+	},
+	{ name: "WebRTC", shape: (quic) => Object.assign(quic, { transport: "webrtc" }) },
+];
+
+for (const kind of silent) {
+	test(`a reservation over ${kind.name} starts no sampling`, async () => {
+		const clock = new Manual();
+		const installed = clock.install();
+		const stub = function StubWebTransport() {
+			const pair = createMockTransportPair(Lite.ALPN_06, { stats: { estimatedSendRate: 2_000_000 } });
+			kind.shape(pair.client);
+			void accept(pair.server, url);
+			return pair.client;
+		};
+		globalThis.WebTransport = stub as unknown as typeof WebTransport;
+		const snapshots = spyOn(Lite.Connection.prototype, "stats");
+
+		const connection = new Connection({ url });
+		try {
+			await clock.advance(Nano.zero);
+			expect(connection.status.peek()).toBe("connected");
+			const allocator = connection.allocator.peek();
+			if (!allocator) throw new Error("missing allocator");
+
+			const track = new TrackProducer("video").accept({ priority: 60 });
+			track.subscribe();
+			const reservation = allocator.reserve(track.demand(), 4_000_000);
+			await clock.advance(Nano.fromMilli(Milli(350)));
+			expect(snapshots).toHaveBeenCalledTimes(0);
+			// The estimate stays unknown, so the sender holds its rate.
+			expect(reservation.peek()).toBeUndefined();
+			reservation.close();
+			track.close();
+		} finally {
+			connection.close();
+			snapshots.mockRestore();
+			installed.close();
+		}
+	});
+}
 
 test("a private connection still exposes an allocator", async () => {
 	stubTransport({ estimatedSendRate: 2_000_000 });

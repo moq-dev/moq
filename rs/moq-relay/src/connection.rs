@@ -455,7 +455,7 @@ mod tests {
 				tracing_subscriber::filter::Targets::new().with_target("moq_relay::connection", tracing::Level::INFO),
 			);
 		let _logging = tracing::subscriber::set_default(subscriber);
-		let cluster = cluster::Cluster::new(cluster::Options::default()).unwrap();
+		let cluster = cluster::Cluster::spawn(cluster::Options::default()).unwrap();
 		let (auth, _admissions) = auth::Auth::embedded("test");
 		let lifecycle = Lifecycle::new(cluster, auth, 42, None);
 		lifecycle

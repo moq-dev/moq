@@ -102,6 +102,7 @@ These diff the branch against its base and only run the affected packages.
 
 Quests: before starting work, run `quest guide` and follow it.
 The `quest` binary comes from the moq-dev/quest flake input and serves the quest skills; change them upstream and bump the input.
+Claude Code's worktree hooks run that pinned `quest` through `nix run`, because hooks don't see the dev shell; `quest init` refuses them, so drop them for its run and restore `.claude/settings.json` afterwards.
 
 # Cross-Package Sync
 
@@ -115,7 +116,6 @@ The `quest` binary comes from the moq-dev/quest flake input and serves the quest
 | `rs/moq-relay` config/behavior | `doc/bin/relay/` |
 | `rs/moq-cli` | `doc/bin/cli.md` |
 | `rs/moq-gst` | `doc/bin/gstreamer.md` |
-| `rs/moq-scene`, `rs/moq-studio` | `doc/bin/studio.md` |
 | `rs/moq-c` C ABI (`moq.h`) | `doc/lib/c` |
 | `js/{watch,publish}` UI/API | `demo/web` if it consumes the API |
 

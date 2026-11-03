@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use kio::clock::{sleep, timeout};
-use moq_net::track::{Order, Position, Subscription};
+use moq_net::track::{Delay, Order, Position, Subscription};
 use moq_net::{Timescale, Timestamp, broadcast, group, track};
 use object_store::ObjectStoreExt;
 use tokio::task::JoinHandle;
@@ -139,7 +139,7 @@ async fn subscribe(broadcast: &broadcast::Producer, track: &str) -> track::Order
 	let subscription = Subscription::default()
 		.with_range(0..)
 		.with_order(Order::Ascending)
-		.with_max_delay(None);
+		.with_delay(Delay::default().with_max(None));
 	track.subscribe(subscription).await.unwrap().ordered()
 }
 
@@ -305,7 +305,7 @@ async fn a_narrowed_read_skips_the_group_it_left() {
 	let gate = mock.stall_gets("rec/video/");
 	let ascending = |groups| {
 		Subscription::default()
-			.with_max_delay(None)
+			.with_delay(Delay::default().with_max(None))
 			.with_range(groups)
 			.with_order(Order::Ascending)
 	};
@@ -622,7 +622,7 @@ async fn groups_and_datagrams_keep_their_forms() {
 	let subscription = Subscription::default()
 		.with_range(0..)
 		.with_order(Order::Ascending)
-		.with_max_delay(None);
+		.with_delay(Delay::default().with_max(None));
 	let mut reader = track.subscribe(subscription).await.unwrap();
 
 	archive
@@ -748,7 +748,7 @@ async fn read_range(broadcast: &broadcast::Producer, track: &str, range: track::
 	let subscription = Subscription::default()
 		.with_ranges([range])
 		.with_order(Order::Ascending)
-		.with_max_delay(None);
+		.with_delay(moq_net::track::Delay::default().with_max(None));
 	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 	let mut read = Vec::new();
 	while let Ok(group) = timeout(5 * REFRESH, reader.next_group()).await {
@@ -810,7 +810,7 @@ async fn a_time_range_resolves_from_the_archive() {
 	let subscription = Subscription::default()
 		.with_ranges([range(at(7_002), None)])
 		.with_order(Order::Ascending)
-		.with_max_delay(None);
+		.with_delay(moq_net::track::Delay::default().with_max(None));
 	let mut reader = track.subscribe(subscription).await.unwrap().ordered();
 	for expected in 7..10 {
 		assert_eq!(sequence(&mut reader).await, Some(expected));
@@ -950,7 +950,7 @@ async fn an_untimed_track_refuses_a_time_range() {
 			start: at(1_000),
 			end: None,
 		}])
-		.with_max_delay(None);
+		.with_delay(moq_net::track::Delay::default().with_max(None));
 	let result = match track.subscribe(subscription).await {
 		Ok(subscriber) => timeout(Duration::from_secs(10), subscriber.ordered().next_group())
 			.await

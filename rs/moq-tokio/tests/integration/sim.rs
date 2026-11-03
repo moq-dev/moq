@@ -184,7 +184,7 @@ async fn serve(network: &Network, version: Version, seed: u64) -> Arrivals {
 		.track("video")
 		.unwrap()
 		// A budget spanning the run, so recovery has to deliver every group, however late.
-		.subscribe(track::Subscription::default().with_max_delay(TIMEOUT))
+		.subscribe(track::Subscription::default().with_delay(track::Delay::default().with_max(TIMEOUT)))
 		.await
 		.unwrap();
 
@@ -253,7 +253,6 @@ fn tls(version: Version) -> (driver::server::Config, driver::client::Config) {
 		.with_single_cert(vec![cert.der().clone()], key)
 		.unwrap();
 	server.alpn_protocols = alpn.clone();
-	let server = driver::crypto::rustls::QuicServerConfig::try_from(server).unwrap();
 
 	let mut roots = rustls::RootCertStore::empty();
 	roots.add(cert.der().clone()).unwrap();
@@ -261,7 +260,6 @@ fn tls(version: Version) -> (driver::server::Config, driver::client::Config) {
 		.with_root_certificates(roots)
 		.with_no_client_auth();
 	client.alpn_protocols = alpn;
-	let client = driver::crypto::rustls::QuicClientConfig::try_from(client).unwrap();
 
 	(
 		driver::server::Config::new(Arc::new(server)),

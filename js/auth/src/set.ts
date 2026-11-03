@@ -7,8 +7,8 @@
  * @module
  */
 
-import * as z from "@zod/mini";
 import * as jose from "jose";
+import * as z from "zod/mini";
 import type { Claims } from "./claims.ts";
 import { Key, KeySchema, type PublicKey } from "./key.ts";
 

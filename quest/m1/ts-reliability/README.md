@@ -1,4 +1,4 @@
-# [L] TS fidelity and recovery
+# TS fidelity and recovery
 
 ## Goal
 
@@ -96,6 +96,13 @@ before the open stream-routes and PAT drafts, which rebase onto it.
 PMT fragmentation (#5220), initial mux-rate measurement (#5287), and
 decoder-time admission (#5306) have landed, as have PSI runs (#5606) and
 catalog linger (#5305).
+
+## Required
+
+- [TS timing checks survive a stalled PCR](/quest/m1/ts-reliability/pcr-stall.md) - the TS importer's TR 101 290 timing checks keep running while a program's PCR stalls or goes missing
+- [Clock-table revisions land at their media position](/quest/m1/ts-reliability/tdt-placement.md) - two exports of one broadcast stay byte-identical across TDT/TOT revisions
+- [A skipped group flags the next PCR](/quest/m1/ts-reliability/skip-flag.md) - a within-instance skip reaches the wire as a flagged PCR discontinuity
+- [A republish announces as soon as its tracks are known](/quest/m1/ts-reliability/republish-announce.md) - a stitched export keeps the new instance's first group on a short-GOP feed
 
 ## Related
 

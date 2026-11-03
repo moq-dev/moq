@@ -216,6 +216,13 @@ impl Import {
 		self.track.discontinuity()
 	}
 
+	/// Advertise whether this rendition is being produced, as the catalog's
+	/// [`enabled`](hang::catalog::VideoConfig::enabled): a publisher that stops encoding it
+	/// disables it, so viewers select another rendition rather than wait for frames.
+	pub fn set_enabled(&mut self, enabled: bool) -> Result<()> {
+		self.catalog.set_enabled(&mut self.track, enabled)
+	}
+
 	/// Close the current group and open the next one at `sequence`.
 	pub fn seek(&mut self, sequence: u64) -> Result<()> {
 		self.track.seek(sequence)?;
@@ -283,8 +290,8 @@ fn sequence_color(seq_header: &SequenceHeaderObu) -> Option<hang::catalog::Color
 	)
 }
 
-/// The colour a run of OBUs signals, such as av1C's `configOBUs`: the first parseable sequence
-/// header's, plus the static HDR metadata OBUs that the AV1 ISOBMFF binding places after it.
+/// The colour a run of OBUs signals, such as av1C's `configOBUs`: the last sequence header's, if
+/// it parses, plus the static HDR metadata OBUs that the AV1 ISOBMFF binding places after it.
 pub(crate) fn color(obus: &[u8]) -> Option<hang::catalog::Color> {
 	let mut color = find_sequence_header(obus)
 		.and_then(|seq| parse_sequence_header(&seq).ok().flatten())
@@ -293,7 +300,31 @@ pub(crate) fn color(obus: &[u8]) -> Option<hang::catalog::Color> {
 	color
 }
 
-/// Read encoded dimensions from the first parseable sequence header in a frame.
+/// Whether `obus`, an av1C's `configOBUs`, hold only what [`color`] reads: at most a sequence
+/// header, first, then at most one of each HDR metadata type.
+pub(crate) fn config_obus_supported(obus: &[u8]) -> bool {
+	let kind = |obu: &[u8]| {
+		let mut reader = obu;
+		match ObuHeader::parse(&mut reader).ok()?.obu_type {
+			ObuType::SequenceHeader => Some(0),
+			ObuType::Metadata => crate::codec::color::av1_hdr_type(reader),
+			_ => None,
+		}
+	};
+	let mut buf = Bytes::copy_from_slice(obus);
+	let mut iter = ObuIterator::new(&mut buf);
+	let mut seen = Vec::new();
+	for obu in iter.by_ref() {
+		match obu.ok().and_then(|obu| kind(&obu)) {
+			Some(kind) if !seen.contains(&kind) && (kind != 0 || seen.is_empty()) => seen.push(kind),
+			_ => return false,
+		}
+	}
+	// A truncated OBU is left behind.
+	matches!(iter.flush(), Ok(None))
+}
+
+/// Read encoded dimensions from the last sequence header in a frame.
 pub(crate) fn dimensions(payload: &[u8]) -> Result<Option<(u32, u32)>> {
 	let Some(sequence) = find_sequence_header(payload) else {
 		return Ok(None);
@@ -329,16 +360,24 @@ fn find_hdr(payload: &Bytes) -> crate::codec::color::Hdr {
 	hdr
 }
 
-/// Find the first sequence-header OBU in a payload, if any.
+/// Find the last sequence-header OBU in a payload, if any: the one a decoder applies.
+///
+/// A splitter that retained its init's header across a reset puts it ahead of the keyframe's own,
+/// so the first one can be stale.
 fn find_sequence_header(payload: &[u8]) -> Option<Bytes> {
 	let mut buf = Bytes::copy_from_slice(payload);
 	let mut obus = ObuIterator::new(&mut buf);
+	let mut last = None;
 	while let Some(Ok(obu)) = obus.next() {
 		if is_sequence_header(&obu) {
-			return Some(obu);
+			last = Some(obu);
 		}
 	}
-	obus.flush().ok().flatten().filter(|obu| is_sequence_header(obu))
+	obus.flush()
+		.ok()
+		.flatten()
+		.filter(|obu| is_sequence_header(obu))
+		.or(last)
 }
 
 #[cfg(test)]
@@ -372,6 +411,30 @@ mod tests {
 		assert_eq!(color.mastering.map(|m| m.max_luminance), Some(1000.0));
 		assert_eq!(color.content_light, crate::codec::color::test::hdr10().content_light);
 		assert_eq!(color.primaries, None);
+	}
+
+	#[test]
+	fn config_obus_hold_a_sequence_header_then_hdr_metadata() {
+		let sequence = av1_config_obus();
+		let hdr = hdr10_obus();
+		for (obus, supported) in [
+			(Vec::new(), true),
+			([sequence.as_slice(), &hdr].concat(), true),
+			(hdr.clone(), true),
+			// ITU-T T.35 metadata, which nothing reads.
+			(
+				[sequence.as_slice(), &metadata_obu(&[4, 0xb5, 0, 0x3c])].concat(),
+				false,
+			),
+			([hdr.as_slice(), &sequence].concat(), false),
+			([sequence.as_slice(), &sequence].concat(), false),
+			([hdr.as_slice(), &hdr].concat(), false),
+			// A temporal delimiter.
+			(vec![0x12, 0x00], false),
+			(sequence[..sequence.len() - 1].to_vec(), false),
+		] {
+			assert_eq!(config_obus_supported(&obus), supported, "{obus:02x?}");
+		}
 	}
 
 	/// A track initialized from an av1C publishes the colour its configOBUs carry, since the

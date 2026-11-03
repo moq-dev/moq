@@ -148,15 +148,15 @@ mod tests {
 			.expect("publish source packet");
 	}
 
-	/// Publish an Opus instance of `source` under `epoch`, keeping its catalog so the test can
+	/// Publish an Opus instance of `source` under `instance`, keeping its catalog so the test can
 	/// kill the instance.
 	fn publish_opus(
 		origin: &moq_net::origin::Producer,
-		epoch: moq_net::Epoch,
+		instance: moq_net::Instance,
 	) -> (Box<dyn Bridge>, moq_mux::catalog::Producer) {
 		let broadcast = origin.create_broadcast("source").expect("create source broadcast");
 		broadcast
-			.announce(moq_net::origin::Route::default().with_epoch(epoch))
+			.announce(moq_net::origin::Route::default().with_instance(instance, 0))
 			.expect("announce source broadcast");
 		let catalog =
 			moq_mux::catalog::Producer::new(&mut broadcast.broadcast().clone(), moq_mux::catalog::Config::default())
@@ -168,9 +168,9 @@ mod tests {
 
 	/// Publish a replacement instance of `source`, returning once the origin serves it.
 	async fn take_over(origin: &moq_net::origin::Producer) -> (Box<dyn Bridge>, moq_mux::catalog::Producer) {
-		let epoch = moq_net::Epoch::mint();
-		let mut instances = moq_mux::follow::Instances::new(&origin.consume(), "source", Some(&epoch)).unwrap();
-		let (mut new, catalog) = publish_opus(origin, epoch);
+		let instance = moq_net::Instance::random();
+		let mut instances = moq_mux::follow::Instances::new(&origin.consume(), "source", Some(&instance)).unwrap();
+		let (mut new, catalog) = publish_opus(origin, instance);
 		push(&mut *new, 20_000, NEW_PACKET);
 		let started = kio::clock::timeout(TIMEOUT, instances.next())
 			.await
@@ -193,7 +193,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_whep_viewer_stays_on_its_instance_until_the_route_dies() {
 		let origin = moq_tokio::origin::spawn();
-		let (mut old, old_catalog) = publish_opus(&origin, moq_net::Epoch::mint());
+		let (mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
 		push(&mut *old, 20_000, OPUS_PACKET);
 
 		let server = Server::new(server::Config::default());
@@ -256,7 +256,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_whip_push_stays_on_its_instance_until_the_route_dies() {
 		let origin = moq_tokio::origin::spawn();
-		let (mut old, old_catalog) = publish_opus(&origin, moq_net::Epoch::mint());
+		let (mut old, old_catalog) = publish_opus(&origin, moq_net::Instance::random());
 		push(&mut *old, 20_000, OPUS_PACKET);
 
 		let server = Server::new(server::Config::default());
@@ -407,7 +407,7 @@ mod tests {
 	#[tokio::test]
 	async fn a_whip_publisher_past_its_cap_plus_burst_is_closed() {
 		let origin = moq_tokio::origin::spawn();
-		let (mut opus, _catalog) = publish_opus(&origin, moq_net::Epoch::mint());
+		let (mut opus, _catalog) = publish_opus(&origin, moq_net::Instance::random());
 		// 8 kbps with a tenth of a second of burst allows 100 bytes up front.
 		let cap = crate::rate::Cap::new(moq_net::bandwidth::Rate::from_kbps(8)).with_burst(Duration::from_millis(100));
 		let (address, http, mut sessions) = serve_capped_whip(crate::rate::Limit::new(cap)).await;

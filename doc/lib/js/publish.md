@@ -35,6 +35,8 @@ WebCodecs, writes the catalog, and publishes a hang broadcast.
 | `preview` | What the nested element shows: the raw `source` (default), a decoded copy of the `encoded` stream to see what viewers get, or `none`. |
 | `backend` | How a `<canvas>` preview is drawn; see [@moq/video](/lib/js/video). `auto` (default), `webgpu`, or `2d`. |
 | `announce` | When to advertise: once the `source` is live (default), or `always`. Nobody can see or subscribe to the broadcast until it is announced. To keep it out of discovery, use a hidden name with a `.`-prefixed segment; it is still subscribable by name. |
+| `stats` | Publish a [stats track](/concept/stats#media-reports) named in the catalog. Off by default. |
+| `echo-path` | Solicit viewer feedback under this path, relative to the broadcast as a rendition reference is: from `room/live`, `viewers` is `room/viewers`. Sets the catalog's `echo` section; absent solicits none. |
 
 Every attribute is also a reactive property, and property or UI changes reflect
 back into the attributes. An invalid value is refused rather than defaulted: the
@@ -49,13 +51,32 @@ Capture failures, such as `NotAllowedError` when permission is refused, land in
 `el.sources.audio`, and `<moq-publish-ui>` shows them. A refused capture waits
 for a permission, device, or settings change instead of prompting again.
 
+## Stats and feedback
+
+With `stats`, the catalog names a `stats.json` track that reports, about once a
+second while someone subscribes, what each rendition has sent under its catalog
+ID: frames, bytes, keyframes, frames skipped because the encoder was still
+busy, and the target bitrate. Its `transport` carries only the PROBE round-trip
+time, since browsers report no usable WebTransport statistics. The encoders'
+`out.stats` and the stats panel read the same counters, and a custom producer
+reports through its rendition's `stats` signal. The `Broadcast` takes the same
+options as `stats`, `probe`, and `echo` inputs.
+
+`echo-path` only asks for feedback: a `<moq-watch echo="alice">` that reads the
+catalog publishes `room/viewers/alice.echo`, and `moq export echo` or a dashboard
+reads it there. Issue tokens that let viewers publish under that path. A path
+that walks above the root from the broadcast name is left out of the catalog
+with a warning, since every viewer would refuse it.
+
 ## Encoding
 
 Video encodes while enabled, so its recent groups wait in the track's cache for
-a late subscription's `maxDelay` or a fetch. Audio keeps raw PCM while nobody
-listens, then encodes that history ahead of live audio when a subscriber arrives.
-Both retain up to `maxAge`; raw audio without a declared retention keeps at most
-30 seconds (about 11.5 MB for 48 kHz stereo f32). Capture stays open.
+a late subscription's `delay.max` or a fetch. The cache keeps an idle group for
+30 seconds whatever `maxAge` says; `maxAge` only bounds how far back a reader
+may reach into it. Audio keeps raw PCM while nobody listens, then encodes that
+history ahead of live audio when a subscriber arrives. Raw audio keeps up to
+`maxAge`, or at most 30 seconds without one (about 11.5 MB for 48 kHz stereo
+f32). Capture stays open.
 
 Pass `onDemand: false` to `Publish.Broadcast` to encode audio continuously too.
 `onDemand: true` also gates video, which then loses its unsubscribed past.
@@ -96,7 +117,6 @@ the same content, so a track re-created on the same `net` throws on an append
 that would reuse its sequences:
 
 ```ts
-import { Milli } from "@moq/clock";
 import * as Json from "@moq/json";
 import * as Moq from "@moq/net";
 
@@ -104,12 +124,10 @@ signals.run((effect) => {
     const net = effect.get(broadcast.net);
     if (!net) return;
 
-    // A day-long retention so a late viewer still replays the last value. Each
-    // value is stamped with when it was written, so the track declares a timescale.
-    const track = net.createTrack("meta.json", {
-        timescale: Moq.Time.Timescale.MILLI,
-        maxAge: Milli(86_400_000),
-    });
+    // A live track always serves and keeps its newest group, so a late viewer
+    // still replays the last value. Each value is stamped with when it was
+    // written, so the track declares a timescale.
+    const track = net.createTrack("meta.json", { timescale: Moq.Time.Timescale.MILLI });
     effect.cleanup(() => {
         track.finish();
         track.close();

@@ -2,8 +2,8 @@ name: release-binary
 
 # Builds, packages, and (on a tag) attests and releases one workspace binary.
 # moq-cli.yml and moq-relay.yml call it; they keep the tag trigger and the
-# workflow name that alert.yml, release-brew.yml, and release-winget.yml match
-# on, and grant the attest job's `id-token` and `attestations` permissions.
+# workflow name that alert.yml and release-brew.yml match on, and grant the
+# attest job's `id-token` and `attestations` permissions.
 
 on:
   workflow_call:

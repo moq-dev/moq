@@ -138,11 +138,11 @@ async fn every_version_establishes_and_negotiates_in_band() {
 async fn reading_returns_flow_control_credit() {
 	for &version in Version::ALL {
 		let mut small = config(version);
-		small.limits.receive_window = std::num::NonZeroU64::new(64 * 1024);
+		small.limits.receive_window = std::num::NonZeroU64::new(moq_net::transport::MIN_RECEIVE_WINDOW);
 		small.limits.stream_receive_window = std::num::NonZeroU64::new(16 * 1024);
 		let (client, server) = pair(config(version), small).await;
 
-		let data = payload(1 << 20, 3);
+		let data = payload(4 << 20, 3);
 		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
 		let writer = {
 			let data = data.clone();
@@ -156,6 +156,156 @@ async fn reading_returns_flow_control_credit() {
 		let mut recv = server.accept_uni().await.unwrap();
 		assert_eq!(read_all(&mut recv).await.unwrap(), data, "{version:?}");
 		writer.await.unwrap().expect("the FIN was delivered");
+	}
+}
+
+/// Lease `want` bytes, returning how many were leased and handing them back unread, so they
+/// keep their credit.
+async fn lease(recv: &mut RecvStream, want: usize) -> Result<usize, Error> {
+	kio::wait(|waiter| recv.poll_lease(waiter, want).map_ok(|lease| lease.remaining())).await
+}
+
+/// Lease `want` bytes, then read and release them, returning their credit.
+async fn read_exact(recv: &mut RecvStream, want: usize) -> Result<Bytes, Error> {
+	kio::wait(|waiter| {
+		recv.poll_lease(waiter, want).map_ok(|mut lease| {
+			let read = lease.copy_to_bytes(want);
+			poll::Lease::release(lease);
+			read
+		})
+	})
+	.await
+}
+
+/// Leased bytes keep their credit, so incomplete messages fill the receive window rather than
+/// memory outside it. Once no reader can make progress, the lowest priority holder is evicted,
+/// and the credit it held lets the others carry on.
+#[tokio::test(start_paused = true)]
+async fn partial_messages_evict_the_lowest_priority_stream() {
+	const HALF: usize = 512 * 1024;
+	for &version in Version::ALL {
+		let window = 2 * HALF as u64;
+		let mut server = config(version);
+		server.limits.receive_window = std::num::NonZeroU64::new(window);
+		server.limits.stream_receive_window = std::num::NonZeroU64::new(window);
+		let (client, server) = pair(config(version), server).await;
+		assert_eq!(
+			poll::Session::receive_window(&server),
+			Some(net::ReceiveWindow::new(window, window))
+		);
+
+		let mut sends = Vec::new();
+		for seed in 0..3 {
+			let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+			write_all(&mut send, payload(1, seed)).await;
+			sends.push(send);
+		}
+		let mut kept = server.accept_uni().await.unwrap();
+		let mut evicted = server.accept_uni().await.unwrap();
+		let mut waiting = server.accept_uni().await.unwrap();
+		kept.set_priority(1);
+		waiting.set_priority(2);
+
+		// Two incomplete messages fill the window, and a third waits for credit.
+		let (mut keep, mut evict, mut wait) = (sends.remove(0), sends.remove(0), sends.remove(0));
+		write_all(&mut keep, payload(HALF - 1, 0)).await;
+		write_all(&mut evict, payload(HALF - 2, 1)).await;
+		let writer = tokio::spawn(async move {
+			write_all(&mut wait, payload(HALF - 1, 2)).await;
+			wait
+		});
+
+		// Every reader wants more than it holds, so the window is stuck.
+		let kept = tokio::spawn(async move {
+			let leased = lease(&mut kept, HALF + 1).await;
+			(kept, leased)
+		});
+		let waiting = tokio::spawn(async move {
+			let read = read_exact(&mut waiting, HALF).await;
+			(waiting, read)
+		});
+		let err = lease(&mut evicted, HALF).await.expect_err("evicted");
+		assert!(matches!(err, Error::Evicted), "{version:?}: {err}");
+		assert_eq!(net::Error::close_kind(&err), net::CloseKind::Evicted);
+		assert_eq!(net::Metrics::streams_evicted(&poll::Session::metrics(&server)), Some(1));
+		drop(evicted);
+
+		// The evicted stream's credit lets the waiting one through, and reading it returns
+		// the credit the kept stream needs to finish its message.
+		let (_waiting, read) = waiting.await.unwrap();
+		assert_eq!(read.unwrap().len(), HALF, "{version:?}");
+		let _wait = writer.await.unwrap();
+		write_all(&mut keep, payload(1, 0)).await;
+		let (_kept, leased) = kept.await.unwrap();
+		assert_eq!(leased.unwrap(), HALF + 1, "{version:?}");
+		drop(evict);
+	}
+}
+
+/// A running session widens its windows, and refuses a rate cap it could never pace, while an
+/// explicit "no cap" is fine.
+#[tokio::test(start_paused = true)]
+async fn set_limits_widens_and_refuses_a_rate_cap() {
+	let (_client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
+	let mut limits = moq_quic::Limits::default();
+	limits.receive_window = std::num::NonZeroU64::new(16 << 20);
+	limits.receive_rate = Some(moq_quic::Rate::Unlimited);
+	limits.send_rate = Some(moq_quic::Rate::Unlimited);
+	server.set_limits(limits).expect("unlimited rates");
+	assert_eq!(poll::Session::receive_window(&server).unwrap().connection, 16 << 20);
+
+	limits.send_rate = Some(moq_quic::Rate::BytesPerSecond(std::num::NonZeroU64::new(1000).unwrap()));
+	assert!(matches!(server.set_limits(limits), Err(Error::InvalidConfig(_))));
+	limits.send_rate = None;
+	limits.receive_window = std::num::NonZeroU64::new(1024);
+	assert!(matches!(
+		server.set_limits(limits),
+		Err(Error::ReceiveWindowTooSmall(_))
+	));
+}
+
+/// A reset seen through a lease frees the stream while the reader still holds it, returning
+/// its stream credit and the connection credit its partial message withheld.
+#[tokio::test(start_paused = true)]
+async fn a_reset_seen_by_a_lease_frees_the_stream() {
+	let mut server = config(Version::QMux02);
+	server.limits.max_streams = std::num::NonZeroU64::new(1);
+	let (client, server) = pair(config(Version::QMux02), server).await;
+
+	let mut first = client.open_uni(SendOptions::default()).await.unwrap();
+	write_all(&mut first, payload(1000, 0)).await;
+	let mut recv = server.accept_uni().await.unwrap();
+	assert_eq!(lease(&mut recv, 1000).await.unwrap(), 1000, "a partial message, leased");
+	first.reset(3);
+	let err = lease(&mut recv, 2000).await.expect_err("reset");
+	assert!(matches!(err, Error::StreamReset(3)), "{err}");
+
+	// Still holding `recv`, the peer gets its stream back.
+	let opening = client.open_uni(SendOptions::default());
+	kio::clock::timeout(Duration::from_secs(1), opening)
+		.await
+		.expect("credit returned on the reset")
+		.unwrap();
+	drop(recv);
+}
+
+/// A stream the session stops reading still sees a reset, without reading a byte.
+#[tokio::test(start_paused = true)]
+async fn a_reset_reaches_an_unread_stream() {
+	for &version in Version::ALL {
+		let (client, server) = pair(config(version), config(version)).await;
+		let mut send = client.open_uni(SendOptions::default()).await.unwrap();
+		write_all(&mut send, payload(16, 0)).await;
+		let mut recv = server.accept_uni().await.unwrap();
+
+		let mut reset = std::pin::pin!(kio::wait(|waiter| recv.poll_reset(waiter)));
+		assert!(
+			futures_poll_once(&mut reset).await.is_none(),
+			"{version:?}: no reset yet"
+		);
+		send.reset(7);
+		let err = reset.await;
+		assert!(matches!(err, Error::StreamReset(7)), "{version:?}: {err}");
 	}
 }
 
@@ -444,6 +594,25 @@ async fn a_close_ends_an_unfinished_read_after_its_data() {
 	assert_eq!(&data[..], b"tail");
 	assert!(matches!(err, Error::ConnectionClosed { code: 42, .. }), "got {err:?}");
 	drop(send);
+}
+
+/// Waits parked on the closing side end with its close instead of hanging.
+#[tokio::test(start_paused = true)]
+async fn a_local_close_ends_parked_waits() {
+	let (_client, server) = pair(config(Version::QMux02), config(Version::QMux02)).await;
+	let (_send, mut recv) = server.open_bi(SendOptions::default()).await.unwrap();
+	let mut accepting = std::pin::pin!(server.accept_uni());
+	let mut reading = std::pin::pin!(recv.read_chunk(usize::MAX));
+	assert!(futures_poll_once(&mut accepting).await.is_none());
+	assert!(futures_poll_once(&mut reading).await.is_none());
+
+	server.close(42, "bye");
+	assert!(matches!(accepting.await, Err(Error::ConnectionClosed { code: 42, .. })));
+	let read = reading.await;
+	assert!(
+		matches!(read, Err(Error::ConnectionClosed { code: 42, .. })),
+		"got {read:?}"
+	);
 }
 
 #[tokio::test(start_paused = true)]
