@@ -63,7 +63,7 @@ struct State {
 }
 
 /// One encoder restart, shared by the roles whose ends declared it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Transition(u64);
 
 struct Pending {
@@ -98,7 +98,7 @@ impl State {
 			ends: Default::default(),
 			tails: Vec::new(),
 			transitions: Default::default(),
-			declared: Default::default(),
+			declared: [Transition(0); 2],
 			next: Transition(1),
 			reference: None,
 			written: None,
@@ -260,7 +260,7 @@ pub struct Track {
 }
 
 /// A segment's timestamp mapping, applied only after its first media can play.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 #[must_use]
 pub struct Mapping {
 	source: Duration,
@@ -291,7 +291,11 @@ impl Track {
 		Self {
 			presentation,
 			role,
-			mapping: Default::default(),
+			mapping: std::sync::Mutex::new(Mapping {
+				source: Duration::ZERO,
+				target: Duration::ZERO,
+				starts: None,
+			}),
 		}
 	}
 
@@ -434,7 +438,7 @@ impl Drop for Track {
 				pending.members[own] = false;
 				pending.plans[own] = None;
 			}
-			presentation.declared[own] = Transition::default();
+			presentation.declared[own] = Transition(0);
 			presentation.prune(kio::clock::now());
 		}
 	}
