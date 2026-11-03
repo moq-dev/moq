@@ -1,13 +1,14 @@
 #![cfg(feature = "async")]
 
 //! A relay's ingest buffers at most a window past the group's fastest reader, then leaves
-//! the rest in the stream, so flow control pushes back to the publisher. A slower reader
-//! is never waited on: it falls off the group's front.
+//! the rest in the stream, so flow control pushes back to the publisher. The window is the
+//! stream receive credit the relay's transport grants, capped at 16 MiB, half the group's
+//! live tail. A slower reader is never waited on: it falls off the group's front.
 
 use std::time::Duration;
 
 use bytes::Bytes;
-use moq_net::{Hop, Timestamp, Version, origin, track};
+use moq_net::{Hop, Timestamp, Version, origin, track, transport::ReceiveWindow};
 
 use crate::support::harness::{MockPair, peer, spawn};
 
@@ -16,6 +17,11 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 const MB: usize = 1 << 20;
 
 const VERSIONS: &[&str] = &["moq-lite-06", "moq-lite-07-wip", "moq-transport-22"];
+
+/// Receive windows whose stream credit, 64 MiB, is past the 16 MiB pacing cap.
+fn uncapped() -> ReceiveWindow {
+	ReceiveWindow::new(u64::MAX, 64 * MB as u64)
+}
 
 fn origin(hop: u64) -> origin::Producer {
 	let (origin, driver) = origin::Producer::new(origin::Config::new(Hop::new(hop).unwrap()));
@@ -66,46 +72,60 @@ async fn relay(version: &str) -> Relay {
 	}
 }
 
+/// An idle reader holds the relay to about its stream credit, or the 16 MiB cap past it, and
+/// still receives every frame.
 #[kio::test]
 async fn an_idle_reader_paces_the_relay_and_loses_nothing() {
-	let payload = Bytes::from(vec![7u8; MB]);
+	// The stream credit the relay grants, and how many 1 MiB frames it then holds.
+	let cases = [
+		(ReceiveWindow::new(16 * MB as u64, 4 * MB as u64), 3..=5),
+		(uncapped(), 15..=18),
+	];
 	for version in VERSIONS {
-		let mut relay = relay(version).await;
-
-		let mut group = relay.track.append_group().unwrap();
-		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
-		let mut reader = kio::clock::timeout(TIMEOUT, relay.subscriber.recv_group())
-			.await
-			.expect("group timeout")
-			.unwrap()
-			.expect("group 0");
-		// Within the publisher's own 32 MB tail, so only the relay's pacing holds it back.
-		for _ in 1..30 {
-			group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+		for (window, expected) in cases.clone() {
+			idle_reader(version, window, expected).await;
 		}
-		group.finish().unwrap();
-
-		// Simulated time moves only once every task is parked: the relay's ingest stopped.
-		kio::clock::sleep(Duration::from_secs(1)).await;
-		let held = reader.frame_count();
-		assert!(
-			(15..=18).contains(&held),
-			"{version}: the relay read {held} MB ahead of a reader that took nothing"
-		);
-
-		for index in 0..30 {
-			let frame = kio::clock::timeout(TIMEOUT, reader.read_frame())
-				.await
-				.unwrap_or_else(|_| panic!("{version}: frame {index} never arrived"))
-				.unwrap_or_else(|err| panic!("{version}: frame {index}: {err}"))
-				.expect("a frame");
-			assert_eq!(frame.payload.len(), MB, "{version}: frame {index}");
-		}
-		let end = kio::clock::timeout(TIMEOUT, reader.read_frame())
-			.await
-			.expect("end timeout");
-		assert!(matches!(end, Ok(None)), "{version}: {end:?}");
 	}
+}
+
+async fn idle_reader(version: &str, window: ReceiveWindow, expected: std::ops::RangeInclusive<usize>) {
+	let payload = Bytes::from(vec![7u8; MB]);
+	let mut relay = relay(version).await;
+	relay.pair.server_transport.set_receive_window(Some(window));
+
+	let mut group = relay.track.append_group().unwrap();
+	group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+	let mut reader = kio::clock::timeout(TIMEOUT, relay.subscriber.recv_group())
+		.await
+		.expect("group timeout")
+		.unwrap()
+		.expect("group 0");
+	// Within the publisher's own 32 MB tail, so only the relay's pacing holds it back.
+	for _ in 1..30 {
+		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
+	}
+	group.finish().unwrap();
+
+	// Simulated time moves only once every task is parked: the relay's ingest stopped.
+	kio::clock::sleep(Duration::from_secs(1)).await;
+	let held = reader.frame_count();
+	assert!(
+		expected.contains(&held),
+		"{version}: the relay read {held} MB ahead of a reader that took nothing under {window:?}"
+	);
+
+	for index in 0..30 {
+		let frame = kio::clock::timeout(TIMEOUT, reader.read_frame())
+			.await
+			.unwrap_or_else(|_| panic!("{version}: frame {index} never arrived"))
+			.unwrap_or_else(|err| panic!("{version}: frame {index}: {err}"))
+			.expect("a frame");
+		assert_eq!(frame.payload.len(), MB, "{version}: frame {index}");
+	}
+	let end = kio::clock::timeout(TIMEOUT, reader.read_frame())
+		.await
+		.expect("end timeout");
+	assert!(matches!(end, Ok(None)), "{version}: {end:?}");
 }
 
 /// A paused stream is not read, so the relay watches it for a reset instead: a publisher
@@ -139,11 +159,15 @@ async fn a_reset_reaches_a_paused_relay() {
 
 /// A frame larger than the room left waits to be admitted, since admitting it trims the
 /// tail to fit: an idle reader loses nothing to a large frame either.
+///
+/// The relay grants past the 16 MiB cap, so it takes the first 15 frames and the publisher
+/// sheds only what it already sent.
 #[kio::test]
 async fn a_large_frame_sheds_nothing_an_idle_reader_wants() {
 	let payload = Bytes::from(vec![7u8; MB]);
 	for version in VERSIONS {
 		let mut relay = relay(version).await;
+		relay.pair.server_transport.set_receive_window(Some(uncapped()));
 
 		let mut group = relay.track.append_group().unwrap();
 		group.write_frame(Timestamp::ZERO, payload.clone()).unwrap();
@@ -249,8 +273,9 @@ async fn a_slow_reader_falls_off_without_slowing_the_fast_one() {
 	}
 }
 
-/// Backpressure crosses both relays, with one pacing window of unread payload per hop.
-/// The upstream copy also keeps sent history within its 32 MiB tail.
+/// Backpressure crosses both relays, with one pacing window of unread payload per hop: the
+/// 1 MiB stream credit each relay grants, not the 16 MiB cap. The upstream copy also keeps
+/// sent history within its 32 MiB tail.
 /// Cache charges include frame slots and relay metadata, not transport buffers or RSS.
 #[kio::test]
 async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
@@ -311,11 +336,12 @@ async fn two_relays_bound_their_cache_and_resume_without_a_hole() {
 		kio::clock::sleep(Duration::from_secs(1)).await;
 		let parked = written.load(std::sync::atomic::Ordering::Relaxed);
 		assert!(parked < TOTAL, "{version}: no backpressure reached the producer");
-		// Frame slots count toward pacing too, so the last whole frame can fall short.
-		for (hop, relay, max) in [(1, &first, 32 * MB + FRAME), (2, &second, 16 * MB + FRAME)] {
+		// Frame slots count toward pacing too, so the last whole frame can fall short. The
+		// upstream copy also holds what it sent downstream, within its 32 MiB tail.
+		for (hop, relay, max) in [(1, &first, 32 * MB + FRAME), (2, &second, MB + FRAME)] {
 			let held = relay.config().pool.used();
 			assert!(
-				held >= (16 * MB - FRAME) as u64,
+				held >= (MB - FRAME) as u64,
 				"{version}: hop {hop} never filled its window: {held}"
 			);
 			assert!(held < max as u64, "{version}: hop {hop} retained {held} bytes");

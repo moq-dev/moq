@@ -51,8 +51,8 @@ Idea for later (maintainer, 2026-10-30, from the
 in [moq-dev/moq#7388](https://github.com/moq-dev/moq/pull/7388)): instead of
 moq-quic granting `MAX_STREAM_DATA` automatically as a stream is read, the
 application could pause a stream, or grant it an explicit
-`allow(fastest + 16 MB)`, so flow control never grants credit past the pacing
-window. Paused streams would then hold no credit beyond that window, replacing
+`allow(fastest + window)`, so flow control never grants credit past the pacing
+window (the stream receive window, capped at 16 MB). Paused streams would then hold no credit beyond that window, replacing
 moq-net's per-session cap on paused credit.
 
 Until then, the pool must keep that cap honest (noted 2026-10-31 from

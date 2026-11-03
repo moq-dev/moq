@@ -43,6 +43,13 @@ const WAKE_BUDGET: usize = 64 * 1024;
 /// A stream ingest may stop reading to pace a group's writer, which holds its receive
 /// credit meanwhile.
 pub(crate) trait Pause {
+	/// How far the group's writer reads this stream ahead of its fastest reader before
+	/// pausing: the stream's receive credit, capped at the live tail's ahead half (see
+	/// [`crate::model::pace::window`]). A stream outside any session takes the cap.
+	fn window(&self) -> u64 {
+		crate::model::pace::AHEAD
+	}
+
 	/// Reserve the credit this stream may hold while paused, returning whether it may pause.
 	/// A stream outside any session always may.
 	fn pause(&mut self) -> bool {
@@ -54,6 +61,10 @@ pub(crate) trait Pause {
 }
 
 impl Pause for crate::transport::boxed::RecvStream {
+	fn window(&self) -> u64 {
+		crate::transport::boxed::RecvStream::window(self)
+	}
+
 	fn pause(&mut self) -> bool {
 		crate::transport::boxed::RecvStream::pause(self)
 	}
@@ -429,7 +440,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 		let result = loop {
 			// A writer too far ahead of the group's fastest reader leaves the rest in the
 			// stream, so flow control pushes back upstream.
-			let lease = match self.poll_pace(waiter, frame.poll_ready(waiter)) {
+			let lease = match self.poll_pace(waiter, frame.poll_ready(waiter, self.stream.window())) {
 				Poll::Ready(Ok(())) => self.poll_lease(waiter, frame.remaining().min(1)),
 				Poll::Ready(Err(err)) => break Err(err),
 				Poll::Pending => Poll::Pending,
@@ -509,7 +520,7 @@ impl<S: RecvStream, V: StreamCodes> Reader<S, V> {
 	where
 		S: Pause,
 	{
-		self.poll_pace(waiter, group.poll_admit(waiter, header))
+		self.poll_pace(waiter, group.poll_admit(waiter, header, self.stream.window()))
 	}
 
 	/// Wait out `paced`, the group's pace gate, if the session has room for the credit this

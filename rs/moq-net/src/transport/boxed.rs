@@ -156,15 +156,25 @@ impl RecvStream {
 	/// Box a stream outside any session, which therefore never pauses.
 	#[cfg(test)]
 	pub(crate) fn new(stream: impl poll::RecvStream + Send + Sync) -> Self {
-		Self::budgeted(stream, Weak::<Shared<super::memory::Session>>::new())
+		Self::budgeted(stream, Weak::<Shared<super::memory::Session>>::new(), None)
 	}
 
-	fn budgeted(stream: impl poll::RecvStream + Send + Sync, session: Budget) -> Self {
+	/// Box a stream of a session granting `receive`, read when the stream is accepted or
+	/// opened, which sizes its pacing [`window`](Self::window).
+	fn budgeted(stream: impl poll::RecvStream + Send + Sync, session: Budget, receive: Option<ReceiveWindow>) -> Self {
 		Self(Box::new(Budgeted {
 			stream,
 			session,
 			held: 0,
+			window: crate::model::pace::window(receive),
 		}))
+	}
+
+	/// How far ingest reads this stream ahead of its group's fastest reader before pausing:
+	/// the credit the stream may hold, so a paced hop buffers about what its peer can have
+	/// in flight on it.
+	pub(crate) fn window(&self) -> u64 {
+		self.0.window()
 	}
 
 	/// Reserve the receive credit this stream may hold while ingest stops reading it, returning
@@ -186,6 +196,8 @@ struct Budgeted<T> {
 	session: Budget,
 	/// The credit reserved while paused, zero while read.
 	held: u64,
+	/// The pacing window, from the session's receive windows when the stream arrived.
+	window: u64,
 }
 
 impl<T> Budgeted<T> {
@@ -311,6 +323,7 @@ trait ErasedRecv: Send + Sync {
 	fn set_priority(&mut self, priority: i64);
 	fn stop(&mut self, code: u32);
 	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error>;
+	fn window(&self) -> u64;
 	fn pause(&mut self) -> bool;
 	fn resume(&mut self);
 }
@@ -338,18 +351,22 @@ fn unbox<'a, G: 'static>(options: SendOptions<'a, Group>) -> SendOptions<'a, G> 
 	}
 }
 
-fn bi<S: poll::Boxable>((send, recv): poll::BiStreams<S>, budget: Budget) -> (SendStream, RecvStream) {
-	(SendStream(Box::new(send)), RecvStream::budgeted(recv, budget))
+fn bi<S: poll::Boxable>(session: &S, (send, recv): poll::BiStreams<S>, budget: Budget) -> (SendStream, RecvStream) {
+	let receive = poll::Session::receive_window(session);
+	(SendStream(Box::new(send)), RecvStream::budgeted(recv, budget, receive))
 }
 
 impl<S: poll::Boxable> ErasedSession for S {
 	fn poll_accept_uni(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<RecvStream, Error>> {
-		poll::Session::poll_accept_uni(self, waiter)
-			.map(|res| res.map(|recv| RecvStream::budgeted(recv, budget)).map_err(Error::new))
+		poll::Session::poll_accept_uni(self, waiter).map(|res| {
+			res.map(|recv| RecvStream::budgeted(recv, budget, poll::Session::receive_window(self)))
+				.map_err(Error::new)
+		})
 	}
 
 	fn poll_accept_bi(&self, waiter: &kio::Waiter, budget: Budget) -> Poll<Result<(SendStream, RecvStream), Error>> {
-		poll::Session::poll_accept_bi(self, waiter).map(|res| res.map(|bis| bi::<S>(bis, budget)).map_err(Error::new))
+		poll::Session::poll_accept_bi(self, waiter)
+			.map(|res| res.map(|bis| bi::<S>(self, bis, budget)).map_err(Error::new))
 	}
 
 	fn poll_open_uni(&self, waiter: &kio::Waiter, options: SendOptions<'_, Group>) -> Poll<Result<SendStream, Error>> {
@@ -364,7 +381,7 @@ impl<S: poll::Boxable> ErasedSession for S {
 		budget: Budget,
 	) -> Poll<Result<(SendStream, RecvStream), Error>> {
 		poll::Session::poll_open_bi(self, waiter, unbox(options))
-			.map(|res| res.map(|bis| bi::<S>(bis, budget)).map_err(Error::new))
+			.map(|res| res.map(|bis| bi::<S>(self, bis, budget)).map_err(Error::new))
 	}
 
 	fn poll_open_request(
@@ -374,7 +391,7 @@ impl<S: poll::Boxable> ErasedSession for S {
 		budget: Budget,
 	) -> Poll<Result<Option<(SendStream, RecvStream)>, Error>> {
 		poll::Session::poll_open_request(self, waiter, unbox(options)).map(|res| {
-			res.map(|streams| streams.map(|bis| bi::<S>(bis, budget)))
+			res.map(|streams| streams.map(|bis| bi::<S>(self, bis, budget)))
 				.map_err(Error::new)
 		})
 	}
@@ -499,6 +516,10 @@ impl<T: poll::RecvStream + Send + Sync> ErasedRecv for Budgeted<T> {
 
 	fn poll_reset(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
 		poll::RecvStream::poll_reset(&mut self.stream, waiter).map(Error::new)
+	}
+
+	fn window(&self) -> u64 {
+		self.window
 	}
 
 	fn pause(&mut self) -> bool {
@@ -734,6 +755,26 @@ mod test {
 		assert!(streams[2].pause(), "a resumed stream returned its share");
 		drop(streams.remove(1));
 		assert!(accept(&session).pause(), "so did a dropped one");
+	}
+
+	/// A stream paces at the credit its session grants it, so a hop holds about what its
+	/// peer can have in flight; a transport without windows takes the cap, never pausing.
+	#[test]
+	fn a_stream_paces_at_its_credit() {
+		use crate::model::pace::AHEAD;
+
+		let gate = kio::Producer::new(true);
+		let session =
+			Session::new(SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(100, 20)));
+		assert_eq!(accept(&session).window(), 20);
+
+		let session = Session::new(
+			SinkSession::accepted_bi(gate.consume()).with_receive_window(ReceiveWindow::new(u64::MAX, u64::MAX)),
+		);
+		assert_eq!(accept(&session).window(), AHEAD, "capped at half the live tail");
+
+		let session = Session::new(SinkSession::accepted_bi(gate.consume()));
+		assert_eq!(accept(&session).window(), AHEAD);
 	}
 
 	/// A transport that reports no window never pauses a stream, since nothing bounds what

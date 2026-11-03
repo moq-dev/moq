@@ -26,7 +26,7 @@ mod expiry;
 mod idle;
 mod skipped;
 // How far a group's writer reads ahead of its fastest reader.
-mod pace;
+pub(crate) mod pace;
 // The DEFLATE codec behind compressed tracks.
 mod flate;
 pub(crate) mod object;

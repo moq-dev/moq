@@ -2236,7 +2236,7 @@ impl Producer {
 	/// the group and is not waited on. Writing without waiting never fails: the group sheds
 	/// its front instead.
 	pub fn poll_ready(&self, waiter: &kio::Waiter, frame: &frame::Info) -> Poll<()> {
-		ready!(self.poll_paced(waiter, frame.size));
+		ready!(self.poll_paced(waiter, frame.size, super::pace::AHEAD));
 		// A closed group reports `Closed`, which is ready too.
 		self.handle.state.poll_wanted_changed(waiter, false).map(|_| ())
 	}
@@ -2247,8 +2247,9 @@ impl Producer {
 	}
 
 	/// Poll until the writer may take more from upstream, `partial` bytes into a frame
-	/// it has not committed: until it is at most [`super::pace::AHEAD`] past the end of the last
-	/// frame its fastest reader took.
+	/// it has not committed: until it is at most `window` bytes past the end of the last
+	/// frame its fastest reader took. Ingest passes its stream's receive credit (see
+	/// [`super::pace::window`]); a local writer passes [`super::pace::AHEAD`].
 	///
 	/// Ready at once while no reader holds the group, so a group nobody watches keeps
 	/// writing and sheds its front, and once it is closed, so the next write surfaces why.
@@ -2257,16 +2258,16 @@ impl Producer {
 	/// fallen off the group and is not waited on.
 	///
 	/// A session's ingest waits on this; a local writer waits on [`Self::poll_ready`].
-	pub(crate) fn poll_paced(&self, waiter: &kio::Waiter, partial: u64) -> Poll<()> {
+	pub(crate) fn poll_paced(&self, waiter: &kio::Waiter, partial: u64, window: u64) -> Poll<()> {
 		let pace = &self.handle.alive.pace;
-		if !pace.ahead(partial) {
+		if !pace.ahead(partial, window) {
 			return Poll::Ready(());
 		}
 		// Either wakes the writer: the last reader leaving, or the group closing.
 		if self.handle.poll_unwanted(waiter).is_ready() || self.handle.state.poll_closed(waiter).is_ready() {
 			return Poll::Ready(());
 		}
-		match pace.paced(pace.park(waiter), partial) {
+		match pace.paced(pace.park(waiter), partial, window) {
 			true => Poll::Pending,
 			false => Poll::Ready(()),
 		}
