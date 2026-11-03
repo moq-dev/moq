@@ -384,6 +384,20 @@ fn quantize(published: Option<Duration>, measured: Option<Duration>, period: Dur
 	}
 }
 
+/// Write `config` under `name`, refusing it before any change if it redefines the rendition's
+/// identity or won't serialize, so the reserved snapshot never retains a bad edit.
+///
+/// The entry is checked in a catalog holding only it: the rest was checked when it was written, and
+/// cloning or serializing the whole catalog would make declaring N renditions cost N².
+fn write<E: CatalogExt, C: RenditionConfig<E>>(catalog: &mut Catalog<E>, name: &str, config: C) -> crate::Result<()> {
+	let mut alone = Catalog::default();
+	config.clone().insert(&mut alone, name);
+	check_identity(catalog, &alone, name)?;
+	serde_json::to_writer(std::io::sink(), &alone).map_err(moq_json::Error::from)?;
+	config.insert(catalog, name);
+	Ok(())
+}
+
 /// Refuse an edit that redefines rendition `name`'s track identity in place: a publisher whose
 /// decoder identity changed publishes under a new name instead.
 fn check_identity<E: CatalogExt>(previous: &Catalog<E>, next: &Catalog<E>, name: &str) -> crate::Result<()> {
@@ -669,13 +683,8 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		config.set_estimate(resolved.clone());
 		{
 			let mut guard = self.catalog.modify()?;
-			let mut next = (*guard).clone();
-			config.insert(&mut next, &self.name);
-			check_identity(&guard, &next, &self.name)?;
-			// Serialization must succeed before the reserved snapshot retains the edit.
-			serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
+			write(&mut guard, &self.name, config)?;
 			self.present = true;
-			*guard = next;
 			guard.list::<C>(&self.name);
 			if C::detects() {
 				guard.hint::<C>(&self.name, supplied.clone());
@@ -816,11 +825,7 @@ impl<E: CatalogExt, C: RenditionConfig<E>> Rendition<E, C> {
 		}
 		Self::check_decrease(&self.config()?.estimate(), &config.estimate())?;
 		let mut guard = self.catalog.modify()?;
-		let mut next = (*guard).clone();
-		config.insert(&mut next, &self.name);
-		check_identity(&guard, &next, &self.name)?;
-		serde_json::to_writer(std::io::sink(), &next).map_err(moq_json::Error::from)?;
-		*guard = next;
+		write(&mut guard, &self.name, config)?;
 		Ok(guard)
 	}
 }
