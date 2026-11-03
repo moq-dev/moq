@@ -6142,7 +6142,7 @@ fn gso_train_fits_one_udp_send() {
 	client_cfg.transport = transport::Config {
 		initial_mtu: MTU,
 		mtu: None,
-		// Neither window, pacer, nor send quantum bounds the train, so only the byte cap can
+		// Neither window, pacer, nor send quantum bounds the train, so only the byte cap bounds it.
 		congestion: Arc::new(FixedQuantumController { send_quantum: u64::MAX }),
 		..transport::Config::default()
 	};
@@ -6163,11 +6163,11 @@ fn gso_train_fits_one_udp_send() {
 	let mut full = false;
 	while let Some(transmit) = conn.poll_transmit(now, 64, &mut buf) {
 		assert!(
-			transmit.size <= 65_507,
+			transmit.size <= MAX_TRANSMIT_SIZE,
 			"a {} byte train exceeds one IPv4 UDP send",
 			transmit.size
 		);
-		full |= transmit.size > 65_507 - usize::from(MTU);
+		full |= transmit.size > MAX_TRANSMIT_SIZE - usize::from(MTU);
 		buf.clear();
 	}
 	assert!(full, "no train came close to the limit, so the test proves nothing");
