@@ -35,7 +35,7 @@ impl KeyId {
 	/// Generate a random key ID using cryptographically secure randomness.
 	pub fn random() -> Self {
 		let mut bytes = [0u8; 8];
-		aws_lc_rs::rand::fill(&mut bytes).expect("failed to generate random bytes");
+		rind::rand::fill(&mut bytes).expect("failed to generate random bytes");
 		let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
 		Self(hex)
 	}
