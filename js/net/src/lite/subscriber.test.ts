@@ -72,6 +72,7 @@ test("closing the subscriber suppresses probe stream warnings", async () => {
 // Drives a Subscriber's announce stream directly: the harness plays the peer, writing
 // forged announce messages into the stream the subscriber opens.
 function announceHarness(version: Version, origin = 1n) {
+	const reading = Promise.withResolvers<void>();
 	let inbound!: ReadableStreamDefaultController<Uint8Array>;
 	// Resolves with the reason once the subscriber resets the stream, which is how a peer
 	// learns it violated the protocol. Never resolving is the failure this observes.
@@ -83,7 +84,14 @@ function announceHarness(version: Version, origin = 1n) {
 	const sessionClosed = new Promise<WebTransportCloseInfo | undefined>((resolve) => (onSessionClose = resolve));
 	const quic = {
 		createBidirectionalStream: async () => ({
-			readable: new ReadableStream<Uint8Array>({ start: (controller) => (inbound = controller) }),
+			// A pull with no read-ahead means the request writes have finished.
+			readable: new ReadableStream<Uint8Array>(
+				{
+					start: (controller) => (inbound = controller),
+					pull: () => reading.resolve(),
+				},
+				{ highWaterMark: 0 },
+			),
 			writable: new WritableStream<Uint8Array>({ abort: (reason) => void onAbort(reason) }),
 		}),
 		close: (info?: WebTransportCloseInfo) => {
@@ -148,7 +156,10 @@ function announceHarness(version: Version, origin = 1n) {
 		finish: () => inbound.close(),
 		abortReason,
 		sessionEnded,
-		settle: () => yieldNow(),
+		settle: async () => {
+			await reading.promise;
+			await yieldNow();
+		},
 	};
 }
 
@@ -2867,21 +2878,17 @@ test("a counted initial set cut short is a protocol violation", async () => {
 test.each([Version.DRAFT_03, Version.DRAFT_04])(
 	"a version without a boundary syncs once the request is out on %s",
 	async (version) => {
-		const clock = new Manual();
-		const installed = clock.install();
 		const yielding = spyOn(Budget.prototype, "poll").mockImplementation(() => yieldNow());
-		const { subscriber } = announceHarness(version);
+		const { subscriber, settle } = announceHarness(version);
 		const announced = subscriber.announced();
 		try {
 			expect(announced.synced.peek()).toBe(false);
-			// A single host turn can end while request writes still yield on the shared budget.
-			await clock.advance(Nano(0));
+			await settle();
 			expect(announced.synced.peek()).toBe(true);
 		} finally {
 			announced.close();
 			subscriber.close();
 			yielding.mockRestore();
-			installed.close();
 		}
 	},
 );

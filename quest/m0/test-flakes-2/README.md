@@ -64,9 +64,9 @@ event-loop stall at each of its 124 host tasks passes all 124 at 1.5 seconds;
 at 4.5 seconds 3 runs and at 11 seconds 114 runs hit bun's own 5-second test
 timeout. No run fails on a protocol deadline, so no clock change applies. Both handled in [moq-dev/moq#7622](https://github.com/moq-dev/moq/pull/7622).
 
-The JS boundary-sync test assumed one host turn drained all request writes. It
-now forces write-budget yields and drains them with the manual clock on lite-03
-and lite-04, fixed by [moq-dev/moq#7663](https://github.com/moq-dev/moq/pull/7663).
+The JS announce harness assumed one host turn drained all request writes. It
+now waits until the subscriber reads the response, with forced write-budget
+yields covering lite-03 and lite-04, fixed by [moq-dev/moq#7663](https://github.com/moq-dev/moq/pull/7663).
 
 Public API: none. Wire: none.
 
