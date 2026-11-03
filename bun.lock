@@ -161,8 +161,8 @@
         "typescript": "7.0.2",
       },
     },
-    "js/e2ee": {
-      "name": "@moq/e2ee",
+    "js/crypto": {
+      "name": "@moq/crypto",
       "version": "0.0.0",
       "dependencies": {
         "@moq/net": "workspace:^",
@@ -360,18 +360,6 @@
         "@typescript/lib-dom": "npm:@types/web@^0.0.358",
         "typescript": "7.0.2",
         "vite": "^8.3.5",
-      },
-    },
-    "js/sign": {
-      "name": "@moq/sign",
-      "version": "0.0.0",
-      "dependencies": {
-        "@moq/net": "workspace:^",
-      },
-      "devDependencies": {
-        "@moq/clock": "workspace:^",
-        "@types/bun": "^1.4.4",
-        "typescript": "7.0.2",
       },
     },
     "js/signals": {
@@ -861,7 +849,7 @@
 
     "@moq/drain-test": ["@moq/drain-test@workspace:test/drain"],
 
-    "@moq/e2ee": ["@moq/e2ee@workspace:js/e2ee"],
+    "@moq/crypto": ["@moq/crypto@workspace:js/crypto"],
 
     "@moq/hang": ["@moq/hang@workspace:js/hang"],
 
@@ -894,8 +882,6 @@
     "@moq/receive-credit-test": ["@moq/receive-credit-test@workspace:test/receive-credit"],
 
     "@moq/room": ["@moq/room@workspace:js/room"],
-
-    "@moq/sign": ["@moq/sign@workspace:js/sign"],
 
     "@moq/signals": ["@moq/signals@workspace:js/signals"],
 

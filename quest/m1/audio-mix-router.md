@@ -24,7 +24,7 @@ routing, mix-minus, and offsets have one implementation with its own tests.
 - **Sync offset:** a per-source delay, so a camera that lags its microphone
   lines up. It delays that source in every mix it feeds.
 - **Inputs:** a source's channel takes PCM as today, including a consumer of
-  [one capture, many consumers](/quest/m1/audio-capture-fanout.md); gain and
+  `capture::Producer`; gain and
   mute stay on its `Strip`.
 - **Breaking:** the single-mix `Bus` API changes shape. Its only consumer
   outside moq-audio is the studio, which updates with it; the migration is
@@ -76,5 +76,4 @@ API, but keep it a draft until the moq commit is on `main`.
 
 ## Related
 
-- [One audio capture feeds the bus and an encoder](/quest/m1/audio-capture-fanout.md) - the capture consumers sources route from
 - [moq-audio filter chain](/quest/m3/audio-filters.md) - runs before a source reaches the router

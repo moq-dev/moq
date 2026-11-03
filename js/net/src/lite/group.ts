@@ -11,7 +11,7 @@ import { hasFrameBounds, type Version } from "./version.ts";
 
 export class Group {
 	subscribe: bigint;
-	sequence: number;
+	sequence: bigint;
 
 	/**
 	 * The index of the first frame on this stream within the group.
@@ -29,7 +29,7 @@ export class Group {
 		frameStart = 0,
 	}: {
 		subscribe: bigint;
-		sequence: number;
+		sequence: bigint;
 		frameStart?: number;
 	}) {
 		this.subscribe = subscribe;
@@ -39,7 +39,7 @@ export class Group {
 
 	async #encode(w: Writer, version: Version) {
 		await w.u62(this.subscribe);
-		await w.u53(this.sequence);
+		await w.u62(this.sequence);
 		if (hasFrameBounds(version)) {
 			await w.u53(this.frameStart);
 		} else if (this.frameStart !== 0) {
@@ -50,7 +50,7 @@ export class Group {
 
 	static async #decode(r: Reader, version: Version): Promise<Group> {
 		const subscribe = await r.u62();
-		const sequence = await r.u53();
+		const sequence = await r.u62();
 		const frameStart = hasFrameBounds(version) ? await r.u53() : 0;
 		return new Group({ subscribe, sequence, frameStart });
 	}

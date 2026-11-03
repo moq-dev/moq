@@ -380,7 +380,7 @@ fn run(scenario: &Scenario) -> Outcome {
 				while let Ok(Some(chunk)) = chunks.next(usize::MAX) {
 					outcome.competitor += chunk.bytes.len() as u64;
 				}
-				let _ = chunks.finalize();
+				chunks.finalize();
 			}
 		}
 
@@ -545,7 +545,7 @@ fn receive(
 				}
 			}
 		}
-		let _ = chunks.finalize();
+		chunks.finalize();
 
 		// The sender opens each group's stream in order, after any it opened before the media
 		let frames = &groups[(id.index() - groups[0].id.index()) as usize].written;

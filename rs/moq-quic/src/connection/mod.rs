@@ -106,7 +106,7 @@ pub use stats::{CreditStats, FrameStats, PathStats, Stats, UdpStats};
 
 mod streams;
 pub(crate) use streams::StreamsState;
-pub use streams::{ShouldTransmit, Streams, recv, send};
+pub use streams::{Streams, recv, send};
 
 mod timer;
 
@@ -1269,7 +1269,7 @@ impl Connection {
 	}
 
 	/// Indicate what types of frames are ready to send for the given space
-	fn space_can_send(&self, space_id: SpaceId, frame_space_1rtt: usize) -> SendableFrames {
+	fn space_can_send(&mut self, space_id: SpaceId, frame_space_1rtt: usize) -> SendableFrames {
 		if self.spaces[space_id].crypto.is_none() {
 			// No keys available for this space
 			return SendableFrames::empty();
@@ -1383,7 +1383,7 @@ impl Connection {
 				.streams
 				.receive_rate_deadline()
 				.is_some_and(|deadline| deadline <= now)
-			&& self.streams.grant_receive_rate(now).should_transmit()
+			&& self.streams.grant_receive_rate(now)
 		{
 			self.spaces[SpaceId::Data].pending.max_data = true;
 		}
@@ -1728,7 +1728,7 @@ impl Connection {
 		limits.validate()?;
 		// The cap first, so a window opened with it is paced rather than granted at once.
 		if let Some(rate) = limits.receive_rate
-			&& self.streams.set_receive_rate(rate).should_transmit()
+			&& self.streams.set_receive_rate(rate)
 		{
 			self.spaces[SpaceId::Data].pending.max_data = true;
 		}
@@ -3097,7 +3097,7 @@ impl Connection {
 		let payload = packet.payload.freeze();
 		// Earned before anything this packet carries is charged against the cap, and granted now:
 		// the refill retires the credit deadline, so a later timeout would not grant it.
-		if self.streams.grant_receive_rate(now).should_transmit() {
+		if self.streams.grant_receive_rate(now) {
 			self.spaces[SpaceId::Data].pending.max_data = true;
 		}
 		let mut is_probing_packet = true;
@@ -3144,7 +3144,7 @@ impl Connection {
 					self.read_crypto(SpaceId::Data, &frame, payload_len)?;
 				}
 				Frame::Stream(frame) => {
-					if self.streams.received(frame, payload_len)?.should_transmit() {
+					if self.streams.received(frame, payload_len)? {
 						self.spaces[SpaceId::Data].pending.max_data = true;
 					}
 				}
@@ -3202,7 +3202,7 @@ impl Connection {
 						err.frame = Some(frame::FrameType::RESET_STREAM_AT);
 						return Err(err);
 					}
-					if self.streams.received_reset(frame)?.should_transmit() {
+					if self.streams.received_reset(frame)? {
 						self.spaces[SpaceId::Data].pending.max_data = true;
 					}
 				}

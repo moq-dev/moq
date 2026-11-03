@@ -69,7 +69,7 @@ export interface ConsumerProps {
 /** One item of a {@link Consumer.next} read, in delivery order. Mirrors Rust's `container::Read`. */
 export type Read =
 	/** A media frame from `group`. Only group equality means anything: numbers may skip. */
-	| { kind: "frame"; group: number; frame: ReceivedFrame }
+	| { kind: "frame"; group: bigint; frame: ReceivedFrame }
 	/**
 	 * Media after an item already read will never reach this reader: a group was skipped, evicted,
 	 * truncated, or never arrived. A decoder resumes without the references or state that media
@@ -85,7 +85,7 @@ export type Read =
 	 * Frames that follow from the same `group` are the stopped encoder's final packets (an audio
 	 * codec's drain), whose output at or past `end` is padding. The next group starts fresh.
 	 */
-	| { kind: "end"; group: number; end: Micro };
+	| { kind: "end"; group: bigint; end: Micro };
 
 /** The default {@link ConsumerProps.maxBuffer}: one group at the transport's size cap. Mirrors Rust's. */
 export const DEFAULT_MAX_BUFFER = 32 * 1024 * 1024;
@@ -150,7 +150,7 @@ function ptsContiguous(end: Micro | undefined, nextStart: Micro | undefined): bo
 function continues(prev: Group, next: Group | undefined): next is Group {
 	if (next === undefined) return false;
 	return (
-		next.consumer.sequence === prev.consumer.sequence + 1 || ptsContiguous(prev.end, next.frames.at(0)?.timestamp)
+		next.consumer.sequence === prev.consumer.sequence + 1n || ptsContiguous(prev.end, next.frames.at(0)?.timestamp)
 	);
 }
 
@@ -181,7 +181,7 @@ export class Consumer {
 	// Group watchers and the track loop parked on a full max buffer.
 	#room: (() => void)[] = [];
 	#groups: Group[] = [];
-	#active?: number; // the active group sequence number
+	#active?: bigint; // the active group sequence number
 	// When the missing sequence at the cursor became late, while one is.
 	#hole?: Instant;
 	// Presentation end (max PTS + duration) of the group we most recently advanced past, so next()'s
@@ -190,7 +190,7 @@ export class Consumer {
 	#presentedEnd?: Micro;
 	// Group of the last media frame next() returned, so an endpoint after it reads as that frame's
 	// duration rather than a declared stop.
-	#mediaGroup?: number;
+	#mediaGroup?: bigint;
 	// Media went missing since the last item read, so the next one is preceded by a gap.
 	#lost = false;
 	// The furthest presentation point read so far: max(timestamp + duration), endpoints included.
@@ -200,7 +200,7 @@ export class Consumer {
 	#next?: Read;
 	// The first media timestamp of the latest delivered group, and its predecessor's start.
 	// Endpoints and later frames can overlap the next group without moving this floor.
-	#start?: { group: number; timestamp: Micro };
+	#start?: { group: bigint; timestamp: Micro };
 	#floor?: Micro;
 	// The error that ended the reader, the first in delivery order: a decode failure or a rewind.
 	#error?: Error;
@@ -549,7 +549,7 @@ export class Consumer {
 			// or still-open group may have lost its tail.
 			const ended = this.#ended(first);
 			const truncated = ended instanceof Error;
-			const adjacent = next?.consumer.sequence === first.consumer.sequence + 1;
+			const adjacent = next?.consumer.sequence === first.consumer.sequence + 1n;
 			const continued = (ended === null && adjacent) || ptsContiguous(first.end ?? this.#presentedEnd, nextStart);
 			if (marker || discarded || truncated || !continued) this.#lost = true;
 			skipped++;
@@ -883,7 +883,7 @@ export class Consumer {
 						// +1 there (the promotion guard above fixes it up once a continuous group arrives).
 						this.#recordPresented(head);
 						const next = this.#groups.at(0);
-						this.#active = continues(head, next) ? next.consumer.sequence : seq + 1;
+						this.#active = continues(head, next) ? next.consumer.sequence : seq + 1n;
 					}
 					head.consumer.close();
 					this.#release(head);
@@ -967,7 +967,7 @@ export class Consumer {
 		const covered =
 			target !== undefined && this.#groups.some((group) => group.start !== undefined && group.start <= target);
 		// Nothing earlier can arrive or be held.
-		const lowest = this.#groups[0].consumer.sequence === 0;
+		const lowest = this.#groups[0].consumer.sequence === 0n;
 		// Wall time: the newest group landed a whole reach ago.
 		const elapsed = Instant.durationSince(now(), this.#anchor) >= reach * 1000;
 		if (ended || this.#full() || target === undefined || covered || lowest || elapsed) {
@@ -1042,7 +1042,7 @@ export class Consumer {
 			const end = Milli.fromMicro(group.latest);
 
 			const last = ranges.at(-1);
-			const contiguous = prev?.consumer.done && prev.consumer.sequence + 1 === group.consumer.sequence;
+			const contiguous = prev?.consumer.done && prev.consumer.sequence + 1n === group.consumer.sequence;
 			if (last && (last.end >= start || contiguous)) {
 				last.end = Milli(Math.max(last.end, end));
 			} else {
