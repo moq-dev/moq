@@ -22,8 +22,7 @@ test("a rendition named __proto__ is reported as its own ID", () => {
 	tally.count(live, { frames: 2 });
 	const report = tally.report(live.path);
 	expect(Object.keys(report).sort()).toEqual(["__proto__", "video"]);
-	expect(Object.hasOwn(report, "__proto__")).toBe(true);
-	expect(JSON.parse(JSON.stringify(report)).__proto__).toEqual({ frames: 1 });
+	expect(Object.getOwnPropertyDescriptor(report, "__proto__")?.value).toEqual({ frames: 1 });
 });
 
 test("a stall reports its time so far and adds its duration once it ends", async () => {
