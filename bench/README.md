@@ -332,15 +332,17 @@ use `instructions.json` for instruction comparisons.
 
 `BENCH_INSTRUCTION_PERIOD` defaults to 1,000,003 retired instructions per sample.
 The fixed-period recording covers the five seconds after the counter window,
-not the window itself: each sampling interrupt runs as the relay's kernel
-instructions, at a cost that follows its stack depth, so at 2,000,003 it added
-about 28k instructions per frame to one relay and the kernel lowered its sample
-rate limit. Scale stacks by their share of samples. `instructions.folded`
+not the window itself, so sampling interrupts, which run as the relay's kernel
+instructions, stay out of the counts. Scale stacks by their share of samples.
+`instructions.folded`
 weights each stack by that period. `perf.data`, raw `stat.json`, `perf.log`,
 thread names, CPU sets, and delivery reports remain with the evidence. Both
 counters and samples cover only the relay. Compare equivalent delivery and loss.
-Instructions reduce frequency and scheduling noise; pinning does not remove
-interference from other host work.
+Instructions reduce frequency noise, but not batching: a relay contending with
+other host work handles more frames per wakeup, so each frame costs fewer
+instructions. On the profiling host, cells measured under a one-minute load
+above about 5 read up to 20% low, so compare cells from quiet stretches, within
+one run. Pinning does not remove interference from other host work.
 
 ### Heap
 
