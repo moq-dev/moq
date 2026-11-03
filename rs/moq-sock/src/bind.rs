@@ -38,6 +38,13 @@ const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// bytes rather than an allocation, so an oversized request costs an idle socket
 /// nothing, while a link's nominal speed says little about the path it feeds (a
 /// VM's virtio NIC reports 10Gbps through a 100Mbps uplink).
+///
+/// Measured by moq-uring's `benchmark_socket_queues` at 480 Mbps of 1200-byte
+/// datagrams, on both receive paths: this request absorbed a 100ms worker stall
+/// with no drop, where the 208 KiB default dropped 13% of a run with 20ms stalls
+/// and 1 MiB dropped 2%. A bigger queue only costs delay when a worker cannot keep
+/// up at all: then it fills, and sitting full it held ~130ms of backlog, against
+/// 4ms at the default. The receive pool depth changed none of this.
 const UDP_BUFFER: usize = 8 * 1024 * 1024;
 
 /// The sysctl capping `SO_RCVBUF`, named in the warning so an operator knows what

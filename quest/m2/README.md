@@ -228,7 +228,6 @@ lite-07; bitrate enforcement is not part of this release.
 - [fMP4 decode times from the declared reorder depth](/quest/m2/fmp4-declared-clock.md) - `DeclaredClock` replaces the sub-GOP cadence cap, as in TS, FLV, and MKV
 - [An ended HLS playlist has no trailing gap](/quest/m2/hls-trailing-gap.md) - no zero-duration `EXT-X-GAP` before `EXT-X-ENDLIST`
 - [moq-video's Apple Sink encodes on its own thread](/quest/m2/apple-sink-thread.md) - macOS and iOS ladders never encode on a tokio worker
-- [The test inventory sees JS bench scripts](/quest/m2/js-bench-inventory.md) - JS bench entry points are resolved by the inventory gate
 - [/fetch answers from the announce sync](/quest/m2/fetch-synced.md) - a missing broadcast gets a 404 once announcements are synced, not after 30 s
 - [An advertisement stuck on a zero-credit peer gives up](/quest/m2/advertise-credit-timeout.md) - A Rust moq-transport publisher whose PUBLISH_NAMESPACE or namespace update cannot leave because the peer grants no send credit gives up on it within a bounded time, as it already does on a silent answer: it resets the request and frees its state
 - [aec::Processor's edge cases are tested](/quest/m2/aec-tests.md) - moq-audio tests cover `aec::Processor` at the extremes of its accepted input

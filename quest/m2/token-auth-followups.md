@@ -30,7 +30,3 @@ which finishes [request tokens](/quest/m1/ietf-token-auth.md).
   `samply` or `perf` on the bench before changing anything.
 
 Public API: none. Wire: none; behavior only.
-
-## Required
-
-- [A moq-transport request token is one auth per distinct token](/quest/m1/ietf-token-auth.md) - its PR, [moq-dev/moq#7211](https://github.com/moq-dev/moq/pull/7211), adds the shared grants and paused-PUBLISH token this extends

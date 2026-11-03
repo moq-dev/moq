@@ -34,7 +34,3 @@ old walk. Optional, only if it falls out: trim `#[ignore]` reasons that
 now duplicate the allowlist's owner (WGC, MediaCodec, NVIDIA).
 
 Public API: none. Wire: none.
-
-## Related
-
-- [The test inventory sees JS bench scripts](/quest/m2/js-bench-inventory.md) - the JS bench half of the same checker
