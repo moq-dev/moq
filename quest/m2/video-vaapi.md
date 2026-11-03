@@ -25,7 +25,10 @@ without NVDEC has no hardware path for it.
 converts them through VPP (`dmabuf`, `vpp`, `Encoder::encode_dmabuf`,
 `Encoder::set_bitrate`); `encode/backend/vaapi.rs` encodes a `Surface::DmaBuf`
 without a download, and `Surface::resize` scales one through VPP. Validated on
-Intel Meteor Lake. What is left is H.265, below.
+Intel Meteor Lake. `just rs gpu` also runs the ignored
+`vaapi_1080p_ladder_stays_on_the_gpu` proof on Intel: 1080p decode to DMA-BUFs,
+VPP to 720p/480p/360p, GPU encode of every frame, and decoded output sizes and
+counts. What is left is H.265, below.
 
 **H.265.** The VAAPI backend advertises H.264 only. `moq-vaapi` 0.1.0 vendors
 the HEVC buffer types (`src/buffer/hevc.rs`) but its `Encoder` is hardcoded to

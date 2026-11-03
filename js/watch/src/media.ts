@@ -1,11 +1,10 @@
-import type { Milli } from "@moq/clock";
 import type { Container } from "@moq/hang";
 import type * as Moq from "@moq/net";
 import { Error as NetError } from "@moq/net";
 import type { Effect, Getter } from "@moq/signals";
 
 /**
- * Open a media subscription with its max delay on the initial request and every update.
+ * Open a media subscription with its delay on the initial request and every update.
  *
  * @internal
  */
@@ -15,16 +14,16 @@ export function subscribeMedia(
 		broadcast: Moq.Broadcast.Consumer;
 		track: string;
 		priority: number;
-		maxDelay: Getter<Milli>;
+		delay: Getter<Moq.Track.Delay>;
 	},
 ): Moq.Track.Subscriber | undefined {
 	if (effect.get(props.broadcast.closed) !== undefined) return;
-	const subscription = () => ({ priority: props.priority, maxDelay: props.maxDelay.peek() });
+	const subscription = () => ({ priority: props.priority, delay: props.delay.peek() });
 	const subscriber = props.broadcast.track(props.track).subscribe(subscription());
 	effect.cleanup(() => subscriber.close());
 
 	effect.run((inner) => {
-		subscriber.update({ priority: props.priority, maxDelay: inner.get(props.maxDelay) });
+		subscriber.update({ priority: props.priority, delay: inner.get(props.delay) });
 	});
 
 	return subscriber;

@@ -21,7 +21,7 @@ use std::{
 use rangemap::{RangeMap, RangeSet};
 
 use super::{Info, Order, Position, TrackState, clamp_max_delay};
-use crate::{Error, Result, StreamError, group, util::SendCell};
+use crate::{Error, Result, StreamError, Timestamp, group, util::SendCell};
 
 /// The fills a track's readers asked for, queued or taken by a handler, under one lock.
 #[derive(Default)]
@@ -44,6 +44,8 @@ struct Pending {
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
+	// The time a lookup asks for, which owes no group.
+	time: Option<Timestamp>,
 	// What its joins ask with now, shared with them and its handler.
 	asks: kio::Shared<Asks>,
 	queued: bool,
@@ -198,6 +200,11 @@ impl Outcome {
 		self.accepted.contains(&sequence)
 	}
 
+	/// The lowest group accepted: a lookup's answer.
+	pub(super) fn first_accepted(&self) -> Option<u64> {
+		self.accepted.iter().next().map(|run| run.start)
+	}
+
 	/// The partial copy accepted for `sequence`, if it still holds `frames`.
 	pub(super) fn partial(&self, sequence: u64, frames: group::Bounds) -> Option<group::Handle> {
 		self.partial.get(&sequence).filter(|copy| copy.covers(frames)).cloned()
@@ -267,6 +274,8 @@ pub(super) struct Ask {
 	pub end: u64,
 	pub frame_end: Option<u64>,
 	pub asking: Asking,
+	/// A lookup of the group holding this time within the run, which owes none of it.
+	pub time: Option<Timestamp>,
 }
 
 /// A reader's place in one fill: the part of it the reader wants.
@@ -403,6 +412,15 @@ impl FillState {
 		if span.is_empty() {
 			return (joins, unfillable);
 		}
+		if let Some(time) = ask.time {
+			// A lookup joins nothing and nothing joins it: it owes no group, so no other
+			// reader's run is answered through it.
+			match self.handlers {
+				0 => unfillable.push(span),
+				_ => joins.push(self.queue_lookup(shared, ask, time)),
+			}
+			return (joins, unfillable);
+		}
 		let covered: Vec<(ops::Range<u64>, u64)> = self
 			.covers
 			.overlapping(&span)
@@ -498,6 +516,7 @@ impl FillState {
 					start,
 					end: groups.end,
 					frame_end: if groups.end == ask.end { ask.frame_end } else { None },
+					time: None,
 					asks,
 					queued: true,
 					wants: RangeMap::from_iter([(groups.clone(), 1)]),
@@ -507,6 +526,41 @@ impl FillState {
 			self.queue.push_back(id);
 		}
 		(joins, unfillable)
+	}
+
+	/// Queue a fill looking up `time` within `ask`'s run, with the join waiting on its answer.
+	fn queue_lookup(&mut self, shared: &kio::Shared<FillState>, ask: &Ask, time: Timestamp) -> Join {
+		let id = self.next;
+		self.next += 1;
+		let result = kio::Producer::<Outcome>::default();
+		let mut asks = Asks::default();
+		asks.add(&ask.asking);
+		let asks = kio::Shared::new(asks);
+		let join = Join {
+			fills: shared.clone(),
+			id,
+			groups: ask.start.group..ask.end,
+			held: RangeSet::new(),
+			outcome: Some(result.consume()),
+			attempt: result.weak(),
+			asking: ask.asking,
+			asks: asks.clone(),
+		};
+		self.pending.insert(
+			id,
+			Pending {
+				start: ask.start,
+				end: ask.end,
+				frame_end: None,
+				time: Some(time),
+				asks,
+				queued: true,
+				wants: RangeMap::new(),
+				result,
+			},
+		);
+		self.queue.push_back(id);
+		join
 	}
 
 	/// Count a join out of reading `groups` of fill `id`. What nobody reads any more is no
@@ -592,6 +646,15 @@ impl FillState {
 	}
 }
 
+/// The pieces of `gap` once `skip` is taken out of it.
+fn without(gap: ops::Range<u64>, skip: Option<u64>) -> impl Iterator<Item = ops::Range<u64>> {
+	let pieces = match skip {
+		Some(skip) if gap.contains(&skip) => [gap.start..skip, skip + 1..gap.end],
+		_ => [gap, 0..0],
+	};
+	pieces.into_iter().filter(|piece| !piece.is_empty())
+}
+
 /// Stop routing readers wanting `groups` to fill `id`: they were answered. Reads first, so
 /// an answer that changes nothing wakes no handler parked on the queue.
 fn uncover(fills: &kio::Shared<FillState>, id: u64, groups: ops::Range<u64>) {
@@ -615,7 +678,7 @@ pub(super) fn poll_requested(
 	}) {
 		let id = guard.pop().expect("predicate guaranteed a fill");
 		let pending = guard.pending.get(&id).expect("popped fill is pending");
-		let (start, end, frame_end) = (pending.start, pending.end, pending.frame_end);
+		let (start, end, frame_end, time) = (pending.start, pending.end, pending.frame_end, pending.time);
 		let (asks, result) = (pending.asks.clone(), pending.result.clone());
 		drop(guard);
 		// Built with the fills unlocked, so no other lock nests under theirs.
@@ -626,6 +689,7 @@ pub(super) fn poll_requested(
 			start,
 			end,
 			frame_end,
+			time,
 			asks,
 			result,
 		};
@@ -688,6 +752,7 @@ struct Inner {
 	end: u64,
 	// Exclusive frame cap in the last group; None asks through the original end.
 	frame_end: Option<u64>,
+	time: Option<Timestamp>,
 	asks: kio::Shared<Asks>,
 	result: kio::Producer<Outcome>,
 }
@@ -707,6 +772,20 @@ impl Fill {
 	/// The exclusive end group.
 	pub fn end(&self) -> u64 {
 		self.inner.end
+	}
+
+	/// The presentation time a reader's range starts at that no group the cache holds
+	/// resolves, so this fill looks it up: [`accept`](Self::accept) the group containing it,
+	/// the newest one starting at or before it, or the oldest group when every group starts
+	/// after it. The reader's range then starts there, once that group's first frame is
+	/// written.
+	///
+	/// A lookup owes no group, so [`wanted`](Self::wanted) is `None` and
+	/// [`is_wanted`](Self::is_wanted) false throughout; it waits only on its first accept.
+	/// Dropped unanswered, as a handler that can't resolve times does, the reader's range
+	/// reaches back to the oldest group the cache holds. `None` for a fill of groups.
+	pub fn time(&self) -> Option<Timestamp> {
+		self.inner.time
 	}
 
 	/// The most urgent delivery priority among the readers waiting on it now.
@@ -786,10 +865,21 @@ impl Fill {
 		outcome.refused.iter().count() + outcome.accepted.iter().count()
 	}
 
+	/// The runs answered so far, even once their readers consumed the answers.
+	#[cfg(all(test, feature = "async"))]
+	pub(super) fn resolved_runs(&self) -> Vec<ops::Range<u64>> {
+		self.inner.result.read().resolved.iter().cloned().collect()
+	}
+
 	/// The next group still owed in the fill's order: a reader still reads it, and it was
 	/// neither answered nor delivered live since it was asked. `None` once none is owed or
 	/// no reader waits on the fill, so stop serving it.
 	pub fn wanted(&self) -> Option<u64> {
+		self.wanted_except(None)
+	}
+
+	/// [`Self::wanted`], passing over `skip`.
+	fn wanted_except(&self, skip: Option<u64>) -> Option<u64> {
 		if !self.inner.result.wanted() {
 			return None;
 		}
@@ -797,7 +887,10 @@ impl Fill {
 			let wanted = self.inner.wanted();
 			let sequence = {
 				let outcome = self.inner.result.read();
-				let mut gaps = wanted.iter().flat_map(|run| outcome.resolved.gaps(run));
+				let mut gaps = wanted
+					.iter()
+					.flat_map(|run| outcome.resolved.gaps(run))
+					.flat_map(|gap| without(gap, skip));
 				match self.order() {
 					Order::Ascending => gaps.next().map(|gap| gap.start),
 					Order::Descending => gaps.last().map(|gap| gap.end - 1),
@@ -864,10 +957,29 @@ impl Fill {
 	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
 	pub(crate) fn next_run(&self) -> Option<ops::Range<u64>> {
 		let sequence = self.wanted()?;
+		Some(self.run_from(sequence, self.inner.owed_around(sequence)))
+	}
+
+	/// [`Self::next_run`], passing over `skip`: a group another request is already bringing,
+	/// so the groups around it are served while it waits. `None` once nothing else is owed.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	pub(crate) fn next_run_except(&self, skip: u64) -> Option<ops::Range<u64>> {
+		let sequence = self.wanted_except(Some(skip))?;
 		let owed = self.inner.owed_around(sequence);
+		let owed = match skip < sequence {
+			true => owed.start.max(skip + 1)..owed.end,
+			false => owed.start..owed.end.min(skip),
+		};
+		Some(self.run_from(sequence, owed))
+	}
+
+	/// The run from `sequence` over the `owed` groups beside it, in the fill's order, up to
+	/// the nearest one the cache holds.
+	#[cfg_attr(not(feature = "async"), allow(dead_code, reason = "async-only"))]
+	fn run_from(&self, sequence: u64, owed: ops::Range<u64>) -> ops::Range<u64> {
 		let state = self.inner.state.read();
 		let held = |(_, slot): &(&u64, &super::Slot)| !slot.is_aborted();
-		Some(match self.order() {
+		match self.order() {
 			Order::Ascending => {
 				let end = state
 					.lookup
@@ -885,7 +997,7 @@ impl Fill {
 					.map_or(owed.start, |(held, _)| held + 1);
 				start..sequence + 1
 			}
-		})
+		}
 	}
 
 	/// The newest group the track's live feed produced, while a feed still writes the track:

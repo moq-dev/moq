@@ -20,7 +20,9 @@ use tokio::sync::oneshot;
 use crate::decode::Read;
 use crate::ffi::OnStatus;
 use crate::task::Task;
-use crate::{Error, Id, NonZeroSlab, Shared, State, ffi, moq_decode_gap, moq_decode_read_kind, moq_decode_start};
+use crate::{
+	Error, Id, NonZeroSlab, Shared, State, ffi, moq_decode_gap, moq_decode_read_kind, moq_decode_start, moq_timestamp,
+};
 
 // ---- C-visible types ----
 
@@ -146,8 +148,8 @@ pub struct moq_video_encode_options {
 /// dimensions, since there they are what the stream turned out to be.
 #[repr(C)]
 pub struct moq_video_encoder_frame {
-	/// Presentation timestamp, in microseconds.
-	pub timestamp_us: u64,
+	/// The presentation timestamp.
+	pub timestamp: moq_timestamp,
 	/// The raw frame bytes in the configured layout.
 	pub data: *const u8,
 	/// The length in bytes of `data`.
@@ -201,8 +203,8 @@ pub struct moq_video_decoder_output {
 /// dimensions because the encoder already fixed them.
 #[repr(C)]
 pub struct moq_video_frame {
-	/// The presentation timestamp in microseconds.
-	pub timestamp_us: u64,
+	/// The presentation timestamp.
+	pub timestamp: moq_timestamp,
 	/// The decoded width in pixels.
 	pub width: u32,
 	/// The decoded height in pixels.
@@ -224,10 +226,10 @@ pub struct moq_video_read {
 	/// The lost span, for [moq_decode_read_kind::MOQ_DECODE_READ_GAP]. Every picture from
 	/// before the loss precedes it, and what follows does not continue what came before.
 	pub gap: moq_decode_gap,
-	/// Where the stopped encoder's media stops in microseconds, for
+	/// Where the stopped encoder's media stops, for
 	/// [moq_decode_read_kind::MOQ_DECODE_READ_END]. The stopped encoder's last pictures
 	/// precede it; what follows comes from a fresh encoder.
-	pub end_us: u64,
+	pub end: moq_timestamp,
 }
 
 // ---- State extension (used internally by lib.rs) ----
@@ -540,7 +542,7 @@ fn follow_grant(shared: &Shared<VideoEncoder>) -> Result<(), Error> {
 
 impl VideoEncoder {
 	/// Encode and publish one picture, returning whether it moved the rendition to a new track.
-	fn publish_frame(&mut self, timestamp_us: u64, data: &[u8]) -> Result<bool, Error> {
+	fn publish_frame(&mut self, timestamp: moq_net::Timestamp, data: &[u8]) -> Result<bool, Error> {
 		if let Some(followed) = &self.followed {
 			followed.check()?;
 		}
@@ -558,7 +560,7 @@ impl VideoEncoder {
 		let Some(encoder) = self.encoder.as_mut() else {
 			return Ok(false);
 		};
-		let frame = moq_video::Frame::new(surface, moq_net::Timestamp::from_micros(timestamp_us)?);
+		let frame = moq_video::Frame::new(surface, timestamp);
 		// A backend that pipelines hands back an earlier frame's output, so this is
 		// zero or more access units rather than one per call.
 		let encoded = block_on(encoder.encode(frame))?;
@@ -835,7 +837,7 @@ impl Video {
 						pixels: OnceLock::new(),
 					})),
 					Some(moq_video::decode::Read::Gap { timestamp, duration }) => Read::gap(timestamp, duration)?,
-					Some(moq_video::decode::Read::End { end }) => Read::end(end)?,
+					Some(moq_video::decode::Read::End { end }) => Read::end(end),
 					None => return Ok(()),
 				},
 			};
@@ -1069,7 +1071,7 @@ pub unsafe extern "C" fn moq_encode_video_frame(producer: u32, frame: *const moq
 			.lock()
 			.as_mut()
 			.ok_or(Error::MediaNotFound)?
-			.publish_frame(frame.timestamp_us, data)?;
+			.publish_frame(frame.timestamp.try_into()?, data)?;
 		// The follower takes the encoder's lock, so it moves with the track after the encode.
 		match moved {
 			true => crate::video::follow_grant(&producer),
@@ -1257,13 +1259,12 @@ pub unsafe extern "C" fn moq_decode_video_read(id: u32, dst: *mut moq_video_read
 		let id = ffi::parse_id(id)?;
 		let dst = unsafe { dst.as_mut() }.ok_or(Error::InvalidPointer)?;
 		let read = State::lock().video.read(id)?;
-		let (kind, gap, end_us) = read.info();
+		let (kind, gap, end) = read.info();
 		let frame = match &read {
 			Read::Frame(frame) => {
 				let pixels = frame.pixels()?;
 				moq_video_frame {
-					// The decoded Timestamp is bounded by a QUIC varint, so its microseconds fit.
-					timestamp_us: frame.frame.timestamp.as_micros() as u64,
+					timestamp: frame.frame.timestamp.into(),
 					width: pixels.width,
 					height: pixels.height,
 					// The slab keeps its `Arc` until the id is freed, and the pixels are
@@ -1273,19 +1274,14 @@ pub unsafe extern "C" fn moq_decode_video_read(id: u32, dst: *mut moq_video_read
 				}
 			}
 			_ => moq_video_frame {
-				timestamp_us: 0,
+				timestamp: moq_timestamp::default(),
 				width: 0,
 				height: 0,
 				data: std::ptr::null(),
 				data_size: 0,
 			},
 		};
-		*dst = moq_video_read {
-			kind,
-			frame,
-			gap,
-			end_us,
-		};
+		*dst = moq_video_read { kind, frame, gap, end };
 		Ok(())
 	})
 }
@@ -1357,7 +1353,14 @@ mod tests {
 			follow_grant(&shared).unwrap();
 			let before = shared.lock().as_ref().unwrap().reservation.clone().unwrap();
 			let small = vec![0x80; 320 * 240 * 4];
-			assert!(!shared.lock().as_mut().unwrap().publish_frame(0, &small).unwrap());
+			assert!(
+				!shared
+					.lock()
+					.as_mut()
+					.unwrap()
+					.publish_frame(moq_net::Timestamp::ZERO, &small)
+					.unwrap()
+			);
 
 			// Disabled, then resumed onto the larger picture.
 			{
@@ -1370,7 +1373,12 @@ mod tests {
 					.unwrap();
 			}
 			let large = vec![0x80; 640 * 480 * 4];
-			let moved = shared.lock().as_mut().unwrap().publish_frame(66_666, &large).unwrap();
+			let moved = shared
+				.lock()
+				.as_mut()
+				.unwrap()
+				.publish_frame(moq_net::Timestamp::from_micros(66_666).unwrap(), &large)
+				.unwrap();
 			assert!(moved, "the larger picture is a new codec string");
 			follow_grant(&shared).unwrap();
 			let guard = shared.lock();

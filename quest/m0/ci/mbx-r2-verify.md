@@ -66,8 +66,8 @@ compilation is "not looked up".
   earlier lockfile state ever matched. The build then fell back to the newest
   local manifest, which was the install's. Since 1.28.0 an install builds
   under its own workspace, so the install order does not matter; it stays
-  where `main` has it. Windows waits on an mbx release that includes #870 and
-  a bump of the `version` pin in `.github/actions/rust-cache/action.yml`.
+  where `main` has it. mbx v1.29.1 (2026-11-01) includes #870, so bump the
+  `version` pin in `.github/actions/rust-cache/action.yml` from 1.28.0 to it.
   Then check that the first scheduled Nightly on it loads a manifest of more
   than 124 predictions and hits on Windows.
 - macOS: on 2026-10-28 the build did inherit, prefetching 732 predictions,

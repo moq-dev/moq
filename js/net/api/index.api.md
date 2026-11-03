@@ -4,8 +4,8 @@
 import { $ZodBranded } from "zod/v4/core";
 import { Instant } from "@moq/clock";
 import { Milli } from "@moq/clock";
-import { ZodMiniBigInt } from "@zod/mini";
-import { infer } from "@zod/mini";
+import { ZodMiniBigInt } from "zod/mini";
+import { infer } from "zod/mini";
 
 export namespace Announce {
 	export interface Announce {
@@ -80,7 +80,7 @@ export namespace Broadcast {
 		clone(): Broadcast.Consumer;
 		close(): void;
 		get closed(): Signals.GetPromise<null>;
-		get epoch(): Epoch.Valid | undefined;
+		get instance(): Instance.Valid | undefined;
 		get path(): Path.Valid;
 		protected shareState(): never;
 		track(name: string): Track.Consumer;
@@ -151,12 +151,17 @@ export namespace Connection {
 		websocket?: Connection.WebSocketProps;
 		webtransport?: Connection.WebTransportProps;
 	}
+	export interface Drain {
+		readonly timeout?: Milli;
+		readonly uri: string;
+	}
 	export interface Established {
 		abort(): void;
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		readonly auth: Auth.Handle;
 		close(): Promise<void>;
 		closed: Promise<Error | null>;
+		readonly draining: Signals.GetPromise<Connection.Drain>;
 		readonly peerImplementation: Promise<string | undefined>;
 		readonly probe: Signals.Getter<Connection.Probe>;
 		stats(): Promise<Connection.Stats>;
@@ -237,14 +242,6 @@ export class Connection {
 	readonly transport: Signals.Getter<Connection.Transport | undefined>;
 	url: Signals.Signal<URL | undefined>;
 	versions: Signals.Signal<readonly string[] | undefined>;
-}
-
-export namespace Epoch {
-	export type Valid = string & {
-		readonly _brand: "epoch";
-	};
-	export function mint(): Epoch.Valid;
-	export function parse(text: string): Epoch.Valid;
 }
 
 export namespace Error {
@@ -377,8 +374,17 @@ export namespace Group {
 
 export const IMPLEMENTATION: string;
 
+export namespace Instance {
+	export type Valid = string & {
+		readonly _brand: "instance";
+	};
+	export function isMinted(instance: Instance.Valid): boolean;
+	export function parse(text: string): Instance.Valid;
+	export function random(): Instance.Valid;
+}
+
 export namespace Origin {
-	export class Consumer {
+	export class Consumer implements Origin.Reader {
 		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
 		get closed(): Signals.GetPromise<Error | null>;
 		get discovery(): Signals.Getter<boolean | undefined>;
@@ -413,18 +419,26 @@ export namespace Origin {
 			cost?: Origin.Route["cost"];
 			epoch?: Origin.Route["epoch"];
 			hops?: Origin.Route["hops"];
+			instance?: Origin.Route["instance"];
 		}): void;
 		readonly broadcast: Broadcast.Producer;
 		get route(): Origin.Route | undefined;
 		unannounce(): void;
 	}
+	export interface Reader {
+		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
+		readonly closed: Signals.GetPromise<Error | null>;
+		readonly discovery: Signals.Getter<boolean | undefined>;
+		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
+	}
 	export class Request {
 		readonly path: Path.Valid;
-		prepare(epoch: Epoch.Valid): Origin.Prepared;
+		prepare(): Origin.Prepared;
 		reject(err: Error): void;
 	}
 	export interface RequestOptions {
-		epoch?: Epoch.Valid;
+		instance?: Instance.Valid;
 	}
 	export class Requesting {
 		readonly active: Signals.Getter<Broadcast.Consumer | undefined>;
@@ -441,16 +455,12 @@ export namespace Origin {
 	export interface Route {
 		auth?: Auth.Credential;
 		cost: Origin.Cost;
-		epoch?: Epoch.Valid;
+		epoch?: bigint;
 		hops: Origin.Hop[];
+		instance?: Instance.Valid;
 	}
-	export interface Table {
-		announced(scope?: Path.Pattern, options?: Announce.Options): Announce.Consumer;
-		readonly closed: Signals.GetPromise<Error | null>;
+	export interface Table extends Origin.Reader {
 		createBroadcast(path: Path.Valid): Origin.Publication;
-		readonly discovery: Signals.Getter<boolean | undefined>;
-		follow(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
-		request(path: Path.Valid, options?: Origin.RequestOptions): Origin.Requesting;
 		requests(prefix: Path.Valid): Origin.Requests;
 	}
 	export function isAnonymous(route: Origin.Route): boolean;
@@ -583,6 +593,10 @@ export namespace Track {
 		sequence: number;
 		timestamp?: Time.Timestamp;
 	}
+	export interface Delay {
+		max?: Milli | null;
+		min?: Milli | null;
+	}
 	export class Demand {
 		get closed(): Signals.GetPromise<Error | null>;
 		readonly name: string;
@@ -678,8 +692,8 @@ export namespace Track {
 		default(): Track.Subscription;
 	};
 	export interface Subscription {
+		delay?: Track.Delay;
 		groups?: Track.Groups;
-		maxDelay?: Milli | null;
 		order?: Track.Order;
 		priority?: number;
 	}
