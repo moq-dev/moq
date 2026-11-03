@@ -81,8 +81,8 @@ throttled one:
 nix develop --command just rs test -p moq-tokio --release -E 'test(benchmark_datagram_delivery)' --run-ignored only --success-output immediate
 ```
 
-It reports offered, received and lost datagrams, bottleneck queue drops, reordered
-arrivals and append-to-receive latency per viewer, and fails if the loopback
+It reports offered and lost datagrams, bottleneck queue drops, QUIC DATAGRAM frames
+that delivered no datagram, reordered arrivals and append-to-receive latency per viewer, and fails if the loopback
 viewer loses any. It runs nightly.
 
 Measure 50 fps audio at per-packet, 100 and 200 ms grouping, plus 400 fps
@@ -479,7 +479,7 @@ reconnects x 64 characters, and keeps its run directory as the `bench-browser`
 artifact.
 
 The in-memory frame, retained-history, gap ledger, bandwidth allocation, cached-group
-replay, and resume-history paths also run directly in Chromium:
+replay, resume-history, and buffered-group paths also run directly in Chromium:
 
 ```bash
 nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
@@ -488,6 +488,7 @@ nix develop --command bun bench/browser/micro.ts --bench ledger --out .tmp/ledge
 nix develop --command bun bench/browser/micro.ts --bench bandwidth --out .tmp/bandwidth.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench replay --out .tmp/replay.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench resume-history --out .tmp/resume-history.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench buffered --out .tmp/buffered.json before=/path/to/main current=. aa=.
 ```
 
 Each variant uses its own workspace source and a persistent, cross-origin isolated
@@ -513,6 +514,15 @@ B-frames, independently varying publisher and reader counts and retained history
 Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
 for mixed millisecond/microsecond timestamps, which exercise exact cross-scale
 comparison.
+
+`buffered` drives every checkout's `@moq/hang` container consumer with one fixture,
+sweeping buffered groups against frames per group, then publishers against players.
+`steady` reads each frame as it lands (its `ns_per_op` is the frame delay);
+`lookahead` and `sparse` decode every group before draining them, in order or
+shuffled with a missing sequence between groups; `burst` times only the arrival
+that skips every buffered group once the max delay drops to zero, per skipped group.
+Each case checks its exact buffered ranges, timestamp order and payloads, and that
+skipped groups are closed; `gaps` and `warnings` must match between variants.
 
 `replay` sweeps retained groups (64, 512, 2048) against subscribers (1, 8) for
 monotonic, reverse, and shuffled arrivals. `join` rows time each subscriber
@@ -542,8 +552,8 @@ route hold, from Chromium's precise memory info; `serve_us` and
 `read_us` include no setup. Bun's collector scans its
 stack conservatively, so the fixture refuses to run there.
 
-The browser smoke lane preserves one measured round of all six fixtures, and drift,
-ledger, bandwidth and replay also run in the nightly JS benchmark leg. Timing is
+The browser smoke lane preserves one measured round of all seven fixtures, and drift,
+ledger, bandwidth, replay and buffered also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
 ## Pattern and container coverage
@@ -620,16 +630,27 @@ The table includes these measurements:
   time elapsed time. The Rust bench target jobs measure them with a short warmup
   and Criterion's quick mode. Per-group benchmark settings can override the default warmup. Quick estimates
   trade precision for nightly runtime; the paired comparison below assesses a change.
-- JS benchmark CSV time columns (`ns`, `us`, `ms`, and their per-operation
-  variants) and `size_bytes` columns, retaining every other column as a workload
-  dimension in each series name.
+- The CSV tables the JS benchmarks and the Rust benchmark tests print. A header
+  line names the columns; the time columns (`ns`, `us`, `ms`, and their
+  per-operation variants such as `ns_per_frame` or `plain_ns_per_read`),
+  `size_bytes` and `peak_bytes`, `mib_per_s`, and `*_packets` columns are
+  measurements, and every other column is a workload dimension in each series
+  name, so print outcomes only in measured columns. The Rust benchmark tests
+  (`just gh nightly rust-test`) run in release builds, one at a time, under
+  nextest's `bench` profile, which keeps each test's output in a JUnit report;
+  their series are named by package and test path, such as
+  `rust-test/moq-congestion/gcc/bench/benchmark_per_packet`.
+- Shipping sizes, in bytes: the release artifacts, minimal FFI build, and JS
+  bundles the [size report](../sh/size/README.md) measures, recorded even on a
+  night its growth check fails. Release build times stay out.
 
 Hosted runners vary across nights, so a trend flag prompts a look at the paired
 comparison rather than proving a regression.
 Malformed, empty, nonfinite, or duplicate measurements fail validation. The
-nightly artifacts retain the reports, raw JS output, and each Criterion run's
-metadata and estimates for 45 days. Relay load, audio quality, and the Rust
-benchmark tests job's nextest output do not enter the table.
+nightly artifacts retain the reports, raw JS output, nextest JUnit reports, and
+each Criterion run's metadata and estimates for 45 days. Relay load, audio
+quality, and the binding runners (measured in rust2, above) do not enter the
+table.
 
 Render the table from the published history:
 

@@ -41,7 +41,8 @@ crossbeam-utils = { version = "0.8" }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2", default-features = false, features = ["getrandom"] }
 crypto-common-c65f7effa3be6d31 = { package = "crypto-common", version = "0.1", default-features = false, features = ["std"] }
 ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
-der = { version = "0.7", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
+der-c38e5c1d305a1b54 = { package = "der", version = "0.8", default-features = false, features = ["oid", "pem", "std"] }
+der-ca01ad9e24f5d932 = { package = "der", version = "0.7", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
 derive_more = { version = "2", features = ["debug", "display", "error", "from"] }
 digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac", "oid", "std"] }
 digest-a6292c17cd707f01 = { package = "digest", version = "0.11", features = ["alloc", "mac", "oid"] }
@@ -66,6 +67,7 @@ hybrid-array = { version = "0.4", default-features = false, features = ["alloc",
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 indexmap = { version = "2", features = ["serde"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 md-5-93f6ce9d446188ac = { package = "md-5", version = "0.10" }
@@ -82,7 +84,8 @@ object_store = { version = "0.14", default-features = false, features = ["aws", 
 once_cell = { version = "1" }
 percent-encoding = { version = "2" }
 pkcs1 = { version = "0.7", default-features = false, features = ["pem", "pkcs8", "std"] }
-pkcs8 = { version = "0.10", default-features = false, features = ["pem", "std"] }
+pkcs8-93f6ce9d446188ac = { package = "pkcs8", version = "0.10", default-features = false, features = ["pem", "std"] }
+pkcs8-a6292c17cd707f01 = { package = "pkcs8", version = "0.11", default-features = false, features = ["pem", "std"] }
 portable-atomic = { version = "1" }
 ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "std"] }
 proptest = { version = "1", default-features = false, features = ["handle-panics"] }
@@ -110,7 +113,8 @@ slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union", "write"] }
 socket2 = { version = "0.6", default-features = false, features = ["all"] }
 spin = { version = "0.9" }
-spki = { version = "0.7", default-features = false, features = ["pem", "std"] }
+spki-c38e5c1d305a1b54 = { package = "spki", version = "0.8", default-features = false, features = ["pem", "std"] }
+spki-ca01ad9e24f5d932 = { package = "spki", version = "0.7", default-features = false, features = ["pem", "std"] }
 subtle = { version = "2", features = ["const-generics"] }
 time = { version = "0.3", features = ["formatting", "local-offset", "macros", "parsing"] }
 tokio = { version = "1", features = ["full", "test-util"] }
@@ -151,7 +155,8 @@ crossbeam-utils = { version = "0.8" }
 crypto-common-6f8ce4dd05d13bba = { package = "crypto-common", version = "0.2", default-features = false, features = ["getrandom"] }
 crypto-common-c65f7effa3be6d31 = { package = "crypto-common", version = "0.1", default-features = false, features = ["std"] }
 ctutils = { version = "0.4", default-features = false, features = ["subtle"] }
-der = { version = "0.7", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
+der-c38e5c1d305a1b54 = { package = "der", version = "0.8", default-features = false, features = ["oid", "pem", "std"] }
+der-ca01ad9e24f5d932 = { package = "der", version = "0.7", default-features = false, features = ["derive", "flagset", "oid", "pem", "std"] }
 derive_more = { version = "2", features = ["debug", "display", "error", "from"] }
 derive_more-impl = { version = "2", features = ["debug", "display", "error", "from"] }
 digest-93f6ce9d446188ac = { package = "digest", version = "0.10", features = ["mac", "oid", "std"] }
@@ -178,6 +183,7 @@ hybrid-array = { version = "0.4", default-features = false, features = ["alloc",
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["server-auto", "service", "tokio"] }
 indexmap = { version = "2", features = ["serde"] }
+jsonwebtoken = { version = "11", features = ["aws_lc_rs"] }
 lazy_static = { version = "1", default-features = false, features = ["spin_no_std"] }
 log = { version = "0.4", default-features = false, features = ["std"] }
 md-5-93f6ce9d446188ac = { package = "md-5", version = "0.10" }
@@ -194,7 +200,8 @@ object_store = { version = "0.14", default-features = false, features = ["aws", 
 once_cell = { version = "1" }
 percent-encoding = { version = "2" }
 pkcs1 = { version = "0.7", default-features = false, features = ["pem", "pkcs8", "std"] }
-pkcs8 = { version = "0.10", default-features = false, features = ["pem", "std"] }
+pkcs8-93f6ce9d446188ac = { package = "pkcs8", version = "0.10", default-features = false, features = ["pem", "std"] }
+pkcs8-a6292c17cd707f01 = { package = "pkcs8", version = "0.11", default-features = false, features = ["pem", "std"] }
 portable-atomic = { version = "1" }
 ppv-lite86 = { version = "0.2", default-features = false, features = ["simd", "std"] }
 proc-macro2 = { version = "1" }
@@ -224,7 +231,8 @@ slab = { version = "0.4" }
 smallvec = { version = "1", default-features = false, features = ["const_new", "union", "write"] }
 socket2 = { version = "0.6", default-features = false, features = ["all"] }
 spin = { version = "0.9" }
-spki = { version = "0.7", default-features = false, features = ["pem", "std"] }
+spki-c38e5c1d305a1b54 = { package = "spki", version = "0.8", default-features = false, features = ["pem", "std"] }
+spki-ca01ad9e24f5d932 = { package = "spki", version = "0.7", default-features = false, features = ["pem", "std"] }
 subtle = { version = "2", features = ["const-generics"] }
 syn-7b89eefb6aaa9bf3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
 syn-f595c2ba2a3f28df = { package = "syn", version = "2", features = ["extra-traits", "fold", "full", "visit", "visit-mut"] }
