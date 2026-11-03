@@ -12,17 +12,22 @@ A raw track's datagrams travel on a separate datagram track of the same name, so
 - `moq_consume_datagrams` receives only datagrams sent after the call, and joins at once instead of waiting for a subscription. Every raw track carries a datagram track, but a name with none, such as a media or JSON track, ends the callback with a not-found error.
 - moq-transport carries no datagrams.
 
+### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`moq_publish_json_snapshot_update`, `moq_publish_json_stream_append`, `moq_publish_json_window_push`, and `moq_publish_json_window_pop` fail with `MOQ_ERROR_INVALID_POINTER` and publish nothing on a NULL `timestamp`, instead of stamping the broadcast clock's current time.
+Read the broadcast clock with the new `moq_publish_catalog_now(broadcast, &now)` and stamp both media frames and JSON writes from it, so every track shares its epoch; media on a timeline of its own advertises the gap to the JSON tracks as catalog `delay`.
+
+### JSON window edits take a timestamp
+
+`moq_publish_json_window_push` and `moq_publish_json_window_pop` take a final
+`const moq_timestamp *timestamp`: a pointer to the edit's capture time on the
+broadcast clock, converted to track milliseconds. NULL fails, as above.
+Recompile callers against the regenerated `moq.h`.
+
 ### Subscriptions take a `moq_delay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
 `moq_subscription.max_delay_us` and `max_delay_present` are `moq_delay delay`. A zeroed `moq_subscription` is moq-net's defaults again, the same as `moq_subscription_defaults()` and a NULL pointer: set `delay.max_us` to the old `max_delay_us`, and `delay.max_unlimited` where `max_delay_present` was false.
 `moq_delay` gains `min_unstated`, after `max_unlimited`, which leaves the target latency unstated; the struct keeps its layout, and a zeroed one still states zero.
-
-### JSON window edits take an optional timestamp
-
-`moq_publish_json_window_push` and `moq_publish_json_window_pop` take a final
-`const moq_timestamp *timestamp`. Pass `NULL` to keep stamping the broadcast
-clock, or a pointer to the edit's capture time, converted to track milliseconds.
-Recompile callers against the regenerated `moq.h`.
 
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
@@ -136,6 +141,7 @@ Publish a replacement under a new name, and expect a finished track's demand ter
 
 `moq_origin_dynamic` takes no route, and `moq_origin_dynamic_update` is gone.
 `moq_broadcast_request_accept` is replaced by `moq_broadcast_request_prepare`, which returns a prepared answer: fill its broadcast, then `moq_broadcast_prepared_publish` announces it at the exact path under a fresh instance of its own.
+To answer with a broadcast you already hold, `moq_broadcast_request_serve(request, consumer)` serves it under the prefix route without announcing an exact route; the consumer stays yours to free.
 `moq_broadcast_prepared_free` refuses an answer you will not publish.
 
 ### `moq_track_info` gains `compress` (#5928)

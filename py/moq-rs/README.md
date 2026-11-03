@@ -222,13 +222,15 @@ subscriber waits. `.cut()` / `.seek(sequence)` draw group boundaries; `.finish()
 
 ### Data
 
-`moq.json.SnapshotProducer.update(value, timestamp=None)`,
-`moq.json.StreamProducer.append(value, timestamp=None)`, and
-`moq.json.WindowProducer.push(value, timestamp=None)` / `.pop(count, timestamp=None)` preserve
-optional capture time. A window keeps a sliding run of records a reader can join at any point,
+`moq.json.SnapshotProducer.update(value, timestamp)`,
+`moq.json.StreamProducer.append(value, timestamp)`, and
+`moq.json.WindowProducer.push(value, timestamp)` / `.pop(count, timestamp)` require a capture time
+on the broadcast clock, read with `media.CatalogProducer.now()`, so their track needs a `timescale`.
+A window keeps a sliding run of records a reader can join at any point,
 and `.cut()` ends its open group so the next edit opens one restating the window; the catalog has
 no window mode, so `WindowProducer` takes only the track.
-Omitting time leaves data untimed; choose the track's `timescale` to match. Publish JSON tracks with
+A raw frame may omit its timestamp on an untimed track, but every JSON write takes one on the
+broadcast clock. Publish JSON tracks with
 `TrackInfo(compress=True)`: the track compresses each group on the wire, and consumers read it the
 same either way. Opaque bytes go on a plain `TrackProducer`.
 
@@ -259,7 +261,7 @@ Every handle whose cleanup is `cancel()` is an async context manager, so exiting
   - `.broadcast → BroadcastProducer`. The broadcast to fill.
   - `.announce(route=None)`, `.unannounce()`. Advertise or retract its exact path; both raise `Closed` once the broadcast closed.
 - **`OriginRequests`**. Async source of broadcasts requested by consumers.
-  - `await .requested_broadcast() → BroadcastRequest`. Call `.prepare()`, fill its `.broadcast`, then `.publish() → Publication` to serve it as a new stream under a fresh instance, or `.reject(code)` to fail the requester.
+  - `await .requested_broadcast() → BroadcastRequest`. Call `.serve(consumer)` to answer with held content under the prefix route's continuous sequence space, `.prepare()` then fill its `.broadcast` and `.publish() → Publication` for an independently restarting job under a fresh instance, or `.reject(code)` to fail the requester.
   - Async iterator yielding `BroadcastRequest`
 - **`OriginConsumer`**. Discover broadcasts.
   - `.announced(prefix, filter=None) → AnnounceConsumer` (async iterator of `AnnounceEvent`: `AnnounceEventStart`, `AnnounceEventUpdate`, `AnnounceEventEnd`, `AnnounceEventRestart`, or `AnnounceEventTakeover`, each carrying an `Announce` whose `.route.instance` names the stream; on a restart, request the path again; a takeover continues what the route at `.predecessor` served); `filter` is a pattern relative to the literal prefix, while each `Announce.prefix` stays origin-relative and `.captures` is a required list of wildcard matches, empty without wildcards

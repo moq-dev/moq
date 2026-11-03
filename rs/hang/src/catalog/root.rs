@@ -435,10 +435,18 @@ mod test {
 		video: Vec<String>,
 		#[serde(default)]
 		audio: Vec<String>,
+		#[serde(default)]
+		text: Vec<String>,
+		#[serde(default)]
+		json: Vec<String>,
+		#[serde(default)]
+		binary: Vec<String>,
+		#[serde(default)]
+		contributions: Vec<String>,
 	}
 
 	/// The corpus `js/hang` also loads: both languages accept the same catalogs and keep the same
-	/// renditions, so a divergence fails CI on whichever side drifts.
+	/// rendition, data track, and contribution IDs, so a divergence fails CI on whichever side drifts.
 	#[test]
 	fn shared_parity_fixtures() {
 		let cases: Vec<ParityCase> = serde_json::from_str(include_str!("../../fixtures/catalog-parity.json")).unwrap();
@@ -455,8 +463,23 @@ mod test {
 				(Ok(catalog), false) => {
 					let video: Vec<_> = catalog.video.renditions.keys().cloned().collect();
 					let audio: Vec<_> = catalog.audio.renditions.keys().cloned().collect();
-					if (&video, &audio) != (&case.video, &case.audio) {
-						failures.push(format!("{}: kept video {video:?} audio {audio:?}", case.name));
+					let text: Vec<_> = catalog.text.renditions.keys().cloned().collect();
+					let json: Vec<_> = catalog.json.tracks.keys().cloned().collect();
+					let binary: Vec<_> = catalog.binary.tracks.keys().cloned().collect();
+					let contributions: Vec<_> = catalog.contributions.keys().cloned().collect();
+					if (&video, &audio, &text, &json, &binary, &contributions)
+						!= (
+							&case.video,
+							&case.audio,
+							&case.text,
+							&case.json,
+							&case.binary,
+							&case.contributions,
+						) {
+						failures.push(format!(
+							"{}: kept video {video:?} audio {audio:?} text {text:?} json {json:?} binary {binary:?} contributions {contributions:?}",
+							case.name
+						));
 					}
 				}
 			}

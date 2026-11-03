@@ -1194,7 +1194,7 @@ impl GroupState {
 
 	/// Record a frame's place in presentation time: the first frame starts the group,
 	/// and later frames can extend a timed group's end. Every frame matches its track
-	/// ([`on_track`]), so a group never mixes the two.
+	/// ([`track::Info::rescale`]), so a group never mixes the two.
 	fn stamp(&mut self, timestamp: Option<Timestamp>) {
 		self.timeline = match (self.timeline, timestamp) {
 			(Timeline::Timed { start, latest }, Some(timestamp)) => Timeline::Timed {
@@ -1359,24 +1359,6 @@ impl Drop for GroupState {
 		if let Some(content) = self.content.take() {
 			content.detach(Error::Dropped);
 		}
-	}
-}
-
-/// `timestamp` at the track's `timescale`.
-///
-/// A track is all timed or all untimed, so a frame must match it: a timed frame on an
-/// untimed track, or an untimed one on a timed track, is [`Error::TimestampMismatch`],
-/// as is a timestamp the track's scale can't hold.
-///
-/// A writer that changes state before its frame reaches [`Producer::write_frame`], such as
-/// publishing a group for it, checks with this first so a refused timestamp changes nothing.
-pub fn on_track(timestamp: Option<Timestamp>, timescale: Option<Timescale>) -> Result<Option<Timestamp>> {
-	match (timestamp, timescale) {
-		(Some(timestamp), Some(timescale)) => Ok(Some(
-			timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?,
-		)),
-		(None, None) => Ok(None),
-		_ => Err(Error::TimestampMismatch),
 	}
 }
 
@@ -1716,7 +1698,7 @@ impl Producer {
 	/// `timestamp` is converted into the parent track's timescale. Pass `None` on an
 	/// untimed track; a frame that doesn't match its track is [`Error::TimestampMismatch`].
 	pub fn write_frame<B: IntoBytes>(&mut self, timestamp: impl Into<Option<Timestamp>>, data: B) -> Result<()> {
-		let timestamp = on_track(timestamp.into(), self.handle.track.timescale)?;
+		let timestamp = self.handle.track.rescale(timestamp.into())?;
 		let payload = data.into_bytes();
 		if payload.len() as u64 > MAX_CACHE_BYTES {
 			return Err(Error::FrameTooLarge);
@@ -1799,7 +1781,7 @@ impl Producer {
 	/// unless it fails the group: too large, or held differently by another copy.
 	pub fn write_frames<const N: usize>(&mut self, frames: &mut frame::Buffer<N>) -> Result<()> {
 		for frame in frames.filled() {
-			on_track(frame.timestamp, self.handle.track.timescale)?;
+			self.handle.track.rescale(frame.timestamp)?;
 			if frame.payload.len() as u64 > MAX_CACHE_BYTES {
 				return Err(Error::FrameTooLarge);
 			}
@@ -1826,7 +1808,10 @@ impl Producer {
 		let origin = match first {
 			Some(timestamp) => state.check_start(
 				neighbors.as_ref(),
-				on_track(timestamp, self.handle.track.timescale).expect("timestamp scale checked above"),
+				self.handle
+					.track
+					.rescale(timestamp)
+					.expect("timestamp scale checked above"),
 			)?,
 			None => state.origin,
 		};
@@ -1856,8 +1841,11 @@ impl Producer {
 		let canonical = state.content.is_some();
 		let mut prepared = arrayvec::ArrayVec::<Entry, N>::new();
 		for (index, frame) in frames.drain().enumerate() {
-			let timestamp =
-				on_track(frame.timestamp, self.handle.track.timescale).expect("timestamp scale checked above");
+			let timestamp = self
+				.handle
+				.track
+				.rescale(frame.timestamp)
+				.expect("timestamp scale checked above");
 			let (payload, inflated) = match state.flate.is_some() {
 				true => (
 					deflated.next().expect("one slice per frame"),
@@ -1962,7 +1950,7 @@ impl Producer {
 	/// size is only a promise until they arrive.
 	fn open_frame(&mut self, header: frame::Header) -> Result<(frame::Info, FrameBuf, Option<frame::Admission>)> {
 		let frame = header.info;
-		let timestamp = on_track(frame.timestamp, self.handle.track.timescale)?;
+		let timestamp = self.handle.track.rescale(frame.timestamp)?;
 		if frame.size > MAX_CACHE_BYTES || header.inflated.is_some_and(|inflated| inflated > MAX_CACHE_BYTES) {
 			return Err(Error::FrameTooLarge);
 		}

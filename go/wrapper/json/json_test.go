@@ -30,10 +30,11 @@ func newBroadcast(t *testing.T) (*moq.BroadcastProducer, *moq.BroadcastConsumer)
 	return broadcast, consumer
 }
 
-// publishTrack creates a raw track for a JSON producer to take over.
+// publishTrack creates a millisecond track for a JSON producer to take over.
 func publishTrack(t *testing.T, broadcast *moq.BroadcastProducer, name string) *moq.TrackProducer {
 	t.Helper()
-	track, err := broadcast.PublishTrack(name, nil)
+	scale := uint64(1_000)
+	track, err := broadcast.PublishTrack(name, &moq.TrackInfo{Timescale: &scale})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +72,7 @@ func TestTracks(t *testing.T) {
 	defer snapshotConsumer.Cancel()
 	for viewers := 1; viewers <= 4; viewers++ {
 		at := moq.Timestamp{Value: uint64(viewers) * 1000, Scale: scale}
-		if err := snapshot.Update(map[string]any{"viewers": viewers}, &at); err != nil {
+		if err := snapshot.Update(map[string]any{"viewers": viewers}, at); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -109,15 +110,16 @@ func TestTracks(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer streamConsumer.Cancel()
-	if err := stream.Append(map[string]any{"n": 1}, nil); err != nil {
+	at := moq.Timestamp{Value: 5, Scale: 1_000}
+	if err := stream.Append(map[string]any{"n": 1}, at); err != nil {
 		t.Fatal(err)
 	}
 	record, err := streamConsumer.Next(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(record.Value) != `{"n":1}` || record.Timestamp != nil {
-		t.Fatalf("record = %s at %v, want untimed", record.Value, record.Timestamp)
+	if string(record.Value) != `{"n":1}` || record.Timestamp == nil || *record.Timestamp != at {
+		t.Fatalf("record = %s at %v, want %v", record.Value, record.Timestamp, at)
 	}
 
 	if err := snapshot.Finish(); err != nil {
@@ -153,11 +155,11 @@ func TestWindow(t *testing.T) {
 		return &moq.Timestamp{Value: uint64(n) * 1000, Scale: scale}
 	}
 	for n := range 3 {
-		if err := window.Push(map[string]any{"n": n}, ms(n)); err != nil {
+		if err := window.Push(map[string]any{"n": n}, *ms(n)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := window.Pop(2, ms(3)); err != nil {
+	if err := window.Pop(2, *ms(3)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -181,7 +183,7 @@ func TestWindow(t *testing.T) {
 	if err := window.Cut(); err != nil {
 		t.Fatal(err)
 	}
-	if err := window.Push(map[string]any{"n": 3}, ms(4)); err != nil {
+	if err := window.Push(map[string]any{"n": 3}, *ms(4)); err != nil {
 		t.Fatal(err)
 	}
 	if err := window.Finish(); err != nil {

@@ -81,6 +81,22 @@ impl Info {
 		self
 	}
 
+	/// `timestamp` at this track's [`timescale`](Self::timescale).
+	///
+	/// A track is all timed or all untimed: a timestamp that doesn't match it, or one the
+	/// track's scale can't hold, is [`Error::TimestampMismatch`]. A writer that changes
+	/// state before its datagram reaches the track, such as encrypting it, rescales first so
+	/// a refused timestamp changes nothing.
+	pub fn rescale(&self, timestamp: Option<Timestamp>) -> Result<Option<Timestamp>> {
+		match (timestamp, self.timescale) {
+			(Some(timestamp), Some(timescale)) => Ok(Some(
+				timestamp.convert(timescale).map_err(|_| Error::TimestampMismatch)?,
+			)),
+			(None, None) => Ok(None),
+			_ => Err(Error::TimestampMismatch),
+		}
+	}
+
 	/// Produce a standalone datagram track with this info, outside any broadcast.
 	pub fn produce(self, name: impl Into<Arc<str>>) -> Producer {
 		Producer::new(name.into(), Some(self))
@@ -242,7 +258,7 @@ impl Producer {
 			return Err(Error::FrameTooLarge);
 		}
 		state.closed()?;
-		datagram.timestamp = super::group::on_track(datagram.timestamp, self.info.timescale)?;
+		datagram.timestamp = self.info.rescale(datagram.timestamp)?;
 		self.stats.meter().datagram(datagram.payload.len() as u64);
 		state.push(datagram);
 		Ok(())

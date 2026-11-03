@@ -1,6 +1,6 @@
 //! Deterministic counterexamples for the per-origin routing contract.
 //!
-//! Each fixture runs one scenario from `quest/m1/cluster-routing/routes.md`
+//! Each fixture runs one scenario from `quest/m1/cluster-routing/routes/README.md`
 //! against [`model`], under the rule that fails and the rule that holds. The
 //! model is a reference for the contract, not the relay: when lite-07's route
 //! layer lands, these topologies become its acceptance tests. Failover fixtures

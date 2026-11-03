@@ -1,8 +1,8 @@
-# [M] moq-e2ee implements the moq-net traits
+# [M] moq-crypto's e2ee implements the moq-net traits
 
 ## Goal
 
-moq-e2ee's broadcast, track, and group wrappers implement the
+moq-crypto's e2ee broadcast, track, and group wrappers implement the
 [moq-net traits](/quest/m2/net-wrap/traits.md), so anything generic over them
 publishes or consumes an encrypted broadcast unchanged, under semantic track
 names.
@@ -17,7 +17,7 @@ the reverse (decided 2026-10-20, maintainer):
 - `track::Producer::create_group(u64)` takes `group::Info`.
 - `broadcast::Consumer::subscribe(semantic, ..)`, which returns a
   `kio::Pending`, becomes `track(semantic)` then `.subscribe(..)`.
-- `moq_e2ee::Error` converts into `moq_net::Error`, keeping the draft's
+- `moq_crypto::e2ee::Error` converts into `moq_net::Error`, keeping the draft's
   typed codes (such as an authentication failure) distinguishable rather
   than collapsing into `Error::Dropped`.
 - Datagrams: the wrapper's datagram producer and consumer match the
@@ -25,7 +25,7 @@ the reverse (decided 2026-10-20, maintainer):
   [Datagram tracks](/quest/m1/datagram-tracks/README.md), so the trait read
   yields only authenticated datagrams. A datagram that fails authentication, or a duplicate, is
   dropped there and the track continues. The draft's `authentication`
-  event stays on moq-e2ee's own consumer, outside the trait, for callers
+  event stays on moq-crypto's own consumer, outside the trait, for callers
   that hold the concrete type. A trait read can't carry it without
   breaking the exact mirror.
 - `track::Info.compress` is logical. Ciphertext doesn't compress, so the
@@ -44,7 +44,7 @@ the reverse (decided 2026-10-20, maintainer):
   This keeps
   [rust-publish](/quest/m2/e2ee/rust-publish.md)'s rule that protected
   catalogs compress before encryption, and needs moq-net to expose its group
-  codec to the wrapper. `@moq/e2ee` does the same in
+  codec to the wrapper. `@moq/crypto` does the same in
   [JS](/quest/m2/net-wrap/js.md).
 - The subscriber's wrapper learns the logical flag from authenticated E2EE
   metadata, never from the physical track (decided 2026-10-20, maintainer):
@@ -54,7 +54,7 @@ the reverse (decided 2026-10-20, maintainer):
   catalog track is itself compressed, so a subscriber would need the flag
   before it could inflate the catalog that carries it. The
   [E2EE epic](/quest/m2/e2ee/README.md) also keeps catalog formats out of
-  moq-e2ee, and the [compression migration](https://github.com/moq-dev/moq/pull/7046) dropped hang's
+  moq-crypto, and the [compression migration](https://github.com/moq-dev/moq/pull/7046) dropped hang's
   `compression` field. The subscriber needs the flag before inflating,
   without changing moq-net's `track(name)`; propose the encoding in the PR.
   Record it in `draft-lcurley-moq-e2ee.md`, replacing the Catalogs section's
@@ -62,10 +62,11 @@ the reverse (decided 2026-10-20, maintainer):
 - Datagram header allowance: a moq-lite datagram carries only Type,
   Subscribe ID, Sequence, and Timestamp, since datagram tracks dropped the
   relayed `ietf` fields and the Inflated Size from it, so
-  `MAX_DATAGRAM_HEADER` (28, `rs/moq-e2ee/src/limits.rs` and
-  `js/e2ee/src/limits.ts`) covers every version. Re-check it if moq-transport
-  datagram tracks ([moq-transport datagram tracks](/quest/m1/datagram-tracks/ietf.md))
-  add header fields.
+  `MAX_DATAGRAM_HEADER` (28, `rs/moq-crypto/src/e2ee/limits.rs` and
+  `js/crypto/src/e2ee/limits.ts`) covers every version. Re-check it if
+  moq-transport datagram tracks
+  ([moq-transport datagram tracks](/quest/m1/datagram-tracks/ietf.md)) add
+  header fields.
 - Ranges: every moq-net range starts at a group's first frame
   ([moq-dev/moq#6465](https://github.com/moq-dev/moq/pull/6465)), so the wrapper reads each physical group whole
   and inflates from frame 0.
@@ -87,12 +88,12 @@ the reverse (decided 2026-10-20, maintainer):
 - Keep the nonce rules the epic specifies: a group producer still owns its
   frame numbering, and a re-created or re-served track name resumes above
   its high-water marks (decided 2026-10-25, maintainer, replacing the
-  refusal; moq-e2ee's claims already resume).
+  refusal; moq-crypto's claims already resume).
 - Test the wrappers against the questline's pass-through test cases. The
   moq-json round trip through an encrypted track waits for
   [moq-json to take the traits](/quest/m2/net-wrap/json.md).
 
-Public API: the moq-e2ee wrapper signatures change to moq-net's. Wire:
+Public API: the moq-crypto wrapper signatures change to moq-net's. Wire:
 `draft-lcurley-moq-e2ee.md` gains the authenticated logical `compress` flag
 and each compressed object's authenticated inflated size.
 

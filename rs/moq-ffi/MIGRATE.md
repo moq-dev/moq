@@ -15,6 +15,11 @@ A raw track's datagrams travel on a separate datagram track of the same name, so
 - A `MoqTrackConsumer` from `subscribe_track` subscribes to datagrams on its first `recv_datagram` and receives only those sent from then on, so start reading before the datagrams you need are sent. One from `MoqTrackProducer::consume` receives those sent after it was created.
 - `recv_datagram` fails with `NotFound` on a track with no datagram track, such as a media or JSON track, and over moq-transport, which carries no datagrams. Every raw track has one.
 
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`MoqJsonSnapshotProducer::update`, `MoqJsonStreamProducer::append`, and `MoqJsonWindowProducer::push` and `pop` take a required `MoqTimestamp` instead of an optional one that defaulted to null. Stamp it on the broadcast clock, read with `MoqMediaCatalogProducer::now`, so the data shares the media's epoch.
+Their constructors refuse a track created without a `timescale`: set one in `MoqTrackInfo`.
+
 ### Subscriptions take a `MoqDelay` ([#7697](https://github.com/moq-dev/moq/pull/7697))
 
 `MoqSubscription.max_delay` is `delay: MoqDelay`, the record the decoder outputs take: set `delay.max` to the old `max_delay`.

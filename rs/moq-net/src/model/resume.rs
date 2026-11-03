@@ -866,6 +866,12 @@ impl Subscriber {
 		self.reader().window().runs(from).next().map(|run| *run.start())
 	}
 
+	/// The groups the reader's ranges name from `from` on; see
+	/// [`track::Subscriber::runs_in_range`].
+	pub(super) fn runs(&self, from: u64) -> Vec<std::ops::RangeInclusive<u64>> {
+		self.reader().window().runs(from).collect()
+	}
+
 	/// Whether `accounted` holds every group the reader's bounded ranges name from `from`
 	/// up to `cap`; see [`track::Subscriber::covered`].
 	pub(super) fn covered(&self, from: u64, cap: Option<u64>, accounted: &impl Accounted) -> bool {

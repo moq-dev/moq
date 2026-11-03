@@ -281,7 +281,7 @@ pub fn lite_wire(data: &[u8]) -> bool {
 		6 => roundtrip::<lite::Subscribe<'_>, _>(rest, &mut Vec::new(), version),
 		7 => roundtrip::<lite::SubscribeOk, _>(rest, &mut Vec::new(), version),
 		8 => roundtrip::<lite::SubscribeStart, _>(rest, &mut Vec::new(), version),
-		9 => roundtrip::<lite::SubscribeEnd, _>(rest, &mut Vec::new(), version),
+		9 => roundtrip::<lite::SubscribeFinish, _>(rest, &mut Vec::new(), version),
 		10 => roundtrip::<lite::SubscribeUpdate, _>(rest, &mut Vec::new(), version),
 		11 => roundtrip::<lite::SubscribeDrop, _>(rest, &mut Vec::new(), version),
 		12 => roundtrip::<lite::SubscribeResponse, _>(rest, &mut Vec::new(), version),
@@ -407,11 +407,6 @@ pub fn takeover_route(
 /// Replace a peer claim's route in place, as a session does on a route update.
 pub fn update_route(dynamic: &crate::origin::Requests, route: crate::origin::Route) -> Result<(), crate::Error> {
 	dynamic.update_route(route)
-}
-
-/// Answer a peer claim's request with the broadcast its session already holds.
-pub fn accept(request: crate::origin::Request, broadcast: impl crate::Consume<broadcast::Consumer>) {
-	request.accept(broadcast)
 }
 
 /// A session's snapshot of its peer's initial announcements, for the synced bench.
