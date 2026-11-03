@@ -13,11 +13,17 @@ source test/lib/harness.sh
 harness_begin push-to-talk "just test push-to-talk$(harness_argv "$@")"
 
 case "${1:-}" in
-    "") shape=(--delay 50ms --rate 64000 --queue 1s) ;;
-    --reproduction) shape=(--delay 50ms --loss 0.02) ;;
-    *) echo 'usage: just test push-to-talk [--reproduction]' >&2; exit 2 ;;
+"") shape=(--delay 50ms --rate 64000 --queue 1s) ;;
+--reproduction) shape=(--delay 50ms --loss 0.02) ;;
+*)
+    echo 'usage: just test push-to-talk [--reproduction]' >&2
+    exit 2
+    ;;
 esac
-[[ $# -le 1 ]] || { echo 'too many arguments' >&2; exit 2; }
+[[ $# -le 1 ]] || {
+    echo 'too many arguments' >&2
+    exit 2
+}
 
 bun install --frozen-lockfile
 cargo build --locked -p moq-relay -p moq-shaper

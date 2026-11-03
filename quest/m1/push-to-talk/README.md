@@ -56,3 +56,15 @@ encoder, and record why.
 ## Closes
 
 - [#7101](https://github.com/moq-dev/moq/issues/7101) - a disabled audio rendition is deselected, so the start of the next utterance is lost
+
+## Waiting
+
+- Maintainer: choose fatal encoder recovery with capture held open. Current audio
+  and video encoders keep a failure latched through disable/re-enable; the audio
+  test `audio failure stays local through demand changes and capture format
+  re-arms a fresh track` verifies it. Options: (1) re-arm once on each explicit
+  disabled-to-enabled edge (recommended, so the next press can recover while
+  preserving capture and publishing a fresh track name), or (2) retain the latch
+  and require a source or settings change. This is a product recovery policy;
+  tests cannot decide the intended user action. An automatic retry loop is not
+  proposed.
