@@ -214,6 +214,7 @@ lite-07; bitrate enforcement is not part of this release.
 - [No MOQ_* knobs outside the binaries](/quest/m2/env-knobs.md) - test, bench, and library knobs leave the `MOQ_*` prefix
 - [Clean ALSA playback onset](/quest/m2/audio-alsa-onset.md) - no onset restarts or clicks over PulseAudio
 - [Interop audit](/quest/m2/audit-interop.md) - our interop runner entries match what we ship, and every red interop cell with a moq.dev side is fixed, reported, or noted as down or unsupported
+- [The Moxygen smoke lane makes its own certificate config](/quest/m2/smoke-moxygen-cert.md) - `just test smoke moxygen` needs no `OPENSSL_CONF` from the caller, like the conformance lane
 - [The HLS server follows each path once](/quest/m2/hls-follow-once.md) - `Following` reports synced absence, so moq-hls resolves with one follow
 - [moq-bench pins the instances it measures](/quest/m2/bench-epoch-pin.md) - pooled requests pin their announced epoch, so a takeover is not counted as the same broadcast
 - [moq-bench reports sub-millisecond latency](/quest/m2/bench-latency-resolution.md) - steady-window latency resolves finer than 1 ms
