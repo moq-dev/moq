@@ -399,9 +399,9 @@ int subscribe(
         if (frames != expected_frames) fail("wrong finished media frame count");
         while (until(catalogs->next(), read_deadline, "catalog EOF")) {}
         for (;;) {
-            auto event = until(routes->next(), read_deadline, "announcement END");
+            auto event = until(routes->next(), read_deadline, "announcement absent");
             if (!event) fail("origin ended before broadcast withdrawal");
-            const auto *end = std::get_if<moq::AnnounceEvent::kEnd>(&event->get_variant());
+            const auto *end = std::get_if<moq::AnnounceEvent::kAbsent>(&event->get_variant());
             if (end && end->announce.prefix == path) break;
         }
         auto watch = ok(session->consume()->follow(path + ".health", std::nullopt), "health watch");

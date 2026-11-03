@@ -408,10 +408,10 @@ struct MoQOutputStatsTest {
 		auto event = TestOk(next.get(), "announcement");
 		if (!event)
 			return std::nullopt;
-		const auto *start = std::get_if<moq::AnnounceEvent::kStart>(&event->get_variant());
-		if (!start)
+		const auto *present = std::get_if<moq::AnnounceEvent::kPresent>(&event->get_variant());
+		if (!present)
 			return std::nullopt;
-		return start->announce.route.instance;
+		return present->announce.route.instance;
 	}
 
 	static std::shared_ptr<moq::Session> Session(MoQOutput &output)
