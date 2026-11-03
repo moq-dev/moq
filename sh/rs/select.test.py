@@ -288,7 +288,7 @@ class MetadataTest(unittest.TestCase):
     def test_every_jq_failure_stops_selection_even_after_partial_output(self):
         jq = self.scratch / "jq"
         jq.write_text(
-            "#!/bin/bash\nset -eu\n"
+            "#!/usr/bin/env bash\nset -eu\n"
             'count_file="$TEST_METADATA.count"\ncount=0\n'
             'if [[ -f "$count_file" ]]; then read -r count <"$count_file"; fi\n'
             'count=$((count + 1))\nprintf "%s\\n" "$count" >"$count_file"\n'
@@ -297,8 +297,11 @@ class MetadataTest(unittest.TestCase):
             f'exec "{shutil.which("jq")}" "$@"\n'
         )
         jq.chmod(0o755)
-        # Normalization, directory probe, external targets, dependencies, ids.
-        for stage in range(1, 6):
+        self.env["FAIL_JQ"] = "0"
+        result = self.run_selection(fixture=self.metadata())
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        stages = int(self.fixture.with_suffix(".count").read_text())
+        for stage in range(1, stages + 1):
             with self.subTest(stage=stage):
                 self.fixture.with_suffix(".count").unlink(missing_ok=True)
                 self.env["FAIL_JQ"] = str(stage)
