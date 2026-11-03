@@ -3,6 +3,7 @@ import {
 	KEY_LABEL,
 	MAX_BYTES,
 	MAX_U32,
+	MAX_U53,
 	NAME_BLOCK,
 	NAME_KEY_LABEL,
 	NAME_MAC_LABEL,
@@ -25,9 +26,16 @@ export const DATAGRAM: Domain = 0x01;
 
 const encoder = new TextEncoder();
 
-/** Refuse a group or kid that is not an integer in `0..=2^53-1`. */
+/** Refuse a kid that is not an integer in `0..=2^53-1`. */
 export function checkU53(value: number): void {
 	if (!Number.isSafeInteger(value) || value < 0) throw new Failure("identity");
+}
+
+const MAX_GROUP = BigInt(MAX_U53);
+
+/** Refuse a group that is not in `0..=2^53-1`. */
+export function checkGroup(value: bigint): void {
+	if (typeof value !== "bigint" || value < 0n || value > MAX_GROUP) throw new Failure("identity");
 }
 
 /** Refuse a frame that is not an integer in `0..=2^32-1`. */
@@ -153,13 +161,12 @@ export function unpad(padded: Uint8Array): string {
 }
 
 /** 96-bit AES-GCM nonce: `u64(group) || u32(frame)`. */
-export function nonce(group: number, frame: number): Uint8Array<ArrayBuffer> {
-	checkU53(group);
+export function nonce(group: bigint, frame: number): Uint8Array<ArrayBuffer> {
+	checkGroup(group);
 	checkU32(frame);
 	const out = new Uint8Array(12);
 	const view = new DataView(out.buffer);
-	view.setUint32(0, Math.floor(group / 2 ** 32));
-	view.setUint32(4, group >>> 0);
+	view.setBigUint64(0, group);
 	view.setUint32(8, frame);
 	return out;
 }

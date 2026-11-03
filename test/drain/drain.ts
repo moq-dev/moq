@@ -128,7 +128,7 @@ const ticker = setInterval(() => {
 		timestamp: Moq.Time.Timestamp.now(),
 	});
 	group.finish();
-	lastPublished = group.sequence;
+	lastPublished = Number(group.sequence);
 }, GROUP_INTERVAL_MS);
 
 // ── viewer through the name ───────────────────────────────────────────────────
@@ -167,7 +167,7 @@ void (async () => {
 				corrupt ??= `group ${group.sequence} carried ${text}`;
 				return;
 			}
-			seen.set(group.sequence, (seen.get(group.sequence) ?? 0) + 1);
+			seen.set(Number(group.sequence), (seen.get(Number(group.sequence)) ?? 0) + 1);
 		}
 	} catch (err) {
 		ended = err instanceof Error ? err.message : String(err);

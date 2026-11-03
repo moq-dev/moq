@@ -23,10 +23,6 @@ type (
 	Audio = ffi.MoqAudio
 	// Catalog is a broadcast's manifest: its video and audio renditions plus display metadata.
 	Catalog = ffi.MoqCatalog
-	// Delay is how far behind the live edge a decoder plays: Min is the playout delay and where a
-	// cold join starts, and Max, nil for no limit, is how far a stalled group may fall behind before
-	// it is skipped. The subscription carries both; a Min past Max starts at Max.
-	Delay = ffi.MoqDelay
 	// Dimensions is a width and height in pixels.
 	Dimensions = ffi.MoqDimensions
 	// DecodeStart is where an audio or video decoder starts on a track that already holds groups.
@@ -299,7 +295,7 @@ func FetchGroup(ctx context.Context, broadcast *moq.BroadcastConsumer, config Gr
 //
 // Pair it with moq.TrackConsumer.RecvGroup to read media in arrival order: frame timestamps are
 // container media time, not the transport's. Which groups arrive, and how long a stalled one
-// stays readable, is the subscription's MaxDelay. Takes over group, whose handle is closed
+// stays readable, is the subscription's Delay.Max. Takes over group, whose handle is closed
 // afterward; errors if it has already read a frame.
 func NewGroupConsumer(group *moq.GroupConsumer, container Container) (*GroupConsumer, error) {
 	inner, err := ffi.NewMoqMediaGroupConsumer(bridge.GroupConsumer(group), container)

@@ -2,6 +2,7 @@ package moq
 
 import (
 	"math"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -59,21 +60,27 @@ func TestTimestampToDurationZeroScale(t *testing.T) {
 	TimestampToDuration(Timestamp{})
 }
 
-// DefaultSubscription carries moq-net's zero max delay, while the zero Subscription
-// leaves it nil, which sets no subscriber limit.
-func TestDefaultSubscriptionMaxDelay(t *testing.T) {
-	got, err := DefaultSubscription().ffi()
+// The zero Subscription is moq-net's defaults, a stated zero Delay, and the flags reach the
+// unstated minimum and the unlimited max.
+func TestSubscriptionDelay(t *testing.T) {
+	if got := DefaultSubscription(); !reflect.DeepEqual(got, Subscription{}) {
+		t.Errorf("DefaultSubscription() = %+v, want the zero Subscription", got)
+	}
+	got, err := Subscription{}.ffi()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.MaxDelay == nil || *got.MaxDelay != 0 {
-		t.Errorf("DefaultSubscription MaxDelay = %v, want 0", got.MaxDelay)
+	if got.Delay.Min == nil || *got.Delay.Min != 0 || got.Delay.Max == nil || *got.Delay.Max != 0 {
+		t.Errorf("zero Subscription Delay = %+v, want a stated zero for both", got.Delay)
 	}
-	got, err = Subscription{}.ffi()
+	got, err = Subscription{Delay: Delay{Min: time.Second, MinUnstated: true, Max: time.Second, MaxUnlimited: true}}.ffi()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.MaxDelay != nil {
-		t.Errorf("zero Subscription MaxDelay = %v, want nil", *got.MaxDelay)
+	if got.Delay.Min != nil || got.Delay.Max != nil {
+		t.Errorf("flagged Delay = %+v, want neither stated", got.Delay)
+	}
+	if _, err := (Subscription{Delay: Delay{Max: -time.Second}}).ffi(); err == nil {
+		t.Error("a negative max delay converted")
 	}
 }
