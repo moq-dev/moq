@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { Milli } from "@moq/clock";
+import { Milli, Nano, sleep } from "@moq/clock";
 import { Error as NetError, StreamCode, Time, Track } from "@moq/net";
 import { hooks } from "../../../net/src/internal.ts";
 import { Consumer } from "./consumer.ts";
@@ -224,7 +224,7 @@ test("reads skip a group the subscription still owes", async () => {
 		expect((await next.next())?.value).toEqual({ n: 0 });
 		// Restored again while both reads wait, so the pin must come from the update itself.
 		const reads = [latest.latest(), next.next()];
-		await new Promise((resolve) => setTimeout(resolve, 0));
+		await sleep(Nano.fromMilli(Milli(1)));
 		restore();
 		put(2n);
 		expect((await Promise.all(reads)).map((state) => state?.value)).toEqual([{ n: 2 }, { n: 2 }]);
