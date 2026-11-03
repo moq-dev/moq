@@ -1,7 +1,7 @@
 //! The connection: shared state, the driver task, and the session handle.
 
-use moq_clock::Instant;
-use std::cell::RefCell;
+use kio::clock::Instant;
+use std::cell::{Cell, RefCell};
 use std::net::SocketAddr;
 use std::rc::{Rc, Weak};
 use std::task::{Context, Poll};
@@ -23,6 +23,13 @@ pub(crate) type Shared = Rc<Inner>;
 /// One GSO train is at most 64 segments; stay a hair under the kernel cap.
 const TRAIN_SEGMENTS: usize = 63;
 
+/// The GSO trains a connection stages per worker turn before it yields to
+/// the next, so one connection's backlog shares the socket with the others
+/// and with the completions the next reap brings back. More than one, so a
+/// reply's lone train is followed by an empty flush rather than a yield and a
+/// turn of its own; four cut a bulk sender's enters by a quarter against one.
+const TRAINS_PER_TURN: usize = 4;
+
 /// Everything the handles and the driver share, single-threaded.
 ///
 /// The connection and the bookkeeping live in separate `RefCell`s so a stream
@@ -39,6 +46,9 @@ pub(crate) struct Inner {
 	/// The worker driving this connection, which anything layered on it
 	/// (the WebTransport handshake, say) runs on too.
 	pub(crate) owner: Owner,
+	/// Live [`Connection`] and stream handles; the last one to drop closes the
+	/// connection, since nothing could use it again.
+	handles: Cell<usize>,
 }
 
 pub(crate) struct State {
@@ -149,6 +159,21 @@ impl Inner {
 		self.state.borrow().closed.clone()
 	}
 
+	/// Count a new connection or stream handle.
+	pub(crate) fn hold(&self) {
+		self.handles.set(self.handles.get() + 1);
+	}
+
+	/// Uncount a dropped handle, closing the connection after the last one
+	/// rather than leaving the driver to idle it out.
+	pub(crate) fn release(&self) {
+		let handles = self.handles.get() - 1;
+		self.handles.set(handles);
+		if handles == 0 && !self.conn.borrow().is_closed() {
+			self.close_code(0, "");
+		}
+	}
+
 	/// Wake the driver so it flushes what a handle just queued.
 	pub(crate) fn kick(&self) {
 		self.state.borrow_mut().driver.wake();
@@ -217,16 +242,16 @@ impl Inner {
 /// [`server::accept`](crate::quic::server::accept) shorthands), already
 /// established. Clones share the connection; each carries its own parking so
 /// concurrent pending operations don't trample each other's wakeups. Dropping
-/// every handle (and every stream) drops the driver's `Rc` peers, but the
-/// driver itself keeps the connection alive until it ends; close explicitly
-/// with [`close`](web_transport_trait::poll::Session::close), or wrap it in
-/// [`crate::quic::web::Session`], whose last handle closes it.
+/// the last handle, streams included, closes the connection with code 0.
 ///
-/// That close only records the code: the driver task is what frames the
-/// CONNECTION_CLOSE and hands it to the socket. Drive the worker until
-/// [`poll_closed`](web_transport_trait::poll::Session::poll_closed) resolves
-/// before stopping it, or the packet is never built and the peer idles out
-/// instead.
+/// Once the connection ends, or the worker driving it is dropped, every
+/// operation fails with the terminal error instead of pending, except reads
+/// and accepts of what already arrived.
+///
+/// A close, implicit or by [`close`](Self::close), only records the code: the
+/// driver task is what frames the CONNECTION_CLOSE and hands it to the socket.
+/// Drive the worker until [`closed`](Self::closed) resolves before stopping
+/// it, or the packet is never built and the peer idles out instead.
 pub struct Connection {
 	shared: Shared,
 	// Retains this clone's waiter registrations across polls.
@@ -315,21 +340,16 @@ impl Connection {
 		self.shared.conn.borrow().stats()
 	}
 
-	/// The peer's certificate chain in DER, leaf first, or `None` if it
-	/// presented none.
+	/// The certificate chain the peer presented, end entity first, or `None`
+	/// if it presented none.
 	///
 	/// A server only sees one when it asked
 	/// ([`ClientAuth`](crate::quic::server::ClientAuth)), and TLS already
 	/// validated it against the configured roots by the time this connection
 	/// exists: an invalid chain fails the handshake instead. So a `Some` here
 	/// is an authenticated peer, and the chain is what names it.
-	pub fn peer_chain(&self) -> Option<Vec<Vec<u8>>> {
-		let conn = self.shared.conn.borrow();
-		let identity = conn.crypto_session().peer_identity()?;
-		let chain = identity
-			.downcast::<Vec<rustls::pki_types::CertificateDer<'static>>>()
-			.ok()?;
-		Some(chain.iter().map(|cert| cert.to_vec()).collect())
+	pub fn peer_identity(&self) -> Option<Vec<rustls::pki_types::CertificateDer<'static>>> {
+		self.shared.conn.borrow().peer_identity()
 	}
 
 	/// The peer's address as of the handshake; a peer that migrates later
@@ -375,10 +395,17 @@ impl Connection {
 	pub(crate) fn streams_evicted(&self) -> u64 {
 		self.shared.conn.borrow().stats().credit.evicted
 	}
+
+	/// The receive windows now in force: the connection's, and the most one stream holds.
+	pub(crate) fn receive_window(&self) -> moq_net::transport::ReceiveWindow {
+		let conn = self.shared.conn.borrow();
+		moq_net::transport::ReceiveWindow::new(conn.receive_window(), conn.stream_receive_window())
+	}
 }
 
 impl Clone for Connection {
 	fn clone(&self) -> Self {
+		self.shared.hold();
 		Self {
 			shared: self.shared.clone(),
 			park: kio::Park::default(),
@@ -415,6 +442,7 @@ pub(crate) fn launch(
 		conn: RefCell::new(conn),
 		state: RefCell::new(State::new()),
 		owner: owner.clone(),
+		handles: Cell::new(0),
 	});
 
 	let mut driver = Driver {
@@ -424,6 +452,8 @@ pub(crate) fn launch(
 		key,
 		deadline: owner.timer(),
 		close_staged: false,
+		turn: 0,
+		trains: 0,
 	};
 	let future = async move { kio::wait(|waiter| driver.poll(waiter)).await };
 	(shared, future)
@@ -485,13 +515,9 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 
 	let (alpn, server_name, remote) = {
 		let conn = shared.conn.borrow();
-		let handshake = conn
-			.crypto_session()
-			.handshake_data()
-			.and_then(|data| data.downcast::<moq_quic::crypto::rustls::HandshakeData>().ok());
-		let (alpn, server_name) = match handshake {
+		let (alpn, server_name) = match conn.handshake_data() {
 			Some(data) => (
-				data.protocol.map(|proto| String::from_utf8_lossy(&proto).into_owned()),
+				data.alpn.map(|proto| String::from_utf8_lossy(&proto).into_owned()),
 				data.server_name,
 			),
 			None => (None, None),
@@ -500,6 +526,7 @@ pub(crate) async fn establish(shared: Shared, deadline: Option<Instant>) -> Resu
 		(alpn, server_name, remote)
 	};
 
+	shared.hold();
 	let conn = Connection {
 		shared,
 		park: kio::Park::default(),
@@ -622,6 +649,12 @@ impl Connection {
 			rtt: stats.path.rtt,
 			bandwidth: stats.path.bandwidth_estimate,
 		}
+	}
+}
+
+impl Drop for Connection {
+	fn drop(&mut self) {
+		self.shared.release();
 	}
 }
 
@@ -773,6 +806,22 @@ struct Driver {
 	/// flush that came back empty: moq-quic paces the close like any other packet,
 	/// so it can sit behind a pacing timer after the application asked for it.
 	close_staged: bool,
+	/// The worker turn `trains` counts in.
+	turn: u64,
+	/// Trains staged this turn.
+	trains: usize,
+}
+
+/// The worker dropped its tasks, this driver among them: nothing will ever
+/// drive the connection again, so every handle fails rather than pending.
+/// After a normal end the terminal error is already set, and this keeps it.
+impl Drop for Driver {
+	fn drop(&mut self) {
+		let mut state = self.shared.state.borrow_mut();
+		if state.closed.is_none() {
+			state.fail(Error::Io(crate::shared::Shared::gone_error().to_string()));
+		}
+	}
 }
 
 impl Driver {
@@ -891,18 +940,27 @@ impl Driver {
 		}
 	}
 
-	/// Stage one GSO train, then yield so another connection sharing the
-	/// socket gets a chance at the transmit pool.
+	/// Stage up to [`TRAINS_PER_TURN`] GSO trains this turn, then yield the
+	/// rest to the next turn, so other connections sharing the socket get a
+	/// chance at the transmit pool and the ring is reaped in between.
 	fn flush(&mut self, waiter: &kio::Waiter) -> Poll<Error> {
-		match self.flush_one(waiter) {
-			Poll::Ready(Ok(())) => {}
-			Poll::Ready(Err(err)) => return Poll::Ready(err),
-			// Backpressure, or nothing left to stage.
-			Poll::Pending => return Poll::Pending,
+		let turn = self.shared.owner.turn();
+		if self.turn != turn {
+			self.turn = turn;
+			self.trains = 0;
 		}
-		// Requeue behind the other ready tasks. If moq-quic is drained, the next
-		// poll costs one empty acquire and then parks normally.
-		waiter.waker().wake_by_ref();
+		while self.trains < TRAINS_PER_TURN {
+			match std::task::ready!(self.flush_one(waiter)) {
+				Ok(()) => self.trains += 1,
+				Err(err) => return Poll::Ready(err),
+			}
+			// The budget is spent: requeue behind the next reap, once per turn.
+			// If moq-quic is drained by then, that poll costs one empty acquire
+			// and then parks normally.
+			if self.trains == TRAINS_PER_TURN {
+				self.shared.owner.yield_turn(waiter.waker());
+			}
+		}
 		Poll::Pending
 	}
 

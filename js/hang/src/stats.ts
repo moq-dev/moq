@@ -3,7 +3,7 @@
  * Missing counters mean zero; parsing preserves omission.
  * @module
  */
-import * as z from "@zod/mini";
+import * as z from "zod/mini";
 import { u53Schema } from "./catalog/integers";
 import { renditions } from "./catalog/section";
 import { measurementSchema } from "./snapshot";

@@ -219,7 +219,7 @@ The in-tree control lanes also run with `--tail`:
   TRACK\_STATUS on every draft. Rust also queries the JS publisher's
   non-default priority before subscribing, when the answer can describe a track.
 - On drafts 18, 20, and 22, a Rust GOAWAY names a second WebSocket endpoint serving
-  the same publisher epoch. The JS reconnect loop retains its reader across the
+  the same publisher instance. The JS reconnect loop retains its reader across the
   move. A separate read through the replacement proves it serves data before the
   original transport is cut; only the replacement can deliver the final group.
   The reverse JS-server-to-Rust-client case uses a marker broadcast excluded from
@@ -491,7 +491,7 @@ pass makes no claim about those omitted checks.
 `just test media --media-cases replacement` keeps publisher A open while B takes
 the same path, then closes B and follows A again. Lite-07, lite-06, and IETF draft
 22 viewers must present each run's marked pixels and synchronized audio, with
-no A pictures spliced into B. Epoch-aware viewers also check the broadcast
+no A pictures spliced into B. Instance-aware viewers also check the broadcast
 identities. Both publishers use lite-07. Each switch must present within a bound
 derived from its parts, counted from B's readiness (connected, with catalogs) or
 B's withdrawal: the relay's 300 ms announcement hold, five loopback round trips
@@ -499,7 +499,7 @@ at QUIC's 1 ms timer granularity, the 500 ms GOP, one frame to decode, the 50 ms
 playback delay, and one page sample plus one driver poll. Publisher preparation
 is not part of it.
 
-The CLI integration suite's `epochs` cases exercise the real QUIC relay with
+The CLI integration suite's `instances` cases exercise the real QUIC relay with
 lite-07, lite-06, and IETF draft 22. Held catalog snapshots and media
 subscriptions keep A while fresh catalog handles resolve B with fresh sibling
 pins. Later metadata and FETCH work cannot join B through A's retired handle;
@@ -545,6 +545,7 @@ clients/
   rust/audio.rs           the Rust subscriber's audio decode via rs/moq-audio (`interop-audio`)
   rust/tail.rs            the finite raw-track client (`interop-tail`)
   rust/catalog.rs         the compressed-catalog publisher (`interop-catalog`)
+  rust/hls.rs             the HLS-records publisher and reader (`interop-hls`)
   python/interop.py       publish/subscribe via py/moq-rs (import moq)
   go/main.go              publish/subscribe via go/wrapper (import moq-go/moq)
   cpp/main.cpp            publish/subscribe via cpp/moq (find_package(moq-cpp))
@@ -562,6 +563,7 @@ clients/
     src/close.ts          the refused session, read off `WebTransport.closed`
   js-native/subscribe.ts  subscribe via @moq/net + @moq/hang + the WebTransport polyfill
   js-native/catalog.ts    the compressed-catalog reader, pinned to one version
+  js-native/hls.ts        the HLS-records publisher via @moq/hang
   c/subscribe.c           subscribe via rs/moq-c
 ```
 
@@ -597,7 +599,8 @@ just test interop-report /tmp/results.jsonl /tmp/interop-report
 JS, then feeds them into each implementation's subscriber over an in-memory
 transport. It checks bare FIN before and after SUBSCRIBE\_START on lite-05/06/07,
 and FIN without PUBLISH\_DONE on IETF draft-18. Clean-end controls use the same
-path. This tests response interoperability, not network delivery or relay behavior.
+path. On lite-05/06/07 it also ends a track owing group 0 and kills the session
+before that group arrives, which each subscriber must end with the session's error. This tests response interoperability, not network delivery or relay behavior.
 The interop workflow runs it alongside the real-transport matrix.
 
 ## Varints
@@ -645,3 +648,9 @@ readers at once, each pinned to lite-07, lite-06, or moq-transport-22 and readin
 `@moq/watch` does. Only the lite-07 reader sees the flag; the other two share the relay's
 inflated copy, so `moq_relay_inflated_bytes_total` must grow by exactly the catalog's
 inflated size. The harness enables the relay's `[stats]` and `[internal]` listener for it.
+
+The HLS-records lane has the Rust publisher (moq-mux) and each native JS runtime
+(`@moq/hang`'s recorder) publish one fixed frame schedule, with GOPs on and off the 4 s
+grid, a discontinuity, and a finish, and the Rust reader prints each broadcast's
+declared `hls` durations and every record. The two readouts must be identical, so a
+browser-published broadcast exports as HLS like a native one.

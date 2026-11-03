@@ -5,7 +5,7 @@
 //! ring (submitting inline when the queue is full), while completions are only
 //! reaped by the worker loop.
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::io;
@@ -58,9 +58,14 @@ pub(crate) struct Shared {
 	pub clock: Clock,
 	/// The worker's timers, at the instant of its current turn. Entered as the
 	/// ambient clock while the worker polls.
-	pub deadlines: moq_clock::Deadlines,
+	pub deadlines: kio::clock::Deadlines,
 	/// Whether a turn is running, so `deadlines` already holds its instant.
 	pub turning: Cell<bool>,
+	/// Counts the worker's turns, so a task can budget work per turn.
+	pub turn: Cell<u64>,
+	/// Tasks that [yielded](crate::worker::Owner::yield_turn) this turn, woken
+	/// once its passes are done so they run after the next reap.
+	pub yields: RefCell<Vec<std::task::Waker>>,
 	/// Tasks handed to [`crate::Handle::spawn`], drained by the worker loop.
 	pub spawns: RefCell<Vec<Task>>,
 	pub unpark: std::sync::Arc<Unpark>,

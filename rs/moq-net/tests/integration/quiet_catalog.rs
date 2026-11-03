@@ -43,7 +43,7 @@ fn abort(pair: MockPair) {
 }
 
 async fn settle() {
-	moq_clock::sleep(Duration::from_millis(500)).await;
+	kio::clock::sleep(Duration::from_millis(500)).await;
 }
 
 /// Announce `live/catalog.json` holding one finished snapshot group.
@@ -68,16 +68,16 @@ async fn read_snapshot(remote: &broadcast::Consumer) -> Result<track::Subscriber
 		.track("catalog.json")
 		.map_err(|err| format!("track: {err}"))?
 		.subscribe(None);
-	let mut sub = moq_clock::timeout(TIMEOUT, subscribe)
+	let mut sub = kio::clock::timeout(TIMEOUT, subscribe)
 		.await
 		.map_err(|_| "subscribe never resolved")?
 		.map_err(|err| format!("subscribe: {err}"))?;
-	let mut group = moq_clock::timeout(TIMEOUT, sub.recv_group())
+	let mut group = kio::clock::timeout(TIMEOUT, sub.recv_group())
 		.await
 		.map_err(|_| "subscribe resolved but no group arrived")?
 		.map_err(|err| format!("recv: {err}"))?
 		.ok_or("track ended with no group")?;
-	let frame = moq_clock::timeout(TIMEOUT, group.read_frame())
+	let frame = kio::clock::timeout(TIMEOUT, group.read_frame())
 		.await
 		.map_err(|_| "group had no frame")?
 		.map_err(|err| format!("read: {err}"))?
@@ -93,7 +93,7 @@ async fn each_version<F: Future<Output = Result<(), String>>>(versions: &[&str],
 	let mut failures = Vec::new();
 	for version in versions {
 		let version: Version = version.parse().unwrap();
-		match moq_clock::timeout(Duration::from_secs(30), scenario(version)).await {
+		match kio::clock::timeout(Duration::from_secs(30), scenario(version)).await {
 			Ok(Ok(())) => {}
 			Ok(Err(err)) => failures.push(format!("{version}: {err}")),
 			Err(_) => failures.push(format!("{version}: scenario timed out")),
@@ -104,7 +104,7 @@ async fn each_version<F: Future<Output = Result<(), String>>>(versions: &[&str],
 
 /// `P -> A -> R` is serving a finished catalog and `P -> B -> R` is standing by.
 /// `A` dies. A new reader on `R` has to receive the snapshot `P` still holds.
-#[moq_clock::test]
+#[kio::test]
 async fn a_quiet_catalog_reaches_a_late_reader_after_its_route_dies() {
 	each_version(VERSIONS, |version| async move {
 		let publisher = produce_origin(1);
@@ -143,14 +143,14 @@ async fn a_quiet_catalog_reaches_a_late_reader_after_its_route_dies() {
 /// A peer resumes one group past a finished catalog before anyone else has
 /// fetched it, so the relay's upstream subscription is created past the only
 /// group. A fresh reader must still receive that group.
-#[moq_clock::test]
+#[kio::test]
 async fn a_quiet_catalog_reaches_a_fresh_reader_when_a_peer_resumes_past_it() {
 	each_version(LITE, |version| resume_then_fresh(version, false)).await;
 }
 
 /// The same, with the fresh reader in-process at the relay. It names no floor at all,
 /// so the aggregate must not keep the resume's floor above the only group.
-#[moq_clock::test]
+#[kio::test]
 async fn a_quiet_catalog_reaches_an_unfloored_relay_reader_when_a_peer_resumes_past_it() {
 	each_version(LITE, |version| resume_then_fresh(version, true)).await;
 }
@@ -169,20 +169,20 @@ async fn resume_then_fresh(version: Version, in_process: bool) -> Result<(), Str
 	let resume_remote = request(&resuming).await;
 	// Held until the scenario returns. Dropping it would cancel the upstream
 	// subscription and let the fresh reader open a new one at the live edge.
-	let _resume = moq_clock::sim::spawn(async move {
+	let _resume = kio::clock::sim::spawn(async move {
 		let _sub = resume_remote
 			.track("catalog.json")
 			.unwrap()
 			.subscribe(track::Subscription::default().with_range(1..))
 			.await
 			.expect("resume subscribe");
-		moq_clock::sleep(Duration::from_secs(60)).await;
+		kio::clock::sleep(Duration::from_secs(60)).await;
 	});
 
 	// Wait for the resume to reach the publisher, so the fresh reader widens it
 	// rather than opening its own floorless subscription.
 	let resumed = vec![track::Range::groups(1..)];
-	moq_clock::timeout(TIMEOUT, async {
+	kio::clock::timeout(TIMEOUT, async {
 		while track.subscription().map(|sub| sub.ranges).as_ref() != Some(&resumed) {
 			track.subscription_changed().await.unwrap();
 		}

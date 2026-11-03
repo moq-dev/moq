@@ -4,6 +4,16 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `peer_chain` is `peer_identity` ([#7028](https://github.com/moq-dev/moq/pull/7028))
+
+`quic::driver::Connection::peer_chain()` is now `peer_identity()` and returns `Option<Vec<CertificateDer<'static>>>`, mirroring moq-tokio.
+Use `cert.to_vec()` for raw DER.
+
+### Smaller default windows ([#7624](https://github.com/moq-dev/moq/pull/7624))
+
+`quic::transport::Config::default()` takes a 4 MiB connection window, a 1 MiB stream window, and 4 MiB of unacknowledged outgoing data, down from 128 MiB, 4 MiB, and 16 MiB, matching moq-tokio's `[quic]` defaults. Set `limits` explicitly to keep the old windows.
+`quic::driver::recv::Stream::received_reset`, and so `quic::web::RecvStream::poll_reset`, fail with `Error::Evicted` for a stream evicted to free a stuck window.
+
 ### QUIC early data is disabled
 
 The shared moq-quic core no longer sends or accepts early data, including with caller-supplied rustls server configs.
@@ -26,11 +36,11 @@ Pass a received `Packet::dst_ip()` as `src_ip` to answer from the address the pe
 moq-net dropped `connect_lite`, `accept_lite`, and `accept_request_lite`, and every session now needs a `Send` transport.
 Wrap the worker's session as `transport::Local::new(transport::Session::new(conn, address))` and call `connect`, `accept`, or `accept_request`.
 
-### Timers run on moq-clock
+### Timers run on `kio::clock`
 
-The worker is a moq-clock backend, so its deadlines are `moq_clock::Instant`s instead of `std::time::Instant`s.
-`Timer::set` takes an `Option<moq_clock::Instant>`, and `quic::handshake::Info::deadline` is one.
-Read the worker's time with `moq_clock::now()` inside it.
+The worker is a `kio::clock` backend, so its deadlines are `kio::clock::Instant`s instead of `std::time::Instant`s.
+`Timer::set` takes an `Option<kio::clock::Instant>`, and `quic::handshake::Info::deadline` is one.
+Read the worker's time with `kio::clock::now()` inside it.
 
 ### Datagrams take `SendOptions` (#5770, #5872)
 

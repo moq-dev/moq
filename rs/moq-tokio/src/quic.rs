@@ -20,6 +20,8 @@ mod backend;
 pub use backend::Error;
 #[cfg(feature = "quic")]
 pub(crate) use backend::{Client, Closer, Options, Server, accept};
+#[cfg(feature = "quic")]
+pub mod demux;
 #[cfg(feature = "driver")]
 pub mod driver;
 
@@ -35,7 +37,7 @@ pub mod web;
 /// Parsed from, and serialized as, a hex string. Its length must match the load
 /// balancer's configured server-ID length.
 #[serde_with::serde_as]
-#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ServerId(#[serde_as(as = "serde_with::hex::Hex")] pub(crate) Vec<u8>);
 
 impl ServerId {
@@ -67,6 +69,20 @@ pub(crate) struct LoadBalancer {
 	pub id: ServerId,
 	/// Number of random nonce bytes appended to each connection ID.
 	pub nonce: usize,
+	/// Forwarding to the other servers behind this one's address.
+	pub forward: Option<Forward>,
+}
+
+/// Resolved QUIC-LB forwarding, every setting present.
+#[cfg(feature = "quic")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Forward {
+	/// The forward socket's address.
+	pub bind: std::net::SocketAddr,
+	/// The shared key file.
+	pub key: PathBuf,
+	/// The peer map file.
+	pub peers: PathBuf,
 }
 
 /// The congestion control family for a QUIC connection.
@@ -105,23 +121,26 @@ pub const DEFAULT_MAX_STREAMS: u64 = 10_000;
 ///
 /// Bounds how much unread data and incomplete messages one peer can make us buffer across
 /// all of its streams, which the backends otherwise leave unlimited. On iroh, which returns
-/// credit as it reads, it bounds only the unread data. It has to be at least
-/// moq-net's `transport::MIN_RECEIVE_WINDOW`, the 64 MiB announcement
-/// cap plus framing, so 64 MiB would be refused; 128 MiB also holds two maximum-size frames
-/// at once, and lets a relay-to-relay session sustain several Gbps at intercontinental RTTs.
-pub const DEFAULT_RECEIVE_WINDOW: u64 = 128 << 20;
+/// credit as it reads, it bounds only the unread data. It has to be at least moq-net's
+/// `transport::MIN_RECEIVE_WINDOW`, one 1 MiB segment. 4 MiB sustains about 270 Mbps at a
+/// 100 ms RTT, room for any one viewer or publisher, and lets a session pause two group
+/// streams for slow readers (half the window, a stream window each).
+pub const DEFAULT_RECEIVE_WINDOW: u64 = 4 << 20;
 #[cfg(feature = "_transport")]
 const _: () = assert!(DEFAULT_RECEIVE_WINDOW >= moq_net::transport::MIN_RECEIVE_WINDOW);
 
 /// Default per-stream receive window, used when [`Config::stream_receive_window`] is unset.
 ///
 /// Stream credit returns as bytes are read, whether or not their message is complete,
-/// so this only paces one stream: enough for a single group stream to reach a few
-/// hundred Mbps at a 100 ms RTT.
-pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 4 << 20;
+/// so this only paces one stream: enough for a single group stream to reach about
+/// 67 Mbps at a 100 ms RTT. It is also what a stream paused for a slow reader holds.
+pub const DEFAULT_STREAM_RECEIVE_WINDOW: u64 = 1 << 20;
 
 /// Default cap on unacknowledged outgoing data, used when [`Config::send_window`] is unset.
-pub const DEFAULT_SEND_WINDOW: u64 = 16 << 20;
+///
+/// Matches [`DEFAULT_RECEIVE_WINDOW`], the most a peer with the defaults takes in flight, so
+/// a slow peer's connection buffers no more than it could receive.
+pub const DEFAULT_SEND_WINDOW: u64 = 4 << 20;
 
 /// Default idle timeout before an inactive connection is dropped.
 ///
@@ -178,7 +197,7 @@ pub struct Config {
 	#[serde(default, skip_serializing_if = "Option::is_none")]
 	pub idle_timeout: Option<crate::cli::Duration>,
 
-	/// Keep-alive ping interval; set `0s` to disable. Defaults to under a third of
+	/// Keep-alive ping interval; `0s` uses the default. Defaults to under a third of
 	/// the idle timeout both ends settle on (3s against the 10s default), so changing
 	/// the idle timeout needs no matching change here.
 	///
@@ -188,10 +207,8 @@ pub struct Config {
 	///
 	/// The iroh backend applies this to its connection keep-alive. It also keeps
 	/// a 5s per-path heartbeat that its builder will not raise or clear, so any
-	/// interval above 5s still sends those path pings. Explicit `0s` is refused
-	/// by Iroh because its builder cannot disable either heartbeat, and iroh derives
-	/// the default from the local idle timeout alone.
-	/// `None` uses the default; zero disables this duration.
+	/// interval above 5s still sends those path pings. Iroh derives the default from
+	/// the local idle timeout alone. `None` and zero both use the default.
 	#[usage(
 		name = "quic-keep-alive",
 		long = "quic-keep-alive",
@@ -227,7 +244,7 @@ pub struct Config {
 
 	/// Connection-wide receive window, in bytes: how much data the peer may have
 	/// in flight or in incomplete messages across every stream at once. Defaults to
-	/// 128 MiB, and must fit the largest message a session assembles, just over 64 MiB.
+	/// 4 MiB, and must fit the largest unit a session assembles, one 1 MiB segment.
 	///
 	/// When incomplete messages fill it, the least urgent stream is cancelled. iroh
 	/// returns credit as it reads, so there it bounds only unread data.
@@ -244,7 +261,7 @@ pub struct Config {
 	)]
 	pub receive_window: Option<u64>,
 
-	/// Per-stream receive window, in bytes. Defaults to 4 MiB.
+	/// Per-stream receive window, in bytes. Defaults to 1 MiB.
 	///
 	/// Stream credit returns as bytes are read, whether or not their message is
 	/// complete, so a smaller window only adds round trips to a large frame. The
@@ -259,7 +276,7 @@ pub struct Config {
 	pub stream_receive_window: Option<u64>,
 
 	/// Cap on unacknowledged outgoing data, in bytes, regardless of what the peer
-	/// allows. Defaults to 16 MiB.
+	/// allows. Defaults to 4 MiB.
 	///
 	/// This bounds the transport send buffer.
 	#[serde(skip_serializing_if = "Option::is_none")]
@@ -640,8 +657,7 @@ pub struct Resolved {
 	pub gso: Option<bool>,
 	/// Idle timeout.
 	pub idle_timeout: Duration,
-	/// Keep-alive interval, `None` to derive it from the negotiated idle timeout, or
-	/// zero when disabled.
+	/// Keep-alive interval, `None` or zero to derive it from the negotiated idle timeout.
 	///
 	/// Unset by default, since the interval depends on the peer's idle timeout;
 	/// [`keep_alive_interval`](Self::keep_alive_interval) is what it comes to
@@ -700,9 +716,9 @@ impl Resolved {
 	}
 
 	/// The keep-alive interval against a peer whose idle timeout is no shorter than
-	/// ours, or `None` when there is none.
+	/// ours, using moq-quic's 30s default (a 9s interval) when neither peer sets one.
 	#[cfg(feature = "_transport")]
-	pub fn keep_alive_interval(&self) -> Option<Duration> {
+	pub fn keep_alive_interval(&self) -> Duration {
 		let idle_timeout = (!self.idle_timeout.is_zero()).then_some(self.idle_timeout);
 		moq_quic::transport::keep_alive_interval(self.keep_alive, idle_timeout)
 	}
@@ -780,19 +796,13 @@ mod tests {
 			.resolve()
 			.keep_alive_interval()
 		};
-		assert_eq!(Resolved::default().keep_alive_interval(), Some(Duration::from_secs(3)));
-		assert_eq!(interval(30, None), Some(Duration::from_secs(9)));
-		assert_eq!(interval(0, None), None);
-		assert_eq!(interval(10, Some(Duration::ZERO)), None);
-		assert_eq!(interval(10, Some(Duration::from_secs(5))), Some(Duration::from_secs(5)));
-		assert_eq!(
-			interval(10, Some(Duration::from_secs(20))),
-			Some(Duration::from_secs(3))
-		);
-		assert_eq!(
-			interval(0, Some(Duration::from_secs(20))),
-			Some(Duration::from_secs(20))
-		);
+		assert_eq!(Resolved::default().keep_alive_interval(), Duration::from_secs(3));
+		assert_eq!(interval(30, None), Duration::from_secs(9));
+		assert_eq!(interval(0, None), Duration::from_secs(9));
+		assert_eq!(interval(10, Some(Duration::ZERO)), Duration::from_secs(3));
+		assert_eq!(interval(10, Some(Duration::from_secs(5))), Duration::from_secs(5));
+		assert_eq!(interval(10, Some(Duration::from_secs(20))), Duration::from_secs(3));
+		assert_eq!(interval(0, Some(Duration::from_secs(20))), Duration::from_secs(20));
 	}
 
 	#[test]

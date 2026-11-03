@@ -129,6 +129,8 @@ pub(crate) enum PublishDoneStatus {
 	TrackEnded,
 	/// A requested subscription update could not be applied.
 	UpdateFailed,
+	/// A relay found the track malformed, so it ended every subscription to it.
+	MalformedTrack,
 }
 
 impl PublishDoneStatus {
@@ -140,6 +142,7 @@ impl PublishDoneStatus {
 			Self::Unauthorized => 0x1,
 			Self::TrackEnded => 0x2,
 			Self::UpdateFailed => 0x8,
+			Self::MalformedTrack => 0x12,
 		}
 	}
 }
@@ -169,6 +172,10 @@ impl PublishDone<'_> {
 		match self.status_code {
 			code if code == PublishDoneStatus::TrackEnded.code() => Ok(()),
 			code if code == PublishDoneStatus::Unauthorized.code() => Err(crate::Error::Unauthorized),
+			// The peer's code, as a moq-lite MALFORMED_TRACK reset reads, so bindings name it.
+			code if code == PublishDoneStatus::MalformedTrack.code() => {
+				Err(crate::Error::Stream(crate::StreamError::MalformedTrack))
+			}
 			// SUBSCRIPTION_ENDED: the subscription reached the end its filter asked for.
 			// Draft-22 removed it and left 0x3 unassigned.
 			0x3 if matches!(version, Version::Draft18) => Ok(()),
@@ -475,10 +482,11 @@ mod tests {
 
 	#[test]
 	fn test_publish_done_registered_statuses_all_versions() {
-		for version in [Version::Draft18] {
+		for version in [Version::Draft18, Version::Draft22] {
 			for (status, expected) in [
 				(PublishDoneStatus::InternalError, 0x0),
 				(PublishDoneStatus::TrackEnded, 0x2),
+				(PublishDoneStatus::MalformedTrack, 0x12),
 			] {
 				assert_eq!(status.code(), expected);
 
@@ -515,6 +523,13 @@ mod tests {
 			);
 			assert!(
 				matches!(done(0x0).end(version), Err(crate::Error::Remote(0x0))),
+				"{version:?}"
+			);
+			assert!(
+				matches!(
+					done(0x12).end(version),
+					Err(crate::Error::Stream(crate::StreamError::MalformedTrack))
+				),
 				"{version:?}"
 			);
 		}

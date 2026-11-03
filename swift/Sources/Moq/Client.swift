@@ -45,22 +45,23 @@ public final class Client: Sendable {
         publish: OriginProducer? = nil,
         consume: OriginProducer? = nil
     ) throws {
-        ffi = try MoqClient(config: MoqClientConfig(
-            bind: bind,
-            versions: versions,
-            tokens: tokens,
-            timeout: timeout,
-            race: race,
-            resolutionDelay: resolutionDelay,
-            tls: tls,
-            quic: quic,
-            websocket: websocket,
-            once: once,
-            backoff: backoff,
-            implementation: implementation,
-            publish: publish?.ffi,
-            consume: consume?.ffi
-        ))
+        ffi = try MoqClient(
+            config: MoqClientConfig(
+                bind: bind,
+                versions: versions,
+                tokens: tokens,
+                timeout: timeout,
+                race: race,
+                resolutionDelay: resolutionDelay,
+                tls: tls,
+                quic: quic,
+                websocket: websocket,
+                once: once,
+                backoff: backoff,
+                implementation: implementation,
+                publish: publish?.ffi,
+                consume: consume?.ffi
+            ))
     }
 
     /// Start a connection and return its session without waiting for the native first dial to succeed.
@@ -72,7 +73,6 @@ public final class Client: Sendable {
     public func cancel() {
         ffi.cancel()
     }
-
 
 }
 
@@ -132,9 +132,8 @@ public final class Session: Sendable {
     }
 
     /// Request a draining close now; await `closed()` for its result.
-    /// Explicit `moq-lite-07-wip` waits for the peer to receive finished tails; older
-    /// Lite versions, including the default lite-06, wait only for transport ACKs.
-    /// IETF also waits for transport ACKs.
+    /// `moq-lite-05` and newer wait for the peer to receive finished tails; older
+    /// Lite versions and IETF wait only for transport ACKs.
     public func shutdown() {
         ffi.shutdown()
     }

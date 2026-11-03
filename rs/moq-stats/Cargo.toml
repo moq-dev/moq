@@ -19,7 +19,7 @@ categories = ["multimedia", "network-programming", "web-programming"]
 bench = ["moq-net/fuzz"]
 
 [dependencies]
-moq-clock = { workspace = true }
+kio = { workspace = true, features = ["runtime"] }
 moq-json = { workspace = true }
 moq-net = { workspace = true }
 serde = { workspace = true }
@@ -28,11 +28,13 @@ serde_with = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 criterion = { package = "bench-harness", path = "../bench-harness" }
 futures = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
+workspace-hack = { path = "../workspace-hack" }
 
 [[bench]]
 name = "decode"

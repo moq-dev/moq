@@ -29,26 +29,25 @@ requests follow the new best route immediately. For 2 s after a relay retracts
 a broadcast, it holds back a worse path to the same publisher that a peer still
 hunting offers, instead of announcing the broadcast again.
 
-Routes carrying the same [publisher epoch](/concept/moq-lite#publisher-epochs)
-serve one broadcast. When the route serving it dies, withdraws, or is beaten by
-a cheaper one with that epoch, each subscription continues on the new route
-from the first frame its readers lack, so they see every frame once. A
-publisher whose groups restart, such as an encoder restarting from group 0,
-publishes under a new epoch, which replaces the old broadcast instead of
-resuming it; the RTMP, SRT, and WHIP ingests mint one per connection. Epochs
-order by creation time, so a reconnect to a different gateway assumes the two
-gateways' clocks roughly agree. Seamless failover needs a publisher that
-announces an epoch and, on every link the route crosses, moq-lite 07 or
-moq-transport with the [epoch extension](/draft/moq-epoch). A route
-without an epoch, including every route on moq-lite 06 and older or a
-moq-transport link without the extension, keeps its subscriptions until it goes or a track fails
-upstream, and any other route winning it is announced as a restart. Viewers
-re-request on a restart, and a relay drops its copy of the old instance,
-including every path beneath a prefix claim when one of them moves to another
-worker.
+Routes carrying the same [instance](/concept/moq-lite#publisher-instances)
+serve one stream. When the route serving it dies, withdraws, or is beaten by
+a cheaper one of that instance, or a higher epoch of it, each subscription
+continues on the new route from the first frame its readers lack, so they see
+every frame once. A publisher whose groups restart, such as an encoder
+restarting from group 0, publishes under a new instance, which replaces the
+old broadcast instead of resuming it; the RTMP, SRT, and WHIP ingests mint one
+per connection. Among instances every relay ranks routes in [one
+order](/concept/identity#choosing-a-route), ending in a hash of the instance
+and the path, so the relays of a mesh agree on each path's stream and a pool's
+paths spread over its hosts. Seamless failover needs moq-lite 07 on every link
+the route crosses. Over moq-lite 06 and older, or moq-transport, the receiving
+relay mints an instance per announcement, so failover onto such a route is
+announced as a restart. Viewers re-request on a restart, and a relay drops its
+copy of the old stream, including every path beneath a prefix claim when one
+of them moves to another worker.
 
 Failover routes must carry copies of one publisher's broadcast. Independent
-importers use distinct epochs and switch as a restart, even when fed one stream.
+importers use distinct instances and switch as a restart, even when fed one stream.
 See [Redundant ingest](/setup/redundancy) to choose between publisher switching,
 subscriber selection, and several routes to one publisher.
 A source whose track differs in any property, such as timescale, retention,
@@ -57,10 +56,10 @@ moq-transport link records its draft in the track's properties and carries
 refresh only as on or off, so a route crossing one does not fail over to or from
 a route that does not.
 
-A route whose original publisher (its first hop) changes under the same epoch is
-updated in place on both wire protocols, so the broadcast never briefly vanishes
-downstream, and subscriptions in flight carry on through it. Without an epoch
-that is another source, so it restarts.
+A route whose original publisher (its first hop) changes under the same instance
+is updated in place, so the broadcast never briefly vanishes downstream, and
+subscriptions in flight carry on through it. Under another instance that is
+another stream, so it restarts.
 
 ## Topology
 
@@ -134,8 +133,9 @@ topology check; whatever generates the peer list applies the layout's rules.
 A link inside a region is rarely congested, so it can skip QUIC: a `tls://`
 peer URL dials qmux over TLS on TCP, verified with the same `connect.tls`
 settings as any other dial. The accepting relay serves it from its TCP
-listener with TLS on. That listener applies the same client-certificate policy
-as the QUIC listener, so a peer on it authenticates with its `connect.tls`
+listener with TLS on, or from its HTTPS listener, which serves `tls://` with
+the listen certificate. Both apply the same client-certificate policy as the
+QUIC listener, so a peer on them authenticates with its `connect.tls`
 certificate against `listen.tls.root`, or with a token (`cluster.token`,
 `token`, or `?jwt=`).
 

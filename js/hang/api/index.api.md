@@ -2,19 +2,18 @@
 
 ```ts
 import { $ZodBranded } from "zod/v4/core";
-import { $brand } from "@zod/mini";
+import { $brand } from "zod/mini";
 import { $loose } from "zod/v4/core";
 import { $strip } from "zod/v4/core";
-import { Micro } from "@moq/clock";
-import { Window } from "@moq/json";
-import { ZodMiniCustom } from "@zod/mini";
-import { ZodMiniNullable } from "@zod/mini";
-import { ZodMiniNumber } from "@zod/mini";
-import { ZodMiniObject } from "@zod/mini";
-import { ZodMiniOptional } from "@zod/mini";
-import { ZodMiniPipe } from "@zod/mini";
-import { ZodMiniTransform } from "@zod/mini";
-import { infer } from "@zod/mini";
+import { ZodMiniCustom } from "zod/mini";
+import { ZodMiniNullable } from "zod/mini";
+import { ZodMiniNumber } from "zod/mini";
+import { ZodMiniObject } from "zod/mini";
+import { ZodMiniOptional } from "zod/mini";
+import { ZodMiniPipe } from "zod/mini";
+import { ZodMiniTransform } from "zod/mini";
+import { ZodMiniType } from "zod/mini";
+import { infer } from "zod/mini";
 
 export * as Catalog from "@moq/hang/catalog";
 
@@ -107,7 +106,7 @@ export namespace Health {
 		unhealthy: number;
 	}
 	export interface Observer {
-		epoch?: Net.Epoch.Valid;
+		instance?: Net.Instance.Valid;
 		path: Net.Path.Valid;
 	}
 	export interface Rendition {
@@ -151,37 +150,21 @@ export namespace Health {
 	export function viewer(sample: Health.Sample<Echo.Snapshot>, thresholds?: Health.Thresholds): Health.Health;
 }
 
-export namespace Hls {
-	export class Consumer implements AsyncIterable<Hls.Event> {
-		[Symbol.asyncIterator](): AsyncIterator<Hls.Event>;
-		close(): void;
-		next(): Promise<Hls.Event | undefined>;
-		static subscribe(broadcast: Net.Broadcast.Consumer, hls: import("@moq/hang/catalog").Hls): Hls.Consumer;
-	}
-	export type Entry = Omit<Hls.Record, "pts" | "duration"> & {
-		duration?: Micro;
-		pts: Micro;
-	};
-	export type Event = {
-		push: {
-			entry: Hls.Entry;
-			index: number;
-		};
-	} | {
-		pop: Window.Span;
-	} | {
-		skip: Window.Span;
-	};
-	export interface Record {
-		duration?: number;
-		group: number;
-		pts: number;
-		sequence: number;
-	}
-	export const SUFFIX: ".hls";
-}
+export * as Hls from "@moq/hang/hls";
 
 export * as Net from "@moq/net";
+
+export namespace Report {
+	export const INTERVAL: 1000;
+	export const PRIORITY: -128;
+	export class Writer<T> {
+		constructor(broadcast: Net.Broadcast.Producer, name: string, schema?: ZodMiniType<T>);
+		finish(): void;
+		readonly track: Net.Track.Producer;
+		update(value: T): void;
+		get wanted(): boolean;
+	}
+}
 
 export * as Signals from "@moq/signals";
 

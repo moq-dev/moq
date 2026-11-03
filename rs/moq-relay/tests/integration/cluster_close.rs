@@ -37,7 +37,7 @@ fn peer_url(server: &driver::endpoint::Endpoint) -> String {
 }
 
 async fn accept(server: &driver::endpoint::Endpoint) -> driver::connection::Connection {
-	moq_clock::timeout(TIMEOUT, server.accept())
+	kio::clock::timeout(TIMEOUT, server.accept())
 		.await
 		.expect("dial timeout")
 		.expect("incoming")
@@ -49,7 +49,7 @@ async fn accept(server: &driver::endpoint::Endpoint) -> driver::connection::Conn
 
 /// The link ends with the dialer's own shutdown close, not a timeout or a SETUP error.
 async fn assert_closed_by_shutdown(conn: driver::connection::Connection) {
-	let err = moq_clock::timeout(TIMEOUT, conn.closed())
+	let err = kio::clock::timeout(TIMEOUT, conn.closed())
 		.await
 		.expect("the peer heard no close before its idle timeout");
 	match err {
@@ -69,9 +69,7 @@ async fn closing_a_cluster_closes_its_static_dials() {
 	let runtime = dialer_runtime();
 	let cluster = runtime
 		.spawn(async move {
-			let cluster = moq_relay::cluster::Cluster::new(options)
-				.expect("cluster init")
-				.with_connect(connect, quic);
+			let cluster = crate::spawn_cluster(options).with_connect(connect, quic);
 			let started = cluster.clone().start().await.expect("cluster start");
 			tokio::spawn(started.run());
 			cluster
@@ -101,25 +99,23 @@ async fn closing_a_cluster_ends_its_websocket_dials() {
 	let mut options = moq_relay::cluster::Options::new(Default::default());
 	options.config.connect = vec![moq_relay::cluster::Peer::new(format!("ws://127.0.0.1:{port}/"))];
 	let (connect, quic) = dial_template();
-	let cluster = moq_relay::cluster::Cluster::new(options)
-		.expect("cluster init")
-		.with_connect(connect, quic);
+	let cluster = crate::spawn_cluster(options).with_connect(connect, quic);
 	let started = cluster.clone().start().await.expect("cluster start");
 	let running = tokio::spawn(started.run());
 
 	// Never answers the upgrade, so the dial holds the socket until stopped.
-	let (mut socket, _) = moq_clock::timeout(TIMEOUT, listener.accept())
+	let (mut socket, _) = kio::clock::timeout(TIMEOUT, listener.accept())
 		.await
 		.expect("dial timeout")
 		.expect("accept");
-	moq_clock::timeout(TIMEOUT, cluster.close())
+	kio::clock::timeout(TIMEOUT, cluster.close())
 		.await
 		.expect("close waits on a stopped dial");
 
 	let mut buf = vec![0; 4096];
 	loop {
 		// Brief: the socket is already closed once `close` returns.
-		let read = moq_clock::timeout(Duration::from_secs(2), socket.read(&mut buf))
+		let read = kio::clock::timeout(Duration::from_secs(2), socket.read(&mut buf))
 			.await
 			.expect("the dial still holds its socket");
 		if read.map_or(true, |n| n == 0) {
@@ -157,7 +153,7 @@ async fn a_relay_shutdown_closes_its_cluster_dials() {
 
 	let conn = accept(&server).await;
 	trigger.start();
-	moq_clock::timeout(TIMEOUT, running)
+	kio::clock::timeout(TIMEOUT, running)
 		.await
 		.expect("relay drain")
 		.expect("relay task")

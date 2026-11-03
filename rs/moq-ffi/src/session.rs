@@ -118,7 +118,7 @@ pub struct MoqQuicConfig {
 	/// How long an idle connection survives before it is dropped.
 	#[uniffi(default = None)]
 	pub idle_timeout: Option<Duration>,
-	/// Keep-alive ping interval. 0 disables it; unset derives it from the idle timeout.
+	/// Keep-alive ping interval; zero or unset derives it from the idle timeout.
 	#[uniffi(default = None)]
 	pub keep_alive: Option<Duration>,
 	/// UDP generic segmentation offload: batches sends into one syscall.
@@ -992,8 +992,8 @@ impl MoqSession {
 	/// handle or a `closed()` waiter; repeated requests share the same drain.
 	/// `cancel` stays immediate. The name avoids Kotlin's generated
 	/// `AutoCloseable.close()`, which releases the handle.
-	/// Explicit `moq-lite-07-wip` waits for the peer to receive the tail. Older Lite
-	/// versions, including the default lite-06, and IETF wait only for transport ACKs.
+	/// `moq-lite-05` and newer wait for the peer to receive the tail; older Lite
+	/// versions and IETF wait only for transport ACKs.
 	/// A drain that takes longer than one second ends with a delivery timeout.
 	pub fn shutdown(&self) {
 		let _guard = crate::ffi::enter();

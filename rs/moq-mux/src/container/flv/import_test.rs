@@ -170,7 +170,10 @@ async fn import_emits_frames() {
 	let track = consumer
 		.track(&video_name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -203,7 +206,7 @@ async fn public_container_preserves_loc_for_flv() {
 		track,
 		crate::catalog::hang::Container::Loc(crate::container::Kind::Data),
 	);
-	let frame = moq_clock::timeout(std::time::Duration::from_secs(1), media.read_frame())
+	let frame = kio::clock::timeout(std::time::Duration::from_secs(1), media.read_frame())
 		.await
 		.unwrap()
 		.unwrap()
@@ -547,7 +550,10 @@ async fn config_churn_keeps_flat_state() {
 	let replaced = consumer
 		.track(&replaced)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 
@@ -562,7 +568,10 @@ async fn config_churn_keeps_flat_state() {
 	let live = consumer
 		.track(snap.video.renditions.keys().next().unwrap())
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	drop(importer);
@@ -609,7 +618,10 @@ async fn import_enhanced_av1() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -743,7 +755,10 @@ async fn import_reports_negative_pts_and_can_resume() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -783,7 +798,10 @@ async fn import_enhanced_hvc1_applies_composition_time() {
 	let track = consumer
 		.track(name)
 		.unwrap()
-		.subscribe(moq_net::track::Subscription::default().with_max_delay(Duration::from_secs(1)))
+		.subscribe(
+			moq_net::track::Subscription::default()
+				.with_delay(moq_net::track::Delay::default().with_max(Duration::from_secs(1))),
+		)
 		.await
 		.unwrap();
 	let mut decoder = crate::container::Consumer::new(
@@ -853,7 +871,7 @@ struct Imported {
 	video: String,
 	/// The root clock the catalog advertised.
 	clock: hang::catalog::Clock,
-	arrival: std::ops::RangeInclusive<moq_clock::Wall>,
+	arrival: std::ops::RangeInclusive<kio::clock::Wall>,
 	/// Why a chunk was refused, if one was.
 	refused: Option<crate::Error>,
 }
@@ -866,7 +884,7 @@ async fn import(chunks: &[Vec<u8>]) -> Imported {
 	let catalog = crate::catalog::Producer::new(&mut broadcast, Default::default()).unwrap();
 	let mut importer = Import::new(broadcast, catalog.reserve());
 
-	let before = moq_clock::wall();
+	let before = kio::clock::wall();
 	let mut after = before;
 	let mut refused = None;
 	for (i, chunk) in chunks.iter().enumerate() {
@@ -875,7 +893,7 @@ async fn import(chunks: &[Vec<u8>]) -> Imported {
 			break;
 		}
 		if i == 0 {
-			after = moq_clock::wall();
+			after = kio::clock::wall();
 		}
 	}
 	importer.finish().unwrap();

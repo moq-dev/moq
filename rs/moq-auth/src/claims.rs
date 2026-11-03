@@ -108,7 +108,9 @@ impl Permissions {
 /// Legacy `moq-token` claims are read too: each `put`/`get` prefix `p` is the subtree
 /// `p/**`. Claims that only grant subtrees are written that way, so every published
 /// verifier accepts them; anything else is written as `publish`/`subscribe`, which an
-/// older verifier refuses rather than misreads. The registered `iss`, `sub`, and `jti`
+/// older verifier refuses rather than misreads. A capped role is written as
+/// `{"path": [...], "rate": bps}`, which every published verifier refuses rather than
+/// drop the cap. The registered `iss`, `sub`, and `jti`
 /// claims are read and ignored; any other field fails verification, since it might
 /// narrow the grant, and a misspelled `root` would otherwise widen it.
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
@@ -122,18 +124,24 @@ pub struct Claims {
 	/// Patterns the holder may publish, relative to the root.
 	pub publish: Patterns,
 
+	/// The most the holder may publish, or no cap when absent.
+	pub publish_rate: Option<crate::Rate>,
+
 	/// Patterns the holder may subscribe to, relative to the root.
 	pub subscribe: Patterns,
 
+	/// The most the holder may receive from its subscriptions, or no cap when absent.
+	pub subscribe_rate: Option<crate::Rate>,
+
 	/// The expiration time of the token as a unix timestamp (`exp`).
-	pub expires: Option<moq_clock::Wall>,
+	pub expires: Option<kio::clock::Wall>,
 
 	/// The issued time of the token as a unix timestamp (`iat`).
-	pub issued: Option<moq_clock::Wall>,
+	pub issued: Option<kio::clock::Wall>,
 
 	/// The time before which the token is refused, as a unix timestamp (`nbf`).
 	/// Enforced by [`Key::verify`](crate::Key::verify).
-	pub not_before: Option<moq_clock::Wall>,
+	pub not_before: Option<kio::clock::Wall>,
 }
 
 impl Claims {
@@ -155,10 +163,23 @@ impl Claims {
 		self
 	}
 
+	/// Cap what the holder may publish, in bits per second; `None` lifts the cap.
+	pub fn with_publish_rate(mut self, rate: impl Into<Option<crate::Rate>>) -> Self {
+		self.publish_rate = rate.into();
+		self
+	}
+
+	/// Cap what the holder may receive from its subscriptions, in bits per second; `None`
+	/// lifts the cap.
+	pub fn with_subscribe_rate(mut self, rate: impl Into<Option<crate::Rate>>) -> Self {
+		self.subscribe_rate = rate.into();
+		self
+	}
+
 	/// Expire the token at this time. Enforced by [`Key::verify`](crate::Key::verify).
 	///
 	/// Accepts an `Option` so a caller can pass one through without unwrapping it.
-	pub fn with_expires(mut self, at: impl Into<Option<moq_clock::Wall>>) -> Self {
+	pub fn with_expires(mut self, at: impl Into<Option<kio::clock::Wall>>) -> Self {
 		self.expires = at.into();
 		self
 	}
@@ -166,7 +187,7 @@ impl Claims {
 	/// Record when the token was issued. Purely informational; nothing enforces it.
 	///
 	/// Accepts an `Option` so a caller can pass one through without unwrapping it.
-	pub fn with_issued(mut self, at: impl Into<Option<moq_clock::Wall>>) -> Self {
+	pub fn with_issued(mut self, at: impl Into<Option<kio::clock::Wall>>) -> Self {
 		self.issued = at.into();
 		self
 	}
@@ -248,11 +269,13 @@ mod tests {
 
 	fn create_test_claims() -> Claims {
 		Claims {
+			publish_rate: None,
+			subscribe_rate: None,
 			root: "test-path".to_string(),
 			publish: patterns(&["test-pub/**"]),
 			subscribe: patterns(&["test-sub/**"]),
-			expires: Some(moq_clock::wall() + Duration::from_secs(3600)),
-			issued: Some(moq_clock::wall()),
+			expires: Some(kio::clock::wall() + Duration::from_secs(3600)),
+			issued: Some(kio::clock::wall()),
 			not_before: None,
 		}
 	}

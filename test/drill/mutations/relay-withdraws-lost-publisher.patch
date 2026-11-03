@@ -9,7 +9,16 @@
 diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.rs
 --- a/rs/moq-net/src/lite/subscriber.rs
 +++ b/rs/moq-net/src/lite/subscriber.rs
-@@ -6515,7 +6515,7 @@
+@@ -6602,7 +6602,7 @@
+ 		let in_place = predecessor == Some(&path);
+ 		// An error means the prefix is outside our origin's scope, so don't serve it.
+ 		let predecessor = predecessor.and_then(|previous| match self.routes.get(previous)? {
+-			Held::Attached(attached) => Some(&attached.dynamic),
++			Held::Attached(attached) => Some(&*attached.dynamic),
+ 			_ => None,
+ 		});
+ 		match subscriber.origin.requests_route(&path, route.clone(), predecessor) {
+@@ -6680,7 +6680,7 @@
  		};
  		self.held.pop();
  		if let Held::Attached(entry) = held {
@@ -18,7 +27,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  		}
  	}
  
-@@ -6616,7 +6616,8 @@
+@@ -6781,7 +6781,8 @@
  	/// without recomputing the chain.
  	route: crate::origin::Route,
  	/// Dropping it retracts the route and rejects its queued requests.
@@ -28,7 +37,7 @@ diff --git a/rs/moq-net/src/lite/subscriber.rs b/rs/moq-net/src/lite/subscriber.
  	/// Closes as the route goes, which closes every source it minted.
  	live: kio::Producer<()>,
  	/// Whether the GOAWAY drain already re-priced this route.
-@@ -6636,7 +6637,7 @@
+@@ -6801,7 +6802,7 @@
  	) -> Self {
  		Self {
  			route,

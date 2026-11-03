@@ -1,0 +1,10 @@
+{
+	"extends": "../../tsconfig.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"emitDeclarationOnly": false,
+		"allowImportingTsExtensions": true,
+		"types": ["bun", "audioworklet"]
+	},
+	"include": [".", "../../common/worklet.d.ts"]
+}

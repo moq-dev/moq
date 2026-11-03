@@ -16,7 +16,7 @@
 
 #[cfg(target_os = "linux")]
 mod linux {
-	use moq_clock::Wall;
+	use kio::clock::Wall;
 	use std::collections::HashMap;
 	use std::io::Write;
 	use std::time::Duration;
@@ -231,7 +231,7 @@ mod linux {
 		target.ctx.retain(|tid| live.contains(&tid));
 
 		Ok(Sample {
-			timestamp_ms: moq_clock::wall()
+			timestamp_ms: kio::clock::wall()
 				.saturating_duration_since(Wall::UNIX_EPOCH)
 				.as_millis(),
 			pid: target.proc.pid,
@@ -277,7 +277,7 @@ mod linux {
 				.join(", ")
 		);
 
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		loop {
 			// Host-wide once per round: unlike the per-target reads inside `sample`,
 			// a failure here is not a target exiting, so it fails the run.

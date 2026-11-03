@@ -64,10 +64,10 @@ fn path<S: ObjectStore>(store: &Store<S>, track: &str, name: &str) -> Path {
 
 /// Wait until every one of `paths` is stored.
 async fn stored<S: ObjectStore>(store: &Store<S>, paths: &[Path]) {
-	moq_clock::timeout(Duration::from_secs(10), async {
+	kio::clock::timeout(Duration::from_secs(10), async {
 		for path in paths {
 			while store.inner().head(path).await.is_err() {
-				moq_clock::sleep(Duration::from_millis(10)).await;
+				kio::clock::sleep(Duration::from_millis(10)).await;
 			}
 		}
 	})
@@ -104,12 +104,12 @@ async fn record<S: ObjectStore + Clone>(store: &Store<S>) {
 	let run = tokio::spawn(Producer::new(store.clone(), second.consume(), config()).run());
 	for track in &tracks {
 		while track.subscription().is_none() {
-			moq_clock::sleep(Duration::from_millis(1)).await;
+			kio::clock::sleep(Duration::from_millis(1)).await;
 		}
 		track.finish().unwrap();
 	}
 	second.close();
-	moq_clock::timeout(Duration::from_secs(10), run)
+	kio::clock::timeout(Duration::from_secs(10), run)
 		.await
 		.expect("the producer ends with its broadcast")
 		.unwrap()

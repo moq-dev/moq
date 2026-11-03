@@ -1,6 +1,6 @@
 //! Pacing of media frames onto the wall clock.
 
-use moq_clock::Instant;
+use kio::clock::Instant;
 use std::time::Duration;
 
 use moq_net::Timestamp;
@@ -248,7 +248,7 @@ mod tests {
 	/// frame onto the anchor.
 	#[test]
 	fn paces_across_timescales() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut pacer = Pacer::default().with_lead(Duration::from_millis(500));
 
 		// A PCR slot at microsecond scale anchors the stream.
@@ -266,7 +266,7 @@ mod tests {
 	/// panics on a large but valid `Duration` (`--delay` is unbounded).
 	#[test]
 	fn huge_lead_does_not_overflow() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut pacer = Pacer::default().with_lead(Duration::MAX);
 		assert_eq!(pacer.pace(ms(0), start), start);
 		assert_eq!(pacer.pace(ms(40), start), start + Duration::from_millis(40));
@@ -279,7 +279,7 @@ mod tests {
 	/// arrival cadence rather than the media one.
 	#[test]
 	fn absorbs_a_standing_delivery_lag() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut pacer = Pacer::default().with_lead(Duration::from_millis(500));
 		assert_eq!(pacer.pace(ms(0), start), start, "the first frame anchors at now");
 
@@ -299,7 +299,7 @@ mod tests {
 	/// rather than growing with every outlier.
 	#[test]
 	fn absorbed_lag_is_capped_by_the_lead() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut pacer = Pacer::default().with_lead(Duration::from_millis(50));
 		assert_eq!(pacer.pace(ms(0), start), start);
 
@@ -316,7 +316,7 @@ mod tests {
 	/// Zero lead (SRT, whose receiver owns the jitter buffer) absorbs nothing.
 	#[test]
 	fn zero_lead_absorbs_nothing() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut pacer = Pacer::default();
 		assert_eq!(pacer.pace(ms(0), start), start);
 
@@ -327,7 +327,7 @@ mod tests {
 
 	#[test]
 	fn hurry_makes_the_frame_the_live_edge() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut pacer = Pacer::default().with_lead(Duration::from_millis(500));
 		assert_eq!(pacer.pace(ms(0), start), start);
 
@@ -343,7 +343,7 @@ mod tests {
 	/// onto a re-anchor the delay itself provoked.
 	#[test]
 	fn the_delay_is_outside_the_lead_comparison() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut pacer = Pacer::default().with_delay(Duration::from_millis(100));
 
 		assert_eq!(pacer.pace(ms(0), start), start + Duration::from_millis(100));
@@ -361,7 +361,7 @@ mod tests {
 	/// playback back toward live rather than leaving it there for the session.
 	#[test]
 	fn an_earlier_arrival_re_anchors_and_keeps_the_delay() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut pacer = Pacer::default().with_delay(Duration::from_millis(100));
 
 		// The first frame was produced 500ms ago; nothing here knows that yet.
@@ -386,7 +386,7 @@ mod tests {
 	/// present at it: the offset playback holds behind the edge has to survive.
 	#[test]
 	fn hurry_keeps_the_delay() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut pacer = Pacer::default().with_delay(Duration::from_millis(100));
 		assert_eq!(pacer.hurry(ms(800), start), start + Duration::from_millis(100));
 
@@ -399,7 +399,7 @@ mod tests {
 	/// second arrival in.
 	#[test]
 	fn due_reads_the_anchor_without_moving_it() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut pacer = Pacer::default().with_delay(Duration::from_millis(100));
 		assert_eq!(pacer.due(ms(0)), None, "no anchor until the first frame");
 
@@ -415,7 +415,7 @@ mod tests {
 
 	#[test]
 	fn lead_schedules_bursts_into_the_future() {
-		let start = moq_clock::now();
+		let start = kio::clock::now();
 		let mut pacer = Pacer::default().with_lead(Duration::from_millis(500));
 		assert_eq!(pacer.pace(ms(0), start), start);
 

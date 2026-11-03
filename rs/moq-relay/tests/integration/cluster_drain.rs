@@ -125,9 +125,8 @@ async fn relay(name: &str) -> (Relay, SocketAddr, moq_net::origin::Publication) 
 async fn peer(name: &str, forwarder: &Forwarder) -> (cluster::Cluster, moq_net::origin::Publication) {
 	let mut config = cluster::Config::default();
 	config.connect = vec![Peer::new(format!("tcp://127.0.0.1:{}/", forwarder.port))];
-	let cluster = cluster::Cluster::new(cluster::Options::new(config))
-		.expect("cluster init")
-		.with_connect(Default::default(), Default::default());
+	let cluster =
+		crate::spawn_cluster(cluster::Options::new(config)).with_connect(Default::default(), Default::default());
 	let broadcast = cluster.origin.create_broadcast(name).expect("create broadcast");
 	broadcast.announce(Default::default()).expect("announce");
 	let started = cluster.clone().start().await.expect("cluster start");
@@ -136,7 +135,7 @@ async fn peer(name: &str, forwarder: &Forwarder) -> (cluster::Cluster, moq_net::
 }
 
 /// Advance the manual clock by `total`, one [`STEP`] at a time.
-async fn pass(clock: &moq_clock::Installed, total: Duration) {
+async fn pass(clock: &kio::clock::Installed, total: Duration) {
 	let mut passed = Duration::ZERO;
 	while passed < total {
 		clock.advance(STEP);
@@ -155,7 +154,7 @@ fn draining_relay_keeps_its_peers_until_it_restarts() {
 }
 
 async fn draining_relay_keeps_its_peers_until_it_restarts_inner() {
-	let clock = moq_clock::Manual::new().install(&tokio::runtime::Handle::current());
+	let clock = kio::clock::Manual::new().install(&tokio::runtime::Handle::current());
 
 	let (b, b_addr, _b_broadcast) = relay("b").await;
 	let b_origin = b.cluster().origin.clone();

@@ -42,8 +42,7 @@ internal and can ship after the cut:
 [moq-transport request leases](/quest/m2/ietf-request-lease.md),
 [group heads filled in place](/quest/m2/ietf-fill-refill.md),
 [one relay serve path](/quest/m2/relay-serve-path.md),
-[moqsrc pad actors](/quest/m2/moqsrc-pad-actor.md), and
-[publish rendition identity](/quest/m2/publish-publication.md). Other
+moqsrc pad actors and publish rendition identity (both since landed). Other
 redesign evidence went into the quests that already own the mechanism:
 [subscribe ranges](/quest/m1/subscribe-ranges/README.md),
 [drop set](/quest/m1/drop-set.md),
@@ -52,16 +51,7 @@ drafts 14-17 removal (since landed), and
 [buffered playback](/quest/m1/buffered-ascending.md). The audit recommends
 leaving JS-only redesigns of `js/net` to [rs2ts](/quest/m2/rs2ts-js.md).
 
-## Required
-
-- [A reserved group survives a route returning](/quest/m1/cut-audit/reserved-route-return.md) - a route flip A to B to A no longer panics a peeked reader
-- [A description-less AAC rendition means one thing](/quest/m1/cut-audit/aac-description-less.md) - every player and exporter agrees on the frame format
-- [Stream-accept loops yield on a per-poll budget](/quest/m1/cut-audit/accept-budget.md) - a peer opening many streams cannot monopolize a session driver
-- [Rust and JS skip a backlog by the same measure](/quest/m1/cut-audit/catalog-parity.md) - a backlog join starts at the same group in every player
-
 ## Related
 
-- [Untrusted media parsers have fuzz targets](/quest/m2/media-fuzz.md) - would have caught the media parser findings here
 - [Announce interest streams share one route table](/quest/m2/announce-interest-memory.md) - the audit's inherited announce memory finding
 - [A parked read of a resumed group reads its budget without re-syncing](/quest/m2/recover-budget.md) - measure-first resume cost
-- [Transcode rungs scale off the runtime](/quest/m2/transcode-rungs.md) - the audit's transcode findings

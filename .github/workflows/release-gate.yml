@@ -81,6 +81,7 @@ jobs:
               - "Cargo.toml"
               - "Cargo.lock"
               - "rust-toolchain.toml"
+              - "sh/rs/android-test.sh"
               - ".github/workflows/android.yml"
             # Anything a published API is built from, including the lockfiles,
             # since a bumped dependency can change a re-exported type.
@@ -117,6 +118,7 @@ jobs:
               - "cpp/moq/cmake/moq-ffi.cmake"
               - "Cargo.lock"
               - ".github/workflows/c.yml"
+              - ".github/actions/uniffi-bindgen/**"
             cpp:
               - "cpp/moq/**"
               - "cpp/justfile"
@@ -128,6 +130,7 @@ jobs:
               - "doc/lib/samples.sh"
               - "Cargo.lock"
               - ".github/workflows/cpp.yml"
+              - ".github/actions/uniffi-bindgen/**"
             # A backported change to the interop harness itself; nightly covers main.
             interop:
               - "test/lib/**"
@@ -200,6 +203,8 @@ jobs:
               - "sh/go/publish-ffi.sh"
               - "rs/moq-ffi/build.sh"
               - ".cargo/config.toml"
+              # release-ffi.yml installs the Go generator through this action.
+              - ".github/actions/uniffi-bindgen/**"
             release-js:
               - "js/**"
               - ".github/workflows/release-js.yml"
@@ -239,7 +244,6 @@ jobs:
               - "rs/moq-archive/**"
               - "rs/moq-auth/**"
               - "rs/moq-cli/**"
-              - "rs/moq-clock/**"
               - "rs/moq-congestion/**"
               - "rs/moq-hls/**"
               - "rs/moq-ice/**"
@@ -395,7 +399,6 @@ jobs:
     secrets: inherit
     permissions:
       contents: read
-      id-token: write
 
   uring:
     name: io_uring
@@ -461,7 +464,6 @@ jobs:
     uses: ./.github/workflows/release-kt-lib.yml
     permissions:
       contents: read
-      actions: read
 
   release-swift-lib:
     name: Release Swift Lib

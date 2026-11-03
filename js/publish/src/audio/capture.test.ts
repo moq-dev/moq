@@ -559,12 +559,20 @@ test("a failed encoder stays failed until the capture source changes", async () 
 	const capture = new Capture({ enabled, source: source as never });
 	const track = new Moq.Track.Producer("audio").accept({ timescale: Moq.Time.Timescale.MILLI });
 	const rendition = {
+		slot: new Signal(undefined),
 		config: new Signal(undefined),
+		stats: new Signal(undefined),
 		track: new Signal<Moq.Track.Producer | undefined>(track),
+		hls: () => undefined,
+		hlsHint: new Signal(undefined),
 		close: () => {},
 	};
 	const encoder = new Encoder("audio", {
-		broadcast: { audio: () => rendition, order: new Order() } as never,
+		broadcast: {
+			audio: () => rendition,
+			order: new Order(),
+			in: { maxAge: new Signal(undefined), onDemand: new Signal(false) },
+		} as never,
 		capture,
 		enabled,
 	});
