@@ -12,9 +12,11 @@
 //! The peer learns of new streams from the broadcast's track listing, which needs
 //! moq-lite-07 on every hop. See `doc/concept/socket.md` for the convention.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use std::task::{Poll, ready};
+
+use hashlink::LinkedHashMap;
 
 use crate::{Error, Instance, Path, Pattern, Patterns};
 
@@ -137,10 +139,11 @@ pub struct Bi {
 struct Listing {
 	/// The peer's listing, opened by the first accept or bi open.
 	tracks: Option<broadcast::Tracks>,
-	/// Uni streams the peer opened, not yet accepted.
-	uni: VecDeque<Arc<str>>,
+	/// Uni streams the peer opened, not yet accepted, in order. A stream the peer withdraws
+	/// unfinished leaves, so these hold no more than the peer lists plus what it finished.
+	uni: LinkedHashMap<Arc<str>, ()>,
 	/// Bi streams the peer opened, with the opener's track info, not yet accepted.
-	bi: VecDeque<(Arc<str>, track::Info)>,
+	bi: LinkedHashMap<Arc<str>, track::Info>,
 	/// This side's bi opens waiting for an answer, and whether the peer listed it.
 	opening: HashMap<Arc<str>, bool>,
 	/// How the listing ended: `Ok` once the peer's broadcast ended, or why it failed.
@@ -184,24 +187,36 @@ impl Listing {
 					return;
 				}
 			};
-			// Only additions open streams; a stream ends through its own track.
-			let TracksEvent::Added { name, info } = event else {
-				continue;
+			// A finished stream stays readable, so only a withdrawal takes one back.
+			let (name, info) = match event {
+				TracksEvent::Added { name, info } => (name, Some(info)),
+				TracksEvent::Removed { name } => (name, None),
+				TracksEvent::Synced | TracksEvent::Finished { .. } => continue,
 			};
 			// A track outside the scheme is the application's own.
 			let Some((opener, kind, stream)) = parse(&name) else {
 				continue;
 			};
-			match (opener == role, kind) {
-				(false, Kind::Uni) => self.uni.push_back(stream.into()),
-				(false, Kind::Bi) => self.bi.push_back((stream.into(), info)),
-				(true, Kind::Bi) => {
+			match (opener == role, kind, info) {
+				(false, Kind::Uni, Some(_)) => {
+					self.uni.replace(stream.into(), ());
+				}
+				(false, Kind::Uni, None) => {
+					self.uni.remove(stream);
+				}
+				(false, Kind::Bi, Some(info)) => {
+					self.bi.replace(stream.into(), info);
+				}
+				(false, Kind::Bi, None) => {
+					self.bi.remove(stream);
+				}
+				(true, Kind::Bi, info) => {
 					if let Some(answered) = self.opening.get_mut(stream) {
-						*answered = true;
+						*answered = info.is_some();
 					}
 				}
 				// This side's uni streams live only in its own broadcast.
-				(true, Kind::Uni) => {}
+				(true, Kind::Uni, _) => {}
 			}
 		}
 	}
@@ -289,11 +304,25 @@ impl Socket {
 	/// [`Error::Duplicate`] when this side already opened a bi stream of that name.
 	pub fn open_bi(&self, name: &str, info: impl Into<Option<track::Info>>) -> Result<kio::Pending<OpenBi>, Error> {
 		let name: Arc<str> = name.into();
-		let producer = self
+		// Registered first, so a poll that reads the peer's answer before this returns keeps it.
+		{
+			let mut listing = self.inner.listing.lock();
+			if listing.opening.contains_key(&name) {
+				return Err(Error::Duplicate);
+			}
+			listing.opening.insert(name.clone(), false);
+		}
+		let producer = match self
 			.inner
 			.local
-			.create_track(track_name(self.inner.role, Kind::Bi, &name), info)?;
-		self.inner.listing.lock().opening.insert(name.clone(), false);
+			.create_track(track_name(self.inner.role, Kind::Bi, &name), info)
+		{
+			Ok(producer) => producer,
+			Err(err) => {
+				self.inner.listing.lock().opening.remove(&name);
+				return Err(err);
+			}
+		};
 		Ok(kio::Pending::new(OpenBi {
 			inner: self.inner.clone(),
 			name,
@@ -306,7 +335,7 @@ impl Socket {
 		let inner = &self.inner;
 		let mut listing = inner.listing.lock();
 		listing.drain(waiter, inner.role, &inner.remote);
-		if let Some(name) = listing.uni.pop_front() {
+		if let Some((name, ())) = listing.uni.pop_front() {
 			drop(listing);
 			return Poll::Ready(
 				match inner.remote.track(&track_name(inner.role.peer(), Kind::Uni, &name)) {
@@ -399,6 +428,13 @@ impl Socket {
 	/// End the socket, retracting this side's broadcast.
 	pub fn close(&self) {
 		self.inner.close(Closed::Local);
+	}
+}
+
+impl Drop for Socket {
+	fn drop(&mut self) {
+		// A pending bi open still holds the shared half, but not the socket.
+		self.inner.local.close();
 	}
 }
 

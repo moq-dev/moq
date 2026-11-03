@@ -290,3 +290,61 @@ async fn a_dial_takes_only_its_own_answer() {
 	assert_eq!(bob_accepted.id(), "bob");
 	assert_ne!(bob_accepted.remote().info().instance, alice.remote().info().instance);
 }
+
+/// A stream the peer withdraws unfinished before it is accepted is never handed out,
+/// while one it finished still is.
+#[kio::test]
+async fn a_withdrawn_stream_is_not_accepted() {
+	let fixture = Fixture::new().await;
+	let mut listener = Listener::new(&fixture.listener, "room").unwrap();
+	let (dialer, accepted) = connect(&fixture.dialer, &mut listener, "alice").await;
+
+	let gone = dialer.open_uni("gone", None).unwrap();
+	let done = dialer.open_uni("done", None).unwrap();
+	send(&done, b"finished");
+	done.finish().unwrap();
+	// Let the listener's listing hear of both before either ends.
+	assert!(kio::clock::timeout(SETTLE, accepted.accept_bi()).await.is_err());
+	drop(gone);
+	drop(done);
+	// And of the withdrawal.
+	assert!(kio::clock::timeout(SETTLE, accepted.accept_bi()).await.is_err());
+
+	let uni = kio::clock::timeout(TIMEOUT, accepted.accept_uni())
+		.await
+		.expect("accept timeout")
+		.unwrap()
+		.expect("a stream");
+	assert_eq!(&*uni.name, "done");
+	assert!(
+		kio::clock::timeout(SETTLE, accepted.accept_uni()).await.is_err(),
+		"a withdrawn stream was accepted"
+	);
+}
+
+/// Opening a bi stream of a name still being opened fails without disturbing the first,
+/// and dropping the socket ends it for the peer even while an open is pending.
+#[kio::test]
+async fn a_pending_open_neither_doubles_nor_outlives_its_socket() {
+	let fixture = Fixture::new().await;
+	let mut listener = Listener::new(&fixture.listener, "room").unwrap();
+	let (dialer, accepted) = connect(&fixture.dialer, &mut listener, "alice").await;
+
+	let first = dialer.open_bi("chat", None).unwrap();
+	assert!(matches!(dialer.open_bi("chat", None), Err(moq_net::Error::Duplicate)));
+	let (opened, answered) = kio::clock::timeout(TIMEOUT, async { futures::join!(first, accepted.accept_bi()) })
+		.await
+		.expect("bi timeout");
+	opened.expect("open");
+	answered.expect("accept").expect("a stream");
+
+	let pending = dialer.open_bi("unanswered", None).unwrap();
+	drop(dialer);
+	assert_eq!(
+		kio::clock::timeout(TIMEOUT, accepted.closed())
+			.await
+			.expect("socket open"),
+		Closed::Remote
+	);
+	drop(pending);
+}
