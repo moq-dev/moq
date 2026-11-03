@@ -462,14 +462,15 @@ run_lane() {
                 # processes. Trapped, it exits once they do, so a cancel
                 # returns only after the whole tree has exited.
                 trap 'exit 143' TERM
-                # Export only the phase's inputs and functions to the launcher.
                 # Admission belongs to the module, not its command name or lane:
                 # the bun lane mixes formatters with builds and tooling tests.
                 export action rs_list js_list large_base
-                export -f files step
                 gate=()
                 [[ ! -v "quick[$module]" || "$phase" == test ]] || gate+=(--quick)
-                bash sh/local.sh "${gate[@]}" bash -euo pipefail -c 'step "$@"' -- "$phase" "$module"
+                # systemd scopes cannot carry exported Bash functions, so pass
+                # the phase's function source as the script instead.
+                script=$(declare -f files step)
+                bash sh/local.sh "${gate[@]}" bash -euo pipefail -c "$script"$'\n''step "$@"' -- "$phase" "$module"
             )
             status=$?
             set -e

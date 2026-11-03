@@ -303,7 +303,9 @@ class QueryTests(unittest.TestCase):
             with self.subTest(action=action):
                 self.stub_ci()
                 (self.repo / "sh/local.sh").write_text("""#!/usr/bin/env bash
-[[ "${LOCAL_SUPERVISED:-}" == 1 ]] || printf 'admit %s\\n' "$*" >>"$CALLS"
+[[ "${LOCAL_SUPERVISED:-}" == 1 ]] || printf 'admit %s %s %s\\n' "$1" "${@: -2:1}" "${@: -1}" >>"$CALLS"
+# A systemd scope does not preserve exported Bash functions.
+unset -f files step
 export LOCAL_SUPERVISED=1
 [[ "$1" != --quick ]] || shift
 exec "$@"
