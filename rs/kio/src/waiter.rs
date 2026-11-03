@@ -47,8 +47,13 @@ pub struct Waiter {
 	noop: bool,
 }
 
-/// Lists a waiter remembers being parked on. A relay's busiest tasks park on up to 8.
-const PARKED: usize = 8;
+/// Lists a waiter remembers being parked on. A relay session's control and serving tasks
+/// park on more than 8 (stream accepts, deadlines, the auth link, expiry landings, channel
+/// closes), and each list past the last remembered stacks a duplicate on every poll. 16
+/// holds them: in the chat fan-out over the memory transport, 8 slots cost 3.9% more
+/// instructions per delivered group and 12 or 32 cost 1.1-1.7% more, since every
+/// registration searches the slots.
+const PARKED: usize = 16;
 
 impl Waiter {
 	/// Create a new waiter from an async [`Waker`].
