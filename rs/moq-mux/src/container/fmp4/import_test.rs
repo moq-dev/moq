@@ -2747,7 +2747,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 				.json_stream::<serde_json::Value>(track, crate::json::Config::default())
 				.unwrap();
 			stream
-				.append(moq_net::Timed::from(&serde_json::json!("before")).at(catalog.clock().now()))
+				.append(&serde_json::json!("before"), catalog.clock().now())
 				.unwrap();
 			Some(stream)
 		}
@@ -2763,9 +2763,7 @@ async fn join_after(earlier: Earlier, start_us: u64) {
 	fmp4.decode(&live_session(start_us, 20)).unwrap();
 	let after = clock.now().as_micros();
 	if let Some(stream) = data.as_mut() {
-		stream
-			.append(moq_net::Timed::from(&serde_json::json!("after")).at(catalog.clock().now()))
-			.unwrap();
+		stream.append(&serde_json::json!("after"), catalog.clock().now()).unwrap();
 	}
 	fmp4.finish().unwrap();
 

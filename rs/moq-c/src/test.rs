@@ -20,6 +20,13 @@ fn read_timestamp(timestamp: *const moq_timestamp) -> Option<moq_timestamp> {
 	unsafe { timestamp.as_ref() }.copied()
 }
 
+/// The broadcast clock's current time, which every write on the broadcast is stamped from.
+fn catalog_now(broadcast: u32) -> moq_timestamp {
+	let mut now = moq_timestamp::default();
+	assert_eq!(unsafe { moq_publish_catalog_now(broadcast, &mut now) }, 0);
+	now
+}
+
 /// A ten-second max delay, the media consumers' usual budget here.
 const TEN_SECONDS: moq_delay = moq_delay {
 	min_us: 0,
@@ -2592,14 +2599,22 @@ fn json_snapshot_publish_consume() {
 
 	let mut last = 0;
 	for expected in [r#"{"a":1}"#, r#"{"a":2}"#] {
+		// Nothing stamps a write for the caller, so a NULL timestamp publishes nothing.
 		assert_eq!(
 			unsafe {
 				moq_publish_json_snapshot_update(
 					producer,
-					expected.as_ptr() as *const c_char,
-					expected.len(),
+					r#"{"a":0}"#.as_ptr() as *const c_char,
+					7,
 					std::ptr::null(),
 				)
+			},
+			MOQ_ERROR_INVALID_POINTER
+		);
+		let now = catalog_now(broadcast);
+		assert_eq!(
+			unsafe {
+				moq_publish_json_snapshot_update(producer, expected.as_ptr() as *const c_char, expected.len(), &now)
 			},
 			0
 		);
@@ -2610,7 +2625,6 @@ fn json_snapshot_publish_consume() {
 			timestamp: std::ptr::null(),
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
-		// The producer stamps each value with the broadcast clock.
 		let at = read_timestamp(value.timestamp).expect("a stamped value is timed");
 		assert!(at.value >= last);
 		last = at.value;
@@ -2660,15 +2674,16 @@ fn json_stream_publish_consume() {
 
 	let mut last = 0;
 	for expected in [r#"{"n":0}"#, r#"{"n":1}"#, r#"{"n":2}"#] {
+		// Nothing stamps a write for the caller, so a NULL timestamp appends nothing.
 		assert_eq!(
 			unsafe {
-				moq_publish_json_stream_append(
-					producer,
-					expected.as_ptr() as *const c_char,
-					expected.len(),
-					std::ptr::null(),
-				)
+				moq_publish_json_stream_append(producer, r#"{"n":-1}"#.as_ptr() as *const c_char, 8, std::ptr::null())
 			},
+			MOQ_ERROR_INVALID_POINTER
+		);
+		let now = catalog_now(broadcast);
+		assert_eq!(
+			unsafe { moq_publish_json_stream_append(producer, expected.as_ptr() as *const c_char, expected.len(), &now) },
 			0
 		);
 		let value_id = id(value_cb.recv());
@@ -2678,7 +2693,6 @@ fn json_stream_publish_consume() {
 			timestamp: std::ptr::null(),
 		};
 		assert_eq!(unsafe { moq_consume_json_value(value_id, &mut value) }, 0);
-		// The producer stamps each value with the broadcast clock.
 		let at = read_timestamp(value.timestamp).expect("a stamped value is timed");
 		assert!(at.value >= last);
 		last = at.value;
@@ -2690,7 +2704,7 @@ fn json_stream_publish_consume() {
 		assert_eq!(moq_consume_json_value_free(value_id), 0);
 	}
 
-	// A caller's timestamp replaces the clock's, floored to the track's millisecond scale.
+	// A timestamp at another scale is floored to the track's milliseconds.
 	let expected = r#"{"n":3}"#;
 	let at = moq_timestamp {
 		value: (last + 1_000) * 90 + 45,
@@ -7521,6 +7535,59 @@ fn json_tracks_are_advertised_in_the_catalog() {
 	assert!(published_catalog(broadcast).json.tracks.is_empty());
 
 	assert_eq!(moq_publish_close(broadcast), 0);
+	assert_eq!(moq_origin_close(origin), 0);
+}
+
+/// Media and data stamped from the broadcast clock share one epoch, so a JSON track gives the
+/// media no `delay`: a media frame trails no data write.
+#[test]
+fn a_shared_epoch_gives_media_no_delay() {
+	let origin = id(moq_origin_create());
+	let broadcast = publish_broadcast(origin, b"shared-epoch");
+	let before: Vec<String> = published_catalog(broadcast).audio.renditions.keys().cloned().collect();
+	let media = id(publish_audio(
+		broadcast,
+		moq_audio_format::MOQ_AUDIO_FORMAT_OPUS,
+		&opus_head(),
+		None,
+	));
+	let name = (published_catalog(broadcast).audio.renditions.keys())
+		.find(|name| !before.contains(name))
+		.expect("rendition listed")
+		.clone();
+	let status = b"status";
+	let json = id(unsafe {
+		moq_publish_json_snapshot(
+			broadcast,
+			status.as_ptr() as *const c_char,
+			status.len(),
+			&moq_json_snapshot_config { deltas: true },
+		)
+	});
+
+	let now = catalog_now(broadcast);
+	let value = br#"{"live":true}"#;
+	assert_eq!(
+		unsafe { moq_publish_json_snapshot_update(json, value.as_ptr() as *const c_char, value.len(), &now) },
+		0
+	);
+	let start = moq_net::Timestamp::try_from(now).unwrap().as_micros() as u64;
+	write_opus(media, start, 50, 100);
+
+	let delay = audio_rendition(broadcast, &name).delay;
+	assert!(delay.unwrap_or_default().is_zero(), "{delay:?}");
+
+	assert_eq!(
+		unsafe { moq_publish_catalog_now(broadcast, std::ptr::null_mut()) },
+		MOQ_ERROR_INVALID_POINTER
+	);
+	assert_eq!(moq_publish_json_snapshot_finish(json), 0);
+	assert_eq!(moq_publish_media_finish(media), 0);
+	assert_eq!(moq_publish_close(broadcast), 0);
+	assert!(
+		unsafe { moq_publish_catalog_now(broadcast, &mut moq_timestamp::default()) } < 0,
+		"a closed broadcast has no clock"
+	);
 	assert_eq!(moq_origin_close(origin), 0);
 }
 

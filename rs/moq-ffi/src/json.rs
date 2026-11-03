@@ -149,7 +149,7 @@ impl MoqJsonSnapshotProducer {
 	/// The catalog carries `json.tracks.<name>` (`mode: snapshot`) for as long as the producer
 	/// lives; finishing or dropping it retires the entry. Takes
 	/// over `track`, whose handle is closed afterward. Errors if the catalog already carries an
-	/// entry under the track's name.
+	/// entry under the track's name, or if `track` has no timescale, since every update is timed.
 	#[uniffi::constructor]
 	pub fn new(
 		broadcast: &MoqBroadcastProducer,
@@ -173,17 +173,15 @@ impl MoqJsonSnapshotProducer {
 
 	/// Publish a new value, encoded as a snapshot or delta automatically. `value` is a JSON
 	/// document. A no-op if unchanged from the previous update.
-	/// `timestamp` is on the broadcast clock; null publishes untimed.
-	#[uniffi::method(default(timestamp = None))]
-	pub fn update(&self, value: String, timestamp: Option<MoqTimestamp>) -> Result<(), MoqError> {
+	/// `timestamp` is on the broadcast clock, which
+	/// [`MoqMediaCatalogProducer::now`](crate::media::MoqMediaCatalogProducer::now) reads.
+	pub fn update(&self, value: String, timestamp: MoqTimestamp) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let value: Value = serde_json::from_str(&value)?;
+		let timestamp = timestamp.try_into()?;
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		producer.update(moq_net::Timed {
-			value: &value,
-			at: timestamp.map(TryInto::try_into).transpose()?,
-		})?;
+		producer.update(&value, timestamp)?;
 		Ok(())
 	}
 
@@ -311,7 +309,8 @@ impl MoqJsonStreamProducer {
 	///
 	/// The catalog carries `json.tracks.<name>` (`mode: stream`) for as long as the producer
 	/// lives. Takes over `track`, whose handle is closed afterward. Errors if the catalog already
-	/// carries an entry under the track's name.
+	/// carries an entry under the track's name, or if `track` has no timescale, since every append
+	/// is timed.
 	#[uniffi::constructor]
 	pub fn new(broadcast: &MoqBroadcastProducer, track: &MoqTrackProducer) -> Result<Arc<Self>, MoqError> {
 		let _guard = crate::ffi::enter();
@@ -325,17 +324,15 @@ impl MoqJsonStreamProducer {
 	}
 
 	/// Append one record to the log. `value` is a JSON document.
-	/// `timestamp` is on the broadcast clock; null publishes untimed.
-	#[uniffi::method(default(timestamp = None))]
-	pub fn append(&self, value: String, timestamp: Option<MoqTimestamp>) -> Result<(), MoqError> {
+	/// `timestamp` is on the broadcast clock, which
+	/// [`MoqMediaCatalogProducer::now`](crate::media::MoqMediaCatalogProducer::now) reads.
+	pub fn append(&self, value: String, timestamp: MoqTimestamp) -> Result<(), MoqError> {
 		let _guard = crate::ffi::enter();
 		let value: Value = serde_json::from_str(&value)?;
+		let timestamp = timestamp.try_into()?;
 		let mut guard = self.inner.lock().unwrap();
 		let producer = guard.as_mut().ok_or(MoqError::Closed)?;
-		producer.append(moq_net::Timed {
-			value: &value,
-			at: timestamp.map(TryInto::try_into).transpose()?,
-		})?;
+		producer.append(&value, timestamp)?;
 		Ok(())
 	}
 

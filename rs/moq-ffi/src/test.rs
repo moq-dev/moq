@@ -1334,56 +1334,52 @@ async fn subscribe(broadcast: &MoqBroadcastProducer, name: &str) -> Arc<MoqTrack
 }
 
 #[tokio::test(start_paused = true)]
-async fn data_writes_preserve_optional_timestamps() {
+async fn data_writes_preserve_the_callers_timestamp() {
 	// A 90 kHz tick, which no microsecond count holds exactly.
-	for timestamp in [
-		None,
-		Some(MoqTimestamp {
-			value: 123_457,
-			scale: 90_000,
-		}),
-	] {
-		for kind in ["json snapshot", "json stream"] {
-			let broadcast = MoqBroadcastProducer::new().unwrap();
-			let track = broadcast
-				.publish_track(
-					"data".into(),
-					Some(MoqTrackInfo {
-						priority: 0,
-						max_age: None,
-						refresh: None,
-						timescale: timestamp.map(|timestamp| timestamp.scale),
-						compress: false,
-					}),
-				)
-				.unwrap();
-			let consumer = subscribe(&broadcast, "data").await;
-			let payload = b"{\"n\":1}";
-			match kind {
-				"json snapshot" => {
-					let producer =
-						MoqJsonSnapshotProducer::new(&broadcast, &track, MoqJsonSnapshotConfig { deltas: false })
-							.unwrap();
-					producer
-						.update(String::from_utf8(payload.to_vec()).unwrap(), timestamp)
+	let timestamp = MoqTimestamp {
+		value: 123_457,
+		scale: 90_000,
+	};
+	for kind in ["json snapshot", "json stream"] {
+		let broadcast = MoqBroadcastProducer::new().unwrap();
+		let track = broadcast
+			.publish_track(
+				"data".into(),
+				Some(MoqTrackInfo {
+					priority: 0,
+					max_age: None,
+					refresh: None,
+					timescale: Some(timestamp.scale),
+					compress: false,
+				}),
+			)
+			.unwrap();
+		let consumer = subscribe(&broadcast, "data").await;
+		let payload = b"{\"n\":1}";
+		match kind {
+			"json snapshot" => {
+				let producer =
+					MoqJsonSnapshotProducer::new(&broadcast, &track, MoqJsonSnapshotConfig { deltas: false })
 						.unwrap();
-					producer.finish().unwrap();
-				}
-				"json stream" => {
-					let producer = MoqJsonStreamProducer::new(&broadcast, &track).unwrap();
-					producer
-						.append(String::from_utf8(payload.to_vec()).unwrap(), timestamp)
-						.unwrap();
-					producer.finish().unwrap();
-				}
-				_ => unreachable!(),
+				producer
+					.update(String::from_utf8(payload.to_vec()).unwrap(), timestamp)
+					.unwrap();
+				producer.finish().unwrap();
 			}
-			let frame = consumer.read_frame().await.unwrap().unwrap();
-			assert_eq!(frame.payload, payload, "{kind}");
-			assert_eq!(frame.timestamp, timestamp, "{kind}");
-			assert_eq!(consumer.info().timescale, timestamp.map(|timestamp| timestamp.scale));
-			broadcast.close().unwrap();
+			"json stream" => {
+				let producer = MoqJsonStreamProducer::new(&broadcast, &track).unwrap();
+				producer
+					.append(String::from_utf8(payload.to_vec()).unwrap(), timestamp)
+					.unwrap();
+				producer.finish().unwrap();
+			}
+			_ => unreachable!(),
 		}
+		let frame = consumer.read_frame().await.unwrap().unwrap();
+		assert_eq!(frame.payload, payload, "{kind}");
+		assert_eq!(frame.timestamp, Some(timestamp), "{kind}");
+		assert_eq!(consumer.info().timescale, Some(timestamp.scale));
+		broadcast.close().unwrap();
 	}
 }
 
@@ -1469,7 +1465,7 @@ async fn json_snapshot_roundtrip() {
 	let consumer = MoqJsonSnapshotConsumer::new(&*subscribe(&broadcast, "meta").await).unwrap();
 
 	for n in 1..=4 {
-		producer.update(format!(r#"{{"a":{n}}}"#), Some(us(n * 1000))).unwrap();
+		producer.update(format!(r#"{{"a":{n}}}"#), us(n * 1000)).unwrap();
 	}
 
 	let value = kio::clock::timeout(TIMEOUT, consumer.next())
@@ -1508,7 +1504,7 @@ async fn json_snapshot_roundtrip() {
 
 	producer.finish().unwrap();
 	assert!(matches!(
-		producer.update(r#"{"a":5}"#.into(), Some(us(5000))),
+		producer.update(r#"{"a":5}"#.into(), us(5000)),
 		Err(MoqError::Closed)
 	));
 	let end = kio::clock::timeout(TIMEOUT, consumer.next())
@@ -1530,7 +1526,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 				priority: 127,
 				max_age: None,
 				refresh: Some(1),
-				timescale: None,
+				timescale: Some(1_000_000),
 				compress: false,
 			}),
 		)
@@ -1538,7 +1534,7 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 	let config = MoqJsonSnapshotConfig { deltas: true };
 	let producer = MoqJsonSnapshotProducer::new(&broadcast, &track, config.clone()).unwrap();
 	for n in 0..4 {
-		producer.update(format!(r#"{{"n":{n}}}"#), None).unwrap();
+		producer.update(format!(r#"{{"n":{n}}}"#), us(n * 1000)).unwrap();
 	}
 
 	// The join crosses the ratio, so the producer restates the value without another update. The
@@ -1574,9 +1570,9 @@ async fn json_snapshot_refreshes_for_a_joiner() {
 async fn json_demand() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let snapshot_config = MoqJsonSnapshotConfig { deltas: true };
-	let track = broadcast.publish_track("status".into(), None).unwrap();
+	let track = broadcast.publish_track("status".into(), Some(timed_info())).unwrap();
 	let snapshot = MoqJsonSnapshotProducer::new(&broadcast, &track, snapshot_config.clone()).unwrap();
-	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
 	let stream = MoqJsonStreamProducer::new(&broadcast, &track).unwrap();
 	let snapshot_demand = snapshot.demand().unwrap();
 	let stream_demand = stream.demand().unwrap();
@@ -1877,12 +1873,12 @@ async fn demand_handle_outlives_finish() {
 #[tokio::test]
 async fn json_stream_roundtrip() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("events".into(), None).unwrap();
+	let track = broadcast.publish_track("events".into(), Some(timed_info())).unwrap();
 	let producer = MoqJsonStreamProducer::new(&broadcast, &track).unwrap();
 	let consumer = MoqJsonStreamConsumer::new(&*subscribe(&broadcast, "events").await).unwrap();
 
 	for n in 0..3 {
-		producer.append(format!(r#"{{"n":{n}}}"#), None).unwrap();
+		producer.append(format!(r#"{{"n":{n}}}"#), us(n * 1000)).unwrap();
 		let value = kio::clock::timeout(TIMEOUT, consumer.next())
 			.await
 			.expect("timed out waiting for json stream record")
@@ -1892,7 +1888,7 @@ async fn json_stream_roundtrip() {
 			serde_json::from_str::<serde_json::Value>(&value.value).unwrap(),
 			serde_json::json!({ "n": n })
 		);
-		assert_eq!(value.timestamp, None, "an untimed track yields no timestamp");
+		assert_eq!(value.timestamp.map(micros), Some(n * 1000));
 	}
 	producer.finish().unwrap();
 }
@@ -1912,7 +1908,7 @@ async fn json_on_requested_track() {
 		.await
 		.expect("timed out waiting for requested track")
 		.unwrap();
-	let producer = MoqJsonStreamProducer::new(&broadcast, &request.accept(None).unwrap()).unwrap();
+	let producer = MoqJsonStreamProducer::new(&broadcast, &request.accept(Some(timed_info())).unwrap()).unwrap();
 	let track = kio::clock::timeout(TIMEOUT, subscribe)
 		.await
 		.expect("timed out waiting for the subscribe")
@@ -1920,7 +1916,7 @@ async fn json_on_requested_track() {
 		.unwrap();
 	let consumer = MoqJsonStreamConsumer::new(&track).unwrap();
 
-	producer.append(r#"{"n":1}"#.into(), None).unwrap();
+	producer.append(r#"{"n":1}"#.into(), us(1000)).unwrap();
 	let value = kio::clock::timeout(TIMEOUT, consumer.next())
 		.await
 		.expect("timed out waiting for json stream record")
@@ -4765,7 +4761,7 @@ async fn data_children(
 	[Arc<MoqTrackConsumer>; 3],
 ) {
 	let consumer = broadcast.consume().unwrap();
-	let track = |name: &str| broadcast.publish_track(name.into(), None).unwrap();
+	let track = |name: &str| broadcast.publish_track(name.into(), Some(timed_info())).unwrap();
 	let writers = (
 		MoqJsonSnapshotProducer::new(
 			broadcast,
@@ -4799,9 +4795,9 @@ async fn closing_a_broadcast_ends_its_open_data_tracks() {
 	broadcast.close().unwrap();
 	assert_left(readers).await;
 
-	assert!(matches!(json_snapshot.update("1".into(), None), Err(MoqError::Closed)));
-	assert!(matches!(json_stream.append("1".into(), None), Err(MoqError::Closed)));
-	assert!(matches!(json_window.push("1".into(), None), Err(MoqError::Closed)));
+	assert!(matches!(json_snapshot.update("1".into(), us(0)), Err(MoqError::Closed)));
+	assert!(matches!(json_stream.append("1".into(), us(0)), Err(MoqError::Closed)));
+	assert!(matches!(json_window.push("1".into(), Some(us(0))), Err(MoqError::Closed)));
 }
 
 /// A data writer released without a finish ends its track as a publisher leaving.
@@ -4819,7 +4815,7 @@ async fn dropping_an_unfinished_data_writer_ends_it() {
 #[tokio::test(start_paused = true)]
 async fn a_track_is_adopted_by_one_writer() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
-	let track = broadcast.publish_track("json".into(), None).unwrap();
+	let track = broadcast.publish_track("json".into(), Some(timed_info())).unwrap();
 	let config = || MoqJsonSnapshotConfig { deltas: false };
 	let failed = track.adopt::<MoqJsonSnapshotProducer>(|_| {
 		assert!(matches!(
@@ -8170,12 +8166,15 @@ async fn json_tracks_are_advertised_in_the_catalog() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let snapshot = MoqJsonSnapshotProducer::new(
 		&broadcast,
-		&broadcast.publish_track("status".into(), None).unwrap(),
+		&broadcast.publish_track("status".into(), Some(timed_info())).unwrap(),
 		MoqJsonSnapshotConfig { deltas: true },
 	)
 	.unwrap();
-	let stream =
-		MoqJsonStreamProducer::new(&broadcast, &broadcast.publish_track("events".into(), None).unwrap()).unwrap();
+	let stream = MoqJsonStreamProducer::new(
+		&broadcast,
+		&broadcast.publish_track("events".into(), Some(timed_info())).unwrap(),
+	)
+	.unwrap();
 
 	let catalog = published_catalog(&broadcast);
 	let entry = catalog.json.tracks.get("status").expect("snapshot track advertised");
@@ -8203,12 +8202,12 @@ async fn data_track_names_cannot_collide() {
 	let broadcast = MoqBroadcastProducer::new().unwrap();
 	let first = MoqJsonSnapshotProducer::new(
 		&broadcast,
-		&broadcast.publish_track("state".into(), None).unwrap(),
+		&broadcast.publish_track("state".into(), Some(timed_info())).unwrap(),
 		MoqJsonSnapshotConfig { deltas: false },
 	)
 	.unwrap();
 	let other = MoqBroadcastProducer::new().unwrap();
-	let track = other.publish_track("state".into(), None).unwrap();
+	let track = other.publish_track("state".into(), Some(timed_info())).unwrap();
 	assert!(
 		MoqJsonStreamProducer::new(&broadcast, &track).is_err(),
 		"a duplicate data track name should fail"
