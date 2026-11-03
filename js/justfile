@@ -178,7 +178,7 @@ p2p-bench:
 # Sweep E2EE frame size against writes in flight through the WebCrypto pump.
 e2ee-bench:
     bun install --frozen-lockfile
-    bun e2ee/bench/pump.ts
+    bun crypto/bench/pump.ts
 
 # Sweep audio renditions x raw retention through native WebCodecs in Chromium.
 raw-audio-bench:
