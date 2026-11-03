@@ -82,15 +82,14 @@ start, consumers.md swaps the first-frame pts for the group start.
   draft and the HLS, CLI, and archive docs this makes stale, including
   `doc/concept/archives.md`, whose HLS paragraph says a recording needs its
   `hls` record tracks.
-- **Open: an unhinted broadcast's interval.** moq-mux declares the interval
-  from its GOP hint, but RTMP, SRT, and file or pipe imports (`moq import` of
-  fMP4, TS, MKV, or FLV) carry none. Today their first segment declares the
-  `hls` duration, at least the 4s default grid. Options: declare the 4s
-  default for an unhinted broadcast at once, its GOPs packing or overrunning
-  (recommended, keeps ingest HLS-renderable with today's segment length);
-  declare the first complete video group, measured once; or leave an
-  unhinted broadcast not HLS-renderable, as the Catalog bullet reads.
-  Implementation waits on this answer.
+- **Measured interval (maintainer, 2026-11-03).** A publisher that knows its
+  GOP declares it as the hint. Without one (RTMP, SRT, and file or pipe
+  `moq import`), moq-mux measures each track for a second or a group,
+  whichever is longer, the window catalog `delay` is measured over since
+  [moq-dev/moq#7689](https://github.com/moq-dev/moq/pull/7689), and declares
+  the estimate. The export never falls back to a default: it waits for the
+  interval. Rejected: a fixed 4s default for unhinted broadcasts, and
+  unhinted broadcasts never becoming HLS-renderable.
 
 Public API: breaking. `hang::hls` and the per-rendition `hls` field are
 deleted, `clock` moves to `media.clock`, and `moq_mux::hls` shrinks to
