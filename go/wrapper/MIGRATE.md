@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `media.VideoInit.Lower` is a `media.Producer` ([#7699](https://github.com/moq-dev/moq/pull/7699))
+
+`Lower` is the `media.Producer` interface instead of `*media.TrackProducer`, so a `*media.TrackStreamProducer` fits too. Assigning a `*media.TrackProducer`, nil included, compiles unchanged; code that reads `Lower` back type-asserts it.
+
 ### `media.VideoInit` is a struct
 
 `media.VideoInit` is its own struct rather than an alias of the generated record, so its new `Lower` field takes a `*media.TrackProducer`. A composite literal with `Format`, `Data`, `Label`, and `Hint` compiles unchanged; build one that way where you converted a generated `MoqVideoInit`.

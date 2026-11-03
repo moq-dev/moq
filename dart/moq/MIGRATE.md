@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `VideoInit.lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
+
+`VideoInit.lower` is a `Producer` (`MoqMediaProducer`) instead of a `TrackProducer`. Pass `TrackMoqMediaProducer(producer: ...)`, or `StreamMoqMediaProducer(producer: ...)` for a byte-stream rendition.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `List<String>` instead of `List<String>?`. Remove null checks and pass `captures: []` when constructing an announcement for a filter without wildcards. Regenerate bindings and rebuild with the matching native library.

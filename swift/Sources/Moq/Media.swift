@@ -53,6 +53,19 @@ public enum Media {
             }
         }
     }
+    /// A single-track producer of either kind, such as a video rendition's `lower`.
+    public enum Producer {
+        /// Imports complete encoded frames.
+        case track(TrackProducer)
+        /// Imports a byte stream.
+        case stream(TrackStreamProducer)
+        var ffi: MoqMediaProducer {
+            switch self {
+            case .track(let producer): return .track(producer: producer.ffi)
+            case .stream(let producer): return .stream(producer: producer.ffi)
+            }
+        }
+    }
     /// An audio codec, its initialization bytes, and label.
     public typealias AudioInit = MoqAudioInit
     /// A video codec, its initialization bytes, label, and hints.
@@ -238,11 +251,12 @@ public enum Media {
         }
         /// Import complete video frames on a named or requested track.
         ///
-        /// Pass `lower`, the next lower rendition of the same source, to publish this track one
-        /// priority below it, so a bandwidth allocator funds that one first.
+        /// Pass `lower`, the next lower rendition of the same source and of either producer
+        /// kind, to publish this track one priority below it, so a bandwidth allocator funds
+        /// that one first.
         public static func video(
             broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil),
-            lower: TrackProducer? = nil
+            lower: Producer? = nil
         ) throws -> TrackProducer {
             var initData = initData
             if let lower { initData.lower = lower.ffi }
@@ -351,7 +365,7 @@ public enum Media {
         /// `lower` is as for ``TrackProducer/video(broadcast:initData:target:lower:)``.
         public static func video(
             broadcast: BroadcastProducer, initData: VideoInit, target: Target = .named(name: nil),
-            lower: TrackProducer? = nil
+            lower: Producer? = nil
         ) throws -> TrackStreamProducer {
             var initData = initData
             if let lower { initData.lower = lower.ffi }
@@ -371,6 +385,16 @@ public enum Media {
         /// access units and buffers any partial trailing frame for the next call.
         public func write(_ payload: Data) throws {
             try ffi.write(payload: payload)
+        }
+
+        /// Stop or resume publishing this rendition, advertised as its catalog `enabled`.
+        ///
+        /// Disable it when its sender stops for lack of bandwidth: this marks a discontinuity
+        /// and drops everything written until it is enabled again, so the stream may keep
+        /// flowing. Enabled again, it resumes, and advertises itself enabled, at the next
+        /// keyframe in the stream.
+        public func setEnabled(_ enabled: Bool) throws {
+            try ffi.setEnabled(enabled: enabled)
         }
 
         /// Finalize the track, publishing the last access unit still waiting for a

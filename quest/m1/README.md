@@ -147,7 +147,6 @@ per-frame CPU growth since #5926.
 - [moq-c at parity](/quest/m1/c/README.md) - the hand-written `moq-c` ships at the cut with every m1 binding feature moq-ffi gains
 - [JSON writes take a broadcast-clock timestamp](/quest/m1/json-required-timestamp.md) - every binding's JSON write requires one, moq-c's NULL fails, and C gains `moq_publish_catalog_now()`, so C media stops advertising an 8 s delay
 - [Catalog delay is the least a track trails](/quest/m1/catalog-delay-min.md) - the estimator keeps the minimum trail, so B-frame reorder never becomes `delay`
-- [Byte-stream renditions form a ladder](/quest/m1/stream-ladder.md) - moq-ffi stream producers link as `lower` and disable unfundable rungs like frame producers
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's instance, replacing the ANNOUNCE_TAKEOVER predecessor design
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07

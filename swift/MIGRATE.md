@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### `lower` is a `Media.Producer` ([#7699](https://github.com/moq-dev/moq/pull/7699))
+
+`Media.TrackProducer.video` and `Media.TrackStreamProducer.video` take `lower: Media.Producer?` instead of `TrackProducer?`. Pass `lower: .track(producer)`, or `.stream(producer)` for a byte-stream rendition.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `[String]` instead of `[String]?`. Remove optional checks and pass `captures: []` when constructing an announcement for a filter without wildcards. Rebuild with the matching MoqFFI package and native library.

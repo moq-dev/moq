@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### `moq::VideoInit::lower` takes either producer kind ([#7699](https://github.com/moq-dev/moq/pull/7699))
+
+`lower` is `std::optional<moq::MediaProducer>` instead of a `std::shared_ptr<moq::MediaTrackProducer>`. Assign `moq::MediaProducer(moq::MediaProducer::kTrack{producer})`, or `kStream` for a `moq::MediaTrackStreamProducer`.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `moq::Announce.captures` is `std::vector<std::string>` instead of an optional vector. Remove optional checks and dereferences; an empty vector means the filter has no wildcards. Regenerate bindings and rebuild with the matching native library.
