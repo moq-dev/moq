@@ -74,7 +74,7 @@ try {
 		throw new Error("the muted listener did not hold its rendition");
 	}
 	const warmup = await page.evaluate(() => globalThis.ptt.result());
-	await Bun.write(join(out, "warmup.json"), JSON.stringify({ initial, held, ...warmup }));
+	await Bun.write(join(out, "warmup.json"), JSON.stringify({ browser: browser.version(), initial, held, ...warmup }));
 	if (!warmup.audible.length) throw new Error("the tone never reached the output tap");
 	await page.evaluate(() => globalThis.ptt.reset());
 	for (let i = 0; i < 22; i++) {
@@ -88,7 +88,7 @@ try {
 	await page.waitForTimeout(5000);
 	const result: ReturnType<typeof measurement.result> = await page.evaluate(() => globalThis.ptt.result());
 	const state = await page.evaluate(() => globalThis.ptt.state());
-	await Bun.write(join(out, "presses.json"), JSON.stringify({ ...result, state, errors }));
+	await Bun.write(join(out, "presses.json"), JSON.stringify({ browser: browser.version(), ...result, state, errors }));
 	if (errors.length || result.errors.length || result.captureError || state.error)
 		throw new Error("measurement failed; see presses.json");
 } finally {
