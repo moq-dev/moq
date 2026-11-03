@@ -1736,6 +1736,8 @@ mod tests {
 		assert_eq!(client.data_recvd, 2048);
 		assert_eq!(client.local_max_data - initial_max, 0);
 
+		let transmit = Counter::new();
+		client.waits.register_transmit(&transmit);
 		let mut pending = Retransmits::default();
 		let mut recv = recv::Stream {
 			id,
@@ -1746,7 +1748,9 @@ mod tests {
 		let mut chunks = recv.read().unwrap();
 		assert_eq!(chunks.next(MESSAGE_SIZE).unwrap().unwrap().bytes.len(), MESSAGE_SIZE);
 		assert!(chunks.next(0).unwrap().is_none());
+		assert_eq!(transmit.wakes(), 0);
 		chunks.finalize();
+		assert_eq!(transmit.wakes(), 1);
 		assert!(pending.max_stream_id[Dir::Uni as usize]);
 		assert_eq!(client.local_max_data - initial_max, MESSAGE_SIZE as u64);
 	}
