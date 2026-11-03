@@ -59,13 +59,40 @@ or holds.
   refused for nonalternating switch records, so it supplies no measurement.
   Once a rerun establishes the quiet-host requirement, suggest the separate
   epoch-versus-main quest if these cached-read waits persist.
+- Decided 2026-11-03 (maintainer): repeat both historical revisions in
+  alternating order on a quiet window, with warm direct-Nix-Cargo builds,
+  per-capture host load, and no other agents running throughout, keeping the
+  workload, worker counts and capture validation. `desktop` was busy, so the
+  repeat used `nixos2` (i7-8700, 6 cores / 12 threads, no hybrid pinning,
+  `perf_event_paranoid=-1`), with a per-capture monitor of load, CPU used
+  outside the run, and other agents' tool commands.
+- That 2026-11-03 repeat found no quiet window. Of three runs, only one
+  pre-epoch run (`d854bf98b1~1`) completed its historical captures. Other
+  agents ran light tool commands during it, using 0.06 to 0.21 cores on
+  average (peak 1.0). In it, the 16-worker capture had 709 us of `GroupState`
+  wait (1.83% of 38.8 ms), all under `Consumer::poll_read_frame_once` ->
+  `poll_read_frame` -> `poll<GroupState>`. That is the stack behind the
+  epoch capture's 599 us on `desktop`, so that wait predates #6782, and the
+  `desktop` contrast (47 us before, 599 us after) is within one revision's
+  capture-to-capture spread. At 4 workers it had 9 us (1.10% of 0.82 ms). Its
+  current 4-worker capture had no `GroupState` wait; its current 16-worker
+  capture was refused for nonalternating switch records. Two other runs are
+  void: another session's moq bench builds used 5 to 6 cores throughout the
+  epoch run, whose 16-worker capture perf also refused for a dropped event,
+  and the first pre-epoch run overlapped another agent's builds. At 1 worker,
+  the relay on this CPU delivers only 20 to 23k of the 31k offered frames per
+  second (about 35% lifetime loss), so 1-worker captures on `nixos2` fail the
+  zero-loss check; they had no mutex wait. No valid epoch capture exists on
+  `nixos2`, so the share comparison has no same-host pair yet.
 
 ## Waiting
 
-- Maintainer: resolve the contrary 16-worker absolute wait before calling this
-  a no-regression result. Recommend repeating the two historical revisions in
-  alternating order with warm direct-Nix-Cargo builds, recording host load
-  per capture and verifying no other agents run throughout. Keep the
-  workload, worker counts and capture validation unchanged. Alternatively, explicitly
-  accept the share-only goal despite the increased absolute wait. No
-  production change is justified by these single captures.
+- Maintainer: a quiet benchmark window. `nixos2` and `desktop` both host
+  agent sessions and other sessions' benchmarks, so no window stayed free of
+  them for the roughly 45 minutes that two alternating pairs need (about
+  11 minutes per run, including its 5-minute base rebuild). Recommend
+  reserving one x86 host with `perf_event_paranoid=-1`, launching no agents
+  or benchmarks there for that time, then repeating the alternating pairs.
+  Alternatively, accept "no regression attributable to #6782" from the
+  pre-epoch replicate showing the same stack at a similar absolute wait.
+  No production change is justified by these captures.
