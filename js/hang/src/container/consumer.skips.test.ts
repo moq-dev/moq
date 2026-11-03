@@ -143,7 +143,7 @@ test("a backlog start waits on a successor without frames", async () => {
 test("Consumer measures each skip's span over every group left, not just the new oldest", async () => {
 	const warn = spyOn(console, "warn").mockImplementation(() => {});
 	const track = new Track.Producer("tone");
-	const delay = new Signal<Delay>({ max: Milli(30_000) });
+	const delay = new Signal<Track.Delay>({ max: Milli(30_000) });
 	const consumer = new Consumer(track.subscribe({ delay: { max: Milli(30_000) } }), {
 		format: new Format("data"),
 		delay,

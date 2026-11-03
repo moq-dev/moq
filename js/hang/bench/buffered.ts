@@ -2,7 +2,7 @@
 import { Milli } from "@moq/clock";
 import { type Group, Time, Track, Varint } from "@moq/net";
 import { Signal } from "@moq/signals";
-import { Consumer, type Delay } from "../src/container/consumer.ts";
+import { Consumer } from "../src/container/consumer.ts";
 import { Format } from "../src/container/legacy.ts";
 
 // Far past every fixture's span, so only the burst case skips anything.
@@ -39,7 +39,7 @@ function wire(group: number, frame: number): Group.Frame {
 	return { payload: payload(group, frame), timestamp: Time.Timestamp.fromMicros(timestamp(group, frame)) };
 }
 
-function open(track: Track.Producer, delay: Signal<Delay>): Player {
+function open(track: Track.Producer, delay: Signal<Track.Delay>): Player {
 	const subscriber = track.subscribe({ delay: { max: HOLD } });
 	const received: Group.Consumer[] = [];
 	const recv = subscriber.recvGroup.bind(subscriber);
@@ -102,7 +102,7 @@ async function measure(
 	publishers: number,
 	readers: number,
 ): Promise<{ ns: number; ops: number; gaps: number; warnings: number }> {
-	const delay = new Signal<Delay>({ max: HOLD });
+	const delay = new Signal<Track.Delay>({ max: HOLD });
 	// Stamped like a hang publisher's media, so the transport finds its live edge at the newest group.
 	const tracks = Array.from({ length: publishers }, (_, i) =>
 		new Track.Producer(`p${i}`).accept({ timescale: Time.Timescale.MICRO }),
