@@ -711,6 +711,11 @@
           }
           // pkgs.lib.optionalAttrs (!pkgs.stdenv.hostPlatform.isDarwin) {
             ALSA_PLUGIN_DIR = "${alsaPlugins}/lib/alsa-lib";
+            # Firefox loads these at runtime; harness.ts exposes them only to its process.
+            PLAYWRIGHT_FIREFOX_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.ffmpeg
+              pkgs.libpulseaudio
+            ];
           };
         };
 

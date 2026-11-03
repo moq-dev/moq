@@ -123,6 +123,14 @@ export function launch(args: string[] = [], engine: Engine = "chromium"): Promis
 		return firefox.launch({
 			headless: true,
 			handleSIGTERM: false,
+			// Firefox dlopens its media libraries. Keep the Nix paths on this child, so other
+			// browsers and native tools retain their own library search paths.
+			env: {
+				...process.env,
+				LD_LIBRARY_PATH: [process.env.PLAYWRIGHT_FIREFOX_LIBRARY_PATH, process.env.LD_LIBRARY_PATH]
+					.filter(Boolean)
+					.join(":"),
+			},
 			firefoxUserPrefs: { "media.autoplay.default": 1, "media.autoplay.block-webaudio": true },
 		});
 	// WebKit's WebCodecs decode through the system GStreamer. The Nix dev shell points GStreamer at

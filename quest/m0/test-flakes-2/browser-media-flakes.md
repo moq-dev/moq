@@ -1,44 +1,44 @@
-# [S] Browser buffering and Firefox audio-tone tests pass under load
+# [S] Firefox audio-tone tests pass under load
 
 ## Goal
 
-The two `harness.browser.ts` buffering tests and the Firefox player's
-audio-tone checks pass reliably in Interop and Nightly, each fixed at its
-cause under the epic's rules. The Nix dev shell runs local Firefox media
-tests without the host's libraries on `LD_LIBRARY_PATH`.
+The Firefox player's `audio tone: after resume` and `audio tone: coded-size
+growth` checks pass reliably in Interop and Nightly, fixed at their demonstrated
+cause under the epic's rules. Do not increase deadlines or weaken playback or
+tone assertions.
 
 ## Plan
 
-Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31 /quest-complete run), from [moq-dev/moq#7402](https://github.com/moq-dev/moq/pull/7402) and [moq-dev/moq#7255](https://github.com/moq-dev/moq/pull/7255). Milestone: ✅ m0 (user, "all recommended" for quests 1-8).
+Decided 2026-10-31 (user, /quest-plan of the follow-ups from the 2026-10-31
+/quest-complete run), from [moq-dev/moq#7402](https://github.com/moq-dev/moq/pull/7402)
+and [moq-dev/moq#7255](https://github.com/moq-dev/moq/pull/7255).
 
-- **Buffering tests**: `the paused play button stays clickable during
-  {audio,video} stalling` (`test/interop/clients/js/harness.browser.ts:30`,
-  at be39188000) hit their 30 s timeout on main. They passed in scheduled
-  Interop
-  [40896908858](https://github.com/moq-dev/moq/actions/runs/40896908858)
-  (2026-10-29, under 1 s each) and failed in
-  [41075505055](https://github.com/moq-dev/moq/actions/runs/41075505055)
-  (2026-10-30), and #7402 saw them time out locally on `origin/main`. They
-  still time out in
-  [41317901057](https://github.com/moq-dev/moq/actions/runs/41317901057)
-  (2026-11-01, "waiting for locator('.buffering') to be hidden"). Find
-  which wait never resolves (the `.buffering` spinner, the Pause click, or
-  `.center-play`) and whether a change between those runs caused it; the
-  fixture is `test/interop/clients/js/buffering/`. If it is a regression in
-  `@moq/watch`, fix the element, not the test.
-- **Firefox audio tone**: `audio tone: after resume` and
-  `audio tone: coded-size growth` (the `audio tone` check in `measure`,
-  `test/interop/clients/js/media.ts:604`, reached from the `after resume`
-  and `coded-size growth` steps at `:1171` and `:1100`) flake under host
-  load with either media fixture: #7255 measured main's fixture at 2/3 for
-  `rename,pause`. Run the Firefox lane
-  (`just test media --media-engines firefox`) under load to find what the
-  tone check samples too early.
-- **Dev shell**: in the Nix dev shell, Firefox needs libavcodec and
-  libpulse for media; CI installs them, and #7255 had to expose the host's
-  through `LD_LIBRARY_PATH`. Provide them to the Playwright Firefox from the
-  flake, scoped to the test launch rather than the whole shell if that is
-  simpler.
+[moq-dev/moq#7716](https://github.com/moq-dev/moq/pull/7716) handles the other
+two original goals:
+
+- The buffering fixture omitted the video configuration signal introduced by
+  [moq-dev/moq#7155](https://github.com/moq-dev/moq/pull/7155). The effect threw
+  before subscribing to Pause, leaving the spinner visible forever. Both
+  failures reproduce on current main; supplying the fixture signal fixes them.
+  This correction is identical to the fixture change already proposed in
+  [moq-dev/moq#7672](https://github.com/moq-dev/moq/pull/7672); no workflow
+  deadline change is included here.
+- The Nix shell supplies libavcodec and libpulse only to Playwright Firefox's
+  launch environment. Without them, the local player fails its H.264 capability
+  probe before playback.
+
+The tone failures remain unconfirmed on current source. The original report
+measured main's fixture at 2/3 for `rename,pause`, failing during coded-size
+growth. Re-read `test/interop/clients/js/media.ts` and the current scheduled
+evidence before changing measurement: `measurePlayback` already waits for a
+running context and a filled audio ring, without waiting for a tone. The
+[2026-11-02 Nightly](https://github.com/moq-dev/moq/actions/runs/41483654426/job/125408204778)
+passed resize and resume tone checks; it failed a separate incumbent fallback.
+A passing run does not establish the cause of the reported tone failure.
+
+The JS pause/resume cause in
+[moq-dev/moq#7709](https://github.com/moq-dev/moq/pull/7709) is separate from
+this measurement goal. Its passing IETF cells do not establish this goal.
 
 Public API: none. Wire: none.
 

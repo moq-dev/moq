@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import type MoqWatch from "@moq/watch/element";
 import { createServer } from "vite";
 import { worklet } from "../../../../js/common/vite-plugin-worklet";
-import { launch, pause } from "./harness";
+import { launch, open, pause, throwPageErrors } from "./harness";
 
 test("pause activates its button when a canvas intercepts pointer input", async () => {
 	const browser = await launch();
@@ -36,10 +36,14 @@ for (const stall of ["audio", "video"]) {
 		await server.listen();
 		const browser = await launch();
 		try {
-			const page = await browser.newPage();
-			await page.goto(`${server.resolvedUrls?.local[0]}?${stall === "video" ? "video" : ""}`);
+			const [page, errors] = await open(
+				browser,
+				`${server.resolvedUrls?.local[0]}?${stall === "video" ? "video" : ""}`,
+				"buffering",
+			);
 			const spinner = page.locator(".buffering");
 			await spinner.waitFor({ state: "visible" });
+			throwPageErrors(errors);
 			await page.getByRole("button", { name: "Pause", exact: true }).click();
 			await page.locator('body[data-paused="true"]').waitFor();
 			await spinner.waitFor({ state: "hidden" });
@@ -48,6 +52,7 @@ for (const stall of ["audio", "video"]) {
 			await page.locator(".center-play").click({ timeout: 5000 });
 			await page.locator('body[data-paused="false"]').waitFor();
 			await spinner.waitFor({ state: "visible" });
+			throwPageErrors(errors);
 		} finally {
 			await browser.close();
 			await server.close();
