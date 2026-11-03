@@ -10685,7 +10685,7 @@ class FfiConverterMoqJsonSnapshotConsumer {
 abstract class MoqJsonSnapshotProducerInterface {
   MoqTrackDemand demand();
   void finish();
-  void update({required String value, MoqTimestamp? timestamp = null});
+  void update({required String value, required MoqTimestamp timestamp});
 }
 
 final _MoqJsonSnapshotProducerFinalizer = Finalizer<Pointer<Void>>((ptr) {
@@ -10762,12 +10762,12 @@ class MoqJsonSnapshotProducer implements MoqJsonSnapshotProducerInterface {
     }, moqExceptionErrorHandler);
   }
 
-  void update({required String value, MoqTimestamp? timestamp = null}) {
+  void update({required String value, required MoqTimestamp timestamp}) {
     return rustCall((status) {
       uniffi_moq_ffi_fn_method_moqjsonsnapshotproducer_update(
         uniffiClonePointer(),
         FfiConverterString.lower(value),
-        FfiConverterOptionalMoqTimestamp.lower(timestamp),
+        FfiConverterMoqTimestamp.lower(timestamp),
         status,
       );
     }, moqExceptionErrorHandler);
@@ -10905,7 +10905,7 @@ class FfiConverterMoqJsonStreamConsumer {
 }
 
 abstract class MoqJsonStreamProducerInterface {
-  void append({required String value, MoqTimestamp? timestamp = null});
+  void append({required String value, required MoqTimestamp timestamp});
   MoqTrackDemand demand();
   void finish();
 }
@@ -10962,12 +10962,12 @@ class MoqJsonStreamProducer implements MoqJsonStreamProducerInterface {
     }
   }
 
-  void append({required String value, MoqTimestamp? timestamp = null}) {
+  void append({required String value, required MoqTimestamp timestamp}) {
     return rustCall((status) {
       uniffi_moq_ffi_fn_method_moqjsonstreamproducer_append(
         uniffiClonePointer(),
         FfiConverterString.lower(value),
-        FfiConverterOptionalMoqTimestamp.lower(timestamp),
+        FfiConverterMoqTimestamp.lower(timestamp),
         status,
       );
     }, moqExceptionErrorHandler);
@@ -21951,8 +21951,7 @@ void _checkApiChecksums() {
       42593) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotproducer_update() !=
-      41112) {
+  if (uniffi_moq_ffi_checksum_method_moqjsonsnapshotproducer_update() != 7688) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonstreamconsumer_cancel() != 29308) {
@@ -21961,7 +21960,7 @@ void _checkApiChecksums() {
   if (uniffi_moq_ffi_checksum_method_moqjsonstreamconsumer_next() != 21257) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_append() != 57310) {
+  if (uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_append() != 60414) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_method_moqjsonstreamproducer_demand() != 52854) {
@@ -22441,14 +22440,13 @@ void _checkApiChecksums() {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqjsonsnapshotproducer_new() !=
-      14914) {
+      37949) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqjsonstreamconsumer_new() != 3025) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
-  if (uniffi_moq_ffi_checksum_constructor_moqjsonstreamproducer_new() !=
-      20445) {
+  if (uniffi_moq_ffi_checksum_constructor_moqjsonstreamproducer_new() != 2022) {
     throw UniffiInternalError.panicked("UniFFI API checksum mismatch");
   }
   if (uniffi_moq_ffi_checksum_constructor_moqjsonwindowconsumer_new() !=

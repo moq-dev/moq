@@ -4,6 +4,11 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON writes refuse a NULL timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`moq_publish_json_snapshot_update` and `moq_publish_json_stream_append` fail with `MOQ_ERROR_INVALID_POINTER` and publish nothing on a NULL `timestamp`, instead of stamping the broadcast clock's current time.
+Read the broadcast clock with the new `moq_publish_catalog_now(broadcast, &now)` and stamp both media frames and JSON writes from it, so every track shares its epoch; media on a timeline of its own advertises the gap to the JSON tracks as catalog `delay`. The JSON window calls still stamp a NULL timestamp.
+
 ### JSON window edits take an optional timestamp
 
 `moq_publish_json_window_push` and `moq_publish_json_window_pop` take a final

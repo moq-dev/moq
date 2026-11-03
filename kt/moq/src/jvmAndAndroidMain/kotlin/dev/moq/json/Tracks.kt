@@ -4,10 +4,14 @@ package dev.moq.json
 // producer takes over a `dev.moq.TrackProducer` (the snapshot and stream
 // producers also advertise it in the broadcast's catalog, which has no window
 // mode), and a consumer takes over a `dev.moq.TrackConsumer` that has not read
-// a group yet. Compression is the track's, set through `TrackInfo(compress = true)`:
+// a group yet. Compression is the track's, set through `TrackInfo(compress = true)`.
+// Every snapshot update and stream append takes a timestamp on the broadcast
+// clock, the epoch every track in the broadcast shares, so their track needs a
+// timescale; one without is refused:
 //
-//     val track = broadcast.publishTrack("status", TrackInfo(compress = true))
+//     val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL, compress = true))
 //     val status = SnapshotProducer(broadcast, track, SnapshotConfig())
+//     status.update(Status(state = "live"), CatalogProducer(broadcast).now())
 //     val reader = SnapshotConsumer(consumer.subscribeTrack("status", null))
 
 import dev.moq.MoqJson
@@ -69,18 +73,18 @@ inline fun <reified T> Value.decode(): Timed<T> =
     Timed(MoqJson.decodeFromString(serializer<T>(), value), timestamp)
 
 /**
- * Publish [value] as a JSON snapshot, superseding the last. A no-op when unchanged.
+ * Publish [value] as a JSON snapshot at [timestamp] on the broadcast clock, superseding the last. A
+ * no-op when unchanged.
  *
  * The `@Serializable` type is encoded with [MoqJson]. Pass an already-encoded `String` to serialize
- * with another library: the member overload takes it unchanged. [timestamp] is on the broadcast
- * clock; null is untimed.
+ * with another library: the member overload takes it unchanged.
  */
-inline fun <reified T> SnapshotProducer.update(value: T, timestamp: Timestamp? = null) {
+inline fun <reified T> SnapshotProducer.update(value: T, timestamp: Timestamp) {
     update(MoqJson.encodeToString(serializer<T>(), value), timestamp)
 }
 
-/** Append [value] at [timestamp] on the broadcast clock; null is untimed. */
-inline fun <reified T> StreamProducer.append(value: T, timestamp: Timestamp? = null) {
+/** Append [value] at [timestamp] on the broadcast clock. */
+inline fun <reified T> StreamProducer.append(value: T, timestamp: Timestamp) {
     append(MoqJson.encodeToString(serializer<T>(), value), timestamp)
 }
 

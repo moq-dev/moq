@@ -538,7 +538,7 @@ async def test_json_snapshot_roundtrip():
     consumer = moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("status"))
 
     for viewers in range(1, 5):
-        producer.update({"viewers": viewers}, timestamp=moq.Timestamp(viewers, 1_000))
+        producer.update({"viewers": viewers}, moq.Timestamp(viewers, 1_000))
 
     # Iteration yields every state in order; latest() skips the buffered third.
     value = await asyncio.wait_for(anext(consumer), timeout=5.0)
@@ -554,13 +554,13 @@ async def test_json_snapshot_roundtrip():
 
 async def test_json_stream_roundtrip():
     broadcast = moq.BroadcastProducer()
-    producer = moq.json.StreamProducer(broadcast, broadcast.publish_track("events"))
+    producer = moq.json.StreamProducer(broadcast, broadcast.publish_track("events", moq.TrackInfo(timescale=1_000)))
     consumer = moq.json.StreamConsumer(await broadcast.consume().subscribe_track("events"))
 
     for n in range(3):
-        producer.append({"n": n})
+        producer.append({"n": n}, moq.Timestamp(n, 1_000))
         record = await asyncio.wait_for(anext(consumer), timeout=5.0)
-        assert record == moq.json.Timed({"n": n}, None)
+        assert record == moq.json.Timed({"n": n}, moq.Timestamp(n, 1_000))
 
     producer.finish()
 
@@ -652,8 +652,9 @@ async def test_json_window_skips_records_outside_the_checkpoint():
 
 async def test_json_producers_report_demand():
     broadcast = moq.BroadcastProducer()
-    snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status", moq.TrackInfo(compress=True)))
-    stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("events"))
+    timed = moq.TrackInfo(timescale=1_000, compress=True)
+    snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("status", timed))
+    stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("events", timed))
     snapshot_demand = snapshot.demand()
     stream_demand = stream.demand()
     assert snapshot_demand.name == "status"
@@ -1757,12 +1758,12 @@ async def test_dynamic_and_json_handles_are_async_context_managers():
         pass
     await assert_cancelled(track_dynamic.requested_fill())
 
-    snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("state"))
+    snapshot = moq.json.SnapshotProducer(broadcast, broadcast.publish_track("state", moq.TrackInfo(timescale=1_000)))
     async with moq.json.SnapshotConsumer(await broadcast.consume().subscribe_track("state")) as snapshot_consumer:
         pass
     await assert_cancelled(anext(snapshot_consumer))
 
-    stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("log"))
+    stream = moq.json.StreamProducer(broadcast, broadcast.publish_track("log", moq.TrackInfo(timescale=1_000)))
     async with moq.json.StreamConsumer(await broadcast.consume().subscribe_track("log")) as stream_consumer:
         pass
     await assert_cancelled(anext(stream_consumer))

@@ -29,7 +29,7 @@ JSON consumers yield `moq.json.Timed(value, timestamp)`; a snapshot consumer yie
 and `await consumer.latest()` skips to the newest. A window consumer's value is a `WindowPush`, `WindowPop`, or `WindowSkip`.
 Raw tracks with a `None` timescale are untimed on both publish and receive.
 `TrackInfo(compress=True)` sends each group DEFLATE-compressed to opt-in `moq-lite-07-wip` peers; other peers, and every reader here, get the original frames. Set it on JSON tracks.
-The JSON producers' `update` / `append` accept `timestamp=moq.Timestamp(...)` (`None` for untimed).
+The JSON snapshot and stream producers' `update` / `append` require a `timestamp` on the broadcast clock, the epoch every track in the broadcast shares, so their track needs a timescale.
 Whole-frame media writes require caller time; container imports keep their own timeline handling.
 Timed raw/data tracks require caller-supplied timestamps. Use `CatalogProducer.now()` to stamp a locally
 created event on the broadcast clock; reading it fixes that clock for later media producers.
@@ -95,9 +95,9 @@ async def main():
         # Raw bytes and JSON
         events = broadcast.publish_track("events")
         events.write_frame(b'{"cmd": "ready"}')
-        status_track = broadcast.publish_track("status", moq.TrackInfo(compress=True))
+        status_track = broadcast.publish_track("status", moq.TrackInfo(timescale=1_000, compress=True))
         status = moq.json.SnapshotProducer(broadcast, status_track)
-        status.update({"state": "live", "viewers": 42})
+        status.update({"state": "live", "viewers": 42}, catalog_producer.now())
 
         publication.announce()  # each broadcast mints a fresh instance
         audio.finish()

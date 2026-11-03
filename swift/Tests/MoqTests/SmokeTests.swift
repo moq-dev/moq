@@ -444,14 +444,15 @@ final class SmokeTests: XCTestCase {
 
         let broadcast = try BroadcastProducer()
         let producer = try Json.StreamProducer<Event>(
-            broadcast: broadcast, track: try broadcast.publishTrack(name: "events"))
+            broadcast: broadcast,
+            track: try broadcast.publishTrack(name: "events", info: TrackInfo(timescale: 1_000_000)))
         let consumer = try Json.StreamConsumer<Event>(
             track: try await broadcast.consume().subscribeTrack(name: "events"))
 
         for n in 0..<3 {
-            try producer.append(Event(n: n))
+            try producer.append(Event(n: n), timestamp: micros(UInt64(n) * 1000))
             let record = try await consumer.next()
-            XCTAssertEqual(record, Json.Timed(value: Event(n: n), timestamp: nil))
+            XCTAssertEqual(record, Json.Timed(value: Event(n: n), timestamp: micros(UInt64(n) * 1000)))
         }
 
         consumer.cancel()
@@ -498,10 +499,11 @@ final class SmokeTests: XCTestCase {
 
     func testJsonProducersReportDemand() async throws {
         let broadcast = try BroadcastProducer()
+        let timed = TrackInfo(timescale: 1_000_000)
         let snapshot = try Json.SnapshotProducer<[String: Int]>(
-            broadcast: broadcast, track: try broadcast.publishTrack(name: "status"))
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "status", info: timed))
         let stream = try Json.StreamProducer<[String: Int]>(
-            broadcast: broadcast, track: try broadcast.publishTrack(name: "events"))
+            broadcast: broadcast, track: try broadcast.publishTrack(name: "events", info: timed))
         let snapshotDemand = try snapshot.demand()
         let streamDemand = try stream.demand()
         XCTAssertEqual(snapshotDemand.name, "status")

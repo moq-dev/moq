@@ -8,6 +8,10 @@ as well as by name. Values are any JSON-serializable Python object.
 
 Compression is the track's: publish it with ``TrackInfo(compress=True)``, which JSON benefits from,
 and a consumer reads it with no option of its own.
+
+Every snapshot update and stream append takes a timestamp on the broadcast clock, the epoch every
+track in the broadcast shares: read it with :meth:`moq.media.CatalogProducer.now`. Their track
+needs a timescale (``TrackInfo(timescale=1000)``); one without is refused.
 """
 
 from __future__ import annotations
@@ -91,9 +95,12 @@ class SnapshotProducer:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def update(self, value: Any, *, timestamp: Timestamp | None = None) -> None:
-        """Publish a new value. A no-op if unchanged from the previous update."""
-        self._inner.update(json.dumps(value), _opt_ts(timestamp))
+    def update(self, value: Any, timestamp: Timestamp) -> None:
+        """Publish a new value at ``timestamp`` on the broadcast clock.
+
+        A no-op if unchanged from the previous update.
+        """
+        self._inner.update(json.dumps(value), timestamp._ffi())
 
     def finish(self) -> None:
         """Finish the track, closing any open group."""
@@ -114,9 +121,9 @@ class StreamProducer:
         """A watch-only handle to whether this track has subscribers."""
         return TrackDemand(self._inner.demand())
 
-    def append(self, value: Any, *, timestamp: Timestamp | None = None) -> None:
-        """Append one record to the log."""
-        self._inner.append(json.dumps(value), _opt_ts(timestamp))
+    def append(self, value: Any, timestamp: Timestamp) -> None:
+        """Append one record to the log at ``timestamp`` on the broadcast clock."""
+        self._inner.append(json.dumps(value), timestamp._ffi())
 
     def finish(self) -> None:
         """Finish the track, closing the group."""

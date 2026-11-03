@@ -574,8 +574,8 @@ class SmokeTest {
     fun `json producer demand follows subscribers`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config).use {
-                producer ->
+            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL))
+            SnapshotProducer(broadcast, track, config).use { producer ->
                 val demand: TrackDemand = producer.demand()
                 assertEquals("status", demand.name())
                 assertEquals(null, demand.wanted())
@@ -593,10 +593,10 @@ class SmokeTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
             // A demand watcher does not own the writer; keep it alive through collection.
-            SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config).use {
-                producer ->
+            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL))
+            SnapshotProducer(broadcast, track, config).use { producer ->
                 val demand: TrackDemand = producer.demand()
-                producer.update(Status(state = "live"))
+                producer.update(Status(state = "live"), Timestamp(1uL, 1_000uL))
 
                 val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
                 while (demand.wantedChanged() == null) {}
@@ -616,13 +616,13 @@ class SmokeTest {
     fun `raw json string passes through unencoded`() = runTest {
         BroadcastProducer().use { broadcast ->
             val config = SnapshotConfig(deltas = false)
-            SnapshotProducer(broadcast, broadcast.publishTrack("status", null), config).use {
-                producer ->
-                producer.update("""{"state":"raw"}""")
+            val track = broadcast.publishTrack("status", TrackInfo(timescale = 1_000uL))
+            SnapshotProducer(broadcast, track, config).use { producer ->
+                producer.update("""{"state":"raw"}""", Timestamp(1uL, 1_000uL))
 
                 val consumer = SnapshotConsumer(broadcast.consume().subscribeTrack("status", null))
                 assertEquals(
-                    Timed(Status(state = "raw"), null),
+                    Timed(Status(state = "raw"), Timestamp(1uL, 1_000uL)),
                     consumer.valuesAs<Status>().first(),
                 )
             }

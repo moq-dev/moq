@@ -4,6 +4,10 @@ How to update your code for each breaking change, newest first.
 
 ## Unreleased
 
+### JSON writes take a broadcast-clock timestamp ([#7691](https://github.com/moq-dev/moq/pull/7691))
+
+`json.SnapshotProducer.update` and `json.StreamProducer.append` take a `required MoqTimestamp timestamp` on the broadcast clock instead of an optional one. Read it with `MoqMediaCatalogProducer(broadcast: broadcast).now()`. Their track needs a timescale, such as `MoqTrackInfo(timescale: 1000)`; one without is refused.
+
 ### Announcement captures are required ([#7484](https://github.com/moq-dev/moq/pull/7484))
 
 `Announce.captures` is `List<String>` instead of `List<String>?`. Remove null checks and pass `captures: []` when constructing an announcement for a filter without wildcards. Regenerate bindings and rebuild with the matching native library.
