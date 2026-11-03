@@ -609,7 +609,7 @@ reconnects x 64 characters, and keeps its run directory as the `bench-browser`
 artifact.
 
 The in-memory frame, retained-history, gap ledger, bandwidth allocation, cached-group
-replay, resume-history, and buffered-group paths also run directly in Chromium:
+replay, resume-history, buffered-group, and peer grant paths also run directly in Chromium:
 
 ```bash
 nix develop --command bun bench/browser/micro.ts --bench frames --out .tmp/frames.json base=/path/to/release current=. aa=.
@@ -619,6 +619,7 @@ nix develop --command bun bench/browser/micro.ts --bench bandwidth --out .tmp/ba
 nix develop --command bun bench/browser/micro.ts --bench replay --out .tmp/replay.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench resume-history --out .tmp/resume-history.json before=/path/to/main current=. aa=.
 nix develop --command bun bench/browser/micro.ts --bench buffered --out .tmp/buffered.json before=/path/to/main current=. aa=.
+nix develop --command bun bench/browser/micro.ts --bench pattern --out .tmp/pattern.json before=/path/to/main current=. aa=.
 ```
 
 Each variant uses its own workspace source and a persistent, cross-origin isolated
@@ -639,6 +640,9 @@ change, a demand change and a ceiling change until the allocator republishes, an
 peek of every reservation, checking every grant against a reference division. Its
 Rust counterpart is `cargo bench -p moq-net --features fuzz --bench bandwidth`, whose
 `BANDWIDTH_COUNTS=<iterations>` mode prints allocations and wakes per operation.
+`pattern` runs `js/pattern/bench/algebra.ts` against every checkout's `@moq/pattern`:
+the same peer grant shapes as the Rust `pattern-algebra` sweep below, reduced and
+compared against a previous grant, up to a whole `AUTH_OK`.
 The drift sweep includes untimed controls and timed groups with decode-order
 B-frames, independently varying publisher and reader counts and retained history.
 Its `time_mode` column is 0 for untimed, 1 for millisecond timestamps, and 2
@@ -682,14 +686,16 @@ route hold, from Chromium's precise memory info; `serve_us` and
 `read_us` include no setup. Bun's collector scans its
 stack conservatively, so the fixture refuses to run there.
 
-The browser smoke lane preserves one measured round of all seven fixtures, and drift,
-ledger, bandwidth, replay and buffered also run in the nightly JS benchmark leg. Timing is
+The browser smoke lane preserves one measured round of all eight fixtures, and drift,
+ledger, bandwidth, replay, buffered and pattern also run in the nightly JS benchmark leg. Timing is
 observational, with the A/A spread showing the host's noise floor.
 
 ## Pattern and container coverage
 
 Rust Criterion coverage includes `moq-pattern`'s
-`matching` (pattern count and path depth, last match and miss) and `moq-mux`'s
+`matching` (pattern count and path depth, last match and miss; and, in
+`pattern-algebra`, whole-union operations, including the worst known peer grant
+shapes swept over encoded size up to a whole `AUTH_OK`) and `moq-mux`'s
 `containers` (CMAF and Annex-B import/export). Container cases vary frame count
 and payload size; CMAF also varies track count. Separate frame and byte rates
 use the same fixtures, with byte rates counting the encoded stream size.

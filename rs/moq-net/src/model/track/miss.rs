@@ -667,7 +667,7 @@ impl Misses {
 		}) || self.budget != Some(drift.budget)
 			|| self.grace != Some(grace)
 			|| self.ended != ended;
-		let low = state.live_floor.unwrap_or(0).max(key.0);
+		let low = key.0;
 		let top = newest.min(u64::MAX - 1);
 		let mut candidates = RangeSet::new();
 		if terms {
@@ -924,6 +924,17 @@ impl Misses {
 			state.cache.watch_wall(at, waiter);
 		}
 
+		// An old cache's floor is a boundary inside a missing run, not a drift verdict
+		// for that whole run. Discard only its prefix before asking for the fresh suffix.
+		let floor = state.cache_floor(drift.budget);
+		let old: Vec<_> = asks
+			.overlapping(&(0..floor))
+			.map(|run| run.start..run.end.min(floor))
+			.collect();
+		for run in old {
+			asks.remove(run.clone());
+			self.give_up(run, given_up);
+		}
 		// Starts never rewind, so a run whose newest group is stale under this reader's
 		// budget is stale throughout.
 		let stale: Vec<ops::Range<u64>> = asks
@@ -1058,9 +1069,20 @@ impl Misses {
 
 	/// What [`Self::expire`] gives up as stale, and what arrived live, parking `waiter`.
 	fn expired(&self, state: &TrackState, drift: &Drift, waiter: &kio::Waiter) -> (RangeSet<u64>, RangeSet<u64>) {
-		let (mut stale, mut arrived) = (RangeSet::new(), RangeSet::new());
+		let floor = state.cache_floor(drift.budget);
+		// A floor raised after this fill was asked can cut through its wanted run.
+		let mut stale: RangeSet<u64> = self
+			.wanted
+			.overlapping(&(0..floor))
+			.map(|run| run.start..run.end.min(floor))
+			.collect();
+		let mut arrived = RangeSet::new();
 		let servable = &drift.edge.servable;
-		let mut next = self.wanted.iter().next().map(|run| run.start);
+		let mut next = self
+			.wanted
+			.overlapping(&(floor..u64::MAX))
+			.next()
+			.map(|run| run.start.max(floor));
 		while let Some(from) = next {
 			let bound = state.arrival(from, servable).map(|slot| slot.group.sequence);
 			let drifted = state.poll_drifted(from, servable, drift.budget, None, waiter);

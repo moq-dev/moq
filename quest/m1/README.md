@@ -150,7 +150,6 @@ per-frame CPU growth since #5926.
 - [A job's exact route continues its claim's readers](/quest/m1/announce-takeover.md) - a job's route inherits its claim's instance, replacing the ANNOUNCE_TAKEOVER predecessor design
 - [Subscribe ranges](/quest/m1/subscribe-ranges/README.md) - a lite-07 SUBSCRIBE asks for past and live ranges with absolute or relative ends, in either order, and replaces FETCH; merged ranges never starve a subscriber; relays fill misses by range, including over moq-transport
 - [Drop set](/quest/m1/drop-set.md) - each cursor judges missing groups against its own budget, so a narrow reader drops promptly and a widening re-offers groups already reported dropped on lite-07
-- [Binding subscriptions take a Delay { min, max }](/quest/m1/subscription-delay.md) - the bindings take the Rust and JS subscription Delay, and an omitted max means 0 in every one
 - [Datagram tracks](/quest/m1/datagram-tracks/README.md) - a track is datagrams or streams; datagram tracks have their own request and sequence, no ranges, no cache, and map to object ID 0 on moq-transport
 - [A step back smaller than the delay keeps the TS export](/quest/m1/ts-small-step-back.md) - audio restarts instead of regressing; video stays within its declared depth
 - [moq-boy's status loop stops on an errored track](/quest/m1/moq-boy-status-loop.md) - only schema errors are caught
@@ -161,7 +160,6 @@ per-frame CPU growth since #5926.
 - [A smaller, safer API than release](/quest/m1/api-audit/README.md) - every surface added since release has a consumer or is gone, overlapping operations are collapsed, names mirror across Rust, JS, and the bindings, and every break says how to migrate
 - [moq-crypto replaces moq-sign and moq-e2ee](/quest/m1/moq-crypto.md) - one Rust crate and one JS package hold signing and end-to-end encryption, sharing moq-net's timestamp check
 - [Register moq-dev draft 20 in the interop runner](/quest/m1/ietf-drop/README.md) - land the external registry, notes, and README correction for drafts 18, 20, and 22
-- [A lapsed request token resets with EXPIRED_AUTH_TOKEN](/quest/m1/auth-expiry-reset.md) - group streams of a lapsed grant reset with the expiry code, so a client knows to renew
 - [moq-quic's API improves on quinn's](/quest/m1/quic-api/README.md) - moq-quic and both QUIC drivers ship one mirrored API: `send::`/`recv::` namespaces, one error per direction, consuming terminal operations, plain configs, no quinn baggage
 - [On-demand JavaScript FETCH](/quest/m1/js-fetch-on-demand.md) - browser publishers answer IETF FETCH for evicted or uncached groups through the JS ranges request surface
 - [Native rung disable proof](/quest/m1/simulcast-rung-disable.md) - a shaped uplink through moq-ffi proves the top rendition stops and resumes over real BBR3 probing
@@ -171,7 +169,6 @@ per-frame CPU growth since #5926.
 - [Buffered playback subscribes in ascending order](/quest/m1/buffered-ascending.md) - a buffered `<moq-watch>` asks for the oldest group first, so a voice reply's opening arrives first, and audio's head hold shrinks to the floor
 - [Push-to-talk loses no speech](/quest/m1/push-to-talk/README.md) - consumers hold a disabled rendition, and an unmute encodes at once with the mic still open
 - [Buffered audio survives a capture stop and a disable](/quest/m1/audio-across-stop.md) - audio retained by buffered capture is still served, or expires on its own `max_age`, after capture stops or the input is disabled
-- [One audio capture feeds the bus and an encoder](/quest/m1/audio-capture-fanout.md) - a capture Producer/Consumer replaces `bus::Capture` and `publish_capture`, so the studio's audio sources feed the mix and their own tracks from one device open
 - [moq-audio routes sources into several mixes](/quest/m1/audio-mix-router.md) - several mixes with routing, mix-minus, and per-source sync offsets, for the studio's audio mixes
 - [moq-mux presents a broadcast on the publisher's timestamps](/quest/m1/presentation-timeline.md) - `moq play`'s audio-anchored playout timing as a moq-mux API the studio's broadcast sources share
 - [TS fidelity and recovery](/quest/m1/ts-reliability/README.md) - both modes have explicit profiles, automated validation, loss tests, and a dedicated guide
@@ -192,11 +189,9 @@ per-frame CPU growth since #5926.
 - [A live keyframe interval change never outruns the declared HLS duration](/quest/m1/js-hls-keyframe-duration.md) - raising a live keyframe interval, even to infinite, never pushes a segment past the declared HLS target duration, and the browser interop cell asserts the catalog `hls` field
 - [One Ed25519 public key type with one z-base-32 codec](/quest/m1/mesh-key-codec.md) - `moq_auth::mesh::EndpointId` is merged into `moq_sign::PublicKey`
 - [moqsink reports track demand only once the track is in the catalog](/quest/m1/moqsink-demand-catalog.md) - A `moqsink` request pad's `track-demand` stays null until its track is listed in the published catalog, and only then reports `wanted`
-- [A discontinuity before the first frame keeps the init's parameter sets](/quest/m1/mux-discontinuity-headers.md) - an avc3, hev1, or av01 track that marks a discontinuity before its first frame still publishes that first keyframe with its init's parameter sets
 - [Ordered reads can skip owed holes, and snapshot latest() does](/quest/m1/ordered-owed-holes.md) - moq-net's `Ordered` gains a read that skips past an owed hole to the newest buffered group, while keeping the reader's bounds
 - [A Rust relay never replays from group 0 to a lite-03/04 subscriber](/quest/m1/relay-inflight-replay.md) - A Rust relay or publisher serving a lite-03 or lite-04 SUBSCRIBE from a track copy that is still resolving starts at the newest group once the copy resolves
 - [The resume model passes its long run again](/quest/m1/resume-model-7542.md) - fix #7542's regression that drops groups a long-budget reader can still get
-- [A resume more than one group behind never hangs](/quest/m1/ietf-resume-behind.md) - a resumed read gets every group or a drop on every wire version
 - [Stats name the route instance's epoch with a type](/quest/m1/stats-epoch-type.md) - `GroupFrame::epoch` gets a dedicated type and tests stop mislabelling the instance
 
 ## Related

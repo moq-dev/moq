@@ -11,6 +11,7 @@ func init() {
 	bridge.BroadcastConsumer = func(v any) *ffi.MoqBroadcastConsumer { return v.(*BroadcastConsumer).inner }
 	bridge.TrackRequest = func(v any) *ffi.MoqTrackRequest { return v.(*TrackRequest).inner }
 	bridge.Subscription = func(v any) (*ffi.MoqSubscription, error) { return subscriptionFFI(v.(*Subscription)) }
+	bridge.Delay = func(v any) (ffi.MoqDelay, error) { return v.(Delay).ffi() }
 
 	bridge.BroadcastProducer = func(v any) *ffi.MoqBroadcastProducer { return v.(*BroadcastProducer).inner }
 	bridge.TrackProducer = func(v any) *ffi.MoqTrackProducer { return v.(*TrackProducer).inner }
