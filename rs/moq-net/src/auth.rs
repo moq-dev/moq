@@ -2441,12 +2441,14 @@ impl Gate {
 		Ok(())
 	}
 
-	/// The kind of request this gate admits, for its token's grant to cover.
+	/// The kind of request this gate admits, for its token's grant to cover. A gate on what
+	/// the peer publishes to us verifies only a PUBLISH_NAMESPACE's token; a PUBLISH's goes
+	/// straight to [`Link::verify_request`].
 	fn kind(&self) -> RequestKind {
 		match (self.discovery, self.direction) {
 			(true, _) => RequestKind::Discover,
 			(false, Direction::Publish) => RequestKind::Subscribe,
-			(false, Direction::Subscribe) => RequestKind::Publish,
+			(false, Direction::Subscribe) => RequestKind::PublishNamespace,
 		}
 	}
 
@@ -3532,6 +3534,27 @@ mod request_token_tests {
 		let auth = Request::new(Bytes::from_static(b"auth"), Default::default());
 		assert_eq!(auth.kind(), None);
 		assert_eq!(auth.path(), None);
+
+		// Each gate names the request it admits.
+		for (gate, kind) in [
+			(
+				Gate::new(handle.clone(), room.clone(), Direction::Publish),
+				RequestKind::Subscribe,
+			),
+			(
+				Gate::new(handle.clone(), room.clone(), Direction::Publish).discovery(),
+				RequestKind::Discover,
+			),
+			(
+				Gate::new(handle.clone(), room.clone(), Direction::Subscribe),
+				RequestKind::PublishNamespace,
+			),
+		] {
+			let _verdict = gate.verify(token(format!("{kind:?}").as_bytes(), 0), None);
+			let request = requests.next().await.unwrap();
+			assert_eq!(request.kind(), Some(kind));
+			assert_eq!(request.path(), Some(&room));
+		}
 	}
 
 	/// A gate its token bound verifies another token as that grant's renewal: one the acceptor
