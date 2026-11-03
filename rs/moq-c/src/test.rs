@@ -5069,9 +5069,12 @@ fn an_instance_pins_request_and_follow() {
 		)
 	});
 	let delivered = id(cb.recv());
-	let tx = unsafe { &*(cb.ptr as *const mpsc::Sender<i32>) }.clone();
-	crate::ffi::RUNTIME.spawn(async move { tx.send(i32::MAX - 1).unwrap() });
-	assert_eq!(cb.recv(), i32::MAX - 1, "the follower delivered another instance");
+	assert!(
+		cb.rx
+			.recv_timeout(moq_net::origin::Config::default().update_hold * 2)
+			.is_err(),
+		"the follower delivered another instance"
+	);
 	assert_eq!(moq_consume_close(delivered), 0);
 	assert_eq!(moq_origin_follow_cancel(task), 0);
 	assert_eq!(cb.recv_terminal(), 0, "cancel delivers terminal 0");

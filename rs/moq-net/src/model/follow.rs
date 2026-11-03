@@ -314,6 +314,8 @@ impl Following {
 			self.unseen = false;
 			let broadcast = match resolved {
 				Ok(broadcast) => broadcast,
+				// `live` stays: the end of what was handed out is still owed once the path goes
+				// offline.
 				Err(err) => {
 					self.last = None;
 					self.moved = None;
@@ -765,7 +767,8 @@ mod tests {
 	}
 
 	/// A refusal by the route that took over from a closed broadcast is not retried when that
-	/// broadcast's movement is seen: the follower waits for another instance.
+	/// broadcast's movement is seen: the follower waits for another instance, and still reports
+	/// the end of what it handed out once the path goes offline.
 	#[kio::test]
 	async fn announced_does_not_retry_a_refusal_after_a_takeover() {
 		let origin = Hop::new(1).unwrap().produce();
@@ -783,6 +786,11 @@ mod tests {
 		none(&mut announced).await;
 		let again = kio::clock::timeout(Duration::from_secs(1), dynamic.requested_broadcast()).await;
 		assert!(again.is_err(), "the refusing handler was asked again");
+
+		// The broadcast handed out before the refusal is still owed its end once the path goes
+		// offline.
+		drop(dynamic);
+		ended(&mut announced).await;
 	}
 
 	/// A path no pattern can spell is refused rather than followed through the whole scope,
