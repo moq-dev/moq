@@ -20,7 +20,6 @@ lite-07; bitrate enforcement is not part of this release.
 
 ## Required
 
-- [Sockets](/quest/m2/socket/README.md) - a generic dial/accept `Socket` in moq-net, Rust, JS, and Python, with tracks as streams; moq-boy and CARLA move onto it
 - [Announce credit](/quest/m2/announce-credit.md) - a subscriber bounds an Announce Stream's routes with credit at the wire, so a path flood never closes a session
 - [JS announced coalescing](/quest/m2/js-announced-coalesce.md) - `@moq/net`'s `Announced` keeps one pending event per path, like Rust
 - [An audio track's final flush joins its open group](/quest/m2/audio-flush-group.md) - a zero-`delay.max` subscriber gets the tail, not `Old`

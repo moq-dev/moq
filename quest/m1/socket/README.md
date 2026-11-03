@@ -18,6 +18,16 @@ one-driver lease and 1 s watchdog); announcement backpressure, which
 
 ## Plan
 
+Decided 2026-11-02 (maintainer, Kixel planning): the whole epic moves from
+m2 to m1, so the next cut publishes sockets in `@moq/net` and moq.pro's
+relays carry them. Why: Kixel's T3 Code prototype
+([moq-dev/kixel.ai T3 epic](https://github.com/moq-dev/kixel.ai/blob/main/quest/m0/t3/README.md))
+sends T3's commands over sockets, one group per message, in place of byte
+streams. `@moq/net` publishes from `release`, and accept relies on lite-07's
+Tracks stream, which only `main` has, so a backport was declined and the cut
+is the route. Byte streams, fastest-reader pacing, and the mesh libraries
+keep their own milestones.
+
 Decided 2026-11-01 with the maintainer (planning interview from moq.pro's TCP
 replacement arc):
 
@@ -71,11 +81,11 @@ announce-watch-request pairing remains in `rs/moq-boy`, `js/moq-boy`, or
 
 ## Required
 
-- [Rust sockets](/quest/m2/socket/rust.md) - `moq_net::socket` with `Listener`, `dial`, and `Socket`, plus the concept page
-- [JS sockets](/quest/m2/socket/js.md) - the same surface in `@moq/net`, interoperating with Rust
-- [Python sockets](/quest/m2/socket/py.md) - moq-ffi and `py/moq-rs` bindings, interoperating with Rust
-- [moq-boy on sockets](/quest/m2/socket/boy.md) - the emulator accepts viewers through a listener and echoes latency per socket
-- [CARLA on sockets](/quest/m2/socket/carla.md) - trucks accept drivers through a listener and ack them per socket
+- [Rust sockets](/quest/m1/socket/rust.md) - `moq_net::socket` with `Listener`, `dial`, and `Socket`, plus the concept page
+- [JS sockets](/quest/m1/socket/js.md) - the same surface in `@moq/net`, interoperating with Rust
+- [Python sockets](/quest/m1/socket/py.md) - moq-ffi and `py/moq-rs` bindings, interoperating with Rust
+- [moq-boy on sockets](/quest/m1/socket/boy.md) - the emulator accepts viewers through a listener and echoes latency per socket
+- [CARLA on sockets](/quest/m1/socket/carla.md) - trucks accept drivers through a listener and ack them per socket
 
 ## Related
 
