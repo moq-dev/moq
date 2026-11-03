@@ -32,13 +32,14 @@ check *args:
     bash sh/local.sh cargo clippy --locked --all-targets "$@" -- -D warnings
     just rs lint "$@"
 
-# `check` with clippy enforced by the `test` build. A selection can hold
-# nothing testable.
+# `check` with clippy enforced by the `test` build, which also compiles the
+# benches and examples so they are linted too. A selection can hold nothing
+# testable.
 
 # Compile, lint, and test in one build, plus everything else `check` verifies.
 [positional-arguments]
 check-test *args:
-    just rs test --no-tests=pass "$@"
+    just rs test --no-tests=pass --benches --examples "$@"
     just rs lint "$@"
 
 # Everything `check` verifies besides clippy.
@@ -293,9 +294,11 @@ media-features *args:
 # nextest kills a wedged test (`.config/nextest.toml` sets the timeout), but
 # skips doctests; `just rs doctest` covers those. clippy-driver as the workspace
 # wrapper enforces lint findings from the same compile. `--tests` builds library,
-# binary, and integration-test targets, including binary-only crates; benches and
-# examples compile and lint in Nightly's `features`. `build.warnings` denies
-# warnings without changing cargo's artifact fingerprint, unlike RUSTFLAGS.
+# binary, and integration-test targets, including binary-only crates. The gate
+# (`check-test`, sh/rs/select.sh's `test`) adds `--benches --examples` so their
+# lints fail the PR rather than Nightly; nextest's default filter leaves the
+# benches unrun. `build.warnings` denies warnings without changing cargo's
+# artifact fingerprint, unlike RUSTFLAGS.
 
 # Run library, binary, and integration tests, enforcing clippy from the same compile.
 [positional-arguments]

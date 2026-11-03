@@ -53,7 +53,7 @@ class SelectTest(unittest.TestCase):
         for github_actions in (False, True):
             for action in ("check", "check-test", "lint", "test"):
                 with self.subTest(action=action, github_actions=github_actions):
-                    suffix = f" --features {DEVICE_FEATURES} moq-tokio/webrtc" if action == "test" else ""
+                    suffix = f" --benches --examples --features {DEVICE_FEATURES} moq-tokio/webrtc" if action == "test" else ""
                     suffix += " moq-relay/io-uring" if LINUX and action == "test" else ""
                     suffix += " --timings" if github_actions and action == "test" else ""
                     self.assertIn(
@@ -263,7 +263,10 @@ class MetadataTest(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(
             self.calls.read_text().splitlines(),
-            ["rs test --package path+file:///rs/dependent#1.0.0 --package path+file:///rs/seed#1.0.0 --no-tests=pass"],
+            [
+                "rs test --package path+file:///rs/dependent#1.0.0 --package path+file:///rs/seed#1.0.0"
+                " --no-tests=pass --benches --examples"
+            ],
         )
 
     def test_malformed_metadata_stops_before_running_tests(self):

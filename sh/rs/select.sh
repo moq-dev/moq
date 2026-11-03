@@ -50,8 +50,8 @@ select_packages() {
 
     local seeds benches edges selected
     # A crate's `benches/` builds only its own bench targets, which no other crate can
-    # depend on and the test build never compiles, so it selects that crate alone
-    # (for its lint) rather than every dependent's tests.
+    # depend on, so it selects that crate alone (for its lint) rather than every
+    # dependent's tests.
     benches=$(sed -n 's|^rs/\([^/]*\)/benches/.*|\1|p' "$list")
     # A target can also sit outside its crate, as moq-cli's interop examples
     # under test/interop/clients/rust/ do, so a change in the directory of a
@@ -176,6 +176,9 @@ case "$action" in
         # A selection can hold nothing testable, and
         # nextest exits 4 on that; the whole workspace finding none really is wrong.
         [[ "$packages" == ALL ]] || flags+=(--no-tests=pass)
+        # Benches and examples join the build only to be linted; nextest's
+        # default filter leaves the benches unrun.
+        flags+=(--benches --examples)
         # CI keeps Cargo's per-crate build timings, which check.yml uploads.
         timings=()
         [[ "${GITHUB_ACTIONS:-}" != true ]] || timings=(--timings)
