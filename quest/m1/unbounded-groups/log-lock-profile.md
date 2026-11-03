@@ -41,25 +41,31 @@ or holds.
 - A 2026-11-03 rerun began on `desktop` at 0.21 one-minute load,
   with no other T3 agents running, and captured both historical bases at
   1/4/16 workers ([moq-dev/moq#7742](https://github.com/moq-dev/moq/pull/7742)).
+  At 1 worker, both historical captures had zero blocked mutex wait, so
+  their shares are undefined; this does not measure the per-frame pin cost.
   At 4 workers, `GroupState` wait fell from 8 us (0.50% of mutex wait) to
   none. At 16 workers, its share fell from 11.72% to 1.78%, but its absolute
   wait rose from 47 us to 599 us in `Consumer::poll_read_frame_once` ->
   `Cursor::poll_read_frame`. Total mutex wait rose from 0.401 ms to
   33.722 ms, so the share alone hides the contrary absolute result.
-  These single five-second captures do not establish a regression or its
-  absence. The PR retains the reduced evidence and stack diff.
-- Current `main` at the claim's source revision has group-state waits in the
-  cached read path at 4 workers in both runs (26 and 18 us), and 937 us at
-  16 workers in the first run. The second current 16-worker capture was
+  Quietness was checked before the attempt, not recorded per capture, so
+  these are candidate observations, not quiet-host proof. These single
+  five-second captures do not establish a regression or its absence. The PR retains the reduced evidence and stack diff.
+- The current source was [b5a2e8fb77](https://github.com/moq-dev/moq/commit/b5a2e8fb7716144abd756ae81cd9a780b200be0b),
+  whose tree equals main at [801fd9a2f2](https://github.com/moq-dev/moq/commit/801fd9a2f2f5c88371fa833d805620d97d372465).
+  Both 4-worker captures have group-state waits under
+  `Consumer::poll_read_frame_once<..., Prefetch::pop_cached>` (26 and 18 us),
+  with 937 us of total group-state wait at 16 workers in the first run. The second current 16-worker capture was
   refused for nonalternating switch records, so it supplies no measurement.
-  A separate epoch-versus-main investigation remains a suggested follow-up,
-  not work owned by this quest.
+  The foreground agent should plan the triggered epoch-versus-main follow-up;
+  this child was explicitly instructed not to create it.
 
 ## Waiting
 
 - Maintainer: resolve the contrary 16-worker absolute wait before calling this
   a no-regression result. Recommend repeating the two historical revisions in
-  alternating order with warm direct-Nix-Cargo builds, keeping the workload,
-  worker counts and capture validation unchanged. Alternatively, explicitly
+  alternating order with warm direct-Nix-Cargo builds, recording host load
+  per capture and verifying no other agents run throughout. Keep the
+  workload, worker counts and capture validation unchanged. Alternatively, explicitly
   accept the share-only goal despite the increased absolute wait. No
   production change is justified by these single captures.
