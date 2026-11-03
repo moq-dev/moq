@@ -441,6 +441,63 @@ async fn cross_node_close_without_hold_reannounces() {
 	assert_eq!(client, [Kind::End, Kind::Start, Kind::End]);
 }
 
+/// Relay 3 hears a broadcast published on relay 0 first over the longer path
+/// through relays 2 and 4, then 300 ms later over the shorter one through relay 1.
+#[rustfmt::skip]
+const LATE_BETTER_PATH: &[Link] = &[
+	((0, 1), ms(10)), ((1, 3), ms(300)), ((0, 2), ms(10)), ((2, 4), ms(10)), ((4, 3), ms(10)),
+];
+
+/// The relays mesh on `mesh` while a publishing client on relay 0 and a watching
+/// client on relay 3 speak `client`. Publishes a broadcast, then closes it, and
+/// returns what the watching client saw for each.
+async fn late_better_path(mesh: &str, client: &str) -> (Vec<Kind>, Vec<Kind>) {
+	let mesh: Version = mesh.parse().unwrap();
+	let client: Version = client.parse().unwrap();
+	let relays: Vec<_> = (1..=5).map(produce_origin).collect();
+	let mut pairs = Vec::new();
+	for &((a, b), latency) in LATE_BETTER_PATH {
+		pairs.push(peer_with_latency(mesh, &relays[a], &relays[b], latency).await);
+	}
+	let publishing = produce(1000, Duration::ZERO);
+	let mut options = MockConnectOptions::new(client);
+	options.client_publish = Some(publishing.consume());
+	options.server_subscribe = Some(relays[0].clone());
+	pairs.push(connect_mock(options).await);
+	let watching = produce(1001, Duration::ZERO);
+	let mut options = MockConnectOptions::new(client);
+	options.server_publish = Some(relays[3].consume());
+	options.client_subscribe = Some(watching.clone());
+	pairs.push(connect_mock(options).await);
+	let mut watcher = watch(watching.consume().announced());
+	kio::clock::sim::idle().await;
+	assert!(drain(&mut watcher).is_empty());
+
+	let broadcast = publishing.create_broadcast("room/a").unwrap();
+	broadcast.announce(Default::default()).unwrap();
+	kio::clock::sim::idle().await;
+	let published = drain(&mut watcher).remove("room/a").unwrap();
+	drop(broadcast);
+	kio::clock::sim::idle().await;
+	let closed = drain(&mut watcher).remove("room/a").unwrap();
+	(published, closed)
+}
+
+/// A relay that first hears a broadcast over a longer path moves to the shorter
+/// one when it arrives, and a client watching it sees a live broadcast only
+/// update. Lite-07 relays carry the instance the publisher's relay minted for
+/// its lite-06 or lite-07 publisher, so the move keeps the instance, and a
+/// lite-06 watcher gets the update in place rather than a retraction and a new
+/// announcement.
+#[kio::test]
+async fn late_better_path_updates_in_place() {
+	for client in ["moq-lite-06", "moq-lite-07-wip"] {
+		let (published, closed) = late_better_path("moq-lite-07-wip", client).await;
+		assert_eq!(published, [Kind::Start, Kind::Update], "{client}");
+		assert_eq!(closed, [Kind::End], "{client}");
+	}
+}
+
 // Residual counterexamples on `main`, with the hold and the retraction
 // quarantine. Each pins what the cluster does today, so a change either way
 // fails here. Routes and announces (quest/m1/cluster-routing/routes.md) must
@@ -496,6 +553,16 @@ async fn residual_mesh_revives() {
 		]
 	);
 	assert_capped_withdrawal(EDGES, 4, 8).await;
+}
+
+/// On a lite-06 mesh each relay mints its own instance for what a neighbor
+/// announces, so the move to the late, shorter path is another instance: the
+/// watching client sees the live broadcast retracted and announced again.
+#[kio::test]
+async fn residual_late_better_path_restarts_on_lite06() {
+	let (published, closed) = late_better_path("moq-lite-06", "moq-lite-06").await;
+	assert_eq!(published, [Kind::Start, Kind::End, Kind::Start]);
+	assert_eq!(closed, [Kind::End]);
 }
 
 async fn assert_capped_withdrawal(edges: &[Link], publisher: usize, watcher: usize) {

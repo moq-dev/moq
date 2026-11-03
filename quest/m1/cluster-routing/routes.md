@@ -598,11 +598,12 @@ passing. On `main` an epochless switch to a stale path is a Restart, which a
 lite-06 client sees as a retraction and an announcement; the release sent an
 in-place update.
 
-Publishing toggles too, decided 2026-10-13: add a time-mocked fixture where,
-on some rings, a longer path arrives first and the better route then replaces
-it as a Restart, so a lite-06 client sees `Start, End, Start` while the
-broadcast stays live. Pin today's sequence beside the `residual_*` tests;
-the epochless Restart rule above decides what it becomes.
+Publishing toggles too, decided 2026-10-13: a longer path arrives first and
+the better route then replaces it. `late_better_path_updates_in_place` pins
+the lite-07 mesh, where the move keeps the instance and a lite-06 or lite-07
+client sees an update. `residual_late_better_path_restarts_on_lite06` pins the
+lite-06 mesh, where each relay mints its own instance and the client sees
+`Start, End, Start` while the broadcast stays live; turn it into an update.
 
 Tests, time mocked: the handoff fixtures and sweep in `handoff.rs`;
 [moq-dev/moq#4644](https://github.com/moq-dev/moq/pull/4644)'s live-graph withdrawal and failover tests (the PR closed and
