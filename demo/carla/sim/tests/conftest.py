@@ -35,8 +35,18 @@ class SnapshotProducer:
     def demand(self) -> object:
         return self.track.demand()
 
-    def update(self, value: object) -> None:
+    def update(self, value: object, timestamp: object) -> None:
         self.values.append(value)
+
+
+class CatalogProducer:
+    """Reads a fixed broadcast clock; the tests do not care about its value."""
+
+    def __init__(self, broadcast: object) -> None:
+        self.broadcast = broadcast
+
+    def now(self) -> SimpleNamespace:
+        return SimpleNamespace(value=0, scale=1_000)
 
 
 class SnapshotConsumer:
@@ -65,6 +75,7 @@ moq_json.SnapshotConsumer = SnapshotConsumer
 moq.json = moq_json
 
 moq_media = ModuleType("moq.media")
+moq_media.CatalogProducer = CatalogProducer
 moq_media.VideoFormat = SimpleNamespace(AVC3="avc3")
 moq_media.VideoInit = lambda **kwargs: SimpleNamespace(**kwargs)
 moq_media.VideoHint = lambda **kwargs: SimpleNamespace(**kwargs)

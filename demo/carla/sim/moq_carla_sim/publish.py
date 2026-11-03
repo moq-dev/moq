@@ -185,8 +185,10 @@ class StatusPublisher:
     """
 
     def __init__(self, broadcast: moq.BroadcastProducer) -> None:
-        track = broadcast.publish_track("status", moq.TrackInfo(compress=True))
+        track = broadcast.publish_track("status", moq.TrackInfo(compress=True, timescale=1_000))
         self._producer = moq.json.SnapshotProducer(broadcast, track)
+        # Weak: reading the clock neither keeps the broadcast open nor locks it.
+        self._catalog = moq.media.CatalogProducer(broadcast)
         # Weak: watching demand neither keeps the track open nor locks it.
         self._demand = self._producer.demand()
 
@@ -200,7 +202,7 @@ class StatusPublisher:
         truck that cannot answer is not one anybody should be steering: let it
         reach the session, exactly as the video pump does with its own track.
         """
-        self._producer.update(payload)
+        self._producer.update(payload, self._catalog.now())
 
     async def used(self) -> None:
         while await self._demand.wanted_changed() is None:
