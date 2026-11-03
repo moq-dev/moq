@@ -896,31 +896,43 @@ export class Publisher {
 		}
 
 		const consumer = front.track(msg.track);
-		let ranges: track.Range[];
+		const subscription = (ranges: track.Range[]): track.Subscription => ({
+			priority: msg.priority,
+			order: msg.order,
+			delay: {
+				max: servingMaxDelay(this.version, msg.maxDelay),
+				min: msg.minDelay === undefined ? null : Milli(msg.minDelay),
+			},
+			ranges,
+		});
+		// A time anchor counts in the timescale this peer was told, so it waits for the info.
+		// Meanwhile the subscription asks for nothing but holds the track it resolves, so an
+		// on-demand track's request answers it, rather than one released once its info lands.
+		const timed = hasWireTime(msg.ranges);
+		let ranges: track.Range[] = [];
 		try {
-			// A time anchor counts in the timescale this peer was told, so it waits for the info.
-			const timescale = hasWireTime(msg.ranges)
-				? ((await untilAborted(consumer.info(), left.signal)).timescale ?? undefined)
-				: undefined;
-			ranges = requestedRanges(msg, timescale);
+			if (!timed) ranges = requestedRanges(msg, undefined);
 		} catch (err: unknown) {
 			stream.writer.reset(error(err));
 			return;
 		}
-		if (watch.revoked()) return;
 		// Parked past a bounded window's end: the peer reads this stream's end as the track's.
-		const track = hooks.parked(
-			consumer.subscribe({
-				priority: msg.priority,
-				order: msg.order,
-				delay: {
-					max: servingMaxDelay(this.version, msg.maxDelay),
-					min: msg.minDelay === undefined ? null : Milli(msg.minDelay),
-				},
-				ranges,
-			}),
-		);
+		const track = hooks.parked(consumer.subscribe(subscription(ranges)));
 		serving(track);
+		if (timed) {
+			try {
+				const info = await untilAborted(track.info(), left.signal);
+				track.update(subscription(requestedRanges(msg, info.timescale ?? undefined)));
+			} catch (err: unknown) {
+				track.close();
+				stream.writer.reset(error(err));
+				return;
+			}
+		}
+		if (watch.revoked()) {
+			track.close();
+			return;
+		}
 		const latest = hooks.latestSequence(track);
 		let floor = cursorFloor(this.version, msg.startGroup, latest);
 		// The ranges cap what is served; the floor only pins where an older wire starts.
@@ -1406,6 +1418,21 @@ export class Publisher {
 									rangeStarts(this.version, track, bounds.startGroup),
 									largest,
 								);
+								if (
+									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
+								)
+									return false;
+								continue;
+							}
+						}
+						// A lite-07 window whose bounded ranges all resolved empty owes nothing: say so at
+						// once, and the subscription ends as covered below. No group would ever answer it.
+						if (emitRange && !startSent && hasRanges(this.version)) {
+							const end = hooks.servingEnd(track);
+							if (end !== undefined && hooks.servingRuns(track, 0, end).length === 0) {
+								startSent = true;
+								startSequence = end;
+								const start = new SubscribeStart(rangeStarts(this.version, track, end), largest);
 								if (
 									!(await controls.response(encodeSubscribeResponse(stream, { start }, this.version)))
 								)

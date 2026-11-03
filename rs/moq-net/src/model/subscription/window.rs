@@ -678,7 +678,10 @@ impl Window {
 			End::Open => None,
 			End::Time(end) => {
 				self.walks.push(Walk {
-					ends: BTreeSet::from([Ending { pts: end, span: position }]),
+					ends: BTreeSet::from([Ending {
+						pts: end,
+						span: position,
+					}]),
 					trail: Trail::new(start, reach),
 					low: start,
 					low_reach: reach,

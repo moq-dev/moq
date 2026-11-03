@@ -889,6 +889,43 @@ test("lite-07 SUBSCRIBE_START names each resolved range start", async () => {
 	}
 });
 
+// A bounded window that resolves empty has no group to answer it, so the publisher answers it
+// at once and ends the subscription as covered, as a local read of it ends at once.
+test("lite-07 answers and ends a bounded window that resolves empty", async () => {
+	const version = Version.DRAFT_07;
+	const sub = await servedSubscription({
+		version,
+		prefill: [0, 1, 2, 3, 4, 5],
+		maxAge: Milli(3_600_000),
+		ranges: [{ start: { relative: 0 }, end: { absolute: 3 } }],
+	});
+	try {
+		const resp = await decodeSubscribeResponse(sub.client.reader, version);
+		if (!("start" in resp)) throw new Error("expected SUBSCRIBE_START");
+		expect(resp.start.starts).toEqual([undefined]);
+		expect(await decodeSubscribeResponseMaybe(sub.client.reader, version)).toBeUndefined();
+	} finally {
+		await sub.close();
+	}
+});
+
+// A time anchor waits for the track's timescale. On an on-demand track that lookup is the
+// subscription's own request, so the track it answers is the one served.
+test("lite-07 serves a time range from the on-demand track its lookup resolved", async () => {
+	const sub = await servedSubscription({
+		version: Version.DRAFT_07,
+		pending: true,
+		ranges: [{ start: { time: 0 } }],
+	});
+	try {
+		await sub.accept();
+		sub.serve(0);
+		expect(await sub.servedSequence()).toBe(0);
+	} finally {
+		await sub.close();
+	}
+});
+
 // A relay can ingest back-to-back groups micro-reordered (the upstream leg sends
 // newest-first). The older group is cached and in demand, so serving must still
 // deliver it; a sequence cursor would skip it permanently.
