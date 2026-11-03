@@ -544,6 +544,13 @@ fn server_stateless_reset() {
 	// Force the server to generate the smallest possible stateless reset
 	pair.client.connections.get_mut(&client_ch).unwrap().ping();
 	info!("resetting");
+	pair.drive_client();
+	pair.drive_server();
+	// The client recognizes the reset before handling it, and not just any short header.
+	let (_, _, reset) = pair.client.inbound.back().unwrap();
+	assert!(pair.client.endpoint.is_stateless_reset(pair.server.addr, reset));
+	assert!(!pair.client.endpoint.is_stateless_reset(pair.server.addr, &[0x40; 64]));
+	assert!(!pair.client.endpoint.is_stateless_reset(pair.client.addr, reset));
 	pair.drive();
 	assert_matches!(
 		pair.client_conn_mut(client_ch).poll(),
@@ -6106,6 +6113,64 @@ fn send_quantum_bounds_the_gso_batch() {
 		datagrams <= QUANTUM_DATAGRAMS,
 		"batched {datagrams} datagrams, over the {QUANTUM_DATAGRAMS} the send quantum allows"
 	);
+}
+
+/// A jumbo-frame MTU must not let a GSO train outgrow what one IPv4 UDP send can carry, however
+/// many datagrams the caller offers.
+#[test]
+fn gso_train_fits_one_udp_send() {
+	const MTU: u16 = 9000;
+
+	let _guard = subscribe();
+	let endpoint_config = || endpoint::Config {
+		max_udp_payload_size: MTU,
+		..endpoint::Config::default()
+	};
+	let server = Endpoint::new(
+		endpoint::Config {
+			server: Some(server_config()),
+			..endpoint_config()
+		},
+		true,
+	)
+	.unwrap();
+	let client = Endpoint::new(endpoint_config(), true).unwrap();
+	let mut pair = Pair::new_from_endpoint(client, server);
+	pair.mtu = usize::from(MTU);
+
+	let mut client_cfg = client_config();
+	client_cfg.transport = transport::Config {
+		initial_mtu: MTU,
+		mtu: None,
+		// Neither window, pacer, nor send quantum bounds the train, so only the byte cap bounds it.
+		congestion: Arc::new(FixedQuantumController { send_quantum: u64::MAX }),
+		..transport::Config::default()
+	};
+	let (client_ch, _) = pair.connect_with(client_cfg);
+
+	let s = pair
+		.client_streams(client_ch)
+		.open(Dir::Uni, Default::default())
+		.unwrap();
+	pair.client_send(client_ch, s)
+		.write(&mut &[42; 256 * 1024][..])
+		.unwrap();
+
+	let now = pair.time;
+	let conn = pair.client_conn_mut(client_ch);
+	assert_eq!(conn.path_mtu(), MTU);
+	let mut buf = Vec::new();
+	let mut full = false;
+	while let Some(transmit) = conn.poll_transmit(now, 64, &mut buf) {
+		assert!(
+			transmit.size <= MAX_TRANSMIT_SIZE,
+			"a {} byte train exceeds one IPv4 UDP send",
+			transmit.size
+		);
+		full |= transmit.size > MAX_TRANSMIT_SIZE - usize::from(MTU);
+		buf.clear();
+	}
+	assert!(full, "no train came close to the limit, so the test proves nothing");
 }
 
 /// A congestion callback, as the transport reported it. Packets are named by send time, which

@@ -38,7 +38,7 @@ class SelectionTest(unittest.TestCase):
         self.write()
         (self.root / "test/tsconfig.json").write_text('{"exclude":["**/dist"]}')
         (self.root / "sh").mkdir()
-        (self.root / "sh/dispatch.sh").write_text("    [js]='^(js/|doc/|demo/|test/)'\n")
+        (self.root / "sh/dispatch.sh").write_text("module js '^(js/|doc/|demo/|test/)'\n")
 
     def write(self):
         (self.root / "package.json").write_text(json.dumps({"workspaces": list(self.packages)}))
@@ -87,7 +87,7 @@ class SelectionTest(unittest.TestCase):
         just.chmod(0o755)
         subprocess.run(["bash", "sh/dispatch.sh", "ci", "base"], cwd=self.root, env=env, check=True)
         self.assertEqual(
-            calls.read_text().splitlines(), ["js test-changed", "js/auth/src/token.ts", "demo/pub/worker.ts"]
+            calls.read_text().splitlines(), ["js test-changed", "js/auth/src/token.ts"]
         )
         self.assertFalse(summary.exists())
 

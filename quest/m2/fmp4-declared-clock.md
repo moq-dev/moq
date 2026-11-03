@@ -15,7 +15,3 @@ Decided 2026-11-01 (maintainer, follow-up planning after the 2026-11-01 /quest-a
 - Keep #7491's tests (`tfdt` never steps back across sub-GOP fragments, ffprobe reads every fragment) and add a variable-rate B-frame case with a stall longer than the cadence, whose decode times follow the presentation slots across the stall. `DeclaredClock` derives DTS from PTS and depth alone, so a gap that only the encoder's own decode times would show is out of reach and not a goal.
 
 Public API: none. Wire: none.
-
-## Related
-
-- [HLS and DASH segment conformance](/quest/m1/hls-conformance.md) - its nightly ffprobe checks would catch a regression here

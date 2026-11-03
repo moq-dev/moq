@@ -3152,7 +3152,7 @@
 		"refused": true
 	},
 	{
-		"name": "video malformed epoch",
+		"name": "video empty instance",
 		"catalog": {
 			"video": {
 				"renditions": {
@@ -3161,7 +3161,7 @@
 					},
 					"probe": {
 						"codec": "avc1.64001f",
-						"epoch": "not-a-uuid"
+						"instance": ""
 					}
 				}
 			}

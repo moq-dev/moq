@@ -57,7 +57,10 @@ function groupStream(subscriber: Subscriber, sequence: number) {
 async function subscribed(version: Version, maxDelay = GRACE, groups?: Groups) {
 	const pair = createMockTransportPair(ALPN_05);
 	const subscriber = new Subscriber(pair.client, version, randomHop());
-	const reader = subscriber.consume(Path.from("room")).track("video").subscribe({ maxDelay, groups });
+	const reader = subscriber
+		.consume(Path.from("room"))
+		.track("video")
+		.subscribe({ delay: { max: maxDelay }, groups });
 
 	const info = await Stream.accept(pair.server, version);
 	if (!info) throw new Error("the subscriber never asked for TRACK_INFO");
@@ -187,7 +190,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			const sub = await subscribed(version);
 			subscriber = sub.subscriber;
 			const { reader, respond, fin } = sub;
-			const ordered = reader.fork({ maxDelay: GRACE }).ordered();
+			const ordered = reader.fork({ delay: { max: GRACE } }).ordered();
 			await respond({ start: new SubscribeStart([0]) });
 			const group = groupStream(subscriber, 1);
 			group.write("1.0");
@@ -197,20 +200,25 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 			await fin();
 
 			// Group 0 has no header, so accounting still waits, and its stream may yet
-			// land behind group 1's. The arrival reader holds at the hole; the sequence
-			// reader is already past it and ends at the boundary.
+			// land behind group 1's. Both readers wait, with the ordered reader holding
+			// group 1 until its budget gives up on the owed hole.
 			expect((await reader.recvGroup())?.sequence).toBe(1);
 			let ended = false;
 			const held = reader.recvGroup().finally(() => (ended = true));
-			expect(await ordered.readString()).toBe("1.0");
-			expect(await ordered.readString()).toBeUndefined();
+			const orderedHeld = ordered.readString();
+			let orderedReady = false;
+			void orderedHeld.then(() => (orderedReady = true));
+			await settle();
+			expect(orderedReady).toBe(false);
 			await settle();
 			expect(ended).toBe(false);
 			expect(reader.closed.peek()).toBeUndefined();
 			expect(hooks.subscriberEnd(reader)).toEqual({ group: 2, frame: 0 });
 
 			// The grace gives up on group 0, and the settled subscription ends the reader.
+			expect(await clock.drive(orderedHeld)).toBe("1.0");
 			expect(await clock.drive(held)).toBeUndefined();
+			expect(await ordered.readString()).toBeUndefined();
 			expect(await reader.closed).toBeNull();
 			ordered.close();
 		} finally {
@@ -354,7 +362,7 @@ describe.each([Version.DRAFT_05, Version.DRAFT_06, Version.DRAFT_07])("%s", (ver
 		const lower = subscriber
 			.consume(Path.from("room"))
 			.track("video")
-			.subscribe({ maxDelay, groups: { start: { included: 1 } } });
+			.subscribe({ delay: { max: maxDelay }, groups: { start: { included: 1 } } });
 		await respond({ end: new SubscribeEnd(4) });
 		await fin();
 		// Long enough for a subscription that owed nothing more to have ended.
